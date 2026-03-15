@@ -1,0 +1,11 @@
+{
+  "name": "remember",
+  "description": "Continuous memory for Claude Code. Extracts, summarizes, and compresses conversations into tiered daily logs. Claude remembers what you did yesterday.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Digital Process Tools"
+  },
+  "license": "MIT",
+  "repository": "https://github.com/Digital-Process-Tools/claude-remember",
+  "keywords": ["memory", "context", "persistence", "session"]
+}
