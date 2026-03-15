@@ -93,7 +93,6 @@ The pipeline writes to `.remember/` (created automatically, self-gitignored):
 | `.remember/logs/`              | Pipeline logs                                     |
 | `.remember/tmp/`               | Lock files, cooldown markers                      |
 | `.claude/remember/identity.md` | Your agent's identity and values (you write this) |
-| `.claude/remember/team/`       | Per-developer memory entries                      |
 
 ## Configuration
 
@@ -123,7 +122,6 @@ pipeline/           Python core — extraction, prompts, parsing, types
   haiku.py          Claude CLI wrapper + response parsing
   prompts.py        Template loading and substitution
   consolidate.py    Multi-day compression via Haiku
-  team.py           Per-developer memory digest
   log.py            Structured logging
   shell.py          Shell integration — prints eval-able variables
   types.py          Dataclasses for all pipeline data
