@@ -80,6 +80,7 @@ In practice, running this all day costs **a few cents per day**. The Anthropic A
 
 3. Write your agent's identity in `.claude/remember/identity.md` (see `identity.example.md`)
 4. Set **Auto-compact** to `false` in Claude Code preferences (`/config`) — auto-compact discards conversation history before the save pipeline can capture it. [Why this matters](https://max.dp.tools/posts/12-context-is-a-trap.php)
+5. Enable the **status line** in Claude Code preferences (`/config`) to see your current context usage — when context gets high, it's time to save and start a new session
 
 ## Hooks
 
