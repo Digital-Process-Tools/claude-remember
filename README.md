@@ -92,6 +92,10 @@ The plugin registers three Claude Code hooks:
 
 Each hook sources `log.sh` for shared config, timezone, logging, and the `dispatch()` system. Hooks dispatch lifecycle events (e.g., `after_user_prompt`) to extensible listeners in `hooks.d/`.
 
+## Manual save
+
+Most saves happen automatically when the `PostToolUse` hook detects enough new content. But you can also trigger a save manually by telling your agent to run `save-session.sh`. This is useful before switching tasks, before context gets too high, or at the end of a long session — anything worth remembering that might not trigger the automatic threshold.
+
 ## Data files
 
 The pipeline writes to `.remember/` (created automatically, self-gitignored):
