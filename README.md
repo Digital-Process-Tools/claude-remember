@@ -18,6 +18,8 @@ tool use → save-session.sh → extract (Python) → summarize (Haiku) → now.
 
 Each layer compresses the one above it. Raw exchanges become one-line summaries. Daily summaries become weekly paragraphs. The result: full context in minimal tokens.
 
+On session start, these files are automatically injected into Claude's context window via the `SessionStart` hook. The agent begins every session with its memory already loaded — no manual prompting, no "read this file" instructions. It just remembers.
+
 ## Requirements
 
 - Python 3.10+
