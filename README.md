@@ -24,6 +24,12 @@ Each layer compresses the one above it. Raw exchanges become one-line summaries.
 
 On session start, these files are automatically injected into Claude's context window via the `SessionStart` hook. The agent begins every session with its memory already loaded — no manual prompting, no "read this file" instructions. It just remembers.
 
+## Cost
+
+The pipeline uses Claude Haiku for summarization and compression. Haiku is the smallest, cheapest Claude model. A typical session save costs **< $0.01** — a few thousand input tokens (the session exchanges) and a few hundred output tokens (the summary). Daily compression and consolidation add a few more Haiku calls.
+
+In practice, running this all day costs **a few cents per day**. The Anthropic API key used by the Claude CLI is the same one that powers the calls — no separate billing.
+
 ## Requirements
 
 - Python 3.10+
