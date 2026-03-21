@@ -54,8 +54,8 @@ set -e
 
 trap 'log "error" "FAILED at line $LINENO (exit $?)"' ERR
 
-PROJECT_DIR="$(cd "$(dirname "$0")/../../.." && pwd)"
-PIPELINE_DIR="${PROJECT_DIR}/.claude/remember"
+PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "$0")/../../.." && pwd)}"
+PIPELINE_DIR="${CLAUDE_PLUGIN_ROOT:-${PROJECT_DIR}/.claude/remember}"
 source "$(dirname "$0")/log.sh"
 
 REMEMBER_TZ=$(config ".timezone" "Europe/Paris")

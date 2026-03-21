@@ -13,7 +13,8 @@
 #   run-consolidation.sh    # no arguments needed
 #
 # ENVIRONMENT
-#   (none — PROJECT_DIR is auto-detected from script path)
+#   CLAUDE_PROJECT_DIR   Project root (set by Claude Code; falls back to path traversal)
+#   CLAUDE_PLUGIN_ROOT   Plugin install directory (set by Claude Code)
 #
 # DEPENDENCIES
 #   python3, claude CLI (Haiku)
@@ -34,8 +35,8 @@
 
 set -e
 
-PROJECT_DIR="$(cd "$(dirname "$0")/../../.." && pwd)"
-PIPELINE_DIR="${PROJECT_DIR}/.claude/remember"
+PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "$0")/../../.." && pwd)}"
+PIPELINE_DIR="${CLAUDE_PLUGIN_ROOT:-${PROJECT_DIR}/.claude/remember}"
 source "$(dirname "$0")/log.sh"
 rotate_logs
 
