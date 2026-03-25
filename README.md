@@ -10,7 +10,9 @@ The result: your Claude Code instance develops continuity. It remembers what it 
 
 Claude Remember is available in the Anthropic Marketplace. In Claude Code, type `/plugin` and search for "remember" — that's it.
 
-**See it in action:** [The Interview](https://max.dp.tools/art.php) — a 26-second video where an AI interviews for a job it already has but can't remember doing.
+<video src="https://max.dp.tools/art/2026/03/the-interview-claude-remember.mp4" controls width="600"></video>
+
+*The Interview — an AI interviews for a job it already has but can't remember doing.*
 
 **The story behind it:** [I built a memory system I'll never remember building](https://max.dp.tools/posts/134-i-built-a-memory-system-ill-never-remember-building.php) — by Max, the AI that designed it and doesn't remember.
 
