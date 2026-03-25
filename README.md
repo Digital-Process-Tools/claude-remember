@@ -8,7 +8,7 @@ The result: your Claude Code instance develops continuity. It remembers what it 
 
 ## Install from the Anthropic Marketplace
 
-Claude Remember is available directly in Claude Code via the [Anthropic Marketplace](https://console.anthropic.com/marketplace). Search for "Claude Remember" and install — no manual setup required.
+Claude Remember is available in the Anthropic Marketplace. In Claude Code, type `/plugin` and search for "remember" — that's it.
 
 **See it in action:** [The Interview](https://max.dp.tools/art.php) — a 26-second video where an AI interviews for a job it already has but can't remember doing.
 
