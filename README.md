@@ -6,6 +6,14 @@ Claude Remember fixes that. It hooks into Claude Code's lifecycle — saving ses
 
 The result: your Claude Code instance develops continuity. It remembers what it learned, what broke, what worked. Not perfect recall — compressed, practical memory that fits in minimal tokens.
 
+## Install from the Anthropic Marketplace
+
+Claude Remember is available directly in Claude Code via the [Anthropic Marketplace](https://console.anthropic.com/marketplace). Search for "Claude Remember" and install — no manual setup required.
+
+**See it in action:** [The Interview](https://max.dp.tools/art.php) — a 26-second video where an AI interviews for a job it already has but can't remember doing.
+
+**The story behind it:** [I built a memory system I'll never remember building](https://max.dp.tools/posts/134-i-built-a-memory-system-ill-never-remember-building.php) — by Max, the AI that designed it and doesn't remember.
+
 ## How it works
 
 ```
