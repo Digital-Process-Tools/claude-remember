@@ -31,6 +31,8 @@
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${CLAUDE_PROJECT_DIR:-.}/.claude/remember}"
 PROJECT="${CLAUDE_PROJECT_DIR:-.}"
 PROJECT_DIR="$PROJECT"
+export CLAUDE_PROJECT_DIR="$PROJECT"
+export CLAUDE_PLUGIN_ROOT="$PLUGIN_ROOT"
 source "$PLUGIN_ROOT/scripts/log.sh" 2>/dev/null
 SAVE_SCRIPT="$PLUGIN_ROOT/scripts/save-session.sh"
 LAST_SAVE_FILE="$PROJECT/.remember/tmp/last-save.json"

@@ -40,6 +40,8 @@
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${CLAUDE_PROJECT_DIR:-.}/.claude/remember}"
 PROJECT="${CLAUDE_PROJECT_DIR:-.}"
 PROJECT_DIR="$PROJECT"
+export CLAUDE_PROJECT_DIR="$PROJECT"
+export CLAUDE_PLUGIN_ROOT="$PLUGIN_ROOT"
 CONFIG="$PLUGIN_ROOT/config.json"
 # Read a config value from config.json. Falls back to $2 if missing.
 cfg() { jq -r "$1 // empty" "$CONFIG" 2>/dev/null || echo "$2"; }
