@@ -4,7 +4,7 @@ Provides the single interface used by all pipeline stages to invoke Haiku.
 Handles subprocess management, CLAUDECODE env stripping, JSON parsing,
 token counting, and cost estimation.
 
-The CLI is invoked in a sandboxed configuration: ``cwd=/tmp``, no tools
+The CLI is invoked in a sandboxed configuration: ``cwd=tempdir``, no tools
 by default, ``max-turns 1``, and the ``CLAUDECODE`` env var is stripped
 to allow nested Claude sessions.
 
@@ -17,6 +17,7 @@ Module-level constants:
 import json
 import os
 import subprocess
+import tempfile
 
 from .types import HaikuResult, TokenUsage
 
@@ -69,7 +70,7 @@ def call_haiku(
             text=True,
             timeout=timeout,
             env=env,
-            cwd="/tmp",
+            cwd=tempfile.gettempdir(),
         )
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"claude timed out after {timeout}s")
