@@ -22,6 +22,7 @@ Or imported::
 import json
 import glob
 import os
+import re
 import sys
 
 from .types import ExtractResult
@@ -32,10 +33,14 @@ _DEFAULT_PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(_SCRIPT_D
 
 
 def _session_dir(project_dir: str) -> str:
-    """Convert a project directory path to its Claude sessions directory."""
-    return os.path.expanduser(
-        "~/.claude/projects/" + project_dir.replace("/", "-")
-    )
+    """Convert a project directory path to its Claude sessions directory.
+
+    Replaces all non-alphanumeric characters with dashes, matching the
+    bash pattern: sed 's/[^a-zA-Z0-9]/-/g'. Handles Unix (/), Windows
+    backslashes (\\) and drive colons (D:).
+    """
+    slug = re.sub(r'[^a-zA-Z0-9]', '-', project_dir)
+    return os.path.expanduser("~/.claude/projects/" + slug)
 
 
 def _last_save_path(project_dir: str) -> str:

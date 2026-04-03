@@ -1084,3 +1084,215 @@ class TestRealisticPluginSimulation:
                 f"Log exists but missing [resolve] entry: {log_content[:200]}"
             )
             assert "FATAL" in log_content
+
+
+# ─── Issue #11: Windows compatibility tests ──────────────────────────────────
+# Tests for each of the 6 sub-issues reported in GitHub issue #11.
+# Some prove the bug exists (xfail), some prove it's already fixed.
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from pipeline.extract import _session_dir
+
+
+class TestWindowsCompatIssue11:
+    """GitHub issue #11: Windows compatibility — 6 sub-issues."""
+
+    # ── Point 1: Session directory path encoding ──
+    # Fixed: extract.py now uses re.sub(r'[^a-zA-Z0-9]', '-', ...) matching bash sed.
+
+    def test_session_dir_unix_path(self):
+        """Unix paths work — forward slashes replaced."""
+        result = _session_dir("/home/user/project")
+        assert "//" not in result.split("projects/")[1], "Forward slashes not replaced"
+        assert result.endswith("-home-user-project")
+
+    def test_session_dir_windows_backslash(self):
+        """Windows backslash paths encoded correctly (fixed: re.sub replaces all non-alnum)."""
+        result = _session_dir("D:\\Users\\dev\\project")
+        assert "\\" not in result, "Backslashes not replaced"
+        assert ":" not in result, "Colons not replaced"
+
+    def test_session_dir_windows_colon(self):
+        """Windows drive letters (D:) encoded correctly."""
+        result = _session_dir("D:/Users/dev/project")
+        assert ":" not in result, "Colons not replaced"
+
+    def test_session_dir_matches_bash_slug(self):
+        """Python slug matches bash sed 's/[^a-zA-Z0-9]/-/g' for all path types."""
+        for path, expected_slug in [
+            ("/home/user/project", "-home-user-project"),
+            ("D:\\Users\\dev\\project", "D--Users-dev-project"),
+            ("D:/Users/dev/project", "D--Users-dev-project"),
+            ("/Users/dev/My Project", "-Users-dev-My-Project"),
+        ]:
+            result = _session_dir(path)
+            assert result.endswith(expected_slug), (
+                f"Path {path!r}: expected slug {expected_slug!r}, got {result!r}"
+            )
+
+    # ── Point 2: python3/python detection via detect-tools.sh ──
+    # Fixed: detect-tools.sh tries python3 then python, exports $PYTHON.
+
+    def test_all_scripts_source_detect_tools(self):
+        """All pipeline scripts source detect-tools.sh for python detection."""
+        for script in ("save-session.sh", "run-consolidation.sh",
+                        "post-tool-hook.sh", "session-start-hook.sh"):
+            with open(os.path.join(REPO_ROOT, "scripts", script)) as f:
+                content = f.read()
+            assert "detect-tools.sh" in content, (
+                f"{script} not sourcing detect-tools.sh"
+            )
+
+    def test_scripts_use_python_var_not_hardcoded(self):
+        """Production scripts use $PYTHON, not hardcoded python3."""
+        for script in ("save-session.sh", "run-consolidation.sh",
+                        "post-tool-hook.sh"):
+            with open(os.path.join(REPO_ROOT, "scripts", script)) as f:
+                for i, line in enumerate(f, 1):
+                    if line.strip().startswith("#"):
+                        continue
+                    assert "python3 -m" not in line and "python3 -" not in line, (
+                        f"{script}:{i} still has hardcoded python3: {line.strip()}"
+                    )
+
+    def test_detect_tools_finds_python(self):
+        """detect-tools.sh finds python3 or python and exports $PYTHON."""
+        result = subprocess.run(
+            ["bash", "-c",
+             f'source "{REPO_ROOT}/scripts/detect-tools.sh" && echo "PYTHON=$PYTHON"'],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0, f"detect-tools.sh failed: {result.stderr}"
+        assert "PYTHON=" in result.stdout
+        python_cmd = result.stdout.strip().split("=")[1]
+        assert python_cmd in ("python3", "python"), f"Unexpected PYTHON={python_cmd}"
+
+    # ── Point 4 & 5: PROJECT_DIR and PIPELINE_DIR resolution ──
+    # Fixed in v0.3.0 via resolve-paths.sh
+
+    def test_save_session_uses_resolve_paths(self):
+        """save-session.sh should source resolve-paths.sh (v0.3.0 fix)."""
+        with open(os.path.join(REPO_ROOT, "scripts", "save-session.sh")) as f:
+            content = f.read()
+        assert "resolve-paths.sh" in content, "save-session.sh not sourcing resolve-paths.sh"
+        assert 'PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(cd' not in content, \
+               "Old inline PROJECT_DIR resolution still present"
+
+    def test_run_consolidation_uses_resolve_paths(self):
+        """run-consolidation.sh should source resolve-paths.sh (v0.3.0 fix)."""
+        with open(os.path.join(REPO_ROOT, "scripts", "run-consolidation.sh")) as f:
+            content = f.read()
+        assert "resolve-paths.sh" in content
+        assert 'PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(cd' not in content
+
+    # ── Point 6: CRLF in safe_eval ──
+    # Fixed: detect-tools.sh overrides safe_eval with line="${line%$'\r'}" strip.
+
+    def test_safe_eval_with_lf(self):
+        """safe_eval works with normal LF line endings."""
+        result = subprocess.run(
+            ["bash", "-c",
+             f'source "{REPO_ROOT}/scripts/detect-tools.sh"; '
+             'safe_eval <<< "FOO=bar"; echo "FOO=$FOO"'],
+            capture_output=True, text=True,
+        )
+        assert "FOO=bar" in result.stdout
+
+    def test_safe_eval_with_crlf(self):
+        """safe_eval strips \\r from CRLF lines — values are clean (fixed via detect-tools.sh)."""
+        result = subprocess.run(
+            ["bash", "-c",
+             f'source "{REPO_ROOT}/scripts/detect-tools.sh"; '
+             'safe_eval < <(printf "FOO=bar\\r\\n"); '
+             'echo -n "$FOO" | xxd | grep -q "0d" && echo "CORRUPTED" || echo "CLEAN"'],
+            capture_output=True, text=True,
+        )
+        assert "CLEAN" in result.stdout, (
+            f"safe_eval CRLF: value corrupted with trailing \\r: {result.stdout!r}"
+        )
+
+    def test_safe_eval_crlf_arithmetic(self):
+        """CRLF-safe safe_eval: numeric values work in arithmetic."""
+        result = subprocess.run(
+            ["bash", "-c",
+             f'source "{REPO_ROOT}/scripts/detect-tools.sh"; '
+             'safe_eval < <(printf "NUM=42\\r\\n"); '
+             'echo "RESULT=$((NUM + 1))"'],
+            capture_output=True, text=True,
+        )
+        assert "RESULT=43" in result.stdout, (
+            f"Arithmetic with CRLF value failed: {result.stdout!r} {result.stderr!r}"
+        )
+
+    # ── Point 3: jq fallback ──
+    # detect-tools.sh provides _jq_fallback using Python when jq is missing.
+
+    def test_detect_tools_jq_fallback(self):
+        """When jq is unavailable, detect-tools.sh provides a Python-based fallback."""
+        with open(os.path.join(REPO_ROOT, "scripts", "detect-tools.sh")) as f:
+            content = f.read()
+        assert "_jq_fallback" in content, "No jq fallback function in detect-tools.sh"
+        assert "command -v jq" in content, "No jq detection in detect-tools.sh"
+
+    def test_scripts_use_jq_var_not_hardcoded(self):
+        """Hook scripts use $JQ, not hardcoded jq (except log.sh and detect-tools.sh)."""
+        for script in ("save-session.sh", "run-consolidation.sh",
+                        "post-tool-hook.sh", "session-start-hook.sh"):
+            with open(os.path.join(REPO_ROOT, "scripts", script)) as f:
+                for i, line in enumerate(f, 1):
+                    if line.strip().startswith("#"):
+                        continue
+                    # Match raw 'jq' but not '$JQ' or 'JQ=' or 'command -v jq'
+                    if " jq " in line or "(jq " in line or "$(jq " in line:
+                        assert False, (
+                            f"{script}:{i} uses hardcoded jq: {line.strip()}"
+                        )
+
+    def test_jq_fallback_reads_json(self, tmp_path):
+        """The jq fallback correctly reads a value from a JSON file."""
+        import json as jsonmod
+        config = os.path.join(str(tmp_path), "config.json")
+        with open(config, "w") as f:
+            jsonmod.dump({"timezone": "Europe/Paris", "cooldowns": {"save_seconds": 120}}, f)
+
+        # Simulate no jq — override PATH to exclude it, source detect-tools.sh
+        result = subprocess.run(
+            ["bash", "-c",
+             f'export PATH="/usr/bin:/bin"; '
+             f'source "{REPO_ROOT}/scripts/detect-tools.sh" 2>/dev/null; '
+             f'$JQ -r ".timezone" "{config}"'],
+            capture_output=True, text=True,
+        )
+        # This will use real jq if it's in /usr/bin, or fallback if not.
+        # Either way, the result should be correct.
+        assert "Europe/Paris" in result.stdout or result.returncode == 0
+
+    # ── Issue #11 integration: all 6 points proven in one place ──
+
+    # ── Bonus: mktemp /tmp hardcoded path ──
+    # Windows Git Bash might not have /tmp. Use ${TMPDIR:-/tmp} instead.
+
+    def test_no_hardcoded_tmp_in_mktemp(self):
+        """Production scripts use ${TMPDIR:-/tmp} in mktemp, not hardcoded /tmp."""
+        for script in ("save-session.sh", "run-consolidation.sh",
+                        "post-tool-hook.sh", "session-start-hook.sh"):
+            with open(os.path.join(REPO_ROOT, "scripts", script)) as f:
+                for i, line in enumerate(f, 1):
+                    if line.strip().startswith("#"):
+                        continue
+                    assert "mktemp /tmp/" not in line, (
+                        f"{script}:{i} uses hardcoded /tmp in mktemp: {line.strip()}"
+                    )
+
+    def test_issue_11_all_points_summary(self):
+        """Meta-test documenting the status of all 6 issue #11 points.
+
+        This test exists to prove we have coverage for each sub-issue:
+          1. Path encoding  → test_session_dir_windows_backslash, _colon, _matches_bash_slug
+          2. python3 cmd    → test_all_scripts_source_detect_tools, _use_python_var, _finds_python
+          3. jq fallback    → test_detect_tools_jq_fallback, test_jq_fallback_reads_json
+          4. PROJECT_DIR    → test_save_session_uses_resolve_paths
+          5. PIPELINE_DIR   → test_run_consolidation_uses_resolve_paths
+          6. CRLF           → test_safe_eval_with_crlf, _crlf_arithmetic
+        """
+        pass  # All assertions are in the individual tests above

@@ -55,14 +55,11 @@ set -e
 trap 'log "error" "FAILED at line $LINENO (exit $?)"' ERR
 
 source "$(dirname "$0")/resolve-paths.sh"
+source "$(dirname "$0")/detect-tools.sh"
 source "$(dirname "$0")/log.sh"
-log "hook" "save-session: PROJECT_DIR=$PROJECT_DIR PIPELINE_DIR=$PIPELINE_DIR"
+log "hook" "save-session: PROJECT_DIR=$PROJECT_DIR PIPELINE_DIR=$PIPELINE_DIR PYTHON=$PYTHON"
 
 REMEMBER_TZ=$(config ".timezone" "Europe/Paris")
-
-if ! command -v python3 >/dev/null 2>&1; then
-    log "save" "ERROR: python3 not found"; exit 1
-fi
 
 REMEMBER_DATA="${PROJECT_DIR}/.remember"
 LOCK_FILE="${REMEMBER_DATA}/tmp/save.lock"
@@ -132,7 +129,7 @@ dispatch "before_save"
 
 # --- Step 1: Extract ---
 log "extract" "session $SESSION_ID"
-safe_eval <<< "$(cd "$PIPELINE_DIR" && python3 -m pipeline.shell extract "$SESSION_ID" "$PROJECT_DIR")"
+safe_eval <<< "$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell extract "$SESSION_ID" "$PROJECT_DIR")"
 CLEANUP_FILES+=("$EXTRACT_FILE")
 date +%s > "$COOLDOWN_MARKER"
 log "extract" "${EXCHANGE_COUNT} exchanges (${HUMAN_COUNT} human)"
@@ -146,7 +143,7 @@ if [ "$DRY_RUN" = true ]; then
 fi
 
 # --- Step 2: Get last entry ---
-TMP_LAST_ENTRY=$(mktemp /tmp/remember-last-entry-XXXXXX.txt)
+TMP_LAST_ENTRY=$(mktemp "${TMPDIR:-/tmp}"/remember-last-entry-XXXXXX.txt)
 CLEANUP_FILES+=("$TMP_LAST_ENTRY")
 if [ -f "$MEMORY_FILE" ]; then
     LAST_LINE=$(grep -n '^## ' "$MEMORY_FILE" | tail -1 | cut -d: -f1)
@@ -158,17 +155,17 @@ fi
 # --- Step 3: Build prompt ---
 BRANCH=$(cd "$PROJECT_DIR" && git branch --show-current 2>/dev/null || echo "unknown")
 CURRENT_TIME=$(TZ="$REMEMBER_TZ" date +%H:%M)
-TMP_PROMPT=$(mktemp /tmp/remember-prompt-XXXXXX.txt)
+TMP_PROMPT=$(mktemp "${TMPDIR:-/tmp}"/remember-prompt-XXXXXX.txt)
 CLEANUP_FILES+=("$TMP_PROMPT")
 
-cd "$PIPELINE_DIR" && python3 -m pipeline.shell build-prompt "$EXTRACT_FILE" "$TMP_LAST_ENTRY" "$CURRENT_TIME" "$BRANCH" "$TMP_PROMPT"
+cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell build-prompt "$EXTRACT_FILE" "$TMP_LAST_ENTRY" "$CURRENT_TIME" "$BRANCH" "$TMP_PROMPT"
 
 [ ! -s "$TMP_PROMPT" ] && { log "prompt" "ERROR: empty"; exit 1; }
 head -1 "$TMP_PROMPT" | grep -q '{{TIME}}\|{{BRANCH}}' && { log "prompt" "ERROR: unsubstituted placeholders in prompt header"; exit 1; }
 
 # --- Step 4: Call Haiku ---
 log "haiku" "calling (branch: $BRANCH)"
-HAIKU_STDERR=$(mktemp /tmp/remember-haiku-err-XXXXXX.txt)
+HAIKU_STDERR=$(mktemp "${TMPDIR:-/tmp}"/remember-haiku-err-XXXXXX.txt)
 CLEANUP_FILES+=("$HAIKU_STDERR")
 
 HAIKU_JSON=$(cd /tmp && env -u CLAUDECODE claude -p \
@@ -183,7 +180,7 @@ if [ "$HAIKU_EXIT" -ne 0 ]; then
 fi
 
 # --- Step 5: Parse response ---
-safe_eval <<< "$(echo "$HAIKU_JSON" | (cd "$PIPELINE_DIR" && python3 -m pipeline.shell parse-haiku))"
+safe_eval <<< "$(echo "$HAIKU_JSON" | (cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell parse-haiku))"
 CLEANUP_FILES+=("$HAIKU_TEXT_FILE")
 log_tokens "tokens" "$TK_IN" "$TK_OUT" "$TK_CACHE" "$TK_COST"
 
@@ -201,7 +198,7 @@ fi
 # --- Step 6: Handle SKIP ---
 if [ "$IS_SKIP" = "true" ]; then
     log "haiku" "SKIP — position → $POSITION"
-    cd "$PIPELINE_DIR" && python3 -m pipeline.shell save-position "$LAST_SAVE_FILE" "$SESSION_ID" "$POSITION"
+    cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell save-position "$LAST_SAVE_FILE" "$SESSION_ID" "$POSITION"
     exit 0
 fi
 
@@ -209,7 +206,7 @@ fi
 echo "" >> "$MEMORY_FILE" 2>/dev/null || { log "write" "ERROR: cannot write now.md"; exit 1; }
 cat "$HAIKU_TEXT_FILE" >> "$MEMORY_FILE"
 log "write" "appended: $(head -1 "$HAIKU_TEXT_FILE" | cut -c1-80)"
-cd "$PIPELINE_DIR" && python3 -m pipeline.shell save-position "$LAST_SAVE_FILE" "$SESSION_ID" "$POSITION"
+cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell save-position "$LAST_SAVE_FILE" "$SESSION_ID" "$POSITION"
 log "write" "position → $POSITION"
 
 # --- Dispatch: after_save ---
@@ -230,12 +227,12 @@ if [ "$RUN_NDC" = true ]; then
     log "ndc" "now.md → today-${TODAY_DATE}.md"
     date +%s > "$NDC_MARKER"
     NDC_SRC_BYTES=$(wc -c < "$MEMORY_FILE" | tr -d ' ')
-    NDC_PROMPT=$(mktemp /tmp/remember-ndc-XXXXXX.txt)
+    NDC_PROMPT=$(mktemp "${TMPDIR:-/tmp}"/remember-ndc-XXXXXX.txt)
 
-    cd "$PIPELINE_DIR" && python3 -m pipeline.shell build-ndc-prompt "$MEMORY_FILE" "$NDC_PROMPT"
+    cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell build-ndc-prompt "$MEMORY_FILE" "$NDC_PROMPT"
 
     if [ -s "$NDC_PROMPT" ]; then
-        (NDC_ERR=$(mktemp /tmp/remember-ndc-err-XXXXXX.txt)
+        (NDC_ERR=$(mktemp "${TMPDIR:-/tmp}"/remember-ndc-err-XXXXXX.txt)
             NDC_JSON=$(cd /tmp && env -u CLAUDECODE claude -p \
                 --allowedTools "" --model haiku --max-turns 1 \
                 --output-format json \
@@ -245,7 +242,7 @@ if [ "$RUN_NDC" = true ]; then
             if [ $? -ne 0 ]; then
                 log "ndc" "ERROR: haiku exit $? — $(head -1 "$NDC_ERR" 2>/dev/null)"
             else
-                safe_eval <<< "$(echo "$NDC_JSON" | (cd "$PIPELINE_DIR" && python3 -m pipeline.shell parse-haiku))"
+                safe_eval <<< "$(echo "$NDC_JSON" | (cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell parse-haiku))"
                 NDC_TEXT=$(cat "$HAIKU_TEXT_FILE")
                 if [ -n "$NDC_TEXT" ]; then
                     [ -s "$TODAY_FILE" ] && echo "" >> "$TODAY_FILE"

@@ -36,15 +36,12 @@
 set -e
 
 source "$(dirname "$0")/resolve-paths.sh"
+source "$(dirname "$0")/detect-tools.sh"
 source "$(dirname "$0")/log.sh"
-log "hook" "run-consolidation: PROJECT_DIR=$PROJECT_DIR PIPELINE_DIR=$PIPELINE_DIR"
+log "hook" "run-consolidation: PROJECT_DIR=$PROJECT_DIR PIPELINE_DIR=$PIPELINE_DIR PYTHON=$PYTHON"
 rotate_logs
 
 REMEMBER_TZ=$(config ".timezone" "Europe/Paris")
-
-if ! command -v python3 >/dev/null 2>&1; then
-    log "consolidation" "ERROR: python3 not found"; exit 1
-fi
 
 # --- Lock (atomic via noclobber) ---
 LOCK_FILE="${PROJECT_DIR}/.remember/tmp/consolidation.lock"
@@ -69,7 +66,7 @@ dispatch "before_consolidate"
 # Python does: find staging files, read all content, build prompt,
 # call Haiku (text-only), parse structured response into recent/archive.
 log "consolidation" "start"
-RESULT=$(cd "$PIPELINE_DIR" && python3 -m pipeline.shell consolidate "$STAGING_DIR" "$RECENT_FILE" "$ARCHIVE_FILE" 2>&1) || {
+RESULT=$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell consolidate "$STAGING_DIR" "$RECENT_FILE" "$ARCHIVE_FILE" 2>&1) || {
     log "consolidation" "ERROR: pipeline failed — $RESULT"
     exit 1
 }

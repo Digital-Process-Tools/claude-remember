@@ -29,10 +29,11 @@
 
 # --- Resolve paths ---
 source "$(dirname "$0")/resolve-paths.sh"
+source "$(dirname "$0")/detect-tools.sh"
 PLUGIN_ROOT="$PIPELINE_DIR"
 PROJECT="$PROJECT_DIR"
 source "$PLUGIN_ROOT/scripts/log.sh" 2>/dev/null
-log "hook" "post-tool: PROJECT_DIR=$PROJECT_DIR PIPELINE_DIR=$PIPELINE_DIR"
+log "hook" "post-tool: PROJECT_DIR=$PROJECT_DIR PIPELINE_DIR=$PIPELINE_DIR PYTHON=$PYTHON"
 SAVE_SCRIPT="$PLUGIN_ROOT/scripts/save-session.sh"
 LAST_SAVE_FILE="$PROJECT/.remember/tmp/last-save.json"
 PID_FILE="$PROJECT/.remember/tmp/save-session.pid"
@@ -50,7 +51,7 @@ SESSION_ID=$(basename "$LATEST_JSONL" .jsonl)
 # --- Get last saved position (from last-save.json) ---
 LAST_LINE=0
 if [ -f "$LAST_SAVE_FILE" ]; then
-    SAVED_SESSION=$(python3 - "$LAST_SAVE_FILE" <<'PYEOF'
+    SAVED_SESSION=$($PYTHON - "$LAST_SAVE_FILE" <<'PYEOF'
 import sys, json
 try:
     d = json.load(open(sys.argv[1]))
@@ -60,7 +61,7 @@ except Exception:
 PYEOF
     )
     if [ "$SAVED_SESSION" = "$SESSION_ID" ]; then
-        LAST_LINE=$(python3 - "$LAST_SAVE_FILE" <<'PYEOF'
+        LAST_LINE=$($PYTHON - "$LAST_SAVE_FILE" <<'PYEOF'
 import sys, json
 try:
     d = json.load(open(sys.argv[1]))
@@ -76,7 +77,7 @@ DELTA=$((CURRENT_LINES - LAST_LINE))
 SAVE_TRIGGERED=""
 
 # --- Fire save if delta exceeds threshold and no save already running ---
-DELTA_THRESHOLD=$(jq -r '.thresholds.delta_lines_trigger // 50' "$PLUGIN_ROOT/config.json" 2>/dev/null || echo 50)
+DELTA_THRESHOLD=$($JQ -r '.thresholds.delta_lines_trigger // 50' "$PLUGIN_ROOT/config.json" 2>/dev/null || echo 50)
 if [ "$DELTA" -gt "$DELTA_THRESHOLD" ]; then
     ALREADY_RUNNING=false
     if [ -f "$PID_FILE" ]; then

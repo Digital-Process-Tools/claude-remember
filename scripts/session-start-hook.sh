@@ -38,11 +38,12 @@
 # ============================================================================
 
 source "$(dirname "$0")/resolve-paths.sh"
+source "$(dirname "$0")/detect-tools.sh"
 PLUGIN_ROOT="$PIPELINE_DIR"
 PROJECT="$PROJECT_DIR"
 CONFIG="$PLUGIN_ROOT/config.json"
 # Read a config value from config.json. Falls back to $2 if missing.
-cfg() { jq -r "$1 // empty" "$CONFIG" 2>/dev/null || echo "$2"; }
+cfg() { $JQ -r "$1 // empty" "$CONFIG" 2>/dev/null || echo "$2"; }
 source "$PLUGIN_ROOT/scripts/log.sh" 2>/dev/null
 REMEMBER_TZ=$(cfg ".timezone" "Europe/Paris")
 TODAY=$(TZ="$REMEMBER_TZ" date '+%Y-%m-%d')
@@ -64,7 +65,7 @@ SESSIONS_DIR="$HOME/.claude/projects/${PROJECT_PATH_SLUG}"
 LAST_SAVE_FILE="$PROJECT/.remember/tmp/last-save.json"
 
 if [ -d "$SESSIONS_DIR" ] && [ -f "$LAST_SAVE_FILE" ]; then
-    SAVED_ID=$(jq -r '.session // ""' "$LAST_SAVE_FILE" 2>/dev/null)
+    SAVED_ID=$($JQ -r '.session // ""' "$LAST_SAVE_FILE" 2>/dev/null)
     LAST_JSONL=$(ls -t "$SESSIONS_DIR"/*.jsonl 2>/dev/null | tail -n +2 | head -1)
     if [ -n "$LAST_JSONL" ]; then
         LAST_ID=$(basename "$LAST_JSONL" .jsonl)

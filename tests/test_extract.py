@@ -476,3 +476,103 @@ def test_main_invalid_arg_exits(capsys):
                     assert False, "should have exited"
                 except SystemExit as e:
                     assert e.code == 1
+
+
+# ---------------------------------------------------------------------------
+# Issue #11: Windows-style path slugging end-to-end
+# ---------------------------------------------------------------------------
+# These tests create real directories at the slugged path (like Claude Code
+# does on Windows) and prove find_session/extract_session work without mocks.
+
+def _make_real_session(home_dir: str, project_dir: str, session_id: str) -> str:
+    """Create a realistic session dir at the slugged path under a fake $HOME.
+
+    Returns the JSONL file path.
+    """
+    import re as remod
+    slug = remod.sub(r'[^a-zA-Z0-9]', '-', project_dir)
+    sdir = os.path.join(home_dir, ".claude", "projects", slug)
+    os.makedirs(sdir, exist_ok=True)
+    jsonl_path = os.path.join(sdir, session_id + ".jsonl")
+    lines = [
+        {"type": "user", "message": {"role": "user", "content": "Hello from Windows"}},
+        {"type": "assistant", "message": {"role": "assistant", "content": "Hi there"}},
+    ]
+    with open(jsonl_path, "w") as f:
+        for obj in lines:
+            f.write(json.dumps(obj) + "\n")
+    return jsonl_path
+
+
+def test_find_session_windows_backslash_path():
+    """find_session works with a D:\\Users\\dev\\project style path (issue #11 point 1)."""
+    with tempfile.TemporaryDirectory() as home:
+        project_dir = "D:\\Users\\dev\\project"
+        session_id = "win-session-001"
+        _make_real_session(home, project_dir, session_id)
+
+        with patch.dict(os.environ, {"HOME": home}):
+            result = find_session(session_id=session_id, project_dir=project_dir)
+
+        assert result.endswith(session_id + ".jsonl")
+
+
+def test_find_session_windows_colon_path():
+    """find_session works with a D:/Users/dev/project style path (issue #11 point 1)."""
+    with tempfile.TemporaryDirectory() as home:
+        project_dir = "D:/Users/dev/project"
+        session_id = "win-session-002"
+        _make_real_session(home, project_dir, session_id)
+
+        with patch.dict(os.environ, {"HOME": home}):
+            result = find_session(session_id=session_id, project_dir=project_dir)
+
+        assert result.endswith(session_id + ".jsonl")
+
+
+def test_extract_session_windows_path_end_to_end():
+    """Full extract_session with a Windows-style path — no mocks on _session_dir."""
+    with tempfile.TemporaryDirectory() as home:
+        project_dir = "D:\\Users\\dev\\my project"
+        session_id = "win-session-003"
+        _make_real_session(home, project_dir, session_id)
+
+        # Create .remember/tmp for last-save.json lookup (uses project_dir directly)
+        # Since project_dir is a fake Windows path that doesn't exist on disk,
+        # we need to patch _last_save_path to avoid filesystem errors.
+        with patch.dict(os.environ, {"HOME": home}), \
+             patch("pipeline.extract._last_save_path", return_value="/nonexistent"):
+            result = extract_session(
+                session_id=session_id,
+                project_dir=project_dir,
+                show_all=True,
+            )
+
+        assert isinstance(result, ExtractResult)
+        assert result.human_count == 1
+        assert result.assistant_count == 1
+        assert "Hello from Windows" in result.exchanges
+
+
+def test_slug_consistency_python_vs_bash():
+    """Python _session_dir slug matches bash sed 's/[^a-zA-Z0-9]/-/g' for Windows paths."""
+    import subprocess
+    import re as remod
+
+    test_paths = [
+        "D:\\Users\\dev\\project",
+        "D:/Users/dev/project",
+        "C:\\Program Files\\My App",
+        "/home/user/project",
+        "/Users/dev/My Project (v2)",
+    ]
+    for path in test_paths:
+        python_slug = remod.sub(r'[^a-zA-Z0-9]', '-', path)
+        bash_result = subprocess.run(
+            ["bash", "-c", f"echo '{path}' | sed 's/[^a-zA-Z0-9]/-/g'"],
+            capture_output=True, text=True,
+        )
+        bash_slug = bash_result.stdout.strip()
+        assert python_slug == bash_slug, (
+            f"Slug mismatch for {path!r}: python={python_slug!r} bash={bash_slug!r}"
+        )
