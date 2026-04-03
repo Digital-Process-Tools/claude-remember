@@ -485,6 +485,48 @@ class TestParseResponseCLIv2:
         assert r.text == ""
         assert r.is_skip is False
 
+    def test_v2_old_code_would_crash(self):
+        """Reproduce issue #10: old code called data.get('result') on a list.
+
+        The old _parse_response (commit 779ab61, v0.1.0) did:
+            data = json.loads(raw)
+            text = data.get("result") or ""
+        When CLI v2+ returns a list, list.get() raises AttributeError.
+        This test proves the current code handles the same input correctly.
+        """
+        # This is the exact format described in issue #10
+        v2_array = [
+            {"type": "system", "subtype": "init"},
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {"type": "text", "text": "## 10:30 | did stuff\ndetails"}
+                    ],
+                    "usage": {"input_tokens": 500, "output_tokens": 100},
+                },
+            },
+            {
+                "type": "result",
+                "total_cost_usd": 0.03,
+                "result": "## 10:30 | did stuff\ndetails",
+                "usage": {"input_tokens": 500, "output_tokens": 100},
+            },
+        ]
+        raw = json.dumps(v2_array)
+
+        # Prove the old code would crash
+        data = json.loads(raw)
+        assert isinstance(data, list), "CLI v2 returns a list"
+        assert not hasattr(data, "get"), "list has no .get() — old code crashes here"
+
+        # Prove the current code handles it
+        r = _parse_response(raw)
+        assert r.text == "## 10:30 | did stuff\ndetails"
+        assert r.is_skip is False
+        assert r.tokens.input == 500
+        assert r.tokens.output == 100
+
 
 # ─── Integration tests: real scripts with resolve-paths.sh ───────────────────
 # These test that the actual save-session.sh, run-consolidation.sh,
