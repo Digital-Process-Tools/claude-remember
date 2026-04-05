@@ -26,6 +26,8 @@ Marketplace plugins are pinned to the commit at install time — they don't auto
 2. Find "remember" in your installed plugins
 3. Select "Update" (or reinstall from the marketplace)
 
+**Known issue:** The `plugin update` command may report "already at latest version" even when it's not — it checks a stale local cache without pulling first ([#37252](https://github.com/anthropics/claude-code/issues/37252), [#38271](https://github.com/anthropics/claude-code/issues/38271)). If you're stuck on an old version, the reliable workaround is to uninstall and reinstall from the marketplace, or install directly from the repo.
+
 **How to check your version:** look at the `version` field in `.claude-plugin/plugin.json`. The plugin location depends on your install type:
 
 | Install type | Location |
@@ -35,6 +37,10 @@ Marketplace plugins are pinned to the commit at install time — they don't auto
 | Local install | `<your-project>/.claude/remember/` |
 
 ### Changelog
+
+**v0.4.0** — Version tagging & marketplace update docs
+- Documented known marketplace update bugs with workarounds ([#37252](https://github.com/anthropics/claude-code/issues/37252), [#38271](https://github.com/anthropics/claude-code/issues/38271))
+- First release with proper git tags
 
 **v0.3.0** — Path resolution overhaul (fixes #9, addresses #10)
 - New `resolve-paths.sh` — single source of truth for all path resolution across local and marketplace installs
