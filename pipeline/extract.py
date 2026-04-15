@@ -19,6 +19,8 @@ Or imported::
     result = extract_session(session_id="abc123", count=5)
 """
 
+from __future__ import annotations
+
 import json
 import glob
 import os

@@ -12,6 +12,8 @@ Templates are plain text files with mustache-style placeholders::
         consolidate-staging.prompt.txt   # {{STAGING_FILES}}, {{RECENT}}, {{ARCHIVE}}
 """
 
+from __future__ import annotations
+
 import os
 
 

@@ -19,6 +19,8 @@ Typical usage::
     # result.archive -> new content for archive.md
 """
 
+from __future__ import annotations
+
 from .prompts import build_consolidation_prompt
 from .haiku import call_haiku
 from .types import ConsolidationResult, TokenUsage
