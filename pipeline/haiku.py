@@ -14,6 +14,8 @@ Module-level constants:
     HAIKU_CACHE_PRICE: USD cost per cache-read input token.
 """
 
+from __future__ import annotations
+
 import json
 import os
 import subprocess

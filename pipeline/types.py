@@ -13,6 +13,8 @@ Typical usage::
     print(usage)  # "1200+800cache→300out ($0.0021)"
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 
 
