@@ -8,33 +8,45 @@ Claude Remember fixes that. It hooks into Claude Code's lifecycle — saving ses
 
 The result: your Claude Code instance develops continuity. It remembers what it learned, what broke, what worked. Not perfect recall — compressed, practical memory that fits in minimal tokens.
 
-## Install from the Anthropic Marketplace
+## Install
 
-Claude Remember is available in the Anthropic Marketplace. In Claude Code, type `/plugin` and search for "remember" — that's it.
+### From our marketplace (recommended)
+
+We maintain our own [plugin marketplace](https://github.com/Digital-Process-Tools/claude-marketplace) so updates actually work. Add it once, then install:
+
+```
+/plugin marketplace add Digital-Process-Tools/claude-marketplace
+/plugin install remember@dpt-plugins
+```
+
+To update later:
+
+```
+/plugin marketplace update
+```
+
+### From the Anthropic Marketplace
+
+Claude Remember is also available in the official Anthropic Marketplace. In Claude Code, type `/plugin` and search for "remember".
+
+**Known issue:** The official marketplace's `plugin update` command may report "already at latest version" even when it's not — it checks a stale local cache without pulling first ([#37252](https://github.com/anthropics/claude-code/issues/37252), [#38271](https://github.com/anthropics/claude-code/issues/38271)). This is why we recommend installing from our marketplace instead.
+
+### Check your version
+
+Look at the `version` field in `.claude-plugin/plugin.json`. The plugin location depends on your install type:
+
+| Install type | Location |
+|---|---|
+| DPT marketplace (macOS/Linux) | `~/.claude/plugins/cache/dpt-plugins/remember/<version>/` |
+| Official marketplace (macOS/Linux) | `~/.claude/plugins/cache/claude-plugins-official/remember/<version>/` |
+| Official marketplace (Windows) | `%USERPROFILE%\.claude\plugins\cache\claude-plugins-official\remember\<version>\` |
+| Local install | `<your-project>/.claude/remember/` |
 
 [![The Interview](https://max.dp.tools/art/og/og-the-interview-video.jpg)](https://max.dp.tools/art/2026/03/the-interview-claude-remember.mp4)
 
 *The Interview — an AI interviews for a job it already has but can't remember doing.*
 
 **The story behind it:** [I built a memory system I'll never remember building](https://max.dp.tools/posts/134-i-built-a-memory-system-ill-never-remember-building.php) — by Max, the AI that designed it and doesn't remember.
-
-## Updating
-
-Marketplace plugins are pinned to the commit at install time — they don't auto-update. To get the latest version:
-
-1. In Claude Code, type `/plugin`
-2. Find "remember" in your installed plugins
-3. Select "Update" (or reinstall from the marketplace)
-
-**Known issue:** The `plugin update` command may report "already at latest version" even when it's not — it checks a stale local cache without pulling first ([#37252](https://github.com/anthropics/claude-code/issues/37252), [#38271](https://github.com/anthropics/claude-code/issues/38271)). If you're stuck on an old version, the reliable workaround is to uninstall and reinstall from the marketplace, or install directly from the repo.
-
-**How to check your version:** look at the `version` field in `.claude-plugin/plugin.json`. The plugin location depends on your install type:
-
-| Install type | Location |
-|---|---|
-| Marketplace (macOS/Linux) | `~/.claude/plugins/cache/claude-plugins-official/remember/<version>/` |
-| Marketplace (Windows) | `%USERPROFILE%\.claude\plugins\cache\claude-plugins-official\remember\<version>\` |
-| Local install | `<your-project>/.claude/remember/` |
 
 ### Changelog
 
