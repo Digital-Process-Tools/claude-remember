@@ -102,7 +102,7 @@ In practice, running this all day costs **a few cents per day**. The Anthropic A
 
 ## Requirements
 
-- Python 3.10+
+- Python 3.9+
 - Claude CLI (`claude`) with Haiku access
 - Bash 4+
 
