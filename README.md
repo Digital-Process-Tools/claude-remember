@@ -50,6 +50,13 @@ Look at the `version` field in `.claude-plugin/plugin.json`. The plugin location
 
 ### Changelog
 
+**v0.5.0** — Bug fixes, Python 3.9 support, DPT marketplace
+- **DPT marketplace** — install from our own marketplace for reliable updates (`/plugin marketplace add Digital-Process-Tools/claude-marketplace`)
+- **Python 3.9 support** — `from __future__ import annotations` in all pipeline modules (macOS ships 3.9 via CommandLineTools)
+- **Fix: NDC subshell killed by `set -e`** (#14) — background compression no longer dies silently when `claude -p` returns non-zero
+- **Fix: .gitignore created too late** (#17) — now created in `session-start-hook.sh` before any save triggers
+- 186 tests (up from 162), 99% coverage
+
 **v0.4.0** — Version tagging & marketplace update docs
 - Documented known marketplace update bugs with workarounds ([#37252](https://github.com/anthropics/claude-code/issues/37252), [#38271](https://github.com/anthropics/claude-code/issues/38271))
 - First release with proper git tags
@@ -226,7 +233,7 @@ pipeline/           Python core — extraction, prompts, parsing, types
 
 prompts/            Prompt templates (txt with {{PLACEHOLDER}} substitution)
 scripts/            Shell orchestration — locks, cooldowns, file I/O, backgrounding
-tests/              pytest suite (162 tests, 99%+ coverage)
+tests/              pytest suite (186 tests, 99%+ coverage)
 ```
 
 ## License
