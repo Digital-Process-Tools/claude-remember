@@ -161,7 +161,7 @@ CLEANUP_FILES+=("$TMP_PROMPT")
 cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell build-prompt "$EXTRACT_FILE" "$TMP_LAST_ENTRY" "$CURRENT_TIME" "$BRANCH" "$TMP_PROMPT"
 
 [ ! -s "$TMP_PROMPT" ] && { log "prompt" "ERROR: empty"; exit 1; }
-head -1 "$TMP_PROMPT" | grep -q '{{TIME}}\|{{BRANCH}}' && { log "prompt" "ERROR: unsubstituted placeholders in prompt header"; exit 1; }
+grep -q '{{TIME}}\|{{BRANCH}}\|{{LAST_ENTRY}}\|{{EXTRACT}}' "$TMP_PROMPT" && { log "prompt" "ERROR: unsubstituted placeholders in prompt"; exit 1; }
 
 # --- Step 4: Call Haiku ---
 log "haiku" "calling (branch: $BRANCH)"
