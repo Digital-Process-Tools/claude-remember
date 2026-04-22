@@ -154,7 +154,12 @@ fi
 
 # --- Step 3: Build prompt ---
 BRANCH=$(cd "$PROJECT_DIR" && git branch --show-current 2>/dev/null || echo "unknown")
-CURRENT_TIME=$(TZ="$REMEMBER_TZ" date +%H:%M)
+TIME_FORMAT=$(config ".time_format" "24h")
+if [ "$TIME_FORMAT" = "12h" ]; then
+    CURRENT_TIME=$(TZ="$REMEMBER_TZ" date '+%-I:%M %p')
+else
+    CURRENT_TIME=$(TZ="$REMEMBER_TZ" date '+%H:%M')
+fi
 TMP_PROMPT=$(mktemp "${TMPDIR:-/tmp}"/remember-prompt-XXXXXX.txt)
 CLEANUP_FILES+=("$TMP_PROMPT")
 
@@ -190,7 +195,7 @@ HAIKU_TEXT=$(cat "$HAIKU_TEXT_FILE")
 # --- Step 5b: Validate format (warn, never discard) ---
 if [ "$IS_SKIP" != "true" ]; then
     FIRST_LINE=$(head -1 "$HAIKU_TEXT_FILE")
-    if ! echo "$FIRST_LINE" | grep -qE '^## [0-9]{2}:[0-9]{2} \|'; then
+    if ! echo "$FIRST_LINE" | grep -qE '^## ([0-9]{2}:[0-9]{2}|[0-9]{1,2}:[0-9]{2} (AM|PM)) \|'; then
         log "validate" "WARNING: unexpected format: $(echo "$FIRST_LINE" | head -c 80)"
     fi
 fi

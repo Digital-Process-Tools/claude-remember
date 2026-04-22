@@ -13,5 +13,6 @@
     "recovery": true
   },
   "debug": false,
-  "timezone": "UTC"
+  "timezone": "UTC",
+  "time_format": "24h"
 }

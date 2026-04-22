@@ -203,6 +203,7 @@ Copy `config.example.json` to `config.json` and adjust:
 | `features.ndc_compression`      | `true`  | Enable hourly compression of daily files           |
 | `features.recovery`             | `true`  | Recover missed saves on session start              |
 | `timezone`                       | `UTC`   | Timezone for timestamps and daily file boundaries  |
+| `time_format`                    | `"24h"` | Timestamp style in daily logs: `"24h"` (e.g. `14:32`) or `"12h"` (e.g. `2:32 PM`) |
 | `debug`                          | `false` | Verbose logging for cooldowns and locks            |
 
 ## Running tests
