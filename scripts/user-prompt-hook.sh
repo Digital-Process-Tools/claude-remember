@@ -35,8 +35,9 @@ source "$PLUGIN_ROOT/scripts/log.sh" 2>/dev/null
 
 # --- Timestamp + context injection ---
 CTX_PCT=""
-if [ -f /tmp/claude-ctx-pct ]; then
-  CTX_PCT=$(cat /tmp/claude-ctx-pct 2>/dev/null)
+CTX_PCT_FILE="${TMPDIR:-/tmp}/claude-ctx-pct"
+if [ -f "$CTX_PCT_FILE" ]; then
+  CTX_PCT=$(cat "$CTX_PCT_FILE" 2>/dev/null)
 fi
 if [ -n "$CTX_PCT" ]; then
   TIMESTAMP="[$(TZ="$REMEMBER_TZ" date '+%H:%M %Z') — $(whoami) — ${CTX_PCT}%]"
