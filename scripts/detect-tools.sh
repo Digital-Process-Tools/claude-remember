@@ -25,13 +25,21 @@
 # ============================================================================
 
 # --- Detect Python ---
-# Try python3 first (macOS/Linux default), fall back to python (Windows)
-if command -v python3 >/dev/null 2>&1; then
-    PYTHON="python3"
-elif command -v python >/dev/null 2>&1; then
-    PYTHON="python"
-else
-    echo "FATAL: Neither python3 nor python found in PATH" >&2
+# Try python3 first (macOS/Linux default), fall back to python, then the
+# Windows `py` launcher. On Windows, `python3` and `python` may resolve to
+# the Microsoft Store placeholder (a stub that only opens the Store when
+# Python is not installed via Store). A `command -v` check alone is not
+# enough — validate with `-V` to confirm the binary actually runs.
+PYTHON=""
+for _candidate in "python3" "python" "py -3" "py"; do
+    _first="${_candidate%% *}"
+    if command -v "$_first" >/dev/null 2>&1 && $_candidate -V >/dev/null 2>&1; then
+        PYTHON="$_candidate"
+        break
+    fi
+done
+if [ -z "$PYTHON" ]; then
+    echo "FATAL: No working Python found. Tried: python3, python, py -3, py. Windows users: install Python from python.org (not Microsoft Store) and ensure 'python' or 'py' works from the shell Claude Code launches hooks in." >&2
     exit 1
 fi
 export PYTHON
