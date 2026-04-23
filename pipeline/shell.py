@@ -195,11 +195,11 @@ def cmd_consolidate(staging_dir: str, recent_file: str, archive_file: str) -> No
     """
     import glob as globmod
     import tempfile
-    from datetime import datetime
 
+    from ._tz import today_str
     from .consolidate import consolidate
 
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = today_str()
 
     # Find staging files (exclude today + .done files)
     staging_contents: dict[str, str] = {}
