@@ -112,6 +112,17 @@ In practice, running this all day costs **a few cents per day**. The Anthropic A
 - Python 3.9+
 - Claude CLI (`claude`) with Haiku access
 - Bash 4+
+- `jq` (used by `log.sh` / `session-start-hook.sh` to read `config.json`)
+- Standard coreutils (`date`, `find`, `tar`, `tr`, `wc`) — preinstalled on macOS/Linux
+
+### Windows
+
+All hooks and pipeline scripts are bash, so Windows users need a POSIX environment in `PATH`. Two supported options:
+
+- **Git Bash / MSYS2** (simplest) — installed by [Git for Windows](https://git-scm.com/download/win). Ships bash, coreutils, and `find`/`tar`/`tr`. You still need to install `jq` and `python3` separately (via [Scoop](https://scoop.sh/), [Chocolatey](https://chocolatey.org/), or the [official installers](https://www.python.org/downloads/windows/)).
+- **WSL** — any Linux distro; works like a native Linux install.
+
+Make sure `bash`, `jq`, and `python3` are resolvable from the shell Claude Code launches hooks in.
 
 ## Setup
 
