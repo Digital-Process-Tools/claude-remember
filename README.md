@@ -202,7 +202,7 @@ Copy `config.example.json` to `config.json` and adjust:
 | `thresholds.delta_lines_trigger` | `50`    | Tool call output lines that trigger auto-save      |
 | `features.ndc_compression`      | `true`  | Enable hourly compression of daily files           |
 | `features.recovery`             | `true`  | Recover missed saves on session start              |
-| `timezone`                       | `UTC`   | Timezone for timestamps and daily file boundaries  |
+| `timezone`                       | *(system local)* | IANA name (e.g. `America/New_York`, `Europe/Paris`) for timestamps and daily file boundaries. Omit or leave empty to use the system clock's local zone. Set this explicitly on a VPS whose system clock is UTC. |
 | `debug`                          | `false` | Verbose logging for cooldowns and locks            |
 
 ## Running tests
