@@ -12,6 +12,5 @@
     "ndc_compression": true,
     "recovery": true
   },
-  "debug": false,
-  "timezone": "UTC"
+  "debug": false
 }

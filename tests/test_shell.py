@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import tempfile
+from datetime import datetime, timezone
 from io import StringIO
 from unittest.mock import patch
 
@@ -332,8 +333,8 @@ def test_cmd_parse_haiku_with_output_file(capsys):
 
 def test_cmd_consolidate_skips_today_file(capsys):
     """A staging file named with today's date is excluded from consolidation."""
-    from datetime import datetime
-    today = datetime.now().strftime("%Y-%m-%d")
+    from pipeline._tz import today_str
+    today = today_str()
 
     with tempfile.TemporaryDirectory() as d:
         today_file = os.path.join(d, f"today-{today}.md")
@@ -343,6 +344,43 @@ def test_cmd_consolidate_skips_today_file(capsys):
         cmd_consolidate(staging_dir=d, recent_file="/nonexistent", archive_file="/nonexistent")
 
     assert "STAGING_COUNT=0" in capsys.readouterr().out
+
+
+def test_cmd_consolidate_today_filter_respects_remember_tz(monkeypatch, capsys):
+    """Regression: the 'today' filter in consolidate uses REMEMBER_TZ, not UTC.
+
+    At 03:12 UTC on 04-23 with REMEMBER_TZ=America/New_York, 'today' is
+    04-22 in the user's zone. A staging file named ``today-2026-04-22.md``
+    must be SKIPPED (it's today locally), not consolidated as yesterday.
+    If Python used UTC here, the file would be consolidated prematurely —
+    a correctness bug, not just cosmetic.
+    """
+    monkeypatch.setenv("REMEMBER_TZ", "America/New_York")
+    moment = datetime(2026, 4, 23, 3, 12, 0, tzinfo=timezone.utc)
+
+    class Frozen:
+        @staticmethod
+        def now(tz=None):
+            if tz is None:
+                return moment.astimezone().replace(tzinfo=None)
+            return moment.astimezone(tz)
+
+    with tempfile.TemporaryDirectory() as d:
+        edt_today = os.path.join(d, "today-2026-04-22.md")
+        with open(edt_today, "w") as f:
+            f.write("today in EDT — should be skipped")
+
+        # Guard rail: patch consolidate so a bug here can never hit the real API.
+        with patch("pipeline.consolidate.consolidate") as mock_con, \
+                patch("pipeline._tz.datetime", Frozen):
+            cmd_consolidate(
+                staging_dir=d,
+                recent_file="/nonexistent",
+                archive_file="/nonexistent",
+            )
+
+    assert "STAGING_COUNT=0" in capsys.readouterr().out
+    mock_con.assert_not_called()
 
 
 def test_cmd_consolidate_skips_done_file(capsys):

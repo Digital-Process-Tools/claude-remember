@@ -40,7 +40,36 @@ if ! mkdir -p "$REMEMBER_LOG_DIR" 2>/dev/null; then
     return 1 2>/dev/null || true
 fi
 
-MEMORY_LOG_DATE=$(TZ="$REMEMBER_TZ" date +%Y-%m-%d)
+# Read .timezone from config.json BEFORE computing MEMORY_LOG_DATE — otherwise
+# TZ="" falls back to UTC on macOS/BSD and produces next-day filenames after
+# ~20:00 local in zones west of UTC.
+REMEMBER_CONFIG="${PROJECT_DIR:-.}/.claude/remember/config.json"
+config() {
+    local key="$1"
+    local default="$2"
+    if [ -f "$REMEMBER_CONFIG" ] && command -v jq >/dev/null 2>&1; then
+        local val
+        val=$(jq -r "$key // empty" "$REMEMBER_CONFIG" 2>/dev/null)
+        [ -n "$val" ] && echo "$val" || echo "$default"
+    else
+        echo "$default"
+    fi
+}
+
+REMEMBER_TZ=$(config ".timezone" "")
+export REMEMBER_TZ
+
+# Resolve "today" / "now" using REMEMBER_TZ when set, else system local.
+# Crucially, an empty REMEMBER_TZ must NOT produce `TZ="" date` — that's UTC.
+_remember_date() {
+    if [ -n "$REMEMBER_TZ" ]; then
+        TZ="$REMEMBER_TZ" date "$@"
+    else
+        date "$@"
+    fi
+}
+
+MEMORY_LOG_DATE=$(_remember_date +%Y-%m-%d)
 MEMORY_LOG_FILE="${REMEMBER_LOG_DIR}/memory-${MEMORY_LOG_DATE}.log"
 
 # Log a timestamped message to the daily pipeline log file.
@@ -56,7 +85,7 @@ log() {
     local component="$1"
     local message="$2"
     local timestamp
-    timestamp=$(TZ="$REMEMBER_TZ" date +%H:%M:%S)
+    timestamp=$(_remember_date +%H:%M:%S)
     echo "${timestamp} [${component}] ${message}" >> "$MEMORY_LOG_FILE" 2>/dev/null \
         || echo "${timestamp} [${component}] ${message}" >&2
 }
@@ -116,21 +145,6 @@ safe_eval() {
 #
 # Usage:
 #   SAVE_COOLDOWN=$(config ".cooldowns.save_seconds" 120)
-REMEMBER_CONFIG="${PROJECT_DIR:-.}/.claude/remember/config.json"
-config() {
-    local key="$1"
-    local default="$2"
-    if [ -f "$REMEMBER_CONFIG" ] && command -v jq >/dev/null 2>&1; then
-        local val
-        val=$(jq -r "$key // empty" "$REMEMBER_CONFIG" 2>/dev/null)
-        [ -n "$val" ] && echo "$val" || echo "$default"
-    else
-        echo "$default"
-    fi
-}
-
-REMEMBER_TZ=$(config ".timezone" "Europe/Paris")
-
 # Dispatch a lifecycle event to all registered hooks.
 #
 # Runs every executable in hooks.d/<event>/, passing the project path

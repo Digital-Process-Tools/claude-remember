@@ -14,20 +14,20 @@ configured log directory (typically ``.remember/logs/``).
 
 import os
 import sys
-from datetime import datetime
 
+from ._tz import time_str, today_str
 from .types import TokenUsage
 
 
 def _log_path(log_dir: str) -> str:
     """Return today's log file path, creating the directory if needed."""
     os.makedirs(log_dir, exist_ok=True)
-    return os.path.join(log_dir, f"memory-{datetime.now():%Y-%m-%d}.log")
+    return os.path.join(log_dir, f"memory-{today_str()}.log")
 
 
 def _timestamp() -> str:
     """Return current time as HH:MM:SS string."""
-    return datetime.now().strftime("%H:%M:%S")
+    return time_str()
 
 
 def log(component: str, message: str, log_dir: str) -> None:
