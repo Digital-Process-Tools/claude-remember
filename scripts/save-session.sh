@@ -143,7 +143,7 @@ if [ "$DRY_RUN" = true ]; then
 fi
 
 # --- Step 2: Get last entry ---
-TMP_LAST_ENTRY=$(mktemp "${TMPDIR:-/tmp}"/remember-last-entry-XXXXXX.txt)
+TMP_LAST_ENTRY=$(mktemp "${TMPDIR:-/tmp}"/remember-last-entry-XXXXXX)
 CLEANUP_FILES+=("$TMP_LAST_ENTRY")
 if [ -f "$MEMORY_FILE" ]; then
     LAST_LINE=$(grep -n '^## ' "$MEMORY_FILE" | tail -1 | cut -d: -f1)
@@ -155,7 +155,7 @@ fi
 # --- Step 3: Build prompt ---
 BRANCH=$(cd "$PROJECT_DIR" && git branch --show-current 2>/dev/null || echo "unknown")
 CURRENT_TIME=$(TZ="$REMEMBER_TZ" date +%H:%M)
-TMP_PROMPT=$(mktemp "${TMPDIR:-/tmp}"/remember-prompt-XXXXXX.txt)
+TMP_PROMPT=$(mktemp "${TMPDIR:-/tmp}"/remember-prompt-XXXXXX)
 CLEANUP_FILES+=("$TMP_PROMPT")
 
 cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell build-prompt "$EXTRACT_FILE" "$TMP_LAST_ENTRY" "$CURRENT_TIME" "$BRANCH" "$TMP_PROMPT"
@@ -165,7 +165,7 @@ head -1 "$TMP_PROMPT" | grep -q '{{TIME}}\|{{BRANCH}}' && { log "prompt" "ERROR:
 
 # --- Step 4: Call Haiku ---
 log "haiku" "calling (branch: $BRANCH)"
-HAIKU_STDERR=$(mktemp "${TMPDIR:-/tmp}"/remember-haiku-err-XXXXXX.txt)
+HAIKU_STDERR=$(mktemp "${TMPDIR:-/tmp}"/remember-haiku-err-XXXXXX)
 CLEANUP_FILES+=("$HAIKU_STDERR")
 
 HAIKU_JSON=$(cd /tmp && env -u CLAUDECODE claude -p \
@@ -227,13 +227,13 @@ if [ "$RUN_NDC" = true ]; then
     log "ndc" "now.md → today-${TODAY_DATE}.md"
     date +%s > "$NDC_MARKER"
     NDC_SRC_BYTES=$(wc -c < "$MEMORY_FILE" | tr -d ' ')
-    NDC_PROMPT=$(mktemp "${TMPDIR:-/tmp}"/remember-ndc-XXXXXX.txt)
+    NDC_PROMPT=$(mktemp "${TMPDIR:-/tmp}"/remember-ndc-XXXXXX)
 
     cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell build-ndc-prompt "$MEMORY_FILE" "$NDC_PROMPT"
 
     if [ -s "$NDC_PROMPT" ]; then
         (set +e  # don't inherit set -e — claude -p non-zero exit must not kill the subshell
-            NDC_ERR=$(mktemp "${TMPDIR:-/tmp}"/remember-ndc-err-XXXXXX.txt)
+            NDC_ERR=$(mktemp "${TMPDIR:-/tmp}"/remember-ndc-err-XXXXXX)
             NDC_JSON=$(cd /tmp && env -u CLAUDECODE claude -p \
                 --allowedTools "" --model haiku --max-turns 1 \
                 --output-format json \
