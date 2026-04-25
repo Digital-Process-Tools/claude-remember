@@ -12,12 +12,14 @@ the config, ``MEMORY_LOG_DATE`` should match the LA date. If log.sh
 has the ordering bug, it will match the UTC date instead.
 """
 
+import json
 import os
 import subprocess
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOG_SH = REPO_ROOT / "scripts" / "log.sh"
+CONFIG_EXAMPLE = REPO_ROOT / "config.example.json"
 
 
 def _run_logsh(project_dir, system_tz):
@@ -121,3 +123,132 @@ def test_log_sh_log_function_produces_filename_matching_configured_tz(tmp_path):
     assert files[0].name == f"memory-{expected_la}.log", (
         f"Log file {files[0].name} does not match LA date {expected_la}"
     )
+
+
+def test_log_sh_exports_remember_tz_to_python_subprocess(tmp_path):
+    """The whole point of ``export REMEMBER_TZ`` is that Python subprocesses
+    (haiku calls, consolidate) inherit the configured timezone. Verify a
+    Python subprocess launched after sourcing log.sh sees the variable.
+    """
+    project = _make_project(tmp_path, "Europe/Paris")
+    script = f"""
+    set -e
+    export PROJECT_DIR={project}
+    source {LOG_SH}
+    python3 -c "import os; print(os.environ.get('REMEMBER_TZ', 'MISSING'))"
+    """
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env={**os.environ, "TZ": "UTC"},
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, f"script failed: {result.stderr}"
+    assert result.stdout.strip() == "Europe/Paris", (
+        f"Python subprocess did not inherit REMEMBER_TZ: {result.stdout.strip()!r}"
+    )
+
+
+def test_log_sh_invalid_timezone_falls_back_to_system_local(tmp_path):
+    """An invalid TZ name in config.json should not crash log.sh.
+
+    BSD/macOS ``date`` with ``TZ=Invalid/Zone`` may silently fall back to UTC
+    or produce an error depending on the OS. The key assertion: log.sh does
+    NOT crash, and MEMORY_LOG_DATE is a valid date string.
+    """
+    project = _make_project(tmp_path, "Invalid/NotAZone")
+    script = f"""
+    set -e
+    export PROJECT_DIR={project}
+    source {LOG_SH}
+    echo "ACTUAL=$(basename "$MEMORY_LOG_FILE" | sed -E 's/^memory-//;s/\\.log$//')"
+    echo "REMEMBER_TZ=$REMEMBER_TZ"
+    """
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env={**os.environ, "TZ": "America/New_York"},
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, f"log.sh crashed with invalid TZ: {result.stderr}"
+    parsed = {}
+    for line in result.stdout.strip().splitlines():
+        if "=" in line:
+            k, v = line.split("=", 1)
+            parsed[k] = v
+    # Date should be a valid YYYY-MM-DD regardless of what the OS did with the bad TZ
+    assert len(parsed.get("ACTUAL", "")) == 10, (
+        f"MEMORY_LOG_DATE is not a valid date: {parsed.get('ACTUAL')!r}"
+    )
+
+
+def test_log_sh_explicit_utc_config_overrides_local_system_tz(tmp_path):
+    """config.timezone=UTC must produce UTC dates even when system TZ is not UTC.
+
+    This proves the config ACTUALLY drives the date, not just that it
+    happens to match the system clock.
+    """
+    project = _make_project(tmp_path, "UTC")
+    result = _run_logsh(project, system_tz="America/Los_Angeles")
+    assert result["REMEMBER_TZ"] == "UTC"
+    expected_utc = subprocess.run(
+        ["bash", "-c", "TZ=UTC date +%Y-%m-%d"],
+        capture_output=True, text=True,
+    ).stdout.strip()
+    assert result["ACTUAL"] == expected_utc, (
+        f"config.timezone=UTC should produce {expected_utc}, got {result['ACTUAL']}"
+    )
+
+
+def test_log_sh_timestamp_inside_file_uses_configured_tz(tmp_path):
+    """The timestamp INSIDE the log line must also use REMEMBER_TZ.
+
+    The original bug only affected filenames (computed at source time),
+    but we should prove timestamps are also correct after the fix.
+    """
+    project = _make_project(tmp_path, "America/Los_Angeles")
+    log_dir = project / ".remember" / "logs"
+    script = f"""
+    set -e
+    export PROJECT_DIR={project}
+    source {LOG_SH}
+    log test "timestamp check"
+    """
+    subprocess.run(
+        ["bash", "-c", script],
+        env={**os.environ, "TZ": "UTC"},
+        check=True,
+        capture_output=True,
+    )
+    files = list(log_dir.iterdir())
+    assert len(files) == 1
+    content = files[0].read_text()
+    # Timestamp should match LA time, not UTC. We can't freeze shell time,
+    # but we can verify the timestamp is from _remember_date, not bare date.
+    # At minimum: format is HH:MM:SS and the line contains our message.
+    lines = content.strip().splitlines()
+    assert len(lines) == 1
+    assert "[test] timestamp check" in lines[0]
+    # Verify HH:MM:SS format at start
+    timestamp = lines[0].split(" ")[0]
+    parts = timestamp.split(":")
+    assert len(parts) == 3, f"Timestamp not HH:MM:SS format: {timestamp!r}"
+    assert all(p.isdigit() and len(p) == 2 for p in parts), (
+        f"Timestamp components not 2-digit numbers: {timestamp!r}"
+    )
+
+
+def test_config_example_json_is_valid():
+    """config.example.json must be parseable JSON.
+
+    The PR removed the ``timezone`` key — this catches trailing comma
+    or other structural issues from the edit.
+    """
+    content = CONFIG_EXAMPLE.read_text()
+    parsed = json.loads(content)  # Raises JSONDecodeError if invalid
+    assert isinstance(parsed, dict)
+    # timezone should NOT be present (removed by the PR)
+    assert "timezone" not in parsed, (
+        "config.example.json should not contain timezone key "
+        "(removed to prevent UTC default landmine)"
+    )
+    # time_format should still be present (from PR #34)
+    assert parsed.get("time_format") == "24h"

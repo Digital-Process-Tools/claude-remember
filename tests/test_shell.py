@@ -8,6 +8,9 @@ from datetime import datetime, timezone
 from io import StringIO
 from unittest.mock import patch
 
+sys.path.insert(0, os.path.dirname(__file__))
+from tz_helpers import frozen_datetime
+
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -358,13 +361,6 @@ def test_cmd_consolidate_today_filter_respects_remember_tz(monkeypatch, capsys):
     monkeypatch.setenv("REMEMBER_TZ", "America/New_York")
     moment = datetime(2026, 4, 23, 3, 12, 0, tzinfo=timezone.utc)
 
-    class Frozen:
-        @staticmethod
-        def now(tz=None):
-            if tz is None:
-                return moment.astimezone().replace(tzinfo=None)
-            return moment.astimezone(tz)
-
     with tempfile.TemporaryDirectory() as d:
         edt_today = os.path.join(d, "today-2026-04-22.md")
         with open(edt_today, "w") as f:
@@ -372,7 +368,7 @@ def test_cmd_consolidate_today_filter_respects_remember_tz(monkeypatch, capsys):
 
         # Guard rail: patch consolidate so a bug here can never hit the real API.
         with patch("pipeline.consolidate.consolidate") as mock_con, \
-                patch("pipeline._tz.datetime", Frozen):
+                patch("pipeline._tz.datetime", frozen_datetime(moment)):
             cmd_consolidate(
                 staging_dir=d,
                 recent_file="/nonexistent",
@@ -381,6 +377,38 @@ def test_cmd_consolidate_today_filter_respects_remember_tz(monkeypatch, capsys):
 
     assert "STAGING_COUNT=0" in capsys.readouterr().out
     mock_con.assert_not_called()
+
+
+def test_cmd_consolidate_processes_yesterday_file_in_tz_context(monkeypatch, capsys):
+    """The TZ filter must not over-skip: yesterday's file SHOULD be consolidated.
+
+    At 03:12 UTC on 04-23 with REMEMBER_TZ=America/New_York, 'today' is
+    04-22 in EDT. A staging file named ``today-2026-04-21.md`` is yesterday
+    in both UTC and EDT — it must be picked up for consolidation.
+
+    This is the inverse of test_cmd_consolidate_today_filter_respects_remember_tz:
+    that test proves today is skipped, this test proves yesterday is NOT skipped.
+    """
+    monkeypatch.setenv("REMEMBER_TZ", "America/New_York")
+    moment = datetime(2026, 4, 23, 3, 12, 0, tzinfo=timezone.utc)
+    fake_tokens = TokenUsage(input=10, output=5, cache=0, cost_usd=0.0)
+    fake_result = ConsolidationResult(recent="new", archive="new", tokens=fake_tokens)
+
+    with tempfile.TemporaryDirectory() as d:
+        yesterday = os.path.join(d, "today-2026-04-21.md")
+        with open(yesterday, "w") as f:
+            f.write("yesterday in EDT — should be consolidated")
+
+        with patch("pipeline.consolidate.consolidate", return_value=fake_result) as mock_con, \
+                patch("pipeline._tz.datetime", frozen_datetime(moment)):
+            cmd_consolidate(
+                staging_dir=d,
+                recent_file=os.path.join(d, "recent.md"),
+                archive_file=os.path.join(d, "archive.md"),
+            )
+
+    assert "STAGING_COUNT=1" in capsys.readouterr().out
+    mock_con.assert_called_once()
 
 
 def test_cmd_consolidate_skips_done_file(capsys):
