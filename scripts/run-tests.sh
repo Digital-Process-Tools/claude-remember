@@ -175,7 +175,7 @@ else
 fi
 
 # 5d. Save position — round trip
-TMP_POS=$(mktemp "$SYS_TMPDIR/remember-test-pos-XXXXXX.json")
+TMP_POS=$(mktemp "$SYS_TMPDIR/remember-test-pos-XXXXXX")
 cleanup_files+=("$TMP_POS")
 (cd "$PIPELINE_DIR" && python3 -m pipeline.shell save-position "$TMP_POS" "test-session-xyz" 42)
 SAVED=$(python3 -c "import json; d=json.load(open('$TMP_POS')); print(d['session'], d['line'])")
@@ -186,9 +186,9 @@ else
 fi
 
 # 5e. Build prompt — verify substitution
-TMP_EXTRACT_F=$(mktemp "$SYS_TMPDIR/remember-test-extract-XXXXXX.txt")
-TMP_LAST_F=$(mktemp "$SYS_TMPDIR/remember-test-last-XXXXXX.txt")
-TMP_PROMPT_F=$(mktemp "$SYS_TMPDIR/remember-test-prompt-XXXXXX.txt")
+TMP_EXTRACT_F=$(mktemp "$SYS_TMPDIR/remember-test-extract-XXXXXX")
+TMP_LAST_F=$(mktemp "$SYS_TMPDIR/remember-test-last-XXXXXX")
+TMP_PROMPT_F=$(mktemp "$SYS_TMPDIR/remember-test-prompt-XXXXXX")
 cleanup_files+=("$TMP_EXTRACT_F" "$TMP_LAST_F" "$TMP_PROMPT_F")
 echo "[HUMAN] hello" > "$TMP_EXTRACT_F"
 echo "(no previous entry)" > "$TMP_LAST_F"
@@ -200,8 +200,8 @@ else
 fi
 
 # 5f. Build NDC prompt
-TMP_MEM=$(mktemp "$SYS_TMPDIR/remember-test-mem-XXXXXX.md")
-TMP_NDC=$(mktemp "$SYS_TMPDIR/remember-test-ndc-XXXXXX.txt")
+TMP_MEM=$(mktemp "$SYS_TMPDIR/remember-test-mem-XXXXXX")
+TMP_NDC=$(mktemp "$SYS_TMPDIR/remember-test-ndc-XXXXXX")
 cleanup_files+=("$TMP_MEM" "$TMP_NDC")
 echo "## 10:30 | test branch\nDid stuff" > "$TMP_MEM"
 (cd "$PIPELINE_DIR" && python3 -m pipeline.shell build-ndc-prompt "$TMP_MEM" "$TMP_NDC")

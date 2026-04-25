@@ -1911,3 +1911,178 @@ class TestFreshProjectBootstrap:
                 f"detect-tools.sh (bootstrap at {bootstrap_pos}, "
                 f"detect at {detect_pos})"
             )
+
+
+class TestBsdMktempCompatibility:
+    """PR #30: BSD mktemp (macOS) fails with chars after XXXXXX suffix.
+
+    GNU mktemp (Linux) silently ignores chars after XXXXXX:
+        mktemp /tmp/foo-XXXXXX.txt  →  /tmp/foo-a1b2c3.txt  (works)
+
+    BSD mktemp (macOS) treats the suffix as literal template chars:
+        mktemp /tmp/foo-XXXXXX.txt  →  "mkstemp: File exists" (fails)
+
+    Fix: remove file extensions after XXXXXX in all mktemp calls.
+    """
+
+    def test_bsd_mktemp_no_randomization_with_extension(self, tmp_path):
+        """BUG REPRODUCTION: BSD mktemp treats chars after XXXXXX as literal.
+
+        On macOS, mktemp /tmp/foo-XXXXXX.txt creates /tmp/foo-XXXXXX.txt
+        (no randomization!) — the first call succeeds but the file has a
+        predictable name. The SECOND call fails with "File exists" because
+        the name is always the same. This is both a collision bug and a
+        security issue (predictable temp filenames).
+        """
+        import platform
+        if platform.system() != "Darwin":
+            pytest.skip("BSD mktemp test only relevant on macOS")
+
+        template = os.path.join(str(tmp_path), "test-XXXXXX.txt")
+
+        # First call: succeeds but creates a non-random filename
+        r1 = subprocess.run(
+            ["mktemp", template], capture_output=True, text=True,
+        )
+        assert r1.returncode == 0, "First mktemp should succeed"
+        created = r1.stdout.strip()
+
+        # On BSD, the filename IS the template (no randomization)
+        assert created == template, (
+            f"BSD mktemp should create literal filename {template}, "
+            f"got {created} — this means XXXXXX was randomized (GNU behavior)"
+        )
+
+        # Second call: fails because the literal file already exists
+        r2 = subprocess.run(
+            ["mktemp", template], capture_output=True, text=True,
+        )
+        assert r2.returncode != 0, (
+            "Second mktemp with same template should fail on BSD — "
+            "the non-random file already exists"
+        )
+        assert "File exists" in r2.stderr, (
+            f"Expected 'File exists' error, got: {r2.stderr[:200]}"
+        )
+
+        # Cleanup
+        if os.path.isfile(created):
+            os.unlink(created)
+
+    def test_bsd_mktemp_works_without_extension(self, tmp_path):
+        """FIX VERIFICATION: mktemp without extension works on all platforms."""
+        result = subprocess.run(
+            ["mktemp", os.path.join(str(tmp_path), "test-XXXXXX")],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0, (
+            f"mktemp without extension should work everywhere. "
+            f"stderr={result.stderr[:200]}"
+        )
+        # Clean up
+        created = result.stdout.strip()
+        if os.path.isfile(created):
+            os.unlink(created)
+
+    def test_no_mktemp_with_extension_in_scripts(self):
+        """Guard: no mktemp call should have chars after XXXXXX.
+
+        Catches future regressions — any new mktemp must follow the pattern.
+        """
+        repo_root = os.path.join(os.path.dirname(__file__), "..")
+        violations = []
+        for script_name in ("save-session.sh", "run-tests.sh",
+                            "run-consolidation.sh", "session-start-hook.sh",
+                            "post-tool-hook.sh", "user-prompt-hook.sh"):
+            script_path = os.path.join(repo_root, "scripts", script_name)
+            if not os.path.isfile(script_path):
+                continue
+            with open(script_path) as f:
+                for i, line in enumerate(f, 1):
+                    stripped = line.lstrip()
+                    if stripped.startswith("#"):
+                        continue
+                    # Match: mktemp ... XXXXXX.ext) or XXXXXX.ext"
+                    if "mktemp" in line and "XXXXXX." in line:
+                        violations.append(f"{script_name}:{i}: {line.strip()}")
+
+        assert not violations, (
+            "mktemp calls with extension after XXXXXX break on macOS (BSD mktemp).\n"
+            "Remove the file extension — use XXXXXX) not XXXXXX.txt)\n"
+            "Violations:\n" + "\n".join(violations)
+        )
+
+
+class TestHaikuHeaderGuard:
+    """PR #22 / Issue #24: Haiku invents 'unknown' header from previous entries.
+
+    When a previous entry's header showed 'unknown' (e.g., from git rev-parse
+    returning no branch in a non-repo cwd), Haiku occasionally mimicked that
+    header instead of using the {{TIME}} | {{BRANCH}} values from the prompt.
+
+    Fix: (1) explicit prompt instruction to copy header verbatim,
+         (2) expand placeholder guard to check entire prompt, not just line 1.
+    """
+
+    def test_prompt_instructs_verbatim_header(self):
+        """Prompt must explicitly tell Haiku to copy header values verbatim."""
+        prompt_path = os.path.join(
+            os.path.dirname(__file__), "..", "prompts", "save-session.prompt.txt"
+        )
+        with open(prompt_path) as f:
+            content = f.read()
+
+        # Must mention copying TIME/BRANCH verbatim
+        assert "{{TIME}}" in content, (
+            "Prompt should reference {{TIME}} placeholder"
+        )
+        assert "{{BRANCH}}" in content, (
+            "Prompt should reference {{BRANCH}} placeholder"
+        )
+        # Must warn against inventing 'unknown'
+        assert "unknown" in content.lower(), (
+            "Prompt should warn against mimicking 'unknown' headers"
+        )
+
+    def test_placeholder_guard_checks_all_placeholders(self):
+        """save-session.sh should check ALL placeholders, not just TIME/BRANCH."""
+        script_path = os.path.join(
+            os.path.dirname(__file__), "..", "scripts", "save-session.sh"
+        )
+        with open(script_path) as f:
+            content = f.read()
+
+        # The guard should check for unsubstituted placeholders
+        assert "{{TIME}}" in content, "Guard should check {{TIME}}"
+        assert "{{BRANCH}}" in content, "Guard should check {{BRANCH}}"
+
+        # After fix: should also check {{LAST_ENTRY}} and {{EXTRACT}}
+        assert "{{LAST_ENTRY}}" in content, (
+            "Guard should check {{LAST_ENTRY}} — partial substitution "
+            "means the prompt is broken"
+        )
+        assert "{{EXTRACT}}" in content, (
+            "Guard should check {{EXTRACT}} — partial substitution "
+            "means the prompt is broken"
+        )
+
+    def test_placeholder_guard_checks_full_prompt_not_just_header(self):
+        """Guard must grep the entire prompt file, not just head -1.
+
+        The old guard was: head -1 "$TMP_PROMPT" | grep -q '{{TIME}}'
+        This only caught unsubstituted headers, not body placeholders.
+        """
+        script_path = os.path.join(
+            os.path.dirname(__file__), "..", "scripts", "save-session.sh"
+        )
+        with open(script_path) as f:
+            content = f.read()
+
+        # Should NOT use 'head -1' before the placeholder grep
+        # Look for the guard pattern
+        for line in content.split("\n"):
+            if "{{TIME}}" in line and "grep" in line:
+                assert "head -1" not in line, (
+                    "Placeholder guard uses 'head -1' — only checks first line. "
+                    "Should grep the entire prompt file."
+                )
