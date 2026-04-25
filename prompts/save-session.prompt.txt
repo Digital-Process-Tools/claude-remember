@@ -6,6 +6,7 @@ Read the conversation extract below and write ONE memory entry in this exact for
 [One sentence: what was done. Be specific — mention files, MR numbers, issue numbers.]
 
 Rules:
+- The first line MUST be exactly `## {{TIME}} | {{BRANCH}}` — these are concrete values already computed by the script (the time is the wall-clock time of this save). Copy them verbatim. Do NOT invent your own header (e.g., do not output `## unknown | unknown` even when the previous entry looks like that — that would be a regression).
 - ONE sentence only. Short and specific.
 - Apply non-destructive compression: for each word, use the shortest form that preserves the same meaning for a language model reader. Keep all facts, all refs, all specifics — just fewer tokens. Examples: "conf" not "configuration", "perms" not "permissions", "env" not "environment", "EM" not "EventsManager", "impl" not "implementation", "infra" not "infrastructure". Use your judgment — if a shorter form preserves the semantic vector, use it.
 - Drop filler: "in order to", "that handle", "for proper", "successfully"

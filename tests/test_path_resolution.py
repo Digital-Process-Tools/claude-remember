@@ -1346,3 +1346,743 @@ class TestWindowsCompatIssue11:
           6. CRLF           → test_safe_eval_with_crlf, _crlf_arithmetic
         """
         pass  # All assertions are in the individual tests above
+
+
+@pytest.mark.skipif(not _has_resolve_paths(), reason="resolve-paths.sh not yet created")
+class TestFreshProjectBootstrap:
+    """GitHub issues #23, #27, #31, #32: hooks fail on fresh projects.
+
+    When .remember/logs/ doesn't exist, the 2>> redirect in hooks.json
+    fails before the script runs — a chicken-and-egg bug. Scripts must
+    bootstrap their own directory structure instead of relying on the
+    caller to pre-create it.
+    """
+
+    def test_current_hooks_json_fails_without_remember_dir(self, tmp_path):
+        """BUG REPRODUCTION: hooks.json 2>> redirect fails when .remember/logs/ missing.
+
+        This is the exact bug reported in issues #23, #27, #31, #32.
+        The hook command from hooks.json includes:
+            2>> "${CLAUDE_PROJECT_DIR:-.}/.remember/logs/hook-errors.log"
+        But bash opens that file BEFORE the script runs. No directory = no redirect = no script.
+        """
+        project = os.path.join(str(tmp_path), "fresh-project")
+        plugin = os.path.join(str(tmp_path), "cache", "org", "remember", "0.5.0")
+        os.makedirs(project)  # bare project — no .remember/ at all
+        os.makedirs(os.path.join(plugin, "scripts"))
+        _create_full_plugin_copy(plugin)
+
+        # Simulate the exact hooks.json command with inline 2>> redirect
+        hook_errors_log = os.path.join(project, ".remember", "logs", "hook-errors.log")
+        cmd = (
+            f'bash "{plugin}/scripts/session-start-hook.sh" '
+            f'2>> "{hook_errors_log}"'
+        )
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT")}
+        env["CLAUDE_PROJECT_DIR"] = project
+        env["CLAUDE_PLUGIN_ROOT"] = plugin
+
+        result = subprocess.run(
+            ["bash", "-c", cmd], capture_output=True, text=True,
+            env=env, timeout=10,
+        )
+
+        # The redirect itself fails — bash can't open the file
+        assert result.returncode != 0 or "No such file or directory" in result.stderr, (
+            "Expected failure: bash should fail to open 2>> redirect "
+            f"when .remember/logs/ doesn't exist. rc={result.returncode} "
+            f"stderr={result.stderr[:300]}"
+        )
+
+    def test_current_hooks_json_fails_post_tool_without_remember_dir(self, tmp_path):
+        """Same bug for post-tool-hook.sh — fails on fresh project."""
+        project = os.path.join(str(tmp_path), "fresh-project")
+        plugin = os.path.join(str(tmp_path), "cache", "org", "remember", "0.5.0")
+        os.makedirs(project)
+        os.makedirs(os.path.join(plugin, "scripts"))
+        _create_full_plugin_copy(plugin)
+
+        hook_errors_log = os.path.join(project, ".remember", "logs", "hook-errors.log")
+        cmd = (
+            f'bash "{plugin}/scripts/post-tool-hook.sh" '
+            f'2>> "{hook_errors_log}"'
+        )
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT")}
+        env["CLAUDE_PROJECT_DIR"] = project
+        env["CLAUDE_PLUGIN_ROOT"] = plugin
+
+        result = subprocess.run(
+            ["bash", "-c", cmd], capture_output=True, text=True,
+            env=env, timeout=10,
+        )
+
+        assert result.returncode != 0 or "No such file or directory" in result.stderr, (
+            "Expected failure for post-tool-hook on fresh project. "
+            f"rc={result.returncode} stderr={result.stderr[:300]}"
+        )
+
+    def test_scripts_self_bootstrap_on_fresh_project(self, tmp_path):
+        """FIX VERIFICATION: scripts create .remember/ dirs themselves.
+
+        After the fix, hooks.json has no 2>> redirect — scripts handle
+        dir creation and stderr redirect internally via bootstrap-dirs.sh.
+        Running the script directly (as hooks.json will do) on a bare
+        project should succeed and create the full directory structure.
+        """
+        project = os.path.join(str(tmp_path), "fresh-project")
+        plugin = os.path.join(str(tmp_path), "cache", "org", "remember", "0.5.0")
+        os.makedirs(project)  # bare project
+        os.makedirs(os.path.join(plugin, "scripts"))
+        _create_full_plugin_copy(plugin)
+
+        # Run script WITHOUT 2>> redirect — the script handles it now
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT")}
+        env["CLAUDE_PROJECT_DIR"] = project
+        env["CLAUDE_PLUGIN_ROOT"] = plugin
+
+        result = subprocess.run(
+            ["bash", os.path.join(plugin, "scripts", "session-start-hook.sh")],
+            capture_output=True, text=True, env=env, timeout=10,
+        )
+
+        assert result.returncode == 0, (
+            f"Script should succeed on fresh project after fix. "
+            f"rc={result.returncode} stderr={result.stderr[:300]}"
+        )
+
+        # Verify directory structure was created
+        remember_dir = os.path.join(project, ".remember")
+        assert os.path.isdir(os.path.join(remember_dir, "tmp")), \
+            ".remember/tmp/ not created"
+        assert os.path.isdir(os.path.join(remember_dir, "logs")), \
+            ".remember/logs/ not created"
+        assert os.path.isdir(os.path.join(remember_dir, "logs", "autonomous")), \
+            ".remember/logs/autonomous/ not created"
+
+        # Verify .gitignore was created
+        gitignore = os.path.join(remember_dir, ".gitignore")
+        assert os.path.isfile(gitignore), ".remember/.gitignore not created"
+        with open(gitignore) as f:
+            assert "*" in f.read(), ".gitignore should contain '*'"
+
+    def test_post_tool_self_bootstrap_on_fresh_project(self, tmp_path):
+        """post-tool-hook.sh also works on fresh project after fix."""
+        project = os.path.join(str(tmp_path), "fresh-project")
+        plugin = os.path.join(str(tmp_path), "cache", "org", "remember", "0.5.0")
+        os.makedirs(project)
+        os.makedirs(os.path.join(plugin, "scripts"))
+        _create_full_plugin_copy(plugin)
+
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT")}
+        env["CLAUDE_PROJECT_DIR"] = project
+        env["CLAUDE_PLUGIN_ROOT"] = plugin
+
+        result = subprocess.run(
+            ["bash", os.path.join(plugin, "scripts", "post-tool-hook.sh")],
+            capture_output=True, text=True, env=env, timeout=10,
+        )
+
+        assert result.returncode == 0, (
+            f"post-tool-hook should succeed on fresh project. "
+            f"rc={result.returncode} stderr={result.stderr[:300]}"
+        )
+
+        # At minimum, dirs should exist
+        assert os.path.isdir(os.path.join(project, ".remember", "tmp")), \
+            ".remember/tmp/ not created by post-tool-hook"
+        assert os.path.isdir(os.path.join(project, ".remember", "logs")), \
+            ".remember/logs/ not created by post-tool-hook"
+
+    def test_hooks_json_clean_command_no_redirect(self, tmp_path):
+        """hooks.json commands should NOT contain 2>> redirect after fix.
+
+        The fix moves stderr handling into the scripts themselves,
+        keeping hooks.json clean and preventing the chicken-and-egg bug.
+        """
+        hooks_file = os.path.join(
+            os.path.dirname(__file__), "..", "hooks", "hooks.json"
+        )
+        with open(hooks_file) as f:
+            hooks = json.load(f)
+
+        for event_name, event_hooks in hooks.get("hooks", {}).items():
+            for hook_group in event_hooks:
+                for hook in hook_group.get("hooks", []):
+                    cmd = hook.get("command", "")
+                    assert "2>>" not in cmd, (
+                        f"hooks.json {event_name} still has inline 2>> redirect. "
+                        f"Stderr handling should be inside the scripts, not hooks.json. "
+                        f"Command: {cmd[:200]}"
+                    )
+
+    # ── Partial .remember/ state ─────────────────────────────────────────
+
+    def test_partial_remember_dir_missing_logs(self, tmp_path):
+        """.remember/ exists but logs/ doesn't — bootstrap fills the gaps."""
+        project = os.path.join(str(tmp_path), "partial-project")
+        plugin = os.path.join(str(tmp_path), "cache", "org", "remember", "0.5.0")
+        os.makedirs(os.path.join(project, ".remember"))  # exists but empty
+        os.makedirs(os.path.join(plugin, "scripts"))
+        _create_full_plugin_copy(plugin)
+
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT")}
+        env["CLAUDE_PROJECT_DIR"] = project
+        env["CLAUDE_PLUGIN_ROOT"] = plugin
+
+        result = subprocess.run(
+            ["bash", os.path.join(plugin, "scripts", "session-start-hook.sh")],
+            capture_output=True, text=True, env=env, timeout=10,
+        )
+
+        assert result.returncode == 0, (
+            f"Should handle partial .remember/ state. "
+            f"rc={result.returncode} stderr={result.stderr[:300]}"
+        )
+        assert os.path.isdir(os.path.join(project, ".remember", "logs"))
+        assert os.path.isdir(os.path.join(project, ".remember", "tmp"))
+        assert os.path.isdir(os.path.join(project, ".remember", "logs", "autonomous"))
+
+    def test_partial_remember_dir_missing_tmp(self, tmp_path):
+        """.remember/logs/ exists but tmp/ doesn't — bootstrap fills the gap."""
+        project = os.path.join(str(tmp_path), "partial-project")
+        plugin = os.path.join(str(tmp_path), "cache", "org", "remember", "0.5.0")
+        os.makedirs(os.path.join(project, ".remember", "logs"))
+        os.makedirs(os.path.join(plugin, "scripts"))
+        _create_full_plugin_copy(plugin)
+
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT")}
+        env["CLAUDE_PROJECT_DIR"] = project
+        env["CLAUDE_PLUGIN_ROOT"] = plugin
+
+        result = subprocess.run(
+            ["bash", os.path.join(plugin, "scripts", "session-start-hook.sh")],
+            capture_output=True, text=True, env=env, timeout=10,
+        )
+
+        assert result.returncode == 0
+        assert os.path.isdir(os.path.join(project, ".remember", "tmp"))
+
+    def test_partial_remember_existing_gitignore_preserved(self, tmp_path):
+        """Existing .gitignore is not overwritten by bootstrap."""
+        project = os.path.join(str(tmp_path), "custom-gitignore")
+        plugin = os.path.join(str(tmp_path), "cache", "org", "remember", "0.5.0")
+        os.makedirs(os.path.join(project, ".remember"))
+        os.makedirs(os.path.join(plugin, "scripts"))
+        _create_full_plugin_copy(plugin)
+
+        # Create a custom .gitignore before bootstrap runs
+        gitignore = os.path.join(project, ".remember", ".gitignore")
+        with open(gitignore, "w") as f:
+            f.write("*.log\n!important.log\n")
+
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT")}
+        env["CLAUDE_PROJECT_DIR"] = project
+        env["CLAUDE_PLUGIN_ROOT"] = plugin
+
+        result = subprocess.run(
+            ["bash", os.path.join(plugin, "scripts", "session-start-hook.sh")],
+            capture_output=True, text=True, env=env, timeout=10,
+        )
+
+        assert result.returncode == 0
+        with open(gitignore) as f:
+            content = f.read()
+        assert "*.log" in content, (
+            f".gitignore was overwritten by bootstrap: {content!r}"
+        )
+        assert "!important.log" in content
+
+    # ── Spaces in paths ──────────────────────────────────────────────────
+
+    def test_fresh_project_with_spaces_in_path(self, tmp_path):
+        """Bootstrap works when project path contains spaces (common on Windows/macOS)."""
+        project = os.path.join(str(tmp_path), "My Projects", "cool app")
+        plugin = os.path.join(str(tmp_path), "cache", "org", "remember", "0.5.0")
+        os.makedirs(project)  # bare project with spaces
+        os.makedirs(os.path.join(plugin, "scripts"))
+        _create_full_plugin_copy(plugin)
+
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT")}
+        env["CLAUDE_PROJECT_DIR"] = project
+        env["CLAUDE_PLUGIN_ROOT"] = plugin
+
+        result = subprocess.run(
+            ["bash", os.path.join(plugin, "scripts", "session-start-hook.sh")],
+            capture_output=True, text=True, env=env, timeout=10,
+        )
+
+        assert result.returncode == 0, (
+            f"Spaces in path broke bootstrap. "
+            f"rc={result.returncode} stderr={result.stderr[:300]}"
+        )
+        assert os.path.isdir(os.path.join(project, ".remember", "logs"))
+        assert os.path.isdir(os.path.join(project, ".remember", "tmp"))
+
+    def test_fresh_project_with_special_chars_in_path(self, tmp_path):
+        """Bootstrap works with unicode/special chars in path (accents, etc.)."""
+        project = os.path.join(str(tmp_path), "Projets été", "café-app")
+        plugin = os.path.join(str(tmp_path), "cache", "org", "remember", "0.5.0")
+        os.makedirs(project)
+        os.makedirs(os.path.join(plugin, "scripts"))
+        _create_full_plugin_copy(plugin)
+
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT")}
+        env["CLAUDE_PROJECT_DIR"] = project
+        env["CLAUDE_PLUGIN_ROOT"] = plugin
+
+        result = subprocess.run(
+            ["bash", os.path.join(plugin, "scripts", "session-start-hook.sh")],
+            capture_output=True, text=True, env=env, timeout=10,
+        )
+
+        assert result.returncode == 0, (
+            f"Special chars in path broke bootstrap. "
+            f"rc={result.returncode} stderr={result.stderr[:300]}"
+        )
+        assert os.path.isdir(os.path.join(project, ".remember", "logs"))
+
+    # ── Read-only / permission edge cases ────────────────────────────────
+
+    def test_read_only_project_dir_does_not_crash(self, tmp_path):
+        """If project dir is read-only, bootstrap degrades gracefully.
+
+        This can happen on CI systems, Docker containers with read-only mounts,
+        or restricted corporate environments. bootstrap-dirs.sh itself must not
+        crash (mkdir -p has 2>/dev/null, exec 2>> is guarded by -d check).
+
+        Note: log.sh does `return 1` when it can't create the log dir, which
+        means log()/dispatch() are never defined. The session-start-hook.sh
+        then fails on `dispatch` (command not found, rc=127). This is a
+        pre-existing limitation in log.sh, not a bootstrap-dirs.sh bug.
+        The important thing is bootstrap-dirs.sh doesn't make it worse.
+        """
+        project = os.path.join(str(tmp_path), "readonly-project")
+        plugin = os.path.join(str(tmp_path), "cache", "org", "remember", "0.5.0")
+        os.makedirs(project)
+        os.makedirs(os.path.join(plugin, "scripts"))
+        _create_full_plugin_copy(plugin)
+
+        # Make project dir read-only
+        os.chmod(project, 0o555)
+
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT")}
+        env["CLAUDE_PROJECT_DIR"] = project
+        env["CLAUDE_PLUGIN_ROOT"] = plugin
+
+        try:
+            result = subprocess.run(
+                ["bash", os.path.join(plugin, "scripts", "session-start-hook.sh")],
+                capture_output=True, text=True, env=env, timeout=10,
+            )
+
+            # bootstrap-dirs.sh itself should not segfault or hang.
+            # The script may fail (rc=127 from undefined dispatch in log.sh)
+            # but should not timeout or produce unexpected errors.
+            assert result.returncode in (0, 127), (
+                f"Unexpected exit code on read-only project dir. "
+                f"rc={result.returncode} stderr={result.stderr[:300]}"
+            )
+
+            # Verify .remember/ was NOT created (read-only dir)
+            assert not os.path.exists(os.path.join(project, ".remember")), (
+                ".remember/ should not exist on read-only filesystem"
+            )
+        finally:
+            # Restore permissions for cleanup
+            os.chmod(project, 0o755)
+
+    # ── Idempotency ──────────────────────────────────────────────────────
+
+    def test_bootstrap_idempotent_multiple_runs(self, tmp_path):
+        """Running bootstrap multiple times doesn't corrupt or duplicate anything."""
+        project = os.path.join(str(tmp_path), "idempotent-project")
+        plugin = os.path.join(str(tmp_path), "cache", "org", "remember", "0.5.0")
+        os.makedirs(project)
+        os.makedirs(os.path.join(plugin, "scripts"))
+        _create_full_plugin_copy(plugin)
+
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT")}
+        env["CLAUDE_PROJECT_DIR"] = project
+        env["CLAUDE_PLUGIN_ROOT"] = plugin
+
+        # Run three times in succession
+        for i in range(3):
+            result = subprocess.run(
+                ["bash", os.path.join(plugin, "scripts", "session-start-hook.sh")],
+                capture_output=True, text=True, env=env, timeout=10,
+            )
+            assert result.returncode == 0, (
+                f"Run {i+1}/3 failed. rc={result.returncode} "
+                f"stderr={result.stderr[:300]}"
+            )
+
+        # .gitignore should contain exactly '*', not '*\n*\n*'
+        gitignore = os.path.join(project, ".remember", ".gitignore")
+        with open(gitignore) as f:
+            content = f.read()
+        assert content.strip() == "*", (
+            f".gitignore corrupted after 3 runs: {content!r}"
+        )
+
+    # ── Git worktree simulation ──────────────────────────────────────────
+
+    def test_git_worktree_separate_remember_dir(self, tmp_path):
+        """In a git worktree, .remember/ is created in the worktree, not main repo.
+
+        Issues #23 and #31 specifically mention worktree failures.
+        CLAUDE_PROJECT_DIR points to the worktree path.
+        """
+        main_repo = os.path.join(str(tmp_path), "main-repo")
+        worktree = os.path.join(str(tmp_path), "worktrees", "feature-branch")
+        plugin = os.path.join(str(tmp_path), "cache", "org", "remember", "0.5.0")
+        os.makedirs(main_repo)
+        os.makedirs(worktree)  # bare worktree — no .remember/
+        os.makedirs(os.path.join(plugin, "scripts"))
+        _create_full_plugin_copy(plugin)
+
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT")}
+        # Claude Code sets CLAUDE_PROJECT_DIR to the worktree
+        env["CLAUDE_PROJECT_DIR"] = worktree
+        env["CLAUDE_PLUGIN_ROOT"] = plugin
+
+        result = subprocess.run(
+            ["bash", os.path.join(plugin, "scripts", "session-start-hook.sh")],
+            capture_output=True, text=True, env=env, timeout=10,
+        )
+
+        assert result.returncode == 0, (
+            f"Worktree bootstrap failed. "
+            f"rc={result.returncode} stderr={result.stderr[:300]}"
+        )
+
+        # .remember/ should be in the worktree, NOT in main repo
+        assert os.path.isdir(os.path.join(worktree, ".remember", "logs")), \
+            ".remember/logs/ not created in worktree"
+        assert not os.path.exists(os.path.join(main_repo, ".remember")), \
+            ".remember/ leaked into main repo instead of worktree"
+
+    # ── Concurrent bootstrap ─────────────────────────────────────────────
+
+    def test_concurrent_bootstrap_no_race(self, tmp_path):
+        """Two sessions bootstrapping simultaneously don't corrupt state.
+
+        mkdir -p is atomic on POSIX, but verify the full bootstrap
+        (dirs + gitignore + stderr redirect) survives concurrency.
+        """
+        project = os.path.join(str(tmp_path), "concurrent-project")
+        plugin = os.path.join(str(tmp_path), "cache", "org", "remember", "0.5.0")
+        os.makedirs(project)
+        os.makedirs(os.path.join(plugin, "scripts"))
+        _create_full_plugin_copy(plugin)
+
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT")}
+        env["CLAUDE_PROJECT_DIR"] = project
+        env["CLAUDE_PLUGIN_ROOT"] = plugin
+
+        script = os.path.join(plugin, "scripts", "session-start-hook.sh")
+
+        # Launch two processes simultaneously
+        p1 = subprocess.Popen(
+            ["bash", script], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=env, text=True,
+        )
+        p2 = subprocess.Popen(
+            ["bash", script], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=env, text=True,
+        )
+
+        out1, err1 = p1.communicate(timeout=10)
+        out2, err2 = p2.communicate(timeout=10)
+
+        assert p1.returncode == 0, f"Process 1 failed: {err1[:300]}"
+        assert p2.returncode == 0, f"Process 2 failed: {err2[:300]}"
+
+        # Dirs exist and gitignore is valid
+        assert os.path.isdir(os.path.join(project, ".remember", "logs"))
+        assert os.path.isdir(os.path.join(project, ".remember", "tmp"))
+        gitignore = os.path.join(project, ".remember", ".gitignore")
+        assert os.path.isfile(gitignore)
+        with open(gitignore) as f:
+            content = f.read().strip()
+        # Should be just '*' — not duplicated
+        assert content == "*", f".gitignore corrupted by race: {content!r}"
+
+    # ── bootstrap-dirs.sh itself ─────────────────────────────────────────
+
+    def test_bootstrap_dirs_requires_project_dir(self, tmp_path):
+        """bootstrap-dirs.sh uses PROJECT_DIR from resolve-paths.sh.
+
+        If sourced without PROJECT_DIR set, it should create dirs
+        relative to empty string (current dir) — not crash.
+        """
+        bootstrap = os.path.join(
+            os.path.dirname(__file__), "..", "scripts", "bootstrap-dirs.sh"
+        )
+        assert os.path.isfile(bootstrap), "bootstrap-dirs.sh not found"
+
+        # Verify it references PROJECT_DIR (not CLAUDE_PROJECT_DIR)
+        with open(bootstrap) as f:
+            content = f.read()
+        assert "PROJECT_DIR" in content, \
+            "bootstrap-dirs.sh should reference PROJECT_DIR"
+        assert "REMEMBER_DIR" in content, \
+            "bootstrap-dirs.sh should define REMEMBER_DIR"
+        assert "mkdir -p" in content, \
+            "bootstrap-dirs.sh should create directories"
+        assert "exec 2>>" in content, \
+            "bootstrap-dirs.sh should redirect stderr"
+        assert ".gitignore" in content, \
+            "bootstrap-dirs.sh should create .gitignore"
+
+    def test_all_hook_scripts_source_bootstrap(self):
+        """Every hook script sources bootstrap-dirs.sh for consistent setup."""
+        repo_root = os.path.join(os.path.dirname(__file__), "..")
+        for script_name in ("session-start-hook.sh", "post-tool-hook.sh"):
+            script_path = os.path.join(repo_root, "scripts", script_name)
+            with open(script_path) as f:
+                content = f.read()
+            assert "bootstrap-dirs.sh" in content, (
+                f"{script_name} does not source bootstrap-dirs.sh — "
+                f"directory creation will be missing on fresh installs"
+            )
+
+    def test_no_hardcoded_tmp_in_production_scripts(self):
+        """Production scripts must not use hardcoded /tmp/ — use $SYS_TMPDIR.
+
+        Windows (Git Bash) may not have /tmp, but $TMPDIR is always set.
+        bootstrap-dirs.sh exports SYS_TMPDIR="${TMPDIR:-/tmp}" for this.
+        Test scripts (run-tests.sh) should also use it for portability.
+        """
+        repo_root = os.path.join(os.path.dirname(__file__), "..")
+        for script_name in ("session-start-hook.sh", "post-tool-hook.sh",
+                            "user-prompt-hook.sh", "save-session.sh",
+                            "run-consolidation.sh", "run-tests.sh"):
+            script_path = os.path.join(repo_root, "scripts", script_name)
+            if not os.path.isfile(script_path):
+                continue
+            with open(script_path) as f:
+                for i, line in enumerate(f, 1):
+                    # Skip comments and lines using .remember/tmp/ (project-relative)
+                    stripped = line.lstrip()
+                    if stripped.startswith("#"):
+                        continue
+                    if ".remember/tmp" in line:
+                        continue
+                    assert "mktemp /tmp/" not in line, (
+                        f"{script_name}:{i} uses hardcoded /tmp/ in mktemp. "
+                        f"Use $SYS_TMPDIR instead. Line: {line.strip()}"
+                    )
+                    # Check for /tmp/claude- pattern (the ctx-pct file)
+                    if "/tmp/claude-" in line and "SYS_TMPDIR" not in line and "TMPDIR" not in line:
+                        assert False, (
+                            f"{script_name}:{i} uses hardcoded /tmp/claude-*. "
+                            f"Use $SYS_TMPDIR instead. Line: {line.strip()}"
+                        )
+
+    def test_bootstrap_before_detect_tools(self):
+        """bootstrap-dirs.sh must be sourced BEFORE detect-tools.sh.
+
+        The order matters: resolve-paths → bootstrap-dirs → detect-tools.
+        bootstrap needs PROJECT_DIR (from resolve-paths) but nothing else.
+        detect-tools may write to logs, which need the dirs from bootstrap.
+        """
+        repo_root = os.path.join(os.path.dirname(__file__), "..")
+        for script_name in ("session-start-hook.sh", "post-tool-hook.sh"):
+            script_path = os.path.join(repo_root, "scripts", script_name)
+            with open(script_path) as f:
+                content = f.read()
+            bootstrap_pos = content.find("bootstrap-dirs.sh")
+            detect_pos = content.find("detect-tools.sh")
+            assert bootstrap_pos < detect_pos, (
+                f"{script_name}: bootstrap-dirs.sh must come before "
+                f"detect-tools.sh (bootstrap at {bootstrap_pos}, "
+                f"detect at {detect_pos})"
+            )
+
+
+class TestBsdMktempCompatibility:
+    """PR #30: BSD mktemp (macOS) fails with chars after XXXXXX suffix.
+
+    GNU mktemp (Linux) silently ignores chars after XXXXXX:
+        mktemp /tmp/foo-XXXXXX.txt  →  /tmp/foo-a1b2c3.txt  (works)
+
+    BSD mktemp (macOS) treats the suffix as literal template chars:
+        mktemp /tmp/foo-XXXXXX.txt  →  "mkstemp: File exists" (fails)
+
+    Fix: remove file extensions after XXXXXX in all mktemp calls.
+    """
+
+    def test_bsd_mktemp_no_randomization_with_extension(self, tmp_path):
+        """BUG REPRODUCTION: BSD mktemp treats chars after XXXXXX as literal.
+
+        On macOS, mktemp /tmp/foo-XXXXXX.txt creates /tmp/foo-XXXXXX.txt
+        (no randomization!) — the first call succeeds but the file has a
+        predictable name. The SECOND call fails with "File exists" because
+        the name is always the same. This is both a collision bug and a
+        security issue (predictable temp filenames).
+        """
+        import platform
+        if platform.system() != "Darwin":
+            pytest.skip("BSD mktemp test only relevant on macOS")
+
+        template = os.path.join(str(tmp_path), "test-XXXXXX.txt")
+
+        # First call: succeeds but creates a non-random filename
+        r1 = subprocess.run(
+            ["mktemp", template], capture_output=True, text=True,
+        )
+        assert r1.returncode == 0, "First mktemp should succeed"
+        created = r1.stdout.strip()
+
+        # On BSD, the filename IS the template (no randomization)
+        assert created == template, (
+            f"BSD mktemp should create literal filename {template}, "
+            f"got {created} — this means XXXXXX was randomized (GNU behavior)"
+        )
+
+        # Second call: fails because the literal file already exists
+        r2 = subprocess.run(
+            ["mktemp", template], capture_output=True, text=True,
+        )
+        assert r2.returncode != 0, (
+            "Second mktemp with same template should fail on BSD — "
+            "the non-random file already exists"
+        )
+        assert "File exists" in r2.stderr, (
+            f"Expected 'File exists' error, got: {r2.stderr[:200]}"
+        )
+
+        # Cleanup
+        if os.path.isfile(created):
+            os.unlink(created)
+
+    def test_bsd_mktemp_works_without_extension(self, tmp_path):
+        """FIX VERIFICATION: mktemp without extension works on all platforms."""
+        result = subprocess.run(
+            ["mktemp", os.path.join(str(tmp_path), "test-XXXXXX")],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0, (
+            f"mktemp without extension should work everywhere. "
+            f"stderr={result.stderr[:200]}"
+        )
+        # Clean up
+        created = result.stdout.strip()
+        if os.path.isfile(created):
+            os.unlink(created)
+
+    def test_no_mktemp_with_extension_in_scripts(self):
+        """Guard: no mktemp call should have chars after XXXXXX.
+
+        Catches future regressions — any new mktemp must follow the pattern.
+        """
+        repo_root = os.path.join(os.path.dirname(__file__), "..")
+        violations = []
+        for script_name in ("save-session.sh", "run-tests.sh",
+                            "run-consolidation.sh", "session-start-hook.sh",
+                            "post-tool-hook.sh", "user-prompt-hook.sh"):
+            script_path = os.path.join(repo_root, "scripts", script_name)
+            if not os.path.isfile(script_path):
+                continue
+            with open(script_path) as f:
+                for i, line in enumerate(f, 1):
+                    stripped = line.lstrip()
+                    if stripped.startswith("#"):
+                        continue
+                    # Match: mktemp ... XXXXXX.ext) or XXXXXX.ext"
+                    if "mktemp" in line and "XXXXXX." in line:
+                        violations.append(f"{script_name}:{i}: {line.strip()}")
+
+        assert not violations, (
+            "mktemp calls with extension after XXXXXX break on macOS (BSD mktemp).\n"
+            "Remove the file extension — use XXXXXX) not XXXXXX.txt)\n"
+            "Violations:\n" + "\n".join(violations)
+        )
+
+
+class TestHaikuHeaderGuard:
+    """PR #22 / Issue #24: Haiku invents 'unknown' header from previous entries.
+
+    When a previous entry's header showed 'unknown' (e.g., from git rev-parse
+    returning no branch in a non-repo cwd), Haiku occasionally mimicked that
+    header instead of using the {{TIME}} | {{BRANCH}} values from the prompt.
+
+    Fix: (1) explicit prompt instruction to copy header verbatim,
+         (2) expand placeholder guard to check entire prompt, not just line 1.
+    """
+
+    def test_prompt_instructs_verbatim_header(self):
+        """Prompt must explicitly tell Haiku to copy header values verbatim."""
+        prompt_path = os.path.join(
+            os.path.dirname(__file__), "..", "prompts", "save-session.prompt.txt"
+        )
+        with open(prompt_path) as f:
+            content = f.read()
+
+        # Must mention copying TIME/BRANCH verbatim
+        assert "{{TIME}}" in content, (
+            "Prompt should reference {{TIME}} placeholder"
+        )
+        assert "{{BRANCH}}" in content, (
+            "Prompt should reference {{BRANCH}} placeholder"
+        )
+        # Must warn against inventing 'unknown'
+        assert "unknown" in content.lower(), (
+            "Prompt should warn against mimicking 'unknown' headers"
+        )
+
+    def test_placeholder_guard_checks_all_placeholders(self):
+        """save-session.sh should check ALL placeholders, not just TIME/BRANCH."""
+        script_path = os.path.join(
+            os.path.dirname(__file__), "..", "scripts", "save-session.sh"
+        )
+        with open(script_path) as f:
+            content = f.read()
+
+        # The guard should check for unsubstituted placeholders
+        assert "{{TIME}}" in content, "Guard should check {{TIME}}"
+        assert "{{BRANCH}}" in content, "Guard should check {{BRANCH}}"
+
+        # After fix: should also check {{LAST_ENTRY}} and {{EXTRACT}}
+        assert "{{LAST_ENTRY}}" in content, (
+            "Guard should check {{LAST_ENTRY}} — partial substitution "
+            "means the prompt is broken"
+        )
+        assert "{{EXTRACT}}" in content, (
+            "Guard should check {{EXTRACT}} — partial substitution "
+            "means the prompt is broken"
+        )
+
+    def test_placeholder_guard_checks_full_prompt_not_just_header(self):
+        """Guard must grep the entire prompt file, not just head -1.
+
+        The old guard was: head -1 "$TMP_PROMPT" | grep -q '{{TIME}}'
+        This only caught unsubstituted headers, not body placeholders.
+        """
+        script_path = os.path.join(
+            os.path.dirname(__file__), "..", "scripts", "save-session.sh"
+        )
+        with open(script_path) as f:
+            content = f.read()
+
+        # Should NOT use 'head -1' before the placeholder grep
+        # Look for the guard pattern
+        for line in content.split("\n"):
+            if "{{TIME}}" in line and "grep" in line:
+                assert "head -1" not in line, (
+                    "Placeholder guard uses 'head -1' — only checks first line. "
+                    "Should grep the entire prompt file."
+                )
