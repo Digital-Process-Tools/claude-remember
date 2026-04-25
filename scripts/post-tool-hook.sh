@@ -29,6 +29,7 @@
 
 # --- Resolve paths ---
 source "$(dirname "$0")/resolve-paths.sh"
+source "$(dirname "$0")/bootstrap-dirs.sh"
 source "$(dirname "$0")/detect-tools.sh"
 PLUGIN_ROOT="$PIPELINE_DIR"
 PROJECT="$PROJECT_DIR"

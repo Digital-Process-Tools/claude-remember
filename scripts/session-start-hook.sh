@@ -38,6 +38,7 @@
 # ============================================================================
 
 source "$(dirname "$0")/resolve-paths.sh"
+source "$(dirname "$0")/bootstrap-dirs.sh"
 source "$(dirname "$0")/detect-tools.sh"
 PLUGIN_ROOT="$PIPELINE_DIR"
 PROJECT="$PROJECT_DIR"
@@ -54,10 +55,6 @@ dispatch "before_session_start"
 
 # ── Cleanup + health check ─────────────────────────────────────────────────
 rm -f "$PROJECT/.remember/tmp/save-session.pid"
-for DIR in "$PROJECT/.remember/tmp" "$PROJECT/.remember/logs" "$PROJECT/.remember/logs/autonomous"; do
-    mkdir -p "$DIR" 2>/dev/null
-done
-[ -f "$PROJECT/.remember/.gitignore" ] || echo '*' > "$PROJECT/.remember/.gitignore"
 
 # ── Recovery: save the most recent missed session ──────────────────────────
 if [ "$(cfg '.features.recovery' true)" = "true" ]; then
