@@ -1859,6 +1859,39 @@ class TestFreshProjectBootstrap:
                 f"directory creation will be missing on fresh installs"
             )
 
+    def test_no_hardcoded_tmp_in_production_scripts(self):
+        """Production scripts must not use hardcoded /tmp/ — use $SYS_TMPDIR.
+
+        Windows (Git Bash) may not have /tmp, but $TMPDIR is always set.
+        bootstrap-dirs.sh exports SYS_TMPDIR="${TMPDIR:-/tmp}" for this.
+        Test scripts (run-tests.sh) should also use it for portability.
+        """
+        repo_root = os.path.join(os.path.dirname(__file__), "..")
+        for script_name in ("session-start-hook.sh", "post-tool-hook.sh",
+                            "user-prompt-hook.sh", "save-session.sh",
+                            "run-consolidation.sh", "run-tests.sh"):
+            script_path = os.path.join(repo_root, "scripts", script_name)
+            if not os.path.isfile(script_path):
+                continue
+            with open(script_path) as f:
+                for i, line in enumerate(f, 1):
+                    # Skip comments and lines using .remember/tmp/ (project-relative)
+                    stripped = line.lstrip()
+                    if stripped.startswith("#"):
+                        continue
+                    if ".remember/tmp" in line:
+                        continue
+                    assert "mktemp /tmp/" not in line, (
+                        f"{script_name}:{i} uses hardcoded /tmp/ in mktemp. "
+                        f"Use $SYS_TMPDIR instead. Line: {line.strip()}"
+                    )
+                    # Check for /tmp/claude- pattern (the ctx-pct file)
+                    if "/tmp/claude-" in line and "SYS_TMPDIR" not in line and "TMPDIR" not in line:
+                        assert False, (
+                            f"{script_name}:{i} uses hardcoded /tmp/claude-*. "
+                            f"Use $SYS_TMPDIR instead. Line: {line.strip()}"
+                        )
+
     def test_bootstrap_before_detect_tools(self):
         """bootstrap-dirs.sh must be sourced BEFORE detect-tools.sh.
 

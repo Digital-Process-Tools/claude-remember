@@ -42,6 +42,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PIPELINE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 FIXTURES="$PIPELINE_DIR/tests/fixtures"
+SYS_TMPDIR="${TMPDIR:-/tmp}"
 
 LIVE=false
 [ "$1" = "--live" ] && LIVE=true
@@ -130,7 +131,7 @@ echo "5. Shell bridge commands"
 # 5a. Extract — use fixture JSONL
 if [ -f "$FIXTURES/sample-session.jsonl" ]; then
     # Create a temp project dir structure pointing to the fixture
-    TMP_PROJECT=$(mktemp -d /tmp/remember-test-project-XXXXXX)
+    TMP_PROJECT=$(mktemp -d "$SYS_TMPDIR/remember-test-project-XXXXXX")
     cleanup_files+=("$TMP_PROJECT")
     SESSION_DIR="$HOME/.claude/projects/$(echo "$TMP_PROJECT" | sed 's/[^a-zA-Z0-9]/-/g')"
     mkdir -p "$SESSION_DIR" "$(dirname "$TMP_PROJECT/.remember/tmp/last-save.json")"
@@ -174,7 +175,7 @@ else
 fi
 
 # 5d. Save position — round trip
-TMP_POS=$(mktemp /tmp/remember-test-pos-XXXXXX.json)
+TMP_POS=$(mktemp "$SYS_TMPDIR/remember-test-pos-XXXXXX.json")
 cleanup_files+=("$TMP_POS")
 (cd "$PIPELINE_DIR" && python3 -m pipeline.shell save-position "$TMP_POS" "test-session-xyz" 42)
 SAVED=$(python3 -c "import json; d=json.load(open('$TMP_POS')); print(d['session'], d['line'])")
@@ -185,9 +186,9 @@ else
 fi
 
 # 5e. Build prompt — verify substitution
-TMP_EXTRACT_F=$(mktemp /tmp/remember-test-extract-XXXXXX.txt)
-TMP_LAST_F=$(mktemp /tmp/remember-test-last-XXXXXX.txt)
-TMP_PROMPT_F=$(mktemp /tmp/remember-test-prompt-XXXXXX.txt)
+TMP_EXTRACT_F=$(mktemp "$SYS_TMPDIR/remember-test-extract-XXXXXX.txt")
+TMP_LAST_F=$(mktemp "$SYS_TMPDIR/remember-test-last-XXXXXX.txt")
+TMP_PROMPT_F=$(mktemp "$SYS_TMPDIR/remember-test-prompt-XXXXXX.txt")
 cleanup_files+=("$TMP_EXTRACT_F" "$TMP_LAST_F" "$TMP_PROMPT_F")
 echo "[HUMAN] hello" > "$TMP_EXTRACT_F"
 echo "(no previous entry)" > "$TMP_LAST_F"
@@ -199,8 +200,8 @@ else
 fi
 
 # 5f. Build NDC prompt
-TMP_MEM=$(mktemp /tmp/remember-test-mem-XXXXXX.md)
-TMP_NDC=$(mktemp /tmp/remember-test-ndc-XXXXXX.txt)
+TMP_MEM=$(mktemp "$SYS_TMPDIR/remember-test-mem-XXXXXX.md")
+TMP_NDC=$(mktemp "$SYS_TMPDIR/remember-test-ndc-XXXXXX.txt")
 cleanup_files+=("$TMP_MEM" "$TMP_NDC")
 echo "## 10:30 | test branch\nDid stuff" > "$TMP_MEM"
 (cd "$PIPELINE_DIR" && python3 -m pipeline.shell build-ndc-prompt "$TMP_MEM" "$TMP_NDC")

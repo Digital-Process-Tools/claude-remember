@@ -23,6 +23,9 @@
 
 REMEMBER_DIR="${PROJECT_DIR}/.remember"
 
+# --- System temp directory (portable: macOS, Linux, Windows/Git Bash) ---
+SYS_TMPDIR="${TMPDIR:-/tmp}"
+
 # --- Create directory structure ---
 mkdir -p \
     "$REMEMBER_DIR/tmp" \
