@@ -1,6 +1,6 @@
 # Continuous Memory for Claude Code
 
-![1,600+ installs from the Anthropic Marketplace](docs/marketplace-1600-installs.png)
+![12,500+ installs on the Anthropic Marketplace](docs/marketplace-12k-installs.png)
 
 Claude Code starts every session blank. It doesn't know what you worked on yesterday, what conventions your team follows, or what mistakes it already made. You re-explain everything, every time.
 
