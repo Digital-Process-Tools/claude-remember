@@ -214,6 +214,7 @@ Copy `config.example.json` to `config.json` and adjust:
 | `features.ndc_compression`      | `true`  | Enable hourly compression of daily files           |
 | `features.recovery`             | `true`  | Recover missed saves on session start              |
 | `timezone`                       | *(system local)* | IANA name (e.g. `America/New_York`, `Europe/Paris`) for timestamps and daily file boundaries. Omit or leave empty to use the system clock's local zone. Set this explicitly on a VPS whose system clock is UTC. |
+| `time_format`                    | `24h`   | `24h` or `12h` — controls timestamp format in log files (e.g. `14:30:00` vs `2:30:00 PM`) |
 | `debug`                          | `false` | Verbose logging for cooldowns and locks            |
 
 ## Running tests
