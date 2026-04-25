@@ -116,7 +116,7 @@ safe_eval() {
 #
 # Usage:
 #   SAVE_COOLDOWN=$(config ".cooldowns.save_seconds" 120)
-REMEMBER_CONFIG="${PROJECT_DIR:-.}/.claude/remember/config.json"
+REMEMBER_CONFIG="${PIPELINE_DIR:-${PROJECT_DIR:-.}/.claude/remember}/config.json"
 config() {
     local key="$1"
     local default="$2"
@@ -142,7 +142,7 @@ REMEMBER_TZ=$(config ".timezone" "Europe/Paris")
 #
 # Usage:
 #   dispatch "after_save"
-REMEMBER_HOOKS_DIR="${PROJECT_DIR:-.}/.claude/remember/hooks.d"
+REMEMBER_HOOKS_DIR="${PIPELINE_DIR:-${PROJECT_DIR:-.}/.claude/remember}/hooks.d"
 dispatch() {
     local event="$1"
     local event_dir="$REMEMBER_HOOKS_DIR/$event"
