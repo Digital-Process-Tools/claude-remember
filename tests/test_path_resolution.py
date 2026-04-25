@@ -2211,3 +2211,112 @@ class TestTimeFormatConfig:
         assert '"24h"' in content, (
             "save-session.sh should default to '24h' when config key is absent"
         )
+
+
+class TestMarketplacePathResolution:
+    """Issue #19: log.sh hardcodes paths relative to PROJECT_DIR/.claude/remember/.
+
+    In marketplace installs, the plugin lives in ~/.claude/plugins/cache/,
+    NOT in $PROJECT_DIR/.claude/remember/. Config and hooks.d paths must
+    use PIPELINE_DIR (set by resolve-paths.sh) instead.
+    """
+
+    def test_log_sh_config_uses_pipeline_dir(self):
+        """log.sh REMEMBER_CONFIG must use PIPELINE_DIR, not PROJECT_DIR."""
+        log_path = os.path.join(
+            os.path.dirname(__file__), "..", "scripts", "log.sh"
+        )
+        with open(log_path) as f:
+            content = f.read()
+
+        for line in content.split("\n"):
+            if line.startswith("REMEMBER_CONFIG="):
+                assert "PIPELINE_DIR" in line or "PLUGIN_ROOT" in line, (
+                    f"REMEMBER_CONFIG should use PIPELINE_DIR for marketplace "
+                    f"compat, not hardcoded .claude/remember/. Line: {line}"
+                )
+                break
+        else:
+            assert False, "REMEMBER_CONFIG not found in log.sh"
+
+    def test_log_sh_hooks_dir_uses_pipeline_dir(self):
+        """log.sh REMEMBER_HOOKS_DIR must use PIPELINE_DIR, not PROJECT_DIR."""
+        log_path = os.path.join(
+            os.path.dirname(__file__), "..", "scripts", "log.sh"
+        )
+        with open(log_path) as f:
+            content = f.read()
+
+        for line in content.split("\n"):
+            if line.startswith("REMEMBER_HOOKS_DIR="):
+                assert "PIPELINE_DIR" in line or "PLUGIN_ROOT" in line, (
+                    f"REMEMBER_HOOKS_DIR should use PIPELINE_DIR for marketplace "
+                    f"compat, not hardcoded .claude/remember/. Line: {line}"
+                )
+                break
+        else:
+            assert False, "REMEMBER_HOOKS_DIR not found in log.sh"
+
+    @pytest.mark.skipif(not _has_resolve_paths(), reason="resolve-paths.sh not yet created")
+    def test_marketplace_layout_config_found(self, tmp_path):
+        """In marketplace layout, config.json is read from plugin dir, not project."""
+        project = os.path.join(str(tmp_path), "user-project")
+        plugin = os.path.join(str(tmp_path), "cache", "org", "remember", "0.5.0")
+        os.makedirs(project)
+        os.makedirs(os.path.join(plugin, "scripts"))
+        _create_full_plugin_copy(plugin)
+
+        import json as json_mod
+        with open(os.path.join(plugin, "config.json"), "w") as f:
+            json_mod.dump({
+                "timezone": "America/New_York",
+                "cooldowns": {"save_seconds": 120},
+                "features": {"recovery": False},
+            }, f)
+
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT")}
+        env["CLAUDE_PROJECT_DIR"] = project
+        env["CLAUDE_PLUGIN_ROOT"] = plugin
+
+        result = subprocess.run(
+            ["bash", os.path.join(plugin, "scripts", "session-start-hook.sh")],
+            capture_output=True, text=True, env=env, timeout=10,
+        )
+
+        assert result.returncode == 0, (
+            f"Marketplace layout should work without .claude/remember/ in project. "
+            f"rc={result.returncode} stderr={result.stderr[:300]}"
+        )
+
+    @pytest.mark.skipif(not _has_resolve_paths(), reason="resolve-paths.sh not yet created")
+    def test_marketplace_hooks_d_dispatches_from_plugin(self, tmp_path):
+        """hooks.d/ dispatch should look in the plugin dir, not project dir."""
+        project = os.path.join(str(tmp_path), "user-project")
+        plugin = os.path.join(str(tmp_path), "cache", "org", "remember", "0.5.0")
+        os.makedirs(project)
+        os.makedirs(os.path.join(plugin, "scripts"))
+        _create_full_plugin_copy(plugin)
+
+        hook_dir = os.path.join(plugin, "hooks.d", "after_session_start")
+        os.makedirs(hook_dir, exist_ok=True)
+        hook_file = os.path.join(hook_dir, "test-hook.sh")
+        with open(hook_file, "w") as f:
+            f.write("#!/bin/bash\necho 'HOOK_FIRED_FROM_PLUGIN=true'\n")
+        os.chmod(hook_file, 0o755)
+
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT")}
+        env["CLAUDE_PROJECT_DIR"] = project
+        env["CLAUDE_PLUGIN_ROOT"] = plugin
+
+        result = subprocess.run(
+            ["bash", os.path.join(plugin, "scripts", "session-start-hook.sh")],
+            capture_output=True, text=True, env=env, timeout=10,
+        )
+
+        assert result.returncode == 0
+        assert "HOOK_FIRED_FROM_PLUGIN=true" in result.stdout, (
+            f"hooks.d/ dispatch should find hooks in plugin dir. "
+            f"stdout={result.stdout[:300]}"
+        )
