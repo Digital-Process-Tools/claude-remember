@@ -90,7 +90,7 @@ if [ "$DELTA" -gt "$DELTA_THRESHOLD" ]; then
 
     if [ "$ALREADY_RUNNING" = false ]; then
         mkdir -p "$PROJECT/.remember/logs/autonomous"
-        nohup "$SAVE_SCRIPT" "$SESSION_ID" > "$PROJECT/.remember/logs/autonomous/save-$(date +%H%M%S).log" 2>&1 &
+        nohup "$SAVE_SCRIPT" "$SESSION_ID" > "$PROJECT/.remember/logs/autonomous/save-$(_remember_date +%H%M%S).log" 2>&1 &
         echo $! > "$PID_FILE"
         SAVE_TRIGGERED="true"
     fi

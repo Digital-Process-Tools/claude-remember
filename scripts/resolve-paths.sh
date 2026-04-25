@@ -50,7 +50,7 @@ else
     # Try to log if we can find a log directory
     _log_dir="${CLAUDE_PROJECT_DIR:-.}/.remember/logs"
     if [ -d "$_log_dir" ]; then
-        echo "$(date '+%H:%M:%S') [resolve] $_msg" >> "$_log_dir/memory-$(date +%Y-%m-%d).log" 2>/dev/null
+        echo "$(date '+%H:%M:%S') [resolve] $_msg" >> "$_log_dir/memory-$(date '+%Y-%m-%d').log" 2>/dev/null
     fi
     exit 1
 fi
@@ -71,7 +71,7 @@ else
     echo "$_msg" >&2
     _log_dir="${PROJECT_DIR:-.}/.remember/logs"
     if [ -d "$_log_dir" ]; then
-        echo "$(date '+%H:%M:%S') [resolve] $_msg" >> "$_log_dir/memory-$(date +%Y-%m-%d).log" 2>/dev/null
+        echo "$(date '+%H:%M:%S') [resolve] $_msg" >> "$_log_dir/memory-$(date '+%Y-%m-%d').log" 2>/dev/null
     fi
     exit 1
 fi

@@ -3,12 +3,17 @@
 import os
 import sys
 import tempfile
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.dirname(__file__))
 
 from pipeline.log import log, log_tokens, format_duration
 from pipeline.types import TokenUsage
+
+
+from tz_helpers import frozen_datetime
 
 
 def test_log_creates_file_and_writes():
@@ -90,3 +95,65 @@ def test_log_tokens_with_zero_cost():
         content = open(os.path.join(d, files[0])).read()
         assert "[save] tokens:" in content
         assert "$0.0000" in content
+
+
+def test_log_filename_uses_remember_tz(monkeypatch):
+    """Regression: at 03:12 UTC on 04-23, with REMEMBER_TZ=America/New_York,
+    the filename must be memory-2026-04-22.log (local EDT), not 04-23 (UTC).
+
+    This is the exact bug: the plugin was stamping filenames with UTC,
+    producing next-day filenames after 20:00 local on EDT.
+    """
+    monkeypatch.setenv("REMEMBER_TZ", "America/New_York")
+    moment = datetime(2026, 4, 23, 3, 12, 0, tzinfo=timezone.utc)
+    with tempfile.TemporaryDirectory() as d:
+        with patch("pipeline._tz.datetime", frozen_datetime(moment)):
+            log("test", "boundary check", d)
+        files = os.listdir(d)
+    assert files == ["memory-2026-04-22.log"], (
+        f"Expected memory-2026-04-22.log (EDT), got {files}"
+    )
+
+
+def test_log_timestamp_uses_remember_tz(monkeypatch):
+    """Timestamp inside the log line must be in REMEMBER_TZ, not UTC."""
+    monkeypatch.setenv("REMEMBER_TZ", "America/New_York")
+    moment = datetime(2026, 4, 23, 3, 12, 45, tzinfo=timezone.utc)
+    with tempfile.TemporaryDirectory() as d:
+        with patch("pipeline._tz.datetime", frozen_datetime(moment)):
+            log("test", "stamp check", d)
+        content = open(os.path.join(d, os.listdir(d)[0])).read()
+    assert content.startswith("23:12:45 [test]"), f"unexpected content: {content!r}"
+
+
+def test_log_tokens_filename_uses_remember_tz(monkeypatch):
+    """log_tokens() writes to the same TZ-aware filename as log().
+
+    Both go through _log_path() → today_str(), but log_tokens() is a
+    separate code path worth proving independently — a 20k-download
+    plugin can't assume code paths share behavior without testing both.
+    """
+    monkeypatch.setenv("REMEMBER_TZ", "America/New_York")
+    moment = datetime(2026, 4, 23, 3, 12, 0, tzinfo=timezone.utc)
+    usage = TokenUsage(input=100, output=50, cache=0)
+    with tempfile.TemporaryDirectory() as d:
+        with patch("pipeline._tz.datetime", frozen_datetime(moment)):
+            log_tokens("save", usage, d)
+        files = os.listdir(d)
+    assert files == ["memory-2026-04-22.log"], (
+        f"log_tokens should use EDT date, got {files}"
+    )
+
+
+def test_log_tokens_timestamp_uses_remember_tz(monkeypatch):
+    """Timestamp inside the log_tokens line must be in REMEMBER_TZ."""
+    monkeypatch.setenv("REMEMBER_TZ", "America/New_York")
+    moment = datetime(2026, 4, 23, 3, 12, 45, tzinfo=timezone.utc)
+    usage = TokenUsage(input=100, output=50, cache=0)
+    with tempfile.TemporaryDirectory() as d:
+        with patch("pipeline._tz.datetime", frozen_datetime(moment)):
+            log_tokens("save", usage, d)
+        content = open(os.path.join(d, os.listdir(d)[0])).read()
+    assert content.startswith("23:12:45 [save] tokens:"), (
+        f"unexpected content: {content!r}"
+    )
