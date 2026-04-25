@@ -25,13 +25,21 @@
 # ============================================================================
 
 # --- Detect Python ---
-# Try python3 first (macOS/Linux default), fall back to python (Windows)
-if command -v python3 >/dev/null 2>&1; then
-    PYTHON="python3"
-elif command -v python >/dev/null 2>&1; then
-    PYTHON="python"
-else
-    echo "FATAL: Neither python3 nor python found in PATH" >&2
+# Try python3 first (macOS/Linux default), fall back to python, then the
+# Windows `py` launcher. On Windows, `python3` and `python` may resolve to
+# the Microsoft Store placeholder (a stub that only opens the Store when
+# Python is not installed via Store). A `command -v` check alone is not
+# enough — validate with `-V` to confirm the binary actually runs.
+PYTHON=""
+for _candidate in "python3" "python" "py -3" "py"; do
+    _first="${_candidate%% *}"
+    if command -v "$_first" >/dev/null 2>&1 && $_candidate -V >/dev/null 2>&1; then
+        PYTHON="$_candidate"
+        break
+    fi
+done
+if [ -z "$PYTHON" ]; then
+    echo "FATAL: No working Python found. Tried: python3, python, py -3, py. Windows users: install Python from python.org (not Microsoft Store) and ensure 'python' or 'py' works from the shell Claude Code launches hooks in." >&2
     exit 1
 fi
 export PYTHON
@@ -84,8 +92,24 @@ safe_eval() {
 }
 
 # --- CRLF-safe session dir slug ---
-# Replaces all non-alphanumeric chars with dashes (matches bash sed pattern).
-# Works for both Unix (/home/user/project) and Windows (D:\Users\project) paths.
+# Replaces all non-alphanumeric chars with dashes. Must match Claude Code's
+# own slug pattern for its ~/.claude/projects/<slug>/ session directories.
+#
+# Unix: Claude Code slugs the native path directly (e.g., /home/u/p → -home-u-p).
+#
+# Windows: Claude Code slugs the native Windows path with the drive letter
+# lowercased (e.g., D:\Users\p → d--Users-p). Hook scripts on Git Bash / MSYS
+# receive the path in Unix form (/d/Users/p), which would slug differently
+# (-d-Users-p). Convert back to the Windows form via cygpath before slugging
+# so we match the actual directory Claude Code created.
 session_dir_slug() {
-    echo "$1" | sed 's/[^a-zA-Z0-9]/-/g'
+    local path="$1"
+    if command -v cygpath >/dev/null 2>&1; then
+        local winpath
+        winpath=$(cygpath -w "$path" 2>/dev/null) || winpath="$path"
+        # Lowercase the drive letter (first character) to match Claude Code.
+        path="${winpath:0:1}"
+        path="${path,,}${winpath:1}"
+    fi
+    echo "$path" | sed 's/[^a-zA-Z0-9]/-/g'
 }

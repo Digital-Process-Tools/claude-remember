@@ -38,7 +38,7 @@ log "hook" "post-tool: PROJECT_DIR=$PROJECT_DIR PIPELINE_DIR=$PIPELINE_DIR PYTHO
 SAVE_SCRIPT="$PLUGIN_ROOT/scripts/save-session.sh"
 LAST_SAVE_FILE="$PROJECT/.remember/tmp/last-save.json"
 PID_FILE="$PROJECT/.remember/tmp/save-session.pid"
-SESSION_DIR="$HOME/.claude/projects/$(echo "$PROJECT" | sed 's/[^a-zA-Z0-9]/-/g')"
+SESSION_DIR="$HOME/.claude/projects/$(session_dir_slug "$PROJECT")"
 
 [ -f "$SAVE_SCRIPT" ] || exit 0
 
