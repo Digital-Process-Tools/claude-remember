@@ -2086,3 +2086,128 @@ class TestHaikuHeaderGuard:
                     "Placeholder guard uses 'head -1' — only checks first line. "
                     "Should grep the entire prompt file."
                 )
+
+
+class TestTimeFormatConfig:
+    """PR #25: configurable 12h/24h time format for save-session output.
+
+    Users in 12h-format locales (US, Philippines, etc.) can set
+    time_format: "12h" in config.json to get "2:32 PM" instead of "14:32".
+    """
+
+    def test_config_example_has_time_format(self):
+        """config.example.json must document the time_format option."""
+        config_path = os.path.join(
+            os.path.dirname(__file__), "..", "config.example.json"
+        )
+        with open(config_path) as f:
+            config = json.load(f)
+        assert "time_format" in config, (
+            "config.example.json should include time_format key"
+        )
+        assert config["time_format"] == "24h", (
+            f"Default time_format should be '24h', got '{config['time_format']}'"
+        )
+
+    def test_save_session_reads_time_format_config(self):
+        """save-session.sh must read time_format from config."""
+        script_path = os.path.join(
+            os.path.dirname(__file__), "..", "scripts", "save-session.sh"
+        )
+        with open(script_path) as f:
+            content = f.read()
+        assert "time_format" in content, (
+            "save-session.sh should read time_format config"
+        )
+        assert "12h" in content, (
+            "save-session.sh should handle 12h format"
+        )
+
+    def test_24h_format_produces_hhmm(self):
+        """24h format should produce HH:MM (e.g., 14:32)."""
+        import platform
+        result = subprocess.run(
+            ["bash", "-c", 'TZ=UTC date "+%H:%M"'],
+            capture_output=True, text=True,
+        )
+        time_str = result.stdout.strip()
+        import re
+        assert re.match(r'^\d{2}:\d{2}$', time_str), (
+            f"24h format should be HH:MM, got '{time_str}'"
+        )
+
+    def test_12h_format_produces_ampm(self):
+        """12h format should produce h:MM AM/PM (e.g., 2:32 PM)."""
+        result = subprocess.run(
+            ["bash", "-c", 'TZ=UTC date "+%-I:%M %p"'],
+            capture_output=True, text=True,
+        )
+        time_str = result.stdout.strip()
+        import re
+        assert re.match(r'^\d{1,2}:\d{2} (AM|PM)$', time_str), (
+            f"12h format should be h:MM AM/PM, got '{time_str}'"
+        )
+
+    def test_header_regex_accepts_24h(self):
+        """Header validation regex must accept 24h format: ## 14:32 |"""
+        result = subprocess.run(
+            ["bash", "-c",
+             """echo '## 14:32 | main' | grep -qE '^## ([0-9]{2}:[0-9]{2}|[0-9]{1,2}:[0-9]{2} (AM|PM)) \\|'"""],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0, "Regex should match 24h header '## 14:32 |'"
+
+    def test_header_regex_accepts_12h_pm(self):
+        """Header validation regex must accept 12h PM: ## 2:32 PM |"""
+        result = subprocess.run(
+            ["bash", "-c",
+             """echo '## 2:32 PM | main' | grep -qE '^## ([0-9]{2}:[0-9]{2}|[0-9]{1,2}:[0-9]{2} (AM|PM)) \\|'"""],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0, "Regex should match 12h header '## 2:32 PM |'"
+
+    def test_header_regex_accepts_12h_am(self):
+        """Header validation regex must accept 12h AM: ## 9:05 AM |"""
+        result = subprocess.run(
+            ["bash", "-c",
+             """echo '## 9:05 AM | main' | grep -qE '^## ([0-9]{2}:[0-9]{2}|[0-9]{1,2}:[0-9]{2} (AM|PM)) \\|'"""],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0, "Regex should match 12h header '## 9:05 AM |'"
+
+    def test_header_regex_accepts_12h_double_digit(self):
+        """Header validation regex must accept 12h with two-digit hour: ## 12:00 PM |"""
+        result = subprocess.run(
+            ["bash", "-c",
+             """echo '## 12:00 PM | main' | grep -qE '^## ([0-9]{2}:[0-9]{2}|[0-9]{1,2}:[0-9]{2} (AM|PM)) \\|'"""],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0, "Regex should match 12h header '## 12:00 PM |'"
+
+    def test_header_regex_rejects_garbage(self):
+        """Header validation regex must reject malformed headers."""
+        for bad_header in [
+            "## unknown | main",
+            "## 2:32PM | main",  # missing space before AM/PM
+            "not a header",
+        ]:
+            result = subprocess.run(
+                ["bash", "-c",
+                 f"""echo '{bad_header}' | grep -qE '^## ([0-9]{{2}}:[0-9]{{2}}|[0-9]{{1,2}}:[0-9]{{2}} (AM|PM)) \\|'"""],
+                capture_output=True, text=True,
+            )
+            assert result.returncode != 0, (
+                f"Regex should reject '{bad_header}'"
+            )
+
+    def test_default_24h_when_no_config(self):
+        """When time_format is not in config.json, default to 24h."""
+        script_path = os.path.join(
+            os.path.dirname(__file__), "..", "scripts", "save-session.sh"
+        )
+        with open(script_path) as f:
+            content = f.read()
+        # Should use config() with "24h" as default
+        assert '"24h"' in content, (
+            "save-session.sh should default to '24h' when config key is absent"
+        )
