@@ -50,6 +50,16 @@ Look at the `version` field in `.claude-plugin/plugin.json`. The plugin location
 
 ### Changelog
 
+**v0.6.0** — Timezone fix, cross-platform, community contribution
+- **Fix: log filename date used UTC instead of configured timezone** ([#26](https://github.com/Digital-Process-Tools/claude-remember/pull/26)) — `MEMORY_LOG_DATE` was computed before `REMEMBER_TZ` was defined; `TZ=""` silently falls back to UTC on macOS/BSD. Community contribution by [@josemoreno801-netizen](https://github.com/josemoreno801-netizen)
+- **New: `pipeline/_tz.py`** — shared timezone-aware date helpers for Python, reading `REMEMBER_TZ` with fallback to system local (never UTC)
+- **New: `time_format` config option** — `24h` (default) or `12h` for AM/PM timestamps in log files
+- **Fix: marketplace path resolution in `log.sh`** — `PIPELINE_DIR` now used for `config.json` and `hooks.d` paths
+- **Fix: BSD `mktemp` compatibility** — no file extensions after `XXXXXX` template
+- **Fix: Windows/Git Bash portability** — centralized `SYS_TMPDIR`, `py` launcher fallback, session-dir slug matching
+- **Fix: Haiku header guard** — prevents invented `unknown` headers in summarization output
+- 256 tests (up from 224), 99% coverage, `_tz.py` at 100%
+
 **v0.5.0** — Bug fixes, Python 3.9 support, DPT marketplace
 - **DPT marketplace** — install from our own marketplace for reliable updates (`/plugin marketplace add Digital-Process-Tools/claude-marketplace`)
 - **Python 3.9 support** — `from __future__ import annotations` in all pipeline modules (macOS ships 3.9 via CommandLineTools)
