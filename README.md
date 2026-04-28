@@ -50,6 +50,13 @@ Look at the `version` field in `.claude-plugin/plugin.json`. The plugin location
 
 ### Changelog
 
+**v0.7.0** — Unified config reader, marketplace path fix
+- **Fix: unified config reader across all scripts** ([#38](https://github.com/Digital-Process-Tools/claude-remember/pull/38)) — all scripts now use `config()` from `log.sh` instead of separate readers; `PIPELINE_DIR` set with fallback for both marketplace and local installs. Issue reported by [@josemoreno801-netizen](https://github.com/josemoreno801-netizen)
+- **Fix: `user-prompt-hook.sh` sources `resolve-paths.sh`** — was the root cause of marketplace config path failures
+- **Fix: removed redundant `REMEMBER_TZ` re-reads** — timezone is now set once in `log.sh`, inherited by all scripts
+- **Fix: removed duplicate `cfg()` from `session-start-hook.sh`** — uses shared `config()` instead
+- 323 tests (up from 256), 99% coverage
+
 **v0.6.0** — Timezone fix, cross-platform, community contribution
 - **Fix: log filename date used UTC instead of configured timezone** ([#26](https://github.com/Digital-Process-Tools/claude-remember/pull/26)) — `MEMORY_LOG_DATE` was computed before `REMEMBER_TZ` was defined; `TZ=""` silently falls back to UTC on macOS/BSD. Community contribution by [@josemoreno801-netizen](https://github.com/josemoreno801-netizen)
 - **New: `pipeline/_tz.py`** — shared timezone-aware date helpers for Python, reading `REMEMBER_TZ` with fallback to system local (never UTC)
