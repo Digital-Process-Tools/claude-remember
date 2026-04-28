@@ -43,7 +43,19 @@ fi
 # Read .timezone from config.json BEFORE computing MEMORY_LOG_DATE — otherwise
 # TZ="" falls back to UTC on macOS/BSD and produces next-day filenames after
 # ~20:00 local in zones west of UTC.
-REMEMBER_CONFIG="${PIPELINE_DIR:-${PROJECT_DIR:-.}/.claude/remember}/config.json"
+#
+# Path resolution covers three install layouts:
+#   1. Marketplace cache: $PIPELINE_DIR/.claude/remember/config.json
+#      (~/.claude/plugins/cache/<mkt>/remember/<ver>/.claude/remember/...)
+#   2. Legacy/flat:       $PIPELINE_DIR/config.json
+#   3. Local install:     $PROJECT_DIR/.claude/remember/config.json
+if [ -n "$PIPELINE_DIR" ] && [ -f "$PIPELINE_DIR/.claude/remember/config.json" ]; then
+    REMEMBER_CONFIG="$PIPELINE_DIR/.claude/remember/config.json"
+elif [ -n "$PIPELINE_DIR" ] && [ -f "$PIPELINE_DIR/config.json" ]; then
+    REMEMBER_CONFIG="$PIPELINE_DIR/config.json"
+else
+    REMEMBER_CONFIG="${PROJECT_DIR:-.}/.claude/remember/config.json"
+fi
 config() {
     local key="$1"
     local default="$2"

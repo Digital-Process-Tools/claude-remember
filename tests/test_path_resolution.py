@@ -2212,6 +2212,27 @@ class TestTimeFormatConfig:
             "save-session.sh should default to '24h' when config key is absent"
         )
 
+    def test_no_hardcoded_city_timezone_default(self):
+        """save-session.sh must not fall back to a hardcoded city when config is missing.
+
+        Earlier versions defaulted REMEMBER_TZ to "Europe/Paris" — when a marketplace
+        install couldn't find config.json (resolved to wrong path), every timestamp
+        silently shifted to Paris time. The correct fallback is empty-string, which
+        log.sh's _remember_date helper translates to "system local" via a bare ``date``
+        invocation (no ``TZ=...`` prefix).
+        """
+        script_path = os.path.join(
+            os.path.dirname(__file__), "..", "scripts", "save-session.sh"
+        )
+        with open(script_path) as f:
+            content = f.read()
+        for forbidden in ("Europe/Paris", "America/New_York", "America/Los_Angeles", "UTC"):
+            assert f'config ".timezone" "{forbidden}"' not in content, (
+                f"save-session.sh hardcodes {forbidden} as the .timezone fallback. "
+                "Use \"\" so missing config falls through to system local instead "
+                "of silently shifting every timestamp to that city."
+            )
+
 
 class TestMarketplacePathResolution:
     """Issue #19: log.sh hardcodes paths relative to PROJECT_DIR/.claude/remember/.
@@ -2229,15 +2250,23 @@ class TestMarketplacePathResolution:
         with open(log_path) as f:
             content = f.read()
 
-        for line in content.split("\n"):
-            if line.startswith("REMEMBER_CONFIG="):
-                assert "PIPELINE_DIR" in line or "PLUGIN_ROOT" in line, (
-                    f"REMEMBER_CONFIG should use PIPELINE_DIR for marketplace "
-                    f"compat, not hardcoded .claude/remember/. Line: {line}"
-                )
-                break
-        else:
-            assert False, "REMEMBER_CONFIG not found in log.sh"
+        # Collect every line that assigns REMEMBER_CONFIG (may be inside an
+        # if/elif block, so allow leading whitespace — the original single-line
+        # version was at column 0 but the marketplace-aware version branches).
+        assignment_lines = [
+            line for line in content.split("\n")
+            if line.lstrip().startswith("REMEMBER_CONFIG=")
+        ]
+        assert assignment_lines, "REMEMBER_CONFIG not found in log.sh"
+        # At least one assignment must reference PIPELINE_DIR (or PLUGIN_ROOT)
+        # so marketplace installs find their config.
+        assert any(
+            "PIPELINE_DIR" in line or "PLUGIN_ROOT" in line
+            for line in assignment_lines
+        ), (
+            "REMEMBER_CONFIG should use PIPELINE_DIR for marketplace "
+            f"compat. Lines: {assignment_lines}"
+        )
 
     def test_log_sh_hooks_dir_uses_pipeline_dir(self):
         """log.sh REMEMBER_HOOKS_DIR must use PIPELINE_DIR, not PROJECT_DIR."""

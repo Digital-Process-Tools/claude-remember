@@ -236,6 +236,49 @@ def test_log_sh_timestamp_inside_file_uses_configured_tz(tmp_path):
     )
 
 
+def test_log_sh_marketplace_layout_finds_config_under_dot_claude_remember(tmp_path):
+    """Regression: marketplace installs put config at PIPELINE_DIR/.claude/remember/config.json.
+
+    When PIPELINE_DIR is set (the marketplace case), log.sh must look for
+    config.json at ``$PIPELINE_DIR/.claude/remember/config.json``, not at
+    ``$PIPELINE_DIR/config.json`` directly. The marketplace cache layout
+    (``~/.claude/plugins/cache/<mkt>/remember/<ver>/``) places the config
+    inside a ``.claude/remember/`` subdirectory next to the plugin code.
+
+    Failure mode before the fix: REMEMBER_TZ resolves to "" (config not
+    found) → log lines and date computations fall through to system local
+    (or a hard-coded fallback in save-session.sh of "Europe/Paris").
+    """
+    plugin = tmp_path / "plugin"
+    (plugin / ".claude" / "remember").mkdir(parents=True)
+    (plugin / ".claude" / "remember" / "config.json").write_text(
+        '{"timezone": "America/Los_Angeles"}'
+    )
+    project = tmp_path / "proj"
+    (project / ".remember" / "logs").mkdir(parents=True)
+    script = f"""
+    set -e
+    export PROJECT_DIR={project}
+    export PIPELINE_DIR={plugin}
+    source {LOG_SH}
+    echo "REMEMBER_TZ=$REMEMBER_TZ"
+    """
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env={**os.environ, "TZ": "UTC"},
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, f"log.sh failed: {result.stderr}"
+    parsed = dict(
+        line.split("=", 1) for line in result.stdout.strip().splitlines() if "=" in line
+    )
+    assert parsed.get("REMEMBER_TZ") == "America/Los_Angeles", (
+        f"log.sh did not find config.json under PIPELINE_DIR/.claude/remember/. "
+        f"Got REMEMBER_TZ={parsed.get('REMEMBER_TZ')!r}. "
+        "This means marketplace installs silently lose their timezone (and time_format) settings."
+    )
+
+
 def test_config_example_json_is_valid():
     """config.example.json must be parseable JSON.
 
