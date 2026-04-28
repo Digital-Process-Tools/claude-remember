@@ -28,11 +28,9 @@
 # ============================================================================
 
 # --- Resolve paths ---
-PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${CLAUDE_PROJECT_DIR:-.}/.claude/remember}"
-PROJECT="${CLAUDE_PROJECT_DIR:-.}"
-PROJECT_DIR="$PROJECT"
-source "$PLUGIN_ROOT/scripts/bootstrap-dirs.sh" 2>/dev/null
-source "$PLUGIN_ROOT/scripts/log.sh" 2>/dev/null
+source "$(dirname "$0")/resolve-paths.sh"
+source "$(dirname "$0")/bootstrap-dirs.sh"
+source "$(dirname "$0")/log.sh" 2>/dev/null
 
 # --- Timestamp + context injection ---
 CTX_PCT=""

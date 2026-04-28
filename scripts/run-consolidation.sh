@@ -41,8 +41,6 @@ source "$(dirname "$0")/log.sh"
 log "hook" "run-consolidation: PROJECT_DIR=$PROJECT_DIR PIPELINE_DIR=$PIPELINE_DIR PYTHON=$PYTHON"
 rotate_logs
 
-REMEMBER_TZ=$(config ".timezone" "Europe/Paris")
-
 # --- Lock (atomic via noclobber) ---
 LOCK_FILE="${PROJECT_DIR}/.remember/tmp/consolidation.lock"
 if ! ( set -o noclobber; echo $$ > "$LOCK_FILE" ) 2>/dev/null; then

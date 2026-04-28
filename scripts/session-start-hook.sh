@@ -42,11 +42,7 @@ source "$(dirname "$0")/bootstrap-dirs.sh"
 source "$(dirname "$0")/detect-tools.sh"
 PLUGIN_ROOT="$PIPELINE_DIR"
 PROJECT="$PROJECT_DIR"
-CONFIG="$PLUGIN_ROOT/config.json"
-# Read a config value from config.json. Falls back to $2 if missing.
-cfg() { $JQ -r "$1 // empty" "$CONFIG" 2>/dev/null || echo "$2"; }
 source "$PLUGIN_ROOT/scripts/log.sh" 2>/dev/null
-REMEMBER_TZ=$(cfg ".timezone" "Europe/Paris")
 TODAY=$(TZ="$REMEMBER_TZ" date '+%Y-%m-%d')
 log "hook" "session-start: PROJECT_DIR=$PROJECT_DIR PIPELINE_DIR=$PIPELINE_DIR"
 
@@ -57,7 +53,7 @@ dispatch "before_session_start"
 rm -f "$PROJECT/.remember/tmp/save-session.pid"
 
 # ── Recovery: save the most recent missed session ──────────────────────────
-if [ "$(cfg '.features.recovery' true)" = "true" ]; then
+if [ "$(config '.features.recovery' true)" = "true" ]; then
 PROJECT_PATH_SLUG="$(session_dir_slug "$PROJECT")"
 SESSIONS_DIR="$HOME/.claude/projects/${PROJECT_PATH_SLUG}"
 LAST_SAVE_FILE="$PROJECT/.remember/tmp/last-save.json"

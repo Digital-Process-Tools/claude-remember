@@ -59,8 +59,6 @@ source "$(dirname "$0")/detect-tools.sh"
 source "$(dirname "$0")/log.sh"
 log "hook" "save-session: PROJECT_DIR=$PROJECT_DIR PIPELINE_DIR=$PIPELINE_DIR PYTHON=$PYTHON"
 
-REMEMBER_TZ=$(config ".timezone" "Europe/Paris")
-
 REMEMBER_DATA="${PROJECT_DIR}/.remember"
 LOCK_FILE="${REMEMBER_DATA}/tmp/save.lock"
 MEMORY_FILE="${REMEMBER_DATA}/now.md"

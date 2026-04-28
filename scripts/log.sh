@@ -130,6 +130,40 @@ safe_eval() {
         fi
     done
 }
+
+# Read a configuration value from config.json using jq.
+#
+# Falls back to the provided default if config.json is missing,
+# jq is not installed, or the key doesn't exist.
+#
+# Args:
+#   $1 — jq key path (e.g., ".cooldowns.save_seconds")
+#   $2 — default value if key is absent or jq unavailable
+#
+# Output:
+#   Prints the resolved value to stdout.
+#
+# Usage:
+#   SAVE_COOLDOWN=$(config ".cooldowns.save_seconds" 120)
+
+# Ensure PIPELINE_DIR is set. Should be set by resolve-paths.sh before
+# sourcing this file. Falls back to local-install convention if unset.
+PIPELINE_DIR="${PIPELINE_DIR:-${PROJECT_DIR:-.}/.claude/remember}"
+
+REMEMBER_CONFIG="$PIPELINE_DIR/config.json"
+config() {
+    local key="$1"
+    local default="$2"
+    if [ -f "$REMEMBER_CONFIG" ] && command -v jq >/dev/null 2>&1; then
+        local val
+        val=$(jq -r "$key // empty" "$REMEMBER_CONFIG" 2>/dev/null)
+        [ -n "$val" ] && echo "$val" || echo "$default"
+    else
+        echo "$default"
+    fi
+}
+
+REMEMBER_TZ=$(config ".timezone" "")
 # Dispatch a lifecycle event to all registered hooks.
 #
 # Runs every executable in hooks.d/<event>/, passing the project path
@@ -141,7 +175,7 @@ safe_eval() {
 #
 # Usage:
 #   dispatch "after_save"
-REMEMBER_HOOKS_DIR="${PIPELINE_DIR:-${PROJECT_DIR:-.}/.claude/remember}/hooks.d"
+REMEMBER_HOOKS_DIR="$PIPELINE_DIR/hooks.d"
 dispatch() {
     local event="$1"
     local event_dir="$REMEMBER_HOOKS_DIR/$event"
