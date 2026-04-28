@@ -64,7 +64,7 @@ if [ -d "$SESSIONS_DIR" ] && [ -f "$LAST_SAVE_FILE" ]; then
     if [ -n "$LAST_JSONL" ]; then
         LAST_ID=$(basename "$LAST_JSONL" .jsonl)
         if [ "$LAST_ID" != "$SAVED_ID" ]; then
-            "$PLUGIN_ROOT/scripts/save-session.sh" "$LAST_ID" --force 2>/dev/null &
+            "$PLUGIN_ROOT/scripts/save-session.sh" "$LAST_ID" --force </dev/null >/dev/null 2>&1 & disown 2>/dev/null || true
         fi
     fi
 fi
@@ -113,7 +113,7 @@ STAGING_COUNT=$(ls "$PROJECT/.remember/today-"*.md 2>/dev/null | grep -v "today-
 if [ "$STAGING_COUNT" -gt 0 ]; then
     echo "=== MEMORY CONSOLIDATION ==="
     echo "$STAGING_COUNT day(s) of memory to compress. Running consolidation in background..."
-    nohup "$PLUGIN_ROOT/scripts/run-consolidation.sh" > /dev/null 2>&1 &
+    nohup "$PLUGIN_ROOT/scripts/run-consolidation.sh" </dev/null >/dev/null 2>&1 & disown 2>/dev/null || true
     echo ""
 fi
 
