@@ -78,7 +78,7 @@ DELTA=$((CURRENT_LINES - LAST_LINE))
 SAVE_TRIGGERED=""
 
 # --- Fire save if delta exceeds threshold and no save already running ---
-DELTA_THRESHOLD=$($JQ -r '.thresholds.delta_lines_trigger // 50' "$PLUGIN_ROOT/config.json" 2>/dev/null || echo 50)
+DELTA_THRESHOLD=$(config ".thresholds.delta_lines_trigger" 50)
 if [ "$DELTA" -gt "$DELTA_THRESHOLD" ]; then
     ALREADY_RUNNING=false
     if [ -f "$PID_FILE" ]; then

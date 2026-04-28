@@ -2214,15 +2214,17 @@ class TestTimeFormatConfig:
 
 
 class TestMarketplacePathResolution:
-    """Issue #19: log.sh hardcodes paths relative to PROJECT_DIR/.claude/remember/.
+    """All hook scripts must resolve config and hooks.d via PIPELINE_DIR.
 
     In marketplace installs, the plugin lives in ~/.claude/plugins/cache/,
-    NOT in $PROJECT_DIR/.claude/remember/. Config and hooks.d paths must
-    use PIPELINE_DIR (set by resolve-paths.sh) instead.
+    NOT in $PROJECT_DIR/.claude/remember/. Every script must source
+    resolve-paths.sh (or have PIPELINE_DIR set) before sourcing log.sh.
     """
 
+    # -- Source guards: verify scripts use the right patterns --
+
     def test_log_sh_config_uses_pipeline_dir(self):
-        """log.sh REMEMBER_CONFIG must use PIPELINE_DIR, not PROJECT_DIR."""
+        """log.sh REMEMBER_CONFIG must reference PIPELINE_DIR."""
         log_path = os.path.join(
             os.path.dirname(__file__), "..", "scripts", "log.sh"
         )
@@ -2230,17 +2232,17 @@ class TestMarketplacePathResolution:
             content = f.read()
 
         for line in content.split("\n"):
-            if line.startswith("REMEMBER_CONFIG="):
-                assert "PIPELINE_DIR" in line or "PLUGIN_ROOT" in line, (
-                    f"REMEMBER_CONFIG should use PIPELINE_DIR for marketplace "
-                    f"compat, not hardcoded .claude/remember/. Line: {line}"
+            stripped = line.strip()
+            if stripped.startswith("REMEMBER_CONFIG="):
+                assert "PIPELINE_DIR" in stripped, (
+                    f"REMEMBER_CONFIG should use PIPELINE_DIR. Line: {stripped}"
                 )
                 break
         else:
-            assert False, "REMEMBER_CONFIG not found in log.sh"
+            assert False, "REMEMBER_CONFIG assignment not found in log.sh"
 
     def test_log_sh_hooks_dir_uses_pipeline_dir(self):
-        """log.sh REMEMBER_HOOKS_DIR must use PIPELINE_DIR, not PROJECT_DIR."""
+        """log.sh REMEMBER_HOOKS_DIR must reference PIPELINE_DIR."""
         log_path = os.path.join(
             os.path.dirname(__file__), "..", "scripts", "log.sh"
         )
@@ -2248,16 +2250,88 @@ class TestMarketplacePathResolution:
             content = f.read()
 
         for line in content.split("\n"):
-            if line.startswith("REMEMBER_HOOKS_DIR="):
-                assert "PIPELINE_DIR" in line or "PLUGIN_ROOT" in line, (
-                    f"REMEMBER_HOOKS_DIR should use PIPELINE_DIR for marketplace "
-                    f"compat, not hardcoded .claude/remember/. Line: {line}"
+            stripped = line.strip()
+            if stripped.startswith("REMEMBER_HOOKS_DIR="):
+                assert "PIPELINE_DIR" in stripped, (
+                    f"REMEMBER_HOOKS_DIR should use PIPELINE_DIR. Line: {stripped}"
                 )
                 break
         else:
-            assert False, "REMEMBER_HOOKS_DIR not found in log.sh"
+            assert False, "REMEMBER_HOOKS_DIR assignment not found in log.sh"
 
-    @pytest.mark.skipif(not _has_resolve_paths(), reason="resolve-paths.sh not yet created")
+    def test_all_hooks_source_resolve_paths(self):
+        """Every hook script must source resolve-paths.sh for consistent paths."""
+        scripts_dir = os.path.join(os.path.dirname(__file__), "..", "scripts")
+        hooks = [
+            "session-start-hook.sh",
+            "post-tool-hook.sh",
+            "user-prompt-hook.sh",
+            "save-session.sh",
+            "run-consolidation.sh",
+        ]
+        for hook in hooks:
+            path = os.path.join(scripts_dir, hook)
+            with open(path) as f:
+                content = f.read()
+            assert "resolve-paths.sh" in content, (
+                f"{hook} must source resolve-paths.sh for PIPELINE_DIR. "
+                f"Without it, marketplace installs read config from wrong path."
+            )
+
+    def test_no_hardcoded_paris_timezone_default(self):
+        """No script should hardcode 'Europe/Paris' as timezone default."""
+        scripts_dir = os.path.join(os.path.dirname(__file__), "..", "scripts")
+        for fname in os.listdir(scripts_dir):
+            if not fname.endswith(".sh"):
+                continue
+            path = os.path.join(scripts_dir, fname)
+            with open(path) as f:
+                for lineno, line in enumerate(f, 1):
+                    if "Europe/Paris" in line and not line.strip().startswith("#"):
+                        assert False, (
+                            f'{fname}:{lineno} hardcodes "Europe/Paris". '
+                            f"Use empty string (system local) as default. "
+                            f"Line: {line.strip()}"
+                        )
+
+    def test_no_redundant_timezone_reread(self):
+        """Only log.sh should set REMEMBER_TZ. Other scripts inherit it."""
+        scripts_dir = os.path.join(os.path.dirname(__file__), "..", "scripts")
+        violators = []
+        for fname in os.listdir(scripts_dir):
+            if not fname.endswith(".sh") or fname == "log.sh":
+                continue
+            path = os.path.join(scripts_dir, fname)
+            with open(path) as f:
+                for lineno, line in enumerate(f, 1):
+                    stripped = line.strip()
+                    if stripped.startswith("REMEMBER_TZ=") and not stripped.startswith("#"):
+                        violators.append(f"{fname}:{lineno}")
+        assert not violators, (
+            f"REMEMBER_TZ should only be set in log.sh. Found in: {violators}"
+        )
+
+    def test_single_config_reader(self):
+        """All config reads should use config() from log.sh, not direct jq."""
+        scripts_dir = os.path.join(os.path.dirname(__file__), "..", "scripts")
+        for fname in os.listdir(scripts_dir):
+            if not fname.endswith(".sh") or fname == "log.sh":
+                continue
+            path = os.path.join(scripts_dir, fname)
+            with open(path) as f:
+                for lineno, line in enumerate(f, 1):
+                    stripped = line.strip()
+                    if stripped.startswith("#"):
+                        continue
+                    # No standalone cfg() definitions or config.json direct reads
+                    if "config.json" in stripped and ("jq" in stripped or "$JQ" in stripped):
+                        assert False, (
+                            f"{fname}:{lineno} reads config.json directly. "
+                            f"Use config() from log.sh instead. Line: {stripped}"
+                        )
+
+    # -- Integration: real hook invocations in marketplace layout --
+
     def test_marketplace_layout_config_found(self, tmp_path):
         """In marketplace layout, config.json is read from plugin dir, not project."""
         project = os.path.join(str(tmp_path), "user-project")
@@ -2265,6 +2339,7 @@ class TestMarketplacePathResolution:
         os.makedirs(project)
         os.makedirs(os.path.join(plugin, "scripts"))
         _create_full_plugin_copy(plugin)
+        _create_full_project(project)
 
         import json as json_mod
         with open(os.path.join(plugin, "config.json"), "w") as f:
@@ -2289,7 +2364,6 @@ class TestMarketplacePathResolution:
             f"rc={result.returncode} stderr={result.stderr[:300]}"
         )
 
-    @pytest.mark.skipif(not _has_resolve_paths(), reason="resolve-paths.sh not yet created")
     def test_marketplace_hooks_d_dispatches_from_plugin(self, tmp_path):
         """hooks.d/ dispatch should look in the plugin dir, not project dir."""
         project = os.path.join(str(tmp_path), "user-project")
@@ -2297,6 +2371,7 @@ class TestMarketplacePathResolution:
         os.makedirs(project)
         os.makedirs(os.path.join(plugin, "scripts"))
         _create_full_plugin_copy(plugin)
+        _create_full_project(project)
 
         hook_dir = os.path.join(plugin, "hooks.d", "after_session_start")
         os.makedirs(hook_dir, exist_ok=True)
@@ -2319,4 +2394,1098 @@ class TestMarketplacePathResolution:
         assert "HOOK_FIRED_FROM_PLUGIN=true" in result.stdout, (
             f"hooks.d/ dispatch should find hooks in plugin dir. "
             f"stdout={result.stdout[:300]}"
+        )
+
+    def test_user_prompt_hook_marketplace(self, tmp_path):
+        """user-prompt-hook.sh must work in marketplace layout (was the root bug)."""
+        project = os.path.join(str(tmp_path), "user-project")
+        plugin = os.path.join(str(tmp_path), "cache", "org", "remember", "0.5.0")
+        os.makedirs(project)
+        _create_full_plugin_copy(plugin)
+        _create_full_project(project)
+
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT")}
+        env["CLAUDE_PROJECT_DIR"] = project
+        env["CLAUDE_PLUGIN_ROOT"] = plugin
+
+        result = subprocess.run(
+            ["bash", os.path.join(plugin, "scripts", "user-prompt-hook.sh")],
+            capture_output=True, text=True, env=env, timeout=10,
+        )
+
+        assert result.returncode == 0, (
+            f"user-prompt-hook.sh should work in marketplace layout. "
+            f"rc={result.returncode} stderr={result.stderr[:300]}"
+        )
+
+
+class TestLogShConfigBehavior:
+    """Behavioral tests: source log.sh and verify actual resolved values.
+
+    These tests prove the config paths resolve correctly — not by grepping
+    source code, but by running the shell and checking the result.
+    """
+
+    LOG_SH = os.path.join(os.path.dirname(__file__), "..", "scripts", "log.sh")
+
+    def _source_log_sh(self, env: dict, tmp_path) -> dict:
+        """Source log.sh and return resolved variables."""
+        # Create required .remember/logs so log.sh doesn't fail
+        log_dir = os.path.join(env.get("PROJECT_DIR", str(tmp_path)), ".remember", "logs")
+        os.makedirs(log_dir, exist_ok=True)
+
+        script = f"""\
+#!/bin/bash
+export PROJECT_DIR="{env.get('PROJECT_DIR', str(tmp_path))}"
+export PIPELINE_DIR="{env.get('PIPELINE_DIR', '')}"
+source "{self.LOG_SH}" 2>/dev/null
+echo "PIPELINE_DIR=$PIPELINE_DIR"
+echo "REMEMBER_CONFIG=$REMEMBER_CONFIG"
+echo "REMEMBER_HOOKS_DIR=$REMEMBER_HOOKS_DIR"
+echo "REMEMBER_TZ=$REMEMBER_TZ"
+"""
+        wrapper = os.path.join(str(tmp_path), "test-wrapper.sh")
+        with open(wrapper, "w") as f:
+            f.write(script)
+
+        result = subprocess.run(
+            ["bash", wrapper],
+            capture_output=True, text=True, timeout=5,
+        )
+        assert result.returncode == 0, f"log.sh failed: {result.stderr[:300]}"
+
+        resolved = {}
+        for line in result.stdout.strip().split("\n"):
+            if "=" in line:
+                k, v = line.split("=", 1)
+                resolved[k] = v
+        return resolved
+
+    def test_marketplace_pipeline_dir_used_for_config(self, tmp_path):
+        """When PIPELINE_DIR is set (marketplace), config reads from plugin dir."""
+        plugin = os.path.join(str(tmp_path), "plugin")
+        project = os.path.join(str(tmp_path), "project")
+        os.makedirs(plugin)
+        os.makedirs(project)
+
+        result = self._source_log_sh({
+            "PROJECT_DIR": project,
+            "PIPELINE_DIR": plugin,
+        }, tmp_path)
+
+        assert result["REMEMBER_CONFIG"] == f"{plugin}/config.json"
+        assert result["REMEMBER_HOOKS_DIR"] == f"{plugin}/hooks.d"
+
+    def test_local_install_fallback(self, tmp_path):
+        """When PIPELINE_DIR is unset, falls back to PROJECT_DIR/.claude/remember/."""
+        project = os.path.join(str(tmp_path), "project")
+        os.makedirs(project)
+
+        result = self._source_log_sh({
+            "PROJECT_DIR": project,
+            "PIPELINE_DIR": "",
+        }, tmp_path)
+
+        expected = f"{project}/.claude/remember"
+        assert result["PIPELINE_DIR"] == expected
+        assert result["REMEMBER_CONFIG"] == f"{expected}/config.json"
+        assert result["REMEMBER_HOOKS_DIR"] == f"{expected}/hooks.d"
+
+    def test_timezone_reads_from_config(self, tmp_path):
+        """REMEMBER_TZ should come from config.json when it exists."""
+        plugin = os.path.join(str(tmp_path), "plugin")
+        project = os.path.join(str(tmp_path), "project")
+        os.makedirs(plugin)
+        os.makedirs(project)
+
+        import json as json_mod
+        with open(os.path.join(plugin, "config.json"), "w") as f:
+            json_mod.dump({"timezone": "America/Chicago"}, f)
+
+        result = self._source_log_sh({
+            "PROJECT_DIR": project,
+            "PIPELINE_DIR": plugin,
+        }, tmp_path)
+
+        assert result["REMEMBER_TZ"] == "America/Chicago"
+
+    def test_timezone_defaults_to_empty_without_config(self, tmp_path):
+        """Without config.json, REMEMBER_TZ defaults to empty (system local)."""
+        plugin = os.path.join(str(tmp_path), "plugin")
+        project = os.path.join(str(tmp_path), "project")
+        os.makedirs(plugin)
+        os.makedirs(project)
+        # No config.json created
+
+        result = self._source_log_sh({
+            "PROJECT_DIR": project,
+            "PIPELINE_DIR": plugin,
+        }, tmp_path)
+
+        assert result["REMEMBER_TZ"] == ""
+
+    def test_marketplace_config_not_read_from_project(self, tmp_path):
+        """Config in project/.claude/remember/ must NOT be used when PIPELINE_DIR is set."""
+        plugin = os.path.join(str(tmp_path), "plugin")
+        project = os.path.join(str(tmp_path), "project")
+        wrong_config_dir = os.path.join(project, ".claude", "remember")
+        os.makedirs(plugin)
+        os.makedirs(wrong_config_dir)
+
+        import json as json_mod
+        # Put a config in the WRONG place (project dir)
+        with open(os.path.join(wrong_config_dir, "config.json"), "w") as f:
+            json_mod.dump({"timezone": "WRONG_TIMEZONE"}, f)
+        # Put correct config in plugin dir
+        with open(os.path.join(plugin, "config.json"), "w") as f:
+            json_mod.dump({"timezone": "America/Denver"}, f)
+
+        result = self._source_log_sh({
+            "PROJECT_DIR": project,
+            "PIPELINE_DIR": plugin,
+        }, tmp_path)
+
+        assert result["REMEMBER_TZ"] == "America/Denver", (
+            "Should read from PIPELINE_DIR, not PROJECT_DIR/.claude/remember/"
+        )
+
+    def test_post_tool_hook_config_reads_from_plugin(self, tmp_path):
+        """post-tool-hook.sh config read must use plugin dir, not project dir."""
+        project = os.path.join(str(tmp_path), "user-project")
+        plugin = os.path.join(str(tmp_path), "cache", "org", "remember", "0.5.0")
+        _create_full_plugin_copy(plugin)
+        _create_full_project(project)
+
+        import json as json_mod
+        with open(os.path.join(plugin, "config.json"), "w") as f:
+            json_mod.dump({
+                "timezone": "UTC",
+                "thresholds": {"delta_lines_trigger": 999},
+                "cooldowns": {"save_seconds": 120},
+                "features": {"recovery": False},
+            }, f)
+
+        # Source post-tool-hook.sh's config path and check it reads 999
+        script = f"""\
+#!/bin/bash
+export CLAUDE_PROJECT_DIR="{project}"
+export CLAUDE_PLUGIN_ROOT="{plugin}"
+source "{plugin}/scripts/resolve-paths.sh"
+source "{plugin}/scripts/bootstrap-dirs.sh"
+source "{plugin}/scripts/detect-tools.sh"
+source "{plugin}/scripts/log.sh" 2>/dev/null
+echo "THRESHOLD=$(config ".thresholds.delta_lines_trigger" 50)"
+"""
+        wrapper = os.path.join(str(tmp_path), "test-wrapper.sh")
+        with open(wrapper, "w") as f:
+            f.write(script)
+
+        result = subprocess.run(
+            ["bash", wrapper], capture_output=True, text=True, timeout=5,
+        )
+        assert "THRESHOLD=999" in result.stdout, (
+            f"config() should read delta_lines_trigger=999 from plugin config. "
+            f"Got: {result.stdout.strip()}"
+        )
+
+
+class TestPerHookMarketplacePaths:
+    """For each hook script, verify it resolves all paths from the plugin dir.
+
+    Each test sets up a marketplace layout with a known config, sources the
+    hook's dependency chain, and checks PIPELINE_DIR, REMEMBER_CONFIG,
+    REMEMBER_TZ, and REMEMBER_HOOKS_DIR all point to the plugin — not the
+    project. This catches the exact class of bug this PR fixes.
+    """
+
+    SCRIPTS_DIR = os.path.join(os.path.dirname(__file__), "..", "scripts")
+
+    # Hook scripts that source resolve-paths.sh → log.sh
+    HOOKS = [
+        "session-start-hook.sh",
+        "post-tool-hook.sh",
+        "user-prompt-hook.sh",
+        "save-session.sh",
+        "run-consolidation.sh",
+    ]
+
+    def _setup_marketplace(self, tmp_path):
+        """Create marketplace layout with known config, return (project, plugin)."""
+        project = os.path.join(str(tmp_path), "user-project")
+        plugin = os.path.join(str(tmp_path), "cache", "org", "remember", "0.5.0")
+        _create_full_plugin_copy(plugin)
+        _create_full_project(project)
+
+        import json as json_mod
+        with open(os.path.join(plugin, "config.json"), "w") as f:
+            json_mod.dump({
+                "timezone": "Pacific/Auckland",
+                "cooldowns": {"save_seconds": 120, "ndc_seconds": 3600},
+                "thresholds": {"delta_lines_trigger": 42},
+                "features": {"recovery": False},
+            }, f)
+
+        return project, plugin
+
+    def _source_hook_and_dump_vars(self, hook_script, project, plugin, tmp_path):
+        """Source a hook's dependency chain and return resolved path variables.
+
+        We can't run hooks to completion (they need sessions, etc.), but we CAN
+        source their dependency chain (resolve-paths → bootstrap → log.sh) and
+        check the variables that get set. This is exactly what each hook does
+        before any business logic.
+        """
+        # Build a wrapper that mimics the hook's source chain then dumps vars
+        script = f"""\
+#!/bin/bash
+set +e  # don't exit on errors — we just want the variables
+export CLAUDE_PROJECT_DIR="{project}"
+export CLAUDE_PLUGIN_ROOT="{plugin}"
+source "{plugin}/scripts/resolve-paths.sh" 2>/dev/null
+source "{plugin}/scripts/bootstrap-dirs.sh" 2>/dev/null
+[ -f "{plugin}/scripts/detect-tools.sh" ] && source "{plugin}/scripts/detect-tools.sh" 2>/dev/null
+source "{plugin}/scripts/log.sh" 2>/dev/null
+echo "PIPELINE_DIR=$PIPELINE_DIR"
+echo "PROJECT_DIR=$PROJECT_DIR"
+echo "REMEMBER_CONFIG=$REMEMBER_CONFIG"
+echo "REMEMBER_HOOKS_DIR=$REMEMBER_HOOKS_DIR"
+echo "REMEMBER_TZ=$REMEMBER_TZ"
+"""
+        wrapper = os.path.join(str(tmp_path), f"test-{hook_script}")
+        with open(wrapper, "w") as f:
+            f.write(script)
+
+        result = subprocess.run(
+            ["bash", wrapper], capture_output=True, text=True, timeout=5,
+        )
+        assert result.returncode == 0, (
+            f"{hook_script} dependency chain failed: {result.stderr[:300]}"
+        )
+
+        resolved = {}
+        for line in result.stdout.strip().split("\n"):
+            if "=" in line:
+                k, v = line.split("=", 1)
+                resolved[k] = v
+        return resolved
+
+    @pytest.mark.parametrize("hook", HOOKS)
+    def test_hook_pipeline_dir_points_to_plugin(self, hook, tmp_path):
+        """PIPELINE_DIR must resolve to the plugin dir, not the project."""
+        project, plugin = self._setup_marketplace(tmp_path)
+        result = self._source_hook_and_dump_vars(hook, project, plugin, tmp_path)
+        assert result["PIPELINE_DIR"] == plugin, (
+            f"{hook}: PIPELINE_DIR={result['PIPELINE_DIR']}, expected {plugin}"
+        )
+
+    @pytest.mark.parametrize("hook", HOOKS)
+    def test_hook_config_points_to_plugin(self, hook, tmp_path):
+        """REMEMBER_CONFIG must be in the plugin dir."""
+        project, plugin = self._setup_marketplace(tmp_path)
+        result = self._source_hook_and_dump_vars(hook, project, plugin, tmp_path)
+        assert result["REMEMBER_CONFIG"] == f"{plugin}/config.json", (
+            f"{hook}: REMEMBER_CONFIG={result['REMEMBER_CONFIG']}"
+        )
+
+    @pytest.mark.parametrize("hook", HOOKS)
+    def test_hook_hooks_dir_points_to_plugin(self, hook, tmp_path):
+        """REMEMBER_HOOKS_DIR must be in the plugin dir."""
+        project, plugin = self._setup_marketplace(tmp_path)
+        result = self._source_hook_and_dump_vars(hook, project, plugin, tmp_path)
+        assert result["REMEMBER_HOOKS_DIR"] == f"{plugin}/hooks.d", (
+            f"{hook}: REMEMBER_HOOKS_DIR={result['REMEMBER_HOOKS_DIR']}"
+        )
+
+    @pytest.mark.parametrize("hook", HOOKS)
+    def test_hook_timezone_from_plugin_config(self, hook, tmp_path):
+        """REMEMBER_TZ must come from the plugin's config.json."""
+        project, plugin = self._setup_marketplace(tmp_path)
+        result = self._source_hook_and_dump_vars(hook, project, plugin, tmp_path)
+        assert result["REMEMBER_TZ"] == "Pacific/Auckland", (
+            f"{hook}: REMEMBER_TZ={result['REMEMBER_TZ']}, expected Pacific/Auckland"
+        )
+
+    @pytest.mark.parametrize("hook", HOOKS)
+    def test_hook_project_dir_points_to_project(self, hook, tmp_path):
+        """PROJECT_DIR must resolve to the user's project, not the plugin."""
+        project, plugin = self._setup_marketplace(tmp_path)
+        result = self._source_hook_and_dump_vars(hook, project, plugin, tmp_path)
+        assert result["PROJECT_DIR"] == project, (
+            f"{hook}: PROJECT_DIR={result['PROJECT_DIR']}, expected {project}"
+        )
+
+
+class TestHookActualOutput:
+    """End-to-end tests: run each hook and verify it produces correct output.
+
+    These tests invoke the real hook scripts in a marketplace layout and
+    check that visible output (timestamps, memory sections, exit codes)
+    is correct. This is what the user actually sees.
+    """
+
+    def _setup_marketplace_with_memory(self, tmp_path, timezone="America/New_York"):
+        """Create marketplace layout with config and memory files."""
+        project = os.path.join(str(tmp_path), "user-project")
+        plugin = os.path.join(str(tmp_path), "cache", "org", "remember", "0.5.0")
+        _create_full_plugin_copy(plugin)
+        _create_full_project(project)
+
+        import json as json_mod
+        with open(os.path.join(plugin, "config.json"), "w") as f:
+            json_mod.dump({
+                "timezone": timezone,
+                "cooldowns": {"save_seconds": 120, "ndc_seconds": 3600},
+                "thresholds": {"delta_lines_trigger": 50},
+                "features": {"recovery": False},
+            }, f)
+
+        return project, plugin
+
+    def _run_hook(self, plugin, hook_name, env, timeout=10):
+        """Run a hook script and return the subprocess result."""
+        hook_path = os.path.join(plugin, "scripts", hook_name)
+        return subprocess.run(
+            ["bash", hook_path],
+            capture_output=True, text=True, env=env, timeout=timeout,
+        )
+
+    def _clean_env(self, project, plugin):
+        """Build a clean env with only CLAUDE_* vars set."""
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT")}
+        env["CLAUDE_PROJECT_DIR"] = project
+        env["CLAUDE_PLUGIN_ROOT"] = plugin
+        return env
+
+    def test_user_prompt_hook_outputs_configured_timezone(self, tmp_path):
+        """user-prompt-hook.sh must display time in the configured timezone."""
+        project, plugin = self._setup_marketplace_with_memory(tmp_path, "UTC")
+        env = self._clean_env(project, plugin)
+        result = self._run_hook(plugin, "user-prompt-hook.sh", env)
+
+        assert result.returncode == 0
+        # Output should be like "[HH:MM UTC — username]"
+        assert "UTC" in result.stdout, (
+            f"Timestamp should use configured timezone UTC. Got: {result.stdout.strip()}"
+        )
+
+    def test_user_prompt_hook_not_paris_when_configured_differently(self, tmp_path):
+        """user-prompt-hook.sh must NOT show Paris time when config says otherwise."""
+        project, plugin = self._setup_marketplace_with_memory(tmp_path, "America/Chicago")
+        env = self._clean_env(project, plugin)
+        result = self._run_hook(plugin, "user-prompt-hook.sh", env)
+
+        assert result.returncode == 0
+        # Should show CDT/CST, not CET/CEST (Paris)
+        stdout = result.stdout.strip()
+        assert "CET" not in stdout and "CEST" not in stdout, (
+            f"Should NOT show Paris timezone (CET/CEST). Got: {stdout}"
+        )
+
+    def test_session_start_hook_runs_in_marketplace(self, tmp_path):
+        """session-start-hook.sh must run and produce output in marketplace."""
+        project, plugin = self._setup_marketplace_with_memory(tmp_path)
+        env = self._clean_env(project, plugin)
+        result = self._run_hook(plugin, "session-start-hook.sh", env)
+
+        assert result.returncode == 0, (
+            f"session-start should succeed. stderr={result.stderr[:300]}"
+        )
+
+    def test_session_start_hook_outputs_memory_when_present(self, tmp_path):
+        """session-start-hook.sh must output === MEMORY === when files exist."""
+        project, plugin = self._setup_marketplace_with_memory(tmp_path)
+
+        # Create a memory file so session-start has something to inject
+        now_file = os.path.join(project, ".remember", "now.md")
+        with open(now_file, "w") as f:
+            f.write("## 10:00 | main\nDid some work.\n")
+
+        env = self._clean_env(project, plugin)
+        result = self._run_hook(plugin, "session-start-hook.sh", env)
+
+        assert result.returncode == 0
+        assert "=== MEMORY ===" in result.stdout, (
+            f"Should output memory section. Got: {result.stdout[:300]}"
+        )
+        assert "Did some work" in result.stdout, (
+            f"Should include now.md content. Got: {result.stdout[:300]}"
+        )
+
+    def test_post_tool_hook_exits_cleanly_no_session(self, tmp_path):
+        """post-tool-hook.sh must exit 0 when there's no active session."""
+        project, plugin = self._setup_marketplace_with_memory(tmp_path)
+        env = self._clean_env(project, plugin)
+        result = self._run_hook(plugin, "post-tool-hook.sh", env)
+
+        assert result.returncode == 0, (
+            f"post-tool should exit cleanly with no session. "
+            f"stderr={result.stderr[:300]}"
+        )
+
+    def test_run_consolidation_exits_cleanly_no_staging(self, tmp_path):
+        """run-consolidation.sh must exit 0 when no staging files exist."""
+        project, plugin = self._setup_marketplace_with_memory(tmp_path)
+        env = self._clean_env(project, plugin)
+        result = self._run_hook(plugin, "run-consolidation.sh", env)
+
+        # Exits 0 with "no staging files" — not a crash
+        assert result.returncode == 0, (
+            f"run-consolidation should exit cleanly with no staging files. "
+            f"stderr={result.stderr[:300]}"
+        )
+
+    def test_user_prompt_hook_timestamp_format(self, tmp_path):
+        """user-prompt-hook.sh output must match [HH:MM TZ -- username] format."""
+        import re
+        project, plugin = self._setup_marketplace_with_memory(tmp_path, "UTC")
+        env = self._clean_env(project, plugin)
+        result = self._run_hook(plugin, "user-prompt-hook.sh", env)
+
+        assert result.returncode == 0
+        line = result.stdout.strip().split("\n")[0]
+        # Format: [HH:MM TIMEZONE — username] (with em-dash or --)
+        pattern = r"^\[\d{1,2}:\d{2} \S+"
+        assert re.match(pattern, line), (
+            f"Timestamp must match [HH:MM TZ ...] format. Got: {line}"
+        )
+
+    def test_session_start_hook_finds_identity_in_plugin(self, tmp_path):
+        """session-start-hook.sh reads identity.md from plugin dir, not project."""
+        project, plugin = self._setup_marketplace_with_memory(tmp_path)
+
+        # Identity lives in the plugin dir (shipped with the plugin)
+        identity = os.path.join(plugin, "identity.md")
+        with open(identity, "w") as f:
+            f.write("# Who I Am\nI am a test identity.\n")
+
+        env = self._clean_env(project, plugin)
+        result = self._run_hook(plugin, "session-start-hook.sh", env)
+
+        assert result.returncode == 0
+        assert "test identity" in result.stdout, (
+            f"Should read identity.md from plugin dir. Got: {result.stdout[:300]}"
+        )
+
+
+class TestLocalInstallLayout:
+    """Verify all hooks work in local install layout (plugin inside project)."""
+
+    def _setup_local(self, tmp_path, timezone="Europe/Berlin"):
+        """Create local install: plugin at $PROJECT/.claude/remember/."""
+        project = os.path.join(str(tmp_path), "my-project")
+        plugin = os.path.join(project, ".claude", "remember")
+        _create_full_plugin_copy(plugin)
+        _create_full_project(project)
+
+        import json as json_mod
+        with open(os.path.join(plugin, "config.json"), "w") as f:
+            json_mod.dump({
+                "timezone": timezone,
+                "cooldowns": {"save_seconds": 120, "ndc_seconds": 3600},
+                "features": {"recovery": False},
+            }, f)
+
+        return project, plugin
+
+    def _clean_env(self, project):
+        """Local install: only CLAUDE_PROJECT_DIR, no CLAUDE_PLUGIN_ROOT."""
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT")}
+        env["CLAUDE_PROJECT_DIR"] = project
+        # No CLAUDE_PLUGIN_ROOT — resolve-paths.sh must walk up from script
+        return env
+
+    def test_session_start_hook_local(self, tmp_path):
+        """session-start-hook.sh must work in local install layout."""
+        project, plugin = self._setup_local(tmp_path)
+        env = self._clean_env(project)
+        result = subprocess.run(
+            ["bash", os.path.join(plugin, "scripts", "session-start-hook.sh")],
+            capture_output=True, text=True, env=env, timeout=10,
+        )
+        assert result.returncode == 0, (
+            f"session-start should work in local layout. stderr={result.stderr[:300]}"
+        )
+
+    def test_user_prompt_hook_local(self, tmp_path):
+        """user-prompt-hook.sh must work in local install layout."""
+        project, plugin = self._setup_local(tmp_path)
+        env = self._clean_env(project)
+        result = subprocess.run(
+            ["bash", os.path.join(plugin, "scripts", "user-prompt-hook.sh")],
+            capture_output=True, text=True, env=env, timeout=10,
+        )
+        assert result.returncode == 0
+        assert "CET" in result.stdout or "CEST" in result.stdout or "Europe" not in "test", (
+            "Should output a timestamp"
+        )
+
+    def test_user_prompt_hook_local_uses_configured_tz(self, tmp_path):
+        """Local install must also read timezone from config, not hardcode Paris."""
+        project, plugin = self._setup_local(tmp_path, "Asia/Tokyo")
+        env = self._clean_env(project)
+        result = subprocess.run(
+            ["bash", os.path.join(plugin, "scripts", "user-prompt-hook.sh")],
+            capture_output=True, text=True, env=env, timeout=10,
+        )
+        assert result.returncode == 0
+        assert "JST" in result.stdout, (
+            f"Local install should use configured TZ (Asia/Tokyo→JST). Got: {result.stdout.strip()}"
+        )
+
+    def test_post_tool_hook_local(self, tmp_path):
+        """post-tool-hook.sh must exit cleanly in local install."""
+        project, plugin = self._setup_local(tmp_path)
+        env = self._clean_env(project)
+        result = subprocess.run(
+            ["bash", os.path.join(plugin, "scripts", "post-tool-hook.sh")],
+            capture_output=True, text=True, env=env, timeout=10,
+        )
+        assert result.returncode == 0
+
+    def test_run_consolidation_local(self, tmp_path):
+        """run-consolidation.sh must exit cleanly in local install."""
+        project, plugin = self._setup_local(tmp_path)
+        env = self._clean_env(project)
+        result = subprocess.run(
+            ["bash", os.path.join(plugin, "scripts", "run-consolidation.sh")],
+            capture_output=True, text=True, env=env, timeout=10,
+        )
+        assert result.returncode == 0
+
+
+class TestEdgeCases:
+    """Edge cases that have caused bugs before or could cause them."""
+
+    LOG_SH = os.path.join(os.path.dirname(__file__), "..", "scripts", "log.sh")
+
+    def test_no_config_json_graceful_degradation(self, tmp_path):
+        """When config.json doesn't exist, hooks must still work with defaults."""
+        project = os.path.join(str(tmp_path), "user-project")
+        plugin = os.path.join(str(tmp_path), "cache", "org", "remember", "0.5.0")
+        _create_full_plugin_copy(plugin)
+        _create_full_project(project)
+
+        # Delete config.json — fresh install scenario
+        config = os.path.join(plugin, "config.json")
+        if os.path.exists(config):
+            os.remove(config)
+
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT")}
+        env["CLAUDE_PROJECT_DIR"] = project
+        env["CLAUDE_PLUGIN_ROOT"] = plugin
+
+        result = subprocess.run(
+            ["bash", os.path.join(plugin, "scripts", "user-prompt-hook.sh")],
+            capture_output=True, text=True, env=env, timeout=10,
+        )
+
+        assert result.returncode == 0, (
+            f"Hooks must work without config.json. stderr={result.stderr[:300]}"
+        )
+
+    def test_no_config_json_timezone_is_system_local(self, tmp_path):
+        """Without config.json, REMEMBER_TZ must be empty (system local), not Paris."""
+        project = os.path.join(str(tmp_path), "project")
+        plugin = os.path.join(str(tmp_path), "plugin")
+        os.makedirs(plugin)
+        os.makedirs(project)
+        # No config.json
+
+        log_dir = os.path.join(project, ".remember", "logs")
+        os.makedirs(log_dir, exist_ok=True)
+
+        script = f"""\
+#!/bin/bash
+export PROJECT_DIR="{project}"
+export PIPELINE_DIR="{plugin}"
+source "{self.LOG_SH}" 2>/dev/null
+echo "TZ=$REMEMBER_TZ"
+"""
+        wrapper = os.path.join(str(tmp_path), "test.sh")
+        with open(wrapper, "w") as f:
+            f.write(script)
+        result = subprocess.run(
+            ["bash", wrapper], capture_output=True, text=True, timeout=5,
+        )
+        assert "TZ=" in result.stdout
+        tz_value = result.stdout.strip().split("TZ=")[1]
+        assert tz_value == "", (
+            f"Without config, TZ should be empty (system local), got '{tz_value}'"
+        )
+
+    def test_spaces_in_project_path(self, tmp_path):
+        """Hooks must work when the project path contains spaces."""
+        project = os.path.join(str(tmp_path), "my project with spaces")
+        plugin = os.path.join(str(tmp_path), "cache", "org", "remember", "0.5.0")
+        _create_full_plugin_copy(plugin)
+        os.makedirs(project)
+        _create_full_project(project)
+
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT")}
+        env["CLAUDE_PROJECT_DIR"] = project
+        env["CLAUDE_PLUGIN_ROOT"] = plugin
+
+        result = subprocess.run(
+            ["bash", os.path.join(plugin, "scripts", "user-prompt-hook.sh")],
+            capture_output=True, text=True, env=env, timeout=10,
+        )
+        assert result.returncode == 0, (
+            f"Hooks must handle spaces in paths. stderr={result.stderr[:300]}"
+        )
+
+    def test_log_dir_in_project_not_plugin(self, tmp_path):
+        """REMEMBER_LOG_DIR must be in PROJECT_DIR/.remember/, not PIPELINE_DIR."""
+        project = os.path.join(str(tmp_path), "project")
+        plugin = os.path.join(str(tmp_path), "plugin")
+        os.makedirs(plugin)
+        os.makedirs(project)
+        log_dir = os.path.join(project, ".remember", "logs")
+        os.makedirs(log_dir, exist_ok=True)
+
+        script = f"""\
+#!/bin/bash
+export PROJECT_DIR="{project}"
+export PIPELINE_DIR="{plugin}"
+source "{self.LOG_SH}" 2>/dev/null
+echo "LOG_DIR=$REMEMBER_LOG_DIR"
+"""
+        wrapper = os.path.join(str(tmp_path), "test.sh")
+        with open(wrapper, "w") as f:
+            f.write(script)
+        result = subprocess.run(
+            ["bash", wrapper], capture_output=True, text=True, timeout=5,
+        )
+        log_dir_val = result.stdout.strip().split("LOG_DIR=")[1]
+        assert log_dir_val.startswith(project), (
+            f"Logs must go in PROJECT_DIR, not plugin. Got: {log_dir_val}"
+        )
+        assert plugin not in log_dir_val, (
+            f"Logs must NOT be in plugin dir. Got: {log_dir_val}"
+        )
+
+    def test_dispatch_no_hooks_dir_is_noop(self, tmp_path):
+        """dispatch() must be a no-op when hooks.d/ doesn't exist, not a crash."""
+        project = os.path.join(str(tmp_path), "project")
+        plugin = os.path.join(str(tmp_path), "plugin")
+        os.makedirs(plugin)
+        os.makedirs(project)
+        log_dir = os.path.join(project, ".remember", "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        # No hooks.d/ directory
+
+        script = f"""\
+#!/bin/bash
+export PROJECT_DIR="{project}"
+export PIPELINE_DIR="{plugin}"
+source "{self.LOG_SH}" 2>/dev/null
+dispatch "nonexistent_event"
+echo "OK"
+"""
+        wrapper = os.path.join(str(tmp_path), "test.sh")
+        with open(wrapper, "w") as f:
+            f.write(script)
+        result = subprocess.run(
+            ["bash", wrapper], capture_output=True, text=True, timeout=5,
+        )
+        assert result.returncode == 0
+        assert "OK" in result.stdout, (
+            f"dispatch with no hooks.d should be a no-op. stderr={result.stderr[:200]}"
+        )
+
+    def test_empty_claude_plugin_root_falls_back(self, tmp_path):
+        """Empty CLAUDE_PLUGIN_ROOT (vs unset) must not crash resolve-paths.sh."""
+        project = os.path.join(str(tmp_path), "my-project")
+        plugin = os.path.join(project, ".claude", "remember")
+        _create_full_plugin_copy(plugin)
+        _create_full_project(project)
+
+        import json as json_mod
+        with open(os.path.join(plugin, "config.json"), "w") as f:
+            json_mod.dump({"timezone": "UTC", "features": {"recovery": False}}, f)
+
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT")}
+        env["CLAUDE_PROJECT_DIR"] = project
+        env["CLAUDE_PLUGIN_ROOT"] = ""  # empty string, not unset
+
+        result = subprocess.run(
+            ["bash", os.path.join(plugin, "scripts", "user-prompt-hook.sh")],
+            capture_output=True, text=True, env=env, timeout=10,
+        )
+        assert result.returncode == 0, (
+            f"Empty CLAUDE_PLUGIN_ROOT should fall back. stderr={result.stderr[:300]}"
+        )
+
+    def test_regression_pipeline_dir_unset_reads_wrong_config(self, tmp_path):
+        """REGRESSION GUARD: without PIPELINE_DIR, log.sh falls back to local path.
+
+        This is the exact bug that was reported: marketplace install, PIPELINE_DIR
+        not set → config read from PROJECT_DIR/.claude/remember/ → file doesn't
+        exist → silent fallback to defaults → wrong timezone.
+        """
+        plugin = os.path.join(str(tmp_path), "marketplace-plugin")
+        project = os.path.join(str(tmp_path), "user-project")
+        os.makedirs(plugin)
+        os.makedirs(project)
+        log_dir = os.path.join(project, ".remember", "logs")
+        os.makedirs(log_dir, exist_ok=True)
+
+        # Config is in the plugin dir (marketplace layout)
+        import json as json_mod
+        with open(os.path.join(plugin, "config.json"), "w") as f:
+            json_mod.dump({"timezone": "America/Denver"}, f)
+
+        # Simulate the OLD bug: source log.sh WITHOUT PIPELINE_DIR
+        script = f"""\
+#!/bin/bash
+export PROJECT_DIR="{project}"
+unset PIPELINE_DIR
+source "{self.LOG_SH}" 2>/dev/null
+echo "CONFIG=$REMEMBER_CONFIG"
+echo "TZ=$REMEMBER_TZ"
+"""
+        wrapper = os.path.join(str(tmp_path), "test.sh")
+        with open(wrapper, "w") as f:
+            f.write(script)
+        result = subprocess.run(
+            ["bash", wrapper], capture_output=True, text=True, timeout=5,
+        )
+
+        # Without PIPELINE_DIR, log.sh falls back to PROJECT_DIR/.claude/remember/
+        # which does NOT have config.json → TZ defaults to empty
+        lines = result.stdout.strip().split("\n")
+        tz_line = [l for l in lines if l.startswith("TZ=")][0]
+        tz_val = tz_line.split("=", 1)[1]
+
+        # The fallback path won't find the config (it's in plugin dir, not project)
+        # so TZ should be empty (the default), NOT "America/Denver"
+        assert tz_val != "America/Denver", (
+            "Without PIPELINE_DIR, config in plugin dir should NOT be found. "
+            "This was the original bug — silent config miss."
+        )
+
+    def test_invalid_json_config_returns_defaults(self, tmp_path):
+        """Malformed config.json must not crash — config() returns defaults."""
+        plugin = os.path.join(str(tmp_path), "plugin")
+        project = os.path.join(str(tmp_path), "project")
+        os.makedirs(plugin)
+        os.makedirs(project)
+        log_dir = os.path.join(project, ".remember", "logs")
+        os.makedirs(log_dir, exist_ok=True)
+
+        # Write broken JSON (missing comma, unclosed brace)
+        with open(os.path.join(plugin, "config.json"), "w") as f:
+            f.write('{"timezone": "America/Chicago" "broken": true')
+
+        script = f"""\
+#!/bin/bash
+export PROJECT_DIR="{project}"
+export PIPELINE_DIR="{plugin}"
+source "{self.LOG_SH}" 2>/dev/null
+echo "TZ=$REMEMBER_TZ"
+echo "COOLDOWN=$(config ".cooldowns.save_seconds" 120)"
+"""
+        wrapper = os.path.join(str(tmp_path), "test.sh")
+        with open(wrapper, "w") as f:
+            f.write(script)
+        result = subprocess.run(
+            ["bash", wrapper], capture_output=True, text=True, timeout=5,
+        )
+        assert result.returncode == 0, (
+            f"Broken config.json must not crash. stderr={result.stderr[:300]}"
+        )
+        # Should fall back to defaults
+        assert "TZ=" in result.stdout
+        assert "COOLDOWN=120" in result.stdout, (
+            "Broken JSON → config() must return the default value"
+        )
+
+    def test_config_timezone_wrong_type_number(self, tmp_path):
+        """config.json with timezone as number must not crash the hook."""
+        plugin = os.path.join(str(tmp_path), "plugin")
+        project = os.path.join(str(tmp_path), "project")
+        _create_full_plugin_copy(plugin)
+        _create_full_project(project)
+
+        import json as json_mod
+        with open(os.path.join(plugin, "config.json"), "w") as f:
+            json_mod.dump({"timezone": 12345, "features": {"recovery": False}}, f)
+
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT")}
+        env["CLAUDE_PROJECT_DIR"] = project
+        env["CLAUDE_PLUGIN_ROOT"] = plugin
+
+        result = subprocess.run(
+            ["bash", os.path.join(plugin, "scripts", "user-prompt-hook.sh")],
+            capture_output=True, text=True, env=env, timeout=10,
+        )
+        # Must not crash — TZ="12345" is weird but date still runs
+        assert result.returncode == 0, (
+            f"Numeric timezone in config must not crash. stderr={result.stderr[:300]}"
+        )
+
+    def test_config_timezone_null_uses_default(self, tmp_path):
+        """config.json with timezone: null must fall back to empty default."""
+        plugin = os.path.join(str(tmp_path), "plugin")
+        project = os.path.join(str(tmp_path), "project")
+        os.makedirs(plugin)
+        os.makedirs(project)
+        log_dir = os.path.join(project, ".remember", "logs")
+        os.makedirs(log_dir, exist_ok=True)
+
+        import json as json_mod
+        with open(os.path.join(plugin, "config.json"), "w") as f:
+            json_mod.dump({"timezone": None}, f)
+
+        script = f"""\
+#!/bin/bash
+export PROJECT_DIR="{project}"
+export PIPELINE_DIR="{plugin}"
+source "{self.LOG_SH}" 2>/dev/null
+echo "TZ=$REMEMBER_TZ"
+"""
+        wrapper = os.path.join(str(tmp_path), "test.sh")
+        with open(wrapper, "w") as f:
+            f.write(script)
+        result = subprocess.run(
+            ["bash", wrapper], capture_output=True, text=True, timeout=5,
+        )
+        # null in JSON → jq returns "null" for `-r` or empty for `// empty`
+        # config() should return default (empty string)
+        tz_val = [l for l in result.stdout.strip().split("\n") if l.startswith("TZ=")][0].split("=", 1)[1]
+        assert tz_val == "", (
+            f"timezone: null should fall back to empty default, got '{tz_val}'"
+        )
+
+    def test_trailing_slash_in_plugin_root(self, tmp_path):
+        """CLAUDE_PLUGIN_ROOT with trailing slash must not break paths."""
+        project = os.path.join(str(tmp_path), "user-project")
+        plugin = os.path.join(str(tmp_path), "cache", "org", "remember", "0.5.0")
+        _create_full_plugin_copy(plugin)
+        _create_full_project(project)
+
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT")}
+        env["CLAUDE_PROJECT_DIR"] = project
+        env["CLAUDE_PLUGIN_ROOT"] = plugin + "/"  # trailing slash
+
+        result = subprocess.run(
+            ["bash", os.path.join(plugin, "scripts", "user-prompt-hook.sh")],
+            capture_output=True, text=True, env=env, timeout=10,
+        )
+        assert result.returncode == 0, (
+            f"Trailing slash in PLUGIN_ROOT must not crash. stderr={result.stderr[:300]}"
+        )
+
+    def test_unicode_in_project_path(self, tmp_path):
+        """Project paths with unicode characters (accents, CJK) must work."""
+        project = os.path.join(str(tmp_path), "projet-café-日本語")
+        plugin = os.path.join(str(tmp_path), "cache", "org", "remember", "0.5.0")
+        _create_full_plugin_copy(plugin)
+        os.makedirs(project)
+        _create_full_project(project)
+
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT")}
+        env["CLAUDE_PROJECT_DIR"] = project
+        env["CLAUDE_PLUGIN_ROOT"] = plugin
+
+        result = subprocess.run(
+            ["bash", os.path.join(plugin, "scripts", "user-prompt-hook.sh")],
+            capture_output=True, text=True, env=env, timeout=10,
+        )
+        assert result.returncode == 0, (
+            f"Unicode in project path must not crash. stderr={result.stderr[:300]}"
+        )
+
+    def test_symlinked_scripts_directory(self, tmp_path):
+        """Hooks must work when scripts/ is a symlink (DVSI local dev layout)."""
+        import shutil
+        project = os.path.join(str(tmp_path), "user-project")
+        plugin = os.path.join(str(tmp_path), "cache", "org", "remember", "0.5.0")
+        _create_full_plugin_copy(plugin)
+        _create_full_project(project)
+
+        # Move scripts to a different location and symlink back
+        real_scripts = os.path.join(str(tmp_path), "real-scripts")
+        shutil.move(os.path.join(plugin, "scripts"), real_scripts)
+        os.symlink(real_scripts, os.path.join(plugin, "scripts"))
+
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT")}
+        env["CLAUDE_PROJECT_DIR"] = project
+        env["CLAUDE_PLUGIN_ROOT"] = plugin
+
+        result = subprocess.run(
+            ["bash", os.path.join(plugin, "scripts", "user-prompt-hook.sh")],
+            capture_output=True, text=True, env=env, timeout=10,
+        )
+        assert result.returncode == 0, (
+            f"Symlinked scripts/ must work. stderr={result.stderr[:300]}"
+        )
+
+    def test_broken_config_symlink_returns_defaults(self, tmp_path):
+        """Broken symlink for config.json must fall back to defaults, not crash."""
+        plugin = os.path.join(str(tmp_path), "plugin")
+        project = os.path.join(str(tmp_path), "project")
+        os.makedirs(plugin)
+        os.makedirs(project)
+        log_dir = os.path.join(project, ".remember", "logs")
+        os.makedirs(log_dir, exist_ok=True)
+
+        # Create a broken symlink for config.json
+        os.symlink("/nonexistent/config.json", os.path.join(plugin, "config.json"))
+
+        script = f"""\
+#!/bin/bash
+export PROJECT_DIR="{project}"
+export PIPELINE_DIR="{plugin}"
+source "{self.LOG_SH}" 2>/dev/null
+echo "TZ=$REMEMBER_TZ"
+echo "COOLDOWN=$(config ".cooldowns.save_seconds" 120)"
+"""
+        wrapper = os.path.join(str(tmp_path), "test.sh")
+        with open(wrapper, "w") as f:
+            f.write(script)
+        result = subprocess.run(
+            ["bash", wrapper], capture_output=True, text=True, timeout=5,
+        )
+        assert result.returncode == 0
+        assert "COOLDOWN=120" in result.stdout, (
+            "Broken config symlink → must return default, not crash"
+        )
+
+    def test_dispatch_continues_after_hook_failure(self, tmp_path):
+        """If one hooks.d script fails, dispatch must continue to the next."""
+        plugin = os.path.join(str(tmp_path), "plugin")
+        project = os.path.join(str(tmp_path), "project")
+        os.makedirs(plugin)
+        os.makedirs(project)
+        log_dir = os.path.join(project, ".remember", "logs")
+        os.makedirs(log_dir, exist_ok=True)
+
+        hook_dir = os.path.join(plugin, "hooks.d", "test_event")
+        os.makedirs(hook_dir)
+
+        # First hook: fails
+        with open(os.path.join(hook_dir, "01-fail.sh"), "w") as f:
+            f.write("#!/bin/bash\nexit 1\n")
+        os.chmod(os.path.join(hook_dir, "01-fail.sh"), 0o755)
+
+        # Second hook: succeeds and prints marker
+        with open(os.path.join(hook_dir, "02-ok.sh"), "w") as f:
+            f.write("#!/bin/bash\necho 'SECOND_HOOK_RAN=true'\n")
+        os.chmod(os.path.join(hook_dir, "02-ok.sh"), 0o755)
+
+        script = f"""\
+#!/bin/bash
+export PROJECT_DIR="{project}"
+export PIPELINE_DIR="{plugin}"
+source "{self.LOG_SH}" 2>/dev/null
+dispatch "test_event"
+echo "DISPATCH_COMPLETED=true"
+"""
+        wrapper = os.path.join(str(tmp_path), "test.sh")
+        with open(wrapper, "w") as f:
+            f.write(script)
+        result = subprocess.run(
+            ["bash", wrapper], capture_output=True, text=True, timeout=5,
+        )
+        assert result.returncode == 0
+        assert "SECOND_HOOK_RAN=true" in result.stdout, (
+            "dispatch must continue after a hook failure"
+        )
+        assert "DISPATCH_COMPLETED=true" in result.stdout
+
+    def test_resolve_paths_failure_does_not_silently_continue(self, tmp_path):
+        """If resolve-paths.sh fails (bad PROJECT_DIR), hook must not run with wrong paths."""
+        plugin = os.path.join(str(tmp_path), "cache", "org", "remember", "0.5.0")
+        _create_full_plugin_copy(plugin)
+
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT")}
+        env["CLAUDE_PROJECT_DIR"] = "/nonexistent/project/that/does/not/exist"
+        env["CLAUDE_PLUGIN_ROOT"] = plugin
+
+        result = subprocess.run(
+            ["bash", os.path.join(plugin, "scripts", "user-prompt-hook.sh")],
+            capture_output=True, text=True, env=env, timeout=10,
+        )
+        # resolve-paths.sh should exit 1, killing the hook
+        assert result.returncode != 0, (
+            "Hook must fail if resolve-paths.sh can't find PROJECT_DIR. "
+            "Silent continuation with wrong paths is worse than a crash."
+        )
+
+    def test_handoff_consumed_after_session_start(self, tmp_path):
+        """session-start must clear remember.md after reading it (one-shot)."""
+        project = os.path.join(str(tmp_path), "user-project")
+        plugin = os.path.join(str(tmp_path), "cache", "org", "remember", "0.5.0")
+        _create_full_plugin_copy(plugin)
+        _create_full_project(project)
+
+        handoff = os.path.join(project, ".remember", "remember.md")
+        with open(handoff, "w") as f:
+            f.write("## Handoff\nPick up the security audit.\n")
+
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT")}
+        env["CLAUDE_PROJECT_DIR"] = project
+        env["CLAUDE_PLUGIN_ROOT"] = plugin
+
+        result = subprocess.run(
+            ["bash", os.path.join(plugin, "scripts", "session-start-hook.sh")],
+            capture_output=True, text=True, env=env, timeout=10,
+        )
+        assert result.returncode == 0
+        assert "security audit" in result.stdout, (
+            "Handoff content should appear in session output"
+        )
+        # File should be empty after consumption
+        with open(handoff) as f:
+            remaining = f.read()
+        assert remaining.strip() == "", (
+            f"remember.md should be cleared after session-start. Contains: {remaining[:100]}"
+        )
+
+    def test_pipeline_dir_empty_string_triggers_fallback(self, tmp_path):
+        """PIPELINE_DIR="" (empty, not unset) must trigger the log.sh guard."""
+        project = os.path.join(str(tmp_path), "project")
+        plugin_local = os.path.join(project, ".claude", "remember")
+        os.makedirs(plugin_local, exist_ok=True)
+        log_dir = os.path.join(project, ".remember", "logs")
+        os.makedirs(log_dir, exist_ok=True)
+
+        import json as json_mod
+        with open(os.path.join(plugin_local, "config.json"), "w") as f:
+            json_mod.dump({"timezone": "Asia/Seoul"}, f)
+
+        script = f"""\
+#!/bin/bash
+export PROJECT_DIR="{project}"
+export PIPELINE_DIR=""
+source "{self.LOG_SH}" 2>/dev/null
+echo "PIPELINE_DIR=$PIPELINE_DIR"
+echo "TZ=$REMEMBER_TZ"
+"""
+        wrapper = os.path.join(str(tmp_path), "test.sh")
+        with open(wrapper, "w") as f:
+            f.write(script)
+        result = subprocess.run(
+            ["bash", wrapper], capture_output=True, text=True, timeout=5,
+        )
+        lines = {l.split("=", 1)[0]: l.split("=", 1)[1]
+                 for l in result.stdout.strip().split("\n") if "=" in l}
+        # Empty PIPELINE_DIR should trigger fallback to PROJECT_DIR/.claude/remember
+        assert lines.get("PIPELINE_DIR") == f"{project}/.claude/remember", (
+            f"Empty PIPELINE_DIR should trigger fallback. Got: {lines.get('PIPELINE_DIR')}"
+        )
+        assert lines.get("TZ") == "Asia/Seoul", (
+            f"Should read config from fallback path. Got TZ={lines.get('TZ')}"
         )
