@@ -76,6 +76,28 @@ else
     exit 1
 fi
 
+# --- Windows shell normalization (Git Bash / MSYS / Cygwin) ----------------
+# Claude Code stores sessions under a Windows-native slug (e.g.
+# "C--Users-dev-project") computed from the Win32 path "C:\Users\dev\project".
+# But on Windows shells, $CLAUDE_PROJECT_DIR arrives as a POSIX-style path
+# ("/c/Users/dev/project") and our sed-based slug produces "-c-Users-dev-..."
+# which never matches. The plugin's `ls $SESSION_DIR/*.jsonl` then returns
+# nothing and the entire save pipeline silently no-ops.
+#
+# Convert /c/Users/... → C:\Users\... here so all downstream slug computations
+# (3 shell sites + Python `_session_dir`) align with Claude Code's storage.
+# On Linux/macOS bash $OSTYPE is "linux-gnu" or "darwin*"; the case below
+# never matches and PROJECT_DIR is left untouched.
+case "$OSTYPE" in
+    msys|cygwin)
+        if [[ "$PROJECT_DIR" =~ ^/([a-zA-Z])/(.*)$ ]]; then
+            _drive=$(printf '%s' "${BASH_REMATCH[1]}" | tr '[:lower:]' '[:upper:]')
+            _rest="${BASH_REMATCH[2]//\//\\}"
+            PROJECT_DIR="${_drive}:\\${_rest}"
+        fi
+        ;;
+esac
+
 # --- Validate both paths exist ---
 if [ ! -d "$PROJECT_DIR" ]; then
     _msg="FATAL: PROJECT_DIR does not exist: $PROJECT_DIR"
