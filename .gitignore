@@ -4,3 +4,4 @@ __pycache__/
 .coverage
 .pytest_cache/
 identity.md
+.DS_Store
