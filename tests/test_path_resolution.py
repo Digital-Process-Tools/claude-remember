@@ -1180,6 +1180,92 @@ class TestWindowsCompatIssue11:
                 f"Path {path!r}: expected slug {expected_slug!r}, got {result!r}"
             )
 
+    # ── Point 1b: Git Bash / MSYS / Cygwin POSIX-style paths ──
+    # Claude Code on Windows stores sessions under the Win32-path slug
+    # (e.g. C--Users-dev-project from C:\Users\dev\project). But Git Bash
+    # exposes $CLAUDE_PROJECT_DIR as a POSIX-style path (/c/Users/...),
+    # which the existing tests above don't cover and which slugs to a
+    # different folder name (-c-Users-...). resolve-paths.sh normalizes
+    # the POSIX form to Win32 before the slug is computed.
+    #
+    # The transformation is tested via a temp script file (not bash -c) so
+    # that bash parses backslashes the same way it does in the production
+    # script — `bash -c '<body>'` mishandles `\\}` inside `${var//\//\\}`
+    # in some interactive contexts.
+
+    @staticmethod
+    def _msys_normalize_path(path: str, tmp_path) -> tuple[int, str, str]:
+        """Run the production OSTYPE=msys normalization block on a path; return (rc, stdout, stderr)."""
+        script = tmp_path / "msys-normalize.sh"
+        script.write_text(
+            '#!/bin/bash\n'
+            'PROJECT_DIR="$1"\n'
+            'OSTYPE="msys"\n'
+            'case "$OSTYPE" in\n'
+            '    msys|cygwin)\n'
+            '        if [[ "$PROJECT_DIR" =~ ^/([a-zA-Z])/(.*)$ ]]; then\n'
+            '            _drive="${BASH_REMATCH[1]^^}"\n'
+            '            _rest="${BASH_REMATCH[2]//\\//\\\\}"\n'
+            '            PROJECT_DIR="${_drive}:\\\\${_rest}"\n'
+            '        fi\n'
+            '        ;;\n'
+            'esac\n'
+            'printf "%s" "$PROJECT_DIR"\n'
+        )
+        result = subprocess.run(
+            ["bash", str(script), path],
+            capture_output=True, text=True,
+        )
+        return result.returncode, result.stdout, result.stderr
+
+    def test_resolve_paths_normalizes_msys_posix_path(self, tmp_path):
+        """resolve-paths.sh on $OSTYPE=msys converts /c/Users/... to C:\\Users\\..."""
+        for posix_path, expected_win in [
+            ("/c/Users/dev/project", r"C:\Users\dev\project"),
+            ("/d/Repos/My Project", r"D:\Repos\My Project"),
+            ("/C/UPPER/case", r"C:\UPPER\case"),
+        ]:
+            rc, stdout, stderr = self._msys_normalize_path(posix_path, tmp_path)
+            assert rc == 0, f"bash failed: {stderr!r}"
+            assert stdout == expected_win, (
+                f"Posix path {posix_path!r}: expected {expected_win!r}, got {stdout!r}"
+            )
+
+    def test_resolve_paths_leaves_unix_paths_unchanged(self, tmp_path):
+        """resolve-paths.sh on $OSTYPE=msys must not touch already-Win32 or pure-Unix paths."""
+        for path in [
+            r"C:\Users\dev\project",          # already Win32 — unchanged
+            "/home/user/project",             # Linux home — multi-letter first dir doesn't match
+            "/Users/dev/project",             # macOS home — uppercase first dir doesn't match
+        ]:
+            rc, stdout, stderr = self._msys_normalize_path(path, tmp_path)
+            assert rc == 0, f"bash failed: {stderr!r}"
+            assert stdout == path, (
+                f"Path {path!r} should be unchanged, got {stdout!r}"
+            )
+
+    def test_normalized_msys_path_yields_windows_slug(self):
+        """End-to-end: a /c/Users/... path post-normalization slugs to the same folder Claude Code uses."""
+        # After resolve-paths.sh normalizes /c/Users/dev/project → C:\Users\dev\project,
+        # the Python _session_dir (and bash sed) must produce the same slug Claude Code
+        # uses to store session JSONLs on Windows.
+        normalized = r"C:\Users\dev\project"
+        slug = _session_dir(normalized).rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+        assert slug == "C--Users-dev-project", (
+            f"Normalized Win32 path slug mismatch: got {slug!r}"
+        )
+
+    def test_resolve_paths_has_msys_normalization_block(self):
+        """resolve-paths.sh contains the OSTYPE=msys|cygwin normalization block."""
+        with open(os.path.join(REPO_ROOT, "scripts", "resolve-paths.sh")) as f:
+            content = f.read()
+        assert 'msys|cygwin' in content, (
+            "resolve-paths.sh missing the Git Bash / MSYS / Cygwin normalization case"
+        )
+        assert 'BASH_REMATCH' in content, (
+            "resolve-paths.sh missing the regex-based POSIX→Win32 conversion"
+        )
+
     # ── Point 2: python3/python detection via detect-tools.sh ──
     # Fixed: detect-tools.sh tries python3 then python, exports $PYTHON.
 
