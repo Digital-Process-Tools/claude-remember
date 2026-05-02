@@ -91,7 +91,7 @@ fi
 case "$OSTYPE" in
     msys|cygwin)
         if [[ "$PROJECT_DIR" =~ ^/([a-zA-Z])/(.*)$ ]]; then
-            _drive="${BASH_REMATCH[1]^^}"
+            _drive=$(printf '%s' "${BASH_REMATCH[1]}" | tr '[:lower:]' '[:upper:]')
             _rest="${BASH_REMATCH[2]//\//\\}"
             PROJECT_DIR="${_drive}:\\${_rest}"
         fi

@@ -1204,7 +1204,7 @@ class TestWindowsCompatIssue11:
             'case "$OSTYPE" in\n'
             '    msys|cygwin)\n'
             '        if [[ "$PROJECT_DIR" =~ ^/([a-zA-Z])/(.*)$ ]]; then\n'
-            '            _drive="${BASH_REMATCH[1]^^}"\n'
+            '            _drive=$(printf \'%s\' "${BASH_REMATCH[1]}" | tr \'[:lower:]\' \'[:upper:]\')\n'
             '            _rest="${BASH_REMATCH[2]//\\//\\\\}"\n'
             '            PROJECT_DIR="${_drive}:\\\\${_rest}"\n'
             '        fi\n'
