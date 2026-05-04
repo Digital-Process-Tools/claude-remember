@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/session-start-hook.sh\""
+            "command": "mkdir -p \"${CLAUDE_PROJECT_DIR:-.}/.remember/logs\" && bash \"${CLAUDE_PLUGIN_ROOT}/scripts/session-start-hook.sh\" 2>> \"${CLAUDE_PROJECT_DIR:-.}/.remember/logs/hook-errors.log\""
           }
         ]
       }
@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/post-tool-hook.sh\""
+            "command": "mkdir -p \"${CLAUDE_PROJECT_DIR:-.}/.remember/logs\" && bash \"${CLAUDE_PLUGIN_ROOT}/scripts/post-tool-hook.sh\" 2>> \"${CLAUDE_PROJECT_DIR:-.}/.remember/logs/hook-errors.log\""
           }
         ]
       }
