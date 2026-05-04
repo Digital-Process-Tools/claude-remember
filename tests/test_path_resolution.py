@@ -1017,7 +1017,7 @@ class TestRealisticPluginSimulation:
         """hooks.json stderr redirect captures FATAL errors to hook-errors.log.
 
         Simulates the exact command from hooks.json:
-          mkdir -p "${CLAUDE_PROJECT_DIR:-.}/.remember/logs" && bash "${CLAUDE_PLUGIN_ROOT}/scripts/..." >> "${CLAUDE_PROJECT_DIR:-.}/.remember/logs/hook-errors.log" 2>&1
+          mkdir -p "${CLAUDE_PROJECT_DIR:-.}/.remember/logs" && bash "${CLAUDE_PLUGIN_ROOT}/scripts/..." 2>> "${CLAUDE_PROJECT_DIR:-.}/.remember/logs/hook-errors.log"
         """
         project = os.path.join(str(tmp_path), "my-project")
         plugin = os.path.join(str(tmp_path), "cache", "org", "remember", "0.1.0")
@@ -1027,12 +1027,12 @@ class TestRealisticPluginSimulation:
 
         # Run the hook command exactly like hooks.json does, but WITHOUT
         # CLAUDE_PROJECT_DIR — so resolve-paths.sh fails with FATAL.
-        # The >> redirect should capture the error.
+        # The 2>> redirect should capture the error.
         hook_errors_log = os.path.join(project, ".remember", "logs", "hook-errors.log")
         cmd = (
             f'mkdir -p "{project}/.remember/logs" && '
             f'bash "{plugin}/scripts/session-start-hook.sh" '
-            f'>> "{hook_errors_log}" 2>&1'
+            f'2>> "{hook_errors_log}"'
         )
         # Use clean environment but preserve PATH so bash can be found
         env = dict(os.environ)
@@ -1074,7 +1074,7 @@ class TestRealisticPluginSimulation:
         cmd = (
             f'mkdir -p "{project}/.remember/logs" && '
             f'bash "{plugin}/scripts/post-tool-hook.sh" '
-            f'>> "{hook_errors_log}" 2>&1'
+            f'2>> "{hook_errors_log}"'
         )
         # Use clean environment but preserve PATH so bash can be found
         env = dict(os.environ)
@@ -1111,7 +1111,7 @@ class TestRealisticPluginSimulation:
         cmd = (
             f'mkdir -p "{project}/.remember/logs" && '
             f'bash "{plugin}/scripts/post-tool-hook.sh" '
-            f'>> "{hook_errors_log}" 2>&1'
+            f'2>> "{hook_errors_log}"'
         )
         # Use clean environment but preserve PATH so bash can be found
         env = dict(os.environ)
