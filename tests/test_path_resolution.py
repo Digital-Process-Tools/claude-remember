@@ -1017,7 +1017,7 @@ class TestRealisticPluginSimulation:
         """hooks.json stderr redirect captures FATAL errors to hook-errors.log.
 
         Simulates the exact command from hooks.json:
-          bash "${CLAUDE_PLUGIN_ROOT}/scripts/..." 2>> "${CLAUDE_PROJECT_DIR:-.}/.remember/logs/hook-errors.log"
+          mkdir -p "${CLAUDE_PROJECT_DIR:-.}/.remember/logs" && bash "${CLAUDE_PLUGIN_ROOT}/scripts/..." >> "${CLAUDE_PROJECT_DIR:-.}/.remember/logs/hook-errors.log" 2>&1
         """
         project = os.path.join(str(tmp_path), "my-project")
         plugin = os.path.join(str(tmp_path), "cache", "org", "remember", "0.1.0")
@@ -1027,20 +1027,31 @@ class TestRealisticPluginSimulation:
 
         # Run the hook command exactly like hooks.json does, but WITHOUT
         # CLAUDE_PROJECT_DIR — so resolve-paths.sh fails with FATAL.
-        # The 2>> redirect should capture the error.
+        # The >> redirect should capture the error.
         hook_errors_log = os.path.join(project, ".remember", "logs", "hook-errors.log")
         cmd = (
+            f'mkdir -p "{project}/.remember/logs" && '
             f'bash "{plugin}/scripts/session-start-hook.sh" '
-            f'2>> "{hook_errors_log}"'
+            f'>> "{hook_errors_log}" 2>&1'
         )
-        env = {k: v for k, v in os.environ.items()
-               if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT")}
-        # Set CLAUDE_PLUGIN_ROOT but NOT CLAUDE_PROJECT_DIR — partial env
+        # Use clean environment but preserve PATH so bash can be found
+        env = dict(os.environ)
+        env.pop("CLAUDE_PROJECT_DIR", None)
+        env.pop("CLAUDE_PLUGIN_ROOT", None)
         env["CLAUDE_PLUGIN_ROOT"] = plugin
-        result = subprocess.run(
-            ["bash", "-c", cmd], capture_output=True, text=True,
-            env=env, timeout=10,
-        )
+        # On Windows, use full path to bash.exe with shell=False to avoid cmd.exe mangling paths
+        import platform
+        if platform.system() == "Windows":
+            bash_exe = "C:\\Program Files\\Git\\usr\\bin\\bash.exe"
+            result = subprocess.run(
+                [bash_exe, "-c", cmd], capture_output=True, text=True,
+                env=env, timeout=10,
+            )
+        else:
+            result = subprocess.run(
+                ["bash", "-c", cmd], capture_output=True, text=True,
+                env=env, timeout=10,
+            )
         assert result.returncode != 0
 
         # The FATAL error should be in hook-errors.log, not lost
@@ -1061,16 +1072,27 @@ class TestRealisticPluginSimulation:
 
         hook_errors_log = os.path.join(project, ".remember", "logs", "hook-errors.log")
         cmd = (
+            f'mkdir -p "{project}/.remember/logs" && '
             f'bash "{plugin}/scripts/post-tool-hook.sh" '
-            f'2>> "{hook_errors_log}"'
+            f'>> "{hook_errors_log}" 2>&1'
         )
-        env = {k: v for k, v in os.environ.items()
-               if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT")}
+        # Use clean environment but preserve PATH so bash can be found
+        env = dict(os.environ)
+        env.pop("CLAUDE_PROJECT_DIR", None)
+        env.pop("CLAUDE_PLUGIN_ROOT", None)
         env["HOME"] = str(tmp_path)
-        result = subprocess.run(
-            ["bash", "-c", cmd], capture_output=True, text=True,
-            env=env, timeout=10,
-        )
+        import platform
+        if platform.system() == "Windows":
+            bash_exe = "C:\\Program Files\\Git\\usr\\bin\\bash.exe"
+            result = subprocess.run(
+                [bash_exe, "-c", cmd], capture_output=True, text=True,
+                env=env, timeout=10,
+            )
+        else:
+            result = subprocess.run(
+                ["bash", "-c", cmd], capture_output=True, text=True,
+                env=env, timeout=10,
+            )
         assert result.returncode == 0, f"Spaces in path broke the hook: {result.stderr[:200]}"
         # Verify log file was written to the correct path (with spaces)
         import glob
@@ -1087,16 +1109,27 @@ class TestRealisticPluginSimulation:
 
         hook_errors_log = os.path.join(project, ".remember", "logs", "hook-errors.log")
         cmd = (
+            f'mkdir -p "{project}/.remember/logs" && '
             f'bash "{plugin}/scripts/post-tool-hook.sh" '
-            f'2>> "{hook_errors_log}"'
+            f'>> "{hook_errors_log}" 2>&1'
         )
-        env = {k: v for k, v in os.environ.items()
-               if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT")}
+        # Use clean environment but preserve PATH so bash can be found
+        env = dict(os.environ)
+        env.pop("CLAUDE_PROJECT_DIR", None)
+        env.pop("CLAUDE_PLUGIN_ROOT", None)
         env["HOME"] = str(tmp_path)
-        result = subprocess.run(
-            ["bash", "-c", cmd], capture_output=True, text=True,
-            env=env, timeout=10,
-        )
+        import platform
+        if platform.system() == "Windows":
+            bash_exe = "C:\\Program Files\\Git\\usr\\bin\\bash.exe"
+            result = subprocess.run(
+                [bash_exe, "-c", cmd], capture_output=True, text=True,
+                env=env, timeout=10,
+            )
+        else:
+            result = subprocess.run(
+                ["bash", "-c", cmd], capture_output=True, text=True,
+                env=env, timeout=10,
+            )
         assert result.returncode == 0, f"stderr: {result.stderr[:200]}"
 
         # On success, no FATAL in hook-errors.log
