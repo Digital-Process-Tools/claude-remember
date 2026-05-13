@@ -250,7 +250,7 @@ echo ""
 # ── 7. Dry-run save ──────────────────────────────────────────────────────
 echo "7. Dry-run save (full flow, no Haiku)"
 
-DRY_OUT=$(cd "$PIPELINE_DIR" && bash scripts/save-session.sh --dry 2>/dev/null) || true
+DRY_OUT=$(cd "$PIPELINE_DIR" && CLAUDE_PROJECT_DIR="$PIPELINE_DIR" bash scripts/save-session.sh --dry 2>/dev/null) || true
 DRY_EXIT=$?
 if echo "$DRY_OUT" 2>/dev/null | grep -q "DRY RUN"; then
     LINES=$(echo "$DRY_OUT" | grep -c '^\[' 2>/dev/null || echo 0)
