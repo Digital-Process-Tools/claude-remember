@@ -1,12 +1,14 @@
 ---
 name: remember
 description: Save session state for clean continuation next session.
-allowed-tools: Write
+allowed-tools: Read, Write
 ---
 
 Write a handoff note so the next session can continue cleanly. Use your knowledge of the current session — you were here. Write in first person ("I").
 
 **Path:** `{project_root}/.remember/remember.md` (overwrite). This is at the PROJECT ROOT, NOT relative to this skill file. If the project root is `/Users/foo/myproject`, the file goes to `/Users/foo/myproject/.remember/remember.md`.
+
+**If the file already exists, Read it first before Writing.** The Write tool enforces a read-before-write check on existing files; without a prior Read, the first Write call will fail with "File has not been read yet." A 1-line Read is enough to satisfy the check.
 
 Format:
 
