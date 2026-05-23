@@ -355,7 +355,7 @@ pipeline/           Python core — extraction, prompts, parsing, types
 
 prompts/            Prompt templates (txt with {{PLACEHOLDER}} substitution)
 scripts/            Shell orchestration — locks, cooldowns, file I/O, backgrounding
-tests/              pytest suite (347 tests, 99%+ coverage)
+tests/              pytest suite (357 tests, 99%+ coverage)
 ```
 
 ## License
