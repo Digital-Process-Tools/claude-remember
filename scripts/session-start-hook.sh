@@ -70,9 +70,14 @@ if [ -d "$SESSIONS_DIR" ] && [ -f "$LAST_SAVE_FILE" ]; then
 fi
 fi
 
-# ── Identity: project-first fallback to plugin-bundled ────────────────────
+# ── Identity: per-project → user-global → plugin-bundled ──────────────────
+# User-global tier: <REMEMBER_ROOT>/identity.md (external mode only).
+# In legacy mode REMEMBER_ROOT == PROJECT_DIR, so we skip it there.
+REMEMBER_ROOT=$(dirname "$REMEMBER_DIR")
 if [ -f "$REMEMBER_DIR/identity.md" ]; then
     IDENTITY_FILE="$REMEMBER_DIR/identity.md"
+elif [ -f "$REMEMBER_ROOT/identity.md" ] && [ "$REMEMBER_ROOT" != "$PROJECT_DIR" ]; then
+    IDENTITY_FILE="$REMEMBER_ROOT/identity.md"
 else
     IDENTITY_FILE="$PLUGIN_ROOT/identity.md"
 fi
