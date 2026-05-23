@@ -2,7 +2,8 @@
   "data_dir": ".remember",
   "cooldowns": {
     "save_seconds": 120,
-    "ndc_seconds": 3600
+    "ndc_seconds": 3600,
+    "git_backup_seconds": 900
   },
   "thresholds": {
     "min_human_messages": 3,

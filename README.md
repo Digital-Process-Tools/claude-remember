@@ -243,6 +243,7 @@ Put cross-project preferences (timezone, cooldowns) in `~/.remember/config.json`
 | `data_dir`                       | `.remember` | Where memory files are written. Relative paths resolve inside the project root (legacy default). Absolute paths or paths starting with `~` are expanded and treated as external — see [External storage mode](#external-storage-mode). |
 | `cooldowns.save_seconds`         | `120`   | Minimum seconds between saves                      |
 | `cooldowns.ndc_seconds`          | `3600`  | Compression interval (hourly)                      |
+| `cooldowns.git_backup_seconds`   | `900`   | Minimum seconds between auto-backup commits (no-op if `~/.remember/` is not a git repo) |
 | `thresholds.min_human_messages`  | `3`     | Minimum messages before saving                     |
 | `thresholds.delta_lines_trigger` | `50`    | Tool call output lines that trigger auto-save      |
 | `features.ndc_compression`      | `true`  | Enable hourly compression of daily files           |
@@ -306,12 +307,25 @@ Because `~/.remember/` lives outside any project repo it won't be accidentally c
 ```bash
 cd ~/.remember
 git init
-echo "tmp/" >> .gitignore
-git add config.json
+git remote add origin git@github.com:youruser/remember-backup.git  # private repo
+# Write .gitignore BEFORE any git add — this excludes runtime state and log files.
+# Running git add before this step will track log dirs you don't want committed.
+cat > .gitignore <<'EOF'
+.git-backup.lock
+.last-git-backup-ts
+*/logs/
+*/tmp/
+EOF
+git add .gitignore config.json
 git commit -m "init: remember config"
+git push -u origin main
 ```
 
-Commit after sessions you want to preserve. Push to a private remote to sync across machines.
+#### Automatic commits
+
+Once `~/.remember/` is a git repo, the `after_save` hook commits each project's memory subdir on its own schedule — one commit per project save, throttled by `cooldowns.git_backup_seconds` (default 15 min) — and pushes to your configured remote. No further setup is needed beyond credential availability (SSH agent or git credential helper) in the environment Claude Code launches hooks in.
+
+If you don't want automatic commits, leave `~/.remember/` as a plain directory and commit manually as before.
 
 ## Running tests
 

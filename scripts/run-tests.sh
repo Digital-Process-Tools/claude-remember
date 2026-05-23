@@ -94,6 +94,16 @@ for script in save-session.sh run-consolidation.sh log.sh; do
     fi
 done
 
+for hook in "$PIPELINE_DIR"/hooks.d/**/*.sh; do
+    [ -f "$hook" ] || continue
+    rel="${hook#"$PIPELINE_DIR/"}"
+    if bash -n "$hook" 2>/dev/null; then
+        pass "$rel"
+    else
+        fail "$rel" "syntax error"
+    fi
+done
+
 echo ""
 
 # ── 3. Python unit tests ─────────────────────────────────────────────────

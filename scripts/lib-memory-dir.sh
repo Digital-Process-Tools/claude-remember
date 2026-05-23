@@ -35,8 +35,8 @@
 #
 # ============================================================================
 
-# Guard against double-sourcing.
-[ -n "$_LIB_MEMORY_DIR_LOADED" ] && return 0
+# Guard against double-sourcing. Use default-expansion so set -u callers don't error.
+[ -n "${_LIB_MEMORY_DIR_LOADED:-}" ] && return 0
 _LIB_MEMORY_DIR_LOADED=1
 
 # ── Helpers ──────────────────────────────────────────────────────────────────

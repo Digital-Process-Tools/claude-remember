@@ -8,5 +8,9 @@
 
   "data_dir": "~/.remember/{slug}",
 
-  "timezone": ""
+  "timezone": "",
+
+  "cooldowns": {
+    "git_backup_seconds": 900
+  }
 }
