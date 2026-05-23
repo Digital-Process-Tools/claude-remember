@@ -1528,6 +1528,7 @@ class TestFreshProjectBootstrap:
                if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT")}
         env["CLAUDE_PROJECT_DIR"] = project
         env["CLAUDE_PLUGIN_ROOT"] = plugin
+        env["HOME"] = str(tmp_path)
 
         result = subprocess.run(
             ["bash", os.path.join(plugin, "scripts", "session-start-hook.sh")],
@@ -1566,6 +1567,7 @@ class TestFreshProjectBootstrap:
                if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT")}
         env["CLAUDE_PROJECT_DIR"] = project
         env["CLAUDE_PLUGIN_ROOT"] = plugin
+        env["HOME"] = str(tmp_path)
 
         result = subprocess.run(
             ["bash", os.path.join(plugin, "scripts", "post-tool-hook.sh")],
@@ -1619,6 +1621,7 @@ class TestFreshProjectBootstrap:
                if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT")}
         env["CLAUDE_PROJECT_DIR"] = project
         env["CLAUDE_PLUGIN_ROOT"] = plugin
+        env["HOME"] = str(tmp_path)
 
         result = subprocess.run(
             ["bash", os.path.join(plugin, "scripts", "session-start-hook.sh")],
@@ -1645,6 +1648,7 @@ class TestFreshProjectBootstrap:
                if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT")}
         env["CLAUDE_PROJECT_DIR"] = project
         env["CLAUDE_PLUGIN_ROOT"] = plugin
+        env["HOME"] = str(tmp_path)
 
         result = subprocess.run(
             ["bash", os.path.join(plugin, "scripts", "session-start-hook.sh")],
@@ -1671,6 +1675,7 @@ class TestFreshProjectBootstrap:
                if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT")}
         env["CLAUDE_PROJECT_DIR"] = project
         env["CLAUDE_PLUGIN_ROOT"] = plugin
+        env["HOME"] = str(tmp_path)
 
         result = subprocess.run(
             ["bash", os.path.join(plugin, "scripts", "session-start-hook.sh")],
@@ -1699,6 +1704,7 @@ class TestFreshProjectBootstrap:
                if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT")}
         env["CLAUDE_PROJECT_DIR"] = project
         env["CLAUDE_PLUGIN_ROOT"] = plugin
+        env["HOME"] = str(tmp_path)
 
         result = subprocess.run(
             ["bash", os.path.join(plugin, "scripts", "session-start-hook.sh")],
@@ -1724,6 +1730,7 @@ class TestFreshProjectBootstrap:
                if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT")}
         env["CLAUDE_PROJECT_DIR"] = project
         env["CLAUDE_PLUGIN_ROOT"] = plugin
+        env["HOME"] = str(tmp_path)
 
         result = subprocess.run(
             ["bash", os.path.join(plugin, "scripts", "session-start-hook.sh")],
@@ -1801,6 +1808,7 @@ class TestFreshProjectBootstrap:
                if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT")}
         env["CLAUDE_PROJECT_DIR"] = project
         env["CLAUDE_PLUGIN_ROOT"] = plugin
+        env["HOME"] = str(tmp_path)
 
         # Run three times in succession
         for i in range(3):
@@ -1842,6 +1850,7 @@ class TestFreshProjectBootstrap:
         # Claude Code sets CLAUDE_PROJECT_DIR to the worktree
         env["CLAUDE_PROJECT_DIR"] = worktree
         env["CLAUDE_PLUGIN_ROOT"] = plugin
+        env["HOME"] = str(tmp_path)
 
         result = subprocess.run(
             ["bash", os.path.join(plugin, "scripts", "session-start-hook.sh")],
@@ -1877,6 +1886,7 @@ class TestFreshProjectBootstrap:
                if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT")}
         env["CLAUDE_PROJECT_DIR"] = project
         env["CLAUDE_PLUGIN_ROOT"] = plugin
+        env["HOME"] = str(tmp_path)
 
         script = os.path.join(plugin, "scripts", "session-start-hook.sh")
 
@@ -3165,6 +3175,7 @@ echo "TZ=$REMEMBER_TZ"
 #!/bin/bash
 export PROJECT_DIR="{project}"
 export PIPELINE_DIR="{plugin}"
+export HOME="{tmp_path}"
 source "{self.LOG_SH}" 2>/dev/null
 echo "LOG_DIR=$REMEMBER_LOG_DIR"
 """
@@ -3552,6 +3563,7 @@ echo "DISPATCH_COMPLETED=true"
                if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT")}
         env["CLAUDE_PROJECT_DIR"] = project
         env["CLAUDE_PLUGIN_ROOT"] = plugin
+        env["HOME"] = str(tmp_path)
 
         result = subprocess.run(
             ["bash", os.path.join(plugin, "scripts", "session-start-hook.sh")],

@@ -66,6 +66,16 @@ _resolve_remember_dir() {
     case "$data_dir" in
         /*|~*)
             # Absolute / home-relative: expand ~ and substitute {slug}.
+            # Guard: session_dir_slug may not be defined if detect-tools.sh was
+            # not sourced yet (e.g. log.sh sourced directly in tests). Define a
+            # minimal inline fallback so the slug is never silently empty.
+            if ! type session_dir_slug >/dev/null 2>&1; then
+                session_dir_slug() {
+                    local _p="$1"
+                    command -v cygpath >/dev/null 2>&1 && _p=$(cygpath -m "$_p")
+                    echo "$_p" | sed 's/[^a-zA-Z0-9]/-/g'
+                }
+            fi
             local slug
             slug=$(session_dir_slug "$proj")
             # shellcheck disable=SC2016  # we want literal ~ expansion here

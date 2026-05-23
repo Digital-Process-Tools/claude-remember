@@ -110,7 +110,7 @@ def test_log_sh_log_function_produces_filename_matching_configured_tz(tmp_path):
     """
     subprocess.run(
         ["bash", "-c", script],
-        env={**os.environ, "TZ": "UTC"},
+        env={**os.environ, "TZ": "UTC", "HOME": str(tmp_path)},
         check=True,
         capture_output=True,
     )
@@ -214,7 +214,7 @@ def test_log_sh_timestamp_inside_file_uses_configured_tz(tmp_path):
     """
     subprocess.run(
         ["bash", "-c", script],
-        env={**os.environ, "TZ": "UTC"},
+        env={**os.environ, "TZ": "UTC", "HOME": str(tmp_path)},
         check=True,
         capture_output=True,
     )
