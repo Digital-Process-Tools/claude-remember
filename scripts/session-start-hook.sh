@@ -32,31 +32,31 @@
 #
 # OUTPUT
 #   Prints memory content to stdout for injection into session context.
-#   Sections: === MEMORY ===, === MEMORY CONSOLIDATION ===
+#   Sections: === HANDOFF ===, === MEMORY ===, === MEMORY CONSOLIDATION ===
 #   hooks.d/ listeners may add their own (e.g., === TEAM ===).
 #
 # ============================================================================
 
 source "$(dirname "$0")/resolve-paths.sh"
-source "$(dirname "$0")/bootstrap-dirs.sh"
 source "$(dirname "$0")/detect-tools.sh"
+source "$(dirname "$0")/bootstrap-dirs.sh"
 PLUGIN_ROOT="$PIPELINE_DIR"
 PROJECT="$PROJECT_DIR"
 source "$PLUGIN_ROOT/scripts/log.sh" 2>/dev/null
 TODAY=$(TZ="$REMEMBER_TZ" date '+%Y-%m-%d')
-log "hook" "session-start: PROJECT_DIR=$PROJECT_DIR PIPELINE_DIR=$PIPELINE_DIR"
+log "hook" "session-start: PROJECT_DIR=$PROJECT_DIR PIPELINE_DIR=$PIPELINE_DIR REMEMBER_DIR=$REMEMBER_DIR"
 
 # ── Dispatch: before_session_start ────────────────────────────────────────
 dispatch "before_session_start"
 
 # ── Cleanup + health check ─────────────────────────────────────────────────
-rm -f "$PROJECT/.remember/tmp/save-session.pid"
+rm -f "$REMEMBER_DIR/tmp/save-session.pid"
 
 # ── Recovery: save the most recent missed session ──────────────────────────
 if [ "$(config '.features.recovery' true)" = "true" ]; then
 PROJECT_PATH_SLUG="$(session_dir_slug "$PROJECT")"
 SESSIONS_DIR="$HOME/.claude/projects/${PROJECT_PATH_SLUG}"
-LAST_SAVE_FILE="$PROJECT/.remember/tmp/last-save.json"
+LAST_SAVE_FILE="$REMEMBER_DIR/tmp/last-save.json"
 
 if [ -d "$SESSIONS_DIR" ] && [ -f "$LAST_SAVE_FILE" ]; then
     SAVED_ID=$($JQ -r '.session // ""' "$LAST_SAVE_FILE" 2>/dev/null)
@@ -70,13 +70,25 @@ if [ -d "$SESSIONS_DIR" ] && [ -f "$LAST_SAVE_FILE" ]; then
 fi
 fi
 
-IDENTITY_FILE="$PLUGIN_ROOT/identity.md"
-CORE_MEMORIES="$PROJECT/.remember/core-memories.md"
-REMEMBER_RECENT="$PROJECT/.remember/recent.md"
-REMEMBER_ARCHIVE="$PROJECT/.remember/archive.md"
-REMEMBER_HANDOFF="$PROJECT/.remember/remember.md"
-REMEMBER_NOW="$PROJECT/.remember/now.md"
-REMEMBER_TODAY_FILE="$PROJECT/.remember/today-${TODAY}.md"
+# ── Identity: project-first fallback to plugin-bundled ────────────────────
+if [ -f "$REMEMBER_DIR/identity.md" ]; then
+    IDENTITY_FILE="$REMEMBER_DIR/identity.md"
+else
+    IDENTITY_FILE="$PLUGIN_ROOT/identity.md"
+fi
+
+CORE_MEMORIES="$REMEMBER_DIR/core-memories.md"
+REMEMBER_RECENT="$REMEMBER_DIR/recent.md"
+REMEMBER_ARCHIVE="$REMEMBER_DIR/archive.md"
+REMEMBER_HANDOFF="$REMEMBER_DIR/remember.md"
+REMEMBER_NOW="$REMEMBER_DIR/now.md"
+REMEMBER_TODAY_FILE="$REMEMBER_DIR/today-${TODAY}.md"
+
+# ── Handoff path hint (consumed by the /remember skill) ───────────────────
+# Emitted unconditionally so the skill always knows the correct write target.
+echo "=== HANDOFF ==="
+echo "Write next handoff to: $REMEMBER_HANDOFF"
+echo ""
 
 # ── History hint ───────────────────────────────────────────────────────────
 cat "$PLUGIN_ROOT/prompts/session-history-hint.txt" 2>/dev/null
@@ -109,7 +121,7 @@ fi
 
 # ── Consolidation trigger ─────────────────────────────────────────────────
 # If past-day staging files exist, compress them in the background.
-STAGING_COUNT=$(ls "$PROJECT/.remember/today-"*.md 2>/dev/null | grep -v "today-${TODAY}.md" | grep -v "\.done\.md" | wc -l | tr -d ' ')
+STAGING_COUNT=$(ls "$REMEMBER_DIR/today-"*.md 2>/dev/null | grep -v "today-${TODAY}.md" | grep -v "\.done\.md" | wc -l | tr -d ' ')
 if [ "$STAGING_COUNT" -gt 0 ]; then
     echo "=== MEMORY CONSOLIDATION ==="
     echo "$STAGING_COUNT day(s) of memory to compress. Running consolidation in background..."

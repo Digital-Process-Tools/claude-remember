@@ -13,5 +13,27 @@
     "recovery": true
   },
   "debug": false,
-  "time_format": "24h"
+  "time_format": "24h",
+
+  "_comments": {
+    "data_dir": [
+      "Controls where memory data files are stored.",
+      "",
+      "Legacy default — project-relative (unchanged behaviour):",
+      "  '.remember'  →  {project_dir}/.remember",
+      "",
+      "External mode — absolute or home-relative path:",
+      "  '~/.remember/{slug}'  →  ~/.remember/<session-dir-slug>/",
+      "  '/var/lib/remember/{slug}'  →  /var/lib/remember/<slug>/",
+      "",
+      "{slug} is replaced by the same slug Claude Code uses for",
+      "~/.claude/projects/<slug>/, so each project gets its own",
+      "isolated subtree. The .gitignore is NOT written in external",
+      "mode — manage the ~/.remember/ tree as your own private repo.",
+      "",
+      "User-global config lives at ~/.remember/config.json and is",
+      "merged on top of this file (per-project overrides user-global",
+      "which overrides these shipped defaults). See config.user.example.json."
+    ]
+  }
 }

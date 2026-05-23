@@ -37,12 +37,13 @@ set -e
 
 source "$(dirname "$0")/resolve-paths.sh"
 source "$(dirname "$0")/detect-tools.sh"
+source "$(dirname "$0")/bootstrap-dirs.sh"
 source "$(dirname "$0")/log.sh"
-log "hook" "run-consolidation: PROJECT_DIR=$PROJECT_DIR PIPELINE_DIR=$PIPELINE_DIR PYTHON=$PYTHON"
+log "hook" "run-consolidation: PROJECT_DIR=$PROJECT_DIR PIPELINE_DIR=$PIPELINE_DIR PYTHON=$PYTHON REMEMBER_DIR=$REMEMBER_DIR"
 rotate_logs
 
 # --- Lock (atomic via noclobber) ---
-LOCK_FILE="${PROJECT_DIR}/.remember/tmp/consolidation.lock"
+LOCK_FILE="${REMEMBER_DIR}/tmp/consolidation.lock"
 if ! ( set -o noclobber; echo $$ > "$LOCK_FILE" ) 2>/dev/null; then
     LOCK_PID=$(cat "$LOCK_FILE" 2>/dev/null)
     if kill -0 "$LOCK_PID" 2>/dev/null; then
@@ -53,7 +54,7 @@ if ! ( set -o noclobber; echo $$ > "$LOCK_FILE" ) 2>/dev/null; then
 fi
 trap 'rm -f "$LOCK_FILE"' EXIT
 
-STAGING_DIR="${PROJECT_DIR}/.remember"
+STAGING_DIR="${REMEMBER_DIR}"
 RECENT_FILE="${STAGING_DIR}/recent.md"
 ARCHIVE_FILE="${STAGING_DIR}/archive.md"
 

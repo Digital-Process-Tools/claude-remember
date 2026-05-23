@@ -45,9 +45,14 @@ def _session_dir(project_dir: str) -> str:
     return os.path.expanduser("~/.claude/projects/" + slug)
 
 
-def _last_save_path(project_dir: str) -> str:
-    """Return the path to last-save.json for incremental extraction."""
-    return os.path.join(project_dir, ".remember", "tmp", "last-save.json")
+def _last_save_path(project_dir: str, remember_dir: str | None = None) -> str:
+    """Return the path to last-save.json for incremental extraction.
+
+    Uses REMEMBER_DIR env var when set, so external-mode paths work
+    without changing the call signature everywhere.
+    """
+    effective = remember_dir or os.environ.get("REMEMBER_DIR") or os.path.join(project_dir, ".remember")
+    return os.path.join(effective, "tmp", "last-save.json")
 
 
 def _validate_session_id(session_id: str) -> None:
@@ -84,7 +89,8 @@ def find_session(session_id: str | None = None,
 
 
 def get_last_save_line(session_id: str,
-                       project_dir: str = _DEFAULT_PROJECT_DIR) -> int:
+                       project_dir: str = _DEFAULT_PROJECT_DIR,
+                       remember_dir: str | None = None) -> int:
     """Return the JSONL line number where the last save happened.
 
     Reads ``last-save.json`` and returns the saved line position if it
@@ -94,11 +100,13 @@ def get_last_save_line(session_id: str,
     Args:
         session_id: Session UUID to match against the saved position.
         project_dir: Root directory of the Claude Code project.
+        remember_dir: Override for the memory data directory. When None,
+            falls back to the REMEMBER_DIR env var or project-relative default.
 
     Returns:
         Line number (0-indexed) to resume extraction from, or 0.
     """
-    path = _last_save_path(project_dir)
+    path = _last_save_path(project_dir, remember_dir)
     if not os.path.exists(path):
         return 0
     try:
@@ -240,6 +248,7 @@ def extract_session(
     project_dir: str = _DEFAULT_PROJECT_DIR,
     count: int | None = None,
     show_all: bool = False,
+    remember_dir: str | None = None,
 ) -> ExtractResult:
     """Main entry point: extract exchanges from a session.
 
@@ -248,6 +257,8 @@ def extract_session(
         project_dir: Project root directory.
         count: If set, return only the last N exchanges.
         show_all: If True, extract from line 0.
+        remember_dir: Override for the memory data directory (external mode).
+            When None, falls back to REMEMBER_DIR env var or project default.
 
     Returns:
         ExtractResult with formatted exchanges and position.
@@ -265,7 +276,7 @@ def extract_session(
         messages = extract_messages(path, skip_lines=0)
         messages = messages[-count:]
     else:
-        last_line = get_last_save_line(actual_id, project_dir)
+        last_line = get_last_save_line(actual_id, project_dir, remember_dir)
         messages = extract_messages(path, skip_lines=last_line)
 
     # Format as text
