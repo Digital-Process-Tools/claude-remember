@@ -326,6 +326,7 @@ git remote add origin git@github.com:youruser/remember-backup.git  # private rep
 cat > .gitignore <<'EOF'
 .git-backup.lock
 .last-git-backup-ts
+.git-backup-remote
 */logs/
 */tmp/
 EOF

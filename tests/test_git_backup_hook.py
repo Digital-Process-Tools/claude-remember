@@ -46,7 +46,7 @@ def make_external_remember_repo(tmp_path: Path):
     subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True, capture_output=True)
     _git(remember, ["remote", "add", "origin", str(remote)])
     gitignore = remember / ".gitignore"
-    gitignore.write_text(".git-backup.lock\n.last-git-backup-ts\n*/logs/\n*/tmp/\n")
+    gitignore.write_text(".git-backup.lock\n.last-git-backup-ts\n.git-backup-remote\n*/logs/\n*/tmp/\n")
     _git(remember, ["add", ".gitignore"])
     _git(remember, ["commit", "-q", "-m", "init"])
     _git(remember, ["push", "-q", "-u", "origin", "main"])
