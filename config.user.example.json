@@ -1,0 +1,16 @@
+{
+  "_purpose": "Copy this file to ~/.remember/config.json to enable external storage mode.",
+  "_notes": [
+    "Settings here override the plugin-shipped defaults for ALL your projects.",
+    "Per-project overrides go in {REMEMBER_DIR}/config.json (e.g. ~/.remember/<slug>/config.json).",
+    "Layered merge order (highest priority wins): per-project > user-global > plugin defaults."
+  ],
+
+  "data_dir": "~/.remember/{slug}",
+
+  "timezone": "",
+
+  "cooldowns": {
+    "git_backup_seconds": 900
+  }
+}

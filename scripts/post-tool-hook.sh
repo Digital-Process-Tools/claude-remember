@@ -29,15 +29,15 @@
 
 # --- Resolve paths ---
 source "$(dirname "$0")/resolve-paths.sh"
-source "$(dirname "$0")/bootstrap-dirs.sh"
 source "$(dirname "$0")/detect-tools.sh"
+source "$(dirname "$0")/bootstrap-dirs.sh"
 PLUGIN_ROOT="$PIPELINE_DIR"
 PROJECT="$PROJECT_DIR"
 source "$PLUGIN_ROOT/scripts/log.sh" 2>/dev/null
-log "hook" "post-tool: PROJECT_DIR=$PROJECT_DIR PIPELINE_DIR=$PIPELINE_DIR PYTHON=$PYTHON"
+log "hook" "post-tool: PROJECT_DIR=$PROJECT_DIR PIPELINE_DIR=$PIPELINE_DIR PYTHON=$PYTHON REMEMBER_DIR=$REMEMBER_DIR"
 SAVE_SCRIPT="$PLUGIN_ROOT/scripts/save-session.sh"
-LAST_SAVE_FILE="$PROJECT/.remember/tmp/last-save.json"
-PID_FILE="$PROJECT/.remember/tmp/save-session.pid"
+LAST_SAVE_FILE="$REMEMBER_DIR/tmp/last-save.json"
+PID_FILE="$REMEMBER_DIR/tmp/save-session.pid"
 SESSION_DIR="$HOME/.claude/projects/$(session_dir_slug "$PROJECT")"
 
 [ -f "$SAVE_SCRIPT" ] || exit 0
@@ -89,8 +89,8 @@ if [ "$DELTA" -gt "$DELTA_THRESHOLD" ]; then
     fi
 
     if [ "$ALREADY_RUNNING" = false ]; then
-        mkdir -p "$PROJECT/.remember/logs/autonomous"
-        nohup "$SAVE_SCRIPT" "$SESSION_ID" > "$PROJECT/.remember/logs/autonomous/save-$(_remember_date +%H%M%S).log" 2>&1 &
+        mkdir -p "$REMEMBER_DIR/logs/autonomous"
+        nohup "$SAVE_SCRIPT" "$SESSION_ID" > "$REMEMBER_DIR/logs/autonomous/save-$(_remember_date +%H%M%S).log" 2>&1 &
         echo $! > "$PID_FILE"
         SAVE_TRIGGERED="true"
     fi

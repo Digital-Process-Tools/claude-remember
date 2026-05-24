@@ -212,27 +212,38 @@ Before clearing context or ending a session, type `/remember`. The agent writes 
 
 ## Data files
 
-The pipeline writes to `.remember/` (created automatically, self-gitignored):
+The pipeline writes to `REMEMBER_DIR` (created automatically). By default this is `.remember/` inside your project root; in external storage mode it is a per-project subdirectory of `~/.remember/` (see [External storage mode](#external-storage-mode)).
 
 | File                           | Purpose                                           |
 | ------------------------------ | ------------------------------------------------- |
-| `.remember/now.md`             | Current session buffer                            |
-| `.remember/today-*.md`         | Daily compressed summaries                        |
-| `.remember/recent.md`          | Last 7 days consolidated                          |
-| `.remember/archive.md`         | Older history consolidated                        |
-| `.remember/logs/`              | Pipeline logs                                     |
-| `.remember/tmp/`               | Lock files, cooldown markers                      |
+| `now.md`                       | Current session buffer                            |
+| `today-*.md`                   | Daily compressed summaries                        |
+| `recent.md`                    | Last 7 days consolidated                          |
+| `archive.md`                   | Older history consolidated                        |
+| `remember.md`                  | Handoff note written by `/remember`               |
+| `logs/`                        | Pipeline logs                                     |
+| `tmp/`                         | Lock files, cooldown markers                      |
+| `identity.md`                  | Per-project identity override (optional)          |
 | `.claude/remember/identity.md` | Your agent's identity and values (you write this) |
 
 ## Configuration
 
-Copy `config.example.json` to `config.json` and adjust:
+Config is resolved by deep-merging three layers (highest priority wins):
+
+| Layer | Path | Scope |
+|-------|------|-------|
+| Plugin bundled | `<plugin>/config.json` | Shipped defaults |
+| User-global | `~/.remember/config.json` | All your projects |
+| Per-project | `<REMEMBER_DIR>/config.json` | One project |
+
+Put cross-project preferences (timezone, cooldowns) in `~/.remember/config.json`. Put project-specific overrides in `<REMEMBER_DIR>/config.json`. See `config.user.example.json` for a user-global template and `config.example.json` for all available keys.
 
 | Key                              | Default | Purpose                                            |
 | -------------------------------- | ------- | -------------------------------------------------- |
-| `data_dir`                       | `.remember` | Where output files are written                 |
+| `data_dir`                       | `.remember` | Where memory files are written. Relative paths resolve inside the project root (legacy default). Absolute paths or paths starting with `~` are expanded and treated as external — see [External storage mode](#external-storage-mode). |
 | `cooldowns.save_seconds`         | `120`   | Minimum seconds between saves                      |
 | `cooldowns.ndc_seconds`          | `3600`  | Compression interval (hourly)                      |
+| `cooldowns.git_backup_seconds`   | `900`   | Minimum seconds between auto-backup commits (no-op if `~/.remember/` is not a git repo) |
 | `thresholds.min_human_messages`  | `3`     | Minimum messages before saving                     |
 | `thresholds.delta_lines_trigger` | `50`    | Tool call output lines that trigger auto-save      |
 | `features.ndc_compression`      | `true`  | Enable hourly compression of daily files           |
@@ -240,6 +251,81 @@ Copy `config.example.json` to `config.json` and adjust:
 | `timezone`                       | *(system local)* | IANA name (e.g. `America/New_York`, `Europe/Paris`) for timestamps and daily file boundaries. Omit or leave empty to use the system clock's local zone. Set this explicitly on a VPS whose system clock is UTC. |
 | `time_format`                    | `24h`   | `24h` or `12h` — controls timestamp format in log files (e.g. `14:30:00` vs `2:30:00 PM`) |
 | `debug`                          | `false` | Verbose logging for cooldowns and locks            |
+
+## External storage mode
+
+By default, memory data lives in `.remember/` inside each project directory. This works but has a drawback: it pollutes `git status` and siloes memory per repo clone.
+
+**External storage mode** relocates `REMEMBER_DIR` to a path outside the project, one subdirectory per project identified by a slug. The `{slug}` placeholder expands to the same value Claude Code uses for `~/.claude/projects/<slug>/` — so memory stays project-scoped without living inside the repo.
+
+### Enable
+
+Create `~/.remember/config.json`:
+
+```json
+{ "data_dir": "~/.remember/{slug}" }
+```
+
+On next session start, the plugin:
+1. Resolves `REMEMBER_DIR` to `~/.remember/<slug-of-project>/`
+2. Auto-migrates any existing `<project>/.remember/` to the new location — once, leaving a `MIGRATED-TO.txt` marker in the old directory
+3. Skips writing `.gitignore` (the external directory is not inside a git repo)
+
+### `{slug}` expansion
+
+`data_dir` values starting with `/` or `~` are treated as absolute. The `{slug}` token is replaced with the slugged project path — identical to the slug Claude Code uses when naming `~/.claude/projects/<slug>/`. All non-alphanumeric characters become `-`:
+
+```
+~/.remember/{slug}  →  ~/.remember/-home-alice-projects-my-app
+```
+
+### Handoff path
+
+When external mode is active, `session-start-hook.sh` emits a `=== HANDOFF ===` block at session start:
+
+```
+=== HANDOFF ===
+Write next handoff to: /home/alice/.remember/-home-alice-projects-my-app/remember.md
+```
+
+The `/remember` skill reads this block to know where to write. If no block is present (legacy mode), it falls back to `{project_root}/.remember/remember.md`.
+
+### Per-project identity override
+
+Place an `identity.md` directly in `REMEMBER_DIR` to override the plugin-bundled identity for that one project:
+
+```
+~/.remember/<slug>/identity.md
+```
+
+If this file exists it takes precedence over `<plugin>/identity.md`. The per-project version is never overwritten by plugin updates.
+
+### Back up your memory
+
+Because `~/.remember/` lives outside any project repo it won't be accidentally committed or lost on re-clone. To keep it safe, track it in a private git repository:
+
+```bash
+cd ~/.remember
+git init
+git remote add origin git@github.com:youruser/remember-backup.git  # private repo
+# Write .gitignore BEFORE any git add — this excludes runtime state and log files.
+# Running git add before this step will track log dirs you don't want committed.
+cat > .gitignore <<'EOF'
+.git-backup.lock
+.last-git-backup-ts
+*/logs/
+*/tmp/
+EOF
+git add .gitignore config.json
+git commit -m "init: remember config"
+git push -u origin main
+```
+
+#### Automatic commits
+
+Once `~/.remember/` is a git repo, the `after_save` hook commits each project's memory subdir on its own schedule — one commit per project save, throttled by `cooldowns.git_backup_seconds` (default 15 min) — and pushes to your configured remote. No further setup is needed beyond credential availability (SSH agent or git credential helper) in the environment Claude Code launches hooks in.
+
+If you don't want automatic commits, leave `~/.remember/` as a plain directory and commit manually as before.
 
 ## Running tests
 
@@ -269,7 +355,7 @@ pipeline/           Python core — extraction, prompts, parsing, types
 
 prompts/            Prompt templates (txt with {{PLACEHOLDER}} substitution)
 scripts/            Shell orchestration — locks, cooldowns, file I/O, backgrounding
-tests/              pytest suite (186 tests, 99%+ coverage)
+tests/              pytest suite (357 tests, 99%+ coverage)
 ```
 
 ## License

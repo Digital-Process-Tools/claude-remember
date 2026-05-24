@@ -53,6 +53,9 @@ def cmd_extract(session_id: str, project_dir: str) -> None:
     Writes the formatted exchange text to a temp file (avoiding shell
     escaping of large text) and prints its path as ``EXTRACT_FILE``.
 
+    Respects the REMEMBER_DIR environment variable for external-mode
+    last-save.json lookup.
+
     Args:
         session_id: UUID of the session to extract.
         project_dir: Root directory of the Claude Code project.
@@ -62,7 +65,8 @@ def cmd_extract(session_id: str, project_dir: str) -> None:
         EXTRACT_FILE (path to temp file containing exchange text).
     """
     import tempfile
-    r = extract_session(session_id=session_id, project_dir=project_dir)
+    remember_dir = os.environ.get("REMEMBER_DIR") or None
+    r = extract_session(session_id=session_id, project_dir=project_dir, remember_dir=remember_dir)
 
     # Write exchanges to temp file (avoids shell escaping of large text)
     fd, extract_file = tempfile.mkstemp(prefix="remember-extract-", suffix=".txt")

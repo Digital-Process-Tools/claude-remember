@@ -15,10 +15,12 @@
 #   config ".cooldowns.save_seconds" 120
 #
 # ENVIRONMENT
-#   PROJECT_DIR   Project root (default: .)
+#   PROJECT_DIR   Project root — must be set before sourcing
+#   PIPELINE_DIR  Plugin root  — must be set before sourcing
+#   REMEMBER_DIR  Memory data dir — set by lib-memory-dir.sh (sourced here)
 #
 # OUTPUT
-#   .remember/logs/memory-YYYY-MM-DD.log
+#   $REMEMBER_DIR/logs/memory-YYYY-MM-DD.log
 #   Format: HH:MM:SS [component] message
 #
 # DEPENDENCIES
@@ -34,16 +36,27 @@
 #
 # ============================================================================
 
-REMEMBER_LOG_DIR="${PROJECT_DIR:-.}/.remember/logs"
+# Ensure PIPELINE_DIR is set. Should be set by resolve-paths.sh before
+# sourcing this file. Falls back to local-install convention if unset.
+PIPELINE_DIR="${PIPELINE_DIR:-${PROJECT_DIR:-.}/.claude/remember}"
+
+# Resolve REMEMBER_DIR and the merged REMEMBER_CONFIG (lib-memory-dir.sh is a
+# no-op if already loaded via the _LIB_MEMORY_DIR_LOADED guard).
+_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$_LIB_DIR/lib-memory-dir.sh"
+unset _LIB_DIR
+
+# ── Logging setup ─────────────────────────────────────────────────────────────
+
+REMEMBER_LOG_DIR="${REMEMBER_DIR}/logs"
 if ! mkdir -p "$REMEMBER_LOG_DIR" 2>/dev/null; then
     echo "FATAL: cannot create $REMEMBER_LOG_DIR" >&2
     return 1 2>/dev/null || true
 fi
 
-# Read .timezone from config.json BEFORE computing MEMORY_LOG_DATE — otherwise
+# Read .timezone from config BEFORE computing MEMORY_LOG_DATE — otherwise
 # TZ="" falls back to UTC on macOS/BSD and produces next-day filenames after
 # ~20:00 local in zones west of UTC.
-REMEMBER_CONFIG="${PIPELINE_DIR:-${PROJECT_DIR:-.}/.claude/remember}/config.json"
 config() {
     local key="$1"
     local default="$2"
@@ -131,39 +144,6 @@ safe_eval() {
     done
 }
 
-# Read a configuration value from config.json using jq.
-#
-# Falls back to the provided default if config.json is missing,
-# jq is not installed, or the key doesn't exist.
-#
-# Args:
-#   $1 — jq key path (e.g., ".cooldowns.save_seconds")
-#   $2 — default value if key is absent or jq unavailable
-#
-# Output:
-#   Prints the resolved value to stdout.
-#
-# Usage:
-#   SAVE_COOLDOWN=$(config ".cooldowns.save_seconds" 120)
-
-# Ensure PIPELINE_DIR is set. Should be set by resolve-paths.sh before
-# sourcing this file. Falls back to local-install convention if unset.
-PIPELINE_DIR="${PIPELINE_DIR:-${PROJECT_DIR:-.}/.claude/remember}"
-
-REMEMBER_CONFIG="$PIPELINE_DIR/config.json"
-config() {
-    local key="$1"
-    local default="$2"
-    if [ -f "$REMEMBER_CONFIG" ] && command -v jq >/dev/null 2>&1; then
-        local val
-        val=$(jq -r "$key // empty" "$REMEMBER_CONFIG" 2>/dev/null)
-        [ -n "$val" ] && echo "$val" || echo "$default"
-    else
-        echo "$default"
-    fi
-}
-
-REMEMBER_TZ=$(config ".timezone" "")
 # Dispatch a lifecycle event to all registered hooks.
 #
 # Runs every executable in hooks.d/<event>/, passing the project path

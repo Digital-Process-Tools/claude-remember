@@ -142,6 +142,39 @@ def test_get_last_save_line_different_session():
         assert get_last_save_line("new-session", project_dir=d) == 0
 
 
+# ─── External-mode: remember_dir parameter ───────────────────────────────────
+
+def test_last_save_path_explicit_remember_dir():
+    """remember_dir override takes precedence over project_dir default."""
+    path = _last_save_path("/some/project", remember_dir="/ext/mem")
+    assert path == "/ext/mem/tmp/last-save.json"
+
+
+def test_last_save_path_env_var_fallback(monkeypatch):
+    """REMEMBER_DIR env var is honoured when remember_dir is None."""
+    monkeypatch.setenv("REMEMBER_DIR", "/env/mem")
+    path = _last_save_path("/some/project")
+    assert path == "/env/mem/tmp/last-save.json"
+
+
+def test_last_save_path_project_fallback(monkeypatch):
+    """Falls back to project-relative path when nothing else is set."""
+    monkeypatch.delenv("REMEMBER_DIR", raising=False)
+    path = _last_save_path("/some/project")
+    assert path == "/some/project/.remember/tmp/last-save.json"
+
+
+def test_get_last_save_line_with_external_remember_dir():
+    """get_last_save_line reads from remember_dir, not project_dir/.remember."""
+    with tempfile.TemporaryDirectory() as ext:
+        save_dir = os.path.join(ext, "tmp")
+        os.makedirs(save_dir)
+        with open(os.path.join(save_dir, "last-save.json"), "w") as f:
+            json.dump({"session": "ext-session", "line": 77}, f)
+        # project_dir has no .remember; the data lives in ext/
+        assert get_last_save_line("ext-session", project_dir="/nonexistent", remember_dir=ext) == 77
+
+
 def test_extract_messages_corrupt_lines():
     with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
         f.write('{"type":"user","message":{"role":"user","content":"hello"}}\n')

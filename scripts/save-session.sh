@@ -56,20 +56,16 @@ trap 'log "error" "FAILED at line $LINENO (exit $?)"' ERR
 
 source "$(dirname "$0")/resolve-paths.sh"
 source "$(dirname "$0")/detect-tools.sh"
+source "$(dirname "$0")/bootstrap-dirs.sh"
 source "$(dirname "$0")/log.sh"
-log "hook" "save-session: PROJECT_DIR=$PROJECT_DIR PIPELINE_DIR=$PIPELINE_DIR PYTHON=$PYTHON"
+log "hook" "save-session: PROJECT_DIR=$PROJECT_DIR PIPELINE_DIR=$PIPELINE_DIR PYTHON=$PYTHON REMEMBER_DIR=$REMEMBER_DIR"
 
-REMEMBER_DATA="${PROJECT_DIR}/.remember"
-LOCK_FILE="${REMEMBER_DATA}/tmp/save.lock"
-MEMORY_FILE="${REMEMBER_DATA}/now.md"
-LAST_SAVE_FILE="${REMEMBER_DATA}/tmp/last-save.json"
-COOLDOWN_MARKER="${REMEMBER_DATA}/tmp/last-save-ts"
+LOCK_FILE="${REMEMBER_DIR}/tmp/save.lock"
+MEMORY_FILE="${REMEMBER_DIR}/now.md"
+LAST_SAVE_FILE="${REMEMBER_DIR}/tmp/last-save.json"
+COOLDOWN_MARKER="${REMEMBER_DIR}/tmp/last-save-ts"
 TODAY_DATE=$(TZ="$REMEMBER_TZ" date +%Y-%m-%d)
 CLEANUP_FILES=()
-
-# Auto-create data dir + gitignore on first run
-mkdir -p "${REMEMBER_DATA}/tmp"
-[ -f "${REMEMBER_DATA}/.gitignore" ] || echo '*' > "${REMEMBER_DATA}/.gitignore"
 
 # Remove lock file and all accumulated temp files on exit.
 cleanup() { rm -f "$LOCK_FILE" "${CLEANUP_FILES[@]}"; }
@@ -154,7 +150,8 @@ fi
 BRANCH=$(cd "$PROJECT_DIR" && git branch --show-current 2>/dev/null || echo "unknown")
 TIME_FORMAT=$(config ".time_format" "24h")
 if [ "$TIME_FORMAT" = "12h" ]; then
-    CURRENT_TIME=$(TZ="$REMEMBER_TZ" date '+%-I:%M %p')
+    # Force uppercase AM/PM: %p is locale-dependent (lowercase on many Linux systems).
+    CURRENT_TIME=$(TZ="$REMEMBER_TZ" date '+%-I:%M %p' | tr '[:lower:]' '[:upper:]')
 else
     CURRENT_TIME=$(TZ="$REMEMBER_TZ" date '+%H:%M')
 fi
@@ -216,7 +213,7 @@ log "write" "position → $POSITION"
 dispatch "after_save"
 
 # --- Step 8: NDC compression (1h cooldown, background) ---
-NDC_MARKER="${PROJECT_DIR}/.remember/tmp/last-ndc.ts"
+NDC_MARKER="${REMEMBER_DIR}/tmp/last-ndc.ts"
 RUN_NDC=true
 if [ -f "$NDC_MARKER" ]; then
     NDC_MOD=$(cat "$NDC_MARKER" 2>/dev/null || echo 0)
@@ -224,7 +221,7 @@ if [ -f "$NDC_MARKER" ]; then
     [ $(( $(date +%s) - NDC_MOD )) -lt "$NDC_COOLDOWN" ] && RUN_NDC=false
 fi
 
-TODAY_FILE="${PROJECT_DIR}/.remember/today-${TODAY_DATE}.md"
+TODAY_FILE="${REMEMBER_DIR}/today-${TODAY_DATE}.md"
 
 if [ "$RUN_NDC" = true ]; then
     log "ndc" "now.md → today-${TODAY_DATE}.md"
@@ -269,5 +266,5 @@ if [ "$RUN_NDC" = true ]; then
     fi
 
     # Housekeeping: remove empty autonomous logs
-    find "${PROJECT_DIR}/.remember/logs/autonomous" -name "*.log" -empty -delete 2>/dev/null
+    find "${REMEMBER_DIR}/logs/autonomous" -name "*.log" -empty -delete 2>/dev/null
 fi

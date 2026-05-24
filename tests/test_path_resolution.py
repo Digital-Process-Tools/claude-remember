@@ -1528,6 +1528,7 @@ class TestFreshProjectBootstrap:
                if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT")}
         env["CLAUDE_PROJECT_DIR"] = project
         env["CLAUDE_PLUGIN_ROOT"] = plugin
+        env["HOME"] = str(tmp_path)
 
         result = subprocess.run(
             ["bash", os.path.join(plugin, "scripts", "session-start-hook.sh")],
@@ -1566,6 +1567,7 @@ class TestFreshProjectBootstrap:
                if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT")}
         env["CLAUDE_PROJECT_DIR"] = project
         env["CLAUDE_PLUGIN_ROOT"] = plugin
+        env["HOME"] = str(tmp_path)
 
         result = subprocess.run(
             ["bash", os.path.join(plugin, "scripts", "post-tool-hook.sh")],
@@ -1619,6 +1621,7 @@ class TestFreshProjectBootstrap:
                if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT")}
         env["CLAUDE_PROJECT_DIR"] = project
         env["CLAUDE_PLUGIN_ROOT"] = plugin
+        env["HOME"] = str(tmp_path)
 
         result = subprocess.run(
             ["bash", os.path.join(plugin, "scripts", "session-start-hook.sh")],
@@ -1645,6 +1648,7 @@ class TestFreshProjectBootstrap:
                if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT")}
         env["CLAUDE_PROJECT_DIR"] = project
         env["CLAUDE_PLUGIN_ROOT"] = plugin
+        env["HOME"] = str(tmp_path)
 
         result = subprocess.run(
             ["bash", os.path.join(plugin, "scripts", "session-start-hook.sh")],
@@ -1671,6 +1675,7 @@ class TestFreshProjectBootstrap:
                if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT")}
         env["CLAUDE_PROJECT_DIR"] = project
         env["CLAUDE_PLUGIN_ROOT"] = plugin
+        env["HOME"] = str(tmp_path)
 
         result = subprocess.run(
             ["bash", os.path.join(plugin, "scripts", "session-start-hook.sh")],
@@ -1699,6 +1704,7 @@ class TestFreshProjectBootstrap:
                if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT")}
         env["CLAUDE_PROJECT_DIR"] = project
         env["CLAUDE_PLUGIN_ROOT"] = plugin
+        env["HOME"] = str(tmp_path)
 
         result = subprocess.run(
             ["bash", os.path.join(plugin, "scripts", "session-start-hook.sh")],
@@ -1724,6 +1730,7 @@ class TestFreshProjectBootstrap:
                if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT")}
         env["CLAUDE_PROJECT_DIR"] = project
         env["CLAUDE_PLUGIN_ROOT"] = plugin
+        env["HOME"] = str(tmp_path)
 
         result = subprocess.run(
             ["bash", os.path.join(plugin, "scripts", "session-start-hook.sh")],
@@ -1801,6 +1808,7 @@ class TestFreshProjectBootstrap:
                if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT")}
         env["CLAUDE_PROJECT_DIR"] = project
         env["CLAUDE_PLUGIN_ROOT"] = plugin
+        env["HOME"] = str(tmp_path)
 
         # Run three times in succession
         for i in range(3):
@@ -1842,6 +1850,7 @@ class TestFreshProjectBootstrap:
         # Claude Code sets CLAUDE_PROJECT_DIR to the worktree
         env["CLAUDE_PROJECT_DIR"] = worktree
         env["CLAUDE_PLUGIN_ROOT"] = plugin
+        env["HOME"] = str(tmp_path)
 
         result = subprocess.run(
             ["bash", os.path.join(plugin, "scripts", "session-start-hook.sh")],
@@ -1877,6 +1886,7 @@ class TestFreshProjectBootstrap:
                if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT")}
         env["CLAUDE_PROJECT_DIR"] = project
         env["CLAUDE_PLUGIN_ROOT"] = plugin
+        env["HOME"] = str(tmp_path)
 
         script = os.path.join(plugin, "scripts", "session-start-hook.sh")
 
@@ -1978,12 +1988,13 @@ class TestFreshProjectBootstrap:
                             f"Use $SYS_TMPDIR instead. Line: {line.strip()}"
                         )
 
-    def test_bootstrap_before_detect_tools(self):
-        """bootstrap-dirs.sh must be sourced BEFORE detect-tools.sh.
+    def test_detect_before_bootstrap(self):
+        """detect-tools.sh must be sourced BEFORE bootstrap-dirs.sh.
 
-        The order matters: resolve-paths → bootstrap-dirs → detect-tools.
-        bootstrap needs PROJECT_DIR (from resolve-paths) but nothing else.
-        detect-tools may write to logs, which need the dirs from bootstrap.
+        The order matters: resolve-paths → detect-tools → bootstrap-dirs.
+        bootstrap sources lib-memory-dir.sh which calls session_dir_slug,
+        defined by detect-tools. detect-tools only needs the python/jq
+        binaries and never writes to the memory directory.
         """
         repo_root = os.path.join(os.path.dirname(__file__), "..")
         for script_name in ("session-start-hook.sh", "post-tool-hook.sh"):
@@ -1992,10 +2003,10 @@ class TestFreshProjectBootstrap:
                 content = f.read()
             bootstrap_pos = content.find("bootstrap-dirs.sh")
             detect_pos = content.find("detect-tools.sh")
-            assert bootstrap_pos < detect_pos, (
-                f"{script_name}: bootstrap-dirs.sh must come before "
-                f"detect-tools.sh (bootstrap at {bootstrap_pos}, "
-                f"detect at {detect_pos})"
+            assert detect_pos < bootstrap_pos, (
+                f"{script_name}: detect-tools.sh must come before "
+                f"bootstrap-dirs.sh (detect at {detect_pos}, "
+                f"bootstrap at {bootstrap_pos})"
             )
 
 
@@ -2223,9 +2234,12 @@ class TestTimeFormatConfig:
         )
 
     def test_12h_format_produces_ampm(self):
-        """12h format should produce h:MM AM/PM (e.g., 2:32 PM)."""
+        """12h format should produce h:MM AM/PM (e.g., 2:32 PM).
+
+        Uses tr to uppercase %p, which is locale-dependent on Linux.
+        """
         result = subprocess.run(
-            ["bash", "-c", 'TZ=UTC date "+%-I:%M %p"'],
+            ["bash", "-c", "TZ=UTC date \"+%-I:%M %p\" | tr '[:lower:]' '[:upper:]'"],
             capture_output=True, text=True,
         )
         time_str = result.stdout.strip()
@@ -2309,23 +2323,21 @@ class TestMarketplacePathResolution:
 
     # -- Source guards: verify scripts use the right patterns --
 
-    def test_log_sh_config_uses_pipeline_dir(self):
-        """log.sh REMEMBER_CONFIG must reference PIPELINE_DIR."""
+    def test_log_sh_sources_lib_memory_dir(self):
+        """log.sh must source lib-memory-dir.sh (which sets REMEMBER_CONFIG).
+
+        REMEMBER_CONFIG is now produced by the layered-merge helper rather
+        than being set to a bare PIPELINE_DIR path. Verify the delegation.
+        """
         log_path = os.path.join(
             os.path.dirname(__file__), "..", "scripts", "log.sh"
         )
         with open(log_path) as f:
             content = f.read()
 
-        for line in content.split("\n"):
-            stripped = line.strip()
-            if stripped.startswith("REMEMBER_CONFIG="):
-                assert "PIPELINE_DIR" in stripped, (
-                    f"REMEMBER_CONFIG should use PIPELINE_DIR. Line: {stripped}"
-                )
-                break
-        else:
-            assert False, "REMEMBER_CONFIG assignment not found in log.sh"
+        assert "lib-memory-dir.sh" in content, (
+            "log.sh must source lib-memory-dir.sh to get the merged REMEMBER_CONFIG"
+        )
 
     def test_log_sh_hooks_dir_uses_pipeline_dir(self):
         """log.sh REMEMBER_HOOKS_DIR must reference PIPELINE_DIR."""
@@ -2530,6 +2542,11 @@ echo "PIPELINE_DIR=$PIPELINE_DIR"
 echo "REMEMBER_CONFIG=$REMEMBER_CONFIG"
 echo "REMEMBER_HOOKS_DIR=$REMEMBER_HOOKS_DIR"
 echo "REMEMBER_TZ=$REMEMBER_TZ"
+# Dump merged config values inline so Python can read them even after this process exits.
+if [ -f "$REMEMBER_CONFIG" ] && command -v jq >/dev/null 2>&1; then
+    echo "MERGED_TIMEZONE=$(jq -r '.timezone // empty' "$REMEMBER_CONFIG" 2>/dev/null)"
+    echo "MERGED_SAVE_SECONDS=$(jq -r '.cooldowns.save_seconds // empty' "$REMEMBER_CONFIG" 2>/dev/null)"
+fi
 """
         wrapper = os.path.join(str(tmp_path), "test-wrapper.sh")
         with open(wrapper, "w") as f:
@@ -2549,24 +2566,37 @@ echo "REMEMBER_TZ=$REMEMBER_TZ"
         return resolved
 
     def test_marketplace_pipeline_dir_used_for_config(self, tmp_path):
-        """When PIPELINE_DIR is set (marketplace), config reads from plugin dir."""
+        """When PIPELINE_DIR is set (marketplace), merged config contains plugin values."""
+        import json as json_mod
         plugin = os.path.join(str(tmp_path), "plugin")
         project = os.path.join(str(tmp_path), "project")
         os.makedirs(plugin)
         os.makedirs(project)
+
+        with open(os.path.join(plugin, "config.json"), "w") as f:
+            json_mod.dump({"timezone": "Pacific/Auckland"}, f)
 
         result = self._source_log_sh({
             "PROJECT_DIR": project,
             "PIPELINE_DIR": plugin,
         }, tmp_path)
 
-        assert result["REMEMBER_CONFIG"] == f"{plugin}/config.json"
+        # Merged config values are dumped inline by the test script.
+        assert result.get("MERGED_TIMEZONE") == "Pacific/Auckland", (
+            f"Merged config must include plugin's timezone value. Got: {result}"
+        )
         assert result["REMEMBER_HOOKS_DIR"] == f"{plugin}/hooks.d"
 
     def test_local_install_fallback(self, tmp_path):
         """When PIPELINE_DIR is unset, falls back to PROJECT_DIR/.claude/remember/."""
+        import json as json_mod
         project = os.path.join(str(tmp_path), "project")
         os.makedirs(project)
+
+        local_plugin = os.path.join(project, ".claude", "remember")
+        os.makedirs(local_plugin, exist_ok=True)
+        with open(os.path.join(local_plugin, "config.json"), "w") as f:
+            json_mod.dump({"timezone": "America/Chicago"}, f)
 
         result = self._source_log_sh({
             "PROJECT_DIR": project,
@@ -2575,7 +2605,9 @@ echo "REMEMBER_TZ=$REMEMBER_TZ"
 
         expected = f"{project}/.claude/remember"
         assert result["PIPELINE_DIR"] == expected
-        assert result["REMEMBER_CONFIG"] == f"{expected}/config.json"
+        assert result.get("MERGED_TIMEZONE") == "America/Chicago", (
+            f"Merged config must include local-install timezone. Got: {result}"
+        )
         assert result["REMEMBER_HOOKS_DIR"] == f"{expected}/hooks.d"
 
     def test_timezone_reads_from_config(self, tmp_path):
@@ -2729,14 +2761,18 @@ set +e  # don't exit on errors — we just want the variables
 export CLAUDE_PROJECT_DIR="{project}"
 export CLAUDE_PLUGIN_ROOT="{plugin}"
 source "{plugin}/scripts/resolve-paths.sh" 2>/dev/null
-source "{plugin}/scripts/bootstrap-dirs.sh" 2>/dev/null
 [ -f "{plugin}/scripts/detect-tools.sh" ] && source "{plugin}/scripts/detect-tools.sh" 2>/dev/null
+source "{plugin}/scripts/bootstrap-dirs.sh" 2>/dev/null
 source "{plugin}/scripts/log.sh" 2>/dev/null
 echo "PIPELINE_DIR=$PIPELINE_DIR"
 echo "PROJECT_DIR=$PROJECT_DIR"
 echo "REMEMBER_CONFIG=$REMEMBER_CONFIG"
 echo "REMEMBER_HOOKS_DIR=$REMEMBER_HOOKS_DIR"
 echo "REMEMBER_TZ=$REMEMBER_TZ"
+# Dump merged config values inline so Python can read them after process exit.
+if [ -f "$REMEMBER_CONFIG" ] && command -v jq >/dev/null 2>&1; then
+    echo "MERGED_TIMEZONE=$(jq -r '.timezone // empty' "$REMEMBER_CONFIG" 2>/dev/null)"
+fi
 """
         wrapper = os.path.join(str(tmp_path), f"test-{hook_script}")
         with open(wrapper, "w") as f:
@@ -2767,11 +2803,13 @@ echo "REMEMBER_TZ=$REMEMBER_TZ"
 
     @pytest.mark.parametrize("hook", HOOKS)
     def test_hook_config_points_to_plugin(self, hook, tmp_path):
-        """REMEMBER_CONFIG must be in the plugin dir."""
+        """Merged config must include the plugin's timezone value."""
         project, plugin = self._setup_marketplace(tmp_path)
         result = self._source_hook_and_dump_vars(hook, project, plugin, tmp_path)
-        assert result["REMEMBER_CONFIG"] == f"{plugin}/config.json", (
-            f"{hook}: REMEMBER_CONFIG={result['REMEMBER_CONFIG']}"
+        # MERGED_TIMEZONE is dumped inline by the test helper script.
+        assert result.get("MERGED_TIMEZONE") == "Pacific/Auckland", (
+            f"{hook}: merged config missing plugin timezone. REMEMBER_TZ={result.get('REMEMBER_TZ')}, "
+            f"MERGED_TIMEZONE={result.get('MERGED_TIMEZONE')}"
         )
 
     @pytest.mark.parametrize("hook", HOOKS)
@@ -3137,6 +3175,7 @@ echo "TZ=$REMEMBER_TZ"
 #!/bin/bash
 export PROJECT_DIR="{project}"
 export PIPELINE_DIR="{plugin}"
+export HOME="{tmp_path}"
 source "{self.LOG_SH}" 2>/dev/null
 echo "LOG_DIR=$REMEMBER_LOG_DIR"
 """
@@ -3524,6 +3563,7 @@ echo "DISPATCH_COMPLETED=true"
                if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT")}
         env["CLAUDE_PROJECT_DIR"] = project
         env["CLAUDE_PLUGIN_ROOT"] = plugin
+        env["HOME"] = str(tmp_path)
 
         result = subprocess.run(
             ["bash", os.path.join(plugin, "scripts", "session-start-hook.sh")],
