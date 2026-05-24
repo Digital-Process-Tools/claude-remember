@@ -46,7 +46,7 @@ def make_external_remember_repo(tmp_path: Path):
     subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True, capture_output=True)
     _git(remember, ["remote", "add", "origin", str(remote)])
     gitignore = remember / ".gitignore"
-    gitignore.write_text(".git-backup.lock\n.last-git-backup-ts\n*/logs/\n*/tmp/\n")
+    gitignore.write_text(".git-backup.lock\n.last-git-backup-ts\n.git-backup-remote\n*/logs/\n*/tmp/\n")
     _git(remember, ["add", ".gitignore"])
     _git(remember, ["commit", "-q", "-m", "init"])
     _git(remember, ["push", "-q", "-u", "origin", "main"])
@@ -358,3 +358,162 @@ class TestGitBackupHook:
         assert log_files, "Expected a log file in slug/logs/"
         log_content = log_files[0].read_text()
         assert "push deferred" in log_content
+
+
+class TestGitBackupRemoteValidation:
+    """Tests for the remote URL validation introduced in #67."""
+
+    def test_first_push_records_remote_url(self, tmp_path):
+        """First push writes the remote URL to .git-backup-remote and logs it prominently."""
+        home, remember, remote = make_external_remember_repo(tmp_path)
+        slug = "test-slug"
+        slug_dir = remember / slug
+        slug_dir.mkdir()
+        (slug_dir / "now.md").write_text("## 10:00 | test\nMemory.\n")
+
+        project = tmp_path / "project"
+        project.mkdir()
+        cfg = _make_config(tmp_path, cooldown=0)
+
+        result = _run_hook(slug_dir, project, home, config_path=cfg)
+        assert result.returncode == 0
+        wait_for_lock_release(remember / ".git-backup.lock")
+
+        state_file = remember / ".git-backup-remote"
+        assert state_file.exists(), ".git-backup-remote state file should be created on first push"
+        recorded = state_file.read_text().strip()
+        assert recorded == str(remote), f"Expected remote {remote!r}, got {recorded!r}"
+
+        log_files = list((slug_dir / "logs").glob("memory-*.log"))
+        assert log_files
+        log_content = log_files[0].read_text()
+        assert "git backup configured to push to:" in log_content
+
+    def test_second_push_to_same_remote_succeeds(self, tmp_path):
+        """Second push with unchanged remote URL commits and pushes without error."""
+        home, remember, remote = make_external_remember_repo(tmp_path)
+        slug = "test-slug"
+        slug_dir = remember / slug
+        slug_dir.mkdir()
+        (slug_dir / "now.md").write_text("## 10:00 | test\nFirst memory.\n")
+
+        project = tmp_path / "project"
+        project.mkdir()
+        cfg = _make_config(tmp_path, cooldown=0)
+
+        # First run — records remote URL.
+        _run_hook(slug_dir, project, home, config_path=cfg)
+        wait_for_lock_release(remember / ".git-backup.lock")
+
+        # Backdate cooldown marker so second run isn't skipped.
+        (remember / ".last-git-backup-ts").write_text("0")
+
+        # Write new content so there's something to commit.
+        (slug_dir / "now.md").write_text("## 10:05 | test\nSecond memory.\n")
+
+        _run_hook(slug_dir, project, home, config_path=cfg)
+        wait_for_lock_release(remember / ".git-backup.lock")
+
+        # Both auto commits should exist (init + first + second = 3 total).
+        commits = _commit_log(remember)
+        assert len(commits) == 3
+
+        # No error in logs about remote change.
+        log_files = list((slug_dir / "logs").glob("memory-*.log"))
+        assert log_files
+        log_content = log_files[0].read_text()
+        assert "remote URL changed" not in log_content
+        assert "push aborted" not in log_content
+
+    def test_push_to_changed_remote_aborts(self, tmp_path):
+        """Push is aborted when the remote URL changed and allow_remote_change is false."""
+        home, remember, remote = make_external_remember_repo(tmp_path)
+        slug = "test-slug"
+        slug_dir = remember / slug
+        slug_dir.mkdir()
+        (slug_dir / "now.md").write_text("## 10:00 | test\nMemory.\n")
+
+        project = tmp_path / "project"
+        project.mkdir()
+        cfg = _make_config(tmp_path, cooldown=0)
+
+        # First run — records remote URL.
+        _run_hook(slug_dir, project, home, config_path=cfg)
+        wait_for_lock_release(remember / ".git-backup.lock")
+
+        # Simulate attacker changing the remote URL.
+        evil_remote = tmp_path / "evil.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(evil_remote)], check=True, capture_output=True)
+        _git(remember, ["remote", "set-url", "origin", str(evil_remote)])
+
+        # Backdate cooldown marker and add new content.
+        (remember / ".last-git-backup-ts").write_text("0")
+        (slug_dir / "now.md").write_text("## 10:05 | test\nMore memory.\n")
+
+        _run_hook(slug_dir, project, home, config_path=cfg)
+        wait_for_lock_release(remember / ".git-backup.lock")
+
+        # Local commit was made (no push, but commit still happens).
+        commits = _commit_log(remember)
+        assert len(commits) == 3  # init + first auto + second auto
+
+        # Evil remote should have received nothing — verify it has no commits.
+        evil_log = subprocess.run(
+            ["git", "-C", str(evil_remote), "log", "--oneline"],
+            capture_output=True, text=True,
+        )
+        assert evil_log.stdout.strip() == "", "Evil remote should not have received any commits"
+
+        # Error should be logged.
+        log_files = list((slug_dir / "logs").glob("memory-*.log"))
+        assert log_files
+        log_content = log_files[0].read_text()
+        assert "remote URL changed" in log_content
+        assert "push aborted" in log_content
+
+    def test_push_to_changed_remote_allowed_when_override_set(self, tmp_path):
+        """When allow_remote_change=true, a changed remote URL is accepted and push proceeds."""
+        home, remember, remote = make_external_remember_repo(tmp_path)
+        slug = "test-slug"
+        slug_dir = remember / slug
+        slug_dir.mkdir()
+        (slug_dir / "now.md").write_text("## 10:00 | test\nMemory.\n")
+
+        project = tmp_path / "project"
+        project.mkdir()
+        cfg = _make_config(tmp_path, cooldown=0)
+
+        # First run — records remote URL.
+        _run_hook(slug_dir, project, home, config_path=cfg)
+        wait_for_lock_release(remember / ".git-backup.lock")
+
+        # Set up a new (legitimate) remote and change the URL.
+        new_remote = tmp_path / "new-remote.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(new_remote)], check=True, capture_output=True)
+        _git(remember, ["remote", "set-url", "origin", str(new_remote)])
+        # Push current history to new remote so it accepts the push.
+        _git(remember, ["push", "-q", "-u", str(new_remote), "main"])
+        _git(remember, ["remote", "set-url", "origin", str(new_remote)])
+
+        # Backdate cooldown marker and add new content.
+        (remember / ".last-git-backup-ts").write_text("0")
+        (slug_dir / "now.md").write_text("## 10:05 | test\nMore memory.\n")
+
+        # Override config: allow_remote_change = true.
+        override_cfg = tmp_path / "override-config.json"
+        override_cfg.write_text('{"cooldowns": {"git_backup_seconds": 0}, "git_backup": {"allow_remote_change": true}}')
+
+        _run_hook(slug_dir, project, home, config_path=override_cfg)
+        wait_for_lock_release(remember / ".git-backup.lock")
+
+        # State file should now point to the new remote.
+        state_file = remember / ".git-backup-remote"
+        recorded = state_file.read_text().strip()
+        assert recorded == str(new_remote), f"State file should be updated to new remote, got {recorded!r}"
+
+        # Log should mention the change with allow note, not an error.
+        log_files = list((slug_dir / "logs").glob("memory-*.log"))
+        assert log_files
+        log_content = log_files[0].read_text()
+        assert "allow_remote_change=true" in log_content
+        assert "push aborted" not in log_content

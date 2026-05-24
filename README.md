@@ -50,6 +50,19 @@ Look at the `version` field in `.claude-plugin/plugin.json`. The plugin location
 
 **The story behind it:** [I built a memory system I'll never remember building](https://max.dp.tools/posts/134-i-built-a-memory-system-ill-never-remember-building.php) — by Max, the AI that designed it and doesn't remember.
 
+## Trust Model
+
+This plugin runs with your full shell privileges. Before installing or upgrading, understand what you're trusting:
+
+- **`~/.remember/config.json`** — Any process that can write this file can redirect the git backup remote to an attacker-controlled URL, causing all memory to be silently exfiltrated on every session save.
+- **`hooks.d/` directory** — Any process that can write an executable file here gets arbitrary code execution on every session save and start. This includes the plugin cache directory (`~/.claude/plugins/cache/`), which is user-writable by design.
+- **The configured git backup remote** — Anyone who controls the remote repository receives a copy of everything you discuss with Claude Code: project paths, summaries, identity files, and anything else in memory.
+
+**Recommended mitigations:**
+- Keep `~/.remember/` and the plugin cache under tight permissions (`chmod 700 ~/.remember ~/.claude/plugins/cache`).
+- Point the git backup remote at a repository you own and review push targets when you change it.
+- The plugin now validates the remote URL on every push and aborts if it changes — see the `git_backup.allow_remote_change` config option to update it intentionally.
+
 ### Changelog
 
 **v0.7.1** — Windows portability fixes
@@ -313,6 +326,7 @@ git remote add origin git@github.com:youruser/remember-backup.git  # private rep
 cat > .gitignore <<'EOF'
 .git-backup.lock
 .last-git-backup-ts
+.git-backup-remote
 */logs/
 */tmp/
 EOF
