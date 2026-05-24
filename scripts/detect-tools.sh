@@ -56,11 +56,11 @@ else
         while [[ "$1" == -* ]]; do _jq_flags="$_jq_flags $1"; shift; done
         local _jq_query="$1"
         local _jq_file="$2"
-        $PYTHON -c "
+        $PYTHON - "$_jq_file" "$_jq_query" << 'PYEOF' 2>/dev/null
 import json, sys
 try:
-    data = json.load(open('$_jq_file'))
-    keys = '$_jq_query'.strip('.').split('.')
+    data = json.load(open(sys.argv[1]))
+    keys = sys.argv[2].strip('.').split('.')
     val = data
     for k in keys:
         if k and isinstance(val, dict):
@@ -72,7 +72,7 @@ try:
     print(val if isinstance(val, (str, int, float, bool)) else json.dumps(val))
 except Exception:
     sys.exit(0)
-" 2>/dev/null
+PYEOF
     }
     JQ="_jq_fallback"
 fi
@@ -85,8 +85,10 @@ export JQ
 safe_eval() {
     while IFS= read -r line; do
         line="${line%$'\r'}"
-        if [[ "$line" =~ ^[A-Z_][A-Z0-9_]*= ]]; then
-            eval "$line"
+        if [[ "$line" =~ ^([A-Z_][A-Z0-9_]*)=(.*)$ ]]; then
+            local _key="${BASH_REMATCH[1]}"
+            local _val="${BASH_REMATCH[2]}"
+            printf -v "$_key" '%s' "$_val"
         fi
     done
 }
