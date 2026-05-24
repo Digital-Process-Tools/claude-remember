@@ -48,18 +48,36 @@ if [ -f "$COOLDOWN_MARKER" ]; then
     fi
 fi
 
-# ── Lock (atomic via noclobber) ───────────────────────────────────────────────
+# ── Lock ─────────────────────────────────────────────────────────────────────
+# Prefer flock(1): it acquires atomically on an open fd, eliminating the
+# TOCTOU window between rm and noclobber re-acquire.  On macOS without
+# util-linux flock, we fall back to the noclobber pattern; the race is benign
+# (worst case: two concurrent commits to disjoint slug subtrees, which git
+# serializes via its own index lock).
 LOCK_FILE="$REPO_ROOT/.git-backup.lock"
-if ! ( set -o noclobber; echo $$ > "$LOCK_FILE" ) 2>/dev/null; then
-    LOCK_PID=$(cat "$LOCK_FILE" 2>/dev/null)
-    if kill -0 "$LOCK_PID" 2>/dev/null; then
-        [ "${REMEMBER_DEBUG:-0}" = "1" ] && log "git-backup" "locked by PID $LOCK_PID, skip"
+if command -v flock >/dev/null 2>&1; then
+    # flock path: open/create the lock file on fd 9 and acquire exclusively,
+    # non-blocking.  If another instance holds it, exit silently.
+    exec 9>"$LOCK_FILE"
+    if ! flock -n 9; then
+        [ "${REMEMBER_DEBUG:-0}" = "1" ] && log "git-backup" "flock held by another instance, skip"
         exit 0
     fi
-    log "git-backup" "stale lock (PID $LOCK_PID dead), taking over"
-    # Delete stale lock, then re-acquire atomically via noclobber.
-    rm -f "$LOCK_FILE"
-    ( set -o noclobber; echo $$ > "$LOCK_FILE" ) 2>/dev/null || exit 0
+    # Lock is held on fd 9 for the lifetime of this process.
+else
+    # Fallback: noclobber pattern.  A TOCTOU window exists between the stale-lock
+    # rm and the re-acquire, but the race is benign — see comment above.
+    if ! ( set -o noclobber; echo $$ > "$LOCK_FILE" ) 2>/dev/null; then
+        LOCK_PID=$(cat "$LOCK_FILE" 2>/dev/null)
+        if kill -0 "$LOCK_PID" 2>/dev/null; then
+            [ "${REMEMBER_DEBUG:-0}" = "1" ] && log "git-backup" "locked by PID $LOCK_PID, skip"
+            exit 0
+        fi
+        log "git-backup" "stale lock (PID $LOCK_PID dead), taking over"
+        # Delete stale lock, then re-acquire atomically via noclobber.
+        rm -f "$LOCK_FILE"
+        ( set -o noclobber; echo $$ > "$LOCK_FILE" ) 2>/dev/null || exit 0
+    fi
 fi
 
 # ── Background subshell — never blocks save-session.sh ───────────────────────

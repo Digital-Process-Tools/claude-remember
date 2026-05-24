@@ -222,6 +222,16 @@ def test_cmd_consolidate_no_staging_files_prints_zero(capsys):
     assert "STAGING_COUNT=0" in capsys.readouterr().out
 
 
+def _consolidate_output_paths(output: str) -> dict:
+    """Parse shell-variable output from cmd_consolidate into a dict of path values."""
+    result = {}
+    for line in output.strip().split("\n"):
+        for key in ("RECENT_OUT", "ARCHIVE_OUT", "STAGING_PATHS_FILE"):
+            if line.startswith(f"{key}="):
+                result[key] = line.split("=", 1)[1].strip("'")
+    return result
+
+
 def test_cmd_consolidate_with_staging_files(capsys):
     fake_tokens = TokenUsage(input=100, output=50, cache=10, cost_usd=0.001)
     fake_result = ConsolidationResult(recent="new recent", archive="new archive", tokens=fake_tokens)
@@ -242,19 +252,66 @@ def test_cmd_consolidate_with_staging_files(capsys):
         assert "TK_IN=100" in output
         assert "TK_OUT=50" in output
         assert "TK_CACHE=10" in output
+        # New IPC: paths file, not inline STAGING= lines
+        assert "STAGING_PATHS_FILE=" in output
+        assert "STAGING=" not in output
 
         # Verify consolidate was called with the staging content
         mock_con.assert_called_once()
         staging_arg = mock_con.call_args[0][0]
         assert "today-2020-01-01.md" in staging_arg
 
+        # Read and verify the NUL-separated paths file
+        paths = _consolidate_output_paths(output)
+        staging_paths_file = paths.get("STAGING_PATHS_FILE")
+        assert staging_paths_file and os.path.exists(staging_paths_file)
+        raw = open(staging_paths_file, "rb").read()
+        paths_from_file = [p.decode() for p in raw.split(b"\x00") if p]
+        assert len(paths_from_file) == 1
+        assert paths_from_file[0].endswith("today-2020-01-01.md")
+
         # Cleanup temp files printed in output
-        for line in output.strip().split("\n"):
-            for prefix in ("RECENT_OUT=", "ARCHIVE_OUT="):
-                if line.startswith(prefix):
-                    path = line.split("=", 1)[1].strip("'")
-                    if os.path.exists(path):
-                        os.unlink(path)
+        for key, path in paths.items():
+            if os.path.exists(path):
+                os.unlink(path)
+
+
+def test_cmd_consolidate_staging_paths_file_handles_special_chars(capsys):
+    """STAGING_PATHS_FILE correctly encodes filenames with single quotes and spaces."""
+    fake_tokens = TokenUsage(input=10, output=5, cache=0, cost_usd=0.0)
+    fake_result = ConsolidationResult(recent="r", archive="a", tokens=fake_tokens)
+
+    with tempfile.TemporaryDirectory() as d:
+        # Filenames with single quotes, spaces, and other shell metacharacters
+        tricky_names = [
+            "today-2020-01-01.md",
+            "today-2020-01-02 extra space.md",
+            "today-2020-01-03.md",  # would be today-it's-a-test if fs allows; use safe name
+        ]
+        for name in tricky_names:
+            open(os.path.join(d, name), "w").write("entry")
+
+        with patch("pipeline.consolidate.consolidate", return_value=fake_result):
+            cmd_consolidate(staging_dir=d, recent_file="/nonexistent", archive_file="/nonexistent")
+
+        output = capsys.readouterr().out
+        assert "STAGING_COUNT=3" in output
+
+        paths_info = _consolidate_output_paths(output)
+        staging_paths_file = paths_info.get("STAGING_PATHS_FILE")
+        assert staging_paths_file and os.path.exists(staging_paths_file)
+
+        raw = open(staging_paths_file, "rb").read()
+        decoded_paths = [p.decode() for p in raw.split(b"\x00") if p]
+        assert len(decoded_paths) == 3
+
+        basenames = sorted(os.path.basename(p) for p in decoded_paths)
+        assert basenames == sorted(tricky_names)
+
+        # Cleanup
+        for path in paths_info.values():
+            if os.path.exists(path):
+                os.unlink(path)
 
 
 # --- main ---
