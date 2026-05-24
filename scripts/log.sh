@@ -138,8 +138,10 @@ log_tokens() {
 #   safe_eval <<< "$(python3 -m pipeline.shell extract ...)"
 safe_eval() {
     while IFS= read -r line; do
-        if [[ "$line" =~ ^[A-Z_][A-Z0-9_]*= ]]; then
-            eval "$line"
+        if [[ "$line" =~ ^([A-Z_][A-Z0-9_]*)=(.*)$ ]]; then
+            local _key="${BASH_REMATCH[1]}"
+            local _val="${BASH_REMATCH[2]}"
+            printf -v "$_key" '%s' "$_val"
         fi
     done
 }

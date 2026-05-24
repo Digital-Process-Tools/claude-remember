@@ -142,10 +142,10 @@ export REMEMBER_CONFIG
 _existing_trap=$(trap -p EXIT 2>/dev/null | sed "s/trap -- '//;s/' EXIT//")
 if [ -n "$_existing_trap" ]; then
     # shellcheck disable=SC2064
-    trap "${_existing_trap}; rm -f ${_merged_cfg}" EXIT
+    trap "${_existing_trap}; rm -f '${_merged_cfg}'" EXIT
 else
     # shellcheck disable=SC2064
-    trap "rm -f ${_merged_cfg}" EXIT
+    trap "rm -f '${_merged_cfg}'" EXIT
 fi
 unset _existing_trap
 
