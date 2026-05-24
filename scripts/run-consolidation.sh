@@ -70,8 +70,8 @@ RESULT=$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell consolidate "$STAGING_D
     exit 1
 }
 
-# eval sets: STAGING_COUNT, RECENT_OUT, ARCHIVE_OUT, TK_IN/OUT/CACHE/COST
-safe_eval <<< "$(echo "$RESULT" | grep -v '^STAGING=')"
+# eval sets: STAGING_COUNT, RECENT_OUT, ARCHIVE_OUT, TK_IN/OUT/CACHE/COST, STAGING_PATHS_FILE
+safe_eval <<< "$RESULT"
 
 if [ "${STAGING_COUNT:-0}" -eq 0 ]; then
     log "consolidation" "no staging files"; exit 0
@@ -85,14 +85,15 @@ rm -f "$RECENT_OUT" "$ARCHIVE_OUT"
 log_tokens "consolidation" "$TK_IN" "$TK_OUT" "$TK_CACHE" "$TK_COST"
 
 # --- Rename processed staging files → .done.md ---
-while IFS= read -r line; do
-    staging_path=$(echo "$line" | sed "s/^STAGING=//;s/^'//;s/'$//")
+# Paths are NUL-separated in STAGING_PATHS_FILE, safe for any filename.
+while IFS= read -r -d '' staging_path; do
     if [ -f "$staging_path" ]; then
         mv "$staging_path" "${staging_path%.md}.done.md"
     else
         log "consolidation" "WARN: $(basename "$staging_path") disappeared"
     fi
-done <<< "$(echo "$RESULT" | grep '^STAGING=')"
+done < "$STAGING_PATHS_FILE"
+rm -f "$STAGING_PATHS_FILE"
 
 log "consolidation" "done: ${STAGING_COUNT} files consolidated"
 

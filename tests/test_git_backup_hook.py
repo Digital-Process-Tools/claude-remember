@@ -7,11 +7,15 @@ lib-memory-dir.sh from overriding the REMEMBER_DIR we set explicitly.
 """
 
 import os
+import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 
 import pytest
+
+FLOCK_AVAILABLE = shutil.which("flock") is not None
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HOOK = REPO_ROOT / "hooks.d" / "after_save" / "50-git-backup.sh"
@@ -289,8 +293,9 @@ class TestGitBackupHook:
         files_b = _files_in_commit(remember, "HEAD")
         assert files_b and all(f.startswith("slug-b/") for f in files_b)
 
+    @pytest.mark.skipif(FLOCK_AVAILABLE, reason="noclobber path skipped when flock is present")
     def test_lock_contention_skips(self, tmp_path):
-        """Hook exits silently without committing when lock is held by a live process."""
+        """Hook exits silently without committing when lock is held by a live process (noclobber path)."""
         home, remember, _ = make_external_remember_repo(tmp_path)
         slug_dir = remember / "test-slug"
         slug_dir.mkdir()
@@ -310,8 +315,9 @@ class TestGitBackupHook:
         assert lock_file.exists()
         assert lock_file.read_text().strip() == str(os.getpid())
 
+    @pytest.mark.skipif(FLOCK_AVAILABLE, reason="noclobber path skipped when flock is present")
     def test_stale_lock_takeover(self, tmp_path):
-        """Hook takes over a lock held by a dead PID and commits successfully."""
+        """Hook takes over a lock held by a dead PID and commits successfully (noclobber path)."""
         home, remember, _ = make_external_remember_repo(tmp_path)
         slug_dir = remember / "test-slug"
         slug_dir.mkdir()
@@ -333,6 +339,38 @@ class TestGitBackupHook:
         assert len(commits) == 2
         assert "auto:" in commits[0]
         assert not lock_file.exists()
+
+    @pytest.mark.skipif(not FLOCK_AVAILABLE, reason="requires flock(1)")
+    def test_flock_concurrent_only_one_wins(self, tmp_path):
+        """With flock, two concurrent hook invocations produce exactly one commit."""
+        home, remember, _ = make_external_remember_repo(tmp_path)
+        slug = "test-slug"
+        slug_dir = remember / slug
+        slug_dir.mkdir()
+        (slug_dir / "now.md").write_text("memory\n")
+        project = tmp_path / "project"
+        project.mkdir()
+        cfg = _make_config(tmp_path, cooldown=0)
+
+        results = []
+
+        def run():
+            r = _run_hook(slug_dir, project, home, config_path=cfg)
+            results.append(r)
+
+        t1 = threading.Thread(target=run)
+        t2 = threading.Thread(target=run)
+        t1.start()
+        t2.start()
+        t1.join(timeout=30)
+        t2.join(timeout=30)
+
+        wait_for_lock_release(remember / ".git-backup.lock")
+
+        commits = _commit_log(remember)
+        # Exactly one hook committed — the other was blocked by flock and skipped.
+        assert len(commits) == 2, f"Expected 2 commits (init + one auto), got {len(commits)}"
+        assert "auto:" in commits[0]
 
     def test_push_failure_tolerated(self, tmp_path):
         """Local commit succeeds when push fails; log records 'push deferred'."""

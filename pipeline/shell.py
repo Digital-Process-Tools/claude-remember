@@ -239,6 +239,15 @@ def cmd_consolidate(staging_dir: str, recent_file: str, archive_file: str) -> No
     with os.fdopen(fd_a, "w", encoding="utf-8") as f:
         f.write(result.archive)
 
+    # Write staging paths to a NUL-separated temp file so the shell rename step
+    # can read them safely regardless of single quotes, spaces, or other
+    # metacharacters in the filename.  Shell reads with:
+    #   while IFS= read -r -d '' path; do ...; done < "$STAGING_PATHS_FILE"
+    fd_s, staging_paths_file = tempfile.mkstemp(prefix="remember-staging-paths-", suffix=".bin")
+    with os.fdopen(fd_s, "wb") as f:
+        for name in staging_contents:
+            f.write(os.path.join(staging_dir, name).encode() + b"\x00")
+
     print(f"STAGING_COUNT={len(staging_contents)}")
     print(f"RECENT_OUT={_shell_escape(recent_out)}")
     print(f"ARCHIVE_OUT={_shell_escape(archive_out)}")
@@ -246,10 +255,7 @@ def cmd_consolidate(staging_dir: str, recent_file: str, archive_file: str) -> No
     print(f"TK_OUT={result.tokens.output}")
     print(f"TK_CACHE={result.tokens.cache}")
     print(f"TK_COST={result.tokens.cost_usd:.6f}")
-
-    # Print staging file basenames for rename step
-    for name in staging_contents:
-        print(f"STAGING={_shell_escape(os.path.join(staging_dir, name))}")
+    print(f"STAGING_PATHS_FILE={_shell_escape(staging_paths_file)}")
 
 
 def main() -> None:
