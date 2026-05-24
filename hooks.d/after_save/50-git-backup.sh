@@ -101,12 +101,49 @@ fi
         exit 0
     fi
 
-    # Push, but tolerate any error (no remote, no network, auth, etc.).
-    # GIT_TERMINAL_PROMPT=0 ensures missing credentials fail fast, not hang.
-    if GIT_TERMINAL_PROMPT=0 git -C "$REPO_ROOT" push >/dev/null 2>&1; then
-        log "git-backup" "pushed $SLUG"
+    # ── Remote URL validation ─────────────────────────────────────────────────
+    # On first push, record the remote URL. On subsequent pushes, abort if the
+    # URL changed — a changed URL could mean a poisoned config.json pointing to
+    # an attacker-controlled remote. Set git_backup.allow_remote_change=true to
+    # override (e.g. when intentionally re-pointing to a new private repo).
+    REMOTE_STATE_FILE="$REPO_ROOT/.git-backup-remote"
+    CURRENT_REMOTE=$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null || true)
+    ALLOW_REMOTE_CHANGE=$(config ".git_backup.allow_remote_change" "false")
+
+    if [ -z "$CURRENT_REMOTE" ]; then
+        log "git-backup" "no remote configured, skipping push"
+    elif [ ! -f "$REMOTE_STATE_FILE" ]; then
+        # First push — record the URL and proceed.
+        echo "$CURRENT_REMOTE" > "$REMOTE_STATE_FILE"
+        log "git-backup" "git backup configured to push to: $CURRENT_REMOTE"
+        if GIT_TERMINAL_PROMPT=0 git -C "$REPO_ROOT" push >/dev/null 2>&1; then
+            log "git-backup" "pushed $SLUG"
+        else
+            log "git-backup" "push deferred (will retry next backup)"
+        fi
     else
-        log "git-backup" "push deferred (will retry next backup)"
+        RECORDED_REMOTE=$(cat "$REMOTE_STATE_FILE" 2>/dev/null || true)
+        if [ "$CURRENT_REMOTE" != "$RECORDED_REMOTE" ]; then
+            if [ "$ALLOW_REMOTE_CHANGE" = "true" ]; then
+                # Explicit override — update state file and push.
+                echo "$CURRENT_REMOTE" > "$REMOTE_STATE_FILE"
+                log "git-backup" "remote URL changed (allow_remote_change=true): $CURRENT_REMOTE"
+                if GIT_TERMINAL_PROMPT=0 git -C "$REPO_ROOT" push >/dev/null 2>&1; then
+                    log "git-backup" "pushed $SLUG"
+                else
+                    log "git-backup" "push deferred (will retry next backup)"
+                fi
+            else
+                log "git-backup" "ERROR: remote URL changed from '$RECORDED_REMOTE' to '$CURRENT_REMOTE' — push aborted (set git_backup.allow_remote_change=true to override)"
+            fi
+        else
+            # Remote matches recorded URL — safe to push.
+            if GIT_TERMINAL_PROMPT=0 git -C "$REPO_ROOT" push >/dev/null 2>&1; then
+                log "git-backup" "pushed $SLUG"
+            else
+                log "git-backup" "push deferred (will retry next backup)"
+            fi
+        fi
     fi
 ) </dev/null >/dev/null 2>&1 &
 disown $! 2>/dev/null || true

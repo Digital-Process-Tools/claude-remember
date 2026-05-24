@@ -252,3 +252,108 @@ def test_config_example_json_is_valid():
     )
     # time_format should still be present (from PR #34)
     assert parsed.get("time_format") == "24h"
+
+
+# ── dispatch() ownership / world-writable tests (#67) ────────────────────────
+
+def _make_dispatch_env(tmp_path: Path) -> dict:
+    """Return env vars for a dispatch() test run."""
+    project = _make_project(tmp_path, timezone_value=None)
+    return {
+        **os.environ,
+        "PROJECT_DIR": str(project),
+        "PIPELINE_DIR": str(REPO_ROOT),
+        "_LIB_MEMORY_DIR_LOADED": "1",
+        "REMEMBER_DIR": str(project / ".remember"),
+    }
+
+
+def _run_dispatch(tmp_path: Path, hooks_dir: Path, extra_env: dict = None) -> subprocess.CompletedProcess:
+    """Source log.sh and call dispatch("test_event") against a custom hooks dir."""
+    env = _make_dispatch_env(tmp_path)
+    if extra_env:
+        env.update(extra_env)
+    script = f"""
+set -e
+export PROJECT_DIR="{env['PROJECT_DIR']}"
+export PIPELINE_DIR="{env['PIPELINE_DIR']}"
+export _LIB_MEMORY_DIR_LOADED=1
+export REMEMBER_DIR="{env['REMEMBER_DIR']}"
+source {LOG_SH}
+# Override REMEMBER_HOOKS_DIR to point at our temp fixture.
+REMEMBER_HOOKS_DIR="{hooks_dir}"
+dispatch "test_event"
+"""
+    return subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
+
+
+def _write_hook(hooks_event_dir: Path, name: str, content: str, mode: int = 0o755) -> Path:
+    """Write an executable hook script and set permissions."""
+    hook = hooks_event_dir / name
+    hook.write_text(content)
+    hook.chmod(mode)
+    return hook
+
+
+class TestDispatchOwnershipChecks:
+    """Regression tests for the ownership + world-writable guards in dispatch() (#67)."""
+
+    def test_owned_not_world_writable_executes(self, tmp_path):
+        """A hook owned by the current user and not world-writable runs normally."""
+        hooks_dir = tmp_path / "hooks.d"
+        event_dir = hooks_dir / "test_event"
+        event_dir.mkdir(parents=True)
+        marker = tmp_path / "ran.txt"
+        _write_hook(event_dir, "10-ok.sh", f'#!/bin/bash\ntouch "{marker}"\n', mode=0o755)
+
+        result = _run_dispatch(tmp_path, hooks_dir)
+
+        assert result.returncode == 0, f"dispatch failed: {result.stderr}"
+        assert marker.exists(), "Owned, non-world-writable hook should have executed"
+
+    def test_world_writable_hook_is_skipped(self, tmp_path):
+        """A world-writable hook (mode 0o777) is skipped with a warning."""
+        hooks_dir = tmp_path / "hooks.d"
+        event_dir = hooks_dir / "test_event"
+        event_dir.mkdir(parents=True)
+        marker = tmp_path / "ran.txt"
+        _write_hook(event_dir, "10-ww.sh", f'#!/bin/bash\ntouch "{marker}"\n', mode=0o777)
+
+        result = _run_dispatch(tmp_path, hooks_dir)
+
+        assert result.returncode == 0, f"dispatch failed: {result.stderr}"
+        assert not marker.exists(), "World-writable hook should have been skipped"
+        assert "world-writable" in result.stderr or _dispatch_warned_in_log(tmp_path, "world-writable")
+
+    def test_unowned_hook_is_skipped(self, tmp_path):
+        """A hook whose UID doesn't match the current user is skipped with a warning.
+
+        We can't actually chown to another UID without root, so we fake the stat
+        output by patching the hook's stat call via a wrapper on PATH.
+        """
+        hooks_dir = tmp_path / "hooks.d"
+        event_dir = hooks_dir / "test_event"
+        event_dir.mkdir(parents=True)
+        marker = tmp_path / "ran.txt"
+        hook = _write_hook(event_dir, "10-other-owner.sh", f'#!/bin/bash\ntouch "{marker}"\n', mode=0o755)
+
+        # Create a fake stat binary that always returns UID 0 (root), regardless of file.
+        fake_bin = tmp_path / "bin"
+        fake_bin.mkdir()
+        fake_stat = fake_bin / "stat"
+        fake_stat.write_text('#!/bin/bash\necho 0\n')
+        fake_stat.chmod(0o755)
+
+        env_override = {"PATH": f"{fake_bin}:{os.environ.get('PATH', '')}"}
+        result = _run_dispatch(tmp_path, hooks_dir, extra_env=env_override)
+
+        assert result.returncode == 0, f"dispatch failed: {result.stderr}"
+        assert not marker.exists(), "Hook owned by different user should have been skipped"
+
+
+def _dispatch_warned_in_log(tmp_path: Path, keyword: str) -> bool:
+    """Check if any log file under tmp_path contains the keyword."""
+    for log_file in tmp_path.rglob("memory-*.log"):
+        if keyword in log_file.read_text():
+            return True
+    return False

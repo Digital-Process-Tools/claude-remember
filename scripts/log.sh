@@ -160,8 +160,22 @@ dispatch() {
     local event="$1"
     local event_dir="$REMEMBER_HOOKS_DIR/$event"
     [ -d "$event_dir" ] || return 0
+    local current_uid
+    current_uid=$(id -u)
     for hook in "$event_dir"/*; do
         [ -x "$hook" ] || continue
+        # Ownership check: skip hooks not owned by the current user.
+        local hook_uid
+        hook_uid=$(stat -f %u "$hook" 2>/dev/null || stat -c %u "$hook" 2>/dev/null || echo "")
+        if [ -z "$hook_uid" ] || [ "$hook_uid" != "$current_uid" ]; then
+            log "dispatch" "WARNING: skipping hook not owned by current user: $event/$(basename "$hook")"
+            continue
+        fi
+        # World-writable check: skip hooks writable by others.
+        if [ -n "$(find "$hook" -maxdepth 0 -perm -002 2>/dev/null)" ]; then
+            log "dispatch" "WARNING: skipping world-writable hook: $event/$(basename "$hook")"
+            continue
+        fi
         REMEMBER_PROJECT="${PROJECT_DIR:-.}" "$hook" 2>/dev/null \
             || log "dispatch" "hook failed: $event/$(basename "$hook")"
     done
