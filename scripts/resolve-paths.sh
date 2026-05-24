@@ -30,6 +30,14 @@
 #
 # ============================================================================
 
+# --- Restrict file creation permissions ---
+# Prevent log files, memory files, and temp files from being world/group readable.
+# On multi-user machines (shared dev box, CI runner, jumphost) the default umask
+# (022) creates files as -rw-r--r--, leaking project paths, branch names, token
+# counts, and memory contents to any local user.  Setting 077 here covers every
+# downstream file created after this source: logs, .remember/ dirs, TMPDIR temps.
+umask 077
+
 # --- Resolve PIPELINE_DIR (where the plugin code lives) ---
 #
 # Priority:
