@@ -5,6 +5,8 @@ multi-user machines. resolve-paths.sh now sets umask 077 so that all downstream
 files (logs, memory dirs, temp files) are created with mode 600/700.
 """
 
+from __future__ import annotations
+
 import os
 import stat
 import subprocess
