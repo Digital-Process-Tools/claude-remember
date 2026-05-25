@@ -10,8 +10,16 @@ Verifies that when data_dir points outside the project:
 import json
 import os
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
+
+import pytest
+
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="bash subprocess + POSIX session-start hook — not portable to Windows runners (#79)",
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DETECT_SCRIPT = REPO_ROOT / "scripts" / "detect-tools.sh"

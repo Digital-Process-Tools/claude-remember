@@ -14,9 +14,15 @@ Install layouts tested:
 import os
 import stat
 import subprocess
+import sys
 import tempfile
 
 import pytest
+
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX path layouts (/c/Users vs C:\\Users) + bash subprocess assertions — not portable to Windows",
+)
 
 
 def _create_local_install(base: str) -> tuple[str, str]:

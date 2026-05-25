@@ -42,7 +42,10 @@ def _session_dir(project_dir: str) -> str:
     backslashes (\\) and drive colons (D:).
     """
     slug = re.sub(r'[^a-zA-Z0-9]', '-', project_dir)
-    return os.path.expanduser("~/.claude/projects/" + slug)
+    # Honor HOME explicitly so test fixtures patching only HOME also work on Windows
+    # (where os.path.expanduser defaults to USERPROFILE, ignoring HOME).
+    home = os.environ.get("HOME") or os.path.expanduser("~")
+    return home + "/.claude/projects/" + slug
 
 
 def _last_save_path(project_dir: str, remember_dir: str | None = None) -> str:
@@ -51,8 +54,10 @@ def _last_save_path(project_dir: str, remember_dir: str | None = None) -> str:
     Uses REMEMBER_DIR env var when set, so external-mode paths work
     without changing the call signature everywhere.
     """
-    effective = remember_dir or os.environ.get("REMEMBER_DIR") or os.path.join(project_dir, ".remember")
-    return os.path.join(effective, "tmp", "last-save.json")
+    # POSIX-style join: this path is consumed by bash hooks (Git Bash on Windows accepts /),
+    # and keeps it portable across platforms without os.path.join inserting backslashes on Windows.
+    effective = remember_dir or os.environ.get("REMEMBER_DIR") or (project_dir.rstrip("/\\") + "/.remember")
+    return effective.rstrip("/\\") + "/tmp/last-save.json"
 
 
 def _validate_session_id(session_id: str) -> None:

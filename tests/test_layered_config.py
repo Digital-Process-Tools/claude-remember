@@ -8,8 +8,16 @@ resolves correctly for both legacy and external data_dir values.
 import json
 import os
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
+
+import pytest
+
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="bash subprocess + POSIX lib-memory-dir.sh — not portable to Windows runners (#79)",
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LIB_SCRIPT = REPO_ROOT / "scripts" / "lib-memory-dir.sh"
@@ -17,7 +25,7 @@ DETECT_SCRIPT = REPO_ROOT / "scripts" / "detect-tools.sh"
 BUNDLED_CONFIG = REPO_ROOT / "config.example.json"
 
 
-def _run_lib(project_dir: str, pipeline_dir: str, home_dir: str, env_extra: dict | None = None) -> dict:
+def _run_lib(project_dir: str, pipeline_dir: str, home_dir: str, env_extra: "dict | None" = None) -> dict:
     """Source lib-memory-dir.sh and return the exported variables."""
     script = f"""
     set -e
