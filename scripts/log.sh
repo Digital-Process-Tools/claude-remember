@@ -168,7 +168,10 @@ dispatch() {
         [ -x "$hook" ] || continue
         # Ownership check: skip hooks not owned by the current user.
         local hook_uid
-        hook_uid=$(stat -f %u "$hook" 2>/dev/null || stat -c %u "$hook" 2>/dev/null || echo "")
+        # Try GNU stat (-c) first, then BSD (-f). The reverse order silently
+        # succeeds on Linux because `stat -f %u` there returns filesystem free
+        # blocks, not file owner UID — and the OR fallback never fires.
+        hook_uid=$(stat -c %u "$hook" 2>/dev/null || stat -f %u "$hook" 2>/dev/null || echo "")
         if [ -z "$hook_uid" ] || [ "$hook_uid" != "$current_uid" ]; then
             log "dispatch" "WARNING: skipping hook not owned by current user: $event/$(basename "$hook")"
             continue
