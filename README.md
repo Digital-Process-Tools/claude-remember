@@ -52,17 +52,9 @@ _The Interview — an AI interviews for a job it already has but can't remember 
 
 ## Trust Model
 
-This plugin runs with your full shell privileges. Before installing or upgrading, understand what you're trusting:
+This plugin runs with your full shell privileges, like any other Claude Code hook. The **default install** stores memory locally under `<project>/.remember/` (or `~/.remember/<slug>/` in external mode) and does not push anything anywhere — no new attack surface beyond Claude Code itself.
 
-- **`~/.remember/config.json`** — Any process that can write this file can redirect the git backup remote to an attacker-controlled URL, causing all memory to be silently exfiltrated on every session save.
-- **`hooks.d/` directory** — Any process that can write an executable file here gets arbitrary code execution on every session save and start. This includes the plugin cache directory (`~/.claude/plugins/cache/`), which is user-writable by design.
-- **The configured git backup remote** — Anyone who controls the remote repository receives a copy of everything you discuss with Claude Code: project paths, summaries, identity files, and anything else in memory.
-
-**Recommended mitigations:**
-
-- Keep `~/.remember/` and the plugin cache under tight permissions (`chmod 700 ~/.remember ~/.claude/plugins/cache`).
-- Point the git backup remote at a repository you own and review push targets when you change it.
-- The plugin now validates the remote URL on every push and aborts if it changes — see the `git_backup.allow_remote_change` config option to update it intentionally.
+The optional **git backup** feature does push memory to a remote you configure. If you enable it, read [`docs/git-backup-security.md`](docs/git-backup-security.md) for the full threat model — short version: treat `~/.remember/` with the same care you give `~/.ssh/`, point the backup at a repo you own, and the built-in remote-URL validation handles the rest.
 
 ### Changelog
 
