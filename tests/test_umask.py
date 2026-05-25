@@ -8,8 +8,16 @@ files (logs, memory dirs, temp files) are created with mode 600/700.
 import os
 import stat
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
+
+import pytest
+
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX umask + mode bits don't apply to NTFS (umask is a no-op on Windows)",
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RESOLVE_PATHS_SH = REPO_ROOT / "scripts" / "resolve-paths.sh"
