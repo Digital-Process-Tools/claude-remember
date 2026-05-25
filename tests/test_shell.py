@@ -453,7 +453,7 @@ def test_cmd_consolidate_processes_yesterday_file_in_tz_context(monkeypatch, cap
 
     with tempfile.TemporaryDirectory() as d:
         yesterday = os.path.join(d, "today-2026-04-21.md")
-        with open(yesterday, "w") as f:
+        with open(yesterday, "w", encoding="utf-8") as f:
             f.write("yesterday in EDT — should be consolidated")
 
         with patch("pipeline.consolidate.consolidate", return_value=fake_result) as mock_con, \
