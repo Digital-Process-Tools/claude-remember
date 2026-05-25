@@ -37,16 +37,16 @@ Claude Remember is also available in the official Anthropic Marketplace. In Clau
 
 Look at the `version` field in `.claude-plugin/plugin.json`. The plugin location depends on your install type:
 
-| Install type | Location |
-|---|---|
-| DPT marketplace (macOS/Linux) | `~/.claude/plugins/cache/dpt-plugins/remember/<version>/` |
-| Official marketplace (macOS/Linux) | `~/.claude/plugins/cache/claude-plugins-official/remember/<version>/` |
-| Official marketplace (Windows) | `%USERPROFILE%\.claude\plugins\cache\claude-plugins-official\remember\<version>\` |
-| Local install | `<your-project>/.claude/remember/` |
+| Install type                       | Location                                                                          |
+| ---------------------------------- | --------------------------------------------------------------------------------- |
+| DPT marketplace (macOS/Linux)      | `~/.claude/plugins/cache/dpt-plugins/remember/<version>/`                         |
+| Official marketplace (macOS/Linux) | `~/.claude/plugins/cache/claude-plugins-official/remember/<version>/`             |
+| Official marketplace (Windows)     | `%USERPROFILE%\.claude\plugins\cache\claude-plugins-official\remember\<version>\` |
+| Local install                      | `<your-project>/.claude/remember/`                                                |
 
 [![The Interview](https://max.dp.tools/art/og/og-the-interview-video.jpg)](https://max.dp.tools/art/2026/03/the-interview-claude-remember.mp4)
 
-*The Interview — an AI interviews for a job it already has but can't remember doing.*
+_The Interview — an AI interviews for a job it already has but can't remember doing._
 
 **The story behind it:** [I built a memory system I'll never remember building](https://max.dp.tools/posts/134-i-built-a-memory-system-ill-never-remember-building.php) — by Max, the AI that designed it and doesn't remember.
 
@@ -59,58 +59,14 @@ This plugin runs with your full shell privileges. Before installing or upgrading
 - **The configured git backup remote** — Anyone who controls the remote repository receives a copy of everything you discuss with Claude Code: project paths, summaries, identity files, and anything else in memory.
 
 **Recommended mitigations:**
+
 - Keep `~/.remember/` and the plugin cache under tight permissions (`chmod 700 ~/.remember ~/.claude/plugins/cache`).
 - Point the git backup remote at a repository you own and review push targets when you change it.
 - The plugin now validates the remote URL on every push and aborts if it changes — see the `git_backup.allow_remote_change` config option to update it intentionally.
 
 ### Changelog
 
-**v0.7.1** — Windows portability fixes
-- **Fix: SessionStart hook libuv assertion on Windows** ([#39](https://github.com/Digital-Process-Tools/claude-remember/pull/39)) — backgrounded `save-session.sh` and `run-consolidation.sh` now fully detach via `</dev/null >/dev/null 2>&1 & disown`, preventing the `UV_HANDLE_CLOSING` assertion that surfaced as `SessionStart:startup hook error` on every fresh terminal. Community contribution by [@maxwellkemp10-ux](https://github.com/maxwellkemp10-ux)
-- **Fix: silent save failures on Windows + Git Bash** ([#44](https://github.com/Digital-Process-Tools/claude-remember/pull/44)) — Git Bash exposes `$CLAUDE_PROJECT_DIR` as a POSIX path (`/c/Users/...`), but Claude Code stores sessions under the Win32-form slug (`C--Users-...`). The post-tool hook silently exited because the slug never matched. `resolve-paths.sh` now normalizes the POSIX form to Win32 inside an `OSTYPE`-gated case (no-op on Linux/macOS). Community contribution by [@kanelavish-a11y](https://github.com/kanelavish-a11y)
-- 327 tests (up from 323)
-
-**v0.7.0** — Unified config reader, marketplace path fix
-- **Fix: unified config reader across all scripts** ([#38](https://github.com/Digital-Process-Tools/claude-remember/pull/38)) — all scripts now use `config()` from `log.sh` instead of separate readers; `PIPELINE_DIR` set with fallback for both marketplace and local installs. Issue reported by [@josemoreno801-netizen](https://github.com/josemoreno801-netizen)
-- **Fix: `user-prompt-hook.sh` sources `resolve-paths.sh`** — was the root cause of marketplace config path failures
-- **Fix: removed redundant `REMEMBER_TZ` re-reads** — timezone is now set once in `log.sh`, inherited by all scripts
-- **Fix: removed duplicate `cfg()` from `session-start-hook.sh`** — uses shared `config()` instead
-- 323 tests (up from 256), 99% coverage
-
-**v0.6.0** — Timezone fix, cross-platform, community contribution
-- **Fix: log filename date used UTC instead of configured timezone** ([#26](https://github.com/Digital-Process-Tools/claude-remember/pull/26)) — `MEMORY_LOG_DATE` was computed before `REMEMBER_TZ` was defined; `TZ=""` silently falls back to UTC on macOS/BSD. Community contribution by [@josemoreno801-netizen](https://github.com/josemoreno801-netizen)
-- **New: `pipeline/_tz.py`** — shared timezone-aware date helpers for Python, reading `REMEMBER_TZ` with fallback to system local (never UTC)
-- **New: `time_format` config option** — `24h` (default) or `12h` for AM/PM timestamps in log files
-- **Fix: marketplace path resolution in `log.sh`** — `PIPELINE_DIR` now used for `config.json` and `hooks.d` paths
-- **Fix: BSD `mktemp` compatibility** — no file extensions after `XXXXXX` template
-- **Fix: Windows/Git Bash portability** — centralized `SYS_TMPDIR`, `py` launcher fallback, session-dir slug matching
-- **Fix: Haiku header guard** — prevents invented `unknown` headers in summarization output
-- 256 tests (up from 224), 99% coverage, `_tz.py` at 100%
-
-**v0.5.0** — Bug fixes, Python 3.9 support, DPT marketplace
-- **DPT marketplace** — install from our own marketplace for reliable updates (`/plugin marketplace add Digital-Process-Tools/claude-marketplace`)
-- **Python 3.9 support** — `from __future__ import annotations` in all pipeline modules (macOS ships 3.9 via CommandLineTools)
-- **Fix: NDC subshell killed by `set -e`** (#14) — background compression no longer dies silently when `claude -p` returns non-zero
-- **Fix: .gitignore created too late** (#17) — now created in `session-start-hook.sh` before any save triggers
-- 186 tests (up from 162), 99% coverage
-
-**v0.4.0** — Version tagging & marketplace update docs
-- Documented known marketplace update bugs with workarounds ([#37252](https://github.com/anthropics/claude-code/issues/37252), [#38271](https://github.com/anthropics/claude-code/issues/38271))
-- First release with proper git tags
-
-**v0.3.0** — Path resolution overhaul (fixes #9, addresses #10)
-- New `resolve-paths.sh` — single source of truth for all path resolution across local and marketplace installs
-- Marketplace installs without `CLAUDE_PROJECT_DIR` now **fail with a clear FATAL error** instead of silently computing wrong paths
-- All hooks log their resolved paths to `.remember/logs/` on every invocation
-- Hook stderr captured to `.remember/logs/hook-errors.log` via hooks.json redirect
-- 162 tests (up from 122), including realistic plugin simulation tests for both install layouts
-
-**v0.2.0** — Windows compatibility, CLI v2.1.86+ support
-- Fixed path slugging for Windows backslashes and colons
-- Added UTF-8 encoding to all Python file operations
-- Handle CLI v2+ JSON array response format in haiku.py
-
-**v0.1.0** — Initial release
+Moved to [`CHANGELOG.md`](CHANGELOG.md) — Keep a Changelog format, full history from v0.1.0.
 
 ## How it works
 
@@ -129,6 +85,7 @@ flowchart TD
 Each layer compresses the one above it. Raw exchanges become one-line summaries. Daily summaries become weekly paragraphs. The result: full context in minimal tokens.
 
 On session start, the `SessionStart` hook automatically injects into Claude's context:
+
 - `identity.md` — who the agent is
 - `remember.md` — the handoff note from the last session
 - `now.md` — current session buffer
@@ -243,27 +200,27 @@ The pipeline writes to `REMEMBER_DIR` (created automatically). By default this i
 
 Config is resolved by deep-merging three layers (highest priority wins):
 
-| Layer | Path | Scope |
-|-------|------|-------|
-| Plugin bundled | `<plugin>/config.json` | Shipped defaults |
-| User-global | `~/.remember/config.json` | All your projects |
-| Per-project | `<REMEMBER_DIR>/config.json` | One project |
+| Layer          | Path                         | Scope             |
+| -------------- | ---------------------------- | ----------------- |
+| Plugin bundled | `<plugin>/config.json`       | Shipped defaults  |
+| User-global    | `~/.remember/config.json`    | All your projects |
+| Per-project    | `<REMEMBER_DIR>/config.json` | One project       |
 
 Put cross-project preferences (timezone, cooldowns) in `~/.remember/config.json`. Put project-specific overrides in `<REMEMBER_DIR>/config.json`. See `config.user.example.json` for a user-global template and `config.example.json` for all available keys.
 
-| Key                              | Default | Purpose                                            |
-| -------------------------------- | ------- | -------------------------------------------------- |
-| `data_dir`                       | `.remember` | Where memory files are written. Relative paths resolve inside the project root (legacy default). Absolute paths or paths starting with `~` are expanded and treated as external — see [External storage mode](#external-storage-mode). |
-| `cooldowns.save_seconds`         | `120`   | Minimum seconds between saves                      |
-| `cooldowns.ndc_seconds`          | `3600`  | Compression interval (hourly)                      |
-| `cooldowns.git_backup_seconds`   | `900`   | Minimum seconds between auto-backup commits (no-op if `~/.remember/` is not a git repo) |
-| `thresholds.min_human_messages`  | `3`     | Minimum messages before saving                     |
-| `thresholds.delta_lines_trigger` | `50`    | Tool call output lines that trigger auto-save      |
-| `features.ndc_compression`      | `true`  | Enable hourly compression of daily files           |
-| `features.recovery`             | `true`  | Recover missed saves on session start              |
-| `timezone`                       | *(system local)* | IANA name (e.g. `America/New_York`, `Europe/Paris`) for timestamps and daily file boundaries. Omit or leave empty to use the system clock's local zone. Set this explicitly on a VPS whose system clock is UTC. |
-| `time_format`                    | `24h`   | `24h` or `12h` — controls timestamp format in log files (e.g. `14:30:00` vs `2:30:00 PM`) |
-| `debug`                          | `false` | Verbose logging for cooldowns and locks            |
+| Key                              | Default          | Purpose                                                                                                                                                                                                                                |
+| -------------------------------- | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `data_dir`                       | `.remember`      | Where memory files are written. Relative paths resolve inside the project root (legacy default). Absolute paths or paths starting with `~` are expanded and treated as external — see [External storage mode](#external-storage-mode). |
+| `cooldowns.save_seconds`         | `120`            | Minimum seconds between saves                                                                                                                                                                                                          |
+| `cooldowns.ndc_seconds`          | `3600`           | Compression interval (hourly)                                                                                                                                                                                                          |
+| `cooldowns.git_backup_seconds`   | `900`            | Minimum seconds between auto-backup commits (no-op if `~/.remember/` is not a git repo)                                                                                                                                                |
+| `thresholds.min_human_messages`  | `3`              | Minimum messages before saving                                                                                                                                                                                                         |
+| `thresholds.delta_lines_trigger` | `50`             | Tool call output lines that trigger auto-save                                                                                                                                                                                          |
+| `features.ndc_compression`       | `true`           | Enable hourly compression of daily files                                                                                                                                                                                               |
+| `features.recovery`              | `true`           | Recover missed saves on session start                                                                                                                                                                                                  |
+| `timezone`                       | _(system local)_ | IANA name (e.g. `America/New_York`, `Europe/Paris`) for timestamps and daily file boundaries. Omit or leave empty to use the system clock's local zone. Set this explicitly on a VPS whose system clock is UTC.                        |
+| `time_format`                    | `24h`            | `24h` or `12h` — controls timestamp format in log files (e.g. `14:30:00` vs `2:30:00 PM`)                                                                                                                                              |
+| `debug`                          | `false`          | Verbose logging for cooldowns and locks                                                                                                                                                                                                |
 
 ## External storage mode
 
@@ -280,6 +237,7 @@ Create `~/.remember/config.json`:
 ```
 
 On next session start, the plugin:
+
 1. Resolves `REMEMBER_DIR` to `~/.remember/<slug-of-project>/`
 2. Auto-migrates any existing `<project>/.remember/` to the new location — once, leaving a `MIGRATED-TO.txt` marker in the old directory
 3. Skips writing `.gitignore` (the external directory is not inside a git repo)
