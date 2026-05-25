@@ -1,6 +1,6 @@
 # Continuous Memory for Claude Code
 
-![12,500+ installs on the Anthropic Marketplace](docs/marketplace-12k-installs.png)
+![claude-remember — continuous memory for Claude Code](docs/remember.png)
 
 [![Tests](https://github.com/Digital-Process-Tools/claude-remember/actions/workflows/tests.yml/badge.svg)](https://github.com/Digital-Process-Tools/claude-remember/actions/workflows/tests.yml)
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue)](https://www.python.org/)
