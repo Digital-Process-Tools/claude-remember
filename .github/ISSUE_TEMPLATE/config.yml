@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/Digital-Process-Tools/claude-remember/security/policy
+    about: Please report security issues privately via email (see SECURITY.md).
