@@ -6,6 +6,8 @@ import sys
 import tempfile
 from unittest.mock import patch
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from pipeline.extract import (
@@ -587,6 +589,10 @@ def test_extract_session_windows_path_end_to_end():
         assert "Hello from Windows" in result.exchanges
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="bash subprocess — Windows GHA runner's bash falls through to WSL launcher (#79)",
+)
 def test_slug_consistency_python_vs_bash():
     """Python _session_dir slug matches bash sed 's/[^a-zA-Z0-9]/-/g' for Windows paths."""
     import subprocess

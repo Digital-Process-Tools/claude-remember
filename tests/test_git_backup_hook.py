@@ -9,11 +9,17 @@ lib-memory-dir.sh from overriding the REMEMBER_DIR we set explicitly.
 import os
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
 
 import pytest
+
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="bash hook subprocess + POSIX flock/git semantics — not portable to Windows runners (#79)",
+)
 
 FLOCK_AVAILABLE = shutil.which("flock") is not None
 

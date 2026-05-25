@@ -8,8 +8,16 @@ resolves correctly for both legacy and external data_dir values.
 import json
 import os
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
+
+import pytest
+
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="bash subprocess + POSIX lib-memory-dir.sh — not portable to Windows runners (#79)",
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LIB_SCRIPT = REPO_ROOT / "scripts" / "lib-memory-dir.sh"
