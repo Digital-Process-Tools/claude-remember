@@ -108,54 +108,54 @@ def test_no_bare_dollar_braces_outside_known_vars():
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not on PATH")
-def test_commands_parse_under_bash(tmp_path):
+def test_commands_parse_under_bash():
     """`bash -n` dry-parses each command with a stubbed CLAUDE_PLUGIN_ROOT.
 
-    Writes the command to a temp .sh file to sidestep Windows subprocess
-    arg-quoting (embedded double quotes get mangled by Python's list2cmdline
-    when passed as `-c "$cmd"`).
+    Pipes the command to bash via stdin — no temp file, no Windows path
+    translation hazards (Git Bash chokes on `C:\\...` style paths), no
+    list2cmdline quote mangling.
     """
     env = {**os.environ, "CLAUDE_PLUGIN_ROOT": "/tmp/stub plugin root"}
-    for i, (loc, cmd) in enumerate(_iter_commands()):
-        script = tmp_path / f"hook_{i}.sh"
-        script.write_text(cmd + "\n")
+    for loc, cmd in _iter_commands():
         result = subprocess.run(
-            ["bash", "-n", str(script)],
+            ["bash", "-n", "/dev/stdin"],
+            input=cmd + "\n",
             env=env,
             capture_output=True,
             text=True,
         )
         assert result.returncode == 0, (
-            f"{loc}: bash syntax error\ncmd: {cmd}\nstderr: {result.stderr}"
+            f"{loc}: bash syntax error\ncmd: {cmd}\n"
+            f"stdout: {result.stdout!r}\nstderr: {result.stderr!r}"
         )
 
 
 @pytest.mark.skipif(shutil.which("pwsh") is None, reason="pwsh not on PATH")
-def test_commands_parse_under_powershell(tmp_path):
+def test_commands_parse_under_powershell():
     """PowerShell dry-parses each command with a stubbed CLAUDE_PLUGIN_ROOT.
 
     Direct guard for #82 — the Windows ParserError surfaces here on any OS that
     has pwsh installed. GitHub-hosted runners ship pwsh on all three matrix legs.
 
-    Writes the command to a temp .ps1 and parses via System.Management.Automation
-    so embedded quotes survive Windows arg encoding.
+    Pipes the command source via stdin and parses it through
+    System.Management.Automation.Language.Parser — bypasses CLI arg encoding.
     """
-    for i, (loc, cmd) in enumerate(_iter_commands()):
-        script = tmp_path / f"hook_{i}.ps1"
-        script.write_text(cmd + "\n", encoding="utf-8")
-        probe = (
-            "$env:CLAUDE_PLUGIN_ROOT = '/tmp/stub plugin root'; "
-            f"$src = Get-Content -Raw -LiteralPath '{script}'; "
-            "$errors = $null; "
-            "$null = [System.Management.Automation.Language.Parser]::ParseInput("
-            "$src, [ref]$null, [ref]$errors); "
-            "if ($errors) { $errors | ForEach-Object { Write-Error $_ }; exit 1 }"
-        )
+    parser_probe = (
+        "$env:CLAUDE_PLUGIN_ROOT = '/tmp/stub plugin root'; "
+        "$src = [Console]::In.ReadToEnd(); "
+        "$errors = $null; "
+        "$null = [System.Management.Automation.Language.Parser]::ParseInput("
+        "$src, [ref]$null, [ref]$errors); "
+        "if ($errors) { $errors | ForEach-Object { Write-Error $_ }; exit 1 }"
+    )
+    for loc, cmd in _iter_commands():
         result = subprocess.run(
-            ["pwsh", "-NoProfile", "-NonInteractive", "-Command", probe],
+            ["pwsh", "-NoProfile", "-NonInteractive", "-Command", parser_probe],
+            input=cmd + "\n",
             capture_output=True,
             text=True,
         )
         assert result.returncode == 0, (
-            f"{loc}: PowerShell ParserError\ncmd: {cmd}\nstderr: {result.stderr}"
+            f"{loc}: PowerShell ParserError\ncmd: {cmd}\n"
+            f"stdout: {result.stdout!r}\nstderr: {result.stderr!r}"
         )
