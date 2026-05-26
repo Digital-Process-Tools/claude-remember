@@ -129,6 +129,7 @@ def test_commands_parse_under_bash():
             env=env,
             capture_output=True,
             text=True,
+            encoding="utf-8",
         )
         assert result.returncode == 0, (
             f"{loc}: bash syntax error\ncmd: {cmd}\n"
@@ -182,6 +183,7 @@ def test_commands_parse_after_substitution(plugin_root):
             input=substituted + "\n",
             capture_output=True,
             text=True,
+            encoding="utf-8",
         )
         assert result.returncode == 0, (
             f"{loc}: PowerShell ParserError after substituting "
@@ -215,6 +217,7 @@ def test_commands_parse_under_powershell():
             input=cmd + "\n",
             capture_output=True,
             text=True,
+            encoding="utf-8",
         )
         assert result.returncode == 0, (
             f"{loc}: PowerShell ParserError\ncmd: {cmd}\n"
