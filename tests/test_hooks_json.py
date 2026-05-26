@@ -201,7 +201,7 @@ def test_commands_parse_after_substitution(plugin_root):
         "if ($errors) { $errors | ForEach-Object { Write-Error $_ }; exit 1 }"
     )
     for loc, cmd in _iter_commands():
-        substituted = re.sub(r"\$\{?CLAUDE_PLUGIN_ROOT\}?", plugin_root, cmd)
+        substituted = re.sub(r"\$\{?CLAUDE_PLUGIN_ROOT\}?", lambda _m: plugin_root, cmd)
         result = subprocess.run(
             ["pwsh", "-NoProfile", "-NonInteractive", "-Command", parser_probe],
             input=substituted + "\n",
