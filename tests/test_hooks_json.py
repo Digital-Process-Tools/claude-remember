@@ -138,23 +138,47 @@ def test_commands_parse_under_bash():
 
 
 PROBLEMATIC_PATHS = [
-    # plain
+    # ── baseline ────────────────────────────────────────────────────
     "C:/Users/dev/plugin",
-    # space — historical install-path bug (4d50166)
+    # ── spaces (historical bug 4d50166) ─────────────────────────────
     "C:/Program Files/My Plugin",
     "C:/Users/Jane Doe/.claude/plugins/cache/org/remember/0.7.2",
-    # non-ASCII (French/German/Polish usernames, OneDrive folder names)
+    # ── trailing space (Windows quietly strips on save) ─────────────
+    "C:/Users/dev /plugin",
+    # ── non-ASCII usernames (Latin1 + extended) ─────────────────────
     "C:/Users/Émilie/plugin",
     "C:/Users/café/plugin",
     "C:/Users/Łukasz/plugin",
-    # apostrophe in folder name (common in OneDrive: "Jane's OneDrive")
-    "C:/Users/Jane's OneDrive/plugin",
-    # backtick — PowerShell escape character
-    "C:/Users/dev/with`backtick/plugin",
-    # literal dollar sign
-    "C:/Users/dev/with$dollar/plugin",
-    # mixed nightmare
+    # ── non-ASCII beyond Latin1 (combining marks, CJK, RTL, emoji) ──
+    "C:/Users/Việt/plugin",
+    "C:/Users/中文/plugin",
+    "C:/Users/مرحبا/plugin",
+    "C:/Users/dev🎉/plugin",
+    # combining mark: e + U+0301 (not precomposed é)
+    "C:/Users/café/plugin",
+    # ── PowerShell-hostile chars ────────────────────────────────────
+    "C:/Users/Jane's OneDrive/plugin",          # apostrophe (OneDrive)
+    "C:/Users/dev/with`backtick/plugin",        # PS escape char
+    "C:/Users/dev/with$dollar/plugin",          # PS var sigil
+    "C:/Users/dev/with[brackets]/plugin",       # PS wildcard / index
+    "C:/Users/dev/with(parens)/plugin",         # subexpression-ish
+    "C:/Users/dev/with{braces}/plugin",         # scriptblock / var-name braces
+    "C:/Users/dev/with;semi/plugin",            # statement separator
+    "C:/Users/dev/with#hash/plugin",            # PS comment char
+    "C:/Users/dev/with@at/plugin",              # here-string / splat
+    # ── cmd.exe-passthrough flavour ─────────────────────────────────
+    "C:/Users/dev/with%percent%/plugin",        # cmd var expansion
+    "C:/Users/dev/with&amp/plugin",             # cmd command separator
+    # ── slash mixing & oddities ─────────────────────────────────────
+    "C:\\Users\\dev\\plugin",                    # all-backslash
+    "C:\\Users/dev\\mixed/plugin",               # mixed
+    "C:/PROGRA~1/plugin",                        # 8.3 short name
+    # ── UNC paths ───────────────────────────────────────────────────
+    "//server/share/plugin",
+    "\\\\server\\share\\plugin",
+    # ── mixed nightmare ─────────────────────────────────────────────
     "C:/Users/Émilie's Files/Café (work)/plugin",
+    "C:/Users/中文 dev's/with `backtick` & $var [v2]/plugin",
 ]
 
 
