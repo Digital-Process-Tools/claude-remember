@@ -18,6 +18,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -107,7 +108,12 @@ def test_no_bare_dollar_braces_outside_known_vars():
             )
 
 
-@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not on PATH")
+@pytest.mark.skipif(
+    sys.platform == "win32" or shutil.which("bash") is None,
+    reason="Windows `bash` resolves to WSL launcher, not Git Bash — "
+    "claude-code on Windows dispatches via pwsh anyway; "
+    "bash-side coverage comes from ubuntu/macos legs.",
+)
 def test_commands_parse_under_bash():
     """`bash -n` dry-parses each command with a stubbed CLAUDE_PLUGIN_ROOT.
 
