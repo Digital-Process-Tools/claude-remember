@@ -136,6 +136,61 @@ def test_commands_parse_under_bash():
         )
 
 
+PROBLEMATIC_PATHS = [
+    # plain
+    "C:/Users/dev/plugin",
+    # space — historical install-path bug (4d50166)
+    "C:/Program Files/My Plugin",
+    "C:/Users/Jane Doe/.claude/plugins/cache/org/remember/0.7.2",
+    # non-ASCII (French/German/Polish usernames, OneDrive folder names)
+    "C:/Users/Émilie/plugin",
+    "C:/Users/café/plugin",
+    "C:/Users/Łukasz/plugin",
+    # apostrophe in folder name (common in OneDrive: "Jane's OneDrive")
+    "C:/Users/Jane's OneDrive/plugin",
+    # backtick — PowerShell escape character
+    "C:/Users/dev/with`backtick/plugin",
+    # literal dollar sign
+    "C:/Users/dev/with$dollar/plugin",
+    # mixed nightmare
+    "C:/Users/Émilie's Files/Café (work)/plugin",
+]
+
+
+@pytest.mark.skipif(shutil.which("pwsh") is None, reason="pwsh not on PATH")
+@pytest.mark.parametrize("plugin_root", PROBLEMATIC_PATHS, ids=lambda p: p[:32])
+def test_commands_parse_after_substitution(plugin_root):
+    """Substitute ${CLAUDE_PLUGIN_ROOT} ourselves, then parse under PowerShell.
+
+    Claude Code on Windows may expand the env variable before handing the
+    command string to pwsh. Paths containing spaces / non-ASCII / apostrophes /
+    backticks / dollar signs can then break the parser even though the raw
+    template was fine. This guards every install-path shape the reporter or
+    future users might have.
+    """
+    parser_probe = (
+        "$src = [Console]::In.ReadToEnd(); "
+        "$errors = $null; "
+        "$null = [System.Management.Automation.Language.Parser]::ParseInput("
+        "$src, [ref]$null, [ref]$errors); "
+        "if ($errors) { $errors | ForEach-Object { Write-Error $_ }; exit 1 }"
+    )
+    for loc, cmd in _iter_commands():
+        substituted = re.sub(r"\$\{?CLAUDE_PLUGIN_ROOT\}?", plugin_root, cmd)
+        result = subprocess.run(
+            ["pwsh", "-NoProfile", "-NonInteractive", "-Command", parser_probe],
+            input=substituted + "\n",
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, (
+            f"{loc}: PowerShell ParserError after substituting "
+            f"CLAUDE_PLUGIN_ROOT={plugin_root!r}\n"
+            f"substituted cmd: {substituted}\n"
+            f"stdout: {result.stdout!r}\nstderr: {result.stderr!r}"
+        )
+
+
 @pytest.mark.skipif(shutil.which("pwsh") is None, reason="pwsh not on PATH")
 def test_commands_parse_under_powershell():
     """PowerShell dry-parses each command with a stubbed CLAUDE_PLUGIN_ROOT.
