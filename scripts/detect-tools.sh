@@ -79,9 +79,9 @@ fi
 export JQ
 
 # Note: safe_eval lives in log.sh (single source of truth). It strips CR
-# and unwraps pipeline.shell._shell_escape single-quote wrapping (issue #84).
+# from CRLF input — needed because Python on Windows emits \r\n (issue #84).
 # Earlier versions overrode safe_eval here as a Windows-CRLF patch — removed
-# now that log.sh handles both concerns and is sourced after this file.
+# now that log.sh carries the fix and is sourced after this file.
 
 # --- CRLF-safe session dir slug ---
 # Replaces all non-alphanumeric chars with dashes. Must match Claude Code's

@@ -1,22 +1,23 @@
 """Tests for the shell↔Python variable-bridge seam (issue #84).
 
-`pipeline.shell._shell_escape` emits POSIX single-quote-wrapped values
-(safe for `eval`), but `safe_eval` in `scripts/log.sh` assigns verbatim
-via `printf -v` — no shell expansion. On Linux, temp paths contain no
-shell-unsafe chars, so `_shell_escape` returns them unquoted and the
-mismatch is invisible. On Windows, paths contain backslashes → quoted
-→ stored *with* literal quotes → downstream `open()` fails with
-`OSError: [Errno 22]`.
+Pre-fix, `pipeline.shell._shell_escape` single-quote-wrapped values per
+POSIX `eval` convention, while `safe_eval` in `scripts/log.sh` assigned
+verbatim via `printf -v` — no shell expansion. Mismatched halves: Linux
+temp paths contained no shell-unsafe chars so the escaper returned them
+unquoted and the bug was invisible; Windows backslash paths got quoted
+and the literal quotes survived into the variable, breaking downstream
+`open()` with `OSError: [Errno 22]`.
 
-Plus: pre-fix `log.sh` `safe_eval` did not strip CR. Python on Windows
-emits `\\r\\n` line endings, so values kept a trailing `\\r`, breaking
+Also pre-fix, `log.sh`'s `safe_eval` did not strip CR — Python on
+Windows emits `\\r\\n`, so values kept a trailing `\\r` and broke the
 integer tests in `save-session.sh`.
 
-`detect-tools.sh` used to override `safe_eval` with a CRLF-safe version,
-but was sourced *before* `log.sh` in every orchestrator (save-session,
-session-start-hook, run-consolidation), so `log.sh`'s broken copy won.
+Post-fix: `_shell_escape` is verbatim (raises on newline), `safe_eval`
+strips CR, and the redundant override in `detect-tools.sh` is removed
+(`log.sh` is the single source of truth).
 
-These tests pin the contract `safe_eval` must satisfy.
+These tests pin the contract both halves must satisfy, including a
+parametrized Python→shell roundtrip across Linux/Windows path shapes.
 """
 
 from __future__ import annotations
