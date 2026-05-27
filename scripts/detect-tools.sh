@@ -78,20 +78,10 @@ PYEOF
 fi
 export JQ
 
-# --- CRLF-safe safe_eval ---
-# Override safe_eval to strip \r from lines before eval.
-# On Windows (Git Bash), Python outputs \r\n. read -r keeps the \r,
-# which corrupts variable values (e.g., POSITION="42\r" breaks arithmetic).
-safe_eval() {
-    while IFS= read -r line; do
-        line="${line%$'\r'}"
-        if [[ "$line" =~ ^([A-Z_][A-Z0-9_]*)=(.*)$ ]]; then
-            local _key="${BASH_REMATCH[1]}"
-            local _val="${BASH_REMATCH[2]}"
-            printf -v "$_key" '%s' "$_val"
-        fi
-    done
-}
+# Note: safe_eval lives in log.sh (single source of truth). It strips CR
+# and unwraps pipeline.shell._shell_escape single-quote wrapping (issue #84).
+# Earlier versions overrode safe_eval here as a Windows-CRLF patch — removed
+# now that log.sh handles both concerns and is sourced after this file.
 
 # --- CRLF-safe session dir slug ---
 # Replaces all non-alphanumeric chars with dashes. Must match Claude Code's

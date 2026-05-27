@@ -35,16 +35,29 @@ from .prompts import build_save_prompt, build_ndc_prompt
 
 
 def _shell_escape(value: str) -> str:
-    """Escape a string for safe shell ``eval`` by single-quote wrapping.
+    """Emit a value for the shell variable bridge consumed by ``safe_eval``.
+
+    ``scripts/log.sh:safe_eval`` parses ``KEY=VALUE`` lines and assigns
+    ``VALUE`` verbatim via ``printf -v`` — no shell expansion, no ``eval``.
+    The only constraint is that ``VALUE`` must not contain a newline
+    (the parser is line-oriented).
+
+    Earlier versions single-quote-wrapped per POSIX ``eval`` convention,
+    which broke on Windows: paths with backslashes were quoted, but
+    ``safe_eval``'s verbatim assignment kept the quotes literal (issue #84).
 
     Args:
-        value: Raw string that may contain spaces, quotes, or special chars.
+        value: Raw string. Must not contain newlines.
 
     Returns:
-        Single-quoted string safe for shell evaluation. Internal single
-        quotes are escaped via the ``'\\''`` idiom.
+        The value as-is — emission is verbatim to match parser semantics.
+
+    Raises:
+        ValueError: If ``value`` contains a newline character.
     """
-    return "'" + value.replace("'", "'\\''") + "'"
+    if "\n" in value or "\r" in value:
+        raise ValueError("shell-bridged values must not contain newlines")
+    return value
 
 
 def cmd_extract(session_id: str, project_dir: str) -> None:
