@@ -138,6 +138,9 @@ log_tokens() {
 #   safe_eval <<< "$(python3 -m pipeline.shell extract ...)"
 safe_eval() {
     while IFS= read -r line; do
+        # Strip trailing CR — Python on Windows emits \r\n, which corrupts
+        # numeric values and trips integer tests downstream (issue #84).
+        line="${line%$'\r'}"
         if [[ "$line" =~ ^([A-Z_][A-Z0-9_]*)=(.*)$ ]]; then
             local _key="${BASH_REMATCH[1]}"
             local _val="${BASH_REMATCH[2]}"

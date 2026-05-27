@@ -1334,7 +1334,8 @@ class TestWindowsCompatIssue11:
         """safe_eval works with normal LF line endings."""
         result = subprocess.run(
             ["bash", "-c",
-             f'source "{REPO_ROOT}/scripts/detect-tools.sh"; '
+             f'export PROJECT_DIR="{REPO_ROOT}" PIPELINE_DIR="{REPO_ROOT}" REMEMBER_DIR="{REPO_ROOT}/.remember-test"; '
+             f'source "{REPO_ROOT}/scripts/detect-tools.sh"; source "{REPO_ROOT}/scripts/log.sh"; '
              'safe_eval <<< "FOO=bar"; echo "FOO=$FOO"'],
             capture_output=True, text=True,
         )
@@ -1344,7 +1345,8 @@ class TestWindowsCompatIssue11:
         """safe_eval strips \\r from CRLF lines — values are clean (fixed via detect-tools.sh)."""
         result = subprocess.run(
             ["bash", "-c",
-             f'source "{REPO_ROOT}/scripts/detect-tools.sh"; '
+             f'export PROJECT_DIR="{REPO_ROOT}" PIPELINE_DIR="{REPO_ROOT}" REMEMBER_DIR="{REPO_ROOT}/.remember-test"; '
+             f'source "{REPO_ROOT}/scripts/detect-tools.sh"; source "{REPO_ROOT}/scripts/log.sh"; '
              'safe_eval < <(printf "FOO=bar\\r\\n"); '
              'echo -n "$FOO" | xxd | grep -q "0d" && echo "CORRUPTED" || echo "CLEAN"'],
             capture_output=True, text=True,
@@ -1357,7 +1359,8 @@ class TestWindowsCompatIssue11:
         """CRLF-safe safe_eval: numeric values work in arithmetic."""
         result = subprocess.run(
             ["bash", "-c",
-             f'source "{REPO_ROOT}/scripts/detect-tools.sh"; '
+             f'export PROJECT_DIR="{REPO_ROOT}" PIPELINE_DIR="{REPO_ROOT}" REMEMBER_DIR="{REPO_ROOT}/.remember-test"; '
+             f'source "{REPO_ROOT}/scripts/detect-tools.sh"; source "{REPO_ROOT}/scripts/log.sh"; '
              'safe_eval < <(printf "NUM=42\\r\\n"); '
              'echo "RESULT=$((NUM + 1))"'],
             capture_output=True, text=True,

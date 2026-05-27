@@ -31,15 +31,23 @@ FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures")
 
 
 def test_shell_escape_simple():
-    assert _shell_escape("hello") == "'hello'"
+    # Post-#84: _shell_escape emits verbatim — safe_eval is verbatim too.
+    assert _shell_escape("hello") == "hello"
 
 
 def test_shell_escape_with_quotes():
-    assert _shell_escape("it's fine") == "'it'\\''s fine'"
+    # Single quotes pass through unchanged — safe_eval stores raw.
+    assert _shell_escape("it's fine") == "it's fine"
 
 
 def test_shell_escape_empty():
-    assert _shell_escape("") == "''"
+    assert _shell_escape("") == ""
+
+
+def test_shell_escape_rejects_newline():
+    import pytest as _pt
+    with _pt.raises(ValueError):
+        _shell_escape("has\nnewline")
 
 
 def test_cmd_parse_haiku_normal(capsys):

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.3] — Windows save pipeline shell↔Python bridge
+
+### Fixed
+
+- **Save pipeline broken on Windows / Git Bash** ([#84](https://github.com/Digital-Process-Tools/claude-remember/issues/84)) — the shell↔Python bridge had two mismatched halves: `pipeline.shell._shell_escape` single-quote-wrapped values per POSIX `eval` convention, but `safe_eval` in `scripts/log.sh` assigned verbatim via `printf -v` (no shell expansion). On Linux, temp paths contain no shell-unsafe chars so the escaper returned them unquoted — invisible. On Windows, backslash paths got quoted, then stored with literal quotes, then `open()` failed with `OSError: [Errno 22]`. Plus `safe_eval` did not strip CR, so Python's `\r\n` line endings on Windows corrupted integer values and broke `[ -eq ]` tests in `save-session.sh`. Fix: `_shell_escape` now emits verbatim (raises on newline); `safe_eval` strips trailing `\r`; redundant override in `detect-tools.sh` removed (`log.sh` is single source of truth). Issue reported by [@qzftsh7f44-design](https://github.com/qzftsh7f44-design).
+
+### Tests
+
+- New `tests/test_safe_eval_seam.py` pins the Python↔bash roundtrip contract — parametrized across Linux paths, Windows backslash paths, spaces, single quotes. Closes the seam gap CI was blind to (both sides were unit-tested in isolation, never together).
+- 391 tests, 99% coverage.
+
 ## [0.7.1] — Windows portability fixes
 
 ### Fixed
