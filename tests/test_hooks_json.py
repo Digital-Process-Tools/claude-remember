@@ -28,6 +28,29 @@ HOOKS_JSON = REPO_ROOT / "hooks" / "hooks.json"
 SCRIPTS_DIR = REPO_ROOT / "scripts"
 
 
+def _find_git_bash():
+    """Locate Git Bash specifically (not WSL's bash launcher).
+
+    On Windows, `shutil.which("bash")` may resolve to the WSL launcher. The #82
+    reporter launches Claude Code from Git Bash, so we want *that* bash. Probe the
+    standard Git-for-Windows install locations; fall back to PATH only if the
+    resolved binary lives under a Git install. Returns the exe path or None.
+    """
+    candidates = []
+    for env_var in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"):
+        base = os.environ.get(env_var)
+        if base:
+            candidates.append(Path(base) / "Git" / "bin" / "bash.exe")
+            candidates.append(Path(base) / "Git" / "usr" / "bin" / "bash.exe")
+    for cand in candidates:
+        if cand.is_file():
+            return str(cand)
+    resolved = shutil.which("bash")
+    if resolved and "git" in resolved.replace("\\", "/").lower():
+        return resolved
+    return None
+
+
 def _iter_commands():
     """Yield (event, index, command_string) for every hook entry."""
     data = json.loads(HOOKS_JSON.read_text())
@@ -137,6 +160,45 @@ def test_commands_parse_under_bash():
         )
 
 
+GIT_BASH = _find_git_bash()
+
+
+@pytest.mark.skipif(GIT_BASH is None, reason="Git Bash not found (non-Windows or not installed)")
+@pytest.mark.parametrize(
+    "plugin_root",
+    [
+        "/c/Users/dev/plugin",
+        "/c/Program Files/My Plugin",
+        "/c/Users/Jane Doe/.claude/plugins/cache/org/remember/0.7.2",
+        "C:\\Users\\dev\\plugin",
+    ],
+)
+def test_commands_parse_under_git_bash(plugin_root):
+    """`bash -n` dry-parse each command under *Git Bash* on Windows (#82).
+
+    The reporter launches Claude Code from Git Bash; the old win32 skip assumed
+    dispatch always goes through pwsh and gave us zero Windows-bash coverage.
+    This fires on the existing windows-latest CI leg (Git ships preinstalled),
+    parsing the dispatched command with both MSYS and native CLAUDE_PLUGIN_ROOT
+    shapes. Parse-only (`-n`) — no execution, no side effects.
+    """
+    assert GIT_BASH is not None  # guaranteed by skipif; narrows type for the checker
+    env = {**os.environ, "CLAUDE_PLUGIN_ROOT": plugin_root}
+    for loc, cmd in _iter_commands():
+        result = subprocess.run(
+            [GIT_BASH, "-n", "/dev/stdin"],
+            input=cmd + "\n",
+            env=env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        assert result.returncode == 0, (
+            f"{loc}: Git Bash syntax error with CLAUDE_PLUGIN_ROOT={plugin_root!r}\n"
+            f"cmd: {cmd}\nstdout: {result.stdout!r}\nstderr: {result.stderr!r}"
+        )
+
+
 PROBLEMATIC_PATHS = [
     # ── baseline ────────────────────────────────────────────────────
     "C:/Users/dev/plugin",
@@ -176,6 +238,18 @@ PROBLEMATIC_PATHS = [
     # ── UNC paths ───────────────────────────────────────────────────
     "//server/share/plugin",
     "\\\\server\\share\\plugin",
+    # ── MSYS / Git-Bash drive forms (#82: reporter launches from Git Bash) ──
+    # When Claude Code is launched from Git Bash, CLAUDE_PLUGIN_ROOT can arrive
+    # as an MSYS-style POSIX path rather than C:\... — the shape never fuzzed
+    # before. Leading "/c" reads as a path under pwsh, but the space/funky-char
+    # variants below still exercise the same parser hazards.
+    "/c/Users/dev/plugin",
+    "/c/Program Files/My Plugin",
+    "/c/Users/Jane Doe/.claude/plugins/cache/org/remember/0.7.2",
+    "/c/Users/Jane's OneDrive/plugin",
+    "/c/Users/Émilie/plugin",
+    "/cygdrive/c/Users/dev/plugin",
+    "/mnt/c/Users/dev/plugin",
     # ── mixed nightmare ─────────────────────────────────────────────
     "C:/Users/Émilie's Files/Café (work)/plugin",
     "C:/Users/中文 dev's/with `backtick` & $var [v2]/plugin",
