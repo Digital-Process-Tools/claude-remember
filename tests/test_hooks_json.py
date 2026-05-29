@@ -163,40 +163,58 @@ def test_commands_parse_under_bash():
 GIT_BASH = _find_git_bash()
 
 
-@pytest.mark.skipif(GIT_BASH is None, reason="Git Bash not found (non-Windows or not installed)")
-@pytest.mark.parametrize(
-    "plugin_root",
-    [
-        "/c/Users/dev/plugin",
-        "/c/Program Files/My Plugin",
-        "/c/Users/Jane Doe/.claude/plugins/cache/org/remember/0.7.2",
-        "C:\\Users\\dev\\plugin",
-    ],
+# Hard error signatures that mean the script (or one of its sourced files)
+# broke under Git Bash — the #82/#84 family: CRLF line endings turn into a
+# stray \r ("$'\r': command not found"), MSYS path mangling, bad test
+# comparisons, or a propagated Python traceback.
+_GIT_BASH_ERROR_SIGNATURES = (
+    "command not found",
+    "syntax error",
+    "$'\\r'",
+    "\\r': ",
+    "unexpected end of file",
+    "integer expression expected",
+    "Traceback (most recent call last)",
+    "No such file or directory",
 )
-def test_commands_parse_under_git_bash(plugin_root):
-    """`bash -n` dry-parse each command under *Git Bash* on Windows (#82).
 
-    The reporter launches Claude Code from Git Bash; the old win32 skip assumed
-    dispatch always goes through pwsh and gave us zero Windows-bash coverage.
-    This fires on the existing windows-latest CI leg (Git ships preinstalled),
-    parsing the dispatched command with both MSYS and native CLAUDE_PLUGIN_ROOT
-    shapes. Parse-only (`-n`) — no execution, no side effects.
+
+@pytest.mark.skipif(GIT_BASH is None, reason="Git Bash not found (non-Windows or not installed)")
+def test_session_start_hook_runs_under_git_bash(tmp_path):
+    """Execute session-start-hook.sh for real under Git Bash on Windows (#82).
+
+    Parse-only checks can't see #82: `bash "${VAR}/x.sh"` is always valid syntax.
+    The real failure is at *execution* — CRLF-poisoned scripts, MSYS path
+    translation, bad `[ ]` comparisons — exactly the #84 family the Git-Bash
+    reporter hits. So we run the hook in a sandbox (HOME + CLAUDE_PROJECT_DIR
+    point at a tmp dir; CLAUDE_PLUGIN_ROOT at the real repo so scripts resolve)
+    and assert it exits 0 with no hard error signature on stderr.
+
+    Fires on the existing windows-latest CI leg — Git ships preinstalled.
     """
     assert GIT_BASH is not None  # guaranteed by skipif; narrows type for the checker
-    env = {**os.environ, "CLAUDE_PLUGIN_ROOT": plugin_root}
-    for loc, cmd in _iter_commands():
-        result = subprocess.run(
-            [GIT_BASH, "-n", "/dev/stdin"],
-            input=cmd + "\n",
-            env=env,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-        )
-        assert result.returncode == 0, (
-            f"{loc}: Git Bash syntax error with CLAUDE_PLUGIN_ROOT={plugin_root!r}\n"
-            f"cmd: {cmd}\nstdout: {result.stdout!r}\nstderr: {result.stderr!r}"
-        )
+    repo = str(REPO_ROOT).replace("\\", "/")
+    script = f"{repo}/scripts/session-start-hook.sh"
+    env = {
+        **os.environ,
+        "CLAUDE_PLUGIN_ROOT": repo,
+        "CLAUDE_PROJECT_DIR": str(tmp_path).replace("\\", "/"),
+        "HOME": str(tmp_path).replace("\\", "/"),
+    }
+    result = subprocess.run(
+        [GIT_BASH, script],
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=60,
+    )
+    offenders = [s for s in _GIT_BASH_ERROR_SIGNATURES if s in result.stderr]
+    assert result.returncode == 0 and not offenders, (
+        f"session-start-hook.sh broke under Git Bash "
+        f"(exit {result.returncode}, signatures {offenders})\n"
+        f"stdout: {result.stdout!r}\nstderr: {result.stderr!r}"
+    )
 
 
 PROBLEMATIC_PATHS = [
