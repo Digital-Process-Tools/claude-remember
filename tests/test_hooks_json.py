@@ -217,6 +217,57 @@ def test_session_start_hook_runs_under_git_bash(tmp_path):
     )
 
 
+@pytest.mark.skipif(GIT_BASH is None, reason="Git Bash not found (non-Windows or not installed)")
+def test_session_start_hook_survives_crlf_checkout(tmp_path):
+    """Run the hook with CRLF-converted scripts under Git Bash (#82 repro).
+
+    GitHub's checkout gives LF, so the plain execution test can't see the
+    reporter's failure. Windows users with `core.autocrlf=true` get the
+    scripts with CRLF line endings — each line then carries a trailing \\r that
+    bash reads as a literal character ("$'\\r': command not found", broken
+    `[ ]` comparisons). This is the same family as the #84 save-pipeline bug.
+
+    We copy the repo to a sandbox, rewrite every *.sh to CRLF, and run the hook
+    from there. The assertion is the permanent guarantee — the hook must survive
+    a CRLF checkout. Until the scripts are made CRLF-safe this test reproduces
+    #82 (red); once fixed it stays green.
+    """
+    assert GIT_BASH is not None  # guaranteed by skipif; narrows type for the checker
+    plugin = tmp_path / "plugin"
+    shutil.copytree(
+        REPO_ROOT,
+        plugin,
+        ignore=shutil.ignore_patterns(".git", "tests", ".remember", "__pycache__", "*.pyc"),
+    )
+    for sh in plugin.rglob("*.sh"):
+        lf = sh.read_bytes().replace(b"\r\n", b"\n")  # normalise first
+        sh.write_bytes(lf.replace(b"\n", b"\r\n"))    # then force CRLF
+
+    home = tmp_path / "home"
+    home.mkdir()
+    plugin_root = str(plugin).replace("\\", "/")
+    env = {
+        **os.environ,
+        "CLAUDE_PLUGIN_ROOT": plugin_root,
+        "CLAUDE_PROJECT_DIR": str(home).replace("\\", "/"),
+        "HOME": str(home).replace("\\", "/"),
+    }
+    result = subprocess.run(
+        [GIT_BASH, f"{plugin_root}/scripts/session-start-hook.sh"],
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=60,
+    )
+    offenders = [s for s in _GIT_BASH_ERROR_SIGNATURES if s in result.stderr]
+    assert result.returncode == 0 and not offenders, (
+        f"session-start-hook.sh broke on a CRLF checkout under Git Bash "
+        f"(exit {result.returncode}, signatures {offenders}) — reproduces #82\n"
+        f"stdout: {result.stdout!r}\nstderr: {result.stderr!r}"
+    )
+
+
 PROBLEMATIC_PATHS = [
     # ── baseline ────────────────────────────────────────────────────
     "C:/Users/dev/plugin",
