@@ -220,6 +220,16 @@ Put cross-project preferences (timezone, cooldowns) in `~/.remember/config.json`
 | `time_format`                    | `24h`            | `24h` or `12h` — controls timestamp format in log files (e.g. `14:30:00` vs `2:30:00 PM`)                                                                                                                                              |
 | `debug`                          | `false`          | Verbose logging for cooldowns and locks                                                                                                                                                                                                |
 
+### Environment variables
+
+A few runtime overrides aren't in `config.json` because they're per-shell rather than per-project.
+
+| Env var            | Effect                                                                                                                                                                                                                                                                                                                                                                                |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `REMEMBER_BRANCH`  | Overrides the `\| <branch>` identity field in each `## HH:MM \| <branch>` memory header. Useful when Claude Code runs from a non-git directory (`$HOME`, a scratch dir) — without it the header falls back to the literal string `unknown`, which collapses the identity slot for every entry. Set to a meaningful tag (e.g. `laptop`, `cloud`, `staging`, an instance name) in your shell rc. |
+| `REMEMBER_DEBUG`   | `1` (default) emits verbose hook/cooldown lines to logs; `0` silences them.                                                                                                                                                                                                                                                                                                            |
+| `REMEMBER_TZ`      | Set automatically by `log.sh` from `config.json` → `timezone`. Don't set this manually unless you're debugging.                                                                                                                                                                                                                                                                       |
+
 ## External storage mode
 
 By default, memory data lives in `.remember/` inside each project directory. This works but has a drawback: it pollutes `git status` and siloes memory per repo clone.

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`REMEMBER_BRANCH` env var override** — `scripts/save-session.sh` now honors `$REMEMBER_BRANCH` when computing the `## HH:MM | <branch>` identity slot of each daily-log entry. Falls back to the existing `git branch --show-current` lookup, then the literal `"unknown"` if no git repo is present. Use case: running Claude Code from `$HOME` (or any non-git directory) collapses the identity slot to `unknown` on every entry, which makes log entries indistinguishable across instances. Export `REMEMBER_BRANCH=laptop` / `cloud` / `staging` / `$HOSTNAME` in your shell rc and the slot becomes a useful per-instance tag. Documented in `README.md` Configuration → Environment variables.
+
+### Tests
+
+- New `tests/test_save_session_branch_override.py` — pins the four-case truth table for the `BRANCH=` line in `save-session.sh`: env-set + git-repo (env wins), env-unset + git-repo (git wins), env-unset + no-git (`unknown` fallback), env-set-to-empty + no-git (`:-` treats empty as unset, falls back to `unknown`). Snapshots the line out of the live `save-session.sh` rather than re-asserting a copy, so the test fails loudly if the line is ever edited without updating the test.
+
 ## [0.7.3] — Windows save pipeline shell↔Python bridge
 
 ### Fixed
