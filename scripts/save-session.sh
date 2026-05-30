@@ -147,7 +147,11 @@ else
 fi
 
 # --- Step 3: Build prompt ---
-BRANCH=$(cd "$PROJECT_DIR" && git branch --show-current 2>/dev/null || echo "unknown")
+# $REMEMBER_BRANCH wins when set, so users running Claude Code from a non-git
+# directory (e.g., $HOME) can supply a meaningful identity for the today-*.md
+# header instead of the literal "unknown" fallback. Empty string is treated as
+# unset so an accidental `export REMEMBER_BRANCH=` doesn't propagate.
+BRANCH="${REMEMBER_BRANCH:-$(cd "$PROJECT_DIR" && git branch --show-current 2>/dev/null || echo "unknown")}"
 TIME_FORMAT=$(config ".time_format" "24h")
 if [ "$TIME_FORMAT" = "12h" ]; then
     # Force uppercase AM/PM: %p is locale-dependent (lowercase on many Linux systems).
