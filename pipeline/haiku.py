@@ -40,6 +40,14 @@ def call_haiku(
     ``--output-format json``, waits for completion, and parses the
     JSON response into a ``HaikuResult``.
 
+    The subprocess runs with ``--strict-mcp-config`` so it does not load
+    the user's configured MCP servers. This call passes ``--allowedTools``
+    (often empty) and never invokes a tool, so spawning MCP servers is pure
+    overhead — and harmful for single-consumer servers: a globally enabled
+    channel plugin (e.g. Telegram, one ``getUpdates`` slot per bot) would
+    boot a second poller here that evicts the user's long-running session
+    and silently drops their channel until a manual reconnect.
+
     Args:
         prompt: The full prompt text to send to the model.
         tools: Optional list of allowed tool names (e.g., ["Read", "Write"]).
@@ -59,6 +67,11 @@ def call_haiku(
         "--output-format", "json",
         "--model", "haiku",
         "--max-turns", "1",
+        # Don't load the user's MCP servers — this call uses no tools, so they
+        # are pure startup overhead, and single-consumer channel plugins (e.g.
+        # Telegram) would have a second poller boot here and evict the user's
+        # main session. See the docstring for the full rationale.
+        "--strict-mcp-config",
         "--allowedTools", ",".join(tools) if tools else "",
     ]
 
