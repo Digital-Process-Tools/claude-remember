@@ -21,9 +21,48 @@ Typical usage::
 
 from __future__ import annotations
 
+import re
+
 from .prompts import build_consolidation_prompt
 from .haiku import call_haiku
 from .types import ConsolidationResult, TokenUsage
+
+
+# A real memory entry header: "## HH:MM", "## Week of ...", or "## YYYY-MM-DD".
+_ENTRY_HEADER = re.compile(r"(?m)^## (\d{2}:\d{2}|Week of |\d{4}-\d{2}-\d{2})")
+
+
+class ConsolidationSkipped(Exception):
+    """Raised when Haiku declined (SKIP) or returned non-conforming output.
+
+    Signals that the consolidation produced no usable result. The caller
+    MUST NOT overwrite recent.md/archive.md and MUST NOT retire (rename to
+    ``.done.md``) the source staging files — they are left for the next run.
+    """
+
+
+def _is_valid_consolidation(text: str) -> bool:
+    """Return True only if the model output is real consolidated memory.
+
+    The expected output is the ``===RECENT===`` / ``===ARCHIVE===`` envelope.
+    A response with neither the recent delimiter nor a single ``## `` entry
+    header is conversational text (a refusal, a clarifying question, or a
+    "here is what I would compress…" preamble) and must be rejected — writing
+    it would replace memory with chatter and the source files would be lost.
+
+    Args:
+        text: Raw text response from Haiku.
+
+    Returns:
+        True if the text carries the recent delimiter or at least one memory
+        entry header; False for empty or purely conversational responses.
+    """
+    t = text.strip()
+    if not t:
+        return False
+    if "===RECENT===" in t:
+        return True
+    return _ENTRY_HEADER.search(t) is not None
 
 
 def consolidate(
@@ -44,9 +83,21 @@ def consolidate(
 
     Raises:
         RuntimeError: If the Haiku call fails or times out.
+        ConsolidationSkipped: If the model declined (SKIP) or returned
+            non-conforming output. The caller must not write or retire files.
     """
     prompt = build_consolidation_prompt(staging_contents, recent, archive)
     result = call_haiku(prompt, timeout=180)
+
+    # Guard: never let a SKIP or a conversational reply overwrite memory.
+    # Without this, a non-conforming response falls through to the parser's
+    # fallback and chatter is written as recent.md (and the source staging
+    # files are then irreversibly renamed to .done.md by the shell).
+    if result.is_skip or not _is_valid_consolidation(result.text):
+        raise ConsolidationSkipped(
+            "Haiku returned no usable consolidation "
+            "(SKIP or missing ===RECENT===/entry headers)"
+        )
 
     recent_new, archive_new = parse_consolidation_response(result.text)
 
