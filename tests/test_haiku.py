@@ -126,6 +126,9 @@ def test_call_haiku_success(mock_run):
     assert "claude" in cmd
     assert "--model" in cmd
     assert "haiku" in cmd
+    # One-shot summarization subprocess: never resume these, never write to disk
+    assert "--no-session-persistence" in cmd
+    assert "--exclude-dynamic-system-prompt-sections" in cmd
     # CLAUDECODE must be stripped from env
     env = args[1]["env"]
     assert "CLAUDECODE" not in env
