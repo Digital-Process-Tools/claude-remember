@@ -39,13 +39,13 @@ if [ -f "$CTX_PCT_FILE" ]; then
   CTX_PCT=$(cat "$CTX_PCT_FILE" 2>/dev/null)
 fi
 if [ -n "$CTX_PCT" ]; then
-  TIMESTAMP="[$(TZ="$REMEMBER_TZ" date '+%H:%M %Z') — $(whoami) — ${CTX_PCT}%]"
+  TIMESTAMP="[$(_remember_date '+%H:%M %Z') — $(whoami) — ${CTX_PCT}%]"
   echo "$TIMESTAMP"
   if [ "$CTX_PCT" -ge 95 ] 2>/dev/null; then
     echo "WARNING: Context at ${CTX_PCT}%. Run /remember to save session state before context death."
   fi
 else
-  echo "[$(TZ="$REMEMBER_TZ" date '+%H:%M %Z') — $(whoami)]"
+  echo "[$(_remember_date '+%H:%M %Z') — $(whoami)]"
 fi
 
 # ── Dispatch: after_user_prompt ─────────────────────────────────────────
