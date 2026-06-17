@@ -43,7 +43,7 @@ source "$(dirname "$0")/bootstrap-dirs.sh"
 PLUGIN_ROOT="$PIPELINE_DIR"
 PROJECT="$PROJECT_DIR"
 source "$PLUGIN_ROOT/scripts/log.sh" 2>/dev/null
-TODAY=$(TZ="$REMEMBER_TZ" date '+%Y-%m-%d')
+TODAY=$(_remember_date '+%Y-%m-%d')
 log "hook" "session-start: PROJECT_DIR=$PROJECT_DIR PIPELINE_DIR=$PIPELINE_DIR REMEMBER_DIR=$REMEMBER_DIR"
 
 # ── Dispatch: before_session_start ────────────────────────────────────────
