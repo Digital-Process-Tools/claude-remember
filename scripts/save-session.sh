@@ -64,7 +64,7 @@ LOCK_FILE="${REMEMBER_DIR}/tmp/save.lock"
 MEMORY_FILE="${REMEMBER_DIR}/now.md"
 LAST_SAVE_FILE="${REMEMBER_DIR}/tmp/last-save.json"
 COOLDOWN_MARKER="${REMEMBER_DIR}/tmp/last-save-ts"
-TODAY_DATE=$(TZ="$REMEMBER_TZ" date +%Y-%m-%d)
+TODAY_DATE=$(_remember_date +%Y-%m-%d)
 CLEANUP_FILES=()
 
 # Remove lock file and all accumulated temp files on exit.
@@ -155,9 +155,9 @@ BRANCH="${REMEMBER_BRANCH:-$(cd "$PROJECT_DIR" && git branch --show-current 2>/d
 TIME_FORMAT=$(config ".time_format" "24h")
 if [ "$TIME_FORMAT" = "12h" ]; then
     # Force uppercase AM/PM: %p is locale-dependent (lowercase on many Linux systems).
-    CURRENT_TIME=$(TZ="$REMEMBER_TZ" date '+%-I:%M %p' | tr '[:lower:]' '[:upper:]')
+    CURRENT_TIME=$(_remember_date '+%-I:%M %p' | tr '[:lower:]' '[:upper:]')
 else
-    CURRENT_TIME=$(TZ="$REMEMBER_TZ" date '+%H:%M')
+    CURRENT_TIME=$(_remember_date '+%H:%M')
 fi
 TMP_PROMPT=$(mktemp "${TMPDIR:-/tmp}"/remember-prompt-XXXXXX)
 CLEANUP_FILES+=("$TMP_PROMPT")
