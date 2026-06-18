@@ -1803,6 +1803,50 @@ class TestFreshProjectBootstrap:
             # Restore permissions for cleanup
             os.chmod(project, 0o755)
 
+    def test_unsourceable_log_sh_fails_loudly_not_silently(self, tmp_path):
+        """If log.sh sources but does not define _remember_date, the hook must
+        fail loudly (rc=127 + diagnostic), not silently produce an empty TODAY.
+
+        Without the guard, the hook would call `_remember_date` (command not
+        found, empty TODAY) and continue to exit 0 — a silent corruption. The
+        guard converts that into an explicit, debuggable failure. rc=127 keeps
+        it inside the degraded-env contract that tolerates (0, 127).
+        """
+        project = os.path.join(str(tmp_path), "project")
+        plugin = os.path.join(str(tmp_path), "cache", "org", "remember", "0.5.0")
+        os.makedirs(project)
+        os.makedirs(os.path.join(plugin, "scripts"))
+        _create_full_plugin_copy(plugin)
+        _create_full_project(project)
+
+        # Replace log.sh with a stub that sources cleanly but omits
+        # _remember_date — isolating the guard from the real log.sh.
+        with open(os.path.join(plugin, "scripts", "log.sh"), "w") as f:
+            f.write("#!/bin/bash\n# stub: intentionally omits _remember_date\n:\n")
+
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT")}
+        env["CLAUDE_PROJECT_DIR"] = project
+        env["CLAUDE_PLUGIN_ROOT"] = plugin
+
+        result = subprocess.run(
+            ["bash", os.path.join(plugin, "scripts", "session-start-hook.sh")],
+            capture_output=True, text=True, env=env, timeout=10,
+        )
+
+        assert result.returncode == 127, (
+            f"Expected loud rc=127 on missing _remember_date, got {result.returncode}. "
+            f"stderr={result.stderr[:300]}"
+        )
+        # bootstrap-dirs.sh redirects stderr to hook-errors.log before log.sh is
+        # sourced, so the guard's diagnostic lands there, not in captured stderr.
+        # The message is unique to the guard — its presence proves the guard fired.
+        errlog = os.path.join(project, ".remember", "logs", "hook-errors.log")
+        log_text = open(errlog).read() if os.path.exists(errlog) else ""
+        assert "failed to source" in log_text, (
+            f"Expected guard diagnostic in {errlog}, got: {log_text[:300]!r}"
+        )
+
     # ── Idempotency ──────────────────────────────────────────────────────
 
     def test_bootstrap_idempotent_multiple_runs(self, tmp_path):
