@@ -65,6 +65,10 @@ MEMORY_FILE="${REMEMBER_DIR}/now.md"
 LAST_SAVE_FILE="${REMEMBER_DIR}/tmp/last-save.json"
 COOLDOWN_MARKER="${REMEMBER_DIR}/tmp/last-save-ts"
 TODAY_DATE=$(_remember_date +%Y-%m-%d)
+# CC 2.x counts prompt-delivery as turn 1, so a cap of one exits error_max_turns
+# before the model replies (#98). A user Stop hook eats a further turn (#100).
+# Default 4 clears both; override via REMEMBER_MAX_TURNS.
+MAX_TURNS="${REMEMBER_MAX_TURNS:-4}"
 CLEANUP_FILES=()
 
 # Remove lock file and all accumulated temp files on exit.
@@ -173,7 +177,7 @@ HAIKU_STDERR=$(mktemp "${TMPDIR:-/tmp}"/remember-haiku-err-XXXXXX)
 CLEANUP_FILES+=("$HAIKU_STDERR")
 
 HAIKU_JSON=$(cd /tmp && env -u CLAUDECODE claude -p \
-    --model haiku --allowedTools "" --max-turns 1 \
+    --model haiku --allowedTools "" --max-turns "$MAX_TURNS" \
     --output-format json \
     --no-session-persistence --exclude-dynamic-system-prompt-sections \
     --mcp-config '{"mcpServers":{}}' --strict-mcp-config \
@@ -240,7 +244,7 @@ if [ "$RUN_NDC" = true ]; then
         (set +e  # don't inherit set -e — claude -p non-zero exit must not kill the subshell
             NDC_ERR=$(mktemp "${TMPDIR:-/tmp}"/remember-ndc-err-XXXXXX)
             NDC_JSON=$(cd /tmp && env -u CLAUDECODE claude -p \
-                --allowedTools "" --model haiku --max-turns 1 \
+                --allowedTools "" --model haiku --max-turns "$MAX_TURNS" \
                 --output-format json \
                 --no-session-persistence --exclude-dynamic-system-prompt-sections \
                 --mcp-config '{"mcpServers":{}}' --strict-mcp-config \
