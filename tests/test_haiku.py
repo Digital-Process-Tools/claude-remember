@@ -141,6 +141,28 @@ def test_call_haiku_success(mock_run):
 
 
 @patch("pipeline.haiku.subprocess.run")
+def test_call_haiku_strips_parent_session_env(mock_run, monkeypatch):
+    """The nested claude -p must not inherit the PARENT Claude Code session
+    vars — else it looks like a resumable session to anything keying off them
+    (#95). Strip CLAUDECODE, CLAUDE_JOB_DIR, and all CLAUDE_CODE_*; keep the
+    rest of the environment intact."""
+    monkeypatch.setenv("CLAUDECODE", "1")
+    monkeypatch.setenv("CLAUDE_JOB_DIR", "/some/job/dir")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "abc-123")
+    monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "cli")
+    monkeypatch.setenv("PATH", "/usr/bin")  # an unrelated var must survive
+    mock_run.return_value = MagicMock(
+        returncode=0, stdout=_mock_claude_response("x"), stderr="")
+    call_haiku("p")
+    env = mock_run.call_args[1]["env"]
+    assert "CLAUDECODE" not in env
+    assert "CLAUDE_JOB_DIR" not in env
+    assert "CLAUDE_CODE_SESSION_ID" not in env
+    assert "CLAUDE_CODE_ENTRYPOINT" not in env
+    assert env.get("PATH") == "/usr/bin"
+
+
+@patch("pipeline.haiku.subprocess.run")
 def test_call_haiku_with_tools(mock_run):
     mock_run.return_value = MagicMock(
         returncode=0,
