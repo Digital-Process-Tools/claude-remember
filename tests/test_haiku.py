@@ -179,16 +179,28 @@ def test_call_haiku_max_turns_env_override(mock_run, monkeypatch):
     assert _max_turns_in(mock_run.call_args[0][0]) == "6"
 
 
-@pytest.mark.parametrize("bad", ["0", "-1", "banana", "", "3.5"])
+@pytest.mark.parametrize("bad", ["0", "-1", "banana", "", "3.5", "21", "999999"])
 @patch("pipeline.haiku.subprocess.run")
 def test_call_haiku_invalid_max_turns_falls_back(mock_run, bad, monkeypatch):
-    """A bad REMEMBER_MAX_TURNS must not flow through as a garbage --max-turns
-    value (which would break claude -p the same way the original bug did)."""
+    """A bad/out-of-range REMEMBER_MAX_TURNS must not flow through as a garbage
+    --max-turns value (which would break claude -p the same way the original
+    bug did). Includes the upper-bound cap so a misconfig is bounded."""
     monkeypatch.setenv("REMEMBER_MAX_TURNS", bad)
     mock_run.return_value = MagicMock(
         returncode=0, stdout=_mock_claude_response("x"), stderr="")
     call_haiku("p")
     assert _max_turns_in(mock_run.call_args[0][0]) == "4"
+
+
+@pytest.mark.parametrize("raw,expected", [("2", "2"), ("20", "20"), ("007", "7")])
+@patch("pipeline.haiku.subprocess.run")
+def test_call_haiku_valid_max_turns_normalized(mock_run, raw, expected, monkeypatch):
+    """In-range values pass through, normalized (leading zeros stripped)."""
+    monkeypatch.setenv("REMEMBER_MAX_TURNS", raw)
+    mock_run.return_value = MagicMock(
+        returncode=0, stdout=_mock_claude_response("x"), stderr="")
+    call_haiku("p")
+    assert _max_turns_in(mock_run.call_args[0][0]) == expected
 
 
 @patch("pipeline.haiku.subprocess.run")

@@ -18,6 +18,7 @@ Available subcommands::
     build-prompt    Build save-summary prompt file
     build-ndc-prompt Build NDC compression prompt file
     parse-haiku     Parse Haiku JSON response from stdin
+    call-haiku      Invoke Haiku on a prompt file (sandbox + parse in one)
     save-position   Write position to last-save.json
     consolidate     Run full consolidation pipeline
 
@@ -186,21 +187,25 @@ def _emit_haiku_result(r, output_file: str = "") -> None:
             f.write(r.text)
 
 
-def cmd_call_haiku(prompt_file: str, output_file: str = "") -> None:
+def cmd_call_haiku(prompt_file: str, output_file: str = "", timeout: int = 120) -> None:
     """Invoke Haiku on the prompt in ``prompt_file`` and print the shell vars.
 
     The single entry point bash uses to run the summarizer subprocess: the
     ``claude -p`` invocation itself lives only in ``haiku.call_haiku`` (one
-    place — no inline duplicate that could drift, #94/#98/#100). On failure,
-    prints the error to stderr and exits 1 so the caller aborts the save.
+    place — no inline duplicate that could drift, #94/#98/#100). ``timeout``
+    is forwarded to ``call_haiku`` (NDC compresses a whole now.md and needs a
+    longer budget than the per-session summary). On any failure — a missing
+    prompt file (OSError) or a claude error (RuntimeError) — prints the error
+    to stderr and exits 1 so the caller aborts; never leaks a traceback to
+    stdout, which the bash caller captures as the shell-var payload.
     """
     from .haiku import call_haiku
 
-    with open(prompt_file, encoding="utf-8") as f:
-        prompt = f.read()
     try:
-        r = call_haiku(prompt)
-    except RuntimeError as e:
+        with open(prompt_file, encoding="utf-8") as f:
+            prompt = f.read()
+        r = call_haiku(prompt, timeout=timeout)
+    except (OSError, RuntimeError) as e:
         print(f"call-haiku error: {e}", file=sys.stderr)
         sys.exit(1)
     _emit_haiku_result(r, output_file)
@@ -341,7 +346,8 @@ def main() -> None:
         cmd_parse_haiku(output_file=output_file)
     elif cmd == "call-haiku":
         output_file = sys.argv[3] if len(sys.argv) > 3 else ""
-        cmd_call_haiku(prompt_file=sys.argv[2], output_file=output_file)
+        timeout = int(sys.argv[4]) if len(sys.argv) > 4 else 120
+        cmd_call_haiku(prompt_file=sys.argv[2], output_file=output_file, timeout=timeout)
     elif cmd == "save-position":
         cmd_save_position(
             last_save_file=sys.argv[2],

@@ -30,20 +30,24 @@ HAIKU_CACHE_PRICE = 0.08 / 1_000_000
 
 # CC 2.x counts prompt-delivery as turn 1, so a cap of 1 exits error_max_turns
 # before the model replies (#98/#100). Default 4 clears that plus a Stop-hook
-# turn, with margin; overridable via REMEMBER_MAX_TURNS.
+# turn, with margin; overridable via REMEMBER_MAX_TURNS (1..MAX_ALLOWED_TURNS).
 DEFAULT_MAX_TURNS = "4"
+MAX_ALLOWED_TURNS = 20
 
 
 def _resolve_max_turns() -> str:
-    """REMEMBER_MAX_TURNS if it is a positive integer, else the safe default.
+    """REMEMBER_MAX_TURNS if it is an integer in [1, MAX_ALLOWED_TURNS], else
+    the safe default.
 
-    A bad value (0, negative, non-numeric, empty) must not flow through as a
-    garbage ``--max-turns`` arg — that would break ``claude -p`` the same way
-    the original hardcoded ``1`` did.
+    A bad value (0, negative, non-numeric, empty) or an absurd one must not
+    flow through as a garbage ``--max-turns`` arg — that would break
+    ``claude -p`` the same way the original hardcoded ``1`` did. The upper
+    bound keeps a misconfiguration bounded instead of opening an unbounded run.
+    Returns the normalized form (leading zeros stripped).
     """
     raw = os.environ.get("REMEMBER_MAX_TURNS", "").strip()
-    if raw.isdigit() and int(raw) >= 1:
-        return raw
+    if raw.isdigit() and 1 <= int(raw) <= MAX_ALLOWED_TURNS:
+        return str(int(raw))
     return DEFAULT_MAX_TURNS
 
 

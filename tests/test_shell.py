@@ -262,6 +262,29 @@ def test_cmd_call_haiku_error_exits_1(tmp_path):
     assert ei.value.code == 1
 
 
+def test_cmd_call_haiku_missing_prompt_file_exits_1_cleanly(tmp_path, capsys):
+    """A missing prompt file must exit 1 with a stderr diagnostic — not dump a
+    traceback to stdout (which the bash caller captures as HAIKU_VARS)."""
+    from pipeline.shell import cmd_call_haiku
+    with pytest.raises(SystemExit) as ei:
+        cmd_call_haiku(str(tmp_path / "does-not-exist.txt"))
+    assert ei.value.code == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""          # nothing on stdout to mis-eval
+    assert "call-haiku error" in captured.err
+
+
+def test_cmd_call_haiku_passes_timeout(tmp_path):
+    """call-haiku must forward its timeout to call_haiku (NDC needs 180, not 120)."""
+    from pipeline.shell import cmd_call_haiku
+    prompt = tmp_path / "p.txt"
+    prompt.write_text("x")
+    fake = HaikuResult(text="t", tokens=TokenUsage(input=1, output=1, cache=0, cost_usd=0.0), is_skip=False)
+    with patch("pipeline.haiku.call_haiku", return_value=fake) as mock_ch:
+        cmd_call_haiku(str(prompt), timeout=180)
+    assert mock_ch.call_args.kwargs.get("timeout") == 180
+
+
 # --- cmd_consolidate ---
 
 def test_cmd_consolidate_no_staging_files_prints_zero(capsys):

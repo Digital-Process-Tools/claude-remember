@@ -232,9 +232,11 @@ if [ "$RUN_NDC" = true ]; then
     if [ -s "$NDC_PROMPT" ]; then
         (set +e  # don't inherit set -e — a haiku non-zero exit must not kill the subshell
             NDC_ERR=$(mktemp "${TMPDIR:-/tmp}"/remember-ndc-err-XXXXXX)
-            NDC_VARS=$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell call-haiku "$NDC_PROMPT" 2>"$NDC_ERR")
+            # 180s (not the 120s default): NDC compresses a whole now.md.
+            NDC_VARS=$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell call-haiku "$NDC_PROMPT" "" 180 2>"$NDC_ERR")
+            NDC_EXIT=$?
 
-            if [ $? -ne 0 ]; then
+            if [ "$NDC_EXIT" -ne 0 ]; then
                 log "ndc" "ERROR: $(head -1 "$NDC_ERR" 2>/dev/null)"
             else
                 safe_eval <<< "$NDC_VARS"
