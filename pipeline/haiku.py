@@ -1,12 +1,15 @@
 """Claude CLI wrapper for calling Haiku and parsing structured JSON responses.
 
 Provides the single interface used by all pipeline stages to invoke Haiku.
-Handles subprocess management, CLAUDECODE env stripping, JSON parsing,
-token counting, and cost estimation.
+Handles subprocess management, parent-session env stripping (CLAUDECODE +
+CLAUDE_JOB_DIR + CLAUDE_CODE_*), JSON parsing, token counting, and cost
+estimation.
 
 The CLI is invoked in a sandboxed configuration: ``cwd=tempdir``, no tools
 by default, ``max-turns`` configurable via ``REMEMBER_MAX_TURNS`` (default 4),
-and the ``CLAUDECODE`` env var is stripped to allow nested Claude sessions.
+and the parent Claude Code session env vars are stripped (``CLAUDECODE`` to
+allow a nested session; ``CLAUDE_JOB_DIR`` / ``CLAUDE_CODE_*`` so the child
+doesn't masquerade as the parent's session, #95).
 
 Module-level constants:
     HAIKU_INPUT_PRICE: USD cost per input token.
@@ -51,6 +54,25 @@ def _resolve_max_turns() -> str:
     return DEFAULT_MAX_TURNS
 
 
+def _child_env() -> dict[str, str]:
+    """Environment for the nested ``claude -p`` with the PARENT session vars
+    stripped.
+
+    ``CLAUDECODE`` blocks nested sessions. ``CLAUDE_JOB_DIR`` and the
+    ``CLAUDE_CODE_*`` family (e.g. ``CLAUDE_CODE_SESSION_ID``) identify the
+    parent Claude Code session; if they leak into the subprocess it looks like
+    a resumable session to anything keying off them (#95). Everything else is
+    passed through unchanged.
+    """
+    return {
+        k: v
+        for k, v in os.environ.items()
+        if k != "CLAUDECODE"
+        and k != "CLAUDE_JOB_DIR"
+        and not k.startswith("CLAUDE_CODE_")
+    }
+
+
 def call_haiku(
     prompt: str,
     tools: list[str] | None = None,
@@ -89,8 +111,7 @@ def call_haiku(
         "--strict-mcp-config",
     ]
 
-    # CLAUDECODE env var blocks nested sessions — must strip it
-    env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+    env = _child_env()
 
     try:
         result = subprocess.run(
