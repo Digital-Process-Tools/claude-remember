@@ -156,9 +156,18 @@ def cmd_parse_haiku(output_file: str = "") -> None:
         HAIKU_TEXT_FILE (path to temp file), IS_SKIP (true/false),
         TK_IN, TK_OUT, TK_CACHE, TK_COST.
     """
-    import tempfile
     raw = sys.stdin.read()
-    r = _parse_response(raw)
+    _emit_haiku_result(_parse_response(raw), output_file)
+
+
+def _emit_haiku_result(r, output_file: str = "") -> None:
+    """Write Haiku text to a temp file and print the shell vars bash consumes.
+
+    Shared by ``parse-haiku`` (parse pre-fetched JSON) and ``call-haiku``
+    (invoke + parse), so both emit an identical contract:
+    HAIKU_TEXT_FILE, IS_SKIP, TK_IN/OUT/CACHE/COST.
+    """
+    import tempfile
 
     # Write text to temp file (can contain newlines, quotes, anything)
     fd, text_file = tempfile.mkstemp(prefix="remember-haiku-text-", suffix=".txt")
@@ -175,6 +184,26 @@ def cmd_parse_haiku(output_file: str = "") -> None:
     if output_file:
         with open(output_file, "w", encoding="utf-8") as f:
             f.write(r.text)
+
+
+def cmd_call_haiku(prompt_file: str, output_file: str = "") -> None:
+    """Invoke Haiku on the prompt in ``prompt_file`` and print the shell vars.
+
+    The single entry point bash uses to run the summarizer subprocess: the
+    ``claude -p`` invocation itself lives only in ``haiku.call_haiku`` (one
+    place — no inline duplicate that could drift, #94/#98/#100). On failure,
+    prints the error to stderr and exits 1 so the caller aborts the save.
+    """
+    from .haiku import call_haiku
+
+    with open(prompt_file, encoding="utf-8") as f:
+        prompt = f.read()
+    try:
+        r = call_haiku(prompt)
+    except RuntimeError as e:
+        print(f"call-haiku error: {e}", file=sys.stderr)
+        sys.exit(1)
+    _emit_haiku_result(r, output_file)
 
 
 def cmd_save_position(last_save_file: str, session_id: str, position: int) -> None:
@@ -310,6 +339,9 @@ def main() -> None:
     elif cmd == "parse-haiku":
         output_file = sys.argv[2] if len(sys.argv) > 2 else ""
         cmd_parse_haiku(output_file=output_file)
+    elif cmd == "call-haiku":
+        output_file = sys.argv[3] if len(sys.argv) > 3 else ""
+        cmd_call_haiku(prompt_file=sys.argv[2], output_file=output_file)
     elif cmd == "save-position":
         cmd_save_position(
             last_save_file=sys.argv[2],

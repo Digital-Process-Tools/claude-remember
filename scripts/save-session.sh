@@ -43,7 +43,7 @@
 #     1. Extract exchanges from session JSONL
 #     2. Get last memory entry (for dedup context)
 #     3. Build summarization prompt
-#     4. Call Haiku (sandboxed: cwd=/tmp, no tools, max-turns 1)
+#     4. Call Haiku via `pipeline.shell call-haiku` (sandbox + parse in one)
 #     5. Parse response (detect SKIP vs. content)
 #     6. Append to now.md + save position
 #     7. NDC compression (hourly, background subshell)
@@ -65,10 +65,6 @@ MEMORY_FILE="${REMEMBER_DIR}/now.md"
 LAST_SAVE_FILE="${REMEMBER_DIR}/tmp/last-save.json"
 COOLDOWN_MARKER="${REMEMBER_DIR}/tmp/last-save-ts"
 TODAY_DATE=$(_remember_date +%Y-%m-%d)
-# CC 2.x counts prompt-delivery as turn 1, so a cap of one exits error_max_turns
-# before the model replies (#98). A user Stop hook eats a further turn (#100).
-# Default 4 clears both; override via REMEMBER_MAX_TURNS.
-MAX_TURNS="${REMEMBER_MAX_TURNS:-4}"
 CLEANUP_FILES=()
 
 # Remove lock file and all accumulated temp files on exit.
@@ -171,25 +167,18 @@ cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell build-prompt "$EXTRACT_FILE" "$T
 [ ! -s "$TMP_PROMPT" ] && { log "prompt" "ERROR: empty"; exit 1; }
 grep -q '{{TIME}}\|{{BRANCH}}\|{{LAST_ENTRY}}\|{{EXTRACT}}' "$TMP_PROMPT" && { log "prompt" "ERROR: unsubstituted placeholders in prompt"; exit 1; }
 
-# --- Step 4: Call Haiku ---
+# --- Step 4+5: Call Haiku (the claude -p invocation lives only in pipeline/haiku.py) ---
 log "haiku" "calling (branch: $BRANCH)"
 HAIKU_STDERR=$(mktemp "${TMPDIR:-/tmp}"/remember-haiku-err-XXXXXX)
 CLEANUP_FILES+=("$HAIKU_STDERR")
 
-HAIKU_JSON=$(cd /tmp && env -u CLAUDECODE claude -p \
-    --model haiku --allowedTools "" --max-turns "$MAX_TURNS" \
-    --output-format json \
-    --no-session-persistence --exclude-dynamic-system-prompt-sections \
-    --mcp-config '{"mcpServers":{}}' --strict-mcp-config \
-    2>"$HAIKU_STDERR" < "$TMP_PROMPT")
-HAIKU_EXIT=$?
+# `|| { ... }` (not a bare `if [ $? ]`) so a failure is handled under set -e
+# instead of tripping the ERR trap at the assignment.
+HAIKU_VARS=$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell call-haiku "$TMP_PROMPT" 2>"$HAIKU_STDERR") || {
+    log "haiku" "ERROR: $(head -1 "$HAIKU_STDERR")"; exit 1
+}
 
-if [ "$HAIKU_EXIT" -ne 0 ]; then
-    log "haiku" "ERROR: exit $HAIKU_EXIT — $(head -1 "$HAIKU_STDERR")"; exit 1
-fi
-
-# --- Step 5: Parse response ---
-safe_eval <<< "$(echo "$HAIKU_JSON" | (cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell parse-haiku))"
+safe_eval <<< "$HAIKU_VARS"
 CLEANUP_FILES+=("$HAIKU_TEXT_FILE")
 log_tokens "tokens" "$TK_IN" "$TK_OUT" "$TK_CACHE" "$TK_COST"
 
@@ -241,19 +230,14 @@ if [ "$RUN_NDC" = true ]; then
     cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell build-ndc-prompt "$MEMORY_FILE" "$NDC_PROMPT"
 
     if [ -s "$NDC_PROMPT" ]; then
-        (set +e  # don't inherit set -e — claude -p non-zero exit must not kill the subshell
+        (set +e  # don't inherit set -e — a haiku non-zero exit must not kill the subshell
             NDC_ERR=$(mktemp "${TMPDIR:-/tmp}"/remember-ndc-err-XXXXXX)
-            NDC_JSON=$(cd /tmp && env -u CLAUDECODE claude -p \
-                --allowedTools "" --model haiku --max-turns "$MAX_TURNS" \
-                --output-format json \
-                --no-session-persistence --exclude-dynamic-system-prompt-sections \
-                --mcp-config '{"mcpServers":{}}' --strict-mcp-config \
-                2>"$NDC_ERR" < "$NDC_PROMPT")
+            NDC_VARS=$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell call-haiku "$NDC_PROMPT" 2>"$NDC_ERR")
 
             if [ $? -ne 0 ]; then
-                log "ndc" "ERROR: haiku exit $? — $(head -1 "$NDC_ERR" 2>/dev/null)"
+                log "ndc" "ERROR: $(head -1 "$NDC_ERR" 2>/dev/null)"
             else
-                safe_eval <<< "$(echo "$NDC_JSON" | (cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell parse-haiku))"
+                safe_eval <<< "$NDC_VARS"
                 NDC_TEXT=$(cat "$HAIKU_TEXT_FILE")
                 if [ -n "$NDC_TEXT" ]; then
                     [ -s "$TODAY_FILE" ] && echo "" >> "$TODAY_FILE"

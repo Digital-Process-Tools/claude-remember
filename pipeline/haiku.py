@@ -5,8 +5,8 @@ Handles subprocess management, CLAUDECODE env stripping, JSON parsing,
 token counting, and cost estimation.
 
 The CLI is invoked in a sandboxed configuration: ``cwd=tempdir``, no tools
-by default, ``max-turns 1``, and the ``CLAUDECODE`` env var is stripped
-to allow nested Claude sessions.
+by default, ``max-turns`` configurable via ``REMEMBER_MAX_TURNS`` (default 4),
+and the ``CLAUDECODE`` env var is stripped to allow nested Claude sessions.
 
 Module-level constants:
     HAIKU_INPUT_PRICE: USD cost per input token.
@@ -27,6 +27,24 @@ from .types import HaikuResult, TokenUsage
 HAIKU_INPUT_PRICE = 0.80 / 1_000_000
 HAIKU_OUTPUT_PRICE = 4.00 / 1_000_000
 HAIKU_CACHE_PRICE = 0.08 / 1_000_000
+
+# CC 2.x counts prompt-delivery as turn 1, so a cap of 1 exits error_max_turns
+# before the model replies (#98/#100). Default 4 clears that plus a Stop-hook
+# turn, with margin; overridable via REMEMBER_MAX_TURNS.
+DEFAULT_MAX_TURNS = "4"
+
+
+def _resolve_max_turns() -> str:
+    """REMEMBER_MAX_TURNS if it is a positive integer, else the safe default.
+
+    A bad value (0, negative, non-numeric, empty) must not flow through as a
+    garbage ``--max-turns`` arg — that would break ``claude -p`` the same way
+    the original hardcoded ``1`` did.
+    """
+    raw = os.environ.get("REMEMBER_MAX_TURNS", "").strip()
+    if raw.isdigit() and int(raw) >= 1:
+        return raw
+    return DEFAULT_MAX_TURNS
 
 
 def call_haiku(
@@ -60,8 +78,11 @@ def call_haiku(
         "--no-session-persistence",
         "--exclude-dynamic-system-prompt-sections",
         "--model", "haiku",
-        "--max-turns", "1",
+        "--max-turns", _resolve_max_turns(),
         "--allowedTools", ",".join(tools) if tools else "",
+        # Sandbox MCP: no servers + strict, so the nested session inherits none (#94)
+        "--mcp-config", '{"mcpServers":{}}',
+        "--strict-mcp-config",
     ]
 
     # CLAUDECODE env var blocks nested sessions — must strip it

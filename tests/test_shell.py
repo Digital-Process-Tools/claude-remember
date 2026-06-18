@@ -222,6 +222,46 @@ def test_cmd_build_prompt_passes_correct_args():
         )
 
 
+# --- cmd_call_haiku ---
+
+def test_cmd_call_haiku_emits_vars_and_passes_prompt(capsys, tmp_path):
+    """call-haiku invokes haiku.call_haiku with the prompt file's content and
+    emits the same shell-var contract as parse-haiku (single claude call site)."""
+    from pipeline.shell import cmd_call_haiku
+    prompt = tmp_path / "p.txt"
+    prompt.write_text("summarize this")
+    fake = HaikuResult(
+        text="## 10:00 | did x",
+        tokens=TokenUsage(input=5, output=2, cache=1, cost_usd=0.0001),
+        is_skip=False,
+    )
+    with patch("pipeline.haiku.call_haiku", return_value=fake) as mock_ch:
+        cmd_call_haiku(str(prompt))
+
+    out = capsys.readouterr().out
+    assert "HAIKU_TEXT_FILE=" in out
+    assert "IS_SKIP=false" in out
+    assert "TK_IN=5" in out and "TK_OUT=2" in out and "TK_CACHE=1" in out
+    mock_ch.assert_called_once()
+    assert mock_ch.call_args[0][0] == "summarize this"
+    for line in out.splitlines():
+        if line.startswith("HAIKU_TEXT_FILE="):
+            p = line.split("=", 1)[1].strip("'")
+            assert open(p).read() == "## 10:00 | did x"
+            os.unlink(p)
+
+
+def test_cmd_call_haiku_error_exits_1(tmp_path):
+    """A claude failure (RuntimeError) must exit 1 so the bash caller aborts."""
+    from pipeline.shell import cmd_call_haiku
+    prompt = tmp_path / "p.txt"
+    prompt.write_text("x")
+    with patch("pipeline.haiku.call_haiku", side_effect=RuntimeError("boom")):
+        with pytest.raises(SystemExit) as ei:
+            cmd_call_haiku(str(prompt))
+    assert ei.value.code == 1
+
+
 # --- cmd_consolidate ---
 
 def test_cmd_consolidate_no_staging_files_prints_zero(capsys):
