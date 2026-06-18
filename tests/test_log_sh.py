@@ -39,6 +39,36 @@ def _bash_path(p) -> str:
     return s.replace("\\", "/")
 
 
+def _find_bash():
+    """Return the bash executable to use for subprocess calls.
+
+    On POSIX, plain "bash". On Windows, the Git-for-Windows bash (NOT the
+    System32 WSL launcher, which CreateProcess finds first on PATH). Returns
+    None on Windows when Git Bash isn't installed → the module is skipped.
+    """
+    if sys.platform != "win32":
+        return "bash"
+    import shutil
+    candidates = []
+    for env_var in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"):
+        base = os.environ.get(env_var)
+        if base:
+            candidates.append(Path(base) / "Git" / "bin" / "bash.exe")
+            candidates.append(Path(base) / "Git" / "usr" / "bin" / "bash.exe")
+    for cand in candidates:
+        if cand.is_file():
+            return str(cand)
+    resolved = shutil.which("bash")
+    if resolved and "git" in resolved.replace("\\", "/").lower():
+        return resolved
+    return None
+
+
+_BASH = _find_bash()
+
+pytestmark = pytest.mark.skipif(_BASH is None, reason="Git Bash not found (Windows without Git for Windows)")
+
+
 def _run_logsh(project_dir, system_tz):
     """Source log.sh under the given system TZ and return MEMORY_LOG_DATE + expected date for the configured TZ."""
     script = f"""
@@ -55,7 +85,7 @@ def _run_logsh(project_dir, system_tz):
     """
     env = {**os.environ, "TZ": system_tz}
     result = subprocess.run(
-        ["bash", "-c", script], env=env, capture_output=True, text=True
+        [_BASH, "-c", script], env=env, capture_output=True, text=True
     )
     assert result.returncode == 0, f"log.sh failed: {result.stderr}"
     parsed = {}
@@ -106,7 +136,7 @@ def test_log_sh_no_config_falls_back_to_system_local_not_utc(tmp_path):
     result = _run_logsh(project, system_tz="America/Los_Angeles")
     # Expected: LA date (system TZ) — not UTC
     expected_la = subprocess.run(
-        ["bash", "-c", "TZ=America/Los_Angeles date +%Y-%m-%d"],
+        [_BASH, "-c", "TZ=America/Los_Angeles date +%Y-%m-%d"],
         capture_output=True, text=True,
     ).stdout.strip()
     assert result["ACTUAL"] == expected_la, (
@@ -126,7 +156,7 @@ def test_log_sh_log_function_produces_filename_matching_configured_tz(tmp_path):
     log test "hello from tz test"
     """
     subprocess.run(
-        ["bash", "-c", script],
+        [_BASH, "-c", script],
         env={**os.environ, "TZ": "UTC", "HOME": str(tmp_path)},
         check=True,
         capture_output=True,
@@ -134,7 +164,7 @@ def test_log_sh_log_function_produces_filename_matching_configured_tz(tmp_path):
     files = list(log_dir.iterdir())
     assert len(files) == 1
     expected_la = subprocess.run(
-        ["bash", "-c", "TZ=America/Los_Angeles date +%Y-%m-%d"],
+        [_BASH, "-c", "TZ=America/Los_Angeles date +%Y-%m-%d"],
         capture_output=True, text=True,
     ).stdout.strip()
     assert files[0].name == f"memory-{expected_la}.log", (
@@ -155,7 +185,7 @@ def test_log_sh_exports_remember_tz_to_python_subprocess(tmp_path):
     python3 -c "import os; print(os.environ.get('REMEMBER_TZ', 'MISSING'))"
     """
     result = subprocess.run(
-        ["bash", "-c", script],
+        [_BASH, "-c", script],
         env={**os.environ, "TZ": "UTC"},
         capture_output=True, text=True,
     )
@@ -181,7 +211,7 @@ def test_log_sh_invalid_timezone_falls_back_to_system_local(tmp_path):
     echo "REMEMBER_TZ=$REMEMBER_TZ"
     """
     result = subprocess.run(
-        ["bash", "-c", script],
+        [_BASH, "-c", script],
         env={**os.environ, "TZ": "America/New_York"},
         capture_output=True, text=True,
     )
@@ -207,7 +237,7 @@ def test_log_sh_explicit_utc_config_overrides_local_system_tz(tmp_path):
     result = _run_logsh(project, system_tz="America/Los_Angeles")
     assert result["REMEMBER_TZ"] == "UTC"
     expected_utc = subprocess.run(
-        ["bash", "-c", "TZ=UTC date +%Y-%m-%d"],
+        [_BASH, "-c", "TZ=UTC date +%Y-%m-%d"],
         capture_output=True, text=True,
     ).stdout.strip()
     assert result["ACTUAL"] == expected_utc, (
@@ -230,7 +260,7 @@ def test_log_sh_timestamp_inside_file_uses_configured_tz(tmp_path):
     log test "timestamp check"
     """
     subprocess.run(
-        ["bash", "-c", script],
+        [_BASH, "-c", script],
         env={**os.environ, "TZ": "UTC", "HOME": str(tmp_path)},
         check=True,
         capture_output=True,
@@ -301,7 +331,7 @@ source "{_bash_path(LOG_SH)}"
 REMEMBER_HOOKS_DIR="{_bash_path(hooks_dir)}"
 dispatch "test_event"
 """
-    return subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
+    return subprocess.run([_BASH, "-c", script], env=env, capture_output=True, text=True)
 
 
 def _write_hook(hooks_event_dir: Path, name: str, content: str, mode: int = 0o755) -> Path:

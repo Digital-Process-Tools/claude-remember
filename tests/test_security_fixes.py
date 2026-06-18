@@ -9,7 +9,10 @@ Covers:
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOG_SH = REPO_ROOT / "scripts" / "log.sh"
@@ -32,6 +35,36 @@ def _bash_path(p) -> str:
     return s.replace("\\", "/")
 
 
+def _find_bash():
+    """Return the bash executable to use for subprocess calls.
+
+    On POSIX, plain "bash". On Windows, the Git-for-Windows bash (NOT the
+    System32 WSL launcher, which CreateProcess finds first on PATH). Returns
+    None on Windows when Git Bash isn't installed → the module is skipped.
+    """
+    if sys.platform != "win32":
+        return "bash"
+    import shutil
+    candidates = []
+    for env_var in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"):
+        base = os.environ.get(env_var)
+        if base:
+            candidates.append(Path(base) / "Git" / "bin" / "bash.exe")
+            candidates.append(Path(base) / "Git" / "usr" / "bin" / "bash.exe")
+    for cand in candidates:
+        if cand.is_file():
+            return str(cand)
+    resolved = shutil.which("bash")
+    if resolved and "git" in resolved.replace("\\", "/").lower():
+        return resolved
+    return None
+
+
+_BASH = _find_bash()
+
+pytestmark = pytest.mark.skipif(_BASH is None, reason="Git Bash not found (Windows without Git for Windows)")
+
+
 # ---------------------------------------------------------------------------
 # 1. safe_eval — RCE injection must NOT execute embedded commands
 # ---------------------------------------------------------------------------
@@ -49,7 +82,7 @@ EXTRACT_FILE={canary}; rm -f {canary}
 EVAL_INPUT
 """.replace("safe_val", "safe_eval")
     result = subprocess.run(
-        ["bash", "-c", script],
+        [_BASH, "-c", script],
         capture_output=True,
         text=True,
         env={**os.environ, "PROJECT_DIR": _bash_path(REPO_ROOT)},
@@ -73,7 +106,7 @@ EXTRACT_FILE=$(rm -f {canary})
 EVAL_INPUT
 """.replace("safe_val", "safe_eval")
     result = subprocess.run(
-        ["bash", "-c", script],
+        [_BASH, "-c", script],
         capture_output=True,
         text=True,
         env={**os.environ, "PROJECT_DIR": _bash_path(REPO_ROOT)},
@@ -99,7 +132,7 @@ echo "EXCHANGE_COUNT=$EXCHANGE_COUNT"
 echo "HUMAN_COUNT=$HUMAN_COUNT"
 """.replace("safe_val", "safe_eval")
     result = subprocess.run(
-        ["bash", "-c", script],
+        [_BASH, "-c", script],
         capture_output=True,
         text=True,
         env={**os.environ, "PROJECT_DIR": _bash_path(REPO_ROOT)},
@@ -121,7 +154,7 @@ EVAL_INPUT
 echo "RESULT=$EXTRACT_FILE"
 """.replace("safe_val", "safe_eval")
     result = subprocess.run(
-        ["bash", "-c", script],
+        [_BASH, "-c", script],
         capture_output=True,
         text=True,
         env={**os.environ, "PROJECT_DIR": _bash_path(REPO_ROOT)},
@@ -141,7 +174,7 @@ EVAL_INPUT
 echo "lowercase_var=${{lowercase_var:-UNSET}}"
 """.replace("safe_val", "safe_eval")
     result = subprocess.run(
-        ["bash", "-c", script],
+        [_BASH, "-c", script],
         capture_output=True,
         text=True,
         env={**os.environ, "PROJECT_DIR": _bash_path(REPO_ROOT)},
@@ -174,7 +207,7 @@ source "{_bash_path(LIB_MEMORY_DIR_SH)}"
 echo "CONFIG=$REMEMBER_CONFIG"
 """
     result = subprocess.run(
-        ["bash", "-c", script],
+        [_BASH, "-c", script],
         capture_output=True,
         text=True,
         env={**os.environ, "HOME": _bash_path(tmp_path)},
@@ -216,7 +249,7 @@ result=$(_jq_fallback -r '.thresholds.min_human_messages' "{_bash_path(json_file
 echo "RESULT=$result"
 """
     result = subprocess.run(
-        ["bash", "-c", script],
+        [_BASH, "-c", script],
         capture_output=True,
         text=True,
     )
@@ -242,7 +275,7 @@ result=$(_jq_fallback -r '.key' "{_bash_path(json_file)}")
 echo "RESULT=$result"
 """
     result = subprocess.run(
-        ["bash", "-c", script],
+        [_BASH, "-c", script],
         capture_output=True,
         text=True,
     )
@@ -266,7 +299,7 @@ result=$(_jq_fallback -r '.a.b.c' "{_bash_path(json_file)}")
 echo "RESULT=$result"
 """
     result = subprocess.run(
-        ["bash", "-c", script],
+        [_BASH, "-c", script],
         capture_output=True,
         text=True,
     )
