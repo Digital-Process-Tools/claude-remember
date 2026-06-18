@@ -84,7 +84,7 @@ def cmd_extract(session_id: str, project_dir: str) -> None:
 
     # Write exchanges to temp file (avoids shell escaping of large text)
     fd, extract_file = tempfile.mkstemp(prefix="remember-extract-", suffix=".txt")
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
+    with os.fdopen(fd, "w", encoding="utf-8", errors="replace") as f:
         f.write(r.exchanges)
 
     print(f"POSITION={r.position}")
@@ -113,9 +113,9 @@ def cmd_build_prompt(
         branch: Current git branch name.
         output_file: Path where the assembled prompt will be written.
     """
-    with open(extract_file, encoding="utf-8") as f:
+    with open(extract_file, encoding="utf-8", errors="replace") as f:
         extract = f.read().strip()
-    with open(last_entry_file, encoding="utf-8") as f:
+    with open(last_entry_file, encoding="utf-8", errors="replace") as f:
         last_entry = f.read().strip()
 
     prompt = build_save_prompt(
@@ -124,7 +124,7 @@ def cmd_build_prompt(
         last_entry=last_entry,
         extract=extract,
     )
-    with open(output_file, "w", encoding="utf-8") as f:
+    with open(output_file, "w", encoding="utf-8", errors="replace") as f:
         f.write(prompt)
 
 
@@ -135,10 +135,10 @@ def cmd_build_ndc_prompt(memory_file: str, output_file: str) -> None:
         memory_file: Path to now.md (the file to be compressed).
         output_file: Path where the assembled prompt will be written.
     """
-    with open(memory_file, encoding="utf-8") as f:
+    with open(memory_file, encoding="utf-8", errors="replace") as f:
         content = f.read()
     prompt = build_ndc_prompt(content)
-    with open(output_file, "w", encoding="utf-8") as f:
+    with open(output_file, "w", encoding="utf-8", errors="replace") as f:
         f.write(prompt)
 
 
@@ -157,6 +157,12 @@ def cmd_parse_haiku(output_file: str = "") -> None:
         HAIKU_TEXT_FILE (path to temp file), IS_SKIP (true/false),
         TK_IN, TK_OUT, TK_CACHE, TK_COST.
     """
+    # Redirected stdin/pipes use the locale codec on Windows (cp1252), not
+    # UTF-8 — PEP 528's UTF-8 console only covers interactive consoles. Force
+    # UTF-8 so the claude JSON decodes correctly (#91). Guarded: a StringIO
+    # substituted in tests has no reconfigure().
+    if hasattr(sys.stdin, "reconfigure"):
+        sys.stdin.reconfigure(encoding="utf-8", errors="replace")
     raw = sys.stdin.read()
     _emit_haiku_result(_parse_response(raw), output_file)
 
@@ -172,7 +178,7 @@ def _emit_haiku_result(r, output_file: str = "") -> None:
 
     # Write text to temp file (can contain newlines, quotes, anything)
     fd, text_file = tempfile.mkstemp(prefix="remember-haiku-text-", suffix=".txt")
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
+    with os.fdopen(fd, "w", encoding="utf-8", errors="replace") as f:
         f.write(r.text)
 
     print(f"HAIKU_TEXT_FILE={_shell_escape(text_file)}")
@@ -183,7 +189,7 @@ def _emit_haiku_result(r, output_file: str = "") -> None:
     print(f"TK_COST={r.tokens.cost_usd:.6f}")
 
     if output_file:
-        with open(output_file, "w", encoding="utf-8") as f:
+        with open(output_file, "w", encoding="utf-8", errors="replace") as f:
             f.write(r.text)
 
 
@@ -202,7 +208,7 @@ def cmd_call_haiku(prompt_file: str, output_file: str = "", timeout: int = 120) 
     from .haiku import call_haiku
 
     try:
-        with open(prompt_file, encoding="utf-8") as f:
+        with open(prompt_file, encoding="utf-8", errors="replace") as f:
             prompt = f.read()
         r = call_haiku(prompt, timeout=timeout)
     except (OSError, RuntimeError) as e:
@@ -222,7 +228,7 @@ def cmd_save_position(last_save_file: str, session_id: str, position: int) -> No
         session_id: UUID of the session being saved.
         position: JSONL line number to resume from next time.
     """
-    with open(last_save_file, "w", encoding="utf-8") as f:
+    with open(last_save_file, "w", encoding="utf-8", errors="replace") as f:
         json.dump({"session": session_id, "line": position}, f)
 
 
@@ -258,7 +264,7 @@ def cmd_consolidate(staging_dir: str, recent_file: str, archive_file: str) -> No
         basename = os.path.basename(path)
         if today in basename or basename.endswith(".done.md"):
             continue
-        with open(path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8", errors="replace") as f:
             staging_contents[basename] = f.read()
 
     if not staging_contents:
@@ -267,12 +273,12 @@ def cmd_consolidate(staging_dir: str, recent_file: str, archive_file: str) -> No
 
     recent = ""
     if os.path.exists(recent_file):
-        with open(recent_file, encoding="utf-8") as f:
+        with open(recent_file, encoding="utf-8", errors="replace") as f:
             recent = f.read()
 
     archive = ""
     if os.path.exists(archive_file):
-        with open(archive_file, encoding="utf-8") as f:
+        with open(archive_file, encoding="utf-8", errors="replace") as f:
             archive = f.read()
 
     try:
@@ -289,11 +295,11 @@ def cmd_consolidate(staging_dir: str, recent_file: str, archive_file: str) -> No
 
     # Write results to temp files
     fd_r, recent_out = tempfile.mkstemp(prefix="remember-recent-", suffix=".md")
-    with os.fdopen(fd_r, "w", encoding="utf-8") as f:
+    with os.fdopen(fd_r, "w", encoding="utf-8", errors="replace") as f:
         f.write(result.recent)
 
     fd_a, archive_out = tempfile.mkstemp(prefix="remember-archive-", suffix=".md")
-    with os.fdopen(fd_a, "w", encoding="utf-8") as f:
+    with os.fdopen(fd_a, "w", encoding="utf-8", errors="replace") as f:
         f.write(result.archive)
 
     # Write staging paths to a NUL-separated temp file so the shell rename step
@@ -303,7 +309,9 @@ def cmd_consolidate(staging_dir: str, recent_file: str, archive_file: str) -> No
     fd_s, staging_paths_file = tempfile.mkstemp(prefix="remember-staging-paths-", suffix=".bin")
     with os.fdopen(fd_s, "wb") as f:
         for name in staging_contents:
-            f.write(os.path.join(staging_dir, name).encode() + b"\x00")
+            # surrogatepass: os.listdir() surrogate-escapes undecodable filename
+            # bytes on Windows; round-trip them so the shell gets the real path.
+            f.write(os.path.join(staging_dir, name).encode("utf-8", "surrogatepass") + b"\x00")
 
     print(f"STAGING_COUNT={len(staging_contents)}")
     print("CONSOLIDATION_STATUS=ok")

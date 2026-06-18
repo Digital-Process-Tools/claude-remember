@@ -118,6 +118,10 @@ def call_haiku(
             cmd,
             capture_output=True,
             text=True,
+            # claude emits UTF-8; without this, text=True decodes with the
+            # locale codec (cp1252 on Windows) → mojibake / UnicodeDecodeError (#91).
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
             env=env,
             cwd=tempfile.gettempdir(),
