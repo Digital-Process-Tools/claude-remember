@@ -228,6 +228,22 @@ def test_extract_messages_tolerates_non_utf8_jsonl(tmp_path):
     assert ("HUMAN", "hello there") in msgs
 
 
+# ── Structured machine-JSON stays STRICT: a corrupt last-save.json must fail to
+#    a clean 0, never an errors="replace"-patched wrong line number.
+
+def test_get_last_save_line_returns_zero_on_corrupt_json(tmp_path):
+    """A non-UTF-8 byte in last-save.json must yield 0 (re-extract from start),
+    not a U+FFFD-corrupted line number that silently skips/re-processes."""
+    sys.path.insert(0, str(REPO_ROOT))
+    from pipeline.extract import get_last_save_line
+
+    save = tmp_path / "tmp" / "last-save.json"
+    save.parent.mkdir(parents=True)
+    # Corrupt the integer field with a raw non-UTF-8 byte.
+    save.write_bytes(b'{"session":"abc-123","line":12\x8034}')
+    assert get_last_save_line("abc-123", remember_dir=str(tmp_path)) == 0
+
+
 # ── Read boundary: user-editable memory files may be saved in a non-UTF-8 editor
 
 def test_build_ndc_prompt_tolerates_non_utf8_now_md(tmp_path, monkeypatch):

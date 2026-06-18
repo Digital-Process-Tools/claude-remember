@@ -228,7 +228,10 @@ def cmd_save_position(last_save_file: str, session_id: str, position: int) -> No
         session_id: UUID of the session being saved.
         position: JSONL line number to resume from next time.
     """
-    with open(last_save_file, "w", encoding="utf-8", errors="replace") as f:
+    # Strict: machine-written structured JSON. session_id is an ASCII UUID
+    # (regex-validated upstream) and position is an int, so this never raises;
+    # keeping it strict avoids silently U+FFFD-corrupting the recovery file.
+    with open(last_save_file, "w", encoding="utf-8") as f:
         json.dump({"session": session_id, "line": position}, f)
 
 
