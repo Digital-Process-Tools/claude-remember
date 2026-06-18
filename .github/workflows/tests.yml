@@ -26,9 +26,12 @@ jobs:
       - name: Install Windows tzdata
         if: runner.os == 'Windows'
         run: pip install tzdata
-      - name: Use Git Bash on Windows (not the WSL bash launcher)
+      - name: Run tests (Windows — Git Bash ahead of the WSL bash launcher)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: echo "C:\Program Files\Git\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+        run: |
+          $env:PATH = "C:\Program Files\Git\bin;$env:PATH"
+          pytest
       - name: Run tests
+        if: runner.os != 'Windows'
         run: pytest

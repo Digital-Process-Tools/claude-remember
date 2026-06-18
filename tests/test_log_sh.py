@@ -25,12 +25,26 @@ LOG_SH = REPO_ROOT / "scripts" / "log.sh"
 CONFIG_EXAMPLE = REPO_ROOT / "config.example.json"
 
 
+def _bash_path(p) -> str:
+    """Convert a path to an MSYS/Git-Bash-safe form.
+
+    On Windows, `C:\\Users\\x` -> `/c/Users/x` (drive letter lowercased,
+    backslashes -> forward slashes) so Git Bash can `source`/`cd`/`export` it.
+    On POSIX the path has no drive letter or backslashes and is returned
+    unchanged.
+    """
+    s = str(p)
+    if len(s) >= 2 and s[1] == ":":          # drive-letter path, e.g. C:\...
+        s = "/" + s[0].lower() + s[2:]
+    return s.replace("\\", "/")
+
+
 def _run_logsh(project_dir, system_tz):
     """Source log.sh under the given system TZ and return MEMORY_LOG_DATE + expected date for the configured TZ."""
     script = f"""
     set -e
-    export PROJECT_DIR={project_dir}
-    source {LOG_SH}
+    export PROJECT_DIR="{_bash_path(project_dir)}"
+    source "{_bash_path(LOG_SH)}"
     # Compute what the date SHOULD be if log.sh honored REMEMBER_TZ
     expected=$(TZ="$REMEMBER_TZ" date +%Y-%m-%d)
     # Extract the date embedded in MEMORY_LOG_FILE
@@ -107,8 +121,8 @@ def test_log_sh_log_function_produces_filename_matching_configured_tz(tmp_path):
     log_dir = project / ".remember" / "logs"
     script = f"""
     set -e
-    export PROJECT_DIR={project}
-    source {LOG_SH}
+    export PROJECT_DIR="{_bash_path(project)}"
+    source "{_bash_path(LOG_SH)}"
     log test "hello from tz test"
     """
     subprocess.run(
@@ -136,8 +150,8 @@ def test_log_sh_exports_remember_tz_to_python_subprocess(tmp_path):
     project = _make_project(tmp_path, "Europe/Paris")
     script = f"""
     set -e
-    export PROJECT_DIR={project}
-    source {LOG_SH}
+    export PROJECT_DIR="{_bash_path(project)}"
+    source "{_bash_path(LOG_SH)}"
     python3 -c "import os; print(os.environ.get('REMEMBER_TZ', 'MISSING'))"
     """
     result = subprocess.run(
@@ -161,8 +175,8 @@ def test_log_sh_invalid_timezone_falls_back_to_system_local(tmp_path):
     project = _make_project(tmp_path, "Invalid/NotAZone")
     script = f"""
     set -e
-    export PROJECT_DIR={project}
-    source {LOG_SH}
+    export PROJECT_DIR="{_bash_path(project)}"
+    source "{_bash_path(LOG_SH)}"
     echo "ACTUAL=$(basename "$MEMORY_LOG_FILE" | sed -E 's/^memory-//;s/\\.log$//')"
     echo "REMEMBER_TZ=$REMEMBER_TZ"
     """
@@ -211,8 +225,8 @@ def test_log_sh_timestamp_inside_file_uses_configured_tz(tmp_path):
     log_dir = project / ".remember" / "logs"
     script = f"""
     set -e
-    export PROJECT_DIR={project}
-    source {LOG_SH}
+    export PROJECT_DIR="{_bash_path(project)}"
+    source "{_bash_path(LOG_SH)}"
     log test "timestamp check"
     """
     subprocess.run(
@@ -264,10 +278,10 @@ def _make_dispatch_env(tmp_path: Path) -> dict:
     project = _make_project(tmp_path, timezone_value=None)
     return {
         **os.environ,
-        "PROJECT_DIR": str(project),
-        "PIPELINE_DIR": str(REPO_ROOT),
+        "PROJECT_DIR": _bash_path(project),
+        "PIPELINE_DIR": _bash_path(REPO_ROOT),
         "_LIB_MEMORY_DIR_LOADED": "1",
-        "REMEMBER_DIR": str(project / ".remember"),
+        "REMEMBER_DIR": _bash_path(project / ".remember"),
     }
 
 
@@ -282,9 +296,9 @@ export PROJECT_DIR="{env['PROJECT_DIR']}"
 export PIPELINE_DIR="{env['PIPELINE_DIR']}"
 export _LIB_MEMORY_DIR_LOADED=1
 export REMEMBER_DIR="{env['REMEMBER_DIR']}"
-source {LOG_SH}
+source "{_bash_path(LOG_SH)}"
 # Override REMEMBER_HOOKS_DIR to point at our temp fixture.
-REMEMBER_HOOKS_DIR="{hooks_dir}"
+REMEMBER_HOOKS_DIR="{_bash_path(hooks_dir)}"
 dispatch "test_event"
 """
     return subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)

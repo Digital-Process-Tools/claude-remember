@@ -18,6 +18,20 @@ LIB_MEMORY_DIR_SH = REPO_ROOT / "scripts" / "lib-memory-dir.sh"
 RESOLVE_PATHS_SH = REPO_ROOT / "scripts" / "resolve-paths.sh"
 
 
+def _bash_path(p) -> str:
+    """Convert a path to an MSYS/Git-Bash-safe form.
+
+    On Windows, `C:\\Users\\x` -> `/c/Users/x` (drive letter lowercased,
+    backslashes -> forward slashes) so Git Bash can `source`/`cd`/`export` it.
+    On POSIX the path has no drive letter or backslashes and is returned
+    unchanged.
+    """
+    s = str(p)
+    if len(s) >= 2 and s[1] == ":":          # drive-letter path, e.g. C:\...
+        s = "/" + s[0].lower() + s[2:]
+    return s.replace("\\", "/")
+
+
 # ---------------------------------------------------------------------------
 # 1. safe_eval — RCE injection must NOT execute embedded commands
 # ---------------------------------------------------------------------------
@@ -29,7 +43,7 @@ def test_safe_eval_rejects_rce_semicolon_injection(tmp_path):
 
     script = f"""
 set +e
-source {LOG_SH}
+source "{_bash_path(LOG_SH)}"
 safe_val << 'EVAL_INPUT'
 EXTRACT_FILE={canary}; rm -f {canary}
 EVAL_INPUT
@@ -38,7 +52,7 @@ EVAL_INPUT
         ["bash", "-c", script],
         capture_output=True,
         text=True,
-        env={**os.environ, "PROJECT_DIR": str(REPO_ROOT)},
+        env={**os.environ, "PROJECT_DIR": _bash_path(REPO_ROOT)},
     )
     assert canary.exists(), (
         f"safe_eval executed injected 'rm -f {canary}' — RCE is still present. "
@@ -53,7 +67,7 @@ def test_safe_eval_rejects_rce_command_substitution(tmp_path):
 
     script = f"""
 set +e
-source {LOG_SH}
+source "{_bash_path(LOG_SH)}"
 safe_val << 'EVAL_INPUT'
 EXTRACT_FILE=$(rm -f {canary})
 EVAL_INPUT
@@ -62,7 +76,7 @@ EVAL_INPUT
         ["bash", "-c", script],
         capture_output=True,
         text=True,
-        env={**os.environ, "PROJECT_DIR": str(REPO_ROOT)},
+        env={**os.environ, "PROJECT_DIR": _bash_path(REPO_ROOT)},
     )
     assert canary.exists(), (
         f"safe_eval executed command substitution in value — RCE present. "
@@ -74,7 +88,7 @@ def test_safe_eval_assigns_normal_variables():
     """Legitimate KEY=value lines must still be assigned."""
     script = f"""
 set -e
-source {LOG_SH}
+source "{_bash_path(LOG_SH)}"
 safe_val << 'EVAL_INPUT'
 EXTRACT_FILE=/tmp/legit-path.txt
 EXCHANGE_COUNT=42
@@ -88,7 +102,7 @@ echo "HUMAN_COUNT=$HUMAN_COUNT"
         ["bash", "-c", script],
         capture_output=True,
         text=True,
-        env={**os.environ, "PROJECT_DIR": str(REPO_ROOT)},
+        env={**os.environ, "PROJECT_DIR": _bash_path(REPO_ROOT)},
     )
     assert result.returncode == 0, f"script failed: {result.stderr}"
     assert "EXTRACT_FILE=/tmp/legit-path.txt" in result.stdout
@@ -100,7 +114,7 @@ def test_safe_eval_assigns_value_with_equals_sign():
     """Values containing '=' (e.g. base64) must be stored literally."""
     script = f"""
 set -e
-source {LOG_SH}
+source "{_bash_path(LOG_SH)}"
 safe_val << 'EVAL_INPUT'
 EXTRACT_FILE=/tmp/a=b=c
 EVAL_INPUT
@@ -110,7 +124,7 @@ echo "RESULT=$EXTRACT_FILE"
         ["bash", "-c", script],
         capture_output=True,
         text=True,
-        env={**os.environ, "PROJECT_DIR": str(REPO_ROOT)},
+        env={**os.environ, "PROJECT_DIR": _bash_path(REPO_ROOT)},
     )
     assert result.returncode == 0, f"script failed: {result.stderr}"
     assert "RESULT=/tmp/a=b=c" in result.stdout
@@ -120,7 +134,7 @@ def test_safe_eval_ignores_lowercase_keys():
     """Lowercase variable names must be silently ignored (not assigned)."""
     script = f"""
 set +e
-source {LOG_SH}
+source "{_bash_path(LOG_SH)}"
 safe_val << 'EVAL_INPUT'
 lowercase_var=something
 EVAL_INPUT
@@ -130,7 +144,7 @@ echo "lowercase_var=${{lowercase_var:-UNSET}}"
         ["bash", "-c", script],
         capture_output=True,
         text=True,
-        env={**os.environ, "PROJECT_DIR": str(REPO_ROOT)},
+        env={**os.environ, "PROJECT_DIR": _bash_path(REPO_ROOT)},
     )
     assert "lowercase_var=UNSET" in result.stdout, (
         f"lowercase key was assigned: {result.stdout!r}"
@@ -152,18 +166,18 @@ def test_trap_cleanup_with_space_in_tmpdir(tmp_path):
 
     script = f"""
 set -e
-export CLAUDE_PROJECT_DIR={project}
-export PIPELINE_DIR={REPO_ROOT}
-source {RESOLVE_PATHS_SH}
-export TMPDIR="{spaced_tmp}"
-source {LIB_MEMORY_DIR_SH}
+export CLAUDE_PROJECT_DIR="{_bash_path(project)}"
+export PIPELINE_DIR="{_bash_path(REPO_ROOT)}"
+source "{_bash_path(RESOLVE_PATHS_SH)}"
+export TMPDIR="{_bash_path(spaced_tmp)}"
+source "{_bash_path(LIB_MEMORY_DIR_SH)}"
 echo "CONFIG=$REMEMBER_CONFIG"
 """
     result = subprocess.run(
         ["bash", "-c", script],
         capture_output=True,
         text=True,
-        env={**os.environ, "HOME": str(tmp_path)},
+        env={**os.environ, "HOME": _bash_path(tmp_path)},
     )
     assert result.returncode == 0, (
         f"lib-memory-dir.sh failed with spaced TMPDIR: {result.stderr}"
@@ -197,8 +211,8 @@ def test_jq_fallback_path_with_single_quote(tmp_path):
 
     script = f"""
 set -e
-source {JQ_TEST_HELPER}
-result=$(_jq_fallback -r '.thresholds.min_human_messages' "{json_file}")
+source "{_bash_path(JQ_TEST_HELPER)}"
+result=$(_jq_fallback -r '.thresholds.min_human_messages' "{_bash_path(json_file)}")
 echo "RESULT=$result"
 """
     result = subprocess.run(
@@ -223,8 +237,8 @@ def test_jq_fallback_path_with_spaces(tmp_path):
 
     script = f"""
 set -e
-source {JQ_TEST_HELPER}
-result=$(_jq_fallback -r '.key' "{json_file}")
+source "{_bash_path(JQ_TEST_HELPER)}"
+result=$(_jq_fallback -r '.key' "{_bash_path(json_file)}")
 echo "RESULT=$result"
 """
     result = subprocess.run(
@@ -247,8 +261,8 @@ def test_jq_fallback_nested_key(tmp_path):
 
     script = f"""
 set -e
-source {JQ_TEST_HELPER}
-result=$(_jq_fallback -r '.a.b.c' "{json_file}")
+source "{_bash_path(JQ_TEST_HELPER)}"
+result=$(_jq_fallback -r '.a.b.c' "{_bash_path(json_file)}")
 echo "RESULT=$result"
 """
     result = subprocess.run(

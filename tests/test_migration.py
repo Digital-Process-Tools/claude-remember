@@ -15,15 +15,29 @@ DETECT_SCRIPT = REPO_ROOT / "scripts" / "detect-tools.sh"
 LIB_SCRIPT = REPO_ROOT / "scripts" / "lib-memory-dir.sh"
 
 
+def _bash_path(p) -> str:
+    """Convert a path to an MSYS/Git-Bash-safe form.
+
+    On Windows, `C:\\Users\\x` -> `/c/Users/x` (drive letter lowercased,
+    backslashes -> forward slashes) so Git Bash can `source`/`cd`/`export` it.
+    On POSIX the path has no drive letter or backslashes and is returned
+    unchanged.
+    """
+    s = str(p)
+    if len(s) >= 2 and s[1] == ":":          # drive-letter path, e.g. C:\...
+        s = "/" + s[0].lower() + s[2:]
+    return s.replace("\\", "/")
+
+
 def _source_bootstrap(project_dir: str, pipeline_dir: str, home_dir: str) -> subprocess.CompletedProcess:
     """Source bootstrap-dirs.sh and return the completed process."""
     script = f"""
     set -e
-    export PROJECT_DIR={project_dir}
-    export PIPELINE_DIR={pipeline_dir}
-    export HOME={home_dir}
-    source {DETECT_SCRIPT}
-    source {BOOTSTRAP_SCRIPT}
+    export PROJECT_DIR="{_bash_path(project_dir)}"
+    export PIPELINE_DIR="{_bash_path(pipeline_dir)}"
+    export HOME="{_bash_path(home_dir)}"
+    source "{_bash_path(DETECT_SCRIPT)}"
+    source "{_bash_path(BOOTSTRAP_SCRIPT)}"
     echo "REMEMBER_DIR=$REMEMBER_DIR"
     """
     return subprocess.run(["bash", "-c", script], capture_output=True, text=True)
