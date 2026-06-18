@@ -57,6 +57,8 @@ def call_haiku(
         "claude",
         "-p", prompt,
         "--output-format", "json",
+        "--no-session-persistence",
+        "--exclude-dynamic-system-prompt-sections",
         "--model", "haiku",
         "--max-turns", "1",
         "--allowedTools", ",".join(tools) if tools else "",

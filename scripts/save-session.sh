@@ -175,6 +175,7 @@ CLEANUP_FILES+=("$HAIKU_STDERR")
 HAIKU_JSON=$(cd /tmp && env -u CLAUDECODE claude -p \
     --model haiku --allowedTools "" --max-turns 1 \
     --output-format json \
+    --no-session-persistence --exclude-dynamic-system-prompt-sections \
     --mcp-config '{"mcpServers":{}}' --strict-mcp-config \
     2>"$HAIKU_STDERR" < "$TMP_PROMPT")
 HAIKU_EXIT=$?
@@ -241,6 +242,7 @@ if [ "$RUN_NDC" = true ]; then
             NDC_JSON=$(cd /tmp && env -u CLAUDECODE claude -p \
                 --allowedTools "" --model haiku --max-turns 1 \
                 --output-format json \
+                --no-session-persistence --exclude-dynamic-system-prompt-sections \
                 --mcp-config '{"mcpServers":{}}' --strict-mcp-config \
                 2>"$NDC_ERR" < "$NDC_PROMPT")
 
