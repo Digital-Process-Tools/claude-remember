@@ -5,6 +5,8 @@ import os
 import sys
 from unittest.mock import patch, MagicMock
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from pipeline.haiku import call_haiku, _parse_response, _extract_tokens
@@ -129,6 +131,10 @@ def test_call_haiku_success(mock_run):
     # One-shot summarization subprocess: never resume these, never write to disk
     assert "--no-session-persistence" in cmd
     assert "--exclude-dynamic-system-prompt-sections" in cmd
+    # Sandboxed MCP: no servers, strict (so the nested session can't inherit any) — #94
+    assert "--mcp-config" in cmd
+    assert cmd[cmd.index("--mcp-config") + 1] == '{"mcpServers":{}}'
+    assert "--strict-mcp-config" in cmd
     # CLAUDECODE must be stripped from env
     env = args[1]["env"]
     assert "CLAUDECODE" not in env
@@ -146,6 +152,55 @@ def test_call_haiku_with_tools(mock_run):
     assert "--allowedTools" in cmd
     idx = cmd.index("--allowedTools")
     assert cmd[idx + 1] == "Read,Write"
+
+
+def _max_turns_in(cmd: list[str]) -> str:
+    return cmd[cmd.index("--max-turns") + 1]
+
+
+@patch("pipeline.haiku.subprocess.run")
+def test_call_haiku_default_max_turns_clears_cc2x(mock_run, monkeypatch):
+    """Default must be >=2 — CC 2.x counts prompt-delivery as turn 1, so a cap
+    of 1 exits error_max_turns before the model replies (#98/#100). This is the
+    consolidation path (consolidate.py -> call_haiku), not just save-session.sh."""
+    monkeypatch.delenv("REMEMBER_MAX_TURNS", raising=False)
+    mock_run.return_value = MagicMock(
+        returncode=0, stdout=_mock_claude_response("x"), stderr="")
+    call_haiku("p")
+    assert _max_turns_in(mock_run.call_args[0][0]) == "4"
+
+
+@patch("pipeline.haiku.subprocess.run")
+def test_call_haiku_max_turns_env_override(mock_run, monkeypatch):
+    monkeypatch.setenv("REMEMBER_MAX_TURNS", "6")
+    mock_run.return_value = MagicMock(
+        returncode=0, stdout=_mock_claude_response("x"), stderr="")
+    call_haiku("p")
+    assert _max_turns_in(mock_run.call_args[0][0]) == "6"
+
+
+@pytest.mark.parametrize("bad", ["0", "-1", "banana", "", "3.5", "21", "999999"])
+@patch("pipeline.haiku.subprocess.run")
+def test_call_haiku_invalid_max_turns_falls_back(mock_run, bad, monkeypatch):
+    """A bad/out-of-range REMEMBER_MAX_TURNS must not flow through as a garbage
+    --max-turns value (which would break claude -p the same way the original
+    bug did). Includes the upper-bound cap so a misconfig is bounded."""
+    monkeypatch.setenv("REMEMBER_MAX_TURNS", bad)
+    mock_run.return_value = MagicMock(
+        returncode=0, stdout=_mock_claude_response("x"), stderr="")
+    call_haiku("p")
+    assert _max_turns_in(mock_run.call_args[0][0]) == "4"
+
+
+@pytest.mark.parametrize("raw,expected", [("2", "2"), ("20", "20"), ("007", "7")])
+@patch("pipeline.haiku.subprocess.run")
+def test_call_haiku_valid_max_turns_normalized(mock_run, raw, expected, monkeypatch):
+    """In-range values pass through, normalized (leading zeros stripped)."""
+    monkeypatch.setenv("REMEMBER_MAX_TURNS", raw)
+    mock_run.return_value = MagicMock(
+        returncode=0, stdout=_mock_claude_response("x"), stderr="")
+    call_haiku("p")
+    assert _max_turns_in(mock_run.call_args[0][0]) == expected
 
 
 @patch("pipeline.haiku.subprocess.run")
