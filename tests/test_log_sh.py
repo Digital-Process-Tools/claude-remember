@@ -20,11 +20,6 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="bash dispatch + POSIX ownership/mode checks — not portable to Windows",
-)
-
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOG_SH = REPO_ROOT / "scripts" / "log.sh"
 CONFIG_EXAMPLE = REPO_ROOT / "config.example.json"
@@ -303,6 +298,11 @@ def _write_hook(hooks_event_dir: Path, name: str, content: str, mode: int = 0o75
     return hook
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX ownership + world-writable (0o777) semantics don't map to NTFS; "
+    "the dispatch() guard is a no-op there. Git Bash fakes mode bits.",
+)
 class TestDispatchOwnershipChecks:
     """Regression tests for the ownership + world-writable guards in dispatch() (#67)."""
 

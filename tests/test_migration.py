@@ -7,15 +7,7 @@ new location on first run and leave a MIGRATED-TO.txt marker behind.
 
 import os
 import subprocess
-import sys
 from pathlib import Path
-
-import pytest
-
-pytestmark = pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="bash subprocess + POSIX bootstrap-dirs.sh — not portable to Windows runners (no bash on PATH)",
-)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BOOTSTRAP_SCRIPT = REPO_ROOT / "scripts" / "bootstrap-dirs.sh"
