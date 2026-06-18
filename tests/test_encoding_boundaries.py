@@ -21,6 +21,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # A non-UTF-8 locale that survives PEP 538 C-locale coercion — makes Python's
@@ -91,6 +93,13 @@ def test_parse_haiku_pipe_handles_cjk_under_non_utf8_locale(tmp_path):
 
 # ── Boundary 2: the claude subprocess stdout decode in call_haiku (#91 #2)
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="fake `claude` is a shebang+chmod script; Windows CreateProcess only "
+    "runs .exe, not a bare executable script. The encoding kwarg is verified "
+    "cross-platform by test_call_haiku_passes_utf8_encoding below; the real "
+    "decode under a forced locale runs on the POSIX CI legs.",
+)
 def test_call_haiku_decodes_utf8_stdout_under_non_utf8_locale(tmp_path):
     """call_haiku must decode the claude CLI's UTF-8 stdout as UTF-8 regardless
     of locale — `subprocess.run(text=True)` without encoding uses cp1252/ascii."""
@@ -120,6 +129,25 @@ def test_call_haiku_decodes_utf8_stdout_under_non_utf8_locale(tmp_path):
     )
     assert result.returncode == 0, result.stderr.decode("utf-8", "replace")
     assert result.stdout.decode("utf-8") == f"arrow {ARROW}"
+
+
+def test_call_haiku_passes_utf8_encoding_to_subprocess():
+    """Cross-platform guard (incl. Windows): call_haiku must hand subprocess.run
+    an explicit UTF-8 decode, never relying on the locale codec (#91)."""
+    sys.path.insert(0, str(REPO_ROOT))
+    from unittest.mock import MagicMock, patch
+    import pipeline.haiku as haiku
+
+    with patch("pipeline.haiku.subprocess.run") as run:
+        run.return_value = MagicMock(
+            returncode=0,
+            stdout='{"result":"x","input_tokens":1,"output_tokens":1,'
+                   '"cache_read_input_tokens":0}',
+            stderr="",
+        )
+        haiku.call_haiku("go")
+    assert run.call_args.kwargs.get("encoding") == "utf-8"
+    assert run.call_args.kwargs.get("errors") == "replace"
 
 
 # ── Write resilience: a lone surrogate in text must never crash a save (#97)
