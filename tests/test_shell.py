@@ -284,6 +284,32 @@ def test_cmd_consolidate_with_staging_files(capsys):
                 os.unlink(path)
 
 
+def test_cmd_consolidate_skip_emits_status_and_no_output_paths(capsys):
+    """When consolidate() raises ConsolidationSkipped (refusal/non-conforming),
+    cmd_consolidate must emit CONSOLIDATION_STATUS=skip and NO output-path vars,
+    so run-consolidation.sh leaves recent/archive and staging files untouched (#90)."""
+    from pipeline.consolidate import ConsolidationSkipped
+
+    with tempfile.TemporaryDirectory() as d:
+        past_file = os.path.join(d, "today-2020-01-01.md")
+        with open(past_file, "w") as f:
+            f.write("old entry")
+
+        with patch(
+            "pipeline.consolidate.consolidate",
+            side_effect=ConsolidationSkipped("refusal"),
+        ):
+            cmd_consolidate(staging_dir=d, recent_file="/nonexistent", archive_file="/nonexistent")
+
+        output = capsys.readouterr().out
+        assert "STAGING_COUNT=1" in output
+        assert "CONSOLIDATION_STATUS=skip" in output
+        # No write/rename must be signalled to the shell on skip.
+        assert "RECENT_OUT=" not in output
+        assert "ARCHIVE_OUT=" not in output
+        assert "STAGING_PATHS_FILE=" not in output
+
+
 def test_cmd_consolidate_staging_paths_file_handles_special_chars(capsys):
     """STAGING_PATHS_FILE correctly encodes filenames with single quotes and spaces."""
     fake_tokens = TokenUsage(input=10, output=5, cache=0, cost_usd=0.0)
