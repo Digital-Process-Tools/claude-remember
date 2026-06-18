@@ -115,11 +115,16 @@ def get_last_save_line(session_id: str,
     if not os.path.exists(path):
         return 0
     try:
+        # Strict on purpose: this is machine-written structured JSON, not user
+        # prose. A corrupt byte must fail cleanly (-> return 0, re-extract from
+        # the start) rather than be patched with U+FFFD into a wrong line number
+        # that silently skips or re-processes messages. ValueError covers both
+        # JSONDecodeError and UnicodeDecodeError.
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
         if data.get("session") == session_id:
             return data.get("line", 0)
-    except (json.JSONDecodeError, KeyError, OSError):
+    except (ValueError, KeyError, OSError):
         pass
     return 0
 
@@ -134,7 +139,7 @@ def count_lines(path: str) -> int:
         Number of lines in the file.
     """
     count = 0
-    with open(path, encoding="utf-8") as f:
+    with open(path, encoding="utf-8", errors="replace") as f:
         for _ in f:
             count += 1
     return count
@@ -160,7 +165,7 @@ def extract_messages(path: str, skip_lines: int = 0) -> list[tuple[str, str]]:
     corrupt_count = 0
 
     try:
-        f = open(path, encoding="utf-8")
+        f = open(path, encoding="utf-8", errors="replace")
     except OSError:
         return messages
 
