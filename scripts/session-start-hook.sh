@@ -43,6 +43,15 @@ source "$(dirname "$0")/bootstrap-dirs.sh"
 PLUGIN_ROOT="$PIPELINE_DIR"
 PROJECT="$PROJECT_DIR"
 source "$PLUGIN_ROOT/scripts/log.sh" 2>/dev/null
+# log.sh is sourced with stderr suppressed; a silent failure (e.g. read-only
+# mount where log.sh `return 1`s) would leave _remember_date / log / dispatch
+# undefined, crashing later with a cryptic `command not found`. Surface a clear
+# diagnostic up front. Exit 127 (command-missing) to match the degraded-env
+# contract that tolerates rc in (0, 127), not a bare 1.
+if ! command -v _remember_date >/dev/null 2>&1; then
+    echo "session-start-hook: ERROR — failed to source $PLUGIN_ROOT/scripts/log.sh" >&2
+    exit 127
+fi
 TODAY=$(_remember_date '+%Y-%m-%d')
 log "hook" "session-start: PROJECT_DIR=$PROJECT_DIR PIPELINE_DIR=$PIPELINE_DIR REMEMBER_DIR=$REMEMBER_DIR"
 
