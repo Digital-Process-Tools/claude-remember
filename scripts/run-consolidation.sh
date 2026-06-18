@@ -70,11 +70,21 @@ RESULT=$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell consolidate "$STAGING_D
     exit 1
 }
 
-# eval sets: STAGING_COUNT, RECENT_OUT, ARCHIVE_OUT, TK_IN/OUT/CACHE/COST, STAGING_PATHS_FILE
+# eval sets: STAGING_COUNT, CONSOLIDATION_STATUS, RECENT_OUT, ARCHIVE_OUT, TK_IN/OUT/CACHE/COST, STAGING_PATHS_FILE
 safe_eval <<< "$RESULT"
 
 if [ "${STAGING_COUNT:-0}" -eq 0 ]; then
     log "consolidation" "no staging files"; exit 0
+fi
+
+# Skip guard: if the model declined or returned non-conforming output, the
+# pipeline emits CONSOLIDATION_STATUS=skip and no RECENT_OUT/ARCHIVE_OUT.
+# Do NOT overwrite memory and do NOT retire staging files — leave everything
+# in place so the next run retries. (Default to ok for backward compatibility
+# with any caller that does not emit the status.)
+if [ "${CONSOLIDATION_STATUS:-ok}" != "ok" ]; then
+    log "consolidation" "skip: status=${CONSOLIDATION_STATUS} — memory + staging files left untouched"
+    exit 0
 fi
 
 # --- Write output ---

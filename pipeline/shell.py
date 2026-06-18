@@ -214,7 +214,7 @@ def cmd_consolidate(staging_dir: str, recent_file: str, archive_file: str) -> No
     import tempfile
 
     from ._tz import today_str
-    from .consolidate import consolidate
+    from .consolidate import consolidate, ConsolidationSkipped
 
     today = today_str()
 
@@ -241,7 +241,17 @@ def cmd_consolidate(staging_dir: str, recent_file: str, archive_file: str) -> No
         with open(archive_file, encoding="utf-8") as f:
             archive = f.read()
 
-    result = consolidate(staging_contents, recent, archive)
+    try:
+        result = consolidate(staging_contents, recent, archive)
+    except ConsolidationSkipped:
+        # Model declined (SKIP) or returned non-conforming output. Emit a
+        # skip status so the shell leaves recent.md/archive.md untouched and
+        # does NOT rename the source staging files to .done.md — they remain
+        # available for the next run. STAGING_COUNT is non-zero (we did find
+        # files) but the shell gates on CONSOLIDATION_STATUS.
+        print(f"STAGING_COUNT={len(staging_contents)}")
+        print("CONSOLIDATION_STATUS=skip")
+        return
 
     # Write results to temp files
     fd_r, recent_out = tempfile.mkstemp(prefix="remember-recent-", suffix=".md")
@@ -262,6 +272,7 @@ def cmd_consolidate(staging_dir: str, recent_file: str, archive_file: str) -> No
             f.write(os.path.join(staging_dir, name).encode() + b"\x00")
 
     print(f"STAGING_COUNT={len(staging_contents)}")
+    print("CONSOLIDATION_STATUS=ok")
     print(f"RECENT_OUT={_shell_escape(recent_out)}")
     print(f"ARCHIVE_OUT={_shell_escape(archive_out)}")
     print(f"TK_IN={result.tokens.input}")
