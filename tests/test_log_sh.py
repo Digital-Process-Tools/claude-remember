@@ -26,17 +26,14 @@ CONFIG_EXAMPLE = REPO_ROOT / "config.example.json"
 
 
 def _bash_path(p) -> str:
-    """Convert a path to an MSYS/Git-Bash-safe form.
+    """Forward-slash drive form, usable by BOTH Git Bash and the Windows
+    ``python3`` that the bash scripts invoke (jq fallback, migration paths).
 
-    On Windows, `C:\\Users\\x` -> `/c/Users/x` (drive letter lowercased,
-    backslashes -> forward slashes) so Git Bash can `source`/`cd`/`export` it.
-    On POSIX the path has no drive letter or backslashes and is returned
-    unchanged.
+    `C:\\Users\\x` -> `C:/Users/x`. Git Bash and Windows Python both accept
+    forward-slash drive paths; the MSYS `/c/x` form works in bash but Windows
+    Python can't ``open()`` it. On POSIX the path is returned unchanged.
     """
-    s = str(p)
-    if len(s) >= 2 and s[1] == ":":          # drive-letter path, e.g. C:\...
-        s = "/" + s[0].lower() + s[2:]
-    return s.replace("\\", "/")
+    return str(p).replace("\\", "/")
 
 
 def _find_bash():
