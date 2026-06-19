@@ -108,7 +108,16 @@ class TestMigration:
         remember_dir = result.stdout.strip().split("REMEMBER_DIR=")[-1].strip()
 
         # Files must be at new location
-        assert (Path(remember_dir) / "now.md").exists(), "now.md not migrated"
+        rd = Path(remember_dir)
+        _diag = (
+            f"remember_dir={remember_dir!r}; rd.exists={rd.exists()}; "
+            f"rd.listing={sorted(p.name for p in rd.iterdir()) if rd.exists() else 'MISSING'}; "
+            f"ext_tree={sorted(str(p.relative_to(tmp_path)) for p in ext_base.rglob('*')) if ext_base.exists() else 'MISSING'}; "
+            f"legacy.exists={legacy.exists()}; "
+            f"legacy.listing={sorted(p.name for p in legacy.iterdir()) if legacy.exists() else 'MISSING'}; "
+            f"stdout={result.stdout!r}"
+        )
+        assert (rd / "now.md").exists(), f"now.md not migrated. {_diag}"
         assert (Path(remember_dir) / "tmp" / "last-save.json").exists(), "last-save.json not migrated"
 
         # Marker must exist in the old location
