@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] — CC 2.x save fix, Windows reliability, unified Haiku call
+
 ### Added
 
 - **`REMEMBER_BRANCH` env var override** — `scripts/save-session.sh` now honors `$REMEMBER_BRANCH` when computing the `## HH:MM | <branch>` identity slot of each daily-log entry. Falls back to the existing `git branch --show-current` lookup, then the literal `"unknown"` if no git repo is present. Use case: running Claude Code from `$HOME` (or any non-git directory) collapses the identity slot to `unknown` on every entry, which makes log entries indistinguishable across instances. Export `REMEMBER_BRANCH=laptop` / `cloud` / `staging` / `$HOSTNAME` in your shell rc and the slot becomes a useful per-instance tag. Documented in `README.md` Configuration → Environment variables.
