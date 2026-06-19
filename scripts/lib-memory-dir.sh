@@ -64,8 +64,11 @@ _resolve_remember_dir() {
     local proj="$2"
 
     case "$data_dir" in
-        /*|~*)
+        /*|~*|[A-Za-z]:/*|[A-Za-z]:\\*)
             # Absolute / home-relative: expand ~ and substitute {slug}.
+            # Drive-letter forms (C:/... and C:\...) are absolute on Windows /
+            # Git Bash — without them a Windows data_dir is wrongly treated as
+            # relative and prepended to PROJECT_DIR (path doubling).
             # Guard: session_dir_slug may not be defined if detect-tools.sh was
             # not sourced yet (e.g. log.sh sourced directly in tests). Define a
             # minimal inline fallback so the slug is never silently empty.

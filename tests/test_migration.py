@@ -12,29 +12,65 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="bash subprocess + POSIX bootstrap-dirs.sh — not portable to Windows runners (no bash on PATH)",
-)
-
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BOOTSTRAP_SCRIPT = REPO_ROOT / "scripts" / "bootstrap-dirs.sh"
 DETECT_SCRIPT = REPO_ROOT / "scripts" / "detect-tools.sh"
 LIB_SCRIPT = REPO_ROOT / "scripts" / "lib-memory-dir.sh"
 
 
+def _bash_path(p) -> str:
+    """Forward-slash drive form, usable by BOTH Git Bash and the Windows
+    ``python3`` that the bash scripts invoke (jq fallback, migration paths).
+
+    `C:\\Users\\x` -> `C:/Users/x`. Git Bash and Windows Python both accept
+    forward-slash drive paths; the MSYS `/c/x` form works in bash but Windows
+    Python can't ``open()`` it. On POSIX the path is returned unchanged.
+    """
+    return str(p).replace("\\", "/")
+
+
+def _find_bash():
+    """Return the bash executable to use for subprocess calls.
+
+    On POSIX, plain "bash". On Windows, the Git-for-Windows bash (NOT the
+    System32 WSL launcher, which CreateProcess finds first on PATH). Returns
+    None on Windows when Git Bash isn't installed → the module is skipped.
+    """
+    if sys.platform != "win32":
+        return "bash"
+    import shutil
+    candidates = []
+    for env_var in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"):
+        base = os.environ.get(env_var)
+        if base:
+            candidates.append(Path(base) / "Git" / "bin" / "bash.exe")
+            candidates.append(Path(base) / "Git" / "usr" / "bin" / "bash.exe")
+    for cand in candidates:
+        if cand.is_file():
+            return str(cand)
+    resolved = shutil.which("bash")
+    if resolved and "git" in resolved.replace("\\", "/").lower():
+        return resolved
+    return None
+
+
+_BASH = _find_bash()
+
+pytestmark = pytest.mark.skipif(_BASH is None, reason="Git Bash not found (Windows without Git for Windows)")
+
+
 def _source_bootstrap(project_dir: str, pipeline_dir: str, home_dir: str) -> subprocess.CompletedProcess:
     """Source bootstrap-dirs.sh and return the completed process."""
     script = f"""
     set -e
-    export PROJECT_DIR={project_dir}
-    export PIPELINE_DIR={pipeline_dir}
-    export HOME={home_dir}
-    source {DETECT_SCRIPT}
-    source {BOOTSTRAP_SCRIPT}
+    export PROJECT_DIR="{_bash_path(project_dir)}"
+    export PIPELINE_DIR="{_bash_path(pipeline_dir)}"
+    export HOME="{_bash_path(home_dir)}"
+    source "{_bash_path(DETECT_SCRIPT)}"
+    source "{_bash_path(BOOTSTRAP_SCRIPT)}"
     echo "REMEMBER_DIR=$REMEMBER_DIR"
     """
-    return subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    return subprocess.run([_BASH, "-c", script], capture_output=True, text=True)
 
 
 def _make_legacy_dir(project_dir: Path) -> None:
@@ -63,7 +99,7 @@ class TestMigration:
         # External data_dir pointing to a slug-based path under home
         ext_base = tmp_path / "ext"
         (pipeline / "config.json").write_text(
-            f'{{"data_dir": "{ext_base}/{{{{slug}}}}"}}'
+            f'{{"data_dir": "{_bash_path(ext_base)}/{{{{slug}}}}"}}'
         )
 
         result = _source_bootstrap(str(project), str(pipeline), str(home))
@@ -93,7 +129,7 @@ class TestMigration:
 
         ext_base = tmp_path / "ext"
         (pipeline / "config.json").write_text(
-            f'{{"data_dir": "{ext_base}/{{{{slug}}}}"}}'
+            f'{{"data_dir": "{_bash_path(ext_base)}/{{{{slug}}}}"}}'
         )
 
         # First run: migrate
@@ -116,7 +152,7 @@ class TestMigration:
 
         ext_base = tmp_path / "ext"
         (pipeline / "config.json").write_text(
-            f'{{"data_dir": "{ext_base}/{{{{slug}}}}"}}'
+            f'{{"data_dir": "{_bash_path(ext_base)}/{{{{slug}}}}"}}'
         )
 
         result = _source_bootstrap(str(project), str(pipeline), str(home))
