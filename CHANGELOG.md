@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1] — Handoff survives context-preview truncation
+
+### Fixed
+
+- **Last-session handoff was lost on every session start** — the session-start hook emits a large block (identity + tiered memory + handoff), but the harness may deliver only a leading preview to the agent. The handoff was dumped inside the memory loop, landing well past the preview cutoff, so it never reached the model. The previous session's handoff is now emitted **first**, before identity/memory, under a `=== LAST HANDOFF ===` header, so it always lands in context. Read-once-then-clear semantics are preserved (the file is truncated immediately after emission).
+
 ## [0.8.0] — CC 2.x save fix, Windows reliability, unified Haiku call
 
 ### Added

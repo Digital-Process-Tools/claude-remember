@@ -104,13 +104,24 @@ echo "=== HANDOFF ==="
 echo "Write next handoff to: $REMEMBER_HANDOFF"
 echo ""
 
+# ── Last handoff (injected FIRST so it survives context-preview truncation) ─
+# The session-start output can be large; the harness may deliver only a leading
+# preview to the agent. Emit the previous session's handoff up top — before
+# identity/memory — so it always lands in context. Read once, then consume.
+if [ -f "$REMEMBER_HANDOFF" ] && [ -s "$REMEMBER_HANDOFF" ]; then
+    echo "=== LAST HANDOFF ==="
+    cat "$REMEMBER_HANDOFF"
+    echo ""
+    : > "$REMEMBER_HANDOFF"
+fi
+
 # ── History hint ───────────────────────────────────────────────────────────
 cat "$PLUGIN_ROOT/prompts/session-history-hint.txt" 2>/dev/null
 echo ""
 
 # ── Inject memory into context ────────────────────────────────────────────
 HAS_MEMORY=""
-for MFILE in "$IDENTITY_FILE" "$CORE_MEMORIES" "$REMEMBER_HANDOFF" "$REMEMBER_TODAY_FILE" "$REMEMBER_NOW" "$REMEMBER_RECENT" "$REMEMBER_ARCHIVE"; do
+for MFILE in "$IDENTITY_FILE" "$CORE_MEMORIES" "$REMEMBER_TODAY_FILE" "$REMEMBER_NOW" "$REMEMBER_RECENT" "$REMEMBER_ARCHIVE"; do
     if [ -f "$MFILE" ]; then
         HAS_MEMORY="true"
     fi
@@ -118,7 +129,7 @@ done
 
 if [ -n "$HAS_MEMORY" ]; then
     echo "=== MEMORY ==="
-    for MFILE in "$IDENTITY_FILE" "$CORE_MEMORIES" "$REMEMBER_HANDOFF" "$REMEMBER_TODAY_FILE" "$REMEMBER_NOW" "$REMEMBER_RECENT" "$REMEMBER_ARCHIVE"; do
+    for MFILE in "$IDENTITY_FILE" "$CORE_MEMORIES" "$REMEMBER_TODAY_FILE" "$REMEMBER_NOW" "$REMEMBER_RECENT" "$REMEMBER_ARCHIVE"; do
         if [ -f "$MFILE" ] && [ -s "$MFILE" ]; then
             BASENAME=$(basename "$MFILE")
             echo "--- $BASENAME ---"
@@ -127,10 +138,6 @@ if [ -n "$HAS_MEMORY" ]; then
         fi
     done
     echo ""
-    # Consume handoff — one-shot briefing, read once then cleared
-    if [ -f "$REMEMBER_HANDOFF" ] && [ -s "$REMEMBER_HANDOFF" ]; then
-        : > "$REMEMBER_HANDOFF"
-    fi
 fi
 
 # ── Consolidation trigger ─────────────────────────────────────────────────
