@@ -9,6 +9,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from pipeline import prompts
+from pipeline import shell
 
 
 def _make_template(tmpdir: str, name: str, content: str) -> None:
@@ -119,3 +120,58 @@ def test_build_consolidation_prompt_empty_staging(monkeypatch):
         assert "Staging:\n" in result
         assert "# Recent" in result
         assert "# Archive" in result
+
+
+def _run_build_prompt(monkeypatch, extract, max_extract_bytes):
+    """Drive shell.cmd_build_prompt with a stub template and return the prompt."""
+    with tempfile.TemporaryDirectory() as d:
+        _make_template(d, "save-session.prompt.txt", "{{EXTRACT}}")
+        monkeypatch.setattr(prompts, "PROMPTS_DIR", d)
+
+        extract_file = os.path.join(d, "extract.txt")
+        last_entry_file = os.path.join(d, "last.txt")
+        output_file = os.path.join(d, "prompt.txt")
+        with open(extract_file, "w", encoding="utf-8") as f:
+            f.write(extract)
+        with open(last_entry_file, "w", encoding="utf-8") as f:
+            f.write("(no previous entry)")
+
+        shell.cmd_build_prompt(
+            extract_file=extract_file,
+            last_entry_file=last_entry_file,
+            time="10:30",
+            branch="master",
+            output_file=output_file,
+            max_extract_bytes=max_extract_bytes,
+        )
+        with open(output_file, encoding="utf-8") as f:
+            return f.read()
+
+
+def test_build_prompt_caps_oversized_extract(monkeypatch):
+    """An extract larger than the cap is truncated to its tail with a NOTE."""
+    extract = "HEAD_MARKER\n" + ("x" * 5000) + "\nTAIL_MARKER"
+    result = _run_build_prompt(monkeypatch, extract, max_extract_bytes=200)
+
+    assert "TAIL_MARKER" in result          # most-recent work survives
+    assert "HEAD_MARKER" not in result       # oldest content dropped
+    assert "truncated to the last 200" in result
+    # Body (note + kept tail) stays within cap + a small note allowance.
+    assert len(result.encode("utf-8")) < 200 + 200
+
+
+def test_build_prompt_keeps_small_extract_intact(monkeypatch):
+    """An extract under the cap is passed through unchanged (no NOTE)."""
+    extract = "[HUMAN] hi\n[AGENT] hello"
+    result = _run_build_prompt(monkeypatch, extract, max_extract_bytes=300000)
+
+    assert result == extract
+    assert "truncated" not in result
+
+
+def test_build_prompt_cap_disabled_with_zero(monkeypatch):
+    """max_extract_bytes=0 disables the cap entirely (back-compat default)."""
+    extract = "A" * 10000
+    result = _run_build_prompt(monkeypatch, extract, max_extract_bytes=0)
+
+    assert result == extract

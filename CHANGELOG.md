@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.2] — Oversized-extract guard keeps long sessions saving
+
+### Fixed
+
+- **A very long session could silently halt all memory saves** ([#96](https://github.com/Digital-Process-Tools/claude-remember/issues/96)) — a single long-lived session can grow an extract larger than Haiku's context window. `build-prompt` embedded the full extract with no size cap, so the Haiku call failed, the save aborted, and daily rotation stopped. Worse, it was self-reinforcing: a failed save never advanced the saved position, so the same session re-extracted the full transcript and failed identically on every subsequent save. The extract is now capped at `thresholds.extract_max_bytes` (default 300 KB), keeping the most-recent tail with a truncation note so the summary still reflects current work. Set to `0` to disable. Thanks to [@selvi5006-commits](https://github.com/selvi5006-commits) for the precise diagnosis and a tested patch.
+
 ## [0.8.1] — Handoff survives context-preview truncation
 
 ### Fixed

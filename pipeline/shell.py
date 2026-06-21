@@ -100,6 +100,7 @@ def cmd_build_prompt(
     time: str,
     branch: str,
     output_file: str,
+    max_extract_bytes: int = 0,
 ) -> None:
     """Build the save-summary prompt and write it to an output file.
 
@@ -112,11 +113,27 @@ def cmd_build_prompt(
         time: Current timestamp string (e.g., "14:32").
         branch: Current git branch name.
         output_file: Path where the assembled prompt will be written.
+        max_extract_bytes: Upper bound on the extract's UTF-8 byte size. A
+            long-lived session can accumulate an extract larger than Haiku's
+            context window, making the prompt unsendable and silently halting
+            daily rotation (#96). When the extract exceeds this size, keep only
+            the most-recent tail (the work worth summarizing) and prepend a
+            truncation note. ``0`` disables the cap.
     """
     with open(extract_file, encoding="utf-8", errors="replace") as f:
         extract = f.read().strip()
     with open(last_entry_file, encoding="utf-8", errors="replace") as f:
         last_entry = f.read().strip()
+
+    if max_extract_bytes > 0:
+        raw = extract.encode("utf-8")
+        if len(raw) > max_extract_bytes:
+            kept = raw[-max_extract_bytes:].decode("utf-8", errors="replace")
+            extract = (
+                f"[NOTE: transcript truncated to the last {max_extract_bytes} "
+                f"of {len(raw)} bytes — summarize the most recent work below]"
+                f"\n\n{kept}"
+            )
 
     prompt = build_save_prompt(
         time=time,
@@ -349,6 +366,7 @@ def main() -> None:
             time=sys.argv[4],
             branch=sys.argv[5],
             output_file=sys.argv[6],
+            max_extract_bytes=int(sys.argv[7]) if len(sys.argv) > 7 else 0,
         )
     elif cmd == "build-ndc-prompt":
         cmd_build_ndc_prompt(memory_file=sys.argv[2], output_file=sys.argv[3])
