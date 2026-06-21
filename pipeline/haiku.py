@@ -97,9 +97,13 @@ def call_haiku(
         RuntimeError: If the subprocess times out or exits with a non-zero
             return code, or if the JSON response cannot be parsed.
     """
+    # Prompt goes on STDIN, not argv: a session extract can exceed Linux's
+    # MAX_ARG_STRLEN (128KB per single argument), which raises E2BIG ("Argument
+    # list too long") at exec time and silently kills saves of long sessions.
+    # `claude -p` with no positional prompt reads the prompt from stdin.
     cmd = [
         "claude",
-        "-p", prompt,
+        "-p",
         "--output-format", "json",
         "--no-session-persistence",
         "--exclude-dynamic-system-prompt-sections",
@@ -116,6 +120,7 @@ def call_haiku(
     try:
         result = subprocess.run(
             cmd,
+            input=prompt,
             capture_output=True,
             text=True,
             # claude emits UTF-8; without this, text=True decodes with the

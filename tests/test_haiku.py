@@ -141,6 +141,26 @@ def test_call_haiku_success(mock_run):
 
 
 @patch("pipeline.haiku.subprocess.run")
+def test_call_haiku_sends_prompt_on_stdin_not_argv(mock_run):
+    """The prompt is delivered on STDIN, never as an argv string.
+
+    A session extract can exceed Linux's MAX_ARG_STRLEN (131072 bytes / 128KB
+    per single argument); the old ``claude -p <prompt>`` form fails at exec()
+    with OSError E2BIG ("Argument list too long"), silently losing the save.
+    Guard both halves so the regression can't silently return: the prompt must
+    arrive via ``input=`` and must NOT appear in the command argv (``-p`` is a
+    bare flag, immediately followed by the next option)."""
+    mock_run.return_value = MagicMock(
+        returncode=0, stdout=_mock_claude_response("ok"), stderr="")
+    call_haiku("the full prompt text")
+    args = mock_run.call_args
+    cmd = args[0][0]
+    assert args[1]["input"] == "the full prompt text"
+    assert "the full prompt text" not in cmd
+    assert cmd[cmd.index("-p") + 1] == "--output-format"
+
+
+@patch("pipeline.haiku.subprocess.run")
 def test_call_haiku_strips_parent_session_env(mock_run, monkeypatch):
     """The nested claude -p must not inherit the PARENT Claude Code session
     vars — else it looks like a resumable session to anything keying off them
