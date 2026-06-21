@@ -6,7 +6,7 @@
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue)](https://www.python.org/)
 [![OS](https://img.shields.io/badge/tested%20on-Linux%20%7C%20macOS%20%7C%20Windows-blue)](https://github.com/Digital-Process-Tools/claude-remember/actions/workflows/tests.yml)
 [![License](https://img.shields.io/badge/license-Community-brightgreen)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.8.1-orange)](.claude-plugin/plugin.json)
+[![Version](https://img.shields.io/badge/version-0.8.2-orange)](.claude-plugin/plugin.json)
 
 Claude Code starts every session blank. It doesn't know what you worked on yesterday, what conventions your team follows, or what mistakes it already made. You re-explain everything, every time.
 
@@ -35,7 +35,7 @@ To update later:
 
 Claude Remember is also available in the official Anthropic Marketplace. In Claude Code, type `/plugin` and search for "remember".
 
-**Known issue — stuck on v0.5.0:** The Anthropic marketplace is still serving v0.5.0, which has known bugs ([#54](https://github.com/Digital-Process-Tools/claude-remember/issues/54) hook stderr redirect fails on first session, [#14](https://github.com/Digital-Process-Tools/claude-remember/issues/14) NDC subshell killed by `set -e`). Anthropic takes a long time to roll updates to the official marketplace. All of these are fixed in v0.8.1 — install from the DPT marketplace above to get the current version.
+**Known issue — stuck on v0.5.0:** The Anthropic marketplace is still serving v0.5.0, which has known bugs ([#54](https://github.com/Digital-Process-Tools/claude-remember/issues/54) hook stderr redirect fails on first session, [#14](https://github.com/Digital-Process-Tools/claude-remember/issues/14) NDC subshell killed by `set -e`). Anthropic takes a long time to roll updates to the official marketplace. All of these are fixed in v0.8.2 — install from the DPT marketplace above to get the current version.
 
 **Known issue — `plugin update`:** The official marketplace's `plugin update` command may report "already at latest version" even when it's not — it checks a stale local cache without pulling first ([#37252](https://github.com/anthropics/claude-code/issues/37252), [#38271](https://github.com/anthropics/claude-code/issues/38271)). Another reason to use our marketplace instead.
 
@@ -214,6 +214,7 @@ Put cross-project preferences (timezone, cooldowns) in `~/.remember/config.json`
 | `cooldowns.git_backup_seconds`   | `900`            | Minimum seconds between auto-backup commits (no-op if `~/.remember/` is not a git repo)                                                                                                                                                |
 | `thresholds.min_human_messages`  | `3`              | Minimum messages before saving                                                                                                                                                                                                         |
 | `thresholds.delta_lines_trigger` | `50`             | Tool call output lines that trigger auto-save                                                                                                                                                                                          |
+| `thresholds.extract_max_bytes`   | `300000`         | Max UTF-8 size of the session extract sent to Haiku. Larger extracts are truncated to their most-recent tail so a very long session can't overflow the model's context window and silently stall saves. `0` disables the cap.          |
 | `features.ndc_compression`       | `true`           | Enable hourly compression of daily files                                                                                                                                                                                               |
 | `features.recovery`              | `true`           | Recover missed saves on session start                                                                                                                                                                                                  |
 | `timezone`                       | _(system local)_ | IANA name (e.g. `America/New_York`, `Europe/Paris`) for timestamps and daily file boundaries. Omit or leave empty to use the system clock's local zone. Set this explicitly on a VPS whose system clock is UTC.                        |

@@ -630,6 +630,22 @@ def test_main_dispatches_build_prompt():
         time="15m",
         branch="main",
         output_file="out",
+        max_extract_bytes=0,
+    )
+
+
+def test_main_dispatches_build_prompt_with_max_extract_bytes():
+    with patch("pipeline.shell.cmd_build_prompt") as mock_fn:
+        with patch("sys.argv",
+                   ["shell.py", "build-prompt", "ef", "lef", "15m", "main", "out", "300000"]):
+            main()
+    mock_fn.assert_called_once_with(
+        extract_file="ef",
+        last_entry_file="lef",
+        time="15m",
+        branch="main",
+        output_file="out",
+        max_extract_bytes=300000,
     )
 
 

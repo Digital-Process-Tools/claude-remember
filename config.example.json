@@ -7,7 +7,8 @@
   },
   "thresholds": {
     "min_human_messages": 3,
-    "delta_lines_trigger": 50
+    "delta_lines_trigger": 50,
+    "extract_max_bytes": 300000
   },
   "features": {
     "ndc_compression": true,
