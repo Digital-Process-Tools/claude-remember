@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import tempfile
 
@@ -52,6 +53,22 @@ def _resolve_max_turns() -> str:
     if raw.isdigit() and 1 <= int(raw) <= MAX_ALLOWED_TURNS:
         return str(int(raw))
     return DEFAULT_MAX_TURNS
+
+
+DEFAULT_MODEL = "haiku"
+
+
+def _resolve_model() -> str:
+    """REMEMBER_MODEL env override, else the safe default ("haiku").
+
+    Memory consolidation is high-stakes (it writes the auto-injected memory
+    layer) but low-complexity (extract + compress). A more capable model
+    (e.g. "sonnet") improves salience and compression-cap compliance with no
+    interactive-latency cost, since this runs backgrounded. Kept as an env knob,
+    consistent with REMEMBER_MAX_TURNS / REMEMBER_TZ / REMEMBER_BRANCH.
+    """
+    raw = os.environ.get("REMEMBER_MODEL", "").strip()
+    return raw if raw else DEFAULT_MODEL
 
 
 def _child_env() -> dict[str, str]:
@@ -107,7 +124,7 @@ def call_haiku(
         "--output-format", "json",
         "--no-session-persistence",
         "--exclude-dynamic-system-prompt-sections",
-        "--model", "haiku",
+        "--model", _resolve_model(),
         "--max-turns", _resolve_max_turns(),
         "--allowedTools", ",".join(tools) if tools else "",
         # Sandbox MCP: no servers + strict, so the nested session inherits none (#94)
@@ -139,6 +156,24 @@ def call_haiku(
         raise RuntimeError(f"claude exited {result.returncode}: {stderr}")
 
     return _parse_response(result.stdout)
+
+
+# Reject-gate: a real memory entry starts with "##" (a header) or is exactly
+# SKIP. Conversational refusals / clarifications must NEVER reach the memory
+# layer (the audit found a model refusal stored verbatim as a memory). Anchored
+# at the START so dense legitimate summaries are never dropped.
+_NON_SUMMARY = re.compile(
+    r"^\s*(i (cannot|can't|can not|won't|will not|am unable|'m unable|"
+    r"don't have|do not have|need (you|the))|could you|do you want|"
+    r"please (provide|paste|share)|there (is|are) no|i'm sorry|sorry[,!]|"
+    r"unfortunately|i notice|it (seems|looks like|appears))",
+    re.I,
+)
+
+
+def _is_non_summary(text: str) -> bool:
+    """True if the output looks like a refusal/clarification, not a summary."""
+    return bool(_NON_SUMMARY.match(text or ""))
 
 
 def _parse_response(raw: str) -> HaikuResult:
@@ -185,7 +220,9 @@ def _parse_response(raw: str) -> HaikuResult:
         text = data.get("result") or ""
         tokens = _extract_tokens(data)
 
-    is_skip = text.strip().upper().startswith("SKIP")
+    # Drop SKIP (model found nothing worth saving) AND refusals/clarifications
+    # (the reject-gate) so neither is ever written to the memory layer.
+    is_skip = text.strip().upper().startswith("SKIP") or _is_non_summary(text)
 
     return HaikuResult(text=text, tokens=tokens, is_skip=is_skip)
 
