@@ -16,8 +16,23 @@
   },
   "debug": false,
   "time_format": "24h",
+  "model": "haiku",
+  "reject_pattern": "",
 
   "_comments": {
+    "model": [
+      "Model for the summarize/consolidate calls (claude -p). Default 'haiku'.",
+      "Set 'sonnet' (or another tier) to improve salience + compression-cap",
+      "compliance; the call is backgrounded so there is no interactive cost.",
+      "An explicit REMEMBER_MODEL env var overrides this."
+    ],
+    "reject_pattern": [
+      "Reject-gate regex keeping model refusals/clarifications out of memory.",
+      "'' -> the narrow built-in default (anchored refusal stems only).",
+      "'none' -> gate disabled (only the literal SKIP contract applies).",
+      "anything else -> a custom case-insensitive regex; invalid falls back to",
+      "the default. An explicit REMEMBER_REJECT_PATTERN env var overrides this."
+    ],
     "data_dir": [
       "Controls where memory data files are stored.",
       "",

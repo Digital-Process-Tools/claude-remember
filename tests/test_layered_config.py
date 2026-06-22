@@ -176,3 +176,71 @@ class TestLayeredConfigMerge:
 
         result = _run_lib(str(project), str(pipeline), str(home))
         assert result.get("MERGED_SAVE_SECONDS") == "55"
+
+
+def _run_log_env(project_dir: str, pipeline_dir: str, home_dir: str, env_extra: "dict | None" = None) -> dict:
+    """Source log.sh (via detect-tools + lib-memory-dir) and return the model
+    knobs it exports. REMEMBER_MODEL / REMEMBER_REJECT_PATTERN are stripped from
+    the base env so the config-vs-default resolution is deterministic; pass
+    env_extra to simulate an explicit shell override."""
+    script = f"""
+    set -e
+    export PROJECT_DIR={project_dir}
+    export PIPELINE_DIR={pipeline_dir}
+    export HOME={home_dir}
+    source {DETECT_SCRIPT}
+    source {LIB_SCRIPT}
+    source {REPO_ROOT / "scripts" / "log.sh"}
+    echo "REMEMBER_MODEL=$REMEMBER_MODEL"
+    echo "REMEMBER_REJECT_PATTERN=$REMEMBER_REJECT_PATTERN"
+    """
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("REMEMBER_MODEL", "REMEMBER_REJECT_PATTERN")}
+    env.update(env_extra or {})
+    result = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
+    assert result.returncode == 0, f"log.sh failed:\n{result.stderr}"
+    parsed: dict = {}
+    for line in result.stdout.strip().splitlines():
+        if "=" in line:
+            k, v = line.split("=", 1)
+            parsed[k] = v
+    return parsed
+
+
+class TestModelConfigBridge:
+    """log.sh bridges config.json model/reject_pattern keys to the env vars
+    pipeline/haiku.py reads, with explicit shell env taking precedence."""
+
+    def _dirs(self, tmp_path):
+        project = tmp_path / "proj"
+        project.mkdir()
+        pipeline = tmp_path / "plugin"
+        pipeline.mkdir()
+        home = tmp_path / "home"
+        home.mkdir()
+        return project, pipeline, home
+
+    def test_model_defaults_to_haiku(self, tmp_path):
+        project, pipeline, home = self._dirs(tmp_path)
+        (pipeline / "config.json").write_text(json.dumps({}))
+        result = _run_log_env(str(project), str(pipeline), str(home))
+        assert result.get("REMEMBER_MODEL") == "haiku"
+        assert result.get("REMEMBER_REJECT_PATTERN") == ""
+
+    def test_model_from_config(self, tmp_path):
+        project, pipeline, home = self._dirs(tmp_path)
+        (pipeline / "config.json").write_text(
+            json.dumps({"model": "sonnet", "reject_pattern": "none"})
+        )
+        result = _run_log_env(str(project), str(pipeline), str(home))
+        assert result.get("REMEMBER_MODEL") == "sonnet"
+        assert result.get("REMEMBER_REJECT_PATTERN") == "none"
+
+    def test_env_overrides_config(self, tmp_path):
+        project, pipeline, home = self._dirs(tmp_path)
+        (pipeline / "config.json").write_text(json.dumps({"model": "sonnet"}))
+        result = _run_log_env(
+            str(project), str(pipeline), str(home),
+            env_extra={"REMEMBER_MODEL": "opus"},
+        )
+        assert result.get("REMEMBER_MODEL") == "opus"
