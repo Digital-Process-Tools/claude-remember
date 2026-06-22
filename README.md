@@ -91,7 +91,7 @@ On session start, the `SessionStart` hook automatically injects into Claude's co
 - `recent.md` — last 7 days
 - `archive.md` — older history
 
-No manual prompting, no "read this file" instructions. The agent begins every session with its memory already loaded. It just remembers.
+The agent begins every session with its memory already loaded. It just remembers.
 
 ## Cost
 
@@ -233,7 +233,7 @@ A few runtime overrides aren't in `config.json` because they're per-shell rather
 
 ## External storage mode
 
-By default, memory data lives in `.remember/` inside each project directory. This works but has a drawback: it pollutes `git status` and siloes memory per repo clone.
+By default, memory data lives in `.remember/` inside each project directory. The drawback: it pollutes `git status` and siloes memory per repo clone.
 
 **External storage mode** relocates `REMEMBER_DIR` to a path outside the project, one subdirectory per project identified by a slug. The `{slug}` placeholder expands to the same value Claude Code uses for `~/.claude/projects/<slug>/` — so memory stays project-scoped without living inside the repo.
 
