@@ -72,6 +72,15 @@ config() {
 REMEMBER_TZ=$(config ".timezone" "")
 export REMEMBER_TZ
 
+# Model + reject-gate knobs. config.json is the source of truth; an explicit
+# shell env var still wins (override) via ${VAR:=...}, then config, then the
+# built-in default. Exported here (log.sh is sourced by every script) so both
+# the summarize and consolidate model calls in pipeline/haiku.py see them.
+: "${REMEMBER_MODEL:=$(config ".model" "haiku")}"
+export REMEMBER_MODEL
+: "${REMEMBER_REJECT_PATTERN:=$(config ".reject_pattern" "")}"
+export REMEMBER_REJECT_PATTERN
+
 # Resolve "today" / "now" using REMEMBER_TZ when set, else system local.
 # Crucially, an empty REMEMBER_TZ must NOT produce `TZ="" date` — that's UTC.
 _remember_date() {
