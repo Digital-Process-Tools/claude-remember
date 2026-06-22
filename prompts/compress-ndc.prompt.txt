@@ -9,7 +9,7 @@ Apply maximum non-destructive compression. Rules:
 - Preserve ## timestamp | branch format
 - Maintain chronological order — entries must appear oldest to newest
 - Every verb, every object, every causal link must survive
-No preamble. Just the compressed output.
+No preamble, no trailer, no meta-commentary. Never describe, explain, or list your own compression decisions (no "Compression applied" section, no before→after notes, no summary of what you shortened). Output ONLY the compressed entries — nothing about how you produced them.
 
 Text:
 {{NOW_CONTENT}}

@@ -36,17 +36,15 @@ Remove the rotated entries from recent.md.
 
 ### Step 3: Identity candidates
 
-If you notice a moment that seems identity-defining, add it at the END of the recent.md section as:
-```
-## Identity Candidates
-- IDENTITY CANDIDATE: [one-line description]
-```
+If you notice a moment that seems identity-defining, add it at the END of the recent.md section as a block of this form (no code fences):
+
+    ## Identity Candidates
+    - IDENTITY CANDIDATE: [one-line description]
 
 ## Output format
 
-Return EXACTLY this structure — no other text, no explanations:
+Return EXACTLY this structure as raw text — nothing before ===RECENT===, nothing after the archive section, no code fences, no explanations:
 
-```
 ===RECENT===
 # Recent
 
@@ -56,12 +54,11 @@ Return EXACTLY this structure — no other text, no explanations:
 # Archive
 
 [archive.md content here]
-```
 
 ## Rules
 
 - NEVER add content that wasn't in the source — you compress, you don't create
 - Keep recent section under 600 tokens total
 - Keep archive section under 400 tokens total
-- Preserve the `# Recent` and `# Archive` headers
+- Output EXACTLY ONE `# Recent` header and ONE `# Archive` header — do not repeat them inside the body
 - Apply non-destructive compression: shortest form preserving meaning. Common: conf, MR, perm, infra, docs, impl, dev, env, app, repo, auth, i18n, EM, entity, refactor.

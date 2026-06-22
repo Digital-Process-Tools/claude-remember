@@ -32,6 +32,24 @@ from .types import ConsolidationResult, TokenUsage
 _ENTRY_HEADER = re.compile(r"(?m)^## (\d{2}:\d{2}|Week of |\d{4}-\d{2}-\d{2})")
 
 
+def _strip_code_fences(text: str) -> str:
+    """Strip leading/trailing Markdown code-fence lines from a parsed section.
+
+    Haiku sometimes wraps its whole response in a ``` ... ``` block. Left in,
+    a leading fence pushes the real ``# Recent``/``# Archive`` header off the
+    first line, defeating the ``startswith`` check in
+    :func:`parse_consolidation_response` — so a second header gets prepended,
+    producing an orphan-fence + duplicate-heading artifact in the saved file.
+    Removing fence-only lines from both ends makes the header check robust.
+    """
+    lines = text.splitlines()
+    while lines and lines[0].strip().startswith("```"):
+        lines.pop(0)
+    while lines and lines[-1].strip().startswith("```"):
+        lines.pop()
+    return "\n".join(lines).strip()
+
+
 class ConsolidationSkipped(Exception):
     """Raised when Haiku declined (SKIP) or returned non-conforming output.
 
@@ -147,6 +165,10 @@ def parse_consolidation_response(text: str) -> tuple[str, str]:
     else:
         # Fallback: treat entire response as recent
         recent = text.strip()
+
+    # Strip stray code fences before the header check (see _strip_code_fences).
+    recent = _strip_code_fences(recent)
+    archive = _strip_code_fences(archive)
 
     # Ensure headers are present
     if recent and not recent.startswith("# Recent"):

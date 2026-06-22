@@ -12,6 +12,7 @@ from pipeline.consolidate import (
     parse_consolidation_response,
     consolidate,
     _is_valid_consolidation,
+    _strip_code_fences,
     ConsolidationSkipped,
 )
 from pipeline.types import HaikuResult, TokenUsage, ConsolidationResult
@@ -225,3 +226,36 @@ def test_consolidate_accepts_valid_envelope():
         )
     assert "2026-06-01" in result.recent
     assert "Old" in result.archive
+
+
+def test_parse_strips_wrapping_code_fences():
+    """Regression: Haiku sometimes wraps the whole envelope in a ``` fence.
+
+    Without fence-stripping, the recent section starts with ``` instead of
+    "# Recent", the startswith check fails, and a SECOND "# Recent" header is
+    prepended — producing a duplicate heading + orphan fence in recent.md.
+    """
+    text = (
+        "```\n"
+        "===RECENT===\n"
+        "# Recent\n\n"
+        "## 2026-03-12\nDid stuff.\n\n"
+        "===ARCHIVE===\n"
+        "# Archive\n\n"
+        "## Week of 2026-03-09\nOld stuff.\n"
+        "```"
+    )
+    recent, archive = parse_consolidation_response(text)
+    assert recent.count("# Recent") == 1
+    assert archive.count("# Archive") == 1
+    assert "```" not in recent
+    assert "```" not in archive
+    assert recent.startswith("# Recent")
+    assert archive.startswith("# Archive")
+
+
+def test_strip_code_fences_helper():
+    assert _strip_code_fences("```\n# Recent\n## 2026-03-12\nx\n```") == "# Recent\n## 2026-03-12\nx"
+    assert _strip_code_fences("```markdown\n# Recent\nx") == "# Recent\nx"
+    assert _strip_code_fences("# Recent\nno fences") == "# Recent\nno fences"
+    assert _strip_code_fences("") == ""
