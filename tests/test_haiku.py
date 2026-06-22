@@ -113,7 +113,8 @@ def test_parse_response_headerless_summary():
 
 
 @patch("pipeline.haiku.subprocess.run")
-def test_call_haiku_success(mock_run):
+def test_call_haiku_success(mock_run, monkeypatch):
+    monkeypatch.delenv("REMEMBER_MODEL", raising=False)  # assert the default model
     mock_run.return_value = MagicMock(
         returncode=0,
         stdout=_mock_claude_response("hello from haiku"),
@@ -311,3 +312,61 @@ def test_extract_tokens_nested_wins_over_flat():
     assert t.input == 42
     assert t.output == 7
     assert t.cache == 3
+
+
+# --- REMEMBER_MODEL env knob (mirrors REMEMBER_MAX_TURNS) --------------------
+from pipeline.haiku import _resolve_model
+
+
+def test_resolve_model_default(monkeypatch):
+    monkeypatch.delenv("REMEMBER_MODEL", raising=False)
+    assert _resolve_model() == "haiku"
+
+
+def test_resolve_model_env_override(monkeypatch):
+    monkeypatch.setenv("REMEMBER_MODEL", "sonnet")
+    assert _resolve_model() == "sonnet"
+
+
+def test_resolve_model_blank_falls_back(monkeypatch):
+    monkeypatch.setenv("REMEMBER_MODEL", "   ")
+    assert _resolve_model() == "haiku"
+
+
+@patch("pipeline.haiku.subprocess.run")
+def test_call_haiku_uses_resolved_model(mock_run, monkeypatch):
+    monkeypatch.setenv("REMEMBER_MODEL", "sonnet")
+    mock_run.return_value = MagicMock(returncode=0, stdout=_mock_claude_response("x"), stderr="")
+    call_haiku("p")
+    cmd = mock_run.call_args[0][0]
+    assert cmd[cmd.index("--model") + 1] == "sonnet"
+
+
+# --- reject-gate: refusals/clarifications never reach memory -----------------
+@pytest.mark.parametrize("refusal", [
+    "I cannot and will not invent timestamps or fabricate session details. Do you want to:",
+    "I can't summarize without the actual session text.",
+    "Could you paste the session text you want summarized?",
+    "Please provide the conversation to summarize.",
+    "I'm sorry, there is no content to summarize.",
+])
+def test_parse_response_rejects_refusal(refusal):
+    """A model refusal/clarification must be treated as skip so it is never
+    written to the memory layer (it was, historically: a refusal stored
+    verbatim as a memory entry)."""
+    result = _parse_response(_mock_claude_response(refusal))
+    assert result.is_skip is True
+
+
+@pytest.mark.parametrize("good", [
+    "## 10:30 | main\nFixed auth bug; deployed staging.",
+    "Fixed authentication bug in login flow and deployed to staging",
+    "[HUMAN] hello\n[ASSISTANT] hi there",
+    "===RECENT===\n# Recent\n## 2026-06-22 did things",
+])
+def test_parse_response_keeps_real_summaries(good):
+    """The reject-gate is anchored at the start and must not drop legitimate
+    summaries, including the headerless / raw-echo cases _parse_response is
+    deliberately permissive about (format validation stays the shell's job)."""
+    result = _parse_response(_mock_claude_response(good))
+    assert result.is_skip is False
