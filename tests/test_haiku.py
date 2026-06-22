@@ -370,3 +370,63 @@ def test_parse_response_keeps_real_summaries(good):
     deliberately permissive about (format validation stays the shell's job)."""
     result = _parse_response(_mock_claude_response(good))
     assert result.is_skip is False
+
+
+# --- reject-gate: narrow default must NOT eat legit hedged summaries ----------
+@pytest.mark.parametrize("good", [
+    "There are no blockers; merged !24648 and the pipeline is green.",
+    "Unfortunately the build broke on flaky DNS; retried and it is green now.",
+    "It seems the cache was stale — cleared it and the page renders.",
+    "I notice the staging DB drifted from prod; resynced via the script.",
+    "Sorry state machine had a missing transition; added PENDING->DONE.",
+])
+def test_parse_response_keeps_hedged_summaries(good):
+    """Regression guard for the over-broad pattern: legitimate summaries that
+    happen to open with a hedge word ("Unfortunately", "There are no",
+    "It seems", "I notice", "Sorry ...") must be preserved, not silently
+    dropped from the memory layer."""
+    result = _parse_response(_mock_claude_response(good))
+    assert result.is_skip is False
+
+
+# --- REMEMBER_REJECT_PATTERN env knob (mirrors REMEMBER_MODEL) ----------------
+from pipeline.haiku import _resolve_reject_pattern, DEFAULT_REJECT_PATTERN
+
+
+def test_resolve_reject_pattern_default(monkeypatch):
+    monkeypatch.delenv("REMEMBER_REJECT_PATTERN", raising=False)
+    assert _resolve_reject_pattern().pattern == DEFAULT_REJECT_PATTERN
+
+
+def test_resolve_reject_pattern_blank_falls_back(monkeypatch):
+    monkeypatch.setenv("REMEMBER_REJECT_PATTERN", "   ")
+    assert _resolve_reject_pattern().pattern == DEFAULT_REJECT_PATTERN
+
+
+def test_resolve_reject_pattern_none_disables(monkeypatch):
+    monkeypatch.setenv("REMEMBER_REJECT_PATTERN", "none")
+    assert _resolve_reject_pattern() is None
+
+
+def test_resolve_reject_pattern_custom(monkeypatch):
+    monkeypatch.setenv("REMEMBER_REJECT_PATTERN", r"^banana")
+    assert _resolve_reject_pattern().pattern == r"^banana"
+
+
+def test_resolve_reject_pattern_invalid_falls_back(monkeypatch):
+    monkeypatch.setenv("REMEMBER_REJECT_PATTERN", r"(unclosed")
+    assert _resolve_reject_pattern().pattern == DEFAULT_REJECT_PATTERN
+
+
+def test_reject_gate_disabled_keeps_refusal(monkeypatch):
+    """With the gate disabled, only the literal SKIP contract applies — a
+    refusal is no longer rejected by the pattern."""
+    monkeypatch.setenv("REMEMBER_REJECT_PATTERN", "none")
+    result = _parse_response(_mock_claude_response("I cannot do that."))
+    assert result.is_skip is False
+
+
+def test_reject_gate_custom_pattern_applies(monkeypatch):
+    monkeypatch.setenv("REMEMBER_REJECT_PATTERN", r"^banana")
+    assert _parse_response(_mock_claude_response("banana split")).is_skip is True
+    assert _parse_response(_mock_claude_response("I cannot do that.")).is_skip is False

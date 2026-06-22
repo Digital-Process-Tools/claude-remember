@@ -158,22 +158,44 @@ def call_haiku(
     return _parse_response(result.stdout)
 
 
-# Reject-gate: a real memory entry starts with "##" (a header) or is exactly
-# SKIP. Conversational refusals / clarifications must NEVER reach the memory
-# layer (the audit found a model refusal stored verbatim as a memory). Anchored
-# at the START so dense legitimate summaries are never dropped.
-_NON_SUMMARY = re.compile(
-    r"^\s*(i (cannot|can't|can not|won't|will not|am unable|'m unable|"
-    r"don't have|do not have|need (you|the))|could you|do you want|"
-    r"please (provide|paste|share)|there (is|are) no|i'm sorry|sorry[,!]|"
-    r"unfortunately|i notice|it (seems|looks like|appears))",
-    re.I,
+# Reject-gate: conversational refusals / clarifications must NEVER reach the
+# memory layer (the audit found a model refusal stored verbatim as a memory).
+# The DEFAULT pattern is deliberately NARROW — anchored at the start and limited
+# to unambiguous refusal/clarification stems — so dense legitimate summaries
+# (which may legitimately open "Unfortunately the build broke...", "There are no
+# blockers...", "I notice the cache was stale...") are never silently dropped.
+# Widen, override, or disable via REMEMBER_REJECT_PATTERN (see _resolve_reject_pattern).
+DEFAULT_REJECT_PATTERN = (
+    r"^\s*("
+    r"i (cannot|can't|can not|won't|will not|am unable|'m unable|am not able)|"
+    r"could you|please (provide|paste|share)|i'm sorry|i am sorry"
+    r")\b"
 )
+
+
+def _resolve_reject_pattern() -> "re.Pattern[str] | None":
+    """Compiled reject-gate pattern, or None when the gate is disabled.
+
+    REMEMBER_REJECT_PATTERN overrides the default, mirroring the REMEMBER_MODEL /
+    REMEMBER_MAX_TURNS env pattern: blank falls back to the narrow default, the
+    literal "none" disables the gate entirely, anything else is used as a custom
+    case-insensitive regex. An invalid custom regex falls back to the default
+    rather than crashing the backgrounded consolidation run.
+    """
+    raw = os.environ.get("REMEMBER_REJECT_PATTERN", "").strip()
+    if raw.lower() == "none":
+        return None
+    pattern = raw if raw else DEFAULT_REJECT_PATTERN
+    try:
+        return re.compile(pattern, re.I)
+    except re.error:
+        return re.compile(DEFAULT_REJECT_PATTERN, re.I)
 
 
 def _is_non_summary(text: str) -> bool:
     """True if the output looks like a refusal/clarification, not a summary."""
-    return bool(_NON_SUMMARY.match(text or ""))
+    pattern = _resolve_reject_pattern()
+    return bool(pattern.match(text or "")) if pattern else False
 
 
 def _parse_response(raw: str) -> HaikuResult:
