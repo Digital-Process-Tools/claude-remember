@@ -99,10 +99,14 @@ REMEMBER_NOW="$REMEMBER_DIR/now.md"
 REMEMBER_TODAY_FILE="$REMEMBER_DIR/today-${TODAY}.md"
 
 # ── Handoff path hint (consumed by the /remember skill) ───────────────────
-# Emitted unconditionally so the skill always knows the correct write target.
-echo "=== HANDOFF ==="
-echo "Write next handoff to: $REMEMBER_HANDOFF"
-echo ""
+# Emitted only in external mode. In legacy mode REMEMBER_HANDOFF resolves to
+# {project}/.remember/remember.md — the exact path the skill defaults to when
+# no === HANDOFF === block is present, so the hint would be pure noise.
+if [ "$REMEMBER_ROOT" != "$PROJECT_DIR" ]; then
+    echo "=== HANDOFF ==="
+    echo "Write next handoff to: $REMEMBER_HANDOFF"
+    echo ""
+fi
 
 # ── Last handoff (injected FIRST so it survives context-preview truncation) ─
 # The session-start output can be large; the harness may deliver only a leading

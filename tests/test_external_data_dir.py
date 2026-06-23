@@ -181,6 +181,42 @@ class TestHandoffEmission:
             f"handoff path does not reference external base.\noutput: {output}\nstderr: {result.stderr[:300]}"
         )
 
+    def test_session_start_suppresses_handoff_block_in_legacy_mode(self, tmp_path):
+        """In legacy mode the === HANDOFF === hint is noise — the /remember skill
+        falls back to {project}/.remember/remember.md, the exact path the hint
+        would carry. Suppress it. The === LAST HANDOFF === block (file-gated) is
+        unaffected and not asserted here.
+        """
+        project = tmp_path / "proj"
+        project.mkdir()
+        home = tmp_path / "home"
+        (home / ".remember").mkdir(parents=True)
+
+        # Legacy mode: relative data_dir resolves to {project}/.remember,
+        # so REMEMBER_ROOT == PROJECT_DIR.
+        (home / ".remember" / "config.json").write_text(
+            json.dumps({"data_dir": ".remember", "features": {"recovery": False}})
+        )
+
+        slug = _slug(str(project))
+        sessions_dir = home / ".claude" / "projects" / slug
+        sessions_dir.mkdir(parents=True)
+
+        env = {
+            **os.environ,
+            "CLAUDE_PROJECT_DIR": str(project),
+            "CLAUDE_PLUGIN_ROOT": str(REPO_ROOT),
+            "HOME": str(home),
+        }
+        result = subprocess.run(
+            ["bash", str(SESSION_START_SCRIPT)], env=env, capture_output=True, text=True
+        )
+        output = result.stdout
+
+        assert "=== HANDOFF ===" not in output, (
+            f"=== HANDOFF === hint should be suppressed in legacy mode.\noutput: {output}\nstderr: {result.stderr[:300]}"
+        )
+
 
 class TestIdentityFallback:
 
