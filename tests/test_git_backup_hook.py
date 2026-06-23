@@ -608,3 +608,80 @@ class TestGitBackupConfigurablePushTarget:
         assert log_files
         log_content = log_files[0].read_text()
         assert "remote 'backup'" in log_content
+
+
+def _configure_fake_gpg(remember: Path, tmp_path: Path) -> None:
+    """Point the repo at a stub gpg that emits a fake signature and enable commit.gpgsign.
+
+    Lets us assert signing behaviour deterministically in CI without a real GPG key:
+    git embeds whatever the stub prints (and trusts the SIG_CREATED status line).
+    """
+    fake = tmp_path / "fakegpg.sh"
+    fake.write_text(
+        "#!/bin/sh\n"
+        'echo "[GNUPG:] SIG_CREATED G" >&2\n'
+        "cat <<'SIG'\n"
+        "-----BEGIN PGP SIGNATURE-----\n"
+        "\n"
+        "fakefakefake\n"
+        "-----END PGP SIGNATURE-----\n"
+        "SIG\n"
+    )
+    fake.chmod(0o755)
+    _git(remember, ["config", "gpg.program", str(fake)])
+    _git(remember, ["config", "commit.gpgsign", "true"])
+    _git(remember, ["config", "user.signingkey", "FAKEKEY"])
+
+
+def _is_signed(repo: Path, ref: str = "HEAD") -> bool:
+    """True if the commit object carries a gpgsig header."""
+    r = subprocess.run(
+        ["git", "-C", str(repo), "cat-file", "-p", ref],
+        capture_output=True, text=True, check=True,
+    )
+    return "gpgsig" in r.stdout
+
+
+class TestGitBackupGpgSign:
+    """Tests for configurable commit signing via git_backup.gpg_sign (#62)."""
+
+    def test_default_commit_is_not_signed(self, tmp_path):
+        """Default (no git_backup.gpg_sign): --no-gpg-sign is passed, overriding repo commit.gpgsign."""
+        home, remember, remote = make_external_remember_repo(tmp_path)
+        _configure_fake_gpg(remember, tmp_path)
+        slug = "test-slug"
+        slug_dir = remember / slug
+        slug_dir.mkdir()
+        (slug_dir / "now.md").write_text("## 10:00 | test\nMemory.\n")
+
+        project = tmp_path / "project"
+        project.mkdir()
+        cfg = _make_config(tmp_path, cooldown=0)
+
+        result = _run_hook(slug_dir, project, home, config_path=cfg)
+        assert result.returncode == 0
+        wait_for_lock_release(remember / ".git-backup.lock")
+
+        assert len(_commit_log(remember)) == 2
+        assert not _is_signed(remember), "default commit must stay unsigned (--no-gpg-sign)"
+
+    def test_gpg_sign_true_honors_user_signing(self, tmp_path):
+        """git_backup.gpg_sign=true omits --no-gpg-sign, so the repo's commit.gpgsign is honored."""
+        home, remember, remote = make_external_remember_repo(tmp_path)
+        _configure_fake_gpg(remember, tmp_path)
+        slug = "test-slug"
+        slug_dir = remember / slug
+        slug_dir.mkdir()
+        (slug_dir / "now.md").write_text("## 10:00 | test\nMemory.\n")
+
+        project = tmp_path / "project"
+        project.mkdir()
+        cfg = tmp_path / "gpg-config.json"
+        cfg.write_text('{"cooldowns": {"git_backup_seconds": 0}, "git_backup": {"gpg_sign": true}}')
+
+        result = _run_hook(slug_dir, project, home, config_path=cfg)
+        assert result.returncode == 0
+        wait_for_lock_release(remember / ".git-backup.lock")
+
+        assert len(_commit_log(remember)) == 2
+        assert _is_signed(remember), "gpg_sign=true must let the repo sign the commit"
