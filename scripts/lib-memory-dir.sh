@@ -129,8 +129,9 @@ _cfg_sources=()
 [ -f "$_project_cfg"  ] && _cfg_sources+=("$_project_cfg")
 
 if [ "${#_cfg_sources[@]}" -gt 0 ] && command -v jq >/dev/null 2>&1; then
-    # Deep-merge: later files override earlier ones.
-    jq -s 'reduce .[] as $x ({}; . * $x)' "${_cfg_sources[@]}" > "$_merged_cfg" 2>/dev/null \
+    # Deep-merge: later files override earlier ones. Strip `_`-prefixed keys —
+    # convention: `_*` are user-facing docs (_comments/_purpose/_notes), never runtime data.
+    jq -s 'reduce .[] as $x ({}; . * $x) | with_entries(select(.key | startswith("_") | not))' "${_cfg_sources[@]}" > "$_merged_cfg" 2>/dev/null \
         || cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null
 else
     # No jq, or no config files — fall back to the bundled defaults.
