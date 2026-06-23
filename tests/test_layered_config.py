@@ -40,8 +40,10 @@ def _run_lib(project_dir: str, pipeline_dir: str, home_dir: str, env_extra: "dic
     if [ -f "$REMEMBER_CONFIG" ] && command -v jq >/dev/null 2>&1; then
         SAVE_SEC=$(jq -r '.cooldowns.save_seconds // "absent"' "$REMEMBER_CONFIG")
         DATA_DIR=$(jq -r '.data_dir // "absent"' "$REMEMBER_CONFIG")
+        UNDERSCORE_KEYS=$(jq -r '[keys[] | select(startswith("_"))] | length' "$REMEMBER_CONFIG")
         echo "MERGED_SAVE_SECONDS=$SAVE_SEC"
         echo "MERGED_DATA_DIR=$DATA_DIR"
+        echo "MERGED_UNDERSCORE_KEYS=$UNDERSCORE_KEYS"
     fi
     """
     env = {**os.environ, **(env_extra or {})}
@@ -161,6 +163,26 @@ class TestLayeredConfigMerge:
 
         result = _run_lib(str(project), str(pipeline), str(home))
         assert result.get("MERGED_SAVE_SECONDS") == "999"
+
+    def test_underscore_keys_stripped(self, tmp_path):
+        """`_`-prefixed doc keys (e.g. _comments, _purpose) never reach the merged config."""
+        project = tmp_path / "proj"
+        project.mkdir()
+        pipeline = tmp_path / "plugin"
+        pipeline.mkdir()
+        home = tmp_path / "home"
+        (home / ".remember").mkdir(parents=True)
+
+        (pipeline / "config.json").write_text(
+            json.dumps({"_comments": {"a": "doc"}, "cooldowns": {"save_seconds": 99}})
+        )
+        (home / ".remember" / "config.json").write_text(
+            json.dumps({"_purpose": "doc", "_notes": ["x"], "cooldowns": {"save_seconds": 200}})
+        )
+
+        result = _run_lib(str(project), str(pipeline), str(home))
+        assert result.get("MERGED_UNDERSCORE_KEYS") == "0"
+        assert result.get("MERGED_SAVE_SECONDS") == "200"
 
     def test_missing_user_global_skipped(self, tmp_path):
         """Missing user-global file does not cause an error; bundled values are used."""
