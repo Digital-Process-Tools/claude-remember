@@ -95,6 +95,15 @@ fi
     GIT_BACKUP_BRANCH=$(config ".git_backup.branch" "")
     REMOTE_NAME="${GIT_BACKUP_REMOTE:-origin}"
 
+    # ── Configurable commit signing (#62) ─────────────────────────────────────
+    # We pass --no-gpg-sign by default so background commits never hang on a
+    # passphrase prompt. Users with non-interactive signing (e.g. a hardware key)
+    # can set git_backup.gpg_sign=true to drop the flag and honour their own
+    # commit.gpgSign config. Empty flag (unquoted) = no extra arg.
+    GIT_BACKUP_GPG_SIGN=$(config ".git_backup.gpg_sign" "false")
+    GPG_SIGN_FLAG="--no-gpg-sign"
+    [ "$GIT_BACKUP_GPG_SIGN" = "true" ] && GPG_SIGN_FLAG=""
+
     _push() {
         if [ -n "$GIT_BACKUP_REMOTE" ]; then
             GIT_TERMINAL_PROMPT=0 git -C "$REPO_ROOT" push "$GIT_BACKUP_REMOTE" ${GIT_BACKUP_BRANCH:+"$GIT_BACKUP_BRANCH"} >/dev/null 2>&1
@@ -125,7 +134,7 @@ fi
     fi
 
     TS=$(_remember_date '+%H:%M')
-    if git -C "$REPO_ROOT" commit --no-gpg-sign \
+    if git -C "$REPO_ROOT" commit $GPG_SIGN_FLAG \
             -m "auto: $SLUG $TS" \
             -- "$SLUG/" >/dev/null 2>&1; then
         log "git-backup" "committed $SLUG"
