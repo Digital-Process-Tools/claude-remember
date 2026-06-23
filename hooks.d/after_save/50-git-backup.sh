@@ -87,6 +87,22 @@ fi
     # Prevent outer git env vars from overriding git -C behaviour.
     unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
 
+    # ── Configurable push target (#63) ────────────────────────────────────────
+    # git_backup.remote / git_backup.branch let users with multiple remotes or a
+    # non-standard tracking config pin exactly where memory is pushed. Both empty
+    # (the default) → bare `git push`, relying on the branch's upstream tracking.
+    GIT_BACKUP_REMOTE=$(config ".git_backup.remote" "")
+    GIT_BACKUP_BRANCH=$(config ".git_backup.branch" "")
+    REMOTE_NAME="${GIT_BACKUP_REMOTE:-origin}"
+
+    _push() {
+        if [ -n "$GIT_BACKUP_REMOTE" ]; then
+            GIT_TERMINAL_PROMPT=0 git -C "$REPO_ROOT" push "$GIT_BACKUP_REMOTE" ${GIT_BACKUP_BRANCH:+"$GIT_BACKUP_BRANCH"} >/dev/null 2>&1
+        else
+            GIT_TERMINAL_PROMPT=0 git -C "$REPO_ROOT" push >/dev/null 2>&1
+        fi
+    }
+
     # Remove the bootstrap-written per-slug .gitignore (contains "*") that was placed
     # to prevent commits when memory lived inside a project repo. In external git-backup
     # mode it blocks all staging; the root-level .gitignore covers logs/tmp exclusions.
@@ -125,7 +141,7 @@ fi
     # an attacker-controlled remote. Set git_backup.allow_remote_change=true to
     # override (e.g. when intentionally re-pointing to a new private repo).
     REMOTE_STATE_FILE="$REPO_ROOT/.git-backup-remote"
-    CURRENT_REMOTE=$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null || true)
+    CURRENT_REMOTE=$(git -C "$REPO_ROOT" remote get-url "$REMOTE_NAME" 2>/dev/null || true)
     ALLOW_REMOTE_CHANGE=$(config ".git_backup.allow_remote_change" "false")
 
     if [ -z "$CURRENT_REMOTE" ]; then
@@ -133,8 +149,8 @@ fi
     elif [ ! -f "$REMOTE_STATE_FILE" ]; then
         # First push — record the URL and proceed.
         echo "$CURRENT_REMOTE" > "$REMOTE_STATE_FILE"
-        log "git-backup" "git backup configured to push to: $CURRENT_REMOTE"
-        if GIT_TERMINAL_PROMPT=0 git -C "$REPO_ROOT" push >/dev/null 2>&1; then
+        log "git-backup" "git backup configured to push to: $CURRENT_REMOTE (remote '$REMOTE_NAME', branch '${GIT_BACKUP_BRANCH:-<upstream tracking>}')"
+        if _push; then
             log "git-backup" "pushed $SLUG"
         else
             log "git-backup" "push deferred (will retry next backup)"
@@ -146,7 +162,7 @@ fi
                 # Explicit override — update state file and push.
                 echo "$CURRENT_REMOTE" > "$REMOTE_STATE_FILE"
                 log "git-backup" "remote URL changed (allow_remote_change=true): $CURRENT_REMOTE"
-                if GIT_TERMINAL_PROMPT=0 git -C "$REPO_ROOT" push >/dev/null 2>&1; then
+                if _push; then
                     log "git-backup" "pushed $SLUG"
                 else
                     log "git-backup" "push deferred (will retry next backup)"
@@ -156,7 +172,7 @@ fi
             fi
         else
             # Remote matches recorded URL — safe to push.
-            if GIT_TERMINAL_PROMPT=0 git -C "$REPO_ROOT" push >/dev/null 2>&1; then
+            if _push; then
                 log "git-backup" "pushed $SLUG"
             else
                 log "git-backup" "push deferred (will retry next backup)"

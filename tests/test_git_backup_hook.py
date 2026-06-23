@@ -561,3 +561,50 @@ class TestGitBackupRemoteValidation:
         log_content = log_files[0].read_text()
         assert "allow_remote_change=true" in log_content
         assert "push aborted" not in log_content
+
+
+class TestGitBackupConfigurablePushTarget:
+    """Tests for configurable git_backup.remote / git_backup.branch (#63)."""
+
+    def test_push_routes_to_configured_remote(self, tmp_path):
+        """git_backup.remote pushes to that remote, not the default origin, and logs the resolved target."""
+        home, remember, origin = make_external_remember_repo(tmp_path)
+        slug = "test-slug"
+        slug_dir = remember / slug
+        slug_dir.mkdir()
+        (slug_dir / "now.md").write_text("## 10:00 | test\nMemory.\n")
+
+        project = tmp_path / "project"
+        project.mkdir()
+
+        # A second, explicitly-configured remote distinct from origin.
+        backup = tmp_path / "backup-remote.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(backup)], check=True, capture_output=True)
+        _git(remember, ["remote", "add", "backup", str(backup)])
+        _git(remember, ["push", "-q", "-u", "backup", "main"])
+
+        cfg = tmp_path / "remote-config.json"
+        cfg.write_text('{"cooldowns": {"git_backup_seconds": 0}, "git_backup": {"remote": "backup"}}')
+
+        result = _run_hook(slug_dir, project, home, config_path=cfg)
+        assert result.returncode == 0
+        wait_for_lock_release(remember / ".git-backup.lock")
+
+        # Local commit was made.
+        assert len(_commit_log(remember)) == 2
+
+        # The configured remote received the auto commit; origin did NOT.
+        # Bare repos: read the explicit main ref (their default HEAD may be master).
+        def _ref_count(bare, ref="refs/heads/main"):
+            r = subprocess.run(["git", "-C", str(bare), "rev-list", "--count", ref],
+                               capture_output=True, text=True)
+            return int(r.stdout.strip()) if r.returncode == 0 else 0
+        assert _ref_count(backup) == 2, "configured 'backup' remote should have the auto commit"
+        assert _ref_count(origin) == 1, "default origin must NOT receive the push when a remote is configured"
+
+        # State file records the configured remote's URL, and the log names the resolved target.
+        assert (remember / ".git-backup-remote").read_text().strip() == str(backup)
+        log_files = list((slug_dir / "logs").glob("memory-*.log"))
+        assert log_files
+        log_content = log_files[0].read_text()
+        assert "remote 'backup'" in log_content
