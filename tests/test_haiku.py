@@ -126,7 +126,7 @@ def test_call_haiku_success(mock_run, monkeypatch):
 
     args = mock_run.call_args
     cmd = args[0][0]
-    assert "claude" in cmd
+    assert os.path.basename(cmd[0]).startswith("claude")
     assert "--model" in cmd
     assert "haiku" in cmd
     # One-shot summarization subprocess: never resume these, never write to disk
@@ -430,3 +430,58 @@ def test_reject_gate_custom_pattern_applies(monkeypatch):
     monkeypatch.setenv("REMEMBER_REJECT_PATTERN", r"^banana")
     assert _parse_response(_mock_claude_response("banana split")).is_skip is True
     assert _parse_response(_mock_claude_response("I cannot do that.")).is_skip is False
+
+
+# --- REMEMBER_CLAUDE_BIN: resolve the claude.cmd shim on Windows (#120) -------
+from pipeline.haiku import _resolve_claude_bin
+
+
+def test_resolve_claude_bin_uses_which(monkeypatch):
+    """Default resolves the full path via shutil.which (queried for "claude")."""
+    monkeypatch.delenv("REMEMBER_CLAUDE_BIN", raising=False)
+    with patch("pipeline.haiku.shutil.which", return_value="/usr/local/bin/claude") as w:
+        assert _resolve_claude_bin() == "/usr/local/bin/claude"
+        w.assert_called_once_with("claude")
+
+
+def test_resolve_claude_bin_windows_cmd_shim(monkeypatch):
+    """shutil.which honours PATHEXT and returns the full claude.cmd path, which
+    subprocess CAN launch — a bare "claude" cannot (CreateProcess only resolves
+    .exe from a bare name), which is what kills every auto-save on Windows (#120)."""
+    monkeypatch.delenv("REMEMBER_CLAUDE_BIN", raising=False)
+    shim = r"C:\Users\x\AppData\Roaming\npm\claude.cmd"
+    with patch("pipeline.haiku.shutil.which", return_value=shim):
+        assert _resolve_claude_bin() == shim
+
+
+def test_resolve_claude_bin_env_override(monkeypatch):
+    """REMEMBER_CLAUDE_BIN wins over which (mirrors REMEMBER_MODEL / _MAX_TURNS)."""
+    monkeypatch.setenv("REMEMBER_CLAUDE_BIN", "/opt/claude/bin/claude")
+    with patch("pipeline.haiku.shutil.which", return_value="/usr/local/bin/claude"):
+        assert _resolve_claude_bin() == "/opt/claude/bin/claude"
+
+
+def test_resolve_claude_bin_blank_override_falls_back(monkeypatch):
+    monkeypatch.setenv("REMEMBER_CLAUDE_BIN", "   ")
+    with patch("pipeline.haiku.shutil.which", return_value="/usr/local/bin/claude"):
+        assert _resolve_claude_bin() == "/usr/local/bin/claude"
+
+
+def test_resolve_claude_bin_not_on_path_falls_back(monkeypatch):
+    """which finds nothing → fall back to the bare name, preserving the prior
+    behaviour on a misconfigured PATH instead of returning None / crashing."""
+    monkeypatch.delenv("REMEMBER_CLAUDE_BIN", raising=False)
+    with patch("pipeline.haiku.shutil.which", return_value=None):
+        assert _resolve_claude_bin() == "claude"
+
+
+@patch("pipeline.haiku.subprocess.run")
+def test_call_haiku_uses_resolved_bin(mock_run, monkeypatch):
+    """cmd[0] must be the RESOLVED binary path, not the bare "claude" — else
+    Windows' CreateProcess raises WinError 2 on the claude.cmd shim (#120)."""
+    monkeypatch.delenv("REMEMBER_CLAUDE_BIN", raising=False)
+    mock_run.return_value = MagicMock(
+        returncode=0, stdout=_mock_claude_response("x"), stderr="")
+    with patch("pipeline.haiku.shutil.which", return_value="/usr/local/bin/claude"):
+        call_haiku("p")
+    assert mock_run.call_args[0][0][0] == "/usr/local/bin/claude"
