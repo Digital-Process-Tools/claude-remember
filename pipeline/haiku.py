@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 
@@ -69,6 +70,27 @@ def _resolve_model() -> str:
     """
     raw = os.environ.get("REMEMBER_MODEL", "").strip()
     return raw if raw else DEFAULT_MODEL
+
+
+def _resolve_claude_bin() -> str:
+    """Full path to the ``claude`` executable, resolved before spawning.
+
+    On Windows the npm global install ships the CLI only as a ``claude.cmd``
+    shim (no ``claude.exe``). ``subprocess`` goes through ``CreateProcess``,
+    which only resolves ``.exe`` from a bare name — so ``["claude", ...]`` dies
+    with ``FileNotFoundError: [WinError 2]`` and silently kills every auto-save
+    (#120). ``shutil.which`` honours ``PATHEXT`` and returns the full
+    ``claude.cmd`` path, which ``subprocess`` launches fine (no ``shell=True``,
+    no argv-length regression); on Linux/macOS it returns the plain path.
+
+    REMEMBER_CLAUDE_BIN overrides the lookup (mirrors REMEMBER_MODEL /
+    REMEMBER_MAX_TURNS). When ``which`` finds nothing, fall back to the bare
+    name so behaviour matches the pre-fix code on a misconfigured PATH.
+    """
+    override = os.environ.get("REMEMBER_CLAUDE_BIN", "").strip()
+    if override:
+        return override
+    return shutil.which("claude") or "claude"
 
 
 def _child_env() -> dict[str, str]:
@@ -119,7 +141,7 @@ def call_haiku(
     # list too long") at exec time and silently kills saves of long sessions.
     # `claude -p` with no positional prompt reads the prompt from stdin.
     cmd = [
-        "claude",
+        _resolve_claude_bin(),
         "-p",
         "--output-format", "json",
         "--no-session-persistence",

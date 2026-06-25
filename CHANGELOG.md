@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.3] — Windows: resolve the claude.cmd shim before spawning
+
+### Fixed
+
+- **Every auto-save silently failed on Windows** ([#120](https://github.com/Digital-Process-Tools/claude-remember/issues/120)) — `pipeline/haiku.py` spawned the CLI in list-form as `subprocess.run(["claude", ...])`. The npm global install ships the CLI only as a `claude.cmd` shim (no `claude.exe`), and Python's `subprocess` goes through `CreateProcess`, which resolves only `.exe` from a bare name — so every spawn raised `FileNotFoundError: [WinError 2]`. The pipeline aborted right after `[haiku] calling`, so `now.md` / `today-*.md` / `recent.md` were never generated (the SessionStart hook and `/remember` skill kept working since they don't spawn `claude`). The binary is now resolved with `shutil.which("claude")`, which honours `PATHEXT` and returns the full `claude.cmd` path that `subprocess` launches fine — no `shell=True`, no argv-length regression, and cross-platform safe (returns the plain path on Linux/macOS). Override via `REMEMBER_CLAUDE_BIN`. Reported with a precise diagnosis and tested patch by the issue author.
+
 ## [0.8.2] — Oversized-extract guard keeps long sessions saving
 
 ### Fixed
