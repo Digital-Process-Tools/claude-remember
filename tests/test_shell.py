@@ -373,6 +373,100 @@ def test_cmd_consolidate_skip_emits_status_and_no_output_paths(capsys):
         assert "STAGING_PATHS_FILE=" not in output
 
 
+# --- cmd_consolidate: oversized-archive rotation (deeper fix) ---
+
+def _valid_envelope():
+    return HaikuResult(
+        text="===RECENT===\n# Recent\n\n## 2020-01-01\nx\n\n===ARCHIVE===\n# Archive\n",
+        tokens=TokenUsage(input=10, output=5, cache=0, cost_usd=0.0),
+    )
+
+
+def test_cmd_consolidate_rotates_oversized_archive_then_succeeds(capsys):
+    """When archive.md is the oversized bulk, rotate it aside and retry once with
+    a fresh archive so consolidation proceeds (memory preserved in the sibling)."""
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "today-2020-01-01.md"), "w") as f:
+            f.write("small entry")
+        recent_file = os.path.join(d, "recent.md")
+        open(recent_file, "w").close()
+        archive_file = os.path.join(d, "archive.md")
+        with open(archive_file, "w") as f:
+            f.write("OLD ARCHIVE " + "x" * 500_000)  # > 300 KB cap
+
+        with patch("pipeline.consolidate.call_haiku", return_value=_valid_envelope()) as mock_haiku:
+            cmd_consolidate(d, recent_file, archive_file, max_prompt_bytes=300_000)
+
+        output = capsys.readouterr().out
+        assert "CONSOLIDATION_STATUS=ok" in output
+        assert "ARCHIVE_OUT=" in output
+        mock_haiku.assert_called_once()  # only the post-rotation retry calls Haiku
+        # original archive.md was rotated to a dated sibling, content preserved
+        rotated = [n for n in os.listdir(d) if n.startswith("archive-") and n.endswith(".md")]
+        assert rotated, "archive.md should have been rotated to archive-<date>.md"
+        assert "OLD ARCHIVE" in open(os.path.join(d, rotated[0])).read()
+        for key, path in _consolidate_output_paths(output).items():
+            if os.path.exists(path):
+                os.unlink(path)
+
+
+def test_cmd_consolidate_oversized_no_archive_skips(capsys):
+    """Oversized with no archive to rotate (staging itself is the bulk) -> skip."""
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "today-2020-01-01.md"), "w") as f:
+            f.write("x" * 500_000)  # staging alone exceeds the cap
+        archive_file = os.path.join(d, "archive.md")  # does not exist
+
+        with patch("pipeline.consolidate.call_haiku") as mock_haiku:
+            cmd_consolidate(d, "/nonexistent", archive_file, max_prompt_bytes=300_000)
+
+        output = capsys.readouterr().out
+        assert "CONSOLIDATION_STATUS=skip" in output
+        assert "ARCHIVE_OUT=" not in output
+        mock_haiku.assert_not_called()
+        assert not any(n.startswith("archive-") for n in os.listdir(d))
+
+
+def test_cmd_consolidate_restores_archive_when_retry_still_too_large(capsys):
+    """If even an empty archive doesn't fit (staging + recent too big), undo the
+    rotation so the original archive.md is left intact, then skip."""
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "today-2020-01-01.md"), "w") as f:
+            f.write("x" * 500_000)  # staging alone already exceeds the cap
+        archive_file = os.path.join(d, "archive.md")
+        with open(archive_file, "w") as f:
+            f.write("OLD ARCHIVE CONTENT")
+
+        with patch("pipeline.consolidate.call_haiku") as mock_haiku:
+            cmd_consolidate(d, "/nonexistent", archive_file, max_prompt_bytes=300_000)
+
+        output = capsys.readouterr().out
+        assert "CONSOLIDATION_STATUS=skip" in output
+        mock_haiku.assert_not_called()
+        # rotation undone: archive.md intact, no orphan sibling left behind
+        assert open(archive_file).read() == "OLD ARCHIVE CONTENT"
+        assert not any(n.startswith("archive-") for n in os.listdir(d))
+
+
+def test_cmd_consolidate_restores_archive_when_retry_errors():
+    """If the post-rotation retry's Haiku call errors, restore archive.md and
+    re-raise so no state is lost on a transient failure."""
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "today-2020-01-01.md"), "w") as f:
+            f.write("small entry")
+        archive_file = os.path.join(d, "archive.md")
+        with open(archive_file, "w") as f:
+            f.write("OLD ARCHIVE " + "x" * 500_000)  # > cap, will trigger rotation
+
+        with patch("pipeline.consolidate.call_haiku", side_effect=RuntimeError("api down")):
+            with pytest.raises(RuntimeError):
+                cmd_consolidate(d, "/nonexistent", archive_file, max_prompt_bytes=300_000)
+
+        # archive restored, no orphan sibling left behind
+        assert open(archive_file).read().startswith("OLD ARCHIVE")
+        assert not any(n.startswith("archive-") for n in os.listdir(d))
+
+
 def test_cmd_consolidate_staging_paths_file_handles_special_chars(capsys):
     """STAGING_PATHS_FILE correctly encodes filenames with single quotes and spaces."""
     fake_tokens = TokenUsage(input=10, output=5, cache=0, cost_usd=0.0)
@@ -685,6 +779,20 @@ def test_main_dispatches_consolidate():
         staging_dir="/staging",
         recent_file="recent.md",
         archive_file="archive.md",
+        max_prompt_bytes=0,  # absent 6th arg -> guard disabled
+    )
+
+
+def test_main_dispatches_consolidate_with_max_bytes():
+    """The optional 6th arg sets the oversized-prompt skip-guard cap."""
+    with patch("pipeline.shell.cmd_consolidate") as mock_fn:
+        with patch("sys.argv", ["shell.py", "consolidate", "/staging", "recent.md", "archive.md", "600000"]):
+            main()
+    mock_fn.assert_called_once_with(
+        staging_dir="/staging",
+        recent_file="recent.md",
+        archive_file="archive.md",
+        max_prompt_bytes=600000,
     )
 
 

@@ -8,7 +8,8 @@
   "thresholds": {
     "min_human_messages": 3,
     "delta_lines_trigger": 50,
-    "extract_max_bytes": 300000
+    "extract_max_bytes": 300000,
+    "consolidate_max_bytes": 600000
   },
   "features": {
     "ndc_compression": true,
@@ -20,6 +21,15 @@
   "reject_pattern": "",
 
   "_comments": {
+    "consolidate_max_bytes": [
+      "Skip-guard cap (UTF-8 bytes) on the assembled consolidation prompt",
+      "(staging + recent.md + archive.md). Default 600000. If the prompt would",
+      "exceed this, consolidation SKIPS that run (staging + memory left intact)",
+      "rather than overflowing Haiku's window with 'Prompt is too long' and",
+      "stalling all saves. Unlike extract_max_bytes the input is NOT truncated,",
+      "because consolidation rewrites recent/archive and truncating would drop",
+      "archived memory. Set 0 to disable the guard."
+    ],
     "model": [
       "Model for the summarize/consolidate calls (claude -p). Default 'haiku'.",
       "Set 'sonnet' (or another tier) to improve salience + compression-cap",
