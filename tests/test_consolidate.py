@@ -13,6 +13,7 @@ from pipeline.consolidate import (
     consolidate,
     _is_valid_consolidation,
     ConsolidationSkipped,
+    ConsolidationTooLarge,
 )
 from pipeline.types import HaikuResult, TokenUsage, ConsolidationResult
 
@@ -225,3 +226,46 @@ def test_consolidate_accepts_valid_envelope():
         )
     assert "2026-06-01" in result.recent
     assert "Old" in result.archive
+
+
+# --- Oversized-prompt guard (consolidation parity with the save-path cap) ---
+
+def test_consolidate_skips_when_prompt_exceeds_cap():
+    """An assembled prompt over max_prompt_bytes must skip BEFORE calling Haiku.
+
+    Mirrors the save path's extract_max_bytes cap, but skips (not truncates)
+    because consolidation rewrites recent/archive - truncating the input would
+    permanently drop archived memory. The skip leaves staging + memory untouched.
+    """
+    huge_staging = {"today-2026-01-01.md": "x" * 5000}
+    with patch("pipeline.consolidate.call_haiku") as mock_haiku:
+        with pytest.raises(ConsolidationTooLarge) as exc:
+            consolidate(huge_staging, recent="", archive="", max_prompt_bytes=1000)
+    # subclass of ConsolidationSkipped so existing handlers keep working
+    assert isinstance(exc.value, ConsolidationSkipped)
+    mock_haiku.assert_not_called()  # never fire a doomed context-overflow call
+
+
+def test_consolidate_proceeds_when_under_cap():
+    """Under the cap, consolidation proceeds normally and calls Haiku once."""
+    ok = HaikuResult(
+        text="===RECENT===\n# Recent\n\n## 2026-01-01\nwork\n\n===ARCHIVE===\n# Archive\n",
+        tokens=TokenUsage(input=10, output=5, cache=0, cost_usd=0.0),
+    )
+    with patch("pipeline.consolidate.call_haiku", return_value=ok) as mock_haiku:
+        res = consolidate({"today-2026-01-01.md": "small"}, recent="", archive="",
+                          max_prompt_bytes=10_000_000)
+    mock_haiku.assert_called_once()
+    assert res.recent.startswith("# Recent")
+
+
+def test_consolidate_no_cap_by_default():
+    """max_prompt_bytes defaults to 0 = disabled, preserving prior behavior."""
+    ok = HaikuResult(
+        text="===RECENT===\n# Recent\n\n## 2026-01-01\nx\n\n===ARCHIVE===\n# Archive\n",
+        tokens=TokenUsage(input=10, output=5, cache=0, cost_usd=0.0),
+    )
+    big_staging = {"today-2026-01-01.md": "x" * 50000}
+    with patch("pipeline.consolidate.call_haiku", return_value=ok) as mock_haiku:
+        consolidate(big_staging, recent="", archive="")  # no cap arg -> uncapped
+    mock_haiku.assert_called_once()

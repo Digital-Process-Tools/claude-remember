@@ -41,6 +41,17 @@ class ConsolidationSkipped(Exception):
     """
 
 
+class ConsolidationTooLarge(ConsolidationSkipped):
+    """Raised when the assembled prompt exceeds ``max_prompt_bytes``.
+
+    Subclass of ConsolidationSkipped so existing ``except ConsolidationSkipped``
+    handlers keep their "leave everything untouched" behavior unchanged. Callers
+    that CAN shrink the input (e.g. rotate archive.md to a dated sibling and
+    retry with a fresh archive) may catch this subclass specifically to recover
+    instead of skipping forever.
+    """
+
+
 def _is_valid_consolidation(text: str) -> bool:
     """Return True only if the model output is real consolidated memory.
 
@@ -69,6 +80,7 @@ def consolidate(
     staging_contents: dict[str, str],
     recent: str,
     archive: str,
+    max_prompt_bytes: int = 0,
 ) -> ConsolidationResult:
     """Run full consolidation: build prompt, call Haiku, parse response.
 
@@ -77,16 +89,37 @@ def consolidate(
             staging file to consolidate.
         recent: Current content of recent.md (may be empty).
         archive: Current content of archive.md (may be empty).
+        max_prompt_bytes: Upper bound on the assembled prompt's UTF-8 byte
+            size. ``0`` disables the guard. When the prompt would exceed the
+            bound, consolidation is SKIPPED (not truncated) -- see below.
 
     Returns:
         ConsolidationResult with new recent/archive content and token usage.
 
     Raises:
         RuntimeError: If the Haiku call fails or times out.
-        ConsolidationSkipped: If the model declined (SKIP) or returned
+        ConsolidationSkipped: If the assembled prompt exceeds
+            ``max_prompt_bytes``, or the model declined (SKIP) or returned
             non-conforming output. The caller must not write or retire files.
     """
     prompt = build_consolidation_prompt(staging_contents, recent, archive)
+
+    # Oversized-prompt guard. Mirrors the save path's extract_max_bytes cap
+    # (build-prompt), but SKIPS instead of truncating: consolidation rewrites
+    # recent.md/archive.md, so tail-truncating the input would feed the model a
+    # partial archive and permanently drop the dropped head on the next write.
+    # Skipping leaves staging + memory untouched (handled by the caller's
+    # ConsolidationSkipped path) -- strictly better than firing a doomed call
+    # that fails with "Prompt is too long" and stalls every subsequent save.
+    if max_prompt_bytes > 0:
+        prompt_bytes = len(prompt.encode("utf-8"))
+        if prompt_bytes > max_prompt_bytes:
+            raise ConsolidationTooLarge(
+                f"consolidation prompt too large ({prompt_bytes} bytes > "
+                f"{max_prompt_bytes} cap) -- skipping to avoid a context-window "
+                f"overflow; staging + memory left untouched"
+            )
+
     result = call_haiku(prompt, timeout=180)
 
     # Guard: never let a SKIP or a conversational reply overwrite memory.

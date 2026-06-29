@@ -64,8 +64,11 @@ dispatch "before_consolidate"
 # --- Consolidate ---
 # Python does: find staging files, read all content, build prompt,
 # call Haiku (text-only), parse structured response into recent/archive.
+# Oversized-prompt skip-guard: cap the assembled prompt so a runaway staging/
+# archive never overflows Haiku's window (skips cleanly instead of crashing).
+CONSOLIDATE_MAX_BYTES=$(config ".thresholds.consolidate_max_bytes" 600000)
 log "consolidation" "start"
-RESULT=$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell consolidate "$STAGING_DIR" "$RECENT_FILE" "$ARCHIVE_FILE" 2>&1) || {
+RESULT=$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell consolidate "$STAGING_DIR" "$RECENT_FILE" "$ARCHIVE_FILE" "$CONSOLIDATE_MAX_BYTES" 2>&1) || {
     log "consolidation" "ERROR: pipeline failed — $RESULT"
     exit 1
 }

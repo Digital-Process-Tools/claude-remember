@@ -252,7 +252,32 @@ def cmd_save_position(last_save_file: str, session_id: str, position: int) -> No
         json.dump({"session": session_id, "line": position}, f)
 
 
-def cmd_consolidate(staging_dir: str, recent_file: str, archive_file: str) -> None:
+def _rotate_archive(archive_file: str) -> str | None:
+    """Rename a non-empty archive.md to a dated sibling so consolidation can
+    proceed with a fresh archive instead of stalling forever on an archive that
+    has grown past the prompt cap.
+
+    Returns the rotated path (e.g. ``archive-2026-06-29.md``, with a ``-N``
+    suffix on same-day collisions), or ``None`` when there is nothing worth
+    rotating (missing/empty archive -> the oversized bulk is staging/recent, not
+    the archive, so rotating would not help).
+    """
+    if not archive_file or not os.path.exists(archive_file) or os.path.getsize(archive_file) == 0:
+        return None
+    from ._tz import today_str
+    parent = os.path.dirname(archive_file)
+    stem = f"archive-{today_str()}"
+    target = os.path.join(parent, f"{stem}.md")
+    n = 2
+    while os.path.exists(target):
+        target = os.path.join(parent, f"{stem}-{n}.md")
+        n += 1
+    os.rename(archive_file, target)
+    return target
+
+
+def cmd_consolidate(staging_dir: str, recent_file: str, archive_file: str,
+                    max_prompt_bytes: int = 0) -> None:
     """Run the full consolidation pipeline and print shell variables.
 
     Collects staging files (excluding today's and ``.done`` files), reads
@@ -263,6 +288,9 @@ def cmd_consolidate(staging_dir: str, recent_file: str, archive_file: str) -> No
         staging_dir: Directory containing ``today-*.md`` staging files.
         recent_file: Path to the current recent.md file.
         archive_file: Path to the current archive.md file.
+        max_prompt_bytes: Skip-guard cap on the assembled consolidation
+            prompt's UTF-8 byte size. ``0`` disables it. An oversized prompt
+            yields ``CONSOLIDATION_STATUS=skip`` instead of overflowing.
 
     Prints:
         STAGING_COUNT (0 if nothing to consolidate), RECENT_OUT and
@@ -274,7 +302,7 @@ def cmd_consolidate(staging_dir: str, recent_file: str, archive_file: str) -> No
     import tempfile
 
     from ._tz import today_str
-    from .consolidate import consolidate, ConsolidationSkipped
+    from .consolidate import consolidate, ConsolidationSkipped, ConsolidationTooLarge
 
     today = today_str()
 
@@ -301,16 +329,40 @@ def cmd_consolidate(staging_dir: str, recent_file: str, archive_file: str) -> No
         with open(archive_file, encoding="utf-8", errors="replace") as f:
             archive = f.read()
 
-    try:
-        result = consolidate(staging_contents, recent, archive)
-    except ConsolidationSkipped:
-        # Model declined (SKIP) or returned non-conforming output. Emit a
-        # skip status so the shell leaves recent.md/archive.md untouched and
-        # does NOT rename the source staging files to .done.md — they remain
-        # available for the next run. STAGING_COUNT is non-zero (we did find
-        # files) but the shell gates on CONSOLIDATION_STATUS.
+    def _emit_skip() -> None:
+        # Skip status so the shell leaves recent.md/archive.md untouched and does
+        # NOT rename the source staging files to .done.md — they remain available
+        # for the next run. STAGING_COUNT is non-zero (we found files) but the
+        # shell gates on CONSOLIDATION_STATUS.
         print(f"STAGING_COUNT={len(staging_contents)}")
         print("CONSOLIDATION_STATUS=skip")
+
+    try:
+        result = consolidate(staging_contents, recent, archive,
+                             max_prompt_bytes=max_prompt_bytes)
+    except ConsolidationTooLarge:
+        # archive.md is the bulk of the oversized prompt. Rotate it to a dated
+        # sibling (memory preserved in cold storage) and retry once with a fresh
+        # empty archive, so consolidation keeps progressing instead of skipping
+        # every run forever. If there is nothing to rotate, or the retry still
+        # overflows (staging + recent alone exceed the cap), restore and skip.
+        rotated = _rotate_archive(archive_file)
+        if rotated is None:
+            _emit_skip()
+            return
+        try:
+            result = consolidate(staging_contents, recent, "",
+                                 max_prompt_bytes=max_prompt_bytes)
+        except ConsolidationSkipped:
+            os.replace(rotated, archive_file)  # still too big -> undo, skip
+            _emit_skip()
+            return
+        except Exception:
+            os.replace(rotated, archive_file)  # retry errored -> undo, re-raise
+            raise
+    except ConsolidationSkipped:
+        # Model declined (SKIP) or returned non-conforming output.
+        _emit_skip()
         return
 
     # Write results to temp files
@@ -388,6 +440,7 @@ def main() -> None:
             staging_dir=sys.argv[2],
             recent_file=sys.argv[3],
             archive_file=sys.argv[4],
+            max_prompt_bytes=int(sys.argv[5]) if len(sys.argv) > 5 else 0,
         )
     else:
         print(f"Unknown command: {cmd}", file=sys.stderr)
