@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Worktree sessions built a throwaway memory that vanished on cleanup** ([#56](https://github.com/Digital-Process-Tools/claude-remember/issues/56)) — the plugin derives `REMEMBER_DIR` from `CLAUDE_PROJECT_DIR`, which Claude Code sets to the *worktree* path for worktree sessions. In the default (legacy) layout that put memory at `<worktree>/.remember` — physically inside the worktree, and gitignored with `*`, so a plain `git worktree remove` (no `--force`, no warning) deleted every `now.md` / `today-*.md` / `remember.md` built up during the session, and none of it was ever migrated to the main checkout. In external mode the `{slug}` was computed from the worktree path, producing an orphaned `~/.remember/<slug-of-worktree>` subtree the main checkout's sessions never loaded. `REMEMBER_DIR` resolution now routes through git's *common dir*: when `PROJECT_DIR` is a linked worktree, memory is keyed to the main checkout, so it survives `worktree remove` and is shared across all worktrees of the repo. `PROJECT_DIR` itself is left untouched (session recovery still resolves transcripts under the worktree slug), and non-worktree / non-git projects behave exactly as before. Reported and diagnosed by [@KrzysztofKasprowicz](https://github.com/Digital-Process-Tools/claude-remember/issues/56) and [@dewet22](https://github.com/Digital-Process-Tools/claude-remember/issues/56).
+
 ## [0.8.4] — Bound consolidation prompt size so a huge archive can't stall saves
 
 ### Fixed

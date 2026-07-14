@@ -36,8 +36,11 @@ unset _BOOTSTRAP_SCRIPT_DIR
 # --- System temp directory (portable: macOS, Linux, Windows/Git Bash) ---
 SYS_TMPDIR="${TMPDIR:-/tmp}"
 
-# --- One-shot migration: legacy ${PROJECT_DIR}/.remember → external REMEMBER_DIR ---
-_legacy_dir="${PROJECT_DIR}/.remember"
+# --- One-shot migration: legacy .remember → external REMEMBER_DIR ---
+# Keyed to MEMORY_PROJECT_DIR (the main checkout when in a worktree) so the
+# legacy dir we migrate/gitignore matches where REMEMBER_DIR now resolves.
+_mem_proj="${MEMORY_PROJECT_DIR:-$PROJECT_DIR}"
+_legacy_dir="${_mem_proj}/.remember"
 if [ "$REMEMBER_DIR" != "$_legacy_dir" ] && [ -d "$_legacy_dir" ] && [ ! -e "$REMEMBER_DIR" ]; then
     mkdir -p "$(dirname "$REMEMBER_DIR")" 2>/dev/null
     if mv "$_legacy_dir" "$REMEMBER_DIR" 2>/dev/null; then
@@ -60,10 +63,11 @@ mkdir -p \
 # to write — the user manages that tree themselves (typically as a private git
 # repo at ~/.remember/).
 case "$REMEMBER_DIR" in
-    "$PROJECT_DIR"/*)
+    "$_mem_proj"/*)
         [ -f "$REMEMBER_DIR/.gitignore" ] || echo '*' > "$REMEMBER_DIR/.gitignore" 2>/dev/null
         ;;
 esac
+unset _mem_proj
 
 # --- Redirect stderr to hook-errors.log ---
 # This replaces the 2>> that was in hooks.json. Now the directory is

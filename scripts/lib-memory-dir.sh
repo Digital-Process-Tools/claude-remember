@@ -55,6 +55,55 @@ _read_data_dir() {
     fi
 }
 
+# _resolve_memory_project_dir <project_dir>
+# Returns the directory memory should be keyed to. Normally this is PROJECT_DIR
+# itself. When PROJECT_DIR is a *linked git worktree*, Claude Code has set
+# CLAUDE_PROJECT_DIR to the worktree path — but memory should live with the main
+# checkout so it survives `git worktree remove` and is shared across worktrees
+# of the same repo (issue #56). A linked worktree is detected via git's common
+# dir differing from its git dir; the main checkout is the parent of the shared
+# common dir.
+#
+# Fail-safe by design: it only redirects when it positively identifies a linked
+# worktree whose main checkout is a real work tree. Ordinary checkouts, non-git
+# directories, bare-repo worktrees, and old git without --path-format all fall
+# through to PROJECT_DIR unchanged — identical to pre-fix behaviour. Only
+# REMEMBER_DIR is affected; PROJECT_DIR stays the worktree path so session
+# recovery still finds transcripts under the worktree slug.
+_resolve_memory_project_dir() {
+    local proj="$1"
+    command -v git >/dev/null 2>&1 || { echo "$proj"; return 0; }
+
+    # One rev-parse yields both paths (common-dir first, git-dir second).
+    # --path-format=absolute requires git >= 2.31; on older git this fails and
+    # we fall through to the unchanged PROJECT_DIR.
+    local _out _gcd _gd
+    _out=$(git -C "$proj" rev-parse --path-format=absolute \
+                --git-common-dir --git-dir 2>/dev/null) || _out=""
+    { IFS= read -r _gcd; IFS= read -r _gd; } <<EOF
+$_out
+EOF
+
+    # Not a git repo, unsupported flag, or an ordinary checkout (common == git):
+    # leave PROJECT_DIR untouched.
+    if [ -z "$_gcd" ] || [ -z "$_gd" ] || [ "$_gcd" = "$_gd" ]; then
+        echo "$proj"
+        return 0
+    fi
+
+    # Linked worktree: the main checkout is the parent of the shared git dir.
+    # Guard against bare-repo worktrees (parent is not a work tree) by only
+    # redirecting to a directory git confirms is inside a work tree.
+    local _main
+    _main=$(dirname "$_gcd")
+    if [ -d "$_main" ] && \
+       git -C "$_main" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        echo "$_main"
+    else
+        echo "$proj"
+    fi
+}
+
 # _resolve_remember_dir <data_dir_value> <project_dir>
 # Resolves the final absolute REMEMBER_DIR.
 # If data_dir starts with / or ~ treat as absolute; expand ~ and {slug}.
@@ -112,7 +161,13 @@ done
 # Default to legacy layout if nothing found.
 _data_dir_raw="${_data_dir_raw:-.remember}"
 
-REMEMBER_DIR=$(_resolve_remember_dir "$_data_dir_raw" "$PROJECT_DIR")
+# Key memory to the main checkout when PROJECT_DIR is a linked worktree, so it
+# survives `git worktree remove` and is shared across worktrees (issue #56).
+# For non-worktree / non-git projects this is exactly PROJECT_DIR.
+MEMORY_PROJECT_DIR=$(_resolve_memory_project_dir "$PROJECT_DIR")
+export MEMORY_PROJECT_DIR
+
+REMEMBER_DIR=$(_resolve_remember_dir "$_data_dir_raw" "$MEMORY_PROJECT_DIR")
 export REMEMBER_DIR
 
 # ── Pass 2: layered config merge ─────────────────────────────────────────────
