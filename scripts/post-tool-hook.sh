@@ -77,9 +77,28 @@ fi
 DELTA=$((CURRENT_LINES - LAST_LINE))
 SAVE_TRIGGERED=""
 
+# --- Don't fork a save that save-session.sh will only discard on cooldown ---
+# The delta throttle above keys on save *position* (last-save.json), which is
+# only written after a successful save. Until the first save lands LAST_LINE is
+# 0, so DELTA is the whole transcript and always clears the threshold — and in
+# an agentic session (many tool calls, few human turns) the min-human gate keeps
+# that first save from ever landing, so the hook would fork a save-session.sh on
+# every tool call for the whole session (issue #125). save-session.sh already
+# rate-limits on the last-save-ts cooldown marker; consult it here so the fork
+# is skipped entirely instead of spawned only to be discarded milliseconds later.
+IN_COOLDOWN=false
+COOLDOWN_MARKER="$REMEMBER_DIR/tmp/last-save-ts"
+if [ -f "$COOLDOWN_MARKER" ]; then
+    LAST_TS=$(cat "$COOLDOWN_MARKER" 2>/dev/null || echo 0)
+    case "$LAST_TS" in ''|*[!0-9]*) LAST_TS=0 ;; esac
+    SAVE_COOLDOWN=$(config ".cooldowns.save_seconds" 120)
+    case "$SAVE_COOLDOWN" in ''|*[!0-9]*) SAVE_COOLDOWN=120 ;; esac
+    [ $(( $(_remember_date +%s) - LAST_TS )) -lt "$SAVE_COOLDOWN" ] && IN_COOLDOWN=true
+fi
+
 # --- Fire save if delta exceeds threshold and no save already running ---
 DELTA_THRESHOLD=$(config ".thresholds.delta_lines_trigger" 50)
-if [ "$DELTA" -gt "$DELTA_THRESHOLD" ]; then
+if [ "$DELTA" -gt "$DELTA_THRESHOLD" ] && [ "$IN_COOLDOWN" = false ]; then
     ALREADY_RUNNING=false
     if [ -f "$PID_FILE" ]; then
         OLD_PID=$(cat "$PID_FILE" 2>/dev/null)
