@@ -615,3 +615,36 @@ def test_slug_consistency_python_vs_bash():
         assert python_slug == bash_slug, (
             f"Slug mismatch for {path!r}: python={python_slug!r} bash={bash_slug!r}"
         )
+
+
+# --- Channel-delivered input (Telegram plugin): isMeta but real human input (issue #128) ---
+
+def test_extract_messages_keeps_channel_delivered_user_input():
+    """A <channel>-wrapped user message carries isMeta:true but is real human
+    input; it must be kept, with the transport wrapper stripped (issue #128)."""
+    line = (
+        '{"type":"user","isMeta":true,"message":{"content":'
+        '"<channel source=\\"plugin:telegram:telegram\\" chat_id=\\"1\\" '
+        'message_id=\\"2\\" user=\\"u\\" ts=\\"2026-07-15T13:52:33.000Z\\">\\n'
+        'Does the remember plugin work?\\n</channel>"}}\n'
+    )
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+        f.write(line)
+        path = f.name
+    try:
+        msgs = extract_messages(path)
+        assert msgs == [("HUMAN", "Does the remember plugin work?")]
+    finally:
+        os.unlink(path)
+
+
+def test_extract_messages_still_skips_non_channel_meta():
+    """Ordinary isMeta records (no <channel> wrapper) stay filtered (issue #128)."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+        f.write('{"type":"user","isMeta":true,"message":{"content":"caveat meta text"}}\n')
+        path = f.name
+    try:
+        msgs = extract_messages(path)
+        assert msgs == []
+    finally:
+        os.unlink(path)

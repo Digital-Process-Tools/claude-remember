@@ -145,6 +145,26 @@ def count_lines(path: str) -> int:
     return count
 
 
+_CHANNEL_RE = re.compile(r"^<channel\b[^>]*>(.*)</channel>$", re.DOTALL)
+
+
+def _channel_text(content) -> str | None:
+    """Inner text of a ``<channel>…</channel>`` payload, or None.
+
+    Channel-delivered input (e.g. the Telegram plugin) arrives as a
+    ``type: "user"`` record flagged ``isMeta: true`` whose content is a
+    ``<channel …>…</channel>`` transport wrapper. It is real human input, so
+    it must survive the isMeta filter — this returns the inner message text
+    (wrapper stripped) when content is such a payload, else None (issue #128).
+    """
+    if not isinstance(content, str):
+        return None
+    match = _CHANNEL_RE.match(content.strip())
+    if not match:
+        return None
+    return match.group(1).strip()
+
+
 def extract_messages(path: str, skip_lines: int = 0) -> list[tuple[str, str]]:
     """Parse a session JSONL file into role-labeled message tuples.
 
@@ -180,12 +200,15 @@ def extract_messages(path: str, skip_lines: int = 0) -> list[tuple[str, str]]:
                 continue
 
             msg_type = obj.get("type")
-            is_meta = obj.get("isMeta", False)
-            if msg_type not in ("user", "assistant") or is_meta:
+            if msg_type not in ("user", "assistant"):
                 continue
 
             content = obj.get("message", {}).get("content", "")
-            texts = _extract_texts(content)
+            channel_text = _channel_text(content)
+            if obj.get("isMeta", False) and channel_text is None:
+                continue
+
+            texts = _extract_texts(content if channel_text is None else channel_text)
 
             if texts:
                 combined = "\n".join(texts)
