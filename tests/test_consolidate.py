@@ -269,3 +269,34 @@ def test_consolidate_no_cap_by_default():
     with patch("pipeline.consolidate.call_haiku", return_value=ok) as mock_haiku:
         consolidate(big_staging, recent="", archive="")  # no cap arg -> uncapped
     mock_haiku.assert_called_once()
+
+
+# --- Wrapping code fence: strip it so headers aren't doubled (issue #126) ---
+
+def test_parse_strips_stray_leading_fence_no_double_header():
+    """A stray leading ``` before the body must not trigger a doubled
+    '# Recent' header (the orphaned-fence artifact seen in recent.md)."""
+    text = (
+        "===RECENT===\n```\n\n# Recent\n\n## 2026-07-02\n"
+        "Committed CF skill pack.\n\n===ARCHIVE===\n# Archive\n\nold"
+    )
+    recent, archive = parse_consolidation_response(text)
+    assert recent.startswith("# Recent")
+    assert recent.count("# Recent") == 1
+    assert "```" not in recent
+    assert "2026-07-02" in recent
+
+
+def test_parse_strips_wrapping_markdown_fence():
+    """A ```markdown … ``` fence wrapping the whole recent body is removed
+    (opening + matching closing), leaving a single header."""
+    text = (
+        "===RECENT===\n```markdown\n# Recent\n\n## 2026-07-02\nDid stuff.\n```\n"
+        "\n===ARCHIVE===\n```\n# Archive\n\nold\n```"
+    )
+    recent, archive = parse_consolidation_response(text)
+    assert recent.startswith("# Recent")
+    assert recent.count("# Recent") == 1
+    assert "```" not in recent
+    assert archive.startswith("# Archive")
+    assert "```" not in archive

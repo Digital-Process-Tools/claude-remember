@@ -31,6 +31,37 @@ from .types import ConsolidationResult, TokenUsage
 # A real memory entry header: "## HH:MM", "## Week of ...", or "## YYYY-MM-DD".
 _ENTRY_HEADER = re.compile(r"(?m)^## (\d{2}:\d{2}|Week of |\d{4}-\d{2}-\d{2})")
 
+# A Markdown code fence the model sometimes wraps a whole section body in:
+# an opening ``` (optionally ```markdown) line, and a matching closing ```.
+_OPEN_FENCE = re.compile(r"^```[^\n]*\n")
+_CLOSE_FENCE = re.compile(r"\n```$")
+
+
+def _strip_wrapping_fence(text: str) -> str:
+    """Strip a Markdown code fence wrapping an entire section body.
+
+    Haiku occasionally returns the ``===RECENT===`` / ``===ARCHIVE===``
+    section body wrapped in a ```` ```markdown … ``` ```` fence, or emits a
+    stray leading ```` ``` ```` line. Left in place, that fence line defeats
+    the ``startswith("# Recent")`` check in parse_consolidation_response, so
+    a second ``# Recent`` header gets prepended — producing the
+    doubled-header + orphaned-fence artifact seen in recent.md (issue #126).
+    Strip the opening fence whenever present, and the closing fence only if
+    present (truncated model output can drop it), before the header check runs.
+
+    Args:
+        text: A section body, before header normalization.
+
+    Returns:
+        The body with a wrapping code fence removed, stripped.
+    """
+    t = text.strip()
+    m = _OPEN_FENCE.match(t)
+    if m:
+        t = t[m.end():]
+        t = _CLOSE_FENCE.sub("", t)
+    return t.strip()
+
 
 class ConsolidationSkipped(Exception):
     """Raised when Haiku declined (SKIP) or returned non-conforming output.
@@ -173,13 +204,13 @@ def parse_consolidation_response(text: str) -> tuple[str, str]:
 
     if "===RECENT===" in text and "===ARCHIVE===" in text:
         parts = text.split("===ARCHIVE===", 1)
-        recent = parts[0].replace("===RECENT===", "").strip()
-        archive = parts[1].strip()
+        recent = _strip_wrapping_fence(parts[0].replace("===RECENT===", ""))
+        archive = _strip_wrapping_fence(parts[1])
     elif "===RECENT===" in text:
-        recent = text.replace("===RECENT===", "").strip()
+        recent = _strip_wrapping_fence(text.replace("===RECENT===", ""))
     else:
         # Fallback: treat entire response as recent
-        recent = text.strip()
+        recent = _strip_wrapping_fence(text)
 
     # Ensure headers are present
     if recent and not recent.startswith("# Recent"):
