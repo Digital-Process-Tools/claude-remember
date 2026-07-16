@@ -83,6 +83,22 @@ def test_every_referenced_script_exists():
     assert found_any, "no script references found — regex drift?"
 
 
+def test_every_shipped_hook_script_is_wired():
+    """Every scripts/*-hook.sh must be registered in hooks.json.
+
+    Regression guard for the 0.8.x manifest gap: user-prompt-hook.sh shipped
+    (and the README documented it) but hooks.json never wired it, so the
+    UserPromptSubmit timestamp injection and its hooks.d/ dispatch were dead
+    code for plugin installs.
+    """
+    all_commands = "\n".join(cmd for _loc, cmd in _iter_commands())
+    for script in sorted(SCRIPTS_DIR.glob("*-hook.sh")):
+        assert script.name in all_commands, (
+            f"scripts/{script.name} ships with the plugin but no hooks.json "
+            f"command references it"
+        )
+
+
 def test_plugin_root_var_is_double_quoted():
     """${CLAUDE_PLUGIN_ROOT} must sit inside double quotes (spaces in install path).
 

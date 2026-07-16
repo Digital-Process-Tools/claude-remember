@@ -10,6 +10,16 @@
         ]
       }
     ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/user-prompt-hook.sh\""
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "hooks": [
