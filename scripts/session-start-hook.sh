@@ -37,7 +37,12 @@
 #
 # ============================================================================
 
-source "$(dirname "$0")/resolve-paths.sh"
+# resolve-paths.sh signals failure via `return`, not `exit` — it's a sourced
+# library, and a bare `exit` there would kill this whole hook process, which
+# is documented to never block session startup. Most likely to fail here for
+# a NESTED `claude -p` session (e.g. the remember pipeline's own Haiku call):
+# it has no CLAUDE_PROJECT_DIR and isn't a real project, so just no-op.
+source "$(dirname "$0")/resolve-paths.sh" || exit 0
 source "$(dirname "$0")/detect-tools.sh"
 source "$(dirname "$0")/bootstrap-dirs.sh"
 PLUGIN_ROOT="$PIPELINE_DIR"

@@ -14,8 +14,17 @@
 #     3. Symlinked:   Any of the above with symlinks in the chain
 #
 # USAGE
-#   source "$(dirname "$0")/resolve-paths.sh"
+#   source "$(dirname "$0")/resolve-paths.sh" || exit <caller-appropriate-code>
 #   # Now PROJECT_DIR and PIPELINE_DIR are set and validated
+#
+#   This file is ALWAYS sourced, never executed directly, so it signals
+#   failure with `return 1` (not `exit 1`). A bare `exit` inside a sourced
+#   script terminates the CALLER's whole process immediately — fatal for
+#   session-start-hook.sh / post-tool-hook.sh, which are documented to never
+#   block the host session (see their own EXIT CODES: 0 Always). Callers
+#   must check the source's exit status and decide their own failure policy;
+#   see save-session.sh (hard-fails via `set -e`) vs. the two hook scripts
+#   (`|| exit 0`).
 #
 # ENVIRONMENT (inputs)
 #   CLAUDE_PROJECT_DIR    Project root (set by Claude Code hooks)
@@ -25,8 +34,9 @@
 #   PROJECT_DIR           Resolved project root (validated to exist)
 #   PIPELINE_DIR          Resolved plugin root (validated to exist)
 #
-# EXIT CODES
-#   1   Path resolution failed (PROJECT_DIR or PIPELINE_DIR not found)
+# RETURN CODES
+#   1   Path resolution failed (PROJECT_DIR or PIPELINE_DIR not found) —
+#       caller must check `|| ...`, this script never exits the caller itself.
 #
 # ============================================================================
 
@@ -60,7 +70,7 @@ else
     if [ -d "$_log_dir" ]; then
         echo "$(date '+%H:%M:%S') [resolve] $_msg" >> "$_log_dir/memory-$(date '+%Y-%m-%d').log" 2>/dev/null
     fi
-    exit 1
+    return 1
 fi
 
 # --- Resolve PROJECT_DIR (the user's project root) ---
@@ -81,7 +91,7 @@ else
     if [ -d "$_log_dir" ]; then
         echo "$(date '+%H:%M:%S') [resolve] $_msg" >> "$_log_dir/memory-$(date '+%Y-%m-%d').log" 2>/dev/null
     fi
-    exit 1
+    return 1
 fi
 
 # --- Windows shell normalization (Git Bash / MSYS / Cygwin) ----------------
@@ -110,13 +120,13 @@ esac
 if [ ! -d "$PROJECT_DIR" ]; then
     _msg="FATAL: PROJECT_DIR does not exist: $PROJECT_DIR"
     echo "$_msg" >&2
-    exit 1
+    return 1
 fi
 
 if [ ! -d "$PIPELINE_DIR" ]; then
     _msg="FATAL: PIPELINE_DIR does not exist: $PIPELINE_DIR"
     echo "$_msg" >&2
-    exit 1
+    return 1
 fi
 
 # --- Export for subprocesses (critical for nohup) ---
