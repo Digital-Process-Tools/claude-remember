@@ -64,14 +64,29 @@ elif cmd == "call-haiku":
     if os.environ.get("STUB_HAIKU_FAIL") == "1":
         sys.stderr.write("stub: simulated haiku failure\\n")
         sys.exit(1)
+    # The NDC call passes extra args ("" and a timeout); the main save call
+    # passes only the prompt. That is how we tell the two apart here.
+    is_ndc = len(sys.argv) > 3
+    if is_ndc and os.environ.get("STUB_APPEND_DURING_NDC"):
+        # Stand in for a *newer* save appending to now.md while this
+        # compression is in flight — the #142 window.
+        with open(os.environ["STUB_MEMORY_FILE"], "a") as f:
+            f.write(os.environ["STUB_APPEND_DURING_NDC"])
     fd, path = tempfile.mkstemp(suffix="-haiku")
     with os.fdopen(fd, "w") as f:
-        f.write("SKIP\\n")
-    print("IS_SKIP=true")
+        if is_ndc:
+            f.write("## 2026-07-25\\n\\n- compressed summary\\n")
+        elif os.environ.get("STUB_HAIKU_SKIP", "1") == "1":
+            f.write("SKIP\\n")
+        else:
+            f.write("## 10:00 | main\\n\\n- did some work\\n")
+    print("IS_SKIP=" + ("false" if (is_ndc or os.environ.get("STUB_HAIKU_SKIP", "1") != "1") else "true"))
     print(f"HAIKU_TEXT_FILE={path}")
     print("TK_IN=0"); print("TK_OUT=0"); print("TK_CACHE=0"); print("TK_COST=0")
 elif cmd == "build-ndc-prompt":
-    open(sys.argv[3], "w").close()
+    # Must be non-empty: save-session.sh gates the NDC run on `[ -s ... ]`.
+    with open(sys.argv[3], "w") as f:
+        f.write("compress this now.md\\n")
 '''
 
 
@@ -119,6 +134,7 @@ def _make_env(tmp_path: Path, *, exchanges: int, humans: int, position: int = 50
         "STUB_POSITION": str(position),
         "STUB_HUMAN_COUNT": str(humans),
         "STUB_EXCHANGE_COUNT": str(exchanges),
+        "STUB_MEMORY_FILE": str(project / ".remember" / "now.md"),
     }
     return env, project, plugin, calls_log, session_id
 

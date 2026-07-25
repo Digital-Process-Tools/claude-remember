@@ -329,7 +329,23 @@ if [ "$RUN_NDC" = true ]; then
                 if [ -n "$NDC_TEXT" ]; then
                     [ -s "$TODAY_FILE" ] && echo "" >> "$TODAY_FILE"
                     cat "$HAIKU_TEXT_FILE" >> "$TODAY_FILE"
-                    : > "$MEMORY_FILE"
+                    # Drop exactly the bytes that were compressed, not the whole
+                    # file (#142). now.md was snapshotted before the Haiku call
+                    # above, which can take up to 180s — and by then the parent
+                    # has released the save lock and exited, so a *newer* save
+                    # may well have appended an entry. `: >` erased those
+                    # entries, and their position had already been advanced, so
+                    # they were unrecoverable and nothing was logged. Keep
+                    # everything past the snapshot offset instead.
+                    NDC_TAIL=$(mktemp "${TMPDIR:-/tmp}"/remember-ndc-tail-XXXXXX)
+                    if tail -c +$(( NDC_SRC_BYTES + 1 )) "$MEMORY_FILE" > "$NDC_TAIL" 2>/dev/null; then
+                        NDC_KEPT=$(wc -c < "$NDC_TAIL" | tr -d ' ')
+                        mv "$NDC_TAIL" "$MEMORY_FILE"
+                        [ "$NDC_KEPT" -gt 0 ] && log "ndc" "kept ${NDC_KEPT}b appended during compression"
+                    else
+                        rm -f "$NDC_TAIL"
+                        : > "$MEMORY_FILE"
+                    fi
                     log_tokens "ndc" "$TK_IN" "$TK_OUT" "$TK_CACHE" "$TK_COST"
                     NDC_OUT_BYTES=$(wc -c < "$HAIKU_TEXT_FILE" | tr -d ' ')
                     [ "$NDC_SRC_BYTES" -gt 0 ] && log "ndc" "${NDC_SRC_BYTES}→${NDC_OUT_BYTES}b (-$(( (NDC_SRC_BYTES - NDC_OUT_BYTES) * 100 / NDC_SRC_BYTES ))%)"
