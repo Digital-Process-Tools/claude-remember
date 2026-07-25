@@ -467,6 +467,21 @@ def test_closed_inner_block_does_not_pass_for_the_wrappers_own_closer():
     assert out.endswith("then it was cut off"), f"content altered: {out!r}"
 
 
+def test_truncation_inside_a_bare_inner_block_still_loses_the_wrapper():
+    """The tagged and untagged truncation shapes must end up the same way.
+
+    A bare ``` cut off mid-block is textually the same shape as a pasted log
+    fenced at the top of the body — one dangling fence with content after it —
+    so the fence grammar alone read it as the leading fence's own closer and
+    kept the wrapper. What separates them is the content.
+    """
+    body = f"{BT3}markdown\n# Recent\n\n## 12:00\nRan:\n\n{BT3}\nls -la"
+    out = parse_consolidation_response(body)[0]
+    assert out.count("# Recent") == 1, f"doubled header: {out!r}"
+    assert f"{BT3}markdown" not in out, f"wrapper survived: {out!r}"
+    assert out.endswith("ls -la"), f"content altered: {out!r}"
+
+
 def test_dangling_fence_of_another_character_does_not_save_the_wrapper():
     """A stray ~~~ cannot close a ``` wrapper, so it cannot vouch for it either."""
     assert _strip_wrapping_fence(f"{BT3}markdown\nbody\n~~~") == "body\n~~~"

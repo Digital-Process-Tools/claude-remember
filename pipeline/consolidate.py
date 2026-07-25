@@ -41,6 +41,27 @@ _FENCE_OPENER = re.compile(r"^\s*(`{3,}|~{3,})\s*([A-Za-z0-9_+.-]*)\s*$")
 _WRAP_TAGS = frozenset({"", "markdown", "md", "text", "txt", "plaintext"})
 
 
+def _looks_like_a_section(body: str) -> bool:
+    """Whether a body reads as consolidation output rather than pasted content.
+
+    Used only to break a tie the fence grammar cannot: see the last branch of
+    _strip_wrapping_fence. Deliberately narrow — an entry header like
+    ``## 12:00`` is not enough, because a pasted log can carry one too.
+
+    Args:
+        body: A body with its leading fence already removed.
+
+    Returns:
+        True if the body opens as a section or still carries its envelope.
+    """
+    return (
+        body.startswith("# Recent")
+        or body.startswith("# Archive")
+        or "===RECENT===" in body
+        or "===ARCHIVE===" in body
+    )
+
+
 def _strip_wrapping_fence(text: str) -> str:
     """Strip a code fence wrapping an entire body, and nothing else.
 
@@ -67,7 +88,9 @@ def _strip_wrapping_fence(text: str) -> str:
       dangling there can be re-read as the leading fence's own closer — but
       only if it could actually close it: bare, same character, run at least as
       long. Then the leading fence enclosed part of the content, not all of it,
-      and the whole thing is left alone;
+      and the whole thing is left alone — unless the body reads as a section,
+      because a pasted log fenced at the top and a wrap truncated inside a bare
+      code block are the same shape and only the content separates them;
     * anything else is a wrapper whose final fence never arrived — truncated
       model output — so strip just the opener. Inner blocks that all closed are
       no evidence the wrapper did, and a dangling ```bash or ~~~ could never
@@ -109,16 +132,21 @@ def _strip_wrapping_fence(text: str) -> str:
             return "\n".join(lines[1:i]).strip()
         inner = (mark, tag)
 
+    body = "\n".join(lines[1:]).strip()
     # Nothing closed the wrapper on the last line. What is left over decides:
     # a fence still open at the end of the body can be read as the leading
     # fence's own closer, but only if it could actually close it — bare, same
-    # character, run at least as long. Then the leading fence enclosed part of
-    # the content rather than all of it, and the whole thing is left alone.
-    # Anything else (everything balanced, or a dangling ```bash or ~~~ that
-    # could never close it) is a wrapper whose final fence never arrived.
+    # character, run at least as long. Anything else (everything balanced, or a
+    # dangling ```bash or ~~~ that could never close it) is a wrapper whose
+    # final fence never arrived, so only the opener goes.
     if inner is not None and not inner[1] and closer.match(inner[0]):
-        return t
-    return "\n".join(lines[1:]).strip()
+        # Grammar has run out: a pasted log fenced at the top of the body and a
+        # wrap truncated inside a bare code block are the same shape, one
+        # dangling fence with content after it. Only the content can tell them
+        # apart, and we know what the payload is supposed to look like.
+        if not _looks_like_a_section(body):
+            return t
+    return body
 
 
 class ConsolidationSkipped(Exception):
