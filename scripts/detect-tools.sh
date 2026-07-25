@@ -94,6 +94,26 @@ export JQ
 # receive the path in Unix form (/d/Users/p), which would slug differently
 # (-d-Users-p). Convert back to the Windows form via cygpath before slugging
 # so we match the actual directory Claude Code created.
+# The sed program for the slug, assembled ONCE at source time. It used to be
+# built inside session_dir_slug, where every $(printf) forked a subshell — ~20
+# of them on a function the post-tool hook calls on every single tool call.
+_remember_build_slug_sed() {
+    local c cont
+    cont="$(printf '\200')-$(printf '\277')"
+    _REMEMBER_SLUG_SED=(
+        -e "s/$(printf '\360')[$(printf '\220')-$(printf '\277')][$cont][$cont]/--/g"
+        -e "s/[$(printf '\361')-$(printf '\363')][$cont][$cont][$cont]/--/g"
+        -e "s/$(printf '\364')[$(printf '\200')-$(printf '\217')][$cont][$cont]/--/g"
+        -e "s/$(printf '\340')[$(printf '\240')-$(printf '\277')][$cont]/-/g"
+        -e "s/[$(printf '\341')-$(printf '\354')][$cont][$cont]/-/g"
+        -e "s/$(printf '\355')[$(printf '\200')-$(printf '\237')][$cont]/-/g"
+        -e "s/[$(printf '\356')-$(printf '\357')][$cont][$cont]/-/g"
+        -e "s/[$(printf '\302')-$(printf '\337')][$cont]/-/g"
+        -e 's/[^a-zA-Z0-9]/-/g'
+    )
+}
+_remember_build_slug_sed
+
 # Non-ASCII: Claude Code slugs with `s.replace(/[^a-zA-Z0-9]/g, '-')` — checked
 # in the installed CLI bundle, and note there is no /u flag. So it replaces one
 # UTF-16 CODE UNIT per dash, not one character: BMP characters (é, 日, プ) give
@@ -142,16 +162,11 @@ session_dir_slug() {
     # macOS enforces well-formed UTF-8, Windows paths come from UTF-16. If it
     # ever does, the slug misses and the hook now says so rather than sitting
     # silent, which is the whole point of the warning below.
-    local C L
-    C="$(printf '\200')-$(printf '\277')"
-    printf '%s\n' "$path" | LC_ALL=C sed \
-        -e "s/$(printf '\360')[$(printf '\220')-$(printf '\277')][$C][$C]/--/g" \
-        -e "s/[$(printf '\361')-$(printf '\363')][$C][$C][$C]/--/g" \
-        -e "s/$(printf '\364')[$(printf '\200')-$(printf '\217')][$C][$C]/--/g" \
-        -e "s/$(printf '\340')[$(printf '\240')-$(printf '\277')][$C]/-/g" \
-        -e "s/[$(printf '\341')-$(printf '\354')][$C][$C]/-/g" \
-        -e "s/$(printf '\355')[$(printf '\200')-$(printf '\237')][$C]/-/g" \
-        -e "s/[$(printf '\356')-$(printf '\357')][$C][$C]/-/g" \
-        -e "s/[$(printf '\302')-$(printf '\337')][$C]/-/g" \
-        -e 's/[^a-zA-Z0-9]/-/g'
+    # A raw newline is a legal byte in a POSIX filename (only / and NUL are
+    # not) and is sed's own record separator, so it splits the input before any
+    # s/// rule sees it and would survive into the slug untouched — missing the
+    # directory exactly the way the locale bug did. Convert it here, where bash
+    # still has the string whole.
+    path=${path//$'\n'/-}
+    printf '%s\n' "$path" | LC_ALL=C sed "${_REMEMBER_SLUG_SED[@]}"
 }

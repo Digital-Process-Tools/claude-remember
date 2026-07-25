@@ -237,3 +237,49 @@ def test_astral_characters_cost_two_dashes_not_one():
     """
     assert _bash_slug("/tmp/𠮷野家/x", "C") == "-tmp------x"
     assert _bash_slug("/tmp/emoji-🎉-dir", "C") == "-tmp-emoji----dir"
+
+
+# ── Byte-level shapes, pinned against the real regex ────────────────────────
+#
+# These are the classes successive review rounds found the sed getting wrong,
+# and none of them can be written as a Python str: they are byte sequences no
+# decoder accepts, so they go in as raw argv bytes. The expected values were
+# taken from the shipped regex run under node, which CI does not have — hence
+# literals rather than a live oracle.
+
+def _bash_slug_bytes(raw: bytes) -> str:
+    """session_dir_slug on raw argv bytes, valid UTF-8 or not."""
+    result = subprocess.run(
+        ["bash", "-c",
+         f"source {DETECT_SCRIPT}\nsession_dir_slug \"$1\"", b"_", raw],
+        capture_output=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr.decode("utf-8", "replace")
+    return result.stdout.decode("utf-8", "replace").strip()
+
+
+def test_embedded_newline_is_slugged():
+    """A newline is legal in a POSIX filename and is sed's record separator.
+
+    It never reaches an s/// rule, so it used to survive into the slug whole —
+    a path with one could never match its session directory, which is #144's
+    failure all over again on a byte that needs no exotic locale to produce.
+    """
+    assert _bash_slug_bytes(b"/Users/max/weird\nproject") == "-Users-max-weird-project"
+    assert _bash_slug_bytes(b"/tmp/two\n\nnewlines/x") == "-tmp-two--newlines-x"
+
+
+def test_malformed_utf8_costs_one_dash_per_byte():
+    """What no decoder accepts is one replacement character per byte.
+
+    The lead-byte ranges have to follow the well-formedness table for this: a
+    blanket [\\302-\\364] class swallowed surrogate and overlong forms as if
+    they were characters, and an unbounded continuation run swallowed the lone
+    bytes after a valid sequence.
+    """
+    assert _bash_slug_bytes(b"/tmp/\xed\xa0\x80/x") == "-tmp-----x"    # surrogate
+    assert _bash_slug_bytes(b"/tmp/\xe0\x80\x80/x") == "-tmp-----x"    # overlong 3-byte
+    assert _bash_slug_bytes(b"/tmp/\xc0\x80/x") == "-tmp----x"         # overlong 2-byte
+    assert _bash_slug_bytes(b"/tmp/\xf5\x80\x80\x80/x") == "-tmp------x"  # > U+10FFFF
+    assert _bash_slug_bytes(b"/tmp/\x80/x") == "-tmp---x"              # lone continuation
+    assert _bash_slug_bytes(b"/tmp/\xc2\x80\x80\x80/x") == "-tmp-----x"  # valid, then two lone
