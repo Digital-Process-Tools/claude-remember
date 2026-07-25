@@ -13,6 +13,7 @@ Rules:
 - No fluff, no preamble — just the entry block
 - Do NOT include markdown fences or any other formatting
 - If the conversation covers the SAME work as the previous entry with no meaningful new progress, return exactly the word SKIP — nothing else
+- If the conversation contains no substantive work at all, return exactly the word SKIP — nothing else. Session-boundary chatter is not work: a greeting, a handoff or orientation summary, a readiness message ("I've loaded your context", "Recent work: …"), a question back to the human ("What's next?"), or the human merely acknowledging and continuing. Summarizing one of those records the greeting as if it were the work done.
 
 Previous entry for context (do not repeat it):
 ---

@@ -268,7 +268,58 @@ HAIKU_TEXT=$(cat "$HAIKU_TEXT_FILE")
 if [ "$IS_SKIP" != "true" ]; then
     FIRST_LINE=$(head -1 "$HAIKU_TEXT_FILE")
     if ! echo "$FIRST_LINE" | grep -qE '^## ([0-9]{2}:[0-9]{2}|[0-9]{1,2}:[0-9]{2} (AM|PM)) \|'; then
-        log "validate" "WARNING: unexpected format: $(echo "$FIRST_LINE" | head -c 80)"
+        # Not an entry header, so it is not an entry. It used to be logged as a
+        # warning and appended anyway (#136), which put a permission prompt in
+        # one reporter's now.md — and memory is a summary of summaries, so a
+        # bad line does not fade: now.md rolls into today-*.md, then recent.md,
+        # then archive.md, each hop compressing it as though it were real work.
+        #
+        # Dropped rather than kept, but never destroyed: the text goes to
+        # tmp/rejected-*.md, so nothing is lost, it simply does not enter the
+        # compression chain. The position still advances, exactly as a SKIP
+        # does, or this span would be re-summarized on every run forever.
+        REJECT_FILE="${REMEMBER_DIR}/tmp/rejected-$(_remember_date +%Y%m%d-%H%M%S).md"
+        mkdir -p "${REMEMBER_DIR}/tmp" 2>/dev/null
+        cp "$HAIKU_TEXT_FILE" "$REJECT_FILE" 2>/dev/null
+        log "validate" "REJECTED (not an entry header): $(echo "$FIRST_LINE" | head -c 80)"
+        log "validate" "rejected text kept at $REJECT_FILE"
+        # Keep the last 20; these are diagnostic, not memory.
+        ls -t "${REMEMBER_DIR}"/tmp/rejected-*.md 2>/dev/null | tail -n +21 | while read -r _old; do
+            rm -f "$_old"
+        done
+        cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell save-position "$LAST_SAVE_FILE" "$SESSION_ID" "$POSITION"
+        log "validate" "position → $POSITION"
+        rm -f "$FAILURE_MARKER"
+        exit 0
+    else
+        # --- Step 5c: take the header time back off the model (#139) ---
+        # The prompt injects {{TIME}} and says to copy it verbatim, but the
+        # model reads a transcript full of other timestamps and sometimes
+        # stamps one of those instead. The check above cannot see it — a wrong
+        # time is still a well-formed one — so entries landed hours out of
+        # order with nothing logged. This is the one field the pipeline knows
+        # better than the model, so overwrite rather than validate. A no-op
+        # when the model copied it correctly.
+        # Split on the pipe itself, not on " | ". The check above only demands a
+        # space BEFORE the pipe, so "## 18:30 |main" passes it — and a literal
+        # " | " match then finds nothing to strip, leaving the whole original
+        # line as the "rest" and writing "## 00:00 | ## 18:30 |main". That is
+        # worse than the wrong time it was meant to fix. Any pipes after the
+        # first belong to the branch name and are left alone.
+        HEADER_REST="${FIRST_LINE#*|}"
+        HEADER_REST="${HEADER_REST# }"
+        NEW_FIRST_LINE="## ${CURRENT_TIME} | ${HEADER_REST}"
+        # Never write a header that would not pass the check above.
+        if ! echo "$NEW_FIRST_LINE" | grep -qE '^## ([0-9]{2}:[0-9]{2}|[0-9]{1,2}:[0-9]{2} (AM|PM)) \|'; then
+            log "validate" "WARNING: refusing to rewrite header, result malformed: $(echo "$NEW_FIRST_LINE" | head -c 60)"
+            NEW_FIRST_LINE="$FIRST_LINE"
+        fi
+        if [ "$NEW_FIRST_LINE" != "$FIRST_LINE" ]; then
+            NORMALIZED=$(mktemp "${TMPDIR:-/tmp}"/remember-header-XXXXXX)
+            { printf '%s\n' "$NEW_FIRST_LINE"; tail -n +2 "$HAIKU_TEXT_FILE"; } > "$NORMALIZED"
+            mv "$NORMALIZED" "$HAIKU_TEXT_FILE"
+            log "validate" "header time corrected to $CURRENT_TIME (model wrote: $(echo "$FIRST_LINE" | head -c 40))"
+        fi
     fi
 fi
 

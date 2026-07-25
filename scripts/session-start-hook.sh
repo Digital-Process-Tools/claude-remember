@@ -74,11 +74,25 @@ SESSIONS_DIR="$HOME/.claude/projects/${PROJECT_PATH_SLUG}"
 LAST_SAVE_FILE="$REMEMBER_DIR/tmp/last-save.json"
 
 if [ -d "$SESSIONS_DIR" ] && [ -f "$LAST_SAVE_FILE" ]; then
-    SAVED_ID=$($JQ -r '.session // ""' "$LAST_SAVE_FILE" 2>/dev/null)
     LAST_JSONL=$(ls -t "$SESSIONS_DIR"/*.jsonl 2>/dev/null | tail -n +2 | head -1)
     if [ -n "$LAST_JSONL" ]; then
         LAST_ID=$(basename "$LAST_JSONL" .jsonl)
-        if [ "$LAST_ID" != "$SAVED_ID" ]; then
+        # Ask whether this session was EVER saved, not whether it owns the one
+        # slot: positions are keyed by session now, and the old equality test
+        # force-saved an already-saved session whenever another had saved since
+        # (issue #140). Legacy single-slot files still answer correctly.
+        # Type-check the value, not just the key: the python readers require an
+        # int, so `has($id)` alone would call a corrupt {"id": null} entry saved
+        # while they resume it from 0 — re-summarizing the whole span, which is
+        # what #140 exists to prevent.
+        # isinfinite guard: JSON has no infinity literal, but 1e400 overflows to
+        # one, and floor(infinite) == infinite — so it would read as a line
+        # number here while python's is_integer() rejects it. jq would then call
+        # the session saved and the recovery force-save below would never fire,
+        # losing that session's tail entirely.
+        SAVED_QUERY='def isline: type == "number" and ((isnan or isinfinite) | not) and . == floor; if (((.sessions // {})[$id]) | isline) or (.session == $id and (.line | isline)) then "saved" else "unsaved" end'
+        SAVED_STATE=$($JQ -r --arg id "$LAST_ID" "$SAVED_QUERY" "$LAST_SAVE_FILE" 2>/dev/null)
+        if [ "$SAVED_STATE" != "saved" ]; then
             "$PLUGIN_ROOT/scripts/save-session.sh" "$LAST_ID" --force </dev/null >/dev/null 2>&1 & disown 2>/dev/null || true
         fi
     fi

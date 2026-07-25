@@ -17,8 +17,10 @@ are exercised without a Haiku call.
 
 import json
 import os
+import re
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -76,11 +78,15 @@ elif cmd == "call-haiku":
     with os.fdopen(fd, "w") as f:
         if is_ndc:
             f.write("## 2026-07-25\\n\\n- compressed summary\\n")
+        elif os.environ.get("STUB_HAIKU_TEXT"):
+            f.write(os.environ["STUB_HAIKU_TEXT"])
         elif os.environ.get("STUB_HAIKU_SKIP", "1") == "1":
             f.write("SKIP\\n")
         else:
             f.write("## 10:00 | main\\n\\n- did some work\\n")
-    print("IS_SKIP=" + ("false" if (is_ndc or os.environ.get("STUB_HAIKU_SKIP", "1") != "1") else "true"))
+    skipping = (os.environ.get("STUB_HAIKU_SKIP", "1") == "1"
+                and not os.environ.get("STUB_HAIKU_TEXT"))
+    print("IS_SKIP=" + ("false" if (is_ndc or not skipping) else "true"))
     print(f"HAIKU_TEXT_FILE={path}")
     print("TK_IN=0"); print("TK_OUT=0"); print("TK_CACHE=0"); print("TK_COST=0")
 elif cmd == "build-ndc-prompt":
@@ -149,6 +155,16 @@ def _run(plugin: Path, env: dict, session_id: str, *args: str):
 def _saved_position(project: Path):
     f = project / ".remember" / "tmp" / "last-save.json"
     return json.loads(f.read_text())["line"] if f.is_file() else None
+
+
+def _suppress_ndc(project: Path):
+    """Stop the background NDC run from draining now.md mid-assertion.
+
+    features.ndc_compression is documented but read nowhere, so the only
+    working brake is the cooldown marker (ndc_seconds is 999999 here).
+    """
+    import time
+    (project / ".remember" / "tmp" / "last-ndc.ts").write_text(str(int(time.time())))
 
 
 class TestNoWorkSessionAdvancesPosition:
@@ -301,3 +317,154 @@ class TestSummaryFailureLoop:
 
         marker = project / ".remember" / "tmp" / "last-summary-failure"
         assert not marker.exists(), "a successful save must reset the failure count"
+
+
+class TestHeaderTimeIsTakenBackOffTheModel:
+    """The prompt injects {{TIME}} and says to copy it, but the model reads a
+    transcript full of other timestamps and sometimes stamps one of those. The
+    format check cannot see it — a wrong time is a well-formed one — so entries
+    landed hours out of order with nothing logged (#139)."""
+
+    def test_a_wrong_time_is_overwritten_with_the_scripts_own(self, tmp_path):
+        env, project, plugin, calls, sid = _make_env(tmp_path, exchanges=6, humans=5)
+        env["STUB_HAIKU_TEXT"] = "## 18:30 | main\n\n- did some work\n"
+        _suppress_ndc(project)
+        result = _run(plugin, env, sid)
+        assert result.returncode == 0, result.stderr
+
+        header = (project / ".remember" / "now.md").read_text().strip().splitlines()[0]
+        logs = "".join(p.read_text() for p in (project / ".remember" / "logs").glob("*.log"))
+        assert "header time corrected" in logs, f"no correction logged:\n{logs}"
+
+        corrected = re.search(r"header time corrected to (\S+)", logs).group(1)
+        assert header == f"## {corrected} | main", (
+            f"header kept the model's time instead of the script's: {header!r}"
+        )
+
+    def test_the_branch_and_body_survive_the_rewrite(self, tmp_path):
+        """Only the time is the pipeline's to know — the rest is the model's."""
+        env, project, plugin, calls, sid = _make_env(tmp_path, exchanges=6, humans=5)
+        env["STUB_HAIKU_TEXT"] = "## 18:30 | feature/some-branch\n\n- fixed the thing\n"
+        _suppress_ndc(project)
+        result = _run(plugin, env, sid)
+        assert result.returncode == 0, result.stderr
+
+        written = (project / ".remember" / "now.md").read_text()
+        assert "| feature/some-branch" in written, f"branch lost: {written!r}"
+        assert "- fixed the thing" in written, f"body lost: {written!r}"
+
+    def test_a_correct_time_is_left_alone(self, tmp_path):
+        """The rewrite is a no-op when the model copied the time properly."""
+        env, project, plugin, calls, sid = _make_env(tmp_path, exchanges=6, humans=5)
+        now = datetime.now().strftime("%H:%M")
+        env["STUB_HAIKU_TEXT"] = f"## {now} | main\n\n- did some work\n"
+        _suppress_ndc(project)
+        result = _run(plugin, env, sid)
+        assert result.returncode == 0, result.stderr
+
+        logs = "".join(p.read_text() for p in (project / ".remember" / "logs").glob("*.log"))
+        header = (project / ".remember" / "now.md").read_text().strip().splitlines()[0]
+        # Tolerate the minute rolling over between the two clock reads.
+        if "header time corrected" in logs:
+            corrected = re.search(r"header time corrected to (\S+)", logs).group(1)
+            assert header == f"## {corrected} | main"
+        else:
+            assert header == f"## {now} | main"
+
+
+class TestMalformedOutputNeverReachesMemory:
+    """A response that is not an entry header is not an entry. It used to be
+    logged as a warning and appended anyway, which put a permission prompt in
+    one reporter's now.md — and memory is a summary of summaries, so it does
+    not fade, it gets compressed downstream as though it were work (#136)."""
+
+    MALFORMED = "Bash needs approval to SSH into preface-vps and check. Shall I proceed?\n"
+
+    def test_malformed_output_is_not_appended(self, tmp_path):
+        env, project, plugin, calls, sid = _make_env(tmp_path, exchanges=6, humans=5)
+        env["STUB_HAIKU_TEXT"] = self.MALFORMED
+        _suppress_ndc(project)
+        result = _run(plugin, env, sid)
+        assert result.returncode == 0, result.stderr
+
+        # Check every memory file, not just now.md: compression moves entries
+        # on, so asserting only on now.md passes whether the junk was rejected
+        # or merely relayed into today-*.md.
+        remember = project / ".remember"
+        written = "".join(
+            f.read_text() for f in remember.glob("*.md") if f.is_file()
+        )
+        assert "needs approval" not in written, f"junk reached memory: {written!r}"
+
+    def test_malformed_output_is_kept_for_inspection(self, tmp_path):
+        """Dropped from memory, but never destroyed."""
+        env, project, plugin, calls, sid = _make_env(tmp_path, exchanges=6, humans=5)
+        env["STUB_HAIKU_TEXT"] = self.MALFORMED
+        _run(plugin, env, sid)
+
+        rejects = list((project / ".remember" / "tmp").glob("rejected-*.md"))
+        assert len(rejects) == 1, f"nothing quarantined: {rejects}"
+        assert "needs approval" in rejects[0].read_text()
+
+    def test_malformed_output_still_advances_the_position(self, tmp_path):
+        """Otherwise the same span is re-summarized on every run, forever."""
+        env, project, plugin, calls, sid = _make_env(tmp_path, exchanges=6, humans=5,
+                                                     position=904)
+        env["STUB_HAIKU_TEXT"] = self.MALFORMED
+        _run(plugin, env, sid)
+
+        assert _saved_position(project) == 904
+
+    def test_rejected_files_do_not_accumulate(self, tmp_path):
+        """They are diagnostic, not memory — keep the last 20."""
+        env, project, plugin, calls, sid = _make_env(tmp_path, exchanges=6, humans=5)
+        tmpdir = project / ".remember" / "tmp"
+        for i in range(25):
+            (tmpdir / f"rejected-2026010{i // 10}-{i:06d}.md").write_text("old\n")
+        env["STUB_HAIKU_TEXT"] = self.MALFORMED
+        _run(plugin, env, sid)
+
+        rejects = list(tmpdir.glob("rejected-*.md"))
+        assert len(rejects) <= 20, f"{len(rejects)} rejected files kept"
+
+
+class TestNoWorkSkipRule:
+
+    def test_prompt_tells_the_model_to_skip_a_no_work_session(self):
+        """#119's cause is prompt-side: the only SKIP was for repeated work, so
+        a greeting or handoff got faithfully summarized as the work done."""
+        prompt = (REPO_ROOT / "prompts" / "save-session.prompt.txt").read_text()
+        assert "no substantive work" in prompt, "the no-work SKIP rule is gone"
+        assert "SKIP" in prompt
+
+    def test_a_header_missing_the_space_after_the_pipe_is_not_corrupted(self):
+        """The format check only demands a space BEFORE the pipe.
+
+        So "## 18:30 |main" reaches the rewrite, and splitting on a literal
+        " | " found nothing to strip — the whole original line became the
+        "rest" and the entry was written as "## 00:00 | ## 18:30 |main". A
+        wrong-but-readable time turned into an unreadable header, which is
+        worse than the bug the rewrite exists to fix.
+        """
+        import tempfile
+        tmp = Path(tempfile.mkdtemp())
+        env, project, plugin, calls, sid = _make_env(tmp, exchanges=6, humans=5)
+        env["STUB_HAIKU_TEXT"] = "## 18:30 |main\n\n- did some work\n"
+        _suppress_ndc(project)
+        _run(plugin, env, sid)
+
+        header = (project / ".remember" / "now.md").read_text().strip().splitlines()[0]
+        assert header.count("##") == 1, f"header duplicated: {header!r}"
+        assert header.endswith("| main"), f"branch mangled: {header!r}"
+
+    def test_a_pipe_inside_the_branch_name_survives(self):
+        """Only the FIRST pipe separates time from the rest."""
+        import tempfile
+        tmp = Path(tempfile.mkdtemp())
+        env, project, plugin, calls, sid = _make_env(tmp, exchanges=6, humans=5)
+        env["STUB_HAIKU_TEXT"] = "## 18:30 | feature/a|b\n\n- did some work\n"
+        _suppress_ndc(project)
+        _run(plugin, env, sid)
+
+        header = (project / ".remember" / "now.md").read_text().strip().splitlines()[0]
+        assert header.endswith("| feature/a|b"), f"branch truncated: {header!r}"

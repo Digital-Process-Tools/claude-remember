@@ -84,28 +84,19 @@ CURRENT_LINES=$(wc -l < "$LATEST_JSONL" | tr -d ' ')
 SESSION_ID=$(basename "$LATEST_JSONL" .jsonl)
 
 # --- Get last saved position (from last-save.json) ---
+# Positions are keyed by session (issue #140), so ask for THIS session rather
+# than whether it happens to own the one slot — two live sessions used to
+# overwrite each other and re-summarize whole spans as duplicates.
+#
+# Delegated to pipeline.shell rather than parsed here. This hook used to carry
+# its own json reader, and it drifted: every other reader learned that a bool
+# is not a position and an integral float is, while this one kept a bare
+# isinstance check and reported 0 for positions the rest of the pipeline
+# resumed from, defeating the delta throttle for the life of a session.
 LAST_LINE=0
 if [ -f "$LAST_SAVE_FILE" ]; then
-    SAVED_SESSION=$($PYTHON - "$LAST_SAVE_FILE" <<'PYEOF'
-import sys, json
-try:
-    d = json.load(open(sys.argv[1]))
-    print(d.get('session', ''))
-except Exception:
-    print('')
-PYEOF
-    )
-    if [ "$SAVED_SESSION" = "$SESSION_ID" ]; then
-        LAST_LINE=$($PYTHON - "$LAST_SAVE_FILE" <<'PYEOF'
-import sys, json
-try:
-    d = json.load(open(sys.argv[1]))
-    print(d.get('line', 0))
-except Exception:
-    print(0)
-PYEOF
-        )
-    fi
+    LAST_LINE=$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell read-position "$LAST_SAVE_FILE" "$SESSION_ID" 2>/dev/null)
+    case "$LAST_LINE" in ''|*[!0-9]*) LAST_LINE=0 ;; esac
 fi
 
 DELTA=$((CURRENT_LINES - LAST_LINE))

@@ -30,7 +30,7 @@ import json
 import os
 import sys
 
-from .extract import extract_session
+from .extract import _is_line_number, extract_session, read_positions
 from .haiku import _parse_response
 from .prompts import build_save_prompt, build_ndc_prompt
 
@@ -234,22 +234,68 @@ def cmd_call_haiku(prompt_file: str, output_file: str = "", timeout: int = 120) 
     _emit_haiku_result(r, output_file)
 
 
-def cmd_save_position(last_save_file: str, session_id: str, position: int) -> None:
-    """Write the current extraction position to last-save.json.
+#: How many sessions keep a remembered position. Interleaved work is a handful
+#: of terminals, not dozens, and the file is read on every tool call.
+_POSITION_SLOTS = 32
 
-    Stores the session ID and line number so the next extraction can
-    resume from where this one left off (incremental extraction).
+
+def cmd_save_position(last_save_file: str, session_id: str, position: int) -> None:
+    """Record the current extraction position for this session.
+
+    Positions are keyed by session ID. A single slot meant two live sessions
+    overwrote each other: A saves, B saves, and A's next save no longer
+    recognises its own ID, resumes from 0, and re-summarizes its whole span as
+    duplicate entries (issue #140). Sessions interleave whenever someone runs
+    two terminals, or a background/worktree session shares the store.
+
+    The newest ``_POSITION_SLOTS`` sessions are kept, oldest evicted first.
+    ``session``/``line`` are still written as a mirror of the most recent save,
+    so a reader from an older install — or one mid-upgrade — keeps working.
 
     Args:
         last_save_file: Path to the last-save.json file.
         session_id: UUID of the session being saved.
         position: JSONL line number to resume from next time.
     """
+    sessions = read_positions(last_save_file)
+    # Re-insert at the end: dicts keep insertion order, so the oldest entry is
+    # simply the first one, and a session that keeps saving keeps its slot.
+    sessions.pop(session_id, None)
+    sessions[session_id] = position
+    while len(sessions) > _POSITION_SLOTS:
+        del sessions[next(iter(sessions))]
+
+    payload = {"sessions": sessions, "session": session_id, "line": position}
     # Strict: machine-written structured JSON. session_id is an ASCII UUID
     # (regex-validated upstream) and position is an int, so this never raises;
     # keeping it strict avoids silently U+FFFD-corrupting the recovery file.
-    with open(last_save_file, "w", encoding="utf-8") as f:
-        json.dump({"session": session_id, "line": position}, f)
+    #
+    # Written via a temp file and renamed: the read-merge-write above is not
+    # atomic, and a reader hitting the file mid-write would see truncated JSON
+    # and resume from 0 — the very duplicate this is fixing.
+    tmp = f"{last_save_file}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f)
+    os.replace(tmp, last_save_file)
+
+
+def cmd_read_position(last_save_file: str, session_id: str) -> None:
+    """Print the saved position for a session, or 0.
+
+    Exists so scripts/post-tool-hook.sh does not need its own JSON parser.
+    It had one, and it drifted: while every other reader was taught that a
+    bool is not a position and an integral float is, that copy kept a bare
+    isinstance check and reported 0 for a position the rest of the pipeline
+    resumed from. Five copies of this rule was four too many.
+
+    Args:
+        last_save_file: Path to the last-save.json file.
+        session_id: Session whose position is wanted.
+
+    Prints:
+        The line number, or 0 when this session has no usable position.
+    """
+    print(read_positions(last_save_file).get(session_id, 0))
 
 
 def _rotate_archive(archive_file: str) -> str | None:
@@ -441,6 +487,8 @@ def main() -> None:
         output_file = sys.argv[3] if len(sys.argv) > 3 else ""
         timeout = int(sys.argv[4]) if len(sys.argv) > 4 else 120
         cmd_call_haiku(prompt_file=sys.argv[2], output_file=output_file, timeout=timeout)
+    elif cmd == "read-position":
+        cmd_read_position(last_save_file=sys.argv[2], session_id=sys.argv[3])
     elif cmd == "save-position":
         cmd_save_position(
             last_save_file=sys.argv[2],
