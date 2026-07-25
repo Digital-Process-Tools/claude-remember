@@ -29,6 +29,15 @@ source "$PIPELINE_DIR/scripts/log.sh"
 REPO_ROOT=$(dirname "$REMEMBER_DIR")
 SLUG=$(basename "$REMEMBER_DIR")
 
+# Prevent outer git env vars from overriding git -C behaviour. This must happen
+# *before* the activation guards below, not just inside the worker subshell: a
+# leaked GIT_DIR (bare-repo dotfiles setups that export it, or invocation from
+# inside another git hook) makes every `git -C … rev-parse` resolve against the
+# leaked repo instead of the directory we asked about — collapsing both sides of
+# the #138 common-dir comparison onto the same wrong value. The guards are the
+# code that most needs the sanitization, so they get it first.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+
 # Legacy mode (REMEMBER_DIR is inside PROJECT_DIR) → never run.
 [ "$REPO_ROOT" = "$PROJECT_DIR" ] && exit 0
 

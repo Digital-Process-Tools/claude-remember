@@ -763,3 +763,34 @@ class TestGitBackupNeverTouchesProjectRepo:
         commits = _commit_log(remember)
         assert len(commits) == 2, "external backup must still commit for worktree sessions"
         assert commits[0].split(" ", 1)[1].startswith(f"auto: {slug}")
+
+    def test_leaked_git_dir_does_not_disable_the_guard(self, tmp_path):
+        """A leaked GIT_DIR must not make every `git -C` resolve to the same repo.
+
+        `git -C DIR rev-parse` honours an exported GIT_DIR over `-C`, so without
+        sanitizing the environment first, both sides of the common-dir comparison
+        collapse onto the leaked repo, compare equal, and the hook skips every
+        backup — including legitimate external ones.
+        """
+        home, remember, _ = make_external_remember_repo(tmp_path)
+        _main, worktree = _make_worktree_project(tmp_path)
+        slug = "test-slug"
+        slug_dir = remember / slug
+        slug_dir.mkdir()
+        (slug_dir / "now.md").write_text("## 10:00 | test\nMemory.\n")
+        cfg = _make_config(tmp_path, cooldown=0)
+
+        leaked = tmp_path / "unrelated"
+        leaked.mkdir()
+        _git(leaked, ["init", "-q"])
+
+        result = _run_hook(
+            slug_dir, worktree, home, config_path=cfg,
+            extra_env={"GIT_DIR": str(leaked / ".git"), "GIT_WORK_TREE": str(leaked)},
+        )
+        assert result.returncode == 0
+        wait_for_lock_release(remember / ".git-backup.lock")
+
+        assert len(_commit_log(remember)) == 2, \
+            "leaked GIT_DIR must not suppress a legitimate external backup"
+        assert _commit_log(leaked) == [], "the leaked repo must never be committed to"
