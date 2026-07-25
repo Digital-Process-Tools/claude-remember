@@ -67,6 +67,46 @@ def _is_line_number(value: object) -> bool:
     return isinstance(value, float) and value.is_integer()
 
 
+
+def read_positions(last_save_file: str) -> dict[str, int]:
+    """Read the session→position map, tolerating every shape the file can take.
+
+    THE one implementation. It lived in two python modules and drifted twice:
+    this module's copy was missing the top-level type guard below, so a file
+    that was valid JSON but not an object (``[]``, ``null``, ``42`` — a
+    truncated write landing on a byte boundary that still parses, or a hand
+    edit) raised AttributeError inside extract_session. That runs in a
+    backgrounded, disowned process with stderr discarded, so the save died
+    silently and kept dying on every later run while the file stayed that
+    shape. Lost memory, with nothing to notice it by.
+
+    Args:
+        last_save_file: Path to the last-save.json file.
+
+    Returns:
+        Mapping of session ID to line number; empty if unreadable.
+    """
+    try:
+        # Strict on purpose: this is machine-written structured JSON, not user
+        # prose. A corrupt byte must fail cleanly (-> resume from the start)
+        # rather than be patched with U+FFFD into a wrong line number that
+        # silently skips or re-processes messages.
+        with open(last_save_file, encoding="utf-8") as f:
+            data = json.load(f)
+    except (ValueError, OSError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    sessions = data.get("sessions")
+    if isinstance(sessions, dict):
+        return {k: int(v) for k, v in sessions.items() if _is_line_number(v)}
+    # Pre-#140 file: one session, one line. Carry it over rather than dropping
+    # it, or the first save after an upgrade re-summarizes from the start.
+    if isinstance(data.get("session"), str) and _is_line_number(data.get("line")):
+        return {data["session"]: int(data["line"])}
+    return {}
+
+
 def _last_save_path(project_dir: str, remember_dir: str | None = None) -> str:
     """Return the path to last-save.json for incremental extraction.
 
@@ -136,29 +176,7 @@ def get_last_save_line(session_id: str,
         Line number (0-indexed) to resume extraction from, or 0.
     """
     path = _last_save_path(project_dir, remember_dir)
-    if not os.path.exists(path):
-        return 0
-    try:
-        # Strict on purpose: this is machine-written structured JSON, not user
-        # prose. A corrupt byte must fail cleanly (-> return 0, re-extract from
-        # the start) rather than be patched with U+FFFD into a wrong line number
-        # that silently skips or re-processes messages. ValueError covers both
-        # JSONDecodeError and UnicodeDecodeError.
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-        sessions = data.get("sessions")
-        if isinstance(sessions, dict):
-            line = sessions.get(session_id, 0)
-            return int(line) if _is_line_number(line) else 0
-        if data.get("session") == session_id:
-            # Type-checked like the keyed branch above: a null or string line in
-            # a hand-edited or truncated file would otherwise be handed back to
-            # callers that expect an int.
-            line = data.get("line", 0)
-            return int(line) if _is_line_number(line) else 0
-    except (ValueError, KeyError, OSError):
-        pass
-    return 0
+    return read_positions(path).get(session_id, 0)
 
 
 def count_lines(path: str) -> int:

@@ -285,3 +285,36 @@ def test_the_post_tool_hook_does_not_parse_the_store_itself():
     hook = (REPO_ROOT / "scripts" / "post-tool-hook.sh").read_text()
     assert "read-position" in hook, "the hook no longer delegates to the shared reader"
     assert "json.load" not in hook, "the hook is parsing last-save.json itself again"
+
+
+@pytest.mark.parametrize("payload", ["[]", "null", "42", "true", '"hello"', '[{"sessions": {}}]'])
+def test_a_top_level_that_is_not_an_object_reads_as_empty(payload, store):
+    """Valid JSON of the wrong shape must not crash the save.
+
+    get_last_save_line had no isinstance(data, dict) guard and its except
+    clause did not catch AttributeError, so `[]` or `null` raised inside
+    extract_session — which runs backgrounded, disowned, with stderr
+    discarded. The save died silently and kept dying while the file stayed
+    that shape: lost memory with nothing to notice it by. The other copy of
+    this reader had the guard; that is what two implementations buys you.
+    """
+    remember, path = store
+    Path(path).write_text(payload, encoding="utf-8")
+    assert get_last_save_line(SESSION_A, remember_dir=str(remember)) == 0
+
+
+def test_the_two_modules_share_one_reader():
+    """shell.py must not grow its own copy again.
+
+    It had one, and it drifted twice — first missing the bool rule, then
+    holding the top-level guard the other lacked. Three review rounds in a
+    row found a copy that had missed an update.
+    """
+    import pipeline.extract as extract_mod
+    import pipeline.shell as shell_mod
+
+    assert shell_mod.read_positions is extract_mod.read_positions
+    assert shell_mod._is_line_number is extract_mod._is_line_number
+    source = (REPO_ROOT / "pipeline" / "shell.py").read_text()
+    assert "def read_positions" not in source, "shell.py defined its own reader again"
+    assert "def _is_line_number" not in source, "shell.py defined its own predicate again"
