@@ -63,10 +63,12 @@ def _strip_wrapping_fence(text: str) -> str:
       depth zero. A bare ``` opening an inner block is textually identical to a
       closer, so the body has to be walked with a fence stack rather than
       scanned for the first match;
-    * if a block opened in the body never closes, the leading fence is that
-      block's own opener, not a wrapper — leave the content alone;
-    * an opener whose closer never arrives is truncated model output — strip
-      just the opener, leaving any inner blocks intact.
+    * a closer anywhere else in the body means the leading fence enclosed part
+      of the content rather than all of it, so the whole thing is left alone;
+    * an opener whose closer never arrives at all is truncated model output —
+      strip just the opener, leaving the inner blocks intact, including one the
+      truncation cut open. A dangling inner fence says nothing about whether
+      the leading fence wraps, so it must not decide the question.
 
     Args:
         text: A body, before header normalization.
@@ -104,12 +106,12 @@ def _strip_wrapping_fence(text: str) -> str:
             return "\n".join(lines[1:i]).strip()
         inner = mark
 
-    if inner is not None:
-        # A block opened in the body never closed, so the leading fence is that
-        # block's own opener, not a wrapper. Leave the content exactly as it is.
+    # Nothing closed the wrapper on the last line. Either the leading fence has
+    # a closer of its own inside the body — so it fenced part of the content,
+    # not all of it, and the whole thing is left alone — or no closer ever
+    # arrives and the model simply dropped its final fence.
+    if any(closer.match(line) for line in lines[1:-1]):
         return t
-    # Every inner block is balanced and none of them closed the wrapper: the
-    # model dropped its final fence. Strip just the opener.
     return "\n".join(lines[1:]).strip()
 
 

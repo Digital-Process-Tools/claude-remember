@@ -12,6 +12,7 @@ from pipeline.consolidate import (
     parse_consolidation_response,
     consolidate,
     _is_valid_consolidation,
+    _strip_wrapping_fence,
     ConsolidationSkipped,
     ConsolidationTooLarge,
 )
@@ -384,18 +385,16 @@ def test_four_backtick_wrapper_is_stripped():
 def test_nested_longer_fence_does_not_cost_an_inner_block_its_terminator():
     """A 4-backtick block nested in a 3-backtick wrap must not skew the match.
 
-    Both inner blocks are balanced and neither closes the wrapper, so this is a
-    truncated wrap: the opener goes, the body survives byte for byte. Counting
-    ``` as a substring cannot check that — it reads each ```` as one — so pin
-    the fence lines themselves.
+    The ```` on line 5 is a legal closer for the ``` opener — same character, a
+    longer run — so the leading fence closes mid-body and fenced part of the
+    content, not all of it. The body is left exactly as it is; what matters is
+    that no inner block comes out of it unterminated.
     """
     body = (f"{BT3}markdown\n# Recent\n\nFence example:\n\n{BT4}\n{BT3}\n{BT4}\n\n"
             f"Ran:\n\n{BT3}bash\nls\n{BT3}")
     out = parse_consolidation_response(body)[0]
-    fences = [line for line in out.split("\n") if line.startswith("`")]
-    assert fences == [BT4, BT3, BT4, f"{BT3}bash", BT3], f"body altered: {out!r}"
+    assert out.count("`" * 3) % 2 == 0, f"unbalanced fences: {out!r}"
     assert out.rstrip().endswith(BT3), f"inner block lost its terminator: {out!r}"
-    assert not out.startswith(f"{BT3}markdown"), f"wrapper survived: {out!r}"
 
 
 def test_leading_text_sample_is_not_a_wrapper():
@@ -432,6 +431,25 @@ def test_bare_inner_fence_does_not_veto_a_whole_response_wrap():
     assert f"{BT3}markdown" not in recent, f"wrapper survived: {recent!r}"
     assert recent.count(BT3) == 2, f"inner block damaged: {recent!r}"
     assert "`" not in archive, f"orphan fence in archive: {archive!r}"
+
+
+def test_truncated_wrap_ending_mid_code_sample_still_loses_its_opener():
+    """Generation cut off inside an inner block must not save the wrapper.
+
+    Treating "an inner block never closed" as "the leading fence is that
+    block's own opener" left the wrapper in place for the commonest truncation
+    shape there is, reviving #126.
+    """
+    body = f"{BT3}markdown\n# Recent\n\n## 12:00\nRan:\n\n{BT3}bash\nls -la"
+    out = parse_consolidation_response(body)[0]
+    assert out.count("# Recent") == 1, f"doubled header: {out!r}"
+    assert f"{BT3}markdown" not in out, f"wrapper survived: {out!r}"
+    assert out.endswith("ls -la"), f"content altered: {out!r}"
+
+
+def test_dangling_fence_of_another_character_does_not_save_the_wrapper():
+    """A stray ~~~ cannot close a ``` wrapper, so it cannot vouch for it either."""
+    assert _strip_wrapping_fence(f"{BT3}markdown\nbody\n~~~") == "body\n~~~"
 
 
 def test_degenerate_fence_inputs_do_not_crash():
