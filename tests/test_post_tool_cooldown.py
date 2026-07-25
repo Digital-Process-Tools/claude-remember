@@ -20,6 +20,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Optional
 
 import pytest
 
@@ -37,7 +38,7 @@ def _slug(path: str) -> str:
     return re.sub(r"[^a-zA-Z0-9]", "-", path)
 
 
-def _run_post_tool(tmp_path: Path, *, cooldown_ts: int | None, jsonl_lines: int = 60):
+def _run_post_tool(tmp_path: Path, *, cooldown_ts: Optional[int], jsonl_lines: int = 60):
     """Set up a project + session JSONL and run the post-tool hook once.
 
     Args:
