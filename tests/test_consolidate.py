@@ -382,12 +382,20 @@ def test_four_backtick_wrapper_is_stripped():
 
 
 def test_nested_longer_fence_does_not_cost_an_inner_block_its_terminator():
-    """A 4-backtick block nested in a 3-backtick wrap must not skew the match."""
+    """A 4-backtick block nested in a 3-backtick wrap must not skew the match.
+
+    Both inner blocks are balanced and neither closes the wrapper, so this is a
+    truncated wrap: the opener goes, the body survives byte for byte. Counting
+    ``` as a substring cannot check that — it reads each ```` as one — so pin
+    the fence lines themselves.
+    """
     body = (f"{BT3}markdown\n# Recent\n\nFence example:\n\n{BT4}\n{BT3}\n{BT4}\n\n"
             f"Ran:\n\n{BT3}bash\nls\n{BT3}")
     out = parse_consolidation_response(body)[0]
-    assert out.count("`" * 3) % 2 == 0, f"unbalanced fences: {out!r}"
+    fences = [line for line in out.split("\n") if line.startswith("`")]
+    assert fences == [BT4, BT3, BT4, f"{BT3}bash", BT3], f"body altered: {out!r}"
     assert out.rstrip().endswith(BT3), f"inner block lost its terminator: {out!r}"
+    assert not out.startswith(f"{BT3}markdown"), f"wrapper survived: {out!r}"
 
 
 def test_leading_text_sample_is_not_a_wrapper():
@@ -408,6 +416,22 @@ def test_tilde_wrapper_is_stripped():
     out = parse_consolidation_response(body)[0]
     assert "~~~" not in out, f"tilde fence survived: {out!r}"
     assert out == "# Recent\n\n## 12:00\n- x"
+
+
+def test_bare_inner_fence_does_not_veto_a_whole_response_wrap():
+    """An info-less inner block is textually a closer — it must not read as one.
+
+    Pasted shell output is usually fenced with a bare ```, whose opening line is
+    indistinguishable from the wrapper's own closer. Taking the first match read
+    that as closing mid-body and left the wrapper in place, reviving #126.
+    """
+    text = (f"{BT3}markdown\n===RECENT===\n# Recent\n\n## 12:00\nRan:\n\n"
+            f"{BT3}\nls -la\n{BT3}\n===ARCHIVE===\n# Archive\n\nold\n{BT3}")
+    recent, archive = parse_consolidation_response(text)
+    assert recent.count("# Recent") == 1, f"doubled header: {recent!r}"
+    assert f"{BT3}markdown" not in recent, f"wrapper survived: {recent!r}"
+    assert recent.count(BT3) == 2, f"inner block damaged: {recent!r}"
+    assert "`" not in archive, f"orphan fence in archive: {archive!r}"
 
 
 def test_degenerate_fence_inputs_do_not_crash():

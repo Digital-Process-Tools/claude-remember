@@ -40,9 +40,6 @@ _FENCE_OPENER = re.compile(r"^\s*(`{3,}|~{3,})\s*([A-Za-z0-9_+.-]*)\s*$")
 # ```python, ```json) opens a code sample that belongs to the content.
 _WRAP_TAGS = frozenset({"", "markdown", "md", "text", "txt", "plaintext"})
 
-# Any fence line, opener or bare closer — used only for the balance check below.
-_BARE_FENCE = re.compile(r"^\s*(`{3,}|~{3,})\s*$")
-
 
 def _strip_wrapping_fence(text: str) -> str:
     """Strip a code fence wrapping an entire body, and nothing else.
@@ -62,10 +59,14 @@ def _strip_wrapping_fence(text: str) -> str:
       opens a code sample, not a wrapper;
     * the closer must use the same character with a run at least as long, which
       is precisely what lets a ````-wrapped body contain ``` blocks untouched;
-    * it is only a wrapper if that closer is the LAST line. A fence that closes
-      mid-body encloses part of the content, so the whole thing is left alone;
-    * an opener with no closer at all is truncated model output — strip just the
-      opener, leaving any inner blocks intact.
+    * it is only a wrapper if that closer is the LAST line, reached at nesting
+      depth zero. A bare ``` opening an inner block is textually identical to a
+      closer, so the body has to be walked with a fence stack rather than
+      scanned for the first match;
+    * if a block opened in the body never closes, the leading fence is that
+      block's own opener, not a wrapper — leave the content alone;
+    * an opener whose closer never arrives is truncated model output — strip
+      just the opener, leaving any inner blocks intact.
 
     Args:
         text: A body, before header normalization.
@@ -85,25 +86,31 @@ def _strip_wrapping_fence(text: str) -> str:
 
     # A closer: same character, run at least as long, and no info string.
     closer = re.compile(r"^\s*" + re.escape(marker[0]) + "{" + str(len(marker)) + r",}\s*$")
-    close_at = next((i for i in range(1, len(lines)) if closer.match(lines[i])), None)
+    # Walk the body tracking nesting. An inner block opened with a bare ``` is
+    # textually identical to this wrapper's closer, so scanning for the first
+    # match read such an opener as closing mid-body and left the wrapper in
+    # place. Only a fence at depth zero, on the LAST line, closes the wrapper.
+    inner = None
+    for i in range(1, len(lines)):
+        fence = _FENCE_OPENER.match(lines[i])
+        if not fence:
+            continue
+        mark, tag = fence.group(1), fence.group(2)
+        if inner is not None:
+            if not tag and mark[0] == inner[0] and len(mark) >= len(inner):
+                inner = None
+            continue
+        if i == len(lines) - 1 and closer.match(lines[i]):
+            return "\n".join(lines[1:i]).strip()
+        inner = mark
 
-    if close_at is None:
-        # Truncated wrap: the model dropped its final fence.
-        return "\n".join(lines[1:]).strip()
-    if close_at != len(lines) - 1:
-        # Closes mid-body, so it fenced part of the content, not the whole of it.
+    if inner is not None:
+        # A block opened in the body never closed, so the leading fence is that
+        # block's own opener, not a wrapper. Leave the content exactly as it is.
         return t
-
-    body = lines[1:close_at]
-    # The final fence is ambiguous when the body it would leave behind has an
-    # odd number of fence lines: it is equally readable as this wrapper's closer
-    # (leaving an inner block unterminated) or as an inner block's own closer
-    # (leaving the wrapper truncated). Prefer the reading that keeps the content
-    # well-formed — an unclosed code block renders everything after it as code,
-    # while a surviving wrapper line is cosmetic.
-    if sum(1 for line in body if _FENCE_OPENER.match(line) or _BARE_FENCE.match(line)) % 2:
-        return "\n".join(lines[1:]).strip()
-    return "\n".join(body).strip()
+    # Every inner block is balanced and none of them closed the wrapper: the
+    # model dropped its final fence. Strip just the opener.
+    return "\n".join(lines[1:]).strip()
 
 
 class ConsolidationSkipped(Exception):
