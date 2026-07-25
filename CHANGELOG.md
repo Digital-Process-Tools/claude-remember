@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.6] — Memory actually saves: agentic sessions, auth, channels, and an NDC data race
+
 ### Fixed
 
 - **Channel-delivered messages were dropped, so those sessions never saved** ([#128](https://github.com/Digital-Process-Tools/claude-remember/issues/128)) — input arriving through a channel integration (e.g. the Telegram plugin) is wrapped by the transport and carries `isMeta`, the same flag Claude Code puts on genuine meta records. `extract_messages()` filtered on it before counting, so every real human turn in such a session vanished: the human count stayed at 0, the min-human gate never cleared, and memory was never written for the entire class of channel-driven users. The wrapped text is now recovered and counted as the human turn it is. Reported by [@ondomru](https://github.com/ondomru).
