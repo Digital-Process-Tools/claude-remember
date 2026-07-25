@@ -234,22 +234,75 @@ def cmd_call_haiku(prompt_file: str, output_file: str = "", timeout: int = 120) 
     _emit_haiku_result(r, output_file)
 
 
-def cmd_save_position(last_save_file: str, session_id: str, position: int) -> None:
-    """Write the current extraction position to last-save.json.
+#: How many sessions keep a remembered position. Interleaved work is a handful
+#: of terminals, not dozens, and the file is read on every tool call.
+_POSITION_SLOTS = 32
 
-    Stores the session ID and line number so the next extraction can
-    resume from where this one left off (incremental extraction).
+
+def cmd_save_position(last_save_file: str, session_id: str, position: int) -> None:
+    """Record the current extraction position for this session.
+
+    Positions are keyed by session ID. A single slot meant two live sessions
+    overwrote each other: A saves, B saves, and A's next save no longer
+    recognises its own ID, resumes from 0, and re-summarizes its whole span as
+    duplicate entries (issue #140). Sessions interleave whenever someone runs
+    two terminals, or a background/worktree session shares the store.
+
+    The newest ``_POSITION_SLOTS`` sessions are kept, oldest evicted first.
+    ``session``/``line`` are still written as a mirror of the most recent save,
+    so a reader from an older install — or one mid-upgrade — keeps working.
 
     Args:
         last_save_file: Path to the last-save.json file.
         session_id: UUID of the session being saved.
         position: JSONL line number to resume from next time.
     """
+    sessions = _read_positions(last_save_file)
+    # Re-insert at the end: dicts keep insertion order, so the oldest entry is
+    # simply the first one, and a session that keeps saving keeps its slot.
+    sessions.pop(session_id, None)
+    sessions[session_id] = position
+    while len(sessions) > _POSITION_SLOTS:
+        del sessions[next(iter(sessions))]
+
+    payload = {"sessions": sessions, "session": session_id, "line": position}
     # Strict: machine-written structured JSON. session_id is an ASCII UUID
     # (regex-validated upstream) and position is an int, so this never raises;
     # keeping it strict avoids silently U+FFFD-corrupting the recovery file.
-    with open(last_save_file, "w", encoding="utf-8") as f:
-        json.dump({"session": session_id, "line": position}, f)
+    #
+    # Written via a temp file and renamed: the read-merge-write above is not
+    # atomic, and a reader hitting the file mid-write would see truncated JSON
+    # and resume from 0 — the very duplicate this is fixing.
+    tmp = f"{last_save_file}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f)
+    os.replace(tmp, last_save_file)
+
+
+def _read_positions(last_save_file: str) -> dict[str, int]:
+    """Read the session→position map, tolerating the old single-slot shape.
+
+    Args:
+        last_save_file: Path to the last-save.json file.
+
+    Returns:
+        Mapping of session ID to line number; empty if unreadable.
+    """
+    try:
+        with open(last_save_file, encoding="utf-8") as f:
+            data = json.load(f)
+    except (ValueError, OSError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    sessions = data.get("sessions")
+    if isinstance(sessions, dict):
+        return {k: v for k, v in sessions.items() if isinstance(v, int)}
+    # Pre-#140 file: one session, one line. Carry it over rather than dropping
+    # it, or the first save after an upgrade re-summarizes from the start.
+    if isinstance(data.get("session"), str) and isinstance(data.get("line"), int):
+        return {data["session"]: data["line"]}
+    return {}
 
 
 def _rotate_archive(archive_file: str) -> str | None:

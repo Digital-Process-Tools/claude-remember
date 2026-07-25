@@ -98,9 +98,14 @@ def get_last_save_line(session_id: str,
                        remember_dir: str | None = None) -> int:
     """Return the JSONL line number where the last save happened.
 
-    Reads ``last-save.json`` and returns the saved line position if it
-    matches the given session ID. Returns 0 if the file is missing,
-    corrupt, or belongs to a different session.
+    Reads ``last-save.json`` and returns the position recorded for this
+    session. Returns 0 if the file is missing, corrupt, or has never seen
+    this session.
+
+    Positions are keyed by session ID (issue #140). The pre-#140 file held a
+    single session, so it is still honoured when it happens to name this one —
+    the first save after an upgrade should resume, not re-summarize the whole
+    transcript.
 
     Args:
         session_id: Session UUID to match against the saved position.
@@ -122,6 +127,10 @@ def get_last_save_line(session_id: str,
         # JSONDecodeError and UnicodeDecodeError.
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
+        sessions = data.get("sessions")
+        if isinstance(sessions, dict):
+            line = sessions.get(session_id, 0)
+            return line if isinstance(line, int) else 0
         if data.get("session") == session_id:
             return data.get("line", 0)
     except (ValueError, KeyError, OSError):

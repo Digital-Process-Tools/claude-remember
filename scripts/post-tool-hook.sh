@@ -84,28 +84,29 @@ CURRENT_LINES=$(wc -l < "$LATEST_JSONL" | tr -d ' ')
 SESSION_ID=$(basename "$LATEST_JSONL" .jsonl)
 
 # --- Get last saved position (from last-save.json) ---
+# Positions are keyed by session, so look up THIS session rather than asking
+# whether it happens to own the one slot — two live sessions used to overwrite
+# each other and re-summarize whole spans as duplicates (issue #140). One
+# python call now instead of two, on a path that runs per tool call.
 LAST_LINE=0
 if [ -f "$LAST_SAVE_FILE" ]; then
-    SAVED_SESSION=$($PYTHON - "$LAST_SAVE_FILE" <<'PYEOF'
+    LAST_LINE=$($PYTHON - "$LAST_SAVE_FILE" "$SESSION_ID" <<'PYEOF'
 import sys, json
 try:
-    d = json.load(open(sys.argv[1]))
-    print(d.get('session', ''))
-except Exception:
-    print('')
-PYEOF
-    )
-    if [ "$SAVED_SESSION" = "$SESSION_ID" ]; then
-        LAST_LINE=$($PYTHON - "$LAST_SAVE_FILE" <<'PYEOF'
-import sys, json
-try:
-    d = json.load(open(sys.argv[1]))
-    print(d.get('line', 0))
+    d = json.load(open(sys.argv[1], encoding="utf-8"))
+    sessions = d.get('sessions')
+    if isinstance(sessions, dict):
+        v = sessions.get(sys.argv[2], 0)
+    elif d.get('session') == sys.argv[2]:
+        v = d.get('line', 0)
+    else:
+        v = 0
+    print(v if isinstance(v, int) else 0)
 except Exception:
     print(0)
 PYEOF
-        )
-    fi
+    )
+    case "$LAST_LINE" in ''|*[!0-9]*) LAST_LINE=0 ;; esac
 fi
 
 DELTA=$((CURRENT_LINES - LAST_LINE))
