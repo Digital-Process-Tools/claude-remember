@@ -125,29 +125,42 @@ else
     fi
 fi
 
+# ── Config snapshot — read BEFORE backgrounding ──────────────────────────────
+# Every git_backup.* value is read here, in the parent, and inherited by the
+# subshell as a plain variable. Read inside it instead and they race the parent's
+# exit: lib-memory-dir.sh installs an EXIT trap that deletes $REMEMBER_CONFIG,
+# and once the merged config is gone config() quietly returns each caller's
+# default (issue #135). A slow backup would then push to the wrong place — or to
+# nowhere, with remote and branch emptied — and nothing would say so, because a
+# missing config file is not itself reported.
+#
+# git_backup.remote / git_backup.branch let users with multiple remotes or a
+# non-standard tracking config pin exactly where memory is pushed. Both empty
+# (the default) → bare `git push`, relying on the branch's upstream tracking.
+GIT_BACKUP_REMOTE=$(config ".git_backup.remote" "")
+GIT_BACKUP_BRANCH=$(config ".git_backup.branch" "")
+REMOTE_NAME="${GIT_BACKUP_REMOTE:-origin}"
+
+# We pass --no-gpg-sign by default so background commits never hang on a
+# passphrase prompt. Users with non-interactive signing (e.g. a hardware key)
+# can set git_backup.gpg_sign=true to drop the flag and honour their own
+# commit.gpgSign config. Empty flag (unquoted) = no extra arg (#62).
+GIT_BACKUP_GPG_SIGN=$(config ".git_backup.gpg_sign" "false")
+GPG_SIGN_FLAG="--no-gpg-sign"
+if [ "$GIT_BACKUP_GPG_SIGN" = "true" ]; then
+    GPG_SIGN_FLAG=""
+fi
+
+# Read here too, though its default is the safe one: falling back to false only
+# aborts a push, where a stale true would let a changed remote through.
+ALLOW_REMOTE_CHANGE=$(config ".git_backup.allow_remote_change" "false")
+
 # ── Background subshell — never blocks save-session.sh ───────────────────────
 (
     trap 'rm -f "$LOCK_FILE"' EXIT
 
     # Prevent outer git env vars from overriding git -C behaviour.
     unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
-
-    # ── Configurable push target (#63) ────────────────────────────────────────
-    # git_backup.remote / git_backup.branch let users with multiple remotes or a
-    # non-standard tracking config pin exactly where memory is pushed. Both empty
-    # (the default) → bare `git push`, relying on the branch's upstream tracking.
-    GIT_BACKUP_REMOTE=$(config ".git_backup.remote" "")
-    GIT_BACKUP_BRANCH=$(config ".git_backup.branch" "")
-    REMOTE_NAME="${GIT_BACKUP_REMOTE:-origin}"
-
-    # ── Configurable commit signing (#62) ─────────────────────────────────────
-    # We pass --no-gpg-sign by default so background commits never hang on a
-    # passphrase prompt. Users with non-interactive signing (e.g. a hardware key)
-    # can set git_backup.gpg_sign=true to drop the flag and honour their own
-    # commit.gpgSign config. Empty flag (unquoted) = no extra arg.
-    GIT_BACKUP_GPG_SIGN=$(config ".git_backup.gpg_sign" "false")
-    GPG_SIGN_FLAG="--no-gpg-sign"
-    [ "$GIT_BACKUP_GPG_SIGN" = "true" ] && GPG_SIGN_FLAG=""
 
     _push() {
         if [ -n "$GIT_BACKUP_REMOTE" ]; then
@@ -196,7 +209,6 @@ fi
     # override (e.g. when intentionally re-pointing to a new private repo).
     REMOTE_STATE_FILE="$REPO_ROOT/.git-backup-remote"
     CURRENT_REMOTE=$(git -C "$REPO_ROOT" remote get-url "$REMOTE_NAME" 2>/dev/null || true)
-    ALLOW_REMOTE_CHANGE=$(config ".git_backup.allow_remote_change" "false")
 
     if [ -z "$CURRENT_REMOTE" ]; then
         log "git-backup" "no remote configured, skipping push"

@@ -794,3 +794,44 @@ class TestGitBackupNeverTouchesProjectRepo:
         assert len(_commit_log(remember)) == 2, \
             "leaked GIT_DIR must not suppress a legitimate external backup"
         assert _commit_log(leaked) == [], "the leaked repo must never be committed to"
+
+
+class TestConfigIsReadBeforeBackgrounding:
+    """Every git_backup.* value must be read in the parent, not the subshell.
+
+    lib-memory-dir.sh installs an EXIT trap that deletes $REMEMBER_CONFIG. The
+    hook backgrounds its work and returns, so a read inside the subshell races
+    that deletion — and once the merged config is gone, config() quietly hands
+    back each caller's default (issue #135). A slow backup would push to the
+    wrong remote, or to nowhere with remote and branch emptied, and nothing
+    would say so: a missing config file is not itself reported.
+
+    This is asserted structurally rather than by running the race. The window
+    is a few microseconds wide, and the harness cannot even open it — it sets
+    _LIB_MEMORY_DIR_LOADED=1, so the trap that deletes the file never installs.
+    A timing test here would pass on the broken code most of the time, which is
+    worse than no test. What can be pinned exactly is the ordering the fix
+    depends on.
+    """
+
+    def test_no_git_backup_config_read_inside_the_subshell(self):
+        lines = HOOK.read_text().splitlines()
+        fork_line = next(
+            i for i, line in enumerate(lines)
+            if line.strip() == "(" and "subshell" in lines[i - 1].lower()
+        )
+        late = [
+            (i + 1, line.strip())
+            for i, line in enumerate(lines)
+            if i > fork_line and 'config ".git_backup.' in line
+        ]
+        assert late == [], (
+            "these git_backup.* reads happen after the fork, so they race the "
+            f"parent's EXIT trap deleting $REMEMBER_CONFIG (#135): {late}"
+        )
+
+    def test_every_git_backup_key_is_still_read(self):
+        """The hoist must not have dropped one on the way up."""
+        source = HOOK.read_text()
+        for key in ("remote", "branch", "gpg_sign", "allow_remote_change"):
+            assert f'config ".git_backup.{key}"' in source, f"{key} is no longer read"
