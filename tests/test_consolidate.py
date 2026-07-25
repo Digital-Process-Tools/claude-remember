@@ -300,3 +300,32 @@ def test_parse_strips_wrapping_markdown_fence():
     assert "```" not in recent
     assert archive.startswith("# Archive")
     assert "```" not in archive
+
+
+def test_parse_strips_orphaned_closing_fence_from_archive():
+    """A fence wrapping the WHOLE envelope leaves its closer in the ARCHIVE half.
+
+    The opener lands before ===RECENT=== and the closer after the archive body,
+    so the archive section inherits an unmatched ``` with no opener of its own —
+    _strip_wrapping_fence's opener-gated close-strip never fires and the fence
+    survives into archive.md (the other half of issue #126).
+    """
+    recent, archive = parse_consolidation_response(
+        "```\n"
+        "===RECENT===\n# Recent\n\n## 2026-07-20\nDid a thing.\n\n"
+        "===ARCHIVE===\n# Archive\n\n## Week of 2026-07-14\nOld stuff.\n"
+        "```"
+    )
+    assert "```" not in recent
+    assert "```" not in archive
+    assert archive.startswith("# Archive")
+    assert "Old stuff." in archive
+
+
+def test_parse_keeps_balanced_code_block_at_end_of_section():
+    """A section legitimately ENDING in a fenced block must keep it."""
+    _, archive = parse_consolidation_response(
+        "===RECENT===\n# Recent\n\nx\n\n"
+        "===ARCHIVE===\n# Archive\n\nRan:\n```bash\nnpm test\n```"
+    )
+    assert "```bash\nnpm test\n```" in archive

@@ -49,6 +49,17 @@ def _strip_wrapping_fence(text: str) -> str:
     Strip the opening fence whenever present, and the closing fence only if
     present (truncated model output can drop it), before the header check runs.
 
+    The closing fence is NOT gated on this section having had an opener. When
+    the model fences the whole ===RECENT===/===ARCHIVE=== envelope rather than
+    one section, the opener lands in the FIRST section and the closer in the
+    LAST — so the archive half inherits an unmatched ``` with no opener of its
+    own, and an opener-gated strip would leave it to land in archive.md.
+
+    Balance decides it: an odd number of fence delimiters means one is
+    unmatched, so the trailing fence is the orphan and is removed. An even
+    number means they pair up, so a section legitimately ending in a fenced
+    code block keeps it.
+
     Args:
         text: A section body, before header normalization.
 
@@ -59,6 +70,7 @@ def _strip_wrapping_fence(text: str) -> str:
     m = _OPEN_FENCE.match(t)
     if m:
         t = t[m.end():]
+    if sum(1 for ln in t.split("\n") if ln.lstrip().startswith("```")) % 2:
         t = _CLOSE_FENCE.sub("", t)
     return t.strip()
 
