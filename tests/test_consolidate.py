@@ -482,6 +482,20 @@ def test_truncation_inside_a_bare_inner_block_still_loses_the_wrapper():
     assert out.endswith("ls -la"), f"content altered: {out!r}"
 
 
+def test_stray_bare_fence_does_not_shadow_the_wrappers_own_closer():
+    """A bare inner opener must not claim the last line before the wrapper can.
+
+    The inner-close branch ran first, so the wrapper's own final fence was
+    spent closing a stray bare fence and BOTH lines survived into memory. A
+    bare opener is itself ambiguous; reading it as stray content leaves one
+    fence, not two. A tagged block is not ambiguous and still keeps its
+    terminator — see test_code_sample_inside_summary_keeps_its_terminator.
+    """
+    out = _strip_wrapping_fence(f"{BT3}markdown\n# Recent\n## 12:00 x\n{BT3}\n{BT3}")
+    assert out.count(BT3) == 1, f"wrapper closer was spent on the stray: {out!r}"
+    assert out.startswith("# Recent"), f"content altered: {out!r}"
+
+
 def test_wrapper_tagged_outside_the_allowlist_is_still_stripped():
     """A tag we did not think of must not veto a cleanly closed wrapper.
 

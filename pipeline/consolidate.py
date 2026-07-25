@@ -133,15 +133,19 @@ def _strip_wrapping_fence(text: str) -> str:
         if not fence:
             continue
         mark, tag = fence.group(1), fence.group(2)
-        if inner is not None:
-            if not tag and mark[0] == inner[0][0] and len(mark) >= len(inner[0]):
-                inner = None
-            continue
-        if i == len(lines) - 1 and closer.match(lines[i]):
+        # The last line is tested before the inner block gets to claim it, but
+        # only against a BARE inner opener — that one is itself ambiguous, and
+        # reading it as stray content beats leaving two fences in the output.
+        # A tagged ```bash block is unambiguous and keeps its terminator.
+        if i == len(lines) - 1 and closer.match(lines[i]) and not (inner and inner[1]):
             wrapped = "\n".join(lines[1:i]).strip()
             if documentish or _looks_like_a_section(wrapped):
                 return wrapped
             return t
+        if inner is not None:
+            if not tag and mark[0] == inner[0][0] and len(mark) >= len(inner[0]):
+                inner = None
+            continue
         inner = (mark, tag)
 
     body = "\n".join(lines[1:]).strip()
