@@ -355,3 +355,64 @@ def test_whole_response_wrap_does_not_orphan_a_fence_in_archive():
     assert "```" not in recent, f"orphan fence in recent: {recent!r}"
     assert archive.startswith("# Archive")
     assert recent.count("# Recent") == 1
+
+
+# --- Fence matching by character + run length (review of #154) --------------
+#
+# Two earlier attempts corrupted content: "strip a leading fence and any
+# trailing fence" cut the terminator off a code sample, and counting fence-ish
+# lines for parity was defeated by any nested fence. These pin the shapes that
+# broke each of them.
+
+BT3 = "`" * 3
+BT4 = "`" * 4
+
+
+def test_four_backtick_wrapper_is_stripped():
+    """A model wrapping content that itself contains fences uses 4 backticks.
+
+    Matching only 3-backtick openers left this wrapper in place, reproducing the
+    doubled header and the orphan fence in archive.md — the #126 artifact.
+    """
+    text = (f"{BT4}markdown\n===RECENT===\n# Recent\n\n## 12:00\nx\n"
+            f"===ARCHIVE===\n# Archive\n\nold\n{BT4}")
+    recent, archive = parse_consolidation_response(text)
+    assert "`" not in archive, f"orphan fence in archive: {archive!r}"
+    assert recent.count("# Recent") == 1, f"doubled header: {recent!r}"
+
+
+def test_nested_longer_fence_does_not_cost_an_inner_block_its_terminator():
+    """A 4-backtick block nested in a 3-backtick wrap must not skew the match."""
+    body = (f"{BT3}markdown\n# Recent\n\nFence example:\n\n{BT4}\n{BT3}\n{BT4}\n\n"
+            f"Ran:\n\n{BT3}bash\nls\n{BT3}")
+    out = parse_consolidation_response(body)[0]
+    assert out.count("`" * 3) % 2 == 0, f"unbalanced fences: {out!r}"
+    assert out.rstrip().endswith(BT3), f"inner block lost its terminator: {out!r}"
+
+
+def test_leading_text_sample_is_not_a_wrapper():
+    """```text is a plausible tag for a pasted log — and it closes mid-body.
+
+    A fence whose closer is not the last line encloses part of the content, so
+    the body must be left exactly as it is.
+    """
+    body = f"{BT3}text\nERROR log line\n{BT3}\n\n## 12:00\n- fixed it"
+    out = parse_consolidation_response(body)[0]
+    assert f"{BT3}text" in out, f"opener was eaten: {out!r}"
+    assert out.count(BT3) % 2 == 0, f"unbalanced fences: {out!r}"
+
+
+def test_tilde_wrapper_is_stripped():
+    """~~~ is a CommonMark-legal fence and models do emit it."""
+    body = "~~~markdown\n# Recent\n\n## 12:00\n- x\n~~~"
+    out = parse_consolidation_response(body)[0]
+    assert "~~~" not in out, f"tilde fence survived: {out!r}"
+    assert out == "# Recent\n\n## 12:00\n- x"
+
+
+def test_degenerate_fence_inputs_do_not_crash():
+    """Empty, whitespace-only, and lone-fence inputs must parse to nothing."""
+    for src in ("", "   \n  ", BT3, f"{BT3}markdown"):
+        recent, archive = parse_consolidation_response(src)
+        assert archive == ""
+        assert "`" not in recent, f"fence leaked through for {src!r}: {recent!r}"

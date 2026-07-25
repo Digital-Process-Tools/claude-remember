@@ -31,38 +31,41 @@ from .types import ConsolidationResult, TokenUsage
 # A real memory entry header: "## HH:MM", "## Week of ...", or "## YYYY-MM-DD".
 _ENTRY_HEADER = re.compile(r"(?m)^## (\d{2}:\d{2}|Week of |\d{4}-\d{2}-\d{2})")
 
-# Any line that opens or closes a Markdown code fence.
-_FENCE_LINE = re.compile(r"^\s*```")
+# A fence opener: indent, a run of 3+ backticks or tildes, and an optional
+# info string. CommonMark matches a fence by CHARACTER and RUN LENGTH, which is
+# what lets a ````-wrapped body legally contain ``` blocks.
+_FENCE_OPENER = re.compile(r"^\s*(`{3,}|~{3,})\s*([A-Za-z0-9_+.-]*)\s*$")
 
-# The opener of a fence a model would wrap PROSE in: bare, or tagged with a
-# document-ish language. A ```bash / ```python opener is a code sample that
-# belongs to the content and must never be treated as a wrapper.
-_WRAP_OPENER = re.compile(r"^\s*```\s*(markdown|md|text|txt|plaintext)?\s*$", re.I)
+# Info strings a model uses when wrapping PROSE. Anything else (```bash,
+# ```python, ```json) opens a code sample that belongs to the content.
+_WRAP_TAGS = frozenset({"", "markdown", "md", "text", "txt", "plaintext"})
 
-# A bare closing fence.
-_BARE_FENCE = re.compile(r"^\s*```\s*$")
+# Any fence line, opener or bare closer — used only for the balance check below.
+_BARE_FENCE = re.compile(r"^\s*(`{3,}|~{3,})\s*$")
 
 
 def _strip_wrapping_fence(text: str) -> str:
-    """Strip a Markdown code fence wrapping an entire body, and nothing else.
+    """Strip a code fence wrapping an entire body, and nothing else.
 
     Haiku occasionally returns its output wrapped in a ```markdown ... ``` fence.
     Left in place that fence defeats the ``startswith("# Recent")`` check in
     parse_consolidation_response, so a second header gets prepended — the
     doubled-header + orphaned-fence artifact of issue #126.
 
-    The hard part is not stripping it, it is *recognising* it. Naively removing
-    a leading fence and then any trailing fence corrupts legitimate content: a
-    summary whose last line closes a ```bash sample loses that terminator and
-    the code block never ends (#154). So a fence is treated as a wrapper only
-    when it genuinely looks like one:
+    The hard part is recognising a wrapper, not removing one. Two earlier
+    attempts corrupted real content: stripping "a leading fence and any trailing
+    fence" cut the terminator off a ```bash sample, and counting fence-ish lines
+    for parity was defeated by any nested fence. So match fences the way
+    CommonMark does — by fence character and run length:
 
-    * the first line must be a bare or document-tagged fence — ```bash opens a
-      code sample, not a wrapper;
-    * the closing fence is removed only when the fences in between are balanced,
-      so an inner code block keeps its own terminator;
-    * when they are unbalanced (truncated output — the model dropped its final
-      fence), only the opener is stripped, leaving inner blocks intact.
+    * the opener must carry no info string, or a document-ish one — ```bash
+      opens a code sample, not a wrapper;
+    * the closer must use the same character with a run at least as long, which
+      is precisely what lets a ````-wrapped body contain ``` blocks untouched;
+    * it is only a wrapper if that closer is the LAST line. A fence that closes
+      mid-body encloses part of the content, so the whole thing is left alone;
+    * an opener with no closer at all is truncated model output — strip just the
+      opener, leaving any inner blocks intact.
 
     Args:
         text: A body, before header normalization.
@@ -72,16 +75,34 @@ def _strip_wrapping_fence(text: str) -> str:
     """
     t = text.strip()
     lines = t.split("\n")
-    if not lines or not _WRAP_OPENER.match(lines[0]):
+    opener = _FENCE_OPENER.match(lines[0])
+    if not opener:
         return t
 
-    body = lines[1:]
-    # Balanced inner fences mean the last line is this wrapper's own closer.
-    if body and _BARE_FENCE.match(body[-1]):
-        inner = sum(1 for line in body[:-1] if _FENCE_LINE.match(line))
-        if inner % 2 == 0:
-            body = body[:-1]
+    marker, info = opener.group(1), opener.group(2).lower()
+    if info not in _WRAP_TAGS:
+        return t
 
+    # A closer: same character, run at least as long, and no info string.
+    closer = re.compile(r"^\s*" + re.escape(marker[0]) + "{" + str(len(marker)) + r",}\s*$")
+    close_at = next((i for i in range(1, len(lines)) if closer.match(lines[i])), None)
+
+    if close_at is None:
+        # Truncated wrap: the model dropped its final fence.
+        return "\n".join(lines[1:]).strip()
+    if close_at != len(lines) - 1:
+        # Closes mid-body, so it fenced part of the content, not the whole of it.
+        return t
+
+    body = lines[1:close_at]
+    # The final fence is ambiguous when the body it would leave behind has an
+    # odd number of fence lines: it is equally readable as this wrapper's closer
+    # (leaving an inner block unterminated) or as an inner block's own closer
+    # (leaving the wrapper truncated). Prefer the reading that keeps the content
+    # well-formed — an unclosed code block renders everything after it as code,
+    # while a surviving wrapper line is cosmetic.
+    if sum(1 for line in body if _FENCE_OPENER.match(line) or _BARE_FENCE.match(line)) % 2:
+        return "\n".join(lines[1:]).strip()
     return "\n".join(body).strip()
 
 
