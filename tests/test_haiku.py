@@ -258,6 +258,85 @@ def test_call_haiku_nonzero_exit(mock_run):
         assert False, "should raise"
     except RuntimeError as e:
         assert "exited 1" in str(e)
+        assert "something broke" in str(e)
+
+
+@patch("pipeline.haiku.subprocess.run")
+def test_call_haiku_failure_reports_json_error_from_stdout(mock_run):
+    """--output-format json puts the failure on STDOUT and leaves stderr empty.
+
+    Reading stderr alone produced 'claude exited 1:' with nothing after the
+    colon, which hid a 7-week auth outage from the reporter of #129.
+    """
+    mock_run.return_value = MagicMock(
+        returncode=1,
+        stdout='{"type":"result","is_error":true,'
+               '"result":"Invalid API key · Please run /login"}',
+        stderr="",
+    )
+    try:
+        call_haiku("test")
+        assert False, "should raise"
+    except RuntimeError as e:
+        assert "Invalid API key" in str(e), (
+            f"the real error must survive into the message, got: {e}"
+        )
+
+
+@patch("pipeline.haiku.subprocess.run")
+def test_call_haiku_failure_with_no_output_says_so(mock_run):
+    """Empty on both streams must read as a statement, not a truncated sentence."""
+    mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="")
+    try:
+        call_haiku("test")
+        assert False, "should raise"
+    except RuntimeError as e:
+        assert "no output" in str(e)
+
+
+@patch("pipeline.haiku.subprocess.run")
+def test_call_haiku_failure_falls_back_to_raw_stdout(mock_run):
+    """Non-JSON stdout is still better than nothing."""
+    mock_run.return_value = MagicMock(
+        returncode=1, stdout="plain text explosion", stderr="")
+    try:
+        call_haiku("test")
+        assert False, "should raise"
+    except RuntimeError as e:
+        assert "plain text explosion" in str(e)
+
+
+@patch("pipeline.haiku.subprocess.run")
+def test_call_haiku_failure_detail_is_capped(mock_run):
+    """A huge payload must not be dumped into the log on every failure."""
+    mock_run.return_value = MagicMock(
+        returncode=1, stdout="x" * 5000, stderr="")
+    try:
+        call_haiku("test")
+        assert False, "should raise"
+    except RuntimeError as e:
+        assert len(str(e)) < 700, "failure detail should be truncated"
+
+
+@patch("pipeline.haiku.subprocess.run")
+def test_call_haiku_keeps_oauth_token(mock_run, monkeypatch):
+    """CLAUDE_CODE_OAUTH_TOKEN shares the parent-session prefix but is the
+    child's credentials — stripping it leaves `claude -p` unauthenticated, so
+    nothing ever saves for setup-token / hosted Agent SDK users (#131)."""
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-example")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "abc-123")
+    mock_run.return_value = MagicMock(
+        returncode=0, stdout=_mock_claude_response("x"), stderr="")
+
+    call_haiku("p")
+
+    env = mock_run.call_args[1]["env"]
+    assert env.get("CLAUDE_CODE_OAUTH_TOKEN") == "sk-ant-oat-example", (
+        "the credential must survive the parent-session strip"
+    )
+    assert "CLAUDE_CODE_SESSION_ID" not in env, (
+        "the rest of the CLAUDE_CODE_* family must still be stripped"
+    )
 
 
 @patch("pipeline.haiku.subprocess.run")

@@ -93,6 +93,14 @@ def _resolve_claude_bin() -> str:
     return shutil.which("claude") or "claude"
 
 
+# CLAUDE_CODE_* vars are stripped as parent-session identity (#95) — but the
+# prefix is a proxy, not a definition, and one member of the family is the
+# child's *credentials*. Stripping CLAUDE_CODE_OAUTH_TOKEN leaves `claude -p`
+# unauthenticated, so nothing ever saves for anyone who authenticated with
+# `claude setup-token` or runs under a hosted Agent SDK (#131). Keep it.
+_CHILD_ENV_KEEP = frozenset({"CLAUDE_CODE_OAUTH_TOKEN"})
+
+
 def _child_env() -> dict[str, str]:
     """Environment for the nested ``claude -p`` with the PARENT session vars
     stripped.
@@ -101,15 +109,64 @@ def _child_env() -> dict[str, str]:
     ``CLAUDE_CODE_*`` family (e.g. ``CLAUDE_CODE_SESSION_ID``) identify the
     parent Claude Code session; if they leak into the subprocess it looks like
     a resumable session to anything keying off them (#95). Everything else is
-    passed through unchanged.
+    passed through unchanged — including the credentials in ``_CHILD_ENV_KEEP``,
+    which only share the prefix by accident.
     """
     return {
         k: v
         for k, v in os.environ.items()
-        if k != "CLAUDECODE"
-        and k != "CLAUDE_JOB_DIR"
-        and not k.startswith("CLAUDE_CODE_")
+        if k in _CHILD_ENV_KEEP
+        or (
+            k != "CLAUDECODE"
+            and k != "CLAUDE_JOB_DIR"
+            and not k.startswith("CLAUDE_CODE_")
+        )
     }
+
+
+# Cap on the failure detail carried into the exception: enough to identify an
+# auth error or a rate limit, not enough to dump a whole JSON payload into the
+# log on every failure.
+_FAILURE_DETAIL_MAX = 500
+
+
+def _failure_detail(stdout: str, stderr: str) -> str:
+    """Best available explanation for a non-zero ``claude`` exit.
+
+    ``--output-format json`` makes the CLI report failures as a JSON object on
+    **stdout** and leave stderr empty, so reading stderr alone produced
+    ``claude exited 1:`` with nothing after the colon — which hid a 7-week auth
+    outage from the reporter of #129. Prefer the structured message on stdout,
+    fall back to raw stdout, then stderr, and say so explicitly when both are
+    empty rather than trailing off.
+    """
+    detail = ""
+    stdout = (stdout or "").strip()
+    stderr = (stderr or "").strip()
+
+    if stdout:
+        try:
+            payload = json.loads(stdout)
+        except ValueError:
+            detail = stdout
+        else:
+            if isinstance(payload, dict):
+                for key in ("error", "result", "message"):
+                    value = payload.get(key)
+                    if isinstance(value, dict):
+                        value = value.get("message")
+                    if isinstance(value, str) and value.strip():
+                        detail = value.strip()
+                        break
+            detail = detail or stdout
+
+    parts = [p for p in (detail, stderr) if p]
+    if not parts:
+        return "(no output on stdout or stderr)"
+    joined = " | ".join(parts)
+    if len(joined) > _FAILURE_DETAIL_MAX:
+        joined = joined[:_FAILURE_DETAIL_MAX] + "…"
+    return joined
 
 
 def call_haiku(
@@ -174,8 +231,10 @@ def call_haiku(
         raise RuntimeError(f"claude timed out after {timeout}s")
 
     if result.returncode != 0:
-        stderr = result.stderr.strip()
-        raise RuntimeError(f"claude exited {result.returncode}: {stderr}")
+        raise RuntimeError(
+            f"claude exited {result.returncode}: "
+            f"{_failure_detail(result.stdout, result.stderr)}"
+        )
 
     return _parse_response(result.stdout)
 
