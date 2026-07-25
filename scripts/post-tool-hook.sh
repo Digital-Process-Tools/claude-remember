@@ -47,8 +47,26 @@ SESSION_DIR="$HOME/.claude/projects/$(session_dir_slug "$PROJECT")"
 [ -f "$SAVE_SCRIPT" ] || exit 0
 
 # --- Count JSONL lines in the current session ---
+# A slug that does not match the directory Claude Code actually created leaves
+# nothing to read here, and the whole pipeline no-ops for the life of the
+# session. That used to be a bare `exit 0`, so the only symptom was memory
+# quietly never appearing (issue #144). Say so instead — once, since this runs
+# on every tool call.
 LATEST_JSONL=$(ls -t "$SESSION_DIR"/*.jsonl 2>/dev/null | head -1)
-[ -n "$LATEST_JSONL" ] || exit 0
+if [ -z "$LATEST_JSONL" ]; then
+    NOTICE_MARKER="$REMEMBER_DIR/tmp/no-transcript-notice"
+    if [ ! -f "$NOTICE_MARKER" ]; then
+        mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null
+        : > "$NOTICE_MARKER" 2>/dev/null
+        if [ -d "$SESSION_DIR" ]; then
+            log "hook" "no .jsonl transcript in $SESSION_DIR — nothing to save yet"
+        else
+            log "hook" "WARNING: no session dir for this project: $SESSION_DIR (slug of $PROJECT). Memory cannot save until it matches a directory under $HOME/.claude/projects/"
+        fi
+    fi
+    exit 0
+fi
+rm -f "$REMEMBER_DIR/tmp/no-transcript-notice" 2>/dev/null
 
 CURRENT_LINES=$(wc -l < "$LATEST_JSONL" | tr -d ' ')
 SESSION_ID=$(basename "$LATEST_JSONL" .jsonl)

@@ -403,6 +403,18 @@ def main() -> None:
     function, passing remaining arguments positionally. Exits with
     status 1 on unknown commands or missing arguments.
     """
+    # Every cmd_* funnels its KEY=value lines through print(), and bash captures
+    # them by command substitution to pass on as argv to the next call. On
+    # Windows print() encodes with the console's ANSI codepage, not UTF-8 — the
+    # same boundary class as #91/#104, on the output side this time — so a temp
+    # path under a non-ASCII profile came back mojibake and the very next step
+    # failed with FileNotFoundError on a file that existed (issue #145). Same
+    # guard as the stdin reconfigure in cmd_parse_haiku: tests substitute a
+    # StringIO, which has no reconfigure().
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
     if len(sys.argv) < 2:
         print("Usage: python3 -m pipeline.shell <command> [args]", file=sys.stderr)
         sys.exit(1)
