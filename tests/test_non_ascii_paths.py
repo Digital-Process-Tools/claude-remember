@@ -16,7 +16,7 @@ follows the locale and every locale answer is wrong somewhere:
   matches accented letters, so "café" keeps its é.
 
 So the tests below run the real bash function under each hostile locale and
-compare against the codepoint reference, which is what the JS does.
+compare against the JS reference, which is UTF-16 code units — see _js_slug.
 """
 
 from __future__ import annotations
@@ -48,6 +48,7 @@ PATHS = [
     "/tmp/プロジェクト/bar",
     "/tmp/中文/项目",
     "/tmp/emoji-🎉-dir",
+    "/tmp/𠮷野家/x",
     "/tmp/user@host.fr/p",
 ]
 
@@ -56,9 +57,19 @@ PATHS = [
 HOSTILE_LOCALES = ["", "C", "en_US.UTF-8", "C.UTF-8"]
 
 
-def _codepoint_slug(path: str) -> str:
-    """The reference: Claude Code's JS regex, one dash per character."""
-    return re.sub(r"[^a-zA-Z0-9]", "-", path)
+def _js_slug(path: str) -> str:
+    """The reference: what `s.replace(/[^a-zA-Z0-9]/g, '-')` actually produces.
+
+    There is no /u flag on that regex in the shipped CLI, so it walks UTF-16
+    code units. Every BMP character costs one dash; an astral one is a
+    surrogate pair and costs two. Python strings are codepoint-based, so a
+    plain re.sub() would quietly disagree on exactly the astral case — which is
+    how the first version of this file managed to agree with a wrong fix.
+    """
+    return "".join(
+        c if c.isascii() and c.isalnum() else "-" * (2 if ord(c) > 0xFFFF else 1)
+        for c in path
+    )
 
 
 def _bash_slug(path: str, locale: str) -> str:
@@ -80,7 +91,7 @@ def _bash_slug(path: str, locale: str) -> str:
 @pytest.mark.parametrize("path", PATHS)
 def test_slug_matches_codepoint_reference_under_any_locale(path: str, locale: str):
     """One dash per character, whatever the ambient or forced locale is."""
-    assert _bash_slug(path, locale) == _codepoint_slug(path), (
+    assert _bash_slug(path, locale) == _js_slug(path), (
         f"slug disagrees with Claude Code under LC_ALL={locale or '<ambient>'}; "
         f"the session directory would never be found (#144)"
     )
@@ -107,7 +118,7 @@ def test_slug_replaces_accented_letters():
 def test_ascii_paths_are_untouched_by_the_utf8_handling():
     """The common case must be byte-identical to the old behaviour."""
     for path in ("/Users/f/Documents/dvsi", "/home/u/p", "/plain/ascii-123"):
-        assert _bash_slug(path, "") == _codepoint_slug(path)
+        assert _bash_slug(path, "") == _js_slug(path)
 
 
 # ── The silent half of #144: nothing said when the slug matches nothing ──────
@@ -182,3 +193,47 @@ def test_missing_session_dir_warning_is_logged_once(tmp_path):
     assert logs.count("no session dir") == 1, (
         f"warning repeated on every tool call:\n{logs}"
     )
+
+
+def test_missing_session_dir_warning_returns_after_its_ttl(tmp_path):
+    """A persistent cause must keep surfacing, not warn once and go quiet.
+
+    The cause here is environmental — a mis-slugged path stays mis-slugged — so
+    a once-ever sentinel would fire in the first session and leave every later
+    one as silent as before the fix. Ageing the marker past its TTL stands in
+    for the next session an hour later.
+    """
+    import os
+    _run_hook_without_session_dir(tmp_path)
+    remember = tmp_path / "project" / ".remember"
+    marker = remember / "tmp" / "no-transcript-notice"
+    assert marker.exists(), "no marker written"
+    marker.write_text("0")  # epoch 0: far older than the TTL
+
+    env = {
+        **os.environ,
+        "HOME": str(tmp_path / "home"),
+        "CLAUDE_PROJECT_DIR": str(tmp_path / "project"),
+        "CLAUDE_PLUGIN_ROOT": str(REPO_ROOT),
+        "REMEMBER_DIR": str(remember),
+        "_LIB_MEMORY_DIR_LOADED": "1",
+    }
+    subprocess.run(["bash", str(HOOK)], env=env,
+                   capture_output=True, text=True, timeout=60)
+    logs = "".join(p.read_text(encoding="utf-8", errors="replace")
+                   for p in sorted((remember / "logs").glob("*.log")))
+    assert logs.count("no session dir") == 2, (
+        f"warning did not return after its TTL — a persistent cause goes "
+        f"silent forever:\n{logs}"
+    )
+
+
+def test_astral_characters_cost_two_dashes_not_one():
+    """A surrogate pair is TWO code units to the JS regex, so two dashes.
+
+    Verified against the shipped CLI's own regex under node. Getting this wrong
+    is invisible on a Latin or BMP-CJK path and only bites the Extension-B
+    kanji and emoji cases — which is the population this issue came from.
+    """
+    assert _bash_slug("/tmp/𠮷野家/x", "C") == "-tmp------x"
+    assert _bash_slug("/tmp/emoji-🎉-dir", "C") == "-tmp-emoji----dir"

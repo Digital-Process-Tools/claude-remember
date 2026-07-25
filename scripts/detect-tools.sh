@@ -94,9 +94,13 @@ export JQ
 # receive the path in Unix form (/d/Users/p), which would slug differently
 # (-d-Users-p). Convert back to the Windows form via cygpath before slugging
 # so we match the actual directory Claude Code created.
-# Non-ASCII: Claude Code slugs with a JS regex, which replaces one CHARACTER
-# per dash. Getting sed to agree portably is the whole problem, because every
-# locale answer is wrong somewhere:
+# Non-ASCII: Claude Code slugs with `s.replace(/[^a-zA-Z0-9]/g, '-')` — checked
+# in the installed CLI bundle, and note there is no /u flag. So it replaces one
+# UTF-16 CODE UNIT per dash, not one character: BMP characters (é, 日, プ) give
+# one dash, but anything astral (emoji, and the Extension-B kanji that turn up
+# in Japanese name registries) is a surrogate PAIR and gives two.
+# Getting sed to agree portably is the whole problem, because every locale
+# answer is wrong somewhere:
 #   * ambient — on Git Bash/MSYS sed matched byte-wise even under
 #     LC_CTYPE=C.UTF-8, so a CJK path got three dashes per character, the slug
 #     missed ~/.claude/projects/<slug>/ entirely and the pipeline silently
@@ -106,9 +110,10 @@ export JQ
 #   * LC_ALL=en_US.UTF-8 — present on macOS, but then [a-z] follows collation
 #     and matches accented letters, so "café" keeps its é and never matches
 #     the slug Claude Code wrote.
-# So force byte semantics and collapse UTF-8 sequences by hand: a lead byte
-# plus its continuation bytes is one character, hence one dash. Deterministic
-# under any locale, and byte-identical to the JS for every path tested.
+# So force byte semantics and collapse UTF-8 sequences by hand: a 4-byte
+# sequence is one surrogate pair, hence two dashes; a 2- or 3-byte sequence is
+# one BMP character, hence one. Deterministic under any locale, and verified
+# byte-identical to the real regex run under node.
 session_dir_slug() {
     local path="$1"
     if command -v cygpath >/dev/null 2>&1; then
@@ -118,10 +123,12 @@ session_dir_slug() {
         path="${winpath:0:1}"
         path="${path,,}${winpath:1}"
     fi
-    local lead lead_hi cont_lo cont_hi
-    lead=$(printf '\302'); lead_hi=$(printf '\364')
+    local lead lead_hi four_lo four_hi cont_lo cont_hi
+    lead=$(printf '\302'); lead_hi=$(printf '\357')
+    four_lo=$(printf '\360'); four_hi=$(printf '\364')
     cont_lo=$(printf '\200'); cont_hi=$(printf '\277')
     printf '%s\n' "$path" | LC_ALL=C sed \
+        -e "s/[$four_lo-$four_hi][$cont_lo-$cont_hi]\{3\}/--/g" \
         -e "s/[$lead-$lead_hi][$cont_lo-$cont_hi]*/-/g" \
         -e 's/[^a-zA-Z0-9]/-/g'
 }

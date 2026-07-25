@@ -50,14 +50,26 @@ SESSION_DIR="$HOME/.claude/projects/$(session_dir_slug "$PROJECT")"
 # A slug that does not match the directory Claude Code actually created leaves
 # nothing to read here, and the whole pipeline no-ops for the life of the
 # session. That used to be a bare `exit 0`, so the only symptom was memory
-# quietly never appearing (issue #144). Say so instead — once, since this runs
-# on every tool call.
+# quietly never appearing (issue #144).
+#
+# Say so instead — but on a timer, not once ever. This runs on every tool call,
+# so a line per call would bury the logs; a plain once-only sentinel is worse
+# though, because the cause here is environmental (a mis-slugged path stays
+# mis-slugged), so the warning would fire once and every later session would be
+# silent again — the very failure being fixed. An hourly repeat keeps a
+# persistent cause visible without flooding.
+NOTICE_TTL=3600
 LATEST_JSONL=$(ls -t "$SESSION_DIR"/*.jsonl 2>/dev/null | head -1)
 if [ -z "$LATEST_JSONL" ]; then
     NOTICE_MARKER="$REMEMBER_DIR/tmp/no-transcript-notice"
-    if [ ! -f "$NOTICE_MARKER" ]; then
+    NOTICE_LAST=0
+    if [ -f "$NOTICE_MARKER" ]; then
+        NOTICE_LAST=$(cat "$NOTICE_MARKER" 2>/dev/null || echo 0)
+        case "$NOTICE_LAST" in ''|*[!0-9]*) NOTICE_LAST=0 ;; esac
+    fi
+    if [ $(( $(_remember_date +%s) - NOTICE_LAST )) -ge "$NOTICE_TTL" ]; then
         mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null
-        : > "$NOTICE_MARKER" 2>/dev/null
+        _remember_date +%s > "$NOTICE_MARKER" 2>/dev/null
         if [ -d "$SESSION_DIR" ]; then
             log "hook" "no .jsonl transcript in $SESSION_DIR — nothing to save yet"
         else
