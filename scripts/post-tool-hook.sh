@@ -28,11 +28,11 @@
 # ============================================================================
 
 # --- Resolve paths ---
-# resolve-paths.sh signals failure via `return`, not `exit` — see the comment
-# in session-start-hook.sh. This hook must never block the agent, so a
-# resolution failure (e.g. a nested/headless session with no
-# CLAUDE_PROJECT_DIR) is a silent no-op, not a crash.
-source "$(dirname "$0")/resolve-paths.sh" || exit 0
+# Opt into resolve-paths.sh's soft-failure mode — see the comment in
+# session-start-hook.sh. This hook must never block the agent, so a resolution
+# failure (e.g. a nested/headless session with no CLAUDE_PROJECT_DIR) is a
+# silent no-op, not a crash.
+REMEMBER_PATHS_SOFT_FAIL=1 source "$(dirname "$0")/resolve-paths.sh" || exit 0
 source "$(dirname "$0")/detect-tools.sh"
 source "$(dirname "$0")/bootstrap-dirs.sh"
 PLUGIN_ROOT="$PIPELINE_DIR"

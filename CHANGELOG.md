@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A nested `claude -p` session crashed on every hook** ([#137](https://github.com/Digital-Process-Tools/claude-remember/pull/137)) — `scripts/resolve-paths.sh` is always *sourced*, but signalled failure with a bare `exit 1`, which terminates the **caller's** whole process. The three Claude Code hooks are documented "EXIT CODES: 0 Always", and the one caller most likely to fail resolution is the plugin's own nested Haiku session (it runs with `cwd` in a temp dir and no `CLAUDE_PROJECT_DIR`, so it is not a project at all) — so the plugin crashed the very session it spawned. Resolution failure now stays **loud by default** (`exit 1`, unchanged for every worker script and for any caller that forgets to check), while a caller that must never take its host process down opts in with `REMEMBER_PATHS_SOFT_FAIL=1` and gets `return 1` to handle itself. Only the three hooks opt in, and they still report FATAL on stderr, which `hooks.json` redirects into `hook-errors.log` — a failed hook is silent to the session, never silent to the logs. Diagnosed and fixed by [@lucasrodriggs-tech](https://github.com/lucasrodriggs-tech).
+
 ## [0.8.5] — Ship the 0.8.4-era fixes: manifest bump, worktree safety, fork storm
 
 ### Fixed

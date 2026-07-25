@@ -1000,24 +1000,38 @@ class TestRealisticPluginSimulation:
         assert "FATAL" not in result.stderr, f"Path resolution failed: {result.stderr[:300]}"
 
     def test_marketplace_without_env_fails_loud(self, tmp_path):
-        """Marketplace layout WITHOUT env vars — every script should fail with FATAL in stderr."""
+        """Marketplace layout WITHOUT env vars — every script reports FATAL.
+
+        Exit status differs by caller policy: the worker scripts abort, while the
+        Claude Code hooks are documented "EXIT CODES: 0 Always" and opt into
+        resolve-paths.sh's soft failure — they must still *report* the problem on
+        stderr (hooks.json redirects it to hook-errors.log), just not take the
+        host session down with them.
+        """
         plugin = os.path.join(str(tmp_path), "cache", "org", "remember", "0.1.0")
         os.makedirs(os.path.join(plugin, "scripts"))
         _create_full_plugin_copy(plugin)
 
         env = {k: v for k, v in os.environ.items()
                if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT")}
-        for script in ("session-start-hook.sh", "post-tool-hook.sh",
-                        "save-session.sh", "run-consolidation.sh"):
+        WORKERS = ("save-session.sh", "run-consolidation.sh")
+        HOOKS = ("session-start-hook.sh", "post-tool-hook.sh", "user-prompt-hook.sh")
+        for script in WORKERS + HOOKS:
             result = _run_hook_like_claude_code(plugin, script, env)
             combined = result.stderr + result.stdout
             assert "FATAL" in combined, (
                 f"{script} should emit FATAL without env vars, got: "
                 f"rc={result.returncode} stderr={result.stderr[:200]}"
             )
-            assert result.returncode != 0, (
-                f"{script} should exit non-zero without env vars"
-            )
+            if script in WORKERS:
+                assert result.returncode != 0, (
+                    f"{script} should exit non-zero without env vars"
+                )
+            else:
+                assert result.returncode == 0, (
+                    f"{script} must never block the session (EXIT CODES: 0 Always), "
+                    f"got rc={result.returncode}"
+                )
 
     def test_hooks_json_stderr_redirect_captures_errors(self, tmp_path):
         """hooks.json stderr redirect captures FATAL errors to hook-errors.log.
@@ -1047,7 +1061,10 @@ class TestRealisticPluginSimulation:
             ["bash", "-c", cmd], capture_output=True, text=True,
             env=env, timeout=10,
         )
-        assert result.returncode != 0
+        # The hook exits 0 even when resolution fails — it must never block the
+        # session — so the redirect, not the exit status, is what preserves the
+        # diagnosis. That is exactly what this test pins.
+        assert result.returncode == 0
 
         # The FATAL error should be in hook-errors.log, not lost
         assert os.path.isfile(hook_errors_log), "hook-errors.log not created"
@@ -3582,7 +3599,12 @@ echo "DISPATCH_COMPLETED=true"
         assert "DISPATCH_COMPLETED=true" in result.stdout
 
     def test_resolve_paths_failure_does_not_silently_continue(self, tmp_path):
-        """If resolve-paths.sh fails (bad PROJECT_DIR), hook must not run with wrong paths."""
+        """If resolve-paths.sh fails (bad PROJECT_DIR), the hook must not run with wrong paths.
+
+        The hook exits 0 (it may never block the agent) but must produce nothing:
+        no timestamp injection, no dispatch. Silence plus a FATAL on stderr — not
+        continuation with empty paths, and not a crash.
+        """
         plugin = os.path.join(str(tmp_path), "cache", "org", "remember", "0.5.0")
         _create_full_plugin_copy(plugin)
 
@@ -3595,10 +3617,18 @@ echo "DISPATCH_COMPLETED=true"
             ["bash", os.path.join(plugin, "scripts", "user-prompt-hook.sh")],
             capture_output=True, text=True, env=env, timeout=10,
         )
-        # resolve-paths.sh should exit 1, killing the hook
-        assert result.returncode != 0, (
-            "Hook must fail if resolve-paths.sh can't find PROJECT_DIR. "
-            "Silent continuation with wrong paths is worse than a crash."
+        assert result.returncode == 0, (
+            "user-prompt-hook.sh is documented EXIT CODES: 0 Always — a sourced "
+            "`exit 1` here kills the hook process and crashes nested sessions."
+        )
+        assert result.stdout.strip() == "", (
+            "Hook must not inject anything when paths are unresolved. Silent "
+            "continuation with wrong paths is worse than a crash: "
+            f"stdout={result.stdout[:200]}"
+        )
+        assert "FATAL" in result.stderr, (
+            "The failure must still be reported on stderr (hooks.json redirects "
+            f"it to hook-errors.log): stderr={result.stderr[:200]}"
         )
 
     def test_handoff_consumed_after_session_start(self, tmp_path):
