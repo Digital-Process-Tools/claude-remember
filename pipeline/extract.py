@@ -48,6 +48,16 @@ def _session_dir(project_dir: str) -> str:
     return home + "/.claude/projects/" + slug
 
 
+def _is_line_number(value: object) -> bool:
+    """Whether a stored position is a usable line number.
+
+    `bool` subclasses `int`, so ``true`` would otherwise pass as line 1 while
+    the jq reader in session-start-hook.sh rejects it — see the matching helper
+    in pipeline/shell.py.
+    """
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 def _last_save_path(project_dir: str, remember_dir: str | None = None) -> str:
     """Return the path to last-save.json for incremental extraction.
 
@@ -130,13 +140,13 @@ def get_last_save_line(session_id: str,
         sessions = data.get("sessions")
         if isinstance(sessions, dict):
             line = sessions.get(session_id, 0)
-            return line if isinstance(line, int) else 0
+            return line if _is_line_number(line) else 0
         if data.get("session") == session_id:
             # Type-checked like the keyed branch above: a null or string line in
             # a hand-edited or truncated file would otherwise be handed back to
             # callers that expect an int.
             line = data.get("line", 0)
-            return line if isinstance(line, int) else 0
+            return line if _is_line_number(line) else 0
     except (ValueError, KeyError, OSError):
         pass
     return 0

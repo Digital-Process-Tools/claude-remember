@@ -85,7 +85,7 @@ if [ -d "$SESSIONS_DIR" ] && [ -f "$LAST_SAVE_FILE" ]; then
         # int, so `has($id)` alone would call a corrupt {"id": null} entry saved
         # while they resume it from 0 — re-summarizing the whole span, which is
         # what #140 exists to prevent.
-        SAVED_QUERY='if (((.sessions // {})[$id] | type) == "number") or (.session == $id and (.line | type) == "number") then "saved" else "unsaved" end'
+        SAVED_QUERY='def isline: type == "number" and . == floor; if (((.sessions // {})[$id]) | isline) or (.session == $id and (.line | isline)) then "saved" else "unsaved" end'
         SAVED_STATE=$($JQ -r --arg id "$LAST_ID" "$SAVED_QUERY" "$LAST_SAVE_FILE" 2>/dev/null)
         if [ "$SAVED_STATE" != "saved" ]; then
             "$PLUGIN_ROOT/scripts/save-session.sh" "$LAST_ID" --force </dev/null >/dev/null 2>&1 & disown 2>/dev/null || true

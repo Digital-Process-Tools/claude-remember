@@ -187,6 +187,13 @@ def _jq_saved_state(payload: str, session_id: str) -> str:
     ('{"session": "%s", "line": 9}' % SESSION_A, "saved"),
     ('{"session": "%s", "line": null}' % SESSION_A, "unsaved"),
     ('{"sessions": {}}', "unsaved"),
+    # A float reads as a number to jq but is not an int to python; a bool is
+    # the reverse, since bool subclasses int. Either disagreement means one
+    # reader skips the recovery save while the other resumes from 0.
+    ('{"sessions": {"%s": 12.5}}' % SESSION_A, "unsaved"),
+    ('{"sessions": {"%s": true}}' % SESSION_A, "unsaved"),
+    ('{"sessions": {"%s": false}}' % SESSION_A, "unsaved"),
+    ('{"session": "%s", "line": 9.5}' % SESSION_A, "unsaved"),
 ])
 def test_jq_reader_agrees_with_the_python_reader(payload, expected, tmp_path):
     assert _jq_saved_state(payload, SESSION_A) == expected
