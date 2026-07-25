@@ -293,13 +293,21 @@ def test_consolidate_tolerates_non_utf8_staging(tmp_path, capsys):
 # and passes on as argv to the NEXT python call. On Windows that print() used
 # the console's ANSI codepage, so a temp path under a non-ASCII profile came
 # back mojibake and build-prompt died with FileNotFoundError on a file that was
-# right there on disk. The paths are made by tempfile, so TMPDIR is what puts
-# non-ASCII into them here — the stand-in for a CJK Windows profile directory.
-# Under the forced locale the ascii codec makes that print() raise outright.
+# right there on disk.
+#
+# Note this boundary needs a DIFFERENT stand-in from the two above. Forcing
+# LC_ALL=C would also make Python's filesystem encoding ascii, which mangles
+# the path before stdout is ever reached — that is not the bug, and it is not
+# what Windows does: there the filesystem is UTF-8 (PEP 529) and only the
+# console codec is wrong. So keep the locale alone and force just the io codec
+# to a real ANSI codepage, which is exactly the shape #145 reported.
+ANSI_STDOUT_ENV = {**os.environ, "PYTHONIOENCODING": "cp1252"}
+ANSI_STDOUT_ENV.pop("PYTHONUTF8", None)
 
-def _run_shell_in_tmpdir(args: list[str], stdin_bytes: bytes, tmpdir: Path):
-    """_run_shell, but with tempfile pointed at a non-ASCII directory."""
-    env = {**FORCED_NON_UTF8_ENV, "TMPDIR": str(tmpdir), "TEMP": str(tmpdir),
+
+def _run_shell_ansi_stdout(args: list[str], stdin_bytes: bytes, tmpdir: Path):
+    """Run pipeline.shell with an ANSI stdout codec and a non-ASCII TMPDIR."""
+    env = {**ANSI_STDOUT_ENV, "TMPDIR": str(tmpdir), "TEMP": str(tmpdir),
            "TMP": str(tmpdir)}
     return subprocess.run(
         [sys.executable, "-m", "pipeline.shell", *args],
@@ -316,16 +324,29 @@ def _haiku_payload(result: str) -> bytes:
     ).encode("utf-8")
 
 
-def test_shell_stdout_emits_utf8_paths_under_non_utf8_locale(tmp_path):
+# The two tests below put a non-ASCII directory on disk, so they need a
+# filesystem codec that can carry one. A runner under LANG=C cannot, and there
+# the path is mangled before stdout is ever involved — a different bug from
+# #145, and not one this stand-in can show. The unit guard below covers those
+# runners.
+requires_utf8_fs = pytest.mark.skipif(
+    sys.getfilesystemencoding().lower().replace("-", "") != "utf8",
+    reason="needs a UTF-8 filesystem codec to put a non-ASCII dir on disk; "
+           "test_main_reconfigures_both_output_streams covers this elsewhere",
+)
+
+
+@requires_utf8_fs
+def test_shell_stdout_emits_utf8_paths_under_ansi_codepage(tmp_path):
     """A path printed for bash to re-consume must survive as UTF-8 (#145)."""
     tmpdir = tmp_path / "ユーザー"
     tmpdir.mkdir()
     out = tmp_path / "haiku.txt"
 
-    result = _run_shell_in_tmpdir(["parse-haiku", str(out)], _haiku_payload("x"), tmpdir)
+    result = _run_shell_ansi_stdout(["parse-haiku", str(out)], _haiku_payload("x"), tmpdir)
 
     assert result.returncode == 0, (
-        "shell.py crashed printing a non-ASCII path under a non-UTF-8 locale "
+        "shell.py crashed printing a non-ASCII path under an ANSI stdout codec "
         f"(#145).\nstderr:\n{result.stderr.decode('utf-8', 'replace')}"
     )
     line = next(
@@ -335,6 +356,7 @@ def test_shell_stdout_emits_utf8_paths_under_non_utf8_locale(tmp_path):
     assert "ユーザー" in line, f"path came back mangled: {line!r}"
 
 
+@requires_utf8_fs
 def test_shell_stdout_path_round_trips_into_a_second_process(tmp_path):
     """The reporter's own check: the captured path must still open (#145).
 
@@ -346,7 +368,7 @@ def test_shell_stdout_path_round_trips_into_a_second_process(tmp_path):
     tmpdir.mkdir()
     out = tmp_path / "haiku.txt"
 
-    captured = _run_shell_in_tmpdir(["parse-haiku", str(out)], _haiku_payload("y"), tmpdir)
+    captured = _run_shell_ansi_stdout(["parse-haiku", str(out)], _haiku_payload("y"), tmpdir)
     assert captured.returncode == 0, captured.stderr.decode("utf-8", "replace")
     path = next(
         ln.split("=", 1)[1]
@@ -357,8 +379,41 @@ def test_shell_stdout_path_round_trips_into_a_second_process(tmp_path):
     probe = subprocess.run(
         [sys.executable, "-c",
          "import os, sys; print(os.path.exists(sys.argv[1]))", path],
-        capture_output=True, cwd=str(REPO_ROOT), env=FORCED_NON_UTF8_ENV, timeout=30,
+        capture_output=True, cwd=str(REPO_ROOT), timeout=30,
     )
     assert probe.stdout.decode("utf-8").strip() == "True", (
         f"captured path does not resolve in a second process: {path!r}"
     )
+
+
+def test_main_reconfigures_both_output_streams():
+    """Cross-platform guard: the reconfigure must cover stderr too, not just
+    stdout — error text carries paths as well, and a crash there is what made
+    #145 undiagnosable in the first place."""
+    sys.path.insert(0, str(REPO_ROOT))
+    from unittest.mock import patch
+    import pipeline.shell as shell
+
+    class Recorder:
+        def __init__(self):
+            self.calls = []
+
+        def reconfigure(self, **kwargs):
+            self.calls.append(kwargs)
+
+        def write(self, *a, **k):
+            pass
+
+        def flush(self):
+            pass
+
+    out, err = Recorder(), Recorder()
+    with patch.object(sys, "stdout", out), patch.object(sys, "stderr", err), \
+            patch.object(sys, "argv", ["shell"]):
+        with pytest.raises(SystemExit):
+            shell.main()
+
+    for name, rec in (("stdout", out), ("stderr", err)):
+        assert rec.calls == [{"encoding": "utf-8", "errors": "replace"}], (
+            f"{name} was not reconfigured to UTF-8: {rec.calls!r}"
+        )
