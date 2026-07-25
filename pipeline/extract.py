@@ -67,7 +67,6 @@ def _is_line_number(value: object) -> bool:
     return isinstance(value, float) and value.is_integer()
 
 
-
 def read_positions(last_save_file: str) -> dict[str, int]:
     """Read the session→position map, tolerating every shape the file can take.
 
