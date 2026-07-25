@@ -194,6 +194,12 @@ def _jq_saved_state(payload: str, session_id: str) -> str:
     ('{"sessions": {"%s": true}}' % SESSION_A, "unsaved"),
     ('{"sessions": {"%s": false}}' % SESSION_A, "unsaved"),
     ('{"session": "%s", "line": 9.5}' % SESSION_A, "unsaved"),
+    # An integral float is the trap: jq cannot tell 1.0 from 1 — it parses
+    # every number to a double — so python has to accept it too, or the hook
+    # calls the session saved while the reader resumes it from 0.
+    ('{"sessions": {"%s": 1.0}}' % SESSION_A, "saved"),
+    ('{"sessions": {"%s": 1e3}}' % SESSION_A, "saved"),
+    ('{"session": "%s", "line": 1.0}' % SESSION_A, "saved"),
 ])
 def test_jq_reader_agrees_with_the_python_reader(payload, expected, tmp_path):
     assert _jq_saved_state(payload, SESSION_A) == expected
@@ -205,3 +211,32 @@ def test_jq_reader_agrees_with_the_python_reader(payload, expected, tmp_path):
     assert (python_line != 0) == (expected == "saved"), (
         f"jq says {expected} but get_last_save_line returned {python_line}"
     )
+
+
+def test_an_integral_float_is_read_as_that_line(store):
+    """jq sees 1.0 and 1 as the same number, so this reader must too.
+
+    Rejecting it here while the hook accepted it meant the hook skipped the
+    recovery save and this reader started over — a re-summarized span, which
+    is the duplicate #140 is about.
+    """
+    remember, path = store
+    Path(path).write_text(json.dumps({"sessions": {SESSION_A: 120.0}}), encoding="utf-8")
+    assert get_last_save_line(SESSION_A, remember_dir=str(remember)) == 120
+
+
+def test_a_bool_in_a_legacy_file_is_not_carried_forward(store):
+    """The legacy branch of _read_positions kept its bare isinstance check.
+
+    bool subclasses int, so `true` survived the merge and was written back
+    into the keyed store as a literal true — persisting the corruption, where
+    the reader then treats it as 0 and re-extracts everything.
+    """
+    remember, path = store
+    Path(path).write_text(json.dumps({"session": SESSION_A, "line": True}), encoding="utf-8")
+
+    cmd_save_position(path, SESSION_B, 7)
+
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    assert SESSION_A not in data["sessions"], f"bool position carried over: {data}"
+    assert data["sessions"][SESSION_B] == 7

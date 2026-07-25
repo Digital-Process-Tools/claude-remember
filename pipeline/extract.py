@@ -51,11 +51,20 @@ def _session_dir(project_dir: str) -> str:
 def _is_line_number(value: object) -> bool:
     """Whether a stored position is a usable line number.
 
-    `bool` subclasses `int`, so ``true`` would otherwise pass as line 1 while
-    the jq reader in session-start-hook.sh rejects it — see the matching helper
-    in pipeline/shell.py.
+    Two traps, both found by review. `bool` subclasses `int` in Python, so a
+    hand-edited ``true`` would sail through an ``isinstance(v, int)`` check and
+    behave as line 1. And jq — which session-start-hook.sh reads the same file
+    with — cannot tell ``1.0`` from ``1``: it parses every number to a double
+    and prints both as ``1``. So an integral float has to count here too, or
+    the hook calls a session saved while this reader resumes it from 0 and
+    re-summarizes the whole span, which is the duplicate #140 exists to
+    prevent. Fractions are rejected on both sides.
     """
-    return isinstance(value, int) and not isinstance(value, bool)
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return True
+    return isinstance(value, float) and value.is_integer()
 
 
 def _last_save_path(project_dir: str, remember_dir: str | None = None) -> str:
@@ -140,13 +149,13 @@ def get_last_save_line(session_id: str,
         sessions = data.get("sessions")
         if isinstance(sessions, dict):
             line = sessions.get(session_id, 0)
-            return line if _is_line_number(line) else 0
+            return int(line) if _is_line_number(line) else 0
         if data.get("session") == session_id:
             # Type-checked like the keyed branch above: a null or string line in
             # a hand-edited or truncated file would otherwise be handed back to
             # callers that expect an int.
             line = data.get("line", 0)
-            return line if _is_line_number(line) else 0
+            return int(line) if _is_line_number(line) else 0
     except (ValueError, KeyError, OSError):
         pass
     return 0

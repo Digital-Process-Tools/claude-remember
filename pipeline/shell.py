@@ -237,13 +237,20 @@ def cmd_call_haiku(prompt_file: str, output_file: str = "", timeout: int = 120) 
 def _is_line_number(value: object) -> bool:
     """Whether a stored position is a usable line number.
 
-    `bool` subclasses `int` in Python, so a hand-edited ``true`` would sail
-    through an ``isinstance(v, int)`` check and behave as line 1 — while the
-    jq reader in session-start-hook.sh rejects it. The two must agree, or one
-    skips the recovery save while the other resumes from 0 and re-summarizes
-    the whole span, which is the duplicate #140 exists to prevent.
+    Two traps, both found by review. `bool` subclasses `int` in Python, so a
+    hand-edited ``true`` would sail through an ``isinstance(v, int)`` check and
+    behave as line 1. And jq — which session-start-hook.sh reads the same file
+    with — cannot tell ``1.0`` from ``1``: it parses every number to a double
+    and prints both as ``1``. So an integral float has to count here too, or
+    the hook calls a session saved while this reader resumes it from 0 and
+    re-summarizes the whole span, which is the duplicate #140 exists to
+    prevent. Fractions are rejected on both sides.
     """
-    return isinstance(value, int) and not isinstance(value, bool)
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return True
+    return isinstance(value, float) and value.is_integer()
 
 
 #: How many sessions keep a remembered position. Interleaved work is a handful
@@ -309,11 +316,11 @@ def _read_positions(last_save_file: str) -> dict[str, int]:
         return {}
     sessions = data.get("sessions")
     if isinstance(sessions, dict):
-        return {k: v for k, v in sessions.items() if _is_line_number(v)}
+        return {k: int(v) for k, v in sessions.items() if _is_line_number(v)}
     # Pre-#140 file: one session, one line. Carry it over rather than dropping
     # it, or the first save after an upgrade re-summarizes from the start.
-    if isinstance(data.get("session"), str) and isinstance(data.get("line"), int):
-        return {data["session"]: data["line"]}
+    if isinstance(data.get("session"), str) and _is_line_number(data.get("line")):
+        return {data["session"]: int(data["line"])}
     return {}
 
 
