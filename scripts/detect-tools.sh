@@ -123,12 +123,35 @@ session_dir_slug() {
         path="${winpath:0:1}"
         path="${path,,}${winpath:1}"
     fi
-    local lead lead_hi four_lo four_hi cont_lo cont_hi
-    lead=$(printf '\302'); lead_hi=$(printf '\357')
-    four_lo=$(printf '\360'); four_hi=$(printf '\364')
-    cont_lo=$(printf '\200'); cont_hi=$(printf '\277')
+    # The UTF-8 well-formedness table, one expression per row. Ranges matter:
+    # a lead byte does not accept every continuation. \355 (U+D800-DFFF, the
+    # surrogate block) and the overlong \340/\360 forms are not valid UTF-8,
+    # and the decoder emits one replacement character per byte for them — so
+    # they must fall through to the catch-all below rather than collapse here.
+    # Each lead also takes EXACTLY its own continuations: an unbounded run
+    # would swallow the lone continuation bytes after a valid sequence, which
+    # again are one replacement character each.
+    #
+    # Verified against the real regex under node over several hundred generated
+    # paths: identical for ALL well-formed UTF-8. The one shape that still
+    # differs is a TRUNCATED sequence (a valid lead and some of its
+    # continuations, then the string ends) — the decoder folds that into a
+    # single replacement character by the maximal-subpart rule, while this
+    # gives one dash per byte. Expressing that needs the decoder's state
+    # machine, and it cannot arise from a path a filesystem would hand us:
+    # macOS enforces well-formed UTF-8, Windows paths come from UTF-16. If it
+    # ever does, the slug misses and the hook now says so rather than sitting
+    # silent, which is the whole point of the warning below.
+    local C L
+    C="$(printf '\200')-$(printf '\277')"
     printf '%s\n' "$path" | LC_ALL=C sed \
-        -e "s/[$four_lo-$four_hi][$cont_lo-$cont_hi]\{3\}/--/g" \
-        -e "s/[$lead-$lead_hi][$cont_lo-$cont_hi]*/-/g" \
+        -e "s/$(printf '\360')[$(printf '\220')-$(printf '\277')][$C][$C]/--/g" \
+        -e "s/[$(printf '\361')-$(printf '\363')][$C][$C][$C]/--/g" \
+        -e "s/$(printf '\364')[$(printf '\200')-$(printf '\217')][$C][$C]/--/g" \
+        -e "s/$(printf '\340')[$(printf '\240')-$(printf '\277')][$C]/-/g" \
+        -e "s/[$(printf '\341')-$(printf '\354')][$C][$C]/-/g" \
+        -e "s/$(printf '\355')[$(printf '\200')-$(printf '\237')][$C]/-/g" \
+        -e "s/[$(printf '\356')-$(printf '\357')][$C][$C]/-/g" \
+        -e "s/[$(printf '\302')-$(printf '\337')][$C]/-/g" \
         -e 's/[^a-zA-Z0-9]/-/g'
 }
