@@ -131,9 +131,38 @@ CLEANUP_FILES+=("$EXTRACT_FILE")
 date +%s > "$COOLDOWN_MARKER"
 log "extract" "${EXCHANGE_COUNT} exchanges (${HUMAN_COUNT} human)"
 
-[ "$EXCHANGE_COUNT" -eq 0 ] && { log "extract" "0 exchanges, skip"; exit 0; }
+# Nothing in this span at all: advance the saved position before leaving (#147).
+# The position is only written after a *successful* save (:211), so an early exit
+# here used to leave the cursor where it was — and since the cooldown marker at
+# :131 *is* written, the next run re-extracted the identical span and exited
+# identically, once per cooldown window, forever. There is nothing to summarize
+# in an empty span, so advancing loses no memory and breaks the loop.
+if [ "$EXCHANGE_COUNT" -eq 0 ]; then
+    log "extract" "0 exchanges, skip — position → $POSITION"
+    cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell save-position "$LAST_SAVE_FILE" "$SESSION_ID" "$POSITION"
+    exit 0
+fi
+
+# The min-human gate exists to keep greetings and one-liners out of memory. But
+# an *agentic* session — many tool calls, few human turns — never clears it, so
+# the plugin's core function silently never ran for the whole session (#147,
+# #125). Substance is not only measured in human turns: a span with this many
+# exchanges is real work, so let it through even when the human count is low.
+# Set the threshold to 0 to disable the fallback and keep the strict gate.
 MIN_HUMAN=$(config ".thresholds.min_human_messages" 3)
-[ "$HUMAN_COUNT" -lt "$MIN_HUMAN" ] && [ "$DRY_RUN" = false ] && [ "$FORCE" != true ] && { log "extract" "${HUMAN_COUNT} human msgs < ${MIN_HUMAN}, skip"; exit 0; }
+MIN_EXCHANGES=$(config ".thresholds.min_exchanges_without_human" 30)
+if [ "$HUMAN_COUNT" -lt "$MIN_HUMAN" ] && [ "$DRY_RUN" = false ] && [ "$FORCE" != true ]; then
+    if [ "$MIN_EXCHANGES" -gt 0 ] && [ "$EXCHANGE_COUNT" -ge "$MIN_EXCHANGES" ]; then
+        log "extract" "${HUMAN_COUNT} human < ${MIN_HUMAN} but ${EXCHANGE_COUNT} exchanges >= ${MIN_EXCHANGES}, saving (agentic session)"
+    else
+        # Deliberately does NOT advance the position: these exchanges are real
+        # content, just not enough of it yet. Keeping the cursor lets them be
+        # summarized together with the turns that follow. The cost of re-reading
+        # is bounded by the save cooldown.
+        log "extract" "${HUMAN_COUNT} human msgs < ${MIN_HUMAN}, skip"
+        exit 0
+    fi
+fi
 
 if [ "$DRY_RUN" = true ]; then
     echo ""; echo "=== DRY RUN ==="; echo ""; cat "$EXTRACT_FILE"; echo ""; exit 0

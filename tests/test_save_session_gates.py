@@ -1,0 +1,205 @@
+"""save-session.sh extraction gates: what skips, what saves, what advances (#147).
+
+The saved position (``last-save.json``) is written only after a successful save,
+while the cooldown marker is written before every gate. So any early exit that
+leaves the position untouched makes the *next* run re-extract the identical span
+and exit identically — once per cooldown window, forever. Two gates sit there:
+
+* ``EXCHANGE_COUNT == 0`` — nothing to summarize, so the position must advance.
+* ``HUMAN_COUNT < min_human_messages`` — real content, just not enough yet, so
+  the position must NOT advance (those turns get summarized with the ones that
+  follow). But an *agentic* session — many tool calls, few human turns — never
+  clears this gate at all, so a large-enough span saves anyway.
+
+These tests drive the real script with a stubbed ``pipeline.shell`` so the gates
+are exercised without a Haiku call.
+"""
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import Optional
+
+import pytest
+
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="bash subprocess + POSIX layout — not portable to Windows runners (#79)",
+)
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# Stub for `python -m pipeline.shell <cmd>`. Covers only the commands the script
+# reaches before/around the gates; every call is appended to calls.log so a test
+# can assert what ran. call-haiku returns a SKIP so no summary is ever written.
+STUB_SHELL = '''\
+import os, sys, tempfile
+
+CALLS = os.environ["STUB_CALLS_LOG"]
+cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+with open(CALLS, "a") as f:
+    f.write(" ".join([cmd] + sys.argv[2:]) + "\\n")
+
+if cmd == "extract":
+    fd, path = tempfile.mkstemp(suffix="-extract")
+    with os.fdopen(fd, "w") as f:
+        f.write("Human: something\\nAssistant: something else\\n")
+    print(f"POSITION={os.environ['STUB_POSITION']}")
+    print(f"HUMAN_COUNT={os.environ['STUB_HUMAN_COUNT']}")
+    print("ASSISTANT_COUNT=1")
+    print(f"EXCHANGE_COUNT={os.environ['STUB_EXCHANGE_COUNT']}")
+    print(f"EXTRACT_FILE={path}")
+elif cmd == "save-position":
+    last_save_file, session_id, position = sys.argv[2], sys.argv[3], sys.argv[4]
+    import json
+    with open(last_save_file, "w") as f:
+        json.dump({"session": session_id, "line": int(position)}, f)
+elif cmd == "build-prompt":
+    # argv: build-prompt <extract> <last_entry> <time> <branch> <out> <max_bytes>
+    with open(sys.argv[6], "w") as f:
+        f.write("a prompt with no placeholders\\n")
+elif cmd == "call-haiku":
+    fd, path = tempfile.mkstemp(suffix="-haiku")
+    with os.fdopen(fd, "w") as f:
+        f.write("SKIP\\n")
+    print("IS_SKIP=true")
+    print(f"HAIKU_TEXT_FILE={path}")
+    print("TK_IN=0"); print("TK_OUT=0"); print("TK_CACHE=0"); print("TK_COST=0")
+elif cmd == "build-ndc-prompt":
+    open(sys.argv[3], "w").close()
+'''
+
+
+def _make_env(tmp_path: Path, *, exchanges: int, humans: int, position: int = 500,
+              config: Optional[dict] = None):
+    """Build a project + stub plugin and return the env for running save-session.sh."""
+    project = tmp_path / "project"
+    (project / ".remember" / "tmp").mkdir(parents=True)
+    (project / ".remember" / "logs").mkdir(parents=True)
+
+    plugin = tmp_path / "plugin"
+    (plugin / "scripts").mkdir(parents=True)
+    (plugin / "pipeline").mkdir(parents=True)
+    (plugin / "pipeline" / "__init__.py").write_text("")
+    (plugin / "pipeline" / "haiku.py").write_text("# marker\n")
+    (plugin / "pipeline" / "shell.py").write_text(STUB_SHELL)
+    for script in ("save-session.sh", "resolve-paths.sh", "detect-tools.sh",
+                   "bootstrap-dirs.sh", "log.sh", "lib-memory-dir.sh"):
+        (plugin / "scripts" / script).write_text((REPO_ROOT / "scripts" / script).read_text())
+
+    cfg = {"cooldowns": {"save_seconds": 0, "ndc_seconds": 999999},
+           "thresholds": {"min_human_messages": 3, "delta_lines_trigger": 50},
+           "features": {"ndc_compression": False}}
+    if config:
+        cfg["thresholds"].update(config)
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps(cfg))
+    (plugin / "config.json").write_text(json.dumps(cfg))
+
+    # A session transcript must exist for the script's session-id discovery.
+    session_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    slug = str(project).replace("/", "-").replace(".", "-").replace("_", "-")
+    session_dir = tmp_path / "home" / ".claude" / "projects" / slug
+    session_dir.mkdir(parents=True)
+    (session_dir / f"{session_id}.jsonl").write_text('{"type":"user"}\n' * 10)
+
+    calls_log = tmp_path / "calls.log"
+    env = {
+        **os.environ,
+        "HOME": str(tmp_path / "home"),
+        "CLAUDE_PROJECT_DIR": str(project),
+        "CLAUDE_PLUGIN_ROOT": str(plugin),
+        "REMEMBER_CONFIG": str(cfg_path),
+        "STUB_CALLS_LOG": str(calls_log),
+        "STUB_POSITION": str(position),
+        "STUB_HUMAN_COUNT": str(humans),
+        "STUB_EXCHANGE_COUNT": str(exchanges),
+    }
+    return env, project, plugin, calls_log, session_id
+
+
+def _run(plugin: Path, env: dict, session_id: str):
+    return subprocess.run(
+        ["bash", str(plugin / "scripts" / "save-session.sh"), session_id],
+        capture_output=True, text=True, env=env, timeout=60,
+    )
+
+
+def _saved_position(project: Path):
+    f = project / ".remember" / "tmp" / "last-save.json"
+    return json.loads(f.read_text())["line"] if f.is_file() else None
+
+
+class TestNoWorkSessionAdvancesPosition:
+
+    def test_zero_exchanges_advances_position(self, tmp_path):
+        """An empty span has nothing to summarize — the cursor must still move (#147)."""
+        env, project, plugin, calls, sid = _make_env(tmp_path, exchanges=0, humans=0,
+                                                     position=812)
+        result = _run(plugin, env, sid)
+
+        assert result.returncode == 0, result.stderr
+        assert _saved_position(project) == 812, (
+            "position must advance past an empty span, else the next run re-extracts "
+            "the same lines and exits identically, once per cooldown, forever"
+        )
+        assert "call-haiku" not in calls.read_text(), "no summary should be attempted"
+
+
+class TestMinHumanGate:
+
+    def test_below_threshold_skips_without_advancing(self, tmp_path):
+        """Too few human turns: skip, but keep the cursor so the content survives."""
+        env, project, plugin, calls, sid = _make_env(tmp_path, exchanges=4, humans=1)
+        result = _run(plugin, env, sid)
+
+        assert result.returncode == 0, result.stderr
+        assert _saved_position(project) is None, (
+            "these exchanges are real content — advancing would drop them from every "
+            "future extract, so they must stay pending"
+        )
+        assert "call-haiku" not in calls.read_text()
+
+    def test_agentic_session_saves_despite_low_human_count(self, tmp_path):
+        """Many exchanges, few human turns: this is work, and it must reach memory."""
+        env, project, plugin, calls, sid = _make_env(tmp_path, exchanges=45, humans=1)
+        result = _run(plugin, env, sid)
+
+        assert result.returncode == 0, result.stderr
+        assert "call-haiku" in calls.read_text(), (
+            "an agentic session (many tool calls, few human turns) never clears the "
+            "min-human gate — without the exchange-count fallback the plugin's core "
+            "function silently never runs (#147/#125)"
+        )
+
+    def test_fallback_threshold_is_configurable(self, tmp_path):
+        """A higher min_exchanges_without_human keeps the same span gated out."""
+        env, project, plugin, calls, sid = _make_env(
+            tmp_path, exchanges=45, humans=1,
+            config={"min_exchanges_without_human": 100},
+        )
+        result = _run(plugin, env, sid)
+
+        assert result.returncode == 0, result.stderr
+        assert "call-haiku" not in calls.read_text()
+
+    def test_fallback_can_be_disabled_with_zero(self, tmp_path):
+        """0 restores the strict gate: human turns are the only way through."""
+        env, project, plugin, calls, sid = _make_env(
+            tmp_path, exchanges=500, humans=1,
+            config={"min_exchanges_without_human": 0},
+        )
+        result = _run(plugin, env, sid)
+
+        assert result.returncode == 0, result.stderr
+        assert "call-haiku" not in calls.read_text()
+
+    def test_enough_human_turns_still_saves(self, tmp_path):
+        """The ordinary path is untouched by the fallback."""
+        env, project, plugin, calls, sid = _make_env(tmp_path, exchanges=6, humans=5)
+        result = _run(plugin, env, sid)
+
+        assert result.returncode == 0, result.stderr
+        assert "call-haiku" in calls.read_text()
