@@ -685,3 +685,81 @@ class TestGitBackupGpgSign:
 
         assert len(_commit_log(remember)) == 2
         assert _is_signed(remember), "gpg_sign=true must let the repo sign the commit"
+
+
+def _make_worktree_project(tmp_path: Path):
+    """Create a project repo with a linked worktree. Returns (main_checkout, worktree)."""
+    main = tmp_path / "project"
+    main.mkdir()
+    _git(main, ["init", "-q", "-b", "main"])
+    _git(main, ["config", "user.email", "t@t"])
+    _git(main, ["config", "user.name", "T"])
+    (main / "README.md").write_text("project\n")
+    _git(main, ["add", "README.md"])
+    _git(main, ["commit", "-q", "-m", "init"])
+    worktree = tmp_path / "project-wt"
+    _git(main, ["worktree", "add", "-q", "-b", "feature", str(worktree)])
+    return main, worktree
+
+
+class TestGitBackupNeverTouchesProjectRepo:
+    """The hook must never commit/push into the project's own repo (#138).
+
+    Since #127 a worktree session keeps PROJECT_DIR on the worktree while
+    REMEMBER_DIR is redirected into the main checkout, so the plain
+    ``REPO_ROOT == PROJECT_DIR`` legacy guard no longer matches and the hook
+    used to treat the project repo as an external backup repo.
+    """
+
+    def test_no_op_for_legacy_memory_in_worktree_session(self, tmp_path):
+        """Legacy mode + worktree session: project repo untouched, .gitignore kept."""
+        main, worktree = _make_worktree_project(tmp_path)
+        remember_dir = main / ".remember"
+        remember_dir.mkdir()
+        gitignore = remember_dir / ".gitignore"
+        gitignore.write_text("*\n")
+        (remember_dir / "now.md").write_text("## 10:00 | test\nMemory.\n")
+
+        commits_before = _commit_log(main)
+        cfg = _make_config(tmp_path, cooldown=0)
+
+        result = _run_hook(remember_dir, worktree, tmp_path / "home", config_path=cfg)
+
+        assert result.returncode == 0
+        assert _commit_log(main) == commits_before, "project repo must not be committed to"
+        assert gitignore.exists(), "protective .remember/.gitignore must survive"
+        assert not (main / ".git-backup.lock").exists()
+        assert not (main / ".last-git-backup-ts").exists()
+
+    def test_no_op_when_repo_root_is_a_sibling_worktree_of_the_project(self, tmp_path):
+        """Memory parked in another worktree of the same repo is still the project repo."""
+        main, worktree = _make_worktree_project(tmp_path)
+        remember_dir = worktree / ".remember"
+        remember_dir.mkdir()
+        (remember_dir / "now.md").write_text("## 10:00 | test\nMemory.\n")
+
+        commits_before = _commit_log(main)
+        cfg = _make_config(tmp_path, cooldown=0)
+
+        result = _run_hook(remember_dir, main, tmp_path / "home", config_path=cfg)
+
+        assert result.returncode == 0
+        assert _commit_log(main) == commits_before
+
+    def test_external_repo_still_activates_for_a_worktree_session(self, tmp_path):
+        """Guard must not over-fire: a dedicated memory repo still backs up normally."""
+        home, remember, _ = make_external_remember_repo(tmp_path)
+        _main, worktree = _make_worktree_project(tmp_path)
+        slug = "test-slug"
+        slug_dir = remember / slug
+        slug_dir.mkdir()
+        (slug_dir / "now.md").write_text("## 10:00 | test\nMemory.\n")
+        cfg = _make_config(tmp_path, cooldown=0)
+
+        result = _run_hook(slug_dir, worktree, home, config_path=cfg)
+        assert result.returncode == 0
+        wait_for_lock_release(remember / ".git-backup.lock")
+
+        commits = _commit_log(remember)
+        assert len(commits) == 2, "external backup must still commit for worktree sessions"
+        assert commits[0].split(" ", 1)[1].startswith(f"auto: {slug}")

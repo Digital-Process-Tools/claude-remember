@@ -36,6 +36,42 @@ SLUG=$(basename "$REMEMBER_DIR")
 TOPLEVEL=$(git -C "$REPO_ROOT" rev-parse --show-toplevel 2>/dev/null) || exit 0
 [ "$TOPLEVEL" = "$REPO_ROOT" ] || exit 0
 
+# ── Never back up into the project's own repository (#138) ───────────────────
+# The equality check above only catches the plain legacy layout. Since #127,
+# a session run from a linked git worktree keeps PROJECT_DIR on the worktree
+# while REMEMBER_DIR is redirected into the *main checkout* — so REPO_ROOT is
+# the project repo, both guards above pass, and the hook would delete the
+# protective .remember/.gitignore, commit the whole memory tree onto whatever
+# branch the main checkout has out, and push it to the project's origin.
+#
+# Compare git *common dirs* instead of paths: every worktree of a repo shares
+# one common dir, so this covers the plain, worktree, and subdirectory cases at
+# once, while a repo dedicated to memory backup keeps a different common dir and
+# still activates. Old git without --path-format falls back to resolving the
+# relative form; if even that fails we leave the previous behaviour untouched.
+_gb_common_dir() {
+    local _d="$1" _out
+    [ -d "$_d" ] || return 1
+    _out=$(git -C "$_d" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || _out=""
+    if [ -z "$_out" ]; then
+        _out=$(git -C "$_d" rev-parse --git-common-dir 2>/dev/null) || return 1
+        [ -n "$_out" ] || return 1
+        case "$_out" in
+            /*|[A-Za-z]:/*|[A-Za-z]:\\*) ;;
+            *) _out="$_d/$_out" ;;
+        esac
+    fi
+    ( cd "$_out" 2>/dev/null && pwd -P ) || printf '%s' "$_out"
+}
+
+PROJECT_COMMON_DIR=$(_gb_common_dir "$PROJECT_DIR") || PROJECT_COMMON_DIR=""
+BACKUP_COMMON_DIR=$(_gb_common_dir "$REPO_ROOT") || BACKUP_COMMON_DIR=""
+if [ -n "$PROJECT_COMMON_DIR" ] && [ "$PROJECT_COMMON_DIR" = "$BACKUP_COMMON_DIR" ]; then
+    [ "${REMEMBER_DEBUG:-0}" = "1" ] && \
+        log "git-backup" "REPO_ROOT is the project repo (worktree/legacy), skip"
+    exit 0
+fi
+
 # ── Cooldown ─────────────────────────────────────────────────────────────────
 COOLDOWN_MARKER="$REPO_ROOT/.last-git-backup-ts"
 BACKUP_COOLDOWN=$(config ".cooldowns.git_backup_seconds" 900)
