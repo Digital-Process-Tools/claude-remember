@@ -7,6 +7,7 @@ lib-memory-dir.sh from overriding the REMEMBER_DIR we set explicitly.
 """
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -814,24 +815,76 @@ class TestConfigIsReadBeforeBackgrounding:
     depends on.
     """
 
-    def test_no_git_backup_config_read_inside_the_subshell(self):
+    GIT_BACKUP_VARS = (
+        "GIT_BACKUP_REMOTE", "GIT_BACKUP_BRANCH",
+        "GIT_BACKUP_GPG_SIGN", "ALLOW_REMOTE_CHANGE",
+    )
+
+    @staticmethod
+    def _fork_line(lines):
+        """Index of the line opening the background subshell."""
+        forks = [i for i, line in enumerate(lines) if line.rstrip() == "("]
+        assert len(forks) == 1, f"expected exactly one top-level subshell, found {forks}"
+        return forks[0]
+
+    def test_no_config_read_of_any_kind_inside_the_subshell(self):
+        """Nothing may consult the config file after the fork.
+
+        Checked as "no config() call at all past the fork" rather than by
+        grepping for the git_backup keys: an earlier version of this test
+        matched the literal string `config ".git_backup.`, and a review beat
+        it in one move by putting the key in a variable — the race was back
+        and the test still passed.
+        """
         lines = HOOK.read_text().splitlines()
-        fork_line = next(
-            i for i, line in enumerate(lines)
-            if line.strip() == "(" and "subshell" in lines[i - 1].lower()
-        )
+        fork = self._fork_line(lines)
         late = [
             (i + 1, line.strip())
             for i, line in enumerate(lines)
-            if i > fork_line and 'config ".git_backup.' in line
+            if i > fork and re.search(r"(?<![\w-])config\s+[\"'$]", line)
         ]
         assert late == [], (
-            "these git_backup.* reads happen after the fork, so they race the "
-            f"parent's EXIT trap deleting $REMEMBER_CONFIG (#135): {late}"
+            "these config reads happen after the fork, so they race the parent's "
+            f"EXIT trap deleting $REMEMBER_CONFIG (#135): {late}"
         )
 
-    def test_every_git_backup_key_is_still_read(self):
-        """The hoist must not have dropped one on the way up."""
-        source = HOOK.read_text()
-        for key in ("remote", "branch", "gpg_sign", "allow_remote_change"):
-            assert f'config ".git_backup.{key}"' in source, f"{key} is no longer read"
+    def test_every_git_backup_value_is_assigned_before_the_fork(self):
+        """Each value must be READ in the parent, not merely mentioned there.
+
+        Assignment sites, not substrings: the previous version was satisfied by
+        the key appearing anywhere in the file, so a dead comment above the
+        fork made it pass while the real read sat inside the subshell.
+        """
+        lines = HOOK.read_text().splitlines()
+        fork = self._fork_line(lines)
+        for var in self.GIT_BACKUP_VARS:
+            assigned = [
+                i for i, line in enumerate(lines)
+                if re.match(rf"\s*{var}=\$\(\s*config\s", line)
+            ]
+            assert assigned, f"{var} is never assigned from config()"
+            assert all(i < fork for i in assigned), (
+                f"{var} is read after the fork (lines {[i + 1 for i in assigned]}, "
+                f"fork at {fork + 1}) — it races the config file's deletion (#135)"
+            )
+
+    def test_the_subshell_still_uses_every_hoisted_value(self):
+        """A hoist that nothing consumes would pass the checks above and do
+        nothing — pin that what was read still crosses the fork.
+
+        gpg_sign is consumed in the parent to pick GPG_SIGN_FLAG, so that flag
+        is the value the subshell actually uses.
+        """
+        consumed_as = {
+            "GIT_BACKUP_REMOTE": "GIT_BACKUP_REMOTE",
+            "GIT_BACKUP_BRANCH": "GIT_BACKUP_BRANCH",
+            "GIT_BACKUP_GPG_SIGN": "GPG_SIGN_FLAG",
+            "ALLOW_REMOTE_CHANGE": "ALLOW_REMOTE_CHANGE",
+        }
+        lines = HOOK.read_text().splitlines()
+        fork = self._fork_line(lines)
+        body = "\n".join(lines[fork:])
+        for var, used in consumed_as.items():
+            assert f"${used}" in body or f"${{{used}" in body, (
+                f"{var} is read in the parent but {used} never reaches the backup"
+            )
