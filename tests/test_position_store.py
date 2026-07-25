@@ -15,6 +15,7 @@ single-slot file, since an upgrade lands mid-session for real users.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -200,6 +201,10 @@ def _jq_saved_state(payload: str, session_id: str) -> str:
     ('{"sessions": {"%s": 1.0}}' % SESSION_A, "saved"),
     ('{"sessions": {"%s": 1e3}}' % SESSION_A, "saved"),
     ('{"session": "%s", "line": 1.0}' % SESSION_A, "saved"),
+    # JSON has no infinity literal, but 1e400 overflows to one — and
+    # floor(infinite) == infinite, so jq needed an explicit guard.
+    ('{"sessions": {"%s": 1e400}}' % SESSION_A, "unsaved"),
+    ('{"sessions": {"%s": -1e400}}' % SESSION_A, "unsaved"),
 ])
 def test_jq_reader_agrees_with_the_python_reader(payload, expected, tmp_path):
     assert _jq_saved_state(payload, SESSION_A) == expected
@@ -240,3 +245,43 @@ def test_a_bool_in_a_legacy_file_is_not_carried_forward(store):
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     assert SESSION_A not in data["sessions"], f"bool position carried over: {data}"
     assert data["sessions"][SESSION_B] == 7
+
+
+# ── One reader, not five ────────────────────────────────────────────────────
+#
+# This rule lived in five places: two python modules, session-start's jq, the
+# post-tool hook's inline json, and the hook's legacy branch. Three review
+# rounds in a row found a copy that had missed an update. The python side is
+# one implementation now, reachable from bash as `pipeline.shell read-position`,
+# which leaves jq as the only reimplementation — and it is pinned against the
+# python one by test_jq_reader_agrees_with_the_python_reader above.
+
+def test_read_position_command_matches_the_library_reader(store):
+    """The command bash calls must answer exactly what the library answers."""
+    remember, path = store
+    cmd_save_position(path, SESSION_A, 120)
+    cmd_save_position(path, SESSION_B, 40)
+
+    for session, expected in ((SESSION_A, 120), (SESSION_B, 40), ("never-seen", 0)):
+        out = subprocess.run(
+            [sys.executable, "-m", "pipeline.shell", "read-position", path, session],
+            capture_output=True, text=True, cwd=str(REPO_ROOT), timeout=30,
+        )
+        assert out.returncode == 0, out.stderr
+        assert out.stdout.strip() == str(expected), (
+            f"read-position({session}) said {out.stdout.strip()!r}, "
+            f"library says {get_last_save_line(session, remember_dir=str(remember))}"
+        )
+
+
+def test_the_post_tool_hook_does_not_parse_the_store_itself():
+    """It carried its own json reader, and that copy drifted (round 4).
+
+    Every other reader learned that a bool is not a position and an integral
+    float is; that one kept a bare isinstance check and reported 0 for
+    positions the rest of the pipeline resumed from, so the delta throttle
+    fired on almost every tool call for the life of a session.
+    """
+    hook = (REPO_ROOT / "scripts" / "post-tool-hook.sh").read_text()
+    assert "read-position" in hook, "the hook no longer delegates to the shared reader"
+    assert "json.load" not in hook, "the hook is parsing last-save.json itself again"

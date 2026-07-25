@@ -298,6 +298,25 @@ def cmd_save_position(last_save_file: str, session_id: str, position: int) -> No
     os.replace(tmp, last_save_file)
 
 
+def cmd_read_position(last_save_file: str, session_id: str) -> None:
+    """Print the saved position for a session, or 0.
+
+    Exists so scripts/post-tool-hook.sh does not need its own JSON parser.
+    It had one, and it drifted: while every other reader was taught that a
+    bool is not a position and an integral float is, that copy kept a bare
+    isinstance check and reported 0 for a position the rest of the pipeline
+    resumed from. Five copies of this rule was four too many.
+
+    Args:
+        last_save_file: Path to the last-save.json file.
+        session_id: Session whose position is wanted.
+
+    Prints:
+        The line number, or 0 when this session has no usable position.
+    """
+    print(_read_positions(last_save_file).get(session_id, 0))
+
+
 def _read_positions(last_save_file: str) -> dict[str, int]:
     """Read the session→position map, tolerating the old single-slot shape.
 
@@ -513,6 +532,8 @@ def main() -> None:
         output_file = sys.argv[3] if len(sys.argv) > 3 else ""
         timeout = int(sys.argv[4]) if len(sys.argv) > 4 else 120
         cmd_call_haiku(prompt_file=sys.argv[2], output_file=output_file, timeout=timeout)
+    elif cmd == "read-position":
+        cmd_read_position(last_save_file=sys.argv[2], session_id=sys.argv[3])
     elif cmd == "save-position":
         cmd_save_position(
             last_save_file=sys.argv[2],
