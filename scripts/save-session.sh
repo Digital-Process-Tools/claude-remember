@@ -138,8 +138,12 @@ log "extract" "${EXCHANGE_COUNT} exchanges (${HUMAN_COUNT} human)"
 # identically, once per cooldown window, forever. There is nothing to summarize
 # in an empty span, so advancing loses no memory and breaks the loop.
 if [ "$EXCHANGE_COUNT" -eq 0 ]; then
-    log "extract" "0 exchanges, skip — position → $POSITION"
-    cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell save-position "$LAST_SAVE_FILE" "$SESSION_ID" "$POSITION"
+    if [ "$DRY_RUN" = false ]; then
+        log "extract" "0 exchanges, skip — position → $POSITION"
+        cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell save-position "$LAST_SAVE_FILE" "$SESSION_ID" "$POSITION"
+    else
+        log "extract" "0 exchanges, skip (dry run — position unchanged)"
+    fi
     exit 0
 fi
 
@@ -151,6 +155,10 @@ fi
 # Set the threshold to 0 to disable the fallback and keep the strict gate.
 MIN_HUMAN=$(config ".thresholds.min_human_messages" 3)
 MIN_EXCHANGES=$(config ".thresholds.min_exchanges_without_human" 30)
+# A non-numeric value in config.json would abort the script at the comparisons
+# below (set -e + ERR trap), turning a typo into "memory silently stopped".
+case "$MIN_HUMAN" in ''|*[!0-9]*) MIN_HUMAN=3 ;; esac
+case "$MIN_EXCHANGES" in ''|*[!0-9]*) MIN_EXCHANGES=30 ;; esac
 if [ "$HUMAN_COUNT" -lt "$MIN_HUMAN" ] && [ "$DRY_RUN" = false ] && [ "$FORCE" != true ]; then
     if [ "$MIN_EXCHANGES" -gt 0 ] && [ "$EXCHANGE_COUNT" -ge "$MIN_EXCHANGES" ]; then
         log "extract" "${HUMAN_COUNT} human < ${MIN_HUMAN} but ${EXCHANGE_COUNT} exchanges >= ${MIN_EXCHANGES}, saving (agentic session)"
@@ -205,10 +213,48 @@ log "haiku" "calling (branch: $BRANCH)"
 HAIKU_STDERR=$(mktemp "${TMPDIR:-/tmp}"/remember-haiku-err-XXXXXX)
 CLEANUP_FILES+=("$HAIKU_STDERR")
 
+# A summarization failure leaves the span unsummarized, so the position stays
+# put and the span is retried on the next run — that is what we want for a
+# transient error (rate limit, network blip). But a *persistent* failure on the
+# same span then retries forever, once per cooldown window, and memory never
+# advances again: @VictorVvdl hit exactly this for a month (#147). So count
+# consecutive failures against the same (session, position) pair and, past
+# thresholds.max_summary_failures, give up on that span — advance past it and
+# say so loudly. Losing one span is bad; losing every future span is worse.
+# Set the threshold to 0 to retry forever (the old behaviour).
+FAILURE_MARKER="${REMEMBER_DIR}/tmp/last-summary-failure"
+MAX_FAILURES=$(config ".thresholds.max_summary_failures" 3)
+case "$MAX_FAILURES" in ''|*[!0-9]*) MAX_FAILURES=3 ;; esac
+
+record_summary_failure() {
+    [ "$MAX_FAILURES" -eq 0 ] && return 0
+    _prev_key=""
+    _prev_count=0
+    if [ -f "$FAILURE_MARKER" ]; then
+        read -r _prev_key _prev_count < "$FAILURE_MARKER" || true
+        case "$_prev_count" in ''|*[!0-9]*) _prev_count=0 ;; esac
+    fi
+    _key="${SESSION_ID}:${POSITION}"
+    if [ "$_prev_key" = "$_key" ]; then
+        _count=$(( _prev_count + 1 ))
+    else
+        _count=1
+    fi
+
+    if [ "$_count" -ge "$MAX_FAILURES" ]; then
+        log "haiku" "WARNING: ${_count} consecutive failures on this span — dropping it unsummarized and advancing position → $POSITION (see thresholds.max_summary_failures)"
+        cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell save-position "$LAST_SAVE_FILE" "$SESSION_ID" "$POSITION"
+        rm -f "$FAILURE_MARKER"
+    else
+        echo "$_key $_count" > "$FAILURE_MARKER"
+        log "haiku" "failure ${_count}/${MAX_FAILURES} on this span — will retry next run"
+    fi
+}
+
 # `|| { ... }` (not a bare `if [ $? ]`) so a failure is handled under set -e
 # instead of tripping the ERR trap at the assignment.
 HAIKU_VARS=$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell call-haiku "$TMP_PROMPT" 2>"$HAIKU_STDERR") || {
-    log "haiku" "ERROR: $(head -1 "$HAIKU_STDERR")"; exit 1
+    log "haiku" "ERROR: $(head -1 "$HAIKU_STDERR")"; record_summary_failure; exit 1
 }
 
 safe_eval <<< "$HAIKU_VARS"
@@ -216,7 +262,7 @@ CLEANUP_FILES+=("$HAIKU_TEXT_FILE")
 log_tokens "tokens" "$TK_IN" "$TK_OUT" "$TK_CACHE" "$TK_COST"
 
 HAIKU_TEXT=$(cat "$HAIKU_TEXT_FILE")
-[ -z "$HAIKU_TEXT" ] && { log "haiku" "ERROR: empty response"; exit 1; }
+[ -z "$HAIKU_TEXT" ] && { log "haiku" "ERROR: empty response"; record_summary_failure; exit 1; }
 
 # --- Step 5b: Validate format (warn, never discard) ---
 if [ "$IS_SKIP" != "true" ]; then
@@ -230,6 +276,11 @@ fi
 if [ "$IS_SKIP" = "true" ]; then
     log "haiku" "SKIP — position → $POSITION"
     cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell save-position "$LAST_SAVE_FILE" "$SESSION_ID" "$POSITION"
+    # A SKIP is a successful summarization (the model judged the span not worth
+    # recording) and it advances the position, so it must clear the failure
+    # count too — otherwise a stale count survives and a later single failure
+    # trips the give-up threshold early.
+    rm -f "$FAILURE_MARKER"
     exit 0
 fi
 
@@ -239,6 +290,7 @@ cat "$HAIKU_TEXT_FILE" >> "$MEMORY_FILE"
 log "write" "appended: $(head -1 "$HAIKU_TEXT_FILE" | cut -c1-80)"
 cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell save-position "$LAST_SAVE_FILE" "$SESSION_ID" "$POSITION"
 log "write" "position → $POSITION"
+rm -f "$FAILURE_MARKER"
 
 # --- Dispatch: after_save ---
 dispatch "after_save"

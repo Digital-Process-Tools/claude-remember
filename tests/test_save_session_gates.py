@@ -61,6 +61,9 @@ elif cmd == "build-prompt":
     with open(sys.argv[6], "w") as f:
         f.write("a prompt with no placeholders\\n")
 elif cmd == "call-haiku":
+    if os.environ.get("STUB_HAIKU_FAIL") == "1":
+        sys.stderr.write("stub: simulated haiku failure\\n")
+        sys.exit(1)
     fd, path = tempfile.mkstemp(suffix="-haiku")
     with os.fdopen(fd, "w") as f:
         f.write("SKIP\\n")
@@ -120,9 +123,9 @@ def _make_env(tmp_path: Path, *, exchanges: int, humans: int, position: int = 50
     return env, project, plugin, calls_log, session_id
 
 
-def _run(plugin: Path, env: dict, session_id: str):
+def _run(plugin: Path, env: dict, session_id: str, *args: str):
     return subprocess.run(
-        ["bash", str(plugin / "scripts" / "save-session.sh"), session_id],
+        ["bash", str(plugin / "scripts" / "save-session.sh"), session_id, *args],
         capture_output=True, text=True, env=env, timeout=60,
     )
 
@@ -203,3 +206,82 @@ class TestMinHumanGate:
 
         assert result.returncode == 0, result.stderr
         assert "call-haiku" in calls.read_text()
+
+
+class TestDryRun:
+
+    def test_dry_run_does_not_advance_position_on_empty_span(self, tmp_path):
+        """--dry inspects; it must never move the cursor, empty span included."""
+        env, project, plugin, calls, sid = _make_env(tmp_path, exchanges=0, humans=0,
+                                                     position=812)
+        result = _run(plugin, env, sid, "--dry")
+
+        assert result.returncode == 0, result.stderr
+        assert _saved_position(project) is None, (
+            "a dry run must leave last-save.json untouched"
+        )
+
+
+class TestSummaryFailureLoop:
+    """A failing summarizer must be retried, then given up on — never looped forever.
+
+    Keeping the position on failure is right for a transient error: the span is
+    retried next run. But a *persistent* failure on the same span then retries
+    once per cooldown window forever and memory never advances again — the
+    month-long macOS repro in #147. After max_summary_failures the span is
+    dropped, loudly, so later spans can still be saved.
+    """
+
+    def test_failure_keeps_position_and_retries(self, tmp_path):
+        """First failures leave the cursor alone so the span is tried again."""
+        env, project, plugin, calls, sid = _make_env(tmp_path, exchanges=6, humans=5)
+        env["STUB_HAIKU_FAIL"] = "1"
+
+        result = _run(plugin, env, sid)
+
+        assert result.returncode == 1
+        assert _saved_position(project) is None, (
+            "a transient failure must not drop the span — it is retried next run"
+        )
+
+    def test_gives_up_after_max_failures(self, tmp_path):
+        """The Nth consecutive failure on the same span advances past it."""
+        env, project, plugin, calls, sid = _make_env(tmp_path, exchanges=6, humans=5,
+                                                     position=904)
+        env["STUB_HAIKU_FAIL"] = "1"
+
+        _run(plugin, env, sid)
+        assert _saved_position(project) is None
+        _run(plugin, env, sid)
+        assert _saved_position(project) is None, "still retrying at failure 2 of 3"
+
+        _run(plugin, env, sid)
+        assert _saved_position(project) == 904, (
+            "after max_summary_failures the span must be dropped and the position "
+            "advanced, or every later span is lost too (#147)"
+        )
+
+    def test_max_summary_failures_zero_retries_forever(self, tmp_path):
+        """0 restores the old behaviour: never give up on a span."""
+        env, project, plugin, calls, sid = _make_env(tmp_path, exchanges=6, humans=5,
+                                                     config={"max_summary_failures": 0})
+        env["STUB_HAIKU_FAIL"] = "1"
+
+        for _ in range(4):
+            _run(plugin, env, sid)
+
+        assert _saved_position(project) is None
+
+    def test_success_clears_the_failure_count(self, tmp_path):
+        """Two failures then a success must not leave a primed counter behind."""
+        env, project, plugin, calls, sid = _make_env(tmp_path, exchanges=6, humans=5)
+        env["STUB_HAIKU_FAIL"] = "1"
+        _run(plugin, env, sid)
+        _run(plugin, env, sid)
+
+        env["STUB_HAIKU_FAIL"] = "0"
+        result = _run(plugin, env, sid)
+        assert result.returncode == 0, result.stderr
+
+        marker = project / ".remember" / "tmp" / "last-summary-failure"
+        assert not marker.exists(), "a successful save must reset the failure count"
