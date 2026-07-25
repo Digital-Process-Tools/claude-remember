@@ -300,8 +300,20 @@ if [ "$IS_SKIP" != "true" ]; then
         # order with nothing logged. This is the one field the pipeline knows
         # better than the model, so overwrite rather than validate. A no-op
         # when the model copied it correctly.
-        HEADER_REST="${FIRST_LINE#*" | "}"
+        # Split on the pipe itself, not on " | ". The check above only demands a
+        # space BEFORE the pipe, so "## 18:30 |main" passes it — and a literal
+        # " | " match then finds nothing to strip, leaving the whole original
+        # line as the "rest" and writing "## 00:00 | ## 18:30 |main". That is
+        # worse than the wrong time it was meant to fix. Any pipes after the
+        # first belong to the branch name and are left alone.
+        HEADER_REST="${FIRST_LINE#*|}"
+        HEADER_REST="${HEADER_REST# }"
         NEW_FIRST_LINE="## ${CURRENT_TIME} | ${HEADER_REST}"
+        # Never write a header that would not pass the check above.
+        if ! echo "$NEW_FIRST_LINE" | grep -qE '^## ([0-9]{2}:[0-9]{2}|[0-9]{1,2}:[0-9]{2} (AM|PM)) \|'; then
+            log "validate" "WARNING: refusing to rewrite header, result malformed: $(echo "$NEW_FIRST_LINE" | head -c 60)"
+            NEW_FIRST_LINE="$FIRST_LINE"
+        fi
         if [ "$NEW_FIRST_LINE" != "$FIRST_LINE" ]; then
             NORMALIZED=$(mktemp "${TMPDIR:-/tmp}"/remember-header-XXXXXX)
             { printf '%s\n' "$NEW_FIRST_LINE"; tail -n +2 "$HAIKU_TEXT_FILE"; } > "$NORMALIZED"

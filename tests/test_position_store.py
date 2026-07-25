@@ -147,3 +147,54 @@ def test_write_leaves_no_temp_file_behind(store):
     cmd_save_position(path, SESSION_A, 1)
     leftovers = list((remember / "tmp").glob("*.tmp"))
     assert leftovers == [], f"temp file left behind: {leftovers}"
+
+
+# ── The shell readers must agree with the Python ones ───────────────────────
+#
+# session-start-hook.sh asks jq whether the previous session was ever saved.
+# That answer has to mean the same thing as get_last_save_line's: a key with a
+# non-int value is NOT a saved position, and treating it as one skips the
+# recovery save while the real reader resumes from 0 — re-summarizing the whole
+# span, which is the duplicate #140 exists to prevent.
+
+import shutil
+import subprocess
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _jq_saved_state(payload: str, session_id: str) -> str:
+    """Run session-start-hook.sh's own jq expression against a store."""
+    source = (REPO_ROOT / "scripts" / "session-start-hook.sh").read_text()
+    query = next(
+        line.split("=", 1)[1].strip().strip("'")
+        for line in source.splitlines()
+        if line.strip().startswith("SAVED_QUERY=")
+    )
+    import tempfile
+    path = Path(tempfile.mkstemp(suffix=".json")[1])
+    path.write_text(payload, encoding="utf-8")
+    out = subprocess.run(["jq", "-r", "--arg", "id", session_id, query, str(path)],
+                         capture_output=True, text=True, timeout=30)
+    return out.stdout.strip()
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="jq not installed")
+@pytest.mark.parametrize("payload,expected", [
+    ('{"sessions": {"%s": 42}}' % SESSION_A, "saved"),
+    ('{"sessions": {"%s": null}}' % SESSION_A, "unsaved"),
+    ('{"sessions": {"%s": "5"}}' % SESSION_A, "unsaved"),
+    ('{"session": "%s", "line": 9}' % SESSION_A, "saved"),
+    ('{"session": "%s", "line": null}' % SESSION_A, "unsaved"),
+    ('{"sessions": {}}', "unsaved"),
+])
+def test_jq_reader_agrees_with_the_python_reader(payload, expected, tmp_path):
+    assert _jq_saved_state(payload, SESSION_A) == expected
+
+    remember = tmp_path / ".remember"
+    (remember / "tmp").mkdir(parents=True)
+    (remember / "tmp" / "last-save.json").write_text(payload, encoding="utf-8")
+    python_line = get_last_save_line(SESSION_A, remember_dir=str(remember))
+    assert (python_line != 0) == (expected == "saved"), (
+        f"jq says {expected} but get_last_save_line returned {python_line}"
+    )

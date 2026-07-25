@@ -132,7 +132,11 @@ def get_last_save_line(session_id: str,
             line = sessions.get(session_id, 0)
             return line if isinstance(line, int) else 0
         if data.get("session") == session_id:
-            return data.get("line", 0)
+            # Type-checked like the keyed branch above: a null or string line in
+            # a hand-edited or truncated file would otherwise be handed back to
+            # callers that expect an int.
+            line = data.get("line", 0)
+            return line if isinstance(line, int) else 0
     except (ValueError, KeyError, OSError):
         pass
     return 0

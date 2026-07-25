@@ -81,7 +81,11 @@ if [ -d "$SESSIONS_DIR" ] && [ -f "$LAST_SAVE_FILE" ]; then
         # slot: positions are keyed by session now, and the old equality test
         # force-saved an already-saved session whenever another had saved since
         # (issue #140). Legacy single-slot files still answer correctly.
-        SAVED_QUERY='if ((.sessions // {}) | has($id)) or (.session == $id) then "saved" else "unsaved" end'
+        # Type-check the value, not just the key: the python readers require an
+        # int, so `has($id)` alone would call a corrupt {"id": null} entry saved
+        # while they resume it from 0 — re-summarizing the whole span, which is
+        # what #140 exists to prevent.
+        SAVED_QUERY='if (((.sessions // {})[$id] | type) == "number") or (.session == $id and (.line | type) == "number") then "saved" else "unsaved" end'
         SAVED_STATE=$($JQ -r --arg id "$LAST_ID" "$SAVED_QUERY" "$LAST_SAVE_FILE" 2>/dev/null)
         if [ "$SAVED_STATE" != "saved" ]; then
             "$PLUGIN_ROOT/scripts/save-session.sh" "$LAST_ID" --force </dev/null >/dev/null 2>&1 & disown 2>/dev/null || true

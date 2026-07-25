@@ -436,3 +436,35 @@ class TestNoWorkSkipRule:
         prompt = (REPO_ROOT / "prompts" / "save-session.prompt.txt").read_text()
         assert "no substantive work" in prompt, "the no-work SKIP rule is gone"
         assert "SKIP" in prompt
+
+    def test_a_header_missing_the_space_after_the_pipe_is_not_corrupted(self):
+        """The format check only demands a space BEFORE the pipe.
+
+        So "## 18:30 |main" reaches the rewrite, and splitting on a literal
+        " | " found nothing to strip — the whole original line became the
+        "rest" and the entry was written as "## 00:00 | ## 18:30 |main". A
+        wrong-but-readable time turned into an unreadable header, which is
+        worse than the bug the rewrite exists to fix.
+        """
+        import tempfile
+        tmp = Path(tempfile.mkdtemp())
+        env, project, plugin, calls, sid = _make_env(tmp, exchanges=6, humans=5)
+        env["STUB_HAIKU_TEXT"] = "## 18:30 |main\n\n- did some work\n"
+        _suppress_ndc(project)
+        _run(plugin, env, sid)
+
+        header = (project / ".remember" / "now.md").read_text().strip().splitlines()[0]
+        assert header.count("##") == 1, f"header duplicated: {header!r}"
+        assert header.endswith("| main"), f"branch mangled: {header!r}"
+
+    def test_a_pipe_inside_the_branch_name_survives(self):
+        """Only the FIRST pipe separates time from the rest."""
+        import tempfile
+        tmp = Path(tempfile.mkdtemp())
+        env, project, plugin, calls, sid = _make_env(tmp, exchanges=6, humans=5)
+        env["STUB_HAIKU_TEXT"] = "## 18:30 | feature/a|b\n\n- did some work\n"
+        _suppress_ndc(project)
+        _run(plugin, env, sid)
+
+        header = (project / ".remember" / "now.md").read_text().strip().splitlines()[0]
+        assert header.endswith("| feature/a|b"), f"branch truncated: {header!r}"
