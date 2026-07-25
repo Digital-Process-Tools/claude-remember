@@ -300,3 +300,58 @@ def test_parse_strips_wrapping_markdown_fence():
     assert "```" not in recent
     assert archive.startswith("# Archive")
     assert "```" not in archive
+
+
+# --- Fence handling (#126 fix, #154 regression) -----------------------------
+#
+# The original #126 fix stripped a leading fence and then *any* trailing fence.
+# That corrupted legitimate content whose last line closed a code sample, and
+# it still left an orphan fence in archive.md for the shape #126 was actually
+# reported with. These pin both the fix and the regression.
+
+
+def test_wrapping_fence_is_stripped():
+    """The plain case: a whole body wrapped in ```markdown ... ```."""
+    body = "```markdown\n# Recent\n\n## 12:00\n- did a thing\n```"
+    assert parse_consolidation_response(body)[0] == "# Recent\n\n## 12:00\n- did a thing"
+
+
+def test_bare_wrapping_fence_is_stripped():
+    body = "```\n# Recent\n\n## 12:00\n- did a thing\n```"
+    assert parse_consolidation_response(body)[0] == "# Recent\n\n## 12:00\n- did a thing"
+
+
+def test_code_sample_inside_summary_keeps_its_terminator():
+    """A truncated wrap whose body ends in a code sample must keep that sample closed.
+
+    Stripping 'the last fence' here removes the ```bash block's own terminator,
+    so the block never ends and everything after it renders as code (#154).
+    """
+    body = "```markdown\n# Recent\n\n## 12:00\nRan:\n\n```bash\nls -la\n```"
+    recent = parse_consolidation_response(body)[0]
+    assert recent.endswith("```"), f"inner code block lost its terminator: {recent!r}"
+    assert recent.count("```") % 2 == 0, f"unbalanced fences: {recent!r}"
+
+
+def test_plain_code_block_is_not_treated_as_a_wrapper():
+    """```bash opens a code sample, not a wrapper — it must survive intact."""
+    body = "```bash\nls -la\n```"
+    recent = parse_consolidation_response(body)[0]
+    assert "```bash" in recent, f"code fence was eaten: {recent!r}"
+    assert "ls -la" in recent
+
+
+def test_whole_response_wrap_does_not_orphan_a_fence_in_archive():
+    """A fence around the WHOLE response closes inside the archive section.
+
+    The archive half then has no opening fence of its own, so a per-section
+    strip cannot see the closer and the orphan ``` lands in archive.md — the
+    shape #126 was originally reported with.
+    """
+    text = ("```markdown\n===RECENT===\n# Recent\n\n## 2026-07-02\nx\n"
+            "===ARCHIVE===\n# Archive\n\nold\n```")
+    recent, archive = parse_consolidation_response(text)
+    assert "```" not in archive, f"orphan fence in archive: {archive!r}"
+    assert "```" not in recent, f"orphan fence in recent: {recent!r}"
+    assert archive.startswith("# Archive")
+    assert recent.count("# Recent") == 1

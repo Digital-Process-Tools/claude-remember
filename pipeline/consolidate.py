@@ -31,36 +31,58 @@ from .types import ConsolidationResult, TokenUsage
 # A real memory entry header: "## HH:MM", "## Week of ...", or "## YYYY-MM-DD".
 _ENTRY_HEADER = re.compile(r"(?m)^## (\d{2}:\d{2}|Week of |\d{4}-\d{2}-\d{2})")
 
-# A Markdown code fence the model sometimes wraps a whole section body in:
-# an opening ``` (optionally ```markdown) line, and a matching closing ```.
-_OPEN_FENCE = re.compile(r"^```[^\n]*\n")
-_CLOSE_FENCE = re.compile(r"\n```$")
+# Any line that opens or closes a Markdown code fence.
+_FENCE_LINE = re.compile(r"^\s*```")
+
+# The opener of a fence a model would wrap PROSE in: bare, or tagged with a
+# document-ish language. A ```bash / ```python opener is a code sample that
+# belongs to the content and must never be treated as a wrapper.
+_WRAP_OPENER = re.compile(r"^\s*```\s*(markdown|md|text|txt|plaintext)?\s*$", re.I)
+
+# A bare closing fence.
+_BARE_FENCE = re.compile(r"^\s*```\s*$")
 
 
 def _strip_wrapping_fence(text: str) -> str:
-    """Strip a Markdown code fence wrapping an entire section body.
+    """Strip a Markdown code fence wrapping an entire body, and nothing else.
 
-    Haiku occasionally returns the ``===RECENT===`` / ``===ARCHIVE===``
-    section body wrapped in a ```` ```markdown … ``` ```` fence, or emits a
-    stray leading ```` ``` ```` line. Left in place, that fence line defeats
-    the ``startswith("# Recent")`` check in parse_consolidation_response, so
-    a second ``# Recent`` header gets prepended — producing the
-    doubled-header + orphaned-fence artifact seen in recent.md (issue #126).
-    Strip the opening fence whenever present, and the closing fence only if
-    present (truncated model output can drop it), before the header check runs.
+    Haiku occasionally returns its output wrapped in a ```markdown ... ``` fence.
+    Left in place that fence defeats the ``startswith("# Recent")`` check in
+    parse_consolidation_response, so a second header gets prepended — the
+    doubled-header + orphaned-fence artifact of issue #126.
+
+    The hard part is not stripping it, it is *recognising* it. Naively removing
+    a leading fence and then any trailing fence corrupts legitimate content: a
+    summary whose last line closes a ```bash sample loses that terminator and
+    the code block never ends (#154). So a fence is treated as a wrapper only
+    when it genuinely looks like one:
+
+    * the first line must be a bare or document-tagged fence — ```bash opens a
+      code sample, not a wrapper;
+    * the closing fence is removed only when the fences in between are balanced,
+      so an inner code block keeps its own terminator;
+    * when they are unbalanced (truncated output — the model dropped its final
+      fence), only the opener is stripped, leaving inner blocks intact.
 
     Args:
-        text: A section body, before header normalization.
+        text: A body, before header normalization.
 
     Returns:
         The body with a wrapping code fence removed, stripped.
     """
     t = text.strip()
-    m = _OPEN_FENCE.match(t)
-    if m:
-        t = t[m.end():]
-        t = _CLOSE_FENCE.sub("", t)
-    return t.strip()
+    lines = t.split("\n")
+    if not lines or not _WRAP_OPENER.match(lines[0]):
+        return t
+
+    body = lines[1:]
+    # Balanced inner fences mean the last line is this wrapper's own closer.
+    if body and _BARE_FENCE.match(body[-1]):
+        inner = sum(1 for line in body[:-1] if _FENCE_LINE.match(line))
+        if inner % 2 == 0:
+            body = body[:-1]
+
+    return "\n".join(body).strip()
 
 
 class ConsolidationSkipped(Exception):
@@ -201,6 +223,13 @@ def parse_consolidation_response(text: str) -> tuple[str, str]:
     """
     recent = ""
     archive = ""
+
+    # A wrap around the WHOLE response puts its closing fence at the very end,
+    # inside the archive section — which then has no opening fence of its own,
+    # so a per-section strip cannot see it and the orphan ``` lands in
+    # archive.md. That is the shape #126 was originally reported with, so the
+    # whole-response wrapper has to come off before the split (#154).
+    text = _strip_wrapping_fence(text)
 
     if "===RECENT===" in text and "===ARCHIVE===" in text:
         parts = text.split("===ARCHIVE===", 1)

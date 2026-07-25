@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The 0.8.6 fence fix could unclose a code block, and still orphaned a fence in `archive.md`** — post-release review of [#126](https://github.com/Digital-Process-Tools/claude-remember/issues/126) found the fix incomplete in both directions. It stripped a leading fence and then *any* trailing fence, so a summary whose last line closed a ```` ```bash ```` sample lost that terminator and the block never ended; a response that was simply a code block had its fences deleted outright. And when the model wrapped the **whole** response, the closing fence landed inside the archive section — which has no opening fence of its own, so the per-section strip could not see it and the orphan ``` still reached `archive.md`, the exact artifact originally reported. A fence is now only treated as a wrapper when it looks like one: the opener must be bare or document-tagged (```` ```bash ```` is content), the closer is removed only when the fences in between are balanced, and a whole-response wrapper is stripped before the sections are split.
+
 ## [0.8.6] — Memory actually saves: agentic sessions, auth, channels, and an NDC data race
 
 ### Fixed
