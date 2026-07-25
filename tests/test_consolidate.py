@@ -482,6 +482,22 @@ def test_truncation_inside_a_bare_inner_block_still_loses_the_wrapper():
     assert out.endswith("ls -la"), f"content altered: {out!r}"
 
 
+def test_log_fenced_ahead_of_the_envelope_keeps_its_fence():
+    """The tiebreaker must read the body's OPENING, not merely search it.
+
+    This runs once over the whole response, where every genuine envelope has
+    ===RECENT=== somewhere in it. Testing containment broke the tie the same
+    way every time, so a log fenced ahead of the envelope lost its opener and
+    orphaned its closer.
+    """
+    text = (f"{BT3}\n$ ls -la\ntotal 24\n{BT3}\n===RECENT===\n# Recent\n\n## 12:00\n"
+            f"Ran ls.\n\n===ARCHIVE===\n# Archive\n\nnothing yet")
+    recent, archive = parse_consolidation_response(text)
+    assert recent.count(BT3) == 2, f"log fence broken up: {recent!r}"
+    assert "$ ls -la" in recent, f"log content lost: {recent!r}"
+    assert archive.startswith("# Archive")
+
+
 def test_dangling_fence_of_another_character_does_not_save_the_wrapper():
     """A stray ~~~ cannot close a ``` wrapper, so it cannot vouch for it either."""
     assert _strip_wrapping_fence(f"{BT3}markdown\nbody\n~~~") == "body\n~~~"

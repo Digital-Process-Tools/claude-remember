@@ -45,8 +45,18 @@ def _looks_like_a_section(body: str) -> bool:
     """Whether a body reads as consolidation output rather than pasted content.
 
     Used only to break a tie the fence grammar cannot: see the last branch of
-    _strip_wrapping_fence. Deliberately narrow — an entry header like
-    ``## 12:00`` is not enough, because a pasted log can carry one too.
+    _strip_wrapping_fence. Deliberately narrow, and it must OPEN this way, not
+    merely contain it. An entry header like ``## 12:00`` is not enough because
+    a pasted log can carry one; and this runs once over the whole response,
+    where every genuine envelope contains ``===RECENT===`` somewhere — so
+    testing containment would make the tie always break the same way, which is
+    no tiebreaker at all.
+
+    The tie it cannot break: content that genuinely opens ``# Recent`` — a
+    quoted excerpt of a previous recent.md, fenced, and truncated inside — is
+    read as a wrapper and loses its fence. That shape is indistinguishable from
+    a truncated wrap by content or by grammar, and it is far rarer than the
+    truncation it is traded against, so it is accepted rather than fixed.
 
     Args:
         body: A body with its leading fence already removed.
@@ -54,12 +64,7 @@ def _looks_like_a_section(body: str) -> bool:
     Returns:
         True if the body opens as a section or still carries its envelope.
     """
-    return (
-        body.startswith("# Recent")
-        or body.startswith("# Archive")
-        or "===RECENT===" in body
-        or "===ARCHIVE===" in body
-    )
+    return body.startswith(("# Recent", "# Archive", "===RECENT===", "===ARCHIVE==="))
 
 
 def _strip_wrapping_fence(text: str) -> str:
