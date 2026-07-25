@@ -482,6 +482,22 @@ def test_truncation_inside_a_bare_inner_block_still_loses_the_wrapper():
     assert out.endswith("ls -la"), f"content altered: {out!r}"
 
 
+def test_wrapper_tagged_outside_the_allowlist_is_still_stripped():
+    """A tag we did not think of must not veto a cleanly closed wrapper.
+
+    The allowlist gated the whole algorithm, so ```yaml around a section kept
+    its fence and doubled the header — while ```bash around a code sample must
+    still survive. What separates them is not the tag, it is that one closes
+    cleanly around a section body and the other does not.
+    """
+    for tag in ("yaml", "output", "response"):
+        text = f"{BT3}{tag}\n===RECENT===\n# Recent\n\n## 12:00\nstuff\n{BT3}"
+        out = parse_consolidation_response(text)[0]
+        assert out == "# Recent\n\n## 12:00\nstuff", f"{tag}: {out!r}"
+    sample = f"{BT3}bash\nls -la\n{BT3}"
+    assert parse_consolidation_response(sample)[0].count(f"{BT3}bash") == 1
+
+
 def test_log_fenced_ahead_of_the_envelope_keeps_its_fence():
     """The tiebreaker must read the body's OPENING, not merely search it.
 

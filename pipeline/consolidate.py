@@ -52,11 +52,13 @@ def _looks_like_a_section(body: str) -> bool:
     testing containment would make the tie always break the same way, which is
     no tiebreaker at all.
 
-    The tie it cannot break: content that genuinely opens ``# Recent`` — a
-    quoted excerpt of a previous recent.md, fenced, and truncated inside — is
-    read as a wrapper and loses its fence. That shape is indistinguishable from
-    a truncated wrap by content or by grammar, and it is far rarer than the
-    truncation it is traded against, so it is accepted rather than fixed.
+    The tie it cannot break: any fenced content whose first line merely STARTS
+    with one of these strings — a quoted excerpt of an older recent.md, but
+    equally a log headed ``# Recently Viewed`` — is read as a wrapper and loses
+    its fence. Prefix matching is deliberate (a section header carries a date
+    or title after it), and the cost is one fence line, never content. It is
+    rarer than the truncation it is traded against, so it is accepted rather
+    than patched around with a signal no more reliable than this one.
 
     Args:
         body: A body with its leading fence already removed.
@@ -81,8 +83,11 @@ def _strip_wrapping_fence(text: str) -> str:
     for parity was defeated by any nested fence. So match fences the way
     CommonMark does — by fence character and run length:
 
-    * the opener must carry no info string, or a document-ish one — ```bash
-      opens a code sample, not a wrapper;
+    * an opener with no info string or a document-ish one (```markdown, ```txt)
+      is taken at its word. Any other tag still gets read — an allowlist of
+      five strings cannot anticipate ```yaml — but has to earn it by closing
+      cleanly around a body that reads as a section, which ```bash around a
+      code sample never does;
     * the closer must use the same character with a run at least as long, which
       is precisely what lets a ````-wrapped body contain ``` blocks untouched;
     * it is only a wrapper if that closer is the LAST line, reached at nesting
@@ -114,8 +119,7 @@ def _strip_wrapping_fence(text: str) -> str:
         return t
 
     marker, info = opener.group(1), opener.group(2).lower()
-    if info not in _WRAP_TAGS:
-        return t
+    documentish = info in _WRAP_TAGS
 
     # A closer: same character, run at least as long, and no info string.
     closer = re.compile(r"^\s*" + re.escape(marker[0]) + "{" + str(len(marker)) + r",}\s*$")
@@ -134,7 +138,10 @@ def _strip_wrapping_fence(text: str) -> str:
                 inner = None
             continue
         if i == len(lines) - 1 and closer.match(lines[i]):
-            return "\n".join(lines[1:i]).strip()
+            wrapped = "\n".join(lines[1:i]).strip()
+            if documentish or _looks_like_a_section(wrapped):
+                return wrapped
+            return t
         inner = (mark, tag)
 
     body = "\n".join(lines[1:]).strip()
@@ -151,6 +158,9 @@ def _strip_wrapping_fence(text: str) -> str:
         # apart, and we know what the payload is supposed to look like.
         if not _looks_like_a_section(body):
             return t
+    elif not documentish and not _looks_like_a_section(body):
+        # ```bash opens a code sample. Only a section body argues otherwise.
+        return t
     return body
 
 
