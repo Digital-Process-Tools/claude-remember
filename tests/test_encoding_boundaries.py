@@ -285,3 +285,80 @@ def test_consolidate_tolerates_non_utf8_staging(tmp_path, capsys):
             archive_file=str(tmp_path / "a.md"),
         )  # must not raise
     assert "RECENT_OUT=" in capsys.readouterr().out
+
+
+# ── Boundary 3: shell.py's own stdout, read back as a path by bash (#145)
+#
+# Every cmd_* prints KEY=value lines that bash captures by command substitution
+# and passes on as argv to the NEXT python call. On Windows that print() used
+# the console's ANSI codepage, so a temp path under a non-ASCII profile came
+# back mojibake and build-prompt died with FileNotFoundError on a file that was
+# right there on disk. The paths are made by tempfile, so TMPDIR is what puts
+# non-ASCII into them here — the stand-in for a CJK Windows profile directory.
+# Under the forced locale the ascii codec makes that print() raise outright.
+
+def _run_shell_in_tmpdir(args: list[str], stdin_bytes: bytes, tmpdir: Path):
+    """_run_shell, but with tempfile pointed at a non-ASCII directory."""
+    env = {**FORCED_NON_UTF8_ENV, "TMPDIR": str(tmpdir), "TEMP": str(tmpdir),
+           "TMP": str(tmpdir)}
+    return subprocess.run(
+        [sys.executable, "-m", "pipeline.shell", *args],
+        input=stdin_bytes, capture_output=True, cwd=str(REPO_ROOT),
+        env=env, timeout=30,
+    )
+
+
+def _haiku_payload(result: str) -> bytes:
+    return json.dumps(
+        {"result": result, "input_tokens": 1, "output_tokens": 1,
+         "cache_read_input_tokens": 0},
+        ensure_ascii=False,
+    ).encode("utf-8")
+
+
+def test_shell_stdout_emits_utf8_paths_under_non_utf8_locale(tmp_path):
+    """A path printed for bash to re-consume must survive as UTF-8 (#145)."""
+    tmpdir = tmp_path / "ユーザー"
+    tmpdir.mkdir()
+    out = tmp_path / "haiku.txt"
+
+    result = _run_shell_in_tmpdir(["parse-haiku", str(out)], _haiku_payload("x"), tmpdir)
+
+    assert result.returncode == 0, (
+        "shell.py crashed printing a non-ASCII path under a non-UTF-8 locale "
+        f"(#145).\nstderr:\n{result.stderr.decode('utf-8', 'replace')}"
+    )
+    line = next(
+        ln for ln in result.stdout.decode("utf-8").splitlines()
+        if ln.startswith("HAIKU_TEXT_FILE=")
+    )
+    assert "ユーザー" in line, f"path came back mangled: {line!r}"
+
+
+def test_shell_stdout_path_round_trips_into_a_second_process(tmp_path):
+    """The reporter's own check: the captured path must still open (#145).
+
+    Printing valid UTF-8 is only half of it — bash hands the captured string to
+    the next `python -m pipeline.shell` call as argv, so the path has to survive
+    the whole loop, not merely look right in a terminal.
+    """
+    tmpdir = tmp_path / "プロジェクト"
+    tmpdir.mkdir()
+    out = tmp_path / "haiku.txt"
+
+    captured = _run_shell_in_tmpdir(["parse-haiku", str(out)], _haiku_payload("y"), tmpdir)
+    assert captured.returncode == 0, captured.stderr.decode("utf-8", "replace")
+    path = next(
+        ln.split("=", 1)[1]
+        for ln in captured.stdout.decode("utf-8").splitlines()
+        if ln.startswith("HAIKU_TEXT_FILE=")
+    ).strip("'\"")
+
+    probe = subprocess.run(
+        [sys.executable, "-c",
+         "import os, sys; print(os.path.exists(sys.argv[1]))", path],
+        capture_output=True, cwd=str(REPO_ROOT), env=FORCED_NON_UTF8_ENV, timeout=30,
+    )
+    assert probe.stdout.decode("utf-8").strip() == "True", (
+        f"captured path does not resolve in a second process: {path!r}"
+    )
