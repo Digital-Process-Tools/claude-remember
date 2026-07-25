@@ -385,16 +385,20 @@ def test_four_backtick_wrapper_is_stripped():
 def test_nested_longer_fence_does_not_cost_an_inner_block_its_terminator():
     """A 4-backtick block nested in a 3-backtick wrap must not skew the match.
 
-    The ```` on line 5 is a legal closer for the ``` opener — same character, a
-    longer run — so the leading fence closes mid-body and fenced part of the
-    content, not all of it. The body is left exactly as it is; what matters is
-    that no inner block comes out of it unterminated.
+    Every inner block here closes: ```` opens and closes around a bare ```,
+    then ```bash opens and closes. Nothing is left that could be read as the
+    wrapper's own closer, so this is a truncated wrap — the opener goes and the
+    body survives line for line. Counting ``` as a substring cannot check that,
+    because it reads each ```` as one, so pin the fence lines themselves.
     """
     body = (f"{BT3}markdown\n# Recent\n\nFence example:\n\n{BT4}\n{BT3}\n{BT4}\n\n"
             f"Ran:\n\n{BT3}bash\nls\n{BT3}")
     out = parse_consolidation_response(body)[0]
-    assert out.count("`" * 3) % 2 == 0, f"unbalanced fences: {out!r}"
+    fences = [line for line in out.split("\n") if line.startswith("`")]
+    assert fences == [BT4, BT3, BT4, f"{BT3}bash", BT3], f"body altered: {out!r}"
     assert out.rstrip().endswith(BT3), f"inner block lost its terminator: {out!r}"
+    assert f"{BT3}markdown" not in out, f"wrapper survived: {out!r}"
+    assert out.count("# Recent") == 1, f"doubled header: {out!r}"
 
 
 def test_leading_text_sample_is_not_a_wrapper():
@@ -445,6 +449,22 @@ def test_truncated_wrap_ending_mid_code_sample_still_loses_its_opener():
     assert out.count("# Recent") == 1, f"doubled header: {out!r}"
     assert f"{BT3}markdown" not in out, f"wrapper survived: {out!r}"
     assert out.endswith("ls -la"), f"content altered: {out!r}"
+
+
+def test_closed_inner_block_does_not_pass_for_the_wrappers_own_closer():
+    """A balanced inner block is not evidence that the wrapper closed.
+
+    Scanning the raw body for any closer-shaped line counted the fences of an
+    inner block that had already opened AND closed, read that as the wrapper
+    closing mid-body, and kept the wrapper — the #126 shape again, on output
+    truncated after a complete code sample.
+    """
+    body = (f"{BT3}markdown\n# Recent\n\n## 12:00\nRan:\n\n{BT3}\nls -la\n{BT3}\n\n"
+            "then it was cut off")
+    out = parse_consolidation_response(body)[0]
+    assert out.count("# Recent") == 1, f"doubled header: {out!r}"
+    assert f"{BT3}markdown" not in out, f"wrapper survived: {out!r}"
+    assert out.endswith("then it was cut off"), f"content altered: {out!r}"
 
 
 def test_dangling_fence_of_another_character_does_not_save_the_wrapper():

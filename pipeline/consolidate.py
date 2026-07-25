@@ -63,12 +63,15 @@ def _strip_wrapping_fence(text: str) -> str:
       depth zero. A bare ``` opening an inner block is textually identical to a
       closer, so the body has to be walked with a fence stack rather than
       scanned for the first match;
-    * a closer anywhere else in the body means the leading fence enclosed part
-      of the content rather than all of it, so the whole thing is left alone;
-    * an opener whose closer never arrives at all is truncated model output —
-      strip just the opener, leaving the inner blocks intact, including one the
-      truncation cut open. A dangling inner fence says nothing about whether
-      the leading fence wraps, so it must not decide the question.
+    * otherwise what is left OPEN at the end of the body decides. A fence still
+      dangling there can be re-read as the leading fence's own closer — but
+      only if it could actually close it: bare, same character, run at least as
+      long. Then the leading fence enclosed part of the content, not all of it,
+      and the whole thing is left alone;
+    * anything else is a wrapper whose final fence never arrived — truncated
+      model output — so strip just the opener. Inner blocks that all closed are
+      no evidence the wrapper did, and a dangling ```bash or ~~~ could never
+      have closed it, so neither may keep the wrapper alive.
 
     Args:
         text: A body, before header normalization.
@@ -99,18 +102,21 @@ def _strip_wrapping_fence(text: str) -> str:
             continue
         mark, tag = fence.group(1), fence.group(2)
         if inner is not None:
-            if not tag and mark[0] == inner[0] and len(mark) >= len(inner):
+            if not tag and mark[0] == inner[0][0] and len(mark) >= len(inner[0]):
                 inner = None
             continue
         if i == len(lines) - 1 and closer.match(lines[i]):
             return "\n".join(lines[1:i]).strip()
-        inner = mark
+        inner = (mark, tag)
 
-    # Nothing closed the wrapper on the last line. Either the leading fence has
-    # a closer of its own inside the body — so it fenced part of the content,
-    # not all of it, and the whole thing is left alone — or no closer ever
-    # arrives and the model simply dropped its final fence.
-    if any(closer.match(line) for line in lines[1:-1]):
+    # Nothing closed the wrapper on the last line. What is left over decides:
+    # a fence still open at the end of the body can be read as the leading
+    # fence's own closer, but only if it could actually close it — bare, same
+    # character, run at least as long. Then the leading fence enclosed part of
+    # the content rather than all of it, and the whole thing is left alone.
+    # Anything else (everything balanced, or a dangling ```bash or ~~~ that
+    # could never close it) is a wrapper whose final fence never arrived.
+    if inner is not None and not inner[1] and closer.match(inner[0]):
         return t
     return "\n".join(lines[1:]).strip()
 
