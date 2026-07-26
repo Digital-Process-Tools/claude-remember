@@ -23,7 +23,6 @@
     "gpg_sign": false,
     "allow_remote_change": false
   },
-  "debug": false,
   "time_format": "24h",
   "model": "haiku",
   "reject_pattern": "",

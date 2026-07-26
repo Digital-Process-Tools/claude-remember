@@ -46,7 +46,14 @@ _NOT_VIA_CONFIG = {"data_dir", "haiku.oauth_token"}
 # earlier fix removed it (test_log_sh.py::test_config_example_json_is_valid
 # asserts it stays out). Documented-but-not-shipped is a deliberate state, so
 # it is named here rather than allowed to fail the agreement check.
-_DELIBERATELY_NOT_SHIPPED = {"timezone"}
+#
+# `debug` joins it for the same reason, and this PR is why: wiring the key up
+# made the long-dead `"debug": false` in the example file LIVE, so anyone who
+# copied it would have silently flipped save-session.sh from verbose to quiet —
+# the exact default-preservation this change promises to protect. A key whose
+# absence means "each script keeps its own default" should not ship with a
+# value at all.
+_DELIBERATELY_NOT_SHIPPED = {"timezone", "debug"}
 
 
 def _source_files() -> list[Path]:
@@ -203,6 +210,20 @@ class TestDebugOptionActuallyWorks:
         volume of every existing install in one direction or the other."""
         assert _debug_enabled(tmp_path, default="1") == "VERBOSE"
         assert _debug_enabled(tmp_path, default="0") == "QUIET"
+
+
+def test_the_example_config_ships_no_debug_value():
+    """Wiring `debug` up turned a dead key in the example file into a live one.
+
+    `"debug": false` sat there doing nothing for as long as the option was
+    unread. The moment it worked, copying the example silenced save-session.sh
+    for every such install — a default change nobody asked for, delivered by a
+    file people are told to copy.
+    """
+    assert "debug" not in _example_keys(), (
+        "config.example.json ships a `debug` value again — its absence is what "
+        "keeps each script's own default"
+    )
 
 
 @pytest.mark.parametrize("key", ["debug", "thresholds.consolidate_max_bytes"])
