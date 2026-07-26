@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.7] — Everything that failed in silence
+
+Nine issues, one shape: memory not written, and nothing anywhere saying so. Six were reported by users who had already done the diagnosis — several arrived with a verified patch, the exact call sites, and in one case a correct prediction of which tests would break. Manifest bumped per [#133](https://github.com/Digital-Process-Tools/claude-remember/issues/133).
+
 ### Fixed
 
 - **Nothing ever saved when `CLAUDE_CONFIG_DIR` was set** ([#166](https://github.com/Digital-Process-Tools/claude-remember/issues/166)) — Claude Code relocates its whole config tree, `projects/` included, when `CLAUDE_CONFIG_DIR` is set, which people use to run a separate account per project. The plugin hardcoded `~/.claude`, so it listed a directory holding no current transcripts and the save pipeline no-oped in silence: the reporter had five days and ~2000 `PostToolUse` invocations with zero saves, an empty `logs/autonomous/`, and nothing anywhere suggesting a problem. The silent version is not the worst case — a stale transcript left in the default tree with more lines than `delta_lines_trigger` would have been summarized into memory as though it were the live session. All four sites now resolve through one helper rather than four copies of the path. The test suite leaked the same variable: sandboxes point `HOME` at a temp directory but never cleared `CLAUDE_CONFIG_DIR`, so a developer who exports it had the real value follow the code out of the fixture — invisible while the plugin ignored the variable, and exposed the moment it stopped. It is cleared for every test now. Reported, diagnosed, patched and test-triaged by [@samoilovartem](https://github.com/samoilovartem), who also predicted exactly which five tests would break.
