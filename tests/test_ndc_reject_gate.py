@@ -89,7 +89,13 @@ elif cmd == "call-haiku":
     print("IS_SKIP=" + ("true" if (rejected or skipping) else "false"))
     print("IS_REJECTED=" + ("true" if rejected else "false"))
     print(f"HAIKU_TEXT_FILE={path}")
-    print("TK_IN=0"); print("TK_OUT=0"); print("TK_CACHE=0"); print("TK_COST=0")
+    tk = os.environ.get("STUB_NDC_TOKENS") if is_ndc else None
+    if tk:
+        tin, tout, tcache, tcost = tk.split(",")
+        print(f"TK_IN={tin}"); print(f"TK_OUT={tout}")
+        print(f"TK_CACHE={tcache}"); print(f"TK_COST={tcost}")
+    else:
+        print("TK_IN=0"); print("TK_OUT=0"); print("TK_CACHE=0"); print("TK_COST=0")
 elif cmd == "build-ndc-prompt":
     with open(sys.argv[3], "w") as f:
         f.write("compress this now.md\\n")
@@ -159,6 +165,39 @@ class TestNdcRefusalIsRejectedNotAppended:
         logs = "".join(p.read_text() for p in (project / ".remember" / "logs").glob("*.log"))
         assert "ndc" in logs and "REJECTED" in logs, (
             f"no REJECTED line logged for the NDC refusal:\n{logs}"
+        )
+
+    def test_a_rejected_call_still_reports_what_it_cost(self, tmp_path):
+        """#180: the tokens were spent before the verdict was known.
+
+        Logged only on success, a model that starts refusing compression gives
+        a run where memory stops growing AND reported cost drops to zero —
+        which reads as "nothing happened" rather than "this failed repeatedly
+        and was paid for". Same invisibility class as #178.
+        """
+        env, project, plugin, calls, sid = _ndc_env(tmp_path)
+        env["STUB_NDC_TEXT"] = REFUSAL
+        env["STUB_NDC_REJECTED"] = "1"
+        env["STUB_NDC_TOKENS"] = "4321,77,910,0.004242"
+
+        result = _run(plugin, env, sid)
+        assert result.returncode == 0, result.stderr
+        _wait_for_calls_to_settle(calls)
+
+        logs = "".join(p.read_text() for p in (project / ".remember" / "logs").glob("*.log"))
+        ndc_token_lines = [
+            line for line in logs.splitlines()
+            if "[ndc]" in line and "tokens:" in line
+        ]
+        assert ndc_token_lines, (
+            f"a refused NDC call cost 4321 input + 77 output tokens and left no "
+            f"record of it:\n{logs}"
+        )
+        assert "4321" in ndc_token_lines[0] and "77" in ndc_token_lines[0], (
+            f"the logged counts are not the ones the call spent: {ndc_token_lines[0]!r}"
+        )
+        assert "0.004242" in ndc_token_lines[0], (
+            f"the cost is missing from the record: {ndc_token_lines[0]!r}"
         )
 
     def test_now_md_is_not_truncated_on_refusal(self, tmp_path):

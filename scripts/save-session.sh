@@ -465,6 +465,14 @@ if [ "$RUN_NDC" = true ]; then
                 IS_REJECTED=false
                 safe_eval <<< "$NDC_VARS"
                 NDC_TEXT=$(cat "$HAIKU_TEXT_FILE")
+                # Before the branch, not inside the success arm: the call has
+                # already gone out and already cost money by this point, and
+                # what it returned does not change that. Logged only on success,
+                # a model that starts refusing compression produced a run where
+                # memory stopped growing AND reported cost fell to zero — which
+                # reads as "nothing happened" rather than "this failed
+                # repeatedly and was paid for" (#180).
+                log_tokens "ndc" "$TK_IN" "$TK_OUT" "$TK_CACHE" "$TK_COST"
                 # Compression runs through the same reject gate as the summarize
                 # call, but nothing here consumed the verdict: a refusal came
                 # back non-empty, passed `[ -n ... ]`, and was appended to
@@ -518,7 +526,6 @@ if [ "$RUN_NDC" = true ]; then
                         : > "$MEMORY_FILE"
                         rm -f "$NOW_DAY_FILE"
                     fi
-                    log_tokens "ndc" "$TK_IN" "$TK_OUT" "$TK_CACHE" "$TK_COST"
                     NDC_OUT_BYTES=$(wc -c < "$HAIKU_TEXT_FILE" | tr -d ' ')
                     [ "$NDC_SRC_BYTES" -gt 0 ] && log "ndc" "${NDC_SRC_BYTES}→${NDC_OUT_BYTES}b (-$(( (NDC_SRC_BYTES - NDC_OUT_BYTES) * 100 / NDC_SRC_BYTES ))%)"
                 else
