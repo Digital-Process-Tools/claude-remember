@@ -149,11 +149,16 @@ def test_log_sh_no_config_falls_back_to_system_local_not_utc(tmp_path):
     utc_date = subprocess.run(
         [_BASH, "-c", "TZ=UTC date +%Y-%m-%d"], capture_output=True, text=True,
     ).stdout.strip()
-    assert expected_local != utc_date, (
-        f"{system_tz} and UTC share a date right now ({utc_date}) — the zone "
-        "choice above no longer separates the two, and this test cannot see "
-        "the bug it exists for"
-    )
+    if expected_local == utc_date:
+        # The zone was chosen so the two dates cannot coincide — unless `date`
+        # ignored the zone name entirely, which is what happens where there is
+        # no tz database. The Windows runners are exactly that: Git Bash ships
+        # no tzdata, so every TZ= resolves to UTC and this test can prove
+        # nothing there. Skipping says so; failing would have blamed the code.
+        pytest.skip(
+            f"`date` ignores IANA zone names here ({system_tz} == UTC == "
+            f"{utc_date}) — no tz database on this platform"
+        )
 
     result = _run_logsh(project, system_tz=system_tz)
     assert result["ACTUAL"] == expected_local, (
