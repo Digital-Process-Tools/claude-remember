@@ -165,3 +165,117 @@ def test_a_quiet_consolidation_still_retires_the_whole_file(tmp_path):
     assert not staging.exists(), "the file should have been renamed away entirely"
     done = remember / "today-2026-07-24.done.md"
     assert done.is_file() and "earlier work" in done.read_text(encoding="utf-8")
+
+
+# ── End-to-end through the REAL pipeline.shell (no STUB_SHELL) ─────────────
+#
+# The suite above stands in for `pipeline.shell consolidate` entirely, so it
+# cannot prove anything about how the consumed-byte count is actually
+# computed — that logic lives in the real cmd_consolidate (review of
+# 8d2cdab). This runs the genuine scripts/run-consolidation.sh against the
+# genuine pipeline package (CLAUDE_PLUGIN_ROOT = the repo itself), with only
+# the `claude` binary swapped for a script that returns a fixed response —
+# the one boundary every other test in this file also stubs.
+
+FAKE_CLAUDE = '''\
+#!/usr/bin/env python3
+import json, os, sys
+sys.stdin.read()  # the prompt arrives on stdin; content doesn't matter here
+
+# Stand-in for a save landing WHILE this (fake, but still out-of-process)
+# Haiku call is in flight — the real #142-shaped race: the file is read
+# before this call and renamed after it returns.
+append_file = os.environ.get("APPEND_DURING_CONSOLIDATION_FILE")
+append_text = os.environ.get("APPEND_DURING_CONSOLIDATION_TEXT")
+if append_file and append_text:
+    with open(append_file, "a", encoding="utf-8") as f:
+        f.write(append_text)
+
+print(json.dumps({
+    "result": "===RECENT===\\n# Recent\\n\\n## 2020-01-02\\n- compressed\\n\\n"
+              "===ARCHIVE===\\n# Archive\\n\\nolder\\n",
+    "input_tokens": 10,
+    "output_tokens": 5,
+    "cache_read_input_tokens": 0,
+}))
+'''
+
+
+def _real_pipeline_env(tmp_path: Path):
+    """Real pipeline.shell + real run-consolidation.sh; only `claude` is faked."""
+    project = tmp_path / "project"
+    remember = project / ".remember"
+    (remember / "tmp").mkdir(parents=True)
+    (remember / "logs").mkdir(parents=True)
+
+    fake_claude = tmp_path / "fake_claude"
+    fake_claude.write_text(FAKE_CLAUDE)
+    fake_claude.chmod(0o755)
+
+    env = {
+        **os.environ,
+        "HOME": str(tmp_path / "home"),
+        "CLAUDE_PROJECT_DIR": str(project),
+        "CLAUDE_PLUGIN_ROOT": str(REPO_ROOT),
+        "REMEMBER_CLAUDE_BIN": str(fake_claude),
+        "REMEMBER_DIR": str(remember),
+        "_LIB_MEMORY_DIR_LOADED": "1",
+    }
+    return env, project, remember
+
+
+def _run_real(env: dict):
+    return subprocess.run(["bash", str(REPO_ROOT / "scripts" / "run-consolidation.sh")],
+                          capture_output=True, text=True, env=env, timeout=90)
+
+
+class TestRealConsolidateNonUtf8AppendRace:
+    """Defect 1 (8d2cdab): an overstated consumed-byte count makes
+    run-consolidation.sh take the blind-rename branch, sealing anything
+    appended during consolidation inside .done.md.
+
+    A non-UTF-8 staging file used to trigger exactly that: the byte count
+    was measured from the decoded-and-re-encoded string (errors="replace"
+    turns each stray byte into a 3-byte U+FFFD), so it overstated the file,
+    `staging_now -gt staging_consumed` read false, and the append below
+    would have been sealed away rather than kept.
+    """
+
+    def test_entry_appended_during_real_consolidation_survives_non_utf8_staging(
+        self, tmp_path
+    ):
+        env, project, remember = _real_pipeline_env(tmp_path)
+        staging = remember / "today-2020-01-01.md"
+        # 30 stray non-UTF-8 bytes. Each becomes one U+FFFD on decode, which
+        # re-encodes to 3 bytes — a 60-byte overstatement, comfortably bigger
+        # than APPENDED (48 bytes) below. That margin is deliberate: it's what
+        # makes the bug's effect (an overstated count) outweigh the race's
+        # effect (more bytes on disk than were consumed) and actually flip the
+        # shell's `staging_now -gt staging_consumed` comparison to false, so
+        # this test would still fail with only a couple of stray bytes.
+        original = b"# Day\n\n## 10:00 | main\n\n- entry with " + b"\xff" * 30 + b" bytes\n"
+        staging.write_bytes(original)
+
+        # The fake `claude` process appends this to the staging file the
+        # moment it's invoked — after cmd_consolidate has read + snapshotted
+        # the file, before run-consolidation.sh renames it. Same window #142
+        # closed for now.md; this proves it for staging.
+        env["APPEND_DURING_CONSOLIDATION_FILE"] = str(staging)
+        env["APPEND_DURING_CONSOLIDATION_TEXT"] = APPENDED
+
+        result = _run_real(env)
+        assert result.returncode == 0, result.stderr
+
+        remaining = staging.read_text(encoding="utf-8", errors="replace") if staging.exists() else ""
+        assert "landed during consolidation" in remaining, (
+            "the entry appended while the (real) consumed-byte count was "
+            "measured wrong got sealed into .done.md instead of surviving in "
+            "the live staging file — an overstated count (from decoding a "
+            "non-UTF-8 staging file with errors='replace' before measuring) "
+            f"makes staging_now > staging_consumed read false. stderr={result.stderr}"
+        )
+        done = remember / "today-2020-01-01.done.md"
+        assert done.is_file(), f"the consumed span was not retired: {result.stderr}"
+        assert "entry with" in done.read_text(encoding="utf-8", errors="replace"), (
+            "the original (consumed) span must still be retired into .done.md"
+        )
