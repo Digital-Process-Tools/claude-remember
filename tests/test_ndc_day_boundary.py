@@ -23,6 +23,7 @@ boundary, which is a bigger change than this issue asked for.
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -149,3 +150,55 @@ def test_the_day_is_not_written_into_now_md(tmp_path):
     header = now.lstrip().splitlines()[0]
     assert "-" not in header.split("|")[0], f"a date leaked into the header: {header!r}"
     assert "remember-day" not in now, "the day marker is being written into now.md"
+
+
+def test_a_compression_spanning_midnight_restamps_with_the_new_day(tmp_path):
+    """The kept bytes belong to the day they were appended, not to this run.
+
+    Compression hands its work to a background subshell and the parent exits;
+    the Haiku call can take 180s. $TODAY_DATE was computed once, before all of
+    that. So a compression that started before midnight stamped the bytes a
+    NEWER save appended with the previous day — not the day they were appended
+    (which is all the documented residual concedes), and not their own day,
+    but a third stale one belonging to an earlier run.
+
+    The clock is shimmed to move between the parent's reads and the restamp,
+    which is exactly what midnight does to a long-running compression.
+    """
+    env, project, plugin, calls, sid = _make_env(tmp_path, exchanges=6, humans=5)
+    remember = project / ".remember"
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    counter = tmp_path / "date-calls"
+    shim = bindir / "date"
+    shim.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "+%Y-%m-%d" ]; then\n'
+        f'  echo x >> "{counter}"\n'
+        f'  if [ "$(wc -l < "{counter}" | tr -d " ")" -le 2 ]; then\n'
+        "    echo 2026-07-24\n"
+        "  else\n"
+        "    echo 2026-07-26\n"
+        "  fi\n"
+        "  exit 0\n"
+        "fi\n"
+        'exec /bin/date "$@"\n'
+    )
+    shim.chmod(0o755)
+    env["PATH"] = f"{bindir}:{env['PATH']}"
+    env["STUB_HAIKU_TEXT"] = "## 23:50 | main\n\n- evening work\n"
+    # A newer save lands while this compression is in flight — the #142 window.
+    env["STUB_APPEND_DURING_NDC"] = "\n## 00:05 | main\n\n- after midnight\n"
+    env["STUB_MEMORY_FILE"] = str(remember / "now.md")
+
+    _run(plugin, env, sid)
+    for _ in range(40):
+        if _day_stamp(project):
+            break
+        time.sleep(0.1)
+
+    assert _day_stamp(project) == "2026-07-26", (
+        "the bytes appended during compression were stamped with the day this "
+        f"run started, not the day they arrived: {_day_stamp(project)!r}"
+    )

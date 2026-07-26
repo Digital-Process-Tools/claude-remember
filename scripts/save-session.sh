@@ -419,10 +419,16 @@ if [ "$RUN_NDC" = true ]; then
                         mv "$NDC_TAIL" "$MEMORY_FILE"
                         # The stamped day is spent with the bytes it covered.
                         # Anything kept was appended during this compression,
-                        # so it belongs to the run day; nothing kept means the
-                        # next entry starts a fresh file and re-stamps.
+                        # so stamp it with the day it is NOW — not $TODAY_DATE,
+                        # which was computed once in the parent before a Haiku
+                        # call that can run 180s. A compression that started
+                        # before midnight would otherwise stamp those newer
+                        # bytes with the previous day: not the day they were
+                        # appended, not their own day, but a third stale one
+                        # belonging to an earlier run. That is the #142-shaped
+                        # window, and misfiling is exactly what it costs here.
                         if [ "$NDC_KEPT" -gt 0 ]; then
-                            printf '%s\n' "$TODAY_DATE" > "$NOW_DAY_FILE" 2>/dev/null || true
+                            printf '%s\n' "$(_remember_date +%Y-%m-%d)" > "$NOW_DAY_FILE" 2>/dev/null || true
                         else
                             rm -f "$NOW_DAY_FILE"
                         fi
