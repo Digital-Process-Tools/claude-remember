@@ -79,9 +79,29 @@ claude_projects_dir() {
     # A trailing separator would give "…//projects", which is harmless on POSIX
     # and not always harmless elsewhere. Strip both kinds; the loop matters
     # because a path can end in more than one.
-    while [ "${_root%[/\\]}" != "$_root" ]; do
-        _root="${_root%[/\\]}"
+    #
+    # With a floor: a value that is nothing BUT separators would otherwise strip
+    # to the empty string and turn "/projects" into a path at the filesystem
+    # root. `\` alone is a relative path, and silently promoting it to an
+    # absolute one is the kind of quiet reinterpretation every bug in this file
+    # has been. Nothing left to keep means keep what we were given.
+    local _stripped="$_root"
+    while [ "${_stripped%[/\\]}" != "$_stripped" ]; do
+        _stripped="${_stripped%[/\\]}"
     done
+    if [ -n "$_stripped" ]; then
+        _root="$_stripped"
+    else
+        case "$_root" in
+            # "/" or "///" — the filesystem root, and "/projects" is what that
+            # means. Empty is the right value to append to.
+            /*) _root="" ;;
+            # "\" alone is a RELATIVE path. Stripping it to nothing would turn
+            # it into an absolute one, quietly pointing somewhere else entirely,
+            # so it stays exactly as it arrived.
+            *) ;;
+        esac
+    fi
 
     printf '%s/projects' "$_root"
 }

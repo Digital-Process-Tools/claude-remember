@@ -120,6 +120,61 @@ def test_the_default_is_still_home_dot_claude(tmp_path):
     assert result.stdout.strip() == "/home/somebody/.claude/projects"
 
 
+@posix_only
+@pytest.mark.parametrize("raw,expected", [
+    ("/", "/projects"),
+    ("///", "/projects"),
+    ("\\\\", "\\\\/projects"),
+])
+def test_a_path_of_nothing_but_separators_is_not_promoted_to_the_root(raw, expected, tmp_path):
+    """The stripping loop needs a floor.
+
+    Without one, `/` and `///` strip to nothing and `/projects` lands at the
+    filesystem root — and a lone `\\`, which is a RELATIVE path, becomes an
+    absolute one pointing somewhere else entirely. Silently reinterpreting a
+    path is the shape of every bug this file has had.
+    """
+    assert _projects_dir(raw, with_cygpath=False, tmp_path=tmp_path) == expected
+
+
+@posix_only
+def test_the_bash_and_python_builders_agree(tmp_path):
+    """Two implementations build this path — they must name the same directory.
+
+    `pipeline/extract.py` builds it in Python for the extractor; `lib-slug.sh`
+    builds it in bash for the hooks. Unifying them the way the slug was unified
+    is not available here: each consumer needs the path in the form its own
+    runtime can open, and on Git Bash those forms genuinely differ (POSIX for
+    bash, native for a Windows Python). What must never differ is which
+    directory they mean.
+
+    Where CI runs there is no cygpath, so the two forms coincide and can be
+    compared directly. The Windows case is tracked in #194.
+    """
+    from pipeline.extract import _session_dir
+
+    config_dir = str(tmp_path / "cfg")
+    monkeypatched = os.environ.copy()
+    monkeypatched["CLAUDE_CONFIG_DIR"] = config_dir
+
+    bash_side = _projects_dir(config_dir, with_cygpath=False, tmp_path=tmp_path)
+
+    old = os.environ.get("CLAUDE_CONFIG_DIR")
+    os.environ["CLAUDE_CONFIG_DIR"] = config_dir
+    try:
+        python_side = _session_dir("/p")
+    finally:
+        if old is None:
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        else:
+            os.environ["CLAUDE_CONFIG_DIR"] = old
+
+    assert python_side.startswith(bash_side + "/"), (
+        f"the two builders disagree about the projects directory:\\n"
+        f"  bash:   {bash_side}\\n  python: {python_side}"
+    )
+
+
 # ── The Python half, which needs no bash and therefore runs on Windows ───────
 
 @pytest.mark.parametrize("config_dir", [
