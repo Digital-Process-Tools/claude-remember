@@ -60,7 +60,30 @@ _remember_build_slug_sed
 # with enough lines would have been summarized into memory as if it were the
 # live session.
 claude_projects_dir() {
-    printf '%s/projects' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+    local _root="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+
+    # CLAUDE_CONFIG_DIR is inherited from the environment, so on Windows it
+    # arrives in whatever form the user typed — usually the native
+    # `C:\Users\x\.claude-alt`. Concatenating "/projects" onto that produced a
+    # mixed-separator path, while PROJECT_DIR gets converted deliberately
+    # before it is slugged. MSYS translates both forms in syscalls, so this may
+    # never have failed — but "probably fine" is what the last four
+    # session-directory bugs were, and each one surfaced as memory that simply
+    # stopped saving (#144, #166, #157, #169). One conversion costs nothing.
+    if command -v cygpath >/dev/null 2>&1; then
+        local _converted
+        _converted=$(cygpath -u "$_root" 2>/dev/null) && [ -n "$_converted" ] \
+            && _root="$_converted"
+    fi
+
+    # A trailing separator would give "…//projects", which is harmless on POSIX
+    # and not always harmless elsewhere. Strip both kinds; the loop matters
+    # because a path can end in more than one.
+    while [ "${_root%[/\\]}" != "$_root" ]; do
+        _root="${_root%[/\\]}"
+    done
+
+    printf '%s/projects' "$_root"
 }
 
 # Non-ASCII: Claude Code slugs with `s.replace(/[^a-zA-Z0-9]/g, '-')` — checked

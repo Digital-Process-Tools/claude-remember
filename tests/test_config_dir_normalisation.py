@@ -1,0 +1,145 @@
+"""CLAUDE_CONFIG_DIR must be normalised the way PROJECT_DIR is (#169).
+
+`claude_projects_dir()` concatenated `/projects` onto whatever the environment
+held. On Windows that value usually arrives in native form
+(`C:\\Users\\x\\.claude-alt`), producing a mixed-separator path, while
+PROJECT_DIR is deliberately converted before it is slugged.
+
+Whether MSYS resolved that anyway was never established — #169 was filed
+unverified because there was no Windows machine to try it on, and the one test
+that would have exercised it is `skipif(win32)` in line with the repo's
+convention for bash-subprocess tests. So the path had **zero** coverage on the
+only platform where it can fail.
+
+Two answers to that here. The bash branch runs on POSIX CI against a stub
+`cygpath` that mimics the MSYS conversion — the branch is Windows-only, the
+logic is not. And the Python half runs unskipped on the Windows runner, because
+it needs no bash at all.
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+LIB_SLUG_SH = REPO_ROOT / "scripts" / "lib-slug.sh"
+
+posix_only = pytest.mark.skipif(
+    sys.platform == "win32", reason="bash subprocess assertions (#79)"
+)
+
+# What `cygpath -u` does to the forms that actually turn up.
+CYGPATH_STUB = r"""#!/usr/bin/env bash
+# Minimal stand-in for MSYS cygpath: -u converts a native Windows path to the
+# POSIX form Git Bash uses. Enough for the one call claude_projects_dir makes.
+if [ "$1" = "-u" ]; then
+    p="$2"
+    p="${p//\\//}"                    # backslashes to forward slashes
+    case "$p" in
+        [A-Za-z]:/*)
+            drive="${p%%:*}"
+            rest="${p#*:}"
+            # Lowercase the drive letter without bash 4 case-folding, which
+            # macOS's bash 3.2 does not have.
+            drive=$(printf '%s' "$drive" | tr 'A-Z' 'a-z')
+            p="/${drive}${rest}"
+            ;;
+    esac
+    printf '%s\n' "$p"
+    exit 0
+fi
+printf '%s\n' "$2"
+"""
+
+
+def _projects_dir(config_dir: str, *, with_cygpath: bool, tmp_path: Path) -> str:
+    """Run claude_projects_dir with CLAUDE_CONFIG_DIR set, optionally with a
+    cygpath stub first on PATH."""
+    env = dict(os.environ)
+    env["CLAUDE_CONFIG_DIR"] = config_dir
+
+    if with_cygpath:
+        bindir = tmp_path / "bin"
+        bindir.mkdir(exist_ok=True)
+        stub = bindir / "cygpath"
+        stub.write_text(CYGPATH_STUB, encoding="utf-8")
+        stub.chmod(0o755)
+        env["PATH"] = f"{bindir}{os.pathsep}{env['PATH']}"
+
+    result = subprocess.run(
+        ["bash", "-c", f'source "{LIB_SLUG_SH}"; claude_projects_dir'],
+        env=env, capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stdout.strip()
+
+
+@posix_only
+def test_a_native_windows_config_dir_is_converted(tmp_path):
+    """The case #169 is about: no mixed separators reach the path."""
+    out = _projects_dir(r"C:\Users\dev\.claude-alt", with_cygpath=True, tmp_path=tmp_path)
+
+    assert "\\" not in out, f"a backslash survived into the projects path: {out!r}"
+    assert out == "/c/Users/dev/.claude-alt/projects", out
+
+
+@posix_only
+def test_a_trailing_separator_does_not_double_up(tmp_path):
+    """`C:\\Users\\dev\\.claude-alt\\` must not become `…//projects`."""
+    out = _projects_dir(r"C:\Users\dev\.claude-alt\\", with_cygpath=True, tmp_path=tmp_path)
+    assert "//projects" not in out, out
+    assert out == "/c/Users/dev/.claude-alt/projects", out
+
+
+@posix_only
+@pytest.mark.parametrize("raw", ["/home/u/.claude", "/home/u/.claude/", "/home/u/.claude///"])
+def test_posix_paths_are_unchanged_apart_from_trailing_slashes(raw, tmp_path):
+    """No cygpath on PATH — the common case must be exactly as it was."""
+    out = _projects_dir(raw, with_cygpath=False, tmp_path=tmp_path)
+    assert out == "/home/u/.claude/projects", out
+
+
+@posix_only
+def test_the_default_is_still_home_dot_claude(tmp_path):
+    """With CLAUDE_CONFIG_DIR unset, nothing about the default changes."""
+    env = dict(os.environ)
+    env.pop("CLAUDE_CONFIG_DIR", None)
+    env["HOME"] = "/home/somebody"
+    result = subprocess.run(
+        ["bash", "-c", f'source "{LIB_SLUG_SH}"; claude_projects_dir'],
+        env=env, capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "/home/somebody/.claude/projects"
+
+
+# ── The Python half, which needs no bash and therefore runs on Windows ───────
+
+@pytest.mark.parametrize("config_dir", [
+    r"C:\Users\dev\.claude-alt",
+    "C:/Users/dev/.claude-alt",
+    r"C:\Users\dev\.claude-alt\\",
+    "C:/Users/dev/.claude-alt/",
+])
+def test_session_dir_tolerates_every_windows_config_dir_form(config_dir, monkeypatch):
+    """`_session_dir` builds the same projects path from any of the forms a
+    Windows user's environment can hold.
+
+    This one is deliberately NOT skipped on win32: #169's whole complaint is
+    that the only test covering this path skips on the platform where it
+    matters, so the half that can run there does.
+    """
+    from pipeline.extract import _session_dir
+
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", config_dir)
+    out = _session_dir("/p")
+
+    assert "//projects" not in out.replace("\\", "/"), out
+    assert out.replace("\\", "/").endswith("/.claude-alt/projects/-p"), out
