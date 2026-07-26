@@ -60,8 +60,12 @@ fi
 config() {
     local key="$1"
     local default="$2"
-    if [ -f "$REMEMBER_CONFIG" ] && command -v jq >/dev/null 2>&1; then
-        local val
+    if [ ! -f "$REMEMBER_CONFIG" ]; then
+        echo "$default"
+        return
+    fi
+    local val=""
+    if command -v jq >/dev/null 2>&1; then
         # NOT `$key // empty`: jq's // treats false the same as null, so every
         # boolean option set to false read back as its default and could never
         # be switched off (#159). features.ndc_compression and features.recovery
@@ -76,10 +80,45 @@ config() {
         #   the string "null" — `jq -r` prints both as the same bare word.
         val=$(jq -r "if $key == null then \"\" else ($key | tostring) end" \
             "$REMEMBER_CONFIG" 2>/dev/null)
-        [ -n "$val" ] && echo "$val" || echo "$default"
+    elif type _jq_fallback >/dev/null 2>&1; then
+        # No jq — detect-tools.sh already defined a Python-based fallback for
+        # exactly this (bare-key `jq -r '.key' file` reads). config() branched
+        # on `command -v jq` and fell straight to `echo "$default"` without
+        # ever trying it, so every user config override was silently ignored
+        # on any jq-less machine. Wire it in here, matching #159's null-vs-
+        # false semantics: an absent/null key falls through to `default`
+        # below; a present `false` prints as the string "false" (see
+        # detect-tools.sh's isinstance(val, str) fix for why that's not
+        # Python's "False").
+        val=$(_jq_fallback -r "$key" "$REMEMBER_CONFIG" 2>/dev/null)
     else
-        echo "$default"
+        # log.sh can be sourced directly without detect-tools.sh (some
+        # callers/tests do), so _jq_fallback may not exist. Same read,
+        # inlined, so config() never regresses to bundled-default-only just
+        # because of sourcing order. Same null-vs-false semantics as above:
+        # a genuinely absent/null key leaves $val empty (falls to $default
+        # below); a present `false` renders as jq's "false", not Python's
+        # str(False).
+        val=$("${PYTHON:-python3}" -c '
+import json, sys
+try:
+    data = json.load(open(sys.argv[2]))
+    keys = sys.argv[1].strip(".").split(".")
+    v = data
+    for k in keys:
+        if k and isinstance(v, dict):
+            v = v.get(k)
+        if v is None:
+            break
+    if v is not None:
+        # jq -r semantics: raw strings, JSON textual form otherwise
+        # (crucially "true"/"false", not Python str(True)/str(False)).
+        print(v if isinstance(v, str) else json.dumps(v))
+except Exception:
+    pass
+' "$key" "$REMEMBER_CONFIG" 2>/dev/null)
     fi
+    [ -n "$val" ] && echo "$val" || echo "$default"
 }
 
 REMEMBER_TZ=$(config ".timezone" "")

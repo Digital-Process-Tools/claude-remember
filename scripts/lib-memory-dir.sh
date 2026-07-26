@@ -188,8 +188,39 @@ if [ "${#_cfg_sources[@]}" -gt 0 ] && command -v jq >/dev/null 2>&1; then
     # convention: `_*` are user-facing docs (_comments/_purpose/_notes), never runtime data.
     jq -s 'reduce .[] as $x ({}; . * $x) | with_entries(select(.key | startswith("_") | not))' "${_cfg_sources[@]}" > "$_merged_cfg" 2>/dev/null \
         || cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null
+elif [ "${#_cfg_sources[@]}" -gt 0 ]; then
+    # No jq — do the same deep-merge in Python instead of silently dropping
+    # the user-global/per-project layers and copying only the bundled
+    # defaults. Every override in ~/.remember/config.json or
+    # ${REMEMBER_DIR}/config.json (time_format, model, cooldowns.*,
+    # thresholds.*, git_backup.*) was previously invisible on any machine
+    # without jq — this made config() (log.sh) irrelevant to those users.
+    "${PYTHON:-python3}" - "$_merged_cfg" "${_cfg_sources[@]}" > /dev/null 2>&1 <<'PYMERGE' || cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null
+import json
+import sys
+
+
+def deep_merge(a, b):
+    if isinstance(a, dict) and isinstance(b, dict):
+        out = dict(a)
+        for k, v in b.items():
+            out[k] = deep_merge(out[k], v) if k in out else v
+        return out
+    return b
+
+
+out_path = sys.argv[1]
+merged = {}
+for path in sys.argv[2:]:
+    with open(path) as f:
+        merged = deep_merge(merged, json.load(f))
+# Strip `_`-prefixed doc keys, top-level only — same convention as the jq path.
+merged = {k: v for k, v in merged.items() if not str(k).startswith("_")}
+with open(out_path, "w") as f:
+    json.dump(merged, f)
+PYMERGE
 else
-    # No jq, or no config files — fall back to the bundled defaults.
+    # No config files at all — fall back to the bundled defaults.
     cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null || echo '{}' > "$_merged_cfg"
 fi
 

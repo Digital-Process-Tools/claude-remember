@@ -69,7 +69,13 @@ try:
             break
     if val is None:
         sys.exit(0)
-    print(val if isinstance(val, (str, int, float, bool)) else json.dumps(val))
+    # jq -r prints strings raw and everything else in jq's JSON textual
+    # form — crucially "true"/"false" for booleans, not Python's capitalized
+    # str(True)/str(False). Getting this wrong silently breaks every caller
+    # that does `[ "$x" = "true" ]` against a boolean config key (e.g.
+    # git_backup.gpg_sign, allow_remote_change) whenever jq is absent: the
+    # comparison never matches, so the key always reads as false.
+    print(val if isinstance(val, str) else json.dumps(val))
 except Exception:
     sys.exit(0)
 PYEOF
