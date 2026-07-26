@@ -42,10 +42,19 @@ def _session_dir(project_dir: str) -> str:
     backslashes (\\) and drive colons (D:).
     """
     slug = re.sub(r'[^a-zA-Z0-9]', '-', project_dir)
+    # CLAUDE_CONFIG_DIR relocates Claude Code's whole config tree, projects/
+    # included (#166). Hardcoding ~/.claude meant reading a directory with no
+    # current transcripts — the save pipeline no-oped in silence, and a stale
+    # transcript sitting in the default tree could be summarized into memory
+    # as though it were the live session.
+    #
     # Honor HOME explicitly so test fixtures patching only HOME also work on Windows
     # (where os.path.expanduser defaults to USERPROFILE, ignoring HOME).
-    home = os.environ.get("HOME") or os.path.expanduser("~")
-    return home + "/.claude/projects/" + slug
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    if not config_dir:
+        home = os.environ.get("HOME") or os.path.expanduser("~")
+        config_dir = home + "/.claude"
+    return config_dir.rstrip("/\\") + "/projects/" + slug
 
 
 def _is_line_number(value: object) -> bool:

@@ -70,7 +70,7 @@ rm -f "$REMEMBER_DIR/tmp/save-session.pid"
 # ── Recovery: save the most recent missed session ──────────────────────────
 if [ "$(config '.features.recovery' true)" = "true" ]; then
 PROJECT_PATH_SLUG="$(session_dir_slug "$PROJECT")"
-SESSIONS_DIR="$HOME/.claude/projects/${PROJECT_PATH_SLUG}"
+SESSIONS_DIR="$(claude_projects_dir)/${PROJECT_PATH_SLUG}"
 LAST_SAVE_FILE="$REMEMBER_DIR/tmp/last-save.json"
 
 if [ -d "$SESSIONS_DIR" ] && [ -f "$LAST_SAVE_FILE" ]; then

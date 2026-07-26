@@ -42,7 +42,7 @@ log "hook" "post-tool: PROJECT_DIR=$PROJECT_DIR PIPELINE_DIR=$PIPELINE_DIR PYTHO
 SAVE_SCRIPT="$PLUGIN_ROOT/scripts/save-session.sh"
 LAST_SAVE_FILE="$REMEMBER_DIR/tmp/last-save.json"
 PID_FILE="$REMEMBER_DIR/tmp/save-session.pid"
-SESSION_DIR="$HOME/.claude/projects/$(session_dir_slug "$PROJECT")"
+SESSION_DIR="$(claude_projects_dir)/$(session_dir_slug "$PROJECT")"
 
 [ -f "$SAVE_SCRIPT" ] || exit 0
 
@@ -73,7 +73,7 @@ if [ -z "$LATEST_JSONL" ]; then
         if [ -d "$SESSION_DIR" ]; then
             log "hook" "no .jsonl transcript in $SESSION_DIR — nothing to save yet"
         else
-            log "hook" "WARNING: no session dir for this project: $SESSION_DIR (slug of $PROJECT). Memory cannot save until it matches a directory under $HOME/.claude/projects/"
+            log "hook" "WARNING: no session dir for this project: $SESSION_DIR (slug of $PROJECT). Memory cannot save until it matches a directory under $(claude_projects_dir)/"
         fi
     fi
     exit 0

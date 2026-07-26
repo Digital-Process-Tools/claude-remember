@@ -114,6 +114,18 @@ _remember_build_slug_sed() {
 }
 _remember_build_slug_sed
 
+# Where Claude Code keeps its session transcripts. CLAUDE_CONFIG_DIR relocates
+# that whole tree, projects/ included — people use it to run a separate account
+# per project — and the plugin used to hardcode ~/.claude, so it listed a
+# directory with no current transcripts and the save pipeline silently no-oped
+# (issue #166: five days, ~2000 hook invocations, zero saves, nothing in the
+# logs). Worse than nothing found: a stale transcript left in the default tree
+# with enough lines would have been summarized into memory as if it were the
+# live session.
+claude_projects_dir() {
+    printf '%s/projects' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+}
+
 # Non-ASCII: Claude Code slugs with `s.replace(/[^a-zA-Z0-9]/g, '-')` — checked
 # in the installed CLI bundle, and note there is no /u flag. So it replaces one
 # UTF-16 CODE UNIT per dash, not one character: BMP characters (é, 日, プ) give
