@@ -85,12 +85,33 @@ def test_a_session_that_keeps_saving_is_not_evicted(store):
     ones while still live, and resume from 0 the next time it saved.
     """
     remember, path = store
+
+    # This test used to interleave A with exactly _POSITION_SLOTS - 1 fillers,
+    # which never overflowed the store — so the eviction loop never ran and the
+    # test passed with the re-insertion deleted (#175). Interleaving alone is
+    # not enough either: A is re-saved last on every round, so it is present at
+    # the end whether or not it kept its slot.
+    #
+    # What separates the two is a burst of OTHER sessions after A's last save.
+    # Re-inserted, A is newer than all of them and survives; keyed on first
+    # insertion, A is the oldest thing in the store and is evicted — then
+    # resumes from 0 and re-summarizes its whole span, which is #140.
     cmd_save_position(path, SESSION_A, 5)
     for i in range(_POSITION_SLOTS - 1):
-        cmd_save_position(path, f"filler-{i:04d}", i)
-        cmd_save_position(path, SESSION_A, 100 + i)
+        cmd_save_position(path, f"early-{i:04d}", i)
 
-    assert get_last_save_line(SESSION_A, remember_dir=str(remember)) == 100 + _POSITION_SLOTS - 2
+    cmd_save_position(path, SESSION_A, 999)
+
+    for i in range(_POSITION_SLOTS - 1):
+        cmd_save_position(path, f"late-{i:04d}", i)
+
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    assert len(data["sessions"]) == _POSITION_SLOTS, "the store never overflowed"
+    assert SESSION_A in data["sessions"], (
+        "an actively-saving session was evicted by newer ones — it will resume "
+        "from 0 and re-summarize everything it already summarized (#140)"
+    )
+    assert get_last_save_line(SESSION_A, remember_dir=str(remember)) == 999
 
 
 def test_legacy_single_slot_file_is_still_honoured(store):

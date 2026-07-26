@@ -129,16 +129,36 @@ def test_log_sh_no_config_falls_back_to_system_local_not_utc(tmp_path):
     Expected behavior: omit TZ prefix entirely, letting date use system TZ.
     """
     project = _make_project(tmp_path, timezone_value=None)
-    # Force a known system TZ so we can assert against it
-    result = _run_logsh(project, system_tz="America/Los_Angeles")
-    # Expected: LA date (system TZ) — not UTC
-    expected_la = subprocess.run(
-        [_BASH, "-c", "TZ=America/Los_Angeles date +%Y-%m-%d"],
+
+    # The system zone is chosen so its DATE differs from UTC's right now.
+    # This used to be pinned to America/Los_Angeles, which shares a calendar
+    # date with UTC for most of the day — so removing the `[ -n "$REMEMBER_TZ" ]`
+    # guard, the literal historical bug, passed outside roughly 17:00–24:00 PT
+    # (#175). Kiritimati (+14) differs from UTC once the UTC hour reaches 10;
+    # Niue (-11) differs before 11. Between them every hour is covered, so this
+    # detects the regression whenever it runs rather than a third of the time.
+    utc_hour = int(subprocess.run(
+        [_BASH, "-c", "TZ=UTC date +%H"], capture_output=True, text=True,
+    ).stdout.strip())
+    system_tz = "Pacific/Kiritimati" if utc_hour >= 10 else "Pacific/Niue"
+
+    expected_local = subprocess.run(
+        [_BASH, "-c", f"TZ={system_tz} date +%Y-%m-%d"],
         capture_output=True, text=True,
     ).stdout.strip()
-    assert result["ACTUAL"] == expected_la, (
-        f"Empty REMEMBER_TZ should fall back to system local ({expected_la}), "
-        f"not UTC. Got: {result['ACTUAL']}"
+    utc_date = subprocess.run(
+        [_BASH, "-c", "TZ=UTC date +%Y-%m-%d"], capture_output=True, text=True,
+    ).stdout.strip()
+    assert expected_local != utc_date, (
+        f"{system_tz} and UTC share a date right now ({utc_date}) — the zone "
+        "choice above no longer separates the two, and this test cannot see "
+        "the bug it exists for"
+    )
+
+    result = _run_logsh(project, system_tz=system_tz)
+    assert result["ACTUAL"] == expected_local, (
+        f"Empty REMEMBER_TZ should fall back to system local ({expected_local}), "
+        f"not UTC ({utc_date}). Got: {result['ACTUAL']}"
     )
 
 

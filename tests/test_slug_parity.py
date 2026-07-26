@@ -258,6 +258,39 @@ def test_a_hash_that_is_not_base36_is_refused(tmp_path):
     assert len(out) > 200, "expected the untruncated fallback, not a bare truncation"
 
 
+def test_home_is_preferred_over_expanduser(monkeypatch):
+    """`os.environ["HOME"]` first, `expanduser("~")` only as a fallback.
+
+    On POSIX these agree — `expanduser` reads $HOME — so swapping the order
+    changes nothing any platform CI runs on can observe, and the mutation
+    survived a green suite (#175). The ordering exists for Windows, where
+    `expanduser` prefers USERPROFILE and ignores HOME, so a fixture that sets
+    only HOME would be silently ignored. Forcing the two apart is the only way
+    to assert which one wins.
+    """
+    from pipeline.extract import _session_dir
+
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.setenv("HOME", "/from-home")
+    monkeypatch.setattr("pipeline.extract.os.path.expanduser", lambda p: "/from-expanduser")
+
+    assert _session_dir("/p").startswith("/from-home/.claude/projects/"), (
+        "expanduser won over HOME — a test fixture setting only HOME would be "
+        "ignored on Windows, which is the case this ordering is for"
+    )
+
+
+def test_expanduser_is_used_when_home_is_unset(monkeypatch):
+    """The other half: without HOME, the fallback must still resolve."""
+    from pipeline.extract import _session_dir
+
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("HOME", raising=False)
+    monkeypatch.setattr("pipeline.extract.os.path.expanduser", lambda p: "/from-expanduser")
+
+    assert _session_dir("/p").startswith("/from-expanduser/.claude/projects/")
+
+
 def test_a_newline_in_the_path_still_becomes_a_dash():
     """sed splits on newlines, so this has to be handled before it gets there."""
     path = "/tmp/we\nird"
