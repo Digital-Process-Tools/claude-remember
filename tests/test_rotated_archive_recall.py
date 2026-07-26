@@ -131,7 +131,7 @@ def test_nothing_is_announced_when_no_rotation_has_happened(tmp_path):
 def test_the_history_hint_names_the_rotated_pattern():
     """Recall is the agent grepping what the hint names."""
     hint = (REPO_ROOT / "prompts" / "session-history-hint.txt").read_text()
-    assert "archive-YYYY-MM-DD.md" in hint, "the hint does not mention rotated archives"
+    assert "archive-YYYY-MM-DD" in hint, "the hint does not mention rotated archives"
 
 
 def test_rotated_slices_alone_are_still_announced(tmp_path):
@@ -174,3 +174,35 @@ def test_a_long_rotation_history_is_capped(tmp_path):
     assert "archive-2026-03-01.md" not in out, "the oldest slice should be summarised"
     assert "and 15 older" in out, f"the remainder is not accounted for:\n{out}"
     assert "archive-*.md" in out, "no glob given for the unlisted slices"
+
+
+def test_a_same_day_collision_does_not_invert_recency_at_the_cap(tmp_path):
+    """A second rotation the same day is archive-DATE-2.md.
+
+    '-' (0x2D) sorts before '.' (0x2E), so that later sibling sorts BEFORE the
+    base file it followed. Lexicographic order stops meaning recency inside a
+    same-day cluster — and the cap decides what to drop right there, so the
+    NEWER slice was summarised away while the older base was listed in its
+    place. Eleven files against a cap of ten put the boundary inside the
+    cluster, which is the only place the inversion shows.
+    """
+    import os
+    remember = _seed(tmp_path)
+    # Oldest first by mtime: the base file, then its same-day sibling, then
+    # nine later days. Lexicographically the sibling sorts FIRST of all eleven.
+    ordered = (["archive-2026-07-01.md", "archive-2026-07-01-2.md"]
+               + [f"archive-2026-07-{d:02d}.md" for d in range(2, 11)])
+    for i, name in enumerate(ordered):
+        f = remember / name
+        f.write_text("x\n", encoding="utf-8")
+        os.utime(f, (1_700_000_000 + i * 60, 1_700_000_000 + i * 60))
+
+    out = _run_session_start(tmp_path)
+
+    assert "archive-2026-07-01-2.md" in out, (
+        "the same-day sibling was dropped despite being newer than the base "
+        "file that was kept — lexicographic order is not recency here"
+    )
+    assert "archive-2026-07-01.md\n" not in out.replace(" (", "\n ("), (
+        "the genuinely oldest slice should have been the one dropped"
+    )

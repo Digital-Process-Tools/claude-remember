@@ -186,8 +186,17 @@ if [ -n "$HAS_MEMORY" ]; then
         # which was the whole point of naming them.
         ROTATED_LIST_MAX=10
         ROTATED_COUNT=$(echo "$ROTATED_ARCHIVES" | wc -l | tr -d ' ')
+        # Pick the newest by MTIME, not by name. A second rotation on the same
+        # day is named archive-DATE-2.md, and '-' (0x2D) sorts before '.'
+        # (0x2E), so the later sibling sorts BEFORE the base file it followed.
+        # Lexicographic order stops meaning recency exactly inside a same-day
+        # cluster — which is where the cap decides what to drop, so the newer
+        # slice was the one getting summarised away. Display stays sorted by
+        # name, which reads chronologically and is stable.
+        ROTATED_NEWEST=$(ls -t "$REMEMBER_DIR"/archive-*.md 2>/dev/null \
+            | head -n "$ROTATED_LIST_MAX" | sort)
         echo "--- rotated archives (not shown; grep on request) ---"
-        echo "$ROTATED_ARCHIVES" | tail -n "$ROTATED_LIST_MAX" | while read -r _archive; do
+        echo "$ROTATED_NEWEST" | while read -r _archive; do
             [ -f "$_archive" ] || continue
             printf '%s (%s bytes)\n' "$_archive" "$(wc -c < "$_archive" | tr -d ' ')"
         done
