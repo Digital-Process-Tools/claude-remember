@@ -25,11 +25,16 @@ import re
 
 from .prompts import build_consolidation_prompt
 from .haiku import call_haiku
+from .entry_header import ANY_HEADER_ERE
 from .types import ConsolidationResult, TokenUsage
 
 
 # A real memory entry header: "## HH:MM", "## Week of ...", or "## YYYY-MM-DD".
-_ENTRY_HEADER = re.compile(r"(?m)^## (\d{2}:\d{2}|Week of |\d{4}-\d{2}-\d{2})")
+# Was spelled out here as 24h-only, while save-session.sh accepted 12h too —
+# two answers to one question, agreeing only because the header is normally
+# rewritten (#177). The 12h form does reach memory, through the #139 fallback,
+# and an entry this did not match read as prose rather than as memory.
+_ENTRY_HEADER = re.compile(ANY_HEADER_ERE, re.MULTILINE)
 
 # A fence opener: indent, a run of 3+ backticks or tildes, and an optional
 # info string. CommonMark matches a fence by CHARACTER and RUN LENGTH, which is

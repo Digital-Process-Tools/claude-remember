@@ -28,10 +28,7 @@ SESSION_START_SCRIPT = REPO_ROOT / "scripts" / "session-start-hook.sh"
 BUNDLED_IDENTITY = REPO_ROOT / "identity.example.md"
 
 
-def _slug(path: str) -> str:
-    """Reproduce the session_dir_slug logic in Python for assertion."""
-    import re
-    return re.sub(r"[^a-zA-Z0-9]", "-", path)
+from pipeline.slug import session_dir_slug as _slug  # noqa: E402  (#177)
 
 
 def _make_plugin_dir(tmp_path: Path, data_dir_value: str) -> Path:

@@ -15,6 +15,7 @@ synchronously before backgrounding, so its presence is a reliable "a save was
 forked" signal.
 """
 
+import json
 import os
 import subprocess
 import sys
@@ -33,9 +34,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 HOOK = REPO_ROOT / "scripts" / "post-tool-hook.sh"
 
 
-def _slug(path: str) -> str:
-    import re
-    return re.sub(r"[^a-zA-Z0-9]", "-", path)
+from pipeline.slug import session_dir_slug as _slug  # noqa: E402  (#177)
 
 
 def _run_post_tool(tmp_path: Path, *, cooldown_ts: Optional[int], jsonl_lines: int = 60):
@@ -44,8 +43,12 @@ def _run_post_tool(tmp_path: Path, *, cooldown_ts: Optional[int], jsonl_lines: i
     Args:
         cooldown_ts: value to write into tmp/last-save-ts, or None to leave the
             marker absent.
-        jsonl_lines: number of lines in the fake session transcript (must exceed
-            delta_lines_trigger=50 to reach the fork decision).
+        jsonl_lines: number of lines in the fake session transcript. Must exceed
+            the delta gate; the fixture writes an explicit
+            thresholds.delta_lines_trigger rather than leaning on the shipped
+            default, which it used to do silently — RAISING that default failed
+            these tests loudly, but LOWERING it changed nothing and nobody would
+            have known (#177).
 
     Returns:
         (CompletedProcess, remember_dir Path).
@@ -63,6 +66,11 @@ def _run_post_tool(tmp_path: Path, *, cooldown_ts: Optional[int], jsonl_lines: i
     session.write_text(
         "".join('{"type":"assistant","message":{"content":"x"}}\n'
                 for _ in range(jsonl_lines))
+    )
+
+    # Say what this test depends on instead of inheriting it.
+    (remember / "config.json").write_text(
+        json.dumps({"thresholds": {"delta_lines_trigger": 50}}), encoding="utf-8"
     )
 
     if cooldown_ts is not None:

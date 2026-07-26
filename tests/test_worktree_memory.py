@@ -36,9 +36,11 @@ BOOTSTRAP_SCRIPT = REPO_ROOT / "scripts" / "bootstrap-dirs.sh"
 SESSION_START_SCRIPT = REPO_ROOT / "scripts" / "session-start-hook.sh"
 
 
-def _slug(path: str) -> str:
-    """Reproduce session_dir_slug for assertions."""
-    return re.sub(r"[^a-zA-Z0-9]", "-", path)
+# The real implementation, not a reproduction of it. Three test files each
+# carried their own copy of the naive rule; they agreed only because no fixture
+# used a non-ASCII or over-200-character path, which is the same "true today"
+# that let the shipped copies drift (#177).
+from pipeline.slug import session_dir_slug as _slug  # noqa: E402
 
 
 def _make_plugin_dir(tmp_path: Path, data_dir_value: str) -> Path:

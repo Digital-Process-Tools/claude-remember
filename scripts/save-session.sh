@@ -309,9 +309,21 @@ keep_rejected_text() {
 }
 
 # --- Step 5b: Validate format (warn, never discard) ---
+# The pattern comes from pipeline/entry_header.py rather than being written out
+# here. It used to be spelled once here and differently in consolidate.py — 12h
+# accepted here, 24h-only there — and the two only agreed because the header is
+# normally rewritten to 24h. The #139 fallback below keeps the model's ORIGINAL
+# line when a rewrite would malform it, so an AM/PM header can reach memory that
+# consolidation then does not recognise as an entry at all (#177).
+ENTRY_HEADER_ERE=$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.entry_header --ere entry 2>/dev/null) \
+    || ENTRY_HEADER_ERE=''
+# A failed lookup must not silently accept everything: fall back to the literal
+# pattern rather than to an empty regex, which grep matches against anything.
+[ -n "$ENTRY_HEADER_ERE" ] || ENTRY_HEADER_ERE='^## ([0-9]{2}:[0-9]{2}|[0-9]{1,2}:[0-9]{2} (AM|PM)) \|'
+
 if [ "$IS_SKIP" != "true" ]; then
     FIRST_LINE=$(head -1 "$HAIKU_TEXT_FILE")
-    if ! echo "$FIRST_LINE" | grep -qE '^## ([0-9]{2}:[0-9]{2}|[0-9]{1,2}:[0-9]{2} (AM|PM)) \|'; then
+    if ! echo "$FIRST_LINE" | grep -qE "$ENTRY_HEADER_ERE"; then
         # Not an entry header, so it is not an entry. It used to be logged as a
         # warning and appended anyway (#136), which put a permission prompt in
         # one reporter's now.md — and memory is a summary of summaries, so a
@@ -347,7 +359,7 @@ if [ "$IS_SKIP" != "true" ]; then
         HEADER_REST="${HEADER_REST# }"
         NEW_FIRST_LINE="## ${CURRENT_TIME} | ${HEADER_REST}"
         # Never write a header that would not pass the check above.
-        if ! echo "$NEW_FIRST_LINE" | grep -qE '^## ([0-9]{2}:[0-9]{2}|[0-9]{1,2}:[0-9]{2} (AM|PM)) \|'; then
+        if ! echo "$NEW_FIRST_LINE" | grep -qE "$ENTRY_HEADER_ERE"; then
             log "validate" "WARNING: refusing to rewrite header, result malformed: $(echo "$NEW_FIRST_LINE" | head -c 60)"
             NEW_FIRST_LINE="$FIRST_LINE"
         fi
