@@ -72,8 +72,20 @@ CLEANUP_FILES=()
 # $REMEMBER_CONFIG (bash keeps a single EXIT trap), so remove it here too.
 CLEANUP_FILES+=("$REMEMBER_CONFIG")
 
-# Remove lock file and all accumulated temp files on exit.
-cleanup() { rm -f "$LOCK_FILE" "${CLEANUP_FILES[@]}"; }
+# HAVE_LOCK: only unlink LOCK_FILE if THIS process actually owns it (either
+# acquired it fresh below, or took over a stale one). The trap is installed
+# before acquisition — so it also fires on the "someone else holds it,
+# skipping" exit — and cleanup() used to unlink LOCK_FILE unconditionally.
+# That let a session which correctly skipped delete the *holder's* lock, so a
+# third process could then acquire while the first was still running: two
+# concurrent save-session.sh, two Haiku calls, two position writes.
+HAVE_LOCK=false
+
+# Remove lock file (only if we own it) and all accumulated temp files on exit.
+cleanup() {
+    [ "$HAVE_LOCK" = true ] && rm -f "$LOCK_FILE"
+    rm -f "${CLEANUP_FILES[@]}"
+}
 trap cleanup EXIT
 
 # --- Lock (atomic via noclobber) ---
@@ -85,6 +97,9 @@ if ! ( set -o noclobber; echo $$ > "$LOCK_FILE" ) 2>/dev/null; then
     fi
     log "lock" "stale lock (PID $LOCK_PID dead), taking over"
     echo $$ > "$LOCK_FILE"
+    HAVE_LOCK=true
+else
+    HAVE_LOCK=true
 fi
 
 # --- Parse args ---
