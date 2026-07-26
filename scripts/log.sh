@@ -68,12 +68,15 @@ config() {
         # are both documented, both default true, and neither could be disabled.
         # Ask for the value and treat only null — a genuinely absent key — as
         # missing.
-        val=$(jq -r "$key" "$REMEMBER_CONFIG" 2>/dev/null)
-        if [ -n "$val" ] && [ "$val" != "null" ]; then
-            echo "$val"
-        else
-            echo "$default"
-        fi
+        # Asking jq to map a genuinely absent key to "" and everything else to
+        # its string form. Two near misses this needs to avoid:
+        #   `$key // empty` treats FALSE like null, so no boolean set to false
+        #   could ever be read (#159);
+        #   testing the printed value against "null" cannot tell JSON null from
+        #   the string "null" — `jq -r` prints both as the same bare word.
+        val=$(jq -r "if $key == null then \"\" else ($key | tostring) end" \
+            "$REMEMBER_CONFIG" 2>/dev/null)
+        [ -n "$val" ] && echo "$val" || echo "$default"
     else
         echo "$default"
     fi

@@ -258,6 +258,7 @@ def test_a_false_boolean_option_is_readable_at_all(tmp_path):
     cfg.write_text(json.dumps({
         "features": {"ndc_compression": False, "recovery": False},
         "timezone": "UTC", "zero": 0, "empty": "",
+        "null_string": "null", "real_null": None,
     }), encoding="utf-8")
 
     def read(key, default):
@@ -279,3 +280,8 @@ def test_a_false_boolean_option_is_readable_at_all(tmp_path):
     assert read(".zero", "9") == "0", "0 is a value, not a missing key"
     assert read(".missing", "fallback") == "fallback", "a genuinely absent key must default"
     assert read(".deeply.missing", "fallback") == "fallback", "an absent path must default"
+    # `jq -r` prints the bare word null for BOTH a JSON null and the string
+    # "null", so comparing the printed value against "null" would discard a
+    # legitimate value. The mapping is done inside jq, where the two differ.
+    assert read(".null_string", "fallback") == "null", "the string \"null\" was discarded"
+    assert read(".real_null", "fallback") == "fallback", "an explicit null must default"
