@@ -1,0 +1,265 @@
+"""The session-directory slug must agree everywhere it exists (#157/#158/#174).
+
+Three implementations had drifted apart: the bash one in detect-tools.sh (fixed
+by #156), a naive inline copy in lib-memory-dir.sh that user-prompt-hook.sh
+actually ran, and the Python one in extract.py. None of them truncated at 200
+characters the way Claude Code does.
+
+Every disagreement here has the same consequence: the plugin computes a
+directory Claude Code never created, finds no transcript, and saves nothing —
+in silence. So these tests compare all of them against one oracle rather than
+against each other.
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from pipeline.slug import session_dir_slug as py_slug
+
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="bash subprocess assertions — not portable to Windows runners (#79)",
+)
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+LIB_SLUG_SH = REPO_ROOT / "scripts" / "lib-slug.sh"
+LIB_MEMORY_DIR_SH = REPO_ROOT / "scripts" / "lib-memory-dir.sh"
+
+
+def js_slug(path: str) -> str:
+    """An independent transcription of the shipped CLI's `JXA`.
+
+        var jXA = 200;
+        function JXA(A) {
+          let q = A.replace(/[^a-zA-Z0-9]/g, "-");
+          if (q.length <= jXA) return q;
+          let K = 0;
+          for (let _ = 0; _ < A.length; _++)
+            K = (K << 5) - K + A.charCodeAt(_), K |= 0;
+          return `${q.slice(0, jXA)}-${Math.abs(K).toString(36)}`;
+        }
+
+    Written from the JS rather than imported from pipeline.slug, so a bug in
+    the implementation cannot quietly become the definition of correct.
+    """
+    units = path.encode("utf-16-le", "surrogatepass")
+    code_units = [units[i] | (units[i + 1] << 8) for i in range(0, len(units), 2)]
+
+    slug = "".join(
+        chr(u) if chr(u).isascii() and chr(u).isalnum() else "-" for u in code_units
+    )
+    if len(slug) <= 200:
+        return slug
+
+    acc = 0
+    for unit in code_units:
+        acc = (acc << 5) - acc + unit
+        acc &= 0xFFFFFFFF
+        if acc >= 0x80000000:
+            acc -= 0x100000000
+    magnitude = abs(acc)
+
+    digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+    if magnitude == 0:
+        tail = "0"
+    else:
+        out = []
+        while magnitude:
+            magnitude, d = divmod(magnitude, 36)
+            out.append(digits[d])
+        tail = "".join(reversed(out))
+    return slug[:200] + "-" + tail
+
+
+def bash_slug(path: str, lib: Path = LIB_SLUG_SH) -> str:
+    """What the shell implementation produces for `path`."""
+    script = f"""
+    PIPELINE_DIR="{REPO_ROOT}"
+    source "{lib}"
+    session_dir_slug "$1"
+    """
+    result = subprocess.run(
+        ["bash", "-c", script, "bash", path],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stdout.rstrip("\n")
+
+
+# Deep enough to cross 200 characters without anything exotic — this is a
+# monorepo module path under a long home directory, which is how #157 was hit.
+DEEP = "/Users/a-developer-with-a-long-name/Documents/clients/acme-holdings/" + "/".join(
+    f"packages/module-{i}" for i in range(12)
+)
+
+PATHS = [
+    "/Users/f/Documents/dvsi",
+    "/home/u/p",
+    "/tmp/café/projet",
+    "/tmp/日本語/プロジェクト",
+    "/tmp/emoji-🎉-dir",
+    "/tmp/𠮷野家/x",
+    "/tmp/mixed-é-🎉-日-𠮷/deep",
+    DEEP,
+    "/x" * 150,
+    "a" * 199,
+    "a" * 200,
+    "a" * 201,
+    "/tmp/" + "🎉" * 120,
+]
+
+
+@pytest.mark.parametrize("path", PATHS)
+def test_python_matches_the_oracle(path):
+    assert py_slug(path) == js_slug(path)
+
+
+@pytest.mark.parametrize("path", PATHS)
+def test_bash_matches_the_oracle(path):
+    assert bash_slug(path) == js_slug(path)
+
+
+@pytest.mark.parametrize("path", PATHS)
+def test_bash_and_python_agree(path):
+    """Belt and braces: the two sides the plugin actually runs."""
+    assert bash_slug(path) == py_slug(path)
+
+
+def test_a_deep_path_is_truncated_with_a_hash():
+    """#157: nothing truncated, so a deep project silently never saved."""
+    slug = py_slug(DEEP)
+    assert len(slug) > 200, "the fixture stopped being long enough to test this"
+    head, _, tail = slug.rpartition("-")
+    assert len(head) == 200, "the first 200 characters must be kept verbatim"
+    assert tail and all(c in "0123456789abcdefghijklmnopqrstuvwxyz" for c in tail)
+    assert slug == bash_slug(DEEP)
+
+
+def test_an_astral_character_costs_two_dashes():
+    """#174: the regex has no /u flag, so a surrogate pair is two code units."""
+    assert py_slug("/tmp/x🎉y") == "-tmp-x--y"
+    assert bash_slug("/tmp/x🎉y") == "-tmp-x--y"
+
+
+def test_a_bmp_character_costs_one_dash():
+    """The other half of the same rule — regressing this breaks CJK paths."""
+    assert py_slug("/tmp/日x") == "-tmp--x"
+    assert bash_slug("/tmp/日x") == "-tmp--x"
+
+
+def test_external_storage_dir_uses_the_real_slug_without_detect_tools():
+    """#158: lib-memory-dir.sh carried a naive copy of its own.
+
+    user-prompt-hook.sh reaches it without sourcing detect-tools.sh, so in
+    external-storage mode ({slug} in data_dir) that hook resolved a DIFFERENT
+    REMEMBER_DIR than every other one — split-brain memory rather than a clean
+    failure, and harder to notice than a silent no-op. This drives the real
+    resolution path, not the helper.
+    """
+    path = "/tmp/mixed-é-🎉-日-𠮷/deep"
+    script = f"""
+    PROJECT_DIR="{REPO_ROOT}"
+    PIPELINE_DIR="{REPO_ROOT}"
+    source "{LIB_MEMORY_DIR_SH}"
+    _resolve_remember_dir "/ext/{{slug}}" "$1"
+    """
+    result = subprocess.run(
+        ["bash", "-c", script, "bash", path],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.rstrip("\n") == "/ext/" + js_slug(path)
+
+
+def test_detect_tools_slug_truncates():
+    """The entry point every hook but one actually calls (#157)."""
+    script = f"""
+    PIPELINE_DIR="{REPO_ROOT}"
+    source "{REPO_ROOT / "scripts" / "detect-tools.sh"}"
+    session_dir_slug "$1"
+    """
+    result = subprocess.run(
+        ["bash", "-c", script, "bash", DEEP],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.rstrip("\n") == js_slug(DEEP)
+
+
+@pytest.mark.parametrize("path", ["/tmp/x🎉y", "/tmp/𠮷野家/x", DEEP])
+def test_extract_session_dir_matches_the_oracle(path, monkeypatch):
+    """The Python entry point that was live-broken in 0.8.7 (#174/#157)."""
+    from pipeline.extract import _session_dir
+
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/cfg")
+    assert _session_dir(path) == "/cfg/projects/" + js_slug(path)
+
+
+def test_the_long_path_hash_survives_without_python():
+    """Degrade to the old behaviour rather than to a crash.
+
+    The hash needs a subprocess. If it cannot run, the slug is wrong — but it
+    is wrong exactly as it was before this change, and the missing-session-
+    directory warning (#156) reports it instead of failing silently.
+    """
+    script = f"""
+    PIPELINE_DIR="/nonexistent"
+    PYTHON="/nonexistent/python"
+    source "{LIB_SLUG_SH}"
+    session_dir_slug "$1"
+    """
+    result = subprocess.run(
+        ["bash", "-c", script, "bash", DEEP],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    untruncated = "".join(
+        c if c.isascii() and c.isalnum() else "-" * (2 if ord(c) > 0xFFFF else 1)
+        for c in DEEP
+    )
+    assert result.stdout.rstrip("\n") == untruncated, (
+        "with no hash available the untruncated slug is the honest fallback — "
+        "wrong in exactly the way it was before, not a crash and not a "
+        "truncation with no hash on the end, which would match nothing at all"
+    )
+
+
+def test_a_hash_that_is_not_base36_is_refused(tmp_path):
+    """The hash arrives from another file resolved through PIPELINE_DIR.
+
+    A stale or wrong-version plugin copy could print anything, and appending it
+    verbatim would invent a NEW wrong directory rather than fall back to the
+    old wrong one. Base36 is the entire alphabet a real hash can use.
+    """
+    fake = tmp_path / "pipeline"
+    fake.mkdir()
+    (fake / "slug.py").write_text("print('WRONG/HASH!')\n", encoding="utf-8")
+
+    script = f"""
+    PIPELINE_DIR="{tmp_path}"
+    source "{LIB_SLUG_SH}"
+    session_dir_slug "$1"
+    """
+    result = subprocess.run(
+        ["bash", "-c", script, "bash", DEEP],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    out = result.stdout.rstrip("\n")
+    assert "WRONG" not in out, f"a non-base36 hash was appended verbatim: {out!r}"
+    assert len(out) > 200, "expected the untruncated fallback, not a bare truncation"
+
+
+def test_a_newline_in_the_path_still_becomes_a_dash():
+    """sed splits on newlines, so this has to be handled before it gets there."""
+    path = "/tmp/we\nird"
+    assert bash_slug(path) == js_slug(path)
+    assert py_slug(path) == js_slug(path)

@@ -27,6 +27,7 @@ import os
 import re
 import sys
 
+from .slug import session_dir_slug
 from .types import ExtractResult
 
 # Session directory computed from project root
@@ -37,11 +38,16 @@ _DEFAULT_PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(_SCRIPT_D
 def _session_dir(project_dir: str) -> str:
     """Convert a project directory path to its Claude sessions directory.
 
-    Replaces all non-alphanumeric characters with dashes, matching the
-    bash pattern: sed 's/[^a-zA-Z0-9]/-/g'. Handles Unix (/), Windows
-    backslashes (\\) and drive colons (D:).
+    The slug itself lives in pipeline/slug.py, which is also what the shell
+    side calls for the over-long-path hash. It used to be a plain
+    ``re.sub(r'[^a-zA-Z0-9]', '-', ...)`` here: Python strings are
+    codepoint-based while Claude Code's regex has no ``/u`` flag and walks
+    UTF-16 code units, so the two disagreed on astral characters — an emoji or
+    an Extension-B kanji in the path produced a directory Claude Code never
+    created, and nothing ever saved (#174). It also never truncated at 200
+    characters, so a deep enough project path missed too (#157).
     """
-    slug = re.sub(r'[^a-zA-Z0-9]', '-', project_dir)
+    slug = session_dir_slug(project_dir)
     # CLAUDE_CONFIG_DIR relocates Claude Code's whole config tree, projects/
     # included (#166). Hardcoding ~/.claude meant reading a directory with no
     # current transcripts — the save pipeline no-oped in silence, and a stale
