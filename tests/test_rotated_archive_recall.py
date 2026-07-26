@@ -206,3 +206,43 @@ def test_a_same_day_collision_does_not_invert_recency_at_the_cap(tmp_path):
     assert "archive-2026-07-01.md\n" not in out.replace(" (", "\n ("), (
         "the genuinely oldest slice should have been the one dropped"
     )
+
+
+def test_order_survives_a_git_restore_of_the_backed_up_store(tmp_path):
+    """Ordering must not depend on mtime, because a restore destroys it.
+
+    hooks.d/after_save/50-git-backup.sh commits the store to a remote, so
+    recovering it is a git clone — and git checkout writes files in
+    byte-lexicographic order, handing archive-DATE-2.md an EARLIER mtime than
+    archive-DATE.md. Ordering by mtime therefore inverts recency on every
+    restore, for every file, which is worse than the same-day-only bug it was
+    meant to fix. The name carries the truth; this pins that it is what is used.
+    """
+    import os
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=origin, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=origin, check=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=origin, check=True)
+    # The base file is that day's FIRST rotation; -2 came after it.
+    for name in ("archive-2026-07-01.md", "archive-2026-07-01-2.md"):
+        (origin / name).write_text("x\n", encoding="utf-8")
+    for day in range(2, 11):
+        (origin / f"archive-2026-07-{day:02d}.md").write_text("x\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=origin, check=True)
+    subprocess.run(["git", "commit", "-qm", "seed"], cwd=origin, check=True)
+
+    remember = tmp_path / "project" / ".remember"
+    remember.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "clone", "-q", str(origin), str(remember)], check=True)
+    (remember / "tmp").mkdir(exist_ok=True)
+    (remember / "logs").mkdir(exist_ok=True)
+
+    restored = sorted((remember / n).stat().st_mtime
+                      for n in ("archive-2026-07-01.md", "archive-2026-07-01-2.md"))
+    out = _run_session_start(tmp_path)
+
+    assert "archive-2026-07-01-2.md" in out, (
+        "the newer same-day sibling was dropped after a restore — ordering is "
+        f"following checkout mtimes, not the names (mtimes: {restored})"
+    )

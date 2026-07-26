@@ -186,15 +186,37 @@ if [ -n "$HAS_MEMORY" ]; then
         # which was the whole point of naming them.
         ROTATED_LIST_MAX=10
         ROTATED_COUNT=$(echo "$ROTATED_ARCHIVES" | wc -l | tr -d ' ')
-        # Pick the newest by MTIME, not by name. A second rotation on the same
-        # day is named archive-DATE-2.md, and '-' (0x2D) sorts before '.'
-        # (0x2E), so the later sibling sorts BEFORE the base file it followed.
-        # Lexicographic order stops meaning recency exactly inside a same-day
-        # cluster — which is where the cap decides what to drop, so the newer
-        # slice was the one getting summarised away. Display stays sorted by
-        # name, which reads chronologically and is stable.
-        ROTATED_NEWEST=$(ls -t "$REMEMBER_DIR"/archive-*.md 2>/dev/null \
-            | head -n "$ROTATED_LIST_MAX" | sort)
+        # Order by the date and rotation number IN THE NAME, parsed — not by
+        # raw name, and not by mtime.
+        #
+        # Raw name is wrong because a second rotation the same day is
+        # archive-DATE-2.md, and '-' (0x2D) sorts before '.' (0x2E), so the
+        # later sibling sorts ahead of the base file it followed.
+        #
+        # mtime looked like the fix and is worse: git checkout writes files in
+        # byte-lexicographic order, so cloning the git-backed store (which
+        # hooks.d/after_save/50-git-backup.sh exists to make possible) hands
+        # archive-DATE-2.md an EARLIER mtime than archive-DATE.md. That
+        # reintroduces the same inversion on every restore, for every file,
+        # instead of only inside a same-day cluster.
+        #
+        # The name carries the truth: the date, then the rotation number, with
+        # the un-suffixed file being that day's first. Zero-padding the number
+        # makes the composed key sort correctly as plain text.
+        ROTATED_NEWEST=$(echo "$ROTATED_ARCHIVES" | while read -r _archive; do
+            [ -n "$_archive" ] || continue
+            _core=${_archive##*/}
+            _core=${_core#archive-}
+            _core=${_core%.md}
+            # Leading '(' on each pattern: bash 3.2 (still what macOS ships)
+            # miscounts the parens of a case inside $( ) without it.
+            case "$_core" in
+                (*-*-*-*) _date=${_core%-*}; _seq=${_core##*-} ;;
+                (*)       _date=$_core;      _seq=1 ;;
+            esac
+            case "$_seq" in (''|*[!0-9]*) _seq=1 ;; esac
+            printf '%s-%010d\t%s\n' "$_date" "$_seq" "$_archive"
+        done | sort | tail -n "$ROTATED_LIST_MAX" | cut -f2-)
         echo "--- rotated archives (not shown; grep on request) ---"
         echo "$ROTATED_NEWEST" | while read -r _archive; do
             [ -f "$_archive" ] || continue
