@@ -18,6 +18,9 @@
     "recovery": true
   },
   "git_backup": {
+    "remote": "",
+    "branch": "",
+    "gpg_sign": false,
     "allow_remote_change": false
   },
   "debug": false,
@@ -29,6 +32,12 @@
   },
 
   "_comments": {
+    "debug": [
+      "Verbose logging for cooldowns and locks. Until #176 this key was read",
+      "nowhere — setting it did nothing. Now: REMEMBER_DEBUG wins if set, then",
+      "this, then each script's own default (save-session verbose, git-backup",
+      "quiet). Remove the key entirely to keep those defaults."
+    ],
     "haiku.oauth_token": [
       "OAuth token the plugin hands to the nested `claude -p` ONLY when the host",
       "did not put CLAUDE_CODE_OAUTH_TOKEN in the hook subprocess environment.",

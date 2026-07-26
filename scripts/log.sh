@@ -121,6 +121,33 @@ except Exception:
     [ -n "$val" ] && echo "$val" || echo "$default"
 }
 
+# Is verbose logging on? `debug` was documented in the README and shipped in
+# config.example.json but passed to config() NOWHERE, so setting it did nothing
+# (#176) — the same class as #159, where documented booleans could not be
+# switched off. The real switch was the REMEMBER_DEBUG env var, which a user
+# configuring the plugin through config.json has no obvious way to set.
+#
+# Precedence: the env var wins, then `debug` in config, then the caller's own
+# default. That last part matters: save-session.sh was verbose unless told
+# otherwise and 50-git-backup.sh was quiet unless told otherwise, and the README
+# documented only the first. Wiring one shared default would have silently
+# changed one of them for every existing install, so each keeps its own and the
+# option now overrides both — which is what setting it was supposed to do.
+#
+# Usage: debug_enabled <default 0|1> && log ...
+debug_enabled() {
+    local _default="${1:-0}"
+    if [ -n "${REMEMBER_DEBUG:-}" ]; then
+        [ "$REMEMBER_DEBUG" = "1" ]
+        return
+    fi
+    case "$(config '.debug' '')" in
+        true) return 0 ;;
+        false) return 1 ;;
+    esac
+    [ "$_default" = "1" ]
+}
+
 REMEMBER_TZ=$(config ".timezone" "")
 export REMEMBER_TZ
 

@@ -21,7 +21,10 @@
 #   --dry          Preview mode — show extracted exchanges, do not call Haiku
 #
 # ENVIRONMENT
-#   REMEMBER_DEBUG   Set to "1" for verbose logging (default: 1)
+#   REMEMBER_DEBUG   Set to "1"/"0" for verbose logging. Unset, the `debug`
+#                    config option decides; unset there too, this script is
+#                    verbose (its long-standing default) while the git-backup
+#                    hook is quiet.
 #
 # DEPENDENCIES
 #   python3, claude CLI (Haiku), git, date, mktemp
@@ -99,7 +102,7 @@ trap cleanup EXIT
 if lock_acquire "$LOCK_DIR" 0; then
     HAVE_LOCK=true
 else
-    [ "${REMEMBER_DEBUG:-1}" = "1" ] && log "lock" "another save holds the lock, skipping"
+    debug_enabled 1 && log "lock" "another save holds the lock, skipping"
     exit 0
 fi
 
@@ -134,7 +137,7 @@ if [ -f "$COOLDOWN_MARKER" ] && [ "$DRY_RUN" != true ] && [ "$FORCE" != true ]; 
     ELAPSED=$(( $(date +%s) - LAST_MOD ))
     SAVE_COOLDOWN=$(config ".cooldowns.save_seconds" 120)
     if [ "$ELAPSED" -lt "$SAVE_COOLDOWN" ]; then
-        [ "${REMEMBER_DEBUG:-1}" = "1" ] && log "cooldown" "${ELAPSED}s < ${SAVE_COOLDOWN}s, skip"
+        debug_enabled 1 && log "cooldown" "${ELAPSED}s < ${SAVE_COOLDOWN}s, skip"
         exit 0
     fi
 fi

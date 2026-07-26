@@ -76,7 +76,7 @@ _gb_common_dir() {
 PROJECT_COMMON_DIR=$(_gb_common_dir "$PROJECT_DIR") || PROJECT_COMMON_DIR=""
 BACKUP_COMMON_DIR=$(_gb_common_dir "$REPO_ROOT") || BACKUP_COMMON_DIR=""
 if [ -n "$PROJECT_COMMON_DIR" ] && [ "$PROJECT_COMMON_DIR" = "$BACKUP_COMMON_DIR" ]; then
-    [ "${REMEMBER_DEBUG:-0}" = "1" ] && \
+    debug_enabled 0 && \
         log "git-backup" "REPO_ROOT is the project repo (worktree/legacy), skip"
     exit 0
 fi
@@ -88,7 +88,7 @@ if [ -f "$COOLDOWN_MARKER" ]; then
     LAST_MOD=$(cat "$COOLDOWN_MARKER" 2>/dev/null || echo 0)
     ELAPSED=$(( $(date +%s) - LAST_MOD ))
     if [ "$ELAPSED" -lt "$BACKUP_COOLDOWN" ]; then
-        [ "${REMEMBER_DEBUG:-0}" = "1" ] && log "git-backup" "cooldown ${ELAPSED}s < ${BACKUP_COOLDOWN}s, skip"
+        debug_enabled 0 && log "git-backup" "cooldown ${ELAPSED}s < ${BACKUP_COOLDOWN}s, skip"
         exit 0
     fi
 fi
@@ -105,7 +105,7 @@ if command -v flock >/dev/null 2>&1; then
     # non-blocking.  If another instance holds it, exit silently.
     exec 9>"$LOCK_FILE"
     if ! flock -n 9; then
-        [ "${REMEMBER_DEBUG:-0}" = "1" ] && log "git-backup" "flock held by another instance, skip"
+        debug_enabled 0 && log "git-backup" "flock held by another instance, skip"
         exit 0
     fi
     # Lock is held on fd 9 for the lifetime of this process.
@@ -115,7 +115,7 @@ else
     if ! ( set -o noclobber; echo $$ > "$LOCK_FILE" ) 2>/dev/null; then
         LOCK_PID=$(cat "$LOCK_FILE" 2>/dev/null)
         if kill -0 "$LOCK_PID" 2>/dev/null; then
-            [ "${REMEMBER_DEBUG:-0}" = "1" ] && log "git-backup" "locked by PID $LOCK_PID, skip"
+            debug_enabled 0 && log "git-backup" "locked by PID $LOCK_PID, skip"
             exit 0
         fi
         log "git-backup" "stale lock (PID $LOCK_PID dead), taking over"
