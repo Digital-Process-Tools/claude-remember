@@ -427,6 +427,14 @@ if [ "$RUN_NDC" = true ]; then
                         # appended, not their own day, but a third stale one
                         # belonging to an earlier run. That is the #142-shaped
                         # window, and misfiling is exactly what it costs here.
+                        #
+                        # Still one stamp for the whole kept range. If two saves
+                        # land inside this window on opposite sides of midnight,
+                        # the earlier one is filed with the later one's day.
+                        # Splitting the range would need each entry to carry its
+                        # own day, which is the thing now.md does not have and
+                        # the reason this stamp exists — see #141 for the flush
+                        # design that would close it.
                         if [ "$NDC_KEPT" -gt 0 ]; then
                             printf '%s\n' "$(_remember_date +%Y-%m-%d)" > "$NOW_DAY_FILE" 2>/dev/null || true
                         else
