@@ -37,7 +37,8 @@ HOOK = REPO_ROOT / "scripts" / "post-tool-hook.sh"
 from pipeline.slug import session_dir_slug as _slug  # noqa: E402  (#177)
 
 
-def _run_post_tool(tmp_path: Path, *, cooldown_ts: Optional[int], jsonl_lines: int = 60):
+def _run_post_tool(tmp_path: Path, *, cooldown_ts: Optional[int], jsonl_lines: int = 60,
+                   write_config: bool = True):
     """Set up a project + session JSONL and run the post-tool hook once.
 
     Args:
@@ -68,10 +69,14 @@ def _run_post_tool(tmp_path: Path, *, cooldown_ts: Optional[int], jsonl_lines: i
                 for _ in range(jsonl_lines))
     )
 
-    # Say what this test depends on instead of inheriting it.
-    (remember / "config.json").write_text(
-        json.dumps({"thresholds": {"delta_lines_trigger": 50}}), encoding="utf-8"
-    )
+    # Say what this test depends on instead of inheriting it — except where the
+    # point IS the inheritance: with write_config=False the hook has to fall
+    # back to its own built-in default, which is the branch that stopped being
+    # exercised when this fixture started writing a config unconditionally.
+    if write_config:
+        (remember / "config.json").write_text(
+            json.dumps({"thresholds": {"delta_lines_trigger": 50}}), encoding="utf-8"
+        )
 
     if cooldown_ts is not None:
         (remember / "tmp" / "last-save-ts").write_text(str(cooldown_ts))
@@ -106,6 +111,38 @@ def _reap(remember: Path):
         except OSError:
             return
         time.sleep(0.1)
+
+
+def test_the_builtin_delta_default_applies_with_no_config(tmp_path):
+    """No config.json at all — the hook's own fallback has to decide.
+
+    Every other test here writes the threshold it depends on, which is right,
+    but it left nothing running the `config ".thresholds.delta_lines_trigger"
+    50` fallback. A transcript of 60 lines is over that default and one of 40
+    is under it, so the two cases together pin the number the hook ships with
+    rather than the number a fixture supplied.
+    """
+    proc, remember = _run_post_tool(
+        tmp_path, cooldown_ts=None, jsonl_lines=60, write_config=False
+    )
+    _reap(remember)
+    assert proc.returncode == 0
+    assert (remember / "tmp" / "save-session.pid").exists(), (
+        "60 lines is over the shipped delta default, but no save was forked"
+    )
+
+
+def test_the_builtin_delta_default_holds_a_small_delta_back(tmp_path):
+    """The other side of the same default: under it, nothing forks."""
+    proc, remember = _run_post_tool(
+        tmp_path, cooldown_ts=None, jsonl_lines=40, write_config=False
+    )
+    _reap(remember)
+    assert proc.returncode == 0
+    assert not (remember / "tmp" / "save-session.pid").exists(), (
+        "40 lines is under the shipped delta default, yet a save was forked — "
+        "the default has moved and nothing else would have said so"
+    )
 
 
 def test_fork_suppressed_during_cooldown(tmp_path):

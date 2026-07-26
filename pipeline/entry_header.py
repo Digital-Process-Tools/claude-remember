@@ -36,9 +36,20 @@ ENTRY_HEADER_ERE = rf"^## {TIME_ERE} \|"
 
 #: Any header the memory layer recognises — session entries plus the day and
 #: week headers consolidation writes.
-ANY_HEADER_ERE = rf"^## ({TIME_ERE}|Week of |[0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}})"
+#:
+#: A time still has to be followed by the pipe here. Accepting a bare `## 09:30`
+#: would mean prose that merely opens with a time reads as memory: widening this
+#: to 12-hour times made `## 9:00 AM standup notes` — an ordinary thing for a
+#: model to write in a refusal — look like consolidated output. Every real entry
+#: carries the identity field, because save-session.sh will not write one that
+#: does not.
+ANY_HEADER_ERE = rf"^## ({TIME_ERE} \||Week of |[0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}})"
 
-_ENTRY = re.compile(ENTRY_HEADER_ERE)
+#: MULTILINE on both: `grep` anchors `^` per line and always has, so a Python
+#: matcher without it disagrees with the shell the moment either is handed more
+#: than one line. One pattern read by two engines is only worth having if they
+#: answer the same question.
+_ENTRY = re.compile(ENTRY_HEADER_ERE, re.MULTILINE)
 _ANY = re.compile(ANY_HEADER_ERE, re.MULTILINE)
 
 

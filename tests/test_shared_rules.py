@@ -68,7 +68,13 @@ def test_python_rejects_everything_else(line):
 
 
 @posix_only
-@pytest.mark.parametrize("line", HEADERS_THAT_ARE_ENTRIES + HEADERS_THAT_ARE_NOT_ENTRIES)
+@pytest.mark.parametrize("line", HEADERS_THAT_ARE_ENTRIES + HEADERS_THAT_ARE_NOT_ENTRIES + [
+    # Multi-line: grep anchors ^ per line, so Python must too or the two
+    # disagree for any caller that passes more than one line.
+    "some prose\\n## 09:30 | main",
+    "## 09:30 | main\\ntrailing prose",
+    "no header\\nstill no header",
+])
 def test_grep_agrees_with_python(line):
     """The shell validates with `grep -E` against this same pattern.
 
@@ -100,6 +106,40 @@ def test_consolidation_recognises_a_twelve_hour_entry():
     # consolidation carrying only 12-hour entries used to be thrown away as
     # "purely conversational".
     assert _is_valid_consolidation(entry)
+
+
+def test_prose_that_merely_mentions_a_time_is_not_a_header():
+    """The cost of accepting 12-hour times, paid for deliberately.
+
+    `## 9:00 AM standup notes` is an ordinary line for a model to write in a
+    refusal, and accepting it as consolidated output would put chatter into
+    permanent memory. The identity pipe is what separates a real entry from a
+    heading that happens to start with a time — save-session.sh will not write
+    an entry without one.
+    """
+    from pipeline.consolidate import _is_valid_consolidation
+
+    refusal = "I cannot do this.\\n\\n## 9:00 AM standup notes\\n- a thing\\n"
+    assert not contains_header(refusal)
+    assert not _is_valid_consolidation(refusal)
+
+
+def test_the_shell_fallback_matches_the_source_of_truth():
+    """save-session.sh keeps a literal copy of the pattern as a fallback.
+
+    That is deliberate — a failed lookup must not leave `grep -E` matching an
+    empty pattern, which matches everything — but an unchecked literal copy is
+    the same drift this file exists to prevent, just one level down. If
+    TIME_ERE changes and the fallback does not, nothing else would notice.
+    """
+    text = SAVE_SH.read_text(encoding="utf-8")
+    m = re.search(r"ENTRY_HEADER_ERE='([^']+)'", text)
+    assert m, "the literal fallback in save-session.sh moved or changed shape"
+    assert m.group(1) == ENTRY_HEADER_ERE, (
+        "save-session.sh's fallback pattern has drifted from "
+        f"pipeline/entry_header.py:\\n  fallback: {m.group(1)}\\n  canonical: "
+        f"{ENTRY_HEADER_ERE}"
+    )
 
 
 def test_consolidation_still_recognises_day_and_week_headers():
