@@ -91,7 +91,8 @@ def _make_env(tmp_path: Path):
     (plugin / "pipeline" / "haiku.py").write_text("# marker\n")
     (plugin / "pipeline" / "shell.py").write_text(STUB_SHELL)
     for script in ("run-consolidation.sh", "resolve-paths.sh", "detect-tools.sh",
-                   "bootstrap-dirs.sh", "log.sh", "lib-memory-dir.sh"):
+                   "bootstrap-dirs.sh", "log.sh", "lib-memory-dir.sh",
+                   "lib-lock.sh"):
         (plugin / "scripts" / script).write_text((REPO_ROOT / "scripts" / script).read_text())
     (plugin / "config.json").write_text('{"cooldowns": {}, "thresholds": {}}')
 

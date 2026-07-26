@@ -58,9 +58,10 @@ source "$(dirname "$0")/resolve-paths.sh"
 source "$(dirname "$0")/detect-tools.sh"
 source "$(dirname "$0")/bootstrap-dirs.sh"
 source "$(dirname "$0")/log.sh"
+source "$(dirname "$0")/lib-lock.sh"
 log "hook" "save-session: PROJECT_DIR=$PROJECT_DIR PIPELINE_DIR=$PIPELINE_DIR PYTHON=$PYTHON REMEMBER_DIR=$REMEMBER_DIR"
 
-LOCK_FILE="${REMEMBER_DIR}/tmp/save.lock"
+LOCK_DIR="${REMEMBER_DIR}/tmp/save.lock"
 MEMORY_FILE="${REMEMBER_DIR}/now.md"
 # Which day now.md's contents belong to (#141) — see Step 7.
 NOW_DAY_FILE="${REMEMBER_DIR}/tmp/now-day"
@@ -72,34 +73,34 @@ CLEANUP_FILES=()
 # $REMEMBER_CONFIG (bash keeps a single EXIT trap), so remove it here too.
 CLEANUP_FILES+=("$REMEMBER_CONFIG")
 
-# HAVE_LOCK: only unlink LOCK_FILE if THIS process actually owns it (either
-# acquired it fresh below, or took over a stale one). The trap is installed
-# before acquisition — so it also fires on the "someone else holds it,
-# skipping" exit — and cleanup() used to unlink LOCK_FILE unconditionally.
+# HAVE_LOCK: only release LOCK_DIR if THIS process actually owns it. The trap
+# is installed before acquisition — so it also fires on the "someone else holds
+# it, skipping" exit — and cleanup() used to unlink the lock unconditionally.
 # That let a session which correctly skipped delete the *holder's* lock, so a
 # third process could then acquire while the first was still running: two
-# concurrent save-session.sh, two Haiku calls, two position writes.
+# concurrent save-session.sh, two Haiku calls, two position writes (#168).
 HAVE_LOCK=false
 
-# Remove lock file (only if we own it) and all accumulated temp files on exit.
+# Release the lock (only if we own it) and remove all temp files on exit.
 cleanup() {
-    [ "$HAVE_LOCK" = true ] && rm -f "$LOCK_FILE"
+    # `|| true`: lock_release legitimately returns 1 (it refuses to release a
+    # lock it does not own), and under `set -e` a bare failing command aborts
+    # the trap — so the `rm -f` below would never run and the script's exit
+    # status would be silently rewritten to 1.
+    [ "$HAVE_LOCK" = true ] && { lock_release "$LOCK_DIR" || true; }
     rm -f "${CLEANUP_FILES[@]}"
 }
 trap cleanup EXIT
 
-# --- Lock (atomic via noclobber) ---
-if ! ( set -o noclobber; echo $$ > "$LOCK_FILE" ) 2>/dev/null; then
-    LOCK_PID=$(cat "$LOCK_FILE" 2>/dev/null)
-    if kill -0 "$LOCK_PID" 2>/dev/null; then
-        [ "${REMEMBER_DEBUG:-1}" = "1" ] && log "lock" "locked by PID $LOCK_PID, skipping"
-        exit 0
-    fi
-    log "lock" "stale lock (PID $LOCK_PID dead), taking over"
-    echo $$ > "$LOCK_FILE"
+# --- Lock (mkdir acquisition, rename-based stale takeover — see lib-lock.sh) ---
+# Timeout 0: a save that loses the race skips rather than queues. Two saves of
+# the same session back to back have nothing to add to each other, and the next
+# tool call brings another one along in seconds.
+if lock_acquire "$LOCK_DIR" 0; then
     HAVE_LOCK=true
 else
-    HAVE_LOCK=true
+    [ "${REMEMBER_DEBUG:-1}" = "1" ] && log "lock" "another save holds the lock, skipping"
+    exit 0
 fi
 
 # --- Parse args ---

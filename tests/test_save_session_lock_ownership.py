@@ -88,7 +88,8 @@ def _make_env(tmp_path: Path, name: str, extract_sleep: float = 0.0):
     (plugin / "pipeline" / "haiku.py").write_text("# marker\n")
     (plugin / "pipeline" / "shell.py").write_text(STUB_SHELL)
     for script in ("save-session.sh", "resolve-paths.sh", "detect-tools.sh",
-                   "bootstrap-dirs.sh", "log.sh", "lib-memory-dir.sh"):
+                   "bootstrap-dirs.sh", "log.sh", "lib-memory-dir.sh",
+                   "lib-lock.sh"):
         (plugin / "scripts" / script).write_text((REPO_ROOT / "scripts" / script).read_text())
 
     cfg = {"cooldowns": {"save_seconds": 0, "ndc_seconds": 999999},
@@ -123,7 +124,9 @@ class TestLockOwnership:
         """Three real processes: P1 holds the lock and is still running when
         P2 skips and exits; P3 must NOT be able to acquire while P1 is alive."""
         env1, project, plugin, calls1, sid = _make_env(tmp_path, "p1", extract_sleep=3.0)
-        lock_file = project / ".remember" / "tmp" / "save.lock"
+        # Since #182 the lock is a DIRECTORY whose `pid` file names the holder.
+        lock_dir = project / ".remember" / "tmp" / "save.lock"
+        lock_file = lock_dir / "pid"
 
         p1 = subprocess.Popen(
             ["bash", str(plugin / "scripts" / "save-session.sh"), sid],
@@ -151,8 +154,8 @@ class TestLockOwnership:
 
         # THE ASSERTION: P1's lock file must still exist and still name P1,
         # even though P2 has fully exited via the skip path.
-        assert lock_file.exists(), (
-            "P2's skip-path cleanup deleted the lock file entirely — "
+        assert lock_dir.is_dir() and lock_file.exists(), (
+            "P2's skip-path cleanup deleted the lock entirely — "
             "P1 is still running and now unprotected"
         )
         assert lock_file.read_text().strip() == p1_holder_pid, (
