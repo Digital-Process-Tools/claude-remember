@@ -327,6 +327,25 @@ fi
 
 # --- Step 6: Handle SKIP ---
 if [ "$IS_SKIP" = "true" ]; then
+    # A model SKIP and a reject-gate match both stay out of memory, but they are
+    # not the same event. SKIP means the span held nothing worth recording; a
+    # rejection means a span of real work was discarded because the reply came
+    # back as a refusal or a clarifying question. Reported identically, the
+    # second is invisible: the log reads like a quiet session, memory simply
+    # stops growing, and max_summary_failures never notices because that counts
+    # hard errors and this call succeeded.
+    if [ "${IS_REJECTED:-false}" = "true" ]; then
+        REJECT_FILE="${REMEMBER_DIR}/tmp/rejected-$(_remember_date +%Y%m%d-%H%M%S).md"
+        mkdir -p "${REMEMBER_DIR}/tmp" 2>/dev/null
+        cp "$HAIKU_TEXT_FILE" "$REJECT_FILE" 2>/dev/null
+        log "haiku" "REJECTED (not a summary — refusal or clarification): $(head -c 80 "$HAIKU_TEXT_FILE" 2>/dev/null)"
+        log "haiku" "rejected text kept at $REJECT_FILE"
+        # Keep the last 20; diagnostic, not memory. Same bound as the format
+        # validator's rejects.
+        ls -t "${REMEMBER_DIR}"/tmp/rejected-*.md 2>/dev/null | tail -n +21 | while read -r _old; do
+            rm -f "$_old"
+        done
+    fi
     log "haiku" "SKIP — position → $POSITION"
     cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell save-position "$LAST_SAVE_FILE" "$SESSION_ID" "$POSITION"
     # A SKIP is a successful summarization (the model judged the span not worth

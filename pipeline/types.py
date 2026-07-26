@@ -54,12 +54,19 @@ class HaikuResult:
         text: The model's text response (may be empty on error).
         tokens: Token usage and cost for this call.
         is_skip: True if the response starts with "SKIP", indicating
-            the model determined there was nothing worth summarizing.
+            the model determined there was nothing worth summarizing, or if
+            the reject gate matched a refusal-shaped reply.
+        is_rejected: True only for the second case. Both are kept out of
+            memory, but a rejection discards a span of real work, and the
+            caller has to be able to say so — reported as a plain SKIP it is
+            indistinguishable from a genuinely empty session, and it slips
+            past max_summary_failures too, which only counts hard errors.
     """
 
     text: str = ""
     tokens: TokenUsage = field(default_factory=TokenUsage)
     is_skip: bool = False
+    is_rejected: bool = False
 
 
 @dataclass

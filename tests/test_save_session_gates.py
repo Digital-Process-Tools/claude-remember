@@ -84,9 +84,11 @@ elif cmd == "call-haiku":
             f.write("SKIP\\n")
         else:
             f.write("## 10:00 | main\\n\\n- did some work\\n")
+    rejected = os.environ.get("STUB_HAIKU_REJECTED") == "1" and not is_ndc
     skipping = (os.environ.get("STUB_HAIKU_SKIP", "1") == "1"
                 and not os.environ.get("STUB_HAIKU_TEXT"))
-    print("IS_SKIP=" + ("false" if (is_ndc or not skipping) else "true"))
+    print("IS_SKIP=" + ("true" if (rejected or (not is_ndc and skipping)) else "false"))
+    print("IS_REJECTED=" + ("true" if rejected else "false"))
     print(f"HAIKU_TEXT_FILE={path}")
     print("TK_IN=0"); print("TK_OUT=0"); print("TK_CACHE=0"); print("TK_COST=0")
 elif cmd == "build-ndc-prompt":

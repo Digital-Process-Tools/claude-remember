@@ -325,9 +325,11 @@ def _parse_response(raw: str) -> HaikuResult:
 
     # Drop SKIP (model found nothing worth saving) AND refusals/clarifications
     # (the reject-gate) so neither is ever written to the memory layer.
-    is_skip = text.strip().upper().startswith("SKIP") or _is_non_summary(text)
+    model_skipped = text.strip().upper().startswith("SKIP")
+    rejected = not model_skipped and _is_non_summary(text)
 
-    return HaikuResult(text=text, tokens=tokens, is_skip=is_skip)
+    return HaikuResult(text=text, tokens=tokens,
+                       is_skip=model_skipped or rejected, is_rejected=rejected)
 
 
 def _extract_tokens(data: dict) -> TokenUsage:

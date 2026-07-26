@@ -337,9 +337,16 @@ def test_cmd_consolidate_with_staging_files(capsys):
         staging_paths_file = paths.get("STAGING_PATHS_FILE")
         assert staging_paths_file and os.path.exists(staging_paths_file)
         raw = open(staging_paths_file, "rb").read()
-        paths_from_file = [p.decode() for p in raw.split(b"\x00") if p]
+        # Records are path\0consumed_bytes\0 — the byte count is what lets the
+        # rename step keep anything appended while Haiku was running (#142's
+        # shape, for staging files).
+        fields = [p.decode() for p in raw.split(b"\x00") if p]
+        paths_from_file, counts = fields[0::2], fields[1::2]
         assert len(paths_from_file) == 1
         assert paths_from_file[0].endswith("today-2020-01-01.md")
+        assert counts[0].isdigit() and int(counts[0]) > 0, (
+            f"no consumed-byte count recorded: {counts!r}"
+        )
 
         # Cleanup temp files printed in output
         for key, path in paths.items():
@@ -493,8 +500,10 @@ def test_cmd_consolidate_staging_paths_file_handles_special_chars(capsys):
         assert staging_paths_file and os.path.exists(staging_paths_file)
 
         raw = open(staging_paths_file, "rb").read()
-        decoded_paths = [p.decode() for p in raw.split(b"\x00") if p]
+        fields = [p.decode() for p in raw.split(b"\x00") if p]
+        decoded_paths, counts = fields[0::2], fields[1::2]
         assert len(decoded_paths) == 3
+        assert all(c.isdigit() for c in counts), f"missing byte counts: {counts!r}"
 
         basenames = sorted(os.path.basename(p) for p in decoded_paths)
         assert basenames == sorted(tricky_names)

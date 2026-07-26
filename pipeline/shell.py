@@ -201,6 +201,7 @@ def _emit_haiku_result(r, output_file: str = "") -> None:
 
     print(f"HAIKU_TEXT_FILE={_shell_escape(text_file)}")
     print(f"IS_SKIP={'true' if r.is_skip else 'false'}")
+    print(f"IS_REJECTED={'true' if r.is_rejected else 'false'}")
     print(f"TK_IN={r.tokens.input}")
     print(f"TK_OUT={r.tokens.output}")
     print(f"TK_CACHE={r.tokens.cache}")
@@ -425,12 +426,20 @@ def cmd_consolidate(staging_dir: str, recent_file: str, archive_file: str,
     # can read them safely regardless of single quotes, spaces, or other
     # metacharacters in the filename.  Shell reads with:
     #   while IFS= read -r -d '' path; do ...; done < "$STAGING_PATHS_FILE"
+    # Each record is path\0consumed_bytes\0. The byte count is what was actually
+    # read into this prompt: run-consolidation.sh renames the file afterwards,
+    # and a save can land in between — the Haiku call above has a 180s budget
+    # and consolidation runs disowned alongside any live session. Renaming
+    # blindly sealed those newer bytes inside the .done.md, which nothing globs
+    # again and session start never injects: written to disk, then unreachable.
+    # Same shape as #142, which fixed it for now.md and not for staging.
     fd_s, staging_paths_file = tempfile.mkstemp(prefix="remember-staging-paths-", suffix=".bin")
     with os.fdopen(fd_s, "wb") as f:
-        for name in staging_contents:
+        for name, content in staging_contents.items():
             # surrogatepass: os.listdir() surrogate-escapes undecodable filename
             # bytes on Windows; round-trip them so the shell gets the real path.
             f.write(os.path.join(staging_dir, name).encode("utf-8", "surrogatepass") + b"\x00")
+            f.write(str(len(content.encode("utf-8"))).encode("ascii") + b"\x00")
 
     print(f"STAGING_COUNT={len(staging_contents)}")
     print("CONSOLIDATION_STATUS=ok")

@@ -101,11 +101,32 @@ log_tokens "consolidation" "$TK_IN" "$TK_OUT" "$TK_CACHE" "$TK_COST"
 
 # --- Rename processed staging files → .done.md ---
 # Paths are NUL-separated in STAGING_PATHS_FILE, safe for any filename.
-while IFS= read -r -d '' staging_path; do
-    if [ -f "$staging_path" ]; then
-        mv "$staging_path" "${staging_path%.md}.done.md"
-    else
+# Records are path\0consumed_bytes\0. Retire exactly the span that was
+# consolidated and keep anything appended past it — a save can land while the
+# Haiku call runs (180s budget, and this script is disowned so it runs
+# alongside live sessions). A blind rename sealed those bytes inside the
+# .done.md, which the next run's glob skips and session start never injects.
+while IFS= read -r -d '' staging_path && IFS= read -r -d '' staging_consumed; do
+    if [ ! -f "$staging_path" ]; then
         log "consolidation" "WARN: $(basename "$staging_path") disappeared"
+        continue
+    fi
+    case "$staging_consumed" in (''|*[!0-9]*) staging_consumed=0 ;; esac
+    staging_now=$(wc -c < "$staging_path" | tr -d ' ')
+    staging_done="${staging_path%.md}.done.md"
+
+    if [ "$staging_consumed" -gt 0 ] && [ "$staging_now" -gt "$staging_consumed" ]; then
+        staging_tail=$(mktemp "${TMPDIR:-/tmp}"/remember-staging-tail-XXXXXX)
+        if head -c "$staging_consumed" "$staging_path" > "$staging_done" 2>/dev/null &&
+           tail -c +$(( staging_consumed + 1 )) "$staging_path" > "$staging_tail" 2>/dev/null; then
+            mv "$staging_tail" "$staging_path"
+            log "consolidation" "kept $(( staging_now - staging_consumed ))b appended to $(basename "$staging_path") during consolidation"
+        else
+            rm -f "$staging_tail"
+            mv "$staging_path" "$staging_done"
+        fi
+    else
+        mv "$staging_path" "$staging_done"
     fi
 done < "$STAGING_PATHS_FILE"
 rm -f "$STAGING_PATHS_FILE"
