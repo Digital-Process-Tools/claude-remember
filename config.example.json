@@ -36,7 +36,9 @@
       "summarization call is unauthenticated and nothing ever saves (#129/#131).",
       "Create one with `claude setup-token`. The plugin holds this credential and",
       "passes it to the CLI — set it deliberately. A host-provided token always",
-      "wins; the REMEMBER_OAUTH_TOKEN env var overrides this. Blank = disabled."
+      "wins; the REMEMBER_OAUTH_TOKEN env var overrides this. Blank = disabled.",
+      "A malformed value (whitespace, under 20 chars, not a string) is refused",
+      "and reported in the daily log — it is never passed to the CLI."
     ],
     "consolidate_max_bytes": [
       "Skip-guard cap (UTF-8 bytes) on the assembled consolidation prompt",

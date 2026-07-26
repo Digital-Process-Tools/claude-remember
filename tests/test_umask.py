@@ -190,3 +190,39 @@ class TestTempFilePermissions:
             f"Temp file created via mktemp has mode {mode_str!r}, expected 600. "
             "Temp files in $TMPDIR must not be world/group readable."
         )
+
+
+class TestMergedConfigPermissions:
+    """The merged REMEMBER_CONFIG can carry a live OAuth credential."""
+
+    def test_merged_config_is_600_without_a_caller_umask(self, tmp_path):
+        """lib-memory-dir.sh must make the merged config private itself.
+
+        Every entry point sources resolve-paths.sh (umask 077) first, so this is
+        belt-and-braces there — but the file documents itself as sourceable on
+        its own, and `haiku.oauth_token` merges into this temp file. Its mode
+        must not depend on the caller having set a umask.
+        """
+        project = tmp_path / "proj"
+        project.mkdir()
+        home = tmp_path / "home"
+        (home / ".remember").mkdir(parents=True)
+        (home / ".remember" / "config.json").write_text(
+            '{"haiku": {"oauth_token": "sk-ant-oat-secret-value-000001"}}',
+            encoding="utf-8",
+        )
+        script = f"""
+        umask 022
+        export PROJECT_DIR={project}
+        export CLAUDE_PROJECT_DIR={project}
+        export HOME={home}
+        export PIPELINE_DIR={REPO_ROOT / "pipeline"}
+        source {REPO_ROOT / "scripts" / "lib-memory-dir.sh"}
+        stat -c '%a' "$REMEMBER_CONFIG" 2>/dev/null || stat -f '%Lp' "$REMEMBER_CONFIG"
+        """
+        result = _run(script)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip().splitlines()[-1] == "600", (
+            "the merged config holds an OAuth token and must never be "
+            f"group/world readable, got mode {result.stdout.strip()!r}"
+        )
