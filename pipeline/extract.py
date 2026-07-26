@@ -45,7 +45,15 @@ def _session_dir(project_dir: str) -> str:
     # Honor HOME explicitly so test fixtures patching only HOME also work on Windows
     # (where os.path.expanduser defaults to USERPROFILE, ignoring HOME).
     home = os.environ.get("HOME") or os.path.expanduser("~")
-    return home + "/.claude/projects/" + slug
+    # Claude Code honors CLAUDE_CONFIG_DIR to relocate its whole config root
+    # (e.g. a second account on one machine: CLAUDE_CONFIG_DIR=~/.claude-max)
+    # — sessions then live under "$CLAUDE_CONFIG_DIR/projects/", not
+    # "~/.claude/projects/". An unset *or empty* value must fall back to the
+    # default; "or" (not a bare os.environ["..."] lookup) covers both, unlike
+    # a naive os.environ.get(...) + "/projects" which would yield a path
+    # starting "/projects" for CLAUDE_CONFIG_DIR="".
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR") or (home + "/.claude")
+    return config_dir + "/projects/" + slug
 
 
 def _is_line_number(value: object) -> bool:
