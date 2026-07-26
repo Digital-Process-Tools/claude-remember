@@ -25,10 +25,23 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+def _ambient_env() -> dict[str, str]:
+    """os.environ minus every GIT_* var.
+
+    conftest's _sanitize_ambient_git_env strips those per test, but the dicts
+    below are built at import time — before any fixture runs — so a GIT_DIR
+    leaked into the launching shell would be baked in and handed to every
+    subprocess these constants feed. Harmless while pipeline.shell never shells
+    out to git; a silent reopening of the bug the moment it does. Filter on the
+    prefix rather than restating conftest's list, so the two cannot drift.
+    """
+    return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+
 # A non-UTF-8 locale that survives PEP 538 C-locale coercion — makes Python's
 # stdin/subprocess codec ascii+surrogateescape on any OS, mimicking cp1252.
 FORCED_NON_UTF8_ENV = {
-    **os.environ,
+    **_ambient_env(),
     "PYTHONUTF8": "0",
     "PYTHONCOERCECLOCALE": "0",
     "LC_ALL": "C",
@@ -357,7 +370,7 @@ def test_consolidate_staging_consumed_bytes_match_real_file_size(tmp_path, capsy
 # what Windows does: there the filesystem is UTF-8 (PEP 529) and only the
 # console codec is wrong. So keep the locale alone and force just the io codec
 # to a real ANSI codepage, which is exactly the shape #145 reported.
-ANSI_STDOUT_ENV = {**os.environ, "PYTHONIOENCODING": "cp1252"}
+ANSI_STDOUT_ENV = {**_ambient_env(), "PYTHONIOENCODING": "cp1252"}
 ANSI_STDOUT_ENV.pop("PYTHONUTF8", None)
 
 
