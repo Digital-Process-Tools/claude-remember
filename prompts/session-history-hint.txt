@@ -1,2 +1,2 @@
 === REMEMBER ===
-History in .remember/: now.md (buffer), today-*.md (daily), recent.md (7d), archive.md (old), core-memories.md (key moments). Search on user request.
+History in .remember/: now.md (buffer), today-*.md (daily), recent.md (7d), archive.md (old), archive-YYYY-MM-DD.md (rotated archives, older still), core-memories.md (key moments). Search on user request — the rotated archives are NOT injected below, grep them when a question reaches past what is.

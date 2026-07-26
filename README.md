@@ -90,6 +90,7 @@ On session start, the `SessionStart` hook automatically injects into Claude's co
 - `today-*.md` — today's compressed history
 - `recent.md` — last 7 days
 - `archive.md` — older history
+- `archive-YYYY-MM-DD.md` — rotated slices of a previously oversized archive; named at session start and searchable, but not injected into context
 
 No manual prompting, no "read this file" instructions. The agent begins every session with its memory already loaded. It just remembers.
 
@@ -188,6 +189,7 @@ The pipeline writes to `REMEMBER_DIR` (created automatically). By default this i
 | `today-*.md`                   | Daily compressed summaries                        |
 | `recent.md`                    | Last 7 days consolidated                          |
 | `archive.md`                   | Older history consolidated                        |
+| `archive-YYYY-MM-DD.md`        | Rotated archive slices — searchable, not auto-loaded |
 | `remember.md`                  | Handoff note written by `/remember`               |
 | `logs/`                        | Pipeline logs                                     |
 | `tmp/`                         | Lock files, cooldown markers                      |

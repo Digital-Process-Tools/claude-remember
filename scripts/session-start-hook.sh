@@ -161,6 +161,25 @@ if [ -n "$HAS_MEMORY" ]; then
             echo ""
         fi
     done
+    # ── Rotated archives: named, not injected (#124) ──────────────────────
+    # An oversized archive.md is rotated to archive-YYYY-MM-DD.md and a fresh
+    # one started (#123). The bytes are kept, but nothing in the read path
+    # ever named them, so that slice of memory sat in cold storage no recall
+    # reached — "no memory lost" was true mechanically and false in practice.
+    #
+    # Named rather than cat'd on purpose: these files were rotated BECAUSE
+    # they were too large to fit a prompt, so injecting them would rebuild
+    # the problem rotation exists to solve. The agent greps them when a
+    # question reaches past what is in context.
+    ROTATED_ARCHIVES=$(ls "$REMEMBER_DIR"/archive-*.md 2>/dev/null | sort)
+    if [ -n "$ROTATED_ARCHIVES" ]; then
+        echo "--- rotated archives (not shown; grep on request) ---"
+        echo "$ROTATED_ARCHIVES" | while read -r _archive; do
+            [ -f "$_archive" ] || continue
+            printf '%s (%s bytes)\n' "$_archive" "$(wc -c < "$_archive" | tr -d ' ')"
+        done
+        echo ""
+    fi
     echo ""
 fi
 

@@ -1,0 +1,133 @@
+"""Rotated archive slices must be reachable by recall (issue #124).
+
+When archive.md is the oversized bulk of a consolidation prompt, #123 rotates
+it to archive-YYYY-MM-DD.md and starts a fresh one. The bytes survive on disk —
+but nothing in the read path ever named those siblings, so that slice sat in
+cold storage no recall reached. "No memory lost" was true mechanically and
+false in practice, and repeated rotations accumulate more of it.
+
+They are NAMED at session start, not injected. These files were rotated
+precisely because they were too large to fit in a prompt; pasting them back
+into every session would rebuild the problem rotation exists to solve. The
+session-history hint tells the agent they are greppable.
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="bash subprocess + POSIX layout — not portable to Windows runners (#79)",
+)
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+HOOK = REPO_ROOT / "scripts" / "session-start-hook.sh"
+
+
+def _run_session_start(tmp_path: Path) -> str:
+    """Run the session-start hook against a project and return its stdout."""
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    remember = project / ".remember"
+    (remember / "tmp").mkdir(parents=True, exist_ok=True)
+    (remember / "logs").mkdir(parents=True, exist_ok=True)
+    home.mkdir(exist_ok=True)
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "CLAUDE_PROJECT_DIR": str(project),
+        "CLAUDE_PLUGIN_ROOT": str(REPO_ROOT),
+        "REMEMBER_DIR": str(remember),
+        "_LIB_MEMORY_DIR_LOADED": "1",
+    }
+    result = subprocess.run(["bash", str(HOOK)], env=env, capture_output=True,
+                            text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    return result.stdout
+
+
+def _seed(tmp_path: Path) -> Path:
+    remember = tmp_path / "project" / ".remember"
+    (remember / "tmp").mkdir(parents=True, exist_ok=True)
+    (remember / "logs").mkdir(parents=True, exist_ok=True)
+    (remember / "archive.md").write_text("# Archive\n\ncurrent slice\n", encoding="utf-8")
+    return remember
+
+
+def test_rotated_archives_are_named_at_session_start(tmp_path):
+    """The acceptance criterion: a rotated slice is reachable, not invisible."""
+    remember = _seed(tmp_path)
+    (remember / "archive-2026-06-29.md").write_text(
+        "# Archive\n\n## Week of 2026-06-22\nthe thing that only lives here\n",
+        encoding="utf-8")
+
+    out = _run_session_start(tmp_path)
+
+    assert "archive-2026-06-29.md" in out, (
+        "the rotated slice is not named anywhere in the session surface, so no "
+        "recall can reach it (#124)"
+    )
+
+
+def test_rotated_archives_are_not_pasted_into_context(tmp_path):
+    """Naming them is the point; injecting them would undo #123.
+
+    They were rotated because the archive was too large for a prompt.
+    """
+    remember = _seed(tmp_path)
+    (remember / "archive-2026-06-29.md").write_text(
+        "# Archive\n\nSENTINEL-ROTATED-CONTENT\n", encoding="utf-8")
+
+    out = _run_session_start(tmp_path)
+
+    assert "SENTINEL-ROTATED-CONTENT" not in out, (
+        "rotated archive contents were injected — that rebuilds the oversized "
+        "prompt rotation exists to avoid"
+    )
+
+
+def test_several_rotations_are_all_listed_in_order(tmp_path):
+    """Repeated rotations accumulate; every slice stays reachable."""
+    remember = _seed(tmp_path)
+    for day in ("2026-04-01", "2026-05-15", "2026-06-29"):
+        (remember / f"archive-{day}.md").write_text(f"# Archive\n\n{day}\n", encoding="utf-8")
+
+    out = _run_session_start(tmp_path)
+
+    listed = [line for line in out.splitlines() if "archive-2026-" in line]
+    assert len(listed) == 3, f"expected all three slices named, got: {listed}"
+    assert listed == sorted(listed), f"not in chronological order: {listed}"
+
+
+def test_the_current_archive_is_still_injected(tmp_path):
+    """Only the rotated siblings are held back — archive.md still loads."""
+    remember = _seed(tmp_path)
+    (remember / "archive.md").write_text("# Archive\n\nSENTINEL-CURRENT\n", encoding="utf-8")
+
+    out = _run_session_start(tmp_path)
+
+    assert "SENTINEL-CURRENT" in out, "the live archive stopped being injected"
+
+
+def test_nothing_is_announced_when_no_rotation_has_happened(tmp_path):
+    """The common case must stay silent — no empty section, no noise."""
+    _seed(tmp_path)
+
+    out = _run_session_start(tmp_path)
+
+    # Match the section header, not the phrase: the history hint mentions
+    # rotated archives too, and asserting on that made this pass for the wrong
+    # reason regardless of what the hook emitted.
+    assert "--- rotated archives" not in out, f"announced an empty rotation set:\n{out}"
+
+
+def test_the_history_hint_names_the_rotated_pattern():
+    """Recall is the agent grepping what the hint names."""
+    hint = (REPO_ROOT / "prompts" / "session-history-hint.txt").read_text()
+    assert "archive-YYYY-MM-DD.md" in hint, "the hint does not mention rotated archives"
