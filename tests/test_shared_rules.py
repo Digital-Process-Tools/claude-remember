@@ -6,7 +6,9 @@ copies agreed on the day they were written and the disagreement surfaced as
 memory that silently stopped saving.
 
 None of the remaining copies disagreed when #177 was filed — that is the point.
-These tests fail when a second definition appears, not after it has drifted.
+These tests aim to fail when a second definition appears rather than after it
+has drifted; where a check can only recognise the copy-paste form of that, its
+docstring says so.
 """
 
 from __future__ import annotations
@@ -167,6 +169,12 @@ def test_no_test_file_reimplements_the_slug():
 
     They agreed only because no fixture used a non-ASCII or over-200-character
     path — the same "true today" that let the shipped copies drift.
+
+    This catches the literal `re.sub(r"[^a-zA-Z0-9]", ...)` copy-paste, which is
+    the form every historical duplicate took. It does NOT catch a hand-rolled
+    equivalent — a loop over `isalnum()`, a reordered character class, a
+    `str.translate` table — so it is a tripwire on the known path, not a proof
+    that no second definition exists.
     """
     offenders = []
     for path in (REPO_ROOT / "tests").glob("test_*.py"):
