@@ -90,13 +90,48 @@ trap cleanup EXIT
 
 # --- Lock (atomic via noclobber) ---
 if ! ( set -o noclobber; echo $$ > "$LOCK_FILE" ) 2>/dev/null; then
-    LOCK_PID=$(cat "$LOCK_FILE" 2>/dev/null)
+    # `|| true` is load-bearing under set -e. This is a plain top-level
+    # assignment, so its exit status is cat's, and the lock file can be gone by
+    # the time we read it — the holder finished and cleaned up, or another
+    # taker-over unlinked it in the takeover branch below. Without the guard
+    # the ERR trap fires and the script exits 1 ("FAILED at line ...") where it
+    # should simply skip this cycle with 0. An empty LOCK_PID then fails the
+    # kill -0 test and falls through to takeover, which is the right reading of
+    # a lock file that no longer exists.
+    LOCK_PID=$(cat "$LOCK_FILE" 2>/dev/null) || true
     if kill -0 "$LOCK_PID" 2>/dev/null; then
         [ "${REMEMBER_DEBUG:-1}" = "1" ] && log "lock" "locked by PID $LOCK_PID, skipping"
         exit 0
     fi
-    log "lock" "stale lock (PID $LOCK_PID dead), taking over"
-    echo $$ > "$LOCK_FILE"
+    # `echo $$ > "$LOCK_FILE"` is a plain overwrite with no compare-and-swap,
+    # so two processes that both observe the same dead PID both "take over"
+    # and both set HAVE_LOCK — the concurrency #168 closed on the acquisition
+    # path, still open on this one. Two saves, two Haiku calls, two position
+    # writes. Reproduced with two real processes against a pre-seeded dead-PID
+    # lock in 4 of 5 runs.
+    #
+    # Unlink, then re-create under noclobber so only one contender can make the
+    # file; the loser skips this cycle. That still leaves the window where a
+    # second taker-over unlinks the lock we just created, so re-read it and
+    # stand down unless it holds our PID. Whoever writes last wins and everyone
+    # else exits, which is the property that matters — never two holders.
+    #
+    # Not a true CAS: between our verify and our first real work another
+    # takeover could still clobber the file. That window is microseconds wide
+    # and confined to this branch (a live lock is handled above), where the
+    # alternative today is losing every save. Closing it properly means a lock
+    # representation with atomic create semantics — mkdir, or an O_EXCL
+    # sentinel — which is a larger change than this fix.
+    rm -f "$LOCK_FILE"
+    if ! ( set -o noclobber; echo $$ > "$LOCK_FILE" ) 2>/dev/null; then
+        [ "${REMEMBER_DEBUG:-1}" = "1" ] && log "lock" "stale lock claimed by another process, skipping"
+        exit 0
+    fi
+    if [ "$(cat "$LOCK_FILE" 2>/dev/null)" != "$$" ]; then
+        [ "${REMEMBER_DEBUG:-1}" = "1" ] && log "lock" "lost the stale-lock race, skipping"
+        exit 0
+    fi
+    log "lock" "stale lock (PID $LOCK_PID dead), taken over"
     HAVE_LOCK=true
 else
     HAVE_LOCK=true
