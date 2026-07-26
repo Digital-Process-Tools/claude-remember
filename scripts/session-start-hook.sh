@@ -150,6 +150,14 @@ for MFILE in "$IDENTITY_FILE" "$CORE_MEMORIES" "$REMEMBER_TODAY_FILE" "$REMEMBER
         HAS_MEMORY="true"
     fi
 done
+# Rotated slices are memory too. A store can hold nothing but them — rotate an
+# oversized archive and the fresh archive.md stays empty until the next
+# consolidation — and gating on the list above meant the whole section was
+# skipped, so the one state issue #124 is written to fix printed nothing at all.
+ROTATED_ARCHIVES=$(ls "$REMEMBER_DIR"/archive-*.md 2>/dev/null | sort)
+if [ -n "$ROTATED_ARCHIVES" ]; then
+    HAS_MEMORY="true"
+fi
 
 if [ -n "$HAS_MEMORY" ]; then
     echo "=== MEMORY ==="
@@ -171,13 +179,22 @@ if [ -n "$HAS_MEMORY" ]; then
     # they were too large to fit a prompt, so injecting them would rebuild
     # the problem rotation exists to solve. The agent greps them when a
     # question reaches past what is in context.
-    ROTATED_ARCHIVES=$(ls "$REMEMBER_DIR"/archive-*.md 2>/dev/null | sort)
     if [ -n "$ROTATED_ARCHIVES" ]; then
+        # Newest ROTATED_LIST_MAX by date, because rotations accumulate for the
+        # life of a store and this prints on every single session start. The
+        # glob is given for the rest so nothing becomes unreachable again —
+        # which was the whole point of naming them.
+        ROTATED_LIST_MAX=10
+        ROTATED_COUNT=$(echo "$ROTATED_ARCHIVES" | wc -l | tr -d ' ')
         echo "--- rotated archives (not shown; grep on request) ---"
-        echo "$ROTATED_ARCHIVES" | while read -r _archive; do
+        echo "$ROTATED_ARCHIVES" | tail -n "$ROTATED_LIST_MAX" | while read -r _archive; do
             [ -f "$_archive" ] || continue
             printf '%s (%s bytes)\n' "$_archive" "$(wc -c < "$_archive" | tr -d ' ')"
         done
+        if [ "$ROTATED_COUNT" -gt "$ROTATED_LIST_MAX" ]; then
+            printf '... and %s older: %s/archive-*.md\n' \
+                "$((ROTATED_COUNT - ROTATED_LIST_MAX))" "$REMEMBER_DIR"
+        fi
         echo ""
     fi
     echo ""

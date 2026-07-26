@@ -100,9 +100,10 @@ def test_several_rotations_are_all_listed_in_order(tmp_path):
 
     out = _run_session_start(tmp_path)
 
-    listed = [line for line in out.splitlines() if "archive-2026-" in line]
-    assert len(listed) == 3, f"expected all three slices named, got: {listed}"
-    assert listed == sorted(listed), f"not in chronological order: {listed}"
+    listed = [Path(line.split(" (")[0]).name
+              for line in out.splitlines() if "archive-2026-" in line]
+    assert listed == ["archive-2026-04-01.md", "archive-2026-05-15.md",
+                      "archive-2026-06-29.md"], f"wrong set or order: {listed}"
 
 
 def test_the_current_archive_is_still_injected(tmp_path):
@@ -131,3 +132,45 @@ def test_the_history_hint_names_the_rotated_pattern():
     """Recall is the agent grepping what the hint names."""
     hint = (REPO_ROOT / "prompts" / "session-history-hint.txt").read_text()
     assert "archive-YYYY-MM-DD.md" in hint, "the hint does not mention rotated archives"
+
+
+def test_rotated_slices_alone_are_still_announced(tmp_path):
+    """A store can hold nothing but rotated slices.
+
+    Rotate an oversized archive and the fresh archive.md stays empty until the
+    next consolidation. The listing sat inside the HAS_MEMORY guard, which
+    never looked at archive-*.md — so the one state this issue exists to fix
+    printed nothing at all: no MEMORY section, no paths, no way to know the
+    files were there.
+    """
+    remember = tmp_path / "project" / ".remember"
+    (remember / "tmp").mkdir(parents=True)
+    (remember / "logs").mkdir(parents=True)
+    (remember / "archive-2026-06-29.md").write_text(
+        "# Archive\n\nonly this exists\n", encoding="utf-8")
+
+    out = _run_session_start(tmp_path)
+
+    assert "archive-2026-06-29.md" in out, (
+        f"a store holding only rotated slices announced nothing:\n{out}"
+    )
+
+
+def test_a_long_rotation_history_is_capped(tmp_path):
+    """Rotations accumulate for the life of a store; this prints every start.
+
+    The newest ten are named and the rest are covered by the glob, so nothing
+    becomes unreachable again while the listing stays a fixed size.
+    """
+    remember = _seed(tmp_path)
+    for day in range(1, 26):
+        (remember / f"archive-2026-03-{day:02d}.md").write_text("x\n", encoding="utf-8")
+
+    out = _run_session_start(tmp_path)
+
+    listed = [line for line in out.splitlines() if line.startswith(str(remember))]
+    assert len(listed) == 10, f"expected the newest 10 named, got {len(listed)}"
+    assert "archive-2026-03-25.md" in out, "the newest slice is missing"
+    assert "archive-2026-03-01.md" not in out, "the oldest slice should be summarised"
+    assert "and 15 older" in out, f"the remainder is not accounted for:\n{out}"
+    assert "archive-*.md" in out, "no glob given for the unlisted slices"
