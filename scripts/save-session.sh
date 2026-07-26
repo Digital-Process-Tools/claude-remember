@@ -266,6 +266,32 @@ log_tokens "tokens" "$TK_IN" "$TK_OUT" "$TK_CACHE" "$TK_COST"
 HAIKU_TEXT=$(cat "$HAIKU_TEXT_FILE")
 [ -z "$HAIKU_TEXT" ] && { log "haiku" "ERROR: empty response"; record_summary_failure; exit 1; }
 
+# Park a discarded reply where it can be read later. Three callers now (format
+# validator, reject gate, NDC compression) — one copy each drifts, so it lives
+# here once.
+#
+# The timestamp carries $$ because seconds-resolution alone collides: two
+# rejections in the same second overwrote each other, and the second one was
+# the evidence you actually wanted.
+keep_rejected_text() {
+    local _src="$1" _tag="$2"
+    local _dir="${REMEMBER_DIR}/tmp"
+    local _file="${_dir}/rejected-$(_remember_date +%Y%m%d-%H%M%S)-$$.md"
+    mkdir -p "$_dir" 2>/dev/null
+    # Report what actually happened. The copy used to be silenced with 2>/dev/null
+    # and the success line logged unconditionally, so a full disk or a bad
+    # permission produced a log entry pointing at a file that was never written.
+    if cp "$_src" "$_file" 2>/dev/null; then
+        log "$_tag" "rejected text kept at $_file"
+    else
+        log "$_tag" "WARNING: could not keep rejected text at $_file"
+    fi
+    # Keep the last 20; these are diagnostic, not memory.
+    ls -t "${_dir}"/rejected-*.md 2>/dev/null | tail -n +21 | while read -r _old; do
+        rm -f "$_old"
+    done
+}
+
 # --- Step 5b: Validate format (warn, never discard) ---
 if [ "$IS_SKIP" != "true" ]; then
     FIRST_LINE=$(head -1 "$HAIKU_TEXT_FILE")
@@ -280,15 +306,8 @@ if [ "$IS_SKIP" != "true" ]; then
         # tmp/rejected-*.md, so nothing is lost, it simply does not enter the
         # compression chain. The position still advances, exactly as a SKIP
         # does, or this span would be re-summarized on every run forever.
-        REJECT_FILE="${REMEMBER_DIR}/tmp/rejected-$(_remember_date +%Y%m%d-%H%M%S).md"
-        mkdir -p "${REMEMBER_DIR}/tmp" 2>/dev/null
-        cp "$HAIKU_TEXT_FILE" "$REJECT_FILE" 2>/dev/null
         log "validate" "REJECTED (not an entry header): $(echo "$FIRST_LINE" | head -c 80)"
-        log "validate" "rejected text kept at $REJECT_FILE"
-        # Keep the last 20; these are diagnostic, not memory.
-        ls -t "${REMEMBER_DIR}"/tmp/rejected-*.md 2>/dev/null | tail -n +21 | while read -r _old; do
-            rm -f "$_old"
-        done
+        keep_rejected_text "$HAIKU_TEXT_FILE" "validate"
         cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell save-position "$LAST_SAVE_FILE" "$SESSION_ID" "$POSITION"
         log "validate" "position → $POSITION"
         rm -f "$FAILURE_MARKER"
@@ -335,16 +354,8 @@ if [ "$IS_SKIP" = "true" ]; then
     # stops growing, and max_summary_failures never notices because that counts
     # hard errors and this call succeeded.
     if [ "${IS_REJECTED:-false}" = "true" ]; then
-        REJECT_FILE="${REMEMBER_DIR}/tmp/rejected-$(_remember_date +%Y%m%d-%H%M%S).md"
-        mkdir -p "${REMEMBER_DIR}/tmp" 2>/dev/null
-        cp "$HAIKU_TEXT_FILE" "$REJECT_FILE" 2>/dev/null
         log "haiku" "REJECTED (not a summary — refusal or clarification): $(head -c 80 "$HAIKU_TEXT_FILE" 2>/dev/null)"
-        log "haiku" "rejected text kept at $REJECT_FILE"
-        # Keep the last 20; diagnostic, not memory. Same bound as the format
-        # validator's rejects.
-        ls -t "${REMEMBER_DIR}"/tmp/rejected-*.md 2>/dev/null | tail -n +21 | while read -r _old; do
-            rm -f "$_old"
-        done
+        keep_rejected_text "$HAIKU_TEXT_FILE" "haiku"
     fi
     log "haiku" "SKIP — position → $POSITION"
     cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell save-position "$LAST_SAVE_FILE" "$SESSION_ID" "$POSITION"
@@ -427,9 +438,27 @@ if [ "$RUN_NDC" = true ]; then
             if [ "$NDC_EXIT" -ne 0 ]; then
                 log "ndc" "ERROR: $(head -1 "$NDC_ERR" 2>/dev/null)"
             else
+                # Defensive, and not load-bearing today: Step 6 exits before
+                # this block whenever either flag is true, and safe_eval rewrites
+                # both from NDC_VARS on every successful call, so no reachable
+                # path currently carries a stale value in here. Kept so the gate
+                # below cannot quietly start reading an inherited value if either
+                # invariant changes — a reset that costs nothing, guarding a
+                # failure mode that writes into permanent memory.
+                IS_SKIP=false
+                IS_REJECTED=false
                 safe_eval <<< "$NDC_VARS"
                 NDC_TEXT=$(cat "$HAIKU_TEXT_FILE")
-                if [ -n "$NDC_TEXT" ]; then
+                # Compression runs through the same reject gate as the summarize
+                # call, but nothing here consumed the verdict: a refusal came
+                # back non-empty, passed `[ -n ... ]`, and was appended to
+                # today-*.md as if it were a day summary. Not lost memory —
+                # corrupted memory, written into the permanent record with no
+                # log line. now.md is left intact so the next round retries.
+                if [ "$IS_SKIP" = "true" ] || [ "${IS_REJECTED:-false}" = "true" ]; then
+                    log "ndc" "REJECTED (not a summary — refusal or clarification): $(head -c 80 "$HAIKU_TEXT_FILE" 2>/dev/null)"
+                    keep_rejected_text "$HAIKU_TEXT_FILE" "ndc"
+                elif [ -n "$NDC_TEXT" ]; then
                     [ -s "$TODAY_FILE" ] && echo "" >> "$TODAY_FILE"
                     cat "$HAIKU_TEXT_FILE" >> "$TODAY_FILE"
                     # Drop exactly the bytes that were compressed, not the whole

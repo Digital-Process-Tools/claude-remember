@@ -356,12 +356,24 @@ def cmd_consolidate(staging_dir: str, recent_file: str, archive_file: str,
 
     # Find staging files (exclude today + .done files)
     staging_contents: dict[str, str] = {}
+    # Raw file size, captured at read time. The consumed-byte count below drives
+    # the retire-vs-keep-tail split, so it has to describe the FILE, not the
+    # decoded string: errors="replace" turns each undecodable byte into one
+    # U+FFFD that re-encodes to three, and len(decoded.encode()) then overstates
+    # the file. Overstated, `staging_now -gt staging_consumed` reads false in
+    # run-consolidation.sh and it falls through to the blind rename — sealing
+    # concurrently appended entries inside .done.md, which is the exact loss
+    # this count exists to prevent. #142 measures now.md with `wc -c` for the
+    # same reason.
+    staging_raw_bytes: dict[str, int] = {}
     for path in sorted(globmod.glob(os.path.join(staging_dir, "today-*.md"))):
         basename = os.path.basename(path)
         if today in basename or basename.endswith(".done.md"):
             continue
-        with open(path, encoding="utf-8", errors="replace") as f:
-            staging_contents[basename] = f.read()
+        with open(path, "rb") as f:
+            raw = f.read()
+        staging_raw_bytes[basename] = len(raw)
+        staging_contents[basename] = raw.decode("utf-8", errors="replace")
 
     if not staging_contents:
         print("STAGING_COUNT=0")
@@ -435,11 +447,11 @@ def cmd_consolidate(staging_dir: str, recent_file: str, archive_file: str,
     # Same shape as #142, which fixed it for now.md and not for staging.
     fd_s, staging_paths_file = tempfile.mkstemp(prefix="remember-staging-paths-", suffix=".bin")
     with os.fdopen(fd_s, "wb") as f:
-        for name, content in staging_contents.items():
+        for name in staging_contents:
             # surrogatepass: os.listdir() surrogate-escapes undecodable filename
             # bytes on Windows; round-trip them so the shell gets the real path.
             f.write(os.path.join(staging_dir, name).encode("utf-8", "surrogatepass") + b"\x00")
-            f.write(str(len(content.encode("utf-8"))).encode("ascii") + b"\x00")
+            f.write(str(staging_raw_bytes[name]).encode("ascii") + b"\x00")
 
     print(f"STAGING_COUNT={len(staging_contents)}")
     print("CONSOLIDATION_STATUS=ok")
