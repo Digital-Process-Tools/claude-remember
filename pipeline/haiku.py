@@ -24,6 +24,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 
 from .types import HaikuResult, TokenUsage
@@ -184,12 +185,33 @@ def _failure_detail(stdout: str, stderr: str) -> str:
 _MIN_TOKEN_LEN = 20
 
 
+def _warn(message: str) -> None:
+    """Surface a token-resolution problem where an operator will actually read it.
+
+    The daily log is the one place shell and pipeline entries interleave.
+    stderr is not: ``save-session.sh`` captures ``call-haiku``'s stderr to a
+    temp file and only echoes it when the call *fails*, so a warning written
+    there on the way to a successful call is discarded. Falls back to stderr
+    only when REMEMBER_DIR is unset (direct python use, tests).
+
+    Never raises — this sits on the path to authenticating, and a logging
+    failure must not become an auth failure.
+    """
+    try:
+        remember_dir = os.environ.get("REMEMBER_DIR", "").strip()
+        if remember_dir:
+            from .log import log
+
+            log("haiku", message, os.path.join(remember_dir, "logs"))
+        else:
+            print(f"[haiku] {message}", file=sys.stderr)
+    except Exception:
+        pass
+
+
 def _looks_like_token(value: object) -> bool:
     """A configured value is usable only if it is a non-empty, whitespace-free
     string of plausible length.
-
-    A blank or obviously wrong config entry should fail at configuration time,
-    not surface later as a confusing 401 whose origin is a stale/garbage token.
     """
     if not isinstance(value, str):
         return False
@@ -197,35 +219,90 @@ def _looks_like_token(value: object) -> bool:
     return len(stripped) >= _MIN_TOKEN_LEN and not any(c.isspace() for c in stripped)
 
 
-def _configured_oauth_token() -> str | None:
-    """Operator-configured OAuth token for the nested CLI, or ``None``.
+def _accept_token(value: object, source: str) -> str | None:
+    """The configured value if usable, else ``None`` **and a log line**.
 
-    Precedence: the ``REMEMBER_OAUTH_TOKEN`` env var, then a ``haiku.oauth_token``
-    key in config.json (``$REMEMBER_DIR/config.json`` if set, else the
-    user-global ``~/.remember/config.json``). Best-effort: any missing file,
-    read error, or malformed JSON yields ``None`` and never raises.
+    A rejected value used to vanish in silence, which made a typo'd or
+    truncated token indistinguishable from never having configured one: the
+    nested CLI ran unauthenticated and the operator got the same confusing auth
+    error this fallback exists to prevent, now with a misleading origin.
+
+    An empty value stays silent — that is how the bundled config ships the key
+    (``"oauth_token": ""``), i.e. "not configured", and it reaches here on
+    every save through the merged config.
+
+    The value itself is never logged; only its source and its length.
     """
-    env_token = os.environ.get("REMEMBER_OAUTH_TOKEN", "").strip()
-    if _looks_like_token(env_token):
-        return env_token
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    if not _looks_like_token(value):
+        if isinstance(value, str):
+            detail = f"{len(value.strip())} chars"
+        else:
+            detail = f"a {type(value).__name__} value"
+        _warn(
+            f"WARNING: ignoring {source} — not a plausible OAuth token "
+            f"(want a whitespace-free string of at least {_MIN_TOKEN_LEN} "
+            f"chars, got {detail}); the nested CLI will run unauthenticated "
+            "unless the host provides a token of its own"
+        )
+        return None
+    return str(value).strip()
 
+
+def _config_candidates() -> list[str]:
+    """Config files to search for ``haiku.oauth_token``, highest priority first.
+
+    ``REMEMBER_CONFIG`` is the merged config ``lib-memory-dir.sh`` builds from
+    all three layers (plugin-bundled, user-global, per-project) and exports
+    before invoking the pipeline — the repo's single source of truth for config
+    resolution. Reading it, rather than re-deriving the layer order here, is
+    what keeps this from becoming a second config reader free to drift from the
+    shell one (#177).
+
+    The raw paths stay as a fallback for direct python use (tests, a manual
+    ``python3 -m pipeline.shell`` call) where no shell wrapper ran.
+    """
     candidates = []
+    merged = os.environ.get("REMEMBER_CONFIG", "").strip()
+    if merged:
+        candidates.append(merged)
     remember_dir = os.environ.get("REMEMBER_DIR", "").strip()
     if remember_dir:
         candidates.append(os.path.join(remember_dir, "config.json"))
     candidates.append(os.path.join(os.path.expanduser("~"), ".remember", "config.json"))
+    return candidates
 
-    for path in candidates:
+
+def _configured_oauth_token() -> str | None:
+    """Operator-configured OAuth token for the nested CLI, or ``None``.
+
+    Precedence: the ``REMEMBER_OAUTH_TOKEN`` env var, then a
+    ``haiku.oauth_token`` key in the first config file that declares one (see
+    ``_config_candidates``). Best-effort: any missing file, read error, or
+    malformed JSON yields ``None`` and never raises — but a value that is
+    present and unusable is logged rather than dropped silently.
+    """
+    env_token = os.environ.get("REMEMBER_OAUTH_TOKEN", "").strip()
+    if env_token:
+        token = _accept_token(env_token, "REMEMBER_OAUTH_TOKEN")
+        if token:
+            return token
+
+    for path in _config_candidates():
         try:
             with open(path, encoding="utf-8") as f:
                 cfg = json.load(f)
         except (OSError, ValueError):
             continue
-        if isinstance(cfg, dict):
-            haiku_cfg = cfg.get("haiku")
-            token = haiku_cfg.get("oauth_token") if isinstance(haiku_cfg, dict) else None
-            if _looks_like_token(token):
-                return token.strip()
+        if not isinstance(cfg, dict):
+            continue
+        haiku_cfg = cfg.get("haiku")
+        if not isinstance(haiku_cfg, dict) or "oauth_token" not in haiku_cfg:
+            continue
+        token = _accept_token(haiku_cfg["oauth_token"], f"haiku.oauth_token in {path}")
+        if token:
+            return token
     return None
 
 

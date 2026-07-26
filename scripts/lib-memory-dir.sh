@@ -177,6 +177,14 @@ _project_cfg="${REMEMBER_DIR}/config.json"
 SYS_TMPDIR="${TMPDIR:-/tmp}"
 _merged_cfg="${SYS_TMPDIR}/remember-config-$$.json"
 
+# Create it private BEFORE any layer is written into it. Every entry point
+# sources resolve-paths.sh (umask 077, #68) first, so this is belt-and-braces
+# there — but this file documents itself as sourceable on its own, and since
+# the merged config can carry `haiku.oauth_token` (a live OAuth credential) its
+# mode must not depend on the caller having set a umask. jq's `>`, the Python
+# fallback's open(), and `cp` all write into the existing file and keep its mode.
+(umask 077; : > "$_merged_cfg") 2>/dev/null || true
+
 # Build an array of files that actually exist.
 _cfg_sources=()
 [ -f "$_bundled_cfg"  ] && _cfg_sources+=("$_bundled_cfg")

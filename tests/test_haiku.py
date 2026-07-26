@@ -389,6 +389,7 @@ def test_call_haiku_rejects_malformed_configured_token(mock_run, monkeypatch, tm
     """A too-short or whitespace-bearing configured value is not injected — it
     should fail at config time, not as a confusing 401 from a garbage token."""
     monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.delenv("REMEMBER_CONFIG", raising=False)
     monkeypatch.setenv("REMEMBER_OAUTH_TOKEN", "too short")
     monkeypatch.setenv("REMEMBER_DIR", str(tmp_path))
     monkeypatch.setattr("pipeline.haiku.os.path.expanduser", lambda p: str(tmp_path))
@@ -397,6 +398,125 @@ def test_call_haiku_rejects_malformed_configured_token(mock_run, monkeypatch, tm
     call_haiku("p")
     env = mock_run.call_args[1]["env"]
     assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
+
+
+def _log_text(remember_dir) -> str:
+    """Everything written to the daily log under a REMEMBER_DIR, or ""."""
+    log_dir = remember_dir / "logs"
+    if not log_dir.is_dir():
+        return ""
+    return "".join(p.read_text(encoding="utf-8") for p in sorted(log_dir.iterdir()))
+
+
+@patch("pipeline.haiku.subprocess.run")
+def test_rejected_token_is_logged_not_silently_dropped(mock_run, monkeypatch, tmp_path):
+    """A configured-but-unusable token must leave a trace.
+
+    Dropping it in silence made a typo'd token indistinguishable from an unset
+    one: the nested CLI ran unauthenticated and produced the same opaque auth
+    error the fallback exists to prevent."""
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.delenv("REMEMBER_CONFIG", raising=False)
+    monkeypatch.setenv("REMEMBER_OAUTH_TOKEN", "sk-ant-oat truncated")
+    monkeypatch.setenv("REMEMBER_DIR", str(tmp_path))
+    monkeypatch.setattr("pipeline.haiku.os.path.expanduser", lambda p: str(tmp_path))
+    mock_run.return_value = MagicMock(
+        returncode=0, stdout=_mock_claude_response("x"), stderr="")
+
+    call_haiku("p")
+
+    logged = _log_text(tmp_path)
+    assert "WARNING" in logged and "REMEMBER_OAUTH_TOKEN" in logged, (
+        "an unusable configured token must be reported, not dropped silently"
+    )
+    assert "sk-ant-oat truncated" not in logged, (
+        "the credential itself must never reach the log"
+    )
+
+
+@patch("pipeline.haiku.subprocess.run")
+def test_empty_configured_token_logs_nothing(mock_run, monkeypatch, tmp_path):
+    """`"oauth_token": ""` is how the bundled config ships the key — it means
+    "not configured" and reaches this code on every save, so it must not warn."""
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.delenv("REMEMBER_OAUTH_TOKEN", raising=False)
+    monkeypatch.delenv("REMEMBER_CONFIG", raising=False)
+    monkeypatch.setenv("REMEMBER_DIR", str(tmp_path))
+    monkeypatch.setattr("pipeline.haiku.os.path.expanduser", lambda p: str(tmp_path))
+    (tmp_path / "config.json").write_text(
+        json.dumps({"haiku": {"oauth_token": ""}}), encoding="utf-8")
+    mock_run.return_value = MagicMock(
+        returncode=0, stdout=_mock_claude_response("x"), stderr="")
+
+    call_haiku("p")
+
+    assert "WARNING" not in _log_text(tmp_path)
+
+
+@patch("pipeline.haiku.subprocess.run")
+def test_non_string_configured_token_is_rejected_and_logged(mock_run, monkeypatch, tmp_path):
+    """A non-string `oauth_token` is neither injected nor allowed to raise."""
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.delenv("REMEMBER_OAUTH_TOKEN", raising=False)
+    monkeypatch.delenv("REMEMBER_CONFIG", raising=False)
+    monkeypatch.setenv("REMEMBER_DIR", str(tmp_path))
+    monkeypatch.setattr("pipeline.haiku.os.path.expanduser", lambda p: str(tmp_path))
+    (tmp_path / "config.json").write_text(
+        json.dumps({"haiku": {"oauth_token": 12345}}), encoding="utf-8")
+    mock_run.return_value = MagicMock(
+        returncode=0, stdout=_mock_claude_response("x"), stderr="")
+
+    call_haiku("p")
+
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in mock_run.call_args[1]["env"]
+    assert "WARNING" in _log_text(tmp_path)
+
+
+@patch("pipeline.haiku.subprocess.run")
+def test_malformed_env_token_falls_through_to_config(mock_run, monkeypatch, tmp_path):
+    """A rejected env token does not veto a valid configured one — and the
+    operator gets told which value was ignored."""
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.delenv("REMEMBER_CONFIG", raising=False)
+    monkeypatch.setenv("REMEMBER_OAUTH_TOKEN", "short")
+    monkeypatch.setenv("REMEMBER_DIR", str(tmp_path))
+    monkeypatch.setattr("pipeline.haiku.os.path.expanduser", lambda p: str(tmp_path))
+    (tmp_path / "config.json").write_text(
+        json.dumps({"haiku": {"oauth_token": "sk-ant-oat-from-config-file-1234"}}),
+        encoding="utf-8")
+    mock_run.return_value = MagicMock(
+        returncode=0, stdout=_mock_claude_response("x"), stderr="")
+
+    call_haiku("p")
+
+    env = mock_run.call_args[1]["env"]
+    assert env.get("CLAUDE_CODE_OAUTH_TOKEN") == "sk-ant-oat-from-config-file-1234"
+    assert "REMEMBER_OAUTH_TOKEN" in _log_text(tmp_path)
+
+
+@patch("pipeline.haiku.subprocess.run")
+def test_merged_config_wins_over_raw_project_config(mock_run, monkeypatch, tmp_path):
+    """REMEMBER_CONFIG — the merged config lib-memory-dir.sh exports — is the
+    source of truth, so this reader cannot drift from the shell one (#177)."""
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.delenv("REMEMBER_OAUTH_TOKEN", raising=False)
+    monkeypatch.setenv("REMEMBER_DIR", str(tmp_path))
+    monkeypatch.setattr("pipeline.haiku.os.path.expanduser", lambda p: str(tmp_path))
+    (tmp_path / "config.json").write_text(
+        json.dumps({"haiku": {"oauth_token": "sk-ant-oat-raw-project-layer-99"}}),
+        encoding="utf-8")
+    merged = tmp_path / "merged.json"
+    merged.write_text(
+        json.dumps({"haiku": {"oauth_token": "sk-ant-oat-merged-layer-000001"}}),
+        encoding="utf-8")
+    monkeypatch.setenv("REMEMBER_CONFIG", str(merged))
+    mock_run.return_value = MagicMock(
+        returncode=0, stdout=_mock_claude_response("x"), stderr="")
+
+    call_haiku("p")
+
+    env = mock_run.call_args[1]["env"]
+    assert env.get("CLAUDE_CODE_OAUTH_TOKEN") == "sk-ant-oat-merged-layer-000001"
 
 
 @patch("pipeline.haiku.subprocess.run")
