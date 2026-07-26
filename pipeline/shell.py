@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 
 from .extract import _is_line_number, extract_session, read_positions

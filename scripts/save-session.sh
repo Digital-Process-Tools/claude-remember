@@ -62,6 +62,8 @@ log "hook" "save-session: PROJECT_DIR=$PROJECT_DIR PIPELINE_DIR=$PIPELINE_DIR PY
 
 LOCK_FILE="${REMEMBER_DIR}/tmp/save.lock"
 MEMORY_FILE="${REMEMBER_DIR}/now.md"
+# Which day now.md's contents belong to (#141) — see Step 7.
+NOW_DAY_FILE="${REMEMBER_DIR}/tmp/now-day"
 LAST_SAVE_FILE="${REMEMBER_DIR}/tmp/last-save.json"
 COOLDOWN_MARKER="${REMEMBER_DIR}/tmp/last-save-ts"
 TODAY_DATE=$(_remember_date +%Y-%m-%d)
@@ -336,6 +338,18 @@ if [ "$IS_SKIP" = "true" ]; then
 fi
 
 # --- Step 7: Append + save position ---
+# Record which day now.md belongs to, when it starts. Entries carry `## HH:MM`
+# and nothing else, so once now.md crosses midnight uncompressed there is no
+# way to tell from the content which day it came from — and NDC filed it by the
+# date it happened to RUN, putting the evening's work at the top of tomorrow's
+# file (issue #141).
+#
+# Kept beside now.md rather than inside it. A marker line in the file would be
+# the first thing session-start injects into context and the first thing the
+# summarizer reads, for a fact only the pipeline needs.
+if [ ! -s "$MEMORY_FILE" ]; then
+    printf '%s\n' "$TODAY_DATE" > "$NOW_DAY_FILE" 2>/dev/null || true
+fi
 echo "" >> "$MEMORY_FILE" 2>/dev/null || { log "write" "ERROR: cannot write now.md"; exit 1; }
 cat "$HAIKU_TEXT_FILE" >> "$MEMORY_FILE"
 log "write" "appended: $(head -1 "$HAIKU_TEXT_FILE" | cut -c1-80)"
@@ -355,10 +369,21 @@ if [ -f "$NDC_MARKER" ]; then
     [ $(( $(date +%s) - NDC_MOD )) -lt "$NDC_COOLDOWN" ] && RUN_NDC=false
 fi
 
-TODAY_FILE="${REMEMBER_DIR}/today-${TODAY_DATE}.md"
+# The day the content belongs to, not the day this run happens to fall on.
+# NDC only fires on a save and carries a cooldown, so now.md routinely holds
+# evening entries when the first save after midnight arrives; filing by run
+# date put them in the new day's file and downstream consolidation then
+# attributed them to the wrong day (#141). Falls back to today for a now.md
+# written before this marker existed, or left behind by an interrupted run.
+NDC_DAY=$(cat "$NOW_DAY_FILE" 2>/dev/null | tr -d '[:space:]')
+case "$NDC_DAY" in
+    ([0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;;
+    (*) NDC_DAY="$TODAY_DATE" ;;
+esac
+TODAY_FILE="${REMEMBER_DIR}/today-${NDC_DAY}.md"
 
 if [ "$RUN_NDC" = true ]; then
-    log "ndc" "now.md → today-${TODAY_DATE}.md"
+    log "ndc" "now.md → today-${NDC_DAY}.md"
     date +%s > "$NDC_MARKER"
     NDC_SRC_BYTES=$(wc -c < "$MEMORY_FILE" | tr -d ' ')
     NDC_PROMPT=$(mktemp "${TMPDIR:-/tmp}"/remember-ndc-XXXXXX)
@@ -392,10 +417,20 @@ if [ "$RUN_NDC" = true ]; then
                     if tail -c +$(( NDC_SRC_BYTES + 1 )) "$MEMORY_FILE" > "$NDC_TAIL" 2>/dev/null; then
                         NDC_KEPT=$(wc -c < "$NDC_TAIL" | tr -d ' ')
                         mv "$NDC_TAIL" "$MEMORY_FILE"
+                        # The stamped day is spent with the bytes it covered.
+                        # Anything kept was appended during this compression,
+                        # so it belongs to the run day; nothing kept means the
+                        # next entry starts a fresh file and re-stamps.
+                        if [ "$NDC_KEPT" -gt 0 ]; then
+                            printf '%s\n' "$TODAY_DATE" > "$NOW_DAY_FILE" 2>/dev/null || true
+                        else
+                            rm -f "$NOW_DAY_FILE"
+                        fi
                         [ "$NDC_KEPT" -gt 0 ] && log "ndc" "kept ${NDC_KEPT}b appended during compression"
                     else
                         rm -f "$NDC_TAIL"
                         : > "$MEMORY_FILE"
+                        rm -f "$NOW_DAY_FILE"
                     fi
                     log_tokens "ndc" "$TK_IN" "$TK_OUT" "$TK_CACHE" "$TK_COST"
                     NDC_OUT_BYTES=$(wc -c < "$HAIKU_TEXT_FILE" | tr -d ' ')
