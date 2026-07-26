@@ -62,8 +62,18 @@ config() {
     local default="$2"
     if [ -f "$REMEMBER_CONFIG" ] && command -v jq >/dev/null 2>&1; then
         local val
-        val=$(jq -r "$key // empty" "$REMEMBER_CONFIG" 2>/dev/null)
-        [ -n "$val" ] && echo "$val" || echo "$default"
+        # NOT `$key // empty`: jq's // treats false the same as null, so every
+        # boolean option set to false read back as its default and could never
+        # be switched off (#159). features.ndc_compression and features.recovery
+        # are both documented, both default true, and neither could be disabled.
+        # Ask for the value and treat only null — a genuinely absent key — as
+        # missing.
+        val=$(jq -r "$key" "$REMEMBER_CONFIG" 2>/dev/null)
+        if [ -n "$val" ] && [ "$val" != "null" ]; then
+            echo "$val"
+        else
+            echo "$default"
+        fi
     else
         echo "$default"
     fi

@@ -115,7 +115,10 @@ def _make_env(tmp_path: Path, *, exchanges: int, humans: int, position: int = 50
 
     cfg = {"cooldowns": {"save_seconds": 0, "ndc_seconds": 999999},
            "thresholds": {"min_human_messages": 3, "delta_lines_trigger": 50},
-           "features": {"ndc_compression": False}}
+           # True, matching the shipped default. It was False here while the
+           # flag was ignored (#159), so every test that exercises compression
+           # was relying on the option not working.
+           "features": {"ndc_compression": True}}
     if config:
         cfg["thresholds"].update(config)
     cfg_path = tmp_path / "config.json"

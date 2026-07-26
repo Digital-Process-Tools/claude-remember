@@ -363,7 +363,15 @@ dispatch "after_save"
 # --- Step 8: NDC compression (1h cooldown, background) ---
 NDC_MARKER="${REMEMBER_DIR}/tmp/last-ndc.ts"
 RUN_NDC=true
-if [ -f "$NDC_MARKER" ]; then
+# features.ndc_compression has been documented in the README since the option
+# existed, and was read nowhere: setting it false did nothing and compression
+# ran anyway (#159). The only working brake was an unreachable combination of
+# cooldowns.ndc_seconds and a hand-written marker file.
+if [ "$(config '.features.ndc_compression' true)" != "true" ]; then
+    RUN_NDC=false
+    log "ndc" "disabled by features.ndc_compression"
+fi
+if [ "$RUN_NDC" = true ] && [ -f "$NDC_MARKER" ]; then
     NDC_MOD=$(cat "$NDC_MARKER" 2>/dev/null || echo 0)
     NDC_COOLDOWN=$(config ".cooldowns.ndc_seconds" 3600)
     [ $(( $(date +%s) - NDC_MOD )) -lt "$NDC_COOLDOWN" ] && RUN_NDC=false

@@ -22,6 +22,8 @@ boundary, which is a bigger change than this issue asked for.
 
 from __future__ import annotations
 
+import json
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -202,3 +204,78 @@ def test_a_compression_spanning_midnight_restamps_with_the_new_day(tmp_path):
         "the bytes appended during compression were stamped with the day this "
         f"run started, not the day they arrived: {_day_stamp(project)!r}"
     )
+
+
+# ── features.ndc_compression (#159) ──────────────────────────────────────────
+
+def test_compression_can_be_switched_off(tmp_path):
+    """The documented option was read nowhere; false did nothing.
+
+    The only brake that worked was an unreachable pairing of
+    cooldowns.ndc_seconds with a hand-written marker file — which is how this
+    was found: a test asserting on now.md had to defeat compression by hand
+    because the documented switch had no effect.
+    """
+    env, project, plugin, calls, sid = _make_env(tmp_path, exchanges=6, humans=5)
+    cfg = json.loads(Path(env["REMEMBER_CONFIG"]).read_text())
+    cfg["features"]["ndc_compression"] = False
+    Path(env["REMEMBER_CONFIG"]).write_text(json.dumps(cfg))
+    (plugin / "config.json").write_text(json.dumps(cfg))
+    env["STUB_HAIKU_TEXT"] = "## 12:00 | main\n\n- work\n"
+
+    _run(plugin, env, sid)
+
+    remember = project / ".remember"
+    assert not list(remember.glob("today-*.md")), "compression ran while disabled"
+    assert "- work" in _read_now(project), "the entry should still be in now.md"
+
+
+def test_compression_runs_when_the_option_is_absent(tmp_path):
+    """Default is on — an install with no such key must be unaffected."""
+    env, project, plugin, calls, sid = _make_env(tmp_path, exchanges=6, humans=5)
+    cfg = json.loads(Path(env["REMEMBER_CONFIG"]).read_text())
+    cfg["features"].pop("ndc_compression", None)
+    Path(env["REMEMBER_CONFIG"]).write_text(json.dumps(cfg))
+    (plugin / "config.json").write_text(json.dumps(cfg))
+    env["STUB_HAIKU_TEXT"] = "## 12:00 | main\n\n- work\n"
+
+    _run(plugin, env, sid)
+
+    assert list((project / ".remember").glob("today-*.md")), (
+        "compression did not run with the option absent"
+    )
+
+
+def test_a_false_boolean_option_is_readable_at_all(tmp_path):
+    """jq's `//` treats false exactly like null.
+
+    So `config ".key" true` returned true for a key explicitly set to false —
+    every boolean option defaulting to true was impossible to switch off. Two
+    shipped and documented options were affected: features.ndc_compression and
+    features.recovery.
+    """
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({
+        "features": {"ndc_compression": False, "recovery": False},
+        "timezone": "UTC", "zero": 0, "empty": "",
+    }), encoding="utf-8")
+
+    def read(key, default):
+        # log.sh derives its log dir from REMEMBER_DIR and exits FATAL if it
+        # cannot create it, so give it a real one.
+        # _LIB_MEMORY_DIR_LOADED stops log.sh's lib-memory-dir.sh from
+        # re-resolving REMEMBER_DIR (and REMEMBER_CONFIG) over the ones here.
+        script = (f'export _LIB_MEMORY_DIR_LOADED=1\n'
+                  f'export REMEMBER_DIR={tmp_path}\n'
+                  f'export REMEMBER_CONFIG={cfg}\n'
+                  f'source {REPO_ROOT}/scripts/log.sh\n'
+                  f'config "{key}" "{default}"')
+        out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+        return out.stdout.strip()
+
+    assert read(".features.ndc_compression", "true") == "false", "false read back as the default"
+    assert read(".features.recovery", "true") == "false", "false read back as the default"
+    assert read(".timezone", "X") == "UTC", "a normal value regressed"
+    assert read(".zero", "9") == "0", "0 is a value, not a missing key"
+    assert read(".missing", "fallback") == "fallback", "a genuinely absent key must default"
+    assert read(".deeply.missing", "fallback") == "fallback", "an absent path must default"
