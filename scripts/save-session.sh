@@ -58,6 +58,7 @@ source "$(dirname "$0")/resolve-paths.sh"
 source "$(dirname "$0")/detect-tools.sh"
 source "$(dirname "$0")/bootstrap-dirs.sh"
 source "$(dirname "$0")/log.sh"
+source "$(dirname "$0")/lib-now-lock.sh"
 log "hook" "save-session: PROJECT_DIR=$PROJECT_DIR PIPELINE_DIR=$PIPELINE_DIR PYTHON=$PYTHON REMEMBER_DIR=$REMEMBER_DIR"
 
 LOCK_FILE="${REMEMBER_DIR}/tmp/save.lock"
@@ -350,8 +351,8 @@ fi
 if [ ! -s "$MEMORY_FILE" ]; then
     printf '%s\n' "$TODAY_DATE" > "$NOW_DAY_FILE" 2>/dev/null || true
 fi
-echo "" >> "$MEMORY_FILE" 2>/dev/null || { log "write" "ERROR: cannot write now.md"; exit 1; }
-cat "$HAIKU_TEXT_FILE" >> "$MEMORY_FILE"
+now_locked 30 now_append "$MEMORY_FILE" "$HAIKU_TEXT_FILE" \
+    || { log "write" "ERROR: cannot write now.md (lock timeout or write failed)"; exit 1; }
 log "write" "appended: $(head -1 "$HAIKU_TEXT_FILE" | cut -c1-80)"
 cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell save-position "$LAST_SAVE_FILE" "$SESSION_ID" "$POSITION"
 log "write" "position → $POSITION"
@@ -393,12 +394,22 @@ TODAY_FILE="${REMEMBER_DIR}/today-${NDC_DAY}.md"
 if [ "$RUN_NDC" = true ]; then
     log "ndc" "now.md → today-${NDC_DAY}.md"
     date +%s > "$NDC_MARKER"
-    NDC_SRC_BYTES=$(wc -c < "$MEMORY_FILE" | tr -d ' ')
     NDC_PROMPT=$(mktemp "${TMPDIR:-/tmp}"/remember-ndc-XXXXXX)
 
-    cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell build-ndc-prompt "$MEMORY_FILE" "$NDC_PROMPT"
+    # Snapshot the byte-count and the build-ndc-prompt read together, under
+    # now.lock — so the count can never disagree with what was actually fed
+    # to the summarizer (a save landing between an unlocked `wc -c` and the
+    # prompt build was defect (a) of #142's incomplete follow-up).
+    _ndc_snapshot() {
+        wc -c < "$MEMORY_FILE" | tr -d ' '
+        (cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell build-ndc-prompt "$MEMORY_FILE" "$NDC_PROMPT") >&2
+    }
+    NDC_SRC_BYTES=$(now_locked 30 _ndc_snapshot) || NDC_SRC_BYTES=""
+    if [ -z "$NDC_SRC_BYTES" ]; then
+        log "ndc" "ERROR: snapshot lock timeout — skipping NDC this round"
+    fi
 
-    if [ -s "$NDC_PROMPT" ]; then
+    if [ -n "$NDC_SRC_BYTES" ] && [ -s "$NDC_PROMPT" ]; then
         (set +e  # don't inherit set -e — a haiku non-zero exit must not kill the subshell
             NDC_ERR=$(mktemp "${TMPDIR:-/tmp}"/remember-ndc-err-XXXXXX)
             # 180s (not the 120s default): NDC compresses a whole now.md.
@@ -411,48 +422,49 @@ if [ "$RUN_NDC" = true ]; then
                 safe_eval <<< "$NDC_VARS"
                 NDC_TEXT=$(cat "$HAIKU_TEXT_FILE")
                 if [ -n "$NDC_TEXT" ]; then
-                    [ -s "$TODAY_FILE" ] && echo "" >> "$TODAY_FILE"
-                    cat "$HAIKU_TEXT_FILE" >> "$TODAY_FILE"
-                    # Drop exactly the bytes that were compressed, not the whole
-                    # file (#142). now.md was snapshotted before the Haiku call
-                    # above, which can take up to 180s — and by then the parent
-                    # has released the save lock and exited, so a *newer* save
-                    # may well have appended an entry. `: >` erased those
-                    # entries, and their position had already been advanced, so
-                    # they were unrecoverable and nothing was logged. Keep
-                    # everything past the snapshot offset instead.
-                    NDC_TAIL=$(mktemp "${TMPDIR:-/tmp}"/remember-ndc-tail-XXXXXX)
-                    if tail -c +$(( NDC_SRC_BYTES + 1 )) "$MEMORY_FILE" > "$NDC_TAIL" 2>/dev/null; then
-                        NDC_KEPT=$(wc -c < "$NDC_TAIL" | tr -d ' ')
-                        mv "$NDC_TAIL" "$MEMORY_FILE"
-                        # The stamped day is spent with the bytes it covered.
-                        # Anything kept was appended during this compression,
-                        # so stamp it with the day it is NOW — not $TODAY_DATE,
-                        # which was computed once in the parent before a Haiku
-                        # call that can run 180s. A compression that started
-                        # before midnight would otherwise stamp those newer
-                        # bytes with the previous day: not the day they were
-                        # appended, not their own day, but a third stale one
-                        # belonging to an earlier run. That is the #142-shaped
-                        # window, and misfiling is exactly what it costs here.
-                        #
-                        # Still one stamp for the whole kept range. If two saves
-                        # land inside this window on opposite sides of midnight,
-                        # the earlier one is filed with the later one's day.
-                        # Splitting the range would need each entry to carry its
-                        # own day, which is the thing now.md does not have and
-                        # the reason this stamp exists — see #141 for the flush
-                        # design that would close it.
+                    # Commit today-*.md + drop exactly the compressed bytes from
+                    # now.md, all under one now.lock acquisition, so the
+                    # tail/mv (defect (b)) cannot interleave with a concurrent
+                    # append, and a tail failure (defect (c)) leaves now.md
+                    # untouched instead of falling back to #142's blind `: >`.
+                    #
+                    # The stamped day is spent with the bytes it covered.
+                    # Anything kept was appended during this compression, so
+                    # it is stamped with the day it is NOW — not $TODAY_DATE,
+                    # which was computed once in the parent before a Haiku
+                    # call that can run 180s. A compression that started
+                    # before midnight would otherwise stamp those newer bytes
+                    # with the previous day: not the day they were appended,
+                    # not their own day, but a third stale one belonging to
+                    # an earlier run. That is the #142-shaped window, and
+                    # misfiling is exactly what it costs here.
+                    #
+                    # Still one stamp for the whole kept range. If two saves
+                    # land inside this window on opposite sides of midnight,
+                    # the earlier one is filed with the later one's day.
+                    # Splitting the range would need each entry to carry its
+                    # own day, which is the thing now.md does not have and
+                    # the reason this stamp exists — see #141 for the flush
+                    # design that would close it.
+                    _ndc_commit() {
+                        [ -s "$TODAY_FILE" ] && echo "" >> "$TODAY_FILE"
+                        cat "$HAIKU_TEXT_FILE" >> "$TODAY_FILE"
+                        now_truncate_first "$MEMORY_FILE" "$NDC_SRC_BYTES"
+                    }
+                    now_locked 60 _ndc_commit
+                    _NDC_RC=$?
+                    if [ "$_NDC_RC" -eq 99 ]; then
+                        log "ndc" "ERROR: now.lock timeout — skipped commit, now.md untouched"
+                    elif [ "$_NDC_RC" -ne 0 ]; then
+                        log "ndc" "ERROR: truncate refused (stale byte count?) rc=$_NDC_RC — now.md untouched"
+                    else
+                        NDC_KEPT=$(wc -c < "$MEMORY_FILE" | tr -d ' ')
                         if [ "$NDC_KEPT" -gt 0 ]; then
                             printf '%s\n' "$(_remember_date +%Y-%m-%d)" > "$NOW_DAY_FILE" 2>/dev/null || true
+                            log "ndc" "kept ${NDC_KEPT}b appended during compression"
                         else
                             rm -f "$NOW_DAY_FILE"
                         fi
-                        [ "$NDC_KEPT" -gt 0 ] && log "ndc" "kept ${NDC_KEPT}b appended during compression"
-                    else
-                        rm -f "$NDC_TAIL"
-                        : > "$MEMORY_FILE"
-                        rm -f "$NOW_DAY_FILE"
                     fi
                     log_tokens "ndc" "$TK_IN" "$TK_OUT" "$TK_CACHE" "$TK_COST"
                     NDC_OUT_BYTES=$(wc -c < "$HAIKU_TEXT_FILE" | tr -d ' ')
