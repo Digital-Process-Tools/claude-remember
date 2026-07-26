@@ -169,6 +169,81 @@ def _failure_detail(stdout: str, stderr: str) -> str:
     return joined
 
 
+# The nested `claude -p` needs its own credentials. Normally that is
+# CLAUDE_CODE_OAUTH_TOKEN, kept across the strip by _CHILD_ENV_KEEP (#131).
+# But some hosts never place it in a hook subprocess's environment at all — the
+# Claude Code desktop / Agent SDK host withholds it from spawned children — so
+# there is nothing to keep and `claude -p` is unauthenticated: the silent-save
+# outage of #129 on a machine that *did* run `claude setup-token`.
+#
+# Recovery is consent-based: the operator hands THIS plugin a token to pass to
+# the nested CLI, via the REMEMBER_OAUTH_TOKEN env var or a `haiku.oauth_token`
+# key in config.json. It is used only when the child env has no
+# CLAUDE_CODE_OAUTH_TOKEN, and only a value the operator deliberately
+# configured — nothing is read from OS credential storage the platform withheld.
+_MIN_TOKEN_LEN = 20
+
+
+def _looks_like_token(value: object) -> bool:
+    """A configured value is usable only if it is a non-empty, whitespace-free
+    string of plausible length.
+
+    A blank or obviously wrong config entry should fail at configuration time,
+    not surface later as a confusing 401 whose origin is a stale/garbage token.
+    """
+    if not isinstance(value, str):
+        return False
+    stripped = value.strip()
+    return len(stripped) >= _MIN_TOKEN_LEN and not any(c.isspace() for c in stripped)
+
+
+def _configured_oauth_token() -> str | None:
+    """Operator-configured OAuth token for the nested CLI, or ``None``.
+
+    Precedence: the ``REMEMBER_OAUTH_TOKEN`` env var, then a ``haiku.oauth_token``
+    key in config.json (``$REMEMBER_DIR/config.json`` if set, else the
+    user-global ``~/.remember/config.json``). Best-effort: any missing file,
+    read error, or malformed JSON yields ``None`` and never raises.
+    """
+    env_token = os.environ.get("REMEMBER_OAUTH_TOKEN", "").strip()
+    if _looks_like_token(env_token):
+        return env_token
+
+    candidates = []
+    remember_dir = os.environ.get("REMEMBER_DIR", "").strip()
+    if remember_dir:
+        candidates.append(os.path.join(remember_dir, "config.json"))
+    candidates.append(os.path.join(os.path.expanduser("~"), ".remember", "config.json"))
+
+    for path in candidates:
+        try:
+            with open(path, encoding="utf-8") as f:
+                cfg = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if isinstance(cfg, dict):
+            haiku_cfg = cfg.get("haiku")
+            token = haiku_cfg.get("oauth_token") if isinstance(haiku_cfg, dict) else None
+            if _looks_like_token(token):
+                return token.strip()
+    return None
+
+
+def _inject_configured_oauth_token(env: dict[str, str]) -> dict[str, str]:
+    """Fill CLAUDE_CODE_OAUTH_TOKEN from operator config when the child env
+    lacks it (see the note above).
+
+    Never overrides a value already present — the host-provided credential wins.
+    Never raises: token resolution is entirely best-effort.
+    """
+    if env.get("CLAUDE_CODE_OAUTH_TOKEN"):
+        return env
+    token = _configured_oauth_token()
+    if token:
+        env["CLAUDE_CODE_OAUTH_TOKEN"] = token
+    return env
+
+
 def call_haiku(
     prompt: str,
     tools: list[str] | None = None,
@@ -212,6 +287,7 @@ def call_haiku(
     ]
 
     env = _child_env()
+    env = _inject_configured_oauth_token(env)
 
     try:
         result = subprocess.run(

@@ -24,8 +24,20 @@
   "time_format": "24h",
   "model": "haiku",
   "reject_pattern": "",
+  "haiku": {
+    "oauth_token": ""
+  },
 
   "_comments": {
+    "haiku.oauth_token": [
+      "OAuth token the plugin hands to the nested `claude -p` ONLY when the host",
+      "did not put CLAUDE_CODE_OAUTH_TOKEN in the hook subprocess environment.",
+      "Some desktop / Agent-SDK hosts withhold it from spawned children, so the",
+      "summarization call is unauthenticated and nothing ever saves (#129/#131).",
+      "Create one with `claude setup-token`. The plugin holds this credential and",
+      "passes it to the CLI — set it deliberately. A host-provided token always",
+      "wins; the REMEMBER_OAUTH_TOKEN env var overrides this. Blank = disabled."
+    ],
     "consolidate_max_bytes": [
       "Skip-guard cap (UTF-8 bytes) on the assembled consolidation prompt",
       "(staging + recent.md + archive.md). Default 600000. If the prompt would",

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Nothing saved when the host withholds `CLAUDE_CODE_OAUTH_TOKEN` from hook subprocesses** — keeping the token in `_CHILD_ENV_KEEP` ([#131](https://github.com/Digital-Process-Tools/claude-remember/issues/131)) only helps when it is in the environment to begin with. Some hosts (the Claude Code desktop / Agent SDK host, observed on Windows) redact `CLAUDE_CODE_OAUTH_TOKEN` from every spawned tool and hook process, so `os.environ` holds nothing for `_child_env` to keep and the nested `claude -p` is unauthenticated again — the same silent-save outage as [#129](https://github.com/Digital-Process-Tools/claude-remember/issues/129), on a machine where the operator *had* run `claude setup-token`. `call_haiku` now accepts an operator-configured fallback token — `REMEMBER_OAUTH_TOKEN`, or `haiku.oauth_token` in `config.json` — used **only** when the child env lacks a token (a host-provided one always wins). The value is shape-checked before use so a blank or malformed entry fails at configuration time rather than as a confusing 401. Consent-based and cross-platform: the operator hands the plugin a token deliberately; nothing is recovered from OS credential storage the platform withheld.
+
 ## [0.8.7] — Everything that failed in silence
 
 Nine issues, one shape: memory not written, and nothing anywhere saying so. Six were reported by users who had already done the diagnosis — several arrived with a verified patch, the exact call sites, and in one case a correct prediction of which tests would break. Manifest bumped per [#133](https://github.com/Digital-Process-Tools/claude-remember/issues/133).

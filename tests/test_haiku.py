@@ -340,6 +340,66 @@ def test_call_haiku_keeps_oauth_token(mock_run, monkeypatch):
 
 
 @patch("pipeline.haiku.subprocess.run")
+def test_call_haiku_uses_configured_token_from_env(mock_run, monkeypatch, tmp_path):
+    """When the host withholds CLAUDE_CODE_OAUTH_TOKEN from the child env, an
+    operator-set REMEMBER_OAUTH_TOKEN is passed to the nested CLI (#129/#131)."""
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.setenv("REMEMBER_OAUTH_TOKEN", "sk-ant-oat-configured-value-123456")
+    monkeypatch.setenv("REMEMBER_DIR", str(tmp_path))
+    mock_run.return_value = MagicMock(
+        returncode=0, stdout=_mock_claude_response("x"), stderr="")
+    call_haiku("p")
+    env = mock_run.call_args[1]["env"]
+    assert env.get("CLAUDE_CODE_OAUTH_TOKEN") == "sk-ant-oat-configured-value-123456"
+
+
+@patch("pipeline.haiku.subprocess.run")
+def test_call_haiku_configured_token_does_not_override_host(mock_run, monkeypatch):
+    """A host-provided CLAUDE_CODE_OAUTH_TOKEN wins; the configured fallback is
+    not consulted."""
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-from-host-00000000")
+    monkeypatch.setenv("REMEMBER_OAUTH_TOKEN", "sk-ant-oat-configured-value-123456")
+    mock_run.return_value = MagicMock(
+        returncode=0, stdout=_mock_claude_response("x"), stderr="")
+    call_haiku("p")
+    env = mock_run.call_args[1]["env"]
+    assert env.get("CLAUDE_CODE_OAUTH_TOKEN") == "sk-ant-oat-from-host-00000000"
+
+
+@patch("pipeline.haiku.subprocess.run")
+def test_call_haiku_reads_configured_token_from_config_file(mock_run, monkeypatch, tmp_path):
+    """With no token in the environment, `haiku.oauth_token` from config.json is
+    used."""
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.delenv("REMEMBER_OAUTH_TOKEN", raising=False)
+    monkeypatch.setenv("REMEMBER_DIR", str(tmp_path))
+    monkeypatch.setattr("pipeline.haiku.os.path.expanduser", lambda p: str(tmp_path))
+    (tmp_path / "config.json").write_text(
+        json.dumps({"haiku": {"oauth_token": "sk-ant-oat-from-config-file-1234"}}),
+        encoding="utf-8")
+    mock_run.return_value = MagicMock(
+        returncode=0, stdout=_mock_claude_response("x"), stderr="")
+    call_haiku("p")
+    env = mock_run.call_args[1]["env"]
+    assert env.get("CLAUDE_CODE_OAUTH_TOKEN") == "sk-ant-oat-from-config-file-1234"
+
+
+@patch("pipeline.haiku.subprocess.run")
+def test_call_haiku_rejects_malformed_configured_token(mock_run, monkeypatch, tmp_path):
+    """A too-short or whitespace-bearing configured value is not injected — it
+    should fail at config time, not as a confusing 401 from a garbage token."""
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.setenv("REMEMBER_OAUTH_TOKEN", "too short")
+    monkeypatch.setenv("REMEMBER_DIR", str(tmp_path))
+    monkeypatch.setattr("pipeline.haiku.os.path.expanduser", lambda p: str(tmp_path))
+    mock_run.return_value = MagicMock(
+        returncode=0, stdout=_mock_claude_response("x"), stderr="")
+    call_haiku("p")
+    env = mock_run.call_args[1]["env"]
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
+
+
+@patch("pipeline.haiku.subprocess.run")
 def test_call_haiku_timeout(mock_run):
     from subprocess import TimeoutExpired
     mock_run.side_effect = TimeoutExpired("claude", 120)
