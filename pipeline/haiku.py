@@ -125,6 +125,60 @@ def _child_env() -> dict[str, str]:
     }
 
 
+def _usage_from_failure(stdout: object) -> TokenUsage | None:
+    """Token counts out of a FAILED call's output, when it carried any.
+
+    ``--output-format json`` makes the CLI report errors as a JSON object on
+    stdout (that is what #129 was about), and that object can carry the same
+    usage block a success does. A timeout usually leaves nothing parseable —
+    the process was killed mid-write — so this returns None more often than not.
+    """
+    if isinstance(stdout, bytes):
+        try:
+            stdout = stdout.decode("utf-8", errors="replace")
+        except Exception:
+            return None
+    if not isinstance(stdout, str) or not stdout.strip():
+        return None
+    try:
+        payload = json.loads(stdout)
+    except ValueError:
+        return None
+    if isinstance(payload, list):
+        payload = payload[-1] if payload else {}
+    if not isinstance(payload, dict):
+        return None
+    usage = _extract_tokens(payload)
+    # An all-zero reading means the payload had no usage block at all, which is
+    # not the same as a call that cost nothing — say unknown rather than free.
+    if usage.input or usage.output or usage.cache:
+        return usage
+    return None
+
+
+def _log_failed_spend(what_happened: str, stdout: object) -> None:
+    """Record what a call that FAILED cost (#190).
+
+    Every accounting path in the pipeline hangs off a returned result, and a
+    failure returns none — so a run where the model times out repeatedly showed
+    errors in the log and zero reported cost, which reads as "it failed for
+    free". It did not: a client-side timeout aborts a call the API has already
+    been billing, and a mid-stream error has already consumed input.
+
+    "unknown" is the honest answer when the payload carries no usage. Zero is
+    not.
+    """
+    usage = _usage_from_failure(stdout)
+    if usage is not None:
+        _warn(f"call {what_happened} after spending tokens: {usage}")
+    else:
+        _warn(
+            f"call {what_happened}; tokens already spent are unknown — the "
+            "failure carried no usage block, so this run's reported cost is "
+            "lower than what it actually cost"
+        )
+
+
 # Cap on the failure detail carried into the exception: enough to identify an
 # auth error or a rate limit, not enough to dump a whole JSON payload into the
 # log on every failure.
@@ -380,10 +434,14 @@ def call_haiku(
             env=env,
             cwd=tempfile.gettempdir(),
         )
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as timed_out:
+        # A client-side timeout aborts a call the API has already been billing.
+        # Whatever partial output arrived is the only evidence of what it cost.
+        _log_failed_spend(f"timed out after {timeout}s", timed_out.stdout)
         raise RuntimeError(f"claude timed out after {timeout}s")
 
     if result.returncode != 0:
+        _log_failed_spend(f"exited {result.returncode}", result.stdout)
         raise RuntimeError(
             f"claude exited {result.returncode}: "
             f"{_failure_detail(result.stdout, result.stderr)}"

@@ -164,6 +164,37 @@ session_dir_slug() {
     # directory exactly the way the locale bug did. Convert it here, where bash
     # still has the string whole.
     local _orig="$path"
+
+    # The byte table below is exact for well-formed UTF-8 and only for that. A
+    # lead byte missing its continuations gets one dash per byte here, where the
+    # real decoder folds it into a single replacement character by the
+    # maximal-subpart rule. macOS enforces well-formed UTF-8 and Windows paths
+    # come from UTF-16, but Linux enforces nothing — every byte except / and NUL
+    # is a legal filename, so a legacy-encoded or corrupted directory name gets
+    # here (#186).
+    #
+    # Expressing maximal-subpart needs the decoder's state machine, which sed
+    # does not have and Python does. So: ask Python, but only for a path that is
+    # both non-ASCII AND actually malformed. An all-ASCII path — the overwhelming
+    # majority, and this function runs on every tool call — never even reaches
+    # the `iconv` check, let alone the subprocess.
+    case "$path" in
+        *[!$' \t'-~]*)
+            if command -v iconv >/dev/null 2>&1 \
+                && ! printf '%s' "$path" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1; then
+                local _py_slug="${PIPELINE_DIR:-}/pipeline/slug.py"
+                if [ -f "$_py_slug" ]; then
+                    local _decoded
+                    _decoded=$("${PYTHON:-python3}" "$_py_slug" "$path" 2>/dev/null) \
+                        && [ -n "$_decoded" ] && { printf '%s\n' "$_decoded"; return 0; }
+                fi
+                # No Python to ask: fall through to the byte table, which is
+                # wrong for this input in a known and documented way rather than
+                # failing.
+            fi
+            ;;
+    esac
+
     path=${path//$'\n'/-}
     local _slug
     _slug=$(printf '%s\n' "$path" | LC_ALL=C sed "${_REMEMBER_SLUG_SED[@]}")

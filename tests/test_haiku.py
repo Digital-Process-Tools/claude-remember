@@ -520,6 +520,61 @@ def test_merged_config_wins_over_raw_project_config(mock_run, monkeypatch, tmp_p
 
 
 @patch("pipeline.haiku.subprocess.run")
+def test_a_failed_call_reports_what_it_spent(mock_run, monkeypatch, tmp_path):
+    """#190: a non-zero exit still cost money if the payload says so."""
+    monkeypatch.setenv("REMEMBER_DIR", str(tmp_path))
+    mock_run.return_value = MagicMock(
+        returncode=1,
+        stdout=json.dumps({
+            "error": {"message": "overloaded"},
+            "usage": {"input_tokens": 8123, "output_tokens": 44,
+                      "cache_read_input_tokens": 900},
+        }),
+        stderr="",
+    )
+
+    with pytest.raises(RuntimeError):
+        call_haiku("p")
+
+    logged = _log_text(tmp_path)
+    assert "8123" in logged and "44" in logged, (
+        f"a failed call spent 8123 input tokens and left no record:\n{logged}"
+    )
+
+
+@patch("pipeline.haiku.subprocess.run")
+def test_a_failure_with_no_usage_says_unknown_not_zero(mock_run, monkeypatch, tmp_path):
+    """Zero would read as "it failed for free", which is the invisibility this
+    closes. Unknown is the honest answer."""
+    monkeypatch.setenv("REMEMBER_DIR", str(tmp_path))
+    mock_run.return_value = MagicMock(
+        returncode=1, stdout='{"error": {"message": "boom"}}', stderr="")
+
+    with pytest.raises(RuntimeError):
+        call_haiku("p")
+
+    logged = _log_text(tmp_path)
+    assert "unknown" in logged, f"no honest account of the failed call:\n{logged}"
+
+
+@patch("pipeline.haiku.subprocess.run")
+def test_a_timeout_is_accounted_for_too(mock_run, monkeypatch, tmp_path):
+    """A client-side timeout aborts a call the API has already been billing."""
+    from subprocess import TimeoutExpired
+
+    monkeypatch.setenv("REMEMBER_DIR", str(tmp_path))
+    mock_run.side_effect = TimeoutExpired("claude", 180)
+
+    with pytest.raises(RuntimeError):
+        call_haiku("p", timeout=180)
+
+    logged = _log_text(tmp_path)
+    assert "timed out" in logged and "unknown" in logged, (
+        f"a 180s timeout left no cost record at all:\n{logged}"
+    )
+
+
+@patch("pipeline.haiku.subprocess.run")
 def test_call_haiku_timeout(mock_run):
     from subprocess import TimeoutExpired
     mock_run.side_effect = TimeoutExpired("claude", 120)

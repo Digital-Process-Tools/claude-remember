@@ -232,6 +232,74 @@ def test_the_long_path_hash_survives_without_python():
     )
 
 
+# Ill-formed UTF-8: legal on Linux, where filenames are bytes. The real decoder
+# folds each ill-formed sequence into ONE replacement character by the
+# maximal-subpart rule; the sed byte table gives one dash per byte, which is the
+# divergence #186 was opened for.
+MALFORMED = [
+    b"ab\xe0\xa0cd",          # 3-byte lead, one continuation, then ASCII
+    b"x\xf0\x90y",            # 4-byte lead truncated mid-sequence
+    b"/tmp/\xff\xfe/x",       # bytes that begin nothing at all
+    b"/tmp/caf\xe9",          # Latin-1 "café" — the classic legacy filename
+]
+
+
+@pytest.mark.parametrize("raw", MALFORMED)
+def test_malformed_utf8_matches_the_decoder(raw):
+    """#186: the shell delegates these to the decoder rather than guessing.
+
+    `errors="replace"` is Python's implementation of the same maximal-subpart
+    rule the platform decoder uses, so it stands in for the oracle here.
+    """
+    decoded = raw.decode("utf-8", "replace")
+    expected = js_slug(decoded)
+
+    script = f"""
+    PIPELINE_DIR="{REPO_ROOT}"
+    source "{LIB_SLUG_SH}"
+    session_dir_slug "$1"
+    """
+    result = subprocess.run(
+        ["bash", "-c", script, "bash", raw.decode("utf-8", "surrogateescape")],
+        capture_output=True, text=True, errors="replace",
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.rstrip("\n") == expected, (
+        f"{raw!r}: shell gave {result.stdout.rstrip()!r}, the decoder says "
+        f"{expected!r} — one dash per bad byte instead of one per ill-formed "
+        "sequence"
+    )
+
+
+def test_well_formed_paths_never_reach_the_subprocess(tmp_path):
+    """The delegation must not cost anything on the common path.
+
+    session_dir_slug runs on every tool call. If a valid UTF-8 path — or worse,
+    an ASCII one — started shelling out to Python, that would be a real
+    regression traded for a rare correctness fix.
+    """
+    marker = tmp_path / "python-was-called"
+    fake_python = tmp_path / "python3"
+    fake_python.write_text(
+        f"#!/usr/bin/env bash\ntouch '{marker}'\nexit 1\n", encoding="utf-8"
+    )
+    fake_python.chmod(0o755)
+
+    for path in ("/tmp/plain-ascii", "/tmp/café/日本語/🎉"):
+        script = f"""
+        PIPELINE_DIR="{REPO_ROOT}"
+        PYTHON="{fake_python}"
+        source "{LIB_SLUG_SH}"
+        session_dir_slug "$1" >/dev/null
+        """
+        subprocess.run(["bash", "-c", script, "bash", path],
+                       capture_output=True, text=True)
+        assert not marker.exists(), (
+            f"{path!r} shelled out to Python — well-formed paths must stay in "
+            "the byte table"
+        )
+
+
 def test_a_hash_that_is_not_base36_is_refused(tmp_path):
     """The hash arrives from another file resolved through PIPELINE_DIR.
 

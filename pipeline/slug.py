@@ -35,6 +35,8 @@ Two details do all the damage:
 
 from __future__ import annotations
 
+import os
+
 SLUG_MAX = 200
 
 _BASE36_DIGITS = "0123456789abcdefghijklmnopqrstuvwxyz"
@@ -100,7 +102,20 @@ def main(argv: list[str]) -> int:
     if len(args) != 1:
         print("usage: python3 -m pipeline.slug [--hash] <path>")
         return 2
-    print(path_hash(args[0]) if want_hash else session_dir_slug(args[0]))
+
+    # argv arrives through the filesystem encoding, so bytes that are not valid
+    # UTF-8 reach here as surrogate escapes — one per bad byte. Decoding them
+    # the way the real decoder does collapses each ill-formed sequence into a
+    # single replacement character by the maximal-subpart rule, which is the
+    # whole reason the shell delegates a malformed path here at all (#186).
+    # Library callers already hold a proper str and are unaffected.
+    raw = args[0]
+    try:
+        raw = os.fsencode(raw).decode("utf-8", "replace")
+    except (UnicodeError, ValueError):
+        pass
+
+    print(path_hash(raw) if want_hash else session_dir_slug(raw))
     return 0
 
 

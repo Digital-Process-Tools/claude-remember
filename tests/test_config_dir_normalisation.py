@@ -177,6 +177,73 @@ def test_the_bash_and_python_builders_agree(tmp_path):
 
 # ── The Python half, which needs no bash and therefore runs on Windows ───────
 
+def _windows_bash() -> str | None:
+    """Git Bash on a Windows runner, or None. NOT the WSL launcher in System32,
+    which CreateProcess finds first on PATH."""
+    if sys.platform != "win32":
+        return "bash"
+    for var in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"):
+        base = os.environ.get(var)
+        if not base:
+            continue
+        for rel in ("Git/bin/bash.exe", "Git/usr/bin/bash.exe"):
+            cand = Path(base) / rel
+            if cand.is_file():
+                return str(cand)
+    return None
+
+
+def test_both_builders_reach_the_same_directory(tmp_path):
+    """#194: the two builders produce different STRINGS on Windows.
+
+    `lib-slug.sh` hands bash a POSIX path; `extract.py` hands Python a native
+    one. Each consumer needs the form its own runtime can open, so identical
+    strings is the wrong invariant — the right one is that both name the same
+    directory. Nobody had established that, which is exactly the "MSYS probably
+    handles it" reasoning #169 was filed about.
+
+    So: create the directory from the Python side, then ask bash — through its
+    own builder — whether it is there. On Windows that is a real answer rather
+    than an argument; on POSIX it is the same assertion, cheaply.
+    """
+    bash = _windows_bash()
+    if bash is None:
+        pytest.skip("no Git Bash on this Windows runner")
+
+    from pipeline.extract import _session_dir
+
+    config_dir = tmp_path / "cfg"
+    old = os.environ.get("CLAUDE_CONFIG_DIR")
+    os.environ["CLAUDE_CONFIG_DIR"] = str(config_dir)
+    try:
+        python_side = Path(_session_dir(str(tmp_path / "proj")))
+        python_side.mkdir(parents=True)
+        (python_side / "marker.jsonl").write_text("{}", encoding="utf-8")
+
+        # The bash builder gets only CLAUDE_CONFIG_DIR — it computes the rest.
+        script = (
+            f'source "{LIB_SLUG_SH}"; '
+            'd="$(claude_projects_dir)/$(session_dir_slug "$1")"; '
+            '[ -f "$d/marker.jsonl" ] && echo FOUND || echo "MISSING: $d"'
+        )
+        result = subprocess.run(
+            [bash, "-c", script, "bash", str(tmp_path / "proj")],
+            env={**os.environ, "PIPELINE_DIR": str(REPO_ROOT)},
+            capture_output=True, text=True,
+        )
+    finally:
+        if old is None:
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        else:
+            os.environ["CLAUDE_CONFIG_DIR"] = old
+
+    assert "FOUND" in result.stdout, (
+        "the shell could not find the transcript directory the Python side "
+        f"created — the two builders do not name the same place:\n"
+        f"{result.stdout}{result.stderr}"
+    )
+
+
 @pytest.mark.parametrize("config_dir", [
     r"C:\Users\dev\.claude-alt",
     "C:/Users/dev/.claude-alt",
