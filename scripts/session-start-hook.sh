@@ -40,9 +40,14 @@
 # resolve-paths.sh exits its caller on failure by default (a caller that keeps
 # going with unresolved paths writes memory to the wrong place). This hook is
 # documented to never block session startup, so it opts into soft failure and
-# handles the status itself. Most likely to fail here for a NESTED `claude -p`
-# session (e.g. the remember pipeline's own Haiku call): it has no
-# CLAUDE_PROJECT_DIR and isn't a real project, so just no-op.
+# handles the status itself, no-oping on any unresolvable root.
+#
+# This used to claim the nested `claude -p` summarizer would fail here because
+# it "has no CLAUDE_PROJECT_DIR". It has one: Claude Code sets it afresh in the
+# child from that session's cwd, so resolution SUCCEEDED and the hook ran with
+# the temp dir as its project (#204). resolve-paths.sh now stops on the
+# REMEMBER_NESTED_SUMMARIZER marker instead, and returns 1 into the `|| exit 0`
+# below.
 REMEMBER_PATHS_SOFT_FAIL=1 source "$(dirname "$0")/resolve-paths.sh" || exit 0
 source "$(dirname "$0")/detect-tools.sh"
 source "$(dirname "$0")/bootstrap-dirs.sh"

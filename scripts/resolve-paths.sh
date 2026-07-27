@@ -43,12 +43,34 @@
 # ENVIRONMENT (opt-in)
 #   REMEMBER_PATHS_SOFT_FAIL=1   Signal failure with `return 1` instead of
 #                                exiting the caller. Set by the hook scripts.
+#   REMEMBER_NESTED_SUMMARIZER   Set by pipeline/haiku.py on the nested
+#                                `claude -p` it spawns. There is no project
+#                                here — resolve nothing and stop.
 #
 # RETURN CODES
 #   1   Path resolution failed, and the caller opted into soft failure.
 #       Without the opt-in, resolution failure exits the caller with 1.
 #
 # ============================================================================
+
+# --- Nested summarizer: there is no project here (#204) ---
+# The Haiku call in pipeline/haiku.py runs `claude -p` with cwd=gettempdir().
+# Claude Code loads plugins in that child and derives its CLAUDE_PROJECT_DIR
+# from that cwd, so every hook this plugin registers fires inside the
+# summarizer with the temp dir as its "project" — scaffolding a memory
+# directory under the temp dir's slug and injecting session-start output into
+# the summarizer's own context.
+#
+# The guard belongs here rather than in any one hook: SessionStart,
+# UserPromptSubmit and PostToolUse are all registered, all source this file,
+# and each one alone is enough to create the directory. This is the only place
+# that covers all three, and the only place a fourth hook would inherit it.
+if [ -n "${REMEMBER_NESTED_SUMMARIZER:-}" ]; then
+    if [ "${REMEMBER_PATHS_SOFT_FAIL:-0}" = "1" ]; then
+        return 1
+    fi
+    exit 0
+fi
 
 # --- Restrict file creation permissions ---
 # Prevent log files, memory files, and temp files from being world/group readable.
