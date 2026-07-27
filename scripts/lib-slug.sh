@@ -131,7 +131,9 @@ claude_projects_dir() {
 # Only where such a path can exist. macOS enforces well-formed UTF-8 in
 # filenames and Windows paths come from UTF-16; Linux enforces nothing, so it is
 # the only platform that can hand us one. $OSTYPE is a bash variable, not a
-# fork, and that matters. Measured, 200 calls each:
+# fork, and that matters. Measured with scripts/bench-slug.sh (macOS, bash 3.2,
+# 200 calls each) — absolute numbers are machine-specific and subprocess-spawn
+# dominated; the ratios are the point:
 #
 #   platform      ASCII    valid non-ASCII    ill-formed
 #   non-Linux     2.1ms    2.1ms              2.2ms        (never checked)
@@ -147,7 +149,9 @@ claude_projects_dir() {
 # locally is a fix nobody maintains.
 _remember_should_check_utf8() {
     [ "${REMEMBER_UTF8_STRICT:-0}" = "1" ] && return 0
-    case "$OSTYPE" in
+    # ${OSTYPE:-}: bash always sets it, but this file is sourced by callers
+    # running under `set -u`, and one unguarded expansion there aborts the hook.
+    case "${OSTYPE:-}" in
         linux*) return 0 ;;
     esac
     return 1
@@ -211,11 +215,12 @@ session_dir_slug() {
     # controls, which are always valid single-byte ASCII and could never be what
     # this looks for; they paid for a check that can only answer yes.
     #
-    # The range starts at \001, not \000: bash cannot hold a NUL in a string, so
-    # $'\000' expands to NOTHING and the bracket silently degenerates into
-    # `[!-\177]` — "any character except - and DEL" — which matches essentially
-    # every path. That reads as a tighter test and is the loosest possible one.
-    # A NUL cannot appear in an argv string anyway, so nothing is lost.
+    # The range starts at \001, not \000, and that is not a style choice: bash
+    # cannot hold a NUL in a string, so $'\000' expands to NOTHING and the
+    # bracket degenerates into `[!-\177]` — "any character except - and DEL" —
+    # which matches essentially every path. The tightest-looking form of this
+    # test is the loosest one, and it costs a fork per tool call. A NUL cannot
+    # appear in an argv string anyway, so starting at \001 loses nothing.
     case "$path" in
         *[!$'\001'-$'\177']*)
             if command -v iconv >/dev/null 2>&1 \
