@@ -39,6 +39,15 @@ PLUGIN_ROOT="$PIPELINE_DIR"
 PROJECT="$PROJECT_DIR"
 source "$PLUGIN_ROOT/scripts/log.sh" 2>/dev/null
 log "hook" "post-tool: PROJECT_DIR=$PROJECT_DIR PIPELINE_DIR=$PIPELINE_DIR PYTHON=$PYTHON REMEMBER_DIR=$REMEMBER_DIR"
+# "PostToolUse ran at all" (#200) — written here, before every early exit
+# below, because the question the doctor asks is whether this hook is WIRED,
+# and the answers to that and to "did it find a transcript" are different.
+# Putting it after the transcript check made it unwritable in exactly the
+# slug-mismatch case (#144) it most needed to distinguish, so the doctor told
+# those users the hook had never fired and to restart Claude Code — advice
+# that does nothing for a wrong slug.
+: > "$REMEMBER_DIR/tmp/post-tool-ran" 2>/dev/null || true
+
 SAVE_SCRIPT="$PLUGIN_ROOT/scripts/save-session.sh"
 LAST_SAVE_FILE="$REMEMBER_DIR/tmp/last-save.json"
 PID_FILE="$REMEMBER_DIR/tmp/save-session.pid"
@@ -83,15 +92,26 @@ rm -f "$REMEMBER_DIR/tmp/no-transcript-notice" 2>/dev/null
 CURRENT_LINES=$(wc -l < "$LATEST_JSONL" | tr -d ' ')
 SESSION_ID=$(basename "$LATEST_JSONL" .jsonl)
 
-# Sign of life for the capture-gap check in session-start-hook.sh (#200).
-# Written unconditionally, before any throttle or early return below: the
-# question this answers is "did PostToolUse run at all", not "did it save".
+# Which session PostToolUse serviced, for the capture-gap check in
+# session-start-hook.sh (#200). Distinct from the post-tool-ran marker above:
+# that one answers "is this hook wired", this one answers "for which session",
+# and it can only be written once a transcript has actually been found.
+#
+# Before any throttle or early return BELOW this line: the question is "did it
+# run for this session", not "did it save".
 #
 # The SESSION ID, not a timestamp. `-nt` compares mtimes at one-second
 # granularity under bash 3.2, so a sign of life landing in the same second as
 # the session-start stamp read as "not newer" and reported a healthy session as
 # broken. Identity has no clock to lose to.
-printf '%s' "$SESSION_ID" > "$REMEMBER_DIR/tmp/capture-alive" 2>/dev/null || true
+# Written via rename, the same lesson last-save.json learned in #140: a plain
+# redirect truncates first, so a process killed between truncate and write
+# leaves an EMPTY marker — which matches no session id, and the next
+# SessionStart reports a healthy session as a gap.
+if printf '%s' "$SESSION_ID" > "$REMEMBER_DIR/tmp/capture-alive.$$" 2>/dev/null; then
+    mv -f "$REMEMBER_DIR/tmp/capture-alive.$$" "$REMEMBER_DIR/tmp/capture-alive" 2>/dev/null \
+        || rm -f "$REMEMBER_DIR/tmp/capture-alive.$$" 2>/dev/null || true
+fi
 
 # --- Get last saved position (from last-save.json) ---
 # Positions are keyed by session (issue #140), so ask for THIS session rather

@@ -136,7 +136,9 @@ echo "-- Tools --"
 _DT_LOG=$(source "$SCRIPT_DIR/detect-tools.sh" 2>&1 1>/dev/null)
 _DT_STATUS=$?
 
+_PYTHON_OK=1
 if [ "$_DT_STATUS" -ne 0 ]; then
+    _PYTHON_OK=0
     echo "FAIL Python: ${_DT_LOG:-no usable python found (tried python3, python, py -3, py)}"
     echo "WARN jq: skipped (python detection failed first)"
 else
@@ -194,9 +196,19 @@ _file_age_seconds() {
     return 0
 }
 
+# "Has the hook run at all" is a different question from "which session did it
+# service", and conflating them is what made this report tell a slug-mismatch
+# victim to restart Claude Code. post-tool-ran is written before every early
+# exit in the hook; capture-alive only after a transcript is found.
+_RAN_MARKER="$REMEMBER_DIR/tmp/post-tool-ran"
 _ALIVE_MARKER="$REMEMBER_DIR/tmp/capture-alive"
 _POST_TOOL_FIRED=0
-if [ -f "$_ALIVE_MARKER" ]; then
+if [ -f "$_RAN_MARKER" ] && [ ! -f "$_ALIVE_MARKER" ]; then
+    echo "WARN PostToolUse is wired and running, but has not serviced a session"
+    echo "     — it is exiting early. The cause is above: most often the session"
+    echo "     dir slug (#144), or a Python it cannot find. Restarting will not help."
+    _POST_TOOL_FIRED=1
+elif [ -f "$_ALIVE_MARKER" ]; then
     _ALIVE_AGE=$(_file_age_seconds "$_ALIVE_MARKER")
     if [ -n "$_ALIVE_AGE" ]; then
         echo "OK   PostToolUse marker present (${_ALIVE_AGE}s old): $_ALIVE_MARKER"
@@ -279,12 +291,20 @@ fi
 echo ""
 
 # ── Verdict ──────────────────────────────────────────────────────────────────
+# Order matters more than it looks. Every one of these ends with "capture is
+# not running", but they need different actions, and the generic
+# "restart Claude Code" was previously reached FIRST — so a missing Python and
+# a mismatched slug were both answered with a restart that fixes neither, on a
+# line commands/doctor.md tells the operator not to second-guess. Specific
+# causes are named before the general one.
 if [ "$_POST_TOOL_FIRED" -eq 1 ] && [ -n "$_LAST_SAVE_TIME" ]; then
     echo "VERDICT: capture is working — last save $_LAST_SAVE_TIME"
+elif [ "$_PYTHON_OK" -eq 0 ]; then
+    echo "VERDICT: problem — no usable Python; the pipeline cannot run at all (see Tools above)"
+elif [ -n "$_SESSION_DIR" ] && [ ! -d "$_SESSION_DIR" ]; then
+    echo "VERDICT: problem — session dir slug does not match Claude Code's transcript directory (#144); restarting will not help"
 elif [ "$_POST_TOOL_FIRED" -eq 0 ]; then
     echo "VERDICT: problem — PostToolUse has never fired; restart Claude Code (see REMEDIATION above)"
-elif [ ! -d "$_SESSION_DIR" ]; then
-    echo "VERDICT: problem — session dir slug does not match Claude Code's transcript directory (#144)"
 else
     echo "VERDICT: problem — PostToolUse has fired but no save has completed yet; check hook-errors.log above"
 fi

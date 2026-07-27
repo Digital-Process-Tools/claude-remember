@@ -58,8 +58,17 @@ def _project(tmp_path: Path):
     session_dir = home / ".claude" / "projects" / _slug(str(project))
     session_dir.mkdir(parents=True)
     (remember / "tmp").mkdir(parents=True)
-    # Recovery forks save-session.sh in the background; these tests are about
-    # the notice, not recovery, and a stray fork would outlive them.
+    # NOTE: this config write is INERT under this harness, and saying so is the
+    # point. `_LIB_MEMORY_DIR_LOADED=1` in the env below makes lib-memory-dir.sh
+    # return before it merges the config layers, so REMEMBER_CONFIG is never
+    # exported and log.sh's config() falls back to each caller's default —
+    # `features.recovery` reads as true regardless of what is written here.
+    #
+    # Recovery still does not fire, but for a different reason: it also needs
+    # tmp/last-save.json, which these fixtures do not create. Anyone copying
+    # this pattern into a test that DOES create last-save.json will get a
+    # stray background save-session.sh fork, not the suppression this looks
+    # like it buys.
     (remember / "config.json").write_text(
         json.dumps({"features": {"recovery": False}}), encoding="utf-8"
     )
@@ -74,9 +83,17 @@ def _transcripts(session_dir: Path, *, previous: str, current: str = PLAIN_LINE)
     """
     prev = session_dir / "sess-prev.jsonl"
     prev.write_text(previous)
-    time.sleep(0.05)
     cur = session_dir / "sess-cur.jsonl"
     cur.write_text(current)
+    # Explicit, widely spaced mtimes rather than a sleep. `ls -t` orders by
+    # mtime, and this feature has already been bitten once by assuming
+    # sub-second mtime resolution — bash's `-nt` works to the second, which is
+    # why the hook compares identities now. A 50ms sleep would reproduce that
+    # same fragility in the test harness on a coarse filesystem or a loaded
+    # runner, so the ordering is stated outright instead of raced for.
+    now = int(time.time())
+    os.utime(prev, (now - 120, now - 120))
+    os.utime(cur, (now, now))
     return prev, cur
 
 
@@ -166,26 +183,30 @@ def test_a_previous_session_with_no_tool_calls_raises_nothing(tmp_path):
     )
 
 
-def test_the_first_ever_session_raises_nothing(tmp_path):
-    """No prior stamp means no prior session to judge. A fresh install must not
-    greet its user with a warning about something that never happened."""
+def test_the_check_is_not_gated_on_having_run_before(tmp_path):
+    """The whole point, and the thing the first cut got backwards.
+
+    That version required a prior session-start stamp, so a fresh install
+    would not be warned about a session that predated it. It sounds right and
+    it defeats the feature: during a mid-session enable NO hook runs, so no
+    stamp is ever written, so the one incident this exists to report is the
+    exact case it stayed silent for. It could only have caught a recurrence.
+    """
     home, project, remember, session_dir = _project(tmp_path)
     _transcripts(session_dir, previous=TOOL_USE_LINE * 5)
+    # No stamp, no capture-alive: the state a mid-session enable leaves behind.
 
     _run(SESSION_START, _env(home, project, remember))
 
-    assert not (remember / "tmp" / "capture-gap-notice").exists()
-
-
-def test_session_start_always_refreshes_its_stamp(tmp_path):
-    """Without this the check has no clock and every later session re-reports
-    the same gap forever."""
-    home, project, remember, session_dir = _project(tmp_path)
-    _transcripts(session_dir, previous=PLAIN_LINE)
-
-    _run(SESSION_START, _env(home, project, remember))
-
-    assert (remember / "tmp" / "capture-session-start").exists()
+    notice = remember / "tmp" / "capture-gap-notice"
+    assert notice.exists(), (
+        "stayed silent for the originating incident — the only one that "
+        "actually happened to the reporter"
+    )
+    assert "installed or enabled" in notice.read_text(), (
+        "a fresh install sees this too, so the wording has to cover both "
+        "without alarming someone whose plugin is working fine"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -211,6 +232,37 @@ def test_the_notice_is_delivered_as_a_system_message(tmp_path):
         "context injection was dropped on the notice path"
     )
     assert not notice.exists(), "notice was not consumed — it would repeat forever"
+
+
+def test_a_failing_jq_can_never_eat_the_prompt(tmp_path):
+    """On UserPromptSubmit, exit 2 blocks the prompt AND ERASES what the user
+    typed. Left as the script's last command, jq's own status became the
+    hook's — so a jq usage error (exit 2) would destroy the user's input on
+    every prompt with a notice pending. A cosmetic notice must never be able
+    to do that.
+    """
+    home, project, remember, session_dir = _project(tmp_path)
+    (remember / "tmp" / "capture-gap-notice").write_text("something to say")
+
+    bindir = tmp_path / "badjq"
+    bindir.mkdir()
+    fake = bindir / "jq"
+    fake.write_text('#!/bin/sh\necho "jq: Unknown option" >&2\nexit 2\n')
+    fake.chmod(0o755)
+
+    env = _env(home, project, remember)
+    env["JQ"] = str(fake)
+    result = subprocess.run(["bash", str(USER_PROMPT)], env=env,
+                            capture_output=True, text=True, timeout=60)
+
+    assert result.returncode == 0, (
+        f"exit {result.returncode} — on UserPromptSubmit that blocks and "
+        "erases the user's prompt"
+    )
+    assert result.stdout.strip(), "swallowed the context injection entirely"
+    assert "something to say" in result.stdout, (
+        "lost the notice as well as the JSON — the fallback must still say it"
+    )
 
 
 def test_the_ordinary_path_stays_plain_text(tmp_path):

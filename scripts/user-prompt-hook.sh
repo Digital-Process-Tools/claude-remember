@@ -79,13 +79,30 @@ dispatch "after_user_prompt"
 JQ_BIN="${JQ:-jq}"
 if [ -z "$NOTICE_MSG" ]; then
     printf '%s\n' "$CTX"
-elif command -v "$JQ_BIN" >/dev/null 2>&1; then
-    printf '%s\n' "$CTX" | "$JQ_BIN" -Rs --arg msg "$NOTICE_MSG" \
-        '{hookSpecificOutput:{hookEventName:"UserPromptSubmit",additionalContext:.},systemMessage:$msg}'
 else
-    # No jq: a plain-text reply cannot carry systemMessage, so the notice goes
-    # into context instead. The model sees it and can relay it — worse than the
-    # terminal line, better than swallowing the one thing worth saying.
-    printf '%s\n' "$CTX"
-    printf 'remember: %s\n' "$NOTICE_MSG"
+    # jq's status must not become this hook's status. Left as the last command
+    # of the script, a jq usage error (exit 2) is read by Claude Code as
+    # "block this prompt" — for UserPromptSubmit, exit 2 BLOCKS AND ERASES
+    # what the user typed. A cosmetic notice must never be able to do that, so
+    # the JSON is built first and only printed if it was actually produced.
+    _JSON=""
+    if command -v "$JQ_BIN" >/dev/null 2>&1; then
+        _JSON=$(printf '%s\n' "$CTX" | "$JQ_BIN" -Rs --arg msg "$NOTICE_MSG" \
+            '{hookSpecificOutput:{hookEventName:"UserPromptSubmit",additionalContext:.},systemMessage:$msg}' 2>/dev/null) \
+            || _JSON=""
+    fi
+    if [ -n "$_JSON" ]; then
+        printf '%s\n' "$_JSON"
+    else
+        # No jq, or jq failed: a plain-text reply cannot carry systemMessage,
+        # so the notice goes into context instead. The model sees it and can
+        # relay it — worse than the terminal line, better than swallowing the
+        # one thing worth saying, and far better than eating the prompt.
+        printf '%s\n' "$CTX"
+        printf 'remember: %s\n' "$NOTICE_MSG"
+    fi
 fi
+
+# Never inherit a failure status from anything above: this hook is documented
+# to always exit 0, and on UserPromptSubmit a non-zero exit is not cosmetic.
+exit 0

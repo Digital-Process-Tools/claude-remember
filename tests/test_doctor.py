@@ -111,6 +111,50 @@ def test_a_healthy_project_is_reported_as_working(tmp_path):
     assert "capture is working" in _verdict(result.stdout)
 
 
+def test_a_slug_mismatch_is_not_answered_with_restart_claude_code(tmp_path):
+    """The verdict is the line the operator acts on, and commands/doctor.md
+    tells them not to second-guess it.
+
+    Every cause of "capture is not running" used to collapse into "restart
+    Claude Code" because the generic branch was tested first — so a user whose
+    slug does not match was confidently sent to do the one thing that cannot
+    help them, with the correct FAIL printed two sections above.
+    """
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    remember = project / ".remember"
+    (remember / "tmp").mkdir(parents=True)
+    (home / ".claude" / "projects").mkdir(parents=True)
+    # The hook IS wired and running — it just exits early, finding no
+    # transcript under a slug Claude Code never created.
+    (remember / "tmp" / "post-tool-ran").write_text("")
+
+    result = _run(home, project, remember)
+
+    verdict = _verdict(result.stdout)
+    assert "#144" in verdict, f"verdict did not name the real cause: {verdict}"
+    # Matching bare "restart" would fail on the verdict's own "restarting will
+    # not help" — the advice is what must be absent, not the word.
+    assert "restart claude code" not in verdict.lower(), (
+        f"told a slug-mismatch victim to restart Claude Code: {verdict}"
+    )
+
+
+def test_a_wired_hook_that_never_serviced_a_session_says_so(tmp_path):
+    """"Wired" and "working" are different questions. post-tool-ran is written
+    before every early exit; capture-alive only once a transcript is found."""
+    home, project, remember, _ = _project(tmp_path)
+    (remember / "tmp" / "post-tool-ran").write_text("")
+
+    result = _run(home, project, remember)
+
+    assert "has never fired" not in result.stdout, (
+        "reported a running hook as never fired, which points at a restart "
+        "instead of at the early exit that is actually happening"
+    )
+    assert "exiting early" in result.stdout
+
+
 def test_a_slug_mismatch_is_named_outright(tmp_path):
     """#144's silent failure: the plugin computes a session dir Claude Code
     never created, and capture no-ops for the life of the project."""
