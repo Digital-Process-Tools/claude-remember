@@ -206,8 +206,18 @@ session_dir_slug() {
     # majority, and this function runs on every tool call — never even reaches
     # the `iconv` check, let alone the subprocess.
     if _remember_should_check_utf8; then
+    # Any byte at or above 0x80 — anything that could be part of a multi-byte
+    # sequence. The earlier form (`[!$' \t'-~]`) also caught DEL and the C0
+    # controls, which are always valid single-byte ASCII and could never be what
+    # this looks for; they paid for a check that can only answer yes.
+    #
+    # The range starts at \001, not \000: bash cannot hold a NUL in a string, so
+    # $'\000' expands to NOTHING and the bracket silently degenerates into
+    # `[!-\177]` — "any character except - and DEL" — which matches essentially
+    # every path. That reads as a tighter test and is the loosest possible one.
+    # A NUL cannot appear in an argv string anyway, so nothing is lost.
     case "$path" in
-        *[!$' \t'-~]*)
+        *[!$'\001'-$'\177']*)
             if command -v iconv >/dev/null 2>&1 \
                 && ! printf '%s' "$path" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1; then
                 local _py_slug="${PIPELINE_DIR:-}/pipeline/slug.py"
