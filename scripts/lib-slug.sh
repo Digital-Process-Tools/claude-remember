@@ -221,8 +221,25 @@ session_dir_slug() {
     # which matches essentially every path. The tightest-looking form of this
     # test is the loosest one, and it costs a fork per tool call. A NUL cannot
     # appear in an argv string anyway, so starting at \001 loses nothing.
+    # Detect under LC_ALL=C, then act. A bracket RANGE is matched by collation
+    # order, not byte value, so `[!\001-\177]` means whatever the ambient locale
+    # says it means — the same trap this file already documents for `[a-z]` in
+    # the sed program below. It answered correctly on one macOS box and matched
+    # every ASCII path on the macOS CI runner, which is the kind of difference
+    # that only ever shows up somewhere you are not.
+    #
+    # The result is stashed in a flag rather than acted on inside the `case`,
+    # because the branch below can return early and would leave the caller's
+    # locale changed.
+    local _high_byte=0 _lc_was_set="${LC_ALL+set}" _lc_prev="${LC_ALL:-}"
+    LC_ALL=C
     case "$path" in
-        *[!$'\001'-$'\177']*)
+        *[!$'\001'-$'\177']*) _high_byte=1 ;;
+    esac
+    if [ -n "$_lc_was_set" ]; then LC_ALL="$_lc_prev"; else unset LC_ALL; fi
+
+    case "$_high_byte" in
+        1)
             if command -v iconv >/dev/null 2>&1 \
                 && ! printf '%s' "$path" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1; then
                 local _py_slug="${PIPELINE_DIR:-}/pipeline/slug.py"

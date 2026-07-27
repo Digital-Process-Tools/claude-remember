@@ -273,7 +273,8 @@ def test_malformed_utf8_matches_the_decoder(raw):
     )
 
 
-def _forks_while_slugging(path: str, tmp_path: Path, *, strict: bool) -> set[str]:
+def _forks_while_slugging(path: str, tmp_path: Path, *, strict: bool,
+                          locale: str | None = None) -> set[str]:
     """Which of `iconv` / `python3` a slug of `path` actually spawns.
 
     Both are shadowed by markers on PATH, so this counts real forks rather than
@@ -303,6 +304,8 @@ def _forks_while_slugging(path: str, tmp_path: Path, *, strict: bool) -> set[str
     env = dict(os.environ, PATH=f"{bindir}{os.pathsep}{os.environ['PATH']}")
     env["PIPELINE_DIR"] = str(REPO_ROOT)
     env["REMEMBER_UTF8_STRICT"] = "1" if strict else "0"
+    if locale is not None:
+        env["LC_ALL"] = locale
     subprocess.run(
         ["bash", "-c",
          f'source "{LIB_SLUG_SH}"; session_dir_slug "$1" >/dev/null', "bash", path],
@@ -315,6 +318,21 @@ def test_an_ascii_path_forks_nothing(tmp_path):
     """session_dir_slug runs on every tool call. The common path must stay in
     the byte table even where the check is enabled."""
     assert _forks_while_slugging("/tmp/plain-ascii", tmp_path, strict=True) == set()
+
+
+@pytest.mark.parametrize("locale", ["C", "POSIX", "en_US.UTF-8", "C.UTF-8"])
+def test_an_ascii_path_forks_nothing_in_any_locale(locale, tmp_path):
+    """A bracket RANGE is matched by collation order, not byte value.
+
+    So `[!\\001-\\177]` means whatever the ambient locale says it means. The
+    same expression answered correctly on one macOS box and matched every
+    ASCII path on the macOS CI runner — a fork per tool call, on the platform
+    that can never need the check. The detection runs under LC_ALL=C now, and
+    this asserts it across the locales that differ.
+    """
+    assert _forks_while_slugging(
+        "/tmp/plain-ascii", tmp_path, strict=True, locale=locale
+    ) == set()
 
 
 def test_a_valid_non_ascii_path_pays_at_most_the_check(tmp_path):
