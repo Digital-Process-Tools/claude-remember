@@ -31,6 +31,13 @@ source "$_SCRIPT_DIR/lib-slug.sh"
 ITERATIONS="${1:-200}"
 PYTHON="${PYTHON:-python3}"
 
+# Fail loudly rather than printing an empty table: a typo'd PYTHON= produced a
+# run with no rows at all and exit 0, which reads as "no measurable cost".
+if ! command -v "$PYTHON" >/dev/null 2>&1; then
+    printf 'bench-slug.sh: PYTHON=%s is not executable\n' "$PYTHON" >&2
+    exit 2
+fi
+
 _bench() {
     local label="$1" path="$2" start end
     start=$("$PYTHON" -c 'import time; print(time.time())')

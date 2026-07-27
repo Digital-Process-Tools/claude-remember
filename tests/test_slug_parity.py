@@ -322,13 +322,18 @@ def test_an_ascii_path_forks_nothing(tmp_path):
 
 @pytest.mark.parametrize("locale", ["C", "POSIX", "en_US.UTF-8", "C.UTF-8"])
 def test_an_ascii_path_forks_nothing_in_any_locale(locale, tmp_path):
-    """A bracket RANGE is matched by collation order, not byte value.
+    """An ASCII path must never fork, whatever the locale.
 
-    So `[!\\001-\\177]` means whatever the ambient locale says it means. The
-    same expression answered correctly on one macOS box and matched every
-    ASCII path on the macOS CI runner — a fork per tool call, on the platform
-    that can never need the check. The detection runs under LC_ALL=C now, and
-    this asserts it across the locales that differ.
+    This is defense-in-depth, not a reproduction. The real failure happened on
+    the macOS CI runners — three runs red, and green the moment the detection
+    was forced to byte semantics with LC_ALL=C — but a sweep of every locale
+    installed on the development machine could not reproduce it under bash
+    3.2, so the mechanism is unconfirmed and these four locales are not known
+    to be the ones that differ.
+
+    Kept because the invariant is worth stating and cheap to check, and
+    because CI is where it actually bites. Do not read a pass here as proof
+    the underlying bug is gone.
     """
     assert _forks_while_slugging(
         "/tmp/plain-ascii", tmp_path, strict=True, locale=locale

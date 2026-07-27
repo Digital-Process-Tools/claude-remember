@@ -221,12 +221,22 @@ session_dir_slug() {
     # which matches essentially every path. The tightest-looking form of this
     # test is the loosest one, and it costs a fork per tool call. A NUL cannot
     # appear in an argv string anyway, so starting at \001 loses nothing.
-    # Detect under LC_ALL=C, then act. A bracket RANGE is matched by collation
-    # order, not byte value, so `[!\001-\177]` means whatever the ambient locale
-    # says it means — the same trap this file already documents for `[a-z]` in
-    # the sed program below. It answered correctly on one macOS box and matched
-    # every ASCII path on the macOS CI runner, which is the kind of difference
-    # that only ever shows up somewhere you are not.
+    # Detect under LC_ALL=C, then act.
+    #
+    # What is established: on the macOS CI runners this same expression matched
+    # plain ASCII paths and forked `iconv` on every one, while answering
+    # correctly on a local macOS box. Three consecutive runs failed
+    # (30235721355, 30236170724, 30237326112) and the run that added LC_ALL=C
+    # passed (30237861167), all on the same test.
+    #
+    # What is NOT established is the mechanism. The obvious candidate is that a
+    # bracket RANGE is matched by collation order rather than byte value — the
+    # same trap this file already documents for `[a-z]` in the sed program
+    # below — but a sweep of all 55 installed locales under bash 3.2 failed to
+    # reproduce it, so the runner must differ in bash build or locale data in
+    # some way not identified. Forcing byte semantics fixes it either way and
+    # costs nothing; the honest label is "empirically necessary, mechanism
+    # unconfirmed".
     #
     # The result is stashed in a flag rather than acted on inside the `case`,
     # because the branch below can return early and would leave the caller's
