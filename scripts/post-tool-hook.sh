@@ -83,6 +83,16 @@ rm -f "$REMEMBER_DIR/tmp/no-transcript-notice" 2>/dev/null
 CURRENT_LINES=$(wc -l < "$LATEST_JSONL" | tr -d ' ')
 SESSION_ID=$(basename "$LATEST_JSONL" .jsonl)
 
+# Sign of life for the capture-gap check in session-start-hook.sh (#200).
+# Written unconditionally, before any throttle or early return below: the
+# question this answers is "did PostToolUse run at all", not "did it save".
+#
+# The SESSION ID, not a timestamp. `-nt` compares mtimes at one-second
+# granularity under bash 3.2, so a sign of life landing in the same second as
+# the session-start stamp read as "not newer" and reported a healthy session as
+# broken. Identity has no clock to lose to.
+printf '%s' "$SESSION_ID" > "$REMEMBER_DIR/tmp/capture-alive" 2>/dev/null || true
+
 # --- Get last saved position (from last-save.json) ---
 # Positions are keyed by session (issue #140), so ask for THIS session rather
 # than whether it happens to own the one slot — two live sessions used to

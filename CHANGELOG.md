@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`/remember:doctor`** ([#200](https://github.com/Digital-Process-Tools/claude-remember/issues/200)) — resolved paths, detected tools, storage mode, whether the session directory Claude Code created matches the slug the plugin computes, the last successful save, and whether `PostToolUse` has ever fired for this project. `OK`/`WARN`/`FAIL` per line and a one-line verdict. The two silent failures it names outright are the slug mismatch of [#144](https://github.com/Digital-Process-Tools/claude-remember/issues/144) and hooks that were never registered.
+
+### Fixed
+
+- **A plugin enabled mid-session captured nothing, and said nothing** ([#200](https://github.com/Digital-Process-Tools/claude-remember/issues/200)) — Claude Code reads hook registrations at session start, so a plugin enabled part-way through one has none of them wired for the rest of it. `PostToolUse` never fires, no memory is written, and `hook-errors.log` stays empty because nothing failed; the reporter lost a day to it and found a single `session-start` line as the only trace. It cannot be caught while it is happening: no env var, file or command exposes which hooks are registered — `/hooks` is a UI a script cannot invoke — and `SessionStart`'s `source` is only startup/resume/clear/compact/fork, so a plugin-enable is indistinguishable from a fresh start. Afterwards the signature is exact, though, and that is what is now checked: a session where `SessionStart` ran and `PostToolUse` never did. `PostToolUse` records the session id it saw; the next `SessionStart` compares it against the previous session's id and, if that session used tools at all, leaves a notice. Identity rather than mtimes, because the first cut compared timestamps and bash 3.2's `-nt` resolves to the second — a healthy session whose first tool call landed in the same second as the stamp was reported as broken. The notice is delivered through `systemMessage`, the only hook output the human sees; `additionalContext` reaches the model alone, which is the shape of the original bug. Reported by [@fmanimashaun](https://github.com/fmanimashaun).
+
 ## [0.8.8] — Rules that only agreed by accident
 
 Eleven issues, and most of them are one shape: a rule written down in more than one place, where the copies happened to agree until they did not. The session-directory slug existed three times and none of the three truncated. The entry-header pattern existed twice and disagreed about 12-hour times. `save.lock` and `consolidation.lock` were two copies of an acquisition that handed the lock to several processes at once. A config option was documented, shipped, and read by nothing.

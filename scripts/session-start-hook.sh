@@ -99,6 +99,47 @@ if [ -d "$SESSIONS_DIR" ] && [ -f "$LAST_SAVE_FILE" ]; then
 fi
 fi
 
+# ── Capture-gap detection (#200) ──────────────────────────────────────────
+# Claude Code reads hook registrations at session start, so a plugin enabled
+# MID-session has none of its hooks wired for that session: PostToolUse never
+# fires and capture silently does nothing, for hours, with nothing in the logs
+# to say so. The reporter lost a day to it and found only a lone session-start
+# line.
+#
+# It cannot be caught while it is happening. Nothing inside a hook can see
+# which hooks are registered — no env var, no file, and `/hooks` is a UI a
+# script cannot invoke — and SessionStart's `source` field is only
+# startup/resume/clear/compact/fork, so a plugin-enable is indistinguishable
+# from a fresh start. Afterwards, though, the signature is exact: a session
+# where SessionStart ran and PostToolUse never did.
+#
+# The stamp only records that a SessionStart has happened before, so a fresh
+# install is never greeted with a warning about a session that never existed.
+# The gap itself is judged by IDENTITY: post-tool-hook.sh writes the session id
+# it saw into capture-alive, and if that is not the previous session's id, then
+# PostToolUse never ran for it. Comparing mtimes instead failed — bash 3.2's
+# `-nt` works to the second, so a healthy session whose first tool call landed
+# inside the same second as the stamp was reported as broken.
+CAPTURE_STAMP="$REMEMBER_DIR/tmp/capture-session-start"
+CAPTURE_ALIVE="$REMEMBER_DIR/tmp/capture-alive"
+if [ -f "$CAPTURE_STAMP" ]; then
+    # The second-newest transcript is the previous session — the same
+    # convention the recovery block above uses. Guard against the honest
+    # zero-tool session too: a conversation with no tool calls produces no
+    # PostToolUse either, and warning about that would be crying wolf.
+    PREV_SLUG="$(session_dir_slug "$PROJECT")"
+    PREV_JSONL=$(ls -t "$(claude_projects_dir)/${PREV_SLUG}"/*.jsonl 2>/dev/null | tail -n +2 | head -1)
+    PREV_ID=""
+    [ -n "$PREV_JSONL" ] && PREV_ID=$(basename "$PREV_JSONL" .jsonl)
+    SEEN_ID=$(cat "$CAPTURE_ALIVE" 2>/dev/null) || true
+    if [ -n "$PREV_ID" ] && [ "$SEEN_ID" != "$PREV_ID" ] \
+       && grep -q '"tool_use"' "$PREV_JSONL" 2>/dev/null; then
+        echo "capture did not run in your previous session — if you enabled remember mid-session, its hooks were not registered until now. Run /remember:doctor to check." \
+            > "$REMEMBER_DIR/tmp/capture-gap-notice" 2>/dev/null || true
+    fi
+fi
+_remember_date +%s > "$CAPTURE_STAMP" 2>/dev/null || true
+
 # ── Identity: per-project → user-global → plugin-bundled ──────────────────
 # User-global tier: <REMEMBER_ROOT>/identity.md (external mode only).
 # In legacy mode REMEMBER_ROOT == PROJECT_DIR, so we skip it there.
