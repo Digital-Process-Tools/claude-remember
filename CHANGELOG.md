@@ -5,7 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.8.8] — Rules that only agreed by accident
+
+Eleven issues, and most of them are one shape: a rule written down in more than one place, where the copies happened to agree until they did not. The session-directory slug existed three times and none of the three truncated. The entry-header pattern existed twice and disagreed about 12-hour times. `save.lock` and `consolidation.lock` were two copies of an acquisition that handed the lock to several processes at once. A config option was documented, shipped, and read by nothing.
+
+The rest are failures that reported nothing: a refused compression and a timed-out call, both billed and both logged as costing zero; an OAuth token refused in silence; and eight mutations a green suite never noticed.
+
+None of these were reported by users. They came out of audits and out of adversarial review of the fixes themselves — six of seven review passes found a real defect, several of them in work that had already passed CI. Three things were found only by measuring rather than reading: an `iconv` fork on every non-ASCII path, a glob that matched almost everything because bash cannot hold a NUL in a string, and a locale-dependent range that only failed on CI.
+
+Manifest bumped per [#133](https://github.com/Digital-Process-Tools/claude-remember/issues/133).
 
 ### Fixed
 
