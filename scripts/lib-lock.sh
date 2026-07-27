@@ -163,9 +163,21 @@ _LOCK_ADOPT_AFTER="${_LOCK_ADOPT_AFTER:-30}"
 # Seconds since <dir> was last modified. `stat` is BSD on macOS and GNU on
 # Linux with incompatible flags; try both, and report 0 (i.e. "fresh") if
 # neither works, so an unreadable mtime can never trigger an adoption.
+#
+# The two probes are captured SEPARATELY, and that is the whole point. Written
+# as `$(A || B)` the substitution captures the stdout of both: on GNU, `-f` is
+# *filesystem* status, so `%m` is read as a filename that does not exist — the
+# command exits 1, the fallback duly runs, but the real path has already
+# printed its filesystem block to stdout. The block and the correct mtime are
+# concatenated, the digits-only guard below rejects the result, and the
+# function returns 0 for a directory of any age. Every caller then reads
+# "fresh" forever and no orphan is ever adopted on Linux (#198).
 _lock_dir_age() {
     local _mtime _now
-    _mtime=$(stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null) || true
+    _mtime=$(stat -c %Y "$1" 2>/dev/null) || _mtime=""
+    case "$_mtime" in
+        ''|*[!0-9]*) _mtime=$(stat -f %m "$1" 2>/dev/null) || _mtime="" ;;
+    esac
     case "$_mtime" in
         ''|*[!0-9]*) echo 0; return 0 ;;
     esac
@@ -180,7 +192,7 @@ _lock_dir_age() {
 # only by deleting the directory by hand. The window is a couple of shell
 # instructions wide, but "rare" and "unrecoverable" is a bad pair.
 _lock_try_adopt() {
-    local _dir="$1" _claim
+    local _dir="$1" _claim _owns_marker=0 _adopted=0
     [ -e "${_dir}/pid" ] && return 1
     for _claim in "${_dir}"/pid.stealing.*; do
         [ -e "$_claim" ] && return 1
@@ -188,10 +200,66 @@ _lock_try_adopt() {
     [ "$(_lock_dir_age "$_dir")" -lt "$_LOCK_ADOPT_AFTER" ] && return 1
 
     # Single winner by construction, same as acquisition: `mkdir` or nothing.
-    mkdir "${_dir}/adopt" 2>/dev/null || return 1
+    if ! mkdir "${_dir}/adopt" 2>/dev/null; then
+        # An adopter killed between `mkdir adopt` and writing the pid strands
+        # the marker: no pid, no claim, adopt/ present. `_lock_try_steal`
+        # returns early with nothing to judge and every later `_lock_try_adopt`
+        # fails here — the same permanent, silent outage this function exists
+        # to answer, one level up (#198). A live adopter holds the marker for
+        # two shell instructions, so one that has sat untouched past the
+        # threshold is debris by exactly the argument used for the lock itself.
+        #
+        # `mv` rather than `rmdir` does the clearing, so that two adopters both
+        # judging the same marker dead cannot both proceed on it: a rename
+        # fails for everyone but the first.
+        [ "$(_lock_dir_age "${_dir}/adopt")" -lt "$_LOCK_ADOPT_AFTER" ] && return 1
+        mv "${_dir}/adopt" "${_dir}/adopt.dead.$$" 2>/dev/null || return 1
+        rm -rf "${_dir}/adopt.dead.$$" 2>/dev/null || true
+    else
+        _owns_marker=1
+    fi
+
+    # The pid write, not the marker, is the single-winner test. A first cut at
+    # this cleared a stranded marker and then recreated it, which meant an
+    # adopter that lost the clearing race — having already read the marker as
+    # debris — went on to displace the *fresh* marker the winner was holding,
+    # and both adopted: 4 double-wins in 40 rounds. Not recreating the marker
+    # is what closed that one, so do not reintroduce a `mkdir` here.
+    #
+    # `noclobber` makes the redirect an O_EXCL create. It is not what fixed
+    # that race, and the concurrent test cannot reach it — with a marker
+    # present every contender funnels into the `mv` and only one gets this
+    # far. It covers the interleaving below instead.
+    #
+    # Refusing to overwrite is right for the adopter specifically: it entered
+    # only because there was no pid, so a pid appearing underneath it means
+    # somebody else legitimately took the lock and this adopter has lost. That
+    # covers the `_lock_try_steal` window too — the rename of `pid` to a claim
+    # is atomic, so one of the two always exists, and the only interleaving
+    # that passes both guards above is one where the steal has already
+    # finished and written its pid. Before this, the adopter would have
+    # clobbered that pid with a plain redirect.
+    #
+    # It does NOT make adoption safe against a *live* holder stalled between
+    # its `mkdir` and its own (plain, unguarded) pid write in `lock_acquire`.
+    # Nothing here can: the two are indistinguishable from outside. That is
+    # what _LOCK_ADOPT_AFTER is for, and the assumption it rests on is stated
+    # above it — a holder writes its pid microseconds after `mkdir`, so
+    # anything this old is debris.
     _lock_self_set
-    echo "$_LOCK_SELF" > "${_dir}/pid" 2>/dev/null || true
-    rmdir "${_dir}/adopt" 2>/dev/null || true
+
+    ( set -o noclobber; echo "$_LOCK_SELF" > "${_dir}/pid" ) 2>/dev/null && _adopted=1
+
+    # Only the process that created the marker removes it. An unguarded rmdir
+    # here deletes whatever is at that path, which after a lost pid race is the
+    # *winner's* live marker rather than this process's — reproducible, and
+    # harmless today only because the pid write above has already settled the
+    # lock and the guard at the top of this function turns away everyone who
+    # comes after. Relying on that would make the marker's stated meaning
+    # ("a live adopter holds this") false whenever the race is lost, and the
+    # clearing logic above reads that meaning back out.
+    [ "$_owns_marker" = 1 ] && rmdir "${_dir}/adopt" 2>/dev/null
+    [ "$_adopted" = 1 ] || return 1
     return 0
 }
 

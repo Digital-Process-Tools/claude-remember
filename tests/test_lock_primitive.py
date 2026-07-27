@@ -334,3 +334,240 @@ def test_lock_survives_set_e_in_the_caller(tmp_path):
     """)
     assert result.returncode == 0, result.stderr
     assert "SKIPPED" in result.stdout and "REACHED_END" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# #198 — _lock_dir_age, and the marker the adopter can strand
+#
+# The age bug is platform-shaped: `stat -f %m` succeeds on BSD and fails on GNU
+# *after printing a filesystem block to stdout*, and the old implementation
+# captured both probes through one command substitution. So it is broken on
+# Linux and fine on macOS, and a test that only calls the real `stat` proves
+# whichever answer the runner happens to hold. These shim `stat` on PATH so
+# both platforms' semantics are exercised everywhere.
+# ---------------------------------------------------------------------------
+
+_GNU_STAT_SHIM = """#!/bin/sh
+# GNU coreutils: `-f` is FILESYSTEM status, so `%m` is read as a filename.
+# That file does not exist -> exit 1, but the real path still prints its block.
+if [ "$1" = "-c" ]; then
+    python3 -c 'import os,sys;print(int(os.stat(sys.argv[1]).st_mtime))' "$3"
+    exit 0
+fi
+if [ "$1" = "-f" ]; then
+    printf '  File: "%s"\\n' "$3"
+    printf '    ID: 26b9871bc77c8277 Namelen: 255     Type: ext2/ext3\\n'
+    echo "stat: cannot read file system information for '%m'" >&2
+    exit 1
+fi
+exit 1
+"""
+
+_BSD_STAT_SHIM = """#!/bin/sh
+if [ "$1" = "-f" ]; then
+    python3 -c 'import os,sys;print(int(os.stat(sys.argv[1]).st_mtime))' "$3"
+    exit 0
+fi
+if [ "$1" = "-c" ]; then
+    echo "stat: illegal option -- c" >&2
+    exit 1
+fi
+exit 1
+"""
+
+
+def _stat_shim(tmp_path, flavour: str) -> Path:
+    """Install a fake `stat` and return the bin dir to prepend to PATH."""
+    bindir = tmp_path / f"bin-{flavour}"
+    bindir.mkdir()
+    shim = bindir / "stat"
+    shim.write_text(
+        _GNU_STAT_SHIM if flavour == "gnu" else _BSD_STAT_SHIM, encoding="utf-8"
+    )
+    shim.chmod(0o755)
+    return bindir
+
+
+def _age_dir(path: Path, seconds: int) -> None:
+    """Backdate a directory's mtime. os.utime rather than `touch`, whose
+    backdating flags differ between BSD (-t) and GNU (-d @epoch)."""
+    now = int(__import__("time").time())
+    os.utime(path, (now - seconds, now - seconds))
+
+
+@pytest.mark.parametrize("flavour", ["gnu", "bsd"])
+def test_lock_dir_age_reports_the_real_age_on_either_stat(flavour, tmp_path):
+    """The probe that fails must not contaminate the one that succeeds.
+
+    GNU `stat -f %m` writes a filesystem block to stdout *and* exits 1. Captured
+    through a single `$(A || B)`, that block is concatenated with the mtime B
+    printed, the digits-only guard rejects the result, and the function reports
+    0 — "fresh" — for a directory of any age. Every adoption check downstream
+    then reads `[ 0 -lt 30 ]` and refuses, forever.
+    """
+    target = tmp_path / "aged.lock"
+    target.mkdir()
+    _age_dir(target, 500)
+
+    result = _run(f"""
+    PATH="{_stat_shim(tmp_path, flavour)}:$PATH"
+    source {LIB_LOCK_SH}
+    _lock_dir_age "{target}"
+    """)
+    assert result.returncode == 0, result.stderr
+    age = int(result.stdout.strip())
+    assert 480 <= age <= 520, (
+        f"{flavour} stat: reported {age}s for a 500s-old directory — an age of 0 "
+        "means _lock_try_adopt can never fire at the shipped threshold"
+    )
+
+
+@pytest.mark.parametrize("flavour", ["gnu", "bsd"])
+def test_a_pidless_orphan_is_adopted_at_the_shipped_threshold(flavour, tmp_path):
+    """The existing adoption test sets _LOCK_ADOPT_AFTER=0, which makes the
+    comparison `[ 0 -lt 0 ]` — false — so it passes *through* a broken age
+    rather than exercising it. This one leaves the default at 30 and ages the
+    directory past it, so the age has to be real for adoption to happen.
+    """
+    lock_dir = tmp_path / "orphan.lock"
+    lock_dir.mkdir()
+    _age_dir(lock_dir, 3600)
+
+    result = _run(f"""
+    PATH="{_stat_shim(tmp_path, flavour)}:$PATH"
+    source {LIB_LOCK_SH}
+    lock_acquire "{lock_dir}" 0 && echo ACQUIRED || echo BLOCKED
+    """)
+    assert "ACQUIRED" in result.stdout, (
+        f"{flavour} stat: a one-hour-old pid-less orphan blocked acquisition at "
+        f"the default threshold — a permanent, silent outage of every save: "
+        f"{result.stdout} {result.stderr}"
+    )
+    assert (lock_dir / "pid").exists()
+
+
+def test_a_stranded_adopt_marker_does_not_wedge_the_lock_forever(tmp_path):
+    """`_lock_try_adopt` takes `${dir}/adopt` as its single-winner marker and
+    removes it after writing the pid. An adopter killed between those two steps
+    leaves no pid, no claim, and adopt/ present: `_lock_try_steal` returns early
+    with nothing to judge, and every later `_lock_try_adopt` fails at `mkdir`.
+    That is the same permanent outage adoption exists to answer, one level up.
+    """
+    lock_dir = tmp_path / "stranded.lock"
+    lock_dir.mkdir()
+    (lock_dir / "adopt").mkdir()
+    _age_dir(lock_dir / "adopt", 3600)
+    _age_dir(lock_dir, 3600)
+
+    result = _run(f"""
+    source {LIB_LOCK_SH}
+    lock_acquire "{lock_dir}" 0 && echo ACQUIRED || echo BLOCKED
+    """)
+    assert "ACQUIRED" in result.stdout, (
+        f"a stranded adopt marker wedged the lock permanently: "
+        f"{result.stdout} {result.stderr}"
+    )
+    assert (lock_dir / "pid").exists()
+
+
+def test_a_fresh_adopt_marker_is_left_alone(tmp_path):
+    """The same state means "an adopter is mid-adoption" for the first moments.
+    Clearing the marker then would let a second process adopt alongside it."""
+    lock_dir = tmp_path / "livemarker.lock"
+    lock_dir.mkdir()
+    (lock_dir / "adopt").mkdir()
+    _age_dir(lock_dir, 3600)
+
+    result = _run(f"""
+    source {LIB_LOCK_SH}
+    lock_acquire "{lock_dir}" 0 && echo ACQUIRED || echo REFUSED
+    """)
+    assert "REFUSED" in result.stdout, (
+        f"adopted past a marker another adopter had just created: "
+        f"{result.stdout} {result.stderr}"
+    )
+
+
+def test_an_adopter_refuses_a_pid_that_appears_after_its_guard(tmp_path):
+    """The `noclobber` write is what makes adoption safe against a pid that
+    lands between the entry guard and the write — most importantly a
+    `_lock_try_steal` winner, whose rename leaves `pid` briefly absent.
+
+    Deterministic because `_lock_dir_age` is called *after* the `[ -e pid ]`
+    guard, so overriding it to install a pid reproduces exactly that window.
+    The adopter must refuse, and must leave the other process's pid intact.
+
+    The concurrent race test below cannot reach this: with the marker already
+    present every contender funnels into the `mv`, which only one can win, so
+    only one process ever reaches the pid write at all.
+    """
+    lock_dir = tmp_path / "latepid.lock"
+    lock_dir.mkdir()
+    _age_dir(lock_dir, 3600)
+
+    result = _run(f"""
+    source {LIB_LOCK_SH}
+    _lock_dir_age() {{ echo 99999 > "{lock_dir}/pid"; echo 3600; }}
+    _lock_try_adopt "{lock_dir}" && echo ADOPTED || echo REFUSED
+    """)
+    assert "REFUSED" in result.stdout, (
+        f"adopted over a pid that appeared after the guard: {result.stdout} "
+        f"{result.stderr}"
+    )
+    assert (lock_dir / "pid").read_text().strip() == "99999", (
+        "clobbered another process's pid — this is the interleaving where a "
+        "steal winner loses the lock it just took"
+    )
+    assert not (lock_dir / "adopt").exists(), (
+        "left its marker behind after refusing, stranding the lock"
+    )
+
+
+def test_two_adopters_racing_on_stranded_debris_produce_one_winner(tmp_path):
+    """Clearing the marker is itself a race: if two adopters both judge it dead
+    and both clear it, the second removes the *fresh* marker the first just
+    made, and both adopt. The clear has to be a single-winner operation.
+
+    The round number goes into the winner line so this asserts exactly one
+    winner per round. `<= ROUNDS` would be satisfied by zero winners — a test
+    that passes because nothing works is the shape #198 was reported for.
+
+    What this actually covers is the *clearing* being single-winner, and the
+    lock not staying wedged. It does NOT cover the `noclobber` pid write:
+    because the marker already exists, every contender fails the opening
+    `mkdir` and funnels into the `mv`, which exactly one can win, so only one
+    process reaches the pid write. Removing `noclobber` leaves this test green
+    over 300 rounds at 8-way contention — verified. The guard is covered by
+    the injection test above instead.
+    """
+    winners = tmp_path / "winners"
+    script = f"""
+    source {LIB_LOCK_SH}
+    contend() {{
+        if lock_acquire "$1" 0; then echo "win $2" >> "{winners}"; fi
+    }}
+    for i in $(seq 1 {ROUNDS}); do
+        D="{tmp_path}/race.$i.lock"
+        mkdir -p "$D/adopt"
+        python3 -c 'import os,sys,time; t=int(time.time())-3600; os.utime(sys.argv[1],(t,t)); os.utime(sys.argv[2],(t,t))' "$D/adopt" "$D"
+        for j in 1 2 3 4; do contend "$D" "$i" & done
+        wait
+        rm -rf "$D"
+    done
+    """
+    result = _run(script)
+    assert result.returncode == 0, result.stderr
+    wins = winners.read_text().split() if winners.exists() else []
+    rounds_won = [w for w in wins if w != "win"]
+    from collections import Counter
+    counts = Counter(rounds_won)
+    doubled = {r: c for r, c in counts.items() if c > 1}
+    assert not doubled, (
+        f"rounds with more than one winner: {doubled} — two adopters cleared the "
+        "same stranded marker and both took the lock"
+    )
+    assert len(counts) == ROUNDS, (
+        f"only {len(counts)} of {ROUNDS} rounds were won at all — stranded debris "
+        "is still wedging the lock, and a max-one-winner assertion alone would "
+        "have called that a pass"
+    )

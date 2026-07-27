@@ -273,7 +273,13 @@ echo "7. Dry-run save (full flow, no Haiku)"
 DRY_OUT=$(cd "$PIPELINE_DIR" && CLAUDE_PROJECT_DIR="$PIPELINE_DIR" bash scripts/save-session.sh --dry 2>/dev/null) || true
 DRY_EXIT=$?
 if echo "$DRY_OUT" 2>/dev/null | grep -q "DRY RUN"; then
-    LINES=$(echo "$DRY_OUT" | grep -c '^\[' 2>/dev/null || echo 0)
+    # `grep -c` prints its count and *still* exits 1 when the count is zero, so
+    # `$(grep -c … || echo 0)` captures both and yields "0\n0" — the same
+    # stdout-contamination shape as #198's `stat` chain, here in a log line.
+    LINES=$(echo "$DRY_OUT" | grep -c '^\[' 2>/dev/null) || true
+    case "$LINES" in
+        ''|*[!0-9]*) LINES=0 ;;
+    esac
     pass "save-session.sh --dry ($LINES exchanges shown)"
 else
     fail "save-session.sh --dry" "exit $DRY_EXIT"
