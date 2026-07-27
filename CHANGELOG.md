@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **`_lock_dir_age` always returned 0 on GNU/Linux, so no orphaned lock was ever adopted there** ([#198](https://github.com/Digital-Process-Tools/claude-remember/issues/198)) — the two `stat` probes shared one command substitution, and the failing one printed to stdout before exiting. They are captured separately now, GNU-native flag first so the noisy call is skipped on the more common platform. Reported by [@bonyohana](https://github.com/bonyohana), with the measurement that made it undeniable.
+- **An adopter killed mid-adoption wedged the lock permanently** ([#198](https://github.com/Digital-Process-Tools/claude-remember/issues/198)) — it left `adopt/` behind with no pid and no claim, so `_lock_try_steal` had nothing to judge and every later `_lock_try_adopt` failed at `mkdir`: the same silent, permanent outage adoption exists to answer, one level up. A marker that has sat untouched past the threshold is now cleared by rename and not recreated — a first cut that recreated it let an adopter which lost the clearing race displace the winner's fresh marker, at 4 double-wins in 40 rounds. Separately, the pid write is guarded with `noclobber`: that is not what closed the double-win, it is what stops an adopter from clobbering the pid a `_lock_try_steal` winner has just written, since the steal's rename leaves `pid` briefly absent and the adopter's entry guard reads that as "no holder".
+- **`grep -c` counted zero and failed at the same time** — `LINES=$(… | grep -c '^\[' || echo 0)` in `scripts/run-tests.sh` captured both branches and produced `"0\n0"`, the same stdout-contamination shape as the `stat` chain. Found by auditing for the reported defect's shape rather than its symptom; consequence was a garbled figure in one self-test log line.
+
 ## [0.8.8] — Rules that only agreed by accident
 
 Eleven issues, and most of them are one shape: a rule written down in more than one place, where the copies happened to agree until they did not. The session-directory slug existed three times and none of the three truncated. The entry-header pattern existed twice and disagreed about 12-hour times. `save.lock` and `consolidation.lock` were two copies of an acquisition that handed the lock to several processes at once. A config option was documented, shipped, and read by nothing.
