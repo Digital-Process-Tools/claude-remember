@@ -14,6 +14,7 @@ against each other.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -256,6 +257,7 @@ def test_malformed_utf8_matches_the_decoder(raw):
 
     script = f"""
     PIPELINE_DIR="{REPO_ROOT}"
+    REMEMBER_UTF8_STRICT=1
     source "{LIB_SLUG_SH}"
     session_dir_slug "$1"
     """
@@ -271,33 +273,67 @@ def test_malformed_utf8_matches_the_decoder(raw):
     )
 
 
-def test_well_formed_paths_never_reach_the_subprocess(tmp_path):
-    """The delegation must not cost anything on the common path.
+def _forks_while_slugging(path: str, tmp_path: Path, *, strict: bool) -> set[str]:
+    """Which of `iconv` / `python3` a slug of `path` actually spawns.
 
-    session_dir_slug runs on every tool call. If a valid UTF-8 path — or worse,
-    an ASCII one — started shelling out to Python, that would be a real
-    regression traded for a rare correctness fix.
+    Both are shadowed by markers on PATH, so this counts real forks rather than
+    the one the test author happened to think of — the first version of this
+    watched only for Python and would have passed while `iconv` forked on every
+    non-ASCII path.
     """
-    marker = tmp_path / "python-was-called"
-    fake_python = tmp_path / "python3"
-    fake_python.write_text(
-        f"#!/usr/bin/env bash\ntouch '{marker}'\nexit 1\n", encoding="utf-8"
-    )
-    fake_python.chmod(0o755)
-
-    for path in ("/tmp/plain-ascii", "/tmp/café/日本語/🎉"):
-        script = f"""
-        PIPELINE_DIR="{REPO_ROOT}"
-        PYTHON="{fake_python}"
-        source "{LIB_SLUG_SH}"
-        session_dir_slug "$1" >/dev/null
-        """
-        subprocess.run(["bash", "-c", script, "bash", path],
-                       capture_output=True, text=True)
-        assert not marker.exists(), (
-            f"{path!r} shelled out to Python — well-formed paths must stay in "
-            "the byte table"
+    bindir = tmp_path / "bin"
+    bindir.mkdir(exist_ok=True)
+    for name in ("iconv", "python3"):
+        marker = tmp_path / f"{name}-was-called"
+        if marker.exists():
+            marker.unlink()
+        # Record AND delegate to the real binary. A stub that merely fails
+        # changes the behaviour it is measuring: an `iconv` that always exits 1
+        # makes every path look ill-formed, which is how the first version of
+        # this helper "found" a well-formed path reaching the decoder.
+        real = shutil.which(name)
+        stub = bindir / name
+        stub.write_text(
+            f"#!/usr/bin/env bash\ntouch '{marker}'\nexec '{real}' \"$@\"\n"
+            if real else f"#!/usr/bin/env bash\ntouch '{marker}'\nexit 127\n",
+            encoding="utf-8",
         )
+        stub.chmod(0o755)
+
+    env = dict(os.environ, PATH=f"{bindir}{os.pathsep}{os.environ['PATH']}")
+    env["PIPELINE_DIR"] = str(REPO_ROOT)
+    env["REMEMBER_UTF8_STRICT"] = "1" if strict else "0"
+    subprocess.run(
+        ["bash", "-c",
+         f'source "{LIB_SLUG_SH}"; session_dir_slug "$1" >/dev/null', "bash", path],
+        env=env, capture_output=True, text=True,
+    )
+    return {n for n in ("iconv", "python3") if (tmp_path / f"{n}-was-called").exists()}
+
+
+def test_an_ascii_path_forks_nothing(tmp_path):
+    """session_dir_slug runs on every tool call. The common path must stay in
+    the byte table even where the check is enabled."""
+    assert _forks_while_slugging("/tmp/plain-ascii", tmp_path, strict=True) == set()
+
+
+def test_a_valid_non_ascii_path_pays_at_most_the_check(tmp_path):
+    """Accented and CJK paths are ordinary. They may reach `iconv`, which says
+    they are well-formed — but they must never reach the decoder."""
+    forked = _forks_while_slugging("/tmp/café/日本語/🎉", tmp_path, strict=True)
+    assert "python3" not in forked, (
+        "a well-formed path was handed to the decoder — that is a subprocess "
+        "per tool call bought for nothing"
+    )
+
+
+def test_nothing_forks_at_all_where_the_bug_cannot_happen(tmp_path):
+    """macOS enforces well-formed UTF-8 and Windows paths come from UTF-16, so
+    neither can produce the input this handles and neither should pay ~6ms per
+    tool call to find that out."""
+    if sys.platform.startswith("linux"):
+        pytest.skip("Linux is where the check is meant to run")
+    assert _forks_while_slugging("/tmp/café/日本語/🎉", tmp_path, strict=False) == set()
 
 
 def test_a_hash_that_is_not_base36_is_refused(tmp_path):

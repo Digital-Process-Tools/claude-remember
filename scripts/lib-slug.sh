@@ -126,6 +126,33 @@ claude_projects_dir() {
 # sequence is one surrogate pair, hence two dashes; a 2- or 3-byte sequence is
 # one BMP character, hence one. Deterministic under any locale, and verified
 # byte-identical to the real regex run under node.
+# Should this path be checked for ill-formed UTF-8 (#186)?
+#
+# Only where such a path can exist. macOS enforces well-formed UTF-8 in
+# filenames and Windows paths come from UTF-16; Linux enforces nothing, so it is
+# the only platform that can hand us one. $OSTYPE is a bash variable, not a
+# fork, and that matters. Measured, 200 calls each:
+#
+#   platform      ASCII    valid non-ASCII    ill-formed
+#   non-Linux     2.1ms    2.1ms              2.2ms        (never checked)
+#   Linux         2.0ms    8.7ms              71ms         (iconv, then python)
+#
+# So an ASCII path pays nothing anywhere, a macOS or Windows user pays nothing
+# at all, and the ~6.5ms belongs only to a Linux user with a non-ASCII path —
+# where the bug is actually reachable. The 71ms case is a path that is already
+# broken and would otherwise have saved nothing at all.
+#
+# REMEMBER_UTF8_STRICT=1 forces it on anyway. Without that the behaviour would
+# be untestable everywhere except a Linux runner, and a fix nobody can exercise
+# locally is a fix nobody maintains.
+_remember_should_check_utf8() {
+    [ "${REMEMBER_UTF8_STRICT:-0}" = "1" ] && return 0
+    case "$OSTYPE" in
+        linux*) return 0 ;;
+    esac
+    return 1
+}
+
 session_dir_slug() {
     local path="$1"
     if command -v cygpath >/dev/null 2>&1; then
@@ -178,6 +205,7 @@ session_dir_slug() {
     # both non-ASCII AND actually malformed. An all-ASCII path — the overwhelming
     # majority, and this function runs on every tool call — never even reaches
     # the `iconv` check, let alone the subprocess.
+    if _remember_should_check_utf8; then
     case "$path" in
         *[!$' \t'-~]*)
             if command -v iconv >/dev/null 2>&1 \
@@ -194,6 +222,7 @@ session_dir_slug() {
             fi
             ;;
     esac
+    fi
 
     path=${path//$'\n'/-}
     local _slug
