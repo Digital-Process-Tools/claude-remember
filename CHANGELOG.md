@@ -5,7 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.8.9] — Silence, mistaken for success
+
+Two issues, both reported from outside the team, and they are the same bug wearing different clothes: something produced no signal, and the absence of a signal was read as a good one.
+
+`_lock_dir_age` was written as "try BSD, fall back to GNU" in one command substitution. The exit codes behaved; stdout did not, because GNU's `stat -f` prints a filesystem block before failing, and the capture concatenated it with the real answer. The digits guard rejected the mess and returned 0 — "fresh" — for a directory of any age, so no orphaned lock was ever adopted on Linux and the permanent save outage adoption exists to prevent was still live on what is probably most installs. The suite was green over it, because the test that covered adoption set the threshold to zero and passed *through* the broken age rather than exercising it.
+
+The other needed no bug at all. A plugin enabled part-way through a session has none of its hooks registered for the rest of it, so `PostToolUse` never fires, nothing is captured, and `hook-errors.log` stays empty — because nothing failed. The plugin worked exactly as designed and simply was not wired in. The reporter lost a day to it and found one `session-start` line as the only trace.
+
+Neither could be found by reading. The first took a reporter measuring `_lock_dir_age` on a directory of known age; the second took someone invoking the hook by hand to prove the pipeline was healthy end to end.
+
+Fixing them went the same way. Four review passes over the two fixes found four more defects, every one of them the fix failing in the shape of the thing it was fixing: a `noclobber` guard credited with closing a race it had nothing to do with; a gap check gated so that it could only catch a recurrence and never the incident it was written for; a diagnostic that answered a slug mismatch and a missing Python with "restart Claude Code", which fixes neither; and a notice whose `jq` could exit 2 and, on `UserPromptSubmit`, erase the user's prompt — a cosmetic warning able to destroy the thing it was warning about.
+
+What ships is therefore narrower than it looks and better documented than usual. Where a limit remains — `capture-alive` is per project, so concurrent sessions on one project can produce a spurious notice — it is written down rather than left to be found.
+
+Thanks to [@bonyohana](https://github.com/bonyohana) and [@fmanimashaun](https://github.com/fmanimashaun), both of whom did the diagnosis before filing.
+
+Manifest bumped per [#133](https://github.com/Digital-Process-Tools/claude-remember/issues/133).
 
 ### Added
 
