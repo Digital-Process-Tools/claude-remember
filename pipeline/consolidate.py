@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import re
 
-from .prompts import build_consolidation_prompt
+from .prompts import build_consolidation_prompt, consolidation_template
 from .haiku import call_haiku
 from .entry_header import ANY_HEADER_ERE
 from .types import ConsolidationResult, TokenUsage
@@ -193,6 +193,60 @@ class ConsolidationTooLarge(ConsolidationSkipped):
     """
 
 
+# A line has to be this long before it counts as an instruction. Short enough
+# to catch `[archive.md content here]` (25) — the placeholder that replaced the
+# reporter's whole archive.md in #202 — and long enough to exclude every line a
+# real consolidation legitimately shares with the template: `===RECENT===` (12),
+# `===ARCHIVE===` (13), `# Recent` (8), `# Archive` (9).
+_MIN_MARKER_LEN = 24
+
+
+def _instruction_markers() -> tuple[str, ...]:
+    """Template lines that a real consolidation can never contain.
+
+    Everything in the template that is not a ``{{PLACEHOLDER}}`` is an
+    *instruction*: prose addressed to the model. The model's job is to return
+    compressed memory, so it has no reason to reproduce any of it. An echo of
+    the prompt, on the other hand, cannot avoid it.
+
+    Computed from the template file rather than written out here, so editing
+    the prompt cannot silently retire the guard.
+    """
+    markers = []
+    for line in consolidation_template().splitlines():
+        line = line.strip()
+        if not line or "{{" in line or len(line) < _MIN_MARKER_LEN:
+            continue
+        markers.append(line)
+    return tuple(markers)
+
+
+def _echoes_the_prompt(text: str) -> bool:
+    """Whether the response is (or embeds) a quotation of the prompt.
+
+    This is the check that has to exist for #202, and the reason it is phrased
+    negatively. The old guard asked "does this look like memory?", and every
+    signal it accepted — the ``===RECENT===`` envelope, a ``## HH:MM |`` entry
+    header — is present in the prompt itself: the envelope because the template
+    prints it as the required output format, the headers because the staging
+    files are embedded verbatim. So a hook block message, which quotes the
+    whole prompt back, satisfied every positive test and was written to
+    recent.md as consolidated memory. The next run quoted the poisoned file
+    into a new prompt and it nested one level deeper each time.
+
+    **A positive-only validity check cannot reject an echo of its own input**,
+    because every signal it looks for is by construction present in that input.
+    Adding another positive pattern reproduces the bug with more steps. The
+    only thing that separates the two is what the echo carries and a real
+    answer does not: the instructions.
+
+    False positives cost a skipped consolidation, which is non-destructive —
+    staging and memory are both left untouched and the next run retries. False
+    negatives cost the permanent record. The asymmetry is deliberate.
+    """
+    return any(marker in text for marker in _instruction_markers())
+
+
 def _is_valid_consolidation(text: str) -> bool:
     """Return True only if the model output is real consolidated memory.
 
@@ -202,15 +256,21 @@ def _is_valid_consolidation(text: str) -> bool:
     "here is what I would compress…" preamble) and must be rejected — writing
     it would replace memory with chatter and the source files would be lost.
 
+    Those two positive tests are kept, but they now run only after the response
+    has been shown not to be an echo of the prompt (#202) — see
+    ``_echoes_the_prompt`` for why that order is the whole point.
+
     Args:
         text: Raw text response from Haiku.
 
     Returns:
         True if the text carries the recent delimiter or at least one memory
-        entry header; False for empty or purely conversational responses.
+        entry header, and is not a quotation of the prompt; False otherwise.
     """
     t = text.strip()
     if not t:
+        return False
+    if _echoes_the_prompt(t):
         return False
     if "===RECENT===" in t:
         return True

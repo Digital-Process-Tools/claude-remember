@@ -377,6 +377,13 @@ scripts/            Shell orchestration — locks, cooldowns, file I/O, backgrou
 tests/              pytest suite (357 tests, 99%+ coverage)
 ```
 
+Before changing how the nested `claude -p` call is invoked, or how its output is
+validated, read [`docs/nested-model-output.md`](docs/nested-model-output.md).
+That stdout is not guaranteed to be the model speaking, and a validity check
+that cannot reject an echo of its own prompt is how a hook's refusal ended up in
+the permanent memory record
+([#202](https://github.com/Digital-Process-Tools/claude-remember/issues/202)).
+
 ## License
 
 Source-available. See [LICENSE](LICENSE).

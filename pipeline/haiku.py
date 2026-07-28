@@ -7,10 +7,17 @@ estimation.
 
 The CLI is invoked in a sandboxed configuration: ``cwd=tempdir``, no tools
 by default, ``max-turns`` configurable via ``REMEMBER_MAX_TURNS`` (default 4),
-and the parent Claude Code session env vars are stripped (``CLAUDECODE`` to
-allow a nested session; ``CLAUDE_JOB_DIR`` / ``CLAUDE_CODE_*`` so the child
-doesn't masquerade as the parent's session, #95), and ``REMEMBER_NESTED_SUMMARIZER``
-is set so the plugin's own hooks recognise the child and no-op (#204).
+no MCP servers (#94), no setting sources and therefore no hooks (#202), and the
+parent Claude Code session env vars are stripped (``CLAUDECODE`` to allow a
+nested session; ``CLAUDE_JOB_DIR`` / ``CLAUDE_CODE_*`` so the child doesn't
+masquerade as the parent's session, #95). ``REMEMBER_NESTED_SUMMARIZER`` is set
+so the plugin's own hooks recognise the child and no-op (#204) — that covers
+*our* hooks specifically, and stays load-bearing on the fallback path below,
+where setting-source isolation has been dropped and the user's hooks are live.
+
+The output of that call is NOT guaranteed to be the model speaking — a blocking
+hook makes the CLI answer in its own voice, on stdout, with exit 0. See
+``docs/nested-model-output.md`` before changing how it is validated.
 
 Module-level constants:
     HAIKU_INPUT_PRICE: USD cost per input token.
@@ -391,6 +398,82 @@ def _inject_configured_oauth_token(env: dict[str, str]) -> dict[str, str]:
     return env
 
 
+# Hook isolation (#202). The nested `claude -p` was sandboxed against MCP
+# servers (#94) and against the parent's session identity (#95), but not
+# against the user's HOOKS — which are registered from settings files, so
+# `--setting-sources ''` (load none of user/project/local) registers none of
+# them. Verified against claude-code 2.1.219: with a blocking UserPromptSubmit
+# hook installed, the call returns the model's reply instead of the hook's
+# block message, and OAuth auth is unaffected.
+#
+# Why this matters more than it sounds: a hook that BLOCKS does not make the
+# call fail. The CLI writes its block message to stdout, quotes the prompt back
+# under "Original prompt:", reports `subtype: success`, and exits 0 — so every
+# status-based check downstream sees a healthy call and the block message is
+# read as the model's reply. That is how #202 wrote a hook's refusal into the
+# permanent memory record, seven levels deep.
+_HOOK_ISOLATION_FLAG = "--setting-sources"
+
+# Failures that mean the ISOLATION caused this, not the request. Both are
+# resolved before the API is contacted, so neither has been billed and the
+# retry below is free.
+#
+#   * an older CLI has no such flag. commander exits non-zero on an unknown
+#     option, which became a RuntimeError, which meant NO SAVES EVER AGAIN —
+#     trading a corruption bug for a silent total outage (the #204 trap).
+#   * excluding every setting source also excludes `apiKeyHelper` and the `env`
+#     block, which is how enterprise / Bedrock / proxy installs authenticate.
+#     Those users get "Not logged in" and the same permanent outage, on a
+#     CURRENT CLI.
+#
+# So isolation fails OPEN: it is dropped, loudly, and the memory record stays
+# protected by the echo guard in consolidate.py. That is why there are two
+# independent layers — this one can be degraded away, and the other cannot.
+_AUTH_FAILURE_MARKERS = (
+    "not logged in",
+    "please run /login",
+    "invalid api key",
+    "authentication_error",
+)
+
+
+def _isolation_may_be_the_cause(stdout: str, stderr: str) -> bool:
+    """Whether a failed call failed *because of* the hook-isolation flag.
+
+    Deliberately narrow. Retrying a rate limit or an overloaded upstream would
+    double a spend that already happened and hide the cause — the #129/#190
+    shape, where a real failure was reported as costing nothing.
+    """
+    haystack = f"{stdout or ''}\n{stderr or ''}".lower()
+    if "unknown option" in haystack:
+        # Only ours. An unknown option naming some other flag says the CLI
+        # disagrees about something we did not just add, and dropping this one
+        # would not fix it.
+        return _HOOK_ISOLATION_FLAG in haystack
+    return any(marker in haystack for marker in _AUTH_FAILURE_MARKERS)
+
+
+def _build_cmd(tools: list[str] | None, isolate_hooks: bool) -> list[str]:
+    """The nested CLI invocation, with hook isolation on or off."""
+    cmd = [
+        _resolve_claude_bin(),
+        "-p",
+        "--output-format", "json",
+        "--no-session-persistence",
+        "--exclude-dynamic-system-prompt-sections",
+        "--model", _resolve_model(),
+        "--max-turns", _resolve_max_turns(),
+        "--allowedTools", ",".join(tools) if tools else "",
+        # Sandbox MCP: no servers + strict, so the nested session inherits none (#94)
+        "--mcp-config", '{"mcpServers":{}}',
+        "--strict-mcp-config",
+    ]
+    if isolate_hooks:
+        # Sandbox settings: no sources, so the nested session inherits no hooks (#202)
+        cmd += [_HOOK_ISOLATION_FLAG, ""]
+    return cmd
+
+
 def call_haiku(
     prompt: str,
     tools: list[str] | None = None,
@@ -419,42 +502,50 @@ def call_haiku(
     # MAX_ARG_STRLEN (128KB per single argument), which raises E2BIG ("Argument
     # list too long") at exec time and silently kills saves of long sessions.
     # `claude -p` with no positional prompt reads the prompt from stdin.
-    cmd = [
-        _resolve_claude_bin(),
-        "-p",
-        "--output-format", "json",
-        "--no-session-persistence",
-        "--exclude-dynamic-system-prompt-sections",
-        "--model", _resolve_model(),
-        "--max-turns", _resolve_max_turns(),
-        "--allowedTools", ",".join(tools) if tools else "",
-        # Sandbox MCP: no servers + strict, so the nested session inherits none (#94)
-        "--mcp-config", '{"mcpServers":{}}',
-        "--strict-mcp-config",
-    ]
-
     env = _child_env()
     env = _inject_configured_oauth_token(env)
 
-    try:
-        result = subprocess.run(
-            cmd,
-            input=prompt,
-            capture_output=True,
-            text=True,
-            # claude emits UTF-8; without this, text=True decodes with the
-            # locale codec (cp1252 on Windows) → mojibake / UnicodeDecodeError (#91).
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-            env=env,
-            cwd=tempfile.gettempdir(),
+    def _run(isolate_hooks: bool):
+        try:
+            return subprocess.run(
+                _build_cmd(tools, isolate_hooks),
+                input=prompt,
+                capture_output=True,
+                text=True,
+                # claude emits UTF-8; without this, text=True decodes with the
+                # locale codec (cp1252 on Windows) → mojibake / UnicodeDecodeError (#91).
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+                env=env,
+                cwd=tempfile.gettempdir(),
+            )
+        except subprocess.TimeoutExpired as timed_out:
+            # A client-side timeout aborts a call the API has already been
+            # billing. Whatever partial output arrived is the only evidence of
+            # what it cost.
+            _log_failed_spend(f"timed out after {timeout}s", timed_out.stdout)
+            raise RuntimeError(f"claude timed out after {timeout}s")
+
+    result = _run(isolate_hooks=True)
+
+    if result.returncode != 0 and _isolation_may_be_the_cause(
+        result.stdout, result.stderr
+    ):
+        # Nothing was billed — the call died resolving arguments or
+        # credentials — so this retry is free. Say so where an operator will
+        # read it: the nested call is now running with the user's hooks live,
+        # which is the exact condition #202 is about, and the only thing still
+        # standing between a blocked prompt and the memory record is the echo
+        # guard in consolidate.py.
+        _warn(
+            f"WARNING: this CLI rejected {_HOOK_ISOLATION_FLAG} "
+            f"({_failure_detail(result.stdout, result.stderr)}); retrying "
+            "WITHOUT hook isolation so saves keep working. The nested call "
+            "will run with your hooks registered — a hook that blocks it "
+            "returns its block message as if it were the model's reply (#202)."
         )
-    except subprocess.TimeoutExpired as timed_out:
-        # A client-side timeout aborts a call the API has already been billing.
-        # Whatever partial output arrived is the only evidence of what it cost.
-        _log_failed_spend(f"timed out after {timeout}s", timed_out.stdout)
-        raise RuntimeError(f"claude timed out after {timeout}s")
+        result = _run(isolate_hooks=False)
 
     if result.returncode != 0:
         _log_failed_spend(f"exited {result.returncode}", result.stdout)
@@ -506,6 +597,24 @@ def _is_non_summary(text: str) -> bool:
     return bool(pattern.match(text or "")) if pattern else False
 
 
+# The CLI's own voice, arriving where the model's reply is expected (#202).
+# `claude -p` reports a hook-blocked prompt as `subtype: success` with exit 0
+# and puts the block message in `result`, so no status, exit code or usage
+# figure distinguishes it from an answer — only the text does.
+#
+# This sits at the boundary where stdout is interpreted, which makes it the one
+# place that covers every pipeline stage at once: consolidation has its own
+# echo guard, but the save path would otherwise write a block message into
+# today's staging file as a session entry, and that is how it reaches
+# consolidation to begin with.
+_CLI_NOTICE = re.compile(r"^\s*\w+ operation blocked by hook:", re.I)
+
+
+def _is_cli_notice(text: str) -> bool:
+    """True if this is the CLI talking about the call, not a reply to it."""
+    return bool(_CLI_NOTICE.match(text or ""))
+
+
 def _parse_response(raw: str) -> HaikuResult:
     """Parse JSON output from ``claude --output-format json``.
 
@@ -553,7 +662,7 @@ def _parse_response(raw: str) -> HaikuResult:
     # Drop SKIP (model found nothing worth saving) AND refusals/clarifications
     # (the reject-gate) so neither is ever written to the memory layer.
     model_skipped = text.strip().upper().startswith("SKIP")
-    rejected = not model_skipped and _is_non_summary(text)
+    rejected = not model_skipped and (_is_non_summary(text) or _is_cli_notice(text))
 
     return HaikuResult(text=text, tokens=tokens,
                        is_skip=model_skipped or rejected, is_rejected=rejected)

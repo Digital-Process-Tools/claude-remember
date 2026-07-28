@@ -34,6 +34,21 @@ def _read_template(name: str) -> str:
         return f.read()
 
 
+CONSOLIDATION_TEMPLATE = "consolidate-staging.prompt.txt"
+
+
+def consolidation_template() -> str:
+    """The raw consolidation template, placeholders unsubstituted.
+
+    Read by ``consolidate._instruction_markers`` to work out which lines are
+    *instructions* rather than content, so an echo of the prompt can be told
+    apart from a real consolidation. Derived rather than hardcoded, so the two
+    cannot drift — a second copy of the template's wording would be the same
+    duplicated-rule class as the slug (#144) and the entry header (#177).
+    """
+    return _read_template(CONSOLIDATION_TEMPLATE)
+
+
 def build_save_prompt(
     time: str,
     branch: str,
