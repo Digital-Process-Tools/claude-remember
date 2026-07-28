@@ -210,6 +210,199 @@ def test_the_check_is_not_gated_on_having_run_before(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# The evidence store must answer "was session X captured" (issue #206)
+# ---------------------------------------------------------------------------
+#
+# The #200 cut stored ONE session id, last-write-wins. That answers a different
+# question — "which session most recently made a tool call" — and the two come
+# apart the moment any session writes after X did. Then the evidence that X was
+# captured is simply gone, and the check reads its own amnesia as a fault in X.
+#
+# Two independent reproductions, both from real installs:
+#
+#   * `/clear` does not mint a new session id. It fires SessionStart while the
+#     transcript, the id and the .jsonl all stay the same — and by then the
+#     CURRENT session has already made tool calls, so the one slot holds the
+#     current id. The previous session's record was overwritten hours ago, so
+#     the mismatch is structurally guaranteed regardless of capture health.
+#     (Same for `compact` and `fork` — every same-session SessionStart source.)
+#
+#   * A session captured by the NEXT session's recovery block rather than by
+#     its own live saves — which, given the default delta/cooldown thresholds,
+#     is the ordinary case for short sessions, not an edge case. Reported
+#     independently by ca-sringert on #206.
+#
+# Neither is fixed by looking at SessionStart's `source`. The store is the
+# defect; the source field is just where the loudest instance surfaced.
+
+
+def _stamp(*files):
+    """Fix mtimes oldest-to-newest, widely spaced. See _transcripts on why the
+    ordering is stated rather than raced for."""
+    now = int(time.time())
+    for offset, path in enumerate(reversed(files)):
+        t = now - offset * 120
+        os.utime(path, (t, t))
+
+
+def test_evidence_of_capture_survives_a_later_session_making_tool_calls(tmp_path):
+    """The `/clear` false positive, end to end and store-agnostic.
+
+    Nothing here writes a marker by hand — the previous session is captured by
+    running the real PostToolUse hook, exactly as a healthy session captures
+    itself. Then the current session makes its own tool calls, which is the
+    precondition `/clear` guarantees: SessionStart runs with the same session
+    id still current and its record already written.
+
+    Under a single-slot store the second PostToolUse run destroys the first's
+    evidence and this warns every single time. It has to survive.
+    """
+    home, project, remember, session_dir = _project(tmp_path)
+    env = _env(home, project, remember)
+
+    prev = session_dir / "sess-prev.jsonl"
+    prev.write_text(TOOL_USE_LINE * 5)
+    _run(POST_TOOL, env)
+
+    cur = session_dir / "sess-cur.jsonl"
+    cur.write_text(TOOL_USE_LINE * 5)
+    _stamp(prev, cur)
+    _run(POST_TOOL, env)
+
+    _run(SESSION_START, env)
+
+    assert not (remember / "tmp" / "capture-gap-notice").exists(), (
+        "warned about a session the PostToolUse hook demonstrably ran for — "
+        "its record was overwritten by the current session's own tool calls, "
+        "which is what /clear guarantees and what makes this fire forever"
+    )
+
+
+def test_a_session_captured_only_by_recovery_is_not_flagged(tmp_path):
+    """ca-sringert's repro: a short session that never crossed its own save
+    thresholds, picked up whole by the next session's recovery block.
+
+    `save-session.sh`'s recovery path never touches capture-alive — only
+    post-tool-hook.sh does — so the one slot still names some unrelated older
+    session. But last-save.json records the session as fully captured, and it
+    is the same source the recovery block itself already trusts. A detector
+    that contradicts the save record is reporting on its own bookkeeping, not
+    on whether anything was lost.
+    """
+    home, project, remember, session_dir = _project(tmp_path)
+    _transcripts(session_dir, previous=TOOL_USE_LINE * 5)
+
+    (remember / "tmp" / "last-save.json").write_text(
+        json.dumps({"sessions": {"sess-prev": 72}, "session": "sess-prev", "line": 72}),
+        encoding="utf-8",
+    )
+    (remember / "tmp" / "capture-alive").write_text("sess-some-older-one")
+
+    _run(SESSION_START, _env(home, project, remember))
+
+    assert not (remember / "tmp" / "capture-gap-notice").exists(), (
+        "flagged a session last-save.json records as captured 72/72 — the "
+        "content is in memory, so 'was not captured' is simply false"
+    )
+
+
+def test_a_real_capture_gap_still_warns(tmp_path):
+    """The pin that stops this fix degenerating into deleting the warning.
+
+    PostToolUse ran — for an older session, so the store is populated and
+    working — and never once for the previous session. That is the #200
+    signature exactly: hooks not registered for that session. It must still be
+    reported, or the whole feature is theatre.
+    """
+    home, project, remember, session_dir = _project(tmp_path)
+    env = _env(home, project, remember)
+
+    old = session_dir / "sess-old.jsonl"
+    old.write_text(TOOL_USE_LINE * 5)
+    _run(POST_TOOL, env)
+
+    prev = session_dir / "sess-prev.jsonl"
+    prev.write_text(TOOL_USE_LINE * 5)
+    cur = session_dir / "sess-cur.jsonl"
+    cur.write_text(PLAIN_LINE)
+    _stamp(old, prev, cur)
+
+    _run(SESSION_START, env)
+
+    notice = remember / "tmp" / "capture-gap-notice"
+    assert notice.exists(), (
+        "silent about a session that ran tools and never once fired "
+        "PostToolUse — a detector that cannot say this is worse than none"
+    )
+    assert "doctor" in notice.read_text()
+
+
+def test_the_same_gap_is_reported_once_not_on_every_restart(tmp_path):
+    """A gap is a fact about one past session, not a condition to re-announce.
+
+    Restarts are cheap and frequent — /clear, /compact, a resume — and each one
+    re-examines the same previous session. Saying it again on every one is how
+    a true positive gets trained into background noise.
+    """
+    home, project, remember, session_dir = _project(tmp_path)
+    env = _env(home, project, remember)
+    _transcripts(session_dir, previous=TOOL_USE_LINE * 5)
+
+    _run(SESSION_START, env)
+    notice = remember / "tmp" / "capture-gap-notice"
+    assert notice.exists(), "precondition: the first run must report it"
+    notice.unlink()  # user-prompt-hook.sh consumes it on delivery
+
+    _run(SESSION_START, env)
+
+    assert not notice.exists(), (
+        "re-reported an already-delivered gap about the same session"
+    )
+
+
+def test_the_legacy_single_slot_marker_still_counts_as_evidence(tmp_path):
+    """Migration. Existing installs have a `capture-alive` FILE and no
+    per-session store, and the first run after an upgrade must not invent a
+    warning out of the store simply being empty. The old marker keeps its
+    meaning for the one session it can still speak for."""
+    home, project, remember, session_dir = _project(tmp_path)
+    _transcripts(session_dir, previous=TOOL_USE_LINE * 5)
+    (remember / "tmp" / "capture-alive").write_text("sess-prev")
+    assert not (remember / "tmp" / "capture-alive.d").exists(), (
+        "precondition: this is the pre-upgrade state, no per-session store"
+    )
+
+    _run(SESSION_START, _env(home, project, remember))
+
+    assert not (remember / "tmp" / "capture-gap-notice").exists(), (
+        "the upgrade itself produced a warning — a fix whose first act is a "
+        "false positive teaches the exact lesson it was meant to unteach"
+    )
+
+
+def test_the_evidence_store_stays_bounded(tmp_path):
+    """One marker per session, forever, in a tmp dir nothing else prunes. The
+    store is a cache of recent sessions, not an archive."""
+    home, project, remember, session_dir = _project(tmp_path)
+    env = _env(home, project, remember)
+    store = remember / "tmp" / "capture-alive.d"
+    store.mkdir(parents=True)
+    now = int(time.time())
+    for i in range(400):
+        marker = store / f"sess-{i:04d}"
+        marker.touch()
+        os.utime(marker, (now - (400 - i), now - (400 - i)))
+    _transcripts(session_dir, previous=PLAIN_LINE * 5)
+
+    _run(SESSION_START, env)
+
+    assert len(list(store.iterdir())) < 400, "store is never pruned"
+    assert (store / "sess-0399").exists(), (
+        "pruned the most recent markers — those are the ones the check reads"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Delivery: systemMessage is the only output the human sees
 # ---------------------------------------------------------------------------
 

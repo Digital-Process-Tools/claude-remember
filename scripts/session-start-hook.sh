@@ -72,32 +72,45 @@ dispatch "before_session_start"
 # ── Cleanup + health check ─────────────────────────────────────────────────
 rm -f "$REMEMBER_DIR/tmp/save-session.pid"
 
+# ── "Was session X saved?" ────────────────────────────────────────────────
+# Hoisted out of the recovery block below because the capture-gap check
+# further down asks the same question of the same file, and the two answers
+# must not be allowed to drift: a detector that tells you a session "was not
+# captured" while the save record says it was captured 72/72 is reporting on
+# its own bookkeeping, not on anything you lost (#206).
+#
+# Ask whether this session was EVER saved, not whether it owns the one
+# slot: positions are keyed by session now, and the old equality test
+# force-saved an already-saved session whenever another had saved since
+# (issue #140). Legacy single-slot files still answer correctly.
+# Type-check the value, not just the key: the python readers require an
+# int, so `has($id)` alone would call a corrupt {"id": null} entry saved
+# while they resume it from 0 — re-summarizing the whole span, which is
+# what #140 exists to prevent.
+# isinfinite guard: JSON has no infinity literal, but 1e400 overflows to
+# one, and floor(infinite) == infinite — so it would read as a line
+# number here while python's is_integer() rejects it. jq would then call
+# the session saved and the recovery force-save below would never fire,
+# losing that session's tail entirely.
+LAST_SAVE_FILE="$REMEMBER_DIR/tmp/last-save.json"
+SAVED_QUERY='def isline: type == "number" and ((isnan or isinfinite) | not) and . == floor; if (((.sessions // {})[$id]) | isline) or (.session == $id and (.line | isline)) then "saved" else "unsaved" end'
+
+# Args: $1 — session id. Exit 0 if last-save.json records it as saved.
+session_was_saved() {
+    [ -n "$1" ] && [ -f "$LAST_SAVE_FILE" ] || return 1
+    [ "$($JQ -r --arg id "$1" "$SAVED_QUERY" "$LAST_SAVE_FILE" 2>/dev/null)" = "saved" ]
+}
+
 # ── Recovery: save the most recent missed session ──────────────────────────
 if [ "$(config '.features.recovery' true)" = "true" ]; then
 PROJECT_PATH_SLUG="$(session_dir_slug "$PROJECT")"
 SESSIONS_DIR="$(claude_projects_dir)/${PROJECT_PATH_SLUG}"
-LAST_SAVE_FILE="$REMEMBER_DIR/tmp/last-save.json"
 
 if [ -d "$SESSIONS_DIR" ] && [ -f "$LAST_SAVE_FILE" ]; then
     LAST_JSONL=$(ls -t "$SESSIONS_DIR"/*.jsonl 2>/dev/null | tail -n +2 | head -1)
     if [ -n "$LAST_JSONL" ]; then
         LAST_ID=$(basename "$LAST_JSONL" .jsonl)
-        # Ask whether this session was EVER saved, not whether it owns the one
-        # slot: positions are keyed by session now, and the old equality test
-        # force-saved an already-saved session whenever another had saved since
-        # (issue #140). Legacy single-slot files still answer correctly.
-        # Type-check the value, not just the key: the python readers require an
-        # int, so `has($id)` alone would call a corrupt {"id": null} entry saved
-        # while they resume it from 0 — re-summarizing the whole span, which is
-        # what #140 exists to prevent.
-        # isinfinite guard: JSON has no infinity literal, but 1e400 overflows to
-        # one, and floor(infinite) == infinite — so it would read as a line
-        # number here while python's is_integer() rejects it. jq would then call
-        # the session saved and the recovery force-save below would never fire,
-        # losing that session's tail entirely.
-        SAVED_QUERY='def isline: type == "number" and ((isnan or isinfinite) | not) and . == floor; if (((.sessions // {})[$id]) | isline) or (.session == $id and (.line | isline)) then "saved" else "unsaved" end'
-        SAVED_STATE=$($JQ -r --arg id "$LAST_ID" "$SAVED_QUERY" "$LAST_SAVE_FILE" 2>/dev/null)
-        if [ "$SAVED_STATE" != "saved" ]; then
+        if ! session_was_saved "$LAST_ID"; then
             "$PLUGIN_ROOT/scripts/save-session.sh" "$LAST_ID" --force </dev/null >/dev/null 2>&1 & disown 2>/dev/null || true
         fi
     fi
@@ -118,11 +131,38 @@ fi
 # from a fresh start. Afterwards, though, the signature is exact: a session
 # where SessionStart ran and PostToolUse never did.
 #
-# Judged by IDENTITY: post-tool-hook.sh writes the session id it saw into
-# capture-alive, and if that is not the previous session's id then PostToolUse
-# never ran for it. Comparing mtimes instead failed — bash 3.2's `-nt` works to
-# the second, so a healthy session whose first tool call landed inside the same
+# Judged by IDENTITY: post-tool-hook.sh writes the session id it saw, and if
+# there is no record for the previous session's id then PostToolUse never ran
+# for it. Comparing mtimes instead failed — bash 3.2's `-nt` works to the
+# second, so a healthy session whose first tool call landed inside the same
 # second as a stamp was reported as broken.
+#
+# By MEMBERSHIP, not equality (#206). The first cut stored one id, last-write-
+# wins, which answers "which session most recently made a tool call" — a
+# different question, and the two come apart the instant anything writes after
+# X did. Two real installs found the seam:
+#
+#   * `/clear` does not mint a new session id. SessionStart fires while the
+#     transcript, the id and the .jsonl all stay the same, and by then the
+#     CURRENT session has made tool calls, so the slot holds the current id
+#     while PREV_ID resolves to a genuinely older session. The mismatch was
+#     structurally guaranteed, regardless of capture health — a warning on
+#     every /clear, forever. Same for `compact` and `fork`.
+#   * A session captured by the NEXT session's recovery block rather than its
+#     own live saves. save-session.sh's recovery path never touches
+#     capture-alive, so the slot names something else entirely, while
+#     last-save.json records the session as fully saved. With the default
+#     delta/cooldown thresholds this is the ordinary case for a short session,
+#     not an edge case. (Reported independently by ca-sringert on #206.)
+#
+# Filtering on SessionStart's `source` — the fix the issue proposed — would
+# silence the first and not the second, and would leave the store still unable
+# to answer the question it is asked. So the store changed shape instead: a
+# per-session marker directory, membership-tested. Three sources are accepted
+# as evidence of capture, because a false positive here costs more than a
+# false negative: this warning has no second chance to be believed, whereas a
+# missed gap is still caught by /remember:doctor and, for the content itself,
+# by the recovery block directly above.
 #
 # Deliberately NOT gated on "have we run before". A first cut required a prior
 # session-start stamp, to keep a fresh install from being greeted with a
@@ -136,6 +176,43 @@ fi
 # see it once per project, which is honest: memory really does start here, and
 # the wording says so.
 CAPTURE_ALIVE="$REMEMBER_DIR/tmp/capture-alive"
+CAPTURE_SEEN_DIR="$REMEMBER_DIR/tmp/capture-alive.d"
+CAPTURE_REPORTED="$REMEMBER_DIR/tmp/capture-gap-reported"
+CAPTURE_SEEN_KEEP=200
+
+SEEN_ID=$(cat "$CAPTURE_ALIVE" 2>/dev/null) || true
+
+# Args: $1 — session id. Exit 0 if anything can vouch for it having been
+# captured. Any one source suffices; they fail independently.
+capture_was_seen() {
+    [ -n "$1" ] || return 1
+    # 1. Per-session marker from post-tool-hook.sh — "PostToolUse ran for this
+    #    session", written pre-throttle, so it means WIRED, not saved.
+    #    Same id check the writer applies: this is a basename off the
+    #    transcript dir, and `..` would make `-e` true for every id.
+    case "$1" in
+        .|..|*[!A-Za-z0-9._-]*) : ;;
+        *) [ -e "$CAPTURE_SEEN_DIR/$1" ] && return 0 ;;
+    esac
+    # 2. The legacy single slot. Kept as evidence rather than dropped so the
+    #    first run after an upgrade — old file present, new store empty — is
+    #    not itself a false positive. It can still speak for exactly one
+    #    session, which is all it ever could.
+    [ "$SEEN_ID" = "$1" ] && return 0
+    # 3. The save record. Covers the session captured by recovery rather than
+    #    by its own live saves, which touches nothing above.
+    session_was_saved "$1" && return 0
+    return 1
+}
+
+# Bounded: one marker per session accumulates in a tmp dir nothing else
+# prunes. Newest are kept — those are the only ones the check ever reads.
+if [ -d "$CAPTURE_SEEN_DIR" ]; then
+    ls -t "$CAPTURE_SEEN_DIR" 2>/dev/null | tail -n "+$((CAPTURE_SEEN_KEEP + 1))" \
+    | while IFS= read -r stale; do
+        [ -n "$stale" ] && rm -f "$CAPTURE_SEEN_DIR/$stale" 2>/dev/null || true
+    done
+fi
 
 # The second-newest transcript is the previous session — the same convention
 # the recovery block above uses. Guard against the honest zero-tool session
@@ -145,11 +222,18 @@ PREV_SLUG="$(session_dir_slug "$PROJECT")"
 PREV_JSONL=$(ls -t "$(claude_projects_dir)/${PREV_SLUG}"/*.jsonl 2>/dev/null | tail -n +2 | head -1)
 PREV_ID=""
 [ -n "$PREV_JSONL" ] && PREV_ID=$(basename "$PREV_JSONL" .jsonl)
-SEEN_ID=$(cat "$CAPTURE_ALIVE" 2>/dev/null) || true
-if [ -n "$PREV_ID" ] && [ "$SEEN_ID" != "$PREV_ID" ] \
+
+# A gap is a fact about one past session, not a live condition, so it is said
+# once. Restarts are frequent and each re-examines the same previous session;
+# repeating the same true positive on every one is how it gets tuned out.
+REPORTED_ID=$(cat "$CAPTURE_REPORTED" 2>/dev/null) || true
+
+if [ -n "$PREV_ID" ] && [ "$REPORTED_ID" != "$PREV_ID" ] \
+   && ! capture_was_seen "$PREV_ID" \
    && grep -q '"tool_use"' "$PREV_JSONL" 2>/dev/null; then
     echo "remember: your previous session was not captured. If you just installed or enabled the plugin, that is expected — capture starts now. Otherwise its hooks were not registered for that session; run /remember:doctor." \
         > "$REMEMBER_DIR/tmp/capture-gap-notice" 2>/dev/null || true
+    printf '%s' "$PREV_ID" > "$CAPTURE_REPORTED" 2>/dev/null || true
 fi
 
 # ── Identity: per-project → user-global → plugin-bundled ──────────────────

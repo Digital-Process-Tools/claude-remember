@@ -108,6 +108,27 @@ SESSION_ID=$(basename "$LATEST_JSONL" .jsonl)
 # redirect truncates first, so a process killed between truncate and write
 # leaves an EMPTY marker — which matches no session id, and the next
 # SessionStart reports a healthy session as a gap.
+#
+# ONE MARKER PER SESSION, not one slot shared by all of them (#206). A single
+# slot answers "which session most recently made a tool call" — a different
+# question from "was session X captured", and the moment anything writes after
+# X the answer for X is gone. Not hypothetical: after a `/clear` the CURRENT
+# session's own tool calls overwrite it while SessionStart still has the
+# previous session to judge, so every healthy session read as broken, once per
+# /clear, forever.
+#
+# The single file is still written. doctor.sh reads it, and it is the only
+# evidence an install upgrading from the old format has for the session that
+# straddles the upgrade.
+if mkdir -p "$REMEMBER_DIR/tmp/capture-alive.d" 2>/dev/null; then
+    # The id becomes a path component, so it is checked rather than trusted:
+    # it comes from a filename in the transcript dir, and `..` or a slash
+    # would escape the store. Real session ids are UUIDs.
+    case "$SESSION_ID" in
+        ''|.|..|*[!A-Za-z0-9._-]*) : ;;
+        *) : > "$REMEMBER_DIR/tmp/capture-alive.d/$SESSION_ID" 2>/dev/null || true ;;
+    esac
+fi
 if printf '%s' "$SESSION_ID" > "$REMEMBER_DIR/tmp/capture-alive.$$" 2>/dev/null; then
     mv -f "$REMEMBER_DIR/tmp/capture-alive.$$" "$REMEMBER_DIR/tmp/capture-alive" 2>/dev/null \
         || rm -f "$REMEMBER_DIR/tmp/capture-alive.$$" 2>/dev/null || true
