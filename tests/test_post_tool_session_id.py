@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import json
 import os
-import pty
 import subprocess
 import sys
 import time
@@ -302,6 +301,12 @@ def test_the_hook_does_not_block_on_an_open_stdin_that_is_never_written(tmp_path
 
 def test_the_hook_does_not_block_on_a_terminal_stdin(tmp_path):
     """Invoked by hand from a shell, stdin is a tty nobody will type into."""
+    # Imported here, not at module scope: `pty` pulls in `termios`, which does
+    # not exist on Windows, and a module-level import runs at COLLECTION time —
+    # before the module's own skipif(win32) can apply. That fails the whole
+    # file on the Windows legs rather than skipping it.
+    import pty
+
     home, project, remember, _ = _project(tmp_path, older_lines=5, newer_lines=5)
     master, slave = pty.openpty()
     try:
