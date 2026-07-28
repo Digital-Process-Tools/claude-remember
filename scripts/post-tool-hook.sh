@@ -9,9 +9,24 @@
 #   launches save-session.sh in the background. Also outputs a team memory
 #   nudge as additionalContext to remind the agent to log team-worthy knowledge.
 #
+#   Which session it is recording for comes from the `session_id` on stdin,
+#   NOT from the newest transcript in the session dir (#212) — with two
+#   sessions live in one project those are different answers, and the wrong one
+#   writes a durable marker vouching for a session that did no work. The
+#   transcript that is measured is resolved from that same id, because the
+#   line count is compared against a position keyed by it. See the block above
+#   CURRENT_LINES.
+#
 # USAGE
 #   Called automatically by Claude Code's PostToolUse hook system.
 #   Not intended for manual invocation.
+#
+# STDIN
+#   The PostToolUse JSON payload. Consumed here, and re-exported as
+#   REMEMBER_HOOK_STDIN for hooks.d/after_post_tool scripts. Read is bounded
+#   (never from a tty, `read -t 1`): this fires on every tool call, so a
+#   blocking read is a hung agent. Anything unusable falls back to the
+#   pre-#212 mtime behaviour rather than failing.
 #
 # ENVIRONMENT
 #   CLAUDE_PLUGIN_ROOT   Plugin install directory (set by Claude Code)
@@ -47,6 +62,53 @@ log "hook" "post-tool: PROJECT_DIR=$PROJECT_DIR PIPELINE_DIR=$PIPELINE_DIR PYTHO
 # those users the hook had never fired and to restart Claude Code — advice
 # that does nothing for a wrong slug.
 : > "$REMEMBER_DIR/tmp/post-tool-ran" 2>/dev/null || true
+
+# --- Which session is this invocation FOR? (#212) ---
+# PostToolUse supplies the answer on stdin. Read it here, once, before anything
+# else wants it, and re-export the raw payload: this hook consumes stdin, so a
+# hooks.d/after_post_tool script that wanted it would otherwise find EOF.
+#
+# Reading stdin is only safe if it cannot wait forever — this runs on EVERY
+# tool call, so a blocking read is a hung agent, not a slow one. Two guards:
+# a tty stdin (hand invocation from a shell) is never read at all, and the read
+# itself is bounded by `-t 1` so a pipe held open with nothing in it costs a
+# second and then gives up. bash 3.2 has no sub-second -t, hence 1.
+HOOK_STDIN=""
+if [ ! -t 0 ]; then
+    _line=""
+    while IFS= read -r -t 1 _line || [ -n "$_line" ]; do
+        HOOK_STDIN="$HOOK_STDIN$_line"
+        _line=""
+    done
+fi
+export REMEMBER_HOOK_STDIN="$HOOK_STDIN"
+
+# Extract "session_id" without forking a JSON parser on every tool call.
+# Deliberately narrow: the key must be followed by nothing but whitespace and a
+# colon before the value's opening quote, so a `session_id` appearing inside
+# tool_input (a Grep pattern, a file being read) is not mistaken for the field.
+# It is a heuristic and it is treated as one — the caller validates the result
+# as a path component AND requires it to name a transcript that exists here
+# before anything is done with it.
+_stdin_session_id() {
+    local raw="$1" rest prefix value
+    case "$raw" in *'"session_id"'*) ;; *) return 1 ;; esac
+    rest=${raw#*\"session_id\"}
+    prefix=${rest%%\"*}
+    case "$prefix" in *[!:[:space:]]*) return 1 ;; esac
+    value=${rest#*\"}
+    value=${value%%\"*}
+    [ -n "$value" ] || return 1
+    printf '%s' "$value"
+}
+
+STDIN_SESSION_ID=$(_stdin_session_id "$HOOK_STDIN" 2>/dev/null) || STDIN_SESSION_ID=""
+# stdin is not more trustworthy than a basename. The id becomes both a path
+# component under capture-alive.d/ and a transcript filename, so it faces the
+# same guard the basename-derived id has always faced, at the point of entry.
+case "$STDIN_SESSION_ID" in
+    ''|.|..|*[!A-Za-z0-9._-]*) STDIN_SESSION_ID="" ;;
+esac
 
 SAVE_SCRIPT="$PLUGIN_ROOT/scripts/save-session.sh"
 LAST_SAVE_FILE="$REMEMBER_DIR/tmp/last-save.json"
@@ -89,8 +151,31 @@ if [ -z "$LATEST_JSONL" ]; then
 fi
 rm -f "$REMEMBER_DIR/tmp/no-transcript-notice" 2>/dev/null
 
-CURRENT_LINES=$(wc -l < "$LATEST_JSONL" | tr -d ' ')
-SESSION_ID=$(basename "$LATEST_JSONL" .jsonl)
+# --- One transcript, one session, one answer (#212) ---
+# Everything below is about ONE session: the marker vouches for it, the saved
+# position is keyed by it, and save-session.sh is handed it by id. The line
+# count is compared against that position, so it has to count THAT session's
+# transcript — "the newest file in the directory" was only ever a stand-in for
+# it, and with two sessions live in one project the stand-in names the wrong
+# one. Resolve the transcript from the session id and both uses agree by
+# construction.
+#
+# The mtime pick above is kept as the fallback, unchanged, and is still what
+# decides whether there is anything here to save at all. If stdin did not
+# answer — an older CLI, a different invocation path, a test harness — or if it
+# named a session with no transcript in this project, the hook records exactly
+# what it recorded before this change. Misattributing a tool call is a bug;
+# capturing nothing is an outage, and this repo has twice traded the first for
+# the second (#204, #129).
+TRANSCRIPT="$LATEST_JSONL"
+if [ -n "$STDIN_SESSION_ID" ] && [ -f "$SESSION_DIR/$STDIN_SESSION_ID.jsonl" ]; then
+    TRANSCRIPT="$SESSION_DIR/$STDIN_SESSION_ID.jsonl"
+else
+    [ -n "$STDIN_SESSION_ID" ] && log "hook" "post-tool: stdin session $STDIN_SESSION_ID has no transcript in $SESSION_DIR — falling back to newest"
+fi
+
+CURRENT_LINES=$(wc -l < "$TRANSCRIPT" | tr -d ' ')
+SESSION_ID=$(basename "$TRANSCRIPT" .jsonl)
 
 # Which session PostToolUse serviced, for the capture-gap check in
 # session-start-hook.sh (#200). Distinct from the post-tool-ran marker above:
