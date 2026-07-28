@@ -5,7 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.9.0] — Mistaken for someone else
+
+Seven fixes, and four of them are the same question answered wrong: *whose is this?*
+
+The worst was the nested summarizer, which could not tell its own CLI's voice from the model's. A `UserPromptSubmit` hook that **blocks** does not make the call fail — the CLI writes its refusal to stdout, quotes the entire prompt back, reports `subtype: success`, and exits **0**. Nothing in the exit code, the status field or the usage figures separates that from an answer. Only the text does, and the guard reading that text was positive-only: accept if the envelope is present, else accept if an entry header is. Both are present, because the prompt embeds the staging files verbatim and prints the envelope in its own instructions. So a hook's refusal was written to `recent.md` as memory, and the next run quoted the poisoned file into a new prompt and nested one level deeper. The reporter reached 29,153 bytes and seven levels, with six days of real entries surviving only as quoted text.
+
+The general lesson is why it is documented rather than only patched: **a positive-only validity check cannot reject an echo of its own input**, because every signal it looks for is by construction present in that input. What separates a reply from an echo is not the content — the echo's content is real memory — but the *instructions*, which the model has no reason to reproduce.
+
+The other three mistaken identities were quieter. The capture-gap detector asked "was session X captured?" of a store that could only answer "which session most recently made a tool call" — so after `/clear`, which mints no new session id, it compared the current session against itself and warned that a perfectly healthy session had been lost. Every time, forever. `PostToolUse` inferred which session it was recording for from the newest transcript by mtime rather than from its own stdin, so two live sessions in one project could credit one's work to the other. And `/remember:doctor` inferred the project from nothing at all — `CLAUDE_PROJECT_DIR` reaches hooks but not the Bash tool that runs it — then reported a hard `FAIL` on a healthy install, while its own instructions told the reader never to contradict a `FAIL` line.
+
+The remaining three are about evidence rather than identity. NDC's failure path still carried the blind truncate that #142 removed from its success path, so a `tail` that errored erased the whole span unrecoverably and unlogged. The test harness printed an empty `stderr` on every failure, because these scripts redirect stderr into `hook-errors.log` — the message was always there, and never where anyone looked. And a warning that fires on every `/clear` trains you to stop reading it, which is how the one that matters gets skipped.
+
+Two things worth knowing about what ships. The hook isolation that closes the corruption uses `--setting-sources ''`, and it **fails open**: an older CLI rejects the flag outright, and excluding every setting source also excludes `apiKeyHelper` and the `env` block, which is how enterprise, Bedrock and proxy installs authenticate. Both resolve before the API is contacted and therefore cost nothing, so the call is retried once without isolation and says so loudly — because trading a corruption bug for a silent total outage is a worse deal, and this project has nearly made it before. The echo-rejecting guard holds either way; that is the whole argument for two layers rather than one good one. And the capture store gains an on-disk format, `tmp/capture-alive.d/`: the legacy single slot stays valid evidence, so the first run after upgrading behaves exactly as before instead of reading its own empty store as a fault.
+
+Thanks to [@kodown1k](https://github.com/kodown1k), who supplied the byte counts and nesting depth that made the recursion legible; [@Jutiphan](https://github.com/Jutiphan), whose diagnosis of the NDC truncate was correct even though its `flock`-based fix was not portable here; [@PedroHenriqueNS](https://github.com/PedroHenriqueNS), who found the doctor's false `FAIL`; [@ca-sringert](https://github.com/ca-sringert), whose independent reproduction proved the capture-gap defect was not `/clear`-specific; and [@BlockX-P2P](https://github.com/BlockX-P2P), who traced the nested summarizer scaffolding a memory directory in `$TMPDIR`.
+
+Manifest bumped per [#133](https://github.com/Digital-Process-Tools/claude-remember/issues/133).
 
 ### Fixed
 
