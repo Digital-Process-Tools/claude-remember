@@ -40,6 +40,14 @@ pytestmark = pytest.mark.skipif(
 # not the one this stub directory was prepended to, so it cannot recurse into
 # itself.
 #
+# `command -p` is deliberately NOT prefixed with `exec`. Debian's dash — which
+# is `/bin/sh` on every Ubuntu runner — implements `exec` as a PATH search for
+# an *executable*, with no fallback to builtins, so `exec command -p tail` dies
+# with "exec: command: not found" and exit 127 before any tail runs. Bash (macOS
+# `/bin/sh`) and Apple's dash both accept it, which is why this only ever showed
+# up on Linux CI. Without `exec` the builtin runs normally and the stub exits
+# with tail's own status; the only cost is one extra live process.
+#
 # Before failing, it snapshots the exact bytes of $3 (MEMORY_FILE) into
 # $STUB_TAIL_SNAPSHOT if set. That snapshot — taken synchronously, inside the
 # call the fix must not mutate around — is the only race-free ground truth
@@ -56,7 +64,7 @@ case "$1" in
         exit 1
         ;;
 esac
-exec command -p tail "$@"
+command -p tail "$@"
 """
 
 
