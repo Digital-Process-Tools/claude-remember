@@ -24,6 +24,8 @@ from pathlib import Path
 
 import pytest
 
+from .subprocess_helpers import subprocess_failure_detail
+
 pytestmark = pytest.mark.skipif(
     sys.platform == "win32",
     reason="bash hook subprocess + POSIX semantics — not portable to Windows runners",
@@ -138,7 +140,7 @@ def test_a_previous_session_that_never_captured_raises_the_notice(tmp_path):
     (remember / "tmp" / "capture-session-start").write_text(str(int(time.time())))
 
     result = _run(SESSION_START, _env(home, project, remember))
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 0, subprocess_failure_detail(result, remember)
 
     notice = remember / "tmp" / "capture-gap-notice"
     assert notice.exists(), (
@@ -412,7 +414,7 @@ def test_the_notice_is_delivered_as_a_system_message(tmp_path):
     notice.write_text("capture did not run in your previous session")
 
     result = _run(USER_PROMPT, _env(home, project, remember))
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 0, subprocess_failure_detail(result, remember)
 
     payload = json.loads(result.stdout)
     assert "capture did not run" in payload["systemMessage"], (
@@ -465,7 +467,7 @@ def test_the_ordinary_path_stays_plain_text(tmp_path):
 
     result = _run(USER_PROMPT, _env(home, project, remember))
 
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 0, subprocess_failure_detail(result, remember)
     assert result.stdout.lstrip().startswith("["), result.stdout
     with pytest.raises(json.JSONDecodeError):
         json.loads(result.stdout)

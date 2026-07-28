@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 
 from .test_save_session_gates import _make_env, _run, REPO_ROOT
+from .subprocess_helpers import subprocess_failure_detail
 
 pytestmark = pytest.mark.skipif(
     sys.platform == "win32",
@@ -144,7 +145,7 @@ class TestNdcRefusalIsRejectedNotAppended:
         env["STUB_NDC_REJECTED"] = "1"
 
         result = _run(plugin, env, sid)
-        assert result.returncode == 0, result.stderr
+        assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")
         _wait_for_calls_to_settle(calls)
 
         today_files = list((project / ".remember").glob("today-*.md"))
@@ -181,7 +182,7 @@ class TestNdcRefusalIsRejectedNotAppended:
         env["STUB_NDC_TOKENS"] = "4321,77,910,0.004242"
 
         result = _run(plugin, env, sid)
-        assert result.returncode == 0, result.stderr
+        assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")
         _wait_for_calls_to_settle(calls)
 
         logs = "".join(p.read_text() for p in (project / ".remember" / "logs").glob("*.log"))
@@ -207,7 +208,7 @@ class TestNdcRefusalIsRejectedNotAppended:
         env["STUB_NDC_REJECTED"] = "1"
 
         result = _run(plugin, env, sid)
-        assert result.returncode == 0, result.stderr
+        assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")
         _wait_for_calls_to_settle(calls)
 
         now_md = project / ".remember" / "now.md"

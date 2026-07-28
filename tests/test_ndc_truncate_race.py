@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from .test_save_session_gates import _make_env, _run  # shared harness
+from .subprocess_helpers import subprocess_failure_detail
 
 pytestmark = pytest.mark.skipif(
     __import__("sys").platform == "win32",
@@ -66,7 +67,7 @@ class TestNdcTruncateRace:
         memory_file = project / ".remember" / "now.md"
 
         result = _run(plugin, env, sid)
-        assert result.returncode == 0, result.stderr
+        assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")
 
         remaining = _wait_for_background_ndc(memory_file)
         assert "an entry written while NDC was compressing" in remaining, (
@@ -80,7 +81,7 @@ class TestNdcTruncateRace:
         memory_file = project / ".remember" / "now.md"
 
         result = _run(plugin, env, sid)
-        assert result.returncode == 0, result.stderr
+        assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")
 
         remaining = _wait_for_background_ndc(memory_file)
         assert "did some work" not in remaining, (

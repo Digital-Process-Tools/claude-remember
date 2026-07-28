@@ -26,6 +26,13 @@ from typing import Optional
 
 import pytest
 
+# sys.path insert + bare import (not `.subprocess_helpers`) so this module
+# keeps working when test_ndc_day_boundary.py / test_reject_gate_visibility.py
+# import it as a bare top-level module via their own sys.path hack, where a
+# relative import would fail with "no known parent package".
+sys.path.insert(0, os.path.dirname(__file__))
+from subprocess_helpers import subprocess_failure_detail
+
 pytestmark = pytest.mark.skipif(
     sys.platform == "win32",
     reason="bash subprocess + POSIX layout — not portable to Windows runners (#79)",
@@ -181,7 +188,7 @@ class TestNoWorkSessionAdvancesPosition:
                                                      position=812)
         result = _run(plugin, env, sid)
 
-        assert result.returncode == 0, result.stderr
+        assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")
         assert _saved_position(project) == 812, (
             "position must advance past an empty span, else the next run re-extracts "
             "the same lines and exits identically, once per cooldown, forever"
@@ -196,7 +203,7 @@ class TestMinHumanGate:
         env, project, plugin, calls, sid = _make_env(tmp_path, exchanges=4, humans=1)
         result = _run(plugin, env, sid)
 
-        assert result.returncode == 0, result.stderr
+        assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")
         assert _saved_position(project) is None, (
             "these exchanges are real content — advancing would drop them from every "
             "future extract, so they must stay pending"
@@ -208,7 +215,7 @@ class TestMinHumanGate:
         env, project, plugin, calls, sid = _make_env(tmp_path, exchanges=45, humans=1)
         result = _run(plugin, env, sid)
 
-        assert result.returncode == 0, result.stderr
+        assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")
         assert "call-haiku" in calls.read_text(), (
             "an agentic session (many tool calls, few human turns) never clears the "
             "min-human gate — without the exchange-count fallback the plugin's core "
@@ -223,7 +230,7 @@ class TestMinHumanGate:
         )
         result = _run(plugin, env, sid)
 
-        assert result.returncode == 0, result.stderr
+        assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")
         assert "call-haiku" not in calls.read_text()
 
     def test_fallback_can_be_disabled_with_zero(self, tmp_path):
@@ -234,7 +241,7 @@ class TestMinHumanGate:
         )
         result = _run(plugin, env, sid)
 
-        assert result.returncode == 0, result.stderr
+        assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")
         assert "call-haiku" not in calls.read_text()
 
     def test_enough_human_turns_still_saves(self, tmp_path):
@@ -242,7 +249,7 @@ class TestMinHumanGate:
         env, project, plugin, calls, sid = _make_env(tmp_path, exchanges=6, humans=5)
         result = _run(plugin, env, sid)
 
-        assert result.returncode == 0, result.stderr
+        assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")
         assert "call-haiku" in calls.read_text()
 
 
@@ -254,7 +261,7 @@ class TestDryRun:
                                                      position=812)
         result = _run(plugin, env, sid, "--dry")
 
-        assert result.returncode == 0, result.stderr
+        assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")
         assert _saved_position(project) is None, (
             "a dry run must leave last-save.json untouched"
         )
@@ -319,7 +326,7 @@ class TestSummaryFailureLoop:
 
         env["STUB_HAIKU_FAIL"] = "0"
         result = _run(plugin, env, sid)
-        assert result.returncode == 0, result.stderr
+        assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")
 
         marker = project / ".remember" / "tmp" / "last-summary-failure"
         assert not marker.exists(), "a successful save must reset the failure count"
@@ -336,7 +343,7 @@ class TestHeaderTimeIsTakenBackOffTheModel:
         env["STUB_HAIKU_TEXT"] = "## 18:30 | main\n\n- did some work\n"
         _suppress_ndc(project)
         result = _run(plugin, env, sid)
-        assert result.returncode == 0, result.stderr
+        assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")
 
         header = (project / ".remember" / "now.md").read_text().strip().splitlines()[0]
         logs = "".join(p.read_text() for p in (project / ".remember" / "logs").glob("*.log"))
@@ -353,7 +360,7 @@ class TestHeaderTimeIsTakenBackOffTheModel:
         env["STUB_HAIKU_TEXT"] = "## 18:30 | feature/some-branch\n\n- fixed the thing\n"
         _suppress_ndc(project)
         result = _run(plugin, env, sid)
-        assert result.returncode == 0, result.stderr
+        assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")
 
         written = (project / ".remember" / "now.md").read_text()
         assert "| feature/some-branch" in written, f"branch lost: {written!r}"
@@ -366,7 +373,7 @@ class TestHeaderTimeIsTakenBackOffTheModel:
         env["STUB_HAIKU_TEXT"] = f"## {now} | main\n\n- did some work\n"
         _suppress_ndc(project)
         result = _run(plugin, env, sid)
-        assert result.returncode == 0, result.stderr
+        assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")
 
         logs = "".join(p.read_text() for p in (project / ".remember" / "logs").glob("*.log"))
         header = (project / ".remember" / "now.md").read_text().strip().splitlines()[0]
@@ -391,7 +398,7 @@ class TestMalformedOutputNeverReachesMemory:
         env["STUB_HAIKU_TEXT"] = self.MALFORMED
         _suppress_ndc(project)
         result = _run(plugin, env, sid)
-        assert result.returncode == 0, result.stderr
+        assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")
 
         # Check every memory file, not just now.md: compression moves entries
         # on, so asserting only on now.md passes whether the junk was rejected

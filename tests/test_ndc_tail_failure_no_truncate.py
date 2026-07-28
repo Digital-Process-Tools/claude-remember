@@ -27,6 +27,7 @@ import pytest
 
 from .test_save_session_gates import _make_env, _run  # shared harness
 from .test_ndc_truncate_race import _ndc_env, _wait_for_background_ndc
+from .subprocess_helpers import subprocess_failure_detail
 
 pytestmark = pytest.mark.skipif(
     sys.platform == "win32",
@@ -90,7 +91,7 @@ class TestNdcTailFailureNoTruncate:
         env = _with_failing_tail(env, tmp_path, snapshot)
 
         result = _run(plugin, env, sid)
-        assert result.returncode == 0, result.stderr
+        assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")
 
         # No tail-forward can succeed, so now.md never changes again once the
         # NDC subshell reaches (and fails) the tail step. Settling just means
@@ -119,7 +120,7 @@ class TestNdcTailFailureNoTruncate:
         env = _with_failing_tail(env, tmp_path, snapshot)
 
         result = _run(plugin, env, sid)
-        assert result.returncode == 0, result.stderr
+        assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")
 
         memory_file = project / ".remember" / "now.md"
         _wait_for_background_ndc(memory_file)
