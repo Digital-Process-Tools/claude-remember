@@ -23,7 +23,13 @@
 #
 # ENVIRONMENT
 #   CLAUDE_PLUGIN_ROOT   Plugin install directory (set by Claude Code)
-#   CLAUDE_PROJECT_DIR   Project root (default: .)
+#   CLAUDE_PROJECT_DIR   Project root. Claude Code exports this to *hooks*,
+#                        not to the Bash tool that runs this script, so on a
+#                        marketplace install it normally arrives unset here
+#                        (#207). When unset, doctor.sh — and only doctor.sh,
+#                        never resolve-paths.sh's other callers — defaults it
+#                        to the current directory, and says so in the report
+#                        instead of presenting the guess as given.
 #
 # DEPENDENCIES
 #   resolve-paths.sh  (sourced with REMEMBER_PATHS_SOFT_FAIL=1 — unlike the
@@ -77,6 +83,26 @@ echo ""
 # ── 2. Resolved paths ────────────────────────────────────────────────────────
 echo "-- Paths --"
 
+# Claude Code exports CLAUDE_PROJECT_DIR to its *hooks*, not to a plain shell —
+# and this script runs through the Bash tool, where it is unset on any install
+# that isn't a local .claude/remember/ layout (marketplace and symlinked
+# installs both hit this). resolve-paths.sh then refuses to guess and fatals,
+# which is correct for the hooks (a wrong guess there writes memory into the
+# wrong project) but turns this read-only report into a false FAIL on a
+# healthy install (#207).
+#
+# Scoped to doctor.sh only: default to the current directory here, never in
+# resolve-paths.sh itself, so every other caller keeps the strict refusal.
+# The guess is reported as a guess below (see _PROJECT_DIR_ASSUMED) — a
+# diagnostic that silently assumes a project and reports on it as fact would
+# just be a quieter version of the same false signal.
+_PROJECT_DIR_ASSUMED=0
+if [ -z "${CLAUDE_PROJECT_DIR:-}" ]; then
+    CLAUDE_PROJECT_DIR="$PWD"
+    _PROJECT_DIR_ASSUMED=1
+    export CLAUDE_PROJECT_DIR
+fi
+
 _RESOLVE_ERR_FILE="${TMPDIR:-/tmp}/remember-doctor-resolve-$$"
 REMEMBER_PATHS_SOFT_FAIL=1 source "$SCRIPT_DIR/resolve-paths.sh" 2>"$_RESOLVE_ERR_FILE"
 _RESOLVE_STATUS=$?
@@ -90,7 +116,14 @@ if [ "$_RESOLVE_STATUS" -ne 0 ]; then
     exit 0
 fi
 
-echo "OK   CLAUDE_PROJECT_DIR = $PROJECT_DIR"
+if [ "$_PROJECT_DIR_ASSUMED" -eq 1 ]; then
+    echo "WARN CLAUDE_PROJECT_DIR was not set — assumed the current directory:"
+    echo "     $PROJECT_DIR"
+    echo "     Everything below describes that directory, not one Claude Code told"
+    echo "     us about. Rerun with CLAUDE_PROJECT_DIR set to check a different project."
+else
+    echo "OK   CLAUDE_PROJECT_DIR = $PROJECT_DIR"
+fi
 echo "OK   PIPELINE_DIR       = $PIPELINE_DIR"
 
 # lib-memory-dir.sh directly (not bootstrap-dirs.sh — see header). It sources
@@ -297,14 +330,23 @@ echo ""
 # a mismatched slug were both answered with a restart that fixes neither, on a
 # line commands/doctor.md tells the operator not to second-guess. Specific
 # causes are named before the general one.
+#
+# _ASSUMED_NOTE repeats the CLAUDE_PROJECT_DIR-was-guessed disclosure from the
+# Paths section on the one line commands/doctor.md tells the operator to trust
+# without scrolling up — every verdict below describes $PROJECT_DIR whether or
+# not that's the project the operator meant (#207).
+_ASSUMED_NOTE=""
+if [ "$_PROJECT_DIR_ASSUMED" -eq 1 ]; then
+    _ASSUMED_NOTE=" (CLAUDE_PROJECT_DIR was not set; this describes $PROJECT_DIR, assumed from the current directory)"
+fi
 if [ "$_POST_TOOL_FIRED" -eq 1 ] && [ -n "$_LAST_SAVE_TIME" ]; then
-    echo "VERDICT: capture is working — last save $_LAST_SAVE_TIME"
+    echo "VERDICT: capture is working — last save $_LAST_SAVE_TIME$_ASSUMED_NOTE"
 elif [ "$_PYTHON_OK" -eq 0 ]; then
-    echo "VERDICT: problem — no usable Python; the pipeline cannot run at all (see Tools above)"
+    echo "VERDICT: problem — no usable Python; the pipeline cannot run at all (see Tools above)$_ASSUMED_NOTE"
 elif [ -n "$_SESSION_DIR" ] && [ ! -d "$_SESSION_DIR" ]; then
-    echo "VERDICT: problem — session dir slug does not match Claude Code's transcript directory (#144); restarting will not help"
+    echo "VERDICT: problem — session dir slug does not match Claude Code's transcript directory (#144); restarting will not help$_ASSUMED_NOTE"
 elif [ "$_POST_TOOL_FIRED" -eq 0 ]; then
-    echo "VERDICT: problem — PostToolUse has never fired; restart Claude Code (see REMEDIATION above)"
+    echo "VERDICT: problem — PostToolUse has never fired; restart Claude Code (see REMEDIATION above)$_ASSUMED_NOTE"
 else
-    echo "VERDICT: problem — PostToolUse has fired but no save has completed yet; check hook-errors.log above"
+    echo "VERDICT: problem — PostToolUse has fired but no save has completed yet; check hook-errors.log above$_ASSUMED_NOTE"
 fi

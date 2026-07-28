@@ -168,3 +168,73 @@ def test_a_slug_mismatch_is_named_outright(tmp_path):
 
     assert "Session dir MISSING" in result.stdout
     assert "#144" in result.stdout, "did not point at the known cause"
+
+
+def test_missing_claude_project_dir_does_not_false_fail_on_healthy_install(tmp_path):
+    """#207: doctor.sh runs through the Bash tool, not as a hook, so it never
+    receives CLAUDE_PROJECT_DIR — resolve-paths.sh then hits its "cannot guess"
+    branch and fatals. That branch is correct for the hooks (a wrong guess
+    there writes memory to the wrong project) but it makes the read-only
+    diagnostic call a healthy install broken.
+
+    Reproduces the real condition: CLAUDE_PROJECT_DIR unset AND CLAUDE_PLUGIN_ROOT
+    pointing outside a local .claude/remember/ layout (REPO_ROOT is the repo
+    checkout itself) — that second half is what forces the fatal branch. A test
+    that only unset the variable while sitting in a local layout would pass on
+    the broken code and pin nothing.
+    """
+    home, project, remember, _ = _project(tmp_path)
+    (remember / "tmp" / "capture-alive").write_text("sess-1")
+    (remember / "tmp" / "last-save.json").write_text(
+        json.dumps({"session": "sess-1", "line": 500}), encoding="utf-8"
+    )
+
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "CLAUDE_PLUGIN_ROOT": str(REPO_ROOT),
+        "REMEMBER_DIR": str(remember),
+        "_LIB_MEMORY_DIR_LOADED": "1",
+    }
+    env.pop("CLAUDE_PROJECT_DIR", None)
+    result = subprocess.run(["bash", str(DOCTOR)], env=env, cwd=str(project),
+                            capture_output=True, text=True, timeout=120)
+
+    assert result.returncode == 0, result.stderr
+    assert "FAIL Path resolution failed" not in result.stdout, (
+        f"a healthy install was reported broken because CLAUDE_PROJECT_DIR "
+        f"was never given to it:\n{result.stdout}"
+    )
+    verdict = _verdict(result.stdout)
+    assert "capture cannot run" not in verdict, (
+        f"verdict claimed capture cannot run when it was never told which "
+        f"project to check: {verdict}"
+    )
+    assert "capture is working" in verdict
+
+    # The assumption must be visible, not silently presented as told-to-us fact.
+    assert "OK   CLAUDE_PROJECT_DIR" not in result.stdout, (
+        "printed the guessed directory as if Claude Code had told it, "
+        "instead of naming it as an assumption"
+    )
+    assert str(project) in result.stdout
+    assert "assum" in result.stdout.lower(), (
+        "did not say the project directory was assumed rather than given"
+    )
+
+
+def test_claude_project_dir_set_behaves_unchanged(tmp_path):
+    """Regression guard for #207's fix: when Claude Code (or a hook) does
+    provide CLAUDE_PROJECT_DIR, doctor.sh must report it as given, not as
+    an assumption — the new default path must never fire in this case."""
+    home, project, remember, _ = _project(tmp_path)
+    (remember / "tmp" / "capture-alive").write_text("sess-1")
+    (remember / "tmp" / "last-save.json").write_text(
+        json.dumps({"session": "sess-1", "line": 500}), encoding="utf-8"
+    )
+
+    result = _run(home, project, remember)
+
+    assert f"OK   CLAUDE_PROJECT_DIR = {project}" in result.stdout
+    assert "assum" not in result.stdout.lower()
+    assert "capture is working" in _verdict(result.stdout)
