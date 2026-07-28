@@ -537,9 +537,28 @@ if [ "$RUN_NDC" = true ]; then
                         fi
                         [ "$NDC_KEPT" -gt 0 ] && log "ndc" "kept ${NDC_KEPT}b appended during compression"
                     else
+                        # tail failed (disk, permissions, a full $TMPDIR — #173).
+                        # This branch used to be `: > "$MEMORY_FILE"`, the exact
+                        # blind truncate #142 removed from the success path above,
+                        # reintroduced here as the failure path. now.md is left
+                        # completely untouched instead: whatever tail could not
+                        # read is safer sitting in now.md than erased.
+                        #
+                        # Cost: the span already appended to $TODAY_FILE above
+                        # (line ~502) stays there, and since now.md keeps every
+                        # byte, the next NDC round can summarize the same span
+                        # again — a duplicated entry in today-*.md. That trade is
+                        # deliberate: a duplicated summary is visible and
+                        # recoverable; erased entries are neither. Rolling back
+                        # the TODAY_FILE append instead was considered and
+                        # rejected — TODAY_FILE can itself receive concurrent
+                        # appends during this same 180s window (any other save's
+                        # own NDC round, or a future flush), and truncating it
+                        # back to a byte count captured earlier would risk
+                        # erasing exactly that concurrent write: the same #142
+                        # class of bug, moved one file over.
                         rm -f "$NDC_TAIL"
-                        : > "$MEMORY_FILE"
-                        rm -f "$NOW_DAY_FILE"
+                        log "ndc" "ERROR: tail failed, now.md left untouched (today-${NDC_DAY}.md may now hold a duplicate of this span)"
                     fi
                     NDC_OUT_BYTES=$(wc -c < "$HAIKU_TEXT_FILE" | tr -d ' ')
                     [ "$NDC_SRC_BYTES" -gt 0 ] && log "ndc" "${NDC_SRC_BYTES}→${NDC_OUT_BYTES}b (-$(( (NDC_SRC_BYTES - NDC_OUT_BYTES) * 100 / NDC_SRC_BYTES ))%)"

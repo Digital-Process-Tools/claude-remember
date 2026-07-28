@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **NDC's failure path truncated `now.md` — the exact bug its success path had already been fixed to avoid** ([#173](https://github.com/Digital-Process-Tools/claude-remember/issues/173)) — `now.md` is snapshotted before a Haiku call that can run 180s, and by the time it returns the parent has released the save lock and exited, so a newer save may have appended entries (#142). The success path keeps everything past the snapshot offset via `tail -c +N` for exactly that reason. But if `tail` itself failed — disk, permissions, a full `$TMPDIR` — the `else` arm fell back to `: > "$MEMORY_FILE"`: the same blind truncate #142 removed, reintroduced as the one error case where it erases the whole span, including anything appended after the snapshot, unrecoverably and unlogged. `now.md` is now left completely untouched on a `tail` failure, with an error logged. Cost: the span was already appended to `today-*.md` before the `tail` step runs, so leaving it in `now.md` too means the next NDC round can summarize it a second time — a duplicated entry. Rolling back the `today-*.md` append instead was considered and rejected: that file can itself receive concurrent appends during the same 180s window, and truncating it back to a byte count captured earlier would risk erasing exactly that concurrent write — the same #142 class of bug, moved one file over. A duplicated, visible summary beats an erased, silent one. Reported against `flock`-based locking in [#173](https://github.com/Digital-Process-Tools/claude-remember/issues/173) by [@Jutiphan](https://github.com/Jutiphan), whose diagnosis of the defect was correct; that PR's fix mechanism wasn't portable here (`lib-lock.sh` rejects `flock` — absent on macOS, no util-linux on the GitHub macOS runner, and a Python `fcntl.flock` workaround dies with its child process while the shell believes it still holds the lock), so the fix here is a straight patch of the existing `mv`-based lock primitive's blast radius rather than a rework of the locking itself.
+
 ## [0.8.9] — Silence, mistaken for success
 
 Two issues, both reported from outside the team, and they are the same bug wearing different clothes: something produced no signal, and the absence of a signal was read as a good one.
