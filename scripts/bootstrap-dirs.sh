@@ -96,11 +96,29 @@ mkdir -p \
 # In external mode (REMEMBER_DIR outside PROJECT_DIR) there is no gitignore
 # to write — the user manages that tree themselves (typically as a private git
 # repo at ~/.remember/).
-case "$REMEMBER_DIR" in
-    "$_mem_proj"/*)
-        [ -f "$REMEMBER_DIR/.gitignore" ] || echo '*' > "$REMEMBER_DIR/.gitignore" 2>/dev/null
-        ;;
-esac
+#
+# Gated on the store actually existing (#204). The mkdir above is best-effort
+# and its status was never checked, so on an unwritable root — the reported
+# case is a session opened at `/`, where legacy mode makes REMEMBER_DIR
+# `//.remember` on macOS's read-only root volume — this walked into file I/O
+# against a directory that was never created. The `2>/dev/null` did not hide
+# the result: the shell opens a redirection target BEFORE running the command,
+# so it is the shell that reports the failure, outside the scope of the
+# redirect meant to silence it, and the user saw
+#   bootstrap-dirs.sh: line NN: //.remember/.gitignore: No such file or directory
+# surfaced as a non-blocking hook failure at every session start.
+#
+# The braces close the same hole for the residual race — the store removed
+# between this test and the write — where there is no directory check left to
+# make. Redirecting the whole group puts the shell's own diagnostic inside the
+# suppressed scope.
+if [ -d "$REMEMBER_DIR" ]; then
+    case "$REMEMBER_DIR" in
+        "$_mem_proj"/*)
+            [ -f "$REMEMBER_DIR/.gitignore" ] || { echo '*' > "$REMEMBER_DIR/.gitignore"; } 2>/dev/null
+            ;;
+    esac
+fi
 unset _mem_proj
 
 # --- Redirect stderr to hook-errors.log ---
