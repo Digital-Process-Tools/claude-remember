@@ -65,6 +65,11 @@ source "$(dirname "$0")/lib-lock.sh"
 log "hook" "save-session: PROJECT_DIR=$PROJECT_DIR PIPELINE_DIR=$PIPELINE_DIR PYTHON=$PYTHON REMEMBER_DIR=$REMEMBER_DIR"
 
 LOCK_DIR="${REMEMBER_DIR}/tmp/save.lock"
+# How long the backgrounded NDC commit waits for the save lock before giving up
+# and leaving now.md alone (#223). See Step 8 for why this is not the parent's
+# timeout 0. Env-overridable so the concurrency tests can drive the timeout path
+# without pinning a lock for half a minute — same shape as _LOCK_ADOPT_AFTER.
+NDC_COMMIT_LOCK_TIMEOUT="${REMEMBER_NDC_COMMIT_LOCK_TIMEOUT:-30}"
 MEMORY_FILE="${REMEMBER_DIR}/now.md"
 # Which day now.md's contents belong to (#141) — see Step 7.
 NOW_DAY_FILE="${REMEMBER_DIR}/tmp/now-day"
@@ -508,57 +513,104 @@ if [ "$RUN_NDC" = true ]; then
                     # entries, and their position had already been advanced, so
                     # they were unrecoverable and nothing was logged. Keep
                     # everything past the snapshot offset instead.
-                    NDC_TAIL=$(mktemp "${TMPDIR:-/tmp}"/remember-ndc-tail-XXXXXX)
-                    if tail -c +$(( NDC_SRC_BYTES + 1 )) "$MEMORY_FILE" > "$NDC_TAIL" 2>/dev/null; then
-                        NDC_KEPT=$(wc -c < "$NDC_TAIL" | tr -d ' ')
-                        mv "$NDC_TAIL" "$MEMORY_FILE"
-                        # The stamped day is spent with the bytes it covered.
-                        # Anything kept was appended during this compression,
-                        # so stamp it with the day it is NOW — not $TODAY_DATE,
-                        # which was computed once in the parent before a Haiku
-                        # call that can run 180s. A compression that started
-                        # before midnight would otherwise stamp those newer
-                        # bytes with the previous day: not the day they were
-                        # appended, not their own day, but a third stale one
-                        # belonging to an earlier run. That is the #142-shaped
-                        # window, and misfiling is exactly what it costs here.
-                        #
-                        # Still one stamp for the whole kept range. If two saves
-                        # land inside this window on opposite sides of midnight,
-                        # the earlier one is filed with the later one's day.
-                        # Splitting the range would need each entry to carry its
-                        # own day, which is the thing now.md does not have and
-                        # the reason this stamp exists — see #141 for the flush
-                        # design that would close it.
-                        if [ "$NDC_KEPT" -gt 0 ]; then
-                            printf '%s\n' "$(_remember_date +%Y-%m-%d)" > "$NOW_DAY_FILE" 2>/dev/null || true
+                    #
+                    # The offset arithmetic closes the 180s window. It does NOT
+                    # close the commit itself (#223, @Jutiphan's defect (b) in
+                    # #173): `tail` reads to EOF, a concurrent save appends —
+                    # entitled to, since nothing was held here — and `mv` puts
+                    # back a copy predating that append. Same erasure as #142,
+                    # in milliseconds instead of minutes. So take the lock back
+                    # for the read-and-replace. The parent released it, and this
+                    # subshell is a different process: `lock_release`'s ownership
+                    # check compares pids, and the EXIT trap that would have
+                    # released it early is not inherited by a backgrounded
+                    # subshell, so there is nothing to unwind here.
+                    #
+                    # Not the parent's timeout 0. The parent releases this very
+                    # lock a handful of instructions after backgrounding us, so
+                    # with 0 the first contender we lose to is our own parent
+                    # whenever the Haiku call returns quickly — every such round
+                    # would skip and duplicate its span. A bounded wait cannot
+                    # deadlock (lock_acquire spins to a deadline and returns 1)
+                    # and costs nothing: nothing waits on this subshell.
+                    #
+                    # It cannot steal the lock from a live save either — steal
+                    # needs a dead pid, adoption needs no pid at all — so losing
+                    # the wait means someone is genuinely holding it.
+                    if lock_acquire "$LOCK_DIR" "$NDC_COMMIT_LOCK_TIMEOUT"; then
+                        # Re-read the size under the lock. The offset stays valid as
+                        # the START of the kept range no matter what happened during
+                        # the Haiku call, but only while now.md still HAS that many
+                        # bytes: a file that shrank underneath us (a rotation, or an
+                        # earlier NDC round that committed its own tail first) is not
+                        # the file the offset describes, and tailing past its end
+                        # yields either nothing or a fragment cut mid-line, which the
+                        # `mv` would then install over live content.
+                        NDC_LIVE_BYTES=$(wc -c < "$MEMORY_FILE" 2>/dev/null | tr -d ' ')
+                        case "$NDC_LIVE_BYTES" in
+                            (''|*[!0-9]*) NDC_LIVE_BYTES=0 ;;
+                        esac
+                        if [ "$NDC_LIVE_BYTES" -lt "$NDC_SRC_BYTES" ]; then
+                            log "ndc" "SKIPPED commit: now.md is ${NDC_LIVE_BYTES}b, below the ${NDC_SRC_BYTES}b snapshot this offset was taken from — left untouched (today-${NDC_DAY}.md may now hold a duplicate of this span)"
                         else
-                            rm -f "$NOW_DAY_FILE"
+                            NDC_TAIL=$(mktemp "${TMPDIR:-/tmp}"/remember-ndc-tail-XXXXXX)
+                            if tail -c +$(( NDC_SRC_BYTES + 1 )) "$MEMORY_FILE" > "$NDC_TAIL" 2>/dev/null; then
+                                NDC_KEPT=$(wc -c < "$NDC_TAIL" | tr -d ' ')
+                                mv "$NDC_TAIL" "$MEMORY_FILE"
+                                # The stamped day is spent with the bytes it covered.
+                                # Anything kept was appended during this compression,
+                                # so stamp it with the day it is NOW — not $TODAY_DATE,
+                                # which was computed once in the parent before a Haiku
+                                # call that can run 180s. A compression that started
+                                # before midnight would otherwise stamp those newer
+                                # bytes with the previous day: not the day they were
+                                # appended, not their own day, but a third stale one
+                                # belonging to an earlier run. That is the #142-shaped
+                                # window, and misfiling is exactly what it costs here.
+                                #
+                                # Still one stamp for the whole kept range. If two saves
+                                # land inside this window on opposite sides of midnight,
+                                # the earlier one is filed with the later one's day.
+                                # Splitting the range would need each entry to carry its
+                                # own day, which is the thing now.md does not have and
+                                # the reason this stamp exists — see #141 for the flush
+                                # design that would close it.
+                                if [ "$NDC_KEPT" -gt 0 ]; then
+                                    printf '%s\n' "$(_remember_date +%Y-%m-%d)" > "$NOW_DAY_FILE" 2>/dev/null || true
+                                else
+                                    rm -f "$NOW_DAY_FILE"
+                                fi
+                                [ "$NDC_KEPT" -gt 0 ] && log "ndc" "kept ${NDC_KEPT}b appended during compression"
+                            else
+                                # tail failed (disk, permissions, a full $TMPDIR — #173).
+                                # This branch used to be `: > "$MEMORY_FILE"`, the exact
+                                # blind truncate #142 removed from the success path above,
+                                # reintroduced here as the failure path. now.md is left
+                                # completely untouched instead: whatever tail could not
+                                # read is safer sitting in now.md than erased.
+                                #
+                                # Cost: the span already appended to $TODAY_FILE above
+                                # (line ~502) stays there, and since now.md keeps every
+                                # byte, the next NDC round can summarize the same span
+                                # again — a duplicated entry in today-*.md. That trade is
+                                # deliberate: a duplicated summary is visible and
+                                # recoverable; erased entries are neither. Rolling back
+                                # the TODAY_FILE append instead was considered and
+                                # rejected — TODAY_FILE can itself receive concurrent
+                                # appends during this same 180s window (any other save's
+                                # own NDC round, or a future flush), and truncating it
+                                # back to a byte count captured earlier would risk
+                                # erasing exactly that concurrent write: the same #142
+                                # class of bug, moved one file over.
+                                rm -f "$NDC_TAIL"
+                                log "ndc" "ERROR: tail failed, now.md left untouched (today-${NDC_DAY}.md may now hold a duplicate of this span)"
+                            fi
                         fi
-                        [ "$NDC_KEPT" -gt 0 ] && log "ndc" "kept ${NDC_KEPT}b appended during compression"
+                        # Released before the summary log line below —
+                        # nothing past this point touches now.md.
+                        lock_release "$LOCK_DIR" || true
                     else
-                        # tail failed (disk, permissions, a full $TMPDIR — #173).
-                        # This branch used to be `: > "$MEMORY_FILE"`, the exact
-                        # blind truncate #142 removed from the success path above,
-                        # reintroduced here as the failure path. now.md is left
-                        # completely untouched instead: whatever tail could not
-                        # read is safer sitting in now.md than erased.
-                        #
-                        # Cost: the span already appended to $TODAY_FILE above
-                        # (line ~502) stays there, and since now.md keeps every
-                        # byte, the next NDC round can summarize the same span
-                        # again — a duplicated entry in today-*.md. That trade is
-                        # deliberate: a duplicated summary is visible and
-                        # recoverable; erased entries are neither. Rolling back
-                        # the TODAY_FILE append instead was considered and
-                        # rejected — TODAY_FILE can itself receive concurrent
-                        # appends during this same 180s window (any other save's
-                        # own NDC round, or a future flush), and truncating it
-                        # back to a byte count captured earlier would risk
-                        # erasing exactly that concurrent write: the same #142
-                        # class of bug, moved one file over.
-                        rm -f "$NDC_TAIL"
-                        log "ndc" "ERROR: tail failed, now.md left untouched (today-${NDC_DAY}.md may now hold a duplicate of this span)"
+                        log "ndc" "SKIPPED commit: another save held the lock for the whole ${NDC_COMMIT_LOCK_TIMEOUT}s wait, now.md left untouched (today-${NDC_DAY}.md now holds a duplicate of this span — the routine outcome of losing this race, not an error)"
                     fi
                     NDC_OUT_BYTES=$(wc -c < "$HAIKU_TEXT_FILE" | tr -d ' ')
                     [ "$NDC_SRC_BYTES" -gt 0 ] && log "ndc" "${NDC_SRC_BYTES}→${NDC_OUT_BYTES}b (-$(( (NDC_SRC_BYTES - NDC_OUT_BYTES) * 100 / NDC_SRC_BYTES ))%)"

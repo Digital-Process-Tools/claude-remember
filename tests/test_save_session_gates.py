@@ -44,7 +44,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # reaches before/around the gates; every call is appended to calls.log so a test
 # can assert what ran. call-haiku returns a SKIP so no summary is ever written.
 STUB_SHELL = '''\
-import os, sys, tempfile
+import os, sys, tempfile, time
 
 CALLS = os.environ["STUB_CALLS_LOG"]
 cmd = sys.argv[1] if len(sys.argv) > 1 else ""
@@ -81,6 +81,30 @@ elif cmd == "call-haiku":
         # compression is in flight — the #142 window.
         with open(os.environ["STUB_MEMORY_FILE"], "a") as f:
             f.write(os.environ["STUB_APPEND_DURING_NDC"])
+    if is_ndc and os.environ.get("STUB_REPLACE_DURING_NDC"):
+        # Stand in for now.md being REPLACED with something shorter while the
+        # compression is in flight — a rotation, or another NDC round that
+        # committed its own tail first. The snapshot offset then points past
+        # the end of a file it no longer describes (#223).
+        with open(os.environ["STUB_MEMORY_FILE"], "w") as f:
+            f.write(os.environ["STUB_REPLACE_DURING_NDC"])
+    if is_ndc and os.environ.get("STUB_HOLD_LOCK_DURING_NDC"):
+        # Take the save lock and keep it, so the NDC commit that runs after
+        # this call returns is guaranteed to find it held by a LIVE process
+        # (STUB_HOLD_LOCK_PID is the test runner's own pid, so the primitive
+        # can neither steal nor adopt it). Done here, synchronously, rather
+        # than from the test process: the parent save still holds the lock
+        # when the subshell is backgrounded, and racing it from outside would
+        # make which side wins a matter of timing (#223).
+        lock_dir = os.environ["STUB_HOLD_LOCK_DURING_NDC"]
+        while True:
+            try:
+                os.mkdir(lock_dir)
+                break
+            except FileExistsError:
+                time.sleep(0.02)
+        with open(os.path.join(lock_dir, "pid"), "w") as f:
+            f.write(os.environ["STUB_HOLD_LOCK_PID"])
     fd, path = tempfile.mkstemp(suffix="-haiku")
     with os.fdopen(fd, "w") as f:
         if is_ndc:
