@@ -191,6 +191,10 @@ Reach for it whenever memory is not appearing and nothing says why — the two s
 
 Before clearing context or ending a session, type `/remember`. The agent writes a short handoff note to `.remember/remember.md` — what's done, what's next, any non-obvious context. The next session reads it and picks up where you left off. This is complementary to the automatic pipeline: the pipeline captures what happened, the handoff captures what matters next.
 
+**The slot is not emptied on read.** Session start delivers the note and records the delivery in `remember.delivered`; the note itself stays on disk until `/remember` writes its replacement. This is deliberate — a session that never writes a handoff back (a scheduled task passing through the project, a `claude -p` one-shot, a session you abandon) used to consume the note meant for your next real session and leave nothing behind ([#221](https://github.com/Digital-Process-Tools/claude-remember/issues/221)).
+
+The trade is that the same note can be delivered more than once. Every delivery after the first says so — *already delivered N times since ‹timestamp› — pending replacement, not news* — so a stale handoff is never mistaken for a fresh one. If you see that line, the fix is `/remember`: writing a new handoff retires the old.
+
 ## Data files
 
 The pipeline writes to `REMEMBER_DIR` (created automatically). By default this is `.remember/` inside your project root; in external storage mode it is a per-project subdirectory of `~/.remember/` (see [External storage mode](#external-storage-mode)).
@@ -203,6 +207,7 @@ The pipeline writes to `REMEMBER_DIR` (created automatically). By default this i
 | `archive.md`                   | Older history consolidated                        |
 | `archive-YYYY-MM-DD.md`        | Rotated archive slices — searchable, not auto-loaded |
 | `remember.md`                  | Handoff note written by `/remember`               |
+| `remember.delivered`           | Delivery record for the handoff above — fingerprint, first delivery, count |
 | `logs/`                        | Pipeline logs                                     |
 | `tmp/`                         | Lock files, cooldown markers                      |
 | `identity.md`                  | Per-project identity override (optional)          |

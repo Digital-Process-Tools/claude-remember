@@ -3631,8 +3631,16 @@ echo "DISPATCH_COMPLETED=true"
             f"it to hook-errors.log): stderr={result.stderr[:200]}"
         )
 
-    def test_handoff_consumed_after_session_start(self, tmp_path):
-        """session-start must clear remember.md after reading it (one-shot)."""
+    def test_handoff_delivered_and_recorded_at_session_start(self, tmp_path):
+        """session-start delivers remember.md and records the delivery (#221).
+
+        This used to assert the slot was truncated on read. That is only safe
+        if every session that starts eventually writes a handoff back, and a
+        scheduled/headless pass-through never does — it silently ate the note
+        meant for the next human session. The slot now survives until a
+        replacement lands; the delivery is recorded in remember.delivered,
+        which is what keeps a stale note from reading as fresh forever.
+        """
         project = os.path.join(str(tmp_path), "user-project")
         plugin = os.path.join(str(tmp_path), "cache", "org", "remember", "0.5.0")
         _create_full_plugin_copy(plugin)
@@ -3656,12 +3664,18 @@ echo "DISPATCH_COMPLETED=true"
         assert "security audit" in result.stdout, (
             "Handoff content should appear in session output"
         )
-        # File should be empty after consumption
+        # The slot is preserved — a session that never writes a handoff back
+        # must not be able to destroy this one.
         with open(handoff) as f:
             remaining = f.read()
-        assert remaining.strip() == "", (
-            f"remember.md should be cleared after session-start. Contains: {remaining[:100]}"
+        assert "security audit" in remaining, (
+            f"remember.md must survive delivery until replaced. Contains: {remaining[:100]}"
         )
+        # And the delivery is on record, so the next read knows it is stale.
+        record = os.path.join(project, ".remember", "remember.delivered")
+        assert os.path.exists(record), "delivery record not written"
+        with open(record) as f:
+            assert "deliveries=1" in f.read()
 
     def test_pipeline_dir_empty_string_triggers_fallback(self, tmp_path):
         """PIPELINE_DIR="" (empty, not unset) must trigger the log.sh guard."""

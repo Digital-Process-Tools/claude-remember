@@ -268,12 +268,76 @@ fi
 # ── Last handoff (injected FIRST so it survives context-preview truncation) ─
 # The session-start output can be large; the harness may deliver only a leading
 # preview to the agent. Emit the previous session's handoff up top — before
-# identity/memory — so it always lands in context. Read once, then consume.
+# identity/memory — so it always lands in context.
+#
+# Delivery is recorded, never destructive (#221). This block used to truncate
+# the slot the moment it read it, which is only correct if every session that
+# starts will eventually write a handoff back. Plenty do not: a scheduled task
+# whose prompt is read-only, a `claude -p` one-shot, a session abandoned before
+# /remember. Each of those consumed the note meant for the next human session
+# and left a 0-byte file, with nothing anywhere saying so.
+#
+# Detecting those sessions is not on the table — there is no signal for "this
+# one will write a handoff back", and a guess that is wrong in the unsafe
+# direction destroys data silently, which is the bug. So nothing is discarded
+# until a replacement lands: /remember overwrites this same path, and the new
+# content is what retires the old.
+#
+# The cost of keeping it is that the same note can be delivered more than once,
+# and a stale handoff that reads as fresh is the same silent lie in new clothes.
+# So a delivery record (fingerprint + first delivery + count) sits beside the
+# slot, and any re-delivery of already-delivered content says so out loud.
+REMEMBER_HANDOFF_STATE="$REMEMBER_DIR/remember.delivered"
+
+# Content fingerprint for the handoff slot. cksum is POSIX and present
+# everywhere this plugin runs, including Git Bash; the size fallback exists so
+# a missing cksum degrades to "re-delivery is under-detected", never to a crash
+# in a hook documented to never block session startup.
+# Args: $1 — file to fingerprint. Prints the fingerprint.
+_remember_handoff_fingerprint() {
+    if command -v cksum >/dev/null 2>&1; then
+        cksum < "$1" | tr ' ' '-'
+    else
+        wc -c < "$1" | tr -d ' '
+    fi
+}
+
 if [ -f "$REMEMBER_HANDOFF" ] && [ -s "$REMEMBER_HANDOFF" ]; then
+    HANDOFF_FP=$(_remember_handoff_fingerprint "$REMEMBER_HANDOFF")
+    PREV_FP=""
+    FIRST_DELIVERED=""
+    DELIVERIES=0
+    if [ -f "$REMEMBER_HANDOFF_STATE" ]; then
+        while IFS='=' read -r _hkey _hval; do
+            case "$_hkey" in
+                fingerprint) PREV_FP="$_hval" ;;
+                first_delivered) FIRST_DELIVERED="$_hval" ;;
+                deliveries) DELIVERIES="$_hval" ;;
+            esac
+        done < "$REMEMBER_HANDOFF_STATE"
+    fi
+    # A hand-edited or half-written record must not turn into an arithmetic
+    # error inside the hook.
+    case "$DELIVERIES" in ''|*[!0-9]*) DELIVERIES=0 ;; esac
+
     echo "=== LAST HANDOFF ==="
+    if [ -n "$PREV_FP" ] && [ "$HANDOFF_FP" = "$PREV_FP" ]; then
+        DELIVERIES=$((DELIVERIES + 1))
+        echo "[already delivered ${DELIVERIES} times since ${FIRST_DELIVERED:-an earlier session} — no new handoff has been written since, so this is pending replacement, not news. You may already have acted on it. Running /remember replaces it.]"
+    else
+        DELIVERIES=1
+        FIRST_DELIVERED=$(_remember_date '+%Y-%m-%d %H:%M')
+    fi
     cat "$REMEMBER_HANDOFF"
     echo ""
-    : > "$REMEMBER_HANDOFF"
+    printf 'fingerprint=%s\nfirst_delivered=%s\ndeliveries=%s\n' \
+        "$HANDOFF_FP" "$FIRST_DELIVERED" "$DELIVERIES" \
+        > "$REMEMBER_HANDOFF_STATE" 2>/dev/null
+elif [ -f "$REMEMBER_HANDOFF_STATE" ]; then
+    # Slot emptied by hand (or by an older version of this hook): the record
+    # describes content that no longer exists, and keeping it would mislabel a
+    # future handoff that happens to fingerprint the same.
+    rm -f "$REMEMBER_HANDOFF_STATE"
 fi
 
 # ── History hint ───────────────────────────────────────────────────────────
