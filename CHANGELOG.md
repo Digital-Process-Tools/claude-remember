@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Documentation
+
+- **`docs/verification.md`** — the manual runbook for the `REMEMBER_OAUTH_TOKEN` fallback in `call_haiku` ([#197](https://github.com/Digital-Process-Tools/claude-remember/issues/197)). The condition this fallback exists for — the Claude Code desktop/Agent-SDK host redacting `CLAUDE_CODE_OAUTH_TOKEN` from a spawned subprocess — cannot occur in CI, so the only evidence it works was a manual run reported in a comment on [#179](https://github.com/Digital-Process-Tools/claude-remember/issues/179). This turns that into a repeatable procedure: confirming the negative precondition (the token really is absent from the child env, or the run proves nothing), the positive assertion, the negative/malformed-token case (source and length logged, never the value — [#184](https://github.com/Digital-Process-Tools/claude-remember/issues/184)), and what to record so a reader can judge how stale the last verification is. Linked from the `REMEMBER_OAUTH_TOKEN` / `haiku.oauth_token` rows in `README.md`.
+
 ## [0.9.0] — Mistaken for someone else
 
 Seven fixes, and four of them are the same question answered wrong: *whose is this?*
