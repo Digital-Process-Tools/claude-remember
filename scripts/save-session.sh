@@ -599,10 +599,67 @@ if [ "$RUN_NDC" = true ]; then
                         if [ "$NDC_LIVE_BYTES" -lt "$NDC_SRC_BYTES" ]; then
                             log "ndc" "SKIPPED commit: now.md is ${NDC_LIVE_BYTES}b, below the ${NDC_SRC_BYTES}b snapshot this offset was taken from — left untouched (today-${NDC_DAY}.md may now hold a duplicate of this span)"
                         else
-                            NDC_TAIL=$(mktemp "${TMPDIR:-/tmp}"/remember-ndc-tail-XXXXXX)
+                            # Beside now.md, not in $TMPDIR (#242). #142's whole
+                            # argument for why this commit is safe is "mv-over is
+                            # atomic on the same filesystem", and its own suggested
+                            # fix wrote "$MEMORY_FILE.tmp" — where that is true.
+                            # Shipping it under $TMPDIR kept the argument and lost
+                            # the property: across filesystems `mv` is not
+                            # rename(2), it is copy-then-unlink, so now.md is
+                            # destroyed and rewritten in place. $TMPDIR is a
+                            # different filesystem in ordinary configurations —
+                            # tmpfs /tmp on Fedora/Arch/RHEL, any devcontainer, WSL
+                            # with the project under /mnt/c, external data_dir mode
+                            # on any platform. Verified against a real second
+                            # filesystem with a genuine ENOSPC partway through: BSD
+                            # mv unlinks the partial destination, so a 1MB now.md
+                            # was gone entirely; GNU mv leaves the prefix instead.
+                            #
+                            # Same-directory also moves ENOSPC one step earlier,
+                            # into the `tail` step below, whose failure arm already
+                            # does the right thing (#173). The rename cannot fail
+                            # for want of space.
+                            #
+                            # A crash between mktemp and mv leaves a stray sibling.
+                            # It is inert — .remember/.gitignore is '*' and nothing
+                            # globs now.md.* (the name deliberately does not end in
+                            # .md, so today-*.md and session-start injection cannot
+                            # see it) — but it would accumulate forever, so sweep
+                            # first. Safe under the lock we already hold: this block
+                            # is the only thing that creates these, and it cannot
+                            # run without LOCK_DIR.
+                            rm -f "${MEMORY_FILE}".ndc-* 2>/dev/null
+                            NDC_TAIL=$(mktemp "${MEMORY_FILE}.ndc-XXXXXX")
                             if tail -c +$(( NDC_SRC_BYTES + 1 )) "$MEMORY_FILE" > "$NDC_TAIL" 2>/dev/null; then
                                 NDC_KEPT=$(wc -c < "$NDC_TAIL" | tr -d ' ')
-                                mv "$NDC_TAIL" "$MEMORY_FILE"
+                                # Same guard as NDC_LIVE_BYTES above. Unsanitized,
+                                # a non-numeric NDC_KEPT makes `[ -gt 0 ]` fail the
+                                # test rather than error out, which takes the else
+                                # arm and deletes the day marker — the exact damage
+                                # this whole block is being fixed for, arriving by
+                                # a different route.
+                                case "$NDC_KEPT" in
+                                    (''|*[!0-9]*) NDC_KEPT=0 ;;
+                                esac
+                                # The commit's result gates everything below it
+                                # (#243). It used to be unread, and under `set +e`
+                                # that meant a failed truncate still rewrote the day
+                                # stamp and still logged the success line: now.md
+                                # kept every byte it had, the #141 marker was moved
+                                # or deleted anyway, and the log said "kept Nb
+                                # appended during compression" — a byte count taken
+                                # off the temp file before the mv, so it prints
+                                # whether or not the commit landed. Memory misfiled,
+                                # log reads clean: the one class this file has been
+                                # hardened against three times (#142, #225, #235).
+                                #
+                                # Checked locally rather than by narrowing `set +e`.
+                                # The subshell is backgrounded, disowned and holding
+                                # LOCK_DIR; letting a non-zero kill it would skip
+                                # lock_release below and leak the lock until the
+                                # adoption timeout, which is strictly worse than the
+                                # failure it would be reacting to.
+                                if NDC_MV_ERR=$(mv "$NDC_TAIL" "$MEMORY_FILE" 2>&1); then
                                 # The stamped day is spent with the bytes it covered.
                                 # Anything kept was appended during this compression,
                                 # so stamp it with the day it is NOW — not $TODAY_DATE,
@@ -621,12 +678,24 @@ if [ "$RUN_NDC" = true ]; then
                                 # own day, which is the thing now.md does not have and
                                 # the reason this stamp exists — see #141 for the flush
                                 # design that would close it.
-                                if [ "$NDC_KEPT" -gt 0 ]; then
-                                    printf '%s\n' "$(_remember_date +%Y-%m-%d)" > "$NOW_DAY_FILE" 2>/dev/null || true
+                                    if [ "$NDC_KEPT" -gt 0 ]; then
+                                        printf '%s\n' "$(_remember_date +%Y-%m-%d)" > "$NOW_DAY_FILE" 2>/dev/null || true
+                                    else
+                                        rm -f "$NOW_DAY_FILE"
+                                    fi
+                                    [ "$NDC_KEPT" -gt 0 ] && log "ndc" "kept ${NDC_KEPT}b appended during compression"
                                 else
-                                    rm -f "$NOW_DAY_FILE"
+                                    # now.md still holds every byte it had, so the
+                                    # marker describing that content is still
+                                    # correct. Leaving it alone is the fix; moving
+                                    # it is the damage. Same trade as the tail arm
+                                    # below: the span already appended to
+                                    # $TODAY_FILE stays there and may be summarized
+                                    # again next round — a visible duplicate, which
+                                    # beats silently misfiled memory.
+                                    rm -f "$NDC_TAIL"
+                                    log "ndc" "ERROR: commit failed, now.md left untouched and the day stamp not changed (today-${NDC_DAY}.md may now hold a duplicate of this span): ${NDC_MV_ERR}"
                                 fi
-                                [ "$NDC_KEPT" -gt 0 ] && log "ndc" "kept ${NDC_KEPT}b appended during compression"
                             else
                                 # tail failed (disk, permissions, a full $TMPDIR — #173).
                                 # This branch used to be `: > "$MEMORY_FILE"`, the exact
