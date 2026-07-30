@@ -62,6 +62,7 @@ source "$(dirname "$0")/detect-tools.sh"
 source "$(dirname "$0")/bootstrap-dirs.sh"
 source "$(dirname "$0")/log.sh"
 source "$(dirname "$0")/lib-lock.sh"
+source "$(dirname "$0")/lib-staging-lock.sh"
 log "hook" "save-session: PROJECT_DIR=$PROJECT_DIR PIPELINE_DIR=$PIPELINE_DIR PYTHON=$PYTHON REMEMBER_DIR=$REMEMBER_DIR"
 
 LOCK_DIR="${REMEMBER_DIR}/tmp/save.lock"
@@ -524,8 +525,32 @@ if [ "$RUN_NDC" = true ]; then
                     log "ndc" "REJECTED (not a summary — refusal or clarification): $(head -c 80 "$HAIKU_TEXT_FILE" 2>/dev/null)"
                     keep_rejected_text "$HAIKU_TEXT_FILE" "ndc"
                 elif [ -n "$NDC_TEXT" ]; then
-                    [ -s "$TODAY_FILE" ] && echo "" >> "$TODAY_FILE"
-                    cat "$HAIKU_TEXT_FILE" >> "$TODAY_FILE"
+                    # Under staging.lock, not save.lock and not nothing (#225).
+                    # today-*.md is the file run-consolidation.sh reads and then
+                    # retires to .done.md, and it holds a DIFFERENT lock while
+                    # doing it. Unlocked, this append could land between that
+                    # script's byte count of the file and its `mv`, and be
+                    # sealed inside the .done.md — which nothing globs again
+                    # and session start never injects. Written to disk, then
+                    # unreachable, with nothing logged: #142's signature one
+                    # file over. The append is also two operations, so a reader
+                    # landing between them sees a trailing blank line and no
+                    # summary. lib-staging-lock.sh explains why this is a third
+                    # lock rather than save.lock.
+                    #
+                    # Losing the wait skips the WHOLE round — no append, and
+                    # therefore no truncate below either. That is strictly
+                    # better than the commit-skip further down: now.md keeps
+                    # every byte, the next round re-summarizes the same span,
+                    # and today-*.md never sees the duplicate at all.
+                    if ! staging_lock_acquire "$STAGING_LOCK_TIMEOUT"; then
+                        NDC_STAGED=false
+                        log "ndc" "SKIPPED: staging.lock held for the whole ${STAGING_LOCK_TIMEOUT}s wait (a consolidation is retiring staging files) — today-${NDC_DAY}.md not appended and now.md left untouched, so the next round re-summarizes this span with no duplicate"
+                    else
+                        NDC_STAGED=true
+                        staging_append "$TODAY_FILE" "$HAIKU_TEXT_FILE"
+                        staging_lock_release
+                    fi
                     # Drop exactly the bytes that were compressed, not the whole
                     # file (#142). now.md was snapshotted before the Haiku call
                     # above, which can take up to 180s — and by then the parent
@@ -558,7 +583,7 @@ if [ "$RUN_NDC" = true ]; then
                     # It cannot steal the lock from a live save either — steal
                     # needs a dead pid, adoption needs no pid at all — so losing
                     # the wait means someone is genuinely holding it.
-                    if lock_acquire "$LOCK_DIR" "$NDC_COMMIT_LOCK_TIMEOUT"; then
+                    if [ "$NDC_STAGED" = true ] && lock_acquire "$LOCK_DIR" "$NDC_COMMIT_LOCK_TIMEOUT"; then
                         # Re-read the size under the lock. The offset stays valid as
                         # the START of the kept range no matter what happened during
                         # the Haiku call, but only while now.md still HAS that many
@@ -630,7 +655,7 @@ if [ "$RUN_NDC" = true ]; then
                         # Released before the summary log line below —
                         # nothing past this point touches now.md.
                         lock_release "$LOCK_DIR" || true
-                    else
+                    elif [ "$NDC_STAGED" = true ]; then
                         log "ndc" "SKIPPED commit: another save held the lock for the whole ${NDC_COMMIT_LOCK_TIMEOUT}s wait, now.md left untouched (today-${NDC_DAY}.md now holds a duplicate of this span — the routine outcome of losing this race, not an error)"
                     fi
                     NDC_OUT_BYTES=$(wc -c < "$HAIKU_TEXT_FILE" | tr -d ' ')

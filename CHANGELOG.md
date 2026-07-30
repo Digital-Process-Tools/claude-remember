@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`today-*.md` was written under one lock and retired under another** ([#225](https://github.com/Digital-Process-Tools/claude-remember/issues/225)) — `save-session.sh`'s NDC step appends a compressed day summary to `today-<day>.md` under **save.lock**; `run-consolidation.sh` reads that same file, calls Haiku, and renames it to `.done.md` under **consolidation.lock**. Each lock is sound on its own ([#182](https://github.com/Digital-Process-Tools/claude-remember/issues/182)). Holding one said nothing about the other.
+
+  The consumed-byte count added for the staging rename closes the *wide* window — the 180s Haiku call — by keeping whatever was appended past the offset it recorded. It does not close the retire loop itself. `wc -c`, `head`, `tail` and `mv` are four separate operations, and an NDC append landing among them goes into the inode about to become `.done.md`. Nothing globs `.done.md` again and session start never injects it, so the entry is written to disk and then unreachable, with no log line: [#142](https://github.com/Digital-Process-Tools/claude-remember/issues/142)'s signature in milliseconds instead of minutes, one file over.
+
+  Reachable, and not only across midnight in the abstract: `$NDC_DAY` comes from `tmp/now-day`, the [#141](https://github.com/Digital-Process-Tools/claude-remember/issues/141) marker recording which day now.md's content is from, so a session that crosses midnight compresses into `today-<yesterday>.md` — exactly the file consolidation considers eligible, since it excludes only *today's*. Reproduced against the shipped scripts with a real second process and a one-shot sync point on the retire loop's byte count: the appended entry ends up inside `today-2026-07-24.done.md` and nowhere else.
+
+  The fix is **a third lock, not one of the two that exist**. `scripts/lib-staging-lock.sh` owns `today-*.md` and is held by exactly two critical sections: the NDC append, and the retire loop. Consolidating onto save.lock was the obvious move and is the wrong one — `save-session.sh` holds save.lock across its own summarize call ([#226](https://github.com/Digital-Process-Tools/claude-remember/issues/226)), so consolidation's rename would have queued behind a model call, and a critical section containing a model call is how #142 happened. An ordering discipline over the two existing locks was the other option, and it holds only while every path obeys it; a path that does not is invisible until it deadlocks. Here **no path holds this lock while acquiring another, and none acquires it while holding save.lock** — there is no lock order to get wrong, which is also what keeps a dedicated now.md lock ([#173](https://github.com/Digital-Process-Tools/claude-remember/pull/173)) compatible rather than deadlock-prone.
+
+  Losing the wait is safe and logged on both sides, and both choices go the same way #142 and #223 went — a visible duplicate over an invisible erasure. The NDC round skips the append **and therefore the truncate**, so now.md keeps every byte and the next round re-summarizes the span with no duplicate at all; that is strictly better than the existing commit-skip, which appends first and duplicates. Consolidation leaves staging in place, so the next run re-consolidates a span already in recent.md and the merge prompt dedupes it.
+
+  `REMEMBER_STAGING_LOCK_TIMEOUT` defaults to **10s**, and unlike the 30s in #226 that number was measured rather than reasoned: polling the lock directory at 1ms while the real scripts run, the append holds it ~30ms and the retire loop ~200ms for a three-file backlog — ~65ms per file, fork cost rather than I/O. The longest hold scales with the backlog, so 10s covers ~150 staging files, and a backlog past that degrades to "retired next run", not to loss.
+
 ## [0.10.0] — Nothing was counting
 
 ### Fixed

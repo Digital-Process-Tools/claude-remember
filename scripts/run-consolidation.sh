@@ -40,6 +40,7 @@ source "$(dirname "$0")/detect-tools.sh"
 source "$(dirname "$0")/bootstrap-dirs.sh"
 source "$(dirname "$0")/log.sh"
 source "$(dirname "$0")/lib-lock.sh"
+source "$(dirname "$0")/lib-staging-lock.sh"
 log "hook" "run-consolidation: PROJECT_DIR=$PROJECT_DIR PIPELINE_DIR=$PIPELINE_DIR PYTHON=$PYTHON REMEMBER_DIR=$REMEMBER_DIR"
 rotate_logs
 
@@ -56,7 +57,10 @@ fi
 # Installed only after acquisition, so it can only ever release our own lock.
 # `|| true` on the release: it can return 1, and under `set -e` that would
 # abort the trap before $REMEMBER_CONFIG is cleaned and rewrite the exit status.
-trap 'lock_release "$LOCK_DIR" || true; rm -f "$REMEMBER_CONFIG"' EXIT
+# staging.lock is released explicitly after the retire loop; the trap covers
+# the case where the script dies inside it. `lock_release` returns 1 when the
+# lock is not ours, which is the normal case on every other exit path.
+trap 'staging_lock_release; lock_release "$LOCK_DIR" || true; rm -f "$REMEMBER_CONFIG"' EXIT
 
 STAGING_DIR="${REMEMBER_DIR}"
 RECENT_FILE="${STAGING_DIR}/recent.md"
@@ -116,6 +120,26 @@ log_tokens "consolidation" "$TK_IN" "$TK_OUT" "$TK_CACHE" "$TK_COST"
 # Haiku call runs (180s budget, and this script is disowned so it runs
 # alongside live sessions). A blind rename sealed those bytes inside the
 # .done.md, which the next run's glob skips and session start never injects.
+# Under staging.lock for the whole loop (#225). The consumed-byte count above
+# closes the 180s window around the Haiku call — an append landing there is
+# kept as the tail. It does NOT close this loop: `wc -c`, `head`, `tail` and
+# `mv` are four separate operations, and an NDC append landing among them goes
+# into the inode this loop is about to rename to .done.md. Nothing globs those
+# again and session start never injects them, so the entry is unreachable and
+# no line is logged — #142's shape, in milliseconds instead of minutes, one
+# file over. save.lock could not serve here: save-session.sh holds it across
+# its own summarize call (#226), so waiting on it would mean waiting behind a
+# model call. See lib-staging-lock.sh.
+#
+# Losing the wait leaves staging exactly as it is. recent.md/archive.md
+# already hold this span, so the next run consolidates it again and the merge
+# prompt dedupes it — a visible duplicate, chosen over sealing a concurrent
+# append into a file nothing reads. Same trade as the NDC tail-failure branch.
+if ! staging_lock_acquire "$STAGING_LOCK_TIMEOUT"; then
+    log "consolidation" "ERROR: staging.lock held for the whole ${STAGING_LOCK_TIMEOUT}s wait — staging files NOT retired; recent.md/archive.md already hold this span so the next run re-consolidates it (a duplicate the merge dedupes, chosen over sealing a concurrent append inside .done.md)"
+    rm -f "$STAGING_PATHS_FILE"
+    exit 0
+fi
 while IFS= read -r -d '' staging_path && IFS= read -r -d '' staging_consumed; do
     if [ ! -f "$staging_path" ]; then
         log "consolidation" "WARN: $(basename "$staging_path") disappeared"
@@ -139,6 +163,7 @@ while IFS= read -r -d '' staging_path && IFS= read -r -d '' staging_consumed; do
         mv "$staging_path" "$staging_done"
     fi
 done < "$STAGING_PATHS_FILE"
+staging_lock_release
 rm -f "$STAGING_PATHS_FILE"
 
 log "consolidation" "done: ${STAGING_COUNT} files consolidated"
