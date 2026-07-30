@@ -12,6 +12,8 @@ the config, ``MEMORY_LOG_DATE`` should match the LA date. If log.sh
 has the ordering bug, it will match the UTC date instead.
 """
 
+from __future__ import annotations
+
 import json
 import os
 import shutil
