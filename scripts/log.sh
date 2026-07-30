@@ -61,13 +61,217 @@ if [ ! -d "$REMEMBER_LOG_DIR" ] && ! mkdir -p "$REMEMBER_LOG_DIR" 2>/dev/null; t
     return 1 2>/dev/null || true
 fi
 
+# ── One-pass config reading (#232) ────────────────────────────────────────────
+#
+# config() spent one `jq` process per key, against a merged config file that
+# does not change for the life of the process. #230 measured post-tool-hook.sh
+# at 20 external spawns per tool call and named these reads as the largest
+# remaining block: three while log.sh is being sourced (.timezone, .model,
+# .reject_pattern), two more in the hook (.cooldowns.save_seconds,
+# .thresholds.delta_lines_trigger), and a dozen in save-session.sh.
+#
+# So the merged config is flattened ONCE into ordinary shell variables —
+# `_RCFG_cooldowns_save_seconds=120` — and every later config() call is a
+# parameter expansion. Nothing is written to disk. That is the whole reason
+# this was preferred over caching the merged file at a stable path: that file
+# can carry `haiku.oauth_token`, a live OAuth credential, which is why
+# lib-memory-dir.sh creates it 0600 per PID under an EXIT trap (#68). Collapsing
+# reads must not re-introduce that trade by the back door.
+#
+# The load happens ONCE, at source time, from log.sh's own body — not lazily
+# from inside config(). It has to: every caller writes `X=$(config ...)`, and a
+# command substitution is a subshell, so a table built inside config() dies with
+# the call that built it and the next key pays for it all over again. Source
+# time is not a change of moment either way: log.sh already reads .timezone,
+# .model and .reject_pattern while being sourced, so a broken config.json is
+# discovered exactly where it was before.
+#
+# THREE states, and the third is the point:
+#
+#   ""         not loaded yet.
+#   ok         the table is authoritative. A key absent from it is genuinely
+#              absent from the config, and the caller's default is the answer.
+#   fallback   the one-pass read DID NOT HAPPEN. Never answer from the table in
+#              this state — fall through to the per-key reads below, which are
+#              the pre-#232 code path verbatim. "the file does not mention this
+#              key" and "the file was never read" produce the same value and
+#              must not become the same event; the second one is reported.
+_REMEMBER_CFG_STATE=""
+_REMEMBER_CFG_LOADED_FROM=""
+
+# `.haiku.*` is deliberately NOT flattened. Reading every key up front means
+# reading the OAuth token up front, and it would then sit in a shell variable
+# in every process that sources log.sh — including one that runs other people's
+# scripts via dispatch(). Nothing needs it there: pipeline/haiku.py reads the
+# token from the merged file in Python, and no config() caller asks for it.
+# This rule and the `select(.[0] != "haiku")` in the flattener are one decision
+# in two places — change both or neither.
+_config_is_private_key() {
+    case "$1" in
+        .haiku|.haiku.*) return 0 ;;
+    esac
+    return 1
+}
+
+# Flatten every scalar to `dotted.key<TAB>value`, or decline to.
+#
+# It REFUSES rather than guesses, in three cases, because each one is a way for
+# a flattened table to answer a question wrongly and silently:
+#   - a key containing anything but [A-Za-z0-9_], which could not survive the
+#     mapping to a shell variable name;
+#   - two distinct keys that collapse to the same variable name (`a.b` and
+#     `a_b`), where the table would hand one key's value to the other;
+#   - a value containing a tab or a newline, which the line protocol below
+#     would truncate.
+# A refusal prints a `#refuse <reason>` sentinel and exits 0, which lands in the
+# `fallback` state — per-key reads, exactly as before. Slower and correct beats
+# faster and wrong.
+#
+# The sentinel rather than `error()` because jq exits 5 for BOTH `error()` and a
+# file that does not parse, so the exit code cannot tell "this config is fine
+# and I am declining to flatten it" from "this config is broken". Those are not
+# the same event and only the second one is worth waking anybody up for. No
+# emitted line can begin with `#`: keys are [A-Za-z0-9_.] by the time they are
+# printed.
+#
+# Paths through arrays are skipped, not refused: config() only accepts dotted
+# keys, so it could never name one.
+#
+# NOT `paths(scalars)`. jq's `paths(f)` keeps a path when f's OUTPUT is truthy,
+# so `paths(scalars)` silently drops every `false` in the file — the #159 bug
+# exactly, arriving inside its own fix. Ask for the type instead.
+#
+# Kept on one line: the PATH-shim spawn counters in tests/ log a command with
+# its arguments, one line per execution, and a multi-line jq program turns one
+# spawn into eighty lines of "spawns".
+_REMEMBER_CFG_FLATTEN_JQ='. as $doc | [paths(type != "object" and type != "array") | select(all(.[]; type == "string")) | select(.[0] != "haiku")] as $ks | if (($ks | flatten) | any(test("^[A-Za-z0-9_]+$") | not)) then "#refuse a config key is outside [A-Za-z0-9_]" elif (($ks | map(join("_")) | unique | length) != ($ks | length)) then "#refuse two config keys flatten to the same name" elif ([$ks[] as $p | $doc | getpath($p) | select(type == "string" and test("[\t\n]"))] | length) > 0 then "#refuse a config value contains a tab or a newline" else $ks[] as $p | ($doc | getpath($p)) as $v | select($v != null) | ($p | join(".")) + "\t" + ($v | tostring) end'
+
+# The same contract without jq, for the machines test_jq_free_config.py exists
+# for. Same refusals, same skips, and jq's textual form for non-strings —
+# "true"/"false", never Python's "True"/"False" (the #159 near miss).
+_REMEMBER_CFG_FLATTEN_PY='
+import json, re, sys
+
+def walk(node, prefix, out):
+    if isinstance(node, dict):
+        for k, v in node.items():
+            walk(v, prefix + [k], out)
+    elif isinstance(node, list):
+        return
+    else:
+        out.append((prefix, node))
+
+try:
+    doc = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    sys.exit(1)
+
+rows = []
+walk(doc, [], rows)
+rows = [(p, v) for p, v in rows if p and p[0] != "haiku" and v is not None]
+
+ok = re.compile(r"^[A-Za-z0-9_]+$")
+for p, v in rows:
+    if not all(ok.match(part) for part in p):
+        print("#refuse a config key is outside [A-Za-z0-9_]")
+        sys.exit(0)
+    if isinstance(v, str) and ("\t" in v or "\n" in v):
+        print("#refuse a config value contains a tab or a newline")
+        sys.exit(0)
+slots = ["_".join(p) for p, _ in rows]
+if len(set(slots)) != len(slots):
+    print("#refuse two config keys flatten to the same name")
+    sys.exit(0)
+
+out = []
+for p, v in rows:
+    out.append(".".join(p) + "\t" + (v if isinstance(v, str) else json.dumps(v)))
+sys.stdout.write("\n".join(out))
+'
+
+_config_load() {
+    _REMEMBER_CFG_LOADED_FROM="${REMEMBER_CONFIG:-}"
+    if [ ! -f "${REMEMBER_CONFIG:-}" ]; then
+        # No merged config is not a failed read: every key is legitimately
+        # absent and every caller's default is the right answer. Silent, and
+        # correctly so — this is the ordinary state of a fresh install.
+        _REMEMBER_CFG_STATE="ok"
+        return 0
+    fi
+
+    local _dump="" _rc=0
+    if command -v jq >/dev/null 2>&1; then
+        _dump=$(jq -r "$_REMEMBER_CFG_FLATTEN_JQ" "$REMEMBER_CONFIG" 2>/dev/null) || _rc=1
+    else
+        _dump=$("${PYTHON:-python3}" -c "$_REMEMBER_CFG_FLATTEN_PY" "$REMEMBER_CONFIG" 2>/dev/null) || _rc=1
+    fi
+
+    if [ "$_rc" -ne 0 ]; then
+        # The file could not be read at all. Say so, once. Before this, a
+        # config.json that did not parse made every config() call return its
+        # built-in default with no indication anywhere — a silent degraded read
+        # in the hook that decides whether memory gets captured at all. The
+        # VALUE is unchanged (the default is still the right answer); being
+        # quiet about it was the defect.
+        echo "remember: could not read ${REMEMBER_CONFIG} — is it valid JSON? falling back to per-key reads" >&2
+        _REMEMBER_CFG_STATE="fallback"
+        return 0
+    fi
+
+    case "$_dump" in
+        '#refuse'*)
+            # Not a problem, and deliberately not reported as one: the config
+            # is fine, its shape is simply one the flattener declines rather
+            # than risk answering wrongly. Per-key reads give the right answers
+            # for it. A warning that fires on a valid config is a warning
+            # nobody reads, so this one only shows up when debugging.
+            [ "${REMEMBER_DEBUG:-}" = "1" ] && \
+                echo "remember: ${_dump#'#refuse' } — reading config one key at a time" >&2
+            _REMEMBER_CFG_STATE="fallback"
+            return 0
+            ;;
+    esac
+
+    local _k _v
+    while IFS=$'\t' read -r _k _v; do
+        [ -n "$_k" ] || continue
+        printf -v "_RCFG_${_k//./_}" '%s' "$_v"
+    done <<EOF
+$_dump
+EOF
+    _REMEMBER_CFG_STATE="ok"
+}
+
 # Read .timezone from config BEFORE computing MEMORY_LOG_DATE — otherwise
 # TZ="" falls back to UTC on macOS/BSD and produces next-day filenames after
 # ~20:00 local in zones west of UTC.
 config() {
     local key="$1"
     local default="$2"
-    if [ ! -f "$REMEMBER_CONFIG" ]; then
+
+    # Lazily, and again if a caller repointed REMEMBER_CONFIG at another file.
+    if [ -z "$_REMEMBER_CFG_STATE" ] || \
+       [ "$_REMEMBER_CFG_LOADED_FROM" != "${REMEMBER_CONFIG:-}" ]; then
+        _config_load
+    fi
+
+    if [ "$_REMEMBER_CFG_STATE" = "ok" ] && ! _config_is_private_key "$key"; then
+        case "$key" in
+            ""|.|.*[!A-Za-z0-9_.]*)
+                # Not a plain dotted key — the table cannot name it. Fall
+                # through to the per-key reader, which speaks jq.
+                ;;
+            .?*)
+                local _slot="_RCFG_${key#.}"
+                _slot="${_slot//./_}"
+                local _hit="${!_slot:-}"
+                [ -n "$_hit" ] && echo "$_hit" || echo "$default"
+                return
+                ;;
+        esac
+    fi
+
+    if [ ! -f "${REMEMBER_CONFIG:-}" ]; then
         echo "$default"
         return
     fi
@@ -127,6 +331,10 @@ except Exception:
     fi
     [ -n "$val" ] && echo "$val" || echo "$default"
 }
+
+# Build the table now, in THIS shell, so every `$(config ...)` subshell
+# inherits it. See the note above for why this cannot live inside config().
+_config_load
 
 # Is verbose logging on? `debug` was documented in the README and shipped in
 # config.example.json but passed to config() NOWHERE, so setting it did nothing

@@ -49,14 +49,24 @@ BOOTSTRAP_SCRIPT = REPO_ROOT / "scripts" / "bootstrap-dirs.sh"
 from pipeline.slug import session_dir_slug as _slug  # noqa: E402
 from tests.spawn_counting import make_shim_dir, spawns as _spawn_lines  # noqa: E402
 
-# Measured 17 on macOS bash 3.2.57 after the fix, from 30 before it. The slack
-# is for the platforms that are not this one — bash >= 4.2 spends fewer (no
-# `date`), Git Bash may spend one `cygpath` more — not for a regression.
+# Measured on macOS bash 3.2.57 with the shared counted-command list of
+# tests/spawn_counting.py: 30 before #230, 20 after it, 16 after #232 collapsed
+# config() to a single read of the merged config.
 #
-# The remainder is dominated by things that cannot go without caching the merged
-# config: five `jq` reads, the `jq -s` merge itself, and its `rm` on exit. That
-# is #230's deliberate remainder, not an oversight.
-POST_TOOL_SPAWN_BUDGET = 20
+# (#230's own note said 17. That number predates #233 folding the two budget
+# tests onto one counted-command list, and it left out the two `mkdir -p` calls
+# and the `git rev-parse` a non-git PROJECT_DIR still pays. The budget it set,
+# 20, therefore had exactly zero slack against the real measurement — the next
+# spawn anyone added would have tripped it as a regression it was not. Stating
+# the measured number and the slack separately is the fix for that.)
+#
+# The slack is for the platforms that are not this one — bash >= 4.2 spends
+# fewer (no `date`), Git Bash may spend one `cygpath` more — not for a
+# regression. What remains is the `jq -s` merge and its `rm` on exit, which
+# cannot go without caching the merged config, and that is a credential
+# lifetime decision (#232) rather than a spawn one.
+POST_TOOL_SPAWN_MEASURED = 16
+POST_TOOL_SPAWN_BUDGET = POST_TOOL_SPAWN_MEASURED + 2
 
 
 def _shim_dir(root: Path) -> Path:
@@ -137,6 +147,43 @@ def _reap(remember: Path) -> None:
 
 
 # ── The budget ───────────────────────────────────────────────────────────────
+
+def test_the_merged_config_is_read_once_not_once_per_key(tmp_path):
+    """The sharp half of the budget, and the one that fails loudly if #232 is
+    reverted while the total happens to stay under its slack.
+
+    The hook asks the merged config five questions per tool call — .timezone,
+    .model and .reject_pattern while log.sh is sourced, then
+    .cooldowns.save_seconds and .thresholds.delta_lines_trigger — and the file
+    does not change between them. Five processes for five questions of one
+    unchanging file was #230's largest named remainder.
+
+    The `jq -s` merge that PRODUCES the file is a different thing and is not
+    counted here: removing it means publishing the merged config at a stable
+    path, and that file can carry a live OAuth credential.
+    """
+    home, project, remember = _project(tmp_path, cooldown_ts=int(time.time()))
+    env = _env(tmp_path, home, project)
+    log = tmp_path / "spawns.log"
+    shims = _shim_dir(tmp_path)
+    _run(env, count_into=log, shims=shims)
+    _reap(remember)
+
+    lines = _spawns(log)
+    merges = [l for l in lines if l.startswith("jq ") and " -s " in l]
+    reads = [l for l in lines
+             if l.startswith("jq ") and " -s " not in l and "remember-config-" in l]
+
+    assert len(merges) == 1, (
+        "the three-layer merge should still happen exactly once per process: "
+        f"{merges}"
+    )
+    assert len(reads) <= 1, (
+        f"{len(reads)} separate jq reads of one unchanging merged config, one "
+        "per key:\n  " + "\n  ".join(reads)
+    )
+
+
 
 def test_the_post_tool_hook_stays_inside_its_spawn_budget(tmp_path):
     """The measurement, as an assertion.

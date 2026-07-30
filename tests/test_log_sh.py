@@ -14,11 +14,15 @@ has the ordering bug, it will match the UTC date instead.
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+
+from tests import spawn_counting
+from tests.spawn_counting import make_shim_dir
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOG_SH = REPO_ROOT / "scripts" / "log.sh"
@@ -431,3 +435,294 @@ def _dispatch_warned_in_log(tmp_path: Path, keyword: str) -> bool:
         if keyword in log_file.read_text():
             return True
     return False
+
+
+# ── config() reads the merged config in one pass (#232) ──────────────────────
+#
+# config() used to spend one `jq` process per key. #230 measured PostToolUse at
+# 20 external spawns per tool call and named these reads as the largest
+# remaining block: three at log.sh source time (.timezone, .model,
+# .reject_pattern) plus two in the hook itself, all against the SAME merged
+# file. #232 collapses them into one read.
+#
+# Collapsing reads means reading keys before knowing they are wanted, and that
+# moves two things that are not the spawn count. Both are pinned here, because
+# the spawn count is the cheap half of this change and the semantics are the
+# half that can hurt: PostToolUse is the write path, and a config that reads as
+# "all defaults" there is a hook that quietly stops capturing.
+
+
+def _run_config_calls(tmp_path, bundled: str, project: str | None, calls: str,
+                      env_extra: dict | None = None):
+    """Source log.sh against a hand-written pair of config layers and run
+    arbitrary shell after it. Returns the CompletedProcess so a test can look
+    at stdout and stderr separately — the difference between "the default,
+    reported" and "the default, silently" is entirely in stderr."""
+    project_dir = tmp_path / "proj"
+    pipeline_dir = tmp_path / "plugin"
+    home = tmp_path / "home"
+    for d in (project_dir, pipeline_dir, home):
+        d.mkdir(parents=True, exist_ok=True)
+    (pipeline_dir / "config.json").write_text(bundled, encoding="utf-8")
+    if project is not None:
+        remember = project_dir / ".remember"
+        remember.mkdir(parents=True, exist_ok=True)
+        (remember / "config.json").write_text(project, encoding="utf-8")
+    script = f'''
+export PROJECT_DIR="{_bash_path(project_dir)}"
+export PIPELINE_DIR="{_bash_path(pipeline_dir)}"
+export HOME="{_bash_path(home)}"
+source "{_bash_path(LOG_SH)}"
+{calls}
+'''
+    env = {**os.environ, "HOME": _bash_path(home)}
+    for stale in ("REMEMBER_DIR", "_LIB_MEMORY_DIR_LOADED", "REMEMBER_TZ",
+                  "REMEMBER_MODEL", "REMEMBER_REJECT_PATTERN"):
+        env.pop(stale, None)
+    if env_extra:
+        env.update(env_extra)
+    return subprocess.run([_BASH, "-c", script], env=env,
+                          capture_output=True, text=True, timeout=60)
+
+
+class TestConfigIsReadInOnePass:
+
+    def test_the_whole_config_is_read_with_one_jq(self, tmp_path):
+        """The assertion this change exists for.
+
+        log.sh asks three questions of the merged config while being sourced
+        and callers ask more afterwards. Every one of them used to be its own
+        `jq` process against the same unchanging file. Counted by execution
+        via a PATH shim, for the reason #227 gives: wall clock is what differs
+        between platforms, spawn count is what causes it.
+        """
+        if not shutil.which("jq"):
+            pytest.skip("no jq on PATH — the jq-free path is covered by "
+                        "test_jq_free_config.py")
+        spawn_log = tmp_path / "spawns.log"
+        shims = make_shim_dir(tmp_path, spawn_log)
+        result = _run_config_calls(
+            tmp_path,
+            bundled=json.dumps({"model": "sonnet", "timezone": "UTC",
+                                "cooldowns": {"save_seconds": 45},
+                                "thresholds": {"delta_lines_trigger": 7}}),
+            project=None,
+            calls=(
+                "config '.cooldowns.save_seconds' 120 > /dev/null\n"
+                "config '.thresholds.delta_lines_trigger' 50 > /dev/null\n"
+                "config '.time_format' 24h > /dev/null\n"
+            ),
+            env_extra={"SPAWN_LOG": str(spawn_log),
+                       "PATH": f"{shims}{os.pathsep}{os.environ['PATH']}"},
+        )
+        assert result.returncode == 0, result.stderr
+        # Only reads of the MERGED config. lib-memory-dir.sh's pass-1
+        # `.data_dir` read is against the bundled layer and happens before the
+        # merged file exists at all — a different file, not a duplicate read.
+        reads = [line for line in spawn_counting.spawns(spawn_log)
+                 if line.startswith("jq ") and " -s " not in line
+                 and "remember-config-" in line]
+        assert len(reads) <= 1, (
+            f"{len(reads)} separate jq reads of the merged config, one per "
+            f"key, against a file that does not change between them:\n  "
+            + "\n  ".join(reads)
+        )
+
+    def test_a_config_that_does_not_parse_is_reported(self, tmp_path):
+        """A malformed config must not read as a tidy set of defaults.
+
+        The merge falls back to copying the bundled layer when it cannot
+        combine the layers, so the way a caller actually ends up holding an
+        unparseable merged config is a bundled layer that is itself broken.
+        In that state every config() call returns its built-in default — the
+        cooldown, the delta threshold, the model — and before this change it
+        did so without a word anywhere. That is a silent degraded read in the
+        hook that decides whether memory gets captured.
+
+        Defaults are still the right ANSWER; being quiet about them is not.
+        """
+        result = _run_config_calls(
+            tmp_path,
+            bundled='{"model": "sonnet",',      # truncated on purpose
+            project=None,
+            calls="config '.model' 'haiku'\n",
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "haiku", (
+            "an unreadable config must still yield the caller's default — "
+            "reporting the problem must not turn into failing the read"
+        )
+        assert result.stderr.strip(), (
+            "an unreadable config.json produced no diagnostic at all: every "
+            "config() call silently became its hardcoded default"
+        )
+
+    def test_an_absent_key_is_not_reported_as_a_failed_read(self, tmp_path):
+        """The other half, and the reason the first half is not just `set -x`.
+
+        "the file says nothing about this key" and "the file could not be
+        read" must not collapse into the same observable. They produce the
+        same VALUE — the caller's default — so the only thing separating them
+        is that one of them is reported and the other is not.
+        """
+        result = _run_config_calls(
+            tmp_path,
+            bundled=json.dumps({"model": "sonnet"}),
+            project=None,
+            calls="config '.cooldowns.save_seconds' 120\n",
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "120"
+        assert result.stderr.strip() == "", (
+            "a key that is simply absent was reported as a problem — a "
+            "warning that fires on ordinary configs is a warning nobody "
+            f"reads: {result.stderr!r}"
+        )
+
+    def test_a_boolean_false_survives_the_one_pass_read(self, tmp_path):
+        """#159, restated against the new reader.
+
+        `features.ndc_compression: false` must come back as "false", not as
+        its default. Every one-pass flattening scheme has a natural way to
+        lose exactly this value (drop falsy, drop empty, drop null all look
+        alike from a distance), and this repo has already shipped that bug
+        once.
+        """
+        result = _run_config_calls(
+            tmp_path,
+            bundled=json.dumps({"features": {"ndc_compression": False},
+                                "git_backup": {"gpg_sign": False}}),
+            project=None,
+            calls=("config '.features.ndc_compression' true\n"
+                   "config '.git_backup.gpg_sign' true\n"),
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.split() == ["false", "false"], result.stdout
+
+    def test_a_per_project_override_still_wins(self, tmp_path):
+        """The one-pass read is of the MERGED config, not of one layer."""
+        result = _run_config_calls(
+            tmp_path,
+            bundled=json.dumps({"cooldowns": {"save_seconds": 99}}),
+            project=json.dumps({"cooldowns": {"save_seconds": 999}}),
+            calls="config '.cooldowns.save_seconds' 120\n",
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "999"
+
+    def test_the_oauth_token_is_not_left_lying_in_a_shell_variable(self, tmp_path):
+        """#230 refused to cache the merged config because it can carry
+        `haiku.oauth_token`, a live credential — which is why lib-memory-dir.sh
+        creates that file 0600, per PID, under an EXIT trap. Reading every key
+        up front is the same trade taken through a different door: the token
+        would sit in a shell variable in every process that sources log.sh,
+        for as long as it lives, in a hook that also runs other people's
+        scripts via dispatch().
+
+        Nothing needs it there. pipeline/haiku.py reads the token from the
+        merged file in Python; no config() caller asks for `.haiku.*` at all.
+        So it stays out of the bulk read, and this pins that.
+        """
+        token = "sk-ant-oat01-NOT-A-REAL-TOKEN-0123456789"
+        dump = tmp_path / "shell-vars.txt"
+        # The token is never written into the script itself — bash publishes
+        # the whole -c string as BASH_EXECUTION_STRING, so a grep spelled out
+        # here would find its own argument and pass for the wrong reason.
+        result = _run_config_calls(
+            tmp_path,
+            bundled=json.dumps({"model": "sonnet",
+                                "haiku": {"oauth_token": token}}),
+            project=None,
+            calls=("config '.model' haiku\n"
+                   f'( set -o posix; set ) > "{_bash_path(dump)}"\n'),
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "sonnet"
+        assert token not in dump.read_text(encoding="utf-8", errors="replace"), (
+            "the OAuth token was read into a shell variable by a config() "
+            "call that did not ask for it"
+        )
+
+    def test_the_token_is_still_readable_when_it_is_actually_asked_for(self, tmp_path):
+        """Keeping it out of the bulk read must not make it unreadable — that
+        would be the same silent-degraded-read defect wearing a security
+        rationale."""
+        token = "sk-ant-oat01-NOT-A-REAL-TOKEN-0123456789"
+        result = _run_config_calls(
+            tmp_path,
+            bundled=json.dumps({"haiku": {"oauth_token": token}}),
+            project=None,
+            calls="config '.haiku.oauth_token' ''\n",
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == token
+
+
+class TestConfigRefusesRatherThanGuesses:
+    """A flattened table maps `a.b` onto a shell variable name, and there are
+    config shapes where that mapping would answer the wrong question with a
+    straight face. The reader refuses those and reads them one key at a time
+    instead — which is the pre-#232 path, so the answers stay right.
+
+    These are not hypothetical shapes: they are the three ways the mapping can
+    lose. Each is asserted by the VALUE it must still return, not by which path
+    produced it, so they hold whichever way a future rewrite goes.
+    """
+
+    def test_two_keys_that_flatten_to_the_same_name_do_not_shadow_each_other(self, tmp_path):
+        """`{"a": {"b": 1}, "a_b": 2}` — both become `a_b` under any
+        dot-to-underscore mapping. One of them would silently return the
+        other's value."""
+        result = _run_config_calls(
+            tmp_path,
+            bundled=json.dumps({"a": {"b": 1}, "a_b": 2}),
+            project=None,
+            calls=("config '.a.b' 0\n"
+                   "config '.a_b' 0\n"),
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.split() == ["1", "2"], result.stdout
+
+    def test_a_value_containing_a_newline_is_not_truncated(self, tmp_path):
+        """reject_pattern is a user-supplied regex. A line-based table would
+        keep everything up to the first newline and drop the rest — a gate
+        that silently matches less than it was told to."""
+        result = _run_config_calls(
+            tmp_path,
+            bundled=json.dumps({"reject_pattern": "one\ntwo"}),
+            project=None,
+            calls="config '.reject_pattern' ''\n",
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "one\ntwo\n", repr(result.stdout)
+
+    def test_a_refused_shape_is_not_reported_as_a_broken_config(self, tmp_path):
+        """The other side of test_a_config_that_does_not_parse_is_reported.
+
+        Declining to flatten a perfectly valid config is a fast-path decision,
+        not a fault, and it happens on every single hook invocation for as long
+        as the config keeps that shape. A warning there would fire hundreds of
+        times a session on a file with nothing wrong with it, and would teach
+        people to ignore the one that means something.
+        """
+        result = _run_config_calls(
+            tmp_path,
+            bundled=json.dumps({"a": {"b": 1}, "a_b": 2}),
+            project=None,
+            calls="config '.a.b' 0\n",
+        )
+        assert result.returncode == 0
+        assert result.stderr.strip() == "", result.stderr
+
+    def test_a_key_under_an_array_does_not_break_the_read(self, tmp_path):
+        """config() has no syntax for indexing an array, so paths through one
+        are skipped — but their presence must not cost the file its fast path
+        or its neighbours their values."""
+        result = _run_config_calls(
+            tmp_path,
+            bundled=json.dumps({"notes": ["a", "b"], "model": "sonnet"}),
+            project=None,
+            calls="config '.model' haiku\n",
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "sonnet"
