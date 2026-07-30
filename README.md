@@ -373,6 +373,25 @@ bash scripts/run-tests.sh          # without Haiku
 bash scripts/run-tests.sh --live   # with real Haiku call
 ```
 
+### The Python floor guard
+
+The supported floor is **Python 3.9** — the lowest interpreter in the CI matrix
+(`.github/workflows/tests.yml`). Syntax newer than the floor does not fail one
+test, it fails *collection*, which takes out a whole matrix leg before anything
+runs, and it is invisible on any machine with a newer Python (which is every
+machine here).
+
+`tests/test_pep604_floor_guard.py` catches that statically, on any interpreter,
+in about a second. It flags PEP 604 unions (`str | None`) everywhere Python
+evaluates them: parameter, return, and module- or class-level variable
+annotations in files without `from __future__ import annotations`, plus
+`isinstance()` / `issubclass()` arguments — which the future import does *not*
+rescue, since those are ordinary runtime expressions. It runs in the normal
+suite; no 3.9 interpreter needs to be installed.
+
+If it fails, the fix is `Optional[str]` from `typing`, or adding
+`from __future__ import annotations` when the union is only in annotations.
+
 ## Architecture
 
 ```
