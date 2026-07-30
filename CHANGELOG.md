@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] — The argument outlived the code
+
+Ten changes, and most of them are one shape: a safety argument that stayed in the file after the property it described was gone.
+
+The clearest is the NDC commit. [#142](https://github.com/Digital-Process-Tools/claude-remember/issues/142)'s reasoning for why writing `now.md` is safe is, in its own words, that "`mv`-over is atomic on the same filesystem" — and its suggested fix wrote the temp file next to `now.md`, where that is true. What shipped put the temp in `$TMPDIR` and kept the sentence. `/tmp` is tmpfs on most Linux distributions, on any devcontainer, and under WSL with the project on `/mnt/c`, so the commit had been a copy-then-unlink for as long as anyone had been reading that comment and believing it. Reproduced against a real second filesystem: BSD `mv` unlinks the partial destination, so `now.md` was **destroyed outright** — not truncated — while the log reported `kept 5400000b appended during compression`, a byte count taken before the move. The same pattern was already correct in three other places in this repo, one of them commented "Rename, so no reader ever parses a partial file". This was the call site that never adopted it.
+
+The rest rhyme with it. Two locks were each sound on their own while the guarantee between them was assumed rather than held, in `today-*.md`'s write-and-retire and in consolidation's read. A spawn budget was documented as having three to spare against a measurement that was actually at the limit. And two guards claimed coverage they did not have: one walked annotations but not the bare `Handler = str | None` that breaks a 3.9 leg identically, and one asserted a clock conversion through a variable that bash 5 regenerates on every reference — green, on the platform whose behaviour it existed to pin, while asserting nothing at all.
+
+There is one addition that is deliberately not a fix: `save.lock` hold times can now be recorded, because [#226](https://github.com/Digital-Process-Tools/claude-remember/issues/226) asked whether a 30s timeout was doing what its reasoning claimed and nobody had ever measured it. The default is unchanged and the issue stays open — a number produced in a sandbox would read as measured and would not be, which is the same defect one layer up.
+
+Manifest bumped per [#133](https://github.com/Digital-Process-Tools/claude-remember/issues/133) — the updater compares manifest versions and nothing else, so this file is for humans and `.claude-plugin/plugin.json` is what actually ships.
+
 ### Added
 
 - **`save.lock` hold times can now be recorded, so the 30s timeout can stop being a guess** ([#226](https://github.com/Digital-Process-Tools/claude-remember/issues/226)) — the NDC commit waits up to `REMEMBER_NDC_COMMIT_LOCK_TIMEOUT` (default 30s) for `save.lock`. #226's complaint is not that 30 is wrong but that nothing measured it, while the code reads as though something had. [#234](https://github.com/Digital-Process-Tools/claude-remember/pull/234) answered the same question for `staging.lock` with real figures (~30ms per NDC append, ~200ms for a 3-file retire loop) and set 10s from them; `save.lock` stayed unmeasured, and it is the one held across a summarize Haiku call. `lock_acquire`/`lock_release` now write one row per lock use — how long the lock was held, how long the acquire waited, and whether the wait ran out — and `scripts/lock-timing-report.sh` turns that file into a per-lock distribution.
