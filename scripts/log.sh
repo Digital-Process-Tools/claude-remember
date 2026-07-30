@@ -52,7 +52,11 @@ unset _REMEMBER_SRC_DIR
 # ── Logging setup ─────────────────────────────────────────────────────────────
 
 REMEMBER_LOG_DIR="${REMEMBER_DIR}/logs"
-if ! mkdir -p "$REMEMBER_LOG_DIR" 2>/dev/null; then
+# `[ -d ]` first (#230): bootstrap-dirs.sh has almost always just created this,
+# and re-asking `mkdir` costs a process per hook invocation to learn nothing. The
+# mkdir — and its FATAL — is still exactly what runs when the directory is not
+# there, which is the only case it was ever about.
+if [ ! -d "$REMEMBER_LOG_DIR" ] && ! mkdir -p "$REMEMBER_LOG_DIR" 2>/dev/null; then
     echo "FATAL: cannot create $REMEMBER_LOG_DIR" >&2
     return 1 2>/dev/null || true
 fi
@@ -261,10 +265,14 @@ dispatch() {
     local event="$1"
     local event_dir="$REMEMBER_HOOKS_DIR/$event"
     [ -d "$event_dir" ] || return 0
-    local current_uid
-    current_uid=$(id -u)
+    local current_uid=""
     for hook in "$event_dir"/*; do
         [ -x "$hook" ] || continue
+        # Resolved on first use, not on entry (#230). The distribution ships
+        # every hooks.d/<event>/ directory containing nothing but a .gitkeep, so
+        # the `-d` test above passes and this loop finds nothing executable —
+        # and `id` was forked on every tool call to compare against nobody.
+        [ -n "$current_uid" ] || current_uid=$(id -u)
         # Ownership check: skip hooks not owned by the current user.
         local hook_uid
         # Try GNU stat (-c) first, then BSD (-f). The reverse order silently

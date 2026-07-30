@@ -48,9 +48,18 @@
 # the temp dir as its project (#204). resolve-paths.sh now stops on the
 # REMEMBER_NESTED_SUMMARIZER marker instead, and returns 1 into the `|| exit 0`
 # below.
-REMEMBER_PATHS_SOFT_FAIL=1 source "$(dirname "$0")/resolve-paths.sh" || exit 0
-source "$(dirname "$0")/detect-tools.sh"
-source "$(dirname "$0")/bootstrap-dirs.sh"
+#
+# Parameter expansion, not three `dirname` forks (#230) — the same pattern
+# log.sh and user-prompt-hook.sh already use. SessionStart runs once per session
+# rather than per tool call, so this is not the hot path post-tool-hook.sh is;
+# it is a startup cost the user waits on, paid for nothing. A path with no slash
+# in it leaves the filename behind, not a directory; `dirname` answered "." and
+# this must too.
+_HOOK_DIR="${BASH_SOURCE[0]%/*}"
+[ "$_HOOK_DIR" = "${BASH_SOURCE[0]}" ] && _HOOK_DIR="."
+REMEMBER_PATHS_SOFT_FAIL=1 source "$_HOOK_DIR/resolve-paths.sh" || exit 0
+source "$_HOOK_DIR/detect-tools.sh"
+source "$_HOOK_DIR/bootstrap-dirs.sh"
 PLUGIN_ROOT="$PIPELINE_DIR"
 PROJECT="$PROJECT_DIR"
 source "$PLUGIN_ROOT/scripts/log.sh" 2>/dev/null

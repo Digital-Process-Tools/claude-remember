@@ -84,6 +84,23 @@ _read_data_dir() {
 # recovery still finds transcripts under the worktree slug.
 _resolve_memory_project_dir() {
     local proj="$1"
+
+    # A linked worktree's `.git` is a FILE (a `gitdir:` pointer); a main
+    # checkout's is a DIRECTORY. A `.git` directory therefore settles "this is
+    # not a linked worktree" with a shell builtin, and the ~200ms `git rev-parse`
+    # below is not paid at all in the overwhelmingly common case (#230). That
+    # matters because PostToolUse pays this on EVERY tool call.
+    #
+    # The POSITIVE answer only. The ABSENCE of `.git` proves nothing — a
+    # subdirectory of a worktree has no `.git` entry and still needs the redirect
+    # — so everything that is not a confirmed main checkout falls through to the
+    # unchanged chain below. Written as an `if` rather than `[ … ] && { … }` so
+    # the false branch cannot hand a non-zero status to a `set -e` caller.
+    if [ -d "$proj/.git" ]; then
+        echo "$proj"
+        return 0
+    fi
+
     command -v git >/dev/null 2>&1 || { echo "$proj"; return 0; }
 
     # One rev-parse yields both paths (common-dir first, git-dir second).

@@ -93,4 +93,11 @@ export JQ
 # Moved to lib-slug.sh so lib-memory-dir.sh can reach it without sourcing this
 # file (which exits 1 when it finds no Python) and without keeping the naive
 # inline copy that drifted from it (#158).
-source "$(dirname "${BASH_SOURCE[0]}")/lib-slug.sh"
+# Parameter expansion, not `dirname` (#230) — matching log.sh and
+# lib-memory-dir.sh, which already resolve their own directory this way. A path
+# with no slash in it (`source detect-tools.sh` from the scripts dir) leaves the
+# filename behind, not a directory; `dirname` answered "." and this must too.
+_REMEMBER_SRC_DIR="${BASH_SOURCE[0]%/*}"
+[ "$_REMEMBER_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_SRC_DIR="."
+source "$_REMEMBER_SRC_DIR/lib-slug.sh"
+unset _REMEMBER_SRC_DIR

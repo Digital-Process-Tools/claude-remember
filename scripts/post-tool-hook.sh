@@ -47,9 +47,16 @@
 # session-start-hook.sh. This hook must never block the agent, so a resolution
 # failure (e.g. a nested/headless session with no CLAUDE_PROJECT_DIR) is a
 # silent no-op, not a crash.
-REMEMBER_PATHS_SOFT_FAIL=1 source "$(dirname "$0")/resolve-paths.sh" || exit 0
-source "$(dirname "$0")/detect-tools.sh"
-source "$(dirname "$0")/bootstrap-dirs.sh"
+#
+# Resolved by parameter expansion rather than three `dirname` forks (#230) —
+# the same pattern log.sh and user-prompt-hook.sh already use. A path with no
+# slash in it (invoked as `bash post-tool-hook.sh` from the scripts dir) leaves
+# the filename behind, not a directory; `dirname` answered "." and this must too.
+_HOOK_DIR="${BASH_SOURCE[0]%/*}"
+[ "$_HOOK_DIR" = "${BASH_SOURCE[0]}" ] && _HOOK_DIR="."
+REMEMBER_PATHS_SOFT_FAIL=1 source "$_HOOK_DIR/resolve-paths.sh" || exit 0
+source "$_HOOK_DIR/detect-tools.sh"
+source "$_HOOK_DIR/bootstrap-dirs.sh"
 PLUGIN_ROOT="$PIPELINE_DIR"
 PROJECT="$PROJECT_DIR"
 source "$PLUGIN_ROOT/scripts/log.sh" 2>/dev/null
@@ -135,7 +142,11 @@ if [ -z "$LATEST_JSONL" ]; then
     NOTICE_MARKER="$REMEMBER_DIR/tmp/no-transcript-notice"
     NOTICE_LAST=0
     if [ -f "$NOTICE_MARKER" ]; then
-        NOTICE_LAST=$(cat "$NOTICE_MARKER" 2>/dev/null || echo 0)
+        # `read`, not `cat` (#230). Status untested on purpose: `read` returns 1
+        # on a file with no trailing newline having set the variable anyway, and
+        # a timestamp written with `printf` is exactly that file. The case guard
+        # below is what decides whether the value is usable.
+        read -r NOTICE_LAST < "$NOTICE_MARKER" 2>/dev/null
         case "$NOTICE_LAST" in ''|*[!0-9]*) NOTICE_LAST=0 ;; esac
     fi
     if [ $(( $(_remember_date +%s) - NOTICE_LAST )) -ge "$NOTICE_TTL" ]; then
@@ -149,7 +160,12 @@ if [ -z "$LATEST_JSONL" ]; then
     fi
     exit 0
 fi
-rm -f "$REMEMBER_DIR/tmp/no-transcript-notice" 2>/dev/null
+# Gated on the marker existing (#230): this line runs on every tool call, and
+# the file it clears is written only in the slug-mismatch case above — which is
+# to say, essentially never. `rm` on a path that is not there is a process spent
+# to do nothing.
+[ -f "$REMEMBER_DIR/tmp/no-transcript-notice" ] && \
+    rm -f "$REMEMBER_DIR/tmp/no-transcript-notice" 2>/dev/null
 
 # --- One transcript, one session, one answer (#212) ---
 # Everything below is about ONE session: the marker vouches for it, the saved
@@ -174,8 +190,17 @@ else
     [ -n "$STDIN_SESSION_ID" ] && log "hook" "post-tool: stdin session $STDIN_SESSION_ID has no transcript in $SESSION_DIR — falling back to newest"
 fi
 
-CURRENT_LINES=$(wc -l < "$TRANSCRIPT" | tr -d ' ')
-SESSION_ID=$(basename "$TRANSCRIPT" .jsonl)
+# `wc -l` on BSD pads its output with leading spaces, which is why `tr -d ' '`
+# was here. Arithmetic expansion strips whitespace on its own, so the pipe's
+# second process goes (#230) — and a `wc` that printed nothing usable now yields
+# 0 rather than the empty string, which every comparison below already treated
+# as 0 anyway.
+CURRENT_LINES=$(wc -l < "$TRANSCRIPT" 2>/dev/null)
+CURRENT_LINES=$(( CURRENT_LINES + 0 ))
+# Parameter expansion, not `basename` (#230): strip the directory, then the
+# extension. Same answer, no process.
+SESSION_ID="${TRANSCRIPT##*/}"
+SESSION_ID="${SESSION_ID%.jsonl}"
 
 # Which session PostToolUse serviced, for the capture-gap check in
 # session-start-hook.sh (#200). Distinct from the post-tool-ran marker above:
@@ -205,7 +230,12 @@ SESSION_ID=$(basename "$TRANSCRIPT" .jsonl)
 # The single file is still written. doctor.sh reads it, and it is the only
 # evidence an install upgrading from the old format has for the session that
 # straddles the upgrade.
-if mkdir -p "$REMEMBER_DIR/tmp/capture-alive.d" 2>/dev/null; then
+# `[ -d ]` before the `mkdir` (#230). Every tool call after the first in a
+# session finds this directory already there, and asking `mkdir -p` to confirm
+# that costs a process each time. The mkdir still runs — and still gates the
+# write on its success — the first time, and on any run where it is missing.
+if [ -d "$REMEMBER_DIR/tmp/capture-alive.d" ] \
+    || mkdir -p "$REMEMBER_DIR/tmp/capture-alive.d" 2>/dev/null; then
     # The id becomes a path component, so it is checked rather than trusted:
     # it comes from a filename in the transcript dir, and `..` or a slash
     # would escape the store. Real session ids are UUIDs.
@@ -250,7 +280,11 @@ SAVE_TRIGGERED=""
 IN_COOLDOWN=false
 COOLDOWN_MARKER="$REMEMBER_DIR/tmp/last-save-ts"
 if [ -f "$COOLDOWN_MARKER" ]; then
-    LAST_TS=$(cat "$COOLDOWN_MARKER" 2>/dev/null || echo 0)
+    # `read`, not `cat` (#230) — see the note on NOTICE_LAST above. This one is
+    # on the hot path proper: the cooldown marker exists for the whole of any
+    # session that has saved once, so this ran on every tool call.
+    LAST_TS=0
+    read -r LAST_TS < "$COOLDOWN_MARKER" 2>/dev/null
     case "$LAST_TS" in ''|*[!0-9]*) LAST_TS=0 ;; esac
     SAVE_COOLDOWN=$(config ".cooldowns.save_seconds" 120)
     case "$SAVE_COOLDOWN" in ''|*[!0-9]*) SAVE_COOLDOWN=120 ;; esac

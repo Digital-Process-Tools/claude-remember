@@ -89,11 +89,18 @@ fi
 unset _legacy_dir
 
 # --- Create directory structure ---
-mkdir -p \
-    "$REMEMBER_DIR/tmp" \
-    "$REMEMBER_DIR/logs" \
-    "$REMEMBER_DIR/logs/autonomous" \
-    2>/dev/null
+# Gated on the tree already existing (#230). `mkdir -p` over three directories
+# that are already there is a process spent to change nothing, and every hook
+# pays it — PostToolUse on every single tool call. The deepest path implies its
+# parents, so two tests settle all three, and a partially-removed tree still
+# falls through to the unchanged mkdir.
+if [ ! -d "$REMEMBER_DIR/logs/autonomous" ] || [ ! -d "$REMEMBER_DIR/tmp" ]; then
+    mkdir -p \
+        "$REMEMBER_DIR/tmp" \
+        "$REMEMBER_DIR/logs" \
+        "$REMEMBER_DIR/logs/autonomous" \
+        2>/dev/null
+fi
 
 # --- Gitignore: only write when REMEMBER_DIR is inside the project tree ---
 # In external mode (REMEMBER_DIR outside PROJECT_DIR) there is no gitignore
