@@ -334,8 +334,75 @@ def _rotate_archive(archive_file: str) -> str | None:
     return target
 
 
+def _eligible_staging(directory: str, filter_today: bool = True) -> list[str]:
+    """Sorted paths of the staging files a consolidation round may consume.
+
+    One answer to "which files are in scope", shared by the snapshot step and
+    the read that follows it. Two copies of the predicate would be two chances
+    to disagree about which day is today, and the whole point of the snapshot
+    is that the second step sees exactly what the first one took under the lock.
+
+    Args:
+        directory: Directory to scan.
+        filter_today: Whether to exclude today's file. False when scanning a
+            snapshot: its contents were already filtered under the lock, and a
+            round that crosses midnight must not drop a file it has taken.
+
+    Returns:
+        Sorted paths, today's file and ``.done.md`` files excluded.
+    """
+    import glob as globmod
+
+    from ._tz import today_str
+
+    today = today_str() if filter_today else ""
+    eligible = []
+    for path in sorted(globmod.glob(os.path.join(directory, "today-*.md"))):
+        basename = os.path.basename(path)
+        if basename.endswith(".done.md"):
+            continue
+        if today and today in basename:
+            continue
+        eligible.append(path)
+    return eligible
+
+
+def cmd_consolidate_snapshot(staging_dir: str, snapshot_dir: str) -> None:
+    """Copy the eligible staging files into ``snapshot_dir``.
+
+    run-consolidation.sh calls this while holding staging.lock, so every append
+    it sees is whole. ``staging_append`` writes a separator and then the summary
+    as two operations, and a reader landing between them consumes a blank line
+    as if it were the end of the day — the span retired into ``.done.md`` ends
+    with a separator whose entry is not there, and the entry is re-consolidated
+    on a later round under a later timestamp (#235).
+
+    The lock could not simply be held across ``cmd_consolidate``: that call
+    contains the Haiku round, and a critical section containing a model call is
+    how #142 happened and why save.lock was rejected as the staging lock in
+    #225. So the critical section ends here, at a process boundary, and the
+    bytes cross it on disk. The caller owns ``snapshot_dir`` and its cleanup.
+
+    Args:
+        staging_dir: Directory containing ``today-*.md`` staging files.
+        snapshot_dir: Directory to copy them into. Created if absent.
+
+    Prints:
+        STAGING_COUNT — how many files were snapshotted.
+    """
+    os.makedirs(snapshot_dir, exist_ok=True)
+    count = 0
+    for path in _eligible_staging(staging_dir):
+        with open(path, "rb") as src:
+            raw = src.read()
+        with open(os.path.join(snapshot_dir, os.path.basename(path)), "wb") as dst:
+            dst.write(raw)
+        count += 1
+    print(f"STAGING_COUNT={count}")
+
+
 def cmd_consolidate(staging_dir: str, recent_file: str, archive_file: str,
-                    max_prompt_bytes: int = 0) -> None:
+                    max_prompt_bytes: int = 0, snapshot_dir: str = "") -> None:
     """Run the full consolidation pipeline and print shell variables.
 
     Collects staging files (excluding today's and ``.done`` files), reads
@@ -349,6 +416,12 @@ def cmd_consolidate(staging_dir: str, recent_file: str, archive_file: str,
         max_prompt_bytes: Skip-guard cap on the assembled consolidation
             prompt's UTF-8 byte size. ``0`` disables it. An oversized prompt
             yields ``CONSOLIDATION_STATUS=skip`` instead of overflowing.
+        snapshot_dir: Directory of copies taken under staging.lock by
+            cmd_consolidate_snapshot. Read instead of ``staging_dir`` when set;
+            the paths emitted for the retire step still name ``staging_dir``,
+            because the basenames are identical on both sides. Empty reads the
+            live directory — the pre-#235 behaviour, kept so a caller that has
+            not been taught the two-step still works.
 
     Prints:
         STAGING_COUNT (0 if nothing to consolidate), RECENT_OUT and
@@ -356,16 +429,16 @@ def cmd_consolidate(staging_dir: str, recent_file: str, archive_file: str,
         TK_OUT, TK_CACHE, TK_COST, and one STAGING line per processed
         staging file (for the shell rename step).
     """
-    import glob as globmod
     import tempfile
 
-    from ._tz import today_str
     from .consolidate import consolidate, ConsolidationSkipped, ConsolidationTooLarge
     from .spawn_guard import EXIT_SPAWN_DECLINED, SummarizerSpawnDeclined
 
-    today = today_str()
+    # Read the snapshot taken under staging.lock when there is one, the live
+    # directory otherwise. Either way the basenames are the staging basenames,
+    # so the paths emitted for the retire loop below still name the real files.
+    source_dir = snapshot_dir or staging_dir
 
-    # Find staging files (exclude today + .done files)
     staging_contents: dict[str, str] = {}
     # Raw file size, captured at read time. The consumed-byte count below drives
     # the retire-vs-keep-tail split, so it has to describe the FILE, not the
@@ -377,10 +450,8 @@ def cmd_consolidate(staging_dir: str, recent_file: str, archive_file: str,
     # this count exists to prevent. #142 measures now.md with `wc -c` for the
     # same reason.
     staging_raw_bytes: dict[str, int] = {}
-    for path in sorted(globmod.glob(os.path.join(staging_dir, "today-*.md"))):
+    for path in _eligible_staging(source_dir, filter_today=not snapshot_dir):
         basename = os.path.basename(path)
-        if today in basename or basename.endswith(".done.md"):
-            continue
         with open(path, "rb") as f:
             raw = f.read()
         staging_raw_bytes[basename] = len(raw)
@@ -534,12 +605,15 @@ def main() -> None:
             session_id=sys.argv[3],
             position=int(sys.argv[4]),
         )
+    elif cmd == "consolidate-snapshot":
+        cmd_consolidate_snapshot(staging_dir=sys.argv[2], snapshot_dir=sys.argv[3])
     elif cmd == "consolidate":
         cmd_consolidate(
             staging_dir=sys.argv[2],
             recent_file=sys.argv[3],
             archive_file=sys.argv[4],
             max_prompt_bytes=int(sys.argv[5]) if len(sys.argv) > 5 else 0,
+            snapshot_dir=sys.argv[6] if len(sys.argv) > 6 else "",
         )
     else:
         print(f"Unknown command: {cmd}", file=sys.stderr)

@@ -60,7 +60,11 @@ fi
 # staging.lock is released explicitly after the retire loop; the trap covers
 # the case where the script dies inside it. `lock_release` returns 1 when the
 # lock is not ours, which is the normal case on every other exit path.
-trap 'staging_lock_release; lock_release "$LOCK_DIR" || true; rm -f "$REMEMBER_CONFIG"' EXIT
+# SNAPSHOT_DIR is set below, after the trap, so it is declared here first —
+# and removed with `if`, not `[ -n ] &&`, because a failing test as the last
+# command of a trap rewrites the exit status under `set -e`.
+SNAPSHOT_DIR=""
+trap 'staging_lock_release; lock_release "$LOCK_DIR" || true; if [ -n "$SNAPSHOT_DIR" ]; then rm -rf "$SNAPSHOT_DIR"; fi; rm -f "$REMEMBER_CONFIG"' EXIT
 
 STAGING_DIR="${REMEMBER_DIR}"
 RECENT_FILE="${STAGING_DIR}/recent.md"
@@ -69,14 +73,55 @@ ARCHIVE_FILE="${STAGING_DIR}/archive.md"
 # --- Dispatch: before_consolidate ---
 dispatch "before_consolidate"
 
+# --- Snapshot staging under staging.lock (#235) ---
+# The read of today-*.md lived in the same Python process as the Haiku call, so
+# it could not be put under staging.lock: a critical section containing a model
+# call is how #142 happened, and is why save.lock was rejected as the staging
+# lock in #225. But `staging_append` is two writes — a separator, then the
+# summary — and an unlocked reader landing between them consumes the blank line
+# as if it were the end of the day. The span retired into .done.md then ends
+# with a separator whose entry is not there, and the entry is re-consolidated on
+# a later round under a later timestamp, attributed to the day it was
+# re-consumed rather than the day it was written, with nothing to say so.
+#
+# So end the critical section at a process boundary instead of widening it past
+# the model call — #224's shape, one file over. Copy the eligible files under
+# the lock, release, then read the copies. That copy IS the "snapshot" option
+# the issue offers as an alternative: in this layout the two are the same
+# change, because the lock lives in bash and the read lives in Python, so
+# holding the lock across the read but not the model call requires the read to
+# end at a process boundary and the bytes to cross it on disk.
+#
+# Cleanup: the directory is ours alone (consolidation.lock is held for the whole
+# script) and the EXIT trap removes it on every path, including the two failure
+# exits below. A SIGKILL leaves one behind holding a copy of bytes that also
+# still exist in staging — no recovery is owed, so the sweep is tidiness.
+rm -rf "${REMEMBER_DIR}"/tmp/consolidate-snapshot-* 2>/dev/null || true
+SNAPSHOT_DIR=$(mktemp -d "${REMEMBER_DIR}/tmp/consolidate-snapshot-XXXXXX")
+# Losing this wait costs a round and nothing else: nothing has been read, so
+# staging, recent.md and archive.md are all exactly as they were and the next
+# run consolidates the same span. That is strictly cheaper than the retire
+# loop's lost-wait branch below, which has already rewritten memory and so
+# leaves a duplicate for the merge prompt to dedupe.
+if ! staging_lock_acquire "$STAGING_LOCK_TIMEOUT"; then
+    log "consolidation" "staging.lock held for the whole ${STAGING_LOCK_TIMEOUT}s wait — nothing read and nothing consolidated; staging, recent.md and archive.md are untouched and the next run picks up the same span (an NDC append may be half applied right now, and consuming its separator without its summary retires a blank line and defers the entry to a later day)"
+    exit 0
+fi
+if ! SNAPSHOT_OUT=$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell consolidate-snapshot "$STAGING_DIR" "$SNAPSHOT_DIR" 2>&1); then
+    staging_lock_release
+    log "consolidation" "ERROR: staging snapshot failed — $SNAPSHOT_OUT"
+    exit 1
+fi
+staging_lock_release
+
 # --- Consolidate ---
-# Python does: find staging files, read all content, build prompt,
+# Python does: read the snapshot taken above, build prompt,
 # call Haiku (text-only), parse structured response into recent/archive.
 # Oversized-prompt skip-guard: cap the assembled prompt so a runaway staging/
 # archive never overflows Haiku's window (skips cleanly instead of crashing).
 CONSOLIDATE_MAX_BYTES=$(config ".thresholds.consolidate_max_bytes" 600000)
 log "consolidation" "start"
-RESULT=$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell consolidate "$STAGING_DIR" "$RECENT_FILE" "$ARCHIVE_FILE" "$CONSOLIDATE_MAX_BYTES" 2>&1) || {
+RESULT=$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell consolidate "$STAGING_DIR" "$RECENT_FILE" "$ARCHIVE_FILE" "$CONSOLIDATE_MAX_BYTES" "$SNAPSHOT_DIR" 2>&1) || {
     # 3 is the spawn guard declining, not a broken pipeline (#204). Staging is
     # untouched in both cases and the next run picks it up, but "declined" and
     # "failed" send an operator looking in different places.

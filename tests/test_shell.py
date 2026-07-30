@@ -789,6 +789,7 @@ def test_main_dispatches_consolidate():
         recent_file="recent.md",
         archive_file="archive.md",
         max_prompt_bytes=0,  # absent 6th arg -> guard disabled
+        snapshot_dir="",     # absent 7th arg -> read the live staging dir
     )
 
 
@@ -802,6 +803,94 @@ def test_main_dispatches_consolidate_with_max_bytes():
         recent_file="recent.md",
         archive_file="archive.md",
         max_prompt_bytes=600000,
+        snapshot_dir="",
     )
+
+
+def test_main_dispatches_consolidate_with_snapshot_dir():
+    """The optional 7th arg names the copies taken under staging.lock (#235).
+
+    staging_dir stays in argv[2] even when a snapshot is supplied, because the
+    retire step still has to be told the real paths.
+    """
+    with patch("pipeline.shell.cmd_consolidate") as mock_fn:
+        with patch("sys.argv", ["shell.py", "consolidate", "/staging", "recent.md",
+                                "archive.md", "600000", "/snap"]):
+            main()
+    mock_fn.assert_called_once_with(
+        staging_dir="/staging",
+        recent_file="recent.md",
+        archive_file="archive.md",
+        max_prompt_bytes=600000,
+        snapshot_dir="/snap",
+    )
+
+
+def test_main_dispatches_consolidate_snapshot():
+    with patch("pipeline.shell.cmd_consolidate_snapshot") as mock_fn:
+        with patch("sys.argv", ["shell.py", "consolidate-snapshot", "/staging", "/snap"]):
+            main()
+    mock_fn.assert_called_once_with(staging_dir="/staging", snapshot_dir="/snap")
+
+
+class TestConsolidateSnapshot:
+    """What crosses the process boundary that ends the critical section (#235)."""
+
+    def _staging(self, tmp_path, today):
+        (tmp_path / f"today-{today}.md").write_text("still being written to\n")
+        (tmp_path / "today-2020-01-01.md").write_text("older day\n")
+        (tmp_path / "today-2020-01-02.md").write_bytes(b"stray \xff byte\n")
+        (tmp_path / "today-2019-12-31.done.md").write_text("already retired\n")
+
+    def test_it_copies_exactly_what_consolidation_may_consume(self, tmp_path):
+        from pipeline._tz import today_str
+        from pipeline.shell import cmd_consolidate_snapshot
+
+        src = tmp_path / "remember"
+        src.mkdir()
+        snap = tmp_path / "snap"
+        self._staging(src, today_str())
+
+        cmd_consolidate_snapshot(str(src), str(snap))
+
+        assert sorted(p.name for p in snap.iterdir()) == [
+            "today-2020-01-01.md", "today-2020-01-02.md"
+        ], "today's file and .done.md files are not consolidation's to consume"
+        assert (snap / "today-2020-01-02.md").read_bytes() == b"stray \xff byte\n", (
+            "the snapshot must be a byte copy: the consumed-byte count that "
+            "drives the retire-vs-keep-tail split is measured from it, and a "
+            "decode round-trip overstates a non-UTF-8 file (#225)"
+        )
+        assert (src / "today-2020-01-01.md").is_file(), (
+            "the snapshot must not move the originals — the retire loop, under "
+            "the lock and after the model call, is what disposes of them"
+        )
+
+    def test_the_snapshot_is_what_gets_read(self, tmp_path):
+        """A snapshot dir means the live directory is not touched at all."""
+        from pipeline.shell import cmd_consolidate
+
+        src = tmp_path / "remember"
+        src.mkdir()
+        snap = tmp_path / "snap"
+        snap.mkdir()
+        (src / "today-2020-01-01.md").write_text("appended after the snapshot\n")
+        (snap / "today-2020-01-01.md").write_text("what the lock protected\n")
+
+        seen = {}
+
+        def _fake(staging_contents, recent, archive, max_prompt_bytes=0):
+            seen.update(staging_contents)
+            raise RuntimeError("stop here — the read is what this test is about")
+
+        with patch("pipeline.consolidate.consolidate", _fake):
+            with pytest.raises(RuntimeError):
+                cmd_consolidate(str(src), str(tmp_path / "recent.md"),
+                                str(tmp_path / "archive.md"), 0, str(snap))
+
+        assert seen == {"today-2020-01-01.md": "what the lock protected\n"}, (
+            "cmd_consolidate re-read the live staging file instead of the "
+            "snapshot, so the whole critical section bought nothing (#235)"
+        )
 
 
