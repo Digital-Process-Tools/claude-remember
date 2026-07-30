@@ -47,17 +47,7 @@ DETECT_SCRIPT = REPO_ROOT / "scripts" / "detect-tools.sh"
 BOOTSTRAP_SCRIPT = REPO_ROOT / "scripts" / "bootstrap-dirs.sh"
 
 from pipeline.slug import session_dir_slug as _slug  # noqa: E402
-
-# Every external command this chain is known to reach, plus the ones a plausible
-# rewrite would reach. A command absent from this list is simply not counted, so
-# the list erring long is the safe direction. `head` is here and is not in
-# #227's copy: `ls -t … | head -1` is a two-process idiom and counting only the
-# `ls` understates it by half.
-COUNTED = (
-    "date whoami jq git dirname basename sed tr id stat find mkdir cat rm cp mv "
-    "python3 python iconv cygpath tar wc touch uname expr awk grep ls sleep nohup "
-    "head sort cut"
-).split()
+from tests.spawn_counting import make_shim_dir, spawns as _spawn_lines  # noqa: E402
 
 # Measured 17 on macOS bash 3.2.57 after the fix, from 30 before it. The slack
 # is for the platforms that are not this one — bash >= 4.2 spends fewer (no
@@ -71,26 +61,7 @@ POST_TOOL_SPAWN_BUDGET = 20
 
 def _shim_dir(root: Path) -> Path:
     """A PATH front-end that records every external execution, then execs it."""
-    shims = root / "shims"
-    shims.mkdir()
-    for name in COUNTED:
-        real = None
-        for d in os.environ.get("PATH", "").split(os.pathsep):
-            cand = Path(d) / name
-            if cand.is_file() and os.access(cand, os.X_OK):
-                real = cand
-                break
-        if real is None:
-            continue
-        shim = shims / name
-        shim.write_text(
-            "#!/bin/bash\n"
-            f'printf "%s %s\\n" "{name}" "$*" >> "$SPAWN_LOG"\n'
-            f'exec "{real}" "$@"\n',
-            encoding="utf-8",
-        )
-        shim.chmod(0o755)
-    return shims
+    return make_shim_dir(root)
 
 
 def _project(tmp_path: Path, *, jsonl_lines: int = 60, config: dict | None = None,
@@ -144,8 +115,7 @@ def _run(env: dict, *, count_into: Path | None = None, shims: Path | None = None
 
 
 def _spawns(log: Path) -> list[str]:
-    raw = log.read_bytes().decode("utf-8", "replace")
-    return [line for line in raw.splitlines() if line.strip()]
+    return _spawn_lines(log)
 
 
 def _reap(remember: Path) -> None:

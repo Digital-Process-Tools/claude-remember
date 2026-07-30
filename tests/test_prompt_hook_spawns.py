@@ -42,17 +42,18 @@ pytestmark = pytest.mark.skipif(
     reason="bash hook subprocess + POSIX semantics — not portable to Windows runners",
 )
 
+from tests.spawn_counting import make_shim_dir  # noqa: E402
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 USER_PROMPT = REPO_ROOT / "scripts" / "user-prompt-hook.sh"
 LIB_CLOCK = REPO_ROOT / "scripts" / "lib-clock.sh"
 
-# Every external command the hook chain is known to reach, plus the ones a
-# plausible rewrite would reach. A command absent from this list is simply not
-# counted, so the list erring long is the safe direction.
-COUNTED = (
-    "date whoami jq git dirname basename sed tr id stat find mkdir cat rm cp mv "
-    "python3 python iconv cygpath tar wc touch uname expr awk grep ls sleep nohup"
-).split()
+# COUNTED is imported, not restated (#230). This file carried its own copy and
+# #230's copy disagreed with it — `head` was missing here, so `ls -t … | head -1`
+# would have been counted at half its true cost had this hook ever grown one. A
+# budget test that cannot see part of what it measures reports a number that
+# reads as complete. Adding `head` did not move this hook's warm count: it is 1
+# on bash 3.2 either way. The omission was a loaded gun, not a wound.
 
 # On bash >= 4.2 the whole hook is spawn-free. On bash 3.2 (stock macOS) there
 # is no time builtin at all, so one `date` is the floor. The `jq` that builds
@@ -64,27 +65,7 @@ TS_RE = re.compile(r"^\[\d{1,2}:\d{2} \S+ — \S+\]$")
 
 def _shim_dir(tmp_path: Path, log: Path) -> Path:
     """A PATH front-end that records every external execution, then execs it."""
-    shims = tmp_path / "shims"
-    shims.mkdir()
-    for name in COUNTED:
-        real = None
-        for d in os.environ.get("PATH", "").split(os.pathsep):
-            cand = Path(d) / name
-            if cand.is_file() and os.access(cand, os.X_OK):
-                real = cand
-                break
-        if real is None:
-            continue
-        shim = shims / name
-        shim.write_text(
-            "#!/bin/bash\n"
-            f'printf "%s\\n" "{name}" >> "$SPAWN_LOG"\n'
-            f'exec "{real}" "$@"\n',
-            encoding="utf-8",
-        )
-        shim.chmod(0o755)
-    log.write_text("", encoding="utf-8")
-    return shims
+    return make_shim_dir(tmp_path, log)
 
 
 def _project(tmp_path: Path, timezone: str | None = None):

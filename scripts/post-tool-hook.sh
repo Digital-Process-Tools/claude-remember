@@ -136,6 +136,19 @@ SESSION_DIR="$(claude_projects_dir)/$(session_dir_slug "$PROJECT")"
 # mis-slugged), so the warning would fire once and every later session would be
 # silent again — the very failure being fixed. An hourly repeat keeps a
 # persistent cause visible without flooding.
+#
+# `ls -t … | head -1` is two processes and it STAYS two processes (#230). The
+# obvious replacement — glob the directory and keep the newest with `[ "$f" -nt
+# "$newest" ]` — is spawn-free and WRONG here: under bash 3.2 (stock macOS)
+# `-nt` compares mtimes at ONE-SECOND granularity, the same trap recorded below
+# the capture-alive marker. Two transcripts written in the same second tie, and
+# a tie makes the loop keep whichever the glob listed first — alphabetical order,
+# not newest. `ls -t` reads the full mtime and does not tie.
+#
+# The value picked here decides which session this invocation is recorded FOR
+# whenever stdin does not answer (#212). Trading a correct answer for two
+# processes on the WRITE path is not a trade; misattributing a tool call is a
+# bug, and this repo has twice turned that bug into an outage (#204, #129).
 NOTICE_TTL=3600
 LATEST_JSONL=$(ls -t "$SESSION_DIR"/*.jsonl 2>/dev/null | head -1)
 if [ -z "$LATEST_JSONL" ]; then
