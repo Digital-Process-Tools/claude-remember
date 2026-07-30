@@ -387,23 +387,141 @@ def test_a_nonsense_cap_falls_back_to_the_default(monkeypatch, value):
     ) == spawn_guard.DEFAULT_MAX_CONCURRENT
 
 
-def test_pid_liveness_is_what_retires_a_crashed_holders_record():
+def _nt_liveness(monkeypatch) -> None:
+    """Make `_pid_alive` behave as it does on Windows, wherever this runs.
+
+    Through the module's own flag, never `os.name`: patching that mutates the
+    real `os` module, `pathlib` reads it, and every `Path` in the process becomes
+    a `WindowsPath` that cannot be instantiated on a POSIX host — which is how
+    this helper first announced itself.
+    """
+    from pipeline import spawn_guard
+
+    monkeypatch.setattr(spawn_guard, "_PIDS_ARE_PROBEABLE", False)
+
+
+def test_liveness_answers_the_two_questions_that_are_the_same_everywhere():
+    """A pid we are running as exists; pid 0 is not a process anywhere.
+
+    The interesting case — a pid that has *exited* — has two different correct
+    answers, one per platform, and gets a test each below.
+    """
     from pipeline import spawn_guard
 
     assert spawn_guard._pid_alive(os.getpid()) is True
     assert spawn_guard._pid_alive(0) is False
-    assert spawn_guard._pid_alive(_dead_pids(1)[0]) is False
 
 
-def test_pid_liveness_says_yes_where_it_cannot_ask(monkeypatch):
-    """Windows has no cheap probe, so staleness alone retires the record there.
-    Erring this way declines for at most `timeout + grace` after a crash; erring
-    the other way would uncap the spawn.
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="`kill -0` is the POSIX probe; Windows has no cheap "
+                           "equivalent and retires records by staleness instead "
+                           "— covered by the two tests below")
+def test_on_posix_a_dead_holder_is_retired_the_instant_it_dies():
+    """`kill -0` answers cheaply and exactly, so a crashed summarizer frees its
+    slot immediately and no deferral is ever observed here.
     """
     from pipeline import spawn_guard
 
-    monkeypatch.setattr(spawn_guard.os, "name", "nt")
+    assert spawn_guard._pid_alive(_dead_pids(1)[0]) is False
+
+
+def test_where_liveness_cannot_be_asked_the_answer_is_yes(monkeypatch):
+    """Windows: `os.kill` there only sends real signals, so there is no probe to
+    make. Saying "alive" defers a save for at most `timeout + grace` after a
+    crash; saying "dead" would hand out a slot per unprobeable record and uncap
+    the spawn. Bounded wrongness beats unbounded wrongness.
+
+    Forced rather than skipped, so a POSIX-only runner still covers the branch.
+    """
+    from pipeline import spawn_guard
+
+    _nt_liveness(monkeypatch)
     assert spawn_guard._pid_alive(_dead_pids(1)[0]) is True
+
+
+def test_staleness_retires_a_crashed_holder_on_the_promised_schedule(monkeypatch,
+                                                                    tmp_path):
+    """The Windows contract, which is the one liveness does NOT cover.
+
+    On the platform where a dead holder reads as alive, staleness is the only
+    thing that ever frees its slot — so this is the path that decides whether the
+    guard defers saves for a bounded `timeout + grace` or wedges forever. The two
+    halves bracket that boundary, which is what a regression in
+    `STALE_GRACE_SECONDS` or in the census arithmetic would move.
+    """
+    from pipeline import spawn_guard
+
+    monkeypatch.setenv("REMEMBER_RUNTIME_DIR", str(tmp_path / "run"))
+    _nt_liveness(monkeypatch)
+
+    records = spawn_guard.record_dir()
+    records.mkdir(parents=True)
+    dead = _dead_pids(1)[0]
+    timeout = 10.0
+    stale_after = timeout + spawn_guard.STALE_GRACE_SECONDS
+    now = time.time()
+    record = records / "crashed.spawn"
+
+    record.write_text(f"pid={dead}\nstarted={now - (stale_after - 5):.6f}\n",
+                      encoding="utf-8")
+    live, _ = spawn_guard._census(records, now, stale_after)
+    assert live == 1, (
+        "inside the grace a crashed holder still consumes its slot — deliberate, "
+        "and the reason the deferral is bounded rather than absent"
+    )
+    assert record.exists(), "retired before its own grace had elapsed"
+
+    record.write_text(f"pid={dead}\nstarted={now - (stale_after + 1):.6f}\n",
+                      encoding="utf-8")
+    live, recent = spawn_guard._census(records, now, stale_after)
+    assert (live, recent) == (0, 0), "staleness never retired the record"
+    assert not record.exists(), "the record was left behind to accumulate"
+
+
+def test_a_batch_of_crashed_holders_defers_saves_and_then_stops(monkeypatch,
+                                                               tmp_path):
+    """Four crashes in quick succession, end to end through `claim()`.
+
+    @ehutchinsonSFDC killed 19 summarizers at once, so a batch is the realistic
+    shape here. On Windows semantics every one of those records reads as live:
+    saves decline until the grace elapses, then resume on their own. Pinned
+    rather than reasoned about — if the arithmetic is wrong the guard declines
+    every save forever, which is the #204 trap in the fix's own clothes.
+    """
+    from pipeline import spawn_guard
+
+    monkeypatch.setenv("REMEMBER_RUNTIME_DIR", str(tmp_path / "run"))
+    _nt_liveness(monkeypatch)
+
+    records = spawn_guard.record_dir()
+    records.mkdir(parents=True)
+    timeout = 10.0
+    stale_after = timeout + spawn_guard.STALE_GRACE_SECONDS
+    now = time.time()
+    dead = _dead_pids(EXPECTED_MAX_CONCURRENT)
+
+    def date_records(age: float) -> None:
+        for i, pid in enumerate(dead):
+            (records / f"{i}.spawn").write_text(
+                f"pid={pid}\nstarted={now - age:.6f}\n", encoding="utf-8"
+            )
+
+    date_records(stale_after - 5)
+    with pytest.raises(spawn_guard.SummarizerSpawnDeclined) as declined:
+        spawn_guard.claim(timeout=timeout)
+    assert "already running" in str(declined.value)
+    assert str(EXPECTED_MAX_CONCURRENT) in str(declined.value)
+
+    date_records(stale_after + 1)
+    slot = spawn_guard.claim(timeout=timeout)
+    try:
+        assert slot.degraded == "", (
+            "the guard degraded instead of recovering from the crash"
+        )
+        live, _ = spawn_guard._census(records, time.time(), stale_after)
+        assert live == 1, "only the new claim should be live once the grace passed"
+    finally:
+        slot.release()
 
 
 @pytest.mark.skipif(sys.platform == "win32",

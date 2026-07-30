@@ -114,17 +114,28 @@ def _positive_int(name: str, default: int) -> int:
     return default
 
 
+#: Whether ``kill -0`` can be used to ask if a pid exists. False on Windows,
+#: where ``os.kill`` only sends real signals.
+#:
+#: A named flag rather than an inline ``os.name`` check because that is what a
+#: test can toggle: monkeypatching ``os.name`` mutates the real ``os`` module,
+#: and ``pathlib`` reads it — so the patch silently turns every ``Path`` in the
+#: process into a ``WindowsPath`` and the test dies somewhere unrelated.
+_PIDS_ARE_PROBEABLE = os.name != "nt"
+
+
 def _pid_alive(pid: int) -> bool:
     """Whether ``pid`` still exists.
 
-    On Windows there is no cheap probe (``os.kill`` only sends real signals
-    there), so say yes and let staleness retire the record instead. That errs
-    toward declining for at most ``timeout + STALE_GRACE_SECONDS`` after a
-    crash, which is bounded; erring the other way would uncap the spawn.
+    Where there is no cheap probe (Windows), say yes and let staleness retire
+    the record instead. That errs toward declining for at most
+    ``timeout + STALE_GRACE_SECONDS`` after a crash, which is bounded; erring
+    the other way would hand out a slot per unprobeable record and uncap the
+    spawn.
     """
     if pid <= 0:
         return False
-    if os.name == "nt":
+    if not _PIDS_ARE_PROBEABLE:
         return True
     try:
         os.kill(pid, 0)
