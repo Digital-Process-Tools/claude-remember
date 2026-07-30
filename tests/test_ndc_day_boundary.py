@@ -170,6 +170,9 @@ def test_a_compression_spanning_midnight_restamps_with_the_new_day(tmp_path):
     env, project, plugin, calls, sid = _make_env(tmp_path, exchanges=6, humans=5)
     remember = project / ".remember"
 
+    # A PATH shim only intercepts a real `date` process, so this depends on
+    # REMEMBER_NO_PRINTF_T=1 — set for every test built from _make_env — keeping
+    # lib-clock.sh off bash's spawn-free `printf '%(FMT)T'` builtin (#227).
     bindir = tmp_path / "bin"
     bindir.mkdir()
     counter = tmp_path / "date-calls"

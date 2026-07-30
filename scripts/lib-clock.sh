@@ -35,6 +35,17 @@
 #                          fallback only ever run on one platform is a fallback
 #                          nobody tests.
 #
+# THE SEAM THIS REMOVED
+#   A builtin is not on PATH, so putting a fake `date` in front of PATH — the
+#   obvious way to test anything time-dependent in a shell pipeline, and how
+#   tests/test_ndc_day_boundary.py fakes midnight — no longer intercepts
+#   anything on bash >= 4.2. The fake is not refused, it is ignored, and the test
+#   quietly asserts against the real clock: green on macOS bash 3.2, red
+#   everywhere else. REMEMBER_NO_PRINTF_T=1 restores the seam, and the shared
+#   test env builder (tests/test_save_session_gates.py::_make_env) sets it for
+#   every shell test. A lint in tests/test_prompt_hook_spawns.py fails if a test
+#   shims `date` without naming that variable.
+#
 # ============================================================================
 
 [ -n "${_REMEMBER_LIB_CLOCK_LOADED:-}" ] && return 0

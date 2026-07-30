@@ -393,3 +393,37 @@ def test_a_context_percentage_at_the_limit_still_warns(tmp_path):
     assert "/remember" in result.stdout, (
         f"no context-death warning at 96%: {result.stdout!r}"
     )
+
+
+def test_no_test_fakes_the_clock_on_path_without_disabling_the_builtin():
+    """The seam that fix #1 removed, guarded so the next author trips loudly.
+
+    Faking time by putting a `date` in front of PATH is the obvious way to test
+    anything time-dependent in a shell pipeline, and it worked for the whole life
+    of this repo. It does not work against `printf '%(FMT)T'`: a builtin is not
+    on PATH, so the fake is silently ignored and the assertion runs against the
+    real clock — green on macOS bash 3.2, red on bash >= 4.2, which is how #227
+    found out. Nothing in a time-faking test's own text would say so.
+
+    So a file that shims `date` must name `REMEMBER_NO_PRINTF_T` — the hatch that
+    forces the `date` path — even if the value itself is set in a shared helper.
+    A comment pointing at it satisfies this, and that comment is the warning.
+    """
+    tests_dir = Path(__file__).resolve().parent
+    shimmers = []
+    for path in sorted(tests_dir.glob("test_*.py")):
+        text = path.read_text(encoding="utf-8")
+        if '/ "date"' not in text and "/ 'date'" not in text:
+            continue
+        shimmers.append(path.name)
+        assert "REMEMBER_NO_PRINTF_T" in text, (
+            f"{path.name} puts its own `date` on PATH but never mentions "
+            f"REMEMBER_NO_PRINTF_T. On bash >= 4.2 lib-clock.sh does not run "
+            f"`date` at all, so the fake clock is ignored and the test asserts "
+            f"against the real one."
+        )
+
+    assert shimmers, (
+        "this guard no longer recognises how any test fakes `date`, so it is "
+        "passing by finding nothing. Update the detector, not the assertion."
+    )
