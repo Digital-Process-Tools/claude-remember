@@ -195,17 +195,45 @@ while IFS= read -r -d '' staging_path && IFS= read -r -d '' staging_consumed; do
     staging_done="${staging_path%.md}.done.md"
 
     if [ "$staging_consumed" -gt 0 ] && [ "$staging_now" -gt "$staging_consumed" ]; then
-        staging_tail=$(mktemp "${TMPDIR:-/tmp}"/remember-staging-tail-XXXXXX)
+        # Sibling of staging_path (#246), not $TMPDIR — #242's class, one file
+        # over. Across filesystems mv is copy-then-unlink, not rename(2), and a
+        # failure partway leaves staging_path destroyed or truncated instead of
+        # "old or new". $TMPDIR is a different filesystem in the ordinary cases
+        # (tmpfs /tmp, devcontainers, WSL under /mnt/c, external data_dir). A
+        # crash between mktemp and mv leaves a stray sibling; sweep it first,
+        # same as #245 — inert (name does not end in .md, so nothing globs it)
+        # but would accumulate one per failure otherwise.
+        rm -f "${staging_path}".tail-* 2>/dev/null
+        staging_tail=$(mktemp "${staging_path}.tail-XXXXXX")
         if head -c "$staging_consumed" "$staging_path" > "$staging_done" 2>/dev/null &&
            tail -c +$(( staging_consumed + 1 )) "$staging_path" > "$staging_tail" 2>/dev/null; then
-            mv "$staging_tail" "$staging_path"
-            log "consolidation" "kept $(( staging_now - staging_consumed ))b appended to $(basename "$staging_path") during consolidation"
+            # Checked, not run bare under set -e: an unchecked failure here used
+            # to kill the whole script mid-loop, abandoning every other staging
+            # file in STAGING_PATHS_FILE rather than handling just this one.
+            if STAGING_MV_ERR=$(mv "$staging_tail" "$staging_path" 2>&1); then
+                log "consolidation" "kept $(( staging_now - staging_consumed ))b appended to $(basename "$staging_path") during consolidation"
+            else
+                # staging_path is untouched: same-directory mv is a real
+                # rename, which cannot fail partway (#246). staging_done
+                # already holds the consumed prefix — harmless, it is
+                # overwritten identically when this file is retried. Leaving
+                # staging_path in place means the next run re-reads it whole
+                # and redoes the split; the consumed span becomes a duplicate
+                # in recent.md/archive.md that the merge dedupes, chosen over
+                # losing the tail appended during this consolidation.
+                rm -f "$staging_tail"
+                log "consolidation" "ERROR: could not keep the tail of $(basename "$staging_path") appended during consolidation — left in place for the next run to retry: ${STAGING_MV_ERR}"
+            fi
         else
             rm -f "$staging_tail"
-            mv "$staging_path" "$staging_done"
+            if ! STAGING_MV_ERR=$(mv "$staging_path" "$staging_done" 2>&1); then
+                log "consolidation" "ERROR: could not retire $(basename "$staging_path") to .done.md — left in place, the next run will see it as unconsolidated: ${STAGING_MV_ERR}"
+            fi
         fi
     else
-        mv "$staging_path" "$staging_done"
+        if ! STAGING_MV_ERR=$(mv "$staging_path" "$staging_done" 2>&1); then
+            log "consolidation" "ERROR: could not retire $(basename "$staging_path") to .done.md — left in place, the next run will see it as unconsolidated: ${STAGING_MV_ERR}"
+        fi
     fi
 done < "$STAGING_PATHS_FILE"
 staging_lock_release

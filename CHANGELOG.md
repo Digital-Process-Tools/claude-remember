@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The consolidation staging-tail mv is now a checked, same-directory rename** ([#246](https://github.com/Digital-Process-Tools/claude-remember/issues/246)) — `run-consolidation.sh`'s retire loop kept the unconsolidated tail of a staging file that grew past its consolidated offset with `mv "$staging_tail" "$staging_path"`, where `$staging_tail` came from `mktemp "${TMPDIR:-/tmp}"/...`. #242's class, one file over: across filesystems `mv` is copy-then-unlink, not `rename(2)`, so a failure partway could destroy or truncate `staging_path` instead of leaving it "old or new" — `$TMPDIR` is a different filesystem in the ordinary cases (tmpfs `/tmp`, devcontainers, WSL under `/mnt/c`, external `data_dir`). The mv's result was also never read, and ran bare under `set -e`, so a failure killed the whole retire loop mid-way rather than being handled — the other two `mv`s in the same loop (the same-directory `.done.md` retires) share that: they cannot half-complete, but were unchecked too, and a failure there was silently swallowed. The temp now lives beside `staging_path` (same pattern as [#245](https://github.com/Digital-Process-Tools/claude-remember/pull/245)'s NDC commit fix), all three `mv`s are checked, and a failure leaves the file in place with an `ERROR` log instead of retiring it — the next run retries rather than losing the tail or silently mis-marking the file done.
+
 ## [0.11.0] — The argument outlived the code
 
 Ten changes, and most of them are one shape: a safety argument that stayed in the file after the property it described was gone.
