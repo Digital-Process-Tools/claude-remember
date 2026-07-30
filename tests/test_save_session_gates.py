@@ -114,6 +114,19 @@ elif cmd == "call-haiku":
     with os.fdopen(fd, "w") as f:
         if is_ndc:
             f.write("## 2026-07-25\\n\\n- compressed summary\\n")
+        elif os.environ.get("STUB_HAIKU_TEXT_FILE"):
+            # The file route exists because the env route cannot carry a large
+            # entry. Linux caps each SINGLE string in argv/envp at
+            # MAX_ARG_STRLEN (32 pages = 128KB) independently of how much total
+            # ARG_MAX allows, so a ~276KB STUB_HAIKU_TEXT kills `bash` with
+            # E2BIG at exec time on every Linux runner, while macOS (no
+            # per-string cap) and Windows stay green. That is the same limit
+            # #107 moved the real summarizer prompt onto stdin to avoid — see
+            # pipeline/haiku.py:515, "claude -p with no positional prompt reads
+            # the prompt from stdin". A fixture that needs a big payload takes
+            # the same route the production code does: not through exec.
+            with open(os.environ["STUB_HAIKU_TEXT_FILE"], encoding="utf-8") as src:
+                f.write(src.read())
         elif os.environ.get("STUB_HAIKU_TEXT"):
             f.write(os.environ["STUB_HAIKU_TEXT"])
         elif os.environ.get("STUB_HAIKU_SKIP", "1") == "1":
@@ -122,7 +135,8 @@ elif cmd == "call-haiku":
             f.write("## 10:00 | main\\n\\n- did some work\\n")
     rejected = os.environ.get("STUB_HAIKU_REJECTED") == "1" and not is_ndc
     skipping = (os.environ.get("STUB_HAIKU_SKIP", "1") == "1"
-                and not os.environ.get("STUB_HAIKU_TEXT"))
+                and not os.environ.get("STUB_HAIKU_TEXT")
+                and not os.environ.get("STUB_HAIKU_TEXT_FILE"))
     print("IS_SKIP=" + ("true" if (rejected or (not is_ndc and skipping)) else "false"))
     print("IS_REJECTED=" + ("true" if rejected else "false"))
     print(f"HAIKU_TEXT_FILE={path}")
@@ -203,10 +217,49 @@ def _make_env(tmp_path: Path, *, exchanges: int, humans: int, position: int = 50
     return env, project, plugin, calls_log, session_id
 
 
+# Linux caps each SINGLE string in argv/envp at MAX_ARG_STRLEN — 32 pages, 128KB
+# — independently of how much total ARG_MAX allows. macOS has no per-string cap
+# and Windows does not use this mechanism at all, so a fixture that hands a large
+# payload to a subprocess passes on the machine it was written on and dies with
+# `OSError: [Errno 7] Argument list too long` on every Linux runner. That is
+# exactly what #247's first push did: a ~276KB entry in STUB_HAIKU_TEXT, four
+# green legs and four red ones.
+#
+# Checked here, in the one helper every shell test spawns through, rather than
+# left to CI — the platform this code is written on is the platform that cannot
+# see the limit. The fix is never to shrink the payload (a size can be
+# load-bearing); it is to take it off the exec boundary, which is what #107 did
+# for the real summarizer prompt when it moved to stdin.
+MAX_ARG_STRLEN = 32 * 4096
+
+
+def _assert_exec_payloads_fit(argv, env: dict):
+    oversized = [
+        f"argv[{i}] ({len(value.encode())} bytes)"
+        for i, value in enumerate(argv)
+        if len(value.encode()) > MAX_ARG_STRLEN
+    ] + [
+        f"${name} ({len(value.encode())} bytes)"
+        for name, value in sorted(env.items())
+        if len(value.encode()) > MAX_ARG_STRLEN
+    ]
+    assert not oversized, (
+        "this subprocess would die with `OSError: [Errno 7] Argument list too "
+        "long` on any Linux host: a single argv/envp string may not exceed "
+        f"MAX_ARG_STRLEN ({MAX_ARG_STRLEN} bytes), whatever ARG_MAX allows. "
+        "macOS has no per-string cap, so this passes locally and fails on every "
+        "ubuntu leg. Put the payload in a file and pass the path (see "
+        "STUB_HAIKU_TEXT_FILE), the way #107 moved the real prompt to stdin — "
+        "do not shrink it, the size may be what the test is for. "
+        f"oversized: {', '.join(oversized)}"
+    )
+
+
 def _run(plugin: Path, env: dict, session_id: str, *args: str):
+    argv = ["bash", str(plugin / "scripts" / "save-session.sh"), session_id, *args]
+    _assert_exec_payloads_fit(argv, env)
     return subprocess.run(
-        ["bash", str(plugin / "scripts" / "save-session.sh"), session_id, *args],
-        capture_output=True, text=True, env=env, timeout=60,
+        argv, capture_output=True, text=True, env=env, timeout=60,
     )
 
 

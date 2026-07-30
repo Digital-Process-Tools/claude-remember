@@ -61,7 +61,17 @@ PRE = "## 09:00 | main\n\n- an entry that was already in memory\n"
 
 # Large enough that the second append is several `write(2)` chunks, so a reader
 # has many observable intermediate sizes and not only the one the process gap
-# between `echo` and `cat` creates. Small enough that the test costs nothing.
+# between `echo` and `cat` creates. This size is load-bearing: shrink it and a
+# fix that merely collapsed the two appends into one `cat` would start passing.
+#
+# It reaches the stub through a FILE, never through the environment. Linux caps
+# each single string in argv/envp at MAX_ARG_STRLEN (32 pages = 128KB) whatever
+# ARG_MAX allows, so passing this as STUB_HAIKU_TEXT killed `bash` with
+# `OSError: [Errno 7] Argument list too long` on all four ubuntu legs while
+# macOS (no per-string cap) and Windows stayed green. That is precisely the
+# limit #107 moved the real summarizer prompt onto stdin to avoid
+# (pipeline/haiku.py:515) — this fixture reproduced, from the other side, the
+# hazard the production path is built around.
 BODY_LINE = "- a line of the entry being written right now\n"
 ENTRY = "## 11:30 | main\n\n" + BODY_LINE * 6000
 
@@ -111,7 +121,9 @@ def _append_env(tmp_path):
     """Harness env that writes one real entry and does not run compression."""
     env, project, plugin, calls, sid = _make_env(tmp_path, exchanges=6, humans=5)
     env["STUB_HAIKU_SKIP"] = "0"
-    env["STUB_HAIKU_TEXT"] = ENTRY
+    entry_file = tmp_path / "entry.md"
+    entry_file.write_text(ENTRY, encoding="utf-8")
+    env["STUB_HAIKU_TEXT_FILE"] = str(entry_file)
     memory_file = project / ".remember" / "now.md"
     memory_file.write_text(PRE, encoding="utf-8")
     # NDC would replace now.md in a disowned subshell moments after the append,
