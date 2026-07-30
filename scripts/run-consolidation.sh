@@ -73,6 +73,14 @@ dispatch "before_consolidate"
 CONSOLIDATE_MAX_BYTES=$(config ".thresholds.consolidate_max_bytes" 600000)
 log "consolidation" "start"
 RESULT=$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell consolidate "$STAGING_DIR" "$RECENT_FILE" "$ARCHIVE_FILE" "$CONSOLIDATE_MAX_BYTES" 2>&1) || {
+    # 3 is the spawn guard declining, not a broken pipeline (#204). Staging is
+    # untouched in both cases and the next run picks it up, but "declined" and
+    # "failed" send an operator looking in different places.
+    CONSOLIDATE_EXIT=$?
+    if [ "$CONSOLIDATE_EXIT" -eq 3 ]; then
+        log "consolidation" "DECLINED: $RESULT"
+        exit 0
+    fi
     log "consolidation" "ERROR: pipeline failed — $RESULT"
     exit 1
 }

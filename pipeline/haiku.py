@@ -35,6 +35,7 @@ import subprocess
 import sys
 import tempfile
 
+from . import spawn_guard
 from .types import HaikuResult, TokenUsage
 
 # Haiku pricing (USD per token)
@@ -133,6 +134,15 @@ def _child_env() -> dict[str, str]:
     meant to no-op here; they were reading a signal this function had deleted.
     A marker we set ourselves cannot be deleted by us and cannot false-positive
     on an unrelated session, which ``CLAUDE_CODE_ENTRYPOINT=sdk-cli`` would.
+
+    ``CLAUDE_PROJECT_DIR`` goes too. It does not carry the ``CLAUDE_CODE_``
+    prefix, so it was never covered by the rule above — while #204's report, and
+    ``resolve-paths.sh``'s own comments, both describe the child as having none.
+    Claude Code 2.1.219 overwrites it from the sandbox cwd, so the leak is inert
+    there and is not the mechanism behind any report; a CLI that honoured the
+    inherited value would aim the summarizer's hooks at the REAL project, which
+    is the failure @ehutchinsonSFDC saw. Cheap to close, and it makes the code
+    say what the comments already claim.
     """
     env = {
         k: v
@@ -141,6 +151,7 @@ def _child_env() -> dict[str, str]:
         or (
             k != "CLAUDECODE"
             and k != "CLAUDE_JOB_DIR"
+            and k != "CLAUDE_PROJECT_DIR"
             and not k.startswith("CLAUDE_CODE_")
         )
     }
@@ -505,6 +516,26 @@ def call_haiku(
     env = _child_env()
     env = _inject_configured_oauth_token(env)
 
+    # Bound the spawn before spawning (#204). Every defence above this line
+    # depends on a signal reaching the child — an env marker a host can redact,
+    # a CLI flag a CLI can reject — and when both failed, nothing limited how
+    # many summarizers came into being. This does, from the parent side, through
+    # the filesystem. Declining RAISES rather than returning a lesser result: a
+    # cap that fires is a state the operator has to be able to see.
+    try:
+        slot = spawn_guard.claim(timeout=timeout)
+    except spawn_guard.SummarizerSpawnDeclined as declined:
+        _warn(f"WARNING: {declined}")
+        raise
+    if slot.degraded:
+        _warn(
+            "WARNING: the summarizer spawn guard could not use "
+            f"{spawn_guard.record_dir()} ({slot.degraded}); this spawn is "
+            "UNBOUNDED. Saves keep working — an unusable runtime directory must "
+            "not become a permanent save outage (#204) — but nothing is "
+            "counting summarizers until it is writable again."
+        )
+
     def _run(isolate_hooks: bool):
         try:
             return subprocess.run(
@@ -527,25 +558,32 @@ def call_haiku(
             _log_failed_spend(f"timed out after {timeout}s", timed_out.stdout)
             raise RuntimeError(f"claude timed out after {timeout}s")
 
-    result = _run(isolate_hooks=True)
+    # One claimed slot covers the retry below as well: it is the same logical
+    # summarizer, and the first attempt died resolving arguments or credentials
+    # without reaching the API.
+    try:
+        result = _run(isolate_hooks=True)
 
-    if result.returncode != 0 and _isolation_may_be_the_cause(
-        result.stdout, result.stderr
-    ):
-        # Nothing was billed — the call died resolving arguments or
-        # credentials — so this retry is free. Say so where an operator will
-        # read it: the nested call is now running with the user's hooks live,
-        # which is the exact condition #202 is about, and the only thing still
-        # standing between a blocked prompt and the memory record is the echo
-        # guard in consolidate.py.
-        _warn(
-            f"WARNING: this CLI rejected {_HOOK_ISOLATION_FLAG} "
-            f"({_failure_detail(result.stdout, result.stderr)}); retrying "
-            "WITHOUT hook isolation so saves keep working. The nested call "
-            "will run with your hooks registered — a hook that blocks it "
-            "returns its block message as if it were the model's reply (#202)."
-        )
-        result = _run(isolate_hooks=False)
+        if result.returncode != 0 and _isolation_may_be_the_cause(
+            result.stdout, result.stderr
+        ):
+            # Nothing was billed — the call died resolving arguments or
+            # credentials — so this retry is free. Say so where an operator will
+            # read it: the nested call is now running with the user's hooks live,
+            # which is the exact condition #202 is about, and the only thing
+            # still standing between a blocked prompt and the memory record is
+            # the echo guard in consolidate.py.
+            _warn(
+                f"WARNING: this CLI rejected {_HOOK_ISOLATION_FLAG} "
+                f"({_failure_detail(result.stdout, result.stderr)}); retrying "
+                "WITHOUT hook isolation so saves keep working. The nested call "
+                "will run with your hooks registered — a hook that blocks it "
+                "returns its block message as if it were the model's reply "
+                "(#202)."
+            )
+            result = _run(isolate_hooks=False)
+    finally:
+        slot.release()
 
     if result.returncode != 0:
         _log_failed_spend(f"exited {result.returncode}", result.stdout)

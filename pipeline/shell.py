@@ -223,13 +223,23 @@ def cmd_call_haiku(prompt_file: str, output_file: str = "", timeout: int = 120) 
     prompt file (OSError) or a claude error (RuntimeError) — prints the error
     to stderr and exits 1 so the caller aborts; never leaks a traceback to
     stdout, which the bash caller captures as the shell-var payload.
+
+    A spawn the guard DECLINED (#204) is not a failure and exits
+    ``EXIT_SPAWN_DECLINED`` instead. The difference is load-bearing:
+    ``save-session.sh`` counts failures against a span and, past
+    ``thresholds.max_summary_failures``, advances the read cursor past it — so
+    reporting a working cap as a failure would lose the span it protected.
     """
     from .haiku import call_haiku
+    from .spawn_guard import EXIT_SPAWN_DECLINED, SummarizerSpawnDeclined
 
     try:
         with open(prompt_file, encoding="utf-8", errors="replace") as f:
             prompt = f.read()
         r = call_haiku(prompt, timeout=timeout)
+    except SummarizerSpawnDeclined as e:
+        print(f"call-haiku declined: {e}", file=sys.stderr)
+        sys.exit(EXIT_SPAWN_DECLINED)
     except (OSError, RuntimeError) as e:
         print(f"call-haiku error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -351,6 +361,7 @@ def cmd_consolidate(staging_dir: str, recent_file: str, archive_file: str,
 
     from ._tz import today_str
     from .consolidate import consolidate, ConsolidationSkipped, ConsolidationTooLarge
+    from .spawn_guard import EXIT_SPAWN_DECLINED, SummarizerSpawnDeclined
 
     today = today_str()
 
@@ -420,6 +431,12 @@ def cmd_consolidate(staging_dir: str, recent_file: str, archive_file: str,
         except Exception:
             os.replace(rotated, archive_file)  # retry errored -> undo, re-raise
             raise
+    except SummarizerSpawnDeclined as declined:
+        # The spawn guard refused (#204). Staging is left exactly as it is and
+        # the next run consolidates it — not a skip, which retires staging, and
+        # not a failure either.
+        print(f"consolidate declined: {declined}", file=sys.stderr)
+        sys.exit(EXIT_SPAWN_DECLINED)
     except ConsolidationSkipped:
         # Model declined (SKIP) or returned non-conforming output.
         _emit_skip()

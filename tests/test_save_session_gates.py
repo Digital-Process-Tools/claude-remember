@@ -70,6 +70,11 @@ elif cmd == "build-prompt":
     with open(sys.argv[6], "w") as f:
         f.write("a prompt with no placeholders\\n")
 elif cmd == "call-haiku":
+    if os.environ.get("STUB_HAIKU_DECLINE") == "1":
+        # The spawn guard refusing (#204) — exit 3, not 1. Distinct because the
+        # script must not count it against the span.
+        sys.stderr.write("call-haiku declined: stub: spawn cap reached\\n")
+        sys.exit(3)
     if os.environ.get("STUB_HAIKU_FAIL") == "1":
         sys.stderr.write("stub: simulated haiku failure\\n")
         sys.exit(1)

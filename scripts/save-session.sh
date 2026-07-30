@@ -277,9 +277,24 @@ record_summary_failure() {
     fi
 }
 
+# Exit code the spawn guard uses to say "declined", as opposed to 1 for
+# "failed" (#204). See pipeline/spawn_guard.py — the two must not be conflated,
+# because record_summary_failure counts failures against this span and drops it
+# after thresholds.max_summary_failures. A cap that is working correctly would
+# then destroy the span it protected.
+SPAWN_DECLINED_EXIT=3
+
 # `|| { ... }` (not a bare `if [ $? ]`) so a failure is handled under set -e
 # instead of tripping the ERR trap at the assignment.
 HAIKU_VARS=$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell call-haiku "$TMP_PROMPT" 2>"$HAIKU_STDERR") || {
+    HAIKU_EXIT=$?
+    if [ "$HAIKU_EXIT" -eq "$SPAWN_DECLINED_EXIT" ]; then
+        # Declined, not failed: no failure is recorded and the position stays
+        # put, so this span is summarized by a later run. Logged as its own word
+        # so `grep DECLINED` finds it — a cap that fires has to be visible.
+        log "haiku" "DECLINED: $(head -1 "$HAIKU_STDERR")"
+        exit 0
+    fi
     log "haiku" "ERROR: $(head -1 "$HAIKU_STDERR")"; record_summary_failure; exit 1
 }
 
@@ -471,7 +486,13 @@ if [ "$RUN_NDC" = true ]; then
             NDC_VARS=$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell call-haiku "$NDC_PROMPT" "" 180 2>"$NDC_ERR")
             NDC_EXIT=$?
 
-            if [ "$NDC_EXIT" -ne 0 ]; then
+            if [ "$NDC_EXIT" -eq "$SPAWN_DECLINED_EXIT" ]; then
+                # Same distinction as the save call above (#204). now.md is left
+                # untouched either way; only the word in the log differs, and it
+                # is the word that tells an operator whether to look for a
+                # broken summarizer or a busy machine.
+                log "ndc" "DECLINED: $(head -1 "$NDC_ERR" 2>/dev/null)"
+            elif [ "$NDC_EXIT" -ne 0 ]; then
                 log "ndc" "ERROR: $(head -1 "$NDC_ERR" 2>/dev/null)"
             else
                 # Defensive, and not load-bearing today: Step 6 exits before

@@ -33,6 +33,21 @@ def _isolate_claude_config_dir(monkeypatch):
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_spawn_guard_runtime_dir(monkeypatch, tmp_path):
+    """Give every test its own summarizer spawn records (#204).
+
+    `pipeline/spawn_guard.py` keeps them under HOME on purpose — a child that
+    inherited no plugin environment has to find the same directory — but a test
+    that does not relocate HOME would otherwise count against the developer's
+    real records, and the rate cap would then fail tests depending on the order
+    they ran in. A test that wants the HOME-derived path (the recursion test in
+    test_spawn_containment.py does, because its child is given nothing else)
+    clears this explicitly.
+    """
+    monkeypatch.setenv("REMEMBER_RUNTIME_DIR", str(tmp_path / "remember-run"))
+
+
 # Git repo-selection variables. Any one of these, if exported in the shell
 # that launches pytest, overrides `-C <dir>` and `cwd=<dir>` alike — that is
 # documented git precedence, not a bug — so a test that builds its own repo
