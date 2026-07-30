@@ -357,35 +357,82 @@ if [ "$_LOCK_TIMING" = 1 ]; then
     fi
 fi
 
+# The three conversions are functions of their ARGUMENT, and the reading is
+# taken by the caller. That split is not tidiness — it is the only way these
+# branches can be tested at all.
+#
+# No machine reaches more than one tier: bash 5 always picks `us`, macOS's
+# /bin/bash 3.2 with BSD date always picks `s`, and `ms` is picked by neither of
+# the runners this repo has. So a test must be able to hand a conversion a
+# reading of its choosing. The obvious way — assign EPOCHREALTIME and call the
+# clock — is a trap: on bash >= 5 EPOCHREALTIME is a dynamically generated
+# variable whose value comes from the clock on every reference, so the
+# assignment does not survive and the conversion is handed `now` instead. That
+# is silent, it is green on macOS (where the variable is an ordinary one) and
+# red on Linux, and it tests nothing on the platform that actually has the tier.
+#
+# Taking the reading as an argument makes every tier drivable everywhere, and
+# it is the same code the live caller runs — not a parallel copy.
+#
+# Malformed input yields 0 rather than a shell arithmetic error: a clock that
+# cannot be read must not take locking down with it. 0 propagates into an
+# absurd duration rather than a plausible one, so it is visible in the report
+# instead of passing for data.
+
+# EPOCHREALTIME (bash >= 5), "seconds.microseconds", to epoch milliseconds.
+_lock_timing_us_to_ms() {
+    local _r="$1" _s _f
+    # The separator is locale-dependent — de_DE gives `1753980000,123456`.
+    case "$_r" in
+        *[.,]*) _s="${_r%%[.,]*}"; _f="${_r#*[.,]}" ;;
+        *)      _s="$_r"; _f="000000" ;;
+    esac
+    case "$_s" in
+        ''|*[!0-9]*) _LOCK_TIMING_NOW=0; return 0 ;;
+    esac
+    case "$_f" in
+        *[!0-9]*) _f="000000" ;;
+    esac
+    # Truncation, never rounding: a hold must not come back longer than it was.
+    _f="${_f}000"
+    _LOCK_TIMING_NOW=$(( _s * 1000 + 10#${_f:0:3} ))
+    return 0
+}
+
+# `date +%s%N` (GNU) to epoch milliseconds.
+_lock_timing_ns_to_ms() {
+    case "$1" in
+        ''|*[!0-9]*) _LOCK_TIMING_NOW=0; return 0 ;;
+    esac
+    _LOCK_TIMING_NOW=$(( $1 / 1000000 ))
+    return 0
+}
+
+# `date +%s` to epoch milliseconds.
+_lock_timing_s_to_ms() {
+    case "$1" in
+        ''|*[!0-9]*) _LOCK_TIMING_NOW=0; return 0 ;;
+    esac
+    _LOCK_TIMING_NOW=$(( $1 * 1000 ))
+    return 0
+}
+
 # Assigns $_LOCK_TIMING_NOW, epoch milliseconds. An assigning function, like
 # _lock_self_set and for the same reason: in $( ) the reading would happen in a
 # forked subshell, which is a spawn on the path whose spawns are the point.
 _lock_timing_now() {
-    local _r _s _f _n
+    local _n
     case "$_LOCK_TIMING_PRECISION" in
         us)
-            _r="$EPOCHREALTIME"
-            # The separator is locale-dependent — de_DE gives `1753980000,123456`.
-            case "$_r" in
-                *[.,]*) _s="${_r%%[.,]*}"; _f="${_r#*[.,]}" ;;
-                *)      _s="$_r"; _f="000000" ;;
-            esac
-            _f="${_f}000"
-            _LOCK_TIMING_NOW=$(( _s * 1000 + 10#${_f:0:3} ))
+            _lock_timing_us_to_ms "$EPOCHREALTIME"
             ;;
         ms)
             _n=$(date +%s%N 2>/dev/null) || _n=""
-            case "$_n" in
-                ''|*[!0-9]*) _LOCK_TIMING_NOW=0; return 0 ;;
-            esac
-            _LOCK_TIMING_NOW=$(( _n / 1000000 ))
+            _lock_timing_ns_to_ms "$_n"
             ;;
         *)
             _n=$(date +%s 2>/dev/null) || _n=""
-            case "$_n" in
-                ''|*[!0-9]*) _LOCK_TIMING_NOW=0; return 0 ;;
-            esac
-            _LOCK_TIMING_NOW=$(( _n * 1000 ))
+            _lock_timing_s_to_ms "$_n"
             ;;
     esac
     return 0

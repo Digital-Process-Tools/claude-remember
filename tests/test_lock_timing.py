@@ -382,39 +382,60 @@ def test_the_report_says_skipped_rather_than_reporting_its_own_silence(tmp_path)
     )
 
 
-# The three clock tiers cannot all be reached on one machine — macOS's
-# /bin/bash 3.2 with BSD `date` only ever takes the `s` branch, and a Linux
-# runner with bash 5 only ever takes `us`. So the conversion itself is driven
-# directly, with the reading injected. Without this, two of the three tiers ship
-# untested on whichever runner does not happen to have them.
-CLOCK_PROBE = """#!/usr/bin/env bash
+# No machine reaches more than one clock tier — bash 5 always picks `us`, this
+# repo's macOS runner (/bin/bash 3.2 + BSD date) always picks `s`, and `ms` is
+# picked by neither. So the conversions are driven directly, with the reading
+# passed as an argument.
+#
+# The first version of this injected the reading by assigning EPOCHREALTIME and
+# calling the clock. That is green on macOS and red on every ubuntu leg, and the
+# CI output said why without ambiguity: the three parametrised cases returned
+# three DIFFERENT well-formed epoch-millisecond values, 20-50ms apart and ~20
+# minutes after the literals — a live clock reading, correctly converted, three
+# times. On bash >= 5 EPOCHREALTIME is generated on every reference, so the
+# assignment never reached the code under test; on bash 3.2 it is an ordinary
+# variable and it did. The conversion was never the thing that was wrong.
+#
+# The lesson is the one that matters here: an injection mechanism that silently
+# no-ops leaves a test that passes while asserting nothing, on exactly the
+# platform whose tier it claims to cover. Passing the reading in cannot no-op.
+CONVERT_PROBE = """#!/usr/bin/env bash
 set -u
 REMEMBER_LOCK_TIMING=1
 source "$LIB_LOCK"
-_LOCK_TIMING_PRECISION="$PRECISION"
-EPOCHREALTIME="$FAKE_EPOCHREALTIME"
-_lock_timing_now
+"$FUNC" "$READING"
 printf '%s\\n' "$_LOCK_TIMING_NOW"
 """
 
 
 @pytest.mark.parametrize(
-    "reading,expected",
+    "func,reading,expected",
     [
-        ("1785436469.123456", 1785436469123),
+        ("_lock_timing_us_to_ms", "1785436469.123456", 1785436469123),
         # A comma decimal separator is what LC_NUMERIC=de_DE gives, and epoch
         # milliseconds computed from `1785436469` alone would be off by 0.9s.
-        ("1785436469,987654", 1785436469987),
+        ("_lock_timing_us_to_ms", "1785436469,987654", 1785436469987),
         # Truncation, never rounding: a hold must not be able to come back
         # longer than it was.
-        ("1785436469.000999", 1785436469000),
+        ("_lock_timing_us_to_ms", "1785436469.000999", 1785436469000),
+        ("_lock_timing_us_to_ms", "1785436469", 1785436469000),
+        # A clock that cannot be read must not take locking down with it, and
+        # must not produce a plausible number either.
+        ("_lock_timing_us_to_ms", "not-a-time", 0),
+        # The `ms` tier no runner in this repo's matrix ever executes live.
+        ("_lock_timing_ns_to_ms", "1785436469123456789", 1785436469123),
+        # What BSD `date +%s%N` prints. `_lock_timing_has_ns_date` rejects it
+        # before the tier is chosen, so this pins the second line of defence.
+        ("_lock_timing_ns_to_ms", "1785436469N", 0),
+        ("_lock_timing_s_to_ms", "1785436469", 1785436469000),
+        ("_lock_timing_s_to_ms", "", 0),
     ],
 )
-def test_the_microsecond_clock_converts_a_reading_to_epoch_milliseconds(
-    tmp_path, reading, expected
+def test_each_clock_tier_converts_a_reading_to_epoch_milliseconds(
+    tmp_path, func, reading, expected
 ):
-    script = _write_script(tmp_path / "clock.sh", CLOCK_PROBE)
-    env = _env(tmp_path, None, PRECISION="us", FAKE_EPOCHREALTIME=reading)
+    script = _write_script(tmp_path / "clock.sh", CONVERT_PROBE)
+    env = _env(tmp_path, None, FUNC=func, READING=reading)
     result = _run(script, env)
     assert result.returncode == 0, result.stderr
     assert int(result.stdout.strip()) == expected, result.stdout
