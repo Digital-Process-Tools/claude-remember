@@ -874,8 +874,15 @@ class TestConsolidateSnapshot:
         src.mkdir()
         snap = tmp_path / "snap"
         snap.mkdir()
-        (src / "today-2020-01-01.md").write_text("appended after the snapshot\n")
-        (snap / "today-2020-01-01.md").write_text("what the lock protected\n")
+        # write_bytes, not write_text. On Windows text mode translates "\n" to
+        # "\r\n" on the way to disk, and cmd_consolidate reads raw bytes and
+        # decodes them faithfully — so a string comparison against "...\n"
+        # fails there for a reason that has nothing to do with which file was
+        # read. That is exactly how this test first went red on the Windows
+        # legs while passing on ubuntu and macOS, and the snapshot had won in
+        # every one of those runs.
+        (src / "today-2020-01-01.md").write_bytes(b"appended after the snapshot\n")
+        (snap / "today-2020-01-01.md").write_bytes(b"what the lock protected\n")
 
         seen = {}
 
@@ -888,9 +895,21 @@ class TestConsolidateSnapshot:
                 cmd_consolidate(str(src), str(tmp_path / "recent.md"),
                                 str(tmp_path / "archive.md"), 0, str(snap))
 
-        assert seen == {"today-2020-01-01.md": "what the lock protected\n"}, (
+        # Three assertions rather than one dict comparison, ordered so the
+        # invariant is tested before the content is. A single `==` let a
+        # newline mismatch fail under the wording below, which reports the one
+        # thing that had not happened — a false alarm that reads as a real
+        # concurrency defect is worse than no test here at all.
+        assert list(seen) == ["today-2020-01-01.md"], (
+            f"the snapshot was not read as exactly one staging file: {list(seen)}"
+        )
+        assert "appended after the snapshot" not in seen["today-2020-01-01.md"], (
             "cmd_consolidate re-read the live staging file instead of the "
             "snapshot, so the whole critical section bought nothing (#235)"
+        )
+        assert "what the lock protected" in seen["today-2020-01-01.md"], (
+            "the snapshot's content did not arrive intact: "
+            f"{seen['today-2020-01-01.md']!r}"
         )
 
 
