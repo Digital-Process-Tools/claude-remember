@@ -383,14 +383,36 @@ machine here).
 
 `tests/test_pep604_floor_guard.py` catches that statically, on any interpreter,
 in about a second. It flags PEP 604 unions (`str | None`) everywhere Python
-evaluates them: parameter, return, and module- or class-level variable
-annotations in files without `from __future__ import annotations`, plus
-`isinstance()` / `issubclass()` arguments — which the future import does *not*
-rescue, since those are ordinary runtime expressions. It runs in the normal
-suite; no 3.9 interpreter needs to be installed.
+evaluates them:
+
+- parameter, return, and module- or class-level variable annotations, in files
+  without `from __future__ import annotations`;
+- `isinstance()` / `issubclass()` arguments — which the future import does
+  *not* rescue, since those are ordinary runtime expressions;
+- the type arguments of `cast()`, `NewType()` and `TypeVar()` (constraints and
+  `bound=`), which are type positions by those callables' own contract;
+- **bare assignments** at module or class level — `Handler = str | None` — but
+  only when the discriminator below can tell them from bitwise arithmetic.
+
+It runs in the normal suite; no 3.9 interpreter needs to be installed.
 
 If it fails, the fix is `Optional[str]` from `typing`, or adding
 `from __future__ import annotations` when the union is only in annotations.
+
+**What it does not catch, and why.** `Handler = str | None` and
+`MASK = READ | WRITE` are the same AST node, and nothing separates them
+without type information. The guard flags an assignment only when some operand
+*cannot* be bitwise-or'd on any Python — `None`, a builtin type name, a name
+imported from `typing`, or a subscript of one. That is decided by the
+language, not guessed, so it does not produce false positives on real bitwise
+code. The price is the other direction: an alias over names it cannot resolve,
+such as `Ids = A | B`, is **not** flagged and will still break a 3.9 leg. That
+trade is deliberate — a guard people learn to ignore is worse than no guard.
+
+Those cases are not silent. They come back as `GuardReport.undecided` and are
+counted in the report's reason: seen, not classified, and not reported as
+clean. Function-local assignments and the bodies of `if TYPE_CHECKING:` are out
+of scope, because neither is evaluated when the module is imported.
 
 ## Architecture
 

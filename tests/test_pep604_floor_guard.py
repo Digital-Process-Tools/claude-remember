@@ -31,6 +31,7 @@ from tests.pep604_floor import (
     declared_floor,
     repo_python_files,
     run_guard,
+    scan_module,
     scan_source,
 )
 
@@ -298,3 +299,224 @@ def test_a_clean_repo_reports_ok(tmp_path: Path) -> None:
     assert report.status == STATUS_OK
     assert report.files_scanned == 1
     assert report.violations == ()
+    assert report.undecided == ()
+
+
+# ── Bare assignments: the type-operand discriminator (#239) ───────────────
+#
+# `Handler = str | None` is an `ast.Assign`, not an `ast.AnnAssign`, and is
+# evaluated at import exactly like the annotation cases. The discriminator is
+# not a naming convention or a guess: `x | None` and `int | str` have no valid
+# bitwise meaning on *any* Python, so a `|` chain with a definitely-a-type
+# operand is a union attempt by the language's own rules.
+
+
+def _violations(tmp_path: Path, name: str, body: str) -> list:
+    path = _write(tmp_path, name, body)
+    return scan_source(path.read_text(encoding="utf-8"), path)
+
+
+def _undecided(tmp_path: Path, name: str, body: str) -> list:
+    path = _write(tmp_path, name, body)
+    return scan_module(path.read_text(encoding="utf-8"), path).undecided
+
+
+def test_a_bare_module_level_type_alias_is_flagged(tmp_path: Path) -> None:
+    """#239's headline case. Evaluated at import; TypeError on 3.9."""
+    found = _violations(tmp_path, "alias.py", "Handler = str | None\n")
+    assert [v.lineno for v in found] == [1], [(v.lineno, v.reason) for v in found]
+    assert "assignment" in found[0].reason
+
+
+def test_an_alias_of_two_builtin_types_is_flagged_without_a_none(tmp_path: Path) -> None:
+    """`int | str` is never bitwise — classes have no `__or__` before 3.10."""
+    assert len(_violations(tmp_path, "b.py", "Ids = int | str\n")) == 1
+
+
+def test_a_class_level_alias_is_flagged(tmp_path: Path) -> None:
+    """A class body is executed at import, same as module level."""
+    found = _violations(tmp_path, "c2.py", "class C:\n    Alias = str | None\n")
+    assert [v.lineno for v in found] == [2]
+
+
+def test_an_alias_over_typing_names_is_flagged(tmp_path: Path) -> None:
+    body = "from typing import Dict\n\n\nRows = Dict[str, int] | None\n"
+    assert [v.lineno for v in _violations(tmp_path, "t.py", body)] == [4]
+
+
+def test_the_future_import_does_not_rescue_a_bare_alias(tmp_path: Path) -> None:
+    """An assignment is an ordinary runtime expression, not an annotation."""
+    body = "from __future__ import annotations\n\nHandler = str | None\n"
+    assert [v.lineno for v in _violations(tmp_path, "f.py", body)] == [3]
+
+
+def test_a_typevar_bound_is_flagged(tmp_path: Path) -> None:
+    body = "from typing import TypeVar\n\n\nT = TypeVar('T', bound=int | None)\n"
+    found = _violations(tmp_path, "tv.py", body)
+    assert [v.lineno for v in found] == [4], [(v.lineno, v.reason) for v in found]
+    assert "TypeVar" in found[0].reason
+
+
+def test_typevar_constraints_are_flagged(tmp_path: Path) -> None:
+    body = "from typing import TypeVar\n\n\nT = TypeVar('T', int | None, str)\n"
+    assert [v.lineno for v in _violations(tmp_path, "tv2.py", body)] == [4]
+
+
+def test_a_cast_type_argument_is_flagged_even_inside_a_function(tmp_path: Path) -> None:
+    """`cast`'s first argument is a type position by contract, and is
+    evaluated whenever the line runs — the `isinstance` case's shape."""
+    body = (
+        "from __future__ import annotations\n"
+        "from typing import cast\n"
+        "\n"
+        "\n"
+        "def f(v):\n"
+        "    return cast(int | None, v)\n"
+    )
+    found = _violations(tmp_path, "cs.py", body)
+    assert [v.lineno for v in found] == [6], [(v.lineno, v.reason) for v in found]
+    assert "cast" in found[0].reason
+
+
+def test_a_newtype_supertype_is_flagged(tmp_path: Path) -> None:
+    body = "from typing import NewType\n\n\nId = NewType('Id', int | None)\n"
+    assert [v.lineno for v in _violations(tmp_path, "nt.py", body)] == [4]
+
+
+# ── The false-positive floor: what must stay silent ───────────────────────
+#
+# These are load-bearing. A guard that flags `MASK = READ | WRITE` is a guard
+# people learn to ignore, which is worse than no guard (`claude-supertool`
+# #577). Each of these would fail if the discriminator flagged every `BitOr`.
+
+
+def test_a_flags_constant_over_unknown_names_is_not_flagged(tmp_path: Path) -> None:
+    assert _violations(tmp_path, "fl.py", "MASK = READ | WRITE\n") == []
+
+
+def test_integer_literals_are_not_flagged(tmp_path: Path) -> None:
+    assert _violations(tmp_path, "i.py", "MASK = 1 | 2\nPERMS = 0o644 | 0o111\n") == []
+
+
+def test_module_level_bitwise_over_attributes_is_not_flagged(tmp_path: Path) -> None:
+    assert _violations(tmp_path, "rf.py", "import re\n\n\nFLAGS = re.I | re.M\n") == []
+
+
+def test_a_function_local_alias_is_out_of_scope(tmp_path: Path) -> None:
+    """Evaluated at call, not at import, so it cannot take out collection.
+    A documented limitation, not an oversight — see the module docstring."""
+    assert _violations(tmp_path, "lo.py", "def f():\n    H = str | None\n    return H\n") == []
+
+
+def test_a_type_checking_block_is_never_executed(tmp_path: Path) -> None:
+    """`TYPE_CHECKING` is False at runtime, so nothing in the body evaluates.
+    Flagging it would be a false positive the old walk would also have made."""
+    body = (
+        "from typing import TYPE_CHECKING\n"
+        "\n"
+        "if TYPE_CHECKING:\n"
+        "    Handler = str | None\n"
+        "    DEFAULT: str | None = None\n"
+    )
+    assert _violations(tmp_path, "tc.py", body) == []
+
+
+def test_the_else_branch_of_a_type_checking_block_is_still_scanned(tmp_path: Path) -> None:
+    body = (
+        "from typing import TYPE_CHECKING\n"
+        "\n"
+        "if TYPE_CHECKING:\n"
+        "    Handler = str\n"
+        "else:\n"
+        "    Handler = str | None\n"
+    )
+    assert [v.lineno for v in _violations(tmp_path, "tc2.py", body)] == [6]
+
+
+def test_a_shadowed_builtin_is_not_treated_as_a_type(tmp_path: Path) -> None:
+    """`str = SomeFlag` at module level means `str | other` is not a union."""
+    shadowed = "str = SomeFlag\nMASK = str | other\n"
+    assert _violations(tmp_path, "sh.py", shadowed) == []
+    assert len(_violations(tmp_path, "nsh.py", "MASK = str | other\n")) == 1
+
+
+# ── The third state: what the discriminator could not decide ──────────────
+
+
+def test_an_ambiguous_assignment_is_recorded_as_undecided(tmp_path: Path) -> None:
+    """Not a violation — but not silence either. The discriminator saying
+    nothing about something it saw is this repo's recurring defect."""
+    undecided = _undecided(tmp_path, "u.py", "MASK = READ | WRITE\n")
+    assert [u.lineno for u in undecided] == [1], [(u.lineno, u.reason) for u in undecided]
+    assert "ambiguous" in undecided[0].reason
+
+
+def test_a_definitely_bitwise_expression_is_not_even_undecided(tmp_path: Path) -> None:
+    """An integer operand settles it; nothing to report in either channel."""
+    assert _undecided(tmp_path, "u2.py", "MASK = 1 | 2\n") == []
+
+
+def test_a_real_violation_is_not_also_reported_as_undecided() -> None:
+    result = scan_module("Handler = str | None\n", Path("x.py"))
+    assert len(result.violations) == 1
+    assert result.undecided == []
+
+
+def test_a_typevar_is_reported_once_not_twice(tmp_path: Path) -> None:
+    """The union sits in both an assignment value and a type argument. One
+    construct, one line, one report."""
+    body = "from typing import TypeVar\n\n\nT = TypeVar('T', bound=int | None)\n"
+    found = _violations(tmp_path, "once.py", body)
+    assert len(found) == 1, [(v.lineno, v.reason) for v in found]
+
+
+def test_an_annotated_aliases_value_is_flagged_despite_the_future_import(tmp_path: Path) -> None:
+    """`X: TypeAlias = str | None` — the annotation is rescued by the future
+    import, the assigned value is not, because it is not an annotation."""
+    body = (
+        "from __future__ import annotations\n"
+        "from typing import TypeAlias\n"
+        "\n"
+        "Handler: TypeAlias = str | None\n"
+    )
+    assert [v.lineno for v in _violations(tmp_path, "ta.py", body)] == [4]
+
+
+def test_the_undecided_count_is_visible_in_an_ok_report(tmp_path: Path) -> None:
+    """A clean `ok` that quietly swallowed an unclassifiable construct would be
+    the guard's own uniform on the defect it exists to catch."""
+    root = _stage_repo(tmp_path)
+    wf = root / ".github" / "workflows"
+    wf.mkdir(parents=True)
+    (wf / "tests.yml").write_text('        python-version: ["3.9", "3.12"]\n', encoding="utf-8")
+    (root / "pipeline" / "real.py").write_text("MASK = READ | WRITE\n", encoding="utf-8")
+
+    report = run_guard(root)
+    assert report.status == STATUS_OK
+    assert [u.lineno for u in report.undecided] == [1]
+    assert "not classifiable" in report.reason
+
+
+def test_a_repo_with_a_bare_alias_reports_violations(tmp_path: Path) -> None:
+    """The teeth check: plant a real one, watch the guard name the line."""
+    root = _stage_repo(tmp_path)
+    wf = root / ".github" / "workflows"
+    wf.mkdir(parents=True)
+    (wf / "tests.yml").write_text('        python-version: ["3.9", "3.12"]\n', encoding="utf-8")
+    (root / "pipeline" / "real.py").write_text("Handler = str | None\n", encoding="utf-8")
+
+    report = run_guard(root)
+    assert report.status == STATUS_VIOLATIONS
+    assert [(v.path.name, v.lineno) for v in report.violations] == [("real.py", 1)]
+
+
+def test_the_repo_has_nothing_the_discriminator_could_not_decide() -> None:
+    """Currently zero, verified by an independent walk. If this ever fails, the
+    guard is not wrong — someone wrote a module-level `|` it cannot classify,
+    and that construct needs a human's eye once."""
+    report = run_guard(_ROOT)
+    if report.status == STATUS_SKIPPED:
+        pytest.skip(report.reason)
+    assert report.undecided == (), [
+        f"  {u.path.relative_to(_ROOT)}:{u.lineno}  {u.snippet}" for u in report.undecided
+    ]
