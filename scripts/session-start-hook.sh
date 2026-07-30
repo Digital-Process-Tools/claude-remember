@@ -66,6 +66,13 @@ fi
 TODAY=$(_remember_date '+%Y-%m-%d')
 log "hook" "session-start: PROJECT_DIR=$PROJECT_DIR PIPELINE_DIR=$PIPELINE_DIR REMEMBER_DIR=$REMEMBER_DIR"
 
+# Publish what the chain above just resolved, so user-prompt-hook.sh does not
+# repeat it on every prompt (#227). Republishing unconditionally here is what
+# bounds the staleness of anything the cache cannot detect — a project that
+# became a linked git worktree, say — to a single session.
+source "$PLUGIN_ROOT/scripts/lib-env-cache.sh"
+_remember_env_cache_publish
+
 # ── Dispatch: before_session_start ────────────────────────────────────────
 dispatch "before_session_start"
 

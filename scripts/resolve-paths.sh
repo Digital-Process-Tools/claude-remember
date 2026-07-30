@@ -86,7 +86,8 @@ umask 077
 #   1. CLAUDE_PLUGIN_ROOT (set by Claude Code for marketplace installs)
 #   2. Walk up from this script's real location to find the plugin root
 #      (works for local installs where scripts/ is inside the plugin dir)
-_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_SCRIPT_DIR="${BASH_SOURCE[0]%/*}"
+[ "$_SCRIPT_DIR" = "${BASH_SOURCE[0]}" ] && _SCRIPT_DIR="."
 _PLUGIN_ROOT_CANDIDATE="$(cd "$_SCRIPT_DIR/.." && pwd)"
 
 # _resolve_paths_fail <message> [log_dir]

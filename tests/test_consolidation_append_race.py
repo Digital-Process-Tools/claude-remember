@@ -92,7 +92,7 @@ def _make_env(tmp_path: Path):
     (plugin / "pipeline" / "shell.py").write_text(STUB_SHELL)
     for script in ("run-consolidation.sh", "resolve-paths.sh", "detect-tools.sh",
                    "bootstrap-dirs.sh", "log.sh", "lib-memory-dir.sh",
-                   "lib-lock.sh", "lib-slug.sh"):
+                   "lib-lock.sh", "lib-slug.sh", "lib-clock.sh"):
         (plugin / "scripts" / script).write_text((REPO_ROOT / "scripts" / script).read_text())
     (plugin / "config.json").write_text('{"cooldowns": {}, "thresholds": {}}')
 

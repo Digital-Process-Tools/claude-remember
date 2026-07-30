@@ -2463,11 +2463,19 @@ class TestMarketplacePathResolution:
                         )
 
     def test_no_redundant_timezone_reread(self):
-        """Only log.sh should set REMEMBER_TZ. Other scripts inherit it."""
+        """Only log.sh should DERIVE REMEMBER_TZ. Other scripts inherit it.
+
+        lib-env-cache.sh is exempt and only it: it never reads config.json, it
+        replays the value log.sh already derived, which is the one thing that
+        makes the fast path in #227 not a second implementation of the config
+        layering. Its other match on this pattern is a `case` label, not an
+        assignment — this lint cannot tell them apart.
+        """
         scripts_dir = os.path.join(os.path.dirname(__file__), "..", "scripts")
+        exempt = ("log.sh", "lib-env-cache.sh")
         violators = []
         for fname in os.listdir(scripts_dir):
-            if not fname.endswith(".sh") or fname == "log.sh":
+            if not fname.endswith(".sh") or fname in exempt:
                 continue
             path = os.path.join(scripts_dir, fname)
             with open(path) as f:

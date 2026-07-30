@@ -16,8 +16,10 @@
 #   CLAUDE_PROJECT_DIR   Project root (default: .)
 #
 # DEPENDENCIES
-#   jq (for config.json reading via log.sh)
-#   log.sh (for timezone, dispatch via hooks.d/)
+#   lib-clock.sh    (the timestamp, without a process where bash can do it)
+#   lib-env-cache.sh (replays an already-resolved REMEMBER_DIR / REMEMBER_TZ)
+#   jq (for config.json reading via log.sh — first run in a project only)
+#   log.sh (for timezone, dispatch via hooks.d/ — first run in a project only)
 #
 # EXIT CODES
 #   0   Always (hook must not block the agent)
@@ -25,15 +27,64 @@
 # OUTPUT
 #   Prints "[HH:MM TZ — username]" to stdout.
 #
+# COST (#227)
+#   This runs on every prompt the user submits and the user waits for it. It
+#   used to source resolve-paths.sh → bootstrap-dirs.sh → log.sh to print one
+#   line: 19 processes on macOS, 27 on the Windows-ARM64-under-QEMU box
+#   @MargeryOlethea measured, where per-spawn costs of 150-800ms turned it into
+#   a p50 of 8718ms — blocking, on every prompt, with 6 outright timeouts in 256
+#   runs. It now takes the chain only when it has no already-resolved answer to
+#   replay, which is once per project per config change.
+#
+#   That matters more here than the numbers suggest: on UserPromptSubmit a
+#   non-zero exit does not merely error, it BLOCKS THE PROMPT AND ERASES WHAT
+#   THE USER TYPED. Every process this does not start is an opportunity to fail
+#   that it does not take.
+#
 # ============================================================================
 
+_HOOK_DIR="${BASH_SOURCE[0]%/*}"
+[ "$_HOOK_DIR" = "${BASH_SOURCE[0]}" ] && _HOOK_DIR="."
+
+# --- Nested summarizer: there is no project here (#204) ---
+# Normally this guard lives in resolve-paths.sh, which the fast path below does
+# not reach. It has to hold for every hook this plugin registers — the whole
+# point of #204 was that any one of them alone scaffolds a memory directory
+# under the summarizer's temp dir and injects into its context.
+[ -n "${REMEMBER_NESTED_SUMMARIZER:-}" ] && exit 0
+
+source "$_HOOK_DIR/lib-clock.sh"
+source "$_HOOK_DIR/lib-env-cache.sh"
+
 # --- Resolve paths ---
-# Opt into resolve-paths.sh's soft-failure mode — see the comment in
-# session-start-hook.sh. This hook must never block the agent, so a resolution
-# failure is a silent no-op, not a crash.
-REMEMBER_PATHS_SOFT_FAIL=1 source "$(dirname "$0")/resolve-paths.sh" || exit 0
-source "$(dirname "$0")/bootstrap-dirs.sh"
-source "$(dirname "$0")/log.sh" 2>/dev/null
+# Two facts are needed below: REMEMBER_DIR (for the capture-gap notice) and
+# REMEMBER_TZ (for the timestamp). If a previous hook in this project already
+# derived them from the same config files, replay that instead of re-deriving
+# it; lib-env-cache.sh validates and declines, it never computes.
+#
+# hooks.d/after_user_prompt/ is checked here because a listener there is the one
+# thing on this path that needs log.sh's dispatch(). The distribution ships no
+# such directory, so `dispatch` was already a no-op for everyone — but a user
+# who creates one gets the documented behaviour, at the old price.
+_REMEMBER_FAST=0
+if _remember_env_cache_load && [ ! -d "$PIPELINE_DIR/hooks.d/after_user_prompt" ]; then
+    _REMEMBER_FAST=1
+    # Both normally come from the chain: umask from resolve-paths.sh (#68),
+    # SYS_TMPDIR from bootstrap-dirs.sh. Same values, no processes.
+    umask 077
+    SYS_TMPDIR="${TMPDIR:-/tmp}"
+    dispatch() { :; }
+fi
+
+if [ "$_REMEMBER_FAST" = "0" ]; then
+    # Opt into resolve-paths.sh's soft-failure mode — see the comment in
+    # session-start-hook.sh. This hook must never block the agent, so a
+    # resolution failure is a silent no-op, not a crash.
+    REMEMBER_PATHS_SOFT_FAIL=1 source "$_HOOK_DIR/resolve-paths.sh" || exit 0
+    source "$_HOOK_DIR/bootstrap-dirs.sh"
+    source "$_HOOK_DIR/log.sh" 2>/dev/null
+    _remember_env_cache_publish
+fi
 
 # --- Capture-gap notice (#200) ────────────────────────────────────────────
 # session-start-hook.sh leaves this when the PREVIOUS session ran SessionStart
@@ -58,16 +109,29 @@ CTX=$(
 CTX_PCT=""
 CTX_PCT_FILE="${SYS_TMPDIR:-/tmp}/claude-ctx-pct"
 if [ -f "$CTX_PCT_FILE" ]; then
-  CTX_PCT=$(cat "$CTX_PCT_FILE" 2>/dev/null)
+  # `read`, not `cat`: this file exists on every prompt for anyone running the
+  # status line, so the process was not the rare path it looks like (#227).
+  # Status untested on purpose: `read` returns 1 on a file with no trailing
+  # newline, having set the variable anyway — and a status line writing "45"
+  # without one is the likely case, not the exotic one. CTX_PCT is already ""
+  # if nothing was read.
+  read -r CTX_PCT < "$CTX_PCT_FILE" 2>/dev/null
 fi
+# whoami was a process for a value the shell already has. They differ only where
+# the effective user is not the login user (`su` without `-`), which is not a
+# shape a Claude Code hook runs in — and whoami is still the fallback when the
+# environment carries neither name.
+_REMEMBER_WHO="${USER:-${USERNAME:-}}"
+[ -n "$_REMEMBER_WHO" ] || _REMEMBER_WHO=$(whoami 2>/dev/null)
+_REMEMBER_NOW=$(_remember_date '+%H:%M %Z')
 if [ -n "$CTX_PCT" ]; then
-  TIMESTAMP="[$(_remember_date '+%H:%M %Z') — $(whoami) — ${CTX_PCT}%]"
+  TIMESTAMP="[$_REMEMBER_NOW — $_REMEMBER_WHO — ${CTX_PCT}%]"
   echo "$TIMESTAMP"
   if [ "$CTX_PCT" -ge 95 ] 2>/dev/null; then
     echo "WARNING: Context at ${CTX_PCT}%. Run /remember to save session state before context death."
   fi
 else
-  echo "[$(_remember_date '+%H:%M %Z') — $(whoami)]"
+  echo "[$_REMEMBER_NOW — $_REMEMBER_WHO]"
 fi
 
 # ── Dispatch: after_user_prompt ─────────────────────────────────────────

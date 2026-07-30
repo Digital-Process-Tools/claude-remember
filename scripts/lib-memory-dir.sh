@@ -44,7 +44,12 @@ _LIB_MEMORY_DIR_LOADED=1
 # carrying every bug #156 fixed, and live for user-prompt-hook.sh, which reaches
 # here without sourcing detect-tools.sh (#158). Sourcing detect-tools.sh instead
 # is not an option: it exits 1 when it finds no Python, taking its caller down.
-source "$(dirname "${BASH_SOURCE[0]}")/lib-slug.sh"
+_REMEMBER_SRC_DIR="${BASH_SOURCE[0]%/*}"
+# A path with no slash in it (`source log.sh` from the scripts dir) leaves the
+# filename behind, not a directory — `dirname` answered "." and this must too.
+[ "$_REMEMBER_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_SRC_DIR="."
+source "$_REMEMBER_SRC_DIR/lib-slug.sh"
+unset _REMEMBER_SRC_DIR
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 

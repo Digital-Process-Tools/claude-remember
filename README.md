@@ -106,7 +106,10 @@ In practice, running this all day costs **a few cents per day**. The Anthropic A
 
 - Python 3.9+
 - Claude CLI (`claude`) with Haiku access
-- Bash 4+
+- Bash 3.2+ — stock macOS ships bash **3.2.57** and is a supported target.
+  On bash **4.2+** the per-prompt timestamp costs no subprocess at all
+  (`printf '%(...)T'`); on 3.2 it forks `date` once. Same output either way
+  ([#227](https://github.com/Digital-Process-Tools/claude-remember/issues/227)).
 - `jq` (used by `log.sh` / `session-start-hook.sh` to read `config.json`)
 - Standard coreutils (`date`, `find`, `tar`, `tr`, `wc`) — preinstalled on macOS/Linux
 
@@ -175,7 +178,9 @@ The plugin registers three Claude Code hooks:
 | `UserPromptSubmit` | `user-prompt-hook.sh`   | Injects current timestamp so the agent knows the time     |
 | `PostToolUse`      | `post-tool-hook.sh`     | Auto-saves session when tool call delta exceeds threshold |
 
-Each hook sources `log.sh` for shared config, timezone, logging, and the `dispatch()` system. Hooks dispatch lifecycle events (e.g., `after_user_prompt`) to extensible listeners in `hooks.d/`.
+`SessionStart` and `PostToolUse` source `log.sh` for shared config, timezone, logging, and the `dispatch()` system. Hooks dispatch lifecycle events (e.g., `after_user_prompt`) to extensible listeners in `hooks.d/`.
+
+`UserPromptSubmit` is the exception, and deliberately so: it runs on every prompt **and the user waits for it**, so it needs only the resolved memory directory and timezone. Rather than re-derive those through the full chain (`git rev-parse`, a slug, a three-layer config merge — 19 processes, and 27 on Windows/ARM64 under QEMU, where it cost a p50 of 8.7s per prompt), it replays the resolution a previous hook already published, via `lib-env-cache.sh`. The cache is refused unless it is newer than every `config.json` layer and was written for the same project, plugin root and `HOME`, so editing config still takes effect on the next prompt. It falls back to the full chain whenever it declines — including when you add a `hooks.d/after_user_prompt/` listener, which needs `dispatch()`. Set `REMEMBER_ENV_CACHE=0` to turn it off ([#227](https://github.com/Digital-Process-Tools/claude-remember/issues/227)).
 
 All three are registered together, from `hooks/hooks.json`, when the session starts — which is why enabling the plugin mid-session wires up none of them (see the install note above).
 

@@ -89,7 +89,7 @@ def _make_env(tmp_path: Path, name: str, extract_sleep: float = 0.0):
     (plugin / "pipeline" / "shell.py").write_text(STUB_SHELL)
     for script in ("save-session.sh", "resolve-paths.sh", "detect-tools.sh",
                    "bootstrap-dirs.sh", "log.sh", "lib-memory-dir.sh",
-                   "lib-lock.sh", "lib-slug.sh"):
+                   "lib-lock.sh", "lib-slug.sh", "lib-clock.sh"):
         (plugin / "scripts" / script).write_text((REPO_ROOT / "scripts" / script).read_text())
 
     cfg = {"cooldowns": {"save_seconds": 0, "ndc_seconds": 999999},

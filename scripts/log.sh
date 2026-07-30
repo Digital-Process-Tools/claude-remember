@@ -42,9 +42,12 @@ PIPELINE_DIR="${PIPELINE_DIR:-${PROJECT_DIR:-.}/.claude/remember}"
 
 # Resolve REMEMBER_DIR and the merged REMEMBER_CONFIG (lib-memory-dir.sh is a
 # no-op if already loaded via the _LIB_MEMORY_DIR_LOADED guard).
-_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$_LIB_DIR/lib-memory-dir.sh"
-unset _LIB_DIR
+_REMEMBER_SRC_DIR="${BASH_SOURCE[0]%/*}"
+# A path with no slash in it (`source log.sh` from the scripts dir) leaves the
+# filename behind, not a directory — `dirname` answered "." and this must too.
+[ "$_REMEMBER_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_SRC_DIR="."
+source "$_REMEMBER_SRC_DIR/lib-memory-dir.sh"
+unset _REMEMBER_SRC_DIR
 
 # ── Logging setup ─────────────────────────────────────────────────────────────
 
@@ -162,13 +165,18 @@ export REMEMBER_REJECT_PATTERN
 
 # Resolve "today" / "now" using REMEMBER_TZ when set, else system local.
 # Crucially, an empty REMEMBER_TZ must NOT produce `TZ="" date` — that's UTC.
-_remember_date() {
-    if [ -n "$REMEMBER_TZ" ]; then
-        TZ="$REMEMBER_TZ" date "$@"
-    else
-        date "$@"
-    fi
-}
+#
+# _remember_date lives in lib-clock.sh so that user-prompt-hook.sh — which needs
+# the time and nothing else log.sh provides — can have it without this chain
+# (#227). Sourced AFTER REMEMBER_TZ is read above, and from here rather than the
+# top of the file, so a log.sh that bailed early still leaves _remember_date
+# undefined and session-start-hook.sh's `command -v` guard still fires.
+_REMEMBER_SRC_DIR="${BASH_SOURCE[0]%/*}"
+# A path with no slash in it (`source log.sh` from the scripts dir) leaves the
+# filename behind, not a directory — `dirname` answered "." and this must too.
+[ "$_REMEMBER_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_SRC_DIR="."
+source "$_REMEMBER_SRC_DIR/lib-clock.sh"
+unset _REMEMBER_SRC_DIR
 
 MEMORY_LOG_DATE=$(_remember_date +%Y-%m-%d)
 MEMORY_LOG_FILE="${REMEMBER_LOG_DIR}/memory-${MEMORY_LOG_DATE}.log"
