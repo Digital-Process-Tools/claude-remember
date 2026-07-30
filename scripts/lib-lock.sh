@@ -263,9 +263,248 @@ _lock_try_adopt() {
     return 0
 }
 
+# ---------------------------------------------------------------------------
+# Hold-duration recorder (#226) — OFF unless REMEMBER_LOCK_TIMING=1
+# ---------------------------------------------------------------------------
+#
+# #226 asks whether the NDC commit's 30s save.lock timeout is doing what its
+# reasoning claims, and answers its own question: instrument lock_acquire /
+# lock_release across a normal working day, then set the default from the tail
+# of the distribution rather than from intuition. #234 did exactly that for
+# staging.lock — ~30ms per NDC append, ~200ms for a 3-file retire loop, polled
+# at 1ms — and set 10s from it. save.lock is still unmeasured, and it is the
+# one held across a summarize Haiku call.
+#
+# This records. It decides nothing: no timeout default changes on the strength
+# of a number produced in a sandbox, because a synthetic figure that reads as
+# measured is the defect #226 is about, one layer up.
+#
+# WHY OPT-IN AND NOT ALWAYS-ON
+#   save-session.sh runs on a PostToolUse hook. #227 measured that path at a
+#   p50 of 8.7s on Windows/ARM64, #230 split out the prefix paid per tool call,
+#   and #204 is an external report of the plugin blocking a user's prompts. An
+#   always-on recorder costs one `wc` per record, plus two `date` spawns per
+#   lock use below bash 5 — on every machine, forever, to answer a question
+#   asked once. A measurement that slows the path it measures is self-defeating
+#   and would also bias its own numbers. Off, this is one string comparison:
+#   no file, no spawn, pinned by tests/test_lock_timing.py.
+#
+# RESOLUTION IS DISCLOSED, NOT ASSUMED
+#   There is no portable spawn-free millisecond clock. Three tiers, best first,
+#   probed once: bash >= 5's EPOCHREALTIME (microseconds, no spawn), GNU
+#   `date +%s%N` (milliseconds, one spawn), and plain `date +%s` (whole
+#   seconds, one spawn) — which is what macOS's /bin/bash 3.2 with BSD date
+#   gets. A python3 fallback was rejected: at ~60ms per spawn it costs more
+#   than a staging.lock hold, so it would report millisecond precision while
+#   inventing most of the milliseconds. The tier lands in every row, because a
+#   distribution read at a finer resolution than it was taken at is the same
+#   false confidence this issue was filed about. One second is coarse for
+#   staging.lock and adequate for save.lock, whose holds are the seconds-long
+#   ones #226 is asking about.
+#
+#   The clock is read after acquisition and before release, so the *release*
+#   reading's own cost falls inside the interval. At the `s` tier that is
+#   invisible; at `ms` it is one `date`, around 1-5ms, and holds this close to
+#   the noise floor are not what a 30s timeout is set from.
+#
+# WHERE IT GOES, AND WHAT BOUNDS IT
+#   $REMEMBER_DIR/logs/lock-timing.tsv, or REMEMBER_LOCK_TIMING_FILE. Bounded
+#   at REMEMBER_LOCK_TIMING_MAX lines (default 5000, ~350KB; the header is one
+#   of them) — this repo has just spent a day on unbounded things. At the cap
+#   recording STOPS and appends a `# CAPPED` line rather than rolling: a rolled
+#   file silently drops the oldest records, and with them the shape of the tail
+#   a timeout would be set from. A `.capped` sibling marker makes the stop a
+#   builtin test rather than a re-scan on every later record.
+#
+# WHEN IT CANNOT RECORD
+#   It says so once per process — through `log` when the caller sourced log.sh,
+#   otherwise on stderr — and carries on. Locking must not fail because its
+#   instrument did. But it must not fail *silently*: a measurement that did not
+#   happen and one that showed nothing look identical in an empty file.
+#
+_LOCK_TIMING="${REMEMBER_LOCK_TIMING:-0}"
+_LOCK_TIMING_MAX="${REMEMBER_LOCK_TIMING_MAX:-5000}"
+_LOCK_TIMING_PRECISION=""
+_LOCK_TIMING_FILE=""
+_LOCK_TIMING_NOW=0
+_LOCK_TIMING_DISCLOSED=0
+
+# True only for a `date` that really honours %N: BSD date prints a literal `N`
+# and some print `%N`, both rejected by the digits-only test; a `date` that
+# drops the format entirely yields 10 digits, rejected by the length test.
+_lock_timing_has_ns_date() {
+    local _n
+    _n=$(date +%s%N 2>/dev/null) || return 1
+    case "$_n" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "${#_n}" -ge 16 ] || return 1
+    return 0
+}
+
+if [ "$_LOCK_TIMING" = 1 ]; then
+    # The version test as well as the variable: EPOCHREALTIME is a shell
+    # builtin variable on bash >= 5 and an ordinary one everywhere else, so an
+    # exported stale value in a bash 3.2 environment would otherwise pin every
+    # row to one frozen timestamp and report every hold as 0ms — a plausible
+    # number, wrong, and indistinguishable from a very fast machine.
+    if [ "${BASH_VERSINFO[0]:-0}" -ge 5 ] && [ -n "${EPOCHREALTIME:-}" ]; then
+        _LOCK_TIMING_PRECISION="us"
+    elif _lock_timing_has_ns_date; then
+        _LOCK_TIMING_PRECISION="ms"
+    else
+        _LOCK_TIMING_PRECISION="s"
+    fi
+fi
+
+# Assigns $_LOCK_TIMING_NOW, epoch milliseconds. An assigning function, like
+# _lock_self_set and for the same reason: in $( ) the reading would happen in a
+# forked subshell, which is a spawn on the path whose spawns are the point.
+_lock_timing_now() {
+    local _r _s _f _n
+    case "$_LOCK_TIMING_PRECISION" in
+        us)
+            _r="$EPOCHREALTIME"
+            # The separator is locale-dependent — de_DE gives `1753980000,123456`.
+            case "$_r" in
+                *[.,]*) _s="${_r%%[.,]*}"; _f="${_r#*[.,]}" ;;
+                *)      _s="$_r"; _f="000000" ;;
+            esac
+            _f="${_f}000"
+            _LOCK_TIMING_NOW=$(( _s * 1000 + 10#${_f:0:3} ))
+            ;;
+        ms)
+            _n=$(date +%s%N 2>/dev/null) || _n=""
+            case "$_n" in
+                ''|*[!0-9]*) _LOCK_TIMING_NOW=0; return 0 ;;
+            esac
+            _LOCK_TIMING_NOW=$(( _n / 1000000 ))
+            ;;
+        *)
+            _n=$(date +%s 2>/dev/null) || _n=""
+            case "$_n" in
+                ''|*[!0-9]*) _LOCK_TIMING_NOW=0; return 0 ;;
+            esac
+            _LOCK_TIMING_NOW=$(( _n * 1000 ))
+            ;;
+    esac
+    return 0
+}
+
+# Resolves $_LOCK_TIMING_FILE with parameter expansion only — no subshell.
+_lock_timing_target() {
+    if [ -n "${REMEMBER_LOCK_TIMING_FILE:-}" ]; then
+        _LOCK_TIMING_FILE="$REMEMBER_LOCK_TIMING_FILE"
+    elif [ -n "${REMEMBER_DIR:-}" ]; then
+        _LOCK_TIMING_FILE="${REMEMBER_DIR}/logs/lock-timing.tsv"
+    else
+        _LOCK_TIMING_FILE=""
+    fi
+}
+
+_lock_timing_disclose() {
+    # `if`, not `[ ... ] && return`: an AND-list that evaluates false is the
+    # statement's exit status, and every caller here runs under `set -e`.
+    if [ "$_LOCK_TIMING_DISCLOSED" = 1 ]; then
+        return 0
+    fi
+    _LOCK_TIMING_DISCLOSED=1
+    if command -v log >/dev/null 2>&1; then
+        log "lock-timing" "$1"
+    else
+        printf 'remember lock-timing: %s\n' "$1" >&2
+    fi
+    return 0
+}
+
+# bash 3.2 has no associative arrays, so the per-lock start time lives in a
+# variable named after the sanitized path. Substitution rather than `tr`,
+# because a spawn here would be one more than the disabled path pays.
+_lock_timing_key() {
+    _LOCK_TIMING_KEY="${1//[!A-Za-z0-9]/_}"
+}
+
+# _lock_timing_record <lock_dir> <event> <outcome> <wait_ms> <held_ms|->
+_lock_timing_record() {
+    local _name="${1##*/}" _dir _n
+    _lock_timing_target
+    if [ -z "$_LOCK_TIMING_FILE" ]; then
+        _lock_timing_disclose "REMEMBER_LOCK_TIMING=1 but neither REMEMBER_LOCK_TIMING_FILE nor REMEMBER_DIR is set — nothing is being recorded"
+        return 0
+    fi
+    if [ -e "${_LOCK_TIMING_FILE}.capped" ]; then
+        return 0
+    fi
+
+    _dir="${_LOCK_TIMING_FILE%/*}"
+    [ -d "$_dir" ] || mkdir -p "$_dir" 2>/dev/null || true
+
+    if [ -f "$_LOCK_TIMING_FILE" ]; then
+        _n=$(wc -l < "$_LOCK_TIMING_FILE" 2>/dev/null | tr -d ' ')
+        case "$_n" in
+            ''|*[!0-9]*) _n=0 ;;
+        esac
+        if [ "$_n" -ge "$_LOCK_TIMING_MAX" ]; then
+            { printf '# CAPPED\t%s lines, REMEMBER_LOCK_TIMING_MAX=%s reached — recording STOPPED here. Nothing was rolled or overwritten, so every record above is real; the distribution below this point is simply missing. Raise the cap or move this file to keep measuring.\n' \
+                "$_n" "$_LOCK_TIMING_MAX" >> "$_LOCK_TIMING_FILE"; } 2>/dev/null \
+                || _lock_timing_disclose "could not append the cap notice to $_LOCK_TIMING_FILE"
+            { : > "${_LOCK_TIMING_FILE}.capped"; } 2>/dev/null || true
+            _lock_timing_disclose "$_LOCK_TIMING_FILE reached REMEMBER_LOCK_TIMING_MAX=$_LOCK_TIMING_MAX lines — recording stopped, nothing rolled"
+            return 0
+        fi
+    else
+        # Two processes can both pass this test and both append; a duplicate
+        # comment line is harmless and a truncating `>` would not be.
+        { printf '# ts_ms\tlock\tevent\toutcome\twait_ms\theld_ms\tprecision\tpid\n' >> "$_LOCK_TIMING_FILE"; } 2>/dev/null \
+            || _lock_timing_disclose "could not create $_LOCK_TIMING_FILE"
+    fi
+
+    # Braced so the redirect failure is reported by the shell INSIDE the
+    # suppression — `printf ... >> f 2>/dev/null` opens f before running printf,
+    # so the error escapes that redirect's scope (the #204 lesson).
+    # ${BASHPID:-$$}, not $$: the NDC commit runs in a backgrounded SUBSHELL of
+    # save-session.sh, and $$ is the same value there as in its parent — so the
+    # two sides of the very contention #226 is about would be indistinguishable
+    # in the pid column. Zero spawns, unlike _lock_self_set's bash 3.2 path,
+    # where it degrades to $$ and the column says so by being equal.
+    { printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$_LOCK_TIMING_NOW" "$_name" "$2" "$3" "$4" "$5" \
+        "$_LOCK_TIMING_PRECISION" "${BASHPID:-$$}" >> "$_LOCK_TIMING_FILE"; } 2>/dev/null \
+        || _lock_timing_disclose "could not append to $_LOCK_TIMING_FILE"
+    return 0
+}
+
 # Acquire <lock_dir>, waiting up to [timeout_seconds] (default 0 = try once,
 # but still take over a stale lock). Returns 0 on success, 1 on timeout.
+#
+# A wrapper around the unchanged primitive rather than four hooks at its four
+# return sites: the timing must not become something a future edit to the
+# acquisition logic has to remember to carry.
 lock_acquire() {
+    local _t0 _waited
+    if [ "$_LOCK_TIMING" != 1 ]; then
+        _lock_acquire_impl "$@"
+        return $?
+    fi
+    _lock_timing_now
+    _t0="$_LOCK_TIMING_NOW"
+    if _lock_acquire_impl "$@"; then
+        _lock_timing_now
+        _waited=$(( _LOCK_TIMING_NOW - _t0 ))
+        _lock_timing_key "$1"
+        eval "_LOCK_TIMING_T0_${_LOCK_TIMING_KEY}=\$_LOCK_TIMING_NOW"
+        eval "_LOCK_TIMING_W_${_LOCK_TIMING_KEY}=\$_waited"
+        return 0
+    fi
+    _lock_timing_now
+    # The row #226 exists to ask about. A timeout leaves only a log line today,
+    # so the one event that would prove the default too small is the one absent
+    # from any distribution built from holds alone.
+    _lock_timing_record "$1" acquire timeout "$(( _LOCK_TIMING_NOW - _t0 ))" "-"
+    return 1
+}
+
+_lock_acquire_impl() {
     local _dir="$1" _timeout="${2:-0}" _deadline _legacy
     _deadline=$(( $(date +%s) + _timeout ))
 
@@ -318,6 +557,29 @@ lock_acquire() {
 # the directory — so the pid check is defence against a future caller releasing
 # a lock it never took, not part of the mutual-exclusion argument.
 lock_release() {
+    local _t0 _wait
+    if [ "$_LOCK_TIMING" != 1 ]; then
+        _lock_release_impl "$@"
+        return $?
+    fi
+    _lock_release_impl "$@" || return 1
+    _lock_timing_now
+    _lock_timing_key "$1"
+    eval "_t0=\${_LOCK_TIMING_T0_${_LOCK_TIMING_KEY}:-}"
+    eval "_wait=\${_LOCK_TIMING_W_${_LOCK_TIMING_KEY}:-}"
+    if [ -z "$_t0" ]; then
+        # Released by a process that never acquired here. Structurally this
+        # should not happen, and the honest answer is to say the duration is
+        # unknown rather than to compute one from a start that does not exist.
+        _lock_timing_record "$1" release unpaired "-" "-"
+        return 0
+    fi
+    eval "unset _LOCK_TIMING_T0_${_LOCK_TIMING_KEY} _LOCK_TIMING_W_${_LOCK_TIMING_KEY}"
+    _lock_timing_record "$1" release ok "$_wait" "$(( _LOCK_TIMING_NOW - _t0 ))"
+    return 0
+}
+
+_lock_release_impl() {
     local _dir="$1" _pid
     _pid=$(cat "${_dir}/pid" 2>/dev/null) || true
 
