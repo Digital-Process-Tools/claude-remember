@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] — Nothing was counting
+
 ### Fixed
 
 - **The prompt hook spawned 27 processes to print a timestamp, and the user waited for all of them** ([#227](https://github.com/Digital-Process-Tools/claude-remember/issues/227)) — `scripts/user-prompt-hook.sh` sourced `resolve-paths.sh` → `bootstrap-dirs.sh` → `log.sh` on every prompt submission to emit one line, `[HH:MM TZ — username]`. That chain runs `git rev-parse --path-format=absolute`, a session slug, a three-layer `config.json` merge, `date` twice and `whoami`: **19 external processes on macOS, 27 on Windows 11 ARM64 under QEMU**.
