@@ -432,8 +432,69 @@ fi
 if [ ! -s "$MEMORY_FILE" ]; then
     printf '%s\n' "$TODAY_DATE" > "$NOW_DAY_FILE" 2>/dev/null || true
 fi
-echo "" >> "$MEMORY_FILE" 2>/dev/null || { log "write" "ERROR: cannot write now.md"; exit 1; }
-cat "$HAIKU_TEXT_FILE" >> "$MEMORY_FILE"
+# Built beside now.md and renamed over it, not appended in two operations
+# (#247). The two appends — a separator, then the entry — are both under
+# save.lock, which is correct and which excludes other WRITERS. It excludes no
+# reader, and the reader that matters cannot take it: session-start-hook.sh
+# sources resolve-paths.sh, detect-tools.sh, bootstrap-dirs.sh, log.sh and
+# lib-env-cache.sh, never lib-lock.sh, so lock_acquire is not merely uncalled
+# there — it is undefined in that process. Its memory-injection loop is a bare
+# `cat "$MFILE"`, and between the two appends there is a whole fork+exec of
+# `cat` during which now.md ends in a separator whose entry has not arrived.
+# A session start landing there is handed a truncated final entry and has no
+# way to know it.
+#
+# Not a reader lock. #227 measured that hook path at a p50 of 8.7s, #230 exists
+# to cut its per-tool-call prefix, and #204 is a user reporting this plugin
+# blocking their prompts. Putting session start behind a lock held for the whole
+# of a save — including its summarize Haiku call — is a worse trade than the
+# tear. The writer carries the atomicity; the reader stays lean.
+#
+# Not one `cat` of separator-plus-entry either. That closes the process gap and
+# leaves the chunk boundaries inside a single write loop, which is a smaller
+# window, not no window. A rename has no window at any entry size: the reader
+# opens either the old inode or the new one, and both are whole. That is the
+# pattern already used four times here — lib-env-cache.sh:170-175 ("Rename, so
+# no reader ever parses a partial file"), post-tool-hook.sh:260-262, the NDC
+# commit (#245), the consolidation staging tail (#249). This was the call site
+# that had not adopted it.
+#
+# The cost is a full copy of now.md per save, on a path that has just spent
+# seconds in a model call. now.md is compressed by NDC and is kilobytes; the
+# copy is not measurable against the Haiku call it follows.
+#
+# A crash between mktemp and mv leaves a stray sibling. Inert — .remember's
+# .gitignore is '*', doctor.sh globs `now.md` exactly, and the name deliberately
+# does not end in .md so neither today-*.md nor session-start injection can see
+# it — but it would accumulate forever, so sweep first. Safe: this block is the
+# only thing that creates these, it runs under save.lock, and NDC's sweep uses a
+# different glob (now.md.ndc-*).
+append_failed() {
+    rm -f "$APPEND_TMP" 2>/dev/null
+    log "write" "ERROR: cannot write now.md — $1"
+    exit 1
+}
+rm -f "${MEMORY_FILE}".append-* 2>/dev/null
+APPEND_TMP=$(mktemp "${MEMORY_FILE}.append-XXXXXX") || {
+    log "write" "ERROR: cannot write now.md — no temp could be created beside it"
+    exit 1
+}
+# `2>&1 >file` — stderr to the capture, THEN stdout to the file, in that order.
+# A read error on now.md has to be fatal rather than silent: staging only the
+# new entry would commit a now.md holding nothing but it, which is the whole
+# file lost to fix a torn boundary.
+if [ -f "$MEMORY_FILE" ]; then
+    APPEND_ERR=$(cat "$MEMORY_FILE" 2>&1 > "$APPEND_TMP") \
+        || append_failed "could not copy the existing now.md: ${APPEND_ERR:-unknown error}"
+fi
+APPEND_ERR=$({ printf '\n' && cat "$HAIKU_TEXT_FILE"; } 2>&1 >> "$APPEND_TMP") \
+    || append_failed "could not stage the entry: ${APPEND_ERR:-unknown error}"
+# Checked, and fatal (#243). save-position runs a few lines below and is what
+# tells the next run this span is done; advancing it for an entry that never
+# reached now.md drops the span from every future extract, silently. Exiting
+# here keeps the position, so the span is summarized again next run.
+APPEND_ERR=$(mv "$APPEND_TMP" "$MEMORY_FILE" 2>&1) \
+    || append_failed "commit failed: ${APPEND_ERR:-unknown error}"
 log "write" "appended: $(head -1 "$HAIKU_TEXT_FILE" | cut -c1-80)"
 cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell save-position "$LAST_SAVE_FILE" "$SESSION_ID" "$POSITION"
 log "write" "position → $POSITION"

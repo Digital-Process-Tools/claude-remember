@@ -85,12 +85,26 @@ pytestmark = pytest.mark.skipif(
 #           Same directory => real rename, which cannot fail this way at all.
 #   fail  — fail cleanly without touching the destination (ENOSPC on a full
 #           volume, EPERM, an unlink race). Used for the ordering assertions.
+#
+# STUB_MV_SRC_MATCH narrows the interception to a source-name glob, because the
+# destination alone stopped identifying the NDC commit: since #247 the ordinary
+# entry append also commits by renaming a sibling temp over now.md, so a stub
+# keyed only on the destination fails that append instead and the run never
+# reaches compression at all. The two temps are named apart on purpose —
+# now.md.ndc-* and now.md.append-* — and each suite intercepts only its own.
 MV_STUB = r"""#!/bin/sh
 _last=""
 _prev=""
 for _a in "$@"; do _prev="$_last"; _last="$_a"; done
 
+_matched=0
 if [ -n "$STUB_MV_TARGET" ] && [ "$_last" = "$STUB_MV_TARGET" ]; then
+    case "$_prev" in
+        ${STUB_MV_SRC_MATCH:-*}) _matched=1 ;;
+    esac
+fi
+
+if [ "$_matched" = 1 ]; then
     printf '%s\t%s\n' "$_prev" "$_last" >> "$STUB_MV_LOG"
     [ -n "$STUB_MV_SNAP_NOW" ]  && cp "$_last" "$STUB_MV_SNAP_NOW"  2>/dev/null
     [ -n "$STUB_MV_SNAP_TAIL" ] && cp "$_prev" "$STUB_MV_SNAP_TAIL" 2>/dev/null
@@ -113,7 +127,7 @@ command -p mv "$@"
 """
 
 
-def _with_mv_stub(env, tmp_path, mode, memory_file, day_file):
+def _with_mv_stub(env, tmp_path, mode, memory_file, day_file, src_match="*.ndc-*"):
     bindir = tmp_path / "mv-stub-bin"
     bindir.mkdir(exist_ok=True)
     stub = bindir / "mv"
@@ -130,6 +144,7 @@ def _with_mv_stub(env, tmp_path, mode, memory_file, day_file):
     env["PATH"] = f"{bindir}{os.pathsep}{env['PATH']}"
     env["STUB_MV_MODE"] = mode
     env["STUB_MV_TARGET"] = str(memory_file)
+    env["STUB_MV_SRC_MATCH"] = src_match
     env["STUB_MV_LOG"] = str(tmp_path / "mv-calls.tsv")
     env["STUB_MV_SNAP_NOW"] = str(tmp_path / "snap-now.md")
     env["STUB_MV_SNAP_TAIL"] = str(tmp_path / "snap-tail.md")
