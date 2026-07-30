@@ -209,8 +209,17 @@ class TestConsolidationRetireVersusNdcAppend:
             "re-consolidate work already in recent.md"
         )
 
-    def test_the_retire_step_refuses_to_run_without_the_lock(self, tmp_path):
-        """Losing the wait must leave staging alone, and say so."""
+    def test_consolidation_refuses_to_touch_staging_without_the_lock(self, tmp_path):
+        """Losing the wait must leave staging alone, and say so.
+
+        Since #235 the bail happens earlier than the name used to suggest:
+        consolidation now takes its snapshot under staging.lock, so a lost
+        wait exits at the *snapshot* acquire and never reaches the retire
+        loop. Both are covered by the same assertions — staging untouched,
+        recent.md and archive.md untouched, and a log line saying why — but
+        the exit under test is the snapshot one, and a reader who assumed
+        otherwise would think the retire loop was still being exercised.
+        """
         env, project, plugin, remember = _make_env(tmp_path)
         staging = remember / "today-2026-07-24.md"
         staging.write_text("# Day\n\n## 10:00 | main\n\n- earlier work\n",
