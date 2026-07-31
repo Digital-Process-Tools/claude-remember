@@ -67,6 +67,12 @@ elif cmd == "save-position":
         json.dump({"session": session_id, "line": int(position)}, f)
 elif cmd == "build-prompt":
     # argv: build-prompt <extract> <last_entry> <time> <branch> <out> <max_bytes>
+    if os.environ.get("STUB_LAST_ENTRY_SNAPSHOT"):
+        # The only place the last-entry context can be observed as the
+        # summarizer receives it: the temp file is unlinked by the script's
+        # cleanup trap, so reading it afterwards is not possible (#251).
+        import shutil
+        shutil.copyfile(sys.argv[3], os.environ["STUB_LAST_ENTRY_SNAPSHOT"])
     with open(sys.argv[6], "w") as f:
         f.write("a prompt with no placeholders\\n")
 elif cmd == "call-haiku":

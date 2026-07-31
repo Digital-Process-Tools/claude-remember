@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A failed read of the last entry was handed to the summarizer as "(no previous entry)"** ([#251](https://github.com/Digital-Process-Tools/claude-remember/issues/251)) — `save-session.sh` built the summarizer's dedup context with `[ -n "$LAST_LINE" ] && tail … > "$TMP" || echo "(no previous entry)" > "$TMP"`, which is not if/else: when the guard holds and `tail` *fails*, the fallback runs as well, and its `>` overwrites whatever `tail` had written. So a read error was rendered as a factual claim about `now.md` — rc 0, nothing logged, no marker. Reproduced with a `tail` that fails only on that one invocation: `now.md` held a real entry and the prompt said there was none.
+
+  **The prompt is where that lands.** `save-session.prompt.txt` hands the previous entry to Haiku for two decisions — do not repeat it, and return `SKIP` if this span is the same work. A false empty removes both anchors at once, so the model writes the previous span back into `now.md` as new: the duplication #142/#224/#250 close from the other end, reached here through the prompt rather than through the file.
+
+  **Three states, not two.** There is genuinely no `## ` header yet; `now.md` cannot be read; the read failed. Only the first is `(no previous entry)`. The other two now send `(previous entry unavailable — now.md could not be read; earlier work may already be recorded)` and log an ERROR naming which one it was. The marker is written for a model, not a person: it says the field is missing rather than empty, and says what follows from that, so the summarizer does not treat a failed read as a fresh buffer. It deliberately does not push toward `SKIP` — nudging a model to skip on missing context spends a real span to protect the prompt.
+
+  **The save still completes.** Failing the run here would trade the loud bug for the quiet one: an entry written without dedup context is visible in `now.md` and recoverable, while a span that never reaches memory is neither. Same trade the NDC tail arm already makes — report the read you could not make, do not act on a value you do not have.
+
+  **The pipeline above it was wrong in the same way, and less visibly.** `grep -n '^## ' … | tail -1 | cut -d: -f1` returned `cut`'s exit status, and `cut` succeeds on empty input, so grep failing on an unreadable file was indistinguishable from grep finding no header — the same false empty, one line earlier, and it would have survived a fix aimed only at the `&&`/`||`. `grep` is now run for its own status (1 = no match, >1 = error) and the last line is taken with parameter expansion, removing two more unchecked processes rather than checking them.
+
+  Two further instances of the idiom remain in `scripts/log.sh` (lines 268 and 332), noted on the issue and not fixed here; there the two branches *concatenate*, so the caller receives the value followed by the default. [shellcheck SC2015](https://www.shellcheck.net/wiki/SC2015) flags all three.
 
 ## [0.12.2] — Too large to hand over
 

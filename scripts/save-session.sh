@@ -204,13 +204,60 @@ if [ "$DRY_RUN" = true ]; then
 fi
 
 # --- Step 2: Get last entry ---
+# Three states, not two (#251). This block used to answer with one of two
+# values, and "(no previous entry)" carried both *there is no entry yet* and
+# *the entry could not be read* — an absence this script produced, handed to
+# the summarizer as an absence in the world. The prompt asks the model to skip
+# work already covered by the previous entry, so a false empty removes its dedup
+# anchor and its SKIP anchor at once, and the previous span is written back into
+# now.md: the damage #142/#224/#250 close from the other end.
+#
+# The old line was `A && B || C`, which is not if/else: when `A` holds and `B`
+# *fails*, `C` runs too, and `C`'s `>` overwrites anything `B` wrote — including
+# a partial read. Rewritten as real branches so a failed read is its own case.
+#
+# The save is NOT failed on this: a span that never reaches memory cannot be
+# recovered, while a summary written without dedup context is visible in now.md
+# and can be. Same trade as the NDC tail arm below (see Step 8) — report the
+# read you could not make, do not act on a value you do not have.
+NO_PREVIOUS_ENTRY="(no previous entry)"
+LAST_ENTRY_UNAVAILABLE="(previous entry unavailable — now.md could not be read; earlier work may already be recorded)"
 TMP_LAST_ENTRY=$(mktemp "${TMPDIR:-/tmp}"/remember-last-entry-XXXXXX)
 CLEANUP_FILES+=("$TMP_LAST_ENTRY")
-if [ -f "$MEMORY_FILE" ]; then
-    LAST_LINE=$(grep -n '^## ' "$MEMORY_FILE" | tail -1 | cut -d: -f1)
-    [ -n "$LAST_LINE" ] && tail -n +"$LAST_LINE" "$MEMORY_FILE" > "$TMP_LAST_ENTRY" || echo "(no previous entry)" > "$TMP_LAST_ENTRY"
+if [ ! -f "$MEMORY_FILE" ]; then
+    printf '%s\n' "$NO_PREVIOUS_ENTRY" > "$TMP_LAST_ENTRY"
+elif [ ! -r "$MEMORY_FILE" ]; then
+    printf '%s\n' "$LAST_ENTRY_UNAVAILABLE" > "$TMP_LAST_ENTRY"
+    log "prompt" "ERROR: now.md exists but is not readable — last entry sent as unavailable, not as absent"
 else
-    echo "(no previous entry)" > "$TMP_LAST_ENTRY"
+    # `grep -n ... | tail -1 | cut` reported the exit status of `cut`, which
+    # succeeds on empty input, so grep failing on an unreadable or vanished
+    # file was indistinguishable from grep finding no header. grep is run on its
+    # own for its status (1 = no match, >1 = error), and the last line is picked
+    # with parameter expansion rather than two more unchecked processes.
+    LAST_ENTRY_HEADERS=""
+    HEADER_GREP_RC=0
+    LAST_ENTRY_HEADERS=$(grep -n '^## ' "$MEMORY_FILE") || HEADER_GREP_RC=$?
+    if [ "$HEADER_GREP_RC" -gt 1 ]; then
+        printf '%s\n' "$LAST_ENTRY_UNAVAILABLE" > "$TMP_LAST_ENTRY"
+        log "prompt" "ERROR: header search over now.md failed (grep rc ${HEADER_GREP_RC}) — last entry sent as unavailable, not as absent"
+    else
+        LAST_LINE="${LAST_ENTRY_HEADERS##*$'\n'}"
+        LAST_LINE="${LAST_LINE%%:*}"
+        case "$LAST_LINE" in ''|*[!0-9]*) LAST_LINE="" ;; esac
+        if [ -z "$LAST_LINE" ]; then
+            printf '%s\n' "$NO_PREVIOUS_ENTRY" > "$TMP_LAST_ENTRY"
+        elif tail -n +"$LAST_LINE" "$MEMORY_FILE" > "$TMP_LAST_ENTRY"; then
+            :
+        else
+            # Whatever tail managed to write is discarded deliberately: a
+            # half-read entry is still a claim about now.md that this script
+            # cannot stand behind, and a mid-word truncation reads to the
+            # summarizer as content rather than as damage.
+            printf '%s\n' "$LAST_ENTRY_UNAVAILABLE" > "$TMP_LAST_ENTRY"
+            log "prompt" "ERROR: reading the last entry from now.md failed — sent as unavailable, not as absent (this save may duplicate work already recorded)"
+        fi
+    fi
 fi
 
 # --- Step 3: Build prompt ---
