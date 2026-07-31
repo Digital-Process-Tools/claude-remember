@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The README now says which install route a release actually reaches, and when** ([#264](https://github.com/Digital-Process-Tools/claude-remember/issues/264)) — the delivery advice added in 0.12.0 assumed an install route it never named. `claude-plugins-official` pins by commit sha rather than by version, and that pin is advanced by an automated PR running roughly twice a day, so a release reaches a DPT-marketplace install immediately and an official-marketplace install up to twelve hours later. `FORCE_AUTOUPDATE_PLUGINS=1` cannot cross that boundary, because nothing on the user's side is stale — the CLI correctly reports the pinned version as current, and the input is old. The reporter spent the diagnosis establishing that their install genuinely could not see v0.12.0; it was true, and it was not a bug in either tool. The stale claim that the official catalogue was "stuck on v0.5.0" is gone, along with the advice to treat that as permanent.
+- **"Check your version" now says to read the manifest and not the directory name** ([#204](https://github.com/Digital-Process-Tools/claude-remember/issues/204)) — a cache directory is named from the version present when it was created and is never renamed, so one called `0.7.1` can hold a manifest saying `0.8.0`. The updater compares manifests. Every claim on #204 about which version was running had been read off the directory name and was wrong by a minor, which is this project's own defect class wearing a filename: a surface that appears to answer the question and does not.
+
 ## [0.12.0] — It said it would retry
 
 Two external reports, three weeks apart, with the same shape underneath: an operation stopped doing its job and reported success. Neither reporter noticed for weeks, and in both cases the reason was not that the tool was quiet — it was that the tool was reassuring.
