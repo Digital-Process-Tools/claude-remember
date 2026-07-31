@@ -818,6 +818,7 @@ class TestConfigIsReadBeforeBackgrounding:
     GIT_BACKUP_VARS = (
         "GIT_BACKUP_REMOTE", "GIT_BACKUP_BRANCH",
         "GIT_BACKUP_GPG_SIGN", "ALLOW_REMOTE_CHANGE",
+        "REJECT_NOTICE_AFTER",
     )
 
     @staticmethod
@@ -880,6 +881,7 @@ class TestConfigIsReadBeforeBackgrounding:
             "GIT_BACKUP_BRANCH": "GIT_BACKUP_BRANCH",
             "GIT_BACKUP_GPG_SIGN": "GPG_SIGN_FLAG",
             "ALLOW_REMOTE_CHANGE": "ALLOW_REMOTE_CHANGE",
+            "REJECT_NOTICE_AFTER": "REJECT_NOTICE_AFTER",
         }
         lines = HOOK.read_text().splitlines()
         fork = self._fork_line(lines)

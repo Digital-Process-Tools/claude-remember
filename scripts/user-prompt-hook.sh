@@ -86,20 +86,38 @@ if [ "$_REMEMBER_FAST" = "0" ]; then
     _remember_env_cache_publish
 fi
 
-# --- Capture-gap notice (#200) ────────────────────────────────────────────
-# session-start-hook.sh leaves this when the PREVIOUS session ran SessionStart
-# but never PostToolUse — the signature of a plugin enabled mid-session, whose
-# hooks Claude Code never wired in. It is delivered here rather than there
-# because `systemMessage` is the only hook output the HUMAN sees, and a notice
-# only the model sees is how this stayed invisible for a day in the first place.
+# --- Notices for the human (#200, #253) ───────────────────────────────────
+# Other hooks leave a file here when they find something the HUMAN has to know
+# and the model cannot act on. They are delivered from this hook rather than
+# from the one that found them because `systemMessage` is the only hook output
+# the HUMAN sees, and a notice only the model sees is how #200 stayed invisible
+# for a day in the first place — and how #253 stayed invisible for twelve.
 #
-# Consumed on read: this is a one-line nudge, not a persistent banner.
-NOTICE_FILE="$REMEMBER_DIR/tmp/capture-gap-notice"
+#   capture-gap-notice  session-start-hook.sh: the PREVIOUS session ran
+#                       SessionStart but never PostToolUse — the signature of a
+#                       plugin enabled mid-session, whose hooks Claude Code
+#                       never wired in.
+#   git-backup-notice   after_save/50-git-backup.sh: the backup remote has
+#                       rejected the last N pushes, so memory is committed
+#                       locally and going nowhere, and no retry will fix it.
+#
+# Consumed on read: these are one-line nudges, not persistent banners. Adding
+# one is deliberately cheap and deliberately rare — this channel interrupts a
+# human mid-thought, and one that fires often is one that gets tuned out.
 NOTICE_MSG=""
-if [ -f "$NOTICE_FILE" ]; then
-    NOTICE_MSG=$(cat "$NOTICE_FILE" 2>/dev/null)
+for _notice_name in capture-gap-notice git-backup-notice; do
+    NOTICE_FILE="$REMEMBER_DIR/tmp/$_notice_name"
+    [ -f "$NOTICE_FILE" ] || continue
+    _notice_body=$(cat "$NOTICE_FILE" 2>/dev/null)
     rm -f "$NOTICE_FILE" 2>/dev/null || true
-fi
+    [ -n "$_notice_body" ] || continue
+    if [ -n "$NOTICE_MSG" ]; then
+        NOTICE_MSG="$NOTICE_MSG
+$_notice_body"
+    else
+        NOTICE_MSG="$_notice_body"
+    fi
+done
 
 # --- Timestamp + context injection ---
 # Collected rather than echoed: with a notice to deliver the whole reply has to

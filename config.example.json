@@ -20,6 +20,7 @@
   "git_backup": {
     "remote": "",
     "branch": "",
+    "reject_notice_after": 3,
     "gpg_sign": false,
     "allow_remote_change": false
   },

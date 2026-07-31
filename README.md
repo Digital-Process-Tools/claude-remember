@@ -249,6 +249,7 @@ Put cross-project preferences (timezone, cooldowns) in `~/.remember/config.json`
 | `cooldowns.git_backup_seconds`   | `900`            | Minimum seconds between auto-backup commits (no-op if `~/.remember/` is not a git repo)                                                                                                                                                |
 | `git_backup.remote`              | _(empty)_        | Remote to push memory backups to. Empty → bare `git push`, relying on the branch's upstream tracking (the standard `origin main` setup). Set this if you have multiple remotes or a non-standard tracking config.                      |
 | `git_backup.branch`              | _(empty)_        | Branch to push to. Only used when `git_backup.remote` is set; empty pushes the current branch. The resolved remote/branch is logged on the first push.                                                                                 |
+| `git_backup.reject_notice_after` | `3`              | Consecutive *permanently rejected* pushes before the backup interrupts you with a `systemMessage` on the next prompt, on top of the log line. A rejection never clears itself, so this only postpones a true report — it cannot swallow one. Transient failures (offline, no credentials) never count toward it. `0` disables the interruption and leaves the log line.                        |
 | `git_backup.gpg_sign`            | `false`          | Sign auto-backup commits. Default passes `--no-gpg-sign` so background commits never hang on a passphrase prompt. Set `true` only with non-interactive signing (e.g. a hardware key) to honour your global `commit.gpgSign`.            |
 | `git_backup.allow_remote_change` | `false`          | One-shot opt-in to accept a changed push remote. The backup hook records the remote URL on first push and aborts every later push if it changed, since a swapped URL can mean a poisoned `config.json` pointing at someone else's host. Set `true` only when you are deliberately re-pointing at a new repo, then set it back. See [`docs/git-backup-security.md`](docs/git-backup-security.md).                                     |
 | `thresholds.min_human_messages`  | `3`              | Minimum human messages before saving. Keeps greetings and one-liners out of memory.                                                                                                                                                    |
@@ -380,6 +381,7 @@ cat > .gitignore <<'EOF'
 .git-backup.lock
 .last-git-backup-ts
 .git-backup-remote
+.git-backup-rejected
 */logs/
 */tmp/
 EOF
@@ -395,6 +397,20 @@ git push -u origin main
 Once `~/.remember/` is a git repo, the `after_save` hook commits each project's memory subdir on its own schedule — one commit per project save, throttled by `cooldowns.git_backup_seconds` (default 15 min) — and pushes to your configured remote. No further setup is needed beyond credential availability (SSH agent or git credential helper) in the environment Claude Code launches hooks in.
 
 If you don't want automatic commits, leave `~/.remember/` as a plain directory and commit manually as before.
+
+#### When a push does not go through
+
+A push can fail for two very different reasons, and the backup log tells them apart rather than lumping them together ([#253](https://github.com/Digital-Process-Tools/claude-remember/issues/253)):
+
+| Log line | What it means | What to do |
+| --- | --- | --- |
+| `pushed <slug>` | Memory is on the remote. | Nothing. |
+| `push deferred (will retry next backup)` | The push did not reach the remote at all — offline, VPN down, credential helper asleep. git never judged your commits. | Nothing. The next backup retries and normally succeeds. |
+| `ERROR: push REJECTED by the remote — the backup has STOPPED …` | git *did* judge them and said no, almost always because the remote has moved ahead (another machine pushed). **No retry can fix this.** Memory is still being committed locally, but it is not leaving the machine. | Resolve it yourself: `git -C ~/.remember push` shows git's own advice. |
+
+The rejection is deliberately **not** resolved for you. `recent.md` and `archive.md` are rewritten wholesale by consolidation rather than appended, so a conflict in them is real and an automatic merge or rebase could corrupt memory silently. The plugin never runs `fetch`, `pull`, `merge` or `rebase` on your store.
+
+After `git_backup.reject_notice_after` consecutive rejections (default 3), the next prompt also carries a one-line `systemMessage` in your terminal, because a stopped backup that only ever appears in a log file is a stopped backup nobody notices — the reporter of #253 lost twelve days of off-machine memory that way. A deferred push never triggers it.
 
 ## Git worktrees
 

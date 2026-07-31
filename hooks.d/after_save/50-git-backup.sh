@@ -155,6 +155,16 @@ fi
 # aborts a push, where a stale true would let a changed remote through.
 ALLOW_REMOTE_CHANGE=$(config ".git_backup.allow_remote_change" "false")
 
+# How many CONSECUTIVE permanently-rejected pushes before the human is
+# interrupted rather than merely logged (#253). 0 disables the interruption and
+# leaves the log line, which stays honest either way. Falling back to the
+# default on a non-numeric value is the safe direction: the alternative is
+# arithmetic on garbage deciding whether a stopped backup gets reported.
+REJECT_NOTICE_AFTER=$(config ".git_backup.reject_notice_after" "3")
+case "$REJECT_NOTICE_AFTER" in
+    ''|*[!0-9]*) REJECT_NOTICE_AFTER=3 ;;
+esac
+
 # ── Background subshell — never blocks save-session.sh ───────────────────────
 (
     trap 'rm -f "$LOCK_FILE"' EXIT
@@ -162,12 +172,90 @@ ALLOW_REMOTE_CHANGE=$(config ".git_backup.allow_remote_change" "false")
     # Prevent outer git env vars from overriding git -C behaviour.
     unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
 
+    # ── Push, and tell the three states apart (#253) ─────────────────────────
+    # A network blip and a non-fast-forward rejection are different in kind. The
+    # first will succeed later. The second cannot succeed on ANY later attempt
+    # without a human, and the backup has in fact stopped. Reporting both as
+    # "will retry next backup" promises something the tool cannot deliver — the
+    # reporter ran twelve days on that promise, 15 deferrals against 8 pushes,
+    # with memory never leaving the machine and nothing anywhere saying so.
+    #
+    # So: three states, never two. Pushed / deferred, will retry / rejected,
+    # stopped, here is what to do.
+    REJECT_STATE_FILE="$REPO_ROOT/.git-backup-rejected"
+
+    # stdout is git's --porcelain per-ref status. stderr is dropped on purpose:
+    # it carries hints, transport noise and any pre-push hook's chatter, and
+    # claude-supertool#641 is precisely what happens when a verdict about the
+    # remote is read off text the remote did not write.
     _push() {
         if [ -n "$GIT_BACKUP_REMOTE" ]; then
-            GIT_TERMINAL_PROMPT=0 git -C "$REPO_ROOT" push "$GIT_BACKUP_REMOTE" ${GIT_BACKUP_BRANCH:+"$GIT_BACKUP_BRANCH"} >/dev/null 2>&1
+            GIT_TERMINAL_PROMPT=0 git -C "$REPO_ROOT" push --porcelain "$GIT_BACKUP_REMOTE" ${GIT_BACKUP_BRANCH:+"$GIT_BACKUP_BRANCH"} 2>/dev/null
         else
-            GIT_TERMINAL_PROMPT=0 git -C "$REPO_ROOT" push >/dev/null 2>&1
+            GIT_TERMINAL_PROMPT=0 git -C "$REPO_ROOT" push --porcelain 2>/dev/null
         fi
+    }
+
+    # The refs git ITSELF flagged as rejected, one per line, read off stdin.
+    #
+    # Empty output is an absence of information and never a "no": an unreachable
+    # remote, a dead credential helper or a killed transport produce no per-ref
+    # lines at all, and every one of those stays a quiet deferral exactly as it
+    # was. Loudness here requires positive evidence from git.
+    #
+    # The grammar is git's: `<flag>TAB<from>:<to>TAB<summary>`, with `!` for a
+    # rejected ref, `*` for a new branch and `+` for a forced update — the three
+    # cannot be confused, unlike the free text they replace. Only lines after
+    # the `To <url>` header are considered, because a pre-push hook's own output
+    # precedes it, and only exact three-tab-field lines count.
+    _rejected_refs() {
+        awk -F'\t' '
+            !hdr { if ($0 ~ /^To /) hdr = 1; next }
+            hdr && NF == 3 && $1 == "!" { print $2 " " $3 }
+        '
+    }
+
+    # One decision for all three push sites. The funnel #253 reports had three
+    # mouths; fixing one would have left the reported case reachable through the
+    # other two, and the next site added would drift again.
+    _push_and_report() {
+        local _out _rc _rejected _count
+        _out=$(_push)
+        _rc=$?
+
+        if [ "$_rc" -eq 0 ]; then
+            log "git-backup" "pushed $SLUG"
+            rm -f "$REJECT_STATE_FILE" 2>/dev/null || true
+            return 0
+        fi
+
+        _rejected=$(printf '%s\n' "$_out" | _rejected_refs | tr '\n' ';')
+        if [ -z "$_rejected" ]; then
+            log "git-backup" "push deferred (will retry next backup)"
+            return 0
+        fi
+
+        _count=$(cat "$REJECT_STATE_FILE" 2>/dev/null || echo 0)
+        case "$_count" in
+            ''|*[!0-9]*) _count=0 ;;
+        esac
+        _count=$((_count + 1))
+        echo "$_count" > "$REJECT_STATE_FILE" 2>/dev/null || true
+
+        log "git-backup" "ERROR: push REJECTED by the remote — the backup has STOPPED for $SLUG and will not resume on its own (consecutive rejections: $_count). git rejected: ${_rejected%;}. The commit exists on this machine only. Nothing here will fetch, merge or rebase for you: run 'git -C \"$REPO_ROOT\" push' to see git's own advice and resolve it by hand — recent.md and archive.md are rewritten wholesale by consolidation, so a wrong automatic resolution would corrupt memory silently."
+
+        # Escalation, not alarm. systemMessage is the only hook output the HUMAN
+        # sees, and it is also the most intrusive surface in this codebase — one
+        # that fires on every hiccup is one nobody reads, which would cost more
+        # than it buys. A transient failure can never reach this branch at all,
+        # and a rejection never clears itself, so the threshold only postpones a
+        # true report by a few backups; it can never swallow one.
+        if [ "$REJECT_NOTICE_AFTER" -gt 0 ] && [ "$_count" -eq "$REJECT_NOTICE_AFTER" ]; then
+            mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null || true
+            printf '%s\n' "remember: git backup has STOPPED. The remote rejected the last $_count pushes from $REPO_ROOT and will not accept them on a retry — memory is still being committed locally, but it is not reaching your backup remote. Run: git -C \"$REPO_ROOT\" push — then resolve the divergence yourself. Nothing will be merged or rebased for you." \
+                > "$REMEMBER_DIR/tmp/git-backup-notice" 2>/dev/null || true
+        fi
+        return 0
     }
 
     # Remove the bootstrap-written per-slug .gitignore (contains "*") that was placed
@@ -216,11 +304,7 @@ ALLOW_REMOTE_CHANGE=$(config ".git_backup.allow_remote_change" "false")
         # First push — record the URL and proceed.
         echo "$CURRENT_REMOTE" > "$REMOTE_STATE_FILE"
         log "git-backup" "git backup configured to push to: $CURRENT_REMOTE (remote '$REMOTE_NAME', branch '${GIT_BACKUP_BRANCH:-<upstream tracking>}')"
-        if _push; then
-            log "git-backup" "pushed $SLUG"
-        else
-            log "git-backup" "push deferred (will retry next backup)"
-        fi
+        _push_and_report
     else
         RECORDED_REMOTE=$(cat "$REMOTE_STATE_FILE" 2>/dev/null || true)
         if [ "$CURRENT_REMOTE" != "$RECORDED_REMOTE" ]; then
@@ -228,21 +312,13 @@ ALLOW_REMOTE_CHANGE=$(config ".git_backup.allow_remote_change" "false")
                 # Explicit override — update state file and push.
                 echo "$CURRENT_REMOTE" > "$REMOTE_STATE_FILE"
                 log "git-backup" "remote URL changed (allow_remote_change=true): $CURRENT_REMOTE"
-                if _push; then
-                    log "git-backup" "pushed $SLUG"
-                else
-                    log "git-backup" "push deferred (will retry next backup)"
-                fi
+                _push_and_report
             else
                 log "git-backup" "ERROR: remote URL changed from '$RECORDED_REMOTE' to '$CURRENT_REMOTE' — push aborted (set git_backup.allow_remote_change=true to override)"
             fi
         else
             # Remote matches recorded URL — safe to push.
-            if _push; then
-                log "git-backup" "pushed $SLUG"
-            else
-                log "git-backup" "push deferred (will retry next backup)"
-            fi
+            _push_and_report
         fi
     fi
 ) </dev/null >/dev/null 2>&1 &
