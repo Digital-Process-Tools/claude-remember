@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] — It said it would retry
+
+Two external reports, three weeks apart, with the same shape underneath: an operation stopped doing its job and reported success. Neither reporter noticed for weeks, and in both cases the reason was not that the tool was quiet — it was that the tool was reassuring.
+
+`rotate_logs` had archived nothing since June on one Windows install ([#252](https://github.com/Digital-Process-Tools/claude-remember/issues/252)): GNU tar reads an `-f` argument whose colon precedes the first slash as `host:path`, so an absolute Windows archive path became a request to connect to a machine called `C`. The archive name is now relative, which no tar can parse as remote — deliberately not `--force-local`, which bsdtar rejects outright with exit 1, so the obvious fix would have repaired Windows by silently disabling the platform this is developed on. The larger half was that `2>/dev/null` discarded the reason and the failure branch returned 0, so "nothing to rotate" and "permanently broken" were the same event to every caller. There are three outcomes now instead of two, and `/remember:doctor` reports the third — chosen because that reporter's `hook-errors.log` was empty for all five weeks.
+
+The git backup had the same defect from the other side ([#253](https://github.com/Digital-Process-Tools/claude-remember/issues/253)): every push failure was logged as `push deferred (will retry next backup)`. That is true of a network blip and false of a non-fast-forward rejection, which cannot succeed on any later attempt — one store had drifted 15 commits ahead and 312 behind, missing twelve days of memory it had never seen. Rejections are now read from `git push --porcelain`'s per-ref status rather than from message text, which matters because a pre-push hook writes to the same streams and can produce a convincing fake; the parse requires git's own header, exactly three tab-delimited fields, and the `!` flag. The asymmetry is what makes it safe: an unreachable remote exits 128 with empty stdout, so a transient failure gives git nothing to say and stays a quiet retry. Reporting loudly requires positive evidence *from git*.
+
+Thanks to **@hubertrm** and **@jqit-ricky**. Both reports were specific enough to reproduce without their machines, and in both cases the second-order observation was the more valuable half — "it does not self-correct", and "that push cannot succeed on any later attempt". Those are the sentences that turned two bug reports into two fixes of a class.
+
+Manifest bumped per [#133](https://github.com/Digital-Process-Tools/claude-remember/issues/133) — the updater compares manifest versions and nothing else, so a release that forgets it ships nothing.
+
 ### Added
 
 - **A restore counterpart to the git backup, off by default** ([#253](https://github.com/Digital-Process-Tools/claude-remember/issues/253), part 2 of 2 — the feature half; part 1, the rejected-push classifier, landed separately) — the plugin pushed and never read back: `git pull|fetch|merge|rebase` appeared nowhere outside `tests/`. A store used from a second machine therefore reads its own stale memory, commits on top of it, and from then on can never push at all — which is how the divergence part 1 reports comes to exist in the first place. `hooks.d/before_session_start/50-git-restore.sh` closes the loop, on the empty dispatch point that has been wired at `session-start-hook.sh:86` all along.
