@@ -17,6 +17,20 @@
 #   Called automatically by Claude Code's SessionStart hook system.
 #   Not intended for manual invocation.
 #
+# STDIN
+#   The SessionStart hook payload, as JSON. Only `session_id` is read, and only
+#   to answer "which transcript in this directory is ours" — without it neither
+#   recovery nor the capture-gap check can tell the current session from the
+#   previous one, and both used to assume the answer from mtime position (#270).
+#
+#   The read is bounded in TIME and only in time — `read -t 1`, and never from a
+#   tty — for the reason post-tool-hook.sh records: a hook that blocks on stdin
+#   is not a slow session start, it is one that never starts.
+#
+#   The hook CONSUMES stdin, so the payload is re-published to hooks.d/
+#   listeners around the dispatches, on the same three-state contract
+#   post-tool-hook.sh established (#266).
+#
 # ENVIRONMENT
 #   CLAUDE_PLUGIN_ROOT   Plugin install directory (set by Claude Code)
 #   CLAUDE_PROJECT_DIR   Project root (default: .)
@@ -82,6 +96,108 @@ log "hook" "session-start: PROJECT_DIR=$PROJECT_DIR PIPELINE_DIR=$PIPELINE_DIR R
 source "$PLUGIN_ROOT/scripts/lib-env-cache.sh"
 _remember_env_cache_publish
 
+# ── Which session is THIS one? (#270) ─────────────────────────────────────
+# Both jobs below need to know our own transcript so they can exclude it. They
+# used to assume its POSITION instead — "ours is newest, so slot 2 is the
+# previous session" — and at source=startup Claude Code creates that transcript
+# AFTER this hook has run. For that window the newest file IS the previous
+# session, so slot 2 is the one before it, and both jobs act on the wrong
+# session: a capture-gap warning about a session old enough to predate the
+# evidence store, and a recovery force-save aimed away from the tail it exists
+# to rescue.
+#
+# #206 named the enabler and shipped the other half of the fix: this hook never
+# read its stdin, so it had neither `source` nor `session_id` and could not
+# exclude itself. Only `session_id` is needed. Excluding our own transcript by
+# id is correct at EVERY source, so there is no source list to enumerate and
+# nothing that was being reported stops being reported.
+#
+# Reading stdin is only safe if it cannot wait forever, so this takes both
+# guards post-tool-hook.sh documents: a tty stdin (hand invocation from a
+# shell) is never read at all, and the read is bounded by `read -t 1`. bash 3.2
+# has no sub-second -t, hence 1. This runs once per session rather than once
+# per tool call, so the worst case is a second of startup — but it is still
+# bounded, because the unbounded version is a session that never begins.
+HOOK_STDIN=""
+if [ ! -t 0 ]; then
+    _line=""
+    while IFS= read -r -t 1 _line || [ -n "$_line" ]; do
+        HOOK_STDIN="$HOOK_STDIN$_line"
+        _line=""
+    done
+fi
+
+# The same deliberately narrow extractor post-tool-hook.sh uses, and for the
+# same reason: the key must be followed by nothing but whitespace and a colon
+# before the value's opening quote, so a `session_id` appearing inside some
+# other field is not mistaken for the field. It is a heuristic and is treated
+# as one — the result is validated as a path component below before anything
+# is done with it.
+_stdin_session_id() {
+    local raw="$1" rest prefix value
+    case "$raw" in *'"session_id"'*) ;; *) return 1 ;; esac
+    rest=${raw#*\"session_id\"}
+    prefix=${rest%%\"*}
+    case "$prefix" in *[!:[:space:]]*) return 1 ;; esac
+    value=${rest#*\"}
+    value=${value%%\"*}
+    [ -n "$value" ] || return 1
+    printf '%s' "$value"
+}
+
+CURRENT_SESSION_ID=$(_stdin_session_id "$HOOK_STDIN" 2>/dev/null) || CURRENT_SESSION_ID=""
+# stdin is not more trustworthy than a basename. This is compared against
+# names taken off the transcript directory, and `..` would match nothing
+# useful while `/` would match across directories, so it faces the same guard
+# the basename-derived ids face — at the point of entry, not the point of use.
+case "$CURRENT_SESSION_ID" in
+    ''|.|..|*[!A-Za-z0-9._-]*) CURRENT_SESSION_ID="" ;;
+esac
+
+# ── Publish the consumed payload to hooks.d/ ──────────────────────────────
+# This hook now reads stdin, so a listener that wanted the payload would find
+# EOF where one used to be. It travels by the route #266 settled on: a file for
+# the authoritative copy, the environment for payloads small enough to carry,
+# and never PART of a payload — a listener holding a silently shortened one
+# cannot tell it from a genuinely short one. Three states, the third disclosed:
+#
+#   FILE unset                     no payload arrived, or no listener
+#   STDIN non-empty                the whole payload
+#   STDIN empty and FILE set       too large for the environment; the file
+#                                  holds it, complete
+#
+# Nothing is written at all unless a listener is installed — the shipped
+# distribution's before_session_start/ and after_session_start/ hold a
+# .gitkeep and, for the git hooks, scripts that never read stdin.
+REMEMBER_HOOK_STDIN_MAX=32768
+_hook_stdin_file=""
+
+_session_start_listener() {
+    local f
+    for f in "$REMEMBER_HOOKS_DIR/before_session_start"/* \
+             "$REMEMBER_HOOKS_DIR/after_session_start"/*; do
+        [ -x "$f" ] && return 0
+    done
+    return 1
+}
+
+if [ -n "$HOOK_STDIN" ] && _session_start_listener; then
+    _hook_stdin_file="$REMEMBER_DIR/tmp/session-start-stdin.$$"
+    if (umask 077; printf '%s' "$HOOK_STDIN" > "$_hook_stdin_file") 2>/dev/null; then
+        export REMEMBER_HOOK_STDIN_FILE="$_hook_stdin_file"
+    else
+        # A write that failed part way through leaves a short file. Nothing may
+        # be told about it, and it may not be left behind either.
+        rm -f "$_hook_stdin_file" 2>/dev/null
+        _hook_stdin_file=""
+    fi
+    if [ "${#HOOK_STDIN}" -le "$REMEMBER_HOOK_STDIN_MAX" ]; then
+        export REMEMBER_HOOK_STDIN="$HOOK_STDIN"
+    else
+        export REMEMBER_HOOK_STDIN=""
+    fi
+fi
+
 # ── Dispatch: before_session_start ────────────────────────────────────────
 dispatch "before_session_start"
 
@@ -117,18 +233,67 @@ session_was_saved() {
     [ "$($JQ -r --arg id "$1" "$SAVED_QUERY" "$LAST_SAVE_FILE" 2>/dev/null)" = "saved" ]
 }
 
-# ── Recovery: save the most recent missed session ──────────────────────────
-if [ "$(config '.features.recovery' true)" = "true" ]; then
+# ── Which session was the PREVIOUS one? (#270) ────────────────────────────
+# Resolved once, here, for the recovery block and the capture-gap check both.
+# They ask the same question, and they used to ask it in two places with two
+# copies of the same expression — which is exactly how two answers drift apart,
+# and how a detector came to report on a different session from the one being
+# rescued in the same invocation.
+#
+# "The newest transcript that is not ours" is correct at every source. At
+# startup there is nothing to exclude and the newest genuinely IS the previous
+# session. At resume/compact/fork ours exists and sorts newest, so excluding it
+# lands on the same file the positional skip did. At `/clear` the id is reused
+# and the transcript shared, so excluding by id excludes it there too.
 PROJECT_PATH_SLUG="$(session_dir_slug "$PROJECT")"
 SESSIONS_DIR="$(claude_projects_dir)/${PROJECT_PATH_SLUG}"
 
-if [ -d "$SESSIONS_DIR" ] && [ -f "$LAST_SAVE_FILE" ]; then
-    LAST_JSONL=$(ls -t "$SESSIONS_DIR"/*.jsonl 2>/dev/null | tail -n +2 | head -1)
-    if [ -n "$LAST_JSONL" ]; then
-        LAST_ID=$(basename "$LAST_JSONL" .jsonl)
-        if ! session_was_saved "$LAST_ID"; then
-            "$PLUGIN_ROOT/scripts/save-session.sh" "$LAST_ID" --force </dev/null >/dev/null 2>&1 & disown 2>/dev/null || true
-        fi
+# Args: $1 — sessions dir. Prints the newest transcript that is not this
+# session's, or nothing.
+previous_transcript() {
+    ls -t "$1"/*.jsonl 2>/dev/null | while IFS= read -r f; do
+        base=${f##*/}
+        base=${base%.jsonl}
+        [ "$base" = "$CURRENT_SESSION_ID" ] && continue
+        printf '%s\n' "$f"
+        break
+    done
+}
+
+if [ -n "$CURRENT_SESSION_ID" ]; then
+    PREV_JSONL=$(previous_transcript "$SESSIONS_DIR")
+else
+    # No id, so "not ours" has no meaning and there is no right answer to
+    # substitute — the positional guess is correct at resume and wrong at
+    # startup, and nothing here can tell which. Recovery keeps it unchanged
+    # rather than trading one guess for another: its failure mode is a save
+    # aimed at the wrong session, which the next startup can still correct.
+    # The capture-gap check gets no such fallback, because its failure mode is
+    # an accusation — see below.
+    PREV_JSONL=$(ls -t "$SESSIONS_DIR"/*.jsonl 2>/dev/null | tail -n +2 | head -1)
+fi
+PREV_ID=""
+if [ -n "$PREV_JSONL" ]; then
+    PREV_ID=${PREV_JSONL##*/}
+    PREV_ID=${PREV_ID%.jsonl}
+fi
+
+# Asked ONCE, and before recovery forks (#270). Recovery force-saves in the
+# background and the capture-gap check below re-read this same file through
+# session_was_saved — so a session being rescued could read as unsaved in the
+# very invocation that was rescuing it, or as saved, depending on which process
+# won. The question is "was this captured", not "has that fork finished yet",
+# and the answer to it does not change while this hook runs.
+PREV_WAS_SAVED="no"
+if [ -n "$PREV_ID" ] && session_was_saved "$PREV_ID"; then
+    PREV_WAS_SAVED="yes"
+fi
+
+# ── Recovery: save the most recent missed session ──────────────────────────
+if [ "$(config '.features.recovery' true)" = "true" ]; then
+if [ -d "$SESSIONS_DIR" ] && [ -f "$LAST_SAVE_FILE" ] && [ -n "$PREV_ID" ]; then
+    if [ "$PREV_WAS_SAVED" = "no" ]; then
+        "$PLUGIN_ROOT/scripts/save-session.sh" "$PREV_ID" --force </dev/null >/dev/null 2>&1 & disown 2>/dev/null || true
     fi
 fi
 fi
@@ -216,8 +381,12 @@ capture_was_seen() {
     #    session, which is all it ever could.
     [ "$SEEN_ID" = "$1" ] && return 0
     # 3. The save record. Covers the session captured by recovery rather than
-    #    by its own live saves, which touches nothing above.
-    session_was_saved "$1" && return 0
+    #    by its own live saves, which touches nothing above. Read as it stood
+    #    when this hook started, BEFORE the recovery fork above (#270) — asking
+    #    again here would be asking a file that a background save is rewriting,
+    #    and answering "has the rescue finished" instead of "was it captured".
+    [ "$1" = "$PREV_ID" ] && [ "$PREV_WAS_SAVED" = "yes" ] && return 0
+    [ "$1" != "$PREV_ID" ] && session_was_saved "$1" && return 0
     return 1
 }
 
@@ -230,26 +399,47 @@ if [ -d "$CAPTURE_SEEN_DIR" ]; then
     done
 fi
 
-# The second-newest transcript is the previous session — the same convention
-# the recovery block above uses. Guard against the honest zero-tool session
-# too: a conversation with no tool calls produces no PostToolUse either, and
-# warning about that would be crying wolf.
-PREV_SLUG="$(session_dir_slug "$PROJECT")"
-PREV_JSONL=$(ls -t "$(claude_projects_dir)/${PREV_SLUG}"/*.jsonl 2>/dev/null | tail -n +2 | head -1)
-PREV_ID=""
-[ -n "$PREV_JSONL" ] && PREV_ID=$(basename "$PREV_JSONL" .jsonl)
+# PREV_ID and PREV_JSONL were resolved once, above, for this check and for
+# recovery both. Guard against the honest zero-tool session too: a conversation
+# with no tool calls produces no PostToolUse either, and warning about that
+# would be crying wolf.
+CAPTURE_SKIPPED="$REMEMBER_DIR/tmp/capture-gap-skipped"
 
-# A gap is a fact about one past session, not a live condition, so it is said
-# once. Restarts are frequent and each re-examines the same previous session;
-# repeating the same true positive on every one is how it gets tuned out.
-REPORTED_ID=$(cat "$CAPTURE_REPORTED" 2>/dev/null) || true
+if [ -z "$CURRENT_SESSION_ID" ]; then
+    # Without a session id this check cannot tell our own transcript from the
+    # previous session's, and its output is an accusation. A missed gap is
+    # still caught by /remember:doctor and, for the content itself, by the
+    # recovery block above; a false one accuses a healthy install and spends
+    # the credibility this warning needs the one time it is true. It has no
+    # second chance to be believed — the same asymmetry that made three
+    # independent sources count as evidence of capture rather than one.
+    #
+    # Silence is a positive claim too, so it is disclosed rather than assumed.
+    # "No warning" must not mean both "the previous session was captured" and
+    # "the question was never asked": an absence the checker produced, read as
+    # an absence in the world, is the defect class this repo keeps filing on
+    # (#144, #263, #266). doctor reports the marker.
+    printf '%s\n' "the SessionStart payload carried no usable session_id" \
+        > "$CAPTURE_SKIPPED" 2>/dev/null || true
+    log "hook" "session-start: capture-gap check skipped — no session_id on stdin"
+else
+    rm -f "$CAPTURE_SKIPPED" 2>/dev/null || true
 
-if [ -n "$PREV_ID" ] && [ "$REPORTED_ID" != "$PREV_ID" ] \
-   && ! capture_was_seen "$PREV_ID" \
-   && grep -q '"tool_use"' "$PREV_JSONL" 2>/dev/null; then
-    echo "remember: your previous session was not captured. If you just installed or enabled the plugin, that is expected — capture starts now. Otherwise its hooks were not registered for that session; run /remember:doctor." \
-        > "$REMEMBER_DIR/tmp/capture-gap-notice" 2>/dev/null || true
-    printf '%s' "$PREV_ID" > "$CAPTURE_REPORTED" 2>/dev/null || true
+    # A gap is a fact about one past session, not a live condition, so it is
+    # said once. Restarts are frequent and each re-examines the same previous
+    # session; repeating the same true positive on every one is how it gets
+    # tuned out. (This dedupe was structurally unable to help while the id was
+    # wrong: a wrong id changes on every startup, so every restart minted a
+    # fresh unreported id and warned again.)
+    REPORTED_ID=$(cat "$CAPTURE_REPORTED" 2>/dev/null) || true
+
+    if [ -n "$PREV_ID" ] && [ "$REPORTED_ID" != "$PREV_ID" ] \
+       && ! capture_was_seen "$PREV_ID" \
+       && grep -q '"tool_use"' "$PREV_JSONL" 2>/dev/null; then
+        echo "remember: your previous session was not captured. If you just installed or enabled the plugin, that is expected — capture starts now. Otherwise its hooks were not registered for that session; run /remember:doctor." \
+            > "$REMEMBER_DIR/tmp/capture-gap-notice" 2>/dev/null || true
+        printf '%s' "$PREV_ID" > "$CAPTURE_REPORTED" 2>/dev/null || true
+    fi
 fi
 
 # ── Identity: per-project → user-global → plugin-bundled ──────────────────
@@ -462,3 +652,11 @@ fi
 # Plugins register here via hooks.d/after_session_start/
 # e.g., team-memory hook injects === TEAM === section
 dispatch "after_session_start"
+
+# The payload file does not outlive the dispatches it was published for.
+[ -n "$_hook_stdin_file" ] && rm -f "$_hook_stdin_file" 2>/dev/null
+
+# Explicit, because the line above is the last command and it is false whenever
+# no payload file was written — the common case. Falling off the end would exit
+# 1 from a hook documented to always exit 0.
+exit 0

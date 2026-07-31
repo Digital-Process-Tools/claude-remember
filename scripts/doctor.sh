@@ -263,6 +263,20 @@ else
     echo "FAIL PostToolUse has never fired for this project (no $_ALIVE_MARKER)"
 fi
 
+# The capture-gap check can decline to answer (#270): without a session_id on
+# the SessionStart payload it cannot tell the current session's transcript from
+# the previous one, and it stays silent rather than accuse a healthy install.
+# Silence is a claim of its own, so the skip is reported here — otherwise "no
+# capture-gap warning" would mean both "nothing was missed" and "nobody looked".
+# WARN, and the VERDICT is deliberately left alone: capture itself is unaffected.
+_GAP_SKIPPED="$REMEMBER_DIR/tmp/capture-gap-skipped"
+if [ -f "$_GAP_SKIPPED" ]; then
+    _GAP_WHY=$(cat "$_GAP_SKIPPED" 2>/dev/null)
+    echo "WARN capture-gap check did not run at the last session start"
+    echo "     (${_GAP_WHY:-reason unrecorded}). Capture is unaffected; this report"
+    echo "     is the check that still answers."
+fi
+
 _LAST_SAVE_FILE="$REMEMBER_DIR/tmp/last-save.json"
 _LAST_SAVE_TIME=""
 if [ -f "$_LAST_SAVE_FILE" ]; then

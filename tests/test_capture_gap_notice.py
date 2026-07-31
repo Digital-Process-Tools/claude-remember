@@ -80,8 +80,12 @@ def _project(tmp_path: Path):
 def _transcripts(session_dir: Path, *, previous: str, current: str = PLAIN_LINE):
     """Two transcripts. `ls -t` orders by mtime, so the current one is newest.
 
-    The hooks take the second-newest as the previous session — same convention
-    the recovery block already uses.
+    The hooks take the newest transcript that is not the current session's,
+    identified by the `session_id` on the SessionStart payload — `sess-cur`
+    here, matching `_run`'s default. Position used to stand in for that
+    identity, which is off by one for as long as the current transcript does
+    not exist yet (#270); `tests/test_session_start_prev_session_270.py`
+    fixtures that window directly.
     """
     prev = session_dir / "sess-prev.jsonl"
     prev.write_text(previous)
@@ -99,9 +103,35 @@ def _transcripts(session_dir: Path, *, previous: str, current: str = PLAIN_LINE)
     return prev, cur
 
 
-def _run(script: Path, env: dict):
-    return subprocess.run(["bash", str(script)], env=env,
-                          capture_output=True, text=True, timeout=60)
+CURRENT_SESSION = "sess-cur"
+
+
+def _payload(session_id: str, source: str = "startup") -> str:
+    """A SessionStart stdin payload, shaped like the real one."""
+    return json.dumps({
+        "session_id": session_id,
+        "transcript_path": f"/does/not/matter/{session_id}.jsonl",
+        "hook_event_name": "SessionStart",
+        "source": source,
+        "cwd": "/does/not/matter",
+    })
+
+
+def _run(script: Path, env: dict, session_id: str = CURRENT_SESSION):
+    """Run a hook once.
+
+    SessionStart is given a payload because the real one always carries one,
+    and since #270 the hook reads `session_id` from it to exclude its own
+    transcript from "the previous session". Passing `session_id=None` models
+    the payload being absent or unusable, where the gap check declines to
+    answer rather than accuse a session it cannot identify.
+    """
+    kwargs = dict(env=env, capture_output=True, text=True, timeout=60)
+    if script == SESSION_START and session_id is not None:
+        kwargs["input"] = _payload(session_id)
+    else:
+        kwargs["stdin"] = subprocess.DEVNULL
+    return subprocess.run(["bash", str(script)], **kwargs)
 
 
 # ---------------------------------------------------------------------------
