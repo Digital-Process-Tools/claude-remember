@@ -42,7 +42,11 @@ source "$(dirname "$0")/log.sh"
 source "$(dirname "$0")/lib-lock.sh"
 source "$(dirname "$0")/lib-staging-lock.sh"
 log "hook" "run-consolidation: PROJECT_DIR=$PROJECT_DIR PIPELINE_DIR=$PIPELINE_DIR PYTHON=$PYTHON REMEMBER_DIR=$REMEMBER_DIR"
-rotate_logs
+# `|| true` is load-bearing under the `set -e` above: rotate_logs now returns 1
+# when it could not archive (#252), and a log directory it cannot tidy must not
+# abort the consolidation that was about to run. The failure is not swallowed —
+# it is logged with tar's own diagnostic and reported by doctor.sh.
+rotate_logs || true
 
 # --- Lock (mkdir acquisition, rename-based stale takeover — see lib-lock.sh) ---
 # Third call site of the same rule (#182): the noclobber pidfile this replaced

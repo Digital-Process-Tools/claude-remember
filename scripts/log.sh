@@ -510,17 +510,78 @@ dispatch() {
 # Args:
 #   (none — operates on REMEMBER_LOG_DIR)
 #
+# Returns:
+#   0  archived, or nothing had aged out
+#   1  could not archive — the reason is in the log line and in .rotate-failed.
+#      Callers running under `set -e` must guard the call (`rotate_logs || true`):
+#      a log directory that cannot be tidied is not a reason to abort the work
+#      that was about to happen.
+#
 # Side effects:
 #   Creates logs-YYYY-MM.tar.gz in the log directory.
 #   Deletes archived .log files.
+#   Writes/removes .rotate-failed (consecutive-failure breadcrumb for doctor.sh).
+# Consecutive failures before the log line stops repeating itself and starts
+# naming the consequence. #252's reporter watched ONE identical line a day for
+# five weeks and only investigated when the directory grew to 2.3 MB — so
+# "logs a line" is demonstrably not enough on its own, while a louder line on
+# every invocation would just be a faster way to become wallpaper. Three
+# consecutive failures is past transient (a full disk, a held lock) and into
+# stuck.
+_ROTATE_ESCALATE_AFTER=3
+
+# Where a stuck rotation leaves its breadcrumb. Deliberately not a
+# `memory-*.log`, so rotation never selects its own state file as something to
+# archive. doctor.sh spells this path a second time rather than sourcing log.sh
+# (it is a read-only report and must not run log.sh's source-time side effects)
+# — the two are one decision in two places, so rename both or neither.
+_ROTATE_STATE_NAME=".rotate-failed"
+
+# THREE states, and the third is what #252 was really about:
+#
+#   0, silent   nothing aged out. Not an event, not worth a line.
+#   0, logged   archived N logs.
+#   1, logged   COULD NOT RUN. Distinct return value, tar's own diagnostic in
+#               the line, and a breadcrumb doctor.sh reports. This used to
+#               return 0 like the other two and discard the reason, so
+#               "nothing to do" and "permanently broken" were the same event
+#               to every caller and to whoever read the log.
+#
+# THE ARCHIVE NAME IS RELATIVE, DELIBERATELY. GNU tar parses an `-f` argument
+# whose colon precedes the first slash as `host:path`, so the old absolute
+# `${REMEMBER_LOG_DIR}/logs-YYYY-MM.tar.gz` became a request to connect to a
+# machine called `C` on Windows ("Cannot connect to C: resolve failed", exit 2,
+# GNU tar 1.35). Only `-f` is parsed that way — `-C` never was, which is why
+# passing the directory separately did not save it.
+#
+# `--force-local` is the usual GNU answer and is NOT used here: bsdtar — which
+# is `/usr/bin/tar` on macOS, the platform this is developed on — rejects it
+# outright with exit 1 and writes no archive. Hardcoding it would have fixed
+# Windows by disabling macOS, inside a branch whose stderr was discarded.
+# Detecting the implementation was the other option and was rejected too: the
+# axis is the tar binary, not the OS (Git Bash ships GNU tar, but Windows also
+# has a bsdtar in System32 that can win the PATH), so a detector would be a
+# second bug waiting to happen. So: `cd` into the directory and name the
+# archive with no directory prefix. A name with no slash has nowhere to put a
+# colon, no tar can read it as remote, and no flag is needed on any of them.
+# Verified against GNU tar 1.35 and bsdtar 3.5.3 — identical members.
 rotate_logs() {
+    local state="${REMEMBER_LOG_DIR}/${_ROTATE_STATE_NAME}"
+
     local old_logs
     old_logs=$(find "$REMEMBER_LOG_DIR" -name "memory-*.log" -mtime +7 2>/dev/null)
-    [ -z "$old_logs" ] && return 0
+    if [ -z "$old_logs" ]; then
+        # Nothing aged out — including the case where a stuck rotation's
+        # backlog was cleared by hand. The problem is over, so the breadcrumb
+        # goes with it; a warning that outlives its cause is a false alarm, and
+        # doctor.sh would otherwise report it forever.
+        rm -f "$state" 2>/dev/null || true
+        return 0
+    fi
 
     local archive_month
     archive_month=$(date -v-7d +%Y-%m 2>/dev/null || date -d '7 days ago' +%Y-%m)
-    local archive="${REMEMBER_LOG_DIR}/logs-${archive_month}.tar.gz"
+    local archive_name="logs-${archive_month}.tar.gz"
     local count
     count=$(echo "$old_logs" | wc -l | tr -d ' ')
 
@@ -529,10 +590,43 @@ rotate_logs() {
         basenames+=("$(basename "$f")")
     done <<< "$old_logs"
 
-    if tar -czf "$archive" -C "$REMEMBER_LOG_DIR" "${basenames[@]}" 2>/dev/null; then
+    # The whole group is captured, not just tar: a failing `cd` writes its own
+    # diagnostic, and that is exactly the kind of reason this used to lose.
+    local err
+    if err=$( { cd "$REMEMBER_LOG_DIR" && tar -czf "$archive_name" "${basenames[@]}"; } 2>&1 ); then
         while IFS= read -r f; do rm -f "$f"; done <<< "$old_logs"
-        log "rotate" "archived ${count} logs → $(basename "$archive")"
-    else
-        log "rotate" "ERROR: tar failed for ${count} logs"
+        rm -f "$state" 2>/dev/null || true
+        log "rotate" "archived ${count} logs → ${archive_name}"
+        return 0
     fi
+
+    # --- Could not run. ------------------------------------------------------
+    # The originals are deliberately NOT deleted, and rotation deliberately does
+    # NOT degrade to deleting or truncating them after N failures. These logs
+    # are the only record of what went wrong, on a machine that has just proved
+    # it cannot run the archive path; trading a slowly growing directory for
+    # irreversible loss of the evidence is the wrong way round. Accumulation is
+    # visible and recoverable; deletion is neither. Bound it by making it loud,
+    # not by making it destructive.
+    local first_line
+    first_line=$(printf '%s\n' "$err" | head -1)
+    [ -z "$first_line" ] && first_line="tar exited non-zero without a diagnostic"
+
+    # `|| prev=0` is not decoration: `read` is the command following the final
+    # `&&`, so it is the one position in this list that errexit does NOT exempt.
+    # An empty or unreadable state file would abort a caller running under
+    # `set -e` — losing the consolidation to the failure of a counter.
+    local prev=0
+    if [ -f "$state" ]; then read -r prev < "$state" 2>/dev/null || prev=0; fi
+    case "$prev" in ''|*[!0-9]*) prev=0 ;; esac
+    local streak=$((prev + 1))
+    printf '%s\n%s\n%s\n' "$streak" "$(date '+%Y-%m-%d %H:%M:%S')" "$first_line" \
+        > "$state" 2>/dev/null || true
+
+    if [ "$streak" -ge "$_ROTATE_ESCALATE_AFTER" ]; then
+        log "rotate" "ERROR: log rotation has now failed ${streak} times in a row — ${count} aged log files are accumulating unarchived in ${REMEMBER_LOG_DIR} and nothing will clear them until this is fixed. Run /remember:doctor. Last error: ${first_line}"
+    else
+        log "rotate" "ERROR: tar failed for ${count} logs: ${first_line}"
+    fi
+    return 1
 }

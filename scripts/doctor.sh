@@ -321,6 +321,40 @@ if [ -s "$_ERR_LOG" ]; then
 else
     echo "OK   No hook errors logged ($_ERR_LOG empty or absent)"
 fi
+
+# Log rotation (#252). A rotation that cannot run is invisible by construction:
+# it happens inside a consolidation the user never watches, it writes one line
+# into the very directory it failed to tidy, and it never escalates on its own.
+# The reporter's install failed every day for five weeks — hook-errors.log was
+# empty throughout, so this report would have said "OK" the entire time. This
+# is the pull-based half of the fix: rotate_logs leaves a breadcrumb, and the
+# command whose whole job is answering "is something silently broken?" reads it.
+#
+# WARN, not FAIL, and the VERDICT is deliberately left alone: rotation failing
+# does not stop capture, and overstating it would devalue the verdict line that
+# commands/doctor.md tells the operator to trust without scrolling up.
+#
+# The filename is log.sh's `_ROTATE_STATE_NAME`, spelled again here because this
+# script must not source log.sh (read-only report; see the header). Rename both
+# or neither.
+_ROTATE_STATE="$REMEMBER_DIR/logs/.rotate-failed"
+if [ -f "$_ROTATE_STATE" ]; then
+    _RT_COUNT=$(sed -n 1p "$_ROTATE_STATE" 2>/dev/null)
+    _RT_WHEN=$(sed -n 2p "$_ROTATE_STATE" 2>/dev/null)
+    _RT_ERR=$(sed -n 3p "$_ROTATE_STATE" 2>/dev/null)
+    _RT_PENDING=0
+    for _rt_f in "$REMEMBER_DIR"/logs/memory-*.log; do
+        [ -f "$_rt_f" ] && _RT_PENDING=$((_RT_PENDING + 1))
+    done
+    echo "WARN Log rotation has failed ${_RT_COUNT:-?} time(s) in a row (last ${_RT_WHEN:-unknown})"
+    echo "     Reason: ${_RT_ERR:-not recorded}"
+    # The count is every log file present, not only the aged ones — the live
+    # log is in there too. Worded so it does not claim they are all overdue.
+    echo "     $_RT_PENDING log file(s) currently in $REMEMBER_DIR/logs; the aged"
+    echo "     ones will not be archived until this is fixed. Capture is unaffected."
+else
+    echo "OK   Log rotation: no failure recorded"
+fi
 echo ""
 
 # ── Verdict ──────────────────────────────────────────────────────────────────
