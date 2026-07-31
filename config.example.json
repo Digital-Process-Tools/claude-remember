@@ -24,6 +24,13 @@
     "gpg_sign": false,
     "allow_remote_change": false
   },
+  "git_restore": {
+    "enabled": false,
+    "remote": "",
+    "branch": "",
+    "fetch_timeout_seconds": 20,
+    "diverged_notice_after": 3
+  },
   "time_format": "24h",
   "model": "haiku",
   "reject_pattern": "",

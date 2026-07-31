@@ -252,6 +252,11 @@ Put cross-project preferences (timezone, cooldowns) in `~/.remember/config.json`
 | `git_backup.reject_notice_after` | `3`              | Consecutive *permanently rejected* pushes before the backup interrupts you with a `systemMessage` on the next prompt, on top of the log line. A rejection never clears itself, so this only postpones a true report — it cannot swallow one. Transient failures (offline, no credentials) never count toward it. `0` disables the interruption and leaves the log line.                        |
 | `git_backup.gpg_sign`            | `false`          | Sign auto-backup commits. Default passes `--no-gpg-sign` so background commits never hang on a passphrase prompt. Set `true` only with non-interactive signing (e.g. a hardware key) to honour your global `commit.gpgSign`.            |
 | `git_backup.allow_remote_change` | `false`          | One-shot opt-in to accept a changed push remote. The backup hook records the remote URL on first push and aborts every later push if it changed, since a swapped URL can mean a poisoned `config.json` pointing at someone else's host. Set `true` only when you are deliberately re-pointing at a new repo, then set it back. See [`docs/git-backup-security.md`](docs/git-backup-security.md).                                     |
+| `git_restore.enabled`            | `false`          | **Off by default.** Fast-forward `~/.remember/` from the backup remote at session start, before memory is read into context — the read counterpart to git backup, for stores used from more than one machine ([#253](https://github.com/Digital-Process-Tools/claude-remember/issues/253)). Fast-forward only: a diverged store is refused and reported, never merged or rebased. The `git fetch` is detached and lands next session, so no network runs before your first prompt. See [Restoring on a second machine](#restoring-on-a-second-machine-off-by-default). |
+| `git_restore.remote`             | _(empty)_        | Remote to restore from. Empty → `git_restore.remote` falls back to `git_backup.remote`, then to `origin`. A store that pushes to one place and reads from another is almost always a mistake, so the default is to share the backup's setting.                                        |
+| `git_restore.branch`             | _(empty)_        | Branch to restore from. Empty → `git_backup.branch`, then the branch currently checked out. With a detached HEAD and this unset, the restore refuses rather than guessing.                                                                                                             |
+| `git_restore.fetch_timeout_seconds` | `20`          | How long the detached background fetch may run before it is killed. It never blocks your prompt either way; the bound exists so a hung transport cannot leave a git process alive indefinitely, and so a fetch that never came back is reported as such next session rather than passing for "up to date". |
+| `git_restore.diverged_notice_after` | `3`           | Consecutive session starts finding a *diverged* store before the restore interrupts you with a `systemMessage`, on top of the log line. A divergence never clears itself, so this only postpones a true report — it cannot swallow one. A failed or unreachable fetch never counts toward it. `0` disables the interruption and leaves the log line. |
 | `thresholds.min_human_messages`  | `3`              | Minimum human messages before saving. Keeps greetings and one-liners out of memory.                                                                                                                                                    |
 | `thresholds.min_exchanges_without_human` | `30`     | Save anyway when the span has at least this many exchanges, even if the human count is below `min_human_messages`. Without it, an agentic session (many tool calls, few human turns) never clears the gate and never saves at all. `0` disables the fallback. |
 | `thresholds.max_summary_failures` | `3`             | Consecutive summarization failures on the *same* span before it is dropped and the position advanced past it. Keeping the position is right for a transient error (the span retries next run), but a persistent failure would otherwise retry forever and no later span could ever be saved. `0` retries forever. |
@@ -382,6 +387,8 @@ cat > .gitignore <<'EOF'
 .last-git-backup-ts
 .git-backup-remote
 .git-backup-rejected
+.git-restore-fetch
+.git-restore-diverged
 */logs/
 */tmp/
 EOF
@@ -411,6 +418,40 @@ A push can fail for two very different reasons, and the backup log tells them ap
 The rejection is deliberately **not** resolved for you. `recent.md` and `archive.md` are rewritten wholesale by consolidation rather than appended, so a conflict in them is real and an automatic merge or rebase could corrupt memory silently. The plugin never runs `fetch`, `pull`, `merge` or `rebase` on your store.
 
 After `git_backup.reject_notice_after` consecutive rejections (default 3), the next prompt also carries a one-line `systemMessage` in your terminal, because a stopped backup that only ever appears in a log file is a stopped backup nobody notices — the reporter of #253 lost twelve days of off-machine memory that way. A deferred push never triggers it.
+
+#### Restoring on a second machine (off by default)
+
+Backup pushes. It does not pull. If you use the same store from more than one machine, the second machine reads its own stale memory, commits on top of it, and from then on cannot push at all — which is how the divergence above happens in the first place.
+
+`git_restore.enabled` turns on the other direction. **It is off by default and nothing changes until you set it**:
+
+```jsonc
+// ~/.remember/config.json
+{ "git_restore": { "enabled": true } }
+```
+
+With it on, each session start fast-forwards `~/.remember/` from the backup remote *before* memory is read into context, so the session sees what your other machine wrote.
+
+**It only ever fast-forwards.** No merge, no rebase, no reset, no checkout, no stash — a test fails if any of those verbs ever appears in the hook. If the store has diverged (commits on both sides) it is **refused and reported**, for the same reason a rejected push is not auto-resolved: `recent.md` and `archive.md` are rewritten wholesale by consolidation, so a conflict there is real and a wrong resolution corrupts memory silently. After `git_restore.diverged_notice_after` session starts in that state (default 3) the refusal also reaches you as a `systemMessage`.
+
+**No network runs before your first prompt.** The `git fetch` is detached and its result lands on the *next* session start; the fast-forward itself reads only refs an earlier session already fetched, and is purely local. Measured on the happy path, the whole hook costs **~26 ms** on top of process startup — against ~1.7 s for a warm `git fetch` to GitHub, which is what a synchronous version would have put in front of every prompt. The trade is that a change made on another machine arrives one session later than it could. A restore that lands one session late is still a restore; a session start that hangs waiting on a credential prompt is not.
+
+Because that fetch is unattended, its outcome is recorded and reported: `could NOT check the remote` is a state of its own and is never rendered as "already up to date". The relevant lines in `~/.remember/<slug>/logs/`:
+
+| Log line | What it means |
+| --- | --- |
+| `restored N commit(s) from …` | The other machine's memory is now on disk, and this session read it. |
+| `already up to date with …` | Checked against a fetch that succeeded. Nothing to do. |
+| `WARNING: the last background fetch FAILED …` / `… never completed` | **Could not check.** The comparison was against refs as old as the last fetch that did finish. Usually offline or missing credentials; run `git -C ~/.remember fetch` to see git's own error. |
+| `ERROR: the memory store has DIVERGED …` | Commits on both sides. Nothing was restored and nothing will be merged or rebased for you. Resolve it by hand. |
+| `store busy (backup in progress), skip` | A backup held the lock. Retried next session. |
+
+Add the restore's state files to your `.gitignore` alongside the backup's:
+
+```
+.git-restore-fetch
+.git-restore-diverged
+```
 
 ## Git worktrees
 

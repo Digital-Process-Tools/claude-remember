@@ -100,12 +100,16 @@ fi
 #   git-backup-notice   after_save/50-git-backup.sh: the backup remote has
 #                       rejected the last N pushes, so memory is committed
 #                       locally and going nowhere, and no retry will fix it.
+#   git-restore-notice  before_session_start/50-git-restore.sh: the store has
+#                       DIVERGED from its backup remote, so the memory loaded
+#                       this session is missing what the other machine wrote,
+#                       and nothing will merge or rebase it for you.
 #
 # Consumed on read: these are one-line nudges, not persistent banners. Adding
 # one is deliberately cheap and deliberately rare — this channel interrupts a
 # human mid-thought, and one that fires often is one that gets tuned out.
 NOTICE_MSG=""
-for _notice_name in capture-gap-notice git-backup-notice; do
+for _notice_name in capture-gap-notice git-backup-notice git-restore-notice; do
     NOTICE_FILE="$REMEMBER_DIR/tmp/$_notice_name"
     [ -f "$NOTICE_FILE" ] || continue
     _notice_body=$(cat "$NOTICE_FILE" 2>/dev/null)
