@@ -392,3 +392,139 @@ def test_doctor_reports_a_stuck_rotation(tmp_path):
     assert "Cannot connect to C" in out, (
         f"doctor reports the rotation failure without its cause:\n{out}"
     )
+
+
+# ── The archive is not a scratch file (#255) ─────────────────────────────────
+
+
+def _age_more_logs(logs: Path, count: int, age_days: int) -> list[str]:
+    """Add ``count`` more genuinely-aged logs, with names no earlier batch used.
+
+    Real files, really backdated — ``find -mtime +7`` is the selector in the
+    code under test, so a fixture that faked the selection would be testing
+    itself.
+    """
+    old = time.time() - age_days * DAY
+    names = []
+    for i in range(count):
+        stamp = time.strftime("%Y-%m-%d", time.localtime(old + i * DAY))
+        f = logs / f"memory-{stamp}.log"
+        f.write_text(f"08:33:14 [save] batch {age_days} entry {i}\n", encoding="utf-8")
+        os.utime(f, (old, old))
+        names.append(f.name)
+    return names
+
+
+def _archived_members(logs: Path) -> set[str]:
+    """Every log recoverable from every archive in the directory.
+
+    Deliberately a union over ``logs-*.tar.gz`` rather than a check on one
+    filename: the post-condition of #255 is that the data survives *somewhere*,
+    which is a weaker and more honest requirement than any particular naming
+    scheme. A fix that scatters, one that merges and one that renames all pass
+    this if and only if nothing was lost.
+    """
+    found: set[str] = set()
+    for a in sorted(logs.glob("logs-*.tar.gz")):
+        with tarfile.open(a, "r:gz") as tf:
+            found |= {
+                n for n in tf.getnames() if not Path(n).name.startswith("._")
+            }
+    return found
+
+
+def test_a_second_rotation_in_the_same_month_keeps_the_first_batch(tmp_path):
+    """#255: rotation deletes the originals, so the archive is the only copy.
+
+    The archive name carried only a month and ``tar -czf`` truncates, so the
+    second rotation of a calendar month replaced the first one's archive with
+    its own contents — and the logs inside it had already been deleted from
+    disk when it was written. Nothing survived anywhere.
+
+    The assertion is about the *data*, not the naming: after two rotations,
+    every log either still sits in the directory or is readable out of some
+    archive in it. Anything weaker would be a test of the naming scheme.
+    """
+    project, logs, first = _project(tmp_path, aged=2, age_days=40)
+
+    assert _status(_rotate(project)) == 0, "first rotation failed"
+    for n in first:
+        assert not (logs / n).exists(), (
+            f"{n} survived on disk, so this test would pass without an archive"
+        )
+    assert set(first) <= _archived_members(logs), (
+        "the first rotation did not archive what it deleted — the setup for "
+        "this test never happened"
+    )
+
+    second = _age_more_logs(logs, 2, age_days=20)
+    assert not set(second) & set(first), "batches must not share filenames"
+
+    assert _status(_rotate(project)) == 0, "second rotation failed"
+
+    recoverable = _archived_members(logs) | {
+        p.name for p in logs.glob("memory-*.log")
+    }
+    lost = sorted(set(first) - recoverable)
+    assert not lost, (
+        f"{lost} exist nowhere: deleted from disk by the first rotation and "
+        "then overwritten in the archive by the second (#255)"
+    )
+    assert set(second) <= recoverable, "the second batch was lost instead"
+
+
+def test_rotation_never_truncates_an_existing_archive(tmp_path):
+    """The mechanism, pinned directly.
+
+    ``tar -czf`` opens its archive with O_TRUNC. Whatever this rotation writes,
+    it must not be a file that already held the only copy of something — so no
+    pre-existing ``logs-*.tar.gz`` may lose bytes across a rotation.
+    """
+    project, logs, first = _project(tmp_path, aged=2, age_days=40)
+    assert _status(_rotate(project)) == 0
+
+    before = {
+        p.name: p.read_bytes() for p in logs.glob("logs-*.tar.gz")
+    }
+    assert before, "no archive was produced, so there is nothing to protect"
+
+    _age_more_logs(logs, 2, age_days=20)
+    assert _status(_rotate(project)) == 0
+
+    for name, blob in before.items():
+        after = logs / name
+        assert after.exists(), f"{name} was removed by a later rotation"
+        assert after.read_bytes() == blob, (
+            f"{name} was rewritten by a later rotation — the logs it held were "
+            "already deleted from disk (#255)"
+        )
+
+
+def test_originals_survive_a_tar_that_exits_zero_without_archiving(tmp_path):
+    """Deletion must be gated on the archive being complete, not on exit 0.
+
+    A tar that reports success and writes an archive missing members is the
+    general case behind #255: the success branch trusted the exit status and
+    removed the originals on the strength of it. Here tar produces a valid
+    archive containing only *one* of the aged logs and exits 0.
+    """
+    project, logs, names = _project(tmp_path, aged=3, age_days=20)
+    # A real tar, invoked with only the first member — a truthful exit 0 over
+    # an archive that is missing two files.
+    shim_dir, argv = _tar_shim(
+        tmp_path,
+        'args=(); for a in "$@"; do args+=("$a"); done\n'
+        'exec /usr/bin/tar "${args[0]}" "${args[1]}" "${args[2]}"',
+    )
+
+    _rotate(project, path_prefix=shim_dir)
+    _recorded_argv(argv)
+
+    recoverable = _archived_members(logs) | {
+        p.name for p in logs.glob("memory-*.log")
+    }
+    lost = sorted(set(names) - recoverable)
+    assert not lost, (
+        f"{lost} were deleted although the archive does not contain them — "
+        "tar exited 0 and that was taken as proof"
+    )

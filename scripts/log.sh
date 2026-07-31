@@ -504,8 +504,8 @@ dispatch() {
 # Archive log files older than 7 days into monthly tar.gz bundles.
 #
 # Finds memory-*.log files with mtime > 7 days, compresses them into
-# logs-YYYY-MM.tar.gz, and removes the originals on success.
-# No-op if no old logs exist.
+# logs-YYYY-MM.tar.gz, and removes the originals once the archive is verified
+# to contain them. No-op if no old logs exist.
 #
 # Args:
 #   (none — operates on REMEMBER_LOG_DIR)
@@ -518,8 +518,9 @@ dispatch() {
 #      that was about to happen.
 #
 # Side effects:
-#   Creates logs-YYYY-MM.tar.gz in the log directory.
-#   Deletes archived .log files.
+#   Creates logs-YYYY-MM.tar.gz — or logs-YYYY-MM-partN.tar.gz — in the log
+#   directory. NEVER writes over an archive that is already there.
+#   Deletes archived .log files, and only those the new archive lists back.
 #   Writes/removes .rotate-failed (consecutive-failure breadcrumb for doctor.sh).
 # Consecutive failures before the log line stops repeating itself and starts
 # naming the consequence. #252's reporter watched ONE identical line a day for
@@ -565,6 +566,65 @@ _ROTATE_STATE_NAME=".rotate-failed"
 # archive with no directory prefix. A name with no slash has nowhere to put a
 # colon, no tar can read it as remote, and no flag is needed on any of them.
 # Verified against GNU tar 1.35 and bsdtar 3.5.3 — identical members.
+#
+# THE ARCHIVE IS NEVER A NAME THAT ALREADY EXISTS, AND THE ORIGINALS ARE NEVER
+# DELETED ON THE STRENGTH OF AN EXIT STATUS (#255). Both halves are one bug:
+# `tar -czf` opens with O_TRUNC, this function deletes what it archived, and the
+# name carried only a month — so the second rotation of a month replaced the
+# first one's archive with its own contents, and the logs that had been inside
+# it were deleted from disk when it was written. Nothing survived anywhere.
+#
+# The month can never be made exact enough to fix that, and it is worth being
+# precise about why, because "just name it correctly" is the obvious answer.
+# `-mtime +7` selects every log that has aged out since the last successful
+# rotation — an unbounded window, so one archive legitimately spans months, and
+# the label is anyway derived from `date -v-7d` (the month a week ago) rather
+# than from the logs. But even a per-month grouping, which the filenames do
+# support, collides: logs from the same June age out on different days, so a
+# rotation in July and another a week later both want `logs-2026-06.tar.gz`.
+# Month granularity is revisited by construction. The name has to be *claimed*,
+# not computed.
+#
+# So: claim the first unused name, and on the second and later archive of a
+# month add `-partN`. This scatters a month across several tarballs, which is
+# the cost, and it is paid deliberately. The alternative that keeps one archive
+# per month is extract-merge-recreate, and its worst moment is unacceptable
+# here — a crash or a full disk midway through recreating leaves a truncated
+# archive whose contents were deleted from disk weeks earlier. This design's
+# worst moment is a crash between a verified archive and the deletion of its
+# originals: the next rotation archives them a second time under a new name.
+# Duplicated, never lost — the same trade the failure branch below already
+# makes, where accumulation is preferred to deletion.
+#
+# The claim uses `set -C` in a subshell so it is atomic: the redirection fails
+# if the file appeared between the test and the create, so two rotations racing
+# cannot select the same name. The empty file it leaves behind is the one tar
+# then overwrites — its own, by construction, which is why the failure paths
+# below may remove it without asking what was in it.
+_ROTATE_MAX_PARTS=100
+
+# The names the new archive does not list back, as a readable string; empty
+# means it lists all of them.
+#
+# tar exiting 0 is not evidence that a file is inside the archive — it is
+# evidence that tar had no complaint, which is a different claim, and #255's
+# deletion was gated on the second while meaning the first. Asking the archive
+# what it contains is the only question whose answer justifies `rm`.
+_rotate_missing_members() {
+    local dir="$1" archive="$2"
+    shift 2
+    local listing member missing=""
+    if ! listing=$( { cd "$dir" && tar -tzf "$archive"; } 2>/dev/null ); then
+        printf '%s' "the archive cannot be read back"
+        return 0
+    fi
+    for member in "$@"; do
+        printf '%s\n' "$listing" | grep -Fqx -- "$member" \
+            || missing="${missing}${missing:+, }${member}"
+    done
+    printf '%s' "$missing"
+}
+
 rotate_logs() {
     local state="${REMEMBER_LOG_DIR}/${_ROTATE_STATE_NAME}"
 
@@ -581,7 +641,6 @@ rotate_logs() {
 
     local archive_month
     archive_month=$(date -v-7d +%Y-%m 2>/dev/null || date -d '7 days ago' +%Y-%m)
-    local archive_name="logs-${archive_month}.tar.gz"
     local count
     count=$(echo "$old_logs" | wc -l | tr -d ' ')
 
@@ -590,14 +649,46 @@ rotate_logs() {
         basenames+=("$(basename "$f")")
     done <<< "$old_logs"
 
+    # Claim a name nothing else holds. The claim is by creation, not by a test:
+    # `[ -e ]` first only saves a fork on the common repeat, and the `set -C`
+    # redirection is what actually decides.
+    local archive_name="" candidate part=1
+    while [ "$part" -le "$_ROTATE_MAX_PARTS" ]; do
+        if [ "$part" -eq 1 ]; then
+            candidate="logs-${archive_month}.tar.gz"
+        else
+            candidate="logs-${archive_month}-part${part}.tar.gz"
+        fi
+        if [ ! -e "${REMEMBER_LOG_DIR}/${candidate}" ] \
+           && ( set -C; : > "${REMEMBER_LOG_DIR}/${candidate}" ) 2>/dev/null; then
+            archive_name="$candidate"
+            break
+        fi
+        part=$((part + 1))
+    done
+
     # The whole group is captured, not just tar: a failing `cd` writes its own
     # diagnostic, and that is exactly the kind of reason this used to lose.
-    local err
-    if err=$( { cd "$REMEMBER_LOG_DIR" && tar -czf "$archive_name" "${basenames[@]}"; } 2>&1 ); then
-        while IFS= read -r f; do rm -f "$f"; done <<< "$old_logs"
-        rm -f "$state" 2>/dev/null || true
-        log "rotate" "archived ${count} logs → ${archive_name}"
-        return 0
+    local err=""
+    if [ -z "$archive_name" ]; then
+        err="no unused archive name for ${archive_month} after ${_ROTATE_MAX_PARTS} tries — the names are taken, or ${REMEMBER_LOG_DIR} is not writable. Refusing to overwrite an existing archive"
+    elif err=$( { cd "$REMEMBER_LOG_DIR" && tar -czf "$archive_name" "${basenames[@]}"; } 2>&1 ); then
+        local missing
+        missing=$(_rotate_missing_members "$REMEMBER_LOG_DIR" "$archive_name" "${basenames[@]}")
+        if [ -z "$missing" ]; then
+            while IFS= read -r f; do rm -f "$f"; done <<< "$old_logs"
+            rm -f "$state" 2>/dev/null || true
+            log "rotate" "archived ${count} logs → ${archive_name}"
+            return 0
+        fi
+        # The archive was claimed by this call and held nothing before it, so
+        # removing it loses nothing — and leaving an incomplete archive next to
+        # the originals it does not contain is how a later rotation, or a
+        # person, comes to trust it.
+        rm -f "${REMEMBER_LOG_DIR}/${archive_name}" 2>/dev/null || true
+        err="tar exited 0 but ${archive_name} does not list back: ${missing}"
+    else
+        rm -f "${REMEMBER_LOG_DIR}/${archive_name}" 2>/dev/null || true
     fi
 
     # --- Could not run. ------------------------------------------------------
