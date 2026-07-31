@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.3] — One bad byte
+
+Five fixes in the backup path and one in the machinery that was supposed to report them, and the one worth leading with inverts an issue we filed ourselves.
+
+Those two halves belong in the same release. The backup could stop for four different reasons while reporting success — and when it did, `dispatch()` sent the hook's own diagnostic to `/dev/null` and logged a line naming which hook failed but neither why nor with what exit code. So the fixes below are the failures, and the last one is the reason nobody saw them.
+
+We reported that a corrupt cooldown marker would *bypass* the throttle, so the backup would run too often. The direction was backwards and the truth is worse. `50-git-backup.sh` sets `set -u` — with the comment *"not -e — we never want to fail loudly here"* — and then does arithmetic on the marker's contents with the variable bare inside `$(( ))`. Bash evaluates that as an arithmetic expression, so a single letter in the marker is an unbound variable reference. Execution stops a line or two later — above the lock, above the staging, above the commit — **and the hook exits 0**, which is the half that matters: `dispatch` sees success, so nothing anywhere reports that the backup did not run. (The precise shape is version-dependent: the arithmetic itself is fatal on bash 5, while on bash 3.2 it prints the same diagnostic, leaves the variable unset, and dies at the first *use* of it instead. Both end in the same place — stopped early, exit 0.) And because the marker was only rewritten after a successful commit, it stayed corrupt. **One bad byte from a crash mid-write stopped the backup permanently**, with a nameless `hook failed` as the only trace. The marker is validated now, and the fallback self-heals — the run it permits is the run that rewrites it.
+
+The file reasons explicitly about not failing loudly and picks the exact option that makes it fatal. That is the shape this project keeps finding in itself, arriving this time inside the safety reasoning.
+
+**A store whose push target is not named `origin` backed up nowhere, forever** — no issue reported this; it surfaced while fixing the ones that were. With `git_backup.remote` unset, the push follows the branch's upstream while the validation above it asked `git remote get-url origin`, so a perfectly good target was reported as "no remote configured" once per save. Worse, the poisoned-remote guard recorded and checked a URL that was **not** the one the push used, so it could be sidestepped through `branch.<name>.remote`. Both now ask git the same question `git push` asks.
+
+**A store reached through a symlink got neither backup nor restore, and said nothing.** Both hooks compared a path textually against a resolved `git rev-parse --show-toplevel`; they resolve first now.
+
+**A failed commit was a log line and the caller was told success**, and **hook state files accumulated untracked at the store root**, where a name collision would one day make `merge --ff-only` refuse. State moved to the repository's git common dir. Existing files are carried forward rather than abandoned, which is load-bearing rather than tidy: `.git-backup-remote` records the URL trusted on first push, so starting fresh would re-record whatever is configured now and silently forgive exactly the change that check exists to catch.
+
+**And a failed read of the last memory entry was handed to the summariser as "(no previous entry)"** — a claim about the file rather than a report of the read. The model then wrote the next entry with no deduplication anchor, as though starting fresh. Three states now, and the unreadable one says so.
+
+None of these destroyed anything. All of them stopped the backup while reporting that it had run.
+
 ### Fixed
 
 - **A hook that died lost both halves of its report at once** ([#277](https://github.com/Digital-Process-Tools/claude-remember/issues/277)) — the last statement of `dispatch()` ran every hook under `2>/dev/null` and reported a failure as `hook failed: <event>/<file>`. The redirect threw away what the hook said, the `||` threw away the status it said it with, and what reached the log proved something was broken while being unable to say what — the least actionable form a report can take.
