@@ -524,8 +524,9 @@ def _make_real_session(home_dir: str, project_dir: str, session_id: str) -> str:
 
     Returns the JSONL file path.
     """
-    import re as remod
-    slug = remod.sub(r'[^a-zA-Z0-9]', '-', project_dir)
+    from pipeline.slug import session_dir_slug
+
+    slug = session_dir_slug(project_dir)
     sdir = os.path.join(home_dir, ".claude", "projects", slug)
     os.makedirs(sdir, exist_ok=True)
     jsonl_path = os.path.join(sdir, session_id + ".jsonl")
