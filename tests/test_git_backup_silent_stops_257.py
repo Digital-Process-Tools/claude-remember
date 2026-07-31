@@ -421,7 +421,8 @@ def test_a_corrupt_cooldown_marker_does_not_kill_the_hook(tmp_path, corrupt):
     invalid base, and the hook DIES at that line — above the lock, above the
     add, above the commit. The marker is only rewritten after a successful
     commit, which is now unreachable, so one bad byte stops the backup
-    permanently and the only trace is dispatch's nameless `hook failed`.
+    permanently and the only trace was dispatch's nameless `hook failed` —
+    nameless until #277 gave it the exit status and bash's own diagnostic.
     """
     home, remember, remote, slug_dir, project = _store(tmp_path)
     (remember / ".last-git-backup-ts").write_text(corrupt, encoding="utf-8", errors="ignore")

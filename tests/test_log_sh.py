@@ -439,6 +439,262 @@ def _dispatch_warned_in_log(tmp_path: Path, keyword: str) -> bool:
     return False
 
 
+# ── a failing hook's own diagnostic (#277) ───────────────────────────────────
+#
+# dispatch() ran every hook under `2>/dev/null` and reported a failure as
+# `hook failed: <event>/<file>` — no exit status, no reason. Both halves of a
+# dying hook's report were discarded at once, which is the least actionable
+# form a report can take.
+#
+# It is not hypothetical. #258's worst case died exactly this way: a corrupt
+# cooldown marker went into `$(( ))`, `50-git-backup.sh` runs `set -u`, and
+# bash said `garbage: unbound variable` — naming the fault precisely, into
+# /dev/null. The backup then stopped permanently and the only trace anybody
+# got was the nameless line.
+#
+# What these pin is the post-condition, not a function's return value: a hook
+# that dies with a diagnostic leaves that diagnostic in a file a human reads.
+# `/remember:doctor` reports "Recent errors" from `logs/hook-errors.log`, so
+# that is the file, and it is asserted by name.
+
+
+def _human_readable_reports(tmp_path: Path) -> str:
+    """Everything a human is ever shown about a dispatch failure.
+
+    The daily log (log()'s destination) and hook-errors.log, which
+    /remember:doctor tails under "Recent errors". Concatenated, because
+    "somewhere a human reads" is the contract; _doctor_reports below pins the
+    surfaced route specifically.
+    """
+    parts = []
+    for log_file in tmp_path.rglob("memory-*.log"):
+        parts.append(log_file.read_text(encoding="utf-8", errors="replace"))
+    parts.append(_doctor_reports(tmp_path))
+    return "\n".join(parts)
+
+
+def _doctor_reports(tmp_path: Path) -> str:
+    """Just hook-errors.log — the file /remember:doctor actually tails."""
+    out = []
+    for err_log in tmp_path.rglob("hook-errors.log"):
+        out.append(err_log.read_text(encoding="utf-8", errors="replace"))
+    return "\n".join(out)
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="exit statuses and bash's own set -u diagnostic differ under Git Bash; "
+    "the capture itself is POSIX-shaped and is exercised on the POSIX legs.",
+)
+class TestFailingHookReportsWhyAndWithWhatStatus:
+    """#277 — the swallow that made #258 invisible."""
+
+    def test_the_dying_hooks_own_diagnostic_survives(self, tmp_path):
+        """The #258 fixture: `set -u` plus an unbound reference.
+
+        Bash prints `<name>: unbound variable` and the hook dies on that line,
+        above everything it was going to do. Before this change that sentence
+        went to /dev/null and the user was left with a filename.
+
+        NOT #258's literal `$(( ))` form, and the difference is worth naming:
+        under bash 3.2 (macOS's /bin/bash, the dev platform) an arithmetic
+        unbound reference prints the same diagnostic and then CONTINUES, exit
+        0 — where bash 5 exits 127. A fixture that dies on one platform and
+        not the other would pin nothing. A plain unbound expansion dies on
+        both, which is the property under test: a hook that failed said why.
+        """
+        hooks_dir = tmp_path / "hooks.d"
+        event_dir = hooks_dir / "test_event"
+        event_dir.mkdir(parents=True)
+        _write_hook(
+            event_dir,
+            "50-dies.sh",
+            '#!/bin/bash\nset -u\necho "$REMEMBER_COOLDOWN_MARKER"\necho unreachable\n',
+        )
+
+        result = _run_dispatch(tmp_path, hooks_dir)
+
+        assert result.returncode == 0, f"dispatch failed: {result.stderr}"
+        reports = _human_readable_reports(tmp_path)
+        assert "unbound variable" in reports, (
+            "bash named the fault exactly and no human-readable file has it:\n"
+            + reports
+        )
+        assert "50-dies.sh" in reports, "the report must still name which hook"
+
+    def test_the_exit_status_is_reported(self, tmp_path):
+        """`rc=127` and `rc=1` are already different diagnoses, and the status
+        is free — it was simply thrown away with the `||`."""
+        hooks_dir = tmp_path / "hooks.d"
+        event_dir = hooks_dir / "test_event"
+        event_dir.mkdir(parents=True)
+        _write_hook(event_dir, "50-rc.sh", "#!/bin/bash\nexit 42\n")
+
+        result = _run_dispatch(tmp_path, hooks_dir)
+
+        assert result.returncode == 0, f"dispatch failed: {result.stderr}"
+        reports = _human_readable_reports(tmp_path)
+        assert "42" in reports, (
+            "the hook's exit status is absent from every report:\n" + reports
+        )
+
+    def test_a_hook_that_says_nothing_is_reported_as_saying_nothing(self, tmp_path):
+        """Three states, not two: said something / said nothing / could not be
+        captured. A silent death must not read like a capture that failed."""
+        hooks_dir = tmp_path / "hooks.d"
+        event_dir = hooks_dir / "test_event"
+        event_dir.mkdir(parents=True)
+        _write_hook(event_dir, "50-mute.sh", "#!/bin/bash\nexit 3\n")
+
+        result = _run_dispatch(tmp_path, hooks_dir)
+
+        assert result.returncode == 0, f"dispatch failed: {result.stderr}"
+        reports = _human_readable_reports(tmp_path)
+        assert "no stderr" in reports, (
+            "a hook that printed nothing should say so, not look like a "
+            "capture that did not happen:\n" + reports
+        )
+
+    def test_a_truncated_capture_says_it_truncated(self, tmp_path):
+        """A bound that hides its own existence is another instance of the
+        defect being fixed here. If lines are dropped, the report says so."""
+        hooks_dir = tmp_path / "hooks.d"
+        event_dir = hooks_dir / "test_event"
+        event_dir.mkdir(parents=True)
+        _write_hook(
+            event_dir,
+            "50-chatty.sh",
+            '#!/bin/bash\nfor i in $(seq 1 40); do echo "STDERRLINE-$i" >&2; done\nexit 1\n',
+        )
+
+        result = _run_dispatch(tmp_path, hooks_dir)
+
+        assert result.returncode == 0, f"dispatch failed: {result.stderr}"
+        reports = _human_readable_reports(tmp_path)
+        assert "STDERRLINE-1" in reports, "the first lines are the diagnosis"
+        assert "STDERRLINE-40" not in reports, (
+            "40 lines of hook chatter reached the log unbounded — this fires "
+            "on every tool call"
+        )
+        assert "more line" in reports, (
+            "the capture was shortened and did not say so:\n" + reports
+        )
+
+    def test_the_report_is_one_line_per_failure(self, tmp_path):
+        """log() is a line protocol and doctor tails 5 lines. A multi-line
+        hook diagnostic must not turn one failure into five entries and push
+        the other four off the report."""
+        hooks_dir = tmp_path / "hooks.d"
+        event_dir = hooks_dir / "test_event"
+        event_dir.mkdir(parents=True)
+        _write_hook(
+            event_dir,
+            "50-multiline.sh",
+            "#!/bin/bash\nprintf 'first\\nsecond\\nthird\\n' >&2\nexit 1\n",
+        )
+
+        _run_dispatch(tmp_path, hooks_dir)
+
+        failure_lines = [
+            line for line in _doctor_reports(tmp_path).splitlines()
+            if "50-multiline.sh" in line
+        ]
+        assert len(failure_lines) == 1, (
+            f"one failure produced {len(failure_lines)} report lines: {failure_lines}"
+        )
+        assert "second" in failure_lines[0] and "third" in failure_lines[0]
+
+    def test_hook_stderr_never_reaches_the_calling_stream(self, tmp_path):
+        """Why the `2>/dev/null` was there at all, and it stays true.
+
+        dispatch runs inside PostToolUse/UserPromptSubmit/SessionStart hooks;
+        nothing a third-party hook writes may become output of the process the
+        agent is reading. Capturing it must not un-do that.
+        """
+        hooks_dir = tmp_path / "hooks.d"
+        event_dir = hooks_dir / "test_event"
+        event_dir.mkdir(parents=True)
+        _write_hook(
+            event_dir,
+            "50-loud.sh",
+            "#!/bin/bash\necho MARKER-LEAKED-TO-CALLER >&2\nexit 1\n",
+        )
+
+        result = _run_dispatch(tmp_path, hooks_dir)
+
+        assert "MARKER-LEAKED-TO-CALLER" not in result.stderr, (
+            "a hook's stderr reached the caller's own stderr"
+        )
+        assert "MARKER-LEAKED-TO-CALLER" not in result.stdout
+        assert "MARKER-LEAKED-TO-CALLER" in _human_readable_reports(tmp_path)
+
+    def test_a_hook_that_succeeds_stays_silent(self, tmp_path):
+        """Noise on the success path is what `2>/dev/null` was really buying.
+        A hook that chatters and exits 0 is not an event, and this runs on
+        every tool call."""
+        hooks_dir = tmp_path / "hooks.d"
+        event_dir = hooks_dir / "test_event"
+        event_dir.mkdir(parents=True)
+        _write_hook(
+            event_dir,
+            "50-noisy-ok.sh",
+            "#!/bin/bash\necho MARKER-ROUTINE-NOISE >&2\nexit 0\n",
+        )
+
+        _run_dispatch(tmp_path, hooks_dir)
+
+        reports = _human_readable_reports(tmp_path)
+        assert "MARKER-ROUTINE-NOISE" not in reports, (
+            "a successful hook's stderr was logged — on every tool call"
+        )
+
+    def test_a_failing_hook_does_not_abort_a_caller_running_set_e(self, tmp_path):
+        """save-session.sh and run-consolidation.sh both `set -e` around their
+        dispatch calls. The old `|| log` made the failure non-fatal by
+        accident of syntax; capturing the status must keep that property, or a
+        third-party hook gains the power to stop a save."""
+        hooks_dir = tmp_path / "hooks.d"
+        event_dir = hooks_dir / "test_event"
+        event_dir.mkdir(parents=True)
+        marker = tmp_path / "second-ran.txt"
+        _write_hook(event_dir, "10-fails.sh", "#!/bin/bash\necho boom >&2\nexit 9\n")
+        _write_hook(event_dir, "20-after.sh", f'#!/bin/bash\ntouch "{marker}"\n')
+
+        result = _run_dispatch(tmp_path, hooks_dir)
+
+        assert result.returncode == 0, (
+            f"a failing hook aborted the caller: rc={result.returncode} "
+            f"stderr={result.stderr}"
+        )
+        assert marker.exists(), "dispatch must continue to the next hook"
+
+    def test_stderr_that_cannot_be_captured_is_reported_as_uncaptured(self, tmp_path):
+        """The third state. If the capture file cannot be created, the report
+        must say the reason is missing rather than imply the hook was mute —
+        that distinction is the whole point of this issue."""
+        hooks_dir = tmp_path / "hooks.d"
+        event_dir = hooks_dir / "test_event"
+        event_dir.mkdir(parents=True)
+        _write_hook(event_dir, "50-dies.sh", "#!/bin/bash\necho why >&2\nexit 1\n")
+
+        # A regular FILE where the capture directory must be: creating the
+        # capture file underneath it is impossible, and no mkdir can fix it.
+        # Written by hand rather than through _make_dispatch_env, which would
+        # build the project tree a second time and collide with _run_dispatch.
+        remember_dir = tmp_path / "proj" / ".remember"
+        remember_dir.mkdir(parents=True, exist_ok=True)
+        (remember_dir / "tmp").write_text("not a directory", encoding="utf-8")
+
+        result = _run_dispatch(tmp_path, hooks_dir)
+
+        assert result.returncode == 0, f"dispatch failed: {result.stderr}"
+        reports = _human_readable_reports(tmp_path)
+        assert "50-dies.sh" in reports, "the failure must still be reported"
+        assert "not captured" in reports, (
+            "an uncapturable stderr must say so, not read as silence:\n" + reports
+        )
+
+
 # ── config() reads the merged config in one pass (#232) ──────────────────────
 #
 # config() used to spend one `jq` process per key. #230 measured PostToolUse at

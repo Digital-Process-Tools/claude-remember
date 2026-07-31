@@ -469,11 +469,101 @@ safe_eval() {
 # Usage:
 #   dispatch "after_save"
 REMEMBER_HOOKS_DIR="$PIPELINE_DIR/hooks.d"
+
+# How much of a failing hook's stderr reaches the report (#277).
+#
+# The bound exists because this loop runs on every tool call and a chatty hook
+# would otherwise write its whole output into the log each time. It is a bound
+# on the REPORT, not on the hook: the capture is a plain file, the hook writes
+# to it freely and is never sent a SIGPIPE by a reader that stopped listening —
+# a `head` in the pipeline would have changed the exit status of the very thing
+# being diagnosed.
+#
+# Five lines is where a shell diagnostic lives. `unbound variable`,
+# `command not found`, `Argument list too long` and a `set -x` trace's last
+# frames are all in the first few; nothing past them changed the diagnosis in
+# the #258 and #266 transcripts.
+#
+# WHAT IS DROPPED IS COUNTED AND SAID. A cap that shortens silently is another
+# instance of the defect this fixes, one layer down — the reader would have no
+# way to tell a hook that said three things from a hook that said three hundred.
+_DISPATCH_STDERR_LINES=5
+_DISPATCH_STDERR_LINE_CHARS=400
+
+# Render a captured stderr file as ONE log line, or say why it cannot.
+#
+# One line because `log()` is a line protocol and doctor.sh tails five lines of
+# hook-errors.log: a hook's three-line death turned into three entries would
+# push two other failures off the only report anybody reads.
+#
+# THREE outcomes, and the third is the point (#277):
+#   text        what the hook actually said, bounded and disclosed.
+#   no stderr   it exited without a word. A real, reportable fact.
+#   (caller)    the capture never happened — reported by the caller, which is
+#               the only one that knows, and never spelled like silence.
+#
+# No forks: read is a builtin, and the failure path is reached in a hook that
+# has already gone wrong.
+_dispatch_stderr_excerpt() {
+    local _file="$1"
+    local _line _kept=0 _dropped=0 _out=""
+    # `|| [ -n "$_line" ]` — a hook killed by a signal can leave a final line
+    # with no newline on it, and that is exactly the line that says why.
+    while IFS= read -r _line || [ -n "$_line" ]; do
+        [ -n "$_line" ] || continue
+        if [ "$_kept" -lt "$_DISPATCH_STDERR_LINES" ]; then
+            if [ "${#_line}" -gt "$_DISPATCH_STDERR_LINE_CHARS" ]; then
+                _line="${_line:0:$_DISPATCH_STDERR_LINE_CHARS} [line truncated]"
+            fi
+            _out="${_out:+$_out | }$_line"
+            _kept=$((_kept + 1))
+        else
+            _dropped=$((_dropped + 1))
+        fi
+    done < "$_file"
+    if [ "$_kept" -eq 0 ]; then
+        printf '%s' "no stderr — it exited without saying anything"
+        return 0
+    fi
+    [ "$_dropped" -eq 0 ] || _out="$_out [+$_dropped more line(s) not shown]"
+    printf '%s' "$_out"
+}
+
+# Report one failed hook, in both places a human looks.
+#
+# `log()` writes the daily narrative, which is where this failure belongs in
+# sequence. hook-errors.log is where `/remember:doctor` reports "Recent errors"
+# and what maintainers ask a reporter to paste — #252 is the demonstration that
+# the daily log ALONE is not read, and #260/#266 are the demonstration that
+# hook-errors.log is what gets looked at when something is wrong.
+#
+# Written by PATH, never by inherited stderr. The three Claude Code hooks have
+# already pointed their own stderr at this file (bootstrap-dirs.sh), so simply
+# dropping the `2>/dev/null` would land in the right place FOR THEM — and in the
+# agent's own stream for save-session.sh, run-consolidation.sh, and any hook
+# process whose bootstrap redirect was skipped on a read-only store. A hook must
+# never gain the ability to write into the session, so the destination is named
+# rather than inherited.
+_dispatch_report_failure() {
+    local _event="$1" _name="$2" _rc="$3" _why="$4"
+    local _msg="ERROR: hook failed: $_event/$_name (exit $_rc): $_why"
+    log "dispatch" "$_msg"
+    [ -d "$REMEMBER_DIR/logs" ] || return 0
+    printf '%s\n' "$(_remember_date +%H:%M:%S) [dispatch] $_msg" \
+        >> "$REMEMBER_DIR/logs/hook-errors.log" 2>/dev/null || true
+    return 0
+}
+
 dispatch() {
     local event="$1"
     local event_dir="$REMEMBER_HOOKS_DIR/$event"
     [ -d "$event_dir" ] || return 0
     local current_uid=""
+    # Both resolved on first use, like current_uid and for the same reason
+    # (#230): the shipped distribution's hooks.d/<event>/ holds a .gitkeep and
+    # nothing else, so the common case is a loop that finds nothing executable.
+    # Nothing below may cost that case a process, a directory or a file.
+    local _err_file="" _err_unavailable=""
     for hook in "$event_dir"/*; do
         [ -x "$hook" ] || continue
         # Resolved on first use, not on entry (#230). The distribution ships
@@ -496,9 +586,58 @@ dispatch() {
             log "dispatch" "WARNING: skipping world-writable hook: $event/$(basename "$hook")"
             continue
         fi
-        REMEMBER_PROJECT="${PROJECT_DIR:-.}" "$hook" 2>/dev/null \
-            || log "dispatch" "hook failed: $event/$(basename "$hook")"
+        # The capture file, prepared once and only once a hook is about to run.
+        # Overwritten per hook (`2>` truncates), removed when the loop ends.
+        if [ -z "$_err_file" ] && [ -z "$_err_unavailable" ]; then
+            _err_file="$REMEMBER_DIR/tmp/dispatch-stderr.$$"
+            # `|| true`, and it is load-bearing: `A || B` where BOTH fail is a
+            # failed compound command, and every caller of dispatch runs under
+            # `set -e`. Without it, a store whose tmp/ cannot be created aborts
+            # the save outright — the loud failure traded for the quiet one.
+            [ -d "$REMEMBER_DIR/tmp" ] || mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null || true
+            # Opened HERE rather than discovered at the redirect. The shell
+            # opens a redirection target before running the command and reports
+            # its own failure OUTSIDE the scope of that redirect — the #204
+            # lesson — so an unopenable `2>"$_err_file"` would both print to the
+            # caller's stderr and count as the hook failing when it never ran.
+            if ! : > "$_err_file" 2>/dev/null; then
+                _err_file=""
+                _err_unavailable="yes"
+            fi
+        fi
+
+        # `if`, not a bare command: save-session.sh and run-consolidation.sh
+        # both `set -e` around their dispatch calls, and the old `|| log` kept a
+        # failing hook non-fatal by accident of syntax. A bare invocation whose
+        # status is read afterwards would hand every third-party hook the power
+        # to abort a save.
+        local _rc=0
+        if [ -n "$_err_file" ]; then
+            if REMEMBER_PROJECT="${PROJECT_DIR:-.}" "$hook" 2>"$_err_file"; then
+                _rc=0
+            else
+                _rc=$?
+            fi
+        elif REMEMBER_PROJECT="${PROJECT_DIR:-.}" "$hook" 2>/dev/null; then
+            _rc=0
+        else
+            _rc=$?
+        fi
+        [ "$_rc" -eq 0 ] && continue
+
+        # Only a FAILING hook is reported. A hook that chatters and exits 0 is
+        # not an event, and this fires on every tool call — that noise is the
+        # one thing `2>/dev/null` was genuinely buying, and it is kept.
+        local _why
+        if [ -n "$_err_file" ]; then
+            _why=$(_dispatch_stderr_excerpt "$_err_file")
+        else
+            _why="stderr not captured — no writable $REMEMBER_DIR/tmp, so the reason is MISSING, not absent; rerun the hook by hand to see what it says"
+        fi
+        _dispatch_report_failure "$event" "${hook##*/}" "$_rc" "$_why"
     done
+    [ -z "$_err_file" ] || rm -f "$_err_file" 2>/dev/null
+    return 0
 }
 
 # Archive log files older than 7 days into monthly tar.gz bundles.
