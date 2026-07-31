@@ -1191,11 +1191,17 @@ class TestWindowsCompatIssue11:
         assert ":" not in result, "Colons not replaced"
 
     def test_session_dir_matches_bash_slug(self):
-        """Python slug matches bash sed 's/[^a-zA-Z0-9]/-/g' for all path types."""
+        """Python slug matches bash sed 's/[^a-zA-Z0-9]/-/g' for all path types.
+
+        The drive letter is lower-cased (#268): bash's session_dir_slug folds
+        it unconditionally since #263, and pipeline/slug.py now does the same
+        — Git for Windows ships cygpath, so the working majority's on-disk
+        stores are already spelled that way.
+        """
         for path, expected_slug in [
             ("/home/user/project", "-home-user-project"),
-            ("D:\\Users\\dev\\project", "D--Users-dev-project"),
-            ("D:/Users/dev/project", "D--Users-dev-project"),
+            ("D:\\Users\\dev\\project", "d--Users-dev-project"),
+            ("D:/Users/dev/project", "d--Users-dev-project"),
             ("/Users/dev/My Project", "-Users-dev-My-Project"),
         ]:
             result = _session_dir(path)
@@ -1271,10 +1277,11 @@ class TestWindowsCompatIssue11:
         """End-to-end: a /c/Users/... path post-normalization slugs to the same folder Claude Code uses."""
         # After resolve-paths.sh normalizes /c/Users/dev/project → C:\Users\dev\project,
         # the Python _session_dir (and bash sed) must produce the same slug Claude Code
-        # uses to store session JSONLs on Windows.
+        # uses to store session JSONLs on Windows — with the drive letter lower-cased
+        # (#268), matching bash's session_dir_slug fold (#263).
         normalized = r"C:\Users\dev\project"
         slug = _session_dir(normalized).rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
-        assert slug == "C--Users-dev-project", (
+        assert slug == "c--Users-dev-project", (
             f"Normalized Win32 path slug mismatch: got {slug!r}"
         )
 

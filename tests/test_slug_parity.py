@@ -156,6 +156,64 @@ def test_a_bmp_character_costs_one_dash():
     assert bash_slug("/tmp/日x") == "-tmp--x"
 
 
+# ── Drive-letter fold parity (#268) ─────────────────────────────────────────
+#
+# scripts/lib-slug.sh folds a leading Windows drive letter to lower case
+# (#263); pipeline/slug.py did not fold at all — it is a faithful
+# transcription of Claude Code's own JXA routine, which never sees a raw
+# drive letter, so a transcription of it has nothing to fold either. On
+# Windows, CLAUDE_PROJECT_DIR reaches the Python side already normalised to
+# the native Win32 form with an UPPER-case drive (resolve-paths.sh:174), and
+# pipeline.slug slugged that literally: `C--Users-...` from Python against
+# `c--Users-...` from bash, for the same directory. NTFS resolves both, so
+# nothing failed and nothing reported it.
+#
+# The JS oracle cannot pin this step: the fold happens to the input BEFORE
+# Claude Code's own regex ever runs, so js_slug() has no concept of a drive
+# letter at all. These compare bash and python directly instead, across both
+# cases and all three shapes CLAUDE_PROJECT_DIR is known to arrive in, so the
+# guarantee spans the normalisation step rather than a list of remembered
+# inputs — extending test_bash_and_python_agree the same way it already
+# covers everything else.
+DRIVE_PATHS = [
+    r"C:\Users\dev\project",
+    r"c:\Users\dev\project",
+    "C:/Users/dev/project",
+    "c:/Users/dev/project",
+    "/c/Users/dev/project",
+    "/C/Users/dev/project",
+    r"D:\Data\x",
+    "C:/",
+]
+
+
+@pytest.mark.parametrize("path", DRIVE_PATHS)
+def test_bash_and_python_agree_on_drive_letter_paths(path):
+    """#268: bash already folds the drive letter; python must agree."""
+    assert bash_slug(path) == py_slug(path)
+
+
+@pytest.mark.parametrize("path", [r"C:\Users\dev\project", "C:/Users/dev/project"])
+def test_the_drive_letter_folds_to_lower_case(path):
+    """The direction is pinned explicitly, not just cross-checked (#263's PR):
+    cygpath already lower-cases, so the working majority's on-disk stores are
+    already spelled that way — uppercasing would "fix" the minority and
+    rename every other store. A bare bash==python equality would still pass
+    if both sides folded to upper case instead."""
+    assert py_slug(path).startswith("c--"), py_slug(path)
+    assert bash_slug(path).startswith("c--"), bash_slug(path)
+
+
+def test_a_drive_letter_not_at_the_start_is_left_alone():
+    """The fold is anchored to position 0. An embedded 'C:' elsewhere in a
+    path is an ordinary colon to both implementations, not a drive letter —
+    folding it would be scope creep past what #263 established."""
+    path = "/tmp/weird:C:embedded"
+    expected = "-tmp-weird-C-embedded"
+    assert py_slug(path) == expected
+    assert bash_slug(path) == expected
+
+
 def test_external_storage_dir_uses_the_real_slug_without_detect_tools():
     """#158: lib-memory-dir.sh carried a naive copy of its own.
 

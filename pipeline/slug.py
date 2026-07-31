@@ -75,8 +75,34 @@ def path_hash(path: str) -> str:
     return _to_base36(abs(acc))
 
 
+def _fold_drive_letter(path: str) -> str:
+    """Lower-case a leading Windows drive letter, matching lib-slug.sh (#268).
+
+    scripts/lib-slug.sh folds this unconditionally since #263; this module
+    did not fold at all, because it is a transcription of Claude Code's own
+    JXA routine, which never sees a raw drive letter — the host normalises
+    before calling it. On Windows, CLAUDE_PROJECT_DIR reaches this function
+    already normalised to the native Win32 form with an UPPER-case drive
+    (resolve-paths.sh's own regex uppercases), so this slugged it literally
+    and disagreed with the shell side by one character's case.
+
+    The direction is not a free choice (see #263's PR): Git for Windows
+    ships cygpath, so the working majority's on-disk stores are already
+    spelled with the lower-case drive; folding the other way would fix the
+    minority and rename every other store.
+
+    Anchored to position 0 only, matching lib-slug.sh's `case "$path" in
+    ?:*)`: an embedded ``X:`` elsewhere in a path is an ordinary colon, not a
+    drive letter, and must not be touched.
+    """
+    if len(path) >= 2 and path[1] == ":" and "A" <= path[0] <= "Z":
+        return path[0].lower() + path[1:]
+    return path
+
+
 def session_dir_slug(path: str) -> str:
     """The directory name Claude Code uses for ``path``."""
+    path = _fold_drive_letter(path)
     slug = "".join(
         c if c.isascii() and c.isalnum() else "-" * (2 if ord(c) > 0xFFFF else 1)
         for c in path

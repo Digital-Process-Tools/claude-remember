@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`pipeline/slug.py` did not fold the Windows drive letter that `scripts/lib-slug.sh` has folded since #263** ([#268](https://github.com/Digital-Process-Tools/claude-remember/issues/268)) — `resolve-paths.sh` normalises `CLAUDE_PROJECT_DIR` to the native Win32 form with an UPPER-case drive before either side ever sees it. Bash then lower-cases that drive letter unconditionally; Python is a faithful transcription of Claude Code's own JXA slug routine, which never receives a raw drive letter at all (the host folds before calling it), so the transcription had nothing to fold either — and slugged the upper-case drive literally. `C--Users-…` from Python against `c--Users-…` from bash, for the same directory. NTFS resolves both, so nothing failed and nothing reported it; `extract.py` uses the Python slug to find the session directory, so it read a differently-cased path than the store the git-backup hook tracks.
+
+  `pipeline/slug.py` now folds a leading drive letter the same way, in the same direction (lower case — not a free choice; see #263's PR: Git for Windows ships cygpath, so the working majority's on-disk stores are already spelled that way). `tests/test_slug_parity.py` is extended to assert bash and Python agree across both cases and all three shapes `CLAUDE_PROJECT_DIR` is known to arrive in (`C:\…`, `c:/…`, `/c/…`), rather than adding the one input that was missing — the guarantee now spans the normalisation step, which is the same shape of gap #263 itself was.
+
+  Two pre-existing tests in `tests/test_path_resolution.py` (predating #263, from the original Windows-compat issue) asserted the old un-folded upper-case slug as correct; they are updated to the now-verified value.
+
 ## [0.12.3] — One bad byte
 
 Five fixes in the backup path and one in the machinery that was supposed to report them, and the one worth leading with inverts an issue we filed ourselves.
