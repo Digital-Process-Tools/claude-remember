@@ -140,15 +140,45 @@ fi
 # (3 shell sites + Python `_session_dir`) align with Claude Code's storage.
 # On Linux/macOS bash $OSTYPE is "linux-gnu" or "darwin*"; the case below
 # never matches and PROJECT_DIR is left untouched.
+# All FOUR shapes, not just the POSIX one (#263). $CLAUDE_PROJECT_DIR does not
+# always arrive in the same form on the same machine: the reporter's log carries
+# `/c/Users/...` and `c:/Users/...` within a single day. Only the first matched,
+# so only the first was normalised, and one directory produced two different
+# slugs. NTFS is case-insensitive and hid that everywhere except git, whose
+# pathspecs are not — `git add -- "$SLUG/"` matched nothing for twelve days and
+# the backup reported an empty store.
+#
+# A path carrying no drive letter at all falls through untouched, which is what
+# a genuine POSIX path under MSYS (/tmp, /usr) needs.
+#
+# The drive-form regex lives in a variable: a bracket expression containing a
+# backslash is not portable to write inline on the right of `=~`.
+_REMEMBER_WIN_DRIVE_RE='^([a-zA-Z]):[/\](.*)$'
 case "$OSTYPE" in
     msys|cygwin)
-        if [[ "$PROJECT_DIR" =~ ^/([a-zA-Z])/(.*)$ ]]; then
-            _drive=$(printf '%s' "${BASH_REMATCH[1]}" | tr '[:lower:]' '[:upper:]')
-            _rest="${BASH_REMATCH[2]//\//\\}"
+        _drive=""
+        _rest=""
+        # Cygwin's mount prefix first: /cygdrive/c/... cannot match the MSYS
+        # form below, because "cygdrive" is not one character.
+        if [[ "$PROJECT_DIR" =~ ^/cygdrive/([a-zA-Z])/(.*)$ ]]; then
+            _drive="${BASH_REMATCH[1]}"
+            _rest="${BASH_REMATCH[2]}"
+        elif [[ "$PROJECT_DIR" =~ ^/([a-zA-Z])/(.*)$ ]]; then
+            _drive="${BASH_REMATCH[1]}"
+            _rest="${BASH_REMATCH[2]}"
+        elif [[ "$PROJECT_DIR" =~ $_REMEMBER_WIN_DRIVE_RE ]]; then
+            _drive="${BASH_REMATCH[1]}"
+            _rest="${BASH_REMATCH[2]}"
+        fi
+        if [ -n "$_drive" ]; then
+            _drive=$(printf '%s' "$_drive" | tr '[:lower:]' '[:upper:]')
+            _rest="${_rest//\//\\}"
             PROJECT_DIR="${_drive}:\\${_rest}"
         fi
+        unset _drive _rest
         ;;
 esac
+unset _REMEMBER_WIN_DRIVE_RE
 
 # --- Validate both paths exist ---
 if [ ! -d "$PROJECT_DIR" ]; then

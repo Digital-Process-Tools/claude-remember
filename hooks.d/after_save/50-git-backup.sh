@@ -270,6 +270,50 @@ esac
     # Auto-untrack logs/tmp if they were accidentally staged before .gitignore was in place.
     git -C "$REPO_ROOT" rm --cached -- "$SLUG/logs/" "$SLUG/tmp/" 2>/dev/null || true
 
+    # ── A pathspec that cannot match is not an empty store (#263) ────────────
+    # `git add -- "$SLUG/"` staging nothing has two completely different causes
+    # and the guard below cannot tell them apart: the store has nothing new to
+    # save, or the pathspec matches no path git tracks. The reporter ran twelve
+    # days on the second while being told the first, every few minutes.
+    #
+    # Their slug differed from the tracked one by the case of the drive letter
+    # alone. NTFS is case-insensitive, so REMEMBER_DIR resolved, memory saved,
+    # and every layer above git was satisfied. Git's pathspecs are case-sensitive
+    # on every platform, so `add` matched nothing and `diff --cached --quiet`
+    # answered "clean" — the correct answer to the question it was asked, and the
+    # wrong answer to the one that mattered.
+    #
+    # So: three states, not two. Committed / clean / this slug cannot address its
+    # own history. The third is asked FIRST, and asked of git rather than of the
+    # filesystem, because a case-insensitive filesystem is precisely what hides
+    # it — and asked whether or not anything changed, because the condition is
+    # structural and a store that is clean right now will still lose the next
+    # thing it writes.
+    #
+    # `:(icase)` needs a git that understands pathspec magic; an older one errors
+    # and prints nothing, which lands back on the previous behaviour rather than
+    # on a false accusation.
+    #
+    # Nothing is renamed automatically. A case-only rename of a tracked memory
+    # tree is exactly the class of repair `_push_and_report` already refuses to
+    # perform for a diverged remote: recent.md and archive.md are rewritten
+    # wholesale by consolidation, so a wrong guess here corrupts memory silently.
+    # A brand-new slug has no tracked path either and is the normal first-backup
+    # case, so a report requires positive evidence — a tracked sibling that
+    # differs from this slug by case alone.
+    if [ -z "$(git -C "$REPO_ROOT" ls-files -- "$SLUG/" 2>/dev/null | head -n 1)" ]; then
+        TRACKED_VARIANT=$(git -C "$REPO_ROOT" ls-files -- ":(icase)$SLUG/" 2>/dev/null \
+            | awk -F/ 'NF > 1 { print $1; exit }')
+        if [ -n "$TRACKED_VARIANT" ] && [ "$TRACKED_VARIANT" != "$SLUG" ]; then
+            FIX_CMD="git -C '$REPO_ROOT' mv -- '$TRACKED_VARIANT' '$SLUG.tmp' && git -C '$REPO_ROOT' mv -- '$SLUG.tmp' '$SLUG'"
+            log "git-backup" "ERROR: this project's memory is tracked as '$TRACKED_VARIANT/' but this session computed '$SLUG/' — git pathspecs are case-sensitive, so nothing under '$SLUG/' can ever be staged and the backup has STOPPED for this project. It will not resume on its own. Nothing here will rename it for you: run $FIX_CMD (two steps, because a case-only rename is a no-op on a case-insensitive filesystem), then commit."
+            mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null || true
+            printf '%s\n' "remember: git backup has STOPPED for this project. Its memory is tracked in $REPO_ROOT as '$TRACKED_VARIANT/' but is being written to '$SLUG/', and git can match neither to the other — every save since is committed nowhere. Rename the tracked directory: $FIX_CMD (two steps — a case-only rename is a no-op on a case-insensitive filesystem), then commit. Nothing will be renamed for you." \
+                > "$REMEMBER_DIR/tmp/git-backup-notice" 2>/dev/null || true
+            exit 0
+        fi
+    fi
+
     # Stage only this slug's subtree. -- required: slug names may start with '-'.
     git -C "$REPO_ROOT" add -- "$SLUG/" 2>/dev/null
 

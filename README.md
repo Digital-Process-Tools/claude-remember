@@ -423,6 +423,26 @@ The rejection is deliberately **not** resolved for you. `recent.md` and `archive
 
 After `git_backup.reject_notice_after` consecutive rejections (default 3), the next prompt also carries a one-line `systemMessage` in your terminal, because a stopped backup that only ever appears in a log file is a stopped backup nobody notices — the reporter of #253 lost twelve days of off-machine memory that way. A deferred push never triggers it.
 
+#### When a commit does not happen
+
+`nothing to commit for <slug>, skip` used to cover two states as well: the store
+really had nothing new, or the pathspec matched nothing git tracks. A Windows
+install ran twelve days on the second while being told the first
+([#263](https://github.com/Digital-Process-Tools/claude-remember/issues/263)) —
+its slug differed from the tracked one by the case of the drive letter, NTFS is
+case-insensitive so every layer above git was satisfied, and git's pathspecs are
+case-sensitive so `git add` matched nothing.
+
+| Log line | What it means | What to do |
+| --- | --- | --- |
+| `committed <slug>` | Memory is in the local store. | Nothing. |
+| `nothing to commit for <slug>, skip` | The store has nothing new since the last backup. | Nothing. |
+| `ERROR: this project's memory is tracked as '<other>/' but this session computed '<slug>/' …` | Git tracks this project's memory under a different spelling and cannot match the two. **No retry can fix this** — every save is being committed nowhere. | Rename the tracked directory, in two steps because a case-only rename is a no-op on a case-insensitive filesystem: `git -C ~/.remember mv -- '<other>' '<slug>.tmp' && git -C ~/.remember mv -- '<slug>.tmp' '<slug>'`, then commit. |
+
+As with a rejected push, the rename is deliberately **not** done for you, and it
+also carries a one-line `systemMessage` on the next prompt — the condition never
+clears itself, so a log line alone is what let the original go unnoticed.
+
 #### Restoring on a second machine (off by default)
 
 Backup pushes. It does not pull. If you use the same store from more than one machine, the second machine reads its own stale memory, commits on top of it, and from then on cannot push at all — which is how the divergence above happens in the first place.
