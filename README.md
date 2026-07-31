@@ -256,6 +256,8 @@ Put cross-project preferences (timezone, cooldowns) in `~/.remember/config.json`
 | `git_backup.remote`              | _(empty)_        | Remote to push memory backups to. Empty → bare `git push`, relying on the branch's upstream tracking (the standard `origin main` setup). Set this if you have multiple remotes or a non-standard tracking config.                      |
 | `git_backup.branch`              | _(empty)_        | Branch to push to. Only used when `git_backup.remote` is set; empty pushes the current branch. The resolved remote/branch is logged on the first push.                                                                                 |
 | `git_backup.reject_notice_after` | `3`              | Consecutive *permanently rejected* pushes before the backup interrupts you with a `systemMessage` on the next prompt, on top of the log line. A rejection never clears itself, so this only postpones a true report — it cannot swallow one. Transient failures (offline, no credentials) never count toward it. `0` disables the interruption and leaves the log line.                        |
+| `git_backup.commit_notice_after` | `3`              | Consecutive *failed commits* before the backup interrupts you with a `systemMessage`, on top of the log line. A failed commit is worse than a failed push — the memory is recorded in no git history at all, not even locally — and every cause is durable (no `user.email`, a full disk, a stale index lock, a pre-commit hook on the backup repo), so this only postpones a true report. git's own error is always in the log line. `0` disables the interruption. |
+| `git_backup.no_remote_notice_after` | `10`          | Consecutive saves with **no remote configured** before the backup says so once — and only once for the lifetime of the store. Unlike every other counter here the condition may be entirely intentional: a local-only history is a legitimate choice, and a notice that repeated on every save would cost the others their meaning. `0` disables it. |
 | `git_backup.gpg_sign`            | `false`          | Sign auto-backup commits. Default passes `--no-gpg-sign` so background commits never hang on a passphrase prompt. Set `true` only with non-interactive signing (e.g. a hardware key) to honour your global `commit.gpgSign`.            |
 | `git_backup.allow_remote_change` | `false`          | One-shot opt-in to accept a changed push remote. The backup hook records the remote URL on first push and aborts every later push if it changed, since a swapped URL can mean a poisoned `config.json` pointing at someone else's host. Set `true` only when you are deliberately re-pointing at a new repo, then set it back. See [`docs/git-backup-security.md`](docs/git-backup-security.md).                                     |
 | `git_restore.enabled`            | `false`          | **Off by default.** Fast-forward `~/.remember/` from the backup remote at session start, before memory is read into context — the read counterpart to git backup, for stores used from more than one machine ([#253](https://github.com/Digital-Process-Tools/claude-remember/issues/253)). Fast-forward only: a diverged store is refused and reported, never merged or rebased. The `git fetch` is detached and lands next session, so no network runs before your first prompt. See [Restoring on a second machine](#restoring-on-a-second-machine-off-by-default). |
@@ -386,15 +388,9 @@ Because `~/.remember/` lives outside any project repo it won't be accidentally c
 cd ~/.remember
 git init
 git remote add origin git@github.com:youruser/remember-backup.git  # private repo
-# Write .gitignore BEFORE any git add — this excludes runtime state and log files.
+# Write .gitignore BEFORE any git add — this excludes log and tmp dirs.
 # Running git add before this step will track log dirs you don't want committed.
 cat > .gitignore <<'EOF'
-.git-backup.lock
-.last-git-backup-ts
-.git-backup-remote
-.git-backup-rejected
-.git-restore-fetch
-.git-restore-diverged
 */logs/
 */tmp/
 EOF
@@ -402,6 +398,17 @@ git add .gitignore config.json
 git commit -m "init: remember config"
 git push -u origin main
 ```
+
+> **Where the hooks keep their own state.** Nothing is written to the store
+> root. The backup and restore hooks keep their lock, cooldown stamp, recorded
+> remote URL and failure counters inside the repository's git directory
+> (`.git/remember/`), which git never tracks, never merges and never reports —
+> so no `.gitignore` entry is needed and `git status` in your store stays clean.
+> Versions before this one wrote those files beside your memory as
+> `.git-backup-*` / `.git-restore-*` / `.last-git-backup-ts`; they are moved
+> automatically on the next backup, and a copy you had already committed is left
+> alone rather than deleted out of your repository. If you have those names in
+> an existing `.gitignore`, they are harmless and can be removed at your leisure.
 
 > **Note:** This first commit only tracks `.gitignore` and `config.json` — there's no memory in the backup yet. Per-project slug directories aren't tracked until the `after_save` hook runs after your next `/remember`. To confirm backup is working, run `/remember` once, then check `cd ~/.remember && git log` for an automatic commit. (If you already have memory to commit now, `git add <slug>/` it explicitly before the first push.)
 
@@ -472,12 +479,12 @@ Because that fetch is unattended, its outcome is recorded and reported: `could N
 | `ERROR: the memory store has DIVERGED …` | Commits on both sides. Nothing was restored and nothing will be merged or rebased for you. Resolve it by hand. |
 | `store busy (backup in progress), skip` | A backup held the lock. Retried next session. |
 
-Add the restore's state files to your `.gitignore` alongside the backup's:
-
-```
-.git-restore-fetch
-.git-restore-diverged
-```
+The restore's state files need no `.gitignore` entry — like the backup's, they
+live in `.git/remember/` rather than beside your memory. That is not only
+tidiness: `git merge --ff-only` refuses when an untracked file would be
+overwritten, so a state file at the store root is a name the restore collides
+with the day a remote carries it, and the thing that breaks is the
+fast-forward itself.
 
 ## Git worktrees
 

@@ -48,6 +48,7 @@ from .test_git_backup_hook import (  # noqa: E402
     REPO_ROOT,
     _git,
     _run_hook,
+    hook_state,
     make_external_remember_repo,
     wait_for_lock_release,
 )
@@ -131,7 +132,8 @@ def _store(tmp_path: Path, *, diverge: bool = True):
 
 def _save_again(remember: Path, slug_dir: Path, n: int) -> None:
     """New content plus a cleared cooldown, so the next hook run does real work."""
-    (remember / ".last-git-backup-ts").write_text("0", encoding="utf-8")
+    hook_state(remember, ".last-git-backup-ts", create_dir=True).write_text(
+        "0", encoding="utf-8")
     (slug_dir / "now.md").write_text(f"## 10:0{n} | test\nMemory {n}.\n", encoding="utf-8")
 
 
@@ -399,7 +401,7 @@ class TestEveryPushSiteClassifies:
     def _run_rejecting(self, tmp_path, *, state, cfg):
         home, remember, remote, slug_dir, project = _store(tmp_path)
         if state is not None:
-            (remember / ".git-backup-remote").write_text(
+            hook_state(remember, ".git-backup-remote", create_dir=True).write_text(
                 state.format(remote=remote), encoding="utf-8"
             )
         _run(slug_dir, project, home, remember, cfg)

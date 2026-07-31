@@ -42,8 +42,30 @@ unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
 [ "$REPO_ROOT" = "$PROJECT_DIR" ] && exit 0
 
 # REPO_ROOT must be the toplevel of a git repo, not just inside one.
+#
+# Compared RESOLVED rather than textually (#260). `--show-toplevel` answers with
+# a resolved path while REPO_ROOT is spelled however REMEMBER_DIR was, so any
+# symlink in any component made the two differ — and this `exit 0` sits above
+# every log call in the file, so the backup did nothing, forever, while the
+# store looked exactly like a healthy one. macOS makes that ordinary rather than
+# exotic: /var is a symlink to /private/var, so every store under TMPDIR is
+# already in this state.
+#
+# The guard itself is kept, because it is what stops the hooks operating on a
+# user's project repo by accident: a store that is a SUBDIRECTORY of some larger
+# repo must still be refused. Resolving both sides narrows the refusal to that
+# case instead of catching honest stores with it.
+_gb_realpath() {
+    ( cd "$1" 2>/dev/null && pwd -P ) || printf '%s' "$1"
+}
 TOPLEVEL=$(git -C "$REPO_ROOT" rev-parse --show-toplevel 2>/dev/null) || exit 0
-[ "$TOPLEVEL" = "$REPO_ROOT" ] || exit 0
+if [ "$(_gb_realpath "$TOPLEVEL")" != "$(_gb_realpath "$REPO_ROOT")" ]; then
+    # Three states, not two: this is not "ran, nothing to do". The store sits
+    # inside a repository the hook declines to manage, and until now that was
+    # indistinguishable from a store it was managing correctly.
+    log "git-backup" "declined: $REPO_ROOT is not the toplevel of its git repository (that is $TOPLEVEL) — a memory store inside a larger repo is never committed or pushed by this hook, deliberately. Nothing here is backed up. Give the store its own repository if you want it backed up."
+    exit 0
+fi
 
 # ── Never back up into the project's own repository (#138) ───────────────────
 # The equality check above only catches the plain legacy layout. Since #127,
@@ -70,7 +92,7 @@ _gb_common_dir() {
             *) _out="$_d/$_out" ;;
         esac
     fi
-    ( cd "$_out" 2>/dev/null && pwd -P ) || printf '%s' "$_out"
+    _gb_realpath "$_out"
 }
 
 PROJECT_COMMON_DIR=$(_gb_common_dir "$PROJECT_DIR") || PROJECT_COMMON_DIR=""
@@ -81,11 +103,72 @@ if [ -n "$PROJECT_COMMON_DIR" ] && [ "$PROJECT_COMMON_DIR" = "$BACKUP_COMMON_DIR
     exit 0
 fi
 
+# ── Where hook state lives (#261) ────────────────────────────────────────────
+# Not at the store root. `git merge --ff-only` refuses when an untracked file
+# would be overwritten, so every state file sitting beside the user's memory is
+# a name the restore half collides with the day a remote carries it — the
+# mechanism the feature depends on being the mechanism that breaks it. It also
+# meant every `git status` in the store showed noise the plugin created, which
+# trains a user to ignore that output.
+#
+# The git common dir is the right home, and it is the only option that needs no
+# .gitignore, no user action, and no edit by the plugin to a tracked file inside
+# the user's own backup repository: git never tracks it, never merges it, never
+# reports it. It is shared by every worktree of the repo, which is what keeps
+# the lock shared with the restore half. These values are also genuinely
+# per-clone — a timestamp, a counter, a lock, a recorded URL are properties of
+# this machine's relationship with the store, not of the memory in it.
+#
+# If it cannot be determined we stay exactly where we were rather than invent a
+# location: three states, and the third is "could not relocate", not a guess.
+if [ -n "$BACKUP_COMMON_DIR" ] && mkdir -p "$BACKUP_COMMON_DIR/remember" 2>/dev/null; then
+    GB_STATE_DIR="$BACKUP_COMMON_DIR/remember"
+else
+    GB_STATE_DIR="$REPO_ROOT"
+fi
+
+# Existing stores already have these files at the root, and they are carried
+# forward rather than abandoned. `.git-backup-remote` is the reason this is not
+# optional: it records the URL trusted on the first push and aborts if it later
+# changes, so starting fresh at a new location would re-record whatever URL is
+# configured now — silently forgiving exactly the change the check exists to
+# catch. A file git TRACKS is copied and left in place; staging a deletion
+# inside the user's backup repository is not this hook's business. The lock is
+# not carried at all — a lock is not state, and a leftover one is only litter.
+if [ "$GB_STATE_DIR" != "$REPO_ROOT" ]; then
+    for _gb_old in .last-git-backup-ts .git-backup-remote .git-backup-rejected \
+                   .git-restore-fetch .git-restore-diverged; do
+        [ -f "$REPO_ROOT/$_gb_old" ] || continue
+        [ -e "$GB_STATE_DIR/${_gb_old#.}" ] && continue
+        cp "$REPO_ROOT/$_gb_old" "$GB_STATE_DIR/${_gb_old#.}" 2>/dev/null || continue
+        if [ -z "$(git -C "$REPO_ROOT" ls-files -- "$_gb_old" 2>/dev/null)" ]; then
+            rm -f "$REPO_ROOT/$_gb_old" 2>/dev/null || true
+        fi
+    done
+    if [ -f "$REPO_ROOT/.git-backup.lock" ] && \
+       [ -z "$(git -C "$REPO_ROOT" ls-files -- .git-backup.lock 2>/dev/null)" ]; then
+        rm -f "$REPO_ROOT/.git-backup.lock" 2>/dev/null || true
+    fi
+fi
+
 # ── Cooldown ─────────────────────────────────────────────────────────────────
-COOLDOWN_MARKER="$REPO_ROOT/.last-git-backup-ts"
+COOLDOWN_MARKER="$GB_STATE_DIR/last-git-backup-ts"
 BACKUP_COOLDOWN=$(config ".cooldowns.git_backup_seconds" 900)
 if [ -f "$COOLDOWN_MARKER" ]; then
     LAST_MOD=$(cat "$COOLDOWN_MARKER" 2>/dev/null || echo 0)
+    # Unvalidated file content inside $(( )) under `set -u` does NOT merely skip
+    # the cooldown (#258 reports the direction the other way round). Bash
+    # evaluates the content as an ARITHMETIC EXPRESSION, so a marker holding a
+    # letter is an unbound variable reference and the hook DIES on the next
+    # line — above the lock, above the add, above the commit. And because the
+    # marker used to be rewritten only after a successful commit, it stayed
+    # corrupt: one bad byte from a crash mid-write stopped the backup
+    # permanently, with dispatch's nameless `hook failed` as the only trace.
+    # Falling back to 0 self-heals, because the run it allows is the run that
+    # rewrites the marker.
+    case "$LAST_MOD" in
+        ''|*[!0-9]*) LAST_MOD=0 ;;
+    esac
     ELAPSED=$(( $(date +%s) - LAST_MOD ))
     if [ "$ELAPSED" -lt "$BACKUP_COOLDOWN" ]; then
         debug_enabled 0 && log "git-backup" "cooldown ${ELAPSED}s < ${BACKUP_COOLDOWN}s, skip"
@@ -99,8 +182,10 @@ fi
 # util-linux flock, we fall back to the noclobber pattern; the race is benign
 # (worst case: two concurrent commits to disjoint slug subtrees, which git
 # serializes via its own index lock).
-LOCK_FILE="$REPO_ROOT/.git-backup.lock"
+LOCK_FILE="$GB_STATE_DIR/git-backup.lock"
+GB_LOCK_STYLE=noclobber
 if command -v flock >/dev/null 2>&1; then
+    GB_LOCK_STYLE=flock
     # flock path: open/create the lock file on fd 9 and acquire exclusively,
     # non-blocking.  If another instance holds it, exit silently.
     exec 9>"$LOCK_FILE"
@@ -139,7 +224,44 @@ fi
 # (the default) → bare `git push`, relying on the branch's upstream tracking.
 GIT_BACKUP_REMOTE=$(config ".git_backup.remote" "")
 GIT_BACKUP_BRANCH=$(config ".git_backup.branch" "")
-REMOTE_NAME="${GIT_BACKUP_REMOTE:-origin}"
+# Which remote a bare `git push` would ACTUALLY use (#257). This was hardcoded
+# to `origin` whenever git_backup.remote is unset, while `_push` in that same
+# case runs a bare `git push` — which follows the branch's upstream. Two
+# consequences, and the second is worse than the filed one:
+#
+#   * a store whose upstream is any other remote was told "no remote configured,
+#     skipping push" on every save while holding a perfectly good push target,
+#     so it backed up nowhere, forever, at one info-level line per save;
+#   * the URL the security check below records and validates was not the URL the
+#     push goes to, so the poisoned-remote guard could be sidestepped entirely by
+#     a `branch.<name>.remote` the check never looks at.
+#
+# Ask git the same question `git push` asks. `@{push}` is the exact answer and
+# needs a git that understands it; `branch.<name>.remote` is the fallback, and
+# `origin` remains the last resort, which is where every store that was working
+# before still lands.
+REMOTE_NAME="$GIT_BACKUP_REMOTE"
+if [ -z "$REMOTE_NAME" ]; then
+    GB_CAND=$(git -C "$REPO_ROOT" rev-parse --abbrev-ref --symbolic-full-name '@{push}' 2>/dev/null) || GB_CAND=""
+    GB_CAND="${GB_CAND%%/*}"
+    if [ -z "$GB_CAND" ]; then
+        GB_BRANCH=$(git -C "$REPO_ROOT" symbolic-ref --short --quiet HEAD 2>/dev/null) || GB_BRANCH=""
+        if [ -n "$GB_BRANCH" ]; then
+            GB_CAND=$(git -C "$REPO_ROOT" config --get "branch.$GB_BRANCH.remote" 2>/dev/null) || GB_CAND=""
+        fi
+    fi
+    # Only a NAMED remote is usable below, and the candidate is not guaranteed
+    # to be one: `branch.<name>.remote` may legally hold a URL, in which case
+    # `git remote get-url <that url>` is not a question with an answer and the
+    # store would be declared remoteless — which is the very failure this block
+    # exists to remove, reintroduced one layer along. So the candidate has to
+    # prove it names a remote before it is believed; anything else falls back to
+    # `origin`, which is where every store that worked before still lands.
+    if [ -n "$GB_CAND" ] && git -C "$REPO_ROOT" remote get-url "$GB_CAND" >/dev/null 2>&1; then
+        REMOTE_NAME="$GB_CAND"
+    fi
+fi
+[ -n "$REMOTE_NAME" ] || REMOTE_NAME=origin
 
 # We pass --no-gpg-sign by default so background commits never hang on a
 # passphrase prompt. Users with non-interactive signing (e.g. a hardware key)
@@ -165,9 +287,40 @@ case "$REJECT_NOTICE_AFTER" in
     ''|*[!0-9]*) REJECT_NOTICE_AFTER=3 ;;
 esac
 
+# How many CONSECUTIVE failed commits before the human is interrupted (#257).
+# The same argument as the rejection counter above, and it applies harder: a
+# rejected push at least leaves the commit on this machine, whereas a failed
+# commit records the memory in no git history at all. The causes are durable by
+# nature — no user.email, a full disk, an index lock left by a crashed git, a
+# pre-commit hook installed on the backup repo — so none of them self-heals and
+# the threshold can only postpone a true report, never swallow one.
+COMMIT_NOTICE_AFTER=$(config ".git_backup.commit_notice_after" "3")
+case "$COMMIT_NOTICE_AFTER" in
+    ''|*[!0-9]*) COMMIT_NOTICE_AFTER=3 ;;
+esac
+
+# How many consecutive saves with NO remote at all before saying so once (#257).
+# Deliberately higher than the two above and deliberately ONE-SHOT, because this
+# is the one case in this file where the condition may be entirely intentional:
+# someone who wants a local-only history is not experiencing a bug. Nagging them
+# every save would cost `systemMessage` its meaning for the cases that are bugs,
+# which is the more serious loss. So the threshold is evidence that this is a
+# steady state rather than a store mid-setup, and it is said once for the
+# lifetime of the store. 0 disables it entirely.
+NO_REMOTE_NOTICE_AFTER=$(config ".git_backup.no_remote_notice_after" "10")
+case "$NO_REMOTE_NOTICE_AFTER" in
+    ''|*[!0-9]*) NO_REMOTE_NOTICE_AFTER=10 ;;
+esac
+
 # ── Background subshell — never blocks save-session.sh ───────────────────────
 (
-    trap 'rm -f "$LOCK_FILE"' EXIT
+    # Only the noclobber path unlinks (#258). flock's ownership is fd-based, so
+    # removing the path while holding it opens a window where a second instance
+    # opens the file, locks the now-unlinked inode, and a third creates a fresh
+    # inode at the same path and locks that — two concurrent backups on one
+    # store. The restore half's `_take_lock` already installs this trap only on
+    # its noclobber branch; this call site simply had not adopted it.
+    [ "$GB_LOCK_STYLE" = "flock" ] || trap 'rm -f "$LOCK_FILE"' EXIT
 
     # Prevent outer git env vars from overriding git -C behaviour.
     unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
@@ -182,7 +335,7 @@ esac
     #
     # So: three states, never two. Pushed / deferred, will retry / rejected,
     # stopped, here is what to do.
-    REJECT_STATE_FILE="$REPO_ROOT/.git-backup-rejected"
+    REJECT_STATE_FILE="$GB_STATE_DIR/git-backup-rejected"
 
     # stdout is git's --porcelain per-ref status. stderr is dropped on purpose:
     # it carries hints, transport noise and any pre-push hook's chatter, and
@@ -323,14 +476,60 @@ esac
         exit 0
     fi
 
+    # ── Committed / failed, and WHY it failed (#257) ─────────────────────────
+    # This branch used to be `log "ERROR: commit failed"; exit 0`, with git's own
+    # stderr thrown away by `2>&1`. That is strictly worse than the rejected
+    # push #253 reports: there the commit existed locally and only the remote
+    # copy was missing, whereas here the memory is recorded NOWHERE — and the
+    # caller was told success. The one line it did print named no cause, so a
+    # user reading it learned only the half they already knew.
+    #
+    # This cannot make the commit succeed. There is no repair available: a
+    # missing user.email or a full disk is not something a backup hook may fix
+    # on someone's behalf, and the file's standing rule is that nothing is
+    # renamed, merged or rebased for you. So the fix is disclosure, and the
+    # failure being chosen is loud-and-still-not-backing-up over
+    # quiet-and-still-not-backing-up. The hook still exits 0 and still never
+    # blocks the agent.
     TS=$(_remember_date '+%H:%M')
-    if git -C "$REPO_ROOT" commit $GPG_SIGN_FLAG \
+    COMMIT_FAIL_STATE_FILE="$GB_STATE_DIR/git-backup-commit-failed"
+
+    # Stamped on BOTH outcomes (#258), and deliberately not any earlier than
+    # this. The filed defect is that a store whose commits fail never engages
+    # the throttle at all, so it runs the full add/rm/commit on every single
+    # save while committing nothing — the opposite of what a cooldown is for.
+    #
+    # Stamping at the top of this subshell instead would also cover the
+    # nothing-to-commit path, and that is worse than the bug: a save with no
+    # new memory would then push the next check out by a whole cooldown window,
+    # so real memory written a minute later would sit unbacked-up for the rest
+    # of it. That trades a wasteful no-op for a slower backup, and slower is the
+    # direction that loses data. `test_nothing_to_commit_no_op` pins it.
+    _gb_stamp_cooldown() { date +%s > "$COOLDOWN_MARKER" 2>/dev/null || true; }
+
+    if COMMIT_ERR=$(git -C "$REPO_ROOT" commit $GPG_SIGN_FLAG \
             -m "auto: $SLUG $TS" \
-            -- "$SLUG/" >/dev/null 2>&1; then
+            -- "$SLUG/" 2>&1 >/dev/null); then
         log "git-backup" "committed $SLUG"
-        date +%s > "$COOLDOWN_MARKER"
+        _gb_stamp_cooldown
+        rm -f "$COMMIT_FAIL_STATE_FILE" 2>/dev/null || true
     else
-        log "git-backup" "ERROR: commit failed for $SLUG"
+        _gb_stamp_cooldown
+        COMMIT_ERR=$(printf '%s' "$COMMIT_ERR" | tr '\n' ' ')
+        _cfail=$(cat "$COMMIT_FAIL_STATE_FILE" 2>/dev/null || echo 0)
+        case "$_cfail" in
+            ''|*[!0-9]*) _cfail=0 ;;
+        esac
+        _cfail=$((_cfail + 1))
+        echo "$_cfail" > "$COMMIT_FAIL_STATE_FILE" 2>/dev/null || true
+
+        log "git-backup" "ERROR: commit FAILED for $SLUG — this memory is recorded in NO git history at all, not locally and not on any remote, and the backup has STOPPED for this project (consecutive failures: $_cfail). git said: ${COMMIT_ERR:-<no output>}. Run 'git -C \"$REPO_ROOT\" commit -- \"$SLUG/\"' to see it yourself."
+
+        if [ "$COMMIT_NOTICE_AFTER" -gt 0 ] && [ "$_cfail" -eq "$COMMIT_NOTICE_AFTER" ]; then
+            mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null || true
+            printf '%s\n' "remember: git backup has STOPPED. The last $_cfail commits into $REPO_ROOT failed, so this project's memory is on disk but in no git history — not locally, and not on your backup remote. git said: ${COMMIT_ERR:-<no output>}. Run: git -C \"$REPO_ROOT\" commit -- \"$SLUG/\"" \
+                > "$REMEMBER_DIR/tmp/git-backup-notice" 2>/dev/null || true
+        fi
         exit 0
     fi
 
@@ -339,12 +538,38 @@ esac
     # URL changed — a changed URL could mean a poisoned config.json pointing to
     # an attacker-controlled remote. Set git_backup.allow_remote_change=true to
     # override (e.g. when intentionally re-pointing to a new private repo).
-    REMOTE_STATE_FILE="$REPO_ROOT/.git-backup-remote"
+    REMOTE_STATE_FILE="$GB_STATE_DIR/git-backup-remote"
+    NO_REMOTE_STATE_FILE="$GB_STATE_DIR/git-backup-no-remote"
+    NO_REMOTE_NOTIFIED_FILE="$GB_STATE_DIR/git-backup-no-remote-notified"
     CURRENT_REMOTE=$(git -C "$REPO_ROOT" remote get-url "$REMOTE_NAME" 2>/dev/null || true)
 
     if [ -z "$CURRENT_REMOTE" ]; then
-        log "git-backup" "no remote configured, skipping push"
+        # ── Backs up nowhere, forever (#257 case 2) ──────────────────────────
+        # Correct behaviour on any single invocation and wrong as a steady
+        # state: one info-level line per save is how a half-finished setup
+        # becomes a permanent absence of off-machine backup, and nothing
+        # distinguished "deliberately local-only" from "the setup was never
+        # finished". It still cannot be distinguished from inside this hook —
+        # so it is asked ONCE, of the only person who knows.
+        _nr=$(cat "$NO_REMOTE_STATE_FILE" 2>/dev/null || echo 0)
+        case "$_nr" in
+            ''|*[!0-9]*) _nr=0 ;;
+        esac
+        _nr=$((_nr + 1))
+        echo "$_nr" > "$NO_REMOTE_STATE_FILE" 2>/dev/null || true
+
+        log "git-backup" "no remote configured for '$REMOTE_NAME' in $REPO_ROOT — the commit exists on this machine ONLY and nothing is backed up off it (consecutive saves in this state: $_nr). Add one: git -C \"$REPO_ROOT\" remote add origin <url>"
+
+        if [ "$NO_REMOTE_NOTICE_AFTER" -gt 0 ] && \
+           [ "$_nr" -ge "$NO_REMOTE_NOTICE_AFTER" ] && \
+           [ ! -f "$NO_REMOTE_NOTIFIED_FILE" ]; then
+            : > "$NO_REMOTE_NOTIFIED_FILE" 2>/dev/null || true
+            mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null || true
+            printf '%s\n' "remember: your memory store at $REPO_ROOT has no git remote, so $_nr saves so far have been committed locally and backed up nowhere. If that is deliberate, nothing further is needed — this will not be said again. If the setup was never finished: git -C \"$REPO_ROOT\" remote add origin <url> && git -C \"$REPO_ROOT\" push -u origin HEAD" \
+                > "$REMEMBER_DIR/tmp/git-backup-notice" 2>/dev/null || true
+        fi
     elif [ ! -f "$REMOTE_STATE_FILE" ]; then
+        rm -f "$NO_REMOTE_STATE_FILE" 2>/dev/null || true
         # First push — record the URL and proceed.
         echo "$CURRENT_REMOTE" > "$REMOTE_STATE_FILE"
         log "git-backup" "git backup configured to push to: $CURRENT_REMOTE (remote '$REMOTE_NAME', branch '${GIT_BACKUP_BRANCH:-<upstream tracking>}')"

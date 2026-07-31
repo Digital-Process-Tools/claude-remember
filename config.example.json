@@ -21,6 +21,8 @@
     "remote": "",
     "branch": "",
     "reject_notice_after": 3,
+    "commit_notice_after": 3,
+    "no_remote_notice_after": 10,
     "gpg_sign": false,
     "allow_remote_change": false
   },

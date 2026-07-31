@@ -52,6 +52,7 @@ pytestmark = pytest.mark.skipif(
 from .test_git_backup_hook import (  # noqa: E402
     REPO_ROOT,
     _git,
+    hook_state,
     make_external_remember_repo,
 )
 from .test_git_backup_push_rejected_253 import (  # noqa: E402
@@ -129,7 +130,7 @@ def _fetch_now(remember: Path) -> None:
 
 def _wait_for_fetch(remember: Path, timeout: float = 60) -> dict:
     """Block until the detached fetch has written its completion record."""
-    state = remember / FETCH_STATE
+    state = hook_state(remember, FETCH_STATE, create_dir=True)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if state.exists():
@@ -210,7 +211,7 @@ class TestOffByDefault:
             "the store was fast-forwarded with git_restore.enabled unset — "
             "every existing install would silently change behaviour on upgrade"
         )
-        assert not (remember / FETCH_STATE).exists(), (
+        assert not (hook_state(remember, FETCH_STATE, create_dir=True)).exists(), (
             "a background fetch was spawned with the feature off — that is "
             "network I/O on the session-start path of every install that never "
             "asked for this"
@@ -225,7 +226,7 @@ class TestOffByDefault:
         _run(slug_dir, project, home, _config(tmp_path, enabled=False))
 
         assert _head(remember) == before
-        assert not (remember / FETCH_STATE).exists()
+        assert not (hook_state(remember, FETCH_STATE, create_dir=True)).exists()
 
     def test_legacy_mode_never_activates(self, tmp_path):
         """Memory inside the project repo: restoring there would fast-forward
@@ -448,7 +449,7 @@ class TestADivergedStoreIsRefused:
         _fetch_now(remember)
         _run(slug_dir, project, home, _config(tmp_path, enabled=True), **self.env)
 
-        assert not (remember / ".git-restore-diverged").exists(), (
+        assert not (hook_state(remember, ".git-restore-diverged")).exists(), (
             "the consecutive-divergence count survived the repair, so the next "
             "unrelated divergence would interrupt on its first occurrence"
         )
@@ -534,7 +535,7 @@ class TestCouldNotCheckIsItsOwnState:
     def test_up_to_date_says_so_only_after_a_real_fetch(self, tmp_path):
         home, remember, remote, slug_dir, project = _store(tmp_path)
         _fetch_now(remember)
-        (remember / FETCH_STATE).write_text(
+        (hook_state(remember, FETCH_STATE, create_dir=True)).write_text(
             f"started={int(time.time())}\nfinished={int(time.time())}\nrc=0\n",
             encoding="utf-8",
         )
@@ -550,7 +551,7 @@ class TestCouldNotCheckIsItsOwnState:
         dies, hangs or is killed, the NEXT session has to be able to say so."""
         home, remember, remote, slug_dir, project = _store(tmp_path)
         _fetch_now(remember)
-        (remember / FETCH_STATE).write_text(
+        (hook_state(remember, FETCH_STATE, create_dir=True)).write_text(
             f"started={int(time.time()) - 9999}\n", encoding="utf-8"
         )
 
@@ -622,14 +623,14 @@ class TestTheDetachedFetch:
 
     def test_it_does_not_stack_fetches(self, tmp_path):
         home, remember, remote, slug_dir, project = _store(tmp_path)
-        (remember / FETCH_STATE).write_text(
+        (hook_state(remember, FETCH_STATE, create_dir=True)).write_text(
             f"started={int(time.time())}\n", encoding="utf-8"
         )
 
         _run(slug_dir, project, home, _config(tmp_path, enabled=True))
         time.sleep(1)
 
-        body = (remember / FETCH_STATE).read_text(encoding="utf-8")
+        body = (hook_state(remember, FETCH_STATE, create_dir=True)).read_text(encoding="utf-8")
         assert "finished" not in body, (
             "a second fetch was spawned on top of one still inside its timeout "
             "window — session starts are frequent and this is how you get a "
@@ -729,7 +730,7 @@ class TestItSharesTheBackupLock:
         _fetch_now(remember)
         before = _head(remember)
 
-        lock = remember / ".git-backup.lock"
+        lock = hook_state(remember, ".git-backup.lock", create_dir=True)
         # Hold it the way the backup hook's fallback path does.
         with open(lock, "w") as fh:
             fh.write(str(os.getpid()))
@@ -749,12 +750,31 @@ class TestItSharesTheBackupLock:
         assert "store busy" in _log_text(slug_dir)
 
     def test_it_uses_the_same_lock_file_as_the_backup(self):
-        """A second, private lock would be no lock at all."""
+        """A second, private lock would be no lock at all.
+
+        Since #261 the lock lives in the git common dir rather than at the store
+        root, so the two halves agree by both deriving it from that directory —
+        which every worktree of a repo shares. Matching on the basename alone
+        would pass on two locks sitting in two different directories, which is
+        exactly the failure this test exists to catch.
+        """
         body = HOOK.read_text(encoding="utf-8")
-        assert '.git-backup.lock' in body, (
+        backup = (REPO_ROOT / "hooks.d" / "after_save"
+                  / "50-git-backup.sh").read_text(encoding="utf-8")
+        pattern = r'LOCK_FILE="\$G[BR]_STATE_DIR/git-backup\.lock"'
+        assert re.search(pattern, body), (
             "the restore takes a different lock from the backup, so the two "
             "cannot exclude each other"
         )
+        assert re.search(pattern, backup), (
+            "the backup half no longer names the lock the restore half expects"
+        )
+        for name, text in (("restore", body), ("backup", backup)):
+            assert 'BACKUP_COMMON_DIR/remember' in text, (
+                f"the {name} half derives its state directory from something "
+                "other than the shared git common dir, so the two locks can "
+                "land in different places"
+            )
 
 
 class TestTheDetachedFetchDoesNotHoldTheLock:
@@ -803,7 +823,7 @@ class TestTheDetachedFetchDoesNotHoldTheLock:
         for _ in range(3):
             _run(slug_dir, project, home, cfg, **env)
 
-        count = (remember / ".git-restore-diverged").read_text(encoding="utf-8").strip()
+        count = (hook_state(remember, ".git-restore-diverged")).read_text(encoding="utf-8").strip()
         assert count == "3", (
             f"three runs against a permanently diverged store counted {count!r} "
             "— the escalation can never fire and the refusal is logged forever "
@@ -823,7 +843,7 @@ class TestTheDetachedFetchDoesNotHoldTheLock:
 
         # Immediately after the hook returns, its fetch is still in flight.
         # Whoever wants the store next must be able to have it.
-        lock = remember / ".git-backup.lock"
+        lock = hook_state(remember, ".git-backup.lock", create_dir=True)
         with open(lock, "a+") as fh:
             try:
                 import fcntl

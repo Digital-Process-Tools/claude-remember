@@ -44,6 +44,8 @@ pytestmark = pytest.mark.skipif(
     reason="bash subprocess assertions — not portable to Windows runners (#79)",
 )
 
+from .test_git_backup_hook import hook_state  # noqa: E402
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RESOLVE_PATHS = REPO_ROOT / "scripts" / "resolve-paths.sh"
 LIB_SLUG_SH = REPO_ROOT / "scripts" / "lib-slug.sh"
@@ -242,7 +244,7 @@ def _run_hook(store: Path, home: Path, slug: str, tmp_path: Path) -> str:
     subprocess.run(["bash", str(HOOK)], env=env, capture_output=True, text=True, timeout=60)
 
     deadline = __import__("time").monotonic() + 20
-    lock = store / ".git-backup.lock"
+    lock = hook_state(store, ".git-backup.lock")
     while __import__("time").monotonic() < deadline and lock.exists():
         __import__("time").sleep(0.1)
 

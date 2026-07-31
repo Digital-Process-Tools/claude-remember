@@ -70,8 +70,28 @@ SLUG="${REMEMBER_DIR##*/}"
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
 
 # REPO_ROOT must be the toplevel of a git repo, not just inside one.
+#
+# Compared RESOLVED rather than textually (#260) — the backup half documents the
+# same change at length. `--show-toplevel` answers with a resolved path while
+# REPO_ROOT is spelled however REMEMBER_DIR was, so a single symlink anywhere in
+# the path made both halves of this feature exit 0 above every log call: nothing
+# pushed, nothing fetched, nothing restored, and hook-errors.log empty
+# throughout.
+_gr_realpath() {
+    ( cd "$1" 2>/dev/null && pwd -P ) || printf '%s' "$1"
+}
 TOPLEVEL=$(git -C "$REPO_ROOT" rev-parse --show-toplevel 2>/dev/null) || exit 0
-[ "$TOPLEVEL" = "$REPO_ROOT" ] || exit 0
+if [ "$(_gr_realpath "$TOPLEVEL")" != "$(_gr_realpath "$REPO_ROOT")" ]; then
+    # log.sh is sourced HERE and not above, on purpose. The cheap-guards-first
+    # ordering exists so that a legacy install — the majority, which can never
+    # activate this hook — does not pay to parse the config on every session
+    # start. This is the rare branch and it is a REFUSAL, which is worth the
+    # cost; the ordinary "not a git repo at all" exit above still says nothing,
+    # because that one really is "nothing to do".
+    source "$PIPELINE_DIR/scripts/log.sh" 2>/dev/null && \
+        log "git-restore" "declined: $REPO_ROOT is not the toplevel of its git repository (that is $TOPLEVEL) — a memory store inside a larger repo is never fast-forwarded by this hook, deliberately. Nothing was restored."
+    exit 0
+fi
 
 # ── Now we can afford logging + config ───────────────────────────────────────
 source "$PIPELINE_DIR/scripts/log.sh"
@@ -99,7 +119,7 @@ _gr_common_dir() {
             *) _out="$_d/$_out" ;;
         esac
     fi
-    ( cd "$_out" 2>/dev/null && pwd -P ) || printf '%s' "$_out"
+    _gr_realpath "$_out"
 }
 PROJECT_COMMON_DIR=$(_gr_common_dir "$PROJECT_DIR") || PROJECT_COMMON_DIR=""
 BACKUP_COMMON_DIR=$(_gr_common_dir "$REPO_ROOT") || BACKUP_COMMON_DIR=""
@@ -131,16 +151,47 @@ DIVERGED_NOTICE_AFTER=$(config '.git_restore.diverged_notice_after' '3')
 case "$DIVERGED_NOTICE_AFTER" in ''|*[!0-9]*) DIVERGED_NOTICE_AFTER=3 ;; esac
 
 # ── State ────────────────────────────────────────────────────────────────────
-# Beside the backup half's own state files, at the store root.
-FETCH_STATE_FILE="$REPO_ROOT/.git-restore-fetch"
-DIVERGED_STATE_FILE="$REPO_ROOT/.git-restore-diverged"
+# Beside the backup half's own state files — which are no longer at the store
+# root (#261). `git merge --ff-only` refuses when an untracked file would be
+# overwritten, so these two names sitting in the worktree were a collision
+# waiting for the day a remote carried one, and the thing that would break is
+# the fast-forward below. The git common dir is untracked by construction,
+# never merged, never reported by `git status`, shared by every worktree — and
+# needs no .gitignore and no user action, which is what makes it work for the
+# installs that already exist.
+if [ -n "$BACKUP_COMMON_DIR" ] && mkdir -p "$BACKUP_COMMON_DIR/remember" 2>/dev/null; then
+    GR_STATE_DIR="$BACKUP_COMMON_DIR/remember"
+else
+    GR_STATE_DIR="$REPO_ROOT"
+fi
+
+# Carry forward what an older version left at the root, rather than starting
+# over and silently losing a fetch's recorded outcome.
+#
+# COPY only — this half never removes anything from the store, and it does not
+# ask git which files are tracked. `TestItCannotDestroyLocalWork` allows this
+# file exactly five git subcommands, and that allowlist is the reason a
+# fast-forward here can be trusted not to destroy local work; widening it to
+# add `ls-files` for a tidy-up would spend the file's whole safety argument on
+# housekeeping. Removing the old root copies is the backup half's job, which
+# already reasons about tracked files and is under no such constraint.
+if [ "$GR_STATE_DIR" != "$REPO_ROOT" ]; then
+    for _gr_old in .git-restore-fetch .git-restore-diverged; do
+        [ -f "$REPO_ROOT/$_gr_old" ] || continue
+        [ -e "$GR_STATE_DIR/${_gr_old#.}" ] && continue
+        cp "$REPO_ROOT/$_gr_old" "$GR_STATE_DIR/${_gr_old#.}" 2>/dev/null || true
+    done
+fi
+
+FETCH_STATE_FILE="$GR_STATE_DIR/git-restore-fetch"
+DIVERGED_STATE_FILE="$GR_STATE_DIR/git-restore-diverged"
 # Deliberately the SAME lock the backup hook takes. The two halves now touch
 # one repo from two lifecycle events — a session start and a save — and the
 # fast-forward moves HEAD and rewrites the working tree while a backup may be
 # part-way through `git add`/`git commit` on the same index. Sharing the lock
 # is what makes that impossible; a second, private lock would have been no
 # lock at all.
-LOCK_FILE="$REPO_ROOT/.git-backup.lock"
+LOCK_FILE="$GR_STATE_DIR/git-backup.lock"
 
 # ── Which branch, and does the fetched ref exist? ────────────────────────────
 # `--abbrev-ref HEAD` on a repo with no commits prints "HEAD" and exits 0 in

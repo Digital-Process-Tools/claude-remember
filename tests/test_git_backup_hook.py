@@ -31,11 +31,81 @@ HOOK = REPO_ROOT / "hooks.d" / "after_save" / "50-git-backup.sh"
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
+def state_dir(remember: Path, create: bool = False) -> Path:
+    """Where the hooks keep their state since #261 — the git common dir, not
+    the store root.
+
+    Nothing there is ever tracked, merged or reported by `git status`, which is
+    what stops an untracked state file colliding with a name the remote adds
+    and making `merge --ff-only` refuse. Falls back to the store root, exactly
+    as the hooks do when the common dir cannot be determined.
+    """
+    out = subprocess.run(
+        ["git", "-C", str(remember), "rev-parse", "--path-format=absolute",
+         "--git-common-dir"],
+        capture_output=True, text=True,
+    )
+    if out.returncode != 0 or not out.stdout.strip():
+        return remember
+    d = Path(out.stdout.strip()) / "remember"
+    if create:
+        d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def hook_state(remember: Path, name: str, create_dir: bool = False) -> Path:
+    """`.git-backup-rejected` at the store root → `git-backup-rejected` in the
+    state dir. Call sites keep naming the historical dotted spelling."""
+    return state_dir(remember, create=create_dir) / name.lstrip(".")
+
+
+def _lock_is_free(lock_path: Path) -> bool:
+    """Ask the lock whether it is held, rather than whether it exists."""
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - non-POSIX
+        return False
+    try:
+        with open(lock_path, "a+") as fh:
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                return False
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            return True
+    except OSError:  # pragma: no cover - platform dependent
+        return False
+
+
 def wait_for_lock_release(lock_path: Path, timeout: float = 10, interval: float = 0.1) -> bool:
-    """Poll until lock_path disappears or timeout expires."""
+    """Poll until the backup's lock is no longer HELD.
+
+    Two changes broke "the file is gone" as a completion signal, and both are
+    silent: a caller naming a path that is never created returns instantly and
+    every assertion after it then races the background subshell.
+
+      * **#261** — the lock moved to the git common dir, so the store-root path
+        these call sites pass no longer exists at any point.
+      * **#258** — the flock path deliberately no longer unlinks the lock at
+        all. flock's ownership is fd-based, so removing the path while holding
+        it lets a second instance lock the now-unlinked inode while a third
+        creates a fresh one at the same path.
+
+    So on a platform with flock(1) — the platform whose hook path holds the lock
+    on a descriptor — ask the lock. Where there is no flock(1) the hook runs its
+    noclobber path, which does still unlink, and absence remains the honest
+    test. Using the lock query on both would return True while a noclobber lock
+    was held, which is the race this helper exists to prevent.
+    """
+    if lock_path.name == ".git-backup.lock":
+        resolved = state_dir(lock_path.parent) / "git-backup.lock"
+        if resolved != lock_path and resolved.exists():
+            lock_path = resolved
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if not lock_path.exists():
+            return True
+        if FLOCK_AVAILABLE and _lock_is_free(lock_path):
             return True
         time.sleep(interval)
     raise TimeoutError(f"Lock not released within {timeout}s: {lock_path}")
@@ -140,8 +210,8 @@ class TestGitBackupHook:
         result = _run_hook(slug_dir, project, home)
 
         assert result.returncode == 0
-        assert not (remember / ".git-backup.lock").exists()
-        assert not (remember / ".last-git-backup-ts").exists()
+        assert not hook_state(remember, ".git-backup.lock").exists()
+        assert not (hook_state(remember, ".last-git-backup-ts", create_dir=True)).exists()
 
     def test_no_op_in_legacy_mode(self, tmp_path):
         """No-op when REMEMBER_DIR is inside PROJECT_DIR — project repo is untouched."""
@@ -206,8 +276,13 @@ class TestGitBackupHook:
         assert changed, "Expected at least one file in commit"
         assert all(f.startswith(f"{slug}/") for f in changed)
 
-        assert (remember / ".last-git-backup-ts").exists()
-        assert not (remember / ".git-backup.lock").exists()
+        assert (hook_state(remember, ".last-git-backup-ts", create_dir=True)).exists()
+        # Not "the file is gone" (#258): the flock path deliberately keeps its
+        # lock file, because flock's ownership is fd-based and unlinking the
+        # path while holding it lets two instances lock two different inodes.
+        # What must be true is that the lock is no longer HELD.
+        _lock = hook_state(remember, ".git-backup.lock")
+        assert not _lock.exists() or _lock_is_free(_lock)
 
     def test_nothing_to_commit_no_op(self, tmp_path):
         """Second run with no new changes: no commit added, cooldown marker unchanged."""
@@ -226,7 +301,7 @@ class TestGitBackupHook:
         wait_for_lock_release(remember / ".git-backup.lock")
 
         # Backdate the marker to 0 so the cooldown check is definitely cleared.
-        cooldown_marker = remember / ".last-git-backup-ts"
+        cooldown_marker = hook_state(remember, ".last-git-backup-ts", create_dir=True)
         cooldown_marker.write_text("0")
         marker_mtime_before = cooldown_marker.stat().st_mtime
 
@@ -255,7 +330,7 @@ class TestGitBackupHook:
         _run_hook(slug_dir, project, home, config_path=cfg)
         wait_for_lock_release(remember / ".git-backup.lock")
 
-        cooldown_marker = remember / ".last-git-backup-ts"
+        cooldown_marker = hook_state(remember, ".last-git-backup-ts", create_dir=True)
         assert cooldown_marker.exists()
         marker_mtime_before = cooldown_marker.stat().st_mtime
 
@@ -311,7 +386,7 @@ class TestGitBackupHook:
         project.mkdir()
         cfg = _make_config(tmp_path, cooldown=0)
 
-        lock_file = remember / ".git-backup.lock"
+        lock_file = hook_state(remember, ".git-backup.lock", create_dir=True)
         # Use the test runner's own PID — guaranteed to be alive.
         lock_file.write_text(str(os.getpid()))
 
@@ -333,7 +408,7 @@ class TestGitBackupHook:
         project.mkdir()
         cfg = _make_config(tmp_path, cooldown=0)
 
-        lock_file = remember / ".git-backup.lock"
+        lock_file = hook_state(remember, ".git-backup.lock", create_dir=True)
         # 999999 is an almost-certainly-dead PID on Linux.
         lock_file.write_text("999999")
 
@@ -424,7 +499,7 @@ class TestGitBackupRemoteValidation:
         assert result.returncode == 0
         wait_for_lock_release(remember / ".git-backup.lock")
 
-        state_file = remember / ".git-backup-remote"
+        state_file = hook_state(remember, ".git-backup-remote", create_dir=True)
         assert state_file.exists(), ".git-backup-remote state file should be created on first push"
         recorded = state_file.read_text().strip()
         assert recorded == str(remote), f"Expected remote {remote!r}, got {recorded!r}"
@@ -451,7 +526,7 @@ class TestGitBackupRemoteValidation:
         wait_for_lock_release(remember / ".git-backup.lock")
 
         # Backdate cooldown marker so second run isn't skipped.
-        (remember / ".last-git-backup-ts").write_text("0")
+        (hook_state(remember, ".last-git-backup-ts", create_dir=True)).write_text("0")
 
         # Write new content so there's something to commit.
         (slug_dir / "now.md").write_text("## 10:05 | test\nSecond memory.\n")
@@ -492,7 +567,7 @@ class TestGitBackupRemoteValidation:
         _git(remember, ["remote", "set-url", "origin", str(evil_remote)])
 
         # Backdate cooldown marker and add new content.
-        (remember / ".last-git-backup-ts").write_text("0")
+        (hook_state(remember, ".last-git-backup-ts", create_dir=True)).write_text("0")
         (slug_dir / "now.md").write_text("## 10:05 | test\nMore memory.\n")
 
         _run_hook(slug_dir, project, home, config_path=cfg)
@@ -541,7 +616,7 @@ class TestGitBackupRemoteValidation:
         _git(remember, ["remote", "set-url", "origin", str(new_remote)])
 
         # Backdate cooldown marker and add new content.
-        (remember / ".last-git-backup-ts").write_text("0")
+        (hook_state(remember, ".last-git-backup-ts", create_dir=True)).write_text("0")
         (slug_dir / "now.md").write_text("## 10:05 | test\nMore memory.\n")
 
         # Override config: allow_remote_change = true.
@@ -552,7 +627,7 @@ class TestGitBackupRemoteValidation:
         wait_for_lock_release(remember / ".git-backup.lock")
 
         # State file should now point to the new remote.
-        state_file = remember / ".git-backup-remote"
+        state_file = hook_state(remember, ".git-backup-remote", create_dir=True)
         recorded = state_file.read_text().strip()
         assert recorded == str(new_remote), f"State file should be updated to new remote, got {recorded!r}"
 
@@ -604,7 +679,7 @@ class TestGitBackupConfigurablePushTarget:
         assert _ref_count(origin) == 1, "default origin must NOT receive the push when a remote is configured"
 
         # State file records the configured remote's URL, and the log names the resolved target.
-        assert (remember / ".git-backup-remote").read_text().strip() == str(backup)
+        assert hook_state(remember, ".git-backup-remote").read_text().strip() == str(backup)
         log_files = list((slug_dir / "logs").glob("memory-*.log"))
         assert log_files
         log_content = log_files[0].read_text()
