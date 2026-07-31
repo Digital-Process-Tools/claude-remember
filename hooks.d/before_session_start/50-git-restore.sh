@@ -177,6 +177,21 @@ _spawn_fetch() {
     fi
 
     (
+        # Drop the backup lock BEFORE doing anything else. fd 9 is where
+        # _take_lock holds the flock, a forked child inherits every open
+        # descriptor, and an inherited fd holds the SAME lock — so without this
+        # the detached fetch keeps the whole store locked for its entire life.
+        #
+        # macOS ships no flock(1), so the fallback path runs there and nothing
+        # is inherited; on Linux this was silent and total. Every session start
+        # for the next `fetch_timeout_seconds` logged "store busy" and skipped,
+        # which meant the divergence counter could never pass 1, the escalation
+        # could never fire, and the repaired-store cleanup could never run —
+        # and any after_save backup landing in that window was blocked too.
+        # That is exactly the failure this file argues the fetch must not
+        # cause: holding a repo-wide lock across network I/O.
+        exec 9>&- 2>/dev/null || true
+
         _started=$(date +%s)
         printf 'started=%s\n' "$_started" > "$FETCH_STATE_FILE" 2>/dev/null || exit 0
 
@@ -330,7 +345,7 @@ if [ "$AHEAD" -gt 0 ] && [ "$BEHIND" -gt 0 ]; then
     _count=$((_count + 1))
     echo "$_count" > "$DIVERGED_STATE_FILE" 2>/dev/null || true
 
-    log "git-restore" "ERROR: the memory store has DIVERGED — $AHEAD local commit(s) the remote does not have, $BEHIND remote commit(s) this machine does not have (consecutive session starts in this state: $_count). NOT restored, and nothing here will merge or rebase for you: recent.md and archive.md are rewritten wholesale by consolidation, so a wrong automatic resolution would corrupt memory silently. Resolve it by hand: git -C \\"$REPO_ROOT\\" log --oneline --left-right \\"HEAD...$REMOTE_REF\\""
+    log "git-restore" "ERROR: the memory store has DIVERGED — $AHEAD local commit(s) the remote does not have, $BEHIND remote commit(s) this machine does not have (consecutive session starts in this state: $_count). NOT restored, and nothing here will merge or rebase for you: recent.md and archive.md are rewritten wholesale by consolidation, so a wrong automatic resolution would corrupt memory silently. Resolve it by hand: git -C \"$REPO_ROOT\" log --oneline --left-right \"HEAD...$REMOTE_REF\""
 
     if [ "$DIVERGED_NOTICE_AFTER" -gt 0 ] && [ "$_count" -eq "$DIVERGED_NOTICE_AFTER" ]; then
         mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null || true

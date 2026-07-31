@@ -35,6 +35,7 @@ would then be vacuous. `_advance_remote` asserts the tip actually moved.
 
 import json
 import re
+import shutil
 import os
 import subprocess
 import sys
@@ -141,6 +142,42 @@ def _wait_for_fetch(remember: Path, timeout: float = 60) -> dict:
                 return body
         time.sleep(0.1)
     raise TimeoutError(f"detached fetch never recorded a result in {state}")
+
+
+# ── Making the Linux branch reachable on macOS ─────────────────────────────
+# `_take_lock` has two paths: flock(1) where it exists, and a noclobber
+# fallback where it does not. Linux has flock and macOS does not, so the branch
+# EVERY Linux install takes is the one the maintainers' own machines can never
+# execute — and it shipped with a bug that made the escalation counter unable to
+# pass 1. #208 (Debian `dash` cannot exec a builtin Apple's `dash` can) and #250
+# (`MAX_ARG_STRLEN` caps one envp string at 128 KB on Linux only) are the same
+# shape: the platform you develop on is the one that cannot see its own
+# constraint.
+#
+# So the flock path is made executable here. The shim implements exactly the
+# call the hooks make — `flock -n <fd>` against an inherited descriptor — through
+# the same syscall. Where a real flock(1) exists it is used instead.
+_FLOCK_SHIM = """#!/usr/bin/env python3
+import fcntl, sys
+args = [a for a in sys.argv[1:] if a != "-n"]
+try:
+    fcntl.flock(int(args[0]), fcntl.LOCK_EX | fcntl.LOCK_NB)
+except OSError:
+    sys.exit(1)
+sys.exit(0)
+"""
+
+
+def _flock_env(tmp_path: Path) -> dict:
+    """Env that guarantees the hook takes its flock branch."""
+    if shutil.which("flock"):
+        return {}
+    shim_dir = tmp_path / "flock-shim"
+    shim_dir.mkdir(exist_ok=True)
+    shim = shim_dir / "flock"
+    shim.write_text(_FLOCK_SHIM, encoding="utf-8")
+    shim.chmod(0o755)
+    return {"PATH": f"{shim_dir}{os.pathsep}{os.environ['PATH']}"}
 
 
 def _diverge_local(remember: Path) -> None:
@@ -267,6 +304,11 @@ class TestADivergedStoreIsRefused:
         _advance_remote(tmp_path, remote)
         _diverge_local(remember)
         _fetch_now(remember)
+        # Deliberately on the flock branch. Everything in this class counts
+        # consecutive RUNS, so it is the first thing to break if one run can
+        # lock the next one out — which is exactly what shipped, and what only
+        # Linux could see.
+        self.env = _flock_env(tmp_path)
         return home, remember, remote, slug_dir, project
 
     def test_a_diverged_store_is_not_touched(self, tmp_path):
@@ -274,7 +316,7 @@ class TestADivergedStoreIsRefused:
         before = _head(remember)
         remote_before = _remote_head(remote)
 
-        result = _run(slug_dir, project, home, _config(tmp_path, enabled=True))
+        result = _run(slug_dir, project, home, _config(tmp_path, enabled=True), **self.env)
 
         assert result.returncode == 0, result.stderr
         assert _head(remember) == before, (
@@ -287,7 +329,7 @@ class TestADivergedStoreIsRefused:
     def test_the_divergence_is_reported_as_a_divergence(self, tmp_path):
         home, remember, remote, slug_dir, project = self._diverged(tmp_path)
 
-        _run(slug_dir, project, home, _config(tmp_path, enabled=True))
+        _run(slug_dir, project, home, _config(tmp_path, enabled=True), **self.env)
 
         log = _log_text(slug_dir)
         assert "DIVERGED" in log, (
@@ -301,7 +343,7 @@ class TestADivergedStoreIsRefused:
     def test_it_says_both_counts_and_what_to_run(self, tmp_path):
         home, remember, remote, slug_dir, project = self._diverged(tmp_path)
 
-        _run(slug_dir, project, home, _config(tmp_path, enabled=True))
+        _run(slug_dir, project, home, _config(tmp_path, enabled=True), **self.env)
 
         log = _log_text(slug_dir)
         assert "1 local commit" in log and "1 remote commit" in log, (
@@ -319,7 +361,7 @@ class TestADivergedStoreIsRefused:
     def test_one_divergence_does_not_yet_interrupt_the_human(self, tmp_path):
         home, remember, remote, slug_dir, project = self._diverged(tmp_path)
 
-        _run(slug_dir, project, home, _config(tmp_path, enabled=True))
+        _run(slug_dir, project, home, _config(tmp_path, enabled=True), **self.env)
 
         assert not (slug_dir / "tmp" / NOTICE_NAME).exists(), (
             "the most intrusive channel in the codebase fired on the first "
@@ -330,7 +372,7 @@ class TestADivergedStoreIsRefused:
         home, remember, remote, slug_dir, project = self._diverged(tmp_path)
 
         for _ in range(3):
-            _run(slug_dir, project, home, _config(tmp_path, enabled=True))
+            _run(slug_dir, project, home, _config(tmp_path, enabled=True), **self.env)
 
         notice = slug_dir / "tmp" / NOTICE_NAME
         assert notice.exists(), (
@@ -345,7 +387,7 @@ class TestADivergedStoreIsRefused:
         home, remember, remote, slug_dir, project = self._diverged(tmp_path)
 
         _run(slug_dir, project, home, _config(tmp_path, enabled=True,
-                                              diverged_notice_after=1))
+                                              diverged_notice_after=1), **self.env)
 
         assert (slug_dir / "tmp" / NOTICE_NAME).exists()
 
@@ -354,7 +396,7 @@ class TestADivergedStoreIsRefused:
 
         for _ in range(4):
             _run(slug_dir, project, home, _config(tmp_path, enabled=True,
-                                                  diverged_notice_after=0))
+                                                  diverged_notice_after=0), **self.env)
 
         assert not (slug_dir / "tmp" / NOTICE_NAME).exists()
         assert "DIVERGED" in _log_text(slug_dir), (
@@ -398,13 +440,13 @@ class TestADivergedStoreIsRefused:
 
     def test_a_repaired_store_clears_the_count(self, tmp_path):
         home, remember, remote, slug_dir, project = self._diverged(tmp_path)
-        _run(slug_dir, project, home, _config(tmp_path, enabled=True))
-        _run(slug_dir, project, home, _config(tmp_path, enabled=True))
+        _run(slug_dir, project, home, _config(tmp_path, enabled=True), **self.env)
+        _run(slug_dir, project, home, _config(tmp_path, enabled=True), **self.env)
 
         # The human resolves it the only way this tool ever endorses: by hand.
         _git(remember, ["push", "-q", "-f", "origin", "main"])
         _fetch_now(remember)
-        _run(slug_dir, project, home, _config(tmp_path, enabled=True))
+        _run(slug_dir, project, home, _config(tmp_path, enabled=True), **self.env)
 
         assert not (remember / ".git-restore-diverged").exists(), (
             "the consecutive-divergence count survived the repair, so the next "
@@ -713,6 +755,84 @@ class TestItSharesTheBackupLock:
             "the restore takes a different lock from the backup, so the two "
             "cannot exclude each other"
         )
+
+
+class TestTheDetachedFetchDoesNotHoldTheLock:
+    """The detached fetch must not inherit the backup lock.
+
+    `_take_lock` holds its flock on fd 9, and a forked child inherits every
+    open descriptor — an inherited fd holds the SAME lock. So the background
+    fetch kept the whole store locked for its entire life: every session start
+    inside `fetch_timeout_seconds` logged "store busy" and skipped, and any
+    `after_save` backup landing in that window was blocked too. That is
+    precisely the failure the hook's own comments argue the fetch must not
+    cause — holding a repo-wide lock across network I/O.
+
+    Invisible on macOS, which has no flock(1) and takes the noclobber fallback
+    where nothing is inherited. Total on Linux. These tests force the flock
+    branch on both.
+    """
+
+    def test_a_second_session_start_is_not_locked_out(self, tmp_path):
+        home, remember, remote, slug_dir, project = _store(tmp_path)
+        _advance_remote(tmp_path, remote)
+        _diverge_local(remember)
+        _fetch_now(remember)
+        env = _flock_env(tmp_path)
+        cfg = _config(tmp_path, enabled=True)
+
+        _run(slug_dir, project, home, cfg, **env)
+        _run(slug_dir, project, home, cfg, **env)
+
+        assert "store busy" not in _log_text(slug_dir), (
+            "the second session start was locked out by the FIRST one's "
+            "detached fetch — the fetch inherited the lock fd, so nothing "
+            "that counts consecutive runs can ever pass 1"
+        )
+
+    def test_the_divergence_counter_can_pass_one(self, tmp_path):
+        """The consequence, stated as the thing users lose: a threshold that
+        can never be reached is a report that never arrives."""
+        home, remember, remote, slug_dir, project = _store(tmp_path)
+        _advance_remote(tmp_path, remote)
+        _diverge_local(remember)
+        _fetch_now(remember)
+        env = _flock_env(tmp_path)
+        cfg = _config(tmp_path, enabled=True)
+
+        for _ in range(3):
+            _run(slug_dir, project, home, cfg, **env)
+
+        count = (remember / ".git-restore-diverged").read_text(encoding="utf-8").strip()
+        assert count == "3", (
+            f"three runs against a permanently diverged store counted {count!r} "
+            "— the escalation can never fire and the refusal is logged forever "
+            "with nothing to raise it"
+        )
+
+    def test_a_backup_can_still_take_the_lock_during_the_fetch(self, tmp_path):
+        """The other half of the damage. The restore's fetch must not block the
+        backup half, which is the thing that actually gets memory off the box."""
+        home, remember, remote, slug_dir, project = _store(tmp_path)
+        _advance_remote(tmp_path, remote)
+        _fetch_now(remember)
+        env = _flock_env(tmp_path)
+
+        _run(slug_dir, project, home,
+             _config(tmp_path, enabled=True, fetch_timeout_seconds=30), **env)
+
+        # Immediately after the hook returns, its fetch is still in flight.
+        # Whoever wants the store next must be able to have it.
+        lock = remember / ".git-backup.lock"
+        with open(lock, "a+") as fh:
+            try:
+                import fcntl
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:  # pragma: no cover - the bug being fixed
+                raise AssertionError(
+                    "the detached fetch is still holding the backup lock, so "
+                    "an after_save backup starting now would silently skip"
+                )
 
 
 # ── The session-start budget ─────────────────────────────────────────────────
