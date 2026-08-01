@@ -539,18 +539,42 @@ def test_two_adopters_racing_on_stranded_debris_produce_one_winner(tmp_path):
     process reaches the pid write. Removing `noclobber` leaves this test green
     over 300 rounds at 8-way contention — verified. The guard is covered by
     the injection test above instead.
+
+    The contenders call `_lock_try_adopt` and NOT `lock_acquire` (#291). That
+    is the whole difference between a scheduler-independent assertion and one
+    that fails on a loaded runner roughly once in twelve. `lock_acquire` also
+    offers the *steal* path, and a winner here holds the lock for zero time:
+    it writes its pid and its subshell exits immediately. A contender the OS
+    did not schedule until after that exit therefore finds a pid whose owner
+    is dead, and takes the lock over — correctly, by the primitive's stated
+    contract, and recorded by the old harness as a second winner. Measured on
+    a loaded laptop with a 150-200ms stagger: 1 run in 3 reported a doubled
+    round, the same `{{'N': 2}}` shape as the CI failure in #291. Nothing in
+    the lock was wrong; "one winner per round" was simply never an invariant
+    of `lock_acquire` when the winners do not stay alive. It IS an invariant
+    of `_lock_try_adopt`, which never consults liveness: once a pid exists the
+    entry guard turns every later adopter away. Held at 1 winner per round
+    with staggers out to 0.5s — see the companion test below for the
+    takeover semantics this deliberately stops asserting over.
     """
     winners = tmp_path / "winners"
     script = f"""
     source {LIB_LOCK_SH}
     contend() {{
-        if lock_acquire "$1" 0; then echo "win $2" >> "{winners}"; fi
+        if _lock_try_adopt "$1"; then echo "win $2" >> "{winners}"; fi
     }}
     for i in $(seq 1 {ROUNDS}); do
         D="{tmp_path}/race.$i.lock"
         mkdir -p "$D/adopt"
         python3 -c 'import os,sys,time; t=int(time.time())-3600; os.utime(sys.argv[1],(t,t)); os.utime(sys.argv[2],(t,t))' "$D/adopt" "$D"
-        for j in 1 2 3 4; do contend "$D" "$i" & done
+        # Two simultaneous, to race on the `mv` that clears the marker, and
+        # two deliberately late — the interleaving that broke the old harness
+        # in #291, kept so a regression to `lock_acquire` here goes red on
+        # purpose rather than once in twelve runs by accident.
+        contend "$D" "$i" &
+        contend "$D" "$i" &
+        ( sleep 0.15; contend "$D" "$i" ) &
+        ( sleep 0.20; contend "$D" "$i" ) &
         wait
         rm -rf "$D"
     done
@@ -570,4 +594,43 @@ def test_two_adopters_racing_on_stranded_debris_produce_one_winner(tmp_path):
         f"only {len(counts)} of {ROUNDS} rounds were won at all — stranded debris "
         "is still wedging the lock, and a max-one-winner assertion alone would "
         "have called that a pass"
+    )
+
+
+def test_an_adopter_that_exits_leaves_a_lock_the_next_contender_takes_over(tmp_path):
+    """The behaviour #291 was reported as a bug, pinned as the contract.
+
+    An adopter writes its pid and exits without releasing. The lock is now
+    held by a dead process, which is precisely the stale lock `_lock_try_steal`
+    exists to recover — so the next contender takes it, and must.
+
+    This is here because the alternative reading of #291 was "the lock admits
+    two writers", and the cost of acting on that reading is high: making
+    acquisition refuse this would restore the permanent, silent outage that
+    #182 and #198 were both filed for. Two adopters never hold the lock *at
+    the same time*; the second one holds it because the first no longer
+    exists. If a future change makes this go red, that change is the bug.
+    """
+    lock_dir = tmp_path / "handover.lock"
+    lock_dir.mkdir()
+    (lock_dir / "adopt").mkdir()
+    _age_dir(lock_dir / "adopt", 3600)
+    _age_dir(lock_dir, 3600)
+
+    result = _run(f"""
+    source {LIB_LOCK_SH}
+    # The adopter runs in a child shell and exits, exactly as the race
+    # harness's contenders do — the lock is left held by a dead pid.
+    ( lock_acquire "{lock_dir}" 0 && echo FIRST ) &
+    wait
+    lock_acquire "{lock_dir}" 0 && echo SECOND || echo BLOCKED
+    """)
+    assert "FIRST" in result.stdout, (
+        f"the adopter did not take the stranded lock at all: {result.stdout} "
+        f"{result.stderr}"
+    )
+    assert "SECOND" in result.stdout, (
+        f"a lock left held by a dead adopter blocked the next contender — that "
+        f"is the permanent outage #198 was filed for: {result.stdout} "
+        f"{result.stderr}"
     )
