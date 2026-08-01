@@ -26,6 +26,11 @@
     "gpg_sign": false,
     "allow_remote_change": false
   },
+  "hooks": {
+    "dispatch_timeout_seconds": 15,
+    "dispatch_timeout_detached_seconds": 120,
+    "dispatch_kill_grace_seconds": 5
+  },
   "git_restore": {
     "enabled": false,
     "remote": "",
@@ -93,6 +98,30 @@
       "always read this as false regardless of configuration. It is now honoured",
       "there too, so an existing true in your config takes effect on those",
       "machines for the first time."
+    ],
+    "hooks.dispatch_timeout_seconds": [
+      "How long ONE hooks.d/ listener may take before it is stopped. Nothing",
+      "bounded them until #286: dispatch() runs them in the foreground, so one",
+      "that blocks stalled the agent for as long as it blocked and logged",
+      "nothing, because nothing had failed.",
+      "",
+      "Two numbers, because two kinds of caller wait on this and only one of",
+      "them is a person. The interactive one covers after_post_tool,",
+      "after_user_prompt and both session_start events; the detached one covers",
+      "before/after_save and before/after_consolidate, dispatched from a nohup'd",
+      "process nobody is waiting on. Claude Code kills a hook at 60s by default,",
+      "so an interactive budget at or above that is the host killing the process",
+      "with no report from us.",
+      "",
+      "The shipped listeners take 0.17-0.58s in the foreground (their git I/O is",
+      "in a disowned subshell and does not count), so these are ~25x and ~200x",
+      "headroom. Set 0 to disable the bound.",
+      "",
+      "The kill is SIGTERM, then SIGKILL after dispatch_kill_grace_seconds, so a",
+      "listener that traps EXIT gets to release its lock. It is a courtesy, not",
+      "a veto: one that traps TERM and keeps going is killed anyway. The signal",
+      "goes to the listener's own PID, never its process group — a listener's",
+      "disowned background work is deliberately left running."
     ],
     "data_dir": [
       "Controls where memory data files are stored.",

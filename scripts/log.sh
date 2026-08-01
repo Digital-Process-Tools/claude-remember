@@ -521,6 +521,70 @@ _DISPATCH_STDOUT_LINE_CHARS=2000
 _DISPATCH_STDOUT_PREFIX="[hook] "
 _DISPATCH_FRAME="=== hooks.d: "
 
+# How long a dispatched hook may take before it is stopped (#286).
+#
+# Until this existed, nothing bounded a listener at all. dispatch() runs them
+# sequentially, in the foreground, so one that blocks — a network call with no
+# timeout, a `read` on a pipe nobody writes to, a lock wait — stalled the agent
+# for as long as it blocked and LOGGED NOTHING, because nothing had failed.
+# That is the house defect in its most literal form: a hook that never returns
+# never reaches the point where it could say anything, so the absence of a log
+# line reads as "nothing happened" when what happened is that everything
+# stopped.
+#
+# TWO numbers, because two kinds of caller wait on this and only one of them is
+# a person:
+#
+#   after_post_tool, after_user_prompt, before/after_session_start
+#       dispatched from inside a Claude Code hook process. A human has pressed
+#       enter, or the agent's own loop is blocked on the tool call. Claude Code
+#       itself kills a hook at 60s by default, so anything at or above that is
+#       not a budget — it is the host killing the whole process with no report
+#       from us at all. 15s sits well under it, so the stop is OURS and comes
+#       with a line naming the hook.
+#
+#   before/after_save, before/after_consolidate
+#       dispatched from save-session.sh and run-consolidation.sh, which
+#       post-tool-hook.sh starts with `nohup … &`. Nobody is waiting. A backup
+#       listener doing real work there is doing it on its own time, and killing
+#       it at 15s would be inventing a deadline no one is keeping.
+#
+# MEASURED, not guessed — the argument claude-supertool#702/#658 settled twice.
+# The shipped listeners' FOREGROUND time, which is the only time dispatch()
+# waits on, on a 2019 Intel macOS box:
+#
+#   after_save/50-git-backup.sh        0.46 – 0.58 s
+#   before_session_start/50-git-restore.sh   0.17 – 0.22 s
+#   a bare hook that only sources this file  0.12 – 0.17 s
+#
+# The 0.58s is with the push remote pointed at a blackholed address, i.e. with
+# the network hung: both hooks put every byte of git I/O inside a disowned
+# subshell, so a slow remote costs the foreground nothing. Headroom is therefore
+# ~25x on the interactive budget and ~200x on the detached one, and the number
+# that would actually be tight — "a real `git push` over a slow network takes
+# tens of seconds" — never touches this path at all.
+#
+# 0 disables the timeout, the same escape hatch every other bound in this
+# codebase offers, and costs the healthy case nothing when it is on.
+_DISPATCH_TIMEOUT_DEFAULT=15
+_DISPATCH_TIMEOUT_DETACHED_DEFAULT=120
+
+# Events dispatched from a process the agent is NOT waiting on. Anything not
+# named here gets the interactive budget, which is the safe direction: a new
+# event added without touching this list is bounded tightly rather than loosely.
+_DISPATCH_DETACHED_EVENTS=" before_save after_save before_consolidate after_consolidate "
+
+# Between TERM and KILL. The point is not politeness — both shipped hooks take a
+# lock and, on the platforms without flock(1), release it from an EXIT trap.
+# bash RUNS an EXIT trap when it dies of an untrapped SIGTERM and does NOT when
+# it dies of SIGKILL, so this window is the difference between a lock released
+# and a lock file left behind holding a dead PID. git is the same story from the
+# other side: it removes its own index.lock on SIGTERM and cannot on SIGKILL.
+#
+# It is a courtesy and not a veto: a listener that traps TERM and keeps going is
+# killed anyway, or it would reinstate the whole defect behind an opt-in.
+_DISPATCH_KILL_GRACE_DEFAULT=5
+
 # Render a captured stderr file as ONE log line, or say why it cannot.
 #
 # One line because `log()` is a line protocol and doctor.sh tails five lines of
@@ -643,6 +707,130 @@ _dispatch_report_skip() {
     return 0
 }
 
+# Report one hook that was STOPPED because it never came back (#286).
+#
+# NOT _dispatch_report_failure, and the distinction is the three-state contract
+# (0.12.0 CHANGELOG; `_push_and_report` in hooks.d/after_save/50-git-backup.sh):
+#
+#   a hook that exits non-zero has ANSWERED — it ran, it failed, and its exit
+#   status and its own first lines are the answer.
+#
+#   a hook that was killed has answered NOTHING. Whether it did its work, did
+#   half of it, or never started is not knowable from here.
+#
+# Reporting the second in the shape of the first — "hook failed (exit 143)" —
+# invents a verdict the hook never gave, and 143 is not even the hook's exit
+# status, it is the signal WE sent. `/remember:doctor` tails this file under
+# "Recent errors", so the difference decides whether it shows a fault or an
+# absence of information. It is loud either way: a listener that hangs is a real
+# problem with a real installation even when its own verdict is unknown.
+#
+# The budget is stated in the line on purpose. Without it a reader cannot tell a
+# hung hook from a budget set too tight for an honest one, and those want
+# opposite fixes.
+_dispatch_report_timeout() {
+    local _event="$1" _name="$2" _budget="$3" _how="$4" _said="$5"
+    local _msg="WARNING: hook TIMED OUT: $_event/$_name did not return within ${_budget}s and was stopped ($_how). This is NOT a failure report from the hook — it never answered, so whether it did its work is UNKNOWN, and anything it left half-done is its own to unwind. Raise hooks.dispatch_timeout_seconds if this listener is honestly slow, or 0 to disable the bound. It said: $_said"
+    log "dispatch" "$_msg"
+    [ -d "$REMEMBER_DIR/logs" ] || return 0
+    printf '%s\n' "$(_remember_date +%H:%M:%S) [dispatch] $_msg" \
+        >> "$REMEMBER_DIR/logs/hook-errors.log" 2>/dev/null || true
+    return 0
+}
+
+# Run one already-started hook under a watchdog, and say what happened to it.
+#
+# Sets two globals rather than returning, because it has two answers: the hook's
+# exit status, and whether that status is the hook's own or ours.
+#   _DISPATCH_RC        the status `wait` reported
+#   _DISPATCH_TIMEDOUT  1 if we stopped it, 0 if it stopped by itself
+#
+# THE HOOK'S OWN PID, NEVER ITS PROCESS GROUP. This is the decision #286 turns
+# on. Both shipped listeners put every git write inside a disowned subshell that
+# redirects its own stdio — 50-git-backup.sh does its whole add/commit/push
+# there, 50-git-restore.sh its fetch — precisely so the network never blocks a
+# save. A group kill would kill exactly that: a SIGTERM between `git add` and
+# `git commit`, or mid-push, leaving a .git/index.lock in the very store this
+# plugin exists to protect, on which the NEXT session's backup then fails with
+# its owner long gone. That is trading a loud failure for a quiet one, which is
+# the trade this codebase refuses everywhere else. So the kill lands on the
+# process that is actually stalling dispatch and on nothing else.
+#
+# The cost of that choice, stated rather than hidden: a listener blocked in a
+# FOREGROUND child (a `curl` with no timeout, say) leaves that child running
+# when its parent dies. The stall is over — dispatch returns, the agent moves —
+# but the process leaks until it finishes or the machine does. A leaked process
+# is recoverable; a half-written git index in someone's memory store is not.
+#
+# NOT a poll of the hook from the caller. A `kill -0` loop on a one-second tick
+# charges EVERY hook a second it did not spend, and after_post_tool dispatches
+# on every single tool call. The caller `wait`s on the real pid, so a hook that
+# returns in 40ms costs 40ms; the watchdog is a sibling that is cancelled the
+# moment the hook is done. Its own loop ticks at one second, but only ever while
+# a hook is genuinely still running.
+#
+# NOT timeout(1), which macOS does not ship — the same finding
+# hooks.d/before_session_start/50-git-restore.sh made for its detached fetch,
+# reached again here. One code path is one code path that gets tested.
+_dispatch_supervise() {
+    local _pid="$1" _budget="$2" _grace="$3" _sentinel="$4"
+    local _wpid=""
+
+    if [ "$_budget" -gt 0 ]; then
+        (
+            _w=0
+            while [ "$_w" -lt "$_budget" ]; do
+                kill -0 "$_pid" 2>/dev/null || exit 0
+                sleep 1
+                _w=$((_w + 1))
+            done
+            kill -0 "$_pid" 2>/dev/null || exit 0
+            # Written BEFORE the signal. The caller distinguishes "we stopped
+            # it" from "it exited 143 on its own" by this file, and a marker
+            # written after the kill could lose the race with `wait`.
+            [ -z "$_sentinel" ] || : > "$_sentinel" 2>/dev/null || true
+            kill -TERM "$_pid" 2>/dev/null || true
+            _g=0
+            while [ "$_g" -lt "$_grace" ]; do
+                kill -0 "$_pid" 2>/dev/null || exit 0
+                sleep 1
+                _g=$((_g + 1))
+            done
+            kill -KILL "$_pid" 2>/dev/null || true
+        ) </dev/null >/dev/null 2>&1 &
+        _wpid=$!
+    fi
+
+    # `if`, not a bare `wait`: every caller of dispatch runs under `set -e`, and
+    # a hook that exits non-zero — or that we just signalled — would otherwise
+    # abort the save. Same reason the invocation below is written this way.
+    if wait "$_pid"; then _DISPATCH_RC=0; else _DISPATCH_RC=$?; fi
+
+    if [ -n "$_wpid" ]; then
+        # Cancelled the instant the hook is done. Its stdio is already pointed
+        # at /dev/null, so it can neither hold open the command substitution
+        # `user-prompt-hook.sh` wraps this dispatch in nor write into it.
+        kill "$_wpid" 2>/dev/null || true
+        wait "$_wpid" 2>/dev/null || true
+    fi
+
+    _DISPATCH_TIMEDOUT=0
+    if [ -n "$_sentinel" ]; then
+        if [ -f "$_sentinel" ]; then
+            _DISPATCH_TIMEDOUT=1
+            rm -f "$_sentinel" 2>/dev/null || true
+        fi
+    elif [ "$_budget" -gt 0 ]; then
+        # No writable tmp, so the watchdog had nowhere to leave a marker and the
+        # signal is all there is to go on. A hook may legitimately exit 143, so
+        # this is an INFERENCE and the report says so rather than asserting it.
+        case "$_DISPATCH_RC" in
+            143|137) _DISPATCH_TIMEDOUT=1 ;;
+        esac
+    fi
+    return 0
+}
+
 dispatch() {
     local event="$1"
     local event_dir="$REMEMBER_HOOKS_DIR/$event"
@@ -653,6 +841,9 @@ dispatch() {
     # nothing else, so the common case is a loop that finds nothing executable.
     # Nothing below may cost that case a process, a directory or a file.
     local _err_file="" _out_file="" _err_unavailable=""
+    # The budget (#286), also on first use, and for the same reason. "" means
+    # not yet read — 0 is a legal value meaning the bound is off.
+    local _budget="" _grace="" _to_file=""
     for hook in "$event_dir"/*; do
         [ -x "$hook" ] || continue
         # Resolved on first use, not on entry (#230). The distribution ships
@@ -660,6 +851,27 @@ dispatch() {
         # the `-d` test above passes and this loop finds nothing executable —
         # and `id` was forked on every tool call to compare against nobody.
         [ -n "$current_uid" ] || current_uid=$(id -u)
+        if [ -z "$_budget" ]; then
+            case "$_DISPATCH_DETACHED_EVENTS" in
+                *" $event "*)
+                    _budget=$(config '.hooks.dispatch_timeout_detached_seconds' "$_DISPATCH_TIMEOUT_DETACHED_DEFAULT")
+                    _DISPATCH_BUDGET_FALLBACK=$_DISPATCH_TIMEOUT_DETACHED_DEFAULT ;;
+                *)
+                    _budget=$(config '.hooks.dispatch_timeout_seconds' "$_DISPATCH_TIMEOUT_DEFAULT")
+                    _DISPATCH_BUDGET_FALLBACK=$_DISPATCH_TIMEOUT_DEFAULT ;;
+            esac
+            # Arithmetic on garbage must not decide whether a hook is killed —
+            # and under `set -u` an unvalidated value inside $(( )) does not
+            # merely misbehave, it kills the shell (the #258 lesson). Falling
+            # back to the shipped default is the safe direction in both senses.
+            case "$_budget" in
+                ''|*[!0-9]*) _budget=$_DISPATCH_BUDGET_FALLBACK ;;
+            esac
+            _grace=$(config '.hooks.dispatch_kill_grace_seconds' "$_DISPATCH_KILL_GRACE_DEFAULT")
+            case "$_grace" in
+                ''|*[!0-9]*) _grace=$_DISPATCH_KILL_GRACE_DEFAULT ;;
+            esac
+        fi
         # Ownership check: skip hooks not owned by the current user.
         local hook_uid
         # Try GNU stat (-c) first, then BSD (-f). The reverse order silently
@@ -694,6 +906,11 @@ dispatch() {
                 _err_file=""
                 _out_file=""
                 _err_unavailable="yes"
+            else
+                # Where the watchdog says it fired (#286). Not opened here — its
+                # EXISTENCE is the signal, so it must be absent until then.
+                _to_file="$REMEMBER_DIR/tmp/dispatch-timeout.$$"
+                rm -f "$_to_file" 2>/dev/null || true
             fi
         fi
 
@@ -702,16 +919,24 @@ dispatch() {
         # failing hook non-fatal by accident of syntax. A bare invocation whose
         # status is read afterwards would hand every third-party hook the power
         # to abort a save.
-        local _rc=0
+        # Backgrounded so it can be supervised (#286), never so it can outrun
+        # the loop: _dispatch_supervise `wait`s on it before this iteration
+        # ends, so hooks still run strictly one at a time and in name order.
+        # The redirections belong to the background job, so a hook's output is
+        # captured exactly as it was when this was a foreground call.
+        local _rc=0 _hpid=""
+        _DISPATCH_RC=0
+        _DISPATCH_TIMEDOUT=0
         if [ -n "$_err_file" ]; then
-            if REMEMBER_PROJECT="${PROJECT_DIR:-.}" "$hook" >"$_out_file" 2>"$_err_file"; then
-                _rc=0
-            else
-                _rc=$?
-            fi
-            # Relayed whether the hook succeeded or failed: a hook that says
-            # something useful and then dies has still said it, and #277 is the
-            # standing argument against discarding a failing hook's words.
+            REMEMBER_PROJECT="${PROJECT_DIR:-.}" "$hook" >"$_out_file" 2>"$_err_file" &
+            _hpid=$!
+            _dispatch_supervise "$_hpid" "$_budget" "$_grace" "$_to_file"
+            _rc=$_DISPATCH_RC
+            # Relayed whether the hook succeeded, failed, or was stopped: a hook
+            # that says something useful and then dies has still said it, and
+            # #277 is the standing argument against discarding its words. A hook
+            # that was killed mid-sentence is the case where they matter most —
+            # they are the only evidence of what it was doing when it stopped.
             _dispatch_stdout_relay "$_out_file" "$event" "${hook##*/}"
         else
             # No writable tmp, so stdout cannot be captured — and uncaptured
@@ -719,14 +944,29 @@ dispatch() {
             # injection this fixes. It is DISCARDED and SAID, never quietly
             # passed through and never quietly dropped: "could not check" is a
             # third state here as it is everywhere else in this codebase.
-            if REMEMBER_PROJECT="${PROJECT_DIR:-.}" "$hook" >/dev/null 2>/dev/null; then
-                _rc=0
-            else
-                _rc=$?
-            fi
+            REMEMBER_PROJECT="${PROJECT_DIR:-.}" "$hook" >/dev/null 2>/dev/null &
+            _hpid=$!
+            _dispatch_supervise "$_hpid" "$_budget" "$_grace" ""
+            _rc=$_DISPATCH_RC
             printf '%s%s/%s — output NOT SHOWN: stdout could not be captured (no writable %s/tmp), so it was discarded rather than delivered unattributed ===\n' \
                 "$_DISPATCH_FRAME" "$event" "${hook##*/}" "$REMEMBER_DIR"
         fi
+
+        # A stop is reported BEFORE the failure branch and instead of it. The
+        # status in $_rc is the signal WE sent, not an answer the hook gave.
+        if [ "$_DISPATCH_TIMEDOUT" -eq 1 ]; then
+            local _how="SIGTERM, then SIGKILL after ${_grace}s if it was still there"
+            [ -n "$_to_file" ] || _how="$_how; inferred from the exit status because $REMEMBER_DIR/tmp is not writable, so a hook that genuinely exited on this signal would look the same"
+            local _said
+            if [ -n "$_err_file" ]; then
+                _said=$(_dispatch_stderr_excerpt "$_err_file")
+            else
+                _said="nothing captured — no writable $REMEMBER_DIR/tmp"
+            fi
+            _dispatch_report_timeout "$event" "${hook##*/}" "$_budget" "$_how" "$_said"
+            continue
+        fi
+
         [ "$_rc" -eq 0 ] && continue
 
         # Only a FAILING hook is reported. A hook that chatters and exits 0 is
@@ -741,6 +981,7 @@ dispatch() {
         _dispatch_report_failure "$event" "${hook##*/}" "$_rc" "$_why"
     done
     [ -z "$_err_file" ] || rm -f "$_err_file" "$_out_file" 2>/dev/null
+    [ -z "$_to_file" ] || rm -f "$_to_file" 2>/dev/null
     return 0
 }
 
