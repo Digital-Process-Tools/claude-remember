@@ -3655,6 +3655,12 @@ echo "DISPATCH_COMPLETED=true"
         meant for the next human session. The slot now survives until a
         replacement lands; the delivery is recorded in remember.delivered,
         which is what keeps a stale note from reading as fresh forever.
+
+        That record is per-clone state and lives in tmp/ with the locks and
+        cooldown markers since #285 — at the store root the git backup
+        committed it, and a second machine's first delivery then read as
+        already-seen. tests/test_delivery_record_per_machine_285.py owns that
+        behaviour; this one only pins where the record is written.
         """
         project = os.path.join(str(tmp_path), "user-project")
         plugin = os.path.join(str(tmp_path), "cache", "org", "remember", "0.5.0")
@@ -3687,8 +3693,11 @@ echo "DISPATCH_COMPLETED=true"
             f"remember.md must survive delivery until replaced. Contains: {remaining[:100]}"
         )
         # And the delivery is on record, so the next read knows it is stale.
-        record = os.path.join(project, ".remember", "remember.delivered")
+        record = os.path.join(project, ".remember", "tmp", "remember.delivered")
         assert os.path.exists(record), "delivery record not written"
+        assert not os.path.exists(
+            os.path.join(project, ".remember", "remember.delivered")
+        ), "the record must not be written where the backup would commit it (#285)"
         with open(record) as f:
             assert "deliveries=1" in f.read()
 

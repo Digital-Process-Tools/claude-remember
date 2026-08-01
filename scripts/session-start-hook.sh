@@ -493,7 +493,48 @@ fi
 # and a stale handoff that reads as fresh is the same silent lie in new clothes.
 # So a delivery record (fingerprint + first delivery + count) sits beside the
 # slot, and any re-delivery of already-delivered content says so out loud.
-REMEMBER_HANDOFF_STATE="$REMEMBER_DIR/remember.delivered"
+#
+# The record is PER-CLONE and lives in tmp/, with the locks and the cooldown
+# markers — not beside the memory, where the git backup committed it like any
+# other file (#285). The fingerprint is a cksum of the handoff CONTENT, so it
+# matches on every machine that has that handoff, and a second machine's FIRST
+# session was therefore told the note had already been delivered N times since
+# another machine's clock. The record that exists to stop a stale handoff
+# reading as fresh instead made a fresh one read as stale: the same lie
+# inverted, and in the direction that suppresses action rather than duplicating
+# it. Over-delivery is the safe direction and is already what #221 chose.
+#
+# There was no shared value it could have held instead. Two of the three fields
+# are per-clone by construction — a wall clock and a session count — and only
+# the fingerprint is globally meaningful, which is exactly the field that
+# carried the harm. Sharing it also conflicted on every concurrent session
+# start, and no merge driver repairs that: union emits both key sets and yields
+# a malformed record, so this is the one file in the store where "keep both
+# sides" is wrong.
+REMEMBER_HANDOFF_STATE="$REMEMBER_DIR/tmp/remember.delivered"
+
+# Carry an existing record to its new home rather than resetting it — this
+# machine's delivery history is still true about this machine.
+#
+# The MOVE is also what retires the tracked copy. An ignore rule does nothing to
+# a file git already tracks, and a `git rm --cached` whose path still exists in
+# the working tree is undone by the very next path-limited commit, which takes
+# its content from the working tree. With the old path gone, the backup's
+# ordinary add/commit stages the deletion like any other, and the remote learns
+# it once.
+#
+# A record arriving from a pull is DISCARDED, never adopted: it describes some
+# other machine's sessions, and it is the reason this issue exists.
+_REMEMBER_HANDOFF_STATE_LEGACY="$REMEMBER_DIR/remember.delivered"
+if [ -f "$_REMEMBER_HANDOFF_STATE_LEGACY" ]; then
+    if [ -f "$REMEMBER_HANDOFF_STATE" ]; then
+        rm -f "$_REMEMBER_HANDOFF_STATE_LEGACY" 2>/dev/null
+    else
+        mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null
+        mv "$_REMEMBER_HANDOFF_STATE_LEGACY" "$REMEMBER_HANDOFF_STATE" 2>/dev/null \
+            || rm -f "$_REMEMBER_HANDOFF_STATE_LEGACY" 2>/dev/null
+    fi
+fi
 
 # Content fingerprint for the handoff slot. cksum is POSIX and present
 # everywhere this plugin runs, including Git Bash; the size fallback exists so

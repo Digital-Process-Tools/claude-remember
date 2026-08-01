@@ -227,9 +227,11 @@ Its "Recent errors" section tails **`<your memory store>/logs/hook-errors.log`**
 
 Before clearing context or ending a session, type `/remember`. The agent writes a short handoff note to `.remember/remember.md` — what's done, what's next, any non-obvious context. The next session reads it and picks up where you left off. This is complementary to the automatic pipeline: the pipeline captures what happened, the handoff captures what matters next.
 
-**The slot is not emptied on read.** Session start delivers the note and records the delivery in `remember.delivered`; the note itself stays on disk until `/remember` writes its replacement. This is deliberate — a session that never writes a handoff back (a scheduled task passing through the project, a `claude -p` one-shot, a session you abandon) used to consume the note meant for your next real session and leave nothing behind ([#221](https://github.com/Digital-Process-Tools/claude-remember/issues/221)).
+**The slot is not emptied on read.** Session start delivers the note and records the delivery in `tmp/remember.delivered`; the note itself stays on disk until `/remember` writes its replacement. This is deliberate — a session that never writes a handoff back (a scheduled task passing through the project, a `claude -p` one-shot, a session you abandon) used to consume the note meant for your next real session and leave nothing behind ([#221](https://github.com/Digital-Process-Tools/claude-remember/issues/221)).
 
 The trade is that the same note can be delivered more than once. Every delivery after the first says so — *already delivered N times since ‹timestamp› — pending replacement, not news* — so a stale handoff is never mistaken for a fresh one. If you see that line, the fix is `/remember`: writing a new handoff retires the old.
+
+**The delivery record is local to one machine and is never backed up** ([#285](https://github.com/Digital-Process-Tools/claude-remember/issues/285)). It says *this* clone has already delivered *this* handoff, and it cannot honestly say more: its timestamp is one machine's clock and its count is one machine's sessions. If you work from two machines against a shared store, the handoff itself travels — it is memory — but each machine counts its own deliveries, so a note you have already read on your laptop arrives on your desktop as news. That is the deliberate direction: being shown a note twice costs a re-read, while being told you have already acted on one you have never seen costs the work.
 
 ## Data files
 
@@ -243,9 +245,8 @@ The pipeline writes to `REMEMBER_DIR` (created automatically). By default this i
 | `archive.md`                   | Older history consolidated                        |
 | `archive-YYYY-MM-DD.md`        | Rotated archive slices — searchable, not auto-loaded |
 | `remember.md`                  | Handoff note written by `/remember`               |
-| `remember.delivered`           | Delivery record for the handoff above — fingerprint, first delivery, count |
-| `logs/`                        | Pipeline logs                                     |
-| `tmp/`                         | Lock files, cooldown markers                      |
+| `logs/`                        | Pipeline logs — local to this machine, never backed up |
+| `tmp/`                         | Lock files, cooldown markers, handoff delivery record — local to this machine, never backed up |
 | `identity.md`                  | Per-project identity override (optional)          |
 | `.claude/remember/identity.md` | Your agent's identity and values (you write this) |
 
@@ -429,6 +430,8 @@ git push -u origin main
 #### Automatic commits
 
 Once `~/.remember/` is a git repo, the `after_save` hook commits each project's memory subdir on its own schedule — one commit per project save, throttled by `cooldowns.git_backup_seconds` (default 15 min) — and pushes to your configured remote. No further setup is needed beyond credential availability (SSH agent or git credential helper) in the environment Claude Code launches hooks in.
+
+**What is not backed up:** each slug's `logs/` and `tmp/`. Those are per-machine — pipeline logs, lock files, cooldown markers, and the handoff delivery record — and sharing them between machines causes conflicts at best and wrong answers at worst ([#285](https://github.com/Digital-Process-Tools/claude-remember/issues/285)). The hook maintains these exclusions in your store's `.git/info/exclude`, which is per-clone and is never itself committed, so no `.gitignore` of yours is edited and nothing about your machine reaches the remote. Everything else under the slug — every memory file — is backed up.
 
 If you don't want automatic commits, leave `~/.remember/` as a plain directory and commit manually as before.
 

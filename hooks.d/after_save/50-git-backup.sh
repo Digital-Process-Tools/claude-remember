@@ -420,7 +420,33 @@ esac
         log "git-backup" "removed per-slug .gitignore (legacy bootstrap artifact)"
     fi
 
-    # Auto-untrack logs/tmp if they were accidentally staged before .gitignore was in place.
+    # ── An exclusion the plugin owns (#285) ──────────────────────────────────
+    # The comment above says the root-level .gitignore covers logs/tmp. The
+    # plugin never creates that file, and in external mode it deletes the only
+    # one it does write. So in every store where the user did not hand-author a
+    # root .gitignore, logs/ and tmp/ are committed and pushed like memory —
+    # and tmp/ is where the handoff delivery record now lives, which is
+    # per-clone state that must never reach another machine.
+    #
+    # $GIT_DIR/info/exclude, not a .gitignore, for the three reasons #261 chose
+    # the git common dir: no user action, no edit by this hook to a tracked file
+    # inside the user's own backup repository, and nothing that can itself be
+    # committed and land on someone else's machine. It is per-clone, which is
+    # exactly the scope of what it excludes. Anchored with a leading slash so a
+    # slug is matched at the repo root and nowhere else, and appended only when
+    # absent so this does not grow a line per save.
+    if [ -n "$BACKUP_COMMON_DIR" ] && mkdir -p "$BACKUP_COMMON_DIR/info" 2>/dev/null; then
+        GB_EXCLUDE_FILE="$BACKUP_COMMON_DIR/info/exclude"
+        for _gb_rule in "/$SLUG/logs/" "/$SLUG/tmp/"; do
+            grep -qxF "$_gb_rule" "$GB_EXCLUDE_FILE" 2>/dev/null && continue
+            printf '%s\n' "$_gb_rule" >> "$GB_EXCLUDE_FILE" 2>/dev/null || true
+        done
+    fi
+
+    # Auto-untrack logs/tmp if they were accidentally staged before the
+    # exclusion was in place. This can only finish the job for a path that no
+    # longer exists in the working tree — see the delivery record's own note in
+    # session-start-hook.sh for why a tracked file has to move, not be ignored.
     git -C "$REPO_ROOT" rm --cached -- "$SLUG/logs/" "$SLUG/tmp/" 2>/dev/null || true
 
     # ── A pathspec that cannot match is not an empty store (#263) ────────────
