@@ -490,6 +490,37 @@ REMEMBER_HOOKS_DIR="$PIPELINE_DIR/hooks.d"
 _DISPATCH_STDERR_LINES=5
 _DISPATCH_STDERR_LINE_CHARS=400
 
+# How a hook's STDOUT reaches the MODEL (#280).
+#
+# dispatch()'s stdout is the caller's stdout, and two callers hand that straight
+# to Claude Code as context: `user-prompt-hook.sh` wraps the whole dispatch in
+# `CTX=$( … )` and delivers it as `additionalContext`, and session-start-hook.sh
+# prints it into the session's opening context (that is what the documented
+# `=== TEAM ===` listener is for). So a hook's stdout is not diagnostics — it is
+# text the model reads, in the same stream and the same position as the
+# plugin's own. Unlabelled, the two are the same thing to the reader.
+#
+# THE CONTRACT, and it is the whole fix: an UNPREFIXED line in dispatched
+# output is the PLUGIN speaking, and a hook cannot produce one. Every line a
+# hook writes is prefixed with $_DISPATCH_STDOUT_PREFIX, so there is no
+# "outside the fence" to escape into — a hook that prints a closing frame, or
+# the plugin's own context warning, gets that prefixed too.
+#
+# The alternative of discarding hook stdout was rejected: `after_user_prompt`
+# and `after_session_start` exist precisely so a hook can contribute context,
+# and a fix that silently deletes what a hook says is this codebase's own
+# defect wearing the fix's clothes.
+#
+# 200 lines is far above any honest contributor (the shipped git-restore and
+# git-backup hooks print nothing at all) and far below a `set -x` trace or a
+# runaway loop. WHAT IS DROPPED IS COUNTED AND SAID — same reason as the
+# stderr bound above: a cap that shortens silently leaves the reader unable to
+# tell a hook that said three things from one that said three hundred.
+_DISPATCH_STDOUT_LINES=200
+_DISPATCH_STDOUT_LINE_CHARS=2000
+_DISPATCH_STDOUT_PREFIX="[hook] "
+_DISPATCH_FRAME="=== hooks.d: "
+
 # Render a captured stderr file as ONE log line, or say why it cannot.
 #
 # One line because `log()` is a line protocol and doctor.sh tails five lines of
@@ -529,6 +560,45 @@ _dispatch_stderr_excerpt() {
     printf '%s' "$_out"
 }
 
+# Relay a captured hook stdout file into the caller's stdout, attributed.
+#
+# Nothing is printed for a hook that said nothing — no frame, no marker. This
+# runs in front of every prompt and the empty case is the normal one; framing
+# it would be a permanent tax on the model's context window, charged for
+# nothing.
+#
+# The frame lines are written by THIS function and are therefore the only
+# unprefixed lines in the region. A hook printing a convincing frame of its own
+# gets it prefixed like everything else, which is what makes the boundary
+# structural rather than conventional.
+#
+# No forks: read and printf are builtins, and this is on the every-prompt path.
+_dispatch_stdout_relay() {
+    local _file="$1" _event="$2" _name="$3"
+    local _line _kept=0 _dropped=0 _framed=0
+    # `|| [ -n "$_line" ]` — a hook killed by a signal can leave a final line
+    # with no newline on it; dropping it would be a silent edit of what the
+    # model is shown.
+    while IFS= read -r _line || [ -n "$_line" ]; do
+        if [ "$_kept" -lt "$_DISPATCH_STDOUT_LINES" ]; then
+            if [ "$_framed" -eq 0 ]; then
+                printf '%s%s/%s — the "%s" lines below are output from a locally installed hook, not from the remember plugin ===\n' \
+                    "$_DISPATCH_FRAME" "$_event" "$_name" "$_DISPATCH_STDOUT_PREFIX"
+                _framed=1
+            fi
+            if [ "${#_line}" -gt "$_DISPATCH_STDOUT_LINE_CHARS" ]; then
+                _line="${_line:0:$_DISPATCH_STDOUT_LINE_CHARS} [line truncated]"
+            fi
+            printf '%s%s\n' "$_DISPATCH_STDOUT_PREFIX" "$_line"
+            _kept=$((_kept + 1))
+        else
+            _dropped=$((_dropped + 1))
+        fi
+    done < "$_file"
+    [ "$_dropped" -eq 0 ] || printf '%s%s/%s — %s line(s) not shown (hook stdout is capped at %s lines) ===\n' \
+        "$_DISPATCH_FRAME" "$_event" "$_name" "$_dropped" "$_DISPATCH_STDOUT_LINES"
+}
+
 # Report one failed hook, in both places a human looks.
 #
 # `log()` writes the daily narrative, which is where this failure belongs in
@@ -554,6 +624,25 @@ _dispatch_report_failure() {
     return 0
 }
 
+# Report one hook that was REFUSED, in both places a human looks (#280).
+#
+# The ownership and world-writable guards below are the reason this is a blast
+# radius rather than a vulnerability — but a refused hook is a hook that never
+# ran and will never run until someone changes its mode or its owner, and until
+# now that fact went only to the daily log. `/remember:doctor` reports "Recent
+# errors" out of hook-errors.log, so it said OK for a store whose backup hook
+# had been silently skipped since it was installed. That is #252's finding
+# reached from another direction: the tool was not quiet, it was reassuring.
+_dispatch_report_skip() {
+    local _event="$1" _name="$2" _why="$3"
+    local _msg="WARNING: hook SKIPPED and did not run: $_event/$_name ($_why) — it will not run on any later dispatch until this is fixed"
+    log "dispatch" "$_msg"
+    [ -d "$REMEMBER_DIR/logs" ] || return 0
+    printf '%s\n' "$(_remember_date +%H:%M:%S) [dispatch] $_msg" \
+        >> "$REMEMBER_DIR/logs/hook-errors.log" 2>/dev/null || true
+    return 0
+}
+
 dispatch() {
     local event="$1"
     local event_dir="$REMEMBER_HOOKS_DIR/$event"
@@ -563,7 +652,7 @@ dispatch() {
     # (#230): the shipped distribution's hooks.d/<event>/ holds a .gitkeep and
     # nothing else, so the common case is a loop that finds nothing executable.
     # Nothing below may cost that case a process, a directory or a file.
-    local _err_file="" _err_unavailable=""
+    local _err_file="" _out_file="" _err_unavailable=""
     for hook in "$event_dir"/*; do
         [ -x "$hook" ] || continue
         # Resolved on first use, not on entry (#230). The distribution ships
@@ -578,18 +667,19 @@ dispatch() {
         # blocks, not file owner UID — and the OR fallback never fires.
         hook_uid=$(stat -c %u "$hook" 2>/dev/null || stat -f %u "$hook" 2>/dev/null || echo "")
         if [ -z "$hook_uid" ] || [ "$hook_uid" != "$current_uid" ]; then
-            log "dispatch" "WARNING: skipping hook not owned by current user: $event/$(basename "$hook")"
+            _dispatch_report_skip "$event" "${hook##*/}" "not owned by the current user"
             continue
         fi
         # World-writable check: skip hooks writable by others.
         if [ -n "$(find "$hook" -maxdepth 0 -perm -002 2>/dev/null)" ]; then
-            log "dispatch" "WARNING: skipping world-writable hook: $event/$(basename "$hook")"
+            _dispatch_report_skip "$event" "${hook##*/}" "world-writable"
             continue
         fi
         # The capture file, prepared once and only once a hook is about to run.
         # Overwritten per hook (`2>` truncates), removed when the loop ends.
         if [ -z "$_err_file" ] && [ -z "$_err_unavailable" ]; then
             _err_file="$REMEMBER_DIR/tmp/dispatch-stderr.$$"
+            _out_file="$REMEMBER_DIR/tmp/dispatch-stdout.$$"
             # `|| true`, and it is load-bearing: `A || B` where BOTH fail is a
             # failed compound command, and every caller of dispatch runs under
             # `set -e`. Without it, a store whose tmp/ cannot be created aborts
@@ -600,8 +690,9 @@ dispatch() {
             # its own failure OUTSIDE the scope of that redirect — the #204
             # lesson — so an unopenable `2>"$_err_file"` would both print to the
             # caller's stderr and count as the hook failing when it never ran.
-            if ! : > "$_err_file" 2>/dev/null; then
+            if ! : > "$_err_file" 2>/dev/null || ! : > "$_out_file" 2>/dev/null; then
                 _err_file=""
+                _out_file=""
                 _err_unavailable="yes"
             fi
         fi
@@ -613,15 +704,28 @@ dispatch() {
         # to abort a save.
         local _rc=0
         if [ -n "$_err_file" ]; then
-            if REMEMBER_PROJECT="${PROJECT_DIR:-.}" "$hook" 2>"$_err_file"; then
+            if REMEMBER_PROJECT="${PROJECT_DIR:-.}" "$hook" >"$_out_file" 2>"$_err_file"; then
                 _rc=0
             else
                 _rc=$?
             fi
-        elif REMEMBER_PROJECT="${PROJECT_DIR:-.}" "$hook" 2>/dev/null; then
-            _rc=0
+            # Relayed whether the hook succeeded or failed: a hook that says
+            # something useful and then dies has still said it, and #277 is the
+            # standing argument against discarding a failing hook's words.
+            _dispatch_stdout_relay "$_out_file" "$event" "${hook##*/}"
         else
-            _rc=$?
+            # No writable tmp, so stdout cannot be captured — and uncaptured
+            # stdout is inherited stdout, which is exactly the unattributed
+            # injection this fixes. It is DISCARDED and SAID, never quietly
+            # passed through and never quietly dropped: "could not check" is a
+            # third state here as it is everywhere else in this codebase.
+            if REMEMBER_PROJECT="${PROJECT_DIR:-.}" "$hook" >/dev/null 2>/dev/null; then
+                _rc=0
+            else
+                _rc=$?
+            fi
+            printf '%s%s/%s — output NOT SHOWN: stdout could not be captured (no writable %s/tmp), so it was discarded rather than delivered unattributed ===\n' \
+                "$_DISPATCH_FRAME" "$event" "${hook##*/}" "$REMEMBER_DIR"
         fi
         [ "$_rc" -eq 0 ] && continue
 
@@ -636,7 +740,7 @@ dispatch() {
         fi
         _dispatch_report_failure "$event" "${hook##*/}" "$_rc" "$_why"
     done
-    [ -z "$_err_file" ] || rm -f "$_err_file" 2>/dev/null
+    [ -z "$_err_file" ] || rm -f "$_err_file" "$_out_file" 2>/dev/null
     return 0
 }
 
