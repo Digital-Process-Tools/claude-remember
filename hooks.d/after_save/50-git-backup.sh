@@ -443,11 +443,46 @@ esac
         done
     fi
 
-    # Auto-untrack logs/tmp if they were accidentally staged before the
-    # exclusion was in place. This can only finish the job for a path that no
-    # longer exists in the working tree — see the delivery record's own note in
-    # session-start-hook.sh for why a tracked file has to move, not be ignored.
-    git -C "$REPO_ROOT" rm --cached -- "$SLUG/logs/" "$SLUG/tmp/" 2>/dev/null || true
+    # ── An exclude cannot untrack, and a partial commit cannot delete (#288) ─
+    # This was `git rm --cached -- "$SLUG/logs/" "$SLUG/tmp/"`, meant to finish
+    # the job on a store that ran the backup before the exclusion existed. It
+    # could not, for two independent reasons:
+    #
+    #   * `git rm --cached` on a DIRECTORY fails outright without -r ("not
+    #     removing ... recursively without -r"), and the error was discarded;
+    #   * and even with -r, the commit further down is `git commit -- "$SLUG/"`,
+    #     a PARTIAL commit, which builds its tree from the WORKING TREE for
+    #     every path the pathspec matches — restoring exactly the paths the
+    #     removal staged. #287 found this same mechanism for the delivery
+    #     record and answered it by making that path stop existing on disk.
+    #     logs/ and tmp/ cannot take that answer: they are live directories
+    #     the plugin writes to every session.
+    #
+    # So the untracking is its own commit, of the INDEX rather than of a
+    # pathspec — the one commit form that can record a deletion for a path
+    # that still exists on disk. It runs only when there is something to
+    # untrack, and only when the index is otherwise clean: an index commit
+    # takes everything staged, and the store is a repository the user owns, so
+    # staged work of theirs must never be swept into a commit this hook wrote.
+    # If it cannot finish, the index is put back rather than left holding a
+    # deletion nothing will complete.
+    #
+    # It removes nothing from history. What has already been pushed stays
+    # pushed: purging it means a rewrite and a force-push, which breaks every
+    # other clone of the store. That call belongs to the user, and the README
+    # tells them it is theirs to make (#288).
+    if [ -n "$(git -C "$REPO_ROOT" ls-files -- "$SLUG/logs/" "$SLUG/tmp/" 2>/dev/null | head -n 1)" ]; then
+        if ! git -C "$REPO_ROOT" diff --cached --quiet 2>/dev/null; then
+            log "git-backup" "$SLUG/logs and $SLUG/tmp are tracked by a version older than the exclusion, but this store has staged changes in its index — untracking them would commit those too, so it is left for the next backup."
+        elif git -C "$REPO_ROOT" rm -r -q --cached --ignore-unmatch -- "$SLUG/logs/" "$SLUG/tmp/" 2>/dev/null \
+            && git -C "$REPO_ROOT" commit $GPG_SIGN_FLAG \
+                -m "auto: stop tracking $SLUG/logs and $SLUG/tmp" >/dev/null 2>&1; then
+            log "git-backup" "untracked $SLUG/logs and $SLUG/tmp — a version older than the exclusion had committed them. They stop being pushed from now on; commits that already carry them are left untouched, because removing those means rewriting history and force-pushing, which breaks every other clone of this store."
+        else
+            git -C "$REPO_ROOT" reset -q 2>/dev/null || true
+            log "git-backup" "could not untrack $SLUG/logs and $SLUG/tmp; the index was restored and the next backup retries."
+        fi
+    fi
 
     # ── A pathspec that cannot match is not an empty store (#263) ────────────
     # `git add -- "$SLUG/"` staging nothing has two completely different causes
