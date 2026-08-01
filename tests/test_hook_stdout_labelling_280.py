@@ -27,10 +27,24 @@ relayed the hook's text unlabelled anyway.
 import os
 import stat
 import subprocess
+import sys
+
+import pytest
 
 from tests.test_path_resolution import (
     _create_full_plugin_copy,
     _create_full_project,
+)
+
+# Same reason, and the same marker, as the module these helpers come from: on
+# windows-latest a bare `bash` resolves to the WSL stub in System32, which
+# prints a UTF-16 "use `wsl --install <Distro>`" notice and exits 1 before any
+# script is read. Every assertion here drives a real hook through a real bash,
+# so there is nothing left to assert once that resolution fails.
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="drives the real hooks through a bash subprocess — not portable to "
+           "Windows (see tests/test_path_resolution.py)",
 )
 
 # The contract under test. Kept as literals rather than parsed out of log.sh:
