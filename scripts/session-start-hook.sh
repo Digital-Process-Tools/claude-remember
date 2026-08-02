@@ -248,6 +248,86 @@ session_was_saved() {
 PROJECT_PATH_SLUG="$(session_dir_slug "$PROJECT")"
 SESSIONS_DIR="$(claude_projects_dir)/${PROJECT_PATH_SLUG}"
 
+# ── The slug, written down once, for callers that are not bash (#294) ─────
+# The slug is a pure function of PROJECT_DIR and PROJECT_DIR does not change
+# mid-session, so a caller in another language had no reason to recompute it —
+# and no way to ask for it except by sourcing lib-slug.sh in a subshell, once
+# per tool call. The reporter of #294 drives this plugin from PowerShell and
+# answered that by maintaining a port of session_dir_slug, which is how the
+# long-path divergence was found: a second implementation of the one function
+# whose disagreements are silent.
+#
+# So it is written here, where PROJECT_PATH_SLUG already exists two lines
+# above. This costs one `mv`; the per-tool-call path is not touched at all,
+# which is deliberate and is asserted by
+# tests/test_session_slug_record_294.py::test_the_per_tool_call_path_is_not_touched.
+#
+# In tmp/, with the locks, the cooldown markers and the delivery record: it
+# names one machine's session and one machine's absolute paths, and #285 is
+# what happens when that kind of state is committed like memory. The git
+# backup already excludes the whole directory.
+#
+# THREE STATES, NOT TWO. An empty slug is not an absence — it resolves to
+# ~/.claude/projects/ ITSELF, a directory that exists and holds every
+# project's transcripts, so a reader that cannot tell "nothing was written"
+# from "the slug is empty" reads someone else's session and never knows. The
+# record therefore always carries a status, and never carries a `slug=` key it
+# cannot fill: absent means this never ran, status=unavailable means it ran
+# and could not answer, status=ok means the value is usable.
+#
+# NO TIMESTAMP, deliberately. The slug is a pure function of the path, so a
+# record written by a long-dead session is still correct; only a record
+# written by a DIFFERENT project is wrong, and worktrees make that reachable —
+# they share a REMEMBER_DIR with the main checkout (#56) while keeping their
+# own PROJECT_DIR, so the last session to start owns this file. `project_dir`
+# is the one field that decides whether the record applies to a reader. A
+# timestamp beside it would only offer a staleness test that answers the wrong
+# question.
+_remember_write_slug_record() {
+    local _dir="$REMEMBER_DIR/tmp" _tmp
+    [ -d "$_dir" ] || mkdir -p "$_dir" 2>/dev/null || return 0
+    _tmp="$_dir/session-slug.$$"
+
+    # A newline is a legal byte in a POSIX filename and this record is
+    # line-based, so a project path containing one would put `slug=…` inside
+    # the value of `project_dir=` — a file that parses cleanly and says
+    # something false. Refusing is the only honest answer, and saying which
+    # state we are in is the point of the status field.
+    local _reason=""
+    if [ -z "$PROJECT_PATH_SLUG" ]; then
+        _reason="empty-slug"
+    else
+        case "${PROJECT}${SESSIONS_DIR}${REMEMBER_DIR}" in
+            *$'\n'*) _reason="unrepresentable-path" ;;
+        esac
+    fi
+
+    # Written whole to a private temp name and moved into place, because two
+    # worktrees of one repo start sessions against the same tmp/ and a reader
+    # must never see half a record. CURRENT_SESSION_ID is already constrained
+    # to [A-Za-z0-9._-] where it is read, so it cannot break a line here.
+    if [ -n "$_reason" ]; then
+        printf 'format=1\nstatus=unavailable\nreason=%s\n' "$_reason" \
+            > "$_tmp" 2>/dev/null || { rm -f "$_tmp" 2>/dev/null; return 0; }
+    else
+        {
+            printf 'format=1\n'
+            printf 'status=ok\n'
+            printf 'project_dir=%s\n' "$PROJECT"
+            printf 'slug=%s\n' "$PROJECT_PATH_SLUG"
+            printf 'sessions_dir=%s\n' "$SESSIONS_DIR"
+            printf 'memory_dir=%s\n' "$REMEMBER_DIR"
+            if [ -n "$CURRENT_SESSION_ID" ]; then
+                printf 'session_id=%s\n' "$CURRENT_SESSION_ID"
+            fi
+        } > "$_tmp" 2>/dev/null || { rm -f "$_tmp" 2>/dev/null; return 0; }
+    fi
+
+    mv -f "$_tmp" "$_dir/session-slug" 2>/dev/null || rm -f "$_tmp" 2>/dev/null
+    return 0
+}
+_remember_write_slug_record
+
 # Args: $1 — sessions dir. Prints the newest transcript that is not this
 # session's, or nothing.
 previous_transcript() {

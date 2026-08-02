@@ -1,0 +1,462 @@
+{
+  "$comment": [
+    "Conformance vectors for claude-remember's session-directory slug.",
+    "",
+    "THIS FILE IS GENERATED. Do not hand-edit it: run `python3 -m tests.slug_vectors`.",
+    "Every expected value here was produced by running scripts/lib-slug.sh, and",
+    "tests/test_slug_vectors_294.py regenerates the whole file on every CI run and",
+    "fails if the checked-in bytes differ. It therefore cannot drift from the",
+    "implementation without our own suite going red — which is the point: an",
+    "external port that diffs against this file is diffing against something we",
+    "are already holding still.",
+    "",
+    "Each vector:",
+    "  id        - stable name. Suffixed .cygpath / .no-cygpath where the two differ.",
+    "  path      - the input, when it is valid UTF-8. null when it is not.",
+    "  path_b64  - the input as raw bytes, base64. ALWAYS present, and authoritative.",
+    "  slug      - the expected result. Always ASCII [A-Za-z0-9-].",
+    "  cygpath   - agnostic: same answer whether or not cygpath is on PATH.",
+    "              present:  only holds with cygpath (an MSYS path being converted).",
+    "              absent:   only holds without it.",
+    "  truncated - true when the slug passed 200 characters and carries a hash.",
+    "  requires  - what must be available to reproduce this with the shell version.",
+    "  note      - why the case is here.",
+    "",
+    "If you are porting: the vectors you want are cygpath=agnostic and",
+    "cygpath=absent. Those describe the pure function - fold a leading upper-case",
+    "ASCII drive letter, replace every non-[A-Za-z0-9] UTF-16 CODE UNIT with a",
+    "dash (so an astral character costs two), and past 200 characters keep the",
+    "first 200 and append base36(abs(int32(hash))) of the ORIGINAL path.",
+    "The cygpath=present vectors describe what the shell does to an MSYS-shaped",
+    "path on its way in, and they are generated against a MODEL of cygpath",
+    "(tests/cygpath_stub.py), not a real one.",
+    "",
+    "Vectors requiring 'utf8-decoder' are ill-formed UTF-8. The shell only",
+    "consults the decoder where such a path can exist - on Linux always,",
+    "elsewhere only under REMEMBER_UTF8_STRICT=1, which is how these were",
+    "generated. A Windows port can ignore them: Windows paths come from UTF-16."
+  ],
+  "format_version": 1,
+  "generator": "tests/slug_vectors.py",
+  "implementation": "scripts/lib-slug.sh",
+  "generated_with": {
+    "REMEMBER_UTF8_STRICT": "1"
+  },
+  "slug_max": 200,
+  "vector_count": 37,
+  "vectors": [
+    {
+      "id": "posix-home",
+      "path": "/home/u/p",
+      "path_b64": "L2hvbWUvdS9w",
+      "slug": "-home-u-p",
+      "cygpath": "agnostic",
+      "truncated": false,
+      "requires": [],
+      "note": ""
+    },
+    {
+      "id": "posix-macos",
+      "path": "/Users/f/Documents/dvsi",
+      "path_b64": "L1VzZXJzL2YvRG9jdW1lbnRzL2R2c2k=",
+      "slug": "-Users-f-Documents-dvsi",
+      "cygpath": "agnostic",
+      "truncated": false,
+      "requires": [],
+      "note": ""
+    },
+    {
+      "id": "win-msys.cygpath",
+      "path": "/c/Users/ricky/dev/jqit/project-b",
+      "path_b64": "L2MvVXNlcnMvcmlja3kvZGV2L2pxaXQvcHJvamVjdC1i",
+      "slug": "c--Users-ricky-dev-jqit-project-b",
+      "cygpath": "present",
+      "truncated": false,
+      "requires": [
+        "cygpath"
+      ],
+      "note": "the shape a Git Bash hook is handed"
+    },
+    {
+      "id": "win-msys.no-cygpath",
+      "path": "/c/Users/ricky/dev/jqit/project-b",
+      "path_b64": "L2MvVXNlcnMvcmlja3kvZGV2L2pxaXQvcHJvamVjdC1i",
+      "slug": "-c-Users-ricky-dev-jqit-project-b",
+      "cygpath": "absent",
+      "truncated": false,
+      "requires": [],
+      "note": "the shape a Git Bash hook is handed"
+    },
+    {
+      "id": "win-drive-lower-slash",
+      "path": "c:/Users/ricky/dev/jqit/project-b",
+      "path_b64": "YzovVXNlcnMvcmlja3kvZGV2L2pxaXQvcHJvamVjdC1i",
+      "slug": "c--Users-ricky-dev-jqit-project-b",
+      "cygpath": "agnostic",
+      "truncated": false,
+      "requires": [],
+      "note": ""
+    },
+    {
+      "id": "win-drive-upper-slash",
+      "path": "C:/Users/ricky/dev/jqit/project-b",
+      "path_b64": "QzovVXNlcnMvcmlja3kvZGV2L2pxaXQvcHJvamVjdC1i",
+      "slug": "c--Users-ricky-dev-jqit-project-b",
+      "cygpath": "agnostic",
+      "truncated": false,
+      "requires": [],
+      "note": ""
+    },
+    {
+      "id": "win-drive-lower-back",
+      "path": "c:\\Users\\ricky\\dev\\jqit\\project-b",
+      "path_b64": "YzpcVXNlcnNccmlja3lcZGV2XGpxaXRccHJvamVjdC1i",
+      "slug": "c--Users-ricky-dev-jqit-project-b",
+      "cygpath": "agnostic",
+      "truncated": false,
+      "requires": [],
+      "note": ""
+    },
+    {
+      "id": "win-drive-upper-back",
+      "path": "C:\\Users\\ricky\\dev\\jqit\\project-b",
+      "path_b64": "QzpcVXNlcnNccmlja3lcZGV2XGpxaXRccHJvamVjdC1i",
+      "slug": "c--Users-ricky-dev-jqit-project-b",
+      "cygpath": "agnostic",
+      "truncated": false,
+      "requires": [],
+      "note": "the native Win32 form a PowerShell caller already holds"
+    },
+    {
+      "id": "win-cygdrive.cygpath",
+      "path": "/cygdrive/c/Users/ricky/dev/jqit/project-b",
+      "path_b64": "L2N5Z2RyaXZlL2MvVXNlcnMvcmlja3kvZGV2L2pxaXQvcHJvamVjdC1i",
+      "slug": "c--Users-ricky-dev-jqit-project-b",
+      "cygpath": "present",
+      "truncated": false,
+      "requires": [
+        "cygpath"
+      ],
+      "note": ""
+    },
+    {
+      "id": "win-cygdrive.no-cygpath",
+      "path": "/cygdrive/c/Users/ricky/dev/jqit/project-b",
+      "path_b64": "L2N5Z2RyaXZlL2MvVXNlcnMvcmlja3kvZGV2L2pxaXQvcHJvamVjdC1i",
+      "slug": "-cygdrive-c-Users-ricky-dev-jqit-project-b",
+      "cygpath": "absent",
+      "truncated": false,
+      "requires": [],
+      "note": ""
+    },
+    {
+      "id": "unc-msys",
+      "path": "//server/share/project",
+      "path_b64": "Ly9zZXJ2ZXIvc2hhcmUvcHJvamVjdA==",
+      "slug": "--server-share-project",
+      "cygpath": "agnostic",
+      "truncated": false,
+      "requires": [],
+      "note": ""
+    },
+    {
+      "id": "unc-native",
+      "path": "\\\\server\\share\\project",
+      "path_b64": "XFxzZXJ2ZXJcc2hhcmVccHJvamVjdA==",
+      "slug": "--server-share-project",
+      "cygpath": "agnostic",
+      "truncated": false,
+      "requires": [],
+      "note": "the two leading separators are two dashes"
+    },
+    {
+      "id": "win-long-msys.cygpath",
+      "path": "/c/dev/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "path_b64": "L2MvZGV2L2FhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEvYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYg==",
+      "slug": "c--dev-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-ghkfw0",
+      "cygpath": "present",
+      "truncated": true,
+      "requires": [
+        "cygpath",
+        "python3"
+      ],
+      "note": "cygpath -w returns \\\\?\\C:\\... here; the prefix is stripped before the fold"
+    },
+    {
+      "id": "win-long-msys.no-cygpath",
+      "path": "/c/dev/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "path_b64": "L2MvZGV2L2FhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEvYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYg==",
+      "slug": "-c-dev-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-33och2",
+      "cygpath": "absent",
+      "truncated": true,
+      "requires": [
+        "python3"
+      ],
+      "note": "cygpath -w returns \\\\?\\C:\\... here; the prefix is stripped before the fold"
+    },
+    {
+      "id": "win-long-native",
+      "path": "C:\\dev\\aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "path_b64": "QzpcZGV2XGFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFcYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYg==",
+      "slug": "c--dev-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-ghkfw0",
+      "cygpath": "agnostic",
+      "truncated": true,
+      "requires": [
+        "python3"
+      ],
+      "note": ""
+    },
+    {
+      "id": "unc-long-msys.cygpath",
+      "path": "//server/share/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "path_b64": "Ly9zZXJ2ZXIvc2hhcmUvYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYS9iYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJi",
+      "slug": "--server-share-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-hdi996",
+      "cygpath": "present",
+      "truncated": true,
+      "requires": [
+        "cygpath",
+        "python3"
+      ],
+      "note": "cygpath -w returns \\\\?\\UNC\\..., which maps back to \\\\, not to nothing"
+    },
+    {
+      "id": "unc-long-msys.no-cygpath",
+      "path": "//server/share/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "path_b64": "Ly9zZXJ2ZXIvc2hhcmUvYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYS9iYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJi",
+      "slug": "--server-share-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-kpoacz",
+      "cygpath": "absent",
+      "truncated": true,
+      "requires": [
+        "python3"
+      ],
+      "note": "cygpath -w returns \\\\?\\UNC\\..., which maps back to \\\\, not to nothing"
+    },
+    {
+      "id": "unc-long-native",
+      "path": "\\\\server\\share\\aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "path_b64": "XFxzZXJ2ZXJcc2hhcmVcYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYVxiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJi",
+      "slug": "--server-share-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-hdi996",
+      "cygpath": "agnostic",
+      "truncated": true,
+      "requires": [
+        "python3"
+      ],
+      "note": ""
+    },
+    {
+      "id": "truncate-boundary-199",
+      "path": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "path_b64": "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYQ==",
+      "slug": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "cygpath": "agnostic",
+      "truncated": false,
+      "requires": [],
+      "note": "one under the limit — no hash"
+    },
+    {
+      "id": "truncate-boundary-200",
+      "path": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "path_b64": "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=",
+      "slug": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "cygpath": "agnostic",
+      "truncated": false,
+      "requires": [],
+      "note": "exactly the limit — still no hash"
+    },
+    {
+      "id": "truncate-boundary-201",
+      "path": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "path_b64": "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFh",
+      "slug": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-rkvsv5",
+      "cygpath": "agnostic",
+      "truncated": true,
+      "requires": [
+        "python3"
+      ],
+      "note": "one over — the first truncated case"
+    },
+    {
+      "id": "truncate-deep-project.cygpath",
+      "path": "/Users/a-developer-with-a-long-name/Documents/clients/acme-holdings/packages/module-0/packages/module-1/packages/module-2/packages/module-3/packages/module-4/packages/module-5/packages/module-6/packages/module-7/packages/module-8/packages/module-9/packages/module-10/packages/module-11",
+      "path_b64": "L1VzZXJzL2EtZGV2ZWxvcGVyLXdpdGgtYS1sb25nLW5hbWUvRG9jdW1lbnRzL2NsaWVudHMvYWNtZS1ob2xkaW5ncy9wYWNrYWdlcy9tb2R1bGUtMC9wYWNrYWdlcy9tb2R1bGUtMS9wYWNrYWdlcy9tb2R1bGUtMi9wYWNrYWdlcy9tb2R1bGUtMy9wYWNrYWdlcy9tb2R1bGUtNC9wYWNrYWdlcy9tb2R1bGUtNS9wYWNrYWdlcy9tb2R1bGUtNi9wYWNrYWdlcy9tb2R1bGUtNy9wYWNrYWdlcy9tb2R1bGUtOC9wYWNrYWdlcy9tb2R1bGUtOS9wYWNrYWdlcy9tb2R1bGUtMTAvcGFja2FnZXMvbW9kdWxlLTEx",
+      "slug": "-Users-a-developer-with-a-long-name-Documents-clients-acme-holdings-packages-module-0-packages-module-1-packages-module-2-packages-module-3-packages-module-4-packages-module-5-packages-module-6-packag-vim06f",
+      "cygpath": "present",
+      "truncated": true,
+      "requires": [
+        "cygpath",
+        "python3"
+      ],
+      "note": "how #157 was actually hit"
+    },
+    {
+      "id": "truncate-deep-project.no-cygpath",
+      "path": "/Users/a-developer-with-a-long-name/Documents/clients/acme-holdings/packages/module-0/packages/module-1/packages/module-2/packages/module-3/packages/module-4/packages/module-5/packages/module-6/packages/module-7/packages/module-8/packages/module-9/packages/module-10/packages/module-11",
+      "path_b64": "L1VzZXJzL2EtZGV2ZWxvcGVyLXdpdGgtYS1sb25nLW5hbWUvRG9jdW1lbnRzL2NsaWVudHMvYWNtZS1ob2xkaW5ncy9wYWNrYWdlcy9tb2R1bGUtMC9wYWNrYWdlcy9tb2R1bGUtMS9wYWNrYWdlcy9tb2R1bGUtMi9wYWNrYWdlcy9tb2R1bGUtMy9wYWNrYWdlcy9tb2R1bGUtNC9wYWNrYWdlcy9tb2R1bGUtNS9wYWNrYWdlcy9tb2R1bGUtNi9wYWNrYWdlcy9tb2R1bGUtNy9wYWNrYWdlcy9tb2R1bGUtOC9wYWNrYWdlcy9tb2R1bGUtOS9wYWNrYWdlcy9tb2R1bGUtMTAvcGFja2FnZXMvbW9kdWxlLTEx",
+      "slug": "-Users-a-developer-with-a-long-name-Documents-clients-acme-holdings-packages-module-0-packages-module-1-packages-module-2-packages-module-3-packages-module-4-packages-module-5-packages-module-6-packag-big6ee",
+      "cygpath": "absent",
+      "truncated": true,
+      "requires": [
+        "python3"
+      ],
+      "note": "how #157 was actually hit"
+    },
+    {
+      "id": "truncate-separators.cygpath",
+      "path": "/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x",
+      "path_b64": "L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94",
+      "slug": "x--x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-9fz0ge",
+      "cygpath": "present",
+      "truncated": true,
+      "requires": [
+        "cygpath",
+        "python3"
+      ],
+      "note": ""
+    },
+    {
+      "id": "truncate-separators.no-cygpath",
+      "path": "/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x/x",
+      "path_b64": "L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94L3gveC94",
+      "slug": "-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-4y6yx2",
+      "cygpath": "absent",
+      "truncated": true,
+      "requires": [
+        "python3"
+      ],
+      "note": ""
+    },
+    {
+      "id": "nonascii-latin",
+      "path": "/tmp/café/projet",
+      "path_b64": "L3RtcC9jYWbDqS9wcm9qZXQ=",
+      "slug": "-tmp-caf--projet",
+      "cygpath": "agnostic",
+      "truncated": false,
+      "requires": [],
+      "note": "BMP — one dash"
+    },
+    {
+      "id": "nonascii-cjk",
+      "path": "/tmp/日本語/プロジェクト",
+      "path_b64": "L3RtcC/ml6XmnKzoqp4v44OX44Ot44K444Kn44Kv44OI",
+      "slug": "-tmp-----------",
+      "cygpath": "agnostic",
+      "truncated": false,
+      "requires": [],
+      "note": "BMP — one dash each"
+    },
+    {
+      "id": "nonascii-emoji",
+      "path": "/tmp/emoji-🎉-dir",
+      "path_b64": "L3RtcC9lbW9qaS3wn46JLWRpcg==",
+      "slug": "-tmp-emoji----dir",
+      "cygpath": "agnostic",
+      "truncated": false,
+      "requires": [],
+      "note": "astral — a surrogate PAIR, so TWO dashes"
+    },
+    {
+      "id": "nonascii-astral-kanji",
+      "path": "/tmp/𠮷野家/x",
+      "path_b64": "L3RtcC/woK636YeO5a62L3g=",
+      "slug": "-tmp------x",
+      "cygpath": "agnostic",
+      "truncated": false,
+      "requires": [],
+      "note": "Extension-B kanji — astral, two dashes"
+    },
+    {
+      "id": "nonascii-mixed",
+      "path": "/tmp/mixed-é-🎉-日-𠮷/deep",
+      "path_b64": "L3RtcC9taXhlZC3DqS3wn46JLeaXpS3woK63L2RlZXA=",
+      "slug": "-tmp-mixed-----------deep",
+      "cygpath": "agnostic",
+      "truncated": false,
+      "requires": [],
+      "note": ""
+    },
+    {
+      "id": "nonascii-astral-truncating.cygpath",
+      "path": "/tmp/🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉",
+      "path_b64": "L3RtcC/wn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjok=",
+      "slug": "-tmp-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------1mzkvb",
+      "cygpath": "present",
+      "truncated": true,
+      "requires": [
+        "cygpath",
+        "python3"
+      ],
+      "note": "astral AND over the limit: the hash is of the ORIGINAL path"
+    },
+    {
+      "id": "nonascii-astral-truncating.no-cygpath",
+      "path": "/tmp/🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉",
+      "path_b64": "L3RtcC/wn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjonwn46J8J+OifCfjok=",
+      "slug": "-tmp-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------44zidb",
+      "cygpath": "absent",
+      "truncated": true,
+      "requires": [
+        "python3"
+      ],
+      "note": "astral AND over the limit: the hash is of the ORIGINAL path"
+    },
+    {
+      "id": "drive-letter-not-at-start",
+      "path": "/tmp/x/C:/y",
+      "path_b64": "L3RtcC94L0M6L3k=",
+      "slug": "-tmp-x-C--y",
+      "cygpath": "agnostic",
+      "truncated": false,
+      "requires": [],
+      "note": "an embedded X: is an ordinary colon, never folded"
+    },
+    {
+      "id": "looks-long-path-prefixed",
+      "path": "/tmp/\\\\?\\C:/x",
+      "path_b64": "L3RtcC9cXD9cQzoveA==",
+      "slug": "-tmp-----C--x",
+      "cygpath": "agnostic",
+      "truncated": false,
+      "requires": [],
+      "note": "a backslash is an ordinary filename byte on Linux; the strip is confined to what cygpath produced"
+    },
+    {
+      "id": "newline-in-path",
+      "path": "/tmp/a\nb",
+      "path_b64": "L3RtcC9hCmI=",
+      "slug": "-tmp-a-b",
+      "cygpath": "agnostic",
+      "truncated": false,
+      "requires": [],
+      "note": "legal in a POSIX filename, and sed's own record separator"
+    },
+    {
+      "id": "illformed-latin1",
+      "path": null,
+      "path_b64": "L3RtcC9jYWbpL3g=",
+      "slug": "-tmp-caf--x",
+      "cygpath": "agnostic",
+      "truncated": false,
+      "requires": [
+        "iconv",
+        "python3",
+        "utf8-decoder"
+      ],
+      "note": "a legacy-encoded byte; the decoder emits one replacement character"
+    },
+    {
+      "id": "illformed-truncated-lead",
+      "path": null,
+      "path_b64": "L3RtcC/mly94",
+      "slug": "-tmp---x",
+      "cygpath": "agnostic",
+      "truncated": false,
+      "requires": [
+        "iconv",
+        "python3",
+        "utf8-decoder"
+      ],
+      "note": "a 3-byte lead with only one continuation — maximal-subpart, one replacement"
+    }
+  ]
+}

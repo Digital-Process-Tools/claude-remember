@@ -248,9 +248,68 @@ The pipeline writes to `REMEMBER_DIR` (created automatically). By default this i
 | `archive-YYYY-MM-DD.md`        | Rotated archive slices — searchable, not auto-loaded |
 | `remember.md`                  | Handoff note written by `/remember`               |
 | `logs/`                        | Pipeline logs — local to this machine, never backed up |
-| `tmp/`                         | Lock files, cooldown markers, handoff delivery record — local to this machine, never backed up |
+| `tmp/`                         | Lock files, cooldown markers, handoff delivery record, this session's [slug record](#1-read-the-slug-this-session-computed) — local to this machine, never backed up |
 | `identity.md`                  | Per-project identity override (optional)          |
 | `.claude/remember/identity.md` | Your agent's identity and values (you write this) |
+
+## Computing the slug outside bash
+
+`~/.claude/projects/<slug>/` is where Claude Code writes session transcripts, and `<slug>` is a pure function of the project path. Anything driving this plugin from another language — PowerShell, Node, Python — eventually needs that name, and the only way to ask for it used to be sourcing `scripts/lib-slug.sh` in a subshell, once per tool call. That cost is exactly why the reporter of [#294](https://github.com/Digital-Process-Tools/claude-remember/issues/294) maintained a PowerShell port of the function — and maintaining that port is how #294 was found. A second implementation of this function disagrees **silently**: a slug that misses names a directory that does not exist, so the pipeline finds no transcript, exits 0, and saves nothing.
+
+Two things exist so that nobody has to keep one.
+
+### 1. Read the slug this session computed
+
+`scripts/session-start-hook.sh` writes it once per session to **`<REMEMBER_DIR>/tmp/session-slug`**. One `key=value` per line:
+
+```
+format=1
+status=ok
+project_dir=/home/alice/projects/my-app
+slug=-home-alice-projects-my-app
+sessions_dir=/home/alice/.claude/projects/-home-alice-projects-my-app
+memory_dir=/home/alice/projects/my-app/.remember
+session_id=0f4c…
+```
+
+**Three states, not two.** An empty slug is not an absence — it resolves to `~/.claude/projects/` **itself**, a directory that exists and holds every project's transcripts. So the record never spells "I could not answer" as an empty value:
+
+| What you find                                    | What it means                                                                 |
+| ------------------------------------------------ | ----------------------------------------------------------------------------- |
+| no file                                           | this plugin never wrote one — an older version, or the session-start hook never ran. Nothing is claimed; compute it yourself. |
+| `status=unavailable` **and no `slug=` key at all** | the hook ran and could not answer. `reason=` says why. Never treat this as an empty slug. |
+| `status=ok` with a non-empty `slug=`              | usable. This is the only case that is.                                         |
+
+**Staleness: compare `project_dir`, and ignore everything else.** One store can be written by more than one project — git worktrees deliberately share a `REMEMBER_DIR` with the main checkout while keeping their own `PROJECT_DIR` — so the last session to start owns this file. A record left by a long-dead session is still **correct**, because the slug is a pure function of the path and age cannot make it wrong. A record left by a *different* project is wrong immediately, however fresh. That is why there is no timestamp here: it would only offer a staleness test that answers the wrong question.
+
+One bootstrap limit, stated plainly: in [external storage mode](#external-storage-mode) with `{slug}` in `data_dir`, `REMEMBER_DIR` is itself named by the slug, so you have to know the store path already to read this file. In the default layout (`<project>/.remember/`) you do not.
+
+### 2. Check your implementation against `docs/slug-vectors.json`
+
+If you do compute the slug yourself, **[`docs/slug-vectors.json`](docs/slug-vectors.json) is the contract.** It is a machine-readable list of input paths and the slug this plugin produces for each, covering every shape the test suite parametrizes: the six Windows drive spellings from [#263](https://github.com/Digital-Process-Tools/claude-remember/issues/263), UNC paths, the `\\?\` long-path forms from #294, the 200-character truncation and its base36 hash, non-ASCII paths on both sides of the UTF-16 surrogate boundary, and ill-formed UTF-8.
+
+It is not a prose spec, and that is the point. **The file is generated from the implementation, and the suite regenerates it on every CI run and fails if the checked-in bytes differ** (`tests/test_slug_vectors_294.py`). It cannot drift from `scripts/lib-slug.sh` without our own build going red, so a port that diffs against it is diffing against something we are already holding still — and a divergence you find is a bug report we can act on rather than an argument about which document is current.
+
+Each vector carries the environment its expected value depends on, because otherwise a port with no `cygpath` cannot use the file correctly:
+
+| Field       | Use                                                                                                          |
+| ----------- | ------------------------------------------------------------------------------------------------------------ |
+| `path`      | the input, when it is valid UTF-8; `null` when it is not                                                      |
+| `path_b64`  | the input as raw bytes, base64. Always present, and authoritative                                             |
+| `slug`      | the expected result, always ASCII                                                                             |
+| `cygpath`   | `agnostic` (same answer either way), `present` (only holds with `cygpath` — an MSYS path being converted), or `absent` |
+| `truncated` | the slug passed 200 characters and carries a hash                                                             |
+| `requires`  | what must be available to reproduce it with the shell version                                                 |
+
+**If you are porting, the vectors you want are `cygpath: agnostic` and `cygpath: absent`.** Those describe the pure function, which is what a caller holding a native path (`C:\dev\project`) needs. The `cygpath: present` vectors describe what the shell does to an MSYS-shaped path on its way in, and they are generated against a *model* of `cygpath` (`tests/cygpath_stub.py`), not a real one — the file says so itself.
+
+Regenerate after any deliberate change to the slug:
+
+```bash
+python3 -m tests.slug_vectors
+```
+
+Before you do: every path whose slug moves is a **store rename** for the people on it, and on a case-insensitive filesystem only git can see it happen. That is what [#263](https://github.com/Digital-Process-Tools/claude-remember/issues/263) was.
 
 ## Configuration
 

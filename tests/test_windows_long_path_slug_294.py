@@ -55,41 +55,14 @@ LIB_SLUG_SH = REPO_ROOT / "scripts" / "lib-slug.sh"
 # the prefix and a short one does not.
 MAX_PATH = 260
 
-# A stand-in for MSYS/Cygwin `cygpath`, extended from the one in
-# tests/test_windows_drive_slug_263.py with the single behaviour this issue is
-# about: past MAX_PATH the `-w` result carries the long-path prefix — `\\?\`
-# for a drive path, `\\?\UNC\` for a UNC one, which is the documented Win32
-# spelling and drops the leading `\\`.
-CYGPATH_STUB = r"""#!/usr/bin/env bash
-if [ "$1" = "-w" ]; then
-    if [ "${CYGPATH_STUB_EMPTY:-0}" = "1" ]; then
-        exit 0
-    fi
-    p="$2"
-    p="${p//\//\\}"
-    case "$p" in
-        \\\\*) ;;
-        \\cygdrive\\?\\*)
-            d=$(printf '%s' "${p:10:1}" | tr 'a-z' 'A-Z')
-            p="$d:\\${p:12}" ;;
-        \\?\\*)
-            d=$(printf '%s' "${p:1:1}" | tr 'a-z' 'A-Z')
-            p="$d:\\${p:3}" ;;
-        ?:\\*)
-            d=$(printf '%s' "${p:0:1}" | tr 'a-z' 'A-Z')
-            p="$d:\\${p:3}" ;;
-    esac
-    if [ "${#p}" -ge 260 ]; then
-        case "$p" in
-            \\\\*) p="\\\\?\\UNC\\${p:2}" ;;
-            *)     p="\\\\?\\$p" ;;
-        esac
-    fi
-    printf '%s\n' "$p"
-    exit 0
-fi
-printf '%s\n' "$2"
-"""
+# A stand-in for MSYS/Cygwin `cygpath`, now shared: `tests/cygpath_stub.py`.
+# It was a literal here and a narrower literal in
+# tests/test_windows_drive_slug_263.py, and the conformance vectors (#294)
+# needed a third — which is the same drift those vectors exist to delete. The
+# behaviour this file depends on is unchanged and documented at the definition:
+# past MAX_PATH the `-w` result carries the long-path prefix, and
+# CYGPATH_STUB_EMPTY=1 makes it exit 0 printing nothing.
+from .cygpath_stub import CYGPATH_STUB  # noqa: E402
 
 
 def _bash_slug(path: str, *, tmp_path: Path, cygpath: bool = True, empty: bool = False) -> str:
