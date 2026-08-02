@@ -175,6 +175,42 @@ session_dir_slug() {
     if command -v cygpath >/dev/null 2>&1; then
         local winpath
         winpath=$(cygpath -w "$path" 2>/dev/null) || winpath="$path"
+        # An exit status is not the only way cygpath declines to answer: it can
+        # exit 0 and print nothing, and that emptied the path outright — the
+        # slug became "" and resolved to ~/.claude/projects/ itself. The same
+        # guard is already on claude_projects_dir's cygpath call a hundred
+        # lines above; this one did not have it. Nothing back means keep what
+        # we were given (#294).
+        [ -n "$winpath" ] || winpath="$path"
+        # Past MAX_PATH, `cygpath -w` answers in the Win32 long-path spelling:
+        # \\?\C:\dev\... for a drive path, \\?\UNC\server\share\... for a UNC
+        # one. Strip that back off before anything below looks at the string,
+        # with parameter expansions rather than a fork — this runs on every
+        # single tool call (#294).
+        #
+        # The prefix is OURS. Claude Code slugs the cwd it holds and never adds
+        # it, so a slug carrying it names a directory that does not exist —
+        # four leading dashes and a different hash, the #157/#166 silent miss.
+        # And the fold below is `case "$path" in ?:*)`, which \\?\C: cannot
+        # match, so the drive letter also stopped folding: #263's condition,
+        # reintroduced for exactly the deep paths the 200-char truncation
+        # exists to protect.
+        #
+        # \\?\UNC\ maps back to \\ and not to nothing: it IS \\server\share,
+        # spelled for Win32, and dropping the two leading separators would slug
+        # one directory two ways just as surely — the same argument as #263,
+        # with no drive letter to fold.
+        #
+        # Inside the cygpath branch on purpose: this undoes what cygpath just
+        # did, and nothing more. A backslash is an ordinary filename byte on
+        # Linux, so a directory literally named \\?\C: can exist there and
+        # Claude Code would slug it literally. Stripping unconditionally would
+        # rename that store. Same reason pipeline/slug.py is untouched — it
+        # never runs cygpath, so it never sees a prefix this plugin put there.
+        case "$winpath" in
+            '\\?\UNC\'*) winpath='\\'"${winpath#'\\?\UNC\'}" ;;
+            '\\?\'*)     winpath="${winpath#'\\?\'}" ;;
+        esac
         path="$winpath"
     fi
     # Lowercase the drive letter to match Claude Code — unconditionally, not
