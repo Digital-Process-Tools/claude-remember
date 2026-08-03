@@ -207,6 +207,39 @@ if [ -f "$REMEMBER_CONFIG" ] && [ -s "$REMEMBER_CONFIG" ]; then
 else
     echo "WARN config.json: none found — running on bundled defaults"
 fi
+
+# Is this store known by a second spelling? (#298)
+#
+# A user who suspects their memory went missing had no way to check this, which
+# is why it is here and not only in a log. Re-run live rather than read from
+# tmp/case-divergence: the record is written at session start, and someone
+# running the doctor has usually just changed something.
+#
+# WARN, never FAIL, and the VERDICT is deliberately left alone. On a
+# case-insensitive filesystem this condition is harmless — the reporter of #298
+# measured 88 files reachable through either spelling on the same directory
+# object — and capture is entirely unaffected. It is a heads-up about a restore.
+if source "$SCRIPT_DIR/lib-case-divergence.sh" 2>/dev/null && \
+   command -v remember_case_divergence >/dev/null 2>&1; then
+    remember_case_divergence
+    case "$REMEMBER_CASE_STATUS" in
+        diverged)
+            echo "WARN Store spelling: this store is known by more than one spelling, differing only in case (resolved: $REMEMBER_CASE_RESOLVED)"
+            echo "     $REMEMBER_CASE_MESSAGE"
+            ;;
+        ok)
+            echo "OK   Store spelling: $REMEMBER_CASE_RESOLVED, on disk and in the store's git repository alike"
+            ;;
+        unavailable)
+            # Both halves named, because the commonest case by far is a disk
+            # that answered `ok` beside a git that has nothing to say — an
+            # external store with no backup repository. Printing only "could
+            # not check" would hide the half that did answer, and printing
+            # "OK" would claim the half that did not.
+            echo "WARN Store spelling: could not check in full — on disk: $REMEMBER_CASE_DISK_STATE${REMEMBER_CASE_DISK_REASON:+ ($REMEMBER_CASE_DISK_REASON)}; in git: $REMEMBER_CASE_GIT_STATE${REMEMBER_CASE_GIT_REASON:+ ($REMEMBER_CASE_GIT_REASON)}. This is not a report that they agree."
+            ;;
+    esac
+fi
 echo ""
 
 # ── 5. Capture health ────────────────────────────────────────────────────────

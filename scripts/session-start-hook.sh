@@ -445,6 +445,112 @@ _remember_write_slug_index() {
 }
 _remember_write_slug_index
 
+# ── Is this store known by a second spelling? (#298) ──────────────────────
+# Git's index is case-sensitive where NTFS is not, so a store can be spelled
+# one way on disk and another in the repository that backs it up. That costs
+# nothing while it stays on a case-insensitive filesystem — measured on the
+# reporter's own Windows box, where both spellings resolve to the same
+# directory object — and it splits the store in two on a case-sensitive
+# restore, which is the machine least likely to be looking.
+#
+# Session start, not the per-tool-call path: `session_dir_slug` runs on every
+# tool call and #299 pinned that path byte-identical. The whole check costs one
+# `git ls-tree` and only for a store that has its own repository; the disk half
+# costs no fork at all, and a store in the legacy layout pays nothing because
+# the library returns not-applicable before either probe runs.
+#
+# Disclosure only, and everything downstream keys off ONE fact: whether the
+# finding has changed since last session. The record at tmp/case-divergence
+# always holds the current answer in all four states, and is rewritten only
+# when that answer is different — which is also what makes the steady state
+# fork-free. The human-facing notice and the "could not check" log line fire
+# on that same change. The condition never clears itself and is harmless
+# today, so repeating it every session start would spend the one channel a
+# human actually reads (#200) on wallpaper — the argument `_push_and_report`
+# makes for its threshold, with the threshold replaced by "say it again only
+# when it says something different". `/remember:doctor` re-runs the check live
+# and reports every time, which is where someone who suspects a problem looks.
+_remember_write_case_divergence() {
+    source "$_HOOK_DIR/lib-case-divergence.sh" 2>/dev/null || return 0
+    command -v remember_case_divergence >/dev/null 2>&1 || return 0
+    remember_case_divergence
+
+    local _dir="$REMEMBER_DIR/tmp" _tmp _old="" _body="" NL=$'\n'
+
+    # The record built as a string first, so it can be compared with what is
+    # already on disk. Every field is appended unconditionally or inside an
+    # `if` — never `[ -n … ] && …`, which as a group's last command makes a
+    # correct write look like a failed one, and cost this file a record it had
+    # already produced until the trace said so.
+    _body="format=1${NL}status=$REMEMBER_CASE_STATUS"
+    if [ "$REMEMBER_CASE_STATUS" != "not-applicable" ]; then
+        _body="$_body${NL}resolved=$REMEMBER_CASE_RESOLVED"
+        _body="$_body${NL}store_root=$REMEMBER_CASE_ROOT"
+        _body="$_body${NL}disk_state=$REMEMBER_CASE_DISK_STATE"
+        if [ -n "$REMEMBER_CASE_DISK_REASON" ]; then
+            _body="$_body${NL}disk_reason=$REMEMBER_CASE_DISK_REASON"
+        fi
+        if [ -n "$REMEMBER_CASE_DISK_NAMES" ]; then
+            _body="$_body${NL}disk_names=$REMEMBER_CASE_DISK_NAMES"
+        fi
+        _body="$_body${NL}git_state=$REMEMBER_CASE_GIT_STATE"
+        if [ -n "$REMEMBER_CASE_GIT_REASON" ]; then
+            _body="$_body${NL}git_reason=$REMEMBER_CASE_GIT_REASON"
+        fi
+        if [ -n "$REMEMBER_CASE_GIT_NAMES" ]; then
+            _body="$_body${NL}git_names=$REMEMBER_CASE_GIT_NAMES"
+        fi
+    fi
+
+    # Read what is already there BEFORE deciding anything: it answers both
+    # "has the finding changed" (which is what the human-facing notice fires
+    # on) and "is there anything to write at all". Read with the shell — a
+    # `grep | tr` here was two forks on a path whose whole budget is one
+    # `git ls-tree`, and in the legacy layout, where this check is
+    # not-applicable and its record never changes, it was two forks for a file
+    # that already said the right thing.
+    if [ -f "$_dir/case-divergence" ]; then
+        local _pline
+        while IFS= read -r _pline; do
+            _old="${_old:+$_old$NL}$_pline"
+        done < "$_dir/case-divergence"
+    fi
+
+    if [ "$_old" != "$_body" ]; then
+        [ -d "$_dir" ] || mkdir -p "$_dir" 2>/dev/null || return 0
+        _tmp="$_dir/case-divergence.$$"
+        printf '%s\n' "$_body" > "$_tmp" 2>/dev/null \
+            || { rm -f "$_tmp" 2>/dev/null; return 0; }
+        mv -f "$_tmp" "$_dir/case-divergence" 2>/dev/null || rm -f "$_tmp" 2>/dev/null
+    fi
+
+    case "$REMEMBER_CASE_STATUS" in
+        diverged)
+            log "case-divergence" "$REMEMBER_CASE_MESSAGE"
+            # An unchanged record is an unchanged finding, and the human has
+            # already been told. Saying it again every session start would
+            # spend the one channel they actually read on a condition that is
+            # harmless today and never clears itself.
+            [ "$_old" = "$_body" ] && return 0
+            printf '%s\n' "$REMEMBER_CASE_MESSAGE" \
+                > "$_dir/case-divergence-notice" 2>/dev/null || true
+            ;;
+        unavailable)
+            # Logged on change only. The commonest reason by far is
+            # `not-a-repository` — an external store nobody has pointed a git
+            # backup at — and that is a standing condition, not an event: one
+            # identical line per session for the life of the install is the
+            # wallpaper #252's five weeks of identical daily lines proved
+            # nobody reads. It is still never rendered as agreement anywhere
+            # that reports it; `/remember:doctor` says it every time.
+            [ "$_old" = "$_body" ] && return 0
+            log "case-divergence" "could not check whether this store is known by a second spelling (disk=$REMEMBER_CASE_DISK_STATE${REMEMBER_CASE_DISK_REASON:+/$REMEMBER_CASE_DISK_REASON} git=$REMEMBER_CASE_GIT_STATE${REMEMBER_CASE_GIT_REASON:+/$REMEMBER_CASE_GIT_REASON}) — this is not a report that they agree"
+            ;;
+    esac
+    return 0
+}
+_remember_write_case_divergence
+
 # Args: $1 — sessions dir. Prints the newest transcript that is not this
 # session's, or nothing.
 previous_transcript() {

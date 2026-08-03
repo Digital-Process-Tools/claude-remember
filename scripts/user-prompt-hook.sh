@@ -104,12 +104,20 @@ fi
 #                       DIVERGED from its backup remote, so the memory loaded
 #                       this session is missing what the other machine wrote,
 #                       and nothing will merge or rebase it for you.
+#   case-divergence-notice
+#                       session-start-hook.sh: this store is known by a second
+#                       spelling that differs only in case (#298). Harmless on
+#                       the case-insensitive filesystem it is sitting on, and it
+#                       splits the store in two on a case-sensitive restore.
+#                       Written only when the finding CHANGES: the condition
+#                       never clears itself, so a notice every session would
+#                       spend this channel on wallpaper.
 #
 # Consumed on read: these are one-line nudges, not persistent banners. Adding
 # one is deliberately cheap and deliberately rare — this channel interrupts a
 # human mid-thought, and one that fires often is one that gets tuned out.
 NOTICE_MSG=""
-for _notice_name in capture-gap-notice git-backup-notice git-restore-notice; do
+for _notice_name in capture-gap-notice git-backup-notice git-restore-notice case-divergence-notice; do
     NOTICE_FILE="$REMEMBER_DIR/tmp/$_notice_name"
     [ -f "$NOTICE_FILE" ] || continue
     _notice_body=$(cat "$NOTICE_FILE" 2>/dev/null)
