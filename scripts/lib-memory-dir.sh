@@ -30,8 +30,10 @@
 #   session_dir_slug — sourced from lib-slug.sh (no longer needs detect-tools.sh)
 #
 # EXPORTS
-#   REMEMBER_DIR      — absolute path to memory data directory
-#   REMEMBER_CONFIG   — absolute path to merged config (tmp file)
+#   REMEMBER_DIR         — absolute path to memory data directory
+#   REMEMBER_STORE_ROOT  — the directory the per-project stores sit in, and empty
+#                          unless data_dir is absolute AND carries {slug} (#297)
+#   REMEMBER_CONFIG      — absolute path to merged config (tmp file)
 #
 # ============================================================================
 
@@ -160,6 +162,73 @@ _resolve_remember_dir() {
     esac
 }
 
+# _set_store_root <data_dir_value>
+# Sets REMEMBER_STORE_ROOT to the directory the per-project stores sit in: the
+# data_dir template truncated at {slug}, with ~ expanded and trailing separators
+# removed. Sets it EMPTY in every other case, and the emptiness is the interface
+# (#297).
+#
+# A FUNCTION THAT ASSIGNS, not one that echoes, and it must never be called as
+# `$(...)`. This file is sourced by bootstrap-dirs.sh, which post-tool-hook.sh
+# sources on EVERY tool call — a command substitution here is a fork per tool
+# call, which is the cost #230 went to trouble removing and #296 refused to add
+# back. Everything below is parameter expansion: no subshell, no external
+# command, no measurable cost on that path.
+#
+# This exists because of a circularity #296 left open. The slug record lives at
+# <REMEMBER_DIR>/tmp/session-slug, and in the layout config.user.example.json
+# ships — "data_dir": "~/.remember/{slug}", under a _purpose that says to copy
+# it — REMEMBER_DIR is itself named by the slug, so a caller had to know the
+# answer to open the file holding it. The store root is the one path in that
+# layout a caller CAN name: it is the part of the template before the
+# placeholder, so the template alone yields it.
+#
+# It is deliberately empty when there is no {slug}. In the legacy layout
+# (<project>/.remember) and in a single-directory external store, REMEMBER_DIR
+# and the store root are the same directory and the record is already reachable
+# from project_dir and the template — so there is nothing to publish, and the
+# session-start index that reads this stays off. The common layout does not pay
+# for the external one.
+#
+# A prefix of "/" or a bare drive is refused rather than accepted. It would put
+# a plugin-owned file at /tmp/sessions, which on a shared world-writable
+# directory is a hijack waiting to happen, and no one keeps a memory store at
+# the filesystem root.
+_set_store_root() {
+    local data_dir="$1" prefix
+    REMEMBER_STORE_ROOT=""
+
+    # Same absolute/home-relative test as _resolve_remember_dir, including the
+    # Windows drive-letter forms: a relative data_dir has no store root.
+    case "$data_dir" in
+        /*|~*|[A-Za-z]:/*|[A-Za-z]:\\*) ;;
+        *) return 0 ;;
+    esac
+    case "$data_dir" in
+        *'{slug}'*) ;;
+        *) return 0 ;;
+    esac
+
+    prefix="${data_dir%%\{slug\}*}"
+    # shellcheck disable=SC2016  # we want literal ~ expansion here
+    prefix="${prefix/#\~/$HOME}"
+
+    # Trailing separators, never down to nothing: the ?* guard keeps "/" whole
+    # so the refusal below is what rejects it, rather than this loop emptying it.
+    while :; do
+        case "$prefix" in
+            ?*/|?*\\) prefix="${prefix%?}" ;;
+            *) break ;;
+        esac
+    done
+
+    case "$prefix" in
+        ''|/|[A-Za-z]:|[A-Za-z]:/|[A-Za-z]:\\) return 0 ;;
+    esac
+
+    REMEMBER_STORE_ROOT="$prefix"
+}
+
 # ── Pass 1: resolve REMEMBER_DIR ─────────────────────────────────────────────
 # Read data_dir from the plugin-bundled config and the user-global config only
 # (the per-project config lives inside REMEMBER_DIR, which we don't know yet).
@@ -188,6 +257,11 @@ export MEMORY_PROJECT_DIR
 
 REMEMBER_DIR=$(_resolve_remember_dir "$_data_dir_raw" "$MEMORY_PROJECT_DIR")
 export REMEMBER_DIR
+
+# Empty in every layout where REMEMBER_DIR is nameable without the slug (#297).
+# Assigned, never `$(...)`: this runs on the per-tool-call path.
+_set_store_root "$_data_dir_raw"
+export REMEMBER_STORE_ROOT
 
 # ── Pass 2: layered config merge ─────────────────────────────────────────────
 # Now that REMEMBER_DIR is known, merge all three layers.

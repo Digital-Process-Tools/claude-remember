@@ -3,7 +3,8 @@
   "_notes": [
     "Settings here override the plugin-shipped defaults for ALL your projects.",
     "Per-project overrides go in {REMEMBER_DIR}/config.json (e.g. ~/.remember/<slug>/config.json).",
-    "Layered merge order (highest priority wins): per-project > user-global > plugin defaults."
+    "Layered merge order (highest priority wins): per-project > user-global > plugin defaults.",
+    "{slug} names the per-project directory, so a caller in another language cannot name it from this template alone. Session start therefore writes an index of project_dir -> slug at the store root — here, ~/.remember/tmp/sessions. See README, 'Computing the slug outside bash'."
   ],
 
   "data_dir": "~/.remember/{slug}",

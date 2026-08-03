@@ -437,7 +437,15 @@ esac
     # absent so this does not grow a line per save.
     if [ -n "$BACKUP_COMMON_DIR" ] && mkdir -p "$BACKUP_COMMON_DIR/info" 2>/dev/null; then
         GB_EXCLUDE_FILE="$BACKUP_COMMON_DIR/info/exclude"
-        for _gb_rule in "/$SLUG/logs/" "/$SLUG/tmp/"; do
+        # "/tmp/" is the STORE ROOT's tmp/, not a slug's: REPO_ROOT here is
+        # dirname "$REMEMBER_DIR", so in external mode the backup repository IS
+        # the store root, and #297's session index sits at its top level. This
+        # hook's own `git add` is pathspec-limited to "$SLUG/" and could never
+        # take it — but the user owns this repository, and one `git add -A` of
+        # theirs would push a file naming every project on the machine and its
+        # absolute paths. That is #285's subject, so it is excluded here beside
+        # the per-slug rules rather than left to be discovered.
+        for _gb_rule in "/$SLUG/logs/" "/$SLUG/tmp/" "/tmp/"; do
             grep -qxF "$_gb_rule" "$GB_EXCLUDE_FILE" 2>/dev/null && continue
             printf '%s\n' "$_gb_rule" >> "$GB_EXCLUDE_FILE" 2>/dev/null || true
         done

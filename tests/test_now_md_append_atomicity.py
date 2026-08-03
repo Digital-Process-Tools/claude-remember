@@ -41,6 +41,7 @@ state to observe, at any entry size, on any filesystem.
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -339,17 +340,45 @@ class TestTheReaderStillCannotLock:
     `save.lock`, this fails and says why that is the worse trade.
     """
 
-    def test_session_start_hook_does_not_source_the_lock_library(self):
+    def test_session_start_hook_takes_no_lock_another_script_can_hold(self):
+        """Originally "does not source lib-lock.sh at all", which #297 had to
+        narrow: session start now rewrites the store-root session index under
+        `sessions.lock`, a lock no other script takes and which is held across
+        one awk and one mv.
+
+        The danger this guards is unchanged, and it is about WHICH lock rather
+        than about locking. If session start takes `save.lock`, a SessionStart
+        hook blocks the user's first prompt behind a lock held for the whole of
+        a save — including its summarize Haiku call. #227 measured that path at
+        a p50 of 8.7s already, #230 exists to cut its prefix, and #204 is a
+        user reporting this plugin blocking them. The writer carries now.md's
+        atomicity instead (#247); the reader stays lean.
+
+        So the assertion is the exhaustive one: session start may name exactly
+        one lock, and it is its own.
+        """
         hook = (Path(__file__).resolve().parent.parent
                 / "scripts" / "session-start-hook.sh").read_text()
-        assert "lib-lock.sh" not in hook, (
-            "session-start-hook.sh now sources lib-lock.sh. If that is so it "
-            "can take save.lock, and a SessionStart hook then blocks a user's "
-            "first prompt behind a lock held for the whole of a save — "
-            "including its summarize Haiku call. #227 measured that path at a "
-            "p50 of 8.7s already, #230 exists to cut its prefix, and #204 is a "
-            "user reporting this plugin blocking them. The writer carries the "
-            "atomicity instead (#247); the reader stays lean."
+        named = set(re.findall(r"[A-Za-z0-9_.-]+\.lock", hook))
+        assert named <= {"sessions.lock"}, (
+            f"session-start-hook.sh names {sorted(named - {'sessions.lock'})}. "
+            "A SessionStart hook that waits on a lock another script holds "
+            "blocks the user's first prompt for as long as that script runs — "
+            "for save.lock, the whole of a save including its Haiku call."
+        )
+
+    def test_the_lock_session_start_does_take_is_bounded(self):
+        """And bounded by a constant small enough to read, because the failure
+        this cannot have is a session start that waits. The index is a way to
+        find the per-project record, not a second source of truth, so a session
+        that cannot take the lock writes no row and the next one repairs it."""
+        hook = (Path(__file__).resolve().parent.parent
+                / "scripts" / "session-start-hook.sh").read_text()
+        assert 'lock_acquire "$_lock" "$SLUG_INDEX_LOCK_TIMEOUT"' in hook
+        timeout = re.search(r"^SLUG_INDEX_LOCK_TIMEOUT=(\d+)$", hook, re.M)
+        assert timeout and int(timeout.group(1)) <= 5, (
+            "the session-index lock timeout is unbounded or large; session "
+            "start is a path the user waits on"
         )
 
     def test_session_start_hook_reads_now_md_unsynchronised(self):

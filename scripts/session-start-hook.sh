@@ -328,6 +328,123 @@ _remember_write_slug_record() {
 }
 _remember_write_slug_record
 
+# ── And somewhere a caller can NAME, in the layout we ship (#297) ─────────
+# The record above answers "what is the slug", and in the layout
+# config.user.example.json ships — "data_dir": "~/.remember/{slug}", under a
+# _purpose that says to copy it — it answers from inside a directory the slug
+# names. A caller holding project_dir and the template could not open it
+# without already knowing what it says. That was written down as one documented
+# hole when #296 shipped; it is the recommended configuration, and those are
+# the installs most likely to have a non-bash caller in the first place.
+#
+# NOTHING IS DERIVED FROM project_dir. The alternative shape — a second copy at
+# <store_root>/tmp/session-slug-<key from project_dir> — needs a key both sides
+# compute the same way, which is a second algorithm over the project path, and
+# deleting exactly that is what #294 and #296 were for. A language-neutral
+# encoding does not escape it either: base64 of an N-byte path is 4*ceil(N/3),
+# so the 260-character paths #294 was about come out at 348 bytes and the
+# 300-character vector in tests/slug_vectors.py at 400, past the 255-byte
+# filename limit everywhere — and truncating to fit means appending a hash, a
+# slug algorithm under a different name. An index matched on project_dir
+# verbatim asks the caller to compute nothing at all, and keeps the property
+# the reporter's own directory scan has: it cannot answer wrongly, only fail
+# to answer.
+#
+# WRITTEN ONLY WHEN THE SLUG NAMES THE STORE. REMEMBER_STORE_ROOT is empty in
+# the legacy layout and in a single-directory external store, where it would
+# equal REMEMBER_DIR and duplicate a record that is already reachable — two
+# files saying one thing, with a second chance to disagree. The common layout
+# pays nothing for the external one, which is also why this is not in
+# bootstrap-dirs.sh.
+#
+# ONE FILE, MANY WRITERS — the difference from the record, which each project
+# owns outright. Several projects, and several worktrees of one project, start
+# sessions against one store root, and a read-modify-write across them loses
+# rows silently. So the rewrite is taken under the plugin's one lock primitive
+# and published with mv; a session that cannot take the lock writes no row and
+# says nothing, because the per-project record remains authoritative and this
+# is a way to find it, not a second source of truth.
+#
+# NO TIMESTAMPS, for the reason _remember_write_slug_record gives above. A row
+# for a directory since deleted can never be MATCHED by a caller holding a live
+# project_dir, and if that path is ever recreated the row is still correct — so
+# rows are never expired by age, and never pruned by testing whether the
+# directory still exists, which would drop correct rows for anything on an
+# unmounted share. The only bound is the row cap, and the ordering it drops by
+# is position, maintained by this rewrite. That is not a staleness test and no
+# reader may use it as one.
+#
+# AND NO ROW AT ALL for a project_dir this file cannot hold. A newline is legal
+# on POSIX and a tab is legal too, and both are structure here. The record can
+# take status=unavailable for that case; a row cannot, because it would have to
+# be keyed by the very value it is refusing. A caller with such a path finds no
+# row and falls back — the same outcome as this never having run, which is the
+# honest one.
+SLUG_INDEX_LOCK_TIMEOUT=2
+SLUG_INDEX_MAX_ROWS=1000
+_remember_write_slug_index() {
+    [ -n "${REMEMBER_STORE_ROOT:-}" ] || return 0
+    [ "$REMEMBER_STORE_ROOT" != "$REMEMBER_DIR" ] || return 0
+    [ -n "$PROJECT_PATH_SLUG" ] || return 0
+
+    case "${PROJECT}${REMEMBER_DIR}" in
+        *$'\n'*|*$'\t'*) return 0 ;;
+    esac
+
+    local _dir="$REMEMBER_STORE_ROOT/tmp"
+    [ -d "$_dir" ] || mkdir -p "$_dir" 2>/dev/null || return 0
+
+    local _index="$_dir/sessions" _lock="$_dir/sessions.lock" _tmp
+
+    # Sourced here rather than at the top of the file: this is the only caller,
+    # and lib-lock.sh probes for fractional sleep at source time — a fork the
+    # legacy layout has no reason to pay at every session start.
+    source "$_HOOK_DIR/lib-lock.sh" 2>/dev/null || return 0
+    command -v lock_acquire >/dev/null 2>&1 || return 0
+    lock_acquire "$_lock" "$SLUG_INDEX_LOCK_TIMEOUT" || return 0
+
+    _tmp="$_index.$$"
+    {
+        printf 'format=1\n'
+        if [ -f "$_index" ]; then
+            # Our own row dropped — it is re-appended below, so a project that
+            # starts twice moves rather than doubles — and the oldest dropped at
+            # the cap. A first line that is not ours means a format this version
+            # cannot read: exit, print nothing, start the file over, rather than
+            # carry rows forward under rules we do not know.
+            awk -v self="$PROJECT" -v max="$((SLUG_INDEX_MAX_ROWS - 1))" '
+                NR == 1 { if ($0 != "format=1") exit 0; next }
+                $0 == "" { next }
+                {
+                    n = index($0, "\tproject_dir=")
+                    if (n == 0) next
+                    if (substr($0, n + 13) == self) next
+                    rows[++c] = $0
+                }
+                END {
+                    start = (c > max) ? c - max + 1 : 1
+                    for (i = start; i <= c; i++) print rows[i]
+                }
+            ' "$_index" 2>/dev/null
+        fi
+        # project_dir LAST, and the only field whose value may contain a tab —
+        # so a reader splits on the first three and keeps the remainder whole.
+        # slug is ASCII by construction, and memory_dir was refused above if it
+        # carried one.
+        printf 'status=ok\tslug=%s\tmemory_dir=%s\tproject_dir=%s\n' \
+            "$PROJECT_PATH_SLUG" "$REMEMBER_DIR" "$PROJECT"
+    } > "$_tmp" 2>/dev/null || {
+        rm -f "$_tmp" 2>/dev/null
+        lock_release "$_lock" 2>/dev/null
+        return 0
+    }
+
+    mv -f "$_tmp" "$_index" 2>/dev/null || rm -f "$_tmp" 2>/dev/null
+    lock_release "$_lock" 2>/dev/null
+    return 0
+}
+_remember_write_slug_index
+
 # Args: $1 — sessions dir. Prints the newest transcript that is not this
 # session's, or nothing.
 previous_transcript() {
