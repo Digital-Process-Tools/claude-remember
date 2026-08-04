@@ -32,7 +32,6 @@ import os
 import re
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -42,6 +41,7 @@ pytestmark = pytest.mark.skipif(
     reason="bash hook subprocess + POSIX semantics — not portable to Windows runners",
 )
 
+from tests.env_cache import EnvCacheProbe, invalidate, write_config  # noqa: E402
 from tests.spawn_counting import make_shim_dir  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -74,9 +74,10 @@ def _project(tmp_path: Path, timezone: str | None = None):
     (project / ".remember" / "tmp").mkdir(parents=True)
     (home / ".remember").mkdir(parents=True)
     if timezone is not None:
-        (home / ".remember" / "config.json").write_text(
-            json.dumps({"timezone": timezone}), encoding="utf-8"
-        )
+        # Through the shared writer, which backdates: lib-env-cache.sh refuses a
+        # cache that is not `-nt` every config layer, and bash's `-nt` compares
+        # whole seconds (#303). See tests/env_cache.py.
+        write_config(home / ".remember" / "config.json", {"timezone": timezone})
     return home, project
 
 
@@ -119,6 +120,11 @@ def test_a_warmed_prompt_hook_spawns_almost_nothing(tmp_path):
     The first invocation in a project may resolve whatever it needs. Every
     invocation after it is the one the user waits on 256 times a day, and it has
     no work left to do that justifies a process.
+
+    The second run is *proved* warm rather than assumed warm (#303). This test
+    writes no config, so nothing here races the cache today — but a low number
+    is the pass condition for both paths being cheap and for the measurement
+    having quietly moved to the cold path, and only one of those is news.
     """
     home, project = _project(tmp_path)
     env = _env(home, project)
@@ -129,9 +135,12 @@ def test_a_warmed_prompt_hook_spawns_almost_nothing(tmp_path):
     assert first.returncode == 0, f"cold run failed: {first.stderr[:400]}"
     cold = len(_spawns(log))
 
+    probe = EnvCacheProbe(env["TMPDIR"])
+    probe.snapshot()
     second = _run(env, count_into=log, shims=shims)
     assert second.returncode == 0, f"warm run failed: {second.stderr[:400]}"
     warm = _spawns(log)
+    probe.assert_warm("the warm prompt-hook spawn budget")
 
     assert len(warm) <= WARM_SPAWN_BUDGET, (
         f"{len(warm)} external spawns to print a timestamp (cold run: {cold}). "
@@ -191,8 +200,7 @@ def test_editing_the_config_is_not_ignored_by_a_warmed_hook(tmp_path):
 
     cfg = home / ".remember" / "config.json"
     cfg.write_text(json.dumps({"timezone": "Asia/Tokyo"}), encoding="utf-8")
-    now = time.time() + 5
-    os.utime(cfg, (now, now))
+    invalidate(cfg)
 
     after = _run(env)
     assert "UTC" not in after.stdout, (

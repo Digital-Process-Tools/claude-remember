@@ -37,7 +37,6 @@ import json
 import os
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -47,6 +46,7 @@ pytestmark = pytest.mark.skipif(
     reason="bash hook subprocess + POSIX semantics — not portable to Windows runners",
 )
 
+from tests.env_cache import EnvCacheProbe, invalidate, write_config  # noqa: E402
 from tests.spawn_counting import make_shim_dir  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -68,18 +68,15 @@ def _project(tmp_path: Path, config: dict | None = None):
     (project / ".remember" / "tmp").mkdir(parents=True)
     (home / ".remember").mkdir(parents=True)
     if config is not None:
-        cfg = home / ".remember" / "config.json"
-        cfg.write_text(json.dumps(config), encoding="utf-8")
-        # Backdated, and not for convenience. lib-env-cache.sh refuses a cache
-        # that is not `-nt` every config layer, and bash's `-nt` compares whole
-        # SECONDS — so a config written in the same second as the cache is
-        # rejected and the next prompt re-resolves from scratch. That direction
-        # fails safe (a stale answer is never served; the cost is one slow
-        # prompt), but it makes any spawn count taken here a coin flip. A config
-        # file the user edited before this session started is also what the
-        # measurement is supposed to be about.
-        old = time.time() - 60
-        os.utime(cfg, (old, old))
+        # Backdated by the shared writer, and not for convenience.
+        # lib-env-cache.sh refuses a cache that is not `-nt` every config layer,
+        # and bash's `-nt` compares whole SECONDS — so a config written in the
+        # same second as the cache is rejected and the next prompt re-resolves
+        # from scratch, which makes any spawn count taken here a coin flip. That
+        # reasoning used to live here, in this comment, in this one file; it now
+        # lives in tests/env_cache.py where the next budget test can find it
+        # ([#303](https://github.com/Digital-Process-Tools/claude-remember/issues/303)).
+        write_config(home / ".remember" / "config.json", config)
     return home, project
 
 
@@ -261,6 +258,12 @@ def test_reading_the_option_costs_no_process_on_a_warm_prompt(tmp_path):
     from the merged config table, replayed from the env cache afterwards. If it
     ever grows its own `jq` here, it is a fork on every prompt the user waits
     on — 150-800 ms each on the box #227 was measured on.
+
+    This is the test #303 was raised about: it writes a config, so the second
+    run is warm only if that config is unambiguously older than the cache the
+    first run publishes. The backdate makes that true; the probe makes the test
+    *say* it, so a count taken on the cold path fails as a cold measurement
+    rather than passing as a cheap one.
     """
     home, project = _project(tmp_path, {"timezone": "UTC", "prompt_stamp": "stable"})
     env = _env(home, project)
@@ -271,9 +274,12 @@ def test_reading_the_option_costs_no_process_on_a_warm_prompt(tmp_path):
     assert first.returncode == 0, f"cold run failed: {first.stderr[:400]}"
     cold = [ln for ln in log.read_text(encoding="utf-8").splitlines() if ln.strip()]
 
+    probe = EnvCacheProbe(env["TMPDIR"])
+    probe.snapshot()
     second = _run(env, count_into=log, shims=shims)
     assert second.returncode == 0, f"warm run failed: {second.stderr[:400]}"
     warm = [ln for ln in log.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    probe.assert_warm("the prompt_stamp warm spawn budget")
 
     assert len(warm) <= WARM_SPAWN_BUDGET, (
         f"{len(warm)} external spawns with prompt_stamp set (cold run: {len(cold)}). "
@@ -292,8 +298,7 @@ def test_changing_the_option_takes_effect_on_the_next_prompt(tmp_path):
 
     cfg = home / ".remember" / "config.json"
     cfg.write_text(json.dumps({"timezone": "UTC", "prompt_stamp": "stable"}), encoding="utf-8")
-    now = time.time() + 5
-    os.utime(cfg, (now, now))
+    invalidate(cfg)
 
     after = _run(env)
     assert after.stdout.strip() == f"[{WHO}]", (

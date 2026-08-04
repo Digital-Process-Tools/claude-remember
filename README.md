@@ -662,6 +662,57 @@ bash scripts/run-tests.sh          # without Haiku
 bash scripts/run-tests.sh --live   # with real Haiku call
 ```
 
+### Skips print their reason
+
+`addopts` carries `-rs`, so every skipped test prints *why* it skipped
+([#306](https://github.com/Digital-Process-Tools/claude-remember/issues/306)).
+That is not verbosity for its own sake. A skip here is a checker saying it could
+not answer — the shell-parse gate naming the bash 3.2 constructs that went
+unchecked because no floor interpreter was installed, the timestamp comparison
+naming the `printf '%(...)T'` builtin this bash does not have — and rendered as
+a bare `s` that sentence never reaches anyone. A green run with silent skips
+looks exactly like a green run that checked everything.
+
+Read the `SKIPPED` block at the end of a run before concluding a leg is covered.
+On a Linux runner it is where you find out that the floor bash was not.
+
+### Measuring the warm path (`tests/env_cache.py`)
+
+`scripts/lib-env-cache.sh` refuses its cache unless the cache file is `-nt`
+every config layer, and bash's `-nt` compares **whole seconds**. So a test that
+writes a config and then counts process spawns on the "warm" run is measuring
+one of two different things depending on which side of a second boundary the two
+writes landed on — cold and expensive, or warm and cheap. Both are correct
+product behaviour; only one is what such a test claims to measure
+([#303](https://github.com/Digital-Process-Tools/claude-remember/issues/303)).
+
+Write config layers through `tests.env_cache.write_config`, which backdates past
+that granularity, and bracket the run being measured with an `EnvCacheProbe`:
+
+```python
+from tests.env_cache import EnvCacheProbe, write_config
+
+write_config(home / ".remember" / "config.json", {"timezone": "UTC"})
+_run(env)                                   # cold — publishes the resolution
+
+probe = EnvCacheProbe(env["TMPDIR"])
+probe.snapshot()
+_run(env)                                   # the run being measured
+probe.assert_warm("the spawn budget")
+```
+
+Backdating alone would only make the number *likely* to be right. The probe
+makes the test **state which path it measured**, with the same three answers
+everything else here gives: `warm`, `cold`, and `unknown` — the last meaning no
+resolution was published or replayed, so the number cannot be attributed at all.
+It needs no clock: a cold run ends in `_remember_env_cache_publish`, which
+`mv`s a temp file over the cache, so the cache file's inode changes; a warm run
+reads and writes nothing.
+
+`tests.env_cache.invalidate` is the other direction, for a test that wants the
+cache refused on purpose — and it needs the same whole-second margin, or the
+config edit is invisible until the next second.
+
 ### The Python floor guard
 
 The supported floor is **Python 3.9** — the lowest interpreter in the CI matrix

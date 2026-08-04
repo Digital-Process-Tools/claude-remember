@@ -1,3 +1,9 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "--cov=pipeline --cov-report=term-missing --cov-fail-under=80"
+# `-rs` prints the reason behind every skip. A skip in this suite is a checker
+# saying it could not answer — the floor-bash parse gate naming the constructs
+# that went unchecked, the timestamp comparison naming the builtin this bash
+# does not have — and that contract only pays for itself if the reason reaches a
+# human. Rendered as a bare `s`, a green run with silent skips is visually
+# identical to a green run that checked everything (#306).
+addopts = "-rs --cov=pipeline --cov-report=term-missing --cov-fail-under=80"
