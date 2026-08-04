@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] — What the check actually saw
+
+Three of the four changes here are the same shape: something reported a clean result it was not in a position to give.
+
+The one with a user behind it is [@jackneil](https://github.com/jackneil)'s. This plugin has always printed `[14:30 CEST — jack — 45%]` into the model's context on every prompt, with no way to turn it down, and operators were rewriting that line in flight with a regex to get rid of it. `prompt_stamp` makes it a choice — `full` (the unchanged default), `stable`, or `off`. The half of the report that was wrong is the half that decided the design: the context percentage is *not* byte-stable between turns, so dropping only the clock would have shipped the same problem under a shorter name.
+
+The other three are ours. Nothing asserted that the shipped shell scripts **parse**, while a syntax error in a hook silently discards whatever the user just typed — and the construct that caused exactly that during this release fails to parse only on bash 3.2, so a gate running under a modern bash would have reported `ok` on the offending file. The lock primitive's concurrency test counted *acquisitions* rather than measuring *overlap*, which meant it recorded four legitimate sequential lock-takes as four concurrent winners. And the store-spelling check added in 0.14.0 now has its precondition measured rather than assumed: it never occurs in any store anybody has, and the disclosure stays as the detector.
+
+Manifest bumped per [#133](https://github.com/Digital-Process-Tools/claude-remember/issues/133) — the updater compares manifest versions and nothing else, so this line is the part that reaches anyone.
+
+
 ### Changed
 
 - **The lock primitive's concurrency test measures overlap instead of counting acquisitions** ([#293](https://github.com/Digital-Process-Tools/claude-remember/issues/293)) — `test_at_most_one_winner_per_round` tallied how many processes acquired a lock in a round and asserted the tally was 1. That is not a property of `lock_acquire`. Its winner released after 150ms, so a contender the OS did not schedule until after that release took the free lock by plain `mkdir` — a second acquisition, legitimate, sequential, and not a race — and the harness recorded it as a concurrent winner. **Reproduced on a stock macOS laptop, and worse than the issue reported: 4 contenders at a 0.4s stagger, 4 winners, zero overlap.** The test passed in CI only because the runners it met happened to schedule contenders inside 150ms of each other — the same property that made [#291](https://github.com/Digital-Process-Tools/claude-remember/issues/291) fail on one ubuntu leg in twelve and never on a laptop.
