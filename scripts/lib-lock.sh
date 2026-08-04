@@ -12,11 +12,17 @@
 #   could each observe the same dead PID and each declare itself the new holder.
 #
 #   Measured on the old acquisition: 0/40 multi-winner rounds at N=2. At N=8 it
-#   is never zero — 11/40 in the harness on #182, 40/40 in the one in
-#   tests/test_lock_primitive.py, which holds the critical section for 0.1s so
-#   overlaps are certain to be observed. The rate depends on the harness; the
-#   point is only that it is zero at N=2 and not zero above it, which is why a
-#   two-process test proves nothing here — see #182.
+#   is never zero — 11/40 in the harness on #182, 40/40 in the one that was in
+#   tests/test_lock_primitive.py at the time, which held the critical section
+#   for 0.1s so overlaps were certain to be observed. The rate depends on the
+#   harness; the point is only that it is zero at N=2 and not zero above it,
+#   which is why a two-process test proves nothing here — see #182.
+#
+#   That harness counted winners. It no longer exists: counting acquisitions is
+#   not a measurement of mutual exclusion, because a contender scheduled after
+#   the holder released takes the free lock legitimately and is counted as a
+#   concurrent one (#293). The current tests record entry to and exit from the
+#   critical section in one ordered log and fail on overlap instead.
 #
 # Why takeover is `mv` and never `rm`:
 #
@@ -209,9 +215,17 @@ _lock_try_adopt() {
         # two shell instructions, so one that has sat untouched past the
         # threshold is debris by exactly the argument used for the lock itself.
         #
-        # `mv` rather than `rmdir` does the clearing, so that two adopters both
-        # judging the same marker dead cannot both proceed on it: a rename
-        # fails for everyone but the first.
+        # `mv` rather than `rmdir` does the clearing. Do NOT read that as the
+        # reason adoption is single-winner: `rmdir` is equally single-winner
+        # here — exactly one of N concurrent callers removes the directory and
+        # the rest get ENOENT — and mutating this line to it leaves every test
+        # in tests/test_lock_primitive.py green, correctly (#293). The gate is
+        # the `noclobber` pid write below, as the comment on it says: mutated
+        # even to `rm -rf`, which really does succeed for every caller, 8-way
+        # contention over 60 rounds still gives 0 doubled adoptions and 60/60
+        # rounds won. What `mv` buys is only that it clears a marker directory
+        # that is not empty, where `rmdir` would fail and wedge the lock it
+        # exists to unwedge.
         [ "$(_lock_dir_age "${_dir}/adopt")" -lt "$_LOCK_ADOPT_AFTER" ] && return 1
         mv "${_dir}/adopt" "${_dir}/adopt.dead.$$" 2>/dev/null || return 1
         rm -rf "${_dir}/adopt.dead.$$" 2>/dev/null || true

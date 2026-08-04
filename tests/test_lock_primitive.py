@@ -7,6 +7,21 @@ Why the concurrency tests go to N=10 rather than stopping at 2: the acquisition
 this replaced measured 0/40 multi-winner rounds at N=2 and 11/40 at N=8. A
 two-process test passes on broken locking, which is exactly how the previous
 fix shipped looking correct.
+
+What the concurrency tests measure is OVERLAP, not acquisitions (#293). "How
+many processes acquired this lock" is not a property of `lock_acquire`: a
+contender the OS schedules after the previous holder released takes the free
+lock by plain `mkdir`, which is a second acquisition, correct, and not a race.
+Counting it made the assertion a statement about the scheduler that read as a
+statement about the lock — the shape that produced #291's misdiagnosis. The
+rule above is the one worth having, so it is the one asserted: contenders
+record entering and leaving the critical section in one ordered log and the
+replay fails if anyone was ever inside while somebody else still was.
+
+No clock is involved, deliberately — see `_overlap_script`. On stock macOS
+bash 3.2 the best portable clock is whole seconds, which is coarser than the
+intervals, and a disjointness test that cannot resolve an overlap would be
+#293 again in a new costume.
 """
 
 from __future__ import annotations
@@ -36,54 +51,280 @@ def _run(script: str, **kwargs) -> subprocess.CompletedProcess:
     )
 
 
-def _race_script(lock_dir: Path, winners_file: Path, n: int) -> str:
-    """N processes contend for the same lock; each winner appends one line.
+def _overlap_script(
+    lock_dir: Path,
+    events_file: Path,
+    n: int,
+    hold: str,
+    timeout: int,
+    stagger: str = "",
+) -> str:
+    """N processes contend for the same lock; each records entering and leaving
+    the critical section, in order, in one shared append log.
 
-    The critical section is deliberately not instantaneous — a lock that only
-    looks correct because the section is too short to overlap proves nothing.
+    There is no clock in here. That is deliberate, and it is the design.
+
+    The obvious way to prove two holders never coincide is a timestamp at each
+    enter and each exit and a pairwise-disjoint check over the intervals. It
+    cannot be done honestly on this suite's platforms. On stock macOS — bash
+    3.2.57, which is the platform lib-lock.sh exists for — `EPOCHREALTIME` is
+    unset and `date +%s%N` prints `1785838792N`, a literal `N`. The best
+    portable clock left is whole seconds, and lib-lock.sh's own recorder
+    (`_lock_timing_now`) degrades to exactly that there. Whole seconds is
+    coarser than every interval being measured, so "disjoint" would decay into
+    "indistinguishable" — the same defect #293 reports, wearing a different
+    hat: a test that passes because it cannot see the thing it checks. File
+    mtimes are no way out either; `-nt` is whole-second granular too (#303).
+
+    Ordering needs no resolution. The appends are O_APPEND, so the order of
+    lines in the log is the order of the write syscalls — and that order is
+    pinned to the lock by causality rather than by the scheduler:
+
+        `enter` is written *after* lock_acquire returns
+        `exit`  is written *before* lock_release is called
+
+    So the recorded interval is contained in the true hold interval and is
+    never wider than it. A holder that genuinely released before the next one
+    acquired cannot have its `exit` line land after the next holder's `enter`,
+    because the release and the acquire sit between those two writes. A false
+    overlap is therefore not reachable, and a real overlap is visible at any
+    duration — including one shorter than any clock on this platform can name.
     """
+    stagger_cmd = f"sleep {stagger}" if stagger else ""
     return f"""
     source {LIB_LOCK_SH}
     contend() {{
-        if lock_acquire "{lock_dir}" 0; then
-            echo "win $$" >> "{winners_file}"
-            sleep 0.15
+        if lock_acquire "{lock_dir}" {timeout}; then
+            echo "enter $1" >> "{events_file}"
+            sleep {hold}
+            echo "exit $1" >> "{events_file}"
             lock_release "{lock_dir}"
+        else
+            echo "timeout $1" >> "{events_file}"
         fi
     }}
-    for i in $(seq 1 {n}); do contend & done
+    for i in $(seq 1 {n}); do
+        contend "$i" &
+        {stagger_cmd}
+    done
     wait
     """
 
 
+def _replay(events_text: str) -> tuple[int, int, list, int]:
+    """Walk the log and report how deep the critical section ever got.
+
+    Returns (holds, timeouts, overlaps, malformed). `overlaps` is one entry per
+    `enter` that arrived while somebody was still inside, carrying who arrived
+    and who was already in — that is the failure this file exists to catch, and
+    a bare count of it would not say who to go and look at.
+    """
+    held: list[str] = []
+    overlaps: list[tuple[str, list[str]]] = []
+    holds = 0
+    timeouts = 0
+    malformed = 0
+    for line in events_text.splitlines():
+        if not line:
+            continue
+        parts = line.split()
+        if len(parts) != 2:
+            # An append that did not land whole. Short O_APPEND writes are
+            # atomic, so this should never happen — but a torn line makes the
+            # replay unreliable in both directions, and the callers below turn
+            # it into a loud skip rather than reading depth out of it.
+            malformed += 1
+            continue
+        kind, who = parts
+        if kind == "enter":
+            if held:
+                overlaps.append((who, list(held)))
+            held.append(who)
+            holds += 1
+        elif kind == "exit":
+            if who in held:
+                held.remove(who)
+        elif kind == "timeout":
+            timeouts += 1
+        else:
+            malformed += 1
+    return holds, timeouts, overlaps, malformed
+
+
+# Ten, where the acquisition count this replaced used forty. A round is no
+# longer one acquisition: every contender waits its turn, so a round at N=10 is
+# ten hand-offs and ten chances to catch two processes inside together. Ten
+# rounds is 100 hand-offs at N=10 against the old 40 rounds' 40 acquisitions —
+# more contention for the same wall clock, which matters because the waiting
+# path is not free (each spin costs a `stat` and a `date`).
+OVERLAP_ROUNDS = 10
+HOLD_SECONDS = "0.05"
+# Generous on purpose. The work in a round is n * HOLD_SECONDS — half a second
+# at n=10 — so this is not a deadline anything correct can miss. It is not
+# asserted on: this lock has no fairness guarantee, so "every contender got in"
+# is not a property to fail on. What is asserted is that somebody always did.
+ACQUIRE_TIMEOUT = 30
+
+
 @pytest.mark.parametrize("n", [2, 4, 8, 10])
-def test_at_most_one_winner_per_round(n, tmp_path):
-    """Across {ROUNDS} rounds at N processes, never two holders at once."""
-    multi_winner_rounds = 0
-    no_winner_rounds = 0
+def test_no_two_holders_overlap(n, tmp_path):
+    """Across OVERLAP_ROUNDS rounds at N processes, never two holders at once.
 
-    for round_no in range(ROUNDS):
+    This counts *overlap*, not acquisitions (#293). The version it replaces
+    tallied how many processes acquired the lock in a round and asserted the
+    count was 1 — which is not a property of `lock_acquire`. Its winner
+    released after 150ms, so a contender the OS did not schedule until after
+    that release acquired the free lock by plain `mkdir`: a legitimate,
+    sequential, second acquisition, tallied as a concurrent winner. Measured
+    on this laptop at a 0.4s stagger: 4 contenders, 4 winners, no overlap of
+    any kind. The assertion was about the scheduler and read as being about
+    the lock, which is how it would have produced #291's misdiagnosis a second
+    time. The scheduler-free form of that is pinned by
+    test_a_sequential_reacquisition_is_not_an_overlap; the concurrent one by
+    test_the_staggered_round_from_293_reports_no_overlap.
+
+    Contenders wait (ACQUIRE_TIMEOUT) rather than giving up at timeout 0, so a
+    round exercises the hand-off N times instead of once. That is where the
+    teeth are: every hand-off is another chance for two to be inside together.
+    """
+    overlapping_rounds: list[tuple[int, list]] = []
+    unmeasurable_rounds = 0
+    malformed_total = 0
+
+    for round_no in range(OVERLAP_ROUNDS):
         lock_dir = tmp_path / f"n{n}-r{round_no}.lock"
-        winners = tmp_path / f"n{n}-r{round_no}.winners"
-        winners.write_text("", encoding="utf-8")
+        events = tmp_path / f"n{n}-r{round_no}.events"
+        events.write_text("", encoding="utf-8")
 
-        result = _run(_race_script(lock_dir, winners, n))
+        result = _run(
+            _overlap_script(lock_dir, events, n, HOLD_SECONDS, ACQUIRE_TIMEOUT)
+        )
         assert result.returncode == 0, result.stderr
 
-        won = [line for line in winners.read_text(encoding="utf-8").splitlines() if line]
-        if len(won) > 1:
-            multi_winner_rounds += 1
-        if not won:
-            no_winner_rounds += 1
+        holds, _timeouts, overlaps, malformed = _replay(
+            events.read_text(encoding="utf-8")
+        )
+        malformed_total += malformed
+        if overlaps:
+            overlapping_rounds.append((round_no, overlaps))
 
-    assert multi_winner_rounds == 0, (
-        f"{multi_winner_rounds}/{ROUNDS} rounds at N={n} had more than one holder — "
-        "the lock is not mutually exclusive"
+        assert holds >= 1, (
+            f"round {round_no} at N={n} had no holder at all — a silently "
+            "missed cycle is as bad as a doubled one"
+        )
+        if holds < 2:
+            unmeasurable_rounds += 1
+
+    if malformed_total:
+        pytest.skip(
+            f"{malformed_total} event lines did not land whole, so the replay "
+            f"cannot be trusted in either direction. COVERAGE LOST: mutual "
+            f"exclusion at N={n} was NOT checked in this run"
+        )
+
+    assert not overlapping_rounds, (
+        f"{len(overlapping_rounds)}/{OVERLAP_ROUNDS} rounds at N={n} had two "
+        f"processes inside the critical section at once — the lock is not "
+        f"mutually exclusive. First: {overlapping_rounds[0]}"
     )
-    assert no_winner_rounds == 0, (
-        f"{no_winner_rounds}/{ROUNDS} rounds at N={n} had no winner at all — "
-        "a silently missed cycle is as bad as a double one"
+
+    measurable = OVERLAP_ROUNDS - unmeasurable_rounds
+    if measurable * 2 < OVERLAP_ROUNDS:
+        pytest.skip(
+            f"only {measurable}/{OVERLAP_ROUNDS} rounds at N={n} got two or "
+            f"more contenders through the lock, so most rounds could not have "
+            f"observed an overlap even if one happened. COVERAGE LOST: this "
+            f"run does not support the mutual-exclusion claim"
+        )
+
+
+def test_a_sequential_reacquisition_is_not_an_overlap(tmp_path):
+    """Take the lock, release it, take it again. Three times, one process.
+
+    This is the structural half of #293 and it has no scheduler in it at all —
+    no background jobs, no sleeps, no stagger. Three acquisitions, three
+    releases, strictly in order, so `holds` is 3 on every runner that can run
+    bash.
+
+    The assertion this file used to carry — "at most one winner per round" —
+    is red on exactly this. Three legitimate sequential acquisitions of a free
+    lock is the behaviour `lock_acquire` promises, and counting them was never
+    a measurement of mutual exclusion. That is why the measurement changed
+    rather than the tolerance: a wider count would have been the same mistake
+    with more slack in it.
+    """
+    lock_dir = tmp_path / "sequential.lock"
+    events = tmp_path / "sequential.events"
+    events.write_text("", encoding="utf-8")
+
+    result = _run(f"""
+    source {LIB_LOCK_SH}
+    for k in 1 2 3; do
+        if lock_acquire "{lock_dir}" 0; then
+            echo "enter $k" >> "{events}"
+            echo "exit $k" >> "{events}"
+            lock_release "{lock_dir}"
+        else
+            echo "timeout $k" >> "{events}"
+        fi
+    done
+    """)
+    assert result.returncode == 0, result.stderr
+
+    holds, timeouts, overlaps, malformed = _replay(
+        events.read_text(encoding="utf-8")
     )
+    assert malformed == 0, "event log did not land whole"
+    assert (holds, timeouts) == (3, 0), (
+        f"a free lock, taken and released three times in sequence by one "
+        f"process, produced {holds} acquisitions and {timeouts} timeouts — "
+        "nothing was contending, so this is a defect in the lock"
+    )
+    assert not overlaps, (
+        f"a sequential re-acquisition was read as an overlap: {overlaps} — the "
+        "replay is reporting acquisitions, which is the #293 defect itself"
+    )
+
+
+def test_the_staggered_round_from_293_reports_no_overlap(tmp_path):
+    """The concurrent shape #293 was filed on, at the stagger it names.
+
+    Four contenders started 0.4s apart, each holding 0.15s at timeout 0. Each
+    finds the lock free — the previous holder released 250ms earlier — and
+    takes it. Measured here: 4 acquisitions, zero overlap. The old rule reads
+    that as a four-way failure of mutual exclusion.
+
+    Unlike the sequential test above, how many contenders get in IS up to the
+    scheduler: at timeout 0 a contender that the OS delays into the previous
+    holder's 150ms window gives up rather than waiting, and on a loaded runner
+    that happens. Observed once in six runs on this laptop, 3 of 4. So the
+    count is NOT asserted on — asserting it would rebuild #293's defect inside
+    the test written to retire it. What is asserted is the overlap, which is
+    scheduler-independent; the count only decides whether this run had anything
+    to say, and a run that did not says so out loud.
+    """
+    n = 4
+    lock_dir = tmp_path / "stagger.lock"
+    events = tmp_path / "stagger.events"
+    events.write_text("", encoding="utf-8")
+
+    result = _run(_overlap_script(lock_dir, events, n, "0.15", 0, stagger="0.4"))
+    assert result.returncode == 0, result.stderr
+
+    holds, _timeouts, overlaps, malformed = _replay(
+        events.read_text(encoding="utf-8")
+    )
+    assert malformed == 0, "event log did not land whole"
+    assert not overlaps, (
+        f"a staggered sequential re-acquisition was read as an overlap: "
+        f"{overlaps} — the replay is reporting the scheduler, not the lock"
+    )
+    if holds < 2:
+        pytest.skip(
+            f"only {holds}/{n} contenders got the lock, so this run contained "
+            f"no re-acquisition to misread. COVERAGE LOST: the concurrent half "
+            f"of #293 was NOT exercised (the sequential half above still was)"
+        )
 
 
 def test_stale_lock_from_a_dead_holder_is_taken_over(tmp_path):
