@@ -94,7 +94,7 @@ _remember_env_cache_load() {
     [ -O "$_f" ] || return 1
     [ -r "$_f" ] || return 1
 
-    local _line _dir="" _tz="" _mem="" _proj="" _pipe=""
+    local _line _dir="" _tz="" _mem="" _proj="" _pipe="" _stamp=""
     local _env_proj="" _env_pipe="" _env_home=""
     local _cfgs=()
     while IFS= read -r _line || [ -n "$_line" ]; do
@@ -105,6 +105,7 @@ _remember_env_cache_load() {
         case "$_line" in
             REMEMBER_DIR=*)          _dir="${_line#*=}" ;;
             REMEMBER_TZ=*)           _tz="${_line#*=}" ;;
+            REMEMBER_PROMPT_STAMP=*) _stamp="${_line#*=}" ;;
             MEMORY_PROJECT_DIR=*)    _mem="${_line#*=}" ;;
             PROJECT_DIR=*)           _proj="${_line#*=}" ;;
             PIPELINE_DIR=*)          _pipe="${_line#*=}" ;;
@@ -120,6 +121,13 @@ _remember_env_cache_load() {
     done < "$_f"
 
     [ -n "$_dir" ] && [ -n "$_proj" ] && [ -n "$_pipe" ] || return 1
+    # Required, not defaulted, and that is the point (#301). The cache is
+    # invalidated by config mtime, never by plugin version — so a file written
+    # by the release before this key existed carries no answer for it, and
+    # reading that absence as "the default" would serve a resolution that never
+    # considered the option. Writers always write a value, so an empty one means
+    # an older writer. Costs one slow prompt, once, at upgrade.
+    [ -n "$_stamp" ] || return 1
     [ "$_env_proj" = "${CLAUDE_PROJECT_DIR:-}" ] || return 1
     [ "$_env_pipe" = "${CLAUDE_PLUGIN_ROOT:-}" ] || return 1
     [ "$_env_home" = "${HOME:-}" ] || return 1
@@ -136,8 +144,10 @@ _remember_env_cache_load() {
     PIPELINE_DIR="$_pipe"
     REMEMBER_DIR="$_dir"
     REMEMBER_TZ="$_tz"
+    REMEMBER_PROMPT_STAMP="$_stamp"
     MEMORY_PROJECT_DIR="${_mem:-$_proj}"
     export PROJECT_DIR PIPELINE_DIR REMEMBER_DIR REMEMBER_TZ MEMORY_PROJECT_DIR
+    export REMEMBER_PROMPT_STAMP
     return 0
 }
 
@@ -165,6 +175,7 @@ _remember_env_cache_publish() {
         printf 'PIPELINE_DIR=%s\n' "$PIPELINE_DIR"
         printf 'REMEMBER_DIR=%s\n' "$REMEMBER_DIR"
         printf 'REMEMBER_TZ=%s\n' "${REMEMBER_TZ:-}"
+        printf 'REMEMBER_PROMPT_STAMP=%s\n' "${REMEMBER_PROMPT_STAMP:-full}"
         printf 'MEMORY_PROJECT_DIR=%s\n' "${MEMORY_PROJECT_DIR:-$PROJECT_DIR}"
         printf 'CACHE_CONFIG=%s\n' "${PIPELINE_DIR}/config.json"
         printf 'CACHE_CONFIG=%s\n' "${HOME:-}/.remember/config.json"

@@ -39,6 +39,7 @@
     "diverged_notice_after": 3
   },
   "time_format": "24h",
+  "prompt_stamp": "full",
   "model": "haiku",
   "reject_pattern": "",
   "haiku": {
@@ -71,6 +72,20 @@
       "stalling all saves. Unlike extract_max_bytes the input is NOT truncated,",
       "because consolidation rewrites recent/archive and truncating would drop",
       "archived memory. Set 0 to disable the guard."
+    ],
+    "prompt_stamp": [
+      "What the UserPromptSubmit hook injects into the model's context.",
+      "  full   (default, unchanged) -> [14:30 CEST — jack — 45%]",
+      "  stable                      -> [jack]",
+      "  off                         -> nothing at all",
+      "Two of the three fields in `full` change between turns for reasons that",
+      "have nothing to do with what you typed: the clock, and the context",
+      "percentage, which climbs on every prompt for anyone running the status",
+      "line. `stable` drops both and keeps the username. It KEEPS the >=95",
+      "context warning, which is threshold-gated and therefore only changes",
+      "bytes when it changes behaviour. `off` suppresses that warning too —",
+      "that is the difference between the two, and the reason both exist.",
+      "An unrecognised value is read as `full`."
     ],
     "model": [
       "Model for the summarize/consolidate calls (claude -p). Default 'haiku'.",

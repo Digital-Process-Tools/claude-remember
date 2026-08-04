@@ -25,7 +25,8 @@
 #   0   Always (hook must not block the agent)
 #
 # OUTPUT
-#   Prints "[HH:MM TZ — username]" to stdout.
+#   Prints "[HH:MM TZ — username]" to stdout. The `prompt_stamp` config option
+#   narrows that to "[username]" (`stable`) or to nothing (`off`) — see #301.
 #
 # COST (#227)
 #   This runs on every prompt the user submits and the user waits for it. It
@@ -136,6 +137,22 @@ done
 # become one JSON object, and stdout cannot be half plain text and half JSON.
 # The no-notice path below still prints exactly what it always did.
 CTX=$(
+# What this hook is allowed to say (#301). Resolved by log.sh and replayed from
+# the env cache, so reading it costs nothing here — see lib-env-cache.sh. The
+# case is a second guard rather than trust in the writer: this value arrives
+# from a file in a shared temp directory.
+#
+# NOT a `case`, and it must not become one: this whole block runs inside a
+# `$( )` command substitution, where bash's parser reads the `)` closing a case
+# pattern as the end of the substitution and fails at parse time — the hook then
+# exits 2, and on UserPromptSubmit exit 2 erases what the user typed. Two
+# string comparisons, no fork, no parser edge.
+_REMEMBER_STAMP="${REMEMBER_PROMPT_STAMP:-full}"
+if [ "$_REMEMBER_STAMP" != "stable" ] && [ "$_REMEMBER_STAMP" != "off" ]; then
+  _REMEMBER_STAMP="full"
+fi
+
+if [ "$_REMEMBER_STAMP" != "off" ]; then
 CTX_PCT=""
 CTX_PCT_FILE="${SYS_TMPDIR:-/tmp}/claude-ctx-pct"
 if [ -f "$CTX_PCT_FILE" ]; then
@@ -153,15 +170,26 @@ fi
 # environment carries neither name.
 _REMEMBER_WHO="${USER:-${USERNAME:-}}"
 [ -n "$_REMEMBER_WHO" ] || _REMEMBER_WHO=$(whoami 2>/dev/null)
-_REMEMBER_NOW=$(_remember_date '+%H:%M %Z')
-if [ -n "$CTX_PCT" ]; then
-  TIMESTAMP="[$_REMEMBER_NOW — $_REMEMBER_WHO — ${CTX_PCT}%]"
-  echo "$TIMESTAMP"
-  if [ "$CTX_PCT" -ge 95 ] 2>/dev/null; then
-    echo "WARNING: Context at ${CTX_PCT}%. Run /remember to save session state before context death."
-  fi
+if [ "$_REMEMBER_STAMP" = "stable" ]; then
+  # The username is the one field here that does not change between turns, and
+  # it is the field the reporter asked to keep. No clock is read at all, which
+  # on bash 3.2 (stock macOS, no printf '%(...)T') also removes this path's last
+  # process.
+  echo "[$_REMEMBER_WHO]"
+elif [ -n "$CTX_PCT" ]; then
+  _REMEMBER_NOW=$(_remember_date '+%H:%M %Z')
+  echo "[$_REMEMBER_NOW — $_REMEMBER_WHO — ${CTX_PCT}%]"
 else
+  _REMEMBER_NOW=$(_remember_date '+%H:%M %Z')
   echo "[$_REMEMBER_NOW — $_REMEMBER_WHO]"
+fi
+# Kept under `stable`, deliberately: it is gated on a threshold, so it changes
+# bytes only when it changes behaviour — and it is the only line here anybody
+# acts on. `off` is the mode that suppresses it, because a user who asked for
+# silence and got a surprise line at 95% is a user back to filtering our stdout.
+if [ -n "$CTX_PCT" ] && [ "$CTX_PCT" -ge 95 ] 2>/dev/null; then
+  echo "WARNING: Context at ${CTX_PCT}%. Run /remember to save session state before context death."
+fi
 fi
 
 # ── Dispatch: after_user_prompt ─────────────────────────────────────────

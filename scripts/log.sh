@@ -366,6 +366,22 @@ debug_enabled() {
 REMEMBER_TZ=$(config ".timezone" "")
 export REMEMBER_TZ
 
+# What user-prompt-hook.sh is allowed to inject (#301). Read here rather than in
+# the hook because the hook's whole design is that it does NOT resolve config —
+# it replays an answer someone else already paid for (see lib-env-cache.sh).
+# `config` is table-backed by the time this line runs, so this is a lookup, not
+# a process: the same read REMEMBER_TZ above gets.
+#   full   — the line that has always shipped: [HH:MM TZ — user — 45%]
+#   stable — [user] only, plus the >=95 warning; no per-turn-volatile bytes
+#   off    — nothing at all, warning included
+# An unrecognised value is `full`: a typo must not silently delete the clock.
+REMEMBER_PROMPT_STAMP=$(config ".prompt_stamp" "full")
+case "$REMEMBER_PROMPT_STAMP" in
+    stable|off) ;;
+    *) REMEMBER_PROMPT_STAMP="full" ;;
+esac
+export REMEMBER_PROMPT_STAMP
+
 # Model + reject-gate knobs. config.json is the source of truth; an explicit
 # shell env var still wins (override) via ${VAR:=...}, then config, then the
 # built-in default. Exported here (log.sh is sourced by every script) so both
