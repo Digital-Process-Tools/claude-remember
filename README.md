@@ -422,9 +422,13 @@ A few runtime overrides aren't in `config.json` because they're per-shell rather
 
 ## Measuring lock hold times
 
-The NDC commit waits up to `REMEMBER_NDC_COMMIT_LOCK_TIMEOUT` (default 30s) for `save.lock`, and [#226](https://github.com/Digital-Process-Tools/claude-remember/issues/226) points out that 30 is reasoned but never measured. `save-session.sh` holds that lock for the *whole* save, including its own summarize `claude -p` call, so if a save routinely holds it longer than the wait, the knob does less than its comment claims. The staging lock's 10s was set from real numbers ([#234](https://github.com/Digital-Process-Tools/claude-remember/pull/234)); `save.lock`'s 30s still is not.
+The NDC commit waits up to `REMEMBER_NDC_COMMIT_LOCK_TIMEOUT` (default 30s) for `save.lock`. [#226](https://github.com/Digital-Process-Tools/claude-remember/issues/226) filed 30 as reasoned but never measured; the **hold** has since been measured and the **default** is now defended by it rather than by intuition.
 
-This is how to produce those numbers on a real machine. Nothing here changes a default — the measurement comes first.
+`save-session.sh` holds that lock for the *whole* save, including its own summarize `claude -p` call, so the hold is roughly `1.2s + summarizer latency` (non-model floor p50 1.22s, n=10). 30s therefore covers the common case comfortably. It cannot cover the tail by construction — the summarizer's own wall is 120s — but a save that far out is already failing at its own bound, and the NDC skip is a second-order symptom of that rather than the problem. Raising the default is not free either: `lock_acquire` busy-spins at roughly 21% of a core while it waits, on the `PostToolUse` path.
+
+What #226 leaves open is structural, not a constant: taking the model call out from under `save.lock` at all. That is a design change to the save path, because the lock also serialises the summarizers themselves.
+
+This is how to reproduce those numbers on a real machine, and how to answer the one question holds alone cannot — how often the wait actually runs out.
 
 ```bash
 export REMEMBER_LOCK_TIMING=1        # in the shell Claude Code launches hooks from
