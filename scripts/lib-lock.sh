@@ -470,8 +470,23 @@ _lock_timing_disclose() {
         return 0
     fi
     _LOCK_TIMING_DISCLOSED=1
-    if command -v log >/dev/null 2>&1; then
-        log "lock-timing" "$1"
+    # `declare -F`, not `command -v`: the question is whether the CALLER SOURCED
+    # log.sh, and `command -v log` does not ask it. macOS ships /usr/bin/log —
+    # the system logging binary — so on the platform lib-lock.sh exists for that
+    # test is true on every machine, sourced or not. The branch then ran
+    # `/usr/bin/log lock-timing "..."`, which exits 64 on an unknown subcommand,
+    # and under `set -e` that aborts the caller MID-SAVE with save.lock held. In
+    # this repo every real sourcer takes log.sh first, so a function shadowed the
+    # binary and it never fired; it was one new caller away from firing, and the
+    # one path it can take down is the recorder's own way of saying it recorded
+    # nothing. An instrument whose failure notice is the failure is worse than a
+    # silent one. `declare -F` is a bash builtin, true only for a shell function,
+    # and works on bash 3.2.
+    if declare -F log >/dev/null 2>&1; then
+        # log() ends in `|| echo ... >&2` so it cannot fail, but this function is
+        # the last thing that may take a save down, and `set -e` does not care
+        # what the callee is supposed to do.
+        log "lock-timing" "$1" || printf 'remember lock-timing: %s\n' "$1" >&2
     else
         printf 'remember lock-timing: %s\n' "$1" >&2
     fi

@@ -13,7 +13,8 @@ This file pins the instrument, not a number. A number cannot be produced here �
 a synthetic run would yield a figure that looks measured and is not, which is
 the exact defect #226 complains about, reproduced one layer up.
 
-Four things are asserted, and each one fails if the recorder does nothing:
+Five things are asserted. The first four fail if the recorder does nothing; the
+fifth fails if it does something when it cannot:
 
 * a real hold of a known duration is recorded with a *plausible* duration, and
   two holds of different lengths are distinguishable — a recorder that writes a
@@ -28,7 +29,13 @@ Four things are asserted, and each one fails if the recorder does nothing:
 * the cap discloses. An unbounded log in the memory directory is a file that
   grows forever on someone's machine, and a silently rolled one loses exactly
   the tail of the distribution a timeout is set from. So recording stops, says
-  so in the file, and keeps every record it already had.
+  so in the file, and keeps every record it already had;
+* a write that FAILS changes nothing about the lock use it was timing. This is
+  the one that would make the instrument worse than not having it: under
+  `set -e`, an unguarded append to a read-only log aborts the save mid-hold. So
+  the lock use completes, no duration is invented to keep the file's shape, and
+  the gap is announced once per process — a hold that was not timed has to be
+  missing from the distribution rather than sitting in it as `0ms`.
 
 Resolution is disclosed by the file itself, because it is not the same
 everywhere: `EPOCHREALTIME` (bash >= 5) is spawn-free microseconds, GNU
@@ -379,6 +386,129 @@ def test_the_report_says_skipped_rather_than_reporting_its_own_silence(tmp_path)
     assert "skipped" in out, out
     assert "REMEMBER_LOCK_TIMING" in out, (
         f"the skip does not say how to make it not skip:\n{out}"
+    )
+
+
+# The instrument must not be able to break the thing it measures. Everything
+# above asserts the recorder records; these two assert that when it *cannot*, the
+# lock use it was watching is unaffected and the gap is disclosed rather than
+# filled in with a plausible zero.
+#
+# `set -e` is deliberate and is the whole point of the harness. `save-session.sh`
+# sets it at :56, and every write in `_lock_timing_record` is a command whose
+# failure would abort that shell — mid-save, with `save.lock` held and the EXIT
+# trap left to clean up after a save that never finished. A recorder that turns
+# a read-only log directory into a failed save is strictly worse than no
+# recorder, because it fails the path it was added to observe.
+#
+# SAVE_COMPLETED is echoed only after both lock uses return, so it stands in for
+# "the save ran to the end". Checking the exit status alone would not: an abort
+# inside the second hold can still exit 0 through a trap.
+UNWRITABLE_HARNESS = """#!/usr/bin/env bash
+set -eu
+source "$LIB_LOCK"
+lock_acquire "$LOCK_DIR" 0 || exit 3
+lock_release "$LOCK_DIR"
+lock_acquire "$LOCK_DIR" 0 || exit 4
+sleep "$LONG_HOLD"
+lock_release "$LOCK_DIR"
+echo SAVE_COMPLETED
+"""
+
+# root ignores the mode bits these tests set, so the writes would succeed and the
+# assertions would pass without ever exercising the failure path — green while
+# testing nothing, which is the failure mode the clock-tier note below is about.
+skip_if_root = pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root writes through the mode bits these tests rely on, so the "
+           "unwritable path would never be taken",
+)
+
+
+def _assert_save_was_unaffected(result, tmp_path):
+    assert result.returncode == 0, (
+        f"a lock use whose timing could not be recorded exited "
+        f"{result.returncode} — the instrument took the save down with it:\n"
+        f"{result.stderr}"
+    )
+    assert "SAVE_COMPLETED" in result.stdout, (
+        "the run did not reach its end — a failed timing write aborted the work "
+        f"it was measuring:\nstdout={result.stdout!r}\nstderr={result.stderr!r}"
+    )
+    assert not (tmp_path / "lock" / "save.lock").exists(), (
+        "the lock was left held after a failed timing write"
+    )
+
+
+@skip_if_root
+def test_an_uncreatable_log_leaves_the_save_untouched_and_says_so(tmp_path):
+    """The log's directory is read-only, so the recorder cannot even create the
+    file.
+
+    Three things have to hold at once, and only all three together make the
+    instrument safe: the lock use completes, no measurement is invented, and the
+    absence is announced. An empty file and a file that was never written look
+    identical to whoever reads the distribution later, so silence here would be
+    the #226 defect exactly — a number that reads as measured and is not, in its
+    degenerate form of no number at all.
+    """
+    readonly = tmp_path / "readonly"
+    readonly.mkdir()
+    timing = readonly / "lock-timing.tsv"
+    script = _write_script(tmp_path / "harness.sh", UNWRITABLE_HARNESS)
+
+    readonly.chmod(0o500)
+    try:
+        result = _run(script, _env(tmp_path, timing))
+    finally:
+        readonly.chmod(0o700)
+
+    _assert_save_was_unaffected(result, tmp_path)
+
+    assert not timing.exists(), (
+        "the recorder created a file it had been told it could not write"
+    )
+    assert result.stderr.count("lock-timing:") == 1, (
+        "the recorder either said nothing about not being able to record — "
+        "leaving a maintainer to read an absent distribution as an idle one — or "
+        f"said it once per lock use instead of once per process:\n{result.stderr}"
+    )
+    assert str(timing) in result.stderr, (
+        f"the disclosure does not name the file it could not write:\n{result.stderr}"
+    )
+
+
+@skip_if_root
+def test_an_unappendable_log_records_nothing_rather_than_a_wrong_something(tmp_path):
+    """The file already exists and is read-only, which is the harder half: the
+    cap check reads it happily and only the append fails.
+
+    The failure mode being excluded is a row written with a zero or a placeholder
+    duration to keep the shape of the file intact. A hold that was never timed
+    must be missing from the distribution, not present in it as a 0ms hold — one
+    of those makes a p50 smaller and the other does not.
+    """
+    timing = tmp_path / "lock-timing.tsv"
+    timing.write_text(
+        "# ts_ms\tlock\tevent\toutcome\twait_ms\theld_ms\tprecision\tpid\n",
+        encoding="utf-8",
+    )
+    script = _write_script(tmp_path / "harness.sh", UNWRITABLE_HARNESS)
+
+    timing.chmod(0o444)
+    try:
+        result = _run(script, _env(tmp_path, timing))
+    finally:
+        timing.chmod(0o644)
+
+    _assert_save_was_unaffected(result, tmp_path)
+
+    assert _records(timing) == [], (
+        "a lock use that could not be recorded left a record anyway: "
+        f"{_records(timing)!r}"
+    )
+    assert result.stderr.count("lock-timing:") == 1, (
+        f"an unappendable log was not disclosed exactly once:\n{result.stderr}"
     )
 
 
