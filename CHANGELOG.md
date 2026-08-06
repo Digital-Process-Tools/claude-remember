@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] — When the checker cannot answer
+
 ### Fixed
 
 - **A Bedrock-proxy install could never save a memory, and the recovery path it needed was already there** ([#316](https://github.com/Digital-Process-Tools/claude-remember/issues/316)) — reported by [@peterurbanec](https://github.com/peterurbanec) with the mechanism traced end to end. `_child_env()` strips every `CLAUDE_CODE_*` var so the child does not look like a resumable parent session, which on a Bedrock install takes `CLAUDE_CODE_USE_BEDROCK` and `CLAUDE_CODE_SKIP_BEDROCK_AUTH` with it; `--setting-sources ''` then stops `~/.claude/settings.json`'s `env` block from putting them back. The nested CLI falls through to the real Anthropic API holding a proxy token, and gets `401 Invalid bearer token`.
