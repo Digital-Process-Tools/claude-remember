@@ -440,11 +440,22 @@ _HOOK_ISOLATION_FLAG = "--setting-sources"
 # So isolation fails OPEN: it is dropped, loudly, and the memory record stays
 # protected by the echo guard in consolidate.py. That is why there are two
 # independent layers — this one can be degraded away, and the other cannot.
+#
+# The tuple is a list of spellings, and a list of spellings is never finished:
+# #316 was a Bedrock proxy install where stripping CLAUDE_CODE_USE_BEDROCK and
+# then declining to reload the `env` block left the child sending a proxy token
+# to the real API, which answers "401 Invalid bearer token" — the exact outage
+# this fallback exists for, in words none of the first four markers matched, so
+# capture failed 100% of the time and never retried. "failed to authenticate"
+# is the CLI's own prefix for that whole family; no rate limit or overload can
+# produce it, so it costs nothing and does not need a fifth issue to be filed.
 _AUTH_FAILURE_MARKERS = (
     "not logged in",
     "please run /login",
     "invalid api key",
+    "invalid bearer token",
     "authentication_error",
+    "failed to authenticate",
 )
 
 

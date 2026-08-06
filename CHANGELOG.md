@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A Bedrock-proxy install could never save a memory, and the recovery path it needed was already there** ([#316](https://github.com/Digital-Process-Tools/claude-remember/issues/316)) — reported by [@peterurbanec](https://github.com/peterurbanec) with the mechanism traced end to end. `_child_env()` strips every `CLAUDE_CODE_*` var so the child does not look like a resumable parent session, which on a Bedrock install takes `CLAUDE_CODE_USE_BEDROCK` and `CLAUDE_CODE_SKIP_BEDROCK_AUTH` with it; `--setting-sources ''` then stops `~/.claude/settings.json`'s `env` block from putting them back. The nested CLI falls through to the real Anthropic API holding a proxy token, and gets `401 Invalid bearer token`.
+
+  **That is precisely the outage `_isolation_may_be_the_cause` exists to undo** — it retries once without the isolation flag, free, because the call died resolving credentials and nothing was billed. It never fired, because the four spellings in `_AUTH_FAILURE_MARKERS` did not include this one. So every capture on those installs failed, permanently, with the fix one string away and nothing in the log saying so.
+
+  **The tuple gained two entries, not one.** `invalid bearer token` closes the reported case. `failed to authenticate` is the CLI's own prefix for the whole family, and no rate limit or overload can produce it — the narrowness this tuple is documented to want is about not retrying failures that already cost money, and an auth failure never did. The next spelling of this should not need a sixth issue.
+
+  **Pinned by `tests/test_auth_failure_markers_316.py`**, which had nothing to extend: `_isolation_may_be_the_cause` had no test at all, so the negatives are pinned now too — 429, 529, 500 and a low credit balance still return False, because retrying any of those would double a real spend and hide the cause ([#129](https://github.com/Digital-Process-Tools/claude-remember/issues/129)/[#190](https://github.com/Digital-Process-Tools/claude-remember/issues/190)).
+
 ### Changed
 
 - **The lock recorder's own failure notice could abort the save it was measuring** ([#226](https://github.com/Digital-Process-Tools/claude-remember/issues/226)) — `_lock_timing_disclose` in `scripts/lib-lock.sh` picks between the pipeline `log` function and a bare stderr `printf`, and it picked with `command -v log`. That is not the question. The question its own comment states is *did the caller source `log.sh`*, and `command -v` asks whether anything named `log` exists anywhere — **on macOS, the platform `lib-lock.sh` exists for, `/usr/bin/log` is the system logging binary and ships on every machine**. So the function branch was taken unconditionally there, running `/usr/bin/log lock-timing "..."`, which prints a usage block and exits **64**. Under `set -e` — `save-session.sh:56` — that aborts the caller mid-save, with `save.lock` held, leaving the `EXIT` trap to clean up after a save that never finished.
