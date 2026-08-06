@@ -459,6 +459,56 @@ _AUTH_FAILURE_MARKERS = (
 )
 
 
+def _failure_haystack(stdout: str, stderr: str) -> str:
+    """The text the *CLI itself* wrote about why it failed, lowercased.
+
+    Scanning all of stdout for a marker reads more than the CLI's own error.
+    Under `--output-format json` the CLI v2 array format carries assistant
+    message content in the same blob as the terminal result record, so a
+    conversation that merely *discusses* an auth failure — a dev debugging their
+    login — could put "not logged in" in front of a scan whose answer decides
+    whether the retry runs with the user's hooks live. That is the conversation
+    choosing when isolation is dropped, which is not a decision it may make.
+
+    So the scan reads the fields the CLI authors: `error` / `result` / `message`,
+    plus the `errors` list (`error_max_turns` populates only that one — measured:
+    it exits 1 and carries no `result` key at all), plus stderr.
+
+    **Unparseable or unrecognised stdout falls back to the raw scan**, and that
+    is deliberate rather than lazy. An older CLI, or a crash before any JSON is
+    emitted, has an auth failure to report and no structure to report it in;
+    refusing to look would fail *closed*, which is a permanent silent outage —
+    the #316 shape exactly. The fallback applies only when nothing structured was
+    found, so a payload that does explain itself is taken at its word.
+    """
+    stdout = stdout or ""
+    stderr = stderr or ""
+
+    try:
+        payload = json.loads(stdout)
+    except ValueError:
+        return f"{stdout}\n{stderr}".lower()
+
+    if isinstance(payload, list):
+        payload = payload[-1] if payload else None
+
+    authored: list[str] = []
+    if isinstance(payload, dict):
+        for key in ("error", "result", "message"):
+            value = payload.get(key)
+            if isinstance(value, dict):
+                value = value.get("message")
+            if isinstance(value, str) and value.strip():
+                authored.append(value)
+        errors = payload.get("errors")
+        if isinstance(errors, list):
+            authored.extend(e for e in errors if isinstance(e, str))
+
+    if not authored:
+        return f"{stdout}\n{stderr}".lower()
+    return "\n".join(authored + [stderr]).lower()
+
+
 def _isolation_may_be_the_cause(stdout: str, stderr: str) -> bool:
     """Whether a failed call failed *because of* the hook-isolation flag.
 
@@ -466,7 +516,7 @@ def _isolation_may_be_the_cause(stdout: str, stderr: str) -> bool:
     double a spend that already happened and hide the cause — the #129/#190
     shape, where a real failure was reported as costing nothing.
     """
-    haystack = f"{stdout or ''}\n{stderr or ''}".lower()
+    haystack = _failure_haystack(stdout, stderr)
     if "unknown option" in haystack:
         # Only ours. An unknown option naming some other flag says the CLI
         # disagrees about something we did not just add, and dropping this one
