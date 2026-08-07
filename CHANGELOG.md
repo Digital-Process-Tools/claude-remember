@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The marker scan's list of field names was assumed exhaustive, and the assumption failed silently** ([#320](https://github.com/Digital-Process-Tools/claude-remember/issues/320)) — [#318](https://github.com/Digital-Process-Tools/claude-remember/issues/318) narrowed `_failure_haystack` to the fields the CLI itself authors (`error` / `result` / `message`, the `errors` list, stderr) and kept the raw-stdout fallback behind `if not authored`. That guard needs **every** recognised field to be empty. So a terminal record reporting an auth failure in some field this does not read, while a field it does read holds something benign, is scanned, found clean, and reported as "not an isolation problem" — the un-isolated retry never runs, capture fails permanently, and nothing says why. [#316](https://github.com/Digital-Process-Tools/claude-remember/issues/316)'s outage exactly, reached through the field set instead of through the spelling list.
+
+  **Not a present defect, and it is fixed anyway.** Every input that reproduces it names a field the measured CLI does not emit. The point is that no test asserted the set was exhaustive and no comment recorded it as an assumption, so the day it stopped being true it would have stopped being true in silence — which is the one property this repo keeps paying for.
+
+  **The haystack is deliberately NOT widened.** Scanning the raw blob whenever the authored text holds no marker sounds like the fix and is a different bug: on a failing call the authored fields hold no marker in the ordinary case, so that branch would hand the retry decision back to arbitrary conversation content for essentially every non-auth failure — the whole of what #318 closed, reinstated. Three states instead of two: a marker in a field the CLI authors retries un-isolated, no marker anywhere is silence, and **a marker in the terminal record but outside the scanned set declines and says so**, naming the token, the field it sat in, the fields that were read, and what to do about it. The verdict is unchanged; the silence is what stops.
+
+  **Scoped to the terminal record, not the whole payload.** `_marker_missed_by_the_scan` reads only the last element of the CLI v2 array and only its unrecognised keys. Assistant content is what #318 removed from this decision, and a session that merely discusses an auth failure would otherwise put this notice in front of every ordinary network failure — a warning that fires on the common case is read as noise and stops carrying information.
+
+  Pinned by `tests/test_auth_marker_blind_spot_320.py`, which also holds the field set itself against a literal, so a schema change breaks a test rather than a user's capture. `unknown option` is covered alongside the auth markers: it decides the same retry through the same scan and goes blind the same way.
+
 ## [0.16.0] — When the checker cannot answer
 
 ### Fixed
