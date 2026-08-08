@@ -5,13 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.17.0] — Markers that were trusted to be numbers
+
+Two of this repo's own state files are read straight into contexts that treat their contents as
+code rather than as data. A cooldown marker is a timestamp until the day it is not, and neither of
+the two readers in `save-session.sh` checked. Reported and fixed by an outside contributor, which
+is the first time that has happened here.
+
+The other half of the release is the auth-marker scan learning to say when it looked somewhere and
+found nothing, instead of letting an empty read stand in for a clean one.
+
+Manifest bumped per [#133](https://github.com/Digital-Process-Tools/claude-remember/issues/133) —
+the updater compares manifest versions and nothing else, so a release without that bump ships to
+nobody.
+
+**Known and not fixed here.** The guards added below validate a marker's *syntax* and not its
+*range*, so a digits-only value that is ahead of the current clock still passes, and on that path
+the marker rewrite is unreachable — the throttle sticks on, permanently and silently. Four sites,
+tracked in [#326](https://github.com/Digital-Process-Tools/claude-remember/issues/326). `10#`
+also landed in `save-session.sh` only; `50-git-backup.sh` still takes the octal path, tracked in
+[#327](https://github.com/Digital-Process-Tools/claude-remember/issues/327). Both predate this
+release and neither loses data that is not still on the machine.
 
 ### Fixed
 
 - **Two cooldown markers were read straight into `$(( ))`, where bash evaluates file content as an arithmetic expression** ([#322](https://github.com/Digital-Process-Tools/claude-remember/issues/322)) — `tmp/last-save-ts` and `tmp/last-ndc.ts`. [#258](https://github.com/Digital-Process-Tools/claude-remember/issues/258) fixed this exact read in `50-git-backup.sh`; these two were missed. A marker holding `1786158837;` is a syntax error rather than a bad number, and bash's response is to abandon the **entire if/then body** and resume after `fi` — so `[ "$ELAPSED" -lt … ]` is never reached, `RUN_NDC=false` never runs, and the save skips its cooldown with one stderr line as the only trace.
 
-  **Smaller than it first looks, and the issue says so.** `date +%s > "$COOLDOWN_MARKER"` sits below the `fi` and `date +%s > "$NDC_MARKER"` runs on precisely the path a corrupt marker allows, so both gates **self-heal**: the cost is one skipped cooldown per corruption event, not a throttle stuck off. Nothing dies either — `set -e` plays no part, and `$ELAPSED` lives inside the abandoned body, so the `set -u` in `50-git-backup.sh` never sees an unbound variable there. The issue was filed claiming both, and both are wrong; the corrected mechanism is measured on bash 3.2.57 and 5.2.37.
+  **Smaller than it first looks, and the issue says so.** `date +%s > "$COOLDOWN_MARKER"` sits below the `fi` and `date +%s > "$NDC_MARKER"` runs on precisely the path a corrupt marker allows, so both gates **self-heal on this path**: the cost is one skipped cooldown per corruption event, not a throttle stuck off. Scope that claim to the *syntax-error* case, which is the one fixed here — a digits-only marker that is ahead of the clock passes the guard, engages the cooldown, and exits **above** the rewrite, so there the throttle does stick off. That is [#326](https://github.com/Digital-Process-Tools/claude-remember/issues/326) and it is not fixed by this release. Nothing dies either — `set -e` plays no part, and `$ELAPSED` lives inside the abandoned body, so the `set -u` in `50-git-backup.sh` never sees an unbound variable there. The issue was filed claiming both, and both are wrong; the corrected mechanism is measured on bash 3.2.57 and 5.2.37.
 
   **`case` and `10#`, not one or the other.** `08` and `09` are all digits, so they clear a digits-only guard and are then read as octal (`value too great for base`) — the identical abandonment from a marker that looks clean. Only reachable through a corrupt marker, which is the premise. `10#` goes after the guard, never instead of it, since `10#` on an empty string is itself an error on bash 5. The guard also rejects a space-padded value that arithmetic would have accepted; deliberate, and the same call #258 already made.
 
