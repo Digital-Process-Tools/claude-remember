@@ -181,9 +181,10 @@ if [ -f "$COOLDOWN_MARKER" ]; then
         # Range, not syntax (#326). A marker AHEAD of now is all digits, clears
         # the case, and makes ELAPSED negative -- which reads as "inside the
         # window" and takes the exit below. Every path that stamps the marker
-        # (_gb_stamp_cooldown, :596/:599) is beneath that exit, so this is #258's
-        # original outage reached through a value the guard ACCEPTS: the git
-        # history simply stops, and the only trace is the absence of commits.
+        # (_gb_stamp_cooldown, and both of its call sites) is beneath that exit,
+        # so this is #258's original outage reached through a value the guard
+        # ACCEPTS: the git history simply stops, and the only trace is the
+        # absence of commits.
         #
         # Proceed, reset here where the reset is reachable, and say so in both
         # places a human looks.

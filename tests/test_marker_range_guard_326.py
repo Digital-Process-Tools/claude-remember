@@ -112,8 +112,13 @@ def _hook_errors(project: Path) -> str:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# save-session.sh :169 — the save cooldown
+# save-session.sh — the save cooldown gate
 # ═════════════════════════════════════════════════════════════════════════════
+#
+# Named rather than numbered, here and below. A line number in a comment is
+# stale the next time anyone edits above it — and three of the four in the first
+# draft of this file were already wrong by the time it was committed. This PR
+# exists because a comment outlived the truth; it should not add more of them.
 
 @pytest.mark.parametrize("marker_value", [None, *OVERFLOW_MARKERS])
 def test_a_future_dated_save_marker_does_not_stick_the_throttle(tmp_path, marker_value):
@@ -201,7 +206,7 @@ def test_a_marker_written_now_still_throttles(tmp_path):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# save-session.sh :593 — the NDC compression gate
+# save-session.sh — the NDC compression gate
 # ═════════════════════════════════════════════════════════════════════════════
 
 def test_a_future_dated_ndc_marker_does_not_stop_compression(tmp_path):
@@ -262,7 +267,7 @@ def test_a_recent_ndc_marker_still_suppresses_compression(tmp_path):
     )
 
 # ═════════════════════════════════════════════════════════════════════════════
-# scripts/post-tool-hook.sh :322 — the fork throttle that reads the same marker
+# scripts/post-tool-hook.sh — the fork throttle that reads the same marker
 # ═════════════════════════════════════════════════════════════════════════════
 #
 # This one is deliberately NOT symmetrical with the other three, and the
@@ -308,8 +313,7 @@ def test_the_fork_throttle_still_suppresses_on_a_fresh_marker(tmp_path):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# hooks.d/after_save/50-git-backup.sh :157 — #258's outage, through an
-# accepted value
+# hooks.d/after_save/50-git-backup.sh — #258's outage, through an accepted value
 # ═════════════════════════════════════════════════════════════════════════════
 
 from tests.test_git_backup_hook import hook_state
@@ -327,9 +331,9 @@ def test_a_future_dated_backup_marker_does_not_stop_the_backup(tmp_path):
     """#258's original outage, reached through a value the guard ACCEPTS.
 
     `exit 0` at the cooldown sits above every path that stamps the marker
-    (`_gb_stamp_cooldown`, :596/:599), so once it is ahead of now the store is
-    never committed again — the git history simply stops, and the only trace is
-    the absence of commits.
+    (`_gb_stamp_cooldown` and both its call sites), so once it is ahead of now
+    the store is never committed again — the git history simply stops, and the
+    only trace is the absence of commits.
     """
     home, remember, _remote, slug_dir, project = _store(tmp_path)
     marker = hook_state(remember, ".last-git-backup-ts", create_dir=True)

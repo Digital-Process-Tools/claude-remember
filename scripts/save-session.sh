@@ -637,7 +637,7 @@ if [ "$RUN_NDC" = true ] && [ -f "$NDC_MARKER" ]; then
     NDC_ELAPSED=$(( $(date +%s) - 10#$NDC_MOD ))
     if [ "$NDC_ELAPSED" -lt 0 ]; then
         # Range, not syntax (#326) — see the save gate above. Here the marker is
-        # rewritten at :622 only inside `if [ "$RUN_NDC" = true ]`, so a marker
+        # rewritten only inside `if [ "$RUN_NDC" = true ]`, so a marker
         # ahead of now sets RUN_NDC=false and thereby skips the only line that
         # would have healed it: now.md is never compressed again and grows
         # without bound, which is the one file every later read walks.

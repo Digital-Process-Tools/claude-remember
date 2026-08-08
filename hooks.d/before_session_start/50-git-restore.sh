@@ -227,7 +227,24 @@ _spawn_fetch() {
         if [ -z "$_f" ] && [ "$_s" -gt 0 ]; then
             _now=$(date +%s)
             _age=$(( _now - 10#$_s ))
-            [ "$_age" -lt "$FETCH_TIMEOUT" ] && return 0
+            if [ "$_age" -lt 0 ]; then
+                # Range, not syntax -- #326's FIFTH site, which that issue's
+                # four-site inventory does not name. A `started` AHEAD of now is
+                # all digits, so it clears the guard above, and it makes _age
+                # negative -- which reads as "well inside the window" and takes
+                # the `return 0` below. The only writers of FETCH_STATE_FILE are
+                # inside the subshell that return skips, so nothing ever
+                # rewrites the record: no fetch is spawned again, ever, and
+                # _fetch_health goes on answering "in-flight" about a process
+                # that does not exist. Same geometry as the other four -- the
+                # self-heal sits below the early exit.
+                #
+                # Fall through and spawn. The spawn rewrites the record, which
+                # is the whole repair, and one line says why.
+                report_error "git-restore" "WARNING: $FETCH_STATE_FILE says a fetch started $(( 0 - _age ))s in the FUTURE — the clock moved back, or the record is corrupt in a way a digits-only check cannot see. No fetch is running; starting a real one and rewriting the record."
+            elif [ "$_age" -lt "$FETCH_TIMEOUT" ]; then
+                return 0
+            fi
         fi
     fi
 
@@ -312,7 +329,19 @@ _fetch_health() {
     if [ -z "$_f" ]; then
         _now=$(date +%s)
         _age=$(( _now - 10#$_s ))
-        if [ "$_age" -lt "$FETCH_TIMEOUT" ]; then echo "in-flight"; else echo "abandoned"; fi
+        # `-ge 0` is the range half (#326, fifth site). A `started` ahead of now
+        # makes _age negative, and negative is `-lt` any timeout -- so the one
+        # answer that means "wait, something is already running" was being given
+        # about nothing at all, forever. Downstream that is not merely a wrong
+        # label: the caller then prints "already up to date" off refs no fetch
+        # ever refreshed, which is precisely the "silence is not a fourth way of
+        # saying up to date" this function's own header forbids.
+        #
+        # ABANDONED, not in-flight. We cannot substantiate a running fetch, and
+        # this function's contract is three honest states rather than a guess.
+        # Left pure -- the diagnostic belongs in _spawn_fetch, because this
+        # function's stdout IS the verdict and is read through $( ).
+        if [ "$_age" -ge 0 ] && [ "$_age" -lt "$FETCH_TIMEOUT" ]; then echo "in-flight"; else echo "abandoned"; fi
         return
     fi
     if [ "$_rc" = "0" ]; then echo "ok"; else echo "failed:${_rc:-unknown}"; fi

@@ -111,7 +111,17 @@ def _unbased_uses(text: str, names):
     findings = []
     for offset, span in _arith_spans(text):
         for name in sorted(names):
-            pattern = re.compile(r"(?:\$\{?)?\b" + re.escape(name) + r"\b")
+            if name.isdigit():
+                # A positional parameter: `case "$1" in` captures the name "1".
+                # Inside `$(( ))` a bare `1` is the integer one, not a reference
+                # to $1, so the sigil is REQUIRED here. Without it every
+                # `$(( x + 1 ))` in a file that guards a positional becomes a
+                # finding — and lib-lock.sh guards two of them today, so this
+                # gate would have started failing the build on the next
+                # ordinary line of arithmetic anyone added there.
+                pattern = re.compile(r"\$\{?" + re.escape(name) + r"\}?")
+            else:
+                pattern = re.compile(r"(?:\$\{?)?\b" + re.escape(name) + r"\b")
             for m in pattern.finditer(span):
                 head = m.start()
                 while head > 0 and span[head - 1] in "${":
@@ -155,9 +165,13 @@ def test_no_case_guarded_value_reaches_arithmetic_without_a_radix():
     )
 
 
+# Double-quoted, with the inner quotes escaped, and NOT single-quoted: `''`
+# inside a single-quoted Python literal closes it and opens another, so the
+# empty-string case arm vanishes into implicit concatenation with no error.
+# test_the_planted_guard_is_actually_the_shape_it_claims pins that.
 PLANTED_GUARD = (
-    'LAST=$(cat "$f")\n'
-    'case "$LAST" in ''|*[!0-9]*) LAST=0 ;; esac\n'
+    "LAST=$(cat \"$f\")\n"
+    "case \"$LAST\" in ''|*[!0-9]*) LAST=0 ;; esac\n"
 )
 
 
@@ -184,8 +198,8 @@ def test_the_detector_does_not_flag_a_test_builtin_comparison():
     """`[ 08 -lt 9 ]` is true and silent, so `test` is not a sink. Flagging it
     would advertise a gap that is not there and train people to ignore this."""
     only_test = (
-        'case "$COOLDOWN" in ''|*[!0-9]*) COOLDOWN=120 ;; esac\n'
-        '[ "$ELAPSED" -lt "$COOLDOWN" ] && echo throttled\n'
+        "case \"$COOLDOWN\" in ''|*[!0-9]*) COOLDOWN=120 ;; esac\n"
+        "[ \"$ELAPSED\" -lt \"$COOLDOWN\" ] && echo throttled\n"
     )
     assert _unbased_uses(only_test, _guarded_names(only_test)) == []
 
@@ -206,3 +220,55 @@ def test_the_sweep_actually_reads_the_shell_files():
         "the digits-only guard was found in almost no file — the detector has "
         f"stopped recognising it: {with_guards}"
     )
+
+# ── Two ways this detector can lie, both found reviewing #336 ────────────────
+
+def test_the_planted_guard_is_actually_the_shape_it_claims():
+    """The fixtures above must contain a real empty-string case arm.
+
+    `''` inside a SINGLE-quoted Python string is not two apostrophes — it closes
+    the literal and opens another, and the two characters vanish into implicit
+    concatenation with no error. The planted guard silently became
+    `case "$LAST" in |*[!0-9]*)`, which still matched only because the detector
+    keys off the `*[!0-9]*` arm.
+
+    A self-test whose fixture is not the shape it claims still goes green, and a
+    green here is supposed to mean "looked, found none".
+    """
+    assert "in ''|" in PLANTED_GUARD, (
+        f"the empty-string arm was eaten by Python string concatenation: "
+        f"{PLANTED_GUARD!r}"
+    )
+
+
+POSITIONAL_GUARD = "case \"$1\" in ''|*[!0-9]*) return 1 ;; esac\n"
+
+
+def test_a_positional_parameter_guard_does_not_flag_the_integer_literal():
+    """`case "$1" in` guards a positional parameter, so the captured name is the
+    bare string "1" — and a bare `1` inside `$(( ))` is the integer one, not a
+    reference to `$1`.
+
+    Matching the name without its sigil turns every `$(( x + 1 ))` in the file
+    into a finding. scripts/lib-lock.sh already carries two of these guards
+    (_lock_timing_ns_to_ms, _lock_timing_s_to_ms), so the next ordinary
+    arithmetic added to that file would have failed the build for no reason.
+
+    A lint gate that cries wolf gets switched off, and then it is not a gate.
+    """
+    src = POSITIONAL_GUARD + "MS=$(( x + 1 ))\n"
+    assert _guarded_names(src) == {"1"}
+    assert _unbased_uses(src, _guarded_names(src)) == [], (
+        "the integer literal 1 was mistaken for a reference to $1"
+    )
+
+
+def test_a_positional_parameter_is_still_flagged_in_its_dollar_form():
+    """The other side: narrowing to the sigil must not make $1 invisible."""
+    src = POSITIONAL_GUARD + "MS=$(( $1 * 1000 ))\n"
+    assert [f[1] for f in _unbased_uses(src, _guarded_names(src))] == ["1"]
+
+
+def test_a_positional_parameter_accepts_the_fixed_form():
+    src = POSITIONAL_GUARD + "MS=$(( 10#$1 * 1000 ))\n"
+    assert _unbased_uses(src, _guarded_names(src)) == []
