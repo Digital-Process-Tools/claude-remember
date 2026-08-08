@@ -5,7 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.18.0] — The rest of the readers
+
+[#322](https://github.com/Digital-Process-Tools/claude-remember/issues/322)'s guard was written
+once and assumed to be everywhere. It was not. Six more sites — across `scripts/post-tool-hook.sh`
+and both git hooks — read a marker of their own straight into `$(( ))` behind the same digits-only
+check that lets `08` and `09` through. Four of them are consecutive-failure counters, and the branch
+bash abandons on the failing increment is the branch holding that file's loudest log line: a corrupt
+counter did not mis-count, it silenced the report.
+
+The other half is a regression test that had been writing its marker to a path the hook reaches only
+through a compatibility shim. The shim exists to be removed, and the day it goes the test would have
+gone vacuous with nothing turning red.
+
+Manifest bumped per [#133](https://github.com/Digital-Process-Tools/claude-remember/issues/133) —
+the updater compares manifest versions and nothing else, so a release without that bump ships to
+nobody.
+
+**Known and not fixed here.** These guards still validate a marker's *syntax* and not its *range*: a
+digits-only value ahead of the current clock passes, engages the cooldown, and exits **above** the
+rewrite, so the throttle sticks on with no diagnostic. Four sites, tracked in
+[#326](https://github.com/Digital-Process-Tools/claude-remember/issues/326), unchanged by this
+release.
 
 ### Fixed
 
@@ -24,6 +45,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **Filed as "the cooldown block is never entered and every corrupt value passes trivially"; measured, that part is not true.** The legacy carry-forward at the top of the hook copies the dotted root file into the state dir *before* the cooldown block, so every parametrized value did reach the evaluator — which is also why the reporter's glob found the dotted path gone rather than untouched. The defect is real but different: the test's transport was the compatibility shim, not the feature under test. That shim exists to be removed, and the day it goes, all four cases go vacuous with nothing turning red. The marker now goes through the same `hook_state` helper the sibling tests already use, resolved through `git rev-parse --git-common-dir` rather than spelled out.
 
   **What was genuinely unguarded is the octal pair, and the assertions.** `08`/`09` were absent from the parametrization, and the test asserted only rc and the commit — neither of which changes on bash 3.2.57, where the failing arithmetic abandons the `if` body and the hook proceeds. It now asserts on stderr, which is the only observable that separates broken from fixed on every bash: falling back to `0` makes a corrupt marker read as "very old", so corrupt and clean-but-ancient reach the same decision by design.
+
+- **A third reader of the same cooldown marker, and a freeze guard that outlived its claim** ([#329](https://github.com/Digital-Process-Tools/claude-remember/issues/329)) — [#322](https://github.com/Digital-Process-Tools/claude-remember/issues/322)'s `10#` landed in `save-session.sh` and stopped there. `scripts/post-tool-hook.sh` has carried the digits-only `case` since [#230](https://github.com/Digital-Process-Tools/claude-remember/issues/230) and carried no `10#`, so `08`/`09` — all digits, therefore clean to that guard — reached its arithmetic as octal at both of its file-sourced operands: `tmp/last-save-ts` at the fork throttle and `tmp/no-transcript-notice` at the once-an-hour report.
+
+  **The notice reader is the one that loses something.** The `if` body bash abandons there is the body holding an `exit 0`, so the hook runs on past it and the line below the `fi` deletes the notice marker on the assumption a transcript had been found — the report is never sent, and its marker is cleared as though it had been. Both sites are pinned on behaviour rather than on the diagnostic alone: this hook writes its diagnostic to `hook-errors.log` and not to stderr, so a stderr-only assertion of the shape #322 used is green against the unfixed hook.
+
+  **`SAVE_COOLDOWN` on the next line looks identical and was deliberately left alone.** It is the right-hand operand of `[ … -lt … ]`, and `test` parses base 10 without evaluating — measured, `[ 9 -lt 010 ]` is true. A `10#` there would advertise a gap that does not exist.
+
+  **The freeze guard is the other half, and it is why a one-token fix could not land.** `test_doctor_is_quiet_when_the_spellings_agree` held `scripts/post-tool-hook.sh` byte-equal to `origin/main`. Byte-equality asserts "nobody has edited this file since main", which is a different claim from the one [#298](https://github.com/Digital-Process-Tools/claude-remember/issues/298)/[#299](https://github.com/Digital-Process-Tools/claude-remember/issues/299) care about, and it fails in both directions: it blocked an unrelated arithmetic guard, and it goes vacuous the moment the edit it objected to lands on main. The property is now asserted directly — the per-tool-call path does not source the divergence library, does not call the check, and spawns no `git`. The other two arms keep the byte compare; they were not what blocked, and widening a guard that belongs to another issue was not that change's business.
+
+  Two further readers were named at the time as still open rather than left silent — `50-git-backup.sh`'s #258 guard and `50-git-restore.sh`'s fetch-state read. Both close in this release under [#327](https://github.com/Digital-Process-Tools/claude-remember/issues/327), and the test that could not pin the first of them is repointed under [#324](https://github.com/Digital-Process-Tools/claude-remember/issues/324).
 
 ## [0.17.0] — Markers that were trusted to be numbers
 
@@ -58,10 +89,6 @@ release and neither loses data that is not still on the machine.
   What this buys is narrow and worth stating plainly: an unexplained diagnostic stops appearing in `hook-errors.log` (visible to users since [#277](https://github.com/Digital-Process-Tools/claude-remember/issues/277)), and unvalidated file content stops reaching an arithmetic evaluator — the sink BashPitfalls #7 names, and the reason `case` was the answer in #258. ShellCheck does not flag this class at all, even with `-o all`; the standing request is koalaman/shellcheck#2679, open and unassigned since 2023.
 
   Pinned by `tests/test_save_session_marker_arithmetic_322.py`, which asserts on the diagnostic rather than on whether a save happened — falling back to `0` makes a corrupt marker read as "very old", so corrupt and clean-but-ancient reach the same decision and only the stderr separates broken from fixed.
-
-  **A third reader of the same marker, in `scripts/post-tool-hook.sh`.** It has carried the digits-only `case` since [#230](https://github.com/Digital-Process-Tools/claude-remember/issues/230) and carried no `10#`, so `08`/`09` reached its arithmetic as octal at both of its file-sourced operands — `tmp/last-save-ts` at the fork throttle and `tmp/no-transcript-notice` at the once-an-hour report. The abandoned body there swallows an `exit 0`, so the hook ran on past it and the line below the `fi` deleted the notice marker on the assumption a transcript had been found. Both are pinned on behaviour rather than on the diagnostic alone: the diagnostic goes to `hook-errors.log` and not to stderr, so a stderr-only assertion is green against the unfixed hook. `SAVE_COOLDOWN` on the next line looks identical and was left alone — it is the right-hand operand of `[ … -lt … ]`, and `test` parses base 10 without evaluating (`[ 9 -lt 010 ]` is true), so a `10#` there would advertise a gap that does not exist.
-
-  Still open, deliberately and named rather than left silent: the same missing `10#` in `50-git-backup.sh`'s #258 guard and in `50-git-restore.sh`'s fetch-state read. Neither is this issue's marker, and `test_a_corrupt_cooldown_marker_does_not_kill_the_hook` currently writes `<store>/.last-git-backup-ts` while the hook reads the state dir under the git common dir — so that regression cannot be pinned until the test is pointed at the path the hook uses.
 
 - **The marker scan's list of field names was assumed exhaustive, and the assumption failed silently** ([#320](https://github.com/Digital-Process-Tools/claude-remember/issues/320)) — [#318](https://github.com/Digital-Process-Tools/claude-remember/issues/318) narrowed `_failure_haystack` to the fields the CLI itself authors (`error` / `result` / `message`, the `errors` list, stderr) and kept the raw-stdout fallback behind `if not authored`. That guard needs **every** recognised field to be empty. So a terminal record reporting an auth failure in some field this does not read, while a field it does read holds something benign, is scanned, found clean, and reported as "not an isolation problem" — the un-isolated retry never runs, capture fails permanently, and nothing says why. [#316](https://github.com/Digital-Process-Tools/claude-remember/issues/316)'s outage exactly, reached through the field set instead of through the spelling list.
 
