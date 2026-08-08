@@ -460,8 +460,9 @@ class TestADivergedStoreIsRefused:
 
 class TestCouldNotCheckIsItsOwnState:
     """Part 1's defect, mirrored onto the read side: 'I could not reach the
-    remote' must never render as 'you are up to date'. `docs/validators.md`
-    calls this declining instead of guessing."""
+    remote' must never render as 'you are up to date'. CHANGELOG.md's 0.12.0
+    entry and `_push_and_report` in hooks.d/after_save/50-git-backup.sh call
+    this declining instead of guessing."""
 
     def test_a_failed_fetch_is_not_reported_as_up_to_date(self, tmp_path):
         home, remember, remote, slug_dir, project = _store(tmp_path)

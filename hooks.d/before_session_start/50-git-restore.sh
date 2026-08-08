@@ -310,9 +310,10 @@ _spawn_fetch() {
 }
 
 # ── What the last fetch has to say ───────────────────────────────────────────
-# Three answers, never two (docs/validators.md, "Declining instead of
-# guessing"): it worked / it failed / it never came back. Silence is not a
-# fourth way of saying "up to date".
+# Three answers, never two ("declining instead of guessing", CHANGELOG.md
+# 0.12.0, and _push_and_report in hooks.d/after_save/50-git-backup.sh for the
+# worked example): it worked / it failed / it never came back. Silence is not
+# a fourth way of saying "up to date".
 _fetch_health() {
     [ -f "$FETCH_STATE_FILE" ] || { echo "never-run"; return; }
     local _s='' _f='' _rc='' _now _age
