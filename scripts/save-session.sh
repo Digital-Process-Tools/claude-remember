@@ -152,9 +152,16 @@ if [ -f "$COOLDOWN_MARKER" ] && [ "$DRY_RUN" != true ] && [ "$FORCE" != true ]; 
     # file does not) -- $ELAPSED is inside the abandoned body, so no unbound
     # variable is ever referenced there either.
     #
-    # Scope it honestly: `date +%s > "$COOLDOWN_MARKER"` sits below the `fi`, so
-    # it runs regardless and the marker SELF-HEALS. One corruption costs one
-    # skipped cooldown, not a throttle stuck off. The guard is worth having
+    # Scope it honestly, and the honest scope is narrower than this comment used
+    # to claim (#326). For a marker bash cannot PARSE, `date +%s >
+    # "$COOLDOWN_MARKER"` sits below the `fi`, so it runs regardless and the
+    # marker SELF-HEALS: one corruption, one skipped cooldown. That was written
+    # as though it covered every corrupt marker. It does not. A marker that
+    # parses and is merely OUT OF RANGE takes the `exit 0` below instead, which
+    # is ABOVE that line — handled explicitly now, in the range arm. The
+    # confident wrong scoping outlived the CHANGELOG correction at v0.17.0 by a
+    # release, which is the whole reason #326 had to be reopened. The guard is
+    # worth having
     # because unvalidated file content in an arithmetic evaluator is a sink in
     # its own right (BashPitfalls #7), and because an unexplained diagnostic in
     # hook-errors.log is visible to users since #277.
@@ -171,7 +178,27 @@ if [ -f "$COOLDOWN_MARKER" ] && [ "$DRY_RUN" != true ] && [ "$FORCE" != true ]; 
     esac
     ELAPSED=$(( $(date +%s) - 10#$LAST_MOD ))
     SAVE_COOLDOWN=$(config ".cooldowns.save_seconds" 120)
-    if [ "$ELAPSED" -lt "$SAVE_COOLDOWN" ]; then
+    if [ "$ELAPSED" -lt 0 ]; then
+        # The case above validates SYNTAX, not RANGE (#326). A marker AHEAD of
+        # now is all digits, so it is accepted, and it makes ELAPSED negative --
+        # which reads as "deep inside the window" and takes the exit below. That
+        # exit sits above `date +%s > "$COOLDOWN_MARKER"`, so the self-heal the
+        # paragraph above promises is unreachable on exactly this path and the
+        # throttle stays on until the wall clock passes the marker. Permanent,
+        # and until now completely mute.
+        #
+        # How it happens without corruption: an NTP step backwards, a VM
+        # snapshot restore, a container clock jump, a store on a share with a
+        # skewed clock. NOT a timezone or DST change -- epoch seconds do not
+        # move for those, which is why proceeding here costs one extra save
+        # rather than mis-throttling a laptop that suspended over a boundary.
+        #
+        # PROCEED, reset, and SAY SO -- three states, not two. Clamping in
+        # silence would trade a mute stuck throttle for a mute wrong value,
+        # which is the same defect one layer along.
+        report_error "cooldown" "WARNING: $COOLDOWN_MARKER is $(( 0 - ELAPSED ))s ahead of now — the clock moved back, or the marker is corrupt in a way a digits-only check cannot see. Resetting it and saving; the cooldown resumes from now."
+        date +%s > "$COOLDOWN_MARKER" 2>/dev/null || true
+    elif [ "$ELAPSED" -lt "$SAVE_COOLDOWN" ]; then
         debug_enabled 1 && log "cooldown" "${ELAPSED}s < ${SAVE_COOLDOWN}s, skip"
         exit 0
     fi
@@ -339,7 +366,9 @@ record_summary_failure() {
     fi
     _key="${SESSION_ID}:${POSITION}"
     if [ "$_prev_key" = "$_key" ]; then
-        _count=$(( _prev_count + 1 ))
+        # 10# after the case (#332): a truncated marker read back as "08"
+        # would abandon this branch, and the branch is what escalates.
+        _count=$(( 10#$_prev_count + 1 ))
     else
         _count=1
     fi
@@ -591,17 +620,32 @@ if [ "$(config '.features.ndc_compression' true)" != "true" ]; then
     log "ndc" "disabled by features.ndc_compression"
 fi
 if [ "$RUN_NDC" = true ] && [ -f "$NDC_MARKER" ]; then
-    # Same read and same guard as the save cooldown above. Here the abandoned
-    # body is the whole `if`, so `RUN_NDC=false` never runs and this save
-    # compresses despite the cooldown -- and `date +%s > "$NDC_MARKER"` below
-    # then rewrites the marker on exactly that path, so this gate self-heals
-    # too. One skipped compression cooldown per corruption event.
+    # Same read and same guard as the save cooldown above. For an UNPARSEABLE
+    # marker the abandoned body is the whole `if`, so `RUN_NDC=false` never runs
+    # and this save compresses despite the cooldown -- and `date +%s >
+    # "$NDC_MARKER"` below then rewrites the marker on exactly that path, so
+    # that case self-heals. One skipped compression cooldown per event.
+    #
+    # An OUT-OF-RANGE marker is the opposite and does not self-heal (#326): it
+    # parses, so `RUN_NDC=false` DOES run, and the rewrite below is inside the
+    # branch that decision skips. Handled in the range arm.
     NDC_MOD=$(cat "$NDC_MARKER" 2>/dev/null || echo 0)
     case "$NDC_MOD" in
         ''|*[!0-9]*) NDC_MOD=0 ;;
     esac
     NDC_COOLDOWN=$(config ".cooldowns.ndc_seconds" 3600)
-    [ $(( $(date +%s) - 10#$NDC_MOD )) -lt "$NDC_COOLDOWN" ] && RUN_NDC=false
+    NDC_ELAPSED=$(( $(date +%s) - 10#$NDC_MOD ))
+    if [ "$NDC_ELAPSED" -lt 0 ]; then
+        # Range, not syntax (#326) — see the save gate above. Here the marker is
+        # rewritten at :622 only inside `if [ "$RUN_NDC" = true ]`, so a marker
+        # ahead of now sets RUN_NDC=false and thereby skips the only line that
+        # would have healed it: now.md is never compressed again and grows
+        # without bound, which is the one file every later read walks.
+        report_error "ndc" "WARNING: $NDC_MARKER is $(( 0 - NDC_ELAPSED ))s ahead of now — the clock moved back, or the marker is corrupt in a way a digits-only check cannot see. Resetting it and compressing; the cooldown resumes from now."
+        date +%s > "$NDC_MARKER" 2>/dev/null || true
+    elif [ "$NDC_ELAPSED" -lt "$NDC_COOLDOWN" ]; then
+        RUN_NDC=false
+    fi
 fi
 
 # The day the content belongs to, not the day this run happens to fall on.

@@ -210,12 +210,12 @@ while IFS= read -r -d '' staging_path && IFS= read -r -d '' staging_consumed; do
         rm -f "${staging_path}".tail-* 2>/dev/null
         staging_tail=$(mktemp "${staging_path}.tail-XXXXXX")
         if head -c "$staging_consumed" "$staging_path" > "$staging_done" 2>/dev/null &&
-           tail -c +$(( staging_consumed + 1 )) "$staging_path" > "$staging_tail" 2>/dev/null; then
+           tail -c +$(( 10#$staging_consumed + 1 )) "$staging_path" > "$staging_tail" 2>/dev/null; then
             # Checked, not run bare under set -e: an unchecked failure here used
             # to kill the whole script mid-loop, abandoning every other staging
             # file in STAGING_PATHS_FILE rather than handling just this one.
             if STAGING_MV_ERR=$(mv "$staging_tail" "$staging_path" 2>&1); then
-                log "consolidation" "kept $(( staging_now - staging_consumed ))b appended to $(basename "$staging_path") during consolidation"
+                log "consolidation" "kept $(( staging_now - 10#$staging_consumed ))b appended to $(basename "$staging_path") during consolidation"
             else
                 # staging_path is untouched: same-directory mv is a real
                 # rename, which cannot fail partway (#246). staging_done

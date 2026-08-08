@@ -723,6 +723,24 @@ _dispatch_report_skip() {
     return 0
 }
 
+# Report one thing that went wrong, in both places a human looks (#326).
+#
+# The generalisation of the two functions above, for callers that are not
+# dispatch. `log()` alone is not enough and #252 is the demonstration: the daily
+# narrative is not read, and `/remember:doctor` reports "Recent errors" out of
+# hook-errors.log, which is the file a reporter is asked to paste.
+#
+# Written by PATH rather than by inherited stderr, for the reason
+# _dispatch_report_failure gives: save-session.sh's stderr is the agent's own
+# stream, and a hook must never gain the ability to write into the session.
+report_error() {
+    log "$1" "$2"
+    [ -d "$REMEMBER_DIR/logs" ] || return 0
+    printf '%s\n' "$(_remember_date +%H:%M:%S) [$1] $2" \
+        >> "$REMEMBER_DIR/logs/hook-errors.log" 2>/dev/null || true
+    return 0
+}
+
 # Report one hook that was STOPPED because it never came back (#286).
 #
 # NOT _dispatch_report_failure, and the distinction is the three-state contract
@@ -1210,7 +1228,9 @@ rotate_logs() {
     local prev=0
     if [ -f "$state" ]; then read -r prev < "$state" 2>/dev/null || prev=0; fi
     case "$prev" in ''|*[!0-9]*) prev=0 ;; esac
-    local streak=$((prev + 1))
+    # 10# after the case (#332) — an "08" here abandons the rest of this
+    # function, which is where the escalation ERROR is logged.
+    local streak=$((10#$prev + 1))
     printf '%s\n%s\n%s\n' "$streak" "$(date '+%Y-%m-%d %H:%M:%S')" "$first_line" \
         > "$state" 2>/dev/null || true
 

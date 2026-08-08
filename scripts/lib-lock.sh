@@ -188,7 +188,8 @@ _lock_dir_age() {
         ''|*[!0-9]*) echo 0; return 0 ;;
     esac
     _now=$(date +%s)
-    echo $(( _now - _mtime ))
+    # 10# after the case, never instead of it (#332).
+    echo $(( _now - 10#$_mtime ))
 }
 
 # Adopt a lock directory that has no pid at all. A holder killed between
@@ -409,7 +410,7 @@ _lock_timing_us_to_ms() {
     esac
     # Truncation, never rounding: a hold must not come back longer than it was.
     _f="${_f}000"
-    _LOCK_TIMING_NOW=$(( _s * 1000 + 10#${_f:0:3} ))
+    _LOCK_TIMING_NOW=$(( 10#$_s * 1000 + 10#${_f:0:3} ))
     return 0
 }
 
@@ -418,7 +419,7 @@ _lock_timing_ns_to_ms() {
     case "$1" in
         ''|*[!0-9]*) _LOCK_TIMING_NOW=0; return 0 ;;
     esac
-    _LOCK_TIMING_NOW=$(( $1 / 1000000 ))
+    _LOCK_TIMING_NOW=$(( 10#$1 / 1000000 ))
     return 0
 }
 
@@ -427,7 +428,7 @@ _lock_timing_s_to_ms() {
     case "$1" in
         ''|*[!0-9]*) _LOCK_TIMING_NOW=0; return 0 ;;
     esac
-    _LOCK_TIMING_NOW=$(( $1 * 1000 ))
+    _LOCK_TIMING_NOW=$(( 10#$1 * 1000 ))
     return 0
 }
 

@@ -177,7 +177,19 @@ if [ -f "$COOLDOWN_MARKER" ]; then
         ''|*[!0-9]*) LAST_MOD=0 ;;
     esac
     ELAPSED=$(( $(date +%s) - 10#$LAST_MOD ))
-    if [ "$ELAPSED" -lt "$BACKUP_COOLDOWN" ]; then
+    if [ "$ELAPSED" -lt 0 ]; then
+        # Range, not syntax (#326). A marker AHEAD of now is all digits, clears
+        # the case, and makes ELAPSED negative -- which reads as "inside the
+        # window" and takes the exit below. Every path that stamps the marker
+        # (_gb_stamp_cooldown, :596/:599) is beneath that exit, so this is #258's
+        # original outage reached through a value the guard ACCEPTS: the git
+        # history simply stops, and the only trace is the absence of commits.
+        #
+        # Proceed, reset here where the reset is reachable, and say so in both
+        # places a human looks.
+        report_error "git-backup" "WARNING: $COOLDOWN_MARKER is $(( 0 - ELAPSED ))s ahead of now — the clock moved back, or the marker is corrupt in a way a digits-only check cannot see. Resetting it and backing up; the cooldown resumes from now."
+        date +%s > "$COOLDOWN_MARKER" 2>/dev/null || true
+    elif [ "$ELAPSED" -lt "$BACKUP_COOLDOWN" ]; then
         debug_enabled 0 && log "git-backup" "cooldown ${ELAPSED}s < ${BACKUP_COOLDOWN}s, skip"
         exit 0
     fi

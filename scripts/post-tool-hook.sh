@@ -305,7 +305,10 @@ if [ -f "$LAST_SAVE_FILE" ]; then
     case "$LAST_LINE" in ''|*[!0-9]*) LAST_LINE=0 ;; esac
 fi
 
-DELTA=$((CURRENT_LINES - LAST_LINE))
+# 10# after the case, never instead of it (#332) — the position is a decimal
+# string from pipeline.shell, and a "08" in it would be read as octal and take
+# the whole delta throttle down with the arithmetic.
+DELTA=$((CURRENT_LINES - 10#$LAST_LINE))
 SAVE_TRIGGERED=""
 
 # --- Don't fork a save that save-session.sh will only discard on cooldown ---
@@ -332,7 +335,24 @@ if [ -f "$COOLDOWN_MARKER" ]; then
     # needs it: SAVE_COOLDOWN is the right-hand operand of `[ ... -lt ... ]`,
     # and `test` parses base 10 without evaluating -- measured, `[ 9 -lt 010 ]`
     # is true. Marking it too would advertise a gap that is not there.
-    [ $(( $(_remember_date +%s) - 10#$LAST_TS )) -lt "$SAVE_COOLDOWN" ] && IN_COOLDOWN=true
+    # `-ge 0` is the range half of #326, and this site is deliberately NOT
+    # symmetrical with the three gates that heal the marker:
+    #
+    #   * it does not rewrite it. tmp/last-save-ts belongs to save-session.sh,
+    #     which stamps it on the very path this hook unblocks. A second writer
+    #     on a per-tool-call path is a race for no gain.
+    #   * it emits no diagnostic. save-session.sh emits exactly one when it
+    #     heals; one here too would append to hook-errors.log on EVERY tool call
+    #     for as long as the clock is behind.
+    #   * it costs nothing (#299/#330): the value is already computed, so this
+    #     adds no subprocess spawn and no file read to the hot path.
+    #
+    # What it must do is refuse to claim a cooldown it cannot substantiate. A
+    # negative ELAPSED used to read as "deep inside the window", so no save was
+    # forked, so save-session.sh never ran, so the marker it would have healed
+    # stayed ahead — the two throttles held each other shut.
+    _ELAPSED=$(( $(_remember_date +%s) - 10#$LAST_TS ))
+    [ "$_ELAPSED" -ge 0 ] && [ "$_ELAPSED" -lt "$SAVE_COOLDOWN" ] && IN_COOLDOWN=true
 fi
 
 # --- Fire save if delta exceeds threshold and no save already running ---

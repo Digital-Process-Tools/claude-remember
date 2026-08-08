@@ -277,8 +277,12 @@ def _saved_position(project: Path):
 def _suppress_ndc(project: Path):
     """Stop the background NDC run from draining now.md mid-assertion.
 
-    features.ndc_compression is documented but read nowhere, so the only
-    working brake is the cooldown marker (ndc_seconds is 999999 here).
+    A CURRENT timestamp against the 999999s ndc_seconds _make_env configures.
+    Not a future-dated one: that used to work, by way of #326's negative
+    ELAPSED, and the range guard now rejects it.
+
+    (features.ndc_compression was documented and read nowhere when this was
+    written; #159 wired it up, so it is a second working brake today.)
     """
     import time
     (project / ".remember" / "tmp" / "last-ndc.ts").write_text(str(int(time.time())))

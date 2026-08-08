@@ -38,9 +38,19 @@ pytestmark = pytest.mark.skipif(
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 sys.path.insert(0, str(REPO_ROOT / "tests"))
-from test_save_session_gates import _make_env, _run  # noqa: E402
+from test_save_session_gates import _make_env, _run, _suppress_ndc  # noqa: E402
 
 
+# These tests need NDC OFF so that now.md survives to be asserted on. They used
+# to get that by writing `2**40` into tmp/last-ndc.ts — a marker ~34,000 years
+# in the future, whose negative ELAPSED read as "inside the cooldown".
+#
+# That is #326's defect, used as an off switch. It stopped working the moment
+# the range guard landed, which is the correct outcome twice over: the gate no
+# longer accepts a marker ahead of now, and #159 already established that a
+# hand-written marker was never the supported brake. `_suppress_ndc` writes a
+# CURRENT timestamp against the 999999s cooldown `_make_env` configures, which
+# suppresses NDC through the mechanism the product documents.
 def _day_stamp(project: Path) -> str:
     f = project / ".remember" / "tmp" / "now-day"
     return f.read_text(encoding="utf-8").strip() if f.is_file() else ""
@@ -55,7 +65,7 @@ def test_now_md_is_stamped_with_the_day_it_started(tmp_path):
     """Nothing else in the file records the day."""
     env, project, plugin, calls, sid = _make_env(tmp_path, exchanges=6, humans=5)
     env["STUB_HAIKU_TEXT"] = "## 23:50 | main\n\n- late evening work\n"
-    (project / ".remember" / "tmp" / "last-ndc.ts").write_text(str(2**40))  # suppress NDC
+    _suppress_ndc(project)
     _run(plugin, env, sid)
 
     from datetime import datetime
@@ -71,7 +81,7 @@ def test_now_md_is_stamped_with_the_day_it_started(tmp_path):
 def test_the_stamp_marks_the_file_not_each_entry(tmp_path):
     """Three entries, one day — the stamp is set when the file starts."""
     env, project, plugin, calls, sid = _make_env(tmp_path, exchanges=6, humans=5)
-    (project / ".remember" / "tmp" / "last-ndc.ts").write_text(str(2**40))
+    _suppress_ndc(project)
     for i in range(3):
         env["STUB_HAIKU_TEXT"] = f"## 1{i}:00 | main\n\n- entry {i}\n"
         _run(plugin, env, sid)
@@ -140,7 +150,7 @@ def test_the_day_is_not_written_into_now_md(tmp_path):
     know about it, and no reader has to strip it back out.
     """
     env, project, plugin, calls, sid = _make_env(tmp_path, exchanges=6, humans=5)
-    (project / ".remember" / "tmp" / "last-ndc.ts").write_text(str(2**40))
+    _suppress_ndc(project)
     env["STUB_HAIKU_TEXT"] = "## 12:00 | main\n\n- work\n"
     _run(plugin, env, sid)
 

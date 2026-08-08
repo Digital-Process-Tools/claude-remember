@@ -258,7 +258,8 @@ _file_age_seconds() {
         ''|*[!0-9]*) return 1 ;;
     esac
     _now=$(date +%s)
-    echo $(( _now - _mtime ))
+    # 10# after the case, never instead of it (#332).
+    echo $(( _now - 10#$_mtime ))
     return 0
 }
 
@@ -343,7 +344,7 @@ if [ -d "$REMEMBER_DIR" ]; then
             _MEMORY_FILE_COUNT=$((_MEMORY_FILE_COUNT + 1))
             _mf_bytes=$(wc -c < "$_mf" 2>/dev/null | tr -d ' ')
             case "$_mf_bytes" in ''|*[!0-9]*) _mf_bytes=0 ;; esac
-            _MEMORY_BYTES=$((_MEMORY_BYTES + _mf_bytes))
+            _MEMORY_BYTES=$((_MEMORY_BYTES + 10#$_mf_bytes))
         done
     done
 fi

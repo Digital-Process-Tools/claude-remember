@@ -872,7 +872,10 @@ if [ -f "$REMEMBER_HANDOFF" ] && [ -s "$REMEMBER_HANDOFF" ]; then
 
     echo "=== LAST HANDOFF ==="
     if [ -n "$PREV_FP" ] && [ "$HANDOFF_FP" = "$PREV_FP" ]; then
-        DELIVERIES=$((DELIVERIES + 1))
+        # 10# after the case (#332). The record is explicitly hand-editable,
+        # which is the premise of the guard above and the one source that can
+        # deliver "08".
+        DELIVERIES=$((10#$DELIVERIES + 1))
         echo "[already delivered ${DELIVERIES} times since ${FIRST_DELIVERED:-an earlier session} — no new handoff has been written since, so this is pending replacement, not news. You may already have acted on it. Running /remember replaces it.]"
     else
         DELIVERIES=1

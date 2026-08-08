@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **A cooldown marker AHEAD of now sticks the throttle ON, permanently and mutely** ([#326](https://github.com/Digital-Process-Tools/claude-remember/issues/326)) — `case "$X" in ''|*[!0-9]*) X=0 ;; esac` validates a marker's *syntax*. It does not bound its *range*. A digits-only value ahead of the current clock is accepted, makes `ELAPSED` negative, and a negative `ELAPSED` is `-lt` any cooldown — so the gate takes its `exit 0`. That exit sits **above** the line that rewrites the marker, so the self-heal the previous three releases rest on is unreachable on exactly the path that needs it. Four sites, four different outages: no session is ever saved again; `now.md` is never compressed again and grows unbounded; the git backup stops, which is [#258](https://github.com/Digital-Process-Tools/claude-remember/issues/258)'s original outage reached through a value the guard *accepts*; and the per-tool-call fork throttle refuses to fork the save that would have healed the marker, so the two throttles hold each other shut.
+
+  **This needs no corruption.** An NTP step backwards, a VM snapshot restore, a container clock jump, or a store on a share with a skewed clock all produce it. Not a timezone or DST change — epoch seconds do not move for those, which is why proceeding is the right call and costs at most one extra save rather than mis-throttling a laptop that suspended over a boundary.
+
+  **Three states, not two.** An out-of-range marker is not clamped in silence: the run **proceeds**, the marker is **reset where the reset is reachable** — at the point of rejection, not below an `exit` — and one line goes to `hook-errors.log` as well as the daily log, via a new `report_error` in `scripts/log.sh`. A silent clamp would trade a mute stuck throttle for a mute wrong value, which is the same defect one layer along. `/remember:doctor` reports "Recent errors" out of that file, so a clock that stepped backwards far enough to disable saving is now visible where a user already looks.
+
+  **`post-tool-hook.sh` is deliberately asymmetrical.** It declines the cooldown it cannot substantiate and does nothing else: no marker rewrite (the marker belongs to `save-session.sh`, and a second writer on a per-tool-call path is a race for no gain), no diagnostic (one per tool call for as long as the clock is behind), and no added subprocess spawn or file read ([#299](https://github.com/Digital-Process-Tools/claude-remember/issues/299)/[#330](https://github.com/Digital-Process-Tools/claude-remember/issues/330)).
+
+  **The source comment said the opposite, and that is why this was reopened.** `scripts/save-session.sh:155` stated that both gates self-heal and that the cost is "one skipped cooldown per corruption event, not a throttle stuck off". True for the syntax case, false for this one. The CHANGELOG was corrected at 0.17.0; the comment was not, and PR [#328](https://github.com/Digital-Process-Tools/claude-remember/pull/328) closed the issue by *referencing* it without changing a line of its subject matter. Both comments are corrected here.
+
+- **Every remaining case-guarded value in `$(( ))` now carries `10#`, and a check keeps it that way** ([#332](https://github.com/Digital-Process-Tools/claude-remember/issues/332)) — `08` and `09` are all digits, so they clear the digits-only guard and are then read as octal; bash abandons the rest of the enclosing command list, which in this repo has repeatedly been the throttle, the ERROR log or the backup. Four issues ([#321](https://github.com/Digital-Process-Tools/claude-remember/issues/321), [#325](https://github.com/Digital-Process-Tools/claude-remember/issues/325), [#329](https://github.com/Digital-Process-Tools/claude-remember/issues/329), [#331](https://github.com/Digital-Process-Tools/claude-remember/issues/331)) each fixed a correct subset by hand and each looked complete.
+
+  **Twelve sites remained, not the seven #332 lists.** The five it does not name — `scripts/doctor.sh:346`, `scripts/lib-lock.sh:412`, `:421`, `:430` and the second `run-consolidation.sh` read — were found by the check rather than by reading, which is the argument for having one.
+
+  `tests/test_arith_base_lint_332.py` sweeps `scripts/` and `hooks.d/` for the shape mechanically: a variable that passes through a digits-only `case` and later appears inside `$(( ))` with no `10#`. ShellCheck does not flag it ([koalaman/shellcheck#2679](https://github.com/koalaman/shellcheck/issues/2679), open since 2023), so nothing in CI caught it before. `[ "$x" -lt "$y" ]` parses base 10 without complaint, so a guarded value used only in `test` is not reported — `$(( ))` is the only sink, and that is what keeps the sweep finite. The check tests itself against a planted instance and a fixed one, so a green means "looked, found none" rather than "did not look".
+
+  **No shared helper.** A `_remember_epoch_or_zero` in `log.sh` would cover most sites and is worth doing on its own terms, but it does not prevent recurrence: the failure mode is a new call site written by someone who has read none of these five issues, and a helper they do not know about cannot help them. The check fails in the one place people already look.
+
 ## [0.18.0] — The rest of the readers
 
 [#322](https://github.com/Digital-Process-Tools/claude-remember/issues/322)'s guard was written
