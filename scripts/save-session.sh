@@ -140,7 +140,36 @@ fi
 [ "$FORCE" = true ] && log "force" "bypassing cooldown + min msgs"
 if [ -f "$COOLDOWN_MARKER" ] && [ "$DRY_RUN" != true ] && [ "$FORCE" != true ]; then
     LAST_MOD=$(cat "$COOLDOWN_MARKER" 2>/dev/null || echo 0)
-    ELAPSED=$(( $(date +%s) - LAST_MOD ))
+    # Unvalidated file content inside $(( )) is evaluated as an ARITHMETIC
+    # EXPRESSION, so one stray byte is a syntax error, not a bad number. Same
+    # read, same guard, as 50-git-backup.sh's cooldown marker (#258).
+    #
+    # What it costs, measured on bash 3.2.57 and 5.2.37: bash abandons the
+    # ENTIRE if/then body and resumes after `fi`. So the `[ "$ELAPSED" -lt ... ]`
+    # below is never reached, `exit 0` never runs, and this save skips its
+    # cooldown -- one stderr line the only trace. Nothing dies: `set -e` is not
+    # involved, and neither is `set -u` (which 50-git-backup.sh sets and this
+    # file does not) -- $ELAPSED is inside the abandoned body, so no unbound
+    # variable is ever referenced there either.
+    #
+    # Scope it honestly: `date +%s > "$COOLDOWN_MARKER"` sits below the `fi`, so
+    # it runs regardless and the marker SELF-HEALS. One corruption costs one
+    # skipped cooldown, not a throttle stuck off. The guard is worth having
+    # because unvalidated file content in an arithmetic evaluator is a sink in
+    # its own right (BashPitfalls #7), and because an unexplained diagnostic in
+    # hook-errors.log is visible to users since #277.
+    #
+    # 10# is for "08"/"09": all-digits, so they pass the case, and are then read
+    # as octal ("value too great for base"). Reachable only via a corrupt
+    # marker -- which is this guard's entire premise. It goes after the case,
+    # never instead of it: 10# on an empty string is itself an error on bash 5.
+    #
+    # The case also rejects a marker padded with spaces, which arithmetic would
+    # have accepted. Deliberate, and the same call #258's guard makes.
+    case "$LAST_MOD" in
+        ''|*[!0-9]*) LAST_MOD=0 ;;
+    esac
+    ELAPSED=$(( $(date +%s) - 10#$LAST_MOD ))
     SAVE_COOLDOWN=$(config ".cooldowns.save_seconds" 120)
     if [ "$ELAPSED" -lt "$SAVE_COOLDOWN" ]; then
         debug_enabled 1 && log "cooldown" "${ELAPSED}s < ${SAVE_COOLDOWN}s, skip"
@@ -562,9 +591,17 @@ if [ "$(config '.features.ndc_compression' true)" != "true" ]; then
     log "ndc" "disabled by features.ndc_compression"
 fi
 if [ "$RUN_NDC" = true ] && [ -f "$NDC_MARKER" ]; then
+    # Same read and same guard as the save cooldown above. Here the abandoned
+    # body is the whole `if`, so `RUN_NDC=false` never runs and this save
+    # compresses despite the cooldown -- and `date +%s > "$NDC_MARKER"` below
+    # then rewrites the marker on exactly that path, so this gate self-heals
+    # too. One skipped compression cooldown per corruption event.
     NDC_MOD=$(cat "$NDC_MARKER" 2>/dev/null || echo 0)
+    case "$NDC_MOD" in
+        ''|*[!0-9]*) NDC_MOD=0 ;;
+    esac
     NDC_COOLDOWN=$(config ".cooldowns.ndc_seconds" 3600)
-    [ $(( $(date +%s) - NDC_MOD )) -lt "$NDC_COOLDOWN" ] && RUN_NDC=false
+    [ $(( $(date +%s) - 10#$NDC_MOD )) -lt "$NDC_COOLDOWN" ] && RUN_NDC=false
 fi
 
 # The day the content belongs to, not the day this run happens to fall on.
