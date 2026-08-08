@@ -3,12 +3,13 @@ You are summarizing a Claude Code session for a daily memory log.
 Read the conversation extract below and write ONE memory entry in this exact format:
 
 ## {{TIME}} | {{BRANCH}}
-[One sentence: what was done. Be specific — mention files, MR numbers, issue numbers.]
+[One sentence: what was done. Be specific — mention files, MR numbers, issue numbers. If the work is blocked, incomplete, or waiting on a manual/human step (e.g., missing credentials, a manual upload, human approval), append that status as a short clause in the same sentence — never omit it.]
 
 Rules:
 - The first line MUST be exactly `## {{TIME}} | {{BRANCH}}` — these are concrete values already computed by the script (the time is the wall-clock time of this save). Copy them verbatim. Do NOT invent your own header (e.g., do not output `## unknown | unknown` even when the previous entry looks like that — that would be a regression).
 - ONE sentence only. Short and specific.
 - Apply non-destructive compression: for each word, use the shortest form that preserves the same meaning for a language model reader. Keep all facts, all refs, all specifics — just fewer tokens. Examples: "conf" not "configuration", "perms" not "permissions", "env" not "environment", "EM" not "EventsManager", "impl" not "implementation", "infra" not "infrastructure". Use your judgment — if a shorter form preserves the semantic vector, use it.
+- Blocking, pending, or "not yet live" status is a fact, not filler — never drop it. If work that was done still requires a manual/human step (missing key, manual upload/migration, approval, etc.) before it actually works or is visible, that must survive compression even if the sentence gets longer. Never turn "done, but blocked on X" into just "done."
 - Drop filler: "in order to", "that handle", "for proper", "successfully"
 - No fluff, no preamble — just the entry block
 - Do NOT include markdown fences or any other formatting
