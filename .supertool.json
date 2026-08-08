@@ -6,28 +6,60 @@
   "rtk": false,
   "allow_outside_cwd": false,
   "allow_vim_shell": false,
-  "presets": ["github", "git"],
+  "presets": [
+    "github",
+    "git"
+  ],
   "validators": {
     "ruff": {
       "cmd": "{python} {supertool_dir}/validators/ruff/ruff.py {file}",
       "match": "*.py",
-      "hooks_into": ["edit", "replace", "replace_lines", "paste", "append", "vim"],
+      "hooks_into": [
+        "edit",
+        "replace",
+        "replace_lines",
+        "paste",
+        "append",
+        "vim"
+      ],
       "rollback_on_fail": false,
       "timeout": 30
     },
     "jsonlint": {
       "cmd": "{python} {supertool_dir}/validators/jsonlint/jsonlint.py {file}",
       "match": "*.json",
-      "hooks_into": ["edit", "replace", "replace_lines", "paste", "append", "vim"],
+      "hooks_into": [
+        "edit",
+        "replace",
+        "replace_lines",
+        "paste",
+        "append",
+        "vim"
+      ],
       "rollback_on_fail": true,
       "timeout": 10
     },
     "git-status": {
       "cmd": "{python} {supertool_dir}/validators/git-status/git-status.py {file}",
       "match": "*",
-      "hooks_into": ["edit", "replace", "replace_lines", "paste", "append", "vim"],
+      "hooks_into": [
+        "edit",
+        "replace",
+        "replace_lines",
+        "paste",
+        "append",
+        "vim"
+      ],
       "rollback_on_fail": false,
       "timeout": 10
+    }
+  },
+  "builtin-ops": {
+    "batch": {
+      "syntax": "batch:@file.json",
+      "description": "Run array of ops in one call. Mix read+edit+grep in one round-trip. Payload: array of {op,...} or {continue_on_error, ops}. A call carries one @- payload, so without this N edits are N calls.",
+      "example": "batch:@.max/ops.json",
+      "hint": true
     }
   }
 }
