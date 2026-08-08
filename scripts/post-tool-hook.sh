@@ -183,7 +183,13 @@ if [ -z "$LATEST_JSONL" ]; then
         read -r NOTICE_LAST < "$NOTICE_MARKER" 2>/dev/null
         case "$NOTICE_LAST" in ''|*[!0-9]*) NOTICE_LAST=0 ;; esac
     fi
-    if [ $(( $(_remember_date +%s) - NOTICE_LAST )) -ge "$NOTICE_TTL" ]; then
+    # 10# after the case, never instead of it (#322): "08"/"09" are all digits,
+    # so they clear the guard and are then read as octal. Bash abandons the rest
+    # of this if body at that point -- including the `exit 0` below -- so the
+    # notice is never sent and the line under `fi` deletes the marker instead.
+    # 10# on an empty string is itself an error on bash 5, which is why the case
+    # stays in front.
+    if [ $(( $(_remember_date +%s) - 10#$NOTICE_LAST )) -ge "$NOTICE_TTL" ]; then
         mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null
         _remember_date +%s > "$NOTICE_MARKER" 2>/dev/null
         if [ -d "$SESSION_DIR" ]; then
@@ -322,7 +328,11 @@ if [ -f "$COOLDOWN_MARKER" ]; then
     case "$LAST_TS" in ''|*[!0-9]*) LAST_TS=0 ;; esac
     SAVE_COOLDOWN=$(config ".cooldowns.save_seconds" 120)
     case "$SAVE_COOLDOWN" in ''|*[!0-9]*) SAVE_COOLDOWN=120 ;; esac
-    [ $(( $(_remember_date +%s) - LAST_TS )) -lt "$SAVE_COOLDOWN" ] && IN_COOLDOWN=true
+    # 10# for the same reason as the notice marker above (#322). Only LAST_TS
+    # needs it: SAVE_COOLDOWN is the right-hand operand of `[ ... -lt ... ]`,
+    # and `test` parses base 10 without evaluating -- measured, `[ 9 -lt 010 ]`
+    # is true. Marking it too would advertise a gap that is not there.
+    [ $(( $(_remember_date +%s) - 10#$LAST_TS )) -lt "$SAVE_COOLDOWN" ] && IN_COOLDOWN=true
 fi
 
 # --- Fire save if delta exceeds threshold and no save already running ---

@@ -5,16 +5,14 @@ the same way and neither was guarded: `tmp/last-save-ts` at the save cooldown an
 `tmp/last-ndc.ts` at the NDC gate.
 
 Bash evaluates a bare variable's VALUE inside `$(( ))` as an arithmetic
-expression, so a stray byte is a syntax error. Bash then abandons the rest of the
-current command list and resumes at the NEXT LINE. Measured with `-e`, without
-it, and with `-u`: identical, so errexit plays no part in this. What separates
-the two files is the absence of `set -u` here —
+expression, so a stray byte is a syntax error. Bash then abandons the ENTIRE
+`if … then … fi` body and resumes after `fi`. Measured with `-e`, without it, and
+with `-u`: identical, so neither errexit nor nounset plays any part.
 
-* `save-session.sh` (no `-u`) — `ELAPSED=$(( ... ))` is abandoned, `ELAPSED`
-  stays unset, and the `[ "$ELAPSED" -lt ... ]` on the next line complains and is
-  false. This run skips its cooldown.
-* `50-git-backup.sh` (`-u`) — the next line's `$ELAPSED` is an unbound variable
-  and the shell exits, which is the permanent stop #258 documented.
+That is one mechanism, not two, and it is the same in both files. `$ELAPSED` is
+itself inside the abandoned body, so `50-git-backup.sh`'s `set -u` never sees an
+unbound variable and nothing dies there either — the consequence in both places
+is a cooldown that is not applied and one line in the log.
 
 Scope it honestly: both gates rewrite their marker on exactly the path a corrupt
 one allows, so each SELF-HEALS. The cost is one skipped cooldown per corruption
@@ -25,9 +23,13 @@ only thing that separates broken from fixed.
 
 `"08"`/`"09"` are here because a digits-only guard is not enough on its own: they
 pass it and are then read as octal (`value too great for base`), failing
-identically. That is why the guard carries `10#` — and why the same `10#` is
-added to #258's existing guard in `50-git-backup.sh`, where that shape is not a
-skipped cooldown but the unbound-variable exit above.
+identically. That is why the guard carries `10#`. The same gap is still open in
+#258's guard in `50-git-backup.sh` and in `50-git-restore.sh`'s fetch-state read
+— both are `case`-guarded and neither carries `10#` — and is deliberately NOT
+closed here: those two are not this issue's markers, the change is untestable
+until `test_a_corrupt_cooldown_marker_does_not_kill_the_hook` stops writing to
+`<store>/.last-git-backup-ts` while the hook reads `<store>/.git/remember/…`, and
+an unpinned one-token edit is how a guard rots back out.
 
 CONTROL: `  1785512249  ` is in the list on purpose and must stay GREEN against
 the unfixed script. Arithmetic skips surrounding whitespace, so that marker works
@@ -200,4 +202,138 @@ def test_a_leading_zero_marker_is_read_as_decimal(tmp_path):
     assert "extract" in ran, (
         "a marker of \"08\" should read as 8 seconds past the epoch — ancient, so "
         f"the cooldown is long expired and the save proceeds. calls: {ran!r}"
+    )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# The third reader of tmp/last-save-ts: scripts/post-tool-hook.sh
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# That file already carries the digits-only `case` (#230 reads it with `read`,
+# not `cat`), so the non-digit half of #322 never reaches its arithmetic. It
+# carries no `10#`, which is the other half: "08"/"09" are all digits, clear the
+# guard, and are then read as octal. Two of its operands come from a file and
+# are exposed by that:
+#
+#   NOTICE_LAST  <- tmp/no-transcript-notice
+#   LAST_TS      <- tmp/last-save-ts, the same marker the save gate above reads
+#
+# Pinned on behaviour, not only on the diagnostic: both sites decide something
+# with the number, and read as octal the decision is not made at all — the
+# abandoned body leaves the throttle off and the notice unsent.
+#
+# SAVE_COOLDOWN on the line after LAST_TS has the same shape and is NOT exposed:
+# it is the right-hand operand of `[ ... -lt ... ]`, and the `test` builtin
+# parses base 10 without evaluating. Measured rather than assumed — `[ 9 -lt
+# 010 ]` is true, so 010 is ten there and eight inside `$(( ))`. Left alone on
+# purpose; a `10#` there would advertise a gap that is not there.
+
+import os  # noqa: E402
+import subprocess  # noqa: E402
+
+from test_post_tool_cooldown import HOOK, _reap, _run_post_tool, _slug  # noqa: E402
+
+
+def _leading_zero_stamp(epoch: int) -> str:
+    """A marker of the one shape that survives a digits-only guard.
+
+    Asserted rather than assumed: a leading zero is octal-invalid only if an 8
+    or a 9 follows it, and a parameter that cannot fail either way is not a
+    test — it is the decoy this repo keeps paying for.
+    """
+    stamp = "0" + str(epoch)
+    assert any(d in stamp for d in "89"), (
+        f"{stamp!r} is a valid octal literal, so it proves nothing about 10#; "
+        "pick an epoch whose digits include an 8 or a 9"
+    )
+    return stamp
+
+
+def _hook_diagnostics(proc, remember) -> str:
+    """stderr AND hook-errors.log — the hook redirects bash's own diagnostic to
+    the log, so an assertion on stderr alone is green against the unfixed file
+    and pins nothing. Measured that way before it was written."""
+    log = remember / "logs" / "hook-errors.log"
+    return proc.stderr + (log.read_text(encoding="utf-8", errors="replace")
+                          if log.is_file() else "")
+
+
+def _hook_env(home, project, remember) -> dict:
+    return {
+        **os.environ,
+        "HOME": str(home),
+        "CLAUDE_PROJECT_DIR": str(project),
+        "CLAUDE_PLUGIN_ROOT": str(REPO_ROOT),
+        "REMEMBER_DIR": str(remember),
+        "_LIB_MEMORY_DIR_LOADED": "1",
+    }
+
+
+def test_the_post_tool_hook_still_throttles_on_a_leading_zero_marker(tmp_path):
+    """The cooldown marker written seconds ago, with a leading zero.
+
+    Read as decimal it is now, and the fork is suppressed. Read as octal the
+    arithmetic fails, the rest of the `if` body is abandoned, IN_COOLDOWN stays
+    false, and the hook forks a save the cooldown existed to prevent — the fork
+    storm #125 was filed for, reached through the marker instead.
+    """
+    stamp = _leading_zero_stamp(int(time.time()))
+    proc, remember = _run_post_tool(tmp_path, cooldown_ts=stamp)
+    _reap(remember)
+
+    assert proc.returncode == 0, proc.stderr
+    seen = _hook_diagnostics(proc, remember)
+    for phrase in ARITHMETIC_DIAGNOSTICS:
+        assert phrase not in seen, (
+            f"tmp/last-save-ts reached $(( )) as octal: bash reported {phrase!r}"
+            f"\n--- stderr + hook-errors.log ---\n{seen.strip()}"
+        )
+    assert not (remember / "tmp" / "save-session.pid").exists(), (
+        f"a cooldown marker of {stamp!r} — written seconds ago — did not "
+        "suppress the fork, so the hook is spawning saves inside the window"
+    )
+
+
+def test_the_post_tool_no_transcript_notice_is_read_as_decimal(tmp_path):
+    """The other file-sourced operand in the same hook, same gap.
+
+    With no transcript the hook reports once per NOTICE_TTL and then exits. Read
+    as octal, the whole body is abandoned — including that `exit 0` — so the
+    report is never made, and execution falls through to the line below the
+    `fi`, which DELETES the marker on the grounds that a transcript was found.
+    The user whose project slug does not match a session directory gets silence
+    from the one line that would have told them (#212).
+
+    The assertion is therefore that the marker survives and is refreshed. Its
+    deletion is the fingerprint of the abandoned body and cannot happen on the
+    path this test drives.
+    """
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    remember = project / ".remember"
+    (home / ".claude" / "projects" / _slug(str(project))).mkdir(parents=True)
+    (remember / "tmp").mkdir(parents=True)
+
+    notice = remember / "tmp" / "no-transcript-notice"
+    stale = _leading_zero_stamp(int(time.time()) - 7200)  # past the 3600s TTL
+    notice.write_text(stale, encoding="utf-8")
+
+    proc = subprocess.run(["bash", str(HOOK)], env=_hook_env(home, project, remember),
+                          capture_output=True, text=True, timeout=60)
+
+    assert proc.returncode == 0, proc.stderr
+    seen = _hook_diagnostics(proc, remember)
+    for phrase in ARITHMETIC_DIAGNOSTICS:
+        assert phrase not in seen, (
+            f"tmp/no-transcript-notice reached $(( )) as octal: bash reported "
+            f"{phrase!r}\n--- stderr + hook-errors.log ---\n{seen.strip()}"
+        )
+    assert notice.is_file(), (
+        "the no-transcript notice marker was deleted — the hook ran past its "
+        "own `exit 0` and took the branch that assumes a transcript was found"
+    )
+    refreshed = notice.read_text(encoding="utf-8").strip()
+    assert refreshed.isdigit() and refreshed != stale, (
+        f"a notice marker two hours old was not refreshed (still {refreshed!r}) "
+        "— the hourly no-transcript report never fired"
     )

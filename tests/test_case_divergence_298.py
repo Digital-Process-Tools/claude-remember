@@ -523,13 +523,38 @@ def test_doctor_is_quiet_when_the_spellings_agree(tmp_path):
 
 def test_the_per_tool_call_path_is_not_touched(tmp_path):
     """#299 asserts this and it stays asserted. `session_dir_slug` runs on every
-    tool call; this check runs once per session and nowhere near it."""
+    tool call; this check runs once per session and nowhere near it.
+
+    For `post-tool-hook.sh` the property is now asserted directly rather than as
+    byte-equality with `origin/main` (#322). Byte-equality says "nobody has
+    edited this file since main", which is a different claim from "the hot path
+    is still cheap" and fails in both directions: it stopped an unrelated
+    one-token arithmetic guard in that file, and it goes vacuous the moment the
+    edit it objected to lands on main. What #298/#299 actually care about is
+    that the divergence check is unreachable from the per-tool-call path and
+    that the path spawns no git, so that is what is checked. The other two arms
+    keep the byte compare — they were not what blocked, and widening a guard
+    that belongs to another issue is not this change's business.
+    """
+    body = POST_TOOL.read_text(encoding="utf-8")
+    code = "\n".join(line for line in body.splitlines()
+                     if not line.lstrip().startswith("#"))
+    assert "lib-case-divergence" not in code, (
+        "the per-tool-call hook now sources the divergence library — it runs on "
+        "every tool call and the check is a once-per-session cost (#299)"
+    )
+    assert "case_divergence" not in code, (
+        "the per-tool-call hook now calls into the divergence check (#299)"
+    )
+    assert "git " not in code, (
+        "the per-tool-call hook now spawns git — that is the cost #298 moved to "
+        "session start in the first place"
+    )
     base = subprocess.run(
-        ["git", "-C", str(REPO_ROOT), "show", f"origin/main:scripts/post-tool-hook.sh"],
+        ["git", "-C", str(REPO_ROOT), "show", "origin/main:scripts/post-tool-hook.sh"],
         capture_output=True, text=True)
     if base.returncode != 0:
         pytest.skip("origin/main not available")
-    assert base.stdout == POST_TOOL.read_text(encoding="utf-8")
     for path, rel in ((LIB_SLUG, "scripts/lib-slug.sh"),
                       (LIB_MEMORY_DIR, "scripts/lib-memory-dir.sh")):
         ref = subprocess.run(["git", "-C", str(REPO_ROOT), "show", f"origin/main:{rel}"],
