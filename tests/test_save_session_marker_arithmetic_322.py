@@ -23,13 +23,15 @@ only thing that separates broken from fixed.
 
 `"08"`/`"09"` are here because a digits-only guard is not enough on its own: they
 pass it and are then read as octal (`value too great for base`), failing
-identically. That is why the guard carries `10#`. The same gap is still open in
-#258's guard in `50-git-backup.sh` and in `50-git-restore.sh`'s fetch-state read
-— both are `case`-guarded and neither carries `10#` — and is deliberately NOT
-closed here: those two are not this issue's markers, the change is untestable
-until `test_a_corrupt_cooldown_marker_does_not_kill_the_hook` stops writing to
-`<store>/.last-git-backup-ts` while the hook reads `<store>/.git/remember/…`, and
-an unpinned one-token edit is how a guard rots back out.
+identically. That is why the guard carries `10#`. The gap this paragraph used to
+report as still open in `50-git-backup.sh` and `50-git-restore.sh` was closed by
+#324/#327, along with four more sinks in the same two files that nobody had
+counted — the consecutive-failure counters, where the abandoned branch is the one
+holding the ERROR log. It is pinned there rather than here, by
+`tests/test_git_backup_silent_stops_257.py` and
+`tests/test_git_restore_hook_253.py`; the ordering that paragraph called for was
+the one taken, #324's path first and the one-token edit behind a test that can
+fail.
 
 CONTROL: `  1785512249  ` is in the list on purpose and must stay GREEN against
 the unfixed script. Arithmetic skips surrounding whitespace, so that marker works

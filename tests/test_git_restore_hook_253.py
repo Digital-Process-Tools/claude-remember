@@ -563,6 +563,41 @@ class TestCouldNotCheckIsItsOwnState:
             "from one that returned nothing new\n--- log ---\n" + log
         )
 
+    def test_a_leading_zero_start_time_is_read_as_decimal(self, tmp_path):
+        """#327, the restore half. `started=08` is all digits, so it clears the
+        digits-only guard in `_fetch_health` and is then read as OCTAL.
+
+        The arithmetic fails, bash abandons the whole `if [ -z "$_f" ]` body,
+        and control falls through to the `rc` branch with `_rc` empty — so a
+        fetch that never came back is reported as one that FAILED with an
+        unknown status. The same three-state vocabulary, the wrong state, and
+        the remedy the user is handed ("run git fetch to see git's own error")
+        is for a failure that did not happen.
+
+        `date +%s` never emits a leading zero, so this is reachable only through
+        a corrupt or truncated state file — which is that guard's whole premise.
+        """
+        home, remember, remote, slug_dir, project = _store(tmp_path)
+        _fetch_now(remember)
+        (hook_state(remember, FETCH_STATE, create_dir=True)).write_text(
+            "started=08\n", encoding="utf-8"
+        )
+
+        result = _run(slug_dir, project, home, _config(tmp_path, enabled=True))
+
+        for phrase in ("syntax error", "invalid arithmetic operator",
+                       "value too great for base", "unbound variable"):
+            assert phrase not in result.stderr, (
+                "the state file reached the arithmetic evaluator — bash said "
+                f"{phrase!r}: {result.stderr.strip()}"
+            )
+        log = _log_text(slug_dir)
+        assert "never completed" in log, (
+            "a fetch with a leading-zero start time was not reported as "
+            "abandoned — the octal read fell through to the FAILED branch, so "
+            "the session is told a fetch failed when none did\n--- log ---\n" + log
+        )
+
 
 # ── The detached fetch ───────────────────────────────────────────────────────
 

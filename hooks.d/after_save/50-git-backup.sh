@@ -166,10 +166,17 @@ if [ -f "$COOLDOWN_MARKER" ]; then
     # permanently, with dispatch's nameless `hook failed` as the only trace.
     # Falling back to 0 self-heals, because the run it allows is the run that
     # rewrites the marker.
+    #
+    # `case` AND `10#`, not one or the other (#327). "08"/"09" are all digits,
+    # so they clear the guard above and are then read as OCTAL -- the same
+    # abandonment, from a marker that looks clean. `10#` goes AFTER the case and
+    # never instead of it: `10#` on an empty string is itself an error on bash 5,
+    # and the case is also what rejects a space-padded value that arithmetic
+    # would have accepted. Same call save-session.sh already makes (#322).
     case "$LAST_MOD" in
         ''|*[!0-9]*) LAST_MOD=0 ;;
     esac
-    ELAPSED=$(( $(date +%s) - LAST_MOD ))
+    ELAPSED=$(( $(date +%s) - 10#$LAST_MOD ))
     if [ "$ELAPSED" -lt "$BACKUP_COOLDOWN" ]; then
         debug_enabled 0 && log "git-backup" "cooldown ${ELAPSED}s < ${BACKUP_COOLDOWN}s, skip"
         exit 0
@@ -388,11 +395,17 @@ esac
             return 0
         fi
 
+        # 10# after the case (#327). Every counter in this file is read back
+        # from a file the hook wrote, so "08" is only reachable through
+        # corruption -- which is what the guard is for. Without it the increment
+        # is an octal error, bash abandons the rest of this branch, and the
+        # `log "ERROR: push REJECTED …"` below never runs: the loudest report in
+        # the file, silenced by the counter that exists to escalate it.
         _count=$(cat "$REJECT_STATE_FILE" 2>/dev/null || echo 0)
         case "$_count" in
             ''|*[!0-9]*) _count=0 ;;
         esac
-        _count=$((_count + 1))
+        _count=$((10#$_count + 1))
         echo "$_count" > "$REJECT_STATE_FILE" 2>/dev/null || true
 
         log "git-backup" "ERROR: push REJECTED by the remote — the backup has STOPPED for $SLUG and will not resume on its own (consecutive rejections: $_count). git rejected: ${_rejected%;}. The commit exists on this machine only. Nothing here will fetch, merge or rebase for you: run 'git -C \"$REPO_ROOT\" push' to see git's own advice and resolve it by hand — recent.md and archive.md are rewritten wholesale by consolidation, so a wrong automatic resolution would corrupt memory silently."
@@ -585,11 +598,14 @@ esac
     else
         _gb_stamp_cooldown
         COMMIT_ERR=$(printf '%s' "$COMMIT_ERR" | tr '\n' ' ')
+        # 10# after the case (#327) — same shape as the reject counter above,
+        # and here the abandoned branch is the one reporting that this memory is
+        # in no git history at all.
         _cfail=$(cat "$COMMIT_FAIL_STATE_FILE" 2>/dev/null || echo 0)
         case "$_cfail" in
             ''|*[!0-9]*) _cfail=0 ;;
         esac
-        _cfail=$((_cfail + 1))
+        _cfail=$((10#$_cfail + 1))
         echo "$_cfail" > "$COMMIT_FAIL_STATE_FILE" 2>/dev/null || true
 
         log "git-backup" "ERROR: commit FAILED for $SLUG — this memory is recorded in NO git history at all, not locally and not on any remote, and the backup has STOPPED for this project (consecutive failures: $_cfail). git said: ${COMMIT_ERR:-<no output>}. Run 'git -C \"$REPO_ROOT\" commit -- \"$SLUG/\"' to see it yourself."
@@ -620,11 +636,12 @@ esac
         # distinguished "deliberately local-only" from "the setup was never
         # finished". It still cannot be distinguished from inside this hook —
         # so it is asked ONCE, of the only person who knows.
+        # 10# after the case (#327), as above.
         _nr=$(cat "$NO_REMOTE_STATE_FILE" 2>/dev/null || echo 0)
         case "$_nr" in
             ''|*[!0-9]*) _nr=0 ;;
         esac
-        _nr=$((_nr + 1))
+        _nr=$((10#$_nr + 1))
         echo "$_nr" > "$NO_REMOTE_STATE_FILE" 2>/dev/null || true
 
         log "git-backup" "no remote configured for '$REMOTE_NAME' in $REPO_ROOT — the commit exists on this machine ONLY and nothing is backed up off it (consecutive saves in this state: $_nr). Add one: git -C \"$REPO_ROOT\" remote add origin <url>"

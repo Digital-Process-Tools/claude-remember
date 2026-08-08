@@ -42,6 +42,7 @@ pytestmark = pytest.mark.skipif(
 from .test_git_backup_hook import (  # noqa: E402
     REPO_ROOT,
     _git,
+    hook_state,
     make_external_remember_repo,
 )
 from .test_git_backup_push_rejected_253 import (  # noqa: E402
@@ -411,21 +412,54 @@ def test_a_store_with_no_remote_at_all_eventually_says_so_exactly_once(tmp_path)
 # ═════════════════════════════════════════════════════════════════════════════
 
 
-@pytest.mark.parametrize("corrupt", ["garbage-text", "12x34", "17\x00", "  1785512249  "])
+# Everything bash says when unvalidated content reaches an arithmetic
+# evaluator, plus the `set -u` follow-on. Asserted on because rc and the commit
+# do NOT separate broken from fixed here: falling back to 0 makes a corrupt
+# marker read as "very old", so corrupt and clean-but-ancient produce the same
+# decision, and on bash 3.2.57 a failing `$(( ))` inside the `if [ -f … ]` body
+# abandons that body and resumes after `fi` — rc stays 0 and the commit still
+# happens. The diagnostic is the only observable that changes.
+ARITHMETIC_DIAGNOSTICS = (
+    "syntax error",
+    "invalid arithmetic operator",
+    "value too great for base",
+    "unbound variable",
+)
+
+
+@pytest.mark.parametrize(
+    "corrupt",
+    ["garbage-text", "12x34", "17\x00", "  1785512249  ", "08", "09"],
+)
 def test_a_corrupt_cooldown_marker_does_not_kill_the_hook(tmp_path, corrupt):
-    """#258 item 1, and its direction is wrong in the issue.
+    """#258 item 1, re-derived twice — the issue had the direction wrong, and
+    this test then had the path wrong (#324).
 
     `LAST_MOD` is unvalidated file content expanded inside `$(( ))` under
-    `set -u`. A non-numeric marker is not "the cooldown is skipped": bash
-    evaluates it as an *arithmetic expression*, hits an unbound variable or an
-    invalid base, and the hook DIES at that line — above the lock, above the
-    add, above the commit. The marker is only rewritten after a successful
-    commit, which is now unreachable, so one bad byte stops the backup
-    permanently and the only trace was dispatch's nameless `hook failed` —
-    nameless until #277 gave it the exit status and bash's own diagnostic.
+    `set -u`, so bash evaluates the marker's VALUE as an *arithmetic
+    expression*. What follows is version- and shape-dependent, which is why
+    nothing below rests on rc alone: measured on bash 3.2.57, the failing
+    expansion abandons the enclosing `if [ -f "$COOLDOWN_MARKER" ]` body and
+    resumes after `fi`, so the hook exits 0, commits, and re-stamps the marker
+    — one skipped cooldown, self-healing. Flattened out of that `if`, the same
+    input exits 127 on `$ELAPSED` being unbound. Both are real; only the
+    stderr separates either from a clean run.
+
+    **Path (#324).** This wrote to `<store>/.last-git-backup-ts` while the hook
+    reads `$GB_STATE_DIR/last-git-backup-ts` (#261). That was NOT vacuous — the
+    legacy carry-forward at the top of the hook copies the dotted root file into
+    the state dir before the cooldown block, so every value here did reach the
+    evaluator. But the transport was the compatibility shim, not the feature:
+    the day that shim is dropped, all of these go vacuous with nothing turning
+    red. `hook_state` puts the marker where the hook actually looks, resolved
+    through git rather than spelled out.
+
+    `08`/`09` (#327) are the pair a digits-only `case` cannot catch: all digits,
+    so they clear the guard, and are then read as octal.
     """
     home, remember, remote, slug_dir, project = _store(tmp_path)
-    (remember / ".last-git-backup-ts").write_text(corrupt, encoding="utf-8", errors="ignore")
+    marker = hook_state(remember, ".last-git-backup-ts", create_dir=True)
+    marker.write_text(corrupt, encoding="utf-8", errors="ignore")
 
     proc = _run_backup(slug_dir, project, home, _backup_config(tmp_path))
 
@@ -433,10 +467,50 @@ def test_a_corrupt_cooldown_marker_does_not_kill_the_hook(tmp_path, corrupt):
         f"the hook died on a corrupt cooldown marker (rc={proc.returncode}): "
         f"{proc.stderr.strip()}"
     )
+    for phrase in ARITHMETIC_DIAGNOSTICS:
+        assert phrase not in proc.stderr, (
+            f"the marker reached the arithmetic evaluator — bash said {phrase!r}. "
+            "The guard did not hold, and what the hook does next is decided by "
+            "the bash version rather than by the code: "
+            f"{proc.stderr.strip()}"
+        )
     assert _wait_until(lambda: _slug_is_committed(remember)), (
         "a corrupt cooldown marker stopped the backup entirely — and because "
         "the marker is rewritten only on a successful commit, it stays corrupt "
         "and the store never backs up again"
+    )
+
+
+def test_a_corrupt_failure_counter_does_not_silence_the_commit_failed_report(tmp_path):
+    """The same octal hole one file over, and here it eats the report itself.
+
+    `git-backup-commit-failed` is a counter this hook writes and reads back to
+    decide when to escalate. It carries the same digits-only guard as the
+    cooldown marker and the same `$(( ))` sink, so `08` clears the guard, the
+    increment fails, and bash abandons the rest of that `else` branch — which is
+    where `log "ERROR: commit FAILED …"` lives. A store whose commits are
+    failing then reports nothing at all, which is #257 exactly, reached through
+    the counter instead of through `exit 0`.
+
+    Found by sweeping the file rather than from either issue; #324 and #327 name
+    the cooldown marker only.
+    """
+    home, remember, remote, slug_dir, project = _store(tmp_path)
+    _break_commits(remember)
+    hook_state(remember, ".git-backup-commit-failed", create_dir=True).write_text(
+        "08", encoding="utf-8")
+
+    proc = _run_backup(slug_dir, project, home, _backup_config(tmp_path))
+
+    for phrase in ARITHMETIC_DIAGNOSTICS:
+        assert phrase not in proc.stderr, (
+            f"the failure counter reached the arithmetic evaluator ({phrase!r}): "
+            f"{proc.stderr.strip()}"
+        )
+    assert _wait_until(lambda: "commit FAILED" in _log_or_empty(slug_dir)), (
+        "the commit failed and the hook said nothing — a corrupt failure "
+        "counter suppressed the one report that tells a user their memory is "
+        "in no git history at all\n--- log ---\n" + _log_or_empty(slug_dir)
     )
 
 

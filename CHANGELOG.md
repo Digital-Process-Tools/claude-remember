@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **`10#` reached `save-session.sh` and `post-tool-hook.sh` but never the two git hooks** ([#327](https://github.com/Digital-Process-Tools/claude-remember/issues/327)) — [#322](https://github.com/Digital-Process-Tools/claude-remember/issues/322)/[#329](https://github.com/Digital-Process-Tools/claude-remember/issues/329) closed four readers and left `hooks.d/after_save/50-git-backup.sh` and `hooks.d/before_session_start/50-git-restore.sh` on the bare digits-only guard, so `08`/`09` — all digits, therefore clean to that guard — still reached `$(( ))` as octal.
+
+  **Six sites, not the one the issue names, and four were found by sweeping the two files.** Besides the backup cooldown marker and the restore hook's two fetch-timestamp reads, every consecutive-failure counter in both hooks (`git-backup-rejected`, `git-backup-commit-failed`, `git-backup-no-remote`, `git-restore-diverged`) reads itself back through the same guard into the same sink. Those four are the worse ones: bash abandons the rest of the branch on the failing increment, and the abandoned branch is the one holding `log "ERROR: push REJECTED …"`, `log "ERROR: commit FAILED …"` and `log "ERROR: … DIVERGED …"`. A corrupt counter did not mis-count — it silenced the loudest report in the file, which is [#257](https://github.com/Digital-Process-Tools/claude-remember/issues/257) reached through the counter instead of through `exit 0`. `_fetch_health` fails the same way pointing the other direction: the octal read falls through to the `rc` branch with `rc` unset, so a fetch that never came back is reported as one that FAILED with an unknown status — the wrong state out of the three, handing the user a remedy for a failure that did not happen.
+
+  **The issue's severity claim does not survive measurement; the fix is right anyway.** #327 states the hook dies under `set -u` and the git backup is stopped permanently, and classes it `fails-to-preserve`. Measured on bash 3.2.57 in the shape the hook actually has — the read sits inside `if [ -f "$COOLDOWN_MARKER" ]` — the failing expansion abandons that body and resumes after `fi`: rc 0, the commit happens, and `_gb_stamp_cooldown` rewrites the marker, so the gate self-heals exactly as #322's two do. The issue's repro used a flattened command list, where the same input does exit 127. This is the mechanism #329's own docstring already records; `misreports` is the right class for all six sites.
+
+  **Comparisons were checked and are not affected.** `[ "$x" -lt "$y" ]` parses base 10, so `[ 08 -lt 9 ]` is true with no diagnostic. `$(( ))` is the only sink, which is what bounds the sweep.
+
+  The docstring half of #327 needs no work: [#329](https://github.com/Digital-Process-Tools/claude-remember/issues/329) already replaced the false claim in `tests/test_save_session_marker_arithmetic_322.py` with an accurate statement that the gap was still open here. That statement is now itself out of date and is updated in the same commit — a correct note about an open gap becomes a wrong one the moment the gap closes.
+
+- **#258's regression test wrote its marker where a compatibility shim happened to carry it** ([#324](https://github.com/Digital-Process-Tools/claude-remember/issues/324)) — reported by [@jmossie82](https://github.com/jmossie82). `test_a_corrupt_cooldown_marker_does_not_kill_the_hook` wrote `<store>/.last-git-backup-ts` while the hook reads `$GB_STATE_DIR/last-git-backup-ts` ([#261](https://github.com/Digital-Process-Tools/claude-remember/issues/261)).
+
+  **Filed as "the cooldown block is never entered and every corrupt value passes trivially"; measured, that part is not true.** The legacy carry-forward at the top of the hook copies the dotted root file into the state dir *before* the cooldown block, so every parametrized value did reach the evaluator — which is also why the reporter's glob found the dotted path gone rather than untouched. The defect is real but different: the test's transport was the compatibility shim, not the feature under test. That shim exists to be removed, and the day it goes, all four cases go vacuous with nothing turning red. The marker now goes through the same `hook_state` helper the sibling tests already use, resolved through `git rev-parse --git-common-dir` rather than spelled out.
+
+  **What was genuinely unguarded is the octal pair, and the assertions.** `08`/`09` were absent from the parametrization, and the test asserted only rc and the commit — neither of which changes on bash 3.2.57, where the failing arithmetic abandons the `if` body and the hook proceeds. It now asserts on stderr, which is the only observable that separates broken from fixed on every bash: falling back to `0` makes a corrupt marker read as "very old", so corrupt and clean-but-ancient reach the same decision by design.
+
 ## [0.17.0] — Markers that were trusted to be numbers
 
 Two of this repo's own state files are read straight into contexts that treat their contents as

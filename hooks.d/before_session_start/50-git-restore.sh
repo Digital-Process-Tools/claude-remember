@@ -219,10 +219,14 @@ _spawn_fetch() {
         while IFS='=' read -r _k _v; do
             case "$_k" in started) _s="$_v" ;; finished) _f="$_v" ;; esac
         done < "$FETCH_STATE_FILE"
+        # 10# after the case, never instead of it (#327): "08" is all digits,
+        # clears the guard, and is then read as octal -- so the age comparison
+        # is abandoned and a fetch still inside its window gets a second one
+        # stacked on top of it.
         case "$_s" in ''|*[!0-9]*) _s=0 ;; esac
         if [ -z "$_f" ] && [ "$_s" -gt 0 ]; then
             _now=$(date +%s)
-            _age=$(( _now - _s ))
+            _age=$(( _now - 10#$_s ))
             [ "$_age" -lt "$FETCH_TIMEOUT" ] && return 0
         fi
     fi
@@ -298,10 +302,16 @@ _fetch_health() {
     while IFS='=' read -r _k _v; do
         case "$_k" in started) _s="$_v" ;; finished) _f="$_v" ;; rc) _rc="$_v" ;; esac
     done < "$FETCH_STATE_FILE"
+    # 10# after the case, never instead of it (#327). Without it "08" is octal,
+    # the arithmetic fails, bash abandons this whole `if` body, and control
+    # falls through to the `rc` test below with `_rc` empty -- so a fetch that
+    # never came back is reported as one that FAILED with an unknown status.
+    # Wrong state out of the three, and the remedy offered is for a failure
+    # that did not happen.
     case "$_s" in ''|*[!0-9]*) _s=0 ;; esac
     if [ -z "$_f" ]; then
         _now=$(date +%s)
-        _age=$(( _now - _s ))
+        _age=$(( _now - 10#$_s ))
         if [ "$_age" -lt "$FETCH_TIMEOUT" ]; then echo "in-flight"; else echo "abandoned"; fi
         return
     fi
@@ -391,9 +401,13 @@ fi
 
 if [ "$AHEAD" -gt 0 ] && [ "$BEHIND" -gt 0 ]; then
     # ── DIVERGED: refuse, and say so ─────────────────────────────────────────
+    # 10# after the case (#327). Without it a corrupt counter makes the
+    # increment an octal error, this branch is abandoned, and the DIVERGED
+    # report below never runs -- a store that refused to restore, saying so
+    # nowhere.
     _count=$(cat "$DIVERGED_STATE_FILE" 2>/dev/null || echo 0)
     case "$_count" in ''|*[!0-9]*) _count=0 ;; esac
-    _count=$((_count + 1))
+    _count=$((10#$_count + 1))
     echo "$_count" > "$DIVERGED_STATE_FILE" 2>/dev/null || true
 
     log "git-restore" "ERROR: the memory store has DIVERGED — $AHEAD local commit(s) the remote does not have, $BEHIND remote commit(s) this machine does not have (consecutive session starts in this state: $_count). NOT restored, and nothing here will merge or rebase for you: recent.md and archive.md are rewritten wholesale by consolidation, so a wrong automatic resolution would corrupt memory silently. Resolve it by hand: git -C \"$REPO_ROOT\" log --oneline --left-right \"HEAD...$REMOTE_REF\""
