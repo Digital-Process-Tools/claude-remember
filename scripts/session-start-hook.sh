@@ -6,7 +6,8 @@
 # DESCRIPTION
 #   Runs at the beginning of every Claude Code session. Performs three jobs:
 #   1. Injects memory files (identity, core memories, today, now, recent,
-#      archive) into the session context via stdout.
+#      archive) into the session context via stdout. At source=compact only
+#      identity is injected and the rest are named — see #339, below.
 #   2. Recovers the most recent missed session by launching save-session.sh
 #      with --force in the background.
 #   3. Triggers background maintenance: consolidation of past-day staging
@@ -131,18 +132,27 @@ fi
 # same reason: the key must be followed by nothing but whitespace and a colon
 # before the value's opening quote, so a `session_id` appearing inside some
 # other field is not mistaken for the field. It is a heuristic and is treated
-# as one — the result is validated as a path component below before anything
-# is done with it.
-_stdin_session_id() {
-    local raw="$1" rest prefix value
-    case "$raw" in *'"session_id"'*) ;; *) return 1 ;; esac
-    rest=${raw#*\"session_id\"}
+# as one — every result is validated below before anything is done with it.
+#
+# Taken over the key rather than hard-coded, because #339 needs a second field
+# — `source` — out of the same payload, and one heuristic is easier to reason
+# about than two copies of it. post-tool-hook.sh keeps its own single-key
+# copy: it reads one field, and sourcing a shared library from a hook that has
+# to survive a broken install is a worse trade than ten duplicated lines.
+_stdin_json_string() {
+    local key="$1" raw="$2" rest prefix value
+    case "$raw" in *"\"$key\""*) ;; *) return 1 ;; esac
+    rest=${raw#*\"$key\"}
     prefix=${rest%%\"*}
     case "$prefix" in *[!:[:space:]]*) return 1 ;; esac
     value=${rest#*\"}
     value=${value%%\"*}
     [ -n "$value" ] || return 1
     printf '%s' "$value"
+}
+
+_stdin_session_id() {
+    _stdin_json_string session_id "$1"
 }
 
 CURRENT_SESSION_ID=$(_stdin_session_id "$HOOK_STDIN" 2>/dev/null) || CURRENT_SESSION_ID=""
@@ -152,6 +162,26 @@ CURRENT_SESSION_ID=$(_stdin_session_id "$HOOK_STDIN" 2>/dev/null) || CURRENT_SES
 # the basename-derived ids face — at the point of entry, not the point of use.
 case "$CURRENT_SESSION_ID" in
     ''|.|..|*[!A-Za-z0-9._-]*) CURRENT_SESSION_ID="" ;;
+esac
+
+# ── Which KIND of SessionStart is this? (#339) ────────────────────────────
+# `source` is one of startup | resume | clear | compact | fork. It is read for
+# exactly one decision — how much of the memory recap to print — and nothing
+# else in this script branches on it. In particular the recovery block and the
+# capture-gap check below deliberately do NOT: #206 settled that question by
+# changing the shape of the evidence store, precisely because a source filter
+# answers the wrong half of it.
+#
+# Read strictly, and in one direction only. A payload with no `source`, an
+# empty value, a spelling from a future release, or no stdin at all leaves
+# this empty and takes the unchanged path. An absence must never be read as
+# `compact`: that would silently stop injecting memory for anyone whose
+# payload shape differs from the one this heuristic was written against —
+# the failure this plugin exists to prevent, not to cause.
+SESSION_START_SOURCE=$(_stdin_json_string source "$HOOK_STDIN" 2>/dev/null) || SESSION_START_SOURCE=""
+case "$SESSION_START_SOURCE" in
+    startup|resume|clear|compact|fork) ;;
+    *) SESSION_START_SOURCE="" ;;
 esac
 
 # ── Publish the consumed payload to hooks.d/ ──────────────────────────────
@@ -898,8 +928,13 @@ cat "$PLUGIN_ROOT/prompts/session-history-hint.txt" 2>/dev/null
 echo ""
 
 # ── Inject memory into context ────────────────────────────────────────────
+# One list, read three times below — the membership test, the injection loop
+# and the named-only loop. Kept in a single place so a seventh memory file
+# cannot be added to one of them and forgotten by the others.
+MEMORY_FILES=("$IDENTITY_FILE" "$CORE_MEMORIES" "$REMEMBER_TODAY_FILE" "$REMEMBER_NOW" "$REMEMBER_RECENT" "$REMEMBER_ARCHIVE")
+
 HAS_MEMORY=""
-for MFILE in "$IDENTITY_FILE" "$CORE_MEMORIES" "$REMEMBER_TODAY_FILE" "$REMEMBER_NOW" "$REMEMBER_RECENT" "$REMEMBER_ARCHIVE"; do
+for MFILE in "${MEMORY_FILES[@]}"; do
     if [ -f "$MFILE" ]; then
         HAS_MEMORY="true"
     fi
@@ -915,14 +950,46 @@ fi
 
 if [ -n "$HAS_MEMORY" ]; then
     echo "=== MEMORY ==="
-    for MFILE in "$IDENTITY_FILE" "$CORE_MEMORIES" "$REMEMBER_TODAY_FILE" "$REMEMBER_NOW" "$REMEMBER_RECENT" "$REMEMBER_ARCHIVE"; do
+    # At source=compact these bodies were already delivered — in this same
+    # session, to the context the compaction has just replaced with a summary
+    # of it. SessionStart fires again there, but the store has not changed and
+    # nothing about the recap is news.
+    #
+    # Identity is the exception and is still printed in full, because it works
+    # by PRESENCE: a path to identity.md does not make the agent behave as
+    # that persona, and no other line of this hook's output even names the
+    # file. Everything else is recall-on-demand and stays addressable — the
+    # === REMEMBER === hint above names the store's files on every single
+    # fire, and the block below names these ones again with their sizes.
+    #
+    # Named rather than dropped, which is the #124 vocabulary for "kept but
+    # not injected": a file nobody names is a file nobody greps, and a recap
+    # that shrinks in silence is indistinguishable from a store that emptied.
+    for MFILE in "${MEMORY_FILES[@]}"; do
         if [ -f "$MFILE" ] && [ -s "$MFILE" ]; then
+            if [ "$SESSION_START_SOURCE" = "compact" ] && [ "$MFILE" != "$IDENTITY_FILE" ]; then
+                continue
+            fi
             BASENAME=$(basename "$MFILE")
             echo "--- $BASENAME ---"
             cat "$MFILE"
             echo ""
         fi
     done
+    if [ "$SESSION_START_SOURCE" = "compact" ]; then
+        # Built before the header is printed, so the header is never printed
+        # over an empty list — a store can hold identity.md and nothing else.
+        DEFERRED_MEMORY=$(for MFILE in "${MEMORY_FILES[@]}"; do
+            [ "$MFILE" != "$IDENTITY_FILE" ] || continue
+            [ -f "$MFILE" ] && [ -s "$MFILE" ] || continue
+            printf '%s (%s bytes)\n' "$MFILE" "$(wc -c < "$MFILE" | tr -d ' ')"
+        done)
+        if [ -n "$DEFERRED_MEMORY" ]; then
+            echo "--- not re-injected at compact (delivered at session start); read or grep on request ---"
+            printf '%s\n' "$DEFERRED_MEMORY"
+            echo ""
+        fi
+    fi
     # ── Rotated archives: named, not injected (#124) ──────────────────────
     # An oversized archive.md is rotated to archive-YYYY-MM-DD.md and a fresh
     # one started (#123). The bytes are kept, but nothing in the read path

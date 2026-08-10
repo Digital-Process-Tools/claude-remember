@@ -125,6 +125,8 @@ On session start, the `SessionStart` hook automatically injects into Claude's co
 
 No manual prompting, no "read this file" instructions. The agent begins every session with its memory already loaded. It just remembers.
 
+**Except after a compaction.** `SessionStart` fires again with `source=compact`, and a compaction is not a new session: the store has not changed and the same bytes were already delivered, once, to the context the compaction has just replaced ([#339](https://github.com/Digital-Process-Tools/claude-remember/issues/339)). There the hook still injects `identity.md` — a path to it does not make the agent behave as that persona — and names the rest with their sizes instead of injecting them, so they stay greppable. `startup`, `resume`, `clear` and `fork` are unchanged, and so is any payload whose `source` this hook does not recognise.
+
 ### How memory files are written
 
 Writers of `now.md` take `save.lock`. **Readers do not, by design** — the `SessionStart` hook that injects memory into a new session sources only what it needs (`resolve-paths.sh`, `detect-tools.sh`, `bootstrap-dirs.sh`, `log.sh`, `lib-env-cache.sh`) and never `lib-lock.sh`, so it *cannot* lock even if it wanted to. That is deliberate: it runs before your first prompt, and `save.lock` is held for the whole of a save including its `claude -p` call ([#227](https://github.com/Digital-Process-Tools/claude-remember/issues/227), [#230](https://github.com/Digital-Process-Tools/claude-remember/issues/230), [#204](https://github.com/Digital-Process-Tools/claude-remember/issues/204)). A hook that blocks your prompt behind a model call is a worse outcome than anything it would be protecting you from.
@@ -214,7 +216,7 @@ The plugin registers three Claude Code hooks:
 
 | Hook               | Script                  | Purpose                                                   |
 | ------------------ | ----------------------- | --------------------------------------------------------- |
-| `SessionStart`     | `session-start-hook.sh` | Loads memory files into context, recovers missed sessions |
+| `SessionStart`     | `session-start-hook.sh` | Loads memory files into context (identity only at `source=compact`), recovers missed sessions |
 | `UserPromptSubmit` | `user-prompt-hook.sh`   | Injects current timestamp so the agent knows the time     |
 | `PostToolUse`      | `post-tool-hook.sh`     | Auto-saves session when tool call delta exceeds threshold |
 
