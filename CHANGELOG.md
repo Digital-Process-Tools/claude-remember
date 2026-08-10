@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.19.0] — A compaction is not a new session
 
 ### Changed
 
@@ -19,7 +19,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   **Nothing else narrows.** `startup`, `resume`, `clear` and `fork` are untouched, and so are `=== HANDOFF ===`, `=== LAST HANDOFF ===`, the history hint, the consolidation trigger and the `hooks.d/` dispatches, at every source. `fork` in particular is left at the full recap deliberately: what a fork inherits from its parent's context was not established, and an unverified belief is not grounds for withholding memory. Neither the recovery block nor the capture-gap check branches on `source` — #206 settled that by changing the shape of the evidence store, precisely because a source filter answers the wrong half of that question.
 
+### Added
+
+- **`batch` is declared in `.supertool.json`, so the op that collapses N calls into one is discoverable here** ([#337](https://github.com/Digital-Process-Tools/claude-remember/issues/337)) — the op existed and worked in this repo; nothing advertised it, so every agent working here paid one round-trip per file read. An undeclared op is indistinguishable from an absent one to whoever is deciding how to make the next call.
+
 ### Fixed
+
+- **A save could report work as done while silently dropping "blocked on you"** ([#323](https://github.com/Digital-Process-Tools/claude-remember/pull/323), reported and fixed by [@turbomotioncat](https://github.com/turbomotioncat)) — `prompts/save-session.prompt.txt` compresses each session into one sentence and lists what counts as droppable filler, but nothing protected blocked / pending / not-yet-live status from being compressed away alongside "successfully" and "in order to". A session that deployed application code but was explicitly waiting on a human to run a credentialed data upload was saved as "...deployed". The caveat had been stated twice in the conversation and appeared nowhere in `now.md`; the user read the entry later, believed the feature was live, and found out otherwise from the application.
+
+  **Blocking status is a fact, not filler.** The format bracket now calls for appending blocked / incomplete / waiting-on-a-manual-step status as a clause in the same sentence, and a new rule states plainly that it must survive compression even if the sentence gets longer — "done, but blocked on X" never compresses to "done". Non-destructive compression was always the intent of the rule next to it; this names the class of fact that was being destroyed. The header contract, the four placeholders and the SKIP logic are untouched.
+
+  A memory entry that is wrong is worse than no memory entry, because it is trusted in place of checking. That makes this the plugin's own failure mode rather than a prompt-wording nit.
 
 - **The README version badge had read 0.8.3 for nine releases** ([#335](https://github.com/Digital-Process-Tools/claude-remember/issues/335)) — the release sweep greps for the *outgoing* version when cutting a new one, which finds every site mid-bump and none that stopped being bumped at all. Bumped to match `.claude-plugin/plugin.json` (0.18.0), and `tests/test_version_manifest.py::test_readme_version_badge_matches_code` now pins the badge to the manifest and fails loud if its own pattern stops matching, rather than passing on a badge it never found.
 
