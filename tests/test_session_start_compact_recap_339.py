@@ -31,6 +31,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -51,9 +52,17 @@ SESSION = "dddddddd-0000-4000-8000-000000000339"
 # One sentinel per memory file. Asserting on the BODY, not on the section
 # header: the header survives either way, so a test that looked for it would
 # pass against a hook that still cat'd everything.
+# Today's staging file is named for the date, so it is built the way the hook
+# builds it: system-local, because this repo ships no config.json and an unset
+# REMEMBER_TZ falls back to local rather than UTC (#99). Naming it matters —
+# it is the sixth entry of MEMORY_FILES, and a fixture that omitted it would
+# leave the largest of the deferred files untested.
+TODAY_FILE = "today-" + time.strftime("%Y-%m-%d") + ".md"
+
 BODIES = {
     "identity.md": "IDENTITY-BODY-339",
     "core-memories.md": "CORE-BODY-339",
+    TODAY_FILE: "TODAY-BODY-339",
     "now.md": "NOW-BODY-339",
     "recent.md": "RECENT-BODY-339",
     "archive.md": "ARCHIVE-BODY-339",

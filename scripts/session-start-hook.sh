@@ -109,9 +109,11 @@ _remember_env_cache_publish
 #
 # #206 named the enabler and shipped the other half of the fix: this hook never
 # read its stdin, so it had neither `source` nor `session_id` and could not
-# exclude itself. Only `session_id` is needed. Excluding our own transcript by
-# id is correct at EVERY source, so there is no source list to enumerate and
-# nothing that was being reported stops being reported.
+# exclude itself. Only `session_id` is needed for THAT job: excluding our own
+# transcript by id is correct at EVERY source, so there is no source list to
+# enumerate and nothing that was being reported stops being reported. `source`
+# is read too, since #339, but for a different job entirely — how much of the
+# memory recap to print — and nothing on this path consults it.
 #
 # Reading stdin is only safe if it cannot wait forever, so this takes both
 # guards post-tool-hook.sh documents: a tty stdin (hand invocation from a
