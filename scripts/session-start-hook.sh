@@ -967,9 +967,31 @@ if [ -n "$HAS_MEMORY" ]; then
     # Named rather than dropped, which is the #124 vocabulary for "kept but
     # not injected": a file nobody names is a file nobody greps, and a recap
     # that shrinks in silence is indistinguishable from a store that emptied.
+    # The last defence, and the only one that helps a store that is ALREADY
+    # broken (#346). A memory file is written by consolidation, and a bounded
+    # writer does nothing for the 6.4 GB recent.md someone already has on
+    # disk: this loop cat'd it into every session, which is what froze every
+    # `claude` launch in that project and took the reporter's iTerm2 to ~56 GB.
+    #
+    # Named rather than injected, which is the #124 vocabulary a few lines
+    # below for rotated archives — the same trade, reached by size instead of
+    # by filename. The bytes stay on disk and stay greppable; what stops is
+    # pouring them into a context window that cannot hold them. A file this
+    # size is a broken store either way, and a session that starts and says so
+    # is worth more than one that hangs.
+    MEMORY_INJECT_MAX_BYTES=$(config ".thresholds.memory_inject_max_bytes" 200000)
+    case "$MEMORY_INJECT_MAX_BYTES" in (''|*[!0-9]*) MEMORY_INJECT_MAX_BYTES=200000 ;; esac
+    OVERSIZED_MEMORY=""
     for MFILE in "${MEMORY_FILES[@]}"; do
         if [ -f "$MFILE" ] && [ -s "$MFILE" ]; then
             if [ "$SESSION_START_SOURCE" = "compact" ] && [ "$MFILE" != "$IDENTITY_FILE" ]; then
+                continue
+            fi
+            MFILE_BYTES=$(wc -c < "$MFILE" | tr -d ' ')
+            case "$MFILE_BYTES" in (''|*[!0-9]*) MFILE_BYTES=0 ;; esac
+            if [ "$MEMORY_INJECT_MAX_BYTES" -gt 0 ] && [ "$MFILE_BYTES" -gt "$MEMORY_INJECT_MAX_BYTES" ]; then
+                OVERSIZED_MEMORY="${OVERSIZED_MEMORY}${MFILE} (${MFILE_BYTES} bytes)
+"
                 continue
             fi
             BASENAME=$(basename "$MFILE")
@@ -978,6 +1000,12 @@ if [ -n "$HAS_MEMORY" ]; then
             echo ""
         fi
     done
+    if [ -n "$OVERSIZED_MEMORY" ]; then
+        echo "--- too large to inject (kept on disk; grep on request) ---"
+        printf '%s' "$OVERSIZED_MEMORY"
+        printf 'A healthy memory file is kilobytes. One this size means consolidation wrote a response nobody bounded (see thresholds.memory_inject_max_bytes) and has been skipping ever since; run /remember:doctor.\n'
+        echo ""
+    fi
     if [ "$SESSION_START_SOURCE" = "compact" ]; then
         # Built before the header is printed, so the header is never printed
         # over an empty list — a store can hold identity.md and nothing else.

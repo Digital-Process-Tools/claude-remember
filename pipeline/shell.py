@@ -461,6 +461,56 @@ def cmd_consolidate(staging_dir: str, recent_file: str, archive_file: str,
         print("STAGING_COUNT=0")
         return
 
+    def _emit_skip() -> None:
+        # Skip status so the shell leaves recent.md/archive.md untouched and does
+        # NOT rename the source staging files to .done.md — they remain available
+        # for the next run. STAGING_COUNT is non-zero (we found files) but the
+        # shell gates on CONSOLIDATION_STATUS.
+        print(f"STAGING_COUNT={len(staging_contents)}")
+        print("CONSOLIDATION_STATUS=skip")
+
+    # Size the store before reading it (#346). The cap is enforced on the
+    # assembled prompt, so the whole store had to be read into memory and a
+    # prompt built around it before the pipeline was allowed to notice it was
+    # too large to send: several times the store's size in allocation to reach
+    # a decision ``stat`` answers for free. Against the reporter's 6.4 GB
+    # recent.md that is what took the machine down, from a script that runs
+    # disowned beside a live session.
+    #
+    # It can never be a false skip. The assembled prompt is the template plus
+    # per-file labels plus these bytes, so it is strictly larger than their
+    # sum, and a sum already over the cap is proof the prompt would be.
+    rotated: str | None = None
+
+    def _restore_rotation() -> None:
+        """Undo an up-front rotation when the round did not go through.
+
+        Existence-checked because the handlers inside ``ConsolidationTooLarge``
+        below do their own restore and then re-raise; an exception raised
+        inside an except clause does not re-enter its siblings, but the guard
+        keeps that a property of this function rather than of Python's
+        control flow.
+        """
+        if rotated is not None and os.path.exists(rotated):
+            os.replace(rotated, archive_file)
+
+    recent_size = os.path.getsize(recent_file) if os.path.exists(recent_file) else 0
+    archive_size = os.path.getsize(archive_file) if os.path.exists(archive_file) else 0
+    if max_prompt_bytes > 0:
+        embedded = sum(staging_raw_bytes.values()) + recent_size + archive_size
+        if embedded > max_prompt_bytes:
+            # Same recovery ConsolidationTooLarge gets below, taken before the
+            # read rather than after it: if archive.md is the bulk, rotate it
+            # to a dated sibling and carry on with a fresh one. Only when
+            # dropping it still would not fit — recent.md is the bulk, #346's
+            # shape — is nothing read at all.
+            if embedded - archive_size <= max_prompt_bytes:
+                rotated = _rotate_archive(archive_file)
+            if rotated is None:
+                _emit_skip()
+                return
+            archive_size = 0
+
     recent = ""
     if os.path.exists(recent_file):
         with open(recent_file, encoding="utf-8", errors="replace") as f:
@@ -471,14 +521,6 @@ def cmd_consolidate(staging_dir: str, recent_file: str, archive_file: str,
         with open(archive_file, encoding="utf-8", errors="replace") as f:
             archive = f.read()
 
-    def _emit_skip() -> None:
-        # Skip status so the shell leaves recent.md/archive.md untouched and does
-        # NOT rename the source staging files to .done.md — they remain available
-        # for the next run. STAGING_COUNT is non-zero (we found files) but the
-        # shell gates on CONSOLIDATION_STATUS.
-        print(f"STAGING_COUNT={len(staging_contents)}")
-        print("CONSOLIDATION_STATUS=skip")
-
     try:
         result = consolidate(staging_contents, recent, archive,
                              max_prompt_bytes=max_prompt_bytes)
@@ -488,7 +530,12 @@ def cmd_consolidate(staging_dir: str, recent_file: str, archive_file: str,
         # empty archive, so consolidation keeps progressing instead of skipping
         # every run forever. If there is nothing to rotate, or the retry still
         # overflows (staging + recent alone exceed the cap), restore and skip.
-        rotated = _rotate_archive(archive_file)
+        # Only reachable when the stat guard above let the round through and
+        # the template plus per-file labels tipped it over, or when the guard
+        # is disabled. An up-front rotation has already happened in the first
+        # case, so do not rotate a second time and orphan the first sibling.
+        if rotated is None:
+            rotated = _rotate_archive(archive_file)
         if rotated is None:
             _emit_skip()
             return
@@ -505,13 +552,25 @@ def cmd_consolidate(staging_dir: str, recent_file: str, archive_file: str,
     except SummarizerSpawnDeclined as declined:
         # The spawn guard refused (#204). Staging is left exactly as it is and
         # the next run consolidates it — not a skip, which retires staging, and
-        # not a failure either.
+        # not a failure either. An up-front rotation is undone for the same
+        # reason: this round never happened, so nothing it moved may persist.
+        _restore_rotation()
         print(f"consolidate declined: {declined}", file=sys.stderr)
         sys.exit(EXIT_SPAWN_DECLINED)
     except ConsolidationSkipped:
-        # Model declined (SKIP) or returned non-conforming output.
+        # Model declined (SKIP), returned non-conforming output, or returned
+        # more bytes than the pipeline is willing to write (#346).
+        _restore_rotation()
         _emit_skip()
         return
+    except Exception:
+        # A transient failure (the model call erroring, say) must not leave the
+        # up-front rotation applied: nothing was consolidated, so archive.md
+        # has to be where the next run expects it. The post-hoc rotation path
+        # has restored itself on this branch since #123; the pre-read one owes
+        # the same guarantee.
+        _restore_rotation()
+        raise
 
     # Write results to temp files
     fd_r, recent_out = tempfile.mkstemp(prefix="remember-recent-", suffix=".md")

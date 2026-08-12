@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **`recent.md` and `archive.md` could be written without bound, and the write that broke the store disabled the only thing that could repair it** ([#346](https://github.com/Digital-Process-Tools/claude-remember/issues/346)) — a reporter's store reached **6.4 GB** (`recent.md`) and **1.8 GB** (`archive.md`). The `SessionStart` hook `cat`s both into every session, so every `claude` launch in that project froze; on macOS iTerm2 reached ~56 GB and the machine needed a restart.
+
+  **The reported cause was that these two files have no rotation and are only ever appended to. Nothing appends to them.** The only writer in the tree is `cp "$RECENT_OUT" "$RECENT_FILE"` in `scripts/run-consolidation.sh`, which *replaces* the file wholesale with the consolidation's output, and it has done exactly that since the initial commit. The observation behind the report was still precisely right — the files only ever grew and never shrank — but the route there is the opposite of an append.
+
+  **Consolidation capped its input and not its output.** `consolidate()` refuses to *send* a prompt over `thresholds.consolidate_max_bytes` (staging + `recent.md` + `archive.md`, default 600000). Between the model call returning and the `cp`, no byte count was ever taken: `capture_output=True` bounds the CLI subprocess by a wall clock and not by bytes, so the size of a response was not a quantity anything downstream measured. `cmd_consolidate` wrote `result.recent` to a temp file verbatim and the shell copied it over `recent.md`.
+
+  **One oversized write is permanent, and that is what makes it this bug rather than one bad round.** `recent.md` is part of the input the cap is measured on. So the round after an oversized write assembles an oversized prompt, raises `ConsolidationTooLarge`, and skips — and so does every round after that, forever. Rotating `archive.md` ([#122](https://github.com/Digital-Process-Tools/claude-remember/issues/122)/[#123](https://github.com/Digital-Process-Tools/claude-remember/issues/123)) is no escape when the bulk is `recent.md`. The file can then never grow again and never shrink either, which from outside is indistinguishable from a file that is only ever appended to.
+
+  **The same number now caps both directions.** A response larger than `consolidate_max_bytes` is refused as non-conforming, which is the established non-destructive path ([#89](https://github.com/Digital-Process-Tools/claude-remember/issues/89)/[#202](https://github.com/Digital-Process-Tools/claude-remember/issues/202)): staging and memory are both left intact and the next run retries. Deliberately *not* `ConsolidationTooLarge` — that subclass means "the input was too big, shrink it and retry", and acting on it would spend another model call to be handed another oversized response while rotating away a healthy archive for nothing.
+
+  **The store is now sized before it is read.** The cap was enforced on the assembled prompt, so the whole store had to be read into memory and a prompt built around it before the pipeline was allowed to notice it was too large to send — several times the store's size in allocation to reach a decision `stat` answers for free, from a script that runs disowned beside a live session. That is the part that took the reporter's machine down. It cannot be a false skip: the prompt is the template plus per-file labels plus those bytes, so a sum already over the cap is proof the prompt would be. `archive.md` being the bulk still rotates, now before the read rather than after it, and an up-front rotation is undone on every path where the round does not go through.
+
+  **And a store that is *already* broken no longer freezes the session**, because none of the above helps the 6.4 GB file someone has on disk today. A memory file over `thresholds.memory_inject_max_bytes` (new, default 200000) is named with its size instead of being `cat`'d — [#124](https://github.com/Digital-Process-Tools/claude-remember/issues/124)'s "kept but not injected" vocabulary, reached by size instead of by filename. The bytes stay on disk and stay greppable; what stops is pouring them into a context window that cannot hold them. A session that starts and says the store is broken is worth more than one that hangs.
+
+  Two growth paths were found and only one is this bug. The other: consolidation is *told* to keep `recent.md` under 600 tokens and nothing enforces it, so a model that faithfully re-emits the file plus one day per round grows it monotonically — measured at ~2 KB/round, reaching the 600000 cap after ~298 rounds and then freezing. That one is bounded by the cap by construction and cannot reach a gigabyte; it is a compression-compliance question, filed separately.
+
 ## [0.19.0] — A compaction is not a new session
 
 ### Changed

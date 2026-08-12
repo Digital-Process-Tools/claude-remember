@@ -333,6 +333,43 @@ def consolidate(
             "(SKIP or missing ===RECENT===/entry headers)"
         )
 
+    # The cap above is the size this pipeline refuses to SEND. Refusing to
+    # WRITE more than that is the same number in the other direction, and the
+    # other direction is where #346 came from: ``capture_output=True`` bounds
+    # the CLI subprocess by a wall clock and not by bytes, so the size of a
+    # response was never a quantity anything downstream measured.
+    # ``cmd_consolidate`` writes ``result.recent`` to a temp file verbatim and
+    # run-consolidation.sh copies it over recent.md — an overwrite, never an
+    # append, and unbounded either way.
+    #
+    # One oversized write is permanent, which is what makes this the bug
+    # rather than one bad round. recent.md is part of the input the cap is
+    # measured on, so the round after an oversized write assembles an
+    # oversized prompt and skips, and so does every round after that.
+    # Rotating the archive is no escape when the bulk is recent.md. The file
+    # can then never grow again and never shrink either — which from outside
+    # is indistinguishable from a file that is only ever appended to, and is
+    # exactly how the reporter read it.
+    #
+    # Deliberately NOT ConsolidationTooLarge: that subclass means "the input
+    # was too big, shrink it and retry", and the caller acts on it by rotating
+    # archive.md. Nothing about the input was wrong here, so a retry would
+    # spend another model call to be handed another oversized response and
+    # would rotate away a healthy archive for nothing.
+    #
+    # Skipping is the established non-destructive direction (see
+    # ``_echoes_the_prompt``): staging and memory are both left intact and the
+    # next run retries, so a false positive costs one round and a false
+    # negative costs the permanent record.
+    if max_prompt_bytes > 0:
+        response_bytes = len(result.text.encode("utf-8"))
+        if response_bytes > max_prompt_bytes:
+            raise ConsolidationSkipped(
+                f"consolidation response too large ({response_bytes} bytes > "
+                f"{max_prompt_bytes} cap) -- refusing to write it to memory; "
+                f"staging + memory left untouched"
+            )
+
     recent_new, archive_new = parse_consolidation_response(result.text)
 
     return ConsolidationResult(

@@ -11,7 +11,8 @@
     "max_summary_failures": 3,
     "delta_lines_trigger": 50,
     "extract_max_bytes": 300000,
-    "consolidate_max_bytes": 600000
+    "consolidate_max_bytes": 600000,
+    "memory_inject_max_bytes": 200000
   },
   "features": {
     "ndc_compression": true,
@@ -71,7 +72,21 @@
       "rather than overflowing Haiku's window with 'Prompt is too long' and",
       "stalling all saves. Unlike extract_max_bytes the input is NOT truncated,",
       "because consolidation rewrites recent/archive and truncating would drop",
-      "archived memory. Set 0 to disable the guard."
+      "archived memory. Set 0 to disable the guard.",
+      "Since #346 the same number caps the OUTPUT too: a model response larger",
+      "than this is refused instead of being written to recent.md/archive.md.",
+      "Capping only the input meant one oversized response became the permanent",
+      "record AND pushed the store past this cap, so every later run skipped and",
+      "the file could never shrink again."
+    ],
+    "memory_inject_max_bytes": [
+      "A memory file larger than this (UTF-8 bytes) is NAMED with its size at",
+      "session start instead of being cat'd into context. Default 200000.",
+      "The bytes stay on disk and stay greppable — what stops is pouring them",
+      "into a context window that cannot hold them. A healthy memory file is",
+      "kilobytes, so this only fires on a store that is already broken; in #346",
+      "a 6.4GB recent.md froze every `claude` launch in that project. Set 0 to",
+      "disable."
     ],
     "prompt_stamp": [
       "What the UserPromptSubmit hook injects into the model's context.",
