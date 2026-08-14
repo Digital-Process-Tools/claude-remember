@@ -1244,7 +1244,8 @@ Fixes [#9](https://github.com/Digital-Process-Tools/claude-remember/issues/9), a
 
 ## [0.1.0] — Initial release
 
-[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.19.0...HEAD
+[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.20.0...HEAD
+[0.20.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.20.0
 [0.19.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.19.0
 [0.18.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.18.0
 [0.17.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.17.0
