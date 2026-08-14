@@ -30,6 +30,16 @@
       "timeout": 10
     }
   },
+  "ops": {
+    "radar": {
+      "radar_tiers": {
+        "gh-prs": {}
+      }
+    },
+    "git-push": {
+      "budget": 1500
+    }
+  },
   "builtin-ops": {
     "batch": {
       "syntax": "batch:@file.json",
