@@ -1,0 +1,36 @@
+{
+  "repo": "Digital-Process-Tools/claude-remember",
+  "default_branch": "main",
+  "branch_pattern": "fix/{issue}",
+  "test_command": "pytest",
+  "version_sites": [
+    ".claude-plugin/plugin.json",
+    "CHANGELOG.md",
+    "README.md"
+  ],
+  "changelog_dir": null,
+  "docs_targets": [
+    "README.md"
+  ],
+  "labels": {
+    "priority": [
+      "priority:high",
+      "priority:low",
+      "priority:medium"
+    ],
+    "lanes": []
+  },
+  "milestones": [],
+  "ci": {
+    "required_checks": 1
+  },
+  "release": {
+    "tag_pattern": "v{version}",
+    "merge_method": null,
+    "commit_subject": null,
+    "triggers": {
+      "merged_prs": 10,
+      "soak_hours": 48
+    }
+  }
+}

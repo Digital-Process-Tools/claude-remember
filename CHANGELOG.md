@@ -1243,3 +1243,38 @@ Fixes [#9](https://github.com/Digital-Process-Tools/claude-remember/issues/9), a
 - Handle CLI v2+ JSON array response format in `haiku.py`.
 
 ## [0.1.0] — Initial release
+
+[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.19.0...HEAD
+[0.19.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.19.0
+[0.18.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.18.0
+[0.17.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.17.0
+[0.16.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.16.0
+[0.15.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.15.0
+[0.14.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.14.0
+[0.13.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.13.0
+[0.12.3]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.12.3
+[0.12.2]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.12.2
+[0.12.1]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.12.1
+[0.12.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.12.0
+[0.11.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.11.0
+[0.10.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.10.0
+[0.9.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.9.0
+[0.8.9]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.8.9
+[0.8.8]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.8.8
+[0.8.7]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.8.7
+[0.8.6]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.8.6
+[0.8.5]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.8.5
+[0.8.4]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.8.4
+[0.8.3]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.8.3
+[0.8.2]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.8.2
+[0.8.1]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.8.1
+[0.8.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.8.0
+[0.7.3]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.7.3
+[0.7.1]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.7.1
+[0.7.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.7.0
+[0.6.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.6.0
+[0.5.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.5.0
+[0.4.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.4.0
+[0.3.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.3.0
+[0.2.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.2.0
+[0.1.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.1.0

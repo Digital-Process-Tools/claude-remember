@@ -7,3 +7,7 @@ identity.md
 .DS_Store
 .max/
 .remember/
+
+# Local Claude Code state (machine scope, never shared)
+.claude/settings.local.json
+.claude/jit-context/.discovery/
