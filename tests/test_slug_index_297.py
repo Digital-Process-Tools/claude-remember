@@ -523,10 +523,13 @@ def test_the_store_root_is_the_template_truncated_at_the_placeholder(tmp_path, t
 
 
 def test_resolving_the_store_root_costs_no_fork():
-    """`lib-memory-dir.sh` is sourced by `bootstrap-dirs.sh`, which
-    `post-tool-hook.sh` sources on EVERY tool call. A `$(...)` here is one fork
-    per tool call — the cost #230 removed and #296 declined to add back. The
-    helper therefore assigns rather than echoes, and this says so."""
+    """`lib-memory-dir.sh` is sourced by `bootstrap-dirs.sh` and by `log.sh`,
+    both of which `post-tool-hook.sh` reaches on the tool call that resolves —
+    the first of a session, and the first after any config edit (#350 made the
+    rest of them replay a published resolution instead). `session-start-hook.sh`
+    and `save-session.sh` reach it unconditionally. A `$(...)` here is one fork
+    on every one of those — the cost #230 removed and #296 declined to add back.
+    The helper therefore assigns rather than echoes, and this says so."""
     source = LIB_MEMORY_DIR.read_text(encoding="utf-8")
     assert "$(_set_store_root" not in source
     assert "`_set_store_root" not in source

@@ -532,9 +532,18 @@ def test_the_per_tool_call_path_is_not_touched(tmp_path):
     one-token arithmetic guard in that file, and it goes vacuous the moment the
     edit it objected to lands on main. What #298/#299 actually care about is
     that the divergence check is unreachable from the per-tool-call path and
-    that the path spawns no git, so that is what is checked. The other two arms
-    keep the byte compare — they were not what blocked, and widening a guard
-    that belongs to another issue is not this change's business.
+    that the path spawns no git, so that is what is checked.
+
+    The other two arms keep the byte compare, over CODE LINES only (#350). They
+    were never about prose: they exist so that nothing reaches into these two
+    hot-path libraries and adds a spawn, and a comment cannot add one. Comparing
+    whole files made the guard fire on a paragraph — this time on a comment in
+    `lib-memory-dir.sh` that had itself become false, saying `bootstrap-dirs.sh`
+    is sourced on every tool call when #350 had just stopped that. A guard that
+    forbids correcting a stale comment is a guard arguing for the stale comment,
+    and prose that no longer matches the code is this repo's own defect class.
+    Strip the comments from both sides — the same one-liner the arm above
+    already uses — and every executable byte stays pinned exactly as before.
     """
     body = POST_TOOL.read_text(encoding="utf-8")
     code = "\n".join(line for line in body.splitlines()
@@ -555,12 +564,22 @@ def test_the_per_tool_call_path_is_not_touched(tmp_path):
         capture_output=True, text=True)
     if base.returncode != 0:
         pytest.skip("origin/main not available")
+    def _code(text: str) -> str:
+        return "\n".join(line for line in text.splitlines()
+                         if not line.lstrip().startswith("#"))
+
     for path, rel in ((LIB_SLUG, "scripts/lib-slug.sh"),
                       (LIB_MEMORY_DIR, "scripts/lib-memory-dir.sh")):
         ref = subprocess.run(["git", "-C", str(REPO_ROOT), "show", f"origin/main:{rel}"],
                              capture_output=True, text=True)
         assert ref.returncode == 0
-        assert ref.stdout == path.read_text(encoding="utf-8"), rel
+        # The premise, asserted rather than assumed: a file that produced no
+        # code lines would compare equal to anything and pin nothing.
+        assert _code(ref.stdout).strip(), (
+            f"{rel} on origin/main has no non-comment lines — this compare "
+            "would pass against any file at all"
+        )
+        assert _code(ref.stdout) == _code(path.read_text(encoding="utf-8")), rel
 
 
 def test_the_check_costs_one_git_invocation_at_most(tmp_path):

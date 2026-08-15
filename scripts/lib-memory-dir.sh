@@ -169,11 +169,14 @@ _resolve_remember_dir() {
 # (#297).
 #
 # A FUNCTION THAT ASSIGNS, not one that echoes, and it must never be called as
-# `$(...)`. This file is sourced by bootstrap-dirs.sh, which post-tool-hook.sh
-# sources on EVERY tool call — a command substitution here is a fork per tool
-# call, which is the cost #230 went to trouble removing and #296 refused to add
-# back. Everything below is parameter expansion: no subshell, no external
-# command, no measurable cost on that path.
+# `$(...)`. This file is sourced by bootstrap-dirs.sh and by log.sh, and
+# post-tool-hook.sh reaches both on the tool call that resolves — the first of a
+# session and the first after any config edit (#350 made the rest of them replay
+# instead). session-start-hook.sh and save-session.sh reach it unconditionally.
+# A command substitution here is a fork on every one of those, which is the cost
+# #230 went to trouble removing and #296 refused to add back. Everything below
+# is parameter expansion: no subshell, no external command, no measurable cost
+# on that path.
 #
 # This exists because of a circularity #296 left open. The slug record lives at
 # <REMEMBER_DIR>/tmp/session-slug, and in the layout config.user.example.json

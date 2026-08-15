@@ -220,7 +220,7 @@ The plugin registers three Claude Code hooks:
 | `UserPromptSubmit` | `user-prompt-hook.sh`   | Injects current timestamp so the agent knows the time     |
 | `PostToolUse`      | `post-tool-hook.sh`     | Auto-saves session when tool call delta exceeds threshold |
 
-`SessionStart` and `PostToolUse` source `log.sh` for shared config, timezone, logging, and the `dispatch()` system. Hooks dispatch lifecycle events (e.g., `after_user_prompt`) to extensible listeners in `hooks.d/`.
+`SessionStart` sources `log.sh` for shared config, timezone, logging, and the `dispatch()` system; `PostToolUse` does too on the run that resolves, and replays that resolution on the rest (see below). Hooks dispatch lifecycle events (e.g., `after_user_prompt`) to extensible listeners in `hooks.d/`. **Installing a listener for an event puts that hook back on the full chain**, because `dispatch()` lives in `log.sh` — the fast paths only skip it when there is nothing executable to dispatch to.
 
 ### What a `hooks.d/` listener may say, and in whose voice
 

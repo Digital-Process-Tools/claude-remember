@@ -42,13 +42,21 @@
 #   CLAUDE_PROJECT_DIR   Project root (default: .)
 #
 # DEPENDENCIES
-#   lib-clock.sh     (the timestamp, without a process where bash can do it)
-#   lib-env-cache.sh (replays an already-resolved REMEMBER_DIR / PIPELINE_DIR
-#                     and the two config scalars this hook needs)
-#   lib-slug.sh      (session_dir_slug / claude_projects_dir)
-#   python3 (for JSON parsing of last-save.json — only once a save has landed)
-#   jq (for reading config.json — first run in a project per config change)
-#   save-session.sh (launched in background when threshold met)
+#   Every run:
+#     lib-clock.sh     (the timestamp, without a process where bash can do it)
+#     lib-env-cache.sh (replays an already-resolved REMEMBER_DIR / PIPELINE_DIR
+#                       and the two config scalars this hook needs)
+#     lib-slug.sh      (session_dir_slug / claude_projects_dir — reached
+#                       directly on the fast path, via detect-tools.sh on the
+#                       slow one)
+#     save-session.sh  (launched in background when threshold met)
+#   The resolving run — the first of a session, the first after any config
+#   edit, and every run with an executable hooks.d/after_post_tool/ listener
+#   installed — additionally takes the whole chain, unchanged:
+#     resolve-paths.sh, detect-tools.sh, bootstrap-dirs.sh, log.sh
+#   Binaries:
+#     python3 (for JSON parsing of last-save.json — only once a save has landed)
+#     jq (for reading config.json — on the resolving run only)
 #
 # EXIT CODES
 #   0   Always (hook must not block the agent)
@@ -104,6 +112,23 @@ source "$_HOOK_DIR/lib-env-cache.sh"
 # holding a .gitkeep, so a `-d` test here would refuse the fast path for every
 # user who never installed a listener — which is all of them. Ask what
 # dispatch() asks: is there anything EXECUTABLE.
+#
+# ONE definition, shared with the publish gate at the bottom of this file, and
+# deliberately the same test dispatch() itself makes. Two spellings of "is a
+# listener installed" is how this gate and that dispatch would come to disagree
+# about whether one is.
+#
+# That sameness is also what bounds the Git Bash question nobody here can run:
+# MSYS fakes the execute bit, and if it ever answered yes for a mode-0644
+# .gitkeep, this would return 0 and the fast path would simply never fire on
+# Windows — the platform it was built for — with no other symptom. It would not
+# be a correctness bug: the slow path is today's behaviour exactly. And it is
+# unlikely rather than merely hoped, because dispatch() has shipped this same
+# `[ -x ]` for many releases and would already be trying to EXECUTE that
+# .gitkeep on every Windows tool call, which nobody has reported. Reasoned, not
+# observed: `[ -x hooks.d/after_post_tool/.gitkeep ]` in a real Git Bash shell
+# settles it, and tests/test_post_tool_fast_path_350.py cannot — it skips on
+# win32, as every bash test in this repo does.
 _after_post_tool_listener() {
     local f
     for f in "$REMEMBER_HOOKS_DIR/after_post_tool"/*; do
@@ -582,11 +607,9 @@ export REMEMBER_SAVE_TRIGGERED="$SAVE_TRIGGERED"
 REMEMBER_HOOK_STDIN_MAX=32768
 _hook_stdin_file=""
 
-# _after_post_tool_listener is defined at the top of this file: the fast-path
-# gate has to ask the same question before it decides whether log.sh — and
-# therefore dispatch() — gets sourced at all (#350). One definition, because
-# two spellings of "is a listener installed" is how the fast path and the
-# dispatch below would come to disagree about whether one is.
+# _after_post_tool_listener is defined at the top of this file, because the
+# fast-path gate has to ask this same question before it decides whether log.sh
+# — and therefore dispatch() — is sourced at all (#350).
 if [ -n "$HOOK_STDIN" ] && _after_post_tool_listener; then
     _hook_stdin_file="$REMEMBER_DIR/tmp/hook-stdin.$$"
     # The payload carries tool output, so it is owner-readable only, and it
