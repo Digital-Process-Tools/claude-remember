@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **`PostToolUse` no longer re-derives, on every tool call, what a previous hook already resolved** ([#350](https://github.com/Digital-Process-Tools/claude-remember/issues/350)) — `post-tool-hook.sh` registers with **no matcher**, so it runs after every single tool call and the agent waits for it. Each invocation sourced `resolve-paths.sh` → `detect-tools.sh` → `bootstrap-dirs.sh` → `log.sh` unconditionally: a `git rev-parse`, a slug, a three-layer config merge and a one-pass flatten, plus a `python3 -V` spent only to validate an interpreter. The reporter measured **750-1000 ms per tool call** on Windows 11 / Git Bash, against ~90 ms for `user-prompt-hook.sh` on the same machine — the hook that already replays.
+
+  **The #227 fast path now covers this hook too.** When `lib-env-cache.sh` can replay a published resolution and no *executable* listener is installed under `hooks.d/after_post_tool/`, the chain is skipped. Measured on macOS/bash 3.2.57: **14 external spawns per warm tool call → 6** (336 ms → 130 ms), or **15 → 8** (405 ms → 248 ms) once a save has landed and the saved position has to be read. The first tool call of a session — and the first after any config edit — still takes the whole chain, and now publishes it, so the cost is paid once per project per config change instead of per tool call.
+
+  **The reason #227 skipped this hook has not been waved away.** That hook needs `config()`, and therefore the merged config file, which can carry a live `haiku.oauth_token` and is `0600` per PID under an `EXIT` trap for exactly that reason ([#232](https://github.com/Digital-Process-Tools/claude-remember/issues/232)/[#68](https://github.com/Digital-Process-Tools/claude-remember/issues/68)). That file is still never cached. What is cached are the two **scalars** `log.sh` reads out of it — `cooldowns.save_seconds` and `thresholds.delta_lines_trigger` — in the same `0600` file that has carried `REMEMBER_TZ` since #227, under the same config-mtime invalidation. A cooldown and a line threshold are neither secret nor expensive to be one prompt stale about.
+
+  **The gate asks for an executable, not a directory.** `user-prompt-hook.sh` tests `[ ! -d hooks.d/after_user_prompt ]` and gets away with it because the distribution ships no such directory. It *does* ship `hooks.d/after_post_tool/` holding a `.gitkeep` — so the same test here would have refused the fast path for every user who never installed a listener, which is all of them. It asks what `dispatch()` asks instead.
+
+  **The interpreter is resolved where it is needed, not replayed.** `lib-env-cache.sh` validates config mtimes; it does not validate binaries, and it is not asked to. `PYTHON` is therefore never cached — `detect-tools.sh` is sourced at the one place a Python is required (reading the saved position, which only exists once a save has landed), so the Microsoft Store alias that passes `command -v` and fails `-V` is still caught by the same check as before.
+
+  **Everything the fast path skips that had a job is done by hand.** The `#204` nested-summarizer guard (normally in `resolve-paths.sh`), `umask 077` (#68), `SYS_TMPDIR`, and `bootstrap-dirs.sh`'s `stderr` redirect into `hook-errors.log` — without that last one, a diagnostic lands in front of the user instead of in the log. `log` is not stubbed out: the branches that call it are the ones where this hook is malfunctioning (a slug matching no session directory, [#144](https://github.com/Digital-Process-Tools/claude-remember/issues/144)), so the first call sources `log.sh` and the runs that never take those branches never pay for it.
+
+  That upgrade has to install a no-op when `log.sh` cannot be sourced at all, and the obvious guard for it — `type log` — is **true on macOS whether or not a function exists**, because `/usr/bin/log` is Apple's unified logging CLI. Caught before release, by running it: the hook execed that binary once per diagnostic, printed nineteen lines of `log: Unknown subcommand 'hook'` to the user, and exited **64** from a hook documented "EXIT CODES: 0 Always". It asks `declare -F`, which knows about functions and nothing else.
+
+  **The `#200` wiring marker survives a store with no `tmp/`.** `bootstrap-dirs.sh` is what creates `$REMEMBER_DIR/tmp`, and the fast path does not source it. `tmp/post-tool-ran` is how `/remember:doctor` answers "is `PostToolUse` wired at all", so it now creates the directory on the failing write rather than assuming one — silently skipping it would tell users a wired hook had never fired, which is the exact regression #200 fixed.
+
+- **Two spawn-budget tests were measuring a path they did not name.** `tests/test_post_tool_hook_spawns.py` counted a *second* run of the same fixture, which after this change is the warm one — and whether it was warm at all depended on which side of a whole second the config write and the cache landed on ([#303](https://github.com/Digital-Process-Tools/claude-remember/issues/303)). It now pins `REMEMBER_ENV_CACHE=0` and states that it is the cold-path file; the warm path is measured next door. `TestFreshProjectBootstrap::test_detect_before_bootstrap` compared the first *mention* of two filenames anywhere in a hook, comments included, and now reads the `source` statements — with the premise ("both are in fact sourced") asserted instead of assumed.
+
 ## [0.20.0] — A cap that only pointed one way
 
 ### Fixed

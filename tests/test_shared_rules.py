@@ -209,16 +209,70 @@ def test_run_tests_sh_uses_the_real_slug():
 # ── Thresholds ───────────────────────────────────────────────────────────────
 
 def test_the_shipped_delta_default_matches_the_example_config():
-    """`delta_lines_trigger` lives in post-tool-hook.sh as a config() fallback
-    and in config.example.json as a shipped value. Raising the fallback failed
-    the cooldown tests loudly; lowering it changed nothing and told nobody."""
-    hook = (REPO_ROOT / "scripts" / "post-tool-hook.sh").read_text(encoding="utf-8")
-    m = re.search(r'config\s+"\.thresholds\.delta_lines_trigger"\s+(\d+)', hook)
+    """`delta_lines_trigger` lives in log.sh as a config() fallback and in
+    config.example.json as a shipped value. Raising the fallback failed the
+    cooldown tests loudly; lowering it changed nothing and told nobody.
+
+    The read moved out of post-tool-hook.sh in #350: that hook now replays the
+    value log.sh resolved, because the fast path cannot call config(). The
+    number it falls back to when nothing set the variable is checked here too —
+    a second spelling of the default is exactly the drift this test exists for,
+    and it arrived with the fix.
+    """
+    log_sh = (REPO_ROOT / "scripts" / "log.sh").read_text(encoding="utf-8")
+    m = re.search(r'config\s+"\.thresholds\.delta_lines_trigger"\s+(\d+)', log_sh)
     assert m, "the delta_lines_trigger fallback moved or changed shape"
+    hook = (REPO_ROOT / "scripts" / "post-tool-hook.sh").read_text(encoding="utf-8")
+    replay = re.search(r'DELTA_THRESHOLD="\$\{REMEMBER_DELTA_THRESHOLD:-(\d+)\}"', hook)
+    assert replay, (
+        "post-tool-hook.sh no longer replays REMEMBER_DELTA_THRESHOLD in the "
+        "shape this test can read — if it went back to calling config(), the "
+        "#350 fast path is forking jq on every tool call again"
+    )
+    assert replay.group(1) == m.group(1), (
+        "log.sh and post-tool-hook.sh disagree about the delta_lines_trigger "
+        f"default ({m.group(1)} vs {replay.group(1)})"
+    )
     shipped = json.loads((REPO_ROOT / "config.example.json").read_text(encoding="utf-8"))
     assert int(m.group(1)) == shipped["thresholds"]["delta_lines_trigger"], (
-        "post-tool-hook.sh's built-in default and config.example.json disagree "
-        "about delta_lines_trigger — one of them is lying to whoever reads it"
+        "log.sh's built-in default and config.example.json disagree about "
+        "delta_lines_trigger — one of them is lying to whoever reads it"
+    )
+
+
+def test_the_shipped_save_cooldown_default_matches_everywhere_it_is_written():
+    """The same rule for `cooldowns.save_seconds`, which #350 gave a fourth
+    home.
+
+    It is a config() fallback in log.sh and in save-session.sh, a replay
+    fallback in post-tool-hook.sh, and a shipped value in config.example.json.
+    Four numbers that must agree, none of which any runtime test can catch
+    disagreeing: a cooldown that is wrong in one place suppresses or permits a
+    save silently, which is what makes it worth pinning textually.
+    """
+    shipped = json.loads((REPO_ROOT / "config.example.json").read_text(encoding="utf-8"))
+    expected = shipped["cooldowns"]["save_seconds"]
+
+    found = {}
+    for script in ("log.sh", "save-session.sh"):
+        text = (REPO_ROOT / "scripts" / script).read_text(encoding="utf-8")
+        m = re.search(r'config\s+"\.cooldowns\.save_seconds"\s+(\d+)', text)
+        assert m, f"{script}: the save_seconds fallback moved or changed shape"
+        found[script] = int(m.group(1))
+
+    hook = (REPO_ROOT / "scripts" / "post-tool-hook.sh").read_text(encoding="utf-8")
+    replay = re.search(r'SAVE_COOLDOWN="\$\{REMEMBER_SAVE_COOLDOWN:-(\d+)\}"', hook)
+    assert replay, (
+        "post-tool-hook.sh no longer replays REMEMBER_SAVE_COOLDOWN in the "
+        "shape this test can read — if it went back to calling config(), the "
+        "#350 fast path is forking jq on every tool call again"
+    )
+    found["post-tool-hook.sh"] = int(replay.group(1))
+
+    disagreeing = {k: v for k, v in found.items() if v != expected}
+    assert not disagreeing, (
+        f"config.example.json ships save_seconds={expected}, but "
+        f"{disagreeing} disagree — one of them is lying to whoever reads it"
     )
 
 

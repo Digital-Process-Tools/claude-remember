@@ -12,6 +12,14 @@ that need none of that caching. The measurement, on macOS bash 3.2.57:
     before: 30 external spawns per tool call
     after:  17
 
+#350 then gave this hook the #227 fast path after all, without conceding the
+point above: the merged config is still never cached, only the two scalars
+`log.sh` reads out of it. Everything here is the COLD path — the first tool call
+of a session, or the first after a config edit — and it stays exactly as it was.
+The warm path, which is every other tool call, is measured next door in
+`tests/test_post_tool_fast_path_350.py` at 6 spawns. Both numbers are wanted:
+this hook must still work on the run that pays full price.
+
 `PostToolUse` fires per tool call — hundreds per session, thousands in an
 agentic run — so this is the hook where spawn count multiplies. But it is also
 the hook on the **write path**: it is how memory gets captured at all. A cheap
@@ -106,6 +114,18 @@ def _env(tmp_path: Path, home: Path, project: Path, extra: dict | None = None) -
         "CLAUDE_PROJECT_DIR": str(project),
         "CLAUDE_PLUGIN_ROOT": str(REPO_ROOT),
         "TMPDIR": str(tmpdir),
+        # Pin the COLD path, explicitly (#350). Every budget and post-condition
+        # in this file is a statement about the run that performs the
+        # resolution, and since #350 the second run of the same fixture
+        # replays it instead — so without this the "warm" run these tests count
+        # would be measuring a different hook than the docstring claims, and
+        # WHICH one it measured would depend on whether the config write and
+        # the cache landed in the same whole second (#303). Wrong number,
+        # green test, nothing in the output saying so.
+        #
+        # REMEMBER_ENV_CACHE=0 is lib-env-cache.sh's own documented off switch,
+        # not a test-only seam, so what runs here is the shipped cold path.
+        "REMEMBER_ENV_CACHE": "0",
     }
     for stale in ("REMEMBER_DIR", "_LIB_MEMORY_DIR_LOADED", "REMEMBER_TZ"):
         env.pop(stale, None)

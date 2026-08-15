@@ -382,6 +382,35 @@ case "$REMEMBER_PROMPT_STAMP" in
 esac
 export REMEMBER_PROMPT_STAMP
 
+# The two numbers post-tool-hook.sh needs on every tool call (#350). Read here,
+# for the same reason REMEMBER_PROMPT_STAMP is: that hook now replays a
+# resolution rather than performing one, and `config()` is the one thing it
+# could not replay — which is exactly why #227 skipped it.
+#
+# What is cached is these two SCALARS, never the merged config file. That file
+# can carry `haiku.oauth_token`, which is why lib-memory-dir.sh creates it 0600
+# per PID under an EXIT trap (#68/#232); publishing it at a stable path to save
+# processes is a trade this repo has already declined once and is not making by
+# the back door. A save cooldown and a line threshold are neither secret nor
+# expensive to be wrong about for one prompt.
+#
+# Both are table-backed by the time these lines run, so they are parameter
+# expansions and not two more processes.
+#
+# Validated HERE rather than at each reader. Both end up inside `$(( ))` and
+# `[ -lt ]`, and this repo has taken the same lesson twice: garbage in
+# arithmetic under `set -u` does not misbehave, it kills the shell (#258), and
+# a leading zero that clears a digits-only guard is read as octal (#322/#332).
+# One validation at the source beats one per consumer, which is how the
+# pre-#158 duplicate readers drifted.
+REMEMBER_SAVE_COOLDOWN=$(config ".cooldowns.save_seconds" 120)
+case "$REMEMBER_SAVE_COOLDOWN" in ''|*[!0-9]*) REMEMBER_SAVE_COOLDOWN=120 ;; esac
+export REMEMBER_SAVE_COOLDOWN
+
+REMEMBER_DELTA_THRESHOLD=$(config ".thresholds.delta_lines_trigger" 50)
+case "$REMEMBER_DELTA_THRESHOLD" in ''|*[!0-9]*) REMEMBER_DELTA_THRESHOLD=50 ;; esac
+export REMEMBER_DELTA_THRESHOLD
+
 # Model + reject-gate knobs. config.json is the source of truth; an explicit
 # shell env var still wins (override) via ${VAR:=...}, then config, then the
 # built-in default. Exported here (log.sh is sourced by every script) so both

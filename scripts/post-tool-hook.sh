@@ -42,34 +42,160 @@
 #   CLAUDE_PROJECT_DIR   Project root (default: .)
 #
 # DEPENDENCIES
-#   python3 (for JSON parsing of last-save.json)
-#   jq (for reading config.json threshold)
+#   lib-clock.sh     (the timestamp, without a process where bash can do it)
+#   lib-env-cache.sh (replays an already-resolved REMEMBER_DIR / PIPELINE_DIR
+#                     and the two config scalars this hook needs)
+#   lib-slug.sh      (session_dir_slug / claude_projects_dir)
+#   python3 (for JSON parsing of last-save.json — only once a save has landed)
+#   jq (for reading config.json — first run in a project per config change)
 #   save-session.sh (launched in background when threshold met)
 #
 # EXIT CODES
 #   0   Always (hook must not block the agent)
 #
+# COST (#350)
+#   Registered with NO matcher, so this runs on every single tool call and the
+#   agent waits for it. #227 gave user-prompt-hook.sh an env-cache fast path and
+#   deliberately skipped this one, because this hook needs config() and
+#   therefore the merged config file — which can carry a live OAuth token and is
+#   0600 per PID for that reason (#232). It still is never cached: what is
+#   replayed are the two SCALARS log.sh reads out of it.
+#
+#   Measured on macOS bash 3.2.57, external spawns per tool call, warm:
+#
+#       no save yet:        14 -> 6   (336 ms -> 130 ms)
+#       a save behind it:   15 -> 8   (405 ms -> 248 ms)
+#
+#   The reporter's Windows 11 / Git Bash numbers are 750-1000 ms per call
+#   against ~90 ms for the prompt hook that already replays. Per-spawn cost is
+#   what differs between platforms; spawn count is what causes it, which is why
+#   the pinned budgets count executions rather than milliseconds.
+#
+#   The FIRST call of a session — and the first after any config edit — still
+#   takes the whole chain and then publishes it, so the cost is paid once per
+#   project per config change rather than per tool call.
+#
 # ============================================================================
 
-# --- Resolve paths ---
-# Opt into resolve-paths.sh's soft-failure mode — see the comment in
-# session-start-hook.sh. This hook must never block the agent, so a resolution
-# failure (e.g. a nested/headless session with no CLAUDE_PROJECT_DIR) is a
-# silent no-op, not a crash.
-#
+# --- Where this script lives ---
 # Resolved by parameter expansion rather than three `dirname` forks (#230) —
 # the same pattern log.sh and user-prompt-hook.sh already use. A path with no
 # slash in it (invoked as `bash post-tool-hook.sh` from the scripts dir) leaves
 # the filename behind, not a directory; `dirname` answered "." and this must too.
 _HOOK_DIR="${BASH_SOURCE[0]%/*}"
 [ "$_HOOK_DIR" = "${BASH_SOURCE[0]}" ] && _HOOK_DIR="."
-REMEMBER_PATHS_SOFT_FAIL=1 source "$_HOOK_DIR/resolve-paths.sh" || exit 0
-source "$_HOOK_DIR/detect-tools.sh"
-source "$_HOOK_DIR/bootstrap-dirs.sh"
+
+# --- Nested summarizer: there is no project here (#204) ---
+# Normally this guard lives in resolve-paths.sh, which the fast path below does
+# not reach — the same reason user-prompt-hook.sh carries its own copy. It has
+# to hold for every hook this plugin registers: any one of them alone scaffolds
+# a memory directory under the summarizer's temp dir.
+[ -n "${REMEMBER_NESTED_SUMMARIZER:-}" ] && exit 0
+
+source "$_HOOK_DIR/lib-clock.sh"
+source "$_HOOK_DIR/lib-env-cache.sh"
+
+# Defined here rather than beside the dispatch it also guards, because the fast
+# path has to ask this question before it decides anything (#350).
+#
+# `-x`, not `-d`, and that difference is the whole gate. user-prompt-hook.sh
+# tests `[ ! -d hooks.d/after_user_prompt ]` and gets away with it because the
+# distribution ships no such directory. It DOES ship hooks.d/after_post_tool/
+# holding a .gitkeep, so a `-d` test here would refuse the fast path for every
+# user who never installed a listener — which is all of them. Ask what
+# dispatch() asks: is there anything EXECUTABLE.
+_after_post_tool_listener() {
+    local f
+    for f in "$REMEMBER_HOOKS_DIR/after_post_tool"/*; do
+        [ -x "$f" ] && return 0
+    done
+    return 1
+}
+
+# --- Resolve paths: replay one, or perform one (#350, the #227 pattern) ---
+# This hook has no matcher, so it runs on EVERY tool call — ten times as often
+# as the prompt hook #227 fixed, and on a Windows/Git Bash box the reporter
+# measured 750-1000 ms of blocking wait per call against ~90 ms for the hook
+# that replays. The chain below (resolve-paths → detect-tools → bootstrap-dirs
+# → log.sh) derives facts that cannot change while the config files that
+# produce them do not, and lib-env-cache.sh already validates exactly that.
+#
+# #227 skipped this hook for a stated reason: it needs config(), and therefore
+# the merged config file, which can carry a live OAuth token (#232) and is
+# deliberately per-PID and 0600. That reason still stands and the file is still
+# never cached. What is replayed are two SCALARS log.sh resolved from it —
+# REMEMBER_SAVE_COOLDOWN and REMEMBER_DELTA_THRESHOLD — in the same 0600 file
+# that has carried REMEMBER_TZ since #227, under the same config-mtime
+# invalidation. A cooldown and a line threshold are neither secret nor
+# expensive to be one prompt stale about.
+#
+# Two things the chain sets are set here by hand, exactly as user-prompt-hook.sh
+# does: umask from resolve-paths.sh (#68) and SYS_TMPDIR from bootstrap-dirs.sh.
+# Same values, no processes.
+_REMEMBER_FAST=0
+if _remember_env_cache_load; then
+    REMEMBER_HOOKS_DIR="$PIPELINE_DIR/hooks.d"
+    _after_post_tool_listener || _REMEMBER_FAST=1
+fi
+
+if [ "$_REMEMBER_FAST" = "1" ]; then
+    umask 077
+    SYS_TMPDIR="${TMPDIR:-/tmp}"
+    # session_dir_slug / claude_projects_dir. Normally arrives via
+    # detect-tools.sh, which is not sourced here — it validates an interpreter
+    # with `python3 -V`, and nothing above the last-save check needs one.
+    source "$_HOOK_DIR/lib-slug.sh"
+    # bootstrap-dirs.sh's last act, and the reason it is worth repeating: every
+    # diagnostic this hook can emit goes to stderr, and without this the ones
+    # below land in front of the user instead of in hook-errors.log.
+    [ -d "$REMEMBER_DIR/logs" ] && exec 2>> "$REMEMBER_DIR/logs/hook-errors.log"
+    # Nothing to dispatch: the gate above only let us in here because no
+    # executable listener is installed.
+    dispatch() { :; }
+    # `log` is NOT stubbed, and that is deliberate. log.sh is the expensive
+    # part of the chain, and the hot path has nothing to say — but the branches
+    # that DO call log are the ones where this hook is malfunctioning: a slug
+    # that matches no session directory (#144), a stdin session id with no
+    # transcript. Dropping those to save a process is #144 arriving inside its
+    # own fix. So the first call upgrades the process instead, and the runs
+    # that never take those branches never pay for it.
+    log() {
+        unset -f log
+        source "$PIPELINE_DIR/scripts/log.sh" 2>/dev/null
+        # log.sh returns early on a store it cannot create a logs/ dir in —
+        # before it defines log() — so the source succeeding is not the same
+        # question as `log` existing.
+        #
+        # `declare -F`, NOT `type`. `type log` is true on macOS whether or not
+        # a function was defined, because /usr/bin/log is Apple's unified
+        # logging CLI: the guard would pass, the stub would never be installed,
+        # and this would exec that binary once per diagnostic — nineteen lines
+        # of `log: Unknown subcommand 'hook'` on stderr and an exit status of
+        # 64, from a hook documented to always exit 0. Measured, on
+        # bash 3.2.57. `declare -F` asks about FUNCTIONS and nothing else.
+        declare -F log >/dev/null 2>&1 || log() { :; }
+        log "$@"
+    }
+else
+    # Opt into resolve-paths.sh's soft-failure mode — see the comment in
+    # session-start-hook.sh. This hook must never block the agent, so a
+    # resolution failure (e.g. a nested/headless session with no
+    # CLAUDE_PROJECT_DIR) is a silent no-op, not a crash.
+    REMEMBER_PATHS_SOFT_FAIL=1 source "$_HOOK_DIR/resolve-paths.sh" || exit 0
+    source "$_HOOK_DIR/detect-tools.sh"
+    source "$_HOOK_DIR/bootstrap-dirs.sh"
+    source "$PIPELINE_DIR/scripts/log.sh" 2>/dev/null
+    # Publish what this run paid for, so the NEXT tool call replays it. Without
+    # this the fast path would depend on SessionStart or a user prompt having
+    # run since the last config edit, which on a long agentic turn is a hundred
+    # tool calls away.
+    _remember_env_cache_publish
+    log "hook" "post-tool: PROJECT_DIR=$PROJECT_DIR PIPELINE_DIR=$PIPELINE_DIR PYTHON=$PYTHON REMEMBER_DIR=$REMEMBER_DIR"
+fi
+
 PLUGIN_ROOT="$PIPELINE_DIR"
 PROJECT="$PROJECT_DIR"
-source "$PLUGIN_ROOT/scripts/log.sh" 2>/dev/null
-log "hook" "post-tool: PROJECT_DIR=$PROJECT_DIR PIPELINE_DIR=$PIPELINE_DIR PYTHON=$PYTHON REMEMBER_DIR=$REMEMBER_DIR"
+
 # "PostToolUse ran at all" (#200) — written here, before every early exit
 # below, because the question the doctor asks is whether this hook is WIRED,
 # and the answers to that and to "did it find a transcript" are different.
@@ -77,7 +203,18 @@ log "hook" "post-tool: PROJECT_DIR=$PROJECT_DIR PIPELINE_DIR=$PIPELINE_DIR PYTHO
 # slug-mismatch case (#144) it most needed to distinguish, so the doctor told
 # those users the hook had never fired and to restart Claude Code — advice
 # that does nothing for a wrong slug.
-: > "$REMEMBER_DIR/tmp/post-tool-ran" 2>/dev/null || true
+#
+# The mkdir is the fast path's half of that (#350): bootstrap-dirs.sh is what
+# creates $REMEMBER_DIR/tmp, and the fast path does not source it. On the
+# common path the directory is already there and the redirect succeeds, so the
+# mkdir costs nothing — it is the recovery, not the precondition, which is the
+# same shape #230 gave every other mkdir in this file. Silently skipping the
+# marker when the directory is missing would tell every doctor user that a
+# wired hook has never fired: the exact regression #200 fixed.
+if ! : > "$REMEMBER_DIR/tmp/post-tool-ran" 2>/dev/null; then
+    mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null \
+        && : > "$REMEMBER_DIR/tmp/post-tool-ran" 2>/dev/null || true
+fi
 
 # --- Which session is this invocation FOR? (#212) ---
 # PostToolUse supplies the answer on stdin. Read it here, once, before anything
@@ -299,8 +436,24 @@ fi
 # is not a position and an integral float is, while this one kept a bare
 # isinstance check and reported 0 for positions the rest of the pipeline
 # resumed from, defeating the delta throttle for the life of a session.
+#
+# The interpreter is resolved HERE on the fast path, not up front (#350).
+# detect-tools.sh validates its candidates with `python3 -V` — a real spawn,
+# and the expensive one on Windows, where `python3` is often the Microsoft
+# Store alias the reporter measured at 125 ms just to answer `-V`. Nothing
+# above this line needs an interpreter, and a store that has never saved does
+# not reach this branch at all, so the validation is deferred rather than
+# dropped: a replayed interpreter path that no longer runs is exactly the
+# silently-wrong-delta this hook must not produce, and lib-env-cache.sh
+# validates config mtimes, not binaries. It is not asked to.
+#
+# Guarded on PYTHON already being set rather than on which path was taken: the
+# slow path has sourced detect-tools.sh already, and detect-tools.sh exports
+# PYTHON, so an invocation that inherited a resolved one from a parent is
+# equally answered. Re-sourcing would only repeat the spawn.
 LAST_LINE=0
 if [ -f "$LAST_SAVE_FILE" ]; then
+    [ -n "${PYTHON:-}" ] || source "$_HOOK_DIR/detect-tools.sh"
     LAST_LINE=$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell read-position "$LAST_SAVE_FILE" "$SESSION_ID" 2>/dev/null)
     case "$LAST_LINE" in ''|*[!0-9]*) LAST_LINE=0 ;; esac
 fi
@@ -329,8 +482,12 @@ if [ -f "$COOLDOWN_MARKER" ]; then
     LAST_TS=0
     read -r LAST_TS < "$COOLDOWN_MARKER" 2>/dev/null
     case "$LAST_TS" in ''|*[!0-9]*) LAST_TS=0 ;; esac
-    SAVE_COOLDOWN=$(config ".cooldowns.save_seconds" 120)
-    case "$SAVE_COOLDOWN" in ''|*[!0-9]*) SAVE_COOLDOWN=120 ;; esac
+    # Resolved by log.sh and validated there, so it arrives the same way on
+    # both paths — from the chain when the chain ran, replayed from the env
+    # cache when it did not (#350). config() is the one thing the fast path
+    # cannot call, and a second reader of the same key here is how the
+    # pre-#158 duplicates drifted.
+    SAVE_COOLDOWN="${REMEMBER_SAVE_COOLDOWN:-120}"
     # 10# for the same reason as the notice marker above (#322). Only LAST_TS
     # needs it: SAVE_COOLDOWN is the right-hand operand of `[ ... -lt ... ]`,
     # and `test` parses base 10 without evaluating -- measured, `[ 9 -lt 010 ]`
@@ -356,7 +513,9 @@ if [ -f "$COOLDOWN_MARKER" ]; then
 fi
 
 # --- Fire save if delta exceeds threshold and no save already running ---
-DELTA_THRESHOLD=$(config ".thresholds.delta_lines_trigger" 50)
+# Same as SAVE_COOLDOWN above: log.sh resolves and validates it, both paths
+# read the resolved value (#350).
+DELTA_THRESHOLD="${REMEMBER_DELTA_THRESHOLD:-50}"
 if [ "$DELTA" -gt "$DELTA_THRESHOLD" ] && [ "$IN_COOLDOWN" = false ]; then
     ALREADY_RUNNING=false
     if [ -f "$PID_FILE" ]; then
@@ -423,14 +582,11 @@ export REMEMBER_SAVE_TRIGGERED="$SAVE_TRIGGERED"
 REMEMBER_HOOK_STDIN_MAX=32768
 _hook_stdin_file=""
 
-_after_post_tool_listener() {
-    local f
-    for f in "$REMEMBER_HOOKS_DIR/after_post_tool"/*; do
-        [ -x "$f" ] && return 0
-    done
-    return 1
-}
-
+# _after_post_tool_listener is defined at the top of this file: the fast-path
+# gate has to ask the same question before it decides whether log.sh — and
+# therefore dispatch() — gets sourced at all (#350). One definition, because
+# two spellings of "is a listener installed" is how the fast path and the
+# dispatch below would come to disagree about whether one is.
 if [ -n "$HOOK_STDIN" ] && _after_post_tool_listener; then
     _hook_stdin_file="$REMEMBER_DIR/tmp/hook-stdin.$$"
     # The payload carries tool output, so it is owner-readable only, and it

@@ -2072,18 +2072,51 @@ class TestFreshProjectBootstrap:
         bootstrap sources lib-memory-dir.sh which calls session_dir_slug,
         defined by detect-tools. detect-tools only needs the python/jq
         binaries and never writes to the memory directory.
+
+        Read from the `source` STATEMENTS, not from the first mention anywhere
+        in the file (#350). This used to be two `content.find()` calls, which
+        cannot tell a source line from a comment naming the same file — and
+        post-tool-hook.sh now explains, above the code, which parts of the
+        chain its fast path skips and why. A prose paragraph in the wrong
+        order failed a test about execution order, while the invariant it
+        guards was never in question.
+
+        The stricter reading is also the safer one: a hook that discusses
+        bootstrap-dirs.sh without ever sourcing it now reads as "no source
+        line" instead of as an offset comparison against a comment.
         """
         repo_root = os.path.join(os.path.dirname(__file__), "..")
         for script_name in ("session-start-hook.sh", "post-tool-hook.sh"):
             script_path = os.path.join(repo_root, "scripts", script_name)
             with open(script_path) as f:
-                content = f.read()
-            bootstrap_pos = content.find("bootstrap-dirs.sh")
-            detect_pos = content.find("detect-tools.sh")
-            assert detect_pos < bootstrap_pos, (
-                f"{script_name}: detect-tools.sh must come before "
-                f"bootstrap-dirs.sh (detect at {detect_pos}, "
-                f"bootstrap at {bootstrap_pos})"
+                lines = f.read().splitlines()
+            sourced = []
+            for lineno, raw in enumerate(lines, 1):
+                code = raw.split("#", 1)[0]
+                if "source " not in code:
+                    continue
+                for word in code.replace(chr(34), " ").split():
+                    if word.endswith(".sh"):
+                        sourced.append((lineno, word.rsplit("/", 1)[-1]))
+            names = [name for _, name in sourced]
+            # The premise, asserted rather than assumed: an ordering test over
+            # two files neither of which is sourced passes vacuously.
+            assert "detect-tools.sh" in names, (
+                f"{script_name} sources no detect-tools.sh at all — "
+                f"sourced: {names}"
+            )
+            assert "bootstrap-dirs.sh" in names, (
+                f"{script_name} sources no bootstrap-dirs.sh at all — "
+                f"sourced: {names}"
+            )
+            detect_line = min(n for n, name in sourced if name == "detect-tools.sh")
+            bootstrap_line = min(
+                n for n, name in sourced if name == "bootstrap-dirs.sh"
+            )
+            assert detect_line < bootstrap_line, (
+                f"{script_name}: detect-tools.sh must be sourced before "
+                f"bootstrap-dirs.sh (detect at line {detect_line}, "
+                f"bootstrap at line {bootstrap_line})"
             )
 
 

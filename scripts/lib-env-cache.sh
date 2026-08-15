@@ -82,8 +82,10 @@ _remember_env_cache_path() {
 }
 
 # _remember_env_cache_load
-# On success: REMEMBER_DIR, REMEMBER_TZ, MEMORY_PROJECT_DIR, PROJECT_DIR and
-# PIPELINE_DIR are set and exported, and the caller can skip the chain.
+# On success: REMEMBER_DIR, REMEMBER_TZ, REMEMBER_PROMPT_STAMP,
+# REMEMBER_SAVE_COOLDOWN, REMEMBER_DELTA_THRESHOLD, MEMORY_PROJECT_DIR,
+# PROJECT_DIR and PIPELINE_DIR are set and exported, and the caller can skip
+# the chain.
 # On failure: nothing is set and the caller must resolve normally.
 _remember_env_cache_load() {
     [ "${REMEMBER_ENV_CACHE:-1}" = "1" ] || return 1
@@ -95,6 +97,7 @@ _remember_env_cache_load() {
     [ -r "$_f" ] || return 1
 
     local _line _dir="" _tz="" _mem="" _proj="" _pipe="" _stamp=""
+    local _cooldown="" _delta=""
     local _env_proj="" _env_pipe="" _env_home=""
     local _cfgs=()
     while IFS= read -r _line || [ -n "$_line" ]; do
@@ -106,6 +109,8 @@ _remember_env_cache_load() {
             REMEMBER_DIR=*)          _dir="${_line#*=}" ;;
             REMEMBER_TZ=*)           _tz="${_line#*=}" ;;
             REMEMBER_PROMPT_STAMP=*) _stamp="${_line#*=}" ;;
+            REMEMBER_SAVE_COOLDOWN=*) _cooldown="${_line#*=}" ;;
+            REMEMBER_DELTA_THRESHOLD=*) _delta="${_line#*=}" ;;
             MEMORY_PROJECT_DIR=*)    _mem="${_line#*=}" ;;
             PROJECT_DIR=*)           _proj="${_line#*=}" ;;
             PIPELINE_DIR=*)          _pipe="${_line#*=}" ;;
@@ -128,6 +133,14 @@ _remember_env_cache_load() {
     # considered the option. Writers always write a value, so an empty one means
     # an older writer. Costs one slow prompt, once, at upgrade.
     [ -n "$_stamp" ] || return 1
+    # Same rule, same reason (#350). post-tool-hook.sh feeds both of these
+    # straight into `$(( ))` and `[ -lt ]`, so a value that is not digits is
+    # not a slow answer, it is a broken one -- and log.sh, the only writer,
+    # already refuses to publish anything else. A cache from a release before
+    # these keys existed carries no answer for them and loses to the chain,
+    # once, at upgrade.
+    case "$_cooldown" in '' | *[!0-9]*) return 1 ;; esac
+    case "$_delta" in '' | *[!0-9]*) return 1 ;; esac
     [ "$_env_proj" = "${CLAUDE_PROJECT_DIR:-}" ] || return 1
     [ "$_env_pipe" = "${CLAUDE_PLUGIN_ROOT:-}" ] || return 1
     [ "$_env_home" = "${HOME:-}" ] || return 1
@@ -145,9 +158,11 @@ _remember_env_cache_load() {
     REMEMBER_DIR="$_dir"
     REMEMBER_TZ="$_tz"
     REMEMBER_PROMPT_STAMP="$_stamp"
+    REMEMBER_SAVE_COOLDOWN="$_cooldown"
+    REMEMBER_DELTA_THRESHOLD="$_delta"
     MEMORY_PROJECT_DIR="${_mem:-$_proj}"
     export PROJECT_DIR PIPELINE_DIR REMEMBER_DIR REMEMBER_TZ MEMORY_PROJECT_DIR
-    export REMEMBER_PROMPT_STAMP
+    export REMEMBER_PROMPT_STAMP REMEMBER_SAVE_COOLDOWN REMEMBER_DELTA_THRESHOLD
     return 0
 }
 
@@ -176,6 +191,8 @@ _remember_env_cache_publish() {
         printf 'REMEMBER_DIR=%s\n' "$REMEMBER_DIR"
         printf 'REMEMBER_TZ=%s\n' "${REMEMBER_TZ:-}"
         printf 'REMEMBER_PROMPT_STAMP=%s\n' "${REMEMBER_PROMPT_STAMP:-full}"
+        printf 'REMEMBER_SAVE_COOLDOWN=%s\n' "${REMEMBER_SAVE_COOLDOWN:-120}"
+        printf 'REMEMBER_DELTA_THRESHOLD=%s\n' "${REMEMBER_DELTA_THRESHOLD:-50}"
         printf 'MEMORY_PROJECT_DIR=%s\n' "${MEMORY_PROJECT_DIR:-$PROJECT_DIR}"
         printf 'CACHE_CONFIG=%s\n' "${PIPELINE_DIR}/config.json"
         printf 'CACHE_CONFIG=%s\n' "${HOME:-}/.remember/config.json"
