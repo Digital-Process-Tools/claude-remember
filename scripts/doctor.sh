@@ -379,12 +379,30 @@ if [ -f "$REMEMBER_CONFIG" ] && [ -s "$REMEMBER_CONFIG" ]; then
     case "$_cmb" in (''|*[!0-9]*) : ;; (*) _CONSOLIDATE_MAX_BYTES=$((10#$_cmb)) ;; esac
 fi
 
-_bytes_of() {
-    # 0 for anything absent or unreadable — a file that is not there
-    # contributes nothing to the prompt either.
-    [ -f "$1" ] || { echo 0; return; }
-    _b=$(wc -c < "$1" 2>/dev/null | tr -d ' ')
-    case "$_b" in (''|*[!0-9]*) echo 0 ;; (*) echo $((10#$_b)) ;; esac
+# Three states, not two. An absent file contributes 0 to the prompt and that is
+# a measurement; a file that EXISTS and cannot be read contributes an unknown
+# number, and folding it into the same 0 makes "I looked and found nothing"
+# and "I could not look" arrive as the same sentence — from the one command
+# whose whole job is telling a human whether to worry. So the unreadable ones
+# are named, and the total they are missing from is not signed off as healthy.
+#
+# Sets _SIZE_BYTES rather than echoing it: a caller writing
+# `x=$(_size_of f)` runs the function in a subshell, and the _STORE_UNREADABLE
+# append below would die with it — the third state detected and then discarded,
+# which is the same defect one level down.
+_STORE_UNREADABLE=""
+_SIZE_BYTES=0
+_size_of() {
+    _SIZE_BYTES=0
+    [ -f "$1" ] || return 0
+    _size_raw=$(wc -c < "$1" 2>/dev/null | tr -d ' ')
+    case "$_size_raw" in
+        (''|*[!0-9]*)
+            _STORE_UNREADABLE="${_STORE_UNREADABLE}${1}
+"
+            ;;
+        (*) _SIZE_BYTES=$((10#$_size_raw)) ;;
+    esac
 }
 
 if [ ! -d "$REMEMBER_DIR" ]; then
@@ -393,8 +411,8 @@ if [ ! -d "$REMEMBER_DIR" ]; then
     # for a store nothing measured.
     echo "WARN Consolidation size check: skipped — $REMEMBER_DIR does not exist"
 else
-    _RECENT_BYTES=$(_bytes_of "$REMEMBER_DIR/recent.md")
-    _ARCHIVE_BYTES=$(_bytes_of "$REMEMBER_DIR/archive.md")
+    _size_of "$REMEMBER_DIR/recent.md";  _RECENT_BYTES=$_SIZE_BYTES
+    _size_of "$REMEMBER_DIR/archive.md"; _ARCHIVE_BYTES=$_SIZE_BYTES
     # Staging as consolidation counts it: past days only, and never a file
     # already retired to .done.md. TODAY is computed by the same `date` the
     # rest of this script uses; a store within one day's capture of the cap is
@@ -408,9 +426,19 @@ else
             (*.done.md) continue ;;
             (*"$_DOCTOR_TODAY"*) continue ;;
         esac
-        _STAGING_BYTES=$((_STAGING_BYTES + $(_bytes_of "$_sf")))
+        _size_of "$_sf"
+        _STAGING_BYTES=$((_STAGING_BYTES + _SIZE_BYTES))
     done
     _STORE_BYTES=$((_STAGING_BYTES + _RECENT_BYTES + _ARCHIVE_BYTES))
+
+    if [ -n "$_STORE_UNREADABLE" ]; then
+        echo "WARN Consolidation size check is incomplete — these memory files exist"
+        echo "     but could not be read, so nothing below counts their bytes:"
+        printf '%s' "$_STORE_UNREADABLE" | while IFS= read -r _uf; do
+            [ -n "$_uf" ] && echo "     $_uf"
+        done
+        echo "     The total is therefore a floor, not the store's size."
+    fi
 
     if [ "$_STORE_BYTES" -gt "$_CONSOLIDATE_MAX_BYTES" ]; then
         if [ "$_STAGING_BYTES" -gt "$_CONSOLIDATE_MAX_BYTES" ]; then
@@ -445,6 +473,13 @@ else
             echo "     deleted — the bytes stay on disk, stay greppable, and session start"
             echo "     names the rotated slices."
         fi
+    elif [ -n "$_STORE_UNREADABLE" ]; then
+        # A floor under the cap proves nothing. Saying OK here would be the
+        # absence this section exists to remove, one level up: an unmeasured
+        # store signed off as a measured one.
+        echo "WARN Whether the store fits the consolidation cap could not be determined:"
+        echo "     the $_STORE_BYTES bytes that could be read are under the"
+        echo "     $_CONSOLIDATE_MAX_BYTES cap, but the files named above went uncounted."
     else
         echo "OK   Store fits the consolidation cap: $_STORE_BYTES of $_CONSOLIDATE_MAX_BYTES bytes"
     fi

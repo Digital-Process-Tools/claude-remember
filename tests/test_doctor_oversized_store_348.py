@@ -47,17 +47,23 @@ def _project(tmp_path: Path):
     return home, project, remember
 
 
-def _run(home: Path, project: Path, remember: Path) -> subprocess.CompletedProcess:
+def _run(home: Path, project: Path, remember: Path,
+         extra_env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "CLAUDE_PROJECT_DIR": str(project),
+        "CLAUDE_PLUGIN_ROOT": str(REPO_ROOT),
+        "REMEMBER_DIR": str(remember),
+        # lib-memory-dir.sh's reentrancy guard. Setting it makes that library
+        # return immediately, which is what keeps these tests off the real
+        # config-merge path -- and means REMEMBER_CONFIG is unset unless a test
+        # sets it deliberately, as the configured-cap test below does.
+        "_LIB_MEMORY_DIR_LOADED": "1",
+    }
+    env.update(extra_env or {})
     return subprocess.run(
-        ["bash", str(DOCTOR)],
-        env={
-            **os.environ,
-            "HOME": str(home),
-            "CLAUDE_PROJECT_DIR": str(project),
-            "CLAUDE_PLUGIN_ROOT": str(REPO_ROOT),
-            "REMEMBER_DIR": str(remember),
-            "_LIB_MEMORY_DIR_LOADED": "1",
-        },
+        ["bash", str(DOCTOR)], env=env,
         capture_output=True, text=True, timeout=180,
     )
 
@@ -140,6 +146,118 @@ def test_a_healthy_store_is_not_reported_as_over_cap(tmp_path):
         "a healthy store was reported as over the consolidation cap:\n"
         + result.stdout
     )
+
+
+def test_the_configured_cap_is_used_and_not_only_the_built_in_default(tmp_path):
+    """The branch that reads thresholds.consolidate_max_bytes out of config.
+
+    doctor.sh must not source log.sh (read-only report), so it cannot use
+    config() and greps the merged config itself. Nothing exercised that grep:
+    every other test here leaves REMEMBER_CONFIG unset and therefore lands on
+    the hardcoded 600000, which is the same number the tests assert -- so a
+    wrong key, a wrong field or a JSON shape the pattern does not anticipate
+    would keep the report silently answering against the default while telling
+    the user it measured their configured cap.
+
+    Paired with the test below, which is the same store against no config at
+    all: the two differ only in whether the cap was read.
+    """
+    home, project, remember = _project(tmp_path)
+    cfg = tmp_path / "merged-config.json"
+    cfg.write_text(
+        '{"timezone": "UTC", "thresholds": {"extract_max_bytes": 300000,'
+        ' "consolidate_max_bytes": 50000, "memory_inject_max_bytes": 200000}}',
+        encoding="utf-8")
+    # Comfortably under the 600000 default and comfortably over the configured
+    # 50000, so which number was used is not a matter of interpretation.
+    _fill(remember / "recent.md", 120000)
+
+    result = _run(home, project, remember, {"REMEMBER_CONFIG": str(cfg)})
+
+    assert result.returncode == 0, result.stderr
+    assert "50000" in result.stdout, (
+        "the configured cap never reached the report -- the grep that reads it "
+        "has no positive control and could be wrong in silence:\n" + result.stdout
+    )
+    assert "too large to consolidate" in result.stdout.lower(), (
+        "a store over the CONFIGURED cap was reported as fitting, because the "
+        "built-in default was used instead:\n" + result.stdout
+    )
+
+
+def test_the_same_store_is_healthy_against_the_built_in_default(tmp_path):
+    """Positive control's other half. Same 120000-byte store, no config.
+
+    Without this, the test above would pass just as well against a doctor that
+    reported every store as over its cap.
+    """
+    home, project, remember = _project(tmp_path)
+    _fill(remember / "recent.md", 120000)
+
+    result = _run(home, project, remember)
+
+    assert "600000" in result.stdout, "the built-in default is not in the report"
+    assert "too large to consolidate" not in result.stdout.lower(), (
+        "120000 bytes is well under the 600000 default and was still flagged:\n"
+        + result.stdout
+    )
+
+
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="running as root -- chmod 000 does not deny root, so the unreadable "
+           "half of this pair cannot be set up and goes UNTESTED here",
+)
+def test_a_memory_file_that_cannot_be_read_is_not_counted_as_zero_bytes(tmp_path):
+    """The third state, and the one that renders as a clean bill of health.
+
+    An unreadable file contributed the same 0 as an absent one, so a store
+    whose recent.md could not be read summed to nothing and the report said it
+    fits the cap -- "I looked and found nothing" and "I could not look"
+    arriving as the same sentence, from the one command whose whole job is
+    telling a human whether to worry.
+
+    Paired with the readable case below, which must still produce the plain OK.
+    """
+    home, project, remember = _project(tmp_path)
+    recent = remember / "recent.md"
+    _fill(recent, 4000)
+    recent.chmod(0o000)
+    try:
+        result = _run(home, project, remember)
+    finally:
+        recent.chmod(0o644)
+
+    assert result.returncode == 0, result.stderr
+    assert "recent.md" in result.stdout, (
+        "the file that could not be read is not named:\n" + result.stdout
+    )
+    assert "could not" in result.stdout.lower(), (
+        "an unreadable memory file was folded into the same total as an absent "
+        "one, so the report cannot tell a measured store from an unmeasured "
+        "one:\n" + result.stdout
+    )
+    assert "Store fits the consolidation cap" not in result.stdout, (
+        "a store that could not be measured was signed off as fitting the cap:\n"
+        + result.stdout
+    )
+
+
+def test_a_readable_store_still_gets_the_plain_ok(tmp_path):
+    """Positive control for the pair above.
+
+    A doctor that declared every store unmeasurable would satisfy the
+    unreadable case perfectly and be useless.
+    """
+    home, project, remember = _project(tmp_path)
+    _fill(remember / "recent.md", 4000)
+
+    result = _run(home, project, remember)
+
+    assert "Store fits the consolidation cap" in result.stdout, (
+        "a perfectly readable store did not get a clean answer:\n" + result.stdout
+    )
+    assert "could not be read" not in result.stdout
 
 
 def _verdict(stdout: str) -> str:
