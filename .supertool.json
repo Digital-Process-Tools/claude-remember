@@ -6,7 +6,7 @@
   "rtk": false,
   "allow_outside_cwd": false,
   "allow_vim_shell": false,
-  "presets": ["github", "git"],
+  "presets": ["github", "git", "watch"],
   "validators": {
     "ruff": {
       "cmd": "{python} {supertool_dir}/validators/ruff/ruff.py {file}",
