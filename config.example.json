@@ -77,7 +77,13 @@
       "than this is refused instead of being written to recent.md/archive.md.",
       "Capping only the input meant one oversized response became the permanent",
       "record AND pushed the store past this cap, so every later run skipped and",
-      "the file could never shrink again."
+      "the file could never shrink again.",
+      "Since #348 a store already past this cap gets out again: whichever file",
+      "is measurably why the round will not fit is rotated to a dated sibling",
+      "(archive-YYYY-MM-DD.md / recent-YYYY-MM-DD.md, -2 on a same-day repeat)",
+      "and a fresh one started. Nothing is deleted and the slices are named at",
+      "session start. If the past-day staging files are over the cap on their",
+      "own, nothing is rotated — no rotation would change the next round."
     ],
     "memory_inject_max_bytes": [
       "A memory file larger than this (UTF-8 bytes) is NAMED with its size at",

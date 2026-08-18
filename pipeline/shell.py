@@ -310,28 +310,63 @@ def cmd_read_position(last_save_file: str, session_id: str) -> None:
     print(read_positions(last_save_file).get(session_id, 0))
 
 
-def _rotate_archive(archive_file: str) -> str | None:
-    """Rename a non-empty archive.md to a dated sibling so consolidation can
-    proceed with a fresh archive instead of stalling forever on an archive that
-    has grown past the prompt cap.
+def _rotate_to_dated_sibling(path: str, stem: str) -> str | None:
+    """Rename a non-empty memory file to a dated sibling of the same family.
 
-    Returns the rotated path (e.g. ``archive-2026-06-29.md``, with a ``-N``
-    suffix on same-day collisions), or ``None`` when there is nothing worth
-    rotating (missing/empty archive -> the oversized bulk is staging/recent, not
-    the archive, so rotating would not help).
+    The move ``archive.md`` has had since #123, factored out in #348 so
+    ``recent.md`` gets exactly the same one rather than a second, subtly
+    different resting place. Both families are read back by the session-start
+    hook, which parses the date and the ``-N`` out of the NAME to order them —
+    so a second naming scheme here would be a second parser there.
+
+    Returns the rotated path, or ``None`` when there is nothing worth rotating:
+    a missing or empty file means the oversized bulk is somewhere else, and
+    rotating would produce an empty dated sibling no recall ever wants while
+    leaving the round exactly as over-cap as it was.
+
+    Args:
+        path: The live file (``.../archive.md``, ``.../recent.md``).
+        stem: Family prefix for the sibling — ``archive`` or ``recent``.
+
+    Returns:
+        The new path (e.g. ``archive-2026-06-29.md``, or
+        ``recent-2026-06-29-2.md`` on a same-day collision), or ``None``.
     """
-    if not archive_file or not os.path.exists(archive_file) or os.path.getsize(archive_file) == 0:
+    if not path or not os.path.exists(path) or os.path.getsize(path) == 0:
         return None
     from ._tz import today_str
-    parent = os.path.dirname(archive_file)
-    stem = f"archive-{today_str()}"
-    target = os.path.join(parent, f"{stem}.md")
+    parent = os.path.dirname(path)
+    base = f"{stem}-{today_str()}"
+    target = os.path.join(parent, f"{base}.md")
+    # Never os.rename onto an existing sibling: a second over-cap round on the
+    # same day would silently eat the first slice, which is the history loss
+    # rotation exists to avoid.
     n = 2
     while os.path.exists(target):
-        target = os.path.join(parent, f"{stem}-{n}.md")
+        target = os.path.join(parent, f"{base}-{n}.md")
         n += 1
-    os.rename(archive_file, target)
+    os.rename(path, target)
     return target
+
+
+def _rotate_archive(archive_file: str) -> str | None:
+    """Rotate archive.md to ``archive-YYYY-MM-DD.md`` (#123). See
+    ``_rotate_to_dated_sibling`` for the contract."""
+    return _rotate_to_dated_sibling(archive_file, "archive")
+
+
+def _rotate_recent(recent_file: str) -> str | None:
+    """Rotate recent.md to ``recent-YYYY-MM-DD.md`` (#348).
+
+    Called only when ``recent.md`` is measurably the reason a round will not
+    fit — see the ladder in ``cmd_consolidate``. The span it retires was never
+    consolidated into ``archive.md``, so this is not the same thing as ageing
+    it out; it is putting it somewhere reachable so the pipeline can start
+    working again. Re-feeding it as staging was the alternative and was
+    rejected: an over-cap span fed back as staging reproduces the oversize on
+    the very next round, which is the loop this exists to break.
+    """
+    return _rotate_to_dated_sibling(recent_file, "recent")
 
 
 def _eligible_staging(directory: str, filter_today: bool = True) -> list[str]:
@@ -481,9 +516,15 @@ def cmd_consolidate(staging_dir: str, recent_file: str, archive_file: str,
     # per-file labels plus these bytes, so it is strictly larger than their
     # sum, and a sum already over the cap is proof the prompt would be.
     rotated: str | None = None
+    rotated_recent: str | None = None
 
     def _restore_rotation() -> None:
         """Undo an up-front rotation when the round did not go through.
+
+        Both families, because #348 can rotate archive.md and recent.md in the
+        same round. A half-undone pair is worse than no rotation at all: the
+        store is then split across two names, one of which nothing ever
+        consolidated, for a round that never happened.
 
         Existence-checked because the handlers inside ``ConsolidationTooLarge``
         below do their own restore and then re-raise; an exception raised
@@ -493,23 +534,59 @@ def cmd_consolidate(staging_dir: str, recent_file: str, archive_file: str,
         """
         if rotated is not None and os.path.exists(rotated):
             os.replace(rotated, archive_file)
+        if rotated_recent is not None and os.path.exists(rotated_recent):
+            os.replace(rotated_recent, recent_file)
 
     recent_size = os.path.getsize(recent_file) if os.path.exists(recent_file) else 0
     archive_size = os.path.getsize(archive_file) if os.path.exists(archive_file) else 0
     if max_prompt_bytes > 0:
-        embedded = sum(staging_raw_bytes.values()) + recent_size + archive_size
+        staging_size = sum(staging_raw_bytes.values())
+        embedded = staging_size + recent_size + archive_size
         if embedded > max_prompt_bytes:
-            # Same recovery ConsolidationTooLarge gets below, taken before the
-            # read rather than after it: if archive.md is the bulk, rotate it
-            # to a dated sibling and carry on with a fresh one. Only when
-            # dropping it still would not fit — recent.md is the bulk, #346's
-            # shape — is nothing read at all.
+            # An escalating ladder, and which rung fires is the whole decision
+            # (#348). "The store is over the cap" is NOT the same question as
+            # "which file is why", and rotating the wrong one is destructive
+            # for nothing: it splits a span across a name nothing consolidated
+            # AND leaves the next round skipping identically.
+            #
+            # So each rung is conditioned on the rotation actually healing the
+            # round, measured on the sizes already in hand:
+            #
+            #   1. archive.md alone is enough  -> rotate it (the #123 move,
+            #      taken before the read rather than after it since #347).
+            #   2. it is not, but staging alone fits -> recent.md is the bulk,
+            #      #346's shape. Rotate it too, and archive.md as well only if
+            #      staging + archive would still not fit — a healthy archive is
+            #      not collateral.
+            #   3. staging alone is already over the cap -> rotate NOTHING and
+            #      skip. No file available here would change the next round,
+            #      so a rotation would be pure loss. Unbounded staging growth
+            #      is a different bug in different files and is filed on its
+            #      own; this rung declines rather than pretending to fix it.
             if embedded - archive_size <= max_prompt_bytes:
                 rotated = _rotate_archive(archive_file)
-            if rotated is None:
+                if rotated is None:
+                    _emit_skip()
+                    return
+                archive_size = 0
+            elif staging_size <= max_prompt_bytes:
+                rotated_recent = _rotate_recent(recent_file)
+                if rotated_recent is None:
+                    # recent.md is missing or empty, so the bulk is not what
+                    # the arithmetic said it was and there is nothing to move.
+                    _emit_skip()
+                    return
+                recent_size = 0
+                if staging_size + archive_size > max_prompt_bytes:
+                    rotated = _rotate_archive(archive_file)
+                    if rotated is None:
+                        _restore_rotation()
+                        _emit_skip()
+                        return
+                    archive_size = 0
+            else:
                 _emit_skip()
                 return
-            archive_size = 0
 
     recent = ""
     if os.path.exists(recent_file):
@@ -534,20 +611,35 @@ def cmd_consolidate(staging_dir: str, recent_file: str, archive_file: str,
         # the template plus per-file labels tipped it over, or when the guard
         # is disabled. An up-front rotation has already happened in the first
         # case, so do not rotate a second time and orphan the first sibling.
+        #
+        # If the up-front ladder already rotated recent.md (#348) it took every
+        # shrink available: `recent` below is the empty string it read back from
+        # a file that is no longer there, and archive.md is either gone too or
+        # was never the problem. The retry would assemble a byte-identical
+        # prompt and raise identically. Declining here is not the point though —
+        # the point is that it declines through `_restore_rotation`, because the
+        # `rotated is None` exit two lines down returns WITHOUT undoing anything,
+        # and reaching it with recent.md rotated would leave the store split
+        # across a dated sibling for a round that never happened.
+        if rotated_recent is not None:
+            _restore_rotation()
+            _emit_skip()
+            return
         if rotated is None:
             rotated = _rotate_archive(archive_file)
         if rotated is None:
+            _restore_rotation()  # no-op unless something above moved a file
             _emit_skip()
             return
         try:
             result = consolidate(staging_contents, recent, "",
                                  max_prompt_bytes=max_prompt_bytes)
         except ConsolidationSkipped:
-            os.replace(rotated, archive_file)  # still too big -> undo, skip
+            _restore_rotation()  # still too big -> undo, skip
             _emit_skip()
             return
         except Exception:
-            os.replace(rotated, archive_file)  # retry errored -> undo, re-raise
+            _restore_rotation()  # retry errored -> undo, re-raise
             raise
     except SummarizerSpawnDeclined as declined:
         # The spawn guard refused (#204). Staging is left exactly as it is and

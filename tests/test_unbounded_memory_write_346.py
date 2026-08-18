@@ -31,10 +31,17 @@ makes it permanent:
 2. **That same write disables the only thing that could repair it.** The cap
    is measured on the INPUT, and recent.md is part of the input. So the round
    after an oversized write assembles an oversized prompt, raises
-   ``ConsolidationTooLarge``, and skips. Forever. ``_rotate_archive`` is no
-   escape: it can only shrink archive.md, and the bulk here is recent.md.
-   The file cannot grow again and cannot shrink either — frozen at its worst
-   size, which is precisely "only ever gets appended to" as a user sees it.
+   ``ConsolidationTooLarge``, and skips. Forever, as of the release this file
+   was written for: ``_rotate_archive`` was no escape, because it can only
+   shrink archive.md and the bulk here is recent.md. The file could then not
+   grow again and not shrink either — frozen at its worst size, which is
+   precisely "only ever gets appended to" as a user sees it.
+
+   The "forever" was closed by #348, which gave recent.md the same rotation
+   archive.md has. The tests below that pinned a permanent skip now pin the
+   recovery instead and say so where they do; what has NOT changed is that
+   the decision must still be reached by ``stat`` rather than by reading the
+   store, and that is what they assert.
 
 There is a second, much slower grower, and it is deliberately NOT this bug:
 consolidation is told to keep recent under 600 tokens but nothing enforces it,
@@ -182,18 +189,26 @@ def test_refusal_leaves_memory_and_staging_untouched(tmp_path):
 # ── 2. The ratchet: an already-oversized store must not be read whole ──────
 
 
-def test_oversized_store_is_refused_by_size_not_by_reading_it(tmp_path):
+def test_oversized_store_is_never_read_into_memory(tmp_path):
     """Discovering the store is too large must not cost the store's size in RAM.
 
-    Today the order is: read recent.md whole, read archive.md whole, build a
-    prompt string around both, encode it to count bytes, and only then raise
-    ``ConsolidationTooLarge``. On the reporter's 6.4 GB file that is several
-    times 6.4 GB of allocation to reach a decision that ``os.path.getsize``
-    answers for free — and it runs disowned in the background, next to a live
-    session, on a machine that then needed a restart.
+    Before #347 the order was: read recent.md whole, read archive.md whole,
+    build a prompt string around both, encode it to count bytes, and only then
+    raise ``ConsolidationTooLarge``. On the reporter's 6.4 GB file that is
+    several times 6.4 GB of allocation to reach a decision that
+    ``os.path.getsize`` answers for free — and it runs disowned in the
+    background, next to a live session, on a machine that then needed a
+    restart.
 
     Asserted by watching the reads rather than the timing: the file is a real
     file of the right size, and the test fails if anything opens it.
+
+    **What happens after that decision changed in #348; this assertion did
+    not.** The round is no longer skipped here — recent.md is the bulk, so it
+    is rotated to a dated sibling and consolidation proceeds with a fresh one.
+    A rotation is a ``rename`` and reads no bytes, so the allocation this test
+    exists to prevent is still never made. The test below is the paired shape
+    that still refuses the round, and it must not read the store either.
     """
     recent_f = tmp_path / "recent.md"
     archive_f = tmp_path / "archive.md"
@@ -218,11 +233,60 @@ def test_oversized_store_is_refused_by_size_not_by_reading_it(tmp_path):
             with redirect_stdout(buf):
                 shell_mod.cmd_consolidate(str(tmp_path), str(recent_f), str(archive_f), CAP, "")
 
-    assert "CONSOLIDATION_STATUS=skip" in buf.getvalue(), buf.getvalue()
-    assert not called, "an oversized store must not reach the model call"
     assert str(recent_f) not in opened, (
         "recent.md was read into memory to discover it is too large to read — "
         f"opened: {opened}"
+    )
+    assert "CONSOLIDATION_STATUS=ok" in buf.getvalue(), (
+        "the store did not recover (#348):\n" + buf.getvalue()
+    )
+    assert called, "the round should have proceeded on a fresh recent.md"
+    assert list(tmp_path.glob("recent-*.md")), "recent.md was not rotated (#348)"
+
+
+def test_a_store_no_rotation_can_shrink_still_skips_without_reading_it(tmp_path):
+    """The paired case, and the one that still refuses the round outright.
+
+    Past-day staging is over the cap on its own, so no rotation available
+    would make the next round any different and the pipeline declines to move
+    anything (#348). That refusal must still cost nothing: the memory files
+    are not opened and the model is never called.
+
+    Without this pair the "not read" assertion above would be the only one
+    left, and it now sits on a path that goes through — a pipeline that read
+    the whole store and then rotated would satisfy it just as well.
+    """
+    recent_f = tmp_path / "recent.md"
+    archive_f = tmp_path / "archive.md"
+    recent_f.write_text(RECENT_BEFORE, encoding="utf-8")
+    archive_f.write_text(ARCHIVE_BEFORE, encoding="utf-8")
+    # Sparse: the size is the point, the bytes are not.
+    with open(tmp_path / "today-2026-01-01.md", "wb") as f:
+        f.truncate(CAP * 4)
+
+    real_open = io.open
+    opened: list[str] = []
+
+    def spy(file, *a, **kw):
+        opened.append(str(file))
+        return real_open(file, *a, **kw)
+
+    called = []
+    buf = io.StringIO()
+    with patch.object(consolidate_mod, "call_haiku",
+                      lambda p, timeout=180: called.append(1) or _response("x")):
+        with patch("builtins.open", spy):
+            with redirect_stdout(buf):
+                shell_mod.cmd_consolidate(str(tmp_path), str(recent_f), str(archive_f), CAP, "")
+
+    assert "CONSOLIDATION_STATUS=skip" in buf.getvalue(), buf.getvalue()
+    assert not called, "an oversized store must not reach the model call"
+    assert str(recent_f) not in opened, (
+        f"recent.md was read on a path that refuses the round — opened: {opened}"
+    )
+    assert recent_f.read_text(encoding="utf-8") == RECENT_BEFORE
+    assert not list(tmp_path.glob("recent-*.md")), (
+        "recent.md was rotated where rotating it heals nothing"
     )
 
 

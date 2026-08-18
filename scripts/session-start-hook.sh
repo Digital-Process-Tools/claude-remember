@@ -945,8 +945,14 @@ done
 # oversized archive and the fresh archive.md stays empty until the next
 # consolidation — and gating on the list above meant the whole section was
 # skipped, so the one state issue #124 is written to fix printed nothing at all.
-ROTATED_ARCHIVES=$(ls "$REMEMBER_DIR"/archive-*.md 2>/dev/null | sort)
-if [ -n "$ROTATED_ARCHIVES" ]; then
+#
+# Two families since #348, not one. A store whose recent.md is the over-cap
+# bulk now rotates it to recent-YYYY-MM-DD.md, and a glob that only knew
+# archive-*.md would leave that slice exactly as invisible as #124 found the
+# archives — the recovery would keep the bytes and lose the recall, which is
+# the failure #124 exists to name.
+ROTATED_SLICES=$(ls "$REMEMBER_DIR"/archive-*.md "$REMEMBER_DIR"/recent-*.md 2>/dev/null | sort)
+if [ -n "$ROTATED_SLICES" ]; then
     HAS_MEMORY="true"
 fi
 
@@ -1020,23 +1026,25 @@ if [ -n "$HAS_MEMORY" ]; then
             echo ""
         fi
     fi
-    # ── Rotated archives: named, not injected (#124) ──────────────────────
+    # ── Rotated slices: named, not injected (#124) ────────────────────────
     # An oversized archive.md is rotated to archive-YYYY-MM-DD.md and a fresh
-    # one started (#123). The bytes are kept, but nothing in the read path
-    # ever named them, so that slice of memory sat in cold storage no recall
-    # reached — "no memory lost" was true mechanically and false in practice.
+    # one started (#123); since #348 an oversized recent.md rotates the same
+    # way, to recent-YYYY-MM-DD.md. The bytes are kept, but nothing in the
+    # read path ever named them, so that slice of memory sat in cold storage
+    # no recall reached — "no memory lost" was true mechanically and false in
+    # practice.
     #
     # Named rather than cat'd on purpose: these files were rotated BECAUSE
     # they were too large to fit a prompt, so injecting them would rebuild
     # the problem rotation exists to solve. The agent greps them when a
     # question reaches past what is in context.
-    if [ -n "$ROTATED_ARCHIVES" ]; then
+    if [ -n "$ROTATED_SLICES" ]; then
         # Newest ROTATED_LIST_MAX by date, because rotations accumulate for the
         # life of a store and this prints on every single session start. The
         # glob is given for the rest so nothing becomes unreachable again —
         # which was the whole point of naming them.
         ROTATED_LIST_MAX=10
-        ROTATED_COUNT=$(echo "$ROTATED_ARCHIVES" | wc -l | tr -d ' ')
+        ROTATED_COUNT=$(echo "$ROTATED_SLICES" | wc -l | tr -d ' ')
         # Order by the date and rotation number IN THE NAME, parsed — not by
         # raw name, and not by mtime.
         #
@@ -1054,10 +1062,17 @@ if [ -n "$HAS_MEMORY" ]; then
         # The name carries the truth: the date, then the rotation number, with
         # the un-suffixed file being that day's first. Zero-padding the number
         # makes the composed key sort correctly as plain text.
-        ROTATED_NEWEST=$(echo "$ROTATED_ARCHIVES" | while read -r _archive; do
-            [ -n "$_archive" ] || continue
-            _core=${_archive##*/}
+        #
+        # Both families (#348) go through one parse, keyed on the date and not
+        # on the family: archive-2026-06-29.md and recent-2026-06-29.md are
+        # two slices of the same week and belong next to each other in the
+        # listing. Only one of the two prefix strips can ever match a given
+        # name, so applying both is unconditional rather than a branch.
+        ROTATED_NEWEST=$(echo "$ROTATED_SLICES" | while read -r _slice; do
+            [ -n "$_slice" ] || continue
+            _core=${_slice##*/}
             _core=${_core#archive-}
+            _core=${_core#recent-}
             _core=${_core%.md}
             # Leading '(' on each pattern: bash 3.2 (still what macOS ships)
             # miscounts the parens of a case inside $( ) without it.
@@ -1066,16 +1081,16 @@ if [ -n "$HAS_MEMORY" ]; then
                 (*)       _date=$_core;      _seq=1 ;;
             esac
             case "$_seq" in (''|*[!0-9]*) _seq=1 ;; esac
-            printf '%s-%010d\t%s\n' "$_date" "$_seq" "$_archive"
+            printf '%s-%010d\t%s\n' "$_date" "$_seq" "$_slice"
         done | sort | tail -n "$ROTATED_LIST_MAX" | cut -f2-)
-        echo "--- rotated archives (not shown; grep on request) ---"
-        echo "$ROTATED_NEWEST" | while read -r _archive; do
-            [ -f "$_archive" ] || continue
-            printf '%s (%s bytes)\n' "$_archive" "$(wc -c < "$_archive" | tr -d ' ')"
+        echo "--- rotated memory slices (not shown; grep on request) ---"
+        echo "$ROTATED_NEWEST" | while read -r _slice; do
+            [ -f "$_slice" ] || continue
+            printf '%s (%s bytes)\n' "$_slice" "$(wc -c < "$_slice" | tr -d ' ')"
         done
         if [ "$ROTATED_COUNT" -gt "$ROTATED_LIST_MAX" ]; then
-            printf '... and %s older: %s/archive-*.md\n' \
-                "$((ROTATED_COUNT - ROTATED_LIST_MAX))" "$REMEMBER_DIR"
+            printf '... and %s older: %s/archive-*.md, %s/recent-*.md\n' \
+                "$((ROTATED_COUNT - ROTATED_LIST_MAX))" "$REMEMBER_DIR" "$REMEMBER_DIR"
         fi
         echo ""
     fi

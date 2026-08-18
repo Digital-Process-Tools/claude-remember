@@ -350,6 +350,106 @@ if [ -d "$REMEMBER_DIR" ]; then
 fi
 echo "OK   Memory files: $_MEMORY_FILE_COUNT file(s), $_MEMORY_BYTES bytes total"
 
+# ── Is the store too large to consolidate? (#348) ────────────────────────────
+#
+# The session-start notice added in #347 tells the user to run this command
+# when a memory file is too large to inject — and until now this command had
+# nothing whatever to say about that condition. A remedy that points at a
+# diagnostic which is silent about the thing it was pointed at is worse than no
+# pointer: the user follows it, reads a clean report, and concludes the notice
+# was noise.
+#
+# The number being checked is the one the pipeline actually enforces:
+# pipeline/shell.py sizes staging + recent.md + archive.md before it reads any
+# of them and skips the round when that sum is over thresholds.
+# consolidate_max_bytes. So this measures the same three parts against the same
+# cap, rather than warning on one file's size and hoping it correlates.
+#
+# Read without config() on purpose. That helper lives in log.sh, and this
+# script must not source log.sh (read-only report; see the header). One grep
+# against the merged config, which is flat JSON produced by lib-memory-dir.sh's
+# merger and carries this key exactly once.
+# Initialised before any branch can set it, so the VERDICT ladder below reads a
+# defined value even when this whole section is skipped for an absent store.
+_STORE_NEEDS_A_HUMAN=0
+_CONSOLIDATE_MAX_BYTES=600000
+if [ -f "$REMEMBER_CONFIG" ] && [ -s "$REMEMBER_CONFIG" ]; then
+    _cmb=$(grep -o '"consolidate_max_bytes"[[:space:]]*:[[:space:]]*[0-9]*' "$REMEMBER_CONFIG" 2>/dev/null \
+        | sed 's/.*:[[:space:]]*//' | head -1)
+    case "$_cmb" in (''|*[!0-9]*) : ;; (*) _CONSOLIDATE_MAX_BYTES=$((10#$_cmb)) ;; esac
+fi
+
+_bytes_of() {
+    # 0 for anything absent or unreadable — a file that is not there
+    # contributes nothing to the prompt either.
+    [ -f "$1" ] || { echo 0; return; }
+    _b=$(wc -c < "$1" 2>/dev/null | tr -d ' ')
+    case "$_b" in (''|*[!0-9]*) echo 0 ;; (*) echo $((10#$_b)) ;; esac
+}
+
+if [ ! -d "$REMEMBER_DIR" ]; then
+    # The third state, and it is not "healthy". A check that cannot look has to
+    # say it could not look; reporting OK here would be a clean bill of health
+    # for a store nothing measured.
+    echo "WARN Consolidation size check: skipped — $REMEMBER_DIR does not exist"
+else
+    _RECENT_BYTES=$(_bytes_of "$REMEMBER_DIR/recent.md")
+    _ARCHIVE_BYTES=$(_bytes_of "$REMEMBER_DIR/archive.md")
+    # Staging as consolidation counts it: past days only, and never a file
+    # already retired to .done.md. TODAY is computed by the same `date` the
+    # rest of this script uses; a store within one day's capture of the cap is
+    # the only place the two could disagree, and under-counting is the safe
+    # direction for a diagnostic — it cannot invent an alarm.
+    _DOCTOR_TODAY=$(date '+%Y-%m-%d')
+    _STAGING_BYTES=0
+    for _sf in "$REMEMBER_DIR"/today-*.md; do
+        [ -f "$_sf" ] || continue
+        case "${_sf##*/}" in
+            (*.done.md) continue ;;
+            (*"$_DOCTOR_TODAY"*) continue ;;
+        esac
+        _STAGING_BYTES=$((_STAGING_BYTES + $(_bytes_of "$_sf")))
+    done
+    _STORE_BYTES=$((_STAGING_BYTES + _RECENT_BYTES + _ARCHIVE_BYTES))
+
+    if [ "$_STORE_BYTES" -gt "$_CONSOLIDATE_MAX_BYTES" ]; then
+        if [ "$_STAGING_BYTES" -gt "$_CONSOLIDATE_MAX_BYTES" ]; then
+            # The one shape rotation cannot fix. FAIL, and it takes a VERDICT
+            # arm below, because nothing in the pipeline will clear it and the
+            # user reading this was sent here by a notice that promised an
+            # answer. Rotating recent.md here would split an unconsolidated
+            # span for nothing and the very next round would skip identically.
+            _STORE_NEEDS_A_HUMAN=1
+            echo "FAIL Store is too large to consolidate and cannot heal itself:"
+            echo "     $_STORE_BYTES bytes against a thresholds.consolidate_max_bytes cap"
+            echo "     of $_CONSOLIDATE_MAX_BYTES — recent.md $_RECENT_BYTES + archive.md $_ARCHIVE_BYTES"
+            echo "     + past-day staging $_STAGING_BYTES."
+            echo "     Past-day staging ALONE is over the cap, so rotating recent.md or"
+            echo "     archive.md would not help and the pipeline will not do it: the next"
+            echo "     round would skip on the same sum. Every round skips while this holds."
+            echo "     The oversized today-*.md files under $REMEMBER_DIR are the thing to look at."
+        else
+            # WARN, not FAIL, and the VERDICT is deliberately left alone — the
+            # same trade the log-rotation and case-divergence checks make above.
+            # Capture is entirely unaffected (saves still land in today-*.md),
+            # and since #348 the remedy is "do nothing": the next consolidation
+            # rotates the oversized file and resumes on its own.
+            echo "WARN Store is too large to consolidate right now: $_STORE_BYTES bytes"
+            echo "     against a thresholds.consolidate_max_bytes cap of $_CONSOLIDATE_MAX_BYTES"
+            echo "     — recent.md $_RECENT_BYTES + archive.md $_ARCHIVE_BYTES + past-day staging $_STAGING_BYTES."
+            echo "     Capture is unaffected; consolidation is what skips, and staging piles"
+            echo "     up until it runs."
+            echo "     REMEDIATION: none by hand. The next consolidation rotates the"
+            echo "     oversized file to a dated sibling (recent-YYYY-MM-DD.md /"
+            echo "     archive-YYYY-MM-DD.md), starts a fresh one, and resumes. Nothing is"
+            echo "     deleted — the bytes stay on disk, stay greppable, and session start"
+            echo "     names the rotated slices."
+        fi
+    else
+        echo "OK   Store fits the consolidation cap: $_STORE_BYTES of $_CONSOLIDATE_MAX_BYTES bytes"
+    fi
+fi
+
 if [ "$_POST_TOOL_FIRED" -eq 0 ]; then
     echo ""
     echo "REMEDIATION: enabling the plugin mid-session does not register its"
@@ -421,7 +521,17 @@ _ASSUMED_NOTE=""
 if [ "$_PROJECT_DIR_ASSUMED" -eq 1 ]; then
     _ASSUMED_NOTE=" (CLAUDE_PROJECT_DIR was not set; this describes $PROJECT_DIR, assumed from the current directory)"
 fi
-if [ "$_POST_TOOL_FIRED" -eq 1 ] && [ -n "$_LAST_SAVE_TIME" ]; then
+# One new arm (#348), and only for the store shape nothing in the pipeline will
+# clear on its own. The self-healing shape stays a WARN with the verdict left
+# alone: capture is unaffected there and the next round repairs it, so claiming
+# a problem would devalue the line commands/doctor.md tells the operator to
+# trust without scrolling. This arm sits ABOVE "capture is working" because
+# capture usually IS working in this state — saves land in today-*.md and pile
+# up unconsolidated, which is exactly why a healthy-looking verdict here would
+# send away the user the session-start notice sent in.
+if [ "${_STORE_NEEDS_A_HUMAN:-0}" -eq 1 ]; then
+    echo "VERDICT: problem — memory is being captured but never consolidated; the staging files are over the prompt cap on their own (see above)$_ASSUMED_NOTE"
+elif [ "$_POST_TOOL_FIRED" -eq 1 ] && [ -n "$_LAST_SAVE_TIME" ]; then
     echo "VERDICT: capture is working — last save $_LAST_SAVE_TIME$_ASSUMED_NOTE"
 elif [ "$_PYTHON_OK" -eq 0 ]; then
     echo "VERDICT: problem — no usable Python; the pipeline cannot run at all (see Tools above)$_ASSUMED_NOTE"
