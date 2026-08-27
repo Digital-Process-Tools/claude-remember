@@ -265,6 +265,8 @@ All four are registered together, from `hooks/hooks.json`, when the session star
 
 A flush failure (missing `python3`, a Haiku call that errors) is reported via the same channel `/remember:doctor` already reads (`hook-errors.log`) rather than swallowed silently, unlike the plugin's other hooks — this one is the last chance a session gets, so a failure here has nowhere left to retry from. Because the flush is backgrounded, that report lands once the background process finishes, not synchronously with the hook itself — the same trade the git-backup hook's own detached push already makes.
 
+A store that could never be created at all (a read-only or otherwise unwritable project root) is a narrower case than a flush failure — there is no `hook-errors.log` to write to, because the directory that would hold it is the one that failed. That one warning goes to this hook's own stderr instead ([#372](https://github.com/Digital-Process-Tools/claude-remember/issues/372)); it will not show up in `/remember:doctor`.
+
 ## Diagnostics (`/remember:doctor`)
 
 Prints resolved paths, detected tools, storage mode, whether the session directory Claude Code actually created matches the slug the plugin computes, when the last successful save happened, and whether `PostToolUse` has ever fired for this project. Each line is prefixed `OK` / `WARN` / `FAIL`, ending in a one-line verdict.

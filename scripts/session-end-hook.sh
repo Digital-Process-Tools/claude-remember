@@ -145,6 +145,35 @@ REMEMBER_PATHS_SOFT_FAIL=1 source "$_HOOK_DIR/resolve-paths.sh" || exit 0
 source "$_HOOK_DIR/detect-tools.sh"
 source "$_HOOK_DIR/bootstrap-dirs.sh"
 source "$PIPELINE_DIR/scripts/log.sh" 2>/dev/null
+# log.sh returns early on a store it cannot create a logs/ dir in — before it
+# defines log(), report_error() or dispatch() — so the source succeeding
+# above is not the same question as those existing (#361, #372). Same guard
+# post-tool-hook.sh and user-prompt-hook.sh already carry, for the same
+# reason: `declare -F`, NOT `type` or `command -v` — on macOS /usr/bin/log is
+# Apple's unified-logging CLI, so `type log` is true whether or not a shell
+# function was ever defined, the guard would pass, and the stub below would
+# never be installed: `log "hook" "..."` two lines down would instead exec
+# that binary, dump its own usage text to stderr, and exit 64 from a hook
+# documented "EXIT CODES: 0 Always". Measured on bash 3.2.57 (macOS).
+#
+# Unlike the no-op stubs the hot paths install, these two still have to
+# report SOMETHING: this is the one file whose own docstring (EXIT CODES,
+# above) promises a failed flush is "reported loudly ... rather than
+# swallowed silently", and line 158 below is reachable only when this source
+# has already failed for that exact reason. log.sh's own log() documents
+# "Falls back to stderr if log file is unwritable" — this reproduces exactly
+# that fallback, because it is the same fallback for the same reason:
+# $REMEMBER_DIR/logs is what could not be created. hook-errors.log and the
+# notices channel user-prompt-hook.sh reads (#200, #253) are both files under
+# that same directory, so neither is reachable here; stderr is the only
+# channel left, and bootstrap-dirs.sh only redirects it into hook-errors.log
+# once that directory exists (bootstrap-dirs.sh:230-231) — on this path it is
+# still going wherever Claude Code sends an unredirected hook's stderr,
+# which is not nowhere.
+declare -F log >/dev/null 2>&1 || log() {
+    printf '%s [%s] %s\n' "$(_remember_date +%H:%M:%S)" "$1" "$2" >&2
+}
+declare -F report_error >/dev/null 2>&1 || report_error() { log "$1" "$2"; }
 log "hook" "session-end: reason=$SESSION_END_REASON session=${STDIN_SESSION_ID:-unresolved}"
 
 # bootstrap-dirs.sh's mkdir is best-effort, and by the time this line runs it

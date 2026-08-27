@@ -236,3 +236,50 @@ class TestFailSoftContract:
         result = _run_hook(plugin, env, session_id=sid)
 
         assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")
+        # Positive control for test_must_fire_unwritable_store_reports_a_warning
+        # below (#372): bootstrap-dirs.sh's mkdir succeeds here (the project
+        # dir is fully writable), so REMEMBER_DIR is recreated and nothing
+        # went wrong -- no WARNING belongs on stderr. Without this half, an
+        # assertion that the warning fires elsewhere would be unfalsifiable:
+        # a broken harness that always prints WARNING would pass that test
+        # too.
+        assert "WARNING" not in result.stderr, (
+            "the store was recreated successfully (mkdir is writable here) -- "
+            "nothing failed, so nothing should be reported\n" + result.stderr
+        )
+
+    def test_must_fire_unwritable_store_reports_a_warning(self, tmp_path):
+        """#372: when the store genuinely cannot be created -- not merely
+        missing, but its parent is unwritable so bootstrap-dirs.sh's own
+        mkdir also fails -- log.sh returns before defining log() or
+        report_error() at all. Reaching line 158 requires exactly this: the
+        hook's own docstring (EXIT CODES) promises the failure is "reported
+        loudly ... rather than swallowed silently", and a `command not found`
+        does not change the exit status, so returncode alone cannot tell a
+        real report from total silence.
+        """
+        env, project, plugin, _calls, sid = _make_env(tmp_path, exchanges=1, humans=1)
+        _wire_hook(plugin)
+        shutil.rmtree(project / ".remember")
+        os.chmod(project, 0o555)
+        try:
+            result = _run_hook(plugin, env, session_id=sid)
+        finally:
+            # Restore before any fixture cleanup (tmp_path teardown) tries to
+            # remove a now-read-only directory.
+            os.chmod(project, 0o755)
+
+        assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")
+        assert not (project / ".remember").exists(), (
+            "the fixture must actually fail to create the store, or this test "
+            "proves nothing about the degraded path"
+        )
+        assert "command not found" not in result.stderr, (
+            "report_error (or log) was called while genuinely undefined -- "
+            "the declare -F guard is missing or bypassed\n" + result.stderr
+        )
+        assert "WARNING" in result.stderr, (
+            "a store that could never be created must be reported, not "
+            "swallowed into the same silent no-op as a session with nothing "
+            "new to flush\n" + result.stderr
+        )
