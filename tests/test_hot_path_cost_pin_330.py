@@ -42,6 +42,28 @@ not turn every future PR red; it is also, by construction, the width of a
 regression these pins cannot catch. Both budgets are measured, not guessed,
 and both slacks are the same size and for the same reason as the existing
 spawn budget.
+
+A third gap, found on macOS CI rather than reasoned about (#330 follow-up):
+the first version of this file wrote `config.json` with a plain
+`write_text()` instead of `tests.env_cache.write_config()`, and never
+verified with `tests.env_cache.EnvCacheProbe` that a "warm" run had actually
+replayed the cache rather than re-resolved. `scripts/lib-env-cache.sh`
+refuses its own cache unless it is `-nt` every config layer, and bash 3.2's
+`-nt` (macOS system bash, confirmed via `env_cache.nt_granularity() ==
+"second"` on this platform) compares whole seconds -- so a config written in
+the same wall-clock second as the cache publish TIES rather than loses, the
+cache is rejected, and every subsequent "warm" measurement in this file was
+silently re-resolving the full chain instead. Reproduced deterministically
+by forcing that tie by hand (`os.utime` matching the cache's own whole-second
+mtime) before this fix: same spawn signature CI reported --
+`python3 -V`, `git rev-parse`, the `jq -s` merge, the trap-stripping `sed`,
+the temp-file sweep. Fixed the same way `test_post_tool_fast_path_350.py`
+already does: `write_config()` backdates the config layer well past any
+second boundary, and every measured (non-priming) run below is bracketed by
+an `EnvCacheProbe` that fails loudly, naming which run went cold and why,
+instead of silently measuring the wrong path. This is a harness bug, not a
+platform limit -- every platform's bash refuses a same-second-or-older
+cache, this file only failed to guarantee it never asked one to.
 """
 
 from __future__ import annotations
@@ -64,6 +86,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from pipeline.slug import session_dir_slug as _slug
+from tests.env_cache import EnvCacheProbe, write_config
 from tests.spawn_counting import make_shim_dir
 from tests.spawn_counting import spawns as _spawn_lines
 
@@ -109,9 +132,16 @@ def _project(tmp_path: Path, *, jsonl_lines: int = 60, session_id: str = "sess-1
     (session_dir / (session_id + ".jsonl")).write_text(
         TRANSCRIPT_LINE * jsonl_lines, encoding="utf-8",
     )
-    (remember / "config.json").write_text(
-        '{"thresholds": {"delta_lines_trigger": 50}}', encoding="utf-8",
-    )
+    # Through write_config, not a plain write_text: the cache this fixture
+    # relies on being warm is refused unless it is `-nt` this file, and bash
+    # 3.2's `-nt` (macOS system bash) compares whole SECONDS. A config
+    # written in the same wall-clock second as the cache publish that
+    # follows it TIES rather than loses, the cache is rejected, and every
+    # "warm" measurement in this file silently re-resolves instead (#303,
+    # reproduced concretely for this file as a macOS-CI-only red -- see the
+    # module docstring). write_config backdates past any second boundary.
+    write_config(remember / "config.json",
+                 {"thresholds": {"delta_lines_trigger": 50}})
     (remember / "tmp" / "last-save-ts").write_text(str(int(time.time())),
                                                      encoding="utf-8")
     return home, project, remember
@@ -260,6 +290,20 @@ def _cmds(lines):
     return [line.split(" ", 1)[0] for line in lines]
 
 
+def _measure(env: dict, plugin: Path, remember: Path, tmp_path: Path, label: str):
+    """The one call site every MEASURED (non-priming) run in this file goes
+    through. Brackets `_traced_warm_run` with an `EnvCacheProbe` and fails
+    loudly, naming which run went cold and why, instead of silently
+    reporting a cold-path spawn/read count as though it were the warm one
+    this file claims to pin (see the module docstring's `#303` note -- this
+    is the fix for the macOS-CI-only red that shipped without it)."""
+    probe = EnvCacheProbe(env["TMPDIR"])
+    probe.snapshot()
+    result, spawns = _traced_warm_run(env, plugin, remember, tmp_path, label)
+    probe.assert_warm("the " + label + " measurement in test_hot_path_cost_pin_330.py")
+    return result, spawns
+
+
 # -- The baseline: both pins, on the SHIPPED hook --------------------------
 
 def test_the_warm_path_stays_inside_both_budgets(tmp_path):
@@ -269,7 +313,7 @@ def test_the_warm_path_stays_inside_both_budgets(tmp_path):
     _prime(env, plugin)
 
     _traced_warm_run(env, plugin, remember, tmp_path, "cold")
-    result, warm_spawns = _traced_warm_run(env, plugin, remember, tmp_path, "warm")
+    result, warm_spawns = _measure(env, plugin, remember, tmp_path, "warm")
     _reap(remember)
 
     reads = _read_builtin_lines(result.stderr)
@@ -321,7 +365,7 @@ def test_a_git_wrapper_on_the_hot_path_trips_the_spawn_pin(tmp_path, wrapper, la
     _prime(env, plugin)
 
     _traced_warm_run(env, plugin, remember, tmp_path, "prime-" + label)
-    _result, warm_spawns = _traced_warm_run(env, plugin, remember, tmp_path, label)
+    _result, warm_spawns = _measure(env, plugin, remember, tmp_path, label)
     _reap(remember)
 
     body = (plugin / "scripts" / "post-tool-hook.sh").read_text(encoding="utf-8")
@@ -372,7 +416,7 @@ def test_an_extra_builtin_file_read_is_invisible_to_the_spawn_pin_but_caught_by_
     _prime(env, plugin)
 
     _traced_warm_run(env, plugin, remember, tmp_path, "prime-read")
-    result, warm_spawns = _traced_warm_run(env, plugin, remember, tmp_path, "extra-read")
+    result, warm_spawns = _measure(env, plugin, remember, tmp_path, "extra-read")
     _reap(remember)
 
     body = (plugin / "scripts" / "post-tool-hook.sh").read_text(encoding="utf-8")
@@ -414,7 +458,7 @@ def test_a_pure_compute_loop_is_invisible_to_every_pin_here(tmp_path):
     _prime(env, plugin)
 
     _traced_warm_run(env, plugin, remember, tmp_path, "prime-compute")
-    result, warm_spawns = _traced_warm_run(env, plugin, remember, tmp_path, "compute")
+    result, warm_spawns = _measure(env, plugin, remember, tmp_path, "compute")
     _reap(remember)
 
     reads = _read_builtin_lines(result.stderr)
