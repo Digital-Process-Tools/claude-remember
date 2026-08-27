@@ -248,6 +248,13 @@ class TestFailSoftContract:
             "nothing failed, so nothing should be reported\n" + result.stderr
         )
 
+    @pytest.mark.skipif(
+        hasattr(os, "geteuid") and os.geteuid() == 0,
+        reason="root ignores the read-only mode bits this test depends on "
+               "(same guard as tests/test_bootstrap_readonly_root.py and "
+               "friends) -- mkdir would succeed anyway, and the fixture "
+               "assertion below would fail for an unrelated reason",
+    )
     def test_must_fire_unwritable_store_reports_a_warning(self, tmp_path):
         """#372: when the store genuinely cannot be created -- not merely
         missing, but its parent is unwritable so bootstrap-dirs.sh's own

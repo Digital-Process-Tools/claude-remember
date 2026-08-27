@@ -159,7 +159,8 @@ source "$PIPELINE_DIR/scripts/log.sh" 2>/dev/null
 # Unlike the no-op stubs the hot paths install, these two still have to
 # report SOMETHING: this is the one file whose own docstring (EXIT CODES,
 # above) promises a failed flush is "reported loudly ... rather than
-# swallowed silently", and line 158 below is reachable only when this source
+# swallowed silently", and the `report_error` call further down (guarding
+# the `[ ! -d "$REMEMBER_DIR" ]` branch) is reachable only when this source
 # has already failed for that exact reason. log.sh's own log() documents
 # "Falls back to stderr if log file is unwritable" — this reproduces exactly
 # that fallback, because it is the same fallback for the same reason:
