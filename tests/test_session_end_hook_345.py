@@ -53,6 +53,32 @@ def _wire_hook(plugin: Path) -> Path:
     return dst
 
 
+def _reap(remember: Path, timeout: float = 30):
+    """Wait for the hook's backgrounded flush to finish (#345).
+
+    The hook now forks save-session.sh into a subshell and returns
+    immediately (to avoid Claude Code's own ~60s hook-kill) -- the same
+    tmp/save-session.pid marker post-tool-hook.sh's own background fork
+    writes (see tests/test_post_tool_cooldown.py::_reap, the same shape).
+    Without this, calls.log may not have been written yet when a test reads
+    it right after subprocess.run() returns.
+    """
+    pid_file = remember / "tmp" / "save-session.pid"
+    if not pid_file.exists():
+        return
+    try:
+        pid = int(pid_file.read_text().strip())
+    except (ValueError, OSError):
+        return
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return
+        time.sleep(0.05)
+
+
 def _run_hook(plugin: Path, env: dict, *, session_id, reason: str = "other",
               no_stdin: bool = False):
     hook = plugin / "scripts" / HOOK_NAME
@@ -64,10 +90,12 @@ def _run_hook(plugin: Path, env: dict, *, session_id, reason: str = "other",
         if session_id is not None:
             body["session_id"] = session_id
         stdin_kw["input"] = json.dumps(body)
-    return subprocess.run(
+    result = subprocess.run(
         ["bash", str(hook)], env=env, capture_output=True, text=True, timeout=60,
         check=False, **stdin_kw,
     )
+    _reap(Path(env["CLAUDE_PROJECT_DIR"]) / ".remember")
+    return result
 
 
 class TestFlushIgnoresCooldownAndMinHumanGate:

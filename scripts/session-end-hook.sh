@@ -53,12 +53,16 @@
 #   CLAUDE_PROJECT_DIR   Project root (default: .)
 #
 # EXIT CODES
-#   0   Always. This hook must never block session teardown. A failed flush
-#       is reported loudly (report_error(), which reaches both the daily log
-#       and hook-errors.log — surfaced by /remember:doctor) rather than
-#       swallowed silently: the other hooks in this plugin can afford silence
-#       on failure because there is always a next tool call or a next session
-#       to retry from. This one is the last chance a session gets.
+#   0   Always, and immediately — the flush itself runs in a backgrounded
+#       subshell (see the flush section below) so this hook's own exit is not
+#       waiting on save-session.sh at all. A failed flush is reported loudly
+#       once that subshell finishes (report_error(), which reaches both the
+#       daily log and hook-errors.log — surfaced by /remember:doctor) rather
+#       than swallowed silently: the other hooks in this plugin can afford
+#       silence on failure because there is always a next tool call or a
+#       next session to retry from. This one is the last chance a session
+#       gets, which is also why it is the one hook here NOT allowed to lose
+#       its own failure to the same 60s kill it is trying to survive.
 #
 # ============================================================================
 
@@ -143,15 +147,25 @@ source "$_HOOK_DIR/bootstrap-dirs.sh"
 source "$PIPELINE_DIR/scripts/log.sh" 2>/dev/null
 log "hook" "session-end: reason=$SESSION_END_REASON session=${STDIN_SESSION_ID:-unresolved}"
 
-# bootstrap-dirs.sh's mkdir is best-effort; a store this hook cannot create
-# (read-only root, missing parent) is a silent no-op rather than a crash —
-# there is nothing to flush TO.
-[ -d "$REMEMBER_DIR" ] || exit 0
+# bootstrap-dirs.sh's mkdir is best-effort, and by the time this line runs it
+# has already tried once for THIS invocation — so unlike an ordinary "nothing
+# to flush" exit, reaching here means that attempt just failed (read-only
+# root, missing parent). Reported, not silently folded into the same no-op
+# every other early exit in this hook takes: without this line, a store that
+# can never be created and a session with nothing new to save are the same
+# line in hook-errors.log, which is no line at all.
+if [ ! -d "$REMEMBER_DIR" ]; then
+    report_error "session-end" "WARNING: $REMEMBER_DIR does not exist and could not be created — nothing was flushed at session end."
+    exit 0
+fi
 
 SAVE_SCRIPT="$PIPELINE_DIR/scripts/save-session.sh"
-[ -f "$SAVE_SCRIPT" ] || exit 0
+if [ ! -f "$SAVE_SCRIPT" ]; then
+    report_error "session-end" "WARNING: $SAVE_SCRIPT is missing — nothing was flushed at session end. Reinstall the plugin."
+    exit 0
+fi
 
-# --- Flush, unconditionally, in the foreground ---
+# --- Flush, unconditionally, in the BACKGROUND ---
 # save-session.sh --force bypasses its own cooldown timer AND its
 # min-human-message gate (see its own USAGE block) — exactly the two gates
 # this issue exists to route around. It does NOT bypass the zero-exchange
@@ -159,21 +173,43 @@ SAVE_SCRIPT="$PIPELINE_DIR/scripts/save-session.sh"
 # position without a Haiku call, so this hook costs nothing extra when there
 # is genuinely nothing to flush.
 #
-# Foreground, not backgrounded the way post-tool-hook.sh forks its own call.
-# post-tool-hook.sh backgrounds because there are more tool calls coming and
-# the agent must not wait on this one; here there is nothing left to wait
-# for, and a backgrounded save has nothing to outlive — the process tree it
-# would race is already tearing down. Blocking here is the whole point: this
-# is the session's last chance, not a routine tick.
-if [ -n "$STDIN_SESSION_ID" ]; then
-    bash "$SAVE_SCRIPT" "$STDIN_SESSION_ID" --force
-else
-    bash "$SAVE_SCRIPT" --force
-fi
-FLUSH_STATUS=$?
-
-if [ "$FLUSH_STATUS" -ne 0 ]; then
-    report_error "session-end" "WARNING: save-session.sh --force exited $FLUSH_STATUS at session end — this session's unsaved tail may be lost. See $REMEMBER_DIR/logs/ for what save-session.sh itself logged."
-fi
+# Backgrounded, the same way post-tool-hook.sh forks its own call — NOT run
+# and waited on in the foreground, which an earlier version of this hook did.
+# Claude Code kills a hook process after `hooks.dispatch_timeout_seconds`'
+# sibling budget for the events it waits on: this repo's own README documents
+# "Claude Code kills a hook at 60s of its own accord" for exactly this
+# reason. save-session.sh's own Haiku call already asks for up to 120s and
+# NDC compression up to 180s (scripts/save-session.sh) — both past 60s on
+# the sessions this hook exists to rescue, which are the long, content-heavy
+# ones. A foreground
+# wait risks losing the ENTIRE flush to Claude Code's own kill with no trace
+# at all; a backgrounded one gets to keep running after this hook returns,
+# the same way `hooks.d/after_save/50-git-backup.sh`'s own git push does
+# ("a listener blocked in a foreground child leaks that child when the
+# script is killed" — the shape this rewrite avoids). The trade is explicit:
+# this hook can no longer report a flush failure to the SAME invocation of
+# `/remember:doctor` that ran a second later, only to hook-errors.log once
+# the background flush itself finishes — which is what the subshell below
+# does.
+#
+# tmp/save-session.pid is the SAME marker post-tool-hook.sh's own
+# background fork writes (scripts/post-tool-hook.sh), not a second one: both
+# are "a save-session.sh is in flight" and nothing downstream needs to tell
+# them apart.
+mkdir -p "$REMEMBER_DIR/logs/autonomous" 2>/dev/null
+_END_LOG="$REMEMBER_DIR/logs/autonomous/session-end-$(_remember_date +%H%M%S).log"
+(
+    if [ -n "$STDIN_SESSION_ID" ]; then
+        bash "$SAVE_SCRIPT" "$STDIN_SESSION_ID" --force
+    else
+        bash "$SAVE_SCRIPT" --force
+    fi
+    _flush_status=$?
+    if [ "$_flush_status" -ne 0 ]; then
+        report_error "session-end" "WARNING: save-session.sh --force exited $_flush_status at session end — this session's unsaved tail may be lost. See $_END_LOG for what save-session.sh itself logged."
+    fi
+) < /dev/null > "$_END_LOG" 2>&1 &
+echo $! > "$REMEMBER_DIR/tmp/save-session.pid" 2>/dev/null
+disown 2>/dev/null || true
 
 exit 0
