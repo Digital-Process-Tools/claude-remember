@@ -792,15 +792,65 @@ fi
 CORE_MEMORIES="$REMEMBER_DIR/core-memories.md"
 REMEMBER_RECENT="$REMEMBER_DIR/recent.md"
 REMEMBER_ARCHIVE="$REMEMBER_DIR/archive.md"
-REMEMBER_HANDOFF="$REMEMBER_DIR/remember.md"
 REMEMBER_NOW="$REMEMBER_DIR/now.md"
 REMEMBER_TODAY_FILE="$REMEMBER_DIR/today-${TODAY}.md"
 
+# ── Handoff path: single (default) vs per-session (#363) ──────────────────
+# Two or more INTERACTIVE sessions share one project store by design, even
+# across git worktrees (_resolve_memory_project_dir, #56) — but the handoff
+# was always one fixed file. The second session's /remember silently
+# overwrote the first's, which then survived only in that session's own
+# transcript, nowhere on disk. Distinct from #221/#222: those protect a
+# PENDING handoff from a session that never writes one back; this is two
+# sessions that each DO write one, to the same name.
+#
+# `handoff_mode` defaults to "single" — today's path, byte-identical — so an
+# existing install's behaviour never changes underneath it. That means the
+# clobber is not fixed in the field until a user opts in, and that trade is
+# deliberate: every other behaviour-changing key in this file defaults off
+# (data_dir, git_restore.enabled, reject_pattern) rather than rewriting an
+# existing store's layout the moment a new version is installed.
+#
+# Per-session mode needs CURRENT_SESSION_ID (#270, sanitized above) to name
+# the file. Its absence must never silently fall back to the shared name —
+# that fallback IS the bug this exists to fix, only quieter, because the
+# user believes per_session is protecting them. So an unresolved session id
+# under a per_session request still resolves REMEMBER_HANDOFF to the shared
+# file (nothing else this hook can do with no name to give it), but the
+# hint below is withheld rather than pointed at it: the /remember skill's
+# own hardcoded legacy fallback is the only thing that can still write
+# there, and doing so leaves "no HANDOFF hint was given" visible in the
+# transcript instead of a namespaced-looking path that never actually
+# applied.
+HANDOFF_MODE=$(config ".handoff_mode" "single")
+PER_SESSION_HANDOFF=""
+HANDOFF_MODE_DEGRADED=""
+if [ "$HANDOFF_MODE" = "per_session" ] && [ -n "$CURRENT_SESSION_ID" ]; then
+    REMEMBER_HANDOFF="$REMEMBER_DIR/remember.${CURRENT_SESSION_ID}.md"
+    PER_SESSION_HANDOFF="true"
+else
+    REMEMBER_HANDOFF="$REMEMBER_DIR/remember.md"
+    # per_session was asked for and could not be honoured — record that this
+    # session degraded to the shared file so the hint below can withhold
+    # rather than point the skill at it as though isolation had applied.
+    [ "$HANDOFF_MODE" = "per_session" ] && HANDOFF_MODE_DEGRADED="true"
+fi
+
 # ── Handoff path hint (consumed by the /remember skill) ───────────────────
-# Emitted only in external mode. In legacy mode REMEMBER_HANDOFF resolves to
-# {project}/.remember/remember.md — the exact path the skill defaults to when
-# no === HANDOFF === block is present, so the hint would be pure noise.
-if [ "$REMEMBER_ROOT" != "$PROJECT_DIR" ]; then
+# Emitted in external mode (unchanged, #56/#296) OR whenever this session
+# resolved a per-session path — in LEGACY per_session mode REMEMBER_HANDOFF
+# no longer equals the skill's own hardcoded fallback, so the hint stops
+# being noise and becomes the only thing that points the skill at the
+# right file.
+#
+# Withheld outright when per_session was requested but degraded (no usable
+# session id): that fallback IS the clobber #363 exists to fix, only
+# quieter, and this applies in external mode too — the hint there was
+# unconditional before this feature existed precisely because REMEMBER_HANDOFF
+# was always the one true path, which is no longer true the moment a mode
+# claiming isolation silently lands on the shared file instead.
+if [ -z "$HANDOFF_MODE_DEGRADED" ] && \
+   { [ "$REMEMBER_ROOT" != "$PROJECT_DIR" ] || [ -n "$PER_SESSION_HANDOFF" ]; }; then
     echo "=== HANDOFF ==="
     echo "Write next handoff to: $REMEMBER_HANDOFF"
     echo ""
@@ -846,10 +896,22 @@ fi
 # start, and no merge driver repairs that: union emits both key sets and yields
 # a malformed record, so this is the one file in the store where "keep both
 # sides" is wrong.
-REMEMBER_HANDOFF_STATE="$REMEMBER_DIR/tmp/remember.delivered"
+# Per-session in per_session mode (#363) — REMEMBER_HANDOFF is now one file
+# per session, and two sessions racing the SAME delivery record would corrupt
+# it (a torn write, or one session's fingerprint overwriting another's) even
+# though each has its own handoff to track. In single mode this is exactly
+# the pre-#363 shared path.
+if [ -n "$PER_SESSION_HANDOFF" ]; then
+    REMEMBER_HANDOFF_STATE="$REMEMBER_DIR/tmp/remember.delivered.${CURRENT_SESSION_ID}"
+else
+    REMEMBER_HANDOFF_STATE="$REMEMBER_DIR/tmp/remember.delivered"
+fi
 
 # Carry an existing record to its new home rather than resetting it — this
-# machine's delivery history is still true about this machine.
+# machine's delivery history is still true about this machine. Legacy-record
+# migration is single-mode only: the old un-namespaced record predates #363
+# entirely, so it has nothing meaningful to say about any one session's
+# per-session slot, and per_session installs are new enough that none exists.
 #
 # The MOVE is also what retires the tracked copy. An ignore rule does nothing to
 # a file git already tracks, and a `git rm --cached` whose path still exists in
@@ -860,14 +922,16 @@ REMEMBER_HANDOFF_STATE="$REMEMBER_DIR/tmp/remember.delivered"
 #
 # A record arriving from a pull is DISCARDED, never adopted: it describes some
 # other machine's sessions, and it is the reason this issue exists.
-_REMEMBER_HANDOFF_STATE_LEGACY="$REMEMBER_DIR/remember.delivered"
-if [ -f "$_REMEMBER_HANDOFF_STATE_LEGACY" ]; then
-    if [ -f "$REMEMBER_HANDOFF_STATE" ]; then
-        rm -f "$_REMEMBER_HANDOFF_STATE_LEGACY" 2>/dev/null
-    else
-        mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null
-        mv "$_REMEMBER_HANDOFF_STATE_LEGACY" "$REMEMBER_HANDOFF_STATE" 2>/dev/null \
-            || rm -f "$_REMEMBER_HANDOFF_STATE_LEGACY" 2>/dev/null
+if [ -z "$PER_SESSION_HANDOFF" ]; then
+    _REMEMBER_HANDOFF_STATE_LEGACY="$REMEMBER_DIR/remember.delivered"
+    if [ -f "$_REMEMBER_HANDOFF_STATE_LEGACY" ]; then
+        if [ -f "$REMEMBER_HANDOFF_STATE" ]; then
+            rm -f "$_REMEMBER_HANDOFF_STATE_LEGACY" 2>/dev/null
+        else
+            mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null
+            mv "$_REMEMBER_HANDOFF_STATE_LEGACY" "$REMEMBER_HANDOFF_STATE" 2>/dev/null \
+                || rm -f "$_REMEMBER_HANDOFF_STATE_LEGACY" 2>/dev/null
+        fi
     fi
 fi
 
