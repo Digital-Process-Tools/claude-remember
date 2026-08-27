@@ -1,12 +1,19 @@
-"""Regression tests: no remember-config-<pid>.json may survive in TMPDIR.
+"""Regression tests: no remember-config-<pid>.json may survive.
 
-lib-memory-dir.sh creates ``${TMPDIR}/remember-config-$$.json`` at source time
+lib-memory-dir.sh creates a per-invocation merged-config file at source time
 and registers a chaining EXIT trap to remove it.  Scripts that later install
 their own plain ``trap ... EXIT`` (save-session.sh, run-consolidation.sh)
 REPLACE that trap — bash keeps a single EXIT trap — so the merged-config file
 used to be orphaned on every exit taken after the script's own trap was
 installed.  These tests run the real scripts in an isolated TMPDIR and assert
 nothing is left behind.
+
+Since #362 the file itself normally lives under ``$REMEMBER_DIR/tmp`` (a
+directory this plugin owns) rather than directly in ``$TMPDIR``, falling back
+to ``$TMPDIR`` only when ``$REMEMBER_DIR/tmp`` cannot be created.  These tests
+check both locations, so a regression to either the new home or the old
+fallback still fails loudly here rather than passing on a stray-count of zero
+that nothing was ever written to explain.
 """
 
 import os
@@ -75,12 +82,18 @@ source "{_bash_path(BOOTSTRAP_DIRS_SH)}"
         capture_output=True,
         text=True,
         env={**os.environ, "HOME": _bash_path(tmp_path)},
+        check=False,
     )
     assert result.returncode == 0, (
         f"script failed: rc={result.returncode}\n"
         f"stdout: {result.stdout}\nstderr: {result.stderr}"
     )
-    return sorted(isolated_tmp.glob("remember-config-*.json"))
+    # #362: the file's normal home is now $REMEMBER_DIR/tmp, with $TMPDIR only
+    # as a fallback -- check both, so a stray in either place is caught.
+    remember_tmp = project / ".remember" / "tmp"
+    return sorted(isolated_tmp.glob("remember-config-*.json")) + sorted(
+        remember_tmp.glob("remember-config-*.json")
+    )
 
 
 def test_save_session_exit_cleans_merged_config(tmp_path):

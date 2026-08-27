@@ -286,11 +286,13 @@ The pipeline writes to `REMEMBER_DIR` (created automatically). By default this i
 | `recent-YYYY-MM-DD.md`         | Rotated `recent.md` spans — searchable, not auto-loaded |
 | `remember.md`                  | Handoff note written by `/remember`               |
 | `logs/`                        | Pipeline logs — local to this machine, never backed up |
-| `tmp/`                         | Lock files, cooldown markers, handoff delivery record, this session's [slug record](#1-read-the-slug-this-session-computed) — local to this machine, never backed up |
+| `tmp/`                         | Lock files, cooldown markers, handoff delivery record, this session's [slug record](#1-read-the-slug-this-session-computed), each invocation's merged config — local to this machine, never backed up |
 | `identity.md`                  | Per-project identity override (optional)          |
 | `.claude/remember/identity.md` | Your agent's identity and values (you write this) |
 
 In [external storage mode](#external-storage-mode) with `{slug}` in `data_dir` there is one more file, and it is **not** inside `REMEMBER_DIR`: `<store root>/tmp/sessions`, the [session index](#2-find-the-record-when-the-slug-names-its-directory). It is per-machine state like the rest of `tmp/`, excluded from the git backup, and it exists because that is the one place a non-bash caller can name without already knowing the slug.
+
+**`tmp/remember-config-<pid>.json`** is the three-layer config merge (bundled defaults, `~/.remember/config.json`, this project's `config.json`) for one invocation. It is created and removed by the same process, via an `EXIT` trap — and on Windows/Git Bash that trap does not reliably fire for this plugin's short-lived hook processes, so one leaked, unremoved copy per hook call was observed accumulating directly in the OS temp directory (23,908 of them in one report, [#362](https://github.com/Digital-Process-Tools/claude-remember/issues/362)). Since #362 the file lives here — a directory this plugin owns, rather than one shared with every other app on the machine — and every invocation also sweeps away any copy here whose age says its own process is long gone, so a trap that never fires no longer leaks forever.
 
 ## Computing the slug outside bash
 
