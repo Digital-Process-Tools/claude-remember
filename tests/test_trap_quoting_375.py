@@ -130,9 +130,15 @@ def test_exit_trap_cleans_up_relocated_config_regardless_of_path_metacharacters(
     Runs the real hook chain (resolve-paths.sh -> bootstrap-dirs.sh, which
     sources lib-memory-dir.sh) as a subprocess so the shell's own EXIT trap
     genuinely fires, exactly as it does for a real hook invocation. Before
-    the fix, every metacharacter case here leaves the relocated
-    remember-config-$$.json behind; the plain-identifier control passes
-    either way, which is what makes it a control rather than a duplicate."""
+    the fix, only the apostrophe case actually leaves the relocated
+    remember-config-$$.json behind -- the vulnerable trap wraps the path in
+    a SINGLE-quoted span, and `$`, a backtick and a double quote are all
+    inert inside single quotes, so those three cases pass before the fix
+    too. They stay in this matrix as regression coverage for the fix
+    itself (confirming `printf %q` round-trips them as well as the
+    apostrophe it was written for), not as pre-fix reproductions. The
+    plain-identifier control passes either way, which is what makes it a
+    control rather than a duplicate."""
     project = _make_named_project(tmp_path, case)
     isolated_tmp = tmp_path / "systmp"
     isolated_tmp.mkdir()
