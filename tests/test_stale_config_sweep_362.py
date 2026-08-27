@@ -102,6 +102,28 @@ def _remember_tmp(project) -> Path:
     return project / ".remember" / "tmp"
 
 
+def _norm_sep(s: str) -> str:
+    """Backslash and forward slash both name the same Windows path, and this
+    codebase deliberately produces BOTH in one string on real Windows/Git
+    Bash: resolve-paths.sh's OSTYPE=msys/cygwin branch (#263) rewrites
+    PROJECT_DIR into native `C:\\...` form so Claude Code's own slug
+    computation matches, while every `/tmp/remember-config-$$.json` this
+    plugin appends afterward is bash string concatenation using `/`
+    literally. The two halves land in one path -- `C:\\Users\\...\\proj` then
+    `/.remember/tmp/...` -- and Windows treats that mix as one valid,
+    working location; a raw substring compare across it does not. Observed
+    on CI's windows-latest leg (#362 follow-up): the un-normalized compare
+    failed on exactly this split, at exactly the project-directory boundary,
+    with the two sides identical in every character except separator style.
+    Comparing after normalizing both sides to `/` makes the check agnostic
+    to which half of a path went through which code, which is the only
+    thing that changes between platforms -- it does not loosen what counts
+    as a match: the fallback ($SYS_TMPDIR, not $REMEMBER_DIR/tmp) is a
+    genuinely different string even after normalization, so a real
+    regression in the relocation still fails this exactly as before."""
+    return s.replace("\\", "/")
+
+
 def test_merged_config_lives_under_remember_dir_tmp(tmp_path):
     """The per-invocation merged config is written under $REMEMBER_DIR/tmp,
     not directly into the shared OS temp root -- a directory this plugin
@@ -122,13 +144,47 @@ def test_merged_config_lives_under_remember_dir_tmp(tmp_path):
     merged_path = merged_line[0][len("MERGED="):]
 
     remember_tmp = _remember_tmp(project)
-    assert str(remember_tmp) in merged_path, (
+    assert _norm_sep(str(remember_tmp)) in _norm_sep(merged_path), (
         f"expected the merged config under {remember_tmp}, got {merged_path!r}"
     )
     assert not list(isolated_tmp.glob("remember-config-*.json")), (
         "merged config was written into the shared OS temp root, not "
         "$REMEMBER_DIR/tmp"
     )
+
+
+def test_norm_sep_tolerates_the_real_windows_ci_mismatch():
+    """Pins the exact CI failure this codebase can hit on real Windows/Git
+    Bash without needing a Windows box to reproduce it: PR #371's
+    windows-latest leg failed test_merged_config_lives_under_remember_dir_tmp
+    with
+
+        expected .../proj\\\\.remember\\\\tmp
+        got      .../proj/.remember/tmp/remember-config-1307.json
+
+    -- identical except that resolve-paths.sh's OSTYPE=msys/cygwin branch
+    (#263) had rewritten the project-directory prefix into native `C:\\\\...`
+    form while this plugin's own `/tmp/remember-config-$$.json` suffix stayed
+    forward-slashed. That is confirmed, by reading resolve-paths.sh, to be
+    deliberate pre-existing behavior unrelated to #362 -- so the relocation
+    genuinely happened and the assertion was wrong to fail. This test uses
+    the literal strings from that CI failure (with the prefix shortened) so
+    a future change to _norm_sep cannot silently stop tolerating this exact
+    shape."""
+    expected = "C:\\Users\\runneradmin\\proj\\.remember\\tmp"
+    got = "C:\\Users\\runneradmin\\proj/.remember/tmp/remember-config-1307.json"
+    assert _norm_sep(expected) in _norm_sep(got)
+
+
+def test_norm_sep_still_catches_a_genuine_fallback_to_systmp():
+    """The paired negative control: normalizing separators must not turn the
+    check into one that passes when the relocation never happened at all --
+    i.e. the file landed in the $SYS_TMPDIR fallback instead of
+    $REMEMBER_DIR/tmp. That is a different path, not a different separator,
+    and must still fail regardless of which slashes either side uses."""
+    expected = "C:\\Users\\runneradmin\\proj\\.remember\\tmp"
+    fallback_got = "C:\\Users\\runneradmin\\AppData\\Local\\Temp/remember-config-1307.json"
+    assert _norm_sep(expected) not in _norm_sep(fallback_got)
 
 
 def test_stale_merged_config_is_swept(tmp_path):
