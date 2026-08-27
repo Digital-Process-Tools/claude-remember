@@ -198,23 +198,48 @@ class TestSingleModeUnchanged:
 
 class TestMissingSessionIdDoesNotSilentlyReintroduceTheClobber:
 
-    def test_per_session_mode_without_a_usable_session_id_withholds_the_hint(self, tmp_path):
+    def test_degraded_per_session_mode_still_gives_the_correct_external_path(self, tmp_path):
         """per_session requested, but no usable session_id reached the hook
-        (payload absent, or #270's sanitizer rejected it). Falling back to
-        the shared remember.md UNDER A MODE THE USER BELIEVES IS NAMESPACED
-        is the exact clobber #363 exists to fix, only quieter — so the hint
-        must not point the /remember skill at the shared file as though
-        per_session had actually applied.
-
-        Uses external mode so the hint would otherwise unconditionally fire
-        (test_external_data_dir.py's own baseline) — the withholding here is
-        provably due to the missing session id, not legacy-mode suppression.
+        (payload absent, or #270's sanitizer rejected it) — REMEMBER_HANDOFF
+        falls back to the shared file. In EXTERNAL mode that shared file is
+        still the one real path, so the hint must still fire: an earlier
+        version of this fix withheld it outright on degrade, which broke
+        external mode by reintroducing the exact bug the hint exists to
+        prevent (the /remember skill falling back to its own hardcoded,
+        project-relative default instead of the true external location).
         """
+        project, home, remember_dir = _sandbox(tmp_path, handoff_mode="per_session", external=True)
+
+        out = _session_start(project, home, None)
+
+        path = _handoff_path_from_hint(out)
+        assert path == str(remember_dir / "remember.md"), (
+            f"degraded per_session hint did not point at the real external "
+            f"handoff file\n{out}"
+        )
+
+    def test_degraded_per_session_mode_says_so_out_loud(self, tmp_path):
+        """Silence is what let the earlier bug (#221) hide; degrading to the
+        shared file must be visible, not merely harmless, so a user who set
+        per_session does not read isolation into a session that never got
+        one."""
         project, home, _remember_dir = _sandbox(tmp_path, handoff_mode="per_session", external=True)
 
         out = _session_start(project, home, None)
 
-        assert "Write next handoff to:" not in out, (
-            f"hint pointed at a file under an unnamespaced fallback while "
-            f"per_session mode was requested\n{out}"
+        assert "no session_id reached this hook" in out, (
+            f"degraded per_session mode said nothing about it\n{out}"
+        )
+
+    def test_resolved_per_session_mode_says_nothing_extra(self, tmp_path):
+        """Positive control for the assertion above: with a usable
+        session_id, per_session is NOT degraded, and the degradation notice
+        must not appear — otherwise the notice text would be unconditional
+        noise rather than a signal tied to the actual degraded state."""
+        project, home, _remember_dir = _sandbox(tmp_path, handoff_mode="per_session")
+
+        out = _session_start(project, home, "sess-ccc")
+
+        assert "no session_id reached this hook" not in out, (
+            f"degradation notice fired for a session that had a usable id\n{out}"
         )

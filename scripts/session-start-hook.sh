@@ -843,16 +843,27 @@ fi
 # being noise and becomes the only thing that points the skill at the
 # right file.
 #
-# Withheld outright when per_session was requested but degraded (no usable
-# session id): that fallback IS the clobber #363 exists to fix, only
-# quieter, and this applies in external mode too — the hint there was
-# unconditional before this feature existed precisely because REMEMBER_HANDOFF
-# was always the one true path, which is no longer true the moment a mode
-# claiming isolation silently lands on the shared file instead.
-if [ -z "$HANDOFF_MODE_DEGRADED" ] && \
-   { [ "$REMEMBER_ROOT" != "$PROJECT_DIR" ] || [ -n "$PER_SESSION_HANDOFF" ]; }; then
+# NOT withheld on degrade. An earlier version of this hook suppressed the
+# hint outright whenever per_session was requested but had no usable
+# session id, reasoning that pointing at the shared file under a mode
+# claiming isolation was a lie. That reasoning was wrong in external mode:
+# REMEMBER_HANDOFF still resolves to the one real external path there, so
+# the hint is exactly as accurate as it always was, and withholding it
+# reintroduced the bug the ORIGINAL external-mode hint existed to prevent —
+# the /remember skill falling back to its hardcoded, project-relative
+# default instead of the real external location. A reviewer of #363 caught
+# this before it shipped.
+#
+# The honest fix is not silence, it is a visible line: when degraded, the
+# hint still fires with the correct path, and a second line says so, so
+# a user who set per_session does not read "namespaced" behaviour into a
+# session that never got one.
+if [ "$REMEMBER_ROOT" != "$PROJECT_DIR" ] || [ -n "$PER_SESSION_HANDOFF" ]; then
     echo "=== HANDOFF ==="
     echo "Write next handoff to: $REMEMBER_HANDOFF"
+    if [ -n "$HANDOFF_MODE_DEGRADED" ]; then
+        echo "(handoff_mode is \"per_session\", but no session_id reached this hook — writing to the shared file above, not a per-session one.)"
+    fi
     echo ""
 fi
 
