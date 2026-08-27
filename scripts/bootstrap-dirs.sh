@@ -172,7 +172,14 @@ if [ -d "$REMEMBER_DIR/tmp" ]; then
         # real chain rather than a standalone snippet. Undoing the
         # requoting -- collapsing each `'\''` back to a literal `'` -- makes
         # the extracted text the exact original command again, safe to
-        # re-embed.
+        # re-embed. This reverses exactly ONE level of `trap -p`'s
+        # requoting, which is all today's chain ever needs (nothing in this
+        # codebase installs an EXIT trap before bootstrap-dirs.sh sources
+        # lib-memory-dir.sh, so what we read back here is always exactly one
+        # `rm -f '$path'`, never something that has already been through
+        # this same substitution itself). It is not a general un-quoter --
+        # chaining onto a trap value that has itself already passed through
+        # one round of this idiom would need a second pass.
         _remember_existing_trap=$(trap -p EXIT 2>/dev/null | sed "s/trap -- '//;s/' EXIT//;s/'\\\\''/'/g")
         if [ -n "$_remember_existing_trap" ]; then
             # shellcheck disable=SC2064
