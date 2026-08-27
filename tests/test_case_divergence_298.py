@@ -532,7 +532,15 @@ def test_the_per_tool_call_path_is_not_touched(tmp_path):
     one-token arithmetic guard in that file, and it goes vacuous the moment the
     edit it objected to lands on main. What #298/#299 actually care about is
     that the divergence check is unreachable from the per-tool-call path and
-    that the path spawns no git, so that is what is checked.
+    that the path spawns no git, so that is what is checked here -- a
+    substring check, and only that. #330 named vectors that reintroduce the
+    same cost while staying green against it (a git call spelled through a
+    variable or `command`, an extra file read or loop with no new spawn at
+    all): see tests/test_hot_path_cost_pin_330.py for the measured spawn and
+    read-builtin pins that close that gap. This test is not redundant with
+    it -- a literal check is cheap and catches a copy-paste of the real
+    divergence code even when it would never run -- but it is no longer the
+    whole story on its own.
 
     The other two arms keep the byte compare, over CODE LINES only (#350). They
     were never about prose: they exist so that nothing reaches into these two

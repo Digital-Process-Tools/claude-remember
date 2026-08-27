@@ -26,6 +26,15 @@ and is invisible to every pin in this file, including the new one. See
 `test_a_pure_compute_loop_is_invisible_to_every_pin_here` -- it is not a gap
 this file closes silently, it is a gap this file states.
 
+A second, narrower gap in the read pin itself: `_is_read_builtin` matches
+`read`, `mapfile` and `readarray` by name, because all three are traced as
+their own xtrace line. `x=$(< file)` -- bash's own fast-path substitute for
+`cat file` -- is not: it produces NO separate trace line at all (confirmed
+locally: `bash -x` on a script containing it prints only the resulting
+assignment, never a `read` or a `cat`), so it is invisible to xtrace itself,
+not merely to this parser. Nothing in this file can catch that vector; it is
+named here rather than left for a reader to discover by trying it.
+
 Also: a single extra spawn or a single extra builtin read, on its own, may
 fall inside a pin's own slack (test_post_tool_fast_path_350's is +2; the read
 pin below carries the same). Slack exists so a legitimate one-spawn fix does
@@ -158,19 +167,28 @@ def _reap(remember: Path) -> None:
 
 _ASSIGN = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
 
+# `read` is the builtin every call site in this repo happens to use today,
+# but it is not the only one that turns a redirected file into a variable
+# with no subprocess: `mapfile`/`readarray` (bash >= 4) do the same thing in
+# one traced command instead of a loop. A pin that only recognised the
+# literal word `read` would call a rewrite from a `while read` loop to
+# `mapfile -t arr < file` a cost reduction when it is exactly the same file
+# being opened. Both names are checked for the same reason.
+_READ_LIKE_BUILTINS = frozenset({"read", "mapfile", "readarray"})
+
 
 def _is_read_builtin(cmd: str) -> bool:
     """`IFS= read -r x` traces as one command with the assignment prefixed --
     strip any number of `NAME=value` prefixes before asking whether the next
-    word is exactly `read`. Exact-match, not substring: `read-position` is a
-    positional argument to `$PYTHON -m pipeline.shell`, not the builtin, and
-    a naive `\bread\b` regex would wrongly match it (a hyphen is a word
-    boundary)."""
+    word is exactly one of `_READ_LIKE_BUILTINS`. Exact-match, not substring:
+    `read-position` is a positional argument to `$PYTHON -m pipeline.shell`,
+    not the builtin, and a naive `\bread\b` regex would wrongly match it (a
+    hyphen is a word boundary)."""
     tokens = cmd.split()
     i = 0
     while i < len(tokens) and _ASSIGN.match(tokens[i]):
         i += 1
-    return i < len(tokens) and tokens[i] == "read"
+    return i < len(tokens) and tokens[i] in _READ_LIKE_BUILTINS
 
 
 def _read_builtin_lines(stderr: bytes) -> list[str]:
