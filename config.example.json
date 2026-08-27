@@ -12,7 +12,8 @@
     "delta_lines_trigger": 50,
     "extract_max_bytes": 300000,
     "consolidate_max_bytes": 600000,
-    "memory_inject_max_bytes": 200000
+    "memory_inject_max_bytes": 200000,
+    "staging_warn_bytes": 2000000
   },
   "features": {
     "ndc_compression": true,
@@ -85,6 +86,20 @@
       "and a fresh one started. Nothing is deleted and the slices are named at",
       "session start. If the past-day staging files are over the cap on their",
       "own, nothing is rotated — no rotation would change the next round."
+    ],
+    "staging_warn_bytes": [
+      "Byte threshold (UTF-8) for a one-time WARNING when a today-*.md staging",
+      "file grows past it (#349). Staging files are append-only by design --",
+      "only a SUCCESSFUL consolidation round retires one -- so sustained lock",
+      "contention, a full disk, or a stalled consolidation (features.ndc_",
+      "compression off, or the #346 skip-forever state) leaves the same kind of",
+      "span appended every round with nothing to bound it. This does NOT cap or",
+      "truncate the file; it only logs (report_error, reaching hook-errors.log,",
+      "surfaced by /remember:doctor) the first time the file crosses the line,",
+      "so the growth is visible instead of silent. Set 0 to disable.",
+      "Default 2000000 -- comfortably above a healthy day's worth of staged",
+      "entries and comfortably below consolidate_max_bytes, so a warning here",
+      "is a signal something is stuck well before that separate skip-guard."
     ],
     "memory_inject_max_bytes": [
       "A memory file larger than this (UTF-8 bytes) is NAMED with its size at",

@@ -87,8 +87,42 @@ staging_lock_release() {
 # which is precisely why they belong inside a critical section — a reader
 # landing between them sees a file ending in a blank line with no summary.
 # Call only while holding the lock.
+#
+# THE GROWTH WARNING (#349): this file is genuinely append-only — every
+# caller that appends here does so *because* rolling the span back risks
+# erasing a concurrent write, and that trade is correct (see the callers'
+# own comments). What nobody costed is a PERSISTENT cause: sustained lock
+# contention, a full disk, or a consolidation round that has stopped for
+# good (#346's skip-forever state, or features.ndc_compression turned off
+# by a typo) all leave the same span landing here every round, forever,
+# with nothing to retire it. A cap that silently dropped bytes would be
+# worse than the growth it is guarding against — so this does not cap
+# anything. It only makes the growth visible once, the same way #180 made
+# a silently-failing NDC call visible: report_error() so it reaches both
+# the daily log and hook-errors.log, surfaced by /remember:doctor, without
+# touching the file's contents at all.
+#
+# Fires once per crossing rather than once per append past the line — the
+# before/after byte count brackets the threshold with no marker file and no
+# state of its own, so a store that later shrinks (a rotation, a manual
+# edit) and grows past the line again warns again rather than staying mute
+# forever after its first crossing.
 staging_append() {
     local _today="$1" _text="$2"
+    local _before=0
+    [ -f "$_today" ] && _before=$(wc -c < "$_today" 2>/dev/null | tr -d ' ')
+    case "$_before" in (''|*[!0-9]*) _before=0 ;; esac
     [ -s "$_today" ] && echo "" >> "$_today"
     cat "$_text" >> "$_today"
+    local _warn_bytes
+    _warn_bytes=$(config ".thresholds.staging_warn_bytes" 2000000)
+    case "$_warn_bytes" in (''|*[!0-9]*) _warn_bytes=2000000 ;; esac
+    if [ "$_warn_bytes" -gt 0 ] && [ "$_before" -lt "$_warn_bytes" ]; then
+        local _after
+        _after=$(wc -c < "$_today" 2>/dev/null | tr -d ' ')
+        case "$_after" in (''|*[!0-9]*) _after=0 ;; esac
+        if [ "$_after" -ge "$_warn_bytes" ]; then
+            report_error "staging" "WARNING: ${_today} has grown past ${_warn_bytes}b — this file is append-only and only a SUCCESSFUL consolidation round retires it. Sustained lock contention, a full disk, or consolidation having stopped (check features.ndc_compression and hook-errors.log for consolidation failures) will keep appending the same kind of span here without bound. Nothing was dropped or truncated."
+        fi
+    fi
 }

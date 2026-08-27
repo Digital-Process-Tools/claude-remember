@@ -101,18 +101,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# --- Lock (mkdir acquisition, rename-based stale takeover — see lib-lock.sh) ---
-# Timeout 0: a save that loses the race skips rather than queues. Two saves of
-# the same session back to back have nothing to add to each other, and the next
-# tool call brings another one along in seconds.
-if lock_acquire "$LOCK_DIR" 0; then
-    HAVE_LOCK=true
-else
-    debug_enabled 1 && log "lock" "another save holds the lock, skipping"
-    exit 0
-fi
-
 # --- Parse args ---
+# Moved ahead of lock acquisition (#369): --force has to be known BEFORE the
+# lock is taken, because the two callers need different acquisition
+# strategies (see below), and reading argv has no side effect that ordering
+# could break.
 DRY_RUN=false
 FORCE=false
 SESSION_ID=""
@@ -123,6 +116,55 @@ for arg in "$@"; do
         *)       SESSION_ID="$arg" ;;
     esac
 done
+
+# --- Lock (mkdir acquisition, rename-based stale takeover — see lib-lock.sh) ---
+# Two acquisition strategies, not one (#369). A PLAIN call (post-tool-hook.sh's
+# background fork, or a bare `save-session.sh <id>`) still uses timeout 0: a
+# save that loses the race skips rather than queues, because two saves of the
+# same session back to back have nothing to add to each other and the next
+# tool call brings another one along in seconds. That reasoning does not carry
+# over to --force. session-end-hook.sh forks `save-session.sh --force` as the
+# session's LAST chance to flush, moments after post-tool-hook.sh's own
+# background save may have just taken the lock for the same span — timeout 0
+# then loses a race it was never trying to win, and used to exit 0 having
+# saved nothing, indistinguishable from a genuine no-op.
+#
+# So a FORCED call waits, bounded, instead of failing on contact: long enough
+# to outlast an ordinary save (NDC's own commit-lock wait is 30s, reused here
+# as the same order of magnitude — see NDC_COMMIT_LOCK_TIMEOUT above), short
+# enough not to hang the session-end hook, which backgrounds this call
+# specifically so a slow flush cannot block Claude Code's own hook timeout
+# (see session-end-hook.sh). Env-overridable so a test can drive the timeout
+# path without waiting out the real default, same shape as
+# REMEMBER_NDC_COMMIT_LOCK_TIMEOUT above.
+#
+# This is a bounded RETRY, not a second writer: --force still waits for the
+# SAME mutex, never bypasses it. Two concurrent writers to now.md was
+# considered and rejected — that reintroduces the #142/#168 class of bug this
+# lock exists to prevent, to buy back a race that a longer wait already
+# closes in the overwhelming majority of cases.
+#
+# The failure that remains — the holder outlives even this wait — must not be
+# silent (#369's actual complaint). It exits 1, distinct from the plain
+# path's exit 0, and session-end-hook.sh already checks that exit code and
+# calls report_error on nonzero: this makes that existing check see the
+# failure instead of a false all-clear.
+FORCE_LOCK_TIMEOUT="${REMEMBER_FORCE_LOCK_TIMEOUT:-30}"
+if [ "$FORCE" = true ]; then
+    if lock_acquire "$LOCK_DIR" "$FORCE_LOCK_TIMEOUT"; then
+        HAVE_LOCK=true
+    else
+        log "lock" "ERROR: --force waited ${FORCE_LOCK_TIMEOUT}s for save.lock and another save still held it — nothing was flushed this call"
+        exit 1
+    fi
+else
+    if lock_acquire "$LOCK_DIR" 0; then
+        HAVE_LOCK=true
+    else
+        debug_enabled 1 && log "lock" "another save holds the lock, skipping"
+        exit 0
+    fi
+fi
 
 SESSION_DIR_PATH="$(claude_projects_dir)/$(session_dir_slug "$PROJECT_DIR")"
 if [ -z "$SESSION_ID" ]; then
