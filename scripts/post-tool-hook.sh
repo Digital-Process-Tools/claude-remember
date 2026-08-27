@@ -215,6 +215,14 @@ else
     # run since the last config edit, which on a long agentic turn is a hundred
     # tool calls away.
     _remember_env_cache_publish
+    # log.sh returns early on a store it cannot create a logs/ dir in — before
+    # it defines log() — so the source succeeding above is not the same
+    # question as `log` existing (#361). The fast path already carries this
+    # exact guard, for the exact reason given there: `declare -F`, not `type`,
+    # because `type log` is true on macOS whether or not a function was
+    # defined — /usr/bin/log is Apple's unified logging CLI, and a hook
+    # documented "EXIT CODES: 0 Always" must not shell out to it.
+    declare -F log >/dev/null 2>&1 || log() { :; }
     log "hook" "post-tool: PROJECT_DIR=$PROJECT_DIR PIPELINE_DIR=$PIPELINE_DIR PYTHON=$PYTHON REMEMBER_DIR=$REMEMBER_DIR"
 fi
 
@@ -631,6 +639,13 @@ if [ -n "$HOOK_STDIN" ] && _after_post_tool_listener; then
     fi
 fi
 
+# Same hazard as the `log` guard above: log.sh may have returned early,
+# before it defined dispatch() (#361). A hook documented "EXIT CODES: 0
+# Always" must not shell out to a "command not found" here either. This one
+# guard covers both branches above it — the fast path already stubs
+# dispatch() unconditionally, so `declare -F` is already true there, and this
+# is a no-op on that path.
+declare -F dispatch >/dev/null 2>&1 || dispatch() { :; }
 dispatch "after_post_tool"
 
 [ -n "$_hook_stdin_file" ] && rm -f "$_hook_stdin_file" 2>/dev/null

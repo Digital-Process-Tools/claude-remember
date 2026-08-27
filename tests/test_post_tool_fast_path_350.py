@@ -540,3 +540,73 @@ def test_an_executable_listener_takes_the_slow_path_and_is_dispatched(tmp_path):
         "the after_post_tool listener was never dispatched — the fast path "
         "stubbed out dispatch() for a user who had installed one"
     )
+
+
+def test_the_slow_path_does_not_exec_system_log_or_call_undefined_dispatch(tmp_path):
+    """#361: the fast path above already guards `log` (`declare -F log`) and
+    stubs `dispatch()` outright. The SLOW path — taken by every session's
+    FIRST tool call, because there is no cache yet to replay — guarded
+    neither: it sourced log.sh with stderr suppressed and then called `log`
+    and `dispatch` unconditionally.
+
+    Reproduced exactly as
+    ``test_a_store_that_cannot_hold_a_log_does_not_exec_the_system_log_binary``
+    does — logs/ as a FILE, the cheapest cross-platform way to make log.sh's
+    `mkdir -p` fail — but deliberately WITHOUT ``_prime(env)`` first, so this
+    run actually takes the slow path instead of the fast one that test (and
+    the one it's modeled on, at line ~448) restricts itself to. The issue's
+    own claim was that dropping ``_prime`` from that fixture makes it fail
+    today; verified directly against this branch's pre-fix tree before the
+    guard below was added — it did.
+
+    Paired with a positive control in the same fixture, on the same project
+    and the same installed listener: a HEALTHY store still dispatches to it.
+    That is the difference between a fallback for a chain that failed and a
+    stub that would silently swallow every real listener too.
+    """
+    home, project, remember = _project(tmp_path, cooldown_ts=int(time.time()))
+    plugin = tmp_path / "plugin"
+    subprocess.run(["cp", "-R", str(REPO_ROOT), str(plugin)], check=True,
+                   capture_output=True)
+    listener_dir = plugin / "hooks.d" / "after_post_tool"
+    listener_dir.mkdir(parents=True, exist_ok=True)
+    witness = tmp_path / "listener-ran"
+    listener = listener_dir / "50-witness.sh"
+    listener.write_text("#!/bin/bash\ntouch " + str(witness) + "\n", encoding="utf-8")
+    listener.chmod(0o755)
+
+    env = _env(tmp_path, home, project, {"CLAUDE_PLUGIN_ROOT": str(plugin)})
+    # No _prime(): this IS the first tool call of a session — the case #361
+    # measured — and there is nothing yet to make it take the fast path.
+
+    logs = remember / "logs"
+    if logs.exists():
+        shutil.rmtree(logs)
+    logs.write_text("not a directory", encoding="utf-8")
+
+    result = _run(env)
+    _reap(remember)
+
+    assert result.returncode == 0, (
+        "documented EXIT CODES: 0 Always — got " + str(result.returncode)
+        + ": " + repr(result.stderr[:600])
+    )
+    assert b"Unknown subcommand" not in result.stderr, (
+        "the slow path shelled out to the system `log` binary instead of "
+        "its own no-op — stderr: " + repr(result.stderr[:600])
+    )
+    assert b"dispatch: command not found" not in result.stderr, (
+        "the slow path called an undefined dispatch() — stderr: "
+        + repr(result.stderr[:600])
+    )
+
+    # POSITIVE CONTROL: a HEALTHY store, same listener, still dispatches —
+    # the guard above is a fallback for a broken chain, not a permanent stub.
+    logs.unlink()
+    result2 = _run(env)
+    _reap(remember)
+    assert result2.returncode == 0, repr(result2.stderr[:400])
+    assert witness.exists(), (
+        "the #361 guard disabled dispatch on the healthy path too — an "
+        "installed after_post_tool listener no longer runs at all"
+    )

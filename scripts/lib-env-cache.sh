@@ -175,6 +175,21 @@ _remember_env_cache_publish() {
     [ -n "${REMEMBER_DIR:-}" ] || return 0
     [ -n "${PROJECT_DIR:-}" ] || return 0
     [ -n "${PIPELINE_DIR:-}" ] || return 0
+    # log.sh returns early — before it ever sets these two — on a store whose
+    # logs/ dir it cannot create (#358). Two of this function's three callers
+    # (user-prompt-hook.sh, post-tool-hook.sh's slow path) source log.sh with
+    # stderr suppressed and call this unconditionally, so an early return left
+    # both variables unset here, not merely absent from config. Defaulting them
+    # below in that case would publish 120/50 as though config had said so, and
+    # the load side cannot tell that apart from a real answer — both are
+    # digits. Required here, not defaulted, same rule _remember_env_cache_load
+    # already applies to the same two keys and for the same reason (#301):
+    # skip the whole publish rather than write a cache the load side would
+    # accept but is really a stand-in for a chain that never ran. A cache one
+    # write cycle stale is the ordinary case anywhere in this file; a cache
+    # that lies about config is the thing #358 exists to refuse.
+    [ -n "${REMEMBER_SAVE_COOLDOWN:-}" ] || return 0
+    [ -n "${REMEMBER_DELTA_THRESHOLD:-}" ] || return 0
     _remember_env_cache_path || return 0
 
     local _f="$_REMEMBER_ENV_CACHE_FILE" _t="${_REMEMBER_ENV_CACHE_FILE}.$$"
@@ -191,8 +206,12 @@ _remember_env_cache_publish() {
         printf 'REMEMBER_DIR=%s\n' "$REMEMBER_DIR"
         printf 'REMEMBER_TZ=%s\n' "${REMEMBER_TZ:-}"
         printf 'REMEMBER_PROMPT_STAMP=%s\n' "${REMEMBER_PROMPT_STAMP:-full}"
-        printf 'REMEMBER_SAVE_COOLDOWN=%s\n' "${REMEMBER_SAVE_COOLDOWN:-120}"
-        printf 'REMEMBER_DELTA_THRESHOLD=%s\n' "${REMEMBER_DELTA_THRESHOLD:-50}"
+        # No `:-120`/`:-50` fallback here — the guard above already refused to
+        # reach this line unless both were actually set by log.sh, and a
+        # default at the point of writing is exactly the silent stand-in
+        # #358 was filed about.
+        printf 'REMEMBER_SAVE_COOLDOWN=%s\n' "$REMEMBER_SAVE_COOLDOWN"
+        printf 'REMEMBER_DELTA_THRESHOLD=%s\n' "$REMEMBER_DELTA_THRESHOLD"
         printf 'MEMORY_PROJECT_DIR=%s\n' "${MEMORY_PROJECT_DIR:-$PROJECT_DIR}"
         printf 'CACHE_CONFIG=%s\n' "${PIPELINE_DIR}/config.json"
         printf 'CACHE_CONFIG=%s\n' "${HOME:-}/.remember/config.json"

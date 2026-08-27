@@ -210,6 +210,73 @@ def test_editing_the_config_is_not_ignored_by_a_warmed_hook(tmp_path):
     assert "JST" in after.stdout, f"expected Tokyo time. Got: {after.stdout!r}"
 
 
+# ── The slow path must not lose a listener, or crash trying (#358/#361 adjacent) ──
+
+def test_an_unwritable_logs_dir_does_not_break_after_user_prompt_dispatch(tmp_path):
+    """log.sh returns early -- before it defines dispatch() -- on a store
+    whose logs/ dir it cannot create. The fast path above stubs dispatch()
+    unconditionally and never reaches log.sh at all, but installing an
+    after_user_prompt listener forces the SLOW path here (see the `[ ! -d ]`
+    gate in scripts/user-prompt-hook.sh), and that path used to call
+    `dispatch "after_user_prompt"` with no guard -- the same mechanism #361
+    fixed for post-tool-hook.sh's own slow path, found adjacent to it while
+    fixing #358 in this same file.
+
+    Reproduced by making the PARENT of logs/ unwritable rather than logs/
+    itself: log.sh's own `[ ! -d ]` check (#230) skips the `mkdir` entirely
+    once logs/ already exists, so an existing-but-chmod-000 directory changes
+    nothing -- what actually fails `mkdir -p` is the directory being ABSENT
+    with an unwritable parent.
+
+    Paired with a positive control in the same fixture: once the store CAN
+    write its logs, the same installed listener still fires. Root only:
+    chmod does not stop root from creating entries in its own directory, so
+    this cannot reproduce as that user.
+    """
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("root ignores directory write permission bits — chmod-based "
+                    "unwritability does not reproduce as this user")
+
+    home, project = _project(tmp_path)
+    remember = project / ".remember"
+    plugin = tmp_path / "plugin"
+    subprocess.run(["cp", "-R", str(REPO_ROOT), str(plugin)], check=True,
+                   capture_output=True)
+    listener_dir = plugin / "hooks.d" / "after_user_prompt"
+    listener_dir.mkdir(parents=True, exist_ok=True)
+    witness = tmp_path / "listener-ran"
+    listener = listener_dir / "50-witness.sh"
+    listener.write_text("#!/bin/bash\ntouch " + str(witness) + "\n", encoding="utf-8")
+    listener.chmod(0o755)
+
+    env = _env(home, project, {"CLAUDE_PLUGIN_ROOT": str(plugin)})
+
+    logs = remember / "logs"
+    assert not logs.exists(), "fixture invariant: logs/ must not exist yet"
+    remember.chmod(0o555)
+    try:
+        result = _run(env)
+    finally:
+        remember.chmod(0o755)
+
+    assert result.returncode == 0, (
+        "documented EXIT CODES: 0 Always — got " + str(result.returncode)
+        + ": " + repr(result.stderr[:600])
+    )
+    assert "dispatch: command not found" not in result.stderr, (
+        "the slow path called an undefined dispatch() — stderr: "
+        + repr(result.stderr[:600])
+    )
+
+    # POSITIVE CONTROL, same fixture: a healthy store still dispatches.
+    result2 = _run(env)
+    assert result2.returncode == 0, repr(result2.stderr[:600])
+    assert witness.exists(), (
+        "the guard disabled dispatch on the healthy path too — an installed "
+        "after_user_prompt listener no longer runs at all"
+    )
+
+
 # ── Portability: two implementations, one output ──────────────────────────────
 
 def _stamp_via(env_extra: dict, fmt: str = "+%H:%M %Z") -> subprocess.CompletedProcess:

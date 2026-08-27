@@ -87,6 +87,14 @@ if [ "$_REMEMBER_FAST" = "0" ]; then
     _remember_env_cache_publish
 fi
 
+# log.sh returns early — before it defines dispatch() — on a store whose
+# logs/ dir it cannot create. That leaves dispatch() undefined on this branch
+# only (the fast path above already stubs it unconditionally), and this hook
+# is documented "EXIT CODES: 0 Always": it must not shell out to a
+# "command not found" for a listener nobody has to install (adjacent to
+# #361, same mechanism, this file's own unguarded call).
+declare -F dispatch >/dev/null 2>&1 || dispatch() { :; }
+
 # --- Notices for the human (#200, #253) ───────────────────────────────────
 # Other hooks leave a file here when they find something the HUMAN has to know
 # and the model cannot act on. They are delivered from this hook rather than
