@@ -34,9 +34,16 @@ pytestmark = pytest.mark.skipif(
     reason="bash subprocess + POSIX semantics -- not portable to Windows runners",
 )
 
-# What the shim answers when doctor.sh asks +%Y-%m-%d with TZ set in the
-# environment (the configured-timezone path) versus without (the old,
-# unfixed, machine-clock path).
+# What the shim answers when doctor.sh asks +%Y-%m-%d with TZ set to
+# EXACTLY the configured timezone (the fixed-code path, where doctor.sh
+# itself constructs `TZ="$_doctor_tz" date ...`) versus anything else,
+# including empty/unset AND an ambient TZ the test process happened to
+# inherit. Checking for mere presence of $TZ, rather than its exact value,
+# would make this test pass against unfixed doctor.sh in any environment
+# that already exports TZ (some CI base images do) -- unfixed doctor.sh
+# never sets TZ itself, but a pre-set ambient TZ would still be inherited
+# by the shim subprocess and satisfy a presence-only check.
+_CONFIGURED_TZ = "Pacific/Kiritimati"
 _TZ_TODAY = "2099-01-02"
 _NO_TZ_TODAY = "2099-01-01"
 
@@ -54,7 +61,7 @@ def _shim_date(bindir):
     shim.write_text(
         "#!/bin/sh\n"
         'if [ "$1" = "+%Y-%m-%d" ]; then\n'
-        '  if [ -n "$TZ" ]; then\n'
+        f'  if [ "$TZ" = "{_CONFIGURED_TZ}" ]; then\n'
         f'    echo {_TZ_TODAY}\n'
         "  else\n"
         f'    echo {_NO_TZ_TODAY}\n'
