@@ -1,5 +1,6 @@
 ---
 title: "The tick state file"
+description: "Written every tick, read first every tick. A corrupt file raises rather than resetting; an over-long decision is refused rather than truncated."
 keywords: state file, oss-watch, tick state, handoff, oss state
 ---
 

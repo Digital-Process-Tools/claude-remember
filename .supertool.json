@@ -5,6 +5,7 @@
   "compact": false,
   "rtk": false,
   "allow_outside_cwd": false,
+  "no_publish_confirm": true,
   "allow_vim_shell": false,
   "presets": ["github", "git", "watch"],
   "validators": {
@@ -32,9 +33,22 @@
   },
   "ops": {
     "radar": {
+      "watch_name": "claude-remember",
       "radar_tiers": {
         "gh-prs": {}
       }
+    },
+    "watch": {
+      "watch_name": "claude-remember"
+    },
+    "unwatch": {
+      "watch_name": "claude-remember"
+    },
+    "watches": {
+      "watch_name": "claude-remember"
+    },
+    "channel": {
+      "watch_name": "claude-remember"
     },
     "git-push": {
       "budget": 1500

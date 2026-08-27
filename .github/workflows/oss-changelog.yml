@@ -20,6 +20,23 @@ on:
     # is a property of the gate, not of this file.
     types: [opened, synchronize, reopened, labeled, unlabeled]
 
+# Per pull request, superseding. `labeled` above is what makes the escape hatch work, and
+# it is also what turns one bot pull request into a burst: dependabot applies its own
+# labels the instant it opens one, so five runs were created inside two seconds on a
+# scaffolded repository and all five failed (#293).
+#
+# `github.ref` is `refs/pull/N/merge` for a `pull_request` event, so the group is one pull
+# request wide. A constant group would serialise unrelated pull requests against each other
+# and cancel their runs, which is a worse defect than the one being fixed.
+#
+# It is a MITIGATION and not a fix, and the difference matters to whatever consumes these
+# runs: `cancelled` is not `success` either, so a gate that aggregates every run on the head
+# sha still refuses. What it earns on its own merits is that a superseded run stops burning
+# a runner and stops racing the run that replaced it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 # Declared at workflow level rather than per job: every job here only reads the pull
 # request and reports, and a job added later should inherit read-only rather than fall
 # back to the repository default. That default is read/write in a repository whose owner
@@ -64,6 +81,10 @@ jobs:
       # a surface a release leaves behind rather than one it reads, so the run that
       # discovers it stale must not be the run cutting the tag (#88).
       - name: CHANGELOG.md's link refs agree with its release headings
+        # changelog_untagged is not declared in .oss.json, so every `## [x.y.z]`
+        # section below is expected to carry a link ref. That is this file's
+        # default reading and not a statement anybody made -- declare [] to say so
+        # deliberately, or list the versions that were never tagged.
         run: |
           set -eu
           # Three states, three exit codes: 0 ok, 1 skipped, 2 refused. Only
@@ -85,6 +106,10 @@ jobs:
         # is attacker-influenced on a fork pull request.
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
+          # The AUTHOR of the pull request, deliberately not `github.actor`. On a `labeled`
+          # event the actor is whoever applied the label, so keying on it would let any
+          # human exempt any pull request just by labelling it.
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           set -eu
           range="origin/$BASE_REF...HEAD"
@@ -152,7 +177,37 @@ jobs:
           # is silent in the dangerous direction for a project whose product is its
           # documentation. The escape hatch is the label, which a human applies and a
           # reviewer can see; the `types:` list above is what makes it work at all.
+          #
+          # One author is exempt, and it is placed HERE -- last, after every branch above --
+          # so that it changes exactly one outcome: the one that currently fails with
+          # nothing left to do. A dependabot pull request that somehow deleted a pending
+          # fragment is still refused, because that branch was already taken.
+          #
+          # The escape hatch this block just described cannot be reached by a bot. Dependabot
+          # applies its own labels at open, each label is a `labeled` event, each event starts
+          # a run, and each run lands here and fails. A human then applying `no-changelog`
+          # makes a passing run exist and retracts nothing, so a merge gate that aggregates
+          # runs on the head sha refuses a pull request the forge calls mergeable, with no
+          # action left that would change it (#293). The exemption therefore has to happen
+          # before the first failure exists, which is why it is a condition here and not a
+          # label somebody applies afterwards.
+          #
+          # This is an AUTHOR check and not a path check, which is the distinction that keeps
+          # the paragraph above honest: which paths are user-visible is a fact about YOUR
+          # repository that this template cannot know, while who opened the pull request is a
+          # fact the event hands it. It matches one exact login -- the bot that
+          # `.github/dependabot.yml`, scaffolded beside this file, actually produces.
+          #
+          # It is a skip that announces itself, not a silent pass. Read that line if you point
+          # dependabot at a runtime ecosystem rather than `github-actions`: a bump that IS
+          # user-visible then announces nothing, and this receipt is the only place it shows.
+          if [ "${PR_AUTHOR:-}" = 'dependabot[bot]' ]; then
+            echo "changelog: skipped (opened by ${PR_AUTHOR:-}, which cannot use the"
+            echo "  'no-changelog' escape hatch -- its own labels fail the run first, #293)"
+            exit 0
+          fi
+
           echo "No changelog fragment in this pull request." >&2
-          echo "Add changelog.d/<issue>.<section>.md, or label the pull request" >&2
+          echo "Add changelog.d/<issue>.<section>[.<slug>].md, or label the pull request" >&2
           echo "'no-changelog' when the change is genuinely invisible to users." >&2
           exit 1

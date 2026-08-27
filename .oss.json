@@ -21,10 +21,8 @@
     "lanes": []
   },
   "milestones": [],
-  "ci": {
-    "required_checks": 1
-  },
   "release": {
+    "authority": "loop",
     "tag_pattern": "v{version}",
     "merge_method": null,
     "commit_subject": null,

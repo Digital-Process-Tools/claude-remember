@@ -1,2 +1,2 @@
-changelog.d/	changelog-fragments.md
+(changelog.d/|(^|/)CHANGELOG\.md$)	changelog-fragments.md
 \.oss\.json	oss-config.md
