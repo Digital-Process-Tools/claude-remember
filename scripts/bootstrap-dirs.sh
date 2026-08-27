@@ -153,6 +153,20 @@ if [ -d "$REMEMBER_DIR/tmp" ]; then
         && mv -f "$REMEMBER_CONFIG" "$_remember_relocated_cfg" 2>/dev/null; then
         REMEMBER_CONFIG="$_remember_relocated_cfg"
         export REMEMBER_CONFIG
+        # #375: $_remember_relocated_cfg is under $REMEMBER_DIR, which in
+        # legacy mode is the raw, non-slugified project directory -- a
+        # user-controlled string, unlike lib-memory-dir.sh's own copy of
+        # this idiom (see there) whose path lives under $SYS_TMPDIR, which
+        # no user names. Embedding a user-controlled path inside a
+        # single-quoted span in a string that `trap` re-parses at exit is
+        # exactly the composition that broke: an apostrophe in the project
+        # path terminates that span early and the remainder is evaluated as
+        # shell source at exit, rather than as the filename it names.
+        # `printf %q` turns the path into a form the SAME shell can safely
+        # re-parse as exactly one word, however many quote characters it
+        # contains, so it is embedded UNquoted below -- it already carries
+        # its own quoting.
+        _remember_relocated_cfg_q=$(printf %q "$_remember_relocated_cfg")
         # Same subshell-safe append lib-memory-dir.sh uses for its own trap --
         # bash keeps a single EXIT trap, and its trap (still targeting the
         # old, now-moved-away path -- a harmless no-op `rm -f` once it is
@@ -179,16 +193,20 @@ if [ -d "$REMEMBER_DIR/tmp" ]; then
         # `rm -f '$path'`, never something that has already been through
         # this same substitution itself). It is not a general un-quoter --
         # chaining onto a trap value that has itself already passed through
-        # one round of this idiom would need a second pass.
+        # one round of this idiom would need a second pass. That extracted
+        # text is $SYS_TMPDIR-rooted and therefore not user-controlled, so
+        # it is chained here exactly as before -- only the path THIS block
+        # owns goes through the %q fix above.
         _remember_existing_trap=$(trap -p EXIT 2>/dev/null | sed "s/trap -- '//;s/' EXIT//;s/'\\\\''/'/g")
         if [ -n "$_remember_existing_trap" ]; then
             # shellcheck disable=SC2064
-            trap "${_remember_existing_trap}; rm -f '${_remember_relocated_cfg}'" EXIT
+            trap "${_remember_existing_trap}; rm -f ${_remember_relocated_cfg_q}" EXIT
         else
             # shellcheck disable=SC2064
-            trap "rm -f '${_remember_relocated_cfg}'" EXIT
+            trap "rm -f ${_remember_relocated_cfg_q}" EXIT
         fi
         unset _remember_existing_trap
+        unset _remember_relocated_cfg_q
     fi
     unset _remember_relocated_cfg
 fi
