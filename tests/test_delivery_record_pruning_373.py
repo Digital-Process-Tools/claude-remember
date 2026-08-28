@@ -1,0 +1,188 @@
+"""Regression tests for #373: with handoff_mode: "per_session",
+remember.delivered.<session_id> files accumulate forever in
+$REMEMBER_DIR/tmp -- nothing ever pruned them, the same directory (and
+class of leak) #362 already fixed once, under a different filename.
+
+The chosen coupling is deliberately NOT the paired remember.<session_id>.md
+handoff slot -- that survives forever on purpose (#221), so tying the
+record's life to it would reproduce unbounded growth under a new name. It is
+coupled instead to the one fact that actually answers "is this session
+over": whether Claude Code's own transcript for that session id still
+exists under $SESSIONS_DIR (the same directory session-start-hook.sh already
+reads via `previous_transcript`).
+
+Three states, tested here as three cases over one fixture shape:
+  - the session's transcript is gone -> its delivery record is pruned
+    (the "must fire" case)
+  - the session's transcript still exists -> its delivery record survives
+    (the paired "must not fire" case -- the positive control that a broken
+    or over-eager sweep would fail)
+  - $SESSIONS_DIR itself cannot be listed at all -> nothing is pruned,
+    because "could not tell whether the session is over" must never render
+    as either "pruned" or "confirmed still active"
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="bash subprocess + POSIX session-start hook -- not portable to Windows runners (#79)",
+)
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+SESSION_START_SCRIPT = REPO_ROOT / "scripts" / "session-start-hook.sh"
+
+from pipeline.slug import session_dir_slug as _slug
+
+
+def _sandbox(tmp_path: Path):
+    project = tmp_path / "proj"
+    project.mkdir(parents=True)
+    home = tmp_path / "home"
+    (home / ".remember").mkdir(parents=True)
+
+    cfg = {"features": {"recovery": False}, "handoff_mode": "per_session", "data_dir": ".remember"}
+    (home / ".remember" / "config.json").write_text(json.dumps(cfg))
+
+    slug = _slug(str(project))
+    sessions_dir = home / ".claude" / "projects" / slug
+    sessions_dir.mkdir(parents=True)
+
+    remember_dir = project / ".remember"
+    remember_dir.mkdir(parents=True, exist_ok=True)
+    return project, home, remember_dir, sessions_dir
+
+
+def _payload(session_id: str) -> str:
+    return json.dumps({
+        "session_id": session_id,
+        "transcript_path": f"/does/not/matter/{session_id}.jsonl",
+        "hook_event_name": "SessionStart",
+        "source": "startup",
+        "cwd": "/does/not/matter",
+    })
+
+
+def _session_start(project: Path, home: Path, session_id: str | None) -> str:
+    env = {
+        **os.environ,
+        "CLAUDE_PROJECT_DIR": str(project),
+        "CLAUDE_PLUGIN_ROOT": str(REPO_ROOT),
+        "HOME": str(home),
+    }
+    kwargs = {"env": env, "capture_output": True, "text": True, "timeout": 60}
+    if session_id is not None:
+        kwargs["input"] = _payload(session_id)
+    else:
+        kwargs["stdin"] = subprocess.DEVNULL
+    result = subprocess.run(
+        ["bash", str(SESSION_START_SCRIPT)], check=False, **kwargs
+    )
+    assert result.returncode == 0, f"hook exited {result.returncode}: {result.stderr[:500]}"
+    return result.stdout
+
+
+def _seed_delivery_record(remember_dir: Path, session_id: str) -> Path:
+    """A per-session handoff plus one delivered-once run against it -- the
+    ordinary way a remember.delivered.<id> record comes to exist."""
+    (remember_dir / f"remember.{session_id}.md").write_text(
+        f"Handoff for {session_id}.\n"
+    )
+    record = remember_dir / "tmp" / f"remember.delivered.{session_id}"
+    return record
+
+
+class TestStaleDeliveryRecordsArePruned:
+
+    def test_record_for_a_session_with_no_transcript_is_pruned(self, tmp_path):
+        """MUST FIRE: session AAA delivered once and left a record behind;
+        its transcript is gone (never existed, or was cleaned up elsewhere).
+        The next session start must remove AAA's stale record."""
+        project, home, remember_dir, _sessions_dir = _sandbox(tmp_path)
+
+        out_a = _session_start(project, home, "sess-aaa")
+        assert "Handoff for" not in out_a  # nothing written yet on first run
+
+        record_a = _seed_delivery_record(remember_dir, "sess-aaa")
+        # Deliver it once for real, so the record this test prunes is the
+        # genuine artifact the hook itself writes, not a hand-built stand-in.
+        _session_start(project, home, "sess-aaa")
+        assert record_a.exists(), "setup did not produce a delivery record"
+
+        # sess-aaa's transcript never existed under sessions_dir -- simulates
+        # a session that is over and gone. A different, unrelated session
+        # (BBB) starts next.
+        _session_start(project, home, "sess-bbb")
+
+        assert not record_a.exists(), (
+            "a delivery record for a session with no transcript on disk "
+            "survived a later session start -- this is the #373 leak"
+        )
+
+    def test_record_for_a_session_whose_transcript_still_exists_survives(self, tmp_path):
+        """MUST NOT FIRE (positive control): same shape, except sess-aaa's
+        transcript is still present under $SESSIONS_DIR when session BBB
+        starts. Its delivery record must survive -- an over-eager sweep
+        that ignores the transcript check would fail this."""
+        project, home, remember_dir, sessions_dir = _sandbox(tmp_path)
+
+        _session_start(project, home, "sess-aaa")
+        record_a = _seed_delivery_record(remember_dir, "sess-aaa")
+        _session_start(project, home, "sess-aaa")
+        assert record_a.exists(), "setup did not produce a delivery record"
+
+        # sess-aaa's transcript IS present -- the session could still resume.
+        (sessions_dir / "sess-aaa.jsonl").write_text('{"type":"user"}\n')
+
+        _session_start(project, home, "sess-bbb")
+
+        assert record_a.exists(), (
+            "a delivery record for a session whose transcript still exists "
+            "was pruned -- the sweep must not delete state for a session "
+            "that could still be active"
+        )
+
+    def test_could_not_tell_leaves_records_untouched(self, tmp_path):
+        """Third state: $SESSIONS_DIR itself is gone (unreadable), so there
+        is no way to tell whether sess-aaa is over. The record must survive
+        -- could-not-tell must never render as "pruned"."""
+        project, home, remember_dir, sessions_dir = _sandbox(tmp_path)
+
+        _session_start(project, home, "sess-aaa")
+        record_a = _seed_delivery_record(remember_dir, "sess-aaa")
+        _session_start(project, home, "sess-aaa")
+        assert record_a.exists(), "setup did not produce a delivery record"
+
+        # Remove the whole sessions directory -- "cannot tell", not "empty".
+        import shutil
+        shutil.rmtree(sessions_dir)
+
+        _session_start(project, home, "sess-bbb")
+
+        assert record_a.exists(), (
+            "a delivery record was pruned even though $SESSIONS_DIR could "
+            "not be read at all -- could-not-tell must not act like pruned"
+        )
+
+    def test_own_record_is_never_pruned_by_the_sweep(self, tmp_path):
+        """The running session's own record (just written this same
+        invocation) must never be swept as though it belonged to some other,
+        absent session."""
+        project, home, remember_dir, _sessions_dir = _sandbox(tmp_path)
+
+        _session_start(project, home, "sess-aaa")
+        record_a = _seed_delivery_record(remember_dir, "sess-aaa")
+        _session_start(project, home, "sess-aaa")
+
+        assert record_a.exists(), (
+            "a session's own just-written delivery record was removed by "
+            "its own invocation's sweep"
+        )
