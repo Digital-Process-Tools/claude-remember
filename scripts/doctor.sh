@@ -297,6 +297,65 @@ else
     echo "FAIL PostToolUse has never fired for this project (no $_ALIVE_MARKER)"
 fi
 
+# ── SessionEnd liveness (#370) ──────────────────────────────────────────────
+#
+# PostToolUse's freshness-window reading above (a marker refreshed on every
+# one of its many calls inside a live session) does not transfer here:
+# SessionEnd fires at most once per session, so "how old is the marker" is a
+# different question from "did the hook run last time it had the chance".
+#
+# No new marker is written for this. session-end-hook.sh already leaves
+# usable evidence of its own accord, as a side effect of its background
+# flush: a logs/autonomous/session-end-<HHMMSS>.log file, created
+# unconditionally once that hook gets past its own SAVE_SCRIPT-missing check
+# (see session-end-hook.sh's own comments around its `_END_LOG` redirect).
+# Presence of even one such file is proof the hook has run; absence needs a
+# second signal before it can be called a problem, since a hook that never
+# had the chance to fire yet is not the same as one that had the chance and
+# stayed silent — the third state the issue calls out by name.
+#
+# $_SESSION_DIR (Paths section, above) is Claude Code's own transcript
+# directory for this project — one *.jsonl file per session it has ever
+# started. Two or more files there is evidence a session other than the one
+# running doctor.sh right now existed and stopped being the active one — the
+# least assumption available about "did a session end" without a marker of
+# SessionEnd's own. It is not proof SessionEnd itself was invoked (its
+# firing conditions on a crash or a killed terminal are undocumented; see
+# session-end-hook.sh's own header) — only that the opportunity existed.
+_SESSION_END_LOG_DIR="$REMEMBER_DIR/logs/autonomous"
+_SESSION_END_FIRED=0
+for _sel in "$_SESSION_END_LOG_DIR"/session-end-*.log; do
+    [ -f "$_sel" ] && _SESSION_END_FIRED=1 && break
+done
+
+_SESSION_END_STATE="unknown"
+if [ "$_SESSION_END_FIRED" -eq 1 ]; then
+    echo "OK   SessionEnd has fired at least once for this project ($_SESSION_END_LOG_DIR/session-end-*.log)"
+    _SESSION_END_STATE="fired"
+elif [ -n "$_SESSION_DIR" ] && [ -d "$_SESSION_DIR" ]; then
+    _SE_TRANSCRIPT_COUNT=0
+    for _tf in "$_SESSION_DIR"/*.jsonl; do
+        [ -f "$_tf" ] || continue
+        _SE_TRANSCRIPT_COUNT=$((_SE_TRANSCRIPT_COUNT + 1))
+    done
+    if [ "$_SE_TRANSCRIPT_COUNT" -ge 2 ]; then
+        echo "FAIL SessionEnd has never fired for this project (no $_SESSION_END_LOG_DIR/session-end-*.log),"
+        echo "     though $_SE_TRANSCRIPT_COUNT prior session transcripts exist in $_SESSION_DIR"
+        echo "     — the last-chance flush is not running. See session-end-hook.sh's own"
+        echo "     header for the endings Claude Code does not document firing on."
+        _SESSION_END_STATE="not-fired"
+    else
+        echo "WARN SessionEnd has not fired yet, and no prior session has ended in this"
+        echo "     project ($_SE_TRANSCRIPT_COUNT transcript(s) in $_SESSION_DIR) — nothing"
+        echo "     has had the chance to prove or disprove this yet."
+    fi
+else
+    echo "WARN SessionEnd has not fired yet, and the session transcript directory is"
+    echo "     unavailable (see Session dir slug above) — cannot tell whether a prior"
+    echo "     session has had the chance to fire it."
+fi
+echo ""
+
 # The capture-gap check can decline to answer (#270): without a session_id on
 # the SessionStart payload it cannot tell the current session's transcript from
 # the previous one, and it stays silent rather than accuse a healthy install.
@@ -610,10 +669,30 @@ fi
 # broken interpreter on an already-large store used to read as "the staging
 # files are over the prompt cap on their own," sending the operator to look
 # at oversized files instead of the Tools section that actually explains it.
+# One more arm (#370), and it sits ABOVE "capture is working" rather than
+# below it — a break with how every other secondary WARN-only check in this
+# file behaves (log rotation, case divergence, the self-healing oversized-
+# store shape all leave the VERDICT alone on purpose). Those all describe
+# conditions where capture ITSELF is unaffected; this one does not. A
+# SessionEnd that never fires is capture's own last-chance flush silently
+# not running, which is #370's whole complaint: a user whose PostToolUse
+# capture looks perfectly healthy sees the exact same "capture is working"
+# line as one whose SessionEnd hook is unregistered or dying before it
+# forks, right up until the session that ends in conversation rather than
+# tool calls loses its tail with no warning at all. The ladder's own rule
+# above is "specific causes before the general one" for DIFFERENT
+# explanations of the SAME symptom; here it is a genuinely separate hook
+# with its own failure mode, and reaching the general "capture is working"
+# line first would be exactly the invisibility this issue reports, just
+# moved one arm down the same ladder. It sits BELOW the no-usable-Python and
+# oversized-store arms because those mean literally nothing in the pipeline
+# runs at all, which outranks a narrower, single-hook failure every time.
 if [ "$_PYTHON_OK" -eq 0 ]; then
     echo "VERDICT: problem — no usable Python; the pipeline cannot run at all (see Tools above)$_ASSUMED_NOTE"
 elif [ "${_STORE_NEEDS_A_HUMAN:-0}" -eq 1 ]; then
     echo "VERDICT: problem — memory is being captured but never consolidated; the staging files are over the prompt cap on their own (see above)$_ASSUMED_NOTE"
+elif [ "$_SESSION_END_STATE" = "not-fired" ]; then
+    echo "VERDICT: problem — SessionEnd has never fired despite prior sessions ending in this project; the last-chance flush is not running (see above)$_ASSUMED_NOTE"
 elif [ "$_POST_TOOL_FIRED" -eq 1 ] && [ -n "$_LAST_SAVE_TIME" ]; then
     echo "VERDICT: capture is working — last save $_LAST_SAVE_TIME$_ASSUMED_NOTE"
 elif [ -n "$_SESSION_DIR" ] && [ ! -d "$_SESSION_DIR" ]; then
