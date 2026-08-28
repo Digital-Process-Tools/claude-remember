@@ -1082,16 +1082,44 @@ if [ -d "$SESSIONS_DIR" ] && [ -d "$REMEMBER_DIR/tmp" ]; then
         if [ ! -e "$SESSIONS_DIR/$_remember_stale_id.jsonl" ]; then
             # #393: an absent transcript is not proof the session is over --
             # it is also what a session still inside its own startup window
-            # looks like. `find -mmin +N` answers "strictly older than N
-            # minutes"; a record inside the window (find finds nothing) is
-            # left untouched rather than treated as confirmed-dead.
-            if [ -z "$(find "$_remember_stale_record" -mmin "+$GRACE_MIN" 2>/dev/null)" ]; then
+            # looks like. Read the record's own mtime rather than shelling
+            # out to `find -mmin`: `find` is the one command on this path
+            # with a real PATH-shadowing risk on Windows Git Bash
+            # (System32's find.exe can resolve ahead of MinGW's find on
+            # some setups and silently answers a different question), so it
+            # would degrade "prune" into a silent always-keep with nothing
+            # surfaced. `stat` uses the same GNU-first-then-BSD-fallback
+            # order already used by doctor.sh:257 and lib-lock.sh:183 for
+            # exactly this portability split -- GNU first, because GNU
+            # `stat -f` on Linux pollutes stdout with a filesystem block
+            # before failing (the #327/#1072 class), so trying it second,
+            # only after `-c` has already failed cleanly, is load-bearing
+            # order and not a stylistic choice.
+            _remember_stale_mtime=$(stat -c %Y "$_remember_stale_record" 2>/dev/null) \
+                || _remember_stale_mtime=$(stat -f %m "$_remember_stale_record" 2>/dev/null) \
+                || _remember_stale_mtime=""
+            if [ -z "$_remember_stale_mtime" ]; then
+                # Could not read the record's own age -> could-not-tell,
+                # same safe direction as an unreadable $SESSIONS_DIR above.
+                continue
+            fi
+            case "$_remember_stale_mtime" in (''|*[!0-9]*) _remember_stale_mtime=0 ;; esac
+            # _remember_date +%s -- same call site convention as
+            # post-tool-hook.sh:377/605. lib-clock.sh routes %s to `date`
+            # unconditionally (never the printf builtin), and `_remember_date`
+            # itself already falls back to plain `date` with no TZ set, so
+            # this always yields digits; the guard below is what #332 asks
+            # for at every arithmetic sink regardless.
+            _remember_now=$(_remember_date +%s)
+            case "$_remember_now" in (''|*[!0-9]*) _remember_now=0 ;; esac
+            if [ "$_remember_now" -gt 0 ] && [ "$_remember_stale_mtime" -gt 0 ] \
+                && [ $((10#$_remember_now - 10#$_remember_stale_mtime)) -lt $((GRACE_MIN * 60)) ]; then
                 continue
             fi
             rm -f "$_remember_stale_record" 2>/dev/null
         fi
     done
-    unset _remember_stale_record _remember_stale_id GRACE_MIN
+    unset _remember_stale_record _remember_stale_id _remember_stale_mtime _remember_now GRACE_MIN
 fi
 
 # ── History hint ───────────────────────────────────────────────────────────

@@ -11,9 +11,15 @@ over": whether Claude Code's own transcript for that session id still
 exists under $SESSIONS_DIR (the same directory session-start-hook.sh already
 reads via `previous_transcript`).
 
-Three states, tested here as three cases over one fixture shape:
-  - the session's transcript is gone -> its delivery record is pruned
+Four states, tested here as four cases over one fixture shape (a fourth,
+#393, joined the original three below):
+  - the session's transcript is gone AND its record is old enough to be
+    outside the #393 startup grace window -> its delivery record is pruned
     (the "must fire" case)
+  - the session's transcript is gone but its record is still inside that
+    grace window -> its delivery record survives (#393's own "must not
+    fire" case -- a session still starting up is indistinguishable from a
+    dead one on the transcript check alone)
   - the session's transcript still exists -> its delivery record survives
     (the paired "must not fire" case -- the positive control that a broken
     or over-eager sweep would fail)
