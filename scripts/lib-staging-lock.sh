@@ -34,6 +34,14 @@
 #
 # USAGE
 #   source "$(dirname "$0")/lib-lock.sh"          # required: the primitive
+#   source "$(dirname "$0")/log.sh"                # optional (#394): staging_append
+#                                                   # calls config() and report_error(),
+#                                                   # both defined only there. Absent, or
+#                                                   # returned early on a store with no
+#                                                   # writable logs/ (#361/#372), the
+#                                                   # fallback guard below degrades to
+#                                                   # stderr-only reporting rather than
+#                                                   # an undefined-function crash.
 #   source "$(dirname "$0")/lib-staging-lock.sh"
 #   if staging_lock_acquire; then
 #       staging_append "$TODAY_FILE" "$TEXT_FILE"
@@ -57,6 +65,35 @@
 
 [ -n "${_REMEMBER_LIB_STAGING_LOCK_SOURCED:-}" ] && return 0
 _REMEMBER_LIB_STAGING_LOCK_SOURCED=1
+
+# Fallback for the case log.sh was never sourced, or was sourced but
+# returned early -- the #361/#372 case, a store where $REMEMBER_DIR/logs
+# cannot be created, in which log.sh returns before defining log(),
+# report_error() or config() at all (#394). staging_append below calls both
+# report_error() and config() unconditionally, so without this guard either
+# case is an undefined-function crash, not a degraded read.
+#
+# `declare -F`, NOT `type` or `command -v`: the same reasoning
+# session-end-hook.sh and post-tool-hook.sh already carry for the identical
+# guard -- macOS ships /usr/bin/log as the system logging CLI, so `type log`
+# is true whether or not a shell function was ever defined.
+#
+# Unlike user-prompt-hook.sh's `dispatch() { :; }` no-op stub, report_error's
+# fallback here is NOT silent. #349 exists specifically so a persistently
+# growing staging file gets reported; a no-op report_error() would turn that
+# warning into exactly the silent failure #349 was written to end, on
+# precisely the broken stores (#361/#372) where surfacing it matters most.
+# So the fallback still writes -- to stderr, the one channel left when
+# $REMEMBER_DIR/logs cannot be created -- rather than dropping the message.
+# config()'s fallback answers every key with its caller-supplied default,
+# same as log.sh's own `[ ! -f "$REMEMBER_CONFIG" ]` branch: with log.sh
+# unavailable there is no merged config to read, and a caller's default is
+# the same honest answer log.sh gives when the file is simply absent.
+declare -F log >/dev/null 2>&1 || log() {
+    printf '%s [%s] %s\n' "$(date +%H:%M:%S)" "$1" "$2" >&2
+}
+declare -F report_error >/dev/null 2>&1 || report_error() { log "$1" "$2"; }
+declare -F config >/dev/null 2>&1 || config() { printf '%s\n' "${2:-}"; }
 
 STAGING_LOCK_TIMEOUT="${REMEMBER_STAGING_LOCK_TIMEOUT:-10}"
 
