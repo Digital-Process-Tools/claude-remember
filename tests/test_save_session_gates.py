@@ -20,7 +20,7 @@ import os
 import re
 import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -448,7 +448,16 @@ class TestHeaderTimeIsTakenBackOffTheModel:
 
     def test_a_wrong_time_is_overwritten_with_the_scripts_own(self, tmp_path):
         env, project, plugin, calls, sid = _make_env(tmp_path, exchanges=6, humans=5)
-        env["STUB_HAIKU_TEXT"] = "## 18:30 | main\n\n- did some work\n"
+        # A literal "18:30" is wrong only when the script's own clock does not
+        # also read 18:30 -- true 1439 minutes out of 1440, and false often
+        # enough that two unrelated PRs failed this exact assertion in the
+        # same minute (#383). An hour back, wrapping through midnight via
+        # timedelta, is wrong by construction: it stays wrong across the
+        # whole test run and across any minute (or hour) rollover between
+        # this read and the script's own, by a margin no such rollover can
+        # close.
+        wrong_time = (datetime.now() - timedelta(hours=1)).strftime("%H:%M")
+        env["STUB_HAIKU_TEXT"] = f"## {wrong_time} | main\n\n- did some work\n"
         _suppress_ndc(project)
         result = _run(plugin, env, sid)
         assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")
@@ -460,6 +469,13 @@ class TestHeaderTimeIsTakenBackOffTheModel:
         corrected = re.search(r"header time corrected to (\S+)", logs).group(1)
         assert header == f"## {corrected} | main", (
             f"header kept the model's time instead of the script's: {header!r}"
+        )
+        # Positive control: the phrase alone is not enough, since a harness
+        # that logged "header time corrected" unconditionally would also
+        # pass the assertion above. The corrected time must actually differ
+        # from the deliberately-wrong one fed in.
+        assert corrected != wrong_time, (
+            f"logged a correction but to the same wrong time: {corrected!r}"
         )
 
     def test_the_branch_and_body_survive_the_rewrite(self, tmp_path):
