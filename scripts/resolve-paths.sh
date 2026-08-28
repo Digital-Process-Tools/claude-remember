@@ -34,6 +34,12 @@
 #
 # ENVIRONMENT (inputs)
 #   CLAUDE_PROJECT_DIR    Project root (set by Claude Code hooks)
+#   REMEMBER_HOOK_CWD     Fallback project root (#411), consulted when
+#                         CLAUDE_PROJECT_DIR is unset -- Codex and Gemini CLI
+#                         never set the latter. Exported by
+#                         session-start-hook.sh / session-end-hook.sh from the
+#                         SessionStart/SessionEnd stdin payload's `cwd` field;
+#                         not read from stdin here (see the caller comments).
 #   PLUGIN_ROOT           Plugin install directory, vendor-neutral name (#407).
 #                         Read before CLAUDE_PLUGIN_ROOT, which is honoured
 #                         when PLUGIN_ROOT is absent -- see pipeline/host.py.
