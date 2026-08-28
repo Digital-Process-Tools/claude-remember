@@ -6,7 +6,8 @@
 # DESCRIPTION
 #   Manual, human-run health check. Reports plugin version, resolved paths,
 #   detected tools, storage mode, and capture health (whether PostToolUse has
-#   ever actually fired and produced a save) in a single plain-text report.
+#   ever actually fired and produced a save, and whether SessionEnd — the
+#   last-chance flush, #370 — has ever fired) in a single plain-text report.
 #
 #   Closes suggestion 3 of issue #200: the plugin can go silently no-op when
 #   it is enabled mid-session (PostToolUse is never registered because Claude
@@ -316,12 +317,21 @@ fi
 #
 # $_SESSION_DIR (Paths section, above) is Claude Code's own transcript
 # directory for this project — one *.jsonl file per session it has ever
-# started. Two or more files there is evidence a session other than the one
-# running doctor.sh right now existed and stopped being the active one — the
-# least assumption available about "did a session end" without a marker of
-# SessionEnd's own. It is not proof SessionEnd itself was invoked (its
-# firing conditions on a crash or a killed terminal are undocumented; see
-# session-end-hook.sh's own header) — only that the opportunity existed.
+# started. A COUNT of files there is not evidence a session ended: two or
+# more concurrently open Claude Code windows on the same project each keep
+# their own transcript, live, at the same time, and neither has ended just
+# because the other exists (#370 review). What distinguishes "a session
+# existed and stopped being active" from "another window is open right now"
+# is whether a transcript OTHER than the one currently growing has gone
+# quiet — Claude Code appends to the active transcript on every turn, so a
+# file nobody has touched in a while is read as no longer live. 900s (15
+# minutes) is generous on purpose: false NEGATIVES here (a truly-ended
+# session not yet counted) cost nothing but a delayed FAIL, while false
+# POSITIVES are the failure mode #370's own review caught — a hard "problem"
+# verdict for an ordinary two-windows-open workflow. It is not proof
+# SessionEnd itself was invoked (its firing conditions on a crash or a
+# killed terminal are undocumented; see session-end-hook.sh's own header) —
+# only that the opportunity existed and the window for it has passed.
 _SESSION_END_LOG_DIR="$REMEMBER_DIR/logs/autonomous"
 _SESSION_END_FIRED=0
 for _sel in "$_SESSION_END_LOG_DIR"/session-end-*.log; do
@@ -334,20 +344,28 @@ if [ "$_SESSION_END_FIRED" -eq 1 ]; then
     _SESSION_END_STATE="fired"
 elif [ -n "$_SESSION_DIR" ] && [ -d "$_SESSION_DIR" ]; then
     _SE_TRANSCRIPT_COUNT=0
+    _SE_STALE_TRANSCRIPT_COUNT=0
     for _tf in "$_SESSION_DIR"/*.jsonl; do
         [ -f "$_tf" ] || continue
         _SE_TRANSCRIPT_COUNT=$((_SE_TRANSCRIPT_COUNT + 1))
+        _tf_age=$(_file_age_seconds "$_tf")
+        case "$_tf_age" in
+            ''|*[!0-9]*) continue ;;
+        esac
+        [ "$_tf_age" -gt 900 ] && _SE_STALE_TRANSCRIPT_COUNT=$((_SE_STALE_TRANSCRIPT_COUNT + 1))
     done
-    if [ "$_SE_TRANSCRIPT_COUNT" -ge 2 ]; then
+    if [ "$_SE_STALE_TRANSCRIPT_COUNT" -ge 1 ]; then
         echo "FAIL SessionEnd has never fired for this project (no $_SESSION_END_LOG_DIR/session-end-*.log),"
-        echo "     though $_SE_TRANSCRIPT_COUNT prior session transcripts exist in $_SESSION_DIR"
-        echo "     — the last-chance flush is not running. See session-end-hook.sh's own"
-        echo "     header for the endings Claude Code does not document firing on."
+        echo "     though $_SE_STALE_TRANSCRIPT_COUNT prior session transcript(s) in $_SESSION_DIR"
+        echo "     have gone quiet for over 15 minutes — the last-chance flush is not"
+        echo "     running. See session-end-hook.sh's own header for the endings Claude"
+        echo "     Code does not document firing on."
         _SESSION_END_STATE="not-fired"
     else
-        echo "WARN SessionEnd has not fired yet, and no prior session has ended in this"
-        echo "     project ($_SE_TRANSCRIPT_COUNT transcript(s) in $_SESSION_DIR) — nothing"
-        echo "     has had the chance to prove or disprove this yet."
+        echo "WARN SessionEnd has not fired yet, and no prior session has demonstrably"
+        echo "     ended in this project ($_SE_TRANSCRIPT_COUNT transcript(s) in"
+        echo "     $_SESSION_DIR, none quiet long enough to call finished) — nothing has"
+        echo "     had the chance to prove or disprove this yet."
     fi
 else
     echo "WARN SessionEnd has not fired yet, and the session transcript directory is"
