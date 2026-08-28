@@ -61,7 +61,7 @@ staging_append "$TODAY" "$TEXT"
 """
 
 
-def _make_env(tmp_path: Path, configured: bool):
+def _make_env(tmp_path: Path, configured: bool, unreadable: bool = False):
     plugin = tmp_path / "plugin"
     (plugin / "scripts").mkdir(parents=True)
     for script in ("lib-staging-lock.sh", "lib-clock.sh"):
@@ -78,6 +78,8 @@ def _make_env(tmp_path: Path, configured: bool):
     if configured:
         cfg_path = tmp_path / "config.json"
         cfg_path.write_text(json.dumps({"thresholds": {"staging_warn_bytes": 999}}))
+        if unreadable:
+            cfg_path.chmod(0o000)
         env["REMEMBER_CONFIG"] = str(cfg_path)
 
     return env, plugin
@@ -131,4 +133,34 @@ def test_absent_config_is_not_reported(tmp_path):
     assert ".thresholds.staging_warn_bytes" not in result.stderr, (
         "the fallback warned even though REMEMBER_CONFIG was never set -- "
         f"the genuinely-default case must stay silent: stderr={result.stderr!r}"
+    )
+
+
+def test_existing_but_unreadable_config_is_also_reported(tmp_path):
+    """Auditor finding on this issue's own self-review: `[ -r ... ]` alone
+    renders "REMEMBER_CONFIG exists but this process cannot read it" (a
+    permission change, a mount hiccup) exactly as silently as "REMEMBER_CONFIG
+    was never set" -- the same defect class the fix exists to close, one
+    layer further out. scripts/log.sh's own real config() checks `-f`
+    (existence) and reports explicitly on a read failure rather than falling
+    silent; the fallback must not be narrower than the function it stands in
+    for. Root is skipped: chmod 000 does not stop root from reading a file it
+    owns, so the assertion cannot hold under a root test runner."""
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("root ignores file permission bits -- chmod-based "
+                    "unreadability does not reproduce as this user")
+
+    env, plugin = _make_env(tmp_path, configured=True, unreadable=True)
+    try:
+        result, today = _run(plugin, env, tmp_path)
+    finally:
+        (Path(env["REMEMBER_CONFIG"])).chmod(0o644)
+
+    assert result.returncode == 0, (
+        f"staging_append crashed: stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    assert today.read_text(encoding="utf-8") == "an ordinary note\n"
+    assert ".thresholds.staging_warn_bytes" in result.stderr, (
+        "an existing-but-unreadable REMEMBER_CONFIG rendered exactly like an "
+        f"absent one -- the fallback stayed silent: stderr={result.stderr!r}"
     )

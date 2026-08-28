@@ -126,7 +126,7 @@ declare -F report_error >/dev/null 2>&1 || report_error() {
 # -- jq / Python fallback / one-pass cache -- inside this file), then
 # reopened as #399 once the two states were shown to render alike.
 #
-# #399's route: distinguish the two states WITHOUT parsing. `[ -r ]` needs
+# #399's route: distinguish the two states WITHOUT parsing. `[ -e ]` needs
 # no jq and no Python fallback, and it is enough to tell "nothing to read"
 # from "something unread" -- it cannot recover the value, only the fact that
 # a value might exist.
@@ -137,11 +137,20 @@ declare -F report_error >/dev/null 2>&1 || report_error() {
 # back to staging_append. So the marker is set once, at definition time, on
 # whichever branch of this guard actually ran, not on every call: any caller
 # can then ask "is config() the real one or the stub" without touching
-# REMEMBER_CONFIG's readability itself, which staging_append below re-checks
+# REMEMBER_CONFIG's existence itself, which staging_append below re-checks
 # directly (still no parsing) once it also knows this is the stub.
 if declare -F config >/dev/null 2>&1; then
     _REMEMBER_CONFIG_IS_FALLBACK=0
 else
+    # `-e`, not `-r`: log.sh's real config() (scripts/log.sh) treats
+    # existence, not readability, as "there might be something to read" --
+    # its own `[ ! -f "$REMEMBER_CONFIG" ]` branch is the only silent path,
+    # and a read failure past that point (permission denied, a mount
+    # hiccup) gets its own explicit "could not read ... falling back" line
+    # rather than silence. `-r` alone would render that same
+    # exists-but-unreadable state as indistinguishable from genuinely
+    # absent -- the identical defect this fix exists to close, one layer
+    # further out (caught in this issue's own self-review before shipping).
     _REMEMBER_CONFIG_IS_FALLBACK=1
     config() { printf '%s\n' "${2:-}"; }
 fi
@@ -207,13 +216,16 @@ staging_append() {
     case "$_warn_bytes" in (''|*[!0-9]*) _warn_bytes=2000000 ;; esac
     # #399: silent on every store where the real config() (log.sh) ran,
     # configured or not -- _REMEMBER_CONFIG_IS_FALLBACK is 0 there. Only
-    # fires on the #361/#372 stub, and only when REMEMBER_CONFIG is itself
-    # readable -- a genuinely absent/unset REMEMBER_CONFIG is still an
-    # honest default and must stay quiet (see the fixture pair in
-    # tests/test_staging_lock_config_unread_399.py).
+    # fires on the #361/#372 stub, and only when REMEMBER_CONFIG itself
+    # exists -- a genuinely absent/unset REMEMBER_CONFIG is still an honest
+    # default and must stay quiet (see the fixture pairs in
+    # tests/test_staging_lock_config_unread_399.py). `-e`, not `-r`: an
+    # existing-but-unreadable REMEMBER_CONFIG (permission change, a mount
+    # hiccup) is still something that might hold a real value, not nothing
+    # -- see the comment on the fallback definition above.
     if [ "${_REMEMBER_CONFIG_IS_FALLBACK:-0}" = 1 ] \
-        && [ -n "${REMEMBER_CONFIG:-}" ] && [ -r "$REMEMBER_CONFIG" ]; then
-        report_error "staging" "could not confirm .thresholds.staging_warn_bytes is genuinely unset -- REMEMBER_CONFIG (${REMEMBER_CONFIG}) exists and is readable, but log.sh never had the chance to parse it (#361/#372), so the ${_warn_bytes}b default below may not be the configured value"
+        && [ -n "${REMEMBER_CONFIG:-}" ] && [ -e "$REMEMBER_CONFIG" ]; then
+        report_error "staging" "could not confirm .thresholds.staging_warn_bytes is genuinely unset -- REMEMBER_CONFIG (${REMEMBER_CONFIG}) exists, but log.sh never had the chance to parse it (#361/#372), so the ${_warn_bytes}b default below may not be the configured value"
     fi
     if [ "$_warn_bytes" -gt 0 ] && [ "$_before" -lt "$_warn_bytes" ]; then
         local _after
