@@ -406,3 +406,65 @@ class TestUnreadableClockDuringPruneSweep:
             "session start -- the pairing control for #402 failed, "
             "independent of the clock-unreadable fix"
         )
+
+
+
+def _fake_stat_bin(tmp_path: Path, target_path: Path) -> Path:
+    """A `stat` that answers non-numeric garbage for a `%Y`/`%m` mtime read
+    of exactly `target_path`, and defers to the real `stat` for every other
+    call -- including this hook's own GNU-then-BSD fallback chain hitting
+    the SAME path with the flag the platform does not support, and every
+    OTHER file this hook or a library it sources reads the mtime/uid of
+    (lib-lock.sh, log.sh)."""
+    import shutil
+    real_stat = shutil.which("stat")
+    assert real_stat, "no real `stat` on PATH -- cannot build the fake"
+    bindir = tmp_path / "fakestatbin"
+    bindir.mkdir(exist_ok=True)
+    fake = bindir / "stat"
+    script_lines = [
+        "#!/bin/sh",
+        'if [ "$3" = "' + str(target_path) + '" ]; then',
+        '    case "$1$2" in',
+        '        "-c%Y"|"-f%m")',
+        '            echo "not-a-number"',
+        "            exit 0",
+        "            ;;",
+        "    esac",
+        "fi",
+        'exec "' + real_stat + '" "$@"',
+        "",
+    ]
+    fake.write_text("\n".join(script_lines))
+    fake.chmod(0o755)
+    return bindir
+
+
+class TestUnreadableMtimeGarbageDuringPruneSweep:
+    """Sibling to TestUnreadableClockDuringPruneSweep, found during #402's
+    own self-review: `_remember_stale_mtime` had the identical gap
+    `_remember_now` did -- a non-empty, non-numeric `stat` read was coerced
+    to 0 rather than treated as could-not-tell, so it could reach the
+    -gt 0 gate as a "confirmed" zero-age record and be pruned on a healthy
+    clock. Fixed alongside #402 in the same commit; this is that fix's own
+    must-not-prune case, with #402's own case-2 control (a healthy stat and
+    clock still prunes an old record) already covering the must-fire side
+    in the class above."""
+
+    def test_live_record_survives_when_stat_output_is_non_numeric(self, tmp_path):
+        project, home, remember_dir, _sessions_dir = _sandbox(tmp_path)
+
+        _session_start(project, home, "sess-aaa")
+        record_a = _seed_delivery_record(remember_dir, "sess-aaa")
+        _session_start(project, home, "sess-aaa")
+        assert record_a.exists(), "setup did not produce a delivery record"
+
+        bindir = _fake_stat_bin(tmp_path, record_a)
+        extra_env = {"PATH": f"{bindir}:{os.environ['PATH']}"}
+        _session_start_with_env(project, home, "sess-bbb", extra_env)
+
+        assert record_a.exists(), (
+            "a live delivery record was pruned because `stat` printed "
+            "non-numeric output for its mtime -- could-not-tell must "
+            "never render as pruned"
+        )

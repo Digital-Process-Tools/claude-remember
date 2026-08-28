@@ -1168,12 +1168,20 @@ if [ -d "$SESSIONS_DIR" ] && [ -d "$REMEMBER_DIR/tmp" ]; then
             _remember_stale_mtime=$(stat -c %Y "$_remember_stale_record" 2>/dev/null) \
                 || _remember_stale_mtime=$(stat -f %m "$_remember_stale_record" 2>/dev/null) \
                 || _remember_stale_mtime=""
-            if [ -z "$_remember_stale_mtime" ]; then
-                # Could not read the record's own age -> could-not-tell,
-                # same safe direction as an unreadable $SESSIONS_DIR above.
-                continue
-            fi
-            case "$_remember_stale_mtime" in (''|*[!0-9]*) _remember_stale_mtime=0 ;; esac
+            # Empty (stat failed outright) and non-numeric (stat exited 0 but
+            # printed something that is not a timestamp) are both
+            # could-not-tell, same safe direction as an unreadable
+            # $SESSIONS_DIR above -- caught in the same `case` so a
+            # non-empty garbage read cannot be coerced to 0 and then treated
+            # by the -gt 0 gate below as a confirmed, comparable age (found
+            # during #402's own review: the previous split of this check
+            # only caught the fully-empty shape, and the -gt 0 gate does not
+            # tell "confirmed zero" apart from "coerced from garbage").
+            case "$_remember_stale_mtime" in
+                (''|*[!0-9]*)
+                    continue
+                    ;;
+            esac
             # _remember_date +%s -- same call site convention as
             # post-tool-hook.sh:377/605. lib-clock.sh routes %s to `date`
             # unconditionally (never the printf builtin), and `_remember_date`
