@@ -110,7 +110,7 @@ _resolve_paths_fail() {
     exit 1
 }
 
-_REMEMBER_PLUGIN_ROOT="${PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}"
+_REMEMBER_PLUGIN_ROOT="${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}"
 if [ -n "$_REMEMBER_PLUGIN_ROOT" ]; then
     PIPELINE_DIR="$_REMEMBER_PLUGIN_ROOT"
 elif [ -f "$_PLUGIN_ROOT_CANDIDATE/pipeline/haiku.py" ]; then

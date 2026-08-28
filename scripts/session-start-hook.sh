@@ -172,11 +172,13 @@ esac
 # spawns. This is data from a host payload, same as CURRENT_SESSION_ID above,
 # and validated the same way: at the point of entry, not the point of use. A
 # transcript path legitimately contains slashes and dots, so it cannot share
-# that variable's character allowlist -- only a literal newline or carriage
-# return (which a well-formed JSON string value cannot contain unescaped) is
-# rejected here. Whether the value actually names an openable file is decided
-# on the Python side, which falls back to the existing derivation when it
-# does not.
+# that variable's character allowlist -- only a carriage return is rejected
+# here (a raw newline cannot reach this point at all: the read loop above
+# already strips every line terminator before HOOK_STDIN is assembled, so
+# the newline arm below is a belt no buckle can ever need -- kept rather
+# than dropped, in case a future change to that loop ever preserves one).
+# Whether the value actually names an openable file is decided on the Python
+# side, which falls back to the existing derivation when it does not.
 REMEMBER_TRANSCRIPT_PATH=$(_stdin_json_string transcript_path "$HOOK_STDIN" 2>/dev/null) || REMEMBER_TRANSCRIPT_PATH=""
 case "$REMEMBER_TRANSCRIPT_PATH" in
     *$'\n'*|*$'\r'*) REMEMBER_TRANSCRIPT_PATH="" ;;
@@ -645,7 +647,16 @@ fi
 if [ "$(config '.features.recovery' true)" = "true" ]; then
 if [ -d "$SESSIONS_DIR" ] && [ -f "$LAST_SAVE_FILE" ] && [ -n "$PREV_ID" ]; then
     if [ "$PREV_WAS_SAVED" = "no" ]; then
-        "$PLUGIN_ROOT/scripts/save-session.sh" "$PREV_ID" --force </dev/null >/dev/null 2>&1 & disown 2>/dev/null || true
+        # REMEMBER_TRANSCRIPT_PATH (exported above, #407) names THIS session's
+        # own transcript -- it must not reach a save being forced for a
+        # DIFFERENT one. pipeline.extract.find_session() trusts that variable
+        # unconditionally once it names a real file, so an inherited value
+        # here would make PREV_ID's rescue silently read and summarize the
+        # current session's transcript instead, while still labelling the
+        # saved record PREV_ID. Cleared in a subshell so it stays exported for
+        # this hook's own later use. Pinned by
+        # tests/test_recovery_transcript_leak_407.py.
+        ( unset REMEMBER_TRANSCRIPT_PATH; "$PLUGIN_ROOT/scripts/save-session.sh" "$PREV_ID" --force ) </dev/null >/dev/null 2>&1 & disown 2>/dev/null || true
     fi
 fi
 fi

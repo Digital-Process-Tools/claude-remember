@@ -43,7 +43,7 @@ def _shell_mirrored_vars() -> set[str]:
     """
     text = RESOLVE_PATHS.read_text(encoding="utf-8")
     match = re.search(
-        r'_REMEMBER_PLUGIN_ROOT="\$\{(\w+):-\$(\w+)\}"', text,
+        r'_REMEMBER_PLUGIN_ROOT="\$\{(\w+):-\$\{(\w+):-\}\}"', text,
     )
     assert match, "resolve-paths.sh no longer has the expected plugin-root read"
     return {match.group(1), match.group(2)}

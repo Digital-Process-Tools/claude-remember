@@ -140,11 +140,14 @@ esac
 # Same field, same reasoning as session-start-hook.sh's identical block:
 # exported for pipeline/host.transcript_path() to pick up in any Python
 # process this hook spawns. Data from a host payload, validated at the point
-# of entry -- only a literal newline or carriage return is rejected, since a
-# transcript path legitimately contains slashes and dots and cannot share
-# STDIN_SESSION_ID's character allowlist. Whether the value names an openable
-# file is decided on the Python side, which falls back to derivation when it
-# does not.
+# of entry -- only a carriage return is rejected, since a transcript path
+# legitimately contains slashes and dots and cannot share STDIN_SESSION_ID's
+# character allowlist. (A raw newline cannot reach this point at all: the
+# read loop above already strips every line terminator before HOOK_STDIN is
+# assembled, so the newline arm below is a belt no buckle can ever need --
+# kept rather than dropped, in case a future change to that loop ever
+# preserves one.) Whether the value names an openable file is decided on the
+# Python side, which falls back to derivation when it does not.
 REMEMBER_TRANSCRIPT_PATH=$(_stdin_json_string transcript_path "$HOOK_STDIN" 2>/dev/null) || REMEMBER_TRANSCRIPT_PATH=""
 case "$REMEMBER_TRANSCRIPT_PATH" in
     *$'\n'*|*$'\r'*) REMEMBER_TRANSCRIPT_PATH="" ;;
