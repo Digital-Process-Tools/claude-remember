@@ -303,10 +303,20 @@ def _fake_date_bin(tmp_path: Path, behavior: str) -> Path:
     (TODAY, FIRST_DELIVERED, ...) -- #402 is specifically about the clock
     read at the GRACE_MIN arbitration, not about breaking the whole hook.
 
-    `_remember_date` (lib-clock.sh) never routes `+%s` to its bash-builtin
-    path -- `_remember_date_builtin_ok` refuses `%s` unconditionally -- so
-    putting this ahead of the real `date` on PATH reliably intercepts every
-    `_remember_date +%s` call regardless of which bash runs the hook.
+    Putting a fake `date` on PATH is exactly the seam
+    tests/test_prompt_hook_spawns.py's
+    test_no_test_fakes_the_clock_on_path_without_disabling_the_builtin guards:
+    on bash >= 4.2 lib-clock.sh's `_remember_date` can answer from bash's own
+    `printf '%(FMT)T'` builtin, which is not on PATH, so a fake `date` is
+    silently ignored for any format that goes through it. `+%s` is not one of
+    those formats -- `_remember_date_builtin_ok` in lib-clock.sh refuses `%s`
+    unconditionally, so `_remember_date +%s` always execs the real `date`
+    binary regardless of bash version or REMEMBER_NO_PRINTF_T (confirmed by
+    reading _remember_date_builtin_ok's case pattern, and by forcing
+    _REMEMBER_PRINTF_T=1 locally and observing the fake still gets called for
+    `+%s` while a non-`%s` format attempts the builtin instead). Callers below
+    still pass REMEMBER_NO_PRINTF_T=1 anyway, so this fake does not depend on
+    that %s-specific carve-out remaining true forever.
     """
     import shutil
     real_date = shutil.which("date")
@@ -345,7 +355,11 @@ class TestUnreadableClockDuringPruneSweep:
         lines above in the source."""
         project, home, remember_dir, _sessions_dir = _sandbox(tmp_path)
         bindir = _fake_date_bin(tmp_path, "fail")
-        extra_env = {"PATH": f"{bindir}:{os.environ['PATH']}"}
+        # REMEMBER_NO_PRINTF_T=1 forces lib-clock.sh's `date` fallback path
+        # even though `+%s` already always takes it (see _fake_date_bin's
+        # docstring) -- belt and suspenders, so this test does not depend on
+        # that %s carve-out surviving a future lib-clock.sh change.
+        extra_env = {"PATH": f"{bindir}:{os.environ['PATH']}", "REMEMBER_NO_PRINTF_T": "1"}
 
         _session_start_with_env(project, home, "sess-aaa", extra_env)
         record_a = _seed_delivery_record(remember_dir, "sess-aaa")
@@ -368,7 +382,9 @@ class TestUnreadableClockDuringPruneSweep:
         of failing outright."""
         project, home, remember_dir, _sessions_dir = _sandbox(tmp_path)
         bindir = _fake_date_bin(tmp_path, "garbage")
-        extra_env = {"PATH": f"{bindir}:{os.environ['PATH']}"}
+        # See the "fail" case above for why REMEMBER_NO_PRINTF_T=1 is set here
+        # even though `+%s` already always takes the `date` fallback path.
+        extra_env = {"PATH": f"{bindir}:{os.environ['PATH']}", "REMEMBER_NO_PRINTF_T": "1"}
 
         _session_start_with_env(project, home, "sess-aaa", extra_env)
         record_a = _seed_delivery_record(remember_dir, "sess-aaa")
