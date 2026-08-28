@@ -1035,13 +1035,31 @@ fi
 # is gone in every way this hook can observe.
 #
 # Three states, not two, matching the record left behind:
-#   - transcript confirmed ABSENT  -> record is pruned
+#   - transcript confirmed ABSENT, record older than GRACE_MIN -> pruned
 #   - transcript confirmed PRESENT -> record is kept (not a bug: correct
 #     under the coupling above)
-#   - $SESSIONS_DIR cannot be listed at all -> nothing is touched.
-#     Could-not-tell must never render as either of the other two, so on
-#     doubt the safe direction is the one #221 already chose for the
-#     handoff itself: keep, never guess-delete.
+#   - transcript ABSENT but record younger than GRACE_MIN, or $SESSIONS_DIR
+#     cannot be listed at all -> nothing is touched. Could-not-tell must
+#     never render as either of the other two, so on doubt the safe
+#     direction is the one #221 already chose for the handoff itself: keep,
+#     never guess-delete.
+#
+# #393: "transcript absent" alone does not mean "session gone". At
+# source=startup (see the #270 comment above, lines 100-108) Claude Code
+# creates a session's own transcript AFTER this hook has already run and
+# already written that session's delivery record (line ~1012 above). For
+# that window a live session's record is indistinguishable from a dead
+# one's on the transcript check alone -- any concurrent session start
+# would prune a record that is still in active use. GRACE_MIN arbitrates:
+# a record newer than the window is not evidence the session is over,
+# whatever the transcript says; the mtime check below is what makes this a
+# third state instead of a coin flip. GRACE_MIN is REASONED, not measured
+# against real Claude Code startup timing -- there is no instrumented
+# figure for how long that gap runs, so this picks a duration wide enough
+# that no plausible hook-to-transcript-creation delay approaches it, while
+# staying bounded: a genuinely dead session's record is still pruned, just
+# on the next session start after it ages past this window, never lost.
+GRACE_MIN=5
 #
 # Runs regardless of THIS session's own handoff_mode -- not gated on
 # $PER_SESSION_HANDOFF. Gating it there was considered and rejected: a
@@ -1062,10 +1080,18 @@ if [ -d "$SESSIONS_DIR" ] && [ -d "$REMEMBER_DIR/tmp" ]; then
         # Never sweep the record this very invocation just wrote.
         [ "$_remember_stale_id" = "$CURRENT_SESSION_ID" ] && continue
         if [ ! -e "$SESSIONS_DIR/$_remember_stale_id.jsonl" ]; then
+            # #393: an absent transcript is not proof the session is over --
+            # it is also what a session still inside its own startup window
+            # looks like. `find -mmin +N` answers "strictly older than N
+            # minutes"; a record inside the window (find finds nothing) is
+            # left untouched rather than treated as confirmed-dead.
+            if [ -z "$(find "$_remember_stale_record" -mmin "+$GRACE_MIN" 2>/dev/null)" ]; then
+                continue
+            fi
             rm -f "$_remember_stale_record" 2>/dev/null
         fi
     done
-    unset _remember_stale_record _remember_stale_id
+    unset _remember_stale_record _remember_stale_id GRACE_MIN
 fi
 
 # ── History hint ───────────────────────────────────────────────────────────
