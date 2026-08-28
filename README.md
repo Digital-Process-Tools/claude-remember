@@ -37,9 +37,16 @@ To update later:
 
 Claude Remember is also available in the official Anthropic Marketplace. In Claude Code, type `/plugin` and search for "remember".
 
-**Releases reach this route on the catalogue's schedule, not ours, and that schedule is not predictable from ours.** `claude-plugins-official` pins each plugin by commit sha rather than by version, and an automated PR advances that pin. Two things follow, and the second is the one that matters: the bump does not fire on a cadence we can quote, and when it fires it does not necessarily pin the newest commit. Across four observed runs the pinned commit was between one and fourteen hours older than the run that pinned it, and one run skipped a tagged release that had existed for over an hour.
+**Releases reach this route on the catalogue's schedule, not ours, and that schedule is not predictable from ours.** `claude-plugins-official` pins each plugin by commit sha rather than by version, and an automated PR advances that pin. Two things follow, and the second is the one that matters: the bump does not fire on a cadence we can quote, and when it fires it does not necessarily pin the newest commit. The lag is unbounded, not something our own release cadence lets you predict, and it has been observed skipping more than one tagged release in a row -- not just one.
 
-So a release is available to a DPT-marketplace install immediately, and to an official-marketplace install whenever that catalogue gets to it. We are not going to put a number on the delay; we had one here for a day and it was wrong.
+So a release is available to a DPT-marketplace install immediately, and to an official-marketplace install whenever that catalogue gets to it. We are not going to put a number on the delay; we had one here for a day and it was already wrong the day after. Measure your own exposure instead:
+
+```
+gh api repos/anthropics/claude-plugins-official/contents/.claude-plugin/marketplace.json --jq '.content' | base64 -d | grep -A6 '"name": "remember"'
+git log -1 --format='%h %ad %s' --date=short <sha>
+```
+
+The first command decodes the whole catalogue and filters it down to this plugin's own entry, which carries the pinned commit sha; take that sha and give it to the second command, which resolves it against this repo's own history to a date and a commit message. Three outcomes, and only the last two mean the catalogue is behind: the pin resolves to the commit for the release you already expect (current); the pin resolves to an older commit, and the date is your lag (behind, by however long the second command says); or either command fails, or the `grep` finds no `remember` entry at all (the pin could not be read -- treat that as unknown, not as current).
 
 **`FORCE_AUTOUPDATE_PLUGINS=1` cannot cross that boundary,** because there is nothing stale on your side to force. Against a catalogue pinned behind the current release, `claude plugin update remember@claude-plugins-official` correctly reports the plugin as already current at the pinned version. The CLI is right and the input is old ([#264](https://github.com/Digital-Process-Tools/claude-remember/issues/264)). Waiting for the next bump works; installing from the DPT marketplace above skips the wait.
 

@@ -979,10 +979,27 @@ if [ -f "$REMEMBER_HANDOFF" ] && [ -s "$REMEMBER_HANDOFF" ]; then
 
     echo "=== LAST HANDOFF ==="
     if [ -n "$PREV_FP" ] && [ "$HANDOFF_FP" = "$PREV_FP" ]; then
-        # 10# after the case (#332). The record is explicitly hand-editable,
-        # which is the premise of the guard above and the one source that can
-        # deliver "08".
-        DELIVERIES=$((10#$DELIVERIES + 1))
+        # The counter's own wording ("already delivered N times") is a claim
+        # about how many SESSIONS have seen this content — but `SessionStart`
+        # fires on every source, including `compact`, which is not a new
+        # session at all (#206 settled this for the capture-alive store; #341
+        # is that rule applied here). Without the guard below, four
+        # auto-compactions of a handoff delivered exactly once read as
+        # "already delivered 5 times", arguing for dismissing content that
+        # was in fact read once.
+        #
+        # `compact` is the only source excluded. `clear`, `fork`, `resume`, an
+        # absent source and an unrecognised value are NOT: each already means
+        # something happened that plausibly warrants treating the fire as a
+        # fresh look — `clear` genuinely replaces the context, and the #339
+        # safe direction for an unknown/absent source is to change nothing.
+        # `compact` is the one source that is provably still the same session.
+        if [ "$SESSION_START_SOURCE" != "compact" ]; then
+            # 10# after the case (#332). The record is explicitly
+            # hand-editable, which is the premise of the guard above and the
+            # one source that can deliver "08".
+            DELIVERIES=$((10#$DELIVERIES + 1))
+        fi
         echo "[already delivered ${DELIVERIES} times since ${FIRST_DELIVERED:-an earlier session} — no new handoff has been written since, so this is pending replacement, not news. You may already have acted on it. Running /remember replaces it.]"
     else
         DELIVERIES=1
@@ -1174,8 +1191,18 @@ fi
 
 # ── Consolidation trigger ─────────────────────────────────────────────────
 # If past-day staging files exist, compress them in the background.
+#
+# Gated on source (#342): `compact` fires mid-session and changes nothing
+# about whether yesterday's staging is worth compressing — the #339 report
+# measured `compact` re-triggering this 82 times across 50 sessions, against
+# `startup`'s 180, all spawning the same work again. `compact` is excluded
+# for the same reason #341 excludes it from the delivery counter: it is
+# provably not a new entry point into the session. `startup`, `resume`,
+# `clear`, `fork`, an absent source and an unrecognised value are left
+# triggering exactly as before — narrowing further would mean staging files
+# wait indefinitely for a session that never does a bare `startup` again.
 STAGING_COUNT=$(ls "$REMEMBER_DIR/today-"*.md 2>/dev/null | grep -v "today-${TODAY}.md" | grep -v "\.done\.md" | wc -l | tr -d ' ')
-if [ "$STAGING_COUNT" -gt 0 ]; then
+if [ "$STAGING_COUNT" -gt 0 ] && [ "$SESSION_START_SOURCE" != "compact" ]; then
     echo "=== MEMORY CONSOLIDATION ==="
     echo "$STAGING_COUNT day(s) of memory to compress. Running consolidation in background..."
     nohup "$PLUGIN_ROOT/scripts/run-consolidation.sh" </dev/null >/dev/null 2>&1 & disown 2>/dev/null || true

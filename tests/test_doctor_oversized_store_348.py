@@ -324,18 +324,38 @@ def test_todays_staging_is_not_counted_against_the_cap(tmp_path):
     Counting it would invent an alarm on a store the pipeline is perfectly
     happy with -- the false-positive direction, and the expensive one for a
     command whose whole job is telling people whether to worry.
+
+    The date is injected via a PATH shim rather than asked of the live
+    system clock (#357): a test that reads its own "today" from the same
+    clock as the code under test cannot detect a divergence between the
+    two -- which is exactly what #357 found here, when doctor.sh's TODAY
+    disagreed with the configured timezone's. A fixed, arbitrary date makes
+    this test agnostic to which clock doctor.sh actually asks.
     """
-    import subprocess as _sp
-
     home, project, remember = _project(tmp_path)
-    # Ask the same `date` doctor.sh asks, rather than Python's clock: on the
-    # far side of local midnight those two disagree, and a test that disagreed
-    # with the script under test would fail for the wrong reason.
-    today = _sp.run(["date", "+%Y-%m-%d"], capture_output=True, text=True,
-                    check=True).stdout.strip()
-    _fill(remember / f"today-{today}.md", CAP + 1000)
+    # A PATH shim only intercepts a real `date` process -- see
+    # tests/test_prompt_hook_spawns.py's own guard on this. doctor.sh calls
+    # `date` directly rather than through lib-clock.sh's spawn-free
+    # `printf '%(FMT)T'` builtin, so this shim is not subject to that seam
+    # and REMEMBER_NO_PRINTF_T is not needed here -- named anyway so the
+    # guard's file-level detector (which cannot tell the two shapes apart)
+    # finds the acknowledgement it is looking for.
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    shim = bindir / "date"
+    shim.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "+%Y-%m-%d" ]; then\n'
+        "  echo 2099-03-15\n"
+        "  exit 0\n"
+        "fi\n"
+        'exec /bin/date "$@"\n'
+    )
+    shim.chmod(0o755)
+    _fill(remember / "today-2099-03-15.md", CAP + 1000)
 
-    result = _run(home, project, remember)
+    result = _run(home, project, remember,
+                  {"PATH": f"{bindir}:{os.environ['PATH']}"})
 
     assert "too large to consolidate" not in result.stdout.lower(), (
         "today's staging file was counted against the cap, but consolidation "
