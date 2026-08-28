@@ -40,7 +40,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS_DIR = REPO_ROOT / "scripts"
 PIPELINE_DIR = REPO_ROOT / "pipeline"
 
-_PRINT_KEYWORD = re.compile(r'^\s*(echo|printf|log|report_error)\b')
+# NOT anchored to the start of the line (a bare `.match`) on purpose: this
+# codebase's own hooks routinely print via `[ cond ] && log ...`, `cmd || log
+# ...` and `if cond; then log ...`, all of which put something other than the
+# keyword first. `.search` with a word boundary catches every one of those.
+_PRINT_KEYWORD = re.compile(r'\b(echo|printf|log|report_error)\b')
 _COMMENT_LINE = re.compile(r'^\s*#')
 
 # The one line in the whole scripts/ tree that is exempt: bench-slug.sh's own
@@ -54,7 +58,27 @@ def _shell_files() -> list[Path]:
     return sorted(SCRIPTS_DIR.glob("*.sh"))
 
 
-def _printed_shell_lines(path: Path) -> list[tuple[int, str]]:
+def _non_comment_lines(path: Path) -> list[tuple[int, str]]:
+    """Every line in `path` that is not a `#` comment (and, for
+    bench-slug.sh, not its own named benchmark-input exemption).
+
+    Deliberately not narrowed to lines that open with a print keyword: this
+    codebase also builds a message in a `local _msg="..."` (or similarly
+    named) assignment on one line and prints it via `log "$_msg"` several
+    lines later (scripts/log.sh's `_dispatch_report_skip` is one such shape),
+    so the message text a human eventually reads does not always share a
+    line with the call that emits it. A keyword-anchored scan of THIS FILE
+    was tried first and demonstrably missed both that shape and the
+    `cond && log ...` guarded-print idiom -- reverting either shape back to
+    an em-dash and rerunning the narrower scan still passed. Scanning every
+    non-comment line closes both gaps at once, and is safe here because
+    nothing in scripts/*.sh outside a comment or the named exemption is
+    non-ASCII for a reason OTHER than eventually reaching a stream; if that
+    ever changes (a byte pattern, a regex literal), name the new exemption
+    the same way bench-slug.sh's is named below rather than loosening this
+    scan back to something a guarded or assignment-carried message can hide
+    behind again.
+    """
     lines = path.read_text(encoding="utf-8").splitlines()
     out = []
     for i, line in enumerate(lines, start=1):
@@ -62,9 +86,19 @@ def _printed_shell_lines(path: Path) -> list[tuple[int, str]]:
             continue
         if path.name == "bench-slug.sh" and _BENCH_SLUG_EXEMPT_NEEDLE in line:
             continue
-        if _PRINT_KEYWORD.match(line):
-            out.append((i, line))
+        out.append((i, line))
     return out
+
+
+def _printed_shell_lines(path: Path) -> list[tuple[int, str]]:
+    """The subset of `_non_comment_lines` that visibly names a print
+    keyword. Used only for the per-file "known to have printed lines" floor
+    below -- the non-ASCII assertion itself scans every non-comment line,
+    for the reason given in `_non_comment_lines`."""
+    return [
+        (i, line) for i, line in _non_comment_lines(path)
+        if _PRINT_KEYWORD.search(line)
+    ]
 
 
 def test_scanned_every_shell_file_under_scripts():
@@ -103,13 +137,16 @@ def test_no_printed_shell_line_contains_non_ascii():
     exemption in bench-slug.sh."""
     offenders = []
     for f in _shell_files():
-        for n, l in _printed_shell_lines(f):
+        for n, l in _non_comment_lines(f):
             if any(ord(ch) > 127 for ch in l):
                 offenders.append((f.name, n, l))
     assert not offenders, (
-        "printed (echo/printf/log/report_error) lines under scripts/ contain "
-        "non-ASCII characters -- every script's printed lines must be pure "
-        "ASCII (#405):\n"
+        "a non-comment line under scripts/ contains non-ASCII characters -- "
+        "every script's printed lines must be pure ASCII (#405), and this "
+        "scan deliberately covers every non-comment line rather than only "
+        "ones that visibly name echo/printf/log/report_error, because a "
+        "message this codebase builds in one assignment and prints several "
+        "lines later would otherwise hide from a keyword-anchored scan:\n"
         + "\n".join(f"  {name}:{n}: {l!r}" for name, n, l in offenders)
     )
 
