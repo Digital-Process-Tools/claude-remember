@@ -506,7 +506,7 @@ _lock_timing_record() {
     local _name="${1##*/}" _dir _n
     _lock_timing_target
     if [ -z "$_LOCK_TIMING_FILE" ]; then
-        _lock_timing_disclose "REMEMBER_LOCK_TIMING=1 but neither REMEMBER_LOCK_TIMING_FILE nor REMEMBER_DIR is set — nothing is being recorded"
+        _lock_timing_disclose "REMEMBER_LOCK_TIMING=1 but neither REMEMBER_LOCK_TIMING_FILE nor REMEMBER_DIR is set -- nothing is being recorded"
         return 0
     fi
     if [ -e "${_LOCK_TIMING_FILE}.capped" ]; then
@@ -522,11 +522,11 @@ _lock_timing_record() {
             ''|*[!0-9]*) _n=0 ;;
         esac
         if [ "$_n" -ge "$_LOCK_TIMING_MAX" ]; then
-            { printf '# CAPPED\t%s lines, REMEMBER_LOCK_TIMING_MAX=%s reached — recording STOPPED here. Nothing was rolled or overwritten, so every record above is real; the distribution below this point is simply missing. Raise the cap or move this file to keep measuring.\n' \
+            { printf '# CAPPED\t%s lines, REMEMBER_LOCK_TIMING_MAX=%s reached -- recording STOPPED here. Nothing was rolled or overwritten, so every record above is real; the distribution below this point is simply missing. Raise the cap or move this file to keep measuring.\n' \
                 "$_n" "$_LOCK_TIMING_MAX" >> "$_LOCK_TIMING_FILE"; } 2>/dev/null \
                 || _lock_timing_disclose "could not append the cap notice to $_LOCK_TIMING_FILE"
             { : > "${_LOCK_TIMING_FILE}.capped"; } 2>/dev/null || true
-            _lock_timing_disclose "$_LOCK_TIMING_FILE reached REMEMBER_LOCK_TIMING_MAX=$_LOCK_TIMING_MAX lines — recording stopped, nothing rolled"
+            _lock_timing_disclose "$_LOCK_TIMING_FILE reached REMEMBER_LOCK_TIMING_MAX=$_LOCK_TIMING_MAX lines -- recording stopped, nothing rolled"
             return 0
         fi
     else

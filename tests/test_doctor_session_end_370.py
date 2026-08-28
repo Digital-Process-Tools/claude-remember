@@ -309,7 +309,7 @@ def test_marker_present_reports_ok_and_never_a_session_end_problem(tmp_path):
         "a store with a genuine session-end log was not reported OK:\n"
         + result.stdout
     )
-    assert "problem — SessionEnd" not in _verdict(result.stdout), (
+    assert "problem -- SessionEnd" not in _verdict(result.stdout), (
         "a working SessionEnd hook still reached a SessionEnd problem verdict:\n"
         + result.stdout
     )
@@ -344,7 +344,7 @@ def test_session_end_failure_outranks_the_generic_capture_is_working_verdict(tmp
     result = _run(home, project, remember)
 
     assert result.returncode == 0, result.stderr
-    assert _verdict(result.stdout).startswith("VERDICT: problem — SessionEnd"), (
+    assert _verdict(result.stdout).startswith("VERDICT: problem -- SessionEnd"), (
         "PostToolUse capture being healthy masked SessionEnd's own silent "
         "failure instead of the specific cause outranking the general "
         "success line:\n" + result.stdout
@@ -385,7 +385,7 @@ def test_prior_cc_history_predating_the_store_is_not_a_failure(tmp_path):
         "reached the VERDICT line:\n" + result.stdout
     )
     assert _verdict(result.stdout).startswith(
-        "VERDICT: problem — PostToolUse has never fired"
+        "VERDICT: problem -- PostToolUse has never fired"
     ), (
         "a fresh install with prior CC history and nothing captured did not "
         "surface the correct, actionable PostToolUse remediation:\n"

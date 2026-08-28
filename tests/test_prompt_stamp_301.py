@@ -135,20 +135,20 @@ def test_the_default_is_byte_for_byte_what_shipped_before(tmp_path):
     an option added for one gateway operator must not quietly restyle the line
     every other install has been reading for a year."""
     out = _stamp(tmp_path, None, pct="45").strip()
-    assert out == f"[{_clock(out)} UTC — {WHO} — 45%]", out
+    assert out == f"[{_clock(out)} UTC -- {WHO} -- 45%]", out
 
 
 def test_full_is_the_default_spelled_out(tmp_path):
     """Setting the documented default explicitly must be a no-op, not a variant."""
     out = _stamp(tmp_path, "full", pct="45").strip()
-    assert out == f"[{_clock(out)} UTC — {WHO} — 45%]", out
+    assert out == f"[{_clock(out)} UTC -- {WHO} -- 45%]", out
 
 
 def test_an_unrecognised_value_falls_back_to_full(tmp_path):
     """A typo in config.json must not silently delete the timestamp — the safe
     direction for an unknown value is the behaviour that already shipped."""
     out = _stamp(tmp_path, "stabel", pct="45").strip()
-    assert out == f"[{_clock(out)} UTC — {WHO} — 45%]", (
+    assert out == f"[{_clock(out)} UTC -- {WHO} -- 45%]", (
         f"`prompt_stamp: stabel` was honoured as something. Got: {out!r}"
     )
 

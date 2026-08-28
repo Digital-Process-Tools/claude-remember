@@ -54,6 +54,19 @@ _HOOK_DIR="${BASH_SOURCE[0]%/*}"
 # under the summarizer's temp dir and injects into its context.
 [ -n "${REMEMBER_NESTED_SUMMARIZER:-}" ] && exit 0
 
+# --- REMEMBER_HOOK_CWD (#417) ---
+# resolve-paths.sh falls back to this variable when CLAUDE_PROJECT_DIR is
+# unset (#411), but only session-start-hook.sh and session-end-hook.sh ever
+# set it -- each from its own stdin `cwd`, freshly validated on every run.
+# This hook has no stdin `cwd` of its own to offer and must not silently
+# inherit whatever the process environment happens to already hold (a value
+# a DIFFERENT session's SessionStart exported, on a host that reuses one
+# environment across hook invocations). Clearing it here is cheap and
+# unconditionally correct regardless of whether that reuse is possible on any
+# supported host: on the common path CLAUDE_PROJECT_DIR is already set and
+# this arm never runs anyway.
+unset REMEMBER_HOOK_CWD
+
 source "$_HOOK_DIR/lib-clock.sh"
 source "$_HOOK_DIR/lib-env-cache.sh"
 
@@ -186,10 +199,10 @@ if [ "$_REMEMBER_STAMP" = "stable" ]; then
   echo "[$_REMEMBER_WHO]"
 elif [ -n "$CTX_PCT" ]; then
   _REMEMBER_NOW=$(_remember_date '+%H:%M %Z')
-  echo "[$_REMEMBER_NOW — $_REMEMBER_WHO — ${CTX_PCT}%]"
+  echo "[$_REMEMBER_NOW -- $_REMEMBER_WHO -- ${CTX_PCT}%]"
 else
   _REMEMBER_NOW=$(_remember_date '+%H:%M %Z')
-  echo "[$_REMEMBER_NOW — $_REMEMBER_WHO]"
+  echo "[$_REMEMBER_NOW -- $_REMEMBER_WHO]"
 fi
 # Kept under `stable`, deliberately: it is gated on a threshold, so it changes
 # bytes only when it changes behaviour — and it is the only line here anybody

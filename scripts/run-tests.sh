@@ -52,11 +52,11 @@ FAIL=0
 SKIP=0
 
 # Record a passing test. Args: $1 — test description.
-pass() { echo "  ✓ $1"; PASS=$((PASS + 1)); }
+pass() { echo "  PASS $1"; PASS=$((PASS + 1)); }
 # Record a failing test. Args: $1 — test description, $2 — failure detail.
-fail() { echo "  ✗ $1: $2"; FAIL=$((FAIL + 1)); }
+fail() { echo "  FAIL $1: $2"; FAIL=$((FAIL + 1)); }
 # Record a skipped test (requires --live). Args: $1 — test description.
-skip() { echo "  ○ $1 (skipped — use --live)"; SKIP=$((SKIP + 1)); }
+skip() { echo "  SKIP $1 (skipped -- use --live)"; SKIP=$((SKIP + 1)); }
 
 cleanup_files=()
 # Remove all accumulated temp files on exit.
@@ -184,7 +184,7 @@ else
 fi
 
 # 5c. Parse Haiku — SKIP detection
-MOCK_SKIP='{"result":"SKIP — duplicate","usage":{"input_tokens":100,"output_tokens":10,"cache_read_input_tokens":0},"total_cost_usd":0.001}'
+MOCK_SKIP='{"result":"SKIP -- duplicate","usage":{"input_tokens":100,"output_tokens":10,"cache_read_input_tokens":0},"total_cost_usd":0.001}'
 SKIP_OUT=$(echo "$MOCK_SKIP" | (cd "$PIPELINE_DIR" && python3 -m pipeline.shell parse-haiku) 2>&1)
 if echo "$SKIP_OUT" | grep -q "IS_SKIP=true"; then
     pass "shell parse-haiku SKIP detection"
@@ -319,7 +319,7 @@ echo "  Skipped: $SKIP"
 echo ""
 
 if [ "$FAIL" -gt 0 ]; then
-    echo "FAILED — $FAIL test(s) need attention"
+    echo "FAILED -- $FAIL test(s) need attention"
     exit 1
 else
     echo "ALL PASSED"

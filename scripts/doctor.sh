@@ -201,12 +201,12 @@ rm -f "$_RESOLVE_ERR_FILE"
 if [ "$_RESOLVE_STATUS" -ne 0 ]; then
     echo "FAIL Path resolution failed: ${_RESOLVE_ERR:-unknown error}"
     echo ""
-    echo "VERDICT: problem — paths did not resolve, capture cannot run (see above)"
+    echo "VERDICT: problem -- paths did not resolve, capture cannot run (see above)"
     exit 0
 fi
 
 if [ "$_PROJECT_DIR_ASSUMED" -eq 1 ]; then
-    echo "WARN CLAUDE_PROJECT_DIR was not set — assumed the current directory:"
+    echo "WARN CLAUDE_PROJECT_DIR was not set -- assumed the current directory:"
     echo "     $PROJECT_DIR"
     echo "     Everything below describes that directory, not one Claude Code told"
     echo "     us about. Rerun with CLAUDE_PROJECT_DIR set to check a different project."
@@ -245,7 +245,7 @@ if command -v session_dir_slug >/dev/null 2>&1 && command -v claude_projects_dir
 else
     _SESSION_DIR=""
     echo "WARN Session dir: slug helpers unavailable, cannot check (#144 is"
-    echo "     therefore unverified — this is not the same as 'no problem')"
+    echo "     therefore unverified -- this is not the same as 'no problem')"
 fi
 echo ""
 
@@ -277,7 +277,7 @@ else
         _JQ_VERSION=$(jq --version 2>&1)
         echo "OK   jq: $_JQ_PATH ($_JQ_VERSION)"
     else
-        echo "WARN jq: not found — using the python fallback (slower, single-key reads only)"
+        echo "WARN jq: not found -- using the python fallback (slower, single-key reads only)"
     fi
 fi
 echo ""
@@ -294,7 +294,7 @@ fi
 if [ -f "$REMEMBER_CONFIG" ] && [ -s "$REMEMBER_CONFIG" ]; then
     echo "OK   config.json: parsed (merged from bundled/user-global/per-project layers)"
 else
-    echo "WARN config.json: none found — running on bundled defaults"
+    echo "WARN config.json: none found -- running on bundled defaults"
 fi
 
 # Is this store known by a second spelling? (#298)
@@ -325,7 +325,7 @@ if source "$SCRIPT_DIR/lib-case-divergence.sh" 2>/dev/null && \
             # external store with no backup repository. Printing only "could
             # not check" would hide the half that did answer, and printing
             # "OK" would claim the half that did not.
-            echo "WARN Store spelling: could not check in full — on disk: $REMEMBER_CASE_DISK_STATE${REMEMBER_CASE_DISK_REASON:+ ($REMEMBER_CASE_DISK_REASON)}; in git: $REMEMBER_CASE_GIT_STATE${REMEMBER_CASE_GIT_REASON:+ ($REMEMBER_CASE_GIT_REASON)}. This is not a report that they agree."
+            echo "WARN Store spelling: could not check in full -- on disk: $REMEMBER_CASE_DISK_STATE${REMEMBER_CASE_DISK_REASON:+ ($REMEMBER_CASE_DISK_REASON)}; in git: $REMEMBER_CASE_GIT_STATE${REMEMBER_CASE_GIT_REASON:+ ($REMEMBER_CASE_GIT_REASON)}. This is not a report that they agree."
             ;;
     esac
 fi
@@ -361,7 +361,7 @@ _ALIVE_MARKER="$REMEMBER_DIR/tmp/capture-alive"
 _POST_TOOL_FIRED=0
 if [ -f "$_RAN_MARKER" ] && [ ! -f "$_ALIVE_MARKER" ]; then
     echo "WARN PostToolUse is wired and running, but has not serviced a session"
-    echo "     — it is exiting early. The cause is above: most often the session"
+    echo "     -- it is exiting early. The cause is above: most often the session"
     echo "     dir slug (#144), or a Python it cannot find. Restarting will not help."
     _POST_TOOL_FIRED=1
 elif [ -f "$_ALIVE_MARKER" ]; then
@@ -379,7 +379,7 @@ elif [ -f "$REMEMBER_DIR/tmp/last-save.json" ]; then
     # completed save proves PostToolUse HAS run here. Calling that "never
     # fired" would send a working user off to restart for nothing, and a
     # diagnostic that cries wolf is worse than none.
-    echo "WARN PostToolUse marker absent, but a save has completed — capture has"
+    echo "WARN PostToolUse marker absent, but a save has completed -- capture has"
     echo "     worked here. The marker is new; it appears on the next tool call."
     _POST_TOOL_FIRED=1
 else
@@ -501,7 +501,7 @@ elif [ -n "$_SESSION_DIR" ] && [ -d "$_SESSION_DIR" ]; then
     if [ "$_SE_STALE_TRANSCRIPT_COUNT" -ge 1 ]; then
         echo "FAIL SessionEnd has never fired for this project (no $_SESSION_END_LOG_DIR/session-end-*.log),"
         echo "     though $_SE_STALE_TRANSCRIPT_COUNT prior session transcript(s) in $_SESSION_DIR"
-        echo "     have gone quiet for over 15 minutes since remember became active here —"
+        echo "     have gone quiet for over 15 minutes since remember became active here --"
         echo "     the last-chance flush is not running. See session-end-hook.sh's own"
         echo "     header for the endings Claude Code does not document firing on."
         _SESSION_END_STATE="not-fired"
@@ -509,11 +509,11 @@ elif [ -n "$_SESSION_DIR" ] && [ -d "$_SESSION_DIR" ]; then
         echo "WARN SessionEnd has not fired yet, and no prior session has demonstrably"
         echo "     ended in this project since remember became active here"
         echo "     ($_SE_TRANSCRIPT_COUNT transcript(s) in $_SESSION_DIR attributable to"
-        echo "     that window, none quiet long enough to call finished) — nothing has"
+        echo "     that window, none quiet long enough to call finished) -- nothing has"
         echo "     had the chance to prove or disprove this yet."
         if [ "$_SE_PREDATES_STORE_COUNT" -gt 0 ]; then
             echo "     ($_SE_PREDATES_STORE_COUNT more transcript(s) predate this project's"
-            echo "     remember store — or no store baseline could be read — and cannot"
+            echo "     remember store -- or no store baseline could be read -- and cannot"
             echo "     testify either way.)"
         fi
         if [ "$_SE_UNREADABLE_COUNT" -gt 0 ]; then
@@ -523,7 +523,7 @@ elif [ -n "$_SESSION_DIR" ] && [ -d "$_SESSION_DIR" ]; then
     fi
 else
     echo "WARN SessionEnd has not fired yet, and the session transcript directory is"
-    echo "     unavailable (see Session dir slug above) — cannot tell whether a prior"
+    echo "     unavailable (see Session dir slug above) -- cannot tell whether a prior"
     echo "     session has had the chance to fire it."
 fi
 echo ""
@@ -649,7 +649,7 @@ if [ ! -d "$REMEMBER_DIR" ]; then
     # The third state, and it is not "healthy". A check that cannot look has to
     # say it could not look; reporting OK here would be a clean bill of health
     # for a store nothing measured.
-    echo "WARN Consolidation size check: skipped — $REMEMBER_DIR does not exist"
+    echo "WARN Consolidation size check: skipped -- $REMEMBER_DIR does not exist"
 else
     _size_of "$REMEMBER_DIR/recent.md";  _RECENT_BYTES=$_SIZE_BYTES
     _size_of "$REMEMBER_DIR/archive.md"; _ARCHIVE_BYTES=$_SIZE_BYTES
@@ -694,7 +694,7 @@ else
     _STORE_BYTES=$((_STAGING_BYTES + _RECENT_BYTES + _ARCHIVE_BYTES))
 
     if [ -n "$_STORE_UNREADABLE" ]; then
-        echo "WARN Consolidation size check is incomplete — these memory files exist"
+        echo "WARN Consolidation size check is incomplete -- these memory files exist"
         echo "     but could not be read, so nothing below counts their bytes:"
         printf '%s' "$_STORE_UNREADABLE" | while IFS= read -r _uf; do
             [ -n "$_uf" ] && echo "     $_uf"
@@ -708,7 +708,7 @@ else
         # own defect class one line up (#360). thresholds.consolidate_max_bytes
         # of 0 is not a 0-byte cap; pipeline/shell.py:542 never skips a round
         # on size when it reads 0, so nothing below is compared against it.
-        echo "OK   Consolidation size check: disabled (thresholds.consolidate_max_bytes: 0) — size never blocks a round"
+        echo "OK   Consolidation size check: disabled (thresholds.consolidate_max_bytes: 0) -- size never blocks a round"
     elif [ "$_STORE_BYTES" -gt "$_CONSOLIDATE_MAX_BYTES" ]; then
         if [ "$_STAGING_BYTES" -gt "$_CONSOLIDATE_MAX_BYTES" ]; then
             # The one shape rotation cannot fix. FAIL, and it takes a VERDICT
@@ -719,7 +719,7 @@ else
             _STORE_NEEDS_A_HUMAN=1
             echo "FAIL Store is too large to consolidate and cannot heal itself:"
             echo "     $_STORE_BYTES bytes against a thresholds.consolidate_max_bytes cap"
-            echo "     of $_CONSOLIDATE_MAX_BYTES — recent.md $_RECENT_BYTES + archive.md $_ARCHIVE_BYTES"
+            echo "     of $_CONSOLIDATE_MAX_BYTES -- recent.md $_RECENT_BYTES + archive.md $_ARCHIVE_BYTES"
             echo "     + past-day staging $_STAGING_BYTES."
             echo "     Past-day staging ALONE is over the cap, so rotating recent.md or"
             echo "     archive.md would not help and the pipeline will not do it: the next"
@@ -733,13 +733,13 @@ else
             # rotates the oversized file and resumes on its own.
             echo "WARN Store is too large to consolidate right now: $_STORE_BYTES bytes"
             echo "     against a thresholds.consolidate_max_bytes cap of $_CONSOLIDATE_MAX_BYTES"
-            echo "     — recent.md $_RECENT_BYTES + archive.md $_ARCHIVE_BYTES + past-day staging $_STAGING_BYTES."
+            echo "     -- recent.md $_RECENT_BYTES + archive.md $_ARCHIVE_BYTES + past-day staging $_STAGING_BYTES."
             echo "     Capture is unaffected; consolidation is what skips, and staging piles"
             echo "     up until it runs."
             echo "     REMEDIATION: none by hand. The next consolidation rotates the"
             echo "     oversized file to a dated sibling (recent-YYYY-MM-DD.md /"
             echo "     archive-YYYY-MM-DD.md), starts a fresh one, and resumes. Nothing is"
-            echo "     deleted — the bytes stay on disk, stay greppable, and session start"
+            echo "     deleted -- the bytes stay on disk, stay greppable, and session start"
             echo "     names the rotated slices."
         fi
     elif [ -n "$_STORE_UNREADABLE" ]; then
@@ -757,7 +757,7 @@ fi
 if [ "$_POST_TOOL_FIRED" -eq 0 ]; then
     echo ""
     echo "REMEDIATION: enabling the plugin mid-session does not register its"
-    echo "hooks for that session — Claude Code reads hook definitions only at"
+    echo "hooks for that session -- Claude Code reads hook definitions only at"
     echo "session start. Restart Claude Code to activate PostToolUse capture."
 fi
 echo ""
@@ -860,9 +860,9 @@ fi
 # oversized-store arms because those mean literally nothing in the pipeline
 # runs at all, which outranks a narrower, single-hook failure every time.
 if [ "$_PYTHON_OK" -eq 0 ]; then
-    echo "VERDICT: problem — no usable Python; the pipeline cannot run at all (see Tools above)$_ASSUMED_NOTE"
+    echo "VERDICT: problem -- no usable Python; the pipeline cannot run at all (see Tools above)$_ASSUMED_NOTE"
 elif [ "${_STORE_NEEDS_A_HUMAN:-0}" -eq 1 ]; then
-    echo "VERDICT: problem — memory is being captured but never consolidated; the staging files are over the prompt cap on their own (see above)$_ASSUMED_NOTE"
+    echo "VERDICT: problem -- memory is being captured but never consolidated; the staging files are over the prompt cap on their own (see above)$_ASSUMED_NOTE"
 elif [ "$_POST_TOOL_FIRED" -eq 1 ] && [ -z "$_LAST_SAVE_TIME" ] \
     && { [ -z "$_SESSION_DIR" ] || [ -d "$_SESSION_DIR" ]; }; then
     # #404: this is the same condition the final `else` below names — PostToolUse
@@ -885,15 +885,15 @@ elif [ "$_POST_TOOL_FIRED" -eq 1 ] && [ -z "$_LAST_SAVE_TIME" ] \
     # mismatched slug can leave PostToolUse having run (`post-tool-ran`
     # written) with no save either, and that structural cause outranks this
     # one — this arm must not swallow it just because it moved earlier.
-    echo "VERDICT: problem — PostToolUse has fired but no save has completed yet; check hook-errors.log above$_ASSUMED_NOTE"
+    echo "VERDICT: problem -- PostToolUse has fired but no save has completed yet; check hook-errors.log above$_ASSUMED_NOTE"
 elif [ "$_SESSION_END_STATE" = "not-fired" ]; then
-    echo "VERDICT: problem — SessionEnd has never fired despite prior sessions ending in this project; the last-chance flush is not running (see above)$_ASSUMED_NOTE"
+    echo "VERDICT: problem -- SessionEnd has never fired despite prior sessions ending in this project; the last-chance flush is not running (see above)$_ASSUMED_NOTE"
 elif [ "$_POST_TOOL_FIRED" -eq 1 ] && [ -n "$_LAST_SAVE_TIME" ]; then
-    echo "VERDICT: capture is working — last save $_LAST_SAVE_TIME$_ASSUMED_NOTE"
+    echo "VERDICT: capture is working -- last save $_LAST_SAVE_TIME$_ASSUMED_NOTE"
 elif [ -n "$_SESSION_DIR" ] && [ ! -d "$_SESSION_DIR" ]; then
-    echo "VERDICT: problem — session dir slug does not match Claude Code's transcript directory (#144); restarting will not help$_ASSUMED_NOTE"
+    echo "VERDICT: problem -- session dir slug does not match Claude Code's transcript directory (#144); restarting will not help$_ASSUMED_NOTE"
 elif [ "$_POST_TOOL_FIRED" -eq 0 ]; then
-    echo "VERDICT: problem — PostToolUse has never fired; restart Claude Code (see REMEDIATION above)$_ASSUMED_NOTE"
+    echo "VERDICT: problem -- PostToolUse has never fired; restart Claude Code (see REMEDIATION above)$_ASSUMED_NOTE"
 else
     # Unreachable in practice — every combination of $_POST_TOOL_FIRED and
     # $_LAST_SAVE_TIME is now caught by an arm above (0 by the last elif,
@@ -901,5 +901,5 @@ else
     # "capture is working") — kept as a defensive fallback rather than
     # deleted, so a future arm added between them without re-auditing the
     # whole ladder still prints something instead of falling off the end.
-    echo "VERDICT: problem — PostToolUse has fired but no save has completed yet; check hook-errors.log above$_ASSUMED_NOTE"
+    echo "VERDICT: problem -- PostToolUse has fired but no save has completed yet; check hook-errors.log above$_ASSUMED_NOTE"
 fi

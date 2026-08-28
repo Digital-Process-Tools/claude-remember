@@ -18,7 +18,7 @@ def test_token_usage_defaults():
 
 def test_token_usage_str():
     t = TokenUsage(input=1000, output=200, cache=500, cost_usd=0.0012)
-    assert str(t) == "1000+500cache→200out ($0.0012)"
+    assert str(t) == "1000+500cache->200out ($0.0012)"
 
 
 def test_haiku_result_defaults():

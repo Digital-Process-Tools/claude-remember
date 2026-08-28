@@ -232,7 +232,7 @@ staging_append() {
         _after=$(wc -c < "$_today" 2>/dev/null | tr -d ' ')
         case "$_after" in (''|*[!0-9]*) _after=0 ;; esac
         if [ "$_after" -ge "$_warn_bytes" ]; then
-            report_error "staging" "WARNING: ${_today} has grown past ${_warn_bytes}b — this file is append-only and only a SUCCESSFUL consolidation round retires it. Sustained lock contention, a full disk, or consolidation having stopped (check features.ndc_compression and hook-errors.log for consolidation failures) will keep appending the same kind of span here without bound. Nothing was dropped or truncated."
+            report_error "staging" "WARNING: ${_today} has grown past ${_warn_bytes}b -- this file is append-only and only a SUCCESSFUL consolidation round retires it. Sustained lock contention, a full disk, or consolidation having stopped (check features.ndc_compression and hook-errors.log for consolidation failures) will keep appending the same kind of span here without bound. Nothing was dropped or truncated."
         fi
     fi
 }

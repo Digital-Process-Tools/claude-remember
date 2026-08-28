@@ -60,7 +60,7 @@ LIB_CLOCK = REPO_ROOT / "scripts" / "lib-clock.sh"
 # the capture-gap JSON is only reached when a notice is actually pending.
 WARM_SPAWN_BUDGET = 2
 
-TS_RE = re.compile(r"^\[\d{1,2}:\d{2} \S+ — \S+\]$")
+TS_RE = re.compile(r"^\[\d{1,2}:\d{2} \S+ -- \S+\]$")
 
 
 def _shim_dir(tmp_path: Path, log: Path) -> Path:
@@ -321,7 +321,7 @@ def test_the_builtin_and_date_timestamps_are_byte_identical(tmp_path):
             f"two paths must be byte-identical, three attempts apart"
         )
 
-    assert TS_RE.match(f"[{fast.stdout.strip()} — x]"), (
+    assert TS_RE.match(f"[{fast.stdout.strip()} -- x]"), (
         f"builtin output is not a timestamp at all: {fast.stdout!r}"
     )
 

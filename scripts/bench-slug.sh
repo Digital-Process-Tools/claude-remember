@@ -59,4 +59,4 @@ _bench "valid non-ascii" "/Users/dev/Documents/café/日本語/🎉"
 _bench "ill-formed" "$(printf '/tmp/ab\xe0\xa0cd')"
 
 printf '\nA path is only checked where an ill-formed one can exist (Linux), so on\n'
-printf 'other platforms all three rows should be equal — see lib-slug.sh.\n'
+printf 'other platforms all three rows should be equal -- see lib-slug.sh.\n'

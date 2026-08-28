@@ -219,13 +219,13 @@ log "hook" "session-end: reason=$SESSION_END_REASON session=${STDIN_SESSION_ID:-
 # can never be created and a session with nothing new to save are the same
 # line in hook-errors.log, which is no line at all.
 if [ ! -d "$REMEMBER_DIR" ]; then
-    report_error "session-end" "WARNING: $REMEMBER_DIR does not exist and could not be created — nothing was flushed at session end."
+    report_error "session-end" "WARNING: $REMEMBER_DIR does not exist and could not be created -- nothing was flushed at session end."
     exit 0
 fi
 
 SAVE_SCRIPT="$PIPELINE_DIR/scripts/save-session.sh"
 if [ ! -f "$SAVE_SCRIPT" ]; then
-    report_error "session-end" "WARNING: $SAVE_SCRIPT is missing — nothing was flushed at session end. Reinstall the plugin."
+    report_error "session-end" "WARNING: $SAVE_SCRIPT is missing -- nothing was flushed at session end. Reinstall the plugin."
     exit 0
 fi
 
@@ -270,7 +270,7 @@ _END_LOG="$REMEMBER_DIR/logs/autonomous/session-end-$(_remember_date +%H%M%S).lo
     fi
     _flush_status=$?
     if [ "$_flush_status" -ne 0 ]; then
-        report_error "session-end" "WARNING: save-session.sh --force exited $_flush_status at session end — this session's unsaved tail may be lost. See $_END_LOG for what save-session.sh itself logged."
+        report_error "session-end" "WARNING: save-session.sh --force exited $_flush_status at session end -- this session's unsaved tail may be lost. See $_END_LOG for what save-session.sh itself logged."
     fi
 ) < /dev/null > "$_END_LOG" 2>&1 &
 echo $! > "$REMEMBER_DIR/tmp/save-session.pid" 2>/dev/null

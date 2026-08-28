@@ -207,7 +207,7 @@ def _log_failed_spend(what_happened: str, stdout: object) -> None:
         _warn(f"call {what_happened} after spending tokens: {usage}")
     else:
         _warn(
-            f"call {what_happened}; tokens already spent are unknown — the "
+            f"call {what_happened}; tokens already spent are unknown -- the "
             "failure carried no usage block, so this run's reported cost is "
             "lower than what it actually cost"
         )
@@ -254,7 +254,7 @@ def _failure_detail(stdout: str, stderr: str) -> str:
         return "(no output on stdout or stderr)"
     joined = " | ".join(parts)
     if len(joined) > _FAILURE_DETAIL_MAX:
-        joined = joined[:_FAILURE_DETAIL_MAX] + "…"
+        joined = joined[:_FAILURE_DETAIL_MAX] + "..."
     return joined
 
 
@@ -329,7 +329,7 @@ def _accept_token(value: object, source: str) -> str | None:
         else:
             detail = f"a {type(value).__name__} value"
         _warn(
-            f"WARNING: ignoring {source} — not a plausible OAuth token "
+            f"WARNING: ignoring {source} -- not a plausible OAuth token "
             f"(want a whitespace-free string of at least {_MIN_TOKEN_LEN} "
             f"chars, got {detail}); the nested CLI will run unauthenticated "
             "unless the host provides a token of its own"
@@ -601,7 +601,7 @@ def _isolation_may_be_the_cause(stdout: str, stderr: str) -> bool:
             f"{', '.join(repr(f) for f in _SCANNED_FAILURE_FIELDS)}, the "
             f"{_SCANNED_FAILURE_LIST_FIELDS[0]!r} list, and stderr (#318). NOT "
             "retrying without hook isolation on the strength of an unrecognised "
-            "field — that decision may not be reachable from arbitrary content "
+            "field -- that decision may not be reachable from arbitrary content "
             "(#202). If this is a genuine auth failure, capture is failing "
             f"permanently and the fix is to add {field!r} to the scanned set: "
             "please file it against #320."
@@ -676,8 +676,8 @@ def call_haiku(
         _warn(
             "WARNING: the summarizer spawn guard could not use "
             f"{spawn_guard.record_dir()} ({slot.degraded}); this spawn is "
-            "UNBOUNDED. Saves keep working — an unusable runtime directory must "
-            "not become a permanent save outage (#204) — but nothing is "
+            "UNBOUNDED. Saves keep working -- an unusable runtime directory must "
+            "not become a permanent save outage (#204) -- but nothing is "
             "counting summarizers until it is writable again."
         )
 
@@ -722,7 +722,7 @@ def call_haiku(
                 f"WARNING: this CLI rejected {_HOOK_ISOLATION_FLAG} "
                 f"({_failure_detail(result.stdout, result.stderr)}); retrying "
                 "WITHOUT hook isolation so saves keep working. The nested call "
-                "will run with your hooks registered — a hook that blocks it "
+                "will run with your hooks registered -- a hook that blocks it "
                 "returns its block message as if it were the model's reply "
                 "(#202)."
             )

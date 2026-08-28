@@ -77,7 +77,7 @@ def test_post_tool_use_exiting_early_outranks_session_end_on_an_aged_store(tmp_p
     )
     verdict = _verdict(result.stdout)
     assert verdict.startswith(
-        "VERDICT: problem — PostToolUse has fired but no save has completed yet"
+        "VERDICT: problem -- PostToolUse has fired but no save has completed yet"
     ), (
         "SessionEnd's general verdict outranked the more specific "
         "PostToolUse-exiting-early cause already printed above it:\n"
@@ -115,7 +115,7 @@ def test_positive_control_session_end_verdict_still_reachable_with_no_post_tool_
     assert result.returncode == 0, result.stderr
     assert "FAIL SessionEnd has never fired" in result.stdout
     verdict = _verdict(result.stdout)
-    assert verdict.startswith("VERDICT: problem — SessionEnd"), (
+    assert verdict.startswith("VERDICT: problem -- SessionEnd"), (
         "with no PostToolUse arm fired at all, SessionEnd's own verdict was "
         "not reachable:\n" + result.stdout
     )

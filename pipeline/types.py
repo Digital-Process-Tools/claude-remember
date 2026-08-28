@@ -40,7 +40,7 @@ class TokenUsage:
 
     def __str__(self) -> str:
         """Format as a compact summary string for log output."""
-        return f"{self.input}+{self.cache}cache→{self.output}out (${self.cost_usd:.4f})"
+        return f"{self.input}+{self.cache}cache->{self.output}out (${self.cost_usd:.4f})"
 
 
 @dataclass

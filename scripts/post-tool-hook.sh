@@ -115,6 +115,19 @@ _HOOK_DIR="${BASH_SOURCE[0]%/*}"
 # a memory directory under the summarizer's temp dir.
 [ -n "${REMEMBER_NESTED_SUMMARIZER:-}" ] && exit 0
 
+# --- REMEMBER_HOOK_CWD (#417) ---
+# resolve-paths.sh falls back to this variable when CLAUDE_PROJECT_DIR is
+# unset (#411), but only session-start-hook.sh and session-end-hook.sh ever
+# set it -- each from its own stdin `cwd`, freshly validated on every run.
+# This hook has no stdin `cwd` of its own to offer and must not silently
+# inherit whatever the process environment happens to already hold (a value
+# a DIFFERENT session's SessionStart exported, on a host that reuses one
+# environment across hook invocations). Clearing it here is cheap and
+# unconditionally correct regardless of whether that reuse is possible on any
+# supported host: on the common path CLAUDE_PROJECT_DIR is already set and
+# this arm never runs anyway.
+unset REMEMBER_HOOK_CWD
+
 source "$_HOOK_DIR/lib-clock.sh"
 source "$_HOOK_DIR/lib-env-cache.sh"
 
@@ -378,7 +391,7 @@ if [ -z "$LATEST_JSONL" ]; then
         mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null
         _remember_date +%s > "$NOTICE_MARKER" 2>/dev/null
         if [ -d "$SESSION_DIR" ]; then
-            log "hook" "no .jsonl transcript in $SESSION_DIR — nothing to save yet"
+            log "hook" "no .jsonl transcript in $SESSION_DIR -- nothing to save yet"
         else
             log "hook" "WARNING: no session dir for this project: $SESSION_DIR (slug of $PROJECT). Memory cannot save until it matches a directory under $(claude_projects_dir)/"
         fi
@@ -412,7 +425,7 @@ TRANSCRIPT="$LATEST_JSONL"
 if [ -n "$STDIN_SESSION_ID" ] && [ -f "$SESSION_DIR/$STDIN_SESSION_ID.jsonl" ]; then
     TRANSCRIPT="$SESSION_DIR/$STDIN_SESSION_ID.jsonl"
 else
-    [ -n "$STDIN_SESSION_ID" ] && log "hook" "post-tool: stdin session $STDIN_SESSION_ID has no transcript in $SESSION_DIR — falling back to newest"
+    [ -n "$STDIN_SESSION_ID" ] && log "hook" "post-tool: stdin session $STDIN_SESSION_ID has no transcript in $SESSION_DIR -- falling back to newest"
 fi
 
 # `wc -l` on BSD pads its output with leading spaces, which is why `tr -d ' '`
@@ -530,14 +543,14 @@ if [ -n "$SIDECAR" ] && [ -f "$SIDECAR" ]; then
     read -r _SIDECAR_LINE < "$SIDECAR" 2>/dev/null
     case "$_SIDECAR_LINE" in
         ''|*[!0-9]*)
-            log "hook" "WARNING: sidecar $SIDECAR held a non-numeric value ($_SIDECAR_LINE) — disagrees with last-save.json, falling back to read-position"
+            log "hook" "WARNING: sidecar $SIDECAR held a non-numeric value ($_SIDECAR_LINE) -- disagrees with last-save.json, falling back to read-position"
             ;;
         *)
             # 10# (#332): a leading zero in the sidecar would otherwise be
             # read as octal and take this comparison — and the delta
             # arithmetic below it — down with it.
             if [ "$((10#$_SIDECAR_LINE))" -gt "$CURRENT_LINES" ]; then
-                log "hook" "WARNING: sidecar $SIDECAR reports position $_SIDECAR_LINE, past this run's own $CURRENT_LINES transcript lines — disagrees with last-save.json, falling back to read-position"
+                log "hook" "WARNING: sidecar $SIDECAR reports position $_SIDECAR_LINE, past this run's own $CURRENT_LINES transcript lines -- disagrees with last-save.json, falling back to read-position"
             else
                 # #403: the bound above only rules out a value the sidecar
                 # could never legitimately reach — it says nothing about
@@ -592,7 +605,7 @@ if [ -n "$SIDECAR" ] && [ -f "$SIDECAR" ]; then
                         SIDECAR_TRUSTED=1
                         ;;
                     *)
-                        log "hook" "WARNING: sidecar $SIDECAR's session $SESSION_ID is absent from last-save.json — disagrees with last-save.json, falling back to read-position"
+                        log "hook" "WARNING: sidecar $SIDECAR's session $SESSION_ID is absent from last-save.json -- disagrees with last-save.json, falling back to read-position"
                         ;;
                 esac
             fi

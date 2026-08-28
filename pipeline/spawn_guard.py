@@ -238,7 +238,7 @@ def claim(timeout: float = 120.0) -> _Slot:
         raise SummarizerSpawnDeclined(
             f"declined to spawn a summarizer: {live} already running and the "
             f"limit is {max_concurrent} ({MAX_CONCURRENT_ENV}). A summarizer "
-            "that reaches this limit is nested inside another one — the guard "
+            "that reaches this limit is nested inside another one -- the guard "
             "that should have stopped it did not reach the child (#204). This "
             "save is skipped, not failed: the span is kept and summarized on a "
             "later run."

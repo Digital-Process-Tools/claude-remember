@@ -143,6 +143,22 @@ fi
 #      read -- doctor.sh and a bare `source` from a shell have none -- so an
 #      unset or unusable value here is silently skipped, same as an unset
 #      CLAUDE_PROJECT_DIR above.
+#
+#      ASSUMPTION (#417): this file only SOURCES the variable, it never sets
+#      it, so its correctness here depends on every caller either exporting a
+#      freshly-validated value (session-start-hook.sh, session-end-hook.sh —
+#      each from its own stdin payload, each rejecting embedded newlines) or
+#      clearing it before sourcing this file (post-tool-hook.sh,
+#      user-prompt-hook.sh — neither has a stdin `cwd` of its own to offer,
+#      and each `unset`s it near the top of the file for exactly that reason).
+#      The assumption this whole chain rests on is that no supported host
+#      reuses one process environment across separate hook invocations within
+#      a project-agnostic dispatcher; on Claude Code CLAUDE_PROJECT_DIR always
+#      wins first and this arm never runs. If that assumption is ever wrong,
+#      a value exported by one session's SessionStart could be inherited by a
+#      later PostToolUse/UserPromptSubmit invocation from a DIFFERENT project
+#      that reused the same environment -- reachability was not established
+#      either way when this comment was written; see #417.
 #   3. If PIPELINE_DIR is inside a .claude/remember/ structure, derive from that
 #   4. Fail — we cannot guess the project root from a marketplace cache path
 if [ -n "$CLAUDE_PROJECT_DIR" ]; then

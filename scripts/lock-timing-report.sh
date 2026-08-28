@@ -53,19 +53,19 @@ fi
 HOWTO="set REMEMBER_LOCK_TIMING=1 in the environment Claude Code launches hooks from, work normally for a day, then re-run this"
 
 if [ -z "$FILE" ]; then
-    echo "lock-timing: skipped — no file given and neither REMEMBER_LOCK_TIMING_FILE nor REMEMBER_DIR is set"
+    echo "lock-timing: skipped -- no file given and neither REMEMBER_LOCK_TIMING_FILE nor REMEMBER_DIR is set"
     echo "             $HOWTO"
     exit 2
 fi
 
 if [ ! -f "$FILE" ]; then
-    echo "lock-timing: skipped — no file at $FILE"
+    echo "lock-timing: skipped -- no file at $FILE"
     echo "             The recorder is off by default: $HOWTO"
     exit 2
 fi
 
 if [ ! -r "$FILE" ]; then
-    echo "lock-timing: skipped — $FILE exists but is not readable"
+    echo "lock-timing: skipped -- $FILE exists but is not readable"
     exit 2
 fi
 
@@ -75,7 +75,7 @@ case "$RECORDS" in
 esac
 
 if [ "$RECORDS" -eq 0 ]; then
-    echo "lock-timing: skipped — $FILE has no records yet (REMEMBER_LOCK_TIMING=1 was set, but no lock was taken while it was)"
+    echo "lock-timing: skipped -- $FILE has no records yet (REMEMBER_LOCK_TIMING=1 was set, but no lock was taken while it was)"
     exit 2
 fi
 
@@ -86,7 +86,7 @@ fi
 
 printf 'lock-timing: ok  file=%s  records=%s\n' "$FILE" "$RECORDS"
 if [ -n "$CAPPED" ]; then
-    printf 'lock-timing: CAPPED — recording stopped at REMEMBER_LOCK_TIMING_MAX. Every record here is real; the tail after the cap is missing, so read the max below as a floor, not as the maximum.\n'
+    printf 'lock-timing: CAPPED -- recording stopped at REMEMBER_LOCK_TIMING_MAX. Every record here is real; the tail after the cap is missing, so read the max below as a floor, not as the maximum.\n'
 fi
 echo ""
 
@@ -138,7 +138,7 @@ END {
             m ? pct(ws, m, 0.99) : "-", m ? ws[m] : "-",
             to[lock] + 0;
         if (up[lock] + 0 > 0)
-            printf "  note: %d %s release(s) had no matching acquire in the same process — duration unknown, not counted\n", up[lock], lock;
+            printf "  note: %d %s release(s) had no matching acquire in the same process -- duration unknown, not counted\n", up[lock], lock;
     }
     if (malformed + 0 > 0)
         printf "  note: %d malformed line(s) skipped\n", malformed;

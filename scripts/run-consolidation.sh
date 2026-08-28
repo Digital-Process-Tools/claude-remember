@@ -108,12 +108,12 @@ SNAPSHOT_DIR=$(mktemp -d "${REMEMBER_DIR}/tmp/consolidate-snapshot-XXXXXX")
 # loop's lost-wait branch below, which has already rewritten memory and so
 # leaves a duplicate for the merge prompt to dedupe.
 if ! staging_lock_acquire "$STAGING_LOCK_TIMEOUT"; then
-    log "consolidation" "staging.lock held for the whole ${STAGING_LOCK_TIMEOUT}s wait — nothing read and nothing consolidated; staging, recent.md and archive.md are untouched and the next run picks up the same span (an NDC append may be half applied right now, and consuming its separator without its summary retires a blank line and defers the entry to a later day)"
+    log "consolidation" "staging.lock held for the whole ${STAGING_LOCK_TIMEOUT}s wait -- nothing read and nothing consolidated; staging, recent.md and archive.md are untouched and the next run picks up the same span (an NDC append may be half applied right now, and consuming its separator without its summary retires a blank line and defers the entry to a later day)"
     exit 0
 fi
 if ! SNAPSHOT_OUT=$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell consolidate-snapshot "$STAGING_DIR" "$SNAPSHOT_DIR" 2>&1); then
     staging_lock_release
-    log "consolidation" "ERROR: staging snapshot failed — $SNAPSHOT_OUT"
+    log "consolidation" "ERROR: staging snapshot failed -- $SNAPSHOT_OUT"
     exit 1
 fi
 staging_lock_release
@@ -134,7 +134,7 @@ RESULT=$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell consolidate "$STAGING_D
         log "consolidation" "DECLINED: $RESULT"
         exit 0
     fi
-    log "consolidation" "ERROR: pipeline failed — $RESULT"
+    log "consolidation" "ERROR: pipeline failed -- $RESULT"
     exit 1
 }
 
@@ -151,7 +151,7 @@ fi
 # in place so the next run retries. (Default to ok for backward compatibility
 # with any caller that does not emit the status.)
 if [ "${CONSOLIDATION_STATUS:-ok}" != "ok" ]; then
-    log "consolidation" "skip: status=${CONSOLIDATION_STATUS} — memory + staging files left untouched"
+    log "consolidation" "skip: status=${CONSOLIDATION_STATUS} -- memory + staging files left untouched"
     exit 0
 fi
 
@@ -185,7 +185,7 @@ log_tokens "consolidation" "$TK_IN" "$TK_OUT" "$TK_CACHE" "$TK_COST"
 # prompt dedupes it — a visible duplicate, chosen over sealing a concurrent
 # append into a file nothing reads. Same trade as the NDC tail-failure branch.
 if ! staging_lock_acquire "$STAGING_LOCK_TIMEOUT"; then
-    log "consolidation" "ERROR: staging.lock held for the whole ${STAGING_LOCK_TIMEOUT}s wait — staging files NOT retired; recent.md/archive.md already hold this span so the next run re-consolidates it (a duplicate the merge dedupes, chosen over sealing a concurrent append inside .done.md)"
+    log "consolidation" "ERROR: staging.lock held for the whole ${STAGING_LOCK_TIMEOUT}s wait -- staging files NOT retired; recent.md/archive.md already hold this span so the next run re-consolidates it (a duplicate the merge dedupes, chosen over sealing a concurrent append inside .done.md)"
     rm -f "$STAGING_PATHS_FILE"
     exit 0
 fi
@@ -226,17 +226,17 @@ while IFS= read -r -d '' staging_path && IFS= read -r -d '' staging_consumed; do
                 # in recent.md/archive.md that the merge dedupes, chosen over
                 # losing the tail appended during this consolidation.
                 rm -f "$staging_tail"
-                log "consolidation" "ERROR: could not keep the tail of $(basename "$staging_path") appended during consolidation — left in place for the next run to retry: ${STAGING_MV_ERR}"
+                log "consolidation" "ERROR: could not keep the tail of $(basename "$staging_path") appended during consolidation -- left in place for the next run to retry: ${STAGING_MV_ERR}"
             fi
         else
             rm -f "$staging_tail"
             if ! STAGING_MV_ERR=$(mv "$staging_path" "$staging_done" 2>&1); then
-                log "consolidation" "ERROR: could not retire $(basename "$staging_path") to .done.md — left in place, the next run will see it as unconsolidated: ${STAGING_MV_ERR}"
+                log "consolidation" "ERROR: could not retire $(basename "$staging_path") to .done.md -- left in place, the next run will see it as unconsolidated: ${STAGING_MV_ERR}"
             fi
         fi
     else
         if ! STAGING_MV_ERR=$(mv "$staging_path" "$staging_done" 2>&1); then
-            log "consolidation" "ERROR: could not retire $(basename "$staging_path") to .done.md — left in place, the next run will see it as unconsolidated: ${STAGING_MV_ERR}"
+            log "consolidation" "ERROR: could not retire $(basename "$staging_path") to .done.md -- left in place, the next run will see it as unconsolidated: ${STAGING_MV_ERR}"
         fi
     fi
 done < "$STAGING_PATHS_FILE"
