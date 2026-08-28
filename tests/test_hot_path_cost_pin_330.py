@@ -68,6 +68,7 @@ cache, this file only failed to guarantee it never asked one to.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -144,6 +145,35 @@ def _project(tmp_path: Path, *, jsonl_lines: int = 60, session_id: str = "sess-1
                  {"thresholds": {"delta_lines_trigger": 50}})
     (remember / "tmp" / "last-save-ts").write_text(str(int(time.time())),
                                                      encoding="utf-8")
+    return home, project, remember
+
+
+def _project_with_prior_save(tmp_path: Path, *, jsonl_lines: int = 60,
+                              session_id: str = "sess-1", position: int = 30):
+    """Like `_project`, but with a prior save already landed: last-save.json
+    plus its #353 sidecar (`position.<session_id>`), agreeing with each
+    other and bounded well inside `jsonl_lines`. `_project` on its own
+    creates neither, so the warm run it feeds always takes LAST_LINE=0's
+    fall-through and never walks the sidecar branch #353 added -- the gap
+    #395 reports.
+
+    Written directly in the schema `pipeline.shell save-position` itself
+    produces (pipeline/shell.py:254-319: last-save.json is
+    `{"sessions": {id: line}, "session": id, "line": line}`, the sidecar is
+    the bare integer), rather than by shelling out to that command -- this
+    fixture must not add a spawn of its own to a measurement that counts
+    spawns.
+    """
+    home, project, remember = _project(tmp_path, jsonl_lines=jsonl_lines,
+                                        session_id=session_id)
+    last_save = remember / "tmp" / "last-save.json"
+    last_save.write_text(
+        json.dumps({"sessions": {session_id: position},
+                    "session": session_id, "line": position}),
+        encoding="utf-8",
+    )
+    sidecar = remember / "tmp" / ("position." + session_id)
+    sidecar.write_text(str(position), encoding="utf-8")
     return home, project, remember
 
 
@@ -333,6 +363,111 @@ def test_the_warm_path_stays_inside_both_budgets(tmp_path):
         + "\n  ".join(warm_spawns)
     )
     assert "git" not in _cmds(warm_spawns)
+
+
+# -- The path #353 actually changed: a save has already landed (#395) -----
+
+# Measured on macOS bash 3.2.57, stable across three trials, with a fixture
+# carrying both last-save.json and its #353 sidecar (position inside this
+# run's own transcript, so SIDECAR_TRUSTED is set and `pipeline.shell
+# read-position` is never spawned): the same 17 reads
+# test_the_warm_path_stays_inside_both_budgets measures on the "no save
+# yet" path, PLUS the sidecar's own `read -r _SIDECAR_LINE < "$SIDECAR"`
+# (post-tool-hook.sh:530) = 18. Confirmed against the harness itself, not
+# guessed: identical to the round-one release audit's own count for #395.
+#
+# No slack, unlike READ_BUILTIN_BUDGET above. #395 exists because the "no
+# save yet" pin above passed while ONE slack unit stood between this
+# branch's own 18 measured reads and a budget of 19 that never actually
+# walked it -- slack absorbed a gap nothing was pinning. Setting this one
+# at the measured value means a future read added to the sidecar branch
+# has to argue for itself in its own PR, rather than fitting inside a
+# margin nobody is watching.
+SIDECAR_READ_BUILTIN_MEASURED = 18
+SIDECAR_READ_BUILTIN_BUDGET = SIDECAR_READ_BUILTIN_MEASURED
+
+
+def test_the_warm_path_with_a_landed_save_stays_inside_both_budgets(tmp_path):
+    """The path #353 actually changed: a prior save has landed, so the hot
+    path consults the #353 sidecar instead of falling through to
+    `pipeline.shell read-position`. #395: the existing budget case above
+    never walks this branch at all (`_project` creates neither
+    last-save.json nor a sidecar), so nothing pinned it -- this is the
+    fixture and the budget that do.
+    """
+    plugin = _scratch_plugin(tmp_path)
+    home, project, remember = _project_with_prior_save(tmp_path)
+    env = _env(tmp_path, home, project, plugin)
+    _prime(env, plugin)
+
+    _traced_warm_run(env, plugin, remember, tmp_path, "cold-sidecar")
+    result, warm_spawns = _measure(env, plugin, remember, tmp_path, "warm-sidecar")
+    _reap(remember)
+
+    reads = _read_builtin_lines(result.stderr)
+    # POSITIVE CONTROL, part 1: the harness sees builtin reads at all.
+    assert len(reads) > 0, (
+        "no `read` builtin observed on a warm run with a landed save -- "
+        "the xtrace harness is not seeing anything"
+    )
+    # POSITIVE CONTROL, part 2: the fixture actually walks the sidecar
+    # branch, not just the same "no save yet" path under a new name. If
+    # this is empty, the budget below measures nothing #395 reports as
+    # unpinned.
+    sidecar_reads = [r for r in reads if "_SIDECAR_LINE" in r]
+    assert sidecar_reads, (
+        "the sidecar's own `read -r _SIDECAR_LINE` was never observed -- "
+        "this fixture is not reaching the #353 branch #395 reports as "
+        "unpinned:\n  " + "\n  ".join(reads)
+    )
+    assert len(reads) <= SIDECAR_READ_BUILTIN_BUDGET, (
+        f"{len(reads)} builtin `read` invocations on a warm tool call with "
+        f"a landed save (budget {SIDECAR_READ_BUILTIN_BUDGET}):\n  "
+        + "\n  ".join(reads)
+    )
+    assert len(warm_spawns) <= FAST_PATH_SPAWN_BUDGET, (
+        f"{len(warm_spawns)} external spawns on a warm tool call with a "
+        f"landed save:\n  " + "\n  ".join(warm_spawns)
+    )
+    assert "git" not in _cmds(warm_spawns)
+    # The spawn drop #353 claims and #395 found unpinned: a trusted
+    # sidecar must skip `pipeline.shell read-position` entirely, not just
+    # stay under the shared spawn budget by coincidence.
+    assert not any("read-position" in line for line in warm_spawns), (
+        "a trusted sidecar must skip the `pipeline.shell read-position` "
+        "spawn entirely:\n  " + "\n  ".join(warm_spawns)
+    )
+
+
+def test_a_defeated_sidecar_trips_the_read_position_spawn_check(tmp_path):
+    """Construct the failure the budget case above exists to catch, per
+    #395's own bar: would it still pass if the sidecar branch did
+    nothing? Mutate the scratch hook so `SIDECAR_TRUSTED` is never set
+    even when the sidecar agrees with last-save.json, and show that a
+    warm run with a landed save then falls through to the
+    `pipeline.shell read-position` spawn #353 exists to avoid -- proof
+    the pin above would have failed on this regression, not merely that
+    it passes on the shipped hook.
+    """
+    plugin = _scratch_plugin(tmp_path)
+    _patch(plugin,
+           '                LAST_LINE=$((10#$_SIDECAR_LINE))\n'
+           '                SIDECAR_TRUSTED=1\n',
+           '                LAST_LINE=$((10#$_SIDECAR_LINE))\n'
+           '                : # SIDECAR_TRUSTED deliberately not set (#395 regression fixture)\n')
+    home, project, remember = _project_with_prior_save(tmp_path)
+    env = _env(tmp_path, home, project, plugin)
+    _prime(env, plugin)
+
+    _traced_warm_run(env, plugin, remember, tmp_path, "prime-defeated-sidecar")
+    _result, warm_spawns = _measure(env, plugin, remember, tmp_path, "defeated-sidecar")
+    _reap(remember)
+
+    assert any("read-position" in line for line in warm_spawns), (
+        "the injected mutation did not defeat sidecar trust -- this "
+        "fixture is not reproducing the regression it claims to:\n  "
+        + "\n  ".join(warm_spawns)
+    )
 
 
 # -- Reintroducing #298/#299: wrapper spawns, real git literal hidden -----
