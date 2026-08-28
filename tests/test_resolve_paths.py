@@ -31,6 +31,7 @@ def _run_soft_fail(tmp_path: Path, cwd: Path):
         "REMEMBER_PATHS_SOFT_FAIL": "1",
     }
     env.pop("CLAUDE_PROJECT_DIR", None)
+    env.pop("REMEMBER_HOOK_CWD", None)
     script = f'source "{RESOLVE_PATHS}"; echo "STATUS=$?"; echo "PROJECT_DIR=${{PROJECT_DIR:-unset}}"'
     return subprocess.run(["bash", "-c", script], env=env, cwd=str(cwd),
                           capture_output=True, text=True, timeout=30)
@@ -66,6 +67,7 @@ def test_loud_default_still_exits_the_caller(tmp_path):
     }
     env.pop("CLAUDE_PROJECT_DIR", None)
     env.pop("REMEMBER_PATHS_SOFT_FAIL", None)
+    env.pop("REMEMBER_HOOK_CWD", None)
 
     result = subprocess.run(
         ["bash", "-c", f'source "{RESOLVE_PATHS}"; echo "UNREACHABLE"'],

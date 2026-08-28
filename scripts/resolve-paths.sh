@@ -124,16 +124,30 @@ fi
 # --- Resolve PROJECT_DIR (the user's project root) ---
 #
 # Priority:
-#   1. CLAUDE_PROJECT_DIR (set by Claude Code — always correct)
-#   2. If PIPELINE_DIR is inside a .claude/remember/ structure, derive from that
-#   3. Fail — we cannot guess the project root from a marketplace cache path
+#   1. CLAUDE_PROJECT_DIR (set by Claude Code — always correct, and the more
+#      specific signal on the host that sets it, so it is tried first and a
+#      disagreeing stdin cwd never overrides it)
+#   2. REMEMBER_HOOK_CWD (#411) — the SessionStart/SessionEnd payload's `cwd`
+#      field, exported by the hooks that already read stdin for `session_id`
+#      and `transcript_path` (#206, #407). Codex and Gemini CLI both put `cwd`
+#      on that payload but neither sets CLAUDE_PROJECT_DIR (Codex documents no
+#      such variable at all; Gemini documents no hook environment variables
+#      whatsoever), so this is the fallback that makes resolution possible on
+#      either host. Not every caller of this file is a hook with stdin to
+#      read -- doctor.sh and a bare `source` from a shell have none -- so an
+#      unset or unusable value here is silently skipped, same as an unset
+#      CLAUDE_PROJECT_DIR above.
+#   3. If PIPELINE_DIR is inside a .claude/remember/ structure, derive from that
+#   4. Fail — we cannot guess the project root from a marketplace cache path
 if [ -n "$CLAUDE_PROJECT_DIR" ]; then
     PROJECT_DIR="$CLAUDE_PROJECT_DIR"
+elif [ -n "${REMEMBER_HOOK_CWD:-}" ] && [ -d "${REMEMBER_HOOK_CWD:-}" ]; then
+    PROJECT_DIR="$REMEMBER_HOOK_CWD"
 elif [[ "$PIPELINE_DIR" == *"/.claude/remember" ]]; then
     # Local install: plugin is at $PROJECT/.claude/remember
     PROJECT_DIR="$(cd "$PIPELINE_DIR/../.." && pwd)"
 else
-    _msg="FATAL: Cannot resolve project root. CLAUDE_PROJECT_DIR is not set and plugin is not in a local .claude/remember/ layout (PIPELINE_DIR=$PIPELINE_DIR)."
+    _msg="FATAL: Cannot resolve project root. CLAUDE_PROJECT_DIR is not set, REMEMBER_HOOK_CWD is not set or not a directory, and plugin is not in a local .claude/remember/ layout (PIPELINE_DIR=$PIPELINE_DIR)."
     _resolve_paths_fail "$_msg" "${PROJECT_DIR:-.}/.remember/logs" || return 1
 fi
 
