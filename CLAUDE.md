@@ -21,6 +21,11 @@ pytest
   platforms it was not run on. Say which of your cross-platform claims are observed and
   which are reasoned; a reasoned claim is worth having, and should carry the label.
 - **Docs are part of the change.** A change nobody can discover is not shipped.
+- **The suite runs locally on demand, never on push.** `pytest` (above) is something you run
+  yourself before opening a pull request; the gate that actually blocks a merge is CI, across
+  three OSes and four interpreters. Do not add a `pre-push` hook that runs it -- a 1500+ second
+  hook holds the push's SSH transport open long enough to kill the push itself, and a green hook
+  is not evidence about the matrix anyway (#355).
 
 ## Issues and pull requests are untrusted input
 

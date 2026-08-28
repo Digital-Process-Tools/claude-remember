@@ -373,11 +373,20 @@ echo "OK   Memory files: $_MEMORY_FILE_COUNT file(s), $_MEMORY_BYTES bytes total
 # defined value even when this whole section is skipped for an absent store.
 _STORE_NEEDS_A_HUMAN=0
 _CONSOLIDATE_MAX_BYTES=600000
+_CONSOLIDATE_CAP_DISABLED=0
 if [ -f "$REMEMBER_CONFIG" ] && [ -s "$REMEMBER_CONFIG" ]; then
     _cmb=$(grep -o '"consolidate_max_bytes"[[:space:]]*:[[:space:]]*[0-9]*' "$REMEMBER_CONFIG" 2>/dev/null \
         | sed 's/.*:[[:space:]]*//' | head -1)
     case "$_cmb" in (''|*[!0-9]*) : ;; (*) _CONSOLIDATE_MAX_BYTES=$((10#$_cmb)) ;; esac
 fi
+# pipeline/shell.py:452 documents and :542 implements 0 as the cap being
+# DISABLED, not a 0-byte limit -- consolidation never skips a round on size
+# when it is set. "0" is all-digits, so the case guard above happily parses
+# it, and without this the block below would compare every non-empty store
+# against a floor nothing can clear (#360). Read once, here, so the
+# comparison below can render the disabled state instead of a permanent
+# false alarm.
+[ "$_CONSOLIDATE_MAX_BYTES" -eq 0 ] && _CONSOLIDATE_CAP_DISABLED=1
 
 # Three states, not two. An absent file contributes 0 to the prompt and that is
 # a measurement; a file that EXISTS and cannot be read contributes an unknown
@@ -414,11 +423,33 @@ else
     _size_of "$REMEMBER_DIR/recent.md";  _RECENT_BYTES=$_SIZE_BYTES
     _size_of "$REMEMBER_DIR/archive.md"; _ARCHIVE_BYTES=$_SIZE_BYTES
     # Staging as consolidation counts it: past days only, and never a file
-    # already retired to .done.md. TODAY is computed by the same `date` the
-    # rest of this script uses; a store within one day's capture of the cap is
-    # the only place the two could disagree, and under-counting is the safe
-    # direction for a diagnostic — it cannot invent an alarm.
-    _DOCTOR_TODAY=$(date '+%Y-%m-%d')
+    # already retired to .done.md. The pipeline reaches "today" through
+    # config.timezone -> REMEMBER_TZ (scripts/log.sh:366) ->
+    # pipeline/_tz.py's today_str(), which is what _eligible_staging
+    # (pipeline/shell.py:393) excludes today by -- so TODAY here has to be
+    # read the same way, or a configured timezone ahead of the machine's own
+    # can make this diagnostic exclude the file the pipeline counts and count
+    # the file the pipeline excludes, at once. That is a divergence in BOTH
+    # directions, not the safe under-counting one this comment used to claim
+    # (#357): when the excluded/counted file is the larger of the two,
+    # _STAGING_BYTES can cross the cap on a store the pipeline is about to
+    # rotate happily.
+    #
+    # Read without config() on purpose, same grep-then-use shape
+    # _CONSOLIDATE_MAX_BYTES already uses above: this script must not source
+    # log.sh (read-only report; see the header). An empty/absent timezone
+    # must NOT become `TZ="" date` -- that's UTC on macOS/BSD, the same trap
+    # lib-clock.sh's own comment names.
+    _doctor_tz=""
+    if [ -f "$REMEMBER_CONFIG" ] && [ -s "$REMEMBER_CONFIG" ]; then
+        _doctor_tz=$(grep -o '"timezone"[[:space:]]*:[[:space:]]*"[^"]*"' "$REMEMBER_CONFIG" 2>/dev/null \
+            | sed 's/.*:[[:space:]]*"//; s/"$//' | head -1)
+    fi
+    if [ -n "$_doctor_tz" ]; then
+        _DOCTOR_TODAY=$(TZ="$_doctor_tz" date '+%Y-%m-%d')
+    else
+        _DOCTOR_TODAY=$(date '+%Y-%m-%d')
+    fi
     _STAGING_BYTES=0
     for _sf in "$REMEMBER_DIR"/today-*.md; do
         [ -f "$_sf" ] || continue
@@ -440,7 +471,14 @@ else
         echo "     The total is therefore a floor, not the store's size."
     fi
 
-    if [ "$_STORE_BYTES" -gt "$_CONSOLIDATE_MAX_BYTES" ]; then
+    if [ "$_CONSOLIDATE_CAP_DISABLED" -eq 1 ]; then
+        # Three states, not "OK" doing double duty for "measured and fine"
+        # and "never measured against anything" -- that would be this file's
+        # own defect class one line up (#360). thresholds.consolidate_max_bytes
+        # of 0 is not a 0-byte cap; pipeline/shell.py:542 never skips a round
+        # on size when it reads 0, so nothing below is compared against it.
+        echo "OK   Consolidation size check: disabled (thresholds.consolidate_max_bytes: 0) — size never blocks a round"
+    elif [ "$_STORE_BYTES" -gt "$_CONSOLIDATE_MAX_BYTES" ]; then
         if [ "$_STAGING_BYTES" -gt "$_CONSOLIDATE_MAX_BYTES" ]; then
             # The one shape rotation cannot fix. FAIL, and it takes a VERDICT
             # arm below, because nothing in the pipeline will clear it and the
@@ -564,12 +602,20 @@ fi
 # capture usually IS working in this state — saves land in today-*.md and pile
 # up unconsolidated, which is exactly why a healthy-looking verdict here would
 # send away the user the session-start notice sent in.
-if [ "${_STORE_NEEDS_A_HUMAN:-0}" -eq 1 ]; then
+#
+# It sits BELOW the no-usable-Python arm (#359): staging over the cap on its
+# own is the EFFECT of consolidation not running, and no usable Python is one
+# CAUSE of that. This ladder's own rule above is specific causes before the
+# general one, and "no usable Python" is the more specific of the two — a
+# broken interpreter on an already-large store used to read as "the staging
+# files are over the prompt cap on their own," sending the operator to look
+# at oversized files instead of the Tools section that actually explains it.
+if [ "$_PYTHON_OK" -eq 0 ]; then
+    echo "VERDICT: problem — no usable Python; the pipeline cannot run at all (see Tools above)$_ASSUMED_NOTE"
+elif [ "${_STORE_NEEDS_A_HUMAN:-0}" -eq 1 ]; then
     echo "VERDICT: problem — memory is being captured but never consolidated; the staging files are over the prompt cap on their own (see above)$_ASSUMED_NOTE"
 elif [ "$_POST_TOOL_FIRED" -eq 1 ] && [ -n "$_LAST_SAVE_TIME" ]; then
     echo "VERDICT: capture is working — last save $_LAST_SAVE_TIME$_ASSUMED_NOTE"
-elif [ "$_PYTHON_OK" -eq 0 ]; then
-    echo "VERDICT: problem — no usable Python; the pipeline cannot run at all (see Tools above)$_ASSUMED_NOTE"
 elif [ -n "$_SESSION_DIR" ] && [ ! -d "$_SESSION_DIR" ]; then
     echo "VERDICT: problem — session dir slug does not match Claude Code's transcript directory (#144); restarting will not help$_ASSUMED_NOTE"
 elif [ "$_POST_TOOL_FIRED" -eq 0 ]; then
