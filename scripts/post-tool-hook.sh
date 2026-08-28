@@ -484,8 +484,54 @@ fi
 # slow path has sourced detect-tools.sh already, and detect-tools.sh exports
 # PYTHON, so an invocation that inherited a resolved one from a parent is
 # equally answered. Re-sourcing would only repeat the spawn.
+# --- The #353 sidecar: skip the read-position spawn when it can be trusted ---
+# `pipeline.shell save-position` (invoked from save-session.sh) writes a
+# plain-integer, bash-`read`-able mirror of THIS session's position AFTER it
+# commits last-save.json, never before — so the sidecar can lag the truth
+# (a crash between the two writes) but can never be ahead of it. That
+# ordering is what makes a value greater than CURRENT_LINES, this run's own
+# transcript line count, self-evidently wrong: reaching one needs corruption
+# or a session-id collision, never a legitimate crash window. A sidecar that
+# fails either check is a DISAGREEMENT with last-save.json and is never
+# trusted silently — it is logged, once per occurrence, and the read falls
+# back to the authoritative `read-position` spawn this hot path exists to
+# avoid on the common path.
+#
+# Three states, not two: SIDECAR_TRUSTED holds the sidecar's own value with
+# no spawn at all; a fallback below asks read-position for the authoritative
+# one; neither path ever substitutes a silent 0 for "could not tell" — an
+# absent or invalid sidecar simply means there was nothing here to trust,
+# and the code below asks the real source of truth instead of guessing.
+SIDECAR=""
+case "$SESSION_ID" in
+    ''|.|..|*[!A-Za-z0-9._-]*) : ;;
+    *) SIDECAR="$REMEMBER_DIR/tmp/position.$SESSION_ID" ;;
+esac
+
 LAST_LINE=0
-if [ -f "$LAST_SAVE_FILE" ]; then
+SIDECAR_TRUSTED=""
+if [ -n "$SIDECAR" ] && [ -f "$SIDECAR" ]; then
+    _SIDECAR_LINE=""
+    read -r _SIDECAR_LINE < "$SIDECAR" 2>/dev/null
+    case "$_SIDECAR_LINE" in
+        ''|*[!0-9]*)
+            log "hook" "WARNING: sidecar $SIDECAR held a non-numeric value ($_SIDECAR_LINE) — disagrees with last-save.json, falling back to read-position"
+            ;;
+        *)
+            # 10# (#332): a leading zero in the sidecar would otherwise be
+            # read as octal and take this comparison — and the delta
+            # arithmetic below it — down with it.
+            if [ "$((10#$_SIDECAR_LINE))" -gt "$CURRENT_LINES" ]; then
+                log "hook" "WARNING: sidecar $SIDECAR reports position $_SIDECAR_LINE, past this run's own $CURRENT_LINES transcript lines — disagrees with last-save.json, falling back to read-position"
+            else
+                LAST_LINE=$((10#$_SIDECAR_LINE))
+                SIDECAR_TRUSTED=1
+            fi
+            ;;
+    esac
+fi
+
+if [ -z "$SIDECAR_TRUSTED" ] && [ -f "$LAST_SAVE_FILE" ]; then
     [ -n "${PYTHON:-}" ] || source "$_HOOK_DIR/detect-tools.sh"
     LAST_LINE=$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell read-position "$LAST_SAVE_FILE" "$SESSION_ID" 2>/dev/null)
     case "$LAST_LINE" in ''|*[!0-9]*) LAST_LINE=0 ;; esac

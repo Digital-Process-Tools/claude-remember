@@ -290,6 +290,32 @@ def cmd_save_position(last_save_file: str, session_id: str, position: int) -> No
         json.dump(payload, f)
     os.replace(tmp, last_save_file)
 
+    # A bash-`read`-able mirror of THIS session's own position (#353, part 2
+    # of #350), so scripts/post-tool-hook.sh's per-tool-call hot path can skip
+    # the `pipeline.shell read-position` spawn once a save has landed, instead
+    # of paying an interpreter launch on every single tool call.
+    #
+    # Written AFTER last-save.json above is committed, never before: this is
+    # the ordering that makes the two files agree by construction rather than
+    # by luck. A crash between the two writes leaves this sidecar holding the
+    # PREVIOUS position — stale, and detectable, because the reader on the
+    # other end bounds it against the transcript's own line count — never a
+    # value ahead of the truth. Writing it first would risk the opposite: a
+    # sidecar the hot path trusts reporting a position last-save.json never
+    # actually reached, which is the silently-wrong-delta this feature exists
+    # to avoid.
+    #
+    # One file per session, not one slot shared by all of them — the same
+    # #140 lesson last-save.json itself already learned, for the same reason:
+    # two live sessions saving in the same store would otherwise stamp on
+    # each other's sidecar.
+    sidecar = os.path.join(os.path.dirname(last_save_file),
+                            f"position.{session_id}")
+    sidecar_tmp = f"{sidecar}.tmp"
+    with open(sidecar_tmp, "w", encoding="utf-8") as f:
+        f.write(str(position))
+    os.replace(sidecar_tmp, sidecar)
+
 
 def cmd_read_position(last_save_file: str, session_id: str) -> None:
     """Print the saved position for a session, or 0.
