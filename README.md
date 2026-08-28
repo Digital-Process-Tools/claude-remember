@@ -52,6 +52,19 @@ The first command decodes the whole catalogue and filters it down to this plugin
 
 **Separately, `plugin update` can report "already at latest version" from a stale local cache** without pulling first ([#37252](https://github.com/anthropics/claude-code/issues/37252), [#38271](https://github.com/anthropics/claude-code/issues/38271)). That one is a client-side cache and is a different failure from the pin lag above, though both surface the same sentence.
 
+### Codex (scaffolding, not yet verified against a live install)
+
+This repo ships a declarative Codex layer -- `.codex-plugin/plugin.json`, a self-referential marketplace entry at `.agents/plugins/marketplace.json`, and `hooks/hooks.codex.json`, which binds Codex's lifecycle events to the same `scripts/*.sh` Claude Code already uses ([#410](https://github.com/Digital-Process-Tools/claude-remember/issues/410)). No new hook code was written for it.
+
+**No Codex binary was available to build this against.** Everything here was written from OpenAI's published documentation ([Package your plugin](https://developers.openai.com/codex/plugins/build), [Hooks](https://learn.chatgpt.com/docs/hooks)), and the tests in `tests/test_codex_manifest_410.py` can only confirm the three manifests are well-formed JSON, name events Codex documents, and reference scripts that actually exist. **They cannot confirm Codex loads the plugin, discovers the marketplace entry, or fires a single hook.** Do not read this as "Codex support" -- read it as the part that could be built before a Codex install existed to test against. Installing it, per the documented commands, would be:
+
+```
+codex plugin marketplace add Digital-Process-Tools/claude-remember
+codex plugin install remember
+```
+
+The Codex-side manifest is a *second* file, `hooks/hooks.codex.json`, rather than a shared one -- Codex's default convention would otherwise point at the exact same `hooks/hooks.json` path Claude Code's manifest already uses by its own default, and the two hosts' hook shapes are close but not identical (Codex hooks support fields, like `matcher` and `timeout`, that this repo's Claude-side manifest does not use).
+
 ### Check your version
 
 Look at the `version` field in `.claude-plugin/plugin.json` — **not at the `<version>` directory name in the path below.** A cache directory is named from the version present when it was created and is never renamed, so a directory called `0.7.1` can hold a manifest saying `0.8.0`. The updater compares manifests, so the manifest is the answer and the directory name is a guess ([#204](https://github.com/Digital-Process-Tools/claude-remember/issues/204)).

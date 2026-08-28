@@ -1,0 +1,20 @@
+{
+  "name": "dpt-plugins",
+  "interface": {
+    "displayName": "Digital Process Tools plugins"
+  },
+  "plugins": [
+    {
+      "name": "remember",
+      "source": {
+        "source": "local",
+        "path": "./"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
