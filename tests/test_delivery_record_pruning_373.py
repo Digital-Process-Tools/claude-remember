@@ -279,3 +279,130 @@ class TestStaleDeliveryRecordsArePruned:
             "session in question is confirmed over"
         )
         assert sessions_dir.is_dir()  # sanity: the fixture itself is sound
+
+def _session_start_with_env(project, home, session_id, extra_env: dict) -> str:
+    env = {
+        **os.environ,
+        "CLAUDE_PROJECT_DIR": str(project),
+        "CLAUDE_PLUGIN_ROOT": str(REPO_ROOT),
+        "HOME": str(home),
+        **extra_env,
+    }
+    result = subprocess.run(
+        ["bash", str(SESSION_START_SCRIPT)],
+        input=_payload(session_id),
+        env=env, capture_output=True, text=True, timeout=60, check=False,
+    )
+    assert result.returncode == 0, f"hook exited {result.returncode}: {result.stderr[:500]}"
+    return result.stdout
+
+
+def _fake_date_bin(tmp_path: Path, behavior: str) -> Path:
+    """A `date` that fails (or answers non-numeric garbage) for `+%s` only,
+    and defers to the real `date` for every other call site this hook makes
+    (TODAY, FIRST_DELIVERED, ...) -- #402 is specifically about the clock
+    read at the GRACE_MIN arbitration, not about breaking the whole hook.
+
+    `_remember_date` (lib-clock.sh) never routes `+%s` to its bash-builtin
+    path -- `_remember_date_builtin_ok` refuses `%s` unconditionally -- so
+    putting this ahead of the real `date` on PATH reliably intercepts every
+    `_remember_date +%s` call regardless of which bash runs the hook.
+    """
+    import shutil
+    real_date = shutil.which("date")
+    assert real_date, "no real `date` on PATH -- cannot build the fake"
+    bindir = tmp_path / "fakebin"
+    bindir.mkdir(exist_ok=True)
+    fake = bindir / "date"
+    if behavior == "fail":
+        body = f'case "$1" in\n  +%s) exit 1 ;;\n  *) exec "{real_date}" "$@" ;;\nesac\n'
+    elif behavior == "garbage":
+        body = f'case "$1" in\n  +%s) echo "not-a-number"; exit 0 ;;\n  *) exec "{real_date}" "$@" ;;\nesac\n'
+    else:
+        raise ValueError(behavior)
+    fake.write_text("#!/bin/sh\n" + body)
+    fake.chmod(0o755)
+    return bindir
+
+
+class TestUnreadableClockDuringPruneSweep:
+    """#402: the #393 grace window degrades could-not-tell to prune when the
+    clock read fails, the opposite of what the code two lines above it does
+    for an unreadable record mtime. Case numbering matches the #402 audit:
+
+      1. live record, healthy clock    : KEPT    (existing #393 control)
+      2. old record,  healthy clock    : PRUNED  (existing #373 control)
+      3. live record, clock UNREADABLE : must be KEPT -- the defect
+      4. live record, clock non-numeric: must be KEPT -- the defect
+    """
+
+    def test_live_record_survives_when_clock_read_fails(self, tmp_path):
+        """MUST NOT FIRE (#402 case 3): the record is fresh -- well inside
+        the #393 grace window -- and its transcript is absent, exactly the
+        #393 shape. If the clock used to arbitrate the window cannot be
+        read, that is could-not-tell, not confirmation the record is old:
+        it must survive, the same way an unreadable mtime already does two
+        lines above in the source."""
+        project, home, remember_dir, _sessions_dir = _sandbox(tmp_path)
+        bindir = _fake_date_bin(tmp_path, "fail")
+        extra_env = {"PATH": f"{bindir}:{os.environ['PATH']}"}
+
+        _session_start_with_env(project, home, "sess-aaa", extra_env)
+        record_a = _seed_delivery_record(remember_dir, "sess-aaa")
+        _session_start_with_env(project, home, "sess-aaa", extra_env)
+        assert record_a.exists(), "setup did not produce a delivery record"
+        # record_a is left exactly as freshly written -- inside the grace
+        # window on any clock that CAN be read.
+
+        _session_start_with_env(project, home, "sess-bbb", extra_env)
+
+        assert record_a.exists(), (
+            "a live delivery record was pruned because the clock used to "
+            "arbitrate the #393 grace window could not be read -- "
+            "could-not-tell must never render as pruned"
+        )
+
+    def test_live_record_survives_when_clock_output_is_non_numeric(self, tmp_path):
+        """MUST NOT FIRE (#402 case 4): same shape as above, but the clock
+        command exits 0 and prints something that is not a number instead
+        of failing outright."""
+        project, home, remember_dir, _sessions_dir = _sandbox(tmp_path)
+        bindir = _fake_date_bin(tmp_path, "garbage")
+        extra_env = {"PATH": f"{bindir}:{os.environ['PATH']}"}
+
+        _session_start_with_env(project, home, "sess-aaa", extra_env)
+        record_a = _seed_delivery_record(remember_dir, "sess-aaa")
+        _session_start_with_env(project, home, "sess-aaa", extra_env)
+        assert record_a.exists(), "setup did not produce a delivery record"
+
+        _session_start_with_env(project, home, "sess-bbb", extra_env)
+
+        assert record_a.exists(), (
+            "a live delivery record was pruned because the clock printed "
+            "non-numeric output -- could-not-tell must never render as "
+            "pruned"
+        )
+
+    def test_old_record_is_still_pruned_when_clock_is_healthy(self, tmp_path):
+        """MUST FIRE (#402 case 2, the paired must-prune control run
+        alongside cases 3/4 above in this same fixture): with a healthy
+        clock and no fake `date` on PATH, an old record outside the grace
+        window is still pruned. Without this control, a harness broken in
+        a way that always "keeps" would pass cases 3/4 for the wrong
+        reason -- this is what tells a real fix from a silently-broken
+        sweep."""
+        project, home, remember_dir, _sessions_dir = _sandbox(tmp_path)
+
+        _session_start(project, home, "sess-aaa")
+        record_a = _seed_delivery_record(remember_dir, "sess-aaa")
+        _session_start(project, home, "sess-aaa")
+        assert record_a.exists(), "setup did not produce a delivery record"
+        _age_record(record_a, _GRACE_MIN + 1)
+
+        _session_start(project, home, "sess-bbb")
+
+        assert not record_a.exists(), (
+            "an old delivery record with a healthy clock survived a later "
+            "session start -- the pairing control for #402 failed, "
+            "independent of the clock-unreadable fix"
+        )

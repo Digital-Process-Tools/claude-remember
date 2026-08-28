@@ -1178,10 +1178,18 @@ if [ -d "$SESSIONS_DIR" ] && [ -d "$REMEMBER_DIR/tmp" ]; then
             # post-tool-hook.sh:377/605. lib-clock.sh routes %s to `date`
             # unconditionally (never the printf builtin), and `_remember_date`
             # itself already falls back to plain `date` with no TZ set, so
-            # this always yields digits; the guard below is what #332 asks
-            # for at every arithmetic sink regardless.
+            # this is not expected to fail on this path -- but #402 found
+            # that when it does (empty output, or a non-numeric one), the
+            # -gt 0 gates below silently coerced "could not read the clock"
+            # into "confirmed outside the grace window", the opposite of
+            # what an unreadable mtime does three lines above. Refuse to
+            # guess in either failure shape, same as the mtime check does.
             _remember_now=$(_remember_date +%s)
-            case "$_remember_now" in (''|*[!0-9]*) _remember_now=0 ;; esac
+            case "$_remember_now" in
+                (''|*[!0-9]*)
+                    continue
+                    ;;
+            esac
             if [ "$_remember_now" -gt 0 ] && [ "$_remember_stale_mtime" -gt 0 ] \
                 && [ $((10#$_remember_now - 10#$_remember_stale_mtime)) -lt $((GRACE_MIN * 60)) ]; then
                 continue
