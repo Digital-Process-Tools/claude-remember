@@ -808,8 +808,8 @@ class TestFullPluginCopyExcludesPycache:
         repo = os.path.join(os.path.dirname(__file__), "..")
         pycache_dir = os.path.join(repo, "pipeline", "__pycache__")
         stale = os.path.join(pycache_dir, "prompts.cpython-312.pyc.139822182724304")
-        os.makedirs(pycache_dir, exist_ok=True)
         created_pycache = not os.path.exists(pycache_dir)
+        os.makedirs(pycache_dir, exist_ok=True)
         try:
             with open(stale, "wb") as f:
                 f.write(b"stale bytecode cache artefact")
