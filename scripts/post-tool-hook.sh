@@ -565,11 +565,28 @@ if [ -n "$SIDECAR" ] && [ -f "$SIDECAR" ]; then
                 # [A-Za-z0-9._-]+ above (no quote or backslash it could
                 # inject) and the trailing `":` anchors the match to a full
                 # key, so "sess-1" cannot false-match a stored "sess-10".
+                #
+                # Scoped to the "sessions" object's own text, not the whole
+                # file: cmd_save_position's payload always carries the
+                # fixed top-level keys "session" and "line" alongside
+                # "sessions" (pipeline/shell.py), so a session id that
+                # happened to equal one of THOSE field names would
+                # false-match a whole-file search even with an empty
+                # "sessions" map. Values in "sessions" are always bare
+                # integers (never braces), so the text between the key and
+                # the object's own closing brace is exactly its content.
                 _LAST_SAVE_CONTENT=""
                 if [ -f "$LAST_SAVE_FILE" ]; then
                     _LAST_SAVE_CONTENT=$(< "$LAST_SAVE_FILE")
                 fi
+                _SESSIONS_SCOPE=""
                 case "$_LAST_SAVE_CONTENT" in
+                    *\"sessions\"*)
+                        _SESSIONS_SCOPE="${_LAST_SAVE_CONTENT#*\"sessions\"}"
+                        _SESSIONS_SCOPE="${_SESSIONS_SCOPE%%\}*}"
+                        ;;
+                esac
+                case "$_SESSIONS_SCOPE" in
                     *\"$SESSION_ID\":*)
                         LAST_LINE=$((10#$_SIDECAR_LINE))
                         SIDECAR_TRUSTED=1

@@ -380,6 +380,48 @@ def test_a_sidecar_whose_session_is_still_in_last_save_json_is_trusted(
     )
 
 
+def test_a_session_id_matching_last_save_jsons_own_fixed_field_names_is_not_falsely_trusted(
+    tmp_path: Path,
+):
+    """The membership check must be scoped to the "sessions" object, not a
+    substring match over the WHOLE file. last-save.json's own schema always
+    carries the fixed top-level keys "session" and "line" (cmd_save_position:
+    `{"sessions": {...}, "session": id, "line": position}`) -- a naive
+    substring match for `"<id>":` over the raw file text would falsely match
+    a session id of "session" or "line" even when neither is actually a key
+    in the "sessions" map, because those two literal strings always appear,
+    quoted and colon-terminated, as the file's OWN field names. Reproduced
+    with an empty "sessions" map (SESSION_A is provably absent from it) and
+    a colliding session id equal to one of those field names."""
+    home, project, remember = _project(tmp_path, jsonl_lines=60,
+                                        session_id="session")
+    (remember / "tmp" / "last-save.json").write_text(
+        json.dumps({"sessions": {}, "session": "session", "line": 5}),
+        encoding="utf-8",
+    )
+    _write_sidecar(remember, "session", "5")
+    env = _env(tmp_path, home, project)
+    _prime(env)
+
+    _result, lines = _traced_run(env, tmp_path, "sidecar-field-name-collision")
+    _reap(remember)
+
+    assert "python3" in _cmds(lines) or "python" in _cmds(lines), (
+        "MUST-FIRE control: a session id equal to last-save.json's own "
+        "fixed field name (\"session\") must not be falsely trusted just "
+        "because that field name is itself quoted and colon-terminated "
+        "somewhere in the file -- the \"sessions\" map is empty, so this "
+        "session is genuinely absent from it. Spawned:\n  "
+        + "\n  ".join(lines)
+    )
+    body = _logged(remember)
+    assert "disagrees with last-save.json" in body, (
+        "a session id colliding with one of last-save.json's own fixed "
+        "field names must be logged as loudly as any other disagreement. "
+        "Log tail: " + repr(body[-2000:])
+    )
+
+
 def test_a_non_numeric_sidecar_is_not_trusted_and_falls_back(tmp_path: Path):
     """A garbled write (partial, or hand-edited) must not become a silent 0
     or a silent anything -- fall back to the authoritative source."""
