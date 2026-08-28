@@ -78,21 +78,52 @@ _REMEMBER_LIB_STAGING_LOCK_SOURCED=1
 # guard -- macOS ships /usr/bin/log as the system logging CLI, so `type log`
 # is true whether or not a shell function was ever defined.
 #
-# Unlike user-prompt-hook.sh's `dispatch() { :; }` no-op stub, report_error's
-# fallback here is NOT silent. #349 exists specifically so a persistently
+# Unlike user-prompt-hook.sh's `dispatch() { :; }` no-op stub, neither
+# fallback here is silent. #349 exists specifically so a persistently
 # growing staging file gets reported; a no-op report_error() would turn that
 # warning into exactly the silent failure #349 was written to end, on
 # precisely the broken stores (#361/#372) where surfacing it matters most.
-# So the fallback still writes -- to stderr, the one channel left when
-# $REMEMBER_DIR/logs cannot be created -- rather than dropping the message.
-# config()'s fallback answers every key with its caller-supplied default,
-# same as log.sh's own `[ ! -f "$REMEMBER_CONFIG" ]` branch: with log.sh
-# unavailable there is no merged config to read, and a caller's default is
-# the same honest answer log.sh gives when the file is simply absent.
+#
+# report_error()'s fallback mirrors log.sh's own report_error()
+# (scripts/log.sh:765-770): it still writes to
+# $REMEMBER_DIR/logs/hook-errors.log when that directory exists and is
+# writable. That covers the (more common) case of this same fallback --
+# log.sh was simply never sourced -- where logs/ is perfectly writable and
+# only the missing `source` line stands between this file and the real
+# functions. Falling straight to stderr in that case too would make the
+# growth warning as invisible to /remember:doctor's "Recent errors" section
+# as the no-op stub this design explicitly rejects. stderr is still the
+# fallback of last resort, exactly as log.sh's own report_error() falls
+# back to it when logs/ cannot be created at all -- the #361/#372 case.
+#
+# lib-clock.sh is self-contained (no log.sh dependency of its own, and its
+# own SOURCED guard) and is what session-end-hook.sh's fallback sources for
+# the identical reason, so it is pulled in here too, rather than a raw
+# `date` call that would silently ignore REMEMBER_TZ -- unlike every other
+# timestamp in this pipeline.
+_REMEMBER_STAGING_LOCK_SRC_DIR="${BASH_SOURCE[0]%/*}"
+[ "$_REMEMBER_STAGING_LOCK_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_STAGING_LOCK_SRC_DIR="."
+source "$_REMEMBER_STAGING_LOCK_SRC_DIR/lib-clock.sh"
+unset _REMEMBER_STAGING_LOCK_SRC_DIR
+
 declare -F log >/dev/null 2>&1 || log() {
-    printf '%s [%s] %s\n' "$(date +%H:%M:%S)" "$1" "$2" >&2
+    printf '%s [%s] %s\n' "$(_remember_date +%H:%M:%S)" "$1" "$2" >&2
 }
-declare -F report_error >/dev/null 2>&1 || report_error() { log "$1" "$2"; }
+declare -F report_error >/dev/null 2>&1 || report_error() {
+    log "$1" "$2"
+    [ -d "${REMEMBER_DIR:-}/logs" ] || return 0
+    printf '%s\n' "$(_remember_date +%H:%M:%S) [$1] $2" \
+        >> "${REMEMBER_DIR}/logs/hook-errors.log" 2>/dev/null || true
+    return 0
+}
+# config()'s fallback answers every key with its caller-supplied default,
+# same as log.sh's own `[ ! -f "$REMEMBER_CONFIG" ]` branch -- an honest
+# answer when REMEMBER_CONFIG is genuinely absent, though NOT when it exists
+# but log.sh returned early before reading it (#361/#372): that narrower gap
+# -- a real, non-default threshold silently read back as the default -- is
+# filed rather than fixed here (#394 follow-up), since closing it means
+# duplicating log.sh's own multi-branch config-reading logic (jq / Python
+# fallback / one-pass cache) inside this file.
 declare -F config >/dev/null 2>&1 || config() { printf '%s\n' "${2:-}"; }
 
 STAGING_LOCK_TIMEOUT="${REMEMBER_STAGING_LOCK_TIMEOUT:-10}"
