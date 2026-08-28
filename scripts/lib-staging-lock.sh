@@ -118,13 +118,33 @@ declare -F report_error >/dev/null 2>&1 || report_error() {
 }
 # config()'s fallback answers every key with its caller-supplied default,
 # same as log.sh's own `[ ! -f "$REMEMBER_CONFIG" ]` branch -- an honest
-# answer when REMEMBER_CONFIG is genuinely absent, though NOT when it exists
-# but log.sh returned early before reading it (#361/#372): that narrower gap
-# -- a real, non-default threshold silently read back as the default -- is
-# filed rather than fixed here (#394 follow-up), since closing it means
-# duplicating log.sh's own multi-branch config-reading logic (jq / Python
-# fallback / one-pass cache) inside this file.
-declare -F config >/dev/null 2>&1 || config() { printf '%s\n' "${2:-}"; }
+# answer when REMEMBER_CONFIG is genuinely absent. It is NOT honest when
+# REMEMBER_CONFIG exists but log.sh returned early before reading it
+# (#361/#372): that narrower gap -- a real, non-default threshold silently
+# read back as the default -- was filed rather than fixed in #394 (closing
+# it fully means duplicating log.sh's own multi-branch config-reading logic
+# -- jq / Python fallback / one-pass cache -- inside this file), then
+# reopened as #399 once the two states were shown to render alike.
+#
+# #399's route: distinguish the two states WITHOUT parsing. `[ -r ]` needs
+# no jq and no Python fallback, and it is enough to tell "nothing to read"
+# from "something unread" -- it cannot recover the value, only the fact that
+# a value might exist.
+#
+# Every caller of config() here runs it inside `$( )` (`_warn_bytes=$(config
+# ...)` below) to capture its printed value, and a command substitution is a
+# subshell in bash -- a variable config() itself assigned would never escape
+# back to staging_append. So the marker is set once, at definition time, on
+# whichever branch of this guard actually ran, not on every call: any caller
+# can then ask "is config() the real one or the stub" without touching
+# REMEMBER_CONFIG's readability itself, which staging_append below re-checks
+# directly (still no parsing) once it also knows this is the stub.
+if declare -F config >/dev/null 2>&1; then
+    _REMEMBER_CONFIG_IS_FALLBACK=0
+else
+    _REMEMBER_CONFIG_IS_FALLBACK=1
+    config() { printf '%s\n' "${2:-}"; }
+fi
 
 STAGING_LOCK_TIMEOUT="${REMEMBER_STAGING_LOCK_TIMEOUT:-10}"
 
@@ -185,6 +205,16 @@ staging_append() {
     local _warn_bytes
     _warn_bytes=$(config ".thresholds.staging_warn_bytes" 2000000)
     case "$_warn_bytes" in (''|*[!0-9]*) _warn_bytes=2000000 ;; esac
+    # #399: silent on every store where the real config() (log.sh) ran,
+    # configured or not -- _REMEMBER_CONFIG_IS_FALLBACK is 0 there. Only
+    # fires on the #361/#372 stub, and only when REMEMBER_CONFIG is itself
+    # readable -- a genuinely absent/unset REMEMBER_CONFIG is still an
+    # honest default and must stay quiet (see the fixture pair in
+    # tests/test_staging_lock_config_unread_399.py).
+    if [ "${_REMEMBER_CONFIG_IS_FALLBACK:-0}" = 1 ] \
+        && [ -n "${REMEMBER_CONFIG:-}" ] && [ -r "$REMEMBER_CONFIG" ]; then
+        report_error "staging" "could not confirm .thresholds.staging_warn_bytes is genuinely unset -- REMEMBER_CONFIG (${REMEMBER_CONFIG}) exists and is readable, but log.sh never had the chance to parse it (#361/#372), so the ${_warn_bytes}b default below may not be the configured value"
+    fi
     if [ "$_warn_bytes" -gt 0 ] && [ "$_before" -lt "$_warn_bytes" ]; then
         local _after
         _after=$(wc -c < "$_today" 2>/dev/null | tr -d ' ')
