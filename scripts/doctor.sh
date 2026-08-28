@@ -341,19 +341,33 @@ done
 # Quietness alone is not proof of a genuine SessionEnd failure (#392): a
 # transcript can go quiet because a session that ran here predates this
 # project ever having a remember store, in which case no SessionEnd hook was
-# ever registered to fire for it. REMEMBER_DIR's own mtime is the earliest
-# "remember became active in this project" signal doctor.sh can read without
-# adding new marker infrastructure elsewhere — bootstrap-dirs.sh creates it
-# the first time ANY hook runs here, and this script never creates it itself
-# (read-only report; see the header), so if it exists at all its mtime traces
-# back to that first hook invocation. It only ever drifts forward with
-# ordinary use (a new today-*.md file, a migration marker) and never
-# backward, so at worst this makes the check MORE conservative as a project
-# ages — the same false-negatives-are-cheap trade the 900s staleness window
-# above already makes on purpose. Absent or unreadable, no transcript can be
-# attributed to "after install", which is the safe default: fall through to
-# the third state below rather than guess.
-_REMEMBER_DIR_AGE=$(_file_age_seconds "$REMEMBER_DIR")
+# ever registered to fire for it. REMEMBER_DIR's own mtime looked like the
+# earliest "remember became active here" signal doctor.sh could read without
+# new marker infrastructure, but it is NOT stable: save-session.sh writes
+# now.md via mktemp-in-REMEMBER_DIR + mv (see save-session.sh's own Step 6
+# comments), and both the mktemp and the mv update REMEMBER_DIR's own mtime,
+# not just now.md's — so on any project with ongoing captures it reads as
+# "time since the last save", not "time since install", reopening the exact
+# false-negative window this fix exists to close (measured: a genuinely
+# 2-day-old store with one ordinary save 5 minutes ago reads as installed 5
+# minutes ago). $REMEMBER_DIR/.gitignore is what this reads instead:
+# bootstrap-dirs.sh writes it exactly once, gated on
+# `[ -f "$REMEMBER_DIR/.gitignore" ] || …` — never rewritten after — so
+# unlike every other path under REMEMBER_DIR it is untouched by ordinary
+# hook activity, and nothing else in this codebase writes to it (grepped).
+# Its age is only ever an over-estimate of a session predating install if the
+# file itself has somehow been touched since, which nothing here does. In
+# EXTERNAL storage mode (REMEMBER_DIR outside PROJECT_DIR) it is never
+# written at all — "no gitignore to write", per bootstrap-dirs.sh's own
+# comment — so this baseline is unavailable there and the arm below can only
+# ever reach WARN for an external-mode store, never FAIL, until a per-project
+# marker that also exists in that mode is added. That is a known gap, not
+# silently accepted: it is the same "no reliable precondition, so WARN is the
+# honest answer" outcome the issue itself sanctions, scoped to the one layout
+# where no write-once marker exists yet. Absent or unreadable for any reason,
+# no transcript can be attributed to "after install", which is the safe
+# default: fall through to the third state below rather than guess.
+_STORE_INSTALL_AGE=$(_file_age_seconds "$REMEMBER_DIR/.gitignore")
 
 _SESSION_END_STATE="unknown"
 if [ "$_SESSION_END_FIRED" -eq 1 ]; then
@@ -377,7 +391,7 @@ elif [ -n "$_SESSION_DIR" ] && [ -d "$_SESSION_DIR" ]; then
                 continue
                 ;;
         esac
-        if [ -z "$_REMEMBER_DIR_AGE" ] || [ "$_tf_age" -gt "$_REMEMBER_DIR_AGE" ]; then
+        if [ -z "$_STORE_INSTALL_AGE" ] || [ "$_tf_age" -gt "$_STORE_INSTALL_AGE" ]; then
             # Quiet since before remember's own store existed for this
             # project (or no baseline could be read at all) — this
             # transcript's silence proves nothing about SessionEnd (#392).

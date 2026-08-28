@@ -37,17 +37,21 @@ Three states, not two, and the fixtures below pin all three:
     history, as broken before it ever had the chance to prove itself.
 
 #392 added the third bullet's second half. Only *quietness* was being
-measured -- a quiet transcript predating REMEMBER_DIR's own existence is
+measured -- a quiet transcript predating this project's own remember store is
 indistinguishable, on quietness alone, from one whose session ended after the
-hook was installed and simply failed to fire. REMEMBER_DIR's own mtime (set
-once, the first time any hook bootstraps this project's store -- see
-bootstrap-dirs.sh; doctor.sh itself never creates it, see its header) is the
-earliest install-time signal doctor.sh can read without adding new
-instrumentation elsewhere, so a transcript is only evidence of a genuine
-SessionEnd failure when it went quiet no earlier than that. Tests that mean
-to pin a GENUINE failure below now backdate REMEMBER_DIR further into the
-past than the transcript, precisely to establish that precondition -- a
-transcript backdated past an unbackdated (i.e. "just now") store is, by
+hook was installed and simply failed to fire. doctor.sh reads
+$REMEMBER_DIR/.gitignore's mtime as its install baseline, NOT REMEMBER_DIR's
+own: bootstrap-dirs.sh writes that file exactly once, gated on it not already
+existing, and nothing else ever touches it again -- unlike REMEMBER_DIR
+itself, whose mtime save-session.sh resets on every ordinary save (a
+mktemp-in-REMEMBER_DIR + mv both bump the directory's own mtime, not just
+now.md's, so it reads as "time since the last save", not "time since
+install", on any project with ongoing captures). A transcript is only
+evidence of a genuine SessionEnd failure when it went quiet no earlier than
+that marker. Tests below that mean to pin a GENUINE failure call
+`_install_store()` to backdate that marker further into the past than the
+transcript, precisely to establish the precondition -- a transcript backdated
+past a store with no such marker (i.e. never `_install_store()`-ed) is, by
 construction, the #392 false-positive shape instead.
 """
 
@@ -113,12 +117,29 @@ def _backdate(path: Path, seconds: int) -> None:
     """Set a path's mtime `seconds` in the past -- doctor.sh's staleness
     check (>900s quiet) is how it tells "a prior session ended" apart from
     "another window on this project is open right now", and (#392) whether a
-    transcript's mtime precedes REMEMBER_DIR's own is how it tells a session
-    that ended before remember was installed apart from one that ended after.
-    Works on directories as well as files -- `os.utime` does not care.
+    transcript's mtime precedes the store's own install marker is how it
+    tells a session that ended before remember was installed apart from one
+    that ended after. Works on directories as well as files -- `os.utime`
+    does not care.
     """
     when = time.time() - seconds
     os.utime(path, (when, when))
+
+
+def _install_store(remember: Path, seconds_ago: int) -> None:
+    """Simulate remember having been bootstrapped `seconds_ago` -- doctor.sh
+    reads $REMEMBER_DIR/.gitignore's mtime as its install baseline (#392),
+    NOT REMEMBER_DIR's own: bootstrap-dirs.sh writes that file exactly once,
+    gated on it not already existing, and nothing else in this codebase ever
+    touches it again -- unlike REMEMBER_DIR itself, whose mtime save-session.sh
+    resets on every ordinary save (mktemp-in-REMEMBER_DIR + mv both bump the
+    directory's own mtime, not just now.md's). A test that backdated
+    REMEMBER_DIR instead would pin a baseline production code no longer
+    reads.
+    """
+    marker = remember / ".gitignore"
+    marker.write_text("*\n", encoding="utf-8")
+    _backdate(marker, seconds_ago)
 
 
 def test_one_fresh_transcript_alone_is_still_the_third_state(tmp_path):
@@ -148,13 +169,14 @@ def test_one_stale_transcript_after_install_is_enough_to_fail(tmp_path):
     whether something demonstrably stopped being active while the hook could
     have serviced it.
 
-    REMEMBER_DIR is backdated further than the transcript so the transcript
-    is unambiguously attributable to a session that ran after the store (and
-    so the hook) existed for this project -- the #392 precondition this test
-    exists to pin now that quietness alone is not accepted as proof.
+    The store's install marker (`_install_store()`) is backdated further than
+    the transcript so the transcript is unambiguously attributable to a
+    session that ran after the store (and so the hook) existed for this
+    project -- the #392 precondition this test exists to pin now that
+    quietness alone is not accepted as proof.
     """
     home, project, remember, session_dir = _project(tmp_path)
-    _backdate(remember, 7200)
+    _install_store(remember, 7200)
     stale = session_dir / "aaaa-quiet-session.jsonl"
     stale.write_text("{}\n", encoding="utf-8")
     _backdate(stale, 3600)
@@ -196,18 +218,19 @@ def test_prior_sessions_ended_after_install_fails_and_reaches_verdict(tmp_path):
     """The hook had its chance, after the store existed, and stayed silent --
     must fire, and must be FAIL.
 
-    REMEMBER_DIR is backdated further than the transcripts, establishing the
-    #392 precondition (this project's remember store already existed when
-    the quiet session ran) that separates this from the false positive #392
-    reports. No end-marker despite that is the exact silent failure #370
-    reports: a SessionEnd hook that never fires reads as a healthy install.
+    The store's install marker is backdated further than the transcripts,
+    establishing the #392 precondition (this project's remember store already
+    existed when the quiet session ran) that separates this from the false
+    positive #392 reports. No end-marker despite that is the exact silent
+    failure #370 reports: a SessionEnd hook that never fires reads as a
+    healthy install.
 
     Paired with test_prior_cc_history_predating_the_store_is_not_a_failure
     below, the same transcript shape with the store NOT backdated -- the
     #392 false positive this precondition exists to rule out.
     """
     home, project, remember, session_dir = _project(tmp_path)
-    _backdate(remember, 7200)
+    _install_store(remember, 7200)
     earlier = session_dir / "aaaa-earlier-session.jsonl"
     earlier.write_text("{}\n", encoding="utf-8")
     _backdate(earlier, 3600)
@@ -298,13 +321,13 @@ def test_session_end_failure_outranks_the_generic_capture_is_working_verdict(tmp
     has never fired once. Reaching "capture is working" first would be
     exactly the invisibility #370 reports, just moved one line down.
 
-    REMEMBER_DIR is backdated past the transcripts so this stays the genuine
-    -fail shape rather than sliding into the #392 false positive below, whose
-    whole point is that a healthy PostToolUse verdict is the CORRECT verdict
-    when the quiet transcripts predate the store.
+    The store's install marker is backdated past the transcripts so this
+    stays the genuine-fail shape rather than sliding into the #392 false
+    positive below, whose whole point is that a healthy PostToolUse verdict
+    is the CORRECT verdict when the quiet transcripts predate the store.
     """
     home, project, remember, session_dir = _project(tmp_path)
-    _backdate(remember, 7200)
+    _install_store(remember, 7200)
     earlier = session_dir / "aaaa-earlier-session.jsonl"
     earlier.write_text("{}\n", encoding="utf-8")
     _backdate(earlier, 3600)
@@ -449,3 +472,52 @@ def test_an_unreadable_transcript_mtime_is_not_counted_as_evidence(tmp_path):
         "the count instead of being named the way this file already names "
         "an unreadable PostToolUse marker:\n" + result.stdout
     )
+
+
+def test_ongoing_saves_do_not_mask_a_genuine_failure(tmp_path):
+    """Regression for a defect caught in self-review before this fix shipped:
+    an earlier version of this fix read REMEMBER_DIR's OWN mtime as the
+    install baseline, rather than $REMEMBER_DIR/.gitignore's. That is wrong
+    -- save-session.sh writes now.md via mktemp directly inside REMEMBER_DIR
+    followed by `mv` over the existing file, and BOTH operations update the
+    directory's own mtime, not just now.md's. On any project with ongoing
+    captures REMEMBER_DIR's mtime therefore reads as "time since the last
+    save", continuously resetting toward "now" -- which would have silently
+    turned every genuine SessionEnd failure back into the #392 false
+    positive this fix exists to correct, the moment a single save landed
+    after the quiet transcript.
+
+    This fixture reproduces exactly that: the store's install marker is
+    genuinely old (2 days), a transcript went stale after that (1 hour ago),
+    and THEN an ordinary save's mktemp+mv into REMEMBER_DIR is simulated --
+    bumping REMEMBER_DIR's own mtime to "just now" -- before doctor.sh runs.
+    A correct fix reads the untouched .gitignore marker and still FAILs; the
+    defect this pins would have read the freshly-bumped directory and
+    silently downgraded to WARN instead.
+    """
+    home, project, remember, session_dir = _project(tmp_path)
+    _install_store(remember, 2 * 24 * 3600)
+    stale = session_dir / "aaaa-quiet-session.jsonl"
+    stale.write_text("{}\n", encoding="utf-8")
+    _backdate(stale, 3600)
+
+    # Simulate save-session.sh's own now.md update: mktemp a sibling directly
+    # inside REMEMBER_DIR, then mv it over the target -- the same two
+    # directory-mutating operations save-session.sh performs, in the same
+    # directory, without touching .gitignore at all.
+    now_md = remember / "now.md"
+    now_md.write_text("placeholder\n", encoding="utf-8")
+    append_tmp = remember / "now.md.append-simulated"
+    append_tmp.write_text("## 12:00\nnew entry\n", encoding="utf-8")
+    append_tmp.replace(now_md)
+
+    result = _run(home, project, remember)
+
+    assert result.returncode == 0, result.stderr
+    assert "FAIL SessionEnd has never fired" in result.stdout, (
+        "an ordinary save landing after the genuinely-old install marker "
+        "masked a real SessionEnd failure -- REMEMBER_DIR's own churned "
+        "mtime was read instead of the stable .gitignore marker:\n"
+        + result.stdout
+    )
+    assert "SessionEnd" in _verdict(result.stdout)
