@@ -278,7 +278,7 @@ A store that could never be created at all (a read-only or otherwise unwritable 
 
 ## Diagnostics (`/remember:doctor`)
 
-Prints resolved paths, detected tools, storage mode, whether the session directory Claude Code actually created matches the slug the plugin computes, when the last successful save happened, and whether `PostToolUse` has ever fired for this project. Each line is prefixed `OK` / `WARN` / `FAIL`, ending in a one-line verdict.
+Prints resolved paths, detected tools, storage mode, whether the session directory Claude Code actually created matches the slug the plugin computes, when the last successful save happened, whether `PostToolUse` has ever fired for this project, and whether `SessionEnd` -- the last-chance flush -- has ever fired ([#370](https://github.com/Digital-Process-Tools/claude-remember/issues/370)). Each line is prefixed `OK` / `WARN` / `FAIL`, ending in a one-line verdict.
 
 Available on plugin installs, which auto-discover `commands/`. If you set the plugin up manually into `<project>/.claude/remember/`, that discovery does not apply — copy `commands/doctor.md` into `.claude/commands/`, or just run the script directly: `bash .claude/remember/scripts/doctor.sh`.
 
