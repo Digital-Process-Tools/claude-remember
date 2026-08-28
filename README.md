@@ -431,6 +431,18 @@ python3 -m tests.slug_vectors
 
 Before you do: every path whose slug moves is a **store rename** for the people on it, and on a case-insensitive filesystem only git can see it happen. That is what [#263](https://github.com/Digital-Process-Tools/claude-remember/issues/263) was.
 
+## Reading the transcript path the host hands us
+
+`SessionStart` and `SessionEnd` carry `transcript_path` on their stdin payload, and since [#407](https://github.com/Digital-Process-Tools/claude-remember/issues/407) the pipeline reads it instead of reconstructing it. `pipeline/extract.py`'s `find_session()` uses the supplied path verbatim when it names a real file — no slug, no glob, none of the drive-letter and truncation logic above enters into it. Every failure mode that logic guards against (six Windows drive spellings, a 200-character truncation boundary, an astral character counted differently by two implementations) exists only because a *derived* path can disagree with where the host actually wrote; a path the host handed over cannot.
+
+The two hooks that already read this stdin payload for `session_id` (`scripts/session-start-hook.sh`, `scripts/session-end-hook.sh`) extract `transcript_path` from the same payload with the same narrow, validated-after-extraction heuristic, and export it as `REMEMBER_TRANSCRIPT_PATH` for any Python process they spawn. `pipeline/host.transcript_path()` reads that variable and returns `None` — never a guess — for anything it cannot open: unset, blank, a directory, a path that does not exist. `_session_dir()`'s reconstruction stays exactly where it was, as the fallback for every caller with no payload to read: consolidation, `/remember:doctor`, and manual invocation of `pipeline.extract` from the command line.
+
+**The session id an incremental save resumes from now also prefers the supplied one over the transcript's basename.** A host is free to name its transcript file anything — Codex writes `rollout-<date>-<uuid>.jsonl` — and a basename-derived id that never matches what was actually passed in would key `get_last_save_line` on the wrong string, silently re-summarizing the whole transcript on every save (the duplicate [#140](https://github.com/Digital-Process-Tools/claude-remember/issues/140) exists to prevent).
+
+**`pipeline/host.py` also reads the plugin's own install directory** through `PLUGIN_ROOT_VARS`, in the same host-neutral spirit: the vendor-neutral `PLUGIN_ROOT` (read by `scripts/resolve-paths.sh` before its `CLAUDE_PLUGIN_ROOT` fallback) wins over `CLAUDE_PLUGIN_ROOT`, which Codex also sets but only as a compatibility alias it could withdraw in any release. `tests/test_host_shell_parity_407.py::test_host_shell_parity` keeps the shell script's hand-mirrored variable list from drifting out of sync with `pipeline/host.PLUGIN_ROOT_VARS`, the same way `tests/test_slug_parity.py` already guards `scripts/lib-slug.sh` against `pipeline/slug.py`.
+
+This is deliberately a thin data table, not a host abstraction layer — `pipeline/host.py`'s own module docstring says what was left out and why (event names live in each host's manifest; the summarizer, `pipeline/haiku.py`, is Claude-Code-coupled by design and not touched). A host nobody has described yet (`detect_host()`'s `UNKNOWN`) is a normal result: everything this plugin actually needs from a host arrives on stdin regardless of whether the plugin recognises it.
+
 ## Configuration
 
 Config is resolved by deep-merging three layers (highest priority wins):

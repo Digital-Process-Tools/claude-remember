@@ -34,7 +34,11 @@
 #
 # ENVIRONMENT (inputs)
 #   CLAUDE_PROJECT_DIR    Project root (set by Claude Code hooks)
-#   CLAUDE_PLUGIN_ROOT    Plugin install directory (set by Claude Code hooks)
+#   PLUGIN_ROOT           Plugin install directory, vendor-neutral name (#407).
+#                         Read before CLAUDE_PLUGIN_ROOT, which is honoured
+#                         when PLUGIN_ROOT is absent -- see pipeline/host.py.
+#   CLAUDE_PLUGIN_ROOT    Plugin install directory (set by Claude Code hooks;
+#                         also set by Codex as a compatibility alias)
 #
 # ENVIRONMENT (outputs)
 #   PROJECT_DIR           Resolved project root (validated to exist)
@@ -83,7 +87,11 @@ umask 077
 # --- Resolve PIPELINE_DIR (where the plugin code lives) ---
 #
 # Priority:
-#   1. CLAUDE_PLUGIN_ROOT (set by Claude Code for marketplace installs)
+#   1. PLUGIN_ROOT (vendor-neutral name; Codex sets it natively) falling back
+#      to CLAUDE_PLUGIN_ROOT (set by Claude Code for marketplace installs, and
+#      by Codex as a compatibility alias it can withdraw -- pipeline/host.py's
+#      PLUGIN_ROOT_VARS is the same precedence, mirrored by hand, and
+#      test_host_shell_parity asserts the two agree)
 #   2. Walk up from this script's real location to find the plugin root
 #      (works for local installs where scripts/ is inside the plugin dir)
 _SCRIPT_DIR="${BASH_SOURCE[0]%/*}"
@@ -102,8 +110,9 @@ _resolve_paths_fail() {
     exit 1
 }
 
-if [ -n "$CLAUDE_PLUGIN_ROOT" ]; then
-    PIPELINE_DIR="$CLAUDE_PLUGIN_ROOT"
+_REMEMBER_PLUGIN_ROOT="${PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}"
+if [ -n "$_REMEMBER_PLUGIN_ROOT" ]; then
+    PIPELINE_DIR="$_REMEMBER_PLUGIN_ROOT"
 elif [ -f "$_PLUGIN_ROOT_CANDIDATE/pipeline/haiku.py" ]; then
     # Local install: scripts/ is one level below the plugin root
     PIPELINE_DIR="$_PLUGIN_ROOT_CANDIDATE"

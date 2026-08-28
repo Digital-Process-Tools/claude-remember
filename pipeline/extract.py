@@ -27,6 +27,7 @@ import os
 import re
 import sys
 
+from . import host as _host
 from .slug import session_dir_slug
 from .types import ExtractResult
 
@@ -154,6 +155,9 @@ def find_session(session_id: str | None = None,
     Raises:
         FileNotFoundError: If no session files exist in the directory.
     """
+    supplied = _host.transcript_path()
+    if supplied:
+        return supplied
     sdir = _session_dir(project_dir)
     if session_id:
         _validate_session_id(session_id)
@@ -364,7 +368,12 @@ def extract_session(
         FileNotFoundError: If no matching session JSONL file is found.
     """
     path = find_session(session_id, project_dir)
-    actual_id = os.path.basename(path).replace(".jsonl", "")
+    # The supplied session_id wins over a basename derived from the transcript
+    # file. A host may name the file anything (Codex's rollout-<date>-<uuid>);
+    # if that leaks into the resume key, get_last_save_line never matches it
+    # and every save re-summarizes from line 0 -- the duplicate #140 exists to
+    # prevent.
+    actual_id = session_id or os.path.basename(path).replace(".jsonl", "")
     total_lines = count_lines(path)
 
     if show_all:

@@ -166,6 +166,23 @@ case "$CURRENT_SESSION_ID" in
     ''|.|..|*[!A-Za-z0-9._-]*) CURRENT_SESSION_ID="" ;;
 esac
 
+# ── The transcript path the host handed us (#407) ─────────────────────────
+# Read from the same payload, exported for pipeline/host.transcript_path() to
+# pick up in any Python process this hook (or something it dispatches)
+# spawns. This is data from a host payload, same as CURRENT_SESSION_ID above,
+# and validated the same way: at the point of entry, not the point of use. A
+# transcript path legitimately contains slashes and dots, so it cannot share
+# that variable's character allowlist -- only a literal newline or carriage
+# return (which a well-formed JSON string value cannot contain unescaped) is
+# rejected here. Whether the value actually names an openable file is decided
+# on the Python side, which falls back to the existing derivation when it
+# does not.
+REMEMBER_TRANSCRIPT_PATH=$(_stdin_json_string transcript_path "$HOOK_STDIN" 2>/dev/null) || REMEMBER_TRANSCRIPT_PATH=""
+case "$REMEMBER_TRANSCRIPT_PATH" in
+    *$'\n'*|*$'\r'*) REMEMBER_TRANSCRIPT_PATH="" ;;
+esac
+export REMEMBER_TRANSCRIPT_PATH
+
 # ── Which KIND of SessionStart is this? (#339) ────────────────────────────
 # `source` is one of startup | resume | clear | compact | fork. It is read for
 # exactly one decision — how much of the memory recap to print — and nothing

@@ -136,6 +136,21 @@ case "$SESSION_END_REASON" in
     ''|*[!A-Za-z0-9_]*) SESSION_END_REASON="unknown" ;;
 esac
 
+# ── The transcript path the host handed us (#407) ─────────────────────────
+# Same field, same reasoning as session-start-hook.sh's identical block:
+# exported for pipeline/host.transcript_path() to pick up in any Python
+# process this hook spawns. Data from a host payload, validated at the point
+# of entry -- only a literal newline or carriage return is rejected, since a
+# transcript path legitimately contains slashes and dots and cannot share
+# STDIN_SESSION_ID's character allowlist. Whether the value names an openable
+# file is decided on the Python side, which falls back to derivation when it
+# does not.
+REMEMBER_TRANSCRIPT_PATH=$(_stdin_json_string transcript_path "$HOOK_STDIN" 2>/dev/null) || REMEMBER_TRANSCRIPT_PATH=""
+case "$REMEMBER_TRANSCRIPT_PATH" in
+    *$'\n'*|*$'\r'*) REMEMBER_TRANSCRIPT_PATH="" ;;
+esac
+export REMEMBER_TRANSCRIPT_PATH
+
 # --- Resolve paths, tools, directories, logging ---
 # Opt into resolve-paths.sh's soft-failure mode, exactly as post-tool-hook.sh
 # does: this hook must never block session teardown, so a resolution failure
