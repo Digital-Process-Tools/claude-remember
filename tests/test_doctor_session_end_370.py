@@ -128,17 +128,21 @@ def _backdate(path: Path, seconds: int) -> None:
 
 def _install_store(remember: Path, seconds_ago: int) -> None:
     """Simulate remember having been bootstrapped `seconds_ago` -- doctor.sh
-    reads $REMEMBER_DIR/.gitignore's mtime as its install baseline (#392),
-    NOT REMEMBER_DIR's own: bootstrap-dirs.sh writes that file exactly once,
-    gated on it not already existing, and nothing else in this codebase ever
-    touches it again -- unlike REMEMBER_DIR itself, whose mtime save-session.sh
-    resets on every ordinary save (mktemp-in-REMEMBER_DIR + mv both bump the
-    directory's own mtime, not just now.md's). A test that backdated
-    REMEMBER_DIR instead would pin a baseline production code no longer
-    reads.
+    reads $REMEMBER_DIR/.install-marker's mtime as its install baseline
+    (#392, #401), NOT REMEMBER_DIR's own: bootstrap-dirs.sh writes that file
+    exactly once, gated on it not already existing, and nothing else in this
+    codebase ever touches it again -- unlike REMEMBER_DIR itself, whose mtime
+    save-session.sh resets on every ordinary save (mktemp-in-REMEMBER_DIR +
+    mv both bump the directory's own mtime, not just now.md's), and unlike
+    the ORIGINAL choice of $REMEMBER_DIR/.gitignore, which
+    hooks.d/after_save/50-git-backup.sh deletes as a one-time cleanup once a
+    migrated, backed-up store lands its first save (#401). A test that
+    backdated REMEMBER_DIR instead would pin a baseline production code no
+    longer reads; see test_doctor_session_end_survives_backup_cleanup_401.py
+    for the fixture pinning the .gitignore-deletion case specifically.
     """
-    marker = remember / ".gitignore"
-    marker.write_text("*\n", encoding="utf-8")
+    marker = remember / ".install-marker"
+    marker.write_text("installed\n", encoding="utf-8")
     _backdate(marker, seconds_ago)
 
 

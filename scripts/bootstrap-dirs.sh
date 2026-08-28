@@ -211,6 +211,51 @@ if [ -d "$REMEMBER_DIR/tmp" ]; then
     unset _remember_relocated_cfg
 fi
 
+# --- Install marker (#401) ---
+#
+# doctor.sh's SessionEnd liveness check (#370) needs a "remember became
+# active here" baseline so a transcript that went quiet BEFORE the store
+# existed is not misread as SessionEnd's own silent failure (#392). It used
+# to read $REMEMBER_DIR/.gitignore's mtime for that -- the one file under
+# REMEMBER_DIR ordinary hook activity never rewrites -- but that file is
+# deleted, by design, the first time a legacy-to-external migration is
+# backed up with git: hooks.d/after_save/50-git-backup.sh's cleanup of the
+# per-slug ".gitignore" bootstrap artifact ("removed per-slug .gitignore
+# (legacy bootstrap artifact)"). The two behaviours are individually correct
+# and were written years apart; composed, the cleanup silently removed the
+# diagnostic's only baseline, and that store's SessionEnd check degraded to
+# a permanent WARN, unable to ever reach FAIL again.
+#
+# This marker is a dedicated replacement nothing else in this codebase ever
+# touches, or has any reason to: written once, gated on it not already
+# existing, exactly like the .gitignore write below -- but unconditional of
+# storage mode, unlike .gitignore, which is only ever written when
+# REMEMBER_DIR is inside the project tree. An external-mode store that was
+# never migrated from legacy never had a .gitignore baseline at all; this
+# marker gives it one for the first time, not only a migrated one.
+#
+# Gated on REMEMBER_DIR existing for the same reason the .gitignore write
+# below is (#204): the mkdir above is best-effort, and writing into a
+# directory that failed to materialize would surface the shell's own
+# "No such file or directory" as a non-blocking hook failure at every
+# session start.
+#
+# An existing store that upgrades into this fix and has no marker yet gets
+# one written the next time any hook sources this file -- the next tool
+# call, the next session start -- dated from that moment, not from the
+# store's true original install. A store already degraded to WARN-only by
+# the .gitignore-deletion composition above self-heals on that next hook
+# run rather than staying broken forever; the cost is that quiet transcripts
+# between the store's true install and this upgrade cannot be attributed to
+# either side of a baseline that did not exist for them, exactly the same
+# "nothing has had the chance to prove or disprove this yet" third state
+# doctor.sh already renders as the honest answer for a fresh install.
+if [ -d "$REMEMBER_DIR" ]; then
+    [ -f "$REMEMBER_DIR/.install-marker" ] \
+        || { echo 'This file marks when remember was first bootstrapped here. Read only by scripts/doctor.sh (#401); do not delete it.' \
+            > "$REMEMBER_DIR/.install-marker"; } 2>/dev/null
+fi
+
 # --- Gitignore: only write when REMEMBER_DIR is inside the project tree ---
 # In external mode (REMEMBER_DIR outside PROJECT_DIR) there is no gitignore
 # to write — the user manages that tree themselves (typically as a private git

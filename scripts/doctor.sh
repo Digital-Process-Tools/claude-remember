@@ -61,6 +61,81 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# ── --json: machine-readable resolution surface (#408) ──────────────────────
+#
+# Every field this prints is already computed for the human report below —
+# resolved directory, storage mode — but only in a form meant to be read by
+# a person. An external caller wanting a `{slug}`-keyed external store's real
+# directory had exactly two options before this: vendor session_dir_slug
+# (UTF-8-aware, hashes over 200 characters, folds Windows drive letters) —
+# a second copy of another project's logic, going stale on its own schedule
+# — or give up and report unknown, which is what claude-oss now does
+# correctly, at the cost of a real diagnostic every time (claude-oss#614).
+#
+# PROVISIONAL, not a stable contract: `schema_version` is 1 and will be
+# bumped on any incompatible change to these keys or their meaning — a
+# caller parsing this should check it rather than assume the shape below is
+# permanent. This is the first release of this surface; nothing has yet
+# exercised whether these three states are the right cut.
+#
+# Three states, not two, deliberately mirroring the ladder two sections below
+# (soft-fail vs the assumed-CLAUDE_PROJECT_DIR guess, #207): a caller must be
+# able to tell "resolved, and trustworthy" from "resolved, but only because
+# CLAUDE_PROJECT_DIR was guessed from the current directory" from "did not
+# resolve at all" — folding any two of these into one state would make
+# `could_not_resolve` (or a guessed path presented as given) indistinguishable
+# from the shape that error case must never take: an absent key or an empty
+# object read as "nothing to report", exactly the gap claude-oss#614 hit on
+# the other side of this same problem.
+#
+# Deliberately short-circuits before any of the human report's own output —
+# a single line of JSON is the whole contract; nothing before or after it on
+# stdout would still parse as one.
+if [ "${1:-}" = "--json" ]; then
+    _JSON_PROJECT_DIR_ASSUMED=0
+    if [ -z "${CLAUDE_PROJECT_DIR:-}" ]; then
+        CLAUDE_PROJECT_DIR="$PWD"
+        _JSON_PROJECT_DIR_ASSUMED=1
+        export CLAUDE_PROJECT_DIR
+    fi
+
+    _JSON_RESOLVE_ERR_FILE="${TMPDIR:-/tmp}/remember-doctor-json-resolve-$$"
+    REMEMBER_PATHS_SOFT_FAIL=1 source "$SCRIPT_DIR/resolve-paths.sh" 2>"$_JSON_RESOLVE_ERR_FILE"
+    _JSON_RESOLVE_STATUS=$?
+    _JSON_RESOLVE_ERR=$(cat "$_JSON_RESOLVE_ERR_FILE" 2>/dev/null)
+    rm -f "$_JSON_RESOLVE_ERR_FILE"
+
+    # sed order matters: backslashes escaped before quotes, else a quote
+    # introduced by the first substitution would be re-escaped by the second.
+    _json_escape() {
+        printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' ' '
+    }
+
+    if [ "$_JSON_RESOLVE_STATUS" -ne 0 ]; then
+        printf '{"schema_version":1,"state":"could_not_resolve","reason":"%s"}\n' \
+            "$(_json_escape "${_JSON_RESOLVE_ERR:-unknown error}")"
+        exit 0
+    fi
+
+    source "$SCRIPT_DIR/lib-memory-dir.sh"
+
+    if [ "$REMEMBER_DIR" = "${PROJECT_DIR}/.remember" ] || [[ "$REMEMBER_DIR" == "$PROJECT_DIR"/* ]]; then
+        _JSON_STORAGE_MODE="legacy"
+    else
+        _JSON_STORAGE_MODE="external"
+    fi
+
+    if [ "$_JSON_PROJECT_DIR_ASSUMED" -eq 1 ]; then
+        _JSON_STATE="resolved_assumed_project_dir"
+    else
+        _JSON_STATE="resolved"
+    fi
+
+    printf '{"schema_version":1,"state":"%s","remember_dir":"%s","storage_mode":"%s","project_dir":"%s"}\n' \
+        "$_JSON_STATE" "$(_json_escape "$REMEMBER_DIR")" "$_JSON_STORAGE_MODE" "$(_json_escape "$PROJECT_DIR")"
+    exit 0
+fi
+
 echo "Remember Doctor"
 echo "==============="
 echo ""
@@ -350,33 +425,33 @@ done
 # "time since the last save", not "time since install", reopening the exact
 # false-negative window this fix exists to close (measured: a genuinely
 # 2-day-old store with one ordinary save 5 minutes ago reads as installed 5
-# minutes ago). $REMEMBER_DIR/.gitignore is what this reads instead:
-# bootstrap-dirs.sh writes it exactly once, gated on
-# `[ -f "$REMEMBER_DIR/.gitignore" ] || …`, and unlike every other path under
-# REMEMBER_DIR it is never rewritten by ordinary hook activity.
+# minutes ago). $REMEMBER_DIR/.install-marker is what this reads instead
+# (#401; originally $REMEMBER_DIR/.gitignore, see below): bootstrap-dirs.sh
+# writes it exactly once, gated on `[ -f "$REMEMBER_DIR/.install-marker" ]
+# || …`, and unlike every other path under REMEMBER_DIR it is never
+# rewritten by ordinary hook activity.
 #
-# It is NOT permanently stable, though (caught in review): a legacy
-# (in-project) store that is later migrated to external mode and backed up
-# with git has this exact file deleted by
-# hooks.d/after_save/50-git-backup.sh's own cleanup of the migration
-# artifact ("removed per-slug .gitignore (legacy bootstrap artifact)") the
-# first time a backed-up save runs, and bootstrap-dirs.sh's write is gated on
-# the store being inside the project (`case "$REMEMBER_DIR" in
-# "$_mem_proj"/*)`), which is false once external, so it is never recreated.
-# From that point this baseline is permanently unavailable for that store —
-# the same practical limit EXTERNAL storage mode already has from the start
-# (bootstrap-dirs.sh never writes this file there either — "no gitignore to
-# write" — so the baseline never exists to begin with), reached here via
-# migration instead. Either way the arm below can only ever reach WARN, never
-# FAIL, for a store in that state, until a marker survives that cleanup too
-# (filed as a follow-up rather than fixed here: the fix touches
-# hooks.d/after_save/50-git-backup.sh, outside this arm's own file). That is
-# a known, documented gap, not a silently accepted one — the same "no
-# reliable precondition, so WARN is the honest answer" outcome the issue
-# itself sanctions. Absent or unreadable for any reason, no transcript can be
-# attributed to "after install", which is the safe default: fall through to
-# the third state below rather than guess.
-_STORE_INSTALL_AGE=$(_file_age_seconds "$REMEMBER_DIR/.gitignore")
+# #401: this originally read $REMEMBER_DIR/.gitignore's mtime instead, which
+# was NOT permanently stable — a legacy (in-project) store that is later
+# migrated to external mode and backed up with git has that exact file
+# deleted by hooks.d/after_save/50-git-backup.sh's own cleanup of the
+# migration artifact ("removed per-slug .gitignore (legacy bootstrap
+# artifact)") the first time a backed-up save runs, and bootstrap-dirs.sh's
+# write of it is gated on the store being inside the project (`case
+# "$REMEMBER_DIR" in "$_mem_proj"/*)`), which is false once external, so it
+# was never recreated — permanently degrading this check to WARN-only for
+# that store. EXTERNAL storage mode had the same gap from the start
+# (bootstrap-dirs.sh never wrote .gitignore there either), reached via
+# migration instead of from day one.
+#
+# $REMEMBER_DIR/.install-marker (bootstrap-dirs.sh, "Install marker (#401)")
+# replaces it: written once, unconditional of storage mode, and nothing in
+# this codebase — including the .gitignore cleanup above — has any reason to
+# touch it again. Absent or unreadable for any reason (including a store
+# that upgraded into this fix before its next hook run ever wrote one), no
+# transcript can be attributed to "after install", which is the safe
+# default: fall through to the third state below rather than guess.
+_STORE_INSTALL_AGE=$(_file_age_seconds "$REMEMBER_DIR/.install-marker")
 
 _SESSION_END_STATE="unknown"
 if [ "$_SESSION_END_FIRED" -eq 1 ]; then
@@ -775,6 +850,29 @@ if [ "$_PYTHON_OK" -eq 0 ]; then
     echo "VERDICT: problem — no usable Python; the pipeline cannot run at all (see Tools above)$_ASSUMED_NOTE"
 elif [ "${_STORE_NEEDS_A_HUMAN:-0}" -eq 1 ]; then
     echo "VERDICT: problem — memory is being captured but never consolidated; the staging files are over the prompt cap on their own (see above)$_ASSUMED_NOTE"
+elif [ "$_POST_TOOL_FIRED" -eq 1 ] && [ -z "$_LAST_SAVE_TIME" ] \
+    && { [ -z "$_SESSION_DIR" ] || [ -d "$_SESSION_DIR" ]; }; then
+    # #404: this is the same condition the final `else` below names — PostToolUse
+    # HAS fired (a marker or a ran-flag exists) but no save has ever completed —
+    # promoted up here, ahead of the SessionEnd arm, because on an AGED store
+    # (baseline genuinely in the past, a transcript genuinely quiet since) this
+    # is the more specific, actionable cause: SessionEnd's own silence is fully
+    # explained by capture never reaching a save in the first place, and the
+    # ladder's own rule above (specific causes before the general one) says the
+    # explanation wins, not the symptom. #392/#400 closed the FRESH-install half
+    # of this same displacement (a transcript predating the store no longer
+    # counts as SessionEnd evidence); this closes the aged-store half, where
+    # `_SESSION_END_STATE` genuinely does become "not-fired". SessionEnd's
+    # priority over "capture is working" and over "PostToolUse never fired at
+    # all" (#370, below) is untouched — those are the two states this
+    # condition's own `-z "$_LAST_SAVE_TIME"` and `_POST_TOOL_FIRED -eq 1`
+    # cannot both be true for. The trailing session-dir-mismatch exclusion
+    # (#144, tested by test_a_slug_mismatch_is_not_answered_with_restart_claude_code)
+    # keeps the still-more-specific slug-mismatch arm below reachable: a
+    # mismatched slug can leave PostToolUse having run (`post-tool-ran`
+    # written) with no save either, and that structural cause outranks this
+    # one — this arm must not swallow it just because it moved earlier.
+    echo "VERDICT: problem — PostToolUse has fired but no save has completed yet; check hook-errors.log above$_ASSUMED_NOTE"
 elif [ "$_SESSION_END_STATE" = "not-fired" ]; then
     echo "VERDICT: problem — SessionEnd has never fired despite prior sessions ending in this project; the last-chance flush is not running (see above)$_ASSUMED_NOTE"
 elif [ "$_POST_TOOL_FIRED" -eq 1 ] && [ -n "$_LAST_SAVE_TIME" ]; then
@@ -784,5 +882,11 @@ elif [ -n "$_SESSION_DIR" ] && [ ! -d "$_SESSION_DIR" ]; then
 elif [ "$_POST_TOOL_FIRED" -eq 0 ]; then
     echo "VERDICT: problem — PostToolUse has never fired; restart Claude Code (see REMEDIATION above)$_ASSUMED_NOTE"
 else
+    # Unreachable in practice — every combination of $_POST_TOOL_FIRED and
+    # $_LAST_SAVE_TIME is now caught by an arm above (0 by the last elif,
+    # 1-with-no-save by the promoted arm near the top, 1-with-a-save by
+    # "capture is working") — kept as a defensive fallback rather than
+    # deleted, so a future arm added between them without re-auditing the
+    # whole ladder still prints something instead of falling off the end.
     echo "VERDICT: problem — PostToolUse has fired but no save has completed yet; check hook-errors.log above$_ASSUMED_NOTE"
 fi
