@@ -31,16 +31,20 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HOOK = REPO_ROOT / "scripts" / "session-start-hook.sh"
 
-# A line that writes literal text to a stream: `echo "..."` or `printf ...`
-# that is NOT redirected into a file path. Redirection to a file (a notice
+# A line that writes literal text to a stream: `echo "..."` / `printf ...`,
+# or a call to this file's own `log()` helper (scripts/log.sh) -- log()
+# normally appends to $MEMORY_LOG_FILE, but falls back to a bare `echo ...
+# >&2` when that file cannot be written (a degraded/read-only store, exactly
+# the state this hook is built to tolerate), so a `log` call is one failed
+# write away from being a stream write too. Redirection to a file (a notice
 # dropped for a LATER hook to read and print, e.g. capture-gap-notice) is
 # still eventually a printed line -- session-start-hook.sh's own scope ends
-# at what IT emits, and the four originally-reported lines are exactly the
-# ones this file itself sends to a stream or hands to a sibling hook to
-# print unchanged; anything genuinely written only for machine consumption
-# (a delivery record, a config dump) is out of scope for this file-wide rule
-# and is not touched here.
-_ECHO_OR_PRINTF = re.compile(r'^\s*(echo|printf)\b')
+# at what IT emits, and the originally-reported lines are exactly the ones
+# this file itself sends to a stream, hands to a sibling hook to print
+# unchanged, or could fall back to stderr for; anything genuinely written
+# only for machine consumption (a delivery record, a config dump) is out of
+# scope for this file-wide rule and is not touched here.
+_ECHO_OR_PRINTF = re.compile(r'^\s*(echo|printf|log)\b')
 _COMMENT_LINE = re.compile(r'^\s*#')
 
 

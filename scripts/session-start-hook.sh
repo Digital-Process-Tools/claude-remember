@@ -576,7 +576,7 @@ _remember_write_case_divergence() {
             # nobody reads. It is still never rendered as agreement anywhere
             # that reports it; `/remember:doctor` says it every time.
             [ "$_old" = "$_body" ] && return 0
-            log "case-divergence" "could not check whether this store is known by a second spelling (disk=$REMEMBER_CASE_DISK_STATE${REMEMBER_CASE_DISK_REASON:+/$REMEMBER_CASE_DISK_REASON} git=$REMEMBER_CASE_GIT_STATE${REMEMBER_CASE_GIT_REASON:+/$REMEMBER_CASE_GIT_REASON}) — this is not a report that they agree"
+            log "case-divergence" "could not check whether this store is known by a second spelling (disk=$REMEMBER_CASE_DISK_STATE${REMEMBER_CASE_DISK_REASON:+/$REMEMBER_CASE_DISK_REASON} git=$REMEMBER_CASE_GIT_STATE${REMEMBER_CASE_GIT_REASON:+/$REMEMBER_CASE_GIT_REASON}) -- this is not a report that they agree"
             ;;
     esac
     return 0
@@ -756,7 +756,7 @@ if [ -z "$CURRENT_SESSION_ID" ]; then
     # (#144, #263, #266). doctor reports the marker.
     printf '%s\n' "the SessionStart payload carried no usable session_id" \
         > "$CAPTURE_SKIPPED" 2>/dev/null || true
-    log "hook" "session-start: capture-gap check skipped — no session_id on stdin"
+    log "hook" "session-start: capture-gap check skipped -- no session_id on stdin"
 else
     rm -f "$CAPTURE_SKIPPED" 2>/dev/null || true
 
@@ -1043,10 +1043,18 @@ fi
 #     doubt the safe direction is the one #221 already chose for the
 #     handoff itself: keep, never guess-delete.
 #
-# Legacy (un-namespaced) mode never reaches here: the glob below only ever
-# matches "remember.delivered.<something>", and the shared-mode file is
-# exactly "remember.delivered" with no trailing dot.
-if [ -n "$PER_SESSION_HANDOFF" ] && [ -d "$SESSIONS_DIR" ] && [ -d "$REMEMBER_DIR/tmp" ]; then
+# Runs regardless of THIS session's own handoff_mode -- not gated on
+# $PER_SESSION_HANDOFF. Gating it there was considered and rejected: a
+# record left behind during a PAST per_session period does not stop
+# existing the moment a user switches handoff_mode back to "single", and a
+# sweep that only ran while per_session was the CURRENT setting would leak
+# exactly those records forever -- the same accumulation this fix exists to
+# stop, just gated behind a config toggle instead of eliminated.
+#
+# Legacy (un-namespaced) mode never matches the glob below regardless: it
+# only ever matches "remember.delivered.<something>", and the shared-mode
+# file is exactly "remember.delivered" with no trailing dot.
+if [ -d "$SESSIONS_DIR" ] && [ -d "$REMEMBER_DIR/tmp" ]; then
     for _remember_stale_record in "$REMEMBER_DIR"/tmp/remember.delivered.*; do
         [ -f "$_remember_stale_record" ] || continue
         _remember_stale_id="${_remember_stale_record##*/remember.delivered.}"

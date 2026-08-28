@@ -61,6 +61,13 @@ def _sandbox(tmp_path: Path):
     return project, home, remember_dir, sessions_dir
 
 
+def _set_handoff_mode(home: Path, mode: str) -> None:
+    cfg_path = home / ".remember" / "config.json"
+    cfg = json.loads(cfg_path.read_text())
+    cfg["handoff_mode"] = mode
+    cfg_path.write_text(json.dumps(cfg))
+
+
 def _payload(session_id: str) -> str:
     return json.dumps({
         "session_id": session_id,
@@ -186,3 +193,32 @@ class TestStaleDeliveryRecordsArePruned:
             "a session's own just-written delivery record was removed by "
             "its own invocation's sweep"
         )
+
+    def test_records_left_over_after_switching_back_to_single_mode_are_still_pruned(self, tmp_path):
+        """The sweep must not be gated on THIS session's own handoff_mode.
+        A record left behind during an earlier per_session period does not
+        stop existing just because the user later switched handoff_mode
+        back to "single" -- a sweep gated on the current mode would leak
+        exactly those records forever, reproducing #373 under a config
+        toggle instead of fixing it."""
+        project, home, remember_dir, sessions_dir = _sandbox(tmp_path)
+
+        _session_start(project, home, "sess-aaa")
+        record_a = _seed_delivery_record(remember_dir, "sess-aaa")
+        _session_start(project, home, "sess-aaa")
+        assert record_a.exists(), "setup did not produce a delivery record"
+
+        # sess-aaa's transcript is gone, and the user has switched back to
+        # single mode before the next session starts.
+        _set_handoff_mode(home, "single")
+        (remember_dir / "remember.md").write_text("Shared note.\n")
+
+        _session_start(project, home, "sess-bbb")
+
+        assert not record_a.exists(), (
+            "a stale per-session delivery record survived a session start "
+            "under handoff_mode: \"single\" -- the sweep must not be gated "
+            "on the CURRENT session's own mode, only on whether the "
+            "session in question is confirmed over"
+        )
+        assert sessions_dir.is_dir()  # sanity: the fixture itself is sound
