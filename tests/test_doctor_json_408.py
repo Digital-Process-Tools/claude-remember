@@ -105,6 +105,40 @@ def test_json_mode_names_an_assumed_project_dir_rather_than_hiding_it(tmp_path):
     assert "remember_dir" in payload, payload
 
 
+def test_json_mode_escapes_control_bytes_other_than_newline(tmp_path):
+    """A resolved path is not guaranteed to be free of raw control bytes
+    (a tab, a carriage return) just because it is unusual -- POSIX
+    filesystems allow them. `_json_escape()` handled `\\`, `"` and `\\n`
+    but passed every other C0 control byte through unescaped, which is
+    invalid inside a JSON string literal (RFC 8259) and breaks any real
+    parser a caller points at this output -- exactly the population this
+    surface exists to serve.
+    """
+    home, _project_dir, _remember = _project(tmp_path)
+    odd_project = tmp_path / "project-with-a-tab-\there"
+    odd_remember = odd_project / ".remember"
+    (odd_remember / "tmp").mkdir(parents=True)
+
+    result = _run_json(home, odd_project, odd_remember)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["state"] == "resolved", payload
+    # json.loads succeeding is the real assertion -- a raw control byte in
+    # the string literal is what json.decoder.JSONDecodeError caught before
+    # this fix (reproduced separately as the red step). The fix flattens
+    # every control byte to a space (the same lossy-but-valid choice this
+    # function already made for a literal newline before this fix), so
+    # "tab-here" survives as "tab- here" -- word-separated, not silently
+    # dropped, which is what a fix that stripped the byte instead of
+    # encoding it would also produce as EMPTY space (no separator at all).
+    assert "tab- here" in payload["project_dir"], (
+        "the tab was dropped rather than replaced with a separator -- this "
+        "assertion is what tells that apart from merely deleting the byte:\n"
+        + result.stdout
+    )
+
+
 def test_json_mode_reports_could_not_resolve_rather_than_an_empty_object(tmp_path):
     """The third state: resolution genuinely fails (REMEMBER_NESTED_SUMMARIZER
     forces resolve-paths.sh's own soft-fail path, the same one the human

@@ -107,8 +107,21 @@ if [ "${1:-}" = "--json" ]; then
 
     # sed order matters: backslashes escaped before quotes, else a quote
     # introduced by the first substitution would be re-escaped by the second.
+    # `tr '[:cntrl:]' ' '` runs LAST, after both sed passes, and flattens every
+    # C0 control byte -- not only the newline the original version of this
+    # handled -- to a plain space. A resolved path is not guaranteed to be
+    # free of a raw tab or carriage return just because it is unusual (POSIX
+    # filesystems allow both), and passing one through unescaped produces a
+    # JSON string literal with a literal control character in it, which is
+    # invalid per RFC 8259 and breaks any real parser this output exists to
+    # be read by (#408 self-review). `[:cntrl:]` is a POSIX bracket
+    # expression class, supported identically by GNU and BSD `tr`, and `tr`
+    # operates on the whole byte stream rather than `sed`'s per-line records
+    # -- the one difference that matters here, since a literal embedded
+    # newline needs collapsing across what `sed` would otherwise see as two
+    # separate lines.
     _json_escape() {
-        printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' ' '
+        printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '[:cntrl:]' ' '
     }
 
     if [ "$_JSON_RESOLVE_STATUS" -ne 0 ]; then
