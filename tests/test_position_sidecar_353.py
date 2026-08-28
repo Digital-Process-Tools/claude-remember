@@ -303,6 +303,83 @@ def test_a_sidecar_past_the_transcripts_own_line_count_is_a_loud_disagreement(
     )
 
 
+def test_an_orphaned_sidecar_within_bounds_is_not_trusted_and_falls_back(
+    tmp_path: Path,
+):
+    """#403: the bound in the test above only rules out a value the sidecar
+    could never legitimately reach -- it says nothing about whether
+    last-save.json still remembers this session at all. The eviction cleanup
+    in pipeline/shell.py's cmd_save_position (the loop right after the
+    sidecar write) is best-effort by its own comment -- a failed unlink
+    leaves an orphaned sidecar that still falls well inside CURRENT_LINES,
+    which the bound in the test above cannot catch. That sidecar must be
+    rejected too: its session id is no longer a key in last-save.json's own
+    "sessions" map, which is the store this feature's log lines already
+    claim (#403) to consult. MUST fall back to read-position and MUST log
+    the disagreement, exactly like the out-of-range and non-numeric cases
+    above."""
+    home, project, remember = _project(tmp_path, jsonl_lines=60,
+                                        session_id=SESSION_A)
+    # last-save.json remembers only SESSION_B -- SESSION_A has been evicted
+    # (or never made it in), yet its sidecar survives (the failed-unlink
+    # case #403 describes) and is well within this run's own 60 lines.
+    _write_last_save(remember, SESSION_B, 40)
+    _write_sidecar(remember, SESSION_A, "30")
+    env = _env(tmp_path, home, project)
+    _prime(env)
+
+    _result, lines = _traced_run(env, tmp_path, "sidecar-orphaned")
+    _reap(remember)
+
+    assert "python3" in _cmds(lines) or "python" in _cmds(lines), (
+        "MUST-FIRE control: a sidecar whose session is absent from "
+        "last-save.json must fall back to read-position rather than being "
+        "trusted just because its value happens to fit under CURRENT_LINES. "
+        "Spawned:\n  " + "\n  ".join(lines)
+    )
+    body = _logged(remember)
+    assert "disagrees with last-save.json" in body, (
+        "an orphaned sidecar (its session absent from last-save.json) must "
+        "be logged as loudly as an out-of-range or non-numeric one -- all "
+        "three are the SAME acceptance criterion (#403 tightening #353): a "
+        "sidecar disagreement is a loud finding. Log tail: "
+        + repr(body[-2000:])
+    )
+
+
+def test_a_sidecar_whose_session_is_still_in_last_save_json_is_trusted(
+    tmp_path: Path,
+):
+    """The positive control for the test above: an in-bound sidecar whose
+    session id IS still a key in last-save.json's "sessions" map must keep
+    being trusted and must NOT spawn read-position -- without this, "the
+    orphan is rejected" would also pass if #403's fix rejected every sidecar
+    unconditionally."""
+    home, project, remember = _project(tmp_path, jsonl_lines=60,
+                                        session_id=SESSION_A)
+    _write_last_save(remember, SESSION_A, 30)
+    _write_sidecar(remember, SESSION_A, "30")
+    env = _env(tmp_path, home, project)
+    _prime(env)
+
+    _result, lines = _traced_run(env, tmp_path, "sidecar-still-present")
+    _reap(remember)
+
+    assert "python3" not in _cmds(lines) and "python" not in _cmds(lines), (
+        "a sidecar whose session is still present in last-save.json did "
+        "not stop the hook from spawning python for read-position. "
+        "Spawned:\n  " + "\n  ".join(lines)
+    )
+    assert not (remember / "tmp" / "save-session.pid").exists(), (
+        "delta should be 30 against a threshold of 50 -- no save should "
+        "have been forked"
+    )
+    assert "disagrees with last-save.json" not in _logged(remember), (
+        "NEGATIVE CONTROL: a sidecar whose session is still present in "
+        "last-save.json must not log a disagreement"
+    )
+
+
 def test_a_non_numeric_sidecar_is_not_trusted_and_falls_back(tmp_path: Path):
     """A garbled write (partial, or hand-edited) must not become a silent 0
     or a silent anything -- fall back to the authoritative source."""

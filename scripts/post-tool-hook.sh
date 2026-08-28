@@ -539,8 +539,45 @@ if [ -n "$SIDECAR" ] && [ -f "$SIDECAR" ]; then
             if [ "$((10#$_SIDECAR_LINE))" -gt "$CURRENT_LINES" ]; then
                 log "hook" "WARNING: sidecar $SIDECAR reports position $_SIDECAR_LINE, past this run's own $CURRENT_LINES transcript lines — disagrees with last-save.json, falling back to read-position"
             else
-                LAST_LINE=$((10#$_SIDECAR_LINE))
-                SIDECAR_TRUSTED=1
+                # #403: the bound above only rules out a value the sidecar
+                # could never legitimately reach — it says nothing about
+                # whether last-save.json still remembers this session at
+                # all. The evicted-sidecar cleanup in pipeline/shell.py's
+                # cmd_save_position (the loop right after the #353 sidecar
+                # write) is best-effort by its own comment: a failed unlink
+                # leaves an orphaned sidecar that still falls well inside
+                # CURRENT_LINES, which the bound above cannot see. Trusting
+                # it would resume from a position the authoritative store no
+                # longer recognises — #140's duplicate-resummarization bug,
+                # reintroduced through this mirror. So the sidecar is
+                # trusted only when this run's own session id is still a
+                # key in last-save.json's "sessions" map, which is the
+                # comparison the two log lines here already claim to make.
+                #
+                # Read via bash's fork-free `$(< file)` (a single
+                # redirection as the whole command substitution — bash
+                # reads the file directly, no subprocess, and it traces as
+                # no separate xtrace line at all) rather than a `read` loop
+                # or a spawn, so the hot path this feature exists to keep
+                # cheap stays cheap. The membership test is a literal
+                # substring match on `"<id>":`, not a JSON parse — safe
+                # because SESSION_ID was already filtered to
+                # [A-Za-z0-9._-]+ above (no quote or backslash it could
+                # inject) and the trailing `":` anchors the match to a full
+                # key, so "sess-1" cannot false-match a stored "sess-10".
+                _LAST_SAVE_CONTENT=""
+                if [ -f "$LAST_SAVE_FILE" ]; then
+                    _LAST_SAVE_CONTENT=$(< "$LAST_SAVE_FILE")
+                fi
+                case "$_LAST_SAVE_CONTENT" in
+                    *\"$SESSION_ID\":*)
+                        LAST_LINE=$((10#$_SIDECAR_LINE))
+                        SIDECAR_TRUSTED=1
+                        ;;
+                    *)
+                        log "hook" "WARNING: sidecar $SIDECAR's session $SESSION_ID is absent from last-save.json — disagrees with last-save.json, falling back to read-position"
+                        ;;
+                esac
             fi
             ;;
     esac

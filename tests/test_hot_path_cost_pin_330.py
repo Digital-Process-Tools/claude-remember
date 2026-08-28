@@ -450,11 +450,14 @@ def test_a_defeated_sidecar_trips_the_read_position_spawn_check(tmp_path):
     it passes on the shipped hook.
     """
     plugin = _scratch_plugin(tmp_path)
+    # #403 moved this pair one level deeper (a case arm gating trust on
+    # last-save.json membership, not just the CURRENT_LINES bound), so the
+    # anchor's indentation tracks that -- 24 spaces, not 16.
     _patch(plugin,
-           '                LAST_LINE=$((10#$_SIDECAR_LINE))\n'
-           '                SIDECAR_TRUSTED=1\n',
-           '                LAST_LINE=$((10#$_SIDECAR_LINE))\n'
-           '                : # SIDECAR_TRUSTED deliberately not set (#395 regression fixture)\n')
+           '                        LAST_LINE=$((10#$_SIDECAR_LINE))\n'
+           '                        SIDECAR_TRUSTED=1\n',
+           '                        LAST_LINE=$((10#$_SIDECAR_LINE))\n'
+           '                        : # SIDECAR_TRUSTED deliberately not set (#395 regression fixture)\n')
     home, project, remember = _project_with_prior_save(tmp_path)
     env = _env(tmp_path, home, project, plugin)
     _prime(env, plugin)
