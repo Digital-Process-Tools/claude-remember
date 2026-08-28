@@ -352,21 +352,30 @@ done
 # 2-day-old store with one ordinary save 5 minutes ago reads as installed 5
 # minutes ago). $REMEMBER_DIR/.gitignore is what this reads instead:
 # bootstrap-dirs.sh writes it exactly once, gated on
-# `[ -f "$REMEMBER_DIR/.gitignore" ] || …` — never rewritten after — so
-# unlike every other path under REMEMBER_DIR it is untouched by ordinary
-# hook activity, and nothing else in this codebase writes to it (grepped).
-# Its age is only ever an over-estimate of a session predating install if the
-# file itself has somehow been touched since, which nothing here does. In
-# EXTERNAL storage mode (REMEMBER_DIR outside PROJECT_DIR) it is never
-# written at all — "no gitignore to write", per bootstrap-dirs.sh's own
-# comment — so this baseline is unavailable there and the arm below can only
-# ever reach WARN for an external-mode store, never FAIL, until a per-project
-# marker that also exists in that mode is added. That is a known gap, not
-# silently accepted: it is the same "no reliable precondition, so WARN is the
-# honest answer" outcome the issue itself sanctions, scoped to the one layout
-# where no write-once marker exists yet. Absent or unreadable for any reason,
-# no transcript can be attributed to "after install", which is the safe
-# default: fall through to the third state below rather than guess.
+# `[ -f "$REMEMBER_DIR/.gitignore" ] || …`, and unlike every other path under
+# REMEMBER_DIR it is never rewritten by ordinary hook activity.
+#
+# It is NOT permanently stable, though (caught in review): a legacy
+# (in-project) store that is later migrated to external mode and backed up
+# with git has this exact file deleted by
+# hooks.d/after_save/50-git-backup.sh's own cleanup of the migration
+# artifact ("removed per-slug .gitignore (legacy bootstrap artifact)") the
+# first time a backed-up save runs, and bootstrap-dirs.sh's write is gated on
+# the store being inside the project (`case "$REMEMBER_DIR" in
+# "$_mem_proj"/*)`), which is false once external, so it is never recreated.
+# From that point this baseline is permanently unavailable for that store —
+# the same practical limit EXTERNAL storage mode already has from the start
+# (bootstrap-dirs.sh never writes this file there either — "no gitignore to
+# write" — so the baseline never exists to begin with), reached here via
+# migration instead. Either way the arm below can only ever reach WARN, never
+# FAIL, for a store in that state, until a marker survives that cleanup too
+# (filed as a follow-up rather than fixed here: the fix touches
+# hooks.d/after_save/50-git-backup.sh, outside this arm's own file). That is
+# a known, documented gap, not a silently accepted one — the same "no
+# reliable precondition, so WARN is the honest answer" outcome the issue
+# itself sanctions. Absent or unreadable for any reason, no transcript can be
+# attributed to "after install", which is the safe default: fall through to
+# the third state below rather than guess.
 _STORE_INSTALL_AGE=$(_file_age_seconds "$REMEMBER_DIR/.gitignore")
 
 _SESSION_END_STATE="unknown"
