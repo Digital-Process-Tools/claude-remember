@@ -280,6 +280,8 @@ A store that could never be created at all (a read-only or otherwise unwritable 
 
 Prints resolved paths, detected tools, storage mode, whether the session directory Claude Code actually created matches the slug the plugin computes, when the last successful save happened, whether `PostToolUse` has ever fired for this project, and whether `SessionEnd` -- the last-chance flush -- has ever fired ([#370](https://github.com/Digital-Process-Tools/claude-remember/issues/370)). Each line is prefixed `OK` / `WARN` / `FAIL`, ending in a one-line verdict.
 
+The `SessionEnd` check only counts a quiet transcript as evidence once it is newer than this project's own `.remember` store -- a transcript quiet since before the store existed cannot be proof `SessionEnd` failed to fire, since the hook was never registered for it. Installing into (or upgrading in) a project with pre-existing Claude Code history therefore reads correctly as "nothing has had the chance to prove or disprove this yet", not as a false `problem` ([#392](https://github.com/Digital-Process-Tools/claude-remember/issues/392)).
+
 Available on plugin installs, which auto-discover `commands/`. If you set the plugin up manually into `<project>/.claude/remember/`, that discovery does not apply — copy `commands/doctor.md` into `.claude/commands/`, or just run the script directly: `bash .claude/remember/scripts/doctor.sh`.
 
 Reach for it whenever memory is not appearing and nothing says why — the two silent failures it names outright are a slug mismatch ([#144](https://github.com/Digital-Process-Tools/claude-remember/issues/144)) and hooks that were never registered ([#200](https://github.com/Digital-Process-Tools/claude-remember/issues/200)).

@@ -22,15 +22,33 @@ Three states, not two, and the fixtures below pin all three:
   * at least one session-end log exists -> fired, OK, and it must not appear
     as a problem (the must-fire case a silence assertion needs a positive
     control for);
-  * no such log, but Claude Code's own transcript directory shows more than
-    one session has ever existed for this project -- meaning a session other
-    than the one running doctor.sh itself finished -- -> the hook had the
-    chance to fire and did not, FAIL, and it has to reach the VERDICT line;
-  * no such log, and nothing shows a prior session ever finished (0 or 1
-    transcript, the "just installed" and "mid-first-session" shapes) -> the
-    third state the issue calls out by name: this must render as neither of
-    the other two. A check that answered FAIL here would flag every fresh
-    install as broken before it had ever had the chance to prove itself.
+  * no such log, but a transcript OTHER than the one running doctor.sh right
+    now went quiet AFTER remember's own store started existing for this
+    project -> the hook had the chance to fire and did not, FAIL, and it has
+    to reach the VERDICT line;
+  * no such log, and nothing shows a prior session, attributable to this
+    project's remember store, ever finished -- either because 0-or-1
+    transcript exists at all (the "just installed" and "mid-first-session"
+    shapes), or because every quiet transcript PREDATES the store itself
+    (#392 -- prior Claude Code history in a project remember was only just
+    installed into) -> the third state the issue calls out by name: this
+    must render as neither of the other two. A check that answered FAIL here
+    would flag every fresh install, and every upgrade into a project with
+    history, as broken before it ever had the chance to prove itself.
+
+#392 added the third bullet's second half. Only *quietness* was being
+measured -- a quiet transcript predating REMEMBER_DIR's own existence is
+indistinguishable, on quietness alone, from one whose session ended after the
+hook was installed and simply failed to fire. REMEMBER_DIR's own mtime (set
+once, the first time any hook bootstraps this project's store -- see
+bootstrap-dirs.sh; doctor.sh itself never creates it, see its header) is the
+earliest install-time signal doctor.sh can read without adding new
+instrumentation elsewhere, so a transcript is only evidence of a genuine
+SessionEnd failure when it went quiet no earlier than that. Tests that mean
+to pin a GENUINE failure below now backdate REMEMBER_DIR further into the
+past than the transcript, precisely to establish that precondition -- a
+transcript backdated past an unbackdated (i.e. "just now") store is, by
+construction, the #392 false-positive shape instead.
 """
 
 from __future__ import annotations
@@ -66,7 +84,9 @@ def _project(tmp_path: Path):
     return home, project, remember, session_dir
 
 
-def _run(home: Path, project: Path, remember: Path) -> subprocess.CompletedProcess:
+def _run(
+    home: Path, project: Path, remember: Path, extra_env: dict | None = None,
+) -> subprocess.CompletedProcess:
     env = {
         **os.environ,
         "HOME": str(home),
@@ -74,6 +94,7 @@ def _run(home: Path, project: Path, remember: Path) -> subprocess.CompletedProce
         "CLAUDE_PLUGIN_ROOT": str(REPO_ROOT),
         "REMEMBER_DIR": str(remember),
         "_LIB_MEMORY_DIR_LOADED": "1",
+        **(extra_env or {}),
     }
     return subprocess.run(
         ["bash", str(DOCTOR)], env=env,
@@ -89,9 +110,13 @@ def _verdict(stdout: str) -> str:
 
 
 def _backdate(path: Path, seconds: int) -> None:
-    """Set a file's mtime `seconds` in the past -- doctor.sh's staleness
+    """Set a path's mtime `seconds` in the past -- doctor.sh's staleness
     check (>900s quiet) is how it tells "a prior session ended" apart from
-    "another window on this project is open right now"."""
+    "another window on this project is open right now", and (#392) whether a
+    transcript's mtime precedes REMEMBER_DIR's own is how it tells a session
+    that ended before remember was installed apart from one that ended after.
+    Works on directories as well as files -- `os.utime` does not care.
+    """
     when = time.time() - seconds
     os.utime(path, (when, when))
 
@@ -116,12 +141,20 @@ def test_one_fresh_transcript_alone_is_still_the_third_state(tmp_path):
     assert "SessionEnd" not in _verdict(result.stdout)
 
 
-def test_one_stale_transcript_alone_is_enough_to_fail(tmp_path):
+def test_one_stale_transcript_after_install_is_enough_to_fail(tmp_path):
     """The other side of that boundary: ONE transcript is sufficient
-    evidence once it has gone quiet -- the count never mattered, only
-    whether something demonstrably stopped being active.
+    evidence once it has gone quiet, PROVIDED it went quiet after remember's
+    own store started existing here -- the count never mattered, only
+    whether something demonstrably stopped being active while the hook could
+    have serviced it.
+
+    REMEMBER_DIR is backdated further than the transcript so the transcript
+    is unambiguously attributable to a session that ran after the store (and
+    so the hook) existed for this project -- the #392 precondition this test
+    exists to pin now that quietness alone is not accepted as proof.
     """
     home, project, remember, session_dir = _project(tmp_path)
+    _backdate(remember, 7200)
     stale = session_dir / "aaaa-quiet-session.jsonl"
     stale.write_text("{}\n", encoding="utf-8")
     _backdate(stale, 3600)
@@ -130,8 +163,8 @@ def test_one_stale_transcript_alone_is_enough_to_fail(tmp_path):
 
     assert result.returncode == 0, result.stderr
     assert "FAIL SessionEnd has never fired" in result.stdout, (
-        "a single stale transcript was not enough to flag SessionEnd's "
-        "silence:\n" + result.stdout
+        "a single stale transcript, quiet after the store existed, was not "
+        "enough to flag SessionEnd's silence:\n" + result.stdout
     )
     assert "SessionEnd" in _verdict(result.stdout)
 
@@ -159,27 +192,35 @@ def test_no_marker_and_no_prior_session_is_the_third_state_not_a_failure(tmp_pat
     )
 
 
-def test_no_marker_but_prior_sessions_existed_fails_and_reaches_verdict(tmp_path):
-    """The hook had its chance and stayed silent -- must fire, and must be FAIL.
+def test_prior_sessions_ended_after_install_fails_and_reaches_verdict(tmp_path):
+    """The hook had its chance, after the store existed, and stayed silent --
+    must fire, and must be FAIL.
 
-    A transcript that has gone quiet for well over 15 minutes -- backdated,
-    here, rather than genuinely two windows old -- means a session other
-    than the one running doctor.sh right now started and stopped being the
-    active one. No end-marker despite that is the exact silent failure #370
+    REMEMBER_DIR is backdated further than the transcripts, establishing the
+    #392 precondition (this project's remember store already existed when
+    the quiet session ran) that separates this from the false positive #392
+    reports. No end-marker despite that is the exact silent failure #370
     reports: a SessionEnd hook that never fires reads as a healthy install.
+
+    Paired with test_prior_cc_history_predating_the_store_is_not_a_failure
+    below, the same transcript shape with the store NOT backdated -- the
+    #392 false positive this precondition exists to rule out.
     """
     home, project, remember, session_dir = _project(tmp_path)
+    _backdate(remember, 7200)
     earlier = session_dir / "aaaa-earlier-session.jsonl"
     earlier.write_text("{}\n", encoding="utf-8")
     _backdate(earlier, 3600)
-    (session_dir / "bbbb-another-earlier-session.jsonl").write_text("{}\n", encoding="utf-8")
+    later = session_dir / "bbbb-another-earlier-session.jsonl"
+    later.write_text("{}\n", encoding="utf-8")
+    _backdate(later, 1800)
 
     result = _run(home, project, remember)
 
     assert result.returncode == 0, result.stderr
     assert "FAIL SessionEnd has never fired" in result.stdout, (
         "doctor did not flag SessionEnd's silence despite a prior session "
-        "having demonstrably ended:\n" + result.stdout
+        "having demonstrably ended after the store existed:\n" + result.stdout
     )
     assert "SessionEnd" in _verdict(result.stdout), (
         "SessionEnd's silent failure did not reach the VERDICT line:\n"
@@ -256,12 +297,19 @@ def test_session_end_failure_outranks_the_generic_capture_is_working_verdict(tmp
     healthy while SessionEnd -- a distinct hook, a distinct failure mode --
     has never fired once. Reaching "capture is working" first would be
     exactly the invisibility #370 reports, just moved one line down.
+
+    REMEMBER_DIR is backdated past the transcripts so this stays the genuine
+    -fail shape rather than sliding into the #392 false positive below, whose
+    whole point is that a healthy PostToolUse verdict is the CORRECT verdict
+    when the quiet transcripts predate the store.
     """
     home, project, remember, session_dir = _project(tmp_path)
+    _backdate(remember, 7200)
     earlier = session_dir / "aaaa-earlier-session.jsonl"
     earlier.write_text("{}\n", encoding="utf-8")
     _backdate(earlier, 3600)
     (session_dir / "bbbb-another-earlier-session.jsonl").write_text("{}\n", encoding="utf-8")
+    _backdate(session_dir / "bbbb-another-earlier-session.jsonl", 1800)
     (remember / "tmp" / "capture-alive").write_text("sess-1", encoding="utf-8")
     (remember / "tmp" / "last-save.json").write_text(
         '{"session": "sess-1", "line": 500}', encoding="utf-8")
@@ -273,4 +321,131 @@ def test_session_end_failure_outranks_the_generic_capture_is_working_verdict(tmp
         "PostToolUse capture being healthy masked SessionEnd's own silent "
         "failure instead of the specific cause outranking the general "
         "success line:\n" + result.stdout
+    )
+
+
+def test_prior_cc_history_predating_the_store_is_not_a_failure(tmp_path):
+    """#392, row 1: a fresh install into a project with prior Claude Code
+    history must not read SessionEnd as broken, and must not displace the
+    correct fresh-install remediation.
+
+    REMEMBER_DIR is NOT backdated (it is created "now", by the fixture,
+    exactly as bootstrap-dirs.sh would on the very first hook invocation),
+    while the transcripts are backdated 3 days -- prior history the plugin
+    had nothing to do with. Nothing has been captured either (no
+    capture-alive, no last-save): PostToolUse has genuinely never fired, and
+    that is the actionable finding this report must surface -- not a
+    SessionEnd verdict about sessions the hook was never installed for.
+
+    Paired with test_prior_sessions_ended_after_install_fails_and_reaches_verdict
+    above, the same transcript shape with the store genuinely predating them.
+    """
+    home, project, remember, session_dir = _project(tmp_path)
+    for name in ("aaaa-old-a.jsonl", "bbbb-old-b.jsonl", "cccc-old-c.jsonl"):
+        f = session_dir / name
+        f.write_text("{}\n", encoding="utf-8")
+        _backdate(f, 3 * 24 * 3600)
+
+    result = _run(home, project, remember)
+
+    assert result.returncode == 0, result.stderr
+    assert "FAIL SessionEnd" not in result.stdout, (
+        "prior Claude Code history predating this project's remember store "
+        "was read as SessionEnd's own silent failure:\n" + result.stdout
+    )
+    assert "SessionEnd" not in _verdict(result.stdout), (
+        "SessionEnd's silence on history it could never have serviced "
+        "reached the VERDICT line:\n" + result.stdout
+    )
+    assert _verdict(result.stdout).startswith(
+        "VERDICT: problem — PostToolUse has never fired"
+    ), (
+        "a fresh install with prior CC history and nothing captured did not "
+        "surface the correct, actionable PostToolUse remediation:\n"
+        + result.stdout
+    )
+
+
+def test_healthy_capture_with_prior_history_reports_capture_is_working(tmp_path):
+    """#392, row 2: a demonstrably healthy install must not read as `problem`
+    merely because the project has prior Claude Code history and no session
+    has ended since remember was installed.
+
+    Same predating-history shape as the test above, but PostToolUse HAS
+    fired and a save HAS completed -- the report's job is to say so, not to
+    manufacture a SessionEnd problem out of history the hook was never
+    installed for.
+    """
+    home, project, remember, session_dir = _project(tmp_path)
+    for name in ("aaaa-old-a.jsonl", "bbbb-old-b.jsonl", "cccc-old-c.jsonl"):
+        f = session_dir / name
+        f.write_text("{}\n", encoding="utf-8")
+        _backdate(f, 3 * 24 * 3600)
+    (remember / "tmp" / "capture-alive").write_text("sess-1", encoding="utf-8")
+    (remember / "tmp" / "last-save.json").write_text(
+        '{"session": "sess-1", "line": 500}', encoding="utf-8")
+
+    result = _run(home, project, remember)
+
+    assert result.returncode == 0, result.stderr
+    assert "FAIL SessionEnd" not in result.stdout, (
+        "a healthy capture with prior CC history was read as a SessionEnd "
+        "failure:\n" + result.stdout
+    )
+    assert _verdict(result.stdout).startswith("VERDICT: capture is working"), (
+        "a demonstrably healthy install with prior CC history did not "
+        "reach the plain success verdict:\n" + result.stdout
+    )
+
+
+def test_an_unreadable_transcript_mtime_is_not_counted_as_evidence(tmp_path):
+    """#392, defect 2: an unreadable mtime was counted into the transcript
+    total and then `continue`d past the staleness question, so the WARN
+    made a claim ("N transcript(s) ... none quiet long enough to call
+    finished") about a file whose quietness was never established.
+
+    `[ -f "$_tf" ]` is a bash BUILTIN -- its own stat() syscall, unaffected
+    by PATH -- so it still reports the file present and regular. Only
+    `_file_age_seconds`'s calls to the external `stat` command go through
+    PATH, so a shim that fails for exactly this one filename (and delegates
+    every other call to the real `stat`, including the ones the SessionEnd
+    baseline and PostToolUse marker checks make) reproduces "found, but its
+    age could not be read" deterministically -- the same third state
+    already handled correctly for the PostToolUse marker 60 lines above
+    this arm in doctor.sh.
+    """
+    home, project, remember, session_dir = _project(tmp_path)
+    target = session_dir / "aaaa-unreadable.jsonl"
+    target.write_text("{}\n", encoding="utf-8")
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    shim = bindir / "stat"
+    shim.write_text(
+        "#!/bin/sh\n"
+        'for _a in "$@"; do\n'
+        '  case "$_a" in\n'
+        f'    */{target.name}) exit 1 ;;\n'
+        "  esac\n"
+        "done\n"
+        'exec /usr/bin/stat "$@"\n'
+    )
+    shim.chmod(0o755)
+
+    result = _run(home, project, remember,
+                  {"PATH": f"{bindir}:{os.environ['PATH']}"})
+
+    assert result.returncode == 0, result.stderr
+    assert "FAIL SessionEnd" not in result.stdout, (
+        "a transcript whose mtime could not be read was treated as proof a "
+        "prior session went quiet:\n" + result.stdout
+    )
+    assert "SessionEnd" not in _verdict(result.stdout), (
+        "an unreadable transcript reached the VERDICT line as though its "
+        "quietness had been established:\n" + result.stdout
+    )
+    assert "could not be read" in result.stdout, (
+        "a transcript whose age could not be read was folded silently into "
+        "the count instead of being named the way this file already names "
+        "an unreadable PostToolUse marker:\n" + result.stdout
     )

@@ -338,6 +338,23 @@ for _sel in "$_SESSION_END_LOG_DIR"/session-end-*.log; do
     [ -f "$_sel" ] && _SESSION_END_FIRED=1 && break
 done
 
+# Quietness alone is not proof of a genuine SessionEnd failure (#392): a
+# transcript can go quiet because a session that ran here predates this
+# project ever having a remember store, in which case no SessionEnd hook was
+# ever registered to fire for it. REMEMBER_DIR's own mtime is the earliest
+# "remember became active in this project" signal doctor.sh can read without
+# adding new marker infrastructure elsewhere — bootstrap-dirs.sh creates it
+# the first time ANY hook runs here, and this script never creates it itself
+# (read-only report; see the header), so if it exists at all its mtime traces
+# back to that first hook invocation. It only ever drifts forward with
+# ordinary use (a new today-*.md file, a migration marker) and never
+# backward, so at worst this makes the check MORE conservative as a project
+# ages — the same false-negatives-are-cheap trade the 900s staleness window
+# above already makes on purpose. Absent or unreadable, no transcript can be
+# attributed to "after install", which is the safe default: fall through to
+# the third state below rather than guess.
+_REMEMBER_DIR_AGE=$(_file_age_seconds "$REMEMBER_DIR")
+
 _SESSION_END_STATE="unknown"
 if [ "$_SESSION_END_FIRED" -eq 1 ]; then
     echo "OK   SessionEnd has fired at least once for this project ($_SESSION_END_LOG_DIR/session-end-*.log)"
@@ -345,27 +362,53 @@ if [ "$_SESSION_END_FIRED" -eq 1 ]; then
 elif [ -n "$_SESSION_DIR" ] && [ -d "$_SESSION_DIR" ]; then
     _SE_TRANSCRIPT_COUNT=0
     _SE_STALE_TRANSCRIPT_COUNT=0
+    _SE_UNREADABLE_COUNT=0
+    _SE_PREDATES_STORE_COUNT=0
     for _tf in "$_SESSION_DIR"/*.jsonl; do
         [ -f "$_tf" ] || continue
-        _SE_TRANSCRIPT_COUNT=$((_SE_TRANSCRIPT_COUNT + 1))
         _tf_age=$(_file_age_seconds "$_tf")
         case "$_tf_age" in
-            ''|*[!0-9]*) continue ;;
+            ''|*[!0-9]*)
+                # Found, but its age could not be read — the same third
+                # state this file already names for the PostToolUse marker
+                # above, not folded into either "counted" or "silently
+                # dropped" (#392, defect 2).
+                _SE_UNREADABLE_COUNT=$((_SE_UNREADABLE_COUNT + 1))
+                continue
+                ;;
         esac
+        if [ -z "$_REMEMBER_DIR_AGE" ] || [ "$_tf_age" -gt "$_REMEMBER_DIR_AGE" ]; then
+            # Quiet since before remember's own store existed for this
+            # project (or no baseline could be read at all) — this
+            # transcript's silence proves nothing about SessionEnd (#392).
+            _SE_PREDATES_STORE_COUNT=$((_SE_PREDATES_STORE_COUNT + 1))
+            continue
+        fi
+        _SE_TRANSCRIPT_COUNT=$((_SE_TRANSCRIPT_COUNT + 1))
         [ "$_tf_age" -gt 900 ] && _SE_STALE_TRANSCRIPT_COUNT=$((_SE_STALE_TRANSCRIPT_COUNT + 1))
     done
     if [ "$_SE_STALE_TRANSCRIPT_COUNT" -ge 1 ]; then
         echo "FAIL SessionEnd has never fired for this project (no $_SESSION_END_LOG_DIR/session-end-*.log),"
         echo "     though $_SE_STALE_TRANSCRIPT_COUNT prior session transcript(s) in $_SESSION_DIR"
-        echo "     have gone quiet for over 15 minutes — the last-chance flush is not"
-        echo "     running. See session-end-hook.sh's own header for the endings Claude"
-        echo "     Code does not document firing on."
+        echo "     have gone quiet for over 15 minutes since remember became active here —"
+        echo "     the last-chance flush is not running. See session-end-hook.sh's own"
+        echo "     header for the endings Claude Code does not document firing on."
         _SESSION_END_STATE="not-fired"
     else
         echo "WARN SessionEnd has not fired yet, and no prior session has demonstrably"
-        echo "     ended in this project ($_SE_TRANSCRIPT_COUNT transcript(s) in"
-        echo "     $_SESSION_DIR, none quiet long enough to call finished) — nothing has"
+        echo "     ended in this project since remember became active here"
+        echo "     ($_SE_TRANSCRIPT_COUNT transcript(s) in $_SESSION_DIR attributable to"
+        echo "     that window, none quiet long enough to call finished) — nothing has"
         echo "     had the chance to prove or disprove this yet."
+        if [ "$_SE_PREDATES_STORE_COUNT" -gt 0 ]; then
+            echo "     ($_SE_PREDATES_STORE_COUNT more transcript(s) predate this project's"
+            echo "     remember store — or no store baseline could be read — and cannot"
+            echo "     testify either way.)"
+        fi
+        if [ "$_SE_UNREADABLE_COUNT" -gt 0 ]; then
+            echo "     ($_SE_UNREADABLE_COUNT more transcript(s) whose age could not be read"
+            echo "     were excluded rather than counted.)"
+        fi
     fi
 else
     echo "WARN SessionEnd has not fired yet, and the session transcript directory is"
