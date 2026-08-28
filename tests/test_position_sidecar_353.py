@@ -48,7 +48,7 @@ pytestmark = pytest.mark.skipif(
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from pipeline.shell import cmd_save_position
+from pipeline.shell import _POSITION_SLOTS, cmd_save_position
 from tests.spawn_counting import make_shim_dir
 from tests.spawn_counting import spawns as _spawn_lines
 from tests.test_post_tool_fast_path_350 import (
@@ -147,6 +147,37 @@ def test_a_crash_between_the_two_writes_leaves_the_sidecar_stale_not_ahead(
     assert sidecar.read_text(encoding="utf-8").strip() == "10", (
         "the sidecar leapfrogged the truth after a simulated crash between "
         "the two writes -- it must be stale, at most, never ahead"
+    )
+
+
+def test_an_evicted_session_sidecar_is_removed_not_left_stale(tmp_path: Path):
+    """last-save.json bounds itself to `_POSITION_SLOTS` sessions, oldest
+    evicted first (#140) -- read-position then correctly answers 0 for an
+    evicted session. Its sidecar must not survive the eviction: a stale
+    sidecar still `<= CURRENT_LINES` on some later, unrelated transcript
+    would be silently TRUSTED by the hot path's bounds check, which cannot
+    see that last-save.json itself has already forgotten this session --
+    reintroducing exactly the #140 duplicate-resummarization bug the sidecar
+    must not bring back."""
+    remember = tmp_path / ".remember"
+    (remember / "tmp").mkdir(parents=True)
+    last_save = remember / "tmp" / "last-save.json"
+
+    cmd_save_position(str(last_save), SESSION_A, 5)
+    sidecar_a = remember / "tmp" / f"position.{SESSION_A}"
+    assert sidecar_a.exists(), "setup: A's own sidecar must exist before eviction"
+
+    for i in range(_POSITION_SLOTS):
+        cmd_save_position(str(last_save), f"filler-{i:04d}", i)
+
+    data = json.loads(last_save.read_text(encoding="utf-8"))
+    assert SESSION_A not in data["sessions"], (
+        "setup: A must actually have been evicted, or this test proves nothing"
+    )
+    assert not sidecar_a.exists(), (
+        "A's sidecar survived its own eviction from last-save.json -- a stale "
+        "position is now reachable to the hot path with nothing left to say "
+        "it no longer applies"
     )
 
 
@@ -290,3 +321,9 @@ def test_a_non_numeric_sidecar_is_not_trusted_and_falls_back(tmp_path: Path):
         + "\n  ".join(lines)
     )
     assert not (remember / "tmp" / "save-session.pid").exists()
+    body = _logged(remember)
+    assert "disagrees with last-save.json" in body, (
+        "a non-numeric sidecar must be logged as loudly as an out-of-range "
+        "one -- both are the SAME acceptance criterion (#353): a sidecar "
+        "disagreement is a loud finding. Log tail: " + repr(body[-2000:])
+    )

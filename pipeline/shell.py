@@ -274,8 +274,10 @@ def cmd_save_position(last_save_file: str, session_id: str, position: int) -> No
     # simply the first one, and a session that keeps saving keeps its slot.
     sessions.pop(session_id, None)
     sessions[session_id] = position
+    evicted: list[str] = []
     while len(sessions) > _POSITION_SLOTS:
-        del sessions[next(iter(sessions))]
+        evicted.append(next(iter(sessions)))
+        del sessions[evicted[-1]]
 
     payload = {"sessions": sessions, "session": session_id, "line": position}
     # Strict: machine-written structured JSON. session_id is an ASCII UUID
@@ -309,12 +311,29 @@ def cmd_save_position(last_save_file: str, session_id: str, position: int) -> No
     # #140 lesson last-save.json itself already learned, for the same reason:
     # two live sessions saving in the same store would otherwise stamp on
     # each other's sidecar.
-    sidecar = os.path.join(os.path.dirname(last_save_file),
-                            f"position.{session_id}")
+    sidecar_dir = os.path.dirname(last_save_file)
+    sidecar = os.path.join(sidecar_dir, f"position.{session_id}")
     sidecar_tmp = f"{sidecar}.tmp"
     with open(sidecar_tmp, "w", encoding="utf-8") as f:
         f.write(str(position))
     os.replace(sidecar_tmp, sidecar)
+
+    # An evicted session's sidecar must not outlive its entry above. Left in
+    # place, a later `read-position` for that same id correctly answers 0 --
+    # this store has forgotten it -- while the hot path's bounds check in
+    # post-tool-hook.sh only compares the sidecar's own value against the
+    # CURRENT transcript's line count, which cannot see that last-save.json
+    # itself has moved on. A stale sidecar that still happens to fall inside
+    # that bound would be trusted, resuming from a position the authoritative
+    # store no longer recognises — the exact duplicate-resummarization bug
+    # #140 fixed for last-save.json, reintroduced through its own mirror.
+    # Best-effort: a session that is gone from the store losing its sidecar a
+    # little late (a failed unlink here) is no worse than #353 not existing.
+    for evicted_id in evicted:
+        try:
+            os.remove(os.path.join(sidecar_dir, f"position.{evicted_id}"))
+        except OSError:
+            pass
 
 
 def cmd_read_position(last_save_file: str, session_id: str) -> None:

@@ -55,7 +55,11 @@
 #   installed — additionally takes the whole chain, unchanged:
 #     resolve-paths.sh, detect-tools.sh, bootstrap-dirs.sh, log.sh
 #   Binaries:
-#     python3 (for JSON parsing of last-save.json — only once a save has landed)
+#     python3 (for JSON parsing of last-save.json, via `pipeline.shell
+#              read-position` — only once a save has landed, and only when
+#              the #353 sidecar below is absent or disagrees; a save that
+#              landed and left a trustworthy sidecar spawns no interpreter
+#              at all)
 #     jq (for reading config.json — on the resolving run only)
 #
 # EXIT CODES
@@ -73,6 +77,17 @@
 #
 #       no save yet:        14 -> 6   (336 ms -> 130 ms)
 #       a save behind it:   15 -> 8   (405 ms -> 248 ms)
+#
+#   The 8-spawn "a save behind it" figure is #352's own number, on that
+#   branch, BEFORE #353's sidecar existed — every one of those runs still
+#   paid for `pipeline.shell read-position`. #353 (this file, below) adds a
+#   bash-`read`-able sidecar that a save behind it now consults with a
+#   builtin `read` instead, so a warm run whose sidecar is present and
+#   agrees no longer spawns python3 at all. REASONED, not directly
+#   re-measured end-to-end: the spawn this drops is the exact one #352
+#   measured at 2 spawns / ~118 ms on a call that takes it, so the same
+#   drop should apply here on the agreeing-sidecar path — but this file has
+#   not re-run that measurement on this change.
 #
 #   The reporter's Windows 11 / Git Bash numbers are 750-1000 ms per call
 #   against ~90 ms for the prompt hook that already replays. Per-spawn cost is
@@ -459,7 +474,7 @@ if printf '%s' "$SESSION_ID" > "$REMEMBER_DIR/tmp/capture-alive.$$" 2>/dev/null;
         || rm -f "$REMEMBER_DIR/tmp/capture-alive.$$" 2>/dev/null || true
 fi
 
-# --- Get last saved position (from last-save.json) ---
+# --- Get last saved position (from the #353 sidecar, or last-save.json) ---
 # Positions are keyed by session (issue #140), so ask for THIS session rather
 # than whether it happens to own the one slot — two live sessions used to
 # overwrite each other and re-summarize whole spans as duplicates.
