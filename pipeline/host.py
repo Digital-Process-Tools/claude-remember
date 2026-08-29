@@ -155,6 +155,17 @@ def transcript_path(env: Mapping[str, str] | None = None) -> str | None:
     from a payload written by the host: it is data, and the one thing worse
     than reconstructing a path is trusting an unusable one and reporting the
     resulting emptiness as a session with nothing in it.
+
+    NOT validated against containment or a session id (#424): this is an
+    existence check only, and ``find_session()`` returns whatever this
+    returns before its own traversal check ever runs. Callers that read
+    ``env`` from a process whose environment could hold a value THEY did not
+    set -- an inherited shell, an ambient dotfile -- must clear
+    ``TRANSCRIPT_PATH_VAR`` before it reaches them, the way
+    ``scripts/post-tool-hook.sh`` and ``scripts/user-prompt-hook.sh`` now do,
+    rather than assume this function will catch an untrusted value. It will
+    not: it exists to validate a payload the caller already trusts, not to
+    decide whether the caller should have trusted it.
     """
     env = os.environ if env is None else env
     value = (env.get(TRANSCRIPT_PATH_VAR) or "").strip()
