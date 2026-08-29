@@ -70,7 +70,7 @@
 #   agent waits for it. #227 gave user-prompt-hook.sh an env-cache fast path and
 #   deliberately skipped this one, because this hook needs config() and
 #   therefore the merged config file — which can carry a live OAuth token and is
-#   0600 with an unpredictable mktemp name, one per invocation, for that
+#   0600, fresh every invocation, for that
 #   reason (#232/#429). It still is never cached: what is
 #   replayed are the two SCALARS log.sh reads out of it.
 #
@@ -279,8 +279,8 @@ _after_post_tool_listener() {
 #
 # #227 skipped this hook for a stated reason: it needs config(), and therefore
 # the merged config file, which can carry a live OAuth token (#232) and is
-# deliberately given an unpredictable mktemp name, one per invocation, and
-# 0600 (#429). That reason still stands and the file is still
+# deliberately given a fresh name every invocation, and 0600 (#429). That
+# reason still stands and the file is still
 # never cached. What is replayed are two SCALARS log.sh resolved from it —
 # REMEMBER_SAVE_COOLDOWN and REMEMBER_DELTA_THRESHOLD — in the same 0600 file
 # that has carried REMEMBER_TZ since #227, under the same config-mtime

@@ -75,8 +75,9 @@ fi
 # parameter expansion. Nothing is written to disk. That is the whole reason
 # this was preferred over caching the merged file at a stable path: that file
 # can carry `haiku.oauth_token`, a live OAuth credential, which is why
-# lib-memory-dir.sh creates it 0600 with an unpredictable mktemp name, one per
-# invocation, under an EXIT trap (#68/#429). Collapsing
+# lib-memory-dir.sh creates it 0600, fresh every invocation, under an EXIT
+# trap (#68/#429) -- an unpredictable mktemp name until bootstrap-dirs.sh's
+# #362 relocation gives it a private-directory home instead. Collapsing
 # reads must not re-introduce that trade by the back door.
 #
 # The load happens ONCE, at source time, from log.sh's own body — not lazily
@@ -389,9 +390,9 @@ export REMEMBER_PROMPT_STAMP
 # could not replay — which is exactly why #227 skipped it.
 #
 # What is cached is these two SCALARS, never the merged config file. That file
-# can carry `haiku.oauth_token`, which is why lib-memory-dir.sh creates it 0600
-# with an unpredictable mktemp name, one per invocation, under an EXIT trap
-# (#68/#232/#429); publishing it at a stable path to save
+# can carry `haiku.oauth_token`, which is why lib-memory-dir.sh creates it
+# 0600, fresh every invocation, under an EXIT trap (#68/#232/#429);
+# publishing it at a stable path to save
 # processes is a trade this repo has already declined once and is not making by
 # the back door. A save cooldown and a line threshold are neither secret nor
 # expensive to be wrong about for one prompt.

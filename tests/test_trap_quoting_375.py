@@ -9,10 +9,11 @@ being that a project directory name is an input to the shell's parser at
 every hook exit.
 
 `scripts/lib-memory-dir.sh` uses the identical string-built-trap idiom on
-`$SYS_TMPDIR/remember-config-$$.json`, which is safe because no user names
-that path. `bootstrap-dirs.sh` relocates the same file under
-`$REMEMBER_DIR/tmp`, which in legacy mode IS the raw project path -- the
-idiom was safe, the relocation was safe, the composition was not.
+its own mktemp-named path under `$SYS_TMPDIR` (#429), which is safe
+because no user names that path. `bootstrap-dirs.sh` relocates the same
+file under `$REMEMBER_DIR/tmp`, which in legacy mode IS the raw project
+path -- the idiom was safe, the relocation was safe, the composition was
+not.
 
 Deliberately does NOT construct a project-directory name that would execute
 something if the defect were present -- an apostrophe is sufficient to pin

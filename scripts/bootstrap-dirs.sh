@@ -105,9 +105,9 @@ fi
 # --- Relocate the per-invocation merged config out of the shared OS temp
 # root, and sweep what a killed process left behind (#362) ---
 #
-# lib-memory-dir.sh (sourced above) writes REMEMBER_CONFIG to
-# $SYS_TMPDIR/remember-config-$$.json and relies solely on its own EXIT trap
-# to remove it. On Windows/Git Bash that trap does not reliably fire for this
+# lib-memory-dir.sh (sourced above) writes REMEMBER_CONFIG to an
+# unpredictable mktemp-named path under $SYS_TMPDIR (#429) and relies solely
+# on its own EXIT trap to remove it. On Windows/Git Bash that trap does not reliably fire for this
 # plugin's short-lived hook processes -- the harness kills the process rather
 # than letting it exit through a path that runs the trap -- so the file
 # leaked forever. One machine accumulated 23,908 of them directly in %TEMP%,

@@ -111,7 +111,10 @@ class TestFlushIgnoresCooldownAndMinHumanGate:
         #
         # `env["REMEMBER_CONFIG"]` is NOT the file to edit: lib-memory-dir.sh
         # regenerates it fresh, at an unpredictable `mktemp` path under
-        # `$TMPDIR` (#429), on every invocation, by merging PIPELINE_DIR/config.json (the
+        # `$TMPDIR` (#429) -- relocated by bootstrap-dirs.sh (#362) to a
+        # fresh, PID-suffixed name under REMEMBER_DIR/tmp before this hook's
+        # own save-session.sh call ever reads it -- on every invocation, by
+        # merging PIPELINE_DIR/config.json (the
         # plugin-bundled layer _make_env also wrote) with REMEMBER_DIR's own
         # config.json (absent here). The plugin-bundled layer is the one that
         # sticks.
@@ -146,8 +149,9 @@ class TestFlushIgnoresCooldownAndMinHumanGate:
         env, project, plugin, calls, sid = _make_env(tmp_path, exchanges=4, humans=1)
         # Same override as the paired --force test above, and the same reason
         # (see its comment): the plugin-bundled config layer is what sticks
-        # through lib-memory-dir.sh's merge into a fresh, unpredictably-named
-        # mktemp file every invocation (#429).
+        # through lib-memory-dir.sh's merge into a fresh mktemp file, relocated
+        # by bootstrap-dirs.sh (#362) before this hook reads it, every
+        # invocation (#429).
         _cfg_layer = plugin / "config.json"
         cfg = json.loads(_cfg_layer.read_text())
         cfg["cooldowns"]["save_seconds"] = 120
