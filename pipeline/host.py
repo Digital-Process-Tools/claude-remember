@@ -138,15 +138,25 @@ UNKNOWN = Host(name="unknown", plugin_root_vars=(), project_dir_vars=())
 # Codex sandbox.
 #
 # A third, explicit AMBIGUOUS state was considered instead of silently
-# picking one. It was rejected here because detect_host() has exactly one
-# consumer (pipeline.haiku._resolve_summarizer_provider) and that consumer's
-# own contract is already binary -- "codex under a detected Codex host,
-# claude everywhere else" -- so AMBIGUOUS would collapse into the same
-# "claude" branch as UNKNOWN with no behavioural difference from today's
-# registry-order answer; it would be a label nothing reads, not a decision
-# nothing else could reach. If a second consumer is ever added that needs to
-# treat "ambiguous" differently from "no signature at all", that is the
-# point to revisit this, not before.
+# picking one. It was rejected here because, at the time, detect_host() had
+# exactly one consumer (pipeline.haiku._choose_summarizer_provider) and that
+# consumer's own contract was already binary -- "codex under a detected
+# Codex host, claude everywhere else" -- so AMBIGUOUS would have collapsed
+# into the same "claude" branch as UNKNOWN with no behavioural difference
+# from today's registry-order answer; it would have been a label nothing
+# reads, not a decision nothing else could reach.
+#
+# #465: that consumer no longer calls detect_host() at all -- the env-var
+# signature this function reads does not survive into the process that
+# actually runs the summarizer (see pipeline/haiku.py's own note on
+# _choose_summarizer_provider), so summarizer routing now reads the
+# transcript the host wrote instead. detect_host() stays here as a correct,
+# directly-tested fact about a process's environment
+# (tests/test_codex_signature_463.py) and the tie-break comment above still
+# describes real, still-true behaviour of THIS function; it is simply no
+# longer wired to the one decision it used to gate. If a consumer that needs
+# env-based host identification is ever added back, this is the point to
+# revisit AMBIGUOUS, not before.
 REGISTRY: tuple[Host, ...] = (CLAUDE_CODE, CODEX)
 
 # Every plugin-root variable any known host uses, in registry precedence order,

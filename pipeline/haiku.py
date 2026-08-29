@@ -35,6 +35,7 @@ import subprocess
 import sys
 import tempfile
 
+from . import extract as _extract
 from . import host as _host
 from . import spawn_guard
 from .types import HaikuResult, TokenUsage
@@ -141,11 +142,37 @@ NESTED_SUMMARIZER_ENV = "REMEMBER_NESTED_SUMMARIZER"
 #
 # REMEMBER_SUMMARIZER selects the provider: "claude" (always the Claude CLI --
 # the historical, only-ever behaviour), "codex" (always `codex exec`), or
-# "auto" (the default), which asks pipeline.host.detect_host() and follows
-# it: codex under a detected Codex host, claude everywhere else -- Claude
-# Code, an unrecognised host, or no signature at all. A Claude Code session's
-# own provider resolution is therefore untouched by this feature: it was
-# already "claude", and "auto" still answers "claude" for it.
+# "auto" (the default), which reads the TRANSCRIPT the host actually wrote
+# (#465) rather than its environment. A Claude Code session's own provider
+# resolution is therefore untouched by this feature: it was already
+# "claude", and "auto" still answers "claude" for it.
+#
+# "auto" used to ask pipeline.host.detect_host() -- env-var signatures
+# (#460, keyed correctly only after #463). #465 found that mechanism cannot
+# work for THIS call site: detect_host() runs inside the summarizer, which
+# is spawned from scripts/haiku's caller (pipeline/haiku.py -> _call_codex /
+# _call_claude), itself reached through scripts/save-session.sh ->
+# scripts/session-end-hook.sh, a process Codex spawns as a HOOK, not the
+# tool shell #464's own CODEX_SESSION_ID/CODEX_THREAD_ID fixture was
+# captured from. Measured against a live codex-cli 0.150.1 SessionEnd hook
+# invocation (env dumped from inside the hook, CLAUDE_CODE_* stripped):
+# neither CODEX_SESSION_ID nor CODEX_THREAD_ID reached the process at all --
+# only PLUGIN_ROOT/CLAUDE_PLUGIN_ROOT survived. So under "auto", every
+# default-configured Codex user's hook-triggered save kept resolving
+# "claude", #460's whole point, unreached.
+#
+# The replacement depends on what the host WROTE, not what it exported: the
+# hooks already trust and export REMEMBER_TRANSCRIPT_PATH
+# (pipeline.host.transcript_path()), and pipeline.extract.sniff_file_envelope()
+# already tells a Codex rollout from a Claude Code transcript by shape
+# (#443). A transcript a host wrote cannot be silently withdrawn the way a
+# compatibility env var can -- the failure mode #463 and #465 are both
+# instances of.
+#
+# pipeline.host.detect_host() itself is unchanged and still exercised
+# directly by tests/test_codex_signature_463.py (env-signature detection is
+# still a real, correct fact about a process); it is simply no longer the
+# mechanism this router calls for "auto".
 #
 # REMEMBER_SUMMARIZER_FALLBACK is the opt-in for what happens when the
 # resolved codex route cannot produce a result (binary missing, non-zero
@@ -189,15 +216,22 @@ def _resolve_summarizer_fallback() -> str | None:
 def _choose_summarizer_provider() -> str:
     """Which provider this call should use: "claude" or "codex".
 
-    "auto" (the default, and the only case that reads the environment for a
-    HOST rather than an explicit choice) follows pipeline.host.detect_host():
-    codex under a detected Codex host, claude for everything else -- which is
-    exactly what every host got before this function existed.
+    "auto" (the default, and the only case that reads anything for a HOST
+    rather than an explicit choice) follows the TRANSCRIPT the host wrote,
+    not its environment (#465): pipeline.host.transcript_path() finds the
+    file the hook already exported (REMEMBER_TRANSCRIPT_PATH), and
+    pipeline.extract.sniff_file_envelope() sniffs that file's own first
+    parseable line for a Codex-shaped or Claude-Code-shaped envelope (#443).
+    No usable transcript (unset, unreadable, or a shape neither host wrote)
+    answers "claude" -- the historical default every host got before Codex
+    routing existed, and the safe side of an unrecognised signal either way.
     """
     provider = _resolve_summarizer_provider()
     if provider != "auto":
         return provider
-    return "codex" if _host.detect_host().name == "codex" else "claude"
+    path = _host.transcript_path()
+    envelope = _extract.sniff_file_envelope(path) if path else "unrecognised"
+    return "codex" if envelope == "codex" else "claude"
 
 
 def _child_env() -> dict[str, str]:

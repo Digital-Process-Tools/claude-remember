@@ -21,7 +21,8 @@ avoided" (see CLAUDE.md: a negative assertion needs a positive control).
 
 import os
 import sys
-from unittest.mock import patch, MagicMock
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -29,6 +30,16 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from pipeline.haiku import call_haiku
 from pipeline.spawn_guard import SummarizerSpawnDeclined
+
+# #465: "auto" no longer asks the environment for a Codex signature -- it
+# reads the transcript the host wrote (REMEMBER_TRANSCRIPT_PATH,
+# pipeline.extract.sniff_file_envelope()). A "Codex host" is therefore
+# simulated here by pointing REMEMBER_TRANSCRIPT_PATH at a real Codex
+# rollout fixture, not by setting CODEX_SESSION_ID -- setting only the env
+# var is now exactly the #465 regression this file's own
+# test_codex_signature_env_vars_alone_no_longer_select_codex (in
+# tests/test_codex_hook_transcript_465.py) pins as "must not fire".
+_CODEX_TRANSCRIPT = str(Path(__file__).parent / "fixtures" / "codex-rollout.jsonl")
 
 
 def _mock_claude_stdout(text: str) -> str:
@@ -45,7 +56,8 @@ def _clear_host_signals(monkeypatch):
     for var in ("CODEX_HOME", "PLUGIN_ROOT", "CODEX_SESSION_ID",
                 "CODEX_THREAD_ID", "CLAUDE_CODE_ENTRYPOINT",
                 "CLAUDE_CODE_SESSION_ID", "CLAUDE_PLUGIN_ROOT",
-                "REMEMBER_SUMMARIZER", "REMEMBER_SUMMARIZER_FALLBACK"):
+                "REMEMBER_SUMMARIZER", "REMEMBER_SUMMARIZER_FALLBACK",
+                "REMEMBER_TRANSCRIPT_PATH"):
         monkeypatch.delenv(var, raising=False)
 
 
@@ -104,8 +116,9 @@ def test_unknown_host_still_uses_claude(mock_run):
 def test_codex_host_routes_to_codex_exec(mock_run, monkeypatch):
     """A detected Codex host uses `codex exec`, not `claude -p` -- the
     positive control paired with every "claude was NOT called" assertion
-    below."""
-    monkeypatch.setenv("CODEX_SESSION_ID", "01a04d64-fake-codex-session")
+    below. Simulated by REMEMBER_TRANSCRIPT_PATH (#465), not
+    CODEX_SESSION_ID -- see the module-level note on why."""
+    monkeypatch.setenv("REMEMBER_TRANSCRIPT_PATH", _CODEX_TRANSCRIPT)
     _write_codex_output.next_text = "## did a codex thing"
     mock_run.side_effect = _write_codex_output
 
@@ -154,7 +167,7 @@ def test_codex_unavailable_fails_loudly_with_no_fallback_configured(mock_run, mo
     """The route being unavailable must never silently reproduce #460 one
     layer down by falling back to claude -p on its own. No fallback opted
     into -> loud RuntimeError, and claude is never spawned."""
-    monkeypatch.setenv("CODEX_SESSION_ID", "01a04d64-fake-codex-session")
+    monkeypatch.setenv("REMEMBER_TRANSCRIPT_PATH", _CODEX_TRANSCRIPT)
     mock_run.side_effect = FileNotFoundError("no such file: codex")
 
     with pytest.raises(RuntimeError, match="could not summarize"):
@@ -170,7 +183,7 @@ def test_codex_unavailable_fails_loudly_with_no_fallback_configured(mock_run, mo
 def test_codex_unavailable_falls_back_when_opted_in(mock_run, monkeypatch):
     """REMEMBER_SUMMARIZER_FALLBACK=claude is the operator's explicit
     opt-in -- the one case where this route is allowed to reach claude -p."""
-    monkeypatch.setenv("CODEX_SESSION_ID", "01a04d64-fake-codex-session")
+    monkeypatch.setenv("REMEMBER_TRANSCRIPT_PATH", _CODEX_TRANSCRIPT)
     monkeypatch.setenv("REMEMBER_SUMMARIZER_FALLBACK", "claude")
 
     calls = []
@@ -194,7 +207,7 @@ def test_codex_empty_output_is_a_loud_failure_not_a_silent_skip(mock_run, monkey
     """An empty -o file (codex exited 0 but wrote nothing) must not be
     read as a legitimate SKIP -- it is a failure of the route, distinct
     from the model choosing SKIP."""
-    monkeypatch.setenv("CODEX_SESSION_ID", "01a04d64-fake-codex-session")
+    monkeypatch.setenv("REMEMBER_TRANSCRIPT_PATH", _CODEX_TRANSCRIPT)
     _write_codex_output.next_text = ""
     mock_run.side_effect = _write_codex_output
 

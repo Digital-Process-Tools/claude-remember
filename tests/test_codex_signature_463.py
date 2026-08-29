@@ -12,6 +12,16 @@ The fix is pinned against ``tests/fixtures/codex-env-463.txt``, a verbatim
 capture from a live ``codex exec`` session, precisely so a future regression
 of the same shape (choosing a plausible-looking but unexported variable
 again) cannot pass by constructing a fixture that agrees with itself.
+
+#465: the fixture above was captured from a Codex *tool shell*, not from
+the SessionEnd *hook* process that actually runs Remember's summarizer --
+those are different children, and a live capture from inside the hook shows
+CODEX_SESSION_ID/CODEX_THREAD_ID do not survive into it. ``detect_host()``
+itself is unchanged and these assertions still hold (it is a correct
+description of what a tool-shell environment looks like); what changed is
+that ``pipeline.haiku._choose_summarizer_provider()`` no longer calls it for
+"auto" -- see tests/test_codex_hook_transcript_465.py and
+pipeline/haiku.py's own note.
 """
 
 from __future__ import annotations
