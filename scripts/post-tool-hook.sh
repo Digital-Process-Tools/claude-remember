@@ -128,6 +128,19 @@ _HOOK_DIR="${BASH_SOURCE[0]%/*}"
 # this arm never runs anyway.
 unset REMEMBER_HOOK_CWD
 
+# --- REMEMBER_TRANSCRIPT_PATH (#424) ---
+# pipeline/host.transcript_path() trusts this variable once it names a real
+# file, and pipeline/extract.py's find_session() returns that value BEFORE
+# the traversal validator (_validate_session_id) ever runs -- so a value set
+# anywhere in the ambient environment reads an arbitrary file straight into
+# the memory store, no `../` required. Only session-start-hook.sh and
+# session-end-hook.sh have a legitimate transcript_path to offer, extracted
+# fresh from their own stdin payload on every run. This hook has none and
+# must not silently consult whatever the process environment already holds,
+# for the same reason and under the same unestablished-reachability
+# reasoning as the REMEMBER_HOOK_CWD unset just above (#417).
+unset REMEMBER_TRANSCRIPT_PATH
+
 source "$_HOOK_DIR/lib-clock.sh"
 source "$_HOOK_DIR/lib-env-cache.sh"
 
@@ -588,9 +601,34 @@ if [ -n "$SIDECAR" ] && [ -f "$SIDECAR" ]; then
                 # "sessions" map. Values in "sessions" are always bare
                 # integers (never braces), so the text between the key and
                 # the object's own closing brace is exactly its content.
+                # #426: "absent", "present but unreadable", and "genuinely
+                # evicted" all used to fold into ONE message that claims a
+                # comparison happened -- `[ -f ]` passes on an unreadable
+                # file, and `$(< file)` cannot tell "read empty content" from
+                # "the read itself failed", so both silently looked
+                # identical to a file whose "sessions" map genuinely lacks
+                # this session. Behaviour is unchanged (fall back to
+                # read-position in all three cases); only the receipt is
+                # split, on whether the file was actually read.
+                _LAST_SAVE_STATE="absent"
                 _LAST_SAVE_CONTENT=""
                 if [ -f "$LAST_SAVE_FILE" ]; then
-                    _LAST_SAVE_CONTENT=$(< "$LAST_SAVE_FILE")
+                    # The stderr redirect has to sit OUTSIDE the command
+                    # substitution (a `{ ...; } 2>/dev/null` group), not
+                    # inside it as `$(< file 2>/dev/null)` -- bash's
+                    # no-fork fast path for `$(< file)` only engages when
+                    # the substitution is EXACTLY that redirection with no
+                    # other token in it; adding one turns it into an empty
+                    # command with a redirection, which reads nothing and
+                    # always "succeeds" silently. That would have made
+                    # unreadable indistinguishable from empty again -- the
+                    # exact bug this fix exists to close, reintroduced one
+                    # line lower.
+                    if { _LAST_SAVE_CONTENT=$(< "$LAST_SAVE_FILE"); } 2>/dev/null; then
+                        _LAST_SAVE_STATE="read"
+                    else
+                        _LAST_SAVE_STATE="unreadable"
+                    fi
                 fi
                 _SESSIONS_SCOPE=""
                 case "$_LAST_SAVE_CONTENT" in
@@ -605,7 +643,17 @@ if [ -n "$SIDECAR" ] && [ -f "$SIDECAR" ]; then
                         SIDECAR_TRUSTED=1
                         ;;
                     *)
-                        log "hook" "WARNING: sidecar $SIDECAR's session $SESSION_ID is absent from last-save.json -- disagrees with last-save.json, falling back to read-position"
+                        case "$_LAST_SAVE_STATE" in
+                            absent)
+                                log "hook" "WARNING: sidecar $SIDECAR exists but last-save.json is absent -- nothing to compare against, falling back to read-position"
+                                ;;
+                            unreadable)
+                                log "hook" "WARNING: sidecar $SIDECAR exists but last-save.json could not be read -- falling back to read-position"
+                                ;;
+                            *)
+                                log "hook" "WARNING: sidecar $SIDECAR's session $SESSION_ID is absent from last-save.json -- disagrees with last-save.json, falling back to read-position"
+                                ;;
+                        esac
                         ;;
                 esac
             fi

@@ -446,3 +446,111 @@ def test_a_non_numeric_sidecar_is_not_trusted_and_falls_back(tmp_path: Path):
         "one -- both are the SAME acceptance criterion (#353): a sidecar "
         "disagreement is a loud finding. Log tail: " + repr(body[-2000:])
     )
+
+
+# == #426: the membership-check message must not claim a comparison that ====
+# == never happened =========================================================
+
+def test_a_sidecar_with_no_last_save_json_at_all_does_not_claim_a_disagreement(
+    tmp_path: Path,
+):
+    """MUST NOT FIRE: a sidecar with NO last-save.json to compare against at
+    all -- e.g. an install that predates #353, or one where last-save.json
+    was never written yet -- is not a "disagreement", because no comparison
+    was ever made. #426's bug is exactly this: the old code folded absent,
+    unreadable, and genuinely-evicted into one "disagrees with
+    last-save.json" line, which is a comparison claim in two of the three
+    cases where no comparison happened."""
+    home, project, remember = _project(tmp_path, jsonl_lines=60,
+                                        session_id=SESSION_A)
+    _write_sidecar(remember, SESSION_A, "30")
+    # Deliberately no last-save.json at all.
+    env = _env(tmp_path, home, project)
+    _prime(env)
+
+    _traced_run(env, tmp_path, "sidecar-no-last-save")
+    _reap(remember)
+
+    # No last-save.json means `[ -f "$LAST_SAVE_FILE" ]` is false for the
+    # read-position fallback too, so this hook correctly never spawns it --
+    # asking read-position for a file that does not exist would only
+    # confirm the 0 this hook already assumes. That absence of a spawn is
+    # not this test's subject; the message is.
+    body = _logged(remember)
+    assert "disagrees with last-save.json" not in body, (
+        "an absent last-save.json is not a DISAGREEMENT -- no comparison "
+        "was made at all, so the log must not claim one. Log tail: "
+        + repr(body[-2000:])
+    )
+
+
+def test_a_sidecar_with_an_unreadable_last_save_json_does_not_claim_a_disagreement(
+    tmp_path: Path,
+):
+    """MUST NOT FIRE: last-save.json present but unreadable (permission
+    denied) is a THIRD state #426 identified -- `[ -f ]` passes and
+    `$(< file)` silently yields empty, indistinguishable from a file whose
+    "sessions" map genuinely lacks this session. Root is exempt from POSIX
+    permission bits, so this test is skipped when running as root (CI
+    containers sometimes do)."""
+    if os.geteuid() == 0:
+        pytest.skip("root ignores file permission bits -- would not reproduce")
+
+    home, project, remember = _project(tmp_path, jsonl_lines=60,
+                                        session_id=SESSION_A)
+    _write_last_save(remember, SESSION_A, 55)
+    last_save = remember / "tmp" / "last-save.json"
+    last_save.chmod(0o000)
+    _write_sidecar(remember, SESSION_A, "30")
+    env = _env(tmp_path, home, project)
+    _prime(env)
+
+    try:
+        _result, lines = _traced_run(env, tmp_path, "sidecar-unreadable")
+    finally:
+        last_save.chmod(0o644)
+    _reap(remember)
+
+    assert "python3" in _cmds(lines) or "python" in _cmds(lines), (
+        "MUST-FIRE control: an unreadable last-save.json must still fall "
+        "back to read-position. Spawned:\n  " + "\n  ".join(lines)
+    )
+    body = _logged(remember)
+    assert "disagrees with last-save.json" not in body, (
+        "an UNREADABLE last-save.json is not a DISAGREEMENT either -- the "
+        "content was never read, so no comparison was made. Log tail: "
+        + repr(body[-2000:])
+    )
+
+
+def test_a_sidecar_whose_session_is_genuinely_evicted_still_claims_a_disagreement(
+    tmp_path: Path,
+):
+    """POSITIVE CONTROL for the two tests above: when last-save.json IS
+    present and readable and the session genuinely is not a member of its
+    "sessions" map, the message legitimately claims a comparison, and #426
+    must not narrow the message into silence for this, the one case where a
+    real disagreement was found. Without this, the two "must not fire"
+    tests above could pass because the message was deleted outright rather
+    than correctly scoped."""
+    home, project, remember = _project(tmp_path, jsonl_lines=60,
+                                        session_id=SESSION_A)
+    _write_last_save(remember, SESSION_B, 40)
+    _write_sidecar(remember, SESSION_A, "30")
+    env = _env(tmp_path, home, project)
+    _prime(env)
+
+    _result, lines = _traced_run(env, tmp_path, "sidecar-genuinely-evicted")
+    _reap(remember)
+
+    assert "python3" in _cmds(lines) or "python" in _cmds(lines), (
+        "MUST-FIRE control: a genuinely evicted session must fall back to "
+        "read-position. Spawned:\n  " + "\n  ".join(lines)
+    )
+    body = _logged(remember)
+    assert "disagrees with last-save.json" in body, (
+        "POSITIVE CONTROL: a session genuinely absent from a present, "
+        "readable last-save.json IS a real disagreement and must still be "
+        "logged as loudly as before -- #426 narrows the message for the "
+        "other two states, not this one. Log tail: " + repr(body[-2000:])
+    )
