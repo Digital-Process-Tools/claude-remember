@@ -2,7 +2,7 @@
 
 `SessionStart` fires again at every auto-compaction. The hook read `session_id`
 out of the payload (#206/#270) and discarded `source`, so a compaction received
-the same full recap a cold start does — every memory file cat'd into a context
+the same full recap a cold start does -- every memory file cat'd into a context
 that was just replaced by a summary of a conversation which already contained
 them.
 
@@ -19,10 +19,31 @@ design here:
   read back.
 
 The direction of the default is the other half. A missing, empty or
-unrecognised `source` must produce today's output exactly — an absence read as
+unrecognised `source` must produce today's output exactly -- an absence read as
 `compact` would silently stop injecting memory for anyone whose payload shape
 differs from the one this heuristic was written against, which is the failure
 this plugin exists to prevent rather than to cause.
+
+── The #422 fixture bug, and how "today" is pinned now ─────────────────────
+This file used to name its own "today" staging file with
+`time.strftime("%Y-%m-%d")` at IMPORT time, while
+`scripts/session-start-hook.sh` computes its own `$TODAY` at RUN time --
+minutes later on this suite's slower legs, since pytest collects every module
+before running any test. A run that straddles a real clock boundary between
+those two reads names a "today" file the hook no longer recognises as
+today's, dropping its body from the recap and forking a stray background
+consolidation (session-start-hook.sh:866, :1395-1399) -- the exact #422
+mechanism pinned in tests/test_stdin_source_top_level_wins_344.py, which
+shares this file's fixture shape closely enough to share its exposure.
+
+Fixed by shimming `date` on PATH so the fixture's "today" and the hook's own
+runtime clock read from the same frozen, arbitrary value -- never the real
+wall clock, so the two can never drift apart regardless of when the suite
+actually runs. This intentionally departs from the file's previous
+system-local rationale (matching an unconfigured REMEMBER_TZ's local-time
+fallback, #99): that only matched TIMEZONE conventions, not TIMING, and a
+frozen shim value removes the timing dependency the timezone match never
+addressed.
 """
 
 from __future__ import annotations
@@ -31,14 +52,13 @@ import json
 import os
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import pytest
 
 pytestmark = pytest.mark.skipif(
     sys.platform == "win32",
-    reason="bash hook subprocess + POSIX semantics — not portable to Windows runners",
+    reason="bash hook subprocess + POSIX semantics -- not portable to Windows runners",
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -49,16 +69,42 @@ from pipeline.slug import session_dir_slug as _slug
 
 SESSION = "dddddddd-0000-4000-8000-000000000339"
 
+# Fixed, arbitrary "today" -- never the real wall-clock date (#422), so a
+# suite that straddles a real day boundary can no longer make the fixture's
+# "today" file disagree with the hook's own runtime notion of today.
+FROZEN_TODAY = "2099-04-08"
+TODAY_FILE = "today-" + FROZEN_TODAY + ".md"
+
+
+def _shim_date(bindir, today):
+    """PATH shim for `date`, freezing `+%Y-%m-%d` to a fixed value.
+
+    A PATH shim only intercepts a real `date` process -- on bash >= 4.2,
+    lib-clock.sh's `_remember_date` prefers the spawn-free
+    `printf '%(FMT)T'` builtin and never touches PATH at all, silently
+    ignoring this shim (the seam tests/test_prompt_hook_spawns.py's own
+    guard exists to catch). REMEMBER_NO_PRINTF_T=1, set in `_env` below,
+    forces the `date` path so the shim actually intercepts. That guard also
+    requires any file that puts `date` on PATH to name the variable, hence
+    this comment: REMEMBER_NO_PRINTF_T.
+    """
+    bindir.mkdir(exist_ok=True)
+    shim = bindir / "date"
+    shim.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "+%Y-%m-%d" ]; then\n'
+        f'  echo {today}\n'
+        "  exit 0\n"
+        "fi\n"
+        'exec /bin/date "$@"\n'
+    )
+    shim.chmod(0o755)
+    return shim
+
+
 # One sentinel per memory file. Asserting on the BODY, not on the section
 # header: the header survives either way, so a test that looked for it would
 # pass against a hook that still cat'd everything.
-# Today's staging file is named for the date, so it is built the way the hook
-# builds it: system-local, because this repo ships no config.json and an unset
-# REMEMBER_TZ falls back to local rather than UTC (#99). Naming it matters —
-# it is the sixth entry of MEMORY_FILES, and a fixture that omitted it would
-# leave the largest of the deferred files untested.
-TODAY_FILE = "today-" + time.strftime("%Y-%m-%d") + ".md"
-
 BODIES = {
     "identity.md": "IDENTITY-BODY-339",
     "core-memories.md": "CORE-BODY-339",
@@ -82,15 +128,18 @@ def _store(tmp_path):
     return home, project, remember
 
 
-def _env(home, project, remember):
-    return {
+def _env(home, project, remember, bindir):
+    env = {
         **os.environ,
         "HOME": str(home),
         "CLAUDE_PROJECT_DIR": str(project),
         "CLAUDE_PLUGIN_ROOT": str(REPO_ROOT),
         "REMEMBER_DIR": str(remember),
         "_LIB_MEMORY_DIR_LOADED": "1",
+        "REMEMBER_NO_PRINTF_T": "1",
     }
+    env["PATH"] = str(bindir) + os.pathsep + env["PATH"]
+    return env
 
 
 def _payload(source=None, extra=None):
@@ -110,8 +159,10 @@ def _payload(source=None, extra=None):
 
 def _run(tmp_path, payload):
     home, project, remember = _store(tmp_path)
+    bindir = tmp_path / "bin"
+    _shim_date(bindir, FROZEN_TODAY)
     kwargs = {
-        "env": _env(home, project, remember),
+        "env": _env(home, project, remember, bindir),
         "capture_output": True,
         "text": True,
         "timeout": 60,
@@ -149,7 +200,7 @@ def test_compact_names_every_file_it_withheld_by_full_path(tmp_path):
     """Withholding silently would be the same defect in the other direction:
     the agent cannot grep a file it was never told is there.
 
-    The assertion is on the RESOLVED PATH, not the basename — a full recap
+    The assertion is on the RESOLVED PATH, not the basename -- a full recap
     already prints `--- recent.md ---` as its body header, so a basename check
     would pass against a hook that changed nothing at all.
     """
