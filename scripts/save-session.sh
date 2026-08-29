@@ -21,10 +21,25 @@
 #   --dry          Preview mode — show extracted exchanges, do not call Haiku
 #
 # ENVIRONMENT
-#   REMEMBER_DEBUG   Set to "1"/"0" for verbose logging. Unset, the `debug`
-#                    config option decides; unset there too, this script is
-#                    verbose (its long-standing default) while the git-backup
-#                    hook is quiet.
+#   REMEMBER_DEBUG            Set to "1"/"0" for verbose logging. Unset, the
+#                             `debug` config option decides; unset there too,
+#                             this script is verbose (its long-standing
+#                             default) while the git-backup hook is quiet.
+#   REMEMBER_TRANSCRIPT_PATH  Trusted input for a manual run (#431). When set,
+#                             pipeline.host.transcript_path() hands it to
+#                             find_session() verbatim -- existence-checked
+#                             only, no containment check -- the same as the
+#                             hook-spawned path this script normally runs on.
+#                             session-start-hook.sh and session-end-hook.sh
+#                             export it freshly, from their own validated
+#                             stdin payload, on every run; post-tool-hook.sh
+#                             and user-prompt-hook.sh (which spawn this script
+#                             with no transcript_path of their own to offer)
+#                             clear it before doing anything else (#424/#430).
+#                             This script does neither: run by hand, it
+#                             inherits whatever your shell already holds,
+#                             deliberately. Unset it yourself before a manual
+#                             run if you do not want that.
 #
 # DEPENDENCIES
 #   python3, claude CLI (Haiku), git, date, mktemp

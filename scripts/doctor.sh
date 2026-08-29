@@ -215,6 +215,25 @@ else
 fi
 echo "OK   PIPELINE_DIR       = $PIPELINE_DIR"
 
+# REMEMBER_TRANSCRIPT_PATH is trusted input for a manual run by design (#431):
+# pipeline/host.transcript_path() gates on existence alone, with no
+# containment check, and this script never clears it the way
+# post-tool-hook.sh and user-prompt-hook.sh do (#424/#430) -- doctor.sh is
+# itself a manual invocation, not a hook with a payload of its own. That
+# decision must not be the absence of a check that nobody decided, so say it
+# loudly rather than proceeding in silence.
+if [ -n "${REMEMBER_TRANSCRIPT_PATH:-}" ]; then
+    echo "WARN REMEMBER_TRANSCRIPT_PATH is set in this shell's environment:"
+    echo "     $REMEMBER_TRANSCRIPT_PATH"
+    echo "     This is trusted input for a manual run (#431), the same as any"
+    echo "     other variable your shell inherits -- pipeline.extract will read"
+    echo "     it verbatim if you invoke it by hand, with no containment check."
+    echo "     session-start-hook.sh and session-end-hook.sh export it freshly on"
+    echo "     every hook run; post-tool-hook.sh and user-prompt-hook.sh clear it"
+    echo "     before doing anything else. If you did not set this yourself,"
+    echo "     unset it before running anything by hand."
+fi
+
 # lib-memory-dir.sh directly (not bootstrap-dirs.sh — see header). It sources
 # lib-slug.sh itself, so session_dir_slug/claude_projects_dir are available
 # without going through detect-tools.sh's exit-prone python check.

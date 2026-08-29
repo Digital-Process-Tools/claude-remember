@@ -166,6 +166,25 @@ def transcript_path(env: Mapping[str, str] | None = None) -> str | None:
     rather than assume this function will catch an untrusted value. It will
     not: it exists to validate a payload the caller already trusts, not to
     decide whether the caller should have trusted it.
+
+    #431 is the decision for every OTHER caller -- ``scripts/save-session.sh``
+    run by hand, ``scripts/doctor.sh``, a direct ``python3 -m pipeline.extract``
+    -- none of which has a hook preamble to clear anything in. Two containment
+    rules were weighed and both were rejected: "must live under the project
+    directory" is actively wrong, because a real Claude Code transcript lives
+    under ``CLAUDE_CONFIG_DIR``/``~/.claude``, never under the project it
+    describes; "must live under the known session store" only has a known
+    store because this module happens to compute one for Claude Code today,
+    and baking that into a containment gate is exactly the host-specific seam
+    the module docstring above declines to invent -- it would silently mis-gate
+    a legitimate value from a host whose store layout this module does not and
+    should not know. So the decision is the second option #424 offered: a
+    caller with no preamble of its own inherits the ambient environment by
+    design, the same way it already inherits ``$PATH`` or ``$HOME``, and the
+    hooks -- which run on every tool call whether or not a human is watching --
+    stay the hardened boundary. ``scripts/doctor.sh`` says so loudly (a WARN
+    naming the value) rather than silently trusting it, so the decision is
+    never mistaken for an oversight.
     """
     env = os.environ if env is None else env
     value = (env.get(TRANSCRIPT_PATH_VAR) or "").strip()

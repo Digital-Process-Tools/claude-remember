@@ -154,6 +154,18 @@ def find_session(session_id: str | None = None,
 
     Raises:
         FileNotFoundError: If no session files exist in the directory.
+
+    A supplied ``REMEMBER_TRANSCRIPT_PATH`` (via ``_host.transcript_path()``)
+    is returned here before ``_validate_session_id()``'s own traversal check
+    below ever runs. That is not an oversight (#431): the hooks with no
+    payload of their own to offer (``scripts/post-tool-hook.sh``,
+    ``scripts/user-prompt-hook.sh``) clear the variable before this module is
+    ever imported, and every OTHER caller of this function -- a manual
+    ``scripts/save-session.sh``, ``scripts/doctor.sh``, a direct
+    ``python3 -m pipeline.extract`` -- trusts its own process environment by
+    design, the same way it already trusts ``$PATH`` or ``$HOME``. See
+    ``pipeline/host.transcript_path()``'s docstring for why a containment
+    check was rejected rather than merely deferred.
     """
     supplied = _host.transcript_path()
     if supplied:
