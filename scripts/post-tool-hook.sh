@@ -141,6 +141,94 @@ unset REMEMBER_HOOK_CWD
 # reasoning as the REMEMBER_HOOK_CWD unset just above (#417).
 unset REMEMBER_TRANSCRIPT_PATH
 
+# --- Which session is this invocation FOR? (#212), and REMEMBER_HOOK_CWD
+# from the same payload (#444) ---
+# PostToolUse supplies the answer on stdin. Read it here, once, before
+# anything else wants it -- including resolve-paths.sh below, which is new
+# with #444: only session-start-hook.sh and session-end-hook.sh used to have
+# a stdin `cwd` to offer it, so a host that never sets CLAUDE_PROJECT_DIR
+# (Codex, Gemini CLI) hit the FATAL in resolve-paths.sh on every PostToolUse
+# call. PostToolUse carries `cwd` on the same payload as `session_id`
+# (#407's comparison table), so the capture that already existed for
+# session_id moves up here to feed both.
+#
+# This is NOT a new stdin read: before #444 this same read happened later in
+# the file (after path resolution), unconditionally on every tool call
+# regardless of which path resolution took -- see the COST section above,
+# which measures exactly that call. Moving it earlier changes nothing about
+# how often it runs, only what its result is available to.
+#
+# Into a plain shell variable, NOT an exported one (#266). Everything below
+# this line forks, and an exported string the size of a tool result makes
+# every one of those forks fail. This hook does consume stdin, so a
+# hooks.d/after_post_tool script that wanted the payload would find EOF — it
+# still gets it, by a route that is not the environment, at the bottom of
+# this file.
+#
+# Reading stdin is only safe if it cannot wait forever — this runs on EVERY
+# tool call, so a blocking read is a hung agent, not a slow one. Two guards:
+# a tty stdin (hand invocation from a shell) is never read at all, and the
+# read itself is bounded by `-t 1` so a pipe held open with nothing in it
+# costs a second and then gives up. bash 3.2 has no sub-second -t, hence 1.
+# Cleared, not merely left alone. This plugin can re-enter its own hooks from
+# a nested session (#204), and both names are exported at the bottom of this
+# file — so without this an inner invocation could read an OUTER invocation's
+# payload and take it for its own. Absent is the correct answer when this
+# invocation has no payload; a stale one is the plausible-and-wrong answer.
+unset REMEMBER_HOOK_STDIN REMEMBER_HOOK_STDIN_FILE
+
+HOOK_STDIN=""
+if [ ! -t 0 ]; then
+    _line=""
+    while IFS= read -r -t 1 _line || [ -n "$_line" ]; do
+        HOOK_STDIN="$HOOK_STDIN$_line"
+        _line=""
+    done
+fi
+
+# Extract a top-level string field without forking a JSON parser on every
+# tool call. Deliberately narrow: the key must be followed by nothing but
+# whitespace and a colon before the value's opening quote, so the key
+# appearing inside tool_input (a Grep pattern, a file being read) is not
+# mistaken for the field. It is a heuristic and it is treated as one — every
+# caller validates the result before anything is done with it. Generalized
+# from a `session_id`-only extractor to also serve `cwd` (#444), the same
+# generalization session-start-hook.sh already made of its own copy.
+_stdin_json_string() {
+    local key="$1" raw="$2" rest prefix value
+    case "$raw" in *"\"$key\""*) ;; *) return 1 ;; esac
+    rest=${raw#*\"$key\"}
+    prefix=${rest%%\"*}
+    case "$prefix" in *[!:[:space:]]*) return 1 ;; esac
+    value=${rest#*\"}
+    value=${value%%\"*}
+    [ -n "$value" ] || return 1
+    printf '%s' "$value"
+}
+
+# ── The cwd the host handed us (#411, #444) ─────────────────────────────
+# resolve-paths.sh's REMEMBER_HOOK_CWD fallback (#411) only ever got a value
+# from session-start-hook.sh and session-end-hook.sh -- this hook's own #417
+# unset above was correct but left it with no legitimate source of its own.
+# Exported for resolve-paths.sh to consult below, in the branch that
+# actually sources it; the fast path never sources resolve-paths.sh at all,
+# so it has no use for this, but exporting it unconditionally here costs
+# nothing extra since HOOK_STDIN is already being read regardless.
+#
+# Validated the same way REMEMBER_TRANSCRIPT_PATH is: data from a host
+# payload, at the point of entry. A project directory legitimately contains
+# slashes and dots, so only an embedded newline or carriage return is
+# rejected -- whether the value actually names a directory is decided in
+# resolve-paths.sh, which falls back to the existing derivation when it does
+# not. Precedence is CLAUDE_PROJECT_DIR, then this, then the existing
+# .claude/remember layout derivation, then the existing failure -- resolved
+# entirely inside resolve-paths.sh, unchanged by this hook.
+REMEMBER_HOOK_CWD=$(_stdin_json_string cwd "$HOOK_STDIN" 2>/dev/null) || REMEMBER_HOOK_CWD=""
+case "$REMEMBER_HOOK_CWD" in
+    *$'\n'*|*$'\r'*) REMEMBER_HOOK_CWD="" ;;
+esac
+export REMEMBER_HOOK_CWD
+
 source "$_HOOK_DIR/lib-clock.sh"
 source "$_HOOK_DIR/lib-env-cache.sh"
 
@@ -291,57 +379,12 @@ if ! : > "$REMEMBER_DIR/tmp/post-tool-ran" 2>/dev/null; then
 fi
 
 # --- Which session is this invocation FOR? (#212) ---
-# PostToolUse supplies the answer on stdin. Read it here, once, before anything
-# else wants it.
-#
-# Into a plain shell variable, NOT an exported one (#266). Everything below
-# this line forks, and an exported string the size of a tool result makes every
-# one of those forks fail. This hook does consume stdin, so a
-# hooks.d/after_post_tool script that wanted the payload would find EOF — it
-# still gets it, by a route that is not the environment, at the bottom of this
-# file.
-#
-# Reading stdin is only safe if it cannot wait forever — this runs on EVERY
-# tool call, so a blocking read is a hung agent, not a slow one. Two guards:
-# a tty stdin (hand invocation from a shell) is never read at all, and the read
-# itself is bounded by `-t 1` so a pipe held open with nothing in it costs a
-# second and then gives up. bash 3.2 has no sub-second -t, hence 1.
-# Cleared, not merely left alone. This plugin can re-enter its own hooks from a
-# nested session (#204), and both names are exported at the bottom of this file
-# — so without this an inner invocation could read an OUTER invocation's
-# payload and take it for its own. Absent is the correct answer when this
-# invocation has no payload; a stale one is the plausible-and-wrong answer.
-unset REMEMBER_HOOK_STDIN REMEMBER_HOOK_STDIN_FILE
-
-HOOK_STDIN=""
-if [ ! -t 0 ]; then
-    _line=""
-    while IFS= read -r -t 1 _line || [ -n "$_line" ]; do
-        HOOK_STDIN="$HOOK_STDIN$_line"
-        _line=""
-    done
-fi
-
-# Extract "session_id" without forking a JSON parser on every tool call.
-# Deliberately narrow: the key must be followed by nothing but whitespace and a
-# colon before the value's opening quote, so a `session_id` appearing inside
-# tool_input (a Grep pattern, a file being read) is not mistaken for the field.
-# It is a heuristic and it is treated as one — the caller validates the result
-# as a path component AND requires it to name a transcript that exists here
-# before anything is done with it.
-_stdin_session_id() {
-    local raw="$1" rest prefix value
-    case "$raw" in *'"session_id"'*) ;; *) return 1 ;; esac
-    rest=${raw#*\"session_id\"}
-    prefix=${rest%%\"*}
-    case "$prefix" in *[!:[:space:]]*) return 1 ;; esac
-    value=${rest#*\"}
-    value=${value%%\"*}
-    [ -n "$value" ] || return 1
-    printf '%s' "$value"
-}
-
-STDIN_SESSION_ID=$(_stdin_session_id "$HOOK_STDIN" 2>/dev/null) || STDIN_SESSION_ID=""
+# HOOK_STDIN was already captured above, ahead of path resolution (#444, so
+# the same payload's `cwd` can feed resolve-paths.sh's REMEMBER_HOOK_CWD
+# fallback), and _stdin_json_string already defined there. session_id is
+# extracted from that same capture rather than reading stdin a second time —
+# it is a single stream and a second read here would see EOF.
+STDIN_SESSION_ID=$(_stdin_json_string session_id "$HOOK_STDIN" 2>/dev/null) || STDIN_SESSION_ID=""
 # stdin is not more trustworthy than a basename. The id becomes both a path
 # component under capture-alive.d/ and a transcript filename, so it faces the
 # same guard the basename-derived id has always faced, at the point of entry.
