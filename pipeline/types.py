@@ -89,6 +89,16 @@ class ExtractResult:
             -- "claude-code", "codex", or "unrecognised". "unrecognised" is
             the loud third state: a shape this module does not know, reported
             rather than silently parsed as a session with nothing in it (#443).
+        skip_lines: The JSONL line this extraction actually started reading
+            from. Normally the caller's last saved position, but when a prior
+            run recorded this session in the unread-envelope quarantine
+            (#450 -- an "unrecognised" envelope that advanced the saved
+            position anyway, to keep #147's loop closed, without ever having
+            read the span), this is that earlier, still-unread point instead
+            -- so a later build that CAN parse the envelope re-reads the span
+            the earlier build only skipped past. Callers report it (and
+            ``save-position`` consumes it) so the quarantine can be cleared
+            once something has actually read that span.
     """
 
     exchanges: str = ""
@@ -97,6 +107,7 @@ class ExtractResult:
     assistant_count: int = 0
     corrupt_lines: int = 0
     envelope: str = ""
+    skip_lines: int = 0
 
 
 @dataclass

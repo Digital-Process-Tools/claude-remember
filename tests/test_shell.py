@@ -796,7 +796,19 @@ def test_main_dispatches_save_position():
     with patch("pipeline.shell.cmd_save_position") as mock_fn:
         with patch("sys.argv", ["shell.py", "save-position", "last.json", "sess-2", "99"]):
             main()
-    mock_fn.assert_called_once_with(last_save_file="last.json", session_id="sess-2", position=99)
+    mock_fn.assert_called_once_with(last_save_file="last.json", session_id="sess-2", position=99,
+                                     envelope=None, skip_lines=None)
+
+
+def test_main_dispatches_save_position_with_envelope_and_skip_lines(): # #450
+    """save-session.sh passes ENVELOPE and SKIP_LINES through so an
+    unrecognised-envelope span can be quarantined rather than lost."""
+    with patch("pipeline.shell.cmd_save_position") as mock_fn:
+        with patch("sys.argv", ["shell.py", "save-position", "last.json", "sess-2", "99",
+                                 "unrecognised", "7"]):
+            main()
+    mock_fn.assert_called_once_with(last_save_file="last.json", session_id="sess-2", position=99,
+                                     envelope="unrecognised", skip_lines=7)
 
 
 def test_main_dispatches_consolidate():

@@ -137,6 +137,86 @@ def _last_save_path(project_dir: str, remember_dir: str | None = None) -> str:
     return effective.rstrip("/\\") + "/tmp/last-save.json"
 
 
+def _unread_envelope_path(project_dir: str, remember_dir: str | None = None) -> str:
+    """Path to the unread-envelope quarantine sidecar (#450).
+
+    Sibling of last-save.json, in the same tmp/ directory, keyed the same
+    way (by session ID) -- but it is a SEPARATE file rather than a field
+    inside last-save.json, because the two have different lifetimes: the
+    saved position always advances (that is what keeps #147's retry loop
+    closed), while an entry here should survive until something has
+    actually read the span it names, however many runs that takes.
+    """
+    effective = remember_dir or os.environ.get("REMEMBER_DIR") or (project_dir.rstrip("/\\") + "/.remember")
+    return effective.rstrip("/\\") + "/tmp/unread-envelope.json"
+
+
+def read_unread_envelope(path: str) -> dict[str, int]:
+    """Read the session -> earliest-unread-line quarantine map.
+
+    Tolerates every shape the file can take, the same way ``read_positions``
+    does: a corrupt or missing file reads as "nothing quarantined" rather
+    than raising, because this is a best-effort recovery aid, not the
+    source of truth for the saved position.
+
+    Args:
+        path: Path to unread-envelope.json.
+
+    Returns:
+        Mapping of session ID to the earliest JSONL line not yet
+        successfully read; empty if unreadable or absent.
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (ValueError, OSError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {k: int(v) for k, v in data.items() if _is_line_number(v)}
+
+
+def _write_unread_envelope(path: str, sessions: dict[str, int]) -> None:
+    """Write the quarantine map atomically (temp file + rename)."""
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(sessions, f)
+    os.replace(tmp, path)
+
+
+def mark_unread_envelope(path: str, session_id: str, from_line: int) -> None:
+    """Record that ``session_id`` has an unread span starting at ``from_line``.
+
+    Set-if-absent: an existing entry is never overwritten with a LATER
+    value, because doing so would let the quarantined point creep forward
+    across repeated "still unrecognised" runs and quietly narrow the span a
+    future, envelope-aware build would recover. In practice the caller
+    always passes back the same value it read (extraction resumes FROM the
+    quarantine point once one is set), so this is a safety net rather than
+    the normal path.
+    """
+    sessions = read_unread_envelope(path)
+    if session_id in sessions:
+        return
+    sessions[session_id] = from_line
+    _write_unread_envelope(path, sessions)
+
+
+def clear_unread_envelope(path: str, session_id: str) -> None:
+    """Drop ``session_id``'s quarantine entry, if any.
+
+    Called once something has actually read starting from the quarantined
+    point -- a successful save whose envelope was not "unrecognised" -- so
+    the span is not re-read forever. A no-op if there is nothing to clear,
+    including when the sidecar itself does not exist yet.
+    """
+    sessions = read_unread_envelope(path)
+    if session_id not in sessions:
+        return
+    del sessions[session_id]
+    _write_unread_envelope(path, sessions)
+
+
 def _validate_session_id(session_id: str) -> None:
     """Reject session IDs containing path traversal characters."""
     if "/" in session_id or "\\" in session_id or ".." in session_id:
@@ -440,6 +520,7 @@ def extract_session(
     total_lines = count_lines(path)
     envelope = sniff_file_envelope(path)
 
+    used_skip_lines = 0
     if show_all:
         messages = extract_messages(path, skip_lines=0, envelope=envelope)
     elif count is not None:
@@ -447,7 +528,19 @@ def extract_session(
         messages = messages[-count:]
     else:
         last_line = get_last_save_line(actual_id, project_dir, remember_dir)
-        messages = extract_messages(path, skip_lines=last_line, envelope=envelope)
+        # #450: a prior run may have advanced the saved position past a span
+        # it never actually read (the envelope was "unrecognised" then), to
+        # keep #147's retry loop closed. That span is quarantined rather than
+        # lost -- start from the quarantine point instead of the saved
+        # position whenever one is on record, so a build that can now parse
+        # the envelope reads the missed span too. Harmless when this run is
+        # STILL unrecognised: extract_messages returns nothing for either
+        # skip point, and the quarantine simply stays in force.
+        unread_from = read_unread_envelope(
+            _unread_envelope_path(project_dir, remember_dir)
+        ).get(actual_id)
+        used_skip_lines = unread_from if unread_from is not None else last_line
+        messages = extract_messages(path, skip_lines=used_skip_lines, envelope=envelope)
 
     # Format as text
     lines = [f"Session: {actual_id}", f"Lines: {total_lines}", "=" * 60]
@@ -468,6 +561,7 @@ def extract_session(
         human_count=human_count,
         assistant_count=assistant_count,
         envelope=envelope,
+        skip_lines=used_skip_lines,
     )
 
 

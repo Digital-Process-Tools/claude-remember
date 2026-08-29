@@ -284,14 +284,27 @@ fi
 # :131 *is* written, the next run re-extracted the identical span and exited
 # identically, once per cooldown window, forever. There is nothing to summarize
 # in an empty span, so advancing loses no memory and breaks the loop.
+#
+# "unrecognised" is NOT the same zero as a genuinely quiet session (#450): the
+# span was never actually read, only skipped, so simply advancing here would
+# make it unrecoverable the moment a later build learns to parse this
+# envelope. The position still advances -- that is what keeps #147's loop
+# closed -- but $ENVELOPE and $SKIP_LINES ride along to `save-position`,
+# which quarantines the span (in unread-envelope.json, keyed by session) at
+# its earliest still-unread point instead of losing it. A future run of THIS
+# session, once its envelope is recognised, resumes extraction from the
+# quarantine point rather than from $POSITION, and the quarantine is cleared
+# the moment that happens. See pipeline.extract.mark_unread_envelope /
+# clear_unread_envelope and pipeline.shell.cmd_save_position for the other
+# half.
 if [ "$EXCHANGE_COUNT" -eq 0 ]; then
     if [ "$DRY_RUN" = false ]; then
         if [ "$ENVELOPE" = "unrecognised" ]; then
-            log "extract" "unrecognised envelope, skip -- position -> $POSITION"
+            log "extract" "unrecognised envelope, skip -- position -> $POSITION (span quarantined from line $SKIP_LINES for a future build)"
         else
             log "extract" "0 exchanges, skip -- position -> $POSITION"
         fi
-        cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell save-position "$LAST_SAVE_FILE" "$SESSION_ID" "$POSITION"
+        cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell save-position "$LAST_SAVE_FILE" "$SESSION_ID" "$POSITION" "$ENVELOPE" "$SKIP_LINES"
     else
         log "extract" "0 exchanges, skip (dry run -- position unchanged)"
     fi
@@ -443,7 +456,7 @@ record_summary_failure() {
 
     if [ "$_count" -ge "$MAX_FAILURES" ]; then
         log "haiku" "WARNING: ${_count} consecutive failures on this span -- dropping it unsummarized and advancing position -> $POSITION (see thresholds.max_summary_failures)"
-        cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell save-position "$LAST_SAVE_FILE" "$SESSION_ID" "$POSITION"
+        cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell save-position "$LAST_SAVE_FILE" "$SESSION_ID" "$POSITION" "$ENVELOPE"
         rm -f "$FAILURE_MARKER"
     else
         echo "$_key $_count" > "$FAILURE_MARKER"
@@ -533,7 +546,7 @@ if [ "$IS_SKIP" != "true" ]; then
         # does, or this span would be re-summarized on every run forever.
         log "validate" "REJECTED (not an entry header): $(echo "$FIRST_LINE" | head -c 80)"
         keep_rejected_text "$HAIKU_TEXT_FILE" "validate"
-        cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell save-position "$LAST_SAVE_FILE" "$SESSION_ID" "$POSITION"
+        cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell save-position "$LAST_SAVE_FILE" "$SESSION_ID" "$POSITION" "$ENVELOPE"
         log "validate" "position -> $POSITION"
         rm -f "$FAILURE_MARKER"
         exit 0
@@ -583,7 +596,7 @@ if [ "$IS_SKIP" = "true" ]; then
         keep_rejected_text "$HAIKU_TEXT_FILE" "haiku"
     fi
     log "haiku" "SKIP -- position -> $POSITION"
-    cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell save-position "$LAST_SAVE_FILE" "$SESSION_ID" "$POSITION"
+    cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell save-position "$LAST_SAVE_FILE" "$SESSION_ID" "$POSITION" "$ENVELOPE"
     # A SKIP is a successful summarization (the model judged the span not worth
     # recording) and it advances the position, so it must clear the failure
     # count too — otherwise a stale count survives and a later single failure
@@ -669,7 +682,7 @@ APPEND_ERR=$({ printf '\n' && cat "$HAIKU_TEXT_FILE"; } 2>&1 >> "$APPEND_TMP") \
 APPEND_ERR=$(mv "$APPEND_TMP" "$MEMORY_FILE" 2>&1) \
     || append_failed "commit failed: ${APPEND_ERR:-unknown error}"
 log "write" "appended: $(head -1 "$HAIKU_TEXT_FILE" | cut -c1-80)"
-cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell save-position "$LAST_SAVE_FILE" "$SESSION_ID" "$POSITION"
+cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell save-position "$LAST_SAVE_FILE" "$SESSION_ID" "$POSITION" "$ENVELOPE"
 log "write" "position -> $POSITION"
 rm -f "$FAILURE_MARKER"
 

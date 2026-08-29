@@ -31,7 +31,13 @@ import os
 import re
 import sys
 
-from .extract import _is_line_number, extract_session, read_positions
+from .extract import (
+    _is_line_number,
+    clear_unread_envelope,
+    extract_session,
+    mark_unread_envelope,
+    read_positions,
+)
 from .haiku import _parse_response
 from .prompts import build_save_prompt, build_ndc_prompt
 
@@ -97,6 +103,13 @@ def cmd_extract(session_id: str, project_dir: str) -> None:
     # from a genuine 0-exchange session, which save-session.sh must not report
     # the same way (#443).
     print(f"ENVELOPE={_shell_escape(r.envelope)}")
+    # The JSONL line this extraction actually started reading from (#450) --
+    # ordinarily the saved position, but the earlier, still-unread point when
+    # a prior "unrecognised" envelope quarantined one. save-session.sh passes
+    # this straight to `save-position`, which is what either keeps the
+    # quarantine pinned to its earliest point or clears it once something has
+    # actually read that span.
+    print(f"SKIP_LINES={r.skip_lines}")
 
 
 def cmd_build_prompt(
@@ -255,7 +268,13 @@ def cmd_call_haiku(prompt_file: str, output_file: str = "", timeout: int = 120) 
 _POSITION_SLOTS = 32
 
 
-def cmd_save_position(last_save_file: str, session_id: str, position: int) -> None:
+def cmd_save_position(
+    last_save_file: str,
+    session_id: str,
+    position: int,
+    envelope: str | None = None,
+    skip_lines: int | None = None,
+) -> None:
     """Record the current extraction position for this session.
 
     Positions are keyed by session ID. A single slot meant two live sessions
@@ -272,6 +291,19 @@ def cmd_save_position(last_save_file: str, session_id: str, position: int) -> No
         last_save_file: Path to the last-save.json file.
         session_id: UUID of the session being saved.
         position: JSONL line number to resume from next time.
+        envelope: This run's ``ExtractResult.envelope`` (#450), or ``None``
+            from a caller that predates it (existing tests, an older
+            wrapper). ``None`` leaves the unread-envelope quarantine
+            untouched -- neither marked nor cleared -- so a caller that has
+            nothing to say about the envelope cannot accidentally erase a
+            quarantine some OTHER, envelope-aware caller set. ``"unrecognised"``
+            marks/keeps ``session_id`` quarantined from ``skip_lines``; any
+            other value clears it, because a save with a recognised envelope
+            means whatever quarantined span there was has now been read.
+        skip_lines: The line this run's extraction actually started from
+            (``ExtractResult.skip_lines``). Used as the quarantine mark point
+            when ``envelope`` is ``"unrecognised"``; falls back to
+            ``position`` if omitted.
     """
     sessions = read_positions(last_save_file)
     # Re-insert at the end: dicts keep insertion order, so the oldest entry is
@@ -338,6 +370,25 @@ def cmd_save_position(last_save_file: str, session_id: str, position: int) -> No
             os.remove(os.path.join(sidecar_dir, f"position.{evicted_id}"))
         except OSError:
             pass
+
+    # #450: keep the unread-envelope quarantine in step with the position it
+    # rides beside. `envelope is None` means this caller (an existing test, a
+    # pre-#450 wrapper) has nothing to say about it -- touch nothing, so an
+    # envelope-unaware save cannot silently erase a quarantine some OTHER,
+    # envelope-aware save set for the same session.
+    unread_path = os.path.join(sidecar_dir, "unread-envelope.json")
+    if envelope == "unrecognised":
+        mark_unread_envelope(unread_path, session_id,
+                              skip_lines if skip_lines is not None else position)
+    elif envelope is not None:
+        clear_unread_envelope(unread_path, session_id)
+    # An evicted session's quarantine entry must not outlive it either, for
+    # the same reason as the position sidecar above: last-save.json has
+    # forgotten the session, so a surviving quarantine entry would still be
+    # consulted by a later extraction that can no longer even resume it
+    # against a real saved position.
+    for evicted_id in evicted:
+        clear_unread_envelope(unread_path, evicted_id)
 
 
 def cmd_read_position(last_save_file: str, session_id: str) -> None:
@@ -804,6 +855,8 @@ def main() -> None:
             last_save_file=sys.argv[2],
             session_id=sys.argv[3],
             position=int(sys.argv[4]),
+            envelope=sys.argv[5] if len(sys.argv) > 5 and sys.argv[5] != "" else None,
+            skip_lines=int(sys.argv[6]) if len(sys.argv) > 6 and sys.argv[6] != "" else None,
         )
     elif cmd == "consolidate-snapshot":
         cmd_consolidate_snapshot(staging_dir=sys.argv[2], snapshot_dir=sys.argv[3])
