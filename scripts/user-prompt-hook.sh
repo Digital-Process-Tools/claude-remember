@@ -82,6 +82,40 @@ unset REMEMBER_HOOK_CWD
 # reasoning as the REMEMBER_HOOK_CWD unset just above (#417).
 unset REMEMBER_TRANSCRIPT_PATH
 
+# --- Host-conditional stdout shape (#451) ---
+# Claude Code treats this hook's plain stdout as `additionalContext` -- that
+# is what the prompt stamp below is for, and every existing regression test
+# (#301, #280) pins it byte-for-byte. Codex's own UserPromptSubmit parser
+# does something different: it sniffs the first non-whitespace byte of
+# stdout, and `{` or `[` means "this claims to be my JSON contract"
+# (codex-rs/hooks/src/engine/output_parser.rs::looks_like_json, read from
+# openai/codex @ 2026-08-29 -- Codex ships no separate hooks.md). That
+# contract is user-prompt-submit.command.output.schema.json
+# (codex-rs/hooks/schema/generated/), consumed by
+# events/user_prompt_submit.rs::parse_completed. The plain stamp this hook
+# has always printed, "[HH:MM TZ -- user]", opens with `[` -- so Codex tries
+# to read it as that JSON contract, fails, and reports the hook run
+# HookRunStatus::Failed even though nothing failed. Plain text that does
+# NOT open with `{`/`[` is accepted by that same parser and appended as
+# additionalContext with status Completed, so the fix is not "never print
+# the stamp on this host", it is "print it inside the envelope Codex's own
+# schema names" -- see the tail of this file.
+#
+# CLAUDE_PROJECT_DIR is the signal already used for this exact distinction
+# in resolve-paths.sh's own ENVIRONMENT block: Claude Code always sets it,
+# Codex documents no such variable and never does, and Gemini CLI
+# "documents no hook environment variables whatsoever" either. So this flag
+# also covers Gemini CLI, whose stdout contract this repo has NOT observed
+# -- REASONED, not observed, for any host besides Codex 0.150.1. The JSON
+# envelope is what Codex's own schema documents, and is no worse than a
+# bracket that collides with Codex's heuristic on every host it has not
+# been checked against either.
+if [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then
+    _REMEMBER_HOST_JSON_STDOUT=0
+else
+    _REMEMBER_HOST_JSON_STDOUT=1
+fi
+
 source "$_HOOK_DIR/lib-clock.sh"
 source "$_HOOK_DIR/lib-env-cache.sh"
 
@@ -289,7 +323,30 @@ dispatch "after_user_prompt"
 # detect-tools.sh is deliberately NOT sourced here — it hard-exits when python
 # is missing, and this hook must never block a prompt. jq is resolved directly.
 JQ_BIN="${JQ:-jq}"
-if [ -z "$NOTICE_MSG" ]; then
+if [ "$_REMEMBER_HOST_JSON_STDOUT" = "1" ]; then
+    # --- Non-Claude-Code host (#451) ---
+    # See the comment at the top of this file. Whether or not there is a
+    # notice, this host's stdout must never open with the bare stamp -- so
+    # both are folded into the one JSON envelope Codex's own schema names,
+    # never printed raw the way the Claude Code branch below does.
+    if [ -z "$CTX" ] && [ -z "$NOTICE_MSG" ]; then
+        : # nothing to say -- printing nothing is Completed on every host
+    elif command -v "$JQ_BIN" >/dev/null 2>&1; then
+        _JSON=$("$JQ_BIN" -n --arg ctx "$CTX" --arg msg "$NOTICE_MSG" \
+            '(if $ctx != "" then {hookSpecificOutput:{hookEventName:"UserPromptSubmit",additionalContext:$ctx}} else {} end)
+             + (if $msg != "" then {systemMessage:$msg} else {} end)' 2>/dev/null) || _JSON=""
+        if [ -n "$_JSON" ]; then
+            printf '%s\n' "$_JSON"
+        fi
+        # jq missing or produced nothing: stay silent rather than print the
+        # bracketed stamp raw -- that raw print is the exact defect this
+        # branch exists to avoid. Losing the stamp here is the honest
+        # option (see #451), not a silent swallow: this hook is documented
+        # "EXIT CODES: 0 Always" and hook-errors.log is not the right
+        # channel for a cosmetic line that failed to render on a host with
+        # no jq, so there is nothing more to say than the omission itself.
+    fi
+elif [ -z "$NOTICE_MSG" ]; then
     printf '%s\n' "$CTX"
 else
     # jq's status must not become this hook's status. Left as the last command
