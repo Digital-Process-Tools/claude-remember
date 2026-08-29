@@ -65,7 +65,7 @@ to this detector everywhere, fixtures included.
 
 ## Detector 2: the current machine's OS username, tree-wide
 
-`test_no_committed_file_leaks_the_current_machine_username` below is the
+`test_no_tracked_file_leaks_the_current_machine_username` below is the
 other half, built for the shape the path detector cannot see. It searches
 every git-tracked file for a verbatim occurrence of `getpass.getuser()` --
 the account name of whoever is running the suite. On a contributor's own
@@ -76,17 +76,64 @@ have, because a *username* has no flood of legitimate look-alike hits the
 way `/Users/` does -- nobody's test data is expected to spell a specific
 person's login name.
 
-**Stated plainly rather than left for a reader to notice from a green CI
-leg:** in CI the runner's account name (`runner`, `root`, or similar) is
-not a contributor's real identity, so this test still executes there and
-still asserts something true (the runner's own login name is not what got
-committed), but that pass is near-vacuous and MUST NOT be read as coverage
-of the leak this guard exists for. The real guard is a contributor running
-the suite locally, on their own machine, under their own username. Short
-or well-known generic account names (`root`, `admin`, `runner`, ...) are
-skipped rather than searched for, loudly, via `pytest.skip`, because
-searching for a four-letter or generic name across ~300 files would
-produce noise no maintainer could act on, not signal.
+### Correction: this detector no longer runs on CI at all -- and why that
+### is not the same call #442 made, even though it looks identical in shape
+
+The first version of this detector ran everywhere, including CI, arguing
+the CI pass was "near-vacuous" but still worth having. #472 turned that
+into a live false positive: `windows-latest` runs as the account
+`runneradmin`, which appears -- legitimately, deliberately -- in
+`tests/test_stale_config_sweep_362.py` (lines 174 and 186) as a realistic
+Windows path fixture rooted at that account's own home directory. Adding
+`"runneradmin"` to a skiplist would have fixed that one image and nothing
+else: every CI image has its own account name (`runner`, `runneradmin`,
+whatever GitHub, GitLab or the next provider calls the next one), each
+discovered the same way this one was -- a red build on somebody else's
+release. A skiplist that grows one entry per incident is a guard that
+costs more than it catches, and it does not even need a new entry to be
+wrong; it is wrong on the next image by construction.
+
+This repository already has a precedent for the mirror question:
+`tests/test_case_divergence_298.py`'s `_origin_main_should_be_resolvable`
+(#442) makes a guard FAIL, not skip, when CI's own env vars are set and
+its precondition (`origin/main` resolvable) is not met. Reading it before
+deciding here was deliberate, and the two answers differ because the two
+preconditions differ in kind, not degree:
+
+- #442's precondition is something CI is SUPPOSED to guarantee -- the
+  checkout step is supposed to make `origin/main` resolvable. Its absence
+  on a CI runner means the infrastructure did its job wrong, and a skip
+  there would hide a real defect behind a green tick. Failing loudly is
+  correct because there IS a defect to report.
+- This detector's precondition is running under a CONTRIBUTOR's own
+  account. A CI runner is never a contributor's own account BY DESIGN --
+  not because some setup step failed to arrange it, the way `origin/main`
+  failing to resolve means the checkout step failed. There is no
+  infrastructure bug for a loud failure to surface here: the runner's
+  account name is simply not evidence of anything, on `runneradmin` today
+  and on whatever the next CI image calls itself tomorrow. Asserting
+  against it does not catch defects, it manufactures false positives, one
+  new CI account name at a time -- which is exactly what #472 was.
+
+So: `_username_check_should_run()` below returns `False` whenever `CI` or
+`GITHUB_ACTIONS` is set (the same two-variable convention #442 already
+uses in this file's sibling), and the check skips there, LOUDLY, naming
+why in the skip reason rather than rendering as a silent pass -- `pytest`
+reports a skip distinctly from a pass in its own summary line and under
+`-rs`, and the reason argues the CI leg is not merely uninformative but is
+answering a question that does not apply to it. Both directions of that
+decision function are pinned the same way #442 pins its own
+(`test_username_check_should_run_true_locally` /
+`test_username_check_should_run_false_on_ci`), so a future edit that
+silently flips either arm -- always-run (reintroducing #472) or
+always-skip (a guard nobody ever runs) -- fails a test, not just a review.
+
+Off CI, the short/generic-account-name skip is unchanged and unrelated to
+this: a contributor's own machine can still legitimately be named `admin`
+or `test`, and searching for a four-or-fewer-letter or dictionary-common
+account name across ~300 tracked files would produce noise no maintainer
+could act on, not signal. That skip is also loud (`pytest.skip`, reason
+stated) and is a genuinely different question from "is this CI at all".
 
 Scoped OUT of detector 2, by name and why: nothing is scoped out by path --
 it is deliberately tree-wide, since a username has no legitimate-hit flood
@@ -99,6 +146,7 @@ under that username).
 from __future__ import annotations
 
 import getpass
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -179,15 +227,54 @@ def test_no_fixture_carries_an_unsanitised_home_path():
 # Detector 2: the current machine's real OS username, tree-wide.
 # ---------------------------------------------------------------------------
 
-_MIN_USERNAME_LEN = 4
+_MIN_USERNAME_LEN = 5
 
-# Account names common enough (a real person's, or a CI runner's default)
-# that searching for them verbatim across ~300 files would produce noise,
-# not signal -- skipped loudly rather than silently, via pytest.skip.
+# Account names common enough on a CONTRIBUTOR's own local machine (not a
+# CI runner -- that question is answered separately by
+# _username_check_should_run, below) that searching for them verbatim
+# across ~300 files would produce noise, not signal -- skipped loudly
+# rather than silently, via pytest.skip. Deliberately NOT the place a new
+# CI runner account name gets added when the next one is discovered: see
+# the module docstring's #472 correction for why that list is the wrong
+# fix, and _username_check_should_run for the actual one.
 _GENERIC_USERNAMES = {
-    "root", "admin", "administrator", "runner", "user", "test", "ci",
-    "docker", "ubuntu", "actions", "github", "vagrant", "guest", "demo",
+    "admin", "administrator", "user", "test", "guest", "demo",
 }
+
+
+def _username_check_should_run(env: dict) -> bool:
+    """A pure decision, kept separate from the scan so it can be tested
+    without depending on the environment actually running this suite --
+    mirrors tests/test_case_divergence_298.py's own
+    _origin_main_should_be_resolvable(#442) in shape and answers the
+    opposite question on purpose. See the module docstring's "Correction"
+    section for the argument; restated here as the one-line contract this
+    function keeps: False (skip) whenever `CI` or `GITHUB_ACTIONS` is set,
+    because a CI runner's own account name is never a contributor's real
+    identity and is not evidence of anything -- there is no infrastructure
+    defect for a loud failure to surface, unlike #442's own check, where
+    an unresolved `origin/main` on CI means the checkout step itself
+    failed. True everywhere else, which is where this detector's evidence
+    actually lives."""
+    return not (env.get("CI") == "true" or env.get("GITHUB_ACTIONS") == "true")
+
+
+def test_username_check_should_run_true_locally():
+    """Positive control's other half: no CI signal means a contributor's
+    own machine, where this detector must actually run."""
+    assert _username_check_should_run({}) is True
+    assert _username_check_should_run({"PATH": "/usr/bin"}) is True
+    assert _username_check_should_run({"CI": "false"}) is True
+
+
+def test_username_check_should_run_false_on_ci():
+    """The load-bearing case for #472: a version of this function that
+    always returned True would reproduce #472 (a false positive on every
+    CI image's own account name) the moment a new one shows up; a version
+    that always returned False would mean this detector never runs at
+    all. This is the one that catches either regression."""
+    assert _username_check_should_run({"CI": "true"}) is False
+    assert _username_check_should_run({"GITHUB_ACTIONS": "true"}) is False
 
 
 def _current_username() -> str | None:
@@ -212,7 +299,9 @@ def _tracked_files() -> list[Path]:
 def test_scanned_at_least_one_tracked_file():
     """Positive control for the tree-wide enumeration: a `git ls-files`
     that silently returned nothing must not let the real check below pass
-    by vacuous truth."""
+    by vacuous truth. Runs unconditionally, on CI included -- `git
+    ls-files` behaves identically everywhere, unlike the username scan
+    below."""
     files = _tracked_files()
     assert len(files) >= 50, (
         f"expected at least 50 tracked files, found {len(files)} -- "
@@ -224,7 +313,10 @@ def test_username_detector_fires_on_a_planted_occurrence():
     """Positive control for detector 2 itself. A detector keyed on a name
     that never appears is the definition of a check that cannot fail --
     this proves the plain substring search actually matches, independent
-    of whether today's real username happens to be committed anywhere."""
+    of whether today's real username happens to be committed anywhere.
+    Runs unconditionally, CI included: this is a pure string check, not a
+    tree scan, so it carries none of the CI-account-name false-positive
+    risk the real check below is skipped for."""
     username = _current_username() or "planted-fallback-username"
     haystack = f'"additionalContext": "[10:54 CEST -- {username}]"'
     assert username in haystack, "planted haystack did not contain its own planted username"
@@ -235,17 +327,33 @@ def test_no_tracked_file_leaks_the_current_machine_username():
     a BARE username (no /Users/ or /home/ prefix) pasted into a
     hand-authored .py string literal, which test_no_fixture_carries_an_
     unsanitised_home_path above cannot see at any scope. See the module
-    docstring for what this detector buys on a contributor's own machine
-    versus in CI, and why -- that asymmetry is stated here rather than
-    left for a green CI leg to be misread as coverage."""
+    docstring for what this detector buys on a contributor's own machine,
+    why it is skipped -- loudly, naming why -- on CI rather than asserted
+    against a runner's own account name (#472), and why that skip is not
+    the same call #442 makes for `origin/main`."""
+    if not _username_check_should_run(os.environ):
+        pytest.skip(
+            "CI environment detected (CI or GITHUB_ACTIONS set) -- this "
+            "detector's precondition (running under a CONTRIBUTOR's own "
+            "account) is never true on a CI runner BY DESIGN, not by a "
+            "setup failure, so it is skipped here rather than asserted "
+            "against the runner's own account name (#472: 'runneradmin' on "
+            "windows-latest legitimately appears in "
+            "tests/test_stale_config_sweep_362.py's Windows path fixtures). "
+            "See the module docstring's 'Correction' section for why this "
+            "differs from tests/test_case_divergence_298.py's #442 check, "
+            "which fails loudly on CI instead. The real guard for this "
+            "class is a contributor running the suite locally."
+        )
     username = _current_username()
     if not username:
         pytest.skip("could not determine the current OS username (getpass.getuser() failed)")
     if len(username) < _MIN_USERNAME_LEN or username.lower() in _GENERIC_USERNAMES:
         pytest.skip(
-            f"current username {username!r} is too short or a known generic/CI "
-            "account name to search for without false positives -- this run "
-            "provides no evidence either way, see the module docstring"
+            f"current username {username!r} is too short or a known generic "
+            "local-account name to search for without false positives -- "
+            "this run provides no evidence either way, see the module "
+            "docstring's _GENERIC_USERNAMES comment"
         )
     offenders: list[str] = []
     for f in _tracked_files():
