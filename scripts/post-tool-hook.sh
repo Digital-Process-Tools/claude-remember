@@ -526,6 +526,14 @@ fi
 # capturing nothing is an outage, and this repo has twice traded the first for
 # the second (#204, #129).
 TRANSCRIPT="$LATEST_JSONL"
+# Whether STDIN_SESSION_ID actually names the TRANSCRIPT resolved below, as
+# opposed to a session that merely showed up on stdin (#468). Only the first
+# two branches earn it: STDIN_TRANSCRIPT_PATH names an exact file the host
+# vouches for, and the SESSION_DIR match below confirms the id by finding its
+# own transcript. The else branch explicitly could not confirm it -- stdin
+# named a session with nothing here -- so TRANSCRIPT falls back to the
+# mtime pick and the session id must fall back with it, not disagree with it.
+STDIN_SESSION_ID_TRUSTED=false
 if [ -n "$STDIN_TRANSCRIPT_PATH" ]; then
     # Already resolved above (#459): STDIN_TRANSCRIPT_PATH IS LATEST_JSONL in
     # this case, and re-deriving a SESSION_DIR match by session id would only
@@ -533,9 +541,10 @@ if [ -n "$STDIN_TRANSCRIPT_PATH" ]; then
     # live under SESSION_DIR at all, so the id-match below would always miss
     # and log a "falling back to newest" line that is not a fallback, just
     # noise on every Codex tool call.
-    :
+    STDIN_SESSION_ID_TRUSTED=true
 elif [ -n "$STDIN_SESSION_ID" ] && [ -f "$SESSION_DIR/$STDIN_SESSION_ID.jsonl" ]; then
     TRANSCRIPT="$SESSION_DIR/$STDIN_SESSION_ID.jsonl"
+    STDIN_SESSION_ID_TRUSTED=true
 else
     [ -n "$STDIN_SESSION_ID" ] && log "hook" "post-tool: stdin session $STDIN_SESSION_ID has no transcript in $SESSION_DIR -- falling back to newest"
 fi
@@ -547,10 +556,24 @@ fi
 # as 0 anyway.
 CURRENT_LINES=$(wc -l < "$TRANSCRIPT" 2>/dev/null)
 CURRENT_LINES=$(( CURRENT_LINES + 0 ))
-# Parameter expansion, not `basename` (#230): strip the directory, then the
-# extension. Same answer, no process.
-SESSION_ID="${TRANSCRIPT##*/}"
-SESSION_ID="${SESSION_ID%.jsonl}"
+# STDIN_SESSION_ID wins when it is TRUSTED -- i.e. it is actually the id that
+# resolved TRANSCRIPT above, not merely a value that showed up on stdin
+# (#468, same precedence #407 gave STDIN_TRANSCRIPT_PATH). Deriving from the
+# TRANSCRIPT basename instead is correct only on Claude Code, which names its
+# own transcripts `<session-id>.jsonl` -- Codex's `rollout-<date>-<uuid>.jsonl`
+# is not a session id at all, and save-session.sh's own `[a-f0-9-]+` gate
+# (#191) rejected every one of them, silently, into an autonomous log nobody
+# reads. Falling back to the basename whenever stdin's id was NOT trusted
+# (absent, or named a session with no transcript here) keeps every existing
+# Claude Code path byte-identical, including the #212 mtime fallback this
+# would otherwise silently disagree with (parameter expansion, not
+# `basename`, same as before -- #230).
+if [ "$STDIN_SESSION_ID_TRUSTED" = true ]; then
+    SESSION_ID="$STDIN_SESSION_ID"
+else
+    SESSION_ID="${TRANSCRIPT##*/}"
+    SESSION_ID="${SESSION_ID%.jsonl}"
+fi
 
 # Which session PostToolUse serviced, for the capture-gap check in
 # session-start-hook.sh (#200). Distinct from the post-tool-ran marker above:
