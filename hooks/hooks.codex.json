@@ -1,5 +1,5 @@
 {
-  "description": "Codex-side binding of Remember's existing hook scripts to Codex lifecycle events. Scaffolding: not verified against a running Codex install (#410). See hooks/hooks.json for the Claude Code manifest these scripts also ship for.",
+  "description": "Codex-side binding of Remember's existing hook scripts to Codex lifecycle events. Observed against a real codex-cli 0.150.1 install (#443, #444, #460, #463, #465). See hooks/hooks.json for the Claude Code manifest these scripts also ship for.",
   "hooks": {
     "SessionStart": [
       {
