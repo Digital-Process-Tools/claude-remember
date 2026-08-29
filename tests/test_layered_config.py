@@ -7,6 +7,7 @@ resolves correctly for both legacy and external data_dir values.
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -36,6 +37,10 @@ def _run_lib(project_dir: str, pipeline_dir: str, home_dir: str, env_extra: "dic
     source {LIB_SCRIPT}
     echo "REMEMBER_DIR=$REMEMBER_DIR"
     echo "REMEMBER_CONFIG=$REMEMBER_CONFIG"
+    echo "REMEMBER_CONFIG_BASENAME=$(basename "$REMEMBER_CONFIG")"
+    if [ -f "$REMEMBER_CONFIG" ]; then
+        echo "REMEMBER_CONFIG_MODE=$(stat -f '%Lp' "$REMEMBER_CONFIG" 2>/dev/null || stat -c '%a' "$REMEMBER_CONFIG")"
+    fi
     # Dump a key from the merged config to verify merge
     if [ -f "$REMEMBER_CONFIG" ] && command -v jq >/dev/null 2>&1; then
         SAVE_SEC=$(jq -r '.cooldowns.save_seconds // "absent"' "$REMEMBER_CONFIG")
@@ -183,6 +188,33 @@ class TestLayeredConfigMerge:
         result = _run_lib(str(project), str(pipeline), str(home))
         assert result.get("MERGED_UNDERSCORE_KEYS") == "0"
         assert result.get("MERGED_SAVE_SECONDS") == "200"
+
+    def test_merged_config_is_0600_and_not_pid_named(self, tmp_path):
+        """#429 replaced the PID-suffixed literal path
+        (`remember-config-$$.json`) with an unpredictable `mktemp` name,
+        because a name built from `$$` is guessable from outside the
+        instant the process starts. Pin both halves as an assertion,
+        not just a comment: the mode stays `0600`, and the basename
+        matches mktemp's unpredictable shape rather than the old
+        PID-suffixed-with-`.json` one. A regression to either shape
+        should fail here, not just read stale in a nearby comment."""
+        project = tmp_path / "proj"
+        project.mkdir()
+        pipeline = tmp_path / "plugin"
+        pipeline.mkdir()
+        home = tmp_path / "home"
+        home.mkdir()
+
+        (pipeline / "config.json").write_text(json.dumps({"cooldowns": {"save_seconds": 99}}))
+
+        result = _run_lib(str(project), str(pipeline), str(home))
+        assert result.get("REMEMBER_CONFIG_MODE") == "600"
+
+        basename = result.get("REMEMBER_CONFIG_BASENAME", "")
+        # Positive control: mktemp actually produced its unpredictable shape.
+        assert re.fullmatch(r"remember-config-[A-Za-z0-9]{6}", basename), basename
+        # Negative: the old PID-suffixed, `.json`-terminated shape is gone.
+        assert not re.fullmatch(r"remember-config-\d+\.json", basename), basename
 
     def test_missing_user_global_skipped(self, tmp_path):
         """Missing user-global file does not cause an error; bundled values are used."""

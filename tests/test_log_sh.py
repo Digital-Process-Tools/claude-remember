@@ -871,7 +871,8 @@ class TestConfigIsReadInOnePass:
     def test_the_oauth_token_is_not_left_lying_in_a_shell_variable(self, tmp_path):
         """#230 refused to cache the merged config because it can carry
         `haiku.oauth_token`, a live credential — which is why lib-memory-dir.sh
-        creates that file 0600, per PID, under an EXIT trap. Reading every key
+        creates that file 0600, with an unpredictable mktemp name, one per
+        invocation, under an EXIT trap (#429). Reading every key
         up front is the same trade taken through a different door: the token
         would sit in a shell variable in every process that sources log.sh,
         for as long as it lives, in a hook that also runs other people's
