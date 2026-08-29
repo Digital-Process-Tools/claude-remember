@@ -583,39 +583,14 @@ def test_doctor_is_quiet_when_the_spellings_agree(tmp_path):
 
 
 # ── The hot path ─────────────────────────────────────────────────────────────
-
-
-def test_sanctioned_divergence_applies_pre_merge_shape():
-    """The sanctioned old->new substitution is still a live PR: old_code is
-    still on origin/main. Substitute it in so the byte-compare judges the fix
-    the allowance exempts, not the noise of the still-open PR (#440)."""
-    rel = "scripts/lib-memory-dir.sh"
-    old_code, new_code = _SANCTIONED_DIVERGENCE[rel]
-    ref_code = f"before\n{old_code}\nafter"
-    result = _apply_sanctioned_divergence(ref_code, rel)
-    assert new_code in result
-    assert old_code not in result
-
-
-def test_sanctioned_divergence_accepts_post_merge_shape():
-    """The allowance's own PR has landed: origin/main now holds new_code and
-    old_code is gone. That is the post-merge steady state, not staleness --
-    pass ref_code through unchanged rather than asserting (#440)."""
-    rel = "scripts/lib-memory-dir.sh"
-    old_code, new_code = _SANCTIONED_DIVERGENCE[rel]
-    ref_code = f"before\n{new_code}\nafter"
-    result = _apply_sanctioned_divergence(ref_code, rel)
-    assert result == ref_code
-
-
-def test_sanctioned_divergence_still_asserts_when_genuinely_stale():
-    """Neither old_code nor new_code is on origin/main: origin/main moved
-    further still and this allowance needs re-deriving, not blindly
-    (re-)applied -- the one case that must still fail loudly (#440)."""
-    rel = "scripts/lib-memory-dir.sh"
-    ref_code = "something else entirely, unrelated to either shape"
-    with pytest.raises(AssertionError):
-        _apply_sanctioned_divergence(ref_code, rel)
+#
+# `_apply_sanctioned_divergence`'s own three-state unit tests live in
+# tests/test_sanctioned_divergence_state_440.py rather than here: this
+# module carries a whole-file `pytestmark` skip on Windows (bash hook
+# subprocess + POSIX semantics, #79), and those three tests are pure Python
+# string manipulation with nothing POSIX or bash about them -- keeping them
+# in this module would inherit that skip and never run on windows-latest CI
+# at all (found by the self-review auditor on #440).
 
 
 def test_the_per_tool_call_path_is_not_touched(tmp_path):
