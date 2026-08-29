@@ -127,6 +127,83 @@ else
     _resolve_paths_fail "$_msg" "${CLAUDE_PROJECT_DIR:-.}/.remember/logs" || return 1
 fi
 
+# --- Windows shell normalization (Git Bash / MSYS / Cygwin) ----------------
+# Claude Code stores sessions under a Windows-native slug (e.g.
+# "C--Users-dev-project") computed from the Win32 path "C:\Users\dev\project".
+# But on Windows shells, $CLAUDE_PROJECT_DIR arrives as a POSIX-style path
+# ("/c/Users/dev/project") and our sed-based slug produces "-c-Users-dev-..."
+# which never matches. The plugin's `ls $SESSION_DIR/*.jsonl` then returns
+# nothing and the entire save pipeline silently no-ops.
+#
+# Convert /c/Users/... → C:\Users\... here so all downstream slug computations
+# (3 shell sites + Python `_session_dir`) align with Claude Code's storage.
+# On Linux/macOS bash $OSTYPE is "linux-gnu" or "darwin*"; the case below
+# never matches and the input is echoed back untouched.
+# All FOUR shapes, not just the POSIX one (#263). $CLAUDE_PROJECT_DIR does not
+# always arrive in the same form on the same machine: the reporter's log carries
+# `/c/Users/...` and `c:/Users/...` within a single day. Only the first matched,
+# so only the first was normalised, and one directory produced two different
+# slugs. NTFS is case-insensitive and hid that everywhere except git, whose
+# pathspecs are not — `git add -- "$SLUG/"` matched nothing for twelve days and
+# the backup reported an empty store.
+#
+# A path carrying no drive letter at all falls through untouched, which is what
+# a genuine POSIX path under MSYS (/tmp, /usr) needs.
+#
+# A FUNCTION (#448), not a one-shot block run after PROJECT_DIR was already
+# chosen. The old ordering tested REMEMBER_HOOK_CWD's `[ -d ]` in whatever
+# spelling the caller's payload happened to carry, then normalized only the
+# already-selected PROJECT_DIR afterwards -- so a Windows-native cwd
+# (backslash separators, or a bare drive letter) was tested in the form the
+# shell cannot resolve and the branch was skipped before the code that would
+# have fixed the spelling ever ran. On a host with no CLAUDE_PROJECT_DIR
+# (Codex, Gemini CLI) that meant every hook silently fell through to the loud
+# failure via its own `|| exit 0`.
+#
+# The fix normalizes every candidate BEFORE it is tested, uniformly:
+# CLAUDE_PROJECT_DIR was never `-d`-tested before selection either (only
+# trusted, then validated once at the very end below), so giving it the same
+# normalize-then-trust treatment here is not a new exposure. REMEMBER_HOOK_CWD
+# keeps its own existence test before selection -- now against the normalized
+# form -- so a value that still doesn't resolve to a real directory falls
+# through to the next candidate (the local-install derivation, or the loud
+# failure) instead of being adopted and hard-failing later with a less
+# specific message. Normalizing is pure string reshaping (drive letter case,
+# separator direction) with no filesystem access of its own, so applying it to
+# an unvalidated candidate before the existence test adds no new trust in a
+# hostile REMEMBER_HOOK_CWD (#417, #424) -- the value still has to name a real
+# directory to be selected, exactly as before.
+#
+# The drive-form regex lives in a variable: a bracket expression containing a
+# backslash is not portable to write inline on the right of `=~`.
+_remember_normalize_win_path() {
+    local _in="$1" _drive="" _rest=""
+    local _re='^([a-zA-Z]):[/\](.*)$'
+    case "$OSTYPE" in
+        msys|cygwin)
+            # Cygwin's mount prefix first: /cygdrive/c/... cannot match the
+            # MSYS form below, because "cygdrive" is not one character.
+            if [[ "$_in" =~ ^/cygdrive/([a-zA-Z])/(.*)$ ]]; then
+                _drive="${BASH_REMATCH[1]}"
+                _rest="${BASH_REMATCH[2]}"
+            elif [[ "$_in" =~ ^/([a-zA-Z])/(.*)$ ]]; then
+                _drive="${BASH_REMATCH[1]}"
+                _rest="${BASH_REMATCH[2]}"
+            elif [[ "$_in" =~ $_re ]]; then
+                _drive="${BASH_REMATCH[1]}"
+                _rest="${BASH_REMATCH[2]}"
+            fi
+            if [ -n "$_drive" ]; then
+                _drive=$(printf '%s' "$_drive" | tr '[:lower:]' '[:upper:]')
+                _rest="${_rest//\//\\}"
+                printf '%s' "${_drive}:\\${_rest}"
+                return 0
+            fi
+            ;;
+    esac
+    printf '%s' "$_in"
+}
+
 # --- Resolve PROJECT_DIR (the user's project root) ---
 #
 # Priority:
@@ -144,6 +221,8 @@ fi
 #      caller of this file is a hook with stdin to read -- doctor.sh and a
 #      bare `source` from a shell have none -- so an unset or unusable value
 #      here is silently skipped, same as an unset CLAUDE_PROJECT_DIR above.
+#      Normalized (#448) before the existence test immediately below, so a
+#      Windows-native spelling is tested in the form the shell can resolve.
 #
 #      ASSUMPTION (#417): this file only SOURCES the variable, it never sets
 #      it, so its correctness here depends on every caller either exporting a
@@ -164,9 +243,9 @@ fi
 #   3. If PIPELINE_DIR is inside a .claude/remember/ structure, derive from that
 #   4. Fail — we cannot guess the project root from a marketplace cache path
 if [ -n "$CLAUDE_PROJECT_DIR" ]; then
-    PROJECT_DIR="$CLAUDE_PROJECT_DIR"
-elif [ -n "${REMEMBER_HOOK_CWD:-}" ] && [ -d "${REMEMBER_HOOK_CWD:-}" ]; then
-    PROJECT_DIR="$REMEMBER_HOOK_CWD"
+    PROJECT_DIR="$(_remember_normalize_win_path "$CLAUDE_PROJECT_DIR")"
+elif [ -n "${REMEMBER_HOOK_CWD:-}" ] && [ -d "$(_remember_normalize_win_path "${REMEMBER_HOOK_CWD:-}")" ]; then
+    PROJECT_DIR="$(_remember_normalize_win_path "$REMEMBER_HOOK_CWD")"
 elif [[ "$PIPELINE_DIR" == *"/.claude/remember" ]]; then
     # Local install: plugin is at $PROJECT/.claude/remember
     PROJECT_DIR="$(cd "$PIPELINE_DIR/../.." && pwd)"
@@ -174,58 +253,7 @@ else
     _msg="FATAL: Cannot resolve project root. CLAUDE_PROJECT_DIR is not set, REMEMBER_HOOK_CWD is not set or not a directory, and plugin is not in a local .claude/remember/ layout (PIPELINE_DIR=$PIPELINE_DIR)."
     _resolve_paths_fail "$_msg" "${PROJECT_DIR:-.}/.remember/logs" || return 1
 fi
-
-# --- Windows shell normalization (Git Bash / MSYS / Cygwin) ----------------
-# Claude Code stores sessions under a Windows-native slug (e.g.
-# "C--Users-dev-project") computed from the Win32 path "C:\Users\dev\project".
-# But on Windows shells, $CLAUDE_PROJECT_DIR arrives as a POSIX-style path
-# ("/c/Users/dev/project") and our sed-based slug produces "-c-Users-dev-..."
-# which never matches. The plugin's `ls $SESSION_DIR/*.jsonl` then returns
-# nothing and the entire save pipeline silently no-ops.
-#
-# Convert /c/Users/... → C:\Users\... here so all downstream slug computations
-# (3 shell sites + Python `_session_dir`) align with Claude Code's storage.
-# On Linux/macOS bash $OSTYPE is "linux-gnu" or "darwin*"; the case below
-# never matches and PROJECT_DIR is left untouched.
-# All FOUR shapes, not just the POSIX one (#263). $CLAUDE_PROJECT_DIR does not
-# always arrive in the same form on the same machine: the reporter's log carries
-# `/c/Users/...` and `c:/Users/...` within a single day. Only the first matched,
-# so only the first was normalised, and one directory produced two different
-# slugs. NTFS is case-insensitive and hid that everywhere except git, whose
-# pathspecs are not — `git add -- "$SLUG/"` matched nothing for twelve days and
-# the backup reported an empty store.
-#
-# A path carrying no drive letter at all falls through untouched, which is what
-# a genuine POSIX path under MSYS (/tmp, /usr) needs.
-#
-# The drive-form regex lives in a variable: a bracket expression containing a
-# backslash is not portable to write inline on the right of `=~`.
-_REMEMBER_WIN_DRIVE_RE='^([a-zA-Z]):[/\](.*)$'
-case "$OSTYPE" in
-    msys|cygwin)
-        _drive=""
-        _rest=""
-        # Cygwin's mount prefix first: /cygdrive/c/... cannot match the MSYS
-        # form below, because "cygdrive" is not one character.
-        if [[ "$PROJECT_DIR" =~ ^/cygdrive/([a-zA-Z])/(.*)$ ]]; then
-            _drive="${BASH_REMATCH[1]}"
-            _rest="${BASH_REMATCH[2]}"
-        elif [[ "$PROJECT_DIR" =~ ^/([a-zA-Z])/(.*)$ ]]; then
-            _drive="${BASH_REMATCH[1]}"
-            _rest="${BASH_REMATCH[2]}"
-        elif [[ "$PROJECT_DIR" =~ $_REMEMBER_WIN_DRIVE_RE ]]; then
-            _drive="${BASH_REMATCH[1]}"
-            _rest="${BASH_REMATCH[2]}"
-        fi
-        if [ -n "$_drive" ]; then
-            _drive=$(printf '%s' "$_drive" | tr '[:lower:]' '[:upper:]')
-            _rest="${_rest//\//\\}"
-            PROJECT_DIR="${_drive}:\\${_rest}"
-        fi
-        unset _drive _rest
-        ;;
-esac
-unset _REMEMBER_WIN_DRIVE_RE
+unset -f _remember_normalize_win_path
 
 # --- Validate both paths exist ---
 if [ ! -d "$PROJECT_DIR" ]; then
