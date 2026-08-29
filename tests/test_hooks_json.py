@@ -23,32 +23,17 @@ from pathlib import Path
 
 import pytest
 
+from ._bash_runner import find_git_bash
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HOOKS_JSON = REPO_ROOT / "hooks" / "hooks.json"
 SCRIPTS_DIR = REPO_ROOT / "scripts"
 
-
-def _find_git_bash():
-    """Locate Git Bash specifically (not WSL's bash launcher).
-
-    On Windows, `shutil.which("bash")` may resolve to the WSL launcher. The #82
-    reporter launches Claude Code from Git Bash, so we want *that* bash. Probe the
-    standard Git-for-Windows install locations; fall back to PATH only if the
-    resolved binary lives under a Git install. Returns the exe path or None.
-    """
-    candidates = []
-    for env_var in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"):
-        base = os.environ.get(env_var)
-        if base:
-            candidates.append(Path(base) / "Git" / "bin" / "bash.exe")
-            candidates.append(Path(base) / "Git" / "usr" / "bin" / "bash.exe")
-    for cand in candidates:
-        if cand.is_file():
-            return str(cand)
-    resolved = shutil.which("bash")
-    if resolved and "git" in resolved.replace("\\", "/").lower():
-        return resolved
-    return None
+# Extracted to _bash_runner.py (#432) so test_hook_cwd_leak_417.py and
+# test_transcript_path_leak_424.py can share it instead of skipping on the
+# whole Windows platform. Re-imported under the original private name so
+# nothing else in this file has to change.
+_find_git_bash = find_git_bash
 
 
 def _iter_commands():

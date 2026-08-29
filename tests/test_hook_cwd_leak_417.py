@@ -39,14 +39,23 @@ Two tests, one fixture family:
 from __future__ import annotations
 
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
 
+from ._bash_runner import resolve_bash
+
+# #432: this used to be a blanket skipif(sys.platform == "win32"), which meant
+# the windows-latest CI leg collected these tests, skipped every one of them,
+# and reported the leg green -- a check that never ran rendering exactly like
+# a check that found nothing, for the regression test of a security fix.
+# tests/test_hooks_json.py already proves a real bash is reachable under Git
+# Bash on that same leg, so the platform is not the limitation; narrow the
+# skip to the one thing that actually is: no usable bash on PATH at all.
+BASH = resolve_bash()
 pytestmark = pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="bash subprocess + POSIX semantics -- not portable to Windows runners",
+    BASH is None,
+    reason="no usable bash found (checked PATH, then Git-for-Windows install locations)",
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -94,7 +103,7 @@ def test_resolve_paths_sh_still_honours_the_variable_when_asked(tmp_path):
         "PATH": "/usr/bin:/bin:/usr/local/bin",
     }
     result = subprocess.run(
-        ["bash", "-c", script], env=env, cwd=str(tmp_path),
+        [BASH, "-c", script], env=env, cwd=str(tmp_path),
         capture_output=True, text=True, timeout=30,
     )
     assert f"PROJECT_DIR={real_project}" in result.stdout, (
@@ -120,7 +129,7 @@ def test_hook_clears_the_variable_before_sourcing_anything(tmp_path, hook):
         "PATH": "/usr/bin:/bin:/usr/local/bin",
     }
     result = subprocess.run(
-        ["bash", "-c", script], env=env, cwd=str(tmp_path),
+        [BASH, "-c", script], env=env, cwd=str(tmp_path),
         capture_output=True, text=True, timeout=30,
     )
     assert "REMEMBER_HOOK_CWD=cleared" in result.stdout, (
