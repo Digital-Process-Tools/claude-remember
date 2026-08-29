@@ -169,22 +169,32 @@ def transcript_path(env: Mapping[str, str] | None = None) -> str | None:
 
     #431 is the decision for every OTHER caller -- ``scripts/save-session.sh``
     run by hand, ``scripts/doctor.sh``, a direct ``python3 -m pipeline.extract``
-    -- none of which has a hook preamble to clear anything in. Two containment
-    rules were weighed and both were rejected: "must live under the project
-    directory" is actively wrong, because a real Claude Code transcript lives
-    under ``CLAUDE_CONFIG_DIR``/``~/.claude``, never under the project it
-    describes; "must live under the known session store" only has a known
-    store because this module happens to compute one for Claude Code today,
-    and baking that into a containment gate is exactly the host-specific seam
-    the module docstring above declines to invent -- it would silently mis-gate
-    a legitimate value from a host whose store layout this module does not and
-    should not know. So the decision is the second option #424 offered: a
-    caller with no preamble of its own inherits the ambient environment by
-    design, the same way it already inherits ``$PATH`` or ``$HOME``, and the
-    hooks -- which run on every tool call whether or not a human is watching --
-    stay the hardened boundary. ``scripts/doctor.sh`` says so loudly (a WARN
-    naming the value) rather than silently trusting it, so the decision is
-    never mistaken for an oversight.
+    -- none of which has a hook preamble to clear anything in. No containment
+    check was added here, and the reason is sharper than "it is hard": this
+    function is the ONE channel both a legitimately-supplied and an ambient
+    value travel through, so a check added here binds both. The legitimate
+    value -- what ``session-start-hook.sh``/``session-end-hook.sh`` export
+    fresh, from their own validated stdin payload, on every run -- is the
+    whole point of #407: trust wherever the host says the transcript lives,
+    rather than reconstruct it, because reconstruction is what #263/#174/#157
+    got wrong. A containment rule narrow enough to matter (under the project
+    directory; under ``CLAUDE_CONFIG_DIR``/``~/.claude``, which is itself a
+    relocatable, user-set path and not "never" true of the project directory
+    either -- see #166) would also reject a legitimate transcript the host
+    handed over that happens to live somewhere else, on a different drive or
+    mount, under a session-store layout this module has no business knowing
+    (Codex and Gemini CLI are not documented here on purpose -- see the module
+    docstring above). Splitting the two channels -- validate only the ambient
+    one -- would need a second parameter threaded through every caller of
+    ``transcript_path()``/``find_session()`` recording whether THIS call has a
+    fresh stdin payload behind it, which is a real fix but a bigger one than
+    this issue asked for, not attempted here. So the decision is the second
+    option #424 offered: a caller with no preamble of its own inherits the
+    ambient environment by design, the same way it already inherits ``$PATH``
+    or ``$HOME``, and the hooks -- which run on every tool call whether or not
+    a human is watching -- stay the hardened boundary. ``scripts/doctor.sh``
+    says so loudly (a WARN naming the value) rather than silently trusting it,
+    so the decision is never mistaken for an oversight.
     """
     env = os.environ if env is None else env
     value = (env.get(TRANSCRIPT_PATH_VAR) or "").strip()

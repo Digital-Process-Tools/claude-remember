@@ -28,7 +28,6 @@ Two things are pinned:
 
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 import sys
@@ -42,12 +41,18 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SAVE_SESSION = REPO_ROOT / "scripts" / "save-session.sh"
 DOCTOR = REPO_ROOT / "scripts" / "doctor.sh"
 
-pytestmark = pytest.mark.skipif(
+# Scoped per-test, not module-wide: only the tests below that actually read a
+# .sh file's text or spawn `bash` need POSIX semantics. The one that calls
+# pipeline.extract / pipeline.host in-process (monkeypatch + pathlib only) has
+# no such dependency, and a blanket skip would report Windows coverage this
+# suite does not have for the #431 trust decision itself.
+_posix_only = pytest.mark.skipif(
     sys.platform == "win32",
     reason="bash subprocess + POSIX semantics -- not portable to Windows runners",
 )
 
 
+@_posix_only
 def test_save_session_never_silently_clears_transcript_path():
     """MUST NOT FIRE: manual invocation honours the variable by design."""
     text = SAVE_SESSION.read_text(encoding="utf-8")
@@ -99,6 +104,7 @@ def _run_doctor(home, project, remember, extra_env=None):
                           capture_output=True, text=True, timeout=120)
 
 
+@_posix_only
 def test_doctor_warns_loudly_when_transcript_path_is_ambiently_set(tmp_path):
     """MUST FIRE: this is the real behavioural fix. Before it, doctor.sh said
     nothing about a REMEMBER_TRANSCRIPT_PATH left in the environment -- the
@@ -118,6 +124,7 @@ def test_doctor_warns_loudly_when_transcript_path_is_ambiently_set(tmp_path):
     assert str(victim) in result.stdout
 
 
+@_posix_only
 def test_doctor_says_nothing_when_transcript_path_is_unset(tmp_path):
     """MUST NOT FIRE (positive control): no ambient value, no warning --
     proves the check above is not just always-on noise."""
@@ -131,3 +138,48 @@ def test_doctor_says_nothing_when_transcript_path_is_unset(tmp_path):
         capture_output=True, text=True, timeout=120,
     )
     assert "REMEMBER_TRANSCRIPT_PATH" not in result.stdout
+
+
+@_posix_only
+def test_doctor_warning_survives_path_resolution_failure(tmp_path):
+    """MUST FIRE: the WARN must not depend on path resolution succeeding.
+
+    A first version of this fix placed the check after resolve-paths.sh's own
+    early `exit 0` on failure, so the one loud thing this issue asked for
+    silently never fired on exactly the run where a human most needs a full
+    report -- an unresolvable install. Pointing CLAUDE_PROJECT_DIR at a
+    directory that does not exist is resolve-paths.sh's own
+    "PROJECT_DIR does not exist" failure shape (its FATAL, not a guess).
+    """
+    victim = tmp_path / "victim.jsonl"
+    victim.write_text("not doctor's business", encoding="utf-8")
+    env = {**os.environ, "HOME": str(tmp_path / "home"),
+           "CLAUDE_PROJECT_DIR": str(tmp_path / "does-not-exist"),
+           "REMEMBER_TRANSCRIPT_PATH": str(victim)}
+    result = subprocess.run(["bash", str(DOCTOR)], env=env, cwd=str(tmp_path),
+                            capture_output=True, text=True, timeout=120)
+    assert "problem" in result.stdout, (
+        f"test setup did not actually hit resolve-paths.sh's failure branch:"
+        f"\n{result.stdout}\n{result.stderr}"
+    )
+    assert "REMEMBER_TRANSCRIPT_PATH" in result.stdout, (
+        f"doctor.sh dropped the transcript-path warning on a path-resolution "
+        f"failure:\n{result.stdout}\n{result.stderr}"
+    )
+
+
+@_posix_only
+def test_doctor_strips_control_characters_from_transcript_path(tmp_path):
+    """MUST FIRE: an embedded newline in the ambient value must not forge a
+    second report line (#408's own reasoning, applied to this new WARN)."""
+    home, project, remember = _doctor_project(tmp_path)
+    forged = str(tmp_path / "victim.jsonl") + "\nOK   FAKE = fine"
+    result = _run_doctor(home, project, remember,
+                         {"REMEMBER_TRANSCRIPT_PATH": forged})
+    # The substring surviving is fine -- it is still inside the WARN's own
+    # indented value line. What must never happen is the forged text landing
+    # as ITS OWN report line, indistinguishable from a genuine OK/WARN/FAIL.
+    assert "OK   FAKE = fine" not in result.stdout.splitlines(), (
+        f"an embedded newline in REMEMBER_TRANSCRIPT_PATH forged a fake "
+        f"report line of its own:\n{result.stdout}"
+    )

@@ -169,6 +169,36 @@ else
 fi
 echo ""
 
+# REMEMBER_TRANSCRIPT_PATH is trusted input for a manual run by design (#431):
+# pipeline/host.transcript_path() gates on existence alone, with no
+# containment check, and this script never clears it the way
+# post-tool-hook.sh and user-prompt-hook.sh do (#424/#430) -- doctor.sh is
+# itself a manual invocation, not a hook with a payload of its own. That
+# decision must not be the absence of a check that nobody decided, so say it
+# loudly rather than proceeding in silence. Checked here, ahead of path
+# resolution below, so a broken CLAUDE_CONFIG_DIR/HOME does not also silence
+# this warning by way of the early `exit 0` a few lines down.
+#
+# The value is untrusted text that this script goes on to print in its own
+# report (#408's own reasoning for the --json branch's _json_escape, above):
+# `tr -d '[:cntrl:]'` strips every C0 control byte, including an embedded
+# newline, so a value cannot forge a second report line -- a fake "OK" or
+# "FAIL" at column 0 that a reader (or a relaying assistant) cannot tell from
+# a real one.
+if [ -n "${REMEMBER_TRANSCRIPT_PATH:-}" ]; then
+    _DT_TRANSCRIPT_PATH_SAFE=$(printf '%s' "$REMEMBER_TRANSCRIPT_PATH" | tr -d '[:cntrl:]')
+    echo "WARN REMEMBER_TRANSCRIPT_PATH is set in this shell's environment:"
+    echo "     $_DT_TRANSCRIPT_PATH_SAFE"
+    echo "     This is trusted input for a manual run (#431), the same as any"
+    echo "     other variable your shell inherits -- pipeline.extract will read"
+    echo "     it verbatim if you invoke it by hand, with no containment check."
+    echo "     session-start-hook.sh and session-end-hook.sh export it freshly on"
+    echo "     every hook run; post-tool-hook.sh and user-prompt-hook.sh clear it"
+    echo "     before doing anything else. If you did not set this yourself,"
+    echo "     unset it before running anything by hand."
+    echo ""
+fi
+
 # ── 2. Resolved paths ────────────────────────────────────────────────────────
 echo "-- Paths --"
 
@@ -214,25 +244,6 @@ else
     echo "OK   CLAUDE_PROJECT_DIR = $PROJECT_DIR"
 fi
 echo "OK   PIPELINE_DIR       = $PIPELINE_DIR"
-
-# REMEMBER_TRANSCRIPT_PATH is trusted input for a manual run by design (#431):
-# pipeline/host.transcript_path() gates on existence alone, with no
-# containment check, and this script never clears it the way
-# post-tool-hook.sh and user-prompt-hook.sh do (#424/#430) -- doctor.sh is
-# itself a manual invocation, not a hook with a payload of its own. That
-# decision must not be the absence of a check that nobody decided, so say it
-# loudly rather than proceeding in silence.
-if [ -n "${REMEMBER_TRANSCRIPT_PATH:-}" ]; then
-    echo "WARN REMEMBER_TRANSCRIPT_PATH is set in this shell's environment:"
-    echo "     $REMEMBER_TRANSCRIPT_PATH"
-    echo "     This is trusted input for a manual run (#431), the same as any"
-    echo "     other variable your shell inherits -- pipeline.extract will read"
-    echo "     it verbatim if you invoke it by hand, with no containment check."
-    echo "     session-start-hook.sh and session-end-hook.sh export it freshly on"
-    echo "     every hook run; post-tool-hook.sh and user-prompt-hook.sh clear it"
-    echo "     before doing anything else. If you did not set this yourself,"
-    echo "     unset it before running anything by hand."
-fi
 
 # lib-memory-dir.sh directly (not bootstrap-dirs.sh — see header). It sources
 # lib-slug.sh itself, so session_dir_slug/claude_projects_dir are available
