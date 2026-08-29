@@ -61,6 +61,11 @@ def _make_env(tmp_path: Path, warn_bytes=None):
                    "lib-staging-lock.sh", "lib-slug.sh", "lib-clock.sh"):
         (plugin / "scripts" / script).write_text((REPO_ROOT / "scripts" / script).read_text())
     (plugin / "scripts" / "driver.sh").write_text(DRIVER)
+    # resolve-paths.sh (#471) now requires pipeline/haiku.py to accept a
+    # CLAUDE_PLUGIN_ROOT/PLUGIN_ROOT value at all, not just [ -d ] -- an
+    # empty stub is enough, nothing here ever imports it.
+    (plugin / "pipeline").mkdir(parents=True)
+    (plugin / "pipeline" / "haiku.py").write_text("", encoding="utf-8")
 
     thresholds = {}
     if warn_bytes is not None:

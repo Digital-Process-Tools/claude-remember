@@ -116,14 +116,37 @@ _resolve_paths_fail() {
     exit 1
 }
 
+# _REMEMBER_PLUGIN_ROOT keeps this EXACT single-assignment shape --
+# test_host_shell_parity_407.py::_shell_mirrored_vars() reads the two
+# variable names straight off this line via regex, rather than a
+# hand-copied list that would drift from pipeline/host.PLUGIN_ROOT_VARS
+# unnoticed. Validation (#471) below is layered on top of it, not folded
+# into the assignment itself, so that regex keeps matching.
 _REMEMBER_PLUGIN_ROOT="${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}"
-if [ -n "$_REMEMBER_PLUGIN_ROOT" ]; then
+if [ -n "$_REMEMBER_PLUGIN_ROOT" ] && [ -f "$_REMEMBER_PLUGIN_ROOT/pipeline/haiku.py" ]; then
     PIPELINE_DIR="$_REMEMBER_PLUGIN_ROOT"
+elif [ -n "${PLUGIN_ROOT:-}" ] && [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] \
+        && [ "$_REMEMBER_PLUGIN_ROOT" != "$CLAUDE_PLUGIN_ROOT" ] \
+        && [ -f "${CLAUDE_PLUGIN_ROOT}/pipeline/haiku.py" ]; then
+    # PLUGIN_ROOT is generic and unnamespaced (#471): an unrelated tool
+    # exporting it into a hook's environment would otherwise become this
+    # plugin's execution root with no check that it contains this plugin's
+    # code -- PIPELINE_DIR is subsequently the pipeline.shell import root,
+    # sourced as scripts/log.sh, executed as scripts/save-session.sh, and
+    # dispatched as hooks.d. A PLUGIN_ROOT that fails the same [ -f ] marker
+    # check the local-install branch below already makes falls through to
+    # the vendor alias instead of being trusted anyway -- turning a name
+    # collision into a fallback rather than a wrong execution root. This
+    # arm only fires when PLUGIN_ROOT was actually set and rejected (so
+    # _REMEMBER_PLUGIN_ROOT came from it, not already from
+    # CLAUDE_PLUGIN_ROOT) and names a genuinely different directory than
+    # CLAUDE_PLUGIN_ROOT, which is validated here on its own merits.
+    PIPELINE_DIR="$CLAUDE_PLUGIN_ROOT"
 elif [ -f "$_PLUGIN_ROOT_CANDIDATE/pipeline/haiku.py" ]; then
     # Local install: scripts/ is one level below the plugin root
     PIPELINE_DIR="$_PLUGIN_ROOT_CANDIDATE"
 else
-    _msg="FATAL: Cannot resolve plugin root. CLAUDE_PLUGIN_ROOT is not set and $_PLUGIN_ROOT_CANDIDATE/pipeline/haiku.py does not exist."
+    _msg="FATAL: Cannot resolve plugin root. PLUGIN_ROOT/CLAUDE_PLUGIN_ROOT do not point at a valid plugin install (missing pipeline/haiku.py) and $_PLUGIN_ROOT_CANDIDATE/pipeline/haiku.py does not exist."
     _resolve_paths_fail "$_msg" "${CLAUDE_PROJECT_DIR:-.}/.remember/logs" || return 1
 fi
 

@@ -88,9 +88,21 @@ def test_plugin_root_wins_over_claude_plugin_root(tmp_path):
 
 def test_claude_plugin_root_still_works_when_plugin_root_is_unset(tmp_path):
     """The alias must keep working alone -- nothing here should regress a
-    Claude Code install that has never heard of ``PLUGIN_ROOT``."""
+    Claude Code install that has never heard of ``PLUGIN_ROOT``.
+
+    Deliberately updated for #471: this used to accept an EMPTY ``alias``
+    directory (``alias.mkdir()`` with nothing inside) as a valid
+    ``PIPELINE_DIR``, which was exactly the missing validation #471 is
+    about -- ``[ -d ]`` and nothing else. Pinning that as "still works"
+    would re-encode the bug this lane exists to fix. ``alias`` now has to
+    look like an actual plugin install (``pipeline/haiku.py`` present, the
+    same marker the local-install branch already required) for the
+    assertion below to mean what it says.
+    """
     alias = tmp_path / "alias"
     alias.mkdir()
+    (alias / "pipeline").mkdir()
+    (alias / "pipeline" / "haiku.py").write_text("", encoding="utf-8")
 
     env = {
         **os.environ,
