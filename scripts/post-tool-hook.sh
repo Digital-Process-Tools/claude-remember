@@ -115,17 +115,19 @@ _HOOK_DIR="${BASH_SOURCE[0]%/*}"
 # a memory directory under the summarizer's temp dir.
 [ -n "${REMEMBER_NESTED_SUMMARIZER:-}" ] && exit 0
 
-# --- REMEMBER_HOOK_CWD (#417) ---
+# --- REMEMBER_HOOK_CWD (#417, #444) ---
 # resolve-paths.sh falls back to this variable when CLAUDE_PROJECT_DIR is
-# unset (#411), but only session-start-hook.sh and session-end-hook.sh ever
-# set it -- each from its own stdin `cwd`, freshly validated on every run.
-# This hook has no stdin `cwd` of its own to offer and must not silently
-# inherit whatever the process environment happens to already hold (a value
-# a DIFFERENT session's SessionStart exported, on a host that reuses one
-# environment across hook invocations). Clearing it here is cheap and
-# unconditionally correct regardless of whether that reuse is possible on any
-# supported host: on the common path CLAUDE_PROJECT_DIR is already set and
-# this arm never runs anyway.
+# unset (#411). Cleared here first and unconditionally, before anything below
+# could set or inherit it -- the #417 leak this closes is a DIFFERENT
+# session's SessionStart-exported value surviving into a hook that has not
+# validated it, or (on a host that reuses one process environment across
+# invocations) a stale value this same hook wrote on a PREVIOUS run. This
+# hook now offers its own stdin `cwd` further down (#444, from the same
+# capture that already reads stdin for `session_id`), but that read has to
+# happen after this unset, never instead of it, or the #417 leak reopens.
+# Clearing it here is cheap and unconditionally correct regardless of whether
+# that reuse is possible on any supported host: on the common path
+# CLAUDE_PROJECT_DIR is already set and this arm never runs anyway.
 unset REMEMBER_HOOK_CWD
 
 # --- REMEMBER_TRANSCRIPT_PATH (#424) ---

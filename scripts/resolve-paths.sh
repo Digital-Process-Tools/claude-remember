@@ -133,24 +133,26 @@ fi
 #   1. CLAUDE_PROJECT_DIR (set by Claude Code — always correct, and the more
 #      specific signal on the host that sets it, so it is tried first and a
 #      disagreeing stdin cwd never overrides it)
-#   2. REMEMBER_HOOK_CWD (#411) — the SessionStart/SessionEnd payload's `cwd`
-#      field, exported by the hooks that already read stdin for `session_id`
-#      and `transcript_path` (#206, #407). Codex and Gemini CLI both put `cwd`
-#      on that payload but neither sets CLAUDE_PROJECT_DIR (Codex documents no
-#      such variable at all; Gemini documents no hook environment variables
-#      whatsoever), so this is the fallback that makes resolution possible on
-#      either host. Not every caller of this file is a hook with stdin to
-#      read -- doctor.sh and a bare `source` from a shell have none -- so an
-#      unset or unusable value here is silently skipped, same as an unset
-#      CLAUDE_PROJECT_DIR above.
+#   2. REMEMBER_HOOK_CWD (#411, #444) — the host's own hook-event payload's
+#      `cwd` field, exported by the hook that read this file, from its own
+#      stdin -- every hook this plugin registers now offers one (session-start
+#      and session-end since #411; user-prompt and post-tool since #444).
+#      Codex and Gemini CLI both put `cwd` on that payload but neither sets
+#      CLAUDE_PROJECT_DIR (Codex documents no such variable at all; Gemini
+#      documents no hook environment variables whatsoever), so this is the
+#      fallback that makes resolution possible on either host. Not every
+#      caller of this file is a hook with stdin to read -- doctor.sh and a
+#      bare `source` from a shell have none -- so an unset or unusable value
+#      here is silently skipped, same as an unset CLAUDE_PROJECT_DIR above.
 #
 #      ASSUMPTION (#417): this file only SOURCES the variable, it never sets
 #      it, so its correctness here depends on every caller either exporting a
-#      freshly-validated value (session-start-hook.sh, session-end-hook.sh —
-#      each from its own stdin payload, each rejecting embedded newlines) or
-#      clearing it before sourcing this file (post-tool-hook.sh,
-#      user-prompt-hook.sh — neither has a stdin `cwd` of its own to offer,
-#      and each `unset`s it near the top of the file for exactly that reason).
+#      freshly-validated value from its own stdin payload (every hook that
+#      reaches this file does, as of #444, each rejecting embedded newlines)
+#      or clearing it before sourcing this file when it has none to offer
+#      (every non-hook caller, and any hook on a run where stdin carried no
+#      usable `cwd` -- the `unset` at the top of each hook's file runs first,
+#      before its own stdin read, for exactly that reason).
 #      The assumption this whole chain rests on is that no supported host
 #      reuses one process environment across separate hook invocations within
 #      a project-agnostic dispatcher; on Claude Code CLAUDE_PROJECT_DIR always
