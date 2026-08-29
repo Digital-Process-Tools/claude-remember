@@ -15,6 +15,15 @@ jobs:
         python-version: ["3.9", "3.10", "3.11", "3.12"]
     steps:
       - uses: actions/checkout@v7
+      - name: Fetch origin/main
+        # actions/checkout on a pull_request event checks out the merge ref
+        # with no local origin/main branch ref at all, so anything comparing
+        # against origin/main (tests/test_case_divergence_298.py's byte-pin
+        # guard) cannot resolve its base and would otherwise have to skip
+        # itself -- which is exactly how that guard went unexercised on
+        # every pull_request run (#442). Fetch it explicitly and cheaply;
+        # depth 1 is enough since only the tip of main is compared against.
+        run: git fetch --no-tags --depth=1 origin main:refs/remotes/origin/main
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v7
         with:

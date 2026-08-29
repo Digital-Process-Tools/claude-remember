@@ -593,6 +593,49 @@ def test_doctor_is_quiet_when_the_spellings_agree(tmp_path):
 # at all (found by the self-review auditor on #440).
 
 
+def _origin_main_should_be_resolvable(env: dict) -> bool:
+    """A pure decision, kept separate from the subprocess call so it can be
+    tested without depending on the state of `origin/main` in whatever
+    checkout happens to run this suite.
+
+    True on a CI runner, where `origin/main` failing to resolve is exactly
+    the #442 exposure this test exists to close: the checkout step is
+    supposed to have made it available, so its absence is the guard not
+    doing its job, and that must fail loudly rather than render as a skip
+    that looks identical to a pass.
+
+    False everywhere else -- a contributor's local clone may legitimately
+    have no `origin` remote, or a shallow non-CI clone that never fetched
+    `main` at all. Turning that into a hard failure would make the suite
+    unrunnable for a contributor who did nothing wrong, so it stays a skip.
+
+    Both `CI` and `GITHUB_ACTIONS` are checked because they are the two
+    conventional signals and either one is sufficient; neither is unset by
+    accident on a runner, and no test in this suite claims to have unset one
+    to prove that.
+    """
+    return env.get("CI") == "true" or env.get("GITHUB_ACTIONS") == "true"
+
+
+def test_origin_main_unavailable_outcome_fails_loudly_on_ci():
+    """The load-bearing case: on a CI runner, an unresolved origin/main must
+    not render as a skip. A version of this function that always returned
+    False (i.e. always skip) would pass every other test in this file and
+    still leave #442 open -- this is the one that would catch it."""
+    assert _origin_main_should_be_resolvable({"CI": "true"}) is True
+    assert _origin_main_should_be_resolvable({"GITHUB_ACTIONS": "true"}) is True
+
+
+def test_origin_main_unavailable_outcome_skips_locally():
+    """The positive control's negative twin: no CI signal at all reads as a
+    contributor's local clone, which must stay a skip rather than a hard
+    failure -- turning it into one would make the suite unrunnable for
+    anyone without an `origin` remote configured."""
+    assert _origin_main_should_be_resolvable({}) is False
+    assert _origin_main_should_be_resolvable({"CI": "false"}) is False
+    assert _origin_main_should_be_resolvable({"PATH": "/usr/bin"}) is False
+
+
 def test_the_per_tool_call_path_is_not_touched(tmp_path):
     """#299 asserts this and it stays asserted. `session_dir_slug` runs on every
     tool call; this check runs once per session and nowhere near it.
@@ -656,7 +699,18 @@ def test_the_per_tool_call_path_is_not_touched(tmp_path):
         ["git", "-C", str(REPO_ROOT), "show", "origin/main:scripts/post-tool-hook.sh"],
         capture_output=True, text=True)
     if base.returncode != 0:
-        pytest.skip("origin/main not available")
+        if _origin_main_should_be_resolvable(os.environ):
+            pytest.fail(
+                "origin/main did not resolve on a CI runner -- the byte-pin guard "
+                "this test implements did not run at all (#442). A skip here "
+                "renders exactly like a pass; on a CI runner that is never the "
+                "right answer, so this fails loudly instead."
+            )
+        pytest.skip(
+            "origin/main not available -- no CI env var detected, so this is "
+            "read as a local clone without the ref (e.g. no 'origin' remote, "
+            "or a shallow non-CI clone) rather than the #442 exposure"
+        )
     def _code(text: str) -> str:
         return "\n".join(line for line in text.splitlines()
                          if not line.lstrip().startswith("#"))
