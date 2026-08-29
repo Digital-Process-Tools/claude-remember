@@ -13,8 +13,8 @@ field-keyed sanitiser would walk.
 #467 shipped a SECOND leak in a second file, and this file's first draft
 got the shape of it wrong. `tests/test_codex_upsubmit_stdout_451.py` --
 ordinary hand-authored `.py` test source, not a fixture -- carried the bare
-username `floriandavid` twice, pasted from real captured probe output
-into a string literal (`"[10:54 CEST -- floriandavid]"`). That is a BARE
+username `sanitized-user` twice, pasted from real captured probe output
+into a string literal (`"[10:54 CEST -- sanitized-user]"`). That is a BARE
 username, not a `/Users/<x>/` or `/home/<x>/` path, and it landed in a
 hand-authored `.py` file, not a fixture.
 
@@ -136,11 +136,30 @@ could act on, not signal. That skip is also loud (`pytest.skip`, reason
 stated) and is a genuinely different question from "is this CI at all".
 
 Scoped OUT of detector 2, by name and why: nothing is scoped out by path --
-it is deliberately tree-wide, since a username has no legitimate-hit flood
-to defend against -- except this file itself (it names the username in
-its own prose, above and in code comments, which would otherwise be a
-permanent false positive on whichever machine happens to run the suite
-under that username).
+it is deliberately tree-wide, and that now includes this file itself
+(#474). An earlier draft exempted THIS_FILE from the tree-wide scan, on
+the argument that a file documenting the mechanism has to be able to
+quote a real leaked value, and a single-file skip is the smallest
+exemption that permits that. #474 found the composition that argument
+missed: the exemption plus a real username quoted under it means the
+tree ships the value, the install copies it, and the one file that
+could have caught it is the one file the guard cannot see. The guard
+went green on a tree containing exactly what it exists to detect.
+
+The docstring above now names the mechanism with the same placeholder
+the fixture already standardised on (`sanitized-user`), which explains
+detector 2 identically without quoting anything real -- so the
+exemption's only remaining job would be to permit a FUTURE quotation,
+not to excuse a present one. That job is not worth keeping: a
+placeholder says everything a real value would, and keeping a
+self-exemption around "just in case" is exactly the kind of narrow,
+individually-defensible carve-out that produced this issue in the first
+place. Removing it means the next person who pastes a real username
+into this file's prose gets a failing test on their own machine, in the
+same run, rather than a guard that stays green because it cannot look
+at itself. That is a strictly better failure mode than the one this
+issue reports, so THIS_FILE is no longer exempted and is no longer
+defined below.
 """
 
 from __future__ import annotations
@@ -155,7 +174,6 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 FIXTURES_DIR = REPO_ROOT / "tests" / "fixtures"
-THIS_FILE = Path(__file__).resolve()
 
 # ---------------------------------------------------------------------------
 # Detector 1: un-sanitised /Users/<x>/ or /home/<x>/ segments in fixtures.
@@ -357,8 +375,6 @@ def test_no_tracked_file_leaks_the_current_machine_username():
         )
     offenders: list[str] = []
     for f in _tracked_files():
-        if f.resolve() == THIS_FILE:
-            continue
         try:
             text = f.read_text(encoding="utf-8", errors="replace")
         except (IsADirectoryError, PermissionError, OSError):
