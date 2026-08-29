@@ -225,13 +225,29 @@ def _choose_summarizer_provider() -> str:
     No usable transcript (unset, unreadable, or a shape neither host wrote)
     answers "claude" -- the historical default every host got before Codex
     routing existed, and the safe side of an unrecognised signal either way.
+    A transcript that WAS exported but could not be sniffed (deleted between
+    export and this read, or a shape neither host wrote) logs why it fell to
+    "claude" -- an operator debugging a wrongly-billed session must be able
+    to tell "genuinely Claude Code" from "could not tell", the same
+    distinction every other UNKNOWN-shaped result in this module already
+    makes loudly (see pipeline.host.sniff_envelope()'s own docstring).
     """
     provider = _resolve_summarizer_provider()
     if provider != "auto":
         return provider
     path = _host.transcript_path()
-    envelope = _extract.sniff_file_envelope(path) if path else "unrecognised"
-    return "codex" if envelope == "codex" else "claude"
+    if not path:
+        return "claude"
+    envelope = _extract.sniff_file_envelope(path)
+    if envelope == "codex":
+        return "codex"
+    if envelope == "unrecognised":
+        _warn(
+            f"WARNING: could not identify the host from transcript {path!r} "
+            "(unreadable or an unrecognised shape) -- REMEMBER_SUMMARIZER=auto "
+            "is falling back to 'claude', which may not be correct"
+        )
+    return "claude"
 
 
 def _child_env() -> dict[str, str]:

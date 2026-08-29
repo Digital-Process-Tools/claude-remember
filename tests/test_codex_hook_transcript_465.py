@@ -37,6 +37,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -100,6 +101,37 @@ def test_codex_signature_env_vars_alone_no_longer_select_codex(monkeypatch):
     _clear_host_signals(monkeypatch)
     monkeypatch.setenv("CODEX_SESSION_ID", "01a04d64-fake-codex-session")
     assert _choose_summarizer_provider() == "claude"
+
+
+def test_unusable_transcript_logs_why_it_fell_to_claude(monkeypatch):
+    """The auditor's own finding on #465: a transcript that WAS exported but
+    could not be sniffed (unreadable, or a shape neither host wrote) must
+    log why "auto" fell to "claude" -- otherwise a genuinely-Claude-Code
+    session and a broken sniff are indistinguishable to an operator
+    debugging a wrongly-billed session. Positive control: fires when the
+    path exists but is genuinely unrecognisable."""
+    _clear_host_signals(monkeypatch)
+    unrecognised = FIXTURES / "unrecognised-465.jsonl"
+    unrecognised.write_text('{"not": "a host shape"}\n', encoding="utf-8")
+    try:
+        monkeypatch.setenv("REMEMBER_TRANSCRIPT_PATH", str(unrecognised))
+        with patch("pipeline.haiku._warn") as mock_warn:
+            assert _choose_summarizer_provider() == "claude"
+        mock_warn.assert_called_once()
+        assert "could not identify the host" in mock_warn.call_args[0][0]
+    finally:
+        unrecognised.unlink()
+
+
+def test_no_transcript_at_all_does_not_warn(monkeypatch):
+    """The must-not-fire half paired with the positive control above: the
+    ordinary, expected case of no REMEMBER_TRANSCRIPT_PATH at all (a bare
+    pipeline invocation with no hook preamble) is not a failure and must
+    not log a warning every time."""
+    _clear_host_signals(monkeypatch)
+    with patch("pipeline.haiku._warn") as mock_warn:
+        assert _choose_summarizer_provider() == "claude"
+    mock_warn.assert_not_called()
 
 
 def test_explicit_override_wins_regardless_of_transcript(monkeypatch):
