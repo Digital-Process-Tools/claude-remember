@@ -592,10 +592,15 @@ if [ "$IS_SKIP" = "true" ]; then
     # stops growing, and max_summary_failures never notices because that counts
     # hard errors and this call succeeded.
     if [ "${IS_REJECTED:-false}" = "true" ]; then
-        log "haiku" "REJECTED (not a summary -- refusal or clarification): $(head -c 80 "$HAIKU_TEXT_FILE" 2>/dev/null)"
+        log "haiku" "REJECTED (provider: ${PROVIDER:-claude}; not a summary -- refusal or clarification): $(head -c 80 "$HAIKU_TEXT_FILE" 2>/dev/null)"
         keep_rejected_text "$HAIKU_TEXT_FILE" "haiku"
     fi
-    log "haiku" "SKIP -- position -> $POSITION"
+    # provider is logged here (#461): a plain "SKIP" is ambiguous about which
+    # route declined once more than one summarizer exists (#460) -- a bare
+    # host guess from the branch name or the log's surrounding lines would be
+    # reconstruction, the exact failure mode #443's envelope field exists to
+    # avoid. This is the value the call itself reported using.
+    log "haiku" "SKIP (provider: ${PROVIDER:-claude}) -- position -> $POSITION"
     cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell save-position "$LAST_SAVE_FILE" "$SESSION_ID" "$POSITION" "$ENVELOPE"
     # A SKIP is a successful summarization (the model judged the span not worth
     # recording) and it advances the position, so it must clear the failure
@@ -681,7 +686,7 @@ APPEND_ERR=$({ printf '\n' && cat "$HAIKU_TEXT_FILE"; } 2>&1 >> "$APPEND_TMP") \
 # here keeps the position, so the span is summarized again next run.
 APPEND_ERR=$(mv "$APPEND_TMP" "$MEMORY_FILE" 2>&1) \
     || append_failed "commit failed: ${APPEND_ERR:-unknown error}"
-log "write" "appended: $(head -1 "$HAIKU_TEXT_FILE" | cut -c1-80)"
+log "write" "appended (provider: ${PROVIDER:-claude}): $(head -1 "$HAIKU_TEXT_FILE" | cut -c1-80)"
 cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell save-position "$LAST_SAVE_FILE" "$SESSION_ID" "$POSITION" "$ENVELOPE"
 log "write" "position -> $POSITION"
 rm -f "$FAILURE_MARKER"
@@ -775,6 +780,7 @@ if [ "$RUN_NDC" = true ]; then
                 # failure mode that writes into permanent memory.
                 IS_SKIP=false
                 IS_REJECTED=false
+                PROVIDER=claude
                 safe_eval <<< "$NDC_VARS"
                 NDC_TEXT=$(cat "$HAIKU_TEXT_FILE")
                 # Before the branch, not inside the success arm: the call has
@@ -792,7 +798,7 @@ if [ "$RUN_NDC" = true ]; then
                 # corrupted memory, written into the permanent record with no
                 # log line. now.md is left intact so the next round retries.
                 if [ "$IS_SKIP" = "true" ] || [ "${IS_REJECTED:-false}" = "true" ]; then
-                    log "ndc" "REJECTED (not a summary -- refusal or clarification): $(head -c 80 "$HAIKU_TEXT_FILE" 2>/dev/null)"
+                    log "ndc" "REJECTED (provider: ${PROVIDER:-claude}; not a summary -- refusal or clarification): $(head -c 80 "$HAIKU_TEXT_FILE" 2>/dev/null)"
                     keep_rejected_text "$HAIKU_TEXT_FILE" "ndc"
                 elif [ -n "$NDC_TEXT" ]; then
                     # Under staging.lock, not save.lock and not nothing (#225).

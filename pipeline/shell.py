@@ -219,6 +219,12 @@ def _emit_haiku_result(r, output_file: str = "") -> None:
     print(f"HAIKU_TEXT_FILE={_shell_escape(text_file)}")
     print(f"IS_SKIP={'true' if r.is_skip else 'false'}")
     print(f"IS_REJECTED={'true' if r.is_rejected else 'false'}")
+    # Which route produced this (#461): a plain "SKIP" in the log is
+    # ambiguous about which provider declined once more than one exists
+    # (#460). Threaded through rather than reconstructed at log time, since
+    # a call-haiku declines (spawn guard) before it even reaches whichever
+    # provider it would have used.
+    print(f"PROVIDER={_shell_escape(r.provider)}")
     print(f"TK_IN={r.tokens.input}")
     print(f"TK_OUT={r.tokens.output}")
     print(f"TK_CACHE={r.tokens.cache}")

@@ -147,6 +147,11 @@ elif cmd == "call-haiku":
     print("IS_SKIP=" + ("true" if (rejected or (not is_ndc and skipping)) else "false"))
     print("IS_REJECTED=" + ("true" if rejected else "false"))
     print(f"HAIKU_TEXT_FILE={path}")
+    # Which route produced this (#460/#461) -- defaults to "claude" so every
+    # pre-#460 test in this file, which never sets STUB_PROVIDER, is
+    # unaffected: save-session.sh reads it with the same ${PROVIDER:-claude}
+    # fallback the real pipeline.shell always overrides on a live call.
+    print(f"PROVIDER={os.environ.get('STUB_PROVIDER', 'claude')}")
     print("TK_IN=0"); print("TK_OUT=0"); print("TK_CACHE=0"); print("TK_COST=0")
 elif cmd == "build-ndc-prompt":
     # Must be non-empty: save-session.sh gates the NDC run on `[ -s ... ]`.

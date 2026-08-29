@@ -61,12 +61,22 @@ class HaikuResult:
             caller has to be able to say so — reported as a plain SKIP it is
             indistinguishable from a genuinely empty session, and it slips
             past max_summary_failures too, which only counts hard errors.
+        provider: Which summarizer actually produced this result -- "claude"
+            or "codex" (#460/#461). Multiple providers exist now, so a SKIP
+            in the log is ambiguous about which one declined unless this is
+            threaded through: the "was this host-shaped?" question #461 asks
+            is only answerable if the log can name which route a given
+            verdict came from. Set explicitly by whichever call path built
+            this result; the default is "claude" because that was the only
+            provider before #460 and every construction site that predates
+            it (tests included) is correct leaving it unset.
     """
 
     text: str = ""
     tokens: TokenUsage = field(default_factory=TokenUsage)
     is_skip: bool = False
     is_rejected: bool = False
+    provider: str = "claude"
 
 
 @dataclass
