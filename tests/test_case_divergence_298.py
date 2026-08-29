@@ -109,6 +109,35 @@ LIB_MEMORY_DIR = REPO_ROOT / "scripts" / "lib-memory-dir.sh"
 # that used to separate a stripped comment block from the code around it
 # survives into the joined "code lines only" text and must be matched here
 # too -- these `\n\n`s are not decoration, they are load-bearing whitespace.
+def _apply_sanctioned_divergence(ref_code: str, rel: str) -> str:
+    """Apply the one sanctioned old-to-new substitution for `rel`, if any.
+
+    Three states, not two (#440) -- the two-state version failed on
+    origin/main the instant its own allowance's PR merged:
+
+    - `old_code` is on origin/main: the substitution's own PR is still open
+      (or the byte-compare is being run against a base that predates it).
+      Substitute old_code with new_code so the compare judges the sanctioned
+      fix rather than the noise it has not yet replaced.
+    - `old_code` is gone AND `new_code` is on origin/main: the post-merge
+      steady state -- the sanctioned fix has already landed on origin/main.
+      Nothing to substitute; return ref_code unchanged rather than asserting.
+    - Neither is on origin/main: genuinely stale. origin/main moved again and
+      this allowance needs re-deriving, not blindly (re-)applied.
+    """
+    if rel not in _SANCTIONED_DIVERGENCE:
+        return ref_code
+    old_code, new_code = _SANCTIONED_DIVERGENCE[rel]
+    if old_code in ref_code:
+        return ref_code.replace(old_code, new_code)
+    assert new_code in ref_code, (
+        f"{rel}: neither the old nor the new code of this sanctioned "
+        "substitution is on origin/main -- origin/main has moved and this "
+        "allowance needs re-deriving, not blindly re-applying"
+    )
+    return ref_code
+
+
 _SANCTIONED_DIVERGENCE = {
     "scripts/lib-memory-dir.sh": (
         '_merged_cfg="${SYS_TMPDIR}/remember-config-$$.json"\n\n' +
@@ -556,6 +585,39 @@ def test_doctor_is_quiet_when_the_spellings_agree(tmp_path):
 # ── The hot path ─────────────────────────────────────────────────────────────
 
 
+def test_sanctioned_divergence_applies_pre_merge_shape():
+    """The sanctioned old->new substitution is still a live PR: old_code is
+    still on origin/main. Substitute it in so the byte-compare judges the fix
+    the allowance exempts, not the noise of the still-open PR (#440)."""
+    rel = "scripts/lib-memory-dir.sh"
+    old_code, new_code = _SANCTIONED_DIVERGENCE[rel]
+    ref_code = f"before\n{old_code}\nafter"
+    result = _apply_sanctioned_divergence(ref_code, rel)
+    assert new_code in result
+    assert old_code not in result
+
+
+def test_sanctioned_divergence_accepts_post_merge_shape():
+    """The allowance's own PR has landed: origin/main now holds new_code and
+    old_code is gone. That is the post-merge steady state, not staleness --
+    pass ref_code through unchanged rather than asserting (#440)."""
+    rel = "scripts/lib-memory-dir.sh"
+    old_code, new_code = _SANCTIONED_DIVERGENCE[rel]
+    ref_code = f"before\n{new_code}\nafter"
+    result = _apply_sanctioned_divergence(ref_code, rel)
+    assert result == ref_code
+
+
+def test_sanctioned_divergence_still_asserts_when_genuinely_stale():
+    """Neither old_code nor new_code is on origin/main: origin/main moved
+    further still and this allowance needs re-deriving, not blindly
+    (re-)applied -- the one case that must still fail loudly (#440)."""
+    rel = "scripts/lib-memory-dir.sh"
+    ref_code = "something else entirely, unrelated to either shape"
+    with pytest.raises(AssertionError):
+        _apply_sanctioned_divergence(ref_code, rel)
+
+
 def test_the_per_tool_call_path_is_not_touched(tmp_path):
     """#299 asserts this and it stays asserted. `session_dir_slug` runs on every
     tool call; this check runs once per session and nowhere near it.
@@ -635,15 +697,7 @@ def test_the_per_tool_call_path_is_not_touched(tmp_path):
             f"{rel} on origin/main has no non-comment lines — this compare "
             "would pass against any file at all"
         )
-        ref_code = _code(ref.stdout)
-        if rel in _SANCTIONED_DIVERGENCE:
-            old_code, new_code = _SANCTIONED_DIVERGENCE[rel]
-            assert old_code in ref_code, (
-                f"{rel}: the code this sanctioned substitution expects to find "
-                "on origin/main is gone -- origin/main has moved and this "
-                "allowance needs re-deriving, not blindly re-applying"
-            )
-            ref_code = ref_code.replace(old_code, new_code)
+        ref_code = _apply_sanctioned_divergence(_code(ref.stdout), rel)
         assert ref_code == _code(path.read_text(encoding="utf-8")), rel
 
 
