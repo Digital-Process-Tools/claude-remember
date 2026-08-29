@@ -93,6 +93,10 @@ def cmd_extract(session_id: str, project_dir: str) -> None:
     print(f"ASSISTANT_COUNT={r.assistant_count}")
     print(f"EXCHANGE_COUNT={r.human_count + r.assistant_count}")
     print(f"EXTRACT_FILE={_shell_escape(extract_file)}")
+    # "unrecognised" is a transcript shape neither known host wrote -- distinct
+    # from a genuine 0-exchange session, which save-session.sh must not report
+    # the same way (#443).
+    print(f"ENVELOPE={_shell_escape(r.envelope)}")
 
 
 def cmd_build_prompt(

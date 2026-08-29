@@ -146,6 +146,7 @@ def test_cmd_extract_prints_shell_vars(capsys):
         position=10,
         human_count=3,
         assistant_count=2,
+        envelope="claude-code",
     )
     with patch("pipeline.shell.extract_session", return_value=fake_result):
         cmd_extract(session_id="sess-abc", project_dir="/tmp/fake")
@@ -156,6 +157,7 @@ def test_cmd_extract_prints_shell_vars(capsys):
     assert "ASSISTANT_COUNT=2" in output
     assert "EXCHANGE_COUNT=5" in output
     assert "EXTRACT_FILE=" in output
+    assert "ENVELOPE=claude-code" in output
 
     # Verify temp file was written with exchanges content
     for line in output.strip().split("\n"):
@@ -165,6 +167,23 @@ def test_cmd_extract_prints_shell_vars(capsys):
             assert "[human] hello" in content
             os.unlink(path)
             break
+
+
+def test_cmd_extract_prints_unrecognised_envelope(capsys):
+    """#443: save-session.sh needs ENVELOPE on the shell bridge to tell a
+    genuinely-quiet session apart from one it could not parse at all."""
+    fake_result = ExtractResult(
+        exchanges="",
+        position=2,
+        human_count=0,
+        assistant_count=0,
+        envelope="unrecognised",
+    )
+    with patch("pipeline.shell.extract_session", return_value=fake_result):
+        cmd_extract(session_id="sess-abc", project_dir="/tmp/fake")
+
+    output = capsys.readouterr().out
+    assert "ENVELOPE=unrecognised" in output
 
 
 # --- cmd_build_prompt ---

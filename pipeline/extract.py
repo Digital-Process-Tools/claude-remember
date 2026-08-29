@@ -225,6 +225,34 @@ def count_lines(path: str) -> int:
     return count
 
 
+def sniff_file_envelope(path: str) -> str:
+    """Which host wrote this transcript, from its own first parseable line.
+
+    Independent of any resume position: incremental extraction can start deep
+    into a file, but the envelope is decided once, from line 0, rather than
+    guessed from whatever line an old ``skip_lines`` happens to land on --
+    every line in one transcript comes from the same host.
+
+    Returns "claude-code", "codex", or "unrecognised" -- the last one also
+    covering an unreadable or entirely-empty file, which offers no line to
+    sniff at all.
+    """
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                return _host.sniff_envelope(obj)
+    except OSError:
+        return "unrecognised"
+    return "unrecognised"
+
+
 _CHANNEL_RE = re.compile(r"^<channel\b[^>]*>(.*)</channel>$", re.DOTALL)
 
 
@@ -245,7 +273,7 @@ def _channel_text(content) -> str | None:
     return match.group(1).strip()
 
 
-def extract_messages(path: str, skip_lines: int = 0) -> list[tuple[str, str]]:
+def extract_messages(path: str, skip_lines: int = 0, envelope: str = "claude-code") -> list[tuple[str, str]]:
     """Parse a session JSONL file into role-labeled message tuples.
 
     Reads each line as JSON, skips metadata messages and system reminders,
@@ -256,13 +284,27 @@ def extract_messages(path: str, skip_lines: int = 0) -> list[tuple[str, str]]:
         path: Absolute path to the session JSONL file.
         skip_lines: Number of lines to skip from the beginning (for
             incremental extraction after a previous save).
+        envelope: Which host wrote this transcript -- "claude-code" (the
+            default, and the only shape this function understood before
+            #443), "codex", or "unrecognised". Callers determine this once
+            per file via ``sniff_file_envelope()``, independent of
+            ``skip_lines``, and pass it through here; a per-line resniff
+            would misfire on a resume that starts past the file's only
+            self-identifying line.
 
     Returns:
         List of ``("HUMAN", text)`` or ``("AGENT", text)`` tuples,
-        one per message, in chronological order.
+        one per message, in chronological order. Empty for an
+        "unrecognised" envelope -- deliberately: the caller (
+        ``extract_session``) is the one that reports that state loud,
+        via ``ExtractResult.envelope``, rather than this function
+        pretending it read something.
     """
     messages: list[tuple[str, str]] = []
     corrupt_count = 0
+
+    if envelope == "unrecognised":
+        return messages
 
     try:
         f = open(path, encoding="utf-8", errors="replace")
@@ -277,6 +319,12 @@ def extract_messages(path: str, skip_lines: int = 0) -> list[tuple[str, str]]:
                 obj = json.loads(line)
             except json.JSONDecodeError:
                 corrupt_count += 1
+                continue
+
+            if envelope == "codex":
+                exchange = _host.codex_exchange(obj)
+                if exchange is not None:
+                    messages.append(exchange)
                 continue
 
             msg_type = obj.get("type")
@@ -387,15 +435,16 @@ def extract_session(
     # prevent.
     actual_id = session_id or os.path.basename(path).replace(".jsonl", "")
     total_lines = count_lines(path)
+    envelope = sniff_file_envelope(path)
 
     if show_all:
-        messages = extract_messages(path, skip_lines=0)
+        messages = extract_messages(path, skip_lines=0, envelope=envelope)
     elif count is not None:
-        messages = extract_messages(path, skip_lines=0)
+        messages = extract_messages(path, skip_lines=0, envelope=envelope)
         messages = messages[-count:]
     else:
         last_line = get_last_save_line(actual_id, project_dir, remember_dir)
-        messages = extract_messages(path, skip_lines=last_line)
+        messages = extract_messages(path, skip_lines=last_line, envelope=envelope)
 
     # Format as text
     lines = [f"Session: {actual_id}", f"Lines: {total_lines}", "=" * 60]
@@ -415,6 +464,7 @@ def extract_session(
         position=total_lines,
         human_count=human_count,
         assistant_count=assistant_count,
+        envelope=envelope,
     )
 
 

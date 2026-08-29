@@ -52,11 +52,9 @@ The first command decodes the whole catalogue and filters it down to this plugin
 
 **Separately, `plugin update` can report "already at latest version" from a stale local cache** without pulling first ([#37252](https://github.com/anthropics/claude-code/issues/37252), [#38271](https://github.com/anthropics/claude-code/issues/38271)). That one is a client-side cache and is a different failure from the pin lag above, though both surface the same sentence.
 
-### Codex (scaffolding, not yet verified against a live install)
+### Codex (verified against a live install)
 
-This repo ships a declarative Codex layer -- `.codex-plugin/plugin.json`, a self-referential marketplace entry at `.agents/plugins/marketplace.json`, and `hooks/hooks.codex.json`, which binds Codex's lifecycle events to the same `scripts/*.sh` Claude Code already uses ([#410](https://github.com/Digital-Process-Tools/claude-remember/issues/410)). No new hook code was written for it.
-
-**No Codex binary was available to build this against.** Everything here was written from OpenAI's published documentation ([Package your plugin](https://developers.openai.com/codex/plugins/build), [Hooks](https://learn.chatgpt.com/docs/hooks)), and the tests in `tests/test_codex_manifest_410.py` can only confirm the three manifests are well-formed JSON, name events Codex documents, and reference scripts that actually exist. **They cannot confirm Codex loads the plugin, discovers the marketplace entry, or fires a single hook.** Do not read this as "Codex support" -- read it as the part that could be built before a Codex install existed to test against. Installing it, per the documented commands, would be:
+This repo ships a declarative Codex layer -- `.codex-plugin/plugin.json`, a self-referential marketplace entry at `.agents/plugins/marketplace.json`, and `hooks/hooks.codex.json`, which binds Codex's lifecycle events to the same `scripts/*.sh` Claude Code already uses ([#410](https://github.com/Digital-Process-Tools/claude-remember/issues/410)). No new hook code was written for it. Install it with:
 
 ```
 codex plugin marketplace add Digital-Process-Tools/claude-remember
@@ -64,6 +62,14 @@ codex plugin install remember
 ```
 
 The Codex-side manifest is a *second* file, `hooks/hooks.codex.json`, rather than a shared one -- Codex's default convention would otherwise point at the exact same `hooks/hooks.json` path Claude Code's manifest already uses by its own default, and the two hosts' hook shapes are close but not identical (Codex hooks support fields, like `matcher` and `timeout`, that this repo's Claude-side manifest does not use).
+
+**Observed against `codex-cli 0.150.1` (macOS arm64), not only reasoned from the docs.** Marketplace discovery and `codex plugin install remember` both work as documented; `SessionStart`, `UserPromptSubmit` and `SessionEnd` all fire; `.remember/` is created in the Codex working directory; [#407](https://github.com/Digital-Process-Tools/claude-remember/issues/407)'s session-id-over-basename keying and [#411](https://github.com/Digital-Process-Tools/claude-remember/issues/411)'s stdin-`cwd` fallback for `session-start-hook.sh`/`session-end-hook.sh` both hold up against a real Codex transcript and a real Codex `cwd` payload. `tests/test_codex_manifest_410.py` still only checks the manifests themselves; the live-install claims above are a separate, later observation, not that test suite.
+
+**Extraction itself did not work until [#443](https://github.com/Digital-Process-Tools/claude-remember/issues/443).** Codex writes a different transcript envelope than Claude Code -- every line is `{"timestamp", "ordinal", "type", "payload"}`, with the role and text one level inside `payload` -- and `pipeline/extract.py` originally only recognised Claude Code's shape, so a real Codex session with a real human prompt and a real reply extracted `0 exchanges` and saved nothing, with every outward signal (hooks firing, `.remember/` present) suggesting it had worked. `pipeline/host.py` now sniffs a transcript's envelope from its own first line and reads either shape; an envelope matching neither is reported as `"unrecognised"` rather than silently counted as an empty session. A trimmed, sanitised capture of the reproducing session lives at `tests/fixtures/codex-rollout.jsonl`.
+
+**Per-turn capture is still broken, in a way none of the above catches** -- tracked separately as [#444](https://github.com/Digital-Process-Tools/claude-remember/issues/444), not fixed here.
+
+**Not yet known:** whether `PostToolUse` fires and what its payload carries (the probe sessions ran no tools), and whether `codex resume` behaves correctly once extraction returns a non-zero count. Summarization still shells `claude -p`, so even correct extraction leaves the Codex-native execution path from [#406](https://github.com/Digital-Process-Tools/claude-remember/issues/406) open.
 
 ### Check your version
 

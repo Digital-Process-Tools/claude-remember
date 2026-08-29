@@ -269,7 +269,14 @@ log "extract" "session $SESSION_ID"
 safe_eval <<< "$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell extract "$SESSION_ID" "$PROJECT_DIR")"
 CLEANUP_FILES+=("$EXTRACT_FILE")
 date +%s > "$COOLDOWN_MARKER"
-log "extract" "${EXCHANGE_COUNT} exchanges (${HUMAN_COUNT} human)"
+if [ "$ENVELOPE" = "unrecognised" ]; then
+    # A transcript shape neither Claude Code nor Codex wrote -- NOT a quiet
+    # session. Reporting it as "0 exchanges" would be indistinguishable from
+    # one, which is exactly the silent failure #443 exists to prevent.
+    log "extract" "unrecognised transcript envelope, 0 exchanges read (not a quiet session -- see pipeline/host.sniff_envelope)"
+else
+    log "extract" "${EXCHANGE_COUNT} exchanges (${HUMAN_COUNT} human)"
+fi
 
 # Nothing in this span at all: advance the saved position before leaving (#147).
 # The position is only written after a *successful* save (:211), so an early exit
@@ -279,7 +286,11 @@ log "extract" "${EXCHANGE_COUNT} exchanges (${HUMAN_COUNT} human)"
 # in an empty span, so advancing loses no memory and breaks the loop.
 if [ "$EXCHANGE_COUNT" -eq 0 ]; then
     if [ "$DRY_RUN" = false ]; then
-        log "extract" "0 exchanges, skip -- position -> $POSITION"
+        if [ "$ENVELOPE" = "unrecognised" ]; then
+            log "extract" "unrecognised envelope, skip -- position -> $POSITION"
+        else
+            log "extract" "0 exchanges, skip -- position -> $POSITION"
+        fi
         cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell save-position "$LAST_SAVE_FILE" "$SESSION_ID" "$POSITION"
     else
         log "extract" "0 exchanges, skip (dry run -- position unchanged)"

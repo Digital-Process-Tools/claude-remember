@@ -60,6 +60,7 @@ if cmd == "extract":
     print("ASSISTANT_COUNT=1")
     print(f"EXCHANGE_COUNT={os.environ['STUB_EXCHANGE_COUNT']}")
     print(f"EXTRACT_FILE={path}")
+    print(f"ENVELOPE={os.environ.get('STUB_ENVELOPE', 'claude-code')}")
 elif cmd == "save-position":
     last_save_file, session_id, position = sys.argv[2], sys.argv[3], sys.argv[4]
     import json
@@ -155,7 +156,7 @@ elif cmd == "build-ndc-prompt":
 
 
 def _make_env(tmp_path: Path, *, exchanges: int, humans: int, position: int = 500,
-              config: Optional[dict] = None):
+              config: Optional[dict] = None, envelope: str = "claude-code"):
     """Build a project + stub plugin and return the env for running save-session.sh."""
     project = tmp_path / "project"
     (project / ".remember" / "tmp").mkdir(parents=True)
@@ -203,6 +204,7 @@ def _make_env(tmp_path: Path, *, exchanges: int, humans: int, position: int = 50
         "STUB_POSITION": str(position),
         "STUB_HUMAN_COUNT": str(humans),
         "STUB_EXCHANGE_COUNT": str(exchanges),
+        "STUB_ENVELOPE": envelope,
         "STUB_MEMORY_FILE": str(project / ".remember" / "now.md"),
         # Keep the clock on `date`, where a PATH shim can still reach it (#227).
         #
@@ -288,6 +290,12 @@ def _suppress_ndc(project: Path):
     (project / ".remember" / "tmp" / "last-ndc.ts").write_text(str(int(time.time())))
 
 
+def _memory_log_text(project: Path) -> str:
+    log_dir = project / ".remember" / "logs"
+    logs = sorted(log_dir.glob("memory-*.log")) if log_dir.is_dir() else []
+    return logs[-1].read_text() if logs else ""
+
+
 class TestNoWorkSessionAdvancesPosition:
 
     def test_zero_exchanges_advances_position(self, tmp_path):
@@ -302,6 +310,36 @@ class TestNoWorkSessionAdvancesPosition:
             "the same lines and exits identically, once per cooldown, forever"
         )
         assert "call-haiku" not in calls.read_text(), "no summary should be attempted"
+
+    def test_zero_exchanges_logs_the_ordinary_message_for_a_known_envelope(self, tmp_path):
+        """Positive control for the test below: a genuinely quiet Claude Code
+        span still gets the plain "0 exchanges" wording, not the unrecognised
+        one -- so the two log messages are provably distinguishable rather
+        than the unrecognised-envelope test only checking a stub that always
+        prints the same thing (#443)."""
+        env, project, plugin, calls, sid = _make_env(tmp_path, exchanges=0, humans=0,
+                                                     position=5, envelope="claude-code")
+        result = _run(plugin, env, sid)
+
+        assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")
+        log_text = _memory_log_text(project)
+        assert "0 exchanges" in log_text
+        assert "unrecognised" not in log_text
+
+    def test_unrecognised_envelope_is_logged_loud_not_as_a_quiet_session(self, tmp_path):
+        """A transcript shape neither known host wrote must be reported as
+        unrecognised in the log -- not silently folded into the same "0
+        exchanges" wording a genuinely empty session gets, which is the exact
+        silent failure #443 exists to prevent. Position still advances: there
+        is nothing more this run can do with an unreadable transcript."""
+        env, project, plugin, calls, sid = _make_env(tmp_path, exchanges=0, humans=0,
+                                                     position=5, envelope="unrecognised")
+        result = _run(plugin, env, sid)
+
+        assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")
+        log_text = _memory_log_text(project)
+        assert "unrecognised" in log_text, log_text
+        assert _saved_position(project) == 5
 
 
 class TestMinHumanGate:

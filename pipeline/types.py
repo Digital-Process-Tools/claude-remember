@@ -84,6 +84,11 @@ class ExtractResult:
         human_count: Number of human (user) messages extracted.
         assistant_count: Number of assistant messages extracted.
         corrupt_lines: Number of lines that failed JSON parsing.
+        envelope: Which host wrote this transcript's lines, as identified by
+            ``pipeline.host.sniff_envelope()`` from the file's own first line
+            -- "claude-code", "codex", or "unrecognised". "unrecognised" is
+            the loud third state: a shape this module does not know, reported
+            rather than silently parsed as a session with nothing in it (#443).
     """
 
     exchanges: str = ""
@@ -91,6 +96,7 @@ class ExtractResult:
     human_count: int = 0
     assistant_count: int = 0
     corrupt_lines: int = 0
+    envelope: str = ""
 
 
 @dataclass

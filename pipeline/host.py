@@ -144,6 +144,92 @@ def plugin_root(env: Mapping[str, str] | None = None) -> str | None:
     return _first_set(env, PLUGIN_ROOT_VARS)
 
 
+# ─── Transcript line envelopes (#443) ──────────────────────────────────────
+#
+# A hook hands ``pipeline.extract`` a transcript *path*; this is the other
+# half -- what a LINE of that transcript looks like, which is what decides
+# whether ``extract_messages()`` can read it at all. Claude Code and Codex
+# disagree here in the way the module docstring above warns about: this is
+# genuinely host-specific data, so it belongs beside ``Host`` rather than
+# branched inside ``extract.py``.
+#
+# Claude Code: ``{"type": "user"|"assistant"|..., "message": {"content": ...}}``.
+# Codex: every line, whatever its own ``type`` says, is
+# ``{"timestamp", "ordinal", "type", "payload"}`` -- the role and text live
+# one level down, inside ``payload`` (issue #443).
+
+
+def sniff_envelope(obj: object) -> str:
+    """Identify which host wrote one already-parsed transcript line, by shape.
+
+    Called once per file, against its own first parseable line -- never
+    against whatever line an incremental resume happens to land on, and never
+    guessed from a line's *content*. The envelope is a property of the whole
+    session file (one host wrote it start to finish), not of any one line.
+
+    Returns ``"claude-code"``, ``"codex"``, or ``"unrecognised"``. The third
+    state matters as much as the first two: a transcript shape this module
+    does not know is reported loud rather than silently parsed as though it
+    held zero exchanges, which is indistinguishable from a genuinely quiet
+    session (#443).
+    """
+    if not isinstance(obj, dict):
+        return "unrecognised"
+    # Codex's marker is structural, not a specific `type` value: every line
+    # -- session_meta, event_msg, response_item, world_state, turn_context,
+    # and whatever a future Codex release adds -- carries a `payload` object.
+    if isinstance(obj.get("payload"), dict):
+        return "codex"
+    if isinstance(obj.get("message"), dict) or obj.get("type") in ("user", "assistant", "summary", "system"):
+        return "claude-code"
+    return "unrecognised"
+
+
+def codex_exchange(obj: dict) -> tuple[str, str] | None:
+    """``(role, text)`` for one Codex rollout line, or ``None`` to skip it.
+
+    Only an ``event_msg`` line whose payload is an ``item_completed`` event
+    naming a ``UserMessage`` or ``AgentMessage`` item counts. Codex also
+    writes the same text a second time, inside a ``response_item`` line at
+    ``payload.role == "user"``/``"assistant"`` -- but that role also covers
+    session scaffolding delivered the same way (the skills-instructions
+    preamble, the recommended-plugins list, this plugin's own REMEMBER
+    buffer), all of which arrive as ``role: "user"`` too. Reading
+    ``response_item`` would count start-up scaffolding as a human turn.
+    ``item_completed`` is Codex's own record of what a human actually sent
+    and what the agent's final answer was, so it is the one signal that does
+    not need a second filter layered on top of it.
+    """
+    if obj.get("type") != "event_msg":
+        return None
+    payload = obj.get("payload")
+    if not isinstance(payload, dict) or payload.get("type") != "item_completed":
+        return None
+    item = payload.get("item")
+    if not isinstance(item, dict):
+        return None
+    item_type = item.get("type")
+    if item_type == "UserMessage":
+        role = "HUMAN"
+    elif item_type == "AgentMessage":
+        role = "AGENT"
+    else:
+        return None
+    content = item.get("content")
+    if not isinstance(content, list):
+        return None
+    texts = [
+        text.strip()
+        for block in content
+        if isinstance(block, dict)
+        for text in [block.get("text")]
+        if isinstance(text, str) and text.strip()
+    ]
+    if not texts:
+        return None
+    return role, "\n".join(texts)
+
+
 def transcript_path(env: Mapping[str, str] | None = None) -> str | None:
     """The transcript path the host handed us, if it is usable.
 

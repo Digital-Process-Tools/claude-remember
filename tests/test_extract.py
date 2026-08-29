@@ -23,6 +23,7 @@ from pipeline.extract import (
     extract_session,
 )
 from pipeline.types import ExtractResult
+from pipeline import host as _host
 
 FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures")
 SAMPLE = os.path.join(FIXTURES, "sample-session.jsonl")
@@ -649,3 +650,102 @@ def test_extract_messages_still_skips_non_channel_meta():
         assert msgs == []
     finally:
         os.unlink(path)
+
+
+# --- Codex rollout transcripts (#443) ---
+def test_extract_messages_codex_rollout_non_zero():
+    """A Codex rollout transcript must extract a non-zero exchange count (#443).
+
+    Would pass vacuously if the code did nothing IF we only asserted `msgs`
+    truthy on the wrong fixture -- so this pins both the count and the roles.
+    """
+    codex_path = os.path.join(FIXTURES, "codex-rollout.jsonl")
+    envelope = _host.sniff_envelope(json.loads(open(codex_path).readline()))
+    assert envelope == "codex"
+    msgs = extract_messages(codex_path, skip_lines=0, envelope=envelope)
+    assert len(msgs) == 2
+    assert msgs[0] == ("HUMAN", "Say only the word PONG and stop.")
+    assert msgs[1] == ("AGENT", "PONG")
+
+
+def test_extract_messages_codex_rollout_positive_control_scaffolding_excluded():
+    """The scaffolding lines (skills instructions, recommended plugins, the
+    remember buffer preamble) must NOT be counted as human turns, even though
+    several of them carry `role: "user"` in their own response_item envelope.
+    This is the positive control for the exclusion: it must fire on real
+    scaffolding, not just fail to fire on nothing.
+    """
+    codex_path = os.path.join(FIXTURES, "codex-rollout.jsonl")
+    msgs = extract_messages(codex_path, skip_lines=0, envelope="codex")
+    all_text = "\n".join(t for _, t in msgs)
+    assert "recommended_plugins" not in all_text
+    assert "skills_instructions" not in all_text
+    assert "REMEMBER" not in all_text
+
+
+def test_extract_session_codex_rollout(monkeypatch):
+    """extract_session end-to-end against a real (sanitised) Codex rollout."""
+    codex_path = os.path.join(FIXTURES, "codex-rollout.jsonl")
+    with patch("pipeline.extract.find_session", return_value=codex_path):
+        result = extract_session(session_id="01a04be7-2a87-7101-886a-552832fb8eaf",
+                                  project_dir="/fake", show_all=True)
+    assert result.human_count == 1
+    assert result.assistant_count == 1
+    assert result.envelope == "codex"
+
+
+def test_sniff_envelope_claude_code():
+    with open(SAMPLE) as f:
+        first = json.loads(f.readline())
+    assert _host.sniff_envelope(first) == "claude-code"
+
+
+def test_sniff_envelope_codex():
+    codex_path = os.path.join(FIXTURES, "codex-rollout.jsonl")
+    with open(codex_path) as f:
+        first = json.loads(f.readline())
+    assert _host.sniff_envelope(first) == "codex"
+
+
+def test_sniff_envelope_unrecognised():
+    """A fourth-host or garbage envelope must be reported loud, not silently
+    treated as an empty session. The positive control: the same function DOES
+    recognise the two known shapes (tests above); this pins the negative case
+    separately so an always-"unrecognised" stub could not pass both.
+    """
+    assert _host.sniff_envelope({"foo": "bar"}) == "unrecognised"
+    assert _host.sniff_envelope("not even a dict") == "unrecognised"
+    assert _host.sniff_envelope([1, 2, 3]) == "unrecognised"
+
+
+def test_extract_messages_unrecognised_envelope_reports_loud_not_silent_zero():
+    """An envelope matching neither host must not be silently counted as a
+    quiet session with 0 exchanges -- extract_session must say so via
+    ExtractResult.envelope rather than merely returning an empty list, which
+    is indistinguishable from a genuinely empty span (#443).
+    """
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+        f.write('{"unknown_shape": true, "nothing": "recognisable"}\n')
+        f.write('{"unknown_shape": true, "still": "nothing"}\n')
+        path = f.name
+    try:
+        with patch("pipeline.extract.find_session", return_value=path):
+            result = extract_session(session_id="whatever", project_dir="/fake", show_all=True)
+        assert result.human_count == 0
+        assert result.assistant_count == 0
+        assert result.envelope == "unrecognised"
+    finally:
+        os.unlink(path)
+
+
+def test_extract_session_claude_code_envelope_still_recognised():
+    """Positive control paired with the unrecognised-envelope test above: an
+    ordinary Claude Code transcript must still report its own envelope name,
+    not "unrecognised" -- proving the field means something rather than
+    always agreeing with whatever's asserted.
+    """
+    with patch("pipeline.extract.find_session", return_value=SAMPLE):
+        result = extract_session(session_id="whatever", project_dir="/fake", show_all=True)
+    assert result.envelope == "claude-code"
+    assert result.human_count > 0
+
