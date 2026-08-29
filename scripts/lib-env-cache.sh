@@ -192,11 +192,19 @@ _remember_env_cache_publish() {
     [ -n "${REMEMBER_DELTA_THRESHOLD:-}" ] || return 0
     _remember_env_cache_path || return 0
 
-    local _f="$_REMEMBER_ENV_CACHE_FILE" _t="${_REMEMBER_ENV_CACHE_FILE}.$$"
-    # 0600 before a single byte of it exists. Every entry point sets umask 077
-    # (#68), but this decides where memory gets written and its mode must not
-    # depend on the caller having done that.
-    (umask 077; : > "$_t") 2>/dev/null || return 0
+    local _f="$_REMEMBER_ENV_CACHE_FILE" _t
+    # mktemp, not a PID-suffixed literal path (#429): $_f itself is built from
+    # CLAUDE_PROJECT_DIR (predictable to anyone who knows the project path),
+    # and appending "$$" to it is no better -- both name a path in a SHARED
+    # tmp dir before this process has created anything there. The shell's `>`
+    # follows a symlink when opening its target and truncates on open, before
+    # a byte is written, so a symlink pre-seeded at that name would receive
+    # whatever this function goes on to write. mktemp creates the file
+    # atomically at an unpredictable name and already 0600 on every mktemp
+    # this repo relies on (GNU and BSD/macOS alike) -- no umask needed, and no
+    # trailing suffix after the X's (BSD mktemp only substitutes a run of X's
+    # at the very end of the template; anything after is left literal).
+    _t=$(mktemp "${_f}.XXXXXX" 2>/dev/null) || return 0
     {
         printf 'CACHE_ENV_PROJECT_DIR=%s\n' "$CLAUDE_PROJECT_DIR"
         printf 'CACHE_ENV_PLUGIN_ROOT=%s\n' "${CLAUDE_PLUGIN_ROOT:-}"

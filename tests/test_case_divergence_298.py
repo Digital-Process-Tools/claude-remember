@@ -100,6 +100,23 @@ POST_TOOL = REPO_ROOT / "scripts" / "post-tool-hook.sh"
 LIB_SLUG = REPO_ROOT / "scripts" / "lib-slug.sh"
 LIB_MEMORY_DIR = REPO_ROOT / "scripts" / "lib-memory-dir.sh"
 
+# The one sanctioned executable-code divergence from origin/main for
+# test_the_per_tool_call_path_is_not_touched's byte-pin arms, keyed by the
+# relative path it applies to -- see that test's docstring for why. Applied
+# to the origin/main side before the compare, so anything else that diverges
+# still fails the guard.
+_SANCTIONED_DIVERGENCE = {
+    "scripts/lib-memory-dir.sh": (
+        # A blank line separated the assignment from the (all-comment) block
+        # that used to sit before the umask line; `_code()` strips comment
+        # LINES but keeps blank ones, so that blank line survives into the
+        # joined "code lines only" text and must be matched here too.
+        '_merged_cfg="${SYS_TMPDIR}/remember-config-$$.json"\n\n' +
+        '(umask 077; : > "$_merged_cfg") 2>/dev/null || true',
+        '_merged_cfg=$(mktemp "${SYS_TMPDIR}/remember-config-XXXXXX" 2>/dev/null) || _merged_cfg=""',
+    ),
+}
+
 RECORD_NAME = "case-divergence"
 NOTICE_NAME = "case-divergence-notice"
 SESSION_ID = "eeeeeeee-0000-4000-8000-000000000298"
@@ -552,6 +569,19 @@ def test_the_per_tool_call_path_is_not_touched(tmp_path):
     and prose that no longer matches the code is this repo's own defect class.
     Strip the comments from both sides — the same one-liner the arm above
     already uses — and every executable byte stays pinned exactly as before.
+
+    One EXECUTABLE line in `lib-memory-dir.sh` is allowed to differ, via
+    `_SANCTIONED_DIVERGENCE` below: #429 replaced a PID-suffixed literal tmp
+    path with `mktemp`, closing a predictable-symlink TOCTOU whose write
+    (traced and reproduced in `tests/test_predictable_tmp_429.py`) can carry
+    a live `haiku.oauth_token` to an attacker-chosen path. That is a real,
+    deliberate spawn added to Pass 2 of the config merge -- exactly the kind
+    of change this guard exists to surface, not to forbid outright -- and it
+    runs only on the resolving run (first tool call of a session, or after a
+    config edit), never on the per-tool-call fast path this guard actually
+    protects. The substitution is applied to the origin/main side before the
+    compare, so it is scoped to this one sanctioned line: anything else that
+    diverges from origin/main in either file still fails this test.
     """
     body = POST_TOOL.read_text(encoding="utf-8")
     code = "\n".join(line for line in body.splitlines()
@@ -587,7 +617,16 @@ def test_the_per_tool_call_path_is_not_touched(tmp_path):
             f"{rel} on origin/main has no non-comment lines — this compare "
             "would pass against any file at all"
         )
-        assert _code(ref.stdout) == _code(path.read_text(encoding="utf-8")), rel
+        ref_code = _code(ref.stdout)
+        if rel in _SANCTIONED_DIVERGENCE:
+            old_code, new_code = _SANCTIONED_DIVERGENCE[rel]
+            assert old_code in ref_code, (
+                f"{rel}: the code this sanctioned substitution expects to find "
+                "on origin/main is gone -- origin/main has moved and this "
+                "allowance needs re-deriving, not blindly re-applying"
+            )
+            ref_code = ref_code.replace(old_code, new_code)
+        assert ref_code == _code(path.read_text(encoding="utf-8")), rel
 
 
 def test_the_check_costs_one_git_invocation_at_most(tmp_path):

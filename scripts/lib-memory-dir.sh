@@ -271,15 +271,24 @@ export REMEMBER_STORE_ROOT
 
 _project_cfg="${REMEMBER_DIR}/config.json"
 SYS_TMPDIR="${TMPDIR:-/tmp}"
-_merged_cfg="${SYS_TMPDIR}/remember-config-$$.json"
-
-# Create it private BEFORE any layer is written into it. Every entry point
-# sources resolve-paths.sh (umask 077, #68) first, so this is belt-and-braces
-# there — but this file documents itself as sourceable on its own, and since
-# the merged config can carry `haiku.oauth_token` (a live OAuth credential) its
-# mode must not depend on the caller having set a umask. jq's `>`, the Python
-# fallback's open(), and `cp` all write into the existing file and keep its mode.
-(umask 077; : > "$_merged_cfg") 2>/dev/null || true
+# mktemp, not a PID-suffixed literal path (#429). ${SYS_TMPDIR} is a SHARED,
+# often world-writable directory, and a name built from `$$` is predictable
+# from the outside the instant this process starts. The shell's `>`
+# redirection, jq's `>`, and Python's `open(path, "w")` all follow a symlink
+# when opening their target and truncate on open, before a byte is written —
+# so a symlink pre-seeded at the predictable name does not just get
+# truncated, it receives the actual write that follows: the merged config,
+# which per the comment below can carry a live `haiku.oauth_token`, lands at
+# whatever path the attacker's symlink pointed to. mktemp both creates the
+# file atomically (closing the create/open race a separate `: >` leaves open)
+# and names it unpredictably, and is already 0600 on every mktemp this repo
+# relies on (GNU and BSD/macOS alike) — no umask needed, and matching
+# save-session.sh's six existing uses and #427's fix to doctor.sh.
+# No trailing content after the X's: BSD/macOS mktemp only substitutes a run
+# of X's at the very END of the template (verified against this file's own
+# platform), so "...XXXXXX.json" is left LITERAL there -- not randomized at
+# all, defeating the fix while looking identical to the working GNU form.
+_merged_cfg=$(mktemp "${SYS_TMPDIR}/remember-config-XXXXXX" 2>/dev/null) || _merged_cfg=""
 
 # Build an array of files that actually exist.
 _cfg_sources=()
