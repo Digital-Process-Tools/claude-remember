@@ -529,10 +529,14 @@ TRANSCRIPT="$LATEST_JSONL"
 # Whether STDIN_SESSION_ID actually names the TRANSCRIPT resolved below, as
 # opposed to a session that merely showed up on stdin (#468). Only the first
 # two branches earn it: STDIN_TRANSCRIPT_PATH names an exact file the host
-# vouches for, and the SESSION_DIR match below confirms the id by finding its
-# own transcript. The else branch explicitly could not confirm it -- stdin
-# named a session with nothing here -- so TRANSCRIPT falls back to the
-# mtime pick and the session id must fall back with it, not disagree with it.
+# vouches for (but only when a session id came WITH it -- a transcript_path
+# with no session_id at all, e.g. an older CLI's payload shape, must fall
+# through to the basename below rather than hand save-session.sh an empty
+# string, which is not "trusted", it is absent), and the SESSION_DIR match
+# below confirms the id by finding its own transcript. The else branch
+# explicitly could not confirm it -- stdin named a session with nothing here
+# -- so TRANSCRIPT falls back to the mtime pick and the session id must fall
+# back with it, not disagree with it.
 STDIN_SESSION_ID_TRUSTED=false
 if [ -n "$STDIN_TRANSCRIPT_PATH" ]; then
     # Already resolved above (#459): STDIN_TRANSCRIPT_PATH IS LATEST_JSONL in
@@ -541,7 +545,7 @@ if [ -n "$STDIN_TRANSCRIPT_PATH" ]; then
     # live under SESSION_DIR at all, so the id-match below would always miss
     # and log a "falling back to newest" line that is not a fallback, just
     # noise on every Codex tool call.
-    STDIN_SESSION_ID_TRUSTED=true
+    [ -n "$STDIN_SESSION_ID" ] && STDIN_SESSION_ID_TRUSTED=true
 elif [ -n "$STDIN_SESSION_ID" ] && [ -f "$SESSION_DIR/$STDIN_SESSION_ID.jsonl" ]; then
     TRANSCRIPT="$SESSION_DIR/$STDIN_SESSION_ID.jsonl"
     STDIN_SESSION_ID_TRUSTED=true

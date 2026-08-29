@@ -216,7 +216,20 @@ def test_bogus_stdin_session_id_still_falls_back_to_the_basename(tmp_path):
     it degrades to the transcript basename exactly as before. On a Codex
     payload with no usable session_id this basename is rejected by
     save-session.sh's own gate, same as the positive control above, and that
-    is the PRE-EXISTING failure mode this issue does not touch."""
+    is the PRE-EXISTING failure mode this issue does not touch.
+
+    This does not merely check that SOME save was forked (a save forked
+    with an EMPTY session id would pass that alone) -- it checks which id
+    was actually used, via the capture-alive marker the hook itself writes
+    under the derived SESSION_ID before ever forking anything. An empty
+    SESSION_ID writes no marker at all (the empty-string arm of the path
+    guard at post-tool-hook.sh's capture-alive block), so this is exactly
+    the assertion that would have caught #468's own first-pass regression:
+    STDIN_SESSION_ID_TRUSTED going true whenever STDIN_TRANSCRIPT_PATH was
+    present, with no check that a session_id had actually arrived alongside
+    it -- which handed save-session.sh an empty id instead of falling back
+    to the basename, silently misattributing whatever session happened to
+    be newest by mtime rather than degrading safely."""
     home, project, remember, rollout = _codex_project(tmp_path, lines=200)
     payload = json.dumps({
         "session_id": "",
@@ -233,4 +246,11 @@ def test_bogus_stdin_session_id_still_falls_back_to_the_basename(tmp_path):
         "no save forked when stdin offered no usable session_id -- capture "
         "must still be ATTEMPTED via the basename fallback, even though "
         "save-session.sh will go on to reject it"
+    )
+    marker = remember / "tmp" / "capture-alive.d" / ROLLOUT_BASENAME
+    assert marker.exists(), (
+        "the derived SESSION_ID was not the transcript's own basename -- "
+        "likely an EMPTY id instead (a transcript_path present with no "
+        "session_id must not be treated as trusted). capture-alive.d "
+        f"holds: {sorted(p.name for p in (remember / 'tmp' / 'capture-alive.d').iterdir()) if (remember / 'tmp' / 'capture-alive.d').is_dir() else '(missing)'}"
     )
