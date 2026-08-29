@@ -39,7 +39,14 @@ def _run_lib(project_dir: str, pipeline_dir: str, home_dir: str, env_extra: "dic
     echo "REMEMBER_CONFIG=$REMEMBER_CONFIG"
     echo "REMEMBER_CONFIG_BASENAME=$(basename "$REMEMBER_CONFIG")"
     if [ -f "$REMEMBER_CONFIG" ]; then
-        echo "REMEMBER_CONFIG_MODE=$(stat -f '%Lp' "$REMEMBER_CONFIG" 2>/dev/null || stat -c '%a' "$REMEMBER_CONFIG")"
+        # GNU first, BSD/macOS fallback -- the reverse order is the #455 bug:
+        # GNU's `stat -f` means "filesystem status", not "format", so on Linux
+        # it succeeds (exit 0) and prints a `File: "..."` block instead of a
+        # mode, and `||` never reaches the working branch. Same idiom as
+        # tests/test_umask.py's TestMergedConfigPermissions, which pins this
+        # exact file's mode already -- matched here rather than inventing a
+        # third spelling.
+        echo "REMEMBER_CONFIG_MODE=$(stat -c '%a' "$REMEMBER_CONFIG" 2>/dev/null || stat -f '%Lp' "$REMEMBER_CONFIG")"
     fi
     # Dump a key from the merged config to verify merge
     if [ -f "$REMEMBER_CONFIG" ] && command -v jq >/dev/null 2>&1; then
