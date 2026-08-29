@@ -1,6 +1,6 @@
 {
   "name": "remember",
-  "description": "Continuous memory for agent CLIs. Extracts, summarizes, and compresses conversations into tiered daily logs. Scaffolding for Codex: this manifest and its hooks binding have not been verified against a running Codex install (#410).",
+  "description": "Continuous memory for agent CLIs. Extracts, summarizes, and compresses conversations into tiered daily logs. Codex layer observed against a real codex-cli 0.150.1 install (#443, #460, #463, #465): marketplace discovery, install, hook firing, and session extraction all hold up against a real Codex transcript. Per-turn capture is still broken (#444), not fixed yet.",
   "version": "0.23.0",
   "author": {
     "name": "Digital Process Tools"

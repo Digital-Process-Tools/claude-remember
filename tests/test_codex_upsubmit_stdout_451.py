@@ -166,7 +166,7 @@ def test_oracle_accepts_the_hookspecificoutput_envelope_this_fix_emits():
     valid = json.dumps({
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
-            "additionalContext": "[10:54 CEST -- floriandavid]",
+            "additionalContext": "[10:54 CEST -- sanitized-user]",
         }
     })
     assert _codex_upsubmit_status(valid) == "Completed"
@@ -176,7 +176,7 @@ def test_oracle_marks_the_bare_stamp_failed():
     """The defect, stated as an assertion about the oracle itself: the exact
     line this hook has always printed opens with `[` and is not valid JSON,
     so Codex's own parser marks it Failed."""
-    assert _codex_upsubmit_status("[10:54 CEST -- floriandavid]") == "Failed"
+    assert _codex_upsubmit_status("[10:54 CEST -- sanitized-user]") == "Failed"
 
 
 # ── Driving the real hook ───────────────────────────────────────────────────
