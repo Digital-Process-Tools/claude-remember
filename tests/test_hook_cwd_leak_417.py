@@ -38,6 +38,7 @@ Two tests, one fixture family:
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -95,7 +96,13 @@ def test_resolve_paths_sh_still_honours_the_variable_when_asked(tmp_path):
         f'source "{RESOLVE_PATHS}"; '
         'echo "PROJECT_DIR=${PROJECT_DIR:-unset}"'
     )
+    # #432: inherit the real environment (as test_hooks_json.py's own
+    # Git-Bash tests already do) rather than handing bash a from-scratch env
+    # -- a real Windows Git Bash process needs SystemRoot and friends from
+    # the native environment to spawn at all. The explicit keys below still
+    # win: they are listed after the `**os.environ` spread.
     env = {
+        **os.environ,
         "HOME": str(tmp_path / "home"),
         "CLAUDE_PLUGIN_ROOT": str(REPO_ROOT),
         "REMEMBER_PATHS_SOFT_FAIL": "1",
@@ -122,7 +129,9 @@ def test_hook_clears_the_variable_before_sourcing_anything(tmp_path, hook):
 
     preamble = _preamble(hook)
     script = preamble + "\necho \"REMEMBER_HOOK_CWD=${REMEMBER_HOOK_CWD:-cleared}\"\n"
+    # #432: see the comment on the sibling env dict above.
     env = {
+        **os.environ,
         "HOME": str(tmp_path / "home"),
         "CLAUDE_PLUGIN_ROOT": str(REPO_ROOT),
         "REMEMBER_HOOK_CWD": str(leaked_project),

@@ -28,6 +28,7 @@ issue), so the fix is not a reachability check -- it is an unconditional
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -90,7 +91,13 @@ def test_hook_clears_transcript_path_before_sourcing_anything(tmp_path, hook):
         preamble
         + "\necho \"REMEMBER_TRANSCRIPT_PATH=${REMEMBER_TRANSCRIPT_PATH:-cleared}\"\n"
     )
+    # #432: inherit the real environment (as test_hooks_json.py's own
+    # Git-Bash tests already do) rather than handing bash a from-scratch env
+    # -- a real Windows Git Bash process needs SystemRoot and friends from
+    # the native environment to spawn at all. The explicit keys below still
+    # win: they are listed after the `**os.environ` spread.
     env = {
+        **os.environ,
         "HOME": str(tmp_path / "home"),
         "CLAUDE_PLUGIN_ROOT": str(REPO_ROOT),
         "REMEMBER_TRANSCRIPT_PATH": str(victim),
