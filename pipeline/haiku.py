@@ -795,7 +795,20 @@ def _call_codex(prompt: str, timeout: int = 120) -> HaikuResult:
         except FileNotFoundError as missing:
             raise RuntimeError(f"codex CLI not found: {missing}") from missing
         except subprocess.TimeoutExpired as timed_out:
-            _log_failed_spend(f"timed out after {timeout}s", timed_out.stdout)
+            # NOT _log_failed_spend: that helper is written for the Anthropic
+            # billing path (it hunts timed_out.stdout for Claude's
+            # `--output-format json` usage block and warns "tokens already
+            # spent are unknown"), and reusing it here would tell the operator
+            # an Anthropic cost was left unaccounted when this call was never
+            # billed to Anthropic in the first place -- self-contradicting the
+            # very reason this route exists. codex's own token/cost figures
+            # are a different provider's accounting and are not tracked here
+            # (see the HaikuResult construction below).
+            _warn(
+                f"WARNING: codex timed out after {timeout}s; codex's own "
+                "usage/cost for this call (a different provider's figures, "
+                "not tracked here) is unknown"
+            )
             raise RuntimeError(f"codex timed out after {timeout}s") from timed_out
 
         if result.returncode != 0:
@@ -843,11 +856,18 @@ def call_haiku(
     tools: list[str] | None = None,
     timeout: int = 120,
 ) -> HaikuResult:
-    """Call Haiku via the Claude CLI and return a structured result.
+    """Call the summarizer and return a structured result.
 
-    Spawns a ``claude`` subprocess with ``--model haiku`` and
-    ``--output-format json``, waits for completion, and parses the
-    JSON response into a ``HaikuResult``.
+    Routes to one of two providers via ``_choose_summarizer_provider()``
+    (#460): a detected Codex host summarizes via ``codex exec``
+    (``_call_codex``, below), and every other host -- Claude Code, an
+    unrecognised host, or an explicit ``REMEMBER_SUMMARIZER=claude`` override
+    -- spawns a ``claude`` subprocess with ``--model haiku`` and
+    ``--output-format json``, waits for completion, and parses the JSON
+    response into a ``HaikuResult``. The codex route falls through to this
+    same claude path only when it fails AND ``REMEMBER_SUMMARIZER_FALLBACK=
+    claude`` was set; otherwise a failed codex route raises rather than
+    silently falling back.
 
     Args:
         prompt: The full prompt text to send to the model.

@@ -24,10 +24,15 @@ inventing a seam rather than recording one:
 
 - **Event names.** Bindings live in each host's own manifest, which is the file
   that has to name them anyway. A mapping table here would be read by nobody.
-- **The summarizer.** ``pipeline/haiku.py`` shells ``claude -p``. That is the
-  one genuinely host-coupled component, and an interface derived from a single
-  implementation would encode that CLI's auth model and output shape as though
-  they were neutral. It gets extracted from two real providers or not at all.
+- **The summarizer.** ``pipeline/haiku.py`` shells ``claude -p`` or
+  ``codex exec``, chosen by ``detect_host()`` (#460) -- two real providers now
+  exist, which was this docstring's own bar for extracting an abstraction. It
+  still is not here: each provider's auth model and output shape (Anthropic's
+  ``--output-format json`` vs. Codex's ``-o <file>``) stay different enough
+  that a shared interface would either leak one CLI's shape into the other or
+  hide a distinction ``pipeline/haiku.py`` actually needs, so the provider
+  dispatch lives beside the CLI calls it dispatches to, and only WHICH host is
+  running lives here.
 - **Path resolution in shell.** ``scripts/resolve-paths.sh`` runs before Python
   is worth starting and mirrors ``PLUGIN_ROOT_VARS`` by hand, the same way
   ``lib-slug.sh`` mirrors ``pipeline/slug.py``. ``test_host_shell_parity``
