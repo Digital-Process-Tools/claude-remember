@@ -99,7 +99,7 @@ if [ "${1:-}" = "--json" ]; then
         export CLAUDE_PROJECT_DIR
     fi
 
-    _JSON_RESOLVE_ERR_FILE="${TMPDIR:-/tmp}/remember-doctor-json-resolve-$$"
+    _JSON_RESOLVE_ERR_FILE=$(mktemp "${TMPDIR:-/tmp}/remember-doctor-json-resolve-XXXXXX")
     REMEMBER_PATHS_SOFT_FAIL=1 source "$SCRIPT_DIR/resolve-paths.sh" 2>"$_JSON_RESOLVE_ERR_FILE"
     _JSON_RESOLVE_STATUS=$?
     _JSON_RESOLVE_ERR=$(cat "$_JSON_RESOLVE_ERR_FILE" 2>/dev/null)
@@ -192,7 +192,7 @@ if [ -z "${CLAUDE_PROJECT_DIR:-}" ]; then
     export CLAUDE_PROJECT_DIR
 fi
 
-_RESOLVE_ERR_FILE="${TMPDIR:-/tmp}/remember-doctor-resolve-$$"
+_RESOLVE_ERR_FILE=$(mktemp "${TMPDIR:-/tmp}/remember-doctor-resolve-XXXXXX")
 REMEMBER_PATHS_SOFT_FAIL=1 source "$SCRIPT_DIR/resolve-paths.sh" 2>"$_RESOLVE_ERR_FILE"
 _RESOLVE_STATUS=$?
 _RESOLVE_ERR=$(cat "$_RESOLVE_ERR_FILE" 2>/dev/null)
