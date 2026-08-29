@@ -481,6 +481,11 @@ def test_main_json_flag(capsys):
     assert data["position"] == 4
     assert "human_count" in data
     assert "assistant_count" in data
+    # #443: the CLI's --json output must carry the same envelope verdict
+    # ExtractResult carries, or a caller of this entry point sees the exact
+    # same JSON shape for a genuinely quiet session and one this module could
+    # not parse at all -- the ambiguity the field exists to remove.
+    assert data["envelope"] == "claude-code"
 
 
 def test_main_count_arg(capsys):
@@ -672,11 +677,22 @@ def test_extract_messages_codex_rollout_positive_control_scaffolding_excluded():
     """The scaffolding lines (skills instructions, recommended plugins, the
     remember buffer preamble) must NOT be counted as human turns, even though
     several of them carry `role: "user"` in their own response_item envelope.
+
     This is the positive control for the exclusion: it must fire on real
-    scaffolding, not just fail to fire on nothing.
+    scaffolding present in the fixture, not merely fail to fire on a fixture
+    that never contained it -- so this pins the raw file DOES contain those
+    strings (an assertion that would fail if the fixture were ever trimmed
+    down to nothing) alongside the assertion that extraction still excludes
+    them, and pins the surviving messages are exactly the two real ones.
     """
     codex_path = os.path.join(FIXTURES, "codex-rollout.jsonl")
+    raw = open(codex_path, encoding="utf-8").read()
+    assert "recommended_plugins" in raw, "fixture no longer contains scaffolding to exclude"
+    assert "skills_instructions" in raw, "fixture no longer contains scaffolding to exclude"
+    assert "REMEMBER" in raw, "fixture no longer contains scaffolding to exclude"
+
     msgs = extract_messages(codex_path, skip_lines=0, envelope="codex")
+    assert msgs == [("HUMAN", "Say only the word PONG and stop."), ("AGENT", "PONG")]
     all_text = "\n".join(t for _, t in msgs)
     assert "recommended_plugins" not in all_text
     assert "skills_instructions" not in all_text

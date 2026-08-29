@@ -1,8 +1,11 @@
-"""Session JSONL parser — extract human/assistant exchanges from Claude Code sessions.
+"""Session JSONL parser — extract human/assistant exchanges from a host's transcript.
 
-Reads Claude Code session JSONL files, filters out metadata and system messages,
-and produces formatted text with role-labeled exchanges suitable for
-summarization by Haiku.
+Reads a session JSONL file, filters out metadata and system messages, and
+produces formatted text with role-labeled exchanges suitable for
+summarization by Haiku. Two transcript envelopes are understood -- Claude
+Code's and Codex's -- via ``sniff_file_envelope()`` and the per-host
+adapters in ``pipeline/host.py`` (#443); a third, unrecognised, shape is
+reported rather than silently read as an empty session.
 
 Supports incremental extraction (only new messages since last save) and
 full extraction (all messages or last N).
@@ -516,6 +519,7 @@ def main() -> None:
             "position": result.position,
             "human_count": result.human_count,
             "assistant_count": result.assistant_count,
+            "envelope": result.envelope,
         }))
     else:
         print(result.exchanges)
