@@ -772,7 +772,10 @@ def _create_full_plugin_copy(plugin_dir: str) -> None:
     for item in ("scripts", "pipeline", "prompts", "hooks", "hooks.d", "skills"):
         src = os.path.join(repo, item)
         if os.path.isdir(src):
-            shutil.copytree(src, os.path.join(plugin_dir, item), dirs_exist_ok=True)
+            shutil.copytree(
+                src, os.path.join(plugin_dir, item), dirs_exist_ok=True,
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+            )
     # config.json needed by log.sh and session-start-hook
     import json
     with open(os.path.join(plugin_dir, "config.json"), "w") as f:
@@ -782,6 +785,61 @@ def _create_full_plugin_copy(plugin_dir: str) -> None:
             "features": {"recovery": False},
         }, f)
 
+class TestFullPluginCopyExcludesPycache:
+    """_create_full_plugin_copy must not copy build artefacts alongside source (#419).
+
+    CPython writes bytecode caches atomically: it creates a temporary
+    ``<name>.pyc.<id>`` file and renames it into place. A `shutil.copytree`
+    walk that includes `__pycache__` can observe that temporary file and then
+    fail with `shutil.Error` when a concurrent interpreter finishes the
+    rename before the walk opens it. Nothing in the copied tree needs
+    `__pycache__` -- it is a build artefact of the source beside it, and any
+    Python the copied hooks invoke recompiles from source anyway.
+
+    This is a property pin, not a race reproduction: reproducing the race
+    reliably would mean defeating it. Instead we assert the property that
+    defeats the race by construction -- neither `__pycache__` nor any `.pyc`
+    file is ever present in the destination -- and pair it with a positive
+    control (a real `.py` file *must* still be copied) so a broken or
+    no-op copy cannot pass by accident.
+    """
+
+    def test_pycache_excluded_but_real_files_copied(self, tmp_path):
+        repo = os.path.join(os.path.dirname(__file__), "..")
+        pycache_dir = os.path.join(repo, "pipeline", "__pycache__")
+        stale = os.path.join(pycache_dir, "prompts.cpython-312.pyc.139822182724304")
+        created_pycache = not os.path.exists(pycache_dir)
+        os.makedirs(pycache_dir, exist_ok=True)
+        try:
+            with open(stale, "wb") as f:
+                f.write(b"stale bytecode cache artefact")
+
+            plugin_dir = os.path.join(str(tmp_path), "plugin")
+            os.makedirs(plugin_dir)
+            _create_full_plugin_copy(plugin_dir)
+
+            copied_pycache = os.path.join(plugin_dir, "pipeline", "__pycache__")
+            assert not os.path.exists(copied_pycache), (
+                f"__pycache__ was copied into {copied_pycache} -- "
+                "a concurrent bytecode write can race this copy and fail it"
+            )
+
+            # Positive control: the copy must still work for real source files,
+            # so the ignore rule isn't silently swallowing everything.
+            copied_prompts = os.path.join(plugin_dir, "pipeline", "prompts.py")
+            assert os.path.exists(copied_prompts), (
+                "prompts.py was not copied -- the ignore rule broke the real copy"
+            )
+        finally:
+            try:
+                os.remove(stale)
+            except OSError:
+                pass
+            if created_pycache:
+                try:
+                    os.rmdir(pycache_dir)
+                except OSError:
+                    pass
 
 def _create_full_project(project_dir: str) -> None:
     """Create a realistic .remember directory structure."""
