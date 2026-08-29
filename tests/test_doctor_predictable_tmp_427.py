@@ -41,7 +41,11 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.skipif(
+# Only the race test below drives a bash subprocess and POSIX symlink
+# semantics -- the static class-pin test is a pure text/regex scan with
+# nothing platform-specific in it, so it is deliberately NOT under this
+# skip and must keep running (and reporting) on the Windows leg too.
+_needs_posix_bash = pytest.mark.skipif(
     sys.platform == "win32",
     reason="bash subprocess + POSIX symlink semantics -- not portable to Windows runners",
 )
@@ -59,6 +63,7 @@ def _project(tmp_path: Path):
     return home, project, remember
 
 
+@_needs_posix_bash
 def test_predictable_temp_path_lets_a_symlink_truncate_an_arbitrary_file(tmp_path):
     home, project, remember = _project(tmp_path)
     shared_tmp = tmp_path / "shared-tmp"
