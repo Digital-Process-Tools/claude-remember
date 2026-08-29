@@ -396,6 +396,38 @@ case "$STDIN_SESSION_ID" in
     ''|.|..|*[!A-Za-z0-9._-]*) STDIN_SESSION_ID="" ;;
 esac
 
+# ── The transcript path the host handed us (#459, mirroring #407/#424) ────
+# ~/.claude/projects/<slug> is Claude Code's OWN session layout, not a
+# universal one -- Codex writes to ~/.codex/sessions/<yyyy>/<mm>/<dd>/, so
+# the SESSION_DIR derivation two lines below can never find a Codex
+# transcript, and every per-tool-call save on that host declined (#459).
+# stdin carries `transcript_path` on every hook event, on every host
+# (pipeline/host.py's own module docstring table), same payload
+# STDIN_SESSION_ID above already reads -- so read it here rather than
+# reconstructing a location this hook has no business knowing the shape of.
+#
+# Validated at the point of entry, same as STDIN_SESSION_ID and
+# REMEMBER_HOOK_CWD above: a raw newline cannot reach this point (the stdin
+# read loop already strips line terminators), so only a stray carriage
+# return is rejected outright; whether the value actually names a file is
+# the `[ -f ]` check below, not a character allowlist -- a transcript path
+# legitimately contains slashes and dots.
+STDIN_TRANSCRIPT_PATH=$(_stdin_json_string transcript_path "$HOOK_STDIN" 2>/dev/null) || STDIN_TRANSCRIPT_PATH=""
+case "$STDIN_TRANSCRIPT_PATH" in
+    *$'\r'*) STDIN_TRANSCRIPT_PATH="" ;;
+esac
+if [ -n "$STDIN_TRANSCRIPT_PATH" ] && [ ! -f "$STDIN_TRANSCRIPT_PATH" ]; then
+    STDIN_TRANSCRIPT_PATH=""
+fi
+# Exported for save-session.sh (launched below, on the delta path) and
+# anything it dispatches: pipeline.host.transcript_path() already trusts
+# this variable name for exactly this purpose (#407/#431), and save-session.sh
+# already documents it as trusted input. This is NOT the ambient value #424
+# unset at the top of this file -- it is freshly rebuilt from THIS
+# invocation's own validated stdin, the same distinction session-start-hook.sh
+# and session-end-hook.sh already draw.
+[ -n "$STDIN_TRANSCRIPT_PATH" ] && export REMEMBER_TRANSCRIPT_PATH="$STDIN_TRANSCRIPT_PATH"
+
 SAVE_SCRIPT="$PLUGIN_ROOT/scripts/save-session.sh"
 LAST_SAVE_FILE="$REMEMBER_DIR/tmp/last-save.json"
 PID_FILE="$REMEMBER_DIR/tmp/save-session.pid"
@@ -429,7 +461,19 @@ SESSION_DIR="$(claude_projects_dir)/$(session_dir_slug "$PROJECT")"
 # processes on the WRITE path is not a trade; misattributing a tool call is a
 # bug, and this repo has twice turned that bug into an outage (#204, #129).
 NOTICE_TTL=3600
-LATEST_JSONL=$(ls -t "$SESSION_DIR"/*.jsonl 2>/dev/null | head -1)
+# STDIN_TRANSCRIPT_PATH (#459) wins outright when present: it is the exact
+# file the host says this invocation belongs to, so there is nothing for the
+# `ls -t`/slug-match dance below to improve on, and running it anyway would
+# cost a process on every tool call for an answer already in hand. It is
+# only consulted (and SESSION_DIR only matters at all) when this host's
+# stdin did not offer one -- an older CLI, a test harness, a host this
+# module has not been taught yet -- which is exactly the population the
+# existing "no session dir" warning below was already written for.
+if [ -n "$STDIN_TRANSCRIPT_PATH" ]; then
+    LATEST_JSONL="$STDIN_TRANSCRIPT_PATH"
+else
+    LATEST_JSONL=$(ls -t "$SESSION_DIR"/*.jsonl 2>/dev/null | head -1)
+fi
 if [ -z "$LATEST_JSONL" ]; then
     NOTICE_MARKER="$REMEMBER_DIR/tmp/no-transcript-notice"
     NOTICE_LAST=0
@@ -453,7 +497,7 @@ if [ -z "$LATEST_JSONL" ]; then
         if [ -d "$SESSION_DIR" ]; then
             log "hook" "no .jsonl transcript in $SESSION_DIR -- nothing to save yet"
         else
-            log "hook" "WARNING: no session dir for this project: $SESSION_DIR (slug of $PROJECT). Memory cannot save until it matches a directory under $(claude_projects_dir)/"
+            log "hook" "WARNING: no session dir for this project: $SESSION_DIR (slug of $PROJECT), and stdin named no usable transcript_path either. Memory cannot save until it matches a directory under $(claude_projects_dir)/ -- or, on a host that is not Claude Code, until this hook's stdin carries a readable transcript_path (#459)."
         fi
     fi
     exit 0
@@ -482,7 +526,15 @@ fi
 # capturing nothing is an outage, and this repo has twice traded the first for
 # the second (#204, #129).
 TRANSCRIPT="$LATEST_JSONL"
-if [ -n "$STDIN_SESSION_ID" ] && [ -f "$SESSION_DIR/$STDIN_SESSION_ID.jsonl" ]; then
+if [ -n "$STDIN_TRANSCRIPT_PATH" ]; then
+    # Already resolved above (#459): STDIN_TRANSCRIPT_PATH IS LATEST_JSONL in
+    # this case, and re-deriving a SESSION_DIR match by session id would only
+    # be able to agree with it or be wrong -- Codex's own transcript does not
+    # live under SESSION_DIR at all, so the id-match below would always miss
+    # and log a "falling back to newest" line that is not a fallback, just
+    # noise on every Codex tool call.
+    :
+elif [ -n "$STDIN_SESSION_ID" ] && [ -f "$SESSION_DIR/$STDIN_SESSION_ID.jsonl" ]; then
     TRANSCRIPT="$SESSION_DIR/$STDIN_SESSION_ID.jsonl"
 else
     [ -n "$STDIN_SESSION_ID" ] && log "hook" "post-tool: stdin session $STDIN_SESSION_ID has no transcript in $SESSION_DIR -- falling back to newest"

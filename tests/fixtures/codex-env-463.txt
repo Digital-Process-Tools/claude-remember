@@ -1,0 +1,27 @@
+# Captured from a live `codex exec` session, codex-cli 0.150.1, macOS 15.3.2
+# arm64, 2026-08-29 (issue #463 investigation). Re-derived independently of
+# the issue's own dump by running, from inside this branch's own worktree:
+#
+#   codex exec --sandbox workspace-write -C <worktree> \
+#     "run: env | grep -Ei 'codex|plugin_root|claude' | sort"
+#
+# This is the whole reason the fixture is a captured file rather than a
+# dict built in test code: a test that constructs its own environment can
+# only fail to notice the exact way the shipped code was wrong, because it
+# will happily set whatever variable the implementation expects. Only a
+# real process's real environment can show that CODEX_HOME and PLUGIN_ROOT
+# are never exported by Codex to a child process -- CODEX_HOME is a
+# *configuration path Codex reads*, not a signature it exports.
+#
+# Deliberately left in (not filtered out): CLAUDE_CODE_ENTRYPOINT and
+# CLAUDE_CODE_SESSION_ID, because this Codex session was itself launched
+# from inside a Claude Code session (nested agents), and that is the
+# second, distinct defect #463 also documents -- see the
+# "two signatures at once" test in tests/test_codex_signature_463.py.
+CODEX_CI=1
+CODEX_SANDBOX=seatbelt
+CODEX_SANDBOX_NETWORK_DISABLED=1
+CODEX_SESSION_ID=01a04d64-6160-73d0-b2f0-5b6a0bb09fdb
+CODEX_THREAD_ID=01a04d64-6160-73d0-b2f0-5b6a0bb09fdb
+CLAUDE_CODE_ENTRYPOINT=cli
+CLAUDE_CODE_SESSION_ID=9059bdf0-e8fb-4f1b-a205-2c2783d46788

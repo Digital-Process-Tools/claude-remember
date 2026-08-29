@@ -42,7 +42,8 @@ def _mock_claude_stdout(text: str) -> str:
 
 
 def _clear_host_signals(monkeypatch):
-    for var in ("CODEX_HOME", "PLUGIN_ROOT", "CLAUDE_CODE_ENTRYPOINT",
+    for var in ("CODEX_HOME", "PLUGIN_ROOT", "CODEX_SESSION_ID",
+                "CODEX_THREAD_ID", "CLAUDE_CODE_ENTRYPOINT",
                 "CLAUDE_CODE_SESSION_ID", "CLAUDE_PLUGIN_ROOT",
                 "REMEMBER_SUMMARIZER", "REMEMBER_SUMMARIZER_FALLBACK"):
         monkeypatch.delenv(var, raising=False)
@@ -52,9 +53,10 @@ def _clear_host_signals(monkeypatch):
 def _isolate_summarizer_routing_env(monkeypatch):
     """Every test in this file starts from a known host + provider state.
 
-    Ambient CODEX_HOME/CLAUDE_CODE_* ever leaking from the environment that
-    launched pytest must not silently reroute an existing (pre-#460) test's
-    expectations -- see the module docstring's "must not fire" pairing.
+    Ambient CODEX_SESSION_ID/CODEX_HOME/CLAUDE_CODE_* ever leaking from the
+    environment that launched pytest must not silently reroute an existing
+    (pre-#460) test's expectations -- see the module docstring's "must not
+    fire" pairing.
     """
     _clear_host_signals(monkeypatch)
 
@@ -103,7 +105,7 @@ def test_codex_host_routes_to_codex_exec(mock_run, monkeypatch):
     """A detected Codex host uses `codex exec`, not `claude -p` -- the
     positive control paired with every "claude was NOT called" assertion
     below."""
-    monkeypatch.setenv("CODEX_HOME", "/fake/codex/home")
+    monkeypatch.setenv("CODEX_SESSION_ID", "01a04d64-fake-codex-session")
     _write_codex_output.next_text = "## did a codex thing"
     mock_run.side_effect = _write_codex_output
 
@@ -125,7 +127,7 @@ def test_codex_host_routes_to_codex_exec(mock_run, monkeypatch):
 def test_explicit_claude_override_wins_under_codex_host(mock_run, monkeypatch):
     """A Codex user who explicitly wants Claude gets it -- possible, just
     not unconditional (the issue's own framing)."""
-    monkeypatch.setenv("CODEX_HOME", "/fake/codex/home")
+    monkeypatch.setenv("CODEX_SESSION_ID", "01a04d64-fake-codex-session")
     monkeypatch.setenv("REMEMBER_SUMMARIZER", "claude")
     mock_run.return_value = MagicMock(
         returncode=0, stdout=_mock_claude_stdout("via claude"), stderr="")
@@ -152,7 +154,7 @@ def test_codex_unavailable_fails_loudly_with_no_fallback_configured(mock_run, mo
     """The route being unavailable must never silently reproduce #460 one
     layer down by falling back to claude -p on its own. No fallback opted
     into -> loud RuntimeError, and claude is never spawned."""
-    monkeypatch.setenv("CODEX_HOME", "/fake/codex/home")
+    monkeypatch.setenv("CODEX_SESSION_ID", "01a04d64-fake-codex-session")
     mock_run.side_effect = FileNotFoundError("no such file: codex")
 
     with pytest.raises(RuntimeError, match="could not summarize"):
@@ -168,7 +170,7 @@ def test_codex_unavailable_fails_loudly_with_no_fallback_configured(mock_run, mo
 def test_codex_unavailable_falls_back_when_opted_in(mock_run, monkeypatch):
     """REMEMBER_SUMMARIZER_FALLBACK=claude is the operator's explicit
     opt-in -- the one case where this route is allowed to reach claude -p."""
-    monkeypatch.setenv("CODEX_HOME", "/fake/codex/home")
+    monkeypatch.setenv("CODEX_SESSION_ID", "01a04d64-fake-codex-session")
     monkeypatch.setenv("REMEMBER_SUMMARIZER_FALLBACK", "claude")
 
     calls = []
@@ -192,7 +194,7 @@ def test_codex_empty_output_is_a_loud_failure_not_a_silent_skip(mock_run, monkey
     """An empty -o file (codex exited 0 but wrote nothing) must not be
     read as a legitimate SKIP -- it is a failure of the route, distinct
     from the model choosing SKIP."""
-    monkeypatch.setenv("CODEX_HOME", "/fake/codex/home")
+    monkeypatch.setenv("CODEX_SESSION_ID", "01a04d64-fake-codex-session")
     _write_codex_output.next_text = ""
     mock_run.side_effect = _write_codex_output
 
@@ -206,7 +208,7 @@ def test_codex_spawn_declined_is_never_treated_as_unavailable(mock_run, mock_cla
     """A spawn-guard decline (#204) is "skip this span, retry later", not
     "route unavailable" -- it must propagate as-is, never triggering a
     fallback claude -p spawn for the same span."""
-    monkeypatch.setenv("CODEX_HOME", "/fake/codex/home")
+    monkeypatch.setenv("CODEX_SESSION_ID", "01a04d64-fake-codex-session")
     monkeypatch.setenv("REMEMBER_SUMMARIZER_FALLBACK", "claude")
     mock_claim.side_effect = SummarizerSpawnDeclined("declined: too many concurrent")
 

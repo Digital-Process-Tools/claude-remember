@@ -94,7 +94,19 @@ CODEX = Host(
     name="codex",
     plugin_root_vars=("PLUGIN_ROOT", "CLAUDE_PLUGIN_ROOT"),
     project_dir_vars=("CLAUDE_PROJECT_DIR",),
-    signature_vars=("CODEX_HOME", "PLUGIN_ROOT"),
+    # NOT CODEX_HOME (#463): that is a configuration path Codex *reads*,
+    # never a variable it *exports* to a child process, so it is absent from
+    # every real codex exec environment and could never have fired. NOT
+    # PLUGIN_ROOT either, for the same reason: it is a compatibility alias
+    # covered by plugin_root_vars above, not a signature -- and, unlike
+    # CODEX_HOME, it is not even always set (Codex only exports it when
+    # invoking a plugin's own hook, not for a bare `codex exec`).
+    # CODEX_SESSION_ID/CODEX_THREAD_ID are what a live `codex exec` process
+    # actually exports on every run, verified against codex-cli 0.150.1 --
+    # see tests/fixtures/codex-env-463.txt, captured rather than
+    # constructed, since a constructed fixture would have accepted
+    # CODEX_HOME just as happily as the code it was meant to catch.
+    signature_vars=("CODEX_SESSION_ID", "CODEX_THREAD_ID"),
 )
 
 # Gemini CLI documents no environment variables for command hooks at all, so it
@@ -111,6 +123,30 @@ UNKNOWN = Host(name="unknown", plugin_root_vars=(), project_dir_vars=())
 # Ordered: the most specific signature is tested first. Codex sets an alias
 # Claude Code also sets, so Claude Code must be asked before Codex or an alias
 # would decide the answer.
+#
+# This order also decides what happens when BOTH hosts' native (non-alias)
+# signatures are present at once -- a real configuration, not a hypothetical
+# one: a Codex session launched from inside a Claude Code session inherits
+# CLAUDE_CODE_ENTRYPOINT/CLAUDE_CODE_SESSION_ID from its parent, alongside
+# its own freshly-set CODEX_SESSION_ID/CODEX_THREAD_ID (#463). CLAUDE_CODE
+# wins in that case, deliberately, and not because it is "more correct" --
+# there is no way to tell from flat environment variables alone which
+# process is the ancestor and which is the child. Neither host publishes an
+# ancestry marker, so "prefer the innermost host" cannot be implemented
+# honestly; it would have to guess a direction and would guess wrong for the
+# (rarer, but real) reverse nesting of Claude Code launched from inside a
+# Codex sandbox.
+#
+# A third, explicit AMBIGUOUS state was considered instead of silently
+# picking one. It was rejected here because detect_host() has exactly one
+# consumer (pipeline.haiku._resolve_summarizer_provider) and that consumer's
+# own contract is already binary -- "codex under a detected Codex host,
+# claude everywhere else" -- so AMBIGUOUS would collapse into the same
+# "claude" branch as UNKNOWN with no behavioural difference from today's
+# registry-order answer; it would be a label nothing reads, not a decision
+# nothing else could reach. If a second consumer is ever added that needs to
+# treat "ambiguous" differently from "no signature at all", that is the
+# point to revisit this, not before.
 REGISTRY: tuple[Host, ...] = (CLAUDE_CODE, CODEX)
 
 # Every plugin-root variable any known host uses, in registry precedence order,
