@@ -22,6 +22,17 @@ REMEMBER_HOOK_CWD test already covers, so the four assertions below are not
 redundant with the existing suite only on the Windows leg -- which is the
 platform this issue is about.
 
+That native-backslash spelling is deliberately used ONLY for the stdin
+`cwd` payload field under test -- see `_win_bash_path` below for why every
+OTHER path handed to bash (the script argv, HOME, CLAUDE_PLUGIN_ROOT) is
+forced to forward slashes instead. A first version of this file used
+`str(...)` unnormalized for those too and broke session-start-hook.sh's own
+self-location on the real windows-latest CI leg before ever reaching
+resolve-paths.sh's candidate logic -- a harness bug, not a finding about
+the fix, caught by CI and fixed here rather than papered over: this repo's
+own tests/test_hooks_json.py already established forward-slash-always as
+the convention for exactly this reason, and this file now follows it.
+
 All four hooks that read the #411/#444 REMEMBER_HOOK_CWD fallback are covered:
 session-start-hook.sh and session-end-hook.sh (#411), user-prompt-hook.sh and
 post-tool-hook.sh (#444).
@@ -72,11 +83,34 @@ RESOLVE_PATHS = REPO_ROOT / "scripts" / "resolve-paths.sh"
 SESSION_ID = "aaaaaaaa-0000-4000-8000-000000000002"
 
 
+def _win_bash_path(p: Path) -> str:
+    """A path spelled the way this repo's OWN Windows-CI convention spells
+    everything handed to bash -- forward slashes, unconditionally, matching
+    tests/test_hooks_json.py's `str(REPO_ROOT).replace("\\\\", "/")` and
+    hooks/hooks.json's own `"${CLAUDE_PLUGIN_ROOT}/scripts/..."` template.
+    Real hook dispatch NEVER hands a hook script a backslash-spelled $0: the
+    registered command is a fixed forward-slash template, and CLAUDE_PLUGIN_ROOT
+    itself arrives POSIX-style on Windows (this file's own header comment on
+    CLAUDE_PROJECT_DIR says the same). `pathlib.Path.__str__` on Windows
+    renders native backslashes, which is the right spelling for an OS-level
+    call (subprocess's own `cwd=` argument, for instance) and the WRONG one
+    for a string bash will itself parse as a path -- session-start-hook.sh's
+    self-location (`_HOOK_DIR="${BASH_SOURCE[0]%/*}"`) cannot derive a
+    directory from a path with no `/` in it, so an un-normalized $0 breaks
+    hook bootstrap before resolve-paths.sh is ever sourced, regardless of
+    what this issue's fix does. This is ONLY for strings bash will parse as
+    paths (the script argv and the env vars below); the REMEMBER_HOOK_CWD
+    *payload* value under test is deliberately left native-spelled -- see
+    the payload builders, which pass str(project) through untouched.
+    """
+    return str(p).replace("\\", "/")
+
+
 def _env(home: Path, plugin_root: Path) -> dict:
     env = {
         **os.environ,
-        "HOME": str(home),
-        "CLAUDE_PLUGIN_ROOT": str(plugin_root),
+        "HOME": _win_bash_path(home),
+        "CLAUDE_PLUGIN_ROOT": _win_bash_path(plugin_root),
     }
     env.pop("CLAUDE_PROJECT_DIR", None)
     env.pop("REMEMBER_HOOK_CWD", None)
@@ -85,7 +119,7 @@ def _env(home: Path, plugin_root: Path) -> dict:
 
 def _run(script: Path, env: dict, payload: str, cwd: Path):
     return subprocess.run(
-        [BASH, str(script)], env=env, input=payload,
+        [BASH, _win_bash_path(script)], env=env, input=payload,
         capture_output=True, text=True, timeout=60, cwd=str(cwd), check=False,
     )
 
