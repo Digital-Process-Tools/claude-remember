@@ -105,15 +105,33 @@ LIB_MEMORY_DIR = REPO_ROOT / "scripts" / "lib-memory-dir.sh"
 # relative path it applies to -- see that test's docstring for why. Applied
 # to the origin/main side before the compare, so anything else that diverges
 # still fails the guard.
+# `_code()` strips comment LINES but keeps blank ones, so every blank line
+# that used to separate a stripped comment block from the code around it
+# survives into the joined "code lines only" text and must be matched here
+# too -- these `\n\n`s are not decoration, they are load-bearing whitespace.
 _SANCTIONED_DIVERGENCE = {
     "scripts/lib-memory-dir.sh": (
-        # A blank line separated the assignment from the (all-comment) block
-        # that used to sit before the umask line; `_code()` strips comment
-        # LINES but keeps blank ones, so that blank line survives into the
-        # joined "code lines only" text and must be matched here too.
         '_merged_cfg="${SYS_TMPDIR}/remember-config-$$.json"\n\n' +
-        '(umask 077; : > "$_merged_cfg") 2>/dev/null || true',
-        '_merged_cfg=$(mktemp "${SYS_TMPDIR}/remember-config-XXXXXX" 2>/dev/null) || _merged_cfg=""',
+        '(umask 077; : > "$_merged_cfg") 2>/dev/null || true\n\n' +
+        '_cfg_sources=()\n' +
+        '[ -f "$_bundled_cfg"  ] && _cfg_sources+=("$_bundled_cfg")\n' +
+        '[ -f "$_user_cfg"     ] && _cfg_sources+=("$_user_cfg")\n' +
+        '[ -f "$_project_cfg"  ] && _cfg_sources+=("$_project_cfg")\n\n' +
+        'if [ "${#_cfg_sources[@]}" -gt 0 ] && command -v jq >/dev/null 2>&1; then',
+        # mktemp replaces the PID-suffixed literal path (closes the #429
+        # credential-disclosure TOCTOU), and the `if [ -z ... ]` arm closes
+        # the leaked-stderr gap the self-review of #429 found: an empty
+        # $_merged_cfg (a failed mktemp) used to fall straight into
+        # `jq ... > "$_merged_cfg"` with an empty redirect target, a
+        # shell-level error 2>/dev/null cannot suppress.
+        '_merged_cfg=$(mktemp "${SYS_TMPDIR}/remember-config-XXXXXX" 2>/dev/null) || _merged_cfg=""\n\n' +
+        '_cfg_sources=()\n' +
+        '[ -f "$_bundled_cfg"  ] && _cfg_sources+=("$_bundled_cfg")\n' +
+        '[ -f "$_user_cfg"     ] && _cfg_sources+=("$_user_cfg")\n' +
+        '[ -f "$_project_cfg"  ] && _cfg_sources+=("$_project_cfg")\n\n' +
+        'if [ -z "$_merged_cfg" ]; then\n' +
+        '    :\n' +
+        'elif [ "${#_cfg_sources[@]}" -gt 0 ] && command -v jq >/dev/null 2>&1; then',
     ),
 }
 

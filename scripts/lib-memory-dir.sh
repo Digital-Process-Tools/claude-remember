@@ -296,7 +296,18 @@ _cfg_sources=()
 [ -f "$_user_cfg"     ] && _cfg_sources+=("$_user_cfg")
 [ -f "$_project_cfg"  ] && _cfg_sources+=("$_project_cfg")
 
-if [ "${#_cfg_sources[@]}" -gt 0 ] && command -v jq >/dev/null 2>&1; then
+# An empty $_merged_cfg means mktemp itself failed (an unwritable/unusable
+# SYS_TMPDIR -- rare, but no longer impossible now that this is mktemp
+# instead of a literal path #429 could always name). `jq ... > "$_merged_cfg"`
+# and `cp ... "$_merged_cfg"` with an EMPTY path are a shell redirect/target
+# error the caller never asked for and 2>/dev/null does not catch (that
+# suppresses the invoked COMMAND's stderr, not the shell's own
+# redirection-setup failure), so skip the merge attempts entirely rather than
+# let that leak: REMEMBER_CONFIG ends up empty either way, which every
+# consumer already treats the same as a genuinely-absent config file.
+if [ -z "$_merged_cfg" ]; then
+    :
+elif [ "${#_cfg_sources[@]}" -gt 0 ] && command -v jq >/dev/null 2>&1; then
     # Deep-merge: later files override earlier ones. Strip `_`-prefixed keys —
     # convention: `_*` are user-facing docs (_comments/_purpose/_notes), never runtime data.
     jq -s 'reduce .[] as $x ({}; . * $x) | with_entries(select(.key | startswith("_") | not))' "${_cfg_sources[@]}" > "$_merged_cfg" 2>/dev/null \

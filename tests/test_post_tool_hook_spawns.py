@@ -59,7 +59,11 @@ from tests.spawn_counting import make_shim_dir, spawns as _spawn_lines  # noqa: 
 
 # Measured on macOS bash 3.2.57 with the shared counted-command list of
 # tests/spawn_counting.py: 30 before #230, 20 after it, 16 after #232 collapsed
-# config() to a single read of the merged config.
+# config() to a single read of the merged config, 17 after #429 added one
+# `mktemp` to close the predictable-shared-tmp-path TOCTOU in the same merge
+# (a PID-suffixed literal path let an attacker's pre-seeded symlink receive
+# the merged config, which can carry a live haiku.oauth_token) -- a real,
+# necessary, one-time cost of the fix, not a regression to chase back out.
 #
 # (#230's own note said 17. That number predates #233 folding the two budget
 # tests onto one counted-command list, and it left out the two `mkdir -p` calls
@@ -73,7 +77,7 @@ from tests.spawn_counting import make_shim_dir, spawns as _spawn_lines  # noqa: 
 # regression. What remains is the `jq -s` merge and its `rm` on exit, which
 # cannot go without caching the merged config, and that is a credential
 # lifetime decision (#232) rather than a spawn one.
-POST_TOOL_SPAWN_MEASURED = 16
+POST_TOOL_SPAWN_MEASURED = 17
 POST_TOOL_SPAWN_BUDGET = POST_TOOL_SPAWN_MEASURED + 2
 
 
