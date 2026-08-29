@@ -49,7 +49,7 @@
 #
 # ============================================================================
 
-set -u  # not -e — we never want to fail loudly here
+set -u  # not -e -- we never want to fail loudly here
 
 # ── Cheap guards FIRST, before sourcing anything ─────────────────────────────
 # Sourcing log.sh loads and parses the merged config. Most installs are legacy
@@ -89,7 +89,7 @@ if [ "$(_gr_realpath "$TOPLEVEL")" != "$(_gr_realpath "$REPO_ROOT")" ]; then
     # cost; the ordinary "not a git repo at all" exit above still says nothing,
     # because that one really is "nothing to do".
     source "$PIPELINE_DIR/scripts/log.sh" 2>/dev/null && \
-        log "git-restore" "declined: $REPO_ROOT is not the toplevel of its git repository (that is $TOPLEVEL) — a memory store inside a larger repo is never fast-forwarded by this hook, deliberately. Nothing was restored."
+        log "git-restore" "declined: $REPO_ROOT is not the toplevel of its git repository (that is $TOPLEVEL) -- a memory store inside a larger repo is never fast-forwarded by this hook, deliberately. Nothing was restored."
     exit 0
 fi
 
@@ -241,7 +241,7 @@ _spawn_fetch() {
                 #
                 # Fall through and spawn. The spawn rewrites the record, which
                 # is the whole repair, and one line says why.
-                report_error "git-restore" "WARNING: $FETCH_STATE_FILE says a fetch started $(( 0 - _age ))s in the FUTURE — the clock moved back, or the record is corrupt in a way a digits-only check cannot see. No fetch is running; starting a real one and rewriting the record."
+                report_error "git-restore" "WARNING: $FETCH_STATE_FILE says a fetch started $(( 0 - _age ))s in the FUTURE -- the clock moved back, or the record is corrupt in a way a digits-only check cannot see. No fetch is running; starting a real one and rewriting the record."
             elif [ "$_age" -lt "$FETCH_TIMEOUT" ]; then
                 return 0
             fi
@@ -376,7 +376,7 @@ _take_lock() {
 }
 
 if ! _take_lock; then
-    log "git-restore" "store busy (backup in progress), skip — the fast-forward will be retried next session"
+    log "git-restore" "store busy (backup in progress), skip -- the fast-forward will be retried next session"
     exit 0
 fi
 
@@ -387,26 +387,26 @@ fi
 # failing for a week looks identical to a store that is genuinely current.
 case "$FETCH_HEALTH" in
     ok)        : ;;
-    never-run) log "git-restore" "no fetch has completed yet for $REPO_ROOT — the comparison below is against whatever refs are already on disk, which may be stale. A fetch starts in the background now and its result lands next session." ;;
-    in-flight) log "git-restore" "a background fetch is still running — the comparison below is against the previous fetch's refs" ;;
-    abandoned) log "git-restore" "WARNING: the last background fetch never completed (started $(cat "$FETCH_STATE_FILE" 2>/dev/null | head -1)) — could NOT check the remote. This is not 'up to date': the refs below are as old as the last fetch that did finish." ;;
-    failed:*)  log "git-restore" "WARNING: the last background fetch FAILED (rc=${FETCH_HEALTH#failed:}) — could NOT check the remote. This is not 'up to date': the refs below are as old as the last fetch that did finish. Run 'git -C \"$REPO_ROOT\" fetch $REMOTE_NAME' to see git's own error." ;;
+    never-run) log "git-restore" "no fetch has completed yet for $REPO_ROOT -- the comparison below is against whatever refs are already on disk, which may be stale. A fetch starts in the background now and its result lands next session." ;;
+    in-flight) log "git-restore" "a background fetch is still running -- the comparison below is against the previous fetch's refs" ;;
+    abandoned) log "git-restore" "WARNING: the last background fetch never completed (started $(cat "$FETCH_STATE_FILE" 2>/dev/null | head -1)) -- could NOT check the remote. This is not 'up to date': the refs below are as old as the last fetch that did finish." ;;
+    failed:*)  log "git-restore" "WARNING: the last background fetch FAILED (rc=${FETCH_HEALTH#failed:}) -- could NOT check the remote. This is not 'up to date': the refs below are as old as the last fetch that did finish. Run 'git -C \"$REPO_ROOT\" fetch $REMOTE_NAME' to see git's own error." ;;
 esac
 
 if [ -z "$LOCAL_HEAD" ]; then
-    log "git-restore" "local branch is unborn (no commits in $REPO_ROOT) — nothing to fast-forward onto, refusing. Clone or check out the backup branch by hand."
+    log "git-restore" "local branch is unborn (no commits in $REPO_ROOT) -- nothing to fast-forward onto, refusing. Clone or check out the backup branch by hand."
     _spawn_fetch
     exit 0
 fi
 
 if [ -z "$GIT_RESTORE_BRANCH" ]; then
-    log "git-restore" "HEAD is detached and git_restore.branch is unset — refusing to guess which branch to restore"
+    log "git-restore" "HEAD is detached and git_restore.branch is unset -- refusing to guess which branch to restore"
     exit 0
 fi
 
 REMOTE_HEAD=$(git -C "$REPO_ROOT" rev-parse --verify --quiet "$REMOTE_REF" 2>/dev/null) || REMOTE_HEAD=""
 if [ -z "$REMOTE_HEAD" ]; then
-    log "git-restore" "no fetched ref $REMOTE_REF — nothing to restore FROM (this is not 'up to date'). Check git_restore.remote / git_restore.branch."
+    log "git-restore" "no fetched ref $REMOTE_REF -- nothing to restore FROM (this is not 'up to date'). Check git_restore.remote / git_restore.branch."
     _spawn_fetch
     exit 0
 fi
@@ -424,7 +424,7 @@ case "$AHEAD" in ''|*[!0-9]*) AHEAD="" ;; esac
 case "$BEHIND" in ''|*[!0-9]*) BEHIND="" ;; esac
 
 if [ -z "$AHEAD" ] || [ -z "$BEHIND" ]; then
-    log "git-restore" "WARNING: could not compare HEAD with $REMOTE_REF — could NOT check, no restore attempted"
+    log "git-restore" "WARNING: could not compare HEAD with $REMOTE_REF -- could NOT check, no restore attempted"
     _spawn_fetch
     exit 0
 fi
@@ -440,11 +440,11 @@ if [ "$AHEAD" -gt 0 ] && [ "$BEHIND" -gt 0 ]; then
     _count=$((10#$_count + 1))
     echo "$_count" > "$DIVERGED_STATE_FILE" 2>/dev/null || true
 
-    log "git-restore" "ERROR: the memory store has DIVERGED — $AHEAD local commit(s) the remote does not have, $BEHIND remote commit(s) this machine does not have (consecutive session starts in this state: $_count). NOT restored, and nothing here will merge or rebase for you: recent.md and archive.md are rewritten wholesale by consolidation, so a wrong automatic resolution would corrupt memory silently. Resolve it by hand: git -C \"$REPO_ROOT\" log --oneline --left-right \"HEAD...$REMOTE_REF\""
+    log "git-restore" "ERROR: the memory store has DIVERGED -- $AHEAD local commit(s) the remote does not have, $BEHIND remote commit(s) this machine does not have (consecutive session starts in this state: $_count). NOT restored, and nothing here will merge or rebase for you: recent.md and archive.md are rewritten wholesale by consolidation, so a wrong automatic resolution would corrupt memory silently. Resolve it by hand: git -C \"$REPO_ROOT\" log --oneline --left-right \"HEAD...$REMOTE_REF\""
 
     if [ "$DIVERGED_NOTICE_AFTER" -gt 0 ] && [ "$_count" -eq "$DIVERGED_NOTICE_AFTER" ]; then
         mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null || true
-        printf '%s\n' "remember: your memory store has DIVERGED from its backup remote. $AHEAD commit(s) here are not on the remote and $BEHIND commit(s) there are not here, so the memory loaded this session is missing them — and the backup cannot push either. Nothing will be merged or rebased for you. Resolve it by hand: git -C \"$REPO_ROOT\" log --oneline --left-right HEAD...$REMOTE_NAME/$GIT_RESTORE_BRANCH" \
+        printf '%s\n' "remember: your memory store has DIVERGED from its backup remote. $AHEAD commit(s) here are not on the remote and $BEHIND commit(s) there are not here, so the memory loaded this session is missing them -- and the backup cannot push either. Nothing will be merged or rebased for you. Resolve it by hand: git -C \"$REPO_ROOT\" log --oneline --left-right HEAD...$REMOTE_NAME/$GIT_RESTORE_BRANCH" \
             > "$REMEMBER_DIR/tmp/git-restore-notice" 2>/dev/null || true
     fi
     _spawn_fetch
@@ -455,7 +455,7 @@ rm -f "$DIVERGED_STATE_FILE" 2>/dev/null || true
 
 if [ "$BEHIND" -eq 0 ]; then
     if [ "$AHEAD" -gt 0 ]; then
-        log "git-restore" "nothing to restore — $AHEAD local commit(s) ahead of $REMOTE_NAME/$GIT_RESTORE_BRANCH, none behind (the backup half pushes those)"
+        log "git-restore" "nothing to restore -- $AHEAD local commit(s) ahead of $REMOTE_NAME/$GIT_RESTORE_BRANCH, none behind (the backup half pushes those)"
     else
         log "git-restore" "already up to date with $REMOTE_NAME/$GIT_RESTORE_BRANCH"
     fi
@@ -470,9 +470,9 @@ fi
 # and a test asserts that stays true — a fast-forward cannot destroy local
 # work, but only as long as nothing else in here can.
 if git -C "$REPO_ROOT" merge --ff-only "$REMOTE_REF" >/dev/null 2>&1; then
-    log "git-restore" "restored $BEHIND commit(s) from $REMOTE_NAME/$GIT_RESTORE_BRANCH (${LOCAL_HEAD:0:7}..${REMOTE_HEAD:0:7}) into $REPO_ROOT — memory below reflects them"
+    log "git-restore" "restored $BEHIND commit(s) from $REMOTE_NAME/$GIT_RESTORE_BRANCH (${LOCAL_HEAD:0:7}..${REMOTE_HEAD:0:7}) into $REPO_ROOT -- memory below reflects them"
 else
-    log "git-restore" "ERROR: fast-forward of $BEHIND commit(s) from $REMOTE_NAME/$GIT_RESTORE_BRANCH was REFUSED by git — most likely uncommitted local changes in $REPO_ROOT that it would overwrite. Nothing was restored and nothing was forced. Run 'git -C \"$REPO_ROOT\" merge --ff-only $REMOTE_REF' to see git's own reason."
+    log "git-restore" "ERROR: fast-forward of $BEHIND commit(s) from $REMOTE_NAME/$GIT_RESTORE_BRANCH was REFUSED by git -- most likely uncommitted local changes in $REPO_ROOT that it would overwrite. Nothing was restored and nothing was forced. Run 'git -C \"$REPO_ROOT\" merge --ff-only $REMOTE_REF' to see git's own reason."
 fi
 
 _spawn_fetch

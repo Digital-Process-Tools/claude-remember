@@ -20,7 +20,7 @@
 #
 # ============================================================================
 
-set -u  # not -e — we never want to fail loudly here
+set -u  # not -e -- we never want to fail loudly here
 
 # ── Source logging (gives us log(), config(), _remember_date(), REMEMBER_TZ) ─
 source "$PIPELINE_DIR/scripts/log.sh"
@@ -63,7 +63,7 @@ if [ "$(_gb_realpath "$TOPLEVEL")" != "$(_gb_realpath "$REPO_ROOT")" ]; then
     # Three states, not two: this is not "ran, nothing to do". The store sits
     # inside a repository the hook declines to manage, and until now that was
     # indistinguishable from a store it was managing correctly.
-    log "git-backup" "declined: $REPO_ROOT is not the toplevel of its git repository (that is $TOPLEVEL) — a memory store inside a larger repo is never committed or pushed by this hook, deliberately. Nothing here is backed up. Give the store its own repository if you want it backed up."
+    log "git-backup" "declined: $REPO_ROOT is not the toplevel of its git repository (that is $TOPLEVEL) -- a memory store inside a larger repo is never committed or pushed by this hook, deliberately. Nothing here is backed up. Give the store its own repository if you want it backed up."
     exit 0
 fi
 
@@ -188,7 +188,7 @@ if [ -f "$COOLDOWN_MARKER" ]; then
         #
         # Proceed, reset here where the reset is reachable, and say so in both
         # places a human looks.
-        report_error "git-backup" "WARNING: $COOLDOWN_MARKER is $(( 0 - ELAPSED ))s ahead of now — the clock moved back, or the marker is corrupt in a way a digits-only check cannot see. Resetting it and backing up; the cooldown resumes from now."
+        report_error "git-backup" "WARNING: $COOLDOWN_MARKER is $(( 0 - ELAPSED ))s ahead of now -- the clock moved back, or the marker is corrupt in a way a digits-only check cannot see. Resetting it and backing up; the cooldown resumes from now."
         date +%s > "$COOLDOWN_MARKER" 2>/dev/null || true
     elif [ "$ELAPSED" -lt "$BACKUP_COOLDOWN" ]; then
         debug_enabled 0 && log "git-backup" "cooldown ${ELAPSED}s < ${BACKUP_COOLDOWN}s, skip"
@@ -421,7 +421,7 @@ esac
         _count=$((10#$_count + 1))
         echo "$_count" > "$REJECT_STATE_FILE" 2>/dev/null || true
 
-        log "git-backup" "ERROR: push REJECTED by the remote — the backup has STOPPED for $SLUG and will not resume on its own (consecutive rejections: $_count). git rejected: ${_rejected%;}. The commit exists on this machine only. Nothing here will fetch, merge or rebase for you: run 'git -C \"$REPO_ROOT\" push' to see git's own advice and resolve it by hand — recent.md and archive.md are rewritten wholesale by consolidation, so a wrong automatic resolution would corrupt memory silently."
+        log "git-backup" "ERROR: push REJECTED by the remote -- the backup has STOPPED for $SLUG and will not resume on its own (consecutive rejections: $_count). git rejected: ${_rejected%;}. The commit exists on this machine only. Nothing here will fetch, merge or rebase for you: run 'git -C \"$REPO_ROOT\" push' to see git's own advice and resolve it by hand -- recent.md and archive.md are rewritten wholesale by consolidation, so a wrong automatic resolution would corrupt memory silently."
 
         # Escalation, not alarm. systemMessage is the only hook output the HUMAN
         # sees, and it is also the most intrusive surface in this codebase — one
@@ -431,7 +431,7 @@ esac
         # true report by a few backups; it can never swallow one.
         if [ "$REJECT_NOTICE_AFTER" -gt 0 ] && [ "$_count" -eq "$REJECT_NOTICE_AFTER" ]; then
             mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null || true
-            printf '%s\n' "remember: git backup has STOPPED. The remote rejected the last $_count pushes from $REPO_ROOT and will not accept them on a retry — memory is still being committed locally, but it is not reaching your backup remote. Run: git -C \"$REPO_ROOT\" push — then resolve the divergence yourself. Nothing will be merged or rebased for you." \
+            printf '%s\n' "remember: git backup has STOPPED. The remote rejected the last $_count pushes from $REPO_ROOT and will not accept them on a retry -- memory is still being committed locally, but it is not reaching your backup remote. Run: git -C \"$REPO_ROOT\" push -- then resolve the divergence yourself. Nothing will be merged or rebased for you." \
                 > "$REMEMBER_DIR/tmp/git-backup-notice" 2>/dev/null || true
         fi
         return 0
@@ -507,11 +507,11 @@ esac
     # tells them it is theirs to make (#288).
     if [ -n "$(git -C "$REPO_ROOT" ls-files -- "$SLUG/logs/" "$SLUG/tmp/" 2>/dev/null | head -n 1)" ]; then
         if ! git -C "$REPO_ROOT" diff --cached --quiet 2>/dev/null; then
-            log "git-backup" "$SLUG/logs and $SLUG/tmp are tracked by a version older than the exclusion, but this store has staged changes in its index — untracking them would commit those too, so it is left for the next backup."
+            log "git-backup" "$SLUG/logs and $SLUG/tmp are tracked by a version older than the exclusion, but this store has staged changes in its index -- untracking them would commit those too, so it is left for the next backup."
         elif git -C "$REPO_ROOT" rm -r -q --cached --ignore-unmatch -- "$SLUG/logs/" "$SLUG/tmp/" 2>/dev/null \
             && git -C "$REPO_ROOT" commit $GPG_SIGN_FLAG \
                 -m "auto: stop tracking $SLUG/logs and $SLUG/tmp" >/dev/null 2>&1; then
-            log "git-backup" "untracked $SLUG/logs and $SLUG/tmp — a version older than the exclusion had committed them. They stop being pushed from now on; commits that already carry them are left untouched, because removing those means rewriting history and force-pushing, which breaks every other clone of this store."
+            log "git-backup" "untracked $SLUG/logs and $SLUG/tmp -- a version older than the exclusion had committed them. They stop being pushed from now on; commits that already carry them are left untouched, because removing those means rewriting history and force-pushing, which breaks every other clone of this store."
         else
             git -C "$REPO_ROOT" reset -q 2>/dev/null || true
             log "git-backup" "could not untrack $SLUG/logs and $SLUG/tmp; the index was restored and the next backup retries."
@@ -554,9 +554,9 @@ esac
             | awk -F/ 'NF > 1 { print $1; exit }')
         if [ -n "$TRACKED_VARIANT" ] && [ "$TRACKED_VARIANT" != "$SLUG" ]; then
             FIX_CMD="git -C '$REPO_ROOT' mv -- '$TRACKED_VARIANT' '$SLUG.tmp' && git -C '$REPO_ROOT' mv -- '$SLUG.tmp' '$SLUG'"
-            log "git-backup" "ERROR: this project's memory is tracked as '$TRACKED_VARIANT/' but this session computed '$SLUG/' — git pathspecs are case-sensitive, so nothing under '$SLUG/' can ever be staged and the backup has STOPPED for this project. It will not resume on its own. Nothing here will rename it for you: run $FIX_CMD (two steps, because a case-only rename is a no-op on a case-insensitive filesystem), then commit."
+            log "git-backup" "ERROR: this project's memory is tracked as '$TRACKED_VARIANT/' but this session computed '$SLUG/' -- git pathspecs are case-sensitive, so nothing under '$SLUG/' can ever be staged and the backup has STOPPED for this project. It will not resume on its own. Nothing here will rename it for you: run $FIX_CMD (two steps, because a case-only rename is a no-op on a case-insensitive filesystem), then commit."
             mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null || true
-            printf '%s\n' "remember: git backup has STOPPED for this project. Its memory is tracked in $REPO_ROOT as '$TRACKED_VARIANT/' but is being written to '$SLUG/', and git can match neither to the other — every save since is committed nowhere. Rename the tracked directory: $FIX_CMD (two steps — a case-only rename is a no-op on a case-insensitive filesystem), then commit. Nothing will be renamed for you." \
+            printf '%s\n' "remember: git backup has STOPPED for this project. Its memory is tracked in $REPO_ROOT as '$TRACKED_VARIANT/' but is being written to '$SLUG/', and git can match neither to the other -- every save since is committed nowhere. Rename the tracked directory: $FIX_CMD (two steps -- a case-only rename is a no-op on a case-insensitive filesystem), then commit. Nothing will be renamed for you." \
                 > "$REMEMBER_DIR/tmp/git-backup-notice" 2>/dev/null || true
             exit 0
         fi
@@ -621,11 +621,11 @@ esac
         _cfail=$((10#$_cfail + 1))
         echo "$_cfail" > "$COMMIT_FAIL_STATE_FILE" 2>/dev/null || true
 
-        log "git-backup" "ERROR: commit FAILED for $SLUG — this memory is recorded in NO git history at all, not locally and not on any remote, and the backup has STOPPED for this project (consecutive failures: $_cfail). git said: ${COMMIT_ERR:-<no output>}. Run 'git -C \"$REPO_ROOT\" commit -- \"$SLUG/\"' to see it yourself."
+        log "git-backup" "ERROR: commit FAILED for $SLUG -- this memory is recorded in NO git history at all, not locally and not on any remote, and the backup has STOPPED for this project (consecutive failures: $_cfail). git said: ${COMMIT_ERR:-<no output>}. Run 'git -C \"$REPO_ROOT\" commit -- \"$SLUG/\"' to see it yourself."
 
         if [ "$COMMIT_NOTICE_AFTER" -gt 0 ] && [ "$_cfail" -eq "$COMMIT_NOTICE_AFTER" ]; then
             mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null || true
-            printf '%s\n' "remember: git backup has STOPPED. The last $_cfail commits into $REPO_ROOT failed, so this project's memory is on disk but in no git history — not locally, and not on your backup remote. git said: ${COMMIT_ERR:-<no output>}. Run: git -C \"$REPO_ROOT\" commit -- \"$SLUG/\"" \
+            printf '%s\n' "remember: git backup has STOPPED. The last $_cfail commits into $REPO_ROOT failed, so this project's memory is on disk but in no git history -- not locally, and not on your backup remote. git said: ${COMMIT_ERR:-<no output>}. Run: git -C \"$REPO_ROOT\" commit -- \"$SLUG/\"" \
                 > "$REMEMBER_DIR/tmp/git-backup-notice" 2>/dev/null || true
         fi
         exit 0
@@ -657,14 +657,14 @@ esac
         _nr=$((10#$_nr + 1))
         echo "$_nr" > "$NO_REMOTE_STATE_FILE" 2>/dev/null || true
 
-        log "git-backup" "no remote configured for '$REMOTE_NAME' in $REPO_ROOT — the commit exists on this machine ONLY and nothing is backed up off it (consecutive saves in this state: $_nr). Add one: git -C \"$REPO_ROOT\" remote add origin <url>"
+        log "git-backup" "no remote configured for '$REMOTE_NAME' in $REPO_ROOT -- the commit exists on this machine ONLY and nothing is backed up off it (consecutive saves in this state: $_nr). Add one: git -C \"$REPO_ROOT\" remote add origin <url>"
 
         if [ "$NO_REMOTE_NOTICE_AFTER" -gt 0 ] && \
            [ "$_nr" -ge "$NO_REMOTE_NOTICE_AFTER" ] && \
            [ ! -f "$NO_REMOTE_NOTIFIED_FILE" ]; then
             : > "$NO_REMOTE_NOTIFIED_FILE" 2>/dev/null || true
             mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null || true
-            printf '%s\n' "remember: your memory store at $REPO_ROOT has no git remote, so $_nr saves so far have been committed locally and backed up nowhere. If that is deliberate, nothing further is needed — this will not be said again. If the setup was never finished: git -C \"$REPO_ROOT\" remote add origin <url> && git -C \"$REPO_ROOT\" push -u origin HEAD" \
+            printf '%s\n' "remember: your memory store at $REPO_ROOT has no git remote, so $_nr saves so far have been committed locally and backed up nowhere. If that is deliberate, nothing further is needed -- this will not be said again. If the setup was never finished: git -C \"$REPO_ROOT\" remote add origin <url> && git -C \"$REPO_ROOT\" push -u origin HEAD" \
                 > "$REMEMBER_DIR/tmp/git-backup-notice" 2>/dev/null || true
         fi
     elif [ ! -f "$REMOTE_STATE_FILE" ]; then
@@ -682,7 +682,7 @@ esac
                 log "git-backup" "remote URL changed (allow_remote_change=true): $CURRENT_REMOTE"
                 _push_and_report
             else
-                log "git-backup" "ERROR: remote URL changed from '$RECORDED_REMOTE' to '$CURRENT_REMOTE' — push aborted (set git_backup.allow_remote_change=true to override)"
+                log "git-backup" "ERROR: remote URL changed from '$RECORDED_REMOTE' to '$CURRENT_REMOTE' -- push aborted (set git_backup.allow_remote_change=true to override)"
             fi
         else
             # Remote matches recorded URL — safe to push.

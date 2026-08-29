@@ -1,6 +1,6 @@
-"""Regression pin for #405: EVERY script under scripts/ and every printed
-message under pipeline/ must be pure ASCII, never just session-start-hook.sh
-(#367).
+"""Regression pin for #405: EVERY script under scripts/ and hooks.d/, and
+every printed message under pipeline/, must be pure ASCII, never just
+session-start-hook.sh (#367).
 
 #367 pinned the file-wide decision -- printed lines must never carry a byte
 outside ASCII -- for session-start-hook.sh alone. #405 is the same decision
@@ -8,6 +8,20 @@ made once for the whole scripts/ tree instead of per file, because #367's own
 reasoning (mojibake on a cp1252 Windows console) does not stop at that file's
 boundary: doctor.sh and post-tool-hook.sh grew non-ASCII printed lines in the
 very same delta that pinned session-start-hook.sh.
+
+#425: the #405 sweep was scoped to scripts/*.sh (non-recursive) and never
+looked at hooks.d/, which ships shell too -- post-tool-hook.sh:139 documents
+that hooks.d/after_post_tool/ is part of the distribution, and
+hooks.d/after_save/50-git-backup.sh and
+hooks.d/before_session_start/50-git-restore.sh both printf a multi-sentence
+warning straight at a user's console exactly like the files #405 already
+covers. hooks.d/ is inside the #405 decision's boundary for the same reason
+scripts/ is: these files run on a user's machine and print to a console that
+may be reading cp1252. The scan below now walks hooks.d/ recursively (its
+subdirectories are per-phase, e.g. hooks.d/after_save/), because the #405
+sweep's own docstring already called itself "the same decision made once for
+the whole scripts/ tree" while covering barely more than half the shipped
+shell.
 
 Scope, same as #367: PRINTED lines only -- bytes that reach stdout or stderr.
 Comments are untouched; the em-dashes and arrows in this repo's prose are not
@@ -39,6 +53,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS_DIR = REPO_ROOT / "scripts"
 PIPELINE_DIR = REPO_ROOT / "pipeline"
+HOOKS_D_DIR = REPO_ROOT / "hooks.d"
 
 # NOT anchored to the start of the line (a bare `.match`) on purpose: this
 # codebase's own hooks routinely print via `[ cond ] && log ...`, `cmd || log
@@ -55,7 +70,12 @@ _BENCH_SLUG_EXEMPT_NEEDLE = "caf\u00e9"
 
 
 def _shell_files() -> list[Path]:
-    return sorted(SCRIPTS_DIR.glob("*.sh"))
+    # scripts/ is flat, so a non-recursive glob is enough there. hooks.d/ is
+    # organised one phase-directory per dispatch point (after_save/,
+    # before_session_start/, ...), so it needs "**/*.sh" -- #425 found this
+    # tree unscanned entirely because the original glob only ever looked at
+    # SCRIPTS_DIR.
+    return sorted(SCRIPTS_DIR.glob("*.sh")) + sorted(HOOKS_D_DIR.glob("**/*.sh"))
 
 
 def _non_comment_lines(path: Path) -> list[tuple[int, str]]:
@@ -112,6 +132,18 @@ def test_scanned_every_shell_file_under_scripts():
     )
 
 
+def test_scanned_every_shell_file_under_hooks_d():
+    """Positive control for the #425 widening: hooks.d/ is nested one
+    phase-directory deep, so a scan that silently fell back to a
+    non-recursive glob (or read the wrong root) must not pass the assertions
+    below by vacuous truth."""
+    files = sorted(HOOKS_D_DIR.glob("**/*.sh"))
+    assert len(files) >= 2, (
+        f"expected at least 2 *.sh files under {HOOKS_D_DIR}, found "
+        f"{len(files)} -- the scan likely did not read the real tree"
+    )
+
+
 def test_scan_finds_printed_lines_in_every_file_known_to_have_them():
     """Positive control for the per-file scan: files known to carry many
     echo/printf/log lines must still show up with a nonzero count, so a
@@ -120,6 +152,7 @@ def test_scan_finds_printed_lines_in_every_file_known_to_have_them():
     expect_nonzero = {
         "doctor.sh", "post-tool-hook.sh", "session-start-hook.sh",
         "log.sh", "save-session.sh", "user-prompt-hook.sh",
+        "50-git-backup.sh", "50-git-restore.sh",
     }
     seen = {f.name: len(_printed_shell_lines(f)) for f in _shell_files()}
     missing = {name for name in expect_nonzero if seen.get(name, 0) == 0}
