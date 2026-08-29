@@ -154,3 +154,121 @@ def test_different_hook_cwd_is_a_correctly_keyed_miss(tmp_path):
         "a different REMEMBER_HOOK_CWD must not hit project_a's cache: "
         + second.stdout + second.stderr
     )
+
+
+# Reviewer finding (self-review round, #469): the key computed at LOAD time
+# (raw REMEMBER_HOOK_CWD, before resolve-paths.sh has run) and the key
+# _remember_env_cache_publish would compute if it recomputed instead of
+# reusing the pin (from CLAUDE_PROJECT_DIR, which resolve-paths.sh has by
+# then exported as the RESOLVED value) can disagree on a platform where
+# resolve-paths.sh's Windows drive-letter normalisation actually changes the
+# string. macOS/Linux can still exercise the exact bash branch this depends
+# on: `_remember_normalize_win_path`'s `case "$OSTYPE" in msys|cygwin)` reads
+# `$OSTYPE` as an ordinary (exportable) variable, not a compiled-in constant
+# -- forcing it to `msys` here runs the real Windows code path on whatever
+# host this test happens to execute on, the same technique
+# tests/test_windows_native_hook_cwd_448.py already relies on.
+_NORMALIZE = r"""
+_remember_normalize_win_path() {{
+    local _in="$1" _drive="" _rest=""
+    if [[ "$_in" =~ ^/([a-zA-Z])/(.*)$ ]]; then
+        _drive="${{BASH_REMATCH[1]}}"
+        _rest="${{BASH_REMATCH[2]}}"
+    fi
+    if [ -n "$_drive" ]; then
+        _drive=$(printf '%s' "$_drive" | tr '[:lower:]' '[:upper:]')
+        _rest="${{_rest//\//\\}}"
+        printf '%s' "${{_drive}}:\\${{_rest}}"
+        return 0
+    fi
+    printf '%s' "$_in"
+}}
+"""
+
+_RUN_WINDOWS_ONE = _NORMALIZE + r"""
+source "{lib}"
+_remember_env_cache_load
+_rc=$?
+echo "LOAD_RC=$_rc"
+if [ "$_rc" != "0" ]; then
+    # The real resolve-paths.sh sequence on Windows/Git-Bash: REMEMBER_HOOK_CWD
+    # arrives POSIX-styled from stdin, gets normalised to a drive-letter
+    # spelling, THAT becomes PROJECT_DIR, and CLAUDE_PROJECT_DIR is exported
+    # as the normalised form -- a genuinely different string than the raw
+    # REMEMBER_HOOK_CWD the earlier (failed) load call above keyed on.
+    _normalized="$(_remember_normalize_win_path "$REMEMBER_HOOK_CWD")"
+    export CLAUDE_PROJECT_DIR="$_normalized"
+    export CLAUDE_PLUGIN_ROOT="{pipeline}"
+    PROJECT_DIR="$_normalized"
+    PIPELINE_DIR="{pipeline}"
+    REMEMBER_DIR="{remember_dir}"
+    REMEMBER_TZ="UTC"
+    REMEMBER_PROMPT_STAMP="full"
+    REMEMBER_SAVE_COOLDOWN="120"
+    REMEMBER_DELTA_THRESHOLD="50"
+    MEMORY_PROJECT_DIR="$PROJECT_DIR"
+    _remember_env_cache_publish
+    echo "PUBLISHED=1"
+else
+    echo "PROJECT_DIR=$PROJECT_DIR"
+fi
+"""
+
+
+def test_windows_normalized_project_dir_does_not_orphan_the_hook_cwd_key(tmp_path):
+    """#469 self-review finding: without pinning the key once per process, a
+    publish call after resolve-paths.sh's Windows normalisation would key the
+    cache under the NORMALISED CLAUDE_PROJECT_DIR while the load call moments
+    earlier, in the same process, keyed under the raw REMEMBER_HOOK_CWD --
+    write and read would target different files, forever, on exactly the
+    platform this fix exists to help. OSTYPE=msys is forced so this runs the
+    real drive-letter-rewriting branch regardless of the host this test
+    executes on (see tests/test_windows_native_hook_cwd_448.py for the same
+    technique)."""
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "tmp").mkdir()
+    pipeline = tmp_path / "pipeline"
+    (pipeline / "pipeline").mkdir(parents=True)
+    (pipeline / "pipeline" / "haiku.py").write_text("", encoding="utf-8")
+    remember_dir = tmp_path / "remember"
+    remember_dir.mkdir()
+
+    # A POSIX-styled drive path, exactly the form resolve-paths.sh's own
+    # comments say Codex/Gemini's stdin `cwd` arrives in on Windows -- and
+    # exactly the form _remember_normalize_win_path rewrites.
+    raw_hook_cwd = "/c/fake/windows/project"
+
+    script = _RUN_WINDOWS_ONE.format(lib=LIB_ENV_CACHE, pipeline=pipeline, remember_dir=remember_dir)
+    env = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT", "PLUGIN_ROOT")}
+    env.update({
+        "HOME": str(home),
+        "TMPDIR": str(home / "tmp"),
+        "REMEMBER_HOOK_CWD": raw_hook_cwd,
+        "OSTYPE": "msys",
+        # Set on EVERY invocation, exactly as Codex sets it -- see the
+        # matching note in _run() above for the non-Windows tests.
+        "CLAUDE_PLUGIN_ROOT": str(pipeline),
+    })
+
+    first = subprocess.run(
+        ["bash", "-c", script], env=env, cwd=str(tmp_path),
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert first.returncode == 0, first.stderr
+    assert "LOAD_RC=1" in first.stdout, first.stdout + first.stderr
+    assert "PUBLISHED=1" in first.stdout, first.stdout + first.stderr
+
+    second = subprocess.run(
+        ["bash", "-c", script], env=env, cwd=str(tmp_path),
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert second.returncode == 0, second.stderr
+    assert "LOAD_RC=0" in second.stdout, (
+        "the second invocation, same raw REMEMBER_HOOK_CWD, must hit the "
+        "cache the first invocation published -- a mismatch here means the "
+        "publish call keyed on the normalised CLAUDE_PROJECT_DIR instead of "
+        "reusing the pinned raw key, orphaning the file on Windows: "
+        + second.stdout + second.stderr
+    )
+

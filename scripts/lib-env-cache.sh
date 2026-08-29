@@ -73,13 +73,35 @@ _REMEMBER_LIB_ENV_CACHE_LOADED=1
 # resolve-paths.sh:270 still exports the RESOLVED CLAUDE_PROJECT_DIR before
 # _remember_env_cache_publish runs, so a cache file is written every time and
 # never found by _remember_env_cache_load, which runs in a fresh process
-# before that export exists. Neither value is normalised yet here (this
-# runs before resolve-paths.sh's Windows drive-letter normalisation, which
-# forks `tr` on Git Bash) -- both sides comparing the same raw environment
-# variable is what makes the key agree without either side computing
-# anything, on every platform that reaches this file at all (#79 already
-# excludes Windows from the bash-subprocess test suite that exercises this).
+# before that export exists. Neither value is normalised here (this can run
+# before resolve-paths.sh's Windows drive-letter normalisation, which forks
+# `tr` on Git Bash) -- the per-process pin inside the function below is what
+# keeps the key stable across a call that runs before normalisation and one
+# that runs after: without it, a call after resolve-paths.sh has normalised
+# and exported CLAUDE_PROJECT_DIR would compute a DIFFERENT key than an
+# earlier call in the same process saw, on a platform where normalisation
+# changes the string (a no-op on macOS/Linux, where raw and resolved always
+# agree -- #79 already excludes Windows from the bash-subprocess test suite
+# that exercises most of this file, which is why this needed its own
+# reasoning rather than a test run here).
 _remember_env_cache_path() {
+    # Pinned once per process (#469): this function runs both BEFORE
+    # resolve-paths.sh (from _remember_env_cache_load, when CLAUDE_PROJECT_DIR
+    # is still unset on Codex/Gemini and REMEMBER_HOOK_CWD is the only
+    # signal) and AFTER it (from _remember_env_cache_publish, by which point
+    # resolve-paths.sh has exported the RESOLVED -- and on Windows/Git-Bash,
+    # NORMALIZED -- CLAUDE_PROJECT_DIR). Recomputing on the second call would
+    # let the now-set CLAUDE_PROJECT_DIR win over the raw REMEMBER_HOOK_CWD
+    # this same invocation's earlier (failed) load call already keyed on --
+    # on a platform where normalization actually changes the string (drive-
+    # letter rewriting; a no-op on macOS/Linux, where raw and resolved always
+    # agree), write and read would target different files, permanently,
+    # exactly the #469 symptom relocated to Windows. resolve-paths.sh only
+    # resolves once per hook invocation, so once a key is known in THIS
+    # process it is reused rather than asked of the environment again.
+    if [ -n "${_REMEMBER_ENV_CACHE_KEY:-}" ]; then
+        return 0
+    fi
     local _key="${CLAUDE_PROJECT_DIR:-${REMEMBER_HOOK_CWD:-}}"
     [ -n "$_key" ] || return 1
     _REMEMBER_ENV_CACHE_KEY="$_key"
