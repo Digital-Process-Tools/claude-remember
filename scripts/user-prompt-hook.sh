@@ -331,20 +331,31 @@ if [ "$_REMEMBER_HOST_JSON_STDOUT" = "1" ]; then
     # never printed raw the way the Claude Code branch below does.
     if [ -z "$CTX" ] && [ -z "$NOTICE_MSG" ]; then
         : # nothing to say -- printing nothing is Completed on every host
-    elif command -v "$JQ_BIN" >/dev/null 2>&1; then
-        _JSON=$("$JQ_BIN" -n --arg ctx "$CTX" --arg msg "$NOTICE_MSG" \
-            '(if $ctx != "" then {hookSpecificOutput:{hookEventName:"UserPromptSubmit",additionalContext:$ctx}} else {} end)
-             + (if $msg != "" then {systemMessage:$msg} else {} end)' 2>/dev/null) || _JSON=""
+    else
+        _JSON=""
+        if command -v "$JQ_BIN" >/dev/null 2>&1; then
+            _JSON=$("$JQ_BIN" -n --arg ctx "$CTX" --arg msg "$NOTICE_MSG" \
+                '(if $ctx != "" then {hookSpecificOutput:{hookEventName:"UserPromptSubmit",additionalContext:$ctx}} else {} end)
+                 + (if $msg != "" then {systemMessage:$msg} else {} end)' 2>/dev/null) || _JSON=""
+        fi
         if [ -n "$_JSON" ]; then
             printf '%s\n' "$_JSON"
+        else
+            # jq missing, or present but failed: stay silent on stdout
+            # rather than print the bracketed stamp raw -- that raw print
+            # is the exact defect this branch exists to avoid, and a bare
+            # `[`/`{` on this host reads as Failed regardless of WHY it is
+            # there. Silent on stdout is not silent everywhere, though:
+            # `jq` is already a hard dependency of this hook's slow path
+            # (bootstrap-dirs.sh, log.sh's own config reads), so its
+            # absence here is a symptom worth a diagnostic line -- logged
+            # only when `log()` is actually defined (the fast path never
+            # sources log.sh, so it never gets one; that path also never
+            # dispatches `after_user_prompt` for the same #227 cost reason,
+            # and losing this one diagnostic line there is the same trade).
+            declare -F log >/dev/null 2>&1 && log "hook" \
+                "user-prompt-hook: jq unavailable/failed on a non-Claude-Code host -- dropped this turn's Codex-safe stdout envelope (stamp/notice lost, not printed raw to avoid the #451 collision)"
         fi
-        # jq missing or produced nothing: stay silent rather than print the
-        # bracketed stamp raw -- that raw print is the exact defect this
-        # branch exists to avoid. Losing the stamp here is the honest
-        # option (see #451), not a silent swallow: this hook is documented
-        # "EXIT CODES: 0 Always" and hook-errors.log is not the right
-        # channel for a cosmetic line that failed to render on a host with
-        # no jq, so there is nothing more to say than the omission itself.
     fi
 elif [ -z "$NOTICE_MSG" ]; then
     printf '%s\n' "$CTX"

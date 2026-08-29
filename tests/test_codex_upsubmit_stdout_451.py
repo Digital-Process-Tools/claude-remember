@@ -56,7 +56,13 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.skipif(
+# NOT a module-level `pytestmark`: three tests below (the oracle tests) are
+# pure Python against `_codex_upsubmit_status` -- no `bash`, no subprocess, no
+# POSIX dependency -- and a blanket skip would silently drop them from the
+# Windows leg along with the ones that actually need it, for a reason that
+# does not apply to them (#451 review). Applied per-test instead, to the six
+# that do drive a real `bash` subprocess.
+WINDOWS_SKIP = pytest.mark.skipif(
     sys.platform == "win32",
     reason="bash hook subprocess + POSIX semantics -- not portable to Windows runners",
 )
@@ -227,6 +233,7 @@ def _write_config(home: Path, config: dict) -> None:
 #    most -- #301 and #280 already pin this hook's Claude Code output; this
 #    is the same control, restated here so this file stands on its own) ────
 
+@WINDOWS_SKIP
 def test_claude_code_payload_is_unchanged(tmp_path):
     home, project = _project(tmp_path)
     _write_config(home, {"timezone": "UTC"})
@@ -244,6 +251,7 @@ def test_claude_code_payload_is_unchanged(tmp_path):
 
 # ── Codex: must fire (context reaches the model) ────────────────────────────
 
+@WINDOWS_SKIP
 def test_codex_payload_wraps_the_stamp_and_reads_completed(tmp_path):
     home, project = _project(tmp_path)
     _write_config(home, {"timezone": "UTC"})
@@ -264,6 +272,7 @@ def test_codex_payload_wraps_the_stamp_and_reads_completed(tmp_path):
 #    is verified to mean "correctly nothing to inject", not "the harness
 #    never ran") ──────────────────────────────────────────────────────────
 
+@WINDOWS_SKIP
 def test_codex_payload_with_stamp_off_prints_nothing_and_still_completes(tmp_path):
     home, project = _project(tmp_path)
     _write_config(home, {"timezone": "UTC", "prompt_stamp": "off"})
@@ -275,6 +284,31 @@ def test_codex_payload_with_stamp_off_prints_nothing_and_still_completes(tmp_pat
     assert _codex_upsubmit_status(result.stdout) == "Completed"
 
 
+@WINDOWS_SKIP
+def test_codex_payload_without_jq_stays_silent_and_logs_the_loss(tmp_path):
+    """jq is already a hard dependency of this hook's slow path (config
+    reads), so its absence here is a real if rare edge -- and it must not
+    regress into printing the bracketed stamp raw (that IS the #451 defect)
+    just because jq could not build the envelope. Silence on stdout is the
+    honest option; silence everywhere is not, so the loss is logged."""
+    home, project = _project(tmp_path)
+    _write_config(home, {"timezone": "UTC"})
+    env = _env_codex(home, project)
+    env["JQ"] = "/nonexistent/jq"
+    env["REMEMBER_ENV_CACHE"] = "0"  # force the slow path, where log() is defined
+    stdin = json.dumps({"session_id": "s", "cwd": str(project),
+                        "hook_event_name": "UserPromptSubmit", "prompt": "hi"})
+    result = _run_upsubmit(env, stdin=stdin)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "", repr(result.stdout)  # never the raw "[...]"
+    assert _codex_upsubmit_status(result.stdout) == "Completed"
+    log_files = list((project / ".remember" / "logs").glob("memory-*.log"))
+    assert log_files, "no memory-*.log written -- the loss went unlogged"
+    logged = log_files[0].read_text(encoding="utf-8")
+    assert "jq unavailable" in logged, logged
+
+
+@WINDOWS_SKIP
 def test_codex_payload_notice_lands_in_systemmessage(tmp_path):
     home, project = _project(tmp_path)
     _write_config(home, {"timezone": "UTC"})
@@ -309,6 +343,7 @@ def _session_start_payload(session_id: str, cwd: str) -> str:
                         "transcript_path": f"/does/not/matter/{session_id}.jsonl"})
 
 
+@WINDOWS_SKIP
 def test_session_start_first_byte_is_never_bracket_or_brace(tmp_path):
     """Three shapes, all driven through the real hook: a full store (recap
     injects everything), a store whose handoff was already delivered once
