@@ -49,7 +49,15 @@ import pytest
 from ._bash_runner import resolve_bash
 
 BASH = resolve_bash()
-pytestmark = pytest.mark.skipif(
+
+# Applied per-function below, NOT as a module-level `pytestmark` (#448 self-
+# review): test_remember_hook_cwd_is_normalized_before_its_existence_test is
+# a pure source-text pin with no bash dependency at all -- a module-level
+# skip would silence the one test in this file its own docstring calls
+# "checkable identically on every platform" for a reason that has nothing to
+# do with what it checks, which is exactly the "misreports what always runs"
+# shape the rest of this suite exists to catch.
+_needs_bash = pytest.mark.skipif(
     BASH is None,
     reason="no usable bash found (checked PATH, then Git-for-Windows install locations)",
 )
@@ -126,6 +134,7 @@ def _post_tool_payload(cwd: str) -> str:
 
 # --- the gap itself: a Windows-native-spelled cwd, no CLAUDE_PROJECT_DIR ---
 
+@_needs_bash
 def test_session_start_resolves_windows_native_stdin_cwd(tmp_path):
     home = tmp_path / "home"
     home.mkdir()
@@ -143,6 +152,7 @@ def test_session_start_resolves_windows_native_stdin_cwd(tmp_path):
     assert "FATAL: Cannot resolve project root" not in result.stderr
 
 
+@_needs_bash
 def test_session_end_resolves_windows_native_stdin_cwd(tmp_path):
     home = tmp_path / "home"
     home.mkdir()
@@ -160,6 +170,7 @@ def test_session_end_resolves_windows_native_stdin_cwd(tmp_path):
     assert "FATAL: Cannot resolve project root" not in result.stderr
 
 
+@_needs_bash
 def test_user_prompt_hook_resolves_windows_native_stdin_cwd(tmp_path):
     home = tmp_path / "home"
     home.mkdir()
@@ -177,6 +188,7 @@ def test_user_prompt_hook_resolves_windows_native_stdin_cwd(tmp_path):
     assert "FATAL: Cannot resolve project root" not in result.stderr
 
 
+@_needs_bash
 def test_post_tool_hook_resolves_windows_native_stdin_cwd(tmp_path):
     home = tmp_path / "home"
     home.mkdir()
@@ -196,6 +208,7 @@ def test_post_tool_hook_resolves_windows_native_stdin_cwd(tmp_path):
 
 # --- positive control: the fixture itself is capable of failing ------------
 
+@_needs_bash
 def test_windows_hook_cwd_alone_would_fail_before_the_448_fix():
     r"""Proves the fixture below is capable of failing: a fabricated
     Windows-native path (drive letter + backslash separators, e.g.
@@ -265,6 +278,7 @@ def test_remember_hook_cwd_is_normalized_before_its_existence_test():
 
 # --- positive control: without a usable cwd, nothing is scaffolded ---------
 
+@_needs_bash
 def test_session_start_scaffolds_nothing_when_cwd_is_genuinely_unusable(tmp_path):
     home = tmp_path / "home"
     home.mkdir()
