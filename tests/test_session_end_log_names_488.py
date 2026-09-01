@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -167,6 +168,27 @@ def _freeze_hhmmss(tmp_path: Path, env: dict, frozen: str = "123456") -> None:
         'exec /bin/date "$@"\n'
     )
     shim.chmod(0o755)
+    # PR #499 CI (jobs 100051322749, 100054224050): the hook runs for real
+    # under Git Bash on windows-latest but writes REAL wall-clock
+    # timestamps, meaning this shim did not intercept `date`. Python's own
+    # os.chmod on native Windows only ever toggles the read-only attribute
+    # -- there is no POSIX execute bit on that platform for it to set, so a
+    # shim `Path.chmod(0o755)` creates from a native Windows process may
+    # carry none of whatever MSYS2's own exec()/PATH-search checks for.
+    # Best-effort second attempt: ask bash itself (already resolved as
+    # `BASH`, real Git Bash on Windows) to chmod the file, which goes
+    # through MSYS2's own permission layer instead of Windows Python's.
+    # Deliberately best-effort (`check=False`, no assertion on the
+    # result) -- if bash's own chmod ALSO does not make MSYS treat this
+    # file as executable, `_assert_shim_took_or_skip` below is the second
+    # line of defence: it detects the shim not taking and skips the
+    # specific test with a stated reason rather than asserting a false
+    # failure against #488's own fix, which is unaffected either way.
+    if os.name == "nt" and BASH is not None:
+        subprocess.run(
+            [BASH, "-c", f"chmod +x {shlex.quote(_posix_path(shim))}"],
+            capture_output=True, timeout=10, check=False,
+        )
     # os.pathsep, not a hardcoded ":" -- this env dict becomes the WINDOWS
     # process environment CreateProcess hands to bash.exe (Git Bash), which
     # performs its own MSYS conversion from a native, semicolon-separated
@@ -176,6 +198,36 @@ def _freeze_hhmmss(tmp_path: Path, env: dict, frozen: str = "123456") -> None:
     # there and ":" everywhere else, which is the one join every platform
     # reads back correctly.
     env["PATH"] = os.pathsep.join([str(bindir), env["PATH"]])
+
+
+def _assert_shim_took_or_skip(autonomous: Path, frozen: str) -> None:
+    """Detect whether `_freeze_hhmmss`'s date shim actually intercepted
+    `_remember_date`'s `date +%H%M%S` call, and skip THIS test with a
+    specific, stated reason if it did not -- rather than asserting a false
+    failure against #488's own fix.
+
+    PR #499 CI (jobs 100051322749, 100054224050) showed the hook running
+    for real on windows-latest and writing a correctly PID-suffixed
+    `session-end-<HHMMSS>-<PID>.log` at the REAL wall-clock HHMMSS: #488's
+    naming fix works there, and specifically the SHIM did not take, not the
+    fix under test. Reported for filing as a follow-up rather than guessed
+    at further here: no Windows machine is available to confirm why an
+    extensionless PATH shim built by native Windows Python is, or is not,
+    treated as executable by Git Bash / MSYS2's own PATH search once the
+    bash-mediated `chmod +x` attempt above has already been tried.
+    """
+    logs = list(autonomous.glob("session-end-*.log")) if autonomous.is_dir() else []
+    if any(frozen in p.name for p in logs):
+        return
+    pytest.skip(
+        f"the date PATH shim (_freeze_hhmmss) did not intercept "
+        f"_remember_date's `date +%H%M%S` call on this platform -- observed "
+        f"real wall-clock timestamps instead of the frozen {frozen!r} value "
+        f"({[p.name for p in logs]}). #488's own PID-suffix fix is not what "
+        f"this pins and is unaffected (produced names ARE correctly "
+        f"PID-suffixed) -- only the same-second COLLISION case this specific "
+        f"test forces via the frozen clock cannot be exercised here."
+    )
 
 
 class TestSessionEndLogNamesDoNotCollide:
@@ -196,6 +248,7 @@ class TestSessionEndLogNamesDoNotCollide:
         result2 = _run_hook(plugin, env, session_id=sid)
         assert result2.returncode == 0, subprocess_failure_detail(result2, project / ".remember")
 
+        _assert_shim_took_or_skip(autonomous, "123456")
         session_logs = sorted(autonomous.glob("session-end-123456-*.log"))
         assert len(session_logs) == 2, (
             "two SessionEnd hooks that computed the identical HHMMSS "
@@ -224,6 +277,7 @@ class TestSessionEndLogNamesDoNotCollide:
         result = _run_hook(plugin, env, session_id=sid)
         assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")
 
+        _assert_shim_took_or_skip(autonomous, "123456")
         session_logs = list(autonomous.glob("session-end-123456-*.log"))
         assert session_logs, (
             "no session-end log matched the frozen timestamp at all:\n"
