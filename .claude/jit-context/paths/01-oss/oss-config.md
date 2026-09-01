@@ -1,7 +1,7 @@
 ---
 title: ".oss.json is config, not truth"
 description: "Per-repo settings for the maintainer loop. Re-derive labels before acting; the CI leg count is not in here; null is an answer, not a gap."
-match: \.oss\.json
+match: (^|/)\.oss\.json$
 ---
 
 Per-repo settings for the maintainer loop: `repo`, `default_branch`, `clone`, `worktree_root`,

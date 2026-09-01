@@ -27,15 +27,27 @@ where nothing can read it. The reason is part of the field: a bare verdict is th
 answer one field further along. Other sections may carry the bullet and are read as compatible when
 they do not.
 
+The fragment check reads this line too, so a declaration that will not parse -- a word that is
+neither verdict, a verdict with no reason, both at once, or a `removed` fragment carrying none --
+is a finding on the pull request that introduced it rather than a stopped release days later.
+
 **Do not hand-edit `CHANGELOG.md`** while this directory exists. The fold overwrites it and deletes
 the fragments; an entry written directly into the file is lost at the next release, silently,
 because the fold has no way to know it was meant to stay.
 
-Check before pushing:
+Check before pushing. **Two commands, not one:** the checker refuses both audits in a
+single call, and says so. They used to be combinable, and the combination quietly ran the
+link audit alone while printing one confident `ok` for it -- so each flag now gets its own
+invocation, and each audits its own thing completely.
 
 ```bash
-python3 .oss/assemble_changelog.py --check --check-links --dir 'changelog.d' --changelog CHANGELOG.md
+python3 .oss/assemble_changelog.py --check --dir 'changelog.d' --changelog CHANGELOG.md
+python3 .oss/assemble_changelog.py --check-links --dir 'changelog.d' --changelog CHANGELOG.md
 ```
+
+Those are the same two commands the scaffolded changelog workflow runs as its own two
+steps, so the pair you run before pushing and the pair that gates the pull request cannot
+disagree.
 
 `--check-links` refuses when a `## [x.y.z]` section has no link reference definition. If the
 version it names was never tagged, the missing link is the correct state: there is no release
