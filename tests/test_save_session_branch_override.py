@@ -69,16 +69,26 @@ def _extract_branch_block() -> str:
     return "\n".join(lines[start : end + 1])
 
 
-def _eval_branch(
+def _eval_branch_raw(
     project_dir: Path,
     env_overrides: dict[str, str | None],
     session_id: str = "abc123",
-) -> str:
+) -> subprocess.CompletedProcess[str]:
     """Eval ONLY the patched BRANCH-resolution block under controlled env,
-    return the resolved value."""
+    return the full CompletedProcess (stdout=$BRANCH, stderr=log() calls).
+
+    The block now calls the real ``log`` function on a configured-but-failing
+    ``$REMEMBER_BRANCH_CMD`` (#481 follow-up) -- under ``set -e`` an
+    undefined ``log`` would abort this isolated eval with "command not
+    found" the moment that path is exercised, so a stub that mirrors
+    log.sh's signature (``log "$component" "$message"``) is required here,
+    not optional. Writing it to stderr (not swallowing it) is what lets
+    ``test_branch_cmd_failure_is_logged`` below assert on it.
+    """
     block = _extract_branch_block()
     script = f"""
 set -e
+log() {{ printf 'LOG %s: %s\n' "$1" "$2" 1>&2; }}
 export PROJECT_DIR={project_dir}
 export SESSION_ID={session_id}
 {block}
@@ -97,7 +107,17 @@ printf '%s' "$BRANCH"
         ["bash", "-c", script], env=env, capture_output=True, text=True
     )
     assert result.returncode == 0, f"BRANCH eval failed: {result.stderr}"
-    return result.stdout
+    return result
+
+
+def _eval_branch(
+    project_dir: Path,
+    env_overrides: dict[str, str | None],
+    session_id: str = "abc123",
+) -> str:
+    """Convenience wrapper over ``_eval_branch_raw`` for tests that only
+    care about the resolved $BRANCH value, not what got logged."""
+    return _eval_branch_raw(project_dir, env_overrides, session_id).stdout
 
 
 def _make_git_repo(tmp_path: Path, branch_name: str = "feature/test-branch") -> Path:
@@ -227,38 +247,67 @@ def test_branch_cmd_receives_session_id(tmp_path):
 
 def test_branch_cmd_nonzero_exit_falls_through_to_git(tmp_path):
     """Case 3a: the command exits non-zero -> fall through past it to the
-    git branch (not to 'unknown', since a real git repo IS present)."""
+    git branch (not to 'unknown', since a real git repo IS present), AND
+    the failure is logged -- a configured resolver that starts failing must
+    read as a reported fault, not silently as "never configured" (audit
+    finding on #481: the original fall-through was completely silent)."""
     project = _make_git_repo(tmp_path, branch_name="release/2026-06")
     resolver = _make_resolver(tmp_path, 'echo "should-not-be-used"; exit 1')
-    branch = _eval_branch(project, {"REMEMBER_BRANCH_CMD": str(resolver)})
-    assert branch == "release/2026-06", (
-        f"a failing resolver must not win; expected git fallback, got {branch!r}"
+    result = _eval_branch_raw(project, {"REMEMBER_BRANCH_CMD": str(resolver)})
+    assert result.stdout == "release/2026-06", (
+        f"a failing resolver must not win; expected git fallback, got {result.stdout!r}"
+    )
+    assert "REMEMBER_BRANCH_CMD" in result.stderr and "branch" in result.stderr, (
+        f"a configured-but-failing resolver must be logged; got stderr={result.stderr!r}"
     )
 
 
 def test_branch_cmd_empty_stdout_falls_through_to_git(tmp_path):
     """Case 3b: the command exits 0 but prints nothing -> fall through past
-    it to the git branch, same as a non-zero exit. An empty identity slot
-    (`## HH:MM | ` with nothing after the separator) is exactly the
-    failure mode #481 exists to prevent, arriving through this path."""
+    it to the git branch, same as a non-zero exit, and logged the same way.
+    An empty identity slot (`## HH:MM | ` with nothing after the separator)
+    is exactly the failure mode #481 exists to prevent, arriving through
+    this path."""
     project = _make_git_repo(tmp_path, branch_name="release/2026-06")
     resolver = _make_resolver(tmp_path, "true")
-    branch = _eval_branch(project, {"REMEMBER_BRANCH_CMD": str(resolver)})
-    assert branch == "release/2026-06", (
-        f"an empty-stdout resolver must not win; expected git fallback, got {branch!r}"
+    result = _eval_branch_raw(project, {"REMEMBER_BRANCH_CMD": str(resolver)})
+    assert result.stdout == "release/2026-06", (
+        f"an empty-stdout resolver must not win; expected git fallback, got {result.stdout!r}"
+    )
+    assert "REMEMBER_BRANCH_CMD" in result.stderr and "branch" in result.stderr, (
+        f"an empty-stdout resolver failure must be logged; got stderr={result.stderr!r}"
     )
 
 
 def test_branch_cmd_unset_does_not_change_existing_behavior(tmp_path):
     """Positive control for the two 'falls through' tests above: with NO
     $REMEMBER_BRANCH_CMD at all, the git branch is still used exactly as
-    before -- proves the new step 2 is a no-op when unconfigured rather
-    than the git lookup silently breaking for an unrelated reason."""
+    before, AND nothing is logged -- proves the new step 2 is a true no-op
+    when unconfigured (no spurious WARNING) rather than the git lookup
+    silently breaking for an unrelated reason."""
     project = _make_git_repo(tmp_path, branch_name="release/2026-06")
-    branch = _eval_branch(project, {"REMEMBER_BRANCH_CMD": None})
-    assert branch == "release/2026-06", (
+    result = _eval_branch_raw(project, {"REMEMBER_BRANCH_CMD": None})
+    assert result.stdout == "release/2026-06", (
         f"expected unchanged git-branch behavior with no resolver configured; "
-        f"got {branch!r}"
+        f"got {result.stdout!r}"
+    )
+    assert result.stderr == "", (
+        f"no REMEMBER_BRANCH_CMD configured must not log anything; got {result.stderr!r}"
+    )
+
+
+def test_branch_cmd_success_does_not_log(tmp_path):
+    """Positive control for the two failure-logs-a-WARNING tests above: a
+    resolver that succeeds must not also log -- the WARNING is for the
+    fall-through case specifically, not printed unconditionally whenever
+    $REMEMBER_BRANCH_CMD is configured."""
+    project = tmp_path / "not-a-repo"
+    project.mkdir()
+    resolver = _make_resolver(tmp_path, 'echo "minor-24"')
+    result = _eval_branch_raw(project, {"REMEMBER_BRANCH_CMD": str(resolver)})
+    assert result.stdout == "minor-24"
+    assert result.stderr == "", (
+        f"a succeeding resolver must not log a warning; got {result.stderr!r}"
     )
 
 

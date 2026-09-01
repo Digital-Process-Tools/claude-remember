@@ -410,16 +410,28 @@ fi
 #      map to is site-specific (a local registry of named sessions, a short
 #      hash, ...), so this is a hook rather than a new built-in default.
 #      A non-zero exit or empty stdout falls through to step 3 rather than
-#      propagating a broken command's silence into the header.
+#      propagating a broken command's silence into the header -- but ONLY
+#      when $REMEMBER_BRANCH_CMD failed to run at all is that silent: a
+#      command that IS configured and DID fail logs a WARNING first, so a
+#      typoed path or a resolver that starts failing later reads as a
+#      reported fault rather than as "never configured" (the same reasoning
+#      the ERROR logs a few steps above this one already apply to a torn
+#      now.md read).
 #   3. `git branch --show-current` in $PROJECT_DIR, for users running Claude
 #      Code from a non-git directory (e.g. $HOME) this yields nothing.
 #   4. The literal "unknown".
 if [ -n "${REMEMBER_BRANCH:-}" ]; then
     BRANCH="$REMEMBER_BRANCH"
-elif [ -n "${REMEMBER_BRANCH_CMD:-}" ] && CMD_BRANCH=$("$REMEMBER_BRANCH_CMD" "$SESSION_ID" 2>/dev/null) && [ -n "$CMD_BRANCH" ]; then
-    BRANCH="$CMD_BRANCH"
 else
-    BRANCH="$(cd "$PROJECT_DIR" && git branch --show-current 2>/dev/null || echo "unknown")"
+    BRANCH=""
+    if [ -n "${REMEMBER_BRANCH_CMD:-}" ]; then
+        if CMD_BRANCH=$("$REMEMBER_BRANCH_CMD" "$SESSION_ID" 2>/dev/null) && [ -n "$CMD_BRANCH" ]; then
+            BRANCH="$CMD_BRANCH"
+        else
+            log "branch" "WARNING: REMEMBER_BRANCH_CMD ($REMEMBER_BRANCH_CMD) exited non-zero or printed nothing for session $SESSION_ID -- falling back to git branch lookup"
+        fi
+    fi
+    [ -z "$BRANCH" ] && BRANCH="$(cd "$PROJECT_DIR" && git branch --show-current 2>/dev/null || echo "unknown")"
 fi
 # BRANCH RESOLUTION END
 TIME_FORMAT=$(config ".time_format" "24h")
