@@ -398,11 +398,30 @@ else
 fi
 
 # --- Step 3: Build prompt ---
-# $REMEMBER_BRANCH wins when set, so users running Claude Code from a non-git
-# directory (e.g., $HOME) can supply a meaningful identity for the today-*.md
-# header instead of the literal "unknown" fallback. Empty string is treated as
-# unset so an accidental `export REMEMBER_BRANCH=` doesn't propagate.
-BRANCH="${REMEMBER_BRANCH:-$(cd "$PROJECT_DIR" && git branch --show-current 2>/dev/null || echo "unknown")}"
+# BRANCH RESOLUTION START -- identity slot for the "## HH:MM | <branch>" header.
+# Order:
+#   1. $REMEMBER_BRANCH wins when set. Empty string is treated as unset so an
+#      accidental `export REMEMBER_BRANCH=` doesn't propagate.
+#   2. $REMEMBER_BRANCH_CMD, invoked as `$REMEMBER_BRANCH_CMD "$SESSION_ID"`.
+#      Sessions of one project share $PROJECT_DIR, so step 3 below resolves
+#      to the SAME branch for every one of them -- concurrent sessions in a
+#      single project need a slot that differs per writer, and $SESSION_ID is
+#      the value already in scope that does (#481). What a session id should
+#      map to is site-specific (a local registry of named sessions, a short
+#      hash, ...), so this is a hook rather than a new built-in default.
+#      A non-zero exit or empty stdout falls through to step 3 rather than
+#      propagating a broken command's silence into the header.
+#   3. `git branch --show-current` in $PROJECT_DIR, for users running Claude
+#      Code from a non-git directory (e.g. $HOME) this yields nothing.
+#   4. The literal "unknown".
+if [ -n "${REMEMBER_BRANCH:-}" ]; then
+    BRANCH="$REMEMBER_BRANCH"
+elif [ -n "${REMEMBER_BRANCH_CMD:-}" ] && CMD_BRANCH=$("$REMEMBER_BRANCH_CMD" "$SESSION_ID" 2>/dev/null) && [ -n "$CMD_BRANCH" ]; then
+    BRANCH="$CMD_BRANCH"
+else
+    BRANCH="$(cd "$PROJECT_DIR" && git branch --show-current 2>/dev/null || echo "unknown")"
+fi
+# BRANCH RESOLUTION END
 TIME_FORMAT=$(config ".time_format" "24h")
 if [ "$TIME_FORMAT" = "12h" ]; then
     # Force uppercase AM/PM: %p is locale-dependent (lowercase on many Linux systems).
