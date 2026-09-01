@@ -189,7 +189,19 @@ _HOME_PATH = re.compile(r"(?:/Users/|/home/)([A-Za-z0-9_.-]+)")
 
 
 def _fixture_files() -> list[Path]:
-    return sorted(p for p in FIXTURES_DIR.iterdir() if p.is_file())
+    """Recursive by design (#480): `iterdir()` only ever saw the
+    immediate children of tests/fixtures/, so a fixture arriving inside
+    a subdirectory -- exactly the shape a future real capture could
+    land in -- was invisible to Detector 1 at any depth, and its own
+    positive control (`test_scanned_at_least_one_fixture_file`'s
+    `>= 2`) could not have noticed, because it counts files rather than
+    walking the tree it claims to cover. `rglob("*")` walks every
+    subdirectory; the `>= 2` control below is unchanged (still catches
+    an empty/broken walk), and `test_fixture_scan_reports_how_many_files_it_examined`
+    adds the other half the issue asked for -- a receipt cross-checked
+    against `git ls-files`, so a walk that silently drops a subtree
+    disagrees with a number nobody has to trust the walk itself for."""
+    return sorted(p for p in FIXTURES_DIR.rglob("*") if p.is_file())
 
 
 def test_scanned_at_least_one_fixture_file():
@@ -239,6 +251,129 @@ def test_no_fixture_carries_an_unsanitised_home_path():
         f"with the placeholder segment {_ALLOWED_HOME_SEGMENT!r}:\n"
         + "\n".join(offenders)
     )
+
+
+def test_fixture_scan_descends_into_subdirectories(monkeypatch, tmp_path):
+    """MUST FIRE case for the ENUMERATION itself (#480): a fixture file
+    living in a subdirectory of tests/fixtures/ must be visible to the
+    scan, not just a file sitting at the top level. The real
+    tests/fixtures/ has no subdirectories today, so this cannot be
+    exercised against the real tree either way -- a synthetic tree is
+    built here instead, with one file at the top and one nested two
+    levels down, so depth is actually tested rather than assumed.
+
+    Before the fix (`FIXTURES_DIR.iterdir()`), this fails: iterdir()
+    yields only immediate children, so the nested file never appears in
+    the returned list. That is exactly what this issue reports --
+    Detector 1 enumerates non-recursively -- and it is why
+    `test_scanned_at_least_one_fixture_file` above could not have caught
+    it: its `>= 2` count is satisfied by the top-level files alone, so a
+    missed subtree changes nothing it can observe."""
+    monkeypatch.setattr(f"{__name__}.FIXTURES_DIR", tmp_path)
+    (tmp_path / "top.txt").write_text("nothing interesting here", encoding="utf-8")
+    nested_dir = tmp_path / "captures" / "2026-08"
+    nested_dir.mkdir(parents=True)
+    nested_file = nested_dir / "leak.jsonl"
+    nested_file.write_text("no home path in this one either", encoding="utf-8")
+
+    found = _fixture_files()
+
+    assert nested_file in found, (
+        f"fixture scan did not descend into a subdirectory -- found only "
+        f"{[str(p) for p in found]}, missing {nested_file}"
+    )
+
+
+def test_detector_fires_on_a_home_path_nested_in_a_fixture_subdirectory(
+    monkeypatch, tmp_path
+):
+    """MUST FIRE case for the DETECTOR end to end (#480), at the depth
+    the real bug lived at: this issue's whole point is that a real
+    #467-shaped leak arriving inside a subdirectory of tests/fixtures/
+    was invisible to both the enumeration and this detector's own
+    positive control. Plants the same JSON-string-nested shape #467's
+    first file actually shipped, two directories deep, and drives it
+    through the real detector logic (not just the bare regex the way
+    test_detector_fires_on_a_planted_real_looking_home_path does) --
+    this is the case that would still pass if only the regex were
+    proven to fire and the walk stayed blind to the subtree."""
+    monkeypatch.setattr(f"{__name__}.FIXTURES_DIR", tmp_path)
+    nested_dir = tmp_path / "captures" / "2026-08"
+    nested_dir.mkdir(parents=True)
+    leaking = nested_dir / "codex-rollout.jsonl"
+    leaking.write_text(
+        r'{"payload": {"cwd": "/Users/realname/project"}}', encoding="utf-8"
+    )
+
+    offenders: list[str] = []
+    for f in _fixture_files():
+        text = f.read_text(encoding="utf-8", errors="replace")
+        for segment in _HOME_PATH.findall(text):
+            if segment != _ALLOWED_HOME_SEGMENT:
+                offenders.append(f"{f}: {segment!r}")
+
+    assert offenders, (
+        "detector missed a real-looking home path nested in a fixtures "
+        "subdirectory -- the walk is not reaching that depth"
+    )
+
+
+def test_detector_does_not_fire_on_a_sanitised_path_in_a_fixture_subdirectory(
+    monkeypatch, tmp_path
+):
+    """MUST-NOT-FIRE case pairing the one above (CLAUDE.md: a negative
+    assertion needs a positive control, and the reverse holds too --
+    widening the walk must not start over-firing on the placeholder
+    segment this repository already standardised on, at any depth)."""
+    monkeypatch.setattr(f"{__name__}.FIXTURES_DIR", tmp_path)
+    nested_dir = tmp_path / "captures" / "2026-08"
+    nested_dir.mkdir(parents=True)
+    clean = nested_dir / "codex-rollout.jsonl"
+    clean.write_text(
+        r'{"payload": {"cwd": "/Users/sanitized-user/project"}}',
+        encoding="utf-8",
+    )
+
+    offenders: list[str] = []
+    for f in _fixture_files():
+        text = f.read_text(encoding="utf-8", errors="replace")
+        for segment in _HOME_PATH.findall(text):
+            if segment != _ALLOWED_HOME_SEGMENT:
+                offenders.append(f"{f}: {segment!r}")
+
+    assert not offenders, (
+        f"detector false-fired on the sanitised placeholder segment in a "
+        f"fixtures subdirectory: {offenders}"
+    )
+
+
+def test_fixture_scan_reports_how_many_files_it_examined(capsys):
+    """Receipt (#480): the issue's own fix note asks for recursion PLUS a
+    receipt naming how many files were actually examined, so an empty
+    walk cannot read as a clean one -- the failure mode this whole issue
+    is about is a scan that silently looked at fewer files than it
+    should have and a positive control that could not tell. Printing the
+    count (visible under `pytest -s` / `-rs` in CI logs) turns "the guard
+    was green" into a number a human reviewing a release audit can sanity
+    -check against how many files are actually tracked under
+    tests/fixtures/, the same way the module docstring's audit trail
+    already quotes `git grep -c` output as its own receipt."""
+    files = _fixture_files()
+    print(f"[receipt] examined {len(files)} fixture file(s) under {FIXTURES_DIR}")
+    tracked = subprocess.run(
+        ["git", "ls-files", "tests/fixtures"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.splitlines()
+    assert len(files) == len(tracked), (
+        f"fixture scan examined {len(files)} file(s) but git tracks "
+        f"{len(tracked)} under tests/fixtures/ -- the walk and the tree "
+        "disagree, which is exactly what a silent scope hole looks like"
+    )
+    captured = capsys.readouterr()
+    assert "[receipt] examined" in captured.out
 
 
 # ---------------------------------------------------------------------------
