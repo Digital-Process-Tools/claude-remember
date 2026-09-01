@@ -89,18 +89,51 @@ def _pid_alive(pid: int) -> bool:
     return str(pid) in out
 
 
+def _posix_path(p) -> str:
+    """Forward-slash a path before handing it to bash (#432/#497 follow-up,
+    PR #499 CI: job 100051322749).
+
+    session-end-hook.sh (and save-session.sh, which it invokes one level
+    down) derive their OWN script directory from a bash parameter
+    expansion (${BASH_SOURCE[0]%/*}) and from `dirname "$0"` -- both of
+    which only recognise the ASCII forward slash as a separator. A native
+    Windows path handed to bash as its own script argument is
+    backslash-separated end to end, so that expansion strips nothing:
+    session-end-hook.sh's own comment on that exact line documents this as
+    the SAME fallback `dirname` takes on a bare filename with no slash in
+    it at all, and sets its hook-directory variable to the current
+    directory. Every subsequent `source` of a sibling script then resolves
+    against the bash process's own working directory (pytest's, not the
+    scripts directory), fails to find resolve-paths.sh, and the hook's own
+    soft-fail guard on that source line exits the ENTIRE hook, silently,
+    before mkdir, before the flush, before anything -- which is what the CI
+    failure actually was: not a broken retention sweep and not a hook that
+    failed, but a hook that never ran, one cause behind both reported
+    symptoms. tests/test_hooks_json.py already works around this for
+    session-start-hook.sh with the identical forward-slashing; this mirrors
+    it for every path that becomes part of the invoked script's own path or
+    a downstream source line built from it.
+    """
+    return str(p).replace(chr(92), "/")
+
+
 def _run_hook(plugin: Path, env: dict, *, session_id, reason: str = "other"):
     """Same shape as test_session_end_hook_345.py's own `_run_hook`, but
     invoking the resolved `BASH` (Git Bash on Windows, not whatever `bash`
-    happens to resolve to on PATH) and waiting via `_pid_alive` instead of
+    happens to resolve to on PATH) with a forward-slashed script path and
+    env (`_posix_path`, above), and waiting via `_pid_alive` instead of
     `_reap` -- see that function's own docstring for why.
     """
-    hook = plugin / "scripts" / HOOK_NAME
+    hook = _posix_path(plugin / "scripts" / HOOK_NAME)
+    run_env = dict(env)
+    for key in ("CLAUDE_PLUGIN_ROOT", "CLAUDE_PROJECT_DIR", "HOME"):
+        if key in run_env:
+            run_env[key] = _posix_path(run_env[key])
     body = {"reason": reason}
     if session_id is not None:
         body["session_id"] = session_id
     result = subprocess.run(
-        [BASH, str(hook)], env=env, capture_output=True, text=True, timeout=60,
+        [BASH, hook], env=run_env, capture_output=True, text=True, timeout=60,
         check=False, input=json.dumps(body),
     )
     pid_file = Path(env["CLAUDE_PROJECT_DIR"]) / ".remember" / "tmp" / "save-session.pid"
@@ -134,7 +167,15 @@ def _freeze_hhmmss(tmp_path: Path, env: dict, frozen: str = "123456") -> None:
         'exec /bin/date "$@"\n'
     )
     shim.chmod(0o755)
-    env["PATH"] = f"{bindir}:{env['PATH']}"
+    # os.pathsep, not a hardcoded ":" -- this env dict becomes the WINDOWS
+    # process environment CreateProcess hands to bash.exe (Git Bash), which
+    # performs its own MSYS conversion from a native, semicolon-separated
+    # Windows PATH at startup. A colon-joined bindir (itself a
+    # backslash-separated Windows path on that platform) ahead of an
+    # already-semicolon-joined PATH is neither format -- os.pathsep is ";"
+    # there and ":" everywhere else, which is the one join every platform
+    # reads back correctly.
+    env["PATH"] = os.pathsep.join([str(bindir), env["PATH"]])
 
 
 class TestSessionEndLogNamesDoNotCollide:
