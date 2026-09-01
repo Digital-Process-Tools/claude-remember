@@ -262,6 +262,21 @@ fi
 # them apart.
 mkdir -p "$REMEMBER_DIR/logs/autonomous" 2>/dev/null
 _END_LOG="$REMEMBER_DIR/logs/autonomous/session-end-$(_remember_date +%H%M%S).log"
+# Seeded with a header line BEFORE the subshell below ever opens it, and the
+# subshell appends (`>>`) rather than truncates (`>`) -- not cosmetic (#483).
+# save-session.sh's own NDC step sweeps this very directory for stale logs
+# with `find ... -name "*.log" -empty -delete` (scripts/save-session.sh), and
+# on an ordinary successful flush NOTHING ever writes to this file: every
+# save-session.sh log line goes to its own daily narrative file, not to
+# stdout/stderr, so a `>`-truncated, still-empty $_END_LOG is exactly what
+# that same sweep -- run from INSIDE the process writing into it -- matches
+# and deletes. Two costs followed: the WARNING below named a path that was
+# already gone by the time anyone read it, and a healthy flush left nothing
+# on disk to confirm it ran at all. A non-empty file at open time is never
+# `-empty`, so it survives its own run's housekeeping while a genuinely
+# stale, still-empty log from an abandoned run is untouched by this and
+# keeps getting swept exactly as before.
+printf '%s [session-end] flush started\n' "$(_remember_date +%H:%M:%S)" > "$_END_LOG" 2>/dev/null
 (
     if [ -n "$STDIN_SESSION_ID" ]; then
         bash "$SAVE_SCRIPT" "$STDIN_SESSION_ID" --force
@@ -272,7 +287,7 @@ _END_LOG="$REMEMBER_DIR/logs/autonomous/session-end-$(_remember_date +%H%M%S).lo
     if [ "$_flush_status" -ne 0 ]; then
         report_error "session-end" "WARNING: save-session.sh --force exited $_flush_status at session end -- this session's unsaved tail may be lost. See $_END_LOG for what save-session.sh itself logged."
     fi
-) < /dev/null > "$_END_LOG" 2>&1 &
+) < /dev/null >> "$_END_LOG" 2>&1 &
 echo $! > "$REMEMBER_DIR/tmp/save-session.pid" 2>/dev/null
 disown 2>/dev/null || true
 
