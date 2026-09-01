@@ -83,7 +83,8 @@ def cmd_extract(session_id: str, project_dir: str) -> None:
 
     Prints:
         POSITION, HUMAN_COUNT, ASSISTANT_COUNT, EXCHANGE_COUNT,
-        EXTRACT_FILE (path to temp file containing exchange text).
+        EXTRACT_FILE (path to temp file containing exchange text), ENVELOPE,
+        SKIP_LINES, UNREAD_SIDECAR_UNREADABLE.
     """
     import tempfile
     remember_dir = os.environ.get("REMEMBER_DIR") or None
@@ -110,6 +111,27 @@ def cmd_extract(session_id: str, project_dir: str) -> None:
     # quarantine pinned to its earliest point or clears it once something has
     # actually read that span.
     print(f"SKIP_LINES={r.skip_lines}")
+    # #458: distinct from ENVELOPE/SKIP_LINES above -- this is the sidecar
+    # extract_session() consulted to CHOOSE those values, not the transcript
+    # itself. "1" means the unread-envelope.json quarantine sidecar exists
+    # but could not be trusted (a torn write, a disk fault, a truncated
+    # file), so this run resumed as though nothing were quarantined even
+    # though the sidecar may disagree -- the same silent-degrade #450's
+    # quarantine exists to catch, one level inside its own recovery path.
+    # Additive: no current consumer reads this key yet (that plumbing --
+    # reaching a shell-visible log line -- is a decision the issue
+    # explicitly left to whoever wires save-session.sh next), but the
+    # signal is on the bridge rather than only inside this process.
+    print(f"UNREAD_SIDECAR_UNREADABLE={1 if r.unread_sidecar_unreadable else 0}")
+    # #478: ENVELOPE="unrecognised" collapses two different facts -- the
+    # transcript could not even be opened (OSError), or it was opened and
+    # read to exhaustion and simply never named a known host shape. Additive
+    # for the same reason as UNREAD_SIDECAR_UNREADABLE above: no current
+    # consumer reads this key yet, but the distinction is on the bridge for
+    # whoever next revises save-session.sh:276's receipt, which today points
+    # every "unrecognised" case at the shape-sniffing function even when the
+    # real answer is "the file could not be read at all".
+    print(f"ENVELOPE_UNREADABLE={1 if r.envelope_unreadable else 0}")
 
 
 def cmd_build_prompt(

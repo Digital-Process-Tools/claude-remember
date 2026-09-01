@@ -109,6 +109,21 @@ class ExtractResult:
             the earlier build only skipped past. Callers report it (and
             ``save-position`` consumes it) so the quarantine can be cleared
             once something has actually read that span.
+        unread_sidecar_unreadable: True when the unread-envelope.json
+            quarantine sidecar was consulted for a resume position AND it
+            exists but could not be trusted (a torn write, a disk fault, a
+            truncated file) -- never true when the sidecar simply does not
+            exist, which is the ordinary "nothing was ever quarantined"
+            case (#458). A caller resuming as though nothing were
+            quarantined when the sidecar is actually corrupt can silently
+            re-lose a span #450's quarantine exists to protect.
+        envelope_unreadable: True when the transcript file named by
+            ``envelope`` could not even be OPENED (an ``OSError`` --
+            permission error, bad mount, vanished between listing and
+            open) -- never true when the file was opened and read to
+            exhaustion (or found empty) and simply never contained a line
+            naming a known host shape (#478). ``envelope`` is
+            "unrecognised" in both cases; this is what tells them apart.
     """
 
     exchanges: str = ""
@@ -118,6 +133,8 @@ class ExtractResult:
     corrupt_lines: int = 0
     envelope: str = ""
     skip_lines: int = 0
+    unread_sidecar_unreadable: bool = False
+    envelope_unreadable: bool = False
 
 
 @dataclass

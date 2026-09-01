@@ -237,6 +237,23 @@ def _choose_summarizer_provider() -> str:
         return provider
     path = _host.transcript_path()
     if not path:
+        # transcript_path() collapses two different facts into one None:
+        # the var was never set (ordinary -- no hook preamble, nothing to
+        # say), and the var WAS set but the file it names is gone (#477 --
+        # exported, then vanished before this read, the exact "deleted
+        # between export and this read" case the docstring above already
+        # promises a receipt for). Re-reading the environment here, rather
+        # than widening transcript_path()'s own return shape, keeps that
+        # function's contract ("a usable path or None") unchanged for every
+        # other caller.
+        raw = (os.environ.get(_host.TRANSCRIPT_PATH_VAR) or "").strip()
+        if raw:
+            _warn(
+                f"WARNING: REMEMBER_TRANSCRIPT_PATH={raw!r} names a "
+                "transcript that no longer exists (exported, then vanished "
+                "before this read) -- REMEMBER_SUMMARIZER=auto is falling "
+                "back to 'claude', which may not be correct"
+            )
         return "claude"
     envelope = _extract.sniff_file_envelope(path)
     if envelope == "codex":
