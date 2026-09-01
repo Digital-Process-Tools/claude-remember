@@ -357,9 +357,22 @@ def test_fixture_scan_reports_how_many_files_it_examined(capsys):
     was green" into a number a human reviewing a release audit can sanity
     -check against how many files are actually tracked under
     tests/fixtures/, the same way the module docstring's audit trail
-    already quotes `git grep -c` output as its own receipt."""
-    files = _fixture_files()
-    print(f"[receipt] examined {len(files)} fixture file(s) under {FIXTURES_DIR}")
+    already quotes `git grep -c` output as its own receipt.
+
+    Deliberately a SUBSET check, not an exact-count comparison: an
+    earlier draft asserted `len(files) == len(tracked)`, which a
+    reviewer caught failing on a file that exists on disk under
+    tests/fixtures/ but is not git-tracked -- a stray `.DS_Store` was the
+    reproduction, and it is `.gitignore`d in this repo but still visible
+    to `rglob("*")`, which walks the filesystem rather than the git
+    index. That is noise unrelated to #480 (a contributor who has ever
+    opened tests/fixtures/ in Finder could fail this test locally for a
+    reason that has nothing to do with the detector), so the receipt now
+    asserts every git-tracked fixture was found by the walk, without
+    demanding the walk find NOTHING else -- that subset direction is
+    exactly the one a dropped subtree would violate."""
+    found = set(_fixture_files())
+    print(f"[receipt] examined {len(found)} fixture file(s) under {FIXTURES_DIR}")
     tracked = subprocess.run(
         ["git", "ls-files", "tests/fixtures"],
         cwd=REPO_ROOT,
@@ -367,10 +380,13 @@ def test_fixture_scan_reports_how_many_files_it_examined(capsys):
         text=True,
         check=True,
     ).stdout.splitlines()
-    assert len(files) == len(tracked), (
-        f"fixture scan examined {len(files)} file(s) but git tracks "
-        f"{len(tracked)} under tests/fixtures/ -- the walk and the tree "
-        "disagree, which is exactly what a silent scope hole looks like"
+    tracked_paths = {REPO_ROOT / line for line in tracked}
+    missing = tracked_paths - found
+    assert not missing, (
+        f"fixture scan missed {len(missing)} git-tracked file(s) under "
+        f"tests/fixtures/ that git ls-files reports: {sorted(missing)} -- "
+        "the walk and the tree disagree, which is exactly what a silent "
+        "scope hole looks like"
     )
     captured = capsys.readouterr()
     assert "[receipt] examined" in captured.out
