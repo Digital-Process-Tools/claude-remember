@@ -276,7 +276,21 @@ _END_LOG="$REMEMBER_DIR/logs/autonomous/session-end-$(_remember_date +%H%M%S).lo
 # `-empty`, so it survives its own run's housekeeping while a genuinely
 # stale, still-empty log from an abandoned run is untouched by this and
 # keeps getting swept exactly as before.
-printf '%s [session-end] flush started\n' "$(_remember_date +%H:%M:%S)" > "$_END_LOG" 2>/dev/null
+# `>>`, not `>` -- this is a synchronous, foreground write into a path a
+# CONCURRENT SessionEnd hook for the same project can compute identically
+# ($_END_LOG has second granularity only, no PID/session-id, and two Claude
+# Code windows on one project ending inside the same wall-clock second is a
+# case scripts/doctor.sh's own SessionEnd-liveness comments already treat as
+# ordinary). A truncating `>` here would clobber whatever a sibling
+# session's already-backgrounded subshell had appended by that instant --
+# not the #483 empty-file bug, a new one this line would otherwise
+# introduce. `>>` creates the file exactly as well as `>` does when it does
+# not yet exist, so nothing about the #483 fix (surviving `-empty -delete`)
+# changes; it only stops adding a fresh way to lose a sibling's output.
+# `_END_LOG`'s own collision risk (no PID/session-id in the filename) is
+# pre-existing and unresolved by this line -- see #483's pull request for
+# the follow-up filed against it.
+printf '%s [session-end] flush started\n' "$(_remember_date +%H:%M:%S)" >> "$_END_LOG" 2>/dev/null
 (
     if [ -n "$STDIN_SESSION_ID" ]; then
         bash "$SAVE_SCRIPT" "$STDIN_SESSION_ID" --force
