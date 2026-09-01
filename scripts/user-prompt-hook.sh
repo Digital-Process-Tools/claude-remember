@@ -153,6 +153,18 @@ source "$_HOOK_DIR/lib-env-cache.sh"
 # with no working fast path at all on Codex/Gemini, which is the choice
 # #479 exists to make explicit rather than silent.
 #
+# WORST CASE, not just average case: before this change, a cache-HIT
+# invocation never touched stdin at all, so it could never block on it.
+# After this change every invocation, hit or miss, carries the same
+# `read -t 1` ceiling the slow path already had -- a host that leaves the
+# pipe open without writing/closing it now costs up to 1s on the hot path
+# too, not 0ms. Accepted deliberately, not overlooked: `post-tool-hook.sh`
+# already reads stdin unconditionally ahead of its own cache-load check
+# (see its REMEMBER_HOOK_CWD block), on the hook that fires roughly ten
+# times more often than this one, with no reported incident -- this is an
+# extension of that same accepted tradeoff to a second hook, not a new
+# risk class.
+#
 # Bounded in TIME only (`read -t 1`, never a tty), the same reasoning every
 # other stdin-reading hook in this repo already carries: a blocking read
 # here is not a slow prompt, it is a lost one (see the COST section above).

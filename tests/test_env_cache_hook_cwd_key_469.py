@@ -287,7 +287,8 @@ def test_windows_normalized_project_dir_does_not_orphan_the_hook_cwd_key(tmp_pat
 # already been called and failed. This drives the real script twice, via
 # `bash -x`, and tells hit from miss by whether the slow path's own
 # `source .../resolve-paths.sh` line appears in the trace -- the fast path
-# never reaches it (scripts/user-prompt-hook.sh:132-140).
+# never reaches it (scripts/user-prompt-hook.sh:207-220, the
+# _remember_env_cache_load gate and the slow-path source call it guards).
 USER_PROMPT_HOOK = REPO_ROOT / "scripts" / "user-prompt-hook.sh"
 
 
