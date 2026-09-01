@@ -19,6 +19,7 @@ passes today, on the unfixed code, and says nothing about the bug.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -35,9 +36,14 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 LIB_ENV_CACHE = REPO_ROOT / "scripts" / "lib-env-cache.sh"
 
 # A minimal, self-contained simulation of one hook run: no CLAUDE_PROJECT_DIR
-# (Codex/Gemini never set it), only REMEMBER_HOOK_CWD -- exactly the shape
-# user-prompt-hook.sh and post-tool-hook.sh already offer from their own
-# stdin `cwd` (#411, #444). Mirrors what resolve-paths.sh itself does on a
+# (Codex/Gemini never set it), only REMEMBER_HOOK_CWD -- the shape
+# post-tool-hook.sh and (since #479) user-prompt-hook.sh offer from their own
+# stdin `cwd` (#411, #444). Before #479, user-prompt-hook.sh set
+# REMEMBER_HOOK_CWD from stdin only AFTER its own cache-load attempt had
+# already run and failed, so this harness's premise did not hold for that
+# hook -- see test_user_prompt_hook_hits_cache_on_second_invocation_with_no_claude_project_dir
+# below for the end-to-end regression against the real script, not this
+# hand-rolled simulation. Mirrors what resolve-paths.sh itself does on a
 # successful resolution: it exports CLAUDE_PROJECT_DIR="$PROJECT_DIR" before
 # anything publishes (resolve-paths.sh:270), so a real publish call always
 # sees CLAUDE_PROJECT_DIR set -- this script reproduces that ordering by hand
@@ -271,4 +277,72 @@ def test_windows_normalized_project_dir_does_not_orphan_the_hook_cwd_key(tmp_pat
         "reusing the pinned raw key, orphaning the file on Windows: "
         + second.stdout + second.stderr
     )
+
+# --- #479: the real hook, not the hand-rolled simulation above ------------
+#
+# The simulation above proves lib-env-cache.sh itself is correctly keyed. It
+# says nothing about whether user-prompt-hook.sh ever supplies the key that
+# early -- and before #479 it did not: REMEMBER_HOOK_CWD was read from stdin
+# only inside the "cache missed" branch, after _remember_env_cache_load had
+# already been called and failed. This drives the real script twice, via
+# `bash -x`, and tells hit from miss by whether the slow path's own
+# `source .../resolve-paths.sh` line appears in the trace -- the fast path
+# never reaches it (scripts/user-prompt-hook.sh:132-140).
+USER_PROMPT_HOOK = REPO_ROOT / "scripts" / "user-prompt-hook.sh"
+
+
+def _user_prompt_payload(cwd: str) -> str:
+    return json.dumps({
+        "session_id": "479-e2e-session",
+        "transcript_path": "/does/not/matter.jsonl",
+        "hook_event_name": "UserPromptSubmit",
+        "cwd": cwd,
+        "prompt": "hello",
+    })
+
+
+def test_user_prompt_hook_hits_cache_on_second_invocation_with_no_claude_project_dir(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    tmp_dir = home / "tmp"
+    tmp_dir.mkdir()
+    project = tmp_path / "codex-project"
+    project.mkdir()
+
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "TMPDIR": str(tmp_dir),
+        "CLAUDE_PLUGIN_ROOT": str(REPO_ROOT),
+    }
+    env.pop("CLAUDE_PROJECT_DIR", None)
+    env.pop("REMEMBER_HOOK_CWD", None)
+
+    payload = _user_prompt_payload(str(project))
+
+    def _run():
+        return subprocess.run(
+            ["bash", "-x", str(USER_PROMPT_HOOK)], env=env, input=payload,
+            cwd=str(project), capture_output=True, text=True, timeout=60,
+            check=False, errors="replace",
+        )
+
+    first = _run()
+    assert first.returncode == 0, first.stderr
+    assert "resolve-paths.sh" in first.stderr, (
+        "first (cold) invocation should take the slow path and source "
+        "resolve-paths.sh -- if it never shows up here the harness itself "
+        "is broken, not the fix: " + first.stderr
+    )
+
+    second = _run()
+    assert second.returncode == 0, second.stderr
+    assert "resolve-paths.sh" not in second.stderr, (
+        "second invocation, same stdin cwd, no CLAUDE_PROJECT_DIR anywhere: "
+        "must be a cache HIT (fast path), never re-sourcing resolve-paths.sh. "
+        "If this fires, REMEMBER_HOOK_CWD is still unset at the point "
+        "_remember_env_cache_load runs, inside user-prompt-hook.sh itself "
+        "(#479): " + second.stderr
+    )
+
 
