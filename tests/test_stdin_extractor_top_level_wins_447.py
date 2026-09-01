@@ -45,14 +45,22 @@ import json
 import re
 import shlex
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
 
+from ._bash_runner import resolve_bash
+
+# #432: a blanket skipif(sys.platform == "win32") makes the windows-latest CI
+# leg collect these tests, skip every one of them, and report the leg green --
+# a check that never ran rendering exactly like a check that found nothing.
+# tests/test_hooks_json.py already proves a real bash is reachable under Git
+# Bash on that same leg, so the platform is not the limitation; narrow the
+# skip to the one thing that actually is: no usable bash on PATH at all.
+BASH = resolve_bash()
 pytestmark = pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="bash function extraction + subprocess -- not portable to Windows runners",
+    BASH is None,
+    reason="no usable bash found (checked PATH, then Git-for-Windows install locations)",
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -80,7 +88,7 @@ def _call(script: str, func_name: str, keyed: bool, key: str, raw: str):
     args = [key, raw] if keyed else [raw]
     call = func_name + " " + " ".join(shlex.quote(a) for a in args)
     result = subprocess.run(
-        ["bash", "-c", body + "\n" + call],
+        [BASH, "-c", body + "\n" + call],
         capture_output=True,
         text=True,
         timeout=10,
