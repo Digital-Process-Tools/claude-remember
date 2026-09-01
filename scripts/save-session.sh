@@ -1049,6 +1049,26 @@ if [ "$RUN_NDC" = true ]; then
         rm -f "$NDC_PROMPT"
     fi
 
-    # Housekeeping: remove empty autonomous logs
+    # Housekeeping: reclaim autonomous logs (#487).
+    #
+    # An empty one is swept immediately -- an abandoned run's redirect
+    # target that never got a header written into it. That used to be this
+    # directory's ONLY retention, and it stopped covering session-end-*.log
+    # the moment #483 seeded $_END_LOG with a header before its subshell
+    # ever opens the file: every one of those is non-empty by construction
+    # now, so an empty-only sweep never reclaims that class again, and the
+    # accumulation is #487's own report of it.
+    #
+    # The second sweep below is the fix: age-keyed, over BOTH file classes
+    # (save-*.log and session-end-*.log share the "*.log" glob), rather than
+    # keyed to emptiness -- emptiness was always a proxy for staleness, and
+    # it is the proxy that produced #483 in the first place. A log this
+    # script itself just wrote (this run's own save-*.log, or the
+    # session-end-hook.sh-seeded header this same flush is appending into)
+    # has an mtime of now and is nowhere near the cutoff, so neither sweep
+    # below can delete output a caller might still want to read.
     find "${REMEMBER_DIR}/logs/autonomous" -name "*.log" -empty -delete 2>/dev/null
+    _AUTONOMOUS_LOG_RETENTION_DAYS=$(config ".thresholds.autonomous_log_retention_days" 7)
+    case "$_AUTONOMOUS_LOG_RETENTION_DAYS" in (''|*[!0-9]*) _AUTONOMOUS_LOG_RETENTION_DAYS=7 ;; esac
+    find "${REMEMBER_DIR}/logs/autonomous" -name "*.log" -mtime "+${_AUTONOMOUS_LOG_RETENTION_DAYS}" -delete 2>/dev/null
 fi

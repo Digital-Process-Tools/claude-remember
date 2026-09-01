@@ -315,6 +315,38 @@ def test_marker_present_reports_ok_and_never_a_session_end_problem(tmp_path):
     )
 
 
+def test_marker_with_pid_suffix_still_reports_ok(tmp_path):
+    """#488: session-end-hook.sh now names its flush log
+    session-end-<HHMMSS>-<PID>.log, not session-end-<HHMMSS>.log, so two
+    hooks ending in the same wall-clock second no longer collide onto one
+    path. This fix's own `for _sel in .../session-end-*.log` glob (above,
+    "5. Capture health" section) was never anchored to a fixed width, so it
+    should still match -- this fixture is the fixed point pinning that,
+    written directly against the fixture's own file (not the real hook,
+    same convention as the sibling test above), so a future narrowing of
+    the glob back to a fixed-width pattern fails here rather than only in
+    production.
+    """
+    home, project, remember, session_dir = _project(tmp_path)
+    (session_dir / "aaaa-earlier-session.jsonl").write_text("{}\n", encoding="utf-8")
+    (session_dir / "bbbb-another-earlier-session.jsonl").write_text("{}\n", encoding="utf-8")
+    (remember / "logs" / "autonomous").mkdir(parents=True)
+    (remember / "logs" / "autonomous" / "session-end-093000-54321.log").write_text(
+        "", encoding="utf-8")
+
+    result = _run(home, project, remember)
+
+    assert result.returncode == 0, result.stderr
+    assert "OK   SessionEnd has fired at least once" in result.stdout, (
+        "a PID-suffixed session-end log (#488's own naming) was not "
+        "recognised as evidence the hook fired:\n" + result.stdout
+    )
+    assert "problem -- SessionEnd" not in _verdict(result.stdout), (
+        "a PID-suffixed session-end log still reached a SessionEnd problem "
+        "verdict:\n" + result.stdout
+    )
+
+
 def test_session_end_failure_outranks_the_generic_capture_is_working_verdict(tmp_path):
     """Ladder placement: SessionEnd's own silent failure must not hide behind
     a healthy-looking PostToolUse verdict.

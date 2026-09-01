@@ -261,7 +261,22 @@ fi
 # are "a save-session.sh is in flight" and nothing downstream needs to tell
 # them apart.
 mkdir -p "$REMEMBER_DIR/logs/autonomous" 2>/dev/null
-_END_LOG="$REMEMBER_DIR/logs/autonomous/session-end-$(_remember_date +%H%M%S).log"
+# `$$` (this hook process's own PID) suffixes the second-granularity
+# timestamp so two SessionEnd hooks for the same project, ending inside the
+# same wall-clock second, no longer resolve to the same path (#488). That
+# collision was not contrived -- scripts/doctor.sh's own SessionEnd-liveness
+# comments already treat two concurrently open windows on one project as an
+# ordinary case, and PR #486 only made the collision harmless (both hooks
+# append rather than truncate) rather than absent: two flushes still
+# interleaved into one file, with no way for a reader to tell whose lines
+# were whose. `$$` is unique per invocation of THIS script -- it is not the
+# backgrounded subshell's own PID, which is assigned only after this line
+# runs -- so it is available before the header below is ever written, and
+# distinct siblings still get distinct files. scripts/doctor.sh's own
+# `session-end-*.log` glob (#370's SessionEnd-liveness check) needs no
+# change for this: the `*` already matches whatever follows the timestamp,
+# suffix included.
+_END_LOG="$REMEMBER_DIR/logs/autonomous/session-end-$(_remember_date +%H%M%S)-$$.log"
 # Seeded with a header line BEFORE the subshell below ever opens it, and the
 # subshell appends (`>>`) rather than truncates (`>`) -- not cosmetic (#483).
 # save-session.sh's own NDC step sweeps this very directory for stale logs
@@ -276,20 +291,10 @@ _END_LOG="$REMEMBER_DIR/logs/autonomous/session-end-$(_remember_date +%H%M%S).lo
 # `-empty`, so it survives its own run's housekeeping while a genuinely
 # stale, still-empty log from an abandoned run is untouched by this and
 # keeps getting swept exactly as before.
-# `>>`, not `>` -- this is a synchronous, foreground write into a path a
-# CONCURRENT SessionEnd hook for the same project can compute identically
-# ($_END_LOG has second granularity only, no PID/session-id, and two Claude
-# Code windows on one project ending inside the same wall-clock second is a
-# case scripts/doctor.sh's own SessionEnd-liveness comments already treat as
-# ordinary). A truncating `>` here would clobber whatever a sibling
-# session's already-backgrounded subshell had appended by that instant --
-# not the #483 empty-file bug, a new one this line would otherwise
-# introduce. `>>` creates the file exactly as well as `>` does when it does
-# not yet exist, so nothing about the #483 fix (surviving `-empty -delete`)
-# changes; it only stops adding a fresh way to lose a sibling's output.
-# `_END_LOG`'s own collision risk (no PID/session-id in the filename) is
-# pre-existing and unresolved by this line -- see #483's pull request for
-# the follow-up filed against it.
+# `>>`, not `>`, is kept even now that `$$` makes an ordinary same-second
+# collision unreachable: a PID can still be recycled across a long-lived
+# store, and appending costs nothing when the file is otherwise guaranteed
+# fresh. Belt, not the buckle.
 printf '%s [session-end] flush started\n' "$(_remember_date +%H:%M:%S)" >> "$_END_LOG" 2>/dev/null
 (
     if [ -n "$STDIN_SESSION_ID" ]; then

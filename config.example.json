@@ -13,7 +13,8 @@
     "extract_max_bytes": 300000,
     "consolidate_max_bytes": 600000,
     "memory_inject_max_bytes": 200000,
-    "staging_warn_bytes": 2000000
+    "staging_warn_bytes": 2000000,
+    "autonomous_log_retention_days": 7
   },
   "features": {
     "ndc_compression": true,
