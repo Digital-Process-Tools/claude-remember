@@ -12,10 +12,12 @@ convention and #345's acceptance criteria only covered README and docs.
 No new marker file is introduced by this fix, and scripts/session-end-hook.sh
 is not touched at all: that hook already leaves usable evidence of its own
 accord, as a side effect of its background flush -- a
-logs/autonomous/session-end-<HHMMSS>.log file, written unconditionally once
-the hook gets past its SAVE_SCRIPT-missing check (see that hook's own
-comments around its `_END_LOG` redirect). doctor.sh's job is reading that
-signal, not producing a new one.
+logs/autonomous/session-end-<HHMMSS>-<PID>.log file (the `-<PID>` suffix is
+#488's own naming, see that hook's own comments around its `_END_LOG`
+redirect; the glob below matched a plain `session-end-<HHMMSS>.log` before
+#488 and still matches the PID-suffixed name after it, unchanged), written
+unconditionally once the hook gets past its SAVE_SCRIPT-missing check.
+doctor.sh's job is reading that signal, not producing a new one.
 
 Three states, not two, and the fixtures below pin all three:
 
@@ -290,10 +292,13 @@ def test_marker_present_reports_ok_and_never_a_session_end_problem(tmp_path):
 
     Without this, a fix that flagged every store with two-or-more
     transcripts as broken -- never checking for the session-end log at all
-    -- would still pass the FAIL test above. The fixture writes the exact
-    file session-end-hook.sh's own background flush leaves behind
-    (logs/autonomous/session-end-<HHMMSS>.log), not a purpose-built marker
-    -- this fix reads that file, it does not introduce one.
+    -- would still pass the FAIL test above. The fixture writes the SHAPE
+    of the file session-end-hook.sh's own background flush leaves behind,
+    pre-#488 (logs/autonomous/session-end-<HHMMSS>.log -- no PID suffix);
+    the post-#488 shape is pinned separately, right below, by
+    test_marker_with_pid_suffix_still_reports_ok. Neither is a
+    purpose-built marker -- this fix reads that file, it does not
+    introduce one.
     """
     home, project, remember, session_dir = _project(tmp_path)
     (session_dir / "aaaa-earlier-session.jsonl").write_text("{}\n", encoding="utf-8")
