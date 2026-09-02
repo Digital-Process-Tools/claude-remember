@@ -14,6 +14,16 @@ Claude Remember fixes that. It hooks into Claude Code's lifecycle — saving ses
 
 The result: your Claude Code instance develops continuity. It remembers what it learned, what broke, what worked. Not perfect recall — compressed, practical memory that fits in minimal tokens.
 
+## From the same workshop
+
+Four plugins, one team, each does one thing. This one and three siblings:
+
+- [claude-jit-context](https://github.com/Digital-Process-Tools/claude-jit-context): project knowledge that loads only when the prompt, the file or the tool matches it.
+- [claude-supertool](https://github.com/Digital-Process-Tools/claude-supertool): batched file and tracker ops. One call instead of seven, and a refusal instead of a wrong answer.
+- [claude-oss](https://github.com/Digital-Process-Tools/claude-oss): the maintainer loop that runs these four repos. Triage, build, review, merge, release.
+
+All four install from one marketplace: `/plugin marketplace add Digital-Process-Tools/claude-marketplace`.
+
 ## Install
 
 ### From our marketplace (recommended)
