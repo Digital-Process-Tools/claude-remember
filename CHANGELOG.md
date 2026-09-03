@@ -7,6 +7,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-09-02 — Telling one session from another, and a fault from a quiet answer
+
+### Added
+
+- Added a test generalising the #344/#379 top-level-wins pin from `source`
+  alone to the extractor itself: `_stdin_json_string` (session-start-hook.sh,
+  session-end-hook.sh, post-tool-hook.sh) and its `cwd`-hardcoded twin
+  `_stdin_cwd` (user-prompt-hook.sh) all take the FIRST `"KEY"` occurrence in
+  the joined stdin string, not the first top-level one, and since #444 that
+  now resolves `cwd` on all four hooks and `session_id` on three of them --
+  neither whitelisted the way `source` was, and `cwd` feeds
+  `REMEMBER_HOOK_CWD`/`PROJECT_DIR` rather than a bounded string comparison.
+  Each (hook, key) pair gets the same two-test shape as the original pin: a
+  nested key AFTER the top-level one must keep losing, and a nested key
+  BEFORE it is pinned as today's documented gap. Nothing in the extractors
+  changed -- no JSON parser was introduced, per #340/#344's standing
+  decision that a hook which must survive a broken install is the wrong
+  place to acquire one. (#447)
+
+- Added (#481): `REMEMBER_BRANCH_CMD` env var, an executable invoked as `$REMEMBER_BRANCH_CMD "$SESSION_ID"` whose stdout resolves the `| <branch>` identity slot of each `## HH:MM | <branch>` memory header. Checked after `REMEMBER_BRANCH` and before the `git branch --show-current` fallback; a non-zero exit or empty stdout falls through to that fallback, logging a WARNING that names the configured command and the session so a configured-but-failing resolver reads as a reported fault rather than as "never configured". Fixes the case `REMEMBER_BRANCH` cannot: several Claude Code sessions running at once in one project share `$PROJECT_DIR`, so both the git-branch fallback and a `REMEMBER_BRANCH` set once at launch resolve to the *same* value for every one of them, collapsing the identity slot the same way the `unknown` fallback originally did. `$SESSION_ID` is already in scope at save time and differs per session, so a site can map it to a name of its own choosing (a local registry, `${SESSION_ID:0:8}`, ...) instead of the plugin guessing a built-in default.
+
+### Changed
+
+- Changed: README's Codex section now records the `UserPromptSubmit`
+  stdout-contract divergence between Claude Code and Codex fixed by #451/#452
+  (Codex's hook engine sniffs the first byte of stdout and marks the run
+  `Failed` on a bare `[`/`{` that fails its own JSON schema), states that
+  `session-start-hook.sh` was checked against three store shapes and does not
+  share the defect, and rebuilds the "not yet known" list from what is
+  actually still unknown today rather than from what was unknown when the
+  section was first written (#453).
+
+### Fixed
+
+- Fixed: `read_unread_envelope()` returned the same empty result for "nothing
+  was ever quarantined" and "the quarantine sidecar exists and could not be
+  read", so a torn write or truncated `unread-envelope.json` silently
+  re-lost a span #450's quarantine exists to protect. `extract_session()`
+  now distinguishes the two and reports it on its result (and through
+  `pipeline.shell`'s existing shell bridge as `UNREAD_SIDECAR_UNREADABLE`)
+  (#458).
+
+- Fixed: an auto-detected Codex session whose exported transcript vanished
+  between export and the SessionEnd hook's read was silently routed to
+  Claude's summarizer with no receipt -- `REMEMBER_SUMMARIZER=auto` now logs
+  that the transcript path was set but the file is gone, distinctly from the
+  ordinary no-transcript-exported case, which stays silent (#477).
+
+- Fixed: `sniff_file_envelope()` returned "unrecognised" for both "the
+  transcript could not even be opened" (permission error, bad mount, a file
+  that vanished between listing and open) and "opened it, read it,
+  recognised no known host shape" -- the same string save-session.sh's
+  receipt points at a shape-sniffing function for, which is the wrong place
+  to look when the real answer is "could not read it at all".
+  `extract_session()` now carries the distinction on its result (and
+  through `pipeline.shell`'s shell bridge as `ENVELOPE_UNREADABLE`), while
+  `sniff_file_envelope()`'s own return value is unchanged for existing
+  callers (#478).
+
+- Fixed: the #469 environment-cache fallback for Codex/Gemini CLI (`_remember_env_cache_path` falling back to `REMEMBER_HOOK_CWD` when `CLAUDE_PROJECT_DIR` is unset) was inert in `scripts/user-prompt-hook.sh` -- that hook unset `REMEMBER_HOOK_CWD` at entry (#417) and only ever set it again from the UserPromptSubmit stdin payload *inside* the "cache missed" branch, i.e. after `_remember_env_cache_load` had already run and failed for want of it. Every UserPromptSubmit wrote a cache file and none was ever read back on a host with no `CLAUDE_PROJECT_DIR`, verbatim the #469 symptom on the hook that fires once per human turn. `tests/test_env_cache_hook_cwd_key_469.py` certified the fix against a premise ("exactly the shape user-prompt-hook.sh ... already offer[s]") that this hook did not meet; its comment now says so and a new end-to-end test drives the real script, via `bash -x`, and asserts the second invocation is a cache HIT (never re-sources `resolve-paths.sh`), not merely a cache write. The stdin read that supplies `REMEMBER_HOOK_CWD` now runs unconditionally, ahead of the cache-load attempt, rather than only on the slow path: it is a bounded bash builtin (`read -t 1`, no fork), measured at no cost above the noise floor of a bare process spawn (8.5ms vs. 9.5ms baseline, 50 runs, macOS/bash 3.2), so this hook keeps a working fast path on Codex/Gemini CLI rather than silently having none. (#479)
+
+- Fixed: the #467 home-path guard's Detector 1 (`tests/test_no_real_home_paths_467.py`)
+  enumerated `tests/fixtures/` non-recursively (`iterdir()`), so a real `/Users/<x>/` or
+  `/home/<x>/` segment committed inside a subdirectory of `tests/fixtures/` was invisible
+  to the detector, and its own positive control could not have noticed -- it only asserted
+  a file count, satisfied by the top-level files alone. The scan now walks the tree
+  (`rglob("*")`) and a new receipt test cross-checks the file count it examined against
+  `git ls-files tests/fixtures`, so a walk that silently drops a subtree disagrees with a
+  number instead of passing quietly. (#480)
+
+- Fixed (#483): `session-end-hook.sh`'s own flush log deleted itself before anyone could read it. The hook redirects `save-session.sh --force`'s output into a fresh, empty `logs/autonomous/session-end-HHMMSS.log` before backgrounding the flush; save-session.sh's own NDC step then sweeps that same directory for stale logs with `find ... -empty -delete`, and on an ordinary successful run nothing ever writes a byte into that log (save-session.sh logs to its own daily file, not to stdout/stderr) -- so the sweep, run from inside the very process writing it, matched and deleted its own log. A later failure's WARNING then named a path that was already gone, and a healthy flush left no trace it had run. Fixed by seeding the log with a header line before the flush starts and appending rather than truncating into it, so it is never `-empty` for its own run's housekeeping to catch -- a genuinely stale, still-empty log from an earlier, abandoned run is untouched and keeps getting swept exactly as before.
+
 ## [0.24.0] - 2026-08-29 — A plugin that only knew one host
 
 ### Added
@@ -1559,7 +1631,8 @@ Fixes [#9](https://github.com/Digital-Process-Tools/claude-remember/issues/9), a
 
 ## [0.1.0] — Initial release
 
-[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.24.0...HEAD
+[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.25.0...HEAD
+[0.25.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.25.0
 [0.24.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.24.0
 [0.23.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.23.0
 [0.22.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.22.0

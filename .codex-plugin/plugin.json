@@ -1,7 +1,7 @@
 {
   "name": "remember",
   "description": "Continuous memory for agent CLIs. Extracts, summarizes, and compresses conversations into tiered daily logs. Codex layer observed against a real codex-cli 0.150.1 install (#443, #444, #460, #463, #465): marketplace discovery, install, hook firing, per-turn capture, and session extraction all hold up against a real Codex transcript.",
-  "version": "0.24.0",
+  "version": "0.25.0",
   "author": {
     "name": "Digital Process Tools"
   },
