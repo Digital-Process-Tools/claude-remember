@@ -260,7 +260,19 @@ fi
 # background fork writes (scripts/post-tool-hook.sh), not a second one: both
 # are "a save-session.sh is in flight" and nothing downstream needs to tell
 # them apart.
-mkdir -p "$REMEMBER_DIR/logs/autonomous" 2>/dev/null
+# Checked and reported (#503): this mkdir is best-effort defensive
+# re-creation on top of bootstrap-dirs.sh's own earlier attempt, and a
+# failure here means the seed write two lines down cannot land either --
+# leaving $_END_LOG absent, which an ordinary housekeeping sweep cannot
+# then be blamed for reclaiming (there is nothing to reclaim), and which
+# scripts/doctor.sh's own SessionEnd-liveness check then misreports as
+# "SessionEnd has never fired for this project" -- a hook-registration
+# problem that does not exist. Reported the same way save-session.sh:428
+# reports its own fall-through, so a read-only store or a full disk shows
+# up as a fault rather than as silence.
+if ! mkdir -p "$REMEMBER_DIR/logs/autonomous" 2>/dev/null; then
+    report_error "session-end" "WARNING: could not create $REMEMBER_DIR/logs/autonomous -- this session's flush will not be recorded, and /remember:doctor may misreport SessionEnd as never having fired."
+fi
 # `$$` (this hook process's own PID) suffixes the second-granularity
 # timestamp so two SessionEnd hooks for the same project, ending inside the
 # same wall-clock second, no longer resolve to the same path (#488). That
@@ -295,7 +307,17 @@ _END_LOG="$REMEMBER_DIR/logs/autonomous/session-end-$(_remember_date +%H%M%S)-$$
 # collision unreachable: a PID can still be recycled across a long-lived
 # store, and appending costs nothing when the file is otherwise guaranteed
 # fresh. Belt, not the buckle.
-printf '%s [session-end] flush started\n' "$(_remember_date +%H:%M:%S)" >> "$_END_LOG" 2>/dev/null
+# Checked and reported (#503): a failed seed write leaves $_END_LOG
+# absent or empty exactly as if it had never been opened, so the very
+# next housekeeping sweep reclaims it as an abandoned run's redirect
+# target -- and #483's original bug (no on-disk trace that SessionEnd
+# ever fired) is silently back for this session, with
+# scripts/doctor.sh's own liveness check then misreporting it as a hook
+# that never fired at all. Reported the same way save-session.sh:428
+# reports its own fall-through.
+if ! printf '%s [session-end] flush started\n' "$(_remember_date +%H:%M:%S)" >> "$_END_LOG" 2>/dev/null; then
+    report_error "session-end" "WARNING: could not seed $_END_LOG -- if this file stays absent or empty, an ordinary housekeeping sweep will reclaim it, and /remember:doctor may misreport this session as one where SessionEnd never fired."
+fi
 (
     if [ -n "$STDIN_SESSION_ID" ]; then
         bash "$SAVE_SCRIPT" "$STDIN_SESSION_ID" --force

@@ -232,3 +232,43 @@ class TestAgedAutonomousLogsAreReclaimed:
             "configured to reclaim anything over 1 day old\n"
             + str(list(autonomous.iterdir()))
         )
+
+
+class TestHousekeepingRunsIndependentlyOfNdcCompression:
+    def test_must_fire_reclaim_survives_ndc_compression_disabled(self, tmp_path):
+        """#498: the retention sweep above lived inside
+        `if [ "$RUN_NDC" = true ]; then ... fi`, so setting
+        features.ndc_compression=false silently disabled ALL
+        logs/autonomous/ housekeeping, not just NDC compression -- an
+        operator who turns that flag off gets an inert
+        autonomous_log_retention_days with no signal it stopped doing
+        anything. An old, non-empty log must still be reclaimed with NDC
+        compression turned off.
+        """
+        env, project, plugin, _calls, sid = _make_env(tmp_path, exchanges=4, humans=1)
+        env["STUB_HAIKU_TEXT"] = "## 18:30 | main\n\n- did some work\n"
+        _wire_hook(plugin)
+        cfg_layer = plugin / "config.json"
+        cfg = json.loads(cfg_layer.read_text())
+        cfg.setdefault("features", {})["ndc_compression"] = False
+        cfg_layer.write_text(json.dumps(cfg))
+        autonomous = project / ".remember" / "logs" / "autonomous"
+        autonomous.mkdir(parents=True, exist_ok=True)
+        stale = autonomous / "session-end-000000-44444.log"
+        stale.write_text(
+            "12:00:00 [session-end] flush started\n"
+            "12:00:01 save-session.sh output from a run long finished\n"
+        )
+        eight_days_ago = time.time() - (8 * 24 * 3600)
+        os.utime(stale, (eight_days_ago, eight_days_ago))
+
+        result = _run_hook(plugin, env, session_id=sid)
+
+        assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")
+        assert not stale.exists(), (
+            "a non-empty session-end log, 8 days old, survived an ordinary "
+            "flush's own housekeeping with features.ndc_compression=false -- "
+            "#498's coupling: the sweep lived inside the RUN_NDC block and "
+            "turning NDC compression off silently turned housekeeping off "
+            "too\n" + str(list(autonomous.iterdir()))
+        )

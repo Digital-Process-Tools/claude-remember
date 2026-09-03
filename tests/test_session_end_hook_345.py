@@ -295,3 +295,61 @@ class TestFailSoftContract:
             "swallowed into the same silent no-op as a session with nothing "
             "new to flush\n" + result.stderr
         )
+
+
+class TestSeedWriteFailureIsReported:
+    """#503: the header write that seeds $_END_LOG (and the mkdir -p just
+    above it) were both unchecked -- `printf ... >> "$_END_LOG" 2>/dev/null`
+    and `mkdir -p ... 2>/dev/null`. A failed seed write leaves the file
+    absent or empty exactly as if it had never been opened, so the very
+    next flush's own -empty housekeeping reclaims it and #483's original
+    bug (no on-disk trace that SessionEnd ever fired) is silently back --
+    with scripts/doctor.sh's own SessionEnd-liveness check then misdirecting
+    an operator toward a hook-registration problem that does not exist.
+
+    A regular FILE at .remember/logs/autonomous (not a directory) is the
+    portable way to make both the mkdir and the printf genuinely fail --
+    unlike a read-only-bits fixture (see test_must_fire_unwritable_store_
+    reports_a_warning above), this does not need a root/euid(0) skip, and a
+    file occupying that path fails the same way on every platform this
+    suite runs on.
+    """
+
+    def test_must_fire_seed_write_failure_is_reported(self, tmp_path):
+        env, project, plugin, _calls, sid = _make_env(tmp_path, exchanges=1, humans=1)
+        _wire_hook(plugin)
+        autonomous_path = project / ".remember" / "logs" / "autonomous"
+        autonomous_path.write_text("blocking file, not a directory (#503 fixture)\n")
+
+        result = _run_hook(plugin, env, session_id=sid)
+
+        assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")
+        assert autonomous_path.is_file() and not autonomous_path.is_dir(), (
+            "the fixture must actually block the directory, or this test "
+            "proves nothing about the degraded path"
+        )
+        hook_errors = project / ".remember" / "logs" / "hook-errors.log"
+        reported = (hook_errors.read_text() if hook_errors.exists() else "") + result.stderr
+        assert "WARNING" in reported, (
+            "a seed write that could never land must be reported -- "
+            "otherwise this session's flush silently leaves no on-disk "
+            "trace, and /remember:doctor cannot tell that apart from a "
+            "hook that never fired at all\n" + reported
+        )
+
+    def test_must_not_fire_control_an_ordinary_flush_reports_nothing_here(self, tmp_path):
+        """Positive control, same fixture shape, autonomous/ left as an
+        ordinary writable directory: nothing about this specific failure
+        mode should be reported when nothing failed."""
+        env, project, plugin, _calls, sid = _make_env(tmp_path, exchanges=1, humans=1)
+        _wire_hook(plugin)
+
+        result = _run_hook(plugin, env, session_id=sid)
+
+        assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")
+        hook_errors = project / ".remember" / "logs" / "hook-errors.log"
+        reported = hook_errors.read_text() if hook_errors.exists() else ""
+        assert "could not create" not in reported and "could not seed" not in reported, (
+            "autonomous/ was left writable -- nothing should be reported "
+            "about it\n" + reported
+        )
