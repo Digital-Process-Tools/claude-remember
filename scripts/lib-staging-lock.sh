@@ -62,6 +62,13 @@
 #   degrades to "retire it next run", not to data loss. Re-measure before
 #   changing this number — that is the whole point of #226.
 #
+# CROSS-HOST CONTRACT: same as lib-lock.sh's own header (#491). This file
+# never reads any per-session identifier of its own -- staging.lock is one
+# fixed lock directory shared by every writer regardless of host, and
+# staging_append is keyed by *today_file* (a day), never by session, so a
+# Claude Code save and a Codex save contend for it identically. See
+# tests/test_cross_host_lock_contract_491.py.
+#
 
 [ -n "${_REMEMBER_LIB_STAGING_LOCK_SOURCED:-}" ] && return 0
 _REMEMBER_LIB_STAGING_LOCK_SOURCED=1

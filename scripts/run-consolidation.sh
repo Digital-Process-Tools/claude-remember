@@ -189,6 +189,36 @@ if ! staging_lock_acquire "$STAGING_LOCK_TIMEOUT"; then
     rm -f "$STAGING_PATHS_FILE"
     exit 0
 fi
+
+# A $2 that already exists means this day was retired before and a
+# today-*.md was re-created for it since -- a session spanning midnight, or
+# NDC re-opening an already-retired day's staging file (#509). Append rather
+# than truncate-overwrite in that case, so the earlier retired span's hourly
+# detail survives; a plain rename/truncate when $2 does not exist yet is
+# unchanged. Same-directory content append + unlink, not a partial-write
+# hazard the way a cross-filesystem mv would be (#246 is about mv atomicity
+# across filesystems; cat+rm here never crosses one).
+retire_whole_into() {
+    local src="$1" dst="$2"
+    if [ -e "$dst" ]; then
+        cat "$src" >> "$dst" && rm -f "$src"
+    else
+        mv "$src" "$dst"
+    fi
+}
+
+# Same guard as retire_whole_into, for the bounded-prefix write below: write
+# $3 bytes of $1 into $2, appending instead of truncating if $2 already
+# exists.
+retire_prefix_into() {
+    local src="$1" dst="$2" nbytes="$3"
+    if [ -e "$dst" ]; then
+        head -c "$nbytes" "$src" >> "$dst"
+    else
+        head -c "$nbytes" "$src" > "$dst"
+    fi
+}
+
 while IFS= read -r -d '' staging_path && IFS= read -r -d '' staging_consumed; do
     if [ ! -f "$staging_path" ]; then
         log "consolidation" "WARN: $(basename "$staging_path") disappeared"
@@ -209,7 +239,7 @@ while IFS= read -r -d '' staging_path && IFS= read -r -d '' staging_consumed; do
         # but would accumulate one per failure otherwise.
         rm -f "${staging_path}".tail-* 2>/dev/null
         staging_tail=$(mktemp "${staging_path}.tail-XXXXXX")
-        if head -c "$staging_consumed" "$staging_path" > "$staging_done" 2>/dev/null &&
+        if retire_prefix_into "$staging_path" "$staging_done" "$staging_consumed" 2>/dev/null &&
            tail -c +$(( 10#$staging_consumed + 1 )) "$staging_path" > "$staging_tail" 2>/dev/null; then
             # Checked, not run bare under set -e: an unchecked failure here used
             # to kill the whole script mid-loop, abandoning every other staging
@@ -219,23 +249,31 @@ while IFS= read -r -d '' staging_path && IFS= read -r -d '' staging_consumed; do
             else
                 # staging_path is untouched: same-directory mv is a real
                 # rename, which cannot fail partway (#246). staging_done
-                # already holds the consumed prefix — harmless, it is
-                # overwritten identically when this file is retried. Leaving
-                # staging_path in place means the next run re-reads it whole
-                # and redoes the split; the consumed span becomes a duplicate
-                # in recent.md/archive.md that the merge dedupes, chosen over
-                # losing the tail appended during this consolidation.
+                # already holds the consumed prefix written above by
+                # retire_prefix_into. On a retry against the SAME failed
+                # attempt (staging_path unchanged, so the recomputed
+                # staging_consumed matches) that prefix gets appended again,
+                # duplicating a few hundred bytes of already-in-progress
+                # content -- accepted, since a visible duplicate is far
+                # cheaper than the alternative of truncating a genuinely
+                # earlier retired span for this day (#509) if staging_done
+                # exists because this is a re-opened day rather than a retry.
+                # Leaving staging_path in place means the next run re-reads
+                # it whole and redoes the split; the consumed span becomes a
+                # duplicate in recent.md/archive.md that the merge dedupes,
+                # chosen over losing the tail appended during this
+                # consolidation.
                 rm -f "$staging_tail"
                 log "consolidation" "ERROR: could not keep the tail of $(basename "$staging_path") appended during consolidation -- left in place for the next run to retry: ${STAGING_MV_ERR}"
             fi
         else
             rm -f "$staging_tail"
-            if ! STAGING_MV_ERR=$(mv "$staging_path" "$staging_done" 2>&1); then
+            if ! STAGING_MV_ERR=$(retire_whole_into "$staging_path" "$staging_done" 2>&1); then
                 log "consolidation" "ERROR: could not retire $(basename "$staging_path") to .done.md -- left in place, the next run will see it as unconsolidated: ${STAGING_MV_ERR}"
             fi
         fi
     else
-        if ! STAGING_MV_ERR=$(mv "$staging_path" "$staging_done" 2>&1); then
+        if ! STAGING_MV_ERR=$(retire_whole_into "$staging_path" "$staging_done" 2>&1); then
             log "consolidation" "ERROR: could not retire $(basename "$staging_path") to .done.md -- left in place, the next run will see it as unconsolidated: ${STAGING_MV_ERR}"
         fi
     fi

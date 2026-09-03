@@ -44,6 +44,28 @@
 # Functions:
 #   lock_acquire <lock_dir> [timeout_seconds]  -> 0 acquired, 1 timed out
 #   lock_release <lock_dir>                    -> 0 released, 1 not ours
+#
+# CROSS-HOST CONTRACT (Claude Code and Codex sharing one .remember/ store on
+# one machine, #491): this primitive is safe there, deliberately, because it
+# never looks at which CLI a process belongs to. `mkdir` and `kill -0` are
+# OS-level, process-table operations -- they see a PID, never a host. Every
+# lock directory used against this file is named by a fixed literal
+# (save.lock, consolidation.lock, staging.lock), never by session id, so a
+# Codex session and a Claude Code session contend for the exact same lock the
+# exact same way two Claude Code sessions would. Proven under real
+# concurrent writes from two simulated hosts in
+# tests/test_cross_host_lock_contract_491.py, not merely asserted.
+#
+# One limitation survives, and it is NOT new here: `kill -0`-based staleness
+# detection (`_lock_try_steal` below) cannot tell a dead holder's PID from an
+# unrelated LIVE process that has since been assigned the same PID by the OS
+# ("PID recycling") -- the lock is then judged live and is not recovered
+# until that unrelated process also exits. This is exactly as likely between
+# two Claude Code processes racing on their own as it is between a Claude
+# Code process and a Codex process; a second host does not make PID reuse
+# more probable, because `kill -0` cannot see which CLI started a PID in
+# either case. See the same test file for a reproduction that documents
+# this as an accepted, general limitation rather than a fix.
 
 [ -n "${_REMEMBER_LIB_LOCK_SOURCED:-}" ] && return 0
 _REMEMBER_LIB_LOCK_SOURCED=1
