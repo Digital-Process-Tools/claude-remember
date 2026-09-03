@@ -23,7 +23,17 @@ from ._bash_runner import resolve_bash
 BASH = resolve_bash()
 import pytest
 
-pytestmark = pytest.mark.skipif(BASH is None, reason="no usable bash found")
+# Per-test, not module-wide (self-review / audit finding): a module-level
+# `pytestmark` skips every test in this file if no bash is found, including
+# the two pure-source-text checks at the bottom
+# (test_stdin_cwd_is_no_longer_captured_through_a_subshell and its sibling),
+# which read the script file and grep it -- no subprocess, no bash binary
+# needed at all. Under the module-wide form, a leg where resolve_bash()
+# returns None would silently drop exactly the two regression guards this
+# issue's own commit message leans on hardest, alongside the ones that
+# genuinely need a shell. `_needs_bash` below is applied only to the tests
+# that actually invoke BASH via subprocess.
+_needs_bash = pytest.mark.skipif(BASH is None, reason="no usable bash found")
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HOOK = REPO_ROOT / "scripts" / "user-prompt-hook.sh"
@@ -61,6 +71,7 @@ CASES = [
 ]
 
 
+@_needs_bash
 @pytest.mark.parametrize("raw, expected", CASES)
 def test_stdin_cwd_into_agrees_with_stdin_cwd(raw, expected):
     text = HOOK.read_text(encoding="utf-8")
@@ -98,6 +109,7 @@ def test_stdin_cwd_into_agrees_with_stdin_cwd(raw, expected):
 
 # ── _remember_date_into parity with _remember_date ──────────────────────────
 
+@_needs_bash
 def test_remember_date_into_matches_remember_date_builtin_path():
     script = (
         f'source "{LIB_CLOCK}"\n'
@@ -110,19 +122,20 @@ def test_remember_date_into_matches_remember_date_builtin_path():
     assert result.returncode == 0, result.stderr
     lines = {l.split("=", 1)[0]: l.split("=", 1)[1] for l in result.stdout.splitlines()}
     # A minute boundary crossed between the two calls is the one legitimate
-    # way this could differ without a bug -- tolerate that one case rather
-    # than flake, but nothing else.
-    assert lines["OLD"] == lines["NEW"] or True, lines
-    # Re-run immediately to make a boundary-crossing false pass implausible:
-    # both calls happen back to back, and if they ever disagree it must be
-    # only in the last digit of a minute crossing, which a second run at the
-    # same instant would not reproduce twice.
+    # way this could differ without a bug -- tolerate that one case by
+    # retrying rather than asserting a `... or True` that would never fail
+    # in the first place (self-review finding): only mismatch reruns below,
+    # and re-running immediately makes a boundary-crossing false pass
+    # implausible -- both calls happen back to back, and if they ever
+    # disagree it must be only in the last digit of a minute crossing, which
+    # a second run at the same instant would not reproduce twice.
     if lines["OLD"] != lines["NEW"]:
         result2 = subprocess.run([BASH, "-c", script], capture_output=True, text=True, timeout=10, check=False)
         lines2 = {l.split("=", 1)[0]: l.split("=", 1)[1] for l in result2.stdout.splitlines()}
         assert lines2["OLD"] == lines2["NEW"], (lines, lines2)
 
 
+@_needs_bash
 def test_remember_date_into_matches_remember_date_with_tz():
     script = (
         f'source "{LIB_CLOCK}"\n'

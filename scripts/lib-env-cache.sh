@@ -22,7 +22,13 @@
 #
 #   Every check below is a bash builtin — `[ -f ]`, `[ -O ]`, `[ -nt ]`,
 #   parameter expansion, `read`. A validation step that forked would spend the
-#   savings it exists to protect.
+#   savings it exists to protect. The one exception (#504) is
+#   `_remember_env_cache_normalize_into`'s Windows drive-letter uppercasing,
+#   which forks `tr` -- but only on `OSTYPE=msys|cygwin`, and only once a
+#   drive-letter pattern has actually matched, the same carve-out
+#   resolve-paths.sh's own copy of this logic already makes. Everywhere else,
+#   including that same function's own substitution site, `printf -v` is used
+#   specifically so the key computation itself never forks a subshell.
 #
 # USAGE
 #   source "$_HOOK_DIR/lib-env-cache.sh"
@@ -83,13 +89,25 @@ _REMEMBER_LIB_ENV_CACHE_LOADED=1
 # runs AFTER resolve-paths.sh, in ITS OWN process, and pins the NORMALISED
 # form resolve-paths.sh re-exported. Two different processes, two different
 # strings for the same project, two different cache files -- the fast path
-# can never hit what the slow path wrote. _remember_env_cache_normalize below
-# closes that: same normalisation resolve-paths.sh's own
+# can never hit what the slow path wrote. _remember_env_cache_normalize_into
+# below closes that: same normalisation resolve-paths.sh's own
 # _remember_normalize_win_path applies, scoped to the same `case "$OSTYPE" in
-# msys|cygwin)` guard, so it is a genuine no-op (no `tr` fork, no regex) on
-# every platform except the one where raw and resolved can actually disagree.
-_remember_env_cache_normalize() {
-    local _in="$1" _drive="" _rest=""
+# msys|cygwin)` guard, so its BODY is a genuine no-op (no `tr` fork, no
+# regex work) on every platform except the one where raw and resolved can
+# actually disagree. Written into a named variable via `printf -v`, not
+# printed for a caller to capture with `$( )` -- self-review on this same
+# change (#511/#504, reviewed together) caught that `$(...)` forks a
+# subshell for the SUBSTITUTION ITSELF regardless of what the function body
+# does, which would have paid exactly the per-fork cost #511 exists to
+# remove, on the fast path, on every single invocation, unconditionally on
+# every platform -- not scoped to msys/cygwin the way the function body is.
+# `_remember_normalize_win_path` in resolve-paths.sh keeps the older
+# print-and-capture shape because that file's own callers are cold-path
+# (once per hook invocation, after resolve-paths.sh has already forked far
+# more than this); lib-env-cache.sh's copy exists specifically because this
+# one runs on the hot path, so it gets the `_into` treatment from the start.
+_remember_env_cache_normalize_into() {
+    local _var="$1" _in="$2" _drive="" _rest=""
     local _re='^([a-zA-Z]):[/\](.*)$'
     case "$OSTYPE" in
         msys|cygwin)
@@ -106,12 +124,12 @@ _remember_env_cache_normalize() {
             if [ -n "$_drive" ]; then
                 _drive=$(printf '%s' "$_drive" | tr '[:lower:]' '[:upper:]')
                 _rest="${_rest//\//\\}"
-                printf '%s' "${_drive}:\\${_rest}"
+                printf -v "$_var" '%s:\\%s' "$_drive" "$_rest"
                 return 0
             fi
             ;;
     esac
-    printf '%s' "$_in"
+    printf -v "$_var" '%s' "$_in"
 }
 
 _remember_env_cache_path() {
@@ -139,8 +157,11 @@ _remember_env_cache_path() {
     # collapse to the same key. Idempotent on an already-normalised string --
     # the drive-letter regex matches a backslash-separated input just as
     # readily as a forward-slash one, and re-uppercasing an already-uppercase
-    # drive letter is a no-op.
-    _key="$(_remember_env_cache_normalize "$_key")"
+    # drive letter is a no-op. `_into` (writes `_key` directly via
+    # `printf -v`), not `_key=$(_remember_env_cache_normalize "$_key")` --
+    # see the comment above the function for why that distinction matters
+    # here specifically.
+    _remember_env_cache_normalize_into _key "$_key"
     _REMEMBER_ENV_CACHE_KEY="$_key"
     _key="${_key//[!a-zA-Z0-9]/-}"
     # Filename length limits are real (255 bytes on most filesystems) and a deep
