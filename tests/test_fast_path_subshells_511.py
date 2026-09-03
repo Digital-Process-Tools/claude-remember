@@ -14,6 +14,7 @@ sibling.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -80,14 +81,31 @@ def test_stdin_cwd_into_agrees_with_stdin_cwd(raw, expected):
 
     script = (
         old_fn + "\n" + new_fn + "\n"
-        + 'RAW=$1\n'
+        + 'RAW=$STDIN_CWD_TEST_RAW\n'
         + 'OLD=$(_stdin_cwd "$RAW" 2>/dev/null); OLD_RC=$?\n'
         + '_stdin_cwd_into NEW_VAR "$RAW"; NEW_RC=$?\n'
         + 'echo "OLD_RC=$OLD_RC OLD=$OLD"\n'
         + 'echo "NEW_RC=$NEW_RC NEW=$NEW_VAR"\n'
     )
+    # RAW travels through an environment variable rather than argv: on
+    # Windows, subprocess.run's argv list is re-flattened into a single
+    # command line by Python's own MSVCRT-style quoting rules
+    # (subprocess.list2cmdline) before CreateProcess hands it to bash.exe,
+    # and MSYS's argv re-parsing of that line does not agree with it on a
+    # raw string containing embedded double quotes (every CASES entry
+    # above but the no-cwd ones does) -- the quotes can be stripped before
+    # $1 ever reaches the function under test, so `"cwd"` no longer
+    # literally appears in $1 and both extractors report a miss. An
+    # environment variable is passed as an already-decoded block, with no
+    # command-line re-quoting step in between, so it sidesteps the whole
+    # cross-runtime quoting question. REASONED: no Windows box available to
+    # confirm this mechanism directly; test_env_cache_key_windows_normalize_504.py
+    # in this same commit hits an adjacent but distinct Windows subprocess
+    # hazard (bash resolving to the WSL launcher stub) at the same review pass.
+    env = dict(os.environ)
+    env["STDIN_CWD_TEST_RAW"] = raw
     result = subprocess.run(
-        [BASH, "-c", script, "_", raw], capture_output=True, text=True, timeout=10, check=False,
+        [BASH, "-c", script], env=env, capture_output=True, text=True, timeout=10, check=False,
     )
     assert result.returncode == 0, result.stderr
     lines = result.stdout.splitlines()

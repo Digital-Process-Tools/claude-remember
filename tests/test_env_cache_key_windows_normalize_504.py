@@ -16,8 +16,22 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
+from ._bash_runner import resolve_bash
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LIB_ENV_CACHE = REPO_ROOT / "scripts" / "lib-env-cache.sh"
+
+# bash on PATH commonly resolves to the WSL launcher on windows-latest
+# runners rather than Git Bash -- resolve_bash() (tests/_bash_runner.py,
+# #432) probes for the real Git-for-Windows bash instead of trusting the
+# literal string "bash", the same convention every other subprocess-bash
+# test in this suite already follows. A bare "bash" hits the WSL stub,
+# which -- with no distro installed -- prints a UTF-16 nag to stdout/stderr
+# and exits nonzero, distinct from anything this file is testing.
+BASH = resolve_bash()
+_needs_bash = pytest.mark.skipif(BASH is None, reason="no usable bash found")
 
 _SCRIPT = r"""
 source "{lib}"
@@ -33,7 +47,7 @@ def _run(project_dir: str, tmp_home: Path):
     env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
     env.update({"HOME": str(tmp_home), "TMPDIR": str(tmp_home / "tmp"), "OSTYPE": "msys"})
     result = subprocess.run(
-        ["bash", "-c", script], env=env, capture_output=True, text=True, timeout=10, check=False,
+        [BASH, "-c", script], env=env, capture_output=True, text=True, timeout=10, check=False,
     )
     assert result.returncode == 0, result.stderr
     out = {}
@@ -43,6 +57,7 @@ def _run(project_dir: str, tmp_home: Path):
     return out
 
 
+@_needs_bash
 def test_raw_and_normalized_windows_forms_key_the_same_cache_file(tmp_path):
     home = tmp_path / "home"
     home.mkdir()
@@ -64,6 +79,7 @@ def test_raw_and_normalized_windows_forms_key_the_same_cache_file(tmp_path):
     )
 
 
+@_needs_bash
 def test_a_genuinely_different_project_still_keys_differently(tmp_path):
     """Positive control: this must not degenerate into every project hashing
     to the same file."""
@@ -76,6 +92,7 @@ def test_a_genuinely_different_project_still_keys_differently(tmp_path):
     assert a["FILE"] != b["FILE"], repr(a) + " " + repr(b)
 
 
+@_needs_bash
 def test_non_windows_ostype_is_unaffected(tmp_path):
     """Off the msys/cygwin branch (an ordinary macOS/Linux OSTYPE), the key
     must still be the raw string verbatim -- no normalization should ever
@@ -86,6 +103,6 @@ def test_non_windows_ostype_is_unaffected(tmp_path):
     script = _SCRIPT.format(lib=LIB_ENV_CACHE, project_dir="/home/dev/project")
     env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
     env.update({"HOME": str(home), "TMPDIR": str(home / "tmp"), "OSTYPE": "darwin23"})
-    result = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True, timeout=10, check=False)
+    result = subprocess.run([BASH, "-c", script], env=env, capture_output=True, text=True, timeout=10, check=False)
     assert result.returncode == 0, result.stderr
     assert "KEY=/home/dev/project" in result.stdout, result.stdout
