@@ -15,6 +15,7 @@ consolidation of that day must not erase the first.
 
 from __future__ import annotations
 
+import os
 import sys
 
 import pytest
@@ -124,4 +125,72 @@ class TestRetireReopenedDay509:
         assert "landed during consolidation" in live, (
             "the entry appended during the second consolidation was sealed away "
             f"instead of kept as the live tail -- got: {live!r}"
+        )
+
+
+# `tail` fails ONLY when invoked with `-c +N` against TAIL_STUB_TARGET, so the
+# retire loop's own tail extraction (`tail -c +$(( ... ))`) is the sole call
+# intercepted; every other `tail` invocation in the script (or its sourced
+# libraries) passes straight through to the real binary.
+TAIL_STUB = r"""#!/bin/sh
+_target="$TAIL_STUB_TARGET"
+_last=""
+for _a in "$@"; do _last="$_a"; done
+case "$1" in
+    -c)
+        if [ -n "$_target" ] && [ "$_last" = "$_target" ]; then
+            exit 1
+        fi
+        ;;
+esac
+command -p tail "$@"
+"""
+
+
+class TestConsolidationRetireTailFailureDoesNotDuplicate509:
+    def test_a_tail_extraction_failure_does_not_duplicate_the_consumed_prefix(
+        self, tmp_path
+    ):
+        """Explore's #509 self-review finding: an earlier draft of the fix
+        wrote the consumed prefix straight into staging_done via
+        retire_prefix_into, BEFORE the `tail` extraction below it was known
+        to succeed. When `tail` then failed, the whole-file fallback
+        (retire_whole_into on the original staging_path) re-committed the
+        SAME prefix on top of the one already durably sitting in
+        staging_done -- doubling it, unconditionally, on the very first
+        attempt. Reproduced here by forcing the retire loop's own `tail -c`
+        call to fail while `head -c` (the prefix extraction) still succeeds."""
+        env, _project, plugin, remember = _make_env(tmp_path)
+        staging = remember / "today-2026-07-24.md"
+        staging.write_text(
+            "# Day\n\n## 10:00 | main\n\n- first span work\n", encoding="utf-8"
+        )
+        env["STUB_APPEND_DURING_CONSOLIDATION"] = (
+            "\n## 23:59 | main\n\n- landed during consolidation\n"
+        )
+
+        bindir = tmp_path / "tail-stub-bin"
+        bindir.mkdir()
+        stub = bindir / "tail"
+        stub.write_text(TAIL_STUB, encoding="utf-8")
+        stub.chmod(0o755)
+        env["PATH"] = f"{bindir}{os.pathsep}{env['PATH']}"
+        env["TAIL_STUB_TARGET"] = str(staging)
+
+        result = _run(plugin, env)
+        assert result.returncode == 0, result.stderr
+
+        done = remember / "today-2026-07-24.done.md"
+        assert done.is_file(), (
+            "the tail failure must still fall through to the whole-file "
+            f"retire fallback, not abandon the file: {result.stderr}"
+        )
+        content = done.read_text(encoding="utf-8")
+        assert content.count("first span work") == 1, (
+            "the consumed prefix was committed to staging_done more than once "
+            f"-- duplicated by the tail-failure fallback. got: {content!r}"
+        )
+        assert content.count("landed during consolidation") == 1, (
+            f"the whole-file fallback did not retire the full file exactly "
+            f"once: {content!r}"
         )
