@@ -5,6 +5,22 @@ on:
     branches: [main]
   pull_request:
 
+# Per branch or pull request, superseding. A second push to the same head cancels the
+# run it replaced rather than leaving two full 12-leg matrices racing each other on the
+# same commit range.
+#
+# `github.ref` is `refs/pull/N/merge` on a `pull_request` event and `refs/heads/main` on a
+# push, so the group is one pull request or one branch wide -- never constant, which would
+# serialise unrelated pull requests against each other.
+#
+# Cancellation is deliberately limited to pull requests. A push to `main` is the run a
+# release gate reads, and `cancelled` is not `success`: cancelling a main run to favour a
+# newer one leaves the older commit with no verdict at all, which is the absence this
+# repo's own CLAUDE.md warns reads exactly like a pass.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   pytest:
     runs-on: ${{ matrix.os }}

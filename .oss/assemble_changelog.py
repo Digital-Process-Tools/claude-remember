@@ -74,6 +74,7 @@ import stat
 import sys
 from collections import Counter
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import (AbstractSet, Dict, Iterator, List, Optional, Sequence, Set,
                     Tuple)
@@ -359,10 +360,25 @@ class CannotValidate(Exception):
     """The tool cannot answer. Not a finding, and emphatically not an `ok`."""
 
 
+_PARSER_INSTANCE = None
+
+
 def _parser():
-    if _MD_IMPORT_ERROR is not None or _MarkdownIt is None:
-        raise CannotValidate(_NO_PARSER.format(_MD_IMPORT_ERROR or "unavailable"))
-    return _MarkdownIt("commonmark")
+    """A cached parser instance -- constructing MarkdownIt("commonmark") is
+    not free, and _verify_written parses the same-sized document several
+    times per run. Safe to share: nothing here mutates the instance _parser()
+    returns (_scanning_parser keeps its own, separately cached, instance
+    below rather than mutating this one).
+    """
+    global _PARSER_INSTANCE
+    if _PARSER_INSTANCE is None:
+        if _MD_IMPORT_ERROR is not None or _MarkdownIt is None:
+            raise CannotValidate(_NO_PARSER.format(_MD_IMPORT_ERROR or "unavailable"))
+        _PARSER_INSTANCE = _MarkdownIt("commonmark")
+    return _PARSER_INSTANCE
+
+
+_SCANNING_PARSER_INSTANCE = None
 
 
 def _scanning_parser():
@@ -385,9 +401,14 @@ def _scanning_parser():
     the sanitiser off widens what the guard *sees*; it never widens what the
     guard *permits*.
     """
-    md = _parser()
-    md.validateLink = lambda url: True
-    return md
+    global _SCANNING_PARSER_INSTANCE
+    if _SCANNING_PARSER_INSTANCE is None:
+        if _MD_IMPORT_ERROR is not None or _MarkdownIt is None:
+            raise CannotValidate(_NO_PARSER.format(_MD_IMPORT_ERROR or "unavailable"))
+        md = _MarkdownIt("commonmark")
+        md.validateLink = lambda url: True
+        _SCANNING_PARSER_INSTANCE = md
+    return _SCANNING_PARSER_INSTANCE
 
 
 def _flatten(tokens: Sequence, line: Optional[int] = None) -> Iterator[Tuple[object, int]]:
@@ -1109,6 +1130,7 @@ def render(fragments: Sequence[Fragment], version: str, date: str,
     return "\n".join(out), emitted
 
 
+@lru_cache(maxsize=32)
 def _document_facts(text: str) -> Tuple[Counter, Dict[str, str], int]:
     """(heading multiset, label -> destination, raw-HTML count) of a document.
 
@@ -1129,6 +1151,7 @@ def _document_facts(text: str) -> Tuple[Counter, Dict[str, str], int]:
     return headings, refs, raw
 
 
+@lru_cache(maxsize=32)
 def _disallowed_destinations(text: str) -> Counter:
     """Multiset of the link and image destinations a document holds that a
     fragment would not be allowed to carry.
@@ -1152,6 +1175,7 @@ def _disallowed_destinations(text: str) -> Counter:
     return found
 
 
+@lru_cache(maxsize=32)
 def _headings(text: str) -> List[Tuple[int, str, str]]:
     """(line index, tag, title) for every heading the parser actually sees.
 
@@ -1171,6 +1195,7 @@ def _headings(text: str) -> List[Tuple[int, str, str]]:
     return found
 
 
+@lru_cache(maxsize=32)
 def _inert_lines(text: str) -> Set[int]:
     """Line indices inside a code block or raw HTML block, per the parser.
 
@@ -1185,6 +1210,7 @@ def _inert_lines(text: str) -> Set[int]:
     return inert
 
 
+@lru_cache(maxsize=32)
 def _crowded_headings(text: str) -> Set[str]:
     """Titles of headings written directly against the line above them.
 

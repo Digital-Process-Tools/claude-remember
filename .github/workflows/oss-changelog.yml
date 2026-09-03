@@ -42,8 +42,15 @@ concurrency:
 # back to the repository default. That default is read/write in a repository whose owner
 # has never changed it, and this workflow runs the vendored assembler from the pull
 # request's own checkout -- so a branch pull request runs contributor Python (#32).
+# #777: `pull-requests: read` is what the fragment gate's live label read below
+# actually needs -- `gh api repos/{repo}/pulls/{n}`, the `pulls` endpoint, not
+# `issues/{n}/labels`, because the latter needs `issues: read` even though a pull
+# request is also an issue. A scope mismatch here 403s the read on every run,
+# forever, and lands silently on the payload fallback -- the live read looking
+# installed and never once working.
 permissions:
   contents: read
+  pull-requests: read
 
 # The actions below are pinned to major tags, not commit SHAs, and that is a decision.
 # A SHA written into this template ships to every repository scaffolded after it and can
@@ -99,8 +106,14 @@ jobs:
           [ "$status" -ne 2 ] || exit 1
 
       # A change to what this project DOES must say so where users read it.
+      #
+      # The `no-changelog` escape hatch is a LABEL, and a label can be applied or
+      # removed after this run was CREATED -- so the check below reads it live rather
+      # than trusting `github.event.pull_request.labels.*.name`, which is frozen to
+      # whatever the label set was at trigger time. `Re-run failed jobs` on a red run
+      # replays that same frozen payload: applying the label and re-running used to
+      # fail again, forever, and the only way out was an unrelated commit (#777).
       - name: A user-visible change carries a fragment
-        if: ${{ !contains(github.event.pull_request.labels.*.name, 'no-changelog') }}
         # Through env, never interpolated into the script body: a ${{ }} expansion is
         # textual substitution, so whatever it carries becomes shell source, and a ref
         # is attacker-influenced on a fork pull request.
@@ -110,8 +123,73 @@ jobs:
           # event the actor is whoever applied the label, so keying on it would let any
           # human exempt any pull request just by labelling it.
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          # Read as JSON and walked with `jq`, never joined into one string: a label
+          # NAME may itself contain a comma, so `,${LABELS},` matched against
+          # `*,no-changelog,*` cannot tell the single label `wontfix,no-changelog`
+          # from the two labels `wontfix` and `no-changelog` -- and Actions joins with
+          # a comma before the shell ever sees it. This is the payload this run was
+          # CREATED with, kept only as the degrade path below, never trusted first.
+          EVENT_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
         run: |
           set -eu
+
+          # `gh api repos/{repo}/pulls/{n}`, not `issues/{n}/labels` -- a pull request
+          # is also an issue, but the scope covering `/issues/*` for `GITHUB_TOKEN` is
+          # `issues: read`, while this job only asks for `pull-requests: read` (see
+          # `permissions:` above). A mismatch there 403s on EVERY run, forever, and
+          # lands silently on the fallback below -- the live read looking installed
+          # and never once working.
+          #
+          # `timeout` bounds it: a slow `api.github.com` and a down one are different
+          # failures, and only one of them returns an error this can fall back on.
+          # Without a bound, a degraded API would sit here until `timeout-minutes`
+          # cancelled the whole job -- red and receiptless on every open pull request
+          # at once. GNU coreutils' `timeout` is present on `ubuntu-latest`, the only
+          # runner this job uses, but is used only when found rather than assumed.
+          if command -v timeout >/dev/null 2>&1; then
+            read_cmd="timeout ${LABEL_READ_TIMEOUT:-30} gh"
+          else
+            read_cmd=gh
+          fi
+
+          label_source=payload
+          labels=""
+          if command -v gh >/dev/null 2>&1; then
+            if live=$($read_cmd api "repos/${GH_REPO:-}/pulls/${PR_NUMBER:-}" --jq '.labels[].name' 2>/dev/null); then
+              labels="$live"
+              label_source=live
+            fi
+          fi
+
+          # The degrade is one-directional and announces itself: it can turn a
+          # finding into a skip and never the reverse, so an outage, a missing `gh`
+          # or a token without the scope cannot redden a board that was green
+          # yesterday -- it prints a `note` rather than answering as though it had
+          # read something.
+          if [ "$label_source" = payload ]; then
+            if command -v jq >/dev/null 2>&1; then
+              labels=$(printf '%s' "${EVENT_LABELS_JSON:-[]}" | jq -r '.[]' 2>/dev/null || true)
+              echo "changelog   : note        (live label read failed - using this run's event payload; a label applied after this run started is invisible to it)"
+            else
+              # Unguarded, this pipeline would exit non-zero under `set -e` with no
+              # `jq` to run at all -- but the more important gap it closes is
+              # silent, not loud: without this branch, `jq` genuinely missing and a
+              # payload genuinely carrying no labels both leave `labels=""`, so a
+              # reader could not tell "there is no label" from "this could not be
+              # read" (#777, found by review).
+              labels=""
+              echo "changelog   : note        (live label read failed and jq is not on PATH - could not read this run's event payload either; treating this run as unlabeled)"
+            fi
+          fi
+
+          if printf '%s\n' "$labels" | grep -Fxq 'no-changelog'; then
+            echo "changelog: skipped ('no-changelog' label present, read $label_source)"
+            exit 0
+          fi
+
           range="origin/$BASE_REF...HEAD"
           changed=$(git diff --name-only "$range")
           if [ -z "$changed" ]; then
@@ -176,7 +254,8 @@ jobs:
           # repository which this template cannot know: guessing `docs/` and `tests/`
           # is silent in the dangerous direction for a project whose product is its
           # documentation. The escape hatch is the label, which a human applies and a
-          # reviewer can see; the `types:` list above is what makes it work at all.
+          # reviewer can see; `gh api` above is what makes it actually take effect on
+          # a re-run rather than only on the next push.
           #
           # One author is exempt, and it is placed HERE -- last, after every branch above --
           # so that it changes exactly one outcome: the one that currently fails with
@@ -209,5 +288,12 @@ jobs:
 
           echo "No changelog fragment in this pull request." >&2
           echo "Add changelog.d/<issue>.<section>[.<slug>].md, or label the pull request" >&2
-          echo "'no-changelog' when the change is genuinely invisible to users." >&2
+          if [ "$label_source" = live ]; then
+            echo "'no-changelog' when the change is genuinely invisible to users, then re-run" >&2
+            echo "this check." >&2
+          else
+            echo "'no-changelog' when the change is genuinely invisible to users, then push a" >&2
+            echo "commit -- the live label read failed for this run, so a re-run would only see" >&2
+            echo "the label set this run started with." >&2
+          fi
           exit 1

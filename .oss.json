@@ -3,6 +3,7 @@
   "default_branch": "main",
   "branch_pattern": "fix/{issue}",
   "test_command": "pytest",
+  "test_measurement_configured": true,
   "version_sites": [
     ".claude-plugin/plugin.json",
     ".codex-plugin/plugin.json",

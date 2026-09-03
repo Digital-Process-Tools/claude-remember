@@ -6,4 +6,4 @@ testpaths = ["tests"]
 # does not have — and that contract only pays for itself if the reason reaches a
 # human. Rendered as a bare `s`, a green run with silent skips is visually
 # identical to a green run that checked everything (#306).
-addopts = "-rs --cov=pipeline --cov-report=term-missing --cov-fail-under=80"
+addopts = "-rs --durations=25 --cov=pipeline --cov-report=term-missing --cov-fail-under=80"

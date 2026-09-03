@@ -1,1 +1,3 @@
+Bash	~gh-pr-merge	merge-gate.md	remind			
+Bash	~gh-pr-create	pr-create-gate.md	remind			
 Read|Edit|Write|Glob|Grep	~.*	supertool-required.md	block			supertool
