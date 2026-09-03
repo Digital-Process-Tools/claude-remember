@@ -101,6 +101,10 @@ fi
 # a `cwd` (or `session_id`, or `transcript_path`) appearing inside some other
 # field is not mistaken for it. It is a heuristic and is treated as one —
 # every result is validated below before anything is done with it.
+#
+# #494: whether a real host payload can nest a `cwd` key AHEAD of this
+# field is researched in scripts/user-prompt-hook.sh, next to its own
+# `_stdin_cwd` -- same extractor mechanism, same finding, not repeated here.
 _stdin_json_string() {
     local key="$1" raw="$2" rest prefix value
     case "$raw" in *"\"$key\""*) ;; *) return 1 ;; esac

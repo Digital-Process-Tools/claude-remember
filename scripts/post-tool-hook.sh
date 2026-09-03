@@ -197,6 +197,12 @@ fi
 # caller validates the result before anything is done with it. Generalized
 # from a `session_id`-only extractor to also serve `cwd` (#444), the same
 # generalization session-start-hook.sh already made of its own copy.
+#
+# #494: whether a real host's `tool_input` can carry a `cwd` key AHEAD of
+# the top-level one is researched in scripts/user-prompt-hook.sh, next to
+# its own `_stdin_cwd` -- same extractor mechanism, same finding (on every
+# host checked, `tool_input` is positioned AFTER the top-level `cwd` field,
+# so this stays the safe nested-after case), not repeated here.
 _stdin_json_string() {
     local key="$1" raw="$2" rest prefix value
     case "$raw" in *"\"$key\""*) ;; *) return 1 ;; esac

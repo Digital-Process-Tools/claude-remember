@@ -108,6 +108,10 @@ fi
 # same reason that file gives for keeping its own copy: a hook that has to
 # survive a broken install is better served by a few duplicated lines than a
 # shared library it might fail to source.
+#
+# #494: whether a real host payload can nest a `cwd` key AHEAD of this
+# field is researched in scripts/user-prompt-hook.sh, next to its own
+# `_stdin_cwd` -- same extractor mechanism, same finding, not repeated here.
 _stdin_json_string() {
     local key="$1" raw="$2" rest prefix value
     case "$raw" in *"\"$key\""*) ;; *) return 1 ;; esac

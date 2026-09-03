@@ -179,9 +179,55 @@ if [ ! -t 0 ]; then
 fi
 # The same deliberately narrow extractor session-start-hook.sh uses: the
 # key must be followed by nothing but whitespace and a colon before the
-# value's opening quote, so a `cwd` appearing inside some other field
-# (unlikely on this payload, but not this function's job to assume) is not
-# mistaken for it.
+# value's opening quote, so a `cwd` appearing inside some other field is
+# not mistaken for it.
+#
+# #494 -- REACHABILITY OF THE NESTED-BEFORE-TOP-LEVEL GAP (researched, not
+# assumed): tests/test_stdin_extractor_top_level_wins_447.py pins that THIS
+# function takes the FIRST `"cwd"` occurrence in the raw stdin text, so a
+# same-named key nested inside some other field wins over the top-level one
+# when it occurs earlier in the byte stream. Whether that shape is reachable
+# from a real host was the open half of #447/#493, settled here by reading
+# all three hosts' hook payload schemas:
+#
+#   Claude Code -- every hook payload (docs.claude.com/en/docs/claude-code/
+#   hooks) puts `cwd` in the shared top-level object (session_id,
+#   transcript_path, cwd, permission_mode, hook_event_name, ...), and
+#   `tool_input`/`tool_response` -- the only nested objects a hook payload
+#   ever carries -- are declared AFTER it in every documented example. No
+#   built-in tool's input schema uses a `cwd` parameter. NOT source-verified
+#   (Claude Code's hook serializer is not open source): docs-observed only.
+#
+#   Codex -- SOURCE-VERIFIED (codex-rs/core/src/hook_runtime.rs): the
+#   request structs declare `cwd` before `tool_input`, and serde's default
+#   struct serialization preserves declaration order, so `cwd` is
+#   guaranteed to serialize first. The built-in shell tool's own working-
+#   directory parameter is named `workdir`, not `cwd`.
+#
+#   Gemini CLI -- docs (github.com/google-gemini/gemini-cli, docs/hooks/
+#   reference.md) show the same shape: `cwd` in the shared base object,
+#   `tool_input` appended after it for BeforeTool/AfterTool. The built-in
+#   shell tool's directory parameter is named `dir_path`, not `cwd`.
+#   NOT source-verified (spread/construction order not confirmed): docs-
+#   observed only.
+#
+# The remaining theoretical opening on all three hosts is a THIRD-PARTY MCP
+# tool whose author names one of ITS OWN input parameters `cwd` -- `tool_input`
+# for an MCP call is passed through as an opaque value on every host checked,
+# unconstrained by any schema this plugin controls. But that still does not
+# reach the gap this file's extractor has: on every host and every payload
+# shape found, `tool_input` (the only place such a key could appear) is
+# positioned AFTER the top-level `cwd` field, not before it -- so even an
+# adversarial MCP tool parameter named `cwd` lands in the SAFE "nested-after"
+# case (tests/test_stdin_extractor_top_level_wins_447.py's first test), never
+# the "nested-before" one this comment is about. The gap the second test pins
+# is real as a property of THIS extractor's mechanism (first-occurrence
+# scanning, not top-level-aware), but no known, currently-shipped host payload
+# reaches it -- and a host is free to reorder its own schema in a future
+# release, which is why this stays documentation and a synthetic-input test
+# rather than a load-bearing guarantee. #340/#344's standing decision not to
+# acquire a JSON parser for a hook that must survive a broken install is
+# unchanged by this finding.
 _stdin_cwd() {
     local raw="$1" rest prefix value
     case "$raw" in *'"cwd"'*) ;; *) return 1 ;; esac
@@ -193,13 +239,37 @@ _stdin_cwd() {
     [ -n "$value" ] || return 1
     printf '%s' "$value"
 }
+# _stdin_cwd_into VARNAME RAW (#511): the same scan as _stdin_cwd above,
+# writing the result into VARNAME with `printf -v` instead of printing it
+# for a caller to capture with `$( )`. `_stdin_cwd` stays as it is --
+# tests/test_stdin_extractor_top_level_wins_447.py extracts and calls it
+# verbatim by name, print-and-capture, and this file's own extractor must
+# stay the thing that test actually exercises. But every real invocation of
+# this hook pays for that capture too, on every single prompt, for a value
+# that never needs to leave this process at all -- `$( )` forks a subshell
+# for the substitution itself regardless of how cheap the function body is,
+# same reasoning as lib-clock.sh's _remember_date_into. Kept in exact sync
+# with _stdin_cwd by hand (both are five lines of parameter expansion, not a
+# function this hook can safely delegate to a sourced library it might fail
+# to load -- see _stdin_cwd's own comment above).
+_stdin_cwd_into() {
+    local _var="$1" raw="$2" rest prefix value
+    case "$raw" in *'"cwd"'*) ;; *) return 1 ;; esac
+    rest=${raw#*\"cwd\"}
+    prefix=${rest%%\"*}
+    case "$prefix" in *[!:[:space:]]*) return 1 ;; esac
+    value=${rest#*\"}
+    value=${value%%\"*}
+    [ -n "$value" ] || return 1
+    printf -v "$_var" '%s' "$value"
+}
 # Validated the same way session-start-hook.sh validates its own copy: data
 # from a host payload, at the point of entry. A project directory
 # legitimately contains slashes and dots, so only an embedded newline or
 # carriage return is rejected -- whether the value actually names a
 # directory is decided in resolve-paths.sh, which falls back to the
 # existing derivation when it does not.
-REMEMBER_HOOK_CWD=$(_stdin_cwd "$_HOOK_STDIN" 2>/dev/null) || REMEMBER_HOOK_CWD=""
+_stdin_cwd_into REMEMBER_HOOK_CWD "$_HOOK_STDIN" || REMEMBER_HOOK_CWD=""
 case "$REMEMBER_HOOK_CWD" in
     *$'\n'*|*$'\r'*) REMEMBER_HOOK_CWD="" ;;
 esac
@@ -333,10 +403,13 @@ if [ "$_REMEMBER_STAMP" = "stable" ]; then
   # process.
   echo "[$_REMEMBER_WHO]"
 elif [ -n "$CTX_PCT" ]; then
-  _REMEMBER_NOW=$(_remember_date '+%H:%M %Z')
+  # _remember_date_into (#511), not `$(_remember_date ...)`: the latter forks
+  # a subshell for the substitution itself even when _remember_date's own
+  # builtin path forks nothing -- see lib-clock.sh for the full reasoning.
+  _remember_date_into _REMEMBER_NOW '+%H:%M %Z'
   echo "[$_REMEMBER_NOW -- $_REMEMBER_WHO -- ${CTX_PCT}%]"
 else
-  _REMEMBER_NOW=$(_remember_date '+%H:%M %Z')
+  _remember_date_into _REMEMBER_NOW '+%H:%M %Z'
   echo "[$_REMEMBER_NOW -- $_REMEMBER_WHO]"
 fi
 # Kept under `stable`, deliberately: it is gated on a threshold, so it changes

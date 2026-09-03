@@ -24,10 +24,34 @@ place to acquire one). Each (hook, key) pair gets the same two-test shape
 
   - nested key AFTER the top-level one (the common, safe shape): the
     top-level value wins. This must keep holding.
-  - nested key BEFORE the top-level one (the documented gap): the nested
+  - nested key BEFORE the top-level one (the extractor's own gap, on a
+    synthetic payload no known host produces -- see #494 below): the nested
     value wins today. Pinned so a change to the scan is a visible,
     deliberate decision rather than a silent shift in which direction is
     unsafe.
+
+#494 -- REACHABILITY, researched rather than assumed. Filed after this pin
+landed, asking whether any of the three hosts' hook payloads can actually
+put a `cwd`-bearing nested object ahead of the top-level `cwd` field. The
+answer, read from each host's own schema (docs for Claude Code and Gemini
+CLI, source for Codex -- see the block above `_stdin_cwd()` in
+scripts/user-prompt-hook.sh for the full citation trail): no. `cwd` sits in
+the shared top-level object on all three, and the only nested object a hook
+payload ever carries (`tool_input`/`tool_response`) is declared AFTER it in
+every schema checked -- Codex's is source-verified (serde struct order),
+Claude Code's and Gemini's are docs-observed only (neither serializer is
+open source). Even a third-party MCP tool naming one of its own parameters
+`cwd` still lands inside `tool_input`, which is still positioned after the
+top-level field -- the safe "nested-after" case, never "nested-before".
+
+That settles TODAY's shipped hosts, not the future: a host is free to
+reorder its own schema, and this repo has no way to be notified when one
+does. So `test_nested_key_ahead_of_top_level_is_the_documented_gap` below
+stays a characterization of the extractor's OWN mechanism against a
+synthetic payload, not a live gap -- it is not flipped to a hard assertion
+that the shape can never occur, because that would be a claim about
+software this repo does not control. Read it as "no known host reaches
+this today", not as "this cannot happen".
 
 Tested directly against the extracted function body rather than through a
 full hook run: `_stdin_json_string`/`_stdin_cwd` take two plain strings and
@@ -146,7 +170,8 @@ def test_nested_key_ahead_of_top_level_is_the_documented_gap(script, func_name, 
         "occurrence in the joined stdin string, not the first top-level one -- this test "
         "pins that today's mechanism still does, so a fix to the scan is a visible, "
         "deliberate decision (got " + repr(out) + ", expected the nested value to win as "
-        "documented)"
+        "documented). #494: this payload shape is synthetic -- no known host schema "
+        "nests a same-named key ahead of the top-level one (see the module docstring)."
     )
 
 

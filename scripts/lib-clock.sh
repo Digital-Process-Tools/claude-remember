@@ -98,3 +98,28 @@ _remember_date() {
     fi
     date "$@"
 }
+
+# _remember_date_into VARNAME [+FORMAT ...] (#511)
+# Same answer as `_remember_date`, written into VARNAME directly instead of
+# printed. `VAR=$(_remember_date ...)` forks a subshell for the command
+# substitution itself EVEN on the builtin (no-`date`-process) path -- cheap on
+# Linux, 50-300ms+ measured on Windows Git Bash per #511's report, and paid on
+# every single prompt regardless of platform. `printf -v` writes to a named
+# variable with no subshell at all, so the builtin/no-REMEMBER_TZ case -- the
+# overwhelming common one on a warmed hook -- now forks nothing here, not even
+# for the substitution itself. The REMEMBER_TZ and bash-3.2 cases still shell
+# out to `date`, an external process either way, so a subshell there is not a
+# new cost -- this only removes the fork that command substitution adds ON TOP
+# of an already-forkless builtin call.
+_remember_date_into() {
+    local _var="$1"
+    shift
+    if [ -z "${REMEMBER_TZ:-}" ] && [ "$_REMEMBER_PRINTF_T" = "1" ] && [ "$#" -eq 1 ] \
+        && _remember_date_builtin_ok "$1"; then
+        printf -v "$_var" "%(${1#+})T" -1
+        return
+    fi
+    local _val
+    _val=$(_remember_date "$@")
+    printf -v "$_var" '%s' "$_val"
+}
