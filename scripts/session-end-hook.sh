@@ -291,9 +291,10 @@ fi
 _END_LOG="$REMEMBER_DIR/logs/autonomous/session-end-$(_remember_date +%H%M%S)-$$.log"
 # Seeded with a header line BEFORE the subshell below ever opens it, and the
 # subshell appends (`>>`) rather than truncates (`>`) -- not cosmetic (#483).
-# save-session.sh's own NDC step sweeps this very directory for stale logs
-# with `find ... -name "*.log" -empty -delete` (scripts/save-session.sh), and
-# on an ordinary successful flush NOTHING ever writes to this file: every
+# save-session.sh's own housekeeping sweep (unconditional on every flush
+# since #498, not tied to its NDC step) reclaims an empty file in this same
+# directory unconditionally (scripts/save-session.sh), and on an ordinary
+# successful flush NOTHING ever writes to this file: every
 # save-session.sh log line goes to its own daily narrative file, not to
 # stdout/stderr, so a `>`-truncated, still-empty $_END_LOG is exactly what
 # that same sweep -- run from INSIDE the process writing into it -- matches
