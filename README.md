@@ -836,6 +836,37 @@ looks exactly like a green run that checked everything.
 Read the `SKIPPED` block at the end of a run before concluding a leg is covered.
 On a Linux runner it is where you find out that the floor bash was not.
 
+### A test that dominates the suite (`#510`)
+
+`pytest` already prints `--durations` (`addopts` carries `--durations=25`);
+nothing read it before #510, so one runaway test could grow to a large share
+of every leg's wall-clock time and the only detector was a human happening to
+scroll a CI log far enough to notice. The root-level `conftest.py` closes that:
+a `pytest_terminal_summary` hook fires at the end of *every* `pytest`
+invocation -- local or any leg of the matrix, no extra flag -- and prints the
+top durations plus the slowest single test's **share of total suite time**
+(a ratio, not an absolute second count, since an absolute count says more
+about the runner than the test). The math lives in
+`scripts/report_test_durations.py`, kept separate from the hook so it is
+testable without driving a nested `pytest` session.
+
+Three states, always distinguishable in the printed text:
+
+- `measured` -- durations were collected and compared against
+  `test-durations-baseline.json` at the repo root.
+- `no-baseline` -- durations were collected but that file does not exist yet
+  (true of every run until a maintainer records one by hand). The share is
+  still printed, said out loud as `no-baseline` rather than rendered as if
+  nothing had changed.
+- `could-not-measure` -- no per-test durations could be collected, or the
+  total suite time was not a usable number. Always names the reason; never
+  prints nothing, which would read exactly like a suite with no hot test.
+
+This is a report, never a gate: it does not fail a run on wall-clock time or
+any share threshold, on purpose -- a shared CI runner's load is not in
+anybody's diff, and a check that reddens a pull request for a neighbour's
+noisy build only teaches people to re-run until green.
+
 ### Measuring the warm path (`tests/env_cache.py`)
 
 `scripts/lib-env-cache.sh` refuses its cache unless the cache file is `-nt`
