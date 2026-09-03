@@ -201,9 +201,18 @@ def save_baseline(path: Path, result: DurationReport) -> None:
 
     Not called automatically by anything in this repo -- no CI step commits
     a baseline back, on purpose, since that would need write access to the
-    branch a pull request runs on. A maintainer who wants the `measured`
-    state going forward runs this by hand (see `main`'s `--save-baseline`)
-    once they trust a given run's number.
+    branch a pull request runs on, and no `--save-baseline` CLI ships in
+    this file either. A maintainer who wants the `measured` state going
+    forward calls this directly, once they trust a given run's number:
+
+        python3 -c "
+        from scripts.report_test_durations import analyze, save_baseline, DEFAULT_BASELINE_PATH
+        result = analyze(durations, total_seconds, baseline=None)
+        save_baseline(DEFAULT_BASELINE_PATH, result)
+        "
+
+    or from a `pytest` script/REPL session where `durations` and
+    `total_seconds` are already in hand.
     """
     if result.slowest_nodeid is None or result.share is None:
         raise ValueError("cannot save a baseline from a could-not-measure result")

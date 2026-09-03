@@ -17,7 +17,16 @@ without driving a nested pytest session.
 
 This intentionally never raises and never touches `exitstatus`: a reporter
 bug must not turn a green run red, and #510 is explicit that this is a
-report a human reads, never a gate.
+report a human reads, never a gate. That includes the import of
+`scripts/report_test_durations.py` itself -- it happens inside
+`pytest_terminal_summary`'s own `try`, not at module scope, so a defect in
+that module degrades to the `could-not-measure` state instead of aborting
+collection for the whole session (a module-scope import failure is a
+`conftest.py` collection error, which pytest treats as fatal: zero tests
+run, non-zero exit, no report at all -- exactly the total, silent failure
+this feature exists to prevent, just promoted from "one test" to "every
+test"). See `tests/test_conftest_import_failure_510.py` for the case this
+guards against.
 """
 
 from __future__ import annotations
@@ -27,14 +36,6 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(__file__))
-
-from scripts.report_test_durations import (
-    DEFAULT_BASELINE_PATH,
-    analyze,
-    collect_from_reports,
-    format_report,
-    load_baseline,
-)
 
 
 def pytest_sessionstart(session):
@@ -48,6 +49,14 @@ def pytest_sessionstart(session):
 
 def pytest_terminal_summary(terminalreporter, exitstatus, config):
     try:
+        from scripts.report_test_durations import (
+            DEFAULT_BASELINE_PATH,
+            analyze,
+            collect_from_reports,
+            format_report,
+            load_baseline,
+        )
+
         reports = [
             report
             for report_list in terminalreporter.stats.values()
