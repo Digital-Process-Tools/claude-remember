@@ -35,5 +35,19 @@ jobs:
       - name: Install Windows tzdata
         if: runner.os == 'Windows'
         run: pip install tzdata
+      # Defender's real-time scanner walks every file this job touches on the runner's
+      # own disk. Today the Windows legs barely notice: 92 modules blanket-skip on win32
+      # (#497), so they create almost no temp files and run faster than the Linux and
+      # macOS legs. The exclusion is here for when those skips lift -- at that point the
+      # Windows legs start doing the same file-heavy work, and the scanner is charged per
+      # fixture. Excluding the checkout and the runner temp directory removes that tax
+      # without touching what any test asserts; the exclusion lives only in the ephemeral
+      # runner VM. Ported from claude-jit-context#310, where it was measured, not guessed.
+      - name: Exclude the checkout and temp dir from Windows Defender scanning
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Add-MpPreference -ExclusionPath "${{ github.workspace }}"
+          Add-MpPreference -ExclusionPath "$env:RUNNER_TEMP"
       - name: Run tests
         run: pytest
