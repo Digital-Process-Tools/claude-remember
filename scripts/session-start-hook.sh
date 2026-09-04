@@ -118,8 +118,11 @@ _stdin_json_string() {
 }
 
 # ── The cwd the host handed us (#411) ──────────────────────────────────────
-# Every host puts `cwd` on the SessionStart payload (#407's comparison table),
-# but only Claude Code also publishes it as CLAUDE_PROJECT_DIR. Exported for
+# Every host puts `cwd` on the SessionStart payload (#407's comparison table).
+# Claude Code always also publishes it as CLAUDE_PROJECT_DIR; Codex never
+# does (live-confirmed, #463); Gemini CLI's own bundled docs now say it DOES
+# publish CLAUDE_PROJECT_DIR too, as a compatibility alias (#456, unverified
+# live — #532; used to be believed it did not, #534). Exported for
 # resolve-paths.sh to consult as its fallback once CLAUDE_PROJECT_DIR is
 # unset — precedence is CLAUDE_PROJECT_DIR, then this, then the existing
 # .claude/remember layout derivation, then the existing failure; a stdin

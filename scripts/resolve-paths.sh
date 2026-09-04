@@ -35,8 +35,14 @@
 # ENVIRONMENT (inputs)
 #   CLAUDE_PROJECT_DIR    Project root (set by Claude Code hooks)
 #   REMEMBER_HOOK_CWD     Fallback project root (#411), consulted when
-#                         CLAUDE_PROJECT_DIR is unset -- Codex and Gemini CLI
-#                         never set the latter. Exported by
+#                         CLAUDE_PROJECT_DIR is unset -- confirmed still true
+#                         of Codex (live-observed, #463) but no longer of
+#                         Gemini CLI, whose own bundled docs say it sets
+#                         CLAUDE_PROJECT_DIR as a compatibility alias (#456,
+#                         unverified live -- #532). This fallback stays
+#                         correct and needed regardless: it exists for ANY
+#                         host that leaves CLAUDE_PROJECT_DIR unset, Codex
+#                         included, not only for Gemini. Exported by
 #                         session-start-hook.sh / session-end-hook.sh from the
 #                         SessionStart/SessionEnd stdin payload's `cwd` field;
 #                         not read from stdin here (see the caller comments).
@@ -270,10 +276,15 @@ _remember_forward_slash() {
 #      `cwd` field, exported by the hook that read this file, from its own
 #      stdin -- every hook this plugin registers now offers one (session-start
 #      and session-end since #411; user-prompt and post-tool since #444).
-#      Codex and Gemini CLI both put `cwd` on that payload but neither sets
-#      CLAUDE_PROJECT_DIR (Codex documents no such variable at all; Gemini
-#      documents no hook environment variables whatsoever), so this is the
-#      fallback that makes resolution possible on either host. Not every
+#      Both Codex and Gemini CLI put `cwd` on that payload. Codex still
+#      documents no CLAUDE_PROJECT_DIR variable at all (live-confirmed,
+#      #463), so this fallback is still what makes resolution possible on
+#      Codex. Gemini CLI's own bundled docs now claim it DOES set
+#      CLAUDE_PROJECT_DIR, as a compatibility alias (#456) -- unverified
+#      live, #532 -- in which case priority 1 above wins for Gemini and this
+#      fallback is simply never reached on that host; it stays correct and
+#      needed for Codex and any other host that genuinely leaves
+#      CLAUDE_PROJECT_DIR unset. Not every
 #      caller of this file is a hook with stdin to read -- doctor.sh and a
 #      bare `source` from a shell have none -- so an unset or unusable value
 #      here is silently skipped, same as an unset CLAUDE_PROJECT_DIR above.

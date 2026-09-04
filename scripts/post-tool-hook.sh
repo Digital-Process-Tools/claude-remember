@@ -150,8 +150,11 @@ unset REMEMBER_TRANSCRIPT_PATH
 # anything else wants it -- including resolve-paths.sh below, which is new
 # with #444: only session-start-hook.sh and session-end-hook.sh used to have
 # a stdin `cwd` to offer it, so a host that never sets CLAUDE_PROJECT_DIR
-# (Codex, Gemini CLI) hit the FATAL in resolve-paths.sh on every PostToolUse
-# call. PostToolUse carries `cwd` on the same payload as `session_id`
+# (Codex -- still true, live-confirmed #463; Gemini CLI was believed the
+# same at the time but its own docs now say it sets CLAUDE_PROJECT_DIR as a
+# compatibility alias, #456, unverified live -- #532) hit the FATAL in
+# resolve-paths.sh on every PostToolUse call. PostToolUse carries `cwd` on
+# the same payload as `session_id`
 # (#407's comparison table), so the capture that already existed for
 # session_id moves up here to feed both.
 #
