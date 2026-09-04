@@ -21,6 +21,14 @@ cannot live in here: a forge reads workflows only from `.github/workflows/` itse
 subdirectories are not supported and a symlink there fails outright. So it keeps the
 `oss-` prefix and carries the same note in its own header.
 
+## Exclude this directory from your own linter
+
+Every `.py` file here is vendored and replaced wholesale on every `/oss:scaffold`
+run, so a style finding your own linter (ruff, flake8, …) reports inside `.oss`
+is not actionable: any fix you make is reverted the next time this directory is
+regenerated. Add `.oss` to your linter's exclude list — for `ruff`, an `exclude`
+entry under `[tool.ruff]` in `pyproject.toml`.
+
 ## What is here
 
 Every file this directory holds, and nothing else — `/oss:scaffold` writes these and

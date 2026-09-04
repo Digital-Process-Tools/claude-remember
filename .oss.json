@@ -20,7 +20,8 @@
       "priority:low",
       "priority:medium"
     ],
-    "lanes": []
+    "lanes": [],
+    "filed_by_loop": "filed-by-loop"
   },
   "milestones": [],
   "release": {

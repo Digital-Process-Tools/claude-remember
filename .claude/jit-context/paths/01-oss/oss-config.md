@@ -31,4 +31,13 @@ every section was tagged: the same audit, and a decision on record. A list names
 The scaffolded CI leg and the fragment rule both render from this key, so the answer is written once.
 Versions, not tags: `0.1.0`, never `v0.1.0`. A declared version with no matching section is a finding.
 
+**`user_visible_paths` has the same shape as `changelog_untagged`, and the empty-list case is the
+one to get right.** It lists regexes naming which changed paths this repository considers
+user-visible, so the generated changelog gate can exempt a pull request that touches none of them.
+Absent or `null` means nobody declared anything -- the gate stays unconditional, exactly today's
+behaviour. Unlike `changelog_untagged`, `[]` is NOT a legal "declared, and nothing is user-visible":
+it is refused at validation, because reading an empty list that way would silently turn the gate off
+for the whole repository. A list names the patterns; `oss_config.user_visible_paths_problem` is
+where all three states are decided.
+
 **No key here holds a credential.** The file is committed; tokens live in the forge CLI's own auth.
