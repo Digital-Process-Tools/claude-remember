@@ -563,6 +563,25 @@ _run_housekeeping_block
             + _dump_dir(autonomous)
         )
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="$OSTYPE cannot be made to say anything other than this "
+               "runner's own real value under real Windows Git Bash -- "
+               "confirmed empirically two separate ways on PR #499's own "
+               "windows-latest CI (jobs 100892436094 and 100895310415): "
+               "an env var override (`env['OSTYPE']=...`) and a `local "
+               "OSTYPE=...` shadow inside a wrapping function both left "
+               "the extracted block reading the runner's real OSTYPE "
+               "(cygwin there) instead of the forced value, so this "
+               "negative control's own premise -- exercise the block "
+               "with $OSTYPE genuinely NOT saying Windows Git Bash -- "
+               "cannot be constructed while actually running under "
+               "Windows Git Bash. Skipped loudly rather than left to "
+               "pass vacuously against a value it never actually forced; "
+               "the fix's OSTYPE gate is still exercised for real by the "
+               "msys/forward-slash cases above, which do not depend on "
+               "overriding OSTYPE away from its real value.",
+    )
     def test_must_not_fire_control_a_posix_backslash_named_dir_is_left_untouched(self, tmp_path):
         """Self-review finding: the fix is gated on `$OSTYPE` (msys/cygwin
         only), not applied unconditionally -- a backslash is a perfectly
@@ -590,14 +609,7 @@ _run_housekeeping_block
         directory -- exposing the removal as a false "swept" rather than
         as an unrelated no-op.
 
-        `ostype="linux-gnu"` is passed explicitly rather than left at this
-        test's own platform default (CI, PR #499: a real windows-latest
-        runner's own bash reports $OSTYPE=cygwin as ITS compiled default,
-        with or without the parent process's environment carrying a
-        value at all -- "leave it unset" is not "not Windows Git Bash" on
-        the one platform this control exists to guard, and the control
-        failed there for exactly that reason, not because the gate itself
-        was ever wrong).
+        Skipped on win32 -- see the class-level skipif above this method.
         """
         autonomous = tmp_path / ".remember" / "logs" / "autonomous"
         autonomous.mkdir(parents=True)
