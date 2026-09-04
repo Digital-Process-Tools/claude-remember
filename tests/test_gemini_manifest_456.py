@@ -108,7 +108,9 @@ def test_gemini_settings_unbound_events_are_empty_arrays():
 
 
 def test_gemini_settings_commands_are_type_command_and_non_empty():
+    found_any = False
     for event, gi, hi, hook in _iter_commands():
+        found_any = True
         assert hook.get("type") == "command", (
             f"{event}[{gi}].hooks[{hi}]: unsupported type {hook.get('type')!r}"
         )
@@ -116,25 +118,35 @@ def test_gemini_settings_commands_are_type_command_and_non_empty():
         assert isinstance(cmd, str) and cmd.strip(), (
             f"{event}[{gi}].hooks[{hi}]: empty/missing command"
         )
+    assert found_any, "no hook commands found in .gemini/settings.json -- would pass vacuously"
 
 
 def test_gemini_settings_never_spells_claude_plugin_root():
     """The one substantive edit this manifest makes over the raw migration
-    output: CLAUDE_PLUGIN_ROOT -> PLUGIN_ROOT, since Gemini CLI never sets
-    the Claude-only name (#407)."""
+    output: CLAUDE_PLUGIN_ROOT -> PLUGIN_ROOT (#407). Neither name is known
+    to be set by a live Gemini CLI process -- pipeline/host.py's own GEMINI
+    Host declares no plugin_root_vars at all, so this is naming hygiene
+    consistent with #407's convention, not a claim that PLUGIN_ROOT resolves
+    on a live install."""
+    found_any = False
     for event, gi, hi, hook in _iter_commands():
+        found_any = True
         cmd = hook.get("command", "")
         assert "CLAUDE_PLUGIN_ROOT" not in cmd, (
             f"{event}[{gi}].hooks[{hi}]: still spells CLAUDE_PLUGIN_ROOT: {cmd!r}"
         )
+    assert found_any, "no hook commands found in .gemini/settings.json -- would pass vacuously"
 
 
 def test_gemini_settings_commands_use_plugin_root_var():
+    found_any = False
     for event, gi, hi, hook in _iter_commands():
+        found_any = True
         cmd = hook.get("command", "")
         assert re.search(r"\$\{PLUGIN_ROOT\}", cmd), (
             f"{event}[{gi}].hooks[{hi}]: command does not reference ${{PLUGIN_ROOT}}: {cmd!r}"
         )
+    assert found_any, "no hook commands found in .gemini/settings.json -- would pass vacuously"
 
 
 def test_every_gemini_settings_script_reference_exists():
@@ -164,10 +176,13 @@ def test_gemini_settings_reuses_existing_scripts_only():
     claude_scripts = set(re.findall(r"scripts/[A-Za-z0-9_./-]+\.sh", claude_commands))
     assert claude_scripts, "could not extract any script names from hooks/hooks.json -- regex drift?"
 
+    found_any = False
     for event, gi, hi, hook in _iter_commands():
         cmd = hook.get("command", "")
         for rel in re.findall(r"scripts/[A-Za-z0-9_./-]+\.sh", cmd):
+            found_any = True
             assert rel in claude_scripts, (
                 f"{event}[{gi}].hooks[{hi}]: references {rel}, which the Claude Code "
                 "manifest does not use"
             )
+    assert found_any, "no scripts/*.sh references found -- would pass vacuously"
