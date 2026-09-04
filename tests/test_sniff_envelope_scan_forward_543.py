@@ -73,6 +73,46 @@ def test_bookkeeping_lines_before_a_codex_payload_are_skipped(tmp_path):
     assert unreadable is False
 
 
+def test_scan_cap_gives_up_before_a_resolving_line_past_it(tmp_path):
+    """The scan is capped (``_ENVELOPE_SNIFF_SCAN_CAP``, 50) rather than
+    unbounded, so a genuinely foreign run of unplaceable lines still fails
+    fast instead of reading a huge file to its end. This must stay
+    "unrecognised" even though a resolving ``claude-code`` line DOES exist
+    in the file, one line past the cap -- proving the cap is enforced
+    (never scanned past 50) rather than merely present as an unused
+    constant.
+    """
+    from pipeline.extract import _ENVELOPE_SNIFF_SCAN_CAP
+
+    unplaceable = '{"type": "queue-operation", "operation": "enqueue"}\n' * (_ENVELOPE_SNIFF_SCAN_CAP + 1)
+    resolving = '{"type": "user", "message": {"role": "user", "content": "hi"}}\n'
+    path = tmp_path / "past-the-cap.jsonl"
+    path.write_text(unplaceable + resolving, encoding="utf-8")
+
+    envelope, unreadable = sniff_file_envelope_status(str(path))
+    assert envelope == "unrecognised"
+    assert unreadable is False
+
+
+def test_blank_and_malformed_lines_do_not_count_against_the_scan_cap(tmp_path):
+    """The scan cap counts unplaceable-but-PARSEABLE lines, not every line
+    in the file: a blank line or one that fails ``json.loads`` must not
+    spend the budget the cap allots to genuine bookkeeping lines, or a
+    transcript with stray blank lines ahead of its real content could be
+    given up on before ever reaching a placeable line well within the cap.
+    """
+    from pipeline.extract import _ENVELOPE_SNIFF_SCAN_CAP
+
+    noise = ("\n" + "not json at all\n") * _ENVELOPE_SNIFF_SCAN_CAP
+    resolving = '{"type": "user", "message": {"role": "user", "content": "hi"}}\n'
+    path = tmp_path / "noisy-but-within-cap.jsonl"
+    path.write_text(noise + resolving, encoding="utf-8")
+
+    envelope, unreadable = sniff_file_envelope_status(str(path))
+    assert envelope == "claude-code"
+    assert unreadable is False
+
+
 def test_a_genuinely_foreign_file_still_reads_unrecognised(tmp_path):
     """MUST-FIRE control's pair: a file where NO line, however far the scan
     goes, is ever placeable by sniff_envelope() must still return
