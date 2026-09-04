@@ -249,8 +249,21 @@ def clear_unread_envelope(path: str, session_id: str) -> None:
 
 
 def _validate_session_id(session_id: str) -> None:
-    """Reject session IDs containing path traversal characters."""
-    if "/" in session_id or "\\" in session_id or ".." in session_id:
+    """Reject session IDs containing path traversal or ADS-stream characters.
+
+    ``:`` is rejected alongside the path-separator and traversal checks
+    because on NTFS a colon in a filename is read as an Alternate Data
+    Stream separator (``filename:stream``) rather than a literal
+    character -- a colon-bearing session_id joined into
+    ``position.<session_id>`` could silently write to/read from an
+    existing file's ADS instead of a distinct file of its own (#544).
+    """
+    if (
+        "/" in session_id
+        or "\\" in session_id
+        or ".." in session_id
+        or ":" in session_id
+    ):
         raise ValueError(f"invalid session_id: {session_id}")
 
 
