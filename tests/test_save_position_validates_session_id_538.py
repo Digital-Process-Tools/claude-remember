@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from pipeline.shell import cmd_save_position
+from pipeline.shell import _POSITION_SLOTS, cmd_save_position
 
 WELL_FORMED = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa"
 
@@ -59,3 +59,37 @@ def test_well_formed_session_id_still_writes_sidecar(store):
     sidecar = remember / "tmp" / f"position.{WELL_FORMED}"
     assert sidecar.exists(), "well-formed session_id must still write its sidecar"
     assert sidecar.read_text() == "120"
+
+
+def test_poisoned_legacy_eviction_id_does_not_abort_the_save(store):
+    """Reviewer finding (#538 self-review): a store written before this fix
+    -- or hand-edited -- can hold an already-invalid key in `sessions`. When
+    that key is the one about to be evicted, cmd_save_position must still
+    complete the save (last-save.json committed, new sidecar written, evicted
+    slot made room for) rather than raising ValueError out of the eviction
+    loop and aborting everything after it, including the trailing #450
+    quarantine bookkeeping.
+    """
+    import json
+
+    remember, path = store
+    poisoned = "../../etc/evil"
+    sessions = {poisoned: 0}
+    for i in range(_POSITION_SLOTS - 1):
+        sessions[f"session-{i:04d}"] = i
+    Path(path).write_text(json.dumps(
+        {"sessions": sessions, "session": "session-0000", "line": 0}
+    ))
+
+    # This save evicts the oldest entry, which is the poisoned one (dicts
+    # keep insertion order, and it was inserted first).
+    cmd_save_position(path, WELL_FORMED, 42)
+
+    saved = json.loads(Path(path).read_text())
+    assert saved["sessions"][WELL_FORMED] == 42, (
+        "the save itself must land even though eviction hit a poisoned id"
+    )
+    assert poisoned not in saved["sessions"], "the poisoned id must still be evicted"
+
+    sidecar = remember / "tmp" / f"position.{WELL_FORMED}"
+    assert sidecar.exists(), "the new session's own sidecar must still be written"

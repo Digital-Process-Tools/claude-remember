@@ -395,11 +395,16 @@ def cmd_save_position(
     # #140 fixed for last-save.json, reintroduced through its own mirror.
     # Best-effort: a session that is gone from the store losing its sidecar a
     # little late (a failed unlink here) is no worse than #353 not existing.
+    # `evicted_id` comes from a key already present in the persisted store, so
+    # a store written before #538 -- or hand-edited -- can hold one that fails
+    # `_validate_session_id` today. That must not abort the save that has
+    # already landed above: treat a rejected id the same as a failed unlink,
+    # never let it become worse than #353 not existing.
     for evicted_id in evicted:
-        _validate_session_id(evicted_id)
         try:
+            _validate_session_id(evicted_id)
             os.remove(os.path.join(sidecar_dir, f"position.{evicted_id}"))
-        except OSError:
+        except (OSError, ValueError):
             pass
 
     # #450: keep the unread-envelope quarantine in step with the position it
