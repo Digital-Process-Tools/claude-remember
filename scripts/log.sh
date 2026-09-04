@@ -269,8 +269,31 @@ config() {
     # jq interpolation below unfiltered. `[[ =~ ]]` (already used elsewhere
     # in this file, e.g. the KEY=VALUE parser below) can anchor the WHOLE
     # string against a real grammar instead: one leading dot, then one or
-    # more [A-Za-z0-9_.]+ segments joined by single dots, nothing else.
-    if ! [[ "$key" =~ ^\.[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$ ]]; then
+    # more [A-Za-z0-9_]+ segments, each joined to the next by a single
+    # literal dot -- the dot is the separator BETWEEN segments, never a
+    # character a segment's own class accepts, so `.foo..bar` (an empty
+    # segment) is correctly rejected rather than swallowed.
+    #
+    # Under LC_ALL=C only: `[A-Za-z]` is a POSIX bracket RANGE, and a range
+    # is matched by collation order, not byte value, once LC_COLLATE (via
+    # LANG/LC_ALL) selects a UTF-8 locale -- lib-slug.sh hits the identical
+    # trap and documents it at length. Under en_US.UTF-8, `[A-Za-z]` also
+    # matches accented Latin letters, so `.café` would pass a guard whose own
+    # comment claims to accept only ASCII. A subshell (not a bare `LC_ALL=C`
+    # assignment, which does not apply to `[[`, a compound command, the way
+    # it would to a simple one) scopes this to the one match and restores
+    # nothing, because nothing outside it was ever changed.
+    if ! ( LC_ALL=C; [[ "$key" =~ ^\.[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$ ]] ); then
+        # Same convention as _config_load's own '#refuse' report just above
+        # in this file: a rejection here and a genuine cache miss a few
+        # lines below both print $default, and without this line they are
+        # indistinguishable from the outside -- "config() keeps returning my
+        # default" reads identically whether the key was malformed or simply
+        # absent. Debug-gated, not unconditional, for the same reason that
+        # one is: a warning that fires on ordinary lookups is a warning
+        # nobody reads.
+        [ "${REMEMBER_DEBUG:-}" = "1" ] && \
+            echo "remember: config() key '$key' is not a plain dotted path -- returning the default rather than evaluating it" >&2
         echo "$default"
         return
     fi
