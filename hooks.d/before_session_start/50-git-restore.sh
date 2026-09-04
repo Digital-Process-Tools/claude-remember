@@ -80,16 +80,31 @@ set -u  # not -e -- we never want to fail loudly here
 # make even a legacy-mode install (the majority, which exits right below
 # and can never activate this hook) pay for a config resolution it will
 # never use.
+#
+# PROJECT_DIR is normalized here too (self-review finding), not just
+# REMEMBER_DIR: _remember_normalize_win_path rewrites PROJECT_DIR to
+# BACKSLASH form on msys/cygwin (scripts/resolve-paths.sh, drive-letter
+# branch), the opposite direction from this normalization -- so comparing
+# the now-forward-slashed REPO_ROOT against a still-backslash PROJECT_DIR
+# would make the legacy-mode short-circuit below never match on a genuine
+# legacy install, defeating the exact "cheap guards first" cost promise
+# this normalization exists to protect. scripts/doctor.sh:141 and
+# scripts/lib-case-divergence.sh:162 normalize both sides of this identical
+# REMEMBER_DIR-vs-PROJECT_DIR comparison for the same reason.
 case "${OSTYPE:-}" in
-    msys|cygwin) _gr_normalized_dir="${REMEMBER_DIR//\\//}" ;;
-    *)           _gr_normalized_dir="$REMEMBER_DIR" ;;
+    msys|cygwin) _gr_normalized_dir="${REMEMBER_DIR//\\//}"
+                 _gr_normalized_project="${PROJECT_DIR//\\//}" ;;
+    *)           _gr_normalized_dir="$REMEMBER_DIR"
+                 _gr_normalized_project="$PROJECT_DIR" ;;
 esac
 REPO_ROOT="${_gr_normalized_dir%/*}"
 SLUG="${_gr_normalized_dir##*/}"
 unset _gr_normalized_dir
 
-# Legacy mode (REMEMBER_DIR is inside PROJECT_DIR) → never run.
-[ "$REPO_ROOT" = "$PROJECT_DIR" ] && exit 0
+# Legacy mode (REMEMBER_DIR is inside PROJECT_DIR) → never run. Compared
+# against the NORMALIZED PROJECT_DIR (see above), not the raw one.
+[ "$REPO_ROOT" = "$_gr_normalized_project" ] && exit 0
+unset _gr_normalized_project
 
 # Prevent outer git env vars from overriding git -C behaviour. Same reasoning
 # as the backup hook: a leaked GIT_DIR makes every `git -C … rev-parse`

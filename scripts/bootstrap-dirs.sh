@@ -282,10 +282,16 @@ if [ -d "$REMEMBER_DIR" ]; then
     # msys/cygwin (resolve-paths.sh's own _remember_normalize_win_path),
     # and a bash `case` pattern only ever recognises '/' as a path
     # separator, so an in-project store's REMEMBER_DIR silently never
-    # matched "$_mem_proj"/* there -- no .gitignore was ever written, and
-    # doctor.sh's later diagnostic for that store degrades to WARN-only
-    # permanently. The write itself still targets the real (unmodified)
-    # REMEMBER_DIR; only the comparison is normalized.
+    # matched "$_mem_proj"/* there -- no .gitignore was ever written. This
+    # is NOT the #401 doctor.sh baseline (that reads .install-marker,
+    # written unconditionally, just above, unaffected by this gate): the
+    # real, still-live consequence is hooks.d/after_save/50-git-backup.sh's
+    # own protective .gitignore going missing for that store, so its
+    # memory content is not excluded from `git add -A`/`git status`
+    # inside the user's own project repository the way the file's comment
+    # near the top of this block documents. The write itself still targets
+    # the real (unmodified) REMEMBER_DIR; only the comparison is
+    # normalized.
     case "$(_remember_forward_slash "$REMEMBER_DIR")" in
         "$(_remember_forward_slash "$_mem_proj")"/*)
             [ -f "$REMEMBER_DIR/.gitignore" ] || { echo '*' > "$REMEMBER_DIR/.gitignore"; } 2>/dev/null

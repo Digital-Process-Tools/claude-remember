@@ -141,7 +141,17 @@ class TestBootstrapDirsGitignoreWrite:
 
 class TestGitRestoreLegacyGuardSplit:
     """Site 2: hooks.d/before_session_start/50-git-restore.sh's own
-    REPO_ROOT/SLUG split (`${REMEMBER_DIR%/*}` / `${REMEMBER_DIR##*/}`).
+    REPO_ROOT/SLUG split (`${REMEMBER_DIR%/*}` / `${REMEMBER_DIR##*/}`)
+    PLUS the legacy-mode short-circuit that immediately follows it
+    (`[ "$REPO_ROOT" = "$PROJECT_DIR" ] && exit 0`) -- both included in one
+    extraction, because a self-review finding (oss:auditor) caught that
+    normalizing only REMEMBER_DIR and comparing the result against a still
+    -backslash PROJECT_DIR breaks that exact guard for a genuine legacy
+    install: _remember_normalize_win_path (scripts/resolve-paths.sh)
+    rewrites PROJECT_DIR to BACKSLASH form on msys/cygwin, the opposite
+    direction, so PROJECT_DIR needs normalizing too before the comparison
+    -- the fix now does this, and TestLegacyModeShortCircuit below is the
+    regression test for it.
 
     Unlike every other #517-class site, this one duplicates the
     `_remember_forward_slash` GATE inline (`case "${OSTYPE:-}" in
@@ -159,17 +169,21 @@ class TestGitRestoreLegacyGuardSplit:
     _BLOCK = extract_lines(
         "hooks.d/before_session_start/50-git-restore.sh",
         "# #519: normalize before the parameter-expansion split",
-        "unset _gr_normalized_dir",
+        "unset _gr_normalized_project",
     )
     _AFTER = 'printf "REPO_ROOT=%s SLUG=%s" "$REPO_ROOT" "$SLUG"'
 
-    def _run(self, remember_dir: str, ostype: str):
-        setup = f"REMEMBER_DIR={shlex.quote(remember_dir)}"
+    def _run(self, remember_dir: str, project_dir: str, ostype: str):
+        setup = (
+            f"REMEMBER_DIR={shlex.quote(remember_dir)}"
+            + f"\nPROJECT_DIR={shlex.quote(project_dir)}"
+        )
         return run_block(self._BLOCK, ostype=ostype, setup=setup, after=self._AFTER)
 
     def test_must_fire_split_finds_the_real_repo_root_under_backslash_paths(self):
         remember_dir = r"C:\Users\x\.claude\remember\proj-slug"
-        result = self._run(remember_dir, "msys")
+        project_dir = r"C:\Users\x\somewhere-else"  # NOT the store's parent
+        result = self._run(remember_dir, project_dir, "msys")
 
         assert result.returncode == 0, result.stderr
         assert result.stdout == "REPO_ROOT=C:/Users/x/.claude/remember SLUG=proj-slug", (
@@ -183,7 +197,67 @@ class TestGitRestoreLegacyGuardSplit:
         -- this passes both before and after the fix, since `%/*`/`##*/`
         already handle a real '/' correctly on their own."""
         remember_dir = "/home/x/.claude/remember/proj-slug"
-        result = self._run(remember_dir, "")
+        project_dir = "/home/x/somewhere-else"
+        result = self._run(remember_dir, project_dir, "")
 
         assert result.returncode == 0, result.stderr
         assert result.stdout == "REPO_ROOT=/home/x/.claude/remember SLUG=proj-slug"
+
+
+class TestLegacyModeShortCircuit:
+    """Regression test for the oss:auditor self-review finding on this
+    diff: the legacy-mode guard (`[ "$REPO_ROOT" = "$PROJECT_DIR" ] && exit
+    0`) must still fire -- cheaply, without ever reaching `git -C` -- for a
+    genuine legacy-mode install (REMEMBER_DIR is PROJECT_DIR + "/.remember")
+    even when both arrive backslash-separated on msys/cygwin. Reuses
+    TestGitRestoreLegacyGuardSplit's own block/`_run` (same class, not
+    duplicated) via direct construction.
+    """
+
+    def _run(self, remember_dir: str, project_dir: str, ostype: str):
+        return TestGitRestoreLegacyGuardSplit()._run(remember_dir, project_dir, ostype)
+
+    def test_must_fire_legacy_install_short_circuits_under_backslash_paths(self):
+        """The bug this guards against: PROJECT_DIR is normalized in the
+        OPPOSITE direction from REMEMBER_DIR by resolve-paths.sh on
+        msys/cygwin (backslash, not forward-slash) -- comparing a
+        forward-slashed REPO_ROOT against a still-backslash PROJECT_DIR
+        would never match here, and the hook would fall through past its
+        own cheap-guards-first short-circuit into sourcing log.sh and
+        parsing config for every legacy-mode Windows install."""
+        project_dir = r"C:\Users\x\proj"
+        remember_dir = project_dir + r"\.remember"
+        result = self._run(remember_dir, project_dir, "msys")
+
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "", (
+            "a genuine legacy-mode install (REMEMBER_DIR is PROJECT_DIR's "
+            "own .remember subdir) must still short-circuit via `exit 0` "
+            "-- reaching git -C at all here means the guard silently "
+            f"stopped firing -- stdout={result.stdout!r} stderr={result.stderr}"
+        )
+
+    def test_must_not_fire_control_external_install_does_not_short_circuit(self):
+        """Positive control: a genuinely external store (REPO_ROOT is NOT
+        PROJECT_DIR) must NOT be caught by this guard, backslash-laden or
+        not -- the fix must not start matching everything."""
+        project_dir = r"C:\Users\x\proj"
+        remember_dir = r"C:\Users\x\.claude\remember\proj-slug"
+        result = self._run(remember_dir, project_dir, "msys")
+
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "REPO_ROOT=C:/Users/x/.claude/remember SLUG=proj-slug", (
+            "an external store must still fall through past the legacy "
+            f"guard -- stdout={result.stdout!r} stderr={result.stderr}"
+        )
+
+    def test_must_fire_forward_slash_legacy_install_still_short_circuits(self):
+        """Positive control: an ordinary POSIX legacy install is
+        unaffected -- this already passed before the fix too, since
+        neither side needed normalizing there."""
+        project_dir = "/home/x/proj"
+        remember_dir = project_dir + "/.remember"
+        result = self._run(remember_dir, project_dir, "")
+
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == ""
