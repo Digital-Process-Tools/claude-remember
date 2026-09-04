@@ -319,13 +319,22 @@ _END_LOG="$REMEMBER_DIR/logs/autonomous/session-end-$(_remember_date +%H%M%S)-$$
 if ! printf '%s [session-end] flush started\n' "$(_remember_date +%H:%M:%S)" >> "$_END_LOG" 2>/dev/null; then
     report_error "session-end" "WARNING: could not seed $_END_LOG -- if this file stays absent or empty, an ordinary housekeeping sweep will reclaim it, and /remember:doctor may misreport this session as one where SessionEnd never fired."
 fi
+# TEMP DEBUG (#487 CI iteration, remove before final commit): writes with
+# their OWN explicit redirect, independent of the subshell-level one below,
+# so a failure of that grouped redirect itself cannot also hide this.
+printf '%s DEBUG session-end: about to launch subshell, SAVE_SCRIPT=[%s] OSTYPE=[%s]\n' \
+    "$(_remember_date +%H:%M:%S)" "$SAVE_SCRIPT" "$OSTYPE" >> "$REMEMBER_DIR/tmp/debug-487.log" 2>&1
 (
+    printf '%s DEBUG session-end: subshell started, SAVE_SCRIPT=[%s]\n' \
+        "$(_remember_date +%H:%M:%S)" "$SAVE_SCRIPT" >> "$REMEMBER_DIR/tmp/debug-487.log" 2>&1
     if [ -n "$STDIN_SESSION_ID" ]; then
         bash "$SAVE_SCRIPT" "$STDIN_SESSION_ID" --force
     else
         bash "$SAVE_SCRIPT" --force
     fi
     _flush_status=$?
+    printf '%s DEBUG session-end: bash save-session.sh exited status=%s\n' \
+        "$(_remember_date +%H:%M:%S)" "$_flush_status" >> "$REMEMBER_DIR/tmp/debug-487.log" 2>&1
     if [ "$_flush_status" -ne 0 ]; then
         report_error "session-end" "WARNING: save-session.sh --force exited $_flush_status at session end -- this session's unsaved tail may be lost. See $_END_LOG for what save-session.sh itself logged."
     fi

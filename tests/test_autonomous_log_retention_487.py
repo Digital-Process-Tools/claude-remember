@@ -86,6 +86,11 @@ def _dump_dir(d: Path) -> str:
                 out.append(f"--- logs/{p.name} ---\n{p.read_text(errors='replace')}")
             except OSError as exc:
                 out.append(f"--- logs/{p.name} (unreadable: {exc}) ---")
+    debug_487 = logs_dir.parent / "tmp" / "debug-487.log"
+    if debug_487.exists():
+        out.append(f"--- tmp/debug-487.log ---\n{debug_487.read_text(errors='replace')}")
+    else:
+        out.append("--- tmp/debug-487.log --- (absent)")
     return "\n".join(out) if out else "(empty)"
 
 
