@@ -8,12 +8,9 @@
 [![License](https://img.shields.io/badge/license-Community-brightgreen)](LICENSE)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-5A67D8)](https://github.com/Digital-Process-Tools/claude-marketplace)
 [![Codex](https://img.shields.io/badge/Codex-plugin-000000)](.agents/plugins/marketplace.json)
-[![Gemini CLI](https://img.shields.io/badge/Gemini%20CLI-extension-4285F4)](.gemini/gemini-extension.json)
 [![Version](https://img.shields.io/badge/version-0.26.0-orange)](.claude-plugin/plugin.json)
 
 **The "Windows" in the badge above is honest about the platform, not about the coverage** ([#497](https://github.com/Digital-Process-Tools/claude-remember/issues/497)): most of the suite still blanket-skips on `win32` rather than actually running there, and the `windows-latest` legs report `success` either way. [Running tests](docs/running-tests.md) says exactly how much, and every `pytest` run — including the CI leg itself — now prints the live skip ratio rather than leaving it silent.
-
-**The Gemini CLI badge is honest about the manifests, not about a live run** ([#532](https://github.com/Digital-Process-Tools/claude-remember/issues/532)): the extension and its hook manifests are checked in and covered by tests, but every one of those tests asserts manifest *shape* — none asserts a hook has fired under a running Gemini CLI, because headless OAuth cannot complete in this environment. Claude Code and Codex are observed hosts; Gemini CLI is a shipped-but-unverified one.
 
 Claude Code starts every session blank. It doesn't know what you worked on yesterday, what conventions your team follows, or what mistakes it already made. You re-explain everything, every time.
 
