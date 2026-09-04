@@ -87,6 +87,25 @@ The Codex-side manifest is a *second* file, `hooks/hooks.codex.json`, rather tha
 
 **Not yet known, rebuilt from what is actually still unknown today (not from what was unknown when this section was first written):** whether `codex resume` behaves correctly once extraction returns a non-zero count; and whether any of the above holds on Gemini CLI at all -- everything in this section is OBSERVED against `codex-cli 0.150.1` specifically, and the `CLAUDE_PROJECT_DIR`-unset branch it shares with Gemini CLI (the stdout envelope, the `REMEMBER_HOOK_CWD` fallback) is REASONED for that third host, never verified against a live Gemini install. Summarization still shells `claude -p` regardless of host, so even correct extraction and a correct `resume` leave the Codex-native execution path from [#406](https://github.com/Digital-Process-Tools/claude-remember/issues/406) open.
 
+### Gemini CLI (manifest only, not yet installed live)
+
+`.gemini/settings.json` is checked in (#456), but only as a manifest -- unlike the Codex layer above, no live `gemini` session has driven it yet, so nothing in this section claims a hook actually fired. It is the output `gemini hooks migrate --from-claude` produces when fed this repo's real `hooks/hooks.json`, observed against a real `gemini-cli 0.57.0` install (`npm install -g @google/gemini-cli` -- the Homebrew `gemini-cli` formula is a deprecated, unrelated `antigravity-cli` package), with one edit: every `${CLAUDE_PLUGIN_ROOT}` the raw migration output carries verbatim is rewritten to `${PLUGIN_ROOT}`, since Gemini CLI never sets the Claude-only name -- the same vendor-neutral variable [#407](https://github.com/Digital-Process-Tools/claude-remember/issues/407) already gave `scripts/resolve-paths.sh` and `pipeline/host.py`'s `PLUGIN_ROOT_VARS`.
+
+The migration only renames event keys; it does not port command bodies, so the rewrite above is the one substantive edit this manifest needs over the raw tool output. Gemini's own event names, per its own bundled docs (`hooks/index.md`, `hooks/reference.md` in the installed `@google/gemini-cli` package) and confirmed against the migration's own output:
+
+| Ours | Gemini's |
+| --- | --- |
+| `SessionStart` | `SessionStart` |
+| `SessionEnd` | `SessionEnd` |
+| `UserPromptSubmit` | `BeforeAgent` |
+| `PostToolUse` | `AfterTool` |
+
+The remaining events Gemini documents (`BeforeTool`, `AfterAgent`, `Notification`, `PreCompress`, `BeforeModel`, `AfterModel`, `BeforeToolSelection`) are present as empty arrays, matching the migration tool's own output shape rather than omitting the keys.
+
+**`.gemini/settings.json` in the project root is project-scope config, confirmed against the bundled docs rather than assumed from the issue that first raised this** (`hooks/index.md`: project settings at `.gemini/settings.json` in the current directory outrank user settings at `~/.gemini/settings.json`, system settings, and hooks bundled by an installed extension, in that order). That settles the question #456 originally left open -- whether hooks might instead need to travel inside a `gemini-extension.json` manifest -- for the project-scope case this repo actually ships; the docs do note that an *installed extension* can also bundle hooks, at lower precedence, which stays unused here since this is a plain project-scope manifest, not an extension.
+
+`tests/test_gemini_manifest_456.py` pins the manifest's shape -- the event mapping, unbound events as empty arrays, and that every command string spells `${PLUGIN_ROOT}` and never `${CLAUDE_PLUGIN_ROOT}` -- the same structural-only limit `tests/test_codex_manifest_410.py` states for the Codex manifest: no `gemini` binary runs in CI, so this proves the file is well-formed and correctly shaped, never that Gemini CLI actually loads it, fires a hook, or expands `${PLUGIN_ROOT}` inside a hook command at all. That, the transcript envelope `pipeline/host.sniff_envelope()` would see from a real Gemini session, and the `UserPromptSubmit`/`BeforeAgent` stdout contract question raised in the Codex section above, all stay open -- a live Gemini session is what would settle them, the same way installing Codex settled its own arm, and each thing it breaks on there is expected to become its own issue rather than be folded into this one.
+
 ### Check your version
 
 Look at the `version` field in `.claude-plugin/plugin.json` — **not at the `<version>` directory name in the path below.** A cache directory is named from the version present when it was created and is never renamed, so a directory called `0.7.1` can hold a manifest saying `0.8.0`. The updater compares manifests, so the manifest is the answer and the directory name is a guess ([#204](https://github.com/Digital-Process-Tools/claude-remember/issues/204)).
