@@ -323,3 +323,110 @@ def test_branch_block_uses_safe_default_substitution_form():
         f"BRANCH resolution block must test REMEMBER_BRANCH via "
         f"'${{REMEMBER_BRANCH:-}}' (empty treated as unset); got: {block!r}"
     )
+
+# --- #500: an option-shaped session_id must never reach REMEMBER_BRANCH_CMD's
+# argv[1] as something a resolver's own option parser could read as a flag
+# ("-e", "--", "-adef"). save-session.sh:191 is the single choke point every
+# caller passes through before Step 3's REMEMBER_BRANCH_CMD invocation (CLI
+# arg, session-end-hook.sh's STDIN_SESSION_ID, session-start-hook.sh's
+# recovery id) -- anchoring THAT gate is cheaper than fixing every caller
+# that feeds it, and holds regardless of which caller supplied the id.
+
+SESSION_ID_VALIDATION_START = "# --- Validate session ID"
+
+
+def _extract_session_id_validation_block() -> str:
+    """Return the live session-id validation block from save-session.sh (the
+    comment through the next blank line) -- extracted from source, not
+    reasserted as a copy, same reasoning as _extract_branch_block above."""
+    lines = SAVE_SH.read_text().splitlines()
+    start = end = None
+    for i, raw in enumerate(lines):
+        if raw.startswith(SESSION_ID_VALIDATION_START):
+            start = i
+        elif start is not None and raw.strip() == "":
+            end = i
+            break
+    if start is None or end is None:
+        raise AssertionError(
+            f"Could not find {SESSION_ID_VALIDATION_START!r} block in {SAVE_SH}"
+        )
+    return "\n".join(lines[start:end])
+
+
+def _eval_session_id_validation(session_id: str) -> subprocess.CompletedProcess[str]:
+    """Eval ONLY the patched session-id validation block under a controlled
+    SESSION_ID, return the full CompletedProcess. Exit 0 means the id was
+    accepted (stdout echoes it back); exit 1 means it was rejected (stderr
+    carries the logged ERROR)."""
+    block = _extract_session_id_validation_block()
+    script = f"""
+log() {{ printf 'LOG %s: %s\n' "$1" "$2" 1>&2; }}
+SESSION_ID={session_id!r}
+{block}
+printf '%s' "$SESSION_ID"
+"""
+    return subprocess.run(
+        ["bash", "-c", script], capture_output=True, text=True, check=False
+    )
+
+
+@pytest.mark.parametrize("hostile_id", ["-adef", "--", "-e"])
+def test_option_shaped_session_id_rejected(hostile_id):
+    """MUST FIRE (#500): a session id that looks like a flag to some
+    resolver's own argument parser must never pass validation -- it must be
+    rejected here, well before Step 3 could ever hand it to
+    REMEMBER_BRANCH_CMD as argv[1]."""
+    result = _eval_session_id_validation(hostile_id)
+    assert result.returncode == 1, (
+        f"option-shaped session id {hostile_id!r} was accepted; "
+        f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    assert "invalid session ID" in result.stderr
+
+
+def test_ordinary_session_id_still_accepted():
+    """Positive control for the case above: an ordinary hex-and-hyphens id
+    with no leading hyphen is still accepted -- proves the anchor rejects
+    the leading-hyphen shape specifically, not every id with a hyphen in
+    it, and that the harness above isn't just failing everything."""
+    result = _eval_session_id_validation("abc123-def456")
+    assert result.returncode == 0, (
+        f"an ordinary session id was rejected; stderr={result.stderr!r}"
+    )
+    assert result.stdout == "abc123-def456"
+
+
+# --- #501: REMEMBER_BRANCH_CMD's stdout is substituted into the summarizer
+# prompt unbounded. A multi-line resolver output must not reach $BRANCH
+# verbatim -- it is rejected the same way a non-zero exit or empty stdout
+# already is (#481's existing fall-through), logged the same way.
+
+def test_branch_cmd_multiline_output_falls_through_to_git(tmp_path):
+    """MUST FIRE (#501): a resolver that prints more than one line must not
+    win -- its output would land at column 0 of the summarizer prompt
+    unbounded. Falls through to the git branch lookup, exactly like a
+    non-zero exit or empty stdout, and is logged the same way."""
+    project = _make_git_repo(tmp_path, branch_name="release/2026-06")
+    resolver = _make_resolver(tmp_path, 'printf "line-one\\nline-two\\n"')
+    result = _eval_branch_raw(project, {"REMEMBER_BRANCH_CMD": str(resolver)})
+    assert result.stdout == "release/2026-06", (
+        f"a multi-line resolver must not win; expected git fallback, got {result.stdout!r}"
+    )
+    assert "REMEMBER_BRANCH_CMD" in result.stderr and "multi-line" in result.stderr, (
+        f"a multi-line resolver must be logged distinctly; got stderr={result.stderr!r}"
+    )
+
+
+def test_branch_cmd_single_line_output_still_used(tmp_path):
+    """Positive control for the case above: a single-line resolver output
+    (even with a trailing newline, which $(...) already strips) is still
+    used and still logs nothing -- proves the multi-line check rejects
+    embedded newlines specifically, not every resolver output."""
+    project = tmp_path / "not-a-repo"
+    project.mkdir()
+    resolver = _make_resolver(tmp_path, 'printf "single-line\\n"')
+    result = _eval_branch_raw(project, {"REMEMBER_BRANCH_CMD": str(resolver)})
+    assert result.stdout == "single-line"
+    assert result.stderr == ""
+

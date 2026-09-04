@@ -188,7 +188,13 @@ if [ -z "$SESSION_ID" ]; then
 fi
 
 # --- Validate session ID (UUID format: hex + hyphens only) ---
-if ! [[ "$SESSION_ID" =~ ^[a-f0-9-]+$ ]]; then
+# Anchored to a hex digit at position 1 (#500): the un-anchored
+# `^[a-f0-9-]+$` admitted a leading hyphen, so an option-shaped id
+# ("-e", "--", "-adef") could reach this far and then, further down,
+# REMEMBER_BRANCH_CMD's own argv[1] -- read as a flag by whatever
+# argument parser the operator's resolver happens to use. A session id
+# is never meant to start with '-'; the anchor just says so.
+if ! [[ "$SESSION_ID" =~ ^[a-f0-9][a-f0-9-]*$ ]]; then
     log "save" "ERROR: invalid session ID: $(echo "$SESSION_ID" | head -c 40)"
     exit 1
 fi
@@ -420,13 +426,31 @@ fi
 #   3. `git branch --show-current` in $PROJECT_DIR, for users running Claude
 #      Code from a non-git directory (e.g. $HOME) this yields nothing.
 #   4. The literal "unknown".
+#
+# $CMD_BRANCH becomes $BRANCH, which is substituted verbatim into the
+# summarizer prompt (pipeline/prompts.py's {{BRANCH}}) with no newline
+# bound of its own (#501). $(...) only strips TRAILING newlines, so a
+# resolver that prints more than one line would write arbitrary content
+# at column 0 of the prompt. Bounded here, before BRANCH is ever set,
+# by rejecting a multi-line result outright -- same as a non-zero exit
+# or empty stdout above: falls through to the git branch lookup, logged
+# the same way, rather than silently truncating to the first line (a
+# truncation a reader of the log could not tell apart from the resolver
+# only ever having meant to print one line).
 if [ -n "${REMEMBER_BRANCH:-}" ]; then
     BRANCH="$REMEMBER_BRANCH"
 else
     BRANCH=""
     if [ -n "${REMEMBER_BRANCH_CMD:-}" ]; then
         if CMD_BRANCH=$("$REMEMBER_BRANCH_CMD" "$SESSION_ID" 2>/dev/null) && [ -n "$CMD_BRANCH" ]; then
-            BRANCH="$CMD_BRANCH"
+            case "$CMD_BRANCH" in
+                *$'\n'*)
+                    log "branch" "WARNING: REMEMBER_BRANCH_CMD ($REMEMBER_BRANCH_CMD) printed multi-line output for session $SESSION_ID -- refusing to use it unbounded, falling back to git branch lookup"
+                    ;;
+                *)
+                    BRANCH="$CMD_BRANCH"
+                    ;;
+            esac
         else
             log "branch" "WARNING: REMEMBER_BRANCH_CMD ($REMEMBER_BRANCH_CMD) exited non-zero or printed nothing for session $SESSION_ID -- falling back to git branch lookup"
         fi
