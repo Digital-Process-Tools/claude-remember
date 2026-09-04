@@ -60,7 +60,7 @@ def test_save_session_never_silently_clears_transcript_path():
         "save-session.sh now clears REMEMBER_TRANSCRIPT_PATH -- that reverses "
         "the #431 decision that a manual invocation trusts its own "
         "environment. If that decision changed, update pipeline/host.py's "
-        "docstring and README.md's transcript-path section, not just this line."
+        "docstring and docs/reading-the-transcript-path.md, not just this line."
     )
 
 

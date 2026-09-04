@@ -77,3 +77,39 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
         terminalreporter.write_line(
             f"-- test duration report (#510) --\nstate: could-not-measure (reporter raised {exc!r})"
         )
+
+    # #507: a separate try so a defect in either reporter cannot silence the
+    # other -- the same isolation the #510 block above already relies on.
+    try:
+        from scripts import report_windows_skip_floor as skipfloor
+
+        # Counted by DISTINCT nodeid, not by summing each category's report
+        # count: a test with a failing/erroring teardown gets a second report
+        # (outcome "error", `when="teardown"`) alongside its own call-phase
+        # "passed"/"failed"/"skipped" report -- summing list lengths would
+        # count that one test twice in `total` while `skipped` still counted
+        # it once, silently diluting the reported ratio below the true one.
+        report_categories = ("passed", "failed", "skipped", "error", "xfailed", "xpassed")
+        skipped_nodeids = {
+            report.nodeid
+            for report in terminalreporter.stats.get("skipped", [])
+            if getattr(report, "nodeid", None) is not None
+        }
+        all_nodeids = {
+            report.nodeid
+            for key in report_categories
+            for report in terminalreporter.stats.get(key, [])
+            if getattr(report, "nodeid", None) is not None
+        }
+        skipped = len(skipped_nodeids)
+        total = len(all_nodeids)
+        skip_result = skipfloor.analyze(skipped, total, is_windows=(sys.platform == "win32"))
+
+        terminalreporter.write_line(skipfloor.format_report(skip_result))
+        warning = skipfloor.github_actions_warning(skip_result)
+        if warning:
+            terminalreporter.write_line(warning)
+    except Exception as exc:  # noqa: BLE001 -- pragma: no cover - defensive; see #510's identical reasoning above
+        terminalreporter.write_line(
+            f"-- windows skip floor report (#507) --\nstate: could-not-measure (reporter raised {exc!r})"
+        )
