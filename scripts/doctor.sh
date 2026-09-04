@@ -466,7 +466,13 @@ fi
 # only that the opportunity existed and the window for it has passed.
 _SESSION_END_LOG_DIR="$REMEMBER_DIR/logs/autonomous"
 _SESSION_END_FIRED=0
-for _sel in "$_SESSION_END_LOG_DIR"/session-end-*.log; do
+# #524: normalize before the glob -- REMEMBER_DIR arrives backslash-
+# separated on msys/cygwin, and bash's glob only ever splits on '/', so
+# without this _SESSION_END_FIRED silently stays 0 there and doctor falls
+# through to its transcript heuristic, misreporting SessionEnd as never
+# having fired for a project that genuinely has one.
+_remember_session_end_glob_dir=$(_remember_forward_slash "$_SESSION_END_LOG_DIR")
+for _sel in "$_remember_session_end_glob_dir"/session-end-*.log; do
     [ -f "$_sel" ] && _SESSION_END_FIRED=1 && break
 done
 
@@ -613,8 +619,12 @@ fi
 _MEMORY_FILE_COUNT=0
 _MEMORY_BYTES=0
 if [ -d "$REMEMBER_DIR" ]; then
+    # #525: normalize before the glob -- see #524's comment above for why
+    # an unnormalized REMEMBER_DIR here means this operator-facing total
+    # silently undercounts to 0 on msys/cygwin.
+    _remember_memory_glob_dir=$(_remember_forward_slash "$REMEMBER_DIR")
     for _pattern in "today-"'*.md' "now.md" "recent.md" "archive"'*.md'; do
-        for _mf in "$REMEMBER_DIR"/$_pattern; do
+        for _mf in "$_remember_memory_glob_dir"/$_pattern; do
             [ -f "$_mf" ] || continue
             _MEMORY_FILE_COUNT=$((_MEMORY_FILE_COUNT + 1))
             _mf_bytes=$(wc -c < "$_mf" 2>/dev/null | tr -d ' ')
