@@ -1,0 +1,8 @@
+{"type":"summary","isMeta":true,"message":{"content":"Session started"}}
+{"type":"user","message":{"role":"user","content":"We keep getting hammered by a scraper on /api/search. Can you add rate limiting?"}}
+{"type":"assistant","message":{"role":"assistant","content":"Sure. I'll add it as middleware so it covers every route rather than one endpoint at a time. What limit do you want?"}}
+{"type":"user","message":{"role":"user","content":"Let's start with 100 requests per minute per IP, and make it configurable later."}}
+{"type":"assistant","message":{"role":"assistant","content":"<system-reminder>hook output, ignore</system-reminder>"}}
+{"type":"assistant","message":{"role":"assistant","content":"Implemented a token bucket limiter in middleware.py: each client IP gets a bucket of 100 tokens refilled at 100 per minute, and a request that finds an empty bucket gets HTTP 429 with a Retry-After header. Wired it in ahead of the routing layer so it applies to every endpoint, not just /api/search."}}
+{"type":"user","message":{"role":"user","content":"Did you test it?"}}
+{"type":"assistant","message":{"role":"assistant","content":"Yes -- test_rate_limit_429_after_bucket_empty sends 101 requests in a burst and asserts the 101st gets 429 while the first 100 succeed. It's still not deployed though -- needs the ops team to bump the Redis instance size before this goes live, since the bucket state is stored there."}}
