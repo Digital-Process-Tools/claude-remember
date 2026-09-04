@@ -12,8 +12,9 @@ mass conversion of these modules, but "a recorded list with a per-module
 verdict" against `tests/_bash_runner.py`'s `resolve_bash()` route -- the
 thing that already replaced this exact pattern in the four modules #432
 converted (`tests/test_hook_cwd_leak_417.py`, `tests/test_transcript_path_leak_424.py`,
-`tests/test_session_end_log_names_488.py`, `tests/test_stdin_extractor_top_level_wins_447.py`,
-plus `tests/test_autonomous_log_retention_487.py`).
+`tests/test_session_end_log_names_488.py`, `tests/test_stdin_extractor_top_level_wins_447.py`),
+plus a fifth, `tests/test_autonomous_log_retention_487.py`, which adopted the
+same route for its own #487 rather than being converted by #432 itself.
 
 ## The count: 94, not 107 (and not the issue's original 92)
 
@@ -43,14 +44,14 @@ silently drift out of sync with the tree the way the issue itself describes
 
 - **convertible** -- the skip reason is plausibly about a POSIX-only *tool*
   (bash itself, a POSIX-only shell construct) that `resolve_bash()` could
-  supply on a Windows runner via Git Bash. 8 modules.
+  supply on a Windows runner via Git Bash. 7 modules.
 - **not-convertible** -- the reason names something Git-Bash discovery
   cannot fix: POSIX file permissions/mode bits, process signals (`kill -0`,
   `fork`), `flock`, `umask`, NTFS/ACL semantics, or an explicit POSIX-vs-Windows
   path-format incompatibility. 12 modules.
 - **unclear** -- the reason string alone does not say enough to tell; reading
   it is not the same as reading the test body, and this list is deliberately
-  not that read. 74 modules.
+  not that read. 75 modules.
 
 **The `unclear` majority is the honest result, not a shortcut.** The great
 bulk of these 94 reasons is one of a handful of near-identical templated
@@ -129,7 +130,7 @@ verdict is the useful artifact").
 | `tests/test_ndc_tail_failure_no_truncate.py` | bash subprocess + POSIX layout — not portable to Windows runners (#79) | unclear | reason bundles the bash-subprocess dependency with an unspecified "POSIX semantics/layout" claim; cannot tell from the string alone whether that names a real non-bash blocker or is boilerplate |
 | `tests/test_ndc_truncate_race.py` | bash subprocess + POSIX layout — not portable to Windows runners (#79) | unclear | reason bundles the bash-subprocess dependency with an unspecified "POSIX semantics/layout" claim; cannot tell from the string alone whether that names a real non-bash blocker or is boilerplate |
 | `tests/test_nested_summarizer.py` | bash subprocess + POSIX layout — not portable to Windows runners (#79) | unclear | reason bundles the bash-subprocess dependency with an unspecified "POSIX semantics/layout" claim; cannot tell from the string alone whether that names a real non-bash blocker or is boilerplate |
-| `tests/test_non_ascii_paths.py` | bash subprocess assertions — not portable to Windows runners (#79) | convertible | reason names only the bash-subprocess dependency, no other blocker |
+| `tests/test_non_ascii_paths.py` | bash subprocess assertions — not portable to Windows runners (#79) | unclear | reason names only bash, but the test body runs the real sed function under several hostile locales (`LC_CTYPE=C.UTF-8`, `LC_ALL=C.utf8`, `LC_ALL=en_US.UTF-8`) whose availability and byte/character semantics under Git Bash/MSYS are not established here -- read on inspection, downgraded from the reason-string-only rule below |
 | `tests/test_now_md_append_atomicity.py` | bash subprocess + POSIX layout — not portable to Windows runners (#79) | unclear | reason bundles the bash-subprocess dependency with an unspecified "POSIX semantics/layout" claim; cannot tell from the string alone whether that names a real non-bash blocker or is boilerplate |
 | `tests/test_path_resolution.py` | POSIX path layouts (/c/Users vs C:\Users) + bash subprocess assertions — not portable to Windows | not-convertible | names a specific POSIX-only primitive (permissions/signals/fork/flock/umask/NTFS/path-format) that Git-Bash discovery cannot supply |
 | `tests/test_plugin_root_validated_471.py` | bash subprocess assertions -- not portable to Windows runners (#79) | convertible | reason names only the bash-subprocess dependency, no other blocker |
