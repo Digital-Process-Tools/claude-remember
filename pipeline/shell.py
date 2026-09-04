@@ -33,6 +33,7 @@ import sys
 
 from .extract import (
     _is_line_number,
+    _validate_session_id,
     clear_unread_envelope,
     extract_session,
     mark_unread_envelope,
@@ -333,6 +334,7 @@ def cmd_save_position(
             when ``envelope`` is ``"unrecognised"``; falls back to
             ``position`` if omitted.
     """
+    _validate_session_id(session_id)
     sessions = read_positions(last_save_file)
     # Re-insert at the end: dicts keep insertion order, so the oldest entry is
     # simply the first one, and a session that keeps saving keeps its slot.
@@ -394,6 +396,7 @@ def cmd_save_position(
     # Best-effort: a session that is gone from the store losing its sidecar a
     # little late (a failed unlink here) is no worse than #353 not existing.
     for evicted_id in evicted:
+        _validate_session_id(evicted_id)
         try:
             os.remove(os.path.join(sidecar_dir, f"position.{evicted_id}"))
         except OSError:
