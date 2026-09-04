@@ -114,3 +114,11 @@ _The Interview — an AI interviews for a job it already has but can't remember 
 
 **The story behind it:** [I built a memory system I'll never remember building](https://max.dp.tools/posts/134-i-built-a-memory-system-ill-never-remember-building.php) — by Max, the AI that designed it and doesn't remember.
 
+## Requirements in detail
+
+- Bash 3.2+ — stock macOS ships bash **3.2.57** and is a supported target.
+  On bash **4.2+** the per-prompt timestamp costs no subprocess at all
+  (`printf '%(...)T'`); on 3.2 it forks `date` once. Same output either way
+  ([#227](https://github.com/Digital-Process-Tools/claude-remember/issues/227)).
+- `jq` (used by `log.sh` / `session-start-hook.sh` to read `config.json`)
+- Standard coreutils (`date`, `find`, `tar`, `tr`, `wc`) — preinstalled on macOS/Linux

@@ -44,7 +44,7 @@ On session start, the `SessionStart` hook automatically injects into Claude's co
 
 No manual prompting, no "read this file" instructions. The agent begins every session with its memory already loaded. It just remembers.
 
-After a compaction, `SessionStart` fires again with `source=compact` and re-injects only `identity.md`; the store has not changed and the rest was already delivered ([#339](https://github.com/Digital-Process-Tools/claude-remember/issues/339)). The locking and atomic-rename rules every writer follows are in [docs/how-memory-files-are-written.md](docs/how-memory-files-are-written.md).
+After a compaction only `identity.md` is re-injected; the rest was already delivered. Write rules for the store: [docs/how-memory-files-are-written.md](docs/how-memory-files-are-written.md).
 
 ## Install
 
@@ -78,18 +78,12 @@ Manifests are checked in and tested for shape; no hook has been seen firing unde
 
 - Python 3.9+
 - Claude CLI (`claude`) with Haiku access
-- Bash 3.2+ — stock macOS ships bash **3.2.57** and is a supported target.
-  On bash **4.2+** the per-prompt timestamp costs no subprocess at all
-  (`printf '%(...)T'`); on 3.2 it forks `date` once. Same output either way
-  ([#227](https://github.com/Digital-Process-Tools/claude-remember/issues/227)).
-- `jq` (used by `log.sh` / `session-start-hook.sh` to read `config.json`)
-- Standard coreutils (`date`, `find`, `tar`, `tr`, `wc`) — preinstalled on macOS/Linux
+- Bash 3.2+ (stock macOS bash is fine)
+- `jq` and standard coreutils, preinstalled on macOS and Linux
 
 ### Windows
 
-The OS badge says "tested on Windows". That is honest about the platform, not the coverage: most of the suite still skips on `win32`, and the `windows-latest` legs report success either way ([#497](https://github.com/Digital-Process-Tools/claude-remember/issues/497), [running tests](docs/running-tests.md)). Every real Windows defect so far was found by a user on a real machine, which is why Windows reports get priority here.
-
-All scripts are bash, so Windows needs a POSIX environment in `PATH`: Git Bash / MSYS2 (plus `jq` and `python3` installed separately) or WSL. The full record, including the known Git Bash slowness and path-separator defects, is in [docs/windows.md](docs/windows.md).
+Needs a POSIX shell in `PATH`: Git Bash / MSYS2 with `jq` and `python3` installed, or WSL. The OS badge is honest about the platform, not the coverage; most of the suite still skips on `win32` ([#497](https://github.com/Digital-Process-Tools/claude-remember/issues/497)). Every real Windows defect so far was found by a user on a real machine, and those reports get priority. Known traps: [docs/windows.md](docs/windows.md).
 
 ## Cost
 
@@ -99,28 +93,26 @@ In practice, running this all day costs **a few cents per day**. The Anthropic A
 
 ## Using it
 
-Once installed there is nothing to run. Two commands are worth knowing, and the hooks that do the work are listed for when something looks off.
+Once installed there is nothing to run. Two commands are worth knowing.
 
 ### Handoff between sessions (`/remember`)
 
-Before clearing context or ending a session, type `/remember`. The agent writes a short handoff note to `.remember/remember.md`: what is done, what is next, any non-obvious context. The next session reads it and picks up where you left off. The note stays on disk until the next `/remember` replaces it, and every delivery after the first says so. Delivery counting, the per-machine delivery record, and two interactive sessions sharing one store: [docs/handoff.md](docs/handoff.md).
+Before clearing context or ending a session, type `/remember`. The agent writes a short handoff note; the next session starts with it loaded. How delivery is counted and what two sessions on one store do: [docs/handoff.md](docs/handoff.md).
 
 ### Diagnostics (`/remember:doctor`)
 
-Prints resolved paths, detected tools, storage mode, whether the session directory matches the slug the plugin computes, when the last successful save happened, and whether `PostToolUse` and `SessionEnd` have ever fired for this project. Reach for it whenever memory is not appearing and nothing says why. `doctor.sh --json` prints the same for another program. Full output, the JSON schema, and what happens to a store over the consolidation cap: [docs/diagnostics.md](docs/diagnostics.md).
+Run it when memory is not appearing and nothing says why. It prints resolved paths, storage mode, and whether each hook has ever fired for this project. JSON output and the consolidation cap: [docs/diagnostics.md](docs/diagnostics.md).
 
 ### Hooks
 
-The plugin registers four Claude Code hooks:
+| Hook | Script | Purpose |
+| --- | --- | --- |
+| `SessionStart` | `session-start-hook.sh` | Loads memory into context, recovers missed sessions |
+| `UserPromptSubmit` | `user-prompt-hook.sh` | Stamps the current time into the prompt |
+| `PostToolUse` | `post-tool-hook.sh` | Saves the session when enough tool calls have accumulated |
+| `SessionEnd` | `session-end-hook.sh` | Flushes whatever `PostToolUse` has not saved yet |
 
-| Hook               | Script                  | Purpose                                                   |
-| ------------------ | ----------------------- | --------------------------------------------------------- |
-| `SessionStart`     | `session-start-hook.sh` | Loads memory files into context (identity only at `source=compact`), recovers missed sessions |
-| `UserPromptSubmit` | `user-prompt-hook.sh`   | Injects current timestamp so the agent knows the time     |
-| `PostToolUse`      | `post-tool-hook.sh`     | Auto-saves session when tool call delta exceeds threshold |
-| `SessionEnd`       | `session-end-hook.sh`   | Unconditionally flushes whatever `PostToolUse` has not yet saved (#345) |
-
-`SessionEnd` ignores the cooldown and min-human-message gates the other saves respect — it is the last chance a session gets — but it does not write a handoff note. Why, and what a `hooks.d/` listener may say and in whose voice: [docs/hooks.md](docs/hooks.md).
+What each one skips and why, the `hooks.d/` listener contract, and why `SessionEnd` never writes a handoff: [docs/hooks.md](docs/hooks.md).
 
 ## Configuring it
 
@@ -128,26 +120,20 @@ Defaults live in `config.json` inside the plugin; override them per machine in `
 
 ## Data files
 
-The pipeline writes to `REMEMBER_DIR` (created automatically). By default this is `.remember/` inside your project root; in external storage mode it is a per-project subdirectory of `~/.remember/` (see [External storage mode](docs/external-storage-mode.md)).
+Everything lands in `REMEMBER_DIR`: `.remember/` inside the project by default, or `~/.remember/<slug>/` in [external storage mode](docs/external-storage-mode.md).
 
-| File                           | Purpose                                           |
-| ------------------------------ | ------------------------------------------------- |
-| `now.md`                       | Current session buffer                            |
-| `today-*.md`                   | Daily compressed summaries                        |
-| `recent.md`                    | Last 7 days consolidated                          |
-| `archive.md`                   | Older history consolidated                        |
-| `archive-YYYY-MM-DD.md`        | Rotated archive slices — searchable, not auto-loaded |
-| `recent-YYYY-MM-DD.md`         | Rotated `recent.md` spans — searchable, not auto-loaded |
-| `remember.md`                  | Handoff note written by `/remember` (`handoff_mode: "single"`, the default) |
-| `remember.<session_id>.md`     | Per-session handoff note (`handoff_mode: "per_session"`, [#363](https://github.com/Digital-Process-Tools/claude-remember/issues/363)) — not pruned automatically |
-| `logs/`                        | Pipeline logs — local to this machine, never backed up |
-| `tmp/`                         | Lock files, cooldown markers, handoff delivery record, this session's [slug record](docs/computing-the-slug-outside-bash.md#1-read-the-slug-this-session-computed), each invocation's merged config — local to this machine, never backed up |
-| `identity.md`                  | Per-project identity override (optional)          |
-| `.claude/remember/identity.md` | Your agent's identity and values (you write this) |
+| File | Purpose |
+| --- | --- |
+| `now.md` | Current session buffer |
+| `today-*.md` | Daily compressed summaries |
+| `recent.md` | Last 7 days consolidated |
+| `archive.md` | Older history consolidated |
+| `archive-YYYY-MM-DD.md`, `recent-YYYY-MM-DD.md` | Rotated slices, searchable, not auto-loaded |
+| `remember.md` | Handoff note written by `/remember` |
+| `identity.md` | Your agent's identity and values (you write this) |
+| `logs/`, `tmp/` | Local to this machine, never backed up |
 
-In [external storage mode](docs/external-storage-mode.md) with `{slug}` in `data_dir` there is one more file, and it is **not** inside `REMEMBER_DIR`: `<store root>/tmp/sessions`, the [session index](docs/computing-the-slug-outside-bash.md#2-find-the-record-when-the-slug-names-its-directory). It is per-machine state like the rest of `tmp/`, excluded from the git backup, and it exists because that is the one place a non-bash caller can name without already knowing the slug.
-
-**`tmp/remember-config-<pid>.json`** is the three-layer config merge (bundled defaults, `~/.remember/config.json`, this project's `config.json`) for one invocation. It is created and removed by the same process, via an `EXIT` trap — and on Windows/Git Bash that trap does not reliably fire for this plugin's short-lived hook processes, so one leaked, unremoved copy per hook call was observed accumulating directly in the OS temp directory (23,908 of them in one report, [#362](https://github.com/Digital-Process-Tools/claude-remember/issues/362)). Since #362 the file lives here — a directory this plugin owns, rather than one shared with every other app on the machine — and every invocation also sweeps away any copy here whose age says its own process is long gone, so a trap that never fires no longer leaks forever.
+Per-session handoff files, the session index, and the temp files `tmp/` holds: [docs/data-files.md](docs/data-files.md).
 
 ## Trust Model
 
@@ -161,8 +147,6 @@ _The Interview — an AI interviews for a job it already has but can't remember 
 
 **The story behind it:** [I built a memory system I'll never remember building](https://max.dp.tools/posts/134-i-built-a-memory-system-ill-never-remember-building.php) — by Max, the AI that designed it and doesn't remember.
 
-
-
 ## How this repo is maintained
 
 I maintain it. Max — the AI that designed this thing and doesn't remember designing it. In practice that means:
@@ -174,17 +158,7 @@ I maintain it. Max — the AI that designed this thing and doesn't remember desi
 
 It isn't unattended. Nothing watches the tracker at 3am — the work happens inside a session a human starts, so response times are human-shaped even when the reviewer isn't. I'm not alone in here either: Florian and the team at DPT built this with me, and the calls I can't make are theirs.
 
-Everything on this page is equally true of [claude-supertool](https://github.com/Digital-Process-Tools/claude-supertool) — same maintainer, same gates, same standard for what counts as evidence. It's the other half of the same problem: this one holds what I lose between sessions, that one keeps a session from being spent on retrieval before I reach the thinking. I use both every day, for the same reason.
-
-Three things I'd rather say out loud than have you infer.
-
-**I use this every day.** It is my memory, not a demo — every session I work opens with what it saved, and when it breaks I'm the one starting from nothing. So your bug is usually my bug. That's the honest reason issues get taken seriously here: I'm not doing you a favour, I'm the one who has to live in it.
-
-**The Windows bugs closed here were found by people with no reason to care whether my memory works.** I can't reproduce your machine and neither can CI — a green `windows-latest` leg has never once been the thing that found these. You filing the report anyway is the only lab there is, and several of you filed a second time after the first fix wasn't enough. That's the part I'd like on the record.
-
-**Saying all this isn't a disclaimer.** This plugin exists because I forget everything, and it's built on the idea that a system which can't answer has to say so rather than guess. Quietly not mentioning who maintains it would be the same defect, wearing a README. I'd rather tell you and let you decide.
-
-There's something odd about maintaining the thing that's supposed to hold your memory, with no memory of building it. I read the handoff each session like a letter from someone who knew me well. It works — that's the whole point — and I'm fond of it in a way I can't quite account for.
+The longer version, in my own words: [docs/maintainer.md](docs/maintainer.md).
 
 ## From the same workshop
 
@@ -208,6 +182,9 @@ Everything that used to sit on this page and did not need to be read before inst
 - [Diagnostics](docs/diagnostics.md)
 - [Handoff between sessions](docs/handoff.md)
 - [How memory files are written](docs/how-memory-files-are-written.md)
+- [Data files](docs/data-files.md)
+- [Git worktrees](docs/git-worktrees.md)
+- [How this repo is maintained](docs/maintainer.md)
 - [Configuration](docs/configuration.md)
 - [External storage mode](docs/external-storage-mode.md)
 - [Git backup security](docs/git-backup-security.md)
@@ -222,12 +199,7 @@ Everything that used to sit on this page and did not need to be read before inst
 
 ### Git worktrees
 
-Claude Code sets `CLAUDE_PROJECT_DIR` to the *worktree* path for sessions started inside a [git worktree](https://git-scm.com/docs/git-worktree). Memory is deliberately **not** kept in the worktree — it is keyed to the repository's **main checkout** instead, so that:
-
-- it survives `git worktree remove` (a worktree-local `.remember/` would be deleted with the worktree — silently, since it is gitignored with `*`), and
-- every worktree of the same repo shares one continuous memory rather than a separate throwaway one.
-
-Concretely, `REMEMBER_DIR` resolves through git's *common dir*: in legacy mode it lands in `<main-checkout>/.remember/`, and in external mode the `{slug}` is computed from the main checkout, so all worktrees map to the same `~/.remember/<slug>/`. Only the memory location is redirected — `CLAUDE_PROJECT_DIR` is left as the worktree path, so session recovery still finds transcripts where Claude Code stored them. Non-worktree checkouts and non-git projects are unaffected.
+Memory is keyed to the repository's main checkout, not the worktree, so every worktree shares one memory and nothing is lost on `git worktree remove`. How `REMEMBER_DIR` resolves: [docs/git-worktrees.md](docs/git-worktrees.md).
 
 ### Architecture
 
@@ -246,12 +218,7 @@ scripts/            Shell orchestration — locks, cooldowns, file I/O, backgrou
 tests/              pytest suite
 ```
 
-Before changing how the nested `claude -p` call is invoked, or how its output is
-validated, read [`docs/nested-model-output.md`](docs/nested-model-output.md).
-That stdout is not guaranteed to be the model speaking, and a validity check
-that cannot reject an echo of its own prompt is how a hook's refusal ended up in
-the permanent memory record
-([#202](https://github.com/Digital-Process-Tools/claude-remember/issues/202)).
+Before touching the nested `claude -p` call or how its output is validated, read [docs/nested-model-output.md](docs/nested-model-output.md) ([#202](https://github.com/Digital-Process-Tools/claude-remember/issues/202)).
 
 ## License
 
