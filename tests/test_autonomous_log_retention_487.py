@@ -183,6 +183,24 @@ def _run_hook(plugin: Path, env: dict, *, session_id, reason: str = "other"):
             deadline = time.monotonic() + 30
             while time.monotonic() < deadline and _pid_alive(pid):
                 time.sleep(0.05)
+    # TEMP DEBUG (#487 CI iteration): CI round 3 (job 100884873570) showed
+    # "subshell started" printed to tmp/debug-487.log but the matching
+    # "exited status=" line never arrived within the 30s _pid_alive wait
+    # above -- either that wait is not tracking the real process at all on
+    # real Windows (OSTYPE there was "cygwin", and cygwin's own PIDs do not
+    # necessarily correspond to the native Windows PIDs `tasklist` above
+    # queries) or the real flush simply takes longer than 30s under real
+    # Windows subprocess-spawn overhead. Poll the debug marker itself
+    # (unambiguous evidence save-session.sh actually returned) up to 90s
+    # more, independent of the PID-based wait, so the next CI run's failure
+    # text says definitively whether this is a wait-condition bug or a
+    # real hang.
+    debug_487 = Path(env["CLAUDE_PROJECT_DIR"]) / ".remember" / "tmp" / "debug-487.log"
+    _deadline2 = time.monotonic() + 90
+    while time.monotonic() < _deadline2:
+        if debug_487.exists() and "exited status=" in debug_487.read_text(errors="replace"):
+            break
+        time.sleep(0.1)
     return result
 
 
