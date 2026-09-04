@@ -16,7 +16,7 @@ converted (`tests/test_hook_cwd_leak_417.py`, `tests/test_transcript_path_leak_4
 plus a fifth, `tests/test_autonomous_log_retention_487.py`, which adopted the
 same route for its own #487 rather than being converted by #432 itself.
 
-## The count: 95, not 107 (and not the issue's original 92)
+## The count: 97, not 107 (and not the issue's original 92)
 
 The issue's own re-verified count -- `grep -rl "pytestmark = pytest.mark.skipif"
 tests | xargs grep -l "win32"` -- returns 107 on this tree. That command only
@@ -36,7 +36,7 @@ parses every test module with `ast`, and only counts a file that has an
 actual module-level `pytestmark = pytest.mark.skipif(<expr containing
 "win32">, reason=...)` assignment -- a bare call, or one arm of a
 list/tuple of marks (pytest ORs a list, so any one arm mentioning "win32"
-is a real blanket skip). That finds **95** modules on this tree at this
+is a real blanket skip). That finds **97** modules on this tree at this
 commit. `tests/test_windows_skip_triage_497.py` recomputes this same set
 on every run and diffs it against the table below, so this list cannot
 silently drift out of sync with the tree the way the issue itself describes
@@ -55,7 +55,7 @@ once already during review.
   path-format incompatibility. 12 modules.
 - **unclear** -- the reason string alone does not say enough to tell; reading
   it is not the same as reading the test body, and this list is deliberately
-  not that read. 75 modules.
+  not that read. 77 modules.
 
 **A blind spot in the scanner itself, caught once already.** An earlier
 version of `scripts/windows_skip_triage_497.py` only matched a bare
@@ -71,7 +71,7 @@ what the AST matcher was written to recognize, not by an exhaustive read of
 every skip expression in `tests/`.
 
 **The `unclear` majority is the honest result, not a shortcut.** The great
-bulk of these 95 reasons is one of a handful of near-identical templated
+bulk of these 97 reasons is one of a handful of near-identical templated
 strings -- `"bash subprocess + POSIX layout -- not portable to Windows
 runners"`, `"bash hook subprocess + POSIX semantics -- not portable to
 Windows runners"`, and near-variants -- that bundle the one thing
@@ -97,6 +97,7 @@ verdict is the useful artifact").
 | `tests/test_case_divergence_298.py` | bash hook subprocess + POSIX semantics — not portable to Windows runners (#79) | unclear | reason bundles the bash-subprocess dependency with an unspecified "POSIX semantics/layout" claim; cannot tell from the string alone whether that names a real non-bash blocker or is boilerplate |
 | `tests/test_codex_stdin_session_id_468.py` | bash hook subprocess + POSIX semantics — not portable to Windows runners (#79) | unclear | reason bundles the bash-subprocess dependency with an unspecified "POSIX semantics/layout" claim; cannot tell from the string alone whether that names a real non-bash blocker or is boilerplate |
 | `tests/test_codex_transcript_path_459.py` | bash hook subprocess + POSIX semantics — not portable to Windows runners (#79) | unclear | reason bundles the bash-subprocess dependency with an unspecified "POSIX semantics/layout" claim; cannot tell from the string alone whether that names a real non-bash blocker or is boilerplate |
+| `tests/test_config_key_injection_539.py` | bash subprocess + POSIX layout — not portable to Windows runners (#79) | unclear | reason bundles the bash-subprocess dependency with an unspecified "POSIX semantics/layout" claim; the test body sources scripts/log.sh's config() through a bash subprocess against tmp_path-derived PROJECT_DIR/PIPELINE_DIR/HOME and separately exercises an LC_ALL=C-scoped bracket-range regex under a UTF-8 locale -- real bash/locale-collation behavior, not merely the interpreter's presence, so this is not "reason names only bash" (convertible); but nothing here names a specific POSIX-only primitive either (not-convertible) -- reading the body narrows this to the templated majority rather than settling it |
 | `tests/test_consolidate_read_race.py` | bash subprocess + POSIX layout — not portable to Windows runners (#79) | unclear | reason bundles the bash-subprocess dependency with an unspecified "POSIX semantics/layout" claim; cannot tell from the string alone whether that names a real non-bash blocker or is boilerplate |
 | `tests/test_consolidation_append_race.py` | bash subprocess + POSIX layout — not portable to Windows runners (#79) | unclear | reason bundles the bash-subprocess dependency with an unspecified "POSIX semantics/layout" claim; cannot tell from the string alone whether that names a real non-bash blocker or is boilerplate |
 | `tests/test_consolidation_retire_reopened_day_509.py` | bash subprocess + POSIX layout -- not portable to Windows runners (#79) | unclear | reason bundles the bash-subprocess dependency with an unspecified "POSIX semantics/layout" claim; cannot tell from the string alone whether that names a real non-bash blocker or is boilerplate |
