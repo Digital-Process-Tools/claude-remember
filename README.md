@@ -105,12 +105,12 @@ Run it when memory is not appearing and nothing says why. It prints resolved pat
 
 ### Hooks
 
-| Hook | Script | Purpose |
-| --- | --- | --- |
-| `SessionStart` | `session-start-hook.sh` | Loads memory into context, recovers missed sessions |
-| `UserPromptSubmit` | `user-prompt-hook.sh` | Stamps the current time into the prompt |
-| `PostToolUse` | `post-tool-hook.sh` | Saves the session when enough tool calls have accumulated |
-| `SessionEnd` | `session-end-hook.sh` | Flushes whatever `PostToolUse` has not saved yet |
+| Claude Code / Codex | Gemini CLI | Script | Purpose |
+| --- | --- | --- | --- |
+| `SessionStart` | `SessionStart` | `session-start-hook.sh` | Loads memory into context, recovers missed sessions |
+| `UserPromptSubmit` | `BeforeAgent` | `user-prompt-hook.sh` | Stamps the current time into the prompt |
+| `PostToolUse` | `AfterTool` | `post-tool-hook.sh` | Saves the session when enough tool calls have accumulated |
+| `SessionEnd` | `SessionEnd` | `session-end-hook.sh` | Flushes whatever `PostToolUse` has not saved yet |
 
 What each one skips and why, the `hooks.d/` listener contract, and why `SessionEnd` never writes a handoff: [docs/hooks.md](docs/hooks.md).
 
