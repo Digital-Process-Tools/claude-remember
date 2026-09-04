@@ -1,0 +1,5 @@
+{
+  "name": "remember",
+  "version": "1.0.0",
+  "description": "Continuous memory hooks for Gemini CLI -- session capture, extraction and summarization, mirroring the Claude Code plugin's hooks/hooks.json. Hooks live in the sibling hooks/hooks.json, not this manifest (bundle/docs/extensions/reference.md ## Hooks)."
+}

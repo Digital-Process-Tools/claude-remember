@@ -5,7 +5,7 @@
       {
         "hooks": [
           {
-            "command": "bash \"${PLUGIN_ROOT}/scripts/post-tool-hook.sh\"",
+            "command": "bash \"${GEMINI_PROJECT_DIR}/scripts/post-tool-hook.sh\"",
             "type": "command"
           }
         ]
@@ -15,7 +15,7 @@
       {
         "hooks": [
           {
-            "command": "bash \"${PLUGIN_ROOT}/scripts/user-prompt-hook.sh\"",
+            "command": "bash \"${GEMINI_PROJECT_DIR}/scripts/user-prompt-hook.sh\"",
             "type": "command"
           }
         ]
@@ -27,7 +27,7 @@
       {
         "hooks": [
           {
-            "command": "bash \"${PLUGIN_ROOT}/scripts/session-start-hook.sh\"",
+            "command": "bash \"${GEMINI_PROJECT_DIR}/scripts/session-start-hook.sh\"",
             "type": "command"
           }
         ]
@@ -37,7 +37,7 @@
       {
         "hooks": [
           {
-            "command": "bash \"${PLUGIN_ROOT}/scripts/session-end-hook.sh\"",
+            "command": "bash \"${GEMINI_PROJECT_DIR}/scripts/session-end-hook.sh\"",
             "type": "command"
           }
         ]
