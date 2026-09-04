@@ -277,8 +277,17 @@ fi
 # make. Redirecting the whole group puts the shell's own diagnostic inside the
 # suppressed scope.
 if [ -d "$REMEMBER_DIR" ]; then
-    case "$REMEMBER_DIR" in
-        "$_mem_proj"/*)
+    # #519: both sides forward-slashed before the case-glob match --
+    # REMEMBER_DIR and _mem_proj both arrive backslash-separated on
+    # msys/cygwin (resolve-paths.sh's own _remember_normalize_win_path),
+    # and a bash `case` pattern only ever recognises '/' as a path
+    # separator, so an in-project store's REMEMBER_DIR silently never
+    # matched "$_mem_proj"/* there -- no .gitignore was ever written, and
+    # doctor.sh's later diagnostic for that store degrades to WARN-only
+    # permanently. The write itself still targets the real (unmodified)
+    # REMEMBER_DIR; only the comparison is normalized.
+    case "$(_remember_forward_slash "$REMEMBER_DIR")" in
+        "$(_remember_forward_slash "$_mem_proj")"/*)
             [ -f "$REMEMBER_DIR/.gitignore" ] || { echo '*' > "$REMEMBER_DIR/.gitignore"; } 2>/dev/null
             ;;
     esac
