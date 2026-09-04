@@ -18,9 +18,15 @@ correct ``save-session`` summary must preserve (specific filenames, error
 codes, decisions -- exactly what ``prompts/save-session.prompt.txt`` itself
 asks the model to keep: "mention files, MR numbers, issue numbers"). Each
 test builds the real save-session prompt via ``pipeline.prompts`` from a
-fixture transcript, sends it through the live ``call_haiku()`` -- whatever
-provider this host resolves to, unmocked -- and asserts every named fact
-survives into the summary as a substring.
+fixture transcript, sends it through the live ``call_haiku()`` -- forced
+onto the ``codex`` route via ``REMEMBER_SUMMARIZER=codex`` (the same
+explicit override ``tests/test_summarizer_routing_460.py`` uses under
+mock), unmocked -- and asserts every named fact survives into the summary
+as a substring. The route is forced deliberately: ``auto`` only resolves
+to ``codex`` when ``REMEMBER_TRANSCRIPT_PATH`` already names a live
+Codex-shaped transcript, which is not the ordinary dev-shell or CI-runner
+case this harness runs in -- an unforced run would silently judge the
+pre-existing ``claude`` route instead of the one this issue is about.
 
 A judge-call shape (an LLM grading another LLM's prose) needs its own
 calibration and is a much bigger scope than this issue asks for; substring
@@ -38,14 +44,17 @@ pytest).
 
 Would this test pass if the code did nothing? No: an empty or SKIP result,
 or a summary that drops a fixture's facts, fails it. Proven both ways
-before this file was committed -- with RUN_LIVE_SUMMARY_JUDGE=1 set, a
-version of this file asserting a fact absent from the fixture (a
-Redis-instance-size fact folded into the auth-csrf-bugfix case, which never
-mentions Redis) failed with a real diff showing the missing fact; restoring
-the correct per-fixture fact list turned it green against a real call. Not
-re-run on every edit after that, because each run is a live, billed API
-call -- exactly the cost this file exists to keep out of CI and out of the
-default local suite.
+against the committed shape (REMEMBER_SUMMARIZER=codex forced, current
+fact lists) before this file reached its final commit -- with
+RUN_LIVE_SUMMARY_JUDGE=1 set, a version of the auth-csrf-bugfix case
+asserting a fact absent from the fixture ("Kubernetes pod eviction", which
+that transcript never mentions) failed with a real diff showing the
+missing fact against a live codex-routed call; restoring the correct
+fact list turned it green against another live codex-routed call, and
+the sibling rate-limit-feature case was independently confirmed green the
+same way. Not re-run on every edit after that, because each run is a
+live, billed API call -- exactly the cost this file exists to keep out of
+CI and out of the default local suite.
 """
 
 from __future__ import annotations
@@ -90,7 +99,7 @@ CASES = [
     {
         "id": "rate-limit-feature",
         "transcript": FIXTURES_DIR / "rate-limit-feature.jsonl",
-        "facts": ["middleware.py", "100", "Redis"],
+        "facts": ["middleware.py", "100 req", "Redis"],
     },
 ]
 
@@ -101,12 +110,17 @@ def _build_prompt_for(transcript_path: Path) -> str:
     Reuses the extractor's own message-formatting shape (see
     ``pipeline.extract.extract_session``) rather than hand-writing a
     second copy of it, so the prompt this harness sends is the same shape
-    the pipeline actually sends in production, not an approximation of it.
+    the pipeline actually sends in production. The ``Lines:`` count in
+    particular has to come from ``count_lines()`` (the raw physical line
+    count, metadata included) rather than ``len(messages)`` (the filtered
+    count) -- production's own ``extract_session`` uses the former, and a
+    hand-rolled ``len(messages)`` here would quietly diverge from it.
     """
     messages = _extract.extract_messages(
         str(transcript_path), skip_lines=0, envelope="claude-code"
     )
-    lines = [f"Session: {transcript_path.stem}", f"Lines: {len(messages)}", "=" * 60]
+    total_lines = _extract.count_lines(str(transcript_path))
+    lines = [f"Session: {transcript_path.stem}", f"Lines: {total_lines}", "=" * 60]
     for role, text in messages:
         lines.append(f"\n[{role}]")
         lines.append(text)
@@ -121,7 +135,19 @@ def _build_prompt_for(transcript_path: Path) -> str:
 
 
 @pytest.mark.parametrize("case", CASES, ids=[c["id"] for c in CASES])
-def test_live_summary_preserves_session_facts(case):
+def test_live_summary_preserves_session_facts(case, monkeypatch):
+    # This is the one thing the issue is actually about: without forcing
+    # the route, _choose_summarizer_provider()'s "auto" default only ever
+    # resolves to "codex" when REMEMBER_TRANSCRIPT_PATH already points at a
+    # live Codex-shaped transcript (pipeline/haiku.py's own
+    # _choose_summarizer_provider docstring) -- never true in an ordinary
+    # dev shell or CI runner, so an unforced run here would silently judge
+    # the pre-existing claude route instead of the codex route #492 is
+    # about. REMEMBER_SUMMARIZER=codex is the explicit override every
+    # provider always honours (see
+    # tests/test_summarizer_routing_460.py::test_explicit_codex_override_wins_under_claude_code_host),
+    # same as that file's own precedent for forcing this route under test.
+    monkeypatch.setenv("REMEMBER_SUMMARIZER", "codex")
     prompt = _build_prompt_for(case["transcript"])
     result = call_haiku(prompt, timeout=60)
 
