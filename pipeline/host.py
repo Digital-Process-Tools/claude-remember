@@ -8,11 +8,29 @@ directly. Three now exist, and they agree on far less than they appear to:
     | hook stdin `session_id`, `cwd`, `transcript_path` | yes | yes | yes |
     | tool event names | `PreToolUse`/`PostToolUse` | same | `BeforeTool`/`AfterTool` |
     | plugin-root env var | `CLAUDE_PLUGIN_ROOT` | `PLUGIN_ROOT` (+ `CLAUDE_*` alias) | none documented |
+    | project-dir env var | `CLAUDE_PROJECT_DIR` | `CLAUDE_PROJECT_DIR` (compat alias) | `CLAUDE_PROJECT_DIR` (compat alias, #456) |
 
 The stdin payload is the only part all three arrived at independently. The
 environment is the parochial part: Codex's `CLAUDE_PLUGIN_ROOT` is a
 compatibility alias it chose to extend and can withdraw, and Gemini documents no
-such variable at all.
+plugin-root variable at all -- but it does document a project-dir one. Gemini
+CLI's own bundled docs (`@google/gemini-cli` 0.57.0,
+`bundle/docs/hooks/index.md`, `### Environment variables`) list
+`CLAUDE_PROJECT_DIR` as `(Alias) Provided for compatibility`, alongside four
+Gemini-native names (`GEMINI_PROJECT_DIR`, `GEMINI_PLANS_DIR`,
+`GEMINI_SESSION_ID`, `GEMINI_CWD`) that carry no equivalent in this module,
+since nothing here reads them yet. This corrects an earlier version of this
+module, which claimed Gemini CLI "documents no environment variables for
+command hooks at all" -- true of the plugin-root row, false of every other
+row in the table above (#456). Settled from documentation, not from a live
+`gemini` process: no `gemini` binary runs in CI
+(`tests/test_gemini_project_dir_var_456.py` states the same limit
+`tests/test_gemini_manifest_456.py` already states for the manifest), and the
+much larger question -- whether this repo's several `CLAUDE_PROJECT_DIR`-unset
+shell branches (`scripts/resolve-paths.sh`, `scripts/lib-env-cache.sh`,
+`scripts/user-prompt-hook.sh`, and others) still behave correctly now that
+Gemini CLI is known to set it -- reaches well outside this module and is
+tracked as its own follow-up rather than fixed here.
 
 So this module is deliberately thin, and is not a host abstraction layer. It
 holds the two things that genuinely differ — what a host calls its variables,
@@ -114,12 +132,20 @@ CODEX = Host(
     signature_vars=("CODEX_SESSION_ID", "CODEX_THREAD_ID"),
 )
 
-# Gemini CLI documents no environment variables for command hooks at all, so it
-# has no signature to match and no variable to read. It is here because it is
-# real and because its absence of variables is the point: everything Remember
-# needs from it arrives on stdin. It is never the result of detection — it is
-# what UNKNOWN already behaves like.
-GEMINI = Host(name="gemini-cli")
+# Gemini CLI documents no plugin-root variable and no signature (nothing
+# Gemini-specific to detect it by), but it DOES document CLAUDE_PROJECT_DIR as
+# a compatibility alias -- the same name CODEX reads project_dir from, and for
+# the same reason: bundle/docs/hooks/index.md lists it as
+# "(Alias) Provided for compatibility", with no Gemini-native project-dir name
+# alongside it (#456; tests/test_gemini_project_dir_var_456.py). Settled from
+# documentation, not a live install -- see this module's own docstring table
+# above for what that limit does and does not cover.
+#
+# It has no signature_vars, so it is never the result of detect_host() --
+# it is what UNKNOWN already behaves like for that purpose. It is here
+# because it is real, and because everything else Remember needs from it
+# arrives on stdin regardless.
+GEMINI = Host(name="gemini-cli", project_dir_vars=("CLAUDE_PROJECT_DIR",))
 
 # The fallback. Not an error: a host we do not recognise still delivers the
 # payload, and the payload is the part that matters.
