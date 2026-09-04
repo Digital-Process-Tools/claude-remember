@@ -1,0 +1,96 @@
+"""Recompute the live set of win32 blanket-skip test modules (#497).
+
+`grep -rl "pytestmark = pytest.mark.skipif" tests | xargs grep -l "win32"`
+-- the command #497's own brief and `scripts/report_windows_skip_floor.py`'s
+docstring both cite (92, then 107) -- over-counts. It requires only that both
+substrings appear *somewhere* in the file, not that they form one real
+`pytestmark` assignment. On this tree it catches a docstring that merely
+*quotes* `pytestmark = pytest.mark.skipif(...)` as prose (`test_bash_runner_432.py`,
+`test_sanctioned_divergence_state_440.py`) and, more importantly, files that
+already carry the `resolve_bash()`-style route -- a local `_find_bash()` whose
+own probe order happens to test `sys.platform == "win32"` and whose skip
+reason is `"bash not available"` / `"Git Bash not found (...)"`, not a blanket
+win32 skip at all (`test_stale_config_sweep_362.py`, `test_tmpdir_cleanup.py`,
+`test_trap_quoting_375.py`, `test_log_sh.py`, `test_migration.py`,
+`test_security_fixes.py`, plus the four files this issue's own #432 already
+converted). Counted on this tree at the base commit for #497 (718a10f): the
+grep-shape check finds 107 files; this AST-based check, requiring an actual
+module-level `pytestmark = pytest.mark.skipif(...)` assignment whose test
+expression mentions `win32`, finds 94.
+
+Used by both `docs/windows-skip-triage.md`'s own generation and by
+`tests/test_windows_skip_triage_497.py`, which recomputes this set fresh on
+every run and diffs it against the file the doc lists -- so the doc cannot
+silently drift out of sync with the tree the way the issue itself describes
+happening to the grep-based count.
+"""
+
+from __future__ import annotations
+
+import ast
+import glob
+import os
+
+
+def find_blanket_skip_modules(tests_dir: str) -> dict[str, str | None]:
+    """Return {relative POSIX path: skip reason} for every test module under
+    `tests_dir` that carries a module-level
+    `pytestmark = pytest.mark.skipif(<expr mentioning win32>, reason=...)`.
+
+    `tests_dir` is the tests directory itself (e.g. `.../tests`); returned
+    paths are relative to its parent, POSIX-separated, so they match the
+    literal path strings a human (or this repo's own doc) would write.
+    """
+    root = os.path.dirname(os.path.abspath(tests_dir))
+    found: dict[str, str | None] = {}
+
+    for path in sorted(glob.glob(os.path.join(tests_dir, "**", "*.py"), recursive=True)):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                src = fh.read()
+            tree = ast.parse(src, filename=path)
+        except (OSError, SyntaxError):
+            continue
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Assign):
+                continue
+            targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
+            if "pytestmark" not in targets:
+                continue
+            if not isinstance(node.value, ast.Call):
+                continue
+            func = node.value.func
+            is_skipif = (
+                isinstance(func, ast.Attribute)
+                and func.attr == "skipif"
+                and isinstance(func.value, ast.Attribute)
+                and func.value.attr == "mark"
+            )
+            if not is_skipif:
+                continue
+            segment = ast.get_source_segment(src, node) or ""
+            if "win32" not in segment:
+                continue
+
+            reason = None
+            for kw in node.value.keywords:
+                if kw.arg == "reason":
+                    try:
+                        reason = ast.literal_eval(kw.value)
+                    except ValueError:
+                        reason = ast.get_source_segment(src, kw.value)
+
+            rel = os.path.relpath(path, root).replace(os.sep, "/")
+            found[rel] = reason
+
+    return found
+
+
+if __name__ == "__main__":
+    here = os.path.dirname(os.path.abspath(__file__))
+    tests_dir = os.path.join(os.path.dirname(here), "tests")
+    modules = find_blanket_skip_modules(tests_dir)
+    print(f"{len(modules)} blanket win32-skip modules found under {tests_dir}")
+    for path in sorted(modules):
+        print(f"  {path}: {modules[path]!r}")
