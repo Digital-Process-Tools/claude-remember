@@ -251,26 +251,45 @@ config() {
     local key="$1"
     local default="$2"
 
+    # $key is spliced into the jq program below by string interpolation, not
+    # passed as data (#539) -- `if $key == null then ... else ($key |
+    # tostring) end`, with $key substituted verbatim, twice. Every call site
+    # in this repo passes a hardcoded literal, so nothing exploits this
+    # today, but the function's contract never said the argument had to be a
+    # literal, and nothing enforced it. Reject anything that is not a plain
+    # dotted path up front, before the config table is even loaded, so a
+    # future caller that builds $key from data fails closed to the default
+    # instead of having it evaluated as jq.
+    #
+    # A `case` glob CANNOT express this: the earlier form here,
+    # `""|.|.*[!A-Za-z0-9_.]*`, only rejected a key that literally started
+    # with "." and later contained a bad character -- a key with no leading
+    # dot at all (`("INJECTED"|length>0)`, say) matched none of that
+    # pattern's arms, fell through the whole case silently, and reached the
+    # jq interpolation below unfiltered. `[[ =~ ]]` (already used elsewhere
+    # in this file, e.g. the KEY=VALUE parser below) can anchor the WHOLE
+    # string against a real grammar instead: one leading dot, then one or
+    # more [A-Za-z0-9_.]+ segments joined by single dots, nothing else.
+    if ! [[ "$key" =~ ^\.[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$ ]]; then
+        echo "$default"
+        return
+    fi
+
     # Lazily, and again if a caller repointed REMEMBER_CONFIG at another file.
     if [ -z "$_REMEMBER_CFG_STATE" ] || \
        [ "$_REMEMBER_CFG_LOADED_FROM" != "${REMEMBER_CONFIG:-}" ]; then
         _config_load
     fi
 
+    # $key is already known to match the dotted-path grammar above, so this
+    # branch no longer needs its own shape check -- it only has to fall
+    # through when the table state cannot answer (fallback / private key).
     if [ "$_REMEMBER_CFG_STATE" = "ok" ] && ! _config_is_private_key "$key"; then
-        case "$key" in
-            ""|.|.*[!A-Za-z0-9_.]*)
-                # Not a plain dotted key — the table cannot name it. Fall
-                # through to the per-key reader, which speaks jq.
-                ;;
-            .?*)
-                local _slot="_RCFG_${key#.}"
-                _slot="${_slot//./_}"
-                local _hit="${!_slot:-}"
-                [ -n "$_hit" ] && echo "$_hit" || echo "$default"
-                return
-                ;;
-        esac
+        local _slot="_RCFG_${key#.}"
+        _slot="${_slot//./_}"
+        local _hit="${!_slot:-}"
+        [ -n "$_hit" ] && echo "$_hit" || echo "$default"
+        return
     fi
 
     if [ ! -f "${REMEMBER_CONFIG:-}" ]; then
@@ -279,6 +298,10 @@ config() {
     fi
     local val=""
     if command -v jq >/dev/null 2>&1; then
+        # $key is spliced into this program by string interpolation below --
+        # safe ONLY because the guard at the top of this function already
+        # rejected anything not shaped like a plain dotted path (#539). Do
+        # not remove that guard to "simplify" this branch.
         # NOT `$key // empty`: jq's // treats false the same as null, so every
         # boolean option set to false read back as its default and could never
         # be switched off (#159). features.ndc_compression and features.recovery
