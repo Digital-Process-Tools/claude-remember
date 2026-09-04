@@ -57,6 +57,23 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def _dump_dir(d: Path) -> str:
+    """TEMP DEBUG (#487 CI iteration): filenames AND contents, so the real
+    windows-latest job log actually shows what the housekeeping block saw
+    -- the DEBUG printf lines added to scripts/save-session.sh land inside
+    the run's own session-end-*.log file, not in this subprocess's own
+    captured stdout/stderr, since the flush is backgrounded. Remove once
+    the mechanism is understood.
+    """
+    out = []
+    for p in sorted(d.iterdir()):
+        try:
+            out.append(f"--- {p.name} ---\n{p.read_text(errors='replace')}")
+        except OSError as exc:
+            out.append(f"--- {p.name} (unreadable: {exc}) ---")
+    return "\n".join(out) if out else "(empty)"
+
+
 def _pid_alive(pid: int) -> bool:
     """Portable liveness probe for `_run_hook`'s own wait below.
 
@@ -175,7 +192,7 @@ class TestAgedAutonomousLogsAreReclaimed:
             "a non-empty session-end log, 8 days old, survived an ordinary "
             "flush's own housekeeping -- #487's retention gap: emptiness "
             "was the only thing ever reclaimed here, and this file was "
-            "never empty\n" + str(list(autonomous.iterdir()))
+            "never empty\n" + _dump_dir(autonomous)
         )
 
     def test_must_fire_a_fresh_nonempty_log_survives_the_same_sweep(self, tmp_path):
@@ -201,7 +218,7 @@ class TestAgedAutonomousLogsAreReclaimed:
         assert recent.exists(), (
             "a 1-day-old, non-empty session-end log was reclaimed well "
             "inside the default 7-day retention window -- the sweep is not "
-            "keyed to the configured age at all\n" + str(list(autonomous.iterdir()))
+            "keyed to the configured age at all\n" + _dump_dir(autonomous)
         )
 
     def test_must_fire_retention_window_is_configurable(self, tmp_path):
@@ -231,7 +248,7 @@ class TestAgedAutonomousLogsAreReclaimed:
             "thresholds.autonomous_log_retention_days=1 did not shrink the "
             "retention window -- a 2-day-old log survived a sweep "
             "configured to reclaim anything over 1 day old\n"
-            + str(list(autonomous.iterdir()))
+            + _dump_dir(autonomous)
         )
 
 
@@ -271,7 +288,7 @@ class TestHousekeepingRunsIndependentlyOfNdcCompression:
             "flush's own housekeeping with features.ndc_compression=false -- "
             "#498's coupling: the sweep lived inside the RUN_NDC block and "
             "turning NDC compression off silently turned housekeeping off "
-            "too\n" + str(list(autonomous.iterdir()))
+            "too\n" + _dump_dir(autonomous)
         )
 
 
@@ -481,7 +498,7 @@ REMEMBER_DIR={shlex.quote(remember_dir)}
             "retention sweep's own glob -- this is CI job 100831279309's "
             "own failure, reproduced locally by feeding the REAL "
             "housekeeping block a synthetic Windows-shaped REMEMBER_DIR\n"
-            + str(list(autonomous.iterdir()))
+            + _dump_dir(autonomous)
         )
 
     def test_must_not_fire_control_a_posix_backslash_named_dir_is_left_untouched(self, tmp_path):
@@ -530,7 +547,7 @@ REMEMBER_DIR={shlex.quote(remember_dir)}
             "therefore match nothing) when $OSTYPE does not say Windows "
             "Git Bash -- normalizing it anyway would silently mangle a "
             "real POSIX path containing a literal backslash\n"
-            + str(list(autonomous.iterdir()))
+            + _dump_dir(autonomous)
         )
 
     def test_must_fire_forward_slash_remember_dir_is_swept_too(self, tmp_path):
@@ -550,5 +567,5 @@ REMEMBER_DIR={shlex.quote(remember_dir)}
         assert not stale.exists(), (
             "an ordinary forward-slash REMEMBER_DIR must still be swept "
             "after the fix -- the normalization must be a no-op here, not "
-            "a regression\n" + str(list(autonomous.iterdir()))
+            "a regression\n" + _dump_dir(autonomous)
         )
