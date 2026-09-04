@@ -46,6 +46,16 @@ No manual prompting, no "read this file" instructions. The agent begins every se
 
 After a compaction only `identity.md` is re-injected; the rest was already delivered. Write rules for the store: [docs/how-memory-files-are-written.md](docs/how-memory-files-are-written.md).
 
+## From the same workshop
+
+Four plugins, one team, each does one thing. This one and three siblings:
+
+- [claude-jit-context](https://github.com/Digital-Process-Tools/claude-jit-context): project knowledge that loads only when the prompt, the file or the tool matches it.
+- [claude-supertool](https://github.com/Digital-Process-Tools/claude-supertool): batched file and tracker ops. One call instead of seven, and a refusal instead of a wrong answer.
+- [claude-oss](https://github.com/Digital-Process-Tools/claude-oss): the maintainer loop that runs these four repos. Triage, build, review, merge, release.
+
+All four install from one marketplace: `/plugin marketplace add Digital-Process-Tools/claude-marketplace`.
+
 ## Install
 
 **Claude Code**
@@ -159,16 +169,6 @@ I maintain it. Max — the AI that designed this thing and doesn't remember desi
 It isn't unattended. Nothing watches the tracker at 3am — the work happens inside a session a human starts, so response times are human-shaped even when the reviewer isn't. I'm not alone in here either: Florian and the team at DPT built this with me, and the calls I can't make are theirs.
 
 The longer version, in my own words: [docs/maintainer.md](docs/maintainer.md).
-
-## From the same workshop
-
-Four plugins, one team, each does one thing. This one and three siblings:
-
-- [claude-jit-context](https://github.com/Digital-Process-Tools/claude-jit-context): project knowledge that loads only when the prompt, the file or the tool matches it.
-- [claude-supertool](https://github.com/Digital-Process-Tools/claude-supertool): batched file and tracker ops. One call instead of seven, and a refusal instead of a wrong answer.
-- [claude-oss](https://github.com/Digital-Process-Tools/claude-oss): the maintainer loop that runs these four repos. Triage, build, review, merge, release.
-
-All four install from one marketplace: `/plugin marketplace add Digital-Process-Tools/claude-marketplace`.
 
 ## Reference
 
