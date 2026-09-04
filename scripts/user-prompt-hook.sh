@@ -101,19 +101,31 @@ unset REMEMBER_TRANSCRIPT_PATH
 # the stamp on this host", it is "print it inside the envelope Codex's own
 # schema names" -- see the tail of this file.
 #
-# CLAUDE_PROJECT_DIR is the signal already used for this exact distinction
-# in resolve-paths.sh's own ENVIRONMENT block: Claude Code always sets it,
-# Codex documents no such variable and never does, and Gemini CLI
-# "documents no hook environment variables whatsoever" either. So this flag
-# also covers Gemini CLI, whose stdout contract this repo has NOT observed
-# -- REASONED, not observed, for any host besides Codex 0.150.1. The JSON
-# envelope is what Codex's own schema documents, and is no worse than a
-# bracket that collides with Codex's heuristic on every host it has not
-# been checked against either.
-if [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then
-    _REMEMBER_HOST_JSON_STDOUT=0
-else
+# Used to key this off "is CLAUDE_PROJECT_DIR set" -- Claude Code always
+# sets it, and until #456 Codex and Gemini CLI were both believed never to,
+# so "unset" stood in for "Codex or Gemini, wrap it". #456 found that belief
+# wrong for Gemini: its own bundled docs list CLAUDE_PROJECT_DIR as a
+# compatibility alias it DOES set (tests/test_gemini_project_dir_var_456.py).
+# Left alone, that turns "CLAUDE_PROJECT_DIR unset" into an over-broad
+# signal -- ANY host that does not set it, Gemini included in the old
+# belief, fell into the JSON-envelope branch by default, whether or not it
+# actually wanted Codex's schema.
+#
+# So this now keys on CODEX's own signature instead: CODEX_SESSION_ID /
+# CODEX_THREAD_ID, the exact pair pipeline/host.py's CODEX.signature_vars
+# already uses, captured from a real `codex exec` process
+# (tests/fixtures/codex-env-463.txt) and never observed on any other host.
+# That makes the JSON envelope Codex-only BY CONSTRUCTION rather than
+# "everything that isn't visibly Claude Code" -- a deliberate, documented
+# choice (#534), not a claim that plain stdout is correct for Gemini CLI's
+# own BeforeAgent stdout contract, which stays unverified (#532 blocks a
+# live session). It only says guessing "JSON envelope" for an unverified
+# host is no safer than guessing "plain", and Codex is the one host whose
+# stdout contract is actually known, from its own schema, to need it.
+if [ -n "${CODEX_SESSION_ID:-}" ] || [ -n "${CODEX_THREAD_ID:-}" ]; then
     _REMEMBER_HOST_JSON_STDOUT=1
+else
+    _REMEMBER_HOST_JSON_STDOUT=0
 fi
 
 source "$_HOOK_DIR/lib-clock.sh"
@@ -123,16 +135,22 @@ source "$_HOOK_DIR/lib-env-cache.sh"
 # below for #479) ---
 # resolve-paths.sh's REMEMBER_HOOK_CWD fallback (#411) only ever gets a
 # value from session-start-hook.sh and session-end-hook.sh, which is why a
-# host that never sets CLAUDE_PROJECT_DIR (Codex, Gemini CLI) hit the FATAL
-# in resolve-paths.sh on this hook before #411/#444: the #417 unset above
-# left it correct but with no legitimate source of its own. UserPromptSubmit
-# carries `cwd` on its own stdin payload on all three hosts (#407's
-# comparison table), so read it here.
+# host that never sets CLAUDE_PROJECT_DIR (Codex -- confirmed live,
+# tests/fixtures/codex-env-463.txt) hit the FATAL in resolve-paths.sh on
+# this hook before #411/#444: the #417 unset above left it correct but with
+# no legitimate source of its own. Gemini CLI's own bundled docs say it DOES
+# set CLAUDE_PROJECT_DIR (#456, unverified live -- #532), so this fallback
+# is not what makes Gemini resolvable any more, but it stays correct and
+# still needed for Codex and any other host that genuinely leaves it unset.
+# UserPromptSubmit carries `cwd` on its own stdin payload on all three
+# hosts (#407's comparison table), so read it here regardless.
 #
 # THIS MUST RUN BEFORE _remember_env_cache_load BELOW (#479). That
 # function's own key, _remember_env_cache_path, falls back to
-# REMEMBER_HOOK_CWD when CLAUDE_PROJECT_DIR is unset (#469) -- and on
-# Codex/Gemini CLAUDE_PROJECT_DIR is NEVER set. Before #479 this read lived
+# REMEMBER_HOOK_CWD when CLAUDE_PROJECT_DIR is unset (#469) -- which is
+# still Codex's own case (confirmed live) and can be true of other hosts
+# too, even though Gemini CLI's own docs now say it is not Gemini's (#456,
+# unverified live -- #532). Before #479 this read lived
 # inside the "cache missed" branch below, i.e. it only ever ran AFTER the
 # cache lookup this very variable was meant to key had already failed for
 # want of it: every UserPromptSubmit wrote a cache file and none ever read
@@ -150,8 +168,9 @@ source "$_HOOK_DIR/lib-env-cache.sh"
 # no-op bash process doing nothing but consume the same stdin -- the loop's
 # own marginal cost does not clear that measurement's noise floor. The
 # alternative -- leaving the read on the slow path only -- keeps this hook
-# with no working fast path at all on Codex/Gemini, which is the choice
-# #479 exists to make explicit rather than silent.
+# with no working fast path at all on Codex, and on any other host that
+# genuinely leaves CLAUDE_PROJECT_DIR unset, which is the choice #479
+# exists to make explicit rather than silent.
 #
 # WORST CASE, not just average case: before this change, a cache-HIT
 # invocation never touched stdin at all, so it could never block on it.

@@ -72,10 +72,16 @@ _REMEMBER_LIB_ENV_CACHE_LOADED=1
 # there is no project to key on.
 #
 # Keyed on the RAW CLAUDE_PROJECT_DIR when it is set, falling back to
-# REMEMBER_HOOK_CWD (#469): Codex and Gemini CLI set neither CLAUDE_PROJECT_DIR
-# nor any variable this cache could key on before resolve-paths.sh runs, and
-# that absence is the entire premise of #407/#411/#444 -- the same hosts
-# #411/#444 gave every hook a REMEMBER_HOOK_CWD fallback for. Without this,
+# REMEMBER_HOOK_CWD (#469): Codex sets neither CLAUDE_PROJECT_DIR nor any
+# variable this cache could key on before resolve-paths.sh runs (live-
+# confirmed, #463); Gemini CLI's own bundled docs now say it DOES set
+# CLAUDE_PROJECT_DIR as a compatibility alias (#456, unverified live --
+# #532), so on Gemini this cache is expected to key on that directly and
+# never need the fallback at all. That absence was the entire premise of
+# #407/#411/#444 for Codex -- the same hosts #411/#444 gave every hook a
+# REMEMBER_HOOK_CWD fallback for -- and the fallback stays correct and
+# needed for Codex and any other host that genuinely leaves
+# CLAUDE_PROJECT_DIR unset. Without this,
 # resolve-paths.sh:270 still exports the RESOLVED CLAUDE_PROJECT_DIR before
 # _remember_env_cache_publish runs, so a cache file is written every time and
 # never found by _remember_env_cache_load, which runs in a fresh process
@@ -135,8 +141,11 @@ _remember_env_cache_normalize_into() {
 _remember_env_cache_path() {
     # Pinned once per process (#469): this function runs both BEFORE
     # resolve-paths.sh (from _remember_env_cache_load, when CLAUDE_PROJECT_DIR
-    # is still unset on Codex/Gemini and REMEMBER_HOOK_CWD is the only
-    # signal) and AFTER it (from _remember_env_cache_publish, by which point
+    # is still unset on Codex -- and on any other host that genuinely never
+    # sets it -- and REMEMBER_HOOK_CWD is the only signal; Gemini CLI's own
+    # docs now say it DOES set CLAUDE_PROJECT_DIR, #456, unverified live --
+    # #532, so this branch is not expected to be reached on Gemini at all)
+    # and AFTER it (from _remember_env_cache_publish, by which point
     # resolve-paths.sh has exported the RESOLVED -- and on Windows/Git-Bash,
     # NORMALIZED -- CLAUDE_PROJECT_DIR). Recomputing on the second call would
     # let the now-set CLAUDE_PROJECT_DIR win over the raw REMEMBER_HOOK_CWD
@@ -235,10 +244,14 @@ _remember_env_cache_load() {
     case "$_delta" in '' | *[!0-9]*) return 1 ;; esac
     # Compared against the SAME identity _remember_env_cache_path just keyed
     # on (CLAUDE_PROJECT_DIR, falling back to REMEMBER_HOOK_CWD, #469) rather
-    # than raw CLAUDE_PROJECT_DIR directly -- on Codex/Gemini CLAUDE_PROJECT_DIR
-    # is unset in the fresh process reading this cache, so comparing against
-    # it directly would reject every cache this fallback lets the path
-    # function find, defeating the fix at this one remaining line.
+    # than raw CLAUDE_PROJECT_DIR directly -- on Codex (live-confirmed,
+    # #463) CLAUDE_PROJECT_DIR is unset in the fresh process reading this
+    # cache, so comparing against it directly would reject every cache this
+    # fallback lets the path function find, defeating the fix at this one
+    # remaining line. Gemini CLI's own docs now say it DOES set
+    # CLAUDE_PROJECT_DIR (#456, unverified live -- #532), in which case the
+    # comparison above is against that value directly and this fallback path
+    # is simply never exercised on Gemini.
     [ "$_env_proj" = "${_REMEMBER_ENV_CACHE_KEY:-}" ] || return 1
     [ "$_env_pipe" = "${CLAUDE_PLUGIN_ROOT:-}" ] || return 1
     [ "$_env_home" = "${HOME:-}" ] || return 1

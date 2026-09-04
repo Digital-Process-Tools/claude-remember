@@ -194,9 +194,17 @@ def _project(tmp_path: Path):
 
 def _env_codex(home: Path, project: Path) -> dict:
     """Codex-shaped: no CLAUDE_PROJECT_DIR, PLUGIN_ROOT set (the vendor-neutral
-    name Codex sets natively per resolve-paths.sh), cwd only on stdin."""
+    name Codex sets natively per resolve-paths.sh), cwd only on stdin, and
+    CODEX_SESSION_ID/CODEX_THREAD_ID set -- the signature a real `codex exec`
+    process actually exports on every run (tests/fixtures/codex-env-463.txt,
+    #463), which is what the JSON-envelope branch keys on since #534 (it used
+    to key on CLAUDE_PROJECT_DIR being unset, which stopped being a reliable
+    Codex-only signal once #456 found Gemini CLI's own docs claim it sets
+    that variable too)."""
     env = {**os.environ, "HOME": str(home), "USER": WHO,
-           "PLUGIN_ROOT": str(REPO_ROOT), "TMPDIR": str(project.parent / "tmp")}
+           "PLUGIN_ROOT": str(REPO_ROOT), "TMPDIR": str(project.parent / "tmp"),
+           "CODEX_SESSION_ID": "01a04d64-fake-codex-session",
+           "CODEX_THREAD_ID": "01a04d64-fake-codex-thread"}
     for key in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT", "REMEMBER_DIR",
                 "REMEMBER_TZ", "REMEMBER_PROMPT_STAMP", "USERNAME",
                 "_LIB_MEMORY_DIR_LOADED"):
@@ -210,7 +218,8 @@ def _env_claude_code(home: Path, project: Path) -> dict:
            "CLAUDE_PROJECT_DIR": str(project), "CLAUDE_PLUGIN_ROOT": str(REPO_ROOT),
            "TMPDIR": str(project.parent / "tmp")}
     for key in ("REMEMBER_DIR", "REMEMBER_TZ", "REMEMBER_PROMPT_STAMP",
-                "USERNAME", "_LIB_MEMORY_DIR_LOADED"):
+                "USERNAME", "_LIB_MEMORY_DIR_LOADED",
+                "CODEX_SESSION_ID", "CODEX_THREAD_ID"):
         env.pop(key, None)
     (project.parent / "tmp").mkdir(exist_ok=True)
     return env

@@ -161,8 +161,13 @@ export REMEMBER_TRANSCRIPT_PATH
 # ── The cwd the host handed us (#411) ─────────────────────────────────────
 # Same field, same reasoning as session-start-hook.sh's identical block:
 # exported for resolve-paths.sh (sourced below) to consult as its fallback
-# once CLAUDE_PROJECT_DIR is unset -- the state Codex and Gemini CLI leave it
-# in, since neither sets that variable. Data from a host payload, validated
+# once CLAUDE_PROJECT_DIR is unset -- still the state Codex leaves it in
+# (live-confirmed, #463); Gemini CLI's own bundled docs now say it DOES set
+# CLAUDE_PROJECT_DIR, as a compatibility alias (#456, unverified live --
+# #532), so this fallback is expected to go unused on Gemini rather than be
+# what makes it resolvable. It stays correct and needed for Codex and any
+# other host that genuinely leaves the variable unset. Data from a host
+# payload, validated
 # at the point of entry: only a carriage return or raw newline is rejected,
 # since a project directory legitimately contains slashes and dots and
 # cannot share STDIN_SESSION_ID's character allowlist. Whether the value
