@@ -9,7 +9,7 @@ arbitrary file as the invoking user, or -- for `lib-memory-dir.sh` -- receive
 the actual write that follows.
 
 `lib-memory-dir.sh` is the sharper case: its `_merged_cfg` can carry a live
-`haiku.oauth_token` (README.md's own documented config key), and unlike
+`haiku.oauth_token` (docs/configuration.md's own documented config key), and unlike
 `doctor.sh`'s stderr-capture file, this one is written to twice -- once to
 create it private, once with the real merged JSON -- so a planted symlink at
 the predictable path receives the credential itself, not just a truncation.

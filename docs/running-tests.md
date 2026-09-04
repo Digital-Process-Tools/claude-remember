@@ -86,6 +86,8 @@ to `resolve_bash()`, a separate and much larger effort tracked by #497 itself.
 The annotation makes the number impossible to miss without blocking work that
 has nothing to do with it.
 
+### Measuring the warm path (`tests/env_cache.py`)
+
 `scripts/lib-env-cache.sh` refuses its cache unless the cache file is `-nt`
 every config layer, and bash's `-nt` compares **whole seconds**. So a test that
 writes a config and then counts process spawns on the "warm" run is measuring

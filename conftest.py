@@ -83,11 +83,26 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
     try:
         from scripts import report_windows_skip_floor as skipfloor
 
-        skipped = len(terminalreporter.stats.get("skipped", []))
-        total = sum(
-            len(terminalreporter.stats.get(key, []))
-            for key in ("passed", "failed", "skipped", "error", "xfailed", "xpassed")
-        )
+        # Counted by DISTINCT nodeid, not by summing each category's report
+        # count: a test with a failing/erroring teardown gets a second report
+        # (outcome "error", `when="teardown"`) alongside its own call-phase
+        # "passed"/"failed"/"skipped" report -- summing list lengths would
+        # count that one test twice in `total` while `skipped` still counted
+        # it once, silently diluting the reported ratio below the true one.
+        report_categories = ("passed", "failed", "skipped", "error", "xfailed", "xpassed")
+        skipped_nodeids = {
+            report.nodeid
+            for report in terminalreporter.stats.get("skipped", [])
+            if getattr(report, "nodeid", None) is not None
+        }
+        all_nodeids = {
+            report.nodeid
+            for key in report_categories
+            for report in terminalreporter.stats.get(key, [])
+            if getattr(report, "nodeid", None) is not None
+        }
+        skipped = len(skipped_nodeids)
+        total = len(all_nodeids)
         skip_result = skipfloor.analyze(skipped, total, is_windows=(sys.platform == "win32"))
 
         terminalreporter.write_line(skipfloor.format_report(skip_result))
