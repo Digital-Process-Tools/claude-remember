@@ -8,15 +8,25 @@ event keys only; it carries every command string through verbatim, including
 `${CLAUDE_PLUGIN_ROOT}`, which Gemini CLI never sets. #407 already fixed this
 for our own scripts by reading `${PLUGIN_ROOT}` first
 (`scripts/resolve-paths.sh`, `pipeline/host.PLUGIN_ROOT_VARS`), so the
-checked-in manifest must spell it the vendor-neutral way rather than ship the
-raw migration output unedited.
+manifest as first checked in spelled it the vendor-neutral way rather than
+ship the raw migration output unedited.
+
+`${PLUGIN_ROOT}` turned out not to help either: #533 found, from Gemini
+CLI's own bundled docs, that a plain project-scope settings.json gets no
+plugin-root variable at all -- `${PLUGIN_ROOT}` was never going to resolve
+there any more than `${CLAUDE_PLUGIN_ROOT}` would have. This file's two
+tests that used to pin `${PLUGIN_ROOT}` now pin `${GEMINI_PROJECT_DIR}`
+instead, the variable that actually does resolve to a project-rooted path
+in that scope; see tests/test_gemini_extension_533.py for the fuller pin
+and for the new `${extensionPath}`-based distributable extension #533 adds
+alongside this file.
 
 This is a manifest lint only, the same limit test_codex_manifest_410.py
 states for its own file: no `gemini` binary runs in CI, so these tests prove
 the file is well-formed JSON, uses Gemini's own documented event names, and
-never spells the Claude-only variable -- not that Gemini actually loads it,
-fires a hook, or expands `${PLUGIN_ROOT}` in a hook command at all (that is
-explicitly out of scope per the #456 issue itself: "not yet observed").
+never spells the Claude-only variable -- not that Gemini actually loads it
+or fires a hook (that is explicitly out of scope per the #456 issue itself:
+"not yet observed", and #532 means it still is not observed).
 """
 
 from __future__ import annotations
@@ -138,19 +148,28 @@ def test_gemini_settings_never_spells_claude_plugin_root():
     assert found_any, "no hook commands found in .gemini/settings.json -- would pass vacuously"
 
 
-def test_gemini_settings_commands_use_plugin_root_var():
+def test_gemini_settings_commands_use_gemini_project_dir_var():
+    """#533: ${PLUGIN_ROOT} cannot resolve inside a plain project-scope
+    settings.json on a live Gemini CLI install -- no plugin-root alias is
+    ever exposed there (bundle/docs/hooks/index.md ### Environment
+    variables). $GEMINI_PROJECT_DIR is the one project-rooted variable a
+    settings.json hook command actually receives, and is what this file
+    was rewritten to use; see tests/test_gemini_extension_533.py for the
+    fuller pin and for the new distributable ${extensionPath} extension
+    this repo ships alongside it."""
     found_any = False
     for event, gi, hi, hook in _iter_commands():
         found_any = True
         cmd = hook.get("command", "")
-        assert re.search(r"\$\{PLUGIN_ROOT\}", cmd), (
-            f"{event}[{gi}].hooks[{hi}]: command does not reference ${{PLUGIN_ROOT}}: {cmd!r}"
+        assert re.search(r"\$\{?GEMINI_PROJECT_DIR\}?", cmd), (
+            f"{event}[{gi}].hooks[{hi}]: command does not reference "
+            f"GEMINI_PROJECT_DIR: {cmd!r}"
         )
     assert found_any, "no hook commands found in .gemini/settings.json -- would pass vacuously"
 
 
 def test_every_gemini_settings_script_reference_exists():
-    pat = re.compile(r"\$\{PLUGIN_ROOT\}/(scripts/[A-Za-z0-9_./-]+\.sh)")
+    pat = re.compile(r"\$\{?GEMINI_PROJECT_DIR\}?/(scripts/[A-Za-z0-9_./-]+\.sh)")
     found_any = False
     for event, gi, hi, hook in _iter_commands():
         cmd = hook.get("command", "")
