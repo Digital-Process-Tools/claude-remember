@@ -1129,7 +1129,22 @@ case "$_AUTONOMOUS_LOG_RETENTION_DAYS" in (''|*[!0-9]*) _AUTONOMOUS_LOG_RETENTIO
 # POSIX filesystem at all (POSIX mkdir/open treat backslash as an
 # ordinary filename character rather than a separator, so the two
 # platforms would stop disagreeing and the bug would not reproduce).
-_remember_auto_dir="${REMEMBER_DIR//\\//}"
+#
+# Gated on $OSTYPE, not applied unconditionally (self-review finding):
+# backslash is a perfectly ordinary, legal filename character on POSIX,
+# and `_remember_normalize_win_path` above is ITSELF gated the same way,
+# for the same reason -- it never rewrites CLAUDE_PROJECT_DIR outside
+# msys/cygwin, so REMEMBER_DIR only ever carries a backslash-as-separator
+# on those two. An unconditional `${REMEMBER_DIR//\\//}` would silently
+# mangle a real POSIX project directory whose name happens to contain a
+# literal `\` (e.g. copied from somewhere that allowed it) into a
+# different, generally nonexistent path -- turning a working retention
+# sweep into a silently broken one for that one directory, on the
+# platform this fix has no business touching at all.
+case "$OSTYPE" in
+    msys|cygwin) _remember_auto_dir="${REMEMBER_DIR//\\//}" ;;
+    *) _remember_auto_dir="$REMEMBER_DIR" ;;
+esac
 for _remember_auto_log in "${_remember_auto_dir}/logs/autonomous"/*.log; do
     [ -f "$_remember_auto_log" ] || continue
     if [ ! -s "$_remember_auto_log" ]; then

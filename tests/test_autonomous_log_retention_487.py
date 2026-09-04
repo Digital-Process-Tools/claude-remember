@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -408,11 +409,33 @@ class TestHousekeepingGlobIsPortableAcrossSeparators:
         )
         return "\n".join(lines[start : end + 1])
 
-    def _run_extracted_block(self, autonomous: Path, remember_dir: str, *, retention_days: int = 7):
+    def _run_extracted_block(self, autonomous: Path, remember_dir: str, *,
+                              retention_days: int = 7, ostype: str = ""):
         """Runs the REAL housekeeping block (extracted verbatim above) in a
         standalone bash process, stood up with just enough of its own
         dependencies (`config`, `log`) stubbed to let it execute in
         isolation from the rest of save-session.sh.
+
+        `remember_dir` is embedded via `shlex.quote`, NOT an f-string
+        `!r}` -- `repr()` of a string containing backslashes ESCAPES each
+        one (Python-literal syntax: one input backslash becomes two
+        characters, `\\\\`), and bash's own single-quoted strings do no
+        backslash processing at all, so those doubled characters would
+        survive into REMEMBER_DIR's runtime value verbatim -- a
+        double-backslash-separated path, not the genuine single-backslash
+        Windows-native shape #448 actually produces (self-review finding).
+        `shlex.quote` wraps the value in single quotes without escaping
+        backslashes, since backslash is not special inside them either --
+        exactly what bash itself does with the string, byte for byte.
+
+        `ostype`, empty by default, sets $OSTYPE for the subprocess. The
+        fix in scripts/save-session.sh is itself gated on
+        `case "$OSTYPE" in msys|cygwin)`, matching
+        `_remember_normalize_win_path`'s own gate in resolve-paths.sh (the
+        thing that puts backslashes into REMEMBER_DIR in the first place)
+        -- so a backslash-laden REMEMBER_DIR only gets normalized when
+        $OSTYPE says this is actually Windows Git Bash, never on whatever
+        $OSTYPE this test happens to run under.
         """
         block = self._extract_housekeeping_block()
         script = f"""
@@ -420,15 +443,18 @@ set -u
 config() {{ printf '%s\\n' '{retention_days}'; }}
 log() {{ :; }}
 _remember_date() {{ date "$@"; }}
-REMEMBER_DIR={remember_dir!r}
+REMEMBER_DIR={shlex.quote(remember_dir)}
 {block}
 """
+        env = dict(os.environ)
+        if ostype:
+            env["OSTYPE"] = ostype
         result = subprocess.run(
-            [BASH, "-c", script], capture_output=True, text=True, timeout=30, check=False,
+            [BASH, "-c", script], env=env, capture_output=True, text=True, timeout=30, check=False,
         )
         assert result.returncode == 0, (
             f"the extracted housekeeping block itself failed to run "
-            f"(REMEMBER_DIR={remember_dir!r})\n"
+            f"(REMEMBER_DIR={remember_dir!r}, OSTYPE={ostype!r})\n"
             f"stdout={result.stdout}\nstderr={result.stderr}"
         )
 
@@ -446,14 +472,65 @@ REMEMBER_DIR={remember_dir!r}
         os.utime(stale, (eight_days_ago, eight_days_ago))
 
         windows_style = str(tmp_path / ".remember").replace("/", "\\")
-        self._run_extracted_block(autonomous, windows_style)
+        self._run_extracted_block(autonomous, windows_style, ostype="msys")
 
         assert not stale.exists(), (
             "a backslash-separated REMEMBER_DIR (the real Windows-native "
-            "form #448 produces) must not defeat the retention sweep's own "
-            "glob -- this is CI job 100831279309's own failure, reproduced "
-            "locally by feeding the REAL housekeeping block a synthetic "
-            "Windows-shaped REMEMBER_DIR\n" + str(list(autonomous.iterdir()))
+            "form #448 produces), with $OSTYPE=msys (Windows Git Bash, the "
+            "one platform the fix is gated on), must not defeat the "
+            "retention sweep's own glob -- this is CI job 100831279309's "
+            "own failure, reproduced locally by feeding the REAL "
+            "housekeeping block a synthetic Windows-shaped REMEMBER_DIR\n"
+            + str(list(autonomous.iterdir()))
+        )
+
+    def test_must_not_fire_control_a_posix_backslash_named_dir_is_left_untouched(self, tmp_path):
+        """Self-review finding: the fix is gated on `$OSTYPE` (msys/cygwin
+        only), not applied unconditionally -- a backslash is a perfectly
+        ordinary, legal filename character on POSIX, and
+        `_remember_normalize_win_path` (resolve-paths.sh) that actually
+        puts backslashes into REMEMBER_DIR is itself gated the identical
+        way. Without this gate, a POSIX project directory whose real name
+        happens to contain a literal `\\` would get silently rewritten to a
+        different, generally nonexistent path by an unconditional
+        normalization -- turning a working retention sweep into a broken
+        one for exactly the directory this fix has no business touching.
+
+        This does not construct a real backslash-NAMED directory (bash's
+        `[ -f ]`/`stat`/`rm -f` calls inside the extracted block would
+        happily follow such a literal name on POSIX, same as any other
+        filename -- proving nothing about the glob's own directory
+        argument specifically). It asserts the narrower, decisive claim
+        instead: with $OSTYPE left at whatever this test's own platform
+        reports (never msys/cygwin), the block must NOT even attempt to
+        normalize a backslash-laden REMEMBER_DIR -- checked by feeding a
+        REMEMBER_DIR that is backslash-laden AND does not correspond to
+        any real directory at all, so if the gate were ever removed and
+        the block normalized it anyway, the now-real (forward-slash)
+        target it would produce is deliberately made to be this fixture's
+        actual, empty autonomous/ directory -- exposing the removal as a
+        false "swept" rather than as an unrelated no-op.
+        """
+        autonomous = tmp_path / ".remember" / "logs" / "autonomous"
+        autonomous.mkdir(parents=True)
+        stale = autonomous / "session-end-000000-33333.log"
+        stale.write_text("12:00:00 [session-end] flush started\n")
+        eight_days_ago = time.time() - (8 * 24 * 3600)
+        os.utime(stale, (eight_days_ago, eight_days_ago))
+
+        # A REMEMBER_DIR that is backslash-laden but resolves, once
+        # normalized, to the REAL .remember dir above -- so an ungated
+        # normalization would still sweep `stale`, and this control would
+        # then wrongly look identical to the fixed behaviour.
+        backslash_but_real_if_normalized = str(tmp_path / ".remember").replace("/", "\\")
+        self._run_extracted_block(autonomous, backslash_but_real_if_normalized)
+
+        assert stale.exists(), (
+            "a backslash-laden REMEMBER_DIR must be left untouched (and "
+            "therefore match nothing) when $OSTYPE does not say Windows "
+            "Git Bash -- normalizing it anyway would silently mangle a "
+            "real POSIX path containing a literal backslash\n"
+            + str(list(autonomous.iterdir()))
         )
 
     def test_must_fire_forward_slash_remember_dir_is_swept_too(self, tmp_path):
