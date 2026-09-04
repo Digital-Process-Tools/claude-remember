@@ -110,6 +110,27 @@ def run_block(
     `return` (lib-case-divergence.sh's own guards do), `after` is skipped
     exactly as it would be for a real caller, which is itself part of what
     a test of that guard needs to observe.
+
+    Written to a real temp .sh file and run as `bash <path>`, NOT
+    `bash -c <script>` (#518, CI job 100918217138 and its 3.10/3.11/3.12
+    siblings, all 4 windows-latest legs): every one of this file's own
+    call sites builds a several-hundred-byte, multi-line, heavily-quoted
+    script string and hands it to Python's `subprocess.run` as a single
+    argv element. On POSIX that element reaches bash byte-for-byte over
+    `exec`; on Windows there is no argv array at the OS level at all --
+    Python's own `subprocess` module re-serialises the whole list into ONE
+    command-line string via `list2cmdline` (Microsoft C-runtime quoting
+    rules), and `bash.exe` (an MSYS2/Cygwin binary, not an ordinary
+    Windows executable) re-derives its OWN argv from that string using
+    the Cygwin runtime's separate, POSIX-flavoured re-parser -- two
+    different quoting conventions on either side of one string, and
+    nothing here pins which one governs a script this long and this
+    quote-dense. A short file PATH crosses that same boundary as a single
+    plain token with no quoting ambiguity at all, which is exactly the
+    property this rewrite trades for: the script's own bytes are written
+    to disk directly (`newline="\\n"`, so Python's own text-mode layer
+    cannot reintroduce a platform line ending either), and only the path
+    -- never the script text -- is marshalled through argv.
     """
     from _bash_runner import resolve_bash
 
@@ -127,15 +148,23 @@ _run_extracted_block() {{
 _run_extracted_block
 """
     import os
+    import tempfile
 
     full_env = dict(os.environ)
     if env:
         full_env.update(env)
-    return subprocess.run(
-        [bash, "-c", script],
-        env=full_env,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-    )
+
+    fd, script_path = tempfile.mkstemp(suffix=".sh")
+    try:
+        with os.fdopen(fd, "w", newline="\n") as f:
+            f.write(script)
+        return subprocess.run(
+            [bash, script_path],
+            env=full_env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    finally:
+        os.remove(script_path)
