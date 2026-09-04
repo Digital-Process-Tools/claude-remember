@@ -868,7 +868,26 @@ if [ "$DELTA" -gt "$DELTA_THRESHOLD" ] && [ "$IN_COOLDOWN" = false ]; then
 
     if [ "$ALREADY_RUNNING" = false ]; then
         mkdir -p "$REMEMBER_DIR/logs/autonomous"
-        nohup "$SAVE_SCRIPT" "$SESSION_ID" > "$REMEMBER_DIR/logs/autonomous/save-$(_remember_date +%H%M%S).log" 2>&1 &
+        _SAVE_LOG="$REMEMBER_DIR/logs/autonomous/save-$(_remember_date +%H%M%S).log"
+        # Seeded with a header line BEFORE the backgrounded save-session.sh
+        # ever opens it, and the nohup redirect below appends (`>>`) rather
+        # than truncates (`>`) -- same defence session-end-hook.sh already
+        # gives $_END_LOG (scripts/session-end-hook.sh:296-311, #483),
+        # applied here for #527: save-session.sh's own housekeeping sweep
+        # (unconditional on every flush since #498, not tied to its NDC
+        # step) reclaims any *.log in this same directory that is still
+        # empty when it runs -- and on an ordinary flush save-session.sh's
+        # own log() writes to its daily narrative file, never to
+        # stdout/stderr, so a `>`-truncated, still-open $_SAVE_LOG is
+        # exactly what that sweep -- run from INSIDE the very process
+        # writing into it -- matches and deletes. A non-empty file at open
+        # time is never `-empty`, so it survives its own run's housekeeping
+        # while a genuinely stale, still-empty log from an abandoned run is
+        # untouched by this and keeps getting swept exactly as before.
+        if ! printf '%s [post-tool] save triggered\n' "$(_remember_date +%H:%M:%S)" >> "$_SAVE_LOG" 2>/dev/null; then
+            log "hook" "WARNING: could not seed $_SAVE_LOG -- if this file stays absent or empty, an ordinary housekeeping sweep will reclaim it while this flush is still writing to it"
+        fi
+        nohup "$SAVE_SCRIPT" "$SESSION_ID" >> "$_SAVE_LOG" 2>&1 &
         echo $! > "$PID_FILE"
         SAVE_TRIGGERED="true"
     fi
