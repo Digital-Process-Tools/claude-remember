@@ -7,6 +7,227 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-09-04 — Windows glob-blindness, swept again, and autonomous logs stop erasing their own evidence
+
+### Added
+
+- **A per-module triage of the 95 Windows CI legs' blanket `win32` skips** (#497,
+  follow-up to #507's own skip-ratio report). `docs/windows-skip-triage.md` lists
+  every test module that still carries a module-level
+  `pytestmark = pytest.mark.skipif(sys.platform == "win32", ...)` -- a bare call
+  or one arm of a list of marks -- its skip reason, and a verdict against
+  `tests/_bash_runner.py`'s `resolve_bash()` route -- `convertible`,
+  `not-convertible`, or `unclear` where the reason string alone cannot say. Not
+  a mass rewrite: no test file was converted here. The issue's own re-verified
+  count (107, by a grep that also catches two docstring mentions and eleven
+  modules that already moved to the `resolve_bash()` route) is corrected to 95
+  by `scripts/windows_skip_triage_497.py`'s AST-based count, which
+  `tests/test_windows_skip_triage_497.py` re-derives on every run so the list
+  cannot silently drift out of sync with the tree the way the issue itself
+  describes happening (92 -> 107 with nothing announcing it).
+
+- **The README names its three sibling plugins near the top** (#505). One block, three
+  links, one marketplace command. Before this each README named the others once or not
+  at all, and the repo strangers reach first (claude-remember) pointed nowhere.
+
+- **A test that dominates the suite is now reported, not found by chance** (#510). `pytest` already
+  printed `--durations`; nothing read it. A root-level `conftest.py` now prints the top durations
+  and the slowest test's share of total suite time at the end of every `pytest` run, local or any CI
+  leg, with no extra flag. Three states -- `measured`, `no-baseline`, `could-not-measure` -- are
+  always distinguishable in the output; it is a report, never a gate, and never fails a run on
+  wall-clock time.
+
+### Changed
+
+- **Cross-host locking contract written down and tested** (#491). Claude Code and Codex
+  sharing one `.remember/` store had no explicit safety contract: `scripts/lib-lock.sh`
+  and `scripts/lib-staging-lock.sh` were written and tested against a single host's
+  process model, and neither file nor its tests mentioned Codex or "host" at all.
+  Established (not assumed): the lock primitive is already safe there, because `mkdir`
+  and `kill -0` are OS-level, process-table operations indifferent to which CLI spawned
+  the contending process, and every lock is keyed by a fixed literal name or by day, never
+  by session id. Both files now carry that contract as a header comment, and
+  `tests/test_cross_host_lock_contract_491.py` proves it under real concurrent writes
+  from two simulated hosts (no lost or interleaved entries), documents the one general,
+  pre-existing `kill -0` PID-reuse limitation this design inherits (not new, not made
+  worse by a second host), and locks in that the lock/staging layer never assumes a
+  session-ID shape.
+
+- **Documented, rather than left open, whether a real host payload can trigger the
+  #447 nested-`cwd` extractor gap** (#494). Reading Claude Code's, Codex's and
+  Gemini CLI's hook payload schemas (source-verified for Codex, docs-observed for
+  the other two) shows `cwd` is always a top-level field and the only nested
+  object a hook payload carries (`tool_input`/`tool_response`) is always declared
+  after it — so the gap the #447 test pins is a property of the shell extractor's
+  own first-occurrence scan on a synthetic input, not something any known,
+  currently-shipped host payload reaches. Recorded in the extractor's own header
+  comment; the test stays a characterization rather than becoming a hard
+  assertion, since a host is free to reorder its own schema.
+
+- Changed (#498): `logs/autonomous/` retention housekeeping (`thresholds.autonomous_log_retention_days`) used to run only inside `save-session.sh`'s `if [ "$RUN_NDC" = true ]` block, by accident of placement -- so setting `features.ndc_compression=false` silently disabled log retention too, with the threshold configured and doing nothing and no signal anywhere that it was inert. The sweep now runs unconditionally on every ordinary flush, independent of NDC compression.
+
+- **README.md moved from 934 lines to a stranger-facing front page** (#505). Six
+  reference sections a stranger scrolled past to reach `## Architecture` --
+  computing the slug outside bash, reading the transcript path the host hands
+  us, configuration, measuring lock hold times, external storage mode, and
+  running tests -- moved verbatim to `docs/<slug>.md`, each replaced in the
+  README by a one-line pointer under a new `## Reference` heading. Every
+  internal anchor link that crossed the move was repointed at its new file;
+  `tests/test_config_contract.py` and `tests/test_prompt_stamp_301.py`, which
+  pinned text out of the Configuration table, now read `docs/configuration.md`
+  instead of `README.md`.
+
+- **CI's Windows legs exclude the checkout and runner temp directory from Windows Defender scanning** (#512, ported from `claude-jit-context#310`). `Add-MpPreference -ExclusionPath` on `${{ github.workspace }}` and `$RUNNER_TEMP`, Windows-only, before the test step. This is preemptive rather than a measured speedup here: on run `33574746296` the `windows-latest` legs were the *fastest* in the matrix (133-205s against 370-434s on Linux and 547-638s on macOS), because 92 modules blanket-skip on win32 (#497) and the Windows legs therefore touch almost no temp files. The exclusion earns its keep when those skips lift and the Windows legs start doing the same file-heavy work the other two OSes already do. No test, hook or behaviour is touched; the exclusion exists only inside the ephemeral runner VM.
+
+- **The `tests` workflow supersedes its own in-flight runs on a pull request** (#512). A `concurrency` group of `${{ github.workflow }}-${{ github.ref }}` with `cancel-in-progress: ${{ github.event_name == 'pull_request' }}`, so a second push to a pull request cancels the 12-leg matrix it replaced instead of racing it. Cancellation is deliberately limited to `pull_request`: a push to `main` is the run a release gate reads, and `cancelled` is not `success`, so cancelling one would leave that commit with no verdict at all -- the absence this repository's `CLAUDE.md` warns reads exactly like a pass. `github.ref` is `refs/pull/N/merge` on a pull request and `refs/heads/main` on a push, so the group is never constant and unrelated pull requests are not serialised against each other. `.github/workflows/oss-changelog.yml` already carried the same block; it only triggers on `pull_request`, which is why its `cancel-in-progress` is a bare `true`.
+- **The four plugin-owned files and the `01-oss` rule layer were refreshed from `/oss:scaffold --apply`.** `.github/workflows/oss-changelog.yml`, `.oss/README.md`, `.oss/assemble_changelog.py` and `.oss/statusline.py` are replaced wholesale on every scaffold run, so a fix shipped in the plugin reaches this repository only when that command is re-run here; `/oss:doctor` had reported all three of the changed ones as `would change what it does`. Eleven rule files under `.claude/jit-context/*/01-oss/` were rewritten by the same run, two of them new (`merge-gate.md`, `pr-create-gate.md`). No hand-written file was touched: nothing under `00-manual/` is read or written by that command.
+- **`pytest` now reports the 25 slowest tests.** `--durations=25` added to `addopts` in `pyproject.toml` beside the coverage flags already there, and `test_measurement_configured` set in `.oss.json` to record that the measurement exists. No threshold and no trend check is implied -- this only makes the number visible.
+
+### Fixed
+
+- Fixed (#487): `logs/autonomous/session-end-*.log` was never reclaimed. `find ... -empty -delete` was the only retention `logs/autonomous/` ever had, and #483's own fix for a different bug (that sweep matching its own still-open, still-empty log) seeded every `session-end-*.log` with a header before its subshell opens it -- making every one of them non-empty by construction, and so invisible to the only cleanup this directory had. One file per session, forever. Fixed by adding a second, age-keyed sweep (`thresholds.autonomous_log_retention_days`, default 7) over both file classes (`save-*.log` and `session-end-*.log`), independent of emptiness -- emptiness was always a proxy for staleness, and it is the proxy that produced #483 in the first place. The empty-file sweep still runs first, on the same pass. (Both sweeps were rewritten again since -- see the #498/#502 fragments for the current, portable mechanism.)
+
+- Fixed (#488): two `SessionEnd` hooks for the same project, ending inside the same wall-clock second, resolved to the identical flush log path -- `session-end-hook.sh` named `$_END_LOG` from a second-granularity timestamp alone, with no PID or session id. #486 made the collision harmless (both hooks append rather than truncate) but not absent: two flushes still interleaved into one file, and a reader could not tell whose lines were whose. Fixed by suffixing the filename with the hook process's own PID (`session-end-<HHMMSS>-<PID>.log`), so concurrent hooks always get distinct files. `scripts/doctor.sh`'s own `session-end-*.log` glob (#370's SessionEnd-liveness check) needed no change -- it was never anchored to a fixed width.
+
+- Fixed (#500): `save-session.sh`'s session-id validator admitted a leading hyphen (`^[a-f0-9-]+$` was never anchored to the first character), so an option-shaped session id (`-e`, `--`, `-adef`) could reach `REMEMBER_BRANCH_CMD`'s `argv[1]` as something the operator's own resolver could misread as a flag. Anchored to `^[a-f0-9][a-f0-9-]*$` -- a session id can never start with `-`, closing this off for every caller (CLI, `session-end-hook.sh`, `session-start-hook.sh`'s recovery path) at the one gate they all pass through.
+
+- Fixed (#501): `REMEMBER_BRANCH_CMD`'s stdout was substituted into the summarizer prompt with no bound on embedded control characters -- `$(...)` only strips a trailing newline, so a resolver that printed more than one line, or a lone carriage return with no line feed, wrote arbitrary content at column 0 of the prompt. Either is now refused outright (logged the same WARNING-and-fall-through-to-`git branch` as a non-zero exit or empty stdout), rather than truncated silently to its first line.
+
+- Fixed (#502): `logs/autonomous/`'s two housekeeping sweeps were bare `find` calls with stderr discarded and no exit-status check, so a failing (or, on Windows Git Bash, potentially PATH-shadowed) `find` was indistinguishable from "found nothing to delete." Replaced both with a portable `stat`-based sweep (GNU-first-then-BSD-fallback, matching `session-start-hook.sh`'s own existing sweep) that checks every removal and logs a WARNING through the same path `save-session.sh` already uses for its own fall-throughs, rather than swallowing a failure into silent success.
+
+- Fixed (#503): `session-end-hook.sh`'s `mkdir -p` for `logs/autonomous/` and the header write that seeds its own flush log were both unchecked. A failed write left the log absent or empty exactly as if it had never been opened -- reclaimed by the very next flush's own `-empty` sweep, silently reintroducing #483's original bug (no on-disk trace that `SessionEnd` ever fired) and leaving `scripts/doctor.sh`'s own liveness check to misdirect an operator toward a hook-registration problem that does not exist. Both writes now check their own exit status and report a WARNING on failure.
+
+- **`user-prompt-hook.sh` and `session-start-hook.sh` now agree on the env-cache key
+  for the same project on Windows** (#504). Both hooks derive the fast-path cache
+  key from `CLAUDE_PROJECT_DIR`/`REMEMBER_HOOK_CWD`, but one read it before
+  `resolve-paths.sh` normalized a Windows drive path and the other read it after —
+  a project whose `cwd` arrives in the forward-slash form Windows sometimes sends
+  could key two different cache files for the same project, so the fast path never
+  hit what the slow path had just published. The key is now normalized the same way
+  before it is pinned, so both spellings collapse to the same file.
+
+- **The README's OS badge no longer overclaims Windows test coverage** (#507,
+  following #497's measurement that the `windows-latest` legs report `success`
+  over 1201 of 1960 collected tests skipped -- roughly 61% of the suite, most
+  of it from a `sys.platform == "win32"` blanket-skip still on 107 of 174 test
+  modules). A one-line caveat now sits next to the badge, and `pytest` itself
+  -- local or any leg of the CI matrix, no extra flag -- prints the current
+  leg's own skip ratio via a new `pytest_terminal_summary` hook
+  (`scripts/report_windows_skip_floor.py`), annotating with a `::warning::`
+  GitHub Actions command when a Windows leg crosses a recorded 10% skip floor.
+  Deliberately a report, not a build-failing gate: today's ratio is already
+  far past 10%, and failing on it would redden every future Windows leg until
+  the modules behind it are migrated to `resolve_bash()` (#432), a separate
+  and much larger effort #497 tracks on its own.
+
+- **Consolidation's retire no longer overwrites an existing retired day** (#509). When a
+  `today-YYYY-MM-DD.md` staging file is re-created for a day that was already retired -- a
+  long-running session spanning midnight, or NDC re-opening a retired day's staging file --
+  the retire loop used to `mv`/`head -c ... >` straight over the existing `.done.md`,
+  silently destroying the first retired span's hourly-detail content with no log line.
+  `run-consolidation.sh` now appends to an existing `.done.md` instead of truncating it, in
+  both the plain-rename and the concurrent-append (`head -c`/tail-split) retire paths. The
+  concurrent-append path also no longer commits the consumed prefix into `.done.md` until
+  the unconsumed tail has been safely extracted too, closing a duplication self-review found
+  in the first version of this fix (a `tail` failure used to leave the prefix committed once
+  by the extraction step and once more by the whole-file fallback).
+
+- **`user-prompt-hook.sh`'s warm path forks fewer subshells** (#511, follow-up to
+  #227). The `cwd` extracted from stdin and the clock read for the prompt stamp
+  are now written into a variable directly instead of being captured through a
+  `$( ... )` command substitution — a fork bash pays for the substitution itself
+  even when nothing inside it shells out to an external process, cheap on
+  Linux/macOS and measurably slower on Windows Git Bash per the original report.
+  README now documents `prompt_stamp: "stable"` as the cheapest option for anyone
+  still finding the warm path slow.
+
+- **7 further Windows glob/pattern-match sites fixed, same class as #487** (#517).
+  Bash's own filename glob (`ls`, `rm -rf ... *`, a bare `for ... in`) and its
+  parameter-expansion pattern matching (`%/*`, `##*/`, a `[[ == ]]` glob) all
+  recognise only `/` as a path separator, never a backslash -- and on Git
+  Bash/MSYS2, `resolve-paths.sh` hands `REMEMBER_DIR`/`PROJECT_DIR` to the rest
+  of the scripts backslash-separated, the native Windows form. #487 fixed the
+  one instance CI was red on (`scripts/save-session.sh`'s retention sweep); an
+  `oss:auditor` self-review of that fix found 7 more, in different subsystems,
+  none touched by it:
+  - `scripts/run-consolidation.sh`'s stale-snapshot cleanup silently never fired
+  - `scripts/session-start-hook.sh`'s staging-file count and rotated-slice check
+    (feeding the "N day(s) of memory to compress" message and the session
+    banner's own `=== MEMORY ===` section) silently undercounted/omitted
+  - `scripts/lib-case-divergence.sh`'s own `REMEMBER_DIR` split left
+    `REMEMBER_CASE_STATUS` stuck at `"not-applicable"` regardless of real
+    on-disk state, and its own #138 in-project refusal compared a
+    forward-slashed value against a still-backslash `PROJECT_DIR`
+  - `scripts/doctor.sh`'s storage-mode detection (both the JSON and
+    human-readable branches) misreported an in-project store as "external",
+    and its staging-byte and pending-log-file counts (both printed directly to
+    the operator) silently undercounted to 0
+  - the #373 stale-delivery-record pruner in `scripts/session-start-hook.sh`
+    silently never fired, leaking one record per session forever
+
+  Fixed via one shared helper, `_remember_forward_slash` (`scripts/resolve-paths.sh`,
+  gated on `$OSTYPE` the same way `_remember_normalize_win_path` already is
+  there) -- 10 call sites in total (the case-divergence split above needed a
+  second, paired comparison fixed alongside it, and `doctor.sh`'s two
+  diagnostics each have a JSON-mode and a human-readable branch) now call it
+  instead of re-deriving the gate inline, the way #487's own fix had to.
+  `save-session.sh`'s own retention sweep is left as its existing inline
+  instance; adopting the shared helper there too is a follow-up, not part of
+  this fix.
+
+  **Two further sites in the same family were found and are NOT fixed by
+  this change**: `scripts/bootstrap-dirs.sh`'s in-project `.gitignore` write
+  (`case "$REMEMBER_DIR" in "$_mem_proj"/*)`) and
+  `hooks.d/before_session_start/50-git-restore.sh`'s legacy-mode guard
+  (`${REMEMBER_DIR%/*}`) -- both the identical class, outside this fix's own
+  claimed files. Filed for a follow-up.
+
+- **2 more Windows backslash-blindness sites fixed, found by #517's own
+  self-review** (#519). `scripts/bootstrap-dirs.sh`'s in-project
+  `.gitignore` write (`case "$REMEMBER_DIR" in "$_mem_proj"/*)`) silently
+  never wrote it on Git Bash/MSYS2, leaving that store's memory content
+  unexcluded from `git add -A`/`git status` inside the user's own project
+  repository -- the protective `.gitignore` `hooks.d/after_save/50-git-backup.sh`'s
+  own comments document relying on.
+  `hooks.d/before_session_start/50-git-restore.sh`'s
+  legacy-mode guard (`${REMEMBER_DIR%/*}` / `${REMEMBER_DIR##*/}`) mis-split
+  a backslash-separated `REMEMBER_DIR`, which made the later git-toplevel
+  check disagree with itself and the whole restore silently never fire, on
+  any affected Windows install with `git_restore.enabled=true` -- confirmed
+  live, not just theoretical, by tracing the call path to the hook's own
+  "declined: not the toplevel" refusal.
+
+  Both sites duplicate the identical `$OSTYPE` gate inline rather than
+  calling the shared `_remember_forward_slash` helper
+  (`scripts/resolve-paths.sh`, #517) directly, for two different reasons.
+  The git-restore.sh hook is exec'd as its own process by
+  `scripts/log.sh`'s `dispatch()`, never sourced, so a function
+  `resolve-paths.sh` defines in the parent process is not in scope there,
+  and the file deliberately never sources `resolve-paths.sh` itself to keep
+  its own documented "cheap guards first" cost promise for the legacy-mode
+  majority that can never activate this hook at all. bootstrap-dirs.sh's
+  first-pass fix DID call the shared helper directly (its own USAGE header
+  claims every caller sources `resolve-paths.sh` first) -- but a real
+  caller, `tests/test_external_data_dir.py` and
+  `tests/test_worktree_memory.py`'s own end-to-end harnesses, sources only
+  `detect-tools.sh` and `bootstrap-dirs.sh`, never `resolve-paths.sh`; there
+  the helper is genuinely undefined, the command substitution silently
+  becomes `command not found` (empty output), and the whole gate degrades
+  to "never matches, `.gitignore` never written" for every `REMEMBER_DIR`,
+  not just a backslash-laden one -- caught by CI (ubuntu-latest 3.9, job
+  100934963344) after the first fix shipped.
+
+  A self-review of this fix (oss:auditor) separately caught a second bug
+  the fix itself introduced: normalizing only `REMEMBER_DIR` in the
+  git-restore.sh site and comparing the result against a still-backslash
+  `PROJECT_DIR` (`_remember_normalize_win_path` rewrites `PROJECT_DIR` to
+  backslash form on msys/cygwin, the opposite direction) broke the
+  legacy-mode short-circuit for every genuine legacy-mode Windows install,
+  defeating the file's own "cheap guards first" cost promise. `PROJECT_DIR`
+  is now normalized the same way before that one comparison, matching the
+  pattern `scripts/doctor.sh` and `scripts/lib-case-divergence.sh` already
+  use for the identical `REMEMBER_DIR`-vs-`PROJECT_DIR` comparison.
+
 ## [0.25.0] - 2026-09-02 — Telling one session from another, and a fault from a quiet answer
 
 ### Added
@@ -1631,7 +1852,8 @@ Fixes [#9](https://github.com/Digital-Process-Tools/claude-remember/issues/9), a
 
 ## [0.1.0] — Initial release
 
-[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.25.0...HEAD
+[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.26.0...HEAD
+[0.26.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.26.0
 [0.25.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.25.0
 [0.24.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.24.0
 [0.23.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.23.0
