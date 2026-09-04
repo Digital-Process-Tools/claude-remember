@@ -264,13 +264,41 @@ fi
 # background fork writes (scripts/post-tool-hook.sh), not a second one: both
 # are "a save-session.sh is in flight" and nothing downstream needs to tell
 # them apart.
-mkdir -p "$REMEMBER_DIR/logs/autonomous" 2>/dev/null
-_END_LOG="$REMEMBER_DIR/logs/autonomous/session-end-$(_remember_date +%H%M%S).log"
+# Checked and reported (#503): this mkdir is best-effort defensive
+# re-creation on top of bootstrap-dirs.sh's own earlier attempt, and a
+# failure here means the seed write two lines down cannot land either --
+# leaving $_END_LOG absent, which an ordinary housekeeping sweep cannot
+# then be blamed for reclaiming (there is nothing to reclaim), and which
+# scripts/doctor.sh's own SessionEnd-liveness check then misreports as
+# "SessionEnd has never fired for this project" -- a hook-registration
+# problem that does not exist. Reported the same way save-session.sh:428
+# reports its own fall-through, so a read-only store or a full disk shows
+# up as a fault rather than as silence.
+if ! mkdir -p "$REMEMBER_DIR/logs/autonomous" 2>/dev/null; then
+    report_error "session-end" "WARNING: could not create $REMEMBER_DIR/logs/autonomous -- this session's flush will not be recorded, and /remember:doctor may misreport SessionEnd as never having fired."
+fi
+# `$$` (this hook process's own PID) suffixes the second-granularity
+# timestamp so two SessionEnd hooks for the same project, ending inside the
+# same wall-clock second, no longer resolve to the same path (#488). That
+# collision was not contrived -- scripts/doctor.sh's own SessionEnd-liveness
+# comments already treat two concurrently open windows on one project as an
+# ordinary case, and PR #486 only made the collision harmless (both hooks
+# append rather than truncate) rather than absent: two flushes still
+# interleaved into one file, with no way for a reader to tell whose lines
+# were whose. `$$` is unique per invocation of THIS script -- it is not the
+# backgrounded subshell's own PID, which is assigned only after this line
+# runs -- so it is available before the header below is ever written, and
+# distinct siblings still get distinct files. scripts/doctor.sh's own
+# `session-end-*.log` glob (#370's SessionEnd-liveness check) needs no
+# change for this: the `*` already matches whatever follows the timestamp,
+# suffix included.
+_END_LOG="$REMEMBER_DIR/logs/autonomous/session-end-$(_remember_date +%H%M%S)-$$.log"
 # Seeded with a header line BEFORE the subshell below ever opens it, and the
 # subshell appends (`>>`) rather than truncates (`>`) -- not cosmetic (#483).
-# save-session.sh's own NDC step sweeps this very directory for stale logs
-# with `find ... -name "*.log" -empty -delete` (scripts/save-session.sh), and
-# on an ordinary successful flush NOTHING ever writes to this file: every
+# save-session.sh's own housekeeping sweep (unconditional on every flush
+# since #498, not tied to its NDC step) reclaims an empty file in this same
+# directory unconditionally (scripts/save-session.sh), and on an ordinary
+# successful flush NOTHING ever writes to this file: every
 # save-session.sh log line goes to its own daily narrative file, not to
 # stdout/stderr, so a `>`-truncated, still-empty $_END_LOG is exactly what
 # that same sweep -- run from INSIDE the process writing into it -- matches
@@ -280,21 +308,49 @@ _END_LOG="$REMEMBER_DIR/logs/autonomous/session-end-$(_remember_date +%H%M%S).lo
 # `-empty`, so it survives its own run's housekeeping while a genuinely
 # stale, still-empty log from an abandoned run is untouched by this and
 # keeps getting swept exactly as before.
-# `>>`, not `>` -- this is a synchronous, foreground write into a path a
-# CONCURRENT SessionEnd hook for the same project can compute identically
-# ($_END_LOG has second granularity only, no PID/session-id, and two Claude
-# Code windows on one project ending inside the same wall-clock second is a
-# case scripts/doctor.sh's own SessionEnd-liveness comments already treat as
-# ordinary). A truncating `>` here would clobber whatever a sibling
-# session's already-backgrounded subshell had appended by that instant --
-# not the #483 empty-file bug, a new one this line would otherwise
-# introduce. `>>` creates the file exactly as well as `>` does when it does
-# not yet exist, so nothing about the #483 fix (surviving `-empty -delete`)
-# changes; it only stops adding a fresh way to lose a sibling's output.
-# `_END_LOG`'s own collision risk (no PID/session-id in the filename) is
-# pre-existing and unresolved by this line -- see #483's pull request for
-# the follow-up filed against it.
-printf '%s [session-end] flush started\n' "$(_remember_date +%H:%M:%S)" >> "$_END_LOG" 2>/dev/null
+# `>>`, not `>`, is kept even now that `$$` makes an ordinary same-second
+# collision unreachable: a PID can still be recycled across a long-lived
+# store, and appending costs nothing when the file is otherwise guaranteed
+# fresh. Belt, not the buckle.
+# Checked and reported (#503): a failed seed write leaves $_END_LOG
+# absent or empty exactly as if it had never been opened, so the very
+# next housekeeping sweep reclaims it as an abandoned run's redirect
+# target -- and #483's original bug (no on-disk trace that SessionEnd
+# ever fired) is silently back for this session, with
+# scripts/doctor.sh's own liveness check then misreporting it as a hook
+# that never fired at all. Reported the same way save-session.sh:428
+# reports its own fall-through.
+if ! printf '%s [session-end] flush started\n' "$(_remember_date +%H:%M:%S)" >> "$_END_LOG" 2>/dev/null; then
+    report_error "session-end" "WARNING: could not seed $_END_LOG -- if this file stays absent or empty, an ordinary housekeeping sweep will reclaim it, and /remember:doctor may misreport this session as one where SessionEnd never fired."
+fi
+# REMEMBER_TEST_COMPLETION_MARKER (opt-in, unset in production): CI
+# iteration on #487 (PR #499) found the test harness's own PID-liveness
+# wait (tasklist, on Windows) does not reliably observe this backgrounded
+# flush finish on a real windows-latest runner -- $OSTYPE there reports
+# "cygwin", and its PID does not appear to line up with what `tasklist`
+# can find, so a test polling PID liveness alone gives up long before the
+# real flush -- which does complete -- is done, and asserts against a
+# still-running one. Rather than trust PID liveness at all, a caller that
+# sets this var gets an explicit, unambiguous completion line appended to
+# a file it names -- at zero cost to every real session, where the var is
+# never set and this whole block is a no-op.
+#
+# Unlike the $_END_LOG seed write just above, a failed marker write here
+# is NOT routed through report_error() (self-review finding, PR #499):
+# report_error writes to hook-errors.log, a real, user-facing file every
+# production session's own tests assert the CONTENTS of (see
+# TestSeedWriteFailureIsReported's own "WARNING" checks), and this whole
+# block is test-only opt-in scaffolding that must never add a line there
+# a real session could see. A failed marker write still is not silent:
+# bash reports a redirection failure it cannot honor to whatever this
+# block's own enclosing stderr already is, which for the first `printf`
+# below is this hook's own stderr (captured by the test harness as
+# `result.stderr`) and for the second, inside the subshell, is $_END_LOG
+# (which _dump_dir already surfaces in full on assertion failure).
+if [ -n "${REMEMBER_TEST_COMPLETION_MARKER:-}" ]; then
+    printf '%s session-end: about to launch subshell\n' "$(_remember_date +%H:%M:%S)" \
+        >> "$REMEMBER_TEST_COMPLETION_MARKER" 2>&1
+fi
 (
     if [ -n "$STDIN_SESSION_ID" ]; then
         bash "$SAVE_SCRIPT" "$STDIN_SESSION_ID" --force
@@ -302,6 +358,10 @@ printf '%s [session-end] flush started\n' "$(_remember_date +%H:%M:%S)" >> "$_EN
         bash "$SAVE_SCRIPT" --force
     fi
     _flush_status=$?
+    if [ -n "${REMEMBER_TEST_COMPLETION_MARKER:-}" ]; then
+        printf '%s session-end: save-session.sh exited status=%s\n' \
+            "$(_remember_date +%H:%M:%S)" "$_flush_status" >> "$REMEMBER_TEST_COMPLETION_MARKER" 2>&1
+    fi
     if [ "$_flush_status" -ne 0 ]; then
         report_error "session-end" "WARNING: save-session.sh --force exited $_flush_status at session end -- this session's unsaved tail may be lost. See $_END_LOG for what save-session.sh itself logged."
     fi

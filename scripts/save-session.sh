@@ -1048,7 +1048,134 @@ if [ "$RUN_NDC" = true ]; then
         log "ndc" "ERROR: prompt empty"
         rm -f "$NDC_PROMPT"
     fi
-
-    # Housekeeping: remove empty autonomous logs
-    find "${REMEMBER_DIR}/logs/autonomous" -name "*.log" -empty -delete 2>/dev/null
 fi
+
+# --- Housekeeping: reclaim aged autonomous logs (#487, #488, #498, #502) ---
+#
+# Runs unconditionally, independent of RUN_NDC/features.ndc_compression
+# (#498): this directory's only retention used to live inside the
+# `if [ "$RUN_NDC" = true ]` block above by accident of placement, so
+# setting features.ndc_compression=false silently disabled ALL
+# logs/autonomous/ housekeeping too, with autonomous_log_retention_days
+# left configured and doing nothing -- and nothing told an operator the
+# setting was inert. Moved out here so it always runs on an ordinary flush,
+# regardless of whether NDC compression itself ran this round.
+#
+# An empty one is swept immediately -- an abandoned run's redirect target
+# that never got a header written into it. That used to be this directory's
+# ONLY retention (#483), and it stopped covering session-end-*.log the
+# moment #483 seeded $_END_LOG with a header before its own subshell ever
+# opens the file: every one of those is non-empty by construction now, so
+# an empty-only sweep never reclaims that class again, and the
+# accumulation is #487's own report of it.
+#
+# The age-keyed sweep below is the fix for that: over BOTH file classes
+# (save-*.log and session-end-*.log share the "*.log" glob), rather than
+# keyed to emptiness -- emptiness was always a proxy for staleness, and it
+# is the proxy that produced #483 in the first place. A log this script
+# itself just wrote (this run's own save-*.log, or the
+# session-end-hook.sh-seeded header this same flush is appending into) has
+# an mtime of now and is nowhere near the cutoff, so neither branch below
+# can delete output a caller might still want to read.
+#
+# A portable stat-based loop, not `find -mtime "+N" -delete` /
+# `find -empty -delete` (#502): `find` is the one command on this path with
+# a real PATH-shadowing risk on Windows Git Bash (System32's find.exe
+# takes none of the flags either sweep needs and would fail silently into
+# the swallowed stderr the old `2>/dev/null` carried, degrading "reclaim"
+# into a silent always-keep with nothing surfaced) -- and, independent of
+# shadowing, `find`'s own day-rounding `-mtime` arithmetic is one more
+# place for a platform-specific off-by-one to hide where nothing would
+# report it. session-start-hook.sh already documents the identical
+# PATH-shadowing risk for its own `-mmin` sweep and takes the same
+# stat-based way around it; `stat` here uses the same
+# GNU-first-then-BSD-fallback order already used there, at doctor.sh:257
+# and at lib-lock.sh:183.
+_AUTONOMOUS_LOG_RETENTION_DAYS=$(config ".thresholds.autonomous_log_retention_days" 7)
+case "$_AUTONOMOUS_LOG_RETENTION_DAYS" in (''|*[!0-9]*) _AUTONOMOUS_LOG_RETENTION_DAYS=7 ;; esac
+# CI (job 100831279309 and its 3.10/3.11/3.12 siblings on PR #499): every
+# windows-latest leg left both the backdated file AND this run's own fresh
+# log in place -- no deletion at any age, default retention or configured,
+# NDC on or off. resolve-paths.sh's own `_remember_normalize_win_path`
+# rewrites CLAUDE_PROJECT_DIR to a fully backslash-separated Windows-native
+# form on msys/cygwin (Claude Code hands it over as `/c/Users/...`, and
+# #263/#448 convert that to `C:\Users\...` so the three shell slug sites
+# and Python's `_session_dir` agree with Claude Code's own slugging) --
+# and REMEMBER_DIR is lib-memory-dir.sh's legacy `"${proj}/${data_dir}"`,
+# so on Windows it is backslash-separated end to end, same as PROJECT_DIR.
+#
+# Every ordinary file op downstream of that (mkdir -p, >>, stat, rm -f)
+# still works with a backslash-laden path, because the MSYS runtime that
+# implements those syscalls translates it -- which is exactly why the
+# earlier mkdir, the header write and the mtime read in this same flush
+# all succeed on that leg. bash's own glob does not get that translation:
+# it recognises only '/' as a path-component boundary, on every platform
+# including Windows Git Bash, because that is POSIX glob(3)'s own
+# definition of a pathname, not a filesystem property -- so
+# "${REMEMBER_DIR}/logs/autonomous"/*.log, with REMEMBER_DIR entirely
+# backslashes, has no '/' anywhere before "logs", and bash looks for a
+# single literal directory ENTRY named the whole backslash string, finds
+# none, and the glob expands to nothing: the loop body never runs, for
+# any file, at any age, which is exactly the "nothing was ever removed"
+# shape both failing assertions and the NDC-disabled variant share.
+#
+# Forward-slashing only the directory argument fixes the glob without
+# touching REMEMBER_DIR itself (every other consumer of that variable
+# still gets the form the rest of the script -- and the Windows slug
+# matching #263/#448 exist for -- expects). A no-op on POSIX, where this
+# never contains a backslash to begin with; pinned portably in
+# tests/test_autonomous_log_retention_487.py's own glob-mechanism test,
+# since a real Windows-native REMEMBER_DIR cannot be constructed on a
+# POSIX filesystem at all (POSIX mkdir/open treat backslash as an
+# ordinary filename character rather than a separator, so the two
+# platforms would stop disagreeing and the bug would not reproduce).
+#
+# Gated on $OSTYPE, not applied unconditionally (self-review finding):
+# backslash is a perfectly ordinary, legal filename character on POSIX,
+# and `_remember_normalize_win_path` above is ITSELF gated the same way,
+# for the same reason -- it never rewrites CLAUDE_PROJECT_DIR outside
+# msys/cygwin, so REMEMBER_DIR only ever carries a backslash-as-separator
+# on those two. An unconditional `${REMEMBER_DIR//\\//}` would silently
+# mangle a real POSIX project directory whose name happens to contain a
+# literal `\` (e.g. copied from somewhere that allowed it) into a
+# different, generally nonexistent path -- turning a working retention
+# sweep into a silently broken one for that one directory, on the
+# platform this fix has no business touching at all.
+case "$OSTYPE" in
+    msys|cygwin) _remember_auto_dir="${REMEMBER_DIR//\\//}" ;;
+    *) _remember_auto_dir="$REMEMBER_DIR" ;;
+esac
+for _remember_auto_log in "${_remember_auto_dir}/logs/autonomous"/*.log; do
+    [ -f "$_remember_auto_log" ] || continue
+    if [ ! -s "$_remember_auto_log" ]; then
+        rm -f "$_remember_auto_log" 2>/dev/null \
+            || log "housekeeping" "WARNING: could not remove empty $_remember_auto_log"
+        continue
+    fi
+    _remember_auto_mtime=$(stat -c %Y "$_remember_auto_log" 2>/dev/null) \
+        || _remember_auto_mtime=$(stat -f %m "$_remember_auto_log" 2>/dev/null) \
+        || _remember_auto_mtime=""
+    # Could-not-tell (stat failed, or printed something non-numeric) is the
+    # safe direction, same as session-start-hook.sh's identical guard: skip
+    # this file rather than coerce garbage into a comparable age and risk
+    # reclaiming something this read could not actually confirm is old.
+    case "$_remember_auto_mtime" in
+        (''|*[!0-9]*)
+            log "housekeeping" "WARNING: could not read mtime of $_remember_auto_log -- leaving it in place"
+            continue
+            ;;
+    esac
+    _remember_auto_now=$(_remember_date +%s)
+    case "$_remember_auto_now" in
+        (''|*[!0-9]*)
+            log "housekeeping" "WARNING: could not read the clock -- skipping the retention sweep for $_remember_auto_log"
+            continue
+            ;;
+    esac
+    _remember_auto_age_days=$(( (10#$_remember_auto_now - 10#$_remember_auto_mtime) / 86400 ))
+    if [ "$_remember_auto_age_days" -gt "$_AUTONOMOUS_LOG_RETENTION_DAYS" ]; then
+        rm -f "$_remember_auto_log" 2>/dev/null \
+            || log "housekeeping" "WARNING: could not remove aged (${_remember_auto_age_days}d) $_remember_auto_log"
+    fi
+done
+unset _remember_auto_dir _remember_auto_log _remember_auto_mtime _remember_auto_now _remember_auto_age_days

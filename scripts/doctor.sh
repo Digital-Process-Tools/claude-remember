@@ -425,10 +425,13 @@ fi
 #
 # No new marker is written for this. session-end-hook.sh already leaves
 # usable evidence of its own accord, as a side effect of its background
-# flush: a logs/autonomous/session-end-<HHMMSS>.log file, created
+# flush: a logs/autonomous/session-end-<HHMMSS>-<PID>.log file, created
 # unconditionally once that hook gets past its own SAVE_SCRIPT-missing check
 # (see session-end-hook.sh's own comments around its `_END_LOG` redirect).
-# Presence of even one such file is proof the hook has run; absence needs a
+# The `-<PID>` suffix (#488) is why the glob below stays a plain
+# `session-end-*.log`, not `session-end-??????.log` -- narrowing it to the
+# old fixed-width shape would stop matching the very files this hook now
+# writes. Presence of even one such file is proof the hook has run; absence needs a
 # second signal before it can be called a problem, since a hook that never
 # had the chance to fire yet is not the same as one that had the chance and
 # stayed silent — the third state the issue calls out by name.
