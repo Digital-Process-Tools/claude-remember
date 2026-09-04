@@ -16,7 +16,7 @@ converted (`tests/test_hook_cwd_leak_417.py`, `tests/test_transcript_path_leak_4
 plus a fifth, `tests/test_autonomous_log_retention_487.py`, which adopted the
 same route for its own #487 rather than being converted by #432 itself.
 
-## The count: 94, not 107 (and not the issue's original 92)
+## The count: 95, not 107 (and not the issue's original 92)
 
 The issue's own re-verified count -- `grep -rl "pytestmark = pytest.mark.skipif"
 tests | xargs grep -l "win32"` -- returns 107 on this tree. That command only
@@ -34,17 +34,21 @@ an actual `pytestmark` skip condition.
 `scripts/windows_skip_triage_497.py` recomputes the set precisely instead: it
 parses every test module with `ast`, and only counts a file that has an
 actual module-level `pytestmark = pytest.mark.skipif(<expr containing
-"win32">, reason=...)` assignment. That finds **94** modules on this tree at
-this commit. `tests/test_windows_skip_triage_497.py` recomputes this same set
+"win32">, reason=...)` assignment -- a bare call, or one arm of a
+list/tuple of marks (pytest ORs a list, so any one arm mentioning "win32"
+is a real blanket skip). That finds **95** modules on this tree at this
+commit. `tests/test_windows_skip_triage_497.py` recomputes this same set
 on every run and diffs it against the table below, so this list cannot
 silently drift out of sync with the tree the way the issue itself describes
-(92 -> 107 with nothing announcing the drift).
+(92 -> 107 with nothing announcing the drift) -- though see the note at the
+end of the Verdicts section: that guard has its own blind spot, caught
+once already during review.
 
 ## Verdicts
 
 - **convertible** -- the skip reason is plausibly about a POSIX-only *tool*
   (bash itself, a POSIX-only shell construct) that `resolve_bash()` could
-  supply on a Windows runner via Git Bash. 7 modules.
+  supply on a Windows runner via Git Bash. 8 modules.
 - **not-convertible** -- the reason names something Git-Bash discovery
   cannot fix: POSIX file permissions/mode bits, process signals (`kill -0`,
   `fork`), `flock`, `umask`, NTFS/ACL semantics, or an explicit POSIX-vs-Windows
@@ -53,8 +57,21 @@ silently drift out of sync with the tree the way the issue itself describes
   it is not the same as reading the test body, and this list is deliberately
   not that read. 75 modules.
 
+**A blind spot in the scanner itself, caught once already.** An earlier
+version of `scripts/windows_skip_triage_497.py` only matched a bare
+`pytestmark = pytest.mark.skipif(...)` call, not the list-of-marks form
+(`pytestmark = [pytest.mark.skipif(...), pytest.mark.skipif(...)]`), and so
+silently missed `tests/test_slug_vectors_294.py` -- which the doc and its
+own drift-detection test then agreed was absent, because the test recomputes
+its "live" baseline from that same scanner function and cannot see a module
+class the function never looked for. A second, independent reviewer's read
+of the diff caught it; the scanner now walks both forms. The fix is
+mechanical, but the lesson generalizes: this list's accuracy is bounded by
+what the AST matcher was written to recognize, not by an exhaustive read of
+every skip expression in `tests/`.
+
 **The `unclear` majority is the honest result, not a shortcut.** The great
-bulk of these 94 reasons is one of a handful of near-identical templated
+bulk of these 95 reasons is one of a handful of near-identical templated
 strings -- `"bash subprocess + POSIX layout -- not portable to Windows
 runners"`, `"bash hook subprocess + POSIX semantics -- not portable to
 Windows runners"`, and near-variants -- that bundle the one thing
@@ -160,6 +177,7 @@ verdict is the useful artifact").
 | `tests/test_session_start_prev_session_270.py` | bash hook subprocess + POSIX semantics — not portable to Windows runners | unclear | reason bundles the bash-subprocess dependency with an unspecified "POSIX semantics/layout" claim; cannot tell from the string alone whether that names a real non-bash blocker or is boilerplate |
 | `tests/test_slug_index_297.py` | bash hook subprocess + POSIX semantics — not portable to Windows runners (#79) | unclear | reason bundles the bash-subprocess dependency with an unspecified "POSIX semantics/layout" claim; cannot tell from the string alone whether that names a real non-bash blocker or is boilerplate |
 | `tests/test_slug_parity.py` | bash subprocess assertions — not portable to Windows runners (#79) | convertible | reason names only the bash-subprocess dependency, no other blocker |
+| `tests/test_slug_vectors_294.py` | bash subprocess assertions — not portable to Windows runners (#79) | convertible | reason names only the bash-subprocess dependency, no other blocker (same reason string as test_slug_parity.py above); module-level pytestmark here is a list of two skipif marks rather than a bare call, which an earlier version of the AST scanner missed entirely -- see scripts/windows_skip_triage_497.py's own docstring |
 | `tests/test_staging_growth_warning_349.py` | bash subprocess + POSIX layout — not portable to Windows runners (#79) | unclear | reason bundles the bash-subprocess dependency with an unspecified "POSIX semantics/layout" claim; cannot tell from the string alone whether that names a real non-bash blocker or is boilerplate |
 | `tests/test_staging_lock.py` | bash subprocess + POSIX layout — not portable to Windows runners (#79) | unclear | reason bundles the bash-subprocess dependency with an unspecified "POSIX semantics/layout" claim; cannot tell from the string alone whether that names a real non-bash blocker or is boilerplate |
 | `tests/test_staging_lock_config_unread_399.py` | bash subprocess + POSIX layout — not portable to Windows runners (#79) | unclear | reason bundles the bash-subprocess dependency with an unspecified "POSIX semantics/layout" claim; cannot tell from the string alone whether that names a real non-bash blocker or is boilerplate |
