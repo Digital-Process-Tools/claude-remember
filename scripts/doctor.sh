@@ -132,7 +132,13 @@ if [ "${1:-}" = "--json" ]; then
 
     source "$SCRIPT_DIR/lib-memory-dir.sh"
 
-    if [ "$REMEMBER_DIR" = "${PROJECT_DIR}/.remember" ] || [[ "$REMEMBER_DIR" == "$PROJECT_DIR"/* ]]; then
+    # #517: both sides forward-slashed before the `==`-glob comparison --
+    # REMEMBER_DIR and PROJECT_DIR both arrive backslash-separated on
+    # msys/cygwin, and `[[ == ]]`'s own glob only ever splits on '/', so an
+    # in-project store misreports as "external" there for any REMEMBER_DIR
+    # that is not the literal default `${PROJECT_DIR}/.remember`.
+    if [ "$REMEMBER_DIR" = "${PROJECT_DIR}/.remember" ] \
+        || [[ "$(_remember_forward_slash "$REMEMBER_DIR")" == "$(_remember_forward_slash "$PROJECT_DIR")"/* ]]; then
         _JSON_STORAGE_MODE="legacy"
     else
         _JSON_STORAGE_MODE="external"
@@ -315,7 +321,12 @@ echo ""
 # ── 4. Storage mode ──────────────────────────────────────────────────────────
 echo "-- Storage --"
 
-if [ "$REMEMBER_DIR" = "${PROJECT_DIR}/.remember" ] || [[ "$REMEMBER_DIR" == "$PROJECT_DIR"/* ]]; then
+# #517: both sides forward-slashed before the `==`-glob comparison -- see
+# the JSON-mode branch above for why an unnormalized REMEMBER_DIR/
+# PROJECT_DIR here misreports an in-project store as "external" on
+# msys/cygwin.
+if [ "$REMEMBER_DIR" = "${PROJECT_DIR}/.remember" ] \
+    || [[ "$(_remember_forward_slash "$REMEMBER_DIR")" == "$(_remember_forward_slash "$PROJECT_DIR")"/* ]]; then
     echo "OK   Storage mode: legacy (in-project: $REMEMBER_DIR)"
 else
     echo "OK   Storage mode: external ($REMEMBER_DIR)"
@@ -714,8 +725,13 @@ else
     else
         _DOCTOR_TODAY=$(date '+%Y-%m-%d')
     fi
+    # #517: normalize before the glob -- REMEMBER_DIR arrives backslash-
+    # separated on msys/cygwin, and bash's glob only ever splits on '/', so
+    # without this _STAGING_BYTES silently undercounts to 0 there, a
+    # number printed directly to the operator two branches below.
+    _remember_staging_bytes_glob_dir=$(_remember_forward_slash "$REMEMBER_DIR")
     _STAGING_BYTES=0
-    for _sf in "$REMEMBER_DIR"/today-*.md; do
+    for _sf in "$_remember_staging_bytes_glob_dir"/today-*.md; do
         [ -f "$_sf" ] || continue
         case "${_sf##*/}" in
             (*.done.md) continue ;;
@@ -827,8 +843,13 @@ if [ -f "$_ROTATE_STATE" ]; then
     _RT_COUNT=$(sed -n 1p "$_ROTATE_STATE" 2>/dev/null)
     _RT_WHEN=$(sed -n 2p "$_ROTATE_STATE" 2>/dev/null)
     _RT_ERR=$(sed -n 3p "$_ROTATE_STATE" 2>/dev/null)
+    # #517: normalize before the glob -- see the _STAGING_BYTES comment
+    # above for why an unnormalized REMEMBER_DIR here means $_RT_PENDING
+    # silently undercounts to 0 on msys/cygwin, another number printed
+    # directly to the operator two lines below.
+    _remember_rt_pending_glob_dir=$(_remember_forward_slash "$REMEMBER_DIR")
     _RT_PENDING=0
-    for _rt_f in "$REMEMBER_DIR"/logs/memory-*.log; do
+    for _rt_f in "$_remember_rt_pending_glob_dir"/logs/memory-*.log; do
         [ -f "$_rt_f" ] && _RT_PENDING=$((_RT_PENDING + 1))
     done
     echo "WARN Log rotation has failed ${_RT_COUNT:-?} time(s) in a row (last ${_RT_WHEN:-unknown})"

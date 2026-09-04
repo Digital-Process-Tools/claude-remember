@@ -48,6 +48,22 @@ SESSION_START_SCRIPT = REPO_ROOT / "scripts" / "session-start-hook.sh"
 
 from pipeline.slug import session_dir_slug as _slug
 
+# #517: the extracted-block harness this file's own
+# TestStaleDeliveryRecordsPruningGlobBackslash517 class (bottom of file)
+# reuses -- see that class's own docstring for why the real hook, driven
+# end to end like the rest of this file, cannot reproduce a genuinely
+# backslash-separated REMEMBER_DIR on a POSIX CI runner at all.
+sys.path.insert(0, os.path.dirname(__file__))
+from _glob_backslash_517 import (
+    extract_function as extract_function_517,
+)
+from _glob_backslash_517 import (
+    extract_lines as extract_lines_517,
+)
+from _glob_backslash_517 import (
+    run_block as run_block_517,
+)
+
 # Mirrors the grace window scripts/session-start-hook.sh's #393 fix uses to
 # arbitrate the sweep -- see the comment beside GRACE_MIN there for why this
 # duration (reasoned, not measured against real Claude Code timing).
@@ -484,3 +500,118 @@ class TestUnreadableMtimeGarbageDuringPruneSweep:
             "non-numeric output for its mtime -- could-not-tell must "
             "never render as pruned"
         )
+
+
+class TestStaleDeliveryRecordsPruningGlobBackslash517:
+    """#517: the sweep above (`for _remember_stale_record in
+    "$REMEMBER_DIR"/tmp/remember.delivered.*`) is a bash glob, and bash's
+    own glob recognises only '/' as a path separator -- so on msys/cygwin,
+    where REMEMBER_DIR arrives backslash-separated (resolve-paths.sh's own
+    `_remember_normalize_win_path`), it silently matched nothing there and
+    every stale delivery record leaked forever, on the one platform the
+    #373 fix above was never proven to cover.
+
+    Driving the real hook end to end (the rest of this file's own
+    technique) cannot reproduce that shape on this POSIX CI runner:
+    resolve-paths.sh's own normalizer only rewrites a drive-letter-shaped
+    PROJECT_DIR, and a pytest tmp_path never looks like one, so forcing
+    $OSTYPE=msys around a real subprocess run would leave REMEMBER_DIR
+    exactly as forward-slash as it always was here. This class instead
+    reuses the extracted-block technique
+    tests/test_autonomous_log_retention_487.py introduced for the
+    identical problem in #487: the real sweep code, pulled verbatim out of
+    session-start-hook.sh, run standalone with REMEMBER_DIR handed a
+    SYNTHETIC backslash-laden string directly and $OSTYPE shadowed with a
+    `local` (not an environment-variable override -- #487's own docstring
+    found real windows-latest Git Bash resets $OSTYPE from its own
+    compiled default regardless of the parent environment).
+    """
+
+    _BLOCK = extract_lines_517(
+        "scripts/session-start-hook.sh",
+        "_remember_delivered_glob_dir=$(_remember_forward_slash",
+        "    done",
+    )
+
+    def _run(self, remember_dir: str, sessions_dir, current_session_id: str, ostype: str):
+        import shlex
+        forward_slash_fn = extract_function_517(
+            "scripts/resolve-paths.sh", "_remember_forward_slash"
+        )
+        setup = (
+            forward_slash_fn
+            + "\n_remember_date() { date \"$@\"; }"
+            + "\nGRACE_MIN=5"
+            + f"\nCURRENT_SESSION_ID={shlex.quote(current_session_id)}"
+            + f"\nSESSIONS_DIR={shlex.quote(str(sessions_dir))}"
+            + f"\nREMEMBER_DIR={shlex.quote(remember_dir)}"
+        )
+        return run_block_517(self._BLOCK, ostype=ostype, setup=setup)
+
+    def test_must_fire_stale_record_is_pruned_under_backslash_remember_dir(self, tmp_path):
+        """MUST FIRE: a stale record (old, no transcript) must still be
+        pruned when REMEMBER_DIR arrives backslash-separated."""
+        import time
+        remember_dir = tmp_path / ".remember"
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir()
+        record = remember_dir / "tmp" / "remember.delivered.sess-aaa"
+        record.parent.mkdir(parents=True)
+        record.write_text("delivered\n")
+        old = time.time() - (10 * 60)
+        os.utime(record, (old, old))
+
+        windows_style = str(remember_dir).replace("/", "\\")
+        result = self._run(windows_style, sessions_dir, "sess-bbb", "msys")
+
+        assert result.returncode == 0, result.stderr
+        assert not record.exists(), (
+            "a backslash-separated REMEMBER_DIR must not defeat the #373 "
+            f"stale-delivery-record sweep\nstderr={result.stderr}"
+        )
+
+    def test_must_not_fire_control_live_record_survives_under_backslash_remember_dir(self, tmp_path):
+        """MUST NOT FIRE (positive control): a record whose transcript
+        still exists must survive, even under a backslash-separated
+        REMEMBER_DIR -- an over-eager sweep that ignores the transcript
+        check, or one broken in a way that deletes everything, would fail
+        this."""
+        import time
+        remember_dir = tmp_path / ".remember"
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir()
+        (sessions_dir / "sess-aaa.jsonl").write_text('{"type":"user"}\n')
+        record = remember_dir / "tmp" / "remember.delivered.sess-aaa"
+        record.parent.mkdir(parents=True)
+        record.write_text("delivered\n")
+        old = time.time() - (10 * 60)
+        os.utime(record, (old, old))
+
+        windows_style = str(remember_dir).replace("/", "\\")
+        result = self._run(windows_style, sessions_dir, "sess-bbb", "msys")
+
+        assert result.returncode == 0, result.stderr
+        assert record.exists(), (
+            "a delivery record for a session whose transcript still "
+            "exists must survive even under a backslash-separated "
+            f"REMEMBER_DIR -- stderr={result.stderr}"
+        )
+
+    def test_must_fire_forward_slash_remember_dir_is_pruned_too(self, tmp_path):
+        """Positive control: an ordinary POSIX REMEMBER_DIR still works --
+        the normalization this fix adds must be a no-op there."""
+        import time
+        remember_dir = tmp_path / ".remember"
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir()
+        record = remember_dir / "tmp" / "remember.delivered.sess-aaa"
+        record.parent.mkdir(parents=True)
+        record.write_text("delivered\n")
+        old = time.time() - (10 * 60)
+        os.utime(record, (old, old))
+
+        result = self._run(str(remember_dir), sessions_dir, "sess-bbb", "")
+
+        assert result.returncode == 0, result.stderr
+        assert not record.exists()
+

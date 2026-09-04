@@ -227,6 +227,39 @@ _remember_normalize_win_path() {
     printf '%s' "$_in"
 }
 
+# --- Portable-glob helper (#517) -------------------------------------------
+#
+# Bash's own filename glob (`*`/`?`/`[...]`) and its parameter-expansion
+# pattern matching (`%`/`##`/a `[[ == ]]` glob) both recognise ONLY '/' as a
+# path-component separator -- POSIX glob(3)'s own definition of a pathname,
+# not a filesystem property -- so on msys/cygwin, where REMEMBER_DIR (and
+# PROJECT_DIR, via _remember_normalize_win_path above) arrive backslash-
+# separated, every such operation against them silently matches nothing.
+# #487 (PR #499) fixed this once, inline, for scripts/save-session.sh's own
+# retention sweep; this is the same fix extracted so every later call site
+# (#517) reuses one mechanism instead of re-deriving the $OSTYPE gate.
+#
+# Gated on $OSTYPE, not applied unconditionally, for the same reason
+# _remember_normalize_win_path above is: a literal backslash is an ordinary,
+# legal filename character on POSIX, and _remember_normalize_win_path (the
+# thing that puts backslashes into these variables in the first place) is
+# itself gated the identical way -- so a POSIX path never carries a
+# separator-shaped backslash to begin with, and unconditionally rewriting
+# one would mangle a real POSIX directory whose name happens to contain a
+# literal `\` into a different, generally nonexistent path.
+#
+# Deliberately NOT `unset -f`'d below the way _remember_normalize_win_path
+# is: every caller of this file that needs to glob or pattern-match against
+# REMEMBER_DIR/PROJECT_DIR sources it AFTER this file runs, so the function
+# has to still be callable then, unlike the normalize helper above, which is
+# only ever used inline, above, within this same file.
+_remember_forward_slash() {
+    case "$OSTYPE" in
+        msys|cygwin) printf '%s' "${1//\\//}" ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+
 # --- Resolve PROJECT_DIR (the user's project root) ---
 #
 # Priority:
