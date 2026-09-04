@@ -1147,7 +1147,16 @@ GRACE_MIN=5
 # only ever matches "remember.delivered.<something>", and the shared-mode
 # file is exactly "remember.delivered" with no trailing dot.
 if [ -d "$SESSIONS_DIR" ] && [ -d "$REMEMBER_DIR/tmp" ]; then
-    for _remember_stale_record in "$REMEMBER_DIR"/tmp/remember.delivered.*; do
+    # #517: normalize before the glob -- REMEMBER_DIR arrives backslash-
+    # separated on msys/cygwin, and bash's glob only ever splits on '/', so
+    # without this the sweep below silently never fires there, leaking one
+    # stale delivery record per session forever (the #373 leak this sweep
+    # exists to stop, just on the one platform it was never proven to
+    # cover). _remember_stale_record itself then expands with '/'
+    # separators from this normalized directory, so the existing
+    # ##*/remember.delivered. strip further down still matches.
+    _remember_delivered_glob_dir=$(_remember_forward_slash "$REMEMBER_DIR")
+    for _remember_stale_record in "$_remember_delivered_glob_dir"/tmp/remember.delivered.*; do
         [ -f "$_remember_stale_record" ] || continue
         _remember_stale_id="${_remember_stale_record##*/remember.delivered.}"
         [ -n "$_remember_stale_id" ] || continue
@@ -1238,7 +1247,12 @@ done
 # archive-*.md would leave that slice exactly as invisible as #124 found the
 # archives — the recovery would keep the bytes and lose the recall, which is
 # the failure #124 exists to name.
-ROTATED_SLICES=$(ls "$REMEMBER_DIR"/archive-*.md "$REMEMBER_DIR"/recent-*.md 2>/dev/null | sort)
+# #517: normalize before the glob -- see the STAGING_COUNT comment above
+# for why an unnormalized REMEMBER_DIR here means this glob silently
+# matches nothing on msys/cygwin even when rotated slices genuinely exist,
+# omitting the session banner's own "=== MEMORY ===" section.
+_remember_rotated_glob_dir=$(_remember_forward_slash "$REMEMBER_DIR")
+ROTATED_SLICES=$(ls "$_remember_rotated_glob_dir"/archive-*.md "$_remember_rotated_glob_dir"/recent-*.md 2>/dev/null | sort)
 if [ -n "$ROTATED_SLICES" ]; then
     HAS_MEMORY="true"
 fi
@@ -1396,7 +1410,13 @@ fi
 # `clear`, `fork`, an absent source and an unrecognised value are left
 # triggering exactly as before — narrowing further would mean staging files
 # wait indefinitely for a session that never does a bare `startup` again.
-STAGING_COUNT=$(ls "$REMEMBER_DIR/today-"*.md 2>/dev/null | grep -v "today-${TODAY}.md" | grep -v "\.done\.md" | wc -l | tr -d ' ')
+# #517: normalize before the glob -- REMEMBER_DIR arrives backslash-
+# separated on msys/cygwin, and bash's glob only ever splits on '/', so
+# without this the count silently undercounts to 0 there, gating the
+# "N day(s) of memory to compress" message and the background
+# consolidation trigger off for real.
+_remember_staging_glob_dir=$(_remember_forward_slash "$REMEMBER_DIR")
+STAGING_COUNT=$(ls "$_remember_staging_glob_dir/today-"*.md 2>/dev/null | grep -v "today-${TODAY}.md" | grep -v "\.done\.md" | wc -l | tr -d ' ')
 if [ "$STAGING_COUNT" -gt 0 ] && [ "$SESSION_START_SOURCE" != "compact" ]; then
     echo "=== MEMORY CONSOLIDATION ==="
     echo "$STAGING_COUNT day(s) of memory to compress. Running consolidation in background..."

@@ -100,7 +100,13 @@ dispatch "before_consolidate"
 # script) and the EXIT trap removes it on every path, including the two failure
 # exits below. A SIGKILL leaves one behind holding a copy of bytes that also
 # still exist in staging — no recovery is owed, so the sweep is tidiness.
-rm -rf "${REMEMBER_DIR}"/tmp/consolidate-snapshot-* 2>/dev/null || true
+# #517: normalize the glob's own directory argument before matching --
+# REMEMBER_DIR arrives backslash-separated on msys/cygwin, and bash's glob
+# recognises only '/' as a path separator, so an unnormalized directory
+# here silently sweeps nothing there (mktemp two lines below needs no such
+# fix -- it builds the path directly, and MSYS translates that syscall).
+_remember_consolidate_glob_dir=$(_remember_forward_slash "$REMEMBER_DIR")
+rm -rf "${_remember_consolidate_glob_dir}"/tmp/consolidate-snapshot-* 2>/dev/null || true
 SNAPSHOT_DIR=$(mktemp -d "${REMEMBER_DIR}/tmp/consolidate-snapshot-XXXXXX")
 # Losing this wait costs a round and nothing else: nothing has been read, so
 # staging, recent.md and archive.md are all exactly as they were and the next
