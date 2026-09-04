@@ -1145,10 +1145,6 @@ case "$OSTYPE" in
     msys|cygwin) _remember_auto_dir="${REMEMBER_DIR//\\//}" ;;
     *) _remember_auto_dir="$REMEMBER_DIR" ;;
 esac
-# TEMP DEBUG (#487 CI iteration, remove before final commit):
-printf 'DEBUG housekeeping: OSTYPE=[%s] REMEMBER_DIR=[%s] _remember_auto_dir=[%s]\n' \
-    "$OSTYPE" "$REMEMBER_DIR" "$_remember_auto_dir" >&2
-printf 'DEBUG housekeeping: glob-expanded=[%s]\n' "${_remember_auto_dir}/logs/autonomous"/*.log >&2
 for _remember_auto_log in "${_remember_auto_dir}/logs/autonomous"/*.log; do
     [ -f "$_remember_auto_log" ] || continue
     if [ ! -s "$_remember_auto_log" ]; then

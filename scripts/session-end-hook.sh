@@ -319,22 +319,32 @@ _END_LOG="$REMEMBER_DIR/logs/autonomous/session-end-$(_remember_date +%H%M%S)-$$
 if ! printf '%s [session-end] flush started\n' "$(_remember_date +%H:%M:%S)" >> "$_END_LOG" 2>/dev/null; then
     report_error "session-end" "WARNING: could not seed $_END_LOG -- if this file stays absent or empty, an ordinary housekeeping sweep will reclaim it, and /remember:doctor may misreport this session as one where SessionEnd never fired."
 fi
-# TEMP DEBUG (#487 CI iteration, remove before final commit): writes with
-# their OWN explicit redirect, independent of the subshell-level one below,
-# so a failure of that grouped redirect itself cannot also hide this.
-printf '%s DEBUG session-end: about to launch subshell, SAVE_SCRIPT=[%s] OSTYPE=[%s]\n' \
-    "$(_remember_date +%H:%M:%S)" "$SAVE_SCRIPT" "$OSTYPE" >> "$REMEMBER_DIR/tmp/debug-487.log" 2>&1
+# REMEMBER_TEST_COMPLETION_MARKER (opt-in, unset in production): CI
+# iteration on #487 (PR #499) found the test harness's own PID-liveness
+# wait (tasklist, on Windows) does not reliably observe this backgrounded
+# flush finish on a real windows-latest runner -- $OSTYPE there reports
+# "cygwin", and its PID does not appear to line up with what `tasklist`
+# can find, so a test polling PID liveness alone gives up long before the
+# real flush -- which does complete -- is done, and asserts against a
+# still-running one. Rather than trust PID liveness at all, a caller that
+# sets this var gets an explicit, unambiguous completion line appended to
+# a file it names -- at zero cost to every real session, where the var is
+# never set and this whole block is a no-op.
+if [ -n "${REMEMBER_TEST_COMPLETION_MARKER:-}" ]; then
+    printf '%s session-end: about to launch subshell\n' "$(_remember_date +%H:%M:%S)" \
+        >> "$REMEMBER_TEST_COMPLETION_MARKER" 2>&1
+fi
 (
-    printf '%s DEBUG session-end: subshell started, SAVE_SCRIPT=[%s]\n' \
-        "$(_remember_date +%H:%M:%S)" "$SAVE_SCRIPT" >> "$REMEMBER_DIR/tmp/debug-487.log" 2>&1
     if [ -n "$STDIN_SESSION_ID" ]; then
         bash "$SAVE_SCRIPT" "$STDIN_SESSION_ID" --force
     else
         bash "$SAVE_SCRIPT" --force
     fi
     _flush_status=$?
-    printf '%s DEBUG session-end: bash save-session.sh exited status=%s\n' \
-        "$(_remember_date +%H:%M:%S)" "$_flush_status" >> "$REMEMBER_DIR/tmp/debug-487.log" 2>&1
+    if [ -n "${REMEMBER_TEST_COMPLETION_MARKER:-}" ]; then
+        printf '%s session-end: save-session.sh exited status=%s\n' \
+            "$(_remember_date +%H:%M:%S)" "$_flush_status" >> "$REMEMBER_TEST_COMPLETION_MARKER" 2>&1
+    fi
     if [ "$_flush_status" -ne 0 ]; then
         report_error "session-end" "WARNING: save-session.sh --force exited $_flush_status at session end -- this session's unsaved tail may be lost. See $_END_LOG for what save-session.sh itself logged."
     fi

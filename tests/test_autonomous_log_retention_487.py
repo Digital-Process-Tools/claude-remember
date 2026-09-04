@@ -58,20 +58,17 @@ pytestmark = pytest.mark.skipif(
 
 
 def _dump_dir(d: Path) -> str:
-    """TEMP DEBUG (#487 CI iteration): filenames AND contents, so the real
-    windows-latest job log actually shows what the housekeeping block saw
-    -- the DEBUG printf lines added to scripts/save-session.sh land inside
-    the run's own session-end-*.log file, not in this subprocess's own
-    captured stdout/stderr, since the flush is backgrounded. Remove once
-    the mechanism is understood.
+    """Filenames AND contents of the autonomous dir plus its parent logs/
+    dir, for a decisive assertion-failure message.
 
-    Second CI round found the fresh session-end-*.log itself carries NO
-    output at all past its own seeded header line -- not even the stderr
-    DEBUG lines added at the housekeeping block -- which means
-    save-session.sh is not reaching that block on real Windows. This now
-    also dumps `logs/` as a whole (memory-YYYY-MM-DD.log, hook-errors.log)
-    since save-session.sh's own `log()` writes there, not to stdout/stderr,
-    and its `trap ... ERR` handler logs an early failure the same way.
+    save-session.sh's own `log()` writes to `logs/memory-YYYY-MM-DD.log`,
+    not to stdout/stderr, and its `trap ... ERR` handler reports an early
+    failure the same way -- neither would be visible from a bare filename
+    listing, which is what made this file's own CI iteration on #487 (PR
+    #499) slow: several rounds were needed to see that the real windows
+    runner's flush was not failing at all, just not finished yet by the
+    time the assertion ran (see `_run_hook`'s own
+    REMEMBER_TEST_COMPLETION_MARKER wait, below).
     """
     out = []
     for p in sorted(d.iterdir()):
@@ -86,11 +83,6 @@ def _dump_dir(d: Path) -> str:
                 out.append(f"--- logs/{p.name} ---\n{p.read_text(errors='replace')}")
             except OSError as exc:
                 out.append(f"--- logs/{p.name} (unreadable: {exc}) ---")
-    debug_487 = logs_dir.parent / "tmp" / "debug-487.log"
-    if debug_487.exists():
-        out.append(f"--- tmp/debug-487.log ---\n{debug_487.read_text(errors='replace')}")
-    else:
-        out.append("--- tmp/debug-487.log --- (absent)")
     return "\n".join(out) if out else "(empty)"
 
 
@@ -158,14 +150,29 @@ def _run_hook(plugin: Path, env: dict, *, session_id, reason: str = "other"):
     """Same shape as test_session_end_hook_345.py's own `_run_hook`, but
     invoking the resolved `BASH` (Git Bash on Windows, not whatever `bash`
     happens to resolve to on PATH) with a forward-slashed script path and
-    env (`_posix_path`, above), and waiting via `_pid_alive` instead of
-    `_reap` -- see that function's own docstring for why.
+    env (`_posix_path`, above), and waiting for the real flush to finish
+    via REMEMBER_TEST_COMPLETION_MARKER (scripts/session-end-hook.sh)
+    rather than `_pid_alive`/`_reap`.
+
+    CI iteration on #487 (PR #499): a real windows-latest runner reports
+    $OSTYPE=cygwin, and `_pid_alive`'s own `tasklist` lookup below never
+    finds the backgrounded flush there -- returns "not alive" on its very
+    first check, long before the real flush (which does complete; it was
+    never the retention sweep itself that was broken) is actually done.
+    `_pid_alive` is kept as a cheap first pass (it is correct and fast on
+    every platform this suite runs on aside from that one real-Windows
+    case), and REMEMBER_TEST_COMPLETION_MARKER is the authoritative
+    fallback: an explicit, unambiguous "flush exited" line the hook
+    itself appends once `bash "$SAVE_SCRIPT"` actually returns, which does
+    not depend on any PID or process-table lookup at all.
     """
     hook = _posix_path(plugin / "scripts" / HOOK_NAME)
     run_env = dict(env)
     for key in ("CLAUDE_PLUGIN_ROOT", "CLAUDE_PROJECT_DIR", "HOME"):
         if key in run_env:
             run_env[key] = _posix_path(run_env[key])
+    marker = Path(env["CLAUDE_PROJECT_DIR"]) / ".remember" / "tmp" / "completion-marker.log"
+    run_env["REMEMBER_TEST_COMPLETION_MARKER"] = _posix_path(marker)
     body = {"reason": reason}
     if session_id is not None:
         body["session_id"] = session_id
@@ -180,25 +187,25 @@ def _run_hook(plugin: Path, env: dict, *, session_id, reason: str = "other"):
         except (ValueError, OSError):
             pid = None
         if pid is not None:
-            deadline = time.monotonic() + 30
+            deadline = time.monotonic() + 5
             while time.monotonic() < deadline and _pid_alive(pid):
                 time.sleep(0.05)
-    # TEMP DEBUG (#487 CI iteration): CI round 3 (job 100884873570) showed
-    # "subshell started" printed to tmp/debug-487.log but the matching
-    # "exited status=" line never arrived within the 30s _pid_alive wait
-    # above -- either that wait is not tracking the real process at all on
-    # real Windows (OSTYPE there was "cygwin", and cygwin's own PIDs do not
-    # necessarily correspond to the native Windows PIDs `tasklist` above
-    # queries) or the real flush simply takes longer than 30s under real
-    # Windows subprocess-spawn overhead. Poll the debug marker itself
-    # (unambiguous evidence save-session.sh actually returned) up to 90s
-    # more, independent of the PID-based wait, so the next CI run's failure
-    # text says definitively whether this is a wait-condition bug or a
-    # real hang.
-    debug_487 = Path(env["CLAUDE_PROJECT_DIR"]) / ".remember" / "tmp" / "debug-487.log"
-    _deadline2 = time.monotonic() + 90
-    while time.monotonic() < _deadline2:
-        if debug_487.exists() and "exited status=" in debug_487.read_text(errors="replace"):
+    # 30s: TestSeedWriteFailureIsReported's own positive fixture
+    # (autonomous/ blocked by a FILE, not a directory) makes $_END_LOG's own
+    # path unopenable, which appears to abort the whole backgrounded
+    # compound command before its body -- including this marker write --
+    # ever runs, so that test waits out the full deadline every time, in
+    # exchange for evidence the flush degraded exactly as designed. Not
+    # measured against a real flush's own exact completion time -- CI
+    # round 4 used a 90s ceiling and the 3 "must fire" tests it fixed did
+    # not report how much of that they actually used -- so this is a
+    # judgment call: generous enough that a real flush is very unlikely to
+    # be cut off, without paying the full 90s on every run of the fixture
+    # above. If a future CI round shows a real flush still exceeding this,
+    # raise it back up rather than re-guessing.
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        if marker.exists() and "exited status=" in marker.read_text(errors="replace"):
             break
         time.sleep(0.1)
     return result
@@ -556,15 +563,24 @@ REMEMBER_DIR={shlex.quote(remember_dir)}
         happily follow such a literal name on POSIX, same as any other
         filename -- proving nothing about the glob's own directory
         argument specifically). It asserts the narrower, decisive claim
-        instead: with $OSTYPE left at whatever this test's own platform
-        reports (never msys/cygwin), the block must NOT even attempt to
-        normalize a backslash-laden REMEMBER_DIR -- checked by feeding a
-        REMEMBER_DIR that is backslash-laden AND does not correspond to
-        any real directory at all, so if the gate were ever removed and
-        the block normalized it anyway, the now-real (forward-slash)
-        target it would produce is deliberately made to be this fixture's
-        actual, empty autonomous/ directory -- exposing the removal as a
-        false "swept" rather than as an unrelated no-op.
+        instead: with $OSTYPE forced to a definitely-not-Windows value,
+        the block must NOT even attempt to normalize a backslash-laden
+        REMEMBER_DIR -- checked by feeding a REMEMBER_DIR that is
+        backslash-laden AND does not correspond to any real directory at
+        all, so if the gate were ever removed and the block normalized it
+        anyway, the now-real (forward-slash) target it would produce is
+        deliberately made to be this fixture's actual, empty autonomous/
+        directory -- exposing the removal as a false "swept" rather than
+        as an unrelated no-op.
+
+        `ostype="linux-gnu"` is passed explicitly rather than left at this
+        test's own platform default (CI, PR #499: a real windows-latest
+        runner's own bash reports $OSTYPE=cygwin as ITS compiled default,
+        with or without the parent process's environment carrying a
+        value at all -- "leave it unset" is not "not Windows Git Bash" on
+        the one platform this control exists to guard, and the control
+        failed there for exactly that reason, not because the gate itself
+        was ever wrong).
         """
         autonomous = tmp_path / ".remember" / "logs" / "autonomous"
         autonomous.mkdir(parents=True)
@@ -578,7 +594,7 @@ REMEMBER_DIR={shlex.quote(remember_dir)}
         # normalization would still sweep `stale`, and this control would
         # then wrongly look identical to the fixed behaviour.
         backslash_but_real_if_normalized = str(tmp_path / ".remember").replace("/", "\\")
-        self._run_extracted_block(autonomous, backslash_but_real_if_normalized)
+        self._run_extracted_block(autonomous, backslash_but_real_if_normalized, ostype="linux-gnu")
 
         assert stale.exists(), (
             "a backslash-laden REMEMBER_DIR must be left untouched (and "
