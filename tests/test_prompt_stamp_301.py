@@ -51,7 +51,9 @@ from tests.spawn_counting import make_shim_dir  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 USER_PROMPT = REPO_ROOT / "scripts" / "user-prompt-hook.sh"
-README = REPO_ROOT / "README.md"
+# #505 moved the Configuration section (and prompt_stamp's row in it)
+# verbatim out of README.md into its own doc.
+CONFIG_DOC = REPO_ROOT / "docs" / "configuration.md"
 
 WHO = "cachetester"
 
@@ -343,9 +345,11 @@ def test_a_cache_written_before_this_option_existed_is_not_trusted(tmp_path):
 
 def test_the_option_is_documented_with_all_three_values(tmp_path):
     """tests/test_config_contract.py already asserts the key appears in the
-    README table and the example config. It cannot assert that the table says
-    what the values DO — and an option whose modes are undiscoverable is one
-    people will keep solving with a regex."""
-    text = README.read_text(encoding="utf-8")
+    docs/configuration.md table and the example config. It cannot assert that
+    the table says what the values DO — and an option whose modes are
+    undiscoverable is one people will keep solving with a regex."""
+    text = CONFIG_DOC.read_text(encoding="utf-8")
     for value in ("`full`", "`stable`", "`off`"):
-        assert value in text, f"README documents no {value} mode for prompt_stamp"
+        assert value in text, (
+            f"docs/configuration.md documents no {value} mode for prompt_stamp"
+        )

@@ -77,3 +77,24 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
         terminalreporter.write_line(
             f"-- test duration report (#510) --\nstate: could-not-measure (reporter raised {exc!r})"
         )
+
+    # #507: a separate try so a defect in either reporter cannot silence the
+    # other -- the same isolation the #510 block above already relies on.
+    try:
+        from scripts import report_windows_skip_floor as skipfloor
+
+        skipped = len(terminalreporter.stats.get("skipped", []))
+        total = sum(
+            len(terminalreporter.stats.get(key, []))
+            for key in ("passed", "failed", "skipped", "error", "xfailed", "xpassed")
+        )
+        skip_result = skipfloor.analyze(skipped, total, is_windows=(sys.platform == "win32"))
+
+        terminalreporter.write_line(skipfloor.format_report(skip_result))
+        warning = skipfloor.github_actions_warning(skip_result)
+        if warning:
+            terminalreporter.write_line(warning)
+    except Exception as exc:  # noqa: BLE001 -- pragma: no cover - defensive; see #510's identical reasoning above
+        terminalreporter.write_line(
+            f"-- windows skip floor report (#507) --\nstate: could-not-measure (reporter raised {exc!r})"
+        )
