@@ -430,3 +430,41 @@ def test_branch_cmd_single_line_output_still_used(tmp_path):
     assert result.stdout == "single-line"
     assert result.stderr == ""
 
+
+def test_branch_cmd_carriage_return_falls_through_to_git(tmp_path):
+    """MUST FIRE (#501 follow-up, auditor finding): a resolver that emits a
+    lone carriage return with no line feed must not win either -- $(...)
+    only strips a trailing LF, so a bare CR survives into $BRANCH exactly
+    like an embedded LF would, and can reposition a naive terminal's
+    cursor to column 0 mid-line the same way issue #501 names for '\n'.
+    The multi-line guard must catch both control characters, not just
+    the one the issue happened to name.
+
+    Captured as raw bytes, decoded without universal-newline translation
+    (subprocess's text=True path silently rewrites a lone '\r' to '\n'
+    on read, which would make this test pass whether or not the fix
+    actually catches '\r' -- the exact false-negative this test exists
+    to rule out)."""
+    project = _make_git_repo(tmp_path, branch_name="release/2026-06")
+    resolver = _make_resolver(tmp_path, 'printf "part1\\rpart2"')
+    block = _extract_branch_block()
+    script = f"""
+set -e
+log() {{ printf 'LOG %s: %s\n' "$1" "$2" 1>&2; }}
+export PROJECT_DIR={project}
+export SESSION_ID=abc123
+export REMEMBER_BRANCH_CMD={resolver}
+{block}
+printf '%s' "$BRANCH"
+"""
+    raw = subprocess.run(["bash", "-c", script], capture_output=True, check=False)
+    assert raw.returncode == 0, f"BRANCH eval failed: {raw.stderr!r}"
+    stdout = raw.stdout.decode()
+    stderr = raw.stderr.decode()
+    assert stdout == "release/2026-06", (
+        f"a lone-CR resolver output must not win; expected git fallback, got {stdout!r}"
+    )
+    assert "REMEMBER_BRANCH_CMD" in stderr, (
+        f"a lone-CR resolver failure must be logged; got stderr={stderr!r}"
+    )
+

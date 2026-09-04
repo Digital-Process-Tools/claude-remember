@@ -428,15 +428,18 @@ fi
 #   4. The literal "unknown".
 #
 # $CMD_BRANCH becomes $BRANCH, which is substituted verbatim into the
-# summarizer prompt (pipeline/prompts.py's {{BRANCH}}) with no newline
-# bound of its own (#501). $(...) only strips TRAILING newlines, so a
-# resolver that prints more than one line would write arbitrary content
-# at column 0 of the prompt. Bounded here, before BRANCH is ever set,
-# by rejecting a multi-line result outright -- same as a non-zero exit
-# or empty stdout above: falls through to the git branch lookup, logged
-# the same way, rather than silently truncating to the first line (a
-# truncation a reader of the log could not tell apart from the resolver
-# only ever having meant to print one line).
+# summarizer prompt (pipeline/prompts.py's {{BRANCH}}) with no bound of
+# its own on embedded control characters (#501). $(...) only strips a
+# TRAILING newline, so a resolver that prints more than one line -- or a
+# lone carriage return with no line feed, which a naive terminal reads
+# as "return to column 0 mid-line" the same way an embedded newline is
+# -- would write arbitrary content at column 0 of the prompt. Bounded
+# here, before BRANCH is ever set, by rejecting the result outright on
+# either character -- same as a non-zero exit or empty stdout above:
+# falls through to the git branch lookup, logged the same way, rather
+# than silently truncating to the first line (a truncation a reader of
+# the log could not tell apart from the resolver only ever having meant
+# to print one line).
 if [ -n "${REMEMBER_BRANCH:-}" ]; then
     BRANCH="$REMEMBER_BRANCH"
 else
@@ -444,8 +447,8 @@ else
     if [ -n "${REMEMBER_BRANCH_CMD:-}" ]; then
         if CMD_BRANCH=$("$REMEMBER_BRANCH_CMD" "$SESSION_ID" 2>/dev/null) && [ -n "$CMD_BRANCH" ]; then
             case "$CMD_BRANCH" in
-                *$'\n'*)
-                    log "branch" "WARNING: REMEMBER_BRANCH_CMD ($REMEMBER_BRANCH_CMD) printed multi-line output for session $SESSION_ID -- refusing to use it unbounded, falling back to git branch lookup"
+                *$'\n'*|*$'\r'*)
+                    log "branch" "WARNING: REMEMBER_BRANCH_CMD ($REMEMBER_BRANCH_CMD) printed multi-line (or carriage-return-bearing) output for session $SESSION_ID -- refusing to use it unbounded, falling back to git branch lookup"
                     ;;
                 *)
                     BRANCH="$CMD_BRANCH"
