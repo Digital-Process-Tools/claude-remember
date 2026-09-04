@@ -248,14 +248,36 @@ jobs:
             exit 0
           fi
 
+          # `user_visible_paths` in .oss.json (#779): a list of regexes THIS
+          # repository has declared as user-visible, joined by
+          # `user_visible_pattern()` at scaffold time into one `grep -E`
+          # alternation. Empty (the substituted value below) when nothing is
+          # declared -- absent/null, the default -- so `[ -n '' ]` is false and
+          # this guard never fires: every non-empty diff with no fragment still
+          # falls through to the label/dependabot/failure branches below,
+          # unchanged from before this key existed.
+          #
+          # Placed BELOW every branch above that can find or lose a fragment on
+          # purpose: a deleted fragment was already refused, above, before this
+          # line is reached, so declaring `user_visible_paths` cannot make that
+          # bypass possible again -- the `$removed && ! $assembled` branch at
+          # the top of this step already returned.
+          if [ -n '' ]; then
+            if ! printf '%s\n' "$changed" | grep -Eq ''; then
+              echo "changelog: skipped (no user-visible paths changed)"
+              exit 0
+            fi
+          fi
+
           # Every pull request is asked for one, including a docs-only or tests-only
-          # change. The alternative -- exempting paths by regex, as some repositories
-          # do -- needs a list of what is user-visible, and that is a fact about YOUR
-          # repository which this template cannot know: guessing `docs/` and `tests/`
-          # is silent in the dangerous direction for a project whose product is its
-          # documentation. The escape hatch is the label, which a human applies and a
-          # reviewer can see; `gh api` above is what makes it actually take effect on
-          # a re-run rather than only on the next push.
+          # change, UNLESS this repository has declared `user_visible_paths` above and
+          # none of the changed paths matched it. Guessing `docs/` and `tests/` by
+          # default is still refused -- silent in the dangerous direction for a
+          # project whose product is its documentation -- so the unconfigured
+          # default stays exactly this strict. The escape hatch below is the label,
+          # which a human applies and a reviewer can see; `gh api` above is what
+          # makes it actually take effect on a re-run rather than only on the next
+          # push.
           #
           # One author is exempt, and it is placed HERE -- last, after every branch above --
           # so that it changes exactly one outcome: the one that currently fails with
@@ -271,10 +293,12 @@ jobs:
           # before the first failure exists, which is why it is a condition here and not a
           # label somebody applies afterwards.
           #
-          # This is an AUTHOR check and not a path check, which is the distinction that keeps
-          # the paragraph above honest: which paths are user-visible is a fact about YOUR
-          # repository that this template cannot know, while who opened the pull request is a
-          # fact the event hands it. It matches one exact login -- the bot that
+          # This is an AUTHOR check and not a path check. `user_visible_paths` above is
+          # the path-based route, and it is opt-in -- a repository that has not declared
+          # it is in exactly the position this comment used to describe unconditionally:
+          # which paths are user-visible is a fact this template does not guess at, so
+          # the escape hatch for a bot that cannot use the label is who opened the pull
+          # request, not what it touched. It matches one exact login -- the bot that
           # `.github/dependabot.yml`, scaffolded beside this file, actually produces.
           #
           # It is a skip that announces itself, not a silent pass. Read that line if you point

@@ -2292,10 +2292,19 @@ def main(argv=None):
             pass
         return 0
 
-    try:
-        payload = json.load(sys.stdin)
-    except (ValueError, OSError):
+    # #846: `sys.stdin` is `None` when the harness hands this process a closed
+    # or unopenable standard input -- `json.load(None)` then raises
+    # `AttributeError`, which neither `ValueError` nor `OSError` below
+    # catches. The rest of `main()` already treats an empty/unreadable
+    # payload as the ordinary "no session context" case, so the same
+    # fallback applies here rather than crashing before it can.
+    if sys.stdin is None:
         payload = {}
+    else:
+        try:
+            payload = json.load(sys.stdin)
+        except (ValueError, OSError):
+            payload = {}
     start = (payload.get("workspace") or {}).get("current_dir") or os.getcwd()
     root = repo_root(start)
     if root is None:
