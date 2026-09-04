@@ -69,7 +69,27 @@ _FORWARD_SLASH_FN = "_remember_forward_slash() {" + _FORWARD_SLASH_FN.split("\n}
 
 class TestBootstrapDirsGitignoreWrite:
     """Site 1: bootstrap-dirs.sh:279-296 -- the in-project `.gitignore`
-    write's `case "$REMEMBER_DIR" in "$_mem_proj"/*)` match."""
+    write's `case "$REMEMBER_DIR" in "$_mem_proj"/*)` match.
+
+    The real store directory this class creates has to be built
+    differently per HOST platform (CI job 100931242415/100931242372,
+    windows-latest 3.9/3.12, self-review-round-2 finding): on a POSIX host
+    (macOS/Linux CI, local dev), backslash is an ordinary filename
+    character, never a separator, so faking a Windows-native boundary
+    needs one real directory whose own on-disk NAME literally contains a
+    backslash (`tmp_path / "proj\\store"`, ONE component, no
+    parents=True). On a native-Windows host (windows-latest), the
+    OPPOSITE is true: backslash IS the real separator, both for Python's
+    own `Path.mkdir()` and for Git Bash's own MSYS-translated file I/O --
+    `tmp_path / "proj\\store"` there is TWO components, and `mkdir()`
+    (no `parents=True`) fails with `WinError 3: The system cannot find
+    the path specified` because "proj" was never created, which is
+    exactly what CI hit. On that host an ORDINARY nested `mkdir` (two
+    real components, `parents=True`) already produces exactly the fully
+    backslash-separated path this test needs, with no special
+    construction at all -- `str(store_dir)` on native Windows is already
+    all-backslash by construction.
+    """
 
     _BLOCK = extract_lines(
         "scripts/bootstrap-dirs.sh",
@@ -86,12 +106,26 @@ class TestBootstrapDirsGitignoreWrite:
         )
         return run_block(self._BLOCK, ostype=ostype, setup=setup)
 
+    @staticmethod
+    def _make_store_dir(tmp_path, container_name: str, leaf_name: str):
+        """Real on-disk directory named <container_name>BOUNDARY<leaf_name>
+        under tmp_path, where BOUNDARY is a literal backslash -- see the
+        class docstring for why its construction has to differ by host
+        platform. `container_name` never needs to exist as its own
+        directory; only the composed store_dir is ever `-d`/write tested."""
+        if os.name == "nt":
+            store_dir = tmp_path / container_name / leaf_name
+            store_dir.mkdir(parents=True)
+        else:
+            store_dir = tmp_path / f"{container_name}\\{leaf_name}"
+            store_dir.mkdir()
+        return store_dir
+
     def test_must_fire_gitignore_written_for_in_project_store_under_backslash_paths(
         self, tmp_path
     ):
         mem_proj = str(tmp_path / "proj")
-        store_dir = tmp_path / "proj\\store"  # one real dir, literal backslash in its name
-        store_dir.mkdir()
+        store_dir = self._make_store_dir(tmp_path, "proj", "store")
         remember_dir = str(store_dir)
 
         result = self._run(remember_dir, mem_proj, "msys")
@@ -110,8 +144,7 @@ class TestBootstrapDirsGitignoreWrite:
         get no .gitignore, backslash-laden or not -- the fix must not
         start matching everything."""
         mem_proj = str(tmp_path / "proj")
-        store_dir = tmp_path / "elsewhere\\store"
-        store_dir.mkdir()
+        store_dir = self._make_store_dir(tmp_path, "elsewhere", "store")
         remember_dir = str(store_dir)
 
         result = self._run(remember_dir, mem_proj, "msys")
@@ -124,11 +157,17 @@ class TestBootstrapDirsGitignoreWrite:
 
     def test_must_fire_forward_slash_paths_still_work(self, tmp_path):
         """Positive control: an ordinary POSIX in-project REMEMBER_DIR is
-        unaffected by the fix."""
-        mem_proj = str(tmp_path / "proj")
-        store_dir = tmp_path / "proj" / "store"
+        unaffected by the fix. The real directory is created with an
+        ORDINARY nested mkdir (portable everywhere), and both strings
+        handed to bash are forced to forward slashes -- a no-op on POSIX,
+        and on native Windows a spelling Git Bash's own MSYS runtime
+        accepts equally well as the native backslash form, so the real
+        directory this creates is still reachable through it."""
+        mem_proj_dir = tmp_path / "proj"
+        store_dir = mem_proj_dir / "store"
         store_dir.mkdir(parents=True)
-        remember_dir = str(store_dir)
+        mem_proj = str(mem_proj_dir).replace("\\", "/")
+        remember_dir = str(store_dir).replace("\\", "/")
 
         result = self._run(remember_dir, mem_proj, "")
 
