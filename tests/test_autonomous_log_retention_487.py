@@ -64,6 +64,14 @@ def _dump_dir(d: Path) -> str:
     the run's own session-end-*.log file, not in this subprocess's own
     captured stdout/stderr, since the flush is backgrounded. Remove once
     the mechanism is understood.
+
+    Second CI round found the fresh session-end-*.log itself carries NO
+    output at all past its own seeded header line -- not even the stderr
+    DEBUG lines added at the housekeeping block -- which means
+    save-session.sh is not reaching that block on real Windows. This now
+    also dumps `logs/` as a whole (memory-YYYY-MM-DD.log, hook-errors.log)
+    since save-session.sh's own `log()` writes there, not to stdout/stderr,
+    and its `trap ... ERR` handler logs an early failure the same way.
     """
     out = []
     for p in sorted(d.iterdir()):
@@ -71,6 +79,13 @@ def _dump_dir(d: Path) -> str:
             out.append(f"--- {p.name} ---\n{p.read_text(errors='replace')}")
         except OSError as exc:
             out.append(f"--- {p.name} (unreadable: {exc}) ---")
+    logs_dir = d.parent
+    for p in sorted(logs_dir.iterdir()):
+        if p.is_file() and p.parent == logs_dir:
+            try:
+                out.append(f"--- logs/{p.name} ---\n{p.read_text(errors='replace')}")
+            except OSError as exc:
+                out.append(f"--- logs/{p.name} (unreadable: {exc}) ---")
     return "\n".join(out) if out else "(empty)"
 
 
