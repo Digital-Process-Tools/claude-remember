@@ -40,7 +40,6 @@ from __future__ import annotations
 import os
 import shlex
 import sys
-from pathlib import Path
 
 import pytest
 
@@ -54,17 +53,11 @@ pytestmark = pytest.mark.skipif(
     reason="no usable bash found (checked PATH, then Git-for-Windows install locations)",
 )
 
-REPO_ROOT_DIR = Path(__file__).resolve().parent.parent
-
-# The shared helper itself, needed in `setup` for the bootstrap-dirs.sh
-# site (which calls it directly) -- extracted the same way
-# tests/test_windows_glob_backslash_517.py does, never retyped.
-_FORWARD_SLASH_FN = (
-    (REPO_ROOT_DIR / "scripts" / "resolve-paths.sh")
-    .read_text()
-    .split("_remember_forward_slash() {", 1)[1]
-)
-_FORWARD_SLASH_FN = "_remember_forward_slash() {" + _FORWARD_SLASH_FN.split("\n}\n", 1)[0] + "\n}"
+# Neither of #519's own two sites calls the shared `_remember_forward_slash`
+# helper (scripts/resolve-paths.sh, #517) any more -- both duplicate its
+# $OSTYPE gate inline instead (see TestBootstrapDirsGitignoreWrite's and
+# TestGitRestoreLegacyGuardSplit's own docstrings for why), so neither
+# extracted block below needs that function prepended to its `setup`.
 
 
 class TestBootstrapDirsGitignoreWrite:
@@ -89,6 +82,20 @@ class TestBootstrapDirsGitignoreWrite:
     backslash-separated path this test needs, with no special
     construction at all -- `str(store_dir)` on native Windows is already
     all-backslash by construction.
+
+    The gate is now duplicated INLINE in bootstrap-dirs.sh rather than
+    calling the shared `_remember_forward_slash` (scripts/resolve-paths.sh,
+    #517) directly -- self-review/CI finding, job 100934963344
+    (ubuntu-latest 3.9): bootstrap-dirs.sh's own USAGE header claims every
+    caller sources resolve-paths.sh first, but tests/test_external_data_dir.py
+    and tests/test_worktree_memory.py's own `_run_bootstrap()` harnesses
+    (real, pre-existing end-to-end tests) source only detect-tools.sh and
+    bootstrap-dirs.sh, never resolve-paths.sh -- so `_remember_forward_slash`
+    was genuinely undefined there, silently degrading the whole gate to
+    "never matches, .gitignore never written" for EVERY REMEMBER_DIR, not
+    just a backslash-laden one. This class's own `setup` therefore no
+    longer needs `_FORWARD_SLASH_FN` prepended -- the extracted block is
+    self-contained, exactly like TestGitRestoreLegacyGuardSplit's own.
     """
 
     _BLOCK = extract_lines(
@@ -100,20 +107,32 @@ class TestBootstrapDirsGitignoreWrite:
 
     def _run(self, remember_dir: str, mem_proj: str, ostype: str):
         setup = (
-            _FORWARD_SLASH_FN
-            + f"\nREMEMBER_DIR={shlex.quote(remember_dir)}"
+            f"REMEMBER_DIR={shlex.quote(remember_dir)}"
             + f"\n_mem_proj={shlex.quote(mem_proj)}"
         )
         return run_block(self._BLOCK, ostype=ostype, setup=setup)
 
     @staticmethod
-    def _make_store_dir(tmp_path, container_name: str, leaf_name: str):
+    def _make_store_dir(tmp_path, container_name: str, leaf_name: str, *, windows_style=None):
         """Real on-disk directory named <container_name>BOUNDARY<leaf_name>
         under tmp_path, where BOUNDARY is a literal backslash -- see the
         class docstring for why its construction has to differ by host
         platform. `container_name` never needs to exist as its own
-        directory; only the composed store_dir is ever `-d`/write tested."""
-        if os.name == "nt":
+        directory; only the composed store_dir is ever `-d`/write tested.
+
+        `windows_style`, when given, OVERRIDES the `os.name`-based branch
+        choice below -- used by TestMakeStoreDirBranchLogic to exercise the
+        Windows branch's own construction logic on every CI leg, not only
+        windows-latest (self-review-round-3 suggestion: a bug in the branch
+        the CURRENT host does not naturally take was otherwise invisible to
+        every OTHER platform's CI). The reverse (forcing the POSIX branch's
+        single-literal-backslash-component `mkdir()` to run on a genuine
+        Windows host) is deliberately NOT exercised the same way: that
+        `mkdir()` call fails there by construction, for the identical
+        WinError-3 reason production code never takes that shape on
+        Windows either -- forcing it would be a manufactured failure, not
+        a regression signal."""
+        if windows_style if windows_style is not None else os.name == "nt":
             store_dir = tmp_path / container_name / leaf_name
             store_dir.mkdir(parents=True)
         else:
@@ -176,6 +195,62 @@ class TestBootstrapDirsGitignoreWrite:
             f"an ordinary forward-slash in-project store must still get "
             f"its .gitignore -- stderr={result.stderr}"
         )
+
+
+class TestMakeStoreDirBranchLogic:
+    """Regression test for the CI-red addendum on this diff (jobs
+    100931242415/100931242372, windows-latest 3.9/3.12): a fix to
+    TestBootstrapDirsGitignoreWrite._make_store_dir()'s Windows branch
+    would previously only ever be exercised by CI's own windows-latest
+    legs, since every OTHER leg's `os.name` naturally selects the POSIX
+    branch instead -- a regression there would go undetected on every
+    platform except the one it actually shows up on, discovered only
+    after a push. This class forces the Windows branch's own construction
+    logic (`windows_style=True`) to run HERE, on whatever host is running
+    this suite, POSIX included -- the mkdir mechanics themselves (an
+    ordinary nested `mkdir(parents=True)` with two real path components)
+    are genuinely platform-agnostic; only the STRING's separator style
+    (native backslash vs forward slash) differs by real host, and this
+    class does not assert on that string at all, only that the directory
+    it names is real and correctly nested.
+
+    The POSIX branch is not given the same treatment here (forcing
+    `windows_style=False` on a genuine Windows host) -- see
+    `_make_store_dir`'s own docstring for why: unlike the Windows branch,
+    the POSIX branch's `mkdir()` call is not merely less-tested on that
+    host, it CANNOT succeed there by construction (native Windows treats
+    the embedded backslash as a real separator, the identical WinError-3
+    class this whole diff exists to fix), so forcing it would be a
+    manufactured failure rather than a regression signal.
+    """
+
+    def test_must_fire_windows_branch_produces_a_real_nested_directory(self, tmp_path):
+        store_dir = TestBootstrapDirsGitignoreWrite._make_store_dir(
+            tmp_path, "proj", "store", windows_style=True
+        )
+
+        assert store_dir.exists() and store_dir.is_dir(), (
+            f"the Windows branch's own mkdir(parents=True) must produce a "
+            f"real, existing directory on every host -- store_dir={store_dir}"
+        )
+        assert store_dir.parent.name == "proj" and store_dir.name == "store", (
+            "the Windows branch must nest the store two real path "
+            f"components deep -- store_dir={store_dir}"
+        )
+
+    def test_must_fire_windows_branch_container_does_not_need_to_pre_exist(self, tmp_path):
+        """Positive control: the container ('proj') is created BY this
+        call (parents=True), not required to already exist -- unlike the
+        POSIX branch, where the container is never a real directory at
+        all, only a string operand."""
+        assert not (tmp_path / "elsewhere").exists()
+
+        store_dir = TestBootstrapDirsGitignoreWrite._make_store_dir(
+            tmp_path, "elsewhere", "store", windows_style=True
+        )
+
+        assert store_dir.exists()
+        assert (tmp_path / "elsewhere").is_dir()
 
 
 class TestGitRestoreLegacyGuardSplit:
