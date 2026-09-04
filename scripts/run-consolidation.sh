@@ -239,7 +239,14 @@ while IFS= read -r -d '' staging_path && IFS= read -r -d '' staging_consumed; do
         # crash between mktemp and mv leaves a stray sibling; sweep it first,
         # same as #245 — inert (name does not end in .md, so nothing globs it)
         # but would accumulate one per failure otherwise.
-        rm -f "${staging_path}".tail-* "${staging_path}".prefix-* 2>/dev/null
+        # #526: normalize before the glob -- staging_path inherits
+        # REMEMBER_DIR's backslashes on msys/cygwin, and bash's glob only
+        # ever splits on '/', so without this the sweep silently never
+        # matches there and a stray .tail-*/.prefix-* sibling accumulates
+        # per failed split, same class as the snapshot sweep above
+        # (_remember_consolidate_glob_dir).
+        _remember_staging_rm_glob=$(_remember_forward_slash "$staging_path")
+        rm -f "${_remember_staging_rm_glob}".tail-* "${_remember_staging_rm_glob}".prefix-* 2>/dev/null
         staging_tail=$(mktemp "${staging_path}.tail-XXXXXX")
         # Extracted into a FRESH temp file, never straight into staging_done
         # (self-review of #509, Explore finding 1): an earlier draft wrote the
