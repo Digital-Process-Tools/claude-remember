@@ -277,13 +277,55 @@ fi
 # make. Redirecting the whole group puts the shell's own diagnostic inside the
 # suppressed scope.
 if [ -d "$REMEMBER_DIR" ]; then
-    case "$REMEMBER_DIR" in
-        "$_mem_proj"/*)
+    # #519: both sides forward-slashed before the case-glob match --
+    # REMEMBER_DIR and _mem_proj both arrive backslash-separated on
+    # msys/cygwin (resolve-paths.sh's own _remember_normalize_win_path),
+    # and a bash `case` pattern only ever recognises '/' as a path
+    # separator, so an in-project store's REMEMBER_DIR silently never
+    # matched "$_mem_proj"/* there -- no .gitignore was ever written. This
+    # is NOT the #401 doctor.sh baseline (that reads .install-marker,
+    # written unconditionally, just above, unaffected by this gate): the
+    # real, still-live consequence is hooks.d/after_save/50-git-backup.sh's
+    # own protective .gitignore going missing for that store, so its
+    # memory content is not excluded from `git add -A`/`git status`
+    # inside the user's own project repository the way the file's comment
+    # near the top of this block documents. The write itself still targets
+    # the real (unmodified) REMEMBER_DIR; only the comparison is
+    # normalized.
+    #
+    # The gate is duplicated INLINE here rather than calling the shared
+    # `_remember_forward_slash` (scripts/resolve-paths.sh, #517) directly
+    # (self-review/CI finding, job 100934963344, ubuntu-latest 3.9):
+    # this file's own USAGE header says every caller sources resolve-paths.sh
+    # first, but that is not true of every REAL caller -- tests/test_external_data_dir.py
+    # and tests/test_worktree_memory.py's own `_run_bootstrap()` harnesses
+    # source only detect-tools.sh and bootstrap-dirs.sh, never resolve-paths.sh,
+    # and neither of those two sources it transitively either. There,
+    # `_remember_forward_slash` is undefined, the command substitution below
+    # would run it as an unknown external command (bash: ... command not
+    # found, exit 127) and silently substitute an EMPTY string, so the case
+    # pattern would never match and .gitignore would never be written for
+    # ANY REMEMBER_DIR, forward-slash or not -- exactly the regression CI
+    # caught (test_gitignore_written_in_legacy_mode /
+    # test_worktree_remember_is_gitignored, both asserting on real, ordinary
+    # POSIX paths with no backslash involved at all). Same reasoning
+    # hooks.d/before_session_start/50-git-restore.sh's own #519 fix already
+    # documents for the identical reason.
+    _mem_bd_glob_dir="$REMEMBER_DIR"
+    _mem_bd_glob_proj="$_mem_proj"
+    case "$OSTYPE" in
+        msys|cygwin)
+            _mem_bd_glob_dir="${_mem_bd_glob_dir//\\//}"
+            _mem_bd_glob_proj="${_mem_bd_glob_proj//\\//}"
+            ;;
+    esac
+    case "$_mem_bd_glob_dir" in
+        "$_mem_bd_glob_proj"/*)
             [ -f "$REMEMBER_DIR/.gitignore" ] || { echo '*' > "$REMEMBER_DIR/.gitignore"; } 2>/dev/null
             ;;
     esac
 fi
-unset _mem_proj
+unset _mem_proj _mem_bd_glob_dir _mem_bd_glob_proj
 
 # --- Redirect stderr to hook-errors.log ---
 # This replaces the 2>> that was in hooks.json. Now the directory is
