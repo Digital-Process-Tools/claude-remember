@@ -244,10 +244,15 @@ def plugin_root(env: Mapping[str, str] | None = None) -> str | None:
 def sniff_envelope(obj: object) -> str:
     """Identify which host wrote one already-parsed transcript line, by shape.
 
-    Called once per file, against its own first parseable line -- never
-    against whatever line an incremental resume happens to land on, and never
-    guessed from a line's *content*. The envelope is a property of the whole
-    session file (one host wrote it start to finish), not of any one line.
+    Called by ``pipeline.extract.sniff_file_envelope_status()`` against one
+    already-parsed line at a time, never against whatever line an
+    incremental resume happens to land on, and never guessed from a line's
+    *content*: this function only ever sees the one line it was handed. The
+    caller may call it more than once per file (#543 -- scanning forward
+    past a line this function cannot place, since current Claude Code
+    transcripts open with several such lines before the first message), but
+    the envelope it is deciding is still a property of the whole session
+    file -- one host wrote it start to finish -- not of any one line.
 
     Returns ``"claude-code"``, ``"codex"``, or ``"unrecognised"``. The third
     state matters as much as the first two: a transcript shape this module

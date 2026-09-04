@@ -339,6 +339,18 @@ def count_lines(path: str) -> int:
     return count
 
 
+# Current Claude Code transcripts (2.1.257+) open with several bookkeeping
+# records -- bridge-session, queue-operation, mode, permission-mode,
+# last-prompt, custom-title, attachment, file-history-snapshot -- before
+# the first message line, and none of them is placeable by
+# ``_host.sniff_envelope()`` (#543). This caps how many parseable-but-
+# unplaceable lines ``sniff_file_envelope_status()`` will scan past before
+# giving up and calling the file "unrecognised" -- generous enough for any
+# realistic run of bookkeeping lines, small enough that a genuinely foreign
+# file still fails fast rather than reading to the end of a huge transcript.
+_ENVELOPE_SNIFF_SCAN_CAP = 50
+
+
 def sniff_file_envelope_status(path: str) -> tuple[str, bool]:
     """Which host wrote this transcript, plus whether it could be OPENED at
     all (#478).
@@ -348,11 +360,23 @@ def sniff_file_envelope_status(path: str) -> tuple[str, bool]:
     causes, and this call tells them apart. ``unreadable=True`` means the
     file could not even be opened (an ``OSError`` -- a permission error, a
     bad mount, a file that vanished between listing and open); ``False``
-    means the file WAS opened and read to exhaustion (or found empty) and
-    simply never contained a line naming a known host shape. The envelope
-    string itself is always "unrecognised" in both cases, matching
-    ``sniff_file_envelope()`` exactly, so a caller that only wants the old
-    behaviour is unaffected.
+    means the file WAS opened and every parseable line was inspected -- to
+    genuine exhaustion, to an entirely-empty file, or up to
+    ``_ENVELOPE_SNIFF_SCAN_CAP`` unplaceable lines (#543, below) -- and none
+    of them named a known host shape. The envelope string itself is always
+    "unrecognised" in both cases, matching ``sniff_file_envelope()``
+    exactly, so a caller that only wants the old behaviour is unaffected.
+
+    A parseable line that ``_host.sniff_envelope()`` cannot place (#543 --
+    a Claude Code bookkeeping record ahead of the first message line, on
+    current Claude Code versions) is not evidence for either host, so it is
+    skipped rather than treated as the file's verdict: this keeps scanning,
+    up to ``_ENVELOPE_SNIFF_SCAN_CAP`` such lines, for the first line that
+    DOES resolve to "claude-code" or "codex". Only once every line is
+    exhausted (or the cap is hit) without ever resolving does this fall
+    back to "unrecognised" -- the same "one host wrote the whole file"
+    reasoning ``sniff_envelope()``'s own docstring gives still holds,
+    because no unplaceable line is ever allowed to decide the verdict.
 
     Returns:
         ``(envelope, unreadable)`` where ``envelope`` is "claude-code",
@@ -360,6 +384,7 @@ def sniff_file_envelope_status(path: str) -> tuple[str, bool]:
     """
     try:
         with open(path, encoding="utf-8", errors="replace") as f:
+            scanned = 0
             for line in f:
                 line = line.strip()
                 if not line:
@@ -368,19 +393,28 @@ def sniff_file_envelope_status(path: str) -> tuple[str, bool]:
                     obj = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                return _host.sniff_envelope(obj), False
+                envelope = _host.sniff_envelope(obj)
+                if envelope != "unrecognised":
+                    return envelope, False
+                scanned += 1
+                if scanned >= _ENVELOPE_SNIFF_SCAN_CAP:
+                    break
     except OSError:
         return "unrecognised", True
     return "unrecognised", False
 
 
 def sniff_file_envelope(path: str) -> str:
-    """Which host wrote this transcript, from its own first parseable line.
+    """Which host wrote this transcript, scanning forward from its first line.
 
     Independent of any resume position: incremental extraction can start deep
-    into a file, but the envelope is decided once, from line 0, rather than
-    guessed from whatever line an old ``skip_lines`` happens to land on --
-    every line in one transcript comes from the same host.
+    into a file, but the envelope is decided once, near the start of the
+    file, rather than guessed from whatever line an old ``skip_lines``
+    happens to land on -- every line in one transcript comes from the same
+    host. "Near the start" rather than "line 0" since #543: a parseable line
+    ``_host.sniff_envelope()`` cannot place is skipped rather than treated
+    as the verdict, up to ``sniff_file_envelope_status()``'s own scan cap --
+    see that function's docstring for why skipping is still sound.
 
     Returns "claude-code", "codex", or "unrecognised" -- the last one also
     covering an unreadable or entirely-empty file, which offers no line to
