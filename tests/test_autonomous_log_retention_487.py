@@ -342,3 +342,136 @@ class TestSeedWriteFailureIsReported:
             "autonomous/ was left writable -- nothing should be reported "
             "about it\n" + reported
         )
+
+
+class TestHousekeepingGlobIsPortableAcrossSeparators:
+    """CI (PR #499, windows-latest 3.9/3.10/3.11/3.12 -- job 100831279309 and
+    its three siblings): every one of those legs left BOTH the backdated
+    file and this run's own fresh log in place, for every one of the three
+    tests above -- default retention, configured retention, NDC disabled.
+    No deletion at any age. That is the exact shape of a housekeeping loop
+    whose glob matches nothing at all, for any file, every time.
+
+    Root cause: resolve-paths.sh's `_remember_normalize_win_path` rewrites
+    CLAUDE_PROJECT_DIR to a fully backslash-separated Windows-native form on
+    msys/cygwin (Claude Code hands it over as `/c/Users/...`; #263/#448
+    convert that to `C:\\Users\\...` so the three shell slug sites and
+    Python's `_session_dir` agree with Claude Code's own slugging), and
+    REMEMBER_DIR is lib-memory-dir.sh's legacy `"${proj}/${data_dir}"` --
+    backslash-separated end to end on that platform, same as PROJECT_DIR.
+
+    Every ordinary file op downstream (mkdir -p, >>, stat, rm -f) still
+    works with that string on Windows, because the MSYS runtime that
+    implements those syscalls translates it -- which is exactly why the
+    earlier mkdir, the header write and the mtime read in this same flush
+    all succeed on that leg (job log shows both files present, exit 0).
+    bash's own glob does not get that translation: it recognises only '/'
+    as a path-component boundary on every platform, including Windows Git
+    Bash, because that is POSIX glob(3)'s own definition of a pathname, not
+    a filesystem property -- a directory ARGUMENT to a glob with no real
+    '/' anywhere in it can never match a real subtree, on any bash,
+    anywhere. That divergence -- syscalls translate backslash, bash's own
+    glob does not -- is the actual mechanism, and it is exactly as true on
+    this machine's bash as it is on Windows Git Bash's.
+
+    A full end-to-end run of save-session.sh with a genuinely
+    Windows-native REMEMBER_DIR cannot be built on POSIX: POSIX mkdir/open
+    treat a backslash as an ordinary filename character rather than a
+    separator, so a literal backslash-named directory WOULD satisfy a
+    literal-string glob component on POSIX, the two platforms would stop
+    disagreeing by accident, and this bug would not reproduce. Extracting
+    the real housekeeping block verbatim from the script under test (never
+    retyped -- a hand-copied duplicate asserts what the copy happens to do,
+    not what the file ships) and feeding it a SYNTHETIC backslash-laden
+    REMEMBER_DIR string sidesteps that: only the directory argument to the
+    glob is backslash-laden, so the fix's own normalization is exercised
+    for real, while the glob's own expansion, and everything after it in
+    the loop, land back on the real, forward-slash files this fixture
+    created -- no windows-only filesystem behaviour needed to prove it.
+    """
+
+    _MARKER_START = "# --- Housekeeping: reclaim aged autonomous logs"
+    _MARKER_END = "unset _remember_auto_dir _remember_auto_log"
+
+    @classmethod
+    def _extract_housekeeping_block(cls) -> str:
+        source = (Path(__file__).parent.parent / "scripts" / "save-session.sh").read_text()
+        lines = source.splitlines()
+        start = next(i for i, line in enumerate(lines) if line.startswith(cls._MARKER_START))
+        end = next(i for i, line in enumerate(lines) if line.startswith(cls._MARKER_END))
+        assert end > start, (
+            "the housekeeping block's own start/end markers moved or were "
+            "renamed in scripts/save-session.sh -- update _MARKER_START/"
+            "_MARKER_END in this test to match, or this extraction silently "
+            "grabs the wrong span\n"
+            f"start={start} end={end}"
+        )
+        return "\n".join(lines[start : end + 1])
+
+    def _run_extracted_block(self, autonomous: Path, remember_dir: str, *, retention_days: int = 7):
+        """Runs the REAL housekeeping block (extracted verbatim above) in a
+        standalone bash process, stood up with just enough of its own
+        dependencies (`config`, `log`) stubbed to let it execute in
+        isolation from the rest of save-session.sh.
+        """
+        block = self._extract_housekeeping_block()
+        script = f"""
+set -u
+config() {{ printf '%s\\n' '{retention_days}'; }}
+log() {{ :; }}
+_remember_date() {{ date "$@"; }}
+REMEMBER_DIR={remember_dir!r}
+{block}
+"""
+        result = subprocess.run(
+            [BASH, "-c", script], capture_output=True, text=True, timeout=30, check=False,
+        )
+        assert result.returncode == 0, (
+            f"the extracted housekeeping block itself failed to run "
+            f"(REMEMBER_DIR={remember_dir!r})\n"
+            f"stdout={result.stdout}\nstderr={result.stderr}"
+        )
+
+    def test_must_fire_backslash_separated_remember_dir_is_still_swept(self, tmp_path):
+        """The fix: even when REMEMBER_DIR arrives fully backslash-separated
+        (the real Windows-native shape #448 produces), the extracted block
+        must still reclaim an old, non-empty log -- proving the glob's own
+        directory argument gets normalized before it is used.
+        """
+        autonomous = tmp_path / ".remember" / "logs" / "autonomous"
+        autonomous.mkdir(parents=True)
+        stale = autonomous / "session-end-000000-11111.log"
+        stale.write_text("12:00:00 [session-end] flush started\n")
+        eight_days_ago = time.time() - (8 * 24 * 3600)
+        os.utime(stale, (eight_days_ago, eight_days_ago))
+
+        windows_style = str(tmp_path / ".remember").replace("/", "\\")
+        self._run_extracted_block(autonomous, windows_style)
+
+        assert not stale.exists(), (
+            "a backslash-separated REMEMBER_DIR (the real Windows-native "
+            "form #448 produces) must not defeat the retention sweep's own "
+            "glob -- this is CI job 100831279309's own failure, reproduced "
+            "locally by feeding the REAL housekeeping block a synthetic "
+            "Windows-shaped REMEMBER_DIR\n" + str(list(autonomous.iterdir()))
+        )
+
+    def test_must_fire_forward_slash_remember_dir_is_swept_too(self, tmp_path):
+        """Positive control: an ordinary POSIX REMEMBER_DIR (what every
+        non-Windows leg has always had) must still work after the fix --
+        the normalization is a no-op there, not a new requirement.
+        """
+        autonomous = tmp_path / ".remember" / "logs" / "autonomous"
+        autonomous.mkdir(parents=True)
+        stale = autonomous / "session-end-000000-22222.log"
+        stale.write_text("12:00:00 [session-end] flush started\n")
+        eight_days_ago = time.time() - (8 * 24 * 3600)
+        os.utime(stale, (eight_days_ago, eight_days_ago))
+
+        self._run_extracted_block(autonomous, str(tmp_path / ".remember"))
+
+        assert not stale.exists(), (
+            "an ordinary forward-slash REMEMBER_DIR must still be swept "
+            "after the fix -- the normalization must be a no-op here, not "
+            "a regression\n" + str(list(autonomous.iterdir()))
+        )

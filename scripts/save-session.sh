@@ -1093,7 +1093,44 @@ fi
 # and at lib-lock.sh:183.
 _AUTONOMOUS_LOG_RETENTION_DAYS=$(config ".thresholds.autonomous_log_retention_days" 7)
 case "$_AUTONOMOUS_LOG_RETENTION_DAYS" in (''|*[!0-9]*) _AUTONOMOUS_LOG_RETENTION_DAYS=7 ;; esac
-for _remember_auto_log in "${REMEMBER_DIR}/logs/autonomous"/*.log; do
+# CI (job 100831279309 and its 3.10/3.11/3.12 siblings on PR #499): every
+# windows-latest leg left both the backdated file AND this run's own fresh
+# log in place -- no deletion at any age, default retention or configured,
+# NDC on or off. resolve-paths.sh's own `_remember_normalize_win_path`
+# rewrites CLAUDE_PROJECT_DIR to a fully backslash-separated Windows-native
+# form on msys/cygwin (Claude Code hands it over as `/c/Users/...`, and
+# #263/#448 convert that to `C:\Users\...` so the three shell slug sites
+# and Python's `_session_dir` agree with Claude Code's own slugging) --
+# and REMEMBER_DIR is lib-memory-dir.sh's legacy `"${proj}/${data_dir}"`,
+# so on Windows it is backslash-separated end to end, same as PROJECT_DIR.
+#
+# Every ordinary file op downstream of that (mkdir -p, >>, stat, rm -f)
+# still works with a backslash-laden path, because the MSYS runtime that
+# implements those syscalls translates it -- which is exactly why the
+# earlier mkdir, the header write and the mtime read in this same flush
+# all succeed on that leg. bash's own glob does not get that translation:
+# it recognises only '/' as a path-component boundary, on every platform
+# including Windows Git Bash, because that is POSIX glob(3)'s own
+# definition of a pathname, not a filesystem property -- so
+# "${REMEMBER_DIR}/logs/autonomous"/*.log, with REMEMBER_DIR entirely
+# backslashes, has no '/' anywhere before "logs", and bash looks for a
+# single literal directory ENTRY named the whole backslash string, finds
+# none, and the glob expands to nothing: the loop body never runs, for
+# any file, at any age, which is exactly the "nothing was ever removed"
+# shape both failing assertions and the NDC-disabled variant share.
+#
+# Forward-slashing only the directory argument fixes the glob without
+# touching REMEMBER_DIR itself (every other consumer of that variable
+# still gets the form the rest of the script -- and the Windows slug
+# matching #263/#448 exist for -- expects). A no-op on POSIX, where this
+# never contains a backslash to begin with; pinned portably in
+# tests/test_autonomous_log_retention_487.py's own glob-mechanism test,
+# since a real Windows-native REMEMBER_DIR cannot be constructed on a
+# POSIX filesystem at all (POSIX mkdir/open treat backslash as an
+# ordinary filename character rather than a separator, so the two
+# platforms would stop disagreeing and the bug would not reproduce).
+_remember_auto_dir="${REMEMBER_DIR//\\//}"
+for _remember_auto_log in "${_remember_auto_dir}/logs/autonomous"/*.log; do
     [ -f "$_remember_auto_log" ] || continue
     if [ ! -s "$_remember_auto_log" ]; then
         rm -f "$_remember_auto_log" 2>/dev/null \
@@ -1126,4 +1163,4 @@ for _remember_auto_log in "${REMEMBER_DIR}/logs/autonomous"/*.log; do
             || log "housekeeping" "WARNING: could not remove aged (${_remember_auto_age_days}d) $_remember_auto_log"
     fi
 done
-unset _remember_auto_log _remember_auto_mtime _remember_auto_now _remember_auto_age_days
+unset _remember_auto_dir _remember_auto_log _remember_auto_mtime _remember_auto_now _remember_auto_age_days
