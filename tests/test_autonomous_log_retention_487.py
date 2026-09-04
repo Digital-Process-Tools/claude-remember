@@ -490,9 +490,23 @@ class TestHousekeepingGlobIsPortableAcrossSeparators:
         backslashes, since backslash is not special inside them either --
         exactly what bash itself does with the string, byte for byte.
 
-        `ostype`, empty by default, sets $OSTYPE for the subprocess. The
-        fix in scripts/save-session.sh is itself gated on
-        `case "$OSTYPE" in msys|cygwin)`, matching
+        `ostype`, empty by default, shadows $OSTYPE for the block via a
+        `local` inside a wrapping function -- NOT an environment variable
+        override (self-review-round-2 finding, CI round 5, job
+        100892436094): a real windows-latest runner's own Git Bash resets
+        $OSTYPE to its own compiled default ("cygwin" there) regardless of
+        what the parent process's environment carries, so
+        `env["OSTYPE"] = ostype` silently has no effect at all on that one
+        platform -- the negative control that relied on it (forcing
+        "linux-gnu") passed everywhere else and failed specifically there,
+        for a reason that had nothing to do with the fix's own gate.
+        `local OSTYPE=...` inside a function is a shell-scoping
+        mechanism, not an inherited-environment one: it is not subject to
+        whatever makes Git Bash re-assert its own OSTYPE from the
+        environment, and `readonly -p` confirms OSTYPE is not a readonly
+        bash special (a real one, like BASH_VERSION, could not be
+        shadowed this way either). The fix in scripts/save-session.sh is
+        itself gated on `case "$OSTYPE" in msys|cygwin)`, matching
         `_remember_normalize_win_path`'s own gate in resolve-paths.sh (the
         thing that puts backslashes into REMEMBER_DIR in the first place)
         -- so a backslash-laden REMEMBER_DIR only gets normalized when
@@ -500,19 +514,22 @@ class TestHousekeepingGlobIsPortableAcrossSeparators:
         $OSTYPE this test happens to run under.
         """
         block = self._extract_housekeeping_block()
+        _ostype_shadow = f"local OSTYPE={shlex.quote(ostype)}" if ostype else ":"
         script = f"""
 set -u
 config() {{ printf '%s\\n' '{retention_days}'; }}
 log() {{ :; }}
 _remember_date() {{ date "$@"; }}
-REMEMBER_DIR={shlex.quote(remember_dir)}
+_run_housekeeping_block() {{
+    {_ostype_shadow}
+    REMEMBER_DIR={shlex.quote(remember_dir)}
 {block}
+}}
+_run_housekeeping_block
 """
-        env = dict(os.environ)
-        if ostype:
-            env["OSTYPE"] = ostype
         result = subprocess.run(
-            [BASH, "-c", script], env=env, capture_output=True, text=True, timeout=30, check=False,
+            [BASH, "-c", script], env=dict(os.environ), capture_output=True, text=True,
+            timeout=30, check=False,
         )
         assert result.returncode == 0, (
             f"the extracted housekeeping block itself failed to run "
