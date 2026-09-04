@@ -101,31 +101,39 @@ unset REMEMBER_TRANSCRIPT_PATH
 # the stamp on this host", it is "print it inside the envelope Codex's own
 # schema names" -- see the tail of this file.
 #
-# Used to key this off "is CLAUDE_PROJECT_DIR set" -- Claude Code always
-# sets it, and until #456 Codex and Gemini CLI were both believed never to,
-# so "unset" stood in for "Codex or Gemini, wrap it". #456 found that belief
-# wrong for Gemini: its own bundled docs list CLAUDE_PROJECT_DIR as a
-# compatibility alias it DOES set (tests/test_gemini_project_dir_var_456.py).
-# Left alone, that turns "CLAUDE_PROJECT_DIR unset" into an over-broad
-# signal -- ANY host that does not set it, Gemini included in the old
-# belief, fell into the JSON-envelope branch by default, whether or not it
-# actually wanted Codex's schema.
+# CLAUDE_PROJECT_DIR is the signal used for this exact distinction in
+# resolve-paths.sh's own ENVIRONMENT block: Claude Code always sets it,
+# Codex documents no such variable and never does (live-confirmed, #463),
+# and until #456 this repo believed Gemini CLI never does either. #456
+# found that belief wrong: Gemini CLI's own bundled docs list
+# CLAUDE_PROJECT_DIR as a compatibility alias it DOES set
+# (tests/test_gemini_project_dir_var_456.py) -- unverified live, #532.
 #
-# So this now keys on CODEX's own signature instead: CODEX_SESSION_ID /
-# CODEX_THREAD_ID, the exact pair pipeline/host.py's CODEX.signature_vars
-# already uses, captured from a real `codex exec` process
-# (tests/fixtures/codex-env-463.txt) and never observed on any other host.
-# That makes the JSON envelope Codex-only BY CONSTRUCTION rather than
-# "everything that isn't visibly Claude Code" -- a deliberate, documented
-# choice (#534), not a claim that plain stdout is correct for Gemini CLI's
-# own BeforeAgent stdout contract, which stays unverified (#532 blocks a
-# live session). It only says guessing "JSON envelope" for an unverified
-# host is no safer than guessing "plain", and Codex is the one host whose
-# stdout contract is actually known, from its own schema, to need it.
-if [ -n "${CODEX_SESSION_ID:-}" ] || [ -n "${CODEX_THREAD_ID:-}" ]; then
-    _REMEMBER_HOST_JSON_STDOUT=1
-else
+# #534 considered replacing this with a Codex-specific signature check
+# instead (CODEX_SESSION_ID/CODEX_THREAD_ID, the pair
+# pipeline/host.py's CODEX.signature_vars uses) so the JSON envelope would
+# be Codex-only by construction rather than riding on "CLAUDE_PROJECT_DIR
+# happens to be unset". That was tried and REJECTED: #465 already measured,
+# live, that neither CODEX_SESSION_ID nor CODEX_THREAD_ID reaches a process
+# Codex spawns as a HOOK (this script is one, registered in
+# hooks/hooks.codex.json) -- only a Codex TOOL-SHELL command sees them
+# (see pipeline/haiku.py's own note, and tests/test_codex_signature_463.py's
+# docstring). tests/fixtures/codex-env-463.txt, the fixture that pair is
+# pinned against, was itself captured from a tool-shell `codex exec … "run:
+# env | …"`, not from inside a hook -- so gating THIS script on those two
+# variables would silently disable the envelope on every real Codex
+# UserPromptSubmit invocation and reopen #451/#452 (every prompt on Codex
+# reads Failed again). Kept on CLAUDE_PROJECT_DIR instead: still exactly
+# right for Codex (confirmed absent, live), and for Gemini this flag now
+# also matches Gemini's own claimed behaviour (present -> plain stdout) --
+# REASONED, not observed, for any host besides Codex 0.150.1, same limit
+# as before #534. The JSON envelope is what Codex's own schema documents,
+# and is no worse than a bracket that collides with Codex's heuristic on
+# every host it has not been checked against either.
+if [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then
     _REMEMBER_HOST_JSON_STDOUT=0
+else
+    _REMEMBER_HOST_JSON_STDOUT=1
 fi
 
 source "$_HOOK_DIR/lib-clock.sh"
