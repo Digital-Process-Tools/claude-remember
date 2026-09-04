@@ -8,15 +8,25 @@ event keys only; it carries every command string through verbatim, including
 `${CLAUDE_PLUGIN_ROOT}`, which Gemini CLI never sets. #407 already fixed this
 for our own scripts by reading `${PLUGIN_ROOT}` first
 (`scripts/resolve-paths.sh`, `pipeline/host.PLUGIN_ROOT_VARS`), so the
-checked-in manifest must spell it the vendor-neutral way rather than ship the
-raw migration output unedited.
+manifest as first checked in spelled it the vendor-neutral way rather than
+ship the raw migration output unedited.
+
+`${PLUGIN_ROOT}` turned out not to help either: #533 found, from Gemini
+CLI's own bundled docs, that a plain project-scope settings.json gets no
+plugin-root variable at all -- `${PLUGIN_ROOT}` was never going to resolve
+there any more than `${CLAUDE_PLUGIN_ROOT}` would have. This file's two
+tests that used to pin `${PLUGIN_ROOT}` now pin `${GEMINI_PROJECT_DIR}`
+instead, the variable that actually does resolve to a project-rooted path
+in that scope; see tests/test_gemini_extension_533.py for the fuller pin
+and for the new `${extensionPath}`-based distributable extension #533 adds
+alongside this file.
 
 This is a manifest lint only, the same limit test_codex_manifest_410.py
 states for its own file: no `gemini` binary runs in CI, so these tests prove
 the file is well-formed JSON, uses Gemini's own documented event names, and
-never spells the Claude-only variable -- not that Gemini actually loads it,
-fires a hook, or expands `${PLUGIN_ROOT}` in a hook command at all (that is
-explicitly out of scope per the #456 issue itself: "not yet observed").
+never spells the Claude-only variable -- not that Gemini actually loads it
+or fires a hook (that is explicitly out of scope per the #456 issue itself:
+"not yet observed", and #532 means it still is not observed).
 """
 
 from __future__ import annotations
