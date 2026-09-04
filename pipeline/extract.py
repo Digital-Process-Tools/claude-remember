@@ -339,6 +339,18 @@ def count_lines(path: str) -> int:
     return count
 
 
+# Current Claude Code transcripts (2.1.257+) open with several bookkeeping
+# records -- bridge-session, queue-operation, mode, permission-mode,
+# last-prompt, custom-title, attachment, file-history-snapshot -- before
+# the first message line, and none of them is placeable by
+# ``_host.sniff_envelope()`` (#543). This caps how many parseable-but-
+# unplaceable lines ``sniff_file_envelope_status()`` will scan past before
+# giving up and calling the file "unrecognised" -- generous enough for any
+# realistic run of bookkeeping lines, small enough that a genuinely foreign
+# file still fails fast rather than reading to the end of a huge transcript.
+_ENVELOPE_SNIFF_SCAN_CAP = 50
+
+
 def sniff_file_envelope_status(path: str) -> tuple[str, bool]:
     """Which host wrote this transcript, plus whether it could be OPENED at
     all (#478).
@@ -354,12 +366,24 @@ def sniff_file_envelope_status(path: str) -> tuple[str, bool]:
     ``sniff_file_envelope()`` exactly, so a caller that only wants the old
     behaviour is unaffected.
 
+    A parseable line that ``_host.sniff_envelope()`` cannot place (#543 --
+    a Claude Code bookkeeping record ahead of the first message line, on
+    current Claude Code versions) is not evidence for either host, so it is
+    skipped rather than treated as the file's verdict: this keeps scanning,
+    up to ``_ENVELOPE_SNIFF_SCAN_CAP`` such lines, for the first line that
+    DOES resolve to "claude-code" or "codex". Only once every line is
+    exhausted (or the cap is hit) without ever resolving does this fall
+    back to "unrecognised" -- the same "one host wrote the whole file"
+    reasoning ``sniff_envelope()``'s own docstring gives still holds,
+    because no unplaceable line is ever allowed to decide the verdict.
+
     Returns:
         ``(envelope, unreadable)`` where ``envelope`` is "claude-code",
         "codex", or "unrecognised".
     """
     try:
         with open(path, encoding="utf-8", errors="replace") as f:
+            scanned = 0
             for line in f:
                 line = line.strip()
                 if not line:
@@ -368,7 +392,12 @@ def sniff_file_envelope_status(path: str) -> tuple[str, bool]:
                     obj = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                return _host.sniff_envelope(obj), False
+                envelope = _host.sniff_envelope(obj)
+                if envelope != "unrecognised":
+                    return envelope, False
+                scanned += 1
+                if scanned >= _ENVELOPE_SNIFF_SCAN_CAP:
+                    break
     except OSError:
         return "unrecognised", True
     return "unrecognised", False
