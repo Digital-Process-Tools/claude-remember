@@ -83,6 +83,18 @@ def _dump_dir(d: Path) -> str:
                 out.append(f"--- logs/{p.name} ---\n{p.read_text(errors='replace')}")
             except OSError as exc:
                 out.append(f"--- logs/{p.name} (unreadable: {exc}) ---")
+    # Self-review finding (Explore, PR #499): this helper's own docstring
+    # names REMEMBER_TEST_COMPLETION_MARKER's wait as the reason it was
+    # written, but the marker file itself (.remember/tmp/completion-marker.log)
+    # lived outside logs_dir and was never dumped -- exactly the file that
+    # would show whether _run_hook's wait timed out or genuinely observed
+    # completion. Included so a future failure here is diagnosable from the
+    # assertion message alone, the way this whole helper exists to be.
+    marker = logs_dir.parent / "tmp" / "completion-marker.log"
+    if marker.exists():
+        out.append(f"--- tmp/completion-marker.log ---\n{marker.read_text(errors='replace')}")
+    else:
+        out.append("--- tmp/completion-marker.log --- (absent)")
     return "\n".join(out) if out else "(empty)"
 
 
@@ -204,10 +216,29 @@ def _run_hook(plugin: Path, env: dict, *, session_id, reason: str = "other"):
     # above. If a future CI round shows a real flush still exceeding this,
     # raise it back up rather than re-guessing.
     deadline = time.monotonic() + 30
+    _marker_seen = False
     while time.monotonic() < deadline:
         if marker.exists() and "exited status=" in marker.read_text(errors="replace"):
+            _marker_seen = True
             break
         time.sleep(0.1)
+    if not _marker_seen:
+        # Self-review finding (Explore, PR #499): without this, the loop
+        # above degrades silently into an unmonitored 30s sleep on a
+        # future regression -- no distinction between "the marker showed
+        # up" and "the deadline simply expired". TestSeedWriteFailureIsReported's
+        # own positive fixture (autonomous/ blocked by a FILE) is the one
+        # EXPECTED case where the marker never appears (see the comment
+        # above this loop), so this is a note for pytest's captured
+        # stderr, not an assertion -- a hard failure here would break that
+        # test's own designed degraded path.
+        print(
+            f"_run_hook: REMEMBER_TEST_COMPLETION_MARKER not observed within "
+            f"30s (marker={marker}) -- either the flush is still running, "
+            f"or (expected for TestSeedWriteFailureIsReported's own "
+            f"blocking-file fixture) it could never start",
+            file=sys.stderr,
+        )
     return result
 
 

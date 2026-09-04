@@ -330,6 +330,19 @@ fi
 # sets this var gets an explicit, unambiguous completion line appended to
 # a file it names -- at zero cost to every real session, where the var is
 # never set and this whole block is a no-op.
+#
+# Unlike the $_END_LOG seed write just above, a failed marker write here
+# is NOT routed through report_error() (self-review finding, PR #499):
+# report_error writes to hook-errors.log, a real, user-facing file every
+# production session's own tests assert the CONTENTS of (see
+# TestSeedWriteFailureIsReported's own "WARNING" checks), and this whole
+# block is test-only opt-in scaffolding that must never add a line there
+# a real session could see. A failed marker write still is not silent:
+# bash reports a redirection failure it cannot honor to whatever this
+# block's own enclosing stderr already is, which for the first `printf`
+# below is this hook's own stderr (captured by the test harness as
+# `result.stderr`) and for the second, inside the subshell, is $_END_LOG
+# (which _dump_dir already surfaces in full on assertion failure).
 if [ -n "${REMEMBER_TEST_COMPLETION_MARKER:-}" ]; then
     printf '%s session-end: about to launch subshell\n' "$(_remember_date +%H:%M:%S)" \
         >> "$REMEMBER_TEST_COMPLETION_MARKER" 2>&1
