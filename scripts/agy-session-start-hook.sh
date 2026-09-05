@@ -61,7 +61,15 @@ _STDIN=$(cat)
 # #568 itself: a log line on this arm is safe -- agy parses these hooks'
 # STDOUT as protojson, but the delegate's own stdout is discarded a few
 # lines down regardless, so stderr is free to use.
-_PARSE_ERR_FILE=$(mktemp "${TMPDIR:-/tmp}/remember-agy-session-start-parse-XXXXXX")
+# mktemp's own failure (unwritable/full TMPDIR) must not abort this script
+# under `set -e` -- self-review caught an earlier draft that called mktemp
+# unguarded here, which turned a broken TMPDIR into an interpreter-level
+# abort instead of this hook's own documented "0 Always" exit contract.
+# `_PARSE_ERR_FILE` (empty on mktemp failure) and `_PARSE_ERR_TARGET`
+# (falls back to /dev/null) are kept as two separate variables so the
+# `rm -f` below can never be handed `/dev/null` itself.
+_PARSE_ERR_FILE=$(mktemp "${TMPDIR:-/tmp}/remember-agy-session-start-parse-XXXXXX" 2>/dev/null) || _PARSE_ERR_FILE=""
+_PARSE_ERR_TARGET="${_PARSE_ERR_FILE:-/dev/null}"
 _NORMALIZED=$(printf '%s' "$_STDIN" | python3 -c '
 import json, sys
 try:
@@ -77,11 +85,13 @@ out = {
     "source": "startup",
 }
 print(json.dumps(out))
-' 2>"$_PARSE_ERR_FILE") || _NORMALIZED="{}"
-if [ -s "$_PARSE_ERR_FILE" ]; then
-    echo "[agy-session-start-hook] WARNING: stdin payload could not be parsed as JSON ($(cat "$_PARSE_ERR_FILE")) -- forwarding an empty SessionStart" >&2
+' 2>"$_PARSE_ERR_TARGET") || _NORMALIZED="{}"
+if [ -n "$_PARSE_ERR_FILE" ]; then
+    if [ -s "$_PARSE_ERR_FILE" ]; then
+        echo "[agy-session-start-hook] WARNING: stdin payload could not be parsed as JSON ($(cat "$_PARSE_ERR_FILE")) -- forwarding an empty SessionStart" >&2
+    fi
+    rm -f "$_PARSE_ERR_FILE"
 fi
-rm -f "$_PARSE_ERR_FILE"
 
 # Antigravity's hook executor parses a command hook's STDOUT as protojson
 # against its OWN structured-output schema, not Claude Code's -- confirmed
