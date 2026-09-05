@@ -935,6 +935,165 @@ fi
 # hint still fires with the correct path, and a second line says so, so
 # a user who set per_session does not read "namespaced" behaviour into a
 # session that never got one.
+# ── Cross-plugin promo (#574) ──────────────────────────────────────────────
+# A single-line systemMessage naming one NOT-YET-INSTALLED sibling plugin,
+# from SessionStart only -- never SessionEnd, never PostToolUse, never
+# UserPromptSubmit/Stop (measured to deliver too, per the issue's own probe,
+# but deliberately not used: a per-turn channel turns "occasional" into
+# "constant" with nobody touching a throttle). additionalContext is never an
+# option here: it costs tokens on every session and is read by the model, not
+# the human this is addressed to.
+#
+# promos.json (data, not shell) lives beside config.example.json so the copy
+# can be added/reworded/dropped without a shell edit inside a hook that runs
+# on every session start. PROMO_MSG is computed here, BEFORE the CTX capture
+# below, because it must reach the plain-script scope that builds the final
+# JSON -- a value set inside the `CTX=$( … )` subshell a few lines down would
+# die with that subshell.
+PROMO_MSG=""
+if [ "$(config ".features.plugin_promos" true)" = "true" ]; then
+
+    # Args: none. Reads promos.json + installed_plugins.json, sets PROMO_MSG
+    # as a side effect, and persists the machine-global throttle/rotation
+    # marker when (and only when) it decides to speak.
+    _remember_compute_promo() {
+        local promos_file="$PLUGIN_ROOT/promos.json"
+        [ -f "$promos_file" ] || return 0
+        command -v jq >/dev/null 2>&1 || return 0
+
+        # Machine-global, deliberately NOT under REMEMBER_DIR: data_dir can be
+        # per-project (the legacy default) or external-and-shared, and this
+        # throttle/rotation state describes what THIS MACHINE has already
+        # shown, not what one project's store has. $HOME/.remember is already
+        # the one config tier that is machine-global regardless of data_dir
+        # (lib-memory-dir.sh's user-global tier) -- reused here for the same
+        # reason, not because it holds config today.
+        local promo_dir="${HOME}/.remember/tmp"
+        local marker="$promo_dir/promo-notice"
+        local cooldown
+        cooldown=$(config ".cooldowns.promo_seconds" 604800)
+        case "$cooldown" in ''|*[!0-9]*) cooldown=604800 ;; esac
+
+        local last_ts=0 last_id=""
+        if [ -f "$marker" ]; then
+            local _pk _pv
+            while IFS='=' read -r _pk _pv; do
+                case "$_pk" in
+                    ts) last_ts="$_pv" ;;
+                    id) last_id="$_pv" ;;
+                esac
+            done < "$marker"
+        fi
+        case "$last_ts" in ''|*[!0-9]*) last_ts=0 ;; esac
+
+        local now
+        now=$(_remember_date +%s)
+        case "$now" in ''|*[!0-9]*) return 0 ;; esac
+
+        if [ "$last_ts" -gt 0 ] \
+            && [ $(( 10#$now - 10#$last_ts )) -lt "$cooldown" ]; then
+            return 0
+        fi
+
+        # Three states (#574 decision 3), never two. `installed_ok` is unset
+        # (cannot-tell) unless the file exists AND declares the one version
+        # this reads -- a wrong/absent version must suppress exactly like a
+        # confirmed install, never be read as "not installed".
+        local installed_file="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/installed_plugins.json"
+        local installed_ok=""
+        if [ -f "$installed_file" ] \
+            && [ "$(jq -r '.version // empty' "$installed_file" 2>/dev/null)" = "2" ]; then
+            installed_ok="true"
+        fi
+
+        local count
+        count=$(jq -r '.promos | length' "$promos_file" 2>/dev/null)
+        case "$count" in ''|*[!0-9]*) return 0 ;; esac
+
+        local i=0 id text url ikey has_it url_display msg
+        local candidate_id="" candidate_msg="" first_id="" first_msg=""
+        while [ "$i" -lt "$count" ]; do
+            id=$(jq -r ".promos[$i].id // empty" "$promos_file" 2>/dev/null)
+            text=$(jq -r ".promos[$i].text // empty" "$promos_file" 2>/dev/null)
+            url=$(jq -r ".promos[$i].url // empty" "$promos_file" 2>/dev/null)
+            ikey=$(jq -r ".promos[$i].installed_key // empty" "$promos_file" 2>/dev/null)
+            i=$((i + 1))
+
+            if [ -z "$id" ] || [ -z "$text" ] || [ -z "$ikey" ]; then
+                log "hook" "promo skipped: promos.json entry $((i - 1)) is missing id/text/installed_key"
+                continue
+            fi
+            # An entry with no url is skipped, and the skip is VISIBLE
+            # (#574 decision 1) -- never silently rendered without the link.
+            if [ -z "$url" ]; then
+                log "hook" "promo skipped: '$id' has no url"
+                continue
+            fi
+
+            [ -n "$installed_ok" ] || continue
+            has_it=$(jq -r --arg k "$ikey" '.plugins[$k] // empty | length' "$installed_file" 2>/dev/null)
+            case "$has_it" in ''|0) : ;; *) continue ;; esac
+
+            url_display="${url#https://}"
+            url_display="${url_display#http://}"
+            msg="$text -- $url_display"
+            if [ "${#msg}" -gt 140 ]; then
+                log "hook" "promo skipped: '$id' text+url exceeds the 140-char budget (${#msg})"
+                continue
+            fi
+
+            [ -n "$first_id" ] || { first_id="$id"; first_msg="$msg"; }
+            if [ "$id" != "$last_id" ]; then
+                candidate_id="$id"
+                candidate_msg="$msg"
+                break
+            fi
+        done
+
+        # Rotation (#574 decision 1): id is what the throttle records, so a
+        # single not-installed candidate that happens to equal last time's id
+        # (only possible plugin) still speaks -- it just never "rotates" away
+        # from itself.
+        [ -n "$candidate_id" ] || { candidate_id="$first_id"; candidate_msg="$first_msg"; }
+        [ -n "$candidate_id" ] || return 0
+
+        PROMO_MSG="$candidate_msg"
+        mkdir -p "$promo_dir" 2>/dev/null
+        printf 'ts=%s\nid=%s\n' "$now" "$candidate_id" > "$marker.$$" 2>/dev/null \
+            && mv -f "$marker.$$" "$marker" 2>/dev/null
+    }
+
+    _remember_compute_promo
+fi
+
+# ── Buffer the rest of stdout instead of writing it live (#574) ────────────
+# `systemMessage` and plain-context stdout cannot coexist on one reply: it is
+# either JSON or it is not. Everything below used to go straight to real
+# stdout, which the harness reads as additionalContext on this event, so
+# when PROMO_MSG is non-empty it must become `hookSpecificOutput.
+# additionalContext` inside one JSON object instead.
+#
+# fd redirection, not `CTX=$( … )`: this range contains `case` statements
+# (the handoff-delivery-record reader below), and bash's own parser reads a
+# `case` pattern's closing `)` as the end of a command substitution -- the
+# exact trap user-prompt-hook.sh's CTX block already documents avoiding for
+# the same reason, on a much smaller block. A private, pre-verified-writable
+# temp file sidesteps the parser entirely: real fds, no substitution boundary
+# for a `)` to collide with.
+_REMEMBER_CTX_FILE="$REMEMBER_DIR/tmp/session-start-ctx.$$"
+_REMEMBER_CTX_OK=""
+mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null
+# Verify the target is writable BEFORE handing it to `exec`: a redirection
+# failure on the `exec` builtin itself (a special builtin) can terminate a
+# non-interactive shell outright, and this hook is documented EXIT CODES: 0
+# Always. `: > file` failing cleanly here costs nothing and keeps the
+# unredirected fallback below (print live, exactly as before, minus the
+# promo) the ONLY behaviour change on a store this hook cannot write into.
+if : > "$_REMEMBER_CTX_FILE" 2>/dev/null; then
+    exec 3>&1
+    exec > "$_REMEMBER_CTX_FILE"
+    _REMEMBER_CTX_OK="true"
+fi
 if [ "$REMEMBER_ROOT" != "$PROJECT_DIR" ] || [ -n "$PER_SESSION_HANDOFF" ]; then
     echo "=== HANDOFF ==="
     echo "Write next handoff to: $REMEMBER_HANDOFF"
@@ -1435,7 +1594,41 @@ dispatch "after_session_start"
 # The payload file does not outlive the dispatches it was published for.
 [ -n "$_hook_stdin_file" ] && rm -f "$_hook_stdin_file" 2>/dev/null
 
-# Explicit, because the line above is the last command and it is false whenever
-# no payload file was written — the common case. Falling off the end would exit
-# 1 from a hook documented to always exit 0.
+# ── Emit: promo via systemMessage, or the old plain-text shape unchanged ───
+if [ -n "$_REMEMBER_CTX_OK" ]; then
+    # Restore the real fd before printing anything -- everything above this
+    # point landed in the buffer file instead of the terminal.
+    exec 1>&3 3>&-
+
+    # No PROMO_MSG (feature off, cooldown live, everything already
+    # installed, cannot-tell, or jq unavailable): stream the buffer straight
+    # through, byte-for-byte -- the common case, and the one that must never
+    # regress. `cat`, never `$(cat …)`, so a trailing blank line the old
+    # direct-print path always produced is not silently trimmed here.
+    if [ -n "$PROMO_MSG" ] && command -v jq >/dev/null 2>&1; then
+        _REMEMBER_PROMO_JSON=$(jq -Rs --arg msg "$PROMO_MSG" \
+            '{hookSpecificOutput:{hookEventName:"SessionStart",additionalContext:.},systemMessage:$msg}' \
+            < "$_REMEMBER_CTX_FILE" 2>/dev/null) || _REMEMBER_PROMO_JSON=""
+        # jq usage failure must not become this hook's status (same
+        # reasoning as user-prompt-hook.sh's own guard): fall back to the
+        # plain buffer rather than ever letting a cosmetic promo cost the
+        # memory context it wraps.
+        if [ -n "$_REMEMBER_PROMO_JSON" ]; then
+            printf '%s\n' "$_REMEMBER_PROMO_JSON"
+        else
+            cat "$_REMEMBER_CTX_FILE"
+        fi
+    else
+        cat "$_REMEMBER_CTX_FILE"
+    fi
+    rm -f "$_REMEMBER_CTX_FILE" 2>/dev/null
+fi
+# _REMEMBER_CTX_OK empty: the buffer redirect never engaged, so every line
+# above already went straight to the real terminal as it always did -- there
+# is nothing left to flush, and PROMO_MSG (if any) is silently lost rather
+# than risk a hook that is supposed to never block session startup.
+
+# Explicit, because the block above is the last command and its own status
+# is not the hook's status. Falling off the end would exit 1 from a hook
+# documented to always exit 0.
 exit 0

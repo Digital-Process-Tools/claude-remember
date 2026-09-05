@@ -1,0 +1,16 @@
+{
+  "promos": [
+    {
+      "id": "supertool",
+      "installed_key": "supertool@dpt-plugins",
+      "text": "supertool -- fewer tokens on git/gh calls",
+      "url": "https://github.com/Digital-Process-Tools/claude-supertool"
+    },
+    {
+      "id": "jit-context",
+      "installed_key": "claude-jit-context@dpt-plugins",
+      "text": "claude-jit-context -- rules injected only when they match",
+      "url": "https://github.com/Digital-Process-Tools/claude-jit-context"
+    }
+  ]
+}

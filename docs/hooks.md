@@ -8,7 +8,7 @@ The plugin registers four Claude Code hooks:
 
 | Hook               | Script                  | Purpose                                                   |
 | ------------------ | ----------------------- | --------------------------------------------------------- |
-| `SessionStart`     | `session-start-hook.sh` | Loads memory files into context (identity only at `source=compact`), recovers missed sessions |
+| `SessionStart`     | `session-start-hook.sh` | Loads memory files into context (identity only at `source=compact`), recovers missed sessions, occasionally a cross-plugin `systemMessage` ([#574](https://github.com/Digital-Process-Tools/claude-remember/issues/574)) |
 | `UserPromptSubmit` | `user-prompt-hook.sh`   | Injects current timestamp so the agent knows the time     |
 | `PostToolUse`      | `post-tool-hook.sh`     | Auto-saves session when tool call delta exceeds threshold |
 | `SessionEnd`       | `session-end-hook.sh`   | Unconditionally flushes whatever `PostToolUse` has not yet saved (#345) |
@@ -16,6 +16,8 @@ The plugin registers four Claude Code hooks:
 `SessionEnd` ignores the cooldown and min-human-message gates the other saves respect — it is the last chance a session gets, not a routine tick — but it does not write a handoff note; see [below](#sessionend-flushes-it-does-not-hand-off) for why.
 
 `SessionStart` sources `log.sh` for shared config, timezone, logging, and the `dispatch()` system; `PostToolUse` does too on the run that resolves, and replays that resolution on the rest (see below). Hooks dispatch lifecycle events (e.g., `after_user_prompt`) to extensible listeners in `hooks.d/`. **Installing a listener for an event puts that hook back on the full chain**, because `dispatch()` lives in `log.sh` — the fast paths only skip it when there is nothing executable to dispatch to.
+
+`SessionStart` is also the only hook that ever writes `systemMessage` on its own account, distinct from every `hooks.d/` listener's stdout above: once per `cooldowns.promo_seconds` (default 7 days) it names one sibling Digital-Process-Tools plugin you have not installed, in a channel the model never reads. Copy lives in `promos.json` (`features.plugin_promos` turns it off); see [Configuring it](../README.md#configuring-it). This is the one case where the hook's own stdout becomes a JSON object (`{"hookSpecificOutput": {...}, "systemMessage": "..."}`) instead of the plain text every other `SessionStart` run still prints byte-for-byte.
 
 ## What a `hooks.d/` listener may say, and in whose voice
 
