@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import sys
 
 DEFAULT_TARGET = os.path.expanduser("~/.gemini/config/hooks.json")
@@ -77,10 +78,27 @@ def build_remember_entry(plugin_root: str) -> dict:
         # Normalizing here removes the ambiguity outright rather than
         # betting on which model agy implements.
         command_path = script_path.replace("\\", "/")
+        # #577: this command line is always executed by bash -- the string
+        # starts with the literal word "bash", never a platform-conditional
+        # interpreter -- so POSIX shell-quoting rules are the right model
+        # even for a Windows-hosted agy install (docs/install-antigravity.md
+        # already marks Windows as reasoned-not-observed for other reasons;
+        # this does not add a new one). shlex.quote() is used for the WHOLE
+        # command, not nested inside a hand-written `bash "{...}"` wrapper:
+        # shlex.quote() switches to single-quoting a path that contains a
+        # literal double quote, and embedding that inside another pair of
+        # double quotes breaks out exactly the same way the un-escaped
+        # original did (the embedded `"` still closes the outer wrapper
+        # early). Replacing the whole construction, rather than quoting only
+        # the interpolated segment, is what actually closes the hole; a
+        # plain path with no shell metacharacters is left unquoted by
+        # shlex.quote(), so the ordinary case still reads as
+        # `bash /abs/path/...`.
+        command_path = shlex.quote(command_path)
         entry[event] = [
             {
                 "type": "command",
-                "command": f'bash "{command_path}"',
+                "command": f"bash {command_path}",
                 "timeout": _TIMEOUT_SECONDS,
             }
         ]

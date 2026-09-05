@@ -16,6 +16,9 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
+import shutil
+import subprocess
 import sys
 
 import pytest
@@ -98,9 +101,16 @@ def test_build_entry_references_scripts_that_exist():
     for handlers in (entry["SessionStart"], entry["PreInvocation"], entry["Stop"]):
         for handler in handlers:
             assert handler["type"] == "command"
-            # "bash \"/abs/path/scripts/whatever.sh\"" -- pull the path out.
+            # #577: shlex.quote() leaves an ordinary path unquoted (no
+            # embedded quote characters at all in the common case), so
+            # pulling the path out with a real POSIX-shell-aware parser
+            # (shlex.split, not a hand-rolled command.split('"')) is the
+            # only form that stays correct regardless of whether the
+            # emitted command happens to be quoted this time.
             command = handler["command"]
-            path = command.split('"')[1]
+            argv = shlex.split(command)
+            assert argv[0] == "bash"
+            path = argv[1]
             assert os.path.isfile(path), f"references missing script: {path}"
 
 
@@ -143,8 +153,93 @@ def test_build_entry_command_survives_windows_shell_quoting():
                 f"{event} command still carries a raw backslash, ambiguous "
                 f"under Windows shell-quoting rules: {command}"
             )
-            path = command.split('"')[1]
+            # #577: a Windows-style root has a space in it ("Test User"),
+            # which shlex.quote() now wraps in single quotes rather than
+            # the old hand-written double quotes -- parse with shlex.split
+            # (a real POSIX-shell-aware parser) instead of assuming which
+            # quote character is present.
+            argv = shlex.split(command)
+            assert argv[0] == "bash"
+            path = argv[1]
             assert path.endswith(f"plugin/scripts/{event_scripts[event]}")
+
+
+def _bash_available() -> bool:
+    return shutil.which("bash") is not None
+
+
+_NO_BASH = pytest.mark.skipif(not _bash_available(), reason="no bash on PATH")
+
+
+def _write_marker_script(scripts_dir: str, marker: str) -> None:
+    os.makedirs(scripts_dir, exist_ok=True)
+    with open(os.path.join(scripts_dir, "agy-stop-hook.sh"), "w", encoding="utf-8") as f:
+        f.write(f'#!/bin/bash\necho ran > "{marker}"\n')
+
+
+@_NO_BASH
+def test_build_entry_command_actually_runs_with_an_ordinary_root(tmp_path):
+    """#577 positive control: an ordinary root with no shell metacharacters
+    must still produce a correct, runnable command after the quoting fix --
+    paired with the two hostile-root tests below, which must NOT run
+    (or must run without side effects) for the opposite reason."""
+    ordinary_root = tmp_path / "plugin"
+    marker = tmp_path / "ran.txt"
+    _write_marker_script(str(ordinary_root / "scripts"), str(marker))
+    entry = installer.build_remember_entry(str(ordinary_root))
+    command = entry["Stop"][0]["command"]
+    subprocess.run(["bash", "-c", command], cwd=str(tmp_path), check=False)
+    assert marker.exists(), f"the real script never ran: {command}"
+
+
+@_NO_BASH
+def test_build_entry_command_actually_runs_with_dollar_paren_in_root(tmp_path):
+    """#577 audit's DOLLAR control, run against real bash: double quotes
+    (the OLD `bash "{command_path}"` wrapper) still permit $(...) command
+    substitution in POSIX shells -- only single quotes suppress it. A
+    plugin_root containing a literal "$(...)" segment is therefore
+    EXECUTED by the old code instead of being treated as an inert path
+    component. RED before the fix (bash actually runs `touch pwned.txt`
+    and then fails to find the resulting, now-different path); GREEN
+    after (the literal directory name is invoked as intended and nothing
+    outside the intended script ever runs)."""
+    hostile_root = tmp_path / "$(touch pwned.txt)plugin"
+    marker = tmp_path / "ran.txt"
+    _write_marker_script(str(hostile_root / "scripts"), str(marker))
+    entry = installer.build_remember_entry(str(hostile_root))
+    command = entry["Stop"][0]["command"]
+    subprocess.run(["bash", "-c", command], cwd=str(tmp_path), check=False)
+    assert not (tmp_path / "pwned.txt").exists(), (
+        "the $(...) segment in plugin_root was executed as a command "
+        f"substitution instead of treated as a literal path component: {command}"
+    )
+    assert marker.exists(), f"the real script never ran -- command mis-parsed: {command}"
+
+
+@_NO_BASH
+@pytest.mark.skipif(
+    sys.platform.startswith("win"),
+    reason='" is not a legal Windows filename character',
+)
+def test_build_entry_command_actually_runs_with_quote_in_root(tmp_path):
+    """#577 audit's QUOTE control, run against real bash: a literal double
+    quote inside plugin_root breaks out of the OLD `bash "{command_path}"`
+    wrapper outright -- a shell syntax error, not merely a wrong path.
+    RED before the fix (bash refuses to parse the command at all, so the
+    marker script never runs); GREEN after (shlex.quote() switches to
+    single-quoting and the embedded double quote is inert)."""
+    hostile_root = tmp_path / 'we"ird'
+    marker = tmp_path / "ran.txt"
+    _write_marker_script(str(hostile_root / "scripts"), str(marker))
+    entry = installer.build_remember_entry(str(hostile_root))
+    command = entry["Stop"][0]["command"]
+    result = subprocess.run(
+        ["bash", "-c", command], cwd=str(tmp_path), check=False, capture_output=True, text=True
+    )
+    assert marker.exists(), (
+        f"the real script never ran (exit {result.returncode}, "
+        f"stderr: {result.stderr!r}): {command}"
+    )
 
 
 def test_merge_creates_file_and_dir_when_absent(tmp_path):
