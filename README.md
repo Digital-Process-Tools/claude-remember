@@ -1,6 +1,6 @@
-# Continuous Memory for Claude Code
+# Continuous Memory for Your Coding Agent
 
-![claude-remember — continuous memory for Claude Code](docs/remember.png)
+![claude-remember — continuous memory for your coding agent](docs/remember.png)
 
 [![Tests](https://github.com/Digital-Process-Tools/claude-remember/actions/workflows/tests.yml/badge.svg)](https://github.com/Digital-Process-Tools/claude-remember/actions/workflows/tests.yml)
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue)](https://www.python.org/)
@@ -10,11 +10,11 @@
 [![Codex](https://img.shields.io/badge/Codex-plugin-000000)](.agents/plugins/marketplace.json)
 [![Version](https://img.shields.io/badge/version-0.27.0-orange)](.claude-plugin/plugin.json)
 
-Claude Code starts every session blank. It doesn't know what you worked on yesterday, what conventions your team follows, or what mistakes it already made. You re-explain everything, every time.
+Your coding agent starts every session blank. It doesn't know what you worked on yesterday, what conventions your team follows, or what mistakes it already made. You re-explain everything, every time.
 
-Claude Remember fixes that. It hooks into Claude Code's lifecycle — saving sessions automatically, compressing them through Haiku into layered daily summaries, and loading them back into context on the next session start. No manual prompting, no copy-pasting notes. The agent starts every session with its history already present.
+Claude Remember fixes that. It hooks into your coding agent's lifecycle — saving sessions automatically, compressing them through Haiku into layered daily summaries, and loading them back into context on the next session start. No manual prompting, no copy-pasting notes. The agent starts every session with its history already present.
 
-The result: your Claude Code instance develops continuity. It remembers what it learned, what broke, what worked. Not perfect recall — compressed, practical memory that fits in minimal tokens.
+The result: your coding agent develops continuity. It remembers what it learned, what broke, what worked. Not perfect recall — compressed, practical memory that fits in minimal tokens.
 
 ## How it works
 
@@ -147,7 +147,7 @@ Per-session handoff files, the session index, and the temp files `tmp/` holds: [
 
 ## Trust Model
 
-This plugin runs with your full shell privileges, like any other Claude Code hook. The **default install** stores memory locally under `<project>/.remember/` (or `~/.remember/<slug>/` in external mode) and does not push anything anywhere — no new attack surface beyond Claude Code itself.
+This plugin runs with your full shell privileges, like any other hook your coding agent runs. The **default install** stores memory locally under `<project>/.remember/` (or `~/.remember/<slug>/` in external mode) and does not push anything anywhere — no new attack surface beyond your coding agent itself.
 
 The optional **git backup** feature does push memory to a remote you configure. If you enable it, read [`docs/git-backup-security.md`](docs/git-backup-security.md) for the full threat model — short version: treat `~/.remember/` with the same care you give `~/.ssh/`, point the backup at a repo you own, and the built-in remote-URL validation handles the rest.
 
