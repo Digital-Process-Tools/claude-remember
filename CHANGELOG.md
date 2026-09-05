@@ -7,6 +7,128 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.0] - 2026-09-05 — A capture regression that saved nothing since 0.25.0, and Gemini CLI moves from manifest to a real extension
+
+### Added
+
+- #456: added a checked-in Gemini CLI hook manifest, `.gemini/settings.json` -- the output `gemini hooks migrate --from-claude` produces when fed this repo's real `hooks/hooks.json` (observed against a live `gemini-cli 0.57.0` install), with every `${CLAUDE_PLUGIN_ROOT}` the raw migration output carries verbatim rewritten to `${PLUGIN_ROOT}`, since Gemini CLI never sets the Claude-only name (#407). `tests/test_gemini_manifest_456.py` pins the event mapping (`UserPromptSubmit`->`BeforeAgent`, `PostToolUse`->`AfterTool`, `SessionStart`/`SessionEnd` unchanged), the unbound-events-as-empty-arrays shape, and the `${PLUGIN_ROOT}`-only rule -- a manifest lint only, the same limit `tests/test_codex_manifest_410.py` states for the Codex manifest: no `gemini` binary runs in CI, so nothing here proves Gemini actually loads it or fires a hook. Scoped down from the fuller #456: installing and driving a live Gemini session, the transcript envelope, and the stdout-contract question all stay open for follow-up issues.
+
+- #492: added an on-demand, live-provider summary-quality harness (`tests/test_summary_quality_492.py`, skipped by default, opt in with `RUN_LIVE_SUMMARY_JUDGE=1`) that runs the real `save-session` prompt through the live summarizer against two recorded session fixtures and asserts the facts a correct summary must preserve (files, error codes, still-blocked status) survive as substrings. #406's `codex exec` provider (v0.24.0) shipped without any check on what a summary actually says -- routing and liveness tests only assert non-empty output.
+
+- #533: added a real, distributable Gemini CLI extension at `.gemini/` -- `.gemini/gemini-extension.json` (the manifest) and `.gemini/hooks/hooks.json` (the hook bindings, mirroring the shape of the Claude Code `hooks/hooks.json` this repo already ships at the top level), with every hook command spelled `${extensionPath}/../scripts/*.sh`: `${extensionPath}` is the only plugin/package-root template variable Gemini CLI documents, and per `bundle/docs/extensions/reference.md` it resolves solely inside an installed extension's own `gemini-extension.json`/`hooks/hooks.json`, never inside a plain `settings.json`. The `../` is deliberate: the extension root is `.gemini/`, but this repo's hook scripts live one level up at `scripts/`, and this manifest is designed for the one install path that keeps that relationship real -- `gemini extensions link <path-to-this-checkout>/.gemini`, which symlinks rather than copies. `gemini extensions install` copies the extension in isolation and would strand the `../`; this manifest is not built for that path. `tests/test_gemini_extension_533.py` pins both this file's shape and the corrected `.gemini/settings.json` -- a manifest lint only, same limit as `tests/test_gemini_manifest_456.py`/`tests/test_codex_manifest_410.py`: no `gemini` binary runs in CI, and #532 still blocks a live session, so nothing here is proof Gemini CLI actually loads either file or fires a hook. README's Gemini section explains why both `.gemini/settings.json` and this extension are kept side by side, and the double-firing corner case that follows from linking the extension while also working inside this checkout.
+
+- #547: added two host badges to the README badge row -- Claude Code and Codex -- so a reader can see which agent hosts this plugin runs on without reading the tree for manifests. Both are observed hosts: hooks have been seen firing under each. Gemini CLI is deliberately not badged. Its extension and hook manifests are checked in and covered by `test_gemini_manifest_456`, `test_gemini_extension_533`, `test_gemini_project_dir_var_456` and `test_gemini_stdout_envelope_534`, but every one of those asserts manifest *shape* only -- no test, and no observation, has a hook firing under a running Gemini CLI, because headless OAuth returns `invalid_grant` in this environment (#532). A badge beside two observed ones would imply an equal claim, and a caveat paragraph explaining why it does not is a worse fix than not making the claim. Gemini CLI returns to the badge row when #456 is actually settled.
+
+### Changed
+
+- #456: attempted to drive a real Gemini CLI session to settle the manifest's remaining open questions (does a hook fire, what does the stdin payload look like, where does Gemini CLI write its own transcript, does the `BeforeAgent` stdout contract match Codex's). Could not: the installed `gemini-cli` 0.57.0's cached OAuth credentials came back `invalid_grant`, re-authenticating needs a browser this environment does not have, and no `GEMINI_API_KEY`/`GOOGLE_API_KEY` fallback was available -- filed as #532 with exactly what was run. Instead, read the exact installed binary's own bundled reference docs (`bundle/docs/hooks/index.md`, `bundle/docs/extensions/reference.md`) and settled two of the open questions without needing a live session. First: `${PLUGIN_ROOT}` cannot resolve inside `.gemini/settings.json` on a real install, because Gemini CLI's hook-command environment carries no plugin-root variable at all, and its one plugin-root template variable, `${extensionPath}`, is substituted only inside an installed extension's own `gemini-extension.json`/`hooks/hooks.json`, never inside a plain project-scope `settings.json`; fixing that needs its own design decision (a real Gemini extension packaging) and is filed as #533. Second: those same docs list `CLAUDE_PROJECT_DIR` as a compatibility alias Gemini CLI itself sets, contradicting this repo's existing "Codex and Gemini CLI never set it" assumption across `scripts/resolve-paths.sh`, `scripts/lib-env-cache.sh`, three hook scripts, and README's own Codex section -- `pipeline/host.py`'s `GEMINI` host is corrected here (`project_dir_vars=("CLAUDE_PROJECT_DIR",)`, TDD red/green via `tests/test_gemini_project_dir_var_456.py`, since `GEMINI` is dead code today: not in `REGISTRY`, nothing calls `GEMINI.project_dir()` yet), but the wider shell-script and stdout-contract implications reach outside this diff and are filed as #534. README updated with all three findings.
+
+- #533: `.gemini/settings.json` (#456) spelled every hook command with `${PLUGIN_ROOT}`, which cannot resolve there -- per the installed `@google/gemini-cli` 0.57.0's own bundled docs (`bundle/docs/hooks/index.md`), a plain project-scope `settings.json` only gets ordinary shell expansion of `GEMINI_PROJECT_DIR`, `GEMINI_PLANS_DIR`, `GEMINI_SESSION_ID`, `GEMINI_CWD` and `CLAUDE_PROJECT_DIR` -- no plugin-root alias at all. Every `${PLUGIN_ROOT}` in that file is now `${GEMINI_PROJECT_DIR}`, the one variable that names a project-rooted path, kept for the narrow case of developing inside this repo's own checkout. `tests/test_gemini_manifest_456.py`'s two tests that pinned `${PLUGIN_ROOT}` usage are updated to pin `${GEMINI_PROJECT_DIR}` instead.
+
+- #549: the README shrank from 77KB to under 14KB. It now carries only what a reader needs before and just after installing: the pitch, how it works, a two-line install per host, requirements, cost, the two commands, the hooks table, configuration pointers, data files, the trust model and how the repo is maintained. Everything that recorded how a defect was found, or a trap to avoid, moved verbatim rather than rewritten into its own `docs/` page: one install page per host (Claude Code, Codex, Gemini CLI), Windows, hooks and the `hooks.d/` listener contract, diagnostics, handoff delivery, how memory files are written, data files, git worktrees, and the maintainer's longer statement. Every moved section leaves a one-line summary and a link in its place, and every page is listed under `## Reference`. Same convention as #505.
+
+### Fixed
+
+- **3 more Windows glob sites normalized, same class as #517** (#524, #525, #526).
+  The gate-3 release audit ahead of v0.26.0 found three further
+  `REMEMBER_DIR`-derived globs in the same two files #517 already swept, left
+  un-normalized:
+  - `scripts/doctor.sh`'s `_SESSION_END_FIRED` glob (#524) silently stayed 0
+    under a backslash-separated `REMEMBER_DIR`, so `/remember:doctor` fell
+    through to its transcript heuristic and misreported a hook-registration
+    problem that did not exist for a project that genuinely had a
+    `session-end-*.log`. A second, independent cause was found composing with
+    the same misreport: `eced1f3`'s age-keyed retention sweep
+    (`thresholds.autonomous_log_retention_days`, default 7 days) reclaims the
+    same `logs/autonomous/session-end-*.log` files after the retention window,
+    so a project idle longer than that also reproduces this report through a
+    second path. That sweep is unchanged by this fix -- it is a separate,
+    already-working piece of behaviour that happens to touch the same files.
+  - `scripts/doctor.sh`'s operator-facing memory-file count (#525), the third
+    counter of this shape in the file -- #517's own fragment named only the
+    other two ("both printed directly to the operator") -- silently
+    undercounted to 0.
+  - `scripts/run-consolidation.sh`'s `.tail-*`/`.prefix-*` stray-sibling sweep
+    (#526) globbed a `staging_path` that inherits `REMEMBER_DIR`'s backslashes,
+    so one small inert temp file accumulated per failed consolidation split.
+
+  All three now route through the same shared helper #517 introduced,
+  `_remember_forward_slash` (`scripts/resolve-paths.sh`), matching the pattern
+  already used at the file's other sites rather than inventing a new one.
+
+- Fixed a race (#527) where `post-tool-hook.sh`'s backgrounded `save-*.log` could be reclaimed by `save-session.sh`'s own empty-log housekeeping sweep while the flush that redirects into it (its own, or a concurrent sibling's) still holds the file open, losing any diagnostic written after that point. The log is now seeded with a header line before the fork starts, the same defence `session-end-hook.sh` already applies to `session-end-*.log` (#483).
+
+- #534: the shell layer's own `CLAUDE_PROJECT_DIR`-unset comments and README's Codex/Gemini prose both still asserted "Codex and Gemini CLI never set `CLAUDE_PROJECT_DIR`" as shared fact, even though #456 had already found that wrong for Gemini CLI specifically (its own bundled docs list it as a compatibility alias Gemini sets). `scripts/resolve-paths.sh`'s `REMEMBER_HOOK_CWD` fallback and `scripts/lib-env-cache.sh`'s cache-key fallback needed only corrected comments -- both stay correct as fallbacks for any host that genuinely leaves the variable unset (Codex, live-confirmed via `tests/fixtures/codex-env-463.txt`), and Gemini setting the variable just means priority 1 wins and the fallback is never reached on that host. `scripts/user-prompt-hook.sh`'s `UserPromptSubmit` JSON-envelope branch was considered for an actual behavioural fix -- narrowing its gate from "is `CLAUDE_PROJECT_DIR` set" to a Codex-specific signature (`CODEX_SESSION_ID`/`CODEX_THREAD_ID`, the pair `pipeline/host.py`'s `CODEX.signature_vars` already uses) -- and that was tried, then rejected during self-review: #465 already found, live, that neither variable survives into a process Codex spawns as a HOOK (this script is registered as exactly that in `hooks/hooks.codex.json`), only into a Codex TOOL-SHELL command, so gating the hook on that pair would have silently disabled the JSON envelope on every real Codex invocation and reopened #451/#452. The gate stays on `CLAUDE_PROJECT_DIR`, unchanged, correctly documented: Gemini setting the variable now routes it through the same plain-stdout branch Claude Code already takes, REASONED as the safer default (not OBSERVED, since Gemini CLI's own `BeforeAgent` stdout contract has never been driven live -- #532). `tests/test_gemini_stdout_envelope_534.py` pins both sides of this gate as controls (Gemini-shaped gets plain stdout; a genuinely signal-less host still gets the Codex envelope, so a future re-narrowing regresses visibly). README corrected in every place it repeated the old shared-fact claim, including the record of why the Codex-signature alternative was rejected.
+
+- **`cmd_save_position` now validates `session_id` before it becomes a path
+  component** (#538). `pipeline/shell.py` built the position sidecar path
+  (`position.<session_id>`) and the evicted-sidecar removal path by
+  interpolating `session_id` directly, without ever calling
+  `pipeline.extract._validate_session_id` -- the same check `find_session()`
+  already runs before its own equivalent join. Both shell callers
+  (`scripts/post-tool-hook.sh`, `scripts/session-end-hook.sh`) and
+  `scripts/save-session.sh` already filter the id before Python ever sees
+  it, so nothing reachable today was exploitable; this is hardening so a
+  future caller reaching `cmd_save_position` by another route -- a test
+  helper, a new hook, a different host's adapter -- inherits the same
+  guarantee instead of nothing.
+
+- **`config()` no longer splices `$key` unquoted into the jq program it
+  builds** (#539). `scripts/log.sh`'s `config()` reads `config.json` by
+  building `if $key == null then "" else ($key | tostring) end` and handing
+  it to `jq -r` -- `$key` was interpolated into the program text, twice,
+  rather than passed as data. Every call site in this repo passes a
+  hardcoded literal key (`.timezone`, `.cooldowns.save_seconds`, and so on),
+  so nothing exploited this, but nothing enforced that contract either: a
+  future caller that read a key name out of a variable would have had it
+  evaluated as jq against the user's config instead of looked up as a path.
+  `config()` now rejects any key that is not a plain dotted path
+  (`^\.[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$`) up front and returns the caller's
+  default, before the config table is loaded and before jq (or its jq-free
+  fallback) ever sees it -- the earlier shape check this used, a `case` glob
+  requiring a leading `.`, silently let a key with *no* leading dot fall
+  through unfiltered, which is exactly the shape a real injection takes.
+  The match runs under `LC_ALL=C`: `[A-Za-z]` is a POSIX collation range,
+  not a byte range, and widens to accept accented letters under a UTF-8
+  locale (the same trap `lib-slug.sh` already documents and guards against
+  elsewhere in this file). And with `REMEMBER_DEBUG=1`, a rejection is now
+  reported on stderr, so it reads differently from a key that is simply
+  absent from config.json -- both used to print the same default silently.
+
+- **`docs/windows-skip-triage.md` now carries a row for
+  `tests/test_config_key_injection_539.py`** (#539). The #539 fix's own new
+  test module carries the module-level win32 blanket-skip pattern
+  `tests/test_windows_skip_triage_497.py` enforces coverage of; it had no
+  row, so the guard (correctly) failed on every `windows-latest` CI leg.
+  Triaged as `unclear` -- the reason string is the same templated
+  "bash subprocess + POSIX layout" boilerplate the majority of this table
+  already carries, and reading the test body confirms real bash/locale
+  behavior (an `LC_ALL=C`-scoped collation-range regex, `tmp_path`-derived
+  paths sourced into the shell) without settling whether `resolve_bash()`
+  alone would make it portable. The table's live module count and the
+  `unclear` subtotal in the doc's own header prose were also one short of
+  the table's actual row count independent of this addition (96 rows vs. a
+  stated 95, i.e. 75 `unclear`) -- fixed alongside this addition so the
+  header prose and the table agree again.
+
+- **The in-repo Codex marketplace no longer collides with the published catalogue** (#540).
+  `.agents/plugins/marketplace.json` -- a development catalogue with one plugin and a
+  local source path, used to run `codex plugin marketplace add .` against a checkout --
+  declared itself `"name": "dpt-plugins"`, the same name the published
+  `Digital-Process-Tools/codex-marketplace` catalogue uses. On a machine that had added
+  both, `remember@dpt-plugins` meant the checkout in one session and the published repo
+  in another. Renamed to `"remember-dev"`, the `<plugin>-dev` shape
+  `claude-jit-context` already ships as `claude-jit-context-dev`.
+
+- **Fixed a regression that stopped memory capture entirely on current Claude Code (2.1.257/2.1.258, CLI and Desktop): every session since claude-remember 0.25.0 read as `unrecognised` and saved 0 exchanges** (#543). `sniff_file_envelope_status()` (`pipeline/extract.py`) decided a transcript's host from its own FIRST parseable line -- correct when #443 introduced it, since Claude Code transcripts used to open with a `user`/`assistant`/`summary`/`system` line. Current Claude Code no longer does: every transcript now opens with several bookkeeping records (`bridge-session`, `queue-operation`, `mode`, `permission-mode`, `last-prompt`, `custom-title`, `attachment`, `file-history-snapshot`) before the first real message line, none of which `sniff_envelope()` (`pipeline/host.py`) can place -- so the old first-line decision returned `"unrecognised"` immediately and every save on an affected install silently captured nothing, with hooks firing and `.remember/` present the whole time. `sniff_file_envelope_status()` now scans forward past a line it cannot place -- up to 50 such lines (`_ENVELOPE_SNIFF_SCAN_CAP`) -- and returns the first verdict that actually resolves to `"claude-code"` or `"codex"`, falling back to `"unrecognised"` only once the file (or the cap) is exhausted without ever resolving. A line neither function can place is not evidence for either host, so skipping it does not weaken the "one host wrote the whole file" reasoning `sniff_envelope()`'s own docstring gives. The #450 quarantine mechanism already recorded every affected session as unread from line 0 rather than losing anything, so sessions captured on an affected install between 0.25.0 and this fix will be picked up on the next save with no further action needed.
+
+- `_validate_session_id()` now rejects `:` in a session_id, alongside the
+  existing path-separator and `..` traversal checks. On NTFS a colon in a
+  filename is read as an Alternate Data Stream separator
+  (`filename:stream`), so a colon-bearing session_id could otherwise land
+  as an ADS on an existing file instead of a distinct file of its own when
+  joined into `position.<session_id>` (#544).
+
 ## [0.26.0] - 2026-09-04 — Windows glob-blindness, swept again, and autonomous logs stop erasing their own evidence
 
 ### Added
@@ -1852,7 +1974,8 @@ Fixes [#9](https://github.com/Digital-Process-Tools/claude-remember/issues/9), a
 
 ## [0.1.0] — Initial release
 
-[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.26.0...HEAD
+[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.27.0...HEAD
+[0.27.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.27.0
 [0.26.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.26.0
 [0.25.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.25.0
 [0.24.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.24.0

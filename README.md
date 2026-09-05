@@ -8,7 +8,7 @@
 [![License](https://img.shields.io/badge/license-Community-brightgreen)](LICENSE)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-5A67D8)](https://github.com/Digital-Process-Tools/claude-marketplace)
 [![Codex](https://img.shields.io/badge/Codex-plugin-000000)](.agents/plugins/marketplace.json)
-[![Version](https://img.shields.io/badge/version-0.26.0-orange)](.claude-plugin/plugin.json)
+[![Version](https://img.shields.io/badge/version-0.27.0-orange)](.claude-plugin/plugin.json)
 
 Claude Code starts every session blank. It doesn't know what you worked on yesterday, what conventions your team follows, or what mistakes it already made. You re-explain everything, every time.
 
