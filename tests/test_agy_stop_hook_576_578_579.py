@@ -253,7 +253,15 @@ def test_windows_crlf_python3_output_is_stripped_before_reaching_save_session(tm
         "trailing CR on conversationId, which the #576 charset guard then "
         "rejected, taking the hook's early exit instead of firing"
     )
-    content = marker.read_text(newline="")
+    # read_bytes(), NOT read_text(newline=""): Path.read_text() only gained a
+    # newline parameter in Python 3.13 (PEP-managed pathlib addition) -- on
+    # every earlier interpreter (this repo's own CI runs 3.10/3.11/3.12)
+    # Path.read_text() raises `TypeError: got an unexpected keyword argument
+    # 'newline'` outright. Caught live on CI (pytest ubuntu-latest, 3.11) after
+    # this test passed locally on 3.13. Reading raw bytes sidesteps newline
+    # translation entirely rather than depending on an interpreter-version-gated
+    # keyword to disable it.
+    content = marker.read_bytes().decode()
     assert "\x0d" not in content, f"a trailing CR survived into save-session.sh's own env/argv: {content!r}"
     assert "ARGV=0b04d3f2-c231-4ee0-8337-076e220bd1ad" in content
     assert "REMEMBER_TRANSCRIPT_PATH=/some/real/transcript.jsonl" in content
