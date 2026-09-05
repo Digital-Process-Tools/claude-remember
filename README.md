@@ -82,7 +82,7 @@ Observed working against `codex-cli 0.150.1`. What was found on the way: [docs/i
 gemini extensions link <path-to-this-checkout>/.gemini
 ```
 
-Manifests are checked in and tested for shape; no hook has been seen firing under a live Gemini CLI yet ([#532](https://github.com/Digital-Process-Tools/claude-remember/issues/532)). The badge says "extension", not "verified": [docs/install-gemini-cli.md](docs/install-gemini-cli.md).
+Manifests are checked in and tested for shape; no hook has been seen firing under a live Gemini CLI yet ([#532](https://github.com/Digital-Process-Tools/claude-remember/issues/532)). That is why Gemini CLI carries no host badge above, while Claude Code and Codex do: [docs/install-gemini-cli.md](docs/install-gemini-cli.md).
 
 ## Requirements
 
