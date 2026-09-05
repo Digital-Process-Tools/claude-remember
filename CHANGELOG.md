@@ -7,6 +7,196 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-09-05 — Antigravity CLI capture ships, with the newline-delimited hook protocol's own hazards filed for follow-up
+
+### Added
+
+- Added: a `trap.d` entry for issue #554, recording that Antigravity CLI (`agy`)
+  1.1.26's `plugin validate` prints the same `[ok]` top-line verdict, exit code `0`,
+  whether it resolved every plugin component or all five came back
+  `skipped (not found)`. This is upstream behaviour in a third-party CLI, not a bug in
+  this repo -- nothing in the plugin itself changed -- so the entry exists to make sure
+  a future claim about Antigravity plugin support in this repo is checked against the
+  per-component detail lines rather than against the verdict or the exit code alone.
+
+- Added: a jit-context trap recording how Antigravity CLI (`agy`) 1.1.27 reads
+  `hooks.json`, measured for issues #553 and #563. Its manifest maps a hook *name* to an
+  object keyed by event, not Claude Code's event-keyed array of matchers -- a
+  Claude-shaped file fails to parse outright, and both the failure and any unrecognised
+  event are silent: `/hooks` answers exactly as it does with no file at all, and the only
+  witness is `~/.gemini/antigravity-cli/cli.log`. The entry records which four events load
+  and fire on that build, the hook stdin payload (including the `transcriptPath` this
+  plugin's capture needs), and that a firing probe must leave a side effect rather than
+  trusting the model's reply. Upstream behaviour in a third-party CLI, not a change to
+  this plugin -- the entry exists so a future Antigravity claim here is checked against
+  the loaded-event list rather than against a manifest that merely installs.
+
+- Added: a working port of this plugin's memory capture onto Antigravity CLI
+  (`agy`), covering `SessionStart`, `UserPromptSubmit` (Antigravity's
+  `PreInvocation`, which fires per model invocation rather than per user
+  prompt) and, for `SessionEnd`, an idempotent per-turn flush on
+  Antigravity's `Stop` -- deliberately NOT the one-shot `session-end-hook.sh`
+  itself, since `Stop` fires after every turn and treating it as a teardown
+  is the exact failure mode manaflow-ai/cmux#5000 already documents.
+  `pipeline/host.py` gained an `ANTIGRAVITY` host (a real, live-captured
+  `ANTIGRAVITY_CONVERSATION_ID` signature) and an `antigravity_exchange()`
+  reader for Antigravity's own flat transcript shape
+  (`{"step_index","source","type","content"}`), so `pipeline/extract.py`
+  now understands a third transcript envelope end to end. Install with
+  `python3 scripts/install_agy_hooks.py`, which merges Remember's entry into
+  the shared, per-machine `~/.gemini/config/hooks.json` without disturbing
+  any other plugin's own entry there -- no static manifest is checked in,
+  because nothing observed on Antigravity sets a plugin-root or
+  project-dir variable a checked-in file could rely on.
+
+  Three defects were found and fixed only by driving this against a real
+  `agy` process, none visible from a transcript-parsing unit test alone:
+  Antigravity's hook executor fails to protojson-parse a Claude Code-shaped
+  hook stdout (context injection / a `hookSpecificOutput` envelope), a
+  plain backgrounded save did not survive the hook process exiting (needed
+  `nohup` + `disown`), and the backgrounded `save-session.sh` had no stdin
+  of its own to resolve `PROJECT_DIR` from (now forwarded from
+  Antigravity's own `workspacePaths`, itself populated only via `agy
+  --add-dir`, not by a bare process `cwd`). See docs/install-antigravity.md
+  for the full account, and the updated
+  `.claude/jit-context/vocabulary/02-hosts/antigravity-hooks.md` for the
+  corrected hooks.json schema and firing evidence, which superseded an
+  earlier, wrong schema and a "PostToolUse/Stop never fire" finding that
+  turned out to be an artifact of that wrong schema, not of the host.
+
+  Not found: any genuine Antigravity session-end signal -- of the four
+  events confirmed loading and firing, none is a process-exit or
+  conversation-close event, so a long session that never re-crosses the
+  minimum-human-messages threshold before the process exits has no
+  equivalent of the last-chance `SessionEnd --force` flush Claude Code and
+  Codex both get. Reported as an open gap, not worked around (#563,
+  superseding #553).
+
+  Self-review also caught and fixed: `scripts/install_agy_hooks.py`
+  originally treated an existing `~/.gemini/config/hooks.json` it could not
+  parse the same as a genuinely absent one, silently discarding whatever
+  other plugin's hook entries were in it on the next write. It now raises
+  `CorruptHooksFile` and writes nothing rather than guessing.
+
+  `tests/test_agy_hooks_563.py` is now triaged in `docs/windows-skip-triage.md`
+  (#497's own meta-guard, `tests/test_windows_skip_triage_497.py`, requires
+  every win32 blanket-skip module to carry an entry) -- `unclear`, same
+  templated reason and verdict as the sibling hook-subprocess test modules
+  it is modelled on.
+
+### Changed
+
+- Changed: reworded README.md and six docs/ pages (configuration.md,
+  diagnostics.md, git-backup-security.md, windows.md, external-storage-mode.md,
+  measuring-lock-hold-times.md) so host-neutral prose says "coding agent"
+  instead of "Claude Code" -- the badges list two hosts (Claude Code, Codex),
+  and the pitch, trust-model, hook-injection and generic-hook-shell sentences
+  were still narrated as if there were one. Left "Claude Code" verbatim
+  everywhere the sentence is actually Claude-Code-specific: install
+  instructions, `.claude/` paths, the hook-name table, and the measured 60s
+  hook-kill timeout in docs/configuration.md. Checked every page for a
+  "Claude Remember" mention after the first (#562's other ask); none had
+  drifted from full-name-once-then-"Remember", so no fold was needed --
+  pinned as a regression guard instead. #562
+
+- Changed: the README now documents Antigravity CLI (`agy`) as a supported host and no
+  longer documents Gemini CLI (#572). Antigravity gains a host badge, an install section built
+  around `scripts/install_agy_hooks.py`, its own column in the hooks table, and a docs-list
+  entry; the table column is separate rather than folded into an existing one because the
+  mapping genuinely differs -- `UserPromptSubmit` maps to `PreInvocation`, `PostToolUse` is
+  not wired, and `SessionEnd` has no analogue at all. That last row is stated in the README
+  itself rather than only in the install page: none of the four Antigravity events confirmed
+  to fire is a process-exit signal, so a short conversation can end with no final flush, and
+  a reader choosing a host should see that before installing rather than after.
+- Changed: the Gemini CLI install section, hooks-table column and docs-list link are removed
+  from the README. `gemini extensions link` is refused on a free-tier individual account with
+  working credentials (`IneligibleTierError: UNSUPPORTED_CLIENT`, #532), and Google's own
+  error text names the Antigravity suite as the migration. This is not a claim that Gemini CLI
+  was withdrawn upstream: paid tiers were never tested and nothing above
+  `@google/gemini-cli` 0.58.0 has been re-probed, so "refused on the tiers that could be
+  tested" is the whole observation. `.gemini/settings.json` and its shape tests are untouched.
+
+### Fixed
+
+- Documented, on `docs/install-gemini-cli.md`, that the `gemini extensions link` install command is refused on an individual Google account's free tier -- `@google/gemini-cli` 0.58.0 answers `IneligibleTierError: UNSUPPORTED_CLIENT` after accepting the OAuth token, a tier rejection rather than an auth failure. The fact now sits next to the install command itself rather than only being discoverable at the bottom of the page. Paid tiers remain untested (#555).
+
+- Fixed: `sniff_file_envelope_status()` (pipeline/extract.py) folded a third
+  cause into the same "unrecognised, and not unreadable" return that #543's
+  50-line scan cap already shared with genuine exhaustion, so a transcript
+  whose scan gave up at the cap was indistinguishable from one that was
+  fully read. The function now returns a third element, `capped`, and
+  `pipeline/haiku.py`'s fallback warning ("could not identify the host from
+  transcript ... (unreadable or an unrecognised shape)") now names the cap
+  specifically instead of lumping it in with a shape genuinely never
+  recognised (#556).
+
+- Fixed: `hooks/hooks.json`'s `SessionEnd` entry now declares `"timeout": 10`
+  -- Claude Code's SessionEnd budget defaults to 1.5 seconds shared across
+  every hook registered for that event, and `session-end-hook.sh`'s own
+  synchronous preamble (path resolution, tool detection, directory
+  bootstrap) was measured at roughly 3.4 seconds on a slow Windows/Git-Bash
+  machine, well past that budget -- Claude Code logged `Hook cancelled` and
+  the session's flush never ran, leaving `logs/autonomous/` with no
+  `session-end-*.log` for that session (#560). The hook body itself is
+  unchanged: it already forks the real flush into the background and
+  returns as soon as it has forked. Declaring `timeout` is the correct
+  thing to do, but Claude Code's own hooks reference is explicit that
+  timeouts declared on a plugin-provided hook (this one) do not raise that
+  shared SessionEnd budget the way a timeout declared in a settings file
+  does -- see [docs/hooks.md](docs/hooks.md) for the documented workaround
+  (`CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS`) if `Hook cancelled` still
+  appears after this change. The manual-install `.claude/settings.json`
+  snippet in [docs/install-claude-code.md](docs/install-claude-code.md) also
+  now declares `"timeout": 10` on its `SessionEnd` entry -- unlike a
+  plugin-provided hook, a timeout declared in a settings file *does* raise
+  the shared budget per the same reference, so that install route is fully
+  fixed by this change with no workaround needed (self-review finding,
+  #560).
+
+- Fixed: an Antigravity transcript resolved under `REMEMBER_SUMMARIZER=auto`
+  routed silently to the `claude` summarizer, with no warning that a
+  different vendor's session was being billed to Anthropic -- the exact
+  shape #460/#477 already warn about elsewhere in the same function.
+  Teaching `sniff_envelope()` the Antigravity shape (#563) had moved this
+  case out of the only arm that used to warn. `pipeline/haiku.py`'s
+  `_choose_summarizer_provider()` now warns before falling back to
+  `claude` for a recognised Antigravity transcript, the same as it already
+  does for a vanished Codex transcript (#567).
+
+- Fixed: `scripts/agy-stop-hook.sh`, `scripts/agy-session-start-hook.sh`
+  and `scripts/agy-pre-invocation-hook.sh` each rendered a malformed stdin
+  payload (bad JSON, or no `python3` at all) identically to a genuinely
+  empty-but-valid one, so the stop hook took its `exit 0` arm having
+  captured nothing with no receipt anywhere that it happened. Each script
+  now tells the two apart and logs a warning to stderr on the malformed
+  arm -- safe to do because `agy` only ever parses these hooks' stdout as
+  protojson, and stdout already goes nowhere on this path (#568).
+
+- Fixed: `scripts/install_agy_hooks.py` now writes the emitted Antigravity
+  (`agy`) hook `command` string with forward slashes, always -- previously
+  it embedded `os.path.join`'s own native path separator unmodified, which
+  on Windows is a backslash mixed into a double-quoted shell-command
+  string that `agy` itself later re-parses. Nothing in this repo has
+  access to a Windows `agy` install to confirm end to end whether that
+  raw backslash actually broke execution there (REASONED, not observed --
+  see [docs/install-antigravity.md](docs/install-antigravity.md)'s own
+  "Everything above is macOS ... Nothing here is claimed for ... Windows"
+  caveat), but forward slashes are unambiguous under every quoting model
+  in play and are accepted by every path API bash and Windows itself
+  expose, so normalizing removes the risk outright rather than betting on
+  which model `agy` implements (#569). `tests/test_install_agy_hooks_563.py`
+  gains a new test that asserts directly on the built command string
+  instead -- the existing `os.path.isfile`-based coverage for this path is
+  left in place alongside it (self-review correction: an earlier draft of
+  this fragment said the new test "replaces" that coverage; it did not --
+  the old test still validates a different, still-useful thing, that every
+  named script actually exists on disk) -- and the one other pre-existing
+  test that compared the emitted command against the host's own native
+  separator (`test_build_entry_uses_literal_absolute_script_paths`) is
+  updated to compare against the same forward-slash form the code now
+  always emits, so it does not regress on `windows-latest` CI having
+  nothing to do with the bug it actually checks for (audit finding, #569).
+
 ## [0.27.0] - 2026-09-05 — A capture regression that saved nothing since 0.25.0, and Gemini CLI moves from manifest to a real extension
 
 ### Added
@@ -1974,7 +2164,8 @@ Fixes [#9](https://github.com/Digital-Process-Tools/claude-remember/issues/9), a
 
 ## [0.1.0] — Initial release
 
-[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.27.0...HEAD
+[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.28.0...HEAD
+[0.28.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.28.0
 [0.27.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.27.0
 [0.26.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.26.0
 [0.25.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.25.0
