@@ -22,6 +22,10 @@ specific to this codebase; this file states the rules.
 - **Say which cross-platform claims are observed and which are reasoned.** A green
   run on your own platform and interpreter is the weakest evidence available about
   the ones it did not run on.
+- **A new module-level `pytestmark = pytest.mark.skipif(sys.platform == "win32", ...)`
+  needs a `docs/windows-skip-triage.md` row in the same commit**, not a follow-up once
+  a `windows-latest` CI leg catches the omission -- it has, twice, in one session
+  (#585, #588). See that file's own header for the convention.
 
 ## Branching and pull requests
 

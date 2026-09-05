@@ -1,3 +1,4 @@
 Bash	~release_publish	release-publish-denied.md	remind			
 Bash	~supertool.*edit:@	supertool-literal-backslashes.md	remind			
 Bash	~tree_snapshot	tree-snapshot-compare.md	remind			
+Bash	~pytest\.mark\.skipif\(sys\.platform *== *.win32.	win32-skip-triage-entry.md	remind			
