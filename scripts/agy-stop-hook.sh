@@ -91,6 +91,15 @@ _STDIN=$(cat)
 # #568 itself: a log line on this arm is safe -- agy parses these hooks'
 # STDOUT as protojson, but stdout already goes nowhere here, so stderr and
 # the daily log are both free to use.
+# #578: the four fields below are extracted POSITIONALLY (one `sed -n Np`
+# per line), so an embedded newline inside any one of them would shift every
+# field after it by one line -- transcriptPath could land in
+# _WORKSPACE_PATH, or worse, a later field could land in _CONVERSATION_ID.
+# _field() rejects \n/\r at the point of entry instead, the same convention
+# session-end-hook.sh and post-tool-hook.sh already apply to their own
+# stdin-sourced fields (their case "..." in *$'\n'*|*$'\r'*) guard) --
+# so a field carrying either becomes empty rather than shifting its
+# neighbours out of position.
 _FIELDS=$(printf '%s' "$_STDIN" | python3 -c '
 import json, sys
 try:
@@ -100,9 +109,15 @@ except Exception as exc:
     d = {}
     parse_status = f"malformed: {exc}"
 workspace_paths = d.get("workspacePaths") or []
-print(d.get("conversationId", ""))
-print(d.get("transcriptPath", ""))
-print(workspace_paths[0] if workspace_paths else "")
+
+def _field(v):
+    if not isinstance(v, str):
+        return ""
+    return "" if ("\n" in v or "\r" in v) else v
+
+print(_field(d.get("conversationId", "")))
+print(_field(d.get("transcriptPath", "")))
+print(_field(workspace_paths[0] if workspace_paths else ""))
 print(parse_status)
 ' 2>/dev/null) || _FIELDS=""
 
@@ -110,6 +125,38 @@ _CONVERSATION_ID=$(printf '%s\n' "$_FIELDS" | sed -n 1p)
 _TRANSCRIPT_PATH=$(printf '%s\n' "$_FIELDS" | sed -n 2p)
 _WORKSPACE_PATH=$(printf '%s\n' "$_FIELDS" | sed -n 3p)
 _PARSE_STATUS=$(printf '%s\n' "$_FIELDS" | sed -n 4p)
+
+# #579 (Windows/Git-Bash, reasoned not observed live -- no Windows runner was
+# available to establish this): python3 -c 'print(...)' writes CRLF line
+# endings there, and command substitution ($(...)) strips only a TRAILING
+# newline from the whole captured stream, not the \r that would precede
+# each INTERNAL line terminator -- so every field but the last would
+# otherwise carry a trailing \r no caller expects. Stripped unconditionally;
+# a no-op everywhere this \r never appears.
+_CONVERSATION_ID="${_CONVERSATION_ID%$'\r'}"
+_TRANSCRIPT_PATH="${_TRANSCRIPT_PATH%$'\r'}"
+_WORKSPACE_PATH="${_WORKSPACE_PATH%$'\r'}"
+_PARSE_STATUS="${_PARSE_STATUS%$'\r'}"
+
+# #576: _CONVERSATION_ID reaches save-session.sh below as argv[1] with no
+# shape requirement of its own -- unlike post-tool-hook.sh's SESSION_ID,
+# which must also name a real, already-existing transcript file before it is
+# trusted (see that script's STDIN_SESSION_ID_TRUSTED gate). save-session.sh's
+# own argument loop (`for arg in "$@"`) reads a literal "--force" or "--dry"
+# as a FLAG no matter where it came from -- its session-id shape check
+# (`^[a-f0-9][a-f0-9-]*$`) only ever sees whatever landed in the positional
+# slot, never the raw argv. A conversationId of exactly "--force" would
+# therefore silently flip FORCE=true, bypassing the cooldown and
+# minimum-human-message gates -- a real, reachable route confirmed by
+# reading save-session.sh's own arg loop, not a hypothetical one. The
+# sibling hooks' own guard (session-end-hook.sh, post-tool-hook.sh,
+# session-start-hook.sh: `''|.|..|*[!A-Za-z0-9._-]*`) does not by itself
+# close this: "--force" and "--dry" both consist entirely of characters that
+# guard already allows. Extended here with a leading-dash rejection (`-*`)
+# so nothing shaped like an option can ever reach that argv position.
+case "$_CONVERSATION_ID" in
+    ''|.|..|-*|*[!A-Za-z0-9._-]*) _CONVERSATION_ID="" ;;
+esac
 
 if [ -z "$_CONVERSATION_ID" ] || [ -z "$_TRANSCRIPT_PATH" ]; then
     if [ "$_PARSE_STATUS" != "ok" ]; then
