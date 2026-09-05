@@ -59,3 +59,5 @@ export CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS=10000
 
 (10 seconds, matching the `timeout` this hook declares; the reference caps the SessionEnd budget at 60000 regardless of what any hook or this variable asks for.) Making this hook's own preamble fast enough to finish inside the *default* 1.5s budget — rather than asking for a longer one — is a larger change (it touches the shared detection/resolution scripts every hook sources, not just this one) and is tracked separately rather than folded into this fix.
 
+A manual install (registering these hooks yourself in your project's `.claude/settings.json`, per [docs/install-claude-code.md](docs/install-claude-code.md)) is not subject to the plugin carve-out above: that snippet's `SessionEnd` entry declares `"timeout": 10` too, and a timeout declared in a settings file *is* one Claude Code's own reference says raises the shared budget. That is the one install route where declaring `timeout` is a complete fix on its own, with no `CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS` fallback needed.
+

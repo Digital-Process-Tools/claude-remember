@@ -81,7 +81,8 @@ The first command decodes the whole catalogue and filters it down to this plugin
         "hooks": [
           {
             "type": "command",
-            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/remember/scripts/session-end-hook.sh"
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/remember/scripts/session-end-hook.sh",
+            "timeout": 10
           }
         ]
       }
