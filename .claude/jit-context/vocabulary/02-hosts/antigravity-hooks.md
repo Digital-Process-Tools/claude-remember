@@ -122,3 +122,29 @@ Antigravity as the migration. Gemini manifests in this repo stay shape-tested on
 
 `agy -p "/hooks" --output-format json` and `agy changelog` both answer in print mode without
 starting a turn or spending quota. Use them before designing anything against this host.
+
+## `agy plugin validate` says `[ok]` over a total absence
+
+`agy plugin validate .claude-plugin` against a directory holding only `plugin.json` -- no
+`skills/`, `agents/`, `commands/`, `mcpServers` or `hooks/` -- prints:
+
+```
+  [ok]    .claude-plugin
+          - skills      : skipped (not found)
+          - agents      : skipped (not found)
+          - commands    : skipped (not found)
+          - mcpServers  : skipped (not found)
+          - hooks       : skipped (not found)
+```
+
+Green `[ok]`, exit code `0`. A directory that resolved **zero** components validates identically to
+one that resolved every component correctly (`agy` 1.1.26, #554).
+
+**The `skipped` lines are the reading; the verdict above them is not derived from them.** It is a
+claim about what was *checked*, not about what was *found*. Never cite a green `agy plugin validate`
+run, or its exit code, as evidence that an Antigravity install loaded anything -- read the
+per-component detail lines.
+
+Same shape as this repo's own worst case: something that ran, produced a clean result, and saved
+nothing. Here it is in a third-party tool rather than ours. Not fixable from this repo; no upstream
+channel was looked for.
