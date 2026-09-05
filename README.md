@@ -57,6 +57,8 @@ Four plugins, one team, each does one thing. This one and three siblings:
 
 All four install from one marketplace: `/plugin marketplace add Digital-Process-Tools/claude-marketplace`.
 
+Once in a while, `SessionStart` names whichever of `claude-supertool` / `claude-jit-context` you have not installed yet, in a single `systemMessage` line the model never sees. It never speaks for a plugin already in `~/.claude/plugins/installed_plugins.json`, and it stops entirely with `"features": {"plugin_promos": false}` in `config.json`: see [Configuring it](#configuring-it).
+
 ## Install
 
 **Claude Code**
