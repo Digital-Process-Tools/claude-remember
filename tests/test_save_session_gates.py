@@ -61,6 +61,8 @@ if cmd == "extract":
     print(f"EXCHANGE_COUNT={os.environ['STUB_EXCHANGE_COUNT']}")
     print(f"EXTRACT_FILE={path}")
     print(f"ENVELOPE={os.environ.get('STUB_ENVELOPE', 'claude-code')}")
+    print(f"SKIP_LINES={os.environ.get('STUB_SKIP_LINES', '0')}")
+    print(f"ENVELOPE_HAS_UNMAPPED_STEP={os.environ.get('STUB_ENVELOPE_HAS_UNMAPPED_STEP', '0')}")
 elif cmd == "save-position":
     last_save_file, session_id, position = sys.argv[2], sys.argv[3], sys.argv[4]
     import json
@@ -161,7 +163,8 @@ elif cmd == "build-ndc-prompt":
 
 
 def _make_env(tmp_path: Path, *, exchanges: int, humans: int, position: int = 500,
-              config: Optional[dict] = None, envelope: str = "claude-code"):
+              config: Optional[dict] = None, envelope: str = "claude-code",
+              envelope_has_unmapped_step: bool = False):
     """Build a project + stub plugin and return the env for running save-session.sh."""
     project = tmp_path / "project"
     (project / ".remember" / "tmp").mkdir(parents=True)
@@ -210,6 +213,7 @@ def _make_env(tmp_path: Path, *, exchanges: int, humans: int, position: int = 50
         "STUB_HUMAN_COUNT": str(humans),
         "STUB_EXCHANGE_COUNT": str(exchanges),
         "STUB_ENVELOPE": envelope,
+        "STUB_ENVELOPE_HAS_UNMAPPED_STEP": "1" if envelope_has_unmapped_step else "0",
         "STUB_MEMORY_FILE": str(project / ".remember" / "now.md"),
         # Keep the clock on `date`, where a PATH shim can still reach it (#227).
         #
@@ -345,6 +349,58 @@ class TestNoWorkSessionAdvancesPosition:
         log_text = _memory_log_text(project)
         assert "unrecognised" in log_text, log_text
         assert _saved_position(project) == 5
+
+    def test_antigravity_unmapped_step_is_quarantined_like_unrecognised(self, tmp_path):
+        """#575: a KNOWN envelope (antigravity) that still read 0 exchanges
+        because every step's own `type` was one pipeline.host cannot map
+        must be routed through the SAME #450 quarantine "unrecognised" gets
+        -- save-position must see "unrecognised" as the envelope it acts on,
+        even though the log and $ENVELOPE keep saying "antigravity" (the
+        honest host name), so a future build that learns the step type can
+        still recover the span instead of it being silently gone the moment
+        the position advances."""
+        env, project, plugin, calls, sid = _make_env(
+            tmp_path, exchanges=0, humans=0, position=7,
+            envelope="antigravity", envelope_has_unmapped_step=True,
+        )
+        result = _run(plugin, env, sid)
+
+        assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")
+        log_text = _memory_log_text(project)
+        assert "antigravity" in log_text and "unmapped" in log_text, log_text
+        save_position_calls = [
+            line for line in calls.read_text().splitlines() if line.startswith("save-position")
+        ]
+        assert len(save_position_calls) == 1
+        assert "unrecognised" in save_position_calls[0], (
+            "the envelope save-position acts on must be 'unrecognised' so the span is "
+            f"quarantined, not lost: {save_position_calls[0]!r}"
+        )
+        assert _saved_position(project) == 7
+
+    def test_antigravity_without_unmapped_step_is_not_quarantined(self, tmp_path):
+        """Paired negative control: a genuinely-quiet antigravity span (no
+        unmapped step seen) must NOT be quarantined -- proving the flag
+        above means "an unmapped step was actually seen", not "any 0-exchange
+        antigravity span", which a stub that always quarantines would also
+        pass the positive test with."""
+        env, project, plugin, calls, sid = _make_env(
+            tmp_path, exchanges=0, humans=0, position=9,
+            envelope="antigravity", envelope_has_unmapped_step=False,
+        )
+        result = _run(plugin, env, sid)
+
+        assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")
+        log_text = _memory_log_text(project)
+        assert "0 exchanges" in log_text
+        assert "unmapped" not in log_text
+        save_position_calls = [
+            line for line in calls.read_text().splitlines() if line.startswith("save-position")
+        ]
+        assert len(save_position_calls) == 1
+        assert "antigravity" in save_position_calls[0]
+        assert "unrecognised" not in save_position_calls[0]
+        assert _saved_position(project) == 9
 
 
 class TestMinHumanGate:

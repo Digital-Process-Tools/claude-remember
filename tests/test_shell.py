@@ -186,6 +186,44 @@ def test_cmd_extract_prints_unrecognised_envelope(capsys):
     assert "ENVELOPE=unrecognised" in output
 
 
+def test_cmd_extract_prints_envelope_has_unmapped_step_flag(capsys):
+    """#575: an antigravity span with an unmapped step type rides the shell
+    bridge as ENVELOPE_HAS_UNMAPPED_STEP=1, so save-session.sh can quarantine
+    it instead of reporting a genuinely-quiet 0-exchange span."""
+    fake_result = ExtractResult(
+        exchanges="",
+        position=2,
+        human_count=0,
+        assistant_count=0,
+        envelope="antigravity",
+        envelope_has_unmapped_step=True,
+    )
+    with patch("pipeline.shell.extract_session", return_value=fake_result):
+        cmd_extract(session_id="sess-abc", project_dir="/tmp/fake")
+
+    output = capsys.readouterr().out
+    assert "ENVELOPE_HAS_UNMAPPED_STEP=1" in output
+
+
+def test_cmd_extract_prints_envelope_has_unmapped_step_flag_off_by_default(capsys):
+    """Paired negative control: an ordinary result (the flag's dataclass
+    default) must print 0, not merely omit the key -- save-session.sh reads
+    it unconditionally, so a missing key and an empty string would both
+    break its `[ "$ENVELOPE_HAS_UNMAPPED_STEP" = "1" ]` check the same way."""
+    fake_result = ExtractResult(
+        exchanges="[human] hi",
+        position=1,
+        human_count=1,
+        assistant_count=0,
+        envelope="claude-code",
+    )
+    with patch("pipeline.shell.extract_session", return_value=fake_result):
+        cmd_extract(session_id="sess-abc", project_dir="/tmp/fake")
+
+    output = capsys.readouterr().out
+    assert "ENVELOPE_HAS_UNMAPPED_STEP=0" in output
+
+
 # --- cmd_build_prompt ---
 
 def test_cmd_build_prompt_writes_output():

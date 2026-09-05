@@ -23,8 +23,10 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from unittest.mock import patch
+
 from pipeline import host as _host
-from pipeline.extract import extract_messages
+from pipeline.extract import extract_messages, extract_session
 
 FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures")
 ANTIGRAVITY_TRANSCRIPT = os.path.join(FIXTURES, "antigravity-transcript-563.jsonl")
@@ -119,3 +121,92 @@ def test_extract_messages_antigravity_negative_control_no_recognised_steps(tmp_p
     assert envelope == "antigravity"
     msgs = extract_messages(str(path), skip_lines=0, envelope=envelope)
     assert msgs == []
+
+
+# --- unmapped step type quarantine (#575) ---
+
+def test_antigravity_step_is_unmapped_true_for_foreign_type():
+    """Positive: a real step `type` this module has never seen (a future
+    tool-call/reasoning step, per the module docstring's own caveat) reads
+    as unmapped."""
+    assert _host.antigravity_step_is_unmapped(
+        {"step_index": 2, "source": "MODEL", "type": "TOOL_CALL_UNKNOWN", "content": "x"}
+    ) is True
+
+
+def test_antigravity_step_is_unmapped_false_for_known_types():
+    """Negative control paired with the test above: both types this module
+    DOES map must not read as unmapped -- an always-True stub would pass
+    the positive test above for the wrong reason."""
+    assert _host.antigravity_step_is_unmapped({"type": "USER_INPUT"}) is False
+    assert _host.antigravity_step_is_unmapped({"type": "PLANNER_RESPONSE"}) is False
+
+
+def test_extract_messages_stats_counts_unmapped_antigravity_steps(tmp_path):
+    """extract_messages, given a `stats` dict, records how many steps in the
+    read span carried a `type` this module cannot map -- the signal
+    save-session.sh needs to tell "genuinely nothing happened" apart from
+    "steps happened but this build cannot read them yet" (#575)."""
+    path = tmp_path / "antigravity-mixed.jsonl"
+    path.write_text(
+        "\n".join([
+            json.dumps({"step_index": 0, "source": "USER", "type": "USER_INPUT", "content": "hi"}),
+            json.dumps({"step_index": 1, "source": "MODEL", "type": "TOOL_CALL_UNKNOWN", "content": "ls"}),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+    stats: dict = {}
+    msgs = extract_messages(str(path), skip_lines=0, envelope="antigravity", stats=stats)
+    assert msgs == [("HUMAN", "hi")]
+    assert stats.get("antigravity_unmapped_steps") == 1
+
+
+def test_extract_messages_stats_stays_empty_for_all_known_types(tmp_path):
+    """Negative control: an ordinary transcript with only known step types
+    must not report any unmapped steps -- a stub that always increments
+    would fail this while passing the test above."""
+    path = tmp_path / "antigravity-clean.jsonl"
+    path.write_text(
+        "\n".join([
+            json.dumps({"step_index": 0, "source": "USER", "type": "USER_INPUT", "content": "hi"}),
+            json.dumps({"step_index": 1, "source": "MODEL", "type": "PLANNER_RESPONSE", "content": "ok"}),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+    stats: dict = {}
+    msgs = extract_messages(str(path), skip_lines=0, envelope="antigravity", stats=stats)
+    assert msgs == [("HUMAN", "hi"), ("AGENT", "ok")]
+    assert stats.get("antigravity_unmapped_steps", 0) == 0
+
+
+def test_extract_session_signals_quarantine_for_unmapped_only_antigravity_span(tmp_path):
+    """End to end: a span made ENTIRELY of step types `_ANTIGRAVITY_STEP_ROLES`
+    does not know must extract to 0 exchanges (as before) but the
+    ExtractResult must ALSO flag that the span needs quarantine -- distinct
+    from a genuinely quiet session, which reports the same 0/0 counts but
+    must NOT set the flag (paired negative control below)."""
+    path = tmp_path / "antigravity-all-unmapped.jsonl"
+    path.write_text(
+        json.dumps({"step_index": 0, "source": "MODEL", "type": "TOOL_CALL_UNKNOWN", "content": "ls"}) + "\n",
+        encoding="utf-8",
+    )
+    with patch("pipeline.extract.find_session", return_value=str(path)):
+        result = extract_session(session_id="whatever", project_dir="/fake", show_all=True)
+    assert result.envelope == "antigravity"
+    assert result.human_count == 0
+    assert result.assistant_count == 0
+    assert result.envelope_has_unmapped_step is True
+
+
+def test_extract_session_does_not_signal_quarantine_for_genuinely_quiet_antigravity_span():
+    """Paired negative control: the real captured fixture, read past its own
+    end (skip_lines beyond EOF == a genuinely quiet resume), must report 0/0
+    same as the test above WITHOUT setting the quarantine flag -- proving
+    the flag means "an unmapped step was actually seen", not "0 exchanges"."""
+    with patch("pipeline.extract.find_session", return_value=ANTIGRAVITY_TRANSCRIPT), \
+         patch("pipeline.extract.get_last_save_line", return_value=10_000):
+        result = extract_session(session_id="whatever", project_dir="/fake")
+    assert result.envelope == "antigravity"
+    assert result.human_count == 0
+    assert result.assistant_count == 0
+    assert result.envelope_has_unmapped_step is False
