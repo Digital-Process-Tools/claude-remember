@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import sys
 
 DEFAULT_TARGET = os.path.expanduser("~/.gemini/config/hooks.json")
@@ -77,10 +78,37 @@ def build_remember_entry(plugin_root: str) -> dict:
         # Normalizing here removes the ambiguity outright rather than
         # betting on which model agy implements.
         command_path = script_path.replace("\\", "/")
+        # #577: the string this manifest carries always starts with the
+        # literal word "bash" -- once whatever spawns it (agy's own hook
+        # executor, on every platform) hands that string to a real bash
+        # process, POSIX shell-quoting rules are the right model FOR THAT
+        # STEP. This does not claim POSIX quoting is safe for every step a
+        # Windows-hosted agy install might take before reaching bash: if
+        # agy's own executor first tokenizes the raw string with something
+        # else (e.g. cmd.exe, which has no concept of single-quote
+        # grouping), a path containing a space could still be split wrong
+        # there, before bash ever sees it -- REASONED, not observed, same
+        # as the rest of Windows agy support in this file (see the module
+        # docstring and docs/install-antigravity.md's own caveat). What
+        # this fix closes is bash's OWN parsing of the string once it gets
+        # one: the embedded-quote and $(...) hazards, which are real and
+        # reproducible with a real bash on every platform this repo tests.
+        # shlex.quote() is used for the WHOLE command, not nested inside a
+        # hand-written `bash "{...}"` wrapper:
+        # shlex.quote() switches to single-quoting a path that contains a
+        # literal double quote, and embedding that inside another pair of
+        # double quotes breaks out exactly the same way the un-escaped
+        # original did (the embedded `"` still closes the outer wrapper
+        # early). Replacing the whole construction, rather than quoting only
+        # the interpolated segment, is what actually closes the hole; a
+        # plain path with no shell metacharacters is left unquoted by
+        # shlex.quote(), so the ordinary case still reads as
+        # `bash /abs/path/...`.
+        command_path = shlex.quote(command_path)
         entry[event] = [
             {
                 "type": "command",
-                "command": f'bash "{command_path}"',
+                "command": f"bash {command_path}",
                 "timeout": _TIMEOUT_SECONDS,
             }
         ]
