@@ -120,10 +120,12 @@ class ExtractResult:
         envelope_unreadable: True when the transcript file named by
             ``envelope`` could not even be OPENED (an ``OSError`` --
             permission error, bad mount, vanished between listing and
-            open) -- never true when the file was opened and read to
-            exhaustion (or found empty) and simply never contained a line
-            naming a known host shape (#478). ``envelope`` is
-            "unrecognised" in both cases; this is what tells them apart.
+            open) -- never true when the file was opened at all, whether
+            that read hit genuine exhaustion (or an empty file) or gave up
+            at the scan cap (``envelope_capped``, below), since neither of
+            those ever contained a line naming a known host shape (#478,
+            #556). ``envelope`` is "unrecognised" in every case; this is
+            what tells "could not open it" apart from the other two.
         envelope_capped: True when ``envelope`` is "unrecognised" because
             the scan gave up after ``extract._ENVELOPE_SNIFF_SCAN_CAP``
             parseable-but-unplaceable lines, rather than because the file

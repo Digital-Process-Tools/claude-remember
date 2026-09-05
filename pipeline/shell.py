@@ -85,7 +85,8 @@ def cmd_extract(session_id: str, project_dir: str) -> None:
     Prints:
         POSITION, HUMAN_COUNT, ASSISTANT_COUNT, EXCHANGE_COUNT,
         EXTRACT_FILE (path to temp file containing exchange text), ENVELOPE,
-        SKIP_LINES, UNREAD_SIDECAR_UNREADABLE, ENVELOPE_UNREADABLE.
+        SKIP_LINES, UNREAD_SIDECAR_UNREADABLE, ENVELOPE_UNREADABLE,
+        ENVELOPE_CAPPED.
     """
     import tempfile
     remember_dir = os.environ.get("REMEMBER_DIR") or None

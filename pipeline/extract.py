@@ -378,11 +378,14 @@ def sniff_file_envelope_status(path: str) -> tuple[str, bool, bool]:
     * ``unreadable=True`` means the file could not even be opened (an
       ``OSError`` -- a permission error, a bad mount, a file that vanished
       between listing and open).
-    * ``capped=True`` means the file WAS opened, but the scan gave up after
+    * ``capped=True`` means the file WAS opened, the scan reached
       ``_ENVELOPE_SNIFF_SCAN_CAP`` parseable-but-unplaceable lines without
-      ever resolving -- a genuinely foreign run of bookkeeping-shaped lines
-      long enough to hit the cap, or (in principle) a resolving line that
-      exists past it and was never reached.
+      ever resolving, AND at least one more line exists past the cap that
+      was never looked at -- a genuinely foreign run of bookkeeping-shaped
+      lines long enough to hit the cap, or (in principle) a resolving line
+      that exists past it. A file whose unplaceable count happens to land
+      exactly on the cap and then ends is genuine exhaustion, not this --
+      there is no unread line left for a later build to ever find.
     * Both ``False`` means the file was opened and read to genuine
       exhaustion (or found empty) -- every parseable line was inspected,
       well within the cap, and none of them named a known host shape.
@@ -423,7 +426,15 @@ def sniff_file_envelope_status(path: str) -> tuple[str, bool, bool]:
                     return envelope, False, False
                 scanned += 1
                 if scanned >= _ENVELOPE_SNIFF_SCAN_CAP:
-                    return "unrecognised", False, True
+                    # A file whose scanned-unplaceable count happens to hit
+                    # the cap on its very last line is NOT "gave up with
+                    # more file left" -- it is genuine exhaustion that
+                    # coincided with the cap, and reporting it as capped
+                    # would tell #450's quarantine a later build could
+                    # never clear it, when nothing was actually left
+                    # unread. Peek at whether the file actually continues
+                    # past this line before deciding which one this is.
+                    return "unrecognised", False, next(f, None) is not None
     except OSError:
         return "unrecognised", True, False
     return "unrecognised", False, False
@@ -442,11 +453,13 @@ def sniff_file_envelope(path: str) -> str:
     see that function's docstring for why skipping is still sound.
 
     Returns "claude-code", "codex", or "unrecognised" -- the last one also
-    covering an unreadable or entirely-empty file, which offers no line to
-    sniff at all. Callers that need to tell "could not even open it" apart
-    from "opened it, found no known shape" -- #478 -- want
-    ``sniff_file_envelope_status()`` instead; this function's contract (a
-    single string, both causes collapsed) is kept unchanged for every
+    covering an unreadable file, an entirely-empty file (which offers no
+    line to sniff at all), and a scan that gave up at
+    ``sniff_file_envelope_status()``'s own cap (#543). Callers that need to
+    tell these apart -- "could not even open it" (#478) from "opened it,
+    found no known shape" from "gave up before exhausting it" (#556) --
+    want ``sniff_file_envelope_status()`` instead; this function's contract
+    (a single string, every cause collapsed) is kept unchanged for every
     existing caller.
     """
     return sniff_file_envelope_status(path)[0]

@@ -62,6 +62,27 @@ def test_genuine_exhaustion_is_not_reported_as_capped(tmp_path):
     assert capped is False
 
 
+def test_a_file_with_exactly_the_cap_and_nothing_more_is_not_capped(tmp_path):
+    """Boundary case (found in review): a file whose unplaceable-line count
+    lands EXACTLY on ``_ENVELOPE_SNIFF_SCAN_CAP`` and then ends is genuine
+    exhaustion, not "gave up with more file left" -- there is no unread
+    line hiding past the cap for a later build to ever find. Reporting
+    this as capped=True would tell #450's quarantine that a re-run of this
+    exact same file could someday resolve it, which is never true here:
+    the whole file has already been read. Without peeking past the cap
+    line, a naive `scanned >= cap` check reports this boundary case as
+    capped=True (the defect this test pins).
+    """
+    unplaceable = '{"type": "queue-operation", "operation": "enqueue"}\n' * _ENVELOPE_SNIFF_SCAN_CAP
+    path = tmp_path / "exactly-the-cap.jsonl"
+    path.write_text(unplaceable, encoding="utf-8")
+
+    envelope, unreadable, capped = sniff_file_envelope_status(str(path))
+    assert envelope == "unrecognised"
+    assert unreadable is False
+    assert capped is False
+
+
 def test_an_empty_file_is_exhausted_not_capped(tmp_path):
     """A second genuine-exhaustion shape: an entirely empty file offers no
     line to scan at all, and must not be reported as capped.
