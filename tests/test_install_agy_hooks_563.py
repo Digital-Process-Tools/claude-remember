@@ -17,7 +17,6 @@ from __future__ import annotations
 import json
 import os
 import shlex
-import shutil
 import subprocess
 import sys
 
@@ -26,6 +25,8 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
 import install_agy_hooks as installer
+
+from ._bash_runner import resolve_bash
 
 REPO_ROOT = os.path.join(os.path.dirname(__file__), "..")
 
@@ -115,11 +116,11 @@ def test_build_entry_references_scripts_that_exist():
 
 
 def test_build_entry_command_survives_windows_shell_quoting():
-    """#569: the test just above (`command.split('"')[1]; assert
-    os.path.isfile(path)`) validates the emitted path with Python's OWN
-    os.path resolver -- never with a shell -- so it passes on Windows
-    whether or not the emitted command is actually executable there. This
-    asserts the string-building contract directly instead: a
+    """#569: the test just above (`shlex.split(command)[1]; assert
+    os.path.isfile(path)` as of #577) validates the emitted path with
+    Python's OWN os.path resolver -- never with a shell -- so it passes on
+    Windows whether or not the emitted command is actually executable
+    there. This asserts the string-building contract directly instead: a
     backslash-bearing, drive-lettered plugin_root (the shape a real
     Windows install path takes) must not leave a raw backslash anywhere in
     the emitted `command` string. A raw Windows-style separator mixed with
@@ -164,16 +165,28 @@ def test_build_entry_command_survives_windows_shell_quoting():
             assert path.endswith(f"plugin/scripts/{event_scripts[event]}")
 
 
-def _bash_available() -> bool:
-    return shutil.which("bash") is not None
-
-
-_NO_BASH = pytest.mark.skipif(not _bash_available(), reason="no bash on PATH")
+# #577 review finding: `shutil.which("bash")` is not trustworthy on Windows --
+# this repo's own tests/_bash_runner.py and test_hooks_json.py already
+# establish that PATH's "bash" there commonly resolves to the WSL launcher
+# rather than Git Bash (#432 fixed a CI leg that reported green with zero
+# real coverage for exactly this reason). resolve_bash() is the same helper
+# every other subprocess-bash test module in this tree already migrated to.
+BASH = resolve_bash()
+_NO_BASH = pytest.mark.skipif(BASH is None, reason="no real POSIX bash resolvable on this platform")
 
 
 def _write_marker_script(scripts_dir: str, marker: str) -> None:
+    """#577 review finding: open(..., "w") with no newline="" performs
+    Python's default text-mode newline translation, so every newline
+    written here becomes CRLF on Windows -- a CR immediately after the
+    closing quote in the redirect line is not IFS whitespace to bash, so
+    it concatenates onto the redirect target and the marker file never
+    gets the name the test expects. newline="" writes exactly the bytes
+    asked for, on every platform."""
     os.makedirs(scripts_dir, exist_ok=True)
-    with open(os.path.join(scripts_dir, "agy-stop-hook.sh"), "w", encoding="utf-8") as f:
+    with open(
+        os.path.join(scripts_dir, "agy-stop-hook.sh"), "w", encoding="utf-8", newline=""
+    ) as f:
         f.write(f'#!/bin/bash\necho ran > "{marker}"\n')
 
 
@@ -188,7 +201,7 @@ def test_build_entry_command_actually_runs_with_an_ordinary_root(tmp_path):
     _write_marker_script(str(ordinary_root / "scripts"), str(marker))
     entry = installer.build_remember_entry(str(ordinary_root))
     command = entry["Stop"][0]["command"]
-    subprocess.run(["bash", "-c", command], cwd=str(tmp_path), check=False)
+    subprocess.run([BASH, "-c", command], cwd=str(tmp_path), check=False)
     assert marker.exists(), f"the real script never ran: {command}"
 
 
@@ -208,7 +221,7 @@ def test_build_entry_command_actually_runs_with_dollar_paren_in_root(tmp_path):
     _write_marker_script(str(hostile_root / "scripts"), str(marker))
     entry = installer.build_remember_entry(str(hostile_root))
     command = entry["Stop"][0]["command"]
-    subprocess.run(["bash", "-c", command], cwd=str(tmp_path), check=False)
+    subprocess.run([BASH, "-c", command], cwd=str(tmp_path), check=False)
     assert not (tmp_path / "pwned.txt").exists(), (
         "the $(...) segment in plugin_root was executed as a command "
         f"substitution instead of treated as a literal path component: {command}"
@@ -234,7 +247,7 @@ def test_build_entry_command_actually_runs_with_quote_in_root(tmp_path):
     entry = installer.build_remember_entry(str(hostile_root))
     command = entry["Stop"][0]["command"]
     result = subprocess.run(
-        ["bash", "-c", command], cwd=str(tmp_path), check=False, capture_output=True, text=True
+        [BASH, "-c", command], cwd=str(tmp_path), check=False, capture_output=True, text=True
     )
     assert marker.exists(), (
         f"the real script never ran (exit {result.returncode}, "
