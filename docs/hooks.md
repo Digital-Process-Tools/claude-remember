@@ -49,3 +49,15 @@ A flush failure (missing `python3`, a Haiku call that errors, or — since [#369
 
 A store that could never be created at all (a read-only or otherwise unwritable project root) is a narrower case than a flush failure — there is no `hook-errors.log` to write to, because the directory that would hold it is the one that failed. That one warning goes to this hook's own stderr instead ([#372](https://github.com/Digital-Process-Tools/claude-remember/issues/372)); it will not show up in `/remember:doctor`.
 
+**`SessionEnd` shares a 1.5-second budget across every hook registered for that event, and this hook can miss it before it ever reaches the fork ([#560](https://github.com/Digital-Process-Tools/claude-remember/issues/560)).** The Claude Code hooks reference (checked 2026-09, "SessionEnd" / "Timeouts") documents that budget, and one reporter measured this hook's own synchronous preamble — `lib-clock.sh`, `resolve-paths.sh`, `detect-tools.sh`'s python/jq detection, `bootstrap-dirs.sh`, `log.sh` — at roughly 3.4 seconds on a slow Windows/Git-Bash machine, well past 1.5s, with Claude Code logging `Hook cancelled` and no `session-end-*.log` ever appearing. `hooks/hooks.json` now declares `"timeout": 10` on this hook, which is the correct, harmless thing to declare — but the same reference is explicit that **"Timeouts set on plugin-provided hooks don't raise the budget."** This hook ships as `hooks/hooks.json` inside a plugin, exactly the location that clause names, so on an install where Claude Code enforces that carve-out, declaring `timeout` here does not, by itself, raise the effective 1.5s ceiling.
+
+If your own `session-end-*.log` files are still missing and your terminal still shows `Hook cancelled` after upgrading past this fix, the plugin genuinely cannot raise the SessionEnd budget on your behalf — set it yourself with the environment variable the same reference documents:
+
+```bash
+export CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS=10000
+```
+
+(10 seconds, matching the `timeout` this hook declares; the reference caps the SessionEnd budget at 60000 regardless of what any hook or this variable asks for.) Making this hook's own preamble fast enough to finish inside the *default* 1.5s budget — rather than asking for a longer one — is a larger change (it touches the shared detection/resolution scripts every hook sources, not just this one) and is tracked separately rather than folded into this fix.
+
+A manual install (registering these hooks yourself in your project's `.claude/settings.json`, per [docs/install-claude-code.md](docs/install-claude-code.md)) is not subject to the plugin carve-out above: that snippet's `SessionEnd` entry declares `"timeout": 10` too, and a timeout declared in a settings file *is* one Claude Code's own reference says raises the shared budget. That is the one install route where declaring `timeout` is a complete fix on its own, with no `CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS` fallback needed.
+
