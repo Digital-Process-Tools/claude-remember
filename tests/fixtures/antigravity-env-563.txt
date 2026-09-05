@@ -1,0 +1,32 @@
+# Captured from a live `agy -p "..." --output-format text` print-mode turn,
+# agy 1.1.27, macOS darwin/arm64, 2026-09-05 (issue #563 investigation, this
+# session). A probe hook installed at ~/.gemini/config/hooks.json under the
+# NAME-KEYED schema #553's final comment establishes (a hook name mapping to
+# an object keyed by event name, each holding an array of handler objects)
+# dumped `env | grep -iE 'gemini|antigrav|agy|claude|plugin|project'` from
+# inside the PreInvocation handler's own command process.
+#
+# Trimmed to the variables the tests in this file actually read -- the same
+# convention tests/fixtures/codex-env-463.txt already follows (its own
+# comment: only CLAUDE_CODE_ENTRYPOINT/CLAUDE_CODE_SESSION_ID are kept
+# beside the host's own signature). Session-scoped values with no test
+# reading them (a messaging bridge token, a PID, an exec path) were in the
+# raw capture and are deliberately not reproduced here.
+#
+# CLAUDE_CODE_ENTRYPOINT / CLAUDE_CODE_SESSION_ID are left in deliberately,
+# same reason tests/fixtures/codex-env-463.txt keeps them: this agy process
+# was itself launched from inside a Claude Code session (this very one), so
+# both signatures are genuinely present at once and detect_host() must
+# still answer deterministically -- see
+# test_antigravity_signature_563.py's "nested signature" test.
+#
+# ANTIGRAVITY_CONVERSATION_ID is the one line this fixture exists to prove:
+# it is set by agy itself, per invocation, matching the `conversationId`
+# field on the same handler's stdin payload -- confirmed by running the
+# probe twice and observing the value change between runs. Nothing in
+# Antigravity's own documentation names this variable; it was found only by
+# dumping a live process's environment, the same way #463 found
+# CODEX_SESSION_ID/CODEX_THREAD_ID for Codex.
+ANTIGRAVITY_CONVERSATION_ID=abdde66c-1153-4a56-bba2-7db93a9a2614
+CLAUDE_CODE_ENTRYPOINT=cli
+CLAUDE_CODE_SESSION_ID=51eb6cba-0bb1-4aa7-baed-d9aefe54bd52

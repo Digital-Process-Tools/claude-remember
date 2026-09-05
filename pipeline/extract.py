@@ -2,10 +2,11 @@
 
 Reads a session JSONL file, filters out metadata and system messages, and
 produces formatted text with role-labeled exchanges suitable for
-summarization by Haiku. Two transcript envelopes are understood -- Claude
-Code's and Codex's -- via ``sniff_file_envelope()`` and the per-host
-adapters in ``pipeline/host.py`` (#443); a third, unrecognised, shape is
-reported rather than silently read as an empty session.
+summarization by Haiku. Three transcript envelopes are understood -- Claude
+Code's, Codex's, and Antigravity's (`agy`, #563) -- via
+``sniff_file_envelope()`` and the per-host adapters in ``pipeline/host.py``
+(#443); an "unrecognised" shape is reported rather than silently read as an
+empty session.
 
 Supports incremental extraction (only new messages since last save) and
 full extraction (all messages or last N).
@@ -498,11 +499,11 @@ def extract_messages(path: str, skip_lines: int = 0, envelope: str = "claude-cod
             incremental extraction after a previous save).
         envelope: Which host wrote this transcript -- "claude-code" (the
             default, and the only shape this function understood before
-            #443), "codex", or "unrecognised". Callers determine this once
-            per file via ``sniff_file_envelope()``, independent of
-            ``skip_lines``, and pass it through here; a per-line resniff
-            would misfire on a resume that starts past the file's only
-            self-identifying line.
+            #443), "codex", "antigravity" (#563), or "unrecognised".
+            Callers determine this once per file via
+            ``sniff_file_envelope()``, independent of ``skip_lines``, and
+            pass it through here; a per-line resniff would misfire on a
+            resume that starts past the file's only self-identifying line.
 
     Returns:
         List of ``("HUMAN", text)`` or ``("AGENT", text)`` tuples,
@@ -535,6 +536,12 @@ def extract_messages(path: str, skip_lines: int = 0, envelope: str = "claude-cod
 
             if envelope == "codex":
                 exchange = _host.codex_exchange(obj)
+                if exchange is not None:
+                    messages.append(exchange)
+                continue
+
+            if envelope == "antigravity":
+                exchange = _host.antigravity_exchange(obj)
                 if exchange is not None:
                     messages.append(exchange)
                 continue

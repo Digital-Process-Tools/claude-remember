@@ -78,6 +78,19 @@ def test_every_shipped_hook_script_is_wired():
     """
     all_commands = "\n".join(cmd for _loc, cmd in _iter_commands())
     for script in sorted(SCRIPTS_DIR.glob("*-hook.sh")):
+        if script.name.startswith("agy-"):
+            # Antigravity CLI (`agy`, #563) has no per-plugin manifest at
+            # all -- its own hooks.json lives at a shared, per-machine path
+            # (~/.gemini/config/hooks.json) with no working variable
+            # substitution, so there is no static file this repo could
+            # check in for hooks/hooks.json's OWN wiring check to find (see
+            # scripts/install_agy_hooks.py's own module docstring). These
+            # scripts have their own wiring guard instead:
+            # tests/test_install_agy_hooks_563.py's
+            # test_build_entry_references_scripts_that_exist and
+            # test_build_entry_only_names_confirmed_events pin that the
+            # installer's generated manifest references every one of them.
+            continue
         assert script.name in all_commands, (
             f"scripts/{script.name} ships with the plugin but no hooks.json "
             f"command references it"
