@@ -71,23 +71,43 @@ _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export CLAUDE_PLUGIN_ROOT="$(dirname "$_SCRIPT_DIR")"
 
 _STDIN=$(cat)
+# #568: a malformed payload (bad JSON, or no python3 at all) and a genuinely
+# empty-but-valid `{}` payload both used to produce this exact same output
+# -- three empty fields -- so this hook took its "nothing to capture" exit
+# identically in both cases, with no receipt distinguishing "there was
+# nothing to do" from "the payload could not even be read". A 4th line
+# ("ok"/"malformed: ...") tells them apart without touching stdout's
+# existing three-field shape any callers already depend on. Settled by
+# #568 itself: a log line on this arm is safe -- agy parses these hooks'
+# STDOUT as protojson, but stdout already goes nowhere here, so stderr and
+# the daily log are both free to use.
+_PARSE_ERR_FILE=$(mktemp "${TMPDIR:-/tmp}/remember-agy-stop-parse-XXXXXX")
 _FIELDS=$(printf '%s' "$_STDIN" | python3 -c '
 import json, sys
 try:
     d = json.load(sys.stdin)
-except Exception:
+    parse_status = "ok"
+except Exception as exc:
     d = {}
+    parse_status = f"malformed: {exc}"
 workspace_paths = d.get("workspacePaths") or []
 print(d.get("conversationId", ""))
 print(d.get("transcriptPath", ""))
 print(workspace_paths[0] if workspace_paths else "")
-' 2>/dev/null) || _FIELDS=""
+print(parse_status)
+' 2>"$_PARSE_ERR_FILE") || _FIELDS=""
+_PARSE_ERR=$(cat "$_PARSE_ERR_FILE" 2>/dev/null)
+rm -f "$_PARSE_ERR_FILE"
 
 _CONVERSATION_ID=$(printf '%s\n' "$_FIELDS" | sed -n 1p)
 _TRANSCRIPT_PATH=$(printf '%s\n' "$_FIELDS" | sed -n 2p)
 _WORKSPACE_PATH=$(printf '%s\n' "$_FIELDS" | sed -n 3p)
+_PARSE_STATUS=$(printf '%s\n' "$_FIELDS" | sed -n 4p)
 
 if [ -z "$_CONVERSATION_ID" ] || [ -z "$_TRANSCRIPT_PATH" ]; then
+    if [ "$_PARSE_STATUS" != "ok" ]; then
+        echo "[agy-stop-hook] WARNING: stdin payload could not be parsed as JSON (${_PARSE_ERR:-python3 unavailable or produced no output}) -- capturing nothing for this Stop" >&2
+    fi
     exit 0
 fi
 

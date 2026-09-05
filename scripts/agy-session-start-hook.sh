@@ -54,11 +54,20 @@ _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export CLAUDE_PLUGIN_ROOT="$(dirname "$_SCRIPT_DIR")"
 
 _STDIN=$(cat)
+# #568: a malformed payload (bad JSON, or no python3 at all) used to
+# normalise to the exact same {} this delegate call already sends for a
+# genuinely empty payload, with no receipt distinguishing "there was
+# nothing to say" from "the payload could not even be read". Settled by
+# #568 itself: a log line on this arm is safe -- agy parses these hooks'
+# STDOUT as protojson, but the delegate's own stdout is discarded a few
+# lines down regardless, so stderr is free to use.
+_PARSE_ERR_FILE=$(mktemp "${TMPDIR:-/tmp}/remember-agy-session-start-parse-XXXXXX")
 _NORMALIZED=$(printf '%s' "$_STDIN" | python3 -c '
 import json, sys
 try:
     d = json.load(sys.stdin)
-except Exception:
+except Exception as exc:
+    print(f"malformed: {exc}", file=sys.stderr)
     d = {}
 workspace_paths = d.get("workspacePaths") or []
 out = {
@@ -68,7 +77,11 @@ out = {
     "source": "startup",
 }
 print(json.dumps(out))
-' 2>/dev/null) || _NORMALIZED="{}"
+' 2>"$_PARSE_ERR_FILE") || _NORMALIZED="{}"
+if [ -s "$_PARSE_ERR_FILE" ]; then
+    echo "[agy-session-start-hook] WARNING: stdin payload could not be parsed as JSON ($(cat "$_PARSE_ERR_FILE")) -- forwarding an empty SessionStart" >&2
+fi
+rm -f "$_PARSE_ERR_FILE"
 
 # Antigravity's hook executor parses a command hook's STDOUT as protojson
 # against its OWN structured-output schema, not Claude Code's -- confirmed

@@ -66,6 +66,10 @@ Running `agy -p "..."` from inside a directory does **not** put that directory i
 
 A real `agy -p "reply with exactly: X" --add-dir <workspace>` turn correctly fired `SessionStart`, `PreInvocation`, and `Stop` (in that order, per `~/.gemini/antigravity-cli/cli.log`), bootstrapped `<workspace>/.remember/`, and `save-session.sh`'s own extraction step read the real `transcriptPath` Antigravity handed the `Stop` hook and reported `2 exchanges (1 human)` -- matching the turn exactly (`[HUMAN] reply with exactly: X`, `[AGENT] X`, confirmed via `--dry`) -- then correctly skipped the actual save because one human turn is below the default `min_human_messages: 3` threshold. That skip is the CORRECT behaviour for `Stop` firing after a single turn, not a defect: it is the same threshold every other host's incremental save already respects, and it is what makes calling `save-session.sh` (without `--force`) safe to do on every `Stop`.
 
+## Summarization: an Antigravity session is summarized by `claude`, not by `agy` or Gemini
+
+There is no Antigravity-native summarizer in this plugin -- `REMEMBER_SUMMARIZER` only ever resolves to `claude` or `codex` (see [`docs/configuration.md`](configuration.md)). Under the default `auto`, an Antigravity transcript is a recognised, non-default-host case -- the same shape #460/#477 already warn about for Codex -- so it now logs a warning naming the transcript before falling back to `claude -p` ([#567](https://github.com/Digital-Process-Tools/claude-remember/issues/567)), the same as a vanished-Codex-transcript does. This means an authenticated `claude` CLI is required for summarization even on a machine that otherwise only runs `agy`, and the session is billed to Anthropic, not to whichever provider `agy` itself is configured against. Set `REMEMBER_SUMMARIZER=claude` explicitly to silence the warning if this is the intended, permanent configuration.
+
 ## Not established
 
 - **Whether Antigravity has any genuine session-end signal at all** -- see above.
