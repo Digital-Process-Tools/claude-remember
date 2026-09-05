@@ -66,10 +66,21 @@ def build_remember_entry(plugin_root: str) -> dict:
     entry: dict = {"enabled": True}
     for event, script_name in _EVENT_SCRIPTS.items():
         script_path = os.path.join(plugin_root, "scripts", script_name)
+        # #569: this string is embedded, unmodified, into a shared JSON
+        # manifest that agy itself later re-parses as a shell command line
+        # on whatever OS the install happens to run on. A backslash-bearing
+        # Windows path (os.path.join's own native separator there) is not
+        # guaranteed to survive that re-encoding the same way on every
+        # quoting model agy might use -- forward slashes are, since every
+        # path API bash and Windows itself expose accepts them, and no
+        # POSIX-style or cmd.exe-style quoting rule treats them specially.
+        # Normalizing here removes the ambiguity outright rather than
+        # betting on which model agy implements.
+        command_path = script_path.replace("\\", "/")
         entry[event] = [
             {
                 "type": "command",
-                "command": f'bash "{script_path}"',
+                "command": f'bash "{command_path}"',
                 "timeout": _TIMEOUT_SECONDS,
             }
         ]

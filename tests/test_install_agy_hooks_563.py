@@ -36,13 +36,22 @@ def test_build_entry_uses_literal_absolute_script_paths():
     manifest could rely on (see the module docstring), so every command must
     already be a real, resolved path."""
     entry = installer.build_remember_entry(_plugin_root())
+    # #569: build_remember_entry() always emits forward slashes in the
+    # command string (see test_build_entry_command_survives_windows_shell_quoting),
+    # regardless of the host's own native separator -- on Windows
+    # _plugin_root() itself is backslash-separated, so the comparison below
+    # must normalize the same way the code under test does, or this
+    # assertion breaks on windows-latest CI for a reason that has nothing
+    # to do with what it is meant to check (a real placeholder leaking
+    # through).
+    normalized_root = _plugin_root().replace("\\", "/")
     for event in ("SessionStart", "PreInvocation", "Stop"):
         assert event in entry
         for handler in entry[event]:
             command = handler["command"]
             assert "${" not in command, f"{event} command still carries a placeholder: {command}"
             assert os.path.isabs(_plugin_root())
-            assert _plugin_root() in command
+            assert normalized_root in command
 
 
 def test_every_shipped_agy_hook_script_is_wired_into_the_installer():
@@ -93,6 +102,49 @@ def test_build_entry_references_scripts_that_exist():
             command = handler["command"]
             path = command.split('"')[1]
             assert os.path.isfile(path), f"references missing script: {path}"
+
+
+def test_build_entry_command_survives_windows_shell_quoting():
+    """#569: the test just above (`command.split('"')[1]; assert
+    os.path.isfile(path)`) validates the emitted path with Python's OWN
+    os.path resolver -- never with a shell -- so it passes on Windows
+    whether or not the emitted command is actually executable there. This
+    asserts the string-building contract directly instead: a
+    backslash-bearing, drive-lettered plugin_root (the shape a real
+    Windows install path takes) must not leave a raw backslash anywhere in
+    the emitted `command` string. A raw Windows-style separator mixed with
+    the forward slashes os.path.join already inserts on this (POSIX) test
+    host is exactly the kind of value whose meaning is not guaranteed to
+    survive the shell-string encoding it is placed into before agy
+    executes it -- forward slashes are unambiguous under every quoting
+    model in play (POSIX double-quote rules, cmd.exe's own quoting) and
+    are accepted by every path API bash and Windows itself expose.
+
+    REASONED, not observed: no Windows `agy` install was available to run
+    the emitted command end to end (see docs/install-antigravity.md's own
+    "Everything above is macOS ... Nothing here is claimed for ... Windows"
+    caveat) -- this proves the command *string* is unambiguous, not that a
+    live Windows `agy` executes it, which stays out of reach in this
+    environment.
+    """
+    windows_root = r"C:\Users\Test User\AppData\Roaming\plugin"
+    entry = installer.build_remember_entry(windows_root)
+    event_scripts = {
+        "SessionStart": "agy-session-start-hook.sh",
+        "PreInvocation": "agy-pre-invocation-hook.sh",
+        "Stop": "agy-stop-hook.sh",
+    }
+    for event, handlers in entry.items():
+        if not isinstance(handlers, list):
+            continue
+        for handler in handlers:
+            command = handler["command"]
+            assert "\\" not in command, (
+                f"{event} command still carries a raw backslash, ambiguous "
+                f"under Windows shell-quoting rules: {command}"
+            )
+            path = command.split('"')[1]
+            assert path.endswith(f"plugin/scripts/{event_scripts[event]}")
 
 
 def test_merge_creates_file_and_dir_when_absent(tmp_path):
