@@ -951,6 +951,9 @@ fi
 # JSON -- a value set inside the `CTX=$( … )` subshell a few lines down would
 # die with that subshell.
 PROMO_MSG=""
+PROMO_ID=""
+PROMO_MARKER=""
+PROMO_NOW=""
 if [ "$(config ".features.plugin_promos" true)" = "true" ]; then
 
     # Args: none. Reads promos.json + installed_plugins.json, sets PROMO_MSG
@@ -1032,6 +1035,15 @@ if [ "$(config ".features.plugin_promos" true)" = "true" ]; then
 
             [ -n "$installed_ok" ] || continue
             has_it=$(jq -r --arg k "$ikey" '.plugins[$k] // empty | length' "$installed_file" 2>/dev/null)
+            # A non-zero jq exit here (a version-2 file whose .plugins is not
+            # the object the schema promises, say) must read as cannot-tell
+            # for THIS entry, never as the empty-output shape that means
+            # genuinely absent -- the same three-state rule the file/version
+            # check above already enforces, extended to a query that can also
+            # fail on well-formed-but-wrong-shaped JSON (review finding, #574).
+            if ! jq -r --arg k "$ikey" '.plugins[$k] // empty | length' "$installed_file" >/dev/null 2>&1; then
+                continue
+            fi
             case "$has_it" in ''|0) : ;; *) continue ;; esac
 
             url_display="${url#https://}"
@@ -1057,10 +1069,22 @@ if [ "$(config ".features.plugin_promos" true)" = "true" ]; then
         [ -n "$candidate_id" ] || { candidate_id="$first_id"; candidate_msg="$first_msg"; }
         [ -n "$candidate_id" ] || return 0
 
+        # The marker is NOT written here (review finding, #574): this
+        # function only SELECTS a candidate. Writing the throttle/rotation
+        # record at this point, before the buffered-stdout / jq stages a few
+        # hundred lines down have proven the promo actually reached stdout,
+        # meant a buffer-open failure or a jq hiccup on the emit pass could
+        # burn the whole `cooldowns.promo_seconds` window on a promo the user
+        # never saw -- reproduced live by both review spawns (an unwritable
+        # $REMEMBER_DIR/tmp, or jq disappearing between the two `command -v`
+        # checks). PROMO_ID/PROMO_MARKER/PROMO_NOW cross the function
+        # boundary the same way PROMO_MSG already does, and the emit block is
+        # the one place that writes the marker, immediately after printing
+        # the JSON that carries this message -- never before.
         PROMO_MSG="$candidate_msg"
-        mkdir -p "$promo_dir" 2>/dev/null
-        printf 'ts=%s\nid=%s\n' "$now" "$candidate_id" > "$marker.$$" 2>/dev/null \
-            && mv -f "$marker.$$" "$marker" 2>/dev/null
+        PROMO_ID="$candidate_id"
+        PROMO_MARKER="$marker"
+        PROMO_NOW="$now"
     }
 
     _remember_compute_promo
@@ -1615,6 +1639,19 @@ if [ -n "$_REMEMBER_CTX_OK" ]; then
         # memory context it wraps.
         if [ -n "$_REMEMBER_PROMO_JSON" ]; then
             printf '%s\n' "$_REMEMBER_PROMO_JSON"
+            # Commit the throttle/rotation marker ONLY now, after the promo
+            # has actually reached stdout -- never inside
+            # _remember_compute_promo (review finding, #574). Writing it at
+            # selection time meant this exact branch failing (this jq call,
+            # or the buffer-open a few lines above) still left a marker on
+            # disk claiming the promo was shown, burning the whole
+            # `cooldowns.promo_seconds` window on a promo the user never saw.
+            if [ -n "$PROMO_ID" ] && [ -n "$PROMO_MARKER" ]; then
+                mkdir -p "$(dirname "$PROMO_MARKER")" 2>/dev/null
+                printf 'ts=%s\nid=%s\n' "$PROMO_NOW" "$PROMO_ID" \
+                    > "$PROMO_MARKER.$$" 2>/dev/null \
+                    && mv -f "$PROMO_MARKER.$$" "$PROMO_MARKER" 2>/dev/null
+            fi
         else
             cat "$_REMEMBER_CTX_FILE"
         fi
@@ -1625,8 +1662,9 @@ if [ -n "$_REMEMBER_CTX_OK" ]; then
 fi
 # _REMEMBER_CTX_OK empty: the buffer redirect never engaged, so every line
 # above already went straight to the real terminal as it always did -- there
-# is nothing left to flush, and PROMO_MSG (if any) is silently lost rather
-# than risk a hook that is supposed to never block session startup.
+# is nothing left to flush, and PROMO_MSG (if any) is silently lost (no
+# marker is written either, by the same "only after delivery" rule above)
+# rather than risk a hook that is supposed to never block session startup.
 
 # Explicit, because the block above is the last command and its own status
 # is not the hook's status. Falling off the end would exit 1 from a hook

@@ -274,6 +274,108 @@ class TestPromosFileIsData:
         assert result.returncode == 0, result.stderr
         assert "systemMessage" not in result.stdout
 
+    def test_entry_over_length_budget_is_skipped_and_logged(self, tmp_path):
+        """A candidate whose rendered text+url exceeds the 140-char budget
+        never renders, and the skip is visible -- a positive control for the
+        length guard (auditor finding #574: the guard had no fixture proving
+        it actually trips, only two shipped entries that stay comfortably
+        under it)."""
+        home, project, remember = _store(tmp_path)
+        _write_installed(home, {})
+        fake_plugin_root = tmp_path / "plugin-root-toolong"
+        fake_plugin_root.mkdir()
+        (fake_plugin_root / "scripts").symlink_to(REPO_ROOT / "scripts")
+        (fake_plugin_root / "prompts").symlink_to(REPO_ROOT / "prompts")
+        (fake_plugin_root / "pipeline").symlink_to(REPO_ROOT / "pipeline")
+        long_text = "x" * 130
+        (fake_plugin_root / "promos.json").write_text(
+            json.dumps(
+                {
+                    "promos": [
+                        {
+                            "id": "too-long-promo",
+                            "text": long_text,
+                            "installed_key": "x@y",
+                            "url": "https://example.com/z",
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        result = subprocess.run(
+            ["bash", str(SESSION_START)],
+            input=_payload(),
+            env=_env(home, project, remember, {"CLAUDE_PLUGIN_ROOT": str(fake_plugin_root)}),
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert result.returncode == 0, result.stderr
+        assert "systemMessage" not in result.stdout
+
+        log_files = list((remember / "logs").glob("memory-*.log"))
+        assert log_files, "expected a daily log to exist"
+        log_text = "\n".join(f.read_text(encoding="utf-8") for f in log_files)
+        assert "too-long-promo" in log_text
+        assert "140" in log_text
+
+
+class TestMarkerIsCommittedOnlyAfterDelivery:
+    """Regression for a shared finding from both self-review spawns (#574):
+    the throttle/rotation marker used to be written the moment a candidate
+    was SELECTED, inside `_remember_compute_promo`, before the buffered-
+    stdout / jq stages further down had proven the promo actually reached
+    stdout. A buffer-open failure or a jq hiccup on the emit pass could then
+    burn the whole `cooldowns.promo_seconds` window on a promo the user never
+    saw. The marker is now written only in the branch that just printed the
+    JSON carrying `systemMessage`.
+    """
+
+    def test_unwritable_ctx_buffer_does_not_burn_the_cooldown(self, tmp_path):
+        home, project, remember = _store(tmp_path)
+        _write_installed(home, {})
+        marker = home / ".remember" / "tmp" / "promo-notice"
+
+        # Make $REMEMBER_DIR/tmp unwritable so `: > "$_REMEMBER_CTX_FILE"`
+        # fails and the buffer redirect never engages -- the exact failure
+        # mode both review spawns reproduced by hand.
+        remember_tmp = remember / "tmp"
+        remember_tmp.chmod(0o500)
+        try:
+            result = subprocess.run(
+                ["bash", str(SESSION_START)],
+                input=_payload(),
+                env=_env(home, project, remember),
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        finally:
+            remember_tmp.chmod(0o700)
+
+        assert result.returncode == 0, result.stderr
+        assert "systemMessage" not in result.stdout
+        assert not marker.exists(), (
+            "the promo was never shown (buffer could not open) but the "
+            "throttle marker was written anyway -- this burns the cooldown "
+            "on a promo nobody saw"
+        )
+
+        # With the buffer writable again, the very next SessionStart must
+        # still be free to show the promo -- nothing was silently consumed
+        # by the failed attempt above.
+        result2 = subprocess.run(
+            ["bash", str(SESSION_START)],
+            input=_payload(),
+            env=_env(home, project, remember),
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert result2.returncode == 0, result2.stderr
+        assert "systemMessage" in result2.stdout
+
 
 def test_session_end_hook_never_mentions_promo_or_system_message():
     """Never on SessionEnd -- a property of the file, not just this fixture.
