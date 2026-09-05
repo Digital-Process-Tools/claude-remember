@@ -1,7 +1,15 @@
 """Which agent CLI is hosting this plugin, and what it tells us (#407).
 
 Remember was written against one host and reads that host's environment
-directly. Three now exist, and they agree on far less than they appear to:
+directly. Four now exist, and they agree on far less than they appear to.
+The table below covers the first three, which at least share field NAMES on
+their hook stdin (`session_id`/`cwd`/`transcript_path`) even where the
+VALUES differ; Antigravity (`agy`, #563, `ANTIGRAVITY` below) does not fit
+this table at all -- its stdin payload uses entirely different field names
+(`conversationId`/`workspacePaths`/`transcriptPath`), which is why its own
+adapter scripts (`scripts/agy-*-hook.sh`) rename the payload before handing
+it to the same hook scripts these three hosts already share, rather than
+teaching this module a fourth column here:
 
     | | Claude Code | Codex | Gemini CLI |
     |---|---|---|---|
@@ -147,6 +155,28 @@ CODEX = Host(
 # arrives on stdin regardless.
 GEMINI = Host(name="gemini-cli", project_dir_vars=("CLAUDE_PROJECT_DIR",))
 
+# Antigravity CLI (`agy`), #563 (superseding the "does anything fire" question
+# #553 closed as resolved-into-#563). Neither a plugin-root nor a project-dir
+# variable is declared: nothing in agy 1.1.27's own hook stdin payload or in a
+# live hook process's environment names either kind of path (confirmed by
+# dumping `env` from inside a real firing hook -- see
+# tests/fixtures/antigravity-env-563.txt), unlike Codex's PLUGIN_ROOT alias or
+# Gemini's CLAUDE_PROJECT_DIR alias above. Declaring one here on the strength
+# of a plausible name alone would be exactly the #463 mistake (CODEX_HOME) one
+# host over.
+#
+# ANTIGRAVITY_CONVERSATION_ID IS a real signature, though: unlike CODEX_HOME,
+# it was found by dumping a live hook process's own environment, not read off
+# a doc page or guessed from a binary's string table, and a second probe run
+# with a fresh conversation confirmed the value changes per invocation rather
+# than being some ambient leftover.
+ANTIGRAVITY = Host(
+    name="antigravity",
+    plugin_root_vars=(),
+    project_dir_vars=(),
+    signature_vars=("ANTIGRAVITY_CONVERSATION_ID",),
+)
+
 # The fallback. Not an error: a host we do not recognise still delivers the
 # payload, and the payload is the part that matters.
 UNKNOWN = Host(name="unknown", plugin_root_vars=(), project_dir_vars=())
@@ -188,7 +218,7 @@ UNKNOWN = Host(name="unknown", plugin_root_vars=(), project_dir_vars=())
 # longer wired to the one decision it used to gate. If a consumer that needs
 # env-based host identification is ever added back, this is the point to
 # revisit AMBIGUOUS, not before.
-REGISTRY: tuple[Host, ...] = (CLAUDE_CODE, CODEX)
+REGISTRY: tuple[Host, ...] = (CLAUDE_CODE, CODEX, ANTIGRAVITY)
 
 # Every plugin-root variable any known host uses, in registry precedence order,
 # de-duplicated. scripts/resolve-paths.sh mirrors this list by hand and
@@ -254,11 +284,11 @@ def sniff_envelope(obj: object) -> str:
     the envelope it is deciding is still a property of the whole session
     file -- one host wrote it start to finish -- not of any one line.
 
-    Returns ``"claude-code"``, ``"codex"``, or ``"unrecognised"``. The third
-    state matters as much as the first two: a transcript shape this module
-    does not know is reported loud rather than silently parsed as though it
-    held zero exchanges, which is indistinguishable from a genuinely quiet
-    session (#443).
+    Returns ``"claude-code"``, ``"codex"``, ``"antigravity"`` (#563), or
+    ``"unrecognised"``. The last of those matters as much as the first
+    three: a transcript shape this module does not know is reported loud
+    rather than silently parsed as though it held zero exchanges, which is
+    indistinguishable from a genuinely quiet session (#443).
     """
     if not isinstance(obj, dict):
         return "unrecognised"
@@ -269,6 +299,18 @@ def sniff_envelope(obj: object) -> str:
         return "codex"
     if isinstance(obj.get("message"), dict) or obj.get("type") in ("user", "assistant", "summary", "system"):
         return "claude-code"
+    # Antigravity CLI (`agy`, #563): a flat per-step object, never nested --
+    # `{"step_index", "source", "type", "content"}`, `content` a plain
+    # string. `step_index` and `source` together are the marker: neither
+    # Claude Code's nor Codex's line shape uses either key, and `content` as
+    # a bare string (rather than Claude Code's `message.content`, which can
+    # itself be a string OR a block list) rules out a coincidental collision.
+    if (
+        "step_index" in obj
+        and "source" in obj
+        and isinstance(obj.get("content"), str)
+    ):
+        return "antigravity"
     return "unrecognised"
 
 
@@ -315,6 +357,41 @@ def codex_exchange(obj: dict) -> tuple[str, str] | None:
     if not texts:
         return None
     return role, "\n".join(texts)
+
+
+# Antigravity's own step `type` values that map to a message this plugin
+# should capture (#563). Everything else -- a future tool-call or reasoning
+# step, or any type this investigation never saw -- is None, deliberately:
+# PreToolUse/PostToolUse are out of scope here (see the #563 issue body), and
+# guessing a role for an unrecognised type is the same mistake codex_exchange
+# above already refuses to make for an unrecognised item_completed item.
+_ANTIGRAVITY_STEP_ROLES = {
+    "USER_INPUT": "HUMAN",
+    "PLANNER_RESPONSE": "AGENT",
+}
+
+
+def antigravity_exchange(obj: dict) -> tuple[str, str] | None:
+    """``(role, text)`` for one Antigravity transcript step, or ``None`` to skip it.
+
+    Antigravity's `transcript_full.jsonl` (`.system_generated/logs/` under
+    the conversation's `artifactDirectoryPath`) is a flat per-step object --
+    ``{"step_index", "source", "type", "status", "created_at", "content"}``
+    -- captured live from a real `agy -p ... --output-format text` print-mode
+    turn, `agy` 1.1.27, macOS darwin/arm64, this session, 2026-09-05
+    (tests/fixtures/antigravity-transcript-563.jsonl). Only ``USER_INPUT``
+    and ``PLANNER_RESPONSE`` are known to occur; every other ``type`` this
+    investigation observed is none, because no tool-calling turn was driven
+    (see the #563 issue body's probing rule -- that needs
+    ``--dangerously-skip-permissions``, a human-run test).
+    """
+    role = _ANTIGRAVITY_STEP_ROLES.get(obj.get("type"))
+    if role is None:
+        return None
+    content = obj.get("content")
+    if not isinstance(content, str) or not content.strip():
+        return None
+    return role, content
 
 
 def transcript_path(env: Mapping[str, str] | None = None) -> str | None:
