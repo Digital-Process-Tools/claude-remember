@@ -1,6 +1,6 @@
 # Git Backup — Security Model
 
-This page only matters if you enable the **git backup** feature (`hooks.d/after_save/50-git-backup.sh`). The default install does not push your memory anywhere — no new attack surface beyond what Claude Code already needs to run on your machine.
+This page only matters if you enable the **git backup** feature (`hooks.d/after_save/50-git-backup.sh`). The default install does not push your memory anywhere — no new attack surface beyond what your coding agent already needs to run on your machine.
 
 If you do enable git backup, read on.
 
@@ -26,7 +26,7 @@ If something can write to your home directory as your user, you are already comp
 
 These are the things that only apply once you enable the feature.
 
-### 1. The remote you push to receives a copy of everything you discuss with Claude Code
+### 1. The remote you push to receives a copy of everything you discuss with your coding agent
 
 That includes project paths, session summaries, identity files, any data the model wrote into memory, and any content you accidentally pasted into a session. If you point the remote at a service you don't fully trust, you're streaming your work history there continuously.
 
