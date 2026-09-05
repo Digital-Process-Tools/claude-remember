@@ -8,6 +8,7 @@
 [![License](https://img.shields.io/badge/license-Community-brightgreen)](LICENSE)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-5A67D8)](https://github.com/Digital-Process-Tools/claude-marketplace)
 [![Codex](https://img.shields.io/badge/Codex-plugin-000000)](.agents/plugins/marketplace.json)
+[![Antigravity](https://img.shields.io/badge/Antigravity-plugin-4285F4)](docs/install-antigravity.md)
 [![Version](https://img.shields.io/badge/version-0.27.0-orange)](.claude-plugin/plugin.json)
 
 Your coding agent starts every session blank. It doesn't know what you worked on yesterday, what conventions your team follows, or what mistakes it already made. You re-explain everything, every time.
@@ -76,13 +77,15 @@ codex plugin install remember
 
 Observed working against `codex-cli 0.150.1`. What was found on the way: [docs/install-codex.md](docs/install-codex.md).
 
-**Gemini CLI**
+**Antigravity CLI (`agy`)**
 
 ```
-gemini extensions link <path-to-this-checkout>/.gemini
+python3 scripts/install_agy_hooks.py
 ```
 
-Manifests are checked in and tested for shape; no hook has been seen firing under a live Gemini CLI yet ([#532](https://github.com/Digital-Process-Tools/claude-remember/issues/532)). That is why Gemini CLI carries no host badge above, while Claude Code and Codex do: [docs/install-gemini-cli.md](docs/install-gemini-cli.md). On an individual Google account's free tier, the command above is refused outright (`IneligibleTierError: UNSUPPORTED_CLIENT`) after the OAuth token is accepted -- see that page for the detail and what has and hasn't been tested.
+Observed working against `agy` 1.1.27: capture was driven end to end against a real `agy` process, not reasoned from its docs. Antigravity has no per-plugin manifest -- `agy plugin install` copies a plugin's own `hooks.json`, counts it, marks the plugin enabled, and never loads it ([#553](https://github.com/Digital-Process-Tools/claude-remember/issues/553)) -- so the installer merges a `remember` entry into the shared `~/.gemini/config/hooks.json`, preserving every other plugin's entries already there.
+
+**One gap, before you choose this host:** of the four Antigravity events confirmed to fire, none is a process-exit signal, so there is no analogue of `SessionEnd` and no last-chance flush at the end of a conversation. `Stop` fires after every turn and is deliberately not wired to `session-end-hook.sh`. What that costs, the name-keyed schema whose parse failures are silent, and the three live defects found while porting: [docs/install-antigravity.md](docs/install-antigravity.md).
 
 ## Requirements
 
@@ -115,12 +118,14 @@ Run it when memory is not appearing and nothing says why. It prints resolved pat
 
 ### Hooks
 
-| Claude Code / Codex | Gemini CLI | Script | Purpose |
+| Claude Code / Codex | Antigravity | Script | Purpose |
 | --- | --- | --- | --- |
 | `SessionStart` | `SessionStart` | `session-start-hook.sh` | Loads memory into context, recovers missed sessions |
-| `UserPromptSubmit` | `BeforeAgent` | `user-prompt-hook.sh` | Stamps the current time into the prompt |
-| `PostToolUse` | `AfterTool` | `post-tool-hook.sh` | Saves the session when enough tool calls have accumulated |
-| `SessionEnd` | `SessionEnd` | `session-end-hook.sh` | Flushes whatever `PostToolUse` has not saved yet |
+| `UserPromptSubmit` | `PreInvocation` (per model invocation, not per prompt) | `user-prompt-hook.sh` | Stamps the current time into the prompt |
+| `PostToolUse` | not wired (`PostInvocation` fires, nothing here needs it) | `post-tool-hook.sh` | Saves the session when enough tool calls have accumulated |
+| `SessionEnd` | **no analogue found** | `session-end-hook.sh` | Flushes whatever `PostToolUse` has not saved yet |
+
+Antigravity's `Stop` is a turn boundary, not a teardown, so it is wired to its own adapter rather than to `session-end-hook.sh`; the row above is the gap that leaves.
 
 What each one skips and why, the `hooks.d/` listener contract, and why `SessionEnd` never writes a handoff: [docs/hooks.md](docs/hooks.md).
 
@@ -176,7 +181,7 @@ Everything that used to sit on this page and did not need to be read before inst
 
 - [Installing under Claude Code](docs/install-claude-code.md): updates, the official marketplace, manual install, checking your version
 - [Installing under Codex](docs/install-codex.md)
-- [Installing under Gemini CLI](docs/install-gemini-cli.md)
+- [Installing under Antigravity CLI](docs/install-antigravity.md)
 - [Windows](docs/windows.md)
 - [Hooks](docs/hooks.md)
 - [Diagnostics](docs/diagnostics.md)

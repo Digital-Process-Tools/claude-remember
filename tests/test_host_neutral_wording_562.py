@@ -58,7 +58,7 @@ def test_readme_keeps_claude_code_where_the_sentence_is_claude_code_specific():
     assert "**Claude Code**\n" in README
     assert "Restart Claude Code afterwards; hooks are read at session start" in README
     assert "Claude Code kills a hook at 60s" not in README  # this sentence lives in docs/configuration.md, not README
-    assert "| Claude Code / Codex | Gemini CLI | Script | Purpose |" in README
+    assert "| Claude Code / Codex | Antigravity | Script | Purpose |" in README
 
 
 def test_readme_full_name_appears_once_then_short_name():
