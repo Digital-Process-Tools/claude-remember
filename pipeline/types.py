@@ -136,6 +136,17 @@ class ExtractResult:
             envelope. Lets a caller (``pipeline.haiku``'s fallback warning)
             name the cap specifically instead of lumping it in with
             "unrecognised shape".
+        envelope_has_unmapped_step: True when ``envelope`` resolved to a
+            known host (currently only ever set for "antigravity") but the
+            read span contained at least one step whose own ``type`` this
+            build's ``pipeline.host`` adapter cannot map to a role (#575).
+            Distinct from an ordinary 0-exchange span: that reports the
+            same ``human_count``/``assistant_count`` of 0 this can, but
+            this is only ever true when a step was actually seen and
+            dropped, so a caller (``scripts/save-session.sh``) can route
+            such a span through the same #450 quarantine an "unrecognised"
+            envelope gets, rather than reporting it as a genuinely quiet
+            session that is safe to advance past for good.
     """
 
     exchanges: str = ""
@@ -148,6 +159,7 @@ class ExtractResult:
     unread_sidecar_unreadable: bool = False
     envelope_unreadable: bool = False
     envelope_capped: bool = False
+    envelope_has_unmapped_step: bool = False
 
 
 @dataclass

@@ -86,7 +86,7 @@ def cmd_extract(session_id: str, project_dir: str) -> None:
         POSITION, HUMAN_COUNT, ASSISTANT_COUNT, EXCHANGE_COUNT,
         EXTRACT_FILE (path to temp file containing exchange text), ENVELOPE,
         SKIP_LINES, UNREAD_SIDECAR_UNREADABLE, ENVELOPE_UNREADABLE,
-        ENVELOPE_CAPPED.
+        ENVELOPE_CAPPED, ENVELOPE_HAS_UNMAPPED_STEP.
     """
     import tempfile
     remember_dir = os.environ.get("REMEMBER_DIR") or None
@@ -141,6 +141,12 @@ def cmd_extract(session_id: str, project_dir: str) -> None:
     # file. Additive for the same reason as the two keys above: no current
     # consumer reads this yet, but the distinction is on the bridge.
     print(f"ENVELOPE_CAPPED={1 if r.envelope_capped else 0}")
+    # #575: distinct from ENVELOPE=="unrecognised" -- this fires for a KNOWN
+    # envelope (today, only "antigravity") whose read span still contained a
+    # step this build's pipeline.host adapter cannot map to a role. Read
+    # unconditionally by scripts/save-session.sh, so it prints 0 rather than
+    # being omitted for every other envelope.
+    print(f"ENVELOPE_HAS_UNMAPPED_STEP={1 if r.envelope_has_unmapped_step else 0}")
 
 
 def cmd_build_prompt(

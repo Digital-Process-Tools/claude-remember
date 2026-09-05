@@ -486,7 +486,12 @@ def _channel_text(content) -> str | None:
     return match.group(1).strip()
 
 
-def extract_messages(path: str, skip_lines: int = 0, envelope: str = "claude-code") -> list[tuple[str, str]]:
+def extract_messages(
+    path: str,
+    skip_lines: int = 0,
+    envelope: str = "claude-code",
+    stats: dict | None = None,
+) -> list[tuple[str, str]]:
     """Parse a session JSONL file into role-labeled message tuples.
 
     Reads each line as JSON, skips metadata messages and system reminders,
@@ -504,6 +509,14 @@ def extract_messages(path: str, skip_lines: int = 0, envelope: str = "claude-cod
             ``sniff_file_envelope()``, independent of ``skip_lines``, and
             pass it through here; a per-line resniff would misfire on a
             resume that starts past the file's only self-identifying line.
+        stats: Optional mutable dict this call writes signals into, additive
+            to the returned messages -- ``None`` (the default) costs every
+            existing caller nothing. For ``envelope == "antigravity"``, sets
+            ``stats["antigravity_unmapped_steps"]`` to the count of steps in
+            the read span whose ``type`` ``pipeline.host`` cannot map (#575):
+            distinct from a genuinely empty span, which this signals as 0/no
+            key at all, so a caller can quarantine the one and not the other
+            rather than treating both as "nothing happened here".
 
     Returns:
         List of ``("HUMAN", text)`` or ``("AGENT", text)`` tuples,
@@ -541,6 +554,10 @@ def extract_messages(path: str, skip_lines: int = 0, envelope: str = "claude-cod
                 continue
 
             if envelope == "antigravity":
+                if stats is not None and _host.antigravity_step_is_unmapped(obj):
+                    stats["antigravity_unmapped_steps"] = (
+                        stats.get("antigravity_unmapped_steps", 0) + 1
+                    )
                 exchange = _host.antigravity_exchange(obj)
                 if exchange is not None:
                     messages.append(exchange)
@@ -658,10 +675,15 @@ def extract_session(
 
     used_skip_lines = 0
     unread_sidecar_unreadable = False
+    # #575: additive signal alongside `messages` -- populated only for the
+    # "antigravity" envelope (see extract_messages()'s own docstring), read
+    # back below regardless of which branch ran, so the sniff-once/count/
+    # default paths all report it the same way.
+    antigravity_stats: dict = {}
     if show_all:
-        messages = extract_messages(path, skip_lines=0, envelope=envelope)
+        messages = extract_messages(path, skip_lines=0, envelope=envelope, stats=antigravity_stats)
     elif count is not None:
-        messages = extract_messages(path, skip_lines=0, envelope=envelope)
+        messages = extract_messages(path, skip_lines=0, envelope=envelope, stats=antigravity_stats)
         messages = messages[-count:]
     else:
         last_line = get_last_save_line(actual_id, project_dir, remember_dir)
@@ -678,7 +700,10 @@ def extract_session(
         )
         unread_from = unread_sessions.get(actual_id)
         used_skip_lines = unread_from if unread_from is not None else last_line
-        messages = extract_messages(path, skip_lines=used_skip_lines, envelope=envelope)
+        messages = extract_messages(
+            path, skip_lines=used_skip_lines, envelope=envelope, stats=antigravity_stats
+        )
+    envelope_has_unmapped_step = antigravity_stats.get("antigravity_unmapped_steps", 0) > 0
 
     # Format as text
     lines = [f"Session: {actual_id}", f"Lines: {total_lines}", "=" * 60]
@@ -703,6 +728,7 @@ def extract_session(
         unread_sidecar_unreadable=unread_sidecar_unreadable,
         envelope_unreadable=envelope_unreadable,
         envelope_capped=envelope_capped,
+        envelope_has_unmapped_step=envelope_has_unmapped_step,
     )
 
 

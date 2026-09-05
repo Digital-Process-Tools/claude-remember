@@ -384,6 +384,14 @@ def antigravity_exchange(obj: dict) -> tuple[str, str] | None:
     investigation observed is none, because no tool-calling turn was driven
     (see the #563 issue body's probing rule -- that needs
     ``--dangerously-skip-permissions``, a human-run test).
+
+    A ``None`` here is ambiguous on its own -- a step whose ``type`` this
+    module has never seen (a real, unmapped step) and a mapped step with
+    blank ``content`` both return it identically. That ambiguity is exactly
+    why #575's quarantine signal is a SEPARATE function
+    (``antigravity_step_is_unmapped``) rather than folded into this one's
+    return value: a caller counting ``None``s could not tell "nothing to
+    capture" from "something this build cannot read yet".
     """
     role = _ANTIGRAVITY_STEP_ROLES.get(obj.get("type"))
     if role is None:
@@ -392,6 +400,29 @@ def antigravity_exchange(obj: dict) -> tuple[str, str] | None:
     if not isinstance(content, str) or not content.strip():
         return None
     return role, content
+
+
+def antigravity_step_is_unmapped(obj: dict) -> bool:
+    """True when this Antigravity step's own ``type`` is a real string this
+    module cannot map to a role (#575).
+
+    Distinct from ``antigravity_exchange()`` returning ``None``: that also
+    happens for a KNOWN type with blank content, which is a legitimate skip,
+    not evidence of a gap in ``_ANTIGRAVITY_STEP_ROLES``. This function
+    answers only "is ``type`` itself foreign to the map" -- a step with no
+    ``type`` at all (malformed, not a foreign type) is not unmapped by this
+    definition, the same way ``sniff_envelope()`` treats a missing shape
+    marker as "not this host" rather than "an unrecognised host".
+
+    A caller that sees this return ``True`` anywhere in a read span knows a
+    step happened that this build silently dropped -- exactly the signal
+    ``extract_messages()``'s ``stats`` parameter threads up to
+    ``ExtractResult.envelope_has_unmapped_step``, so `scripts/save-session.sh`
+    can route that span through the same #450 quarantine an "unrecognised"
+    envelope gets, instead of reporting it as a genuinely quiet session.
+    """
+    step_type = obj.get("type")
+    return isinstance(step_type, str) and step_type not in _ANTIGRAVITY_STEP_ROLES
 
 
 def transcript_path(env: Mapping[str, str] | None = None) -> str | None:

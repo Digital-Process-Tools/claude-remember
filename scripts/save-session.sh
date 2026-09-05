@@ -305,12 +305,26 @@ fi
 # half.
 if [ "$EXCHANGE_COUNT" -eq 0 ]; then
     if [ "$DRY_RUN" = false ]; then
+        # #575: a KNOWN envelope (today, only "antigravity") can still read
+        # 0 exchanges because every step in the span had a `type` this
+        # build's pipeline.host adapter cannot map to a role -- the same
+        # unrecoverable-silent-loss shape "unrecognised" exists to prevent,
+        # just discovered one level deeper (the file WAS placed, but part of
+        # it could not be read). Route it through the identical #450
+        # quarantine by passing "unrecognised" as the envelope save-position
+        # sees, even though $ENVELOPE itself (used for logging above and
+        # everywhere else) stays the real, honest host name.
         if [ "$ENVELOPE" = "unrecognised" ]; then
             log "extract" "unrecognised envelope, skip -- position -> $POSITION (span quarantined from line $SKIP_LINES for a future build)"
+            SAVE_ENVELOPE="$ENVELOPE"
+        elif [ "$ENVELOPE_HAS_UNMAPPED_STEP" = "1" ]; then
+            log "extract" "$ENVELOPE envelope with an unmapped step type, skip -- position -> $POSITION (span quarantined from line $SKIP_LINES for a future build)"
+            SAVE_ENVELOPE="unrecognised"
         else
             log "extract" "0 exchanges, skip -- position -> $POSITION"
+            SAVE_ENVELOPE="$ENVELOPE"
         fi
-        cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell save-position "$LAST_SAVE_FILE" "$SESSION_ID" "$POSITION" "$ENVELOPE" "$SKIP_LINES"
+        cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell save-position "$LAST_SAVE_FILE" "$SESSION_ID" "$POSITION" "$SAVE_ENVELOPE" "$SKIP_LINES"
     else
         log "extract" "0 exchanges, skip (dry run -- position unchanged)"
     fi
