@@ -36,13 +36,22 @@ def test_build_entry_uses_literal_absolute_script_paths():
     manifest could rely on (see the module docstring), so every command must
     already be a real, resolved path."""
     entry = installer.build_remember_entry(_plugin_root())
+    # #569: build_remember_entry() always emits forward slashes in the
+    # command string (see test_build_entry_command_survives_windows_shell_quoting),
+    # regardless of the host's own native separator -- on Windows
+    # _plugin_root() itself is backslash-separated, so the comparison below
+    # must normalize the same way the code under test does, or this
+    # assertion breaks on windows-latest CI for a reason that has nothing
+    # to do with what it is meant to check (a real placeholder leaking
+    # through).
+    normalized_root = _plugin_root().replace("\\", "/")
     for event in ("SessionStart", "PreInvocation", "Stop"):
         assert event in entry
         for handler in entry[event]:
             command = handler["command"]
             assert "${" not in command, f"{event} command still carries a placeholder: {command}"
             assert os.path.isabs(_plugin_root())
-            assert _plugin_root() in command
+            assert normalized_root in command
 
 
 def test_every_shipped_agy_hook_script_is_wired_into_the_installer():
