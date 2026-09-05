@@ -1005,21 +1005,21 @@ if [ "$(config ".features.plugin_promos" true)" = "true" ]; then
         local installed_file="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/installed_plugins.json"
         local installed_ok=""
         if [ -f "$installed_file" ] \
-            && [ "$(jq -r '.version // empty' "$installed_file" 2>/dev/null)" = "2" ]; then
+            && [ "$($JQ -r '.version // empty' "$installed_file" 2>/dev/null)" = "2" ]; then
             installed_ok="true"
         fi
 
         local count
-        count=$(jq -r '.promos | length' "$promos_file" 2>/dev/null)
+        count=$($JQ -r '.promos | length' "$promos_file" 2>/dev/null)
         case "$count" in ''|*[!0-9]*) return 0 ;; esac
 
         local i=0 id text url ikey has_it url_display msg
         local candidate_id="" candidate_msg="" first_id="" first_msg=""
         while [ "$i" -lt "$count" ]; do
-            id=$(jq -r ".promos[$i].id // empty" "$promos_file" 2>/dev/null)
-            text=$(jq -r ".promos[$i].text // empty" "$promos_file" 2>/dev/null)
-            url=$(jq -r ".promos[$i].url // empty" "$promos_file" 2>/dev/null)
-            ikey=$(jq -r ".promos[$i].installed_key // empty" "$promos_file" 2>/dev/null)
+            id=$($JQ -r ".promos[$i].id // empty" "$promos_file" 2>/dev/null)
+            text=$($JQ -r ".promos[$i].text // empty" "$promos_file" 2>/dev/null)
+            url=$($JQ -r ".promos[$i].url // empty" "$promos_file" 2>/dev/null)
+            ikey=$($JQ -r ".promos[$i].installed_key // empty" "$promos_file" 2>/dev/null)
             i=$((i + 1))
 
             if [ -z "$id" ] || [ -z "$text" ] || [ -z "$ikey" ]; then
@@ -1034,14 +1034,14 @@ if [ "$(config ".features.plugin_promos" true)" = "true" ]; then
             fi
 
             [ -n "$installed_ok" ] || continue
-            has_it=$(jq -r --arg k "$ikey" '.plugins[$k] // empty | length' "$installed_file" 2>/dev/null)
+            has_it=$($JQ -r --arg k "$ikey" '.plugins[$k] // empty | length' "$installed_file" 2>/dev/null)
             # A non-zero jq exit here (a version-2 file whose .plugins is not
             # the object the schema promises, say) must read as cannot-tell
             # for THIS entry, never as the empty-output shape that means
             # genuinely absent -- the same three-state rule the file/version
             # check above already enforces, extended to a query that can also
             # fail on well-formed-but-wrong-shaped JSON (review finding, #574).
-            if ! jq -r --arg k "$ikey" '.plugins[$k] // empty | length' "$installed_file" >/dev/null 2>&1; then
+            if ! $JQ -r --arg k "$ikey" '.plugins[$k] // empty | length' "$installed_file" >/dev/null 2>&1; then
                 continue
             fi
             case "$has_it" in ''|0) : ;; *) continue ;; esac
@@ -1630,7 +1630,7 @@ if [ -n "$_REMEMBER_CTX_OK" ]; then
     # regress. `cat`, never `$(cat …)`, so a trailing blank line the old
     # direct-print path always produced is not silently trimmed here.
     if [ -n "$PROMO_MSG" ] && command -v jq >/dev/null 2>&1; then
-        _REMEMBER_PROMO_JSON=$(jq -Rs --arg msg "$PROMO_MSG" \
+        _REMEMBER_PROMO_JSON=$($JQ -Rs --arg msg "$PROMO_MSG" \
             '{hookSpecificOutput:{hookEventName:"SessionStart",additionalContext:.},systemMessage:$msg}' \
             < "$_REMEMBER_CTX_FILE" 2>/dev/null) || _REMEMBER_PROMO_JSON=""
         # jq usage failure must not become this hook's status (same
