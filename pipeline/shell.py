@@ -133,6 +133,13 @@ def cmd_extract(session_id: str, project_dir: str) -> None:
     # every "unrecognised" case at the shape-sniffing function even when the
     # real answer is "the file could not be read at all".
     print(f"ENVELOPE_UNREADABLE={1 if r.envelope_unreadable else 0}")
+    # #556: ENVELOPE="unrecognised" with ENVELOPE_UNREADABLE=0 still collapses
+    # two different causes -- a file read to genuine exhaustion without ever
+    # naming a known host shape, and one that hit
+    # extract._ENVELOPE_SNIFF_SCAN_CAP and gave up before exhausting the
+    # file. Additive for the same reason as the two keys above: no current
+    # consumer reads this yet, but the distinction is on the bridge.
+    print(f"ENVELOPE_CAPPED={1 if r.envelope_capped else 0}")
 
 
 def cmd_build_prompt(

@@ -50,9 +50,10 @@ def test_bookkeeping_lines_before_the_first_message_are_skipped(tmp_path):
         '{"type": "user", "message": {"role": "user", "content": "hi"}, "sessionId": "s"}\n',
         encoding="utf-8",
     )
-    envelope, unreadable = sniff_file_envelope_status(str(path))
+    envelope, unreadable, capped = sniff_file_envelope_status(str(path))
     assert envelope == "claude-code"
     assert unreadable is False
+    assert capped is False
     assert sniff_file_envelope(str(path)) == "claude-code"
 
 
@@ -68,9 +69,10 @@ def test_bookkeeping_lines_before_a_codex_payload_are_skipped(tmp_path):
         '{"type": "session_meta", "payload": {"id": "abc"}}\n',
         encoding="utf-8",
     )
-    envelope, unreadable = sniff_file_envelope_status(str(path))
+    envelope, unreadable, capped = sniff_file_envelope_status(str(path))
     assert envelope == "codex"
     assert unreadable is False
+    assert capped is False
 
 
 def test_scan_cap_gives_up_before_a_resolving_line_past_it(tmp_path):
@@ -89,9 +91,12 @@ def test_scan_cap_gives_up_before_a_resolving_line_past_it(tmp_path):
     path = tmp_path / "past-the-cap.jsonl"
     path.write_text(unplaceable + resolving, encoding="utf-8")
 
-    envelope, unreadable = sniff_file_envelope_status(str(path))
+    envelope, unreadable, capped = sniff_file_envelope_status(str(path))
     assert envelope == "unrecognised"
     assert unreadable is False
+    # #556: this scan-cap case is now distinguishable from genuine
+    # exhaustion -- it must report capped, not merely "unrecognised".
+    assert capped is True
 
 
 def test_blank_and_malformed_lines_do_not_count_against_the_scan_cap(tmp_path):
@@ -108,9 +113,10 @@ def test_blank_and_malformed_lines_do_not_count_against_the_scan_cap(tmp_path):
     path = tmp_path / "noisy-but-within-cap.jsonl"
     path.write_text(noise + resolving, encoding="utf-8")
 
-    envelope, unreadable = sniff_file_envelope_status(str(path))
+    envelope, unreadable, capped = sniff_file_envelope_status(str(path))
     assert envelope == "claude-code"
     assert unreadable is False
+    assert capped is False
 
 
 def test_a_genuinely_foreign_file_still_reads_unrecognised(tmp_path):
@@ -126,7 +132,8 @@ def test_a_genuinely_foreign_file_still_reads_unrecognised(tmp_path):
         '{"kind": "totally-unrelated-tool", "data": [1, 2, 3]}\n',
         encoding="utf-8",
     )
-    envelope, unreadable = sniff_file_envelope_status(str(path))
+    envelope, unreadable, capped = sniff_file_envelope_status(str(path))
     assert envelope == "unrecognised"
     assert unreadable is False
+    assert capped is False
     assert sniff_file_envelope(str(path)) == "unrecognised"

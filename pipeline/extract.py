@@ -361,23 +361,35 @@ def count_lines(path: str) -> int:
 # giving up and calling the file "unrecognised" -- generous enough for any
 # realistic run of bookkeeping lines, small enough that a genuinely foreign
 # file still fails fast rather than reading to the end of a huge transcript.
+# Hitting this cap is reported as its own ``capped`` fact (#556) rather than
+# folded into genuine exhaustion -- see ``sniff_file_envelope_status()``.
 _ENVELOPE_SNIFF_SCAN_CAP = 50
 
 
-def sniff_file_envelope_status(path: str) -> tuple[str, bool]:
+def sniff_file_envelope_status(path: str) -> tuple[str, bool, bool]:
     """Which host wrote this transcript, plus whether it could be OPENED at
-    all (#478).
+    all (#478), plus whether "unrecognised" means the scan gave up at its
+    cap rather than genuinely exhausting the file (#556).
 
     Same sniff as ``sniff_file_envelope()`` -- see that docstring -- but
-    returned alongside a second fact: "unrecognised" covers two different
-    causes, and this call tells them apart. ``unreadable=True`` means the
-    file could not even be opened (an ``OSError`` -- a permission error, a
-    bad mount, a file that vanished between listing and open); ``False``
-    means the file WAS opened and every parseable line was inspected -- to
-    genuine exhaustion, to an entirely-empty file, or up to
-    ``_ENVELOPE_SNIFF_SCAN_CAP`` unplaceable lines (#543, below) -- and none
-    of them named a known host shape. The envelope string itself is always
-    "unrecognised" in both cases, matching ``sniff_file_envelope()``
+    returned alongside two more facts: "unrecognised" covers three different
+    causes, and this call tells them apart.
+
+    * ``unreadable=True`` means the file could not even be opened (an
+      ``OSError`` -- a permission error, a bad mount, a file that vanished
+      between listing and open).
+    * ``capped=True`` means the file WAS opened, but the scan gave up after
+      ``_ENVELOPE_SNIFF_SCAN_CAP`` parseable-but-unplaceable lines without
+      ever resolving -- a genuinely foreign run of bookkeeping-shaped lines
+      long enough to hit the cap, or (in principle) a resolving line that
+      exists past it and was never reached.
+    * Both ``False`` means the file was opened and read to genuine
+      exhaustion (or found empty) -- every parseable line was inspected,
+      well within the cap, and none of them named a known host shape.
+
+    ``unreadable`` and ``capped`` are never both true: a file that could not
+    be opened at all never reaches the scan. The envelope string itself is
+    always "unrecognised" in every case, matching ``sniff_file_envelope()``
     exactly, so a caller that only wants the old behaviour is unaffected.
 
     A parseable line that ``_host.sniff_envelope()`` cannot place (#543 --
@@ -392,8 +404,8 @@ def sniff_file_envelope_status(path: str) -> tuple[str, bool]:
     because no unplaceable line is ever allowed to decide the verdict.
 
     Returns:
-        ``(envelope, unreadable)`` where ``envelope`` is "claude-code",
-        "codex", or "unrecognised".
+        ``(envelope, unreadable, capped)`` where ``envelope`` is
+        "claude-code", "codex", or "unrecognised".
     """
     try:
         with open(path, encoding="utf-8", errors="replace") as f:
@@ -408,13 +420,13 @@ def sniff_file_envelope_status(path: str) -> tuple[str, bool]:
                     continue
                 envelope = _host.sniff_envelope(obj)
                 if envelope != "unrecognised":
-                    return envelope, False
+                    return envelope, False, False
                 scanned += 1
                 if scanned >= _ENVELOPE_SNIFF_SCAN_CAP:
-                    break
+                    return "unrecognised", False, True
     except OSError:
-        return "unrecognised", True
-    return "unrecognised", False
+        return "unrecognised", True, False
+    return "unrecognised", False, False
 
 
 def sniff_file_envelope(path: str) -> str:
@@ -622,7 +634,7 @@ def extract_session(
     # prevent.
     actual_id = session_id or os.path.basename(path).replace(".jsonl", "")
     total_lines = count_lines(path)
-    envelope, envelope_unreadable = sniff_file_envelope_status(path)
+    envelope, envelope_unreadable, envelope_capped = sniff_file_envelope_status(path)
 
     used_skip_lines = 0
     unread_sidecar_unreadable = False
@@ -670,6 +682,7 @@ def extract_session(
         skip_lines=used_skip_lines,
         unread_sidecar_unreadable=unread_sidecar_unreadable,
         envelope_unreadable=envelope_unreadable,
+        envelope_capped=envelope_capped,
     )
 
 

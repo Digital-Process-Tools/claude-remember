@@ -124,6 +124,16 @@ class ExtractResult:
             exhaustion (or found empty) and simply never contained a line
             naming a known host shape (#478). ``envelope`` is
             "unrecognised" in both cases; this is what tells them apart.
+        envelope_capped: True when ``envelope`` is "unrecognised" because
+            the scan gave up after ``extract._ENVELOPE_SNIFF_SCAN_CAP``
+            parseable-but-unplaceable lines, rather than because the file
+            was read to genuine exhaustion (or found empty) without ever
+            naming a known host shape (#556). Never true together with
+            ``envelope_unreadable`` -- a file that could not be opened
+            never reaches the scan -- and never true for a resolved
+            envelope. Lets a caller (``pipeline.haiku``'s fallback warning)
+            name the cap specifically instead of lumping it in with
+            "unrecognised shape".
     """
 
     exchanges: str = ""
@@ -135,6 +145,7 @@ class ExtractResult:
     skip_lines: int = 0
     unread_sidecar_unreadable: bool = False
     envelope_unreadable: bool = False
+    envelope_capped: bool = False
 
 
 @dataclass

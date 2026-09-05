@@ -38,9 +38,10 @@ def test_missing_file_is_unrecognised_and_flagged_unreadable(tmp_path):
     shape.
     """
     missing = str(tmp_path / "does-not-exist.jsonl")
-    envelope, unreadable = sniff_file_envelope_status(missing)
+    envelope, unreadable, capped = sniff_file_envelope_status(missing)
     assert envelope == "unrecognised"
     assert unreadable is True
+    assert capped is False
     # Old call site's contract is unchanged.
     assert sniff_file_envelope(missing) == "unrecognised"
 
@@ -56,9 +57,10 @@ def test_permission_denied_file_is_flagged_unreadable(tmp_path):
     path.write_text('{"type": "user"}\n', encoding="utf-8")
     path.chmod(0)
     try:
-        envelope, unreadable = sniff_file_envelope_status(str(path))
+        envelope, unreadable, capped = sniff_file_envelope_status(str(path))
         assert envelope == "unrecognised"
         assert unreadable is True
+        assert capped is False
     finally:
         path.chmod(stat.S_IWUSR | stat.S_IRUSR)
 
@@ -71,9 +73,10 @@ def test_a_readable_but_shapeless_file_is_not_flagged_unreadable(tmp_path):
     """
     path = tmp_path / "shapeless.jsonl"
     path.write_text('{"nothing": "recognisable"}\n', encoding="utf-8")
-    envelope, unreadable = sniff_file_envelope_status(str(path))
+    envelope, unreadable, capped = sniff_file_envelope_status(str(path))
     assert envelope == "unrecognised"
     assert unreadable is False
+    assert capped is False
 
 
 def test_an_empty_file_is_not_flagged_unreadable(tmp_path):
@@ -83,6 +86,7 @@ def test_an_empty_file_is_not_flagged_unreadable(tmp_path):
     """
     path = tmp_path / "empty.jsonl"
     path.write_text("", encoding="utf-8")
-    envelope, unreadable = sniff_file_envelope_status(str(path))
+    envelope, unreadable, capped = sniff_file_envelope_status(str(path))
     assert envelope == "unrecognised"
     assert unreadable is False
+    assert capped is False
