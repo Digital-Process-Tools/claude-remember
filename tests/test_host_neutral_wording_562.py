@@ -1,15 +1,23 @@
 """#562 -- README prose said "Claude Code" in sentences that are true of any
-coding agent this project supports (Claude Code, Codex), and said "Claude
-Remember" in prose after the first mention on a page where "Remember" reads
-better. Two wording rules, both host-neutral prose only -- no manifest, no
-install command, no path, no hook-event name is touched.
+coding agent this project supports (Claude Code, Codex), and #562 also asked
+to fold "Claude Remember" to "Remember" after a page's first mention, where
+a page had drifted from that convention. Two wording rules, both host-neutral
+prose only -- no manifest, no install command, no path, no hook-event name is
+touched.
 
-Would this test pass if nothing changed? No: every assertion below names an
-exact rewritten sentence that does not exist in the pre-#562 tree (confirmed
-against the base commit's README.md and docs/git-backup-security.md via
+Would this test pass if nothing changed? Almost every assertion below names
+an exact rewritten sentence that does not exist in the pre-#562 tree
+(confirmed against the base commit's README.md and four docs/ pages via
 `git show`), and separately asserts the narrow, Claude-Code-specific
-sentences the issue says must survive untouched still do.
-"""
+sentences the issue says must survive untouched still do. The one exception
+is test_readme_full_name_appears_once_then_short_name: on inspection every
+page already held "Claude Remember" at most once, so there was no page left
+to fold -- that function pins the already-correct convention as a regression
+guard rather than a red-before-green check, and its docstring says so rather
+than overclaiming, a distinction a reviewer had to point out because an
+earlier version of this docstring claimed every assertion here was
+red-before-green when this one was not (caught in self-review before #562's
+commit)."""
 
 from __future__ import annotations
 
@@ -20,6 +28,9 @@ README = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
 GIT_BACKUP_SECURITY = (REPO_ROOT / "docs" / "git-backup-security.md").read_text(encoding="utf-8")
 DIAGNOSTICS = (REPO_ROOT / "docs" / "diagnostics.md").read_text(encoding="utf-8")
 CONFIGURATION = (REPO_ROOT / "docs" / "configuration.md").read_text(encoding="utf-8")
+WINDOWS = (REPO_ROOT / "docs" / "windows.md").read_text(encoding="utf-8")
+EXTERNAL_STORAGE_MODE = (REPO_ROOT / "docs" / "external-storage-mode.md").read_text(encoding="utf-8")
+MEASURING_LOCK_HOLD_TIMES = (REPO_ROOT / "docs" / "measuring-lock-hold-times.md").read_text(encoding="utf-8")
 
 
 def test_readme_opening_paragraphs_are_host_neutral():
@@ -51,9 +62,37 @@ def test_readme_keeps_claude_code_where_the_sentence_is_claude_code_specific():
 
 
 def test_readme_full_name_appears_once_then_short_name():
-    """Full name on first mention per page, "Remember" after that (#562)."""
+    """Full name on first mention per page, "Remember" after that (#562).
+
+    This is a regression guard, not a red-before-green check: README.md
+    already held "Claude Remember" exactly once before #562, so there was
+    no second mention to fold here. It still catches a future page picking
+    the full name back up on a second mention."""
     assert README.count("Claude Remember") == 1
-    assert "Remember fixes that." in README or "Claude Remember fixes that." in README
+
+
+def test_readme_session_start_injection_is_host_neutral():
+    """The `SessionStart` hook is true of Claude Code and Codex alike (see
+    the hooks table further down README.md) -- the sentence introducing it
+    must not narrow "context" down to "Claude's context" specifically,
+    which would misdescribe a Codex install running a different model."""
+    assert "injects into your coding agent's context" in README
+    assert "injects into Claude's context" not in README
+
+
+def test_windows_hook_shell_wording_is_host_neutral():
+    assert "resolvable from the shell your coding agent launches hooks in" in WINDOWS
+    assert "resolvable from the shell Claude Code launches hooks in" not in WINDOWS
+
+
+def test_external_storage_mode_hook_environment_wording_is_host_neutral():
+    assert "in the environment your coding agent launches hooks in" in EXTERNAL_STORAGE_MODE
+    assert "in the environment Claude Code launches hooks in" not in EXTERNAL_STORAGE_MODE
+
+
+def test_measuring_lock_hold_times_hook_shell_wording_is_host_neutral():
+    assert "in the shell your coding agent launches hooks from" in MEASURING_LOCK_HOLD_TIMES
+    assert "in the shell Claude Code launches hooks from" not in MEASURING_LOCK_HOLD_TIMES
 
 
 def test_git_backup_security_says_coding_agent_for_the_general_trust_claim():

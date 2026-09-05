@@ -32,7 +32,7 @@ flowchart TD
 
 Each layer compresses the one above it. Raw exchanges become one-line summaries. Daily summaries become weekly paragraphs. The result: full context in minimal tokens.
 
-On session start, the `SessionStart` hook automatically injects into Claude's context:
+On session start, the `SessionStart` hook automatically injects into your coding agent's context:
 
 - `identity.md` — who the agent is
 - `remember.md` — the handoff note from the last session

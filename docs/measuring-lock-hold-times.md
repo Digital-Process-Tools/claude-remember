@@ -9,7 +9,7 @@ What #226 leaves open is structural, not a constant: taking the model call out f
 This is how to reproduce those numbers on a real machine, and how to answer the one question holds alone cannot — how often the wait actually runs out.
 
 ```bash
-export REMEMBER_LOCK_TIMING=1        # in the shell Claude Code launches hooks from
+export REMEMBER_LOCK_TIMING=1        # in the shell your coding agent launches hooks from
 # ...work normally for a day...
 scripts/lock-timing-report.sh
 ```
