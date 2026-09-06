@@ -896,8 +896,39 @@ if [ "$RUN_NDC" = true ]; then
                 # today-*.md as if it were a day summary. Not lost memory —
                 # corrupted memory, written into the permanent record with no
                 # log line. now.md is left intact so the next round retries.
-                if [ "$IS_SKIP" = "true" ] || [ "${IS_REJECTED:-false}" = "true" ]; then
-                    log "ndc" "REJECTED (provider: ${PROVIDER:-claude}; not a summary -- refusal or clarification): $(head -c 80 "$HAIKU_TEXT_FILE" 2>/dev/null)"
+                #
+                # #597: IS_REJECTED alone is not enough. DEFAULT_REJECT_PATTERN
+                # (pipeline/haiku.py) is anchored to English refusal stems, and
+                # #593 put the reply in the conversation's OWN language into
+                # now.md in ordinary use for the first time -- a Chinese,
+                # French, Spanish, German or Japanese refusal comes back with
+                # IS_REJECTED=false and would otherwise pass straight through
+                # here. Widening the pattern to more languages reproduces the
+                # same bug with a longer list, so the second gate checks SHAPE
+                # instead of content: compress-ndc.prompt.txt requires every
+                # genuine reply to open with a "## " header -- a single entry,
+                # a merged time-blocked range ("## 08:48-09:22 | branch", which
+                # the prompt explicitly asks the model to produce when several
+                # entries share a subject), or a whole-day header -- and no
+                # refusal opens that way in any language.
+                #
+                # Deliberately NOT ENTRY_HEADER_ERE (the summarize path's check
+                # a few hundred lines up, `^## HH:MM \|`): that shape demands
+                # exactly one HH:MM time, and the merged-range header the
+                # prompt asks for fails it on sight -- rejecting a CORRECT
+                # compression instead of a refusal, which is this same failure
+                # mode with the trigger swapped. The plain "## " check is the
+                # one thing every legitimate shape shares that no refusal does.
+                case "$(head -1 "$HAIKU_TEXT_FILE" 2>/dev/null)" in
+                    ('## '*) NDC_LOOKS_LIKE_HEADER=true ;;
+                    (*) NDC_LOOKS_LIKE_HEADER=false ;;
+                esac
+                if [ "$IS_SKIP" = "true" ] || [ "${IS_REJECTED:-false}" = "true" ] || [ "$NDC_LOOKS_LIKE_HEADER" = "false" ]; then
+                    if [ "$IS_SKIP" = "true" ] || [ "${IS_REJECTED:-false}" = "true" ]; then
+                        log "ndc" "REJECTED (provider: ${PROVIDER:-claude}; not a summary -- refusal or clarification): $(head -c 80 "$HAIKU_TEXT_FILE" 2>/dev/null)"
+                    else
+                        log "ndc" "REJECTED (not a header -- reply does not open with '## '): $(head -c 80 "$HAIKU_TEXT_FILE" 2>/dev/null)"
+                    fi
                     keep_rejected_text "$HAIKU_TEXT_FILE" "ndc"
                 elif [ -n "$NDC_TEXT" ]; then
                     # Under staging.lock, not save.lock and not nothing (#225).
