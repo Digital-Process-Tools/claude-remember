@@ -7,6 +7,92 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-09-06 — A cross-plugin promo ships behind a suppression control, and the release gate 3 audit that found it files three more non-blocking findings against the delta that carried it
+
+### Added
+
+- Added: a `systemMessage` cross-plugin promo at `SessionStart` (#574), naming one
+  sibling Digital-Process-Tools plugin (`supertool` or `claude-jit-context`) the
+  user has NOT already installed, checked against
+  `~/.claude/plugins/installed_plugins.json`. Copy lives in `promos.json` (beside
+  `config.example.json`), never in the hook script, so wording can change without
+  a shell edit. Emitted only from `SessionStart` -- never `SessionEnd`, never as
+  `additionalContext` -- because `systemMessage` is the one hook channel a human
+  sees and the model never does. Off switch: `features.plugin_promos` (default
+  `true`). Throttle: `cooldowns.promo_seconds` (default 604800, i.e. 7 days),
+  persisted per machine under `~/.remember/tmp/`, independent of any per-project
+  `data_dir`. An entry with no `url`, or whose rendered text would be too long, is
+  skipped and the skip is logged rather than silently rendered without the link.
+  A `cannot-tell` read of the installed-plugins file (absent, unreadable, or the
+  wrong schema version) suppresses the promo exactly like a confirmed install --
+  only a positive "not installed" ever speaks.
+
+- Added: a `.claude/jit-context` entry (`tools/00-manual/win32-skip-triage-entry.md`) that reminds, at write time, that a new module-level `pytestmark = pytest.mark.skipif(sys.platform == "win32", ...)` needs a `docs/windows-skip-triage.md` row in the same commit -- a `windows-latest` CI leg caught the omission twice in one session (#585, #588) before this existed (#589). `CONTRIBUTING.md` and `docs/windows-skip-triage.md` now both state the convention as a backstop for a write that does not go through `supertool` (native `Edit`/`Write`), which the jit-context entry cannot see into.
+- Audited `tests/test_path_resolution.py` for other instances of the same shape (#589) -- a docstring/comment promising an exclusion the code does not implement, with no positive-control test proving it fires. Found none beyond the `command -v jq` case already fixed in #574/#588: every other per-line exclusion in that file (`.remember/tmp` in the tmpdir scan, the whole-file `log.sh`/`detect-tools.sh`/`lib-env-cache.sh` omissions) is a plain, correctly-implemented containment check or omission, not a substring pattern that can quietly amnesty a real violation.
+
+- Session summary entries now follow the language of the conversation being summarized (issue #593).
+
+### Fixed
+
+- Fixed: an Antigravity turn made entirely of step `type`s `pipeline/host.py`'s
+  `_ANTIGRAVITY_STEP_ROLES` map does not yet know (a tool-call or reasoning step no
+  probe has captured live) extracted to 0 exchanges and advanced the saved position
+  *without* the #450 quarantine `scripts/save-session.sh` applies to an
+  `"unrecognised"` envelope -- an unmapped-but-present step read as a genuinely
+  quiet session and became unrecoverable the moment a later build learned that step
+  type (#575). `ExtractResult.envelope_has_unmapped_step` (threaded through
+  `pipeline.extract.extract_messages()`'s new `stats` parameter and
+  `pipeline.host.antigravity_step_is_unmapped()`) now flags exactly that case, and
+  `scripts/save-session.sh` routes it through the same quarantine path as an
+  unrecognised envelope, keyed under `"unrecognised"` in `unread-envelope.json`
+  even though the logged and reported envelope stays the honest `"antigravity"`
+  name. The map itself is still only `USER_INPUT`/`PLANNER_RESPONSE` -- filling it
+  in for a real tool-calling turn needs a human-run `agy --dangerously-skip-
+  permissions` session this fix does not have access to; what changed is that a gap
+  in the map can no longer silently lose data.
+
+- Hardened `scripts/agy-stop-hook.sh` against three related defects in its Antigravity Stop payload handling (#576, #578, #579): a `conversationId` shaped like a flag (e.g. `--force`) could reach `save-session.sh`'s argv unsanitised and be read as a flag rather than a session id, silently bypassing the cooldown and minimum-message gates; the four-field stdout protocol between the hook's JSON extractor and its shell reader had no protection against an embedded newline in one field shifting every field after it; and a trailing carriage return from a CRLF-writing `python3` on Windows/Git-Bash could survive into an extracted field. All three are now rejected/stripped at the point of entry, matching the sanitisation convention the sibling hooks already apply to their own stdin-sourced fields.
+
+- Fixed: `scripts/install_agy_hooks.py`'s shared-hooks command line now shell-quotes the plugin's install path with `shlex.quote()` instead of interpolating it inside a hand-written `bash "..."` wrapper (#577). A literal double quote in the install path previously broke the command outright, and double quotes still permit POSIX `$(...)` command substitution, so a path containing one was executed rather than treated as a literal filesystem path. The install path is the user's own checkout location, not remote-controlled, so this was low severity rather than blocking.
+
+- Fixed: `docs/windows.md` no longer states an absolute "N `_remember_forward_slash` call sites in total" count (#580). The number drifted stale for the second time -- it said 10 while a live grep on `main` counted 15, after the same drift already happened once (#524) -- so rather than adding a third guarded-total mechanism, the sentence is dropped entirely and the doc's existing per-issue breakdown, which already enumerates which issue fixed which call site, carries the story on its own.
+
+- Fixed: a MIXED Antigravity read span -- at least one mapped exchange
+  (`USER_INPUT`/`PLANNER_RESPONSE`) alongside at least one unmapped step type in the
+  same span -- exited `scripts/save-session.sh` with `EXCHANGE_COUNT > 0` and was
+  never routed through the #450/#575 quarantine at all: the unmapped step's content
+  was silently dropped, and if a prior quarantine mark existed for that session it
+  was cleared, because the ordinary successful-save path passes any value other than
+  `"unrecognised"` to `cmd_save_position()`, which reads that as "whatever was
+  quarantined has now been read" (#583). `$ENVELOPE_HAS_UNMAPPED_STEP` was
+  previously only consulted inside the script's `EXCHANGE_COUNT -eq 0` branch; a new
+  `save_position_span()` helper now applies the same check at every other
+  `save-position` call site -- the give-up-after-repeated-failures path, the
+  reject-not-an-entry-header path, the model SKIP path, and the ordinary successful
+  append -- so a mixed span quarantines exactly like an all-unmapped one, whatever
+  its own mapped exchanges' fate was. This accepts the same re-extraction/duplicate-
+  summary risk on a future recovery that #575 already accepted for the all-unmapped
+  case, rather than building real per-step-range tracking, which the issue itself
+  left as a larger, separate design decision.
+
+- Fixed: a non-English refusal from the NDC compression call passed the reject gate
+  unfiltered and was written into `today-*.md` as though it were a genuine day
+  summary, after which `now.md` was truncated over the entries that were supposed to
+  have been compressed -- gone, with no copy anywhere (#597). `DEFAULT_REJECT_PATTERN`
+  (`pipeline/haiku.py`) is anchored to English refusal stems, and writing the reply in
+  the conversation's own language (#593) put non-English text into that path for the
+  first time in ordinary use; `IS_REJECTED` alone gated the NDC branch, with no
+  fallback the way the summarize branch already had via `ENTRY_HEADER_ERE`.
+  `scripts/save-session.sh`'s NDC branch now also rejects any reply whose first line
+  does not open with a `"## "` header -- the one thing every genuine compression
+  shares (a single entry, a merged time-blocked range, or a whole-day header) that no
+  refusal produces in any language -- and treats it exactly like the existing
+  `IS_REJECTED` branch: kept at `tmp/rejected-*.md`, `now.md` left intact so the next
+  round retries. Deliberately not `ENTRY_HEADER_ERE` itself, which requires a single
+  `HH:MM` time and would reject a legitimate merged-range header
+  (`## 08:48-09:22 | branch`) that `compress-ndc.prompt.txt` explicitly asks the model
+  to produce.
+
 ## [0.28.0] - 2026-09-05 — Antigravity CLI capture ships, with the newline-delimited hook protocol's own hazards filed for follow-up
 
 ### Added
@@ -2164,7 +2250,8 @@ Fixes [#9](https://github.com/Digital-Process-Tools/claude-remember/issues/9), a
 
 ## [0.1.0] — Initial release
 
-[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.28.0...HEAD
+[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.29.0...HEAD
+[0.29.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.29.0
 [0.28.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.28.0
 [0.27.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.27.0
 [0.26.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.26.0
