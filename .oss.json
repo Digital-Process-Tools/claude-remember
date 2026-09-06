@@ -20,7 +20,15 @@
       "priority:low",
       "priority:medium"
     ],
-    "lanes": [],
+    "lanes": [
+      "lane-capture",
+      "lane-consolidation",
+      "lane-diagnostics",
+      "lane-hosts",
+      "lane-other",
+      "lane-paths",
+      "lane-storage"
+    ],
     "filed_by_loop": "filed-by-loop"
   },
   "milestones": [],
