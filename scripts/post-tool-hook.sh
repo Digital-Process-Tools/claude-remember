@@ -401,8 +401,23 @@ STDIN_SESSION_ID=$(_stdin_json_string session_id "$HOOK_STDIN" 2>/dev/null) || S
 # stdin is not more trustworthy than a basename. The id becomes both a path
 # component under capture-alive.d/ and a transcript filename, so it faces the
 # same guard the basename-derived id has always faced, at the point of entry.
+#
+# #610: this value also reaches save-session.sh's argv, unchanged, on the
+# background nohup save path below (`nohup "$SAVE_SCRIPT" "$SESSION_ID" ...
+# &`), and that script's own arg loop treats a leading-dash value as a FLAG
+# rather than a positional session id (`--dry) DRY_RUN=true ;;`) -- the
+# character class here has never excluded a leading dash, exactly the gap
+# #576/#600 already closed at the two sibling call sites
+# (agy-stop-hook.sh, session-end-hook.sh). Without `-*`, a session_id of
+# "--dry" passes this guard untouched and, paired with a real
+# transcript_path, is trusted by the STDIN_SESSION_ID_TRUSTED branch below
+# (which only checks that a transcript_path was given, not that this id
+# names it -- an established #468 trust decision this fix does not revisit)
+# -- silently turning a real delta-triggered save into a no-op dry-run
+# preview: no summary written, no position advanced, log line reads like an
+# ordinary run.
 case "$STDIN_SESSION_ID" in
-    ''|.|..|*[!A-Za-z0-9._-]*) STDIN_SESSION_ID="" ;;
+    ''|.|..|-*|*[!A-Za-z0-9._-]*) STDIN_SESSION_ID="" ;;
 esac
 
 # ── The transcript path the host handed us (#459, mirroring #407/#424) ────
