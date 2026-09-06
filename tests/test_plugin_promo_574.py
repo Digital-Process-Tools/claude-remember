@@ -145,6 +145,13 @@ class TestPromoOnlyWhenNotInstalled:
         # No systemMessage at all: plain-text output, byte-for-byte the old shape.
         assert not out.lstrip().startswith("{")
         assert "systemMessage" not in out
+        # Positive control (#602): both assertions above pass just as well if
+        # the hook printed nothing at all. `=== REMEMBER ===` is the history
+        # hint (prompts/session-history-hint.txt) printed unconditionally on
+        # every SessionStart run, on the plain-text path, after the promo
+        # decision -- its presence proves the hook actually ran this path
+        # rather than emitting nothing.
+        assert "=== REMEMBER ===" in out
 
     def test_cannot_tell_suppresses_like_installed(self, tmp_path):
         """installed_plugins.json absent -> cannot-tell -> no promo, ever.
@@ -154,10 +161,14 @@ class TestPromoOnlyWhenNotInstalled:
         """
         out, _home, _remember = _run(tmp_path, write_installed=False)
         assert "systemMessage" not in out
+        # Positive control (#602): see test_suppressed_when_key_present.
+        assert "=== REMEMBER ===" in out
 
     def test_wrong_version_is_cannot_tell(self, tmp_path):
         out, _home, _remember = _run(tmp_path, installed_keyed={}, installed_version="1")
         assert "systemMessage" not in out
+        # Positive control (#602): see test_suppressed_when_key_present.
+        assert "=== REMEMBER ===" in out
 
 
 class TestOffSwitch:
