@@ -407,8 +407,10 @@ STDIN_SESSION_ID=$(_stdin_json_string session_id "$HOOK_STDIN" 2>/dev/null) || S
 # &`), and that script's own arg loop treats a leading-dash value as a FLAG
 # rather than a positional session id (`--dry) DRY_RUN=true ;;`) -- the
 # character class here has never excluded a leading dash, exactly the gap
-# #576/#600 already closed at the two sibling call sites
-# (agy-stop-hook.sh, session-end-hook.sh). Without `-*`, a session_id of
+# #576 already closed at the sibling agy-stop-hook.sh call site (merged),
+# and #600 is fixing the same gap at session-end-hook.sh (PR #609, not yet
+# merged as of this commit -- do not read that sibling file as fixed until
+# it lands). Without `-*`, a session_id of
 # "--dry" passes this guard untouched and, paired with a real
 # transcript_path, is trusted by the STDIN_SESSION_ID_TRUSTED branch below
 # (which only checks that a transcript_path was given, not that this id

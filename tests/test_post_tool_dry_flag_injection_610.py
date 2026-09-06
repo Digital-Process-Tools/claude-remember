@@ -1,16 +1,17 @@
 """post-tool-hook.sh's STDIN_SESSION_ID guard lets a flag-shaped session_id
 reach save-session.sh's argv, unchanged, in the background nohup save path
 (#610 -- same class as #576/#600, a third call site neither of those two
-fixes reached).
+fixes reached. #576 (agy-stop-hook.sh) is merged; #600 (session-end-hook.sh)
+is fixed in PR #609, not yet merged as of this commit.)
 
 The character class at the point of entry (``[!A-Za-z0-9._-]``) has never
 excluded a *leading* dash, so a PostToolUse payload carrying
 ``session_id: "--dry"`` alongside a real, existing ``transcript_path`` passes
 the guard untouched. Once ``STDIN_TRANSCRIPT_PATH`` names a file that exists,
-the ``STDIN_SESSION_ID_TRUSTED`` branch (post-tool-hook.sh:549-557) asks only
+the ``STDIN_SESSION_ID_TRUSTED`` branch (post-tool-hook.sh:564-576) asks only
 whether *some* session id was supplied -- never whether that id actually
 names the resolved transcript -- so the untouched value is trusted and handed
-to ``nohup "$SAVE_SCRIPT" "$SESSION_ID" ... &`` (post-tool-hook.sh:893) as
+to ``nohup "$SAVE_SCRIPT" "$SESSION_ID" ... &`` (post-tool-hook.sh:908) as
 positional argument 1.
 
 save-session.sh's own arg loop (``--dry) DRY_RUN=true ;;``) reads a
@@ -173,11 +174,11 @@ def _save_log_text(remember: Path) -> str:
 def test_a_flag_shaped_session_id_must_not_turn_the_background_save_into_a_dry_run(tmp_path):
     """MUST NOT FIRE: the exploit. session_id="--dry" travels with a REAL,
     existing transcript_path -- exactly the payload shape the
-    STDIN_SESSION_ID_TRUSTED branch (post-tool-hook.sh:549-557) accepts on
+    STDIN_SESSION_ID_TRUSTED branch (post-tool-hook.sh:564-576) accepts on
     the strength of the transcript_path alone. Before the fix, this silently
     turns the delta-triggered background save into a `--dry` preview: no
     Haiku call, no summary, no advanced position -- the guard at
-    post-tool-hook.sh:404-406 must be the reason it no longer can."""
+    post-tool-hook.sh:419-421 must be the reason it no longer can."""
     home, project, remember, transcript, ledger = _setup(tmp_path)
     claude_bin = _fake_claude(tmp_path, ledger)
 
@@ -191,9 +192,10 @@ def test_a_flag_shaped_session_id_must_not_turn_the_background_save_into_a_dry_r
         "session_id=\"--dry\" reached save-session.sh's argv unrejected and "
         "was read as the --dry FLAG (not a positional session id), silently "
         "turning a real delta-triggered save into a no-op preview -- this is "
-        "the #610 guard gap: post-tool-hook.sh:404-406 must reject a "
-        "leading dash the same way #576/#600 already do at the two sibling "
-        f"call sites.\n\n--- save-session.sh log ---\n{log_text}"
+        "the #610 guard gap: post-tool-hook.sh:419-421 must reject a "
+        "leading dash the same way #576 already does (merged) and #600 will "
+        "once PR #609 merges "
+        f"at its own sibling call site.\n\n--- save-session.sh log ---\n{log_text}"
     )
     assert ledger.read_text().count("spawn") >= 1 if ledger.exists() else False, (
         "the crafted session_id did not trigger the dry-run banner, but also "
