@@ -496,11 +496,36 @@ MEMORY_LOG_FILE="${REMEMBER_LOG_DIR}/memory-${MEMORY_LOG_DATE}.log"
 # Output:
 #   Appends "HH:MM:SS [component] message" to daily log file.
 #   Falls back to stderr if log file is unwritable.
+#
+# Several callers (save-session.sh's NDC and header-validation paths, since
+# #593) embed the first bytes of a model's reply straight into $2 via `head
+# -c 80`, a byte-count cut with no regard for UTF-8 character boundaries.
+# That text is untrusted -- not controlled by this codebase -- and a raw
+# newline or carriage return inside it would land at column 0 of the log
+# file, reading as a second, forged log entry to anything parsing the log (a
+# person skimming it, or a script). Flattened here, once, rather than at each
+# of the (at least three) call sites that embed such text, so the class is
+# closed everywhere log() is used, not just at the newest one (#599).
+#
+# LC_ALL=C is not decoration: under the caller's own UTF-8 locale, a `head
+# -c 80` cut landing mid-multibyte-character hands tr a malformed sequence,
+# and BOTH GNU and BSD tr respond to that by printing "tr: Illegal byte
+# sequence" to stderr, exiting nonzero, and truncating their output at the
+# bad byte -- silently dropping everything after it inside this
+# already-unchecked $(...) (self-review, #599). Forcing the C locale makes
+# tr classify every byte 0-255 on its own, the same on GNU and BSD, so a
+# byte that is part of a multibyte character but is not itself one of the
+# ASCII control codes (0-31, 127) passes through untouched rather than
+# erroring -- the class this function exists to close (an embedded literal
+# newline/CR/tab, always single-byte in UTF-8) is still caught, and the
+# malformed tail from an unrelated truncation is preserved instead of
+# silently vanishing.
 log() {
     local component="$1"
     local message="$2"
     local timestamp
     timestamp=$(_remember_date +%H:%M:%S)
+    message="$(printf '%s' "$message" | LC_ALL=C tr '[:cntrl:]' ' ')"
     echo "${timestamp} [${component}] ${message}" >> "$MEMORY_LOG_FILE" 2>/dev/null \
         || echo "${timestamp} [${component}] ${message}" >&2
 }
