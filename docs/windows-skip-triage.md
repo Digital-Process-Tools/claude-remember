@@ -16,6 +16,13 @@ converted (`tests/test_hook_cwd_leak_417.py`, `tests/test_transcript_path_leak_4
 plus a fifth, `tests/test_autonomous_log_retention_487.py`, which adopted the
 same route for its own #487 rather than being converted by #432 itself.
 
+**Adding a new blanket win32 skip?** Add its row here in the same commit, not once a
+`windows-latest` CI leg catches the omission (#589; it already has, twice, in one
+session -- #585, #588). A `.claude/jit-context` entry
+(`tools/00-manual/win32-skip-triage-entry.md`) reminds of this convention when a
+`supertool` write introduces the `pytestmark` pattern; `CONTRIBUTING.md` states it too,
+for a contributor not routing writes through `supertool`.
+
 ## The count: 98, not 107 (and not the issue's original 92)
 
 The issue's own re-verified count -- `grep -rl "pytestmark = pytest.mark.skipif"
