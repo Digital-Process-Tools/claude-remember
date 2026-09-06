@@ -64,6 +64,7 @@ half-happened. A refusal from that block says so in as many words, on stderr,
 and does not claim CHANGELOG.md is untouched — which every other refusal here
 does claim, and means.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -76,8 +77,7 @@ from collections import Counter
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import (AbstractSet, Dict, Iterator, List, Optional, Sequence, Set,
-                    Tuple)
+from typing import AbstractSet, Dict, Iterator, List, Optional, Sequence, Set, Tuple
 
 try:
     import markdown_it as _markdown_it
@@ -90,6 +90,7 @@ else:
     _MD_IMPORT_ERROR = None
 
 _MD_VERSION = getattr(_markdown_it, "__version__", "unknown")
+
 
 def _find_repo_root(start: Path) -> Optional[Path]:
     """Walk upward from *start* for a `.git` entry -- a directory in an
@@ -149,7 +150,9 @@ SECTIONS = ("added", "changed", "deprecated", "removed", "fixed", "security")
 #: folded into the release and then deleted as consumed.
 _NAME_RE = re.compile(r"^(\d+)\.([a-z]+)(?:\.([A-Za-z0-9][A-Za-z0-9._-]*))?\.md\Z")
 
-_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+\Z")  # \Z, not $ (a POSIX filename may end in a newline)
+_VERSION_RE = re.compile(
+    r"^\d+\.\d+\.\d+\Z"
+)  # \Z, not $ (a POSIX filename may end in a newline)
 
 #: Not fragments, and not mistakes either — refusing these would make the
 #: directory unable to document itself.
@@ -186,7 +189,8 @@ VERDICTS = (BREAKING, COMPATIBLE)
 MUST_DECLARE = ("removed",)
 
 _COMPAT_LINE = re.compile(  # anchored-ok: matched per line of a fragment body; the newline is the delimiter
-    r"^\s*-\s+compatibility\s*:\s*(.*)$", re.IGNORECASE)
+    r"^\s*-\s+compatibility\s*:\s*(.*)$", re.IGNORECASE
+)
 
 _UNRELEASED_LINK_RE = re.compile(  # anchored-ok: matched per line of CHANGELOG.md; the newline is the delimiter
     r"^\[Unreleased\]:\s*(?P<base>\S+?)/compare/v(?P<prev>[0-9][^.\s]*(?:\.[^.\s]+)*)\.\.\.HEAD\s*$"
@@ -219,7 +223,8 @@ _UNRELEASED_ANY_LINK_RE = re.compile(r"^\[Unreleased\]:\s*(?P<url>\S+)\s*$")
 #: something to guess a base from, and that case is reported rather than
 #: patched over.
 _FORGE_BASE_RE = re.compile(
-    r"^(?P<base>\S+?)/(?:commits|commit|compare|tree|releases)(?:/\S*)?\Z")
+    r"^(?P<base>\S+?)/(?:commits|commit|compare|tree|releases)(?:/\S*)?\Z"
+)
 
 #: The guard and the reader are the same parser now.
 #:
@@ -305,42 +310,54 @@ _SCHEME_RE = re.compile(r"\A([A-Za-z][A-Za-z0-9+.\-]*):")
 #: author wrote.
 _DISCARDED_IN_URL = re.compile(r"%0[0-9aAdD]|%1[0-9a-fA-F]|%20|%7[fF]|[\x00-\x20\x7f]")
 
-_URL_SHAPE = ("a fragment's links may point at http, https, mailto or a path "
-              "inside this repository, and its images at a path inside this "
-              "repository only")
+_URL_SHAPE = (
+    "a fragment's links may point at http, https, mailto or a path "
+    "inside this repository, and its images at a path inside this "
+    "repository only"
+)
 
-_REMEDY_LINK = ("Write the destination as an http or https URL, or as a path "
-                "relative to the repository root. To *show* a scheme rather "
-                "than link with it, put it in backticks: CHANGELOG.md is "
-                "rendered by tools this repository does not choose, and a "
-                "scheme one renderer strips is live in the next one, so what "
-                "is inert where it was tested is not inert where it is read.")
+_REMEDY_LINK = (
+    "Write the destination as an http or https URL, or as a path "
+    "relative to the repository root. To *show* a scheme rather "
+    "than link with it, put it in backticks: CHANGELOG.md is "
+    "rendered by tools this repository does not choose, and a "
+    "scheme one renderer strips is live in the next one, so what "
+    "is inert where it was tested is not inert where it is read."
+)
 
-_REMEDY_REMOTE_IMAGE = ("Commit the image into this repository and reference it "
-                        "by relative path, or link to it instead of embedding "
-                        "it -- `[screenshot](https://...)` is allowed, because "
-                        "a link waits to be clicked and an image does not. The "
-                        "URL a pull request gives you for a dragged-in "
-                        "screenshot is off-repo and lands here.")
+_REMEDY_REMOTE_IMAGE = (
+    "Commit the image into this repository and reference it "
+    "by relative path, or link to it instead of embedding "
+    "it -- `[screenshot](https://...)` is allowed, because "
+    "a link waits to be clicked and an image does not. The "
+    "URL a pull request gives you for a dragged-in "
+    "screenshot is off-repo and lands here."
+)
 
-_REMEDY_DATA_IMAGE = ("A `data:` image is not remote, and that is the whole of "
-                      "what can be said for it: it is an unbounded opaque blob "
-                      "in a file whose diff is its review, so nobody reviewing "
-                      "the release can see what shipped. Commit the image and "
-                      "reference it by relative path.")
+_REMEDY_DATA_IMAGE = (
+    "A `data:` image is not remote, and that is the whole of "
+    "what can be said for it: it is an unbounded opaque blob "
+    "in a file whose diff is its review, so nobody reviewing "
+    "the release can see what shipped. Commit the image and "
+    "reference it by relative path."
+)
 
-_SHAPE = ("a fragment is `- ` bullets at column 0 plus lines indented under "
-          "them, and parsed as CommonMark it may hold no heading, no link ref "
-          "definition and no raw HTML at any depth")
+_SHAPE = (
+    "a fragment is `- ` bullets at column 0 plus lines indented under "
+    "them, and parsed as CommonMark it may hold no heading, no link ref "
+    "definition and no raw HTML at any depth"
+)
 
-_REMEDY = ("To show one in an entry, put it in a fenced code block at the "
-           "bullet's own indent (```), which is what every fenced example in "
-           "CHANGELOG.md already does — and close the fence at that same "
-           "indent, because a line reaching column 0 ends the bullet, the "
-           "fence and the list, whatever the fence was meant to be hiding. "
-           "Indenting further is not a remedy: inside a `- ` bullet an "
-           "indented line is still a live heading and a live definition, which "
-           "is what the advice this message used to give got wrong.")
+_REMEDY = (
+    "To show one in an entry, put it in a fenced code block at the "
+    "bullet's own indent (```), which is what every fenced example in "
+    "CHANGELOG.md already does — and close the fence at that same "
+    "indent, because a line reaching column 0 ends the bullet, the "
+    "fence and the list, whatever the fence was meant to be hiding. "
+    "Indenting further is not a remedy: inside a `- ` bullet an "
+    "indented line is still a live heading and a live definition, which "
+    "is what the advice this message used to give got wrong."
+)
 
 #: Said in full wherever a run cannot validate, because the alternative is a
 #: receipt with nothing behind it — which is the thing this file exists to
@@ -353,7 +370,8 @@ _NO_PARSER = (
     "anything it is about to report on. "
     "There is deliberately no text-scanning fallback: three of them shipped "
     "and all three were bypassed within one audit, so a "
-    "fallback here would be the same bug wearing a receipt.")
+    "fallback here would be the same bug wearing a receipt."
+)
 
 
 class CannotValidate(Exception):
@@ -411,7 +429,9 @@ def _scanning_parser():
     return _SCANNING_PARSER_INSTANCE
 
 
-def _flatten(tokens: Sequence, line: Optional[int] = None) -> Iterator[Tuple[object, int]]:
+def _flatten(
+    tokens: Sequence, line: Optional[int] = None
+) -> Iterator[Tuple[object, int]]:
     """Every token in document order, each with the nearest line it maps to.
 
     Inline tokens carry no map of their own, so they inherit their block's.
@@ -428,21 +448,24 @@ def _flatten(tokens: Sequence, line: Optional[int] = None) -> Iterator[Tuple[obj
 
 def _finding(name: str, number: int, what: str, line: str) -> str:
     """One refusal, naming the file, the line number, the shape and the remedy."""
-    return ("{0}:{1}: {2} — {3}. Inserted verbatim into CHANGELOG.md, this line "
-            "becomes one. {4} Line: {5}"
-            .format(name, number, what, _SHAPE, _REMEDY, line.strip()[:120]))
+    return (
+        "{0}:{1}: {2} — {3}. Inserted verbatim into CHANGELOG.md, this line "
+        "becomes one. {4} Line: {5}".format(
+            name, number, what, _SHAPE, _REMEDY, line.strip()[:120]
+        )
+    )
 
 
-def _url_finding(name: str, number: int, what: str, remedy: str,
-                 line: str) -> str:
+def _url_finding(name: str, number: int, what: str, remedy: str, line: str) -> str:
     """One refusal about where something points, rather than about shape.
 
     Separate from `_finding` because that one ends in advice about fenced code
     blocks and indentation, which answers nothing an author asked when their
     screenshot URL was turned away.
     """
-    return ("{0}:{1}: {2} — {3}. {4} Line: {5}"
-            .format(name, number, what, _URL_SHAPE, remedy, line.strip()[:120]))
+    return "{0}:{1}: {2} — {3}. {4} Line: {5}".format(
+        name, number, what, _URL_SHAPE, remedy, line.strip()[:120]
+    )
 
 
 def _line_of_reference(md, lines: Sequence[str], label: str) -> int:
@@ -464,7 +487,7 @@ def _line_of_reference(md, lines: Sequence[str], label: str) -> int:
         # where the parser happened to finish reading it.
         for start in range(count, 0, -1):
             env = {}
-            md.parse("\n".join(lines[start - 1:count]) + "\n", env)
+            md.parse("\n".join(lines[start - 1 : count]) + "\n", env)
             if label in env.get("references", {}):
                 return start
         return count
@@ -505,21 +528,36 @@ def _structure_findings(name: str, lines: Sequence[str], tokens: Sequence) -> Li
     top = [t for t in tokens if t.level == 0 and t.nesting >= 0]
     if len(top) != 1 or top[0].type != "bullet_list_open":
         at = top[1].map[0] + 1 if len(top) > 1 and top[1].map else 1
-        return [_finding(name, at,
-                         "a fragment whose top level is not a single `- ` bullet list",
-                         lines[at - 1] if at <= len(lines) else "")]
+        return [
+            _finding(
+                name,
+                at,
+                "a fragment whose top level is not a single `- ` bullet list",
+                lines[at - 1] if at <= len(lines) else "",
+            )
+        ]
     if top[0].markup != "-":
-        return [_finding(name, (top[0].map[0] + 1) if top[0].map else 1,
-                         "a list marked `{0}`, which `_entry_count` does not count"
-                         .format(top[0].markup),
-                         lines[top[0].map[0]] if top[0].map else "")]
+        return [
+            _finding(
+                name,
+                (top[0].map[0] + 1) if top[0].map else 1,
+                "a list marked `{0}`, which `_entry_count` does not count".format(
+                    top[0].markup
+                ),
+                lines[top[0].map[0]] if top[0].map else "",
+            )
+        ]
     for token in tokens:
         if token.type == "list_item_open" and token.level == 1 and token.map:
             if not lines[token.map[0]].startswith(_BULLET):
-                findings.append(_finding(
-                    name, token.map[0] + 1,
-                    "a top-level list item that does not begin `- `",
-                    lines[token.map[0]]))
+                findings.append(
+                    _finding(
+                        name,
+                        token.map[0] + 1,
+                        "a top-level list item that does not begin `- `",
+                        lines[token.map[0]],
+                    )
+                )
     return findings
 
 
@@ -553,23 +591,31 @@ def _destination_refusal(kind: str, url: str) -> Tuple[Optional[str], str]:
             return None, ""
         if shape == "scheme" and scheme == "data":
             return ("an image inlined as a `data:` URL", _REMEDY_DATA_IMAGE)
-        return ("an image loaded from off this repository (`{0}`), which every "
-                "reader of the release notes fetches, reporting themselves to "
-                "whoever serves it".format(shown), _REMEDY_REMOTE_IMAGE)
+        return (
+            "an image loaded from off this repository (`{0}`), which every "
+            "reader of the release notes fetches, reporting themselves to "
+            "whoever serves it".format(shown),
+            _REMEDY_REMOTE_IMAGE,
+        )
     if shape == "local" or (shape == "scheme" and scheme in _LINK_SCHEMES):
         return None, ""
     if shape == "network-relative":
-        return ("a link to a scheme-relative destination (`{0}`), which is off "
-                "this repository however the reader arrived at the file"
-                .format(shown), _REMEDY_LINK)
-    return ("a link with the `{0}:` scheme (`{1}`), which is not one of {2}"
-            .format(scheme, shown,
-                    ", ".join("`{0}`".format(s) for s in _LINK_SCHEMES)),
-            _REMEDY_LINK)
+        return (
+            "a link to a scheme-relative destination (`{0}`), which is off "
+            "this repository however the reader arrived at the file".format(shown),
+            _REMEDY_LINK,
+        )
+    return (
+        "a link with the `{0}:` scheme (`{1}`), which is not one of {2}".format(
+            scheme, shown, ", ".join("`{0}`".format(s) for s in _LINK_SCHEMES)
+        ),
+        _REMEDY_LINK,
+    )
 
 
-def _destination_findings(name: str, lines: Sequence[str],
-                          tokens: Sequence) -> List[str]:
+def _destination_findings(
+    name: str, lines: Sequence[str], tokens: Sequence
+) -> List[str]:
     """Findings for every link and image destination in the fragment."""
     findings: List[str] = []
     for token, at in _flatten(tokens):
@@ -581,9 +627,11 @@ def _destination_findings(name: str, lines: Sequence[str],
             continue
         what, remedy = _destination_refusal(kind, url)
         if what is not None:
-            findings.append(_url_finding(
-                name, at + 1, what, remedy,
-                lines[at] if at < len(lines) else ""))
+            findings.append(
+                _url_finding(
+                    name, at + 1, what, remedy, lines[at] if at < len(lines) else ""
+                )
+            )
     return findings
 
 
@@ -604,34 +652,48 @@ def scan_fragment_body(name: str, text: str) -> List[str]:
 
     if "\t" in text:
         at = next(i for i, line in enumerate(lines) if "\t" in line)
-        findings.append(_finding(
-            name, at + 1,
-            "a tab, which the shipped CHANGELOG.md contains none of and which "
-            "reaches a different column in every renderer",
-            lines[at]))
+        findings.append(
+            _finding(
+                name,
+                at + 1,
+                "a tab, which the shipped CHANGELOG.md contains none of and which "
+                "reaches a different column in every renderer",
+                lines[at],
+            )
+        )
 
     for token, at in _flatten(tokens):
         what = _REFUSABLE.get(token.type)
         if what is not None:
-            findings.append(_finding(name, at + 1, what,
-                                     lines[at] if at < len(lines) else ""))
+            findings.append(
+                _finding(name, at + 1, what, lines[at] if at < len(lines) else "")
+            )
         elif token.type == "fence" and not _fence_is_closed(lines, token):
-            findings.append(_finding(
-                name, at + 1,
-                "a fenced code block that is never closed at the indent it "
-                "opened, which swallows what follows it in CHANGELOG.md",
-                lines[at] if at < len(lines) else ""))
+            findings.append(
+                _finding(
+                    name,
+                    at + 1,
+                    "a fenced code block that is never closed at the indent it "
+                    "opened, which swallows what follows it in CHANGELOG.md",
+                    lines[at] if at < len(lines) else "",
+                )
+            )
 
     for label in env.get("references", {}):
         at = _line_of_reference(md, lines, label)
-        findings.append(_finding(
-            name, at,
-            "a link ref definition of `[{0}]` — the first definition of a "
-            "label is the one that resolves, and a fragment lands above the "
-            "genuine block at the bottom of the file".format(label),
-            lines[at - 1] if at <= len(lines) else ""))
+        findings.append(
+            _finding(
+                name,
+                at,
+                "a link ref definition of `[{0}]` — the first definition of a "
+                "label is the one that resolves, and a fragment lands above the "
+                "genuine block at the bottom of the file".format(label),
+                lines[at - 1] if at <= len(lines) else "",
+            )
+        )
 
     return sorted(set(findings), key=findings.index)
+
 
 OK, SKIPPED, REFUSED = 0, 1, 2
 
@@ -670,7 +732,9 @@ def parse_fragment_name(name: str) -> Fragment:
         raise BadFragment(
             f"{name}: unknown section {section!r} — expected one of: {', '.join(SECTIONS)}"
         )
-    return Fragment(issue=int(match.group(1)), section=section, slug=match.group(3) or "")
+    return Fragment(
+        issue=int(match.group(1)), section=section, slug=match.group(3) or ""
+    )
 
 
 #: How a body may name its own issue: `#NNN`, or a tracker URL ending in the
@@ -717,8 +781,10 @@ def self_reference_finding(name: str, text: str) -> Optional[str]:
         "{0}:{1}: the entry never names #{2} — the issue number is in the "
         "filename, and the release consumes the file, so nothing carries it "
         "into CHANGELOG.md. Write `(#{2})` into the entry — a link to the "
-        "issue counts too. Line: {3}"
-        .format(name, at, number, lines[at - 1] if at <= len(lines) else ""))
+        "issue counts too. Line: {3}".format(
+            name, at, number, lines[at - 1] if at <= len(lines) else ""
+        )
+    )
 
 
 def _has_reason(text: str) -> bool:
@@ -784,27 +850,35 @@ def compatibility_finding(name: str, section: str, text: str) -> Optional[str]:
                 "value nothing recognises never grades as compatible. The release "
                 "number is proposed from these fragments, so this stops the "
                 "proposal rather than defaulting quietly.".format(
-                    name, _echo(rest), _echo(head) or "an empty verdict",
-                    BREAKING, COMPATIBLE))
-        if not _has_reason(rest[len(head):]):
+                    name,
+                    _echo(rest),
+                    _echo(head) or "an empty verdict",
+                    BREAKING,
+                    COMPATIBLE,
+                )
+            )
+        if not _has_reason(rest[len(head) :]):
             return (
                 "{0}: `Compatibility: {1}` carries no reason — a bare verdict is "
                 "the same unsourced answer one field further along, and the "
                 "sentence is the part worth having. Write "
-                "`- Compatibility: {1} - <reason>`.".format(name, _echo(head)))
+                "`- Compatibility: {1} - <reason>`.".format(name, _echo(head))
+            )
         verdicts.add(word)
     if len(verdicts) > 1:
         return (
             "{0}: the fragment declares both `{1}` and `{2}` — nothing downstream "
             "can pick one, and reading the first would make the fragment's meaning "
-            "depend on the order of its bullets.".format(name, BREAKING, COMPATIBLE))
+            "depend on the order of its bullets.".format(name, BREAKING, COMPATIBLE)
+        )
     if not verdicts and section in MUST_DECLARE:
         return (
             "{0}: a `{1}` fragment must declare compatibility, as one more bullet "
             "in the body: `- Compatibility: {2}|{3} - <reason>`. Whether the "
             "removal breaks anything is the question the version number turns on, "
             "and a removal that declares nothing is read here rather than defaulted "
-            "to a quiet minor.".format(name, section, BREAKING, COMPATIBLE))
+            "to a quiet minor.".format(name, section, BREAKING, COMPATIBLE)
+        )
     return None
 
 
@@ -912,10 +986,11 @@ def _fragment_dir_state(directory: Path) -> Tuple[str, str]:
         if confirmed is False:
             return "unreadable", (
                 "the name is present in its parent's listing but stat "
-                "could not reach it: {0}".format(exc))
+                "could not reach it: {0}".format(exc)
+            )
         return "unreadable", (
-            "stat reported absence and nothing could confirm it: "
-            "{0}".format(exc))
+            "stat reported absence and nothing could confirm it: {0}".format(exc)
+        )
     except OSError as exc:
         return "unreadable", str(exc)
     except ValueError as exc:
@@ -935,7 +1010,8 @@ def collect(directory: Path) -> List[Fragment]:
     if state == "unreadable":
         raise CannotValidate(
             f"{directory}: could not determine whether the fragment "
-            f"directory exists — {detail}")
+            f"directory exists — {detail}"
+        )
     if state == "absent":
         raise BadFragment(f"{directory}: fragment directory does not exist")
 
@@ -957,7 +1033,9 @@ def collect(directory: Path) -> List[Fragment]:
             continue
         text = path.read_text(encoding="utf-8")
         if not text.strip():
-            findings.append(f"{path.name}: fragment is empty — an entry nobody would ever read")
+            findings.append(
+                f"{path.name}: fragment is empty — an entry nobody would ever read"
+            )
             continue
         # Ahead of the body scan, which is the arm that needs `markdown-it-py`:
         # this finding needs no parser, and a definite refusal must not be lost
@@ -1070,11 +1148,14 @@ def release_heading(version: str, date: str, title: Optional[str] = None) -> str
     return heading
 
 
-def render(fragments: Sequence[Fragment], version: str, date: str,
-           residue_preamble: Sequence[str] = (),
-           residue_sections: Sequence[Tuple[str, List[str]]] = (),
-           title: Optional[str] = None
-           ) -> Tuple[str, List[str]]:
+def render(
+    fragments: Sequence[Fragment],
+    version: str,
+    date: str,
+    residue_preamble: Sequence[str] = (),
+    residue_sections: Sequence[Tuple[str, List[str]]] = (),
+    title: Optional[str] = None,
+) -> Tuple[str, List[str]]:
     """The release section as text, and the heading lines it wrote.
 
     Sections in Keep a Changelog order; within each, the folded `[Unreleased]`
@@ -1145,8 +1226,9 @@ def _document_facts(text: str) -> Tuple[Counter, Dict[str, str], int]:
         if token.type == "heading_open":
             title = flat[index + 1].content if index + 1 < len(flat) else ""
             headings[(token.tag, title)] += 1
-    refs = {label: value.get("href")
-            for label, value in env.get("references", {}).items()}
+    refs = {
+        label: value.get("href") for label, value in env.get("references", {}).items()
+    }
     raw = sum(1 for token in flat if token.type in ("html_block", "html_inline"))
     return headings, refs, raw
 
@@ -1190,8 +1272,13 @@ def _headings(text: str) -> List[Tuple[int, str, str]]:
     found = []
     for index, token in enumerate(flat):
         if token.type == "heading_open" and token.map:
-            found.append((token.map[0], token.tag,
-                          flat[index + 1].content if index + 1 < len(flat) else ""))
+            found.append(
+                (
+                    token.map[0],
+                    token.tag,
+                    flat[index + 1].content if index + 1 < len(flat) else "",
+                )
+            )
     return found
 
 
@@ -1231,8 +1318,11 @@ def _crowded_headings(text: str) -> Set[str]:
     parser, so a fenced example of a release heading is not one of these.
     """
     lines = text.splitlines()
-    return {title for index, _, title in _headings(text)
-            if index and lines[index - 1].strip()}
+    return {
+        title
+        for index, _, title in _headings(text)
+        if index and lines[index - 1].strip()
+    }
 
 
 def _section_lines(section: str) -> List[str]:
@@ -1262,7 +1352,11 @@ def _anchor(headings: Sequence[Tuple[int, str, str]]) -> int:
     so it does.
     """
     for index, tag, title in headings:
-        if tag == "h2" and title.startswith("[") and not title.startswith("[Unreleased]"):
+        if (
+            tag == "h2"
+            and title.startswith("[")
+            and not title.startswith("[Unreleased]")
+        ):
             return index
     raise BadFragment(
         "CHANGELOG.md has no `## [x.y.z]` release heading to insert above — "
@@ -1270,9 +1364,9 @@ def _anchor(headings: Sequence[Tuple[int, str, str]]) -> int:
     )
 
 
-def _first_release_anchor(lines: Sequence[str],
-                          headings: Sequence[Tuple[int, str, str]],
-                          inert: Set[int]) -> int:
+def _first_release_anchor(
+    lines: Sequence[str], headings: Sequence[Tuple[int, str, str]], inert: Set[int]
+) -> int:
     """Where a *first* release section goes, when there is no release to
     insert above. Raises when the file's shape cannot defend a position.
 
@@ -1305,8 +1399,11 @@ def _first_release_anchor(lines: Sequence[str],
     the exact moment they are least able to tell a tool limitation from a
     mistake of their own.
     """
-    unreleased = [index for index, tag, title in headings
-                  if tag == "h2" and title.startswith("[Unreleased]")]
+    unreleased = [
+        index
+        for index, tag, title in headings
+        if tag == "h2" and title.startswith("[Unreleased]")
+    ]
     if not unreleased:
         raise BadFragment(
             "CHANGELOG.md has no `## [x.y.z]` release heading to insert above, "
@@ -1315,29 +1412,34 @@ def _first_release_anchor(lines: Sequence[str],
             "and it will not pick between the preamble, the blurb and the "
             "link-ref block. Add a `## [Unreleased]` heading and re-run: with "
             "no release heading anywhere, the first release is cut directly "
-            "below it.")
+            "below it."
+        )
     if len(unreleased) > 1:
         raise BadFragment(
             "CHANGELOG.md has no `## [x.y.z]` release heading to insert above "
             "and {0} `## [Unreleased]` headings (lines {1}) to cut a first "
             "release below, so which one it belongs under is a guess. Leave "
             "exactly one `## [Unreleased]` heading and re-run.".format(
-                len(unreleased), ", ".join(str(i + 1) for i in unreleased)))
+                len(unreleased), ", ".join(str(i + 1) for i in unreleased)
+            )
+        )
     start = unreleased[0]
-    ends = [index for index, tag, _ in headings
-            if index > start and tag in ("h1", "h2")]
+    ends = [
+        index for index, tag, _ in headings if index > start and tag in ("h1", "h2")
+    ]
     block = _link_ref_block(lines, inert)
     if block and block[0] > start:
         ends.append(block[0])
     return min(ends) if ends else len(lines)
 
 
-def _unreleased_span(lines: Sequence[str], headings: Sequence[Tuple[int, str, str]],
-                     anchor: int) -> Tuple[Optional[int], List[str]]:
+def _unreleased_span(
+    lines: Sequence[str], headings: Sequence[Tuple[int, str, str]], anchor: int
+) -> Tuple[Optional[int], List[str]]:
     """The `## [Unreleased]` heading's index and its body, above `anchor`."""
     for index, tag, title in headings:
         if index < anchor and tag == "h2" and title.startswith("[Unreleased]"):
-            return index, list(lines[index + 1:anchor])
+            return index, list(lines[index + 1 : anchor])
     return None, []
 
 
@@ -1364,8 +1466,7 @@ def _link_ref_block(lines: Sequence[str], inert: Set[int]) -> Optional[Tuple[int
     return (index + 1, end) if index + 1 <= end else None
 
 
-def _rewrite_links(lines: List[str], version: str
-                   ) -> Optional[Tuple[str, List[str]]]:
+def _rewrite_links(lines: List[str], version: str) -> Optional[Tuple[str, List[str]]]:
     """Point `[Unreleased]` at the new tag and add the new version's link ref.
 
     Scoped to the bottom link-ref block: this used to return on its
@@ -1394,8 +1495,10 @@ def _rewrite_links(lines: List[str], version: str
         base = match.group("base")
         lines[index] = "[Unreleased]: {0}/compare/v{1}...HEAD".format(base, version)
         lines.insert(index + 1, "[{0}]: {1}/releases/tag/v{0}".format(version, base))
-        return ("[Unreleased] -> compare/v{0}...HEAD, added [{0}] tag ref".format(version),
-                [lines[index], lines[index + 1]])
+        return (
+            "[Unreleased] -> compare/v{0}...HEAD, added [{0}] tag ref".format(version),
+            [lines[index], lines[index + 1]],
+        )
     return None
 
 
@@ -1421,8 +1524,9 @@ def _dominant_newline(raw: bytes) -> str:
     return "\r\n" if crlf and crlf * 2 > raw.count(b"\n") else "\n"
 
 
-def _unwritable_links_refusal(lines: Sequence[str], version: str
-                              ) -> Tuple[str, List[str]]:
+def _unwritable_links_refusal(
+    lines: Sequence[str], version: str
+) -> Tuple[str, List[str]]:
     """Why `_rewrite_links` wrote nothing, for a release that is not the first.
 
     Reaching here means the fold is about to add a `## [x.y.z]` heading with no
@@ -1448,20 +1552,26 @@ def _unwritable_links_refusal(lines: Sequence[str], version: str
     #: `[Unreleased]:` line leaves the old one in place beside the new: two
     #: definitions of one reference, which no parse reports, and the reader is
     #: shown whichever is read first.
-    add = ("add       `[Unreleased]: <repo>/compare/v<newest released "
-           "version>...HEAD` as the first line of the block at the bottom of "
-           "CHANGELOG.md, then re-run")
-    replace = ("replace   the `[Unreleased]:` line at the bottom of "
-               "CHANGELOG.md with `[Unreleased]: <repo>/compare/v<newest "
-               "released version>...HEAD` — replace it rather than adding a "
-               "second definition of the same reference, then re-run")
+    add = (
+        "add       `[Unreleased]: <repo>/compare/v<newest released "
+        "version>...HEAD` as the first line of the block at the bottom of "
+        "CHANGELOG.md, then re-run"
+    )
+    replace = (
+        "replace   the `[Unreleased]:` line at the bottom of "
+        "CHANGELOG.md with `[Unreleased]: <repo>/compare/v<newest "
+        "released version>...HEAD` — replace it rather than adding a "
+        "second definition of the same reference, then re-run"
+    )
 
     span = _link_ref_block(lines, _inert_lines("\n".join(lines)))
     remedy = add
     if span is None:
-        reason = ("CHANGELOG.md has no trailing link-reference block at all, so "
-                  "there is no `[Unreleased]` definition to advance and no "
-                  "repository URL to write `[{0}]` from".format(version))
+        reason = (
+            "CHANGELOG.md has no trailing link-reference block at all, so "
+            "there is no `[Unreleased]` definition to advance and no "
+            "repository URL to write `[{0}]` from".format(version)
+        )
     else:
         start, end = span
         current = None
@@ -1471,26 +1581,33 @@ def _unwritable_links_refusal(lines: Sequence[str], version: str
                 current = match.group("url")
                 break
         if current is None:
-            reason = ("the trailing link-reference block has no `[Unreleased]:` "
-                      "definition, so there is nothing to advance and no "
-                      "repository URL to write `[{0}]` from".format(version))
+            reason = (
+                "the trailing link-reference block has no `[Unreleased]:` "
+                "definition, so there is nothing to advance and no "
+                "repository URL to write `[{0}]` from".format(version)
+            )
         else:
-            reason = ("`[Unreleased]` resolves to {0}, which is not a "
-                      "`<repo>/compare/vX.Y.Z...HEAD` line — this rewrites that "
-                      "line and will not reshape one it does not recognise"
-                      .format(current))
+            reason = (
+                "`[Unreleased]` resolves to {0}, which is not a "
+                "`<repo>/compare/vX.Y.Z...HEAD` line — this rewrites that "
+                "line and will not reshape one it does not recognise".format(current)
+            )
             remedy = replace
-    return ("`## [{0}]` would have no link ref and would render as literal "
-            "bracketed text".format(version),
-            ["reason    " + reason,
-             remedy + ": this advances `[Unreleased]` to "
-             "`compare/v{0}...HEAD` and writes `[{0}]: "
-             "<repo>/releases/tag/v{0}` beside it".format(version),
-             "why       a heading with no definition behind it is not a broken "
-             "link, it is text that never looked like one — nobody reviewing "
-             "the rendered page sees a failure to click",
-             "untouched CHANGELOG.md was not written and no fragment was "
-             "consumed"])
+    return (
+        "`## [{0}]` would have no link ref and would render as literal "
+        "bracketed text".format(version),
+        [
+            "reason    " + reason,
+            remedy
+            + ": this advances `[Unreleased]` to "
+            "`compare/v{0}...HEAD` and writes `[{0}]: "
+            "<repo>/releases/tag/v{0}` beside it".format(version),
+            "why       a heading with no definition behind it is not a broken "
+            "link, it is text that never looked like one — nobody reviewing "
+            "the rendered page sees a failure to click",
+            "untouched CHANGELOG.md was not written and no fragment was consumed",
+        ],
+    )
 
 
 def _first_release_links(lines: List[str], version: str) -> Tuple[str, List[str]]:
@@ -1518,13 +1635,16 @@ def _first_release_links(lines: List[str], version: str) -> Tuple[str, List[str]
     """
     span = _link_ref_block(lines, _inert_lines("\n".join(lines)))
     if span is None:
-        return ("none — first release: CHANGELOG.md has no trailing "
-                "link-reference block, so there was no `[Unreleased]` "
-                "definition to take a repository URL from. Both "
-                "`[{0}]: <repo>/releases/tag/v{0}` and "
-                "`[Unreleased]: <repo>/compare/v{0}...HEAD` are missing, and "
-                "`## [{0}]` renders as literal bracketed text until they are "
-                "added".format(version), [])
+        return (
+            "none — first release: CHANGELOG.md has no trailing "
+            "link-reference block, so there was no `[Unreleased]` "
+            "definition to take a repository URL from. Both "
+            "`[{0}]: <repo>/releases/tag/v{0}` and "
+            "`[Unreleased]: <repo>/compare/v{0}...HEAD` are missing, and "
+            "`## [{0}]` renders as literal bracketed text until they are "
+            "added".format(version),
+            [],
+        )
     start, end = span
     for index in range(start, end + 1):
         match = _UNRELEASED_ANY_LINK_RE.match(lines[index])
@@ -1533,24 +1653,31 @@ def _first_release_links(lines: List[str], version: str) -> Tuple[str, List[str]
         url = match.group("url")
         base = _FORGE_BASE_RE.match(url)
         if not base:
-            return ("none — first release: `[Unreleased]` resolves to {0}, "
-                    "which has no `/commits/`, `/commit/`, `/compare/`, "
-                    "`/tree/` or `/releases/` segment to take a repository URL "
-                    "from, so "
-                    "nothing was rewritten and `## [{1}]` has no link ref — "
-                    "add `[{1}]: <repo>/releases/tag/v{1}`".format(url, version),
-                    [])
+            return (
+                "none — first release: `[Unreleased]` resolves to {0}, "
+                "which has no `/commits/`, `/commit/`, `/compare/`, "
+                "`/tree/` or `/releases/` segment to take a repository URL "
+                "from, so "
+                "nothing was rewritten and `## [{1}]` has no link ref — "
+                "add `[{1}]: <repo>/releases/tag/v{1}`".format(url, version),
+                [],
+            )
         root = base.group("base")
         lines[index] = "[Unreleased]: {0}/compare/v{1}...HEAD".format(root, version)
         lines.insert(index + 1, "[{0}]: {1}/releases/tag/v{0}".format(version, root))
-        return ("first release: [Unreleased] -> compare/v{0}...HEAD (it pointed "
-                "at {1}, there being no earlier tag to compare from), added "
-                "[{0}] tag ref".format(version, url),
-                [lines[index], lines[index + 1]])
-    return ("none — first release: the trailing link-reference block has no "
-            "`[Unreleased]:` definition to take a repository URL from, so "
-            "nothing was rewritten and `## [{0}]` has no link ref — add "
-            "`[{0}]: <repo>/releases/tag/v{0}`".format(version), [])
+        return (
+            "first release: [Unreleased] -> compare/v{0}...HEAD (it pointed "
+            "at {1}, there being no earlier tag to compare from), added "
+            "[{0}] tag ref".format(version, url),
+            [lines[index], lines[index + 1]],
+        )
+    return (
+        "none — first release: the trailing link-reference block has no "
+        "`[Unreleased]:` definition to take a repository URL from, so "
+        "nothing was rewritten and `## [{0}]` has no link ref — add "
+        "`[{0}]: <repo>/releases/tag/v{0}`".format(version),
+        [],
+    )
 
 
 # Versions with a `## [x.y.z]` section and no tag anywhere — nothing was ever
@@ -1607,7 +1734,7 @@ def _release_headings(text: str) -> List[Tuple[int, str, str]]:
     for index, tag, title in _headings(text):
         if tag != "h2" or not title.startswith("[") or "]" not in title:
             continue
-        label = title[1:title.index("]")]
+        label = title[1 : title.index("]")]
         if _VERSION_RE.match(label):
             found.append((index, label, title))
     return found
@@ -1639,14 +1766,15 @@ def heading_shape(heading: str) -> Tuple[str, str]:
     shape this script writes; `## [0.1.0] - Scaffold` is this repository's own
     oldest heading and is a title, correctly.
     """
-    rest = heading[heading.index("]") + 1:].strip() if "]" in heading else ""
+    rest = heading[heading.index("]") + 1 :].strip() if "]" in heading else ""
     rest = _HEADING_SEPARATOR_RE.sub("", rest, count=1).strip()
     if not rest:
         return "bare", ""
     match = _HEADING_DATE_RE.match(rest)
     if match:
         after = _HEADING_SEPARATOR_RE.sub(
-            "", rest[match.end():].strip(), count=1).strip()
+            "", rest[match.end() :].strip(), count=1
+        ).strip()
         if not after:
             return "dated", match.group(0)
         # `[x.y.z] - 2026-08-14 — A title`: what this script writes when it is
@@ -1672,14 +1800,17 @@ def _title_problem(title: str) -> Optional[str]:
     list of rules here that would drift from it.
     """
     if "\n" in title or "\r" in title:
-        return ("--title {0!r} contains a line break, and a Markdown heading "
-                "is one line — everything after the break would render as "
-                "body text under a heading nobody wrote".format(title))
+        return (
+            "--title {0!r} contains a line break, and a Markdown heading "
+            "is one line — everything after the break would render as "
+            "body text under a heading nobody wrote".format(title)
+        )
     return None
 
 
-def _title_receipt(title: Optional[str], heading: str,
-                   shape: Optional[Tuple[str, str]]) -> str:
+def _title_receipt(
+    title: Optional[str], heading: str, shape: Optional[Tuple[str, str]]
+) -> str:
     """One line saying which of the three declarations this fold was given,
     and what it read the file's own convention to be.
 
@@ -1693,25 +1824,31 @@ def _title_receipt(title: Optional[str], heading: str,
     if title:
         return "heading   `{0}` — from --title".format(heading)
     if shape is None:
-        return ("heading   `{0}` — the default. CHANGELOG.md holds no release "
-                "heading to read a title convention from, so none was inferred "
-                "— not the same as reading one and finding it plain"
-                .format(heading))
+        return (
+            "heading   `{0}` — the default. CHANGELOG.md holds no release "
+            "heading to read a title convention from, so none was inferred "
+            "— not the same as reading one and finding it plain".format(heading)
+        )
     kind, carried = shape
     carried_note = " (`{0}`)".format(carried) if carried else ""
     if title is not None:
-        return ("heading   `{0}` — --title '' declares this release "
-                "deliberately untitled. The newest release heading above it is "
-                "{1}{2}, and this is a decision recorded against it rather "
-                "than the flag being forgotten"
-                .format(heading, kind, carried_note))
-    return ("heading   `{0}` — the default, and the newest release heading "
-            "above it is {1}{2}, so no title convention was found to keep"
-            .format(heading, kind, carried_note))
+        return (
+            "heading   `{0}` — --title '' declares this release "
+            "deliberately untitled. The newest release heading above it is "
+            "{1}{2}, and this is a decision recorded against it rather "
+            "than the flag being forgotten".format(heading, kind, carried_note)
+        )
+    return (
+        "heading   `{0}` — the default, and the newest release heading "
+        "above it is {1}{2}, so no title convention was found to keep".format(
+            heading, kind, carried_note
+        )
+    )
 
 
-def audit_link_refs(text: str,
-                    untagged: Optional[AbstractSet[str]] = None) -> List[str]:
+def audit_link_refs(
+    text: str, untagged: Optional[AbstractSet[str]] = None
+) -> List[str]:
     """What the link-ref table at the bottom disagrees with the file about.
 
     The assembler writes one definition per cut, which keeps the *next* release
@@ -1730,7 +1867,8 @@ def audit_link_refs(text: str,
         raise CannotValidate(
             "no `## [x.y.z]` release heading was found, so there is nothing to "
             "audit the link refs against — 0 findings here would read as a "
-            "clean table rather than as a table nobody looked at.")
+            "clean table rather than as a table nobody looked at."
+        )
     _, refs, _ = _document_facts(text)
 
     findings: List[str] = []
@@ -1740,39 +1878,48 @@ def audit_link_refs(text: str,
             findings.append(
                 "[{0}] is declared as never tagged but has a link ref ({1}) — "
                 "one of the two is wrong, and a `releases/tag/v{0}` for a tag "
-                "that was never pushed is a 404 that reads as a working link"
-                .format(version, href))
+                "that was never pushed is a 404 that reads as a working link".format(
+                    version, href
+                )
+            )
         elif version not in declared and not href:
             findings.append(
                 "`## [{0}]` has no link ref, so it renders as literal bracketed "
                 "text instead of a link to the release — add "
-                "`[{0}]: <repo>/releases/tag/v{0}` to the block at the bottom"
-                .format(version))
+                "`[{0}]: <repo>/releases/tag/v{0}` to the block at the bottom".format(
+                    version
+                )
+            )
 
     present = set(versions)
     for version in sorted(declared - present):
         findings.append(
             "[{0}] is declared as never tagged but has no `## [{0}]` section in "
             "the file — a stale declaration is where a genuinely missing ref "
-            "gets filed away without anyone deciding to".format(version))
+            "gets filed away without anyone deciding to".format(version)
+        )
 
     unreleased = refs.get("UNRELEASED")
     if not unreleased:
         findings.append(
             "[Unreleased] has no link ref — the heading a reader clicks to see "
-            "what is pending links nowhere")
+            "what is pending links nowhere"
+        )
     else:
         match = _COMPARE_HREF_RE.search(unreleased)
         if not match:
             findings.append(
                 "[Unreleased] does not resolve to a `compare/vX.Y.Z...HEAD` "
-                "link: {0}".format(unreleased))
+                "link: {0}".format(unreleased)
+            )
         elif match.group("version") != versions[0]:
             findings.append(
                 "[Unreleased] compares from v{0} but the newest release section "
                 "is [{1}] — that link resolves and shows everything released "
                 "since v{0} as unreleased work".format(
-                    match.group("version"), versions[0]))
+                    match.group("version"), versions[0]
+                )
+            )
     return findings
 
 
@@ -1791,21 +1938,27 @@ def _untagged_receipt(untagged: Optional[AbstractSet[str]]) -> str:
     the repository that made it.
     """
     if untagged is None:
-        return ("untagged  (none declared) — no --untagged was passed, so every "
-                "`## [x.y.z]` section is expected to carry a link ref. That is "
-                "this run's default reading and not a statement anybody made")
+        return (
+            "untagged  (none declared) — no --untagged was passed, so every "
+            "`## [x.y.z]` section is expected to carry a link ref. That is "
+            "this run's default reading and not a statement anybody made"
+        )
     if not untagged:
-        return ("untagged  (declared empty) — --untagged was passed naming no "
-                "version: the caller states that every release section here was "
-                "tagged. Same audit as declaring nothing, and a different claim")
+        return (
+            "untagged  (declared empty) — --untagged was passed naming no "
+            "version: the caller states that every release section here was "
+            "tagged. Same audit as declaring nothing, and a different claim"
+        )
     versions = sorted(untagged)
-    return ("untagged  {0} — declared by the caller as having no tag, so no "
-            "`releases/tag/v...` link was expected for {1}"
-            .format(", ".join(versions), "them" if len(versions) > 1 else "it"))
+    return (
+        "untagged  {0} — declared by the caller as having no tag, so no "
+        "`releases/tag/v...` link was expected for {1}".format(
+            ", ".join(versions), "them" if len(versions) > 1 else "it"
+        )
+    )
 
 
-def check_links(changelog: Path,
-                untagged: Optional[AbstractSet[str]] = None) -> int:
+def check_links(changelog: Path, untagged: Optional[AbstractSet[str]] = None) -> int:
     """`--check-links`: audit the table, and say which of the three it did.
 
     *untagged* is the caller's `--untagged`, and it is the whole reason that
@@ -1827,8 +1980,10 @@ def check_links(changelog: Path,
     try:
         text = changelog.read_text(encoding="utf-8")
     except OSError as exc:
-        _receipt("skipped", "cannot read {0}: {1} — nothing was audited"
-                 .format(changelog, exc))
+        _receipt(
+            "skipped",
+            "cannot read {0}: {1} — nothing was audited".format(changelog, exc),
+        )
         return SKIPPED
     try:
         findings = audit_link_refs(text, declared)
@@ -1839,21 +1994,30 @@ def check_links(changelog: Path,
         # The count stays the count of findings. The declaration line is a
         # labelled note in the same shape the `--untagged` refusal already
         # uses, not a finding -- it is the context the findings are read in.
-        _receipt("refused", "{0} finding(s) in {1}'s link ref table"
-                 .format(len(findings), changelog.name),
-                 list(findings) + [declaration])
+        _receipt(
+            "refused",
+            "{0} finding(s) in {1}'s link ref table".format(
+                len(findings), changelog.name
+            ),
+            list(findings) + [declaration],
+        )
         return REFUSED
     versions = release_versions(text)
-    _receipt("ok", "{0} release section(s) in {1}, parsed with markdown-it-py "
-                   "{2}: each has a link ref or is declared untagged, and "
-                   "[Unreleased] compares from v{3}"
-             .format(len(versions), changelog.name, _MD_VERSION, versions[0]),
-             [declaration])
+    _receipt(
+        "ok",
+        "{0} release section(s) in {1}, parsed with markdown-it-py "
+        "{2}: each has a link ref or is declared untagged, and "
+        "[Unreleased] compares from v{3}".format(
+            len(versions), changelog.name, _MD_VERSION, versions[0]
+        ),
+        [declaration],
+    )
     return OK
 
 
-def _verify_written(before: str, after: str, emitted: Sequence[str],
-                    written_refs: Sequence[str]) -> List[str]:
+def _verify_written(
+    before: str, after: str, emitted: Sequence[str], written_refs: Sequence[str]
+) -> List[str]:
     """Re-parse the file about to be written and report what it gained.
 
     The second layer, and the reason there is one: a fragment is validated
@@ -1883,30 +2047,47 @@ def _verify_written(before: str, after: str, emitted: Sequence[str],
             "re-parse of the assembled file found {0} heading(s) this release "
             "did not write: {1}".format(
                 sum(surplus.values()),
-                ", ".join("<{0}>{1}".format(tag, title[:60])
-                          for tag, title in sorted(surplus))))
+                ", ".join(
+                    "<{0}>{1}".format(tag, title[:60]) for tag, title in sorted(surplus)
+                ),
+            )
+        )
     if after_refs != expected_refs:
         differing = sorted(set(after_refs) ^ set(expected_refs)) or sorted(
-            label for label in after_refs if after_refs[label] != expected_refs.get(label))
-        pre_existing = all(after_refs.get(label) == before_refs.get(label)
-                           for label in differing)
+            label
+            for label in after_refs
+            if after_refs[label] != expected_refs.get(label)
+        )
+        pre_existing = all(
+            after_refs.get(label) == before_refs.get(label) for label in differing
+        )
         findings.append(
             "re-parse of the assembled file found a link ref table this release "
             "did not write — label(s) {0}. First definition of a label wins, so a "
             "definition earlier in the file beats the block at the bottom that "
             "this release rewrites: {1}. {2}".format(
                 ", ".join(differing),
-                "; ".join("[{0}] resolves to {1}, this release wrote {2}".format(
-                    label, after_refs.get(label, "nothing"),
-                    expected_refs.get(label, "nothing")) for label in differing),
+                "; ".join(
+                    "[{0}] resolves to {1}, this release wrote {2}".format(
+                        label,
+                        after_refs.get(label, "nothing"),
+                        expected_refs.get(label, "nothing"),
+                    )
+                    for label in differing
+                ),
                 "That earlier definition is already in CHANGELOG.md and no "
                 "fragment introduced it — fix the file, then cut."
-                if pre_existing else
-                "A fragment consumed by this run introduced it."))
+                if pre_existing
+                else "A fragment consumed by this run introduced it.",
+            )
+        )
     if after_raw > before_raw:
         findings.append(
             "re-parse of the assembled file found {0} new raw HTML token(s), "
-            "which render as structure a reader will trust".format(after_raw - before_raw))
+            "which render as structure a reader will trust".format(
+                after_raw - before_raw
+            )
+        )
     gained = _disallowed_destinations(after) - _disallowed_destinations(before)
     if gained:
         findings.append(
@@ -1915,8 +2096,11 @@ def _verify_written(before: str, after: str, emitted: Sequence[str],
             "{1}. The per-fragment guard should have refused these; that it did "
             "not is itself the finding".format(
                 sum(gained.values()),
-                ", ".join("{0} -> {1}".format(kind, url[:80])
-                          for kind, url in sorted(gained))))
+                ", ".join(
+                    "{0} -> {1}".format(kind, url[:80]) for kind, url in sorted(gained)
+                ),
+            )
+        )
     crowded = sorted(_crowded_headings(after) - _crowded_headings(before))
     if crowded:
         findings.append(
@@ -1924,8 +2108,10 @@ def _verify_written(before: str, after: str, emitted: Sequence[str],
             "them, which a stricter Markdown parser folds into the paragraph "
             "before rather than rendering as a heading: {1}. The ones already "
             "in CHANGELOG.md are carried forward untouched — they already "
-            "shipped in tags".format(len(crowded), ", ".join(crowded)))
+            "shipped in tags".format(len(crowded), ", ".join(crowded))
+        )
     return findings
+
 
 def _line(stream, text: str) -> None:
     """Write one line to *stream* in a way a console cannot refuse.
@@ -1992,9 +2178,15 @@ def _alarm(lines: Sequence[str]) -> None:
         pass
 
 
-def assemble(changelog: Path, directory: Path, version: str, date: str,
-             dry_run: bool = False, keep: bool = False,
-             title: Optional[str] = None) -> int:
+def assemble(
+    changelog: Path,
+    directory: Path,
+    version: str,
+    date: str,
+    dry_run: bool = False,
+    keep: bool = False,
+    title: Optional[str] = None,
+) -> int:
     if not _VERSION_RE.match(version):
         _receipt("refused", "--version {0!r} is not x.y.z".format(version))
         return REFUSED
@@ -2002,8 +2194,7 @@ def assemble(changelog: Path, directory: Path, version: str, date: str,
     if title is not None:
         problem = _title_problem(title)
         if problem:
-            _receipt("refused", problem + " — CHANGELOG.md untouched, nothing "
-                                          "consumed")
+            _receipt("refused", problem + " — CHANGELOG.md untouched, nothing consumed")
             return REFUSED
 
     try:
@@ -2013,14 +2204,22 @@ def assemble(changelog: Path, directory: Path, version: str, date: str,
         return SKIPPED
     except BadFragment as exc:
         findings = str(exc).splitlines()
-        _receipt("refused", "{0} finding(s) — CHANGELOG.md untouched, nothing consumed"
-                 .format(len(findings)),
-                 ["{0}/{1}".format(directory.name, line) for line in findings])
+        _receipt(
+            "refused",
+            "{0} finding(s) — CHANGELOG.md untouched, nothing consumed".format(
+                len(findings)
+            ),
+            ["{0}/{1}".format(directory.name, line) for line in findings],
+        )
         return REFUSED
 
     if not fragments:
-        _receipt("skipped", "no fragments in {0}/ — nothing to assemble; "
-                            "CHANGELOG.md untouched".format(directory.name))
+        _receipt(
+            "skipped",
+            "no fragments in {0}/ — nothing to assemble; CHANGELOG.md untouched".format(
+                directory.name
+            ),
+        )
         return SKIPPED
 
     # Every other failure below answers in one of three states. This read did
@@ -2035,18 +2234,24 @@ def assemble(changelog: Path, directory: Path, version: str, date: str,
         raw = changelog.read_bytes()
         text = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
     except OSError as exc:
-        _receipt("skipped", "cannot read {0}: {1} — nothing was written, "
-                            "nothing consumed".format(changelog, exc),
-                 ["a changelog this script can assemble into needs a "
-                  "`## [Unreleased]` heading. With one or more `## [x.y.z]` "
-                  "release headings below it the new section is inserted above "
-                  "the newest of them; with none, this is a first release and "
-                  "the section is cut directly below `## [Unreleased]`",
-                  "what it will not do is guess: with no `## [Unreleased]` "
-                  "heading there is no position in the file it can defend, and "
-                  "it refuses rather than picking one. Seeding a release "
-                  "section for a version that never shipped is no longer the "
-                  "way to cut a first release, and never was a good one"])
+        _receipt(
+            "skipped",
+            "cannot read {0}: {1} — nothing was written, nothing consumed".format(
+                changelog, exc
+            ),
+            [
+                "a changelog this script can assemble into needs a "
+                "`## [Unreleased]` heading. With one or more `## [x.y.z]` "
+                "release headings below it the new section is inserted above "
+                "the newest of them; with none, this is a first release and "
+                "the section is cut directly below `## [Unreleased]`",
+                "what it will not do is guess: with no `## [Unreleased]` "
+                "heading there is no position in the file it can defend, and "
+                "it refuses rather than picking one. Seeding a release "
+                "section for a version that never shipped is no longer the "
+                "way to cut a first release, and never was a good one",
+            ],
+        )
         return SKIPPED
     lines = text.splitlines()
 
@@ -2062,10 +2267,15 @@ def assemble(changelog: Path, directory: Path, version: str, date: str,
     # `line.startswith("## [")`
     # both answer a question about characters when the question is about
     # structure. The parser is asked instead.
-    if any(tag == "h2" and title.startswith("[{0}]".format(version))
-           for _, tag, title in headings):
-        _receipt("refused", "CHANGELOG.md already has a `## [{0}]` section — "
-                            "assembling again would duplicate a release heading".format(version))
+    if any(
+        tag == "h2" and title.startswith("[{0}]".format(version))
+        for _, tag, title in headings
+    ):
+        _receipt(
+            "refused",
+            "CHANGELOG.md already has a `## [{0}]` section — "
+            "assembling again would duplicate a release heading".format(version),
+        )
         return REFUSED
 
     # Three states here, not two. A repo with releases has an unambiguous
@@ -2110,46 +2320,62 @@ def assemble(changelog: Path, directory: Path, version: str, date: str,
     previous = _release_headings(text)
     shape = heading_shape(previous[0][2]) if previous else None
     if title is None and shape is not None and shape[0] == "titled":
-        _receipt("refused",
-                 "CHANGELOG.md's newest release heading carries a title and "
-                 "this fold was given none — CHANGELOG.md untouched, nothing "
-                 "consumed",
-                 ["read      `## {0}` on line {1}, whose text after the version "
-                  "is {2!r}".format(previous[0][2], previous[0][0] + 1, shape[1]),
-                  "pass      --title '<what this release is about>' to write "
-                  "one, and `{0}` is what you would get"
-                  .format(release_heading(version, date, "…")),
-                  "or        --title '' to declare this release deliberately "
-                  "untitled. An empty title is a decision and the receipt "
-                  "records it as one; omitting the flag is not a decision, "
-                  "which is why it is refused here rather than defaulted "
-                  "through to `{0}`".format(release_heading(version, date)),
-                  "why       the plain heading would be written, the fold "
-                  "would succeed, and the break would be visible only to "
-                  "somebody reading the heading against the four above it"])
+        _receipt(
+            "refused",
+            "CHANGELOG.md's newest release heading carries a title and "
+            "this fold was given none — CHANGELOG.md untouched, nothing "
+            "consumed",
+            [
+                "read      `## {0}` on line {1}, whose text after the version "
+                "is {2!r}".format(previous[0][2], previous[0][0] + 1, shape[1]),
+                "pass      --title '<what this release is about>' to write "
+                "one, and `{0}` is what you would get".format(
+                    release_heading(version, date, "…")
+                ),
+                "or        --title '' to declare this release deliberately "
+                "untitled. An empty title is a decision and the receipt "
+                "records it as one; omitting the flag is not a decision, "
+                "which is why it is refused here rather than defaulted "
+                "through to `{0}`".format(release_heading(version, date)),
+                "why       the plain heading would be written, the fold "
+                "would succeed, and the break would be visible only to "
+                "somebody reading the heading against the four above it",
+            ],
+        )
         return REFUSED
 
-    section, emitted = render(fragments, version, date, preamble,
-                              residue_sections, title)
+    section, emitted = render(
+        fragments, version, date, preamble, residue_sections, title
+    )
 
     # Arithmetic, not trust: every entry on either side has to be in the result.
     # A merge that dropped one would otherwise be indistinguishable from a clean
     # run, which is the whole failure mode this file is built against.
     expected = folded + sum(
         _entry_count(f.path.read_text(encoding="utf-8").splitlines())
-        for f in fragments if f.path)
+        for f in fragments
+        if f.path
+    )
     produced = _entry_count(section.splitlines())
     if produced != expected:
-        _receipt("refused", "entry count does not balance: {0} folded + fragments = {1} "
-                            "expected, {2} produced — refusing to write a lossy changelog"
-                 .format(folded, expected, produced))
+        _receipt(
+            "refused",
+            "entry count does not balance: {0} folded + fragments = {1} "
+            "expected, {2} produced — refusing to write a lossy changelog".format(
+                folded, expected, produced
+            ),
+        )
         return REFUSED
 
     if unreleased_at is None:
         body = list(lines[:anchor]) + _section_lines(section) + list(lines[anchor:])
     else:
-        body = (list(lines[:unreleased_at + 1]) + [""] + _section_lines(section)
-                + list(lines[anchor:]))
+        body = (
+            list(lines[: unreleased_at + 1])
+            + [""]
+            + _section_lines(section)
+            + list(lines[anchor:])
+        )
     if first_release and anchor >= len(lines):
         # Nothing followed `[Unreleased]`, so the section is now the tail of the
         # file and `_section_lines`' trailing blank would become a trailing blank
@@ -2177,17 +2403,25 @@ def assemble(changelog: Path, directory: Path, version: str, date: str,
         _receipt("skipped", "{0} CHANGELOG.md untouched".format(exc))
         return SKIPPED
     if structural:
-        _receipt("refused", "{0} finding(s) in the assembled file — CHANGELOG.md "
-                            "untouched, nothing consumed".format(len(structural)),
-                 structural)
+        _receipt(
+            "refused",
+            "{0} finding(s) in the assembled file — CHANGELOG.md "
+            "untouched, nothing consumed".format(len(structural)),
+            structural,
+        )
         return REFUSED
 
     details = [
         _title_receipt(title, emitted[0], shape),
         "consumed  " + ", ".join(f.path.name for f in fragments if f.path),
-        "sections  " + ", ".join(
-            "{0} ({1})".format(name.capitalize(), sum(1 for f in fragments if f.section == name))
-            for name in SECTIONS if any(f.section == name for f in fragments)),
+        "sections  "
+        + ", ".join(
+            "{0} ({1})".format(
+                name.capitalize(), sum(1 for f in fragments if f.section == name)
+            )
+            for name in SECTIONS
+            if any(f.section == name for f in fragments)
+        ),
     ]
     if first_release:
         # Two lines, not one, and the second is the load-bearing half.
@@ -2213,39 +2447,50 @@ def assemble(changelog: Path, directory: Path, version: str, date: str,
         # receipt names the source it read, names the second source it did not,
         # and says what to do with it — at the moment of the claim, which is
         # where a limit is worth a sentence and a doc is not.
-        details.insert(0, (
-            "first     no `## [x.y.z]` release heading in CHANGELOG.md, so this "
-            "is its first release: the section was inserted directly below the "
-            "`## [Unreleased]` heading on line {0}, the one position in the file "
-            "this script can defend. Detected, not assumed — a single existing "
-            "release heading would have anchored it instead."
-        ).format(unreleased_at + 1))
-        details.insert(1, (
-            "source    CHANGELOG.md, and nothing else. This script is handed a "
-            "file rather than a repository, so `git tag` is a second source it "
-            "does not read: a changelog rewritten, truncated or regenerated by "
-            "hand while tags exist has exactly this shape and is cut here "
-            "rather than refused. Before you push this, check that `git tag` "
-            "lists no release — if it lists one, this is not a first release "
-            "and the section is in the wrong place."
-        ))
+        details.insert(
+            0,
+            (
+                "first     no `## [x.y.z]` release heading in CHANGELOG.md, so this "
+                "is its first release: the section was inserted directly below the "
+                "`## [Unreleased]` heading on line {0}, the one position in the file "
+                "this script can defend. Detected, not assumed — a single existing "
+                "release heading would have anchored it instead."
+            ).format(unreleased_at + 1),
+        )
+        details.insert(
+            1,
+            (
+                "source    CHANGELOG.md, and nothing else. This script is handed a "
+                "file rather than a repository, so `git tag` is a second source it "
+                "does not read: a changelog rewritten, truncated or regenerated by "
+                "hand while tags exist has exactly this shape and is cut here "
+                "rather than refused. Before you push this, check that `git tag` "
+                "lists no release — if it lists one, this is not a first release "
+                "and the section is in the wrong place."
+            ),
+        )
     if links:
         details.append("links     " + links)
     else:
-        details.append("links     none — no `[Unreleased]: .../compare/vX...HEAD` line found "
-                       "in the trailing definition block, so the link refs were left alone")
+        details.append(
+            "links     none — no `[Unreleased]: .../compare/vX...HEAD` line found "
+            "in the trailing definition block, so the link refs were left alone"
+        )
     if folded:
         details.append(
             "folded    {0} entr{1} from `## [Unreleased]` into [{2}], above the fragments. "
-            "The heading stays as the compare-link anchor; its body is now empty."
-            .format(folded, "y" if folded == 1 else "ies", version))
+            "The heading stays as the compare-link anchor; its body is now empty.".format(
+                folded, "y" if folded == 1 else "ies", version
+            )
+        )
     else:
         details.append("folded    0 — `## [Unreleased]` was already empty")
     details.append(
         "verified  the assembled file was re-parsed with markdown-it-py {0}: its "
         "headings are the ones already there plus the {1} this run wrote, its link "
         "ref table is the one already there plus what this run wrote, and it gained "
-        "no raw HTML".format(_MD_VERSION, len(emitted)))
+        "no raw HTML".format(_MD_VERSION, len(emitted))
+    )
 
     if dry_run:
         # `emitted[0]`, not a second `"## [{0}] - {1}"` formatted here. This
@@ -2253,8 +2498,13 @@ def assemble(changelog: Path, directory: Path, version: str, date: str,
         # second author of what a release heading looks like — so with a title
         # it would have quoted a heading the fold was not about to write, in a
         # mode whose entire job is to say what the fold would do.
-        _receipt("ok", "dry-run: {0} fragment(s) would become `{1}`; nothing "
-                       "written".format(len(fragments), emitted[0]), details)
+        _receipt(
+            "ok",
+            "dry-run: {0} fragment(s) would become `{1}`; nothing written".format(
+                len(fragments), emitted[0]
+            ),
+            details,
+        )
         return OK
 
     # ------------------------------------------------------------------
@@ -2285,8 +2535,9 @@ def assemble(changelog: Path, directory: Path, version: str, date: str,
         # arrived on `Path.write_text` in 3.10 and this file runs on 3.9.
         # Without it the platform decides, and the platform is not what the
         # file on disk already said.
-        with changelog.open("w", encoding="utf-8",
-                            newline=_dominant_newline(raw)) as handle:
+        with changelog.open(
+            "w", encoding="utf-8", newline=_dominant_newline(raw)
+        ) as handle:
             handle.write(assembled)
         wrote = True
         if not keep:
@@ -2294,12 +2545,18 @@ def assemble(changelog: Path, directory: Path, version: str, date: str,
                 if frag.path:
                     frag.path.unlink()
                     removed += 1
-            details.append("removed   {0} fragment file(s) from {1}/"
-                           .format(len(fragments), directory.name))
+            details.append(
+                "removed   {0} fragment file(s) from {1}/".format(
+                    len(fragments), directory.name
+                )
+            )
         else:
-            details.append("kept      --keep: {0} fragment file(s) left in {1}/ — they will ship "
-                           "twice if the next release also consumes them"
-                           .format(len(fragments), directory.name))
+            details.append(
+                "kept      --keep: {0} fragment file(s) left in {1}/ — they will ship "
+                "twice if the next release also consumes them".format(
+                    len(fragments), directory.name
+                )
+            )
 
         # `emitted[0]` for the same reason the dry run uses it, and more so:
         # this is the only line that reports the mutation, printed after
@@ -2307,8 +2564,13 @@ def assemble(changelog: Path, directory: Path, version: str, date: str,
         # heading here a second time made it name a heading that is not in the
         # file it had just written -- the receipt disagreeing with the tree it
         # exists to describe.
-        _receipt("ok", "{0} fragment(s) -> `{1}` in {2}"
-                 .format(len(fragments), emitted[0], changelog.name), details)
+        _receipt(
+            "ok",
+            "{0} fragment(s) -> `{1}` in {2}".format(
+                len(fragments), emitted[0], changelog.name
+            ),
+            details,
+        )
         # Flushed inside the guard on purpose. A receipt that only reached a
         # buffer has not been delivered, and a pipe that closed under it
         # raises when the interpreter flushes at shutdown -- after the exit
@@ -2322,28 +2584,38 @@ def assemble(changelog: Path, directory: Path, version: str, date: str,
         # disk on the redirect, would have produced a confident sentence about
         # a file that was never written. Reporting a mutation that did not
         # happen is the same defect as denying one that did.
-        _alarm([
-            "assemble    : refused     ({0}: {1}: {2})".format(
-                "this run changed the tree and then could not report it"
-                if wrote or removed else
-                "this run could not complete and cannot prove it changed "
-                "nothing",
-                type(exc).__name__, exc),
-            "  written   " + (
-                "{0} now holds `## [{1}] - {2}`".format(changelog, version, date)
-                if wrote else
-                "the write to {0} did not complete. Whether it holds the "
-                "release, a truncated file or the original is not established "
-                "here -- read it before anything else".format(changelog)),
-            "  fragments " + (
-                "left in place (--keep)" if keep else
-                "{0} of {1} consumed fragment(s) deleted from {2}/".format(
-                    removed, len(fragments), directory.name)),
-            "  exit      refused, not skipped. Skipped means the tree is "
-            "untouched, and this run cannot prove that. Read the two paths "
-            "above, then either commit the cut or restore both from git; "
-            "re-running is not the move.",
-        ])
+        _alarm(
+            [
+                "assemble    : refused     ({0}: {1}: {2})".format(
+                    "this run changed the tree and then could not report it"
+                    if wrote or removed
+                    else "this run could not complete and cannot prove it changed "
+                    "nothing",
+                    type(exc).__name__,
+                    exc,
+                ),
+                "  written   "
+                + (
+                    "{0} now holds `## [{1}] - {2}`".format(changelog, version, date)
+                    if wrote
+                    else "the write to {0} did not complete. Whether it holds the "
+                    "release, a truncated file or the original is not established "
+                    "here -- read it before anything else".format(changelog)
+                ),
+                "  fragments "
+                + (
+                    "left in place (--keep)"
+                    if keep
+                    else "{0} of {1} consumed fragment(s) deleted from {2}/".format(
+                        removed, len(fragments), directory.name
+                    )
+                ),
+                "  exit      refused, not skipped. Skipped means the tree is "
+                "untouched, and this run cannot prove that. Read the two paths "
+                "above, then either commit the cut or restore both from git; "
+                "re-running is not the move.",
+            ]
+        )
         return REFUSED
     return OK
 
@@ -2361,8 +2633,11 @@ def check(directory: Path) -> int:
         return SKIPPED
     except BadFragment as exc:
         findings = str(exc).splitlines()
-        _receipt("refused", "{0} fragment(s) will not assemble".format(len(findings)),
-                 ["{0}/{1}".format(directory.name, line) for line in findings])
+        _receipt(
+            "refused",
+            "{0} fragment(s) will not assemble".format(len(findings)),
+            ["{0}/{1}".format(directory.name, line) for line in findings],
+        )
         return REFUSED
     # Named on every branch below, including `ok`: a verdict that does
     # not say what it read cannot be checked by the person reading it, and
@@ -2371,8 +2646,9 @@ def check(directory: Path) -> int:
     # spelling that answers the question this fragment's own bug was about.
     resolved = directory.resolve()
     if not fragments:
-        _receipt("skipped", "{0}/ holds 0 fragments — nothing to validate"
-                 .format(resolved))
+        _receipt(
+            "skipped", "{0}/ holds 0 fragments — nothing to validate".format(resolved)
+        )
         return OK
     # The receipt states what was established and names what established it,
     # which the last three did not. "no body writes at column 0" stayed
@@ -2380,68 +2656,108 @@ def check(directory: Path) -> int:
     # link ref, at any indent or nesting" was true of the scanner's own model
     # of CommonMark and false of CommonMark. This claim is checkable by the
     # person reading it: it is what markdown-it-py saw.
-    _receipt("ok", "{0} fragments in {1}, all names parse, each body names "
-                   "the issue in its own filename, and every compatibility line "
-                   "present reads as `{3}` or `{4}` with a reason (a `{5}` "
-                   "fragment carrying none is a finding, every other section may "
-                   "omit it); each body parsed with "
-                   "markdown-it-py {2}, whose token stream holds no heading, no "
-                   "link ref definition and no raw HTML at any depth, whose "
-                   "fences all close inside the fragment, whose top level is "
-                   "one `- ` bullet list, and every link and image destination "
-                   "in which is on the allowlist"
-             .format(len(fragments), resolved, _MD_VERSION,
-                     BREAKING, COMPATIBLE, "`/`".join(MUST_DECLARE) or "no"),
-             ["{0}  {1}".format(f.path.name if f.path else "?", f.section) for f in fragments])
+    _receipt(
+        "ok",
+        "{0} fragments in {1}, all names parse, each body names "
+        "the issue in its own filename, and every compatibility line "
+        "present reads as `{3}` or `{4}` with a reason (a `{5}` "
+        "fragment carrying none is a finding, every other section may "
+        "omit it); each body parsed with "
+        "markdown-it-py {2}, whose token stream holds no heading, no "
+        "link ref definition and no raw HTML at any depth, whose "
+        "fences all close inside the fragment, whose top level is "
+        "one `- ` bullet list, and every link and image destination "
+        "in which is on the allowlist".format(
+            len(fragments),
+            resolved,
+            _MD_VERSION,
+            BREAKING,
+            COMPATIBLE,
+            "`/`".join(MUST_DECLARE) or "no",
+        ),
+        [
+            "{0}  {1}".format(f.path.name if f.path else "?", f.section)
+            for f in fragments
+        ],
+    )
     return OK
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--version", help="the version being cut, x.y.z")
-    parser.add_argument("--date", default=datetime.date.today().isoformat(),
-                        help="release date, YYYY-MM-DD (default: today)")
+    parser.add_argument(
+        "--date",
+        default=datetime.date.today().isoformat(),
+        help="release date, YYYY-MM-DD (default: today)",
+    )
     # No argparse default on either. The derived value is applied per mode
     # below -- read-only modes take it, the fold refuses without an explicit
     # one -- and an argparse default would erase the distinction between "the
     # caller named this" and "we guessed it", which is the whole question.
-    parser.add_argument("--changelog", default=None,
-                        help="path to CHANGELOG.md; required to fold, derived "
-                             "from the caller's own current working "
-                             "directory for the read-only modes")
-    parser.add_argument("--dir", dest="directory", default=None,
-                        help="path to the fragment directory; required to "
-                             "fold, derived from the caller's cwd for the "
-                             "read-only modes")
+    parser.add_argument(
+        "--changelog",
+        default=None,
+        help="path to CHANGELOG.md; required to fold, derived "
+        "from the caller's own current working "
+        "directory for the read-only modes",
+    )
+    parser.add_argument(
+        "--dir",
+        dest="directory",
+        default=None,
+        help="path to the fragment directory; required to "
+        "fold, derived from the caller's cwd for the "
+        "read-only modes",
+    )
     parser.add_argument("--dry-run", action="store_true", help="report, write nothing")
-    parser.add_argument("--keep", action="store_true", help="do not delete consumed fragments")
-    parser.add_argument("--check", action="store_true",
-                        help="validate every fragment name and body; write nothing")
-    parser.add_argument("--check-links", dest="check_links", action="store_true",
-                        help="audit CHANGELOG.md's link ref table; write nothing")
-    parser.add_argument("--untagged", default=None,
-                        help="comma-separated versions that have a `## [x.y.z]` "
-                             "section but were never tagged, so no "
-                             "`releases/tag/vX.Y.Z` link is expected for them "
-                             "and one written anyway is a 404 that reads as a "
-                             "working link. Per-repository, which is why it is "
-                             "a flag and not a constant in this file")
-    parser.add_argument("--title", default=None,
-                        help="the release heading's title, written after the "
-                             "date as `## [x.y.z] - YYYY-MM-DD — <title>`. "
-                             "Absent means the convention is read out of "
-                             "CHANGELOG.md's newest release heading and the "
-                             "fold refuses if that one carries a title; "
-                             "`--title ''` declares this release deliberately "
-                             "untitled, which is a decision and is recorded as "
-                             "one. Per-release, which is why it is a flag and "
-                             "not a key in a config file written once")
-    parser.add_argument("--count", action="store_true",
-                        help="print the fragment count as a bare integer, and nothing else")
+    parser.add_argument(
+        "--keep", action="store_true", help="do not delete consumed fragments"
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="validate every fragment name and body; write nothing",
+    )
+    parser.add_argument(
+        "--check-links",
+        dest="check_links",
+        action="store_true",
+        help="audit CHANGELOG.md's link ref table; write nothing",
+    )
+    parser.add_argument(
+        "--untagged",
+        default=None,
+        help="comma-separated versions that have a `## [x.y.z]` "
+        "section but were never tagged, so no "
+        "`releases/tag/vX.Y.Z` link is expected for them "
+        "and one written anyway is a 404 that reads as a "
+        "working link. Per-repository, which is why it is "
+        "a flag and not a constant in this file",
+    )
+    parser.add_argument(
+        "--title",
+        default=None,
+        help="the release heading's title, written after the "
+        "date as `## [x.y.z] - YYYY-MM-DD — <title>`. "
+        "Absent means the convention is read out of "
+        "CHANGELOG.md's newest release heading and the "
+        "fold refuses if that one carries a title; "
+        "`--title ''` declares this release deliberately "
+        "untitled, which is a decision and is recorded as "
+        "one. Per-release, which is why it is a flag and "
+        "not a key in a config file written once",
+    )
+    parser.add_argument(
+        "--count",
+        action="store_true",
+        help="print the fragment count as a bare integer, and nothing else",
+    )
     args = parser.parse_args(list(argv) if argv is not None else None)
 
-    def _resolve(value: Optional[str], flag: str,
-                 derived: Optional[Path]) -> Optional[Path]:
+    def _resolve(
+        value: Optional[str], flag: str, derived: Optional[Path]
+    ) -> Optional[Path]:
         """Read-only modes only. Take what the caller passed, else the value
         derived from the caller's own current working directory --
         not from this script's install location, which may be a plugin
@@ -2469,16 +2785,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 # The rarer of the two `derived is None` causes: the process's
                 # own current directory no longer exists to walk up from at
                 # all (see `_safe_cwd`), not merely "no .git found above it".
-                _receipt("skipped",
-                         "could not read the current working directory to "
-                         "derive a default for {0}; pass it explicitly"
-                         .format(flag))
+                _receipt(
+                    "skipped",
+                    "could not read the current working directory to "
+                    "derive a default for {0}; pass it explicitly".format(flag),
+                )
             else:
-                _receipt("skipped",
-                         "could not find the repository root above {0} "
-                         "(no .git there or in any parent) to derive a default "
-                         "for {1}; pass it explicitly"
-                         .format(_CWD, flag))
+                _receipt(
+                    "skipped",
+                    "could not find the repository root above {0} "
+                    "(no .git there or in any parent) to derive a default "
+                    "for {1}; pass it explicitly".format(_CWD, flag),
+                )
             return None
         if value == "":
             # Distinct from `value is None` -- the caller said *something*,
@@ -2489,8 +2807,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             # absent-flag case (covered below with no message at all) must
             # stay quiet: a note on every default-using run would stop
             # meaning anything.
-            print("note: {0} was empty -- using the derived default {1}"
-                  .format(flag, derived), file=sys.stderr)
+            print(
+                "note: {0} was empty -- using the derived default {1}".format(
+                    flag, derived
+                ),
+                file=sys.stderr,
+            )
         return derived
 
     def _fold_target() -> Optional[Tuple[Path, Path]]:
@@ -2514,29 +2836,38 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         protects every caller, in-tree or out, without assuming anything
         about where a legitimately-named directory lives.
         """
-        missing = [flag for flag, value in (("--dir", args.directory),
-                                            ("--changelog", args.changelog))
-                   if not value]
+        missing = [
+            flag
+            for flag, value in (
+                ("--dir", args.directory),
+                ("--changelog", args.changelog),
+            )
+            if not value
+        ]
         if not missing:
             return Path(args.changelog), Path(args.directory)
-        _receipt("refused",
-                 "the fold rewrites CHANGELOG.md and deletes every consumed "
-                 "fragment, so it will not choose its own target: {0} {1} "
-                 "required and not given"
-                 .format(" and ".join(missing),
-                         "is" if len(missing) == 1 else "are"),
-                 ["pass      --dir <fragment directory> --changelog <changelog "
-                  "file>, both read relative to the directory you run this from",
-                  "example   --version {0} --dir changelog.d --changelog "
-                  "CHANGELOG.md".format(args.version),
-                  "why       the fold derives no default, in this copy or the "
-                  "one vendored into a managed repo. This file finds a "
-                  "repository root by walking up from your current working "
-                  "directory, which names wherever you happen to be standing "
-                  "and not necessarily the one you are releasing; nothing on "
-                  "disk says whether those are the same",
-                  "untouched CHANGELOG.md was not read or written, and no "
-                  "fragment was consumed"])
+        _receipt(
+            "refused",
+            "the fold rewrites CHANGELOG.md and deletes every consumed "
+            "fragment, so it will not choose its own target: {0} {1} "
+            "required and not given".format(
+                " and ".join(missing), "is" if len(missing) == 1 else "are"
+            ),
+            [
+                "pass      --dir <fragment directory> --changelog <changelog "
+                "file>, both read relative to the directory you run this from",
+                "example   --version {0} --dir changelog.d --changelog "
+                "CHANGELOG.md".format(args.version),
+                "why       the fold derives no default, in this copy or the "
+                "one vendored into a managed repo. This file finds a "
+                "repository root by walking up from your current working "
+                "directory, which names wherever you happen to be standing "
+                "and not necessarily the one you are releasing; nothing on "
+                "disk says whether those are the same",
+                "untouched CHANGELOG.md was not read or written, and no "
+                "fragment was consumed",
+            ],
+        )
         return None
 
     #: What the read-only modes fall back to. Composed here rather than at
@@ -2557,17 +2888,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # two audits in one call gets two separate ones, never a silent choice
     # between them.
     if args.check and args.check_links:
-        _receipt("refused",
-                 "--check and --check-links together only ever ran the links "
-                 "audit -- the fragment audit was silently skipped, and the "
-                 "printed ok named only the half that ran",
-                 ["run       --check --dir <fragment directory> for the "
-                  "fragment audit",
-                  "run       --check-links --changelog <changelog file> "
-                  "[--untagged x.y.z,...] for the link audit",
-                  "why       each flag already audits its own thing "
-                  "completely; combining them silently ran only one, which is "
-                  "the one failure mode a guard must not have"])
+        _receipt(
+            "refused",
+            "--check and --check-links together only ever ran the links "
+            "audit -- the fragment audit was silently skipped, and the "
+            "printed ok named only the half that ran",
+            [
+                "run       --check --dir <fragment directory> for the fragment audit",
+                "run       --check-links --changelog <changelog file> "
+                "[--untagged x.y.z,...] for the link audit",
+                "why       each flag already audits its own thing "
+                "completely; combining them silently ran only one, which is "
+                "the one failure mode a guard must not have",
+            ],
+        )
         return REFUSED
 
     # `--untagged` is read by `--check-links` and by nothing else. Accepting it
@@ -2576,14 +2910,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # value that is not `x.y.z`, which `--check-links` refuses and every other
     # mode would have ignored.
     if args.untagged is not None and not args.check_links:
-        _receipt("refused",
-                 "--untagged is read by --check-links only, and this run is "
-                 "not one — nothing was audited, written or consumed",
-                 ["pass      --check-links alongside it, or drop it",
-                  "why       the versions it declares are compared against the "
-                  "link ref table, which no other mode reads. Silently ignored "
-                  "here, a declaration that never applied would be "
-                  "indistinguishable from one that did"])
+        _receipt(
+            "refused",
+            "--untagged is read by --check-links only, and this run is "
+            "not one — nothing was audited, written or consumed",
+            [
+                "pass      --check-links alongside it, or drop it",
+                "why       the versions it declares are compared against the "
+                "link ref table, which no other mode reads. Silently ignored "
+                "here, a declaration that never applied would be "
+                "indistinguishable from one that did",
+            ],
+        )
         return REFUSED
 
     # Same argument as `--untagged` above, one flag along. A title is read by
@@ -2592,14 +2930,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # would look exactly like one that was — and what it decides here is the
     # heading a release ships under.
     if args.title is not None and (args.check or args.check_links or args.count):
-        _receipt("refused",
-                 "--title is read by the fold only, and this run is a "
-                 "read-only mode — nothing was audited, written or consumed",
-                 ["pass      it on the fold (`--version x.y.z --dir ... "
-                  "--changelog ...`), or drop it here",
-                  "why       it decides the release heading, which no "
-                  "read-only mode writes. Silently ignored here, a title that "
-                  "never applied would be indistinguishable from one that did"])
+        _receipt(
+            "refused",
+            "--title is read by the fold only, and this run is a "
+            "read-only mode — nothing was audited, written or consumed",
+            [
+                "pass      it on the fold (`--version x.y.z --dir ... "
+                "--changelog ...`), or drop it here",
+                "why       it decides the release heading, which no "
+                "read-only mode writes. Silently ignored here, a title that "
+                "never applied would be indistinguishable from one that did",
+            ],
+        )
         return REFUSED
 
     if args.count:
@@ -2625,7 +2967,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         untagged = None
         if args.untagged is not None:
             untagged = frozenset(
-                part.strip() for part in args.untagged.split(",") if part.strip())
+                part.strip() for part in args.untagged.split(",") if part.strip()
+            )
             bad = sorted(v for v in untagged if not _VERSION_RE.match(v))
             if bad:
                 # Refused, not dropped. A typo silently ignored means the
@@ -2633,9 +2976,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 # link ref, the audit reports a finding about it, and the
                 # maintainer reads that finding as disagreement with a
                 # declaration that was never made.
-                _receipt("refused",
-                         "--untagged {0!r}: {1} is not x.y.z — nothing was "
-                         "audited".format(args.untagged, ", ".join(bad)))
+                _receipt(
+                    "refused",
+                    "--untagged {0!r}: {1} is not x.y.z — nothing was audited".format(
+                        args.untagged, ", ".join(bad)
+                    ),
+                )
                 return REFUSED
         return check_links(changelog, untagged)
 
@@ -2646,16 +2992,27 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return check(directory)
 
     if not args.version:
-        _receipt("refused", "--version is required to assemble "
-                            "(or pass --check / --count for the read-only modes)")
+        _receipt(
+            "refused",
+            "--version is required to assemble "
+            "(or pass --check / --count for the read-only modes)",
+        )
         return REFUSED
 
     target = _fold_target()
     if target is None:
         return REFUSED
     changelog, directory = target
-    return assemble(changelog, directory, args.version, args.date,
-                    dry_run=args.dry_run, keep=args.keep, title=args.title)
+    return assemble(
+        changelog,
+        directory,
+        args.version,
+        args.date,
+        dry_run=args.dry_run,
+        keep=args.keep,
+        title=args.title,
+    )
+
 
 def _exit(code: int) -> int:
     """Deliver whatever is still buffered, and keep *code*.

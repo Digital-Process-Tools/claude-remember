@@ -22,8 +22,10 @@ Pushing and opening is one read plus one call, not a document you write:
   report path, never the payload path. Three answers: `ok`, a finding, and
   `UNVALIDATABLE` at exit 2, which is a statement about the validator and not the report.
 - **Release what a lane did not finish.** A lane with no commit, or a pull request closed
-  without merging, both leave an assignment behind: `gh issue edit <N> --remove-assignee
-  @me`. *Could not read the pull request state* must never render as released.
+  without merging, both leave an assignment behind:
+  `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/lane_setup.py" <N> --release`, which releases
+  the lane record and the GitHub assignee together. *Could not read the pull request
+  state* must never render as released.
 
 Full argument -- the fragment-rename procedure, the three states of `pr_body`, how far
 the validator actually gets on each field, and the two ways a body silently references
