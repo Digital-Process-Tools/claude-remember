@@ -295,3 +295,43 @@ class TestFailSoftContract:
             "swallowed into the same silent no-op as a session with nothing "
             "new to flush\n" + result.stderr
         )
+
+
+class TestFlagShapedSessionIdIsRejected600:
+    """#600: STDIN_SESSION_ID's own guard (`*[!A-Za-z0-9._-]*`) allows a
+    leading `-`, so a session_id of exactly "--dry" on the SessionEnd
+    payload passes untouched and reaches save-session.sh's argv as --dry --
+    turning the last-chance flush into a dry-run preview: no summary
+    written, position not advanced, log line reads like an ordinary run.
+    Mirrors #576's own remedy (`-*` added to the case pattern) at the
+    sibling call site in agy-stop-hook.sh.
+    """
+
+    def test_must_fire_dash_dry_session_id_does_not_become_a_dry_run(self, tmp_path):
+        env, project, plugin, calls, _sid = _make_env(tmp_path, exchanges=4, humans=1)
+        _wire_hook(plugin)
+
+        result = _run_hook(plugin, env, session_id="--dry")
+
+        assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")
+        logged_calls = calls.read_text() if calls.exists() else ""
+        assert "call-haiku" in logged_calls, (
+            "session_id=--dry must not reach save-session.sh's argv as a flag -- "
+            "if it does, DRY_RUN=true silently swallows the whole flush\n"
+            + logged_calls
+        )
+
+    def test_must_not_fire_control_ordinary_session_id_still_flushes(self, tmp_path):
+        """Positive control paired with the must-fire case above -- proves
+        the fixture actually drives a real flush when nothing is wrong."""
+        env, project, plugin, calls, sid = _make_env(tmp_path, exchanges=4, humans=1)
+        _wire_hook(plugin)
+
+        result = _run_hook(plugin, env, session_id=sid)
+
+        assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")
+        logged_calls = calls.read_text() if calls.exists() else ""
+        assert "call-haiku" in logged_calls, (
+            "the fixture itself never reaches call-haiku -- broken harness\n"
+            + logged_calls
+        )
