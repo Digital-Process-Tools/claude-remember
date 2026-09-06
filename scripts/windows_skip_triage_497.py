@@ -36,6 +36,32 @@ from __future__ import annotations
 import ast
 import glob
 import os
+import re
+
+# Every row in docs/windows-skip-triage.md's table opens with a path cell in
+# backticks, followed by a reason cell and a verdict cell -- the same three
+# leading columns regardless of how many trailing columns (e.g. "basis")
+# follow. `tests/test_windows_skip_triage_497.py` (which only needs the path
+# column, to diff the row set against the live tree) and
+# `tests/test_windows_skip_triage_prose_totals_595.py` (which also needs the
+# verdict column, to check the doc's prose totals against the table's own
+# counts) both parse this same table. A second, independently-written copy of
+# this regex in the newer file was flagged in #595's own self-review: nothing
+# ties two separate patterns together, so a future change to the table's
+# column layout could satisfy one guard's row model while silently breaking
+# the other's. Parsing through this one shared function instead means both
+# guards see the same rows or fail the same way.
+_TABLE_ROW_RE = re.compile(r"^\|\s*`(tests/[^`]+\.py)`\s*\|([^|]*)\|([^|]*)\|", re.MULTILINE)
+
+
+def parse_doc_table_rows(doc_text: str) -> list[tuple[str, str, str]]:
+    """Return (path, reason, verdict) for every row in the doc's table,
+    trimmed of surrounding whitespace. `doc_text` is the full text of
+    docs/windows-skip-triage.md (or a fixture built to look like it)."""
+    return [
+        (path, reason.strip(), verdict.strip())
+        for path, reason, verdict in _TABLE_ROW_RE.findall(doc_text)
+    ]
 
 
 def find_blanket_skip_modules(tests_dir: str) -> dict[str, str | None]:
