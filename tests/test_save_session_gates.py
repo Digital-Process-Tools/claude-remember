@@ -704,3 +704,148 @@ class TestNoWorkSkipRule:
 
         header = (project / ".remember" / "now.md").read_text().strip().splitlines()[0]
         assert header.endswith("| feature/a|b"), f"branch truncated: {header!r}"
+
+
+class TestMixedSpanQuarantine583:
+    """#583: a MIXED read span -- some exchanges the pipeline COULD map, plus
+    at least one step type it could not -- must be quarantined exactly like
+    an all-unmapped span (#575), at every save-position call site, not just
+    the EXCHANGE_COUNT==0 one this file already covers above. exchanges=3
+    here stands in for "3 mapped exchanges alongside 1 unmapped step in the
+    same span" -- EXCHANGE_COUNT>0 is exactly what routes the #575 branch
+    around every one of the four sites below today."""
+
+    def test_ordinary_successful_save_quarantines_a_mixed_span(self, tmp_path):
+        """The everyday path: Haiku summarized the mapped exchanges and the
+        result was appended to now.md. That summary is real, but it does not
+        cover the unmapped step -- so this must still quarantine, or the
+        step's content is gone the moment the position advances and any
+        earlier quarantine mark is cleared."""
+        env, project, plugin, calls, sid = _make_env(
+            tmp_path, exchanges=3, humans=3, position=42,
+            envelope="antigravity", envelope_has_unmapped_step=True,
+        )
+        env["STUB_HAIKU_TEXT"] = "## 10:00 | main\n\n- did some mapped work\n"
+        env["STUB_SKIP_LINES"] = "17"
+        _suppress_ndc(project)
+
+        result = _run(plugin, env, sid)
+
+        assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")
+        save_position_calls = [
+            line for line in calls.read_text().splitlines() if line.startswith("save-position")
+        ]
+        assert len(save_position_calls) == 1
+        assert "unrecognised" in save_position_calls[0], (
+            "a mixed span (3 mapped exchanges + 1 unmapped step) must be quarantined "
+            f"the same way an all-unmapped span is, not saved clean: {save_position_calls[0]!r}"
+        )
+        assert "17" in save_position_calls[0], (
+            "skip_lines must ride along so the quarantine points at the still-unread "
+            f"part of the span, not just the new position: {save_position_calls[0]!r}"
+        )
+        assert _saved_position(project) == 42
+
+    def test_ordinary_successful_save_of_a_fully_mapped_span_is_not_quarantined(self, tmp_path):
+        """Paired negative control: a mixed-shaped span that in fact had NO
+        unmapped step must save clean -- proving the assertion above means
+        "an unmapped step was actually seen", not "any antigravity span with
+        EXCHANGE_COUNT>0", which a stub that always quarantines would also
+        pass the positive test with."""
+        env, project, plugin, calls, sid = _make_env(
+            tmp_path, exchanges=3, humans=3, position=42,
+            envelope="antigravity", envelope_has_unmapped_step=False,
+        )
+        env["STUB_HAIKU_TEXT"] = "## 10:00 | main\n\n- did some mapped work\n"
+        _suppress_ndc(project)
+
+        result = _run(plugin, env, sid)
+
+        assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")
+        save_position_calls = [
+            line for line in calls.read_text().splitlines() if line.startswith("save-position")
+        ]
+        assert len(save_position_calls) == 1
+        assert "unrecognised" not in save_position_calls[0]
+        assert _saved_position(project) == 42
+
+    def test_skip_path_quarantines_a_mixed_span(self, tmp_path):
+        """The model judged the mapped exchanges not worth recording (SKIP).
+        That verdict says nothing about the unmapped step it never saw --
+        the extract text handed to Haiku never included it -- so this must
+        still quarantine."""
+        env, project, plugin, calls, sid = _make_env(
+            tmp_path, exchanges=3, humans=3, position=55,
+            envelope="antigravity", envelope_has_unmapped_step=True,
+        )
+        env["STUB_SKIP_LINES"] = "9"
+
+        result = _run(plugin, env, sid)
+
+        assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")
+        save_position_calls = [
+            line for line in calls.read_text().splitlines() if line.startswith("save-position")
+        ]
+        assert len(save_position_calls) == 1
+        assert "unrecognised" in save_position_calls[0], save_position_calls[0]
+        assert _saved_position(project) == 55
+
+    def test_skip_path_of_fully_mapped_span_is_not_quarantined(self, tmp_path):
+        """Paired negative control for the SKIP path."""
+        env, project, plugin, calls, sid = _make_env(
+            tmp_path, exchanges=3, humans=3, position=55,
+            envelope="antigravity", envelope_has_unmapped_step=False,
+        )
+
+        result = _run(plugin, env, sid)
+
+        assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")
+        save_position_calls = [
+            line for line in calls.read_text().splitlines() if line.startswith("save-position")
+        ]
+        assert len(save_position_calls) == 1
+        assert "unrecognised" not in save_position_calls[0]
+        assert _saved_position(project) == 55
+
+    def test_reject_gate_quarantines_a_mixed_span(self, tmp_path):
+        """Haiku's reply for the mapped exchanges was not an entry header, so
+        it is discarded by the reject gate -- that discard is about the
+        mapped content, not the unmapped step, which must still quarantine."""
+        env, project, plugin, calls, sid = _make_env(
+            tmp_path, exchanges=3, humans=3, position=63,
+            envelope="antigravity", envelope_has_unmapped_step=True,
+        )
+        env["STUB_HAIKU_TEXT"] = "Shall I proceed with that?\n"
+        env["STUB_SKIP_LINES"] = "4"
+
+        result = _run(plugin, env, sid)
+
+        assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")
+        save_position_calls = [
+            line for line in calls.read_text().splitlines() if line.startswith("save-position")
+        ]
+        assert len(save_position_calls) == 1
+        assert "unrecognised" in save_position_calls[0], save_position_calls[0]
+        assert _saved_position(project) == 63
+
+    def test_give_up_after_max_failures_quarantines_a_mixed_span(self, tmp_path):
+        """The span is dropped unsummarized after repeated Haiku failures --
+        that give-up is about the summarizer, not about the unmapped step,
+        which must still quarantine rather than being silently dropped along
+        with the rest."""
+        env, project, plugin, calls, sid = _make_env(
+            tmp_path, exchanges=3, humans=3, position=71,
+            envelope="antigravity", envelope_has_unmapped_step=True,
+        )
+        env["STUB_HAIKU_FAIL"] = "1"
+        env["STUB_SKIP_LINES"] = "6"
+
+        for _ in range(3):
+            _run(plugin, env, sid)
+
+        save_position_calls = [
+            line for line in calls.read_text().splitlines() if line.startswith("save-position")
+        ]
+        assert len(save_position_calls) == 1, save_position_calls
+        assert "unrecognised" in save_position_calls[0], save_position_calls[0]
+        assert _saved_position(project) == 71

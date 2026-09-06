@@ -509,6 +509,33 @@ FAILURE_MARKER="${REMEMBER_DIR}/tmp/last-summary-failure"
 MAX_FAILURES=$(config ".thresholds.max_summary_failures" 3)
 case "$MAX_FAILURES" in ''|*[!0-9]*) MAX_FAILURES=3 ;; esac
 
+# #583: every save-position call site below this point runs only once
+# EXCHANGE_COUNT -gt 0 (the EXCHANGE_COUNT -eq 0 branch above already
+# quarantines a wholly-unmapped span per #575) -- a give-up, a reject, a
+# SKIP, or an ordinary successful append. None of those verdicts says
+# anything about an unmapped step that rode along in the SAME span: the
+# extract text handed to every one of those paths never included it, so
+# whatever the verdict was, the step's content is not in it. $ENVELOPE,
+# $ENVELOPE_HAS_UNMAPPED_STEP and $SKIP_LINES are all set once by the
+# extract step (:275ish) and never reassigned afterwards -- call-haiku
+# prints HAIKU_TEXT_FILE/IS_SKIP/IS_REJECTED/PROVIDER/TK_*, none of which
+# collide with these names -- so this generalizes unchanged to every site
+# below, mixed span or not: a mapped-only span passes $ENVELOPE straight
+# through exactly as before, and a span carrying an unmapped step is routed
+# through the identical #450 quarantine mechanism the all-unmapped case
+# uses, accepting the same re-extraction/duplicate-summary risk on a future
+# recovery that #575 already accepted for that case (see #583's own "what
+# would settle it" section for the alternative this deliberately does not
+# build: real per-step-range tracking).
+save_position_span() {
+    if [ "$ENVELOPE" != "unrecognised" ] && [ "$ENVELOPE_HAS_UNMAPPED_STEP" = "1" ]; then
+        log "extract" "$ENVELOPE envelope with an unmapped step type, skip -- position -> $POSITION (span quarantined from line $SKIP_LINES for a future build)"
+        cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell save-position "$LAST_SAVE_FILE" "$SESSION_ID" "$POSITION" "unrecognised" "$SKIP_LINES"
+    else
+        cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell save-position "$LAST_SAVE_FILE" "$SESSION_ID" "$POSITION" "$ENVELOPE"
+    fi
+}
+
 record_summary_failure() {
     [ "$MAX_FAILURES" -eq 0 ] && return 0
     _prev_key=""
@@ -528,7 +555,7 @@ record_summary_failure() {
 
     if [ "$_count" -ge "$MAX_FAILURES" ]; then
         log "haiku" "WARNING: ${_count} consecutive failures on this span -- dropping it unsummarized and advancing position -> $POSITION (see thresholds.max_summary_failures)"
-        cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell save-position "$LAST_SAVE_FILE" "$SESSION_ID" "$POSITION" "$ENVELOPE"
+        save_position_span
         rm -f "$FAILURE_MARKER"
     else
         echo "$_key $_count" > "$FAILURE_MARKER"
@@ -618,7 +645,7 @@ if [ "$IS_SKIP" != "true" ]; then
         # does, or this span would be re-summarized on every run forever.
         log "validate" "REJECTED (not an entry header): $(echo "$FIRST_LINE" | head -c 80)"
         keep_rejected_text "$HAIKU_TEXT_FILE" "validate"
-        cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell save-position "$LAST_SAVE_FILE" "$SESSION_ID" "$POSITION" "$ENVELOPE"
+        save_position_span
         log "validate" "position -> $POSITION"
         rm -f "$FAILURE_MARKER"
         exit 0
@@ -673,7 +700,7 @@ if [ "$IS_SKIP" = "true" ]; then
     # reconstruction, the exact failure mode #443's envelope field exists to
     # avoid. This is the value the call itself reported using.
     log "haiku" "SKIP (provider: ${PROVIDER:-claude}) -- position -> $POSITION"
-    cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell save-position "$LAST_SAVE_FILE" "$SESSION_ID" "$POSITION" "$ENVELOPE"
+    save_position_span
     # A SKIP is a successful summarization (the model judged the span not worth
     # recording) and it advances the position, so it must clear the failure
     # count too — otherwise a stale count survives and a later single failure
@@ -759,7 +786,7 @@ APPEND_ERR=$({ printf '\n' && cat "$HAIKU_TEXT_FILE"; } 2>&1 >> "$APPEND_TMP") \
 APPEND_ERR=$(mv "$APPEND_TMP" "$MEMORY_FILE" 2>&1) \
     || append_failed "commit failed: ${APPEND_ERR:-unknown error}"
 log "write" "appended (provider: ${PROVIDER:-claude}): $(head -1 "$HAIKU_TEXT_FILE" | cut -c1-80)"
-cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell save-position "$LAST_SAVE_FILE" "$SESSION_ID" "$POSITION" "$ENVELOPE"
+save_position_span
 log "write" "position -> $POSITION"
 rm -f "$FAILURE_MARKER"
 
