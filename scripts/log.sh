@@ -496,11 +496,26 @@ MEMORY_LOG_FILE="${REMEMBER_LOG_DIR}/memory-${MEMORY_LOG_DATE}.log"
 # Output:
 #   Appends "HH:MM:SS [component] message" to daily log file.
 #   Falls back to stderr if log file is unwritable.
+#
+# Several callers (save-session.sh's NDC and header-validation paths, since
+# #593) embed the first bytes of a model's reply straight into $2. That text
+# is untrusted -- not controlled by this codebase -- and a raw newline or
+# carriage return inside it would land at column 0 of the log file, reading
+# as a second, forged log entry to anything parsing the log (a person
+# skimming it, or a script). Flattened here, once, rather than at each of the
+# (at least three) call sites that embed such text, so the class is closed
+# everywhere log() is used, not just at the newest one (#599). Same remedy
+# doctor.sh's _json_escape already uses for the identical reason: `tr
+# '[:cntrl:]'` is a POSIX bracket expression, identical on GNU and BSD tr,
+# and it operates on the whole byte stream so an embedded newline is caught
+# even though `message` is a single shell variable, not a stream `sed` would
+# see as two records.
 log() {
     local component="$1"
     local message="$2"
     local timestamp
     timestamp=$(_remember_date +%H:%M:%S)
+    message="$(printf '%s' "$message" | tr '[:cntrl:]' ' ')"
     echo "${timestamp} [${component}] ${message}" >> "$MEMORY_LOG_FILE" 2>/dev/null \
         || echo "${timestamp} [${component}] ${message}" >&2
 }
