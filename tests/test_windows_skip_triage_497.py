@@ -16,30 +16,33 @@ positive control"), the real doc's "must match" case is paired with a "must
 fire" case: a deliberately wrong fixture list is asserted to fail the same
 comparison, so the test cannot pass merely because comparison logic never
 runs.
+
+The doc's table is parsed via `scripts.windows_skip_triage_497.parse_doc_table_rows`
+-- the same shared parser `tests/test_windows_skip_triage_prose_totals_595.py`
+uses for its own row/verdict counts -- rather than a second, independently
+written row regex here, so the two guards cannot silently disagree about what
+counts as a row (#595's own self-review).
 """
 
 from __future__ import annotations
 
 import os
-import re
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from scripts.windows_skip_triage_497 import find_blanket_skip_modules
+from scripts.windows_skip_triage_497 import (
+    find_blanket_skip_modules,
+    parse_doc_table_rows,
+)
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TESTS_DIR = os.path.join(REPO_ROOT, "tests")
 DOC_PATH = os.path.join(REPO_ROOT, "docs", "windows-skip-triage.md")
 
-# Every row in the doc's table opens with a path cell in backticks, e.g.
-# "| `tests/test_foo.py` | ... |". This is the same shape for every row
-# regardless of verdict, so it does not need to know the verdict vocabulary.
-_ROW_PATH_RE = re.compile(r"^\|\s*`(tests/[^`]+\.py)`\s*\|", re.MULTILINE)
-
 
 def _doc_listed_paths(doc_text: str) -> set[str]:
-    return set(_ROW_PATH_RE.findall(doc_text))
+    return {path for path, _reason, _verdict in parse_doc_table_rows(doc_text)}
 
 
 def test_doc_lists_exactly_the_live_blanket_skip_modules():
