@@ -1225,6 +1225,22 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from pipeline.extract import _session_dir
 
 
+def _line_has_hardcoded_jq(line):
+    """True if `line` uses a hardcoded `jq` call rather than `$JQ` (#601).
+
+    A `command -v jq` availability probe never invokes jq against real
+    input, so it is excluded -- but only the probe SPAN is removed before
+    the hardcoded-call check runs, not the whole line via `continue`. A
+    `continue` would silently amnesty a real hardcoded call sharing the
+    same line as a probe, since `continue` drops the entire line from
+    every later check in the loop, not just the probe check itself.
+    """
+    if line.strip().startswith("#"):
+        return False
+    scan = line.replace("command -v jq", "")
+    return " jq " in scan or "(jq " in scan or "$(jq " in scan
+
+
 class TestWindowsCompatIssue11:
     """GitHub issue #11: Windows compatibility — 6 sub-issues."""
 
@@ -1467,23 +1483,7 @@ class TestWindowsCompatIssue11:
                         "post-tool-hook.sh", "session-start-hook.sh"):
             with open(os.path.join(REPO_ROOT, "scripts", script)) as f:
                 for i, line in enumerate(f, 1):
-                    if line.strip().startswith("#"):
-                        continue
-                    # `command -v jq` is an AVAILABILITY PROBE, not an invocation --
-                    # it never runs jq against real input, so it is exactly the
-                    # exclusion this docstring already promised ("but not ...
-                    # 'command -v jq'") and never implemented (#574 CI follow-up):
-                    # the substring check below matches " jq " against "command -v
-                    # jq >/dev/null" too (the "v jq >" span), refusing a guard the
-                    # comment says is fine. Skipped BEFORE the substring check, not
-                    # folded into it, so a real hardcoded call on the SAME line as
-                    # a probe (unlikely, but not this test's job to rule out) still
-                    # has a chance to be caught by a later line instead of being
-                    # silently amnestied by one `continue`.
-                    if "command -v jq" in line:
-                        continue
-                    # Match raw 'jq' but not '$JQ' or 'JQ=' or 'command -v jq'
-                    if " jq " in line or "(jq " in line or "$(jq " in line:
+                    if _line_has_hardcoded_jq(line):
                         assert False, (
                             f"{script}:{i} uses hardcoded jq: {line.strip()}"
                         )
@@ -1491,20 +1491,37 @@ class TestWindowsCompatIssue11:
     def test_scripts_use_jq_var_not_hardcoded_allows_command_dash_v_probe(self):
         """Positive control for the exclusion above (#574 CI follow-up).
 
-        Without the `continue` on a `command -v jq` line, this exact shape --
-        session-start-hook.sh's own jq-availability guard -- trips the hardcoded-
-        jq check even though the docstring explicitly says it should not: the
-        naive `" jq " in line` substring test matches the `v jq >` span inside
-        `command -v jq >/dev/null 2>&1 || return 0`. Asserted directly against
-        the scanning logic (not just "the real file happens to pass today") so a
-        future edit that deletes the `continue` fails this test even if nobody
-        touches session-start-hook.sh again.
+        Without excluding the `command -v jq` probe SPAN, this exact shape --
+        session-start-hook.sh's own jq-availability guard -- would trip the
+        hardcoded-jq check even though the docstring explicitly says it should
+        not: the naive `" jq " in line` substring test matches the `v jq >`
+        span inside `command -v jq >/dev/null 2>&1 || return 0`. Asserted
+        directly against the real scanning function (not just "the real file
+        happens to pass today") so a future edit that removes the exclusion
+        fails this test even if nobody touches session-start-hook.sh again.
         """
         line = "command -v jq >/dev/null 2>&1 || return 0\n"
         assert "command -v jq" in line
         # The exact substring the un-excluded check would have matched --
         # confirms this is a real trip hazard and not a hypothetical one.
         assert " jq " in line
+        assert not _line_has_hardcoded_jq(line)
+
+    def test_scripts_use_jq_var_not_hardcoded_catches_call_sharing_probe_line(self):
+        """#601: a hardcoded jq call sharing a line with a `command -v jq`
+        probe must still be caught.
+
+        The old scanning logic used `continue` to skip any line containing
+        `command -v jq`, which drops the ENTIRE line from every later check
+        in the loop -- not just the probe check. A real hardcoded jq call
+        appended to the same line as a probe (e.g. `command -v jq
+        >/dev/null 2>&1 && jq -r '.x' file.json`) would therefore never be
+        examined at all. Narrowing the exclusion to the probe SPAN itself
+        (stripping `command -v jq` before scanning) closes that gap: this
+        line must be flagged, not amnestied.
+        """
+        line = "command -v jq >/dev/null 2>&1 && jq -r '.x' file.json\n"
+        assert _line_has_hardcoded_jq(line)
 
     def test_jq_fallback_reads_json(self, tmp_path):
         """The jq fallback correctly reads a value from a JSON file."""
