@@ -103,4 +103,17 @@ fi
 # context injection) and Antigravity's own docs describe no equivalent
 # contract this plugin could target instead, so the delegate's stdout is
 # discarded here rather than guessed at.
-printf '%s' "$_NORMALIZED" | bash "$_SCRIPT_DIR/session-start-hook.sh" >/dev/null
+#
+# REMEMBER_SUPPRESS_PROMO=1 (#596): the cross-plugin promo (#574) is
+# composed and printed on this same stdout, which this line just discards
+# -- so a promo selected here would never reach anyone, while
+# session-start-hook.sh's own emit block would still commit the
+# machine-global throttle/rotation marker on the mere successful `printf`
+# to /dev/null, burning `cooldowns.promo_seconds` for every OTHER caller
+# on this machine for a promo nobody saw. This adapter is the one place
+# that KNOWS the delegate's stdout goes nowhere, so it is the one place
+# that turns the whole feature off for this call -- session-start-hook.sh
+# itself has no reliable way to detect a discarding caller (a real Claude
+# Code invocation also reads this hook's stdout through a non-tty pipe).
+printf '%s' "$_NORMALIZED" \
+    | REMEMBER_SUPPRESS_PROMO=1 bash "$_SCRIPT_DIR/session-start-hook.sh" >/dev/null

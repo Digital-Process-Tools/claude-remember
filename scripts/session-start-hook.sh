@@ -950,11 +950,33 @@ fi
 # below, because it must reach the plain-script scope that builds the final
 # JSON -- a value set inside the `CTX=$( … )` subshell a few lines down would
 # die with that subshell.
+#
+# REMEMBER_SUPPRESS_PROMO (#596): agy-session-start-hook.sh delegates here
+# with this delegate's own stdout piped to /dev/null (Antigravity parses a
+# command hook's stdout as protojson against its own schema, and this
+# script's plain-text/hookSpecificOutput shape does not fit it -- #563), so
+# any promo composed on that path is guaranteed to never reach a human, yet
+# the emit block a few hundred lines down commits the throttle/rotation
+# marker on any successful `printf`, and `printf` to /dev/null succeeds.
+# That silently burned the whole `cooldowns.promo_seconds` window for
+# every OTHER caller on the same machine, for a promo nobody ever saw.
+#
+# Fixed here rather than by having the emit block detect its own stdout
+# target: this script has no reliable way to do that. `[ -t 1 ]` cannot
+# tell "discarded" from "captured normally" -- a real Claude Code
+# invocation ALSO pipes this hook's stdout through a non-tty read, so a
+# tty check would suppress the marker for every legitimate caller too.
+# Only the caller that KNOWS its own delegation discards stdout can act on
+# that fact, so agy-session-start-hook.sh sets this flag before invoking
+# us, and the whole promo feature -- selection AND marker -- is skipped on
+# that path, leaving the cooldown/rotation state untouched for a real
+# session to actually show the promo in.
 PROMO_MSG=""
 PROMO_ID=""
 PROMO_MARKER=""
 PROMO_NOW=""
-if [ "$(config ".features.plugin_promos" true)" = "true" ]; then
+if [ "$(config ".features.plugin_promos" true)" = "true" ] \
+    && [ -z "$REMEMBER_SUPPRESS_PROMO" ]; then
 
     # Args: none. Reads promos.json + installed_plugins.json, sets PROMO_MSG
     # as a side effect, and persists the machine-global throttle/rotation
