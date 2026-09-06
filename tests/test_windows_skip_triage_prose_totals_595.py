@@ -129,10 +129,10 @@ def test_positive_control_fires_on_a_stale_prose_number():
 
 
 def test_positive_control_fires_on_a_stale_convertible_count():
-    # MUST fire: same as above, but for the convertible/not-convertible
-    # patterns added after self-review -- without this, a broken pattern for
-    # either one would make the real test pass whether or not the prose
-    # actually agrees with the table on those two counts specifically.
+    # MUST fire: same as above, but for the convertible pattern added after
+    # self-review -- without this, a broken pattern for it would make the
+    # real test pass whether or not the prose actually agrees with the table
+    # on that count specifically.
     with open(DOC_PATH, encoding="utf-8") as fh:
         doc_text = fh.read()
 
@@ -147,5 +147,51 @@ def test_positive_control_fires_on_a_stale_convertible_count():
     mismatches = _prose_mismatches(stale_doc)
     assert mismatches, (
         "positive control failed to fire: a deliberately wrong convertible "
+        "count should have produced a nonempty mismatch list"
+    )
+
+
+def test_positive_control_fires_on_a_stale_not_convertible_count():
+    # MUST fire: same as above, for the not-convertible pattern. A second
+    # audit round on #595 flagged that the first version of this file added
+    # a dedicated fire-test for `convertible` but not for `not-convertible`
+    # or `unclear` -- the identical gap the commit's own message claimed to
+    # have closed for "both new counts." This closes it for not-convertible.
+    with open(DOC_PATH, encoding="utf-8") as fh:
+        doc_text = fh.read()
+
+    counts = _table_counts(doc_text)
+    wrong_not_convertible = counts.get("not-convertible", 0) + 1
+    stale_doc = doc_text.replace(
+        f"path-format incompatibility. {counts.get('not-convertible', 0)} modules.",
+        f"path-format incompatibility. {wrong_not_convertible} modules.",
+    )
+    assert stale_doc != doc_text, "fixture setup: replacement did not match live doc text"
+
+    mismatches = _prose_mismatches(stale_doc)
+    assert mismatches, (
+        "positive control failed to fire: a deliberately wrong not-convertible "
+        "count should have produced a nonempty mismatch list"
+    )
+
+
+def test_positive_control_fires_on_a_stale_unclear_count():
+    # MUST fire: same as above, for the unclear pattern -- the fourth of the
+    # four counts this guard checks, and the other one the second audit round
+    # found had no dedicated fire-test of its own.
+    with open(DOC_PATH, encoding="utf-8") as fh:
+        doc_text = fh.read()
+
+    counts = _table_counts(doc_text)
+    wrong_unclear = counts.get("unclear", 0) + 1
+    stale_doc = doc_text.replace(
+        f"not that read. {counts.get('unclear', 0)} modules.",
+        f"not that read. {wrong_unclear} modules.",
+    )
+    assert stale_doc != doc_text, "fixture setup: replacement did not match live doc text"
+
+    mismatches = _prose_mismatches(stale_doc)
+    assert mismatches, (
+        "positive control failed to fire: a deliberately wrong unclear "
         "count should have produced a nonempty mismatch list"
     )

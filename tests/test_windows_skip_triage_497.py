@@ -31,7 +31,10 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from scripts.windows_skip_triage_497 import find_blanket_skip_modules, parse_doc_table_rows  # noqa: I001
+from scripts.windows_skip_triage_497 import (
+    find_blanket_skip_modules,
+    parse_doc_table_rows,
+)
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TESTS_DIR = os.path.join(REPO_ROOT, "tests")
