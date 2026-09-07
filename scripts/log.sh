@@ -530,36 +530,27 @@ log() {
     local message="$2"
     local timestamp
     timestamp=$(_remember_date +%H:%M:%S)
-    # #621: log() runs on the per-tool-call hot path, and the overwhelming
-    # majority of messages this codebase writes (component names, static
-    # prose, numeric positions) carry no control byte at all -- so forking
-    # printf|tr on every single call paid for a flatten nearly none of them
-    # need. This `case` is a pure in-shell pattern match, no subprocess:
-    # only when a control byte is actually PRESENT does the fork below run.
-    #
-    # Deliberately NOT `[[:cntrl:]]` (a POSIX bracket CLASS, which asks the
-    # C library "is this byte cntrl under the active locale" -- a ctype/
-    # wctype lookup that a shell's own glob matcher can implement however
-    # it likes). #621 originally used it here and it broke, deterministically,
-    # on every windows-latest CI leg (all 4 Python versions) while every
-    # Linux and macOS leg -- and this repo's own macOS dev machine, on an
-    # ancient bash 3.2.57 -- stayed green: the pre-check simply never
-    # matched a message carrying a real embedded newline under Git Bash's
-    # MSYS2-built bash, so `tr` was never invoked and the flatten silently
-    # never ran. The version below tests literal BYTE VALUES via ANSI-C
-    # quoting (`$'\001'`-`$'\037'`, `$'\177'`) instead -- a straight ordinal
-    # comparison with no ctype table, no locale, and nothing left for a
-    # different bash build to classify differently. `local LC_ALL=C` is kept
-    # for the actual `tr` invocation below (a coreutils call, unaffected by
-    # this bug -- Git for Windows bundles GNU coreutils, and the failure
-    # reports named the pre-check, never a `tr` that ran and mis-flattened),
-    # the same correctness #599 forced on it for the identical reason (a
-    # `head -c 80` cut can land mid-multibyte-character).
-    case "$message" in
-        *[$'\001'-$'\037']*|*$'\177'*)
-            message="$(printf '%s' "$message" | LC_ALL=C tr '[:cntrl:]' ' ')"
-            ;;
-    esac
+    # #621 tried three times to gate this fork behind a cheap in-shell
+    # pre-check (a message rarely carries a control byte at all, and log()
+    # runs on the per-tool-call hot path) -- unconditional `[[:cntrl:]]`,
+    # then an ANSI-C byte-value range meant to sidestep locale/ctype
+    # classification entirely. Both were reasoned defensible and both went
+    # red on live CI in ways this repo could not reproduce locally: the
+    # bracket-class version deterministically missed every embedded control
+    # byte on windows-latest while this repo's own macOS dev machine (bash
+    # 3.2.57) stayed green; the byte-range version then did the same on
+    # every macos-latest leg (all four Python versions) while remaining
+    # green under bash 3.2.57 AND a fresh Homebrew bash 5.3.15, under every
+    # locale tried, including no locale at all -- so the actual mechanism on
+    # that CI image is still unknown. #618 and #620, landing in the same
+    # pull request, are correctness fixes; #621 itself is a cost
+    # optimization the issue calls optional ("if judged worth it"). A
+    # correctness fix should not be held hostage by an optimization with a
+    # three-attempt failure record and no reproduction path, so #621 is
+    # closed as not worth the fragility and log() unconditionally forks the
+    # flatten again, as it did before #621 (the pre-#621 shape, restored
+    # verbatim).
+    message="$(printf '%s' "$message" | LC_ALL=C tr '[:cntrl:]' ' ')"
     echo "${timestamp} [${component}] ${message}" >> "$MEMORY_LOG_FILE" 2>/dev/null \
         || echo "${timestamp} [${component}] ${message}" >&2
 }
