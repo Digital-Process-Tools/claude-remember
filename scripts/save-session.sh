@@ -1143,7 +1143,8 @@ if [ "$RUN_NDC" = true ]; then
                                     # above accepts a leading zero ("08"),
                                     # which bash arithmetic reads as octal and
                                     # "08"/"09" are not valid octal digits --
-                                    # `$(( NDC_SRC_GEN + 1 ))` would abort that
+                                    # feeding a bare NDC_SRC_GEN into `$(( ))`
+                                    # without that prefix would abort the
                                     # statement instead of bumping the
                                     # counter. record_summary_failure() hit
                                     # this exact shape and fixed it the same
