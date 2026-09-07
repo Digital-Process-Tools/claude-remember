@@ -129,11 +129,14 @@ ndc_read_gen() {
     esac
 }
 # Same shape as ndc_read_gen above, generalised to any timestamp marker file:
-# echoes 0 only when the marker was never created (or is a dangling symlink
-# nothing ever completed writing to -- see the -e/-L comment above), and the
-# literal "unreadable" when it exists but a read of it failed or produced
-# something that is not a plain non-negative integer -- a value neither
-# state can ever equal. Reused at both COOLDOWN_MARKER and NDC_MARKER below
+# echoes 0 only when the marker was never created (see the -e/-L comment
+# inside ndc_read_gen above for why a DANGLING symlink is NOT this case --
+# -L is true for it, so it falls through to "unreadable" below instead, the
+# same as ndc_read_gen's own dangling-symlink handling), and the literal
+# "unreadable" when it exists but a read of it failed, or is not a plain
+# regular file (see the type check below), or produced something that is
+# not a plain non-negative integer -- a value neither state can ever equal.
+# Reused at both COOLDOWN_MARKER and NDC_MARKER below
 # so the collapse #619 fixed for NDC_GEN_FILE -- `cat FILE 2>/dev/null ||
 # echo 0`, which cannot tell "never created" from "a read failed" -- does not
 # reappear at either one (#625). Lower stakes here than at NDC_GEN_FILE: an

@@ -256,3 +256,20 @@ class TestTsMarkerReadDoesNotHangOnNonRegularFiles:
             f"a marker that was never created must still read as 0, got: "
             f"{proc.stdout!r} / {proc.stderr!r}"
         )
+
+    def test_a_dangling_symlink_reads_as_unreadable_not_zero(self, tmp_path):
+        """A dangling symlink is something that WAS created (-L is true for
+        it), not the same fact as a marker that was never created -- the
+        same distinction ndc_read_gen's own comment already draws. Pinned
+        after a re-audit round found this module's docstring-level comment
+        (just above ts_marker_read) mis-describing this case as reading 0.
+        """
+        marker = tmp_path / "dangling-symlink-marker"
+        marker.symlink_to(tmp_path / "nonexistent-target")
+        proc = _call_ts_marker_read(marker, timeout=5)
+        assert proc.stdout.strip() == "unreadable", (
+            f"a dangling symlink was created here even though its target is "
+            f"gone -- it must read as unreadable, not as the fresh-0 that a "
+            f"marker never created at all would, got: {proc.stdout!r} / "
+            f"{proc.stderr!r}"
+        )
