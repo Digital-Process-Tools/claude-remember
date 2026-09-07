@@ -530,7 +530,7 @@ log() {
     local message="$2"
     local timestamp
     timestamp=$(_remember_date +%H:%M:%S)
-    # #621 tried three times to gate this fork behind a cheap in-shell
+    # #621 tried twice to gate this fork behind a cheap in-shell
     # pre-check (a message rarely carries a control byte at all, and log()
     # runs on the per-tool-call hot path) -- unconditional `[[:cntrl:]]`,
     # then an ANSI-C byte-value range meant to sidestep locale/ctype
@@ -546,7 +546,7 @@ log() {
     # pull request, are correctness fixes; #621 itself is a cost
     # optimization the issue calls optional ("if judged worth it"). A
     # correctness fix should not be held hostage by an optimization with a
-    # three-attempt failure record and no reproduction path, so #621 is
+    # two-attempt failure record and no reproduction path, so #621 is
     # closed as not worth the fragility and log() unconditionally forks the
     # flatten again, as it did before #621 (the pre-#621 shape, restored
     # verbatim).
