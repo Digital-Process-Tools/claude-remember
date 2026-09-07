@@ -505,7 +505,12 @@ MEMORY_LOG_FILE="${REMEMBER_LOG_DIR}/memory-${MEMORY_LOG_DATE}.log"
 # file, reading as a second, forged log entry to anything parsing the log (a
 # person skimming it, or a script). Flattened here, once, rather than at each
 # of the (at least three) call sites that embed such text, so the class is
-# closed everywhere log() is used, not just at the newest one (#599).
+# closed everywhere log() is used, not just at the newest one (#599) -- that
+# is $MEMORY_LOG_FILE ONLY. hook-errors.log is a SEPARATE file, written by
+# four functions below (_dispatch_report_failure, _dispatch_report_skip,
+# report_error, _dispatch_report_timeout) via their own second, independent
+# printf -- #599 did not reach those call sites, and #618 is what adds the
+# identical flatten to each of them directly, not by routing through log().
 #
 # LC_ALL=C is not decoration: under the caller's own UTF-8 locale, a `head
 # -c 80` cut landing mid-multibyte-character hands tr a malformed sequence,
@@ -525,6 +530,26 @@ log() {
     local message="$2"
     local timestamp
     timestamp=$(_remember_date +%H:%M:%S)
+    # #621 tried twice to gate this fork behind a cheap in-shell
+    # pre-check (a message rarely carries a control byte at all, and log()
+    # runs on the per-tool-call hot path) -- unconditional `[[:cntrl:]]`,
+    # then an ANSI-C byte-value range meant to sidestep locale/ctype
+    # classification entirely. Both were reasoned defensible and both went
+    # red on live CI in ways this repo could not reproduce locally: the
+    # bracket-class version deterministically missed every embedded control
+    # byte on windows-latest while this repo's own macOS dev machine (bash
+    # 3.2.57) stayed green; the byte-range version then did the same on
+    # every macos-latest leg (all four Python versions) while remaining
+    # green under bash 3.2.57 AND a fresh Homebrew bash 5.3.15, under every
+    # locale tried, including no locale at all -- so the actual mechanism on
+    # that CI image is still unknown. #618 and #620, landing in the same
+    # pull request, are correctness fixes; #621 itself is a cost
+    # optimization the issue calls optional ("if judged worth it"). A
+    # correctness fix should not be held hostage by an optimization with a
+    # two-attempt failure record and no reproduction path, so #621 is
+    # closed as not worth the fragility and log() unconditionally forks the
+    # flatten again, as it did before #621 (the pre-#621 shape, restored
+    # verbatim).
     message="$(printf '%s' "$message" | LC_ALL=C tr '[:cntrl:]' ' ')"
     echo "${timestamp} [${component}] ${message}" >> "$MEMORY_LOG_FILE" 2>/dev/null \
         || echo "${timestamp} [${component}] ${message}" >&2
@@ -800,6 +825,11 @@ _dispatch_stdout_relay() {
 _dispatch_report_failure() {
     local _event="$1" _name="$2" _rc="$3" _why="$4"
     local _msg="ERROR: hook failed: $_event/$_name (exit $_rc): $_why"
+    # #618: flattened HERE, once, before either write -- log() applies its
+    # own #599 flatten to $MEMORY_LOG_FILE, but the printf below writes a
+    # SECOND, raw copy straight to hook-errors.log, which #599 never
+    # touched. $_why can carry a hook's own untrusted output.
+    _msg="$(printf '%s' "$_msg" | LC_ALL=C tr '[:cntrl:]' ' ')"
     log "dispatch" "$_msg"
     [ -d "$REMEMBER_DIR/logs" ] || return 0
     printf '%s\n' "$(_remember_date +%H:%M:%S) [dispatch] $_msg" \
@@ -819,6 +849,9 @@ _dispatch_report_failure() {
 _dispatch_report_skip() {
     local _event="$1" _name="$2" _why="$3"
     local _msg="WARNING: hook SKIPPED and did not run: $_event/$_name ($_why) -- it will not run on any later dispatch until this is fixed"
+    # #618: see _dispatch_report_failure above -- same second, raw copy of
+    # $_msg reaches hook-errors.log below, outside log()'s own #599 flatten.
+    _msg="$(printf '%s' "$_msg" | LC_ALL=C tr '[:cntrl:]' ' ')"
     log "dispatch" "$_msg"
     [ -d "$REMEMBER_DIR/logs" ] || return 0
     printf '%s\n' "$(_remember_date +%H:%M:%S) [dispatch] $_msg" \
@@ -837,9 +870,16 @@ _dispatch_report_skip() {
 # _dispatch_report_failure gives: save-session.sh's stderr is the agent's own
 # stream, and a hook must never gain the ability to write into the session.
 report_error() {
-    log "$1" "$2"
+    local _component="$1"
+    # #618: flattened before either write, same reason as the three
+    # dispatch reporters above -- $2 is untrusted (a caller's own error
+    # text) and previously reached hook-errors.log raw, outside log()'s
+    # own #599 flatten.
+    local _msg
+    _msg="$(printf '%s' "$2" | LC_ALL=C tr '[:cntrl:]' ' ')"
+    log "$_component" "$_msg"
     [ -d "$REMEMBER_DIR/logs" ] || return 0
-    printf '%s\n' "$(_remember_date +%H:%M:%S) [$1] $2" \
+    printf '%s\n' "$(_remember_date +%H:%M:%S) [$_component] $_msg" \
         >> "$REMEMBER_DIR/logs/hook-errors.log" 2>/dev/null || true
     return 0
 }
@@ -868,6 +908,9 @@ report_error() {
 _dispatch_report_timeout() {
     local _event="$1" _name="$2" _budget="$3" _how="$4" _said="$5"
     local _msg="WARNING: hook TIMED OUT: $_event/$_name did not return within ${_budget}s and was stopped ($_how). This is NOT a failure report from the hook -- it never answered, so whether it did its work is UNKNOWN, and anything it left half-done is its own to unwind. Raise hooks.dispatch_timeout_seconds if this listener is honestly slow, or 0 to disable the bound. It said: $_said"
+    # #618: see _dispatch_report_failure above. $_said is a hook's own
+    # (possibly hostile, definitely untrusted) reply text.
+    _msg="$(printf '%s' "$_msg" | LC_ALL=C tr '[:cntrl:]' ' ')"
     log "dispatch" "$_msg"
     [ -d "$REMEMBER_DIR/logs" ] || return 0
     printf '%s\n' "$(_remember_date +%H:%M:%S) [dispatch] $_msg" \
