@@ -128,8 +128,17 @@ STDIN_SESSION_ID=$(_stdin_json_string session_id "$HOOK_STDIN" 2>/dev/null) || S
 # stdin is not more trustworthy than a basename — same validation
 # post-tool-hook.sh applies before this id becomes a path component or an
 # argument to another script.
+#
+# #600: this value reaches save-session.sh's argv below (`bash "$SAVE_SCRIPT"
+# "$STDIN_SESSION_ID" --force`), and that script's own arg loop treats a
+# leading-dash value as a FLAG rather than a positional session id, exactly
+# the gap #576 already closed at the sibling agy-stop-hook.sh call site
+# (`case ... in ''|.|..|-*|*[!A-Za-z0-9._-]*)`). Without `-*` here, a
+# session_id of "--dry" passes this guard untouched and turns the last-
+# chance flush into a silent dry-run preview: no summary written, position
+# not advanced, log line reads like an ordinary run.
 case "$STDIN_SESSION_ID" in
-    ''|.|..|*[!A-Za-z0-9._-]*) STDIN_SESSION_ID="" ;;
+    ''|.|..|-*|*[!A-Za-z0-9._-]*) STDIN_SESSION_ID="" ;;
 esac
 
 SESSION_END_REASON=$(_stdin_json_string reason "$HOOK_STDIN" 2>/dev/null) || SESSION_END_REASON=""
