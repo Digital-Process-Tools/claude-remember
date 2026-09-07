@@ -149,6 +149,22 @@ ts_marker_read() {
         echo 0
         return 0
     fi
+    # Something is at this path (or a symlink chains to something, dangling
+    # or not) but is not a REGULAR file -- a directory, a FIFO, a socket, a
+    # device, or a symlink to one of those. `cat` on a directory fails fast,
+    # but `cat` on a FIFO with no writer present BLOCKS forever (no O_NONBLOCK,
+    # no timeout anywhere in this script), and `cat` on a character device
+    # like /dev/zero streams unboundedly into the capture below instead of
+    # ever hitting EOF. -f follows symlinks to their final target, so this
+    # also catches a symlink into a FIFO. Every such case is "unreadable" --
+    # a value this marker can never legitimately hold -- without ever
+    # attempting to read it, so a marker of the wrong TYPE degrades to a
+    # WARNING the same as an unreadable one, rather than hanging the whole
+    # script on the read this function exists to make safe (self-review, #625).
+    if [ ! -f "$_marker" ]; then
+        echo unreadable
+        return 0
+    fi
     local _val
     _val=$(cat "$_marker" 2>/dev/null)
     case "$_val" in
@@ -274,18 +290,34 @@ if [[ ( -e "$COOLDOWN_MARKER" || -L "$COOLDOWN_MARKER" ) && "$DRY_RUN" != true &
     LAST_MOD=$(ts_marker_read "$COOLDOWN_MARKER")
     if [ "$LAST_MOD" = "unreadable" ]; then
         # #625: this marker exists but neither this read nor an earlier one
-        # (a permission or I/O error, or something in its place that is not
-        # a plain file -- a directory, most reachably) could get its
-        # content. That is NOT the same fact as "no save has ever landed",
-        # which is what a bare `cat ... || echo 0` used to make it look
-        # like -- silently, forever, on every single invocation, for a
-        # marker that is durably unreadable rather than merely racing a
-        # writer. Fail OPEN (proceed with the save; see the module-level
-        # discussion of ts_marker_read above for why that is the right
-        # call here) but SAY SO.
-        report_error "cooldown" "WARNING: $COOLDOWN_MARKER exists but could not be read -- treating the cooldown as expired and saving now. This will recur on every save until the marker is made readable again, or removed."
+        # got usable content from it -- either the read itself failed (a
+        # permission or I/O error, a non-regular file such as a directory)
+        # or it succeeded and returned something that is not a plain
+        # timestamp (empty, or corrupted by an interrupted write). Either
+        # way this round cannot trust the value. That is NOT the same fact
+        # as "no save has ever landed", which is what a bare
+        # `cat ... || echo 0` used to make it look like -- silently, forever,
+        # on every single invocation, for a marker that is durably broken
+        # rather than merely racing a writer. Fail OPEN (proceed with the
+        # save; see the module-level discussion of ts_marker_read above for
+        # why that is the right call here) but SAY SO.
+        report_error "cooldown" "WARNING: $COOLDOWN_MARKER exists but its value could not be used (a read failure, or content that is not a plain timestamp) -- treating the cooldown as expired and saving now. This will recur on every save until the marker holds a valid timestamp again, or is removed."
         LAST_MOD=0
     fi
+    # By this point LAST_MOD is always "0" or all-digits: ts_marker_read
+    # above already intercepts anything else (a failed read, or content that
+    # is not a plain timestamp) and this if/fi already converted its
+    # "unreadable" sentinel to 0. So the `case` a few lines down -- and the
+    # multi-paragraph history below explaining what happens when *raw,
+    # unvalidated* marker content reaches `$(( ))` -- describes a route that
+    # can no longer be taken through THIS read site. It is kept as a
+    # defensive backstop (a value slipping past ts_marker_read some other
+    # way, or a future edit that reads $COOLDOWN_MARKER directly again) and
+    # because moving 30 years of #326/#258 history for a case that no longer
+    # fires costs more than the one stale sentence, but do not read the
+    # comment block below as describing THIS path's normal behaviour anymore
+    # (#625).
+    #
     # Unvalidated file content inside $(( )) is evaluated as an ARITHMETIC
     # EXPRESSION, so one stray byte is a syntax error, not a bad number. Same
     # read, same guard, as 50-git-backup.sh's cooldown marker (#258).
@@ -913,11 +945,17 @@ if [[ "$RUN_NDC" = true && ( -e "$NDC_MARKER" || -L "$NDC_MARKER" ) ]]; then
         # #625: same collapse #619 fixed for NDC_GEN_FILE, at this marker
         # instead -- see ts_marker_read's own comment above. Fail OPEN
         # (compress now) but SAY SO, rather than silently defeating this
-        # cooldown on every invocation for as long as the marker stays
-        # unreadable.
-        report_error "ndc" "WARNING: $NDC_MARKER exists but could not be read -- treating the cooldown as expired and compressing now. This will recur on every save until the marker is made readable again, or removed."
+        # cooldown on every invocation for as long as the marker cannot be
+        # trusted -- whether that is a failed read or content that is not a
+        # plain timestamp.
+        report_error "ndc" "WARNING: $NDC_MARKER exists but its value could not be used (a read failure, or content that is not a plain timestamp) -- treating the cooldown as expired and compressing now. This will recur on every save until the marker holds a valid timestamp again, or is removed."
         NDC_MOD=0
     fi
+    # As at the cooldown site above: NDC_MOD is always "0" or all-digits by
+    # this point, so the `case` below and the UNPARSEABLE-vs-OUT-OF-RANGE
+    # comments that follow describe a route ts_marker_read already
+    # intercepts -- kept as a defensive backstop, not this path's normal
+    # behaviour (#625).
     case "$NDC_MOD" in
         ''|*[!0-9]*) NDC_MOD=0 ;;
     esac

@@ -22,6 +22,8 @@ suite used for NDC_GEN_FILE (tests/test_ndc_commit_lock.py).
 """
 
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -38,12 +40,31 @@ from .subprocess_helpers import subprocess_failure_detail
 from .test_ndc_truncate_race import _ndc_env, _wait_for_background_ndc
 from .test_save_session_gates import _make_env, _memory_log_text, _run
 
-UNREADABLE_PHRASE = "could not be read"
+UNREADABLE_PHRASE = "could not be used"
 
 
 def _hook_errors_text(project: Path) -> str:
     log = project / ".remember" / "logs" / "hook-errors.log"
     return log.read_text(encoding="utf-8", errors="replace") if log.is_file() else ""
+
+
+def _call_ts_marker_read(marker_path: Path, timeout: float = 5) -> subprocess.CompletedProcess:
+    """Call `ts_marker_read()` in isolation via process substitution.
+
+    Sourcing the WHOLE script would run its main flow; extracting just this
+    one function's definition (a plain `sed` range, not a bash construct
+    that could itself hang) lets a test call it directly and cheaply,
+    without also standing up a full save-session.sh environment. Wrapped in
+    a short timeout because the entire point of the test that uses this is
+    proving the call does NOT block indefinitely -- a bare `_run()` through
+    the full script would otherwise hang the test suite itself for up to
+    the harness's own 60s subprocess timeout.
+    """
+    script = REPO_ROOT / "scripts" / "save-session.sh"
+    source_line = f'source <(sed -n "/^ts_marker_read()/,/^}}/p" {script}); '
+    call_line = f'ts_marker_read "{marker_path}"'
+    cmd = ["bash", "-c", source_line + call_line]
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
 
 
 class TestCooldownMarkerUnreadable:
@@ -80,6 +101,19 @@ class TestCooldownMarkerUnreadable:
             "a cooldown marker that exists but cannot be read must be logged "
             "as such -- it is not the same fact as a marker that was never "
             f"created, and the silence must not repeat #619's failure mode.\n{seen}"
+        )
+        # A directory in place of the marker breaks the LATER unconditional
+        # `date +%s > "$COOLDOWN_MARKER"` write too, not just this read --
+        # and that write is unguarded upstream of this fix, so under `set -e`
+        # it crashes the whole script rather than merely leaving the
+        # cooldown to re-trigger. `proc.returncode == 0` above is already the
+        # regression check for that (reverting the write guard turns this
+        # red), but pin the guard's own log line too, distinct from the
+        # read-side WARNING asserted above, so a change that keeps the exit
+        # code green while dropping the write-side message is still caught.
+        assert "could not write" in seen and str(marker) in seen, (
+            "the later unconditional marker write also fails for a directory "
+            f"marker and must say so, separately from the read-side WARNING.\n{seen}"
         )
 
     def test_save_proceeds_quietly_when_cooldown_marker_is_absent(self, tmp_path):
@@ -142,6 +176,15 @@ class TestNdcMarkerUnreadable:
             "an NDC marker that exists but cannot be read must be logged as "
             f"such, distinct from one that was never created.\n{seen}"
         )
+        # Same write-guard pin as the cooldown marker test above: a directory
+        # marker also breaks the later unconditional `date +%s > "$NDC_MARKER"`
+        # write, which is unguarded upstream of this fix and crashes the
+        # whole script under `set -e`. `proc.returncode == 0` above is the
+        # regression check; this pins the guard's own distinct log line.
+        assert "could not write" in seen and str(marker) in seen, (
+            "the later unconditional marker write also fails for a directory "
+            f"marker and must say so, separately from the read-side WARNING.\n{seen}"
+        )
 
     def test_ndc_proceeds_quietly_when_marker_is_absent(self, tmp_path):
         """Positive control for the NDC marker."""
@@ -168,4 +211,48 @@ class TestNdcMarkerUnreadable:
         seen = _memory_log_text(project) + _hook_errors_text(project)
         assert UNREADABLE_PHRASE not in seen, (
             "an absent marker is not a read failure; it must not be reported as one"
+        )
+
+
+class TestTsMarkerReadDoesNotHangOnNonRegularFiles:
+    """Widening the existence test from `-f` to `-e || -L` (#625) means a
+    marker that is a FIFO now reaches ts_marker_read's body -- and `cat` on a
+    FIFO with no writer present blocks forever, with no timeout anywhere in
+    this script. Found in self-review, not by the TDD cycle above: pinned
+    here as its own class because it needs its OWN red/green cycle (a hang
+    is not a value a plain assertion sees; it needs a timeout around the
+    call) rather than fitting the read/warn shape the tests above pin.
+    """
+
+    def test_a_fifo_marker_returns_unreadable_without_blocking(self, tmp_path):
+        marker = tmp_path / "fifo-marker"
+        os.mkfifo(marker)
+        # No writer is ever opened on this FIFO. `cat` on it would block
+        # until one appears -- i.e. forever, in this test. The timeout below
+        # is the assertion: a hang fails the test by raising TimeoutExpired,
+        # exactly the shape a `pytest.raises` cannot express for "did not
+        # hang", so it is asserted by NOT catching the exception.
+        proc = _call_ts_marker_read(marker, timeout=5)
+        assert proc.stdout.strip() == "unreadable", (
+            f"a FIFO marker must read as unreadable (it can never legitimately "
+            f"hold a timestamp), got: {proc.stdout!r} / {proc.stderr!r}"
+        )
+
+    def test_a_regular_file_marker_is_unaffected(self, tmp_path):
+        """Positive control: the -f narrowing must not break the ordinary case."""
+        marker = tmp_path / "plain-marker"
+        marker.write_text("1700000000")
+        proc = _call_ts_marker_read(marker, timeout=5)
+        assert proc.stdout.strip() == "1700000000", (
+            f"a regular file holding a valid timestamp must still read as "
+            f"that timestamp, got: {proc.stdout!r} / {proc.stderr!r}"
+        )
+
+    def test_an_absent_marker_still_reads_as_zero(self, tmp_path):
+        """Positive control: the absence path (never created) is untouched."""
+        marker = tmp_path / "never-created"
+        proc = _call_ts_marker_read(marker, timeout=5)
+        assert proc.stdout.strip() == "0", (
+            f"a marker that was never created must still read as 0, got: "
+            f"{proc.stdout!r} / {proc.stderr!r}"
         )
