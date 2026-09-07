@@ -87,6 +87,20 @@ LOCK_DIR="${REMEMBER_DIR}/tmp/save.lock"
 # without pinning a lock for half a minute — same shape as _LOCK_ADOPT_AFTER.
 NDC_COMMIT_LOCK_TIMEOUT="${REMEMBER_NDC_COMMIT_LOCK_TIMEOUT:-30}"
 MEMORY_FILE="${REMEMBER_DIR}/now.md"
+# Monotonic counter, bumped by every NDC commit that lands (#614). The
+# byte-count staleness check below (NDC_LIVE_BYTES < NDC_SRC_BYTES) only
+# catches a replacement that ends up SHORTER than the snapshot it is being
+# checked against. Two overlapping NDC rounds -- reachable when a second
+# round's cooldown gate opens while the first round's Haiku call, or its own
+# NDC_COMMIT_LOCK_TIMEOUT wait, is still in flight (e.g. a laptop sleep/wake
+# spanning the hour-long cooldown) -- can have the FIRST round's commit
+# already retire+replace now.md with its own tail before the SECOND round
+# reaches its own commit check. If enough was appended in between that the
+# replacement is still >= the second round's now-meaningless offset, the size
+# check alone passes and `tail -c +N` slices into bytes the second round's
+# own Haiku call never summarized -- content that then exists nowhere. See
+# Step 8 for where this is read and bumped, both under LOCK_DIR.
+NDC_GEN_FILE="${REMEMBER_DIR}/tmp/ndc-generation"
 # Which day now.md's contents belong to (#141) — see Step 7.
 NOW_DAY_FILE="${REMEMBER_DIR}/tmp/now-day"
 LAST_SAVE_FILE="${REMEMBER_DIR}/tmp/last-save.json"
@@ -850,6 +864,15 @@ if [ "$RUN_NDC" = true ]; then
     log "ndc" "now.md -> today-${NDC_DAY}.md"
     date +%s > "$NDC_MARKER"
     NDC_SRC_BYTES=$(wc -c < "$MEMORY_FILE" | tr -d ' ')
+    # Read under LOCK_DIR, which this (parent) process still holds at this
+    # point in the script — see #614's NDC_GEN_FILE comment above. A prior
+    # round's committed generation is the value this round's own offset is
+    # only valid against; anything else means a commit has landed since and
+    # the offset no longer describes a real boundary in the live file.
+    NDC_SRC_GEN=$(cat "$NDC_GEN_FILE" 2>/dev/null || echo 0)
+    case "$NDC_SRC_GEN" in
+        (''|*[!0-9]*) NDC_SRC_GEN=0 ;;
+    esac
     NDC_PROMPT=$(mktemp "${TMPDIR:-/tmp}"/remember-ndc-XXXXXX)
 
     cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell build-ndc-prompt "$MEMORY_FILE" "$NDC_PROMPT"
@@ -1002,8 +1025,24 @@ if [ "$RUN_NDC" = true ]; then
                         case "$NDC_LIVE_BYTES" in
                             (''|*[!0-9]*) NDC_LIVE_BYTES=0 ;;
                         esac
+                        # #614: size alone cannot tell a legitimate append from
+                        # a REPLACEMENT that happens to still be >= this
+                        # round's snapshot -- and a replacement is exactly what
+                        # another NDC round's own commit produces (its own
+                        # tail, written over now.md by its own `mv`). Read
+                        # under the same LOCK_DIR this block already holds:
+                        # any generation other than the one this round started
+                        # against means such a commit has landed since, and
+                        # this round's offset no longer describes a real
+                        # boundary in the live file, regardless of size.
+                        NDC_LIVE_GEN=$(cat "$NDC_GEN_FILE" 2>/dev/null || echo 0)
+                        case "$NDC_LIVE_GEN" in
+                            (''|*[!0-9]*) NDC_LIVE_GEN=0 ;;
+                        esac
                         if [ "$NDC_LIVE_BYTES" -lt "$NDC_SRC_BYTES" ]; then
                             log "ndc" "SKIPPED commit: now.md is ${NDC_LIVE_BYTES}b, below the ${NDC_SRC_BYTES}b snapshot this offset was taken from -- left untouched (today-${NDC_DAY}.md may now hold a duplicate of this span)"
+                        elif [ "$NDC_LIVE_GEN" != "$NDC_SRC_GEN" ]; then
+                            log "ndc" "SKIPPED commit: another NDC round already committed since this round's snapshot (generation ${NDC_SRC_GEN} -> ${NDC_LIVE_GEN}) -- now.md left untouched, this round's offset no longer describes a real boundary (today-${NDC_DAY}.md may now hold a duplicate of this span)"
                         else
                             # Beside now.md, not in $TMPDIR (#242). #142's whole
                             # argument for why this commit is safe is "mv-over is
@@ -1090,6 +1129,15 @@ if [ "$RUN_NDC" = true ]; then
                                         rm -f "$NOW_DAY_FILE"
                                     fi
                                     [ "$NDC_KEPT" -gt 0 ] && log "ndc" "kept ${NDC_KEPT}b appended during compression"
+                                    # #614: retire this round's own offset for
+                                    # every OTHER live round (there can be at
+                                    # most one concurrently reachable given
+                                    # the hour-long cooldown, but nothing here
+                                    # depends on that staying true). Written
+                                    # under the same LOCK_DIR this commit just
+                                    # used, right after the mv that makes it
+                                    # true.
+                                    echo $(( NDC_SRC_GEN + 1 )) > "$NDC_GEN_FILE" 2>/dev/null || true
                                 else
                                     # now.md still holds every byte it had, so the
                                     # marker describing that content is still
