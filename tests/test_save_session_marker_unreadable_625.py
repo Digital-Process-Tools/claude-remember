@@ -23,8 +23,10 @@ suite used for NDC_GEN_FILE (tests/test_ndc_commit_lock.py).
 
 import json
 import os
+import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -48,23 +50,63 @@ def _hook_errors_text(project: Path) -> str:
     return log.read_text(encoding="utf-8", errors="replace") if log.is_file() else ""
 
 
-def _call_ts_marker_read(marker_path: Path, timeout: float = 5) -> subprocess.CompletedProcess:
-    """Call `ts_marker_read()` in isolation via process substitution.
+_TS_MARKER_READ_RANGE = re.compile(
+    r"^ts_marker_read\(\).*?^\}", re.MULTILINE | re.DOTALL
+)
 
-    Sourcing the WHOLE script would run its main flow; extracting just this
-    one function's definition (a plain `sed` range, not a bash construct
-    that could itself hang) lets a test call it directly and cheaply,
-    without also standing up a full save-session.sh environment. Wrapped in
-    a short timeout because the entire point of the test that uses this is
-    proving the call does NOT block indefinitely -- a bare `_run()` through
-    the full script would otherwise hang the test suite itself for up to
-    the harness's own 60s subprocess timeout.
+
+def _extract_ts_marker_read_source() -> str:
+    """Pull `ts_marker_read()`'s definition out of save-session.sh in Python,
+    not via a `sed`-into-`source <(...)` pipeline.
+
+    That pipeline (`source <(sed -n '/^ts_marker_read()/,/^}/p' FILE)`) works
+    on every macOS bash this was authored and locally re-tested against
+    (3.2.57 and Homebrew 5.x) but was OBSERVED failing -- consistently, on
+    all four macos-latest legs, never on ubuntu-latest or windows-latest --
+    on GitHub Actions CI with `bash: ts_marker_read: command not found`: the
+    function silently ended up undefined despite `source` reporting no
+    error, the same shape of macOS-CI-only process-substitution flakiness
+    this session had already hit once this session (#621/#627) with a
+    different fragile shell-substitution trick. Unreproducible locally under
+    any bash version tried, so the actual OS/runner-image mechanism was not
+    chased further -- the fix is to stop depending on process substitution
+    at all, per the maintainer's explicit steer after the CI failure was
+    reported. A plain multiline regex extraction (identical bytes to what
+    the old `sed` range selected) removes both the subprocess and the
+    `<(...)` construct from this path entirely.
     """
     script = REPO_ROOT / "scripts" / "save-session.sh"
-    source_line = f'source <(sed -n "/^ts_marker_read()/,/^}}/p" {script}); '
-    call_line = f'ts_marker_read "{marker_path}"'
-    cmd = ["bash", "-c", source_line + call_line]
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
+    text = script.read_text(encoding="utf-8")
+    match = _TS_MARKER_READ_RANGE.search(text)
+    assert match, "ts_marker_read() not found in scripts/save-session.sh -- extraction regex is stale"
+    return match.group(0) + "\n"
+
+
+def _call_ts_marker_read(marker_path: Path, timeout: float = 5) -> subprocess.CompletedProcess:
+    """Call `ts_marker_read()` in isolation, via a REAL temp file.
+
+    Sourcing the WHOLE script would run its main flow; sourcing just this
+    one function's definition lets a test call it directly and cheaply,
+    without also standing up a full save-session.sh environment. A real
+    file on disk (not a process substitution) so `source` has an ordinary
+    seekable path to read, whatever the underlying mechanism was that made
+    macOS CI misbehave with `<(...)` here. Wrapped in a short timeout
+    because the entire point of the test that uses this is proving the call
+    does NOT block indefinitely -- a bare `_run()` through the full script
+    would otherwise hang the test suite itself for up to the harness's own
+    60s subprocess timeout.
+    """
+    func_src = _extract_ts_marker_read_source()
+    with tempfile.NamedTemporaryFile(
+        "w", suffix=".sh", delete=False, encoding="utf-8"
+    ) as f:
+        f.write(func_src)
+        func_file = f.name
+    try:
+        cmd = ["bash", "-c", f'source "{func_file}"; ts_marker_read "{marker_path}"']
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
+    finally:
+        os.unlink(func_file)
 
 
 class TestCooldownMarkerUnreadable:
