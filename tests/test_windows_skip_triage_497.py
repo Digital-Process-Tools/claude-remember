@@ -18,10 +18,14 @@ comparison, so the test cannot pass merely because comparison logic never
 runs.
 
 The doc's table is parsed via `scripts.windows_skip_triage_497.parse_doc_table_rows`
--- the same shared parser `tests/test_windows_skip_triage_prose_totals_595.py`
-uses for its own row/verdict counts -- rather than a second, independently
-written row regex here, so the two guards cannot silently disagree about what
-counts as a row (#595's own self-review).
+rather than a second, independently written row regex here, so a future
+consistency guard on this table cannot silently disagree with this one about
+what counts as a row (#595's own self-review). The prose-total guard that
+originally motivated sharing this parser,
+`tests/test_windows_skip_triage_prose_totals_595.py`, was itself removed by
+#613 along with the prose numbers it checked -- see
+docs/windows-skip-triage.md's "Verdicts" section and
+`tests/test_windows_skip_triage_no_stale_prose_counts_613.py`.
 """
 
 from __future__ import annotations
