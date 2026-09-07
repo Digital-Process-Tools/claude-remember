@@ -326,3 +326,33 @@ class TestNdcCommitLock:
             "just because a failed read and an absent file happen to produce "
             "the same fallback value"
         )
+
+    def test_commit_skips_when_generation_marker_is_a_broken_symlink(self, tmp_path):
+        """#619 follow-up: a dangling symlink is not the same fact as no path at all.
+
+        `[ ! -e PATH ]` follows symlinks and is false for a plain missing path
+        and for a symlink whose target is missing alike -- `-e` cannot tell
+        "nothing was ever created here" from "something was created here and
+        then its target went away". A dangling symlink left in place of the
+        marker (a partial/aborted write by some other tool, e.g.) would
+        therefore read as legitimate generation 0 under a bare `-e` check,
+        reopening the exact absent-vs-unreadable ambiguity this issue closes,
+        just one layer further down.
+        """
+        env, project, plugin, calls, sid = _ndc_env(tmp_path)
+        memory_file = project / ".remember" / "now.md"
+        gen_file = project / ".remember" / "tmp" / "ndc-generation"
+        gen_file.symlink_to(project / ".remember" / "tmp" / "does-not-exist")
+
+        result = _run(plugin, env, sid)
+        assert result.returncode == 0, subprocess_failure_detail(
+            result, project / ".remember"
+        )
+
+        _wait_for_background_ndc(memory_file)
+        assert "SKIPPED commit" in _log_text(project), (
+            "the generation marker exists (as a symlink) but its target does "
+            "not, so every read of it fails -- that is not the same fact as "
+            "the marker never having been created, and must not be treated "
+            "as generation 0"
+        )

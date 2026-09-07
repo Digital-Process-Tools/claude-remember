@@ -111,10 +111,17 @@ NDC_GEN_FILE="${REMEMBER_DIR}/tmp/ndc-generation"
 # exactly when it can least afford to (#619). Echoes a generation number, or
 # the literal "unreadable", which a numeric generation can never equal.
 ndc_read_gen() {
-    if [ ! -e "$NDC_GEN_FILE" ]; then
+    # -e follows a symlink and is false for BOTH "nothing was ever created
+    # here" and "a symlink was created here and its target is now gone" --
+    # it cannot tell those apart. -L catches the second: a path that is a
+    # symlink, dangling or not, is a path something created, so it belongs
+    # on the "exists" side of this check, falling through to the failed
+    # `cat` below rather than being read as a fresh, legitimate 0.
+    if [ ! -e "$NDC_GEN_FILE" ] && [ ! -L "$NDC_GEN_FILE" ]; then
         echo 0
         return 0
     fi
+    local _ndc_gen
     _ndc_gen=$(cat "$NDC_GEN_FILE" 2>/dev/null)
     case "$_ndc_gen" in
         (''|*[!0-9]*) echo unreadable ;;
