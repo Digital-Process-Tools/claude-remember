@@ -87,13 +87,21 @@ def _fake_tr_dir(tmp_path, ledger):
 
 
 def _run(script, project_dir, path_prefix):
-    env = {
-        **os.environ,
-        "PROJECT_DIR": _bash_path(project_dir),
-        "PATH": f"{path_prefix}{os.pathsep}{os.environ.get('PATH', '')}",
-    }
+    # PATH is prepended INSIDE the script, via bash's own `export`, rather
+    # than through subprocess's env dict with `os.pathsep` -- os.pathsep is
+    # `;` on Windows, but Git Bash's bash.exe is a POSIX shell and always
+    # wants `$PATH` colon-separated internally regardless of the host OS.
+    # Handing it a `;`-joined value through env= sits downstream of MSYS2's
+    # own env-variable conversion heuristics, which are not guaranteed to
+    # re-split a value the test injected after the fact the way they split
+    # a native Windows PATH inherited at process start. A literal `:` typed
+    # inside the script, extending bash's own already-correct `$PATH`, has
+    # no such ambiguity: it is bash's own syntax, read by bash itself, on
+    # every platform bash runs on.
+    env = {**os.environ, "PROJECT_DIR": _bash_path(project_dir)}
+    wrapped = f'export PATH="{path_prefix}:$PATH"\n{script}'
     result = subprocess.run(
-        [_BASH, "-c", script], env=env, capture_output=True, text=True,
+        [_BASH, "-c", wrapped], env=env, capture_output=True, text=True,
         errors="replace", check=False,
     )
     assert result.returncode == 0, f"script failed: {result.stderr}"
