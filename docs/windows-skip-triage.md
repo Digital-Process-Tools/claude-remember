@@ -23,7 +23,7 @@ session -- #585, #588). A `.claude/jit-context` entry
 `supertool` write introduces the `pytestmark` pattern; `CONTRIBUTING.md` states it too,
 for a contributor not routing writes through `supertool`.
 
-## The count: 104, not 107 (and not the issue's original 92)
+## The count: not 107, and not the issue's original 92 (see the table for the live number)
 
 The issue's own re-verified count -- `grep -rl "pytestmark = pytest.mark.skipif"
 tests | xargs grep -l "win32"` -- returns 107 on this tree. That command only
@@ -43,11 +43,11 @@ parses every test module with `ast`, and only counts a file that has an
 actual module-level `pytestmark = pytest.mark.skipif(<expr containing
 "win32">, reason=...)` assignment -- a bare call, or one arm of a
 list/tuple of marks (pytest ORs a list, so any one arm mentioning "win32"
-is a real blanket skip). That finds **104** modules on this tree at this
-commit. `tests/test_windows_skip_triage_497.py` recomputes this same set
-on every run and diffs it against the table below, so this list cannot
-silently drift out of sync with the tree the way the issue itself describes
-(92 -> 107 with nothing announcing the drift) -- though see the note at the
+is a real blanket skip). `tests/test_windows_skip_triage_497.py` recomputes
+this same set on every run and diffs it against the table below, so this
+list cannot silently drift out of sync with the tree the way the issue
+itself describes (92 -> 107 with nothing announcing the drift) -- though
+see the note at the
 end of the Verdicts section: that guard has its own blind spot, caught
 once already during review.
 
@@ -55,14 +55,27 @@ once already during review.
 
 - **convertible** -- the skip reason is plausibly about a POSIX-only *tool*
   (bash itself, a POSIX-only shell construct) that `resolve_bash()` could
-  supply on a Windows runner via Git Bash. 8 modules.
+  supply on a Windows runner via Git Bash.
 - **not-convertible** -- the reason names something Git-Bash discovery
   cannot fix: POSIX file permissions/mode bits, process signals (`kill -0`,
   `fork`), `flock`, `umask`, NTFS/ACL semantics, or an explicit POSIX-vs-Windows
-  path-format incompatibility. 12 modules.
+  path-format incompatibility.
 - **unclear** -- the reason string alone does not say enough to tell; reading
   it is not the same as reading the test body, and this list is deliberately
-  not that read. 84 modules.
+  not that read.
+
+The exact count for each verdict is the table's own row count below, not
+restated here -- #613 removed these numbers (and the total-module count
+above) after they drifted out of sync with the table three times in quick
+succession (#595, #596, and a follow-up commit on #611), every time because
+a PR adding one table row was reviewed and merged green against its own
+stale base before a sibling PR's prose fix had landed. A reactive
+consistency test (`tests/test_windows_skip_triage_prose_totals_595.py`,
+since removed) caught two of those three drifts, but only after the fact,
+and could not see a drift introduced by a different PR's base. Deleting the
+numbers removes the class: there is now exactly one place a count lives, and
+`tests/test_windows_skip_triage_no_stale_prose_counts_613.py` guards against
+one creeping back in as hand-maintained prose.
 
 **A blind spot in the scanner itself, caught once already.** An earlier
 version of `scripts/windows_skip_triage_497.py` only matched a bare
@@ -78,7 +91,7 @@ what the AST matcher was written to recognize, not by an exhaustive read of
 every skip expression in `tests/`.
 
 **The `unclear` majority is the honest result, not a shortcut.** The great
-bulk of these 104 reasons is one of a handful of near-identical templated
+bulk of these reasons is one of a handful of near-identical templated
 strings -- `"bash subprocess + POSIX layout -- not portable to Windows
 runners"`, `"bash hook subprocess + POSIX semantics -- not portable to
 Windows runners"`, and near-variants -- that bundle the one thing
