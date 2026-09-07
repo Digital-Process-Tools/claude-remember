@@ -128,6 +128,34 @@ ndc_read_gen() {
         (*) echo "$_ndc_gen" ;;
     esac
 }
+# Same shape as ndc_read_gen above, generalised to any timestamp marker file:
+# echoes 0 only when the marker was never created (or is a dangling symlink
+# nothing ever completed writing to -- see the -e/-L comment above), and the
+# literal "unreadable" when it exists but a read of it failed or produced
+# something that is not a plain non-negative integer -- a value neither
+# state can ever equal. Reused at both COOLDOWN_MARKER and NDC_MARKER below
+# so the collapse #619 fixed for NDC_GEN_FILE -- `cat FILE 2>/dev/null ||
+# echo 0`, which cannot tell "never created" from "a read failed" -- does not
+# reappear at either one (#625). Lower stakes here than at NDC_GEN_FILE: an
+# unreadable marker reads as maximally old, so the cooldown it guards is
+# bypassed (an extra Haiku call) rather than data silently lost -- but a
+# durably unreadable marker (crashed mid-write, replaced by a directory,
+# permissions never fixed) was defeating that cooldown on every single
+# invocation with nothing in the log to say so, which is the same silence
+# #619 closed, just with a cheaper failure mode.
+ts_marker_read() {
+    local _marker="$1"
+    if [ ! -e "$_marker" ] && [ ! -L "$_marker" ]; then
+        echo 0
+        return 0
+    fi
+    local _val
+    _val=$(cat "$_marker" 2>/dev/null)
+    case "$_val" in
+        (''|*[!0-9]*) echo unreadable ;;
+        (*) echo "$_val" ;;
+    esac
+}
 # Which day now.md's contents belong to (#141) — see Step 7.
 NOW_DAY_FILE="${REMEMBER_DIR}/tmp/now-day"
 LAST_SAVE_FILE="${REMEMBER_DIR}/tmp/last-save.json"
@@ -242,8 +270,22 @@ fi
 
 # --- Cooldown ---
 [ "$FORCE" = true ] && log "force" "bypassing cooldown + min msgs"
-if [ -f "$COOLDOWN_MARKER" ] && [ "$DRY_RUN" != true ] && [ "$FORCE" != true ]; then
-    LAST_MOD=$(cat "$COOLDOWN_MARKER" 2>/dev/null || echo 0)
+if [[ ( -e "$COOLDOWN_MARKER" || -L "$COOLDOWN_MARKER" ) && "$DRY_RUN" != true && "$FORCE" != true ]]; then
+    LAST_MOD=$(ts_marker_read "$COOLDOWN_MARKER")
+    if [ "$LAST_MOD" = "unreadable" ]; then
+        # #625: this marker exists but neither this read nor an earlier one
+        # (a permission or I/O error, or something in its place that is not
+        # a plain file -- a directory, most reachably) could get its
+        # content. That is NOT the same fact as "no save has ever landed",
+        # which is what a bare `cat ... || echo 0` used to make it look
+        # like -- silently, forever, on every single invocation, for a
+        # marker that is durably unreadable rather than merely racing a
+        # writer. Fail OPEN (proceed with the save; see the module-level
+        # discussion of ts_marker_read above for why that is the right
+        # call here) but SAY SO.
+        report_error "cooldown" "WARNING: $COOLDOWN_MARKER exists but could not be read -- treating the cooldown as expired and saving now. This will recur on every save until the marker is made readable again, or removed."
+        LAST_MOD=0
+    fi
     # Unvalidated file content inside $(( )) is evaluated as an ARITHMETIC
     # EXPRESSION, so one stray byte is a syntax error, not a bad number. Same
     # read, same guard, as 50-git-backup.sh's cooldown marker (#258).
@@ -315,7 +357,18 @@ dispatch "before_save"
 log "extract" "session $SESSION_ID"
 safe_eval <<< "$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell extract "$SESSION_ID" "$PROJECT_DIR")"
 CLEANUP_FILES+=("$EXTRACT_FILE")
-date +%s > "$COOLDOWN_MARKER"
+# #625: unguarded, this write crashes the WHOLE script under `set -e` when
+# the marker cannot be written -- the same durable state (a directory in its
+# place, or a permission that blocks both read and write) that makes
+# ts_marker_read report "unreadable" above. That is a harder failure than
+# the "fails open to an extra Haiku call" this cooldown is documented to
+# cost: the save that just ran would be lost entirely, past the point of no
+# return, rather than merely re-running its cooldown next time. Guarded the
+# same way the self-heal write in the ELAPSED<0 branch already is, so a
+# durably broken marker degrades to "the cooldown keeps re-triggering" (a
+# warning already given above) instead of "this save never completed".
+date +%s > "$COOLDOWN_MARKER" 2>/dev/null \
+    || report_error "cooldown" "WARNING: could not write $COOLDOWN_MARKER after this save -- the cooldown will not reflect it, and every future save will hit the same unreadable/unwritable marker until it is fixed or removed."
 if [ "$ENVELOPE" = "unrecognised" ]; then
     # A transcript shape neither Claude Code nor Codex wrote -- NOT a quiet
     # session. Reporting it as "0 exchanges" would be indistinguishable from
@@ -845,7 +898,7 @@ if [ "$(config '.features.ndc_compression' true)" != "true" ]; then
     RUN_NDC=false
     log "ndc" "disabled by features.ndc_compression"
 fi
-if [ "$RUN_NDC" = true ] && [ -f "$NDC_MARKER" ]; then
+if [[ "$RUN_NDC" = true && ( -e "$NDC_MARKER" || -L "$NDC_MARKER" ) ]]; then
     # Same read and same guard as the save cooldown above. For an UNPARSEABLE
     # marker the abandoned body is the whole `if`, so `RUN_NDC=false` never runs
     # and this save compresses despite the cooldown -- and `date +%s >
@@ -855,7 +908,16 @@ if [ "$RUN_NDC" = true ] && [ -f "$NDC_MARKER" ]; then
     # An OUT-OF-RANGE marker is the opposite and does not self-heal (#326): it
     # parses, so `RUN_NDC=false` DOES run, and the rewrite below is inside the
     # branch that decision skips. Handled in the range arm.
-    NDC_MOD=$(cat "$NDC_MARKER" 2>/dev/null || echo 0)
+    NDC_MOD=$(ts_marker_read "$NDC_MARKER")
+    if [ "$NDC_MOD" = "unreadable" ]; then
+        # #625: same collapse #619 fixed for NDC_GEN_FILE, at this marker
+        # instead -- see ts_marker_read's own comment above. Fail OPEN
+        # (compress now) but SAY SO, rather than silently defeating this
+        # cooldown on every invocation for as long as the marker stays
+        # unreadable.
+        report_error "ndc" "WARNING: $NDC_MARKER exists but could not be read -- treating the cooldown as expired and compressing now. This will recur on every save until the marker is made readable again, or removed."
+        NDC_MOD=0
+    fi
     case "$NDC_MOD" in
         ''|*[!0-9]*) NDC_MOD=0 ;;
     esac
@@ -889,7 +951,12 @@ TODAY_FILE="${REMEMBER_DIR}/today-${NDC_DAY}.md"
 
 if [ "$RUN_NDC" = true ]; then
     log "ndc" "now.md -> today-${NDC_DAY}.md"
-    date +%s > "$NDC_MARKER"
+    # #625: same reasoning as the COOLDOWN_MARKER write above -- unguarded,
+    # this crashes the whole script under `set -e` for a durably broken
+    # marker instead of merely leaving the compression cooldown to
+    # re-trigger next time.
+    date +%s > "$NDC_MARKER" 2>/dev/null \
+        || report_error "ndc" "WARNING: could not write $NDC_MARKER after this compression -- the cooldown will not reflect it, and every future save will hit the same unreadable/unwritable marker until it is fixed or removed."
     NDC_SRC_BYTES=$(wc -c < "$MEMORY_FILE" | tr -d ' ')
     # Read under LOCK_DIR, which this (parent) process still holds at this
     # point in the script — see #614's NDC_GEN_FILE comment above. A prior
@@ -1071,7 +1138,14 @@ if [ "$RUN_NDC" = true ]; then
                             # must not be treated as "no commit landed" just
                             # because a bare `cat ... || echo 0` used to produce
                             # that same 0 for both cases.
-                            log "ndc" "SKIPPED commit: could not read ${NDC_GEN_FILE} (src=${NDC_SRC_GEN}, live=${NDC_LIVE_GEN}) -- now.md left untouched, this round cannot tell whether another round committed since its snapshot (today-${NDC_DAY}.md may now hold a duplicate of this span)"
+                            # #626: a durably unreadable marker (crashed
+                            # mid-write, replaced by a directory, permissions
+                            # never fixed) makes every future round land here
+                            # forever, with no hint of the way out -- deleting
+                            # it is safe (it only ever resets generation
+                            # tracking to 0) and is the one thing an operator
+                            # reading this line cannot otherwise know.
+                            log "ndc" "SKIPPED commit: could not read ${NDC_GEN_FILE} (src=${NDC_SRC_GEN}, live=${NDC_LIVE_GEN}) -- now.md left untouched, this round cannot tell whether another round committed since its snapshot (today-${NDC_DAY}.md may now hold a duplicate of this span). If this recurs, ${NDC_GEN_FILE} is likely durably unreadable rather than merely racing a writer -- delete it to reset generation tracking to 0 and unblock future commits."
                         elif [ "$NDC_LIVE_GEN" != "$NDC_SRC_GEN" ]; then
                             log "ndc" "SKIPPED commit: another NDC round already committed since this round's snapshot (generation ${NDC_SRC_GEN} -> ${NDC_LIVE_GEN}) -- now.md left untouched, this round's offset no longer describes a real boundary (today-${NDC_DAY}.md may now hold a duplicate of this span)"
                         else
