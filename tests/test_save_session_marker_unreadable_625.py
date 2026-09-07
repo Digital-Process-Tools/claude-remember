@@ -50,11 +50,6 @@ def _hook_errors_text(project: Path) -> str:
     return log.read_text(encoding="utf-8", errors="replace") if log.is_file() else ""
 
 
-_TS_MARKER_READ_RANGE = re.compile(
-    r"^ts_marker_read\(\).*?^\}", re.MULTILINE | re.DOTALL
-)
-
-
 def _extract_ts_marker_read_source() -> str:
     """Pull `ts_marker_read()`'s definition out of save-session.sh in Python,
     not via a `sed`-into-`source <(...)` pipeline.
@@ -77,7 +72,7 @@ def _extract_ts_marker_read_source() -> str:
     """
     script = REPO_ROOT / "scripts" / "save-session.sh"
     text = script.read_text(encoding="utf-8")
-    match = _TS_MARKER_READ_RANGE.search(text)
+    match = re.search(r"^ts_marker_read\(\).*?^\}", text, re.MULTILINE | re.DOTALL)
     assert match, "ts_marker_read() not found in scripts/save-session.sh -- extraction regex is stale"
     return match.group(0) + "\n"
 
