@@ -536,13 +536,27 @@ log() {
     # printf|tr on every single call paid for a flatten nearly none of them
     # need. This `case` is a pure in-shell pattern match, no subprocess:
     # only when a control byte is actually PRESENT does the fork below run.
-    # `local LC_ALL=C` scopes the C locale to this function only (restored
-    # on return) so the match classifies bytes 0-255 individually, the same
-    # correctness #599 forced on the tr pipeline itself for the identical
-    # reason (a `head -c 80` cut can land mid-multibyte-character).
-    local LC_ALL=C
+    #
+    # Deliberately NOT `[[:cntrl:]]` (a POSIX bracket CLASS, which asks the
+    # C library "is this byte cntrl under the active locale" -- a ctype/
+    # wctype lookup that a shell's own glob matcher can implement however
+    # it likes). #621 originally used it here and it broke, deterministically,
+    # on every windows-latest CI leg (all 4 Python versions) while every
+    # Linux and macOS leg -- and this repo's own macOS dev machine, on an
+    # ancient bash 3.2.57 -- stayed green: the pre-check simply never
+    # matched a message carrying a real embedded newline under Git Bash's
+    # MSYS2-built bash, so `tr` was never invoked and the flatten silently
+    # never ran. The version below tests literal BYTE VALUES via ANSI-C
+    # quoting (`$'\001'`-`$'\037'`, `$'\177'`) instead -- a straight ordinal
+    # comparison with no ctype table, no locale, and nothing left for a
+    # different bash build to classify differently. `local LC_ALL=C` is kept
+    # for the actual `tr` invocation below (a coreutils call, unaffected by
+    # this bug -- Git for Windows bundles GNU coreutils, and the failure
+    # reports named the pre-check, never a `tr` that ran and mis-flattened),
+    # the same correctness #599 forced on it for the identical reason (a
+    # `head -c 80` cut can land mid-multibyte-character).
     case "$message" in
-        *[[:cntrl:]]*)
+        *[$'\001'-$'\037']*|*$'\177'*)
             message="$(printf '%s' "$message" | LC_ALL=C tr '[:cntrl:]' ' ')"
             ;;
     esac

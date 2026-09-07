@@ -140,3 +140,45 @@ def test_a_message_with_a_control_byte_still_forks_tr_and_flattens(tmp_path):
     log_lines = [l for l in result.stdout.splitlines() if l.strip()]
     assert len(log_lines) == 1, f"embedded newline forged a second log entry: {log_lines!r}"
     assert "[hook] session-start" in log_lines[0]
+
+
+_CONTROL_BYTE_CASES = [
+    ("tab, 0x09", "\t"),
+    ("carriage return, 0x0d", "\r"),
+    ("DEL, 0x7f", chr(0x7f)),
+    ("unit separator, 0x1f -- the top of the C0 range", chr(0x1f)),
+]
+
+
+@pytest.mark.parametrize("byte_desc,byte_char", _CONTROL_BYTE_CASES)
+def test_every_control_byte_class_still_forks_tr(tmp_path, byte_desc, byte_char):
+    """MUST FIRE (positive control, broadened). Context: #621's own
+    regression, reported against a live windows-latest CI run (all 4 Python
+    versions, only that leg): the ORIGINAL pre-check used a POSIX bracket
+    CLASS to test for a control byte -- a ctype/locale table lookup a shell
+    build can implement however it likes -- and it silently never matched a
+    real embedded newline under Git Bash's MSYS2-built bash, while every
+    Linux/macOS leg (and this repo's own macOS dev machine, on an old
+    bash 3.2.57) stayed green. The fix replaced the bracket class with a
+    literal byte-value range test instead, which needs no ctype table at
+    all. This test widens coverage across the byte range the new pattern
+    claims to cover -- not just newline -- so a future edit that narrows
+    the range back down has more than one single byte value pinning it."""
+    project = _make_project(tmp_path)
+    ledger = tmp_path / "tr-calls.log"
+    bindir = _fake_tr_dir(tmp_path, ledger)
+    script = f"""
+    set -e
+    export PROJECT_DIR="{_bash_path(project)}"
+    source "{_bash_path(LOG_SH)}"
+    log "ndc" "before{byte_char}after"
+    cat "$MEMORY_LOG_FILE"
+    """
+    result = _run(script, project, _bash_path(bindir))
+    assert ledger.exists(), (
+        f"log() never invoked tr for a message carrying {byte_desc}: {result.stdout!r}"
+    )
+    assert byte_char not in result.stdout, (
+        f"{byte_desc} reached the log file unflattened: {result.stdout!r}"
+    )
+    assert "before" in result.stdout and "after" in result.stdout
