@@ -1137,7 +1137,31 @@ if [ "$RUN_NDC" = true ]; then
                                     # under the same LOCK_DIR this commit just
                                     # used, right after the mv that makes it
                                     # true.
-                                    echo $(( NDC_SRC_GEN + 1 )) > "$NDC_GEN_FILE" 2>/dev/null || true
+                                    #
+                                    # `10#$NDC_SRC_GEN` (#332's own fix,
+                                    # applied here too): the digit-only guard
+                                    # above accepts a leading zero ("08"),
+                                    # which bash arithmetic reads as octal and
+                                    # "08"/"09" are not valid octal digits --
+                                    # `$(( NDC_SRC_GEN + 1 ))` would abort that
+                                    # statement instead of bumping the
+                                    # counter. record_summary_failure() hit
+                                    # this exact shape and fixed it the same
+                                    # way (see its own `10#$_prev_count`).
+                                    #
+                                    # Logged, not `|| true` alone: a failed
+                                    # write here leaves the on-disk generation
+                                    # at its PRE-commit value even though the
+                                    # commit itself already landed (the mv
+                                    # above already succeeded) -- silently
+                                    # reopening the exact #614 window this
+                                    # check exists to close, for any other
+                                    # round that snapshotted the same
+                                    # generation. Matches the sibling mv
+                                    # failure's own logging a few lines above.
+                                    if ! NDC_GEN_ERR=$(echo $(( 10#$NDC_SRC_GEN + 1 )) > "$NDC_GEN_FILE" 2>&1); then
+                                        log "ndc" "WARNING: could not bump ${NDC_GEN_FILE} past ${NDC_SRC_GEN} -- a later round that started from this same generation will not detect that this commit already landed: ${NDC_GEN_ERR:-unknown error}"
+                                    fi
                                 else
                                     # now.md still holds every byte it had, so the
                                     # marker describing that content is still
