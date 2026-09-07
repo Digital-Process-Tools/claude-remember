@@ -101,6 +101,33 @@ MEMORY_FILE="${REMEMBER_DIR}/now.md"
 # own Haiku call never summarized -- content that then exists nowhere. See
 # Step 8 for where this is read and bumped, both under LOCK_DIR.
 NDC_GEN_FILE="${REMEMBER_DIR}/tmp/ndc-generation"
+# Read NDC_GEN_FILE, distinguishing "never created" (legitimately generation 0
+# -- no commit has ever landed) from "exists but a read of it failed" (a
+# permission or I/O error, or a reader racing the truncating `>` this file's
+# own writer uses to bump it below). #614's mismatch check compares two such
+# reads; collapsing both failure shapes to the same 0 -- what a bare
+# `cat ... || echo 0` does -- makes two independent failures compare equal to
+# each other and to a legitimately absent file, and the guard goes silent
+# exactly when it can least afford to (#619). Echoes a generation number, or
+# the literal "unreadable", which a numeric generation can never equal.
+ndc_read_gen() {
+    # -e follows a symlink and is false for BOTH "nothing was ever created
+    # here" and "a symlink was created here and its target is now gone" --
+    # it cannot tell those apart. -L catches the second: a path that is a
+    # symlink, dangling or not, is a path something created, so it belongs
+    # on the "exists" side of this check, falling through to the failed
+    # `cat` below rather than being read as a fresh, legitimate 0.
+    if [ ! -e "$NDC_GEN_FILE" ] && [ ! -L "$NDC_GEN_FILE" ]; then
+        echo 0
+        return 0
+    fi
+    local _ndc_gen
+    _ndc_gen=$(cat "$NDC_GEN_FILE" 2>/dev/null)
+    case "$_ndc_gen" in
+        (''|*[!0-9]*) echo unreadable ;;
+        (*) echo "$_ndc_gen" ;;
+    esac
+}
 # Which day now.md's contents belong to (#141) — see Step 7.
 NOW_DAY_FILE="${REMEMBER_DIR}/tmp/now-day"
 LAST_SAVE_FILE="${REMEMBER_DIR}/tmp/last-save.json"
@@ -869,10 +896,7 @@ if [ "$RUN_NDC" = true ]; then
     # round's committed generation is the value this round's own offset is
     # only valid against; anything else means a commit has landed since and
     # the offset no longer describes a real boundary in the live file.
-    NDC_SRC_GEN=$(cat "$NDC_GEN_FILE" 2>/dev/null || echo 0)
-    case "$NDC_SRC_GEN" in
-        (''|*[!0-9]*) NDC_SRC_GEN=0 ;;
-    esac
+    NDC_SRC_GEN=$(ndc_read_gen)
     NDC_PROMPT=$(mktemp "${TMPDIR:-/tmp}"/remember-ndc-XXXXXX)
 
     cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell build-ndc-prompt "$MEMORY_FILE" "$NDC_PROMPT"
@@ -1035,12 +1059,19 @@ if [ "$RUN_NDC" = true ]; then
                         # against means such a commit has landed since, and
                         # this round's offset no longer describes a real
                         # boundary in the live file, regardless of size.
-                        NDC_LIVE_GEN=$(cat "$NDC_GEN_FILE" 2>/dev/null || echo 0)
-                        case "$NDC_LIVE_GEN" in
-                            (''|*[!0-9]*) NDC_LIVE_GEN=0 ;;
-                        esac
+                        NDC_LIVE_GEN=$(ndc_read_gen)
                         if [ "$NDC_LIVE_BYTES" -lt "$NDC_SRC_BYTES" ]; then
                             log "ndc" "SKIPPED commit: now.md is ${NDC_LIVE_BYTES}b, below the ${NDC_SRC_BYTES}b snapshot this offset was taken from -- left untouched (today-${NDC_DAY}.md may now hold a duplicate of this span)"
+                        elif [ "$NDC_SRC_GEN" = "unreadable" ] || [ "$NDC_LIVE_GEN" = "unreadable" ]; then
+                            # #619: a marker that EXISTS but could not be read is
+                            # not the same fact as one that was never created --
+                            # ndc_read_gen only ever returns 0 for the latter. A
+                            # failed read tells this round nothing about whether
+                            # another round committed since its snapshot, so it
+                            # must not be treated as "no commit landed" just
+                            # because a bare `cat ... || echo 0` used to produce
+                            # that same 0 for both cases.
+                            log "ndc" "SKIPPED commit: could not read ${NDC_GEN_FILE} (src=${NDC_SRC_GEN}, live=${NDC_LIVE_GEN}) -- now.md left untouched, this round cannot tell whether another round committed since its snapshot (today-${NDC_DAY}.md may now hold a duplicate of this span)"
                         elif [ "$NDC_LIVE_GEN" != "$NDC_SRC_GEN" ]; then
                             log "ndc" "SKIPPED commit: another NDC round already committed since this round's snapshot (generation ${NDC_SRC_GEN} -> ${NDC_LIVE_GEN}) -- now.md left untouched, this round's offset no longer describes a real boundary (today-${NDC_DAY}.md may now hold a duplicate of this span)"
                         else
