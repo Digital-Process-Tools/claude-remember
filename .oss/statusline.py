@@ -1651,32 +1651,34 @@ def _gh_unlabelled_issue_counts(repo, total, priority_labels, lane_labels):
             "per_page=100",
             "--jq",
             ".[] | select(.pull_request == null)"
-            ' | "L:" + ([.labels[].name] | join(","))',
+            " | ([.labels[].name] | tojson)",
         ],
         timeout=25,
     )
     if out is None:
         return None
-    # The "L:" prefix on every line (rather than a bare comma-joined list) is not
-    # decoration -- `_run` strips the whole blob's leading/trailing whitespace, and
-    # an issue with zero labels would otherwise print a genuinely empty line. That
-    # line is real data (one issue read, and it carries neither axis's label), but a
-    # *trailing* empty line -- the last open issue in the page happening to carry no
-    # labels -- is indistinguishable from ordinary trailing whitespace and would be
-    # silently stripped away, undercounting `lines` by one against `total` below and
-    # failing the cross-check for a page that was, in fact, read completely. Every
-    # line is non-empty by construction with the prefix in place, so `.strip()` never
-    # eats one.
+    # One JSON array per line, `tojson`-encoded server-side, rather than the earlier
+    # comma-joined string this used to split back apart in Python. A GitHub label name
+    # may legally contain a comma -- a label literally named e.g. `blocked,lane-storage`
+    # split into two names under the old scheme, one of which could coincidentally
+    # collide with a real declared lane, so the issue silently counted as *placed in a
+    # lane* when no triage sweep had placed it there (#622). `tojson` needs no delimiter
+    # a label name could ever contain, and unlike the old bare comma-joined line, `[]`
+    # (zero labels) is never empty, so there is no longer a trailing-blank-line hazard
+    # to guard against with a prefix.
     lines = out.split("\n") if out else []
     if len(lines) != total:
         return None
     no_priority = 0
     no_lane = 0
     for line in lines:
-        if not line.startswith("L:"):
+        try:
+            parsed = json.loads(line)
+        except ValueError:
             return None
-        names = set(line[2:].split(",")) if line[2:] else set()
-        names.discard("")
+        if not isinstance(parsed, list):
+            return None
+        names = {str(name) for name in parsed}
         if priority_set and not (names & priority_set):
             no_priority += 1
         if lane_set and not (names & lane_set):
