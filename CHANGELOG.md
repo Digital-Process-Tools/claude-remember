@@ -7,6 +7,140 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.1] - 2026-09-07 — A generation counter closes a silent NDC byte-loss race, a control-byte flatten closes a log-forging gap, and the last leading-dash argv-injection guards land across the session hooks — the release gate 3 audit on this delta files six more non-blocking findings, one carried to the next milestone by the round cap
+
+### Fixed
+
+- Fixed: `docs/windows-skip-triage.md` restated the total blanket win32-skip
+  module count and the `unclear` verdict count as fixed prose numbers -- "98"
+  and "78 modules" -- in four sentences that nothing recomputed, while the
+  table right below them (guarded by `tests/test_windows_skip_triage_497.py`
+  against the live tree) had already grown to 102 modules / 82 `unclear`
+  across #589 and #591 without those sentences being touched (#595). The doc
+  now states 102/82, and a new guard,
+  `tests/test_windows_skip_triage_prose_totals_595.py`, ties every one of
+  these prose sentences -- total, `unclear`, and (after self-review flagged
+  the same gap on the two other verdict counts) `convertible` and
+  `not-convertible` as well -- to the table's own row/verdict counts rather
+  than to another hardcoded number, so a future row added to the table
+  without updating the prose next to it fails a test instead of drifting
+  silently again. The table-row parsing itself now lives in one shared
+  `scripts.windows_skip_triage_497.parse_doc_table_rows` helper, used by both
+  this new guard and the existing #497 one, so the two cannot silently
+  disagree about what counts as a row.
+
+- Fixed: an Antigravity SessionStart burned the machine-global cross-plugin promo
+  cooldown for every Claude Code session on the same machine, for a promo nobody ever
+  saw (#596). `scripts/agy-session-start-hook.sh` delegates to
+  `scripts/session-start-hook.sh` with the delegate's own stdout piped to `/dev/null`
+  (Antigravity parses a command hook's stdout as protojson against its own schema,
+  #563) -- but the delegate's emit block committed the `$HOME/.remember/tmp/promo-
+  notice` throttle/rotation marker on any successful `printf`, and `printf` to
+  `/dev/null` succeeds. `agy-session-start-hook.sh` now sets `REMEMBER_SUPPRESS_PROMO=1`
+  on that call, and `session-start-hook.sh` skips the whole promo feature (selection
+  and marker alike) when it is set. Fixed at the delegation call rather than by having
+  `session-start-hook.sh` try to detect its own discarded stdout: a real Claude Code
+  invocation also reads this hook's stdout through a non-tty pipe, so no in-script
+  check (`[ -t 1 ]` included) can tell "discarded" from "captured normally".
+
+- Fixed: `log()` (`scripts/log.sh`) wrote its message argument verbatim into the
+  daily log file, with no newline handling. Several call sites in
+  `scripts/save-session.sh` embed the first 80 bytes of a model's reply straight
+  into a log line (e.g. the NDC and header-validation rejection paths) -- text
+  that is untrusted since #593, because it is model-authored from the
+  conversation's own content rather than controlled by this codebase. A raw
+  newline or carriage return embedded in that text landed at column 0 of the log
+  file and read as a second, forged log entry to anything parsing the log -- a
+  person skimming it, or a script (#599). `log()` now flattens every control byte
+  in the message to a plain space (`LC_ALL=C tr '[:cntrl:]' ' '`, the same remedy
+  `scripts/doctor.sh`'s `_json_escape` already uses for the identical reason)
+  before writing the line, once inside `log()` itself rather than at each of the
+  (at least three) call sites that embed such text, so the class is closed
+  everywhere `log()` is used rather than only at the newest call site.
+  `LC_ALL=C` is load-bearing rather than decoration: those call sites cut the
+  model's reply with `head -c 80`, a byte-count cut with no regard for UTF-8
+  character boundaries, and under the caller's own UTF-8 locale a cut landing
+  mid-multibyte-character makes `tr` print "Illegal byte sequence", exit
+  nonzero, and truncate its own output at the bad byte -- silently dropping
+  everything logged after it, and, because `save-session.sh` runs under `set
+  -e`, aborting the whole script on the `message=$(...)` assignment whose exit
+  status is `tr`'s. Forcing the C locale makes `tr` classify every byte 0-255
+  on its own, identically on GNU and BSD, so a non-ASCII byte that is not
+  itself a control code passes through untouched instead of erroring.
+
+- Hardened `scripts/session-end-hook.sh`'s `STDIN_SESSION_ID` guard against argv flag injection (#600): a `session_id` shaped like a flag (e.g. `--dry`) on the SessionEnd payload consisted entirely of characters the guard already allowed, so it passed untouched and reached `save-session.sh`'s argv, whose own arg loop reads a leading `--dry`/`--force` as a FLAG rather than a session id -- silently turning the last-chance flush into a dry-run preview (no summary written, position not advanced). The guard now rejects a leading dash too, mirroring the remedy #576 already applied at the sibling `agy-stop-hook.sh` call site.
+
+- Fixed: `tests/test_path_resolution.py`'s `test_scripts_use_jq_var_not_hardcoded`
+  excluded a `command -v jq` availability probe by `continue`-ing past the WHOLE
+  matched line, not just the probe span, so a hardcoded `jq` call sharing a line
+  with a probe would never reach any later check in that loop -- the exact
+  exclusion the docstring already promised ("but not `command -v jq`") never
+  actually implemented that way (#601). The scanning logic is now a standalone
+  `_line_has_hardcoded_jq()` helper that strips only the `command -v jq` substring
+  before scanning the rest of the line, closing the amnesty; a new regression test
+  pins a fixture line combining a probe and a hardcoded call on the same line.
+
+- Fixed: `tests/test_plugin_promo_574.py`'s suppression tests (`test_suppressed_when_key_present`,
+  `test_cannot_tell_suppresses_like_installed`, `test_wrong_version_is_cannot_tell`) asserted only
+  that `systemMessage` was absent from the hook's output -- an assertion equally satisfied by the
+  hook printing nothing at all, on the one path covering the common every-session case (promo
+  suppressed, buffer flushed) (#602). Each now also asserts `=== REMEMBER ===` (the history hint
+  from `prompts/session-history-hint.txt`, printed unconditionally on every `SessionStart` run) is
+  present in the output, so a total-loss regression on this path fails the test instead of passing it.
+
+- Fixed: `post-tool-hook.sh`'s `session_id` guard let a leading-dash value
+  (e.g. `--dry`) through unrejected, the same character-class gap #576 already
+  closed at its `agy-stop-hook.sh` call site (and #600 is closing at
+  `session-end-hook.sh`, in PR #609, not yet merged) -- a third, distinct call
+  site here, reaching `save-session.sh`'s argv on the background `nohup` save
+  path.
+  Paired with a real `transcript_path`, the untouched id was trusted and
+  read by `save-session.sh`'s own arg loop as the `--dry` FLAG rather than a
+  positional session id, silently turning a real delta-triggered save into a
+  no-op dry-run preview: no summary written, no position advanced (#610). The
+  guard now rejects a leading dash the same way its two siblings do.
+
+- Fixed: `docs/windows-skip-triage.md` restated four of its own table's counts
+  (the total module count, three times, plus the `convertible`,
+  `not-convertible` and `unclear` verdict counts) as hand-maintained prose
+  numbers. A reactive test (`tests/test_windows_skip_triage_prose_totals_595.py`)
+  caught a mismatch after the fact, but the numbers still drifted three times
+  in quick succession (#595, #596, and a follow-up commit on #611), each time
+  because a PR adding one new table row was reviewed and merged green against
+  its own stale base, before a sibling PR's prose fix had landed -- a same-PR
+  test cannot see a drift introduced by a different PR's base (#613).
+  The prose numbers are removed rather than re-derived: the table below is
+  now the only place any of these counts live, so there is nothing left for a
+  PR to leave out of sync. `tests/test_windows_skip_triage_no_stale_prose_counts_613.py`
+  replaces the old reactive test, guarding against one of these numbers
+  creeping back into the prose by hand.
+
+- Fixed: a narrow NDC compression race (#614) could silently drop bytes from
+  `now.md` that existed nowhere else -- not in `now.md`, not in any
+  `today-*.md`. NDC's own commit re-checks the size of `now.md` under the save
+  lock before trusting its pre-Haiku byte offset, but a *size* check alone
+  cannot tell a legitimate append from a REPLACEMENT that happens to still be
+  at least as long: exactly what another, overlapping NDC round's own commit
+  produces (its own tail, written over `now.md` by its own `mv`). Two
+  overlapping rounds are reachable when a second round's hour-long cooldown
+  gate opens while the first round's Haiku call, or its own lock-reacquisition
+  wait, is still in flight -- for example across a laptop sleep/wake spanning
+  the cooldown. When that happens, the second-committing round's own
+  `tail -c +N` offset no longer describes any real boundary in the file, and
+  can slice into bytes its own Haiku call never summarized.
+  `save-session.sh` now tracks a small monotonic generation counter
+  (`.remember/tmp/ndc-generation`), bumped by every NDC commit that lands and
+  checked, under the same lock, before any later round is allowed to commit --
+  any mismatch means a commit has landed since that round's snapshot was
+  taken, and the round is skipped exactly like the pre-existing "shrank below
+  the snapshot" case, rather than acting on a now-meaningless offset.
+  A prior triage pass on #614 could not confirm the reporter's own suspected
+  cause (a hook blind-truncating `now.md`) -- the append path never truncates,
+  and this race is unrelated to that guess. `tests/test_ndc_commit_lock.py`
+  adds a regression test that reproduces the exact byte loss (a replacement
+  at least as long as the stale snapshot, going undetected by the byte-count
+  check alone) and confirms the generation check now catches it.
+
 ## [0.29.0] - 2026-09-06 — A cross-plugin promo ships behind a suppression control, and the release gate 3 audit that found it files three more non-blocking findings against the delta that carried it
 
 ### Added
@@ -2250,7 +2384,8 @@ Fixes [#9](https://github.com/Digital-Process-Tools/claude-remember/issues/9), a
 
 ## [0.1.0] — Initial release
 
-[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.29.0...HEAD
+[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.29.1...HEAD
+[0.29.1]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.29.1
 [0.29.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.29.0
 [0.28.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.28.0
 [0.27.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.27.0
