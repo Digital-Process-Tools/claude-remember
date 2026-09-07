@@ -96,12 +96,21 @@ elif cmd == "call-haiku":
         with open(os.environ["STUB_MEMORY_FILE"], "a") as f:
             f.write(os.environ["STUB_APPEND_DURING_NDC"])
     if is_ndc and os.environ.get("STUB_REPLACE_DURING_NDC"):
-        # Stand in for now.md being REPLACED with something shorter while the
-        # compression is in flight — a rotation, or another NDC round that
-        # committed its own tail first. The snapshot offset then points past
-        # the end of a file it no longer describes (#223).
+        # Stand in for now.md being REPLACED while the compression is in
+        # flight — a rotation, or another NDC round that committed its own
+        # tail first. The snapshot offset then points past the end of a file
+        # it no longer describes (#223), or — if the replacement happens to
+        # be at least as long as the snapshot — into the WRONG file, one the
+        # offset was never taken from at all (#614).
         with open(os.environ["STUB_MEMORY_FILE"], "w") as f:
             f.write(os.environ["STUB_REPLACE_DURING_NDC"])
+        # A real "another round already committed" bumps the generation
+        # counter as part of that commit (#614's own fix) — reproduce that
+        # here so this stub models what actually produces a replacement, not
+        # just its byte-level shape.
+        gen_file = os.path.join(os.path.dirname(os.environ["STUB_MEMORY_FILE"]), "tmp", "ndc-generation")
+        with open(gen_file, "w") as f:
+            f.write("1")
     if is_ndc and os.environ.get("STUB_HOLD_LOCK_DURING_NDC"):
         # Take the save lock and keep it, so the NDC commit that runs after
         # this call returns is guaranteed to find it held by a LIVE process

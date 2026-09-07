@@ -213,3 +213,51 @@ class TestNdcCommitLock:
         assert "SKIPPED commit" in _log_text(project), (
             "acting on a stale offset must be refused out loud, not silently"
         )
+
+    def test_commit_skips_when_now_md_was_replaced_by_a_later_committed_round(self, tmp_path):
+        """#614: a stale offset that survives the size check is still stale.
+
+        The size check above (`NDC_LIVE_BYTES < NDC_SRC_BYTES`) only catches a
+        REPLACEMENT that ends up SHORTER than the snapshot. Two overlapping NDC
+        rounds -- reachable when a second round's cooldown gate opens while the
+        first round's Haiku call (or its own NDC_COMMIT_LOCK_TIMEOUT wait) is
+        still in flight, e.g. after a laptop sleep/wake spanning the cooldown --
+        can have the FIRST round's own commit already retire+replace now.md with
+        a whole new file (its own tail past ITS offset) before the SECOND round
+        reaches its commit check. If enough was appended in between that the
+        replacement's size is still >= the second round's own (now meaningless)
+        snapshot offset, the size check passes and `tail -c +N` cuts into bytes
+        that were never part of what this round's own Haiku call summarized --
+        content that then exists nowhere: not in now.md, not in any today-*.md.
+        """
+        env, project, plugin, calls, sid = _ndc_env(tmp_path)
+        memory_file = project / ".remember" / "now.md"
+
+        # Stands in for "another NDC round already committed its own tail here
+        # first" (see the comment above `NDC_LIVE_BYTES` re: "a rotation, or an
+        # earlier NDC round that committed its own tail first"). Longer than
+        # this round's own pre-Haiku snapshot (~36 bytes in this harness), so
+        # the size-only check cannot tell it apart from legitimate growth --
+        # but it is unrelated content this round's offset says nothing about.
+        head = "REPLACEMENT-HEAD-MUST-SURVIVE-0123456789\n"
+        tail_text = "TAIL-CONTENT-KEPT\n"
+        env = dict(env)
+        env["STUB_REPLACE_DURING_NDC"] = head + tail_text
+
+        result = _run(plugin, env, sid)
+        assert result.returncode == 0, subprocess_failure_detail(
+            result, project / ".remember"
+        )
+
+        remaining = _wait_for_background_ndc(memory_file)
+        today_text = "".join(
+            f.read_text() for f in (project / ".remember").glob("today-*.md")
+        )
+        assert head.strip() in remaining or head.strip() in today_text, (
+            "now.md was replaced by another round's own committed tail between "
+            "this round's snapshot and its commit; the replacement's own "
+            "content is live data no compression here has ever seen, and this "
+            "round's `tail -c +N` sliced into it using an offset that no "
+            "longer describes any real boundary in the file -- losing bytes "
+            "that exist nowhere else (#614)"
+        )
