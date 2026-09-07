@@ -261,3 +261,68 @@ class TestNdcCommitLock:
             "longer describes any real boundary in the file -- losing bytes "
             "that exist nowhere else (#614)"
         )
+
+    def test_commit_proceeds_when_generation_marker_is_absent(self, tmp_path):
+        """Positive control: no commit has ever landed, so 0 is legitimate.
+
+        Paired with the unreadable-marker test below -- both currently produce
+        the same fallback value in the script, but only one of them describes
+        a state the guard should let through (#619).
+        """
+        env, project, plugin, calls, sid = _ndc_env(tmp_path)
+        memory_file = project / ".remember" / "now.md"
+        gen_file = project / ".remember" / "tmp" / "ndc-generation"
+        assert not gen_file.exists(), "setup must start from a marker that was never created"
+
+        result = _run(plugin, env, sid)
+        assert result.returncode == 0, subprocess_failure_detail(
+            result, project / ".remember"
+        )
+
+        _wait_for_background_ndc(memory_file)
+        today_text = "".join(
+            f.read_text() for f in (project / ".remember").glob("today-*.md")
+        )
+        assert "compressed summary" in today_text, (
+            "the generation marker was never created -- that is legitimately "
+            "generation 0, and the commit must proceed, landing the "
+            "compressed span in today-*.md"
+        )
+        assert "SKIPPED commit" not in _log_text(project), (
+            "an absent marker is not a read failure; it must not skip the commit"
+        )
+
+    def test_commit_skips_when_generation_marker_exists_but_cannot_be_read(self, tmp_path):
+        """#619: a marker that exists but cannot be read is not the same as absent.
+
+        Both `NDC_SRC_GEN` (read before the Haiku call) and `NDC_LIVE_GEN`
+        (re-read under the lock before the commit) defaulted a failed `cat` to
+        0 -- the identical value a genuinely absent marker produces. When the
+        marker exists but a read of it fails (a permission or I/O error, or a
+        write from the commit below truncated mid-flight), both reads collapse
+        to the same fallback and the mismatch check this guard exists to
+        enforce (#614) never has a chance to fire: it silently reports two
+        equal generations instead of two reads that told it nothing.
+
+        A directory in place of the marker reproduces "exists but every read
+        fails" without depending on this process's uid ever being denied a
+        permission bit -- a bit CI's usual root uid ignores outright.
+        """
+        env, project, plugin, calls, sid = _ndc_env(tmp_path)
+        memory_file = project / ".remember" / "now.md"
+        gen_file = project / ".remember" / "tmp" / "ndc-generation"
+        gen_file.mkdir()  # exists, but `cat` on a directory always fails
+
+        result = _run(plugin, env, sid)
+        assert result.returncode == 0, subprocess_failure_detail(
+            result, project / ".remember"
+        )
+
+        _wait_for_background_ndc(memory_file)
+        assert "SKIPPED commit" in _log_text(project), (
+            "the generation marker exists but neither read of it could "
+            "succeed -- this round cannot tell whether another round "
+            "committed since its snapshot, and must not assume it did not "
+            "just because a failed read and an absent file happen to produce "
+            "the same fallback value"
+        )
