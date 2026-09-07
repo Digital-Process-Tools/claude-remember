@@ -505,7 +505,12 @@ MEMORY_LOG_FILE="${REMEMBER_LOG_DIR}/memory-${MEMORY_LOG_DATE}.log"
 # file, reading as a second, forged log entry to anything parsing the log (a
 # person skimming it, or a script). Flattened here, once, rather than at each
 # of the (at least three) call sites that embed such text, so the class is
-# closed everywhere log() is used, not just at the newest one (#599).
+# closed everywhere log() is used, not just at the newest one (#599) -- that
+# is $MEMORY_LOG_FILE ONLY. hook-errors.log is a SEPARATE file, written by
+# four functions below (_dispatch_report_failure, _dispatch_report_skip,
+# report_error, _dispatch_report_timeout) via their own second, independent
+# printf -- #599 did not reach those call sites, and #618 is what adds the
+# identical flatten to each of them directly, not by routing through log().
 #
 # LC_ALL=C is not decoration: under the caller's own UTF-8 locale, a `head
 # -c 80` cut landing mid-multibyte-character hands tr a malformed sequence,
@@ -525,7 +530,36 @@ log() {
     local message="$2"
     local timestamp
     timestamp=$(_remember_date +%H:%M:%S)
-    message="$(printf '%s' "$message" | LC_ALL=C tr '[:cntrl:]' ' ')"
+    # #621: log() runs on the per-tool-call hot path, and the overwhelming
+    # majority of messages this codebase writes (component names, static
+    # prose, numeric positions) carry no control byte at all -- so forking
+    # printf|tr on every single call paid for a flatten nearly none of them
+    # need. This `case` is a pure in-shell pattern match, no subprocess:
+    # only when a control byte is actually PRESENT does the fork below run.
+    #
+    # Deliberately NOT `[[:cntrl:]]` (a POSIX bracket CLASS, which asks the
+    # C library "is this byte cntrl under the active locale" -- a ctype/
+    # wctype lookup that a shell's own glob matcher can implement however
+    # it likes). #621 originally used it here and it broke, deterministically,
+    # on every windows-latest CI leg (all 4 Python versions) while every
+    # Linux and macOS leg -- and this repo's own macOS dev machine, on an
+    # ancient bash 3.2.57 -- stayed green: the pre-check simply never
+    # matched a message carrying a real embedded newline under Git Bash's
+    # MSYS2-built bash, so `tr` was never invoked and the flatten silently
+    # never ran. The version below tests literal BYTE VALUES via ANSI-C
+    # quoting (`$'\001'`-`$'\037'`, `$'\177'`) instead -- a straight ordinal
+    # comparison with no ctype table, no locale, and nothing left for a
+    # different bash build to classify differently. `local LC_ALL=C` is kept
+    # for the actual `tr` invocation below (a coreutils call, unaffected by
+    # this bug -- Git for Windows bundles GNU coreutils, and the failure
+    # reports named the pre-check, never a `tr` that ran and mis-flattened),
+    # the same correctness #599 forced on it for the identical reason (a
+    # `head -c 80` cut can land mid-multibyte-character).
+    case "$message" in
+        *[$'\001'-$'\037']*|*$'\177'*)
+            message="$(printf '%s' "$message" | LC_ALL=C tr '[:cntrl:]' ' ')"
+            ;;
+    esac
     echo "${timestamp} [${component}] ${message}" >> "$MEMORY_LOG_FILE" 2>/dev/null \
         || echo "${timestamp} [${component}] ${message}" >&2
 }
@@ -800,6 +834,11 @@ _dispatch_stdout_relay() {
 _dispatch_report_failure() {
     local _event="$1" _name="$2" _rc="$3" _why="$4"
     local _msg="ERROR: hook failed: $_event/$_name (exit $_rc): $_why"
+    # #618: flattened HERE, once, before either write -- log() applies its
+    # own #599 flatten to $MEMORY_LOG_FILE, but the printf below writes a
+    # SECOND, raw copy straight to hook-errors.log, which #599 never
+    # touched. $_why can carry a hook's own untrusted output.
+    _msg="$(printf '%s' "$_msg" | LC_ALL=C tr '[:cntrl:]' ' ')"
     log "dispatch" "$_msg"
     [ -d "$REMEMBER_DIR/logs" ] || return 0
     printf '%s\n' "$(_remember_date +%H:%M:%S) [dispatch] $_msg" \
@@ -819,6 +858,9 @@ _dispatch_report_failure() {
 _dispatch_report_skip() {
     local _event="$1" _name="$2" _why="$3"
     local _msg="WARNING: hook SKIPPED and did not run: $_event/$_name ($_why) -- it will not run on any later dispatch until this is fixed"
+    # #618: see _dispatch_report_failure above -- same second, raw copy of
+    # $_msg reaches hook-errors.log below, outside log()'s own #599 flatten.
+    _msg="$(printf '%s' "$_msg" | LC_ALL=C tr '[:cntrl:]' ' ')"
     log "dispatch" "$_msg"
     [ -d "$REMEMBER_DIR/logs" ] || return 0
     printf '%s\n' "$(_remember_date +%H:%M:%S) [dispatch] $_msg" \
@@ -837,9 +879,16 @@ _dispatch_report_skip() {
 # _dispatch_report_failure gives: save-session.sh's stderr is the agent's own
 # stream, and a hook must never gain the ability to write into the session.
 report_error() {
-    log "$1" "$2"
+    local _component="$1"
+    # #618: flattened before either write, same reason as the three
+    # dispatch reporters above -- $2 is untrusted (a caller's own error
+    # text) and previously reached hook-errors.log raw, outside log()'s
+    # own #599 flatten.
+    local _msg
+    _msg="$(printf '%s' "$2" | LC_ALL=C tr '[:cntrl:]' ' ')"
+    log "$_component" "$_msg"
     [ -d "$REMEMBER_DIR/logs" ] || return 0
-    printf '%s\n' "$(_remember_date +%H:%M:%S) [$1] $2" \
+    printf '%s\n' "$(_remember_date +%H:%M:%S) [$_component] $_msg" \
         >> "$REMEMBER_DIR/logs/hook-errors.log" 2>/dev/null || true
     return 0
 }
@@ -868,6 +917,9 @@ report_error() {
 _dispatch_report_timeout() {
     local _event="$1" _name="$2" _budget="$3" _how="$4" _said="$5"
     local _msg="WARNING: hook TIMED OUT: $_event/$_name did not return within ${_budget}s and was stopped ($_how). This is NOT a failure report from the hook -- it never answered, so whether it did its work is UNKNOWN, and anything it left half-done is its own to unwind. Raise hooks.dispatch_timeout_seconds if this listener is honestly slow, or 0 to disable the bound. It said: $_said"
+    # #618: see _dispatch_report_failure above. $_said is a hook's own
+    # (possibly hostile, definitely untrusted) reply text.
+    _msg="$(printf '%s' "$_msg" | LC_ALL=C tr '[:cntrl:]' ' ')"
     log "dispatch" "$_msg"
     [ -d "$REMEMBER_DIR/logs" ] || return 0
     printf '%s\n' "$(_remember_date +%H:%M:%S) [dispatch] $_msg" \

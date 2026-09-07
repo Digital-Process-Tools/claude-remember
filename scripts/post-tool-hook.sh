@@ -400,7 +400,9 @@ fi
 STDIN_SESSION_ID=$(_stdin_json_string session_id "$HOOK_STDIN" 2>/dev/null) || STDIN_SESSION_ID=""
 # stdin is not more trustworthy than a basename. The id becomes both a path
 # component under capture-alive.d/ and a transcript filename, so it faces the
-# same guard the basename-derived id has always faced, at the point of entry.
+# same guard the basename-derived id now faces too (#620) -- both are
+# sanitised at their own point of entry, this one here and the other where
+# SESSION_ID is derived from TRANSCRIPT below.
 #
 # #610: this value also reaches save-session.sh's argv, unchanged, on the
 # background nohup save path below (`nohup "$SAVE_SCRIPT" "$SESSION_ID" ...
@@ -603,6 +605,16 @@ if [ "$STDIN_SESSION_ID_TRUSTED" = true ]; then
 else
     SESSION_ID="${TRANSCRIPT##*/}"
     SESSION_ID="${SESSION_ID%.jsonl}"
+    # #620: the basename route faced no guard at all before this line was
+    # added -- this value reaches save-session.sh's argv unchanged, on the
+    # very same background nohup save path #610 already guards
+    # STDIN_SESSION_ID for (post-tool-hook.sh:419-423). Same character
+    # class, same reason: `-*` rejects a leading dash so a transcript
+    # basename that happens to collide with save-session.sh's own `--dry`/
+    # `--force` flags cannot be misread as one.
+    case "$SESSION_ID" in
+        ''|.|..|-*|*[!A-Za-z0-9._-]*) SESSION_ID="" ;;
+    esac
 fi
 
 # Which session PostToolUse serviced, for the capture-gap check in
