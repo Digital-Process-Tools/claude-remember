@@ -1070,9 +1070,27 @@ if [ "$(config ".features.plugin_promos" true)" = "true" ] \
 
             url_display="${url#https://}"
             url_display="${url_display#http://}"
-            msg="$text -- $url_display"
-            if [ "${#msg}" -gt 140 ]; then
-                log "hook" "promo skipped: '$id' text+url exceeds the 140-char budget (${#msg})"
+            # The off switch travels WITH the message (#631). It was
+            # already documented in README.md, docs/configuration.md and
+            # docs/hooks.md -- none of which a user reads at the moment a
+            # line they did not ask for appears in their terminal.
+            #
+            # The key is spelled in full, exactly as docs/configuration.md
+            # spells it. A shorter `plugin_promos=false` fits the old
+            # 140-char budget, but config.json is JSON -- that form is not
+            # valid syntax anywhere, and a reader who pastes it literally
+            # gets silence rather than an error. An unfindable hint and a
+            # wrong one are the same defect; the budget moved instead
+            # (140 -> 150), which lengthens no rendered line, it only stops
+            # guarding against one that is 10 characters longer.
+            #
+            # The longest shipped entry renders at 142 of 150.
+            # TestPromoCarriesItsOwnOffSwitch asserts every shipped entry
+            # still renders, so a future copy edit that busts the budget
+            # fails CI instead of silently suppressing the promo.
+            msg="$text -- $url_display (off: features.plugin_promos)"
+            if [ "${#msg}" -gt 150 ]; then
+                log "hook" "promo skipped: '$id' text+url exceeds the 150-char budget (${#msg})"
                 continue
             fi
 
