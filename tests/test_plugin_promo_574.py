@@ -286,7 +286,7 @@ class TestPromosFileIsData:
         assert "systemMessage" not in result.stdout
 
     def test_entry_over_length_budget_is_skipped_and_logged(self, tmp_path):
-        """A candidate whose rendered text+url exceeds the 140-char budget
+        """A candidate whose rendered text+url exceeds the 170-char budget
         never renders, and the skip is visible -- a positive control for the
         length guard (auditor finding #574: the guard had no fixture proving
         it actually trips, only two shipped entries that stay comfortably
@@ -329,7 +329,7 @@ class TestPromosFileIsData:
         assert log_files, "expected a daily log to exist"
         log_text = "\n".join(f.read_text(encoding="utf-8") for f in log_files)
         assert "too-long-promo" in log_text
-        assert "140" in log_text
+        assert "170" in log_text
 
 
 class TestMarkerIsCommittedOnlyAfterDelivery:
@@ -398,3 +398,69 @@ def test_session_end_hook_never_mentions_promo_or_system_message():
     text = SESSION_END.read_text(encoding="utf-8")
     assert "systemMessage" not in text
     assert "promo" not in text.lower()
+
+
+class TestPromoCarriesItsOwnOffSwitch:
+    """The promo names its own off switch, in the message itself (#631).
+
+    The reporter's complaint was not that the promo exists but that it
+    arrived "without a clear path to disabling" it. `features.plugin_promos`
+    was already documented in README.md, docs/configuration.md and
+    docs/hooks.md -- documentation nobody reads at the moment they are
+    interrupted in a terminal. The hint has to travel with the message.
+    """
+
+    HINT = "(off: features.plugin_promos)"
+    SOURCE = "claude-remember:"
+
+    def test_rendered_promo_names_the_off_switch(self, tmp_path):
+        out, _home, _remember = _run(tmp_path, installed_keyed={})
+        parsed = json.loads(out)
+        assert self.HINT in parsed["systemMessage"], (
+            "the promo must carry its own off switch; got: "
+            f"{parsed['systemMessage']!r}"
+        )
+        assert parsed["systemMessage"].startswith(self.SOURCE), (
+            "the promo must say which plugin is speaking -- an off-switch key "
+            "with no plugin named is a key in nobody's config.json; got: "
+            f"{parsed['systemMessage']!r}"
+        )
+
+    def test_every_shipped_promo_still_fits_the_length_budget(self, tmp_path):
+        """Positive control for the hint's cost.
+
+        Appending the hint lengthens every rendered line. A shipped entry
+        pushed over the budget by it would be SKIPPED -- the promo would go
+        silent rather than loud, and every suppression test in this file
+        would still pass. This asserts each shipped promo actually renders
+        with the hint attached, one at a time, and that nothing was logged
+        as skipped for length.
+        """
+        promos = json.loads(
+            (REPO_ROOT / "promos.json").read_text(encoding="utf-8")
+        )["promos"]
+        assert promos, "expected shipped promos to exist"
+
+        for entry in promos:
+            # Install every OTHER plugin so this one is the only candidate.
+            others = {
+                p["installed_key"]: [{"name": p["id"]}]
+                for p in promos
+                if p["id"] != entry["id"]
+            }
+            out, _home, remember = _run(tmp_path / entry["id"], installed_keyed=others)
+            parsed = json.loads(out)
+            msg = parsed.get("systemMessage", "")
+            assert entry["id"] in msg or entry["text"].split(" -- ")[0] in msg, (
+                f"shipped promo {entry['id']!r} did not render at all -- "
+                f"length budget likely tripped by the off-switch hint; got {msg!r}"
+            )
+            assert self.HINT in msg
+
+            log_files = list((remember / "logs").glob("memory-*.log"))
+            log_text = "\n".join(
+                f.read_text(encoding="utf-8") for f in log_files
+            )
+            assert "exceeds the" not in log_text, (
+                f"shipped promo {entry['id']!r} was skipped for length: {log_text}"
+            )

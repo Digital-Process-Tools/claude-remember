@@ -1070,9 +1070,40 @@ if [ "$(config ".features.plugin_promos" true)" = "true" ] \
 
             url_display="${url#https://}"
             url_display="${url_display#http://}"
-            msg="$text -- $url_display"
-            if [ "${#msg}" -gt 140 ]; then
-                log "hook" "promo skipped: '$id' text+url exceeds the 140-char budget (${#msg})"
+            # The off switch travels WITH the message (#631). It was
+            # already documented in README.md, docs/configuration.md and
+            # docs/hooks.md -- none of which a user reads at the moment a
+            # line they did not ask for appears in their terminal.
+            #
+            # The key is spelled in full, exactly as docs/configuration.md
+            # spells it. A shorter `plugin_promos=false` fits the old
+            # 140-char budget, but config.json is JSON -- that form is not
+            # valid syntax anywhere, and a reader who pastes it literally
+            # gets silence rather than an error. An unfindable hint and a
+            # wrong one are the same defect; the budget moved instead
+            # (140 -> 150), which lengthens no rendered line, it only stops
+            # guarding against one that is 10 characters longer.
+            #
+            # The line also says who is speaking (#631). systemMessage is
+            # emitted raw a few hundred lines below -- no plugin name is
+            # added by this hook, and whether the client adds one is not
+            # something this repo can assert. Unattributed, the hint above
+            # names a key in nobody's config.json in particular: every
+            # plugin may have a `features` block, and the reporter had to
+            # work out for himself which of his plugins had spoken. An
+            # unaddressed off switch is barely better than none.
+            #
+            # The longest shipped entry renders at 159 of the 170-char
+            # budget below. Dropping `github.com/` from the display would
+            # have bought 11 characters and fit 150, but most terminals
+            # stop auto-linking a bare org/repo, and an unclickable link
+            # defeats the only thing the promo is for.
+            # TestPromoCarriesItsOwnOffSwitch asserts every shipped entry
+            # still renders, so a future copy edit that busts the budget
+            # fails CI instead of silently suppressing the promo.
+            msg="claude-remember: $text -- $url_display (off: features.plugin_promos)"
+            if [ "${#msg}" -gt 170 ]; then
+                log "hook" "promo skipped: '$id' text+url exceeds the 170-char budget (${#msg})"
                 continue
             fi
 
