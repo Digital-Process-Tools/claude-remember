@@ -1084,13 +1084,26 @@ if [ "$(config ".features.plugin_promos" true)" = "true" ] \
             # (140 -> 150), which lengthens no rendered line, it only stops
             # guarding against one that is 10 characters longer.
             #
-            # The longest shipped entry renders at 142 of 150.
+            # The line also says who is speaking (#631). systemMessage is
+            # emitted raw a few hundred lines below -- no plugin name is
+            # added by this hook, and whether the client adds one is not
+            # something this repo can assert. Unattributed, the hint above
+            # names a key in nobody's config.json in particular: every
+            # plugin may have a `features` block, and the reporter had to
+            # work out for himself which of his plugins had spoken. An
+            # unaddressed off switch is barely better than none.
+            #
+            # The longest shipped entry renders at 159 of the 170-char
+            # budget below. Dropping `github.com/` from the display would
+            # have bought 11 characters and fit 150, but most terminals
+            # stop auto-linking a bare org/repo, and an unclickable link
+            # defeats the only thing the promo is for.
             # TestPromoCarriesItsOwnOffSwitch asserts every shipped entry
             # still renders, so a future copy edit that busts the budget
             # fails CI instead of silently suppressing the promo.
-            msg="$text -- $url_display (off: features.plugin_promos)"
-            if [ "${#msg}" -gt 150 ]; then
-                log "hook" "promo skipped: '$id' text+url exceeds the 150-char budget (${#msg})"
+            msg="claude-remember: $text -- $url_display (off: features.plugin_promos)"
+            if [ "${#msg}" -gt 170 ]; then
+                log "hook" "promo skipped: '$id' text+url exceeds the 170-char budget (${#msg})"
                 continue
             fi
 

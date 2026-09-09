@@ -286,7 +286,7 @@ class TestPromosFileIsData:
         assert "systemMessage" not in result.stdout
 
     def test_entry_over_length_budget_is_skipped_and_logged(self, tmp_path):
-        """A candidate whose rendered text+url exceeds the 150-char budget
+        """A candidate whose rendered text+url exceeds the 170-char budget
         never renders, and the skip is visible -- a positive control for the
         length guard (auditor finding #574: the guard had no fixture proving
         it actually trips, only two shipped entries that stay comfortably
@@ -329,7 +329,7 @@ class TestPromosFileIsData:
         assert log_files, "expected a daily log to exist"
         log_text = "\n".join(f.read_text(encoding="utf-8") for f in log_files)
         assert "too-long-promo" in log_text
-        assert "150" in log_text
+        assert "170" in log_text
 
 
 class TestMarkerIsCommittedOnlyAfterDelivery:
@@ -411,12 +411,18 @@ class TestPromoCarriesItsOwnOffSwitch:
     """
 
     HINT = "(off: features.plugin_promos)"
+    SOURCE = "claude-remember:"
 
     def test_rendered_promo_names_the_off_switch(self, tmp_path):
         out, _home, _remember = _run(tmp_path, installed_keyed={})
         parsed = json.loads(out)
         assert self.HINT in parsed["systemMessage"], (
             "the promo must carry its own off switch; got: "
+            f"{parsed['systemMessage']!r}"
+        )
+        assert parsed["systemMessage"].startswith(self.SOURCE), (
+            "the promo must say which plugin is speaking -- an off-switch key "
+            "with no plugin named is a key in nobody's config.json; got: "
             f"{parsed['systemMessage']!r}"
         )
 
