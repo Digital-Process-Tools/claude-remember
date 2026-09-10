@@ -148,9 +148,14 @@ def _reap(remember: Path, timeout: float = 30) -> None:
 def test_a_flag_shaped_transcript_basename_must_not_reach_the_argv_unguarded(tmp_path):
     """MUST NOT FIRE: the exploit. The only transcript in this project's
     session dir is named --dry.jsonl. With no stdin, post-tool-hook.sh
-    falls back to the basename route. Before the fix, the unguarded
-    SESSION_ID -- literally --dry -- reaches save-session.sh's argv[1]
-    unchanged. The stub records exactly what it received."""
+    falls back to the basename route. Before this fix, the unguarded
+    SESSION_ID -- literally --dry -- reached save-session.sh's argv[1]
+    unchanged. Since #633, the #620 sanitiser emptying SESSION_ID is itself
+    gated: the fork is skipped entirely rather than handing save-session.sh
+    an empty id (which it would read as "no id given" and silently
+    substitute -- see test_post_tool_basename_empty_session_refused_633.py
+    for that half). So the ledger must not exist at all here, not merely
+    disagree with "--dry"."""
     home, project, remember, ledger = _setup(tmp_path, basename="--dry.jsonl")
     plugin_root = _fake_plugin_root(tmp_path, ledger)
 
@@ -158,13 +163,14 @@ def test_a_flag_shaped_transcript_basename_must_not_reach_the_argv_unguarded(tmp
     assert result.returncode == 0, result.stderr
     _reap(remember)
 
-    assert ledger.exists(), "the background save never forked -- broken harness"
-    argv_line = ledger.read_text().strip()
-    assert argv_line != "1:--dry", (
-        'the transcript basename "--dry" reached save-session.sh argv '
-        f"unrejected: {argv_line!r} -- the basename route "
-        "(post-tool-hook.sh:604-605) must reject a leading dash the same way "
-        "the stdin route already does (post-tool-hook.sh:419-423, #610)."
+    assert not ledger.exists(), (
+        'the transcript basename "--dry" reached save-session.sh argv at '
+        f"all: {ledger.read_text() if ledger.exists() else None!r} -- the "
+        "basename route (post-tool-hook.sh:604-605) must reject a leading "
+        "dash the same way the stdin route already does "
+        "(post-tool-hook.sh:419-423, #610), and #633 requires the fork be "
+        "skipped entirely once the id is rejected, not merely handed an "
+        "empty string."
     )
 
 
