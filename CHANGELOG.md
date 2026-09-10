@@ -7,6 +7,172 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.0] - 2026-09-10 — Absent-vs-unreadable markers stop crashing save-session.sh under set -e, hook-errors.log's remaining raw writers get flattened against log forging, and the SessionStart promo names itself and its off switch -- the release gate 3 audit files five more non-blocking findings (#633-#637)
+
+### Changed
+
+- Changed: the cross-plugin promo at `SessionStart` (#574) now says who is
+  speaking and how to stop it, in the line itself (#631). It renders as
+  `claude-remember: <promo> -- <url> (off: features.plugin_promos)`.
+
+  Two separate gaps, both reported as one: `features.plugin_promos` was
+  already documented in `README.md`, `docs/configuration.md` and
+  `docs/hooks.md`, but nobody reads documentation at the moment an unasked-for
+  line appears in their terminal -- the reporter's words were "without a clear
+  path to disabling" it. And `systemMessage` is emitted raw, with no plugin
+  name attached by this hook and no guarantee the client adds one, so the
+  reporter could not tell which of his installed plugins had spoken. An off
+  switch nobody can find and one nobody can address are the same defect
+  twice; the line now carries both halves.
+
+  The default is unchanged: still **on**, still only for a sibling plugin
+  absent from `~/.claude/plugins/installed_plugins.json`, still at most once
+  per `cooldowns.promo_seconds` (7 days). Opt-in was requested and declined --
+  a promo channel nobody opts into reaches nobody, which is removal by a
+  politer name, and the complaint that held up was discoverability rather than
+  existence. The promo is also self-terminating: install both siblings and it
+  never speaks again.
+
+  The length budget moves 140 -> 170 to fit the prefix and the hint. That
+  guard only decides when an entry is skipped-and-logged; it lengthens no
+  rendered line. Two shorter spellings were measured and rejected:
+  `plugin_promos=false` fits 140 but is valid syntax nowhere (`config.json` is
+  JSON), and dropping `github.com/` from the displayed URL fits 150 but stops
+  most terminals auto-linking it, defeating the only thing the promo is for.
+  The longest shipped entry renders at 159 of 170, and a test asserts every
+  shipped entry still renders -- a copy edit that busts the budget fails CI
+  instead of silently suppressing the promo.
+
+### Fixed
+
+- Fixed: the CHANGELOG.md entry for #595 (folded into the 0.29.1 release
+  section) stated as current fact that `docs/windows-skip-triage.md` "now
+  states 102/82" and that `tests/test_windows_skip_triage_prose_totals_595.py`
+  is "a new guard" tying that doc's prose sentences to its own table. Both
+  were true only for the few commits between #595's own merge and #613's:
+  three commits later in that same release, #613 (landed as PR #615) removed
+  the hand-maintained prose counts from the doc entirely and replaced the
+  guard with `tests/test_windows_skip_triage_no_stale_prose_counts_613.py`,
+  which the #613 entry a little further down the same release section
+  already documents correctly. This fragment is not a correction to
+  `changelog.d/595.fixed.md` itself -- that file was already folded into
+  `CHANGELOG.md` and deleted by the time #617 was filed, so there is nothing
+  left under `changelog.d/` to amend. Read the #595 entry as a historical
+  record of what PR #605 did, not as a claim about the doc's state at HEAD;
+  the #613 entry immediately below it in the same release is the current
+  description (#617).
+
+- Fixed: #599's control-byte flatten (`LC_ALL=C tr '[:cntrl:]' ' '`) only
+  ever covered `$MEMORY_LOG_FILE`, the daily narrative log written by
+  `log()` itself. Four functions in `scripts/log.sh` --
+  `_dispatch_report_failure`, `_dispatch_report_skip`, `report_error`, and
+  `_dispatch_report_timeout` -- write a SECOND, independent copy of the same
+  message straight to `hook-errors.log` via their own `printf`, entirely
+  outside `log()`, and that copy was never flattened. `hook-errors.log` is
+  the file `/remember:doctor` tails under "Recent errors" and the one
+  maintainers ask reporters to paste, so an embedded newline in a hook name,
+  an exit reason, or a hook's own untrusted reply text could forge a second,
+  attacker-shaped entry in exactly the file a human is told to trust. All
+  four writers now flatten before either write (#618). This also corrects
+  #599's own coverage claim, both in `scripts/log.sh`'s comment and in the
+  entry already folded into `CHANGELOG.md` under the 0.29.0 release ("the
+  class is closed everywhere `log()` is used") -- that claim was true of
+  `log()` callers, not of `hook-errors.log`'s own raw writers, which #599
+  never reached. The already-released `CHANGELOG.md` entry is left as
+  historical record rather than hand-edited; this fragment is the
+  correction.
+
+- Fixed: save-session.sh's NDC generation guard (#614) now tells "the
+  generation marker was never created" (legitimately generation 0) apart from
+  "the marker exists but a read of it failed" (a permission or I/O error, or a
+  reader racing the truncating write that bumps it). Both used to collapse to
+  the same 0 at both read sites, so two failed reads could compare equal to
+  each other -- and to a legitimately absent marker -- and the guard would go
+  silent exactly when it could not tell whether another NDC round had already
+  committed, restoring the pre-#614 risk of content landing nowhere (#619).
+
+- Fixed: `post-tool-hook.sh`'s basename-derived `SESSION_ID` (the fallback used
+  whenever stdin does not supply a trusted `session_id`) reached
+  `save-session.sh`'s argv unguarded, unlike the stdin-derived id, which #610
+  already guards against a leading dash at its own point of entry. A
+  transcript basename shaped like `save-session.sh`'s own `--dry`/`--force`
+  flags now gets cleared the same way, at the point the id is derived, before
+  it ever reaches `nohup "$SAVE_SCRIPT" "$SESSION_ID" ...` (#620). In
+  practice this route's impact is narrower than #610's: because the
+  basename-derived id and the transcript `save-session.sh`'s own auto-detect
+  would independently re-discover are always the same file, its own
+  session-id-shape check already rejected the crafted value before this fix
+  landed -- but the guard is still added for consistency with the sibling
+  fixes (#576, #600, #610) and because a future change to that downstream
+  check should not silently reopen this route. The code comment claiming
+  both routes already shared this guard is corrected to match.
+
+- Closed without a code change: `log()` (`scripts/log.sh`) forked a
+  `printf | tr` pipeline on every call to flatten control bytes (#599), even
+  though most log messages carry none. #621 asked whether a cheap in-shell
+  pre-check could skip that fork when a message has no control byte to
+  flatten. Two portability attempts at the pre-check each broke a different
+  CI platform in ways this repo could not reproduce locally after extensive
+  effort (multiple bash builds, multiple locales, an emptied environment):
+  a POSIX `[[:cntrl:]]` bracket-class version silently never matched a real
+  embedded control byte under windows-latest's Git Bash, and a follow-up
+  ANSI-C byte-value range meant to avoid exactly that ctype/locale
+  dependency then did the identical thing on every macos-latest CI leg
+  instead. #621 itself calls this fix optional ("if judged worth it") --
+  it is a hot-path cost optimization, not a correctness fix -- and it must
+  not keep blocking the correctness fixes landing alongside it (#618,
+  #620) on a third round of unreproducible platform fragility. `log()`
+  forks the flatten unconditionally again, as it did before #621 (#621).
+
+- Fixed: `_gh_unlabelled_issue_counts` in `.oss/statusline.py` built one line per
+  open issue by joining its label names with `,` in a `gh api --jq` call and
+  splitting that line back apart in Python. A GitHub label name may legally
+  contain a comma -- a label literally named e.g. `blocked,lane-storage` split
+  into two names, one of which (`lane-storage`) could coincidentally collide
+  with a real declared lane, so the issue silently counted as *placed in a
+  lane* when no triage sweep had actually placed it there. The direction of
+  the error was an under-count of `no_lane`/`no_priority`, the opposite of
+  this function's own documented convention of never under-counting -- and
+  the existing `len(lines) != total` cross-check could not catch it, because
+  the line count stayed correct; only the per-line parse was wrong (#622).
+  The wire format is now one JSON array of label names per line
+  (`[.labels[].name] | tojson` server-side, `json.loads` in Python) instead
+  of a comma-joined string, closing the hole with a delimiter no label name
+  can contain rather than trying to escape or reject commas after the fact.
+  `.oss/statusline.py` had no test coverage before this change; a first,
+  narrow test file (`tests/test_statusline_gh_unlabelled_issue_counts_622.py`)
+  covers this one function directly by stubbing `_run`, rather than adding
+  broader coverage for the module -- the smallest fix proportionate to what
+  was actually reported.
+
+- Fixed: save-session.sh's two other timestamp markers, `tmp/last-save-ts`
+  (the save cooldown) and `tmp/last-ndc.ts` (the NDC compression cooldown),
+  had the same absent-vs-unreadable collapse #619 fixed for the NDC
+  generation marker: `cat FILE 2>/dev/null || echo 0` cannot tell "never
+  created" from "exists but a read of it failed" (a permission or I/O error,
+  or the marker's own place taken by a directory). A durably unreadable
+  marker now silently defeated its cooldown on every single invocation with
+  nothing in the log to say so. Both now go through a shared `ts_marker_read`
+  helper and log a WARNING naming the marker when a read fails, instead of
+  proceeding in silence. Fixing this also surfaced a related crash: the
+  unconditional `date +%s > "$MARKER"` write below each read ran unguarded,
+  so a durably unwritable marker (a directory, most reachably) killed the
+  whole script under `set -e` rather than merely leaving the cooldown to
+  re-trigger next time -- both writes are now guarded the same way the
+  existing self-heal write already was. Self-review also caught that
+  widening the existence check to include non-regular files (needed to
+  catch a directory in a marker's place) opened a hang: `cat` on a FIFO with
+  no writer present blocks forever, with no timeout anywhere in the script.
+  `ts_marker_read` now rejects any non-regular file before ever calling
+  `cat` on it (#625).
+
+- Fixed: when save-session.sh's NDC commit gate skips a commit because
+  `tmp/ndc-generation` could not be read (#619), the log line now names the
+  remedy for a marker that is durably unreadable rather than merely racing a
+  writer -- delete it to reset generation tracking to 0 and unblock future
+  commits -- instead of leaving every future round to land on the same
+  "SKIPPED commit" line with no hint of the way out (#626).
+
 ## [0.29.1] - 2026-09-07 — A generation counter closes a silent NDC byte-loss race, a control-byte flatten closes a log-forging gap, and the last leading-dash argv-injection guards land across the session hooks — the release gate 3 audit on this delta files six more non-blocking findings, one carried to the next milestone by the round cap
 
 ### Fixed
@@ -2384,7 +2550,8 @@ Fixes [#9](https://github.com/Digital-Process-Tools/claude-remember/issues/9), a
 
 ## [0.1.0] — Initial release
 
-[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.29.1...HEAD
+[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.30.0...HEAD
+[0.30.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.30.0
 [0.29.1]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.29.1
 [0.29.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.29.0
 [0.28.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.28.0
