@@ -890,6 +890,20 @@ fi
 # read the resolved value (#350).
 DELTA_THRESHOLD="${REMEMBER_DELTA_THRESHOLD:-50}"
 if [ "$DELTA" -gt "$DELTA_THRESHOLD" ] && [ "$IN_COOLDOWN" = false ]; then
+  if [ -z "$SESSION_ID" ]; then
+    # #633: the #620 sanitiser above can empty SESSION_ID when the
+    # transcript basename fails the character class, and this fork is the
+    # ONLY remaining consumer of it on the basename route -- unlike the
+    # stdin route, which has STDIN_SESSION_ID_TRUSTED gating every use of
+    # STDIN_SESSION_ID behind `[ -n "$STDIN_SESSION_ID" ]`
+    # (post-tool-hook.sh:419-423), there is no further fallback here to
+    # fall through to. An empty value is not "trusted", it is absent
+    # (post-tool-hook.sh:561-563) -- save-session.sh reads an empty argv[1]
+    # as "no id given" and silently substitutes the newest .jsonl by mtime
+    # (save-session.sh:273-275) rather than refusing, so the fork must be
+    # skipped here rather than let that happen.
+    log "hook" "post-tool: transcript basename \"${TRANSCRIPT##*/}\" failed the session id sanitiser -- refusing to save rather than handing save-session.sh an empty id"
+  else
     ALREADY_RUNNING=false
     if [ -f "$PID_FILE" ]; then
         OLD_PID=$(cat "$PID_FILE" 2>/dev/null)
@@ -923,6 +937,7 @@ if [ "$DELTA" -gt "$DELTA_THRESHOLD" ] && [ "$IN_COOLDOWN" = false ]; then
         echo $! > "$PID_FILE"
         SAVE_TRIGGERED="true"
     fi
+  fi
 fi
 
 # --- Dispatch: after_post_tool ---
