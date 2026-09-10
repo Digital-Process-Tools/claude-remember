@@ -117,9 +117,18 @@ declare -F log >/dev/null 2>&1 || log() {
     printf '%s [%s] %s\n' "$(_remember_date +%H:%M:%S)" "$1" "$2" >&2
 }
 declare -F report_error >/dev/null 2>&1 || report_error() {
-    log "$1" "$2"
+    # #636: flattened before either write, same reason and same tr as
+    # log.sh's own report_error() (#618) -- $2 is a caller's own,
+    # potentially untrusted, error text, and this stub is the fifth writer
+    # of hook-errors.log #618 did not cover (only log.sh's four were
+    # touched there). Without this, an embedded newline/CR in $2 forges a
+    # second entry in the file /remember:doctor tails and maintainers ask
+    # reporters to paste.
+    local _msg
+    _msg="$(printf '%s' "$2" | LC_ALL=C tr '[:cntrl:]' ' ')"
+    log "$1" "$_msg"
     [ -d "${REMEMBER_DIR:-}/logs" ] || return 0
-    printf '%s\n' "$(_remember_date +%H:%M:%S) [$1] $2" \
+    printf '%s\n' "$(_remember_date +%H:%M:%S) [$1] $_msg" \
         >> "${REMEMBER_DIR}/logs/hook-errors.log" 2>/dev/null || true
     return 0
 }
