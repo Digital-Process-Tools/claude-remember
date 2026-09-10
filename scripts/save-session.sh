@@ -121,6 +121,22 @@ ndc_read_gen() {
         echo 0
         return 0
     fi
+    # Something is at this path but is not a REGULAR file -- a FIFO, a
+    # character device, a directory, a socket, or a symlink to one of
+    # those. `cat` on a directory fails fast, but `cat` on a FIFO with no
+    # writer present BLOCKS forever (no O_NONBLOCK, no timeout anywhere in
+    # this script), and `cat` on a character device like /dev/zero streams
+    # unboundedly into the capture below instead of ever hitting EOF. -f
+    # follows symlinks to their final target, so this also catches a
+    # symlink into a FIFO. Same check ts_marker_read() below already makes
+    # for its own marker file (#625); backported here for #634 (#619's own
+    # fix only widened the existence test, never added this one). Every
+    # such case is "unreadable" -- a value this generation counter can
+    # never legitimately hold -- without ever attempting to read it.
+    if [ ! -f "$NDC_GEN_FILE" ]; then
+        echo unreadable
+        return 0
+    fi
     local _ndc_gen
     _ndc_gen=$(cat "$NDC_GEN_FILE" 2>/dev/null)
     case "$_ndc_gen" in
@@ -402,7 +418,18 @@ CLEANUP_FILES+=("$EXTRACT_FILE")
 # same way the self-heal write in the ELAPSED<0 branch already is, so a
 # durably broken marker degrades to "the cooldown keeps re-triggering" (a
 # warning already given above) instead of "this save never completed".
-date +%s > "$COOLDOWN_MARKER" 2>/dev/null \
+# #635: `2>/dev/null` placed AFTER a `>` redirection only takes effect once
+# that redirection has already succeeded -- a failing `>` (the marker is a
+# directory, a permission is denied, etc.) is reported by bash to the REAL
+# stderr before `2>/dev/null` is ever applied, leaking bash's own raw
+# diagnostic line (into the agent's stream, or duplicated into
+# hook-errors.log alongside the WARNING below, depending on what already
+# redirected fd 2 upstream) rather than being silenced by it. Wrapping the
+# whole write in a `{ ...; }` group applies `2>/dev/null` to the group as a
+# unit, suppressing the group's own redirection failure too -- kept (rather
+# than dropped) so this line degrades identically whether the surrounding
+# process already flattened stderr or not.
+{ date +%s > "$COOLDOWN_MARKER"; } 2>/dev/null \
     || report_error "cooldown" "WARNING: could not write $COOLDOWN_MARKER after this save -- the cooldown will not reflect it, and every future save will hit the same unreadable/unwritable marker until it is fixed or removed."
 if [ "$ENVELOPE" = "unrecognised" ]; then
     # A transcript shape neither Claude Code nor Codex wrote -- NOT a quiet
@@ -996,7 +1023,10 @@ if [ "$RUN_NDC" = true ]; then
     # this crashes the whole script under `set -e` for a durably broken
     # marker instead of merely leaving the compression cooldown to
     # re-trigger next time.
-    date +%s > "$NDC_MARKER" 2>/dev/null \
+    # #635: same `{ ...; }` grouping as the COOLDOWN_MARKER write above --
+    # see that comment for why a bare `2>/dev/null` after the `>` does not
+    # suppress the redirection's OWN failure.
+    { date +%s > "$NDC_MARKER"; } 2>/dev/null \
         || report_error "ndc" "WARNING: could not write $NDC_MARKER after this compression -- the cooldown will not reflect it, and every future save will hit the same unreadable/unwritable marker until it is fixed or removed."
     NDC_SRC_BYTES=$(wc -c < "$MEMORY_FILE" | tr -d ' ')
     # Read under LOCK_DIR, which this (parent) process still holds at this
