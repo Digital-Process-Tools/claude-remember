@@ -394,7 +394,12 @@ if [[ ( -e "$COOLDOWN_MARKER" || -L "$COOLDOWN_MARKER" ) && "$DRY_RUN" != true &
         # silence would trade a mute stuck throttle for a mute wrong value,
         # which is the same defect one layer along.
         report_error "cooldown" "WARNING: $COOLDOWN_MARKER is $(( 0 - ELAPSED ))s ahead of now -- the clock moved back, or the marker is corrupt in a way a digits-only check cannot see. Resetting it and saving; the cooldown resumes from now."
-        date +%s > "$COOLDOWN_MARKER" 2>/dev/null || true
+        # #643: same `{ ...; }` grouping as the guarded write below -- a bare
+        # `2>/dev/null` placed AFTER a `>` redirection only takes effect once
+        # that redirection has already succeeded, so a failing `>` here (this
+        # self-heal write, not the guarded one #635 fixed) would otherwise
+        # leak bash's own raw diagnostic before the suppression applies.
+        { date +%s > "$COOLDOWN_MARKER"; } 2>/dev/null || true
     elif [ "$ELAPSED" -lt "$SAVE_COOLDOWN" ]; then
         debug_enabled 1 && log "cooldown" "${ELAPSED}s < ${SAVE_COOLDOWN}s, skip"
         exit 0
@@ -876,7 +881,12 @@ fi
 # the first thing session-start injects into context and the first thing the
 # summarizer reads, for a fact only the pipeline needs.
 if [ ! -s "$MEMORY_FILE" ]; then
-    printf '%s\n' "$TODAY_DATE" > "$NOW_DAY_FILE" 2>/dev/null || true
+    # #643: `{ ...; }` grouping -- a bare `2>/dev/null` placed AFTER a `>`
+    # redirection only takes effect once that redirection has already
+    # succeeded, so a failing `>` (permission denied, NOW_DAY_FILE's parent
+    # replaced by something read-only) would otherwise leak bash's own raw
+    # diagnostic before the suppression applies (same class as #635).
+    { printf '%s\n' "$TODAY_DATE" > "$NOW_DAY_FILE"; } 2>/dev/null || true
 fi
 # Built beside now.md and renamed over it, not appended in two operations
 # (#247). The two appends — a separator, then the entry — are both under
@@ -998,7 +1008,11 @@ if [[ "$RUN_NDC" = true && ( -e "$NDC_MARKER" || -L "$NDC_MARKER" ) ]]; then
         # would have healed it: now.md is never compressed again and grows
         # without bound, which is the one file every later read walks.
         report_error "ndc" "WARNING: $NDC_MARKER is $(( 0 - NDC_ELAPSED ))s ahead of now -- the clock moved back, or the marker is corrupt in a way a digits-only check cannot see. Resetting it and compressing; the cooldown resumes from now."
-        date +%s > "$NDC_MARKER" 2>/dev/null || true
+        # #643: same `{ ...; }` grouping as the guarded write below -- see
+        # the COOLDOWN_MARKER self-heal write above for why a bare
+        # `2>/dev/null` after a `>` does not suppress the redirection's OWN
+        # failure.
+        { date +%s > "$NDC_MARKER"; } 2>/dev/null || true
     elif [ "$NDC_ELAPSED" -lt "$NDC_COOLDOWN" ]; then
         RUN_NDC=false
     fi
@@ -1010,7 +1024,16 @@ fi
 # date put them in the new day's file and downstream consolidation then
 # attributed them to the wrong day (#141). Falls back to today for a now.md
 # written before this marker existed, or left behind by an interrupted run.
-NDC_DAY=$(cat "$NOW_DAY_FILE" 2>/dev/null | tr -d '[:space:]')
+# #642: same regular-file type check as ndc_read_gen() (#634) and
+# ts_marker_read() (#625) -- a FIFO or character device at $NOW_DAY_FILE
+# would otherwise hang `cat` forever (FIFO, no writer) or stream unboundedly
+# (character device); a non-regular NOW_DAY_FILE falls through to the same
+# "*" branch below that an absent or garbage-content one already takes.
+if [ -f "$NOW_DAY_FILE" ]; then
+    NDC_DAY=$(cat "$NOW_DAY_FILE" 2>/dev/null | tr -d '[:space:]')
+else
+    NDC_DAY=""
+fi
 case "$NDC_DAY" in
     ([0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;;
     (*) NDC_DAY="$TODAY_DATE" ;;
@@ -1251,7 +1274,12 @@ if [ "$RUN_NDC" = true ]; then
                             # run without LOCK_DIR.
                             rm -f "${MEMORY_FILE}".ndc-* 2>/dev/null
                             NDC_TAIL=$(mktemp "${MEMORY_FILE}.ndc-XXXXXX")
-                            if tail -c +$(( NDC_SRC_BYTES + 1 )) "$MEMORY_FILE" > "$NDC_TAIL" 2>/dev/null; then
+                            # #643: `{ ...; }` grouping around the `>` -- same class as
+                            # #635/above: a failing `>` here (disk full, $NDC_TAIL
+                            # removed from under this, etc.) would otherwise leak
+                            # bash's own raw diagnostic before `2>/dev/null` takes
+                            # effect.
+                            if { tail -c +$(( NDC_SRC_BYTES + 1 )) "$MEMORY_FILE" > "$NDC_TAIL"; } 2>/dev/null; then
                                 NDC_KEPT=$(wc -c < "$NDC_TAIL" | tr -d ' ')
                                 # Same guard as NDC_LIVE_BYTES above. Unsanitized,
                                 # a non-numeric NDC_KEPT makes `[ -gt 0 ]` fail the
@@ -1300,7 +1328,9 @@ if [ "$RUN_NDC" = true ]; then
                                 # the reason this stamp exists — see #141 for the flush
                                 # design that would close it.
                                     if [ "$NDC_KEPT" -gt 0 ]; then
-                                        printf '%s\n' "$(_remember_date +%Y-%m-%d)" > "$NOW_DAY_FILE" 2>/dev/null || true
+                                        # #643: `{ ...; }` grouping -- same class as
+                                        # the fresh-stamp write above.
+                                        { printf '%s\n' "$(_remember_date +%Y-%m-%d)" > "$NOW_DAY_FILE"; } 2>/dev/null || true
                                     else
                                         rm -f "$NOW_DAY_FILE"
                                     fi
