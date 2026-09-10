@@ -1660,7 +1660,21 @@ STAGING_COUNT=$(ls "$_remember_staging_glob_dir/today-"*.md 2>/dev/null | grep -
 if [ "$STAGING_COUNT" -gt 0 ] && [ "$SESSION_START_SOURCE" != "compact" ]; then
     echo "=== MEMORY CONSOLIDATION ==="
     echo "$STAGING_COUNT day(s) of memory to compress. Running consolidation in background..."
-    nohup "$PLUGIN_ROOT/scripts/run-consolidation.sh" </dev/null >/dev/null 2>&1 & disown 2>/dev/null || true
+    # `3>&-` is load-bearing, not tidiness (#646). Line ~1171 above did
+    # `exec 3>&1` BEFORE redirecting stdout into the buffer file, so fd 3 is a
+    # dup of the hook's REAL stdout -- the pipe Claude Code reads. `nohup`
+    # redirects only fds 0, 1 and 2, so without this the consolidation child
+    # inherits fd 3 and holds the write end of that pipe open for its entire
+    # life. The hook process exits at once; the client, reading to EOF, does
+    # not see EOF until the LAST holder of the write end goes away, which is
+    # the child. The #646 reporter measured a 98.62s SessionStart against a 93s
+    # consolidation -- and 3.2-3.5s whenever it did not fire -- then hit the VS
+    # Code extension's 60s subprocess-init deadline, whose error text sends the
+    # user to audit credentials and network for a pipe they still hold open.
+    # Not a lock, and not a Git Bash detach failure: their own probe of this
+    # exact construct returned in 0.11s. Ordinary POSIX fd inheritance, so it
+    # reproduced on macOS too (tests/test_session_start_fd_leak_646.py).
+    nohup "$PLUGIN_ROOT/scripts/run-consolidation.sh" </dev/null >/dev/null 2>&1 3>&- & disown 2>/dev/null || true
     echo ""
 fi
 
