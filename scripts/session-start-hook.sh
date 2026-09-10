@@ -1081,8 +1081,9 @@ if [ "$(config ".features.plugin_promos" true)" = "true" ] \
             # valid syntax anywhere, and a reader who pastes it literally
             # gets silence rather than an error. An unfindable hint and a
             # wrong one are the same defect; the budget moved instead
-            # (140 -> 150), which lengthens no rendered line, it only stops
-            # guarding against one that is 10 characters longer.
+            # (140 -> 150 -> 170, across #631's two off-switch-hint
+            # commits), which lengthens no rendered line, it only stops
+            # guarding against one that is 30 characters longer.
             #
             # The line also says who is speaking (#631). systemMessage is
             # emitted raw a few hundred lines below -- no plugin name is
