@@ -229,55 +229,34 @@ declare -F log >/dev/null 2>&1 || log() {
 declare -F report_error >/dev/null 2>&1 || report_error() { log "$1" "$2"; }
 log "hook" "session-end: reason=$SESSION_END_REASON session=${STDIN_SESSION_ID:-unresolved}"
 
-# bootstrap-dirs.sh's mkdir is best-effort, and by the time this line runs it
-# has already tried once for THIS invocation — so unlike an ordinary "nothing
-# to flush" exit, reaching here means that attempt just failed (read-only
-# root, missing parent). Reported, not silently folded into the same no-op
-# every other early exit in this hook takes: without this line, a store that
-# can never be created and a session with nothing new to save are the same
-# line in hook-errors.log, which is no line at all.
-if [ ! -d "$REMEMBER_DIR" ]; then
-    report_error "session-end" "WARNING: $REMEMBER_DIR does not exist and could not be created -- nothing was flushed at session end."
-    exit 0
-fi
-
-SAVE_SCRIPT="$PIPELINE_DIR/scripts/save-session.sh"
-if [ ! -f "$SAVE_SCRIPT" ]; then
-    report_error "session-end" "WARNING: $SAVE_SCRIPT is missing -- nothing was flushed at session end. Reinstall the plugin."
-    exit 0
-fi
-
-# --- Flush, unconditionally, in the BACKGROUND ---
-# save-session.sh --force bypasses its own cooldown timer AND its
-# min-human-message gate (see its own USAGE block) — exactly the two gates
-# this issue exists to route around. It does NOT bypass the zero-exchange
-# gate: a session with nothing new since the last save advances the saved
-# position without a Haiku call, so this hook costs nothing extra when there
-# is genuinely nothing to flush.
+# ── The on-disk trace that this hook fired, written FIRST (#647) ──────────
+# Moved up here, ahead of the $REMEMBER_DIR and $SAVE_SCRIPT checks and
+# ahead of the flush itself, from the bottom of the file where it used to
+# sit immediately before the backgrounded subshell.
 #
-# Backgrounded, the same way post-tool-hook.sh forks its own call — NOT run
-# and waited on in the foreground, which an earlier version of this hook did.
-# Claude Code kills a hook process after `hooks.dispatch_timeout_seconds`'
-# sibling budget for the events it waits on: this repo's own README documents
-# "Claude Code kills a hook at 60s of its own accord" for exactly this
-# reason. save-session.sh's own Haiku call already asks for up to 120s and
-# NDC compression up to 180s (scripts/save-session.sh) — both past 60s on
-# the sessions this hook exists to rescue, which are the long, content-heavy
-# ones. A foreground
-# wait risks losing the ENTIRE flush to Claude Code's own kill with no trace
-# at all; a backgrounded one gets to keep running after this hook returns,
-# the same way `hooks.d/after_save/50-git-backup.sh`'s own git push does
-# ("a listener blocked in a foreground child leaks that child when the
-# script is killed" — the shape this rewrite avoids). The trade is explicit:
-# this hook can no longer report a flush failure to the SAME invocation of
-# `/remember:doctor` that ran a second later, only to hook-errors.log once
-# the background flush itself finishes — which is what the subshell below
-# does.
+# Every exit path below this line -- a store that could not be created, a
+# missing save-session.sh on a half-finished install -- used to leave the
+# store in exactly the state an unregistered hook leaves it in: no
+# session-end-*.log at all. That is the only evidence scripts/doctor.sh
+# has, so it reported "SessionEnd has never fired for this project" and
+# blamed hook registration, which was correct about the file and wrong
+# about the cause. The #647 reporter went and audited a registration that
+# was fine.
 #
-# tmp/save-session.pid is the SAME marker post-tool-hook.sh's own
-# background fork writes (scripts/post-tool-hook.sh), not a second one: both
-# are "a save-session.sh is in flight" and nothing downstream needs to tell
-# them apart.
+# This is as early as the trace can go: it needs $REMEMBER_DIR, which
+# resolve-paths.sh and bootstrap-dirs.sh above are what establish, and
+# report_error(), which the log.sh source above is what defines. Nothing
+# between there and here can fail without being reported.
+#
+# What this does NOT rescue, stated so the next reader does not assume it
+# does: a hook cancelled during that preamble. #560 measured the preamble
+# at ~3.4s on a slow Windows/Git-Bash machine against SessionEnd's 1.5s
+# shared budget, and everything this seed depends on is inside it -- so on
+# the machine #647 reports from, this line is never reached either. The
+# `"timeout": 10` in hooks/hooks.json is what addresses that, and
+# docs/hooks.md carries the rest. This move closes the narrower gap: an
+# exit AFTER resolution now leaves evidence, so "fired and gave up" stops
+# being indistinguishable from "never fired at all".
 # Checked and reported (#503): this mkdir is best-effort defensive
 # re-creation on top of bootstrap-dirs.sh's own earlier attempt, and a
 # failure here means the seed write two lines down cannot land either --
@@ -337,6 +316,56 @@ _END_LOG="$REMEMBER_DIR/logs/autonomous/session-end-$(_remember_date +%H%M%S)-$$
 if ! printf '%s [session-end] flush started\n' "$(_remember_date +%H:%M:%S)" >> "$_END_LOG" 2>/dev/null; then
     report_error "session-end" "WARNING: could not seed $_END_LOG -- if this file stays absent or empty, an ordinary housekeeping sweep will reclaim it, and /remember:doctor may misreport this session as one where SessionEnd never fired."
 fi
+
+# bootstrap-dirs.sh's mkdir is best-effort, and by the time this line runs it
+# has already tried once for THIS invocation — so unlike an ordinary "nothing
+# to flush" exit, reaching here means that attempt just failed (read-only
+# root, missing parent). Reported, not silently folded into the same no-op
+# every other early exit in this hook takes: without this line, a store that
+# can never be created and a session with nothing new to save are the same
+# line in hook-errors.log, which is no line at all.
+if [ ! -d "$REMEMBER_DIR" ]; then
+    report_error "session-end" "WARNING: $REMEMBER_DIR does not exist and could not be created -- nothing was flushed at session end."
+    exit 0
+fi
+
+SAVE_SCRIPT="$PIPELINE_DIR/scripts/save-session.sh"
+if [ ! -f "$SAVE_SCRIPT" ]; then
+    report_error "session-end" "WARNING: $SAVE_SCRIPT is missing -- nothing was flushed at session end. Reinstall the plugin."
+    exit 0
+fi
+
+# --- Flush, unconditionally, in the BACKGROUND ---
+# save-session.sh --force bypasses its own cooldown timer AND its
+# min-human-message gate (see its own USAGE block) — exactly the two gates
+# this issue exists to route around. It does NOT bypass the zero-exchange
+# gate: a session with nothing new since the last save advances the saved
+# position without a Haiku call, so this hook costs nothing extra when there
+# is genuinely nothing to flush.
+#
+# Backgrounded, the same way post-tool-hook.sh forks its own call — NOT run
+# and waited on in the foreground, which an earlier version of this hook did.
+# Claude Code kills a hook process after `hooks.dispatch_timeout_seconds`'
+# sibling budget for the events it waits on: this repo's own README documents
+# "Claude Code kills a hook at 60s of its own accord" for exactly this
+# reason. save-session.sh's own Haiku call already asks for up to 120s and
+# NDC compression up to 180s (scripts/save-session.sh) — both past 60s on
+# the sessions this hook exists to rescue, which are the long, content-heavy
+# ones. A foreground
+# wait risks losing the ENTIRE flush to Claude Code's own kill with no trace
+# at all; a backgrounded one gets to keep running after this hook returns,
+# the same way `hooks.d/after_save/50-git-backup.sh`'s own git push does
+# ("a listener blocked in a foreground child leaks that child when the
+# script is killed" — the shape this rewrite avoids). The trade is explicit:
+# this hook can no longer report a flush failure to the SAME invocation of
+# `/remember:doctor` that ran a second later, only to hook-errors.log once
+# the background flush itself finishes — which is what the subshell below
+# does.
+#
+# tmp/save-session.pid is the SAME marker post-tool-hook.sh's own
+# background fork writes (scripts/post-tool-hook.sh), not a second one: both
+# are "a save-session.sh is in flight" and nothing downstream needs to tell
+# them apart.
 # REMEMBER_TEST_COMPLETION_MARKER (opt-in, unset in production): CI
 # iteration on #487 (PR #499) found the test harness's own PID-liveness
 # wait (tasklist, on Windows) does not reliably observe this backgrounded
