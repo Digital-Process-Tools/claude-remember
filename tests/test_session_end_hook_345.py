@@ -62,13 +62,30 @@ def _reap(remember: Path, timeout: float = 30):
     writes (see tests/test_post_tool_cooldown.py::_reap, the same shape).
     Without this, calls.log may not have been written yet when a test reads
     it right after subprocess.run() returns.
+
+    Since #647 the hook process returns BEFORE its own preamble -- it hands
+    the whole job to a detached copy of itself -- so when subprocess.run()
+    returns, tmp/save-session.pid usually does not exist yet: the child is
+    still resolving paths. "No pid file" therefore no longer means "nothing
+    was forked"; it means "not yet". Wait for it to appear (and to hold a
+    parseable pid -- `echo $! >` is not atomic against a reader) before
+    waiting for the pid to die. A hook that legitimately never forks (no
+    store, no save-session.sh) costs this helper its appear-deadline; the
+    tests on those paths use REMEMBER_SESSION_END_FOREGROUND or poll for
+    the artefact they actually assert on instead.
     """
     pid_file = remember / "tmp" / "save-session.pid"
-    if not pid_file.exists():
-        return
-    try:
-        pid = int(pid_file.read_text().strip())
-    except (ValueError, OSError):
+    pid = None
+    appear_deadline = time.monotonic() + 15
+    while time.monotonic() < appear_deadline:
+        if pid_file.exists():
+            try:
+                pid = int(pid_file.read_text().strip())
+                break
+            except (ValueError, OSError):
+                pass
+        time.sleep(0.05)
+    if pid is None:
         return
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -80,7 +97,9 @@ def _reap(remember: Path, timeout: float = 30):
 
 
 def _run_hook(plugin: Path, env: dict, *, session_id, reason: str = "other",
-              no_stdin: bool = False):
+              no_stdin: bool = False, reap: bool = True):
+    """`reap=False` for a fixture where the hook can never fork -- there is
+    no pid file coming, and waiting 15s for one proves nothing."""
     hook = plugin / "scripts" / HOOK_NAME
     stdin_kw = {}
     if no_stdin:
@@ -94,7 +113,8 @@ def _run_hook(plugin: Path, env: dict, *, session_id, reason: str = "other",
         ["bash", str(hook)], env=env, capture_output=True, text=True, timeout=60,
         check=False, **stdin_kw,
     )
-    _reap(Path(env["CLAUDE_PROJECT_DIR"]) / ".remember")
+    if reap:
+        _reap(Path(env["CLAUDE_PROJECT_DIR"]) / ".remember")
     return result
 
 
@@ -274,8 +294,16 @@ class TestFailSoftContract:
         _wire_hook(plugin)
         shutil.rmtree(project / ".remember")
         os.chmod(project, 0o555)
+        # #647: in production the hook detaches before the preamble, and the
+        # detached child has no stderr the caller can see -- so on this one
+        # path, where there is no hook-errors.log to write to either, the
+        # warning reaches nobody. Foreground mode is the opt-in that keeps
+        # the old inline shape; this test proves the report still exists
+        # there, and test_detached_path_drops_the_unwritable_store_warning
+        # below records what the production path does with it.
+        env = {**env, "REMEMBER_SESSION_END_FOREGROUND": "1"}
         try:
-            result = _run_hook(plugin, env, session_id=sid)
+            result = _run_hook(plugin, env, session_id=sid, reap=False)
         finally:
             # Restore before any fixture cleanup (tmp_path teardown) tries to
             # remove a now-read-only directory.
@@ -294,6 +322,40 @@ class TestFailSoftContract:
             "a store that could never be created must be reported, not "
             "swallowed into the same silent no-op as a session with nothing "
             "new to flush\n" + result.stderr
+        )
+
+    @pytest.mark.skipif(
+        hasattr(os, "geteuid") and os.geteuid() == 0,
+        reason="root ignores the read-only mode bits this test depends on",
+    )
+    def test_detached_path_drops_the_unwritable_store_warning(self, tmp_path):
+        """The cost of #647's detach, recorded rather than implied.
+
+        The production path hands everything to a detached child whose
+        stderr goes nowhere, so the #372 warning -- which has no
+        hook-errors.log to land in, because the directory that would hold
+        it is what failed -- reaches nobody. This is a documented loss
+        (docs/hooks.md), traded for a hook that fits Claude Code's 1.5s
+        SessionEnd budget on every machine. It is asserted here so that
+        the day the child gains a channel for it, this test fails and the
+        doc gets corrected; and the foreground test above is the positive
+        control proving the warning itself still exists.
+        """
+        env, project, plugin, _calls, sid = _make_env(tmp_path, exchanges=1, humans=1)
+        _wire_hook(plugin)
+        shutil.rmtree(project / ".remember")
+        os.chmod(project, 0o555)
+        try:
+            result = _run_hook(plugin, env, session_id=sid, reap=False)
+        finally:
+            os.chmod(project, 0o755)
+
+        assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")
+        assert not (project / ".remember").exists()
+        assert "WARNING" not in result.stderr, (
+            "the detached path surfaced the #372 warning on the hook's own "
+            "stderr -- good news, but docs/hooks.md says it cannot; update "
+            "the doc and this test together\n" + result.stderr
         )
 
 

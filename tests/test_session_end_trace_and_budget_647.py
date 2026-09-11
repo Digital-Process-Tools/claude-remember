@@ -16,9 +16,12 @@ event, and this hook's synchronous preamble (`lib-clock.sh`, `resolve-paths.sh`,
 Windows/Git-Bash machine. #560's fix declares `"timeout": 10` to raise that
 ceiling, and `docs/hooks.md` carries the rest, including the
 `CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS` fallback for the plugin-install case
-where Claude Code's own carve-out means a declared timeout does not raise it. The
-#647 reporter is on 0.29.1 and predates that fix; nothing in this file re-fixes
-it. What is here is the two things #560 left standing.
+where Claude Code's own carve-out means a declared timeout does not raise it. On
+the plugin install route both reporters are on, that carve-out may make #561's
+declaration do nothing. The fix that does not depend on it -- the hook process
+detaching BEFORE its preamble, so nothing it does runs on Claude Code's clock --
+is tested in tests/test_session_end_detach_before_preamble_647.py. What is here
+is the two things around it.
 
 **1. That `timeout: 10` reads exactly like an arbitrary leftover.** It is the only
 timed hook in `hooks.json` -- `SessionStart`, `UserPromptSubmit` and `PostToolUse`
@@ -44,13 +47,12 @@ hook returns, whatever it decided to do afterwards. The paired positive control
 runs the same fixture with the script present, so "a file exists" is not passing
 against a harness that writes it unconditionally.
 
-**Scope, stated rather than implied.** Moving the seed up does not rescue a hook
-cancelled during the preamble -- the seed needs `$REMEMBER_DIR`, and resolving it
-is part of what spends the budget. On the #647 reporter's machine this changes
-nothing by itself; #560's timeout is what does. It closes the narrower gap: every
-exit path *after* resolution now leaves evidence, so "fired and gave up" stops
-looking like "never fired". Making the preamble itself fit inside the default 1.5s
-is the larger change `docs/hooks.md` already tracks separately.
+**Scope.** Moving the seed up cannot, on its own, rescue a hook cancelled during
+the preamble -- the seed needs `$REMEMBER_DIR`, and resolving it is part of what
+spent the budget. That is why the detach (the sibling test module) sits ahead of
+the preamble: the seed then runs in a child on no budget at all. Together they
+mean every exit after resolution leaves evidence, on every machine, so "fired and
+gave up" stops looking like "never fired".
 """
 from __future__ import annotations
 
@@ -58,6 +60,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -105,8 +108,9 @@ def test_session_end_keeps_its_declared_timeout():
     Code's own reference says "Timeouts set on plugin-provided hooks don't raise
     the budget", and `hooks/hooks.json` is exactly that location -- so on a
     plugin install the ceiling can stay 1.5s no matter what this file says. That
-    gap is #560's, documented in `docs/hooks.md`, and is not something a test in
-    this repo can close.
+    gap is why the hook now detaches before its preamble (see the sibling
+    module) instead of relying on this number at all; the pin stays so that
+    the belt is not quietly removed on the grounds that there is a buckle.
     """
     hooks = json.loads(HOOKS_JSON.read_text(encoding="utf-8"))["hooks"]
     declared = [
@@ -186,7 +190,18 @@ def _fire(tmp_path, *, with_save_script: bool):
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    logs = sorted((remember / "logs" / "autonomous").glob("session-end-*.log"))
+    # The hook returns before its detached child has resolved anything, so
+    # the trace lands some time after subprocess.run() does. Poll for it;
+    # the negative direction of these tests is "still absent after a
+    # generous wait", not "absent the instant the hook returned".
+    autonomous = remember / "logs" / "autonomous"
+    deadline = time.monotonic() + 15
+    logs = []
+    while time.monotonic() < deadline:
+        logs = sorted(autonomous.glob("session-end-*.log")) if autonomous.is_dir() else []
+        if logs:
+            break
+        time.sleep(0.1)
     return result, logs
 
 

@@ -32,6 +32,9 @@
 #   bounded, non-blocking approach post-tool-hook.sh uses for `session_id`:
 #   never from a tty, and time-bounded (`read -t 1`) so a pipe held open with
 #   nothing in it costs at most a second rather than hanging session teardown.
+#   Read once, by the process Claude Code invoked; the detached child gets
+#   the same bytes through REMEMBER_SESSION_END_PAYLOAD and never touches
+#   stdin (it has /dev/null there).
 #
 #   `reason` is documented (Claude Code hooks reference, checked 2026-08) as
 #   one of clear/resume/logout/prompt_input_exit/other, but is treated here as
@@ -53,9 +56,12 @@
 #   CLAUDE_PROJECT_DIR   Project root (default: .)
 #
 # EXIT CODES
-#   0   Always, and immediately — the flush itself runs in a backgrounded
-#       subshell (see the flush section below) so this hook's own exit is not
-#       waiting on save-session.sh at all. A failed flush is reported loudly
+#   0   Always, and immediately — since #647 this process does nothing but
+#       read stdin and re-launch itself detached (see the detach section
+#       below), so its own exit waits on neither the path/tool preamble nor
+#       save-session.sh. Claude Code's SessionEnd budget is 1.5s shared
+#       across every hook on the event, and the preamble alone was measured
+#       past that on a slow Windows machine (#560). A failed flush is reported loudly
 #       once that subshell finishes (report_error(), which reaches both the
 #       daily log and hook-errors.log — surfaced by /remember:doctor) rather
 #       than swallowed silently: the other hooks in this plugin can afford
@@ -81,8 +87,6 @@ _HOOK_DIR="${BASH_SOURCE[0]%/*}"
 # hook does it.
 [ -n "${REMEMBER_NESTED_SUMMARIZER:-}" ] && exit 0
 
-source "$_HOOK_DIR/lib-clock.sh"
-
 # --- Read stdin: session_id and reason ---
 # Cleared, not merely left alone (#266) — see post-tool-hook.sh's identical
 # comment. This plugin can re-enter its own hooks from a nested session, and
@@ -91,14 +95,62 @@ source "$_HOOK_DIR/lib-clock.sh"
 # honest absent one.
 unset REMEMBER_HOOK_STDIN REMEMBER_HOOK_STDIN_FILE
 
-HOOK_STDIN=""
-if [ ! -t 0 ]; then
-    _line=""
-    while IFS= read -r -t 1 _line || [ -n "$_line" ]; do
-        HOOK_STDIN="$HOOK_STDIN$_line"
+# ── Detach BEFORE the preamble, not after it (#647, #560) ─────────────────
+# Claude Code gives SessionEnd a 1.5-second budget shared across every hook
+# registered for the event. #560 measured everything this script used to do
+# synchronously before forking its flush -- lib-clock.sh, resolve-paths.sh,
+# detect-tools.sh's python/jq probing, bootstrap-dirs.sh, log.sh -- at ~3.4s
+# on a slow Windows/Git-Bash machine, so the hook was cancelled before the
+# flush existed, on every exit. #561 declared `"timeout": 10` in
+# hooks/hooks.json to raise that ceiling. Claude Code's own reference says
+# "Timeouts set on plugin-provided hooks don't raise the budget", and
+# hooks.json ships inside a plugin: on the install route both reporters are
+# on, that declaration may do nothing at all, and the #647 reporter (0.29.1,
+# claude-plugins-official) still sees `Hook cancelled` on every exit.
+#
+# So this process now does the least it can: read stdin, hand the ENTIRE
+# job -- preamble, trace seed, flush -- to a detached copy of itself, exit.
+# Tens of milliseconds, on any machine, on any install route, under any
+# budget. The child is this same script re-entered with
+# REMEMBER_SESSION_END_DETACHED set and the payload carried in an env var
+# (never re-read from a stdin it no longer has). Both are unset again the
+# moment the child has consumed them, so nothing this hook spawns in turn
+# sees either.
+#
+# fd hygiene (#646): nothing above this line opens a descriptor beyond
+# 0/1/2, so redirecting those three is the whole set. If that ever changes,
+# close the extra ones here too -- an inherited dup of the client's pipe
+# keeps the client waiting for the child, hook exit notwithstanding.
+#
+# REMEMBER_SESSION_END_FOREGROUND=1 (opt-in, unset in production) runs the
+# old inline shape: no detach, stderr reaching the caller. The one thing
+# the detached path cannot do is report a store that could never be
+# created (#372) -- that warning went to this hook's own stderr because
+# there is no hook-errors.log to write to when the directory that would
+# hold it is what failed, and a detached child has no stderr the caller
+# can see. That report survives only in foreground mode; the trade is
+# stated in docs/hooks.md rather than left for someone to discover.
+if [ -n "${REMEMBER_SESSION_END_DETACHED:-}" ]; then
+    HOOK_STDIN="${REMEMBER_SESSION_END_PAYLOAD:-}"
+    unset REMEMBER_SESSION_END_DETACHED REMEMBER_SESSION_END_PAYLOAD
+else
+    HOOK_STDIN=""
+    if [ ! -t 0 ]; then
         _line=""
-    done
+        while IFS= read -r -t 1 _line || [ -n "$_line" ]; do
+            HOOK_STDIN="$HOOK_STDIN$_line"
+            _line=""
+        done
+    fi
+    if [ -z "${REMEMBER_SESSION_END_FOREGROUND:-}" ]; then
+        REMEMBER_SESSION_END_DETACHED=1 REMEMBER_SESSION_END_PAYLOAD="$HOOK_STDIN" \
+            nohup bash "${BASH_SOURCE[0]}" </dev/null >/dev/null 2>&1 &
+        disown 2>/dev/null || true
+        exit 0
+    fi
 fi
+
+source "$_HOOK_DIR/lib-clock.sh"
 
 # The same deliberately narrow extractor post-tool-hook.sh and
 # session-start-hook.sh use: the key must be followed by nothing but
@@ -248,15 +300,15 @@ log "hook" "session-end: reason=$SESSION_END_REASON session=${STDIN_SESSION_ID:-
 # report_error(), which the log.sh source above is what defines. Nothing
 # between there and here can fail without being reported.
 #
-# What this does NOT rescue, stated so the next reader does not assume it
-# does: a hook cancelled during that preamble. #560 measured the preamble
-# at ~3.4s on a slow Windows/Git-Bash machine against SessionEnd's 1.5s
-# shared budget, and everything this seed depends on is inside it -- so on
-# the machine #647 reports from, this line is never reached either. The
-# `"timeout": 10` in hooks/hooks.json is what addresses that, and
-# docs/hooks.md carries the rest. This move closes the narrower gap: an
-# exit AFTER resolution now leaves evidence, so "fired and gave up" stops
-# being indistinguishable from "never fired at all".
+# On its own this move could not rescue a hook cancelled DURING that
+# preamble -- #560 measured the preamble at ~3.4s on a slow Windows/Git-
+# Bash machine against SessionEnd's 1.5s shared budget, and everything
+# this seed depends on is inside it. That is why the detach at the top of
+# this file now happens before the preamble rather than after it: by the
+# time this line runs, the process running it is the detached child, on
+# no budget at all. The two changes are one fix -- the detach makes this
+# line reachable on that machine, and this line is what makes the result
+# visible to /remember:doctor.
 # Checked and reported (#503): this mkdir is best-effort defensive
 # re-creation on top of bootstrap-dirs.sh's own earlier attempt, and a
 # failure here means the seed write two lines down cannot land either --

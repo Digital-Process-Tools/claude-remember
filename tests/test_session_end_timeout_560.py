@@ -22,6 +22,14 @@ update and the changelog fragment for the actionable remedy
 (CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS). This test only pins the one thing
 this diff can enforce mechanically: the manifest declares a timeout.
 
+Since #647 the preamble described above no longer runs in the process Claude
+Code is timing: the hook reads stdin, re-launches itself detached, and exits, so
+the budget is not load-bearing on any install route. The declaration stays --
+harmless belt over a buckle -- and so does this test, so it is not removed on
+the grounds that it "looks arbitrary" (tests/test_session_end_trace_and_budget_647.py
+pins the same thing with that reader in mind). The measurement that proves the
+detach is tests/test_session_end_detach_before_preamble_647.py.
+
 The bar: would this test still pass if hooks.json were left unchanged? No --
 today's manifest has no `timeout` key anywhere, so this fails for the right
 reason (KeyError / missing field) before the fix, and passes once
