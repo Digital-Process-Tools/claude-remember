@@ -73,7 +73,13 @@ def test_fatal_reports_the_path_and_each_candidates_probe_result(tmp_path):
     assert result.returncode != 0, "no usable python on PATH must still be fatal"
     err = result.stderr
     assert "FATAL: No working Python found" in err, err
-    assert str(bindir) in err, (
+    # Git Bash reports PATH in msys spelling (`/c/Users/...`), so a verbatim
+    # `str(bindir)` (drive letter, backslashes) never matches there -- the
+    # first CI run of this file failed on windows-latest for exactly that,
+    # with the PATH line present and correct. Match the unique directory
+    # names instead, on a separator-normalised copy.
+    _err_fwd = err.replace(chr(92), "/")
+    assert f"{tmp_path.name}/bin" in _err_fwd, (
         "the FATAL does not show the PATH it searched, so a reader cannot tell "
         "whether the interpreter was missing from PATH or present and broken:\n"
         + err
