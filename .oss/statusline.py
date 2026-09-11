@@ -36,6 +36,58 @@ import sys
 import time
 from pathlib import Path
 
+#: #1295: this file is vendored standalone (see the module docstring above --
+#: "No third-party imports... installs nothing to run it") so it cannot
+#: `import scripts.gh_which` the way every other converted call site in this
+#: repository does. `_safe_which` below is a reduced, inlined copy of
+#: `gh_which.safe_which`'s own resolution walk -- see that module's docstring
+#: for the full mechanism this closes: a same-named `git.exe`/`gh.cmd`
+#: planted at the root of the repository this statusline is reporting on can
+#: otherwise win over a real `PATH` entry on Windows, because a bare argv[0]
+#: with no directory component lets `CreateProcess` search the *calling
+#: process's* current directory first. Being a separate copy, this can drift
+#: from `gh_which.py`'s own walk without anything here noticing -- logged as
+#: a known trade-off of the vendoring constraint, not fixed by this issue.
+_WIN_DEFAULT_PATHEXT = ".COM;.EXE;.BAT;.CMD;.VBS;.JS;.WS;.MSC"
+
+
+def _win_candidate_names(name):
+    pathext_source = os.environ.get("PATHEXT") or _WIN_DEFAULT_PATHEXT
+    pathext = [ext for ext in pathext_source.split(";") if ext]
+    lowered = name.lower()
+    if any(lowered.endswith(ext.lower()) for ext in pathext):
+        return [name]
+    return [name + ext for ext in pathext]
+
+
+def _safe_which(name):
+    """Resolve `name` on the real `PATH`, without ever letting an implicit
+    current-working-directory search take priority over a real `PATH` entry.
+    Returns an absolute path, or `None`.
+    """
+    search_path = os.environ.get("PATH", os.defpath)
+    if not search_path:
+        return None
+    is_windows = sys.platform == "win32"
+    candidate_names = _win_candidate_names(name) if is_windows else [name]
+    seen = set()
+    for directory in search_path.split(os.pathsep):
+        candidate_dir = directory if directory else os.curdir
+        normalised = os.path.normcase(os.path.abspath(candidate_dir))
+        if normalised in seen:
+            continue
+        seen.add(normalised)
+        for candidate_name in candidate_names:
+            candidate = os.path.join(candidate_dir, candidate_name)
+            if (
+                os.path.exists(candidate)
+                and os.access(candidate, os.X_OK)
+                and not os.path.isdir(candidate)
+            ):
+                return os.path.abspath(candidate)
+    return None
+
+
 #: How old a cached board reading may be before a refresh is forked, in seconds. Short,
 #: because this is the half a maintainer watches move: at 300 the line showed a merged pull
 #: request and three still-open issues that had just been closed (#515).
@@ -66,6 +118,27 @@ LATEST_REFRESH_AFTER = 3600
 #: what it cost when that reading is in hand -- do not silently promote this
 #: constant to "measured" later without adding that record.
 CHANNEL_REFRESH_AFTER = 300
+
+#: A fourth clock (#1314), for the one field slower than all three above it:
+#: `/oss:doctor`'s own verdict. The issue that asked for this field measured
+#: `channel:health` alone -- one check inside the diagnostic -- past 20 seconds in
+#: its worst case, and the full diagnostic runs many more checks besides. That rules
+#: out the board's 60s clock outright, and it is also nowhere near as volatile as
+#: `CHANNEL_REFRESH_AFTER`'s own subject -- a dead consumer can appear between one
+#: render and the next; a new doctor WARN generally does not. `LATEST_REFRESH_AFTER`'s
+#: own docstring quotes "the order of weeks" for ITS subject (a published version) and
+#: is itself set to one hour, not weeks -- read as a starting interval already judged
+#: acceptable for a similarly slow-moving, comparatively expensive-to-check fact,
+#: never as a claim that doctor's own findings change on a weekly cadence. Sharing
+#: that number rather than inventing a fifth one unmeasured in either direction.
+DOCTOR_REFRESH_AFTER = LATEST_REFRESH_AFTER
+
+#: How long the detached refresh may wait on `doctor.py` before giving up on that one
+#: reading and moving on. Comfortably above the >20s worst case named above, and
+#: comfortably below `LOCK_STALE_AFTER` -- a hung doctor run must still release the
+#: refresh lock in time for the next refresh to retry, rather than freezing every
+#: other field on this line along with it.
+DOCTOR_TIMEOUT = 60
 
 #: How long a refresh may hold its lock before another render is allowed to retry. A
 #: lock that outlives a killed refresher would otherwise freeze the counts forever.
@@ -314,17 +387,33 @@ def parse_channel_report(text):
 
 
 def channel_status(
-    raw_state, attribution, fetched_at, now, interval=CHANNEL_REFRESH_AFTER
+    raw_state,
+    attribution,
+    fetched_at,
+    now,
+    interval=CHANNEL_REFRESH_AFTER,
+    session=None,
+    current_session=None,
 ):
-    """Fold a raw `channel:health` reading, its own age and its attribution into
-    the state `render` actually shows (#613, widened by #754).
+    """Fold a raw `channel:health` reading, its own age, its attribution and
+    (#1362) the session that took it into the state `render` actually shows
+    (#613, widened by #754, widened again by #1362).
 
-    Four ways this becomes `cannot_determine` before a caller ever sees one of
+    Five ways this becomes `cannot_determine` before a caller ever sees one of
     the five real states, and each is a distinct reason a reader might act on
     differently -- collapsing them into one `?` would be this module's own
     defect class, the same reason `board_from_cache` keeps its counts separate:
 
     * ``not-asked``    -- nobody has taken a reading yet (`fetched_at` is None).
+    * ``other-session`` -- the reading is real and fresh, but it was taken by a
+      DIFFERENT session on this same repository (#1362): `raw_state`'s
+      `forwarding` vs `not_subscribed` distinction comes from whether *the
+      session that took the reading* is subscribed to the socket, and two
+      sessions on one repo -- one armed via `bin/oss-workspace`, one a bare
+      `claude` -- can hold genuinely different, simultaneously correct
+      answers. Checked right after `not-asked`, before attribution or
+      staleness: a reading that is not this session's own cannot be trusted
+      regardless of how sound it otherwise looks.
     * ``stale``        -- the reading is older than its own refresh interval
       (#550/#551's lesson, applied a third time: never let an old reading
       render as though it were fresh).
@@ -346,6 +435,14 @@ def channel_status(
     decides which; this function only asks whether it is one of the first two
     (real attribution) or not.
 
+    `session`/`current_session` are compared only when BOTH are truthy: a
+    cache written before #1362 carries no `session` key at all, and a caller
+    with no session identity of its own (`doctor.py`'s re-derivation, which
+    has none to compare against) passes `current_session=None` -- neither
+    should manufacture a mismatch that was never actually observed. That
+    window self-heals at the next full refresh, the same convention #754's
+    own migration comment above uses for the old `attributable` boolean.
+
     Deliberately NOT handled here, and this is #551's own gap restated for a
     third instrument: a reading that is fresh BY THIS RULE and simply wrong --
     the consumer died one second after the reading was taken -- renders exactly
@@ -363,6 +460,8 @@ def channel_status(
     """
     if not isinstance(fetched_at, (int, float)):
         return {"state": "cannot_determine", "reason": "not-asked"}
+    if session and current_session and session != current_session:
+        return {"state": "cannot_determine", "reason": "other-session"}
     if attribution == "declaration-unreadable":
         return {"state": "cannot_determine", "reason": "declaration-unreadable"}
     if attribution not in ("derivation", "declaration"):
@@ -402,6 +501,7 @@ def board_from_cache(cache, now=None):
             "issues_external": None,
             "issues_no_priority": None,
             "issues_no_lane": None,
+            "inbound": None,
             "age": None,
         }
     prs = cache.get("prs")
@@ -427,6 +527,8 @@ def board_from_cache(cache, now=None):
         # A cache written before this field existed, or by a refresh whose rollup call did
         # not answer. Neither is "every pull request is green".
         checks = None
+    inbound = cache.get("inbound")
+    inbound = inbound if isinstance(inbound, dict) else None
     fetched = cache.get("fetched_at")
     age = None
     if isinstance(fetched, (int, float)):
@@ -438,6 +540,7 @@ def board_from_cache(cache, now=None):
         "issues_no_priority": issues_no_priority,
         "issues_no_lane": issues_no_lane,
         "checks": checks,
+        "inbound": inbound,
         "age": age,
     }
 
@@ -735,7 +838,20 @@ def _trap_count(root):
 
     Counts `*.md` files not starting with `.`, matching `trap_curate.waiting`'s own
     filter -- `.gitkeep` (and any other dotfile) is excluded by the leading-dot
-    check alone, with no separate name check needed.
+    check alone, with no separate name check needed -- **and excluding the one
+    file `scaffold.py` owns inside that directory**, its README (#1348/#1372).
+
+    That exclusion is a duplicated literal and it is duplicated knowingly, for
+    the reason the paragraph above gives: this module is vendored standalone and
+    cannot import `trap_curate`. So the parity this docstring claims is not
+    enforced by construction, and #1372 is what happens when it is left to the
+    claim alone -- #1348 excluded the README from `trap_curate.waiting` and not
+    from here, and the two counters read 16 and 17 on this repository until a
+    release audit reproduced it. What a maintainer saw: `trap 1` on a fully
+    drained `trap.d/`, with no fragment left to delete that would clear it,
+    while doctor's own trap-queue check said `none waiting` in the same run.
+    `tests/test_gate3_round1_findings_1372.py` compares the two counters
+    directly rather than trusting either docstring.
     """
     path = Path(root) / "trap.d"
     try:
@@ -744,7 +860,11 @@ def _trap_count(root):
         return 0
     except OSError:
         return None
-    return sum(1 for name in names if name.endswith(".md") and not name.startswith("."))
+    return sum(
+        1
+        for name in names
+        if name.endswith(".md") and not name.startswith(".") and name != "README.md"
+    )
 
 
 def _render_stamp(now):
@@ -855,6 +975,33 @@ def _trap_field(traps):
     that is read straight off the filesystem rather than off a cache.
     """
     return "trap " + ("?" if not isinstance(traps, int) else str(traps))
+
+
+def _inbound_field(inbound):
+    """`inb 2is 1pr` / `inb ?is ?pr` -- outside issues unruled and outside
+    pull requests unreviewed, beside the `trap.d/` backlog above (#1406).
+
+    `inbound` is `board.get("inbound")` -- the cached `inbound_reading()`
+    document, or `None` for a cache written before this field existed. Each
+    count renders `?`, never `0`, exactly the rule `_trap_field` and
+    `_board_field`'s own `eis` group already follow: a zero from a read that
+    never happened and a zero from one that happened and found nothing must
+    not be the same pixels, which is the whole reason #1406 exists.
+
+    `unanswered_comments` is deliberately not a third number here.
+    `inbound_reading` always reports it as `None` (see that function's own
+    docstring for why the walk is not built yet) -- a field that always
+    renders `?` teaches the eye to stop reading it, which is worse than not
+    showing it at all, so it stays off this line rather than being padded
+    in as a permanent unknown.
+    """
+    inbound = inbound if isinstance(inbound, dict) else {}
+    unruled = inbound.get("unruled_issues")
+    unreviewed = inbound.get("unreviewed_prs")
+    return "inb {}is {}pr".format(
+        "?" if not isinstance(unruled, int) else unruled,
+        "?" if not isinstance(unreviewed, int) else unreviewed,
+    )
 
 
 def _last_field(stamp):
@@ -1099,6 +1246,43 @@ def _channel_field(channel, symbols, color=False):
     return shade + text + RESET
 
 
+def _doctor_field(state, symbols, color=False):
+    """`dr` + one glyph for `/oss:doctor`'s own last verdict (#1314) -- the same width
+    discipline `_channel_field` (#613) argues for, folded onto three of the same states
+    a check on this line already uses: a pass, a real finding, and "cannot currently
+    say". `state` is already the outcome `refresh()`/`gather()` computed (see
+    `DOCTOR_REFRESH_AFTER`'s own docstring) -- this function takes no root and makes no
+    call of its own, matching every other render-layer function on this line.
+
+    `"ok"` -> `symbols["ok"]`, doctor's own clean `VERDICT: ok`. `"gaps"` ->
+    `symbols["own"]`, doctor's `usable with gaps` -- reusing the glyph `_channel_field`
+    uses for its own "a real finding that is neither pass nor fail" state, because that
+    is exactly what a WARN is here too. `"bad"` -> `symbols["bad"]`, `not usable`.
+    Anything else -- `None`, because the reading is absent or stale (folded by
+    `gather()` before this function ever sees it), or a verdict shape doctor has never
+    printed -- renders `symbols["unk"]`, never a guess.
+
+    **Named risk, not fixed here (the issue's own "Edge case" section, #1314): a
+    single persistent false-positive WARN pins this marker at the `gaps` glyph
+    permanently.** `.claude/jit-context/paths/00-manual/doctor-check-contract.md`
+    already treats a WARN nothing can clear as a defect in the CHECK, not in the repo
+    it is raised against -- this field does not change that. It makes the standing
+    alert visible on every render instead of only on a run nobody happened to make,
+    which is progress and also new, continuous pressure on that already-named defect.
+    """
+    if state == "ok":
+        text, shade = "dr" + symbols["ok"], GREEN
+    elif state == "gaps":
+        text, shade = "dr" + symbols["own"], YELLOW
+    elif state == "bad":
+        text, shade = "dr" + symbols["bad"], RED
+    else:
+        text, shade = "dr" + symbols["unk"], DIM
+    if not color:
+        return text
+    return shade + text + RESET
+
+
 #: `gh-branch`'s own four states, folded onto `_symbols`' four render glyphs (#856).
 #: `"bad"` gets its own glyph -- a leg has actually failed, the one state that is a
 #: finding rather than "not settled yet". `"running"` and `"no-run"` share `run` on
@@ -1119,6 +1303,19 @@ def _default_branch_marker(state, symbols, color=False):
     head commit is green right now (#856) -- the reading nothing on this line said
     anything about, including the moment right after this loop's own merge, when
     the branch has a fresh commit and no concluded run yet.
+
+    **Speaks only about the `.oss.json`-declared `default_branch` -- never about
+    the current branch or worktree this line happens to be rendered from (#1312).**
+    This function does not even take a branch argument: `state` is already the
+    outcome `_gh_default_branch_state` computed against `config.get("default_branch")`
+    (see that function's own docstring, and `refresh()`'s call site), folded through
+    `gather()`. Nothing between here and there ever consults `branch_name(root)` --
+    the function that answers the OTHER, legitimately-current-branch field a few
+    lines below this marker's call site in `render()`. Confusing the two is the
+    exact failure mode #1312 was filed to guard against: this loop runs from a
+    worktree checked out to a branch other than the default on every single lane,
+    and a marker that silently drifted to mean "is MY branch green" would be
+    actively misleading rather than merely wrong.
 
     `None` -- rendering nothing, never `?` -- when `state` is `None`: either the
     config declares no default branch to compare against (a deliberate absence of
@@ -1206,12 +1403,18 @@ def render(facts, ascii_only=False, color=False):
     blocks.append(_unlabelled_field(board))
     blocks.append(_release_field(facts.get("release")))
     blocks.append(_trap_field(facts.get("traps")))
+    blocks.append(_inbound_field(board.get("inbound")))
     blocks.append(_last_field(facts.get("last")))
 
     blocks.append(_plugins_field(facts.get("plugins") or [], symbols, color))
     channel_block = _channel_field(facts.get("channel"), symbols, color)
     if channel_block is not None:
         blocks.append(channel_block)
+    # Always shown, unlike `ch` above -- there is no deliberate off switch for
+    # `/oss:doctor` the way `watch_channel: false` turns the channel field off
+    # (#613's own convention), so an absent or stale reading renders `dr?` rather
+    # than disappearing from the line (#1314).
+    blocks.append(_doctor_field(facts.get("doctor_state"), symbols, color))
     return symbols["sep"].join(blocks)
 
 
@@ -1254,6 +1457,16 @@ def branch_name(root):
 
 
 def _run(command, timeout=5):
+    """#1295: `command[0]` is resolved through `_safe_which` above before it is
+    ever handed to `subprocess.run` -- every caller in this module passes a
+    bare `"git"`/`"gh"` as argv[0], and a same-named `git.exe`/`gh.cmd`
+    planted at the root of the repository this statusline is reporting on
+    can otherwise win over a real `PATH` entry on Windows.
+    """
+    resolved = _safe_which(command[0])
+    if resolved is None:
+        return None
+    command = [resolved] + list(command[1:])
     try:
         result = subprocess.run(
             command,
@@ -1604,6 +1817,146 @@ def _gh_external_issue_count(repo, total):
     return external
 
 
+def _gh_external_pr_count(repo, total):
+    """Mirrors `_gh_external_issue_count` exactly, against the pull-request
+    listing instead of the issue one (#1406).
+
+    `repos/{owner}/{repo}/pulls` never mixes issues in the way
+    `repos/{owner}/{repo}/issues` does, so there is no `pull_request == null`
+    filter to apply here -- every row already is a pull request. Same
+    row-count cross-check against `total` (`_gh_count`'s own answer, "is:pr"),
+    same `None`-on-any-doubt rule: a count smaller than the truth must never
+    render as a real one.
+    """
+    if not isinstance(total, int):
+        return None
+    if _malformed_repo(repo):
+        return None
+    out = _run(
+        [
+            "gh",
+            "api",
+            "--paginate",
+            "-X",
+            "GET",
+            "repos/{}/pulls".format(repo),
+            "-f",
+            "state=open",
+            "-f",
+            "per_page=100",
+            "--jq",
+            ".[] | .author_association",
+        ],
+        timeout=25,
+    )
+    if out is None:
+        return None
+    lines = out.split("\n") if out else []
+    if len(lines) != total:
+        return None
+    external = 0
+    for line in lines:
+        assoc = line.strip()
+        if not assoc or assoc.upper() == "NULL":
+            return None
+        if assoc.upper() not in _INSIDE_ASSOCIATIONS:
+            external += 1
+    return external
+
+
+def inbound_reading(repo, issues_total, prs_total):
+    """How much of what arrived from outside is still waiting -- #1405/#1406.
+
+    **One module, two consumers**, per the design note on #1405: `refresh()`
+    below calls this on the board's own clock and caches the result, because
+    the statusline must never block a prompt on a fresh forge round trip.
+    `scripts/next_action.py`'s own `_fresh_inbound_reading` calls this
+    function directly, with totals it took a moment ago, because the loop is
+    about to act on the answer and can afford the two calls. Neither is a
+    second opinion about the other; both call this.
+
+    `unruled_issues` -- open issues authored by someone outside repository
+    membership (`_gh_external_issue_count`'s own reading against `issues_
+    total`). The loop rules on an issue by closing it with a reason
+    (`inbound_triage.REFUSAL_REASONS`), so any still-open one is, by
+    construction, not yet ruled on -- no second read needed to establish
+    that. `unreviewed_prs` -- the identical reading for open pull requests
+    (`_gh_external_pr_count` against `prs_total`): the loop's own review has
+    not landed a merge or a close on it yet.
+
+    `unanswered_comments` is always `None` here. Counting it for real means
+    walking every open issue and pull request's own comment thread -- one
+    forge call each -- which is a materially larger cost than the two reads
+    above (#1406's own "which fields, and what that costs" question). #1406
+    asked for the field to fail honestly rather than render a guessed zero;
+    it did not ask for that walk to be built in the same change that decides
+    the shape, so this is a deliberate scope line, not an oversight, and it
+    is on record as a follow-up rather than guessed at here.
+
+    `state` is `"measured"` only when both counts actually resolved;
+    `"could-not-tell"` the moment either one comes back `None` -- never
+    quietly reads as `0`, the same discipline `_gh_external_issue_count`
+    already applies to its own row-count cross-check.
+    """
+    unruled = _gh_external_issue_count(repo, issues_total)
+    unreviewed = _gh_external_pr_count(repo, prs_total)
+    state = (
+        "measured"
+        if unruled is not None and unreviewed is not None
+        else "could-not-tell"
+    )
+    return {
+        "state": state,
+        "unruled_issues": unruled,
+        "unreviewed_prs": unreviewed,
+        "unanswered_comments": None,
+    }
+
+
+def _effective_lane_labels(labels_config):
+    """Vendored copy of `oss_config.effective_lane_labels`'s own logic
+    (#1181) -- this module cannot import that module (#653's own
+    standalone-vendoring reason, restated in this module's own docstring).
+    `labels_config` here is `config["labels"]` already narrowed to a dict by
+    the caller (`refresh()`), not the whole config -- `oss_config.
+    effective_lane_labels` takes the whole config and narrows it itself;
+    this does the narrower half so the two can be compared directly by a
+    parity test rather than only reachable through the whole of `refresh()`
+    (#1325).
+
+    `oss_config.effective_lane_labels` filters `labels.lanes` down to
+    string entries before appending `lane_other` -- `oss_config.validate`
+    checks `labels.lanes` is a list but never that every element is a
+    string, so a malformed config (e.g. a stray integer) can carry a
+    non-string entry through validation. This filters the same way, or a
+    non-string entry would survive here (later coerced to a string by
+    `_gh_unlabelled_issue_counts`'s own `{str(label) for label in
+    lane_labels}`) while `effective_lane_labels` drops it, reopening the
+    exact "readers disagree" defect #1181 closed.
+
+    `labels.lane_other` is a completed triage decision -- "no real lane
+    owns this issue's files" -- recorded on its own key rather than as a
+    sixth entry in `labels.lanes` (#1130), because it carries no file
+    pattern and select_issues.py dispatches it solo, never bundled.
+    Appended once, only if it is a non-blank string not already present. A
+    `None`/absent `lane_other` changes nothing.
+    """
+    raw_lanes = labels_config.get("lanes")
+    lane_labels = (
+        [l for l in raw_lanes if isinstance(l, str)]
+        if isinstance(raw_lanes, list)
+        else []
+    )
+    lane_other = labels_config.get("lane_other")
+    if (
+        isinstance(lane_other, str)
+        and lane_other.strip()
+        and lane_other not in lane_labels
+    ):
+        lane_labels.append(lane_other)
+    return lane_labels
+
+
 def _gh_unlabelled_issue_counts(repo, total, priority_labels, lane_labels):
     """How many open issues carry none of `priority_labels`, and how many carry none
     of `lane_labels` -- reported separately, as two independent counts (#1079).
@@ -1650,22 +2003,28 @@ def _gh_unlabelled_issue_counts(repo, total, priority_labels, lane_labels):
             "-f",
             "per_page=100",
             "--jq",
-            ".[] | select(.pull_request == null)"
-            " | ([.labels[].name] | tojson)",
+            ".[] | select(.pull_request == null) | ([.labels[].name] | tojson)",
         ],
         timeout=25,
     )
     if out is None:
         return None
-    # One JSON array per line, `tojson`-encoded server-side, rather than the earlier
-    # comma-joined string this used to split back apart in Python. A GitHub label name
-    # may legally contain a comma -- a label literally named e.g. `blocked,lane-storage`
-    # split into two names under the old scheme, one of which could coincidentally
-    # collide with a real declared lane, so the issue silently counted as *placed in a
-    # lane* when no triage sweep had placed it there (#622). `tojson` needs no delimiter
-    # a label name could ever contain, and unlike the old bare comma-joined line, `[]`
-    # (zero labels) is never empty, so there is no longer a trailing-blank-line hazard
-    # to guard against with a prefix.
+    # #1226: one JSON array of label names per line (`tojson`, server-side),
+    # rather than the earlier `"L:" + join(",")` scheme this used to split
+    # back apart in Python. A GitHub label name may legally contain a comma
+    # -- a label literally named e.g. `blocked,lane-storage` split into two
+    # names under the old scheme, one of which (`lane-storage`) could
+    # coincidentally collide with a real declared lane, silently counting an
+    # issue as *placed in a lane* when no triage sweep had actually placed it
+    # there. The direction of that error was an undercount of
+    # `no_priority`/`no_lane`, the opposite of this function's own
+    # documented convention (never undercount) -- and the existing
+    # `len(lines) != total` cross-check below could not catch it, because
+    # the line count stayed correct; only the per-line parse was wrong.
+    # `tojson` needs no delimiter a label name could ever contain, and
+    # unlike the old scheme, `[]` (zero labels) is never an empty line, so
+    # there is no longer a trailing-blank-line hazard to guard against with
+    # a prefix the way the old `"L:"` marker did.
     lines = out.split("\n") if out else []
     if len(lines) != total:
         return None
@@ -1891,6 +2250,15 @@ def _gh_default_branch_state(repo, branch):
     """Is the default branch's head commit green? One of the four states `gh-branch`
     itself answers, read off two cheaper calls (#856, and #914 for the second one).
 
+    **`branch` is `.oss.json`'s `default_branch`, always -- the only call site
+    (`refresh()`) passes `config.get("default_branch")`, never anything derived
+    from the current checkout (#1312).** This function has no way to notice which
+    branch or worktree the statusline process is actually running from, and
+    nothing should ever change that: the marker `_default_branch_marker` renders
+    from this function's return value must keep meaning "is the declared default
+    green", identically whether this loop is standing in `main` or in one of its
+    own worktrees on `fix/NNNN`.
+
     `gh-branch` (supertool) enumerates every workflow run on the head SHA and
     collapses re-runs and multi-run workflows to answer conjunctively -- machinery
     this render does not need, because it produces one glyph, not a table.
@@ -2087,11 +2455,29 @@ def _channel_reading(root, config):
         attribution = "derivation"
     else:
         declared, problem = _declared_watch_names(root)
+        only = next(iter(declared)) if len(declared) == 1 else None
         if problem:
             attribution = "declaration-unreadable"
-        elif (
-            actual is not None and len(declared) == 1 and next(iter(declared)) == actual
-        ):
+        elif only is not None and only in (actual, expected):
+            # Two ways one declared name attributes, and #1365 added the second.
+            #
+            # `only == actual` is #754's own case: a repository whose declared
+            # name differs from what it would derive, matching what this
+            # process was handed.
+            #
+            # `only == expected` is ownership stated in the repository's own
+            # tracked `.supertool.json` and agreeing with what the repository
+            # derives -- which is a fact about the repository, not about
+            # whether THIS process happens to carry SUPERTOOL_WATCH_NAME. It
+            # did not attribute before, so every session not started by
+            # `bin/oss-workspace` read its own channel as possibly another
+            # project's fleet, and the marker flapped between `derivation` and
+            # `not-attributable` for one unchanged repository depending on
+            # which kind of session took the reading. The WARN doctor printed
+            # asked the maintainer to declare `ops.<name>.watch_name`, which
+            # was already declared -- no manual op and no scaffold run could
+            # clear it, which by this repository's own rule makes it a bug in
+            # the check rather than work.
             attribution = "declaration"
         else:
             attribution = "not-attributable"
@@ -2100,8 +2486,224 @@ def _channel_reading(root, config):
     return parse_channel_report(_run_channel_health()), attribution
 
 
-def refresh(root, now=None):
+#: Mirrors `scaffold.py`'s own `OWNED_DIR` (".oss") -- the one directory name
+#: `scaffold.py` ever vendors this module into (`_owned_statusline`). Not
+#: imported from `scaffold.py`: this module is vendored standalone into
+#: managed repositories with "No third-party imports" (see the module
+#: docstring above), so a duplicate literal is the only route available here,
+#: the same trade-off `_safe_which` above already documents for `gh_which.py`.
+_VENDORED_DIR_NAME = ".oss"
+
+
+def _statusline_sibling_doctor_path():
+    """`doctor.py` beside this file on disk. Real only when this file IS the
+    plugin's own tracked `scripts/statusline.py`, run directly out of a checkout
+    -- this repository's own dev loop, and every existing test in this suite --
+    never the vendored copy `scaffold.py` writes to a managed repo's
+    `.oss/statusline.py` (#1314's own self-review finding: `_owned_statusline`
+    copies exactly one file at write time, and `doctor.py` is not it -- see
+    `OWNED` in `scaffold.py`). Split out from `_doctor_script_path` below so that
+    fallback is testable without patching `__file__` itself.
+
+    Returns the candidate path unconditionally -- existence and provenance are
+    both `_doctor_script_path`'s job, not this function's (#1334): this file's
+    own `is_file()` check was previously the ONLY gate, and the candidate it
+    resolves to is under attacker control in a managed repository (see
+    `_sibling_doctor_candidate_is_trusted` below).
+    """
+    return Path(__file__).with_name("doctor.py")
+
+
+def _sibling_doctor_candidate_is_trusted(candidate):
+    """Whether `candidate` (`_statusline_sibling_doctor_path()`'s return value)
+    is safe to execute unread, beyond merely existing (#1334).
+
+    `_statusline_sibling_doctor_path` resolves a path beside `__file__` with no
+    check on WHICH `__file__` is running it. In a managed repository the
+    vendored copy of this module lives at `<repo>/.oss/statusline.py`
+    (`scaffold.py`'s `OWNED_DIR`), so the sibling candidate resolves to
+    `<repo>/.oss/doctor.py` -- a path INSIDE the repository under inspection,
+    not gitignored, and addable by an ordinary pull request. `_doctor_reading`
+    then runs whatever is there with `sys.executable`, in the maintainer's own
+    session, reachable with no user action (`gather()` forks a refresh
+    whenever the board is stale) and before any review of that pull request.
+
+    This checks the one fact that is NOT attacker-controlled: the name of the
+    directory the running module actually lives in. `scaffold.py` is the only
+    writer of a vendored copy and always uses the literal ".oss" -- a pull
+    request against the managed repo can add files inside that directory but
+    cannot relocate which directory `.oss/statusline.py` itself executes from.
+    So a sibling candidate whose parent directory is named `.oss` is refused
+    outright, and `_doctor_script_path` falls through to the installed-plugin
+    candidate instead, exactly as it already does when the sibling is simply
+    missing. Everywhere else -- this repository's own `scripts/` checkout, a
+    pytest fixture directory, the plugin's own installed `scripts/` directory
+    -- is unaffected; this closes one specific, attacker-reachable path rather
+    than adding a hash or signature scheme this loop has no way to bootstrap
+    trust for.
+
+    Compared case-folded (self-review finding): on a case-insensitive but
+    case-preserving filesystem (default macOS APFS, default Windows NTFS),
+    `<repo>/.OSS/statusline.py` is the SAME directory on disk as
+    `<repo>/.oss/statusline.py` even though the two path strings differ, and
+    `scaffold.py` never varies its own literal-lowercase spelling -- but
+    nothing here controls what string the harness's own invocation path (a
+    hook config, a symlink, a future resolver) happens to carry. A
+    case-sensitive comparison would (wrongly) trust the vendored sibling the
+    moment that string happened to spell the directory with any other
+    casing, silently reopening the exact bypass this function exists to
+    close. `.lower()` on both sides removes that dependency entirely rather
+    than assuming today's one invocation path is the only one that will ever
+    exist.
+    """
+    return candidate.parent.name.lower() != _VENDORED_DIR_NAME
+
+
+def _installed_plugin_root(project_root, name, plugins_root=None):
+    """The `installPath` of the installed plugin named `name`, for THIS project --
+    the same `installed_plugins.json` resolution `installed_plugins()` above
+    already performs, but returning the install directory itself rather than
+    the version/repository facts that function derives from it (#1314).
+
+    `None` when `installed_plugins.json` cannot be read/parsed, no entry's name
+    matches (`key.split("@", 1)[0]`, the same split `installed_plugins()` uses),
+    or no matching entry applies to this project (`_entry_applies`) -- never a
+    guess at where a plugin "usually" lives.
+    """
+    root = Path(plugins_root) if plugins_root is not None else plugins_root_default()
+    try:
+        doc = json.loads((root / "installed_plugins.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    project = _normalized_path(project_root) if project_root is not None else None
+    for key, entries in (doc.get("plugins") or {}).items():
+        if key.split("@", 1)[0] != name:
+            continue
+        for entry in entries or []:
+            if not _entry_applies(entry, project):
+                continue
+            install_path = entry.get("installPath")
+            if install_path:
+                return install_path
+    return None
+
+
+def _doctor_script_path(root):
+    """Where `_doctor_reading` should find `doctor.py`, in the two shapes this
+    statusline file is actually run from (#1314's own self-review finding).
+
+    1. Beside this file (`_statusline_sibling_doctor_path`) -- this repository's
+       own dev checkout, where `scripts/statusline.py` and `scripts/doctor.py`
+       are genuine siblings. Only trusted when
+       `_sibling_doctor_candidate_is_trusted` says so (#1334): a candidate
+       resolving inside `scaffold.py`'s vendored `.oss/` directory is refused
+       even when it exists, since a file there is attacker-plantable via an
+       ordinary pull request against the managed repo.
+    2. Failing that, the `oss` plugin's own installed copy
+       (`_installed_plugin_root`, `OSS_STATUSLINE_PLUGIN` env, default `"oss"` --
+       the same name `plugin_facts` below already reads this repo's own entry
+       under) -- `<install path>/scripts/doctor.py`. This is the candidate that
+       actually answers in a managed repository: `scaffold.py` never ships
+       `doctor.py` alongside the vendored `.oss/statusline.py` it writes, so
+       candidate 1 does not exist there by construction (and would be refused
+       by the trust check even if it did), and the plugin installed under
+       `~/.claude/plugins` is where the real diagnostic lives.
+
+    Returns the first trusted candidate that exists on disk, or `None` when
+    neither does -- `_doctor_reading` folds that to the same absent-reading
+    `None` every other unreachable-subprocess case there already produces.
+    """
+    beside = _statusline_sibling_doctor_path()
+    if beside.is_file() and _sibling_doctor_candidate_is_trusted(beside):
+        return beside
+    loop_name = os.environ.get("OSS_STATUSLINE_PLUGIN", "oss")
+    install_path = _installed_plugin_root(root, loop_name)
+    if install_path:
+        candidate = Path(install_path) / "scripts" / "doctor.py"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _doctor_verdict_state(verdict):
+    """Fold `doctor.py`'s own free-text `VERDICT:` line into one of the three states
+    `_doctor_field` renders (#1314): `"ok"`, `"gaps"` (`usable with gaps -- ...`),
+    `"bad"` (`not usable -- ...`). `verdict` is the text AFTER the `VERDICT: ` prefix,
+    or `None`.
+
+    Anything else -- `None` itself, or a verdict shape doctor's own `main()` has never
+    printed (a future third state, a truncated read) -- folds to `None` here too,
+    rendered as `?` by the caller: never guessed at from a shape this function does not
+    recognise. Matched with `startswith`, not equality, because both real WARN/FAIL
+    lines carry a count after the leading words (`"usable with gaps -- 2 warning(s)"`)
+    that this function does not need and must not have to keep in exact sync with
+    `doctor.py`'s own count formatting.
+    """
+    if verdict is None:
+        return None
+    if verdict == "ok":
+        return "ok"
+    if verdict.startswith("usable with gaps"):
+        return "gaps"
+    if verdict.startswith("not usable"):
+        return "bad"
+    return None
+
+
+def _doctor_reading(root):
+    """Run `doctor.py --root <root>` and read back its own last `VERDICT:` line
+    (#1314). Returns the raw text after `"VERDICT:"`, or `None` when no `doctor.py`
+    could be located (`_doctor_script_path`), the subprocess could not be started,
+    timed out, or exited non-zero -- which, by doctor's own "exit 0 always" contract
+    (see its module docstring), should never happen, but is treated here as a real
+    absence rather than trusted blindly.
+
+    Not routed through `_run()`: that helper resolves `command[0]` on `PATH` via
+    `_safe_which` (#1295), which defends against a same-named `git.exe`/`gh.cmd`
+    planted in the repository this statusline reports on winning over a real `PATH`
+    entry. `sys.executable` is not a bare name subject to that shadowing -- it is
+    already the absolute path of the interpreter running this process, the identical
+    value `_fork_refresh` above already spawns itself with -- so resolving it through
+    a PATH walk would only fail to find it.
+
+    Called from `refresh()` only, which already runs detached, never on the render
+    path; `DOCTOR_TIMEOUT` bounds the wait so one hung doctor run cannot freeze the
+    rest of that refresh's fields along with it.
+    """
+    script = _doctor_script_path(root)
+    if script is None:
+        return None
+    try:
+        result = subprocess.run(
+            [sys.executable, str(script), "--root", str(root)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=DOCTOR_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    text = result.stdout.decode("utf-8", "replace")
+    for line in reversed(text.splitlines()):
+        line = line.strip()
+        if line.startswith("VERDICT:"):
+            return line[len("VERDICT:") :].strip()
+    return None
+
+
+def refresh(root, now=None, session_id=None):
     """Fill the cache for one managed repository. Runs detached, never on the render path.
+
+    `session_id` (#1362) -- the session that requested this refresh, threaded
+    from `_fork_refresh`'s own `--session-id` argv all the way from `gather()`'s
+    `payload.get("session_id")` -- is recorded alongside a freshly-taken
+    channel reading so a LATER render, possibly from a different session on
+    this same repository, can tell whether the reading in the cache is its
+    own. `None` when nobody named one (a manual `--refresh`, or a caller that
+    predates this field): the reading is then unattributed to any session,
+    which `channel_status` treats as "unknown, not necessarily someone
+    else's" rather than as evidence of a mismatch.
 
     Two clocks (#515), soon three (#613). The board -- open pull requests, open issues,
     who filed each, their check rollups, the unlabelled-issue counts (#1079) -- is
@@ -2138,14 +2740,20 @@ def refresh(root, now=None):
         labels_config = labels_config if isinstance(labels_config, dict) else {}
         priority_labels = labels_config.get("priority")
         priority_labels = priority_labels if isinstance(priority_labels, list) else []
-        lane_labels = labels_config.get("lanes")
-        lane_labels = lane_labels if isinstance(lane_labels, list) else []
+        lane_labels = _effective_lane_labels(labels_config)
         unlabelled = _gh_unlabelled_issue_counts(
             repo, document["issues"], priority_labels, lane_labels
         )
         document["issues_no_priority"] = (unlabelled or {}).get("no_priority")
         document["issues_no_lane"] = (unlabelled or {}).get("no_lane")
         document["pr_checks"] = check_rollup_counts(_gh_rollups(repo), document["prs"])
+        # Same board clock as everything above (#1406): two more calls of the
+        # identical shape `issues_external` already makes, so folding this
+        # into the existing REFRESH_AFTER cadence rather than inventing a
+        # separate clock is a deliberate choice, not an oversight -- see
+        # `inbound_reading`'s own docstring for the "one module, two
+        # consumers" design this composes into.
+        document["inbound"] = inbound_reading(repo, document["issues"], document["prs"])
         # Same call group, same `fetched_at`, same `stale_after` (#856): the default
         # branch's own CI state is exactly as time-sensitive as the pull-request board
         # it sits beside, and it shares the moment (a merge or an issue close in this
@@ -2203,7 +2811,14 @@ def refresh(root, now=None):
         )
         if channel_due:
             raw_state, attribution = _channel_reading(root, config)
-            document["channel"] = {"raw_state": raw_state, "attribution": attribution}
+            document["channel"] = {
+                "raw_state": raw_state,
+                "attribution": attribution,
+                # #1362 -- which session took this reading, so a later render
+                # (possibly a different session on this same repository) can
+                # tell whether it is entitled to adopt it.
+                "session": session_id,
+            }
             document["channel_fetched_at"] = now
         else:
             # Carried forward under its OWN old stamp, same shape as `latest`
@@ -2211,6 +2826,19 @@ def refresh(root, now=None):
             # old reading indistinguishable from a fresh one at the render.
             document["channel"] = previous.get("channel")
             document["channel_fetched_at"] = previous_channel_stamp
+    previous_doctor_stamp = previous.get("doctor_fetched_at")
+    doctor_due = not isinstance(previous_doctor_stamp, (int, float)) or (
+        now - previous_doctor_stamp >= DOCTOR_REFRESH_AFTER
+    )
+    if doctor_due:
+        document["doctor_verdict"] = _doctor_reading(root)
+        document["doctor_fetched_at"] = now
+    else:
+        # Carried forward under its OWN old stamp, same shape as `channel`/`latest`
+        # above and for the same reason: re-stamping `now` would make an old reading
+        # indistinguishable from a fresh one at the render.
+        document["doctor_verdict"] = previous.get("doctor_verdict")
+        document["doctor_fetched_at"] = previous_doctor_stamp
     path = cache_path(repo)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
@@ -2364,11 +2992,31 @@ def _lock_path(repo):
     return cache_path(repo).with_suffix(".lock")
 
 
-def _fork_refresh(root, repo):
+def _fork_refresh(root, repo, session_id=None):
     """Start a detached refresh, at most one at a time.
 
     The lock carries a timestamp rather than being a directory: a refresher killed
     mid-run must not freeze the counts forever, so a stale lock is simply overwritten.
+
+    `session_id` (#1362) is forwarded as `--session-id` so the detached process --
+    which inherits this one's environment but none of its argv -- can record
+    whose render triggered the refresh, and omitted entirely when there is none
+    to name (the caller's own session id was itself unknown), rather than
+    passing a literal `"None"` string that would attribute the reading to a
+    session that does not exist.
+
+    Self-review finding: `payload.get("session_id")` is read from a JSON
+    document this module does not control the shape of, and a non-string
+    value (an int, a dict, anything `Popen`'s own argv marshalling does not
+    accept) reaching `subprocess.Popen` here raises `TypeError`, which is
+    NOT one of the two exceptions this function already catches -- and
+    unlike every other malformed-input case in this module, that one is not
+    scoped to this field: it kills `gather()`'s whole caller, so a bad
+    `session_id` would take down the ENTIRE status line rather than costing
+    only the channel reading its answer. Checked with `isinstance` here for
+    the same reason `_watch_preset_declared` guards a malformed
+    `.supertool.json`: a value this module cannot trust is treated as
+    absent, never as a crash.
     """
     lock = _lock_path(repo)
     try:
@@ -2378,15 +3026,18 @@ def _fork_refresh(root, repo):
         lock.write_text(str(time.time()), encoding="utf-8")
     except OSError:
         return
+    argv = [
+        sys.executable,
+        os.path.abspath(__file__),
+        "--refresh",
+        "--root",
+        str(root),
+    ]
+    if isinstance(session_id, str) and session_id:
+        argv.extend(["--session-id", session_id])
     try:
         subprocess.Popen(
-            [
-                sys.executable,
-                os.path.abspath(__file__),
-                "--refresh",
-                "--root",
-                str(root),
-            ],
+            argv,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL,
@@ -2401,12 +3052,26 @@ def _fork_refresh(root, repo):
 
 def gather(payload, root, now=None):
     now = time.time() if now is None else now
+    # #1362 -- the session id Claude Code's own statusline payload carries,
+    # threaded through both to the detached refresh this call may fork (so a
+    # freshly-taken channel reading is stamped with the session that asked
+    # for it) and to `channel_status` below (so a reading stamped with a
+    # DIFFERENT session's id is never rendered as this session's own).
+    # Self-review finding: a malformed payload could carry a non-string
+    # value here, and `_fork_refresh` would otherwise pass it straight into
+    # `subprocess.Popen`'s argv -- a `TypeError` that function does not
+    # catch and that would crash this whole render, not only the channel
+    # field. Coerced to "absent" at the source, the same treatment this
+    # module already gives any input it cannot trust.
+    current_session = (payload or {}).get("session_id")
+    if not isinstance(current_session, str):
+        current_session = None
     config = repo_config(root)
     cache = read_cache(cache_path(config.get("repo")))
     board = board_from_cache(cache, now=now)
     board_stale = board_is_due(cache, now)
     if board_stale:
-        _fork_refresh(root, config.get("repo"))
+        _fork_refresh(root, config.get("repo"), current_session)
     # Same fold `plugin_facts`/`version_status` already do for `latest` (#550), on
     # the same board clock `board_is_due` already computes above -- `default_branch`
     # itself present-but-unconfigured stays `None` (never asked, #613's own
@@ -2453,7 +3118,22 @@ def gather(payload, root, now=None):
             raw_channel.get("attribution", "not-attributable"),
             (cache or {}).get("channel_fetched_at"),
             now,
+            session=raw_channel.get("session"),
+            current_session=current_session,
         )
+
+    # Its own clock (`DOCTOR_REFRESH_AFTER`), independent of the board clock above --
+    # `default_branch_state` folds on `board_stale` because a fresh commit falsifies it
+    # within seconds; a doctor reading has no such falsifying event and is only ever
+    # too old on its own much longer interval. A reading absent or older than that
+    # interval folds to `None` here, rendered `?` by `_doctor_field`, never a guess.
+    raw_doctor_stamp = (cache or {}).get("doctor_fetched_at")
+    if isinstance(raw_doctor_stamp, (int, float)) and (
+        now - raw_doctor_stamp < DOCTOR_REFRESH_AFTER
+    ):
+        doctor_state = _doctor_verdict_state((cache or {}).get("doctor_verdict"))
+    else:
+        doctor_state = None
 
     return {
         "model": ((payload.get("model") or {}).get("display_name") or "").split(" ")[0]
@@ -2472,6 +3152,7 @@ def gather(payload, root, now=None):
         ),
         "channel": channel,
         "default_branch_state": default_branch_state,
+        "doctor_state": doctor_state,
     }
 
 
@@ -2502,13 +3183,74 @@ def _ascii_only(stream):
     return False
 
 
+def _arg_value(argv, flag, default):
+    """The token following ``flag`` in ``argv``, or ``default``.
+
+    ``flag`` as the last token on the command line used to raise
+    ``IndexError`` at both of this file's two call sites (#1346) -- each
+    hand-rolled the same broken ``argv[argv.index(flag) + 1]`` independently.
+    One helper, used by both, so a trailing flag with nothing after it falls
+    back to ``default`` instead of crashing.
+    """
+    if flag in argv:
+        i = argv.index(flag)
+        if i + 1 < len(argv):
+            return argv[i + 1]
+    return default
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
+    if "--mark-stale" in argv:
+        # A triage pass relabels issues, which is exactly the kind of event that
+        # falsifies the board half of the cache -- the same reasoning
+        # `/oss:release` already applies to the `latest` half via
+        # `release_publish._invalidate_cache_after_publish` (#549). This is the
+        # single call an orchestrating session makes once, at the pass's own end
+        # (#1313), rather than relying only on `board_touch.py`'s per-command
+        # `PostToolUse` hook to catch every labelling route.
+        #
+        # #1346: the caller reads only the exit code, and this always exited 0
+        # whether the board was actually marked stale or `repo` failed to
+        # resolve -- the same absence-vs-clean-pass shape this whole plugin is
+        # named after. Print a one-line receipt naming which happened, and read
+        # `mark_board_stale`'s own return rather than assuming success just
+        # because a repo resolved -- it is silent-on-failure by design (a
+        # cache write can lose a race or hit a read-only filesystem), and this
+        # receipt exists precisely so that silence stops being invisible here.
+        #
+        # `reconfigure` first: the receipt interpolates a repo slug or a
+        # `--root` path into a plain `print()`, and on Windows the console
+        # encodes stdout with its own codepage (typically cp1252) rather than
+        # the source encoding -- a non-ASCII path component would otherwise
+        # raise `UnicodeEncodeError` at the print, after the work it reports
+        # already happened. Same idiom `lane_setup.py`'s CLI entry point uses.
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                stream.reconfigure(errors="backslashreplace")
+            except (AttributeError, ValueError):  # pragma: no cover - very old Python
+                pass
+        root = _arg_value(argv, "--root", ".")
+        repo = repo_config(root).get("repo")
+        if repo and mark_board_stale(repo):
+            print("mark-stale: marked {} stale".format(repo))
+        elif repo:
+            print(
+                "mark-stale: not marked -- writing the stale marker for {} failed".format(
+                    repo
+                )
+            )
+        else:
+            print(
+                "mark-stale: not marked -- no repo resolved for root {!r}".format(root)
+            )
+        return 0
     if "--refresh" in argv:
-        root = "."
-        if "--root" in argv:
-            root = argv[argv.index("--root") + 1]
-        refresh(root)
+        root = _arg_value(argv, "--root", ".")
+        # #1362 -- forwarded by `_fork_refresh` so the detached process can
+        # record whose render triggered it; absent for a manual `--refresh`.
+        session_id = _arg_value(argv, "--session-id", None)
+        refresh(root, session_id=session_id)
         try:
             _lock_path(repo_config(root).get("repo")).unlink()
         except OSError:

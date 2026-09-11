@@ -39,8 +39,9 @@ replaces them wholesale on every run.
 - `assemble_changelog.py` — validates changelog fragments and folds them into
   `CHANGELOG.md` at release time. It lives in your repository rather than in the plugin
   because CI checks out your repository and nothing else.
-- `statusline.py` — renders one status line for this repository: the tracker board, when
-  the next tick is due, and whether the plugin copies you are running are current. It is
+- `statusline.py` — renders one status line for this repository: the tracker board, how
+  many open issues still have no priority or lane label, how many `trap.d/` fragments are
+  waiting for `/oss:curate`, and whether the plugin copies you are running are current. It is
   **opt-in, and nothing here calls it**: it stays inert until a `statusLine` entry in
   `.claude/settings.json` points at it, so removing that entry stops it and breaks nothing else.
   The command that entry runs is
