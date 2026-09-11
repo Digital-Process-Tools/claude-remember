@@ -443,12 +443,35 @@ class TestPromoCarriesItsOwnOffSwitch:
 
         for entry in promos:
             # Install every OTHER plugin so this one is the only candidate.
+            # `.get("installed_key")` (#657): a `gate`-based entry (the star
+            # ask) carries no `installed_key` at all, so it cannot be marked
+            # "installed" and must not appear on this side of the dict either
+            # -- a KeyError here reads as "this suite was never updated for
+            # the new entry shape", which is exactly what caught this gap.
             others = {
                 p["installed_key"]: [{"name": p["id"]}]
                 for p in promos
-                if p["id"] != entry["id"]
+                if p.get("installed_key") and p["id"] != entry["id"]
             }
-            out, _home, remember = _run(tmp_path / entry["id"], installed_keyed=others)
+            if entry.get("gate") == "recent_nonempty":
+                # The #657 shape: not an install check at all. Give it the
+                # ONE thing it actually reads (a non-empty recent.md) rather
+                # than routing through `_run`, which never writes one.
+                home, project, remember = _store(tmp_path / entry["id"])
+                _write_installed(home, others)
+                (remember / "recent.md").write_text("hi\n", encoding="utf-8")
+                result = subprocess.run(
+                    ["bash", str(SESSION_START)],
+                    input=_payload(),
+                    env=_env(home, project, remember),
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                assert result.returncode == 0, result.stderr
+                out = result.stdout
+            else:
+                out, _home, remember = _run(tmp_path / entry["id"], installed_keyed=others)
             parsed = json.loads(out)
             msg = parsed.get("systemMessage", "")
             assert entry["id"] in msg or entry["text"].split(" -- ")[0] in msg, (
