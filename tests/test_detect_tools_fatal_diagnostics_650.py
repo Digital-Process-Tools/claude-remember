@@ -64,9 +64,13 @@ def test_fatal_reports_the_path_and_each_candidates_probe_result(tmp_path):
     stub = bindir / "python3"
     stub.write_text("#!/bin/sh\nexit 49\n", encoding="utf-8")
     stub.chmod(0o755)
-    # `command -v` and the stub's own `#!/bin/sh` need sh; nothing else.
-    sh_dir = str(Path(subprocess.check_output([BASH, "-c", "command -v sh"], text=True).strip()).parent)
-    env = {"PATH": f"{bindir}{os.pathsep}{sh_dir}", "HOME": str(tmp_path)}
+    # PATH is the stub directory and NOTHING else. The stub's `#!/bin/sh` is
+    # resolved by the kernel from the absolute path, not from PATH, and
+    # `command -v` is a bash builtin. The first draft appended `sh`'s own
+    # directory "for the shebang" -- on ubuntu-latest that is /usr/bin, which
+    # also holds a real `python`, so the probe succeeded and the FATAL path
+    # this test exists for never ran.
+    env = {"PATH": str(bindir), "HOME": str(tmp_path)}
 
     result = _source(env)
 
