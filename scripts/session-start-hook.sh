@@ -182,6 +182,11 @@ log "hook" "session-start: PROJECT_DIR=$PROJECT_DIR PIPELINE_DIR=$PIPELINE_DIR R
 source "$PLUGIN_ROOT/scripts/lib-env-cache.sh"
 _remember_env_cache_publish
 
+# #668: the injected MEMORY section (six files headed/sized/concatenated,
+# plus the rotated-slice listing) is cached across SessionStart runs -- see
+# lib-memory-context.sh's own header for the validation contract.
+source "$PLUGIN_ROOT/scripts/lib-memory-context.sh"
+
 # ── Which session is THIS one? (#270) ─────────────────────────────────────
 # Both jobs below need to know our own transcript so they can exclude it. They
 # used to assume its POSITION instead — "ours is newest, so slot 2 is the
@@ -1568,176 +1573,33 @@ cat "$PLUGIN_ROOT/prompts/session-history-hint.txt" 2>/dev/null
 echo ""
 
 # ── Inject memory into context ────────────────────────────────────────────
-# One list, read three times below — the membership test, the injection loop
-# and the named-only loop. Kept in a single place so a seventh memory file
-# cannot be added to one of them and forgotten by the others.
+# Cached across SessionStart runs (#668): six memory files headed/sized/
+# concatenated, plus the rotated-slice listing, only change when a memory
+# file changes -- i.e. after a save or a consolidation, both of which run in
+# a detached background phase already. lib-memory-context.sh is the single
+# source of truth for both the render and the cache (see its own header) --
+# session-start-hook.sh's job here is only to try the cache first, and on a
+# miss render live while ALSO leaving a fresh cache behind via `tee`, so the
+# very next start benefits even if no save/consolidation runs first.
 MEMORY_FILES=("$IDENTITY_FILE" "$CORE_MEMORIES" "$REMEMBER_TODAY_FILE" "$REMEMBER_NOW" "$REMEMBER_RECENT" "$REMEMBER_ARCHIVE")
 
-HAS_MEMORY=""
-for MFILE in "${MEMORY_FILES[@]}"; do
-    if [ -f "$MFILE" ]; then
-        HAS_MEMORY="true"
+if ! _remember_start_cache_context_load; then
+    _REMEMBER_START_CTX_TMP=""
+    if [ -n "${REMEMBER_DIR:-}" ] && [ "${REMEMBER_START_CACHE:-1}" = "1" ] \
+       && [ "$SESSION_START_SOURCE" != "compact" ] \
+       && mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null; then
+        _REMEMBER_START_CTX_TMP=$(mktemp "$REMEMBER_DIR/tmp/start-context.cache.XXXXXX" 2>/dev/null) || _REMEMBER_START_CTX_TMP=""
     fi
-done
-# Rotated slices are memory too. A store can hold nothing but them — rotate an
-# oversized archive and the fresh archive.md stays empty until the next
-# consolidation — and gating on the list above meant the whole section was
-# skipped, so the one state issue #124 is written to fix printed nothing at all.
-#
-# Two families since #348, not one. A store whose recent.md is the over-cap
-# bulk now rotates it to recent-YYYY-MM-DD.md, and a glob that only knew
-# archive-*.md would leave that slice exactly as invisible as #124 found the
-# archives — the recovery would keep the bytes and lose the recall, which is
-# the failure #124 exists to name.
-# #517: normalize before the glob -- see the STAGING_COUNT comment above
-# for why an unnormalized REMEMBER_DIR here means this glob silently
-# matches nothing on msys/cygwin even when rotated slices genuinely exist,
-# omitting the session banner's own "=== MEMORY ===" section.
-_remember_rotated_glob_dir=$(_remember_forward_slash "$REMEMBER_DIR")
-ROTATED_SLICES=$(ls "$_remember_rotated_glob_dir"/archive-*.md "$_remember_rotated_glob_dir"/recent-*.md 2>/dev/null | sort)
-if [ -n "$ROTATED_SLICES" ]; then
-    HAS_MEMORY="true"
-fi
-
-if [ -n "$HAS_MEMORY" ]; then
-    echo "=== MEMORY ==="
-    # At source=compact these bodies were already delivered — in this same
-    # session, to the context the compaction has just replaced with a summary
-    # of it. SessionStart fires again there, but the store has not changed and
-    # nothing about the recap is news.
-    #
-    # Identity is the exception and is still printed in full, because it works
-    # by PRESENCE: a path to identity.md does not make the agent behave as
-    # that persona, and no other line of this hook's output even names the
-    # file. Everything else is recall-on-demand and stays addressable — the
-    # === REMEMBER === hint above names the store's files on every single
-    # fire, and the block below names these ones again with their sizes.
-    #
-    # Named rather than dropped, which is the #124 vocabulary for "kept but
-    # not injected": a file nobody names is a file nobody greps, and a recap
-    # that shrinks in silence is indistinguishable from a store that emptied.
-    # The last defence, and the only one that helps a store that is ALREADY
-    # broken (#346). A memory file is written by consolidation, and a bounded
-    # writer does nothing for the 6.4 GB recent.md someone already has on
-    # disk: this loop cat'd it into every session, which is what froze every
-    # `claude` launch in that project and took the reporter's iTerm2 to ~56 GB.
-    #
-    # Named rather than injected, which is the #124 vocabulary a few lines
-    # below for rotated archives — the same trade, reached by size instead of
-    # by filename. The bytes stay on disk and stay greppable; what stops is
-    # pouring them into a context window that cannot hold them. A file this
-    # size is a broken store either way, and a session that starts and says so
-    # is worth more than one that hangs.
-    MEMORY_INJECT_MAX_BYTES=$(config ".thresholds.memory_inject_max_bytes" 200000)
-    case "$MEMORY_INJECT_MAX_BYTES" in (''|*[!0-9]*) MEMORY_INJECT_MAX_BYTES=200000 ;; esac
-    OVERSIZED_MEMORY=""
-    for MFILE in "${MEMORY_FILES[@]}"; do
-        if [ -f "$MFILE" ] && [ -s "$MFILE" ]; then
-            if [ "$SESSION_START_SOURCE" = "compact" ] && [ "$MFILE" != "$IDENTITY_FILE" ]; then
-                continue
-            fi
-            MFILE_BYTES=$(wc -c < "$MFILE" | tr -d ' ')
-            case "$MFILE_BYTES" in (''|*[!0-9]*) MFILE_BYTES=0 ;; esac
-            if [ "$MEMORY_INJECT_MAX_BYTES" -gt 0 ] && [ "$MFILE_BYTES" -gt "$MEMORY_INJECT_MAX_BYTES" ]; then
-                OVERSIZED_MEMORY="${OVERSIZED_MEMORY}${MFILE} (${MFILE_BYTES} bytes)
-"
-                continue
-            fi
-            BASENAME=$(basename "$MFILE")
-            echo "--- $BASENAME ---"
-            cat "$MFILE"
-            echo ""
-        fi
-    done
-    if [ -n "$OVERSIZED_MEMORY" ]; then
-        echo "--- too large to inject (kept on disk; grep on request) ---"
-        printf '%s' "$OVERSIZED_MEMORY"
-        printf 'A healthy memory file is kilobytes. One this size means consolidation wrote a response nobody bounded (see thresholds.memory_inject_max_bytes) and has been skipping ever since; run /remember:doctor.\n'
-        echo ""
+    if [ -n "$_REMEMBER_START_CTX_TMP" ]; then
+        # `tee`, not render-then-publish: the miss path already pays the full
+        # read/size/concatenate cost once, and re-running it a second time
+        # just to fill the cache would double that cost on every single miss.
+        _remember_render_memory_section | tee "$_REMEMBER_START_CTX_TMP"
+        _remember_start_cache_context_finish_publish "$_REMEMBER_START_CTX_TMP"
+    else
+        _remember_render_memory_section
     fi
-    if [ "$SESSION_START_SOURCE" = "compact" ]; then
-        # Built before the header is printed, so the header is never printed
-        # over an empty list — a store can hold identity.md and nothing else.
-        DEFERRED_MEMORY=$(for MFILE in "${MEMORY_FILES[@]}"; do
-            [ "$MFILE" != "$IDENTITY_FILE" ] || continue
-            [ -f "$MFILE" ] && [ -s "$MFILE" ] || continue
-            printf '%s (%s bytes)\n' "$MFILE" "$(wc -c < "$MFILE" | tr -d ' ')"
-        done)
-        if [ -n "$DEFERRED_MEMORY" ]; then
-            echo "--- not re-injected at compact (delivered at session start); read or grep on request ---"
-            printf '%s\n' "$DEFERRED_MEMORY"
-            echo ""
-        fi
-    fi
-    # ── Rotated slices: named, not injected (#124) ────────────────────────
-    # An oversized archive.md is rotated to archive-YYYY-MM-DD.md and a fresh
-    # one started (#123); since #348 an oversized recent.md rotates the same
-    # way, to recent-YYYY-MM-DD.md. The bytes are kept, but nothing in the
-    # read path ever named them, so that slice of memory sat in cold storage
-    # no recall reached — "no memory lost" was true mechanically and false in
-    # practice.
-    #
-    # Named rather than cat'd on purpose: these files were rotated BECAUSE
-    # they were too large to fit a prompt, so injecting them would rebuild
-    # the problem rotation exists to solve. The agent greps them when a
-    # question reaches past what is in context.
-    if [ -n "$ROTATED_SLICES" ]; then
-        # Newest ROTATED_LIST_MAX by date, because rotations accumulate for the
-        # life of a store and this prints on every single session start. The
-        # glob is given for the rest so nothing becomes unreachable again —
-        # which was the whole point of naming them.
-        ROTATED_LIST_MAX=10
-        ROTATED_COUNT=$(echo "$ROTATED_SLICES" | wc -l | tr -d ' ')
-        # Order by the date and rotation number IN THE NAME, parsed — not by
-        # raw name, and not by mtime.
-        #
-        # Raw name is wrong because a second rotation the same day is
-        # archive-DATE-2.md, and '-' (0x2D) sorts before '.' (0x2E), so the
-        # later sibling sorts ahead of the base file it followed.
-        #
-        # mtime looked like the fix and is worse: git checkout writes files in
-        # byte-lexicographic order, so cloning the git-backed store (which
-        # hooks.d/after_save/50-git-backup.sh exists to make possible) hands
-        # archive-DATE-2.md an EARLIER mtime than archive-DATE.md. That
-        # reintroduces the same inversion on every restore, for every file,
-        # instead of only inside a same-day cluster.
-        #
-        # The name carries the truth: the date, then the rotation number, with
-        # the un-suffixed file being that day's first. Zero-padding the number
-        # makes the composed key sort correctly as plain text.
-        #
-        # Both families (#348) go through one parse, keyed on the date and not
-        # on the family: archive-2026-06-29.md and recent-2026-06-29.md are
-        # two slices of the same week and belong next to each other in the
-        # listing. Only one of the two prefix strips can ever match a given
-        # name, so applying both is unconditional rather than a branch.
-        ROTATED_NEWEST=$(echo "$ROTATED_SLICES" | while read -r _slice; do
-            [ -n "$_slice" ] || continue
-            _core=${_slice##*/}
-            _core=${_core#archive-}
-            _core=${_core#recent-}
-            _core=${_core%.md}
-            # Leading '(' on each pattern: bash 3.2 (still what macOS ships)
-            # miscounts the parens of a case inside $( ) without it.
-            case "$_core" in
-                (*-*-*-*) _date=${_core%-*}; _seq=${_core##*-} ;;
-                (*)       _date=$_core;      _seq=1 ;;
-            esac
-            case "$_seq" in (''|*[!0-9]*) _seq=1 ;; esac
-            printf '%s-%010d\t%s\n' "$_date" "$_seq" "$_slice"
-        done | sort | tail -n "$ROTATED_LIST_MAX" | cut -f2-)
-        echo "--- rotated memory slices (not shown; grep on request) ---"
-        echo "$ROTATED_NEWEST" | while read -r _slice; do
-            [ -f "$_slice" ] || continue
-            printf '%s (%s bytes)\n' "$_slice" "$(wc -c < "$_slice" | tr -d ' ')"
-        done
-        if [ "$ROTATED_COUNT" -gt "$ROTATED_LIST_MAX" ]; then
-            printf '... and %s older: %s/archive-*.md, %s/recent-*.md\n' \
-                "$((ROTATED_COUNT - ROTATED_LIST_MAX))" "$REMEMBER_DIR" "$REMEMBER_DIR"
-        fi
-        echo ""
-    fi
-    echo ""
+    unset _REMEMBER_START_CTX_TMP
 fi
 
 # ── Consolidation trigger ─────────────────────────────────────────────────

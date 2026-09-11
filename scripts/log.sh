@@ -191,12 +191,100 @@ for p, v in rows:
 sys.stdout.write("\n".join(out))
 '
 
+# --- Flattened config cache (#668) ---
+# _config_load's own jq/python flatten is a subprocess forked on the FIRST
+# config() call of every process that reaches it -- session-start-hook.sh,
+# post-tool-hook.sh's slow path, user-prompt-hook.sh, save-session.sh -- even
+# though the flattened result only changes when one of the three config
+# LAYERS changes. Persisted here as sourceable `_RCFG_key='value'`
+# assignments, keyed by mtime against the same three layers lib-memory-dir.sh
+# merges (REMEMBER_CONFIG itself is a fresh mktemp path every process --
+# always "now" -- so it is useless as a cache key; the SOURCE files are what
+# must be checked).
+#
+# Deliberately NOT a cache of the raw merged config.json: that file can carry
+# a live `haiku.oauth_token` (lib-memory-dir.sh's own security comment), and
+# a persistent copy would extend a secret's on-disk lifetime from "until this
+# process exits" to "until the config next changes" -- real exposure growth
+# for a scratch file that today is deleted at EXIT. The FLATTENED dump is
+# safe to persist: both flatteners already drop the whole "haiku" top-level
+# key before a single row is emitted (see `select(.[0] != "haiku")` in the jq
+# program above and the matching `p[0] != "haiku"` in the Python one), so the
+# cache below never receives it in the first place.
+#
+# Values are written with `%q` (bash's own shell-quoting printf conversion),
+# not interpolated raw, because the cache is loaded with `source`: an
+# unescaped config value containing shell metacharacters would otherwise be
+# interpreted as code the moment the cache file executes.
+_remember_cfg_flatten_cache_path() {
+    [ -n "${REMEMBER_DIR:-}" ] || return 1
+    printf '%s' "$REMEMBER_DIR/tmp/config.rcfg"
+}
+
+_remember_cfg_flatten_cache_sources() {
+    printf '%s\n' "${PIPELINE_DIR:-}/config.json"
+    printf '%s\n' "${HOME:-}/.remember/config.json"
+    printf '%s\n' "${REMEMBER_DIR:-}/config.json"
+}
+
+_remember_cfg_flatten_cache_load() {
+    [ "${REMEMBER_CONFIG_CACHE:-1}" = "1" ] || return 1
+    local _f
+    _f=$(_remember_cfg_flatten_cache_path) || return 1
+    [ -f "$_f" ] || return 1
+    [ -L "$_f" ] && return 1
+    [ -O "$_f" ] || return 1
+    [ -r "$_f" ] || return 1
+    local _src _sources
+    _sources=$(_remember_cfg_flatten_cache_sources)
+    while IFS= read -r _src; do
+        [ -n "$_src" ] || continue
+        # -nt: strictly newer, never a tie -- the same "ambiguous means miss"
+        # guardrail #668 asks for everywhere else in this codebase, and true
+        # against a layer that does not exist (absent cannot have changed).
+        [ "$_f" -nt "$_src" ] || return 1
+    done <<EOF
+$_sources
+EOF
+    # shellcheck disable=SC1090  # dynamic path, keyed and validated above
+    source "$_f" 2>/dev/null || return 1
+    return 0
+}
+
+_remember_cfg_flatten_cache_publish() {
+    [ "${REMEMBER_CONFIG_CACHE:-1}" = "1" ] || return 0
+    local _dump="$1"
+    local _f
+    _f=$(_remember_cfg_flatten_cache_path) || return 0
+    local _dir
+    _dir="${_f%/*}"
+    mkdir -p "$_dir" 2>/dev/null || return 0
+    local _t
+    _t=$(mktemp "${_f}.XXXXXX" 2>/dev/null) || return 0
+    local _k _v
+    {
+        while IFS=$'\t' read -r _k _v; do
+            [ -n "$_k" ] || continue
+            printf '_RCFG_%s=%q\n' "${_k//./_}" "$_v"
+        done <<EOF
+$_dump
+EOF
+    } > "$_t" 2>/dev/null || { rm -f "$_t" 2>/dev/null; return 0; }
+    mv -f "$_t" "$_f" 2>/dev/null || rm -f "$_t" 2>/dev/null
+    return 0
+}
+
 _config_load() {
     _REMEMBER_CFG_LOADED_FROM="${REMEMBER_CONFIG:-}"
     if [ ! -f "${REMEMBER_CONFIG:-}" ]; then
         # No merged config is not a failed read: every key is legitimately
         # absent and every caller's default is the right answer. Silent, and
         # correctly so — this is the ordinary state of a fresh install.
+        _REMEMBER_CFG_STATE="ok"
+        return 0
+    fi
+
+    if _remember_cfg_flatten_cache_load; then
         _REMEMBER_CFG_STATE="ok"
         return 0
     fi
@@ -241,6 +329,7 @@ _config_load() {
     done <<EOF
 $_dump
 EOF
+    _remember_cfg_flatten_cache_publish "$_dump"
     _REMEMBER_CFG_STATE="ok"
 }
 
