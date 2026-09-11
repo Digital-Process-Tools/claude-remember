@@ -53,6 +53,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -197,6 +198,11 @@ def test_session_end_resolves_windows_native_stdin_cwd(tmp_path):
     result = _run(SESSION_END, env, _session_end_payload(str(project)), cwd=project)
 
     assert result.returncode == 0, result.stderr
+    # #647: the hook returns before its detached child has bootstrapped
+    # anything, so the store appears some time after subprocess.run() does.
+    _deadline = time.monotonic() + 15
+    while not (project / ".remember").is_dir() and time.monotonic() < _deadline:
+        time.sleep(0.1)
     assert (project / ".remember").is_dir(), (
         "session-end-hook.sh did not resolve PROJECT_DIR from a "
         f"Windows-native-spelled stdin cwd; stderr:\n{result.stderr}"

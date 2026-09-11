@@ -15,6 +15,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -97,6 +98,11 @@ def test_session_end_scaffolds_under_the_stdin_cwd_when_claude_project_dir_is_un
     result = _run(SESSION_END, env, payload, cwd=project)
 
     assert result.returncode == 0, result.stderr
+    # #647: the hook returns before its detached child has bootstrapped
+    # anything, so the store appears some time after subprocess.run() does.
+    _deadline = time.monotonic() + 15
+    while not (project / ".remember").is_dir() and time.monotonic() < _deadline:
+        time.sleep(0.1)
     assert (project / ".remember").is_dir(), (
         "session-end-hook.sh did not resolve PROJECT_DIR from the stdin "
         f"cwd; stderr:\n{result.stderr}"
