@@ -191,6 +191,30 @@ ts_marker_read() {
         (*) echo "$_val" ;;
     esac
 }
+# The write-side twin of the type check every marker READ above carries
+# (#653, release gate 3 finding on v0.31.0). `{ … > "$FILE"; } 2>/dev/null
+# || true` looks like it degrades a bad marker, and for a permission
+# failure it does -- but a `>` on a FIFO with no reader blocks in open(2)
+# before any redirection error exists for the `2>/dev/null` or the `|| true`
+# to catch. So a FIFO at $COOLDOWN_MARKER passed ts_marker_read() as
+# `unreadable`, was reported, and then hung the post-save write while this
+# process still held LOCK_DIR -- the hang #634/#642 were opened to remove,
+# one line later, with every later save queueing behind it. Every marker
+# write goes through this; the guard is the same `-f` the reads use, so a
+# marker of the wrong TYPE is refused and reported rather than opened.
+# tests/test_marker_write_fifo_653.py pins both the helper and that every
+# write site is behind it.
+marker_write_ok() {
+    local _path="$1" _tag="$2"
+    if [ -e "$_path" ] && [ ! -f "$_path" ]; then
+        # "could not write" is the phrase every marker-write WARNING in this
+        # file shares and its tests key on; this is one more reason it could
+        # not, not a new class of message.
+        report_error "$_tag" "WARNING: could not write $_path -- it exists but is not a regular file, and opening it is refused (a FIFO here would block this process forever). Remove or replace it."
+        return 1
+    fi
+    return 0
+}
 # Which day now.md's contents belong to (#141) — see Step 7.
 NOW_DAY_FILE="${REMEMBER_DIR}/tmp/now-day"
 LAST_SAVE_FILE="${REMEMBER_DIR}/tmp/last-save.json"
@@ -399,7 +423,9 @@ if [[ ( -e "$COOLDOWN_MARKER" || -L "$COOLDOWN_MARKER" ) && "$DRY_RUN" != true &
         # that redirection has already succeeded, so a failing `>` here (this
         # self-heal write, not the guarded one #635 fixed) would otherwise
         # leak bash's own raw diagnostic before the suppression applies.
-        { date +%s > "$COOLDOWN_MARKER"; } 2>/dev/null || true
+        if marker_write_ok "$COOLDOWN_MARKER" cooldown; then
+            { date +%s > "$COOLDOWN_MARKER"; } 2>/dev/null || true
+        fi
     elif [ "$ELAPSED" -lt "$SAVE_COOLDOWN" ]; then
         debug_enabled 1 && log "cooldown" "${ELAPSED}s < ${SAVE_COOLDOWN}s, skip"
         exit 0
@@ -434,8 +460,10 @@ CLEANUP_FILES+=("$EXTRACT_FILE")
 # unit, suppressing the group's own redirection failure too -- kept (rather
 # than dropped) so this line degrades identically whether the surrounding
 # process already flattened stderr or not.
-{ date +%s > "$COOLDOWN_MARKER"; } 2>/dev/null \
-    || report_error "cooldown" "WARNING: could not write $COOLDOWN_MARKER after this save -- the cooldown will not reflect it, and every future save will hit the same unreadable/unwritable marker until it is fixed or removed."
+if marker_write_ok "$COOLDOWN_MARKER" cooldown; then
+    { date +%s > "$COOLDOWN_MARKER"; } 2>/dev/null \
+        || report_error "cooldown" "WARNING: could not write $COOLDOWN_MARKER after this save -- the cooldown will not reflect it, and every future save will hit the same unreadable/unwritable marker until it is fixed or removed."
+fi
 if [ "$ENVELOPE" = "unrecognised" ]; then
     # A transcript shape neither Claude Code nor Codex wrote -- NOT a quiet
     # session. Reporting it as "0 exchanges" would be indistinguishable from
@@ -886,7 +914,9 @@ if [ ! -s "$MEMORY_FILE" ]; then
     # succeeded, so a failing `>` (permission denied, NOW_DAY_FILE's parent
     # replaced by something read-only) would otherwise leak bash's own raw
     # diagnostic before the suppression applies (same class as #635).
-    { printf '%s\n' "$TODAY_DATE" > "$NOW_DAY_FILE"; } 2>/dev/null || true
+    if marker_write_ok "$NOW_DAY_FILE" now-day; then
+        { printf '%s\n' "$TODAY_DATE" > "$NOW_DAY_FILE"; } 2>/dev/null || true
+    fi
 fi
 # Built beside now.md and renamed over it, not appended in two operations
 # (#247). The two appends — a separator, then the entry — are both under
@@ -1012,7 +1042,9 @@ if [[ "$RUN_NDC" = true && ( -e "$NDC_MARKER" || -L "$NDC_MARKER" ) ]]; then
         # the COOLDOWN_MARKER self-heal write above for why a bare
         # `2>/dev/null` after a `>` does not suppress the redirection's OWN
         # failure.
-        { date +%s > "$NDC_MARKER"; } 2>/dev/null || true
+        if marker_write_ok "$NDC_MARKER" ndc; then
+            { date +%s > "$NDC_MARKER"; } 2>/dev/null || true
+        fi
     elif [ "$NDC_ELAPSED" -lt "$NDC_COOLDOWN" ]; then
         RUN_NDC=false
     fi
@@ -1028,9 +1060,17 @@ fi
 # ts_marker_read() (#625) -- a FIFO or character device at $NOW_DAY_FILE
 # would otherwise hang `cat` forever (FIFO, no writer) or stream unboundedly
 # (character device); a non-regular NOW_DAY_FILE falls through to the same
-# "*" branch below that an absent or garbage-content one already takes.
+# "*" branch below that an absent or garbage-content one already takes --
+# but not silently (#654, release gate 3 on v0.31.0): the siblings fixed
+# for this class report `unreadable`, and an unreported fallback here is a
+# previous day's entries attributed to today with nothing in the log, the
+# misattribution this marker exists to prevent (#141). Absence stays quiet;
+# it is the ordinary first-run state.
 if [ -f "$NOW_DAY_FILE" ]; then
     NDC_DAY=$(cat "$NOW_DAY_FILE" 2>/dev/null | tr -d '[:space:]')
+elif [ -e "$NOW_DAY_FILE" ]; then
+    report_error "now-day" "WARNING: $NOW_DAY_FILE exists but is not a regular file -- treating it as absent, so this round's entries are attributed to today ($TODAY_DATE). Remove or replace it."
+    NDC_DAY=""
 else
     NDC_DAY=""
 fi
@@ -1049,8 +1089,10 @@ if [ "$RUN_NDC" = true ]; then
     # #635: same `{ ...; }` grouping as the COOLDOWN_MARKER write above --
     # see that comment for why a bare `2>/dev/null` after the `>` does not
     # suppress the redirection's OWN failure.
-    { date +%s > "$NDC_MARKER"; } 2>/dev/null \
-        || report_error "ndc" "WARNING: could not write $NDC_MARKER after this compression -- the cooldown will not reflect it, and every future save will hit the same unreadable/unwritable marker until it is fixed or removed."
+    if marker_write_ok "$NDC_MARKER" ndc; then
+        { date +%s > "$NDC_MARKER"; } 2>/dev/null \
+            || report_error "ndc" "WARNING: could not write $NDC_MARKER after this compression -- the cooldown will not reflect it, and every future save will hit the same unreadable/unwritable marker until it is fixed or removed."
+    fi
     NDC_SRC_BYTES=$(wc -c < "$MEMORY_FILE" | tr -d ' ')
     # Read under LOCK_DIR, which this (parent) process still holds at this
     # point in the script — see #614's NDC_GEN_FILE comment above. A prior
@@ -1330,7 +1372,9 @@ if [ "$RUN_NDC" = true ]; then
                                     if [ "$NDC_KEPT" -gt 0 ]; then
                                         # #643: `{ ...; }` grouping -- same class as
                                         # the fresh-stamp write above.
-                                        { printf '%s\n' "$(_remember_date +%Y-%m-%d)" > "$NOW_DAY_FILE"; } 2>/dev/null || true
+                                        if marker_write_ok "$NOW_DAY_FILE" now-day; then
+                                            { printf '%s\n' "$(_remember_date +%Y-%m-%d)" > "$NOW_DAY_FILE"; } 2>/dev/null || true
+                                        fi
                                     else
                                         rm -f "$NOW_DAY_FILE"
                                     fi
@@ -1366,7 +1410,7 @@ if [ "$RUN_NDC" = true ]; then
                                     # round that snapshotted the same
                                     # generation. Matches the sibling mv
                                     # failure's own logging a few lines above.
-                                    if ! NDC_GEN_ERR=$(echo $(( 10#$NDC_SRC_GEN + 1 )) > "$NDC_GEN_FILE" 2>&1); then
+                                    if marker_write_ok "$NDC_GEN_FILE" ndc && ! NDC_GEN_ERR=$(echo $(( 10#$NDC_SRC_GEN + 1 )) > "$NDC_GEN_FILE" 2>&1); then
                                         log "ndc" "WARNING: could not bump ${NDC_GEN_FILE} past ${NDC_SRC_GEN} -- a later round that started from this same generation will not detect that this commit already landed: ${NDC_GEN_ERR:-unknown error}"
                                     fi
                                 else

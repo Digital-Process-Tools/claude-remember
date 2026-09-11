@@ -49,7 +49,11 @@ def _extract_ndc_day_block() -> str:
 
 def _read_ndc_day(now_day_file: Path, today_date: str = "2026-01-01", timeout: float = 5) -> subprocess.CompletedProcess:
     block_src = _extract_ndc_day_block()
-    script = f'NOW_DAY_FILE="{now_day_file}"\nTODAY_DATE="{today_date}"\n{block_src}\nprintf %s "$NDC_DAY"\n'
+    # report_error is what save-session.sh has from log.sh; the extracted
+    # block calls it on the non-regular path (#654), so the harness supplies a
+    # stand-in that makes the call visible on stderr.
+    stub = 'report_error() { printf "REPORTED [%s] %s\\n" "$1" "$2" >&2; }\n'
+    script = f'{stub}NOW_DAY_FILE="{now_day_file}"\nTODAY_DATE="{today_date}"\n{block_src}\nprintf %s "$NDC_DAY"\n'
     with tempfile.NamedTemporaryFile(
         "w", suffix=".sh", delete=False, encoding="utf-8"
     ) as f:
@@ -78,6 +82,16 @@ class TestNowDayFileDoesNotHangOnNonRegularFiles:
             f"than hanging, got returncode={proc.returncode} "
             f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
         )
+        # #654: falling back is right; falling back SILENTLY is not. The
+        # siblings fixed for this class (ts_marker_read, ndc_read_gen) report
+        # `unreadable`; this one used to be indistinguishable from "no marker
+        # yet", and the cost of that is a previous day's entries attributed to
+        # today with nothing in the log -- the misattribution the marker
+        # exists to prevent (#141).
+        assert "REPORTED [now-day]" in proc.stderr and "WARNING" in proc.stderr, (
+            "a non-regular now-day marker was treated as absent without a "
+            f"WARNING; stderr={proc.stderr!r}"
+        )
 
     def test_a_regular_file_now_day_is_unaffected(self, tmp_path):
         """Positive control: the new type check must not break the ordinary case."""
@@ -97,3 +111,6 @@ class TestNowDayFileDoesNotHangOnNonRegularFiles:
             f"a now-day file that was never created must fall back to "
             f"today's date, got: {proc.stdout!r} / {proc.stderr!r}"
         )
+        # The positive control for #654's negative: absence is the ordinary
+        # first-run state and must stay quiet, or the WARNING above is noise.
+        assert proc.stderr == "", proc.stderr
