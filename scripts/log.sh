@@ -227,8 +227,30 @@ _remember_cfg_flatten_cache_sources() {
     printf '%s\n' "${REMEMBER_DIR:-}/config.json"
 }
 
+# Both the loader and the publisher below refuse unless $REMEMBER_CONFIG's
+# own basename still carries the mktemp template lib-memory-dir.sh's normal
+# three-layer merge always uses (`mktemp "${SYS_TMPDIR}/remember-config-XXXXXX"`,
+# line ~291 of that file). A caller that points REMEMBER_CONFIG at a file of
+# its own choosing -- a legitimate, supported override this codebase's own
+# test suite relies on in dozens of places, e.g. tests/test_git_backup_hook.py's
+# `config_path=` parameter -- is asking for THAT file to be read, not the
+# three standard layers this cache is keyed against. Skipping the cache
+# entirely in that case is the only safe answer: checking mtime against the
+# three layers cannot tell "the override file changed" from "the standard
+# layers happen not to have", and a real reproduction (two runs, two
+# different override files, same REMEMBER_DIR) served the FIRST run's config
+# to the SECOND -- the exact "silently serve stale content" failure #668
+# names as never permitted -- before this guard existed.
+_remember_cfg_flatten_cache_is_standard_merge() {
+    case "${REMEMBER_CONFIG:-}" in
+        */remember-config-*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 _remember_cfg_flatten_cache_load() {
     [ "${REMEMBER_CONFIG_CACHE:-1}" = "1" ] || return 1
+    _remember_cfg_flatten_cache_is_standard_merge || return 1
     local _f
     _f=$(_remember_cfg_flatten_cache_path) || return 1
     [ -f "$_f" ] || return 1
@@ -253,6 +275,7 @@ EOF
 
 _remember_cfg_flatten_cache_publish() {
     [ "${REMEMBER_CONFIG_CACHE:-1}" = "1" ] || return 0
+    _remember_cfg_flatten_cache_is_standard_merge || return 0
     local _dump="$1"
     local _f
     _f=$(_remember_cfg_flatten_cache_path) || return 0

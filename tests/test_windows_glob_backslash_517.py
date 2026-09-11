@@ -186,8 +186,12 @@ class TestSessionStartRotatedSlices:
     -- an unnormalized REMEMBER_DIR silently omits the session banner's own
     "=== MEMORY ===" section even when rotated slices genuinely exist."""
 
+    # #668 moved this glob out of session-start-hook.sh into the shared
+    # render function both it and the two detached background scripts call --
+    # scripts/lib-memory-context.sh:_remember_render_memory_section. The code
+    # itself did not change, only its home file.
     _BLOCK = extract_lines(
-        "scripts/session-start-hook.sh",
+        "scripts/lib-memory-context.sh",
         "_remember_rotated_glob_dir=$(_remember_forward_slash",
         'ROTATED_SLICES=$(ls "$_remember_rotated_glob_dir"',
     )

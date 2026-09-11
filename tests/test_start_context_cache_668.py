@@ -228,3 +228,54 @@ def test_a_tied_mtime_between_cache_and_source_is_a_miss_not_a_hit(tmp_path):
         "a tied mtime must be treated as a miss, never a hit -- "
         f"stdout={load.stdout!r}"
     )
+
+
+def test_compact_mode_never_reads_or_writes_the_context_cache(tmp_path):
+    """#668's compact carve-out: at SESSION_START_SOURCE=compact the render is
+    a different, much smaller shape (identity only), so the cache must be
+    skipped in BOTH directions -- a compact run must never serve a
+    previously-published non-compact cache (it would show content compact
+    mode is supposed to omit), and it must never publish its own smaller
+    render into the cache (which would corrupt the NEXT ordinary start)."""
+    home, project, remember = _project(tmp_path)
+    now = time.time()
+    _touch(remember / "core-memories.md", now, "hello from core\n")
+    env = _base_env(tmp_path, home, project)
+
+    # Publish a genuine non-compact cache first.
+    publish = subprocess.run(
+        [BASH, "-c", HARNESS, "_", "publish"],
+        env=env, capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert publish.returncode == 0, (publish.stdout, publish.stderr)
+    cache_file = remember / "tmp" / "start-context.cache"
+    assert cache_file.is_file()
+    os.utime(cache_file, (now + 5, now + 5))
+    before_bytes = cache_file.read_bytes()
+
+    compact_env = {**env, "SESSION_START_SOURCE": "compact"}
+
+    # A compact "load" must never hit -- must always report a miss (rc 1),
+    # never serve the non-compact cache's larger content.
+    load = subprocess.run(
+        [BASH, "-c", HARNESS, "_", "load"],
+        env=compact_env, capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert load.returncode == 1, (
+        "compact mode must never be served the cache -- "
+        f"stdout={load.stdout!r}"
+    )
+    assert load.stdout == ""
+
+    # A compact "publish" must never overwrite the existing cache -- the very
+    # next ordinary (non-compact) start must still see the ORIGINAL content.
+    publish_compact = subprocess.run(
+        [BASH, "-c", HARNESS, "_", "publish"],
+        env=compact_env, capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert publish_compact.returncode == 0, (publish_compact.stdout, publish_compact.stderr)
+    after_bytes = cache_file.read_bytes()
+    assert after_bytes == before_bytes, (
+        "a compact-mode publish must never touch the cache a real session "
+        "start reads from -- the file's bytes changed"
+    )

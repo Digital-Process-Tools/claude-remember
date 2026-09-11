@@ -862,20 +862,14 @@ fi
 # ── Identity: per-project → user-global → plugin-bundled ──────────────────
 # User-global tier: <REMEMBER_ROOT>/identity.md (external mode only).
 # In legacy mode REMEMBER_ROOT == PROJECT_DIR, so we skip it there.
-REMEMBER_ROOT=$(dirname "$REMEMBER_DIR")
-if [ -f "$REMEMBER_DIR/identity.md" ]; then
-    IDENTITY_FILE="$REMEMBER_DIR/identity.md"
-elif [ -f "$REMEMBER_ROOT/identity.md" ] && [ "$REMEMBER_ROOT" != "$PROJECT_DIR" ]; then
-    IDENTITY_FILE="$REMEMBER_ROOT/identity.md"
-else
-    IDENTITY_FILE="$PLUGIN_ROOT/identity.md"
-fi
-
-CORE_MEMORIES="$REMEMBER_DIR/core-memories.md"
-REMEMBER_RECENT="$REMEMBER_DIR/recent.md"
-REMEMBER_ARCHIVE="$REMEMBER_DIR/archive.md"
-REMEMBER_NOW="$REMEMBER_DIR/now.md"
-REMEMBER_TODAY_FILE="$REMEMBER_DIR/today-${TODAY}.md"
+#
+# Computed by lib-memory-context.sh's _remember_memory_paths (#668), the same
+# function save-session.sh and run-consolidation.sh now call to pre-render
+# the SessionStart cache -- kept in one place for the same reason #158
+# documents for session_dir_slug: a second, independently-maintained copy of
+# this exact logic is how the live path and the cache it feeds silently
+# drift apart. TODAY is already set above, so the function reuses it as-is.
+_remember_memory_paths
 
 # ── Handoff path: single (default) vs per-session (#363) ──────────────────
 # Two or more INTERACTIVE sessions share one project store by design, even
@@ -1581,7 +1575,7 @@ echo ""
 # session-start-hook.sh's job here is only to try the cache first, and on a
 # miss render live while ALSO leaving a fresh cache behind via `tee`, so the
 # very next start benefits even if no save/consolidation runs first.
-MEMORY_FILES=("$IDENTITY_FILE" "$CORE_MEMORIES" "$REMEMBER_TODAY_FILE" "$REMEMBER_NOW" "$REMEMBER_RECENT" "$REMEMBER_ARCHIVE")
+# MEMORY_FILES was already set by _remember_memory_paths, above.
 
 if ! _remember_start_cache_context_load; then
     _REMEMBER_START_CTX_TMP=""

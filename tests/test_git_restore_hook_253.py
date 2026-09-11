@@ -270,10 +270,18 @@ class TestCleanlyBehindFastForwards:
     def test_it_lands_before_memory_is_read(self, tmp_path):
         """before_session_start is dispatched at session-start-hook.sh:86 and
         memory is injected far below it. If that ordering ever inverts, a
-        restore can only ever affect the NEXT session."""
+        restore can only ever affect the NEXT session.
+
+        #668 moved the actual `echo "=== MEMORY ==="` line (and the rest of
+        the render) out of this file into the shared
+        lib-memory-context.sh:_remember_render_memory_section, called from
+        both a cache-hit and a cache-miss branch here -- so the marker this
+        test now anchors on is the call site that reads memory (cache or
+        live) at all, `_remember_start_cache_context_load`, rather than a
+        literal line that no longer lives in this file."""
         body = (REPO_ROOT / "scripts" / "session-start-hook.sh").read_text(encoding="utf-8")
         dispatch_at = body.index('dispatch "before_session_start"')
-        inject_at = body.index('echo "=== MEMORY ==="')
+        inject_at = body.index('_remember_start_cache_context_load')
         assert dispatch_at < inject_at, (
             "before_session_start now runs after memory injection — the restore "
             "would land one whole session late"

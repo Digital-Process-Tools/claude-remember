@@ -148,3 +148,40 @@ def test_editing_the_config_invalidates_the_flatten_cache(tmp_path):
         "stale cache must be impossible to serve silently -- expected the "
         f"NEW value after editing config.json: {result2.stdout!r}"
     )
+
+
+def test_haiku_key_never_reaches_the_persisted_cache(tmp_path):
+    """Security property the cache design depends on, stated in both this
+    file's own docstring and log.sh's own comment on the cache: a live
+    haiku.oauth_token in config.json must never be written into the
+    persisted config.rcfg cache, which survives long past the single
+    process the raw merged config.json scratch file is deleted at exit of.
+    Both flatteners drop the whole "haiku" key before a row is ever emitted
+    -- this pins that guarantee against the PERSISTED file specifically,
+    not just against config()'s own in-process read."""
+    home, project, remember = _project(tmp_path)
+    cfg = remember / "config.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "cooldowns": {"save_seconds": 42},
+                "haiku": {"oauth_token": "sk-super-secret-do-not-persist-me"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    _lines, result = _run_with_shim(tmp_path, home, project)
+    assert result.returncode == 0, (result.stdout, result.stderr)
+
+    cache = remember / "tmp" / "config.rcfg"
+    assert cache.is_file()
+    cache_text = cache.read_text(encoding="utf-8")
+    assert "oauth_token" not in cache_text, (
+        "the haiku.oauth_token key leaked into the persisted config cache: "
+        f"{cache_text!r}"
+    )
+    assert "sk-super-secret-do-not-persist-me" not in cache_text, (
+        "the haiku oauth token VALUE leaked into the persisted config cache: "
+        f"{cache_text!r}"
+    )
