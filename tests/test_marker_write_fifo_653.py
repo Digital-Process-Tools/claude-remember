@@ -15,9 +15,10 @@ Two things pinned here:
     tests/test_now_day_file_fifo_642.py extracts its block) refuses a FIFO and
     reports it, and allows a regular file and an absent path. The FIFO case is
     the timeout-as-assertion shape: a hang fails via TimeoutExpired.
-  - every write to the four marker paths in save-session.sh sits behind that
+  - every write to the five marker paths in save-session.sh sits behind that
     helper -- a static check, so a new write site added without the guard fails
-    here rather than in a user's session.
+    here rather than in a user's session. FAILURE_MARKER is the fifth, added by
+    #656 after #653's own sweep missed it.
 
 #654 is the read-side sibling: a non-regular `NOW_DAY_FILE` used to fall
 through to today's date with no log line. That assertion lives in
