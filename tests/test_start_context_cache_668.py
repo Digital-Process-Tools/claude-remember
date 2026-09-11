@@ -65,13 +65,24 @@ def _run(script: str, env: dict) -> subprocess.CompletedProcess:
 # for config() and _remember_date -- then lib-memory-context.sh), set up the
 # paths, and expose the three calls this test drives as CLI subcommands so
 # each assertion is one `bash -c` call with a clear exit code.
+# .as_posix(), not a raw f-string interpolation of a Path object (#670): on
+# Windows, str(Path(...)) is backslash-separated, and detect-tools.sh's own
+# BASH_SOURCE-relative sourcing of lib-slug.sh
+# (`_REMEMBER_SRC_DIR="${BASH_SOURCE[0]%/*}"`) finds no '/' to strip in a
+# fully-backslash path, falls through to its own "." fallback, and then
+# fails to find ./lib-slug.sh relative to whatever cwd the subprocess
+# happened to start in -- reproduced on CI (PR #670, all three
+# windows-latest legs), matching the existing convention already used
+# elsewhere in this repo for exactly this reason
+# (tests/test_detect_tools_fatal_diagnostics_650.py, this file's own sibling
+# tests/test_detect_tools_cache_668.py).
 HARNESS = f"""
 set -u
-REMEMBER_PATHS_SOFT_FAIL=1 source "{RESOLVE_PATHS}" || exit 99
+REMEMBER_PATHS_SOFT_FAIL=1 source "{RESOLVE_PATHS.as_posix()}" || exit 99
 PLUGIN_ROOT="$PIPELINE_DIR"
-source "{REPO_ROOT}/scripts/detect-tools.sh" || exit 99
-source "{LOG_SH}" 2>/dev/null
-source "{REPO_ROOT}/scripts/lib-memory-context.sh"
+source "{(REPO_ROOT / 'scripts' / 'detect-tools.sh').as_posix()}" || exit 99
+source "{LOG_SH.as_posix()}" 2>/dev/null
+source "{(REPO_ROOT / 'scripts' / 'lib-memory-context.sh').as_posix()}"
 _remember_memory_paths
 cmd="$1"
 case "$cmd" in

@@ -45,13 +45,24 @@ def _project(tmp_path: Path):
     return home, project, remember
 
 
+# .as_posix(), not a raw f-string interpolation of a Path object (#670): on
+# Windows, str(Path(...)) is backslash-separated, and detect-tools.sh's own
+# BASH_SOURCE-relative sourcing of lib-slug.sh
+# (`_REMEMBER_SRC_DIR="${BASH_SOURCE[0]%/*}"`) finds no '/' to strip in a
+# fully-backslash path, falls through to its own "." fallback, and then
+# fails to find ./lib-slug.sh relative to whatever cwd the subprocess
+# happened to start in -- reproduced on CI (PR #670, all three
+# windows-latest legs), matching the existing convention already used
+# elsewhere in this repo for exactly this reason
+# (tests/test_detect_tools_fatal_diagnostics_650.py, this file's own sibling
+# tests/test_detect_tools_cache_668.py).
 HARNESS = f"""
 set -eu
-REMEMBER_PATHS_SOFT_FAIL=1 source "{RESOLVE_PATHS}" || exit 99
+REMEMBER_PATHS_SOFT_FAIL=1 source "{RESOLVE_PATHS.as_posix()}" || exit 99
 PLUGIN_ROOT="$PIPELINE_DIR"
-source "{DETECT_TOOLS}" || exit 99
-source "{BOOTSTRAP_DIRS}" || exit 99
-source "{LOG_SH}" 2>/dev/null
+source "{DETECT_TOOLS.as_posix()}" || exit 99
+source "{BOOTSTRAP_DIRS.as_posix()}" || exit 99
+source "{LOG_SH.as_posix()}" 2>/dev/null
 config ".cooldowns.save_seconds" "default"
 """
 
