@@ -30,18 +30,49 @@
 # the Microsoft Store placeholder (a stub that only opens the Store when
 # Python is not installed via Store). A `command -v` check alone is not
 # enough — validate with `-V` to confirm the binary actually runs.
+#
+# Each candidate's verdict is kept as it is probed (#650) -- `not on PATH`,
+# or the exit status of its `-V` -- and printed ONLY on the fatal path. A
+# Windows reporter logged 1,650 consecutive hook failures over a month,
+# every one this FATAL, while `python -V` and `py -3 -V` worked in the shell
+# the hooks launch from; a second plugin's independent probe failed
+# identically in the same window, then both self-resolved with nothing
+# changed. Nobody can say why, because the old message named the
+# candidates and nothing about what was seen: not the PATH searched, not
+# which names resolved, not what the resolved ones exited with. With those
+# in hook-errors.log the next such report is answerable from the log alone.
+# Nothing is printed on success: this file is sourced on the post-tool hot
+# path, where stderr is hook-errors.log, on every tool call.
 PYTHON=""
+_probe_report=""
 for _candidate in "python3" "python" "py -3" "py"; do
     _first="${_candidate%% *}"
-    if command -v "$_first" >/dev/null 2>&1 && $_candidate -V >/dev/null 2>&1; then
+    if ! command -v "$_first" >/dev/null 2>&1; then
+        _probe_report="$_probe_report
+  $_candidate: not on PATH"
+        continue
+    fi
+    if $_candidate -V >/dev/null 2>&1; then
         PYTHON="$_candidate"
         break
+    else
+        # Captured in the else arm, where `$?` is still the probe's own
+        # status: after `fi` it is the compound's, which is 0 here, and
+        # after the `command -v` substitution below it would be that one's.
+        _probe_status=$?
     fi
+    _probe_report="$_probe_report
+  $_candidate: on PATH ($(command -v "$_first" 2>/dev/null)), '-V' exit $_probe_status"
 done
+unset _probe_status
 if [ -z "$PYTHON" ]; then
     echo "FATAL: No working Python found. Tried: python3, python, py -3, py. Windows users: install Python from python.org (not Microsoft Store) and ensure 'python' or 'py' works from the shell Claude Code launches hooks in." >&2
+    echo "  PATH searched: $PATH" >&2
+    echo "  per-candidate (exit 49 = Microsoft Store placeholder, not a real interpreter):$_probe_report" >&2
+    unset _probe_report
     exit 1
 fi
+unset _probe_report
 export PYTHON
 
 # --- Detect jq ---
