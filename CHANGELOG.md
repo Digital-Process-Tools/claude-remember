@@ -7,6 +7,97 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.31.0] - 2026-09-11 — SessionEnd detaches before its preamble, SessionStart stops holding the client's pipe open through consolidation, and the Python-detection FATAL says what it saw -- the three Windows reports of the week, plus the release audit's marker-write FIFO guard (#646, #647, #650, #653)
+
+### Added
+
+- Two guards against the #646 shape, a detached child inheriting a dup of the client's pipe and holding it open after the hook exits (#648): a static check that flags any background spawn in a shell script made while an fd >= 3 opened by `exec` is still open and not closed on that line, run over every script in the repo; and a per-spawn-site measurement that stubs the detached work with a sleeper and asserts EOF on the hook's stdout arrives while the child is still running. The consolidation, recovery-save, PostToolUse-save and Antigravity Stop spawn sites are covered.
+
+### Changed
+
+- Closed without a code change: #621 asked for a cheap in-shell pre-check
+  ahead of `log()`'s `printf | tr` control-byte flatten (an optional cost
+  optimization). PR #627 closed #621 via GitHub's `Closes #621`, but the
+  pre-check was never shipped -- two portability attempts at the pre-check
+  itself (a POSIX `[[:cntrl:]]` bracket-class `case`, then an ANSI-C
+  byte-range `case` meant to fix that) each broke a different CI platform,
+  and a third round -- a test-harness PATH-injection fix -- diagnosed and
+  resolved a separate windows-latest artifact in the same CI run without
+  ever explaining the macOS symptom, so #627 shipped a straight revert to
+  the pre-#621 unconditional flatten instead. `log()` still forks `tr` on
+  every call today. This matches `scripts/log.sh`'s own comment on `log()`
+  ("tried twice... a two-attempt failure record") and `CHANGELOG.md`'s
+  0.30.0 entry for #621 ("two portability attempts... a third round of
+  unreproducible platform fragility"), both already accurate. #621's own
+  closed state now carries a correcting comment so the board does not read
+  the optimization as shipped -- this issue is closed as already correctly
+  documented, with no further code or record change needed (#629).
+
+- Documented, not fixed: while working #621 on PR #627, a bash
+  `case "$var" in *[$'\xxx'-$'\yyy']*)` byte-range glob pattern -- reached
+  for as a cheap in-shell control-byte pre-check -- silently failed to
+  match a message that genuinely carried a control byte on every
+  `macos-latest` CI leg, so the `tr` flatten it guarded never ran. Not
+  reproducible locally on Apple's system bash (3.2.57) or a fresh Homebrew
+  bash (5.3.15), under several locales; the runner image
+  (`macos-26-arm64`, `20260831.0337.3`) was unavailable to test directly,
+  so the mechanism stayed unknown. `scripts/log.sh` no longer uses this
+  pattern (reverted to an unconditional flatten), so nothing shipped is
+  currently exposed, but the pattern shape is a plausible thing to reach
+  for again elsewhere in this codebase and fails silently (a `case` that
+  does not match raises no error) -- recorded as a landmine in
+  `trap.d/630.macos-case-byte-range-silent-mismatch.md` for the curation
+  pass to weigh as a jit-context rule (#630).
+
+### Fixed
+
+- Fixed: `post-tool-hook.sh`'s basename-derived `SESSION_ID` sanitiser
+  (#620) could empty the value to `""` with no non-empty gate before the
+  background save fork, unlike the stdin route's own
+  `STDIN_SESSION_ID_TRUSTED` gate (#610). An empty `argv[1]` reached
+  `save-session.sh`, which reads it as "no id given" and silently
+  substitutes the newest `.jsonl` by mtime instead of refusing -- turning a
+  loud, logged rejection into a completed save for a session nobody named.
+  The fork is now skipped and logged as a refusal whenever the sanitiser
+  empties `SESSION_ID` on the basename route, matching the invariant the
+  stdin route already holds (#633).
+
+- Fixed: `ndc_read_gen()` in `scripts/save-session.sh` could hang the whole save indefinitely (or stream unboundedly) if a FIFO or character device ever existed at `$REMEMBER_DIR/tmp/ndc-generation`, since it lacked the regular-file type check its sibling `ts_marker_read()` already had. It now reports "unreadable" for any non-regular-file marker without attempting to read it (#634).
+
+- Fixed: the two guarded timestamp-marker writes in `scripts/save-session.sh` (`COOLDOWN_MARKER` and `NDC_MARKER`) placed `2>/dev/null` after the `>` redirection, which only takes effect once that redirection has already succeeded -- a failed write (permission denied, a directory in the marker's place) still leaked bash's own raw diagnostic line. Both writes now wrap the redirection in a `{ ...; }` group so `2>/dev/null` actually suppresses the group's own failure, and `report_error()` still reports it as before (#635).
+
+- Fixed: `lib-staging-lock.sh`'s fallback `report_error()` stub -- used only
+  when `log.sh` was never sourced, or returned early (#361/#372/#394) -- now
+  flattens control bytes (`LC_ALL=C tr '[:cntrl:]' ' '`) before writing to
+  `hook-errors.log`, the same as `log.sh`'s own four writers already do
+  since #618. #618's "all four writers now flatten" claim was true of
+  `log.sh`'s own writers only -- this was a fifth, uncovered writer of the
+  same file. No caller passes stranger-controlled text through this stub
+  today, so this closes a coverage gap ahead of the next caller that might
+  (#636).
+
+- Fixed: `scripts/session-start-hook.sh`'s promo length-budget comment (#637)
+  narrated the history as "the budget moved instead (140 -> 150)" while the
+  code enforced 170, matching `docs/hooks.md` and `docs/configuration.md`. The
+  comment now reads "140 -> 150 -> 170", matching the enforced value and both
+  docs. Comment-only fix; no behavior change.
+
+- Fixed: `scripts/save-session.sh` read `$NOW_DAY_FILE` via a bare `cat` with no regular-file type check, unlike its siblings `ndc_read_gen()` (#634) and `ts_marker_read()` (#625) -- a FIFO or character device at that path could hang the whole save indefinitely, or stream unboundedly. The read is now guarded the same way (#642).
+
+- Fixed: five more writes in `scripts/save-session.sh` (the COOLDOWN_MARKER and NDC_MARKER self-heal writes, both NOW_DAY_FILE stamps, and the NDC_TAIL truncate-and-copy) placed `2>/dev/null` after a `>` redirection that can itself fail -- the same shape #635 fixed for two other writes. Since redirections are set up left to right, a failing `>` reports bash's own raw diagnostic before `2>/dev/null` ever takes effect. All five are now wrapped in a `{ ...; }` group so the suppression covers the redirection's own failure too (#643).
+
+- SessionStart no longer holds the client's stdout pipe open for the whole of a background consolidation run (#646). The hook buffers its own output and keeps the real stdout on fd 3, which the detached `run-consolidation.sh` inherited -- so a client reading to EOF waited for the child, not for the hook. Measured at 98.62s against a 93s consolidation, which on the VS Code extension's 60s subprocess-init deadline is a session that fails to start, under an error about authentication and network connectivity. The spawn now closes fd 3.
+
+- SessionEnd writes its `logs/autonomous/session-end-*.log` trace before attempting the flush, instead of after (#647). Every early exit below it -- an uncreatable store, a `save-session.sh` missing from a half-finished install -- used to leave the same empty directory an unregistered hook leaves, and `/remember:doctor` reported "SessionEnd has never fired for this project" and blamed hook registration. A hook cancelled during the preamble is still not covered: that is the 1.5s shared-budget case #560 addresses, and the seed depends on the same path resolution that spends the budget.
+
+- SessionEnd detaches before its own preamble, so the hook process returns in tens of milliseconds on any machine instead of after resolving paths, probing for python/jq and bootstrapping the store (#647, closing the gap #560 left). Claude Code gives SessionEnd a 1.5-second budget shared across every hook on the event; #560 measured that preamble at ~3.4s on a slow Windows/Git-Bash machine, and #561's declared `timeout` is one Claude Code's own reference says a plugin cannot use to raise the budget. The process Claude Code invokes now reads stdin and re-launches itself detached; preamble, trace seed and flush all run in the child. One report is lost on that path and documented: a store that could never be created at all (#372) has no `hook-errors.log` to write to and now no stderr either -- `REMEMBER_SESSION_END_FOREGROUND=1` runs the old inline shape for debugging.
+
+- `detect-tools.sh`'s "No working Python found" now says what it saw, not only what it concluded (#650): the `PATH` it searched and, per candidate, `not on PATH` or the exit status of its `-V` probe (49 being the Microsoft Store placeholder). A Windows reporter logged 1,650 consecutive hook failures over a month with the interpreters present and working in the same shell, then it self-resolved with nothing changed; the old message left no way to tell "missing from PATH" from "present and shadowed" after the fact. Nothing is printed on success.
+
+- save-session.sh's marker WRITE sites (`last-save-ts`, the NDC cooldown and generation markers, `now-day`) now refuse a path that exists but is not a regular file, with a WARNING, instead of opening it (#653). #634/#642 guarded the READ side against a planted FIFO; a `>` on a FIFO with no reader blocks in `open(2)` before any redirection error exists for the surrounding `2>/dev/null || true` to catch, so the post-save write hung while still holding the save lock and every later save queued behind it. Found and reproduced by the v0.31.0 release audit.
+
+- A non-regular `now-day` marker (a FIFO, a directory) is now reported with a WARNING when save-session.sh falls back to today's date, instead of being indistinguishable from "no marker yet" (#654). The siblings fixed for the same class report `unreadable`; this one fell through silently, which is a previous day's entries attributed to today with nothing in the log. Absence stays quiet. Found by the v0.31.0 release audit.
+
 ## [0.30.0] - 2026-09-10 — Absent-vs-unreadable markers stop crashing save-session.sh under set -e, hook-errors.log's remaining raw writers get flattened against log forging, and the SessionStart promo names itself and its off switch -- the release gate 3 audit files five more non-blocking findings (#633-#637)
 
 ### Changed
@@ -2550,7 +2641,8 @@ Fixes [#9](https://github.com/Digital-Process-Tools/claude-remember/issues/9), a
 
 ## [0.1.0] — Initial release
 
-[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.30.0...HEAD
+[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.31.0...HEAD
+[0.31.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.31.0
 [0.30.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.30.0
 [0.29.1]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.29.1
 [0.29.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.29.0
