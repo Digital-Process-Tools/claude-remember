@@ -29,7 +29,8 @@
       "lane-paths",
       "lane-storage"
     ],
-    "filed_by_loop": "filed-by-loop"
+    "filed_by_loop": "filed-by-loop",
+    "lane_other": "lane-other"
   },
   "milestones": [],
   "release": {
