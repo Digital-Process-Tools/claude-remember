@@ -338,12 +338,21 @@ def test_codex_payload_notice_lands_in_systemmessage(tmp_path):
 # ── SessionStart (#451's hidden judgment call): confirm or refute, do not
 #    assume -- driven end-to-end against real fixtures, not reasoned about ──
 
-def _session_start_env(home: Path, remember: Path) -> dict:
+def _session_start_env(home: Path, remember: Path, suppress_promo: bool = False) -> dict:
     env = {**os.environ, "HOME": str(home), "REMEMBER_DIR": str(remember),
            "_LIB_MEMORY_DIR_LOADED": "1", "REMEMBER_NO_PRINTF_T": "1",
            "PLUGIN_ROOT": str(REPO_ROOT)}
     for key in ("CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT"):
         env.pop(key, None)
+    # `_LIB_MEMORY_DIR_LOADED=1` above means `config()` never reads a real
+    # config.json for this env (it answers every key from its hardcoded
+    # default), so a caller that wants the promo mechanism off cannot get
+    # there via `features.plugin_promos` -- REMEMBER_SUPPRESS_PROMO is the
+    # env-level route #596 already established for exactly that shape.
+    # Opt-in, not the default: this suite's other tests may still want the
+    # promo path live.
+    if suppress_promo:
+        env["REMEMBER_SUPPRESS_PROMO"] = "1"
     return env
 
 
@@ -361,7 +370,24 @@ def test_session_start_first_byte_is_never_bracket_or_brace(tmp_path):
     see the module docstring), and an empty store. In every one, the first
     stdout byte is a letter or `=`, never `{`/`[` -- REFUTING #451's
     hypothesis that SessionStart shares this defect. OBSERVED for these
-    three shapes; NOT a proof for every branch of a 1400-line script."""
+    three shapes; NOT a proof for every branch of a 1400-line script.
+
+    The promo mechanism is suppressed for this fixture via
+    `REMEMBER_SUPPRESS_PROMO` (#657), not `config.json`: `_session_start_env`
+    below sets `_LIB_MEMORY_DIR_LOADED=1` so this suite's other assertions
+    never pay for a real config merge, and that guard makes `config()`
+    answer every key from its hardcoded default -- a `config.json` write
+    here would be silently ignored (confirmed live: writing
+    `features.plugin_promos: false` alone still left it firing). Shape 2
+    below writes a non-empty `recent.md` to force the largest recap this
+    hook produces, and since #657 that is also the ONE gate the star-ask
+    promo entry checks -- on a fresh $HOME with no cooldown marker yet it
+    otherwise fires, turning stdout into the JSON `systemMessage` shape
+    this test exists to prove never happens on the PLAIN path. That is a
+    real, unrelated feature firing on borrowed fixture state, not a #451
+    regression -- suppressed here so this test keeps measuring what its
+    name says.
+    """
     home = tmp_path / "home"
     project = tmp_path / "project"
     remember = project / ".remember"
@@ -370,7 +396,7 @@ def test_session_start_first_byte_is_never_bracket_or_brace(tmp_path):
 
     # Shape 1: empty store.
     result = subprocess.run(
-        ["bash", str(SESSION_START)], env=_session_start_env(home, remember),
+        ["bash", str(SESSION_START)], env=_session_start_env(home, remember, suppress_promo=True),
         input=_session_start_payload("s1", str(project)),
         capture_output=True, text=True, timeout=60, check=False,
     )
@@ -388,7 +414,7 @@ def test_session_start_first_byte_is_never_bracket_or_brace(tmp_path):
         (remember / name).write_text(body + "\n", encoding="utf-8")
     (remember / "remember.md").write_text("HANDOFF-BODY-451\n", encoding="utf-8")
     result = subprocess.run(
-        ["bash", str(SESSION_START)], env=_session_start_env(home, remember),
+        ["bash", str(SESSION_START)], env=_session_start_env(home, remember, suppress_promo=True),
         input=_session_start_payload("s2", str(project)),
         capture_output=True, text=True, timeout=60, check=False,
     )
@@ -400,7 +426,7 @@ def test_session_start_first_byte_is_never_bracket_or_brace(tmp_path):
     # Shape 3: the handoff delivered once already -- the run that reaches
     # this script's one bracket-opening line, "[already delivered ...]".
     result = subprocess.run(
-        ["bash", str(SESSION_START)], env=_session_start_env(home, remember),
+        ["bash", str(SESSION_START)], env=_session_start_env(home, remember, suppress_promo=True),
         input=_session_start_payload("s3", str(project)),
         capture_output=True, text=True, timeout=60, check=False,
     )

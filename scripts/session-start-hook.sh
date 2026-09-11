@@ -1020,32 +1020,106 @@ if [ "$(config ".features.plugin_promos" true)" = "true" ] \
             return 0
         fi
 
+        # ── #660: one jq call for the whole promo list, not four per entry ──
+        # The pre-#660 shape ran, per candidate, one `jq -r '.promos | length'`
+        # plus FOUR more `jq` calls (id/text/url/installed_key) and then, for
+        # every candidate that survived those, TWO MORE identical `has_it`
+        # calls -- one to capture the value, one just to re-run the same query
+        # and inspect its exit status (a plain copy-paste: same program, same
+        # file, same $ikey, called twice). With the two promos.json ships
+        # today that is up to 13 jq forks to decide on ONE line of output.
+        # `jq` is cheap on Linux/macOS; it is not on Windows/Git Bash, where
+        # each subprocess costs ~50-200ms (#660's own measurement) -- a hook
+        # that shells out a dozen times pays for that roughly 10x harder than
+        # on Unix. None of this needed per-entry queries: `.promos` does not
+        # change between one candidate and the next in the same invocation, so
+        # one jq process can read the whole array.
+        #
+        # One value per LINE, not one TSV row per entry (#657 regression
+        # caught mid-implementation): `IFS=$'\t' read` squashes CONSECUTIVE
+        # tab delimiters exactly like it squashes consecutive spaces, because
+        # tab is one of the fixed "IFS whitespace" characters POSIX defines --
+        # true no matter what IFS is actually SET to, as long as it consists
+        # only of space/tab/newline. An entry with an EMPTY middle field (no
+        # `url`, the #574 fixture this broke first) collapses two adjacent
+        # tabs into one delimiter and every field after it shifts left by
+        # one. Newline never gets squashed by `read -r` the same way, so
+        # each field is printed on its own line instead.
+        #
+        # A second trap sits right behind the first: `$( … )` strips EVERY
+        # trailing newline from a command substitution, not just one, so an
+        # entry whose LAST field (`gate`, here) is empty on the FINAL promo
+        # in the file silently loses that line -- the five-line group for
+        # that entry becomes four, and the next `read` past it hits real EOF
+        # instead of the sentinel below, dropping the star ask whenever it
+        # happens to land last with an empty trailing field. A literal,
+        # never-empty sentinel appended after every real field closes both
+        # traps: it can never itself be eaten by trailing-newline stripping
+        # (nothing empty follows it), and the loop below stops on SEEING it
+        # rather than on EOF, so a genuinely empty trailing field is read
+        # correctly instead of silently vanishing.
+        local _promo_rows
+        _promo_rows=$($JQ -r '(.promos[]? | .id // "", .text // "", .url // "", .installed_key // "", .gate // ""), "#promo-end#"' "$promos_file" 2>/dev/null) || return 0
+        [ -n "$_promo_rows" ] || return 0
+
         # Three states (#574 decision 3), never two. `installed_ok` is unset
         # (cannot-tell) unless the file exists AND declares the one version
         # this reads -- a wrong/absent version must suppress exactly like a
         # confirmed install, never be read as "not installed".
+        #
+        # Folded into the SAME jq call that lists the installed keys (#660):
+        # previously the version check was one `jq` call and each candidate's
+        # `.plugins[$k]` membership test was its own call against the same
+        # document. A malformed `.plugins` (not an object) used to fail each
+        # of those per-key queries individually, which had the SAME aggregate
+        # effect as failing here once -- every candidate already fell through
+        # to `continue` either way, so no entry could ever be selected from an
+        # installed-plugins file jq could not query, and `first_id`/rotation
+        # never sees an entry whose install status could not be confirmed.
+        # Collapsing that into one up-front probe changes nothing selectable,
+        # only how many processes it costs to find out.
         local installed_file="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/installed_plugins.json"
         local installed_ok=""
-        if [ -f "$installed_file" ] \
-            && [ "$($JQ -r '.version // empty' "$installed_file" 2>/dev/null)" = "2" ]; then
-            installed_ok="true"
+        local -a installed_keys=()
+        if [ -f "$installed_file" ]; then
+            local _iprobe
+            _iprobe=$($JQ -r 'if (.version // empty) == "2" then (["#ok"] + ((.plugins // {}) | to_entries | map(.key))) | .[] else empty end' "$installed_file" 2>/dev/null)
+            if [ -n "$_iprobe" ]; then
+                local _iline _ifirst=1
+                while IFS= read -r _iline; do
+                    if [ "$_ifirst" = "1" ]; then
+                        _ifirst=0
+                        [ "$_iline" = "#ok" ] && installed_ok="true"
+                        continue
+                    fi
+                    [ -n "$_iline" ] && installed_keys+=("$_iline")
+                done <<< "$_iprobe"
+            fi
         fi
 
-        local count
-        count=$($JQ -r '.promos | length' "$promos_file" 2>/dev/null)
-        case "$count" in ''|*[!0-9]*) return 0 ;; esac
-
-        local i=0 id text url ikey has_it url_display msg
+        local id text url ikey gate entry_idx=0 url_display msg
         local candidate_id="" candidate_msg="" first_id="" first_msg=""
-        while [ "$i" -lt "$count" ]; do
-            id=$($JQ -r ".promos[$i].id // empty" "$promos_file" 2>/dev/null)
-            text=$($JQ -r ".promos[$i].text // empty" "$promos_file" 2>/dev/null)
-            url=$($JQ -r ".promos[$i].url // empty" "$promos_file" 2>/dev/null)
-            ikey=$($JQ -r ".promos[$i].installed_key // empty" "$promos_file" 2>/dev/null)
-            i=$((i + 1))
+        while IFS= read -r id; do
+            [ "$id" = "#promo-end#" ] && break
+            IFS= read -r text || break
+            IFS= read -r url || break
+            IFS= read -r ikey || break
+            IFS= read -r gate || break
+            entry_idx=$((entry_idx + 1))
 
-            if [ -z "$id" ] || [ -z "$text" ] || [ -z "$ikey" ]; then
-                log "hook" "promo skipped: promos.json entry $((i - 1)) is missing id/text/installed_key"
+            if [ -z "$id" ] || [ -z "$text" ]; then
+                log "hook" "promo skipped: promos.json entry $((entry_idx - 1)) is missing id/text"
+                continue
+            fi
+            # `gate` (#657) is the escape from the cross-plugin-only shape
+            # #574 shipped: an entry with no `gate` is the original kind and
+            # still needs `installed_key` to know what to check for; an entry
+            # WITH a `gate` is asking a different question entirely (has this
+            # store demonstrably done something for the user yet?) and has no
+            # installed-plugin identity to check, so `installed_key` is not
+            # required for it.
+            if [ -z "$gate" ] && [ -z "$ikey" ]; then
+                log "hook" "promo skipped: promos.json entry $((entry_idx - 1)) is missing installed_key"
                 continue
             fi
             # An entry with no url is skipped, and the skip is VISIBLE
@@ -1055,18 +1129,46 @@ if [ "$(config ".features.plugin_promos" true)" = "true" ] \
                 continue
             fi
 
-            [ -n "$installed_ok" ] || continue
-            has_it=$($JQ -r --arg k "$ikey" '.plugins[$k] // empty | length' "$installed_file" 2>/dev/null)
-            # A non-zero jq exit here (a version-2 file whose .plugins is not
-            # the object the schema promises, say) must read as cannot-tell
-            # for THIS entry, never as the empty-output shape that means
-            # genuinely absent -- the same three-state rule the file/version
-            # check above already enforces, extended to a query that can also
-            # fail on well-formed-but-wrong-shaped JSON (review finding, #574).
-            if ! $JQ -r --arg k "$ikey" '.plugins[$k] // empty | length' "$installed_file" >/dev/null 2>&1; then
-                continue
-            fi
-            case "$has_it" in ''|0) : ;; *) continue ;; esac
+            case "$gate" in
+                "")
+                    # The #574 shape: only a plugin that is NOT installed may
+                    # speak.
+                    [ -n "$installed_ok" ] || continue
+                    local _found=""
+                    local _k
+                    for _k in "${installed_keys[@]}"; do
+                        if [ "$_k" = "$ikey" ]; then
+                            _found="yes"
+                            break
+                        fi
+                    done
+                    [ -z "$_found" ] || continue
+                    ;;
+                recent_nonempty)
+                    # #657: the star ask waits until the plugin has
+                    # demonstrably done something for the user. `recent.md`
+                    # existing and being non-empty needs no new counter --
+                    # that file is written only once a past day's staging has
+                    # been consolidated (pipeline/consolidate.py), so its
+                    # presence already means a full day of sessions was
+                    # captured and compressed. `-f` (not `-e`) so a directory,
+                    # device or other non-regular node at that path -- the
+                    # same class of thing #653/#654 refuse at every marker
+                    # WRITE site -- is never read as "done something", and
+                    # `-s` so a zero-byte file (created but never populated)
+                    # is not either.
+                    if [ ! -f "$REMEMBER_RECENT" ] || [ ! -s "$REMEMBER_RECENT" ]; then
+                        continue
+                    fi
+                    ;;
+                *)
+                    # An unrecognised gate is refused, not guessed at --
+                    # rendering an ungated promo by accident is the failure
+                    # this field exists to prevent, not a fallback to offer.
+                    log "hook" "promo skipped: '$id' has unknown gate '$gate'"
+                    continue
+                    ;;
+            esac
 
             url_display="${url#https://}"
             url_display="${url_display#http://}"
@@ -1094,11 +1196,11 @@ if [ "$(config ".features.plugin_promos" true)" = "true" ] \
             # work out for himself which of his plugins had spoken. An
             # unaddressed off switch is barely better than none.
             #
-            # The longest shipped entry renders at 159 of the 170-char
-            # budget below. Dropping `github.com/` from the display would
-            # have bought 11 characters and fit 150, but most terminals
-            # stop auto-linking a bare org/repo, and an unclickable link
-            # defeats the only thing the promo is for.
+            # The longest shipped entry renders at 162 of the 170-char
+            # budget below (the #657 star ask). Dropping `github.com/` from
+            # the display would have bought characters back, but most
+            # terminals stop auto-linking a bare org/repo, and an
+            # unclickable link defeats the only thing the promo is for.
             # TestPromoCarriesItsOwnOffSwitch asserts every shipped entry
             # still renders, so a future copy edit that busts the budget
             # fails CI instead of silently suppressing the promo.
@@ -1114,7 +1216,7 @@ if [ "$(config ".features.plugin_promos" true)" = "true" ] \
                 candidate_msg="$msg"
                 break
             fi
-        done
+        done <<< "$_promo_rows"
 
         # Rotation (#574 decision 1): id is what the throttle records, so a
         # single not-installed candidate that happens to equal last time's id
