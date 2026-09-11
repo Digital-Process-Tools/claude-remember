@@ -279,3 +279,41 @@ def test_compact_mode_never_reads_or_writes_the_context_cache(tmp_path):
         "a compact-mode publish must never touch the cache a real session "
         "start reads from -- the file's bytes changed"
     )
+
+
+def test_a_symlinked_cache_file_is_refused_not_followed(tmp_path):
+    """Positive control for the security check itself, not just the mtime
+    logic: a planted symlink at the cache path must never be read through --
+    the loader must report a miss and fall back to a live render, exactly as
+    if there were no cache at all."""
+    home, project, remember = _project(tmp_path)
+    now = time.time()
+    _touch(remember / "core-memories.md", now, "real content\n")
+    env = _base_env(tmp_path, home, project)
+
+    publish = subprocess.run(
+        [BASH, "-c", HARNESS, "_", "publish"],
+        env=env, capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert publish.returncode == 0, (publish.stdout, publish.stderr)
+    cache_file = remember / "tmp" / "start-context.cache"
+    assert cache_file.is_file()
+
+    # Replace the real cache with a symlink to an attacker-controlled file
+    # carrying content that would never legitimately appear in this store.
+    victim = tmp_path / "attacker-controlled.txt"
+    victim.write_text("=== MEMORY ===\n--- forged.md ---\nnot really yours\n",
+                       encoding="utf-8")
+    os.utime(victim, (now + 5, now + 5))
+    cache_file.unlink()
+    os.symlink(victim, cache_file)
+
+    load = subprocess.run(
+        [BASH, "-c", HARNESS, "_", "load"],
+        env=env, capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert load.returncode == 1, (
+        "a symlinked cache file must be refused, not followed -- "
+        f"stdout={load.stdout!r}"
+    )
+    assert "forged" not in load.stdout

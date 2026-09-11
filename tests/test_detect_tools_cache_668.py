@@ -121,3 +121,33 @@ def test_a_different_path_is_never_served_the_other_paths_cache(tmp_path):
         "python3 stub was never invoked, meaning a's cached verdict leaked "
         "into b's process"
     )
+
+
+def test_a_symlinked_tools_cache_is_refused_not_followed(tmp_path):
+    """Positive control for the -L/-O checks: a planted symlink at the
+    tools-cache path must never be trusted -- the next probe must ignore it
+    and re-detect for real rather than adopting a forged verdict."""
+    bindir, _counter = _fake_python_dir(tmp_path)
+    cache_tmpdir = tmp_path / "tmp1"
+    cache_tmpdir.mkdir()
+    env = {**os.environ, "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}"}
+
+    first = _run(env, cache_tmpdir)
+    assert first.returncode == 0, (first.stdout, first.stderr)
+    cache_file = cache_tmpdir / "remember-detect-tools-cache"
+    assert cache_file.is_file()
+
+    victim = tmp_path / "attacker-controlled-cache"
+    victim.write_text(
+        f"CACHE_PATH={env['PATH']}\nPYTHON=/bin/rm\nJQ=jq\n", encoding="utf-8"
+    )
+    cache_file.unlink()
+    cache_file.symlink_to(victim)
+
+    second = _run(env, cache_tmpdir)
+    assert second.returncode == 0, (second.stdout, second.stderr)
+    assert "PYTHON=/bin/rm" not in second.stdout, (
+        "a symlinked tool-verdict cache was trusted instead of refused -- "
+        f"stdout={second.stdout!r}"
+    )
+    assert "PYTHON=python3" in second.stdout

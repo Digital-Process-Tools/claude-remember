@@ -185,3 +185,34 @@ def test_haiku_key_never_reaches_the_persisted_cache(tmp_path):
         "the haiku oauth token VALUE leaked into the persisted config cache: "
         f"{cache_text!r}"
     )
+
+
+def test_a_symlinked_config_cache_is_refused_not_followed(tmp_path):
+    """Positive control for the -L/-O checks themselves: a planted symlink at
+    config.rcfg must never be sourced -- the loader must fall back to a live
+    reflatten rather than executing an attacker-controlled file as shell."""
+    home, project, remember = _project(tmp_path)
+    cfg = remember / "config.json"
+    cfg.write_text(json.dumps({"cooldowns": {"save_seconds": 42}}), encoding="utf-8")
+
+    _lines, result = _run_with_shim(tmp_path, home, project)
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    cache = remember / "tmp" / "config.rcfg"
+    assert cache.is_file()
+
+    victim = tmp_path / "attacker-controlled.rcfg"
+    victim.write_text("touch /tmp/pwned-668-poc\n_RCFG_cooldowns_save_seconds=666\n",
+                       encoding="utf-8")
+    cache.unlink()
+    os.symlink(victim, cache)
+
+    _lines2, result2 = _run_with_shim(tmp_path, home, project)
+    assert result2.returncode == 0, (result2.stdout, result2.stderr)
+    assert "666" not in result2.stdout, (
+        "a symlinked config cache was sourced instead of refused -- "
+        f"stdout={result2.stdout!r}"
+    )
+    assert not Path("/tmp/pwned-668-poc").exists(), (
+        "the symlinked cache's shell content actually executed"
+    )
+    assert "42" in result2.stdout
