@@ -33,6 +33,22 @@ COUNTED = (
 ).split()
 
 
+# On native Windows the binaries this shimming exists to intercept are never
+# named bare ("jq", "git") -- they carry one of these suffixes, and a lookup
+# that only tries the bare name never finds any of them, so make_shim_dir
+# silently shimmed NOTHING on Windows -- not just jq, every one of COUNTED --
+# and every existing caller either blanket-skips win32 (most of them) or
+# only ever asserts an UPPER bound on the spawn count (test_log_sh.py's
+# `assert len(reads) <= 1`), which still passes when the true count is 0
+# because the shim never intercepted anything at all. The gap had no
+# consumer that could fail loudly until a test asserted a LOWER bound --
+# "at least one spawn must be observed" -- which is exactly what exposed it
+# (#670, CI: windows-latest 3.11/3.12, test_config_flatten_cache_668.py's
+# own positive control: "got spawns: []", the whole list empty, not merely
+# missing jq -- consistent with zero shims having been created at all).
+_EXE_SUFFIXES = [""] if os.name != "nt" else ["", ".exe", ".cmd", ".bat"]
+
+
 def make_shim_dir(tmp_path: Path, log: Path | None = None) -> Path:
     """A PATH front-end that records every external execution, then execs it.
 
@@ -46,9 +62,12 @@ def make_shim_dir(tmp_path: Path, log: Path | None = None) -> Path:
     for name in COUNTED:
         real = None
         for d in os.environ.get("PATH", "").split(os.pathsep):
-            cand = Path(d) / name
-            if cand.is_file() and os.access(cand, os.X_OK):
-                real = cand
+            for suffix in _EXE_SUFFIXES:
+                cand = Path(d) / (name + suffix)
+                if cand.is_file() and os.access(cand, os.X_OK):
+                    real = cand
+                    break
+            if real is not None:
                 break
         if real is None:
             continue
@@ -56,7 +75,13 @@ def make_shim_dir(tmp_path: Path, log: Path | None = None) -> Path:
         shim.write_text(
             "#!/bin/bash\n"
             f'printf "%s %s\\n" "{name}" "$*" >> "$SPAWN_LOG"\n'
-            f'exec "{real}" "$@"\n',
+            # .as_posix(), not a raw str(real): on Windows `real` is a
+            # backslash-separated WindowsPath, and embedding that directly
+            # into a bash script is the identical class of bug #670 already
+            # fixed once in this same PR (tests/test_start_context_cache_668.py,
+            # tests/test_config_flatten_cache_668.py) -- this fix must not
+            # reintroduce it one function away.
+            f'exec "{real.as_posix()}" "$@"\n',
             encoding="utf-8",
         )
         shim.chmod(0o755)
