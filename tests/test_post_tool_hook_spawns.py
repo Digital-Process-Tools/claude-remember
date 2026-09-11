@@ -130,6 +130,19 @@ def _env(tmp_path: Path, home: Path, project: Path, extra: dict | None = None) -
         # REMEMBER_ENV_CACHE=0 is lib-env-cache.sh's own documented off switch,
         # not a test-only seam, so what runs here is the shipped cold path.
         "REMEMBER_ENV_CACHE": "0",
+        # Same reasoning, same #303 class, one mechanism later (#668): log.sh's
+        # flattened-config cache (config.rcfg) is ALSO mtime-keyed against
+        # config.json, and this fixture creates config.json once, then runs
+        # the hook twice -- whether the SECOND run's cache read ties or hits
+        # depends on whether the first run's cache write landed in the same
+        # whole second as config.json's own creation, which this test must
+        # not depend on any more than it depends on it for REMEMBER_ENV_CACHE
+        # above. Off, for the identical reason: this file measures the COLD
+        # path's own, pre-#668 cost (post-tool-hook.sh's docstring: "the
+        # merged config is still never cached... stays exactly as it was"),
+        # not #668's caching benefit -- that has its own dedicated tests
+        # (tests/test_config_flatten_cache_668.py).
+        "REMEMBER_CONFIG_CACHE": "0",
     }
     for stale in ("REMEMBER_DIR", "_LIB_MEMORY_DIR_LOADED", "REMEMBER_TZ"):
         env.pop(stale, None)
