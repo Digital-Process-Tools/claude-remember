@@ -746,7 +746,7 @@ record_summary_failure() {
         log "haiku" "WARNING: ${_count} consecutive failures on this span -- dropping it unsummarized and advancing position -> $POSITION (see thresholds.max_summary_failures)"
         save_position_span
         rm -f "$FAILURE_MARKER"
-    else
+    elif marker_write_ok "$FAILURE_MARKER" summary; then
         echo "$_key $_count" > "$FAILURE_MARKER"
         log "haiku" "failure ${_count}/${MAX_FAILURES} on this span -- will retry next run"
     fi

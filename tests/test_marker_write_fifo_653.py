@@ -87,7 +87,65 @@ class TestMarkerWriteOk:
         assert proc.stderr == ""
 
 
-_MARKERS = ("COOLDOWN_MARKER", "NDC_MARKER", "NOW_DAY_FILE", "NDC_GEN_FILE")
+def _extract_record_summary_failure() -> str:
+    text = SAVE.read_text(encoding="utf-8")
+    m = re.search(r"^record_summary_failure\(\) \{.*?^\}\n", text, re.MULTILINE | re.DOTALL)
+    assert m, "record_summary_failure() not found in scripts/save-session.sh"
+    return m.group(0)
+
+
+def _run_record_summary_failure(failure_marker: Path, timeout: float = 5) -> subprocess.CompletedProcess:
+    # MAX_FAILURES=3 (the config default) reaches the `else` branch -- the
+    # `echo "$_key $_count" > "$FAILURE_MARKER"` write -- on the very FIRST
+    # recorded failure: SESSION_ID:POSITION has no prior marker, so
+    # _prev_key != _key, _count becomes 1, and 1 < 3 skips the "give up"
+    # arm. Only MAX_FAILURES=1 would route the very first failure straight
+    # to the `rm -f` arm instead -- #656 notes this is why the narrow
+    # window is "above 1", not "above 0": the default (3) is already inside
+    # the reachable range.
+    script = (
+        'report_error() { printf "REPORTED [%s] %s\\n" "$1" "$2" >&2; }\n'
+        'log() { printf "LOG [%s] %s\\n" "$1" "$2" >&2; }\n'
+        'save_position_span() { :; }\n'
+        + _extract_helper()
+        + _extract_record_summary_failure()
+        + f'\nFAILURE_MARKER="{failure_marker}"\nMAX_FAILURES=3\nSESSION_ID="s1"\nPOSITION="5"\n'
+        + 'record_summary_failure\necho DONE\n'
+    )
+    with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False, encoding="utf-8") as f:
+        f.write(script)
+        name = f.name
+    try:
+        return subprocess.run(["bash", name], capture_output=True, text=True, timeout=timeout, check=False)
+    finally:
+        os.unlink(name)
+
+
+class TestFailureMarkerWrite:
+    """#656: FAILURE_MARKER's write (scripts/save-session.sh:750, inside
+    record_summary_failure()) is the fifth marker write in this file and was
+    left out of #653's sweep -- both the guard and the static completeness
+    check below. Mirrors TestMarkerWriteOk's FIFO/regular-file pairing, but
+    against the real call site rather than the extracted helper alone, so
+    this pins the actual reachable hang (#656's own reproduction) and not
+    just marker_write_ok()'s generic contract."""
+
+    def test_a_fifo_at_failure_marker_is_refused_not_hung(self, tmp_path):
+        p = tmp_path / "last-summary-failure"
+        os.mkfifo(p)
+        proc = _run_record_summary_failure(p)
+        assert "DONE" in proc.stdout, proc
+        assert "REPORTED" in proc.stderr and "WARNING" in proc.stderr, proc.stderr
+
+    def test_a_regular_failure_marker_write_still_succeeds(self, tmp_path):
+        p = tmp_path / "last-summary-failure"
+        proc = _run_record_summary_failure(p)
+        assert "DONE" in proc.stdout, proc
+        assert "REPORTED" not in proc.stderr, proc.stderr
+        assert p.read_text().strip() == "s1:5 1"
+
+
+_MARKERS = ("COOLDOWN_MARKER", "NDC_MARKER", "NOW_DAY_FILE", "NDC_GEN_FILE", "FAILURE_MARKER")
 
 
 def test_every_marker_write_site_is_guarded():
