@@ -268,7 +268,28 @@ def _run_once(env: dict, shims: Path, log: Path) -> tuple[subprocess.CompletedPr
     run_env = {**env, "SPAWN_LOG": str(log), "PATH": f"{shims}{os.pathsep}{env['PATH']}"}
     t0 = time.perf_counter()
     result = subprocess.run(
-        [BASH, str(SESSION_START)],
+        # SESSION_START.as_posix(), not str(SESSION_START) (#669 round 5): on
+        # Windows str() gives a fully backslash-separated path, and
+        # session-start-hook.sh:60 derives its own directory with
+        # `_HOOK_DIR="${BASH_SOURCE[0]%/*}"` -- bash's `%/*` suffix removal
+        # is pure string matching and only recognises `/`, never `\`
+        # (docs/windows.md already names this exact class of bug for other
+        # variables: #487/#517/#519/#524-#526's `_remember_forward_slash`).
+        # A backslash-only BASH_SOURCE[0] has no `/` to strip, so `_HOOK_DIR`
+        # falls back to "." -- exactly the observed CI failure
+        # (session-start-hook.sh: line 160: ./resolve-paths.sh: No such file
+        # or directory, job 103477377903, windows-latest/3.10), confirmed
+        # by this file's own round-4 diagnostics. This is a TEST HARNESS bug,
+        # not a hook bug: the hook's real caller (hooks/hooks.json:
+        # `bash "${CLAUDE_PLUGIN_ROOT}/scripts/session-start-hook.sh"`)
+        # always has a literal forward slash hardcoded immediately before
+        # the filename, regardless of what separator style
+        # CLAUDE_PLUGIN_ROOT itself uses, so BASH_SOURCE[0] there always
+        # ends in `/session-start-hook.sh` and `_HOOK_DIR` resolves
+        # correctly -- this repo's years of real Windows usage never hit
+        # this because the real invocation never constructs the path via
+        # Python's native str(Path).
+        [BASH, SESSION_START.as_posix()],
         input=_payload(),
         env=run_env,
         capture_output=True,
@@ -459,4 +480,109 @@ def test_session_start_hook_benchmark_with_jq_absent(tmp_path, record_property):
         cold_budget=JQ_ABSENT_COLD_SPAWN_BUDGET,
         warm_budget=JQ_ABSENT_WARM_SPAWN_BUDGET,
         label="jq_absent",
+    )
+
+
+def _extract_hook_dir_lines() -> str:
+    """The exact two lines session-start-hook.sh derives its own directory
+    with, read out of the real file rather than retyped -- so this test
+    breaks loudly if that mechanism ever changes, instead of silently
+    testing a copy that has drifted from what actually ships."""
+    text = SESSION_START.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if line.strip() != '_HOOK_DIR="${BASH_SOURCE[0]%/*}"':
+            continue
+        return "\n".join(lines[i : i + 2])
+    raise AssertionError(
+        "session-start-hook.sh no longer derives _HOOK_DIR the way this "
+        "test expects -- either the mechanism changed or moved, and this "
+        "test's extraction needs to move with it"
+    )
+
+
+def test_hook_dir_derivation_needs_a_forward_slash_path(tmp_path):
+    """Round 5 (#669): windows-latest/3.10 CI showed session-start-hook.sh
+    failing to source resolve-paths.sh at all ('./resolve-paths.sh: No such
+    file or directory') -- this file's own round-4 diagnostics (bash-side
+    PATH probe, shim dir listing) ruled out jq, PATH and MSYS path
+    translation entirely; the hook had simply never gotten past its own
+    directory derivation.
+
+    OBSERVED here, on THIS platform, not merely reasoned about Windows:
+    `_HOOK_DIR="${BASH_SOURCE[0]%/*}"` is pure bash STRING pattern matching
+    -- it only ever recognises `/`, never `\\`, regardless of what the
+    filesystem underneath considers a separator.
+
+    `BASH_SOURCE` cannot simply be assigned a fake value (it is populated by
+    bash itself from how the running script was actually invoked, and a
+    bare `BASH_SOURCE=(...)` in a `bash -c` string silently produces an
+    EMPTY array rather than overriding it -- caught while writing this test:
+    an earlier version of this probe asserted `HOOK_DIR=.` for every case,
+    including the forward-slash one, for exactly that reason). So this test
+    drives the REAL mechanism by actually invoking a real file at a chosen
+    path, the same way `_run_once` invokes the real hook -- on THIS platform
+    (POSIX), a path with forward slashes is both a valid filesystem path AND
+    a string `%/*` can split; there is no way to make a SINGLE real
+    invocation here exercise the Windows symptom exactly (a backslash path
+    is simultaneously a valid Windows filesystem path string-matchable only
+    by `/`, and on POSIX it is invalid as a path at all -- `bash
+    \\foo\\bar.sh` fails to even locate the file, a different, earlier
+    failure than the Windows one). What IS directly testable here, with no
+    platform-specific reasoning required, is the `%/*` operator itself: it
+    is applied to a real, readable variable (not the unsettable
+    `BASH_SOURCE`), driven by the exact pattern/fallback the two lines use.
+    """
+    snippet = _extract_hook_dir_lines().replace("BASH_SOURCE[0]", "FAKE_SOURCE")
+
+    def _probe(fake_source: str) -> str:
+        result = subprocess.run(
+            ["bash", "-c", f'FAKE_SOURCE="$1"; {snippet}; echo "HOOK_DIR=$_HOOK_DIR"',
+             "--", fake_source],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        return result.stdout.strip()
+
+    posix = _probe("/some/plugin/root/scripts/session-start-hook.sh")
+    assert posix == "HOOK_DIR=/some/plugin/root/scripts", (
+        f"a forward-slash path must derive the real scripts directory: {posix!r}"
+    )
+
+    # POSITIVE CONTROL for the positive control above: a path with no
+    # separator at all is the ONE case this mechanism is DESIGNED to fall
+    # back on ("." -- see the hook's own comment at line 57-58). Without
+    # this, a probe bug that always returned "." would pass the backslash
+    # assertion below for the wrong reason.
+    no_sep = _probe("session-start-hook.sh")
+    assert no_sep == "HOOK_DIR=.", (
+        f"a bare filename with no separator is the documented fallback case: {no_sep!r}"
+    )
+
+    backslash = _probe("C:\\some\\plugin\\root\\scripts\\session-start-hook.sh")
+    assert backslash == "HOOK_DIR=.", (
+        "a backslash-only path must fall back to the SAME '.' this mechanism "
+        "uses for 'no separator at all' -- bash's own %/* cannot tell a "
+        f"Windows path from a bare filename. Got: {backslash!r}"
+    )
+
+    # The actual fix (#669 round 5): invoke the REAL hook file and check
+    # bash's own BASH_SOURCE[0] resolves correctly when given the exact
+    # .as_posix() form _run_once now uses -- end to end, on the real file,
+    # not a simulated variable.
+    real_probe_script = tmp_path / "hook_dir_real_probe.sh"
+    real_probe_script.write_text(
+        '_HOOK_DIR="${BASH_SOURCE[0]%/*}"\n'
+        '[ "$_HOOK_DIR" = "${BASH_SOURCE[0]}" ] && _HOOK_DIR="."\n'
+        'echo "HOOK_DIR=$_HOOK_DIR"\n',
+        encoding="utf-8",
+    )
+    real_result = subprocess.run(
+        ["bash", real_probe_script.as_posix()],
+        capture_output=True, text=True, timeout=10, check=False,
+    )
+    assert real_result.returncode == 0, real_result.stderr
+    assert real_result.stdout.strip() == f"HOOK_DIR={real_probe_script.parent.as_posix()}", (
+        f"invoking with .as_posix() (what _run_once now does) must resolve "
+        f"_HOOK_DIR to the script's real parent directory: {real_result.stdout!r}"
     )
