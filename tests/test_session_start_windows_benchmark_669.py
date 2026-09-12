@@ -127,11 +127,17 @@ SESSION = "ffffffff-0000-4000-8000-000000000669"
 PREV_SESSION = "eeeeeeee-0000-4000-8000-000000000669"
 PREV_SESSION_LINES = 181  # arbitrary, plausible; only its type (an integer) matters
 
-# Measured (OBSERVED, macOS, this file, this commit) cold/warm spawn counts:
-#   jq present:  cold 75, warm 38
-#   jq absent:   cold 63, warm 56
-# Budgets carry roughly 2x slack over the observed number, not the tight "+2"
-# margin a single-platform budget can afford -- see the module docstring.
+# Measured (OBSERVED, macOS, this file, this commit, AFTER fixing the
+# make_shim_dir/_path_without_jq interaction both self-review spawns caught --
+# see _benchmark()'s own comment) cold/warm spawn counts:
+#   jq present:  cold 76, warm 39
+#   jq absent:   cold 93, warm 78
+# jq absent costs MORE here, not less: _jq_fallback's own single-key lookups
+# and the other jq-absent code paths this hook falls back to are each one
+# extra python3 spawn where jq-present was one jq call, and there is no
+# equivalent of jq's one-process multi-query batching on that path. Budgets
+# carry roughly 2x slack over the observed number, not the tight "+2" margin
+# a single-platform budget can afford -- see the module docstring.
 # MEASURE FIRST on whatever runner reads this, THEN tighten, per the issue's
 # own "Ask" item 5 -- these are deliberately generous starting values, not a
 # claim about what #662-#667 should leave behind.
@@ -158,7 +164,7 @@ def _store(tmp_path: Path):
     plugins_dir = home / ".claude" / "plugins"
     plugins_dir.mkdir(parents=True)
     (plugins_dir / "installed_plugins.json").write_text(
-        json.dumps({"version": "2", "plugins": {}}), encoding="utf-8"
+        json.dumps({"version": "2", "plugins": {}}), encoding="utf-8", newline=""
     )
 
     bodies = {
@@ -169,7 +175,14 @@ def _store(tmp_path: Path):
         "archive.md": "ARCHIVE-BODY-669",
     }
     for name, body in bodies.items():
-        (remember / name).write_text(body + "\n", encoding="utf-8")
+        # newline="" everywhere in this fixture: write_text's default
+        # universal-newline translation turns every \n into \r\n on
+        # Windows, which this repo has already named and fixed once for
+        # exactly this reason (tests/test_install_agy_hooks_563.py, #577;
+        # tests/_glob_backslash_517.py) -- a fixture that silently differs
+        # by platform is not "a representative, already-healthy project" on
+        # all three.
+        (remember / name).write_text(body + "\n", encoding="utf-8", newline="")
 
     # A genuine previous session, saved: a real transcript on disk, and
     # last-save.json recording it with an INTEGER (a line count), which is
@@ -178,10 +191,11 @@ def _store(tmp_path: Path):
     prev_transcript = session_dir / f"{PREV_SESSION}.jsonl"
     prev_transcript.write_text(
         '{"type":"assistant","message":{"content":"x"}}\n' * PREV_SESSION_LINES,
-        encoding="utf-8",
+        encoding="utf-8", newline="",
     )
     (remember / "tmp" / "last-save.json").write_text(
-        json.dumps({"sessions": {PREV_SESSION: PREV_SESSION_LINES}}), encoding="utf-8"
+        json.dumps({"sessions": {PREV_SESSION: PREV_SESSION_LINES}}),
+        encoding="utf-8", newline="",
     )
 
     return home, project, remember
@@ -258,6 +272,24 @@ def _benchmark(tmp_path: Path, record_property, *, jq_present: bool,
     env = _env(home, project, remember, base_path)
     log = tmp_path / "spawn.log"
     shims = make_shim_dir(tmp_path, log)
+    if not jq_present:
+        # make_shim_dir (tests/spawn_counting.py) shims every name in its own
+        # COUNTED list -- which includes "jq" -- by resolving it off the
+        # REAL ambient PATH of the process running pytest, not off
+        # `base_path` above. On any machine/runner that has a real jq (every
+        # GitHub-hosted runner image does), that silently puts a working jq
+        # shim back in front of the jq-stripped PATH in _run_once below,
+        # defeating _path_without_jq entirely and measuring the jq-PRESENT
+        # code path under the jq-absent label (caught by both self-review
+        # spawns; confirmed empirically: with detect-tools.sh's
+        # _jq_fallback deliberately broken, this test still passed before
+        # this fix). Removing the shim -- leaving no `jq` anywhere reachable
+        # from the run_env PATH built in `_run_once` -- is what actually
+        # forces detect-tools.sh's `command -v jq` to fail and fall through
+        # to `_jq_fallback`.
+        jq_shim = shims / "jq"
+        if jq_shim.exists():
+            jq_shim.unlink()
 
     cold, cold_time, cold_spawns = _run_once(env, shims, log)
     assert cold.returncode == 0, (
@@ -267,6 +299,27 @@ def _benchmark(tmp_path: Path, record_property, *, jq_present: bool,
     assert warm.returncode == 0, (
         f"[{label}] warm run failed: {warm.stderr[-2000:]!r}"
     )
+
+    # Positive/negative control, paired (CLAUDE.md: a "must not fire"
+    # assertion needs a "must fire" twin, or a broken harness that shims
+    # nothing passes the negative half for free). jq_present MUST see real
+    # `jq` invocations -- proof the harness can detect one at all; jq_absent
+    # MUST NOT, proving the scenario above actually forced the fallback.
+    all_spawns = cold_spawns + warm_spawns
+    jq_calls = [s for s in all_spawns if s.startswith("jq ")]
+    if jq_present:
+        assert jq_calls, (
+            f"[{label}] expected real jq invocations (this is the jq-present "
+            "scenario) and saw none -- the harness cannot distinguish "
+            f"jq-present from jq-absent if this fires. Spawns: {all_spawns}"
+        )
+    else:
+        assert not jq_calls, (
+            f"[{label}] expected NO real jq invocations (jq was removed from "
+            "every shim and from PATH) but saw real jq calls -- the "
+            f"jq-absent scenario is not actually exercising _jq_fallback: "
+            f"{jq_calls}"
+        )
 
     print(
         f"#669 benchmark [{label}]: "
