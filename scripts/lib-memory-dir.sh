@@ -358,7 +358,18 @@ export REMEMBER_CONFIG
 
 # Register cleanup of the tmp file when the outermost script exits.
 # Use a subshell-safe append to avoid overwriting any existing trap.
-_existing_trap=$(trap -p EXIT 2>/dev/null | sed "s/trap -- '//;s/' EXIT//")
+# #679 (part of #660): `trap -p EXIT | sed "s/trap -- '//;s/' EXIT//"` forked
+# a `sed` to strip four characters at a known, fixed offset -- `trap -p`
+# itself is a builtin (no fork either way), so parameter expansion removes
+# the ONLY fork this line ever paid, with no behaviour change: stripping a
+# prefix/suffix a string does not have leaves it unchanged, matching sed on
+# empty input the same way (no existing trap -> both leave _existing_trap
+# empty). Sanctioned in tests/test_case_divergence_298.py's
+# _SANCTIONED_DIVERGENCE, same mechanism #429/#662/#665 already used for
+# this exact file.
+_t=$(trap -p EXIT 2>/dev/null)
+_existing_trap="${_t#trap -- \'}"
+_existing_trap="${_existing_trap%\' EXIT}"
 if [ -n "$_existing_trap" ]; then
     # shellcheck disable=SC2064
     trap "${_existing_trap}; rm -f '${_merged_cfg}'" EXIT
@@ -366,7 +377,7 @@ else
     # shellcheck disable=SC2064
     trap "rm -f '${_merged_cfg}'" EXIT
 fi
-unset _existing_trap
+unset _existing_trap _t
 
 # Clean up local variables to avoid polluting the caller's namespace.
 unset _bundled_cfg _user_cfg _project_cfg _cfg_sources _data_dir_raw _val _merged_cfg _cfg_candidate

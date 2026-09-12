@@ -889,7 +889,20 @@ CAPTURE_SEEN_DIR="$REMEMBER_DIR/tmp/capture-alive.d"
 CAPTURE_REPORTED="$REMEMBER_DIR/tmp/capture-gap-reported"
 CAPTURE_SEEN_KEEP=200
 
-SEEN_ID=$(cat "$CAPTURE_ALIVE" 2>/dev/null) || true
+# $(<"$f") -- bash's own special-cased "no fork" command substitution,
+# not $(cat "$f" 2>/dev/null) (#679, part of #660): `$(<file)` is ONLY that
+# fast path when the substitution's body is EXACTLY `<file` and nothing
+# else -- `$(2>/dev/null <file)` looks similar but is an ordinary subshell
+# running NO command with two redirections, so it always prints nothing at
+# all, file-present or not (a real, reproduced bug in an earlier version
+# of this fix: it read as correct on the missing-file path and silently
+# broke the present-file one, caught by the full suite rather than by this
+# file's own targeted test, which never exercised a file that actually has
+# content). So: guard the missing/unreadable case with `[ -f ]` first,
+# exactly as this codebase already does everywhere else on this pattern,
+# and use the untouched `$(<file)` form only once existence is known.
+SEEN_ID=""
+[ -f "$CAPTURE_ALIVE" ] && SEEN_ID=$(<"$CAPTURE_ALIVE")
 
 # Args: $1 — session id. Exit 0 if anything can vouch for it having been
 # captured. Any one source suffices; they fail independently.
@@ -976,7 +989,10 @@ else
     # tuned out. (This dedupe was structurally unable to help while the id was
     # wrong: a wrong id changes on every startup, so every restart minted a
     # fresh unreported id and warned again.)
-    REPORTED_ID=$(cat "$CAPTURE_REPORTED" 2>/dev/null) || true
+    # $(<"$f") -- see SEEN_ID's own comment above (#679) for why this is
+    # NOT `$(2>/dev/null <"$f")`.
+    REPORTED_ID=""
+    [ -f "$CAPTURE_REPORTED" ] && REPORTED_ID=$(<"$CAPTURE_REPORTED")
 
     if [ -n "$PREV_ID" ] && [ "$REPORTED_ID" != "$PREV_ID" ] \
        && ! capture_was_seen "$PREV_ID" \
@@ -1695,7 +1711,16 @@ if [ -d "$SESSIONS_DIR" ] && [ -d "$REMEMBER_DIR/tmp" ]; then
 fi
 
 # ── History hint ───────────────────────────────────────────────────────────
-cat "$PLUGIN_ROOT/prompts/session-history-hint.txt" 2>/dev/null
+# printf + $(<file), not `cat` (#679, part of #660): forks nothing, and is
+# byte-identical to the old `cat` ONLY because the shipped file's own
+# trailing bytes are exactly one newline -- proven, not assumed, in
+# tests/test_session_start_spawn_reduction_679.py
+# (test_session_history_hint_read_is_byte_identical_679). Guarded on the
+# file existing so a missing/unreadable file stays silent, matching cat's
+# own `2>/dev/null`.
+if [ -f "$PLUGIN_ROOT/prompts/session-history-hint.txt" ]; then
+    printf '%s\n' "$(<"$PLUGIN_ROOT/prompts/session-history-hint.txt")"
+fi
 echo ""
 
 # ── Inject memory into context ────────────────────────────────────────────
@@ -1800,7 +1825,10 @@ fi
 dispatch "after_session_start"
 
 # The payload file does not outlive the dispatches it was published for.
-[ -n "$_hook_stdin_file" ] && rm -f "$_hook_stdin_file" 2>/dev/null
+# Removed below, batched with $_REMEMBER_CTX_FILE (#679, part of #660):
+# nothing between here and there reads it, so deferring its removal by a
+# few lines costs nothing and turns two `rm -f` execs into one on the
+# common (CTX_OK) path.
 
 # ── Emit: promo via systemMessage, or the old plain-text shape unchanged ───
 if [ -n "$_REMEMBER_CTX_OK" ]; then
@@ -1842,7 +1870,15 @@ if [ -n "$_REMEMBER_CTX_OK" ]; then
     else
         cat "$_REMEMBER_CTX_FILE"
     fi
-    rm -f "$_REMEMBER_CTX_FILE" 2>/dev/null
+    # Batched with $_hook_stdin_file (#679, part of #660) -- one `rm -f`
+    # instead of two, safe because nothing after the earlier dispatch call
+    # still needs the stdin payload file.
+    rm -f "$_REMEMBER_CTX_FILE" "$_hook_stdin_file" 2>/dev/null
+else
+    # The CTX_OK branch above is the only place $_REMEMBER_CTX_FILE gets
+    # removed; on this branch the buffer redirect never engaged, so it was
+    # never created, but $_hook_stdin_file still needs its own remove.
+    rm -f "$_hook_stdin_file" 2>/dev/null
 fi
 # _REMEMBER_CTX_OK empty: the buffer redirect never engaged, so every line
 # above already went straight to the real terminal as it always did -- there
