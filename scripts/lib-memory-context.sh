@@ -98,6 +98,32 @@ _remember_memory_paths() {
 # _remember_memory_paths to have already run, and `config()` (log.sh) to be
 # available. Reads SESSION_START_SOURCE from the environment; unset/empty is
 # treated as the non-compact (full) render, same as the original code.
+# bash 3.2 (the documented floor -- lib-clock.sh's own header, lib-lock.sh's
+# _lock_timing_key comment) has no associative arrays, so the per-file byte
+# counts `_remember_render_memory_section` batches below live in a variable
+# named after the sanitized path instead, exactly like lib-lock.sh's own
+# `_lock_timing_key` does for the same reason. `declare -A` parses as a
+# syntax error... no, it does not -- it is ACCEPTED and silently creates a
+# plain, non-associative array on bash 3.2 (`declare: -A: invalid option` is
+# non-fatal), so the very next `${arr[$key]}` lookup throws a fatal "syntax
+# error: operand expected" instead, aborting the whole render with nothing
+# injected and nothing visible beyond stderr (#662/#664 self-review finding).
+# `printf -v` + indirect (`${!name}`) expansion is plain parameter expansion,
+# no subshell, and has worked since bash 2.x -- confirmed directly against
+# the real `/bin/bash` 3.2.57 this repo ships behind on stock macOS.
+_remember_wc_size_set() {
+    local _remember_wc_size_key="_remember_wcsz_${1//[!A-Za-z0-9]/_}"
+    printf -v "$_remember_wc_size_key" '%s' "$2"
+}
+# Writes into VARNAME rather than returning via `$(...)` -- a command
+# substitution forks a subshell even when nothing inside it forks a real
+# process, and this is called once per memory file on the render's hot path.
+_remember_wc_size_get_into() {
+    local _remember_wc_size_outvar="$1"
+    local _remember_wc_size_key="_remember_wcsz_${2//[!A-Za-z0-9]/_}"
+    printf -v "$_remember_wc_size_outvar" '%s' "${!_remember_wc_size_key:-0}"
+}
+
 _remember_render_memory_section() {
     local MFILE HAS_MEMORY="" ROTATED_SLICES _remember_rotated_glob_dir
     local _remember_rotated_arr=()
@@ -142,7 +168,6 @@ _remember_render_memory_section() {
     # gone too: `read` already splits on (and discards) leading/trailing
     # whitespace, which is all `wc -c`'s own leading-space padding is.
     local _remember_present=() _remember_wc_bytes _remember_wc_path
-    declare -A _remember_byte_sizes=()
     for MFILE in "${MEMORY_FILES[@]}"; do
         if [ -f "$MFILE" ] && [ -s "$MFILE" ]; then
             if [ "${SESSION_START_SOURCE:-}" = "compact" ] && [ "$MFILE" != "$IDENTITY_FILE" ]; then
@@ -162,11 +187,11 @@ _remember_render_memory_section() {
         while read -r _remember_wc_bytes _remember_wc_path; do
             case "$_remember_wc_bytes" in (''|*[!0-9]*) continue ;; esac
             [ "$_remember_wc_path" = "total" ] && continue
-            _remember_byte_sizes["$_remember_wc_path"]="$_remember_wc_bytes"
+            _remember_wc_size_set "$_remember_wc_path" "$_remember_wc_bytes"
         done < <(wc -c "${_remember_present[@]}")
     fi
     for MFILE in "${_remember_present[@]}"; do
-            MFILE_BYTES="${_remember_byte_sizes[$MFILE]:-0}"
+            _remember_wc_size_get_into MFILE_BYTES "$MFILE"
             case "$MFILE_BYTES" in (''|*[!0-9]*) MFILE_BYTES=0 ;; esac
             if [ "$MEMORY_INJECT_MAX_BYTES" -gt 0 ] && [ "$MFILE_BYTES" -gt "$MEMORY_INJECT_MAX_BYTES" ]; then
                 OVERSIZED_MEMORY="${OVERSIZED_MEMORY}${MFILE} (${MFILE_BYTES} bytes)
@@ -193,17 +218,20 @@ _remember_render_memory_section() {
         done
         # Same one-batched-`wc` shape as the main loop above (#664): compact
         # mode is the one branch that did NOT already have these files'
-        # sizes cached in _remember_byte_sizes (the main loop above skips
-        # every non-identity file once SESSION_START_SOURCE=compact).
+        # sizes cached yet (the main loop above skips every non-identity
+        # file once SESSION_START_SOURCE=compact). Same storage (indirect
+        # variables, not an associative array -- see the comment above
+        # _remember_wc_size_set) as the main loop's own batch.
         if [ "${#_remember_deferred[@]}" -gt 0 ]; then
             while read -r _remember_wc_bytes _remember_wc_path; do
                 case "$_remember_wc_bytes" in (''|*[!0-9]*) continue ;; esac
                 [ "$_remember_wc_path" = "total" ] && continue
-                _remember_byte_sizes["$_remember_wc_path"]="$_remember_wc_bytes"
+                _remember_wc_size_set "$_remember_wc_path" "$_remember_wc_bytes"
             done < <(wc -c "${_remember_deferred[@]}")
         fi
         DEFERRED_MEMORY=$(for MFILE in "${_remember_deferred[@]}"; do
-            printf '%s (%s bytes)\n' "$MFILE" "${_remember_byte_sizes[$MFILE]:-0}"
+            _remember_wc_size_get_into MFILE_BYTES "$MFILE"
+            printf '%s (%s bytes)\n' "$MFILE" "$MFILE_BYTES"
         done)
         if [ -n "$DEFERRED_MEMORY" ]; then
             echo "--- not re-injected at compact (delivered at session start); read or grep on request ---"
@@ -238,14 +266,15 @@ _remember_render_memory_section() {
             [ -f "$_remember_newest_line" ] && _remember_newest_arr+=("$_remember_newest_line")
         done <<< "$ROTATED_NEWEST"
         if [ "${#_remember_newest_arr[@]}" -gt 0 ]; then
-            declare -A _remember_newest_sizes=()
+            local _remember_newest_bytes
             while read -r _remember_wc_bytes _remember_wc_path; do
                 case "$_remember_wc_bytes" in (''|*[!0-9]*) continue ;; esac
                 [ "$_remember_wc_path" = "total" ] && continue
-                _remember_newest_sizes["$_remember_wc_path"]="$_remember_wc_bytes"
+                _remember_wc_size_set "$_remember_wc_path" "$_remember_wc_bytes"
             done < <(wc -c "${_remember_newest_arr[@]}")
             for _remember_newest_line in "${_remember_newest_arr[@]}"; do
-                printf '%s (%s bytes)\n' "$_remember_newest_line" "${_remember_newest_sizes[$_remember_newest_line]:-0}"
+                _remember_wc_size_get_into _remember_newest_bytes "$_remember_newest_line"
+                printf '%s (%s bytes)\n' "$_remember_newest_line" "$_remember_newest_bytes"
             done
         fi
         if [ "$ROTATED_COUNT" -gt "$ROTATED_LIST_MAX" ]; then

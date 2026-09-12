@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -365,4 +366,80 @@ def test_capture_seen_prune_is_gated_on_the_threshold(tmp_path):
     assert stale_prune_spawns == [], (
         f"no capture-alive.d directory exists at all, so the prune must "
         f"never fork `ls` against it: {stale_prune_spawns}"
+    )
+
+
+def test_memory_render_has_no_bash_3_2_associative_arrays(tmp_path):
+    """Self-review finding (#662/#664): `declare -A` is silently ACCEPTED by
+    bash 3.2 (it just creates a plain indexed array instead of erroring),
+    so the bug does not show up until the very next `${arr[$key]}` lookup,
+    which throws a fatal "syntax error: operand expected" there instead --
+    aborting the MEMORY render with nothing injected and nothing visible
+    beyond stderr, on the one platform (stock macOS `/bin/bash`) this
+    repo's own lib-clock.sh and lib-lock.sh document as a supported floor
+    specifically BECAUSE it lacks associative arrays.
+
+    Two checks: a static grep that fires on *any* shell script (catches a
+    regression anywhere, on any host, with no real bash 3.2 needed), and a
+    functional run against the real `/bin/bash` on this machine when it
+    actually identifies as bash < 4 -- the same repro that caught this bug.
+    """
+    import subprocess as _sp
+
+    # Two-stage filter, not a single "exclude comments" regex: the first
+    # attempt here (`^\s*[^#\s].*declare -A`) silently failed to fire on a
+    # line where `declare -A` is the FIRST thing on it, because the
+    # character class consumes the 'd' of "declare", leaving no second
+    # "declare -A" substring behind for `.*declare -A` to find afterwards
+    # -- caught only by deliberately reintroducing the bug during self-
+    # review and finding this check stayed green. `grep -n` first, then a
+    # plain Python check that the content after "path:lineno:" does not
+    # start with `#` (this very comment block names the flag in prose, so
+    # that line must stay excluded).
+    hits = _sp.run(
+        ["grep", "-rn", "declare -A", str(REPO_ROOT / "scripts")],
+        capture_output=True, text=True, check=False,
+    )
+    real_hits = [
+        line for line in hits.stdout.splitlines()
+        if not re.match(r"^[^:]*:[0-9]+:\s*#", line)
+    ]
+    assert not real_hits, (
+        "declare -A reintroduced -- bash 3.2 accepts it silently and only "
+        "fails on the next lookup, far from this line:\n" + "\n".join(real_hits)
+    )
+
+    version_check = subprocess.run(
+        ["/bin/bash", "-c", "echo ${BASH_VERSINFO[0]}"],
+        capture_output=True, text=True, check=False,
+    )
+    if version_check.returncode != 0 or not version_check.stdout.strip().isdigit():
+        pytest.skip("no usable /bin/bash on this host to check the real floor")
+    if int(version_check.stdout.strip()) >= 4:
+        pytest.skip("this host's /bin/bash is not the bash-3.2-floor platform")
+
+    remember = tmp_path / "remember"
+    remember.mkdir()
+    (remember / "identity.md").write_text("memory content\n", encoding="utf-8")
+    script = f"""
+    config() {{ printf '%s' "$2"; }}
+    _remember_forward_slash() {{ printf '%s' "$1"; }}
+    source "{REPO_ROOT}/scripts/lib-clock.sh"
+    source "{REPO_ROOT}/scripts/lib-memory-context.sh"
+    _remember_memory_paths
+    _remember_render_memory_section
+    """
+    result = subprocess.run(
+        ["/bin/bash", "-c", script],
+        env={**os.environ, "REMEMBER_DIR": str(remember),
+             "PROJECT_DIR": str(tmp_path / "project"),
+             "PLUGIN_ROOT": str(REPO_ROOT), "TODAY": "2026-09-12"},
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert result.returncode == 0, (
+        f"real bash 3.2 floor: render aborted -- stderr={result.stderr!r}"
+    )
+    assert "memory content" in result.stdout, (
+        f"positive control failed: file content missing from render -- "
+        f"{result.stdout!r}"
     )
