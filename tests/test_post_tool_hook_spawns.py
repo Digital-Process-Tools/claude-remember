@@ -131,8 +131,9 @@ def _env(tmp_path: Path, home: Path, project: Path, extra: dict | None = None) -
         # not a test-only seam, so what runs here is the shipped cold path.
         "REMEMBER_ENV_CACHE": "0",
         # Same reasoning, same #303 class, one mechanism later (#668): log.sh's
-        # flattened-config cache (config.rcfg) is ALSO mtime-keyed against
-        # config.json, and this fixture creates config.json once, then runs
+        # flattened-config cache (moved out of the project tree by #682; no
+        # longer named config.rcfg) is ALSO mtime-keyed against config.json,
+        # and this fixture creates config.json once, then runs
         # the hook twice -- whether the SECOND run's cache read ties or hits
         # depends on whether the first run's cache write landed in the same
         # whole second as config.json's own creation, which this test must

@@ -9,12 +9,22 @@ already a short-lived scratch file deleted at process exit
 (lib-memory-dir.sh's own comment); a persistent cache of it would extend
 that secret's on-disk lifetime. Both flatteners already drop the whole
 "haiku" key before emitting a row, so the persisted cache never sees it.
+
+#682: the cache used to live at `$REMEMBER_DIR/tmp/config.rcfg` -- inside
+the PROJECT tree, a directory users commit and share -- and was loaded with
+a bare `source`. A repository could ship that file and have every hook that
+sources log.sh execute its contents as shell. The tests below cover both
+halves of the fix: the cache moved to the system temp dir (never inside a
+clonable project directory), keyed on `REMEMBER_DIR` so two projects never
+share a file; and the loader validates every line's shape before assigning
+any of it, rather than trusting `source` with an unread file.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -24,6 +34,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(__file__))
 from _bash_runner import resolve_bash
+from config_cache import CACHE_GLOB, cache_files
 from spawn_counting import make_shim_dir, spawns
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -67,9 +78,16 @@ config ".cooldowns.save_seconds" "default"
 """
 
 
-def _run_with_shim(tmp_path: Path, home: Path, project: Path):
+def _run_with_shim(tmp_path: Path, home: Path, project: Path, *, sys_tmp: Path | None = None):
     log = tmp_path / "spawn.log"
     shims = make_shim_dir(tmp_path, log)
+    # A dedicated, per-test system tmp dir (#682): the cache now lives under
+    # `${TMPDIR:-/tmp}`, so a test that left TMPDIR at its real system value
+    # would read and write a real, shared, cross-test location -- isolate it
+    # the same way tests/test_detect_tools_cache_668.py already does for the
+    # sibling tools cache.
+    sys_tmp = sys_tmp if sys_tmp is not None else (tmp_path / "systmp")
+    sys_tmp.mkdir(parents=True, exist_ok=True)
     env = {
         **os.environ,
         "HOME": str(home),
@@ -77,12 +95,13 @@ def _run_with_shim(tmp_path: Path, home: Path, project: Path):
         "CLAUDE_PLUGIN_ROOT": str(REPO_ROOT),
         "REMEMBER_HOOK_CWD": str(project),
         "SPAWN_LOG": str(log),
+        "TMPDIR": str(sys_tmp),
         "PATH": f"{shims}{os.pathsep}{os.environ['PATH']}",
     }
     result = subprocess.run(
-        [BASH, "-c", HARNESS], env=env, capture_output=True, text=True, timeout=30, check=False,
+        [BASH, "-c", HARNESS], env=env, capture_output=True, text=True, encoding="utf-8", timeout=30, check=False,
     )
-    return spawns(log), result
+    return spawns(log), result, sys_tmp
 
 
 def test_first_run_is_a_miss_and_forks_jq_to_flatten(tmp_path):
@@ -93,14 +112,18 @@ def test_first_run_is_a_miss_and_forks_jq_to_flatten(tmp_path):
     (remember / "config.json").write_text(
         json.dumps({"cooldowns": {"save_seconds": 42}}), encoding="utf-8"
     )
-    lines, result = _run_with_shim(tmp_path, home, project)
+    lines, result, sys_tmp = _run_with_shim(tmp_path, home, project)
     assert result.returncode == 0, (result.stdout, result.stderr)
     jq_spawns = [l for l in lines if l.startswith("jq ")]
     assert jq_spawns, (
         "positive control failed: no jq fork observed on the first (cold) "
         f"run -- got spawns: {lines}"
     )
-    assert (remember / "tmp" / "config.rcfg").is_file()
+    assert cache_files(sys_tmp), (
+        f"no flattened-config cache ({CACHE_GLOB}) was published under {sys_tmp}"
+    )
+    # #682: the cache must never land back inside the project tree.
+    assert not (remember / "tmp" / "config.rcfg").exists()
 
 
 def test_second_run_with_unchanged_config_skips_the_flatten_fork(tmp_path):
@@ -110,16 +133,17 @@ def test_second_run_with_unchanged_config_skips_the_flatten_fork(tmp_path):
     cfg = remember / "config.json"
     cfg.write_text(json.dumps({"cooldowns": {"save_seconds": 42}}), encoding="utf-8")
 
-    _lines1, result1 = _run_with_shim(tmp_path, home, project)
+    _lines1, result1, sys_tmp = _run_with_shim(tmp_path, home, project)
     assert result1.returncode == 0, (result1.stdout, result1.stderr)
-    cache = remember / "tmp" / "config.rcfg"
-    assert cache.is_file()
+    caches = cache_files(sys_tmp)
+    assert caches, f"no flattened-config cache ({CACHE_GLOB}) was published under {sys_tmp}"
+    cache = caches[0]
     # Force the cache strictly newer than the config layer, independent of
     # which second the two writes above landed in.
     now = time.time()
     os.utime(cache, (now + 5, now + 5))
 
-    lines2, result2 = _run_with_shim(tmp_path, home, project)
+    lines2, result2, _sys_tmp2 = _run_with_shim(tmp_path, home, project, sys_tmp=sys_tmp)
     assert result2.returncode == 0, (result2.stdout, result2.stderr)
     assert result2.stdout == result1.stdout
     # `jq -s reduce ...` is lib-memory-dir.sh's own three-layer MERGE, which
@@ -142,10 +166,12 @@ def test_editing_the_config_invalidates_the_flatten_cache(tmp_path):
     cfg = remember / "config.json"
     cfg.write_text(json.dumps({"cooldowns": {"save_seconds": 42}}), encoding="utf-8")
 
-    _lines1, result1 = _run_with_shim(tmp_path, home, project)
+    _lines1, result1, sys_tmp = _run_with_shim(tmp_path, home, project)
     assert result1.returncode == 0, (result1.stdout, result1.stderr)
     assert "42" in result1.stdout
-    cache = remember / "tmp" / "config.rcfg"
+    caches = cache_files(sys_tmp)
+    assert caches
+    cache = caches[0]
     now = time.time()
     os.utime(cache, (now + 5, now + 5))
 
@@ -153,7 +179,7 @@ def test_editing_the_config_invalidates_the_flatten_cache(tmp_path):
     cfg.write_text(json.dumps({"cooldowns": {"save_seconds": 99}}), encoding="utf-8")
     os.utime(cfg, (now + 10, now + 10))
 
-    _lines2, result2 = _run_with_shim(tmp_path, home, project)
+    _lines2, result2, _sys_tmp2 = _run_with_shim(tmp_path, home, project, sys_tmp=sys_tmp)
     assert result2.returncode == 0, (result2.stdout, result2.stderr)
     assert "99" in result2.stdout, (
         "stale cache must be impossible to serve silently -- expected the "
@@ -165,11 +191,11 @@ def test_haiku_key_never_reaches_the_persisted_cache(tmp_path):
     """Security property the cache design depends on, stated in both this
     file's own docstring and log.sh's own comment on the cache: a live
     haiku.oauth_token in config.json must never be written into the
-    persisted config.rcfg cache, which survives long past the single
-    process the raw merged config.json scratch file is deleted at exit of.
-    Both flatteners drop the whole "haiku" key before a row is ever emitted
-    -- this pins that guarantee against the PERSISTED file specifically,
-    not just against config()'s own in-process read."""
+    persisted config cache, which survives long past the single process the
+    raw merged config.json scratch file is deleted at exit of. Both
+    flatteners drop the whole "haiku" key before a row is ever emitted --
+    this pins that guarantee against the PERSISTED file specifically, not
+    just against config()'s own in-process read."""
     home, project, remember = _project(tmp_path)
     cfg = remember / "config.json"
     cfg.write_text(
@@ -182,12 +208,12 @@ def test_haiku_key_never_reaches_the_persisted_cache(tmp_path):
         encoding="utf-8",
     )
 
-    _lines, result = _run_with_shim(tmp_path, home, project)
+    _lines, result, sys_tmp = _run_with_shim(tmp_path, home, project)
     assert result.returncode == 0, (result.stdout, result.stderr)
 
-    cache = remember / "tmp" / "config.rcfg"
-    assert cache.is_file()
-    cache_text = cache.read_text(encoding="utf-8")
+    caches = cache_files(sys_tmp)
+    assert caches
+    cache_text = caches[0].read_text(encoding="utf-8")
     assert "oauth_token" not in cache_text, (
         "the haiku.oauth_token key leaked into the persisted config cache: "
         f"{cache_text!r}"
@@ -200,16 +226,18 @@ def test_haiku_key_never_reaches_the_persisted_cache(tmp_path):
 
 def test_a_symlinked_config_cache_is_refused_not_followed(tmp_path):
     """Positive control for the -L/-O checks themselves: a planted symlink at
-    config.rcfg must never be sourced -- the loader must fall back to a live
-    reflatten rather than executing an attacker-controlled file as shell."""
+    the cache's real (new, #682) location must never be sourced -- the
+    loader must fall back to a live reflatten rather than executing an
+    attacker-controlled file as shell."""
     home, project, remember = _project(tmp_path)
     cfg = remember / "config.json"
     cfg.write_text(json.dumps({"cooldowns": {"save_seconds": 42}}), encoding="utf-8")
 
-    _lines, result = _run_with_shim(tmp_path, home, project)
+    _lines, result, sys_tmp = _run_with_shim(tmp_path, home, project)
     assert result.returncode == 0, (result.stdout, result.stderr)
-    cache = remember / "tmp" / "config.rcfg"
-    assert cache.is_file()
+    caches = cache_files(sys_tmp)
+    assert caches
+    cache = caches[0]
 
     victim = tmp_path / "attacker-controlled.rcfg"
     victim.write_text("touch /tmp/pwned-668-poc\n_RCFG_cooldowns_save_seconds=666\n",
@@ -217,7 +245,7 @@ def test_a_symlinked_config_cache_is_refused_not_followed(tmp_path):
     cache.unlink()
     os.symlink(victim, cache)
 
-    _lines2, result2 = _run_with_shim(tmp_path, home, project)
+    _lines2, result2, _sys_tmp2 = _run_with_shim(tmp_path, home, project, sys_tmp=sys_tmp)
     assert result2.returncode == 0, (result2.stdout, result2.stderr)
     assert "666" not in result2.stdout, (
         "a symlinked config cache was sourced instead of refused -- "
@@ -227,3 +255,501 @@ def test_a_symlinked_config_cache_is_refused_not_followed(tmp_path):
         "the symlinked cache's shell content actually executed"
     )
     assert "42" in result2.stdout
+
+
+def test_planted_cache_in_old_project_path_is_never_executed(tmp_path):
+    """#682's core reproduction. Before the fix, `_remember_cfg_flatten_
+    cache_load` did `source "$REMEMBER_DIR/tmp/config.rcfg"` -- a path
+    INSIDE the project tree, which a cloned repository can ship. `-O`
+    (owned by the current user) passes for a file the user's own `git
+    clone` wrote; `-L` passes for a regular file; `-nt` against an absent
+    `.remember/config.json` (the common case with no project-level config)
+    reads as "fresh". Planting a file there and running it through the
+    real, unmodified detect-tools.sh -> bootstrap-dirs.sh -> log.sh chain
+    must never execute its contents, no matter where the cache used to live.
+    """
+    home, project, remember = _project(tmp_path)
+    cfg = remember / "config.json"
+    cfg.write_text(json.dumps({"cooldowns": {"save_seconds": 42}}), encoding="utf-8")
+
+    marker = tmp_path / "pwned-682-marker"
+    planted = remember / "tmp" / "config.rcfg"
+    planted.write_text(
+        f'touch "{marker.as_posix()}"\n_RCFG_cooldowns_save_seconds=42\n',
+        encoding="utf-8",
+    )
+
+    # Positive control FIRST, and independent of the guard under test: the
+    # marker-based assertion below is only meaningful if sourcing this exact
+    # file, with nothing in the way, actually creates the marker. If it
+    # doesn't, the negative assertion after it would pass for free on a
+    # broken harness.
+    assert not marker.exists()
+    subprocess.run(
+        [BASH, "-c", f'source "{planted.as_posix()}"'],
+        capture_output=True, text=True, encoding="utf-8", timeout=10, check=False,
+    )
+    assert marker.exists(), (
+        "positive control failed: sourcing the planted file directly did "
+        "not create the marker -- the harness cannot see execution"
+    )
+    marker.unlink()
+
+    # The real case: the shipped chain must never read, let alone execute,
+    # a config.rcfg that lives inside the project tree.
+    lines, result, _sys_tmp = _run_with_shim(tmp_path, home, project)
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert not marker.exists(), (
+        "the repo-shipped .remember/tmp/config.rcfg was executed as shell "
+        f"by the real hook chain -- spawns: {lines}"
+    )
+    assert "42" in result.stdout, (
+        "config resolution broke instead of just ignoring the planted file: "
+        f"{result.stdout!r}"
+    )
+
+
+def test_malformed_line_in_new_cache_location_is_rejected_not_executed(tmp_path):
+    """The second #682 half, name-check side: even at the new (system-tmp-
+    dir) location, the loader must not trust `source`. A line whose NAME
+    does not even carry the `_RCFG_` prefix the publisher always writes --
+    here, `SOME_VAR=...` -- must be rejected on that alone, remove the
+    poisoned file, and still resolve the config correctly by falling
+    through to a real flatten. This case alone does not prove the VALUE-
+    shape validator is doing any work (a wrong-prefix line is rejected
+    before `_remember_cfg_flatten_cache_valid_value` is ever reached) --
+    see test_malformed_value_with_a_correct_name_prefix_is_rejected_not_executed
+    just below for that."""
+    home, project, remember = _project(tmp_path)
+    cfg = remember / "config.json"
+    cfg.write_text(json.dumps({"cooldowns": {"save_seconds": 42}}), encoding="utf-8")
+
+    _lines1, result1, sys_tmp = _run_with_shim(tmp_path, home, project)
+    assert result1.returncode == 0, (result1.stdout, result1.stderr)
+    caches = cache_files(sys_tmp)
+    assert caches, f"no flattened-config cache ({CACHE_GLOB}) was published under {sys_tmp}"
+    cache = caches[0]
+
+    marker = tmp_path / "pwned-682-malformed-marker"
+    good = cache.read_text(encoding="utf-8")
+    corrupted = good + f'SOME_VAR=x; touch "{marker.as_posix()}"\n'
+    cache.write_text(corrupted, encoding="utf-8")
+    now = time.time()
+    os.utime(cache, (now + 5, now + 5))
+
+    lines2, result2, _sys_tmp2 = _run_with_shim(tmp_path, home, project, sys_tmp=sys_tmp)
+    assert result2.returncode == 0, (result2.stdout, result2.stderr)
+    assert not marker.exists(), (
+        f"a malformed cache line was evaluated as shell: {lines2}"
+    )
+    assert "42" in result2.stdout, (
+        "the malformed cache was not cleanly rejected -- config resolution "
+        f"did not fall through to a correct real flatten: {result2.stdout!r}"
+    )
+    # The loader removes the poisoned file before falling through, and
+    # _config_load's own fallback path republishes a fresh cache at the
+    # SAME name once it has re-flattened for real -- so "the file is gone"
+    # is the wrong check; "the poison is gone" is the one that matters.
+    if cache.exists():
+        assert marker.as_posix() not in cache.read_text(encoding="utf-8"), (
+            "the rejected cache was republished still carrying the "
+            "malformed line -- the poison survived the rejection"
+        )
+    else:
+        pass  # also acceptable: rejection removed it and nothing republished
+
+
+def test_malformed_value_with_a_correct_name_prefix_is_rejected_not_executed(tmp_path):
+    """The second #682 half, VALUE-shape side. The sibling test just above
+    plants a line whose NAME already fails the `_RCFG_` prefix check --
+    which proves nothing about `_remember_cfg_flatten_cache_valid_value`,
+    the function that actually decides whether a value shaped like `%q`
+    output is safe to `eval`. This plants a line with a fully correct,
+    real-looking name (`_RCFG_cooldowns_save_seconds=`) carrying a value a
+    real `%q` conversion could never produce -- unescaped command
+    substitution -- so only the VALUE check stands between it and
+    execution."""
+    home, project, remember = _project(tmp_path)
+    cfg = remember / "config.json"
+    cfg.write_text(json.dumps({"cooldowns": {"save_seconds": 42}}), encoding="utf-8")
+
+    _lines1, result1, sys_tmp = _run_with_shim(tmp_path, home, project)
+    assert result1.returncode == 0, (result1.stdout, result1.stderr)
+    caches = cache_files(sys_tmp)
+    assert caches, f"no flattened-config cache ({CACHE_GLOB}) was published under {sys_tmp}"
+    cache = caches[0]
+
+    marker = tmp_path / "pwned-682-value-marker"
+    good = cache.read_text(encoding="utf-8")
+    corrupted = good + f'_RCFG_cooldowns_save_seconds=$(touch "{marker.as_posix()}")\n'
+    cache.write_text(corrupted, encoding="utf-8")
+    now = time.time()
+    os.utime(cache, (now + 5, now + 5))
+
+    # Positive control: `eval`ing this exact line, with nothing in the way,
+    # must actually create the marker -- otherwise the negative assertion
+    # below would pass even if the value check were deleted outright.
+    assert not marker.exists()
+    subprocess.run(
+        [BASH, "-c", f'eval \'_RCFG_x=$(touch "{marker.as_posix()}")\''],
+        capture_output=True, text=True, encoding="utf-8", timeout=10, check=False,
+    )
+    assert marker.exists(), (
+        "positive control failed: eval-ing the malicious value directly "
+        "did not create the marker -- the harness cannot see execution"
+    )
+    marker.unlink()
+
+    lines2, result2, _sys_tmp2 = _run_with_shim(tmp_path, home, project, sys_tmp=sys_tmp)
+    assert result2.returncode == 0, (result2.stdout, result2.stderr)
+    assert not marker.exists(), (
+        f"a malformed cache VALUE (correct name, unescaped $(...)) was "
+        f"evaluated as shell: {lines2}"
+    )
+    assert "42" in result2.stdout, (
+        "the malformed cache was not cleanly rejected -- config resolution "
+        f"did not fall through to a correct real flatten: {result2.stdout!r}"
+    )
+    if cache.exists():
+        assert marker.as_posix() not in cache.read_text(encoding="utf-8"), (
+            "the rejected cache was republished still carrying the "
+            "malformed value -- the poison survived the rejection"
+        )
+
+
+def test_a_zero_byte_cache_is_rejected_not_treated_as_an_empty_hit(tmp_path):
+    """A genuinely empty config (zero flattened keys) still publishes a
+    cache -- just one carrying no `_RCFG_*` lines. Before the identity line
+    the loader now always requires as its first line, a cache file reduced
+    to zero bytes by anything OTHER than the normal publish path (an
+    external truncate, a half-finished write that somehow kept a fresh
+    mtime) was indistinguishable from that legitimate "zero keys" case: the
+    validate loop simply never ran its body, and the loader returned a
+    clean hit. Pin that this can no longer happen: a hand-planted, genuinely
+    empty file at the real cache location must be rejected, not read as
+    "nothing to say"."""
+    home, project, remember = _project(tmp_path)
+    cfg = remember / "config.json"
+    cfg.write_text(json.dumps({"cooldowns": {"save_seconds": 42}}), encoding="utf-8")
+
+    # Publish once for real, so the cache path this test plants over is the
+    # one the loader will actually look at.
+    _lines1, result1, sys_tmp = _run_with_shim(tmp_path, home, project)
+    assert result1.returncode == 0, (result1.stdout, result1.stderr)
+    caches = cache_files(sys_tmp)
+    assert caches, f"no flattened-config cache ({CACHE_GLOB}) was published under {sys_tmp}"
+    cache = caches[0]
+
+    cache.write_text("", encoding="utf-8")
+    now = time.time()
+    os.utime(cache, (now + 5, now + 5))
+
+    _lines2, result2, _sys_tmp2 = _run_with_shim(tmp_path, home, project, sys_tmp=sys_tmp)
+    assert result2.returncode == 0, (result2.stdout, result2.stderr)
+    assert "42" in result2.stdout, (
+        "a zero-byte cache was treated as a clean, valid hit instead of "
+        f"being rejected and falling through to a real flatten: {result2.stdout!r}"
+    )
+
+
+def test_two_projects_whose_mangled_paths_collide_never_share_a_config(tmp_path):
+    """The cache filename is a MANY-to-one mangling of REMEMBER_DIR (every
+    non-alnum character collapses to `-`), so two different project paths
+    that differ only in which separator they use at the same position can
+    land on the identical cache filename -- verified directly: mangling
+    both "my.project" and "my-project" produces the string "my-project".
+    Without an identity check inside the file itself, the second project
+    to publish would silently read back the FIRST project's config on
+    every subsequent hit. This drives that exact collision through the
+    real chain for two sibling projects and asserts the second one's own
+    config value is never shadowed by the first's."""
+    home = tmp_path / "home"
+    (home / ".remember").mkdir(parents=True)
+    project_a = tmp_path / "my.project"
+    project_b = tmp_path / "my-project"
+    remember_a = project_a / ".remember"
+    remember_b = project_b / ".remember"
+    (remember_a / "tmp").mkdir(parents=True)
+    (remember_b / "tmp").mkdir(parents=True)
+    # Mirrors log.sh's own `${REMEMBER_DIR//[!a-zA-Z0-9]/-}` mangling
+    # exactly (every non-alnum character, not just the dot) -- so this
+    # checks the actual collision the cache filename would hit, not an
+    # approximation of it.
+    mangle = lambda p: re.sub(r"[^A-Za-z0-9]", "-", str(p))
+    assert mangle(remember_a) == mangle(remember_b), (
+        "test setup assumption broke -- these two paths no longer mangle "
+        "to the same filename, so this test would not be reproducing the "
+        "collision it claims to"
+    )
+
+    (remember_a / "config.json").write_text(
+        json.dumps({"cooldowns": {"save_seconds": 111}}), encoding="utf-8"
+    )
+    (remember_b / "config.json").write_text(
+        json.dumps({"cooldowns": {"save_seconds": 222}}), encoding="utf-8"
+    )
+
+    # Publish A first, so if B's load ever fell through to A's file by
+    # mistake, B would read A's value (111) instead of its own (222).
+    _lines_a, result_a, sys_tmp = _run_with_shim(tmp_path, home, project_a)
+    assert result_a.returncode == 0, (result_a.stdout, result_a.stderr)
+    assert "111" in result_a.stdout
+
+    _lines_b, result_b, _sys_tmp_b = _run_with_shim(
+        tmp_path, home, project_b, sys_tmp=sys_tmp
+    )
+    assert result_b.returncode == 0, (result_b.stdout, result_b.stderr)
+    assert "222" in result_b.stdout, (
+        "project B read project A's flattened config through a colliding "
+        f"mangled cache filename: {result_b.stdout!r}"
+    )
+
+
+# Coordinator follow-up review of the #682 fix above: `_remember_cfg_flatten_
+# cache_valid_value`'s plain-form branch was an ASCII whitelist
+# (`[A-Za-z0-9_./:@%+=~-]`) rather than a blacklist of what can actually
+# change how `eval "NAME=value"` parses a single plain assignment. Two
+# concrete costs of that over-narrow whitelist, both silent: any config
+# value containing `#` (a real, unremarkable byte -- e.g. `#deadbeef` as a
+# tag) or any non-ASCII byte (an accented or CJK path/value) was REJECTED
+# by a validator whose whole job is to accept everything `%q` actually
+# produces, and a rejection here is not just a missed hit -- the loader
+# `rm -f`s the file and the publisher republishes it on every single run
+# (mktemp + rm each time), forever, for that user. Separately: bash 3.2
+# (macOS's stock /bin/bash) tilde-expands after an unquoted `:` in an
+# assignment, not just at the start of the word, and 3.2's own `%q` does
+# NOT escape a tilde in that position (`printf %q 'a:~'` -> `a:~`, whereas
+# bash 5's does: `a:\~`) -- so a value shaped like `foo:~/bar` reaching the
+# blanket `eval` on 3.2 alone would substitute a home directory instead of
+# assigning the literal string.
+def _macos_system_bash():
+    """The specific `/bin/bash` (stock, unreplaced, bash 3.2.57) macOS ships
+    -- the interpreter finding 3 above is about. `resolve_bash()` (used by
+    every other test in this file) follows PATH, which on a dev machine
+    with Homebrew's bash ahead of `/bin` in PATH resolves to bash 5 instead
+    -- silently missing the one interpreter this specific behaviour needs."""
+    if sys.platform == "win32":
+        return None
+    candidate = "/bin/bash"
+    if not os.path.isfile(candidate):
+        return None
+    probe = subprocess.run(
+        [candidate, "-c", "echo $BASH_VERSION"],
+        capture_output=True, text=True, encoding="utf-8", timeout=10, check=False,
+    )
+    if probe.returncode != 0:
+        return None
+    return candidate
+
+
+MACOS_SYSTEM_BASH = _macos_system_bash()
+
+
+def _run_with_shim_using(bash_path: str, tmp_path: Path, home: Path, project: Path, *, sys_tmp: Path | None = None):
+    """Same as `_run_with_shim` above, but against a caller-chosen bash
+    executable instead of the module-level `BASH` -- needed to pin down
+    behaviour that is specific to one interpreter (bash 3.2), not whichever
+    bash happens to be first on this machine's PATH."""
+    log = tmp_path / "spawn.log"
+    shims = make_shim_dir(tmp_path, log)
+    sys_tmp = sys_tmp if sys_tmp is not None else (tmp_path / "systmp")
+    sys_tmp.mkdir(parents=True, exist_ok=True)
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "CLAUDE_PROJECT_DIR": str(project),
+        "CLAUDE_PLUGIN_ROOT": str(REPO_ROOT),
+        "REMEMBER_HOOK_CWD": str(project),
+        "SPAWN_LOG": str(log),
+        "TMPDIR": str(sys_tmp),
+        "PATH": f"{shims}{os.pathsep}{os.environ['PATH']}",
+    }
+    result = subprocess.run(
+        [bash_path, "-c", HARNESS], env=env, capture_output=True, text=True, encoding="utf-8", timeout=30, check=False,
+    )
+    return spawns(log), result, sys_tmp
+
+
+def test_hash_comma_and_non_ascii_values_round_trip_through_a_warm_hit(tmp_path):
+    """Positive control for the whitelist-too-narrow finding: a config value
+    containing `#`, `,`, and accented Latin text (all bytes a real config
+    value can plainly carry, and all bytes `%q` leaves bare rather than
+    escaping) must survive a cold publish AND a warm load -- the warm run
+    must be an actual cache HIT (jq never forks again), not just "the
+    right value, because it fell through to a real flatten every time"."""
+    home, project, remember = _project(tmp_path)
+    cfg = remember / "config.json"
+    cfg.write_text(json.dumps({"probe": "a#b,héllo"}), encoding="utf-8")
+
+    lines1, result1, sys_tmp = _run_with_shim(tmp_path, home, project)
+    assert result1.returncode == 0, (result1.stdout, result1.stderr)
+
+    caches = cache_files(sys_tmp)
+    assert caches, f"no flattened-config cache ({CACHE_GLOB}) was published under {sys_tmp}"
+    cache = caches[0]
+    # Force the cache strictly newer than the config layer, independent of
+    # which second the two writes above landed in.
+    now = time.time()
+    os.utime(cache, (now + 5, now + 5))
+
+    harness2 = HARNESS.replace(
+        'config ".cooldowns.save_seconds" "default"',
+        'config ".probe" "default"',
+    )
+    log2 = tmp_path / "spawn2.log"
+    shims2 = make_shim_dir(tmp_path, log2)
+    env2 = {
+        **os.environ,
+        "HOME": str(home),
+        "CLAUDE_PROJECT_DIR": str(project),
+        "CLAUDE_PLUGIN_ROOT": str(REPO_ROOT),
+        "REMEMBER_HOOK_CWD": str(project),
+        "SPAWN_LOG": str(log2),
+        "TMPDIR": str(sys_tmp),
+        "PATH": f"{shims2}{os.pathsep}{os.environ['PATH']}",
+    }
+    result2 = subprocess.run(
+        [BASH, "-c", harness2], env=env2, capture_output=True, text=True, encoding="utf-8", timeout=30, check=False,
+    )
+    assert result2.returncode == 0, (result2.stdout, result2.stderr)
+    assert "a#b,héllo" in result2.stdout, (
+        "a config value containing '#', ',' and accented text did not "
+        f"round-trip through the flatten cache: {result2.stdout!r}"
+    )
+    lines2 = spawns(log2)
+    flatten_spawns_2 = [l for l in lines2 if l.startswith("jq ") and "paths(" in l]
+    assert not flatten_spawns_2, (
+        "the warm run re-forked jq's flattener instead of hitting the cache -- "
+        f"the value was rejected by the validator and re-flattened: {lines2}"
+    )
+
+
+def test_non_ascii_project_path_identity_line_still_hits_warm(tmp_path):
+    """The identity line the loader checks (`#REMEMBER_DIR=%q`) goes
+    through the exact same value validator as every `_RCFG_*` line. A
+    project path with a non-ASCII component (e.g. a user directory named
+    after themselves) must not make that identity line itself unreadable --
+    that would make the cache permanently cold for that user, every run,
+    forever, with no config value involved at all."""
+    home = tmp_path / "home"
+    project = tmp_path / "José-project"
+    remember = project / ".remember"
+    (remember / "tmp").mkdir(parents=True)
+    (home / ".remember").mkdir(parents=True)
+    cfg = remember / "config.json"
+    cfg.write_text(json.dumps({"cooldowns": {"save_seconds": 42}}), encoding="utf-8")
+
+    lines1, result1, sys_tmp = _run_with_shim(tmp_path, home, project)
+    assert result1.returncode == 0, (result1.stdout, result1.stderr)
+    assert "42" in result1.stdout
+
+    caches = cache_files(sys_tmp)
+    assert caches, f"no flattened-config cache ({CACHE_GLOB}) was published under {sys_tmp}"
+    cache = caches[0]
+    # Force the cache strictly newer than the config layer, independent of
+    # which second the two writes above landed in (same convention as
+    # test_second_run_with_unchanged_config_skips_the_flatten_fork above).
+    now = time.time()
+    os.utime(cache, (now + 5, now + 5))
+
+    lines2, result2, _sys_tmp2 = _run_with_shim(tmp_path, home, project, sys_tmp=sys_tmp)
+    assert result2.returncode == 0, (result2.stdout, result2.stderr)
+    assert "42" in result2.stdout
+    flatten_spawns_2 = [l for l in lines2 if l.startswith("jq ") and "paths(" in l]
+    assert not flatten_spawns_2, (
+        "a non-ASCII REMEMBER_DIR made the identity line fail validation, "
+        f"forcing a cold re-flatten on every run: {lines2}"
+    )
+
+
+@pytest.mark.parametrize(
+    "bad_value,desc",
+    [
+        ("x y", "unescaped space"),
+        ("x;y", "unescaped semicolon"),
+        ("x$(y)", "unescaped command substitution"),
+        ("x`y`", "unescaped backtick"),
+        ("x|y", "unescaped pipe"),
+        ("x'y", "unescaped single quote"),
+    ],
+)
+def test_unescaped_shell_metacharacters_in_a_plain_looking_value_are_rejected(tmp_path, bad_value, desc):
+    """None of these bytes are ever left bare by a real `%q` conversion in
+    this position -- they are exactly the shapes `_remember_cfg_flatten_
+    cache_valid_value`'s blacklist exists to catch. Each is planted as a
+    correct-looking `_RCFG_*` line so only the VALUE check stands between
+    it and `eval`; each must be rejected, remove the cache, and still
+    resolve the real config value from a fallback flatten."""
+    home, project, remember = _project(tmp_path)
+    cfg = remember / "config.json"
+    cfg.write_text(json.dumps({"cooldowns": {"save_seconds": 42}}), encoding="utf-8")
+
+    _lines1, result1, sys_tmp = _run_with_shim(tmp_path, home, project)
+    assert result1.returncode == 0, (result1.stdout, result1.stderr)
+    caches = cache_files(sys_tmp)
+    assert caches, f"no flattened-config cache ({CACHE_GLOB}) was published under {sys_tmp}"
+    cache = caches[0]
+
+    marker = tmp_path / f"pwned-682-followup-marker-{desc.replace(' ', '-')}"
+    good = cache.read_text(encoding="utf-8")
+    corrupted = good + f'_RCFG_cooldowns_save_seconds={bad_value}\n'
+    cache.write_text(corrupted, encoding="utf-8")
+    now = time.time()
+    os.utime(cache, (now + 5, now + 5))
+
+    lines2, result2, _sys_tmp2 = _run_with_shim(tmp_path, home, project, sys_tmp=sys_tmp)
+    assert result2.returncode == 0, (result2.stdout, result2.stderr)
+    assert not marker.exists()
+    assert "42" in result2.stdout, (
+        f"a value with {desc} was not cleanly rejected -- config "
+        f"resolution did not fall through to a real flatten: {result2.stdout!r}"
+    )
+
+
+@pytest.mark.skipif(MACOS_SYSTEM_BASH is None, reason="needs macOS's stock /bin/bash (3.2)")
+def test_colon_tilde_value_does_not_expand_a_home_directory_on_bash_3_2(tmp_path):
+    """bash 3.2 tilde-expands after an unquoted `:` in an assignment, and
+    3.2's own `printf %q` does NOT escape a tilde in that position (bash
+    5's does). A config value shaped like `foo:~/bar` -- plausible for
+    anything PATH-like -- reaching the blanket `eval` on 3.2 alone would
+    substitute a real home directory instead of the literal string.
+    Observed directly on this machine's `/bin/bash` before this test was
+    written: `eval "v=foo:~/bar"` on 3.2 yields `foo:/Users/<you>/bar`, not
+    the literal value. Reasoned, not observed, on Git Bash/Linux: their
+    `%q` already escapes the tilde in this position (`foo:\\~/bar`), so the
+    extra guard this test pins is a no-op there rather than untested."""
+    home, project, remember = _project(tmp_path)
+    cfg = remember / "config.json"
+    cfg.write_text(json.dumps({"probe": "foo:~/bar"}), encoding="utf-8")
+
+    lines1, result1, sys_tmp = _run_with_shim_using(MACOS_SYSTEM_BASH, tmp_path, home, project)
+    assert result1.returncode == 0, (result1.stdout, result1.stderr)
+
+    harness2 = HARNESS.replace(
+        'config ".cooldowns.save_seconds" "default"',
+        'config ".probe" "default"',
+    )
+    log2 = tmp_path / "spawn2.log"
+    shims2 = make_shim_dir(tmp_path, log2)
+    env2 = {
+        **os.environ,
+        "HOME": str(home),
+        "CLAUDE_PROJECT_DIR": str(project),
+        "CLAUDE_PLUGIN_ROOT": str(REPO_ROOT),
+        "REMEMBER_HOOK_CWD": str(project),
+        "SPAWN_LOG": str(log2),
+        "TMPDIR": str(sys_tmp),
+        "PATH": f"{shims2}{os.pathsep}{os.environ['PATH']}",
+    }
+    result2 = subprocess.run(
+        [MACOS_SYSTEM_BASH, "-c", harness2], env=env2, capture_output=True, text=True, encoding="utf-8", timeout=30, check=False,
+    )
+    assert result2.returncode == 0, (result2.stdout, result2.stderr)
+    out = result2.stdout
+    assert str(home) not in out, (
+        "a colon-tilde config value was tilde-expanded into a real home "
+        f"directory on bash 3.2 instead of staying a literal string: {out!r}"
+    )
+    assert "foo:~/bar" in out or "foo:/" not in out, (
+        f"the colon-tilde value was mangled rather than preserved literally: {out!r}"
+    )

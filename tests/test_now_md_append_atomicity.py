@@ -336,9 +336,17 @@ class TestNowMdAppendIsAtomic:
         # exactly as lib-env-cache.sh's own `remember-env-*` cache file
         # would need to be if any script in THIS harness's chain called
         # its publish function (none currently do).
+        # #682: the flattened-config cache moved out of the project tree to a
+        # per-project file under TMPDIR too (scripts/log.sh's
+        # `_remember_cfg_flatten_cache_path`), for the identical security
+        # reason #668's tools-verdict cache already lives here -- and for
+        # the identical reason it is excluded from this leak check: one
+        # file, rewritten in place on every cache-miss run via a
+        # temp-then-rename, never accumulating one per invocation.
         in_tmpdir = sorted(
             p.name for p in Path(env["TMPDIR"]).glob("remember-*")
             if p.name != "remember-detect-tools-cache"
+            and not p.name.startswith("remember-config-cache-")
         )
         assert not beside and not in_tmpdir, (
             f"a failed commit orphaned its temp. beside={beside} tmpdir={in_tmpdir}"

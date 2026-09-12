@@ -196,8 +196,10 @@ sys.stdout.write("\n".join(out))
 # config() call of every process that reaches it -- session-start-hook.sh,
 # post-tool-hook.sh's slow path, user-prompt-hook.sh, save-session.sh -- even
 # though the flattened result only changes when one of the three config
-# LAYERS changes. Persisted here as sourceable `_RCFG_key='value'`
-# assignments, keyed by mtime against the same three layers lib-memory-dir.sh
+# LAYERS changes. Persisted here as `_RCFG_key=value` lines (validated, then
+# assigned per line -- see the loader below, and the #682 comment just
+# above _remember_cfg_flatten_cache_path for why it is no longer a bare
+# `source`), keyed by mtime against the same three layers lib-memory-dir.sh
 # merges (REMEMBER_CONFIG itself is a fresh mktemp path every process --
 # always "now" -- so it is useless as a cache key; the SOURCE files are what
 # must be checked).
@@ -212,13 +214,73 @@ sys.stdout.write("\n".join(out))
 # program above and the matching `p[0] != "haiku"` in the Python one), so the
 # cache below never receives it in the first place.
 #
-# Values are written with `%q` (bash's own shell-quoting printf conversion),
-# not interpolated raw, because the cache is loaded with `source`: an
-# unescaped config value containing shell metacharacters would otherwise be
-# interpreted as code the moment the cache file executes.
+# Values are written with `%q` (bash's own shell-quoting printf conversion).
+# The loader below no longer trusts that on its own -- see the #682 comment.
+#
+# SECURITY (#682): this file used to live at `$REMEMBER_DIR/tmp/config.rcfg`
+# -- inside the PROJECT tree, a directory users commit and share -- and was
+# loaded with a bare `source`. `-O` (owned by the current user) passes for a
+# file the user's own `git clone` wrote; `-L` passes for a regular file;
+# `-nt` against an absent `.remember/config.json` (the common, no-project-
+# config case) reads as "fresh". A repository could therefore ship a
+# `.remember/tmp/config.rcfg` and have every hook that sources this file
+# (SessionStart, every post-tool call) execute its contents as shell, in the
+# cloning user's own session -- one `git clone` from arbitrary code
+# execution, no user action beyond opening the project. Reproduced with a
+# planted file driven through the real detect-tools.sh -> bootstrap-dirs.sh
+# -> log.sh chain
+# (tests/test_config_flatten_cache_668.py::test_planted_cache_in_old_project_path_is_never_executed).
+#
+# Two independent fixes, both required -- either alone still leaves a hole:
+#
+# 1. The cache file now lives under the SYSTEM temp dir (same convention as
+#    lib-env-cache.sh's `_REMEMBER_ENV_CACHE_FILE` and detect-tools.sh's
+#    `_REMEMBER_TOOLS_CACHE`), never inside the project tree, so nothing a
+#    `git clone` brings in can plant it. Keyed on REMEMBER_DIR itself,
+#    mangled into a filename with the SAME non-alnum-to-`-` mapping and
+#    tail-keep truncation `_remember_env_cache_path` already uses (fork-free
+#    -- no md5/shasum/cksum exec on this hot path, #660's whole point), so
+#    two different projects on the same machine never share, or collide on,
+#    one file. The `-f`/`-L`/`-O`/`-r` guards stay: they are exactly the
+#    right guards for a file under a SHARED tmp dir, which is what this now
+#    is.
+#
+# 2. Even a cache under the system tmp dir is one race away from being
+#    planted by another local user, so the loader below no longer trusts
+#    `source` at all. It reads the file line by line and checks every line
+#    against the EXACT shape the publisher writes, below -- `_RCFG_<name>=
+#    <value>`, where <name> can only be `[A-Za-z0-9_]+` (guaranteed by the
+#    flattener's own key-shape refusal further up this file: every path
+#    segment is already `[A-Za-z0-9_]+` before the publisher ever sees it,
+#    and dots become underscores) and <value> is one of the handful of
+#    shapes bash's own `%q` conversion ever produces for a single word:
+#    `''` (empty), `$'...'` (any control character present -- the shell's
+#    own quoting, safe to eval even though a bare `;`/`|`/`&` can appear
+#    INSIDE it, because none of those are special inside this quoting, only
+#    outside it), or a run of characters %q never escapes plus backslash-
+#    escaped pairs for everything else (a bare, unescaped `;`, `$(`,
+#    backtick, `|`, `&`, quote or whitespace character never appears in this
+#    form). A line outside all three shapes -- an unknown NAME, a second
+#    unquoted word, an unescaped shell metacharacter -- rejects the WHOLE
+#    cache before a single byte of it is evaluated: the file is removed (so
+#    the next start does not re-read the same poison) and the caller falls
+#    through to a real flatten. Only once every line has validated are the
+#    lines assigned, one `eval "$name=$value"` per line -- `%q`'s output is
+#    exactly the word `eval` re-reads, so this is safe by construction for a
+#    line that has already passed the shape check above, and it is strictly
+#    narrower than a blanket `source` of a file whose contents were never
+#    inspected at all.
 _remember_cfg_flatten_cache_path() {
     [ -n "${REMEMBER_DIR:-}" ] || return 1
-    printf '%s' "$REMEMBER_DIR/tmp/config.rcfg"
+    local _key="${REMEMBER_DIR//[!a-zA-Z0-9]/-}"
+    # Same tail-keep truncation as _remember_env_cache_path
+    # (lib-env-cache.sh), same reason: a deep project path can exceed
+    # filesystem name limits (255 bytes on most filesystems), and the END of
+    # a path is what distinguishes it from a sibling -- a truncation
+    # collision only ever costs a rejected/regenerated cache, never a wrong
+    # one, because the value is never trusted from the filename alone.
+    [ "${#_key}" -gt 120 ] && _key="${_key: -120}"
+    printf '%s' "${TMPDIR:-/tmp}/remember-config-cache-${_key}"
 }
 
 _remember_cfg_flatten_cache_sources() {
@@ -248,6 +310,82 @@ _remember_cfg_flatten_cache_is_standard_merge() {
     esac
 }
 
+# Every value this cache ever writes -- both the config `_RCFG_*` lines
+# below and the REMEMBER_DIR identity line the loader checks against -- is
+# one of the handful of shapes bash's own `%q` conversion ever produces for
+# a single word: `''` (empty), `$'...'` (any control character present --
+# real quoting, so a bare `;`/`|`/`&` INSIDE it is inert, only a raw,
+# unescaped closing `'` could break out, and the character class below
+# excludes that), or a run of characters plus backslash-escaped pairs for
+# everything else. Returns 1 for anything else, including an empty value
+# (the publisher always writes `''` for an empty string, never nothing) or
+# a raw, unescaped shell metacharacter anywhere in it.
+#
+# The plain-form check below is a BLACKLIST of what can actually change how
+# `eval "NAME=value"` parses a single plain assignment word -- unescaped
+# whitespace, `;` `&` `|` `(` `)` `<` `>` (word/control operators), `$` and
+# backtick (expansion), `'` and `"` (quoting) -- rather than a whitelist of
+# bytes %q is known to leave bare. An ASCII whitelist (an earlier shape of
+# this check) rejected two things %q plainly leaves bare and unescaped on
+# every bash tested (3.2 and 5): a mid-word `#` (`printf %q 'a#b'` ->
+# `a#b`), and any non-ASCII byte (`héllo`, `日本`) -- and a rejection here is
+# not a miss, it is `rm -f` on the cache followed by a full republish on
+# every single subsequent run, forever, for that value. Everything the
+# blacklist does not name (`#`, `,`, `*?[]{}!^`, non-ASCII bytes) is inert
+# inside a plain assignment value and is either left bare by %q or already
+# covered by the `\.` escaped-pair alternative.
+#
+# `~` is handled by position, not by the character class, in both
+# directions bash tilde-expands an assignment word from: a LEADING tilde
+# (`eval "$name=~foo"` substitutes a home directory), which %q ALWAYS
+# escapes (`printf %q '~foo'` -> `\~foo`) so a bare one is a shape the
+# publisher could never have produced; and a tilde immediately after an
+# unquoted `:` (`eval "$name=a:~"` substitutes one there too, per bash's
+# own assignment-specific tilde-expansion rule), which %q escapes on bash 5
+# (`a:~` -> `a:\~`) but NOT on bash 3.2 (macOS's stock `/bin/bash`; `a:~`
+# stays `a:~`, and `eval "v=a:~"` on 3.2 observably substitutes a real home
+# directory). Both positions are rejected outright, before the general
+# character-class check ever runs; a tilde anywhere else is inert and
+# still passes it further down, since %q is not guaranteed to escape it.
+#
+# `local LC_ALL=C` for the duration of this function only (restored on
+# return, never leaks to the caller): `[[ =~ ]]`'s character classes are
+# locale-dependent, and bash 3.2's own `%q` output for some multi-byte
+# UTF-8 input mixes raw bytes with `\NNN` octal escapes byte-by-byte in a
+# way that is not itself valid UTF-8 -- observed to make the very same
+# regex silently NOT match under an inherited UTF-8 locale, even though the
+# value still round-trips correctly through `eval`. Byte-wise (C-locale)
+# matching sees exactly the bytes %q actually wrote and is what the
+# character classes above are written against.
+_remember_cfg_flatten_cache_valid_value() {
+    local _value="$1"
+    local LC_ALL=C
+    [ -n "$_value" ] || return 1
+    # %q's own empty-string spelling.
+    [ "$_value" = "''" ] && return 0
+    if [[ "$_value" =~ ^\$\'(\\.|[^\\\'])*\'$ ]]; then
+        return 0
+    fi
+    case "$_value" in
+        \~*) return 1 ;;
+        *:\~*) return 1 ;;
+    esac
+    if [[ "$_value" =~ ^(\\.|[^\\\$\`\'\"\;\&\|\(\)\<\>[:space:]])*$ ]]; then
+        return 0
+    fi
+    return 1
+}
+
+# A single config-data cache line must be exactly `_RCFG_<name>=<value>` --
+# see _remember_cfg_flatten_cache_valid_value just above for what <value> is
+# allowed to be, and the #682 block comment above this whole section for
+# what <name> is guaranteed to be (and why that guarantee holds).
+_remember_cfg_flatten_cache_valid_line() {
+    local _line="$1"
+    [[ "$_line" =~ ^_RCFG_[A-Za-z0-9_]+= ]] || return 1
+    _remember_cfg_flatten_cache_valid_value "${_line#*=}"
+}
+
 _remember_cfg_flatten_cache_load() {
     [ "${REMEMBER_CONFIG_CACHE:-1}" = "1" ] || return 1
     _remember_cfg_flatten_cache_is_standard_merge || return 1
@@ -268,8 +406,82 @@ _remember_cfg_flatten_cache_load() {
     done <<EOF
 $_sources
 EOF
-    # shellcheck disable=SC1090  # dynamic path, keyed and validated above
-    source "$_f" 2>/dev/null || return 1
+
+    # Validate BEFORE trusting a single byte of it -- see the #682 block
+    # comment above this whole section for why a shared-tmp-dir file is
+    # still not enough on its own. Two passes on purpose: collecting every
+    # line first means a cache that fails on its LAST line never partially
+    # executes its first N-1.
+    #
+    # The FIRST line must be the REMEMBER_DIR identity line the publisher
+    # now always writes first (see below): the filename this cache lives at
+    # is a MANY-to-one mangling of REMEMBER_DIR (every non-alnum character
+    # collapses to `-`), so two different project paths that differ only in
+    # which separator they use at the same position -- `my.project` and
+    # `my-project` both mangle to `my-project` -- can land on the identical
+    # cache filename. Without an identity check inside the file itself, the
+    # second project to publish would silently read back the FIRST
+    # project's flattened config on every subsequent hit: exactly the
+    # "silently serve stale/wrong content" failure #668's own design
+    # forbids, just via a different door than the mtime check closes. A
+    # cache file with no identity line at all -- including a fully empty
+    # (zero-byte) one, from external truncation/corruption rather than a
+    # genuinely empty config, which the publisher always writes an identity
+    # line for even when the config is empty -- is unrecognised and
+    # rejected outright, never treated as "zero keys and a clean hit".
+    # `#` rather than `_RCFG_`: no row the flattener ever emits begins with
+    # `#` (see the flattener's own comment further up this file), so this
+    # shape can never collide with a real config key's own line, unlike
+    # reusing the `_RCFG_` namespace would risk.
+    local _line _lines=() _first=1 _identity_raw=""
+    while IFS= read -r _line || [ -n "$_line" ]; do
+        _line="${_line%$'\r'}"
+        [ -n "$_line" ] || continue
+        if [ "$_first" = "1" ]; then
+            _first=0
+            case "$_line" in
+                '#REMEMBER_DIR='*)
+                    _identity_raw="${_line#'#REMEMBER_DIR='}"
+                    _remember_cfg_flatten_cache_valid_value "$_identity_raw" || {
+                        rm -f "$_f" 2>/dev/null
+                        return 1
+                    }
+                    continue
+                    ;;
+                *)
+                    rm -f "$_f" 2>/dev/null
+                    return 1
+                    ;;
+            esac
+        fi
+        if ! _remember_cfg_flatten_cache_valid_line "$_line"; then
+            # Distrust the WHOLE file, and remove it: the next start must not
+            # re-read the same poison and re-pay this same rejection forever.
+            rm -f "$_f" 2>/dev/null
+            return 1
+        fi
+        _lines[${#_lines[@]}]="$_line"
+    done < "$_f"
+    # No lines at all (including "no identity line" -- see above): reject.
+    [ "$_first" = "0" ] || { rm -f "$_f" 2>/dev/null; return 1; }
+
+    local _identity
+    eval "_identity=$_identity_raw"
+    [ "$_identity" = "${REMEMBER_DIR:-}" ] || {
+        rm -f "$_f" 2>/dev/null
+        return 1
+    }
+
+    local _assign
+    for _assign in ${_lines[@]+"${_lines[@]}"}; do
+        # shellcheck disable=SC1090  # each $_assign already passed
+        # _remember_cfg_flatten_cache_valid_line above: it is exactly one
+        # `_RCFG_name=value` word, where `value` is one of the shapes %q
+        # ever emits, so this evaluates a plain assignment and nothing
+        # else, by construction -- never a blanket `source` of bytes that
+        # were never inspected.
+        eval "$_assign"
+    done
     return 0
 }
 
@@ -281,11 +493,21 @@ _remember_cfg_flatten_cache_publish() {
     _f=$(_remember_cfg_flatten_cache_path) || return 0
     local _dir
     _dir="${_f%/*}"
-    mkdir -p "$_dir" 2>/dev/null || return 0
+    # Guarded, not unconditional (matching the same convention this file's
+    # own $REMEMBER_LOG_DIR creation already uses, and for the same reason
+    # its comment gives): the target is now `${TMPDIR:-/tmp}` itself (#682),
+    # which is essentially always already present, so re-asking `mkdir`
+    # every single publish would cost a process per cache-miss run to learn
+    # nothing new almost every time.
+    [ -d "$_dir" ] || mkdir -p "$_dir" 2>/dev/null || return 0
     local _t
     _t=$(mktemp "${_f}.XXXXXX" 2>/dev/null) || return 0
     local _k _v
     {
+        # Identity line FIRST, always -- see the #682 comment in the loader
+        # above for why a file at this (many-to-one-mangled) path cannot be
+        # trusted without one.
+        printf '#REMEMBER_DIR=%q\n' "${REMEMBER_DIR:-}"
         while IFS=$'\t' read -r _k _v; do
             [ -n "$_k" ] || continue
             printf '_RCFG_%s=%q\n' "${_k//./_}" "$_v"

@@ -59,6 +59,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(__file__))
 from _bash_runner import resolve_bash
+from config_cache import CACHE_GLOB, cache_files
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RESOLVE_PATHS = REPO_ROOT / "scripts" / "resolve-paths.sh"
@@ -167,7 +168,15 @@ echo "{END}"
         "CLAUDE_PLUGIN_ROOT": str(REPO_ROOT),
         "REMEMBER_HOOK_CWD": str(project),
         "PATH": os.environ["PATH"],
+        # #682: the flattened-config cache this probe warms via
+        # `_warm_config` now lives under TMPDIR, not inside the project
+        # tree -- pin it to a directory keyed on `tmp_path` (the same value
+        # `_warm_config`'s own env below uses) so this call and that one
+        # agree on where to find it, rather than both falling through to
+        # the real, shared, cross-test system tmp dir.
+        "TMPDIR": str(tmp_path / "systmp"),
     }
+    (tmp_path / "systmp").mkdir(parents=True, exist_ok=True)
     result = subprocess.run(
         [BASH, "-c", script], env=env, capture_output=True, text=True,
         errors="replace", timeout=30, check=False,
@@ -191,6 +200,18 @@ source "{BOOTSTRAP_DIRS.as_posix()}" || exit 99
 source "{LOG_SH.as_posix()}" 2>/dev/null
 config '.cooldowns.save_seconds' '0'
 """
+    # #682: the flattened-config cache no longer lives at
+    # `$REMEMBER_DIR/tmp/config.rcfg` -- it moved to a per-project file
+    # under TMPDIR, keyed by mangling REMEMBER_DIR itself. Pin TMPDIR to a
+    # directory keyed on `tmp_path`, the SAME one `_count_forks`'s own env
+    # uses (both take `tmp_path` from the same test), rather than letting
+    # either call fall through to the real, shared, cross-test system tmp
+    # dir -- that dir accumulates one file per test run across the whole
+    # suite's history and is never cleaned up, so a bare `caches[0]` there
+    # can silently pick up an unrelated leftover from an earlier test
+    # instead of the cache this call just published.
+    sys_tmp = tmp_path / "systmp"
+    sys_tmp.mkdir(parents=True, exist_ok=True)
     env = {
         **os.environ,
         "HOME": str(home),
@@ -198,11 +219,13 @@ config '.cooldowns.save_seconds' '0'
         "CLAUDE_PLUGIN_ROOT": str(REPO_ROOT),
         "REMEMBER_HOOK_CWD": str(project),
         "PATH": os.environ["PATH"],
+        "TMPDIR": str(sys_tmp),
     }
     result = subprocess.run([BASH, "-c", script], env=env, capture_output=True, text=True, timeout=30, check=False)
     assert result.returncode == 0, (result.stdout, result.stderr)
-    cache = remember / "tmp" / "config.rcfg"
-    assert cache.is_file()
+    caches = cache_files(sys_tmp)
+    assert caches, f"no flattened-config cache ({CACHE_GLOB}) was published under {sys_tmp}"
+    cache = caches[0]
     now = time.time()
     os.utime(cache, (now + 5, now + 5))
 
