@@ -326,5 +326,18 @@ rm -f "$STAGING_PATHS_FILE"
 
 log "consolidation" "done: ${STAGING_COUNT} files consolidated"
 
+# --- Pre-render the SessionStart MEMORY context cache (#668) ---
+# This script only ever runs via `nohup ... & disown` (session-start-hook.sh's
+# own consolidation trigger launches it detached), so everything from here on
+# is already outside the interactive session. Consolidation is exactly the
+# operation that rotates archive.md/recent.md and rewrites core-memories.md,
+# so refreshing the cache here -- after those files have landed -- is what
+# lets the NEXT SessionStart skip re-reading and re-sizing them.
+PLUGIN_ROOT="${PLUGIN_ROOT:-$PIPELINE_DIR}"
+if source "$(dirname "$0")/lib-memory-context.sh" 2>/dev/null; then
+    _remember_memory_paths
+    _remember_start_cache_context_publish
+fi
+
 # --- Dispatch: after_consolidate ---
 dispatch "after_consolidate"

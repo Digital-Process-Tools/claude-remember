@@ -1601,3 +1601,16 @@ for _remember_auto_log in "${_remember_auto_dir}/logs/autonomous"/*.log; do
     fi
 done
 unset _remember_auto_dir _remember_auto_log _remember_auto_mtime _remember_auto_now _remember_auto_age_days
+
+# --- Pre-render the SessionStart MEMORY context cache (#668) ---
+# This script only ever runs via `nohup ... & disown` (session-end-hook.sh's
+# stop path calls it detached), so everything from here on is already
+# outside the interactive session -- the same reasoning session-start-hook.sh
+# itself documents for its OWN consolidation trigger. Refreshing the cache
+# here, right after the memory files this save may have just written/rotated
+# have landed, is what lets the NEXT SessionStart skip re-reading them.
+PLUGIN_ROOT="${PLUGIN_ROOT:-$PIPELINE_DIR}"
+if source "$(dirname "$0")/lib-memory-context.sh" 2>/dev/null; then
+    _remember_memory_paths
+    _remember_start_cache_context_publish
+fi

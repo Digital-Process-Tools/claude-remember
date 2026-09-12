@@ -23,6 +23,115 @@
 #   1   No usable python found
 #
 # ============================================================================
+# --- Tool verdict cache (#668) ---
+# PYTHON/JQ detection is a subprocess probe (python3 -V, and up to 4
+# candidates on a cold PATH; a jq presence check) paid on EVERY hook
+# invocation that sources this file -- the post-tool hot path included. The
+# verdict cannot change unless $PATH changes, so it is cached keyed on the
+# exact PATH string: there is no "source file" whose mtime could track a
+# PATH change the way the other #668 caches key on file mtimes, so identity
+# is the whole PATH value itself, byte for byte (the issue's own guidance:
+# "bash ${PATH} compared as a string is enough").
+#
+# Lives under the system temp dir (like lib-env-cache.sh's own cache file),
+# NOT under REMEMBER_DIR: this file runs before bootstrap-dirs.sh, so
+# REMEMBER_DIR is not known yet. It is machine/PATH-global rather than
+# per-project, which is correct -- which python and whether jq is on PATH do
+# not depend on which project a hook is running for.
+#
+# SECURITY: same convention as lib-env-cache.sh -- read only when it is a
+# regular file (never a symlink) owned by the current user; a pre-planted
+# file from another user on a shared tmp dir simply fails that check and
+# falls through to a real (re-)detection, exactly as if no cache existed.
+_REMEMBER_TOOLS_CACHE="${TMPDIR:-/tmp}/remember-detect-tools-cache"
+
+# Defined unconditionally (cheap -- a function definition, never invoked
+# unless JQ actually points to it) so a cache hit reporting JQ=_jq_fallback
+# has something to call: before this refactor the function only existed
+# inside the "no jq on PATH" branch, which a cache hit would skip entirely.
+_jq_fallback() {
+    local _jq_flags=""
+    while [[ "$1" == -* ]]; do _jq_flags="$_jq_flags $1"; shift; done
+    local _jq_query="$1"
+    local _jq_file="$2"
+    $PYTHON - "$_jq_file" "$_jq_query" << 'PYEOF' 2>/dev/null
+import json, sys
+try:
+    data = json.load(open(sys.argv[1]))
+    keys = sys.argv[2].strip('.').split('.')
+    val = data
+    for k in keys:
+        if k and isinstance(val, dict):
+            val = val.get(k)
+        if val is None:
+            break
+    if val is None:
+        sys.exit(0)
+    # jq -r prints strings raw and everything else in jq's JSON textual
+    # form — crucially "true"/"false" for booleans, not Python's capitalized
+    # str(True)/str(False). Getting this wrong silently breaks every caller
+    # that does `[ "$x" = "true" ]` against a boolean config key (e.g.
+    # git_backup.gpg_sign, allow_remote_change) whenever jq is absent: the
+    # comparison never matches, so the key always reads as false.
+    print(val if isinstance(val, str) else json.dumps(val))
+except Exception:
+    sys.exit(0)
+PYEOF
+}
+
+_remember_tools_cache_load() {
+    [ "${REMEMBER_TOOLS_CACHE:-1}" = "1" ] || return 1
+    local _f="$_REMEMBER_TOOLS_CACHE"
+    [ -f "$_f" ] || return 1
+    [ -L "$_f" ] && return 1
+    [ -O "$_f" ] || return 1
+    [ -r "$_f" ] || return 1
+    local _line _path="" _py="" _jq=""
+    while IFS= read -r _line || [ -n "$_line" ]; do
+        _line="${_line%$'\r'}"
+        [ -n "$_line" ] || continue
+        case "$_line" in
+            CACHE_PATH=*) _path="${_line#*=}" ;;
+            PYTHON=*)     _py="${_line#*=}" ;;
+            JQ=*)         _jq="${_line#*=}" ;;
+            # Unknown line: not our file, or not our version of it -- distrust
+            # the whole thing rather than partially validate it.
+            *) return 1 ;;
+        esac
+    done < "$_f"
+    [ -n "$_py" ] || return 1
+    [ -n "$_jq" ] || return 1
+    # An EMPTY PATH compares equal to itself just as readily as a real one --
+    # never let a process that genuinely has no PATH short-circuit real
+    # detection on that coincidence.
+    [ -n "$_path" ] || return 1
+    [ "$_path" = "$PATH" ] || return 1
+    case "$_jq" in
+        jq|_jq_fallback) ;;
+        *) return 1 ;;
+    esac
+    PYTHON="$_py"
+    JQ="$_jq"
+    export PYTHON JQ
+    return 0
+}
+
+_remember_tools_cache_publish() {
+    [ "${REMEMBER_TOOLS_CACHE:-1}" = "1" ] || return 0
+    local _f="$_REMEMBER_TOOLS_CACHE" _t
+    _t=$(mktemp "${_f}.XXXXXX" 2>/dev/null) || return 0
+    {
+        printf 'CACHE_PATH=%s\n' "$PATH"
+        printf 'PYTHON=%s\n' "$PYTHON"
+        printf 'JQ=%s\n' "$JQ"
+    } > "$_t" 2>/dev/null || { rm -f "$_t" 2>/dev/null; return 0; }
+    mv -f "$_t" "$_f" 2>/dev/null || rm -f "$_t" 2>/dev/null
+    return 0
+}
+
+if _remember_tools_cache_load; then
+    :
+else
 
 # --- Detect Python ---
 # Try python3 first (macOS/Linux default), fall back to python, then the
@@ -80,40 +189,12 @@ export PYTHON
 if command -v jq >/dev/null 2>&1; then
     JQ="jq"
 else
-    # Fallback: use Python for JSON queries
-    # Supports: jq -r '.key' file.json  (single-level key extraction)
-    _jq_fallback() {
-        local _jq_flags=""
-        while [[ "$1" == -* ]]; do _jq_flags="$_jq_flags $1"; shift; done
-        local _jq_query="$1"
-        local _jq_file="$2"
-        $PYTHON - "$_jq_file" "$_jq_query" << 'PYEOF' 2>/dev/null
-import json, sys
-try:
-    data = json.load(open(sys.argv[1]))
-    keys = sys.argv[2].strip('.').split('.')
-    val = data
-    for k in keys:
-        if k and isinstance(val, dict):
-            val = val.get(k)
-        if val is None:
-            break
-    if val is None:
-        sys.exit(0)
-    # jq -r prints strings raw and everything else in jq's JSON textual
-    # form — crucially "true"/"false" for booleans, not Python's capitalized
-    # str(True)/str(False). Getting this wrong silently breaks every caller
-    # that does `[ "$x" = "true" ]` against a boolean config key (e.g.
-    # git_backup.gpg_sign, allow_remote_change) whenever jq is absent: the
-    # comparison never matches, so the key always reads as false.
-    print(val if isinstance(val, str) else json.dumps(val))
-except Exception:
-    sys.exit(0)
-PYEOF
-    }
     JQ="_jq_fallback"
 fi
 export JQ
+
+_remember_tools_cache_publish
+fi
 
 # Note: safe_eval lives in log.sh (single source of truth). It strips CR
 # from CRLF input — needed because Python on Windows emits \r\n (issue #84).

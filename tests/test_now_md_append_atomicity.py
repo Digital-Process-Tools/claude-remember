@@ -325,7 +325,21 @@ class TestNowMdAppendIsAtomic:
         _run(plugin, env, sid)
 
         beside = sorted(p.name for p in (project / ".remember").glob("now.md.*"))
-        in_tmpdir = sorted(p.name for p in Path(env["TMPDIR"]).glob("remember-*"))
+        # #668: detect-tools.sh (sourced by every script in this chain,
+        # unconditionally, on every run -- not only a failed one) now
+        # persists a single, stably-named tool-verdict cache file under
+        # TMPDIR: scripts/detect-tools.sh's own `_REMEMBER_TOOLS_CACHE`.
+        # That file is not a leak in the sense this test guards against --
+        # it is intentional, has one fixed name, and is rewritten in place
+        # rather than accumulating one per run the way an orphaned append
+        # temp would -- so it is excluded from the glob below by name,
+        # exactly as lib-env-cache.sh's own `remember-env-*` cache file
+        # would need to be if any script in THIS harness's chain called
+        # its publish function (none currently do).
+        in_tmpdir = sorted(
+            p.name for p in Path(env["TMPDIR"]).glob("remember-*")
+            if p.name != "remember-detect-tools-cache"
+        )
         assert not beside and not in_tmpdir, (
             f"a failed commit orphaned its temp. beside={beside} tmpdir={in_tmpdir}"
         )
@@ -382,8 +396,14 @@ class TestTheReaderStillCannotLock:
         )
 
     def test_session_start_hook_reads_now_md_unsynchronised(self):
+        # #668 moved the memory injection loop (and this bare `cat`) out of
+        # session-start-hook.sh into the shared render function
+        # lib-memory-context.sh:_remember_render_memory_section -- the same
+        # function save-session.sh and run-consolidation.sh now also call to
+        # pre-render the SessionStart cache. The read is still unsynchronised
+        # there; only its home file changed.
         hook = (Path(__file__).resolve().parent.parent
-                / "scripts" / "session-start-hook.sh").read_text()
+                / "scripts" / "lib-memory-context.sh").read_text()
         assert 'cat "$MFILE"' in hook, (
             "the memory injection loop no longer reads now.md with a bare cat. "
             "That is fine, but #247's fix is justified by this being an "
