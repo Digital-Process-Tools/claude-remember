@@ -99,7 +99,7 @@ def _run_with_shim(tmp_path: Path, home: Path, project: Path, *, sys_tmp: Path |
         "PATH": f"{shims}{os.pathsep}{os.environ['PATH']}",
     }
     result = subprocess.run(
-        [BASH, "-c", HARNESS], env=env, capture_output=True, text=True, timeout=30, check=False,
+        [BASH, "-c", HARNESS], env=env, capture_output=True, text=True, encoding="utf-8", timeout=30, check=False,
     )
     return spawns(log), result, sys_tmp
 
@@ -287,7 +287,7 @@ def test_planted_cache_in_old_project_path_is_never_executed(tmp_path):
     assert not marker.exists()
     subprocess.run(
         [BASH, "-c", f'source "{planted.as_posix()}"'],
-        capture_output=True, text=True, timeout=10, check=False,
+        capture_output=True, text=True, encoding="utf-8", timeout=10, check=False,
     )
     assert marker.exists(), (
         "positive control failed: sourcing the planted file directly did "
@@ -392,7 +392,7 @@ def test_malformed_value_with_a_correct_name_prefix_is_rejected_not_executed(tmp
     assert not marker.exists()
     subprocess.run(
         [BASH, "-c", f'eval \'_RCFG_x=$(touch "{marker.as_posix()}")\''],
-        capture_output=True, text=True, timeout=10, check=False,
+        capture_output=True, text=True, encoding="utf-8", timeout=10, check=False,
     )
     assert marker.exists(), (
         "positive control failed: eval-ing the malicious value directly "
@@ -535,7 +535,7 @@ def _macos_system_bash():
         return None
     probe = subprocess.run(
         [candidate, "-c", "echo $BASH_VERSION"],
-        capture_output=True, text=True, timeout=10, check=False,
+        capture_output=True, text=True, encoding="utf-8", timeout=10, check=False,
     )
     if probe.returncode != 0:
         return None
@@ -565,7 +565,7 @@ def _run_with_shim_using(bash_path: str, tmp_path: Path, home: Path, project: Pa
         "PATH": f"{shims}{os.pathsep}{os.environ['PATH']}",
     }
     result = subprocess.run(
-        [bash_path, "-c", HARNESS], env=env, capture_output=True, text=True, timeout=30, check=False,
+        [bash_path, "-c", HARNESS], env=env, capture_output=True, text=True, encoding="utf-8", timeout=30, check=False,
     )
     return spawns(log), result, sys_tmp
 
@@ -609,7 +609,7 @@ def test_hash_comma_and_non_ascii_values_round_trip_through_a_warm_hit(tmp_path)
         "PATH": f"{shims2}{os.pathsep}{os.environ['PATH']}",
     }
     result2 = subprocess.run(
-        [BASH, "-c", harness2], env=env2, capture_output=True, text=True, timeout=30, check=False,
+        [BASH, "-c", harness2], env=env2, capture_output=True, text=True, encoding="utf-8", timeout=30, check=False,
     )
     assert result2.returncode == 0, (result2.stdout, result2.stderr)
     assert "a#b,héllo" in result2.stdout, (
@@ -742,7 +742,7 @@ def test_colon_tilde_value_does_not_expand_a_home_directory_on_bash_3_2(tmp_path
         "PATH": f"{shims2}{os.pathsep}{os.environ['PATH']}",
     }
     result2 = subprocess.run(
-        [MACOS_SYSTEM_BASH, "-c", harness2], env=env2, capture_output=True, text=True, timeout=30, check=False,
+        [MACOS_SYSTEM_BASH, "-c", harness2], env=env2, capture_output=True, text=True, encoding="utf-8", timeout=30, check=False,
     )
     assert result2.returncode == 0, (result2.stdout, result2.stderr)
     out = result2.stdout
