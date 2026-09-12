@@ -1225,30 +1225,23 @@ dispatch() {
             continue
         fi
         # World-writable check: skip hooks writable by others. GNU `%a`
-        # (unlike BSD's `%Lp`) includes the setuid/setgid/sticky bits AHEAD
-        # of the three permission digits when any of them is set, so a hook
-        # at mode 1777/2777/4777 stats as "1777" -- the FOUR-digit form --
-        # not "777". Trimmed to the last 3 characters BEFORE the pattern
-        # match so those bits never hide the world-writable one: a first
-        # version of this fold matched `$hook_perm` directly against a
-        # 3-digit-only pattern, which made a sticky-plus-world-writable hook
-        # (mode 1777) fail to match at all and fall through as "cannot tell"
-        # -- silently losing the exact guard `find -maxdepth 0 -perm -002`
-        # used to provide regardless of any other bit set (caught in
-        # self-review; no CI leg creates a hook with a special mode bit, so
-        # nothing here would have gone red).
-        #
-        # `${hook_perm: -3}` on a string already 3-or-fewer characters long
-        # returns it unchanged (bash clamps a negative offset past the start
-        # to 0), so an ordinary "755" or a short/malformed "" both take their
-        # original path below. The 3-octal-digit pattern is still what
-        # decides whether the result is trustworthy -- anything else (a
-        # `stat` that emitted no second field, a stray non-numeric byte) is
-        # treated as "cannot tell", the same fail-open direction the old
-        # `find` fallback already took on its own failure.
-        case "${hook_perm: -3}" in
-            [0-7][0-7][0-7])
-                if [ $(( 8#${hook_perm: -3} & 2 )) -ne 0 ]; then
+        # (unlike BSD's `%Lp`) prints the setuid/setgid/sticky bits AHEAD of
+        # the three permission digits when any is set ("1777", not "777"),
+        # and prints no leading zeros at all ("7" for mode 0007). A first
+        # version of this fold matched a fixed 3-digit pattern, which a
+        # sticky-plus-world-writable hook (1777) failed to match, falling
+        # through as "cannot tell" -- silently losing the guard that `find
+        # -maxdepth 0 -perm -002` gave regardless of other bits (caught in
+        # self-review; no CI leg creates a hook with a special mode bit).
+        # So: accept any all-octal string and test the o+w bit with an
+        # arithmetic AND, which ignores every other bit by construction.
+        # Anything else (no second field, a stray non-numeric byte) is
+        # "cannot tell", the same fail-open direction the old `find`
+        # fallback already took on its own failure.
+        case "$hook_perm" in
+            *[!0-7]*|'') ;;
+            *)
+                if [ $(( 8#$hook_perm & 2 )) -ne 0 ]; then
                     _dispatch_report_skip "$event" "${hook##*/}" "world-writable"
                     continue
                 fi
