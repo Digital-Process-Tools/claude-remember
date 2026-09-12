@@ -215,7 +215,17 @@ if [ -d "$REMEMBER_DIR/tmp" ]; then
         # text is $SYS_TMPDIR-rooted and therefore not user-controlled, so
         # it is chained here exactly as before -- only the path THIS block
         # owns goes through the %q fix above.
-        _remember_existing_trap=$(trap -p EXIT 2>/dev/null | sed "s/trap -- '//;s/' EXIT//;s/'\\\\''/'/g")
+        # #679 (part of #660): `trap -p` is a builtin -- `sed` was the only
+        # fork this line paid, at a fixed offset plus one quote-collapse
+        # (undoing `trap -p`'s own re-quoting of an embedded `'`).
+        # Parameter expansion does the identical strip+collapse with zero
+        # forks -- proven byte-identical to the old sed output in
+        # tests/test_session_start_spawn_reduction_679.py.
+        _remember_trap_raw=$(trap -p EXIT 2>/dev/null)
+        _remember_existing_trap="${_remember_trap_raw#trap -- \'}"
+        _remember_existing_trap="${_remember_existing_trap%\' EXIT}"
+        _remember_existing_trap="${_remember_existing_trap//\'\\\'\'/\'}"
+        unset _remember_trap_raw
         if [ -n "$_remember_existing_trap" ]; then
             # shellcheck disable=SC2064
             trap "${_remember_existing_trap}; rm -f ${_remember_relocated_cfg_q}" EXIT

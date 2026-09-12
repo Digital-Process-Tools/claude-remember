@@ -75,14 +75,27 @@ def test_sanctioned_divergence_accepts_post_merge_shape():
 def test_sanctioned_divergence_mixed_states_judge_each_pair_alone():
     """One allowance landed, another still open: the landed one passes
     through, the open one is substituted -- neither state contaminates the
-    other's verdict."""
+    other's verdict.
+
+    Generalized over however many pairs `_SANCTIONED_DIVERGENCE[_REL]`
+    actually carries (#679 added a third, alongside #429/#662's two) --
+    the first pair plays "already landed" (only its new_code appears in
+    ref_code) and every OTHER pair plays "still open" (only its old_code
+    does), so the loop inside `_apply_sanctioned_divergence` sees every
+    pair in a different state at once, not just the first two.
+    """
     if len(_PAIRS) < 2:
         pytest.skip(f"{_REL} carries a single allowance -- no mixed state to pin")
-    (old_a, new_a), (old_b, new_b) = _PAIRS[0], _PAIRS[1]
-    ref_code = f"before\n{new_a}\n{old_b}\nafter"
+    landed_new = _PAIRS[0][1]
+    still_open = _PAIRS[1:]
+    ref_code = "before\n" + landed_new + "\n" + "\n".join(
+        old for old, _ in still_open
+    ) + "\nafter"
     result = _apply_sanctioned_divergence(ref_code, _REL)
-    assert new_a in result and new_b in result
-    assert old_b not in result
+    for old_code, new_code in _PAIRS:
+        assert new_code in result, new_code
+    for old_code, _ in still_open:
+        assert old_code not in result, old_code
 
 
 def test_sanctioned_divergence_still_asserts_when_genuinely_stale():

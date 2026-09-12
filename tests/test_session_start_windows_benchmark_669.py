@@ -127,24 +127,33 @@ SESSION = "ffffffff-0000-4000-8000-000000000669"
 PREV_SESSION = "eeeeeeee-0000-4000-8000-000000000669"
 PREV_SESSION_LINES = 181  # arbitrary, plausible; only its type (an integer) matters
 
-# Measured (OBSERVED, macOS, this file, this commit, AFTER fixing the
-# make_shim_dir/_path_without_jq interaction both self-review spawns caught --
-# see _benchmark()'s own comment) cold/warm spawn counts:
-#   jq present:  cold 76, warm 39
-#   jq absent:   cold 93, warm 78
-# jq absent costs MORE here, not less: _jq_fallback's own single-key lookups
-# and the other jq-absent code paths this hook falls back to are each one
-# extra python3 spawn where jq-present was one jq call, and there is no
-# equivalent of jq's one-process multi-query batching on that path. Budgets
-# carry roughly 2x slack over the observed number, not the tight "+2" margin
-# a single-platform budget can afford -- see the module docstring.
-# MEASURE FIRST on whatever runner reads this, THEN tighten, per the issue's
-# own "Ask" item 5 -- these are deliberately generous starting values, not a
-# claim about what #662-#667 should leave behind.
-JQ_PRESENT_COLD_SPAWN_BUDGET = 160
-JQ_PRESENT_WARM_SPAWN_BUDGET = 120
-JQ_ABSENT_COLD_SPAWN_BUDGET = 160
-JQ_ABSENT_WARM_SPAWN_BUDGET = 140
+# Measured (OBSERVED, macOS, this file, this commit, AFTER #679's fixes --
+# see that issue and this file's own `_path_without_jq` docstring) cold/warm
+# spawn counts:
+#   jq present:  cold 43, warm 24
+#   jq absent:   cold 73, warm 24
+# The #679 finding, in one line: the #668 caches were ALREADY hitting
+# correctly on a warm start for both scenarios -- the "jq-absent warm miss"
+# this issue was filed against was `_path_without_jq`'s own bug (stripping a
+# whole PATH directory that also held `mktemp` on any machine where jq
+# shares one with core tools, e.g. macOS 15+'s /usr/bin), not a defect in
+# detect-tools.sh or lib-memory-context.sh. Once the harness stopped taking
+# mktemp down with it, jq-absent's warm number matches jq-present's exactly
+# (both 24): the fallback's own extra cost is entirely a COLD-run cost
+# (_jq_fallback's per-key python3 spawns on the first, uncached run), and
+# warm reuses the cache regardless of which path filled it. #679 also
+# removed real per-warm-start forks common to BOTH scenarios (a `sed`
+# recovering the EXIT trap in lib-memory-dir.sh and bootstrap-dirs.sh, two
+# `cat`s of small id files, one `cat` of a static prompt file, and one `rm`
+# call merged into another) -- jq present's own warm count dropped from 30
+# to 24 as a result. Budgets carry roughly 2x slack over the observed
+# number, not the tight "+2" margin a single-platform budget can afford --
+# see the module docstring. MEASURE FIRST on whatever runner reads this,
+# THEN tighten.
+JQ_PRESENT_COLD_SPAWN_BUDGET = 90
+JQ_PRESENT_WARM_SPAWN_BUDGET = 50
+JQ_ABSENT_COLD_SPAWN_BUDGET = 150
+JQ_ABSENT_WARM_SPAWN_BUDGET = 50
 
 # A safety net against a genuine hang, not a regression detector -- wall
 # clock is asserted nowhere tighter than this; see the module docstring for
@@ -263,21 +272,96 @@ def _store(tmp_path: Path):
     return home, project, remember
 
 
-def _path_without_jq(path_value: str) -> str:
-    """PATH with every directory that holds a `jq` (or `jq.exe` etc. on
-    Windows) removed -- a real "jq absent" PATH, not a mock, so
-    detect-tools.sh's own `command -v jq` genuinely fails and falls through
-    to `_jq_fallback`. Mirrors the suffix list tests/spawn_counting.py
-    documents for the identical native-Windows-naming reason.
-    """
-    suffixes = [""] if os.name != "nt" else ["", ".exe", ".cmd", ".bat"]
-    kept = []
+def _which(name: str, path_value: str) -> str | None:
+    """The first executable named `name` on `path_value`, PATH-search order
+    -- a tiny, dependency-free stand-in for `shutil.which` that a harness
+    fixture can point at a PATH string that is not the process's own."""
     for entry in path_value.split(os.pathsep):
         if not entry:
             continue
-        has_jq = any((Path(entry) / ("jq" + suf)).is_file() for suf in suffixes)
-        if not has_jq:
+        cand = Path(entry) / name
+        if cand.is_file() and os.access(cand, os.X_OK):
+            return str(cand)
+    return None
+
+
+def _path_without_jq(path_value: str, workdir: Path) -> str:
+    """PATH with every `jq` (or `jq.exe` etc. on Windows) made unreachable --
+    a real "jq absent" PATH, not a mock, so detect-tools.sh's own
+    `command -v jq` genuinely fails and falls through to `_jq_fallback`.
+    Mirrors the suffix list tests/spawn_counting.py documents for the
+    identical native-Windows-naming reason.
+
+    Does NOT drop a PATH entry wholesale just because it holds a `jq` --
+    an earlier version of this helper did, and macOS 15+ ships jq at
+    /usr/bin, the SAME directory as mktemp, cat, wc and sh (Apple's own
+    build: `jq-1.6-...-apple-...`, confirmed by running it directly).
+    Dropping /usr/bin wholesale took mktemp down with it for the whole
+    scenario, cold run included, and every #668 cache's publish step fails
+    silently when its own `mktemp` call fails (by design, for a genuinely
+    read-only filesystem) -- so the resulting "neither cache ever
+    populates" symptom looked exactly like the #679 bug this scenario
+    exists to catch, for a reason that had nothing to do with
+    detect-tools.sh: a genuine Windows/Git-Bash "jq absent" machine has no
+    jq anywhere on PATH at all, so there is no directory to remove and
+    mktemp (bundled with Git for Windows) is never at risk.
+
+    Instead: for each PATH entry that holds a jq, build a view directory
+    under `workdir` holding a tiny exec-shim (the exact `#!/bin/bash` +
+    `exec "<original>" "$@"` shape tests/spawn_counting.py's own
+    `make_shim_dir` already uses) for every OTHER file in it, and
+    substitute that view directory in PATH. A shim that `exec`s the
+    ORIGINAL binary at its ORIGINAL path -- not a byte-copy of it -- is
+    required on macOS specifically: a `shutil.copy2` of a system binary out
+    of /usr/bin was OBSERVED to be killed by the kernel with SIGKILL the
+    instant it ran (`rc=137`, confirmed with `mktemp` on this machine) --
+    Apple's code-signing/AMFI enforcement ties a Mach-O binary's validity
+    to its own signed location, and a copy elsewhere is not a binary the
+    kernel will start at all. A same-path `exec` from a script never
+    touches that check because the ORIGINAL, still-signed binary is what
+    actually runs. Every sibling tool in the directory stays reachable;
+    only jq itself is gone.
+    """
+    suffixes = [""] if os.name != "nt" else ["", ".exe", ".cmd", ".bat"]
+    jq_names = {"jq" + suf for suf in suffixes}
+    kept = []
+    view_counter = 0
+    for entry in path_value.split(os.pathsep):
+        if not entry:
+            continue
+        entry_path = Path(entry)
+        if not any((entry_path / name).is_file() for name in jq_names):
             kept.append(entry)
+            continue
+        if not entry_path.is_dir():
+            # A jq-named file whose parent is not a real, listable
+            # directory (should not happen on a real PATH entry) -- drop it
+            # rather than guess, same as the old behaviour for this one
+            # unreachable corner.
+            continue
+        view_counter += 1
+        view_dir = workdir / f"pathview-{view_counter}"
+        view_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            children = list(entry_path.iterdir())
+        except OSError:
+            continue
+        for child in children:
+            if (
+                child.name in jq_names
+                or not child.is_file()
+                or not os.access(child, os.X_OK)
+            ):
+                continue
+            shim = view_dir / child.name
+            # newline="": see make_shim_dir's own comment -- a shebang line
+            # ending in \r is a broken interpreter directive under Git
+            # Bash/MSYS.
+            with open(shim, "w", encoding="utf-8", newline="") as _f:
+                _f.write("#!/bin/bash\n")
+                _f.write(f'exec "{child.as_posix()}" "$@"\n')
+            shim.chmod(0o755)
+        kept.append(str(view_dir))
     return os.pathsep.join(kept)
 
 
@@ -414,7 +498,7 @@ def _diagnose(env: dict, shims: Path, log: Path, label: str,
 def _benchmark(tmp_path: Path, record_property, *, jq_present: bool,
                 cold_budget: int, warm_budget: int, label: str):
     home, project, remember = _store(tmp_path)
-    base_path = os.environ["PATH"] if jq_present else _path_without_jq(os.environ["PATH"])
+    base_path = os.environ["PATH"] if jq_present else _path_without_jq(os.environ["PATH"], tmp_path)
     env = _env(home, project, remember, base_path)
     log = tmp_path / "spawn.log"
     shims = make_shim_dir(tmp_path, log)

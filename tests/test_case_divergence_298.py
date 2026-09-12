@@ -243,6 +243,30 @@ _SANCTIONED_DIVERGENCE = {
         '    :\n' +
         'elif [ "${#_cfg_sources[@]}" -gt 0 ] && command -v jq >/dev/null 2>&1; then',
         ),
+        (
+            "_existing_trap=$(trap -p EXIT 2>/dev/null | sed \"s/trap -- '//;s/' EXIT//\")\n"
+            "if [ -n \"$_existing_trap\" ]; then\n"
+            "    trap \"${_existing_trap}; rm -f '${_merged_cfg}'\" EXIT\n"
+            "else\n"
+            "    trap \"rm -f '${_merged_cfg}'\" EXIT\n"
+            "fi\n"
+            "unset _existing_trap\n",
+            # #679 (part of #660): `trap -p` is a builtin -- `sed` was the
+            # only fork this line paid, stripping four characters at a
+            # fixed offset. Parameter expansion does the identical strip
+            # with no behaviour change: a prefix/suffix a string does not
+            # have is left unchanged, matching sed on empty input the same
+            # way (no existing trap -> both leave _existing_trap empty).
+            "_t=$(trap -p EXIT 2>/dev/null)\n"
+            "_existing_trap=\"${_t#trap -- \\'}\"\n"
+            "_existing_trap=\"${_existing_trap%\\' EXIT}\"\n"
+            "if [ -n \"$_existing_trap\" ]; then\n"
+            "    trap \"${_existing_trap}; rm -f '${_merged_cfg}'\" EXIT\n"
+            "else\n"
+            "    trap \"rm -f '${_merged_cfg}'\" EXIT\n"
+            "fi\n"
+            "unset _existing_trap _t\n",
+        ),
     ],
 }
 
