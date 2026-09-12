@@ -625,7 +625,13 @@ _REMEMBER_SRC_DIR="${BASH_SOURCE[0]%/*}"
 source "$_REMEMBER_SRC_DIR/lib-clock.sh"
 unset _REMEMBER_SRC_DIR
 
-MEMORY_LOG_DATE=$(_remember_date +%Y-%m-%d)
+# _remember_date_into (lib-clock.sh, #511), not $(_remember_date ...) --
+# this runs unconditionally at the top level every time log.sh is sourced,
+# on every hook invocation, exactly the class of fork #665 (part of #660)
+# exists to remove (found by a self-review round: the top-level call was
+# missed the first pass, log()'s own timestamp a few lines below was not).
+MEMORY_LOG_DATE=""
+_remember_date_into MEMORY_LOG_DATE +%Y-%m-%d
 MEMORY_LOG_FILE="${REMEMBER_LOG_DIR}/memory-${MEMORY_LOG_DATE}.log"
 
 # Log a timestamped message to the daily pipeline log file.
