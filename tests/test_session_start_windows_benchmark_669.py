@@ -152,6 +152,53 @@ JQ_ABSENT_WARM_SPAWN_BUDGET = 140
 WALL_TIME_CEILING_SECONDS = 45.0
 
 
+def _format_benchmark_table(label: str, *, cold_time: float, cold_spawns: list,
+                             warm_time: float, warm_spawns: list) -> str:
+    """#673: the table the issue asks for -- one row per scenario x
+    cold/warm, wall time in whole milliseconds (CI's own summary renderer is
+    Markdown, not a spreadsheet; sub-ms precision is not what a human
+    comparing run over run needs) and the real spawn count beside it. Pure
+    and platform-independent by construction -- it takes numbers in and
+    returns text, so it is tested directly with no subprocess, no tmp_path,
+    and no skip condition of its own."""
+    return (
+        f"### #669 benchmark: `{label}` ({sys.platform})\n"
+        "\n"
+        "| scenario | wall (ms) | spawns |\n"
+        "| --- | --- | --- |\n"
+        f"| cold | {cold_time * 1000:.0f} | {len(cold_spawns)} |\n"
+        f"| warm | {warm_time * 1000:.0f} | {len(warm_spawns)} |\n"
+    )
+
+
+def _append_step_summary(table: str) -> None:
+    """Append `table` to $GITHUB_STEP_SUMMARY, the route the issue names as
+    needing zero workflow-file change: GitHub Actions sets this env var to a
+    real, writable file for every step of every job, and a child process
+    (pytest, here) inherits it like any other env var -- nothing in
+    `.github/workflows/tests.yml` has to name it for that inheritance to
+    happen (verified by reading that file, not assumed from the issue's own
+    "zero workflow change" framing -- #673's own pushback).
+
+    Two failure shapes, deliberately different:
+    - UNSET (the ordinary local `pytest` run, which never has this variable
+      at all) is not a failure: silently doing nothing here is what keeps
+      this file passing off of CI exactly as it did before #673, on every
+      platform the existing matrix already runs it on.
+    - SET but unwritable (a real CI misconfiguration, not a local
+      dev-machine fact) is let through as a genuine OSError rather than
+      caught and swallowed -- a silently-dropped benchmark table is
+      precisely the failure mode #673 exists to fix for the *reading* side,
+      and catching this here would just move the same silent absence to the
+      *writing* side instead.
+    """
+    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not summary_path:
+        return
+    with open(summary_path, "a", encoding="utf-8") as f:
+        f.write(table)
+
+
 def _write_no_crlf(path: Path, text: str) -> None:
     """write_text(..., newline="") without Path.write_text's own newline=
     kwarg, which this repo's own matrix cannot use: it only exists from
@@ -430,12 +477,25 @@ def _benchmark(tmp_path: Path, record_property, *, jq_present: bool,
             f"{jq_calls}\n\n{diag}"
         )
 
-    print(
+    summary_line = (
         f"#669 benchmark [{label}]: "
         f"cold {cold_time:.3f}s / {len(cold_spawns)} spawns, "
         f"warm {warm_time:.3f}s / {len(warm_spawns)} spawns "
         f"(platform={sys.platform}, bash={BASH})"
     )
+    # #673: printed to BOTH streams (the issue's own ask) -- stdout so it
+    # still shows up the way it always has (captured, surfaced by pytest on
+    # a failure), stderr so it reaches a log that shows even when the run as
+    # a whole is green, which is the whole gap #673 exists to close.
+    print(summary_line)
+    print(summary_line, file=sys.stderr)
+    table = _format_benchmark_table(
+        label, cold_time=cold_time, cold_spawns=cold_spawns,
+        warm_time=warm_time, warm_spawns=warm_spawns,
+    )
+    print(table)
+    print(table, file=sys.stderr)
+    _append_step_summary(table)
     record_property(f"remember_benchmark_{label}_cold_seconds", round(cold_time, 3))
     record_property(f"remember_benchmark_{label}_cold_spawns", len(cold_spawns))
     record_property(f"remember_benchmark_{label}_warm_seconds", round(warm_time, 3))
@@ -632,3 +692,63 @@ def test_hook_dir_derivation_needs_a_forward_slash_path(tmp_path):
         f"invoking with .as_posix() (what _run_once now does) must resolve "
         f"_HOOK_DIR to the script's real parent directory: {real_result.stdout!r}"
     )
+
+
+def test_step_summary_table_has_one_row_per_scenario_cold_warm():
+    """#673: the table-building helper must emit exactly the rows the issue
+    asks for -- one per scenario x cold/warm -- with real numbers, not just
+    headers. A row-count-only assertion would pass on an empty table body,
+    so this pins actual values too."""
+    table = _format_benchmark_table(
+        "jq_present", cold_time=2.601, cold_spawns=["a"] * 76,
+        warm_time=0.234, warm_spawns=["b"] * 39,
+    )
+    body_lines = [
+        line for line in table.splitlines()
+        if line.startswith("|") and "---" not in line and "scenario" not in line
+    ]
+    assert len(body_lines) == 2, f"expected exactly 2 data rows, got: {body_lines}"
+    assert "2601" in body_lines[0] and "76" in body_lines[0]
+    assert "234" in body_lines[1] and "39" in body_lines[1]
+
+
+def test_step_summary_written_when_env_set(tmp_path, monkeypatch):
+    """Positive control: with GITHUB_STEP_SUMMARY pointing at a real,
+    writable file, appending must land the table's own text in that file."""
+    summary = tmp_path / "summary.md"
+    summary.write_text("", encoding="utf-8")
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    table = _format_benchmark_table(
+        "jq_present", cold_time=1.0, cold_spawns=["a"], warm_time=0.5, warm_spawns=["b"],
+    )
+    _append_step_summary(table)
+    written = summary.read_text(encoding="utf-8")
+    assert "jq_present" in written
+    assert "1000" in written  # cold wall-ms
+
+
+def test_step_summary_skipped_silently_when_env_unset(monkeypatch):
+    """Negative control, paired with the 'must fire' case above: the common
+    local-pytest-run case (no GITHUB_STEP_SUMMARY at all) must NOT raise --
+    otherwise this file would start failing the existing test matrix's own
+    local/dev runs, which never set this variable (#673's own hidden
+    judgment call)."""
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    table = _format_benchmark_table(
+        "jq_present", cold_time=1.0, cold_spawns=[], warm_time=0.5, warm_spawns=[],
+    )
+    _append_step_summary(table)  # must not raise
+
+
+def test_step_summary_raises_loudly_when_path_unwritable(tmp_path, monkeypatch):
+    """Negative control's OTHER half, from the issue's own wording: a
+    genuinely unwritable path (set, but pointing at a directory that does
+    not exist) must fail LOUDLY, not be swallowed -- a silent except would
+    make a real CI misconfiguration invisible forever."""
+    unwritable = tmp_path / "does" / "not" / "exist" / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(unwritable))
+    table = _format_benchmark_table(
+        "jq_present", cold_time=1.0, cold_spawns=[], warm_time=0.5, warm_spawns=[],
+    )
+    with pytest.raises(OSError):
+        _append_step_summary(table)
