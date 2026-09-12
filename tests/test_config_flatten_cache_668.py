@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -309,12 +310,16 @@ def test_planted_cache_in_old_project_path_is_never_executed(tmp_path):
 
 
 def test_malformed_line_in_new_cache_location_is_rejected_not_executed(tmp_path):
-    """The second #682 half: even at the new (system-tmp-dir) location, the
-    loader must not trust `source`. A line the publisher could never write
-    -- here, one with an unquoted second word and a `;` -- must reject the
-    WHOLE cache before anything is evaluated, remove the poisoned file, and
-    still resolve the config correctly by falling through to a real
-    flatten."""
+    """The second #682 half, name-check side: even at the new (system-tmp-
+    dir) location, the loader must not trust `source`. A line whose NAME
+    does not even carry the `_RCFG_` prefix the publisher always writes --
+    here, `SOME_VAR=...` -- must be rejected on that alone, remove the
+    poisoned file, and still resolve the config correctly by falling
+    through to a real flatten. This case alone does not prove the VALUE-
+    shape validator is doing any work (a wrong-prefix line is rejected
+    before `_remember_cfg_flatten_cache_valid_value` is ever reached) --
+    see test_malformed_value_with_a_correct_name_prefix_is_rejected_not_executed
+    just below for that."""
     home, project, remember = _project(tmp_path)
     cfg = remember / "config.json"
     cfg.write_text(json.dumps({"cooldowns": {"save_seconds": 42}}), encoding="utf-8")
@@ -352,3 +357,149 @@ def test_malformed_line_in_new_cache_location_is_rejected_not_executed(tmp_path)
         )
     else:
         pass  # also acceptable: rejection removed it and nothing republished
+
+
+def test_malformed_value_with_a_correct_name_prefix_is_rejected_not_executed(tmp_path):
+    """The second #682 half, VALUE-shape side. The sibling test just above
+    plants a line whose NAME already fails the `_RCFG_` prefix check --
+    which proves nothing about `_remember_cfg_flatten_cache_valid_value`,
+    the function that actually decides whether a value shaped like `%q`
+    output is safe to `eval`. This plants a line with a fully correct,
+    real-looking name (`_RCFG_cooldowns_save_seconds=`) carrying a value a
+    real `%q` conversion could never produce -- unescaped command
+    substitution -- so only the VALUE check stands between it and
+    execution."""
+    home, project, remember = _project(tmp_path)
+    cfg = remember / "config.json"
+    cfg.write_text(json.dumps({"cooldowns": {"save_seconds": 42}}), encoding="utf-8")
+
+    _lines1, result1, sys_tmp = _run_with_shim(tmp_path, home, project)
+    assert result1.returncode == 0, (result1.stdout, result1.stderr)
+    caches = cache_files(sys_tmp)
+    assert caches, f"no flattened-config cache ({CACHE_GLOB}) was published under {sys_tmp}"
+    cache = caches[0]
+
+    marker = tmp_path / "pwned-682-value-marker"
+    good = cache.read_text(encoding="utf-8")
+    corrupted = good + f'_RCFG_cooldowns_save_seconds=$(touch "{marker.as_posix()}")\n'
+    cache.write_text(corrupted, encoding="utf-8")
+    now = time.time()
+    os.utime(cache, (now + 5, now + 5))
+
+    # Positive control: `eval`ing this exact line, with nothing in the way,
+    # must actually create the marker -- otherwise the negative assertion
+    # below would pass even if the value check were deleted outright.
+    assert not marker.exists()
+    subprocess.run(
+        [BASH, "-c", f'eval \'_RCFG_x=$(touch "{marker.as_posix()}")\''],
+        capture_output=True, text=True, timeout=10, check=False,
+    )
+    assert marker.exists(), (
+        "positive control failed: eval-ing the malicious value directly "
+        "did not create the marker -- the harness cannot see execution"
+    )
+    marker.unlink()
+
+    lines2, result2, _sys_tmp2 = _run_with_shim(tmp_path, home, project, sys_tmp=sys_tmp)
+    assert result2.returncode == 0, (result2.stdout, result2.stderr)
+    assert not marker.exists(), (
+        f"a malformed cache VALUE (correct name, unescaped $(...)) was "
+        f"evaluated as shell: {lines2}"
+    )
+    assert "42" in result2.stdout, (
+        "the malformed cache was not cleanly rejected -- config resolution "
+        f"did not fall through to a correct real flatten: {result2.stdout!r}"
+    )
+    if cache.exists():
+        assert marker.as_posix() not in cache.read_text(encoding="utf-8"), (
+            "the rejected cache was republished still carrying the "
+            "malformed value -- the poison survived the rejection"
+        )
+
+
+def test_a_zero_byte_cache_is_rejected_not_treated_as_an_empty_hit(tmp_path):
+    """A genuinely empty config (zero flattened keys) still publishes a
+    cache -- just one carrying no `_RCFG_*` lines. Before the identity line
+    the loader now always requires as its first line, a cache file reduced
+    to zero bytes by anything OTHER than the normal publish path (an
+    external truncate, a half-finished write that somehow kept a fresh
+    mtime) was indistinguishable from that legitimate "zero keys" case: the
+    validate loop simply never ran its body, and the loader returned a
+    clean hit. Pin that this can no longer happen: a hand-planted, genuinely
+    empty file at the real cache location must be rejected, not read as
+    "nothing to say"."""
+    home, project, remember = _project(tmp_path)
+    cfg = remember / "config.json"
+    cfg.write_text(json.dumps({"cooldowns": {"save_seconds": 42}}), encoding="utf-8")
+
+    # Publish once for real, so the cache path this test plants over is the
+    # one the loader will actually look at.
+    _lines1, result1, sys_tmp = _run_with_shim(tmp_path, home, project)
+    assert result1.returncode == 0, (result1.stdout, result1.stderr)
+    caches = cache_files(sys_tmp)
+    assert caches, f"no flattened-config cache ({CACHE_GLOB}) was published under {sys_tmp}"
+    cache = caches[0]
+
+    cache.write_text("", encoding="utf-8")
+    now = time.time()
+    os.utime(cache, (now + 5, now + 5))
+
+    _lines2, result2, _sys_tmp2 = _run_with_shim(tmp_path, home, project, sys_tmp=sys_tmp)
+    assert result2.returncode == 0, (result2.stdout, result2.stderr)
+    assert "42" in result2.stdout, (
+        "a zero-byte cache was treated as a clean, valid hit instead of "
+        f"being rejected and falling through to a real flatten: {result2.stdout!r}"
+    )
+
+
+def test_two_projects_whose_mangled_paths_collide_never_share_a_config(tmp_path):
+    """The cache filename is a MANY-to-one mangling of REMEMBER_DIR (every
+    non-alnum character collapses to `-`), so two different project paths
+    that differ only in which separator they use at the same position can
+    land on the identical cache filename -- verified directly: mangling
+    both "my.project" and "my-project" produces the string "my-project".
+    Without an identity check inside the file itself, the second project
+    to publish would silently read back the FIRST project's config on
+    every subsequent hit. This drives that exact collision through the
+    real chain for two sibling projects and asserts the second one's own
+    config value is never shadowed by the first's."""
+    home = tmp_path / "home"
+    (home / ".remember").mkdir(parents=True)
+    project_a = tmp_path / "my.project"
+    project_b = tmp_path / "my-project"
+    remember_a = project_a / ".remember"
+    remember_b = project_b / ".remember"
+    (remember_a / "tmp").mkdir(parents=True)
+    (remember_b / "tmp").mkdir(parents=True)
+    # Mirrors log.sh's own `${REMEMBER_DIR//[!a-zA-Z0-9]/-}` mangling
+    # exactly (every non-alnum character, not just the dot) -- so this
+    # checks the actual collision the cache filename would hit, not an
+    # approximation of it.
+    mangle = lambda p: re.sub(r"[^A-Za-z0-9]", "-", str(p))
+    assert mangle(remember_a) == mangle(remember_b), (
+        "test setup assumption broke -- these two paths no longer mangle "
+        "to the same filename, so this test would not be reproducing the "
+        "collision it claims to"
+    )
+
+    (remember_a / "config.json").write_text(
+        json.dumps({"cooldowns": {"save_seconds": 111}}), encoding="utf-8"
+    )
+    (remember_b / "config.json").write_text(
+        json.dumps({"cooldowns": {"save_seconds": 222}}), encoding="utf-8"
+    )
+
+    # Publish A first, so if B's load ever fell through to A's file by
+    # mistake, B would read A's value (111) instead of its own (222).
+    _lines_a, result_a, sys_tmp = _run_with_shim(tmp_path, home, project_a)
+    assert result_a.returncode == 0, (result_a.stdout, result_a.stderr)
+    assert "111" in result_a.stdout
+
+    _lines_b, result_b, _sys_tmp_b = _run_with_shim(
+        tmp_path, home, project_b, sys_tmp=sys_tmp
+    )
+    assert result_b.returncode == 0, (result_b.stdout, result_b.stderr)
+    assert "222" in result_b.stdout, (
+        "project B read project A's flattened config through a colliding "
+        f"mangled cache filename: {result_b.stdout!r}"
+    )

@@ -310,34 +310,56 @@ _remember_cfg_flatten_cache_is_standard_merge() {
     esac
 }
 
-# A single cache line must be exactly `_RCFG_<name>=<value>` -- see the #682
-# block comment above this whole section for what <name> and <value> are
-# each allowed to be, and why. Returns 1 for anything else, including a line
-# with no `=`, an empty value (the publisher always writes `''` for an empty
-# string, never nothing), or a raw, unescaped shell metacharacter anywhere
-# in the value.
-_remember_cfg_flatten_cache_valid_line() {
-    local _line="$1"
-    [[ "$_line" =~ ^_RCFG_[A-Za-z0-9_]+= ]] || return 1
-    local _value="${_line#*=}"
+# Every value this cache ever writes -- both the config `_RCFG_*` lines
+# below and the REMEMBER_DIR identity line the loader checks against -- is
+# one of the handful of shapes bash's own `%q` conversion ever produces for
+# a single word: `''` (empty), `$'...'` (any control character present --
+# real quoting, so a bare `;`/`|`/`&` INSIDE it is inert, only a raw,
+# unescaped closing `'` could break out, and the character class below
+# excludes that), or a run of characters %q never escapes plus backslash-
+# escaped pairs for everything else. Returns 1 for anything else, including
+# an empty value (the publisher always writes `''` for an empty string,
+# never nothing) or a raw, unescaped shell metacharacter anywhere in it.
+#
+# `~` is deliberately NOT in the plain form's safe-character whitelist even
+# though %q sometimes leaves one bare (`a~b`, `foo/~bar` -- harmless,
+# embedded, no word boundary for tilde-expansion to trigger on): %q ALWAYS
+# escapes a LEADING tilde (`printf %q '~foo'` -> `\~foo`), because bash
+# performs tilde-expansion on the text right after a `=` in an assignment,
+# and `eval "$name=~foo"` would substitute a home directory instead of
+# assigning the literal string. A bare leading tilde is therefore a shape
+# the publisher could never have produced and is rejected outright, by
+# position, before the general character-class check ever runs -- a
+# non-leading one still passes it further down, since it is inert there and
+# %q is not guaranteed to escape it.
+_remember_cfg_flatten_cache_valid_value() {
+    local _value="$1"
     [ -n "$_value" ] || return 1
     # %q's own empty-string spelling.
     [ "$_value" = "''" ] && return 0
-    # %q's control-character form: real quoting, so a bare `;`/`|`/`&`
-    # INSIDE it is inert -- only a raw, unescaped closing `'` could break
-    # out, and the character class below excludes that.
     if [[ "$_value" =~ ^\$\'(\\.|[^\\\'])*\'$ ]]; then
         return 0
     fi
-    # %q's plain form: every character is either one %q never escapes, or a
-    # backslash followed by exactly one more character -- the escape pair
-    # %q emits for anything else. A bare, unescaped `;`, `$(`, backtick,
-    # `|`, `&`, quote or whitespace character matches neither alternative
-    # and rejects the whole line.
-    if [[ "$_value" =~ ^(\\.|[A-Za-z0-9_./:@%,+=~-])*$ ]]; then
+    case "$_value" in
+        \~*) return 1 ;;
+    esac
+    # A bare, unescaped `;`, `$(`, backtick, `|`, `&`, quote, comma, brace
+    # or whitespace character matches neither alternative below and rejects
+    # the whole value.
+    if [[ "$_value" =~ ^(\\.|[A-Za-z0-9_./:@%+=~-])*$ ]]; then
         return 0
     fi
     return 1
+}
+
+# A single config-data cache line must be exactly `_RCFG_<name>=<value>` --
+# see _remember_cfg_flatten_cache_valid_value just above for what <value> is
+# allowed to be, and the #682 block comment above this whole section for
+# what <name> is guaranteed to be (and why that guarantee holds).
+_remember_cfg_flatten_cache_valid_line() {
+    local _line="$1"
+    [[ "$_line" =~ ^_RCFG_[A-Za-z0-9_]+= ]] || return 1
+    _remember_cfg_flatten_cache_valid_value "${_line#*=}"
 }
 
 _remember_cfg_flatten_cache_load() {
@@ -366,10 +388,48 @@ EOF
     # still not enough on its own. Two passes on purpose: collecting every
     # line first means a cache that fails on its LAST line never partially
     # executes its first N-1.
-    local _line _lines=()
+    #
+    # The FIRST line must be the REMEMBER_DIR identity line the publisher
+    # now always writes first (see below): the filename this cache lives at
+    # is a MANY-to-one mangling of REMEMBER_DIR (every non-alnum character
+    # collapses to `-`), so two different project paths that differ only in
+    # which separator they use at the same position -- `my.project` and
+    # `my-project` both mangle to `my-project` -- can land on the identical
+    # cache filename. Without an identity check inside the file itself, the
+    # second project to publish would silently read back the FIRST
+    # project's flattened config on every subsequent hit: exactly the
+    # "silently serve stale/wrong content" failure #668's own design
+    # forbids, just via a different door than the mtime check closes. A
+    # cache file with no identity line at all -- including a fully empty
+    # (zero-byte) one, from external truncation/corruption rather than a
+    # genuinely empty config, which the publisher always writes an identity
+    # line for even when the config is empty -- is unrecognised and
+    # rejected outright, never treated as "zero keys and a clean hit".
+    # `#` rather than `_RCFG_`: no row the flattener ever emits begins with
+    # `#` (see the flattener's own comment further up this file), so this
+    # shape can never collide with a real config key's own line, unlike
+    # reusing the `_RCFG_` namespace would risk.
+    local _line _lines=() _first=1 _identity_raw=""
     while IFS= read -r _line || [ -n "$_line" ]; do
         _line="${_line%$'\r'}"
         [ -n "$_line" ] || continue
+        if [ "$_first" = "1" ]; then
+            _first=0
+            case "$_line" in
+                '#REMEMBER_DIR='*)
+                    _identity_raw="${_line#'#REMEMBER_DIR='}"
+                    _remember_cfg_flatten_cache_valid_value "$_identity_raw" || {
+                        rm -f "$_f" 2>/dev/null
+                        return 1
+                    }
+                    continue
+                    ;;
+                *)
+                    rm -f "$_f" 2>/dev/null
+                    return 1
+                    ;;
+            esac
+        fi
         if ! _remember_cfg_flatten_cache_valid_line "$_line"; then
             # Distrust the WHOLE file, and remove it: the next start must not
             # re-read the same poison and re-pay this same rejection forever.
@@ -378,13 +438,22 @@ EOF
         fi
         _lines[${#_lines[@]}]="$_line"
     done < "$_f"
+    # No lines at all (including "no identity line" -- see above): reject.
+    [ "$_first" = "0" ] || { rm -f "$_f" 2>/dev/null; return 1; }
+
+    local _identity
+    eval "_identity=$_identity_raw"
+    [ "$_identity" = "${REMEMBER_DIR:-}" ] || {
+        rm -f "$_f" 2>/dev/null
+        return 1
+    }
 
     local _assign
     for _assign in ${_lines[@]+"${_lines[@]}"}; do
         # shellcheck disable=SC1090  # each $_assign already passed
         # _remember_cfg_flatten_cache_valid_line above: it is exactly one
-        # `_RCFG_name=value` word, where `value` is one of the three shapes
-        # %q ever emits, so this evaluates a plain assignment and nothing
+        # `_RCFG_name=value` word, where `value` is one of the shapes %q
+        # ever emits, so this evaluates a plain assignment and nothing
         # else, by construction -- never a blanket `source` of bytes that
         # were never inspected.
         eval "$_assign"
@@ -400,11 +469,21 @@ _remember_cfg_flatten_cache_publish() {
     _f=$(_remember_cfg_flatten_cache_path) || return 0
     local _dir
     _dir="${_f%/*}"
-    mkdir -p "$_dir" 2>/dev/null || return 0
+    # Guarded, not unconditional (matching the same convention this file's
+    # own $REMEMBER_LOG_DIR creation already uses, and for the same reason
+    # its comment gives): the target is now `${TMPDIR:-/tmp}` itself (#682),
+    # which is essentially always already present, so re-asking `mkdir`
+    # every single publish would cost a process per cache-miss run to learn
+    # nothing new almost every time.
+    [ -d "$_dir" ] || mkdir -p "$_dir" 2>/dev/null || return 0
     local _t
     _t=$(mktemp "${_f}.XXXXXX" 2>/dev/null) || return 0
     local _k _v
     {
+        # Identity line FIRST, always -- see the #682 comment in the loader
+        # above for why a file at this (many-to-one-mangled) path cannot be
+        # trusted without one.
+        printf '#REMEMBER_DIR=%q\n' "${REMEMBER_DIR:-}"
         while IFS=$'\t' read -r _k _v; do
             [ -n "$_k" ] || continue
             printf '_RCFG_%s=%q\n' "${_k//./_}" "$_v"
