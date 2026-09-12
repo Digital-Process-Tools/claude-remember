@@ -532,14 +532,42 @@ def test_hook_dir_derivation_needs_a_forward_slash_path(tmp_path):
     platform-specific reasoning required, is the `%/*` operator itself: it
     is applied to a real, readable variable (not the unsettable
     `BASH_SOURCE`), driven by the exact pattern/fallback the two lines use.
+
+    The fake value under test travels through an ENVIRONMENT VARIABLE, not
+    argv, and the probe script is a real FILE invoked by path rather than
+    inline `bash -c "<script>"` text. tests/test_fast_path_subshells_511.py
+    already documents why, for the same hazard: on Windows,
+    subprocess.run's argv list is re-flattened into a single command line
+    by Python's own MSVCRT-style quoting rules (subprocess.list2cmdline)
+    before CreateProcess hands it to bash.exe, and MSYS's own argv
+    re-parsing of that line does not agree with it on a string carrying
+    embedded double quotes -- which a `bash -c` command built from this
+    snippet necessarily does (`"${FAKE_SOURCE%/*}"`, `"$_HOOK_DIR"`, etc.).
+    An earlier version of this test passed both the script AND the fake
+    path through argv and failed on EVERY Windows leg, at the FIRST
+    (plain-POSIX, no-backslash) case -- with an empty stderr and a garbled
+    `args` repr in the failure message, consistent with the argv/CreateProcess
+    round-trip corrupting the command text before bash ever saw it, not
+    with anything in this test's own Python-side string construction (which
+    this file's own local run, and the CI job's own observed content right
+    up to the point of corruption, both show is correct). An environment
+    variable is passed as an already-decoded block with no command-line
+    re-quoting step in between, sidestepping the whole cross-runtime
+    quoting question -- the identical fix #511's own test made for the
+    identical reason.
     """
     snippet = _extract_hook_dir_lines().replace("BASH_SOURCE[0]", "FAKE_SOURCE")
+    probe_script = tmp_path / "hook_dir_probe.sh"
+    probe_script.write_text(
+        'FAKE_SOURCE="$FAKE_SOURCE_ENV"\n' + snippet + '\necho "HOOK_DIR=$_HOOK_DIR"\n',
+        encoding="utf-8", newline="",
+    )
 
     def _probe(fake_source: str) -> str:
+        env = {**os.environ, "FAKE_SOURCE_ENV": fake_source}
         result = subprocess.run(
-            ["bash", "-c", f'FAKE_SOURCE="$1"; {snippet}; echo "HOOK_DIR=$_HOOK_DIR"',
-             "--", fake_source],
-            capture_output=True, text=True, timeout=10, check=False,
+            ["bash", probe_script.as_posix()],
+            env=env, capture_output=True, text=True, timeout=10, check=False,
         )
         assert result.returncode == 0, result.stderr
         return result.stdout.strip()
