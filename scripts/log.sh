@@ -316,24 +316,50 @@ _remember_cfg_flatten_cache_is_standard_merge() {
 # a single word: `''` (empty), `$'...'` (any control character present --
 # real quoting, so a bare `;`/`|`/`&` INSIDE it is inert, only a raw,
 # unescaped closing `'` could break out, and the character class below
-# excludes that), or a run of characters %q never escapes plus backslash-
-# escaped pairs for everything else. Returns 1 for anything else, including
-# an empty value (the publisher always writes `''` for an empty string,
-# never nothing) or a raw, unescaped shell metacharacter anywhere in it.
+# excludes that), or a run of characters plus backslash-escaped pairs for
+# everything else. Returns 1 for anything else, including an empty value
+# (the publisher always writes `''` for an empty string, never nothing) or
+# a raw, unescaped shell metacharacter anywhere in it.
 #
-# `~` is deliberately NOT in the plain form's safe-character whitelist even
-# though %q sometimes leaves one bare (`a~b`, `foo/~bar` -- harmless,
-# embedded, no word boundary for tilde-expansion to trigger on): %q ALWAYS
-# escapes a LEADING tilde (`printf %q '~foo'` -> `\~foo`), because bash
-# performs tilde-expansion on the text right after a `=` in an assignment,
-# and `eval "$name=~foo"` would substitute a home directory instead of
-# assigning the literal string. A bare leading tilde is therefore a shape
-# the publisher could never have produced and is rejected outright, by
-# position, before the general character-class check ever runs -- a
-# non-leading one still passes it further down, since it is inert there and
-# %q is not guaranteed to escape it.
+# The plain-form check below is a BLACKLIST of what can actually change how
+# `eval "NAME=value"` parses a single plain assignment word -- unescaped
+# whitespace, `;` `&` `|` `(` `)` `<` `>` (word/control operators), `$` and
+# backtick (expansion), `'` and `"` (quoting) -- rather than a whitelist of
+# bytes %q is known to leave bare. An ASCII whitelist (an earlier shape of
+# this check) rejected two things %q plainly leaves bare and unescaped on
+# every bash tested (3.2 and 5): a mid-word `#` (`printf %q 'a#b'` ->
+# `a#b`), and any non-ASCII byte (`héllo`, `日本`) -- and a rejection here is
+# not a miss, it is `rm -f` on the cache followed by a full republish on
+# every single subsequent run, forever, for that value. Everything the
+# blacklist does not name (`#`, `,`, `*?[]{}!^`, non-ASCII bytes) is inert
+# inside a plain assignment value and is either left bare by %q or already
+# covered by the `\.` escaped-pair alternative.
+#
+# `~` is handled by position, not by the character class, in both
+# directions bash tilde-expands an assignment word from: a LEADING tilde
+# (`eval "$name=~foo"` substitutes a home directory), which %q ALWAYS
+# escapes (`printf %q '~foo'` -> `\~foo`) so a bare one is a shape the
+# publisher could never have produced; and a tilde immediately after an
+# unquoted `:` (`eval "$name=a:~"` substitutes one there too, per bash's
+# own assignment-specific tilde-expansion rule), which %q escapes on bash 5
+# (`a:~` -> `a:\~`) but NOT on bash 3.2 (macOS's stock `/bin/bash`; `a:~`
+# stays `a:~`, and `eval "v=a:~"` on 3.2 observably substitutes a real home
+# directory). Both positions are rejected outright, before the general
+# character-class check ever runs; a tilde anywhere else is inert and
+# still passes it further down, since %q is not guaranteed to escape it.
+#
+# `local LC_ALL=C` for the duration of this function only (restored on
+# return, never leaks to the caller): `[[ =~ ]]`'s character classes are
+# locale-dependent, and bash 3.2's own `%q` output for some multi-byte
+# UTF-8 input mixes raw bytes with `\NNN` octal escapes byte-by-byte in a
+# way that is not itself valid UTF-8 -- observed to make the very same
+# regex silently NOT match under an inherited UTF-8 locale, even though the
+# value still round-trips correctly through `eval`. Byte-wise (C-locale)
+# matching sees exactly the bytes %q actually wrote and is what the
+# character classes above are written against.
 _remember_cfg_flatten_cache_valid_value() {
     local _value="$1"
+    local LC_ALL=C
     [ -n "$_value" ] || return 1
     # %q's own empty-string spelling.
     [ "$_value" = "''" ] && return 0
@@ -342,11 +368,9 @@ _remember_cfg_flatten_cache_valid_value() {
     fi
     case "$_value" in
         \~*) return 1 ;;
+        *:\~*) return 1 ;;
     esac
-    # A bare, unescaped `;`, `$(`, backtick, `|`, `&`, quote, comma, brace
-    # or whitespace character matches neither alternative below and rejects
-    # the whole value.
-    if [[ "$_value" =~ ^(\\.|[A-Za-z0-9_./:@%+=~-])*$ ]]; then
+    if [[ "$_value" =~ ^(\\.|[^\\\$\`\'\"\;\&\|\(\)\<\>[:space:]])*$ ]]; then
         return 0
     fi
     return 1

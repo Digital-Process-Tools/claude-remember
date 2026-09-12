@@ -503,3 +503,253 @@ def test_two_projects_whose_mangled_paths_collide_never_share_a_config(tmp_path)
         "project B read project A's flattened config through a colliding "
         f"mangled cache filename: {result_b.stdout!r}"
     )
+
+
+# Coordinator follow-up review of the #682 fix above: `_remember_cfg_flatten_
+# cache_valid_value`'s plain-form branch was an ASCII whitelist
+# (`[A-Za-z0-9_./:@%+=~-]`) rather than a blacklist of what can actually
+# change how `eval "NAME=value"` parses a single plain assignment. Two
+# concrete costs of that over-narrow whitelist, both silent: any config
+# value containing `#` (a real, unremarkable byte -- e.g. `#deadbeef` as a
+# tag) or any non-ASCII byte (an accented or CJK path/value) was REJECTED
+# by a validator whose whole job is to accept everything `%q` actually
+# produces, and a rejection here is not just a missed hit -- the loader
+# `rm -f`s the file and the publisher republishes it on every single run
+# (mktemp + rm each time), forever, for that user. Separately: bash 3.2
+# (macOS's stock /bin/bash) tilde-expands after an unquoted `:` in an
+# assignment, not just at the start of the word, and 3.2's own `%q` does
+# NOT escape a tilde in that position (`printf %q 'a:~'` -> `a:~`, whereas
+# bash 5's does: `a:\~`) -- so a value shaped like `foo:~/bar` reaching the
+# blanket `eval` on 3.2 alone would substitute a home directory instead of
+# assigning the literal string.
+def _macos_system_bash():
+    """The specific `/bin/bash` (stock, unreplaced, bash 3.2.57) macOS ships
+    -- the interpreter finding 3 above is about. `resolve_bash()` (used by
+    every other test in this file) follows PATH, which on a dev machine
+    with Homebrew's bash ahead of `/bin` in PATH resolves to bash 5 instead
+    -- silently missing the one interpreter this specific behaviour needs."""
+    if sys.platform == "win32":
+        return None
+    candidate = "/bin/bash"
+    if not os.path.isfile(candidate):
+        return None
+    probe = subprocess.run(
+        [candidate, "-c", "echo $BASH_VERSION"],
+        capture_output=True, text=True, timeout=10, check=False,
+    )
+    if probe.returncode != 0:
+        return None
+    return candidate
+
+
+MACOS_SYSTEM_BASH = _macos_system_bash()
+
+
+def _run_with_shim_using(bash_path: str, tmp_path: Path, home: Path, project: Path, *, sys_tmp: Path | None = None):
+    """Same as `_run_with_shim` above, but against a caller-chosen bash
+    executable instead of the module-level `BASH` -- needed to pin down
+    behaviour that is specific to one interpreter (bash 3.2), not whichever
+    bash happens to be first on this machine's PATH."""
+    log = tmp_path / "spawn.log"
+    shims = make_shim_dir(tmp_path, log)
+    sys_tmp = sys_tmp if sys_tmp is not None else (tmp_path / "systmp")
+    sys_tmp.mkdir(parents=True, exist_ok=True)
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "CLAUDE_PROJECT_DIR": str(project),
+        "CLAUDE_PLUGIN_ROOT": str(REPO_ROOT),
+        "REMEMBER_HOOK_CWD": str(project),
+        "SPAWN_LOG": str(log),
+        "TMPDIR": str(sys_tmp),
+        "PATH": f"{shims}{os.pathsep}{os.environ['PATH']}",
+    }
+    result = subprocess.run(
+        [bash_path, "-c", HARNESS], env=env, capture_output=True, text=True, timeout=30, check=False,
+    )
+    return spawns(log), result, sys_tmp
+
+
+def test_hash_comma_and_non_ascii_values_round_trip_through_a_warm_hit(tmp_path):
+    """Positive control for the whitelist-too-narrow finding: a config value
+    containing `#`, `,`, and accented Latin text (all bytes a real config
+    value can plainly carry, and all bytes `%q` leaves bare rather than
+    escaping) must survive a cold publish AND a warm load -- the warm run
+    must be an actual cache HIT (jq never forks again), not just "the
+    right value, because it fell through to a real flatten every time"."""
+    home, project, remember = _project(tmp_path)
+    cfg = remember / "config.json"
+    cfg.write_text(json.dumps({"probe": "a#b,héllo"}), encoding="utf-8")
+
+    lines1, result1, sys_tmp = _run_with_shim(tmp_path, home, project)
+    assert result1.returncode == 0, (result1.stdout, result1.stderr)
+
+    caches = cache_files(sys_tmp)
+    assert caches, f"no flattened-config cache ({CACHE_GLOB}) was published under {sys_tmp}"
+    cache = caches[0]
+    # Force the cache strictly newer than the config layer, independent of
+    # which second the two writes above landed in.
+    now = time.time()
+    os.utime(cache, (now + 5, now + 5))
+
+    harness2 = HARNESS.replace(
+        'config ".cooldowns.save_seconds" "default"',
+        'config ".probe" "default"',
+    )
+    log2 = tmp_path / "spawn2.log"
+    shims2 = make_shim_dir(tmp_path, log2)
+    env2 = {
+        **os.environ,
+        "HOME": str(home),
+        "CLAUDE_PROJECT_DIR": str(project),
+        "CLAUDE_PLUGIN_ROOT": str(REPO_ROOT),
+        "REMEMBER_HOOK_CWD": str(project),
+        "SPAWN_LOG": str(log2),
+        "TMPDIR": str(sys_tmp),
+        "PATH": f"{shims2}{os.pathsep}{os.environ['PATH']}",
+    }
+    result2 = subprocess.run(
+        [BASH, "-c", harness2], env=env2, capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert result2.returncode == 0, (result2.stdout, result2.stderr)
+    assert "a#b,héllo" in result2.stdout, (
+        "a config value containing '#', ',' and accented text did not "
+        f"round-trip through the flatten cache: {result2.stdout!r}"
+    )
+    lines2 = spawns(log2)
+    flatten_spawns_2 = [l for l in lines2 if l.startswith("jq ") and "paths(" in l]
+    assert not flatten_spawns_2, (
+        "the warm run re-forked jq's flattener instead of hitting the cache -- "
+        f"the value was rejected by the validator and re-flattened: {lines2}"
+    )
+
+
+def test_non_ascii_project_path_identity_line_still_hits_warm(tmp_path):
+    """The identity line the loader checks (`#REMEMBER_DIR=%q`) goes
+    through the exact same value validator as every `_RCFG_*` line. A
+    project path with a non-ASCII component (e.g. a user directory named
+    after themselves) must not make that identity line itself unreadable --
+    that would make the cache permanently cold for that user, every run,
+    forever, with no config value involved at all."""
+    home = tmp_path / "home"
+    project = tmp_path / "José-project"
+    remember = project / ".remember"
+    (remember / "tmp").mkdir(parents=True)
+    (home / ".remember").mkdir(parents=True)
+    cfg = remember / "config.json"
+    cfg.write_text(json.dumps({"cooldowns": {"save_seconds": 42}}), encoding="utf-8")
+
+    lines1, result1, sys_tmp = _run_with_shim(tmp_path, home, project)
+    assert result1.returncode == 0, (result1.stdout, result1.stderr)
+    assert "42" in result1.stdout
+
+    caches = cache_files(sys_tmp)
+    assert caches, f"no flattened-config cache ({CACHE_GLOB}) was published under {sys_tmp}"
+    cache = caches[0]
+    # Force the cache strictly newer than the config layer, independent of
+    # which second the two writes above landed in (same convention as
+    # test_second_run_with_unchanged_config_skips_the_flatten_fork above).
+    now = time.time()
+    os.utime(cache, (now + 5, now + 5))
+
+    lines2, result2, _sys_tmp2 = _run_with_shim(tmp_path, home, project, sys_tmp=sys_tmp)
+    assert result2.returncode == 0, (result2.stdout, result2.stderr)
+    assert "42" in result2.stdout
+    flatten_spawns_2 = [l for l in lines2 if l.startswith("jq ") and "paths(" in l]
+    assert not flatten_spawns_2, (
+        "a non-ASCII REMEMBER_DIR made the identity line fail validation, "
+        f"forcing a cold re-flatten on every run: {lines2}"
+    )
+
+
+@pytest.mark.parametrize(
+    "bad_value,desc",
+    [
+        ("x y", "unescaped space"),
+        ("x;y", "unescaped semicolon"),
+        ("x$(y)", "unescaped command substitution"),
+        ("x`y`", "unescaped backtick"),
+        ("x|y", "unescaped pipe"),
+        ("x'y", "unescaped single quote"),
+    ],
+)
+def test_unescaped_shell_metacharacters_in_a_plain_looking_value_are_rejected(tmp_path, bad_value, desc):
+    """None of these bytes are ever left bare by a real `%q` conversion in
+    this position -- they are exactly the shapes `_remember_cfg_flatten_
+    cache_valid_value`'s blacklist exists to catch. Each is planted as a
+    correct-looking `_RCFG_*` line so only the VALUE check stands between
+    it and `eval`; each must be rejected, remove the cache, and still
+    resolve the real config value from a fallback flatten."""
+    home, project, remember = _project(tmp_path)
+    cfg = remember / "config.json"
+    cfg.write_text(json.dumps({"cooldowns": {"save_seconds": 42}}), encoding="utf-8")
+
+    _lines1, result1, sys_tmp = _run_with_shim(tmp_path, home, project)
+    assert result1.returncode == 0, (result1.stdout, result1.stderr)
+    caches = cache_files(sys_tmp)
+    assert caches, f"no flattened-config cache ({CACHE_GLOB}) was published under {sys_tmp}"
+    cache = caches[0]
+
+    marker = tmp_path / f"pwned-682-followup-marker-{desc.replace(' ', '-')}"
+    good = cache.read_text(encoding="utf-8")
+    corrupted = good + f'_RCFG_cooldowns_save_seconds={bad_value}\n'
+    cache.write_text(corrupted, encoding="utf-8")
+    now = time.time()
+    os.utime(cache, (now + 5, now + 5))
+
+    lines2, result2, _sys_tmp2 = _run_with_shim(tmp_path, home, project, sys_tmp=sys_tmp)
+    assert result2.returncode == 0, (result2.stdout, result2.stderr)
+    assert not marker.exists()
+    assert "42" in result2.stdout, (
+        f"a value with {desc} was not cleanly rejected -- config "
+        f"resolution did not fall through to a real flatten: {result2.stdout!r}"
+    )
+
+
+@pytest.mark.skipif(MACOS_SYSTEM_BASH is None, reason="needs macOS's stock /bin/bash (3.2)")
+def test_colon_tilde_value_does_not_expand_a_home_directory_on_bash_3_2(tmp_path):
+    """bash 3.2 tilde-expands after an unquoted `:` in an assignment, and
+    3.2's own `printf %q` does NOT escape a tilde in that position (bash
+    5's does). A config value shaped like `foo:~/bar` -- plausible for
+    anything PATH-like -- reaching the blanket `eval` on 3.2 alone would
+    substitute a real home directory instead of the literal string.
+    Observed directly on this machine's `/bin/bash` before this test was
+    written: `eval "v=foo:~/bar"` on 3.2 yields `foo:/Users/<you>/bar`, not
+    the literal value. Reasoned, not observed, on Git Bash/Linux: their
+    `%q` already escapes the tilde in this position (`foo:\\~/bar`), so the
+    extra guard this test pins is a no-op there rather than untested."""
+    home, project, remember = _project(tmp_path)
+    cfg = remember / "config.json"
+    cfg.write_text(json.dumps({"probe": "foo:~/bar"}), encoding="utf-8")
+
+    lines1, result1, sys_tmp = _run_with_shim_using(MACOS_SYSTEM_BASH, tmp_path, home, project)
+    assert result1.returncode == 0, (result1.stdout, result1.stderr)
+
+    harness2 = HARNESS.replace(
+        'config ".cooldowns.save_seconds" "default"',
+        'config ".probe" "default"',
+    )
+    log2 = tmp_path / "spawn2.log"
+    shims2 = make_shim_dir(tmp_path, log2)
+    env2 = {
+        **os.environ,
+        "HOME": str(home),
+        "CLAUDE_PROJECT_DIR": str(project),
+        "CLAUDE_PLUGIN_ROOT": str(REPO_ROOT),
+        "REMEMBER_HOOK_CWD": str(project),
+        "SPAWN_LOG": str(log2),
+        "TMPDIR": str(sys_tmp),
+        "PATH": f"{shims2}{os.pathsep}{os.environ['PATH']}",
+    }
+    result2 = subprocess.run(
+        [MACOS_SYSTEM_BASH, "-c", harness2], env=env2, capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert result2.returncode == 0, (result2.stdout, result2.stderr)
+    out = result2.stdout
+    assert str(home) not in out, (
+        "a colon-tilde config value was tilde-expanded into a real home "
+        f"directory on bash 3.2 instead of staying a literal string: {out!r}"
+    )
+    assert "foo:~/bar" in out or "foo:/" not in out, (
+        f"the colon-tilde value was mangled rather than preserved literally: {out!r}"
+    )
