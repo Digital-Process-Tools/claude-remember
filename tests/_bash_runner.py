@@ -62,3 +62,28 @@ def resolve_bash() -> str | None:
     if sys.platform != "win32":
         return shutil.which("bash")
     return find_git_bash()
+
+
+def decode_bash_output(raw: bytes) -> str:
+    """Decode a bash subprocess byte stream defensively (#672).
+
+    On Windows, invoking the literal ``"bash"`` can resolve to the WSL
+    launcher or a WindowsApps alias stub instead of Git Bash. Those
+    launchers write UTF-16LE-framed text to a redirected pipe -- each
+    ASCII byte followed by a NUL -- which a locale/UTF-8 decode turns into
+    NUL-interleaved garbage, or raises outright on a UTF-8 locale. Detect
+    a UTF-16LE frame by its NUL density and decode it as UTF-16LE;
+    otherwise fall back to UTF-8 with replacement, the same policy
+    ``subprocess`` itself uses for undecodable bytes when ``text=True``.
+    """
+    if not raw:
+        return ""
+    if raw.count(b"\x00") >= len(raw) // 4:
+        try:
+            decoded = raw.decode("utf-16-le")
+        except UnicodeDecodeError:
+            pass
+        else:
+            if "\x00" not in decoded:
+                return decoded
+    return raw.decode("utf-8", errors="replace")

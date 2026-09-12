@@ -109,7 +109,7 @@ SESSION_START = REPO_ROOT / "scripts" / "session-start-hook.sh"
 sys.path.insert(0, str(REPO_ROOT))
 from pipeline.slug import session_dir_slug as _slug
 
-from ._bash_runner import resolve_bash
+from ._bash_runner import decode_bash_output, resolve_bash
 from .spawn_counting import make_shim_dir, spawns
 
 # #432's own narrowing, not a platform skip: the windows-latest leg genuinely
@@ -561,19 +561,11 @@ def _extract_hook_dir_lines() -> str:
     )
 
 
-@pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="PR #671: a bash subprocess probe's own stdout/returncode arrives "
-    "NUL-interleaved (UTF-16LE) on windows-latest, reproduced identically "
-    "across every call in this function -- including the FIRST, plain "
-    "forward-slash case, not only the backslash one -- and across two "
-    "structurally different invocation shapes (round 5's inline `bash -c`, "
-    "round 7's plain script-path via .as_posix()). Root cause not yet "
-    "identified; this is an environment-level corruption, not a defect in "
-    "the %/* mechanism this test pins or in _run_once's own .as_posix() fix "
-    "(which is independently exercised and green via the benchmark tests "
-    "in this file, on every Windows leg). Tracked in #672.",
-)
+# #672: this test was skipped on win32 while a bare ``"bash"`` probe resolved
+# to the WSL launcher and its UTF-16LE/NUL-interleaved output (exit 127 on a
+# missing distribution) looked environment-level. The probe now invokes
+# ``resolve_bash()``'s Git Bash instead of the literal ``"bash"`` and decodes
+# output UTF-16LE-aware (see decode_bash_output), so the skip is gone.
 def test_hook_dir_derivation_needs_a_forward_slash_path(tmp_path):
     """Round 5 (#669): windows-latest/3.10 CI showed session-start-hook.sh
     failing to source resolve-paths.sh at all ('./resolve-paths.sh: No such
@@ -644,11 +636,11 @@ def test_hook_dir_derivation_needs_a_forward_slash_path(tmp_path):
     def _probe(fake_source: str) -> str:
         env = {**os.environ, "FAKE_SOURCE_ENV": fake_source}
         result = subprocess.run(
-            ["bash", probe_script.as_posix()],
-            env=env, capture_output=True, text=True, timeout=10, check=False,
+            [BASH, probe_script.as_posix()],
+            env=env, capture_output=True, timeout=10, check=False,
         )
-        assert result.returncode == 0, result.stderr
-        return result.stdout.strip()
+        assert result.returncode == 0, decode_bash_output(result.stderr or b"")
+        return decode_bash_output(result.stdout or b"").strip()
 
     posix = _probe("/some/plugin/root/scripts/session-start-hook.sh")
     assert posix == "HOOK_DIR=/some/plugin/root/scripts", (
@@ -684,13 +676,16 @@ def test_hook_dir_derivation_needs_a_forward_slash_path(tmp_path):
         encoding="utf-8",
     )
     real_result = subprocess.run(
-        ["bash", real_probe_script.as_posix()],
-        capture_output=True, text=True, timeout=10, check=False,
+        [BASH, real_probe_script.as_posix()],
+        capture_output=True, timeout=10, check=False,
     )
-    assert real_result.returncode == 0, real_result.stderr
-    assert real_result.stdout.strip() == f"HOOK_DIR={real_probe_script.parent.as_posix()}", (
+    assert real_result.returncode == 0, decode_bash_output(real_result.stderr or b"")
+    assert decode_bash_output(real_result.stdout or b"").strip() == (
+        f"HOOK_DIR={real_probe_script.parent.as_posix()}"
+    ), (
         f"invoking with .as_posix() (what _run_once now does) must resolve "
-        f"_HOOK_DIR to the script's real parent directory: {real_result.stdout!r}"
+        f"_HOOK_DIR to the script's real parent directory: "
+        f"{decode_bash_output(real_result.stdout or b'')!r}"
     )
 
 
