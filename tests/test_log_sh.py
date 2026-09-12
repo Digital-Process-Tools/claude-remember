@@ -430,6 +430,48 @@ class TestDispatchOwnershipChecks:
         assert result.returncode == 0, f"dispatch failed: {result.stderr}"
         assert not marker.exists(), "Hook owned by different user should have been skipped"
 
+    def test_world_writable_hook_with_a_special_mode_bit_is_still_skipped(self, tmp_path):
+        """A hook that is BOTH setuid/setgid/sticky AND world-writable must still
+        be skipped -- the special bit must never hide the write bit (#663).
+
+        GNU `stat -c '%a'` (unlike BSD `stat -f '%Lp'`) prefixes the three
+        permission digits with the setuid/setgid/sticky bit whenever one is
+        set, so a hook at mode 4777 stats as "4777", not "777". A version of
+        the folded ownership+world-writable check that matched the raw
+        `stat` output against an exactly-3-digit pattern would fail to match
+        a 4-digit value at all and silently treat it as "cannot tell" --
+        which fails OPEN, letting a genuinely world-writable hook run. This
+        pins the fix (trim to the last 3 characters before the pattern
+        match) by faking `stat` to emit the GNU 4-digit shape regardless of
+        which platform this test actually runs on.
+        """
+        hooks_dir = tmp_path / "hooks.d"
+        event_dir = hooks_dir / "test_event"
+        event_dir.mkdir(parents=True)
+        marker = tmp_path / "ran.txt"
+        _write_hook(event_dir, "10-special-bit-ww.sh", f'#!/bin/bash\ntouch "{marker}"\n', mode=0o755)
+
+        # A fake `stat` that always answers "<real uid> 4777" -- the current
+        # user (so the OWNERSHIP check passes and this test reaches the
+        # world-writable check), GNU-shaped with a setuid bit plus a
+        # world-writable low octet, regardless of the `-c`/`-f` flag it was
+        # actually called with.
+        fake_bin = tmp_path / "bin"
+        fake_bin.mkdir()
+        fake_stat = fake_bin / "stat"
+        fake_stat.write_text('#!/bin/bash\necho "$(command id -u) 4777"\n')
+        fake_stat.chmod(0o755)
+
+        env_override = {"PATH": f"{fake_bin}:{os.environ.get('PATH', '')}"}
+        result = _run_dispatch(tmp_path, hooks_dir, extra_env=env_override)
+
+        assert result.returncode == 0, f"dispatch failed: {result.stderr}"
+        assert not marker.exists(), (
+            "A hook stat'd as mode 4777 (setuid + world-writable) must be skipped -- "
+            "the setuid bit must not hide the world-writable one"
+        )
+        assert "world-writable" in result.stderr or _dispatch_warned_in_log(tmp_path, "world-writable")
+
 
 def _dispatch_warned_in_log(tmp_path: Path, keyword: str) -> bool:
     """Check if any log file under tmp_path contains the keyword."""
