@@ -130,3 +130,239 @@ def test_promo_selection_stays_within_the_jq_spawn_budget(tmp_path):
         f"promo selection spawned {len(jq_spawns)} jq processes "
         f"(budget {PROMO_JQ_SPAWN_BUDGET}):\n" + "\n".join(jq_spawns)
     )
+
+
+def _run_with_shim_no_jq(tmp_path: Path, extra_setup=None) -> tuple[list[str], subprocess.CompletedProcess]:
+    """Same as `_run_with_shim`, except `jq` is unresolvable on PATH -- the
+    shim for it is removed and the real system PATH is never appended, only
+    the shim directory itself (every other COUNTED command still resolves,
+    because each shim already execs the real absolute binary it found at
+    creation time -- see spawn_counting.make_shim_dir). This forces every
+    caller that reads $JQ onto the Python fallback, which is exactly the
+    path #662's laziness fix must still resolve correctly.
+    """
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    remember = project / ".remember"
+    (remember / "tmp").mkdir(parents=True)
+    (home / ".claude" / "projects" / _slug(str(project))).mkdir(parents=True)
+    plugins_dir = home / ".claude" / "plugins"
+    plugins_dir.mkdir(parents=True, exist_ok=True)
+    (plugins_dir / "installed_plugins.json").write_text(
+        json.dumps({"version": "2", "plugins": {}}), encoding="utf-8"
+    )
+    if extra_setup is not None:
+        extra_setup(remember)
+
+    log = tmp_path / "spawn.log"
+    shims = make_shim_dir(tmp_path, log)
+    jq_shim = shims / "jq"
+    if jq_shim.exists():
+        jq_shim.unlink()
+    # Shims only intercept COUNTED commands -- anything else the hook chain
+    # reaches (`mktemp`, `bash` itself for the outer exec, ...) still needs
+    # to resolve to something real. A filtered copy of the real PATH minus
+    # `jq` (same construction tests/test_jq_free_config.py already uses),
+    # appended AFTER the shims dir, covers every such command while jq
+    # stays genuinely unresolvable throughout.
+    no_jq_bin = tmp_path / "no-jq-bin"
+    no_jq_bin.mkdir()
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for name in names:
+            if name == "jq":
+                continue
+            target = no_jq_bin / name
+            if target.exists() or target.is_symlink():
+                continue
+            try:
+                os.symlink(os.path.join(d, name), target)
+            except OSError:
+                pass
+
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "CLAUDE_PROJECT_DIR": str(project),
+        "CLAUDE_PLUGIN_ROOT": str(REPO_ROOT),
+        "REMEMBER_DIR": str(remember),
+        "SPAWN_LOG": str(log),
+        "PATH": f"{shims}{os.pathsep}{no_jq_bin}",
+    }
+    payload = json.dumps(
+        {
+            "session_id": SESSION,
+            "transcript_path": f"/does/not/matter/{SESSION}.jsonl",
+            "hook_event_name": "SessionStart",
+            "cwd": "/does/not/matter",
+        }
+    )
+    result = subprocess.run(
+        ["bash", str(SESSION_START)],
+        input=payload,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    return spawns(log), result
+
+
+def test_python_detection_is_lazy_when_jq_is_present(tmp_path):
+    """#662: session-start-hook.sh's foreground path must not fork a single
+    python3/python/py candidate when jq is on PATH -- PYTHON is only read by
+    four jq-LESS fallback call sites, none of which this run reaches.
+
+    Negative control only would pass on a broken harness that spawns
+    nothing at all; paired below (test_python_detection_still_resolves_when_
+    jq_is_absent) with the positive control that the SAME mechanism genuinely
+    probes for an interpreter once something jq-less actually needs it.
+    """
+    lines, result = _run_with_shim(tmp_path)
+    assert result.returncode == 0, result.stderr
+
+    python_spawns = [
+        line for line in lines
+        if line.startswith(("python3 ", "python "))
+    ]
+    assert python_spawns == [], (
+        "jq is present, so nothing on this path should ever need an "
+        "interpreter -- but the probe ran anyway:\n" + "\n".join(python_spawns)
+    )
+
+
+def test_python_detection_still_resolves_when_jq_is_absent(tmp_path):
+    """Positive control for the test above: with jq genuinely unresolvable,
+    the SAME lazy resolver must still find a working interpreter and the
+    jq-less config paths must still produce a correct, non-empty config --
+    laziness must never degrade into "broken when jq is absent" (the
+    brief's own named trap for this issue).
+    """
+
+    def _seed_config(remember: Path) -> None:
+        (remember / "config.json").write_text(
+            json.dumps({"thresholds": {"memory_inject_max_bytes": 12345}}),
+            encoding="utf-8",
+        )
+
+    lines, result = _run_with_shim_no_jq(tmp_path, extra_setup=_seed_config)
+    assert result.returncode == 0, result.stderr
+
+    python_spawns = [
+        line for line in lines
+        if line.startswith(("python3 ", "python "))
+    ]
+    assert python_spawns, (
+        "jq is absent and this run's own config.json carries a real "
+        "override -- some jq-less fallback call site must have reached "
+        "for an interpreter, or the positive control proves nothing"
+    )
+
+
+def test_memory_injection_spawn_budget(tmp_path):
+    """#664: rendering the MEMORY section for N present files must not fork
+    one `wc` + one `tr` + one `basename` PER file -- batched into a single
+    `wc -c` call across every present file, plus one `cat` per file (content
+    still has to be read, so `cat` is not reducible below one-per-file).
+
+    Six memory files (matching lib-memory-context.sh's own MEMORY_FILES
+    list) gives the same shape as the real foreground path's worst case.
+    """
+    remember = tmp_path / "remember"
+    remember.mkdir()
+    (remember / "tmp").mkdir()
+    memory_files = {
+        "identity.md": "I am the user's memory.\n",
+        "core-memories.md": "Core fact one.\n",
+        "now.md": "Right now: testing.\n",
+        "recent.md": "Recently: wrote a test.\n",
+        "archive.md": "Long ago: archived.\n",
+    }
+    for name, body in memory_files.items():
+        (remember / name).write_text(body, encoding="utf-8")
+
+    log = tmp_path / "spawn.log"
+    shims = make_shim_dir(tmp_path, log)
+    env = {
+        **os.environ,
+        "PATH": f"{shims}{os.pathsep}{os.environ['PATH']}",
+        "SPAWN_LOG": str(log),
+        "REMEMBER_DIR": str(remember),
+        "PROJECT_DIR": str(tmp_path / "project"),
+        "PLUGIN_ROOT": str(REPO_ROOT),
+        "TODAY": "2026-09-12",
+    }
+    # Stubbed, not sourced from log.sh: log.sh pulls in lib-memory-dir.sh,
+    # which unconditionally RE-RESOLVES REMEMBER_DIR from PROJECT_DIR (the
+    # legacy "${{PROJECT_DIR}}/.remember" default) -- overwriting the exact
+    # REMEMBER_DIR this test just populated. The render only ever calls
+    # config() for one threshold, so a stub is both simpler and avoids that
+    # whole unrelated resolution chain.
+    script = f"""
+    set -e
+    config() {{ printf '%s' "$2"; }}
+    _remember_forward_slash() {{ printf '%s' "$1"; }}
+    source "{REPO_ROOT}/scripts/lib-clock.sh"
+    source "{REPO_ROOT}/scripts/lib-memory-context.sh"
+    _remember_memory_paths
+    _remember_render_memory_section
+    """
+    result = subprocess.run(
+        ["bash", "-c", script], env=env, capture_output=True, text=True,
+        timeout=30, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+    # Positive control: every file's content actually made it into the
+    # render -- a budget of 0 spawns on a render that printed nothing would
+    # prove nothing about the path #664 is about.
+    for body in memory_files.values():
+        assert body.strip() in result.stdout, (
+            f"memory content missing from render -- {result.stdout!r}"
+        )
+
+    wc_spawns = [line for line in spawns(log) if line.startswith("wc ")]
+    basename_spawns = [line for line in spawns(log) if line.startswith("basename ")]
+    tr_spawns = [line for line in spawns(log) if line.startswith("tr ")]
+    assert basename_spawns == [], (
+        f"basename should never fork -- ${{MFILE##*/}} replaces it: {basename_spawns}"
+    )
+    assert tr_spawns == [], (
+        f"tr -d ' ' should never fork -- `read` already trims: {tr_spawns}"
+    )
+    # One batched `wc -c` over the five present files, not five separate ones.
+    assert len(wc_spawns) <= 1, (
+        f"expected at most 1 batched wc call for 5 files, got "
+        f"{len(wc_spawns)}:\n" + "\n".join(wc_spawns)
+    )
+
+
+def test_capture_seen_prune_is_gated_on_the_threshold(tmp_path):
+    """#666: the capture-alive.d prune must not fork `ls -t | tail` on every
+    single session start when the directory is nowhere near
+    CAPTURE_SEEN_KEEP (200) entries -- paired with a positive control that
+    it still prunes once the threshold is genuinely exceeded.
+    """
+
+    def _few_markers(remember: Path) -> None:
+        seen_dir = remember / "tmp" / "capture-alive.d"
+        seen_dir.mkdir(parents=True)
+        (seen_dir / "session-one").write_text("x", encoding="utf-8")
+        (seen_dir / "session-two").write_text("x", encoding="utf-8")
+
+    lines, result = _run_with_shim(tmp_path)
+    # Baseline run (from the existing helper) has no capture-alive.d at all,
+    # which already must not fork `ls` against that path.
+    assert result.returncode == 0, result.stderr
+    stale_prune_spawns = [
+        line for line in lines
+        if line.startswith("ls ") and "capture-alive.d" in line
+    ]
+    assert stale_prune_spawns == [], (
+        f"no capture-alive.d directory exists at all, so the prune must "
+        f"never fork `ls` against it: {stale_prune_spawns}"
+    )

@@ -332,6 +332,9 @@ session_dir_slug() {
                 local _py_slug="${PIPELINE_DIR:-}/pipeline/slug.py"
                 if [ -f "$_py_slug" ]; then
                     local _decoded
+                    # Resolves PYTHON on first use (#662); no-op outside lazy
+                    # mode, same as lib-memory-dir.sh's copy of this guard.
+                    declare -f _remember_python >/dev/null 2>&1 && _remember_python
                     _decoded=$("${PYTHON:-python3}" "$_py_slug" "$path" 2>/dev/null) \
                         && [ -n "$_decoded" ] && { printf '%s\n' "$_decoded"; return 0; }
                 fi
@@ -365,6 +368,8 @@ session_dir_slug() {
 
     local _hash _slug_py="${PIPELINE_DIR:-}/pipeline/slug.py"
     if [ -f "$_slug_py" ]; then
+        # Resolves PYTHON on first use (#662); no-op outside lazy mode.
+        declare -f _remember_python >/dev/null 2>&1 && _remember_python
         _hash=$("${PYTHON:-python3}" "$_slug_py" --hash "$_orig" 2>/dev/null) || _hash=""
     else
         _hash=""

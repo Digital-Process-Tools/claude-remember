@@ -319,6 +319,11 @@ elif [ "${#_cfg_sources[@]}" -gt 0 ]; then
     # ${REMEMBER_DIR}/config.json (time_format, model, cooldowns.*,
     # thresholds.*, git_backup.*) was previously invisible on any machine
     # without jq — this made config() (log.sh) irrelevant to those users.
+    # Resolves PYTHON on first use (#662) when detect-tools.sh was sourced in
+    # lazy mode; a no-op everywhere else (PYTHON already set, or the
+    # resolver was never defined because this ran without detect-tools.sh at
+    # all -- both tolerated by the ${PYTHON:-python3} fallback below).
+    declare -f _remember_python >/dev/null 2>&1 && _remember_python
     "${PYTHON:-python3}" - "$_merged_cfg" "${_cfg_sources[@]}" > /dev/null 2>&1 <<'PYMERGE' || cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null
 import json
 import sys

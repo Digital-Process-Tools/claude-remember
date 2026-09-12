@@ -316,6 +316,8 @@ _config_load() {
     if command -v jq >/dev/null 2>&1; then
         _dump=$(jq -r "$_REMEMBER_CFG_FLATTEN_JQ" "$REMEMBER_CONFIG" 2>/dev/null) || _rc=1
     else
+        # Resolves PYTHON on first use (#662); no-op outside lazy mode.
+        declare -f _remember_python >/dev/null 2>&1 && _remember_python
         _dump=$("${PYTHON:-python3}" -c "$_REMEMBER_CFG_FLATTEN_PY" "$REMEMBER_CONFIG" 2>/dev/null) || _rc=1
     fi
 
