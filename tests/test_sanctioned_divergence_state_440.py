@@ -43,25 +43,46 @@ from tests.test_case_divergence_298 import (
 _REL = "scripts/lib-memory-dir.sh"
 
 
+# A file may carry more than one allowance (#429 and #662 both touch
+# lib-memory-dir.sh), so `_SANCTIONED_DIVERGENCE[_REL]` is a list of
+# (old_code, new_code) pairs and each is judged on its own. `ref_code` is
+# built from every pair's shape at once so the helper sees each one in the
+# state under test; the per-pair assertions below say which pair failed.
+_PAIRS = _SANCTIONED_DIVERGENCE[_REL]
+assert _PAIRS, f"{_REL} carries no sanctioned divergence -- nothing to pin here"
+
+
 def test_sanctioned_divergence_applies_pre_merge_shape():
-    """The sanctioned old->new substitution is still a live PR: old_code is
-    still on origin/main. Substitute it in so the byte-compare judges the fix
+    """The sanctioned old->new substitutions are still live PRs: old_code is
+    still on origin/main. Substitute them in so the byte-compare judges the fix
     the allowance exempts, not the noise of the still-open PR."""
-    old_code, new_code = _SANCTIONED_DIVERGENCE[_REL]
-    ref_code = f"before\n{old_code}\nafter"
+    ref_code = "before\n" + "\n".join(old for old, _ in _PAIRS) + "\nafter"
     result = _apply_sanctioned_divergence(ref_code, _REL)
-    assert new_code in result
-    assert old_code not in result
+    for old_code, new_code in _PAIRS:
+        assert new_code in result, new_code
+        assert old_code not in result, old_code
 
 
 def test_sanctioned_divergence_accepts_post_merge_shape():
-    """The allowance's own PR has landed: origin/main now holds new_code and
+    """The allowances' own PRs have landed: origin/main now holds new_code and
     old_code is gone. That is the post-merge steady state, not staleness --
     pass ref_code through unchanged rather than asserting."""
-    _, new_code = _SANCTIONED_DIVERGENCE[_REL]
-    ref_code = f"before\n{new_code}\nafter"
+    ref_code = "before\n" + "\n".join(new for _, new in _PAIRS) + "\nafter"
     result = _apply_sanctioned_divergence(ref_code, _REL)
     assert result == ref_code
+
+
+def test_sanctioned_divergence_mixed_states_judge_each_pair_alone():
+    """One allowance landed, another still open: the landed one passes
+    through, the open one is substituted -- neither state contaminates the
+    other's verdict."""
+    if len(_PAIRS) < 2:
+        pytest.skip(f"{_REL} carries a single allowance -- no mixed state to pin")
+    (old_a, new_a), (old_b, new_b) = _PAIRS[0], _PAIRS[1]
+    ref_code = f"before\n{new_a}\n{old_b}\nafter"
+    result = _apply_sanctioned_divergence(ref_code, _REL)
+    assert new_a in result and new_b in result
+    assert old_b not in result
 
 
 def test_sanctioned_divergence_still_asserts_when_genuinely_stale():
