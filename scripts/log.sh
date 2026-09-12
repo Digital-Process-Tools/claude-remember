@@ -388,6 +388,44 @@ config() {
     # character a segment's own class accepts, so `.foo..bar` (an empty
     # segment) is correctly rejected rather than swallowed.
     #
+    # This validation, the flattened-cache lookup and the jq/python fallback
+    # all now live in config_into() below -- config() is a thin wrapper
+    # around it (#665, part of #660) so external callers (hooks.d/*,
+    # pipeline shell probes, tests) keep the `X=$(config ...)` idiom
+    # unchanged, while a caller that only wants the value (not the
+    # subshell-and-echo round trip) can call config_into directly and skip
+    # the fork the `$( )` itself adds -- see config_into's own comment for
+    # what that removes and what it does not.
+    local _cfg_result
+    config_into _cfg_result "$key" "$default"
+    printf '%s\n' "$_cfg_result"
+}
+
+# config_into VARNAME key default
+#
+# Same lookup and the same precedence as config() above, written straight
+# into VARNAME with `printf -v` instead of printed to stdout -- so a caller
+# that only ever does `X=$(config ...)` can have the value with NO command
+# substitution at all on the common case: the flattened `_RCFG_*` table
+# (#668) already sitting in THIS shell's own variables. `$( )` forks a
+# subshell to capture a function's stdout EVEN WHEN the function itself
+# forks nothing, exactly the way `_remember_date_into` (lib-clock.sh, #511)
+# already removes that same subshell on top of an already-forkless builtin.
+#
+# This does NOT make every path through config() fork-free: a malformed key,
+# a config file that vanished mid-run, or (genuinely, #159's jq-less case)
+# the jq/python fallback still needs a subprocess, or still needs a subshell
+# to capture one -- the zero-fork claim holds only for the flattened-cache
+# HIT path, same judgment call `_config_load`'s own comment makes for the
+# table it builds. Every local below is prefixed `_cfg_` specifically so a
+# caller passing a destination variable named e.g. "key" or "default" (both
+# names this function would otherwise declare `local` itself) is written to
+# the CALLER's variable, not shadowed by one of this function's own.
+config_into() {
+    local _cfg_var="$1"
+    local _cfg_key="$2"
+    local _cfg_default="$3"
+
     # Under LC_ALL=C only: `[A-Za-z]` is a POSIX bracket RANGE, and a range
     # is matched by collation order, not byte value, once LC_COLLATE (via
     # LANG/LC_ALL) selects a UTF-8 locale -- lib-slug.sh hits the identical
@@ -397,18 +435,18 @@ config() {
     # assignment, which does not apply to `[[`, a compound command, the way
     # it would to a simple one) scopes this to the one match and restores
     # nothing, because nothing outside it was ever changed.
-    if ! ( LC_ALL=C; [[ "$key" =~ ^\.[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$ ]] ); then
+    if ! ( LC_ALL=C; [[ "$_cfg_key" =~ ^\.[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$ ]] ); then
         # Same convention as _config_load's own '#refuse' report just above
         # in this file: a rejection here and a genuine cache miss a few
-        # lines below both print $default, and without this line they are
-        # indistinguishable from the outside -- "config() keeps returning my
-        # default" reads identically whether the key was malformed or simply
-        # absent. Debug-gated, not unconditional, for the same reason that
-        # one is: a warning that fires on ordinary lookups is a warning
-        # nobody reads.
+        # lines below both resolve to $default, and without this line they
+        # are indistinguishable from the outside -- "config() keeps
+        # returning my default" reads identically whether the key was
+        # malformed or simply absent. Debug-gated, not unconditional, for
+        # the same reason that one is: a warning that fires on ordinary
+        # lookups is a warning nobody reads.
         [ "${REMEMBER_DEBUG:-}" = "1" ] && \
-            echo "remember: config() key '$key' is not a plain dotted path -- returning the default rather than evaluating it" >&2
-        echo "$default"
+            echo "remember: config() key '$_cfg_key' is not a plain dotted path -- returning the default rather than evaluating it" >&2
+        printf -v "$_cfg_var" '%s' "$_cfg_default"
         return
     fi
 
@@ -418,61 +456,55 @@ config() {
         _config_load
     fi
 
-    # $key is already known to match the dotted-path grammar above, so this
-    # branch no longer needs its own shape check -- it only has to fall
+    # $_cfg_key is already known to match the dotted-path grammar above, so
+    # this branch no longer needs its own shape check -- it only has to fall
     # through when the table state cannot answer (fallback / private key).
-    if [ "$_REMEMBER_CFG_STATE" = "ok" ] && ! _config_is_private_key "$key"; then
-        local _slot="_RCFG_${key#.}"
-        _slot="${_slot//./_}"
-        local _hit="${!_slot:-}"
-        [ -n "$_hit" ] && echo "$_hit" || echo "$default"
+    if [ "$_REMEMBER_CFG_STATE" = "ok" ] && ! _config_is_private_key "$_cfg_key"; then
+        local _cfg_slot="_RCFG_${_cfg_key#.}"
+        _cfg_slot="${_cfg_slot//./_}"
+        local _cfg_hit="${!_cfg_slot:-}"
+        printf -v "$_cfg_var" '%s' "${_cfg_hit:-$_cfg_default}"
         return
     fi
 
     if [ ! -f "${REMEMBER_CONFIG:-}" ]; then
-        echo "$default"
+        printf -v "$_cfg_var" '%s' "$_cfg_default"
         return
     fi
-    local val=""
+    local _cfg_val=""
     if command -v jq >/dev/null 2>&1; then
-        # $key is spliced into this program by string interpolation below --
-        # safe ONLY because the guard at the top of this function already
-        # rejected anything not shaped like a plain dotted path (#539). Do
-        # not remove that guard to "simplify" this branch.
-        # NOT `$key // empty`: jq's // treats false the same as null, so every
-        # boolean option set to false read back as its default and could never
-        # be switched off (#159). features.ndc_compression and features.recovery
-        # are both documented, both default true, and neither could be disabled.
-        # Ask for the value and treat only null — a genuinely absent key — as
-        # missing.
-        # Asking jq to map a genuinely absent key to "" and everything else to
-        # its string form. Two near misses this needs to avoid:
-        #   `$key // empty` treats FALSE like null, so no boolean set to false
-        #   could ever be read (#159);
-        #   testing the printed value against "null" cannot tell JSON null from
-        #   the string "null" — `jq -r` prints both as the same bare word.
-        val=$(jq -r "if $key == null then \"\" else ($key | tostring) end" \
+        # $_cfg_key is spliced into this program by string interpolation
+        # below -- safe ONLY because the guard at the top of this function
+        # already rejected anything not shaped like a plain dotted path
+        # (#539). Do not remove that guard to "simplify" this branch.
+        # NOT `$_cfg_key // empty`: jq's // treats false the same as null,
+        # so every boolean option set to false read back as its default and
+        # could never be switched off (#159). features.ndc_compression and
+        # features.recovery are both documented, both default true, and
+        # neither could be disabled.
+        # Ask for the value and treat only null -- a genuinely absent key --
+        # as missing. Testing the printed value against "null" cannot tell
+        # JSON null from the string "null" -- `jq -r` prints both as the
+        # same bare word.
+        _cfg_val=$(jq -r "if $_cfg_key == null then \"\" else ($_cfg_key | tostring) end" \
             "$REMEMBER_CONFIG" 2>/dev/null)
     elif type _jq_fallback >/dev/null 2>&1; then
-        # No jq — detect-tools.sh already defined a Python-based fallback for
-        # exactly this (bare-key `jq -r '.key' file` reads). config() branched
-        # on `command -v jq` and fell straight to `echo "$default"` without
-        # ever trying it, so every user config override was silently ignored
-        # on any jq-less machine. Wire it in here, matching #159's null-vs-
-        # false semantics: an absent/null key falls through to `default`
-        # below; a present `false` prints as the string "false" (see
-        # detect-tools.sh's isinstance(val, str) fix for why that's not
-        # Python's "False").
-        val=$(_jq_fallback -r "$key" "$REMEMBER_CONFIG" 2>/dev/null)
+        # No jq -- detect-tools.sh already defined a Python-based fallback
+        # for exactly this (bare-key `jq -r '.key' file` reads). Matching
+        # #159's null-vs-false semantics: an absent/null key falls through
+        # to $_cfg_default below; a present `false` prints as the string
+        # "false" (see detect-tools.sh's isinstance(val, str) fix for why
+        # that's not Python's "False").
+        _cfg_val=$(_jq_fallback -r "$_cfg_key" "$REMEMBER_CONFIG" 2>/dev/null)
     else
         # log.sh can be sourced directly without detect-tools.sh (some
         # callers/tests do), so _jq_fallback may not exist. Same read,
-        # inlined, so config() never regresses to bundled-default-only just
-        # because of sourcing order. Same null-vs-false semantics as above:
-        # a genuinely absent/null key leaves $val empty (falls to $default
-        # below); a present `false` renders as jq's "false", not Python's
-        # str(False).
-        val=$("${PYTHON:-python3}" -c '
+        # inlined, so config_into() never regresses to bundled-default-only
+        # just because of sourcing order. Same null-vs-false semantics as
+        # above: a genuine absent/null key leaves $_cfg_val empty (falls to
+        # $_cfg_default below); a present `false` renders as jq's "false",
+        # not Python's str(False).
+        _cfg_val=$("${PYTHON:-python3}" -c '
 import json, sys
 try:
     data = json.load(open(sys.argv[2]))
@@ -489,9 +521,9 @@ try:
         print(v if isinstance(v, str) else json.dumps(v))
 except Exception:
     pass
-' "$key" "$REMEMBER_CONFIG" 2>/dev/null)
+' "$_cfg_key" "$REMEMBER_CONFIG" 2>/dev/null)
     fi
-    [ -n "$val" ] && echo "$val" || echo "$default"
+    printf -v "$_cfg_var" '%s' "${_cfg_val:-$_cfg_default}"
 }
 
 # Build the table now, in THIS shell, so every `$(config ...)` subshell
@@ -518,14 +550,19 @@ debug_enabled() {
         [ "$REMEMBER_DEBUG" = "1" ]
         return
     fi
-    case "$(config '.debug' '')" in
+    local _debug_cfg
+    config_into _debug_cfg '.debug' ''
+    case "$_debug_cfg" in
         true) return 0 ;;
         false) return 1 ;;
     esac
     [ "$_default" = "1" ]
 }
 
-REMEMBER_TZ=$(config ".timezone" "")
+# config_into (#665, part of #660) writes straight into REMEMBER_TZ -- no
+# command-substitution subshell on top of the flattened-cache-hit table
+# `_config_load` already built into THIS shell's own variables.
+config_into REMEMBER_TZ ".timezone" ""
 export REMEMBER_TZ
 
 # What user-prompt-hook.sh is allowed to inject (#301). Read here rather than in
@@ -537,7 +574,7 @@ export REMEMBER_TZ
 #   stable — [user] only, plus the >=95 warning; no per-turn-volatile bytes
 #   off    — nothing at all, warning included
 # An unrecognised value is `full`: a typo must not silently delete the clock.
-REMEMBER_PROMPT_STAMP=$(config ".prompt_stamp" "full")
+config_into REMEMBER_PROMPT_STAMP ".prompt_stamp" "full"
 case "$REMEMBER_PROMPT_STAMP" in
     stable|off) ;;
     *) REMEMBER_PROMPT_STAMP="full" ;;
@@ -566,11 +603,11 @@ export REMEMBER_PROMPT_STAMP
 # a leading zero that clears a digits-only guard is read as octal (#322/#332).
 # One validation at the source beats one per consumer, which is how the
 # pre-#158 duplicate readers drifted.
-REMEMBER_SAVE_COOLDOWN=$(config ".cooldowns.save_seconds" 120)
+config_into REMEMBER_SAVE_COOLDOWN ".cooldowns.save_seconds" 120
 case "$REMEMBER_SAVE_COOLDOWN" in ''|*[!0-9]*) REMEMBER_SAVE_COOLDOWN=120 ;; esac
 export REMEMBER_SAVE_COOLDOWN
 
-REMEMBER_DELTA_THRESHOLD=$(config ".thresholds.delta_lines_trigger" 50)
+config_into REMEMBER_DELTA_THRESHOLD ".thresholds.delta_lines_trigger" 50
 case "$REMEMBER_DELTA_THRESHOLD" in ''|*[!0-9]*) REMEMBER_DELTA_THRESHOLD=50 ;; esac
 export REMEMBER_DELTA_THRESHOLD
 
@@ -578,9 +615,14 @@ export REMEMBER_DELTA_THRESHOLD
 # shell env var still wins (override) via ${VAR:=...}, then config, then the
 # built-in default. Exported here (log.sh is sourced by every script) so both
 # the summarize and consolidate model calls in pipeline/haiku.py see them.
-: "${REMEMBER_MODEL:=$(config ".model" "haiku")}"
+# `${VAR:=...}` triggers on unset OR empty -- preserved here by checking
+# the same condition directly, rather than `${VAR:=$(config_into ...)}`
+# (config_into has no stdout to substitute; it writes to a NAMED variable,
+# so it cannot sit inside a parameter expansion the way `$(config ...)`
+# could). Skips the fork entirely when an explicit env var already won.
+[ -n "${REMEMBER_MODEL:-}" ] || config_into REMEMBER_MODEL ".model" "haiku"
 export REMEMBER_MODEL
-: "${REMEMBER_REJECT_PATTERN:=$(config ".reject_pattern" "")}"
+[ -n "${REMEMBER_REJECT_PATTERN:-}" ] || config_into REMEMBER_REJECT_PATTERN ".reject_pattern" ""
 export REMEMBER_REJECT_PATTERN
 
 # Resolve "today" / "now" using REMEMBER_TZ when set, else system local.
@@ -643,7 +685,14 @@ log() {
     local component="$1"
     local message="$2"
     local timestamp
-    timestamp=$(_remember_date +%H:%M:%S)
+    # `_remember_date_into` (lib-clock.sh, #511) writes straight into
+    # `timestamp` with `printf -v` -- no command-substitution subshell on
+    # top of the already-forkless builtin path (#665, part of #660). The
+    # REMEMBER_TZ and bash-3.2 cases inside it still shell out to `date`,
+    # an external process either way -- this only removes the extra fork
+    # `$( )` was adding on top of that, exactly the way config_into (above,
+    # #665) does for config().
+    _remember_date_into timestamp +%H:%M:%S
     # #621 tried twice to gate this fork behind a cheap in-shell
     # pre-check (a message rarely carries a control byte at all, and log()
     # runs on the per-tool-call hot path) -- unconditional `[[:cntrl:]]`,

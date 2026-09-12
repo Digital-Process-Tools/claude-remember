@@ -529,14 +529,21 @@ class TestStaleDeliveryRecordsPruningGlobBackslash517:
 
     _BLOCK = extract_lines_517(
         "scripts/session-start-hook.sh",
-        "_remember_delivered_glob_dir=$(_remember_forward_slash",
+        '_remember_delivered_glob_dir=""',
         "    done",
     )
 
     def _run(self, remember_dir: str, sessions_dir, current_session_id: str, ostype: str):
         import shlex
-        forward_slash_fn = extract_function_517(
-            "scripts/resolve-paths.sh", "_remember_forward_slash"
+        # #665 (part of #660): the site now calls _remember_forward_slash_into
+        # (printf -v, no command-substitution subshell) instead of capturing
+        # $(_remember_forward_slash ...) -- both functions live in
+        # resolve-paths.sh and the extracted block needs the one it actually
+        # calls in scope.
+        forward_slash_fn = (
+            extract_function_517("scripts/resolve-paths.sh", "_remember_forward_slash")
+            + "\n"
+            + extract_function_517("scripts/resolve-paths.sh", "_remember_forward_slash_into")
         )
         setup = (
             forward_slash_fn

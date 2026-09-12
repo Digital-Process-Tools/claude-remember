@@ -50,6 +50,13 @@ _FORWARD_SLASH_FN = extract_function(
     "scripts/resolve-paths.sh", "_remember_forward_slash"
 )
 
+# #665 (part of #660): sites 2 and 3 below now call _remember_forward_slash_into
+# (printf -v, no command-substitution subshell) instead of capturing
+# $(_remember_forward_slash ...) -- their extracted blocks need it in scope.
+_FORWARD_SLASH_INTO_FN = _FORWARD_SLASH_FN + "\n" + extract_function(
+    "scripts/resolve-paths.sh", "_remember_forward_slash_into"
+)
+
 
 class TestForwardSlashHelper:
     """The shared mechanism every site below relies on -- tested once here
@@ -139,14 +146,14 @@ class TestSessionStartStagingCount:
 
     _BLOCK = extract_lines(
         "scripts/session-start-hook.sh",
-        "_remember_staging_glob_dir=$(_remember_forward_slash",
+        '_remember_staging_glob_dir=""',
         'unset _remember_staging_candidates _remember_staging_was_nullglob _remember_staging_file',
     )
 
     def _run(self, remember_dir, ostype):
         import shlex
         setup = (
-            _FORWARD_SLASH_FN
+            _FORWARD_SLASH_INTO_FN
             + f"\nREMEMBER_DIR={shlex.quote(remember_dir)}"
             + '\nTODAY="2099-01-01"'
         )
@@ -192,14 +199,14 @@ class TestSessionStartRotatedSlices:
     # itself did not change, only its home file.
     _BLOCK = extract_lines(
         "scripts/lib-memory-context.sh",
-        "_remember_rotated_glob_dir=$(_remember_forward_slash",
+        '_remember_forward_slash_into _remember_rotated_glob_dir',
         '[ -n "$ROTATED_SLICES" ] && HAS_MEMORY="true"',
     )
     _AFTER = 'if [ -n "$ROTATED_SLICES" ]; then printf HAS; else printf NONE; fi'
 
     def _run(self, remember_dir, ostype):
         import shlex
-        setup = _FORWARD_SLASH_FN + f"\nREMEMBER_DIR={shlex.quote(remember_dir)}"
+        setup = _FORWARD_SLASH_INTO_FN + f"\nREMEMBER_DIR={shlex.quote(remember_dir)}"
         return run_block(self._BLOCK, ostype=ostype, setup=setup, after=self._AFTER)
 
     def test_must_fire_rotated_slices_are_seen_under_backslash_remember_dir(self, tmp_path):

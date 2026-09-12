@@ -34,18 +34,40 @@ _REMEMBER_LIB_SLUG_LOADED=1
 # The sed program for the slug, assembled ONCE at source time. It used to be
 # built inside session_dir_slug, where every $(printf) forked a subshell — ~20
 # of them on a function the post-tool hook calls on every single tool call.
+# #665 (part of #660) removes those forks too: 22 x $(printf '\NNN') here
+# each forked a subshell just to capture one byte bash's own ANSI-C quoting
+# (dollar-single-quote octal escapes -- a lexer-level substitution, no
+# process at all) already produces without one. Every span below is a
+# straight transcription of the old $(printf '\NNN') / $(printf
+# '\NNN')-$(printf '\MMM') calls it replaces -- proved byte-identical
+# against the old builder, restored verbatim as a reference, by
+# tests/test_session_start_fork_tax_665.py::test_slug_sed_program_is_byte_identical_to_the_old_printf_builder.
+# A dollar-single-quote span cannot appear INSIDE a double-quoted "..." span
+# and be expanded there -- it is a lexer-level word of its own, so each byte
+# range below is its own bare dollar-single-quote token concatenated (no
+# space) against the surrounding "..." pieces, the same way "a" followed
+# immediately by a dollar-single-quote newline span followed immediately by
+# "b" -- never one span embedding the other -- is the only shape that
+# actually embeds a real newline.
 _remember_build_slug_sed() {
-    local cont
-    cont="$(printf '\200')-$(printf '\277')"
+    local cont=$'\200-\277'
+    local r220_277=$'\220-\277'
+    local r361_363=$'\361-\363'
+    local r200_217=$'\200-\217'
+    local r240_277=$'\240-\277'
+    local r341_354=$'\341-\354'
+    local r200_237=$'\200-\237'
+    local r356_357=$'\356-\357'
+    local r302_337=$'\302-\337'
     _REMEMBER_SLUG_SED=(
-        -e "s/$(printf '\360')[$(printf '\220')-$(printf '\277')][$cont][$cont]/--/g"
-        -e "s/[$(printf '\361')-$(printf '\363')][$cont][$cont][$cont]/--/g"
-        -e "s/$(printf '\364')[$(printf '\200')-$(printf '\217')][$cont][$cont]/--/g"
-        -e "s/$(printf '\340')[$(printf '\240')-$(printf '\277')][$cont]/-/g"
-        -e "s/[$(printf '\341')-$(printf '\354')][$cont][$cont]/-/g"
-        -e "s/$(printf '\355')[$(printf '\200')-$(printf '\237')][$cont]/-/g"
-        -e "s/[$(printf '\356')-$(printf '\357')][$cont][$cont]/-/g"
-        -e "s/[$(printf '\302')-$(printf '\337')][$cont]/-/g"
+        -e "s/"$'\360'"[$r220_277][$cont][$cont]/--/g"
+        -e "s/[$r361_363][$cont][$cont][$cont]/--/g"
+        -e "s/"$'\364'"[$r200_217][$cont][$cont]/--/g"
+        -e "s/"$'\340'"[$r240_277][$cont]/-/g"
+        -e "s/[$r341_354][$cont][$cont]/-/g"
+        -e "s/"$'\355'"[$r200_237][$cont]/-/g"
+        -e "s/[$r356_357][$cont][$cont]/-/g"
+        -e "s/[$r302_337][$cont]/-/g"
         -e 's/[^a-zA-Z0-9]/-/g'
     )
 }

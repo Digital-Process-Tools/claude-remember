@@ -131,7 +131,7 @@ _remember_render_memory_section() {
     for MFILE in "${MEMORY_FILES[@]}"; do
         [ -f "$MFILE" ] && HAS_MEMORY="true"
     done
-    _remember_rotated_glob_dir=$(_remember_forward_slash "$REMEMBER_DIR")
+    _remember_forward_slash_into _remember_rotated_glob_dir "$REMEMBER_DIR"
     # Glob array, not `ls` (#664/#666) -- `ls` over a pattern that matches
     # nothing prints nothing AND exits nonzero on some implementations, which
     # is exactly what nullglob expresses without forking a process to find
@@ -158,8 +158,8 @@ _remember_render_memory_section() {
     [ -n "$HAS_MEMORY" ] || return 0
 
     echo "=== MEMORY ==="
-    local MEMORY_INJECT_MAX_BYTES
-    MEMORY_INJECT_MAX_BYTES=$(config ".thresholds.memory_inject_max_bytes" 200000)
+    local MEMORY_INJECT_MAX_BYTES=""
+    config_into MEMORY_INJECT_MAX_BYTES ".thresholds.memory_inject_max_bytes" 200000
     case "$MEMORY_INJECT_MAX_BYTES" in (''|*[!0-9]*) MEMORY_INJECT_MAX_BYTES=200000 ;; esac
     local OVERSIZED_MEMORY="" BASENAME MFILE_BYTES
     # One batched `wc -c` over every memory file that is present AND

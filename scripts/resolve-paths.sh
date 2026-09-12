@@ -266,6 +266,22 @@ _remember_forward_slash() {
     esac
 }
 
+# _remember_forward_slash_into VARNAME VALUE
+# Same answer as _remember_forward_slash, written into VARNAME with
+# `printf -v` instead of printed -- so a caller doing `X=$(_remember_forward_slash
+# "$Y")` can have it with no command-substitution subshell at all (#665, part
+# of #660). `_remember_forward_slash` itself already forks nothing (`case` and
+# a parameter expansion, no external process) -- the fork this removes is the
+# one `$( )` was adding purely to capture that already-forkless function's
+# stdout, the same class `_remember_date_into` (lib-clock.sh, #511) and
+# config_into (log.sh, #665) remove for their own callers.
+_remember_forward_slash_into() {
+    case "$OSTYPE" in
+        msys|cygwin) printf -v "$1" '%s' "${2//\\//}" ;;
+        *) printf -v "$1" '%s' "$2" ;;
+    esac
+}
+
 # --- Resolve PROJECT_DIR (the user's project root) ---
 #
 # Priority:

@@ -164,6 +164,53 @@ _SANCTIONED_DIVERGENCE = {
             '        ' + _LAZY_PYTHON_GUARD +
             '        _hash=$("${PYTHON:-python3}" "$_slug_py" --hash "$_orig" 2>/dev/null) || _hash=""\n',
         ),
+        (
+            '_remember_build_slug_sed() {\n'
+            '    local cont\n'
+            '    cont="$(printf \'\\200\')-$(printf \'\\277\')"\n'
+            '    _REMEMBER_SLUG_SED=(\n'
+            '        -e "s/$(printf \'\\360\')[$(printf \'\\220\')-$(printf \'\\277\')][$cont][$cont]/--/g"\n'
+            '        -e "s/[$(printf \'\\361\')-$(printf \'\\363\')][$cont][$cont][$cont]/--/g"\n'
+            '        -e "s/$(printf \'\\364\')[$(printf \'\\200\')-$(printf \'\\217\')][$cont][$cont]/--/g"\n'
+            '        -e "s/$(printf \'\\340\')[$(printf \'\\240\')-$(printf \'\\277\')][$cont]/-/g"\n'
+            '        -e "s/[$(printf \'\\341\')-$(printf \'\\354\')][$cont][$cont]/-/g"\n'
+            '        -e "s/$(printf \'\\355\')[$(printf \'\\200\')-$(printf \'\\237\')][$cont]/-/g"\n'
+            '        -e "s/[$(printf \'\\356\')-$(printf \'\\357\')][$cont][$cont]/-/g"\n'
+            '        -e "s/[$(printf \'\\302\')-$(printf \'\\337\')][$cont]/-/g"\n'
+            "        -e 's/[^a-zA-Z0-9]/-/g'\n"
+            '    )\n'
+            '}\n'
+            '_remember_build_slug_sed\n',
+            # #665 (part of #660): ANSI-C octal quoting instead of
+            # $(printf ...) -- byte-identical output, proved by
+            # tests/test_session_start_fork_tax_665.py::
+            # test_slug_sed_program_is_byte_identical_to_the_old_printf_builder,
+            # replacing 22 subshell forks with a lexer-level substitution
+            # that forks nothing.
+            '_remember_build_slug_sed() {\n'
+            "    local cont=$'\\200-\\277'\n"
+            "    local r220_277=$'\\220-\\277'\n"
+            "    local r361_363=$'\\361-\\363'\n"
+            "    local r200_217=$'\\200-\\217'\n"
+            "    local r240_277=$'\\240-\\277'\n"
+            "    local r341_354=$'\\341-\\354'\n"
+            "    local r200_237=$'\\200-\\237'\n"
+            "    local r356_357=$'\\356-\\357'\n"
+            "    local r302_337=$'\\302-\\337'\n"
+            '    _REMEMBER_SLUG_SED=(\n'
+            '        -e "s/"$\'\\360\'"[$r220_277][$cont][$cont]/--/g"\n'
+            '        -e "s/[$r361_363][$cont][$cont][$cont]/--/g"\n'
+            '        -e "s/"$\'\\364\'"[$r200_217][$cont][$cont]/--/g"\n'
+            '        -e "s/"$\'\\340\'"[$r240_277][$cont]/-/g"\n'
+            '        -e "s/[$r341_354][$cont][$cont]/-/g"\n'
+            '        -e "s/"$\'\\355\'"[$r200_237][$cont]/-/g"\n'
+            '        -e "s/[$r356_357][$cont][$cont]/-/g"\n'
+            '        -e "s/[$r302_337][$cont]/-/g"\n'
+            "        -e 's/[^a-zA-Z0-9]/-/g'\n"
+            '    )\n'
+            '}\n'
+            '_remember_build_slug_sed\n',
+        ),
     ],
     "scripts/lib-memory-dir.sh": [
         (
