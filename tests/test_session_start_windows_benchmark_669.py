@@ -558,9 +558,14 @@ def test_hook_dir_derivation_needs_a_forward_slash_path(tmp_path):
     """
     snippet = _extract_hook_dir_lines().replace("BASH_SOURCE[0]", "FAKE_SOURCE")
     probe_script = tmp_path / "hook_dir_probe.sh"
-    probe_script.write_text(
+    # _write_no_crlf(), not probe_script.write_text(..., newline=""): that
+    # is the exact Path.write_text()-newline=-kwarg shape round 3 (#669,
+    # commit b84a5c9) already found broken on Python 3.9 (the kwarg only
+    # exists from 3.10) -- reintroduced here by mistake in round 6 instead
+    # of reusing the helper this file already defines for exactly this.
+    _write_no_crlf(
+        probe_script,
         'FAKE_SOURCE="$FAKE_SOURCE_ENV"\n' + snippet + '\necho "HOOK_DIR=$_HOOK_DIR"\n',
-        encoding="utf-8", newline="",
     )
 
     def _probe(fake_source: str) -> str:
