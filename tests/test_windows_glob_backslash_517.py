@@ -140,7 +140,7 @@ class TestSessionStartStagingCount:
     _BLOCK = extract_lines(
         "scripts/session-start-hook.sh",
         "_remember_staging_glob_dir=$(_remember_forward_slash",
-        'STAGING_COUNT=$(ls "$_remember_staging_glob_dir/today-"',
+        'unset _remember_staging_candidates _remember_staging_was_nullglob _remember_staging_file',
     )
 
     def _run(self, remember_dir, ostype):
@@ -193,7 +193,7 @@ class TestSessionStartRotatedSlices:
     _BLOCK = extract_lines(
         "scripts/lib-memory-context.sh",
         "_remember_rotated_glob_dir=$(_remember_forward_slash",
-        'ROTATED_SLICES=$(ls "$_remember_rotated_glob_dir"',
+        '[ -n "$ROTATED_SLICES" ] && HAS_MEMORY="true"',
     )
     _AFTER = 'if [ -n "$ROTATED_SLICES" ]; then printf HAS; else printf NONE; fi'
 

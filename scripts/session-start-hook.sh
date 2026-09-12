@@ -158,6 +158,15 @@ export REMEMBER_HOOK_CWD
 # is why this hook never reaches this line for that child; resolve-paths.sh
 # keeps its own copy of the same guard for every OTHER caller that sources it.
 REMEMBER_PATHS_SOFT_FAIL=1 source "$_HOOK_DIR/resolve-paths.sh" || exit 0
+# Defer the Python candidate probe (#662): this foreground path only ever
+# needs $PYTHON through four call sites, all jq-less fallbacks (the config
+# merge, the config flatten, the per-key read, and _jq_fallback itself) --
+# none of which run on the common jq-present path. Every other sourcer of
+# detect-tools.sh (post-tool-hook.sh, save-session.sh, run-consolidation.sh,
+# doctor.sh) invokes $PYTHON -m pipeline.shell unconditionally right after
+# sourcing it, so eager detection there is real, not wasted, work -- this is
+# the one caller that is not.
+_REMEMBER_LAZY_PYTHON=1
 source "$_HOOK_DIR/detect-tools.sh"
 source "$_HOOK_DIR/bootstrap-dirs.sh"
 PLUGIN_ROOT="$PIPELINE_DIR"
@@ -809,12 +818,29 @@ capture_was_seen() {
 
 # Bounded: one marker per session accumulates in a tmp dir nothing else
 # prunes. Newest are kept — those are the only ones the check ever reads.
-if [ -d "$CAPTURE_SEEN_DIR" ]; then
+#
+# Gated on actually being over the threshold (#666): the `ls -t | tail`
+# pipeline ran on every single session start before this, even on a brand
+# new store with one marker in it -- paying two forks to find nothing to
+# prune. A glob array costs none: its length is exactly what the threshold
+# check needs, and nullglob means an absent/empty directory counts as zero
+# rather than matching a literal `*` string.
+# `shopt -p nullglob` exits 1 (even though it prints correctly) whenever
+# the option is currently OFF -- which it is by default -- so capturing it
+# via `var=$(...)` would abort this script if it ever ran under `set -e`.
+# `shopt -q` in a plain `&&` conditional never has that problem.
+_remember_capture_seen_was_nullglob=0
+shopt -q nullglob && _remember_capture_seen_was_nullglob=1
+shopt -s nullglob
+_remember_capture_seen_entries=("$CAPTURE_SEEN_DIR"/*)
+[ "$_remember_capture_seen_was_nullglob" = 1 ] || shopt -u nullglob
+if [ "${#_remember_capture_seen_entries[@]}" -gt "$CAPTURE_SEEN_KEEP" ]; then
     ls -t "$CAPTURE_SEEN_DIR" 2>/dev/null | tail -n "+$((CAPTURE_SEEN_KEEP + 1))" \
     | while IFS= read -r stale; do
         [ -n "$stale" ] && rm -f "$CAPTURE_SEEN_DIR/$stale" 2>/dev/null || true
     done
 fi
+unset _remember_capture_seen_entries _remember_capture_seen_was_nullglob
 
 # PREV_ID and PREV_JSONL were resolved once, above, for this check and for
 # recovery both. Guard against the honest zero-tool session too: a conversation
@@ -1614,7 +1640,32 @@ fi
 # "N day(s) of memory to compress" message and the background
 # consolidation trigger off for real.
 _remember_staging_glob_dir=$(_remember_forward_slash "$REMEMBER_DIR")
-STAGING_COUNT=$(ls "$_remember_staging_glob_dir/today-"*.md 2>/dev/null | grep -v "today-${TODAY}.md" | grep -v "\.done\.md" | wc -l | tr -d ' ')
+# Glob array + a bash `case` per entry, not `ls | grep -v | grep -v | wc -l |
+# tr -d ' '` (#666) -- five forks collapsed to zero: nullglob turns "no
+# matches" into an empty array instead of the literal pattern string, and the
+# two `grep -v` exclusions (today's own file; anything already marked
+# `.done.md`) are exactly what a `case` pattern already expresses.
+# `shopt -p nullglob` exits 1 (even though it prints correctly) whenever
+# the option is currently OFF -- which it is by default -- so capturing it
+# via `var=$(...)` would abort this script if it ever ran under `set -e`.
+# `shopt -q` in a plain `&&` conditional never has that problem.
+_remember_staging_was_nullglob=0
+shopt -q nullglob && _remember_staging_was_nullglob=1
+shopt -s nullglob
+_remember_staging_candidates=("$_remember_staging_glob_dir/today-"*.md)
+[ "$_remember_staging_was_nullglob" = 1 ] || shopt -u nullglob
+STAGING_COUNT=0
+# Count-guarded: `"${arr[@]}"` on an empty array is an "unbound variable"
+# error under `set -u` on bash < 4.4, and an empty staging dir is the
+# common case.
+[ "${#_remember_staging_candidates[@]}" -gt 0 ] && for _remember_staging_file in "${_remember_staging_candidates[@]}"; do
+    case "$_remember_staging_file" in
+        (*"today-${TODAY}.md") continue ;;
+        (*.done.md) continue ;;
+    esac
+    STAGING_COUNT=$((STAGING_COUNT + 1))
+done
+unset _remember_staging_candidates _remember_staging_was_nullglob _remember_staging_file
 if [ "$STAGING_COUNT" -gt 0 ] && [ "$SESSION_START_SOURCE" != "compact" ]; then
     echo "=== MEMORY CONSOLIDATION ==="
     echo "$STAGING_COUNT day(s) of memory to compress. Running consolidation in background..."

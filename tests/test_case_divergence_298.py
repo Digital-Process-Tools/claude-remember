@@ -100,7 +100,7 @@ POST_TOOL = REPO_ROOT / "scripts" / "post-tool-hook.sh"
 LIB_SLUG = REPO_ROOT / "scripts" / "lib-slug.sh"
 LIB_MEMORY_DIR = REPO_ROOT / "scripts" / "lib-memory-dir.sh"
 
-# The one sanctioned executable-code divergence from origin/main for
+# The sanctioned executable-code divergences from origin/main for
 # test_the_per_tool_call_path_is_not_touched's byte-pin arms, keyed by the
 # relative path it applies to -- see that test's docstring for why. Applied
 # to the origin/main side before the compare, so anything else that diverges
@@ -110,10 +110,10 @@ LIB_MEMORY_DIR = REPO_ROOT / "scripts" / "lib-memory-dir.sh"
 # survives into the joined "code lines only" text and must be matched here
 # too -- these `\n\n`s are not decoration, they are load-bearing whitespace.
 def _apply_sanctioned_divergence(ref_code: str, rel: str) -> str:
-    """Apply the one sanctioned old-to-new substitution for `rel`, if any.
+    """Apply each sanctioned old-to-new substitution for `rel`, if any.
 
-    Three states, not two (#440) -- the two-state version failed on
-    origin/main the instant its own allowance's PR merged:
+    Three states per substitution, not two (#440) -- the two-state version
+    failed on origin/main the instant its own allowance's PR merged:
 
     - `old_code` is on origin/main: the substitution's own PR is still open
       (or the byte-compare is being run against a base that predates it).
@@ -121,25 +121,59 @@ def _apply_sanctioned_divergence(ref_code: str, rel: str) -> str:
       fix rather than the noise it has not yet replaced.
     - `old_code` is gone AND `new_code` is on origin/main: the post-merge
       steady state -- the sanctioned fix has already landed on origin/main.
-      Nothing to substitute; return ref_code unchanged rather than asserting.
+      Nothing to substitute; leave ref_code unchanged rather than asserting.
     - Neither is on origin/main: genuinely stale. origin/main moved again and
       this allowance needs re-deriving, not blindly (re-)applied.
+
+    A file may carry more than one allowance (#429 and #662 both touch
+    lib-memory-dir.sh); they are applied in order, each judged on its own.
     """
-    if rel not in _SANCTIONED_DIVERGENCE:
-        return ref_code
-    old_code, new_code = _SANCTIONED_DIVERGENCE[rel]
-    if old_code in ref_code:
-        return ref_code.replace(old_code, new_code)
-    assert new_code in ref_code, (
-        f"{rel}: neither the old nor the new code of this sanctioned "
-        "substitution is on origin/main -- origin/main has moved and this "
-        "allowance needs re-deriving, not blindly re-applying"
-    )
+    for old_code, new_code in _SANCTIONED_DIVERGENCE.get(rel, ()):
+        if old_code in ref_code:
+            ref_code = ref_code.replace(old_code, new_code)
+            continue
+        assert new_code in ref_code, (
+            f"{rel}: neither the old nor the new code of this sanctioned "
+            "substitution is on origin/main -- origin/main has moved and this "
+            "allowance needs re-deriving, not blindly re-applying"
+        )
     return ref_code
 
 
+# `_LAZY_PYTHON_GUARD` is the #662 line: a `declare -f` builtin check that
+# resolves $PYTHON on first use when detect-tools.sh was sourced in lazy mode
+# and is a no-op everywhere else. It adds no spawn of its own -- it sits
+# immediately before a python spawn that was already there, on branches that
+# only run when that spawn runs -- which is why it is sanctioned here rather
+# than moved off the hot path.
+_LAZY_PYTHON_GUARD = 'declare -f _remember_python >/dev/null 2>&1 && _remember_python\n'
+
 _SANCTIONED_DIVERGENCE = {
-    "scripts/lib-memory-dir.sh": (
+    "scripts/lib-slug.sh": [
+        (
+            '                    local _decoded\n'
+            '                    _decoded=$("${PYTHON:-python3}" "$_py_slug" "$path" 2>/dev/null) \\\n',
+            '                    local _decoded\n'
+            '                    ' + _LAZY_PYTHON_GUARD +
+            '                    _decoded=$("${PYTHON:-python3}" "$_py_slug" "$path" 2>/dev/null) \\\n',
+        ),
+        (
+            '    if [ -f "$_slug_py" ]; then\n'
+            '        _hash=$("${PYTHON:-python3}" "$_slug_py" --hash "$_orig" 2>/dev/null) || _hash=""\n',
+            '    if [ -f "$_slug_py" ]; then\n'
+            '        ' + _LAZY_PYTHON_GUARD +
+            '        _hash=$("${PYTHON:-python3}" "$_slug_py" --hash "$_orig" 2>/dev/null) || _hash=""\n',
+        ),
+    ],
+    "scripts/lib-memory-dir.sh": [
+        (
+            'elif [ "${#_cfg_sources[@]}" -gt 0 ]; then\n'
+            '    "${PYTHON:-python3}" - "$_merged_cfg" "${_cfg_sources[@]}" > /dev/null 2>&1 <<\'PYMERGE\'',
+            'elif [ "${#_cfg_sources[@]}" -gt 0 ]; then\n'
+            '    ' + _LAZY_PYTHON_GUARD +
+            '    "${PYTHON:-python3}" - "$_merged_cfg" "${_cfg_sources[@]}" > /dev/null 2>&1 <<\'PYMERGE\'',
+        ),
+        (
         '_merged_cfg="${SYS_TMPDIR}/remember-config-$$.json"\n\n' +
         '(umask 077; : > "$_merged_cfg") 2>/dev/null || true\n\n' +
         '_cfg_sources=()\n' +
@@ -161,7 +195,8 @@ _SANCTIONED_DIVERGENCE = {
         'if [ -z "$_merged_cfg" ]; then\n' +
         '    :\n' +
         'elif [ "${#_cfg_sources[@]}" -gt 0 ] && command -v jq >/dev/null 2>&1; then',
-    ),
+        ),
+    ],
 }
 
 RECORD_NAME = "case-divergence"
