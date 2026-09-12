@@ -140,17 +140,27 @@ def _plugin_root_with_stub_save(tmp_path: Path, record: Path) -> Path:
             continue
         (scripts / entry.name).symlink_to(entry)
     stub = scripts / "save-session.sh"
-    stub.write_text(
-        "#!/bin/bash\n"
-        f'printf "%s\\n" "$*" >> "{record}"\n'
-        "exit 0\n",
-        encoding="utf-8",
-    )
+    # newline="" (not write_text's default universal-newline translation,
+    # which turns every \n into \r\n on Windows): a shebang line ending in
+    # \r is a broken interpreter directive under Git Bash/MSYS -- the exact
+    # defect class this test's own `make_shim_dir` import already exists to
+    # avoid (tests/spawn_counting.py, #669/#670), and unlike a shimmed
+    # COUNTED tool this stub has no same-named real binary on PATH to
+    # silently fall through to: a corrupted shebang here would fail loudly
+    # with a "bad interpreter" error instead, breaking the positive-control
+    # test on windows-latest for a reason unrelated to #667 (self-review
+    # finding).
+    with open(stub, "w", encoding="utf-8", newline="") as f:
+        f.write(
+            "#!/bin/bash\n"
+            f'printf "%s\\n" "$*" >> "{record}"\n'
+            "exit 0\n"
+        )
     stub.chmod(0o755)
     return root
 
 
-def _store(tmp_path: Path, *, prev_saved: bool):
+def _store(tmp_path: Path, *, prev_saved: bool, last_save_body: dict | None = None):
     home = tmp_path / "home"
     project = tmp_path / "project"
     remember = project / ".remember"
@@ -165,18 +175,17 @@ def _store(tmp_path: Path, *, prev_saved: bool):
     prev = session_dir / f"{PREV_SESSION}.jsonl"
     prev.write_text('{"type":"assistant","message":{"content":"x"}}\n')
 
-    if prev_saved:
-        (remember / "tmp" / "last-save.json").write_text(
-            json.dumps({"sessions": {PREV_SESSION: PREV_SESSION_LINES}})
-        )
+    if last_save_body is not None:
+        body = last_save_body
+    elif prev_saved:
+        body = {"sessions": {PREV_SESSION: PREV_SESSION_LINES}}
     else:
         # Recorded, but for a DIFFERENT session -- a real "not saved" state,
         # not merely a missing file (which session_was_saved also treats as
         # unsaved, but that would not distinguish "the check ran and said no"
         # from "the check never looked").
-        (remember / "tmp" / "last-save.json").write_text(
-            json.dumps({"sessions": {"ffffffff-0000-4000-8000-000000000000": 1}})
-        )
+        body = {"sessions": {"ffffffff-0000-4000-8000-000000000000": 1}}
+    (remember / "tmp" / "last-save.json").write_text(json.dumps(body))
 
     return home, project, remember
 
@@ -191,8 +200,8 @@ def _payload() -> str:
     })
 
 
-def _run(tmp_path: Path, *, prev_saved: bool, jq_present: bool):
-    home, project, remember = _store(tmp_path, prev_saved=prev_saved)
+def _run(tmp_path: Path, *, prev_saved: bool, jq_present: bool, last_save_body: dict | None = None):
+    home, project, remember = _store(tmp_path, prev_saved=prev_saved, last_save_body=last_save_body)
     record = tmp_path / "save-session-argv.log"
     plugin_root = _plugin_root_with_stub_save(tmp_path, record)
 
@@ -284,4 +293,41 @@ def test_an_unsaved_previous_session_does_spawn_a_forced_resave(tmp_path, jq_pre
     )
     assert seen == f"{PREV_SESSION} --force", (
         f"recovery invoked save-session.sh with unexpected argv: {seen!r}"
+    )
+
+
+@pytest.mark.parametrize("jq_present", [True, False], ids=["jq-present", "jq-absent"])
+def test_a_malformed_sessions_shape_reads_as_unsaved_on_both_paths(tmp_path, jq_present):
+    """Parity check (self-review finding, Explore pass on this diff): real
+    jq's `(.sessions // {})[$id]` throws a hard runtime error -- aborting
+    the WHOLE `$SAVED_QUERY` program with no fallback to the legacy
+    `.session`/`.line` shape below it -- the instant `.sessions` is present
+    but is not an object (or null). The jq-free Python branch must diverge
+    from that on stdout text (jq: error to stderr, empty stdout; Python:
+    an explicit "unsaved") but must NOT diverge on the observable outcome:
+    a `sessions` value corrupted into a list, with an otherwise-valid
+    legacy `session`/`line` pair sitting right next to it, must still read
+    as unsaved and still trigger recovery -- on jq and on the fallback
+    alike. Before the fix's `isinstance(sessions, dict)` short-circuit,
+    the Python branch fell through to the legacy check and read this
+    exact shape as "saved" (no recovery), diverging from jq on the
+    identical file.
+    """
+    result, remember, record = _run(
+        tmp_path,
+        prev_saved=False,
+        jq_present=jq_present,
+        last_save_body={
+            "sessions": ["not", "a", "dict"],
+            "session": PREV_SESSION,
+            "line": PREV_SESSION_LINES,
+        },
+    )
+    assert result.returncode == 0, subprocess_failure_detail(result, remember)
+
+    seen = _await_record(record)
+    assert seen == f"{PREV_SESSION} --force", (
+        f"a corrupted `sessions` shape (jq: whole query errors -> "
+        f"unsaved) was read as saved instead (jq_present={jq_present}); "
+        f"save-session.sh argv: {seen!r}"
     )

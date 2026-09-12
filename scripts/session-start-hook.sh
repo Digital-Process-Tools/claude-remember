@@ -386,10 +386,27 @@ except Exception:
     sys.exit(0)
 
 sid = sys.argv[2]
-sessions = data.get("sessions") if isinstance(data, dict) else None
+if not isinstance(data, dict):
+    print("unsaved")
+    sys.exit(0)
+
+sessions = data.get("sessions")
+if sessions is not None and not isinstance(sessions, dict):
+    # $SAVED_QUERY's own `(.sessions // {})[$id]` throws a hard jq runtime
+    # error the instant `.sessions` is present but not an object (or null)
+    # -- jq has no `or`-short-circuit past a raised error, so the WHOLE
+    # query aborts right there and the shell side reads empty stdout as
+    # "unsaved", never reaching the legacy .session/.line fallback below.
+    # Falling through here instead (self-review finding) would read a
+    # corrupted `sessions` value as "saved" whenever a legacy `session`/
+    # `line` pair also happened to validate, diverging from real jq on the
+    # exact same file.
+    print("unsaved")
+    sys.exit(0)
+
 if isinstance(sessions, dict) and isline(sessions.get(sid)):
     print("saved")
-elif isinstance(data, dict) and data.get("session") == sid and isline(data.get("line")):
+elif data.get("session") == sid and isline(data.get("line")):
     print("saved")
 else:
     print("unsaved")
