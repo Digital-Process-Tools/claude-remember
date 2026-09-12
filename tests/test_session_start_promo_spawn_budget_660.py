@@ -443,3 +443,83 @@ def test_memory_render_has_no_bash_3_2_associative_arrays(tmp_path):
         f"positive control failed: file content missing from render -- "
         f"{result.stdout!r}"
     )
+
+
+def _floor_bash_or_skip() -> str:
+    """The real `/bin/bash` when it is the bash < 4.4 floor, else skip.
+
+    `"${arr[@]}"` over an EMPTY array is an "unbound variable" error under
+    `set -u` on every bash before 4.4 and silently fine on 4.4+, so the
+    class of bug pinned below can only be demonstrated on a floor bash --
+    stock macOS's 3.2. On hosts without one this is a skip with the reason
+    stated, never a pass: the CI macOS legs are where it actually runs.
+    """
+    version_check = subprocess.run(
+        ["/bin/bash", "-c", 'echo "${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}"'],
+        capture_output=True, text=True, check=False,
+    )
+    ver = version_check.stdout.strip()
+    if version_check.returncode != 0 or not re.match(r"^\d+\.\d+$", ver):
+        pytest.skip("no usable /bin/bash on this host to check the real floor")
+    major, minor = (int(x) for x in ver.split("."))
+    if (major, minor) >= (4, 4):
+        pytest.skip(
+            f"this host's /bin/bash is {ver}; the empty-array-under-set-u "
+            "error only exists below 4.4"
+        )
+    return "/bin/bash"
+
+
+def _render_under_set_u(bash: str, remember: Path, project: Path, source: str) -> subprocess.CompletedProcess:
+    script = f"""
+    set -u
+    config() {{ printf '%s' "$2"; }}
+    _remember_forward_slash() {{ printf '%s' "$1"; }}
+    source "{REPO_ROOT}/scripts/lib-clock.sh"
+    source "{REPO_ROOT}/scripts/lib-memory-context.sh"
+    _remember_memory_paths
+    _remember_render_memory_section
+    """
+    env = {**os.environ, "REMEMBER_DIR": str(remember), "PROJECT_DIR": str(project),
+           "PLUGIN_ROOT": str(REPO_ROOT), "TODAY": "2026-09-12"}
+    if source:
+        env["SESSION_START_SOURCE"] = source
+    else:
+        env.pop("SESSION_START_SOURCE", None)
+    return subprocess.run([bash, "-c", script], env=env,
+                          capture_output=True, text=True, timeout=30, check=False)
+
+
+def test_compact_render_with_no_identity_file_survives_set_u_on_the_bash_floor(tmp_path):
+    """CI's macOS legs on #675 (bash 3.2): at SESSION_START_SOURCE=compact
+    every non-identity file is skipped, so with no identity file the
+    batched-`wc` present list is EMPTY -- and `for MFILE in "${arr[@]}"`
+    over an empty array is a fatal "unbound variable" under `set -u` on
+    bash < 4.4, which save-session.sh / run-consolidation.sh's publish path
+    runs under. Nothing was injected and rc was 127 with an empty stderr
+    (the render's own stderr is discarded by its caller). bash 5 -- the
+    developer lane's and the Linux legs' bash -- hides it entirely, which
+    is why it reached CI. Every iteration over an array that can be empty
+    is now count-guarded; this pins the exact shape that failed.
+    """
+    bash = _floor_bash_or_skip()
+    remember = tmp_path / "remember"
+    remember.mkdir()
+    (remember / "core-memories.md").write_text("core only, no identity\n", encoding="utf-8")
+
+    compact = _render_under_set_u(bash, remember, tmp_path / "project", "compact")
+    assert compact.returncode == 0, (
+        f"compact render with an empty present list aborted under set -u on "
+        f"{bash}: rc={compact.returncode} stderr={compact.stderr!r}"
+    )
+    assert "unbound variable" not in compact.stderr
+    # The deferred list still names the skipped file: the guard did not
+    # silence the branch, it only stopped the empty-array expansion.
+    assert "core-memories.md" in compact.stdout, compact.stdout
+
+    # Positive control -- the same harness renders content on the same
+    # bash when the present list is NOT empty, so a green above is not a
+    # harness that ran nothing.
+    full = _render_under_set_u(bash, remember, tmp_path / "project", "")
+    assert full.returncode == 0, full.stderr
+    assert "core only, no identity" in full.stdout, full.stdout

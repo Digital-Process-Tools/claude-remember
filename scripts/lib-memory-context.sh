@@ -190,7 +190,13 @@ _remember_render_memory_section() {
             _remember_wc_size_set "$_remember_wc_path" "$_remember_wc_bytes"
         done < <(wc -c "${_remember_present[@]}")
     fi
-    for MFILE in "${_remember_present[@]}"; do
+    # `"${arr[@]}"` on an EMPTY array is an "unbound variable" error under
+    # `set -u` on bash < 4.4 (3.2 included), while `${#arr[@]}` is not -- so
+    # every iteration over an array that can be empty is count-guarded.
+    # Compact mode with no identity file is exactly that case here, and
+    # save-session.sh/run-consolidation.sh's caller chain runs under `set -u`
+    # (CI's macOS legs caught it on #675; bash 5 hides it).
+    [ "${#_remember_present[@]}" -gt 0 ] && for MFILE in "${_remember_present[@]}"; do
             _remember_wc_size_get_into MFILE_BYTES "$MFILE"
             case "$MFILE_BYTES" in (''|*[!0-9]*) MFILE_BYTES=0 ;; esac
             if [ "$MEMORY_INJECT_MAX_BYTES" -gt 0 ] && [ "$MFILE_BYTES" -gt "$MEMORY_INJECT_MAX_BYTES" ]; then
@@ -229,7 +235,9 @@ _remember_render_memory_section() {
                 _remember_wc_size_set "$_remember_wc_path" "$_remember_wc_bytes"
             done < <(wc -c "${_remember_deferred[@]}")
         fi
-        DEFERRED_MEMORY=$(for MFILE in "${_remember_deferred[@]}"; do
+        DEFERRED_MEMORY=""
+        # Same empty-array guard as the main loop above (bash < 4.4 + set -u).
+        [ "${#_remember_deferred[@]}" -gt 0 ] && DEFERRED_MEMORY=$(for MFILE in "${_remember_deferred[@]}"; do
             _remember_wc_size_get_into MFILE_BYTES "$MFILE"
             printf '%s (%s bytes)\n' "$MFILE" "$MFILE_BYTES"
         done)

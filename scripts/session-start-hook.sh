@@ -1655,7 +1655,10 @@ shopt -s nullglob
 _remember_staging_candidates=("$_remember_staging_glob_dir/today-"*.md)
 [ "$_remember_staging_was_nullglob" = 1 ] || shopt -u nullglob
 STAGING_COUNT=0
-for _remember_staging_file in "${_remember_staging_candidates[@]}"; do
+# Count-guarded: `"${arr[@]}"` on an empty array is an "unbound variable"
+# error under `set -u` on bash < 4.4, and an empty staging dir is the
+# common case.
+[ "${#_remember_staging_candidates[@]}" -gt 0 ] && for _remember_staging_file in "${_remember_staging_candidates[@]}"; do
     case "$_remember_staging_file" in
         (*"today-${TODAY}.md") continue ;;
         (*.done.md) continue ;;
