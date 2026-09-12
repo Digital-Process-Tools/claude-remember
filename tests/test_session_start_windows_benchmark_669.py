@@ -280,6 +280,69 @@ def _run_once(env: dict, shims: Path, log: Path) -> tuple[subprocess.CompletedPr
     return result, elapsed, spawns(log)
 
 
+def _diagnose(env: dict, shims: Path, log: Path, label: str,
+              cold: subprocess.CompletedProcess, cold_time: float,
+              warm: subprocess.CompletedProcess, warm_time: float) -> str:
+    """Everything #669's "don't fix blind again" round asked for, gathered
+    once per scenario so a single CI run on an unreachable platform answers
+    every open question about the empty-spawn-log symptom at once, rather
+    than costing another 5-minute round-trip per hypothesis.
+
+    Deliberately never raises: a diagnostic that crashes instead of reporting
+    is strictly worse than the assertion failure it was meant to explain, so
+    every piece is wrapped to degrade to a one-line "<could not get: ...>"
+    rather than replacing the real failure with a diagnostic one.
+    """
+    run_env = {**env, "SPAWN_LOG": str(log), "PATH": f"{shims}{os.pathsep}{env['PATH']}"}
+    lines = [f"=== #669 diagnostics [{label}] ==="]
+    lines.append(f"resolved bash: {BASH!r}")
+    lines.append(f"python-side PATH (as built for run_env): {run_env['PATH']!r}")
+
+    # What bash itself resolves PATH to, from INSIDE the same subprocess
+    # shape the real runs use -- the working theory this round exists to
+    # rule in/out is MSYS path translation (Windows-style vs POSIX-style),
+    # which only a bash-side read can show; the Python-side string above
+    # cannot prove what bash actually sees after its own startup conversion.
+    try:
+        path_probe = subprocess.run(
+            [BASH, "-c", 'printf "DIAG_PATH=%s\\nDIAG_JQ=%s\\n" "$PATH" "$(command -v jq 2>&1)"'],
+            env=run_env, capture_output=True, text=True, timeout=30, check=False,
+        )
+        lines.append(f"bash-side PATH probe rc={path_probe.returncode}:")
+        lines.append(f"  stdout: {path_probe.stdout!r}")
+        lines.append(f"  stderr: {path_probe.stderr!r}")
+    except Exception as exc:  # noqa: BLE001 -- diagnostics must never crash the test
+        lines.append(f"  <could not probe bash-side PATH: {exc!r}>")
+
+    try:
+        entries = sorted(shims.iterdir())
+        lines.append(f"shim dir {shims} contains {len(entries)} entries:")
+        for entry in entries:
+            try:
+                st = entry.stat()
+                lines.append(f"  {entry.name}  mode={oct(st.st_mode)}  size={st.st_size}")
+            except OSError as exc:
+                lines.append(f"  {entry.name}  <stat failed: {exc!r}>")
+    except Exception as exc:  # noqa: BLE001
+        lines.append(f"  <could not list shim dir {shims}: {exc!r}>")
+
+    try:
+        log_exists = log.exists()
+        log_size = log.stat().st_size if log_exists else None
+        lines.append(f"spawn log {log}: exists={log_exists} size={log_size}")
+    except Exception as exc:  # noqa: BLE001
+        lines.append(f"  <could not stat spawn log {log}: {exc!r}>")
+
+    lines.append(f"cold: rc={cold.returncode} elapsed={cold_time:.3f}s")
+    lines.append(f"  cold stdout ({len(cold.stdout)} chars): {cold.stdout!r}")
+    lines.append(f"  cold stderr ({len(cold.stderr)} chars): {cold.stderr!r}")
+    lines.append(f"warm: rc={warm.returncode} elapsed={warm_time:.3f}s")
+    lines.append(f"  warm stdout ({len(warm.stdout)} chars): {warm.stdout!r}")
+    lines.append(f"  warm stderr ({len(warm.stderr)} chars): {warm.stderr!r}")
+    lines.append("=== end #669 diagnostics ===")
+    return "\n".join(lines)
+
+
 def _benchmark(tmp_path: Path, record_property, *, jq_present: bool,
                 cold_budget: int, warm_budget: int, label: str):
     home, project, remember = _store(tmp_path)
@@ -315,6 +378,15 @@ def _benchmark(tmp_path: Path, record_property, *, jq_present: bool,
         f"[{label}] warm run failed: {warm.stderr[-2000:]!r}"
     )
 
+    # Printed unconditionally, not only on failure: pytest shows captured
+    # stdout for a FAILED test by default (no -s needed, confirmed against
+    # this repo's own addopts in pyproject.toml, which sets none of
+    # --capture=no/-s), so this appears in the job log exactly when it is
+    # needed and costs nothing extra when it is not. Built once per
+    # scenario, not duplicated in every assertion below it.
+    diag = _diagnose(env, shims, log, label, cold, cold_time, warm, warm_time)
+    print(diag)
+
     # Positive/negative control, paired (CLAUDE.md: a "must not fire"
     # assertion needs a "must fire" twin, or a broken harness that shims
     # nothing passes the negative half for free). jq_present MUST see real
@@ -326,14 +398,15 @@ def _benchmark(tmp_path: Path, record_property, *, jq_present: bool,
         assert jq_calls, (
             f"[{label}] expected real jq invocations (this is the jq-present "
             "scenario) and saw none -- the harness cannot distinguish "
-            f"jq-present from jq-absent if this fires. Spawns: {all_spawns}"
+            f"jq-present from jq-absent if this fires. Spawns: {all_spawns}\n\n"
+            f"{diag}"
         )
     else:
         assert not jq_calls, (
             f"[{label}] expected NO real jq invocations (jq was removed from "
             "every shim and from PATH) but saw real jq calls -- the "
             f"jq-absent scenario is not actually exercising _jq_fallback: "
-            f"{jq_calls}"
+            f"{jq_calls}\n\n{diag}"
         )
 
     print(
