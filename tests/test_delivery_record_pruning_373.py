@@ -548,6 +548,11 @@ class TestStaleDeliveryRecordsPruningGlobBackslash517:
         setup = (
             forward_slash_fn
             + "\n_remember_date() { date \"$@\"; }"
+            # #665 (part of #660): the stale-mtime-age check now calls
+            # _remember_date_into (already existed, lib-clock.sh #511)
+            # directly instead of $(_remember_date ...) -- the extracted
+            # block calls it, so the stub needs it too.
+            + "\n_remember_date_into() { local _v=\"$1\"; shift; printf -v \"$_v\" '%s' \"$(_remember_date \"$@\")\"; }"
             + "\nGRACE_MIN=5"
             + f"\nCURRENT_SESSION_ID={shlex.quote(current_session_id)}"
             + f"\nSESSIONS_DIR={shlex.quote(str(sessions_dir))}"

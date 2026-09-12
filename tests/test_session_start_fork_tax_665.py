@@ -68,7 +68,45 @@ LOG_SH = REPO_ROOT / "scripts" / "log.sh"
 LIB_SLUG = REPO_ROOT / "scripts" / "lib-slug.sh"
 
 BASH = resolve_bash()
-pytestmark = pytest.mark.skipif(BASH is None, reason="no usable bash found")
+
+
+def _bash_has_bashpid(bash: str | None) -> bool:
+    """$BASHPID (bash >= 4.0) is what this whole file's fork counter relies
+    on -- each real fork() gets a brand-new pid, unlike `$BASH_SUBSHELL`
+    (nesting depth, undercounts sibling forks) or `$$` (bash's own docs: `$$`
+    is NOT reset in a subshell, so every sibling would report the SAME
+    "process"). Stock macOS ships bash 3.2 as `/bin/bash`
+    (tests/test_lock_primitive.py's own `test_self_id_differs_between_sibling_subshells`
+    documents the identical gap for lib-lock.sh's self-id, and lib-lock.sh's
+    `_lock_self_set` falls back to `sh -c 'echo $PPID'` for exactly this
+    reason) -- whether THIS host's `bash` (found by `resolve_bash()`, which
+    trusts whatever is on PATH, not necessarily `/bin/bash`) is old enough to
+    lack it is a real, host-dependent question, not a hypothetical one.
+    Checked directly rather than assumed, so a host where `bash` happens to
+    resolve to the pre-4.0 floor skips loudly instead of failing every test
+    in this file on "harness produced no trace lines at all" -- a skip this
+    file's own coverage note (below) names, not a silent pass.
+    """
+    if bash is None:
+        return False
+    result = subprocess.run(
+        [bash, "-c", "echo ${BASHPID:-}"],
+        capture_output=True, text=True, timeout=10, check=False,
+    )
+    return result.returncode == 0 and result.stdout.strip().isdigit()
+
+
+_HAS_BASHPID = _bash_has_bashpid(BASH)
+pytestmark = pytest.mark.skipif(
+    BASH is None or not _HAS_BASHPID,
+    reason=(
+        "no usable bash found" if BASH is None else
+        "this host's `bash` lacks $BASHPID (pre-4.0, e.g. stock macOS "
+        "/bin/bash 3.2) -- this whole file's fork counter depends on it "
+        "(see _bash_has_bashpid's docstring); untested on that floor rather "
+        "than reporting a false pass or a spurious 'broken probe' failure"
+    ),
+)
 
 START = "===FORKPROBE-START==="
 END = "===FORKPROBE-END==="

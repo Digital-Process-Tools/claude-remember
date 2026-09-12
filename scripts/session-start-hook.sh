@@ -125,18 +125,23 @@ _stdin_json_string() {
 # unconditional call: VARNAME is set to the empty string up front, so a
 # `return 1` below leaves it exactly where the old `|| X=""` idiom did,
 # with no separate fallback statement needed at the call site (#665, part
-# of #660).
+# of #660). Locals below are prefixed `_sjsi_` (this function's own name,
+# abbreviated) rather than the bare `_sjs_` tag config_into's own comment
+# warns about -- narrows, does not close, the same `printf -v`-resolves-
+# against-the-innermost-local collision every function in this file that
+# takes a destination VARNAME shares; see config_into's comment (log.sh)
+# for the full argument.
 _stdin_json_string_into() {
-    local _sjs_var="$1" _sjs_key="$2" _sjs_raw="$3" _sjs_rest _sjs_prefix _sjs_value
-    printf -v "$_sjs_var" '%s' ""
-    case "$_sjs_raw" in *"\"$_sjs_key\""*) ;; *) return 1 ;; esac
-    _sjs_rest=${_sjs_raw#*\"$_sjs_key\"}
-    _sjs_prefix=${_sjs_rest%%\"*}
-    case "$_sjs_prefix" in *[!:[:space:]]*) return 1 ;; esac
-    _sjs_value=${_sjs_rest#*\"}
-    _sjs_value=${_sjs_value%%\"*}
-    [ -n "$_sjs_value" ] || return 1
-    printf -v "$_sjs_var" '%s' "$_sjs_value"
+    local _sjsi_var="$1" _sjsi_key="$2" _sjsi_raw="$3" _sjsi_rest _sjsi_prefix _sjsi_value
+    printf -v "$_sjsi_var" '%s' ""
+    case "$_sjsi_raw" in *"\"$_sjsi_key\""*) ;; *) return 1 ;; esac
+    _sjsi_rest=${_sjsi_raw#*\"$_sjsi_key\"}
+    _sjsi_prefix=${_sjsi_rest%%\"*}
+    case "$_sjsi_prefix" in *[!:[:space:]]*) return 1 ;; esac
+    _sjsi_value=${_sjsi_rest#*\"}
+    _sjsi_value=${_sjsi_value%%\"*}
+    [ -n "$_sjsi_value" ] || return 1
+    printf -v "$_sjsi_var" '%s' "$_sjsi_value"
 }
 
 # ── The cwd the host handed us (#411) ──────────────────────────────────────
@@ -203,7 +208,8 @@ if ! command -v _remember_date >/dev/null 2>&1; then
     echo "session-start-hook: ERROR -- failed to source $PLUGIN_ROOT/scripts/log.sh" >&2
     exit 127
 fi
-TODAY=$(_remember_date '+%Y-%m-%d')
+TODAY=""
+_remember_date_into TODAY '+%Y-%m-%d'
 log "hook" "session-start: PROJECT_DIR=$PROJECT_DIR PIPELINE_DIR=$PIPELINE_DIR REMEMBER_DIR=$REMEMBER_DIR"
 
 # Publish what the chain above just resolved, so user-prompt-hook.sh does not
@@ -1064,8 +1070,8 @@ if [ "$_promos_enabled" = "true" ] \
         fi
         case "$last_ts" in ''|*[!0-9]*) last_ts=0 ;; esac
 
-        local now
-        now=$(_remember_date +%s)
+        local now=""
+        _remember_date_into now +%s
         case "$now" in ''|*[!0-9]*) return 0 ;; esac
 
         if [ "$last_ts" -gt 0 ] \
@@ -1472,7 +1478,7 @@ if [ -f "$REMEMBER_HANDOFF" ] && [ -s "$REMEMBER_HANDOFF" ]; then
         echo "[already delivered ${DELIVERIES} times since ${FIRST_DELIVERED:-an earlier session} -- no new handoff has been written since, so this is pending replacement, not news. You may already have acted on it. Running /remember replaces it.]"
     else
         DELIVERIES=1
-        FIRST_DELIVERED=$(_remember_date '+%Y-%m-%d %H:%M')
+        _remember_date_into FIRST_DELIVERED '+%Y-%m-%d %H:%M'
     fi
     cat "$REMEMBER_HANDOFF"
     echo ""
@@ -1601,7 +1607,8 @@ if [ -d "$SESSIONS_DIR" ] && [ -d "$REMEMBER_DIR/tmp" ]; then
             # into "confirmed outside the grace window", the opposite of
             # what an unreadable mtime does three lines above. Refuse to
             # guess in either failure shape, same as the mtime check does.
-            _remember_now=$(_remember_date +%s)
+            _remember_now=""
+            _remember_date_into _remember_now +%s
             case "$_remember_now" in
                 (''|*[!0-9]*)
                     continue

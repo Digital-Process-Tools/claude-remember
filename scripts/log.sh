@@ -361,43 +361,18 @@ EOF
 # Read .timezone from config BEFORE computing MEMORY_LOG_DATE — otherwise
 # TZ="" falls back to UTC on macOS/BSD and produces next-day filenames after
 # ~20:00 local in zones west of UTC.
+# The key-shape validation (#539), the flattened-cache lookup and the
+# jq/python fallback all live in config_into() below, not here -- config()
+# is now a thin wrapper around it (#665, part of #660) so external callers
+# (hooks.d/*, pipeline shell probes, tests) keep the `X=$(config ...)`
+# idiom unchanged, while a caller that only wants the value (not the
+# subshell-and-echo round trip) can call config_into directly and skip the
+# fork the `$( )` itself adds. See config_into's own comment, right below,
+# for what that removes, what it does not, and why $key is validated before
+# ever reaching jq.
 config() {
-    local key="$1"
-    local default="$2"
-
-    # $key is spliced into the jq program below by string interpolation, not
-    # passed as data (#539) -- `if $key == null then ... else ($key |
-    # tostring) end`, with $key substituted verbatim, twice. Every call site
-    # in this repo passes a hardcoded literal, so nothing exploits this
-    # today, but the function's contract never said the argument had to be a
-    # literal, and nothing enforced it. Reject anything that is not a plain
-    # dotted path up front, before the config table is even loaded, so a
-    # future caller that builds $key from data fails closed to the default
-    # instead of having it evaluated as jq.
-    #
-    # A `case` glob CANNOT express this: the earlier form here,
-    # `""|.|.*[!A-Za-z0-9_.]*`, only rejected a key that literally started
-    # with "." and later contained a bad character -- a key with no leading
-    # dot at all (`("INJECTED"|length>0)`, say) matched none of that
-    # pattern's arms, fell through the whole case silently, and reached the
-    # jq interpolation below unfiltered. `[[ =~ ]]` (already used elsewhere
-    # in this file, e.g. the KEY=VALUE parser below) can anchor the WHOLE
-    # string against a real grammar instead: one leading dot, then one or
-    # more [A-Za-z0-9_]+ segments, each joined to the next by a single
-    # literal dot -- the dot is the separator BETWEEN segments, never a
-    # character a segment's own class accepts, so `.foo..bar` (an empty
-    # segment) is correctly rejected rather than swallowed.
-    #
-    # This validation, the flattened-cache lookup and the jq/python fallback
-    # all now live in config_into() below -- config() is a thin wrapper
-    # around it (#665, part of #660) so external callers (hooks.d/*,
-    # pipeline shell probes, tests) keep the `X=$(config ...)` idiom
-    # unchanged, while a caller that only wants the value (not the
-    # subshell-and-echo round trip) can call config_into directly and skip
-    # the fork the `$( )` itself adds -- see config_into's own comment for
-    # what that removes and what it does not.
     local _cfg_result
-    config_into _cfg_result "$key" "$default"
+    config_into _cfg_result "$1" "$2"
     printf '%s\n' "$_cfg_result"
 }
 
@@ -417,14 +392,24 @@ config() {
 # the jq/python fallback still needs a subprocess, or still needs a subshell
 # to capture one -- the zero-fork claim holds only for the flattened-cache
 # HIT path, same judgment call `_config_load`'s own comment makes for the
-# table it builds. Every local below is prefixed `_cfg_` specifically so a
-# caller passing a destination variable named e.g. "key" or "default" (both
-# names this function would otherwise declare `local` itself) is written to
-# the CALLER's variable, not shadowed by one of this function's own.
+# table it builds. Every local below is prefixed `_cfg_into_` (this
+# function's own name, not just a generic tag) specifically so a caller
+# passing a destination variable named "key" or "default" is written to
+# the CALLER's variable rather than one of this function's own locals of
+# that same bare name. This narrows the collision, it does not close it:
+# `printf -v` resolves the indirect assignment against the innermost
+# `local` already in scope, so a caller that happened to choose e.g.
+# "_cfg_into_key" as ITS destination variable would still have the write
+# land on this function's own local instead -- bash has no nameref
+# (`local -n`) on the bash 3.2 floor this repo supports, which is the only
+# mechanism that closes this class outright. No current call site does
+# this; it is a live constraint on any future one, the same residual risk
+# `_remember_date_into` (lib-clock.sh, #511) already carries for its own
+# `_var`/`_val` locals.
 config_into() {
-    local _cfg_var="$1"
-    local _cfg_key="$2"
-    local _cfg_default="$3"
+    local _cfg_into_var="$1"
+    local _cfg_into_key="$2"
+    local _cfg_into_default="$3"
 
     # Under LC_ALL=C only: `[A-Za-z]` is a POSIX bracket RANGE, and a range
     # is matched by collation order, not byte value, once LC_COLLATE (via
@@ -435,7 +420,7 @@ config_into() {
     # assignment, which does not apply to `[[`, a compound command, the way
     # it would to a simple one) scopes this to the one match and restores
     # nothing, because nothing outside it was ever changed.
-    if ! ( LC_ALL=C; [[ "$_cfg_key" =~ ^\.[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$ ]] ); then
+    if ! ( LC_ALL=C; [[ "$_cfg_into_key" =~ ^\.[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$ ]] ); then
         # Same convention as _config_load's own '#refuse' report just above
         # in this file: a rejection here and a genuine cache miss a few
         # lines below both resolve to $default, and without this line they
@@ -445,8 +430,8 @@ config_into() {
         # the same reason that one is: a warning that fires on ordinary
         # lookups is a warning nobody reads.
         [ "${REMEMBER_DEBUG:-}" = "1" ] && \
-            echo "remember: config() key '$_cfg_key' is not a plain dotted path -- returning the default rather than evaluating it" >&2
-        printf -v "$_cfg_var" '%s' "$_cfg_default"
+            echo "remember: config() key '$_cfg_into_key' is not a plain dotted path -- returning the default rather than evaluating it" >&2
+        printf -v "$_cfg_into_var" '%s' "$_cfg_into_default"
         return
     fi
 
@@ -456,28 +441,28 @@ config_into() {
         _config_load
     fi
 
-    # $_cfg_key is already known to match the dotted-path grammar above, so
+    # $_cfg_into_key is already known to match the dotted-path grammar above, so
     # this branch no longer needs its own shape check -- it only has to fall
     # through when the table state cannot answer (fallback / private key).
-    if [ "$_REMEMBER_CFG_STATE" = "ok" ] && ! _config_is_private_key "$_cfg_key"; then
-        local _cfg_slot="_RCFG_${_cfg_key#.}"
-        _cfg_slot="${_cfg_slot//./_}"
-        local _cfg_hit="${!_cfg_slot:-}"
-        printf -v "$_cfg_var" '%s' "${_cfg_hit:-$_cfg_default}"
+    if [ "$_REMEMBER_CFG_STATE" = "ok" ] && ! _config_is_private_key "$_cfg_into_key"; then
+        local _cfg_into_slot="_RCFG_${_cfg_into_key#.}"
+        _cfg_into_slot="${_cfg_into_slot//./_}"
+        local _cfg_into_hit="${!_cfg_into_slot:-}"
+        printf -v "$_cfg_into_var" '%s' "${_cfg_into_hit:-$_cfg_into_default}"
         return
     fi
 
     if [ ! -f "${REMEMBER_CONFIG:-}" ]; then
-        printf -v "$_cfg_var" '%s' "$_cfg_default"
+        printf -v "$_cfg_into_var" '%s' "$_cfg_into_default"
         return
     fi
-    local _cfg_val=""
+    local _cfg_into_val=""
     if command -v jq >/dev/null 2>&1; then
-        # $_cfg_key is spliced into this program by string interpolation
+        # $_cfg_into_key is spliced into this program by string interpolation
         # below -- safe ONLY because the guard at the top of this function
         # already rejected anything not shaped like a plain dotted path
         # (#539). Do not remove that guard to "simplify" this branch.
-        # NOT `$_cfg_key // empty`: jq's // treats false the same as null,
+        # NOT `$_cfg_into_key // empty`: jq's // treats false the same as null,
         # so every boolean option set to false read back as its default and
         # could never be switched off (#159). features.ndc_compression and
         # features.recovery are both documented, both default true, and
@@ -486,25 +471,25 @@ config_into() {
         # as missing. Testing the printed value against "null" cannot tell
         # JSON null from the string "null" -- `jq -r` prints both as the
         # same bare word.
-        _cfg_val=$(jq -r "if $_cfg_key == null then \"\" else ($_cfg_key | tostring) end" \
+        _cfg_into_val=$(jq -r "if $_cfg_into_key == null then \"\" else ($_cfg_into_key | tostring) end" \
             "$REMEMBER_CONFIG" 2>/dev/null)
     elif type _jq_fallback >/dev/null 2>&1; then
         # No jq -- detect-tools.sh already defined a Python-based fallback
         # for exactly this (bare-key `jq -r '.key' file` reads). Matching
         # #159's null-vs-false semantics: an absent/null key falls through
-        # to $_cfg_default below; a present `false` prints as the string
+        # to $_cfg_into_default below; a present `false` prints as the string
         # "false" (see detect-tools.sh's isinstance(val, str) fix for why
         # that's not Python's "False").
-        _cfg_val=$(_jq_fallback -r "$_cfg_key" "$REMEMBER_CONFIG" 2>/dev/null)
+        _cfg_into_val=$(_jq_fallback -r "$_cfg_into_key" "$REMEMBER_CONFIG" 2>/dev/null)
     else
         # log.sh can be sourced directly without detect-tools.sh (some
         # callers/tests do), so _jq_fallback may not exist. Same read,
         # inlined, so config_into() never regresses to bundled-default-only
         # just because of sourcing order. Same null-vs-false semantics as
-        # above: a genuine absent/null key leaves $_cfg_val empty (falls to
-        # $_cfg_default below); a present `false` renders as jq's "false",
+        # above: a genuine absent/null key leaves $_cfg_into_val empty (falls to
+        # $_cfg_into_default below); a present `false` renders as jq's "false",
         # not Python's str(False).
-        _cfg_val=$("${PYTHON:-python3}" -c '
+        _cfg_into_val=$("${PYTHON:-python3}" -c '
 import json, sys
 try:
     data = json.load(open(sys.argv[2]))
@@ -521,9 +506,9 @@ try:
         print(v if isinstance(v, str) else json.dumps(v))
 except Exception:
     pass
-' "$_cfg_key" "$REMEMBER_CONFIG" 2>/dev/null)
+' "$_cfg_into_key" "$REMEMBER_CONFIG" 2>/dev/null)
     fi
-    printf -v "$_cfg_var" '%s' "${_cfg_val:-$_cfg_default}"
+    printf -v "$_cfg_into_var" '%s' "${_cfg_into_val:-$_cfg_into_default}"
 }
 
 # Build the table now, in THIS shell, so every `$(config ...)` subshell
