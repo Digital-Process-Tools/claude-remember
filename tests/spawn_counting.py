@@ -72,36 +72,46 @@ def make_shim_dir(tmp_path: Path, log: Path | None = None) -> Path:
         if real is None:
             continue
         shim = shims / name
-        shim.write_text(
-            "#!/bin/bash\n"
-            f'printf "%s %s\\n" "{name}" "$*" >> "$SPAWN_LOG"\n'
-            # .as_posix(), not a raw str(real): on Windows `real` is a
-            # backslash-separated WindowsPath, and embedding that directly
-            # into a bash script is the identical class of bug #670 already
-            # fixed once in this same PR (tests/test_start_context_cache_668.py,
-            # tests/test_config_flatten_cache_668.py) -- this fix must not
-            # reintroduce it one function away.
-            f'exec "{real.as_posix()}" "$@"\n',
-            # newline="": write_text's default universal-newline translation
-            # turns every \n into \r\n on Windows, and a shebang line ending
-            # in \r is a broken interpreter directive under Git Bash/MSYS --
-            # `#!/bin/bash\r` is not a path bash's own exec() can resolve.
-            # Observed live on windows-latest/3.11 CI (#669): every COUNTED
-            # command was correctly located via _EXE_SUFFIXES (the #670 fix),
-            # shim files existed with the right content, `command -v` still
-            # reported the shim PATH entry as present/executable (NTFS ACL
-            # default), but invoking it never actually ran the wrapper --
-            # SPAWN_LOG stayed empty for an entire cold+warm pair that still
-            # exited 0, meaning the real (unshimmed) binary answered instead
-            # and the shim silently never fired. This is the exact CRLF class
-            # this repo already named and fixed once elsewhere
-            # (tests/test_install_agy_hooks_563.py, #577).
-            encoding="utf-8",
-            newline="",
-        )
+        # newline="": write_text's default universal-newline translation
+        # turns every \n into \r\n on Windows, and a shebang line ending
+        # in \r is a broken interpreter directive under Git Bash/MSYS --
+        # `#!/bin/bash\r` is not a path bash's own exec() can resolve.
+        # Observed live on windows-latest/3.11 CI (#669): every COUNTED
+        # command was correctly located via _EXE_SUFFIXES (the #670 fix),
+        # shim files existed with the right content, `command -v` still
+        # reported the shim PATH entry as present/executable (NTFS ACL
+        # default), but invoking it never actually ran the wrapper --
+        # SPAWN_LOG stayed empty for an entire cold+warm pair that still
+        # exited 0, meaning the real (unshimmed) binary answered instead
+        # and the shim silently never fired. This is the exact CRLF class
+        # this repo already named and fixed once elsewhere
+        # (tests/test_install_agy_hooks_563.py, #577).
+        #
+        # `open(..., newline="")`, not `Path.write_text(..., newline=...)`:
+        # Path.write_text only gained a `newline` parameter in Python 3.10,
+        # and this repo's own matrix floors at 3.9 (.github/workflows/tests.yml)
+        # -- the first attempt at this fix used write_text(newline=...) and
+        # broke every already-passing caller of make_shim_dir on
+        # windows-latest/3.9 with TypeError: write_text() got an unexpected
+        # keyword argument 'newline' (observed on CI, job 103473817312).
+        # open()'s own `newline` parameter has existed on every Python this
+        # repo supports.
+        with open(shim, "w", encoding="utf-8", newline="") as _f:
+            _f.write(
+                "#!/bin/bash\n"
+                f'printf "%s %s\\n" "{name}" "$*" >> "$SPAWN_LOG"\n'
+                # .as_posix(), not a raw str(real): on Windows `real` is a
+                # backslash-separated WindowsPath, and embedding that directly
+                # into a bash script is the identical class of bug #670 already
+                # fixed once in this same PR (tests/test_start_context_cache_668.py,
+                # tests/test_config_flatten_cache_668.py) -- this fix must not
+                # reintroduce it one function away.
+                f'exec "{real.as_posix()}" "$@"\n'
+            )
         shim.chmod(0o755)
     if log is not None:
-        log.write_text("", encoding="utf-8", newline="")
+        with open(log, "w", encoding="utf-8", newline="") as _f:
+            _f.write("")
     return shims
 
 

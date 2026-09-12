@@ -152,6 +152,20 @@ JQ_ABSENT_WARM_SPAWN_BUDGET = 140
 WALL_TIME_CEILING_SECONDS = 45.0
 
 
+def _write_no_crlf(path: Path, text: str) -> None:
+    """write_text(..., newline="") without Path.write_text's own newline=
+    kwarg, which this repo's own matrix cannot use: it only exists from
+    Python 3.10, and .github/workflows/tests.yml floors at 3.9 -- the first
+    attempt at this fixture's CRLF fix used write_text(newline=...) directly
+    and broke windows-latest/3.9 with TypeError: write_text() got an
+    unexpected keyword argument 'newline' (observed on CI, job
+    103473817312), for every existing caller of tests/spawn_counting's
+    make_shim_dir too, not just this file. open()'s own `newline` parameter
+    has existed on every Python version this repo supports."""
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        f.write(text)
+
+
 def _store(tmp_path: Path):
     """A healthy, already-populated project: legacy `.remember/` layout."""
     home = tmp_path / "home"
@@ -163,8 +177,9 @@ def _store(tmp_path: Path):
 
     plugins_dir = home / ".claude" / "plugins"
     plugins_dir.mkdir(parents=True)
-    (plugins_dir / "installed_plugins.json").write_text(
-        json.dumps({"version": "2", "plugins": {}}), encoding="utf-8", newline=""
+    _write_no_crlf(
+        plugins_dir / "installed_plugins.json",
+        json.dumps({"version": "2", "plugins": {}}),
     )
 
     bodies = {
@@ -175,27 +190,27 @@ def _store(tmp_path: Path):
         "archive.md": "ARCHIVE-BODY-669",
     }
     for name, body in bodies.items():
-        # newline="" everywhere in this fixture: write_text's default
+        # No CRLF translation anywhere in this fixture: write_text's default
         # universal-newline translation turns every \n into \r\n on
         # Windows, which this repo has already named and fixed once for
         # exactly this reason (tests/test_install_agy_hooks_563.py, #577;
         # tests/_glob_backslash_517.py) -- a fixture that silently differs
         # by platform is not "a representative, already-healthy project" on
         # all three.
-        (remember / name).write_text(body + "\n", encoding="utf-8", newline="")
+        _write_no_crlf(remember / name, body + "\n")
 
     # A genuine previous session, saved: a real transcript on disk, and
     # last-save.json recording it with an INTEGER (a line count), which is
     # what session_was_saved()'s jq query actually checks for -- see the
     # module docstring for the fixture bug this avoids.
     prev_transcript = session_dir / f"{PREV_SESSION}.jsonl"
-    prev_transcript.write_text(
+    _write_no_crlf(
+        prev_transcript,
         '{"type":"assistant","message":{"content":"x"}}\n' * PREV_SESSION_LINES,
-        encoding="utf-8", newline="",
     )
-    (remember / "tmp" / "last-save.json").write_text(
+    _write_no_crlf(
+        remember / "tmp" / "last-save.json",
         json.dumps({"sessions": {PREV_SESSION: PREV_SESSION_LINES}}),
-        encoding="utf-8", newline="",
     )
 
     return home, project, remember
