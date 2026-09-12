@@ -7,6 +7,121 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.0] - 2026-09-13 — SessionStart's fork-reduction series closes out with three opt-out caches (memory, config, tool-detection), 22+ more subshell forks cut from the hot path, and a Windows benchmark that finally runs in CI -- plus the release-audit fix moving the #668 config cache out of the project tree and validating it line-by-line before eval, and the privacy/terms pages the plugin directory listing requires (#656, #657, #660, #662-#669, #673, #679, #682, #683)
+
+### Added
+
+- claude-remember now asks for a GitHub star, once, through the same `SessionStart` promo slot and off switch (`features.plugin_promos`) the #574/#631 cross-plugin promo already owns (#657). It does NOT fire at install time: the gate is `recent.md` being a non-empty regular file, which only exists once a full day of sessions has actually been consolidated -- so the ask waits until the plugin has demonstrably done something for you, per the maintainer's decision on the issue. Same cooldown, same rotation, same `claude-remember:`-prefixed self-identifying `systemMessage`-only line as every other entry in `promos.json`. A `stargazers` badge was also added to README.md, next to the version badge.
+
+- `SessionStart` now caches three of the four things #668 identified as recomputed on every start -- the injected `=== MEMORY ===` section (six memory files headed/sized/concatenated, plus the rotated-slice listing), the flattened `config()` table (`_RCFG_*`), and the `python`/`jq` tool-verdict probe -- each validated by mtime (`-nt`, never a tie) against the files it depends on, and each invalidated rather than served stale on any mismatch. The context and config caches are written under `$REMEMBER_DIR/tmp/` and refreshed by `save-session.sh` and `run-consolidation.sh` at the tail of their own already-detached (`nohup ... & disown`) runs, so population costs nothing on the interactive path; `session-start-hook.sh` also self-heals a miss by writing a fresh cache via `tee` while still streaming the live render. The tool-verdict cache lives under the system temp dir (keyed on the exact `$PATH` string) since it runs before `REMEMBER_DIR` is known. The fourth item (`session_dir_slug`) was assessed and deliberately deferred -- see the pull request body for why. New shared library: `scripts/lib-memory-context.sh`. `REMEMBER_START_CACHE=0`, `REMEMBER_CONFIG_CACHE=0` and `REMEMBER_TOOLS_CACHE=0` each disable one cache independently for debugging.
+
+- `session-start-hook.sh` now has a real wall-time and spawn-count benchmark (`tests/test_session_start_windows_benchmark_669.py`), run on every leg of the existing test matrix -- including `windows-latest` under Git Bash -- rather than in a new, separate CI job (#669, part of #660). Every latency figure attached to #660's follow-ups (#662-#667) was reasoned from one reporter's own measurement and never observed in CI, because the Windows leg never executed this hook at all. Two scenarios are measured (jq present, and jq absent -- Git for Windows does not ship it), each cold and warm. Spawn count is asserted as a generous, deliberately loose budget (spawn count is counted by execution, so it is machine-independent); wall time is printed and recorded via `record_property` for a human to compare run over run, never asserted tightly, for the same reason this repo's own `#510` and `#497` reports are reports and not gates: a shared CI runner's wall clock is noisy about itself.
+
+- `tests/test_session_start_windows_benchmark_669.py`'s cold/warm wall-time and spawn-count numbers (#669) now reach a human on every CI run instead of none: each scenario appends a small Markdown table to `$GITHUB_STEP_SUMMARY` (shown on the run's own Summary tab, no workflow-file change needed -- GitHub Actions already makes that variable available to every step) and prints the same table to both stdout and stderr, so it is visible in the job log too, not only on a failure (#673). Appending degrades silently to a no-op when the variable is unset (the ordinary local `pytest` run), but a genuinely unwritable path raises loudly rather than dropping the table a second time.
+
+- Privacy policy (`docs/privacy.md`) and terms of service (`docs/terms.md`) pages, required by the OpenAI plugin directory submission form (#683).
+
+### Changed
+
+- SessionStart's foreground path no longer forks a `python3`/`python`/`py` candidate probe unconditionally on every start (#662). `$PYTHON` is only read by four jq-less fallback call sites (the config merge, the config flatten, the per-key read, and `_jq_fallback` itself), none of which fire when `jq` is on PATH -- the common case. Detection is now lazy: a `_remember_python()` resolver, called only at first actual need and cached the same way the existing PATH-keyed verdict cache already was, opted into via `_REMEMBER_LAZY_PYTHON=1` -- set only by `session-start-hook.sh`, since every OTHER sourcer of `detect-tools.sh` (`post-tool-hook.sh`, `save-session.sh`, `run-consolidation.sh`, `doctor.sh`) genuinely invokes `$PYTHON -m pipeline.shell` right after sourcing it, so eager detection there is real work, not waste. The jq-less path still resolves a working interpreter correctly when one is actually needed (#662's own named trap).
+- Rendering the injected `=== MEMORY ===` section (`lib-memory-context.sh`) no longer forks one `wc` + one `tr` + one `basename` per memory file -- a typical 4-6 file store paid 8-12+ forks here alone (#664, #666). Sizes are now read with one batched `wc -c` call across every present file (and, separately, one across the compact-mode deferred set and one across the up-to-10 rotated slices actually printed), parsed via a plain `read`, which already trims `wc`'s own padding; `basename` is replaced with `${MFILE##*/}`. The rotated-slice listing uses a glob array instead of `ls | sort`, and its count is the array length instead of `echo | wc -l | tr -d ' '`.
+- Three more always-on forks on the SessionStart foreground path are now gated or removed (#666): the `capture-alive.d` prune (`ls -t | tail`) only runs once the directory is actually over its 200-entry keep threshold, instead of on every single start; the staging-count check (`ls | grep -v | grep -v | wc -l | tr -d ' '`, five forks) is now a glob array walked with a `case`, zero forks; and `bootstrap-dirs.sh`'s stale-config sweep (`find -mmin +30`) is skipped entirely when a glob array shows there is nothing to sweep. `lib-clock.sh`'s `_remember_date` also now accepts `%s` through the bash >= 4.2 `printf '%(FMT)T'` builtin instead of always shelling out to `date` for it -- `%s` is POSIX strftime, not the GNU-only extension it was previously lumped in with, and the builtin and `date +%s` are pinned byte-identical by `tests/test_session_start_promo_spawn_budget_660.py`.
+
+- `SessionStart`'s hot path removes 22+ `$( )` subshell forks that were paying
+  a fork purely to capture an already-forkless builtin's output (#665, part
+  of #660): `config()`'s flattened-cache-hit lookups now have a `config_into
+  VAR key default` sibling (`printf -v`, no command substitution) used for
+  every `.features.*`/`.handoff_mode`/`.cooldowns.*`/`.timezone`/etc. read on
+  the `SessionStart` and per-tool-call config paths; `log()`'s timestamp now
+  calls `_remember_date_into` (already added by #511) directly instead of
+  wrapping it in `$( )`; `_remember_forward_slash` and `_stdin_json_string`
+  each gained an `_into` sibling, wired into every session-start-hook.sh call
+  site; and `lib-slug.sh`'s `_remember_build_slug_sed` -- 22 `$(printf
+  '\NNN')` calls building the slug's byte-range sed program, run once per
+  hook invocation -- now uses bash's own ANSI-C (`$'\NNN'`) octal quoting, a
+  lexer-level substitution that forks nothing, proved byte-identical to the
+  old builder. `log()`'s message control-byte scrub (`printf | tr`, #618/
+  #621) and the `.hooks.dispatch_*` reads in the hook-dispatcher region are
+  deliberately unchanged -- see the pull request body for why.
+
+### Fixed
+
+- save-session.sh's `FAILURE_MARKER` write (`last-summary-failure`, the consecutive-summarization-failure counter) now goes through the same `marker_write_ok` guard #653 gave the other four marker writes, instead of opening the path unguarded (#656). It was the fifth marker write in this file and #653's own completeness claim -- and its static test's `_MARKERS` tuple -- missed it: a FIFO planted at that path blocked the write in `open(2)` while still holding the save lock, the same shape #653 closed for `COOLDOWN_MARKER`, `NDC_MARKER`, `NOW_DAY_FILE` and `NDC_GEN_FILE`. Reachable only where `thresholds.max_summary_failures` (default 3) is configured above 1. Found by the v0.31.0 release gate 3 audit, round 2.
+
+- `session-start-hook.sh`'s promo selection (`_remember_compute_promo()`) no longer forks one `jq` process per field, per candidate, per invocation (#660). Reported as ~12.5s average session-start latency on Windows/Git Bash across 36 real starts, against 0.5-1.3s for comparable `SessionStart` hooks in the same sessions -- with Windows process-spawn cost (~50-200ms per subprocess under Git Bash) named as the plausible multiplier. Measured on this file: up to 13 `jq` forks for two shipped promos.json entries, including one query (`.plugins[$k]`) run twice back to back for no reason -- once to capture its value, once again just to inspect its exit status. Now 4, via one `jq` call reading the whole promo list and one probing `installed_plugins.json`, with a spawn-count regression test (`tests/test_session_start_promo_spawn_budget_660.py`) pinning it. Observed: the reduction in subprocess count, on this host. Reasoned, not observed: that removing 6 of 10 forks helps proportionally more on Windows/Git Bash, where each one costs more.
+
+- `50-git-restore.sh` (`before_session_start`) no longer re-runs the whole config-merge chain just to learn that `git_restore.enabled` is `false` (#663, part of #660). `session-start-hook.sh` sources `log.sh` -- which already resolves and merges the layered config -- before dispatching this hook as a CHILD process, and since `_LIB_MEMORY_DIR_LOADED` is deliberately not exported to it, `source log.sh` at the top of the hook unconditionally redid the ENTIRE three-layer merge (`lib-memory-dir.sh`'s own `mktemp`/`jq` merge, plus `log.sh`'s one-pass flatten) before ever reading the one boolean that decides whether any of that was needed -- on every dispatch, on every install with git_restore off (the shipped default). Now the hook reads the flag with one `jq` call straight out of the already-merged `REMEMBER_CONFIG` the parent already exported, before sourcing anything, and only falls through to the full chain when the flag says yes -- unchanged behavior on that path, since the authoritative `config()` gate right after `source log.sh` still re-checks it. Measured on this repo's spawn-counting harness (external `data_dir` layout, real re-source, git_restore.enabled=false): 11 spawns before this fix, 2 after (`tests/test_git_restore_no_resource_when_disabled_663.py`, with a positive control proving `git_restore.enabled=true` still runs the real restore). Also: `dispatch()` (`scripts/log.sh`) now reads the current user's UID with `$EUID` (a bash builtin) instead of forking `id -u`, and folds the per-hook ownership `stat` and the world-writable `find -perm -002` into a single `stat` call whose output decides both.
+
+- `session_was_saved()`'s jq-less fallback path (`_jq_fallback` in `scripts/detect-tools.sh`, used when `jq` is not on `PATH` -- the default on a fresh Git for Windows / Git Bash install) dropped the `--arg id "$1"` pair from its jq query entirely: the flag was swallowed as an unread option and the session id then took the place of the query, leaving the filter and the target file unread. Every previous session read as "unsaved" regardless of the truth, so `session-start-hook.sh`'s recovery block spawned `save-session.sh --force` in the background on every single jq-less startup (#667). `session_was_saved()` now gets its own jq-free branch, reading `last-save.json` with one direct Python call instead of going through the generic `--arg`-blind shim.
+
+- `SessionStart`'s warm path (#679, part of #660): a `sed` recovering the
+  EXIT trap in `lib-memory-dir.sh` and `bootstrap-dirs.sh` is now parameter
+  expansion (zero forks, byte-identical output, proven by a positive/negative
+  control), a `cat` of `capture-alive`/`capture-gap-reported` and the static
+  `session-history-hint.txt` is now a builtin `$(<file)` read, and two
+  same-script temp-file removes at the very end of `session-start-hook.sh`
+  are now one `rm -f` call instead of two. Warm-start spawn count on this
+  platform dropped from 30 to 24 (jq present).
+- The issue's own premise -- that the jq-less path re-probes `python3 -V`
+  and re-renders the whole `MEMORY` section on every warm start, missing
+  both of #668's caches -- turned out to be a bug in the TEST HARNESS this
+  repo measures itself with, not in `detect-tools.sh` or
+  `lib-memory-context.sh`: `tests/test_session_start_windows_benchmark_669.py`'s
+  own `_path_without_jq` helper removed the WHOLE PATH directory holding a
+  `jq` binary to simulate "jq absent", and on any machine where jq shares a
+  directory with core tools this hook also needs (macOS 15+ ships jq at
+  `/usr/bin`, alongside `mktemp`), that silently took `mktemp` down with it
+  too -- breaking BOTH #668 caches' publish step for the whole scenario,
+  cold run included. A genuine Windows/Git-Bash "jq absent" machine has no
+  jq anywhere on `PATH` at all, so there is no directory to remove and
+  `mktemp` (bundled with Git for Windows) is never at risk; users on that
+  platform were never actually affected. Fixed the harness (a per-file
+  exec-shim view directory, not a directory drop) and re-measured: with jq
+  genuinely absent, both caches hit correctly on a warm start, matching
+  jq-present's own warm spawn count exactly (24) once the harness stopped
+  hiding it.
+- Windows/Git-Bash benchmark budgets in `tests/test_session_start_windows_benchmark_669.py`
+  are re-measured and tightened to the corrected numbers (observed on
+  macOS): jq present cold 43 / warm 24, jq absent cold 73 / warm 24, each
+  with roughly 2x slack.
+
+- **Security fix (#682):** the #668 flattened-config cache (`_RCFG_*`, unreleased --
+  landed in #670, after v0.31.0) used to live at `$REMEMBER_DIR/tmp/config.rcfg`
+  -- inside the PROJECT tree, a directory users commit and share -- and was
+  loaded with a bare `source`. A repository could ship that file and have
+  every hook that sources `log.sh` (every `SessionStart`, every post-tool
+  call) execute its contents as shell in the cloning user's own session, no
+  action beyond `git clone` and opening the project. The cache now lives
+  under the system temp dir instead (the same convention as
+  `lib-env-cache.sh`'s and `detect-tools.sh`'s own caches), keyed on
+  `REMEMBER_DIR` so two projects on the same machine never collide on one
+  file's mangled filename and silently read back each other's config (the
+  cache now carries its own REMEMBER_DIR identity line, checked on every
+  load), and the loader no longer trusts `source` at all: it validates
+  every line against the exact `NAME=%q-value` shape the publisher writes
+  and rejects (and removes) the whole file on the first line that does not
+  match, before a single byte of it is evaluated. A stale
+  `.remember/tmp/config.rcfg` left behind by an earlier build is simply
+  never read again -- it is not migrated, and nothing deletes it
+  automatically; it is dead weight, not a hazard, once this fix is
+  installed.
+
+  Follow-up (same issue, self-review + maintainer review): the value
+  validator's ASCII whitelist rejected two shapes `%q` plainly leaves bare
+  and unescaped -- a mid-word `#` (`printf %q 'a#b'` -> `a#b`) and any
+  non-ASCII byte (`e9`, `65e5 672c`) -- turning a rejection into a
+  delete-and-republish on every single run for any config value or
+  project path containing either, forever. The check is now a blacklist of
+  what can actually change how `eval "NAME=value"` parses a plain
+  assignment word (unescaped whitespace, `; & | ( ) < >`, `$`/backtick,
+  quotes), run under a function-local `LC_ALL=C` so its character classes
+  match the raw bytes `%q` wrote rather than whatever locale the caller
+  happens to be in. A second bash-3.2-only gap is also closed: bash
+  tilde-expands after an unquoted `:` in an assignment word as well as at
+  the start, and stock macOS `/bin/bash`'s `%q` does not escape that
+  position (`a:~` stays `a:~`, unlike bash 5's `a:\~`) -- a bare `:~` is
+  now rejected outright, by position, on every bash.
+
 ## [0.31.0] - 2026-09-11 — SessionEnd detaches before its preamble, SessionStart stops holding the client's pipe open through consolidation, and the Python-detection FATAL says what it saw -- the three Windows reports of the week, plus the release audit's marker-write FIFO guard (#646, #647, #650, #653)
 
 ### Added
@@ -2641,7 +2756,8 @@ Fixes [#9](https://github.com/Digital-Process-Tools/claude-remember/issues/9), a
 
 ## [0.1.0] — Initial release
 
-[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.31.0...HEAD
+[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.32.0...HEAD
+[0.32.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.32.0
 [0.31.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.31.0
 [0.30.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.30.0
 [0.29.1]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.29.1
