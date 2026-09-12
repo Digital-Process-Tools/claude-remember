@@ -55,6 +55,23 @@ pytestmark = pytest.mark.skipif(
     reason="no usable bash found -- these tests drive the real hook scripts",
 )
 
+# The three harness-driven tests below assert on coreutils spawns (sed, cat,
+# rm) that the shim directory must be able to intercept. On windows-latest
+# it cannot: resolve_bash() returns Git for Windows' `Git/bin/bash.exe`,
+# a launcher that prepends `/mingw64/bin:/usr/bin` to PATH before the
+# script runs, so every MSYS coreutil resolves to the real binary ahead of
+# the shim dir and is invisible to the spawn log -- only tools outside the
+# Git install (jq, python) get counted there. Observed on CI (windows-latest
+# 3.9, PR #681): the warm spawn list was three `jq` calls and nothing else,
+# and the positive control ("at least one rm naming these files") failed.
+# That is a harness blind spot, not evidence about the hook; the byte-
+# identity test below has no such dependency and still runs everywhere.
+_needs_coreutils_shims = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Git/bin/bash.exe prepends /usr/bin ahead of the shim dir, so "
+    "coreutils spawns are not observable on Windows (#679)",
+)
+
 
 def _warm_spawns(tmp_path: Path, jq_present: bool = True) -> list[str]:
     """One cold + one warm run of the real session-start-hook.sh, same
@@ -82,6 +99,7 @@ def _warm_spawns(tmp_path: Path, jq_present: bool = True) -> list[str]:
 
 # ── Item 4: `trap -p EXIT | sed ...`  ->  parameter expansion, zero exec ───
 
+@_needs_coreutils_shims
 def test_no_sed_spawn_recovering_the_exit_trap_679(tmp_path):
     """lib-memory-dir.sh and bootstrap-dirs.sh each chained onto the
     caller's existing EXIT trap via `trap -p EXIT | sed "..."` -- one `sed`
@@ -99,6 +117,7 @@ def test_no_sed_spawn_recovering_the_exit_trap_679(tmp_path):
 
 # ── Item 2 (partial): small fixed files read via $(<file), not `cat` ──────
 
+@_needs_coreutils_shims
 def test_no_cat_of_capture_alive_or_gap_reported_679(tmp_path):
     """`SEEN_ID=$(cat "$CAPTURE_ALIVE")` and
     `REPORTED_ID=$(cat "$CAPTURE_REPORTED")` each forked a `cat` to read a
@@ -131,6 +150,7 @@ def test_session_history_hint_read_is_byte_identical_679():
     assert new == old, f"byte mismatch: {new!r} != {old!r}"
 
 
+@_needs_coreutils_shims
 def test_no_cat_of_session_history_hint_679(tmp_path):
     warm = _warm_spawns(tmp_path)
     offending = [s for s in warm if s.startswith("cat ") and "session-history-hint" in s]
@@ -140,6 +160,7 @@ def test_no_cat_of_session_history_hint_679(tmp_path):
 # ── Item 3 (narrow): the two same-script temp-file removes at the very end
 #    of session-start-hook.sh, batched into one `rm -f a b` ────────────────
 
+@_needs_coreutils_shims
 def test_hook_stdin_and_ctx_files_removed_in_one_rm_call_679(tmp_path):
     """`_hook_stdin_file` and `_REMEMBER_CTX_FILE` were each removed by
     their own standalone `rm -f`, ~40 lines apart, even though nothing
