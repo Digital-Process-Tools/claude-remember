@@ -69,7 +69,12 @@ _jq_fallback() {
     # sources log.sh/lib-memory-dir.sh WITHOUT this file never defines
     # _remember_python at all, and _jq_fallback is only ever reachable
     # through $JQ, which this same file is the only thing that sets.
-    declare -f _remember_python >/dev/null 2>&1 && _remember_python
+    # A failed resolve (no interpreter at all) returns 1 here rather than
+    # running `$PYTHON` as an empty word: the result is the same "no value"
+    # the callers already default on, minus the bogus `-: command not found`.
+    if declare -f _remember_python >/dev/null 2>&1; then
+        _remember_python || return 1
+    fi
     $PYTHON - "$_jq_file" "$_jq_query" << 'PYEOF' 2>/dev/null
 import json, sys
 try:
