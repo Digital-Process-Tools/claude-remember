@@ -11,16 +11,25 @@
 #
 # USAGE
 #   source "$(dirname "$0")/detect-tools.sh"
-#   # Now PYTHON and JQ are set
+#   # Now PYTHON and JQ are set (eager mode, the default)
 #   $PYTHON -m pipeline.shell extract ...
 #   val=$($JQ -r '.key' file.json)
 #
+#   _REMEMBER_LAZY_PYTHON=1 source "$(dirname "$0")/detect-tools.sh"
+#   # Lazy mode (#662): JQ is set, PYTHON stays EMPTY until the first
+#   # `_remember_python` call resolves it -- see "Lazy mode" below. Only
+#   # session-start-hook.sh opts in; every other sourcer needs $PYTHON
+#   # right away and keeps the eager default.
+#
 # ENVIRONMENT (outputs)
-#   PYTHON       Path/command for python (python3 or python, validated)
+#   PYTHON       Path/command for python (python3 or python, validated).
+#                Lazy mode: empty until `_remember_python` has run.
 #   JQ           Path/command for jq (jq or _jq_fallback function)
 #
 # EXIT CODES
-#   1   No usable python found
+#   1   No usable python found (eager mode). In lazy mode sourcing never
+#       exits for this; `_remember_python` returns 1 at the call site
+#       instead, and the jq-less fallbacks fall through to python3.
 #
 # ============================================================================
 # --- Tool verdict cache (#668) ---

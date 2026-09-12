@@ -68,11 +68,13 @@ SESSION = "eeeeeeee-0000-4000-8000-000000000660"
 PROMO_JQ_SPAWN_BUDGET = 4
 
 
-def _run_with_shim(tmp_path: Path) -> tuple[list[str], subprocess.CompletedProcess]:
+def _run_with_shim(tmp_path: Path, extra_setup=None) -> tuple[list[str], subprocess.CompletedProcess]:
     home = tmp_path / "home"
     project = tmp_path / "project"
     remember = project / ".remember"
     (remember / "tmp").mkdir(parents=True)
+    if extra_setup is not None:
+        extra_setup(remember)
     (home / ".claude" / "projects" / _slug(str(project))).mkdir(parents=True)
     plugins_dir = home / ".claude" / "plugins"
     plugins_dir.mkdir(parents=True, exist_ok=True)
@@ -342,30 +344,60 @@ def test_memory_injection_spawn_budget(tmp_path):
     )
 
 
+CAPTURE_SEEN_KEEP = 200  # mirrors session-start-hook.sh's own constant
+
+
+def _seed_capture_seen(remember: Path, count: int) -> Path:
+    seen_dir = remember / "tmp" / "capture-alive.d"
+    seen_dir.mkdir(parents=True, exist_ok=True)
+    for i in range(count):
+        (seen_dir / f"session-{i:04d}").write_text("x", encoding="utf-8")
+    return seen_dir
+
+
+def _prune_spawns(lines: list[str]) -> list[str]:
+    return [line for line in lines if line.startswith("ls ") and "capture-alive.d" in line]
+
+
 def test_capture_seen_prune_is_gated_on_the_threshold(tmp_path):
     """#666: the capture-alive.d prune must not fork `ls -t | tail` on every
-    single session start when the directory is nowhere near
-    CAPTURE_SEEN_KEEP (200) entries -- paired with a positive control that
-    it still prunes once the threshold is genuinely exceeded.
+    single session start when the directory exists but is nowhere near
+    CAPTURE_SEEN_KEEP (200) entries. The pre-#666 code forked on a bare
+    `[ -d ]`, so a directory that EXISTS is the case that separates the
+    two -- an absent directory never forked under either (the first draft
+    of this test only ran that shape, and would have passed against the
+    old code: Explore self-review finding on #675).
     """
-
-    def _few_markers(remember: Path) -> None:
-        seen_dir = remember / "tmp" / "capture-alive.d"
-        seen_dir.mkdir(parents=True)
-        (seen_dir / "session-one").write_text("x", encoding="utf-8")
-        (seen_dir / "session-two").write_text("x", encoding="utf-8")
-
-    lines, result = _run_with_shim(tmp_path)
-    # Baseline run (from the existing helper) has no capture-alive.d at all,
-    # which already must not fork `ls` against that path.
+    lines, result = _run_with_shim(
+        tmp_path, extra_setup=lambda remember: _seed_capture_seen(remember, 2)
+    )
     assert result.returncode == 0, result.stderr
-    stale_prune_spawns = [
-        line for line in lines
-        if line.startswith("ls ") and "capture-alive.d" in line
-    ]
-    assert stale_prune_spawns == [], (
-        f"no capture-alive.d directory exists at all, so the prune must "
-        f"never fork `ls` against it: {stale_prune_spawns}"
+    seen_dir = tmp_path / "project" / ".remember" / "tmp" / "capture-alive.d"
+    assert len(list(seen_dir.iterdir())) == 2, "the run must not touch an under-threshold store"
+    assert _prune_spawns(lines) == [], (
+        "capture-alive.d exists with 2 entries, far under the keep threshold, "
+        f"so the prune must not fork `ls` against it: {_prune_spawns(lines)}"
+    )
+
+
+def test_capture_seen_prune_still_fires_over_the_threshold(tmp_path):
+    """Positive control for the gate above: one entry over CAPTURE_SEEN_KEEP,
+    the prune must run -- `ls -t` observed on the spawn log -- and leave
+    exactly CAPTURE_SEEN_KEEP entries behind. A gate that skipped the
+    prune outright would pass the test above and fail here.
+    """
+    lines, result = _run_with_shim(
+        tmp_path, extra_setup=lambda remember: _seed_capture_seen(remember, CAPTURE_SEEN_KEEP + 1)
+    )
+    assert result.returncode == 0, result.stderr
+    assert _prune_spawns(lines), (
+        f"{CAPTURE_SEEN_KEEP + 1} entries is over the threshold, so the prune must "
+        "actually run -- no `ls` against capture-alive.d was observed"
+    )
+    seen_dir = tmp_path / "project" / ".remember" / "tmp" / "capture-alive.d"
+    remaining = len(list(seen_dir.iterdir()))
+    assert remaining == CAPTURE_SEEN_KEEP, (
+        f"prune left {remaining} entries; expected exactly {CAPTURE_SEEN_KEEP}"
     )
 
 
