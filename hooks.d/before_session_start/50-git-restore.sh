@@ -135,6 +135,63 @@ if [ "$(_gr_realpath "$TOPLEVEL")" != "$(_gr_realpath "$REPO_ROOT")" ]; then
     exit 0
 fi
 
+# ── Cheap gate BEFORE sourcing anything (#663, part of #660) ─────────────────
+# session-start-hook.sh's dispatch() runs this file as a CHILD of a process
+# that already sourced log.sh -- which already ran the full three-layer
+# config merge (lib-memory-dir.sh: mktemp, jq -s across up to three files)
+# and log.sh's own one-pass flatten (another jq call) -- and exported the
+# result as REMEMBER_CONFIG. `source log.sh` below is unconditional, so this
+# child redid the ENTIRE merge from scratch, every time, before ever reading
+# whether the hook is even switched on: because `_LIB_MEMORY_DIR_LOADED` is
+# not (and cannot safely be, see the comment on that guard elsewhere in this
+# codebase) exported to the child, sourcing lib-memory-dir.sh here re-runs
+# unconditionally rather than skipping. #253's default is OFF, so this is
+# every dispatch of this hook, on every install that has never touched
+# git_restore, paying for a merge whose answer is never used.
+#
+# The fix is the one the brief names as cheapest: read the flag straight out
+# of the ALREADY-MERGED file the parent exported, with one jq (or python)
+# call, and only pay for the full chain (which this file still needs for the
+# actual restore, and for config()'s other keys below) when that flag says
+# yes. If REMEMBER_CONFIG is not there, is not readable, or neither jq nor
+# python is available to read it, this must not guess "disabled" -- it falls
+# through to the unconditional `source log.sh` + config() gate below
+# unchanged, so a install lacking jq/REMEMBER_CONFIG never silently loses a
+# restore it asked for. This is strictly an optimization: every path below
+# still re-checks the flag through config() before doing anything else.
+_gr_cheap_restore_enabled() {
+    [ -n "${REMEMBER_CONFIG:-}" ] && [ -f "$REMEMBER_CONFIG" ] || return 1
+    if command -v jq >/dev/null 2>&1; then
+        jq -r '.git_restore.enabled // false' "$REMEMBER_CONFIG" 2>/dev/null
+    elif command -v "${PYTHON:-python3}" >/dev/null 2>&1; then
+        "${PYTHON:-python3}" -c '
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        d = json.load(f)
+except Exception:
+    sys.exit(1)
+v = d.get("git_restore", {}).get("enabled", False) if isinstance(d, dict) else False
+print("true" if v is True or v == "true" else "false")
+' "$REMEMBER_CONFIG" 2>/dev/null
+    else
+        return 1
+    fi
+}
+_GR_CHEAP_RC=0
+_GR_CHEAP_ENABLED=$(_gr_cheap_restore_enabled) || _GR_CHEAP_RC=$?
+unset -f _gr_cheap_restore_enabled
+if [ "$_GR_CHEAP_RC" -eq 0 ] && [ "$_GR_CHEAP_ENABLED" != "true" ]; then
+    # A definitive "false" from the file the parent already merged. Nothing
+    # sourced, nothing merged twice.
+    exit 0
+fi
+# Either the cheap read said "true" (fall through and let the authoritative
+# check below confirm it once log.sh's config() is available), or it could
+# not answer at all (_GR_CHEAP_RC != 0) -- in which case the unconditional
+# source + gate below is the only source of truth, exactly as before this
+# change.
+
 # ── Now we can afford logging + config ───────────────────────────────────────
 source "$PIPELINE_DIR/scripts/log.sh"
 
