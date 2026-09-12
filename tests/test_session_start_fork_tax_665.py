@@ -59,6 +59,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(__file__))
 from _bash_runner import resolve_bash
+from config_cache import CACHE_GLOB, cache_files
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RESOLVE_PATHS = REPO_ROOT / "scripts" / "resolve-paths.sh"
@@ -201,8 +202,16 @@ config '.cooldowns.save_seconds' '0'
     }
     result = subprocess.run([BASH, "-c", script], env=env, capture_output=True, text=True, timeout=30, check=False)
     assert result.returncode == 0, (result.stdout, result.stderr)
-    cache = remember / "tmp" / "config.rcfg"
-    assert cache.is_file()
+    # #682: the flattened-config cache no longer lives at
+    # `$REMEMBER_DIR/tmp/config.rcfg` -- it moved to a per-project file
+    # under `${TMPDIR:-/tmp}`, keyed by mangling REMEMBER_DIR itself. `env`
+    # above never overrides TMPDIR (inherits the real one from os.environ,
+    # same as `_count_forks`'s own env, so the two calls agree on where to
+    # look), so locate it there rather than at the old in-project path.
+    sys_tmp = Path(os.environ.get("TMPDIR") or "/tmp")
+    caches = cache_files(sys_tmp)
+    assert caches, f"no flattened-config cache ({CACHE_GLOB}) was published under {sys_tmp}"
+    cache = caches[0]
     now = time.time()
     os.utime(cache, (now + 5, now + 5))
 
