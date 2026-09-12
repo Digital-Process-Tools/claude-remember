@@ -82,11 +82,26 @@ def make_shim_dir(tmp_path: Path, log: Path | None = None) -> Path:
             # tests/test_config_flatten_cache_668.py) -- this fix must not
             # reintroduce it one function away.
             f'exec "{real.as_posix()}" "$@"\n',
+            # newline="": write_text's default universal-newline translation
+            # turns every \n into \r\n on Windows, and a shebang line ending
+            # in \r is a broken interpreter directive under Git Bash/MSYS --
+            # `#!/bin/bash\r` is not a path bash's own exec() can resolve.
+            # Observed live on windows-latest/3.11 CI (#669): every COUNTED
+            # command was correctly located via _EXE_SUFFIXES (the #670 fix),
+            # shim files existed with the right content, `command -v` still
+            # reported the shim PATH entry as present/executable (NTFS ACL
+            # default), but invoking it never actually ran the wrapper --
+            # SPAWN_LOG stayed empty for an entire cold+warm pair that still
+            # exited 0, meaning the real (unshimmed) binary answered instead
+            # and the shim silently never fired. This is the exact CRLF class
+            # this repo already named and fixed once elsewhere
+            # (tests/test_install_agy_hooks_563.py, #577).
             encoding="utf-8",
+            newline="",
         )
         shim.chmod(0o755)
     if log is not None:
-        log.write_text("", encoding="utf-8")
+        log.write_text("", encoding="utf-8", newline="")
     return shims
 
 
