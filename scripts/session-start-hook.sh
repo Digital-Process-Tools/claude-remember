@@ -342,9 +342,79 @@ LAST_SAVE_FILE="$REMEMBER_DIR/tmp/last-save.json"
 SAVED_QUERY='def isline: type == "number" and ((isnan or isinfinite) | not) and . == floor; if (((.sessions // {})[$id]) | isline) or (.session == $id and (.line | isline)) then "saved" else "unsaved" end'
 
 # Args: $1 — session id. Exit 0 if last-save.json records it as saved.
+#
+# _jq_fallback's own shim (scripts/detect-tools.sh) only ever evaluates
+# dotted-path lookups and drops every `--arg`/`--argjson` pair entirely
+# (#667): it eats each leading `-*` token into a flags variable it never
+# reads, then treats the first non-flag token as the query and the one
+# after it as the file -- fed `--arg id "$1" "$SAVED_QUERY"
+# "$LAST_SAVE_FILE"`, that lands on query="id", file="$1" (the session id,
+# not a real file), so the shim always prints nothing and this always read
+# as "unsaved", spawning `save-session.sh --force` on every jq-less
+# startup regardless of whether the previous session was actually saved.
+#
+# Every OTHER $JQ/$JQ_BIN call site under scripts/ that passes --arg already
+# guards itself with `command -v jq` first (session-start-hook.sh's own
+# promo-JSON call below, user-prompt-hook.sh's two notice-JSON calls), so
+# this is the ONLY call site that ever reaches the fallback with --arg --
+# it gets its own jq-free branch instead of teaching the generic shim a
+# --arg parser it would be the sole caller of.
 session_was_saved() {
     [ -n "$1" ] && [ -f "$LAST_SAVE_FILE" ] || return 1
-    [ "$($JQ -r --arg id "$1" "$SAVED_QUERY" "$LAST_SAVE_FILE" 2>/dev/null)" = "saved" ]
+    if [ "$JQ" = "_jq_fallback" ]; then
+        _remember_python || return 1
+        [ "$($PYTHON - "$LAST_SAVE_FILE" "$1" << 'PYEOF' 2>/dev/null
+import json, math, sys
+
+def isline(v):
+    # Mirrors $SAVED_QUERY's own `isline` def exactly: a JSON number,
+    # never a bool (Python's bool is an int subclass), finite (excludes
+    # both NaN and +/-Infinity -- 1e400 overflows to Infinity, and
+    # floor(Infinity) == Infinity, which would otherwise read as a false
+    # "saved"), and equal to its own floor (an integer value).
+    return (
+        isinstance(v, (int, float))
+        and not isinstance(v, bool)
+        and math.isfinite(v)
+        and v == math.floor(v)
+    )
+
+try:
+    data = json.load(open(sys.argv[1]))
+except Exception:
+    print("unsaved")
+    sys.exit(0)
+
+sid = sys.argv[2]
+if not isinstance(data, dict):
+    print("unsaved")
+    sys.exit(0)
+
+sessions = data.get("sessions")
+if sessions is not None and not isinstance(sessions, dict):
+    # $SAVED_QUERY's own `(.sessions // {})[$id]` throws a hard jq runtime
+    # error the instant `.sessions` is present but not an object (or null)
+    # -- jq has no `or`-short-circuit past a raised error, so the WHOLE
+    # query aborts right there and the shell side reads empty stdout as
+    # "unsaved", never reaching the legacy .session/.line fallback below.
+    # Falling through here instead (self-review finding) would read a
+    # corrupted `sessions` value as "saved" whenever a legacy `session`/
+    # `line` pair also happened to validate, diverging from real jq on the
+    # exact same file.
+    print("unsaved")
+    sys.exit(0)
+
+if isinstance(sessions, dict) and isline(sessions.get(sid)):
+    print("saved")
+elif data.get("session") == sid and isline(data.get("line")):
+    print("saved")
+else:
+    print("unsaved")
+PYEOF
+)" = "saved" ]
+    else
+        [ "$($JQ -r --arg id "$1" "$SAVED_QUERY" "$LAST_SAVE_FILE" 2>/dev/null)" = "saved" ]
+    fi
 }
 
 # ── Which session was the PREVIOUS one? (#270) ────────────────────────────
