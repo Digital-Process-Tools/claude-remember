@@ -1169,11 +1169,14 @@ dispatch() {
     local event="$1"
     local event_dir="$REMEMBER_HOOKS_DIR/$event"
     [ -d "$event_dir" ] || return 0
-    local current_uid=""
-    # Both resolved on first use, like current_uid and for the same reason
-    # (#230): the shipped distribution's hooks.d/<event>/ holds a .gitkeep and
-    # nothing else, so the common case is a loop that finds nothing executable.
-    # Nothing below may cost that case a process, a directory or a file.
+    # `$EUID` (#663, part of #660): a bash builtin, never a fork, so there is
+    # no cost to pay eagerly and no reason left to defer this the way
+    # current_uid used to be deferred to "first hook found" (#230's own
+    # reason for the old `id -u` was that hook-less installs must not fork
+    # to compare against nobody -- $EUID removes the fork rather than the
+    # comparison, so paying it unconditionally costs nothing measurable).
+    local current_uid="$EUID"
+    # Deferred to first use, for the reason #230 states below.
     local _err_file="" _out_file="" _err_unavailable=""
     # The budget (#286), also on first use, and for the same reason. "" means
     # not yet read — 0 is a legal value meaning the bound is off.
@@ -1183,8 +1186,7 @@ dispatch() {
         # Resolved on first use, not on entry (#230). The distribution ships
         # every hooks.d/<event>/ directory containing nothing but a .gitkeep, so
         # the `-d` test above passes and this loop finds nothing executable —
-        # and `id` was forked on every tool call to compare against nobody.
-        [ -n "$current_uid" ] || current_uid=$(id -u)
+        # and a spawn here would run on every tool call to learn nothing.
         if [ -z "$_budget" ]; then
             case "$_DISPATCH_DETACHED_EVENTS" in
                 *" $event "*)
@@ -1206,21 +1208,35 @@ dispatch() {
                 ''|*[!0-9]*) _grace=$_DISPATCH_KILL_GRACE_DEFAULT ;;
             esac
         fi
-        # Ownership check: skip hooks not owned by the current user.
-        local hook_uid
-        # Try GNU stat (-c) first, then BSD (-f). The reverse order silently
-        # succeeds on Linux because `stat -f %u` there returns filesystem free
-        # blocks, not file owner UID — and the OR fallback never fires.
-        hook_uid=$(stat -c %u "$hook" 2>/dev/null || stat -f %u "$hook" 2>/dev/null || echo "")
-        if [ -z "$hook_uid" ] || [ "$hook_uid" != "$current_uid" ]; then
+        # Ownership + world-writable checks, ONE stat call instead of two
+        # (`stat` for the owner, `find -perm -002` for the mode) -- #663, part
+        # of #660. Try GNU stat (-c '%u %a') first, then BSD (-f '%u %Lp'):
+        # the reverse order silently succeeds on Linux because `stat -f %u`
+        # there returns filesystem free blocks, not file owner UID, and the
+        # OR fallback never fires -- the same trap the old two-call form
+        # already documented, unchanged here. `%a`/`%Lp` both give the
+        # permission bits alone, in octal, with no file-type prefix.
+        local hook_stat hook_uid hook_perm
+        hook_stat=$(stat -c '%u %a' "$hook" 2>/dev/null || stat -f '%u %Lp' "$hook" 2>/dev/null || echo "")
+        hook_uid="${hook_stat%% *}"
+        hook_perm="${hook_stat#* }"
+        if [ -z "$hook_stat" ] || [ "$hook_uid" != "$current_uid" ]; then
             _dispatch_report_skip "$event" "${hook##*/}" "not owned by the current user"
             continue
         fi
-        # World-writable check: skip hooks writable by others.
-        if [ -n "$(find "$hook" -maxdepth 0 -perm -002 2>/dev/null)" ]; then
-            _dispatch_report_skip "$event" "${hook##*/}" "world-writable"
-            continue
-        fi
+        # World-writable check: skip hooks writable by others. `hook_perm`
+        # must be exactly 3 octal digits to trust the arithmetic below --
+        # anything else (a `stat` that emitted no second field, a stray
+        # non-numeric byte) is treated as "cannot tell", the same fail-open
+        # direction the old `find` fallback already took on its own failure.
+        case "$hook_perm" in
+            [0-7][0-7][0-7])
+                if [ $(( 8#$hook_perm & 2 )) -ne 0 ]; then
+                    _dispatch_report_skip "$event" "${hook##*/}" "world-writable"
+                    continue
+                fi
+                ;;
+        esac
         # The capture file, prepared once and only once a hook is about to run.
         # Overwritten per hook (`2>` truncates), removed when the loop ends.
         if [ -z "$_err_file" ] && [ -z "$_err_unavailable" ]; then
