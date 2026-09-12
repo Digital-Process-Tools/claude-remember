@@ -86,6 +86,28 @@ to `resolve_bash()`, a separate and much larger effort tracked by #497 itself.
 The annotation makes the number impossible to miss without blocking work that
 has nothing to do with it.
 
+### The session-start-hook.sh Windows benchmark (`#669`)
+
+`tests/test_session_start_windows_benchmark_669.py` drives
+`scripts/session-start-hook.sh` under a real, non-WSL bash
+(`tests/_bash_runner.py`'s `resolve_bash()`, same as the rest of this section)
+and measures wall time and spawn count, cold and warm, with jq present and
+with jq genuinely absent from `PATH` (Git for Windows does not ship it). It
+carries no platform skip beyond "no bash found", so it runs on every leg of
+the matrix in `.github/workflows/tests.yml`, `windows-latest` included --
+before this file, every latency number attached to #660 and its follow-ups
+(#662-#667) was reasoned from one reporter's own measurement, never observed
+in CI, because nothing exercised this hook on that leg at all.
+
+Spawn count is a real, failing budget, deliberately loose (counted by
+execution, so it does not depend on how loaded the runner is -- the same
+reasoning `tests/spawn_counting.py` gives for the post-tool and prompt hook
+budgets). Wall time is printed and handed to `record_property` for a human to
+read run over run, and is asserted only against a hang-detection ceiling, not
+a tight regression budget -- the same report-not-gate choice this section's
+own #510 and #497 make, for the same reason: a shared CI runner's wall clock
+is noisy even about itself.
+
 ### Measuring the warm path (`tests/env_cache.py`)
 
 `scripts/lib-env-cache.sh` refuses its cache unless the cache file is `-nt`
