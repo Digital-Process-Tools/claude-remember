@@ -305,10 +305,16 @@ def test_memory_injection_spawn_budget(tmp_path):
     # REMEMBER_DIR this test just populated. The render only ever calls
     # config() for one threshold, so a stub is both simpler and avoids that
     # whole unrelated resolution chain.
+    # #665 (part of #660): lib-memory-context.sh now calls config_into and
+    # _remember_forward_slash_into (printf -v, no command-substitution
+    # subshell) instead of capturing $(config ...) / $(_remember_forward_slash
+    # ...) -- both stubs need their `_into` sibling too.
     script = f"""
     set -e
     config() {{ printf '%s' "$2"; }}
+    config_into() {{ printf -v "$1" '%s' "$3"; }}
     _remember_forward_slash() {{ printf '%s' "$1"; }}
+    _remember_forward_slash_into() {{ printf -v "$1" '%s' "$2"; }}
     source "{REPO_ROOT}/scripts/lib-clock.sh"
     source "{REPO_ROOT}/scripts/lib-memory-context.sh"
     _remember_memory_paths

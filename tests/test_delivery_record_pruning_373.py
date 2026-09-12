@@ -529,18 +529,30 @@ class TestStaleDeliveryRecordsPruningGlobBackslash517:
 
     _BLOCK = extract_lines_517(
         "scripts/session-start-hook.sh",
-        "_remember_delivered_glob_dir=$(_remember_forward_slash",
+        '_remember_delivered_glob_dir=""',
         "    done",
     )
 
     def _run(self, remember_dir: str, sessions_dir, current_session_id: str, ostype: str):
         import shlex
-        forward_slash_fn = extract_function_517(
-            "scripts/resolve-paths.sh", "_remember_forward_slash"
+        # #665 (part of #660): the site now calls _remember_forward_slash_into
+        # (printf -v, no command-substitution subshell) instead of capturing
+        # $(_remember_forward_slash ...) -- both functions live in
+        # resolve-paths.sh and the extracted block needs the one it actually
+        # calls in scope.
+        forward_slash_fn = (
+            extract_function_517("scripts/resolve-paths.sh", "_remember_forward_slash")
+            + "\n"
+            + extract_function_517("scripts/resolve-paths.sh", "_remember_forward_slash_into")
         )
         setup = (
             forward_slash_fn
             + "\n_remember_date() { date \"$@\"; }"
+            # #665 (part of #660): the stale-mtime-age check now calls
+            # _remember_date_into (already existed, lib-clock.sh #511)
+            # directly instead of $(_remember_date ...) -- the extracted
+            # block calls it, so the stub needs it too.
+            + "\n_remember_date_into() { local _v=\"$1\"; shift; printf -v \"$_v\" '%s' \"$(_remember_date \"$@\")\"; }"
             + "\nGRACE_MIN=5"
             + f"\nCURRENT_SESSION_ID={shlex.quote(current_session_id)}"
             + f"\nSESSIONS_DIR={shlex.quote(str(sessions_dir))}"

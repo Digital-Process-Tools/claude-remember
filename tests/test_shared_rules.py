@@ -220,7 +220,12 @@ def test_the_shipped_delta_default_matches_the_example_config():
     and it arrived with the fix.
     """
     log_sh = (REPO_ROOT / "scripts" / "log.sh").read_text(encoding="utf-8")
-    m = re.search(r'config\s+"\.thresholds\.delta_lines_trigger"\s+(\d+)', log_sh)
+    # #665 (part of #660): the read is now `config_into VAR ".key" default`
+    # (printf -v, no command-substitution subshell), one extra token -- the
+    # destination variable -- ahead of the key this test checks.
+    m = re.search(
+        r'config(?:_into\s+\S+)?\s+"\.thresholds\.delta_lines_trigger"\s+(\d+)', log_sh
+    )
     assert m, "the delta_lines_trigger fallback moved or changed shape"
     hook = (REPO_ROOT / "scripts" / "post-tool-hook.sh").read_text(encoding="utf-8")
     replay = re.search(r'DELTA_THRESHOLD="\$\{REMEMBER_DELTA_THRESHOLD:-(\d+)\}"', hook)

@@ -117,6 +117,33 @@ _stdin_json_string() {
     printf '%s' "$value"
 }
 
+# _stdin_json_string_into VARNAME key raw
+# Same extraction as _stdin_json_string, written into VARNAME with
+# `printf -v` instead of printed -- so `X=$(_stdin_json_string ...) ||
+# X=""` (a subshell fork purely to capture an already-forkless function's
+# stdout, plus a second statement for the failure case) becomes one
+# unconditional call: VARNAME is set to the empty string up front, so a
+# `return 1` below leaves it exactly where the old `|| X=""` idiom did,
+# with no separate fallback statement needed at the call site (#665, part
+# of #660). Locals below are prefixed `_sjsi_` (this function's own name,
+# abbreviated) rather than the bare `_sjs_` tag config_into's own comment
+# warns about -- narrows, does not close, the same `printf -v`-resolves-
+# against-the-innermost-local collision every function in this file that
+# takes a destination VARNAME shares; see config_into's comment (log.sh)
+# for the full argument.
+_stdin_json_string_into() {
+    local _sjsi_var="$1" _sjsi_key="$2" _sjsi_raw="$3" _sjsi_rest _sjsi_prefix _sjsi_value
+    printf -v "$_sjsi_var" '%s' ""
+    case "$_sjsi_raw" in *"\"$_sjsi_key\""*) ;; *) return 1 ;; esac
+    _sjsi_rest=${_sjsi_raw#*\"$_sjsi_key\"}
+    _sjsi_prefix=${_sjsi_rest%%\"*}
+    case "$_sjsi_prefix" in *[!:[:space:]]*) return 1 ;; esac
+    _sjsi_value=${_sjsi_rest#*\"}
+    _sjsi_value=${_sjsi_value%%\"*}
+    [ -n "$_sjsi_value" ] || return 1
+    printf -v "$_sjsi_var" '%s' "$_sjsi_value"
+}
+
 # ── The cwd the host handed us (#411) ──────────────────────────────────────
 # Every host puts `cwd` on the SessionStart payload (#407's comparison table).
 # Claude Code always also publishes it as CLAUDE_PROJECT_DIR; Codex never
@@ -140,7 +167,7 @@ _stdin_json_string() {
 # preserves one). Whether the value actually names a directory is decided in
 # resolve-paths.sh, which falls back to the existing derivation when it does
 # not.
-REMEMBER_HOOK_CWD=$(_stdin_json_string cwd "$HOOK_STDIN" 2>/dev/null) || REMEMBER_HOOK_CWD=""
+_stdin_json_string_into REMEMBER_HOOK_CWD cwd "$HOOK_STDIN" 2>/dev/null
 case "$REMEMBER_HOOK_CWD" in
     *$'\n'*|*$'\r'*) REMEMBER_HOOK_CWD="" ;;
 esac
@@ -181,7 +208,8 @@ if ! command -v _remember_date >/dev/null 2>&1; then
     echo "session-start-hook: ERROR -- failed to source $PLUGIN_ROOT/scripts/log.sh" >&2
     exit 127
 fi
-TODAY=$(_remember_date '+%Y-%m-%d')
+TODAY=""
+_remember_date_into TODAY '+%Y-%m-%d'
 log "hook" "session-start: PROJECT_DIR=$PROJECT_DIR PIPELINE_DIR=$PIPELINE_DIR REMEMBER_DIR=$REMEMBER_DIR"
 
 # Publish what the chain above just resolved, so user-prompt-hook.sh does not
@@ -242,7 +270,7 @@ esac
 # than dropped, in case a future change to that loop ever preserves one).
 # Whether the value actually names an openable file is decided on the Python
 # side, which falls back to the existing derivation when it does not.
-REMEMBER_TRANSCRIPT_PATH=$(_stdin_json_string transcript_path "$HOOK_STDIN" 2>/dev/null) || REMEMBER_TRANSCRIPT_PATH=""
+_stdin_json_string_into REMEMBER_TRANSCRIPT_PATH transcript_path "$HOOK_STDIN" 2>/dev/null
 case "$REMEMBER_TRANSCRIPT_PATH" in
     *$'\n'*|*$'\r'*) REMEMBER_TRANSCRIPT_PATH="" ;;
 esac
@@ -262,7 +290,7 @@ export REMEMBER_TRANSCRIPT_PATH
 # `compact`: that would silently stop injecting memory for anyone whose
 # payload shape differs from the one this heuristic was written against —
 # the failure this plugin exists to prevent, not to cause.
-SESSION_START_SOURCE=$(_stdin_json_string source "$HOOK_STDIN" 2>/dev/null) || SESSION_START_SOURCE=""
+_stdin_json_string_into SESSION_START_SOURCE source "$HOOK_STDIN" 2>/dev/null
 case "$SESSION_START_SOURCE" in
     startup|resume|clear|compact|fork) ;;
     *) SESSION_START_SOURCE="" ;;
@@ -777,7 +805,11 @@ if [ -n "$PREV_ID" ] && session_was_saved "$PREV_ID"; then
 fi
 
 # ── Recovery: save the most recent missed session ──────────────────────────
-if [ "$(config '.features.recovery' true)" = "true" ]; then
+# config_into (#665, part of #660) writes into a scratch var directly --
+# no command-substitution subshell on top of the flattened-cache-hit table.
+_recovery_enabled=""
+config_into _recovery_enabled '.features.recovery' true
+if [ "$_recovery_enabled" = "true" ]; then
 if [ -d "$SESSIONS_DIR" ] && [ -f "$LAST_SAVE_FILE" ] && [ -n "$PREV_ID" ]; then
     if [ "$PREV_WAS_SAVED" = "no" ]; then
         # REMEMBER_TRANSCRIPT_PATH (exported above, #407) names THIS session's
@@ -994,7 +1026,7 @@ _remember_memory_paths
 # there, and doing so leaves "no HANDOFF hint was given" visible in the
 # transcript instead of a namespaced-looking path that never actually
 # applied.
-HANDOFF_MODE=$(config ".handoff_mode" "single")
+config_into HANDOFF_MODE ".handoff_mode" "single"
 PER_SESSION_HANDOFF=""
 HANDOFF_MODE_DEGRADED=""
 if [ "$HANDOFF_MODE" = "per_session" ] && [ -n "$CURRENT_SESSION_ID" ]; then
@@ -1070,7 +1102,9 @@ PROMO_MSG=""
 PROMO_ID=""
 PROMO_MARKER=""
 PROMO_NOW=""
-if [ "$(config ".features.plugin_promos" true)" = "true" ] \
+_promos_enabled=""
+config_into _promos_enabled ".features.plugin_promos" true
+if [ "$_promos_enabled" = "true" ] \
     && [ -z "$REMEMBER_SUPPRESS_PROMO" ]; then
 
     # Args: none. Reads promos.json + installed_plugins.json, sets PROMO_MSG
@@ -1091,7 +1125,7 @@ if [ "$(config ".features.plugin_promos" true)" = "true" ] \
         local promo_dir="${HOME}/.remember/tmp"
         local marker="$promo_dir/promo-notice"
         local cooldown
-        cooldown=$(config ".cooldowns.promo_seconds" 604800)
+        config_into cooldown ".cooldowns.promo_seconds" 604800
         case "$cooldown" in ''|*[!0-9]*) cooldown=604800 ;; esac
 
         local last_ts=0 last_id=""
@@ -1106,8 +1140,8 @@ if [ "$(config ".features.plugin_promos" true)" = "true" ] \
         fi
         case "$last_ts" in ''|*[!0-9]*) last_ts=0 ;; esac
 
-        local now
-        now=$(_remember_date +%s)
+        local now=""
+        _remember_date_into now +%s
         case "$now" in ''|*[!0-9]*) return 0 ;; esac
 
         if [ "$last_ts" -gt 0 ] \
@@ -1514,7 +1548,7 @@ if [ -f "$REMEMBER_HANDOFF" ] && [ -s "$REMEMBER_HANDOFF" ]; then
         echo "[already delivered ${DELIVERIES} times since ${FIRST_DELIVERED:-an earlier session} -- no new handoff has been written since, so this is pending replacement, not news. You may already have acted on it. Running /remember replaces it.]"
     else
         DELIVERIES=1
-        FIRST_DELIVERED=$(_remember_date '+%Y-%m-%d %H:%M')
+        _remember_date_into FIRST_DELIVERED '+%Y-%m-%d %H:%M'
     fi
     cat "$REMEMBER_HANDOFF"
     echo ""
@@ -1592,7 +1626,8 @@ if [ -d "$SESSIONS_DIR" ] && [ -d "$REMEMBER_DIR/tmp" ]; then
     # cover). _remember_stale_record itself then expands with '/'
     # separators from this normalized directory, so the existing
     # ##*/remember.delivered. strip further down still matches.
-    _remember_delivered_glob_dir=$(_remember_forward_slash "$REMEMBER_DIR")
+    _remember_delivered_glob_dir=""
+    _remember_forward_slash_into _remember_delivered_glob_dir "$REMEMBER_DIR"
     for _remember_stale_record in "$_remember_delivered_glob_dir"/tmp/remember.delivered.*; do
         [ -f "$_remember_stale_record" ] || continue
         _remember_stale_id="${_remember_stale_record##*/remember.delivered.}"
@@ -1642,7 +1677,8 @@ if [ -d "$SESSIONS_DIR" ] && [ -d "$REMEMBER_DIR/tmp" ]; then
             # into "confirmed outside the grace window", the opposite of
             # what an unreadable mtime does three lines above. Refuse to
             # guess in either failure shape, same as the mtime check does.
-            _remember_now=$(_remember_date +%s)
+            _remember_now=""
+            _remember_date_into _remember_now +%s
             case "$_remember_now" in
                 (''|*[!0-9]*)
                     continue
@@ -1709,7 +1745,8 @@ fi
 # without this the count silently undercounts to 0 there, gating the
 # "N day(s) of memory to compress" message and the background
 # consolidation trigger off for real.
-_remember_staging_glob_dir=$(_remember_forward_slash "$REMEMBER_DIR")
+_remember_staging_glob_dir=""
+_remember_forward_slash_into _remember_staging_glob_dir "$REMEMBER_DIR"
 # Glob array + a bash `case` per entry, not `ls | grep -v | grep -v | wc -l |
 # tr -d ' '` (#666) -- five forks collapsed to zero: nullglob turns "no
 # matches" into an empty array instead of the literal pattern string, and the

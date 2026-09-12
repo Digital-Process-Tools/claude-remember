@@ -31,8 +31,11 @@ EXAMPLE = REPO_ROOT / "config.example.json"
 # Where a config key can legitimately be read from.
 SOURCE_DIRS = ("scripts", "hooks.d", "hooks", "pipeline")
 
-# `config ".some.key" default` / `config '.some.key' default`
-_CONFIG_CALL = re.compile(r"""config\s+["']\.([A-Za-z0-9_.]+)["']""")
+# `config ".some.key" default` / `config '.some.key' default`, and its
+# fork-free sibling `config_into VARNAME ".some.key" default` (#665, part of
+# #660) -- same key position, one extra token (the destination variable)
+# ahead of it.
+_CONFIG_CALL = re.compile(r"""config(?:_into\s+\S+)?\s+["']\.([A-Za-z0-9_.]+)["']""")
 
 # Rows of the config table: | `key` | default | description |
 _README_ROW = re.compile(r"^\|\s*`([a-z][A-Za-z0-9_.]*)`\s*\|")
