@@ -78,7 +78,11 @@ def decode_bash_output(raw: bytes) -> str:
     """
     if not raw:
         return ""
-    if raw.count(b"\x00") >= len(raw) // 4:
+    nuls = raw.count(b"\x00")
+    # Require at least one NUL: the gate `nuls >= len(raw) // 4` alone is
+    # true for every input shorter than 4 bytes (len // 4 == 0), which would
+    # mis-decode a short, perfectly valid UTF-8 probe output (e.g. b"1\n").
+    if nuls and nuls >= len(raw) // 4:
         try:
             decoded = raw.decode("utf-16-le")
         except UnicodeDecodeError:

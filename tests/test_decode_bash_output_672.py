@@ -33,9 +33,20 @@ def test_empty_stream_returns_empty_string():
     assert decode_bash_output(b"") == ""
 
 
+def test_short_utf8_output_is_returned_unchanged():
+    """Negative control: a 2-byte UTF-8 blob -- exactly the shape a probe
+    printing an exit status or a counter produces -- must come back
+    unchanged, not misread as UTF-16LE. (The original NUL gate was true for
+    every input shorter than 4 bytes because len(raw) // 4 == 0.)"""
+    raw = b"1\n"
+    assert decode_bash_output(raw) == "1\n"
+
+
 def test_undecodable_bytes_fall_back_without_raising():
     """A blob that is neither clean UTF-8 nor a usable UTF-16LE frame must
-    still return a str (with replacement characters), never raise."""
+    still return a str (with replacement characters), never raise, and the
+    readable slice must survive in the output."""
     raw = b"\xff\xfe\x00\x00garbage\x80\x81"
     out = decode_bash_output(raw)
     assert isinstance(out, str)
+    assert "garbage" in out
