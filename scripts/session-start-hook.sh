@@ -1419,7 +1419,7 @@ if : > "$_REMEMBER_CTX_FILE" 2>/dev/null; then
     exec > "$_REMEMBER_CTX_FILE"
     _REMEMBER_CTX_OK="true"
 fi
-if [ "$REMEMBER_ROOT" != "$PROJECT_DIR" ] || [ -n "$PER_SESSION_HANDOFF" ]; then
+if [ "$REMEMBER_ROOT" != "$PROJECT_DIR" ] || [ -n "$PER_SESSION_HANDOFF" ] || [ -n "$HANDOFF_MODE_DEGRADED" ]; then
     echo "=== HANDOFF ==="
     echo "Write next handoff to: $REMEMBER_HANDOFF"
     if [ -n "$HANDOFF_MODE_DEGRADED" ]; then
