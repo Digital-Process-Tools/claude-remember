@@ -51,18 +51,36 @@ pytestmark = pytest.mark.skipif(
     BASH is None, reason="no usable bash on this host (#432)"
 )
 
-# How many past transcripts to litter SESSIONS_DIR with, per scenario.
-TRANSCRIPT_COUNTS = (1, 500, 2000)
+# Round 1/2 scaled transcript COUNT and found it nearly flat (0.41s of a 3.2s
+# run at 2000). Round 3 scales SIZE instead, on the three axes a long-lived
+# real store grows along and the fixture never had:
+#
+#   store_kb      -- the six memory files. archive.md alone is megabytes on a
+#                    store that has been consolidating for months.
+#   transcript_mb -- the PREVIOUS session's .jsonl. The capture-gap check runs
+#                    `grep -q '"tool_use"'` over it (session-start-hook.sh:999),
+#                    which reads the whole file when the pattern is absent.
+#   slices        -- rotated archive-*.md / recent-*.md. The memory render
+#                    globs, sorts and lists every one of them on a cache miss.
+#
+# name, transcripts, store_kb, transcript_mb, rotated slices, staging files
+SCENARIOS = (
+    ("baseline", 50, 400, 0.01, 0, 0),
+    ("year-old-store", 50, 6_000, 20.0, 60, 3),
+    ("abandoned-store", 50, 20_000, 100.0, 250, 10),
+)
 
-# Roughly the reporter's store: ~480KB across the six memory files.
-MEMORY_FILE_BYTES = 80_000
+
+LINE = "- a remembered line about as long as a real one in a real store\n"
 
 
-def _fatten(remember: Path) -> None:
-    """Grow the fixture's memory files to a reporter-representative size."""
-    filler = ("- a remembered line about as long as a real one\n" * 4000)[
-        :MEMORY_FILE_BYTES
-    ]
+def _filler(nbytes: int) -> str:
+    return (LINE * (nbytes // len(LINE) + 1))[:nbytes]
+
+
+def _fatten(remember: Path, store_kb: int, slices: int, staging: int) -> None:
+    """Grow the store along the three axes a long-lived one grows along."""
+    each = (store_kb * 1000) // 5
     for name in (
         "identity.md",
         "core-memories.md",
@@ -70,16 +88,39 @@ def _fatten(remember: Path) -> None:
         "recent.md",
         "archive.md",
     ):
-        _write_no_crlf(remember / name, filler)
+        _write_no_crlf(remember / name, _filler(each))
+
+    # Rotated slices: globbed, sorted and listed by the memory render.
+    for i in range(slices):
+        day = f"2026-{(i % 12) + 1:02d}-{(i % 28) + 1:02d}"
+        _write_no_crlf(remember / f"archive-{day}.md", _filler(20_000))
+        _write_no_crlf(remember / f"recent-{day}.md", _filler(20_000))
+
+    # Past-day staging files: what the consolidation trigger counts.
+    for i in range(staging):
+        _write_no_crlf(remember / f"today-2026-08-{i + 1:02d}.md", _filler(30_000))
 
 
-def _litter_transcripts(home: Path, project: Path, count: int) -> None:
-    """Put `count` past session transcripts where previous_transcript() looks."""
+def _litter_transcripts(home: Path, project: Path, count: int,
+                        previous_mb: float) -> None:
+    """`count` past transcripts, the newest one `previous_mb` megabytes.
+
+    Size matters on the newest one specifically: it is what
+    previous_transcript() returns, and the capture-gap check greps it
+    (session-start-hook.sh:999) -- `grep -q` reads to EOF when the pattern is
+    absent, and this fixture's lines never contain "tool_use".
+    """
     session_dir = home / ".claude" / "projects" / _slug(str(project))
     session_dir.mkdir(parents=True, exist_ok=True)
-    body = '{"type":"assistant","message":{"content":"x"}}\n' * 20
+    small = '{"type":"assistant","message":{"content":"x"}}\n' * 20
     for i in range(count):
-        _write_no_crlf(session_dir / f"diag-{i:05d}.jsonl", body)
+        _write_no_crlf(session_dir / f"diag-{i:05d}.jsonl", small)
+
+    big = session_dir / f"diag-{count:05d}.jsonl"
+    chunk = '{"type":"assistant","message":{"content":"xxxxxxxxxxxxxxxx"}}\n' * 1000
+    with open(big, "w", encoding="utf-8", newline="") as fh:
+        for _ in range(max(1, int(previous_mb * 1_000_000 / len(chunk)))):
+            fh.write(chunk)
 
 
 def _trace(env: dict, trace_file: Path) -> tuple[float, str]:
@@ -166,11 +207,17 @@ def _render(label, wall, traced, lines, rows) -> str:
     return "\n".join(out)
 
 
-@pytest.mark.parametrize("count", TRANSCRIPT_COUNTS)
-def test_diag_where_does_session_start_spend_its_time(tmp_path, count):
+@pytest.mark.parametrize(
+    "name,count,store_kb,previous_mb,slices,staging",
+    SCENARIOS,
+    ids=[s[0] for s in SCENARIOS],
+)
+def test_diag_where_does_session_start_spend_its_time(
+    tmp_path, name, count, store_kb, previous_mb, slices, staging
+):
     home, project, remember = _store(tmp_path)
-    _fatten(remember)
-    _litter_transcripts(home, project, count)
+    _fatten(remember, store_kb, slices, staging)
+    _litter_transcripts(home, project, count, previous_mb)
     env = _env(home, project, remember, os.environ["PATH"])
 
     # Cold (nothing cached) then warm (every #668/#684 cache filled): a real
@@ -182,8 +229,9 @@ def test_diag_where_does_session_start_spend_its_time(tmp_path, count):
     warm_rows, warm_traced = _attribute(warm_trace)
 
     report = "\n\n".join([
-        f"## #660 diagnostic -- {count} past transcripts, "
-        f"{MEMORY_FILE_BYTES * 5 // 1000}KB store, {sys.platform}",
+        f"## #660 diagnostic [{name}] -- {store_kb}KB store, "
+        f"{previous_mb}MB previous transcript, {count} transcripts, "
+        f"{slices} rotated slices, {staging} staging files, {sys.platform}",
         _render("cold", cold_wall, cold_traced, len(cold_trace.splitlines()), cold_rows),
         _render("warm", warm_wall, warm_traced, len(warm_trace.splitlines()), warm_rows),
     ])
