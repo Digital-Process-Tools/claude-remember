@@ -325,6 +325,21 @@ def _child_env() -> dict[str, str]:
     inherited value would aim the summarizer's hooks at the REAL project, which
     is the failure @ehutchinsonSFDC saw. Cheap to close, and it makes the code
     say what the comments already claim.
+
+    ``ANTHROPIC_API_KEY`` goes too. When that var is set anywhere in the host's
+    environment it wins over the operator's own ``claude.ai`` login for THIS
+    subprocess specifically, because the CLI resolves credentials in that
+    order — an ambient host var the operator never chose for this call. When
+    the key's balance is exhausted or rate-limited, the background summarizer
+    fails on every session-end with "Credit balance is too low", silently,
+    while the operator's interactive sessions keep working fine off the login
+    — so nothing about the failure points at this var without reading the
+    child's own stderr (observed in production: repeated
+    ``save-session.sh --force exited 1`` at session end, traced to exactly
+    this). It was never a "parent session" marker the way ``CLAUDE_CODE_*``
+    is; it is stripped here for the same reason ``CLAUDE_PROJECT_DIR`` is: the
+    child should authenticate and scope itself exactly as if launched fresh,
+    not inherit a credential the operator did not choose for it.
     """
     env = {
         k: v
@@ -334,6 +349,7 @@ def _child_env() -> dict[str, str]:
             k != "CLAUDECODE"
             and k != "CLAUDE_JOB_DIR"
             and k != "CLAUDE_PROJECT_DIR"
+            and k != "ANTHROPIC_API_KEY"
             and not k.startswith("CLAUDE_CODE_")
         )
     }

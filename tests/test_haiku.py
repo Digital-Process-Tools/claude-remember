@@ -184,6 +184,27 @@ def test_call_haiku_strips_parent_session_env(mock_run, monkeypatch):
 
 
 @patch("pipeline.haiku.subprocess.run")
+def test_call_haiku_strips_anthropic_api_key(mock_run, monkeypatch):
+    """ANTHROPIC_API_KEY, if set anywhere in the host's environment, wins
+    over the operator's claude.ai login for the nested `claude -p` call --
+    the CLI resolves credentials in that order. A key with an exhausted or
+    unfunded balance then fails every background summarize silently (the
+    operator's own interactive sessions keep working fine off the login, so
+    nothing points at this var without reading the child's stderr). Unlike
+    CLAUDE_CODE_OAUTH_TOKEN this was never the child's own credential -- it
+    is an ambient host var the operator did not choose for this subprocess --
+    so it is stripped, not kept, and the rest of the environment survives."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-example")
+    monkeypatch.setenv("PATH", "/usr/bin")  # an unrelated var must survive
+    mock_run.return_value = MagicMock(
+        returncode=0, stdout=_mock_claude_response("x"), stderr="")
+    call_haiku("p")
+    env = mock_run.call_args[1]["env"]
+    assert "ANTHROPIC_API_KEY" not in env
+    assert env.get("PATH") == "/usr/bin"
+
+
+@patch("pipeline.haiku.subprocess.run")
 def test_call_haiku_with_tools(mock_run):
     mock_run.return_value = MagicMock(
         returncode=0,
