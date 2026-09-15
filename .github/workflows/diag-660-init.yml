@@ -65,6 +65,39 @@ jobs:
           (Get-MpPreference).ExclusionPath
           $env:PROCESSOR_ARCHITECTURE
 
+      # Does the fork-free read actually win on THIS platform? The render
+      # traded five `cat` forks for `IFS= read -r -d ''`, and a fork is
+      # expensive on Git Bash while bash's own byte handling might be worse
+      # on a large file. The Windows bench got slower on exactly the
+      # big-store arms after that change, which is either this or runner
+      # noise -- and nothing we have can tell those apart by staring at
+      # medians. So measure both, on the runner, at three sizes.
+      - name: cat vs read probe
+        shell: bash
+        run: |
+          probe() {
+            local size=$1 f="${RUNNER_TEMP:-/tmp}/probe-$1.md"
+            yes '- a remembered line about as long as a real one in a store' \
+              | head -c "$size" > "$f"
+            local t0 t1
+            t0=$EPOCHREALTIME
+            for _ in 1 2 3 4 5; do cat "$f" >/dev/null; done
+            t1=$EPOCHREALTIME
+            printf 'size=%-9s cat  x5: %.3fs\n' "$size" \
+              "$(awk -v a="$t0" -v b="$t1" 'BEGIN{print b-a}')"
+            t0=$EPOCHREALTIME
+            for _ in 1 2 3 4 5; do
+              IFS= read -r -d '' _body < "$f" || :
+              printf '%s' "$_body" >/dev/null
+            done
+            t1=$EPOCHREALTIME
+            printf 'size=%-9s read x5: %.3fs\n' "$size" \
+              "$(awk -v a="$t0" -v b="$t1" 'BEGIN{print b-a}')"
+          }
+          probe 4096
+          probe 262144
+          probe 4194304
+
       - name: Benchmark
         shell: bash
         env:
