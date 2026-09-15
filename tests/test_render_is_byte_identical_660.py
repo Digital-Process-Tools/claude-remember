@@ -39,7 +39,15 @@ SHAPES = {
     "unicode.md": "éà中文 \U0001f600\n",
 }
 
-SHIPPED = f'source "{LIB.as_posix()}"; _remember_emit_file "$MFILE"' 
+# Both branches of the size switch, exercised by name: under the threshold
+# the shell reads the file itself, over it the function falls back to `cat`.
+# A test that only ever drove one of them would leave the other unproven --
+# and the `cat` branch exists BECAUSE an unconditional read made a 4MB file
+# take 24 seconds on windows-latest.
+SHIPPED_SMALL = f'source "{LIB.as_posix()}"; _remember_emit_file "$MFILE" 10'
+SHIPPED_LARGE = f'source "{LIB.as_posix()}"; _remember_emit_file "$MFILE" 999999'
+SHIPPED_NO_SIZE = f'source "{LIB.as_posix()}"; _remember_emit_file "$MFILE"'
+SHIPPED = SHIPPED_SMALL
 NAIVE = 'printf \'%s\\n\' "$(<"$MFILE")"'
 CAT = 'cat "$MFILE"'
 
@@ -59,12 +67,33 @@ def _emit(tmp_path: Path, name: str, body: str, snippet: str) -> bytes:
     return done.stdout
 
 
-def test_the_render_no_longer_forks_cat():
+def test_the_render_delegates_to_the_size_aware_emitter():
     """The point of the change, pinned so a revert is loud."""
     source = LIB.read_text(encoding="utf-8")
-    assert "_remember_emit_file " in source
     body = source.split("_remember_render_memory_section()")[1]
-    assert 'cat "$MFILE"' not in body, "the render forks `cat` again"
+    assert '_remember_emit_file "$MFILE" "$MFILE_BYTES"' in body, (
+        "the render must hand the size over -- without it the emitter cannot "
+        "choose, and falls back to cat for every file"
+    )
+    assert 'cat "$MFILE"' not in body, "the render forks `cat` directly again"
+
+
+@pytest.mark.parametrize("name,body", sorted(SHAPES.items()))
+def test_the_large_file_branch_is_byte_identical_too(tmp_path, name, body):
+    """Over the threshold the emitter uses `cat`; same bytes, by definition,
+    but pinned because the branch is chosen by a number that can be edited."""
+    assert _emit(tmp_path, name, body, SHIPPED_LARGE) == body.encode("utf-8")
+
+
+@pytest.mark.parametrize("name,body", sorted(SHAPES.items()))
+def test_a_missing_size_still_renders_the_file(tmp_path, name, body):
+    """A caller that forgets the second argument must not render nothing.
+
+    The size decides the branch, so an absent or non-numeric one has to fall
+    somewhere deliberate rather than into an arithmetic error that prints an
+    empty section and looks like an empty memory file.
+    """
+    assert _emit(tmp_path, name, body, SHIPPED_NO_SIZE) == body.encode("utf-8")
 
 
 @pytest.mark.parametrize("name,body", sorted(SHAPES.items()))
