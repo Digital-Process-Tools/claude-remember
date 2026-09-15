@@ -213,6 +213,34 @@ _SANCTIONED_DIVERGENCE = {
         ),
     ],
     "scripts/lib-memory-dir.sh": [
+        # #695: `[A-Za-z]:` in the drive-form `case` patterns below is a
+        # bracket RANGE, matched by the locale's collation rather than by
+        # byte value. `local LC_ALL=C` scopes byte semantics to the function
+        # and restores the caller's locale on return. Measured on glibc, a
+        # `case` range does not actually move with the locale (only `[[ =~ ]]`
+        # does -- see tests/test_locale_ranges_695.py for the matrix), so this
+        # is not a behaviour change on any platform; it is the same one-line
+        # rule applied uniformly so the scanner has no exception to carry.
+        # Each pair carries the line AFTER the opener as well, so that
+        # `old_code` is not a prefix of `new_code`. A prefix would leave the
+        # old text present inside the substituted result, and
+        # tests/test_sanctioned_divergence_state_440.py asserts exactly that it
+        # is gone -- the invariant every existing allowance here already meets
+        # by inserting between two lines rather than before the first.
+        (
+            '_resolve_remember_dir() {\n'
+            '    local data_dir="$1"\n',
+            '_resolve_remember_dir() {\n'
+            '    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)\n'
+            '    local data_dir="$1"\n',
+        ),
+        (
+            '_set_store_root() {\n'
+            '    local data_dir="$1" prefix\n',
+            '_set_store_root() {\n'
+            '    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)\n'
+            '    local data_dir="$1" prefix\n',
+        ),
         (
             'elif [ "${#_cfg_sources[@]}" -gt 0 ]; then\n'
             '    "${PYTHON:-python3}" - "$_merged_cfg" "${_cfg_sources[@]}" > /dev/null 2>&1 <<\'PYMERGE\'',

@@ -206,6 +206,7 @@ fi
 # The drive-form regex lives in a variable: a bracket expression containing a
 # backslash is not portable to write inline on the right of `=~`.
 _remember_normalize_win_path() {
+    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
     local _in="$1" _drive="" _rest=""
     local _re='^([a-zA-Z]):[/\](.*)$'
     case "$OSTYPE" in

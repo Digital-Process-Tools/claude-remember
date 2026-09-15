@@ -271,6 +271,7 @@ sys.stdout.write("\n".join(out))
 #    narrower than a blanket `source` of a file whose contents were never
 #    inspected at all.
 _remember_cfg_flatten_cache_path() {
+    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
     [ -n "${REMEMBER_DIR:-}" ] || return 1
     local _key="${REMEMBER_DIR//[!a-zA-Z0-9]/-}"
     # Same tail-keep truncation as _remember_env_cache_path
@@ -381,6 +382,7 @@ _remember_cfg_flatten_cache_valid_value() {
 # allowed to be, and the #682 block comment above this whole section for
 # what <name> is guaranteed to be (and why that guarantee holds).
 _remember_cfg_flatten_cache_valid_line() {
+    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
     local _line="$1"
     [[ "$_line" =~ ^_RCFG_[A-Za-z0-9_]+= ]] || return 1
     _remember_cfg_flatten_cache_valid_value "${_line#*=}"

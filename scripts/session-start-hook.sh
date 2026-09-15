@@ -1007,6 +1007,7 @@ SEEN_ID=""
 # Args: $1 — session id. Exit 0 if anything can vouch for it having been
 # captured. Any one source suffices; they fail independently.
 capture_was_seen() {
+    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
     [ -n "$1" ] || return 1
     # 1. Per-session marker from post-tool-hook.sh — "PostToolUse ran for this
     #    session", written pre-throttle, so it means WIRED, not saved.

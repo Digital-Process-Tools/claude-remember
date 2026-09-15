@@ -113,6 +113,7 @@ _REMEMBER_LIB_ENV_CACHE_LOADED=1
 # more than this); lib-env-cache.sh's copy exists specifically because this
 # one runs on the hot path, so it gets the `_into` treatment from the start.
 _remember_env_cache_normalize_into() {
+    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
     local _var="$1" _in="$2" _drive="" _rest=""
     local _re='^([a-zA-Z]):[/\](.*)$'
     case "$OSTYPE" in
@@ -139,6 +140,7 @@ _remember_env_cache_normalize_into() {
 }
 
 _remember_env_cache_path() {
+    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
     # Pinned once per process (#469): this function runs both BEFORE
     # resolve-paths.sh (from _remember_env_cache_load, when CLAUDE_PROJECT_DIR
     # is still unset on Codex -- and on any other host that genuinely never

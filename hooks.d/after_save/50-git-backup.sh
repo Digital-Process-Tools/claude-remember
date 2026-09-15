@@ -81,6 +81,7 @@ fi
 # still activates. Old git without --path-format falls back to resolving the
 # relative form; if even that fails we leave the previous behaviour untouched.
 _gb_common_dir() {
+    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
     local _d="$1" _out
     [ -d "$_d" ] || return 1
     _out=$(git -C "$_d" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || _out=""

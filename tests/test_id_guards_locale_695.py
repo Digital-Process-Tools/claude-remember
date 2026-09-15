@@ -35,6 +35,7 @@ The fix in both is `local LC_ALL=C`, scoped to the function.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -63,6 +64,11 @@ def _bash(script: str, env_extra: dict, tmp_path: Path) -> str:
         set -u
         export PIPELINE_DIR={REPO_ROOT}
         export PROJECT_DIR={tmp_path}
+        # resolve-paths.sh reads this at source time under `set -u`; without it
+        # the whole harness exits 127 before the function under test is ever
+        # called, and four legs below report a failure that is about this
+        # script rather than about the locale.
+        export CLAUDE_PROJECT_DIR={tmp_path}
         {script}
         """], env=env, capture_output=True, text=True, timeout=30, check=False)
     assert result.returncode == 0, (
@@ -83,9 +89,32 @@ def _cache_line_verdict(line: str, env_extra: dict, tmp_path: Path) -> str:
     """, env_extra, tmp_path)
 
 
+def _extract_normalize_win_path() -> str:
+    """Pull `_remember_normalize_win_path()`'s definition out of
+    resolve-paths.sh.
+
+    Sourcing the script does not leave the function callable: it is used
+    during resolution and then removed with `unset -f` (resolve-paths.sh:340),
+    deliberately, so nothing downstream can reach it. Extracting the
+    definition is the same route tests/test_save_session_marker_unreadable_625.py
+    already takes for ts_marker_read, and for the reason that module records:
+    a plain multiline regex, never a `sed`-into-`source <(...)` pipeline, which
+    was observed failing on macOS CI only."""
+    text = (REPO_ROOT / "scripts" / "resolve-paths.sh").read_text(encoding="utf-8")
+    match = re.search(r"^_remember_normalize_win_path\(\).*?^\}",
+                      text, re.MULTILINE | re.DOTALL)
+    assert match, (
+        "_remember_normalize_win_path() not found in scripts/resolve-paths.sh "
+        "-- the extraction regex is stale"
+    )
+    return match.group(0) + "\n"
+
+
 def _normalized(path: str, env_extra: dict, tmp_path: Path) -> str:
+    func_file = tmp_path / "normalize.sh"
+    func_file.write_text(_extract_normalize_win_path(), encoding="utf-8")
     return _bash(f"""
-        source {RESOLVE} >/dev/null 2>&1
+        source '{func_file}'
         OSTYPE=msys
         _remember_normalize_win_path '{path}'
         echo
@@ -158,3 +187,21 @@ class TestWindowsDriveUnderTurkishCollation:
         normaliser start claiming paths that are not drive paths."""
         _name, env = _locale_env()
         assert _normalized("/home/x", env, tmp_path) == "/home/x"
+
+
+class TestTheHarnessItselfRuns:
+    """Every leg above skips on a runner that cannot reproduce #695 -- which
+    is most of them, and all of macOS. A harness that had simply stopped
+    working would skip identically and say nothing: that is exactly what
+    happened on this branch's first CI run, where four legs reported a
+    failure that was `exit 127` from sourcing, not the locale.
+
+    These two run under the C locale on every platform, so a broken harness
+    is a loud failure everywhere rather than a silent skip.
+    """
+
+    def test_the_cache_line_validator_is_reachable(self, tmp_path):
+        assert _cache_line_verdict("_RCFG_ID=x", {"LC_ALL": "C"}, tmp_path) == "VALID"
+
+    def test_the_win_path_normaliser_is_reachable(self, tmp_path):
+        assert _normalized("I:/x", {"LC_ALL": "C"}, tmp_path) == "I:\\x"

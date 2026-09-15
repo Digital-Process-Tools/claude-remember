@@ -207,6 +207,7 @@ source "$PIPELINE_DIR/scripts/log.sh"
 # from the project's origin at session start. Compare git common dirs, which
 # every worktree of a repo shares.
 _gr_common_dir() {
+    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
     local _d="$1" _out
     [ -d "$_d" ] || return 1
     _out=$(git -C "$_d" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || _out=""

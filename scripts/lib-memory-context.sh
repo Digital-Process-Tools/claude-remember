@@ -133,6 +133,7 @@ _remember_memory_paths() {
 # no subshell, and has worked since bash 2.x -- confirmed directly against
 # the real `/bin/bash` 3.2.57 this repo ships behind on stock macOS.
 _remember_wc_size_set() {
+    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
     local _remember_wc_size_key="_remember_wcsz_${1//[!A-Za-z0-9]/_}"
     printf -v "$_remember_wc_size_key" '%s' "$2"
 }
@@ -140,6 +141,7 @@ _remember_wc_size_set() {
 # substitution forks a subshell even when nothing inside it forks a real
 # process, and this is called once per memory file on the render's hot path.
 _remember_wc_size_get_into() {
+    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
     local _remember_wc_size_outvar="$1"
     local _remember_wc_size_key="_remember_wcsz_${2//[!A-Za-z0-9]/_}"
     printf -v "$_remember_wc_size_outvar" '%s' "${!_remember_wc_size_key:-0}"

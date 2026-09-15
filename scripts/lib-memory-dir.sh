@@ -140,6 +140,7 @@ EOF
 # If data_dir starts with / or ~ treat as absolute; expand ~ and {slug}.
 # Otherwise treat as a path relative to PROJECT_DIR (legacy behaviour).
 _resolve_remember_dir() {
+    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
     local data_dir="$1"
     local proj="$2"
 
@@ -198,6 +199,7 @@ _resolve_remember_dir() {
 # directory is a hijack waiting to happen, and no one keeps a memory store at
 # the filesystem root.
 _set_store_root() {
+    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
     local data_dir="$1" prefix
     REMEMBER_STORE_ROOT=""
 

@@ -520,6 +520,7 @@ _lock_timing_disclose() {
 # variable named after the sanitized path. Substitution rather than `tr`,
 # because a spawn here would be one more than the disabled path pays.
 _lock_timing_key() {
+    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
     _LOCK_TIMING_KEY="${1//[!A-Za-z0-9]/_}"
 }
 
