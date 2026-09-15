@@ -538,7 +538,9 @@ _remember_write_slug_record() {
     mv -f "$_tmp" "$_dir/session-slug" 2>/dev/null || rm -f "$_tmp" 2>/dev/null
     return 0
 }
-_remember_write_slug_record
+# Called in the deferred block below (#660), not here: this writes a record
+# nothing in this hook reads back, and the foreground path's only obligation
+# is the injected context.
 
 # ── And somewhere a caller can NAME, in the layout we ship (#297) ─────────
 # The record above answers "what is the slug", and in the layout
@@ -655,7 +657,9 @@ _remember_write_slug_index() {
     lock_release "$_lock" 2>/dev/null
     return 0
 }
-_remember_write_slug_index
+# Called in the deferred block below (#660), not here: this writes a record
+# nothing in this hook reads back, and the foreground path's only obligation
+# is the injected context.
 
 # ── Is this store known by a second spelling? (#298) ──────────────────────
 # Git's index is case-sensitive where NTFS is not, so a store can be spelled
@@ -761,7 +765,9 @@ _remember_write_case_divergence() {
     esac
     return 0
 }
-_remember_write_case_divergence
+# Called in the deferred block below (#660), not here: this writes a record
+# nothing in this hook reads back, and the foreground path's only obligation
+# is the injected context.
 
 # Args: $1 — sessions dir. Prints the newest transcript that is not this
 # session's, or nothing.
@@ -808,7 +814,23 @@ previous_transcript() {
 # than before. A start whose first user prompt arrives before the grep
 # finishes now sees the notice on the prompt after it. The notice is about a
 # PREVIOUS session and is not time-critical; nothing else observes the file.
-{
+_remember_deferred_phase() {
+# `local`, so an inline run (REMEMBER_DEFER=0, below) does not leave the label
+# set for the rest of the hook. Marks everything below as off the foreground
+# path, for the profiler and for the reader: a trace cannot tell a deferred
+# child from a command substitution by pid alone -- $(...) gets its own pid
+# too and the parent WAITS for it -- so "how much is still synchronous" is
+# unanswerable without a phase label.
+local _REMEMBER_PHASE=deferred
+
+# Records, moved here from their original call sites above (#660). All three
+# are pure side effects -- verified mechanically that none of them assigns
+# anything read later in this hook -- and their outputs are read by
+# user-prompt-hook.sh and /remember:doctor, never by the start itself.
+_remember_write_slug_record
+_remember_write_slug_index
+_remember_write_case_divergence
+
 if [ -n "$CURRENT_SESSION_ID" ]; then
     PREV_JSONL=$(previous_transcript "$SESSIONS_DIR")
 else
@@ -1036,7 +1058,23 @@ else
         printf '%s' "$PREV_ID" > "$CAPTURE_REPORTED" 2>/dev/null || true
     fi
 fi
-} </dev/null >/dev/null 2>&1 3>&- & disown 2>/dev/null || true
+}
+
+# REMEMBER_DEFER=0 runs the whole block inline, on the foreground path, exactly
+# as it ran before #660. It exists because determinism is worth more than
+# milliseconds to a test that asserts one of these side effects: nine
+# case-divergence tests and the slug-index concurrency test read a record file
+# the instant the hook exits, and a deferred write had not landed yet. Without
+# the switch the honest options were to weaken those assertions into polls or
+# to leave the work on the hot path; this keeps both the assertion and the
+# speed. Default is 1 -- deferred -- and
+# tests/test_session_start_deferred_capture_gap_660.py covers the DEFAULT
+# path, so the switch cannot become the only thing that is ever tested.
+if [ "${REMEMBER_DEFER:-1}" = "0" ]; then
+    _remember_deferred_phase
+else
+    _remember_deferred_phase </dev/null >/dev/null 2>&1 3>&- & disown 2>/dev/null || true
+fi
 # ── end deferred block (#660) ─────────────────────────────────────────────
 
 # ── Identity: per-project → user-global → plugin-bundled ──────────────────
@@ -1782,7 +1820,17 @@ if ! _remember_start_cache_context_load; then
         # read/size/concatenate cost once, and re-running it a second time
         # just to fill the cache would double that cost on every single miss.
         _remember_render_memory_section | tee "$_REMEMBER_START_CTX_TMP"
-        _remember_start_cache_context_finish_publish "$_REMEMBER_START_CTX_TMP"
+        # Deferred (#660): publishing the cache is four forks (mkdir, mktemp,
+        # two mv) spent entirely on making the NEXT start fast. This start has
+        # already rendered and already emitted; nothing below reads the
+        # published cache back. `3>&-` for the same reason the consolidation
+        # spawn documents in full -- fd 3 is a dup of the real stdout pipe
+        # here, and a child holding it open would keep the client waiting for
+        # EOF, turning "deferred" into "still blocking, just less visibly".
+        {
+            _REMEMBER_PHASE=deferred
+            _remember_start_cache_context_finish_publish "$_REMEMBER_START_CTX_TMP"
+        } </dev/null >/dev/null 2>&1 3>&- & disown 2>/dev/null || true
     else
         _remember_render_memory_section
     fi
