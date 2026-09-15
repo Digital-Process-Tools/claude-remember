@@ -77,11 +77,13 @@ jobs:
         run: |
           probe() {
             local size=$1 f="${RUNNER_TEMP:-/tmp}/probe-$1.md"
-            # `--` first: the line starts with a dash, and without it `yes`
-            # reads its own argument as an option
-            # ("yes: unknown option -- ", windows-latest, first attempt).
-            yes -- '- a remembered line about as long as a real one in a store' \
-              | head -c "$size" > "$f"
+            # python, not `yes | head -c`: the step runs under `bash -e -o
+            # pipefail`, `head` closes the pipe as soon as it has its bytes,
+            # and the SIGPIPE that kills `yes` fails the whole step
+            # (exit 141, windows-latest). Two attempts were spent on this
+            # fixture before it measured anything -- the first died on
+            # "yes: unknown option -- " because the line starts with a dash.
+            python -c "import sys; p=sys.argv[1]; n=int(sys.argv[2]); line='- a remembered line about as long as a real one in a store'+chr(10); open(p,'w').write((line*(n//len(line)+1))[:n])" "$f" "$size"
             local t0 t1
             t0=$EPOCHREALTIME
             for _ in 1 2 3 4 5; do cat "$f" >/dev/null; done
