@@ -42,8 +42,27 @@ TOOL_USE_LINE = '{"type":"assistant","message":{"content":[{"type":"tool_use"}]}
 PLAIN_LINE = '{"type":"assistant","message":{"content":"just talking"}}\n'
 
 
-def _env(home: Path, project: Path, remember: Path) -> dict:
-    return {
+def _env(home: Path, project: Path, remember: Path, *, defer: bool = True) -> dict:
+    """`defer=False` runs the deferred phase inline (REMEMBER_DEFER=0).
+
+    The capture-gap check moved into that phase (#660), and it is the LAST
+    thing the phase does -- session-start-hook.sh writes the notice at the end
+    of `_remember_deferred_phase`, after the records and after the evidence
+    store prune. So the hook returning says nothing at all about whether the
+    check has run yet.
+
+    That splits this file's assertions in two, and the split is not cosmetic:
+
+    * "the notice must appear" is a real assertion on the default path, and
+      is polled for -- it proves the deferred phase actually reaches the end.
+    * "the notice must NOT appear" cannot be asserted on the default path at
+      all. It would pass just as well against a phase that had not run yet,
+      or that died before it got there -- the negative and the absence are
+      the same file-not-found. Those run inline, where "did not fire" is a
+      verdict rather than a race. (macos-latest 3.10 was the leg that caught
+      this, on a green-everywhere-else pull request.)
+    """
+    env = {
         **os.environ,
         "HOME": str(home),
         "CLAUDE_PROJECT_DIR": str(project),
@@ -51,6 +70,23 @@ def _env(home: Path, project: Path, remember: Path) -> dict:
         "REMEMBER_DIR": str(remember),
         "_LIB_MEMORY_DIR_LOADED": "1",
     }
+    if not defer:
+        env["REMEMBER_DEFER"] = "0"
+    return env
+
+
+# How long a polled assertion waits for the deferred phase to reach its end.
+# Generous: it is a bound on a hang, not a measurement of anything.
+DEFERRED_TIMEOUT = 15
+
+
+def _wait_for_notice(notice: Path) -> bool:
+    deadline = time.time() + DEFERRED_TIMEOUT
+    while time.time() < deadline:
+        if notice.is_file() and notice.read_text(encoding="utf-8").strip():
+            return True
+        time.sleep(0.1)
+    return False
 
 
 def _project(tmp_path: Path):
@@ -173,7 +209,7 @@ def test_a_previous_session_that_never_captured_raises_the_notice(tmp_path):
     assert result.returncode == 0, subprocess_failure_detail(result, remember)
 
     notice = remember / "tmp" / "capture-gap-notice"
-    assert notice.exists(), (
+    assert _wait_for_notice(notice), (
         "a session that ran SessionStart and never PostToolUse produced no "
         "notice — this is exactly the silent no-op #200 reports"
     )
@@ -193,7 +229,7 @@ def test_a_healthy_previous_session_raises_nothing(tmp_path):
     (remember / "tmp" / "capture-session-start").write_text(str(int(time.time())))
     (remember / "tmp" / "capture-alive").write_text("sess-prev")
 
-    _run(SESSION_START, _env(home, project, remember))
+    _run(SESSION_START, _env(home, project, remember, defer=False))
 
     assert not (remember / "tmp" / "capture-gap-notice").exists(), (
         "warned about a session that captured normally — a false alarm here "
@@ -208,7 +244,7 @@ def test_a_previous_session_with_no_tool_calls_raises_nothing(tmp_path):
     _transcripts(session_dir, previous=PLAIN_LINE * 5)
     (remember / "tmp" / "capture-session-start").write_text(str(int(time.time())))
 
-    _run(SESSION_START, _env(home, project, remember))
+    _run(SESSION_START, _env(home, project, remember, defer=False))
 
     assert not (remember / "tmp" / "capture-gap-notice").exists(), (
         "cried wolf over a session that simply used no tools"
@@ -231,7 +267,7 @@ def test_the_check_is_not_gated_on_having_run_before(tmp_path):
     _run(SESSION_START, _env(home, project, remember))
 
     notice = remember / "tmp" / "capture-gap-notice"
-    assert notice.exists(), (
+    assert _wait_for_notice(notice), (
         "stayed silent for the originating incident — the only one that "
         "actually happened to the reporter"
     )
@@ -290,7 +326,7 @@ def test_evidence_of_capture_survives_a_later_session_making_tool_calls(tmp_path
     evidence and this warns every single time. It has to survive.
     """
     home, project, remember, session_dir = _project(tmp_path)
-    env = _env(home, project, remember)
+    env = _env(home, project, remember, defer=False)
 
     prev = session_dir / "sess-prev.jsonl"
     prev.write_text(TOOL_USE_LINE * 5)
@@ -330,7 +366,7 @@ def test_a_session_captured_only_by_recovery_is_not_flagged(tmp_path):
     )
     (remember / "tmp" / "capture-alive").write_text("sess-some-older-one")
 
-    _run(SESSION_START, _env(home, project, remember))
+    _run(SESSION_START, _env(home, project, remember, defer=False))
 
     assert not (remember / "tmp" / "capture-gap-notice").exists(), (
         "flagged a session last-save.json records as captured 72/72 — the "
@@ -362,7 +398,7 @@ def test_a_real_capture_gap_still_warns(tmp_path):
     _run(SESSION_START, env)
 
     notice = remember / "tmp" / "capture-gap-notice"
-    assert notice.exists(), (
+    assert _wait_for_notice(notice), (
         "silent about a session that ran tools and never once fired "
         "PostToolUse — a detector that cannot say this is worse than none"
     )
@@ -404,7 +440,7 @@ def test_the_legacy_single_slot_marker_still_counts_as_evidence(tmp_path):
         "precondition: this is the pre-upgrade state, no per-session store"
     )
 
-    _run(SESSION_START, _env(home, project, remember))
+    _run(SESSION_START, _env(home, project, remember, defer=False))
 
     assert not (remember / "tmp" / "capture-gap-notice").exists(), (
         "the upgrade itself produced a warning — a fix whose first act is a "
