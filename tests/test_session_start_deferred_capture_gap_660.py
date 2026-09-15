@@ -68,15 +68,19 @@ def _gate_shim(workdir: Path, started: Path, release: Path) -> Path:
     """
     shim_dir = workdir / "gate-bin"
     shim_dir.mkdir(parents=True, exist_ok=True)
-    real = None
-    for entry in os.environ.get("PATH", "").split(os.pathsep):
-        if not entry:
-            continue
-        cand = Path(entry) / "grep"
-        if cand.is_file() and os.access(cand, os.X_OK):
-            real = cand
-            break
-    assert real is not None, "no real grep on PATH to gate"
+    # Asked of bash, not of os.environ: on windows-latest the real binary is
+    # `grep.exe` under Git's own usr/bin, which the Python process's PATH does
+    # not necessarily carry -- a plain scan for a file literally named "grep"
+    # found nothing and failed both tests on every Windows leg while passing
+    # on macOS and Linux. `command -v` in the SAME bash the hook runs under
+    # answers with the path that bash will actually resolve, msys form
+    # included, which is the only form the shim's own `exec` can use.
+    probe = subprocess.run(
+        [BASH, "-c", "command -v grep"],
+        capture_output=True, text=True, check=False,
+    )
+    real = probe.stdout.strip()
+    assert real, f"no grep resolvable by {BASH}: {probe.stderr.strip()}"
     script = shim_dir / "grep"
     # newline="" throughout: a CRLF shebang is not a shebang on Git Bash,
     # and the shim then silently never fires (the class
@@ -95,7 +99,7 @@ def _gate_shim(workdir: Path, started: Path, release: Path) -> Path:
         "        done\n"
         "        ;;\n"
         "esac\n"
-        f'exec "{real.as_posix()}" "$@"\n',
+        f'exec "{real}" "$@"\n',
     )
     script.chmod(0o755)
     return shim_dir
@@ -248,3 +252,30 @@ def test_deferred_records_still_land_on_the_default_path(tmp_path):
         "the slug record never appeared on the default (deferred) path -- "
         "the deferred phase is not running, or is dying before it writes"
     )
+
+
+def test_dispatch_capture_files_are_namespaced_per_event():
+    """Two dispatches running at once must not share a capture file (#660).
+
+    `$$` is the SHELL's pid and is unchanged inside a subshell, so deferring
+    the before_session_start dispatch put it on the same
+    `tmp/dispatch-stdout.$$` as the foreground after_session_start dispatch.
+    The background one's end-of-loop `rm -f` then deleted the file the
+    foreground one was writing, and a plugin's injected context disappeared
+    with no error on any channel -- the exact silent-absence class this repo
+    keeps filing on.
+
+    Pinned as a source shape rather than a race, because a race that
+    reproduces reliably enough to assert on is a race you have already lost:
+    the end-to-end proof is
+    test_marketplace_hooks_d_dispatches_from_plugin, which failed against the
+    unfixed version.
+    """
+    source = (Path(__file__).resolve().parent.parent
+              / "scripts" / "log.sh").read_text(encoding="utf-8")
+    for name in ("dispatch-stderr", "dispatch-stdout"):
+        line = next(ln for ln in source.splitlines()
+                    if f'/{name}.' in ln and "_file=" in ln)
+        assert "$event" in line, (
+            f"{name} capture file is not namespaced by event: {line.strip()}"
+        )

@@ -15,7 +15,7 @@ on:
     inputs:
       runs:
         description: runs per arm
-        default: "5"
+        default: "9"
   push:
     branches:
       - "diag/660-**"
@@ -68,7 +68,11 @@ jobs:
       - name: Benchmark
         shell: bash
         env:
-          DIAG660_RUNS: ${{ github.event.inputs.runs || '5' }}
+          # 9, not 5: windows-latest moved its own no-plugin baseline by 15%
+          # between two consecutive runs of this workflow, which is wider than
+          # the differences being measured. More samples per arm is the only
+          # lever this side of a dedicated machine.
+          DIAG660_RUNS: ${{ github.event.inputs.runs || '9' }}
           # Off the checkout: the fixture writes a 100MB transcript and a
           # 20MB store, and a dirty tree is not what this branch is for.
           DIAG660_ROOT: ${{ runner.temp }}/diag660

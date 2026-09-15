@@ -341,7 +341,51 @@ if [ -n "$HOOK_STDIN" ] && _session_start_listener; then
 fi
 
 # ── Dispatch: before_session_start ────────────────────────────────────────
-dispatch "before_session_start"
+# Deferred (#660) when, and only when, BOTH of these hold:
+#
+#   * git_restore.enabled is not true. The bundled 50-git-restore.sh exits at
+#     its line 199 in that case, so the dispatch costs a bash spawn, an
+#     ownership stat pair and the supervisor's own forks to reach a script
+#     that does nothing. With it ENABLED, deferring would be a correctness
+#     bug, not an optimisation: the restore repairs the store, and the render
+#     below would read the store it was supposed to repair. Wrong memory,
+#     silently, which is worse than a slow start.
+#   * nothing but the bundled script is registered. A third party dropping a
+#     script into hooks.d/before_session_start/ means "before the session
+#     starts", and its stdout may be context it expects to inject; a deferred
+#     dispatch sends that to /dev/null. Their contract is kept literally --
+#     any unknown script and this runs in the foreground exactly as before.
+#
+# Both checks are free: the config read is a cached lookup and the second is a
+# glob, so a foreground dispatch pays nothing for the question being asked.
+_remember_defer_dispatch=0
+if [ "${REMEMBER_DEFER:-1}" != "0" ]; then
+    _remember_git_restore_on=""
+    config_into _remember_git_restore_on '.git_restore.enabled' false
+    if [ "$_remember_git_restore_on" != "true" ]; then
+        _remember_bss_was_nullglob=0
+        shopt -q nullglob && _remember_bss_was_nullglob=1
+        shopt -s nullglob
+        _remember_bss_scripts=("$PLUGIN_ROOT/hooks.d/before_session_start/"*)
+        [ "$_remember_bss_was_nullglob" = 1 ] || shopt -u nullglob
+        if [ "${#_remember_bss_scripts[@]}" -eq 1 ]; then
+            case "${_remember_bss_scripts[0]}" in
+                (*/50-git-restore.sh) _remember_defer_dispatch=1 ;;
+            esac
+        fi
+        unset _remember_bss_scripts _remember_bss_was_nullglob
+    fi
+    unset _remember_git_restore_on
+fi
+if [ "$_remember_defer_dispatch" = 1 ]; then
+    {
+        _REMEMBER_PHASE=deferred
+        dispatch "before_session_start"
+    } </dev/null >/dev/null 2>&1 3>&- & disown 2>/dev/null || true
+else
+    dispatch "before_session_start"
+fi
+unset _remember_defer_dispatch
 
 # ── Cleanup + health check ─────────────────────────────────────────────────
 rm -f "$REMEMBER_DIR/tmp/save-session.pid"
