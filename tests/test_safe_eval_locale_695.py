@@ -57,74 +57,7 @@ LOG_SH = REPO_ROOT / "scripts" / "log.sh"
 _BRIDGE_INPUT = "EXTRACT_FILE=/tmp/x-695.txt\nPOSITION=270\nHUMAN_COUNT=36\n"
 
 
-_PROBE = '[[ "I" =~ ^[A-Z]+$ ]]'
-
-
-def _reproduces(name: str, env_extra: dict) -> bool:
-    """Does THIS machine's bash refuse to match "I" against [A-Z] under this
-    locale? The only question that matters -- a locale is accepted by
-    observed behaviour, never by its name."""
-    try:
-        probe = subprocess.run(
-            ["bash", "-c", _PROBE],
-            env={**os.environ, **env_extra, "LC_ALL": name, "LANG": name},
-            capture_output=True, timeout=10, check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return probe.returncode != 0
-
-
-@functools.lru_cache(maxsize=1)
-def _collation_locale() -> "tuple[str, dict] | None":
-    """A locale under which this machine reproduces #695, as
-    ``(name, env_overlay)`` -- or None.
-
-    Two sources, in order. An already-installed locale first (tr_TR/az_AZ
-    preferred, since they are the documented cases, then anything else --
-    the property under test is the collation, not the language). Failing
-    that, one compiled on the spot with ``localedef`` into a scratch
-    directory and reached through ``LOCPATH``, which needs no root: GitHub's
-    Linux runners ship C.UTF-8 and en_US.UTF-8 and nothing else, so without
-    this step the legs below would skip on the exact platform where the bug
-    lives and the whole module would assert nothing anywhere.
-
-    Either way the locale is handed back only after ``_reproduces`` watched
-    bash fail under it."""
-    try:
-        out = subprocess.run(["locale", "-a"], capture_output=True, text=True,
-                             timeout=10, check=False).stdout
-    except (OSError, subprocess.SubprocessError):
-        out = ""
-    names = [line.strip() for line in out.splitlines() if line.strip()]
-    preferred = [n for n in names if n.lower().startswith(("tr_tr", "az_az"))]
-    for name in preferred + [n for n in names if n not in preferred]:
-        if _reproduces(name, {}):
-            return (name, {})
-
-    locpath = Path(tempfile.mkdtemp(prefix="remember-695-locale-"))
-    for source, name in (("tr_TR", "tr_TR.UTF-8"), ("az_AZ", "az_AZ.UTF-8")):
-        target = locpath / name
-        try:
-            built = subprocess.run(
-                ["localedef", "-i", source, "-f", "UTF-8", str(target)],
-                capture_output=True, timeout=60, check=False)
-        except (OSError, subprocess.SubprocessError):
-            break
-        if built.returncode != 0 or not target.exists():
-            continue
-        overlay = {"LOCPATH": str(locpath)}
-        if _reproduces(name, overlay):
-            return (name, overlay)
-    return None
-
-
-_SKIP_REASON = (
-    "no locale on this runner makes bash refuse 'I' against [A-Z], and none "
-    "could be compiled with localedef -- #695 is a glibc collation "
-    "behaviour and macOS's libc does not reproduce it under tr_TR or "
-    "anything else, so this leg would assert nothing about the bug"
-)
+from ._locale_probe import SKIP_REASON as _SKIP_REASON, collation_locale as _collation_locale
 
 
 def _run_safe_eval(tmp_path: Path, payload: str,
