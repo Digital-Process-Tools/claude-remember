@@ -62,11 +62,19 @@ jobs:
       # fixture. Excluding the checkout and the runner temp directory removes that tax
       # without touching what any test asserts; the exclusion lives only in the ephemeral
       # runner VM. Ported from claude-jit-context#310, where it was measured, not guessed.
-      - name: Exclude the checkout and temp dir from Windows Defender scanning
+      # DIAGNOSTIC BRANCH ONLY (#660) -- reverted with this branch.
+      # The exclusion step is deliberately NOT run here. Round 1 measured the
+      # hook at 2.25s cold on this runner and the reporter measures 38.5s on
+      # theirs, so this round removes the one environmental difference we
+      # control: with no exclusion, Defender's real-time scanner walks the
+      # checkout and every fixture file, which is what a real user's box does
+      # and what CI has been exempting since claude-jit-context#310.
+      - name: Report Windows Defender state (exclusions deliberately NOT added)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Add-MpPreference -ExclusionPath "${{ github.workspace }}"
-          Add-MpPreference -ExclusionPath "$env:RUNNER_TEMP"
+          $p = Get-MpPreference
+          "RealTimeProtectionEnabled: $((Get-MpComputerStatus).RealTimeProtectionEnabled)"
+          "ExclusionPath: $($p.ExclusionPath -join ', ')"
       - name: Run tests
         run: pytest

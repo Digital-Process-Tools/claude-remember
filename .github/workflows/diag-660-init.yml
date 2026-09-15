@@ -1,0 +1,131 @@
+# THROWAWAY diagnostic workflow for #660 -- delete with the branch.
+#
+# Every other #660 instrument runs scripts/session-start-hook.sh directly and
+# is therefore blind to the part the reporter last measured: a full Claude
+# Code start, 18.3s with the plugin against 6.8s without, of which the hook's
+# own durationMs accounts for ~2.2s. This one launches the real CLI with the
+# real plugin installed from a local marketplace, against a local stub
+# endpoint -- no API key, no spend, no network in the number.
+#
+# It does not gate anything. It prints a table.
+name: diag-660-init
+
+on:
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: runs per arm
+        default: "9"
+  push:
+    branches:
+      - "diag/660-**"
+
+permissions:
+  contents: read
+
+jobs:
+  init-bench:
+    name: init bench (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pytest
+        shell: bash
+        run: python -m pip install --quiet pytest
+
+      - name: Install Claude Code
+        shell: bash
+        run: |
+          npm install -g @anthropic-ai/claude-code
+          claude --version
+
+      # Reported for the record, not used: windows-latest answers
+      # RealTimeProtectionEnabled False with both drives already excluded, so
+      # no run on this image measures an antivirus tax. Printing it stops the
+      # next person reasoning from an exclusion step that does nothing.
+      - name: Defender state (Windows, informational)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Get-MpComputerStatus | Select-Object RealTimeProtectionEnabled
+          (Get-MpPreference).ExclusionPath
+          $env:PROCESSOR_ARCHITECTURE
+
+      # Does the fork-free read actually win on THIS platform? The render
+      # traded five `cat` forks for `IFS= read -r -d ''`, and a fork is
+      # expensive on Git Bash while bash's own byte handling might be worse
+      # on a large file. The Windows bench got slower on exactly the
+      # big-store arms after that change, which is either this or runner
+      # noise -- and nothing we have can tell those apart by staring at
+      # medians. So measure both, on the runner, at three sizes.
+      - name: cat vs read probe
+        shell: bash
+        run: |
+          probe() {
+            local size=$1 f="${RUNNER_TEMP:-/tmp}/probe-$1.md"
+            # python, not `yes | head -c`: the step runs under `bash -e -o
+            # pipefail`, `head` closes the pipe as soon as it has its bytes,
+            # and the SIGPIPE that kills `yes` fails the whole step
+            # (exit 141, windows-latest). Two attempts were spent on this
+            # fixture before it measured anything -- the first died on
+            # "yes: unknown option -- " because the line starts with a dash.
+            python -c "import sys; p=sys.argv[1]; n=int(sys.argv[2]); line='- a remembered line about as long as a real one in a store'+chr(10); open(p,'w').write((line*(n//len(line)+1))[:n])" "$f" "$size"
+            local t0 t1
+            t0=$EPOCHREALTIME
+            for _ in 1 2 3 4 5; do cat "$f" >/dev/null; done
+            t1=$EPOCHREALTIME
+            printf 'size=%-9s cat  x5: %.3fs\n' "$size" \
+              "$(awk -v a="$t0" -v b="$t1" 'BEGIN{print b-a}')"
+            t0=$EPOCHREALTIME
+            for _ in 1 2 3 4 5; do
+              IFS= read -r -d '' _body < "$f" || :
+              printf '%s' "$_body" >/dev/null
+            done
+            t1=$EPOCHREALTIME
+            printf 'size=%-9s read x5: %.3fs\n' "$size" \
+              "$(awk -v a="$t0" -v b="$t1" 'BEGIN{print b-a}')"
+          }
+          probe 4096
+          probe 262144
+          probe 4194304
+
+      - name: Benchmark
+        shell: bash
+        env:
+          # 9, not 5: windows-latest moved its own no-plugin baseline by 15%
+          # between two consecutive runs of this workflow, which is wider than
+          # the differences being measured. More samples per arm is the only
+          # lever this side of a dedicated machine.
+          DIAG660_RUNS: ${{ github.event.inputs.runs || '9' }}
+          # Off the checkout: the fixture writes a 100MB transcript and a
+          # 20MB store, and a dirty tree is not what this branch is for.
+          DIAG660_ROOT: ${{ runner.temp }}/diag660
+        run: |
+          python tests/diag660_init_bench.py | tee bench.txt
+          exit ${PIPESTATUS[0]}
+
+      - name: Table to job summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## #660 init bench -- ${{ matrix.os }}"
+            echo
+            echo '```'
+            cat bench.txt || echo "(no output)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

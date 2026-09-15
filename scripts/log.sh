@@ -1472,8 +1472,24 @@ dispatch() {
         # The capture file, prepared once and only once a hook is about to run.
         # Overwritten per hook (`2>` truncates), removed when the loop ends.
         if [ -z "$_err_file" ] && [ -z "$_err_unavailable" ]; then
-            _err_file="$REMEMBER_DIR/tmp/dispatch-stderr.$$"
-            _out_file="$REMEMBER_DIR/tmp/dispatch-stdout.$$"
+            # $event in the name, not just $$ (#660). `$$` is the SHELL's pid
+            # and does NOT change inside a subshell, so once session-start
+            # began deferring its before_session_start dispatch into a
+            # background child, that child and the foreground
+            # after_session_start dispatch named the same two files: the
+            # background one's end-of-loop `rm -f` deleted the capture the
+            # foreground one was still writing, and the after_session_start
+            # hook's output -- context a plugin injects -- vanished with no
+            # error anywhere. Caught by
+            # test_marketplace_hooks_d_dispatches_from_plugin, which asserts
+            # that output reaches stdout.
+            #
+            # $BASHPID would be the more general fix and is deliberately not
+            # used: it is bash 4.0+, and macOS still ships bash 3.2 as
+            # /bin/bash. The event name is enough -- two dispatches of the
+            # SAME event never run concurrently in one process.
+            _err_file="$REMEMBER_DIR/tmp/dispatch-stderr.$event.$$"
+            _out_file="$REMEMBER_DIR/tmp/dispatch-stdout.$event.$$"
             # `|| true`, and it is load-bearing: `A || B` where BOTH fail is a
             # failed compound command, and every caller of dispatch runs under
             # `set -e`. Without it, a store whose tmp/ cannot be created aborts

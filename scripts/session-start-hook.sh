@@ -341,7 +341,51 @@ if [ -n "$HOOK_STDIN" ] && _session_start_listener; then
 fi
 
 # ── Dispatch: before_session_start ────────────────────────────────────────
-dispatch "before_session_start"
+# Deferred (#660) when, and only when, BOTH of these hold:
+#
+#   * git_restore.enabled is not true. The bundled 50-git-restore.sh exits at
+#     its line 199 in that case, so the dispatch costs a bash spawn, an
+#     ownership stat pair and the supervisor's own forks to reach a script
+#     that does nothing. With it ENABLED, deferring would be a correctness
+#     bug, not an optimisation: the restore repairs the store, and the render
+#     below would read the store it was supposed to repair. Wrong memory,
+#     silently, which is worse than a slow start.
+#   * nothing but the bundled script is registered. A third party dropping a
+#     script into hooks.d/before_session_start/ means "before the session
+#     starts", and its stdout may be context it expects to inject; a deferred
+#     dispatch sends that to /dev/null. Their contract is kept literally --
+#     any unknown script and this runs in the foreground exactly as before.
+#
+# Both checks are free: the config read is a cached lookup and the second is a
+# glob, so a foreground dispatch pays nothing for the question being asked.
+_remember_defer_dispatch=0
+if [ "${REMEMBER_DEFER:-1}" != "0" ]; then
+    _remember_git_restore_on=""
+    config_into _remember_git_restore_on '.git_restore.enabled' false
+    if [ "$_remember_git_restore_on" != "true" ]; then
+        _remember_bss_was_nullglob=0
+        shopt -q nullglob && _remember_bss_was_nullglob=1
+        shopt -s nullglob
+        _remember_bss_scripts=("$PLUGIN_ROOT/hooks.d/before_session_start/"*)
+        [ "$_remember_bss_was_nullglob" = 1 ] || shopt -u nullglob
+        if [ "${#_remember_bss_scripts[@]}" -eq 1 ]; then
+            case "${_remember_bss_scripts[0]}" in
+                (*/50-git-restore.sh) _remember_defer_dispatch=1 ;;
+            esac
+        fi
+        unset _remember_bss_scripts _remember_bss_was_nullglob
+    fi
+    unset _remember_git_restore_on
+fi
+if [ "$_remember_defer_dispatch" = 1 ]; then
+    {
+        _REMEMBER_PHASE=deferred
+        dispatch "before_session_start"
+    } </dev/null >/dev/null 2>&1 3>&- & disown 2>/dev/null || true
+else
+    dispatch "before_session_start"
+fi
+unset _remember_defer_dispatch
 
 # ── Cleanup + health check ─────────────────────────────────────────────────
 rm -f "$REMEMBER_DIR/tmp/save-session.pid"
@@ -538,7 +582,9 @@ _remember_write_slug_record() {
     mv -f "$_tmp" "$_dir/session-slug" 2>/dev/null || rm -f "$_tmp" 2>/dev/null
     return 0
 }
-_remember_write_slug_record
+# Called in the deferred block below (#660), not here: this writes a record
+# nothing in this hook reads back, and the foreground path's only obligation
+# is the injected context.
 
 # ── And somewhere a caller can NAME, in the layout we ship (#297) ─────────
 # The record above answers "what is the slug", and in the layout
@@ -655,7 +701,9 @@ _remember_write_slug_index() {
     lock_release "$_lock" 2>/dev/null
     return 0
 }
-_remember_write_slug_index
+# Called in the deferred block below (#660), not here: this writes a record
+# nothing in this hook reads back, and the foreground path's only obligation
+# is the injected context.
 
 # ── Is this store known by a second spelling? (#298) ──────────────────────
 # Git's index is case-sensitive where NTFS is not, so a store can be spelled
@@ -761,7 +809,9 @@ _remember_write_case_divergence() {
     esac
     return 0
 }
-_remember_write_case_divergence
+# Called in the deferred block below (#660), not here: this writes a record
+# nothing in this hook reads back, and the foreground path's only obligation
+# is the injected context.
 
 # Args: $1 — sessions dir. Prints the newest transcript that is not this
 # session's, or nothing.
@@ -774,6 +824,56 @@ previous_transcript() {
         break
     done
 }
+
+# ── Deferred: previous-session recovery and capture-gap detection (#660) ──
+# Everything from here to the end of the capture-gap block runs in a detached
+# subshell, because nothing in it feeds this hook's stdout and nothing after
+# it reads what it sets. Its outputs are: a backgrounded save-session.sh
+# (already detached before this change), files under tmp/ whose only reader is
+# user-prompt-hook.sh on the NEXT prompt, and log lines. The foreground path's
+# one obligation is the injected context, and this is not part of it.
+#
+# Why it is worth moving: `previous_transcript` sorts every past transcript
+# (0.41s at 2000 of them) and the capture-gap check greps the previous
+# transcript to EOF whenever "tool_use" is absent (0.197s on a 100MB one,
+# windows-latest) -- both inside a start whose whole budget is a couple of
+# seconds on Git Bash.
+#
+# A brace group, not an extracted script: a subshell inherits the functions
+# and variables already defined above (previous_transcript, session_was_saved,
+# config_into, log, REMEMBER_DIR, SESSIONS_DIR...), so nothing has to be
+# duplicated and there is no second copy to drift. Verified before the move:
+# no variable assigned inside this span is referenced after it.
+#
+# The redirections are load-bearing, not tidiness -- the same #646 fd
+# inheritance that cost that reporter 98s. At this point in the script stdout
+# is still the REAL pipe Claude Code reads (the buffer redirect happens later,
+# at `exec 3>&1`), so a child that inherits it holds the write end open and
+# the client does not see EOF until this subshell finishes -- which would make
+# a start that no longer WAITS for this work still BLOCK on it, and look like
+# the change did nothing. `3>&-` guards the same way against the fd 3 dup that
+# the consolidation spawn below documents in full.
+#
+# Behaviour change, stated: the capture-gap notice is written slightly later
+# than before. A start whose first user prompt arrives before the grep
+# finishes now sees the notice on the prompt after it. The notice is about a
+# PREVIOUS session and is not time-critical; nothing else observes the file.
+_remember_deferred_phase() {
+# `local`, so an inline run (REMEMBER_DEFER=0, below) does not leave the label
+# set for the rest of the hook. Marks everything below as off the foreground
+# path, for the profiler and for the reader: a trace cannot tell a deferred
+# child from a command substitution by pid alone -- $(...) gets its own pid
+# too and the parent WAITS for it -- so "how much is still synchronous" is
+# unanswerable without a phase label.
+local _REMEMBER_PHASE=deferred
+
+# Records, moved here from their original call sites above (#660). All three
+# are pure side effects -- verified mechanically that none of them assigns
+# anything read later in this hook -- and their outputs are read by
+# user-prompt-hook.sh and /remember:doctor, never by the start itself.
+_remember_write_slug_record
+_remember_write_slug_index
+_remember_write_case_divergence
 
 if [ -n "$CURRENT_SESSION_ID" ]; then
     PREV_JSONL=$(previous_transcript "$SESSIONS_DIR")
@@ -1002,6 +1102,24 @@ else
         printf '%s' "$PREV_ID" > "$CAPTURE_REPORTED" 2>/dev/null || true
     fi
 fi
+}
+
+# REMEMBER_DEFER=0 runs the whole block inline, on the foreground path, exactly
+# as it ran before #660. It exists because determinism is worth more than
+# milliseconds to a test that asserts one of these side effects: nine
+# case-divergence tests and the slug-index concurrency test read a record file
+# the instant the hook exits, and a deferred write had not landed yet. Without
+# the switch the honest options were to weaken those assertions into polls or
+# to leave the work on the hot path; this keeps both the assertion and the
+# speed. Default is 1 -- deferred -- and
+# tests/test_session_start_deferred_capture_gap_660.py covers the DEFAULT
+# path, so the switch cannot become the only thing that is ever tested.
+if [ "${REMEMBER_DEFER:-1}" = "0" ]; then
+    _remember_deferred_phase
+else
+    _remember_deferred_phase </dev/null >/dev/null 2>&1 3>&- & disown 2>/dev/null || true
+fi
+# ── end deferred block (#660) ─────────────────────────────────────────────
 
 # ── Identity: per-project → user-global → plugin-bundled ──────────────────
 # User-global tier: <REMEMBER_ROOT>/identity.md (external mode only).
@@ -1407,7 +1525,10 @@ fi
 # for a `)` to collide with.
 _REMEMBER_CTX_FILE="$REMEMBER_DIR/tmp/session-start-ctx.$$"
 _REMEMBER_CTX_OK=""
-mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null
+# `[ -d ] ||` first (#660): `mkdir -p` on a directory that already exists is
+# a fork that does nothing, and tmp/ exists on every start after the first.
+# The test is a bash builtin, so the first start pays nothing for it either.
+[ -d "$REMEMBER_DIR/tmp" ] || mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null
 # Verify the target is writable BEFORE handing it to `exec`: a redirection
 # failure on the `exec` builtin itself (a special builtin) can terminate a
 # non-interactive shell outright, and this hook is documented EXIT CODES: 0
@@ -1500,7 +1621,10 @@ if [ -z "$PER_SESSION_HANDOFF" ]; then
         if [ -f "$REMEMBER_HANDOFF_STATE" ]; then
             rm -f "$_REMEMBER_HANDOFF_STATE_LEGACY" 2>/dev/null
         else
-            mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null
+            # `[ -d ] ||` first (#660): `mkdir -p` on a directory that already exists is
+            # a fork that does nothing, and tmp/ exists on every start after the first.
+            # The test is a bash builtin, so the first start pays nothing for it either.
+            [ -d "$REMEMBER_DIR/tmp" ] || mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null
             mv "$_REMEMBER_HANDOFF_STATE_LEGACY" "$REMEMBER_HANDOFF_STATE" 2>/dev/null \
                 || rm -f "$_REMEMBER_HANDOFF_STATE_LEGACY" 2>/dev/null
         fi
@@ -1738,7 +1862,7 @@ if ! _remember_start_cache_context_load; then
     _REMEMBER_START_CTX_TMP=""
     if [ -n "${REMEMBER_DIR:-}" ] && [ "${REMEMBER_START_CACHE:-1}" = "1" ] \
        && [ "$SESSION_START_SOURCE" != "compact" ] \
-       && mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null; then
+       && { [ -d "$REMEMBER_DIR/tmp" ] || mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null; }; then
         _REMEMBER_START_CTX_TMP=$(mktemp "$REMEMBER_DIR/tmp/start-context.cache.XXXXXX" 2>/dev/null) || _REMEMBER_START_CTX_TMP=""
     fi
     if [ -n "$_REMEMBER_START_CTX_TMP" ]; then
@@ -1746,7 +1870,17 @@ if ! _remember_start_cache_context_load; then
         # read/size/concatenate cost once, and re-running it a second time
         # just to fill the cache would double that cost on every single miss.
         _remember_render_memory_section | tee "$_REMEMBER_START_CTX_TMP"
-        _remember_start_cache_context_finish_publish "$_REMEMBER_START_CTX_TMP"
+        # Deferred (#660): publishing the cache is four forks (mkdir, mktemp,
+        # two mv) spent entirely on making the NEXT start fast. This start has
+        # already rendered and already emitted; nothing below reads the
+        # published cache back. `3>&-` for the same reason the consolidation
+        # spawn documents in full -- fd 3 is a dup of the real stdout pipe
+        # here, and a child holding it open would keep the client waiting for
+        # EOF, turning "deferred" into "still blocking, just less visibly".
+        {
+            _REMEMBER_PHASE=deferred
+            _remember_start_cache_context_finish_publish "$_REMEMBER_START_CTX_TMP"
+        } </dev/null >/dev/null 2>&1 3>&- & disown 2>/dev/null || true
     else
         _remember_render_memory_section
     fi
