@@ -145,11 +145,29 @@ _remember_wc_size_get_into() {
     printf -v "$_remember_wc_size_outvar" '%s' "${!_remember_wc_size_key:-0}"
 }
 
-# Args: $1 -- a file. Writes its bytes to stdout, unchanged, without forking.
+# Args: $1 -- a file. $2 -- its size in bytes. Writes its bytes to stdout,
+# unchanged, using whichever of the two ways is actually cheaper AT THAT SIZE.
 #
-# Replaces `cat "$MFILE"` (#660). The render calls this once per memory file,
-# so a typical store paid five forks here; on Git Bash a fork costs 10-50x
-# what it costs on Linux, which is why five of them is worth a function.
+# Replaces an unconditional `cat "$MFILE"` (#660). A fork is expensive on Git
+# Bash, so a small file is cheaper read by the shell -- but bash's `read`
+# processes the delimiter byte by byte, and that is catastrophic at size.
+# Measured on windows-latest, five iterations each (the workflow's own
+# "cat vs read probe" step, which exists to keep this honest):
+#
+#     size     cat      read
+#     4KB      0.197s   0.025s     <- read wins by 8x
+#     256KB    0.092s   1.505s     <- read loses by 16x
+#     4MB      0.099s   24.129s    <- read loses by 240x
+#
+# ubuntu-latest has the same shape (4MB: 0.008s vs 0.879s), so this is not a
+# Windows quirk. The first version of this function used `read`
+# unconditionally and made the big-store arms of the benchmark measurably
+# SLOWER -- a fork-count optimisation that cost seconds, which is exactly what
+# counting forks alone cannot see.
+#
+# The threshold is deliberately well below the ~34KB crossover implied by
+# those numbers: being wrong towards `cat` costs one fork, being wrong towards
+# `read` costs seconds.
 #
 # `read -d ''` reads to the first NUL -- i.e. the whole file, for text -- into
 # a variable, using no subprocess at all, and `printf %s` writes it back
@@ -168,6 +186,18 @@ _remember_wc_size_get_into() {
 # a NUL in one is already a corrupted store, and injecting the bytes after it
 # was never the more useful behaviour.
 _remember_emit_file() {
+    local _remember_emit_max="${REMEMBER_EMIT_READ_MAX:-16384}"
+    case "${2:-}" in
+        (''|*[!0-9]*)
+            # No usable size: `cat` is the one that cannot go quadratic.
+            cat "$1"
+            return 0
+            ;;
+    esac
+    if [ "$2" -gt "$_remember_emit_max" ]; then
+        cat "$1"
+        return 0
+    fi
     local _remember_file_body=""
     IFS= read -r -d '' _remember_file_body < "$1" || :
     printf '%s' "$_remember_file_body"
@@ -256,7 +286,7 @@ _remember_render_memory_section() {
             fi
             BASENAME="${MFILE##*/}"
             echo "--- $BASENAME ---"
-            _remember_emit_file "$MFILE"
+            _remember_emit_file "$MFILE" "$MFILE_BYTES"
             echo ""
     done
     if [ -n "$OVERSIZED_MEMORY" ]; then
