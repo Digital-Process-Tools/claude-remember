@@ -775,6 +775,40 @@ previous_transcript() {
     done
 }
 
+# ── Deferred: previous-session recovery and capture-gap detection (#660) ──
+# Everything from here to the end of the capture-gap block runs in a detached
+# subshell, because nothing in it feeds this hook's stdout and nothing after
+# it reads what it sets. Its outputs are: a backgrounded save-session.sh
+# (already detached before this change), files under tmp/ whose only reader is
+# user-prompt-hook.sh on the NEXT prompt, and log lines. The foreground path's
+# one obligation is the injected context, and this is not part of it.
+#
+# Why it is worth moving: `previous_transcript` sorts every past transcript
+# (0.41s at 2000 of them) and the capture-gap check greps the previous
+# transcript to EOF whenever "tool_use" is absent (0.197s on a 100MB one,
+# windows-latest) -- both inside a start whose whole budget is a couple of
+# seconds on Git Bash.
+#
+# A brace group, not an extracted script: a subshell inherits the functions
+# and variables already defined above (previous_transcript, session_was_saved,
+# config_into, log, REMEMBER_DIR, SESSIONS_DIR...), so nothing has to be
+# duplicated and there is no second copy to drift. Verified before the move:
+# no variable assigned inside this span is referenced after it.
+#
+# The redirections are load-bearing, not tidiness -- the same #646 fd
+# inheritance that cost that reporter 98s. At this point in the script stdout
+# is still the REAL pipe Claude Code reads (the buffer redirect happens later,
+# at `exec 3>&1`), so a child that inherits it holds the write end open and
+# the client does not see EOF until this subshell finishes -- which would make
+# a start that no longer WAITS for this work still BLOCK on it, and look like
+# the change did nothing. `3>&-` guards the same way against the fd 3 dup that
+# the consolidation spawn below documents in full.
+#
+# Behaviour change, stated: the capture-gap notice is written slightly later
+# than before. A start whose first user prompt arrives before the grep
+# finishes now sees the notice on the prompt after it. The notice is about a
+# PREVIOUS session and is not time-critical; nothing else observes the file.
+{
 if [ -n "$CURRENT_SESSION_ID" ]; then
     PREV_JSONL=$(previous_transcript "$SESSIONS_DIR")
 else
@@ -1002,6 +1036,8 @@ else
         printf '%s' "$PREV_ID" > "$CAPTURE_REPORTED" 2>/dev/null || true
     fi
 fi
+} </dev/null >/dev/null 2>&1 3>&- & disown 2>/dev/null || true
+# ── end deferred block (#660) ─────────────────────────────────────────────
 
 # ── Identity: per-project → user-global → plugin-bundled ──────────────────
 # User-global tier: <REMEMBER_ROOT>/identity.md (external mode only).
