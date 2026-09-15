@@ -438,6 +438,25 @@ dispatch "before_save"
 # --- Step 1: Extract ---
 log "extract" "session $SESSION_ID"
 safe_eval <<< "$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell extract "$SESSION_ID" "$PROJECT_DIR")"
+# #695: the bridge is load-bearing, so its failure must be said here rather
+# than discovered three layers down. `pipeline.shell extract` ALWAYS prints
+# EXTRACT_FILE; an empty one means the line did not survive the crossing --
+# the locale bug fixed in log.sh's safe_eval dropped exactly this variable
+# (its name carries an "I", which tr_TR collation puts outside [A-Z]), and
+# any future reason for the same absence is no less serious.
+#
+# Failing closed is not caution, it is the difference between one accurate
+# line and 5,071 useless ones. The counts have no "I" in their names, so
+# they arrived intact, passed the "0 exchanges" gate below, and carried the
+# run all the way to build-prompt with an empty path -- where Python raised
+# `FileNotFoundError: [Errno 2] No such file or directory: ''`, a trace
+# naming neither the bridge nor the locale, once per save, forever. Note the
+# cooldown marker is already written by the time we get here: continuing
+# past this point does not "try again later", it burns the span.
+if [ -z "${EXTRACT_FILE:-}" ]; then
+    report_error "extract" "FAILED: the extract step produced no EXTRACT_FILE. Every variable it prints crosses into this script through safe_eval, so an absent one means the bridge lost it, not that there was nothing to extract. Stopping here rather than calling build-prompt with an empty path (#695)."
+    exit 1
+fi
 CLEANUP_FILES+=("$EXTRACT_FILE")
 # #625: unguarded, this write crashes the WHOLE script under `set -e` when
 # the marker cannot be written -- the same durable state (a directory in its

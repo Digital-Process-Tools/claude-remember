@@ -965,6 +965,24 @@ log_tokens() {
 # Usage:
 #   safe_eval <<< "$(python3 -m pipeline.shell extract ...)"
 safe_eval() {
+    # `local LC_ALL=C` for the duration of this function only (restored on
+    # return, never leaks to the caller -- and the caller's locale is what
+    # every log timestamp and every later `[[ =~ ]]` in save-session.sh
+    # reads). `[A-Z]` below is a POSIX bracket RANGE, and a range is matched
+    # by the locale's COLLATION order, not by byte value. Turkish collation
+    # (tr_TR; az_AZ the same way) orders dotted and dotless i around the
+    # Latin letters such that `I` does not fall inside `A`..`Z` -- so on a
+    # Turkish-locale host every bridge variable whose name carries an `I`
+    # was silently skipped here: EXTRACT_FILE, POSITION, SKIP_LINES. The
+    # counts (EXCHANGE_COUNT, HUMAN_COUNT -- no `I`) still arrived and still
+    # passed the "0 exchanges" gate, so the run went all the way to
+    # build-prompt with an empty path and died on `FileNotFoundError: ''`.
+    # One reporter's hook-errors.log held 5,071 of them: no save had ever
+    # completed on that host, whose only unusual property is its language
+    # (#695). This is the same trap `config()` and
+    # _remember_cfg_flatten_cache_valid_value already guard against, the
+    # same way, in this file.
+    local LC_ALL=C
     while IFS= read -r line; do
         # Strip trailing CR — Python on Windows emits \r\n, which corrupts
         # numeric values and trips integer tests downstream (issue #84).
