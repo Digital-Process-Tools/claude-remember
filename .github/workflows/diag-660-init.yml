@@ -77,7 +77,10 @@ jobs:
         run: |
           probe() {
             local size=$1 f="${RUNNER_TEMP:-/tmp}/probe-$1.md"
-            yes '- a remembered line about as long as a real one in a store' \
+            # `--` first: the line starts with a dash, and without it `yes`
+            # reads its own argument as an option
+            # ("yes: unknown option -- ", windows-latest, first attempt).
+            yes -- '- a remembered line about as long as a real one in a store' \
               | head -c "$size" > "$f"
             local t0 t1
             t0=$EPOCHREALTIME
