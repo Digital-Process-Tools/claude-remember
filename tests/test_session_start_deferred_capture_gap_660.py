@@ -213,3 +213,38 @@ def test_capture_gap_notice_still_written_after_release(tmp_path):
             "capture-gap notice was never written after the gate opened -- "
             "the check was deferred into nothing"
         )
+
+
+def test_deferred_records_still_land_on_the_default_path(tmp_path):
+    """The records are deferred, not dropped -- with nothing switched off.
+
+    The slug record, the slug index and the case-divergence notice moved into
+    the deferred phase. Every existing test that asserts one of them now runs
+    that phase inline (REMEMBER_DEFER=0) for determinism, which leaves a gap:
+    nothing would notice if the DEFAULT path stopped writing them at all. A
+    plugin whose records silently never appear looks exactly like a fast one.
+    """
+    home, project, remember = _store(tmp_path)
+    env = _env(home, project, remember, os.environ["PATH"])
+    assert "REMEMBER_DEFER" not in env, "this test is about the default path"
+
+    done = subprocess.run(
+        [BASH, SESSION_START.as_posix()],
+        input=_payload().encode(),
+        capture_output=True,
+        env=env,
+        timeout=HOOK_TIMEOUT,
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr.decode("utf-8", "replace")
+
+    record = remember / "tmp" / "session-slug"
+    deadline = time.time() + NOTICE_TIMEOUT
+    while time.time() < deadline:
+        if record.is_file() and record.read_text(encoding="utf-8").strip():
+            return
+        time.sleep(0.1)
+    pytest.fail(
+        "the slug record never appeared on the default (deferred) path -- "
+        "the deferred phase is not running, or is dying before it writes"
+    )

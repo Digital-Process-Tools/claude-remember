@@ -144,6 +144,13 @@ def _run(home: Path, project: Path, session_id: str = SESSION_ID):
         "HOME": str(home),
         "CLAUDE_PROJECT_DIR": str(project),
         "CLAUDE_PLUGIN_ROOT": str(REPO_ROOT),
+        # The index row is written in the hook's deferred phase since #660.
+        # This file's concurrency test is about rows not being LOST when
+        # several sessions write at once -- a property of the read-modify-write,
+        # not of when it runs -- and reading the index the instant the hooks
+        # exit would otherwise time out a real guarantee on a scheduling
+        # detail. Inline keeps the race under test and drops the flake.
+        "REMEMBER_DEFER": "0",
     })
     return subprocess.run(
         ["bash", str(SESSION_START)],
@@ -310,6 +317,12 @@ def test_concurrent_session_starts_do_not_lose_a_row(tmp_path):
             "HOME": str(home),
             "CLAUDE_PROJECT_DIR": str(project),
             "CLAUDE_PLUGIN_ROOT": str(REPO_ROOT),
+            # This test builds its own env rather than calling _run, so it
+            # needs the same REMEMBER_DEFER=0 for the same reason -- see the
+            # comment there. Waiting on the hook processes does not wait for
+            # their deferred children, and the six writers racing is exactly
+            # what is under test here.
+            "REMEMBER_DEFER": "0",
         })
         procs.append(subprocess.Popen(
             ["bash", str(SESSION_START)],

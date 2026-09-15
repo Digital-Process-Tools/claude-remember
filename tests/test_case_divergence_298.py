@@ -327,6 +327,15 @@ def _env(home: Path, project: Path) -> dict:
         "HOME": str(home),
         "CLAUDE_PROJECT_DIR": str(project),
         "CLAUDE_PLUGIN_ROOT": str(REPO_ROOT),
+        # The case-divergence notice is written in the hook's deferred phase
+        # since #660, so by default it lands shortly AFTER the hook exits and
+        # every assertion in this file reads it too early. Run that phase
+        # inline instead of turning nine assertions into polls: what these
+        # tests are about is which notice gets written and how often, not when.
+        # That the deferral itself happens, and still lands, is covered by
+        # tests/test_session_start_deferred_capture_gap_660.py against the
+        # DEFAULT (deferred) path.
+        "REMEMBER_DEFER": "0",
     })
     return env
 
