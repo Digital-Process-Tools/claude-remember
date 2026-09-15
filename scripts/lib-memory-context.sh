@@ -73,7 +73,28 @@ _REMEMBER_LIB_MEMORY_CONTEXT_LOADED=1
 _remember_memory_paths() {
     [ -n "${TODAY:-}" ] || TODAY=$(_remember_date '+%Y-%m-%d')
 
-    REMEMBER_ROOT=$(dirname "$REMEMBER_DIR")
+    # Parameter expansion, not a `dirname` fork (#660) -- the pattern #230
+    # established for this repo and session-start-hook.sh:60 already uses.
+    # `dirname` is reproduced exactly, edge cases included, and
+    # tests/test_dirname_without_a_fork_660.py compares the two against a
+    # table of paths rather than trusting this comment:
+    #   trailing slashes are stripped first ("/a/b/" -> "/a")
+    #   no slash at all answers "." ("x" -> ".")
+    #   the root's parent is the root ("/a" -> "/", "/" -> "/")
+    _remember_root_scratch="$REMEMBER_DIR"
+    while [ "${_remember_root_scratch%/}" != "$_remember_root_scratch" ] \
+        && [ "$_remember_root_scratch" != "/" ]; do
+        _remember_root_scratch="${_remember_root_scratch%/}"
+    done
+    case "$_remember_root_scratch" in
+        (/) REMEMBER_ROOT="/" ;;
+        (*/*)
+            REMEMBER_ROOT="${_remember_root_scratch%/*}"
+            [ -n "$REMEMBER_ROOT" ] || REMEMBER_ROOT="/"
+            ;;
+        (*) REMEMBER_ROOT="." ;;
+    esac
+    unset _remember_root_scratch
     if [ -f "$REMEMBER_DIR/identity.md" ]; then
         IDENTITY_FILE="$REMEMBER_DIR/identity.md"
     elif [ -f "$REMEMBER_ROOT/identity.md" ] && [ "$REMEMBER_ROOT" != "$PROJECT_DIR" ]; then
@@ -124,6 +145,34 @@ _remember_wc_size_get_into() {
     printf -v "$_remember_wc_size_outvar" '%s' "${!_remember_wc_size_key:-0}"
 }
 
+# Args: $1 -- a file. Writes its bytes to stdout, unchanged, without forking.
+#
+# Replaces `cat "$MFILE"` (#660). The render calls this once per memory file,
+# so a typical store paid five forks here; on Git Bash a fork costs 10-50x
+# what it costs on Linux, which is why five of them is worth a function.
+#
+# `read -d ''` reads to the first NUL -- i.e. the whole file, for text -- into
+# a variable, using no subprocess at all, and `printf %s` writes it back
+# verbatim. It returns non-zero at EOF having ALREADY set the variable, which
+# is why the `|| :` is correct rather than sloppy.
+#
+# What this deliberately is NOT: `printf '%s\n' "$(<"$1")"`. Command
+# substitution strips EVERY trailing newline and the printf adds exactly one
+# back, so a file ending in two newlines, or in none, renders differently from
+# what is on disk -- silently, in the model's injected context.
+# tests/test_render_is_byte_identical_660.py pins all six shapes and carries a
+# demonstration that the naive form fails them.
+#
+# A file containing a literal NUL would be truncated here where `cat` would
+# have passed it through. Memory files are markdown this plugin wrote itself;
+# a NUL in one is already a corrupted store, and injecting the bytes after it
+# was never the more useful behaviour.
+_remember_emit_file() {
+    local _remember_file_body=""
+    IFS= read -r -d '' _remember_file_body < "$1" || :
+    printf '%s' "$_remember_file_body"
+}
+
 _remember_render_memory_section() {
     local MFILE HAS_MEMORY="" ROTATED_SLICES _remember_rotated_glob_dir
     local _remember_rotated_arr=()
@@ -159,6 +208,7 @@ _remember_render_memory_section() {
 
     echo "=== MEMORY ==="
     local MEMORY_INJECT_MAX_BYTES=""
+    # (see _remember_emit_file, above, for why the render no longer forks cat)
     config_into MEMORY_INJECT_MAX_BYTES ".thresholds.memory_inject_max_bytes" 200000
     case "$MEMORY_INJECT_MAX_BYTES" in (''|*[!0-9]*) MEMORY_INJECT_MAX_BYTES=200000 ;; esac
     local OVERSIZED_MEMORY="" BASENAME MFILE_BYTES
@@ -206,7 +256,7 @@ _remember_render_memory_section() {
             fi
             BASENAME="${MFILE##*/}"
             echo "--- $BASENAME ---"
-            cat "$MFILE"
+            _remember_emit_file "$MFILE"
             echo ""
     done
     if [ -n "$OVERSIZED_MEMORY" ]; then
