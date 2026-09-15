@@ -382,7 +382,16 @@ _remember_render_memory_section() {
             done < <(wc -c "${_remember_newest_arr[@]}")
             for _remember_newest_line in "${_remember_newest_arr[@]}"; do
                 _remember_wc_size_get_into _remember_newest_bytes "$_remember_newest_line"
-                printf '%s (%s bytes)\n' "$_remember_newest_line" "$_remember_newest_bytes"
+                # The third of this getter's three call sites, and the one the
+                # round-1 repair missed: since that repair the getter can
+                # answer with the empty string, so an unformatted `%s bytes`
+                # here renders `( bytes)` -- a number-shaped slot holding
+                # nothing. Same three states as the deferred listing above
+                # (#695 round-2 audit).
+                case "$_remember_newest_bytes" in
+                    (''|*[!0-9]*) printf '%s (size unknown)\n' "$_remember_newest_line" ;;
+                    (*) printf '%s (%s bytes)\n' "$_remember_newest_line" "$_remember_newest_bytes" ;;
+                esac
             done
         fi
         if [ "$ROTATED_COUNT" -gt "$ROTATED_LIST_MAX" ]; then

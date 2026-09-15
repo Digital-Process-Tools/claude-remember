@@ -147,3 +147,51 @@ class TestTheUnmeasuredSizeStaysUnknown:
             "a 5-byte file with a known size forked `cat` -- the read path is "
             "what #660 introduced the threshold for"
         )
+
+
+class TestEveryBytesSlotSaysWhenItDoesNotKnow:
+    """Source-shape, because the round-1 repair missed a call site (#695 round-2 audit).
+
+    That repair changed `_remember_wc_size_get_into`'s contract: it used to
+    answer `0` for a path it holds no measurement for, and now answers the
+    empty string. Two of the getter's three call sites were updated to say
+    `size unknown`; the third still formatted the value straight into
+    `%s bytes`, so with the batched `wc -c` failing -- the scenario the repair
+    exists for -- the rotated-slices listing renders `archive-….md ( bytes)`:
+    a number-shaped slot holding nothing.
+
+    Behavioural coverage of that third site would mean driving the whole
+    render with rotated slices present and `wc` broken. This asserts the
+    invariant instead, where it is cheap and where the next call site added
+    will meet it: a line that formats a byte count has a `size unknown`
+    branch within a few lines of it.
+    """
+
+    def test_no_bytes_slot_formats_an_unguarded_size(self):
+        text = (REPO_ROOT / "scripts" / "lib-memory-context.sh").read_text(encoding="utf-8")
+        lines = text.splitlines()
+        offenders = []
+        for i, line in enumerate(lines):
+            if "(%s bytes)" not in line or line.lstrip().startswith("#"):
+                continue
+            window = "\n".join(lines[max(0, i - 6):i + 1])
+            if "size unknown" not in window:
+                offenders.append(f"scripts/lib-memory-context.sh:{i + 1}: {line.strip()}")
+        assert not offenders, (
+            "a byte count is formatted with no branch for the size being "
+            "unknown. `_remember_wc_size_get_into` answers the empty string "
+            "for a path it never measured, so this renders `( bytes)` -- "
+            "which reads as neither a size nor an absence:\n  "
+            + "\n  ".join(offenders)
+        )
+
+    def test_the_shape_check_can_fail(self):
+        """MUST-FIRE control: the assertion above passes trivially if the
+        format string is ever spelled differently, so pin that the detector
+        sees the shape it is looking for at all."""
+        text = (REPO_ROOT / "scripts" / "lib-memory-context.sh").read_text(encoding="utf-8")
+        assert text.count("(%s bytes)") >= 2, (
+            "no byte-count format strings found in lib-memory-context.sh -- "
+            "the check above is scanning for a shape that no longer exists "
+            "and would pass over anything"
+        )
