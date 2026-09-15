@@ -1525,7 +1525,10 @@ fi
 # for a `)` to collide with.
 _REMEMBER_CTX_FILE="$REMEMBER_DIR/tmp/session-start-ctx.$$"
 _REMEMBER_CTX_OK=""
-mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null
+# `[ -d ] ||` first (#660): `mkdir -p` on a directory that already exists is
+# a fork that does nothing, and tmp/ exists on every start after the first.
+# The test is a bash builtin, so the first start pays nothing for it either.
+[ -d "$REMEMBER_DIR/tmp" ] || mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null
 # Verify the target is writable BEFORE handing it to `exec`: a redirection
 # failure on the `exec` builtin itself (a special builtin) can terminate a
 # non-interactive shell outright, and this hook is documented EXIT CODES: 0
@@ -1618,7 +1621,10 @@ if [ -z "$PER_SESSION_HANDOFF" ]; then
         if [ -f "$REMEMBER_HANDOFF_STATE" ]; then
             rm -f "$_REMEMBER_HANDOFF_STATE_LEGACY" 2>/dev/null
         else
-            mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null
+            # `[ -d ] ||` first (#660): `mkdir -p` on a directory that already exists is
+            # a fork that does nothing, and tmp/ exists on every start after the first.
+            # The test is a bash builtin, so the first start pays nothing for it either.
+            [ -d "$REMEMBER_DIR/tmp" ] || mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null
             mv "$_REMEMBER_HANDOFF_STATE_LEGACY" "$REMEMBER_HANDOFF_STATE" 2>/dev/null \
                 || rm -f "$_REMEMBER_HANDOFF_STATE_LEGACY" 2>/dev/null
         fi
@@ -1856,7 +1862,7 @@ if ! _remember_start_cache_context_load; then
     _REMEMBER_START_CTX_TMP=""
     if [ -n "${REMEMBER_DIR:-}" ] && [ "${REMEMBER_START_CACHE:-1}" = "1" ] \
        && [ "$SESSION_START_SOURCE" != "compact" ] \
-       && mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null; then
+       && { [ -d "$REMEMBER_DIR/tmp" ] || mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null; }; then
         _REMEMBER_START_CTX_TMP=$(mktemp "$REMEMBER_DIR/tmp/start-context.cache.XXXXXX" 2>/dev/null) || _REMEMBER_START_CTX_TMP=""
     fi
     if [ -n "$_REMEMBER_START_CTX_TMP" ]; then

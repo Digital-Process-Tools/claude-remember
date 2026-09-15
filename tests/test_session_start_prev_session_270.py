@@ -71,6 +71,14 @@ def _env(home: Path, project: Path, remember: Path, plugin_root: Path | None = N
         "CLAUDE_PLUGIN_ROOT": str(plugin_root or REPO_ROOT),
         "REMEMBER_DIR": str(remember),
         "_LIB_MEMORY_DIR_LOADED": "1",
+        # The capture-gap check runs in the hook's deferred phase since #660,
+        # so its record lands shortly AFTER the hook exits and every
+        # assertion in this file reads it too early. What these tests are
+        # about is WHICH session gets named, not when the naming happens, so
+        # they run that phase inline. The deferral itself is covered against
+        # the default path by
+        # tests/test_session_start_deferred_capture_gap_660.py.
+        "REMEMBER_DEFER": "0",
     }
 
 
