@@ -144,7 +144,14 @@ _remember_wc_size_get_into() {
     local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
     local _remember_wc_size_outvar="$1"
     local _remember_wc_size_key="_remember_wcsz_${2//[!A-Za-z0-9]/_}"
-    printf -v "$_remember_wc_size_outvar" '%s' "${!_remember_wc_size_key:-0}"
+    # `-` and not `:-0`: a file this cache holds no entry for is UNMEASURED,
+    # and `0` is a measurement. Laundering the two together made
+    # _remember_emit_file's own "no usable size" arm unreachable -- `0` is a
+    # digit string and `0 -gt 16384` is false, so an unmeasured file of ANY
+    # size took the read path that the 16 KB threshold exists to keep it off
+    # (#695 round-1 audit). The batched `wc -c` can fail wholesale, which
+    # leaves every file in that state at once.
+    printf -v "$_remember_wc_size_outvar" '%s' "${!_remember_wc_size_key-}"
 }
 
 # Args: $1 -- a file. $2 -- its size in bytes. Writes its bytes to stdout,
@@ -280,8 +287,14 @@ _remember_render_memory_section() {
     # (CI's macOS legs caught it on #675; bash 5 hides it).
     [ "${#_remember_present[@]}" -gt 0 ] && for MFILE in "${_remember_present[@]}"; do
             _remember_wc_size_get_into MFILE_BYTES "$MFILE"
-            case "$MFILE_BYTES" in (''|*[!0-9]*) MFILE_BYTES=0 ;; esac
-            if [ "$MEMORY_INJECT_MAX_BYTES" -gt 0 ] && [ "$MFILE_BYTES" -gt "$MEMORY_INJECT_MAX_BYTES" ]; then
+            # An unmeasured size stays unmeasured (empty), rather than being
+            # rewritten to 0: `_remember_emit_file` reads it as "no usable
+            # size" and picks `cat`, the arm that cannot go quadratic. The
+            # oversize check below is skipped for it because there is nothing
+            # to compare -- failing open to injecting the file, the same way a
+            # file measured under the cap is injected (#695 round-1 audit).
+            case "$MFILE_BYTES" in (*[!0-9]*) MFILE_BYTES="" ;; esac
+            if [ -n "$MFILE_BYTES" ] && [ "$MEMORY_INJECT_MAX_BYTES" -gt 0 ] && [ "$MFILE_BYTES" -gt "$MEMORY_INJECT_MAX_BYTES" ]; then
                 OVERSIZED_MEMORY="${OVERSIZED_MEMORY}${MFILE} (${MFILE_BYTES} bytes)
 "
                 continue
@@ -321,7 +334,12 @@ _remember_render_memory_section() {
         # Same empty-array guard as the main loop above (bash < 4.4 + set -u).
         [ "${#_remember_deferred[@]}" -gt 0 ] && DEFERRED_MEMORY=$(for MFILE in "${_remember_deferred[@]}"; do
             _remember_wc_size_get_into MFILE_BYTES "$MFILE"
-            printf '%s (%s bytes)\n' "$MFILE" "$MFILE_BYTES"
+            # "(0 bytes)" for a file nobody measured reads exactly like an
+            # empty file. Say which one it is (#695 round-1 audit).
+            case "$MFILE_BYTES" in
+                (''|*[!0-9]*) printf '%s (size unknown)\n' "$MFILE" ;;
+                (*) printf '%s (%s bytes)\n' "$MFILE" "$MFILE_BYTES" ;;
+            esac
         done)
         if [ -n "$DEFERRED_MEMORY" ]; then
             echo "--- not re-injected at compact (delivered at session start); read or grep on request ---"

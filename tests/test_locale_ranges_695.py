@@ -95,29 +95,57 @@ def _strip_comment(line: str) -> str:
 
 
 def _function_spans(text: str) -> list[tuple[int, int, str]]:
-    """(start, end, body) per top-level function. Every function in this tree
-    opens with `name() {` at column 0 and closes with `}` at column 0 -- the
-    shape tests/test_save_session_marker_unreadable_625.py already relies on
-    to extract one."""
+    """(start, end, own_body) per function opened at column 0.
+
+    `own_body` excludes any nested function's lines, so a declaration inside
+    an inner function is never credited to the outer one.
+
+    Nesting is not hypothetical here: #696 defined `capture_was_seen() {` at
+    column 0 inside `_remember_deferred_phase() {`. A parser that closed at the
+    first column-0 `}` computed the outer span as ending at the INNER
+    function's brace and handed the inner's `local LC_ALL=C` to 148 outer
+    lines that have none -- reporting them protected when they are not. A
+    stack, so an opener seen while already inside a span nests rather than
+    being mistaken for the continuation of one.
+    """
     lines = text.splitlines()
-    spans, start = [], None
+    opener = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\(\)\s*\{\s*$")
+    stack: list[int] = []
+    spans: list[tuple[int, int]] = []
     for i, line in enumerate(lines):
-        if start is None:
-            if re.match(r"^[A-Za-z_][A-Za-z0-9_]*\(\)\s*\{\s*$", line):
-                start = i
-        elif line == "}":
-            spans.append((start, i, "\n".join(lines[start:i + 1])))
-            start = None
-    return spans
+        if opener.match(line):
+            stack.append(i)
+        elif line == "}" and stack:
+            spans.append((stack.pop(), i))
+
+    out = []
+    for start, end in spans:
+        inner = {n for s2, e2 in spans
+                 if (s2, e2) != (start, end) and start <= s2 and e2 <= end
+                 for n in range(s2, e2 + 1)}
+        own = "\n".join(line for n, line in enumerate(lines[start:end + 1],
+                                                      start=start)
+                        if n not in inner)
+        out.append((start, end, own))
+    return out
 
 
 def _is_protected(text: str, line_no: int, line: str) -> bool:
-    """Is this line's range matched under the C locale?"""
+    """Is this line's range matched under the C locale?
+
+    The INNERMOST function containing the line decides: a declaration in an
+    enclosing function does govern a nested one (the nested body runs with the
+    outer's `local` still in scope), but never the other way round."""
     if _INLINE_LC.search(line):
         return True
-    for start, end, body in _function_spans(text):
-        if start <= line_no <= end:
-            return bool(_LOCAL_LC.search(body))
+    containing = [(start, end, body) for start, end, body in _function_spans(text)
+                  if start <= line_no <= end]
+    if not containing:
+        return False
+    containing.sort(key=lambda s: s[1] - s[0])
+    for _start, _end, body in containing:
+        if _LOCAL_LC.search(body):
+            return True
     return False
 
 
@@ -192,6 +220,51 @@ def test_no_unguarded_letter_range_in_shipped_shell():
         "`é`. Put `local LC_ALL=C` in the enclosing function, prefix the "
         "command with `LC_ALL=C`, or add the line to ALLOWLIST with the "
         "reason it is safe:\n  " + "\n  ".join(findings)
+    )
+
+
+def test_the_scanner_sees_through_a_nested_function():
+    """MUST-FIRE control for the shape that actually occurs in this tree.
+
+    `_function_spans` used to close a function at the first `}` at column 0,
+    on the stated assumption that no function is defined inside another. #696
+    broke that assumption without anyone noticing: `capture_was_seen() {` is
+    defined at column 0 INSIDE `_remember_deferred_phase() {`, so the outer
+    span was computed as ending at the inner function's brace, and the inner
+    function's `local LC_ALL=C` was credited to 148 lines of the outer one
+    that has no such declaration. Every range in those lines would have been
+    reported protected while it was not -- a scanner that is the whole
+    standing defence for a class that already shipped a total-failure bug.
+
+    Neither of the two controls below could see it: both use flat fixtures.
+    This one is the nested shape, both halves -- the outer lines must NOT
+    inherit the inner's declaration, and the inner's own lines must still be
+    recognised."""
+    nested = (
+        'outer() {\n'                                   # 0
+        '    case "$1" in *[!A-Za-z0-9._-]*) : ;; esac\n'  # 1  unprotected
+        'inner() {\n'                                   # 2
+        '    local LC_ALL=C\n'                           # 3
+        '    case "$2" in *[!A-Za-z0-9._-]*) : ;; esac\n'  # 4  protected
+        '}\n'                                           # 5
+        '    case "$3" in *[!A-Za-z0-9._-]*) : ;; esac\n'  # 6  unprotected
+        '}\n'                                           # 7
+    )
+    lines = nested.splitlines()
+
+    assert not _is_protected(nested, 1, lines[1]), (
+        "a line in the outer function, before the nested one even opens, was "
+        "reported protected -- the nested function's `local LC_ALL=C` is "
+        "being credited to lines it does not govern"
+    )
+    assert _is_protected(nested, 4, lines[4]), (
+        "the nested function's own line was not recognised as protected -- "
+        "fixing the over-reporting must not break the ordinary case"
+    )
+    assert not _is_protected(nested, 6, lines[6]), (
+        "a line in the outer function AFTER the nested one closed was "
+        "reported protected -- the inner declaration does not reach here "
+        "either"
     )
 
 

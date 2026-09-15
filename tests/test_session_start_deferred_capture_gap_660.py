@@ -242,15 +242,37 @@ def test_deferred_records_still_land_on_the_default_path(tmp_path):
     )
     assert done.returncode == 0, done.stderr.decode("utf-8", "replace")
 
-    record = remember / "tmp" / "session-slug"
+    # Both records this fixture's storage mode can produce, not just the
+    # first (#695 round-1 audit). The docstring above names three writers;
+    # polling only `session-slug` -- the FIRST of three consecutive calls at
+    # session-start-hook.sh:874-876 -- left the other two uncovered on the
+    # default path, while every test that asserts them runs with
+    # REMEMBER_DEFER=0 and cannot see the default path at all. The live risk
+    # is not a missing call but a slow one: _remember_write_slug_index blocks
+    # on `lock_acquire`, and anything behind it in the deferred phase waits.
+    #
+    # `_remember_write_slug_index` is NOT polled here, and that is a
+    # precondition rather than an omission: it returns early unless
+    # REMEMBER_STORE_ROOT differs from REMEMBER_DIR (external storage), which
+    # this fixture does not set up. It is covered by tests/test_slug_index_297.py,
+    # which does -- with REMEMBER_DEFER=0, so the default path for THAT record
+    # remains uncovered and is named here rather than left implied.
+    expected = {
+        "session-slug": remember / "tmp" / "session-slug",
+        "case-divergence": remember / "tmp" / "case-divergence",
+    }
+    missing = dict(expected)
     deadline = time.time() + NOTICE_TIMEOUT
-    while time.time() < deadline:
-        if record.is_file() and record.read_text(encoding="utf-8").strip():
-            return
-        time.sleep(0.1)
-    pytest.fail(
-        "the slug record never appeared on the default (deferred) path -- "
-        "the deferred phase is not running, or is dying before it writes"
+    while time.time() < deadline and missing:
+        for name, path in list(missing.items()):
+            if path.is_file() and path.read_text(encoding="utf-8").strip():
+                del missing[name]
+        if missing:
+            time.sleep(0.1)
+    assert not missing, (
+        f"{sorted(missing)} never appeared on the default (deferred) path "
+        f"within {NOTICE_TIMEOUT}s -- the deferred phase is not running, or "
+        f"is dying part-way through its record writes"
     )
 
 
