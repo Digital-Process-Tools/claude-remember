@@ -428,7 +428,24 @@ def test_the_evidence_store_stays_bounded(tmp_path):
 
     _run(SESSION_START, env)
 
-    assert len(list(store.iterdir())) < 400, "store is never pruned"
+    # The prune moved into the deferred phase (#660), so it is no longer
+    # finished when the hook exits -- this asserted on it immediately and
+    # went red on two of the four macos legs and nowhere else, which is what
+    # a race looks like when it is read as a verdict. Poll instead of
+    # sleeping a fixed amount, and instead of running the phase inline with
+    # REMEMBER_DEFER=0: the DEFAULT path is the one that has to prune, and a
+    # deferred phase that dies before it gets there would still pass an
+    # inline run.
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        if len(list(store.iterdir())) < 400:
+            break
+        time.sleep(0.1)
+    assert len(list(store.iterdir())) < 400, (
+        "store is never pruned -- nothing had removed a marker 15s after the "
+        "hook exited, so the deferred phase either never ran or died before "
+        "reaching the prune"
+    )
     assert (store / "sess-0399").exists(), (
         "pruned the most recent markers — those are the ones the check reads"
     )
