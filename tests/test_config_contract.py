@@ -42,9 +42,10 @@ _README_ROW = re.compile(r"^\|\s*`([a-z][A-Za-z0-9_.]*)`\s*\|")
 
 # Keys the README table lists that are not `config()` options: data_dir is
 # resolved by lib-memory-dir.sh's own reader before REMEMBER_CONFIG exists, and
-# haiku.oauth_token is read by pipeline/haiku.py from the merged config in
-# Python. Both are genuinely wired — they just do not go through config().
-_NOT_VIA_CONFIG = {"data_dir", "haiku.oauth_token"}
+# haiku.oauth_token / haiku.anthropic_api_key are read by pipeline/haiku.py from
+# the merged config in Python. All three are genuinely wired — they just do not
+# go through config().
+_NOT_VIA_CONFIG = {"data_dir", "haiku.oauth_token", "haiku.anthropic_api_key"}
 
 # Documented and read, but deliberately NOT shipped in config.example.json:
 # a `"timezone": ""` people copy is a landmine — an empty TZ falls back to UTC

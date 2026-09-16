@@ -326,21 +326,11 @@ def _child_env() -> dict[str, str]:
     is the failure @ehutchinsonSFDC saw. Cheap to close, and it makes the code
     say what the comments already claim.
 
-    ``ANTHROPIC_API_KEY`` goes too. When that var is set anywhere in the host's
-    environment it wins over the operator's own ``claude.ai`` login for THIS
-    subprocess specifically, because the CLI resolves credentials in that
-    order — an ambient host var the operator never chose for this call. When
-    the key's balance is exhausted or rate-limited, the background summarizer
-    fails on every session-end with "Credit balance is too low", silently,
-    while the operator's interactive sessions keep working fine off the login
-    — so nothing about the failure points at this var without reading the
-    child's own stderr (observed in production: repeated
-    ``save-session.sh --force exited 1`` at session end, traced to exactly
-    this). It was never a "parent session" marker the way ``CLAUDE_CODE_*``
-    is; it is stripped here for the same reason ``CLAUDE_PROJECT_DIR`` is: the
-    child should authenticate and scope itself exactly as if launched fresh,
-    not inherit a credential the operator did not choose for it.
+    ``ANTHROPIC_API_KEY`` goes too, but only on evidence — see
+    ``_anthropic_api_key_decision`` for which evidence and why the strip cannot
+    be unconditional (#703).
     """
+    strip_key, key_reason = _anthropic_api_key_decision()
     env = {
         k: v
         for k, v in os.environ.items()
@@ -349,7 +339,7 @@ def _child_env() -> dict[str, str]:
             k != "CLAUDECODE"
             and k != "CLAUDE_JOB_DIR"
             and k != "CLAUDE_PROJECT_DIR"
-            and k != "ANTHROPIC_API_KEY"
+            and not (k == ANTHROPIC_API_KEY_ENV and strip_key)
             and not k.startswith("CLAUDE_CODE_")
         )
     }
@@ -590,6 +580,175 @@ def _configured_oauth_token() -> str | None:
         if token:
             return token
     return None
+
+
+# ── The ambient ANTHROPIC_API_KEY (#703, reported in #693) ────────────────────
+#
+# The Claude CLI resolves credentials in a fixed order, and ANTHROPIC_API_KEY
+# out-ranks a claude.ai login. So an operator who has a login AND keeps that
+# var set for some unrelated tool gets every nested summarizer call billed to
+# the key -- and when its balance is exhausted, every background save dies with
+# "Credit balance is too low" while their own interactive sessions carry on
+# working off the login. Nothing at any layer names the variable; the reporter
+# found it by reading the child's stderr in the daily log after days of opaque
+# `save-session.sh --force exited 1` warnings.
+#
+# Stripping it unconditionally does not remove that failure, it relocates it:
+# authenticating the CLI with ANTHROPIC_API_KEY alone is normal and documented,
+# and for those installs a strip leaves the child with no credential at all and
+# every save failing in exactly the same silent shape.
+#
+# So the strip is conditional on another credential actually being visible.
+# "Visible" is the honest limit here: a claude.ai login in the macOS Keychain
+# is not something this process can see without probing the operator's keychain
+# (which prompts, and reads a secret we have no business reading), so `auto`
+# keeps the key for those operators -- today's behaviour, not a new failure --
+# and `haiku.anthropic_api_key` lets them say `strip` once. The failure hint in
+# `call_haiku` is what tells them the knob exists at the moment it matters.
+ANTHROPIC_API_KEY_ENV = "ANTHROPIC_API_KEY"
+
+_ANTHROPIC_KEY_POLICIES = ("auto", "keep", "strip")
+_ANTHROPIC_KEY_POLICY_DEFAULT = "auto"
+
+
+def _claude_login_path() -> str:
+    """Where the Claude CLI keeps a `claude.ai` login on disk.
+
+    ``CLAUDE_CONFIG_DIR`` relocates the CLI's whole config directory, so it is
+    honoured here rather than assuming ``~/.claude`` -- an operator who moved it
+    has a login this function would otherwise declare absent.
+    """
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
+    if not config_dir:
+        config_dir = os.path.join(os.path.expanduser("~"), ".claude")
+    return os.path.join(config_dir, ".credentials.json")
+
+
+def _host_login_present() -> bool:
+    """True when a `claude.ai` login is visible ON DISK.
+
+    False means "not visible", never "absent": a login held in the macOS
+    Keychain is invisible here by design (see the note above). Every caller has
+    to treat a False as the weaker claim it is, which is why `auto` KEEPS the
+    ambient key on a False rather than stripping it.
+
+    Never raises -- a permission error reading a path under HOME must not become
+    a save outage.
+    """
+    try:
+        return os.path.getsize(_claude_login_path()) > 0
+    except OSError:
+        return False
+
+
+def _configured_anthropic_key_policy() -> str:
+    """`haiku.anthropic_api_key` from config: ``auto``, ``keep`` or ``strip``.
+
+    A value nothing recognises falls back to ``auto`` and is reported -- the
+    same rule ``_accept_token`` follows, and for the same reason: a typo'd
+    policy that silently graded as one of the two behaviours would be
+    indistinguishable from never having configured one, on a key whose whole
+    purpose is to overrule what this module inferred.
+    """
+    for path in _config_candidates():
+        try:
+            with open(path, encoding="utf-8") as f:
+                cfg = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(cfg, dict):
+            continue
+        haiku_cfg = cfg.get("haiku")
+        if not isinstance(haiku_cfg, dict) or "anthropic_api_key" not in haiku_cfg:
+            continue
+        value = haiku_cfg["anthropic_api_key"]
+        if isinstance(value, str) and value.strip().lower() in _ANTHROPIC_KEY_POLICIES:
+            return value.strip().lower()
+        if isinstance(value, str) and not value.strip():
+            # How the bundled config can ship the key as "not configured",
+            # matching `haiku.oauth_token`'s own empty-means-unset convention.
+            return _ANTHROPIC_KEY_POLICY_DEFAULT
+        _warn(
+            f"WARNING: ignoring haiku.anthropic_api_key in {path} -- "
+            f"{value!r} is not one of {', '.join(_ANTHROPIC_KEY_POLICIES)}; "
+            f"falling back to '{_ANTHROPIC_KEY_POLICY_DEFAULT}'"
+        )
+        return _ANTHROPIC_KEY_POLICY_DEFAULT
+    return _ANTHROPIC_KEY_POLICY_DEFAULT
+
+
+def _other_credential() -> str | None:
+    """Name of a credential the child can authenticate with besides the ambient
+    key, or ``None`` when none is visible.
+
+    The name, not a bool, because it goes into the reason string: an operator
+    reading why their key was dropped should see which credential displaced it.
+    """
+    if os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "").strip():
+        return "CLAUDE_CODE_OAUTH_TOKEN from the host"
+    if _configured_oauth_token():
+        return "the OAuth token you configured for this plugin"
+    if _host_login_present():
+        return f"the claude.ai login in {_claude_login_path()}"
+    return None
+
+
+def _anthropic_api_key_decision() -> tuple[bool, str]:
+    """``(strip?, reason)`` for the ambient ANTHROPIC_API_KEY.
+
+    The reason is carried rather than logged on every save: this runs on the
+    hot path of every session end, and a line per save about a variable that is
+    behaving correctly is noise. It is surfaced only where it is actually
+    diagnostic -- in the failure hint below.
+    """
+    if not os.environ.get(ANTHROPIC_API_KEY_ENV, "").strip():
+        return False, "not set"
+    policy = _configured_anthropic_key_policy()
+    if policy == "keep":
+        return False, "haiku.anthropic_api_key is 'keep'"
+    if policy == "strip":
+        return True, "haiku.anthropic_api_key is 'strip'"
+    other = _other_credential()
+    if other:
+        return True, f"another credential is available ({other})"
+    return False, "it is the only credential this process can see"
+
+
+# Markers that a failed call plausibly died on credentials rather than on the
+# prompt, the model or the network. Deliberately narrow: a hint that fires on
+# every failure would point unrelated outages at an innocent variable, which is
+# the shape of misdirection this whole issue is about.
+_CREDENTIAL_FAILURE_MARKERS = (
+    "credit balance",
+    "takes precedence",
+    "authentication",
+    "unauthorized",
+    "invalid api key",
+    "invalid x-api-key",
+    "rate limit",
+)
+
+
+def _anthropic_api_key_hint(env: dict[str, str], detail: str) -> str:
+    """The sentence a failure gets when the ambient key plausibly caused it.
+
+    Empty string when the key never reached the child, or when the failure does
+    not look like a credential failure. This lands in the RuntimeError, which
+    `save-session.sh` surfaces into `hook-errors.log` -- the place an operator
+    is already looking, rather than the daily log alone (#694).
+    """
+    if not env.get(ANTHROPIC_API_KEY_ENV):
+        return ""
+    lowered = detail.lower()
+    if not any(marker in lowered for marker in _CREDENTIAL_FAILURE_MARKERS):
+        return ""
+    return (
+        f" -- note that {ANTHROPIC_API_KEY_ENV} was set in this environment and "
+        "was passed to the nested CLI, where it OUT-RANKS a claude.ai login; if "
+        "that key is exhausted or wrong, this is what failed. Set "
+        "`haiku.anthropic_api_key` to \"strip\" in config.json to keep it out of "
+        "the summarizer, or \"keep\" to silence this note (#703)"
+    )
 
 
 def _inject_configured_oauth_token(env: dict[str, str]) -> dict[str, str]:
@@ -1103,9 +1262,10 @@ def call_haiku(
 
     if result.returncode != 0:
         _log_failed_spend(f"exited {result.returncode}", result.stdout)
+        detail = _failure_detail(result.stdout, result.stderr)
         raise RuntimeError(
-            f"claude exited {result.returncode}: "
-            f"{_failure_detail(result.stdout, result.stderr)}"
+            f"claude exited {result.returncode}: {detail}"
+            f"{_anthropic_api_key_hint(env, detail)}"
         )
 
     return _parse_response(result.stdout)

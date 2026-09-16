@@ -49,7 +49,8 @@
   "reject_pattern": "",
   "handoff_mode": "single",
   "haiku": {
-    "oauth_token": ""
+    "oauth_token": "",
+    "anthropic_api_key": "auto"
   },
 
   "_comments": {

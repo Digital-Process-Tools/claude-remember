@@ -183,25 +183,270 @@ def test_call_haiku_strips_parent_session_env(mock_run, monkeypatch):
     assert env.get("PATH") == "/usr/bin"
 
 
+# ── ANTHROPIC_API_KEY, kept or stripped on evidence (#703) ─────────────────
+#
+# The reported failure and the failure a naive fix creates are the SAME
+# failure -- an unauthenticated nested `claude -p`, every background save
+# dying silently -- so each test below names which population it is standing
+# in for. A strip test with no keep twin, or a keep test with no strip twin,
+# would pass just as well against a function that always did the one thing.
+
+
+@pytest.fixture
+def no_ambient_credentials(monkeypatch, tmp_path):
+    """No credential visible to `_child_env()` except what a test sets itself.
+
+    `_configured_oauth_token()` reads the merged config, `$REMEMBER_DIR`'s
+    config.json and `~/.remember/config.json`; `_host_login_present()` reads
+    `~/.claude/.credentials.json`. A developer machine has real files at two of
+    those paths, so without this fixture the strip/keep decision under test is
+    the developer's own login rather than the case the test describes -- and it
+    would flip between their machine and CI.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))  # Windows' expanduser reads this
+    monkeypatch.setenv("REMEMBER_DIR", str(tmp_path / "remember"))
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.delenv("REMEMBER_OAUTH_TOKEN", raising=False)
+    monkeypatch.delenv("REMEMBER_CONFIG", raising=False)
+    return home
+
+
+def _write_config(home, haiku_block):
+    cfg_dir = home / ".remember"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    (cfg_dir / "config.json").write_text(
+        json.dumps({"haiku": haiku_block}), encoding="utf-8"
+    )
+
+
+def _write_host_login(home):
+    claude_dir = home / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    (claude_dir / ".credentials.json").write_text(
+        json.dumps({"claudeAiOauth": {"accessToken": "x"}}), encoding="utf-8"
+    )
+
+
 @patch("pipeline.haiku.subprocess.run")
-def test_call_haiku_strips_anthropic_api_key(mock_run, monkeypatch):
-    """ANTHROPIC_API_KEY, if set anywhere in the host's environment, wins
-    over the operator's claude.ai login for the nested `claude -p` call --
-    the CLI resolves credentials in that order. A key with an exhausted or
-    unfunded balance then fails every background summarize silently (the
-    operator's own interactive sessions keep working fine off the login, so
-    nothing points at this var without reading the child's stderr). Unlike
-    CLAUDE_CODE_OAUTH_TOKEN this was never the child's own credential -- it
-    is an ambient host var the operator did not choose for this subprocess --
-    so it is stripped, not kept, and the rest of the environment survives."""
+def test_call_haiku_strips_anthropic_api_key_when_the_host_supplied_a_token(
+    mock_run, monkeypatch, no_ambient_credentials
+):
+    """The reported case (#703, reported in #693): the operator has a
+    credential they chose, and an ambient ANTHROPIC_API_KEY out-ranks it for
+    this subprocess because the CLI resolves credentials in that order. An
+    exhausted key then fails every background save while the operator's own
+    interactive sessions keep working off the login, so nothing points at the
+    var. With another credential present, the ambient key is the one to drop."""
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-example")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-example")
     monkeypatch.setenv("PATH", "/usr/bin")  # an unrelated var must survive
     mock_run.return_value = MagicMock(
         returncode=0, stdout=_mock_claude_response("x"), stderr="")
+
     call_haiku("p")
+
     env = mock_run.call_args[1]["env"]
     assert "ANTHROPIC_API_KEY" not in env
+    assert env.get("CLAUDE_CODE_OAUTH_TOKEN") == "sk-ant-oat-example"
     assert env.get("PATH") == "/usr/bin"
+
+
+@patch("pipeline.haiku.subprocess.run")
+def test_call_haiku_keeps_anthropic_api_key_when_it_is_the_only_credential(
+    mock_run, monkeypatch, no_ambient_credentials
+):
+    """The twin population, and the reason the strip is conditional (#703).
+
+    Authenticating the CLI with ANTHROPIC_API_KEY alone -- no claude.ai login,
+    no setup-token -- is normal and documented. Stripping it there leaves the
+    nested call with nothing, and every background save fails silently: the
+    same outage this fix exists to remove, relocated onto different people.
+    A future refactor that strips unconditionally must fail here."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-example")
+    mock_run.return_value = MagicMock(
+        returncode=0, stdout=_mock_claude_response("x"), stderr="")
+
+    call_haiku("p")
+
+    env = mock_run.call_args[1]["env"]
+    assert env.get("ANTHROPIC_API_KEY") == "sk-ant-api03-example", (
+        "the only credential on the host must reach the child"
+    )
+
+
+@patch("pipeline.haiku.subprocess.run")
+def test_call_haiku_strips_anthropic_api_key_when_the_operator_configured_a_token(
+    mock_run, monkeypatch, no_ambient_credentials
+):
+    """`haiku.oauth_token` counts as the deliberate credential too (#703).
+
+    It is the one the operator handed this plugin on purpose, so an ambient key
+    out-ranking it is the same defect as out-ranking a login -- and this is the
+    host shape (#129/#131) where CLAUDE_CODE_OAUTH_TOKEN never arrives at all.
+    """
+    _write_config(no_ambient_credentials, {"oauth_token": "sk-ant-oat-configured-123456"})
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-example")
+    mock_run.return_value = MagicMock(
+        returncode=0, stdout=_mock_claude_response("x"), stderr="")
+
+    call_haiku("p")
+
+    env = mock_run.call_args[1]["env"]
+    assert "ANTHROPIC_API_KEY" not in env
+    assert env.get("CLAUDE_CODE_OAUTH_TOKEN") == "sk-ant-oat-configured-123456"
+
+
+@patch("pipeline.haiku.subprocess.run")
+def test_call_haiku_strips_anthropic_api_key_when_a_host_login_file_exists(
+    mock_run, monkeypatch, no_ambient_credentials
+):
+    """A `claude.ai` login on disk is a credential the child can use (#703).
+
+    This is the reporter's own shape: a login they chose, no token env var
+    anywhere, and an ambient key winning anyway. `~/.claude/.credentials.json`
+    is the only login this process can see without probing an OS keychain --
+    see the keep-by-default case in
+    test_call_haiku_keeps_anthropic_api_key_when_it_is_the_only_credential for
+    what an invisible login costs, and the `strip` policy for the way out."""
+    _write_host_login(no_ambient_credentials)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-example")
+    mock_run.return_value = MagicMock(
+        returncode=0, stdout=_mock_claude_response("x"), stderr="")
+
+    call_haiku("p")
+
+    assert "ANTHROPIC_API_KEY" not in mock_run.call_args[1]["env"]
+
+
+@patch("pipeline.haiku.subprocess.run")
+def test_anthropic_api_key_policy_strip_overrides_an_invisible_login(
+    mock_run, monkeypatch, no_ambient_credentials
+):
+    """`haiku.anthropic_api_key: "strip"` is the escape hatch for the operator
+    whose login this process cannot see -- a macOS Keychain entry, say -- where
+    the automatic rule would otherwise keep a key that is breaking them (#703)."""
+    _write_config(no_ambient_credentials, {"anthropic_api_key": "strip"})
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-example")
+    mock_run.return_value = MagicMock(
+        returncode=0, stdout=_mock_claude_response("x"), stderr="")
+
+    call_haiku("p")
+
+    assert "ANTHROPIC_API_KEY" not in mock_run.call_args[1]["env"]
+
+
+@patch("pipeline.haiku.subprocess.run")
+def test_anthropic_api_key_policy_keep_overrides_the_strip(
+    mock_run, monkeypatch, no_ambient_credentials
+):
+    """And the other direction (#703): an operator who wants the nested call
+    billed to the key, with a token present that would otherwise win, says so
+    once in config rather than unsetting a var their other tools need."""
+    _write_config(no_ambient_credentials, {"anthropic_api_key": "keep"})
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-example")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-example")
+    mock_run.return_value = MagicMock(
+        returncode=0, stdout=_mock_claude_response("x"), stderr="")
+
+    call_haiku("p")
+
+    env = mock_run.call_args[1]["env"]
+    assert env.get("ANTHROPIC_API_KEY") == "sk-ant-api03-example"
+
+
+@patch("pipeline.haiku.subprocess.run")
+def test_anthropic_api_key_policy_unrecognised_value_warns_and_falls_back(
+    mock_run, monkeypatch, no_ambient_credentials
+):
+    """A value nothing recognises must not silently grade as one of the two
+    behaviours (#703). It falls back to `auto` -- here, a token is present, so
+    `auto` strips -- and says so where the operator reads warnings."""
+    _write_config(no_ambient_credentials, {"anthropic_api_key": "yes please"})
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-example")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-example")
+    mock_run.return_value = MagicMock(
+        returncode=0, stdout=_mock_claude_response("x"), stderr="")
+
+    with patch("pipeline.haiku._warn") as mock_warn:
+        call_haiku("p")
+
+    assert "ANTHROPIC_API_KEY" not in mock_run.call_args[1]["env"]
+    warnings = " ".join(str(c.args[0]) for c in mock_warn.call_args_list)
+    assert "haiku.anthropic_api_key" in warnings
+    assert "yes please" in warnings, "the refused value belongs in the warning"
+
+
+@patch("pipeline.haiku.subprocess.run")
+def test_failure_names_anthropic_api_key_when_it_was_kept(
+    mock_run, monkeypatch, no_ambient_credentials
+):
+    """The discoverability half (#703). The key was kept -- correctly, it was
+    the only credential -- and the call died on that key's balance. The error
+    reaches hook-errors.log through save-session.sh, so the variable is named
+    there rather than only in the daily log (#694)."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-example")
+    mock_run.return_value = MagicMock(
+        returncode=1,
+        stdout=json.dumps({"error": "Credit balance is too low"}),
+        stderr="",
+    )
+
+    with pytest.raises(RuntimeError) as raised:
+        call_haiku("p")
+
+    message = str(raised.value)
+    assert "Credit balance is too low" in message
+    assert "ANTHROPIC_API_KEY" in message, (
+        "the failure must name the variable that plausibly caused it"
+    )
+    assert "haiku.anthropic_api_key" in message, "and the knob that changes it"
+
+
+@patch("pipeline.haiku.subprocess.run")
+def test_failure_does_not_name_anthropic_api_key_when_it_was_not_set(
+    mock_run, monkeypatch, no_ambient_credentials
+):
+    """The positive control's twin: the same credit error, no such var in the
+    environment. A hint that fires here is a hint that fires always, which
+    would point every unrelated auth failure at an innocent variable (#703)."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    mock_run.return_value = MagicMock(
+        returncode=1,
+        stdout=json.dumps({"error": "Credit balance is too low"}),
+        stderr="",
+    )
+
+    with pytest.raises(RuntimeError) as raised:
+        call_haiku("p")
+
+    message = str(raised.value)
+    assert "Credit balance is too low" in message
+    assert "ANTHROPIC_API_KEY" not in message
+
+
+@patch("pipeline.haiku.subprocess.run")
+def test_failure_unrelated_to_credentials_does_not_name_anthropic_api_key(
+    mock_run, monkeypatch, no_ambient_credentials
+):
+    """And the third case, which is the one that makes the hint worth having
+    rather than noise: the key IS set and kept, but the failure has nothing to
+    do with credentials, so the hint stays out of it (#703)."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-example")
+    mock_run.return_value = MagicMock(
+        returncode=1,
+        stdout=json.dumps({"error": "Prompt is too long"}),
+        stderr="",
+    )
+
+    with pytest.raises(RuntimeError) as raised:
+        call_haiku("p")
+
+    message = str(raised.value)
+    assert "Prompt is too long" in message
+    assert "ANTHROPIC_API_KEY" not in message
 
 
 @patch("pipeline.haiku.subprocess.run")
