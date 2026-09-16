@@ -420,3 +420,4 @@ if [ -d "$REMEMBER_DIR/logs" ]; then
     fi
     unset _remember_bd_keep_fd2
 fi
+unset _remember_bd_has_xtracefd

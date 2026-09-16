@@ -302,9 +302,14 @@ def test_remember_trace_unset_is_not_the_opt_out(tmp_path):
         "a Windows runner to answer. Left as a loud xfail rather than a "
         "silent skip so this stays visible until someone can actually step "
         "through it there; strict=False so a fix flips this to XPASS instead "
-        "of a build failure, which is the signal to remove the marker."
+        "of a build failure, which is the signal to remove the marker. "
+        "Scoped to AssertionError specifically -- an unrelated crash on this "
+        "leg (a TimeoutExpired, a FileNotFoundError from a missing bash) "
+        "must still fail the build rather than being absorbed as if it were "
+        "this same, already-documented symptom."
     ),
     strict=False,
+    raises=AssertionError,
 )
 def test_the_real_hook_traces_past_the_bootstrap(tmp_path):
     """End to end, on the hook the issue was filed about.
