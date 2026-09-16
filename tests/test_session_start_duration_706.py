@@ -192,7 +192,12 @@ def test_a_backward_clock_step_is_reported_as_could_not_measure_not_a_negative_n
     assert result.returncode == 0, result.stderr[-2000:]
 
     calls_log = (fake_dir / "date-calls.log")
-    if not (calls_log.is_file() and calls_log.read_text().strip()):
+    if not (calls_log.is_file() and calls_log.read_text().strip()) and os.name == "nt":
+        # POSIX chmod actually sets the executable bit, so an empty
+        # date-calls.log there means a real regression (the hook stopped
+        # calling `date`), not the #488 Windows-only shim-detection gap --
+        # skipping unconditionally would convert that into a silent SKIP
+        # with a Windows-flavoured excuse that is false on this platform.
         pytest.skip(
             "the date PATH shim did not intercept `date +%s` on this "
             "platform -- date-calls.log stayed empty, consistent with the "

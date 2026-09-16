@@ -1095,6 +1095,16 @@ def _assert_date_shim_took_or_skip(fake_dir) -> None:
     calls_log = fake_dir / "date-calls.log"
     if calls_log.is_file() and calls_log.read_text().strip():
         return
+    if os.name != "nt":
+        # The #488 class this guards against is specific to a native
+        # Windows Python's Path.chmod(0o755) not reliably reaching MSYS2's
+        # own executable check -- on POSIX, chmod actually sets the bit and
+        # the shim is expected to take every time. Skipping here too would
+        # convert a genuine "log.sh/session-start-hook.sh stopped calling
+        # date" regression into a silent SKIP with a Windows-flavoured
+        # excuse that is simply false on this platform. Returning without
+        # skipping lets the caller's own assertions fail loudly instead.
+        return
     pytest.skip(
         "the date PATH shim (_make_fake_date_shim) did not intercept "
         "log.sh's `date` calls on this platform -- date-calls.log stayed "
