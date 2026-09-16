@@ -105,6 +105,30 @@ def _env_with_shims(shims: Path, log: Path) -> dict:
     }
 
 
+# A single ASCII backslash byte, spelled this way rather than as a Python
+# escape sequence inside a docstring below -- see the comment beside it.
+_BACKSLASH = chr(92)
+
+
+def _norm(path) -> str:
+    """Normalize a path for cross-platform string comparison.
+
+    bash's own glob always joins with a literal forward slash, regardless
+    of what separator the OS uses or what characters the directory argument
+    itself contains (OBSERVED, bash 3.2: a directory variable containing a
+    Windows-style separator byte is passed through into the glob result
+    verbatim -- bash never renormalizes it). On Windows, `tmp_path`
+    fixtures are `WindowsPath`s whose `str()` uses that separator
+    throughout, so the shell side's output (dir-as-passed + a literal
+    forward slash + the filename) and the Python side's `str(expected_path)`
+    (using that separator throughout) can both be correct paths to the same
+    file and still fail a raw string `==`. Folding every occurrence of that
+    one byte to a forward slash on both sides sidesteps the exact place bash
+    and pathlib disagree, without needing a real Windows host to catch it
+    (self-review finding, oss:auditor)."""
+    return str(path).replace(_BACKSLASH, "/")
+
+
 def test_previous_transcript_picks_the_newest_excluding_current_at_scale(tmp_path):
     sessions = tmp_path / "sessions"
     sessions.mkdir()
@@ -120,7 +144,7 @@ def test_previous_transcript_picks_the_newest_excluding_current_at_scale(tmp_pat
 
     result = _run(script, [str(sessions), current.stem], env)
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == str(expected), (
+    assert _norm(result.stdout.strip()) == _norm(expected), (
         f"expected the second-newest transcript {expected}, "
         f"got {result.stdout.strip()!r}: {result.stderr}"
     )
@@ -151,7 +175,7 @@ def test_previous_transcript_excludes_current_by_id_not_position(tmp_path):
 
     result = _run(script, [str(sessions), middle.stem], env)
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == str(newest)
+    assert _norm(result.stdout.strip()) == _norm(newest)
 
 
 def test_previous_transcript_returns_nothing_when_only_file_is_current(tmp_path):
@@ -188,7 +212,7 @@ def test_second_newest_fallback_matches_ls_t_tail_head_semantics_at_scale(tmp_pa
 
     result = _run(script, [str(sessions)], env)
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == str(expected), (
+    assert _norm(result.stdout.strip()) == _norm(expected), (
         f"expected the second-newest transcript {expected}, "
         f"got {result.stdout.strip()!r}: {result.stderr}"
     )
