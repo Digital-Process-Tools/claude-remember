@@ -73,6 +73,28 @@ _HOOK_DIR="${BASH_SOURCE[0]%/*}"
 # already run; now it fires before any of that, and before the stdin read.
 [ -n "${REMEMBER_NESTED_SUMMARIZER:-}" ] && exit 0
 
+# ── #706: start the clock ──────────────────────────────────────────────────
+# The single sharpest piece of feedback from #660's own investigation: a
+# reporter spent days measuring this plugin before finding the actual cause
+# on their own machine (a kernel leak inflating every fork 3-10x). A hook
+# that states its own runtime is how the NEXT person learns the question is
+# not about the plugin at all. Captured here, before resolve-paths.sh, log.sh
+# or anything else in this file runs, so the number covers the WHOLE hook --
+# and before the nested-summarizer guard above would ever be reached, so a
+# `claude -p` child that exits at that guard is never measured or logged.
+#
+# EPOCHSECONDS (bash >= 5) is a builtin variable, not a fork -- the same
+# "test the version, not a fork" pattern lib-clock.sh and lib-lock.sh already
+# use. Below bash 5 this pays one `date +%s` fork, here and again at the end
+# -- twice per session start, not per line, so it does not reintroduce the
+# per-call cost #660/#665 removed elsewhere on this same file's hot path.
+_REMEMBER_HOOK_T0=""
+if [ "${BASH_VERSINFO[0]:-0}" -ge 5 ]; then
+    _REMEMBER_HOOK_T0="$EPOCHSECONDS"
+else
+    _REMEMBER_HOOK_T0=$(date +%s 2>/dev/null) || _REMEMBER_HOOK_T0=""
+fi
+
 # ── Read stdin once, before resolving paths (#411) ────────────────────────
 # `session_id` / `transcript_path` / `source` used to be extracted here, just
 # after resolve-paths.sh ran. `cwd` (below) is new, and resolve-paths.sh needs
@@ -211,6 +233,17 @@ fi
 TODAY=""
 _remember_date_into TODAY '+%Y-%m-%d'
 log "hook" "session-start: PROJECT_DIR=$PROJECT_DIR PIPELINE_DIR=$PIPELINE_DIR REMEMBER_DIR=$REMEMBER_DIR"
+
+# #706: how slow is "slow enough to say so in the session, not just the
+# daily log". A line on every start is noise on a healthy host; silence past
+# this point is silence exactly when someone is comparing two machines.
+# config_into is the same forkless cached lookup config()/REMEMBER_MODEL
+# above already use -- no new cost on the common (already-cached) path.
+REMEMBER_SESSION_START_SLOW_S=""
+config_into REMEMBER_SESSION_START_SLOW_S ".session_start_slow_threshold_s" "5"
+case "$REMEMBER_SESSION_START_SLOW_S" in
+    ''|*[!0-9]*) REMEMBER_SESSION_START_SLOW_S=5 ;;
+esac
 
 # Publish what the chain above just resolved, so user-prompt-hook.sh does not
 # repeat it on every prompt (#227). Republishing unconditionally here is what
@@ -1958,6 +1991,41 @@ fi
 # Plugins register here via hooks.d/after_session_start/
 # e.g., team-memory hook injects === TEAM === section
 dispatch "after_session_start"
+
+# ── #706: stop the clock, ALWAYS log, surface only over threshold ─────────
+# Printed here, before the CTX_OK restore below -- while stdout is still
+# whatever it was for the rest of this hook's output (the buffer file on the
+# common path, the live terminal on the fallback path), so this line rides
+# along with everything else instead of needing a second emit path of its
+# own or a chance to land after a JSON promo blob and corrupt it.
+#
+# _REMEMBER_HOOK_T0 empty means the clock could not be read at start (an
+# unreadable `date` on bash < 5) -- reported as could-not-measure, never
+# coerced into a number, the same three-state discipline #402/#621 already
+# hold this file to elsewhere.
+_REMEMBER_HOOK_ELAPSED_S=""
+if [ -n "$_REMEMBER_HOOK_T0" ]; then
+    if [ "${BASH_VERSINFO[0]:-0}" -ge 5 ]; then
+        _remember_hook_t1="$EPOCHSECONDS"
+    else
+        _remember_hook_t1=$(date +%s 2>/dev/null) || _remember_hook_t1=""
+    fi
+    case "$_remember_hook_t1" in
+        ''|*[!0-9]*) _REMEMBER_HOOK_ELAPSED_S="" ;;
+        *) _REMEMBER_HOOK_ELAPSED_S=$(( 10#$_remember_hook_t1 - 10#$_REMEMBER_HOOK_T0 )) ;;
+    esac
+    unset _remember_hook_t1
+fi
+if [ -n "$_REMEMBER_HOOK_ELAPSED_S" ]; then
+    log "hook" "session-start took ${_REMEMBER_HOOK_ELAPSED_S}s"
+    if [ "$_REMEMBER_HOOK_ELAPSED_S" -ge "$REMEMBER_SESSION_START_SLOW_S" ]; then
+        echo "=== SESSION-START ==="
+        echo "This hook took ${_REMEMBER_HOOK_ELAPSED_S}s (>= ${REMEMBER_SESSION_START_SLOW_S}s threshold). The plugin cannot tell a slow host from a slow plugin -- see \`/remember:doctor\` and this session's daily log for detail."
+        echo ""
+    fi
+else
+    log "hook" "session-start: could not measure its own duration"
+fi
 
 # The payload file does not outlive the dispatches it was published for.
 # Removed below, batched with $_REMEMBER_CTX_FILE (#679, part of #660):

@@ -35,3 +35,7 @@ Consolidation refuses to build a prompt larger than `thresholds.consolidate_max_
 
 Its "Recent errors" section tails **`<your memory store>/logs/hook-errors.log`**. That file is where a hook's own stderr goes: `bootstrap-dirs.sh` points every coding agent hook's stderr at it, and a hook that exits non-zero is reported there with its exit status and its own first lines ([#277](https://github.com/Digital-Process-Tools/claude-remember/issues/277)). It is the single most useful thing to attach to a bug report — most of what makes a plugin failure hard to diagnose from the outside is already written in it, and a report that includes it usually skips a whole round of questions.
 
+## SessionStart duration ([#706](https://github.com/Digital-Process-Tools/claude-remember/issues/706))
+
+`/remember:doctor` also reports the most recently recorded `session-start took Ns` line from the daily log — `session-start-hook.sh` writes one on every start, always, whether or not it was slow enough to also show up in the session itself (see `session_start_slow_threshold_s` in [Configuration](configuration.md)). The plugin cannot tell a slow host from a slow plugin and does not try to; it only says how long it took, which is what points a user at the right question to ask next instead of hours of "the memory plugin feels slow" with nothing to check it against.
+

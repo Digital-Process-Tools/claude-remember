@@ -858,6 +858,23 @@ MEMORY_LOG_DATE=""
 _remember_date_into MEMORY_LOG_DATE +%Y-%m-%d
 MEMORY_LOG_FILE="${REMEMBER_LOG_DIR}/memory-${MEMORY_LOG_DATE}.log"
 
+# #705: MEMORY_LOG_DATE above is a snapshot, not a subscription -- a process
+# that sources log.sh and then lives across midnight (a long-running
+# session, a backgrounded save, a consolidation round that starts at 23:58)
+# would otherwise keep writing into the file named for the day it was
+# SOURCED, forever. The fix cannot re-fork `date` on every log() call --
+# that is exactly the cost #660/#665 removed from this hot path -- so
+# log() instead compares its own already-computed HH:MM:SS timestamp
+# against the previous call's (both zero-padded 24h strings, so a plain
+# lexicographic `<` is a correct earlier-than-later test) and only pays for
+# a fresh MEMORY_LOG_DATE when the clock has visibly gone backwards, i.e.
+# wrapped through midnight. Seeded here, at source time, with the SAME
+# instant MEMORY_LOG_DATE above was computed from, so even the very first
+# log() call after a source-time-then-sleep-past-midnight gap detects the
+# rollover -- an empty seed would miss exactly that first call.
+_REMEMBER_LOG_LAST_TIME=""
+_remember_date_into _REMEMBER_LOG_LAST_TIME +%H:%M:%S
+
 # Log a timestamped message to the daily pipeline log file.
 #
 # Args:
@@ -908,6 +925,19 @@ log() {
     # `$( )` was adding on top of that, exactly the way config_into (above,
     # #665) does for config().
     _remember_date_into timestamp +%H:%M:%S
+    # #705: a lexicographic compare against the PREVIOUS call's timestamp,
+    # not a second clock read -- both are zero-padded "HH:MM:SS", so a
+    # string that sorts BEFORE the last one means the clock wrapped through
+    # midnight since then. No fork on the (overwhelming) common case where
+    # nothing wrapped; MEMORY_LOG_DATE is only re-forked (still via the
+    # same forkless builtin path on bash >= 4.2 -- an actual fork only on
+    # the REMEMBER_TZ/bash-3.2 paths, and only once per day, not per line)
+    # on the rare call where it did.
+    if [ -n "$_REMEMBER_LOG_LAST_TIME" ] && [[ "$timestamp" < "$_REMEMBER_LOG_LAST_TIME" ]]; then
+        _remember_date_into MEMORY_LOG_DATE +%Y-%m-%d
+        MEMORY_LOG_FILE="${REMEMBER_LOG_DIR}/memory-${MEMORY_LOG_DATE}.log"
+    fi
+    _REMEMBER_LOG_LAST_TIME="$timestamp"
     # #621 tried twice to gate this fork behind a cheap in-shell
     # pre-check (a message rarely carries a control byte at all, and log()
     # runs on the per-tool-call hot path) -- unconditional `[[:cntrl:]]`,

@@ -832,6 +832,39 @@ if [ -s "$_ERR_LOG" ]; then
 else
     echo "OK   No hook errors logged ($_ERR_LOG empty or absent)"
 fi
+echo ""
+
+# ── 6b. SessionStart duration (#706) ────────────────────────────────────────
+# "The daily log is right for the record, and /remember:doctor is right for
+# the read-out" -- the issue's own words. session-start-hook.sh writes
+# "session-start took Ns" into the daily log on EVERY start (never gated);
+# this reads the most recent one back so "is my host slow" is one command
+# away instead of a manual grep through logs/. Three states, not two: found,
+# no daily log exists yet (a fresh install, or capture never ran), and a
+# daily log exists but has no such line (an install from before #706 shipped
+# -- not the same as "never ran", and not reported as if it were).
+echo "-- SessionStart duration (#706) --"
+_remember_ss_glob_dir=$(_remember_forward_slash "$REMEMBER_DIR")
+_SS_LATEST_LOG=""
+for _ss_f in "$_remember_ss_glob_dir"/logs/memory-*.log; do
+    [ -f "$_ss_f" ] || continue
+    if [ -z "$_SS_LATEST_LOG" ] || [ "$_ss_f" -nt "$_SS_LATEST_LOG" ]; then
+        _SS_LATEST_LOG="$_ss_f"
+    fi
+done
+if [ -z "$_SS_LATEST_LOG" ]; then
+    echo "--   No daily log found yet -- SessionStart has not run, or logging is unwritable"
+else
+    _SS_LAST_LINE=$(grep -F "] session-start took" "$_SS_LATEST_LOG" 2>/dev/null | tail -n 1)
+    if [ -n "$_SS_LAST_LINE" ]; then
+        echo "OK   Last recorded: $_SS_LAST_LINE"
+        echo "     ($_SS_LATEST_LOG)"
+    else
+        echo "--   $_SS_LATEST_LOG has no session-start duration line -- either #706 predates"
+        echo "     this install's last SessionStart, or no line has been logged in it yet"
+    fi
+fi
+unset _remember_ss_glob_dir _SS_LATEST_LOG _SS_LAST_LINE _ss_f
 
 # Log rotation (#252). A rotation that cannot run is invisible by construction:
 # it happens inside a consolidation the user never watches, it writes one line

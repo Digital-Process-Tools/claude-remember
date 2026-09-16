@@ -48,6 +48,7 @@
   "model": "haiku",
   "reject_pattern": "",
   "handoff_mode": "single",
+  "session_start_slow_threshold_s": 5,
   "haiku": {
     "oauth_token": "",
     "anthropic_api_key": "auto"
@@ -211,6 +212,20 @@
       "a veto: one that traps TERM and keeps going is killed anyway. The signal",
       "goes to the listener's own PID, never its process group — a listener's",
       "disowned background work is deliberately left running."
+    ],
+    "session_start_slow_threshold_s": [
+      "#706: below this many whole seconds, the SessionStart hook's own",
+      "wall-clock duration is written ONLY to the daily log -- a line on",
+      "every start would be noise on a healthy host. At or above it, the",
+      "same number is also printed into the session under '=== SESSION-",
+      "START ===', so a slow HOST (not a slow plugin) is visible without",
+      "having to go looking for the daily log first. Default 5. Set 0 to",
+      "surface every start; there is no way to disable the daily-log line,",
+      "which costs one more log() call, no extra fork.",
+      "The plugin cannot diagnose a slow HOST -- see #660's own",
+      "investigation, a kernel-leak host that inflated every fork 3-10x --",
+      "and does not try to; it only says how long it took, which is what",
+      "lets a user go looking in the right place."
     ],
     "data_dir": [
       "Controls where memory data files are stored.",

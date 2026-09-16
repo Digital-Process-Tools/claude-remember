@@ -1027,3 +1027,117 @@ class TestConfigRefusesRatherThanGuesses:
         )
         assert result.returncode == 0, result.stderr
         assert result.stdout.strip() == "sonnet"
+
+
+def _make_fake_date_shim(fake_dir, date_queue_lines, time_queue_lines):
+    """A `date` on PATH that pops canned answers off two queues, one per
+    format string, and records every call it saw.
+
+    #705's fix must recompute MEMORY_LOG_DATE only when a real day rollover
+    is detected, using the same forkless builtin path as everything else on
+    this hot path -- so the test forces the fork path with
+    REMEMBER_NO_PRINTF_T=1 and puts this shim in front of PATH to control
+    what "now" answers on each call, one canned value at a time.
+    """
+    fake_dir.mkdir(parents=True, exist_ok=True)
+    (fake_dir / "date-queue").write_text("\n".join(date_queue_lines) + "\n")
+    (fake_dir / "time-queue").write_text("\n".join(time_queue_lines) + "\n")
+    (fake_dir / "date-calls.log").write_text("")
+    fake_date = fake_dir / "date"
+    fake_date.write_text(
+        '#!/bin/bash\n'
+        'here="$(cd "$(dirname "$0")" && pwd)"\n'
+        'echo "$1" >> "$here/date-calls.log"\n'
+        'case "$1" in\n'
+        '  +%Y-%m-%d) f="$here/date-queue" ;;\n'
+        '  +%H:%M:%S) f="$here/time-queue" ;;\n'
+        '  *) f="" ;;\n'
+        'esac\n'
+        'if [ -z "$f" ]; then\n'
+        '  exec /usr/bin/env -S date "$@"\n'
+        'fi\n'
+        'line=$(head -n1 "$f")\n'
+        'tail -n +2 "$f" > "$f.tmp" && mv "$f.tmp" "$f"\n'
+        'echo "$line"\n'
+    )
+    fake_date.chmod(0o755)
+    return fake_date
+
+
+def test_a_process_alive_across_midnight_files_the_write_under_the_new_day(tmp_path):
+    """#705: MEMORY_LOG_DATE was computed once at source time and never
+    revisited. A process that sources log.sh before midnight and then calls
+    log() after midnight must file that write under the NEW day, not
+    whatever day it was when the file was sourced.
+
+    The bar: would this test still pass if the code did nothing? No -- before
+    the fix, FILE2 below equals FILE1 (both "2026-01-01"), because nothing
+    ever looks at the clock again after source time.
+    """
+    project = _make_project(tmp_path, None)
+    fake_dir = tmp_path / "fakebin"
+    _make_fake_date_shim(
+        fake_dir,
+        date_queue_lines=["2026-01-01", "2026-01-02"],
+        time_queue_lines=["23:59:00", "23:59:30", "00:05:00"],
+    )
+    script = f"""
+    set -e
+    export PROJECT_DIR="{_bash_path(project)}"
+    export REMEMBER_NO_PRINTF_T=1
+    export PATH="{_bash_path(fake_dir)}:$PATH"
+    source "{_bash_path(LOG_SH)}"
+    log component "before midnight"
+    echo "FILE1=$MEMORY_LOG_FILE"
+    log component "after midnight"
+    echo "FILE2=$MEMORY_LOG_FILE"
+    """
+    env = {**os.environ}
+    result = subprocess.run([_BASH, "-c", script], env=env, capture_output=True, text=True)
+    assert result.returncode == 0, f"log.sh failed: {result.stderr}"
+    parsed = {}
+    for line in result.stdout.strip().splitlines():
+        if "=" in line:
+            k, v = line.split("=", 1)
+            parsed[k] = v
+    assert parsed["FILE1"].endswith("memory-2026-01-01.log"), parsed
+    assert parsed["FILE2"].endswith("memory-2026-01-02.log"), (
+        f"a log() call after midnight kept writing into yesterday's file: {parsed}"
+    )
+
+
+def test_log_does_not_refork_date_for_the_day_when_nothing_rolled_over(tmp_path):
+    """Positive control for the test above: the recompute path must fire
+    ONLY on an actual day rollover, never on every log() call -- that would
+    reintroduce the exact per-line fork #660/#665 removed. Without this
+    control, a naive fix that always re-forks `date +%Y-%m-%d` in log()
+    would also pass the midnight test above.
+    """
+    project = _make_project(tmp_path, None)
+    fake_dir = tmp_path / "fakebin"
+    _make_fake_date_shim(
+        fake_dir,
+        date_queue_lines=["2026-01-01"],
+        time_queue_lines=["10:00:00", "10:00:05", "10:00:10"],
+    )
+    script = f"""
+    set -e
+    export PROJECT_DIR="{_bash_path(project)}"
+    export REMEMBER_NO_PRINTF_T=1
+    export PATH="{_bash_path(fake_dir)}:$PATH"
+    source "{_bash_path(LOG_SH)}"
+    log component "one"
+    log component "two"
+    echo "FILE=$MEMORY_LOG_FILE"
+    """
+    env = {**os.environ}
+    result = subprocess.run([_BASH, "-c", script], env=env, capture_output=True, text=True)
+    assert result.returncode == 0, f"log.sh failed: {result.stderr}"
+    file_line = next(l for l in result.stdout.strip().splitlines() if l.startswith("FILE="))
+    assert file_line.endswith("memory-2026-01-01.log"), file_line
+    calls = (fake_dir / "date-calls.log").read_text().splitlines()
+    day_calls = [c for c in calls if c == "+%Y-%m-%d"]
+    assert len(day_calls) == 1, (
+        f"date was re-forked for the day component when no midnight crossing "
+        f"happened -- exactly one call (at source time) is allowed: {calls}"
+    )
