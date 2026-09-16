@@ -1233,6 +1233,21 @@ def test_a_multi_day_idle_gap_recomputes_even_when_time_never_decreases(tmp_path
     fork path (shimmed, so the two calendar dates below are fully
     controlled), while $EPOCHSECONDS itself is untouched by that variable
     and ticks for real.
+
+    #715: a 1-second simulated day and a 1.5s sleep raced ordinary shell
+    startup jitter -- EPOCHSECONDS has 1-second wall-clock granularity, and
+    `_REMEMBER_LOG_LAST_EPOCH` is captured at SOURCE time (log.sh, module
+    load), before this script's first `log()` call ("call one") ever runs.
+    On a loaded CI runner, sourcing log.sh plus setting up the fake `date`
+    shim can itself span a real 1-second tick, so the idle-gap check could
+    already read `>= 1` on call one -- a day early, before the deliberate
+    sleep below ever executes -- which is exactly the flake CI hit (FILE1
+    one day ahead, FILE2 with an empty date component because the shim's
+    second queued date was consumed early, on call one, leaving nothing
+    queued for call two). Widened to a 5s simulated day and an 8s sleep:
+    comfortably above realistic source-to-first-call startup jitter (so
+    call one does not roll over spuriously) and comfortably below the real
+    elapsed gap the deliberate sleep produces (so call two reliably does).
     """
     project = _make_project(tmp_path, None)
     fake_dir = tmp_path / "fakebin"
@@ -1245,12 +1260,12 @@ def test_a_multi_day_idle_gap_recomputes_even_when_time_never_decreases(tmp_path
     set -e
     export PROJECT_DIR="{_bash_path(project)}"
     export REMEMBER_NO_PRINTF_T=1
-    export _REMEMBER_LOG_DAY_SECONDS_TEST=1
+    export _REMEMBER_LOG_DAY_SECONDS_TEST=5
     export PATH="{_bash_path(fake_dir)}:$PATH"
     source "{_bash_path(LOG_SH)}"
     log component "call one"
     echo "FILE1=$MEMORY_LOG_FILE"
-    sleep 1.5
+    sleep 8
     log component "call two, later time-of-day, same string-compare direction"
     echo "FILE2=$MEMORY_LOG_FILE"
     """
