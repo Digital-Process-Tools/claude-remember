@@ -50,5 +50,7 @@ PS4='+$EPOCHREALTIME ' bash -x scripts/session-start-hook.sh < payload.json
 
 In the second shape the hook prints one line saying it is **not** redirecting stderr, so the absence of `hook-errors.log` entries during a profiling run is stated rather than discovered. `REMEMBER_TRACE=1` asks for the same thing without `bash -x`, for a profiler that is not bash's own xtrace.
 
+**`BASH_XTRACEFD` needs bash 4.1 or newer.** Stock macOS ships bash 3.2 as `/bin/bash`, which silently ignores the variable -- xtrace stays on fd 2 no matter what it names. The redirect knows this and stands down on that floor too, exactly as it does for a bare fd-2 trace, so a profile taken with the "best" shape above still survives on an old bash; it just lands on fd 2 like the plain case rather than in its own file.
+
 Its "Recent errors" section tails **`<your memory store>/logs/hook-errors.log`**. That file is where a hook's own stderr goes: `bootstrap-dirs.sh` points every coding agent hook's stderr at it, and a hook that exits non-zero is reported there with its exit status and its own first lines ([#277](https://github.com/Digital-Process-Tools/claude-remember/issues/277)). It is the single most useful thing to attach to a bug report — most of what makes a plugin failure hard to diagnose from the outside is already written in it, and a report that includes it usually skips a whole round of questions.
 

@@ -378,10 +378,34 @@ unset _mem_proj _mem_bd_glob_dir _mem_bd_glob_proj
 # A trace on its own fd (BASH_XTRACEFD=9) is untouched by the redirect, so
 # that case keeps it -- the stderr leak this redirect exists to stop (#643)
 # is not worth trading for a problem that is already solved.
+#
+# Third guard, below BOTH of the above (round-2 #690, found on GitHub's own
+# macOS runners): BASH_XTRACEFD was added in bash 4.1. Stock macOS ships bash
+# 3.2 as `/bin/bash` -- the same floor tests/test_session_start_fork_tax_665.py
+# already names for $BASHPID -- and 3.2 silently ignores the variable, so
+# xtrace stays on real fd 2 no matter what BASH_XTRACEFD says. Trusting the
+# variable's TEXT on that floor reproduces the exact #690 symptom this file
+# exists to fix: the guard reads "9", concludes the trace is safely
+# elsewhere, and redirects fd 2 into hook-errors.log anyway -- while the
+# trace, which never left fd 2, goes with it. Checked directly against
+# BASH_VERSINFO, the same version test lib-clock.sh and lib-lock.sh already
+# run before relying on a bash-4+ feature, rather than assumed.
+_remember_bd_has_xtracefd=0
+if [ "${BASH_VERSINFO[0]:-0}" -gt 4 ] 2>/dev/null; then
+    _remember_bd_has_xtracefd=1
+elif [ "${BASH_VERSINFO[0]:-0}" -eq 4 ] 2>/dev/null && [ "${BASH_VERSINFO[1]:-0}" -ge 1 ] 2>/dev/null; then
+    _remember_bd_has_xtracefd=1
+fi
 if [ -d "$REMEMBER_DIR/logs" ]; then
     _remember_bd_keep_fd2=""
     case "$-" in
-        (*x*) [ "${BASH_XTRACEFD:-2}" = "2" ] && _remember_bd_keep_fd2="an xtrace is running on fd 2" ;;
+        (*x*)
+            if [ "$_remember_bd_has_xtracefd" = "0" ]; then
+                _remember_bd_keep_fd2="an xtrace is running (this bash predates BASH_XTRACEFD, added in 4.1, so xtrace stays on fd 2 regardless of the variable)"
+            elif [ "${BASH_XTRACEFD:-2}" = "2" ]; then
+                _remember_bd_keep_fd2="an xtrace is running on fd 2"
+            fi
+            ;;
     esac
     [ "${REMEMBER_TRACE:-}" = "1" ] && _remember_bd_keep_fd2="REMEMBER_TRACE=1"
     if [ -n "$_remember_bd_keep_fd2" ]; then
