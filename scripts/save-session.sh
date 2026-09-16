@@ -1491,6 +1491,30 @@ if [ "$RUN_NDC" = true ]; then
     fi
 fi
 
+# --- Release save.lock before housekeeping (#709) ---
+# Nothing past this point touches now.md: the NDC subshell above is already
+# backgrounded (or never started) and re-acquires the lock itself around its
+# own commit (see the "Released before the summary log line" comment inside
+# it). Everything below -- the autonomous-log retention sweep and the
+# SessionStart cache pre-render -- used to run while the PARENT still held
+# save.lock, because the only release was the EXIT trap at the bottom of this
+# script. On a tree with hundreds of aged logs under $REMEMBER_DIR/logs/autonomous/, the
+# stat-per-file sweep alone measured 231.9s (#709) -- far past both
+# NDC_COMMIT_LOCK_TIMEOUT and FORCE_LOCK_TIMEOUT (30s each), so every other
+# save and every --force session-end flush timed out behind housekeeping
+# rather than behind any real writer.
+#
+# Guarded on HAVE_LOCK, and HAVE_LOCK is cleared right after, so the EXIT
+# trap's own `[ "$HAVE_LOCK" = true ] && lock_release` does not try to
+# release a lock this block already gave up -- lock_release's own ownership
+# check would just no-op on that double call (it refuses to release a lock
+# it does not hold), but clearing the flag keeps cleanup() from attempting a
+# release on every ordinary exit for no reason.
+if [ "$HAVE_LOCK" = true ]; then
+    lock_release "$LOCK_DIR" || true
+    HAVE_LOCK=false
+fi
+
 # --- Housekeeping: reclaim aged autonomous logs (#487, #488, #498, #502) ---
 #
 # Runs unconditionally, independent of RUN_NDC/features.ndc_compression
