@@ -352,9 +352,23 @@ def test_session_start_names_an_oversized_memory_file_instead_of_injecting_it(tm
     assert proc.returncode == 0, proc.stderr
     out = proc.stdout
 
-    assert "NOW-BODY-346" in out, "healthy memory files must still be injected"
-    assert "RECENT-BODY-346" not in out, (
-        f"an oversized recent.md was cat'd into the session ({len(out)} bytes of hook output)"
+    # #707: each assertion below dumps the full payload on failure. A flake
+    # once dropped "NOW-BODY-346" from `out` with no reproduction in hand --
+    # the elided default message ("assert 'NOW-BODY-346' in '...'") truncated
+    # exactly the evidence the next occurrence would need. The full payload
+    # is kilobytes, not megabytes, so paying for it on every failure is cheap.
+    assert "NOW-BODY-346" in out, (
+        "healthy memory files must still be injected -- full payload:\n" + out
     )
-    assert "recent.md" in out, "an oversized file must still be NAMED, not silently dropped"
-    assert str(oversized_bytes) in out, "the size must be reported so the state is diagnosable"
+    assert "RECENT-BODY-346" not in out, (
+        f"an oversized recent.md was cat'd into the session "
+        f"({len(out)} bytes of hook output) -- full payload:\n" + out
+    )
+    assert "recent.md" in out, (
+        "an oversized file must still be NAMED, not silently dropped -- "
+        "full payload:\n" + out
+    )
+    assert str(oversized_bytes) in out, (
+        "the size must be reported so the state is diagnosable -- "
+        "full payload:\n" + out
+    )
