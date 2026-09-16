@@ -55,14 +55,16 @@ jobs:
         if: runner.os == 'Windows'
         run: pip install tzdata
       # Defender's real-time scanner walking every file this job touches would be a
-      # real cost in principle, but #692 found it is not currently one: on the
-      # windows-latest image this runs against, a state read showed real-time
-      # protection already off and the whole checkout drive already excluded before
-      # this step does anything (removing the step entirely produced the same timings
-      # as keeping it -- runner noise, no trend). Runner images change, so the step
-      # stays and reports its own premise instead of asserting it: the log below says
-      # whether the exclusion is doing anything on the image of the day, rather than
-      # claiming a tax that nothing here can show was ever charged.
+      # real cost in principle, but as of #692, a state read on the windows-latest
+      # image this ran against then showed real-time protection already off and
+      # the whole checkout drive already excluded before this step did anything
+      # (removing the step entirely produced the same timings as keeping it --
+      # runner noise, no trend). That reading is a snapshot of one image, not a
+      # standing guarantee -- runner images change -- so the step does not repeat
+      # the claim as durable fact. It reports its own premise instead: the log
+      # below says whether the exclusion is doing anything on the image of the
+      # day, read before the exclusions are added so the printed state is the
+      # runner's own, not this step's.
       - name: Report Defender state, then exclude the checkout and temp dir
         if: runner.os == 'Windows'
         shell: pwsh

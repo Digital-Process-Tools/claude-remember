@@ -32,13 +32,35 @@ def test_defender_step_reports_its_own_state_before_excluding() -> None:
     assert "RealTimeProtectionEnabled" in text
     assert "ExclusionPath" in text
 
+    # Reporting state and then mutating it in the same step only proves anything
+    # if the read happens first -- a state-report that ran after the exclusions
+    # were added would print this step's own change, not the runner's own state.
+    report_at = text.index("RealTimeProtectionEnabled")
+    exclude_at = text.index('Add-MpPreference -ExclusionPath "${{ github.workspace }}"')
+    assert report_at < exclude_at, (
+        "the state report must be printed before the exclusions are added, or "
+        "the printed ExclusionPath includes this step's own additions (#692)"
+    )
+
 
 def test_defender_comment_no_longer_claims_a_tax_it_cannot_show_is_charged() -> None:
-    text = _workflow_text()
-    assert "removes that tax" not in text, (
+    text = _workflow_text().lower()
+    # A substring match on one exact phrasing only catches that phrasing coming
+    # back verbatim -- check a spread of the ways the same unchecked claim could
+    # be restated, not just the one wording #692 happened to use.
+    banned = (
+        "removes that tax",
+        "removes the tax",
+        "removes the scanning tax",
+        "eliminates that tax",
+        "eliminates the scanning cost",
+        "removes the scanning cost",
+    )
+    found = [phrase for phrase in banned if phrase in text]
+    assert not found, (
         "the old comment asserted the exclusion removes a scanning cost with "
-        "nothing in the log to show it was ever charged (#692) -- it must not "
-        "come back"
+        "nothing in the log to show it was ever charged (#692) -- it, or a "
+        f"rewording of it, must not come back: {found}"
     )
 
 
