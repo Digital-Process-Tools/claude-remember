@@ -789,7 +789,17 @@ HAIKU_VARS=$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell call-haiku "$TMP_PR
         log "haiku" "DECLINED: $(head -1 "$HAIKU_STDERR")"
         exit 0
     fi
-    log "haiku" "ERROR: $(head -1 "$HAIKU_STDERR")"; record_summary_failure; exit 1
+    # report_error, not log() alone (#694): log() only reaches the daily
+    # narrative log, and the CLI's own failure detail -- already dug out of
+    # its stdout JSON by pipeline/haiku.py's _failure_detail() and printed
+    # here by `pipeline.shell call-haiku`'s own stderr handler -- is exactly
+    # the diagnosis an operator needs when saves silently stop working.
+    # Without this, hook-errors.log (what /remember:doctor tails, and what a
+    # reporter is asked to paste) says only "exited 1" while the real cause
+    # -- an expired token, an exhausted balance, a rate limit -- sat in a
+    # second log file nobody was looking at (#693: 12 occurrences over
+    # several days before anyone found it).
+    report_error "haiku" "ERROR: $(head -1 "$HAIKU_STDERR")"; record_summary_failure; exit 1
 }
 
 safe_eval <<< "$HAIKU_VARS"
@@ -797,7 +807,10 @@ CLEANUP_FILES+=("$HAIKU_TEXT_FILE")
 log_tokens "tokens" "$TK_IN" "$TK_OUT" "$TK_CACHE" "$TK_COST"
 
 HAIKU_TEXT=$(cat "$HAIKU_TEXT_FILE")
-[ -z "$HAIKU_TEXT" ] && { log "haiku" "ERROR: empty response"; record_summary_failure; exit 1; }
+# report_error, not log() alone -- same #694 shape as the call-haiku
+# failure above: an empty summary is a real, reportable failure and must
+# reach hook-errors.log rather than only the daily narrative log.
+[ -z "$HAIKU_TEXT" ] && { report_error "haiku" "ERROR: empty response"; record_summary_failure; exit 1; }
 
 # Park a discarded reply where it can be read later. Three callers now (format
 # validator, reject gate, NDC compression) — one copy each drifts, so it lives

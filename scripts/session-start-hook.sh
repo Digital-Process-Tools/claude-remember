@@ -852,14 +852,49 @@ _remember_write_case_divergence() {
 
 # Args: $1 — sessions dir. Prints the newest transcript that is not this
 # session's, or nothing.
+#
+# A single pass over the glob, comparing mtimes with bash's own `-nt` TEST
+# BUILTIN (no fork) instead of forking `ls -t` to sort the whole directory
+# and throwing away every line but the first (#691). Measured cost of the
+# old shape (windows-latest, the #660 diagnostic): 0.104s at 500 past
+# transcripts, 0.41s at 2000 -- the only per-session cost in this hook that
+# grows with how long a project has been used. This has none: it forks
+# nothing, so its cost is the glob expansion alone.
 previous_transcript() {
-    ls -t "$1"/*.jsonl 2>/dev/null | while IFS= read -r f; do
+    local dir=$1 f base newest=""
+    for f in "$dir"/*.jsonl; do
+        [ -e "$f" ] || continue
         base=${f##*/}
         base=${base%.jsonl}
         [ "$base" = "$CURRENT_SESSION_ID" ] && continue
-        printf '%s\n' "$f"
-        break
+        if [ -z "$newest" ] || [ "$f" -nt "$newest" ]; then
+            newest=$f
+        fi
     done
+    [ -n "$newest" ] && printf '%s\n' "$newest"
+    return 0
+}
+
+# Args: $1 — sessions dir. Sets $_TWO_NEWEST_JSONL_SECOND to the
+# second-newest transcript in $1 (or "" when fewer than two exist), with no
+# id filtering at all -- the sibling call site below (#691's own "sibling
+# instance" note) has no CURRENT_SESSION_ID to exclude by and instead picks
+# positionally, on the premise that the newest untagged file is this
+# session's own. Same single-pass, fork-free shape as previous_transcript()
+# above; sets a global rather than being captured via $(...) so calling it
+# costs no subshell either.
+_second_newest_jsonl() {
+    local dir=$1 f newest="" second=""
+    for f in "$dir"/*.jsonl; do
+        [ -e "$f" ] || continue
+        if [ -z "$newest" ] || [ "$f" -nt "$newest" ]; then
+            second=$newest
+            newest=$f
+        elif [ -z "$second" ] || [ "$f" -nt "$second" ]; then
+            second=$f
+        fi
+    done
+    _TWO_NEWEST_JSONL_SECOND=$second
 }
 
 # ── Deferred: previous-session recovery and capture-gap detection (#660) ──
@@ -922,7 +957,8 @@ else
     # aimed at the wrong session, which the next startup can still correct.
     # The capture-gap check gets no such fallback, because its failure mode is
     # an accusation — see below.
-    PREV_JSONL=$(ls -t "$SESSIONS_DIR"/*.jsonl 2>/dev/null | tail -n +2 | head -1)
+    _second_newest_jsonl "$SESSIONS_DIR"
+    PREV_JSONL=$_TWO_NEWEST_JSONL_SECOND
 fi
 PREV_ID=""
 if [ -n "$PREV_JSONL" ]; then
