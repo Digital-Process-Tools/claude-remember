@@ -1290,12 +1290,15 @@ def test_a_multi_day_idle_gap_recomputes_even_when_time_never_decreases(tmp_path
     reason="the EPOCHSECONDS-based long-gap check only exists on bash >= 5",
 )
 def test_the_idle_gap_check_does_not_fire_under_a_day_that_has_not_elapsed(tmp_path):
-    """POSITIVE CONTROL for the test above, using the SAME real sleep and
-    the SAME shim, with only the day-length threshold changed -- proving the
-    previous test's pass is not just "the shim always advances the date
-    regardless of the epoch check", the same way
+    """POSITIVE CONTROL for the test above, using the same shape of shim
+    (only the day-length threshold changed) -- proving the previous test's
+    pass is not just "the shim always advances the date regardless of the
+    epoch check", the same way
     test_log_does_not_refork_date_for_the_day_when_nothing_rolled_over pairs
-    with the plain midnight test above it.
+    with the plain midnight test above it. Its own real `sleep 1.5` below is
+    intentionally UNCHANGED by #715's widening above -- at a 999999s
+    threshold it is nowhere near either margin, so it was never part of the
+    race that test's docstring describes.
     """
     project = _make_project(tmp_path, None)
     fake_dir = tmp_path / "fakebin"
