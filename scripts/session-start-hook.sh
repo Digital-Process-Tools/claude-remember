@@ -88,8 +88,12 @@ _HOOK_DIR="${BASH_SOURCE[0]%/*}"
 # use. Below bash 5 this pays one `date +%s` fork, here and again at the end
 # -- twice per session start, not per line, so it does not reintroduce the
 # per-call cost #660/#665 removed elsewhere on this same file's hot path.
+# _REMEMBER_HOOK_FORCE_DATE_FALLBACK=1 forces the `date +%s` path even on
+# bash >= 5 -- a test-only seam, the same shape REMEMBER_NO_PRINTF_T gives
+# lib-clock.sh, needed because EPOCHSECONDS is a live bash builtin and
+# cannot be pinned by direct assignment (confirmed while writing this).
 _REMEMBER_HOOK_T0=""
-if [ "${BASH_VERSINFO[0]:-0}" -ge 5 ]; then
+if [ "${BASH_VERSINFO[0]:-0}" -ge 5 ] && [ "${_REMEMBER_HOOK_FORCE_DATE_FALLBACK:-0}" != "1" ]; then
     _REMEMBER_HOOK_T0="$EPOCHSECONDS"
 else
     _REMEMBER_HOOK_T0=$(date +%s 2>/dev/null) || _REMEMBER_HOOK_T0=""
@@ -2003,16 +2007,29 @@ dispatch "after_session_start"
 # unreadable `date` on bash < 5) -- reported as could-not-measure, never
 # coerced into a number, the same three-state discipline #402/#621 already
 # hold this file to elsewhere.
+#
+# Self-review finding: a wall clock stepped BACKWARD between the two reads
+# (an NTP correction mid-hook, the same class of clock anomaly #705's own
+# review raised) produces a negative subtraction here with nothing to catch
+# it -- a plausible-looking `"session-start took -3s"` in the daily log,
+# which is a FOURTH, unnamed state hiding inside what looks like "measured".
+# Clamped to could-not-measure instead: a negative duration is not a
+# smaller-than-usual real one, it is proof the clock cannot be trusted for
+# this run, and #402's own rule elsewhere in this codebase is to say that
+# outright rather than pass a coerced number downstream.
 _REMEMBER_HOOK_ELAPSED_S=""
 if [ -n "$_REMEMBER_HOOK_T0" ]; then
-    if [ "${BASH_VERSINFO[0]:-0}" -ge 5 ]; then
+    if [ "${BASH_VERSINFO[0]:-0}" -ge 5 ] && [ "${_REMEMBER_HOOK_FORCE_DATE_FALLBACK:-0}" != "1" ]; then
         _remember_hook_t1="$EPOCHSECONDS"
     else
         _remember_hook_t1=$(date +%s 2>/dev/null) || _remember_hook_t1=""
     fi
     case "$_remember_hook_t1" in
         ''|*[!0-9]*) _REMEMBER_HOOK_ELAPSED_S="" ;;
-        *) _REMEMBER_HOOK_ELAPSED_S=$(( 10#$_remember_hook_t1 - 10#$_REMEMBER_HOOK_T0 )) ;;
+        *)
+            _REMEMBER_HOOK_ELAPSED_S=$(( 10#$_remember_hook_t1 - 10#$_REMEMBER_HOOK_T0 ))
+            [ "$_REMEMBER_HOOK_ELAPSED_S" -ge 0 ] || _REMEMBER_HOOK_ELAPSED_S=""
+            ;;
     esac
     unset _remember_hook_t1
 fi

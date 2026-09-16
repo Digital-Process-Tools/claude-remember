@@ -131,3 +131,64 @@ def test_a_run_over_threshold_also_surfaces_the_duration_in_the_session(tmp_path
         f"the daily log stopped recording once the session line started "
         f"showing up too: {log_text!r}"
     )
+
+
+def test_a_backward_clock_step_is_reported_as_could_not_measure_not_a_negative_number(tmp_path):
+    """Self-review finding on the #706 fix itself: a wall clock stepped
+    BACKWARD between the start and end reads (an NTP correction mid-hook) is
+    an un-named FOURTH state hiding inside what looks like "measured" --
+    without a clamp, `_REMEMBER_HOOK_ELAPSED_S` goes negative and the daily
+    log gets a plausible-looking "session-start took -3s" instead of an
+    honest "could not measure".
+
+    EPOCHSECONDS cannot be pinned (confirmed elsewhere in this suite), so
+    this forces the `date +%s` fallback path with
+    `_REMEMBER_HOOK_FORCE_DATE_FALLBACK=1` -- a test-only seam mirroring
+    lib-clock.sh's own REMEMBER_NO_PRINTF_T -- and shims `date` to answer a
+    LATER epoch first (start) and an EARLIER one second (end), the exact
+    shape of a backward step.
+    """
+    home, project, remember = _store(tmp_path)
+    fake_dir = tmp_path / "fakebin"
+    fake_dir.mkdir(parents=True, exist_ok=True)
+    (fake_dir / "date-calls.log").write_text("")
+    fake_date = fake_dir / "date"
+    # First call answers a LATER epoch (t0), every call after answers an
+    # EARLIER one (t1 and beyond) -- a stable backward step regardless of
+    # exactly how many `date +%s` calls this run happens to make, rather
+    # than a short queue that would raise IndexError/echo nothing on an
+    # unexpected extra call.
+    fake_date.write_text(
+        '#!/bin/bash\n'
+        'here="$(cd "$(dirname "$0")" && pwd)"\n'
+        'echo "$@" >> "$here/date-calls.log"\n'
+        'count_file="$here/date-count"\n'
+        'n=$(cat "$count_file" 2>/dev/null || echo 0)\n'
+        'echo $((n + 1)) > "$count_file"\n'
+        'if [ "$n" -eq 0 ]; then\n'
+        '  echo 2000000000\n'
+        'else\n'
+        '  echo 1000000000\n'
+        'fi\n'
+    )
+    fake_date.chmod(0o755)
+
+    env = _env(home, project, remember, f"{fake_dir}{os.pathsep}{os.environ['PATH']}")
+    env["_REMEMBER_HOOK_FORCE_DATE_FALLBACK"] = "1"
+
+    result = _run_hook(env)
+    assert result.returncode == 0, result.stderr[-2000:]
+
+    log_text = _daily_log_text(remember)
+    assert "could not measure its own duration" in log_text, (
+        f"a backward clock step must be reported as could-not-measure: {log_text!r}"
+    )
+    assert "-1000000000s" not in log_text and " -" not in log_text.split(
+        "session-start"
+    )[-1][:20], (
+        f"a negative duration leaked into the daily log instead of being "
+        f"clamped to could-not-measure: {log_text!r}"
+    )
+    assert "=== SESSION-START ===" not in result.stdout, (
+        "an unmeasurable duration must never surface as a slow-session banner"
+    )

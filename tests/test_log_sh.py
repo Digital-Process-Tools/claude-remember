@@ -1141,3 +1141,117 @@ def test_log_does_not_refork_date_for_the_day_when_nothing_rolled_over(tmp_path)
         f"date was re-forked for the day component when no midnight crossing "
         f"happened -- exactly one call (at source time) is allowed: {calls}"
     )
+
+
+def _bash_major_version(bash) -> int:
+    """0 on any failure -- the caller treats 0 as "skip", never as "bash 0"."""
+    if not bash:
+        return 0
+    result = subprocess.run(
+        [bash, "-c", 'echo "${BASH_VERSINFO[0]:-0}"'],
+        capture_output=True, text=True,
+    )
+    try:
+        return int(result.stdout.strip())
+    except ValueError:
+        return 0
+
+
+@pytest.mark.skipif(
+    _bash_major_version(_BASH) < 5,
+    reason="the EPOCHSECONDS-based long-gap check only exists on bash >= 5 -- "
+    "log.sh's own comment says there is no forkless equivalent below it, so "
+    "this class is genuinely untested there, not silently skipped",
+)
+def test_a_multi_day_idle_gap_recomputes_even_when_time_never_decreases(tmp_path):
+    """Self-review finding on the #705 fix itself: the time-decrease check
+    ALONE only catches a day change whose NEXT log() call happens to land at
+    an EARLIER time-of-day than the one before it (the 23:58-consolidation
+    case the issue names). An infrequently-logging process whose next call,
+    after a multi-day idle gap, lands at a LATER time-of-day than its last
+    call never trips that check -- the string never "goes backward" -- which
+    would silently reintroduce #705 under a different timing.
+
+    EPOCHSECONDS cannot be pinned by direct assignment (confirmed: it is a
+    live bash builtin, the same trap this repo's own lib-clock.sh docs name
+    for EPOCHREALTIME), so this drives the REAL comparison with a real, short
+    sleep and `_REMEMBER_LOG_DAY_SECONDS_TEST` standing in for a real 86400s
+    day -- REMEMBER_NO_PRINTF_T=1 still forces the `+%Y-%m-%d`/`+%H:%M:%S`
+    fork path (shimmed, so the two calendar dates below are fully
+    controlled), while $EPOCHSECONDS itself is untouched by that variable
+    and ticks for real.
+    """
+    project = _make_project(tmp_path, None)
+    fake_dir = tmp_path / "fakebin"
+    _make_fake_date_shim(
+        fake_dir,
+        date_queue_lines=["2026-01-01", "2026-01-02"],
+        time_queue_lines=["10:00:00", "10:00:05", "10:00:10"],
+    )
+    script = f"""
+    set -e
+    export PROJECT_DIR="{_bash_path(project)}"
+    export REMEMBER_NO_PRINTF_T=1
+    export _REMEMBER_LOG_DAY_SECONDS_TEST=1
+    export PATH="{_bash_path(fake_dir)}:$PATH"
+    source "{_bash_path(LOG_SH)}"
+    log component "call one"
+    echo "FILE1=$MEMORY_LOG_FILE"
+    sleep 1.5
+    log component "call two, later time-of-day, same string-compare direction"
+    echo "FILE2=$MEMORY_LOG_FILE"
+    """
+    env = {**os.environ}
+    result = subprocess.run([_BASH, "-c", script], env=env, capture_output=True, text=True)
+    assert result.returncode == 0, f"log.sh failed: {result.stderr}"
+    parsed = {}
+    for line in result.stdout.strip().splitlines():
+        if "=" in line:
+            k, v = line.split("=", 1)
+            parsed[k] = v
+    assert parsed["FILE1"].endswith("memory-2026-01-01.log"), parsed
+    assert parsed["FILE2"].endswith("memory-2026-01-02.log"), (
+        f"an idle-gap rollover where time-of-day never decreased was not "
+        f"detected by the EPOCHSECONDS-based check: {parsed}"
+    )
+
+
+@pytest.mark.skipif(
+    _bash_major_version(_BASH) < 5,
+    reason="the EPOCHSECONDS-based long-gap check only exists on bash >= 5",
+)
+def test_the_idle_gap_check_does_not_fire_under_a_day_that_has_not_elapsed(tmp_path):
+    """POSITIVE CONTROL for the test above, using the SAME real sleep and
+    the SAME shim, with only the day-length threshold changed -- proving the
+    previous test's pass is not just "the shim always advances the date
+    regardless of the epoch check", the same way
+    test_log_does_not_refork_date_for_the_day_when_nothing_rolled_over pairs
+    with the plain midnight test above it.
+    """
+    project = _make_project(tmp_path, None)
+    fake_dir = tmp_path / "fakebin"
+    _make_fake_date_shim(
+        fake_dir,
+        date_queue_lines=["2026-01-01"],
+        time_queue_lines=["10:00:00", "10:00:05", "10:00:10"],
+    )
+    script = f"""
+    set -e
+    export PROJECT_DIR="{_bash_path(project)}"
+    export REMEMBER_NO_PRINTF_T=1
+    export _REMEMBER_LOG_DAY_SECONDS_TEST=999999
+    export PATH="{_bash_path(fake_dir)}:$PATH"
+    source "{_bash_path(LOG_SH)}"
+    log component "call one"
+    sleep 1.5
+    log component "call two"
+    echo "FILE=$MEMORY_LOG_FILE"
+    """
+    env = {**os.environ}
+    result = subprocess.run([_BASH, "-c", script], env=env, capture_output=True, text=True)
+    assert result.returncode == 0, f"log.sh failed: {result.stderr}"
+    file_line = next(l for l in result.stdout.strip().splitlines() if l.startswith("FILE="))
+    assert file_line.endswith("memory-2026-01-01.log"), (
+        f"the epoch-based check fired despite the configured day length "
+        f"({999999}s) not having elapsed: {file_line}"
+    )
