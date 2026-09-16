@@ -668,10 +668,21 @@ def _configured_anthropic_key_policy() -> str:
             # How the bundled config can ship the key as "not configured",
             # matching `haiku.oauth_token`'s own empty-means-unset convention.
             return _ANTHROPIC_KEY_POLICY_DEFAULT
+        # The refused value is described, never echoed. This key's NAME invites
+        # an operator to paste an actual API key into it, and a warning that
+        # quoted the value would then write that key to the daily log in clear
+        # text -- turning a typo into a leaked credential on disk. CodeQL flags
+        # exactly this shape, and it is right to.
+        if isinstance(value, str):
+            shape = f"a {len(value.strip())}-character string"
+        else:
+            shape = f"a {type(value).__name__} value"
         _warn(
-            f"WARNING: ignoring haiku.anthropic_api_key in {path} -- "
-            f"{value!r} is not one of {', '.join(_ANTHROPIC_KEY_POLICIES)}; "
-            f"falling back to '{_ANTHROPIC_KEY_POLICY_DEFAULT}'"
+            f"WARNING: ignoring haiku.anthropic_api_key in {path} -- {shape}, "
+            f"not one of {', '.join(_ANTHROPIC_KEY_POLICIES)}; falling back to "
+            f"'{_ANTHROPIC_KEY_POLICY_DEFAULT}'. The value itself is not logged: "
+            "this key takes a policy word, and anyone who pasted a real key here "
+            "must not have it written to disk"
         )
         return _ANTHROPIC_KEY_POLICY_DEFAULT
     return _ANTHROPIC_KEY_POLICY_DEFAULT

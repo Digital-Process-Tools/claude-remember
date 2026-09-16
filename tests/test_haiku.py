@@ -364,7 +364,7 @@ def test_anthropic_api_key_policy_unrecognised_value_warns_and_falls_back(
     """A value nothing recognises must not silently grade as one of the two
     behaviours (#703). It falls back to `auto` -- here, a token is present, so
     `auto` strips -- and says so where the operator reads warnings."""
-    _write_config(no_ambient_credentials, {"anthropic_api_key": "yes please"})
+    _write_config(no_ambient_credentials, {"anthropic_api_key": "sk-ant-api03-pasted-here"})
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-example")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-example")
     mock_run.return_value = MagicMock(
@@ -376,7 +376,29 @@ def test_anthropic_api_key_policy_unrecognised_value_warns_and_falls_back(
     assert "ANTHROPIC_API_KEY" not in mock_run.call_args[1]["env"]
     warnings = " ".join(str(c.args[0]) for c in mock_warn.call_args_list)
     assert "haiku.anthropic_api_key" in warnings
-    assert "yes please" in warnings, "the refused value belongs in the warning"
+    assert "auto, keep, strip" in warnings, "the legal values belong in the warning"
+    assert "sk-ant-api03-pasted-here" not in warnings, (
+        "the refused value must NOT be echoed -- this key's name invites pasting a "
+        "real credential into it, and the daily log is a file on disk"
+    )
+
+
+@patch("pipeline.haiku.subprocess.run")
+def test_anthropic_api_key_policy_recognised_value_warns_about_nothing(
+    mock_run, monkeypatch, no_ambient_credentials
+):
+    """The positive control for the warning above: a value the code accepts
+    must produce no warning at all, or "warns on a bad value" would be
+    indistinguishable from "warns on every value" (#703)."""
+    _write_config(no_ambient_credentials, {"anthropic_api_key": "keep"})
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-example")
+    mock_run.return_value = MagicMock(
+        returncode=0, stdout=_mock_claude_response("x"), stderr="")
+
+    with patch("pipeline.haiku._warn") as mock_warn:
+        call_haiku("p")
+
+    assert mock_warn.call_args_list == []
 
 
 @patch("pipeline.haiku.subprocess.run")
