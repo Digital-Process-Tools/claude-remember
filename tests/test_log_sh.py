@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -1061,7 +1062,47 @@ def _make_fake_date_shim(fake_dir, date_queue_lines, time_queue_lines):
         'echo "$line"\n'
     )
     fake_date.chmod(0o755)
+    # #488 (tests/test_session_end_log_names_488.py): Path.chmod(0o755) run
+    # by a native Windows Python only ever toggles the read-only attribute --
+    # there is no POSIX execute bit on that platform for it to set, so a shim
+    # this process creates may carry none of whatever MSYS2's own exec()/
+    # PATH-search checks for, and Git Bash falls through to the REAL `date`
+    # on PATH instead of this one. Best-effort second attempt: ask bash
+    # itself (already resolved as `_BASH`, real Git Bash on Windows) to
+    # chmod the file, which goes through MSYS2's own permission layer
+    # instead of Windows Python's. Deliberately best-effort (`check=False`)
+    # -- `_assert_date_shim_took_or_skip` below is the second line of
+    # defence if this ALSO does not make MSYS treat the file as executable.
+    if os.name == "nt" and _BASH is not None:
+        subprocess.run(
+            [_BASH, "-c", f"chmod +x {shlex.quote(_bash_path(fake_date))}"],
+            capture_output=True, timeout=10, check=False,
+        )
     return fake_date
+
+
+def _assert_date_shim_took_or_skip(fake_dir) -> None:
+    """Detect whether `_make_fake_date_shim`'s `date` on PATH actually
+    intercepted log.sh's `date` calls, and skip the calling test with a
+    specific, stated reason if it did not -- rather than asserting a false
+    failure against #705's own fix. The shim appends to `date-calls.log` on
+    EVERY invocation it receives, real-format or not, so an empty log after
+    the subprocess has run means Git Bash resolved the real `date` on PATH
+    instead of this one (the #488 class), never that the shim ran and saw
+    no calls -- log.sh always calls `date` at least once to build
+    MEMORY_LOG_DATE.
+    """
+    calls_log = fake_dir / "date-calls.log"
+    if calls_log.is_file() and calls_log.read_text().strip():
+        return
+    pytest.skip(
+        "the date PATH shim (_make_fake_date_shim) did not intercept "
+        "log.sh's `date` calls on this platform -- date-calls.log stayed "
+        "empty, consistent with the real `date` binary answering instead "
+        "(#488's own class: a chmod'd-by-native-Windows-Python shim is not "
+        "always treated as executable by Git Bash/MSYS2's PATH search). "
+        "#705's own fix is not what this pins and is unaffected either way."
+    )
 
 
 def test_a_process_alive_across_midnight_files_the_write_under_the_new_day(tmp_path):
@@ -1095,6 +1136,7 @@ def test_a_process_alive_across_midnight_files_the_write_under_the_new_day(tmp_p
     env = {**os.environ}
     result = subprocess.run([_BASH, "-c", script], env=env, capture_output=True, text=True)
     assert result.returncode == 0, f"log.sh failed: {result.stderr}"
+    _assert_date_shim_took_or_skip(fake_dir)
     parsed = {}
     for line in result.stdout.strip().splitlines():
         if "=" in line:
@@ -1133,6 +1175,7 @@ def test_log_does_not_refork_date_for_the_day_when_nothing_rolled_over(tmp_path)
     env = {**os.environ}
     result = subprocess.run([_BASH, "-c", script], env=env, capture_output=True, text=True)
     assert result.returncode == 0, f"log.sh failed: {result.stderr}"
+    _assert_date_shim_took_or_skip(fake_dir)
     file_line = next(l for l in result.stdout.strip().splitlines() if l.startswith("FILE="))
     assert file_line.endswith("memory-2026-01-01.log"), file_line
     calls = (fake_dir / "date-calls.log").read_text().splitlines()
@@ -1204,6 +1247,7 @@ def test_a_multi_day_idle_gap_recomputes_even_when_time_never_decreases(tmp_path
     env = {**os.environ}
     result = subprocess.run([_BASH, "-c", script], env=env, capture_output=True, text=True)
     assert result.returncode == 0, f"log.sh failed: {result.stderr}"
+    _assert_date_shim_took_or_skip(fake_dir)
     parsed = {}
     for line in result.stdout.strip().splitlines():
         if "=" in line:
@@ -1250,6 +1294,7 @@ def test_the_idle_gap_check_does_not_fire_under_a_day_that_has_not_elapsed(tmp_p
     env = {**os.environ}
     result = subprocess.run([_BASH, "-c", script], env=env, capture_output=True, text=True)
     assert result.returncode == 0, f"log.sh failed: {result.stderr}"
+    _assert_date_shim_took_or_skip(fake_dir)
     file_line = next(l for l in result.stdout.strip().splitlines() if l.startswith("FILE="))
     assert file_line.endswith("memory-2026-01-01.log"), (
         f"the epoch-based check fired despite the configured day length "

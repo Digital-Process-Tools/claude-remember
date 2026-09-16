@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -172,12 +173,34 @@ def test_a_backward_clock_step_is_reported_as_could_not_measure_not_a_negative_n
         'fi\n'
     )
     fake_date.chmod(0o755)
+    # #488 (tests/test_session_end_log_names_488.py): Path.chmod(0o755) run
+    # by a native Windows Python only ever toggles the read-only attribute --
+    # MSYS2's own exec()/PATH-search checks may see none of it, and Git Bash
+    # falls through to the REAL `date` on PATH instead of this one.
+    # Best-effort second attempt: ask bash itself to chmod the file, which
+    # goes through MSYS2's own permission layer instead of Windows Python's.
+    if os.name == "nt" and BASH is not None:
+        subprocess.run(
+            [BASH, "-c", f"chmod +x {shlex.quote(fake_date.as_posix())}"],
+            capture_output=True, timeout=10, check=False,
+        )
 
     env = _env(home, project, remember, f"{fake_dir}{os.pathsep}{os.environ['PATH']}")
     env["_REMEMBER_HOOK_FORCE_DATE_FALLBACK"] = "1"
 
     result = _run_hook(env)
     assert result.returncode == 0, result.stderr[-2000:]
+
+    calls_log = (fake_dir / "date-calls.log")
+    if not (calls_log.is_file() and calls_log.read_text().strip()):
+        pytest.skip(
+            "the date PATH shim did not intercept `date +%s` on this "
+            "platform -- date-calls.log stayed empty, consistent with the "
+            "real `date` binary answering instead (#488's own class: a "
+            "chmod'd-by-native-Windows-Python shim is not always treated "
+            "as executable by Git Bash/MSYS2's PATH search). #706's own "
+            "fix is not what this pins and is unaffected either way."
+        )
 
     log_text = _daily_log_text(remember)
     assert "could not measure its own duration" in log_text, (
