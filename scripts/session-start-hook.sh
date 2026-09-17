@@ -416,7 +416,12 @@ if [ "${REMEMBER_DEFER:-1}" != "0" ]; then
 fi
 if [ "$_remember_defer_dispatch" = 1 ]; then
     {
-        _REMEMBER_PHASE=deferred
+        # #700: exported, not a plain assignment -- a bare `_REMEMBER_PHASE=deferred`
+        # never left this subshell, so no traced child (a hooks.d/ listener,
+        # here) could see it. The whole point of the label, per the comment on
+        # _remember_deferred_phase below, is telling a deferred child from a
+        # command substitution by pid alone; that needs the child's own env.
+        export _REMEMBER_PHASE=deferred
         dispatch "before_session_start"
     } </dev/null >/dev/null 2>&1 3>&- & disown 2>/dev/null || true
 else
@@ -937,7 +942,11 @@ _remember_deferred_phase() {
 # child from a command substitution by pid alone -- $(...) gets its own pid
 # too and the parent WAITS for it -- so "how much is still synchronous" is
 # unanswerable without a phase label.
-local _REMEMBER_PHASE=deferred
+# #700: exported (local -x), so a real child forked from anywhere below
+# (the recovery save-session.sh fork, further down) carries the label into
+# its own env -- a plain `local` never left this function at all, so no
+# tracer outside this process could ever have observed it.
+local -x _REMEMBER_PHASE=deferred
 
 # Records, moved here from their original call sites above (#660). All three
 # are pure side effects -- verified mechanically that none of them assigns
@@ -1952,7 +1961,10 @@ if ! _remember_start_cache_context_load; then
         # here, and a child holding it open would keep the client waiting for
         # EOF, turning "deferred" into "still blocking, just less visibly".
         {
-            _REMEMBER_PHASE=deferred
+            # #700: exported for the same reason the before_session_start
+            # deferral above is -- a plain assignment stays inside this
+            # subshell and is invisible to anything a traced child forks.
+            export _REMEMBER_PHASE=deferred
             _remember_start_cache_context_finish_publish "$_REMEMBER_START_CTX_TMP"
         } </dev/null >/dev/null 2>&1 3>&- & disown 2>/dev/null || true
     else
