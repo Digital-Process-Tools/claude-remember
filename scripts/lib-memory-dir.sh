@@ -345,11 +345,17 @@ elif [ "${#_cfg_sources[@]}" -gt 0 ] && command -v jq >/dev/null 2>&1; then
     # at all, rather than merged and then somehow un-merged after.
     _strip_project_haiku="false"
     [ "$_project_cfg_haiku_untrusted" = "1" ] && [ -f "$_project_cfg" ] && _strip_project_haiku="true"
-    jq -s --argjson strip_last_haiku "$_strip_project_haiku" '
-        (if $strip_last_haiku then (.[-1] |= del(.haiku)) else . end)
-        | reduce .[] as $x ({}; . * $x)
-        | with_entries(select(.key | startswith("_") | not))
-    ' "${_cfg_sources[@]}" > "$_merged_cfg" 2>/dev/null \
+    # The filter is one line, not one per clause: a literal newline inside
+    # this quoted argument reaches the process's own argv byte-for-byte, and
+    # every spawn-counting test in this repo (tests/spawn_counting.py's
+    # `spawns()`) records a process as `printf "%s %s\n" "$name" "$*"` then
+    # SPLITS the log on newlines -- so a multi-line filter here does not cost
+    # one more process, it costs the SAME process several extra phantom
+    # lines in every budget this file's merge appears in (#discovered
+    # investigating a macOS-only spawn-budget CI failure on this same #726
+    # change: 4 phantom lines, one real process, jq itself is whitespace-
+    # insensitive so this is a pure counting fix with no behavior change).
+    jq -s --argjson strip_last_haiku "$_strip_project_haiku" '(if $strip_last_haiku then (.[-1] |= del(.haiku)) else . end) | reduce .[] as $x ({}; . * $x) | with_entries(select(.key | startswith("_") | not))' "${_cfg_sources[@]}" > "$_merged_cfg" 2>/dev/null \
         || cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null
 elif [ "${#_cfg_sources[@]}" -gt 0 ]; then
     # No jq — do the same deep-merge in Python instead of silently dropping

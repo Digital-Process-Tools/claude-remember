@@ -323,15 +323,22 @@ _SANCTIONED_DIVERGENCE = {
             # #726: when the project layer's `haiku` block is untrusted, it is
             # always the LAST element `-s` slurps (project cfg is appended last
             # to `_cfg_sources` when present) -- deleted before the reduce, never
-            # merged in at all.
+            # merged in at all. The filter is kept on ONE line (rather than the
+            # more readable multi-line form first shipped): a literal newline
+            # inside this quoted argument reaches the jq process's own argv,
+            # and tests/spawn_counting.py's shim logs a spawn as `printf "%s
+            # %s\n" "$name" "$*"` then callers split the log on newlines -- so
+            # a multi-line filter here does not cost one more process, it
+            # costs the SAME single process several extra phantom lines in
+            # every spawn-count budget this merge appears in. Found via a
+            # macOS-only (stock bash 3.2) CI failure in
+            # tests/test_post_tool_hook_spawns.py after the multi-line form
+            # first landed: 4 phantom lines from one real jq call pushed the
+            # count from comfortably under budget to one over it.
             'elif [ "${#_cfg_sources[@]}" -gt 0 ] && command -v jq >/dev/null 2>&1; then\n'
             '    _strip_project_haiku="false"\n'
             '    [ "$_project_cfg_haiku_untrusted" = "1" ] && [ -f "$_project_cfg" ] && _strip_project_haiku="true"\n'
-            '    jq -s --argjson strip_last_haiku "$_strip_project_haiku" \'\n'
-            '        (if $strip_last_haiku then (.[-1] |= del(.haiku)) else . end)\n'
-            '        | reduce .[] as $x ({}; . * $x)\n'
-            '        | with_entries(select(.key | startswith("_") | not))\n'
-            '    \' "${_cfg_sources[@]}" > "$_merged_cfg" 2>/dev/null \\\n'
+            '    jq -s --argjson strip_last_haiku "$_strip_project_haiku" \'(if $strip_last_haiku then (.[-1] |= del(.haiku)) else . end) | reduce .[] as $x ({}; . * $x) | with_entries(select(.key | startswith("_") | not))\' "${_cfg_sources[@]}" > "$_merged_cfg" 2>/dev/null \\\n'
             '        || cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null\n',
         ),
         (
