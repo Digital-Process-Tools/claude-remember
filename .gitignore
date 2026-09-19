@@ -10,9 +10,12 @@ identity.md
 
 # #725: the local entry-point supertool's own SessionStart hook creates at
 # the repo root -- git-ignored here (tracked) rather than only in this one
-# machine's local .git/info/exclude, so a pull request cannot ship a
-# TRACKED file at this path and have git overwrite the ignored entry-point
-# on checkout.
+# machine's local .git/info/exclude, so an ordinary `git add`/`git add -A`
+# in a pull request branch will not silently track a file at this path (a
+# contributor can still force it with `git add -f`, which .gitignore alone
+# never blocks -- the actual guard against running whatever lands here is
+# the rule layer no longer recommending `./supertool` at all, see
+# tools/01-oss/00-README.md and supertool-required.md).
 /supertool
 
 # Local Claude Code state (machine scope, never shared)

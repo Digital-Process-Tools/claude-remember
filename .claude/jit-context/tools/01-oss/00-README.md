@@ -112,29 +112,28 @@ which used to live there, moved here instead, where it costs nothing per refusal
 No exception for an image, a PDF or a notebook cell: none exists in this repository today. If one
 appears, that is when it gets one -- not before.
 
-### If the triage commands in the rule don't run
+### If the triage command in the rule doesn't run
 
-**Neither `./supertool 'ops'` nor `supertool 'ops'` tells you anything about the *other* one --
-run both.** A rule is a text file the hook matches a subject against; it runs no command, and
-nothing checked reachability on your behalf before writing this file.
+**Triage with `supertool 'ops'` -- never `./supertool` (#725).** A rule is a text file the hook
+matches a subject against; it runs no command, and nothing checked reachability on your behalf
+before writing this file. `./supertool` is not a safer or equivalent fallback: a project-relative
+invocation runs whatever file the current checkout happens to have at that literal path, and (see
+the entry directly below) a pull request branch shipping a tracked file there is exactly what this
+issue closed -- so never execute `./supertool`, for triage or anything else, no matter what an
+older rule revision or a stale memory of this project says.
 
-- **`./supertool 'ops'` prints a list of ops.** Everything is wired; the refusal was about your
-  call, not your setup. Use this only to diagnose -- once diagnosed, call `supertool` (on
-  `PATH`), never the `./`-prefixed form (#725): a project-relative invocation runs whatever
-  file a checkout happens to have at that path, and a pull request branch can ship a
-  TRACKED file literally named `supertool` at the repo root, which `git checkout` writes
-  over the local entry-point on any clone.
-- **`./supertool` is missing, `supertool` works.** The binary is installed and *this clone* has
-  no entry point. `/supertool` is in the tracked `.gitignore` (#725) -- not merely this one
-  machine's local `.git/info/exclude`, which protects nothing on a fresh clone or a
-  contributor's PR checkout -- because committing the real entry point would bake one
-  machine's absolute path into every other clone, and it is created by supertool's own
-  session-start hook, so a fresh clone has none until a session has been started in it. Start
-  one, or call `supertool` (never `./supertool`, see above). Nothing is missing from your
-  installation.
-- **Neither runs.** `supertool` is not installed on this machine. It is a Claude Code plugin and
-  a declared dependency of the plugin that wrote this layer, so installing that plugin resolves
-  it from the same marketplace.
+- **`supertool 'ops'` prints a list of ops.** Everything is wired; the refusal was about your
+  call, not your setup.
+- **`supertool 'ops'` fails, and `ls -la ./supertool` (never execute it) shows nothing there
+  either.** `supertool` is not installed on this machine. It is a Claude Code plugin and a
+  declared dependency of the plugin that wrote this layer, so installing that plugin resolves it
+  from the same marketplace.
+- **`supertool 'ops'` fails, but something answers when this clone's own entry point is
+  inspected.** `/supertool` is in the tracked `.gitignore` (#725) -- git will not silently stage
+  it for you, though a contributor can still force-add a tracked file at that path with `git add
+  -f`, which is why the rule layer never runs it regardless of what's there -- and it is created
+  by supertool's own session-start hook, so a fresh clone has none until a session has been
+  started in it. Start one; `supertool` on `PATH` is the only spelling ever worth running.
 
 ### The `requires: supertool` frontmatter line, and what it does today
 

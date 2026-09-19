@@ -2396,7 +2396,7 @@ def _run_channel_health(timeout=30):
     constants) put a documented worst case north of 20s when a lookup is slow
     rather than merely present.
 
-    **`argv[0]` is resolved through `_safe_which` first (#1399), the same way
+    **`argv[0]` is resolved through `_safe_which` first (#725), the same way
     `_run` above resolves `git`/`gh`.** This used to hand `"supertool"` to
     `subprocess.run` bare, which on Windows lets a same-named
     `supertool.exe`/`supertool.cmd` planted at the root of the repository
