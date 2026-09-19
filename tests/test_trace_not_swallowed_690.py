@@ -388,16 +388,42 @@ def test_the_real_hook_traces_past_the_bootstrap(tmp_path):
     )
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "these fixtures are borrowed from test_plugin_promo_574.py "
+        "(_env/_payload/_store/_write_installed), whose own module-level "
+        "pytestmark already declares 'bash hook subprocess + POSIX "
+        "semantics -- not portable to Windows runners'. Confirmed the hard "
+        "way on PR #733's windows-latest CI (all 4 legs, 3.9-3.12): the hook "
+        "itself runs to completion and prints its normal plain-text context "
+        "('=== REMEMBER ===...') -- proof the #712 path-normalization fix "
+        "(SESSION_START.as_posix(), see test_the_real_hook_traces_past_the_bootstrap "
+        "above) is genuinely working end to end on Windows -- but the "
+        "plugin-promo systemMessage wrapper itself never fires there, most "
+        "likely because _env()'s HOME/CLAUDE_PROJECT_DIR/REMEMBER_DIR are "
+        "raw str(Path) rather than normalized, and something downstream of "
+        "that (installed_plugins.json detection, most likely) then reads as "
+        "'cannot tell', which the promo mechanism -- by design -- suppresses "
+        "exactly like a confirmed install (#574 decision 3). Making the "
+        "whole plugin-promo subsystem Windows-portable is what #574's own "
+        "authors already declined to do; it is out of scope for #712, which "
+        "is about the trace/fd-swap guard below, not about promo delivery. "
+        "Skipped here rather than reworked, matching the fixture source's "
+        "own documented limitation, so this class does not claim Windows "
+        "coverage it cannot back."
+    ),
+)
 class TestCtxBufferSkippedUnderTrace:
     """#712: the test above is the only one in this file that exercises
     session-start-hook.sh's OWN `_REMEMBER_CTX_FILE` buffer/fd-swap -- the
     six neighbours above it only source bootstrap-dirs.sh, which never
     touches that mechanism. These tests pin the guard added for #712
     directly (skip the buffer entirely whenever a trace is active) using an
-    observable that does not require a Windows runner: the plugin-promo
-    `systemMessage` only ever reaches stdout via that same buffer, so its
-    presence or absence is a direct, cross-platform proxy for "did the
-    buffer engage".
+    observable that is NOT Windows-portable (see the skipif above): the
+    plugin-promo `systemMessage` only ever reaches stdout via that same
+    buffer, so its presence or absence is a direct proxy for "did the
+    buffer engage" on every platform this class actually runs on.
     """
 
     def test_positive_control_promo_shows_without_trace(self, tmp_path):
