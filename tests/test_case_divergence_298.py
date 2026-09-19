@@ -125,7 +125,7 @@ def _apply_sanctioned_divergence(ref_code: str, rel: str) -> str:
     - Neither is on origin/main: genuinely stale. origin/main moved again and
       this allowance needs re-deriving, not blindly (re-)applied.
 
-    A file may carry more than one allowance (#429 and #662 both touch
+    A file may carry more than one allowance (#429 and #726 both touch
     lib-memory-dir.sh); they are applied in order, each judged on its own.
     """
     for old_code, new_code in _SANCTIONED_DIVERGENCE.get(rel, ()):

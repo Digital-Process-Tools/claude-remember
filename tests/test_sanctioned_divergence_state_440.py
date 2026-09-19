@@ -43,7 +43,7 @@ from tests.test_case_divergence_298 import (
 _REL = "scripts/lib-memory-dir.sh"
 
 
-# A file may carry more than one allowance (#429 and #662 both touch
+# A file may carry more than one allowance (#429 and #726 both touch
 # lib-memory-dir.sh), so `_SANCTIONED_DIVERGENCE[_REL]` is a list of
 # (old_code, new_code) pairs and each is judged on its own. `ref_code` is
 # built from every pair's shape at once so the helper sees each one in the
