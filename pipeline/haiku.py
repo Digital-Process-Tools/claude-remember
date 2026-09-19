@@ -5,15 +5,23 @@ Handles subprocess management, parent-session env stripping (CLAUDECODE +
 CLAUDE_JOB_DIR + CLAUDE_CODE_*), JSON parsing, token counting, and cost
 estimation.
 
-The CLI is invoked in a sandboxed configuration: ``cwd=tempdir``, no tools
-by default, ``max-turns`` configurable via ``REMEMBER_MAX_TURNS`` (default 4),
-no MCP servers (#94), no setting sources and therefore no hooks (#202), and the
+The CLI is invoked in a sandboxed configuration: a fresh, empty `cwd`
+created and torn down around each call (`_isolated_summarizer_cwd`, #724 --
+NOT the shared system tempdir, which is where another concurrent save's own
+tempfiles and the merged config live), every built-in tool explicitly
+disallowed unless requested (`--disallowedTools`, #724, F8 -- an empty
+`--allowedTools` alone leaves tools that need no approval still callable),
+``max-turns`` configurable via ``REMEMBER_MAX_TURNS`` (default 4), no MCP
+servers (#94), no setting sources and therefore no hooks (#202), and the
 parent Claude Code session env vars are stripped (``CLAUDECODE`` to allow a
 nested session; ``CLAUDE_JOB_DIR`` / ``CLAUDE_CODE_*`` so the child doesn't
 masquerade as the parent's session, #95). ``REMEMBER_NESTED_SUMMARIZER`` is set
 so the plugin's own hooks recognise the child and no-op (#204) — that covers
 *our* hooks specifically, and stays load-bearing on the fallback path below,
 where setting-source isolation has been dropped and the user's hooks are live.
+The Codex route (`_call_codex`) additionally runs with an allow-listed child
+environment rather than the Claude route's deny-list one, since its
+``--sandbox read-only`` still permits command execution (#724, F9/F10).
 
 The output of that call is NOT guaranteed to be the model speaking — a blocking
 hook makes the CLI answer in its own voice, on stdout, with exit 0. See
@@ -27,6 +35,7 @@ Module-level constants:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -526,6 +535,33 @@ def _accept_token(value: object, source: str) -> str | None:
     return str(value).strip()
 
 
+def _remember_dir_is_project_local(remember_dir: str) -> bool:
+    """True only when REMEMBER_DIR can be POSITIVELY shown to sit inside the
+    project checkout -- the untrusted layout #726 is about, where
+    ``.remember/config.json`` is a file the repository ships, not one the
+    operator wrote.
+
+    ``MEMORY_PROJECT_DIR`` (set by lib-memory-dir.sh, #56) is the project
+    root memory is keyed to. When it is unset -- direct python use with no
+    shell wrapper, exactly the case ``_config_candidates``'s own docstring
+    already carves out as the reason the raw fallback path exists at all --
+    this returns False rather than guessing, so that documented use keeps
+    working. The real save path always has REMEMBER_CONFIG set, and
+    ``_config_candidates`` tries that first; this raw fallback matters only
+    when it is not, so a False here in the ambiguous case does not reopen
+    #726 in practice.
+    """
+    project_dir = os.environ.get("MEMORY_PROJECT_DIR", "").strip()
+    if not project_dir:
+        return False
+    try:
+        remember_abs = os.path.realpath(remember_dir)
+        project_abs = os.path.realpath(project_dir)
+    except OSError:
+        return False
+    return remember_abs == project_abs or remember_abs.startswith(project_abs + os.sep)
+
+
 def _config_candidates() -> list[str]:
     """Config files to search for ``haiku.oauth_token``, highest priority first.
 
@@ -534,17 +570,24 @@ def _config_candidates() -> list[str]:
     before invoking the pipeline — the repo's single source of truth for config
     resolution. Reading it, rather than re-deriving the layer order here, is
     what keeps this from becoming a second config reader free to drift from the
-    shell one (#177).
+    shell one (#177). Since #726, that merge already strips an untrusted
+    project layer's ``haiku`` block before REMEMBER_CONFIG is written, so this
+    first candidate is safe as-is.
 
     The raw paths stay as a fallback for direct python use (tests, a manual
-    ``python3 -m pipeline.shell`` call) where no shell wrapper ran.
+    ``python3 -m pipeline.shell`` call) where no shell wrapper ran -- but the
+    raw ``${REMEMBER_DIR}/config.json`` is skipped when it can be shown to sit
+    inside the project checkout (#726): unlike REMEMBER_CONFIG, this file was
+    never passed through the untrusted-layer strip above, so trusting it here
+    would reopen the same hole for exactly the code path this fallback exists
+    to cover.
     """
     candidates = []
     merged = os.environ.get("REMEMBER_CONFIG", "").strip()
     if merged:
         candidates.append(merged)
     remember_dir = os.environ.get("REMEMBER_DIR", "").strip()
-    if remember_dir:
+    if remember_dir and not _remember_dir_is_project_local(remember_dir):
         candidates.append(os.path.join(remember_dir, "config.json"))
     candidates.append(os.path.join(os.path.expanduser("~"), ".remember", "config.json"))
     return candidates
@@ -977,8 +1020,23 @@ def _isolation_may_be_the_cause(stdout: str, stderr: str) -> bool:
     return False
 
 
+# Every built-in Claude Code tool that needs no user approval to run --
+# Read/Glob/Grep/Task chief among them -- and so is NOT disabled by an empty
+# `--allowedTools`, which only clears the AUTO-APPROVE list (#724, F8). This
+# summarizer is documented and comment-claimed as tool-less; `--allowedTools
+# ""` alone does not make that true, so every one of these is explicitly
+# denied unless the caller asked for it.
+_ALL_BUILTIN_TOOLS = (
+    "Read", "Glob", "Grep", "Task", "LS", "NotebookRead", "TodoWrite",
+    "WebSearch", "WebFetch", "Bash", "Edit", "Write", "MultiEdit",
+    "NotebookEdit",
+)
+
+
 def _build_cmd(tools: list[str] | None, isolate_hooks: bool) -> list[str]:
     """The nested CLI invocation, with hook isolation on or off."""
+    allowed = tools or []
+    disallowed = [t for t in _ALL_BUILTIN_TOOLS if t not in allowed]
     cmd = [
         _resolve_claude_bin(),
         "-p",
@@ -987,7 +1045,8 @@ def _build_cmd(tools: list[str] | None, isolate_hooks: bool) -> list[str]:
         "--exclude-dynamic-system-prompt-sections",
         "--model", _resolve_model(),
         "--max-turns", _resolve_max_turns(),
-        "--allowedTools", ",".join(tools) if tools else "",
+        "--allowedTools", ",".join(allowed),
+        "--disallowedTools", ",".join(disallowed),
         # Sandbox MCP: no servers + strict, so the nested session inherits none (#94)
         "--mcp-config", '{"mcpServers":{}}',
         "--strict-mcp-config",
@@ -998,11 +1057,70 @@ def _build_cmd(tools: list[str] | None, isolate_hooks: bool) -> list[str]:
     return cmd
 
 
-def _build_codex_cmd(output_file: str) -> list[str]:
+@contextlib.contextmanager
+def _isolated_summarizer_cwd():
+    """A fresh, empty directory for one summarizer subprocess call (#724, F8).
+
+    Both routes used to spawn with ``cwd=tempfile.gettempdir()`` -- the same
+    shared directory another concurrent save's own ``remember-prompt-*`` /
+    ``remember-codex-out-*`` tempfiles land in, and where the merged config
+    (which can carry a live oauth token, see docs/git-backup-security.md) is
+    written. A summarizer whose "no tools" guarantee turns out to be
+    incomplete -- built-in tools the Claude route's empty ``--allowedTools``
+    does not disable, or a command Codex's read-only sandbox still lets run
+    -- could read any of that. An empty directory, created and torn down
+    around exactly one call, has nothing project-specific in it either way.
+    """
+    d = tempfile.mkdtemp(prefix="remember-summarizer-cwd-")
+    try:
+        yield d
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+# Minimal environment for the nested `codex exec` (#724, F9/F10). Unlike the
+# Claude route, Codex's `--sandbox read-only` still executes whatever
+# commands the model issues (see _build_codex_cmd's docstring below), so
+# stripping a deny-list off an otherwise-full os.environ (what _child_env()
+# does) is not enough -- a command like `env`/`printenv` reads the child's
+# environment directly. This keeps only what the CLI itself needs to run
+# and resolve its own filesystem-based auth.
+_CODEX_CHILD_ENV_ALLOW = frozenset({
+    "PATH", "HOME", "LANG", "LC_ALL", "CODEX_HOME", "TMPDIR", "TEMP", "TMP",
+})
+
+
+def _codex_child_env() -> dict[str, str]:
+    """Allow-listed environment for `_call_codex`'s subprocess (#724, F9/F10).
+
+    ``PATH``/``HOME``: find and run the binary, resolve ``~``.
+    ``LANG``/``LC_ALL``: locale-dependent CLI output.
+    ``TMPDIR``/``TEMP``/``TMP``: whichever the platform sets, if any.
+    ``CODEX_HOME``: where Codex's own ``auth.json`` lives, if overridden --
+    unaffected by this allow-list either way, matching the note in
+    `_build_codex_cmd`'s docstring.
+
+    Nothing else -- no Anthropic key, no cloud credential, no unrelated
+    shell secret this process's own environment happens to carry -- is
+    passed through, because a command the model runs inside Codex's
+    read-only sandbox can read the child's environment directly.
+    """
+    env = {k: v for k, v in os.environ.items() if k in _CODEX_CHILD_ENV_ALLOW}
+    env[NESTED_SUMMARIZER_ENV] = "1"
+    return env
+
+
+def _build_codex_cmd(output_file: str, cwd: str) -> list[str]:
     """The nested ``codex exec`` invocation (#460).
 
-    ``--sandbox read-only``: this call summarizes, it does not act (mirrors
-    the Claude path's default empty ``--allowedTools``).
+    ``--sandbox read-only``: denies writes and network -- NOT command
+    execution. Codex's read-only sandbox still runs whatever commands the
+    model issues; this is NOT the tool-less guarantee the comment here used
+    to claim (mirroring the Claude path's default empty ``--allowedTools``,
+    itself incomplete for the same reason -- see #724, F8/F9). What actually
+    bounds the blast radius of a command run here is the allow-listed
+    environment (`_codex_child_env`) and the fresh, empty `cwd` this call is
+    given (`_isolated_summarizer_cwd`, #724).
     ``--skip-git-repo-check``: cwd is a temp dir, never a git repo.
     ``--ephemeral``: no session file persisted for a one-shot summarizer call.
     ``--ignore-user-config``: Codex's own equivalent of the Claude path's
@@ -1024,7 +1142,7 @@ def _build_codex_cmd(output_file: str) -> list[str]:
         "--skip-git-repo-check",
         "--ephemeral",
         "--ignore-user-config",
-        "-C", tempfile.gettempdir(),
+        "-C", cwd,
         "-o", output_file,
         "-",
     ]
@@ -1063,18 +1181,19 @@ def _call_codex(prompt: str, timeout: int = 120) -> HaikuResult:
     os.close(fd)
     try:
         try:
-            result = subprocess.run(
-                _build_codex_cmd(out_path),
-                input=prompt,
-                capture_output=True,
-                text=True,
-                # codex emits UTF-8; same rationale as the Claude path (#91).
-                encoding="utf-8",
-                errors="replace",
-                timeout=timeout,
-                env=_child_env(),
-                cwd=tempfile.gettempdir(),
-            )
+            with _isolated_summarizer_cwd() as summarizer_cwd:
+                result = subprocess.run(
+                    _build_codex_cmd(out_path, summarizer_cwd),
+                    input=prompt,
+                    capture_output=True,
+                    text=True,
+                    # codex emits UTF-8; same rationale as the Claude path (#91).
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=timeout,
+                    env=_codex_child_env(),
+                    cwd=summarizer_cwd,
+                )
         except FileNotFoundError as missing:
             raise RuntimeError(f"codex CLI not found: {missing}") from missing
         except subprocess.TimeoutExpired as timed_out:
@@ -1224,19 +1343,20 @@ def call_haiku(
 
     def _run(isolate_hooks: bool):
         try:
-            return subprocess.run(
-                _build_cmd(tools, isolate_hooks),
-                input=prompt,
-                capture_output=True,
-                text=True,
-                # claude emits UTF-8; without this, text=True decodes with the
-                # locale codec (cp1252 on Windows) → mojibake / UnicodeDecodeError (#91).
-                encoding="utf-8",
-                errors="replace",
-                timeout=timeout,
-                env=env,
-                cwd=tempfile.gettempdir(),
-            )
+            with _isolated_summarizer_cwd() as summarizer_cwd:
+                return subprocess.run(
+                    _build_cmd(tools, isolate_hooks),
+                    input=prompt,
+                    capture_output=True,
+                    text=True,
+                    # claude emits UTF-8; without this, text=True decodes with the
+                    # locale codec (cp1252 on Windows) → mojibake / UnicodeDecodeError (#91).
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=timeout,
+                    env=env,
+                    cwd=summarizer_cwd,
+                )
         except subprocess.TimeoutExpired as timed_out:
             # A client-side timeout aborts a call the API has already been
             # billing. Whatever partial output arrived is the only evidence of

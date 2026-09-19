@@ -55,6 +55,21 @@ Put cross-project preferences (timezone, cooldowns) in `~/.remember/config.json`
 | `haiku.anthropic_api_key`        | `auto`           | What to do with an ambient `ANTHROPIC_API_KEY` when the nested `claude -p` is spawned. The CLI resolves credentials in a fixed order and that key **out-ranks a `claude.ai` login**, so a key set for some unrelated tool silently becomes the summarizer's credential — and an exhausted one fails every background save while your interactive sessions keep working ([#703](https://github.com/Digital-Process-Tools/claude-remember/issues/703)). `auto` — strip it when another credential is visible (`CLAUDE_CODE_OAUTH_TOKEN`, a configured `haiku.oauth_token`/`REMEMBER_OAUTH_TOKEN`, or a login at `~/.claude/.credentials.json`), keep it when it is the only one, since stripping the sole credential is the same silent outage pointed at a different population. `strip` — always keep it out of the summarizer: **this is the setting for a login stored in the macOS Keychain**, which this process cannot see, so `auto` keeps the key for you. `keep` — always pass it through, e.g. to bill the summarizer to the key deliberately. An unrecognised value falls back to `auto` and is reported in the daily log. |
 | `session_start_slow_threshold_s` | `5`              | The `SessionStart` hook's own wall-clock duration is always written to the daily log (`session-start took Ns`); at or above this many whole seconds it is **also** printed into the session, under `=== SESSION-START ===`, so a slow host is visible without going looking for the daily log first ([#706](https://github.com/Digital-Process-Tools/claude-remember/issues/706)). Measured with bash 5's `EPOCHSECONDS` builtin (no added fork) or, on older bash, one `date +%s` at each end — never per log line. Set `0` to surface every start; there is no key that silences the daily-log line. |
 
+**`haiku.oauth_token` and `haiku.anthropic_api_key` are never read from a per-project
+`.remember/config.json`, in the default (legacy) storage layout.** Both live under the
+`haiku` block above, and both are security-relevant: one chooses the credential the
+nested summarizer authenticates with, the other can force your own `ANTHROPIC_API_KEY`
+to be stripped. In the default layout `.remember/` sits inside the project checkout, so
+a repository you clone can ship a `.remember/config.json` of its own -- and before
+[#726](https://github.com/Digital-Process-Tools/claude-remember/issues/726), its `haiku`
+block was trusted exactly like one you wrote yourself. It no longer is: set these two
+keys in `~/.remember/config.json` (user-global) or via `REMEMBER_OAUTH_TOKEN`, never in
+a project's own config file, if you want them honoured. External storage mode
+(`data_dir` absolute or home-relative, e.g. `~/.remember/{slug}`) is unaffected --
+`REMEMBER_DIR` there is the operator's own directory, never one a clone ships, so its
+`haiku` block stays trusted. See [git-backup-security.md](git-backup-security.md) for
+the wider "a cloned project's config is untrusted input" note.
+
 ### Environment variables
 
 A few runtime overrides aren't in `config.json` because they're per-shell rather than per-project.

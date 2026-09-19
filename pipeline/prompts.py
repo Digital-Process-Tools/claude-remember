@@ -34,6 +34,38 @@ def _read_template(name: str) -> str:
         return f.read()
 
 
+_PLACEHOLDER_BREAK = "\u200b"  # zero-width space
+
+
+def _escape_placeholder_syntax(value: str) -> str:
+    """Break up any '{{' / '}}' pairs in an untrusted substituted value.
+
+    A value inserted into a prompt template can itself contain the literal
+    two-character sequence '{{' or '}}' -- transcript text quoting the
+    template's own placeholder syntax, for instance. Left unescaped, that
+    sequence can spell out one of the four real placeholder tokens
+    ('{{TIME}}', '{{BRANCH}}', '{{LAST_ENTRY}}', '{{EXTRACT}}') in the final
+    prompt, which is indistinguishable from a genuine unsubstituted
+    placeholder to a downstream guard that greps the assembled prompt for
+    those exact strings (scripts/save-session.sh:700). Since that guard
+    aborts the save without advancing the read cursor, an attacker who gets
+    one of these tokens into a transcript can permanently stall memory
+    capture for the session (#722).
+
+    Inserting a zero-width space between the two braces keeps the value
+    visually unchanged (a human or Haiku reading the prompt still sees
+    what looks like "{{TIME}}") while breaking the exact byte match the
+    guard -- and any other single-pass '{{TOKEN}}' scan -- depends on. This
+    is applied only to substituted VALUES, never to template text itself,
+    so a genuine unsubstituted placeholder in a template is still fully
+    detectable.
+    """
+    return (
+        value.replace("{{", "{" + _PLACEHOLDER_BREAK + "{")
+        .replace("}}", "}" + _PLACEHOLDER_BREAK + "}")
+    )
+
+
 CONSOLIDATION_TEMPLATE = "consolidate-staging.prompt.txt"
 
 
@@ -70,10 +102,10 @@ def build_save_prompt(
     template = _read_template("save-session.prompt.txt")
     return (
         template
-        .replace("{{TIME}}", time)
-        .replace("{{BRANCH}}", branch)
-        .replace("{{LAST_ENTRY}}", last_entry)
-        .replace("{{EXTRACT}}", extract)
+        .replace("{{TIME}}", _escape_placeholder_syntax(time))
+        .replace("{{BRANCH}}", _escape_placeholder_syntax(branch))
+        .replace("{{LAST_ENTRY}}", _escape_placeholder_syntax(last_entry))
+        .replace("{{EXTRACT}}", _escape_placeholder_syntax(extract))
     )
 
 
@@ -87,7 +119,7 @@ def build_ndc_prompt(now_content: str) -> str:
         Complete prompt string ready to send to Haiku.
     """
     template = _read_template("compress-ndc.prompt.txt")
-    return template.replace("{{NOW_CONTENT}}", now_content)
+    return template.replace("{{NOW_CONTENT}}", _escape_placeholder_syntax(now_content))
 
 
 def build_consolidation_prompt(
@@ -113,13 +145,16 @@ def build_consolidation_prompt(
 
     staging_section = ""
     for filename, content in sorted(staging_contents.items()):
-        staging_section += f"\n--- {filename} ---\n{content}\n"
+        staging_section += (
+            f"\n--- {_escape_placeholder_syntax(filename)} ---\n"
+            f"{_escape_placeholder_syntax(content)}\n"
+        )
 
     return (
         template
         .replace("{{STAGING_FILES}}", staging_section)
-        .replace("{{RECENT}}", recent)
-        .replace("{{ARCHIVE}}", archive)
+        .replace("{{RECENT}}", _escape_placeholder_syntax(recent))
+        .replace("{{ARCHIVE}}", _escape_placeholder_syntax(archive))
     )
 
 

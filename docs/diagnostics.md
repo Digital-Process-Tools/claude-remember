@@ -54,6 +54,29 @@ In the second shape the hook prints one line saying it is **not** redirecting st
 
 Its "Recent errors" section tails **`<your memory store>/logs/hook-errors.log`**. That file is where a hook's own stderr goes: `bootstrap-dirs.sh` points every coding agent hook's stderr at it, and a hook that exits non-zero is reported there with its exit status and its own first lines ([#277](https://github.com/Digital-Process-Tools/claude-remember/issues/277)). It is the single most useful thing to attach to a bug report — most of what makes a plugin failure hard to diagnose from the outside is already written in it, and a report that includes it usually skips a whole round of questions.
 
+## A save that stalls every time: `unsubstituted placeholders in prompt`
+
+`hook-errors.log` repeating `prompt` `ERROR: unsubstituted placeholders in prompt` on every save
+for one project, never clearing on its own, is `save-session.sh`'s placeholder guard aborting
+before the read cursor advances ([#722](https://github.com/Digital-Process-Tools/claude-remember/issues/722)).
+Since the guard's own exit path runs before `save-position` is called, every later save re-extracts
+the same span and hits the same guard, so memory capture for that session stops for good until
+something clears it.
+
+Before #722 this could be forced by a literal `{{TIME}}`/`{{BRANCH}}`/`{{LAST_ENTRY}}`/`{{EXTRACT}}`
+token surviving unescaped into the assembled prompt from transcript content the summarizer inlines
+verbatim (a pasted snippet, a file the agent read, a tool result) rather than from a genuinely
+broken template; substituted values are now escaped so a literal token like that can no longer
+trigger the guard, but the recovery path below still applies to any occurrence, past or future,
+including a real template bug the guard is there to catch.
+
+**Recovery**: clear the recorded position for the affected session so the next save starts fresh
+rather than re-reading the poisoned span. `last-save.json` lives at `<store>/tmp/last-save.json`
+(`session_dir_slug`/`/remember:doctor` names `<store>`); removing that file, or deleting just the
+entry for the stuck session ID, is enough -- nothing else needs to change. The trade-off is that any
+unsummarized content in the span since the last successful save before the stall is not recaptured;
+if that matters, save it manually before clearing the position.
+
 ## SessionStart duration ([#706](https://github.com/Digital-Process-Tools/claude-remember/issues/706))
 
 `/remember:doctor` also reports the most recently recorded `session-start took Ns` line from the daily log — `session-start-hook.sh` writes one on every start, always, whether or not it was slow enough to also show up in the session itself (see `session_start_slow_threshold_s` in [Configuration](configuration.md)). The plugin cannot tell a slow host from a slow plugin and does not try to; it only says how long it took, which is what points a user at the right question to ask next instead of hours of "the memory plugin feels slow" with nothing to check it against.

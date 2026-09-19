@@ -52,6 +52,16 @@ The per-project config layer (`<REMEMBER_DIR>/config.json`, i.e. `<slug>/config.
 
 **Mitigation:** prefer the `REMEMBER_OAUTH_TOKEN` environment variable over `config.json` for this key -- it never touches disk inside the backup store at all. If you do set `haiku.oauth_token` in a project's `config.json`, that file will still never be pushed by this hook, but treat it with the same care as `~/.ssh/`.
 
+### 5. `<project>/.remember/config.json` is untrusted input when the project is a clone
+
+This is a different file from #4 above, and a different threat. Item 4 is about YOUR OWN backup store's per-project `config.json` -- something you or the plugin wrote. This item is about the default (legacy) storage layout, where `REMEMBER_DIR` resolves to `<project>/.remember`, sitting inside the checkout itself. A repository you clone can ship a `.remember/config.json` of its own, ordinary content delivered by an ordinary `git clone` -- no special access, no compromised `$HOME`, just a file the repository's author committed.
+
+Before [#726](https://github.com/Digital-Process-Tools/claude-remember/issues/726), that file's `haiku` block was merged in with the same trust as one you wrote yourself: a cloned repo's `.remember/config.json` could set `haiku.oauth_token` to choose which credential the nested summarizer authenticates with, and could set `haiku.anthropic_api_key` to `"strip"` to force your own `ANTHROPIC_API_KEY` out of the child process -- both without your ever having opened the file.
+
+**Fixed:** the per-project layer's `haiku` block is no longer merged in at all when `REMEMBER_DIR` sits inside the project checkout -- neither key reaches the nested summarizer from a file the project itself ships. This applies regardless of whether you also use git backup; it is about the *source* checkout's own `.remember/`, not the backup store. External storage mode (`data_dir` absolute or home-relative, e.g. `~/.remember/{slug}`) is unaffected, since `REMEMBER_DIR` there is your own directory, never one a clone delivers.
+
+**Mitigation, defense in depth:** treat any `.remember/config.json` that ships inside a repository you did not author as untrusted input, the same as any other file in that clone -- do not manually copy `haiku.*` settings out of it into your own config.
+
 ---
 
 ## Recommended setup

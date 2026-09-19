@@ -272,6 +272,22 @@ export REMEMBER_STORE_ROOT
 # Now that REMEMBER_DIR is known, merge all three layers.
 
 _project_cfg="${REMEMBER_DIR}/config.json"
+
+# The per-project config layer is untrusted input when REMEMBER_DIR sits
+# inside the project checkout (the default/legacy layout) -- a repository an
+# operator clones can ship .remember/config.json, and its own `haiku.*` block
+# would otherwise choose the credential the nested `claude -p` / `codex exec`
+# summarizer authenticates with, and can flip whether the operator's own
+# ANTHROPIC_API_KEY is stripped (#726). External storage mode (data_dir
+# absolute or home-relative, e.g. ~/.remember/{slug}) resolves outside any
+# checkout the project itself controls, so that layer's `haiku` block IS
+# trusted there -- the same absolute/home-relative case switch
+# _resolve_remember_dir already uses to tell the two layouts apart.
+case "$_data_dir_raw" in
+    /*|~*|[A-Za-z]:/*|[A-Za-z]:\\*) _project_cfg_haiku_untrusted=0 ;;
+    *) _project_cfg_haiku_untrusted=1 ;;
+esac
+
 SYS_TMPDIR="${TMPDIR:-/tmp}"
 # mktemp, not a PID-suffixed literal path (#429). ${SYS_TMPDIR} is a SHARED,
 # often world-writable directory, and a name built from `$$` is predictable
@@ -312,7 +328,17 @@ if [ -z "$_merged_cfg" ]; then
 elif [ "${#_cfg_sources[@]}" -gt 0 ] && command -v jq >/dev/null 2>&1; then
     # Deep-merge: later files override earlier ones. Strip `_`-prefixed keys —
     # convention: `_*` are user-facing docs (_comments/_purpose/_notes), never runtime data.
-    jq -s 'reduce .[] as $x ({}; . * $x) | with_entries(select(.key | startswith("_") | not))' "${_cfg_sources[@]}" > "$_merged_cfg" 2>/dev/null \
+    # When the project layer's `haiku` block is untrusted (#726, above), it is
+    # the LAST element `-s` slurps (project cfg is always appended last to
+    # _cfg_sources when present) -- deleted before the reduce, never merged in
+    # at all, rather than merged and then somehow un-merged after.
+    _strip_project_haiku="false"
+    [ "$_project_cfg_haiku_untrusted" = "1" ] && [ -f "$_project_cfg" ] && _strip_project_haiku="true"
+    jq -s --argjson strip_last_haiku "$_strip_project_haiku" '
+        (if $strip_last_haiku then (.[-1] |= del(.haiku)) else . end)
+        | reduce .[] as $x ({}; . * $x)
+        | with_entries(select(.key | startswith("_") | not))
+    ' "${_cfg_sources[@]}" > "$_merged_cfg" 2>/dev/null \
         || cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null
 elif [ "${#_cfg_sources[@]}" -gt 0 ]; then
     # No jq — do the same deep-merge in Python instead of silently dropping
@@ -326,7 +352,9 @@ elif [ "${#_cfg_sources[@]}" -gt 0 ]; then
     # resolver was never defined because this ran without detect-tools.sh at
     # all -- both tolerated by the ${PYTHON:-python3} fallback below).
     declare -f _remember_python >/dev/null 2>&1 && _remember_python
-    "${PYTHON:-python3}" - "$_merged_cfg" "${_cfg_sources[@]}" > /dev/null 2>&1 <<'PYMERGE' || cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null
+    _untrusted_haiku_source=""
+    [ "$_project_cfg_haiku_untrusted" = "1" ] && _untrusted_haiku_source="$_project_cfg"
+    "${PYTHON:-python3}" - "$_merged_cfg" "$_untrusted_haiku_source" "${_cfg_sources[@]}" > /dev/null 2>&1 <<'PYMERGE' || cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null
 import json
 import sys
 
@@ -341,10 +369,17 @@ def deep_merge(a, b):
 
 
 out_path = sys.argv[1]
+# Empty string when the project layer's `haiku` block is trusted (external
+# storage mode, or no project cfg at all) -- never equal to a real path then,
+# so nothing is stripped (#726, see the case switch this mirrors above).
+untrusted_haiku_path = sys.argv[2]
 merged = {}
-for path in sys.argv[2:]:
+for path in sys.argv[3:]:
     with open(path) as f:
-        merged = deep_merge(merged, json.load(f))
+        data = json.load(f)
+    if untrusted_haiku_path and path == untrusted_haiku_path and isinstance(data, dict):
+        data = {k: v for k, v in data.items() if k != "haiku"}
+    merged = deep_merge(merged, data)
 # Strip `_`-prefixed doc keys, top-level only — same convention as the jq path.
 merged = {k: v for k, v in merged.items() if not str(k).startswith("_")}
 with open(out_path, "w") as f:
