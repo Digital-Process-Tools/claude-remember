@@ -293,47 +293,6 @@ def test_remember_trace_unset_is_not_the_opt_out(tmp_path):
     assert MARKER not in proc.stderr
 
 
-@pytest.mark.xfail(
-    sys.platform == "win32",
-    reason=(
-        "round-2 #690: on windows-latest, `bash -x session-start-hook.sh` "
-        "exits 0 with zero stdout bytes even though the six tests above it "
-        "in this file pass on the same runner. PR #733's own CI (the first "
-        "real windows-latest evidence #712 ever had) found the actual "
-        "mechanism: this test (and, before this fix, TestCtxBufferSkippedUnderTrace "
-        "below) called `bash [..., str(SESSION_START)]` -- an unnormalized "
-        "pathlib str() on a WindowsPath renders pure backslashes with no "
-        "forward slash at all, and session-start-hook.sh's own self-location "
-        "(`_HOOK_DIR='${BASH_SOURCE[0]%/*}'`, line ~60) has no fallback for "
-        "that shape: with zero '/' in BASH_SOURCE[0] the pattern strip is a "
-        "no-op, `_HOOK_DIR` becomes '.', and `source './resolve-paths.sh'` "
-        "fails from whatever cwd pytest happened to be in -- resolve-paths.sh's "
-        "own `|| exit 0` then exits clean with nothing printed, exactly this "
-        "symptom. This is the same test-harness bug test_windows_native_hook_cwd_448.py "
-        "already hit and fixed once (its own docstring: 'broke session-start-hook.sh's "
-        "own self-location on the real windows-latest CI leg... a harness bug, not "
-        "a finding about the fix') and the same convention "
-        "tests/test_hooks_json.py established for exactly this reason -- this file's "
-        "own real-hook invocation had not been updated to follow it. Now fixed here "
-        "(`SESSION_START.as_posix()` throughout this file, matching the rest of the "
-        "suite); production is unaffected either way, since hooks.json always invokes "
-        "via a literal `${CLAUDE_PLUGIN_ROOT}/scripts/...` shape that guarantees at "
-        "least one forward slash regardless of platform. #712's OWN fix -- skipping "
-        "session-start-hook.sh's _REMEMBER_CTX_FILE buffer/fd-swap under an active "
-        "trace (see TestCtxBufferSkippedUnderTrace below) -- remains in place as a "
-        "harmless, precedent-matching defensive improvement, but is very likely NOT "
-        "what was causing the originally observed symptom; the path bug above is. "
-        "Left as a loud xfail rather than removed outright because this repo has "
-        "still not seen a green windows-latest run of this exact test: strict=False "
-        "so that run flips this to XPASS instead of a build failure, which is the "
-        "signal to remove the marker for good. Scoped to AssertionError specifically "
-        "-- an unrelated crash on this leg (a TimeoutExpired, a FileNotFoundError "
-        "from a missing bash) must still fail the build rather than being absorbed "
-        "as if it were this same, already-documented symptom."
-    ),
-    strict=False,
-    raises=AssertionError,
-)
 def test_the_real_hook_traces_past_the_bootstrap(tmp_path):
     """End to end, on the hook the issue was filed about.
 
