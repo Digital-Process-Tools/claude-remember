@@ -264,9 +264,17 @@ case "$GIT_BACKUP_REMOTE" in
         GIT_BACKUP_REMOTE=""
         ;;
 esac
+# A leading '-' is not the only shape that matters here: `--` stops git's
+# OPTION parsing, but it does not stop git's own REFSPEC grammar once an
+# operand position is reached, and a branch value is exactly that operand.
+# `git push -- origin "main:refs/heads/some-other-branch"` is a valid,
+# fully-formed src:dst refspec -- the colon tells git to push to a
+# destination ref OTHER than the usual one, one this value also controls. A
+# colon is rejected for the identical reason the remote-name check above
+# rejects one.
 case "$GIT_BACKUP_BRANCH" in
-    -*)
-        report_error "git-backup" "WARNING: configured git_backup.branch '$GIT_BACKUP_BRANCH' starts with '-' -- refusing to use it as a git push operand."
+    -*|*:*)
+        report_error "git-backup" "WARNING: configured git_backup.branch '$GIT_BACKUP_BRANCH' starts with '-' or contains ':' -- refusing to use it as a git push operand (a colon makes it a src:dst refspec, not a branch name)."
         GIT_BACKUP_BRANCH=""
         ;;
 esac

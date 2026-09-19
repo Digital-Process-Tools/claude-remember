@@ -254,9 +254,17 @@ case "$REMOTE_NAME" in
         REMOTE_NAME="origin"
         ;;
 esac
+# A leading '-' is not the only shape that matters here: `--` stops git's
+# OPTION parsing, but it does not stop git's own REFSPEC grammar once an
+# operand position is reached, and a branch value is exactly that operand.
+# `git fetch -- origin "main:refs/heads/some-other-branch"` is a valid,
+# fully-formed src:dst refspec -- the colon tells git to write the fetched
+# ref somewhere OTHER than the usual remote-tracking ref, to a destination
+# this value also controls. A colon is rejected for the identical reason the
+# remote-name check above rejects one.
 case "$GIT_RESTORE_BRANCH" in
-    -*)
-        report_error "git-restore" "WARNING: configured branch '$GIT_RESTORE_BRANCH' starts with '-' -- refusing to use it as a git fetch operand."
+    -*|*:*)
+        report_error "git-restore" "WARNING: configured branch '$GIT_RESTORE_BRANCH' starts with '-' or contains ':' -- refusing to use it as a git fetch operand (a colon makes it a src:dst refspec, not a branch name)."
         GIT_RESTORE_BRANCH=""
         ;;
 esac

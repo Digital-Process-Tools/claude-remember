@@ -19,6 +19,7 @@ restore hook that silently stopped fetching altogether could not pass either
 case.
 """
 
+import subprocess
 import sys
 
 import pytest
@@ -78,6 +79,34 @@ class TestFetchRejectsInjectedRemote:
         log_text = _log_text(slug_dir)
         assert "starts with '-'" in log_text
         assert "--upload-pack=touch /tmp/pwned-723-branch" in log_text
+
+    def test_colon_branch_refspec_is_rejected(self, tmp_path):
+        """A colon makes a branch value a src:dst REFSPEC rather than a plain
+        branch name -- `--` does not neutralize this, only `-`-leading
+        options, so it needs its own check alongside the leading-dash one."""
+        home, remember, _remote, slug_dir, project = _store(tmp_path)
+        cfg = _config(tmp_path, enabled=True, branch="main:refs/heads/some-other-branch")
+
+        result = _run(slug_dir, project, home, cfg=cfg, **_flock_env(tmp_path))
+        assert result.returncode == 0
+
+        state = _wait_for_fetch(remember, timeout=60)
+        assert state.get("rc") == "0", (
+            f"fetch did not succeed once the poisoned refspec was cleared: {state}"
+        )
+
+        log_text = _log_text(slug_dir)
+        assert "starts with '-' or contains ':'" in log_text
+
+        other_ref = subprocess.run(
+            ["git", "-C", str(remember), "rev-parse", "--verify", "--quiet",
+             "refs/remotes/origin/some-other-branch"],
+            capture_output=True, text=True, check=False,
+        )
+        assert other_ref.returncode != 0, (
+            "the poisoned refspec fetched into an arbitrary local ref: "
+            + other_ref.stdout
+        )
 
     def test_legitimate_remote_and_branch_still_fetch(self, tmp_path):
         """Positive control: a normal, valid remote/branch configuration is
