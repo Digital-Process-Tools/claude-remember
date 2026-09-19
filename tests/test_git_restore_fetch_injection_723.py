@@ -98,9 +98,17 @@ class TestFetchRejectsInjectedRemote:
         log_text = _log_text(slug_dir)
         assert "starts with '-' or contains ':'" in log_text
 
+        # `git fetch -- origin "main:refs/heads/some-other-branch"` writes
+        # directly to that LOCAL destination ref -- never to anything under
+        # refs/remotes/origin/, which is what an ordinary fetch populates. The
+        # ref this attack actually creates is refs/heads/some-other-branch, so
+        # that is the one this assertion has to check for the test to be able
+        # to fail at all (second-pass review caught the fetch-side test
+        # checking refs/remotes/origin/... instead, which the attack never
+        # touches, making it pass regardless of whether the guard held).
         other_ref = subprocess.run(
             ["git", "-C", str(remember), "rev-parse", "--verify", "--quiet",
-             "refs/remotes/origin/some-other-branch"],
+             "refs/heads/some-other-branch"],
             capture_output=True, text=True, check=False,
         )
         assert other_ref.returncode != 0, (

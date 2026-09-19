@@ -77,9 +77,19 @@ class TestPushRejectsInjectedRemote:
     def test_colon_branch_refspec_is_rejected(self, tmp_path):
         """A colon makes a branch value a src:dst REFSPEC rather than a plain
         branch name -- `--` does not neutralize this, only `-`-leading options.
+
+        Checks BOTH halves, not just the absence: the poisoned ref must never
+        appear on the remote (negative), AND the fallback bare push must still
+        have reached the remote at all (positive control) -- otherwise an
+        unrelated total push failure (the exact silent-mkdir-failure shape
+        logged in trap.d/719.silent-exclude-mkdir-failure.md, or any other
+        breakage) would make "the poisoned ref does not exist" trivially true
+        for the wrong reason (second-pass review's finding: this test did not
+        originally check that the push itself still succeeded).
         """
         home, remember, remote, slug_dir, project = _store_not_diverged(tmp_path)
         cfg = _config(tmp_path, branch="main:refs/heads/some-other-branch")
+        before = _remote_head(remote)
 
         result = _run(slug_dir, project, home, remember, cfg)
         assert result.returncode == 0
@@ -95,6 +105,13 @@ class TestPushRejectsInjectedRemote:
         assert other_branch.returncode != 0, (
             "the poisoned refspec created/overwrote an arbitrary branch on "
             "the remote: " + other_branch.stdout
+        )
+
+        after = _remote_head(remote)
+        assert after != before, (
+            "the fallback push never reached the remote at all -- 'the "
+            "poisoned ref does not exist' would then be trivially true for "
+            "the wrong reason"
         )
 
     def test_legitimate_remote_and_branch_still_push(self, tmp_path):
