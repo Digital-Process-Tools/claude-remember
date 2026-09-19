@@ -283,10 +283,21 @@ _project_cfg="${REMEMBER_DIR}/config.json"
 # checkout the project itself controls, so that layer's `haiku` block IS
 # trusted there -- the same absolute/home-relative case switch
 # _resolve_remember_dir already uses to tell the two layouts apart.
-case "$_data_dir_raw" in
-    /*|~*|[A-Za-z]:/*|[A-Za-z]:\\*) _project_cfg_haiku_untrusted=0 ;;
-    *) _project_cfg_haiku_untrusted=1 ;;
-esac
+# A function, not a bare top-level `case`: `local LC_ALL=C` needs a function
+# body to attach to, and this is the only way to force byte-wise bracket-range
+# matching here without a subshell fork -- same convention as
+# _resolve_remember_dir/_set_store_root above, which are exempted from
+# tests/test_locale_ranges_695.py's scan for the same reason (#695). Assigns
+# the caller's `_project_cfg_haiku_untrusted` directly, same as
+# _set_store_root does for REMEMBER_STORE_ROOT.
+_classify_project_cfg_haiku_trust() {
+    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
+    case "$_data_dir_raw" in
+        /*|~*|[A-Za-z]:/*|[A-Za-z]:\\*) _project_cfg_haiku_untrusted=0 ;;
+        *) _project_cfg_haiku_untrusted=1 ;;
+    esac
+}
+_classify_project_cfg_haiku_trust
 
 SYS_TMPDIR="${TMPDIR:-/tmp}"
 # mktemp, not a PID-suffixed literal path (#429). ${SYS_TMPDIR} is a SHARED,

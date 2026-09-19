@@ -8,9 +8,10 @@ estimation.
 The CLI is invoked in a sandboxed configuration: a fresh, empty `cwd`
 created and torn down around each call (`_isolated_summarizer_cwd`, #724 --
 NOT the shared system tempdir, which is where another concurrent save's own
-tempfiles and the merged config live), every built-in tool explicitly
-disallowed unless requested (`--disallowedTools`, #724, F8 -- an empty
-`--allowedTools` alone leaves tools that need no approval still callable),
+tempfiles and the merged config live), every built-in tool made unavailable unless requested (`--tools ""`, #724,
+F8 -- an empty `--allowedTools` alone leaves tools that need no approval
+still callable, and a hand-maintained deny-list is only ever as complete as
+its last update against the CLI's own tool inventory),
 ``max-turns`` configurable via ``REMEMBER_MAX_TURNS`` (default 4), no MCP
 servers (#94), no setting sources and therefore no hooks (#202), and the
 parent Claude Code session env vars are stripped (``CLAUDECODE`` to allow a
@@ -320,8 +321,9 @@ def _child_env() -> dict[str, str]:
     ``REMEMBER_NESTED_SUMMARIZER`` is then set as the positive counterpart to
     that stripping. Removing the parent markers is what lets the child start at
     all, and it also erases every trace that it IS a child — so the plugin's own
-    hooks fire inside it, resolve a project from ``cwd=gettempdir()``, and
-    scaffold a memory directory for the temp dir (#204). The hooks were always
+    hooks fire inside it, resolve a project from ``cwd`` (an isolated, per-call
+    directory since #724 -- previously the shared ``gettempdir()``), and
+    scaffold a memory directory there (#204). The hooks were always
     meant to no-op here; they were reading a signal this function had deleted.
     A marker we set ourselves cannot be deleted by us and cannot false-positive
     on an unrelated session, which ``CLAUDE_CODE_ENTRYPOINT=sdk-cli`` would.
@@ -542,14 +544,21 @@ def _remember_dir_is_project_local(remember_dir: str) -> bool:
     operator wrote.
 
     ``MEMORY_PROJECT_DIR`` (set by lib-memory-dir.sh, #56) is the project
-    root memory is keyed to. When it is unset -- direct python use with no
+    root memory is keyed to. When it is UNSET -- direct python use with no
     shell wrapper, exactly the case ``_config_candidates``'s own docstring
     already carves out as the reason the raw fallback path exists at all --
     this returns False rather than guessing, so that documented use keeps
     working. The real save path always has REMEMBER_CONFIG set, and
     ``_config_candidates`` tries that first; this raw fallback matters only
-    when it is not, so a False here in the ambiguous case does not reopen
-    #726 in practice.
+    when it is not, so a False here in that one specific case does not
+    reopen #726 in practice.
+
+    That is a different situation from ``MEMORY_PROJECT_DIR`` being SET but
+    ``os.path.realpath`` then raising: there, the shell wrapper DID run (this
+    is not the documented direct-python case above), so guessing "external,
+    trust it" is the wrong default for a security-motivated check -- it
+    returns True (treat as project-local, exclude the raw candidate) instead,
+    so an unresolvable path fails safe rather than falling open.
     """
     project_dir = os.environ.get("MEMORY_PROJECT_DIR", "").strip()
     if not project_dir:
@@ -558,7 +567,7 @@ def _remember_dir_is_project_local(remember_dir: str) -> bool:
         remember_abs = os.path.realpath(remember_dir)
         project_abs = os.path.realpath(project_dir)
     except OSError:
-        return False
+        return True
     return remember_abs == project_abs or remember_abs.startswith(project_abs + os.sep)
 
 
@@ -1020,23 +1029,28 @@ def _isolation_may_be_the_cause(stdout: str, stderr: str) -> bool:
     return False
 
 
-# Every built-in Claude Code tool that needs no user approval to run --
-# Read/Glob/Grep/Task chief among them -- and so is NOT disabled by an empty
-# `--allowedTools`, which only clears the AUTO-APPROVE list (#724, F8). This
-# summarizer is documented and comment-claimed as tool-less; `--allowedTools
-# ""` alone does not make that true, so every one of these is explicitly
-# denied unless the caller asked for it.
-_ALL_BUILTIN_TOOLS = (
-    "Read", "Glob", "Grep", "Task", "LS", "NotebookRead", "TodoWrite",
-    "WebSearch", "WebFetch", "Bash", "Edit", "Write", "MultiEdit",
-    "NotebookEdit",
-)
-
-
 def _build_cmd(tools: list[str] | None, isolate_hooks: bool) -> list[str]:
-    """The nested CLI invocation, with hook isolation on or off."""
+    """The nested CLI invocation, with hook isolation on or off.
+
+    ``--tools`` (not just ``--allowedTools``) is what actually makes this
+    summarizer tool-less (#724, F8). An empty ``--allowedTools`` only clears
+    the AUTO-APPROVE list -- built-in tools that need no approval at all
+    (Read, Glob, Grep, Task, ...) still run under it. A hand-maintained
+    deny-list of "every built-in tool" was tried first and rejected: it is
+    only as complete as whoever last updated it against the CLI's actual
+    tool inventory, and this repo has no test cross-referencing the two, so
+    a tool the CLI adds later (or one this list simply missed -- verified
+    against `claude --help --restricted`'s own description, which names
+    PowerShell and REPL as separate code-running tools neither an earlier
+    version of this list nor `--allowedTools` alone would have caught) stays
+    reachable by omission. ``--tools ""`` is the CLI's own primitive for
+    exactly this ("Use \"\" to disable all tools"), verified present on
+    Claude Code 2.1.261 -- the AVAILABLE set, not merely the pre-approved
+    one, so nothing outside it exists for the nested session to call at
+    all. ``--allowedTools`` is kept alongside it, unchanged, to pre-approve
+    within whatever set ``--tools`` names, when a caller does ask for tools.
+    """
     allowed = tools or []
-    disallowed = [t for t in _ALL_BUILTIN_TOOLS if t not in allowed]
     cmd = [
         _resolve_claude_bin(),
         "-p",
@@ -1045,8 +1059,8 @@ def _build_cmd(tools: list[str] | None, isolate_hooks: bool) -> list[str]:
         "--exclude-dynamic-system-prompt-sections",
         "--model", _resolve_model(),
         "--max-turns", _resolve_max_turns(),
+        "--tools", ",".join(allowed),
         "--allowedTools", ",".join(allowed),
-        "--disallowedTools", ",".join(disallowed),
         # Sandbox MCP: no servers + strict, so the nested session inherits none (#94)
         "--mcp-config", '{"mcpServers":{}}',
         "--strict-mcp-config",
@@ -1177,11 +1191,21 @@ def _call_codex(prompt: str, timeout: int = 120) -> HaikuResult:
             "is counting summarizers until it is writable again."
         )
 
-    fd, out_path = tempfile.mkstemp(prefix="remember-codex-out-", suffix=".txt")
-    os.close(fd)
     try:
-        try:
-            with _isolated_summarizer_cwd() as summarizer_cwd:
+        # The -o output file is created INSIDE the isolated cwd (dir=), not
+        # the shared tempdir (#724): a file living in the shared tempdir
+        # would be exactly the kind of concurrent-save artefact
+        # _isolated_summarizer_cwd exists to keep away from a command this
+        # sandbox still lets run. It is read back before the `with` block
+        # exits, since _isolated_summarizer_cwd's own cleanup removes the
+        # directory (and everything in it, including this file) the moment
+        # the block closes.
+        with _isolated_summarizer_cwd() as summarizer_cwd:
+            fd, out_path = tempfile.mkstemp(
+                prefix="remember-codex-out-", suffix=".txt", dir=summarizer_cwd
+            )
+            os.close(fd)
+            try:
                 result = subprocess.run(
                     _build_codex_cmd(out_path, summarizer_cwd),
                     input=prompt,
@@ -1194,44 +1218,40 @@ def _call_codex(prompt: str, timeout: int = 120) -> HaikuResult:
                     env=_codex_child_env(),
                     cwd=summarizer_cwd,
                 )
-        except FileNotFoundError as missing:
-            raise RuntimeError(f"codex CLI not found: {missing}") from missing
-        except subprocess.TimeoutExpired as timed_out:
-            # NOT _log_failed_spend: that helper is written for the Anthropic
-            # billing path (it hunts timed_out.stdout for Claude's
-            # `--output-format json` usage block and warns "tokens already
-            # spent are unknown"), and reusing it here would tell the operator
-            # an Anthropic cost was left unaccounted when this call was never
-            # billed to Anthropic in the first place -- self-contradicting the
-            # very reason this route exists. codex's own token/cost figures
-            # are a different provider's accounting and are not tracked here
-            # (see the HaikuResult construction below).
-            _warn(
-                f"WARNING: codex timed out after {timeout}s; codex's own "
-                "usage/cost for this call (a different provider's figures, "
-                "not tracked here) is unknown"
-            )
-            raise RuntimeError(f"codex timed out after {timeout}s") from timed_out
+            except FileNotFoundError as missing:
+                raise RuntimeError(f"codex CLI not found: {missing}") from missing
+            except subprocess.TimeoutExpired as timed_out:
+                # NOT _log_failed_spend: that helper is written for the Anthropic
+                # billing path (it hunts timed_out.stdout for Claude's
+                # `--output-format json` usage block and warns "tokens already
+                # spent are unknown"), and reusing it here would tell the operator
+                # an Anthropic cost was left unaccounted when this call was never
+                # billed to Anthropic in the first place -- self-contradicting the
+                # very reason this route exists. codex's own token/cost figures
+                # are a different provider's accounting and are not tracked here
+                # (see the HaikuResult construction below).
+                _warn(
+                    f"WARNING: codex timed out after {timeout}s; codex's own "
+                    "usage/cost for this call (a different provider's figures, "
+                    "not tracked here) is unknown"
+                )
+                raise RuntimeError(f"codex timed out after {timeout}s") from timed_out
 
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"codex exited {result.returncode}: "
-                f"{_failure_detail(result.stdout, result.stderr)}"
-            )
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"codex exited {result.returncode}: "
+                    f"{_failure_detail(result.stdout, result.stderr)}"
+                )
 
-        try:
-            with open(out_path, encoding="utf-8", errors="replace") as f:
-                text = f.read()
-        except OSError as unreadable:
-            raise RuntimeError(
-                f"codex exited 0 but its output file could not be read: {unreadable}"
-            ) from unreadable
+            try:
+                with open(out_path, encoding="utf-8", errors="replace") as f:
+                    text = f.read()
+            except OSError as unreadable:
+                raise RuntimeError(
+                    f"codex exited 0 but its output file could not be read: {unreadable}"
+                ) from unreadable
     finally:
         slot.release()
-        try:
-            os.remove(out_path)
-        except OSError:
-            pass
 
     if not text.strip():
         raise RuntimeError(

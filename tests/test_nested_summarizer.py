@@ -1,7 +1,9 @@
 """The nested Haiku summarizer must not scaffold a memory directory (#204).
 
-pipeline/haiku.py spawns `claude -p` with cwd=tempfile.gettempdir() to keep the
-summarizer out of the user's repo. Claude Code loads plugins in that child and
+pipeline/haiku.py spawns `claude -p` with cwd set to a scratch directory (a
+fresh, isolated per-call one since #724 -- previously the shared
+tempfile.gettempdir()) to keep the summarizer out of the user's repo. Claude
+Code loads plugins in that child and
 derives its CLAUDE_PROJECT_DIR from that cwd — so this plugin's own hooks fire
 inside the summarizer, resolve the temp dir as a project, and build a memory
 store under its slug:

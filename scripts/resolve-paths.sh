@@ -70,12 +70,13 @@
 # ============================================================================
 
 # --- Nested summarizer: there is no project here (#204) ---
-# The Haiku call in pipeline/haiku.py runs `claude -p` with cwd=gettempdir().
-# Claude Code loads plugins in that child and derives its CLAUDE_PROJECT_DIR
-# from that cwd, so every hook this plugin registers fires inside the
-# summarizer with the temp dir as its "project" — scaffolding a memory
-# directory under the temp dir's slug and injecting session-start output into
-# the summarizer's own context.
+# The Haiku call in pipeline/haiku.py runs `claude -p` with cwd set to a
+# fresh, isolated per-call directory (_isolated_summarizer_cwd, #724 --
+# previously the shared gettempdir()). Claude Code loads plugins in that
+# child and derives its CLAUDE_PROJECT_DIR from that cwd, so every hook this
+# plugin registers fires inside the summarizer with that directory as its
+# "project" — scaffolding a memory directory under its slug and injecting
+# session-start output into the summarizer's own context.
 #
 # The guard belongs here rather than in any one hook: SessionStart,
 # UserPromptSubmit and PostToolUse are all registered, all source this file,

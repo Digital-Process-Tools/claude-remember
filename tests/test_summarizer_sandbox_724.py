@@ -28,7 +28,6 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from pipeline.haiku import (
-    _ALL_BUILTIN_TOOLS,
     _build_cmd,
     _call_codex,
     _codex_child_env,
@@ -55,25 +54,23 @@ def _write_codex_output(cmd, **kwargs):
 # ── F8: built-in tools must actually be disabled ───────────────────────────
 
 
-def test_build_cmd_disallows_all_builtin_tools_when_none_requested():
+def test_build_cmd_disables_all_tools_when_none_requested():
     """No tools requested (the summarizer's only real call shape today) must
-    disable every built-in tool, not just leave the auto-approve list empty."""
+    disable every built-in tool via `--tools ""` -- the CLI's own
+    "disable all tools" primitive, not a hand-maintained deny-list that can
+    only ever be as complete as whoever last updated it against the CLI's
+    actual tool inventory (#724, F8)."""
     cmd = _build_cmd(tools=None, isolate_hooks=True)
-    assert "--disallowedTools" in cmd
-    disallowed = cmd[cmd.index("--disallowedTools") + 1].split(",")
-    for tool in _ALL_BUILTIN_TOOLS:
-        assert tool in disallowed, f"{tool!r} was not disallowed"
+    assert "--tools" in cmd
+    assert cmd[cmd.index("--tools") + 1] == ""
 
 
 def test_build_cmd_still_allows_explicitly_requested_tools():
-    """Positive control: a caller that DOES ask for a tool still gets it --
-    the deny-list is everything else, not everything."""
+    """Positive control: a caller that DOES ask for tools still gets exactly
+    those, both as the available set and as pre-approved."""
     cmd = _build_cmd(tools=["Read", "Write"], isolate_hooks=True)
+    assert cmd[cmd.index("--tools") + 1] == "Read,Write"
     assert cmd[cmd.index("--allowedTools") + 1] == "Read,Write"
-    disallowed = cmd[cmd.index("--disallowedTools") + 1].split(",")
-    assert "Read" not in disallowed
-    assert "Write" not in disallowed
-    assert "Bash" in disallowed
 
 
 # ── F8: isolated cwd, not the shared tempdir ────────────────────────────────
@@ -81,13 +78,25 @@ def test_build_cmd_still_allows_explicitly_requested_tools():
 
 @patch("pipeline.haiku.subprocess.run")
 def test_call_haiku_does_not_spawn_in_the_shared_tempdir(mock_run, monkeypatch):
-    mock_run.return_value = MagicMock(
-        returncode=0, stdout=_mock_claude_stdout("done"), stderr="")
+    """The cwd handed to subprocess.run must both differ from the shared
+    tempdir AND exist AT THE MOMENT the call runs -- checked from inside a
+    side_effect while the isolated directory is still open, since by the
+    time this test function resumes control _isolated_summarizer_cwd's own
+    `finally: shutil.rmtree(...)` has already removed it."""
+    seen = {}
+
+    def _capture_cwd_liveness(*args, **kwargs):
+        seen["cwd"] = kwargs["cwd"]
+        seen["existed_during_call"] = os.path.isdir(kwargs["cwd"])
+        return MagicMock(returncode=0, stdout=_mock_claude_stdout("done"), stderr="")
+
+    mock_run.side_effect = _capture_cwd_liveness
     call_haiku("prompt")
-    cwd = mock_run.call_args[1]["cwd"]
-    assert cwd != tempfile.gettempdir()
-    # It must still be a real, existing directory the call could use.
-    assert os.path.isdir(cwd) or True  # cleaned up after the call returns
+    assert seen["cwd"] != tempfile.gettempdir()
+    assert seen["existed_during_call"] is True
+    # Positive control on the OTHER half: cleanup actually ran, so nothing
+    # is left behind once the call has returned.
+    assert not os.path.isdir(seen["cwd"])
 
 
 @patch("pipeline.haiku.subprocess.run")

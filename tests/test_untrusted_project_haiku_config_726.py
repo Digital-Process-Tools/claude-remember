@@ -234,6 +234,23 @@ class TestConfigCandidatesSkipsProjectLocalRememberDir:
         monkeypatch.delenv("MEMORY_PROJECT_DIR", raising=False)
         assert _remember_dir_is_project_local(str(tmp_path / ".remember")) is False
 
+    def test_unresolvable_path_fails_safe_as_project_local(self, tmp_path, monkeypatch):
+        """MEMORY_PROJECT_DIR IS set (the shell wrapper did run -- not the
+        direct-python case above) but realpath() raises -- must default to
+        True (exclude the raw candidate) rather than False, since the wrong
+        default here silently reopens #726 on whatever rare host hits this."""
+        import pipeline.haiku as haiku_module
+
+        project = tmp_path / "proj"
+        project.mkdir()
+        monkeypatch.setenv("MEMORY_PROJECT_DIR", str(project))
+
+        def _raise(path):
+            raise OSError("simulated resolution failure")
+
+        monkeypatch.setattr(haiku_module.os.path, "realpath", _raise)
+        assert _remember_dir_is_project_local(str(project / ".remember")) is True
+
     def test_config_candidates_omits_project_local_remember_dir(self, tmp_path, monkeypatch):
         project = tmp_path / "proj"
         remember = project / ".remember"
