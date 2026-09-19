@@ -97,7 +97,7 @@ Once `~/.remember/` is a git repo, the `after_save` hook commits each project's 
 
 If you don't want automatic commits, leave `~/.remember/` as a plain directory and commit manually as before.
 
-#### Logs (or a credential) in a backup you made before this version
+#### Logs in a backup you made before this version
 
 The exclusions above are new, and were added at two different times. **0.12.3 and earlier staged each slug's whole subtree with nothing excluded**, on the assumption — written into the backup hook's own comment — that a root-level `.gitignore` covered `logs/` and `tmp/`. The plugin never created that file, and in external-store mode it deleted the only `.gitignore` it did write ([#285](https://github.com/Digital-Process-Tools/claude-remember/issues/285)). The setup snippet under [Back up your memory](#back-up-your-memory) has always told you to write one by hand; **if you did, none of this applies to you.** If you did not, this plugin's session logs were committed and pushed alongside your memory. Separately, **every version before the `config.json` exclusion ([#719](https://github.com/Digital-Process-Tools/claude-remember/issues/719)) staged a slug's `config.json` too** — the same "nothing excluded" gap, but for a file that can carry a live `haiku.oauth_token` OAuth credential rather than a session log.
 
