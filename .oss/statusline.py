@@ -1592,6 +1592,15 @@ def installed_plugins(project_root, plugins_root=None):
                     )
                 except (OSError, ValueError):
                     continue
+                # Self-review finding on this issue (#727): this manifest is
+                # the same PR-editable/attacker-plantable class F14 already
+                # names for repo_version's own read of the identical file --
+                # a syntactically valid non-object plugin.json here raised
+                # AttributeError out of `.get`, uncaught by anything in this
+                # function, the same crash the surrounding guards exist to
+                # close.
+                if not isinstance(manifest, dict):
+                    continue
                 record["repository"] = manifest.get("repository")
                 record["dependencies"] = manifest.get("dependencies") or []
     return found

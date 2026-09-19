@@ -112,6 +112,35 @@ def test_well_formed_installed_plugins_json_still_yields_its_entries(tmp_path):
     assert result["widgets"]["version"] == "1.0.0"
 
 
+def test_non_object_per_plugin_manifest_does_not_raise(tmp_path):
+    """Self-review finding: installed_plugins() reads a SECOND JSON document per
+    entry -- the installed plugin's own .claude-plugin/plugin.json, at the
+    installPath an installed_plugins.json entry names -- and called `.get()`
+    on it with no isinstance guard, the same crash class as the top-level
+    document this module's other fixes already cover."""
+    project = str(tmp_path / "project")
+    install_path = tmp_path / "installed-widgets"
+    (install_path / ".claude-plugin").mkdir(parents=True)
+    (install_path / ".claude-plugin" / "plugin.json").write_text("null")
+    doc = {
+        "plugins": {
+            "widgets@acme": [
+                {
+                    "version": "1.0.0",
+                    "scope": "user",
+                    "installPath": str(install_path),
+                },
+            ]
+        }
+    }
+    (tmp_path / "installed_plugins.json").write_text(json.dumps(doc))
+
+    result = statusline.installed_plugins(project, plugins_root=tmp_path)  # must not raise
+
+    assert result["widgets"]["version"] == "1.0.0"
+    assert result["widgets"]["repository"] is None
+
+
 # ------------------------------------------------ sibling: _installed_plugin_root
 
 def test_non_object_installed_plugins_json_root_lookup_does_not_raise(tmp_path):
