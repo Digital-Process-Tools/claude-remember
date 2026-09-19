@@ -15,7 +15,7 @@ The pipeline writes to `REMEMBER_DIR` (created automatically). By default this i
 | `remember.md`                  | Handoff note written by `/remember` (`handoff_mode: "single"`, the default) |
 | `remember.<session_id>.md`     | Per-session handoff note (`handoff_mode: "per_session"`, [#363](https://github.com/Digital-Process-Tools/claude-remember/issues/363)) — not pruned automatically |
 | `logs/`                        | Pipeline logs — local to this machine, never backed up |
-| `tmp/`                         | Lock files, cooldown markers, handoff delivery record, this session's [slug record](computing-the-slug-outside-bash.md#1-read-the-slug-this-session-computed), each invocation's merged config — local to this machine, never backed up |
+| `tmp/`                         | Lock files, cooldown markers, handoff delivery record, the resolved handoff path `scripts/write-handoff.sh` reads instead of the transcript (`tmp/handoff-path`, [#720](https://github.com/Digital-Process-Tools/claude-remember/issues/720)), this session's [slug record](computing-the-slug-outside-bash.md#1-read-the-slug-this-session-computed), each invocation's merged config — local to this machine, never backed up |
 | `identity.md`                  | Per-project identity override (optional)          |
 | `.claude/remember/identity.md` | Your agent's identity and values (you write this) |
 
