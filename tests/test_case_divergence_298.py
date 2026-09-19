@@ -295,6 +295,77 @@ _SANCTIONED_DIVERGENCE = {
             "fi\n"
             "unset _existing_trap _t\n",
         ),
+        (
+            '_project_cfg="${REMEMBER_DIR}/config.json"\n'
+            'SYS_TMPDIR="${TMPDIR:-/tmp}"\n',
+            # #726: the project layer's `haiku` block is untrusted when
+            # REMEMBER_DIR sits inside the project checkout (the operator's own
+            # clone could otherwise choose the nested summarizer's credential, or
+            # flip whether ANTHROPIC_API_KEY is stripped). This records that
+            # verdict into `_project_cfg_haiku_untrusted` before the merge runs.
+            '_project_cfg="${REMEMBER_DIR}/config.json"\n'
+            '\n'
+            '_classify_project_cfg_haiku_trust() {\n'
+            '    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)\n'
+            '    case "$_data_dir_raw" in\n'
+            '        /*|~*|[A-Za-z]:/*|[A-Za-z]:\\\\*) _project_cfg_haiku_untrusted=0 ;;\n'
+            '        *) _project_cfg_haiku_untrusted=1 ;;\n'
+            '    esac\n'
+            '}\n'
+            '_classify_project_cfg_haiku_trust\n'
+            '\n'
+            'SYS_TMPDIR="${TMPDIR:-/tmp}"\n',
+        ),
+        (
+            'elif [ "${#_cfg_sources[@]}" -gt 0 ] && command -v jq >/dev/null 2>&1; then\n'
+            '    jq -s \'reduce .[] as $x ({}; . * $x) | with_entries(select(.key | startswith("_") | not))\' "${_cfg_sources[@]}" > "$_merged_cfg" 2>/dev/null \\\n'
+            '        || cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null\n',
+            # #726: when the project layer's `haiku` block is untrusted, it is
+            # always the LAST element `-s` slurps (project cfg is appended last
+            # to `_cfg_sources` when present) -- deleted before the reduce, never
+            # merged in at all.
+            'elif [ "${#_cfg_sources[@]}" -gt 0 ] && command -v jq >/dev/null 2>&1; then\n'
+            '    _strip_project_haiku="false"\n'
+            '    [ "$_project_cfg_haiku_untrusted" = "1" ] && [ -f "$_project_cfg" ] && _strip_project_haiku="true"\n'
+            '    jq -s --argjson strip_last_haiku "$_strip_project_haiku" \'\n'
+            '        (if $strip_last_haiku then (.[-1] |= del(.haiku)) else . end)\n'
+            '        | reduce .[] as $x ({}; . * $x)\n'
+            '        | with_entries(select(.key | startswith("_") | not))\n'
+            '    \' "${_cfg_sources[@]}" > "$_merged_cfg" 2>/dev/null \\\n'
+            '        || cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null\n',
+        ),
+        (
+            '    declare -f _remember_python >/dev/null 2>&1 && _remember_python\n'
+            '    "${PYTHON:-python3}" - "$_merged_cfg" "${_cfg_sources[@]}" > /dev/null 2>&1 <<\'PYMERGE\' || cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null\n'
+            'import json\n',
+            # #726: the same untrusted-source verdict, threaded through the
+            # no-jq Python fallback.
+            '    declare -f _remember_python >/dev/null 2>&1 && _remember_python\n'
+            '    _untrusted_haiku_source=""\n'
+            '    [ "$_project_cfg_haiku_untrusted" = "1" ] && _untrusted_haiku_source="$_project_cfg"\n'
+            '    "${PYTHON:-python3}" - "$_merged_cfg" "$_untrusted_haiku_source" "${_cfg_sources[@]}" > /dev/null 2>&1 <<\'PYMERGE\' || cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null\n'
+            'import json\n',
+        ),
+        (
+            'out_path = sys.argv[1]\n'
+            'merged = {}\n'
+            'for path in sys.argv[2:]:\n'
+            '    with open(path) as f:\n'
+            '        merged = deep_merge(merged, json.load(f))\n'
+            'merged = {k: v for k, v in merged.items() if not str(k).startswith("_")}\n',
+            # #726: the Python fallback's own strip of the untrusted `haiku` key,
+            # mirroring the jq path's `del(.haiku)` on the last element.
+            'out_path = sys.argv[1]\n'
+            'untrusted_haiku_path = sys.argv[2]\n'
+            'merged = {}\n'
+            'for path in sys.argv[3:]:\n'
+            '    with open(path) as f:\n'
+            '        data = json.load(f)\n'
+            '    if untrusted_haiku_path and path == untrusted_haiku_path and isinstance(data, dict):\n'
+            '        data = {k: v for k, v in data.items() if k != "haiku"}\n'
+            '    merged = deep_merge(merged, data)\n'
+            'merged = {k: v for k, v in merged.items() if not str(k).startswith("_")}\n',
+        ),
     ],
 }
 

@@ -163,6 +163,12 @@ def test_enabled_still_runs_the_restore(tmp_path):
     # cache publish (`mv`), and -- the actual restore, not just bookkeeping
     # -- the divergence check `git rev-list --left-right --count`.
     joined = " ".join(got)
-    assert "jq -s reduce" in joined, got
+    # `jq -s reduce` used to be adjacent; #726 inserted an `--argjson
+    # strip_last_haiku ...` flag between `-s` and the program text (an
+    # untrusted-source strip the project-cfg layer can trigger), so the
+    # merge is now pinned as two separate substrings either side of that
+    # flag rather than one that no longer appears verbatim.
+    assert "jq -s --argjson strip_last_haiku" in joined, got
+    assert "reduce .[] as $x" in joined, got
     assert "rev-list --left-right --count" in joined, got
     assert len(got) > 10, got

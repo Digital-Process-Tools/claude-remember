@@ -146,10 +146,11 @@ def test_second_run_with_unchanged_config_skips_the_flatten_fork(tmp_path):
     lines2, result2, _sys_tmp2 = _run_with_shim(tmp_path, home, project, sys_tmp=sys_tmp)
     assert result2.returncode == 0, (result2.stdout, result2.stderr)
     assert result2.stdout == result1.stdout
-    # `jq -s reduce ...` is lib-memory-dir.sh's own three-layer MERGE, which
-    # runs on every process regardless of this cache (REMEMBER_CONFIG is a
-    # fresh mktemp target every time) -- narrow to the FLATTEN program
-    # specifically (its `paths(` signature), the one call #668 removes.
+    # `jq -s --argjson strip_last_haiku ... | reduce ...` (#726 added the
+    # flag) is lib-memory-dir.sh's own three-layer MERGE, which runs on every
+    # process regardless of this cache (REMEMBER_CONFIG is a fresh mktemp
+    # target every time) -- narrow to the FLATTEN program specifically (its
+    # `paths(` signature), the one call #668 removes.
     flatten_spawns_2 = [l for l in lines2 if l.startswith("jq ") and "paths(" in l]
     py_flatten_spawns_2 = [
         l for l in lines2 if l.startswith(("python3 ", "python ")) and "walk(node" in l
