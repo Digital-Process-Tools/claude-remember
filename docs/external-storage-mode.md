@@ -68,6 +68,14 @@ git commit -m "init: remember config"
 git push -u origin main
 ```
 
+> **Warning: this `config.json` is the store ROOT's, and this step commits and pushes it
+> deliberately.** Do not put `haiku.oauth_token` in it. That key is a live claude.ai OAuth
+> credential ([`docs/configuration.md`](configuration.md)) — put it in the `REMEMBER_OAUTH_TOKEN`
+> environment variable instead, which never touches disk inside the backup store. A
+> *per-project* `<slug>/config.json` is different: the `after_save` hook never stages or commits
+> that one regardless of what it contains ([#719](https://github.com/Digital-Process-Tools/claude-remember/issues/719)), but this manual, one-time
+> command for the root file has no such guard, because you are the one running `git add` here.
+
 > **Where the hooks keep their own state.** Nothing is written to the store
 > root. The backup and restore hooks keep their lock, cooldown stamp, recorded
 > remote URL and failure counters inside the repository's git directory
@@ -85,7 +93,7 @@ git push -u origin main
 
 Once `~/.remember/` is a git repo, the `after_save` hook commits each project's memory subdir on its own schedule — one commit per project save, throttled by `cooldowns.git_backup_seconds` (default 15 min) — and pushes to your configured remote. No further setup is needed beyond credential availability (SSH agent or git credential helper) in the environment your coding agent launches hooks in.
 
-**What is not backed up:** each slug's `logs/` and `tmp/`. Those are per-machine — pipeline logs, lock files, cooldown markers, and the handoff delivery record — and sharing them between machines causes conflicts at best and wrong answers at worst ([#285](https://github.com/Digital-Process-Tools/claude-remember/issues/285)). The hook maintains these exclusions in your store's `.git/info/exclude`, which is per-clone and is never itself committed, so no `.gitignore` of yours is edited and nothing about your machine reaches the remote. Everything else under the slug — every memory file — is backed up.
+**What is not backed up:** each slug's `logs/`, `tmp/` and `config.json`. `logs/` and `tmp/` are per-machine — pipeline logs, lock files, cooldown markers, and the handoff delivery record — and sharing them between machines causes conflicts at best and wrong answers at worst ([#285](https://github.com/Digital-Process-Tools/claude-remember/issues/285)). `config.json` is excluded because it is a documented home for `haiku.oauth_token`, a live claude.ai OAuth credential, and this hook must never push a credential to the remote ([#719](https://github.com/Digital-Process-Tools/claude-remember/issues/719)). The hook maintains these exclusions in your store's `.git/info/exclude`, which is per-clone and is never itself committed, so no `.gitignore` of yours is edited and nothing about your machine (or a per-project credential) reaches the remote. Everything else under the slug — every memory file — is backed up.
 
 If you don't want automatic commits, leave `~/.remember/` as a plain directory and commit manually as before.
 

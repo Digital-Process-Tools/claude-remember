@@ -245,6 +245,31 @@ fi
 # (the default) → bare `git push`, relying on the branch's upstream tracking.
 GIT_BACKUP_REMOTE=$(config ".git_backup.remote" "")
 GIT_BACKUP_BRANCH=$(config ".git_backup.branch" "")
+
+# #723 (sibling site, same finding class as the restore half): config.json is
+# git-tracked and can be a poisoned copy on a shared/second machine or from
+# anyone with push access to the store, so a git_backup.remote/branch read
+# from it is untrusted for anything that reaches `git push`'s argv. A
+# `-`-leading remote is parsed as an OPTION rather than an operand
+# (`--upload-pack=...` against a local-transport target is local command
+# execution); a value containing `:` or `/` is a transport URL/spec, not a
+# name naming a remote this repo already trusts. Cleared rather than passed
+# through: the block below this one already resolves a safe REMOTE_NAME
+# (@{push}, branch.<name>.remote, then origin) whenever GIT_BACKUP_REMOTE is
+# empty, so clearing an invalid value routes it through that same validated
+# fallback instead of guessing a replacement here.
+case "$GIT_BACKUP_REMOTE" in
+    -*|*:*|*/*)
+        report_error "git-backup" "WARNING: configured git_backup.remote '$GIT_BACKUP_REMOTE' is not a plain remote name (leading '-', or contains ':' or '/') -- refusing to use it, falling back to the branch's push target. A config.json restored from a shared store can carry an attacker-controlled value here; treat this as untrusted."
+        GIT_BACKUP_REMOTE=""
+        ;;
+esac
+case "$GIT_BACKUP_BRANCH" in
+    -*)
+        report_error "git-backup" "WARNING: configured git_backup.branch '$GIT_BACKUP_BRANCH' starts with '-' -- refusing to use it as a git push operand."
+        GIT_BACKUP_BRANCH=""
+        ;;
+esac
 # Which remote a bare `git push` would ACTUALLY use (#257). This was hardcoded
 # to `origin` whenever git_backup.remote is unset, while `_push` in that same
 # case runs a bare `git push` — which follows the branch's upstream. Two
@@ -363,8 +388,14 @@ esac
     # claude-supertool#641 is precisely what happens when a verdict about the
     # remote is read off text the remote did not write.
     _push() {
+        # -- required (#723): GIT_BACKUP_REMOTE/GIT_BACKUP_BRANCH are validated
+        # plain names by this point (see the case statements above, right after
+        # they are read from config), but without a `--` separator a value that
+        # slipped past would still be parsed as an option rather than an
+        # operand -- the separator is cheap insurance the validation above does
+        # not make redundant.
         if [ -n "$GIT_BACKUP_REMOTE" ]; then
-            GIT_TERMINAL_PROMPT=0 git -C "$REPO_ROOT" push --porcelain "$GIT_BACKUP_REMOTE" ${GIT_BACKUP_BRANCH:+"$GIT_BACKUP_BRANCH"} 2>/dev/null
+            GIT_TERMINAL_PROMPT=0 git -C "$REPO_ROOT" push --porcelain -- "$GIT_BACKUP_REMOTE" ${GIT_BACKUP_BRANCH:+"$GIT_BACKUP_BRANCH"} 2>/dev/null
         else
             GIT_TERMINAL_PROMPT=0 git -C "$REPO_ROOT" push --porcelain 2>/dev/null
         fi
@@ -472,7 +503,14 @@ esac
         # theirs would push a file naming every project on the machine and its
         # absolute paths. That is #285's subject, so it is excluded here beside
         # the per-slug rules rather than left to be discovered.
-        for _gb_rule in "/$SLUG/logs/" "/$SLUG/tmp/" "/tmp/"; do
+        # /$SLUG/config.json (#719): the per-project config layer
+        # (${REMEMBER_DIR}/config.json, i.e. $SLUG/config.json under the store
+        # root) is a documented home for haiku.oauth_token -- a live claude.ai
+        # OAuth credential. `git add -- "$SLUG/"` below has no exclusion for
+        # it otherwise, so it would be committed and pushed to the configured
+        # remote right alongside memory, landing a live credential in git
+        # history and in every clone of the store.
+        for _gb_rule in "/$SLUG/logs/" "/$SLUG/tmp/" "/$SLUG/config.json" "/tmp/"; do
             grep -qxF "$_gb_rule" "$GB_EXCLUDE_FILE" 2>/dev/null && continue
             printf '%s\n' "$_gb_rule" >> "$GB_EXCLUDE_FILE" 2>/dev/null || true
         done
@@ -506,16 +544,22 @@ esac
     # pushed: purging it means a rewrite and a force-push, which breaks every
     # other clone of the store. That call belongs to the user, and the README
     # tells them it is theirs to make (#288).
-    if [ -n "$(git -C "$REPO_ROOT" ls-files -- "$SLUG/logs/" "$SLUG/tmp/" 2>/dev/null | head -n 1)" ]; then
+    # #719: config.json joins this same untracking, not a separate block --
+    # it is a FILE rather than a directory, but the partial-commit restore
+    # mechanism above applies to it identically (the commit further down is
+    # `git commit -- "$SLUG/"`), so a store that committed it before this fix
+    # existed needs the same index-only removal, in the same commit as
+    # logs/tmp so a second untracking commit is not needed on top.
+    if [ -n "$(git -C "$REPO_ROOT" ls-files -- "$SLUG/logs/" "$SLUG/tmp/" "$SLUG/config.json" 2>/dev/null | head -n 1)" ]; then
         if ! git -C "$REPO_ROOT" diff --cached --quiet 2>/dev/null; then
-            log "git-backup" "$SLUG/logs and $SLUG/tmp are tracked by a version older than the exclusion, but this store has staged changes in its index -- untracking them would commit those too, so it is left for the next backup."
-        elif git -C "$REPO_ROOT" rm -r -q --cached --ignore-unmatch -- "$SLUG/logs/" "$SLUG/tmp/" 2>/dev/null \
+            log "git-backup" "$SLUG/logs, $SLUG/tmp or $SLUG/config.json are tracked by a version older than the exclusion, but this store has staged changes in its index -- untracking them would commit those too, so it is left for the next backup."
+        elif git -C "$REPO_ROOT" rm -r -q --cached --ignore-unmatch -- "$SLUG/logs/" "$SLUG/tmp/" "$SLUG/config.json" 2>/dev/null \
             && git -C "$REPO_ROOT" commit $GPG_SIGN_FLAG \
-                -m "auto: stop tracking $SLUG/logs and $SLUG/tmp" >/dev/null 2>&1; then
-            log "git-backup" "untracked $SLUG/logs and $SLUG/tmp -- a version older than the exclusion had committed them. They stop being pushed from now on; commits that already carry them are left untouched, because removing those means rewriting history and force-pushing, which breaks every other clone of this store."
+                -m "auto: stop tracking $SLUG/logs, $SLUG/tmp and $SLUG/config.json" >/dev/null 2>&1; then
+            log "git-backup" "untracked $SLUG/logs, $SLUG/tmp and $SLUG/config.json -- a version older than the exclusion had committed them. They stop being pushed from now on; commits that already carry them are left untouched, because removing those means rewriting history and force-pushing, which breaks every other clone of this store. If config.json carried a live haiku.oauth_token, treat that credential as compromised and rotate it."
         else
             git -C "$REPO_ROOT" reset -q 2>/dev/null || true
-            log "git-backup" "could not untrack $SLUG/logs and $SLUG/tmp; the index was restored and the next backup retries."
+            log "git-backup" "could not untrack $SLUG/logs, $SLUG/tmp or $SLUG/config.json; the index was restored and the next backup retries."
         fi
     fi
 

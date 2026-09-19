@@ -238,6 +238,29 @@ REMOTE_NAME="${GIT_RESTORE_REMOTE:-origin}"
 GIT_RESTORE_BRANCH=$(config '.git_restore.branch' '')
 [ -n "$GIT_RESTORE_BRANCH" ] || GIT_RESTORE_BRANCH=$(config '.git_backup.branch' '')
 
+# #723: config.json is git-tracked and is exactly what `git merge --ff-only`
+# below fast-forwards FROM the remote, so git_restore.remote/git_backup.remote
+# and their branch equivalents are untrusted for anything that reaches
+# `git fetch`'s argv -- a party with push access to the store, or a second
+# machine sharing it, controls their value. A `-`-leading remote is parsed as
+# an OPTION rather than an operand (`--upload-pack=...` against a
+# local-transport target is local command execution); a value containing `:`
+# or `/` is a transport URL/spec, not a name naming a remote this repo already
+# trusts. Falls back to `origin` -- the same last resort the backup half uses
+# for the identical case -- rather than guessing at what the user meant.
+case "$REMOTE_NAME" in
+    -*|*:*|*/*)
+        report_error "git-restore" "WARNING: configured remote '$REMOTE_NAME' is not a plain remote name (leading '-', or contains ':' or '/') -- refusing to use it, falling back to 'origin'. A config.json restored from the backup remote can carry an attacker-controlled value here; treat this as untrusted."
+        REMOTE_NAME="origin"
+        ;;
+esac
+case "$GIT_RESTORE_BRANCH" in
+    -*)
+        report_error "git-restore" "WARNING: configured branch '$GIT_RESTORE_BRANCH' starts with '-' -- refusing to use it as a git fetch operand."
+        GIT_RESTORE_BRANCH=""
+        ;;
+esac
+
 FETCH_TIMEOUT=$(config '.git_restore.fetch_timeout_seconds' '20')
 case "$FETCH_TIMEOUT" in ''|*[!0-9]*|0) FETCH_TIMEOUT=20 ;; esac
 
@@ -378,8 +401,15 @@ _spawn_fetch() {
 
         # --no-tags --prune-tags: this is a memory store, not a release repo, and
         # the fetch should move exactly one remote-tracking ref.
+        #
+        # -- required (#723): REMOTE_NAME/GIT_RESTORE_BRANCH are validated
+        # plain names by this point (see the case statements above, right
+        # after they are computed), but without a `--` separator a value that
+        # slipped past would still be parsed as an option rather than an
+        # operand -- the separator is cheap insurance the validation above
+        # does not make redundant.
         git -C "$REPO_ROOT" -c core.askPass= fetch --quiet --no-tags \
-            "$REMOTE_NAME" ${GIT_RESTORE_BRANCH:+"$GIT_RESTORE_BRANCH"} >/dev/null 2>&1 &
+            -- "$REMOTE_NAME" ${GIT_RESTORE_BRANCH:+"$GIT_RESTORE_BRANCH"} >/dev/null 2>&1 &
         _fetch_pid=$!
 
         # A portable watchdog rather than timeout(1), which macOS does not ship.
