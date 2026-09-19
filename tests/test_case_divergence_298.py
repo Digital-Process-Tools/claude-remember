@@ -882,18 +882,22 @@ def test_the_per_tool_call_path_is_not_touched(tmp_path):
     Strip the comments from both sides — the same one-liner the arm above
     already uses — and every executable byte stays pinned exactly as before.
 
-    One EXECUTABLE line in `lib-memory-dir.sh` is allowed to differ, via
-    `_SANCTIONED_DIVERGENCE` below: #429 replaced a PID-suffixed literal tmp
-    path with `mktemp`, closing a predictable-symlink TOCTOU whose write
-    (traced and reproduced in `tests/test_predictable_tmp_429.py`) can carry
-    a live `haiku.oauth_token` to an attacker-chosen path. That is a real,
-    deliberate spawn added to Pass 2 of the config merge -- exactly the kind
-    of change this guard exists to surface, not to forbid outright -- and it
-    runs only on the resolving run (first tool call of a session, or after a
-    config edit), never on the per-tool-call fast path this guard actually
-    protects. The substitution is applied to the origin/main side before the
-    compare, so it is scoped to this one sanctioned line: anything else that
-    diverges from origin/main in either file still fails this test.
+    Some EXECUTABLE lines in `lib-slug.sh`/`lib-memory-dir.sh` are allowed to
+    differ from origin/main, via `_SANCTIONED_DIVERGENCE` below -- one entry
+    per deliberate change, each judged on its own by
+    `_apply_sanctioned_divergence`. See that dict's own per-entry comments
+    for what each one is and why (e.g. #429 replaced a PID-suffixed literal
+    tmp path with `mktemp`, closing a predictable-symlink TOCTOU whose write
+    can carry a live `haiku.oauth_token` to an attacker-chosen path; #726
+    added an untrusted-project-config classification and threaded it through
+    both the jq and Python merge paths). Each is a real, deliberate spawn or
+    behavior change added to Pass 2 of the config merge -- exactly the kind
+    of change this guard exists to surface, not to forbid outright -- and
+    none of them touch the per-tool-call fast path this guard actually
+    protects. Substitutions are applied to the origin/main side before the
+    compare, so they are scoped to exactly the sanctioned lines: anything
+    else that diverges from origin/main in either file still fails this
+    test.
     """
     body = POST_TOOL.read_text(encoding="utf-8")
     code = "\n".join(line for line in body.splitlines()
