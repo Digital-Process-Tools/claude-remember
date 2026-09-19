@@ -95,6 +95,7 @@ fi
 # basename must be remember.md or remember.<safe-token>.md.
 _wh_shape_ok() {
     local _cand="$1" _parent _base
+    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
     _parent="${_cand%/*}"
     _base="${_cand##*/}"
     [ "$_parent" = "$REMEMBER_DIR" ] || return 1
