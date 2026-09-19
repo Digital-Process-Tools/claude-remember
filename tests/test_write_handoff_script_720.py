@@ -121,9 +121,15 @@ class TestHookResolvedPathIsHonoured:
 
 class TestOutputIsNeverSilent:
 
-    def test_success_prints_the_path_written(self, tmp_path):
+    def test_success_prints_the_path_written_and_actually_writes_it(self, tmp_path):
+        """The stdout claim and the filesystem must agree -- a stub that only
+        echoes the success line and never touches disk must not pass this."""
         project, home = _sandbox(tmp_path)
-        result = _write_handoff(project, home, "note\n")
+        result = _write_handoff(project, home, "a very specific note body\n")
         assert result.returncode == 0
         assert "remember.md" in result.stdout
         assert result.stdout.strip(), "a successful write must not print nothing"
+
+        target = project / ".remember" / "remember.md"
+        assert target.exists(), "stdout claimed success but the file was never created"
+        assert target.read_text() == "a very specific note body\n"

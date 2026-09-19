@@ -1,7 +1,7 @@
 ---
 name: remember
 description: Save session state for clean continuation next session.
-allowed-tools: Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/write-handoff.sh":*)
+allowed-tools: Bash(${CLAUDE_PLUGIN_ROOT}/scripts/write-handoff.sh:*)
 ---
 
 Write a handoff note so the next session can continue cleanly. Use your knowledge of the current session — you were here. Write in first person ("I").
@@ -33,7 +33,7 @@ Rules:
 **Save it** by piping the note on stdin to this exact command:
 
 ```
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/write-handoff.sh" <<'EOF'
+"${CLAUDE_PLUGIN_ROOT}/scripts/write-handoff.sh" <<'EOF'
 {the note, in the format above}
 EOF
 ```

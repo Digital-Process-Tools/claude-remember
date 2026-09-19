@@ -32,6 +32,7 @@ Four properties:
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -175,7 +176,15 @@ class TestSingleModeUnchanged:
         (rd2 / "remember.md").write_text("Legacy handoff, unnamespaced.\n")
         out_explicit = _session_start(project2, home2, "sess-x")
 
-        assert out_default == out_explicit, (
+        # The delivered-handoff fence carries a per-invocation random token
+        # (#721 follow-up: a fixed closing marker is guessable by whoever
+        # plants the handoff content) -- normalize it away before comparing,
+        # since it legitimately differs between two separate process runs
+        # even when every other byte must match.
+        _token_re = re.compile(r"=== END LAST HANDOFF \d+ ===")
+        out_default_n = _token_re.sub("=== END LAST HANDOFF <token> ===", out_default)
+        out_explicit_n = _token_re.sub("=== END LAST HANDOFF <token> ===", out_explicit)
+        assert out_default_n == out_explicit_n, (
             "handoff_mode: \"single\" is not byte-identical to the unset default"
         )
 

@@ -131,7 +131,21 @@ if ! _wh_shape_ok "$_WH_TARGET"; then
 fi
 
 [ -d "$REMEMBER_DIR" ] || mkdir -p "$REMEMBER_DIR" 2>/dev/null
-_WH_TMP="$_WH_TARGET.$$"
+
+# mktemp, not a $$-suffixed literal path -- the exact hazard
+# lib-memory-dir.sh's own merged-config write already documents at length
+# for this SAME directory: a name built from the PID is predictable from
+# the outside the instant this process starts, and a symlink pre-seeded at
+# that predictable name would have the note's content written straight
+# through it by `cat >`, then `mv -f` would move the symlink itself (not
+# its target) onto $_WH_TARGET. mktemp both creates the file atomically
+# and names it unpredictably. No trailing content after the X's: BSD/macOS
+# mktemp only randomizes a run of X's at the very end of the template.
+_WH_TMP=$(mktemp "${_WH_TARGET%/*}/.write-handoff-XXXXXX" 2>/dev/null) || _WH_TMP=""
+if [ -z "$_WH_TMP" ]; then
+    echo "REFUSED: could not create a temp file to write $_WH_TARGET" >&2
+    exit 1
+fi
 if ! cat > "$_WH_TMP" 2>/dev/null; then
     rm -f "$_WH_TMP" 2>/dev/null
     echo "REFUSED: could not write $_WH_TARGET" >&2
