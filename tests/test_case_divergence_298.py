@@ -125,7 +125,7 @@ def _apply_sanctioned_divergence(ref_code: str, rel: str) -> str:
     - Neither is on origin/main: genuinely stale. origin/main moved again and
       this allowance needs re-deriving, not blindly (re-)applied.
 
-    A file may carry more than one allowance (#429 and #662 both touch
+    A file may carry more than one allowance (#429 and #726 both touch
     lib-memory-dir.sh); they are applied in order, each judged on its own.
     """
     for old_code, new_code in _SANCTIONED_DIVERGENCE.get(rel, ()):
@@ -241,13 +241,18 @@ _SANCTIONED_DIVERGENCE = {
             '    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)\n'
             '    local data_dir="$1" prefix\n',
         ),
-        (
-            'elif [ "${#_cfg_sources[@]}" -gt 0 ]; then\n'
-            '    "${PYTHON:-python3}" - "$_merged_cfg" "${_cfg_sources[@]}" > /dev/null 2>&1 <<\'PYMERGE\'',
-            'elif [ "${#_cfg_sources[@]}" -gt 0 ]; then\n'
-            '    ' + _LAZY_PYTHON_GUARD +
-            '    "${PYTHON:-python3}" - "$_merged_cfg" "${_cfg_sources[@]}" > /dev/null 2>&1 <<\'PYMERGE\'',
-        ),
+        # #662's own tuple (the `_LAZY_PYTHON_GUARD` insertion into the no-jq
+        # elif, on its own, pre-#726 two-argument invocation) is gone (#734):
+        # #726 (below) composed directly on top of it and shipped the guard
+        # and the three-argument invocation together in one already-merged
+        # commit, so origin/main never again holds the guard paired with the
+        # old two-argument call -- neither this tuple's old_code (pre-guard)
+        # nor its new_code (guard + two-arg) is a substring of origin/main
+        # once #726 lands, which is exactly the "neither old nor new" failure
+        # #734 saw. The guard's insertion point is still pinned -- it is the
+        # first line of the #726 tuple's own new_code below, so removing this
+        # redundant tuple loses no coverage of #662's actual invariant (the
+        # guard still precedes the python invocation on the no-jq path).
         (
         '_merged_cfg="${SYS_TMPDIR}/remember-config-$$.json"\n\n' +
         '(umask 077; : > "$_merged_cfg") 2>/dev/null || true\n\n' +
