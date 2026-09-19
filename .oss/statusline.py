@@ -1431,9 +1431,14 @@ def repo_root(start):
 
 def repo_config(root):
     try:
-        return json.loads((Path(root) / ".oss.json").read_text(encoding="utf-8"))
+        doc = json.loads((Path(root) / ".oss.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
+    # #727 sibling: every caller of this function does `.get(...)` on the
+    # result with no isinstance check of its own (repo_version's sibling
+    # crash class, F14/F15) -- .oss.json is repo-tracked and PR-editable, so
+    # a non-object document must not propagate as one.
+    return doc if isinstance(doc, dict) else {}
 
 
 def repo_version(root):
@@ -1444,7 +1449,13 @@ def repo_version(root):
     """
     manifest = Path(root) / ".claude-plugin" / "plugin.json"
     try:
-        version = json.loads(manifest.read_text(encoding="utf-8")).get("version")
+        doc = json.loads(manifest.read_text(encoding="utf-8"))
+        # #727 (F14): plugin.json is repo-tracked and PR-editable, and
+        # json.loads happily returns a list/str/int/None for a syntactically
+        # valid non-object document -- `.get` on any of those raised
+        # AttributeError with no `except` above it, crashing the whole
+        # status line render, not just this field.
+        version = doc.get("version") if isinstance(doc, dict) else None
         if version:
             return version
     except (OSError, ValueError):
@@ -1555,7 +1566,11 @@ def installed_plugins(project_root, plugins_root=None):
         return {}
     project = _normalized_path(project_root) if project_root is not None else None
     found = {}
-    for key, entries in (doc.get("plugins") or {}).items():
+    # #727 sibling: installed_plugins.json is not this module's own file
+    # either -- same non-dict-JSON crash class as F14/F15, guarded the same
+    # way rather than assuming `doc` is a dict.
+    plugins = doc.get("plugins") if isinstance(doc, dict) else None
+    for key, entries in (plugins or {}).items():
         name = key.split("@", 1)[0]
         for entry in entries or []:
             if not _entry_applies(entry, project):
@@ -2343,9 +2358,17 @@ def _latest_release(repo):
     try:
         import base64
 
-        return json.loads(base64.b64decode(encoded).decode("utf-8")).get("version")
+        doc = json.loads(base64.b64decode(encoded).decode("utf-8"))
     except (ValueError, TypeError, UnicodeDecodeError):
         return None
+    # #727 (F15): a remote manifest that parses to a JSON list/string/number/
+    # null raised AttributeError out of `.get`, which the except tuple above
+    # did not catch -- the cache was never rewritten and the lock at
+    # `_lock_path` was never released, freezing the rendered board at stale
+    # counts every 180s thereafter.
+    if not isinstance(doc, dict):
+        return None
+    return doc.get("version")
 
 
 def _watch_preset_declared(root):
@@ -2576,7 +2599,9 @@ def _installed_plugin_root(project_root, name, plugins_root=None):
     except (OSError, ValueError):
         return None
     project = _normalized_path(project_root) if project_root is not None else None
-    for key, entries in (doc.get("plugins") or {}).items():
+    # #727 sibling: same non-dict-JSON crash class as F14/F15/installed_plugins.
+    plugins = doc.get("plugins") if isinstance(doc, dict) else None
+    for key, entries in (plugins or {}).items():
         if key.split("@", 1)[0] != name:
             continue
         for entry in entries or []:

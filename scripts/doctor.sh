@@ -599,8 +599,14 @@ if [ -f "$_LAST_SAVE_FILE" ]; then
     _LS_SESSION=""
     _LS_LINE=""
     if command -v jq >/dev/null 2>&1; then
-        _LS_SESSION=$(jq -r '.session // empty' "$_LAST_SAVE_FILE" 2>/dev/null)
-        _LS_LINE=$(jq -r '.line // empty' "$_LAST_SAVE_FILE" 2>/dev/null)
+        # last-save.json is store-derived, not this script's own text -- the
+        # same trust boundary REMEMBER_TRANSCRIPT_PATH crosses above (#727,
+        # mirroring the tr -d '[:cntrl:]' scrub at :195): an embedded newline
+        # in .session/.line could otherwise forge a column-0 VERDICT:/FAIL:
+        # line that commands/doctor.md tells the relaying assistant to quote
+        # back verbatim.
+        _LS_SESSION=$(jq -r '.session // empty' "$_LAST_SAVE_FILE" 2>/dev/null | tr -d '[:cntrl:]')
+        _LS_LINE=$(jq -r '.line // empty' "$_LAST_SAVE_FILE" 2>/dev/null | tr -d '[:cntrl:]')
     fi
     # `date -r <file>` prints the file's mtime, formatted — true on both GNU
     # date (documented: --reference=FILE) and BSD/macOS date (undocumented in
