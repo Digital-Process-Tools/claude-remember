@@ -1790,21 +1790,39 @@ _remember_handoff_is_tracked() {
     # the file is untracked -- only that it is not tracked under THIS case.
     # On a case-insensitive filesystem (APFS default, NTFS) `cat` reads the
     # same bytes off disk regardless of which case the repository committed
-    # the path under, so a repo that ships `.remember/Remember.MD` would
+    # the path under, so a repo that ships `.remember/Remember.MD` -- or a
+    # differently-cased PARENT directory, `.Remember/remember.md` -- would
     # pass the exact-case check above and still be delivered as though it
-    # were the user's own file -- the same hazard #298's case-divergence
-    # probe exists for, applied to this check instead of to the store's own
-    # directory name. List everything git tracks under the handoff's parent
-    # directory and case-fold-compare, rather than trust one exact string.
-    _tracked_out=$(unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
-        git -C "$PROJECT_DIR" ls-tree --name-only -r HEAD -- "${_rel%/*}" 2>/dev/null) || _tracked_out=""
-    [ -n "$_tracked_out" ] || return 1
-    while IFS= read -r _line; do
+    # were the user's own file. Three things an earlier version of this
+    # fallback got wrong, fixed here:
+    #   - it restricted `ls-tree`'s pathspec to the handoff's OWN directory
+    #     case, which cannot match a differently-cased directory at all
+    #     (pathspec matching is byte-exact regardless of core.ignorecase) --
+    #     this version lists every tracked path with no directory
+    #     restriction and case-folds the comparison itself, in bash;
+    #   - it read HEAD's tree, so `git rm --cached` -- the exact remediation
+    #     this hook's own refusal message names -- did not un-refuse until a
+    #     new commit landed; this version reads the INDEX (`ls-files`), the
+    #     same source of truth the exact-case check above already uses, so
+    #     the two agree the instant the index changes;
+    #   - it used `--name-only` with no `-z`, so `core.quotepath` (on by
+    #     default) can octal-escape a non-ASCII or special-character path in
+    #     the output, silently breaking the string comparison; `-z` prints
+    #     raw NUL-terminated bytes with no quoting at all.
+    #
+    # Piped straight into the loop via process substitution, NEVER through
+    # a `$(...)` variable: `-z` output is NUL-delimited, and bash strings
+    # cannot hold an embedded NUL at all -- `_tracked_out=$(git ls-files -z)`
+    # would silently truncate at the FIRST NUL, discarding every path after
+    # the first. Nothing distinguishes "no output" from "truncated after
+    # one entry" once that has happened, which is worse than not de-quoting
+    # at all: a repo with more than one tracked file would compare only the
+    # first one against $_rel and could report untracked outright.
+    while IFS= read -r -d '' _line; do
         [ -n "$_line" ] || continue
         _remember_th_ci_eq "$_line" "$_rel" && return 0
-    done <<EOF
-$_tracked_out
-EOF
+    done < <(unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+              git -C "$PROJECT_DIR" ls-files -z 2>/dev/null)
     return 1
 }
 
