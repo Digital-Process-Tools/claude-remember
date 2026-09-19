@@ -1637,11 +1637,35 @@ _REMEMBER_CTX_OK=""
 # Always. `: > file` failing cleanly here costs nothing and keeps the
 # unredirected fallback below (print live, exactly as before, minus the
 # promo) the ONLY behaviour change on a store this hook cannot write into.
-if : > "$_REMEMBER_CTX_FILE" 2>/dev/null; then
+#
+# Also skip the whole buffer/fd-swap when a trace is running (#712, round 2
+# of #690): `bash -x scripts/session-start-hook.sh` exits 0 with zero stdout
+# bytes on windows-latest, while the six neighbouring bootstrap-dirs.sh trace
+# tests in test_trace_not_swallowed_690.py pass on the same runner -- so this
+# is not a bash-resolution or PATH problem, and exit 0 rules out a crash.
+# What is unique to THIS hook, and absent from those six, is the `exec
+# 3>&1` / `exec > file` / `exec 1>&3 3>&-` fd-swap spanning ~600 lines of
+# traced execution -- a plausible site for Git Bash's fd emulation to lose
+# bytes under `-x`, but nothing here pins down which half, and no Windows
+# runner is available to step through it. Rather than debug that
+# interaction blind, sidestep it entirely, the same way bootstrap-dirs.sh
+# already sidesteps its OWN fd tension for a trace an operator deliberately
+# started: don't shadow output somebody went looking for. The fallback this
+# takes is not new -- it is the exact unbuffered path
+# test_unwritable_ctx_buffer_does_not_burn_the_cooldown already proves safe
+# for an unwritable tmp/, so the only visible cost is the promo banner,
+# never the memory context itself.
+_REMEMBER_CTX_TRACE_ACTIVE=""
+case "$-" in
+    (*x*) _REMEMBER_CTX_TRACE_ACTIVE="1" ;;
+esac
+[ "${REMEMBER_TRACE:-}" = "1" ] && _REMEMBER_CTX_TRACE_ACTIVE="1"
+if [ -z "$_REMEMBER_CTX_TRACE_ACTIVE" ] && : > "$_REMEMBER_CTX_FILE" 2>/dev/null; then
     exec 3>&1
     exec > "$_REMEMBER_CTX_FILE"
     _REMEMBER_CTX_OK="true"
 fi
+unset _REMEMBER_CTX_TRACE_ACTIVE
 if [ "$REMEMBER_ROOT" != "$PROJECT_DIR" ] || [ -n "$PER_SESSION_HANDOFF" ] || [ -n "$HANDOFF_MODE_DEGRADED" ]; then
     echo "=== HANDOFF ==="
     echo "Write next handoff to: $REMEMBER_HANDOFF"
