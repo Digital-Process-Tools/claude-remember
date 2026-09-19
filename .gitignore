@@ -8,6 +8,13 @@ identity.md
 .max/
 .remember/
 
+# #725: the local entry-point supertool's own SessionStart hook creates at
+# the repo root -- git-ignored here (tracked) rather than only in this one
+# machine's local .git/info/exclude, so a pull request cannot ship a
+# TRACKED file at this path and have git overwrite the ignored entry-point
+# on checkout.
+/supertool
+
 # Local Claude Code state (machine scope, never shared)
 .claude/settings.json
 .claude/settings.local.json

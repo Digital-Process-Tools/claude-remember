@@ -119,12 +119,19 @@ run both.** A rule is a text file the hook matches a subject against; it runs no
 nothing checked reachability on your behalf before writing this file.
 
 - **`./supertool 'ops'` prints a list of ops.** Everything is wired; the refusal was about your
-  call, not your setup.
+  call, not your setup. Use this only to diagnose -- once diagnosed, call `supertool` (on
+  `PATH`), never the `./`-prefixed form (#725): a project-relative invocation runs whatever
+  file a checkout happens to have at that path, and a pull request branch can ship a
+  TRACKED file literally named `supertool` at the repo root, which `git checkout` writes
+  over the local entry-point on any clone.
 - **`./supertool` is missing, `supertool` works.** The binary is installed and *this clone* has
-  no entry point. `./supertool` is gitignored on purpose -- committing it would bake one
-  machine's absolute path into every other clone -- and it is created by supertool's own
+  no entry point. `/supertool` is in the tracked `.gitignore` (#725) -- not merely this one
+  machine's local `.git/info/exclude`, which protects nothing on a fresh clone or a
+  contributor's PR checkout -- because committing the real entry point would bake one
+  machine's absolute path into every other clone, and it is created by supertool's own
   session-start hook, so a fresh clone has none until a session has been started in it. Start
-  one, or call whichever spelling answers. Nothing is missing from your installation.
+  one, or call `supertool` (never `./supertool`, see above). Nothing is missing from your
+  installation.
 - **Neither runs.** `supertool` is not installed on this machine. It is a Claude Code plugin and
   a declared dependency of the plugin that wrote this layer, so installing that plugin resolves
   it from the same marketplace.

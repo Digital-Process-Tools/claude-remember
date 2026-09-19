@@ -18,6 +18,10 @@ the refused call:
 - **Glob** -- `supertool 'glob:PATTERN'`
 - **Grep** -- `supertool 'grep:PATTERN:PATH'`
 
-If none of those run, triage with `./supertool 'ops'` then `supertool 'ops'` --
-see `00-README.md` here for what each answer means and why this rule stays
-this wide.
+If none of those run, triage with `supertool 'ops'` -- see `00-README.md`
+here for what the answer means and why this rule stays this wide.
+
+**Never `./supertool`** (#725): a project-relative invocation runs whatever
+file a pull request checkout happens to have placed at that path, tracked or
+not -- always call the on-`PATH` `supertool`, or the plugin-cache absolute
+path, never a `./`-prefixed one.

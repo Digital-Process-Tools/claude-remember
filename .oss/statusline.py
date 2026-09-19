@@ -2395,10 +2395,30 @@ def _run_channel_health(timeout=30):
     ordinary case, and `MCP_LOOKUP_BUDGET` plus `PS_TIMEOUT` (supertool's own
     constants) put a documented worst case north of 20s when a lookup is slow
     rather than merely present.
+
+    **`argv[0]` is resolved through `_safe_which` first (#1399), the same way
+    `_run` above resolves `git`/`gh`.** This used to hand `"supertool"` to
+    `subprocess.run` bare, which on Windows lets a same-named
+    `supertool.exe`/`supertool.cmd` planted at the root of the repository
+    this statusline is reporting on win over the real `PATH` entry, for the
+    identical `CreateProcess`-searches-cwd-first reason `_run`'s own
+    docstring names. Deliberately NOT routed through `_run` itself: that
+    helper folds every non-zero exit into `None`, and `NOT DELIVERING`/
+    `CANNOT DETERMINE`/`CONTRADICTED`/`BOUND, NOT SUBSCRIBED` are all real,
+    distinct findings that exit non-zero on purpose -- see this function's
+    own "NOT `_run`" paragraph above. `_safe_which` returning `None` (the
+    binary is not resolvable at all) folds to the same `None` `_run_channel_
+    health` already returned for a missing binary before this fix, via the
+    `OSError` `subprocess.run` itself would have raised for a bare name that
+    does not resolve -- so the caller-visible contract is unchanged, only
+    the resolution path underneath it.
     """
+    resolved = _safe_which("supertool")
+    if resolved is None:
+        return None
     try:
         result = subprocess.run(
-            ["supertool", "channel:health"],
+            [resolved, "channel:health"],
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             timeout=timeout,
