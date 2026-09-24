@@ -345,13 +345,39 @@ elif [ "${#_cfg_sources[@]}" -gt 0 ] && command -v jq >/dev/null 2>&1; then
     # every source file into one sequence with no file-boundary information,
     # so a project config shipping TWO whitespace-concatenated JSON documents
     # put its first document's `haiku` block one element before the position
-    # `.[-1]` ever looked at -- untouched, and merged straight through. `-n`
-    # with `inputs`/`input_filename` (rather than `-s`) tags each document
-    # with the file it actually came from, so the strip applies to every
-    # document from the untrusted file, however many there are, not to a
-    # position that assumed exactly one.
+    # `.[-1]` ever looked at -- untouched, and merged straight through.
+    # `--slurpfile proj "$_project_cfg"` (rather than tagging every document
+    # with `input_filename` and comparing it to a shell-supplied path, #740's
+    # first attempt) has jq open the untrusted file DIRECTLY, once, by its
+    # own single file argument -- there is no filename STRING to compare at
+    # all, so a platform that renders `$_project_cfg` differently to jq than
+    # to the shell (a Windows-native jq.exe's own path handling, a symlink, a
+    # `./`-prefix) has nothing left to diverge on. It also has no "assume the
+    # project file is the last thing read" ambiguity the immediately-tried
+    # alternative (comparing every document's `input_filename` against the
+    # LAST document's own filename) turned out to carry: that design strips
+    # the wrong layer's `haiku` whenever the untrusted project file exists
+    # but happens to be EMPTY (0 documents) -- the untrusted file then
+    # contributes nothing to the merge's own document stream at all, so its
+    # "last document" is actually the LAST TRUSTED file's, and the trusted
+    # user-global layer's own legitimate `haiku` block gets stripped by
+    # mistake (verified directly with jq: bundled+user(haiku)+empty-project
+    # loses the user's haiku; --slurpfile does not, since an empty file just
+    # slurps to `[]` and strips nothing from anyone).
     _strip_project_haiku="false"
     [ "$_project_cfg_haiku_untrusted" = "1" ] && [ -f "$_project_cfg" ] && _strip_project_haiku="true"
+    # bundled/user only -- the untrusted project layer is read separately,
+    # below, via --slurpfile. jq's own `inputs` falls back to reading STDIN
+    # when given zero positional file arguments, so /dev/null is a deliberate
+    # placeholder (0 documents, always readable) rather than an omission, for
+    # the reachable case where neither bundled nor user config exists but the
+    # project layer does.
+    _non_project_sources=()
+    [ -f "$_bundled_cfg" ] && _non_project_sources+=("$_bundled_cfg")
+    [ -f "$_user_cfg"    ] && _non_project_sources+=("$_user_cfg")
+    [ "${#_non_project_sources[@]}" -eq 0 ] && _non_project_sources=("/dev/null")
+    _project_slurp_source="/dev/null"
+    [ -f "$_project_cfg" ] && _project_slurp_source="$_project_cfg"
     # The filter is one line, not one per clause: a literal newline inside
     # this quoted argument reaches the process's own argv byte-for-byte, and
     # every spawn-counting test in this repo (tests/spawn_counting.py's
@@ -362,7 +388,7 @@ elif [ "${#_cfg_sources[@]}" -gt 0 ] && command -v jq >/dev/null 2>&1; then
     # investigating a macOS-only spawn-budget CI failure on this same #726
     # change: 4 phantom lines, one real process, jq itself is whitespace-
     # insensitive so this is a pure counting fix with no behavior change).
-    jq -n --argjson strip_haiku "$_strip_project_haiku" --arg proj "$_project_cfg" '[inputs | {doc: ., file: input_filename}] | map(if $strip_haiku and .file == $proj then (.doc |= del(.haiku)) else . end) | map(.doc) | reduce .[] as $x ({}; . * $x) | with_entries(select(.key | startswith("_") | not))' "${_cfg_sources[@]}" > "$_merged_cfg" 2>/dev/null \
+    jq -n --argjson strip_haiku "$_strip_project_haiku" --slurpfile proj "$_project_slurp_source" '($proj | if $strip_haiku then map(del(.haiku)) else . end) as $proj_docs | ([inputs] + $proj_docs) | reduce .[] as $x ({}; . * $x) | with_entries(select(.key | startswith("_") | not))' "${_non_project_sources[@]}" > "$_merged_cfg" 2>/dev/null \
         || cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null
 elif [ "${#_cfg_sources[@]}" -gt 0 ]; then
     # No jq — do the same deep-merge in Python instead of silently dropping
@@ -397,12 +423,40 @@ out_path = sys.argv[1]
 # storage mode, or no project cfg at all) -- never equal to a real path then,
 # so nothing is stripped (#726, see the case switch this mirrors above).
 untrusted_haiku_path = sys.argv[2]
+
+
+def load_documents(path):
+    """Parse every whitespace-concatenated JSON document in `path` (#740):
+    the untrusted project layer may ship more than one, and a plain
+    json.load() raises `JSONDecodeError` on any file with more than one --
+    which used to take the WHOLE merge down with it (the `|| cp
+    "$_bundled_cfg" ...` fallback below), dropping the trusted user-global
+    layer too rather than just stripping `haiku` from this file's own
+    documents and keeping everything else."""
+    with open(path) as f:
+        raw = f.read()
+    decoder = json.JSONDecoder()
+    idx, n, docs = 0, len(raw), []
+    while idx < n:
+        while idx < n and raw[idx].isspace():
+            idx += 1
+        if idx >= n:
+            break
+        obj, idx = decoder.raw_decode(raw, idx)
+        docs.append(obj)
+    return docs
+
+
 merged = {}
 for path in sys.argv[3:]:
+    if untrusted_haiku_path and path == untrusted_haiku_path:
+        for data in load_documents(path):
+            if isinstance(data, dict):
+                data = {k: v for k, v in data.items() if k != "haiku"}
+            merged = deep_merge(merged, data)
+        continue
     with open(path) as f:
         data = json.load(f)
-    if untrusted_haiku_path and path == untrusted_haiku_path and isinstance(data, dict):
-        data = {k: v for k, v in data.items() if k != "haiku"}
     merged = deep_merge(merged, data)
 # Strip `_`-prefixed doc keys, top-level only — same convention as the jq path.
 merged = {k: v for k, v in merged.items() if not str(k).startswith("_")}

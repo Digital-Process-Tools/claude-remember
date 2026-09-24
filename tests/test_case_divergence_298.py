@@ -358,28 +358,48 @@ _SANCTIONED_DIVERGENCE = {
             # ever reached the LAST document of the LAST file -- a project
             # config shipping two whitespace-concatenated JSON documents had
             # its FIRST document's `haiku` block survive untouched, one array
-            # element before the position `.[-1]` looked at. `-n` with
-            # `inputs`/`input_filename` tags each document with the file it
-            # came from, so every document the untrusted file contributes is
-            # stripped, however many there are, rather than a position that
-            # assumed exactly one document per file. The trailing `elif`
-            # (the no-jq branch's own opener) is pulled into BOTH sides of
-            # this pair on purpose -- #740's new_code is textually IDENTICAL
-            # to the #726 pair's own new_code apart from that one jq line,
-            # and test_sanctioned_divergence_state_440.py's synthetic
-            # ref_code concatenates every pair's old_code together: without
-            # this extra anchor line, this pair's old_code is a literal
-            # substring of the #726 pair's new_code, and applying both
-            # substitutions in sequence there clobbers the #726 pair's own
-            # new_code out of the result before that test's per-pair
-            # assertion ever checks it (#734 hit the same composition
-            # problem from the opposite direction and removed the stale
-            # tuple; here both pairs are still independently live, so the
-            # fix is to make the two strings stop coinciding instead).
+            # element before the position `.[-1]` looked at. The first fix
+            # tried (`-n` with `inputs`/`input_filename`, tagging each
+            # document with the file it came from and comparing that against
+            # a shell-supplied `--arg proj` string) was itself replaced
+            # before landing: it still compared a path STRING, which a
+            # maintainer flagged as unverifiable on a platform where jq's own
+            # view of a path could diverge from the shell's, and this repo's
+            # CI skips every bash-subprocess test on win32 (#79) so nothing
+            # here could ever prove it safe either way. `--slurpfile proj
+            # "$_project_cfg"` removes the comparison entirely -- jq opens
+            # the untrusted file DIRECTLY, by its own single file argument,
+            # so there is no filename string left to diverge on any
+            # platform. It also avoids a real regression the `input_filename`
+            # design had: comparing every document's file against the LAST
+            # document's own file breaks the moment the untrusted project
+            # file exists but is EMPTY (0 documents) -- its "last document"
+            # is then some TRUSTED file's, stripping that layer's own
+            # legitimate `haiku` by mistake. `--slurpfile` has no such
+            # ambiguity (an empty file just slurps to `[]`). The trailing
+            # `elif` (the no-jq branch's own opener) is pulled into BOTH
+            # sides of this pair on purpose -- #740's new_code is textually
+            # IDENTICAL to the #726 pair's own new_code apart from the
+            # changed lines, and test_sanctioned_divergence_state_440.py's
+            # synthetic ref_code concatenates every pair's old_code
+            # together: without this extra anchor line, this pair's old_code
+            # is a literal substring of the #726 pair's new_code, and
+            # applying both substitutions in sequence there clobbers the
+            # #726 pair's own new_code out of the result before that test's
+            # per-pair assertion ever checks it (#734 hit the same
+            # composition problem from the opposite direction and removed
+            # the stale tuple; here both pairs are still independently live,
+            # so the fix is to make the two strings stop coinciding instead).
             'elif [ "${#_cfg_sources[@]}" -gt 0 ] && command -v jq >/dev/null 2>&1; then\n'
             '    _strip_project_haiku="false"\n'
             '    [ "$_project_cfg_haiku_untrusted" = "1" ] && [ -f "$_project_cfg" ] && _strip_project_haiku="true"\n'
-            '    jq -n --argjson strip_haiku "$_strip_project_haiku" --arg proj "$_project_cfg" \'[inputs | {doc: ., file: input_filename}] | map(if $strip_haiku and .file == $proj then (.doc |= del(.haiku)) else . end) | map(.doc) | reduce .[] as $x ({}; . * $x) | with_entries(select(.key | startswith("_") | not))\' "${_cfg_sources[@]}" > "$_merged_cfg" 2>/dev/null \\\n'
+            '    _non_project_sources=()\n'
+            '    [ -f "$_bundled_cfg" ] && _non_project_sources+=("$_bundled_cfg")\n'
+            '    [ -f "$_user_cfg"    ] && _non_project_sources+=("$_user_cfg")\n'
+            '    [ "${#_non_project_sources[@]}" -eq 0 ] && _non_project_sources=("/dev/null")\n'
+            '    _project_slurp_source="/dev/null"\n'
+            '    [ -f "$_project_cfg" ] && _project_slurp_source="$_project_cfg"\n'
+            '    jq -n --argjson strip_haiku "$_strip_project_haiku" --slurpfile proj "$_project_slurp_source" \'($proj | if $strip_haiku then map(del(.haiku)) else . end) as $proj_docs | ([inputs] + $proj_docs) | reduce .[] as $x ({}; . * $x) | with_entries(select(.key | startswith("_") | not))\' "${_non_project_sources[@]}" > "$_merged_cfg" 2>/dev/null \\\n'
             '        || cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null\n'
             'elif [ "${#_cfg_sources[@]}" -gt 0 ]; then\n',
         ),
@@ -397,14 +417,6 @@ _SANCTIONED_DIVERGENCE = {
         ),
         (
             'out_path = sys.argv[1]\n'
-            'merged = {}\n'
-            'for path in sys.argv[2:]:\n'
-            '    with open(path) as f:\n'
-            '        merged = deep_merge(merged, json.load(f))\n'
-            'merged = {k: v for k, v in merged.items() if not str(k).startswith("_")}\n',
-            # #726: the Python fallback's own strip of the untrusted `haiku` key,
-            # mirroring the jq path's `del(.haiku)` on the last element.
-            'out_path = sys.argv[1]\n'
             'untrusted_haiku_path = sys.argv[2]\n'
             'merged = {}\n'
             'for path in sys.argv[3:]:\n'
@@ -412,6 +424,62 @@ _SANCTIONED_DIVERGENCE = {
             '        data = json.load(f)\n'
             '    if untrusted_haiku_path and path == untrusted_haiku_path and isinstance(data, dict):\n'
             '        data = {k: v for k, v in data.items() if k != "haiku"}\n'
+            '    merged = deep_merge(merged, data)\n'
+            'merged = {k: v for k, v in merged.items() if not str(k).startswith("_")}\n',
+            # #726 shipped this line by line, one field per pre-726 line, so
+            # there used to be a SEPARATE tuple here (old=pre-726 single
+            # json.load loop, new=this #726 form) -- gone (#734's own
+            # reasoning, restated): #726 already landed, so real origin/main
+            # can never again be at the pre-726 state that tuple's own
+            # old_code named, and keeping it around only existed to trip the
+            # same synthetic-ref_code collision #740 hit composing directly
+            # on top of it (below). #740: a plain `json.load(f)` on the
+            # untrusted project file raises `JSONDecodeError` if that file
+            # ships more than one JSON document -- uncaught, so it took the
+            # WHOLE merge down with it (falling back to bundled-only
+            # defaults, dropping the trusted user-global layer's own
+            # overrides too) rather than stripping `haiku` from each of the
+            # untrusted file's own documents and keeping everything else,
+            # the same shape the jq path now has. `load_documents()` parses
+            # one or more whitespace-concatenated JSON documents from the
+            # untrusted file specifically; every other (trusted) source file
+            # keeps the original single `json.load()`, unchanged.
+            'out_path = sys.argv[1]\n'
+            'untrusted_haiku_path = sys.argv[2]\n'
+            '\n'
+            '\n'
+            'def load_documents(path):\n'
+            '    """Parse every whitespace-concatenated JSON document in `path` (#740):\n'
+            '    the untrusted project layer may ship more than one, and a plain\n'
+            '    json.load() raises `JSONDecodeError` on any file with more than one --\n'
+            '    which used to take the WHOLE merge down with it (the `|| cp\n'
+            '    "$_bundled_cfg" ...` fallback below), dropping the trusted user-global\n'
+            '    layer too rather than just stripping `haiku` from this file\'s own\n'
+            '    documents and keeping everything else."""\n'
+            '    with open(path) as f:\n'
+            '        raw = f.read()\n'
+            '    decoder = json.JSONDecoder()\n'
+            '    idx, n, docs = 0, len(raw), []\n'
+            '    while idx < n:\n'
+            '        while idx < n and raw[idx].isspace():\n'
+            '            idx += 1\n'
+            '        if idx >= n:\n'
+            '            break\n'
+            '        obj, idx = decoder.raw_decode(raw, idx)\n'
+            '        docs.append(obj)\n'
+            '    return docs\n'
+            '\n'
+            '\n'
+            'merged = {}\n'
+            'for path in sys.argv[3:]:\n'
+            '    if untrusted_haiku_path and path == untrusted_haiku_path:\n'
+            '        for data in load_documents(path):\n'
+            '            if isinstance(data, dict):\n'
+            '                data = {k: v for k, v in data.items() if k != "haiku"}\n'
+            '            merged = deep_merge(merged, data)\n'
+            '        continue\n'
+            '    with open(path) as f:\n'
+            '        data = json.load(f)\n'
             '    merged = deep_merge(merged, data)\n'
             'merged = {k: v for k, v in merged.items() if not str(k).startswith("_")}\n',
         ),

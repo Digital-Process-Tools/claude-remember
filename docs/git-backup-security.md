@@ -62,6 +62,8 @@ Before [#726](https://github.com/Digital-Process-Tools/claude-remember/issues/72
 
 **Fixed:** the per-project layer's `haiku` block is no longer merged in at all when `REMEMBER_DIR` sits inside the project checkout, regardless of how many JSON documents that file contains -- neither key reaches the nested summarizer from a file the project itself ships. This applies regardless of whether you also use git backup; it is about the *source* checkout's own `.remember/`, not the backup store. External storage mode (`data_dir` absolute or home-relative, e.g. `~/.remember/{slug}`) is unaffected, since `REMEMBER_DIR` there is your own directory, never one a clone delivers.
 
+The merge reads the untrusted project file directly (`jq --slurpfile`) rather than tagging every document with its source filename and comparing that against a shell-supplied path -- so the guard does not depend on a filename string agreeing between the shell and jq on every platform, and an untrusted file that happens to be empty cannot cause a trusted layer's own `haiku` to be stripped by mistake. The no-jq Python fallback (used when `jq` is not on `PATH`) got the equivalent fix: it used to fail the whole merge (falling back to bundled defaults, dropping the user-global layer's own overrides too) the moment the project file held more than one JSON document, rather than stripping `haiku` from each of that file's own documents and keeping everything else.
+
 **Mitigation, defense in depth:** treat any `.remember/config.json` that ships inside a repository you did not author as untrusted input, the same as any other file in that clone -- do not manually copy `haiku.*` settings out of it into your own config.
 
 ---
