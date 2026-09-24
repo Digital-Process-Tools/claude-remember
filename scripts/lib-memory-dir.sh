@@ -339,10 +339,17 @@ if [ -z "$_merged_cfg" ]; then
 elif [ "${#_cfg_sources[@]}" -gt 0 ] && command -v jq >/dev/null 2>&1; then
     # Deep-merge: later files override earlier ones. Strip `_`-prefixed keys —
     # convention: `_*` are user-facing docs (_comments/_purpose/_notes), never runtime data.
-    # When the project layer's `haiku` block is untrusted (#726, above), it is
-    # the LAST element `-s` slurps (project cfg is always appended last to
-    # _cfg_sources when present) -- deleted before the reduce, never merged in
-    # at all, rather than merged and then somehow un-merged after.
+    # When the project layer's `haiku` block is untrusted (#726, above), every
+    # document THAT FILE CONTRIBUTES must be stripped, not just "the last
+    # element `-s` slurps" (#740): `-s`/`inputs` flattens every document from
+    # every source file into one sequence with no file-boundary information,
+    # so a project config shipping TWO whitespace-concatenated JSON documents
+    # put its first document's `haiku` block one element before the position
+    # `.[-1]` ever looked at -- untouched, and merged straight through. `-n`
+    # with `inputs`/`input_filename` (rather than `-s`) tags each document
+    # with the file it actually came from, so the strip applies to every
+    # document from the untrusted file, however many there are, not to a
+    # position that assumed exactly one.
     _strip_project_haiku="false"
     [ "$_project_cfg_haiku_untrusted" = "1" ] && [ -f "$_project_cfg" ] && _strip_project_haiku="true"
     # The filter is one line, not one per clause: a literal newline inside
@@ -355,7 +362,7 @@ elif [ "${#_cfg_sources[@]}" -gt 0 ] && command -v jq >/dev/null 2>&1; then
     # investigating a macOS-only spawn-budget CI failure on this same #726
     # change: 4 phantom lines, one real process, jq itself is whitespace-
     # insensitive so this is a pure counting fix with no behavior change).
-    jq -s --argjson strip_last_haiku "$_strip_project_haiku" '(if $strip_last_haiku then (.[-1] |= del(.haiku)) else . end) | reduce .[] as $x ({}; . * $x) | with_entries(select(.key | startswith("_") | not))' "${_cfg_sources[@]}" > "$_merged_cfg" 2>/dev/null \
+    jq -n --argjson strip_haiku "$_strip_project_haiku" --arg proj "$_project_cfg" '[inputs | {doc: ., file: input_filename}] | map(if $strip_haiku and .file == $proj then (.doc |= del(.haiku)) else . end) | map(.doc) | reduce .[] as $x ({}; . * $x) | with_entries(select(.key | startswith("_") | not))' "${_cfg_sources[@]}" > "$_merged_cfg" 2>/dev/null \
         || cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null
 elif [ "${#_cfg_sources[@]}" -gt 0 ]; then
     # No jq — do the same deep-merge in Python instead of silently dropping

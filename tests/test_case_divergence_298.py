@@ -347,6 +347,43 @@ _SANCTIONED_DIVERGENCE = {
             '        || cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null\n',
         ),
         (
+            'elif [ "${#_cfg_sources[@]}" -gt 0 ] && command -v jq >/dev/null 2>&1; then\n'
+            '    _strip_project_haiku="false"\n'
+            '    [ "$_project_cfg_haiku_untrusted" = "1" ] && [ -f "$_project_cfg" ] && _strip_project_haiku="true"\n'
+            '    jq -s --argjson strip_last_haiku "$_strip_project_haiku" \'(if $strip_last_haiku then (.[-1] |= del(.haiku)) else . end) | reduce .[] as $x ({}; . * $x) | with_entries(select(.key | startswith("_") | not))\' "${_cfg_sources[@]}" > "$_merged_cfg" 2>/dev/null \\\n'
+            '        || cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null\n'
+            'elif [ "${#_cfg_sources[@]}" -gt 0 ]; then\n',
+            # #740: `-s` slurps every document from every source file into one
+            # flat array with no file-boundary information, so `.[-1]` only
+            # ever reached the LAST document of the LAST file -- a project
+            # config shipping two whitespace-concatenated JSON documents had
+            # its FIRST document's `haiku` block survive untouched, one array
+            # element before the position `.[-1]` looked at. `-n` with
+            # `inputs`/`input_filename` tags each document with the file it
+            # came from, so every document the untrusted file contributes is
+            # stripped, however many there are, rather than a position that
+            # assumed exactly one document per file. The trailing `elif`
+            # (the no-jq branch's own opener) is pulled into BOTH sides of
+            # this pair on purpose -- #740's new_code is textually IDENTICAL
+            # to the #726 pair's own new_code apart from that one jq line,
+            # and test_sanctioned_divergence_state_440.py's synthetic
+            # ref_code concatenates every pair's old_code together: without
+            # this extra anchor line, this pair's old_code is a literal
+            # substring of the #726 pair's new_code, and applying both
+            # substitutions in sequence there clobbers the #726 pair's own
+            # new_code out of the result before that test's per-pair
+            # assertion ever checks it (#734 hit the same composition
+            # problem from the opposite direction and removed the stale
+            # tuple; here both pairs are still independently live, so the
+            # fix is to make the two strings stop coinciding instead).
+            'elif [ "${#_cfg_sources[@]}" -gt 0 ] && command -v jq >/dev/null 2>&1; then\n'
+            '    _strip_project_haiku="false"\n'
+            '    [ "$_project_cfg_haiku_untrusted" = "1" ] && [ -f "$_project_cfg" ] && _strip_project_haiku="true"\n'
+            '    jq -n --argjson strip_haiku "$_strip_project_haiku" --arg proj "$_project_cfg" \'[inputs | {doc: ., file: input_filename}] | map(if $strip_haiku and .file == $proj then (.doc |= del(.haiku)) else . end) | map(.doc) | reduce .[] as $x ({}; . * $x) | with_entries(select(.key | startswith("_") | not))\' "${_cfg_sources[@]}" > "$_merged_cfg" 2>/dev/null \\\n'
+            '        || cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null\n'
+            'elif [ "${#_cfg_sources[@]}" -gt 0 ]; then\n',
+        ),
+        (
             '    declare -f _remember_python >/dev/null 2>&1 && _remember_python\n'
             '    "${PYTHON:-python3}" - "$_merged_cfg" "${_cfg_sources[@]}" > /dev/null 2>&1 <<\'PYMERGE\' || cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null\n'
             'import json\n',

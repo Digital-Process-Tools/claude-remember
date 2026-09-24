@@ -198,6 +198,89 @@ class TestProjectLocalHaikuConfigIsUntrusted:
         assert merged["cooldowns"]["save_seconds"] == 999
 
 
+class TestMultiDocumentProjectConfigDoesNotLeakHaiku:
+    """#740: `jq -s` slurps EVERY JSON document across ALL source files into
+    one flat array with no file-boundary information, so `.[-1] |= del(.haiku)`
+    only strips the LAST document of the LAST file. A project `.remember/
+    config.json` that ships TWO whitespace-concatenated JSON documents --
+    the first carrying a live `haiku` block, the second empty -- has that
+    first document survive `reduce .[] as $x ({}; . * $x)` completely
+    unstripped: the exact #726 attack, just wrapped in one extra document."""
+
+    def test_multi_document_project_config_first_document_haiku_is_still_stripped(
+        self, tmp_path
+    ):
+        """The #740 reproduction: two JSON documents in the project config,
+        `haiku` in the FIRST one -- must not reach the merged config."""
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(json.dumps({}))
+        remember = project / ".remember"
+        remember.mkdir()
+        (remember / "config.json").write_text(
+            json.dumps({"haiku": {"oauth_token": "e" * 40}}) + "\n" + json.dumps({})
+        )
+
+        merged, _ = _run_lib_and_dump_config(project, pipeline, home)
+        assert "haiku" not in merged or "oauth_token" not in merged.get("haiku", {})
+
+    def test_multi_document_project_config_second_document_haiku_is_still_stripped(
+        self, tmp_path
+    ):
+        """Same shape, `haiku` in the SECOND (last) document -- this half
+        already passed before the fix (it's exactly what `.[-1]` targeted),
+        kept here so a fix that changes strategy cannot regress it."""
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(json.dumps({}))
+        remember = project / ".remember"
+        remember.mkdir()
+        (remember / "config.json").write_text(
+            json.dumps({}) + "\n" + json.dumps({"haiku": {"oauth_token": "f" * 40}})
+        )
+
+        merged, _ = _run_lib_and_dump_config(project, pipeline, home)
+        assert "haiku" not in merged or "oauth_token" not in merged.get("haiku", {})
+
+    def test_multi_document_project_config_non_haiku_keys_still_merge(self, tmp_path):
+        """Positive control: a legitimate non-credential key from a
+        multi-document project config must still take effect -- a fix that
+        refused or dropped the whole project layer on sight of multiple
+        documents cannot pass as correct either."""
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(json.dumps({}))
+        remember = project / ".remember"
+        remember.mkdir()
+        (remember / "config.json").write_text(
+            json.dumps({"haiku": {"oauth_token": "g" * 40}})
+            + "\n"
+            + json.dumps({"cooldowns": {"save_seconds": 777}})
+        )
+
+        merged, _ = _run_lib_and_dump_config(project, pipeline, home)
+        assert merged["cooldowns"]["save_seconds"] == 777
+        assert "haiku" not in merged or "oauth_token" not in merged.get("haiku", {})
+
+    def test_user_global_haiku_still_works_alongside_multi_document_project_config(
+        self, tmp_path
+    ):
+        """Positive control: the trusted user-global layer's own haiku
+        credential must still reach the merged config even when the
+        untrusted project layer is a multi-document file being stripped."""
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(json.dumps({}))
+        (home / ".remember").mkdir(parents=True)
+        (home / ".remember" / "config.json").write_text(
+            json.dumps({"haiku": {"oauth_token": "h" * 40}})
+        )
+        remember = project / ".remember"
+        remember.mkdir()
+        (remember / "config.json").write_text(
+            json.dumps({"haiku": {"oauth_token": "i" * 40}}) + "\n" + json.dumps({})
+        )
+
+        merged, _ = _run_lib_and_dump_config(project, pipeline, home)
+        assert merged["haiku"]["oauth_token"] == "h" * 40
+
+
 def test_run_lib_sanity_check_still_works():
     """Sanity: the sibling _run_lib helper this file imports (used only for
     its constants above) is still importable and unbroken."""

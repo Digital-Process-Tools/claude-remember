@@ -167,8 +167,12 @@ def test_enabled_still_runs_the_restore(tmp_path):
     # strip_last_haiku ...` flag between `-s` and the program text (an
     # untrusted-source strip the project-cfg layer can trigger), so the
     # merge is now pinned as two separate substrings either side of that
-    # flag rather than one that no longer appears verbatim.
-    assert "jq -s --argjson strip_last_haiku" in joined, got
+    # flag rather than one that no longer appears verbatim. #740 replaced
+    # `-s`/`.[-1]` with `-n`/`inputs`/`input_filename` (the position-based
+    # strip only ever reached the last document of the last source file,
+    # missing every other document a multi-document project config could
+    # ship) -- same reasoning, new flag name and mode.
+    assert "jq -n --argjson strip_haiku" in joined, got
     assert "reduce .[] as $x" in joined, got
     assert "rev-list --left-right --count" in joined, got
     assert len(got) > 10, got

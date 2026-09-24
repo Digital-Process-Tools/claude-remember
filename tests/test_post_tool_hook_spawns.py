@@ -74,9 +74,10 @@ from tests.spawn_counting import make_shim_dir, spawns as _spawn_lines  # noqa: 
 #
 # The slack is for the platforms that are not this one — bash >= 4.2 spends
 # fewer (no `date`), Git Bash may spend one `cygpath` more — not for a
-# regression. What remains is the `jq -s` merge and its `rm` on exit, which
-# cannot go without caching the merged config, and that is a credential
-# lifetime decision (#232) rather than a spawn one.
+# regression. What remains is the layered-config merge (`jq -n`, since #740 —
+# was `jq -s` before it) and its `rm` on exit, which cannot go without caching
+# the merged config, and that is a credential lifetime decision (#232) rather
+# than a spawn one.
 POST_TOOL_SPAWN_MEASURED = 17
 POST_TOOL_SPAWN_BUDGET = POST_TOOL_SPAWN_MEASURED + 2
 
@@ -196,9 +197,13 @@ def test_the_merged_config_is_read_once_not_once_per_key(tmp_path):
     does not change between them. Five processes for five questions of one
     unchanging file was #230's largest named remainder.
 
-    The `jq -s` merge that PRODUCES the file is a different thing and is not
-    counted here: removing it means publishing the merged config at a stable
-    path, and that file can carry a live OAuth credential.
+    The layered-config merge that PRODUCES the file is a different thing and is
+    not counted here: removing it means publishing the merged config at a
+    stable path, and that file can carry a live OAuth credential. It ran as
+    `jq -s` before #740 switched it to `jq -n` (so a project config shipping
+    more than one JSON document gets its untrusted `haiku` block stripped from
+    every document it contributes, not just the last one `-s`/`.[-1]` ever
+    reached) -- still exactly one process either way.
     """
     home, project, remember = _project(tmp_path, cooldown_ts=int(time.time()))
     env = _env(tmp_path, home, project)
@@ -208,9 +213,9 @@ def test_the_merged_config_is_read_once_not_once_per_key(tmp_path):
     _reap(remember)
 
     lines = _spawns(log)
-    merges = [l for l in lines if l.startswith("jq ") and " -s " in l]
+    merges = [l for l in lines if l.startswith("jq ") and " -n " in l]
     reads = [l for l in lines
-             if l.startswith("jq ") and " -s " not in l and "remember-config-" in l]
+             if l.startswith("jq ") and " -n " not in l and "remember-config-" in l]
 
     assert len(merges) == 1, (
         "the three-layer merge should still happen exactly once per process: "
