@@ -114,11 +114,56 @@ _wh_shape_ok() {
 }
 
 _WH_TARGET=""
-_WH_HINT_FILE="$REMEMBER_DIR/tmp/handoff-path"
-if [ -f "$_WH_HINT_FILE" ]; then
-    _WH_HINTED=$(head -n 1 "$_WH_HINT_FILE" 2>/dev/null)
-    if [ -n "$_WH_HINTED" ] && _wh_shape_ok "$_WH_HINTED"; then
-        _WH_TARGET="$_WH_HINTED"
+
+# Session-keyed hint, checked FIRST (#738). $REMEMBER_DIR/tmp/handoff-path is
+# published by EVERY SessionStart, project-wide -- in per_session mode the
+# last session to start owns that one file, so an earlier session's later
+# /remember read a pointer some other, more-recently-started session had
+# already overwritten and clobbered that session's own remember.<id>.md.
+# The value being published (a resolved handoff path) is per-SESSION; the
+# channel it was published over was per-PROJECT -- one shared, last-writer-
+# wins file. session-start-hook.sh now ALSO publishes a copy keyed by that
+# session's own id, $REMEMBER_DIR/tmp/handoff-path.<session_id>, which
+# nothing else can overwrite. This script can only read its OWN copy of
+# that file if it knows which session it is running as -- CLAUDE_CODE_SESSION_ID
+# is the answer: an env var Claude Code itself sets for the Bash tool
+# (observed live, macOS, this session; distinct from CLAUDE_PROJECT_DIR,
+# which #207 already established is hook-only), never a value the model
+# reads, asserts or can forge the way transcript text could pre-#720.
+#
+# Same character allowlist CURRENT_SESSION_ID is sanitized against in
+# session-start-hook.sh (#270) -- this value did not arrive through that
+# hook's stdin JSON here, so it gets the same point-of-entry validation
+# before it is ever used to build a path.
+_WH_SESSION_ID="${CLAUDE_CODE_SESSION_ID:-}"
+_WH_LC_ALL_SAVE="${LC_ALL:-}"
+LC_ALL=C  # byte-wise bracket range, not collated (#695)
+case "$_WH_SESSION_ID" in
+    ''|.|..|*[!A-Za-z0-9._-]*) _WH_SESSION_ID="" ;;
+esac
+LC_ALL="$_WH_LC_ALL_SAVE"
+unset _WH_LC_ALL_SAVE
+
+if [ -n "$_WH_SESSION_ID" ]; then
+    _WH_SESSION_HINT_FILE="$REMEMBER_DIR/tmp/handoff-path.$_WH_SESSION_ID"
+    if [ -f "$_WH_SESSION_HINT_FILE" ]; then
+        _WH_HINTED=$(head -n 1 "$_WH_SESSION_HINT_FILE" 2>/dev/null)
+        if [ -n "$_WH_HINTED" ] && _wh_shape_ok "$_WH_HINTED"; then
+            _WH_TARGET="$_WH_HINTED"
+        fi
+    fi
+fi
+
+# Fallback: no usable session id reached this script, or no session-keyed
+# hint file exists yet (single/external mode, or a session that predates
+# this fix) -- same shared-pointer lookup as before #738, unchanged.
+if [ -z "$_WH_TARGET" ]; then
+    _WH_HINT_FILE="$REMEMBER_DIR/tmp/handoff-path"
+    if [ -f "$_WH_HINT_FILE" ]; then
+        _WH_HINTED=$(head -n 1 "$_WH_HINT_FILE" 2>/dev/null)
+        if [ -n "$_WH_HINTED" ] && _wh_shape_ok "$_WH_HINTED"; then
+            _WH_TARGET="$_WH_HINTED"
+        fi
     fi
 fi
 
