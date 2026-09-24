@@ -1270,6 +1270,25 @@ fi
 [ -d "$REMEMBER_DIR/tmp" ] || mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null
 printf '%s\n' "$REMEMBER_HANDOFF" > "$REMEMBER_DIR/tmp/handoff-path" 2>/dev/null
 
+# ── Session-keyed copy of the same pointer (#738) ──────────────────────────
+# The file above is published on EVERY SessionStart to one shared, project-
+# wide path -- in per_session mode the LAST session to start owns it, so a
+# session that started earlier and calls /remember later reads a pointer
+# some other, more-recently-started session already overwrote, and its note
+# lands in that other session's remember.<id>.md instead of its own. The
+# value being published here is per-SESSION (this session's own resolved
+# handoff target); the bug was carrying it over a per-PROJECT, last-writer-
+# wins channel. write-handoff.sh now prefers a copy keyed by THIS session's
+# own id -- a filename nothing else can collide with or overwrite -- over
+# the shared file above, whenever CURRENT_SESSION_ID is available (#270
+# already sanitized it, above). Written unconditionally, not only in
+# per_session mode: single/external mode's REMEMBER_HANDOFF is identical in
+# both files, so this is a harmless duplicate there, and write-handoff.sh
+# still falls back to the shared file when no session id reaches it at all.
+if [ -n "$CURRENT_SESSION_ID" ]; then
+    printf '%s\n' "$REMEMBER_HANDOFF" > "$REMEMBER_DIR/tmp/handoff-path.$CURRENT_SESSION_ID" 2>/dev/null
+fi
+
 # ── Handoff path hint (human-facing only since #720) ───────────────────────
 # Emitted in external mode (unchanged, #56/#296) OR whenever this session
 # resolved a per-session path — in LEGACY per_session mode REMEMBER_HANDOFF
@@ -2073,6 +2092,57 @@ if [ -d "$SESSIONS_DIR" ] && [ -d "$REMEMBER_DIR/tmp" ]; then
     done
     unset _remember_stale_record _remember_stale_id _remember_stale_mtime _remember_now GRACE_MIN
 fi
+
+# ── Prune stale session-keyed handoff-path hints (#738) ───────────────────
+# The session-keyed pointer written above, tmp/handoff-path.<session_id>,
+# accumulates one file per session that ever started, same as the
+# remember.delivered.<session_id> records #373 already prunes just above --
+# and for the same reason nothing else in this codebase removes one. Same
+# sweep, same coupling (a live transcript under $SESSIONS_DIR means the
+# session could still resume and call /remember; one gone in every way this
+# hook can observe is genuinely over), same GRACE_MIN window so a session
+# still inside its own SessionStart-to-transcript-creation gap (#393) is
+# never mistaken for a dead one. Deliberately a second, self-contained loop
+# rather than folded into the one above: the two glob patterns
+# (remember.delivered.* vs handoff-path.*) live in different files with
+# different prefixes to strip, and #373's own loop already unset every
+# local it used, so nothing survives here to reuse.
+GRACE_MIN=5
+if [ -d "$SESSIONS_DIR" ] && [ -d "$REMEMBER_DIR/tmp" ]; then
+    _remember_handoff_glob_dir=""
+    _remember_forward_slash_into _remember_handoff_glob_dir "$REMEMBER_DIR"
+    for _remember_stale_hint in "$_remember_handoff_glob_dir"/tmp/handoff-path.*; do
+        [ -f "$_remember_stale_hint" ] || continue
+        _remember_stale_id="${_remember_stale_hint##*/handoff-path.}"
+        [ -n "$_remember_stale_id" ] || continue
+        # Never sweep the hint this very invocation just wrote.
+        [ "$_remember_stale_id" = "$CURRENT_SESSION_ID" ] && continue
+        if [ ! -e "$SESSIONS_DIR/$_remember_stale_id.jsonl" ]; then
+            _remember_stale_mtime=$(stat -c %Y "$_remember_stale_hint" 2>/dev/null) \
+                || _remember_stale_mtime=$(stat -f %m "$_remember_stale_hint" 2>/dev/null) \
+                || _remember_stale_mtime=""
+            case "$_remember_stale_mtime" in
+                (''|*[!0-9]*)
+                    continue
+                    ;;
+            esac
+            _remember_now=""
+            _remember_date_into _remember_now +%s
+            case "$_remember_now" in
+                (''|*[!0-9]*)
+                    continue
+                    ;;
+            esac
+            if [ "$_remember_now" -gt 0 ] && [ "$_remember_stale_mtime" -gt 0 ] \
+                && [ $((10#$_remember_now - 10#$_remember_stale_mtime)) -lt $((GRACE_MIN * 60)) ]; then
+                continue
+            fi
+            rm -f "$_remember_stale_hint" 2>/dev/null
+        fi
+    done
+    unset _remember_handoff_glob_dir _remember_stale_hint _remember_stale_id _remember_stale_mtime _remember_now
+fi
+unset GRACE_MIN
 
 # ── History hint ───────────────────────────────────────────────────────────
 # printf + $(<file), not `cat` (#679, part of #660): forks nothing, and is
