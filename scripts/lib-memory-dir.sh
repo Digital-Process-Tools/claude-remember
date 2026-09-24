@@ -339,45 +339,52 @@ if [ -z "$_merged_cfg" ]; then
 elif [ "${#_cfg_sources[@]}" -gt 0 ] && command -v jq >/dev/null 2>&1; then
     # Deep-merge: later files override earlier ones. Strip `_`-prefixed keys —
     # convention: `_*` are user-facing docs (_comments/_purpose/_notes), never runtime data.
-    # When the project layer's `haiku` block is untrusted (#726, above), every
-    # document THAT FILE CONTRIBUTES must be stripped, not just "the last
-    # element `-s` slurps" (#740): `-s`/`inputs` flattens every document from
-    # every source file into one sequence with no file-boundary information,
-    # so a project config shipping TWO whitespace-concatenated JSON documents
-    # put its first document's `haiku` block one element before the position
-    # `.[-1]` ever looked at -- untouched, and merged straight through.
-    # `--slurpfile proj "$_project_cfg"` (rather than tagging every document
-    # with `input_filename` and comparing it to a shell-supplied path, #740's
-    # first attempt) has jq open the untrusted file DIRECTLY, once, by its
-    # own single file argument -- there is no filename STRING to compare at
-    # all, so a platform that renders `$_project_cfg` differently to jq than
-    # to the shell (a Windows-native jq.exe's own path handling, a symlink, a
-    # `./`-prefix) has nothing left to diverge on. It also has no "assume the
-    # project file is the last thing read" ambiguity the immediately-tried
-    # alternative (comparing every document's `input_filename` against the
-    # LAST document's own filename) turned out to carry: that design strips
-    # the wrong layer's `haiku` whenever the untrusted project file exists
-    # but happens to be EMPTY (0 documents) -- the untrusted file then
-    # contributes nothing to the merge's own document stream at all, so its
-    # "last document" is actually the LAST TRUSTED file's, and the trusted
-    # user-global layer's own legitimate `haiku` block gets stripped by
-    # mistake (verified directly with jq: bundled+user(haiku)+empty-project
-    # loses the user's haiku; --slurpfile does not, since an empty file just
-    # slurps to `[]` and strips nothing from anyone).
+    # #744: the previous two designs (`.[-1] |= del(.haiku)` on a `-s`
+    # slurp, then `--slurpfile`/`input_filename`) were REASONED to be safe
+    # on Windows, never OBSERVED there -- PR #744's CI showed the
+    # `--slurpfile` invocation itself erroring under a native jq.exe, and
+    # the `|| cp "$_bundled_cfg" ...` fallback silently dropped EVERY
+    # layer, project AND trusted user-global, with no error surfaced to
+    # the user at all. This design uses NOTHING that was not already
+    # proven, on every CI platform, before #740 ever touched this file:
+    # the untrusted project layer is sanitized in a SEPARATE, plain call
+    # (`jq -c 'del(.haiku)' "$_project_cfg"`, no `-s`, no `-n`, no
+    # `--slurpfile`, no `/dev/null` placeholder, no path comparison of any
+    # kind) into its own temp file, applying `del(.haiku)` to every
+    # top-level JSON value the untrusted file contains -- jq's ordinary
+    # (non-slurp) mode already treats each one as a separate input, so
+    # this handles a multi-document project config the same way #740's
+    # first fix did, and an empty file the same way its second fix did,
+    # without either design's own platform-dependent moving part. Once
+    # sanitized, the ORIGINAL `jq -s` reduce below (unchanged since
+    # before #726) runs over the SAME plain file arguments it always did
+    # -- the sanitized temp file standing in for the untrusted one -- so
+    # the one thing #744 needed proof of (does this shape work on
+    # Windows) is answered by history rather than reasoning.
     _strip_project_haiku="false"
     [ "$_project_cfg_haiku_untrusted" = "1" ] && [ -f "$_project_cfg" ] && _strip_project_haiku="true"
-    # bundled/user only -- the untrusted project layer is read separately,
-    # below, via --slurpfile. jq's own `inputs` falls back to reading STDIN
-    # when given zero positional file arguments, so /dev/null is a deliberate
-    # placeholder (0 documents, always readable) rather than an omission, for
-    # the reachable case where neither bundled nor user config exists but the
-    # project layer does.
-    _non_project_sources=()
-    [ -f "$_bundled_cfg" ] && _non_project_sources+=("$_bundled_cfg")
-    [ -f "$_user_cfg"    ] && _non_project_sources+=("$_user_cfg")
-    [ "${#_non_project_sources[@]}" -eq 0 ] && _non_project_sources=("/dev/null")
-    _project_slurp_source="/dev/null"
-    [ -f "$_project_cfg" ] && _project_slurp_source="$_project_cfg"
+    _jq_merge_sources=()
+    [ -f "$_bundled_cfg" ] && _jq_merge_sources+=("$_bundled_cfg")
+    [ -f "$_user_cfg"    ] && _jq_merge_sources+=("$_user_cfg")
+    _project_sanitized_tmp=""
+    if [ -f "$_project_cfg" ]; then
+        if [ "$_strip_project_haiku" = "true" ]; then
+            _project_sanitized_tmp=$(mktemp "${SYS_TMPDIR}/remember-config-sanitized-XXXXXX" 2>/dev/null) || _project_sanitized_tmp=""
+            if [ -n "$_project_sanitized_tmp" ] && jq -c 'del(.haiku)' "$_project_cfg" > "$_project_sanitized_tmp" 2>/dev/null; then
+                _jq_merge_sources+=("$_project_sanitized_tmp")
+            else
+                # Sanitizing failed (mktemp, an unreadable project file, or
+                # jq itself) -- fail CLOSED: the project layer is dropped
+                # entirely rather than merged unsanitized. The trusted
+                # bundled/user layers above are unaffected; only the
+                # untrusted one's own contribution is lost.
+                [ -n "$_project_sanitized_tmp" ] && rm -f "$_project_sanitized_tmp"
+                _project_sanitized_tmp=""
+            fi
+        else
+            _jq_merge_sources+=("$_project_cfg")
+        fi
+    fi
     # The filter is one line, not one per clause: a literal newline inside
     # this quoted argument reaches the process's own argv byte-for-byte, and
     # every spawn-counting test in this repo (tests/spawn_counting.py's
@@ -388,8 +395,9 @@ elif [ "${#_cfg_sources[@]}" -gt 0 ] && command -v jq >/dev/null 2>&1; then
     # investigating a macOS-only spawn-budget CI failure on this same #726
     # change: 4 phantom lines, one real process, jq itself is whitespace-
     # insensitive so this is a pure counting fix with no behavior change).
-    jq -n --argjson strip_haiku "$_strip_project_haiku" --slurpfile proj "$_project_slurp_source" '($proj | if $strip_haiku then map(del(.haiku)) else . end) as $proj_docs | ([inputs] + $proj_docs) | reduce .[] as $x ({}; . * $x) | with_entries(select(.key | startswith("_") | not))' "${_non_project_sources[@]}" > "$_merged_cfg" 2>/dev/null \
+    jq -s 'reduce .[] as $x ({}; . * $x) | with_entries(select(.key | startswith("_") | not))' "${_jq_merge_sources[@]}" > "$_merged_cfg" 2>/dev/null \
         || cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null
+    [ -n "$_project_sanitized_tmp" ] && rm -f "$_project_sanitized_tmp"
 elif [ "${#_cfg_sources[@]}" -gt 0 ]; then
     # No jq — do the same deep-merge in Python instead of silently dropping
     # the user-global/per-project layers and copying only the bundled
@@ -450,7 +458,17 @@ def load_documents(path):
 merged = {}
 for path in sys.argv[3:]:
     if untrusted_haiku_path and path == untrusted_haiku_path:
-        for data in load_documents(path):
+        # #744: fail CLOSED -- if the untrusted file can't even be loaded
+        # (unreadable, a permissions error, anything load_documents() itself
+        # doesn't already tolerate), drop just this layer rather than let
+        # the exception propagate and crash the whole merge down to the
+        # bundled-only fallback below, taking the trusted user-global
+        # layer's own overrides with it for no reason connected to them.
+        try:
+            docs = load_documents(path)
+        except OSError:
+            continue
+        for data in docs:
             if isinstance(data, dict):
                 data = {k: v for k, v in data.items() if k != "haiku"}
             merged = deep_merge(merged, data)

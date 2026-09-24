@@ -393,6 +393,89 @@ class TestNoJqFallbackMultiDocumentProjectConfig:
         assert "haiku" not in merged or "oauth_token" not in merged.get("haiku", {})
 
 
+class TestSanitizeStepFailsClosed:
+    """#744: PR #744's CI observed the risk #740's `--slurpfile`/`input_filename`
+    design was only ever REASONED about, not observed -- on Windows (Git
+    Bash + a native jq.exe) the jq invocation itself errored, and the
+    `|| cp "$_bundled_cfg" ...` fallback silently dropped EVERY layer
+    (project AND the trusted user-global one), with no error surfaced to
+    the user at all. The fix drops `--slurpfile` and `input_filename`
+    entirely: a separate, plain `jq -c 'del(.haiku)' "$_project_cfg" >
+    sanitized_tmp` call (no path comparison, no `/dev/null` placeholder --
+    the same shape as the `jq -s` reduce that was ALREADY proven on every
+    platform before #740 ever touched this file) sanitizes the untrusted
+    layer BEFORE the original reduce ever sees it. If sanitizing itself
+    fails, the project layer is dropped entirely (fail CLOSED) rather than
+    merged unsanitized -- these tests exercise that specific path."""
+
+    def test_an_unreadable_project_cfg_drops_the_layer_without_losing_the_rest(
+        self, tmp_path
+    ):
+        """The sanitize step can't even open a project config with no read
+        permission -- confirms the failure is scoped to just that layer:
+        the trusted user-global layer must still merge normally rather than
+        the whole thing collapsing to the bundled-only fallback (which
+        would ALSO be safe, but is not what "drop the project layer" means,
+        and masks a real "could I even find the source of the failure"
+        signal a maintainer would want)."""
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(json.dumps({}))
+        (home / ".remember").mkdir(parents=True)
+        (home / ".remember" / "config.json").write_text(
+            json.dumps({"cooldowns": {"save_seconds": 321}})
+        )
+        remember = project / ".remember"
+        remember.mkdir()
+        project_cfg_path = remember / "config.json"
+        project_cfg_path.write_text(
+            json.dumps({"haiku": {"oauth_token": "n" * 40}})
+        )
+        project_cfg_path.chmod(0o000)
+        try:
+            merged, _ = _run_lib_and_dump_config(project, pipeline, home)
+        finally:
+            project_cfg_path.chmod(0o644)
+
+        # Positive control: the trusted layer's own key still merged --
+        # this is not the total bundled-only fallback.
+        assert merged["cooldowns"]["save_seconds"] == 321
+        assert "haiku" not in merged or "oauth_token" not in merged.get("haiku", {})
+
+    def test_an_unreadable_project_cfg_no_jq_fallback_also_drops_only_that_layer(
+        self, tmp_path
+    ):
+        """Same shape, no-jq Python fallback: `open()` on an unreadable
+        project config raises inside `load_documents()` -- must not take
+        the whole merge down with it either."""
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(json.dumps({}))
+        (home / ".remember").mkdir(parents=True)
+        (home / ".remember" / "config.json").write_text(
+            json.dumps({"cooldowns": {"save_seconds": 322}})
+        )
+        remember = project / ".remember"
+        remember.mkdir()
+        project_cfg_path = remember / "config.json"
+        project_cfg_path.write_text(
+            json.dumps({"haiku": {"oauth_token": "o" * 40}})
+        )
+        project_cfg_path.chmod(0o000)
+        try:
+            merged, _ = _run_lib_and_dump_config(
+                project, pipeline, home,
+                env_extra={"PATH": _path_without_jq(tmp_path)},
+            )
+        finally:
+            project_cfg_path.chmod(0o644)
+
+        # Positive control, same shape as the jq-path test above: the
+        # trusted layer's own key must still merge -- not the total
+        # bundled-only fallback.
+        assert merged["cooldowns"]["save_seconds"] == 322
+
+        assert "haiku" not in merged or "oauth_token" not in merged.get("haiku", {})
+
+
 def test_run_lib_sanity_check_still_works():
     """Sanity: the sibling _run_lib helper this file imports (used only for
     its constants above) is still importable and unbroken."""

@@ -163,16 +163,19 @@ def test_enabled_still_runs_the_restore(tmp_path):
     # cache publish (`mv`), and -- the actual restore, not just bookkeeping
     # -- the divergence check `git rev-list --left-right --count`.
     joined = " ".join(got)
-    # `jq -s reduce` used to be adjacent; #726 inserted an `--argjson
+    # `jq -s reduce` was adjacent before #726 inserted an `--argjson
     # strip_last_haiku ...` flag between `-s` and the program text (an
-    # untrusted-source strip the project-cfg layer can trigger), so the
-    # merge is now pinned as two separate substrings either side of that
-    # flag rather than one that no longer appears verbatim. #740 replaced
-    # `-s`/`.[-1]` with `-n`/`inputs`/`input_filename` (the position-based
-    # strip only ever reached the last document of the last source file,
-    # missing every other document a multi-document project config could
-    # ship) -- same reasoning, new flag name and mode.
-    assert "jq -n --argjson strip_haiku" in joined, got
-    assert "reduce .[] as $x" in joined, got
+    # untrusted-source strip the project-cfg layer can trigger). #740 then
+    # tried `-n`/`inputs`/`input_filename`, then `--slurpfile` -- all three
+    # depended on this SAME spawn doing the untrusted-layer strip inline.
+    # #744 (CI observed the `--slurpfile` design fail on Windows) moved
+    # that strip to a SEPARATE `jq -c 'del(.haiku)'` spawn that runs only
+    # when a project-local config exists and is untrusted -- this fixture
+    # has neither (`REMEMBER_DIR` here is the external store's own slug
+    # directory, no `.remember/config.json` inside `project/` at all), so
+    # that spawn never fires and this one is back to being exactly the
+    # pre-#726 form again, `jq -s reduce` adjacent with no flag between
+    # them.
+    assert "jq -s reduce .[] as $x" in joined, got
     assert "rev-list --left-right --count" in joined, got
     assert len(got) > 10, got

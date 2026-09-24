@@ -353,54 +353,61 @@ _SANCTIONED_DIVERGENCE = {
             '    jq -s --argjson strip_last_haiku "$_strip_project_haiku" \'(if $strip_last_haiku then (.[-1] |= del(.haiku)) else . end) | reduce .[] as $x ({}; . * $x) | with_entries(select(.key | startswith("_") | not))\' "${_cfg_sources[@]}" > "$_merged_cfg" 2>/dev/null \\\n'
             '        || cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null\n'
             'elif [ "${#_cfg_sources[@]}" -gt 0 ]; then\n',
-            # #740: `-s` slurps every document from every source file into one
-            # flat array with no file-boundary information, so `.[-1]` only
-            # ever reached the LAST document of the LAST file -- a project
-            # config shipping two whitespace-concatenated JSON documents had
-            # its FIRST document's `haiku` block survive untouched, one array
-            # element before the position `.[-1]` looked at. The first fix
-            # tried (`-n` with `inputs`/`input_filename`, tagging each
-            # document with the file it came from and comparing that against
-            # a shell-supplied `--arg proj` string) was itself replaced
-            # before landing: it still compared a path STRING, which a
-            # maintainer flagged as unverifiable on a platform where jq's own
-            # view of a path could diverge from the shell's, and this repo's
-            # CI skips every bash-subprocess test on win32 (#79) so nothing
-            # here could ever prove it safe either way. `--slurpfile proj
-            # "$_project_cfg"` removes the comparison entirely -- jq opens
-            # the untrusted file DIRECTLY, by its own single file argument,
-            # so there is no filename string left to diverge on any
-            # platform. It also avoids a real regression the `input_filename`
-            # design had: comparing every document's file against the LAST
-            # document's own file breaks the moment the untrusted project
-            # file exists but is EMPTY (0 documents) -- its "last document"
-            # is then some TRUSTED file's, stripping that layer's own
-            # legitimate `haiku` by mistake. `--slurpfile` has no such
-            # ambiguity (an empty file just slurps to `[]`). The trailing
-            # `elif` (the no-jq branch's own opener) is pulled into BOTH
-            # sides of this pair on purpose -- #740's new_code is textually
-            # IDENTICAL to the #726 pair's own new_code apart from the
-            # changed lines, and test_sanctioned_divergence_state_440.py's
-            # synthetic ref_code concatenates every pair's old_code
-            # together: without this extra anchor line, this pair's old_code
-            # is a literal substring of the #726 pair's new_code, and
-            # applying both substitutions in sequence there clobbers the
-            # #726 pair's own new_code out of the result before that test's
-            # per-pair assertion ever checks it (#734 hit the same
-            # composition problem from the opposite direction and removed
-            # the stale tuple; here both pairs are still independently live,
-            # so the fix is to make the two strings stop coinciding instead).
+            # #740/#744: `-s` slurps every document from every source file into
+            # one flat array with no file-boundary information, so `.[-1]` only
+            # ever reached the LAST document of the LAST file -- a project config
+            # shipping two whitespace-concatenated JSON documents had its FIRST
+            # document's `haiku` block survive untouched, one array element
+            # before the position `.[-1]` looked at (#740). Two designs meant to
+            # fix that were tried and abandoned before this one: `-n` with
+            # `inputs`/`input_filename`, comparing every document's source file
+            # against a shell-supplied `--arg proj` path -- reasoned to be safe,
+            # never observed on a platform where jq's own view of a path could
+            # diverge from the shell's (this repo's CI skips every bash-subprocess
+            # test on win32, #79); then `--slurpfile proj "$_project_cfg"`, which
+            # removed that comparison but was ITSELF never proven on Windows either
+            # -- PR #744's CI showed it erroring under a native jq.exe there, and
+            # the `|| cp "$_bundled_cfg" ...` fallback silently dropped EVERY layer,
+            # project AND trusted user-global, with no error surfaced to the user
+            # at all. This design (#744) uses NOTHING that was not already proven,
+            # on every CI platform, before #740 ever touched this file: a SEPARATE,
+            # plain `jq -c 'del(.haiku)'` call (no `-s`, no `-n`, no `--slurpfile`,
+            # no path comparison) sanitizes the untrusted project layer into its own
+            # temp file first -- jq's ordinary mode already treats each document as
+            # a separate input, so a multi-document project config is handled the
+            # same way #740's first fix was, and an empty one the same way its
+            # second fix was, without either design's own platform-dependent moving
+            # part. If sanitizing fails for any reason, the project layer is simply
+            # dropped (fail CLOSED) rather than merged unsanitized -- the trusted
+            # bundled/user layers are unaffected either way. Once sanitized, the
+            # ORIGINAL `jq -s` reduce (unchanged since before #726) runs over the
+            # same plain file arguments it always did. The trailing `elif` (the
+            # no-jq branch's own opener) is pulled into BOTH sides of this pair for
+            # the same test_sanctioned_divergence_state_440.py collision reason the
+            # #726 pair's own comment (above) already explains in full.
             'elif [ "${#_cfg_sources[@]}" -gt 0 ] && command -v jq >/dev/null 2>&1; then\n'
             '    _strip_project_haiku="false"\n'
             '    [ "$_project_cfg_haiku_untrusted" = "1" ] && [ -f "$_project_cfg" ] && _strip_project_haiku="true"\n'
-            '    _non_project_sources=()\n'
-            '    [ -f "$_bundled_cfg" ] && _non_project_sources+=("$_bundled_cfg")\n'
-            '    [ -f "$_user_cfg"    ] && _non_project_sources+=("$_user_cfg")\n'
-            '    [ "${#_non_project_sources[@]}" -eq 0 ] && _non_project_sources=("/dev/null")\n'
-            '    _project_slurp_source="/dev/null"\n'
-            '    [ -f "$_project_cfg" ] && _project_slurp_source="$_project_cfg"\n'
-            '    jq -n --argjson strip_haiku "$_strip_project_haiku" --slurpfile proj "$_project_slurp_source" \'($proj | if $strip_haiku then map(del(.haiku)) else . end) as $proj_docs | ([inputs] + $proj_docs) | reduce .[] as $x ({}; . * $x) | with_entries(select(.key | startswith("_") | not))\' "${_non_project_sources[@]}" > "$_merged_cfg" 2>/dev/null \\\n'
+            '    _jq_merge_sources=()\n'
+            '    [ -f "$_bundled_cfg" ] && _jq_merge_sources+=("$_bundled_cfg")\n'
+            '    [ -f "$_user_cfg"    ] && _jq_merge_sources+=("$_user_cfg")\n'
+            '    _project_sanitized_tmp=""\n'
+            '    if [ -f "$_project_cfg" ]; then\n'
+            '        if [ "$_strip_project_haiku" = "true" ]; then\n'
+            '            _project_sanitized_tmp=$(mktemp "${SYS_TMPDIR}/remember-config-sanitized-XXXXXX" 2>/dev/null) || _project_sanitized_tmp=""\n'
+            '            if [ -n "$_project_sanitized_tmp" ] && jq -c \'del(.haiku)\' "$_project_cfg" > "$_project_sanitized_tmp" 2>/dev/null; then\n'
+            '                _jq_merge_sources+=("$_project_sanitized_tmp")\n'
+            '            else\n'
+            '                [ -n "$_project_sanitized_tmp" ] && rm -f "$_project_sanitized_tmp"\n'
+            '                _project_sanitized_tmp=""\n'
+            '            fi\n'
+            '        else\n'
+            '            _jq_merge_sources+=("$_project_cfg")\n'
+            '        fi\n'
+            '    fi\n'
+            '    jq -s \'reduce .[] as $x ({}; . * $x) | with_entries(select(.key | startswith("_") | not))\' "${_jq_merge_sources[@]}" > "$_merged_cfg" 2>/dev/null \\\n'
             '        || cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null\n'
+            '    [ -n "$_project_sanitized_tmp" ] && rm -f "$_project_sanitized_tmp"\n'
             'elif [ "${#_cfg_sources[@]}" -gt 0 ]; then\n',
         ),
         (
@@ -473,7 +480,11 @@ _SANCTIONED_DIVERGENCE = {
             'merged = {}\n'
             'for path in sys.argv[3:]:\n'
             '    if untrusted_haiku_path and path == untrusted_haiku_path:\n'
-            '        for data in load_documents(path):\n'
+            '        try:\n'
+            '            docs = load_documents(path)\n'
+            '        except OSError:\n'
+            '            continue\n'
+            '        for data in docs:\n'
             '            if isinstance(data, dict):\n'
             '                data = {k: v for k, v in data.items() if k != "haiku"}\n'
             '            merged = deep_merge(merged, data)\n'
