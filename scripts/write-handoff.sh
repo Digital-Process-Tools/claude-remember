@@ -136,13 +136,9 @@ _WH_TARGET=""
 # hook's stdin JSON here, so it gets the same point-of-entry validation
 # before it is ever used to build a path.
 _WH_SESSION_ID="${CLAUDE_CODE_SESSION_ID:-}"
-_WH_LC_ALL_SAVE="${LC_ALL:-}"
-LC_ALL=C  # byte-wise bracket range, not collated (#695)
 case "$_WH_SESSION_ID" in
     ''|.|..|*[!A-Za-z0-9._-]*) _WH_SESSION_ID="" ;;
 esac
-LC_ALL="$_WH_LC_ALL_SAVE"
-unset _WH_LC_ALL_SAVE
 
 if [ -n "$_WH_SESSION_ID" ]; then
     _WH_SESSION_HINT_FILE="$REMEMBER_DIR/tmp/handoff-path.$_WH_SESSION_ID"
