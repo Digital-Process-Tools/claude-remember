@@ -32,6 +32,8 @@ Three properties, mirroring test_handoff_per_session_363.py's own shape:
     would also make the negative assertion pass for the wrong reason)
 """
 
+from __future__ import annotations
+
 import json
 import os
 import subprocess
