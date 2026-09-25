@@ -78,11 +78,51 @@ if [ "$REMEMBER_DIR" != "$_legacy_dir" ] && [ -d "$_legacy_dir" ] && [ ! -e "$RE
 
     if [ "$_migrating_user_config_home" = false ]; then
         mkdir -p "$(dirname "$REMEMBER_DIR")" 2>/dev/null
+
+        # #757: lib-memory-dir.sh trusts ${REMEMBER_DIR}/config.json outright
+        # once REMEMBER_DIR is external (~293-300) -- that is right for a
+        # config an OPERATOR wrote, but a legacy .remember/config.json a
+        # REPOSITORY committed is exactly the untrusted input #726/#740
+        # already strip out of the ordinary project layer. Carrying it across
+        # this one-shot `mv` unchanged would launder it into the trusted
+        # layer permanently, on every session after the first. So: hold a
+        # git-tracked config.json out of the move, and leave it behind,
+        # still tracked, doing nothing for the new external store -- logged,
+        # not silent, so the operator can see why their repo's config.json
+        # no longer takes effect and where their own settings now belong.
+        _legacy_cfg="$_legacy_dir/config.json"
+        _legacy_cfg_holdout=""
+        if [ -f "$_legacy_cfg" ] && command -v git >/dev/null 2>&1 && [ -e "$_mem_proj/.git" ] \
+            && (unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+                git -C "$_mem_proj" ls-files --error-unmatch -- ".remember/config.json") >/dev/null 2>&1; then
+            _legacy_cfg_holdout=$(mktemp "${SYS_TMPDIR:-/tmp}/remember-legacy-cfg-XXXXXX" 2>/dev/null) || _legacy_cfg_holdout=""
+            if [ -n "$_legacy_cfg_holdout" ] && cp "$_legacy_cfg" "$_legacy_cfg_holdout" 2>/dev/null; then
+                rm -f "$_legacy_cfg" 2>/dev/null || _legacy_cfg_holdout=""
+            else
+                _legacy_cfg_holdout=""
+            fi
+        fi
+
         if mv "$_legacy_dir" "$REMEMBER_DIR" 2>/dev/null; then
             mkdir -p "$_legacy_dir"
-            printf 'Memory data migrated to:\n  %s\nThis directory is now empty; you may delete it.\n' \
-                "$REMEMBER_DIR" > "$_legacy_dir/MIGRATED-TO.txt"
+            if [ -n "$_legacy_cfg_holdout" ] && [ -f "$_legacy_cfg_holdout" ]; then
+                mv "$_legacy_cfg_holdout" "$_legacy_cfg" 2>/dev/null
+                printf 'Memory data migrated to:\n  %s\nThis directory is now empty; you may delete it.\n\nconfig.json was NOT migrated: it is tracked by this repository git\nindex, so treating it as your own trusted config would let a cloned repo\nchoose the summarizer credential, model, or refusal-gate settings your\nmemory pipeline runs with (#757). Left behind here, still tracked, still\ndoing nothing for the external store above. Put your own settings in\n%s/config.json instead.\n' \
+                    "$REMEMBER_DIR" "$REMEMBER_DIR" > "$_legacy_dir/MIGRATED-TO.txt"
+                printf 'remember: %s is tracked by this repository git index; left behind rather than migrated into the trusted external config store (#757)\n' \
+                    "$_legacy_cfg" >&2
+            else
+                printf 'Memory data migrated to:\n  %s\nThis directory is now empty; you may delete it.\n' \
+                    "$REMEMBER_DIR" > "$_legacy_dir/MIGRATED-TO.txt"
+            fi
+        elif [ -n "$_legacy_cfg_holdout" ] && [ -f "$_legacy_cfg_holdout" ]; then
+            # The dir move itself failed after config.json was already pulled
+            # out -- put it back rather than leave the legacy dir missing a
+            # file nothing else removed on purpose.
+            mv "$_legacy_cfg_holdout" "$_legacy_cfg" 2>/dev/null
         fi
+        [ -n "$_legacy_cfg_holdout" ] && rm -f "$_legacy_cfg_holdout" 2>/dev/null
+        unset _legacy_cfg _legacy_cfg_holdout
     fi
     unset _migrating_user_config_home
 fi

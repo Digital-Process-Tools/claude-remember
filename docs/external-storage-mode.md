@@ -15,7 +15,7 @@ Create `~/.remember/config.json`:
 On next session start, the plugin:
 
 1. Resolves `REMEMBER_DIR` to `~/.remember/<slug-of-project>/`
-2. Auto-migrates any existing `<project>/.remember/` to the new location — once, leaving a `MIGRATED-TO.txt` marker in the old directory
+2. Auto-migrates any existing `<project>/.remember/` to the new location — once, leaving a `MIGRATED-TO.txt` marker in the old directory. **Exception:** a `config.json` in that legacy directory that is tracked by the repository's own git index is left behind, still tracked, rather than migrated ([#757](https://github.com/Digital-Process-Tools/claude-remember/issues/757)) — once external, `${REMEMBER_DIR}/config.json` is trusted outright (see [configuration.md](configuration.md)), and a config a repository committed is exactly the untrusted input [#726](https://github.com/Digital-Process-Tools/claude-remember/issues/726)/[#740](https://github.com/Digital-Process-Tools/claude-remember/issues/740) already strip out of the ordinary project layer. The marker names why, and a `remember:` line goes to `hook-errors.log`. An **untracked** legacy `config.json` — the user's own, never committed — still migrates and is still trusted, as before.
 3. Skips writing `.gitignore` (the external directory is not inside a git repo)
 
 ### `{slug}` expansion

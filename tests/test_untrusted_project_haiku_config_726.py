@@ -627,3 +627,115 @@ class TestConfigCandidatesSkipsProjectLocalRememberDir:
         monkeypatch.delenv("REMEMBER_CONFIG", raising=False)
         candidates = _config_candidates()
         assert str(external / "config.json") in candidates
+
+
+class TestUntrustedProjectModelAndRejectPatternAlsoStripped:
+    """#757: the untrusted-layer strip that #726/#740 built for `haiku` must
+    also cover `model` and `reject_pattern`. Neither can redirect where the
+    summarizer sends transcripts, but a repo-committed project layer could
+    otherwise pick the model billed for every save, or reach into the
+    refusal gate -- `none` turns it off outright, and any other value is a
+    regex run over model output (a ReDoS surface an attacker fully
+    controls)."""
+
+    def test_project_model_does_not_reach_the_merged_config(self, tmp_path):
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(json.dumps({}))
+        remember = project / ".remember"
+        remember.mkdir()
+        (remember / "config.json").write_text(json.dumps({"model": "attacker-model"}))
+
+        merged, _ = _run_lib_and_dump_config(project, pipeline, home)
+        assert merged.get("model") != "attacker-model"
+
+    def test_project_reject_pattern_does_not_reach_the_merged_config(self, tmp_path):
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(json.dumps({}))
+        remember = project / ".remember"
+        remember.mkdir()
+        (remember / "config.json").write_text(json.dumps({"reject_pattern": "none"}))
+
+        merged, _ = _run_lib_and_dump_config(project, pipeline, home)
+        assert merged.get("reject_pattern") != "none"
+
+    def test_project_model_removal_does_not_touch_other_project_keys(self, tmp_path):
+        """Positive control: a non-stripped key from the SAME untrusted
+        project file still merges -- proving the fix removes only the
+        named keys, not the whole file's contribution."""
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(json.dumps({}))
+        remember = project / ".remember"
+        remember.mkdir()
+        (remember / "config.json").write_text(
+            json.dumps({"model": "attacker-model", "cooldowns": {"save_seconds": 999}})
+        )
+
+        merged, _ = _run_lib_and_dump_config(project, pipeline, home)
+        assert merged["cooldowns"]["save_seconds"] == 999
+        assert merged.get("model") != "attacker-model"
+
+    def test_user_global_model_still_carries_through(self, tmp_path):
+        """Positive control: the SAME key, configured in the TRUSTED
+        user-global layer, must still reach the merged config."""
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(json.dumps({}))
+        (home / ".remember").mkdir(parents=True)
+        (home / ".remember" / "config.json").write_text(json.dumps({"model": "sonnet"}))
+
+        merged, _ = _run_lib_and_dump_config(project, pipeline, home)
+        assert merged["model"] == "sonnet"
+
+    def test_user_global_reject_pattern_still_carries_through(self, tmp_path):
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(json.dumps({}))
+        (home / ".remember").mkdir(parents=True)
+        (home / ".remember" / "config.json").write_text(json.dumps({"reject_pattern": "^custom"}))
+
+        merged, _ = _run_lib_and_dump_config(project, pipeline, home)
+        assert merged["reject_pattern"] == "^custom"
+
+    def test_external_storage_project_layer_model_still_trusted(self, tmp_path):
+        """Positive control: in external storage mode the project layer is
+        not the #726/#757 attack surface (REMEMBER_DIR resolves outside any
+        checkout a clone could ship), so model/reject_pattern set there must
+        still carry through."""
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(
+            json.dumps({"data_dir": str(home / "ext-mem" / "{slug}")})
+        )
+        ext_dir = home / "ext-mem"
+        ext_dir.mkdir(parents=True)
+
+        _, remember_dir = _run_lib_and_dump_config(project, pipeline, home)
+        remember_dir_path = Path(remember_dir)
+        remember_dir_path.mkdir(parents=True, exist_ok=True)
+        (remember_dir_path / "config.json").write_text(
+            json.dumps({"model": "sonnet", "reject_pattern": "^custom"})
+        )
+
+        merged, _ = _run_lib_and_dump_config(project, pipeline, home)
+        assert merged["model"] == "sonnet"
+        assert merged["reject_pattern"] == "^custom"
+
+    def test_no_jq_fallback_also_strips_untrusted_project_model_and_reject_pattern(self, tmp_path):
+        """Same attack, jq off PATH -- the Python merge fallback must apply
+        the same rule."""
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(json.dumps({}))
+        remember = project / ".remember"
+        remember.mkdir()
+        (remember / "config.json").write_text(
+            json.dumps({
+                "model": "attacker-model",
+                "reject_pattern": "none",
+                "cooldowns": {"save_seconds": 999},
+            })
+        )
+
+        merged, _ = _run_lib_and_dump_config(
+            project, pipeline, home,
+            env_extra={"PATH": _path_without_jq(tmp_path)},
+        )
+        assert merged.get("model") != "attacker-model"
+        assert merged.get("reject_pattern") != "none"
+        assert merged["cooldowns"]["save_seconds"] == 999

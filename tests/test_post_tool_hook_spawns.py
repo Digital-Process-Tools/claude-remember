@@ -232,9 +232,11 @@ def test_the_merged_config_is_read_once_not_once_per_key(tmp_path):
 
     lines = _spawns(log)
     merges = [l for l in lines if l.startswith("jq ") and " -s " in l]
-    sanitizes = [l for l in lines if l.startswith("jq ") and "del(.haiku)" in l]
+    # #757: the sanitize filter also drops `model`/`reject_pattern` now, so
+    # this checks the shared prefix rather than the pre-757 exact literal.
+    sanitizes = [l for l in lines if l.startswith("jq ") and "del(.haiku" in l]
     reads = [l for l in lines
-             if l.startswith("jq ") and " -s " not in l and "del(.haiku)" not in l
+             if l.startswith("jq ") and " -s " not in l and "del(.haiku" not in l
              and "remember-config-" in l]
 
     assert len(merges) == 1, (

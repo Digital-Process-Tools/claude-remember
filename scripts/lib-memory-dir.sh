@@ -361,6 +361,11 @@ elif [ "${#_cfg_sources[@]}" -gt 0 ] && command -v jq >/dev/null 2>&1; then
     # -- the sanitized temp file standing in for the untrusted one -- so
     # the one thing #744 needed proof of (does this shape work on
     # Windows) is answered by history rather than reasoning.
+    # #757: the filter also drops `model` and `reject_pattern` -- not
+    # destinations, but a repo-committed project layer could otherwise pick
+    # the summarizer's model or turn the refusal gate off/into a ReDoS
+    # candidate (`reject_pattern` is a user-supplied regex run over model
+    # output). Kept in this one call, same fail-closed shape as `haiku`.
     _strip_project_haiku="false"
     [ "$_project_cfg_haiku_untrusted" = "1" ] && [ -f "$_project_cfg" ] && _strip_project_haiku="true"
     _jq_merge_sources=()
@@ -370,7 +375,7 @@ elif [ "${#_cfg_sources[@]}" -gt 0 ] && command -v jq >/dev/null 2>&1; then
     if [ -f "$_project_cfg" ]; then
         if [ "$_strip_project_haiku" = "true" ]; then
             _project_sanitized_tmp=$(mktemp "${SYS_TMPDIR}/remember-config-sanitized-XXXXXX" 2>/dev/null) || _project_sanitized_tmp=""
-            if [ -n "$_project_sanitized_tmp" ] && jq -c 'del(.haiku)' "$_project_cfg" > "$_project_sanitized_tmp" 2>/dev/null; then
+            if [ -n "$_project_sanitized_tmp" ] && jq -c 'del(.haiku, .model, .reject_pattern)' "$_project_cfg" > "$_project_sanitized_tmp" 2>/dev/null; then
                 _jq_merge_sources+=("$_project_sanitized_tmp")
             else
                 # Sanitizing failed (mktemp, an unreadable project file, or
@@ -485,7 +490,7 @@ for path in sys.argv[3:]:
             continue
         for data in docs:
             if isinstance(data, dict):
-                data = {k: v for k, v in data.items() if k != "haiku"}
+                data = {k: v for k, v in data.items() if k not in ("haiku", "model", "reject_pattern")}
             merged = deep_merge(merged, data)
         continue
     with open(path) as f:
