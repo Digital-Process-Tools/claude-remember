@@ -26,6 +26,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -133,10 +134,17 @@ def test_path_without_git_keeps_bash_reachable_when_colocated_with_git(tmp_path,
     real_bash = shutil.which("bash")
     assert real_git and real_bash, "need a real git and bash on PATH to build the repro"
 
+    # Symlinked with the SAME basename as the real binary -- not a literal
+    # "git"/"bash" -- so this matches shutil.which's own PATHEXT-aware
+    # extension matching on Windows too: shutil.which("git") there looks
+    # for "git.exe" (an extensionless "git" file is invisible to it), so a
+    # symlink literally named "git" made this repro fail on windows-latest
+    # (job #108225629550 et al) even though the fix under test worked --
+    # only the synthetic repro's own naming was platform-specific.
     colocated = tmp_path / "colocated-bin"
     colocated.mkdir()
-    os.symlink(real_git, colocated / "git")
-    os.symlink(real_bash, colocated / "bash")
+    os.symlink(real_git, colocated / Path(real_git).name)
+    os.symlink(real_bash, colocated / Path(real_bash).name)
 
     monkeypatch.setenv("PATH", str(colocated))
 
@@ -329,6 +337,24 @@ class TestRestoreIsCheckedNeverSilentlyDropped:
     was deleted UNCONDITIONALLY afterward -- a failed restore silently lost
     the operator's config with no trace and no message."""
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="the mv-shim used to simulate 'restore destination unwritable' "
+        "is a bare-name #!/bin/sh script marked executable via Path.chmod(0o755) "
+        "-- on windows-latest that chmod call does not confer the executable "
+        "status Git-for-Windows' MSYS bash actually checks on a PATH search, "
+        "so the shim is silently skipped and the REAL mv (further down PATH) "
+        "runs instead, always succeeding -- observed directly in CI (jobs "
+        "#108216073146, #108225629550 et al): the SUCCESS-path log message "
+        "('... git status could not be determined) ...') appears where "
+        "'FAILED to restore' was expected, not because #757's restore-failure "
+        "logging is broken, but because this test's own fail-simulation cannot "
+        "be constructed this way on this platform. Reasoned, not verified on "
+        "an actual Windows box -- left as a loud skip rather than a guessed "
+        "fix, per CLAUDE.md's 'skip loudly with what went untested'. The "
+        "positive control below (an ordinary restore) is unaffected and still "
+        "runs on every platform.",
+    )
     def test_a_restore_that_fails_does_not_lose_the_config(self, tmp_path):
         project = tmp_path / "proj"
         project.mkdir()
