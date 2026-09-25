@@ -97,7 +97,9 @@ fi
 '''.replace("@RESOLVE_PATHS@", RESOLVE_PATHS).replace("@LIB@", LIB)
 
 
-def _tracked_state(file_path: str, ostype: str | None = None) -> tuple[str, str]:
+def _tracked_state(
+    file_path: str, ostype: str | None = None, cwd: str | None = None,
+) -> tuple[str, str]:
     """Returns (state, diagnostic_text). diagnostic_text is empty on a
     healthy 'tracked'/'not-tracked' state and always populated otherwise,
     for inclusion in an assertion failure message -- see module docstring."""
@@ -109,6 +111,7 @@ def _tracked_state(file_path: str, ostype: str | None = None) -> tuple[str, str]
     done = subprocess.run(
         [BASH, "-c", HARNESS, "bash", file_path],
         capture_output=True, text=True, timeout=60, check=False, env=env,
+        cwd=cwd,
     )
     assert done.returncode == 0, done.stderr
     lines = done.stdout.splitlines()
@@ -182,4 +185,34 @@ class TestBackslashPathWalksPastTheProjectRoot:
         assert state == "not-tracked", (
             f"positive control did not reach 'not-tracked' -- got {state!r}\n"
             f"--- diagnostic ---\n{diag}"
+        )
+
+class TestFullyBackslashedPathIsNotResolvedAgainstTheCwd:
+    """Observed on windows-latest (PR #767): the path arrives with NO `/` at
+    all (C:\\Users\\...\\now.md). DIR was split from it BEFORE
+    forward-slashing, fell back to ".", and the walk then answered about
+    whatever repository the process cwd sits in -- the CI checkout itself --
+    so every memory file read as `unavailable` and was refused."""
+
+    def test_fully_backslashed_path_uses_its_own_repo_not_the_cwds(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
+        remember_dir = repo / "pkg" / ".remember"
+        remember_dir.mkdir(parents=True)
+        now_md = remember_dir / "now.md"
+        now_md.write_text("Working on the parser fix.\\n")
+
+        # A DIFFERENT repository as the process cwd -- the CI-checkout shape.
+        other = tmp_path / "other"
+        other.mkdir()
+        subprocess.run(["git", "init", "-q", str(other)], check=True, capture_output=True)
+
+        file_arg = str(now_md).replace("/", "\\\\")
+        state, diag = _tracked_state(file_arg, ostype="cygwin", cwd=str(other))
+
+        assert state == "not-tracked", (
+            f"a fully backslashed path was resolved against the cwd's "
+            f"repository instead of its own -- got {state!r}\\n"
+            f"--- diagnostic ---\\n{diag}"
         )

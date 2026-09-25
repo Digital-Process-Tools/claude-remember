@@ -436,26 +436,25 @@ _remember_file_tracked_state_into() {
     local _fts_outvar="$1" _fts_file="$2"
     local _fts_dir _fts_root _fts_root_fs _fts_file_fs _fts_dir_fs _fts_rel _fts_reldir
     local _fts_list _fts_state _fts_line _fts_walk _fts_sym_key
-    case "$_fts_file" in
-        (*/*) _fts_dir="${_fts_file%/*}" ;;
-        (*)   _fts_dir="." ;;
+    # Forward-slash FILE before anything splits it: on msys/cygwin it can
+    # carry the backslash form _remember_normalize_win_path produces. Split
+    # first and a backslash-only path has no `/`, so DIR fell back to "." --
+    # the process cwd -- and the walk then found whatever repository the
+    # cwd sits in, not FILE's own, and every file read as unavailable
+    # (observed on windows-latest: DIR_FS=. ROOT=.). The walk below also
+    # climbs one `/`-delimited component at a time, so it needs the
+    # forward-slashed form for the same reason.
+    _remember_forward_slash_into _fts_file_fs "$_fts_file"
+    case "$_fts_file_fs" in
+        (*/*) _fts_dir_fs="${_fts_file_fs%/*}" ;;
+        (*)   _fts_dir_fs="." ;;
     esac
-    # Forward-slashed BEFORE the walk, not after: on msys/cygwin, FILE (and
-    # therefore DIR) can carry the backslash form
-    # _remember_normalize_win_path produces, and the walk below climbs a
-    # path one `/`-delimited component at a time. Handed a backslash path
-    # it never finds a `/` to split on and stops after testing only the
-    # single starting directory -- silently never reaching a `.git` that
-    # sits further up. Normalising first is what lets a repository two or
-    # more directories above DIR still be found on that platform.
-    _remember_forward_slash_into _fts_dir_fs "$_fts_dir"
     _remember_repo_root_walk_into _fts_root "$_fts_dir_fs"
     if [ -z "$_fts_root" ]; then
         printf -v "$_fts_outvar" 'no-repo'
         return 0
     fi
     _remember_forward_slash_into _fts_root_fs "$_fts_root"
-    _remember_forward_slash_into _fts_file_fs "$_fts_file"
 
     # Walk every directory from DIR up to (and including) the repository
     # root and refuse if any one of them is itself a symlink -- see the
