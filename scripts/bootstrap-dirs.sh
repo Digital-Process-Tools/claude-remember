@@ -44,7 +44,14 @@ SYS_TMPDIR="${TMPDIR:-/tmp}"
 # legacy dir we migrate/gitignore matches where REMEMBER_DIR now resolves.
 _mem_proj="${MEMORY_PROJECT_DIR:-$PROJECT_DIR}"
 _legacy_dir="${_mem_proj}/.remember"
-if [ "$REMEMBER_DIR" != "$_legacy_dir" ] && [ -d "$_legacy_dir" ] && [ ! -e "$REMEMBER_DIR" ]; then
+# -L before -d: -d follows a symlink, so a LEGACY DIRECTORY ITSELF that
+# is a symlink (a repository can commit one, pointing anywhere on disk)
+# would otherwise satisfy this condition and get `mv`'d wholesale into
+# REMEMBER_DIR -- moving the link, not the data, and leaving every later
+# session reading and writing through it, indistinguishable at read time
+# from a legitimate operator-configured external directory. Refused below
+# instead, in its own branch.
+if [ "$REMEMBER_DIR" != "$_legacy_dir" ] && [ ! -L "$_legacy_dir" ] && [ -d "$_legacy_dir" ] && [ ! -e "$REMEMBER_DIR" ]; then
     # Never migrate ~/.remember. It is not a legacy project store — it is the
     # user-global config home that lib-memory-dir.sh reads to resolve
     # REMEMBER_DIR in the first place. Open a session with cwd = $HOME and the
@@ -102,15 +109,26 @@ if [ "$REMEMBER_DIR" != "$_legacy_dir" ] && [ -d "$_legacy_dir" ] && [ ! -e "$RE
         # absence and let the file migrate as trusted by default).
         _legacy_cfg="$_legacy_dir/config.json"
         _legacy_cfg_holdout=""
-        if [ -f "$_legacy_cfg" ]; then
+        # -e alone misses a SYMLINKED config.json whose target does not
+        # exist (a dangling link still needs to be held out untouched,
+        # never treated as absent) -- -L catches that case without ever
+        # resolving the link.
+        if [ -e "$_legacy_cfg" ] || [ -L "$_legacy_cfg" ]; then
             case "$(_remember_config_tracked_status "$_mem_proj" ".remember/config.json")" in
                 untracked) : ;;
                 *)
+                    # mv, never cp+rm: a git-tracked config.json can be a
+                    # SYMLINK pointing anywhere on disk (outside the repo
+                    # entirely), and `cp` follows a symlink by default --
+                    # the target file's own bytes would land as an ordinary
+                    # regular file inside the repo's working tree, ready to
+                    # be committed. `mv` renames the link itself and never
+                    # opens what it points to, so a symlink held out here
+                    # comes back exactly as it went in, never read, never
+                    # copied, never migrated (hardens #757).
                     _legacy_cfg_holdout=$(mktemp "${SYS_TMPDIR:-/tmp}/remember-legacy-cfg-XXXXXX" 2>/dev/null) || _legacy_cfg_holdout=""
-                    if [ -n "$_legacy_cfg_holdout" ] && cp "$_legacy_cfg" "$_legacy_cfg_holdout" 2>/dev/null; then
-                        rm -f "$_legacy_cfg" 2>/dev/null || _legacy_cfg_holdout=""
-                    else
-                        _legacy_cfg_holdout=""
+                    if [ -n "$_legacy_cfg_holdout" ]; then
+                        mv "$_legacy_cfg" "$_legacy_cfg_holdout" 2>/dev/null || _legacy_cfg_holdout=""
                     fi
                     ;;
             esac
@@ -118,26 +136,62 @@ if [ "$REMEMBER_DIR" != "$_legacy_dir" ] && [ -d "$_legacy_dir" ] && [ ! -e "$RE
 
         if mv "$_legacy_dir" "$REMEMBER_DIR" 2>/dev/null; then
             mkdir -p "$_legacy_dir"
-            if [ -n "$_legacy_cfg_holdout" ] && [ -f "$_legacy_cfg_holdout" ]; then
-                mv "$_legacy_cfg_holdout" "$_legacy_cfg" 2>/dev/null
-                printf 'Memory data migrated to:\n  %s\nThis directory is now empty; you may delete it.\n\nconfig.json was NOT migrated: it is tracked by this repository git\nindex (or its git status could not be determined, which this treats the\nsame way) -- treating it as your own trusted config would let a cloned\nrepo choose the summarizer credential, model, or refusal-gate settings\nyour memory pipeline runs with (#757). Left behind here, still doing\nnothing for the external store above. Put your own settings in\n%s/config.json instead.\n' \
-                    "$REMEMBER_DIR" "$REMEMBER_DIR" > "$_legacy_dir/MIGRATED-TO.txt"
-                printf 'remember: %s is tracked by this repository git index (or its git status could not be determined); left behind rather than migrated into the trusted external config store (#757)\n' \
-                    "$_legacy_cfg" >&2
+            if [ -n "$_legacy_cfg_holdout" ] && { [ -e "$_legacy_cfg_holdout" ] || [ -L "$_legacy_cfg_holdout" ]; }; then
+                # Every step from here on is checked: a config held out of
+                # a successful migration is the operator's only copy, and
+                # an unchecked restore `mv` here (#757's own original
+                # shape) silently loses it if the destination is not
+                # writable -- with nothing to say so and the holdout then
+                # deleted unconditionally regardless.
+                if mv "$_legacy_cfg_holdout" "$_legacy_cfg" 2>/dev/null; then
+                    printf 'Memory data migrated to:\n  %s\nThis directory is now empty; you may delete it.\n\nconfig.json was NOT migrated: it is tracked by this repository git\nindex (or its git status could not be determined, which this treats the\nsame way) -- treating it as your own trusted config would let a cloned\nrepo choose the summarizer credential, model, or refusal-gate settings\nyour memory pipeline runs with (#757). Left behind here, still doing\nnothing for the external store above. Put your own settings in\n%s/config.json instead.\n' \
+                        "$REMEMBER_DIR" "$REMEMBER_DIR" > "$_legacy_dir/MIGRATED-TO.txt"
+                    printf 'remember: %s is tracked by this repository git index (or its git status could not be determined); left behind rather than migrated into the trusted external config store (#757)\n' \
+                        "$_legacy_cfg" >&2
+                    _legacy_cfg_holdout=""
+                else
+                    # Restore failed -- the operator's config is NOT lost,
+                    # it is still sitting at the holdout path below, and
+                    # this deliberately does NOT delete it. Left set so the
+                    # cleanup at the end of this block skips it too.
+                    printf 'Memory data migrated to:\n  %s\nconfig.json could NOT be restored to %s after migration --\nsee the error logged to stderr; it still exists at the path named there\nand was not deleted.\n' \
+                        "$REMEMBER_DIR" "$_legacy_cfg" > "$_legacy_dir/MIGRATED-TO.txt"
+                    printf 'remember: FAILED to restore %s from its holdout copy -- your config.json was NOT deleted, it is still sitting at %s; move it back to %s by hand. (#757)\n' \
+                        "$_legacy_cfg" "$_legacy_cfg_holdout" "$_legacy_cfg" >&2
+                fi
             else
                 printf 'Memory data migrated to:\n  %s\nThis directory is now empty; you may delete it.\n' \
                     "$REMEMBER_DIR" > "$_legacy_dir/MIGRATED-TO.txt"
             fi
-        elif [ -n "$_legacy_cfg_holdout" ] && [ -f "$_legacy_cfg_holdout" ]; then
+        elif [ -n "$_legacy_cfg_holdout" ] && { [ -e "$_legacy_cfg_holdout" ] || [ -L "$_legacy_cfg_holdout" ]; }; then
             # The dir move itself failed after config.json was already pulled
             # out -- put it back rather than leave the legacy dir missing a
-            # file nothing else removed on purpose.
-            mv "$_legacy_cfg_holdout" "$_legacy_cfg" 2>/dev/null
+            # file nothing else removed on purpose. Checked the same way as
+            # the success path above: an unchecked restore here is the same
+            # silent-loss bug, just on the other branch.
+            if mv "$_legacy_cfg_holdout" "$_legacy_cfg" 2>/dev/null; then
+                _legacy_cfg_holdout=""
+            else
+                printf 'remember: FAILED to restore %s after the migration move itself failed -- your config.json was NOT deleted, it is still sitting at %s; move it back to %s by hand. (#757)\n' \
+                    "$_legacy_cfg" "$_legacy_cfg_holdout" "$_legacy_cfg" >&2
+            fi
         fi
-        [ -n "$_legacy_cfg_holdout" ] && rm -f "$_legacy_cfg_holdout" 2>/dev/null
+        # No unconditional cleanup of the holdout here (#757's own original
+        # shape had one, `rm -f "$_legacy_cfg_holdout"` run no matter what):
+        # every path above either moves the holdout back out from under
+        # itself (nothing left to remove) or leaves it in place ON PURPOSE
+        # because the restore failed -- an unconditional rm after either
+        # outcome would have deleted the operator's only remaining copy in
+        # exactly the failure case this exists to protect.
         unset _legacy_cfg _legacy_cfg_holdout
     fi
     unset _migrating_user_config_home
+elif [ "$REMEMBER_DIR" != "$_legacy_dir" ] && [ -L "$_legacy_dir" ] && [ ! -e "$REMEMBER_DIR" ]; then
+    # The legacy .remember DIRECTORY itself is a symlink -- never
+    # migrated, left exactly where it is, logged loudly rather than
+    # silently (#757).
+    printf 'remember: %s is a symlink -- refusing to migrate it; left in place untouched. Move or replace it by hand if this was not intentional. (#757)\n' \
+        "$_legacy_dir" >&2
 fi
 unset _legacy_dir
 
