@@ -405,8 +405,12 @@ _SANCTIONED_DIVERGENCE = {
             '            _jq_merge_sources+=("$_project_cfg")\n'
             '        fi\n'
             '    fi\n'
-            '    jq -s \'reduce .[] as $x ({}; . * $x) | with_entries(select(.key | startswith("_") | not))\' "${_jq_merge_sources[@]}" > "$_merged_cfg" 2>/dev/null \\\n'
-            '        || cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null\n'
+            '    if [ "${#_jq_merge_sources[@]}" -eq 0 ]; then\n'
+            '        echo \'{}\' > "$_merged_cfg"\n'
+            '    else\n'
+            '        jq -s \'reduce .[] as $x ({}; . * $x) | with_entries(select(.key | startswith("_") | not))\' "${_jq_merge_sources[@]}" > "$_merged_cfg" 2>/dev/null \\\n'
+            '            || cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null\n'
+            '    fi\n'
             '    [ -n "$_project_sanitized_tmp" ] && rm -f "$_project_sanitized_tmp"\n'
             'elif [ "${#_cfg_sources[@]}" -gt 0 ]; then\n',
         ),
@@ -482,7 +486,7 @@ _SANCTIONED_DIVERGENCE = {
             '    if untrusted_haiku_path and path == untrusted_haiku_path:\n'
             '        try:\n'
             '            docs = load_documents(path)\n'
-            '        except OSError:\n'
+            '        except (OSError, ValueError):\n'
             '            continue\n'
             '        for data in docs:\n'
             '            if isinstance(data, dict):\n'

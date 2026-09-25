@@ -395,8 +395,18 @@ elif [ "${#_cfg_sources[@]}" -gt 0 ] && command -v jq >/dev/null 2>&1; then
     # investigating a macOS-only spawn-budget CI failure on this same #726
     # change: 4 phantom lines, one real process, jq itself is whitespace-
     # insensitive so this is a pure counting fix with no behavior change).
-    jq -s 'reduce .[] as $x ({}; . * $x) | with_entries(select(.key | startswith("_") | not))' "${_jq_merge_sources[@]}" > "$_merged_cfg" 2>/dev/null \
-        || cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null
+    if [ "${#_jq_merge_sources[@]}" -eq 0 ]; then
+        # Bundled and user configs both absent, and the untrusted project
+        # layer either doesn't exist either or was just sanitize-dropped
+        # above -- `jq -s '...'` with ZERO positional file arguments falls
+        # back to reading STDIN, and a hook blocked on STDIN never returns.
+        # Same "no config files at all" answer the final `else` below gives
+        # when jq isn't even on PATH.
+        echo '{}' > "$_merged_cfg"
+    else
+        jq -s 'reduce .[] as $x ({}; . * $x) | with_entries(select(.key | startswith("_") | not))' "${_jq_merge_sources[@]}" > "$_merged_cfg" 2>/dev/null \
+            || cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null
+    fi
     [ -n "$_project_sanitized_tmp" ] && rm -f "$_project_sanitized_tmp"
 elif [ "${#_cfg_sources[@]}" -gt 0 ]; then
     # No jq — do the same deep-merge in Python instead of silently dropping
@@ -459,14 +469,19 @@ merged = {}
 for path in sys.argv[3:]:
     if untrusted_haiku_path and path == untrusted_haiku_path:
         # #744: fail CLOSED -- if the untrusted file can't even be loaded
-        # (unreadable, a permissions error, anything load_documents() itself
-        # doesn't already tolerate), drop just this layer rather than let
-        # the exception propagate and crash the whole merge down to the
-        # bundled-only fallback below, taking the trusted user-global
-        # layer's own overrides with it for no reason connected to them.
+        # (unreadable, a permissions error, malformed JSON, anything
+        # load_documents() itself doesn't already tolerate), drop just this
+        # layer rather than let the exception propagate and crash the whole
+        # merge down to the bundled-only fallback below, taking the trusted
+        # user-global layer's own overrides with it for no reason connected
+        # to them. `json.JSONDecodeError` (raised by decoder.raw_decode() on
+        # invalid JSON) and `UnicodeDecodeError` (raised by f.read() on a
+        # file that isn't valid text in the expected encoding) are both
+        # ValueError subclasses -- catching only OSError let either one
+        # through uncaught.
         try:
             docs = load_documents(path)
-        except OSError:
+        except (OSError, ValueError):
             continue
         for data in docs:
             if isinstance(data, dict):

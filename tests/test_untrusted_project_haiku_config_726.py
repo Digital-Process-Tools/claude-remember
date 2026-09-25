@@ -475,6 +475,82 @@ class TestSanitizeStepFailsClosed:
 
         assert "haiku" not in merged or "oauth_token" not in merged.get("haiku", {})
 
+    def test_a_malformed_project_cfg_drops_the_layer_without_losing_the_rest(
+        self, tmp_path
+    ):
+        """The jq path's sanitize call (`jq -c 'del(.haiku)'`) errors on a
+        project config that isn't even valid JSON -- same fail-CLOSED shape
+        as the unreadable-file test above, different cause. Expected to
+        already pass: the sanitize step's own exit code already gates
+        whether `_project_sanitized_tmp` gets added to `_jq_merge_sources`."""
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(json.dumps({}))
+        (home / ".remember").mkdir(parents=True)
+        (home / ".remember" / "config.json").write_text(
+            json.dumps({"cooldowns": {"save_seconds": 323}})
+        )
+        remember = project / ".remember"
+        remember.mkdir()
+        (remember / "config.json").write_text('{"haiku": {"oauth_token": "' + "p" * 40)
+
+        merged, _ = _run_lib_and_dump_config(project, pipeline, home)
+
+        assert merged["cooldowns"]["save_seconds"] == 323
+        assert "haiku" not in merged or "oauth_token" not in merged.get("haiku", {})
+
+    def test_a_malformed_project_cfg_no_jq_fallback_drops_the_layer_without_losing_the_rest(
+        self, tmp_path
+    ):
+        """Same shape, no-jq Python fallback: `json.JSONDecodeError` (a
+        `ValueError` subclass) from `load_documents()`'s own
+        `decoder.raw_decode()` call on invalid JSON must be caught the same
+        way an `OSError` already is -- catching only `OSError` lets this
+        exception propagate, crashing the WHOLE merge down to the
+        bundled-only fallback and losing the trusted user-global layer's
+        own key too, exactly the regression changelog.d/740.security.md's
+        "drops just that layer" claim says does not happen."""
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(json.dumps({}))
+        (home / ".remember").mkdir(parents=True)
+        (home / ".remember" / "config.json").write_text(
+            json.dumps({"cooldowns": {"save_seconds": 324}})
+        )
+        remember = project / ".remember"
+        remember.mkdir()
+        (remember / "config.json").write_text('{"haiku": {"oauth_token": "' + "q" * 40)
+
+        merged, _ = _run_lib_and_dump_config(
+            project, pipeline, home,
+            env_extra={"PATH": _path_without_jq(tmp_path)},
+        )
+
+        assert merged["cooldowns"]["save_seconds"] == 324
+        assert "haiku" not in merged or "oauth_token" not in merged.get("haiku", {})
+
+    def test_all_layers_absent_or_dropped_does_not_hang_reading_stdin(
+        self, tmp_path
+    ):
+        """jq's own `inputs`/positional-file reading falls back to STDIN when
+        given ZERO file arguments (`jq -s '...' ` with an empty `"$@"` is
+        `jq -s '...' ` with none) -- reachable here when bundled and user
+        configs are both absent AND the untrusted project layer gets
+        sanitize-dropped, leaving `_jq_merge_sources` empty. A hook blocked
+        on STDIN never returns, so this asserts the run finishes at all
+        (the shared 30s subprocess timeout in `_run_lib_and_dump_config`
+        turns a hang into a test failure rather than a stalled suite) and
+        produces the same `{}` the "no config files at all" branch already
+        produces elsewhere in this file."""
+        project, pipeline, home = _dirs(tmp_path)
+        # No bundled config.json, no home/.remember/config.json -- both
+        # absent, not merely empty.
+        remember = project / ".remember"
+        remember.mkdir()
+        (remember / "config.json").write_text('{"haiku": {"oauth_token": "' + "r" * 40)
+
+        merged, _ = _run_lib_and_dump_config(project, pipeline, home)
+
+        assert merged == {}
+
 
 def test_run_lib_sanity_check_still_works():
     """Sanity: the sibling _run_lib helper this file imports (used only for
