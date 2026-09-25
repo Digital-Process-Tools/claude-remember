@@ -270,6 +270,35 @@ _remember_ci_eq() {
     return $_rc
 }
 
+# _remember_git_unquote_into <outvar> <line>
+# `git ls-files` wraps an entry in double quotes and C-escapes it (\\, \",
+# \a \b \f \n \r \t \v, and \NNN octal byte values) whenever the path
+# carries a byte it considers unusual -- ALWAYS for a literal backslash,
+# double quote, or control byte, and ALSO for any byte >= 0x80 unless
+# core.quotePath=false is set (#774 disables that half; this handles the
+# half quotePath cannot touch, found in #774's own self-review: a tracked
+# path containing a literal backslash or double quote was still quoted,
+# and the guard's comparison is a literal string match against the raw,
+# unquoted path, so it still silently answered "not tracked"). `printf
+# '%b'` expands exactly this escape set (it is the same table `echo -e`
+# uses) back into the original bytes, so unquoting is one call, not a
+# hand-rolled parser -- and it is applied unconditionally: an UNQUOTED
+# line (the common case) has no leading/trailing `"` and falls through
+# the `*)` arm unchanged.
+_remember_git_unquote_into() {
+    local _gu_outvar="$1" _gu_line="$2"
+    case "$_gu_line" in
+        (\"*\")
+            _gu_line="${_gu_line#\"}"
+            _gu_line="${_gu_line%\"}"
+            printf -v "$_gu_outvar" '%b' "$_gu_line"
+            ;;
+        (*)
+            printf -v "$_gu_outvar" '%s' "$_gu_line"
+            ;;
+    esac
+}
+
 # _remember_cache_key_into <outvar> <prefix> <value> -- same sanitized-
 # indirect-name convention as _remember_wc_size_set, with a prefix so two
 # different caches (repo root, tracked-file listing) keyed off the same
@@ -375,12 +404,21 @@ _remember_root_tracked_state_into() {
             # case is not -- the pre-existing NUL-delimited handling
             # elsewhere in this codebase reads exactly that general case and
             # stays NUL-delimited for it.
+            # `-c core.quotePath=false` (#774): without it, `ls-files`
+            # quotes/octal-escapes any non-ASCII (or otherwise "unusual")
+            # byte in a path -- e.g. `caf\303\251/.remember/now.md` -- and
+            # the comparison below is a literal string match against the
+            # RAW relative path, which never equals the quoted form. That
+            # silently answered `not-tracked` for a genuinely tracked
+            # non-ASCII path, letting a planted file through the guard.
+            # Disabling quoting here (not globally) keeps this comparison
+            # correct without touching how `git` is invoked anywhere else.
             if [ -n "$_rts_pathspec" ]; then
                 _rts_list=$(unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
-                            git -C "$_rts_root" ls-files -- "$_rts_pathspec" 2>/dev/null)
+                            git -c core.quotePath=false -C "$_rts_root" ls-files -- "$_rts_pathspec" 2>/dev/null)
             else
                 _rts_list=$(unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
-                            git -C "$_rts_root" ls-files 2>/dev/null)
+                            git -c core.quotePath=false -C "$_rts_root" ls-files 2>/dev/null)
             fi
             _rts_rc=$?
         else
@@ -435,7 +473,7 @@ _remember_root_tracked_state_into() {
 _remember_file_tracked_state_into() {
     local _fts_outvar="$1" _fts_file="$2"
     local _fts_dir _fts_root _fts_root_fs _fts_file_fs _fts_dir_fs _fts_rel _fts_reldir
-    local _fts_list _fts_state _fts_line _fts_walk _fts_sym_key
+    local _fts_list _fts_state _fts_line _fts_line_raw _fts_walk _fts_sym_key
     # Forward-slash FILE before anything splits it: on msys/cygwin it can
     # carry the backslash form _remember_normalize_win_path produces. Split
     # first and a backslash-only path has no `/`, so DIR fell back to "." --
@@ -517,7 +555,13 @@ _remember_file_tracked_state_into() {
     fi
     while IFS= read -r _fts_line; do
         [ -n "$_fts_line" ] || continue
-        if [ "$_fts_line" = "$_fts_rel" ] || _remember_ci_eq "$_fts_line" "$_fts_rel"; then
+        # #774 follow-up: `ls-files` C-quotes a literal backslash, double
+        # quote or control byte UNCONDITIONALLY (core.quotePath has no
+        # effect on that half), so the line compared here can still be
+        # quoted even with `-c core.quotePath=false` set on the listing
+        # above -- unquote before comparing, not just before storing.
+        _remember_git_unquote_into _fts_line_raw "$_fts_line"
+        if [ "$_fts_line_raw" = "$_fts_rel" ] || _remember_ci_eq "$_fts_line_raw" "$_fts_rel"; then
             printf -v "$_fts_outvar" 'tracked'
             return 0
         fi
@@ -869,12 +913,27 @@ _remember_render_memory_section() {
     echo ""
 }
 
+# _REMEMBER_CACHE_FORMAT_VERSION -- bump this whenever a change to this
+# file could make an OLD cache's bytes wrong to serve under the NEW code,
+# even though every SRC= mtime the old manifest names is still older than
+# the cache (#775). The injection guard (_remember_may_inject) is the
+# motivating case: a cache published before the guard existed (or before a
+# later guard fix) can hold a rendered MEMORY section built from a file the
+# CURRENT guard would refuse -- the guard is never consulted on a cache
+# HIT (see _remember_start_cache_context_load), so mtimes alone cannot
+# catch this. A mismatched or entirely absent VERSION= line in the
+# manifest is always a miss; see the loader below.
+_REMEMBER_CACHE_FORMAT_VERSION="1"
+
 # _remember_start_cache_manifest_lines
-# Echoes, one per line, "SRC=<path>" for every input the render depends on --
-# shared by the loader (checks each with -nt) and the publisher (writes them
-# verbatim). Requires _remember_memory_paths to have already run.
+# Echoes, one per line, "SRC=<path>" for every input the render depends on,
+# preceded by a "VERSION=<_REMEMBER_CACHE_FORMAT_VERSION>" stamp -- shared by
+# the loader (checks each SRC with -nt, and the VERSION against its own
+# constant) and the publisher (writes them verbatim). Requires
+# _remember_memory_paths to have already run.
 _remember_start_cache_manifest_lines() {
     local MFILE
+    printf 'VERSION=%s\n' "$_REMEMBER_CACHE_FORMAT_VERSION"
     for MFILE in "${MEMORY_FILES[@]}"; do
         printf 'SRC=%s\n' "$MFILE"
     done
@@ -912,11 +971,15 @@ _remember_start_cache_context_load() {
     [ -O "$_manifest" ] || return 1
     [ -r "$_manifest" ] || return 1
 
-    local _line _src
+    local _line _src _mf_version=""
     while IFS= read -r _line || [ -n "$_line" ]; do
         _line="${_line%$'\r'}"
         [ -n "$_line" ] || continue
         case "$_line" in
+            VERSION=*)
+                _mf_version="${_line#VERSION=}"
+                continue
+                ;;
             SRC=*) _src="${_line#SRC=}" ;;
             # Unknown line: not our file, or not our version of it -- distrust
             # the whole manifest rather than partially validate it.
@@ -929,6 +992,11 @@ _remember_start_cache_context_load() {
         # longer exists (an absent source cannot have changed).
         [ "$_cache" -nt "$_src" ] || return 1
     done < "$_manifest"
+    # #775: a manifest with no VERSION= line at all (every cache published
+    # before this fix existed) or one naming a different format version
+    # must never be served -- see _REMEMBER_CACHE_FORMAT_VERSION above for
+    # why mtimes alone cannot catch this.
+    [ "$_mf_version" = "$_REMEMBER_CACHE_FORMAT_VERSION" ] || return 1
 
     cat "$_cache"
     return 0
