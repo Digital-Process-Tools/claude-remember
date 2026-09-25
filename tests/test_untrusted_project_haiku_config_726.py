@@ -198,6 +198,360 @@ class TestProjectLocalHaikuConfigIsUntrusted:
         assert merged["cooldowns"]["save_seconds"] == 999
 
 
+class TestMultiDocumentProjectConfigDoesNotLeakHaiku:
+    """#740: `jq -s` slurps EVERY JSON document across ALL source files into
+    one flat array with no file-boundary information, so `.[-1] |= del(.haiku)`
+    only strips the LAST document of the LAST file. A project `.remember/
+    config.json` that ships TWO whitespace-concatenated JSON documents --
+    the first carrying a live `haiku` block, the second empty -- has that
+    first document survive `reduce .[] as $x ({}; . * $x)` completely
+    unstripped: the exact #726 attack, just wrapped in one extra document."""
+
+    def test_multi_document_project_config_first_document_haiku_is_still_stripped(
+        self, tmp_path
+    ):
+        """The #740 reproduction: two JSON documents in the project config,
+        `haiku` in the FIRST one -- must not reach the merged config."""
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(json.dumps({}))
+        remember = project / ".remember"
+        remember.mkdir()
+        (remember / "config.json").write_text(
+            json.dumps({"haiku": {"oauth_token": "e" * 40}}) + "\n" + json.dumps({})
+        )
+
+        merged, _ = _run_lib_and_dump_config(project, pipeline, home)
+        assert "haiku" not in merged or "oauth_token" not in merged.get("haiku", {})
+
+    def test_multi_document_project_config_second_document_haiku_is_still_stripped(
+        self, tmp_path
+    ):
+        """Same shape, `haiku` in the SECOND (last) document -- this half
+        already passed before the fix (it's exactly what `.[-1]` targeted),
+        kept here so a fix that changes strategy cannot regress it."""
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(json.dumps({}))
+        remember = project / ".remember"
+        remember.mkdir()
+        (remember / "config.json").write_text(
+            json.dumps({}) + "\n" + json.dumps({"haiku": {"oauth_token": "f" * 40}})
+        )
+
+        merged, _ = _run_lib_and_dump_config(project, pipeline, home)
+        assert "haiku" not in merged or "oauth_token" not in merged.get("haiku", {})
+
+    def test_multi_document_project_config_non_haiku_keys_still_merge(self, tmp_path):
+        """Positive control: a legitimate non-credential key from a
+        multi-document project config must still take effect -- a fix that
+        refused or dropped the whole project layer on sight of multiple
+        documents cannot pass as correct either."""
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(json.dumps({}))
+        remember = project / ".remember"
+        remember.mkdir()
+        (remember / "config.json").write_text(
+            json.dumps({"haiku": {"oauth_token": "g" * 40}})
+            + "\n"
+            + json.dumps({"cooldowns": {"save_seconds": 777}})
+        )
+
+        merged, _ = _run_lib_and_dump_config(project, pipeline, home)
+        assert merged["cooldowns"]["save_seconds"] == 777
+        assert "haiku" not in merged or "oauth_token" not in merged.get("haiku", {})
+
+    def test_user_global_haiku_still_works_alongside_multi_document_project_config(
+        self, tmp_path
+    ):
+        """Positive control: the trusted user-global layer's own haiku
+        credential must still reach the merged config even when the
+        untrusted project layer is a multi-document file being stripped."""
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(json.dumps({}))
+        (home / ".remember").mkdir(parents=True)
+        (home / ".remember" / "config.json").write_text(
+            json.dumps({"haiku": {"oauth_token": "h" * 40}})
+        )
+        remember = project / ".remember"
+        remember.mkdir()
+        (remember / "config.json").write_text(
+            json.dumps({"haiku": {"oauth_token": "i" * 40}}) + "\n" + json.dumps({})
+        )
+
+        merged, _ = _run_lib_and_dump_config(project, pipeline, home)
+        assert merged["haiku"]["oauth_token"] == "h" * 40
+
+
+class TestPathIdentityDoesNotDependOnAShellString:
+    """#740 follow-up: the first fix compared every document's `input_filename`
+    against a shell-supplied `--arg proj "$_project_cfg"` string. That works
+    when both sides come from the identical bash variable (they always do
+    here), but a maintainer flagged it as reasoned-not-observed on platforms
+    where jq's own path handling could diverge from the shell's (a
+    Windows-native jq.exe, a symlink, a `./`-prefix) -- and this repo's CI
+    skips every bash-subprocess test on win32 (#79), so nothing here could
+    ever have caught a real divergence. The shipped fix removes the
+    comparison entirely: `--slurpfile proj "$_project_cfg"` has jq open the
+    untrusted file directly, by its own single file argument, so there is no
+    filename STRING left to compare against anything. These tests exercise
+    the two constructible-on-this-platform edges rather than the Windows
+    case itself, which cannot be reproduced here."""
+
+    def test_project_cfg_reached_through_a_symlinked_directory_still_strips_haiku(
+        self, tmp_path
+    ):
+        """The project's `.remember` directory is reached through a symlink
+        (a `./`-prefix and a case-difference are both flavors of the same
+        "the shell's string and the tool's own view of the file can differ"
+        concern) -- the untrusted haiku block must still be stripped."""
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(json.dumps({}))
+        real_remember = tmp_path / "real-remember-store"
+        real_remember.mkdir()
+        (real_remember / "config.json").write_text(
+            json.dumps({"haiku": {"oauth_token": "j" * 40}})
+        )
+        (project / ".remember").symlink_to(real_remember, target_is_directory=True)
+
+        merged, _ = _run_lib_and_dump_config(project, pipeline, home)
+        assert "haiku" not in merged or "oauth_token" not in merged.get("haiku", {})
+
+    def test_empty_project_cfg_does_not_strip_trusted_user_haiku(self, tmp_path):
+        """Regression for the alternative design considered and rejected
+        while fixing this: comparing every document's `input_filename`
+        against the LAST document's own filename (rather than reading the
+        untrusted file directly via `--slurpfile`) silently picks the wrong
+        file's name as "the untrusted one" whenever the project config
+        exists but is EMPTY (0 documents) -- the untrusted file then
+        contributes nothing to the document stream at all, so the "last
+        document" actually belongs to the trusted user-global layer, and
+        that layer's own legitimate `haiku` block gets stripped by mistake.
+        Verified directly with jq before rejecting that design; this test
+        pins the shipped `--slurpfile` design against the same shape."""
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(json.dumps({}))
+        (home / ".remember").mkdir(parents=True)
+        (home / ".remember" / "config.json").write_text(
+            json.dumps({"haiku": {"oauth_token": "k" * 40}})
+        )
+        remember = project / ".remember"
+        remember.mkdir()
+        (remember / "config.json").write_text("")  # exists, untrusted, EMPTY
+
+        merged, _ = _run_lib_and_dump_config(project, pipeline, home)
+        assert merged["haiku"]["oauth_token"] == "k" * 40
+
+
+class TestNoJqFallbackMultiDocumentProjectConfig:
+    """#740 follow-up: the no-jq Python merge fallback reads each source file
+    with a single `json.load()`, which raises `json.JSONDecodeError` on a
+    project config shipping more than one JSON document. That exception is
+    uncaught, so it took the WHOLE merge down with it (falling back to
+    bundled defaults only, dropping the user-global layer too) rather than
+    stripping `haiku` from each of the untrusted file's own documents and
+    keeping everything else -- safe (no leak) but not the same fix the jq
+    path got. Parses the untrusted file's documents individually instead,
+    the same shape as the jq path's per-document strip."""
+
+    def test_no_jq_fallback_strips_haiku_from_every_document_of_a_multi_document_project_config(
+        self, tmp_path
+    ):
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(json.dumps({}))
+        remember = project / ".remember"
+        remember.mkdir()
+        (remember / "config.json").write_text(
+            json.dumps({"haiku": {"oauth_token": "l" * 40}}) + "\n" + json.dumps({"cooldowns": {"save_seconds": 555}})
+        )
+
+        merged, _ = _run_lib_and_dump_config(
+            project, pipeline, home,
+            env_extra={"PATH": _path_without_jq(tmp_path)},
+        )
+        assert "haiku" not in merged or "oauth_token" not in merged.get("haiku", {})
+        # Positive control: the multi-document project file's OTHER key
+        # still merges -- a fix that dropped the whole layer on sight of
+        # more than one document would pass the assertion above too.
+        assert merged["cooldowns"]["save_seconds"] == 555
+
+    def test_no_jq_fallback_multi_document_project_config_first_document_haiku_is_stripped(
+        self, tmp_path
+    ):
+        """Same shape as the jq-path #740 regression: `haiku` in the FIRST
+        of two documents, not the second."""
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(json.dumps({}))
+        remember = project / ".remember"
+        remember.mkdir()
+        (remember / "config.json").write_text(
+            json.dumps({"haiku": {"oauth_token": "m" * 40}}) + "\n" + json.dumps({})
+        )
+
+        merged, _ = _run_lib_and_dump_config(
+            project, pipeline, home,
+            env_extra={"PATH": _path_without_jq(tmp_path)},
+        )
+        assert "haiku" not in merged or "oauth_token" not in merged.get("haiku", {})
+
+
+class TestSanitizeStepFailsClosed:
+    """#744: PR #744's CI observed the risk #740's `--slurpfile`/`input_filename`
+    design was only ever REASONED about, not observed -- on Windows (Git
+    Bash + a native jq.exe) the jq invocation itself errored, and the
+    `|| cp "$_bundled_cfg" ...` fallback silently dropped EVERY layer
+    (project AND the trusted user-global one), with no error surfaced to
+    the user at all. The fix drops `--slurpfile` and `input_filename`
+    entirely: a separate, plain `jq -c 'del(.haiku)' "$_project_cfg" >
+    sanitized_tmp` call (no path comparison, no `/dev/null` placeholder --
+    the same shape as the `jq -s` reduce that was ALREADY proven on every
+    platform before #740 ever touched this file) sanitizes the untrusted
+    layer BEFORE the original reduce ever sees it. If sanitizing itself
+    fails, the project layer is dropped entirely (fail CLOSED) rather than
+    merged unsanitized -- these tests exercise that specific path."""
+
+    def test_an_unreadable_project_cfg_drops_the_layer_without_losing_the_rest(
+        self, tmp_path
+    ):
+        """The sanitize step can't even open a project config with no read
+        permission -- confirms the failure is scoped to just that layer:
+        the trusted user-global layer must still merge normally rather than
+        the whole thing collapsing to the bundled-only fallback (which
+        would ALSO be safe, but is not what "drop the project layer" means,
+        and masks a real "could I even find the source of the failure"
+        signal a maintainer would want)."""
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(json.dumps({}))
+        (home / ".remember").mkdir(parents=True)
+        (home / ".remember" / "config.json").write_text(
+            json.dumps({"cooldowns": {"save_seconds": 321}})
+        )
+        remember = project / ".remember"
+        remember.mkdir()
+        project_cfg_path = remember / "config.json"
+        project_cfg_path.write_text(
+            json.dumps({"haiku": {"oauth_token": "n" * 40}})
+        )
+        project_cfg_path.chmod(0o000)
+        try:
+            merged, _ = _run_lib_and_dump_config(project, pipeline, home)
+        finally:
+            project_cfg_path.chmod(0o644)
+
+        # Positive control: the trusted layer's own key still merged --
+        # this is not the total bundled-only fallback.
+        assert merged["cooldowns"]["save_seconds"] == 321
+        assert "haiku" not in merged or "oauth_token" not in merged.get("haiku", {})
+
+    def test_an_unreadable_project_cfg_no_jq_fallback_also_drops_only_that_layer(
+        self, tmp_path
+    ):
+        """Same shape, no-jq Python fallback: `open()` on an unreadable
+        project config raises inside `load_documents()` -- must not take
+        the whole merge down with it either."""
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(json.dumps({}))
+        (home / ".remember").mkdir(parents=True)
+        (home / ".remember" / "config.json").write_text(
+            json.dumps({"cooldowns": {"save_seconds": 322}})
+        )
+        remember = project / ".remember"
+        remember.mkdir()
+        project_cfg_path = remember / "config.json"
+        project_cfg_path.write_text(
+            json.dumps({"haiku": {"oauth_token": "o" * 40}})
+        )
+        project_cfg_path.chmod(0o000)
+        try:
+            merged, _ = _run_lib_and_dump_config(
+                project, pipeline, home,
+                env_extra={"PATH": _path_without_jq(tmp_path)},
+            )
+        finally:
+            project_cfg_path.chmod(0o644)
+
+        # Positive control, same shape as the jq-path test above: the
+        # trusted layer's own key must still merge -- not the total
+        # bundled-only fallback.
+        assert merged["cooldowns"]["save_seconds"] == 322
+
+        assert "haiku" not in merged or "oauth_token" not in merged.get("haiku", {})
+
+    def test_a_malformed_project_cfg_drops_the_layer_without_losing_the_rest(
+        self, tmp_path
+    ):
+        """The jq path's sanitize call (`jq -c 'del(.haiku)'`) errors on a
+        project config that isn't even valid JSON -- same fail-CLOSED shape
+        as the unreadable-file test above, different cause. Expected to
+        already pass: the sanitize step's own exit code already gates
+        whether `_project_sanitized_tmp` gets added to `_jq_merge_sources`."""
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(json.dumps({}))
+        (home / ".remember").mkdir(parents=True)
+        (home / ".remember" / "config.json").write_text(
+            json.dumps({"cooldowns": {"save_seconds": 323}})
+        )
+        remember = project / ".remember"
+        remember.mkdir()
+        (remember / "config.json").write_text('{"haiku": {"oauth_token": "' + "p" * 40)
+
+        merged, _ = _run_lib_and_dump_config(project, pipeline, home)
+
+        assert merged["cooldowns"]["save_seconds"] == 323
+        assert "haiku" not in merged or "oauth_token" not in merged.get("haiku", {})
+
+    def test_a_malformed_project_cfg_no_jq_fallback_drops_the_layer_without_losing_the_rest(
+        self, tmp_path
+    ):
+        """Same shape, no-jq Python fallback: `json.JSONDecodeError` (a
+        `ValueError` subclass) from `load_documents()`'s own
+        `decoder.raw_decode()` call on invalid JSON must be caught the same
+        way an `OSError` already is -- catching only `OSError` lets this
+        exception propagate, crashing the WHOLE merge down to the
+        bundled-only fallback and losing the trusted user-global layer's
+        own key too, exactly the regression changelog.d/740.security.md's
+        "drops just that layer" claim says does not happen."""
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(json.dumps({}))
+        (home / ".remember").mkdir(parents=True)
+        (home / ".remember" / "config.json").write_text(
+            json.dumps({"cooldowns": {"save_seconds": 324}})
+        )
+        remember = project / ".remember"
+        remember.mkdir()
+        (remember / "config.json").write_text('{"haiku": {"oauth_token": "' + "q" * 40)
+
+        merged, _ = _run_lib_and_dump_config(
+            project, pipeline, home,
+            env_extra={"PATH": _path_without_jq(tmp_path)},
+        )
+
+        assert merged["cooldowns"]["save_seconds"] == 324
+        assert "haiku" not in merged or "oauth_token" not in merged.get("haiku", {})
+
+    def test_all_layers_absent_or_dropped_does_not_hang_reading_stdin(
+        self, tmp_path
+    ):
+        """jq's own `inputs`/positional-file reading falls back to STDIN when
+        given ZERO file arguments (`jq -s '...' ` with an empty `"$@"` is
+        `jq -s '...' ` with none) -- reachable here when bundled and user
+        configs are both absent AND the untrusted project layer gets
+        sanitize-dropped, leaving `_jq_merge_sources` empty. A hook blocked
+        on STDIN never returns, so this asserts the run finishes at all
+        (the shared 30s subprocess timeout in `_run_lib_and_dump_config`
+        turns a hang into a test failure rather than a stalled suite) and
+        produces the same `{}` the "no config files at all" branch already
+        produces elsewhere in this file."""
+        project, pipeline, home = _dirs(tmp_path)
+        # No bundled config.json, no home/.remember/config.json -- both
+        # absent, not merely empty.
+        remember = project / ".remember"
+        remember.mkdir()
+        (remember / "config.json").write_text('{"haiku": {"oauth_token": "' + "r" * 40)
+
+        merged, _ = _run_lib_and_dump_config(project, pipeline, home)
+
+        assert merged == {}
+
+
 def test_run_lib_sanity_check_still_works():
     """Sanity: the sibling _run_lib helper this file imports (used only for
     its constants above) is still importable and unbroken."""

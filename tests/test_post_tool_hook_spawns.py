@@ -64,6 +64,15 @@ from tests.spawn_counting import make_shim_dir, spawns as _spawn_lines  # noqa: 
 # (a PID-suffixed literal path let an attacker's pre-seeded symlink receive
 # the merged config, which can carry a live haiku.oauth_token) -- a real,
 # necessary, one-time cost of the fix, not a regression to chase back out.
+# 18 after #744 added a SEPARATE `jq -c 'del(.haiku)'` sanitize spawn ahead
+# of the merge (this fixture's own project config is in the untrusted
+# layout, so it fires every cold run): #740's two earlier designs
+# (`-n`/`input_filename`, then `--slurpfile`) folded the untrusted-layer
+# strip into this SAME merge spawn at no extra process cost, but the
+# second of those designs itself errored under a native jq.exe on Windows
+# CI, silently dropping every layer -- another real, necessary, one-time
+# cost, this time of a fix that could only be proven correct on the
+# platform where the previous one had already failed.
 #
 # (#230's own note said 17. That number predates #233 folding the two budget
 # tests onto one counted-command list, and it left out the two `mkdir -p` calls
@@ -74,10 +83,11 @@ from tests.spawn_counting import make_shim_dir, spawns as _spawn_lines  # noqa: 
 #
 # The slack is for the platforms that are not this one — bash >= 4.2 spends
 # fewer (no `date`), Git Bash may spend one `cygpath` more — not for a
-# regression. What remains is the `jq -s` merge and its `rm` on exit, which
-# cannot go without caching the merged config, and that is a credential
-# lifetime decision (#232) rather than a spawn one.
-POST_TOOL_SPAWN_MEASURED = 17
+# regression. What remains is the layered-config merge (`jq -s`, back to its
+# pre-#726 form) and the sanitize spawn ahead of it, plus their own `rm` on
+# exit -- neither can go without caching the merged config, and that is a
+# credential lifetime decision (#232) rather than a spawn one.
+POST_TOOL_SPAWN_MEASURED = 18
 POST_TOOL_SPAWN_BUDGET = POST_TOOL_SPAWN_MEASURED + 2
 
 
@@ -196,9 +206,22 @@ def test_the_merged_config_is_read_once_not_once_per_key(tmp_path):
     does not change between them. Five processes for five questions of one
     unchanging file was #230's largest named remainder.
 
-    The `jq -s` merge that PRODUCES the file is a different thing and is not
-    counted here: removing it means publishing the merged config at a stable
-    path, and that file can carry a live OAuth credential.
+    The layered-config merge that PRODUCES the file is a different thing and is
+    not counted here: removing it means publishing the merged config at a
+    stable path, and that file can carry a live OAuth credential. It ran as
+    plain `jq -s` before #726 first threaded an untrusted-project-layer
+    strip through this SAME spawn (a `--argjson` flag, then #740's `-n`,
+    then `--slurpfile`) -- #744 (CI observed the `--slurpfile` design
+    itself error under a native jq.exe on Windows, silently dropping
+    EVERY layer through the `|| cp "$_bundled_cfg" ...` fallback with no
+    error surfaced) moved the strip out of this spawn entirely: a
+    SEPARATE `jq -c 'del(.haiku)'` call sanitizes the untrusted project
+    layer first (this fixture's default project config exists in the
+    untrusted/legacy layout, so that spawn fires too, once), and this
+    spawn is back to being exactly the plain pre-#726 `jq -s` reduce
+    again -- nothing about ITS OWN one-process-per-run property changed,
+    there is just one more, separate, one-process-per-run spawn next to
+    it now.
     """
     home, project, remember = _project(tmp_path, cooldown_ts=int(time.time()))
     env = _env(tmp_path, home, project)
@@ -209,12 +232,18 @@ def test_the_merged_config_is_read_once_not_once_per_key(tmp_path):
 
     lines = _spawns(log)
     merges = [l for l in lines if l.startswith("jq ") and " -s " in l]
+    sanitizes = [l for l in lines if l.startswith("jq ") and "del(.haiku)" in l]
     reads = [l for l in lines
-             if l.startswith("jq ") and " -s " not in l and "remember-config-" in l]
+             if l.startswith("jq ") and " -s " not in l and "del(.haiku)" not in l
+             and "remember-config-" in l]
 
     assert len(merges) == 1, (
         "the three-layer merge should still happen exactly once per process: "
         f"{merges}"
+    )
+    assert len(sanitizes) == 1, (
+        "the untrusted project layer's own sanitize spawn should happen "
+        f"exactly once per process: {sanitizes}"
     )
     assert len(reads) <= 1, (
         f"{len(reads)} separate jq reads of one unchanging merged config, one "

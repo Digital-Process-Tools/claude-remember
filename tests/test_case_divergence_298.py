@@ -347,6 +347,74 @@ _SANCTIONED_DIVERGENCE = {
             '        || cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null\n',
         ),
         (
+            'elif [ "${#_cfg_sources[@]}" -gt 0 ] && command -v jq >/dev/null 2>&1; then\n'
+            '    _strip_project_haiku="false"\n'
+            '    [ "$_project_cfg_haiku_untrusted" = "1" ] && [ -f "$_project_cfg" ] && _strip_project_haiku="true"\n'
+            '    jq -s --argjson strip_last_haiku "$_strip_project_haiku" \'(if $strip_last_haiku then (.[-1] |= del(.haiku)) else . end) | reduce .[] as $x ({}; . * $x) | with_entries(select(.key | startswith("_") | not))\' "${_cfg_sources[@]}" > "$_merged_cfg" 2>/dev/null \\\n'
+            '        || cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null\n'
+            'elif [ "${#_cfg_sources[@]}" -gt 0 ]; then\n',
+            # #740/#744: `-s` slurps every document from every source file into
+            # one flat array with no file-boundary information, so `.[-1]` only
+            # ever reached the LAST document of the LAST file -- a project config
+            # shipping two whitespace-concatenated JSON documents had its FIRST
+            # document's `haiku` block survive untouched, one array element
+            # before the position `.[-1]` looked at (#740). Two designs meant to
+            # fix that were tried and abandoned before this one: `-n` with
+            # `inputs`/`input_filename`, comparing every document's source file
+            # against a shell-supplied `--arg proj` path -- reasoned to be safe,
+            # never observed on a platform where jq's own view of a path could
+            # diverge from the shell's (this repo's CI skips every bash-subprocess
+            # test on win32, #79); then `--slurpfile proj "$_project_cfg"`, which
+            # removed that comparison but was ITSELF never proven on Windows either
+            # -- PR #744's CI showed it erroring under a native jq.exe there, and
+            # the `|| cp "$_bundled_cfg" ...` fallback silently dropped EVERY layer,
+            # project AND trusted user-global, with no error surfaced to the user
+            # at all. This design (#744) uses NOTHING that was not already proven,
+            # on every CI platform, before #740 ever touched this file: a SEPARATE,
+            # plain `jq -c 'del(.haiku)'` call (no `-s`, no `-n`, no `--slurpfile`,
+            # no path comparison) sanitizes the untrusted project layer into its own
+            # temp file first -- jq's ordinary mode already treats each document as
+            # a separate input, so a multi-document project config is handled the
+            # same way #740's first fix was, and an empty one the same way its
+            # second fix was, without either design's own platform-dependent moving
+            # part. If sanitizing fails for any reason, the project layer is simply
+            # dropped (fail CLOSED) rather than merged unsanitized -- the trusted
+            # bundled/user layers are unaffected either way. Once sanitized, the
+            # ORIGINAL `jq -s` reduce (unchanged since before #726) runs over the
+            # same plain file arguments it always did. The trailing `elif` (the
+            # no-jq branch's own opener) is pulled into BOTH sides of this pair for
+            # the same test_sanctioned_divergence_state_440.py collision reason the
+            # #726 pair's own comment (above) already explains in full.
+            'elif [ "${#_cfg_sources[@]}" -gt 0 ] && command -v jq >/dev/null 2>&1; then\n'
+            '    _strip_project_haiku="false"\n'
+            '    [ "$_project_cfg_haiku_untrusted" = "1" ] && [ -f "$_project_cfg" ] && _strip_project_haiku="true"\n'
+            '    _jq_merge_sources=()\n'
+            '    [ -f "$_bundled_cfg" ] && _jq_merge_sources+=("$_bundled_cfg")\n'
+            '    [ -f "$_user_cfg"    ] && _jq_merge_sources+=("$_user_cfg")\n'
+            '    _project_sanitized_tmp=""\n'
+            '    if [ -f "$_project_cfg" ]; then\n'
+            '        if [ "$_strip_project_haiku" = "true" ]; then\n'
+            '            _project_sanitized_tmp=$(mktemp "${SYS_TMPDIR}/remember-config-sanitized-XXXXXX" 2>/dev/null) || _project_sanitized_tmp=""\n'
+            '            if [ -n "$_project_sanitized_tmp" ] && jq -c \'del(.haiku)\' "$_project_cfg" > "$_project_sanitized_tmp" 2>/dev/null; then\n'
+            '                _jq_merge_sources+=("$_project_sanitized_tmp")\n'
+            '            else\n'
+            '                [ -n "$_project_sanitized_tmp" ] && rm -f "$_project_sanitized_tmp"\n'
+            '                _project_sanitized_tmp=""\n'
+            '            fi\n'
+            '        else\n'
+            '            _jq_merge_sources+=("$_project_cfg")\n'
+            '        fi\n'
+            '    fi\n'
+            '    if [ "${#_jq_merge_sources[@]}" -eq 0 ]; then\n'
+            '        echo \'{}\' > "$_merged_cfg"\n'
+            '    else\n'
+            '        jq -s \'reduce .[] as $x ({}; . * $x) | with_entries(select(.key | startswith("_") | not))\' "${_jq_merge_sources[@]}" > "$_merged_cfg" 2>/dev/null \\\n'
+            '            || cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null\n'
+            '    fi\n'
+            '    [ -n "$_project_sanitized_tmp" ] && rm -f "$_project_sanitized_tmp"\n'
+            'elif [ "${#_cfg_sources[@]}" -gt 0 ]; then\n',
+        ),
+        (
             '    declare -f _remember_python >/dev/null 2>&1 && _remember_python\n'
             '    "${PYTHON:-python3}" - "$_merged_cfg" "${_cfg_sources[@]}" > /dev/null 2>&1 <<\'PYMERGE\' || cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null\n'
             'import json\n',
@@ -360,14 +428,6 @@ _SANCTIONED_DIVERGENCE = {
         ),
         (
             'out_path = sys.argv[1]\n'
-            'merged = {}\n'
-            'for path in sys.argv[2:]:\n'
-            '    with open(path) as f:\n'
-            '        merged = deep_merge(merged, json.load(f))\n'
-            'merged = {k: v for k, v in merged.items() if not str(k).startswith("_")}\n',
-            # #726: the Python fallback's own strip of the untrusted `haiku` key,
-            # mirroring the jq path's `del(.haiku)` on the last element.
-            'out_path = sys.argv[1]\n'
             'untrusted_haiku_path = sys.argv[2]\n'
             'merged = {}\n'
             'for path in sys.argv[3:]:\n'
@@ -375,6 +435,66 @@ _SANCTIONED_DIVERGENCE = {
             '        data = json.load(f)\n'
             '    if untrusted_haiku_path and path == untrusted_haiku_path and isinstance(data, dict):\n'
             '        data = {k: v for k, v in data.items() if k != "haiku"}\n'
+            '    merged = deep_merge(merged, data)\n'
+            'merged = {k: v for k, v in merged.items() if not str(k).startswith("_")}\n',
+            # #726 shipped this line by line, one field per pre-726 line, so
+            # there used to be a SEPARATE tuple here (old=pre-726 single
+            # json.load loop, new=this #726 form) -- gone (#734's own
+            # reasoning, restated): #726 already landed, so real origin/main
+            # can never again be at the pre-726 state that tuple's own
+            # old_code named, and keeping it around only existed to trip the
+            # same synthetic-ref_code collision #740 hit composing directly
+            # on top of it (below). #740: a plain `json.load(f)` on the
+            # untrusted project file raises `JSONDecodeError` if that file
+            # ships more than one JSON document -- uncaught, so it took the
+            # WHOLE merge down with it (falling back to bundled-only
+            # defaults, dropping the trusted user-global layer's own
+            # overrides too) rather than stripping `haiku` from each of the
+            # untrusted file's own documents and keeping everything else,
+            # the same shape the jq path now has. `load_documents()` parses
+            # one or more whitespace-concatenated JSON documents from the
+            # untrusted file specifically; every other (trusted) source file
+            # keeps the original single `json.load()`, unchanged.
+            'out_path = sys.argv[1]\n'
+            'untrusted_haiku_path = sys.argv[2]\n'
+            '\n'
+            '\n'
+            'def load_documents(path):\n'
+            '    """Parse every whitespace-concatenated JSON document in `path` (#740):\n'
+            '    the untrusted project layer may ship more than one, and a plain\n'
+            '    json.load() raises `JSONDecodeError` on any file with more than one --\n'
+            '    which used to take the WHOLE merge down with it (the `|| cp\n'
+            '    "$_bundled_cfg" ...` fallback below), dropping the trusted user-global\n'
+            '    layer too rather than just stripping `haiku` from this file\'s own\n'
+            '    documents and keeping everything else."""\n'
+            '    with open(path) as f:\n'
+            '        raw = f.read()\n'
+            '    decoder = json.JSONDecoder()\n'
+            '    idx, n, docs = 0, len(raw), []\n'
+            '    while idx < n:\n'
+            '        while idx < n and raw[idx].isspace():\n'
+            '            idx += 1\n'
+            '        if idx >= n:\n'
+            '            break\n'
+            '        obj, idx = decoder.raw_decode(raw, idx)\n'
+            '        docs.append(obj)\n'
+            '    return docs\n'
+            '\n'
+            '\n'
+            'merged = {}\n'
+            'for path in sys.argv[3:]:\n'
+            '    if untrusted_haiku_path and path == untrusted_haiku_path:\n'
+            '        try:\n'
+            '            docs = load_documents(path)\n'
+            '        except (OSError, ValueError):\n'
+            '            continue\n'
+            '        for data in docs:\n'
+            '            if isinstance(data, dict):\n'
+            '                data = {k: v for k, v in data.items() if k != "haiku"}\n'
+            '            merged = deep_merge(merged, data)\n'
+            '        continue\n'
+            '    with open(path) as f:\n'
+            '        data = json.load(f)\n'
             '    merged = deep_merge(merged, data)\n'
             'merged = {k: v for k, v in merged.items() if not str(k).startswith("_")}\n',
         ),

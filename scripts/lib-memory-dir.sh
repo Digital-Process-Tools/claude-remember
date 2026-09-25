@@ -339,12 +339,52 @@ if [ -z "$_merged_cfg" ]; then
 elif [ "${#_cfg_sources[@]}" -gt 0 ] && command -v jq >/dev/null 2>&1; then
     # Deep-merge: later files override earlier ones. Strip `_`-prefixed keys —
     # convention: `_*` are user-facing docs (_comments/_purpose/_notes), never runtime data.
-    # When the project layer's `haiku` block is untrusted (#726, above), it is
-    # the LAST element `-s` slurps (project cfg is always appended last to
-    # _cfg_sources when present) -- deleted before the reduce, never merged in
-    # at all, rather than merged and then somehow un-merged after.
+    # #744: the previous two designs (`.[-1] |= del(.haiku)` on a `-s`
+    # slurp, then `--slurpfile`/`input_filename`) were REASONED to be safe
+    # on Windows, never OBSERVED there -- PR #744's CI showed the
+    # `--slurpfile` invocation itself erroring under a native jq.exe, and
+    # the `|| cp "$_bundled_cfg" ...` fallback silently dropped EVERY
+    # layer, project AND trusted user-global, with no error surfaced to
+    # the user at all. This design uses NOTHING that was not already
+    # proven, on every CI platform, before #740 ever touched this file:
+    # the untrusted project layer is sanitized in a SEPARATE, plain call
+    # (`jq -c 'del(.haiku)' "$_project_cfg"`, no `-s`, no `-n`, no
+    # `--slurpfile`, no `/dev/null` placeholder, no path comparison of any
+    # kind) into its own temp file, applying `del(.haiku)` to every
+    # top-level JSON value the untrusted file contains -- jq's ordinary
+    # (non-slurp) mode already treats each one as a separate input, so
+    # this handles a multi-document project config the same way #740's
+    # first fix did, and an empty file the same way its second fix did,
+    # without either design's own platform-dependent moving part. Once
+    # sanitized, the ORIGINAL `jq -s` reduce below (unchanged since
+    # before #726) runs over the SAME plain file arguments it always did
+    # -- the sanitized temp file standing in for the untrusted one -- so
+    # the one thing #744 needed proof of (does this shape work on
+    # Windows) is answered by history rather than reasoning.
     _strip_project_haiku="false"
     [ "$_project_cfg_haiku_untrusted" = "1" ] && [ -f "$_project_cfg" ] && _strip_project_haiku="true"
+    _jq_merge_sources=()
+    [ -f "$_bundled_cfg" ] && _jq_merge_sources+=("$_bundled_cfg")
+    [ -f "$_user_cfg"    ] && _jq_merge_sources+=("$_user_cfg")
+    _project_sanitized_tmp=""
+    if [ -f "$_project_cfg" ]; then
+        if [ "$_strip_project_haiku" = "true" ]; then
+            _project_sanitized_tmp=$(mktemp "${SYS_TMPDIR}/remember-config-sanitized-XXXXXX" 2>/dev/null) || _project_sanitized_tmp=""
+            if [ -n "$_project_sanitized_tmp" ] && jq -c 'del(.haiku)' "$_project_cfg" > "$_project_sanitized_tmp" 2>/dev/null; then
+                _jq_merge_sources+=("$_project_sanitized_tmp")
+            else
+                # Sanitizing failed (mktemp, an unreadable project file, or
+                # jq itself) -- fail CLOSED: the project layer is dropped
+                # entirely rather than merged unsanitized. The trusted
+                # bundled/user layers above are unaffected; only the
+                # untrusted one's own contribution is lost.
+                [ -n "$_project_sanitized_tmp" ] && rm -f "$_project_sanitized_tmp"
+                _project_sanitized_tmp=""
+            fi
+        else
+            _jq_merge_sources+=("$_project_cfg")
+        fi
+    fi
     # The filter is one line, not one per clause: a literal newline inside
     # this quoted argument reaches the process's own argv byte-for-byte, and
     # every spawn-counting test in this repo (tests/spawn_counting.py's
@@ -355,8 +395,19 @@ elif [ "${#_cfg_sources[@]}" -gt 0 ] && command -v jq >/dev/null 2>&1; then
     # investigating a macOS-only spawn-budget CI failure on this same #726
     # change: 4 phantom lines, one real process, jq itself is whitespace-
     # insensitive so this is a pure counting fix with no behavior change).
-    jq -s --argjson strip_last_haiku "$_strip_project_haiku" '(if $strip_last_haiku then (.[-1] |= del(.haiku)) else . end) | reduce .[] as $x ({}; . * $x) | with_entries(select(.key | startswith("_") | not))' "${_cfg_sources[@]}" > "$_merged_cfg" 2>/dev/null \
-        || cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null
+    if [ "${#_jq_merge_sources[@]}" -eq 0 ]; then
+        # Bundled and user configs both absent, and the untrusted project
+        # layer either doesn't exist either or was just sanitize-dropped
+        # above -- `jq -s '...'` with ZERO positional file arguments falls
+        # back to reading STDIN, and a hook blocked on STDIN never returns.
+        # Same "no config files at all" answer the final `else` below gives
+        # when jq isn't even on PATH.
+        echo '{}' > "$_merged_cfg"
+    else
+        jq -s 'reduce .[] as $x ({}; . * $x) | with_entries(select(.key | startswith("_") | not))' "${_jq_merge_sources[@]}" > "$_merged_cfg" 2>/dev/null \
+            || cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null
+    fi
+    [ -n "$_project_sanitized_tmp" ] && rm -f "$_project_sanitized_tmp"
 elif [ "${#_cfg_sources[@]}" -gt 0 ]; then
     # No jq — do the same deep-merge in Python instead of silently dropping
     # the user-global/per-project layers and copying only the bundled
@@ -390,12 +441,55 @@ out_path = sys.argv[1]
 # storage mode, or no project cfg at all) -- never equal to a real path then,
 # so nothing is stripped (#726, see the case switch this mirrors above).
 untrusted_haiku_path = sys.argv[2]
+
+
+def load_documents(path):
+    """Parse every whitespace-concatenated JSON document in `path` (#740):
+    the untrusted project layer may ship more than one, and a plain
+    json.load() raises `JSONDecodeError` on any file with more than one --
+    which used to take the WHOLE merge down with it (the `|| cp
+    "$_bundled_cfg" ...` fallback below), dropping the trusted user-global
+    layer too rather than just stripping `haiku` from this file's own
+    documents and keeping everything else."""
+    with open(path) as f:
+        raw = f.read()
+    decoder = json.JSONDecoder()
+    idx, n, docs = 0, len(raw), []
+    while idx < n:
+        while idx < n and raw[idx].isspace():
+            idx += 1
+        if idx >= n:
+            break
+        obj, idx = decoder.raw_decode(raw, idx)
+        docs.append(obj)
+    return docs
+
+
 merged = {}
 for path in sys.argv[3:]:
+    if untrusted_haiku_path and path == untrusted_haiku_path:
+        # #744: fail CLOSED -- if the untrusted file can't even be loaded
+        # (unreadable, a permissions error, malformed JSON, anything
+        # load_documents() itself doesn't already tolerate), drop just this
+        # layer rather than let the exception propagate and crash the whole
+        # merge down to the bundled-only fallback below, taking the trusted
+        # user-global layer's own overrides with it for no reason connected
+        # to them. `json.JSONDecodeError` (raised by decoder.raw_decode() on
+        # invalid JSON) and `UnicodeDecodeError` (raised by f.read() on a
+        # file that isn't valid text in the expected encoding) are both
+        # ValueError subclasses -- catching only OSError let either one
+        # through uncaught.
+        try:
+            docs = load_documents(path)
+        except (OSError, ValueError):
+            continue
+        for data in docs:
+            if isinstance(data, dict):
+                data = {k: v for k, v in data.items() if k != "haiku"}
+            merged = deep_merge(merged, data)
+        continue
     with open(path) as f:
         data = json.load(f)
-    if untrusted_haiku_path and path == untrusted_haiku_path and isinstance(data, dict):
-        data = {k: v for k, v in data.items() if k != "haiku"}
     merged = deep_merge(merged, data)
 # Strip `_`-prefixed doc keys, top-level only — same convention as the jq path.
 merged = {k: v for k, v in merged.items() if not str(k).startswith("_")}
