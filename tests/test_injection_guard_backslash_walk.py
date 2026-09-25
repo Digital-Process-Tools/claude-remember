@@ -27,6 +27,19 @@ is what actually exercises the msys/cygwin code path on any host.
 
 Every case here is red before the fix and green after -- see the branch's
 own report for the paired subprocess.run output.
+
+DIAGNOSTIC (temporary, kept until the windows-latest leg is confirmed
+green -- see PR #767 review): the shipped function's own `git -C ... `
+call redirects git's stderr to /dev/null (matching production's own
+#760-established "unavailable" behaviour, which must never leak a git
+error message into injected session context), so a CI job log carries
+only the opaque final state, never git's own reason for failing. `_probe`
+below independently replicates the walk + pathspec computation ALONGSIDE
+the real call (not instead of it -- the assertions still check the real,
+unmodified `_remember_file_tracked_state_into` output), with git's stderr
+and exit code captured rather than discarded, purely so a CI failure's
+own output carries the exact string that a local darwin/linux run cannot
+reproduce.
 """
 
 from __future__ import annotations
@@ -48,16 +61,46 @@ RESOLVE_PATHS = (REPO_ROOT / "scripts" / "resolve-paths.sh").as_posix()
 # The one function this needs from resolve-paths.sh, lifted out exactly as
 # tests/test_dirname_without_a_fork_660.py lifts _remember_root_of out of
 # lib-memory-context.sh -- the real shipped code runs, not a copy of it.
+#
+# The trailing DIAG block is diagnostic-only (see module docstring): it
+# does not feed back into $_state, which is still exactly what the real,
+# unmodified _remember_file_tracked_state_into produced.
 HARNESS = r'''
 _body=$(sed -n '/^_remember_forward_slash_into()/,/^}/p' "@RESOLVE_PATHS@")
 eval "$_body"
 source "@LIB@"
 _remember_file_tracked_state_into _state "$1"
-printf '%s' "$_state"
+printf 'STATE=%s\n' "$_state"
+
+case "$1" in
+    (*/*) _diag_dir="${1%/*}" ;;
+    (*)   _diag_dir="." ;;
+esac
+_remember_forward_slash_into _diag_dir_fs "$_diag_dir"
+_remember_repo_root_walk_into _diag_root "$_diag_dir_fs"
+printf 'DIAG_OSTYPE=%s\n' "${OSTYPE:-<unset>}"
+printf 'DIAG_BASH_VERSION=%s\n' "${BASH_VERSION:-<unset>}"
+printf 'DIAG_INPUT=%s\n' "$1"
+printf 'DIAG_DIR_FS=%s\n' "$_diag_dir_fs"
+printf 'DIAG_ROOT=%s\n' "$_diag_root"
+if [ -n "$_diag_root" ]; then
+    printf 'DIAG_GIT_WHICH=%s\n' "$(command -v git 2>&1)"
+    printf 'DIAG_GIT_VERSION=%s\n' "$(git --version 2>&1)"
+    _diag_out=$(git -C "$_diag_root" ls-files 2>&1)
+    _diag_rc=$?
+    printf 'DIAG_GIT_RC=%s\n' "$_diag_rc"
+    printf 'DIAG_GIT_OUT=%s\n' "$_diag_out"
+    _diag_top=$(git -C "$_diag_root" rev-parse --show-toplevel 2>&1)
+    printf 'DIAG_GIT_TOPLEVEL_RC=%s\n' "$?"
+    printf 'DIAG_GIT_TOPLEVEL=%s\n' "$_diag_top"
+fi
 '''.replace("@RESOLVE_PATHS@", RESOLVE_PATHS).replace("@LIB@", LIB)
 
 
-def _tracked_state(file_path: str, ostype: str | None = None) -> str:
+def _tracked_state(file_path: str, ostype: str | None = None) -> tuple[str, str]:
+    """Returns (state, diagnostic_text). diagnostic_text is empty on a
+    healthy 'tracked'/'not-tracked' state and always populated otherwise,
+    for inclusion in an assertion failure message -- see module docstring."""
     env = None
     if ostype is not None:
         import os
@@ -68,7 +111,16 @@ def _tracked_state(file_path: str, ostype: str | None = None) -> str:
         capture_output=True, text=True, timeout=60, check=False, env=env,
     )
     assert done.returncode == 0, done.stderr
-    return done.stdout
+    lines = done.stdout.splitlines()
+    state = ""
+    diag_lines = []
+    for line in lines:
+        if line.startswith("STATE="):
+            state = line[len("STATE="):]
+        else:
+            diag_lines.append(line)
+    diag = "\n".join(diag_lines)
+    return state, diag
 
 
 class TestBackslashPathWalksPastTheProjectRoot:
@@ -101,13 +153,13 @@ class TestBackslashPathWalksPastTheProjectRoot:
         proj_backslash = str(proj).replace("/", "\\")
         file_arg = f"{proj_backslash}/.remember/now.md"
 
-        state = _tracked_state(file_arg, ostype="msys")
+        state, diag = _tracked_state(file_arg, ostype="msys")
 
         assert state == "not-tracked", (
             f"backslash-separated path did not climb past the project "
             f"root to find the repository two levels up -- got {state!r} "
             f"(expected 'not-tracked': a repository was found, and this "
-            f"untracked file is genuinely not in it)"
+            f"untracked file is genuinely not in it)\n--- diagnostic ---\n{diag}"
         )
 
     def test_forward_slash_path_still_finds_the_same_repo(self, tmp_path):
@@ -125,6 +177,9 @@ class TestBackslashPathWalksPastTheProjectRoot:
         now_md = remember_dir / "now.md"
         now_md.write_text("Working on the parser fix.\n")
 
-        state = _tracked_state(str(now_md))
+        state, diag = _tracked_state(str(now_md))
 
-        assert state == "not-tracked"
+        assert state == "not-tracked", (
+            f"positive control did not reach 'not-tracked' -- got {state!r}\n"
+            f"--- diagnostic ---\n{diag}"
+        )
