@@ -325,7 +325,31 @@ _classify_project_cfg_haiku_trust
 _remember_config_tracked_status() {
     local _dir="$1" _name="$2" _out _rc
 
-    command -v git >/dev/null 2>&1 || { echo "untracked"; return 0; }
+    if ! command -v git >/dev/null 2>&1; then
+        # #766: "no git binary" used to fall straight through to
+        # "untracked", trusting the config -- the opposite of the
+        # documented fail-closed behaviour, and indistinguishable from the
+        # genuine "there is no repository here" case. No git spawn is
+        # possible either way, so this walks the filesystem by hand instead:
+        # an enclosing .git found on disk means there COULD be a tracked
+        # file here that this has no way to ask git about (could-not-tell,
+        # fails closed same as `tracked`); no .git anywhere above means
+        # there is nothing to check, same as the ordinary non-git case
+        # (untracked).
+        local _walk
+        _walk=$(cd "$_dir" 2>/dev/null && pwd -P) || _walk="$_dir"
+        while [ -n "$_walk" ]; do
+            if [ -e "$_walk/.git" ]; then
+                echo "could-not-tell"
+                return 0
+            fi
+            [ "$_walk" = "/" ] && break
+            _walk="${_walk%/*}"
+            [ -z "$_walk" ] && _walk="/"
+        done
+        echo "untracked"
+        return 0
+    fi
 
     # LC_ALL=C/LANGUAGE=C: the ONE place this reads a git error message as
     # text rather than an exit code alone, so it forces git's own fatal
@@ -353,14 +377,26 @@ _remember_config_tracked_status() {
         return 0
     fi
 
-    (unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
-     git -C "$_dir" ls-files --error-unmatch -- "$_name") >/dev/null 2>&1
+    # #757/#754's `ls-files --error-unmatch` compared the exact-case path,
+    # which misses a config the repository committed under a DIFFERENTLY
+    # CASED name on a case-insensitive filesystem (macOS APFS default): a
+    # repo shipping `.Remember/config.json` reads as untracked here and
+    # migrates as trusted. `:(icase)` pathspec magic asks git the
+    # case-insensitive question directly, still in one spawn -- non-empty
+    # output means something matching that name case-insensitively is
+    # tracked; empty output (exit 0) means nothing does.
+    _out=$( (unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+             git -C "$_dir" ls-files -- ":(icase)$_name") 2>/dev/null )
     _rc=$?
-    case "$_rc" in
-        0) echo "tracked" ;;
-        1) echo "untracked" ;;
-        *) echo "could-not-tell" ;;
-    esac
+    if [ "$_rc" -ne 0 ]; then
+        echo "could-not-tell"
+        return 0
+    fi
+    if [ -n "$_out" ]; then
+        echo "tracked"
+    else
+        echo "untracked"
+    fi
 }
 
 # #757: `model` and `reject_pattern` are not credential-equivalent to
@@ -379,6 +415,22 @@ if [ "$_project_cfg_haiku_untrusted" = "1" ] && [ -f "$_project_cfg" ]; then
         untracked) _project_cfg_model_reject_untrusted=0 ;;
         *) _project_cfg_model_reject_untrusted=1 ;;  # tracked or could-not-tell -> fail CLOSED
     esac
+fi
+
+# #757 hardening: a SYMLINKED project config.json is left exactly as it
+# is -- never read through the link during the merge below. jq (and the
+# no-jq python fallback's own open()) opens what a symlink points to, not
+# the link itself, so treating a symlinked config.json as an ordinary file
+# here would read whatever it targets -- anywhere on disk -- into the
+# merged config that later feeds a subprocess. -L never dereferences; this
+# check runs BEFORE anything below opens "$_project_cfg" for reading, and
+# clearing the variable to a path that cannot exist removes it from every
+# `[ -f "$_project_cfg" ]` gate downstream in one place rather than at each
+# of the several merge call sites individually.
+if [ -L "$_project_cfg" ]; then
+    printf 'remember: %s is a symlink -- refusing to read it through the link; this project config layer is skipped entirely for this session (#757)\n' \
+        "$_project_cfg" >&2
+    _project_cfg="${REMEMBER_DIR}/.remember-symlinked-config-refused"
 fi
 
 SYS_TMPDIR="${TMPDIR:-/tmp}"

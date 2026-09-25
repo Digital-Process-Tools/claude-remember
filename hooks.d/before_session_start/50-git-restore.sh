@@ -609,6 +609,43 @@ fi
 # work, but only as long as nothing else in here can.
 if git -C "$REPO_ROOT" merge --ff-only "$REMOTE_REF" >/dev/null 2>&1; then
     log "git-restore" "restored $BEHIND commit(s) from $REMOTE_NAME/$GIT_RESTORE_BRANCH (${LOCAL_HEAD:0:7}..${REMOTE_HEAD:0:7}) into $REPO_ROOT -- memory below reflects them"
+
+    # ── #741: a fast-forward that untracks config.json must not delete it ──
+    # A store from before #719 has $SLUG/config.json committed. The FIRST
+    # machine to upgrade runs an index-only `git rm --cached` on it (the
+    # untracking commit in after_save/50-git-backup.sh) and pushes -- its own
+    # working-tree copy is untouched, because `--cached` only ever edits the
+    # index. Every OTHER machine sharing the store only ever reaches that
+    # commit by fast-forwarding onto it, right here, and `git merge --ff-only`
+    # updates the working tree to match the new HEAD as part of an ordinary
+    # checkout: a path the incoming commit stops tracking is REMOVED from
+    # disk if (and only if) the local copy was identical to what was tracked
+    # before -- exactly the "unmodified" case #741 names. There is no
+    # distinct code path for it to hook into; it is the fast-forward doing
+    # exactly what a fast-forward does, silently, to a file nothing here is
+    # allowed to lose (haiku.oauth_token and per-project settings live there).
+    #
+    # So: after the merge, ask whether config.json was tracked at the
+    # PRE-merge HEAD and is not tracked at the new one. If so and the file no
+    # longer exists on disk, it was this merge that removed it -- restore its
+    # exact bytes from the pre-merge commit. It stays OUT of the index: the
+    # whole point of the untracking commit it just adopted is that this path
+    # stops being pushed, and re-staging it here would undo that on every
+    # machine that runs this hook.
+    _gr_config_rel="$SLUG/config.json"
+    if [ -n "$LOCAL_HEAD" ] \
+        && git -C "$REPO_ROOT" cat-file -e "$LOCAL_HEAD:$_gr_config_rel" 2>/dev/null \
+        && ! git -C "$REPO_ROOT" cat-file -e "HEAD:$_gr_config_rel" 2>/dev/null \
+        && [ ! -e "$REPO_ROOT/$_gr_config_rel" ]; then
+        mkdir -p "$(dirname "$REPO_ROOT/$_gr_config_rel")" 2>/dev/null || true
+        if git -C "$REPO_ROOT" show "$LOCAL_HEAD:$_gr_config_rel" > "$REPO_ROOT/$_gr_config_rel.restore-tmp" 2>/dev/null \
+            && mv "$REPO_ROOT/$_gr_config_rel.restore-tmp" "$REPO_ROOT/$_gr_config_rel"; then
+            log "git-restore" "restored $_gr_config_rel after this fast-forward adopted a commit that stopped tracking it (#741) -- another machine ran 'git rm --cached' on it during the #719 upgrade; the file is preserved on disk exactly as it was, but stays OUT of the index, matching the new HEAD"
+        else
+            rm -f "$REPO_ROOT/$_gr_config_rel.restore-tmp" 2>/dev/null || true
+            log "git-restore" "ERROR: this fast-forward adopted a commit that stopped tracking $_gr_config_rel (#741) and restoring its pre-merge content to $REPO_ROOT/$_gr_config_rel FAILED -- check it by hand; if it carried a live haiku.oauth_token, it may now be gone"
+        fi
+    fi
 else
     log "git-restore" "ERROR: fast-forward of $BEHIND commit(s) from $REMOTE_NAME/$GIT_RESTORE_BRANCH was REFUSED by git -- most likely uncommitted local changes in $REPO_ROOT that it would overwrite. Nothing was restored and nothing was forced. Run 'git -C \"$REPO_ROOT\" merge --ff-only $REMOTE_REF' to see git's own reason."
 fi
