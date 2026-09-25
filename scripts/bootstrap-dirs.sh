@@ -90,26 +90,39 @@ if [ "$REMEMBER_DIR" != "$_legacy_dir" ] && [ -d "$_legacy_dir" ] && [ ! -e "$RE
         # still tracked, doing nothing for the new external store -- logged,
         # not silent, so the operator can see why their repo's config.json
         # no longer takes effect and where their own settings now belong.
+        # _remember_config_tracked_status (lib-memory-dir.sh, already
+        # sourced above) walks up to any ENCLOSING work tree rather than
+        # checking only "$_mem_proj/.git" -- a project started from a repo
+        # SUBDIRECTORY has no .git of its own, and the repository can still
+        # have committed the file two levels up (#754). It also tells
+        # "definitely untracked" apart from "could not tell" (a git spawn
+        # failing for a reason other than a confirmed answer) -- and
+        # could-not-tell fails CLOSED here too: left behind, same as
+        # tracked (#760 -- a git failure must never read as a confirmed
+        # absence and let the file migrate as trusted by default).
         _legacy_cfg="$_legacy_dir/config.json"
         _legacy_cfg_holdout=""
-        if [ -f "$_legacy_cfg" ] && command -v git >/dev/null 2>&1 && [ -e "$_mem_proj/.git" ] \
-            && (unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
-                git -C "$_mem_proj" ls-files --error-unmatch -- ".remember/config.json") >/dev/null 2>&1; then
-            _legacy_cfg_holdout=$(mktemp "${SYS_TMPDIR:-/tmp}/remember-legacy-cfg-XXXXXX" 2>/dev/null) || _legacy_cfg_holdout=""
-            if [ -n "$_legacy_cfg_holdout" ] && cp "$_legacy_cfg" "$_legacy_cfg_holdout" 2>/dev/null; then
-                rm -f "$_legacy_cfg" 2>/dev/null || _legacy_cfg_holdout=""
-            else
-                _legacy_cfg_holdout=""
-            fi
+        if [ -f "$_legacy_cfg" ]; then
+            case "$(_remember_config_tracked_status "$_mem_proj" ".remember/config.json")" in
+                untracked) : ;;
+                *)
+                    _legacy_cfg_holdout=$(mktemp "${SYS_TMPDIR:-/tmp}/remember-legacy-cfg-XXXXXX" 2>/dev/null) || _legacy_cfg_holdout=""
+                    if [ -n "$_legacy_cfg_holdout" ] && cp "$_legacy_cfg" "$_legacy_cfg_holdout" 2>/dev/null; then
+                        rm -f "$_legacy_cfg" 2>/dev/null || _legacy_cfg_holdout=""
+                    else
+                        _legacy_cfg_holdout=""
+                    fi
+                    ;;
+            esac
         fi
 
         if mv "$_legacy_dir" "$REMEMBER_DIR" 2>/dev/null; then
             mkdir -p "$_legacy_dir"
             if [ -n "$_legacy_cfg_holdout" ] && [ -f "$_legacy_cfg_holdout" ]; then
                 mv "$_legacy_cfg_holdout" "$_legacy_cfg" 2>/dev/null
-                printf 'Memory data migrated to:\n  %s\nThis directory is now empty; you may delete it.\n\nconfig.json was NOT migrated: it is tracked by this repository git\nindex, so treating it as your own trusted config would let a cloned repo\nchoose the summarizer credential, model, or refusal-gate settings your\nmemory pipeline runs with (#757). Left behind here, still tracked, still\ndoing nothing for the external store above. Put your own settings in\n%s/config.json instead.\n' \
+                printf 'Memory data migrated to:\n  %s\nThis directory is now empty; you may delete it.\n\nconfig.json was NOT migrated: it is tracked by this repository git\nindex (or its git status could not be determined, which this treats the\nsame way) -- treating it as your own trusted config would let a cloned\nrepo choose the summarizer credential, model, or refusal-gate settings\nyour memory pipeline runs with (#757). Left behind here, still doing\nnothing for the external store above. Put your own settings in\n%s/config.json instead.\n' \
                     "$REMEMBER_DIR" "$REMEMBER_DIR" > "$_legacy_dir/MIGRATED-TO.txt"
-                printf 'remember: %s is tracked by this repository git index; left behind rather than migrated into the trusted external config store (#757)\n' \
+                printf 'remember: %s is tracked by this repository git index (or its git status could not be determined); left behind rather than migrated into the trusted external config store (#757)\n' \
                     "$_legacy_cfg" >&2
             else
                 printf 'Memory data migrated to:\n  %s\nThis directory is now empty; you may delete it.\n' \

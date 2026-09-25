@@ -126,15 +126,9 @@ class TestConfigKeyInjectionWithJq:
     def test_positive_control_real_key_still_reads(self, tmp_path):
         """Paired positive control: a genuine dotted key must still read its
         real value, so the injected-key case above cannot pass merely
-        because config() stopped returning anything at all.
-
-        `.timezone`, not `.model` -- since #757 `model` is one of the keys
-        stripped from an untrusted per-project layer (this fixture's project
-        config lives in the default/legacy layout, which #726 already
-        classifies as untrusted), so it is no longer a plain "some real key
-        reads through" example."""
-        out = _run_config(tmp_path, ".timezone", "UTC", {"timezone": "Europe/Paris"})
-        assert out == "Europe/Paris"
+        because config() stopped returning anything at all."""
+        out = _run_config(tmp_path, ".model", "haiku", {"model": "sonnet"})
+        assert out == "sonnet"
 
 
 def _utf8_locale_available() -> "str | None":
@@ -234,10 +228,10 @@ class TestConfigGuardIsLocaleIndependent:
         if locale_name is None:
             pytest.skip("no UTF-8 locale installed on this runner")
         result = _run_config_raw(
-            tmp_path, ".timezone", "UTC", {"timezone": "Europe/Paris"},
+            tmp_path, ".model", "haiku", {"model": "sonnet"},
             env_extra={"LC_ALL": locale_name, "LANG": locale_name,
                        "REMEMBER_DEBUG": "1"})
-        assert result.stdout.strip() == "Europe/Paris"
+        assert result.stdout.strip() == "sonnet"
         assert "is not a plain dotted path" not in result.stderr, (
             "a genuine, present config key was rejected as malformed -- "
             "the rejection-line assertion above would be meaningless if "
@@ -258,6 +252,6 @@ class TestConfigKeyInjectionWithoutJq:
         assert out == "safe-default"
 
     def test_positive_control_real_key_still_reads(self, tmp_path):
-        out = _run_config(tmp_path, ".timezone", "UTC", {"timezone": "Europe/Paris"},
+        out = _run_config(tmp_path, ".model", "haiku", {"model": "sonnet"},
                            without_jq=True)
-        assert out == "Europe/Paris"
+        assert out == "sonnet"

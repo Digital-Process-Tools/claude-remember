@@ -299,6 +299,88 @@ _classify_project_cfg_haiku_trust() {
 }
 _classify_project_cfg_haiku_trust
 
+# _remember_config_tracked_status <dir> <name>
+# Whether <dir>/<name> is tracked by <dir>'s own git index, walking up to
+# any ENCLOSING work tree -- not just a same-directory .git (#754: a
+# project started from a repo SUBDIRECTORY has no .git of its own, and the
+# repository can still have committed the file two levels up). Prints
+# exactly one of three words: `tracked`, `untracked`, `could-not-tell`.
+#
+# `could-not-tell` is not `untracked` (#760): a git spawn that fails for a
+# reason OTHER than "no repository reachable from here" or "this path is
+# not tracked" -- a corrupted index, a permissions error, a PATH shim that
+# answers with an unrelated fatal error -- must never read the same as a
+# confirmed absence. Every caller of this treats `could-not-tell` the SAME
+# as `tracked` (fail CLOSED): the class of input this guards is more
+# expensive to leak than to occasionally over-protect.
+#
+# Two spawns at most, and the common "no git at all" case pays only one:
+# `rev-parse --is-inside-work-tree` answers "is there a work tree reachable
+# from here" on its exit status alone (no output parsing, so no locale/
+# translation risk from git's own error text) -- a plain non-git project
+# fails it immediately and this returns `untracked` without ever running
+# `ls-files`. Only once inside a real work tree does `ls-files
+# --error-unmatch` run, to ask about the file itself; ITS exit status (0 /
+# 1 / anything else) is what separates the three states from there.
+_remember_config_tracked_status() {
+    local _dir="$1" _name="$2" _out _rc
+
+    command -v git >/dev/null 2>&1 || { echo "untracked"; return 0; }
+
+    # LC_ALL=C/LANGUAGE=C: the ONE place this reads a git error message as
+    # text rather than an exit code alone, so it forces git's own fatal
+    # text to the untranslated form rather than trusting the ambient
+    # locale. A plain non-git project fails here with EXACTLY "fatal: not
+    # a git repository (or any of the parent directories): .git" (exit
+    # 128, verified against this file's own platform) -- the legitimate,
+    # common "nothing to check" case. Any OTHER fatal text at this step
+    # (a corrupted repo, a permissions error, a PATH shim answering with
+    # an unrelated failure) is NOT that case and must not read as it.
+    _out=$( (unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+             LC_ALL=C LANGUAGE=C git -C "$_dir" rev-parse --is-inside-work-tree) 2>&1 )
+    _rc=$?
+    if [ "$_rc" -ne 0 ]; then
+        case "$_out" in
+            *"not a git repository"*) echo "untracked" ;;
+            *) echo "could-not-tell" ;;
+        esac
+        return 0
+    fi
+    if [ "$_out" != "true" ]; then
+        # A real repository, but $_dir itself is not inside its work tree
+        # (a bare repo) -- nothing to check either.
+        echo "untracked"
+        return 0
+    fi
+
+    (unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+     git -C "$_dir" ls-files --error-unmatch -- "$_name") >/dev/null 2>&1
+    _rc=$?
+    case "$_rc" in
+        0) echo "tracked" ;;
+        1) echo "untracked" ;;
+        *) echo "could-not-tell" ;;
+    esac
+}
+
+# #757: `model` and `reject_pattern` are not credential-equivalent to
+# `haiku` -- they cannot redirect where transcripts go, only which model
+# is billed or whether the refusal gate runs at all -- so unlike `haiku`
+# (stripped from EVERY legacy-layout project layer, tracked or not: #726
+# already decided that's worth the loss of a legitimate per-project
+# override) they are stripped only when the file is GIT-TRACKED, i.e.
+# committed by the repository rather than written by the operator running
+# it. An untracked in-project config.json -- the ordinary, common case --
+# keeps both, exactly as before #757. Computed only when there is
+# something to check: legacy layout AND a project config file present.
+_project_cfg_model_reject_untrusted=0
+if [ "$_project_cfg_haiku_untrusted" = "1" ] && [ -f "$_project_cfg" ]; then
+    case "$(_remember_config_tracked_status "${_project_cfg%/*}" "${_project_cfg##*/}")" in
+        untracked) _project_cfg_model_reject_untrusted=0 ;;
+        *) _project_cfg_model_reject_untrusted=1 ;;  # tracked or could-not-tell -> fail CLOSED
+    esac
+fi
+
 SYS_TMPDIR="${TMPDIR:-/tmp}"
 # mktemp, not a PID-suffixed literal path (#429). ${SYS_TMPDIR} is a SHARED,
 # often world-writable directory, and a name built from `$$` is predictable
@@ -361,13 +443,19 @@ elif [ "${#_cfg_sources[@]}" -gt 0 ] && command -v jq >/dev/null 2>&1; then
     # -- the sanitized temp file standing in for the untrusted one -- so
     # the one thing #744 needed proof of (does this shape work on
     # Windows) is answered by history rather than reasoning.
-    # #757: the filter also drops `model` and `reject_pattern` -- not
-    # destinations, but a repo-committed project layer could otherwise pick
-    # the summarizer's model or turn the refusal gate off/into a ReDoS
-    # candidate (`reject_pattern` is a user-supplied regex run over model
-    # output). Kept in this one call, same fail-closed shape as `haiku`.
+    # #757: when the project layer is ALSO git-tracked
+    # (_project_cfg_model_reject_untrusted), the same filter drops `model`
+    # and `reject_pattern` too -- not destinations, but a repo-committed
+    # project layer could otherwise pick the summarizer's model or turn
+    # the refusal gate off/into a ReDoS candidate (`reject_pattern` is a
+    # user-supplied regex run over model output). An UNTRACKED project
+    # config keeps both, same as before #757 -- only `haiku` is stripped
+    # from every legacy layer unconditionally. Still one jq call either
+    # way: the filter argument varies, the spawn count does not.
     _strip_project_haiku="false"
     [ "$_project_cfg_haiku_untrusted" = "1" ] && [ -f "$_project_cfg" ] && _strip_project_haiku="true"
+    _project_del_filter=".haiku"
+    [ "$_project_cfg_model_reject_untrusted" = "1" ] && _project_del_filter="${_project_del_filter}, .model, .reject_pattern"
     _jq_merge_sources=()
     [ -f "$_bundled_cfg" ] && _jq_merge_sources+=("$_bundled_cfg")
     [ -f "$_user_cfg"    ] && _jq_merge_sources+=("$_user_cfg")
@@ -375,7 +463,7 @@ elif [ "${#_cfg_sources[@]}" -gt 0 ] && command -v jq >/dev/null 2>&1; then
     if [ -f "$_project_cfg" ]; then
         if [ "$_strip_project_haiku" = "true" ]; then
             _project_sanitized_tmp=$(mktemp "${SYS_TMPDIR}/remember-config-sanitized-XXXXXX" 2>/dev/null) || _project_sanitized_tmp=""
-            if [ -n "$_project_sanitized_tmp" ] && jq -c 'del(.haiku, .model, .reject_pattern)' "$_project_cfg" > "$_project_sanitized_tmp" 2>/dev/null; then
+            if [ -n "$_project_sanitized_tmp" ] && jq -c "del($_project_del_filter)" "$_project_cfg" > "$_project_sanitized_tmp" 2>/dev/null; then
                 _jq_merge_sources+=("$_project_sanitized_tmp")
             else
                 # Sanitizing failed (mktemp, an unreadable project file, or
@@ -427,7 +515,13 @@ elif [ "${#_cfg_sources[@]}" -gt 0 ]; then
     declare -f _remember_python >/dev/null 2>&1 && _remember_python
     _untrusted_haiku_source=""
     [ "$_project_cfg_haiku_untrusted" = "1" ] && _untrusted_haiku_source="$_project_cfg"
-    "${PYTHON:-python3}" - "$_merged_cfg" "$_untrusted_haiku_source" "${_cfg_sources[@]}" > /dev/null 2>&1 <<'PYMERGE' || cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null
+    # #757: whether the SAME untrusted source is ALSO git-tracked, so
+    # model/reject_pattern get dropped alongside haiku for it -- see the
+    # jq branch's own comment above for why this is conditional where
+    # haiku's own strip is not.
+    _strip_model_reject="0"
+    [ "$_project_cfg_model_reject_untrusted" = "1" ] && _strip_model_reject="1"
+    "${PYTHON:-python3}" - "$_merged_cfg" "$_untrusted_haiku_source" "$_strip_model_reject" "${_cfg_sources[@]}" > /dev/null 2>&1 <<'PYMERGE' || cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null
 import json
 import sys
 
@@ -446,6 +540,10 @@ out_path = sys.argv[1]
 # storage mode, or no project cfg at all) -- never equal to a real path then,
 # so nothing is stripped (#726, see the case switch this mirrors above).
 untrusted_haiku_path = sys.argv[2]
+# #757: "1" only when the SAME untrusted source is also git-tracked --
+# model/reject_pattern are stripped alongside haiku only then, never for
+# an untracked (the operator's own) in-project config.
+strip_model_reject = sys.argv[3] == "1"
 
 
 def load_documents(path):
@@ -471,7 +569,7 @@ def load_documents(path):
 
 
 merged = {}
-for path in sys.argv[3:]:
+for path in sys.argv[4:]:
     if untrusted_haiku_path and path == untrusted_haiku_path:
         # #744: fail CLOSED -- if the untrusted file can't even be loaded
         # (unreadable, a permissions error, malformed JSON, anything
@@ -490,7 +588,10 @@ for path in sys.argv[3:]:
             continue
         for data in docs:
             if isinstance(data, dict):
-                data = {k: v for k, v in data.items() if k not in ("haiku", "model", "reject_pattern")}
+                drop = {"haiku"}
+                if strip_model_reject:
+                    drop |= {"model", "reject_pattern"}
+                data = {k: v for k, v in data.items() if k not in drop}
             merged = deep_merge(merged, data)
         continue
     with open(path) as f:

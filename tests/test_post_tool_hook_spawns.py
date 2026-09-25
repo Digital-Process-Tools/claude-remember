@@ -74,6 +74,19 @@ from tests.spawn_counting import make_shim_dir, spawns as _spawn_lines  # noqa: 
 # cost, this time of a fix that could only be proven correct on the
 # platform where the previous one had already failed.
 #
+# 19 after #757 added ONE `git rev-parse --is-inside-work-tree` ahead of
+# the sanitize spawn, to decide whether model/reject_pattern get stripped
+# alongside haiku (only when the project config is git-TRACKED, unlike
+# haiku's own unconditional-in-legacy-layout strip) -- gated on the SAME
+# "project config exists in the untrusted layout" condition the sanitize
+# spawn above already pays for, so it fires in lockstep with it, never on
+# its own. Measured HERE, not assumed: this fixture's project directory is
+# not itself a git work tree, so `rev-parse` fails immediately and the
+# SECOND possible spawn (`git ls-files --error-unmatch`, only reached
+# inside a real work tree) is never paid in this fixture -- a repo whose
+# project dir IS tracked pays that second spawn too, still under the +2
+# slack below.
+#
 # (#230's own note said 17. That number predates #233 folding the two budget
 # tests onto one counted-command list, and it left out the two `mkdir -p` calls
 # and the `git rev-parse` a non-git PROJECT_DIR still pays. The budget it set,
@@ -87,7 +100,7 @@ from tests.spawn_counting import make_shim_dir, spawns as _spawn_lines  # noqa: 
 # pre-#726 form) and the sanitize spawn ahead of it, plus their own `rm` on
 # exit -- neither can go without caching the merged config, and that is a
 # credential lifetime decision (#232) rather than a spawn one.
-POST_TOOL_SPAWN_MEASURED = 18
+POST_TOOL_SPAWN_MEASURED = 19
 POST_TOOL_SPAWN_BUDGET = POST_TOOL_SPAWN_MEASURED + 2
 
 

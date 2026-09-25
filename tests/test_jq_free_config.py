@@ -111,15 +111,9 @@ class TestConfigUsesJqFreeFallback:
     def test_string_override_honoured_without_jq(self, tmp_path):
         """A per-project config override must not be silently dropped just
         because jq is absent — config() must fall through to the Python
-        fallback detect-tools.sh already provides.
-
-        `.timezone`, not `.model` -- since #757 `model` is one of the keys
-        stripped from an untrusted per-project layer (this fixture's project
-        config lives in the default/legacy layout, which #726 already
-        classifies as untrusted), so it is no longer a plain "some string
-        override reads through" example."""
-        out = _run_config(tmp_path, ".timezone", "UTC", {"timezone": "Europe/Paris"})
-        assert out == "Europe/Paris", (
+        fallback detect-tools.sh already provides."""
+        out = _run_config(tmp_path, ".model", "haiku", {"model": "sonnet"})
+        assert out == "sonnet", (
             "config() ignored the project override and returned the "
             "hardcoded default — the jq-free fallback was never wired in"
         )
