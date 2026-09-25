@@ -26,6 +26,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -114,13 +115,30 @@ def _path_with_mv_that_refuses_config_restore(tmp_path: Path) -> str:
     return str(fake_bin)
 
 
-def _fs_is_case_insensitive(tmp_path: Path) -> bool:
-    probe = tmp_path / "case_probe"
-    probe.mkdir()
-    (probe / "AbC").write_text("x")
-    insensitive = (probe / "abc").exists()
-    shutil.rmtree(probe)
-    return insensitive
+def _fs_is_case_insensitive() -> bool:
+    """Never touches a hardcoded path -- `tempfile.mkdtemp()` resolves the
+    real platform temp root (`%TEMP%` on Windows, `$TMPDIR`/`/tmp` on POSIX),
+    so this is safe to call from a `skipif` CONDITION, which pytest
+    evaluates at COLLECTION time. A hardcoded `/tmp` here previously crashed
+    collection outright on windows-latest (`FileNotFoundError: [WinError 3]
+    ... '\\tmp\\case_probe'`) -- there is no `/tmp` on Windows, and nothing
+    catches an exception raised while a class-level `pytest.mark.skipif`
+    condition is being evaluated; it aborts the whole collection, not just
+    this one skip decision. Any failure here (no writable temp directory
+    reachable at all) is read the SAME as case-sensitive -- the tests this
+    guards are the case-insensitive-only checks, so failing to determine the
+    answer must never masquerade as "yes, run them"."""
+    probe_dir = None
+    try:
+        probe_dir = tempfile.mkdtemp(prefix="remember-case-probe-")
+        probe = Path(probe_dir)
+        (probe / "AbC").write_text("x")
+        return (probe / "abc").exists()
+    except OSError:
+        return False
+    finally:
+        if probe_dir is not None:
+            shutil.rmtree(probe_dir, ignore_errors=True)
 
 
 class TestSymlinkedTrackedConfigNeverFollowed:
@@ -290,8 +308,10 @@ class TestRestoreIsCheckedNeverSilentlyDropped:
 
 
 @pytest.mark.skipif(
-    not _fs_is_case_insensitive(Path(os.environ.get("TMPDIR", "/tmp"))),
-    reason="case-insensitive-filesystem-only check (macOS APFS default); this filesystem is case-sensitive",
+    not _fs_is_case_insensitive(),
+    reason="case-insensitive-filesystem-only check (macOS APFS default); this filesystem is case-sensitive "
+    "(or the probe itself could not run -- treated the same way, fail toward skipping this class rather "
+    "than asserting a platform behaviour that was never confirmed)",
 )
 class TestCaseVariantTrackedConfigIsStillSeenAsTracked:
     """F3: `.Remember/config.json` (capital R), committed by the repository,
@@ -509,7 +529,7 @@ class TestSymlinkedLegacyDirectoryNeverMigrated:
             json.dumps({"data_dir": f"{_bash_path(ext_base)}/{{slug}}"})
         )
 
-        merged, remember_dir, stderr = _run_bootstrap_and_dump_merged_config(
+        _merged, remember_dir, stderr = _run_bootstrap_and_dump_merged_config(
             str(project), str(pipeline), str(home)
         )
 
