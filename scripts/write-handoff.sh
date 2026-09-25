@@ -19,10 +19,15 @@
 # RESOLUTION
 #   1. Source resolve-paths.sh + lib-memory-dir.sh to get REMEMBER_DIR, the
 #      same way the hook does. CLAUDE_PROJECT_DIR is not exported to the
-#      Bash tool (#207, see doctor.sh) so this defaults it to the current
-#      directory, same as doctor.sh -- and Claude Code always runs the Bash
-#      tool with the project directory as cwd, so that default is the
-#      project.
+#      Bash tool (#207, see doctor.sh). Claude Code runs the Bash tool with
+#      the project directory as its INITIAL cwd, but that cwd is the same
+#      shell state across every command in one Bash-tool call -- a `cd`
+#      earlier in the call persists, so a bare `$PWD` fallback can be a
+#      subdirectory of the project by the time this script runs, not the
+#      project root itself (#743). This prefers `git rev-parse
+#      --show-toplevel` when the cwd is inside a git repo -- the common
+#      case, and immune to an earlier `cd` -- falling back to the plain
+#      $PWD default only outside a git repo, same as before.
 #   2. If the SessionStart hook this session left a resolved path at
 #      $REMEMBER_DIR/tmp/handoff-path (written every session start, #720),
 #      and that path's shape passes the check below, use it -- this is what
@@ -40,9 +45,15 @@
 #   not silently widened to "write wherever it says".
 #
 # USAGE
-#   bash "${CLAUDE_PLUGIN_ROOT}/scripts/write-handoff.sh" <<'EOF'
-#   <handoff note>
-#   EOF
+#   The note is untrusted content (#742): the caller must pipe it in behind
+#   a fresh, unpredictable heredoc terminator each time -- never the literal
+#   `EOF` -- since a note containing a line matching the terminator exactly
+#   would end the heredoc early and let the remainder be parsed as shell in
+#   this same call.
+#
+#     bash "${CLAUDE_PLUGIN_ROOT}/scripts/write-handoff.sh" <<'HANDOFF_<random>'
+#     <handoff note>
+#     HANDOFF_<random>
 #
 #   Always prints exactly one of:
 #     Wrote handoff to: <path>
@@ -61,7 +72,15 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 if [ -z "${CLAUDE_PROJECT_DIR:-}" ]; then
-    CLAUDE_PROJECT_DIR="$PWD"
+    # #743: prefer the git top level over a possibly-stale $PWD -- immune to
+    # a `cd` that happened earlier in the same Bash-tool call. Falls back to
+    # $PWD, unchanged, when the cwd is not inside a git repo at all.
+    _WH_GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || _WH_GIT_ROOT=""
+    if [ -n "$_WH_GIT_ROOT" ]; then
+        CLAUDE_PROJECT_DIR="$_WH_GIT_ROOT"
+    else
+        CLAUDE_PROJECT_DIR="$PWD"
+    fi
     export CLAUDE_PROJECT_DIR
 fi
 

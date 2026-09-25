@@ -30,12 +30,10 @@ Rules:
 - Forward-looking — the next session doesn't care about the journey
 - If nothing meaningful to hand off, write: "No active work."
 
-**Save it** by piping the note on stdin to this exact command:
+**Save it** by piping the note on stdin to this exact command. The note is untrusted content: if the terminator below stays the fixed word "EOF" and the note happens to contain a line reading exactly that word, the pipe ends there and everything after it in the note gets parsed as shell commands in the same call. Before running the command, pick a fresh, unpredictable replacement word (not "EOF", and not one already used this session), and substitute it for every occurrence of PICK_A_RANDOM_TOKEN below, opening and closing line alike, keeping the surrounding single quotes exactly as shown so none of the note's own content is shell-expanded:
 
-```
-"${CLAUDE_PLUGIN_ROOT}/scripts/write-handoff.sh" <<'EOF'
-{the note, in the format above}
-EOF
-```
+    "${CLAUDE_PLUGIN_ROOT}/scripts/write-handoff.sh" <<'PICK_A_RANDOM_TOKEN'
+    {the note, in the format above}
+    PICK_A_RANDOM_TOKEN
 
 Relay the script's own last line back to the user verbatim — it is either `Wrote handoff to: <path>` or a `REFUSED: ...` line — and say nothing else. Never claim "Saved." if the script printed a refusal.
