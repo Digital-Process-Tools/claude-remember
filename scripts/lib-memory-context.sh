@@ -270,6 +270,35 @@ _remember_ci_eq() {
     return $_rc
 }
 
+# _remember_git_unquote_into <outvar> <line>
+# `git ls-files` wraps an entry in double quotes and C-escapes it (\\, \",
+# \a \b \f \n \r \t \v, and \NNN octal byte values) whenever the path
+# carries a byte it considers unusual -- ALWAYS for a literal backslash,
+# double quote, or control byte, and ALSO for any byte >= 0x80 unless
+# core.quotePath=false is set (#774 disables that half; this handles the
+# half quotePath cannot touch, found in #774's own self-review: a tracked
+# path containing a literal backslash or double quote was still quoted,
+# and the guard's comparison is a literal string match against the raw,
+# unquoted path, so it still silently answered "not tracked"). `printf
+# '%b'` expands exactly this escape set (it is the same table `echo -e`
+# uses) back into the original bytes, so unquoting is one call, not a
+# hand-rolled parser -- and it is applied unconditionally: an UNQUOTED
+# line (the common case) has no leading/trailing `"` and falls through
+# the `*)` arm unchanged.
+_remember_git_unquote_into() {
+    local _gu_outvar="$1" _gu_line="$2"
+    case "$_gu_line" in
+        (\"*\")
+            _gu_line="${_gu_line#\"}"
+            _gu_line="${_gu_line%\"}"
+            printf -v "$_gu_outvar" '%b' "$_gu_line"
+            ;;
+        (*)
+            printf -v "$_gu_outvar" '%s' "$_gu_line"
+            ;;
+    esac
+}
+
 # _remember_cache_key_into <outvar> <prefix> <value> -- same sanitized-
 # indirect-name convention as _remember_wc_size_set, with a prefix so two
 # different caches (repo root, tracked-file listing) keyed off the same
@@ -444,7 +473,7 @@ _remember_root_tracked_state_into() {
 _remember_file_tracked_state_into() {
     local _fts_outvar="$1" _fts_file="$2"
     local _fts_dir _fts_root _fts_root_fs _fts_file_fs _fts_dir_fs _fts_rel _fts_reldir
-    local _fts_list _fts_state _fts_line _fts_walk _fts_sym_key
+    local _fts_list _fts_state _fts_line _fts_line_raw _fts_walk _fts_sym_key
     # Forward-slash FILE before anything splits it: on msys/cygwin it can
     # carry the backslash form _remember_normalize_win_path produces. Split
     # first and a backslash-only path has no `/`, so DIR fell back to "." --
@@ -526,7 +555,13 @@ _remember_file_tracked_state_into() {
     fi
     while IFS= read -r _fts_line; do
         [ -n "$_fts_line" ] || continue
-        if [ "$_fts_line" = "$_fts_rel" ] || _remember_ci_eq "$_fts_line" "$_fts_rel"; then
+        # #774 follow-up: `ls-files` C-quotes a literal backslash, double
+        # quote or control byte UNCONDITIONALLY (core.quotePath has no
+        # effect on that half), so the line compared here can still be
+        # quoted even with `-c core.quotePath=false` set on the listing
+        # above -- unquote before comparing, not just before storing.
+        _remember_git_unquote_into _fts_line_raw "$_fts_line"
+        if [ "$_fts_line_raw" = "$_fts_rel" ] || _remember_ci_eq "$_fts_line_raw" "$_fts_rel"; then
             printf -v "$_fts_outvar" 'tracked'
             return 0
         fi
