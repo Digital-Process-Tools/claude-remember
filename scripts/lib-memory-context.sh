@@ -213,6 +213,17 @@ _remember_wc_size_get_into() {
 #     not be trusted (#760: missing binary, corrupted `.git`, a broken
 #     shim on PATH). This is a THIRD state, not folded into "not tracked":
 #     see _remember_file_tracked_state_into's own comment.
+#   - a file reached through a SYMLINKED DIRECTORY somewhere between it
+#     and the repository root (most commonly `.remember` itself, if a
+#     repository commits it as a symlink rather than a directory). The
+#     per-file symlink check above only ever sees the file at the far end
+#     of the link, already resolved, and `git ls-files` records a
+#     symlinked directory as one blob with nothing "under" it, so neither
+#     check alone catches this shape -- see the `symlinked-ancestor` state
+#     _remember_file_tracked_state_into documents and produces. Gated the
+#     same way the tracked check is (a repository has to be found first),
+#     so a user-chosen external store reached through its own symlink
+#     stays exempt, exactly like the tracked check just above.
 #   - nothing else. A file with no repository anywhere above it (external-
 #     storage mode's ordinary case) is passed through unchanged, exactly
 #     as before this guard existed.
@@ -405,22 +416,78 @@ _remember_root_tracked_state_into() {
 #                    Callers must treat this as a REFUSAL, not as
 #                    not-tracked: a git failure must never silently permit
 #                    a memory file through un-checked.
+#   symlinked-ancestor -- a repository is there, and some directory
+#                    between FILE's own directory and the repository root
+#                    (inclusive of both ends) is itself a symlink. The
+#                    per-file symlink check elsewhere in this guard only
+#                    ever sees FILE after every directory component in its
+#                    path has already been followed, so a symlinked
+#                    directory earlier in that path (most commonly
+#                    `.remember` itself) is invisible to it, and so is a
+#                    `git ls-files` tracked-check scoped underneath a
+#                    directory git itself records as a symlink BLOB rather
+#                    than a tree -- nothing "under" a symlink blob is ever
+#                    listed. Checked only once a repository root is known
+#                    (see the walk below), which keeps this scoped to a
+#                    repository-controlled tree and out of a user-chosen
+#                    external store, whose own root is trusted regardless
+#                    of how it is reached.
 _remember_file_tracked_state_into() {
     local _fts_outvar="$1" _fts_file="$2"
     local _fts_dir _fts_root _fts_root_fs _fts_file_fs _fts_dir_fs _fts_rel _fts_reldir
-    local _fts_list _fts_state _fts_line
+    local _fts_list _fts_state _fts_line _fts_walk _fts_sym_key
     case "$_fts_file" in
         (*/*) _fts_dir="${_fts_file%/*}" ;;
         (*)   _fts_dir="." ;;
     esac
-    _remember_repo_root_walk_into _fts_root "$_fts_dir"
+    # Forward-slashed BEFORE the walk, not after: on msys/cygwin, FILE (and
+    # therefore DIR) can carry the backslash form
+    # _remember_normalize_win_path produces, and the walk below climbs a
+    # path one `/`-delimited component at a time. Handed a backslash path
+    # it never finds a `/` to split on and stops after testing only the
+    # single starting directory -- silently never reaching a `.git` that
+    # sits further up. Normalising first is what lets a repository two or
+    # more directories above DIR still be found on that platform.
+    _remember_forward_slash_into _fts_dir_fs "$_fts_dir"
+    _remember_repo_root_walk_into _fts_root "$_fts_dir_fs"
     if [ -z "$_fts_root" ]; then
         printf -v "$_fts_outvar" 'no-repo'
         return 0
     fi
     _remember_forward_slash_into _fts_root_fs "$_fts_root"
     _remember_forward_slash_into _fts_file_fs "$_fts_file"
-    _remember_forward_slash_into _fts_dir_fs "$_fts_dir"
+
+    # Walk every directory from DIR up to (and including) the repository
+    # root and refuse if any one of them is itself a symlink -- see the
+    # `symlinked-ancestor` state documented above this function. `[ -L ]`
+    # is a shell builtin (no fork), and the result is cached per distinct
+    # directory the same way the tracked-listing cache above is, so a
+    # render touching several files under the same store directory pays
+    # this walk once rather than once per file.
+    _fts_walk="$_fts_dir_fs"
+    while :; do
+        _remember_cache_key_into _fts_sym_key "symlink" "$_fts_walk"
+        if [ -z "${!_fts_sym_key+x}" ]; then
+            if [ -L "$_fts_walk" ]; then
+                printf -v "$_fts_sym_key" '1'
+            else
+                printf -v "$_fts_sym_key" '0'
+            fi
+        fi
+        if [ "${!_fts_sym_key}" = '1' ]; then
+            printf -v "$_fts_outvar" 'symlinked-ancestor'
+            return 0
+        fi
+        [ "$_fts_walk" = "$_fts_root_fs" ] && break
+        case "$_fts_walk" in
+            (*/*)
+                _fts_walk="${_fts_walk%/*}"
+                [ -n "$_fts_walk" ] || _fts_walk="/"
+                ;;
+            (*) break ;;
+        esac
+    done
+
     _fts_rel="${_fts_file_fs#$_fts_root_fs/}"
     if [ "$_fts_rel" = "$_fts_file_fs" ]; then
         # FILE does not actually sit under the repository the walk found --
@@ -526,6 +593,11 @@ _remember_may_inject() {
             # "not tracked".
             _REMEMBER_INJECT_REFUSAL="$_mi_file could not be checked against this repository's git index (git is missing, or the check itself failed) -- refusing rather than injecting unverified. Run /remember:doctor to see why git could not be asked."
             log "$_mi_component" "refused injecting $_mi_file: git status unavailable"
+            return 1
+            ;;
+        (symlinked-ancestor)
+            _REMEMBER_INJECT_REFUSAL="$_mi_file sits under a directory that is itself a symlink -- refusing to follow it into session context. This plugin never creates a symlink inside a memory store; if you did not create this one, treat it as planted and inspect what it points at before deleting it."
+            log "$_mi_component" "refused injecting $_mi_file: symlinked ancestor directory"
             return 1
             ;;
         (*)
