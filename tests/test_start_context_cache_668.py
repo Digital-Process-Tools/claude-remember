@@ -292,6 +292,47 @@ def test_compact_mode_never_reads_or_writes_the_context_cache(tmp_path):
     )
 
 
+def test_manifest_without_a_version_stamp_is_a_miss(tmp_path):
+    """#775: a cache published BEFORE this fix existed carries a manifest
+    with only SRC= lines -- no version/format stamp of any kind. Such a
+    manifest must never be served as a hit across an upgrade, even though
+    every SRC= mtime it does name is still older than the cache: the
+    injection guard's own logic can have changed between the version that
+    wrote this cache and the version now loading it, and the whole point
+    of a stamp is to force a miss precisely when that might have
+    happened -- content the guard would refuse today must not be replayed
+    from a render made before the guard existed."""
+    home, project, remember = _project(tmp_path)
+    now = time.time()
+    core = remember / "core-memories.md"
+    _touch(core, now, "hello from core\n")
+    env = _base_env(tmp_path, home, project)
+
+    cache_dir = remember / "tmp"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_file = cache_dir / "start-context.cache"
+    manifest_file = cache_dir / "start-context.manifest"
+    cache_file.write_text(
+        "=== MEMORY ===\n--- core-memories.md ---\nhello from core\n\n",
+        encoding="utf-8",
+    )
+    # The OLD, pre-#775 manifest shape: SRC= lines only, no version/format
+    # stamp at all -- exactly what any version of this file before this
+    # fix wrote on every publish.
+    manifest_file.write_text(f"SRC={core}\n", encoding="utf-8")
+    os.utime(cache_file, (now + 5, now + 5))
+
+    load = subprocess.run(
+        [BASH, "-c", HARNESS, "_", "load"],
+        env=env, capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert load.returncode == 1, (
+        "a manifest with no version/format stamp (the pre-fix shape) was "
+        f"still served as a hit: stdout={load.stdout!r}"
+    )
+    assert load.stdout == ""
+
+
 def test_a_symlinked_cache_file_is_refused_not_followed(tmp_path):
     """Positive control for the security check itself, not just the mtime
     logic: a planted symlink at the cache path must never be read through --

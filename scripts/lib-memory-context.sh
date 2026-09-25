@@ -375,12 +375,21 @@ _remember_root_tracked_state_into() {
             # case is not -- the pre-existing NUL-delimited handling
             # elsewhere in this codebase reads exactly that general case and
             # stays NUL-delimited for it.
+            # `-c core.quotePath=false` (#774): without it, `ls-files`
+            # quotes/octal-escapes any non-ASCII (or otherwise "unusual")
+            # byte in a path -- e.g. `caf\303\251/.remember/now.md` -- and
+            # the comparison below is a literal string match against the
+            # RAW relative path, which never equals the quoted form. That
+            # silently answered `not-tracked` for a genuinely tracked
+            # non-ASCII path, letting a planted file through the guard.
+            # Disabling quoting here (not globally) keeps this comparison
+            # correct without touching how `git` is invoked anywhere else.
             if [ -n "$_rts_pathspec" ]; then
                 _rts_list=$(unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
-                            git -C "$_rts_root" ls-files -- "$_rts_pathspec" 2>/dev/null)
+                            git -c core.quotePath=false -C "$_rts_root" ls-files -- "$_rts_pathspec" 2>/dev/null)
             else
                 _rts_list=$(unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
-                            git -C "$_rts_root" ls-files 2>/dev/null)
+                            git -c core.quotePath=false -C "$_rts_root" ls-files 2>/dev/null)
             fi
             _rts_rc=$?
         else
@@ -869,12 +878,27 @@ _remember_render_memory_section() {
     echo ""
 }
 
+# _REMEMBER_CACHE_FORMAT_VERSION -- bump this whenever a change to this
+# file could make an OLD cache's bytes wrong to serve under the NEW code,
+# even though every SRC= mtime the old manifest names is still older than
+# the cache (#775). The injection guard (_remember_may_inject) is the
+# motivating case: a cache published before the guard existed (or before a
+# later guard fix) can hold a rendered MEMORY section built from a file the
+# CURRENT guard would refuse -- the guard is never consulted on a cache
+# HIT (see _remember_start_cache_context_load), so mtimes alone cannot
+# catch this. A mismatched or entirely absent VERSION= line in the
+# manifest is always a miss; see the loader below.
+_REMEMBER_CACHE_FORMAT_VERSION="1"
+
 # _remember_start_cache_manifest_lines
-# Echoes, one per line, "SRC=<path>" for every input the render depends on --
-# shared by the loader (checks each with -nt) and the publisher (writes them
-# verbatim). Requires _remember_memory_paths to have already run.
+# Echoes, one per line, "SRC=<path>" for every input the render depends on,
+# preceded by a "VERSION=<_REMEMBER_CACHE_FORMAT_VERSION>" stamp -- shared by
+# the loader (checks each SRC with -nt, and the VERSION against its own
+# constant) and the publisher (writes them verbatim). Requires
+# _remember_memory_paths to have already run.
 _remember_start_cache_manifest_lines() {
     local MFILE
+    printf 'VERSION=%s\n' "$_REMEMBER_CACHE_FORMAT_VERSION"
     for MFILE in "${MEMORY_FILES[@]}"; do
         printf 'SRC=%s\n' "$MFILE"
     done
@@ -912,11 +936,15 @@ _remember_start_cache_context_load() {
     [ -O "$_manifest" ] || return 1
     [ -r "$_manifest" ] || return 1
 
-    local _line _src
+    local _line _src _mf_version=""
     while IFS= read -r _line || [ -n "$_line" ]; do
         _line="${_line%$'\r'}"
         [ -n "$_line" ] || continue
         case "$_line" in
+            VERSION=*)
+                _mf_version="${_line#VERSION=}"
+                continue
+                ;;
             SRC=*) _src="${_line#SRC=}" ;;
             # Unknown line: not our file, or not our version of it -- distrust
             # the whole manifest rather than partially validate it.
@@ -929,6 +957,11 @@ _remember_start_cache_context_load() {
         # longer exists (an absent source cannot have changed).
         [ "$_cache" -nt "$_src" ] || return 1
     done < "$_manifest"
+    # #775: a manifest with no VERSION= line at all (every cache published
+    # before this fix existed) or one naming a different format version
+    # must never be served -- see _REMEMBER_CACHE_FORMAT_VERSION above for
+    # why mtimes alone cannot catch this.
+    [ "$_mf_version" = "$_REMEMBER_CACHE_FORMAT_VERSION" ] || return 1
 
     cat "$_cache"
     return 0
