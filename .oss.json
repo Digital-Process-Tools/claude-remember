@@ -45,5 +45,7 @@
     "create_release": true,
     "draft": false,
     "latest": true
-  }
+  },
+  "curate_route_threshold": 15,
+  "triage_route_threshold": 0
 }
