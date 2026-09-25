@@ -48,6 +48,54 @@ def _dirs(tmp_path):
     return project, pipeline, home
 
 
+def _git(repo: Path, args: list) -> None:
+    subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+
+
+def _git_init_commit(project: Path, tracked_rel_path: "str | None") -> None:
+    """Turn `project` into a real git repo (#757 review: distinguishing
+    tracked/untracked/could-not-tell needs an ACTUAL work tree, not just a
+    `.git` directory sitting there). When `tracked_rel_path` is given, that
+    file is `git add`ed and committed; when it is None, a repo still exists
+    but nothing is ever staged -- the "real git repo, file still untracked"
+    case, distinct from "no git repo at all"."""
+    _git(project, ["init", "-q"])
+    _git(project, ["config", "user.email", "t@t"])
+    _git(project, ["config", "user.name", "T"])
+    if tracked_rel_path is not None:
+        _git(project, ["add", tracked_rel_path])
+        _git(project, ["commit", "-q", "-m", "seed"])
+
+
+def _path_with_broken_git(tmp_path: Path) -> str:
+    """A PATH where every OTHER real binary resolves normally but `git`
+    is a shim that always exits 128 with an unrelated fatal error --
+    never "not a git repository", never "did not match any file(s)
+    known to git" -- so `_remember_config_tracked_status` cannot read it
+    as either `untracked` state and must report `could-not-tell`."""
+    fake_bin = tmp_path / "broken-git-bin"
+    fake_bin.mkdir()
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for name in names:
+            if name == "git":
+                continue
+            target = fake_bin / name
+            if target.exists() or target.is_symlink():
+                continue
+            try:
+                os.symlink(os.path.join(d, name), target)
+            except OSError:
+                pass
+    shim = fake_bin / "git"
+    shim.write_text("#!/bin/sh\necho 'fatal: simulated unrelated git failure' >&2\nexit 128\n")
+    shim.chmod(0o755)
+    return str(fake_bin)
+
+
 def _run_lib_and_dump_config(project_dir, pipeline_dir, home_dir, env_extra=None):
     """Source lib-memory-dir.sh and cat the merged config back INSIDE the
     same script -- REMEMBER_CONFIG is a mktemp file the script's own EXIT
@@ -627,3 +675,214 @@ class TestConfigCandidatesSkipsProjectLocalRememberDir:
         monkeypatch.delenv("REMEMBER_CONFIG", raising=False)
         candidates = _config_candidates()
         assert str(external / "config.json") in candidates
+
+
+class TestUntrustedProjectModelAndRejectPatternAlsoStripped:
+    """#757: `model` and `reject_pattern` are stripped from the untrusted
+    per-project layer ONLY when config.json is git-TRACKED there -- i.e.
+    committed by the REPOSITORY, not merely sitting in the default/legacy
+    layout that #726 already distrusts for `haiku`. Unlike a credential,
+    neither key can redirect where transcripts go, only which model is
+    billed or whether the refusal gate runs at all (`none` disables it;
+    any other value is a regex run over model output an attacker fully
+    controls) -- severe enough to strip from a file the repository itself
+    committed, not severe enough to break every single-user project's own
+    untracked per-project override, the way #726 already accepted for
+    `haiku`. Every stripped case here is paired with the SAME key, same
+    file, left untracked -- still honoured -- so a fix that stripped
+    unconditionally cannot pass."""
+
+    def test_git_tracked_project_model_does_not_reach_the_merged_config(self, tmp_path):
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(json.dumps({}))
+        remember = project / ".remember"
+        remember.mkdir()
+        (remember / "config.json").write_text(json.dumps({"model": "attacker-model"}))
+        _git_init_commit(project, ".remember/config.json")
+
+        merged, _ = _run_lib_and_dump_config(project, pipeline, home)
+        assert merged.get("model") != "attacker-model"
+
+    def test_git_tracked_project_reject_pattern_does_not_reach_the_merged_config(self, tmp_path):
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(json.dumps({}))
+        remember = project / ".remember"
+        remember.mkdir()
+        (remember / "config.json").write_text(json.dumps({"reject_pattern": "none"}))
+        _git_init_commit(project, ".remember/config.json")
+
+        merged, _ = _run_lib_and_dump_config(project, pipeline, home)
+        assert merged.get("reject_pattern") != "none"
+
+    def test_git_tracked_project_model_removal_does_not_touch_other_project_keys(self, tmp_path):
+        """Positive control: a non-stripped key from the SAME tracked
+        project file still merges -- proving the fix removes only the
+        named keys, not the whole file's contribution."""
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(json.dumps({}))
+        remember = project / ".remember"
+        remember.mkdir()
+        (remember / "config.json").write_text(
+            json.dumps({"model": "attacker-model", "cooldowns": {"save_seconds": 999}})
+        )
+        _git_init_commit(project, ".remember/config.json")
+
+        merged, _ = _run_lib_and_dump_config(project, pipeline, home)
+        assert merged["cooldowns"]["save_seconds"] == 999
+        assert merged.get("model") != "attacker-model"
+
+    def test_untracked_project_model_still_carries_through(self, tmp_path):
+        """Positive control (#757 review finding): an UNTRACKED per-project
+        config.json -- the ordinary case, the user's own, never committed
+        -- must still have `model` take effect. This is the exact case a
+        first version of this fix broke: #726/#740's own `haiku` strip is
+        unconditional on LAYOUT alone, but model/reject_pattern are not
+        credential-equivalent, so they may not pay that same cost."""
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(json.dumps({}))
+        remember = project / ".remember"
+        remember.mkdir()
+        (remember / "config.json").write_text(json.dumps({"model": "sonnet"}))
+        # A git repo exists, but the file is never `git add`ed -- untracked.
+        _git_init_commit(project, None)
+
+        merged, _ = _run_lib_and_dump_config(project, pipeline, home)
+        assert merged["model"] == "sonnet"
+
+    def test_untracked_project_reject_pattern_still_carries_through(self, tmp_path):
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(json.dumps({}))
+        remember = project / ".remember"
+        remember.mkdir()
+        (remember / "config.json").write_text(json.dumps({"reject_pattern": "^custom"}))
+        _git_init_commit(project, None)
+
+        merged, _ = _run_lib_and_dump_config(project, pipeline, home)
+        assert merged["reject_pattern"] == "^custom"
+
+    def test_no_git_repo_at_all_project_model_still_carries_through(self, tmp_path):
+        """Positive control: no `.git` reachable from the project at all --
+        the ordinary case for most users -- must not itself be read as
+        "untrackable, so strip". Nothing to check means nothing is
+        stripped."""
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(json.dumps({}))
+        remember = project / ".remember"
+        remember.mkdir()
+        (remember / "config.json").write_text(json.dumps({"model": "sonnet"}))
+
+        merged, _ = _run_lib_and_dump_config(project, pipeline, home)
+        assert merged["model"] == "sonnet"
+
+    def test_user_global_model_still_carries_through(self, tmp_path):
+        """Positive control: the SAME key, configured in the TRUSTED
+        user-global layer, must still reach the merged config."""
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(json.dumps({}))
+        (home / ".remember").mkdir(parents=True)
+        (home / ".remember" / "config.json").write_text(json.dumps({"model": "sonnet"}))
+
+        merged, _ = _run_lib_and_dump_config(project, pipeline, home)
+        assert merged["model"] == "sonnet"
+
+    def test_user_global_reject_pattern_still_carries_through(self, tmp_path):
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(json.dumps({}))
+        (home / ".remember").mkdir(parents=True)
+        (home / ".remember" / "config.json").write_text(json.dumps({"reject_pattern": "^custom"}))
+
+        merged, _ = _run_lib_and_dump_config(project, pipeline, home)
+        assert merged["reject_pattern"] == "^custom"
+
+    def test_external_storage_project_layer_model_still_trusted(self, tmp_path):
+        """Positive control: in external storage mode the project layer is
+        not the #726/#757 attack surface (REMEMBER_DIR resolves outside any
+        checkout a clone could ship), so model/reject_pattern set there must
+        still carry through -- even if that external directory happens to
+        be git-tracked (not the layout #757 is about)."""
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(
+            json.dumps({"data_dir": str(home / "ext-mem" / "{slug}")})
+        )
+        ext_dir = home / "ext-mem"
+        ext_dir.mkdir(parents=True)
+
+        _, remember_dir = _run_lib_and_dump_config(project, pipeline, home)
+        remember_dir_path = Path(remember_dir)
+        remember_dir_path.mkdir(parents=True, exist_ok=True)
+        (remember_dir_path / "config.json").write_text(
+            json.dumps({"model": "sonnet", "reject_pattern": "^custom"})
+        )
+
+        merged, _ = _run_lib_and_dump_config(project, pipeline, home)
+        assert merged["model"] == "sonnet"
+        assert merged["reject_pattern"] == "^custom"
+
+    def test_no_jq_fallback_also_strips_tracked_project_model_and_reject_pattern(self, tmp_path):
+        """Same tracked-config attack, jq off PATH -- the Python merge
+        fallback must apply the same rule."""
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(json.dumps({}))
+        remember = project / ".remember"
+        remember.mkdir()
+        (remember / "config.json").write_text(
+            json.dumps({
+                "model": "attacker-model",
+                "reject_pattern": "none",
+                "cooldowns": {"save_seconds": 999},
+            })
+        )
+        _git_init_commit(project, ".remember/config.json")
+
+        merged, _ = _run_lib_and_dump_config(
+            project, pipeline, home,
+            env_extra={"PATH": _path_without_jq(tmp_path)},
+        )
+        assert merged.get("model") != "attacker-model"
+        assert merged.get("reject_pattern") != "none"
+        assert merged["cooldowns"]["save_seconds"] == 999
+
+    def test_no_jq_fallback_untracked_project_model_still_carries_through(self, tmp_path):
+        """Positive control for the no-jq path: untracked stays honoured
+        there too."""
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(json.dumps({}))
+        remember = project / ".remember"
+        remember.mkdir()
+        (remember / "config.json").write_text(json.dumps({"model": "sonnet"}))
+        _git_init_commit(project, None)
+
+        merged, _ = _run_lib_and_dump_config(
+            project, pipeline, home,
+            env_extra={"PATH": _path_without_jq(tmp_path)},
+        )
+        assert merged["model"] == "sonnet"
+
+
+class TestGitTrackedCheckFailsClosed:
+    """#757 review: `_remember_config_tracked_status` must not read a git
+    failure that is NOT "not tracked" as "untracked" -- a PATH shim that
+    makes every git invocation exit 128 (a corrupted repo, a permissions
+    error, an unrelated fatal error) must fail CLOSED: model/reject_pattern
+    are stripped, exactly as if the file had been confirmed tracked."""
+
+    def test_a_git_that_always_fails_strips_model_and_reject_pattern(self, tmp_path):
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(json.dumps({}))
+        remember = project / ".remember"
+        remember.mkdir()
+        (remember / "config.json").write_text(
+            json.dumps({"model": "attacker-model", "reject_pattern": "none"})
+        )
+        # A real repo exists (so rev-parse alone would say "yes, a work
+        # tree") -- the broken PATH shim below is what must be hit for
+        # ls-files, not the absence of a repository.
+        _git_init_commit(project, None)
+
+        broken_git_path = _path_with_broken_git(tmp_path)
+        merged, _ = _run_lib_and_dump_config(
+            project, pipeline, home,
+            env_extra={"PATH": broken_git_path},
+        )
+        assert merged.get("model") != "attacker-model"
+        assert merged.get("reject_pattern") != "none"

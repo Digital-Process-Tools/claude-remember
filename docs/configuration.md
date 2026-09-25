@@ -62,13 +62,36 @@ nested summarizer authenticates with, the other can force your own `ANTHROPIC_AP
 to be stripped. In the default layout `.remember/` sits inside the project checkout, so
 a repository you clone can ship a `.remember/config.json` of its own -- and before
 [#726](https://github.com/Digital-Process-Tools/claude-remember/issues/726), its `haiku`
-block was trusted exactly like one you wrote yourself. It no longer is: set these two
-keys in `~/.remember/config.json` (user-global) or via `REMEMBER_OAUTH_TOKEN`, never in
-a project's own config file, if you want them honoured. External storage mode
-(`data_dir` absolute or home-relative, e.g. `~/.remember/{slug}`) is unaffected --
-`REMEMBER_DIR` there is the operator's own directory, never one a clone ships, so its
-`haiku` block stays trusted. See [git-backup-security.md](git-backup-security.md) for
-the wider "a cloned project's config is untrusted input" note.
+block was trusted exactly like one you wrote yourself. It no longer is, **regardless of
+whether that file is tracked by the repository's own git index** -- set these two keys
+in `~/.remember/config.json` (user-global) or via `REMEMBER_OAUTH_TOKEN`, never in a
+project's own config file, if you want them honoured.
+
+**`model` and `reject_pattern` from that same per-project config are stripped too, but
+only when the file is git-TRACKED** -- committed by the repository, not merely sitting
+in the default layout
+([#757](https://github.com/Digital-Process-Tools/claude-remember/issues/757)). Unlike
+the two `haiku.*` keys, neither can redirect where a transcript goes -- only which model
+is billed for every save, or whether the refusal gate runs at all (`reject_pattern:
+"none"` turns it off outright; any other value is a regex run over model output, an
+attacker-controlled ReDoS surface) -- severe enough to strip from a file the repository
+itself committed, not severe enough to break every single-user project's own untracked
+per-project override the way #726 already accepted paying for `haiku`. An **untracked**
+per-project `config.json` -- the ordinary case, written by you, never `git add`ed --
+still has `model`/`reject_pattern` take effect, exactly as before #757.
+
+External storage mode (`data_dir` absolute or home-relative, e.g. `~/.remember/{slug}`)
+is unaffected by any of the above -- `REMEMBER_DIR` there is the operator's own
+directory, never one a clone ships, so its config stays trusted **once it is genuinely
+the operator's own**. The one exception is the one-shot migration INTO that mode: a
+legacy `.remember/config.json` that is git-tracked (or whose tracked status could not be
+determined -- this fails CLOSED, the same as a confirmed-tracked file) is left behind
+rather than carried across trusted
+([#757](https://github.com/Digital-Process-Tools/claude-remember/issues/757); see
+[external-storage-mode.md](external-storage-mode.md)) -- only a config nobody but you
+ever wrote, or whose git status was confirmed clean, reaches the trusted external layer.
+See [git-backup-security.md](git-backup-security.md) for the wider "a cloned project's
+config is untrusted input" note.
 
 ### Environment variables
 
