@@ -37,6 +37,13 @@ What helps whoever promotes it later:
 Unsure whether it belongs elsewhere, or is even a real rule? Say so in the fragment and log
 it anyway -- a guess at where it belongs is useful and costs nothing.
 
+## When it is an issue instead
+
+A fragment here is not the only route. **File an issue only when the finding blocks a release** --
+the ranking table in `skills/manager/phases/findings.md` decides that, by its own `Blocks a
+release?` column, or when the finding fits none of that table's rows. Everything else belongs here,
+as a fragment, not on the tracker.
+
 ## Fragments are inert
 
 Nothing loads them into a session automatically. Writing one costs nothing and reads

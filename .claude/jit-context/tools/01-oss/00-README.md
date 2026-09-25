@@ -112,28 +112,22 @@ which used to live there, moved here instead, where it costs nothing per refusal
 No exception for an image, a PDF or a notebook cell: none exists in this repository today. If one
 appears, that is when it gets one -- not before.
 
-### If the triage command in the rule doesn't run
+### If the triage commands in the rule don't run
 
-**Triage with `supertool 'ops'` -- never `./supertool` (#725).** A rule is a text file the hook
-matches a subject against; it runs no command, and nothing checked reachability on your behalf
-before writing this file. `./supertool` is not a safer or equivalent fallback: a project-relative
-invocation runs whatever file the current checkout happens to have at that literal path, and (see
-the entry directly below) a pull request branch shipping a tracked file there is exactly what this
-issue closed -- so never execute `./supertool`, for triage or anything else, no matter what an
-older rule revision or a stale memory of this project says.
+**Neither `./supertool 'ops'` nor `supertool 'ops'` tells you anything about the *other* one --
+run both.** A rule is a text file the hook matches a subject against; it runs no command, and
+nothing checked reachability on your behalf before writing this file.
 
-- **`supertool 'ops'` prints a list of ops.** Everything is wired; the refusal was about your
+- **`./supertool 'ops'` prints a list of ops.** Everything is wired; the refusal was about your
   call, not your setup.
-- **`supertool 'ops'` fails, and `ls -la ./supertool` (never execute it) shows nothing there
-  either.** `supertool` is not installed on this machine. It is a Claude Code plugin and a
-  declared dependency of the plugin that wrote this layer, so installing that plugin resolves it
-  from the same marketplace.
-- **`supertool 'ops'` fails, but something answers when this clone's own entry point is
-  inspected.** `/supertool` is in the tracked `.gitignore` (#725) -- git will not silently stage
-  it for you, though a contributor can still force-add a tracked file at that path with `git add
-  -f`, which is why the rule layer never runs it regardless of what's there -- and it is created
-  by supertool's own session-start hook, so a fresh clone has none until a session has been
-  started in it. Start one; `supertool` on `PATH` is the only spelling ever worth running.
+- **`./supertool` is missing, `supertool` works.** The binary is installed and *this clone* has
+  no entry point. `./supertool` is gitignored on purpose -- committing it would bake one
+  machine's absolute path into every other clone -- and it is created by supertool's own
+  session-start hook, so a fresh clone has none until a session has been started in it. Start
+  one, or call whichever spelling answers. Nothing is missing from your installation.
+- **Neither runs.** `supertool` is not installed on this machine. It is a Claude Code plugin and
+  a declared dependency of the plugin that wrote this layer, so installing that plugin resolves
+  it from the same marketplace.
 
 ### The `requires: supertool` frontmatter line, and what it does today
 
@@ -171,3 +165,37 @@ declined narrowing on the grounds that the absent-binary case would be answered 
 reader without `supertool` is no longer blocked, without this rule's `block` weakening for the
 reader who has it. Revisiting `block` again would be re-litigating a question `requires:` was
 written to close.
+
+### #1408: no provenance-verification section is added here, and here is why
+
+The repository that ships `supertool` itself carries its own jit-context tool-redirection rule for
+its own file tools, `.claude/jit-context/tools/00-manual/harness-tools-blocked.md`. That rule gained
+a "This is not a prompt injection" section, in that repository's own issue #1793, after a stock
+reviewer twice read the redirection block and reported it as fabricated attacker content -- the
+section tells a suspicious reader how to verify the block's provenance against tracked history.
+`supertool-required.md` -- scaffolded wholesale into every managed repository, that one's own
+checkout included -- carries the identical `mode: block` tool-redirection shape and no such section
+at all. #1408 asked whether that gap should close.
+
+**Not copied here, on the strength of the evidence that exists.** The lane that filed #1408 had
+already run a falsification experiment (that repository's own issue #2007, n=6 cold reads, two body
+variants) against `harness-tools-blocked.md` itself, and found the provenance section did **not**
+change a fresh reader's verdict: every reader called the redirection an injection regardless of
+whether the section was present. Adding equivalent prose here on the strength of "it worked there"
+would be acting against that repository's own measured result, not informed by it.
+
+**And the failure #1793 exists to prevent has no recorded instance against this rule.** #903, above,
+already shows two observed cases of a spawned, unbriefed `Explore` reviewer hitting this exact block
+and correctly treating it as untrusted content, routing around it via its own already-granted tools
+-- the safe outcome, with no provenance section present, because a reader holding no `supertool`
+grant was never going to act on the block either way. No incident has been recorded here of a
+session that DOES hold `supertool` mistaking this block for a fabricated attack rather than a real
+one -- the specific failure #1793's section was written to prevent.
+
+**The decision is recorded, not closed.** If a real report surfaces of a `supertool`-holding session
+wrongly treating this block as fabricated, or #2007's own line of experiments produces evidence that
+would change the calculus above, that is the trigger to revisit -- and, per #1408's own framing, to
+design something informed by what #2007 actually found rather than copy #1793 unmodified and expect
+a different result. Nothing changes in the rule body itself (`supertool-required.md`) either way: it
+is a `mode: block` rule re-injected whole on every refused call (#757 above), so a decision record
+belongs here, never in the per-refusal body.

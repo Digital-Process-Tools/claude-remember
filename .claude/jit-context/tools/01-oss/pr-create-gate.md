@@ -3,7 +3,7 @@ title: "Before gh-pr-create: don't retype what already arrived right"
 description: "title, head and base arrive filled in from the report -- retyping any of them is the one move that makes things worse. Publish gh-pr-create:@FILE, never a hand-built body."
 tool: Bash
 match: ~gh-pr-create
-mode: remind
+mode: once
 ---
 
 Pushing and opening is one read plus one call, not a document you write:
