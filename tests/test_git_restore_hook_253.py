@@ -776,11 +776,16 @@ class TestItCannotDestroyLocalWork:
         )
         invoked = set(re.findall(r"\bgit\b(?:\s+-[Cc]\s+\S+)*\s+([a-z][a-z-]*)", code))
         assert invoked, "no git invocation found at all — the scan is vacuous"
-        allowed = {"rev-parse", "symbolic-ref", "rev-list", "merge", "fetch"}
+        # #741: cat-file -e (existence probe) and show (read a blob's bytes,
+        # never a write) both joined the recovery for a config.json a
+        # fast-forward untracks -- both are pure reads of objects already in
+        # the local object database, exactly the same safety class as
+        # rev-parse/rev-list/symbolic-ref above.
+        allowed = {"rev-parse", "symbolic-ref", "rev-list", "merge", "fetch", "cat-file", "show"}
         assert invoked <= allowed, (
             f"50-git-restore.sh invokes {sorted(invoked - allowed)} — the "
-            "restore half may only read refs and fast-forward (#253). A "
-            "fast-forward cannot destroy local work by definition, but only "
+            "restore half may only read refs/objects and fast-forward (#253). "
+            "A fast-forward cannot destroy local work by definition, but only "
             "for as long as nothing else in this file can."
         )
         assert 'merge --ff-only "$REMOTE_REF"' in code, (
