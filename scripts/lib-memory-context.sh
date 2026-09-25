@@ -291,6 +291,21 @@ _remember_git_unquote_into() {
         (\"*\")
             _gu_line="${_gu_line#\"}"
             _gu_line="${_gu_line%\"}"
+            # #780: `printf '%b'` does NOT know the two-character escape
+            # `\"` (unlike `\\`, `\n`, `\t`, ... which it does handle) --
+            # left alone, a literal double-quote byte in the path survives
+            # as the two raw characters backslash+quote instead of becoming
+            # a quote, so the comparison at the call site never matches and
+            # a tracked path containing a `"` byte reads as not-tracked.
+            # Pre-translate every `\"` pair (always exactly one escaped
+            # quote byte -- git never emits an unescaped `"` inside a
+            # quoted entry) into the octal escape `\042` (0x22 = '"'),
+            # which `%b` DOES expand. The replacement text itself contains
+            # no `"` character, so a left-to-right non-overlapping scan
+            # cannot re-match anything it just wrote, and it never touches
+            # an unrelated `\\` (backslash) escape, which `%b` already
+            # handles correctly on its own.
+            _gu_line="${_gu_line//\\\"/\\042}"
             printf -v "$_gu_outvar" '%b' "$_gu_line"
             ;;
         (*)
@@ -923,7 +938,7 @@ _remember_render_memory_section() {
 # HIT (see _remember_start_cache_context_load), so mtimes alone cannot
 # catch this. A mismatched or entirely absent VERSION= line in the
 # manifest is always a miss; see the loader below.
-_REMEMBER_CACHE_FORMAT_VERSION="1"
+_REMEMBER_CACHE_FORMAT_VERSION="2"
 
 # _remember_start_cache_manifest_lines
 # Echoes, one per line, "SRC=<path>" for every input the render depends on,
@@ -970,8 +985,20 @@ _remember_start_cache_context_load() {
     [ -L "$_manifest" ] && return 1
     [ -O "$_manifest" ] || return 1
     [ -r "$_manifest" ] || return 1
+    # #781: a repository can commit its own start-context.cache and a
+    # manifest holding nothing but a VERSION= stamp -- git checks both out
+    # owned by the user and as regular files, so every check above this
+    # comment passes, and with no SRC= line the -nt loop below never runs
+    # against anything either. None of that has ever asked the injection
+    # guard a single question. Route the cache and manifest FILES
+    # THEMSELVES through the same tracked/symlink check _remember_may_inject
+    # applies to every file a fresh render injects, before trusting either
+    # one -- a git-tracked cache pair is exactly the shipped-by-the-
+    # repository content that check exists to catch.
+    _remember_may_inject "$_cache" "start-cache" || return 1
+    _remember_may_inject "$_manifest" "start-cache" || return 1
 
-    local _line _src _mf_version=""
+    local _line _src _mf_version="" _mf_saw_src=0
     while IFS= read -r _line || [ -n "$_line" ]; do
         _line="${_line%$'\r'}"
         [ -n "$_line" ] || continue
@@ -986,12 +1013,19 @@ _remember_start_cache_context_load() {
             *) return 1 ;;
         esac
         [ -n "$_src" ] || continue
+        _mf_saw_src=1
         # Strictly newer, never a tie (see the file header): -nt is false on
         # an equal mtime, which is exactly the "ambiguous means miss"
         # guardrail #668 asks for, and true against a manifest entry that no
         # longer exists (an absent source cannot have changed).
         [ "$_cache" -nt "$_src" ] || return 1
     done < "$_manifest"
+    # #781: a legitimate cache always depends on at least one source file --
+    # _remember_start_cache_manifest_lines below always emits several. Zero
+    # SRC= lines is either a bug in whatever wrote the manifest or a planted
+    # manifest engineered to make the loop above a no-op (nothing to compare
+    # mtimes against, so nothing can ever force a miss).
+    [ "$_mf_saw_src" -eq 1 ] || return 1
     # #775: a manifest with no VERSION= line at all (every cache published
     # before this fix existed) or one naming a different format version
     # must never be served -- see _REMEMBER_CACHE_FORMAT_VERSION above for

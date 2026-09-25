@@ -86,6 +86,94 @@ if [ "$REMEMBER_DIR" != "$_legacy_dir" ] && [ ! -L "$_legacy_dir" ] && [ -d "$_l
     if [ "$_migrating_user_config_home" = false ]; then
         mkdir -p "$(dirname "$REMEMBER_DIR")" 2>/dev/null
 
+        # #782: the config.json holdout just below is the ONLY tracked-
+        # content protection this migration has ever applied -- every OTHER
+        # file the legacy directory holds, including a planted now.md,
+        # still moved wholesale into REMEMBER_DIR. The injection guard
+        # exempts external storage from its tracked-file check entirely BY
+        # DESIGN (`_remember_in_project_store || return 0`,
+        # lib-memory-context.sh, #764) because that store can legitimately
+        # be the plugin's OWN git_backup repository -- so once a
+        # repository-tracked memory file lands inside REMEMBER_DIR via this
+        # migration, nothing downstream ever refuses it again. Scanning for
+        # tracked content BEYOND config.json (already held out on its own
+        # below) and refusing the WHOLE migration when any is found is
+        # simpler and safer than generalizing the single-file holdout into a
+        # per-file loop: REMEMBER_DIR is never created here, so this
+        # session's live render still has nothing to inject FROM the
+        # external store, and the legacy directory (with its tracked
+        # content) is left exactly where it was for the operator to sort
+        # out by hand.
+        # Same repo-existence-first shape as _remember_config_tracked_status
+        # (lib-memory-dir.sh, #766): "no git binary" and "not a git
+        # repository at all" must never read the same way. Only an
+        # ENCLOSING repository that git cannot be asked about fails closed
+        # (could-not-tell, treated the same as tracked below) -- no
+        # repository anywhere above _mem_proj means there is nothing to
+        # check, same as the ordinary non-git project.
+        # Every assignment from a `git ...` call below is deliberately
+        # written `CMD && RC=0 || RC=$?` rather than the plainer `CMD; RC=$?`
+        # -- this file can be sourced by a CALLER running under `set -e`
+        # (see the nullglob comment further down in this same file for the
+        # established precedent), and `git rev-parse --is-inside-work-tree`
+        # is EXPECTED to exit non-zero for the ordinary non-repo case. A bare
+        # failing command substitution assignment aborts the whole script
+        # under `set -e` before this function ever gets to inspect the exit
+        # code -- observed directly: `test_an_ordinary_legacy_directory_
+        # still_migrates` and `test_migration_moves_legacy_to_external`
+        # (both plain non-git tmp dirs) failed with returncode 128 and empty
+        # output until this shape was used. Per POSIX, a command that is not
+        # the LAST element of an AND-OR list is exempt from triggering
+        # errexit, so the first `git ...` call here never aborts the caller.
+        _legacy_other_tracked="clean"
+        if command -v git >/dev/null 2>&1; then
+            _legacy_repo_check=$( (unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+                                    LC_ALL=C LANGUAGE=C git -C "$_mem_proj" rev-parse --is-inside-work-tree) 2>&1 ) && _legacy_repo_rc=0 || _legacy_repo_rc=$?
+            if [ "$_legacy_repo_rc" -ne 0 ]; then
+                case "$_legacy_repo_check" in
+                    *"not a git repository"*) : ;;
+                    (*) _legacy_other_tracked="could-not-tell" ;;
+                esac
+            elif [ "$_legacy_repo_check" = "true" ]; then
+                _legacy_ls_list=$(unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+                                   git -c core.quotePath=false -C "$_mem_proj" ls-files -- ".remember/" 2>/dev/null) && _legacy_ls_rc=0 || _legacy_ls_rc=$?
+                if [ "$_legacy_ls_rc" -ne 0 ]; then
+                    _legacy_other_tracked="could-not-tell"
+                else
+                    while IFS= read -r _legacy_ls_line; do
+                        [ -n "$_legacy_ls_line" ] || continue
+                        case "$_legacy_ls_line" in
+                            (.remember/config.json) : ;;
+                            (*) _legacy_other_tracked="tracked" ;;
+                        esac
+                    done <<EOF
+$_legacy_ls_list
+EOF
+                fi
+            fi
+            # else: a real repository, but $_mem_proj is not inside its work
+            # tree (a bare repo) -- nothing to check, stays "clean".
+        else
+            _legacy_walk=$(cd "$_mem_proj" 2>/dev/null && pwd -P) || _legacy_walk="$_mem_proj"
+            while [ -n "$_legacy_walk" ]; do
+                if [ -e "$_legacy_walk/.git" ]; then
+                    _legacy_other_tracked="could-not-tell"
+                    break
+                fi
+                [ "$_legacy_walk" = "/" ] && break
+                _legacy_walk="${_legacy_walk%/*}"
+                [ -z "$_legacy_walk" ] && _legacy_walk="/"
+            done
+            unset _legacy_walk
+        fi
+        unset _legacy_ls_list _legacy_ls_line _legacy_repo_check _legacy_repo_rc _legacy_ls_rc
+
+        if [ "$_legacy_other_tracked" != "clean" ]; then
+            printf 'remember: %s contains git-tracked content beyond config.json (%s) -- refusing to migrate it into the external memory store, which would launder repository-committed content into a location the injection guard trusts unconditionally (#782). Left in place, untouched; move your own files out of it by hand, or `git rm --cached` whatever the repository should not have committed, then start a new session to retry.\n' \
+                "$_legacy_dir" "$_legacy_other_tracked" >&2
+        fi
+    fi
+    if [ "$_migrating_user_config_home" = false ] && [ "${_legacy_other_tracked:-clean}" = "clean" ]; then
         # #757: lib-memory-dir.sh trusts ${REMEMBER_DIR}/config.json outright
         # once REMEMBER_DIR is external (~293-300) -- that is right for a
         # config an OPERATOR wrote, but a legacy .remember/config.json a
@@ -185,7 +273,7 @@ if [ "$REMEMBER_DIR" != "$_legacy_dir" ] && [ ! -L "$_legacy_dir" ] && [ -d "$_l
         # exactly the failure case this exists to protect.
         unset _legacy_cfg _legacy_cfg_holdout
     fi
-    unset _migrating_user_config_home
+    unset _migrating_user_config_home _legacy_other_tracked
 elif [ "$REMEMBER_DIR" != "$_legacy_dir" ] && [ -L "$_legacy_dir" ] && [ ! -e "$REMEMBER_DIR" ]; then
     # The legacy .remember DIRECTORY itself is a symlink -- never
     # migrated, left exactly where it is, logged loudly rather than
