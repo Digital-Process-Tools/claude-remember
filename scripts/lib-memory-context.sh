@@ -647,6 +647,7 @@ _remember_may_inject() {
 # was never the more useful behaviour.
 _remember_emit_file() {
     local _remember_emit_max="${REMEMBER_EMIT_READ_MAX:-16384}"
+    case "$_remember_emit_max" in (''|*[!0-9]*) _remember_emit_max=16384 ;; esac
     case "${2:-}" in
         (''|*[!0-9]*)
             # No usable size: `cat` is the one that cannot go quadratic.
