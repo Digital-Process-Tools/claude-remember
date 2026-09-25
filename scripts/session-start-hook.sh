@@ -1813,105 +1813,29 @@ _remember_handoff_fingerprint() {
     fi
 }
 
-# _remember_handoff_is_tracked <handoff-abs-path> (#721, worktree case #747)
-# True only in legacy mode (REMEMBER_ROOT == MEMORY_PROJECT_DIR -- the only
-# layout where the handoff sits inside a repository the user did not
-# necessarily write it into) AND that repository has a git repo AND its
-# index tracks the handoff file. A repository can ship .remember/remember.md
-# committed; this plugin never commits one itself (bootstrap-dirs.sh writes
-# a .gitignore for the whole directory), so a tracked file did not come
-# from this plugin and must not be injected as though it were the user's
-# own prior-session note.
-#
-# Anchored on MEMORY_PROJECT_DIR (lib-memory-dir.sh), not PROJECT_DIR (#747):
-# from a linked git worktree, PROJECT_DIR is the worktree path, but
-# REMEMBER_DIR -- and therefore REMEMBER_ROOT, its dirname -- is redirected
-# into the MAIN checkout's .remember/ (#56), the same repository just a
-# different path. Comparing against PROJECT_DIR made that redirect look like
-# "not legacy mode" and skipped the tracked-check entirely, letting a
-# repo-shipped, git-tracked handoff through unrefused from any worktree.
-# MEMORY_PROJECT_DIR already equals PROJECT_DIR outside a worktree (it is the
-# fail-safe default in _resolve_memory_project_dir), so this is additive: the
-# non-worktree behaviour this function already had is unchanged.
-# Case-insensitive string equality with no fork -- the same trick
-# lib-case-divergence.sh's own `_remember_case_fold_eq` uses, duplicated
-# rather than sourced: that library is only loaded on demand, deep inside
-# `_remember_write_case_divergence`, and this check runs earlier and does
-# not want to pull the whole file in just for one comparison.
-_remember_th_ci_eq() {
-    local _was=0 _rc
-    shopt -q nocasematch && _was=1
-    shopt -s nocasematch
-    [[ "$1" == "$2" ]]
-    _rc=$?
-    [ "$_was" -eq 1 ] || shopt -u nocasematch
-    return $_rc
-}
+# Handoff injection routes through the shared "may this memory file be
+# injected?" guard, _remember_may_inject (lib-memory-context.sh, sourced
+# above at :262) -- the same helper every other memory file goes through
+# (#721 follow-ups: #754, #755, #756, GHSA-6q55-m29c-3xgj). It refuses a
+# symlink and a file the nearest git repository above its OWN directory
+# tracks, asked about directly (`git -C "$(dirname f)" ls-files -- ...`)
+# rather than by comparing REMEMBER_ROOT/MEMORY_PROJECT_DIR/PROJECT_DIR
+# against each other. That per-file question is what closes both prior
+# bypasses of the old root-comparison check: a linked WORKTREE (#747, fixed
+# once already by anchoring on MEMORY_PROJECT_DIR instead of PROJECT_DIR),
+# and a repository SUBDIRECTORY (#754 -- MEMORY_PROJECT_DIR itself has no
+# `.git` when Claude starts from `repo/pkg/`, so even the #747-fixed check
+# still answered "not tracked"; asking git about the handoff's own
+# directory needs no such fact, since git walks up to the nearest
+# repository itself).
 
-_remember_handoff_is_tracked() {
-    local _path="$1" _rel _proj_fs _path_fs _tracked_out _line _mem_proj
-    _mem_proj="${MEMORY_PROJECT_DIR:-$PROJECT_DIR}"
-    [ "$REMEMBER_ROOT" = "$_mem_proj" ] || return 1
-    [ -e "$_mem_proj/.git" ] || return 1
-    command -v git >/dev/null 2>&1 || return 1
-    _remember_forward_slash_into _proj_fs "$_mem_proj"
-    _remember_forward_slash_into _path_fs "$_path"
-    _rel="${_path_fs#$_proj_fs/}"
-    [ "$_rel" != "$_path_fs" ] || return 1
-    # Leaked GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE would resolve this against
-    # a different repository entirely -- the same sanitisation the case-
-    # divergence probe uses for the same reason.
-    if (unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
-        git -C "$_mem_proj" ls-files --error-unmatch -- "$_rel") >/dev/null 2>&1; then
-        return 0
-    fi
-    # Case-insensitive fallback. An exact-case `ls-files` miss is not proof
-    # the file is untracked -- only that it is not tracked under THIS case.
-    # On a case-insensitive filesystem (APFS default, NTFS) `cat` reads the
-    # same bytes off disk regardless of which case the repository committed
-    # the path under, so a repo that ships `.remember/Remember.MD` -- or a
-    # differently-cased PARENT directory, `.Remember/remember.md` -- would
-    # pass the exact-case check above and still be delivered as though it
-    # were the user's own file. Three things an earlier version of this
-    # fallback got wrong, fixed here:
-    #   - it restricted `ls-tree`'s pathspec to the handoff's OWN directory
-    #     case, which cannot match a differently-cased directory at all
-    #     (pathspec matching is byte-exact regardless of core.ignorecase) --
-    #     this version lists every tracked path with no directory
-    #     restriction and case-folds the comparison itself, in bash;
-    #   - it read HEAD's tree, so `git rm --cached` -- the exact remediation
-    #     this hook's own refusal message names -- did not un-refuse until a
-    #     new commit landed; this version reads the INDEX (`ls-files`), the
-    #     same source of truth the exact-case check above already uses, so
-    #     the two agree the instant the index changes;
-    #   - it used `--name-only` with no `-z`, so `core.quotepath` (on by
-    #     default) can octal-escape a non-ASCII or special-character path in
-    #     the output, silently breaking the string comparison; `-z` prints
-    #     raw NUL-terminated bytes with no quoting at all.
-    #
-    # Piped straight into the loop via process substitution, NEVER through
-    # a `$(...)` variable: `-z` output is NUL-delimited, and bash strings
-    # cannot hold an embedded NUL at all -- `_tracked_out=$(git ls-files -z)`
-    # would silently truncate at the FIRST NUL, discarding every path after
-    # the first. Nothing distinguishes "no output" from "truncated after
-    # one entry" once that has happened, which is worse than not de-quoting
-    # at all: a repo with more than one tracked file would compare only the
-    # first one against $_rel and could report untracked outright.
-    while IFS= read -r -d '' _line; do
-        [ -n "$_line" ] || continue
-        _remember_th_ci_eq "$_line" "$_rel" && return 0
-    done < <(unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
-              git -C "$_mem_proj" ls-files -z 2>/dev/null)
-    return 1
-}
-
-if [ -f "$REMEMBER_HANDOFF" ] && [ -s "$REMEMBER_HANDOFF" ] && _remember_handoff_is_tracked "$REMEMBER_HANDOFF"; then
+if [ -f "$REMEMBER_HANDOFF" ] && [ -s "$REMEMBER_HANDOFF" ] && ! _remember_may_inject "$REMEMBER_HANDOFF" "handoff"; then
     # Refuse rather than inject (#721). No delivery record is written or
     # kept for content this hook declined to trust -- if the file is later
     # untracked (`git rm --cached`) it is delivered fresh, not read as
     # "already seen" from a session that never actually saw it.
     echo "=== LAST HANDOFF ==="
-    echo "[refused -- $REMEMBER_HANDOFF is tracked by this repository's own git index. This plugin never commits a handoff file itself (.remember/.gitignore excludes it), so a tracked one was shipped by the repository, not written by your own /remember. Not injecting it. If it is genuinely yours: git rm --cached it. If you did not add it: delete it and consider what else the commit that added it changed.]"
+    echo "[refused -- $_REMEMBER_INJECT_REFUSAL]"
     echo ""
     [ -f "$REMEMBER_HANDOFF_STATE" ] && rm -f "$REMEMBER_HANDOFF_STATE" 2>/dev/null
 elif [ -f "$REMEMBER_HANDOFF" ] && [ -s "$REMEMBER_HANDOFF" ]; then
