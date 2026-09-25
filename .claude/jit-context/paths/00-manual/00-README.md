@@ -14,8 +14,9 @@ than an oversight.
   stale" on every touch of `docs/` would be noise standing in for a one-line repair.
 
 - **`695.emit-read-max-is-an-unvalidated-knob`** — declined 2026-09-25. `REMEMBER_EMIT_READ_MAX`
-  is genuinely still read with no numeric guard at `lib-memory-context.sh:198`, unlike its
-  siblings in the same file — still true, not fixed. Declined as a rule because the knob is
+  was read with no numeric guard at `lib-memory-context.sh:198`, unlike its siblings in the
+  same file; fixed in #758, which added the same `case (''|*[!0-9]*) ... ;; esac` guard the
+  file's other numeric knobs already carry. Declined as a rule because the knob is
   undocumented and developer-only (not user-facing input), too narrow a single line to be worth
   injecting into every touch of `scripts/`. **Filed as
   [#758](https://github.com/Digital-Process-Tools/claude-remember/issues/758) instead.**
