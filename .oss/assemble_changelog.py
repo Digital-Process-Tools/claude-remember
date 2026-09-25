@@ -781,7 +781,9 @@ def self_reference_finding(name: str, text: str) -> Optional[str]:
         "{0}:{1}: the entry never names #{2} — the issue number is in the "
         "filename, and the release consumes the file, so nothing carries it "
         "into CHANGELOG.md. Write `(#{2})` into the entry — a link to the "
-        "issue counts too. Line: {3}".format(
+        "issue counts too. (This rule traces back to "
+        "https://github.com/Digital-Process-Tools/claude-supertool/issues/1251 "
+        "-- read that for why it exists.) Line: {3}".format(
             name, at, number, lines[at - 1] if at <= len(lines) else ""
         )
     )

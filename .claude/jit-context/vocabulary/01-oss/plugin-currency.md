@@ -47,8 +47,16 @@ So a session can hold a registry at one version and instructions from another, a
 `ahead` is the normal state in a clone of the plugin itself (unreleased work), and normal for any session
 in the window after a release before the cache refreshes. It is not a problem.
 
-`version_status` folds a stale comparison into `unknown` rather than inventing vocabulary -- so a
-`?` means either half was missing **or** the reading was too old to trust.
+`version_status` folds a stale comparison into `unknown` rather than inventing
+vocabulary -- so a `?` means either half was missing **or** a refresh was actually
+attempted and failed. "Too old" is NOT a reason to fold on its own, at any age
+(`LATEST_REFRESH_AFTER`, or any fixed ceiling past it): a due reading provokes its
+own background refresh, and age is a trigger to refresh, never a reason to distrust
+what is already known (#1464, #1635). `gather()` keeps rendering the last-known
+comparison however far past due, and folds only on a recorded failed refresh
+(`latest_refresh_failed_at`) or a reading that was never taken at all. The same rule
+now governs the default-branch marker and the `/oss:doctor` field beside it on this
+same line (#1635).
 
 ## The cached `latest`
 

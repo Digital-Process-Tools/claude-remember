@@ -1,3 +1,12 @@
+dev	dev-lanes.md	
+devs	dev-lanes.md	
+developer	dev-lanes.md	
+developers	dev-lanes.md	
+lane	dev-lanes.md	
+lanes	dev-lanes.md	
+oss	oss-loop.md	
+the loop	oss-loop.md	
+maintainer loop	oss-loop.md	
 state file	oss-state.md	
 oss-watch	oss-state.md	
 tick state	oss-state.md	
@@ -10,3 +19,5 @@ plugin currency	plugin-currency.md
 statusline	plugin-currency.md	
 oss-workspace	plugin-currency.md	
 plugin cache	plugin-currency.md	
+sub-manager	sub-manager-vocab.md	
+submanager	sub-manager-vocab.md	

@@ -17,8 +17,10 @@ read out of context.
 
 **A `removed` fragment must declare compatibility**, as one more bullet in that list:
 
-    - Compatibility: breaking - <reason>
-    - Compatibility: compatible - <reason>
+```
+- Compatibility: breaking - <reason>
+- Compatibility: compatible - <reason>
+```
 
 `/oss:release` reads it to propose the version. A removal that declares nothing stops the proposal
 and names the file, rather than being read as a quiet minor -- whether a removal breaks anything is

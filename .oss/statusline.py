@@ -238,20 +238,26 @@ def version_status(installed, latest, stale=False):
 
 
 #: The text after "channel: " on `channel:health`'s own first content line,
-#: mapped to this module's five-way state (#613). Both routes to that report --
-#: `channel.py` run directly and `supertool 'channel:health'` -- agree on this
-#: text; only the exit code differs, and the supertool wrapper collapses every
-#: non-zero exit to 1, so text is the only signal both routes share. Anything
-#: not a key here -- an error page for a preset that is not enabled, output this
-#: module has never seen -- is deliberately not in this table, so it falls
-#: through to `cannot_determine` in `parse_channel_report` rather than being
-#: guessed at.
+#: mapped to this module's six-way state (#613, #1726). Both routes to that
+#: report -- `channel.py` run directly and `supertool 'channel:health'` --
+#: agree on this text; only the exit code differs, and the supertool wrapper
+#: collapses every non-zero exit to 1, so text is the only signal both routes
+#: share. Anything not a key here -- an error page for a preset that is not
+#: enabled, output this module has never seen -- is deliberately not in this
+#: table, so it falls through to `cannot_determine` in `parse_channel_report`
+#: rather than being guessed at.
 CHANNEL_STATES = {
     "FORWARDING": "forwarding",
     "NOT DELIVERING": "not_delivering",
     "CANNOT DETERMINE": "cannot_determine",
     "CONTRADICTED": "contradicted",
     "BOUND, NOT SUBSCRIBED": "not_subscribed",
+    # supertool 0.64.0 (Digital-Process-Tools/claude-supertool#2658): bound,
+    # verified and subscribed, but has never forwarded anything
+    # (`forwarded == 0`, no `last_forwarded`). Distinct from `forwarding`
+    # (it has not) and from `cannot_determine` (the check DID determine this
+    # -- #1726).
+    "BOUND, UNPROVEN": "unproven",
 }
 
 #: Same name supertool's own `presets/watch/naming.py` reads (`NAME_ENV`). Not
@@ -279,7 +285,21 @@ _WATCH_NAME_UNSAFE_RE = re.compile(r"[^A-Za-z0-9._-]")
 #: Excludes a backslash too, as of #897 -- `tests/test_statusline_watch_name_
 #: refusal_653.py::test_repo_re_pattern_matches_oss_configs_own_pattern` pins the
 #: two patterns together so this copy cannot drift from `oss_config.REPO_RE` again.
-_REPO_RE = re.compile(r"\A[^/\\\s]+/[^/\\\s]+\Z")
+#: `?` and `#` joined the excluded class for #1475, at the canonical
+#: `oss_config.REPO_RE` this copy is pinned against -- see that module's own
+#: comment above `REPO_RE` for why. `_REPO_QUERY_FRAGMENT_RE` below is now
+#: redundant for `repo` (this pattern alone refuses both), kept as an
+#: explicit, self-documenting second line of defense rather than deleted --
+#: `_malformed_repo`'s own docstring still describes both checks.
+_REPO_RE = re.compile(r"\A[^/\\\s?#]+/[^/\\\s?#]+\Z")
+
+#: `?` starts a query string and `#` starts a fragment the instant either
+#: appears inside a path segment `gh api` builds by plain string
+#: substitution -- `_REPO_RE` above forbids a slash, a backslash, whitespace,
+#: `?` and `#` within a segment (#1401, widened into `_REPO_RE` itself by
+#: #1475). Kept as an explicit, named check inside `_malformed_repo` even
+#: though `_REPO_RE` alone now also refuses these two characters.
+_REPO_QUERY_FRAGMENT_RE = re.compile(r"[?#]")
 
 #: `.supertool.json`'s own filename, read but never written -- the same constant
 #: `doctor.py` carries as `WATCH_CONFIG`, duplicated rather than imported for the
@@ -364,7 +384,7 @@ def _declared_watch_names(root):
 def parse_channel_report(text):
     """The state `channel:health` reported, from its own report text, or `None`.
 
-    `None` covers everything that is not one of the five recognised states --
+    `None` covers everything that is not one of the six recognised states --
     most importantly the "op 'channel' is unavailable here" refusal supertool
     prints when the `watch` preset is not enabled, which also exits 1 and would
     otherwise be indistinguishable from a genuine `NOT DELIVERING` (#613; this
@@ -394,13 +414,14 @@ def channel_status(
     interval=CHANNEL_REFRESH_AFTER,
     session=None,
     current_session=None,
+    refresh_failed_at=None,
 ):
     """Fold a raw `channel:health` reading, its own age, its attribution and
     (#1362) the session that took it into the state `render` actually shows
-    (#613, widened by #754, widened again by #1362).
+    (#613, widened by #754, widened again by #1362, and by #1636).
 
     Five ways this becomes `cannot_determine` before a caller ever sees one of
-    the five real states, and each is a distinct reason a reader might act on
+    the six real states, and each is a distinct reason a reader might act on
     differently -- collapsing them into one `?` would be this module's own
     defect class, the same reason `board_from_cache` keeps its counts separate:
 
@@ -412,11 +433,17 @@ def channel_status(
       sessions on one repo -- one armed via `bin/oss-workspace`, one a bare
       `claude` -- can hold genuinely different, simultaneously correct
       answers. Checked right after `not-asked`, before attribution or
-      staleness: a reading that is not this session's own cannot be trusted
-      regardless of how sound it otherwise looks.
-    * ``stale``        -- the reading is older than its own refresh interval
-      (#550/#551's lesson, applied a third time: never let an old reading
-      render as though it were fresh).
+      refresh-failure: a reading that is not this session's own cannot be
+      trusted regardless of how sound it otherwise looks.
+    * ``refresh-failed`` -- (#1636, renamed from ``stale``) a refresh WAS
+      attempted (`refresh()` found this reading due) and got nothing back --
+      `refresh_failed_at` recorded at least as recent as `fetched_at`. MERE
+      interval age is no longer part of this decision at all: age is a
+      trigger to refresh (`refresh()`'s own due check forks/attempts one),
+      never a reason to distrust a reading that is still the best one held --
+      the same rule #1464/#1635 already apply to `latest`, the default-branch
+      marker and the `/oss:doctor` reading. A reading merely due, with no
+      recorded failure, falls through to the real-state branch below.
     * ``not-attributable`` -- the channel name this reading came from is
       neither what this repository's own `.oss.json` would derive NOR what
       this repository's own tracked `.supertool.json` declares, so the socket
@@ -448,8 +475,9 @@ def channel_status(
     the consumer died one second after the reading was taken -- renders exactly
     like a correct one. Nothing performs "the consumer died" the way
     `/oss:release` performs a publish, so there is no falsifying event to
-    invalidate the cache against; #613's own docstring on `CHANNEL_REFRESH_AFTER`
-    states that gap rather than papering over it.
+    invalidate the cache against on its own -- `refresh_failed_at` catches a
+    DIFFERENT gap (a refresh that was attempted and got nothing back), not
+    this one, and this function does not claim otherwise.
 
     `not-asked` is checked BEFORE attribution, and that order is deliberate: a
     cache holding no reading at all also holds no attribution, so `attribution`
@@ -457,6 +485,13 @@ def channel_status(
     report every never-asked repository as "not this repo's fleet" instead of
     "nobody has looked yet", which is a different and more alarming claim about
     a question that was never even put.
+
+    `interval`/`now` are still accepted -- both callers (this module's own
+    `gather()` and `doctor_check_statusline_unknowns.py`) pass them
+    positionally -- but neither decides the fold any more; `refresh()` is
+    what reads `interval` to decide whether a fetch is due, and this
+    function only ever sees the OUTCOME of that decision, via
+    `refresh_failed_at`.
     """
     if not isinstance(fetched_at, (int, float)):
         return {"state": "cannot_determine", "reason": "not-asked"}
@@ -466,8 +501,11 @@ def channel_status(
         return {"state": "cannot_determine", "reason": "declaration-unreadable"}
     if attribution not in ("derivation", "declaration"):
         return {"state": "cannot_determine", "reason": "not-attributable"}
-    if now - fetched_at >= interval:
-        return {"state": "cannot_determine", "reason": "stale"}
+    refresh_failed = isinstance(refresh_failed_at, (int, float)) and (
+        refresh_failed_at >= fetched_at
+    )
+    if refresh_failed:
+        return {"state": "cannot_determine", "reason": "refresh-failed"}
     if raw_state not in CHANNEL_STATES.values():
         return {"state": "cannot_determine", "reason": "unrecognized"}
     return {"state": raw_state, "reason": None}
@@ -548,7 +586,7 @@ def board_from_cache(cache, now=None):
 # ------------------------------------------------------------------ release progress
 
 
-def release_progress(commits, tags_by_hash):
+def release_progress(commits, tags_by_hash, window=RELEASE_WINDOW):
     """How far into the next release this clone is: commits banked, over the usual size.
 
     Both halves come from the same two facts -- the log window and where the version tags
@@ -558,6 +596,13 @@ def release_progress(commits, tags_by_hash):
     renders as `0`, which is a measurement this repository takes seriously enough to name
     itself after: zero commits since the tag is a real and common state, and it has to stay
     distinguishable from never having looked.
+
+    A repository with NO version tag at all is a third case, distinct from "never looked"
+    (#1692): every commit in the window is banked toward a first release, and that count is
+    known exactly as long as the window reached the root commit (`len(commits) < window`).
+    When the window is exactly `window` commits long, whether more history exists beyond it
+    is unmeasured -- the count is a floor, not a measurement, and `since_floor` says so
+    rather than letting a truncated count render as if it were exact.
 
     `commits` is newest-first, as `git rev-list` prints it. `tags_by_hash` maps a commit to
     the tag names on it; anything `_version_tuple` cannot parse is not a release boundary
@@ -576,7 +621,12 @@ def release_progress(commits, tags_by_hash):
             if version is not None:
                 found.append((version, index))
     if not found:
-        return unknown
+        return {
+            "state": "no-tag",
+            "since": len(commits),
+            "typical": None,
+            "since_floor": len(commits) >= window,
+        }
     found.sort(key=lambda pair: pair[0], reverse=True)
     since = found[0][1]
     gaps = []
@@ -610,6 +660,11 @@ def git_release_progress(root, window=RELEASE_WINDOW):
     ``for-each-ref`` rather than ``show-ref`` because an annotated tag's own object hash is
     not the commit's: ``*objectname`` dereferences it, and is empty for a lightweight tag,
     so one format string covers both without a second call to tell them apart.
+
+    Callers that have `.oss.json`'s `release.triggers.merged_prs` in hand fold it onto the
+    returned dict themselves (`dict(progress, trigger=...)`), rather than this function
+    taking it as a parameter -- several tests monkeypatch this whole function with a
+    single-argument stand-in, and this keeps that call shape unchanged (#1692).
     """
     refs = _run(
         [
@@ -633,7 +688,7 @@ def git_release_progress(root, window=RELEASE_WINDOW):
             continue
         direct, dereferenced, name = parts
         tags.setdefault(dereferenced or direct, []).append(name)
-    return release_progress(log.split(), tags)
+    return release_progress(log.split(), tags, window=window)
 
 
 #: The rollup states GitHub reports that mean the checks passed, and the ones that mean
@@ -776,6 +831,18 @@ def mark_board_stale(repo, now=None, delay=0):
     return True
 
 
+def _latest_stamp_key(cache):
+    """Which stamp `latest`'s own age is measured from: the split `latest_fetched_at`
+    where present, else the pre-#515 legacy fallback `fetched_at` -- the same test
+    `latest_is_due` and `latest_is_unknown` both apply, factored out so the two
+    thresholds cannot silently drift onto different keys."""
+    if isinstance(cache, dict) and not isinstance(
+        cache.get("latest_fetched_at"), (int, float)
+    ):
+        return "fetched_at"
+    return "latest_fetched_at"
+
+
 def latest_is_due(cache, now):
     """The same question for the published plugin versions, on the long clock.
 
@@ -783,12 +850,55 @@ def latest_is_due(cache, now):
     that one stamp is when those versions were fetched -- so it is what the age is measured
     from. Reading a missing stamp as "just now" would freeze the version column for a whole
     interval on every upgrade, which is the quiet direction to be wrong in.
+
+    This governs when `refresh()` re-asks -- a DIFFERENT question from whether the render
+    should still trust the old reading in the meantime; see `latest_is_unknown` for that one
+    (#1464).
     """
-    if isinstance(cache, dict) and not isinstance(
-        cache.get("latest_fetched_at"), (int, float)
-    ):
-        return _is_due(cache, "fetched_at", LATEST_REFRESH_AFTER, now)
-    return _is_due(cache, "latest_fetched_at", LATEST_REFRESH_AFTER, now)
+    return _is_due(cache, _latest_stamp_key(cache), LATEST_REFRESH_AFTER, now)
+
+
+def latest_is_unknown(cache, now):
+    """Should `gather()` fold the cached `latest` comparison to `unknown` (#1464, #1635)?
+
+    NOT the same threshold `latest_is_due` uses. A reading merely due -- however long
+    past `LATEST_REFRESH_AFTER` -- still renders as its last-known state, because the
+    detached refresh a due reading provokes is the thing that keeps it current; age on
+    its own is a trigger to refresh, never a reason to distrust what is already known
+    (#1635's own governing rule, applied here as well as to the board and doctor folds
+    it was filed over). Folding at the exact instant of due-ness -- or at any fixed
+    ceiling past it -- showed `unknown` for a comparison that was correct a second
+    earlier and would be correct again once the refresh lands.
+
+    `now` is accepted for signature symmetry with this module's other `now`-taking
+    predicates; it plays no part in the decision below.
+
+    Folds only on:
+
+    * a refresh was attempted and failed SINCE the last success -- `latest_refresh_failed_at`
+      newer than the stamp `_latest_stamp_key` reads. That is no longer "merely due", it is
+      known to be unconfirmable right now. A failure recorded BEFORE the most recent success
+      is stale news, superseded, and must not fold an otherwise-fine reading.
+    * no reading having been taken at all -- `_latest_stamp_key` names no stamp.
+
+    A former third leg, a hard `LATEST_UNKNOWN_AFTER` ceiling (2x the refresh interval),
+    was removed by #1635: it guarded a "refresh not landed yet" state that cannot persist
+    while the network works, since a due reading provokes its own refresh on every render
+    -- so a reading that stays old is a reading whose refreshes are failing, which the
+    failed-refresh check above already catches.
+
+    Does not affect a `latest` entry that was never fetched at all for a given plugin --
+    `version_status` already folds that to `unknown` because `theirs is None`, independent
+    of this function or `stale`.
+    """
+    if not isinstance(cache, dict):
+        return True
+    key = _latest_stamp_key(cache)
+    stamp = cache.get(key)
+    if not isinstance(stamp, (int, float)):
+        return True
+    failed_at = cache.get("latest_refresh_failed_at")
+    return isinstance(failed_at, (int, float)) and failed_at > stamp
 
 
 def _is_due(cache, key, interval, now):
@@ -867,6 +977,42 @@ def _trap_count(root):
     )
 
 
+# ------------------------------------------------------------------------- outbound
+
+
+def _outbound_count(root):
+    """How many drafts in `outbound/` are `pending` -- written, not yet sent
+    (#1395). Same split as `_trap_count` immediately above, for the identical
+    reason: a missing `outbound/` means nobody has drafted anything yet, a
+    real, measured `0`, while any other `OSError` means this listing could
+    not be taken at all and folds to `None` so it renders `?` rather than a
+    zero it never measured.
+
+    Vendored standalone, like `_trap_count`: this module ships into
+    `.oss/statusline.py` on its own, and `scripts/outbound_draft.py` is not
+    part of what gets copied there, so the state is parsed straight out of
+    each filename here rather than imported. `<issue>.<state>.<slug>.md` is
+    `outbound_draft.py`'s own naming convention; a name that does not match
+    it is not counted either way, the same as an unparsed `trap.d/` fragment
+    is still listed but not counted against a state it never declared.
+    """
+    path = Path(root) / "outbound"
+    try:
+        names = os.listdir(str(path))
+    except FileNotFoundError:
+        return 0
+    except OSError:
+        return None
+    count = 0
+    for name in names:
+        if not name.endswith(".md") or name.startswith(".") or name == "README.md":
+            continue
+        parts = name[: -len(".md")].split(".")
+        if len(parts) >= 3 and parts[0].isdigit() and parts[1] == "pending":
+            count += 1
+    return count
+
+
 def _render_stamp(now):
     """The wall-clock reading for the "stamp of the last render" field (#504).
 
@@ -910,6 +1056,7 @@ def _symbols(ascii_only):
             "run": "...",
             "unk": "?",
             "own": "b",
+            "prv": "u",
         }
     return {
         "sep": " | ",
@@ -938,6 +1085,13 @@ def _symbols(ascii_only):
         # on purpose", "a fifth state for the same reason"). Half-filled shape
         # reads as "handed off, half-heard" even before the colour is read.
         "own": "◐",
+        # `BOUND, UNPROVEN` (#1726): bound, verified and subscribed, but has
+        # never forwarded anything -- distinct from `own` above (nobody is
+        # subscribed there; here somebody is, and nothing has moved yet) and
+        # from `ok` (which means it HAS moved). Quarter-filled shape reads as
+        # "just started, no traffic yet" -- less filled than `own`'s half
+        # circle, on purpose.
+        "prv": "◔",
     }
 
 
@@ -977,16 +1131,30 @@ def _trap_field(traps):
     return "trap " + ("?" if not isinstance(traps, int) else str(traps))
 
 
+def _outbound_field(outbound):
+    """`out 2` / `out ?` -- drafts in `outbound/` waiting `pending`, beside the
+    `trap.d/` backlog and the inbound counts above (#1395).
+
+    `?`, never `0`, for a directory this render could not list -- the same
+    rule `_trap_field` already follows, applied to the one other count read
+    straight off the filesystem rather than off a cache.
+    """
+    return "out " + ("?" if not isinstance(outbound, int) else str(outbound))
+
+
 def _inbound_field(inbound):
     """`inb 2is 1pr` / `inb ?is ?pr` -- outside issues unruled and outside
     pull requests unreviewed, beside the `trap.d/` backlog above (#1406).
 
     `inbound` is `board.get("inbound")` -- the cached `inbound_reading()`
     document, or `None` for a cache written before this field existed. Each
-    count renders `?`, never `0`, exactly the rule `_trap_field` and
-    `_board_field`'s own `eis` group already follow: a zero from a read that
-    never happened and a zero from one that happened and found nothing must
-    not be the same pixels, which is the whole reason #1406 exists.
+    count renders `?`, never `0`, exactly the rule `_trap_field` already
+    follows: a zero from a read that never happened and a zero from one that
+    happened and found nothing must not be the same pixels, which is the
+    whole reason #1406 exists. `_board_field` used to render this exact
+    number a second time, as its own `eis` group, following the identical
+    rule -- #1463 removed that render, so this field is now the only one
+    that does.
 
     `unanswered_comments` is deliberately not a third number here.
     `inbound_reading` always reports it as `None` (see that function's own
@@ -1021,8 +1189,7 @@ def _last_field(stamp):
 
 
 def _board_field(board, symbols, color=False):
-    """`4pr 2ok 1x 1... 0? . 23is / 2eis` -- how many are open, what CI says about each,
-    and how many of the issues arrived from outside repository membership (#595).
+    """`4pr 2ok 1x 1... 0? . 23is` -- how many are open and what CI says about each.
 
     Lowercase because the fields either side of it are, and a status line that shouts one
     field trains the eye to read that one first regardless of what it says.
@@ -1031,14 +1198,16 @@ def _board_field(board, symbols, color=False):
     makes the reader subtract to find what is missing, and `0x` -- nothing red -- and `0...`
     -- nothing on the way -- are two of the more useful things this line can say. The one
     thing that does collapse is a reading that never happened: rollups nobody could fetch
-    render as a single `?`, never as four zeros. `eis` follows the same rule: `0eis` is a
-    real reading -- nobody outside has filed anything -- and it must stay visibly different
-    from `?eis`, a count nobody could take, because zero external issues is both a common
-    true answer and exactly what a failed call looks like.
+    render as a single `?`, never as four zeros.
+
+    Used to also render `/ Neis`, the count of open issues filed from outside repository
+    membership (#595) -- the identical number `_inbound_field`'s `is` group already carries
+    (#1406), taken from the same call. #1463 drops the duplicate render here; `refresh()`
+    still caches the count under `issues_external` (old caches still parse), it is just no
+    longer rendered twice on the one line.
     """
     prs = board.get("prs")
     issues = board.get("issues")
-    issues_external = board.get("issues_external")
     checks = board.get("checks")
     if isinstance(checks, dict):
         groups = " ".join(
@@ -1052,12 +1221,11 @@ def _board_field(board, symbols, color=False):
         )
     else:
         groups = symbols["unk"]
-    return "{}pr {}{}{}is / {}eis".format(
+    return "{}pr {}{}{}is".format(
         "?" if not isinstance(prs, int) else prs,
         groups,
         symbols["dot"],
         "?" if not isinstance(issues, int) else issues,
-        "?" if not isinstance(issues_external, int) else issues_external,
     )
 
 
@@ -1069,18 +1237,47 @@ def _group(count, symbol, shade, color):
     return (shade if count else DIM) + text + RESET
 
 
+def _with_release_trigger(progress, config):
+    """Fold `.oss.json`'s `release.triggers.merged_prs` onto a release-progress dict.
+
+    A merged-PR count is a different unit from `since`'s commit count (#1692), so this
+    never rewrites `since` or `typical` -- it only adds `trigger`, which `_release_field`
+    renders with its own unit marker rather than ever presenting the two as one ratio.
+    """
+    trigger = ((config or {}).get("release") or {}).get("triggers") or {}
+    trigger = trigger.get("merged_prs")
+    if not isinstance(trigger, int):
+        return progress
+    return dict(progress or {}, trigger=trigger)
+
+
 def _release_field(progress):
     """`rel 4/17` -- banked since the last release, over what a release here usually costs.
 
     Each half carries its own `?`, because they fail separately: a clone with one tag knows
     exactly how much is banked and nothing about the usual size, and `rel 4/?` says that
     where a single `?` would throw away the half that was measured.
+
+    A repository with no version tag at all still has a measured numerator -- every commit
+    in the window is banked toward a first release (#1692) -- rendered plain (`rel 5/?`) when
+    the window reached the root commit, or with a trailing `+` (`rel 500+/?`) when
+    `since_floor` says the count is a truncation rather than the whole history.
+
+    `trigger` is a merged-PR count, a different unit from `since`'s commits, so whenever it
+    is present both halves carry a unit marker (`rel 5c/8pr`) rather than ever rendering as
+    one bare ratio that looks like a single unit.
     """
     progress = progress or {}
     since = progress.get("since")
     typical = progress.get("typical")
+    trigger = progress.get("trigger")
+    since_text = "?" if not isinstance(since, int) else str(since)
+    if isinstance(since, int) and progress.get("since_floor"):
+        since_text += "+"
+    if isinstance(trigger, int):
+        return "rel {}c/{}pr".format(since_text, trigger)
     return "rel {}/{}".format(
-        "?" if not isinstance(since, int) else since,
+        since_text,
         "?" if not isinstance(typical, int) else typical,
     )
 
@@ -1208,18 +1405,21 @@ def _channel_field(channel, symbols, color=False):
 
     Three or four characters -- the same width discipline `_plugins_field` (#512)
     argues for (that field spent 45 characters saying nothing on almost every
-    render), scaled down for a field with five possible states rather than a
+    render), scaled down for a field with six possible states rather than a
     per-plugin list.
     `None` -- never a placeholder `?` -- when `watch_channel` is off in
     `.oss.json`: an operator's deliberate off switch is not the same absence as
     a question this line asked and could not answer, and the whole point of the
     third state this repository is named after is keeping those apart.
 
-    The five upstream states map to distinct markers because they call for
-    distinct actions (the issue's own table): a pass, a definite negative, a
-    finding that is neither, a contradiction, and "nothing was established".
-    `CONTRADICTED` renders uncoloured on purpose, matching the issue's own table,
-    whose shade column is blank for that row alone.
+    The six upstream states map to distinct markers because they call for
+    distinct actions (the issue's own table, plus #1726's own sixth row): a
+    pass, a definite negative, a finding that is neither, a contradiction,
+    "nothing was established", and "verified but unproven" -- bound and
+    subscribed, but nothing has forwarded yet, which is neither a pass nor a
+    finding that something is wrong. `CONTRADICTED` renders uncoloured on
+    purpose, matching the issue's own table, whose shade column is blank for
+    that row alone.
 
     **What this must never claim, in the render layer too, not only in the
     docstrings that compute the state:** `forwarding` means the consumer's own
@@ -1237,6 +1437,8 @@ def _channel_field(channel, symbols, color=False):
         text, shade = "ch" + symbols["bad"], RED
     elif state == "not_subscribed":
         text, shade = "ch" + symbols["own"], YELLOW
+    elif state == "unproven":
+        text, shade = "ch" + symbols["prv"], YELLOW
     elif state == "contradicted":
         text, shade = "ch!", None
     else:
@@ -1258,9 +1460,17 @@ def _doctor_field(state, symbols, color=False):
     `symbols["own"]`, doctor's `usable with gaps` -- reusing the glyph `_channel_field`
     uses for its own "a real finding that is neither pass nor fail" state, because that
     is exactly what a WARN is here too. `"bad"` -> `symbols["bad"]`, `not usable`.
-    Anything else -- `None`, because the reading is absent or stale (folded by
-    `gather()` before this function ever sees it), or a verdict shape doctor has never
-    printed -- renders `symbols["unk"]`, never a guess.
+    `"timeout"` -> `symbols["run"]`, in YELLOW rather than DIM (#1650): a refresh that
+    hit `DOCTOR_TIMEOUT` is real work that did not finish in time, the same "not
+    settled yet, look again later" shape `_gh_branch_field`'s own `running`/`no-run`
+    collapse already argues for -- never the same glyph as "no reading was ever taken".
+    Anything else -- `None`, because the reading was never taken at all, or a due
+    refresh was actually attempted and got nothing back for a reason other than a
+    timeout (`doctor_refresh_failed_at`, folded by `gather()` before this function
+    ever sees it -- #1635), or a verdict shape doctor has never printed -- renders
+    `symbols["unk"]`, never a guess. A reading merely due for its own refresh interval
+    is NOT folded here any more (#1635): `gather()` keeps rendering the last-known
+    verdict while a refresh is merely in flight.
 
     **Named risk, not fixed here (the issue's own "Edge case" section, #1314): a
     single persistent false-positive WARN pins this marker at the `gaps` glyph
@@ -1276,6 +1486,8 @@ def _doctor_field(state, symbols, color=False):
         text, shade = "dr" + symbols["own"], YELLOW
     elif state == "bad":
         text, shade = "dr" + symbols["bad"], RED
+    elif state == "timeout":
+        text, shade = "dr" + symbols["run"], YELLOW
     else:
         text, shade = "dr" + symbols["unk"], DIM
     if not color:
@@ -1317,13 +1529,16 @@ def _default_branch_marker(state, symbols, color=False):
     and a marker that silently drifted to mean "is MY branch green" would be
     actively misleading rather than merely wrong.
 
-    `None` -- rendering nothing, never `?` -- when `state` is `None`: either the
-    config declares no default branch to compare against (a deliberate absence of
-    the question, the channel field's own convention, #613), or `gather()` has
-    already folded a stale reading into `"unknown"` before this function ever
-    sees it, in which case `state == "unknown"` reaches here and DOES render --
-    the `unk` glyph -- because a stale reading is a real answer ("we cannot
-    currently say"), not the same absence as never having asked at all.
+    `None` -- rendering nothing, never `?` -- when `state` is `None`: the config
+    declares no default branch to compare against (a deliberate absence of the
+    question, the channel field's own convention, #613). A reading `gather()` has
+    folded to `"unknown"` -- a recorded failed refresh, `stale_after` having
+    invalidated it (this session's own merge/close, #516), or a value that was
+    never fetched at all (#1635) -- reaches here as `state == "unknown"` and DOES
+    render, the `unk` glyph, because that is a real answer ("we cannot currently
+    say"), not the same absence as never having asked at all. A reading merely
+    due for its own refresh interval, with none of the above, is NOT folded any
+    more (#1635) and reaches here as its own last-known state instead.
 
     Colour reinforces the glyph and is never its only carrier (#549/#550): every
     state below is a distinct shape in `_symbols`, monochrome or not.
@@ -1403,6 +1618,7 @@ def render(facts, ascii_only=False, color=False):
     blocks.append(_unlabelled_field(board))
     blocks.append(_release_field(facts.get("release")))
     blocks.append(_trap_field(facts.get("traps")))
+    blocks.append(_outbound_field(facts.get("outbound")))
     blocks.append(_inbound_field(board.get("inbound")))
     blocks.append(_last_field(facts.get("last")))
 
@@ -1412,8 +1628,13 @@ def render(facts, ascii_only=False, color=False):
         blocks.append(channel_block)
     # Always shown, unlike `ch` above -- there is no deliberate off switch for
     # `/oss:doctor` the way `watch_channel: false` turns the channel field off
-    # (#613's own convention), so an absent or stale reading renders `dr?` rather
-    # than disappearing from the line (#1314).
+    # (#613's own convention), so a reading never taken, or one a due refresh
+    # actually attempted and failed to get back for a reason other than a
+    # timeout, renders `dr?` rather than disappearing from the line (#1314). A
+    # refresh that instead hit DOCTOR_TIMEOUT renders its own distinct marker
+    # (#1650) -- never the same `dr?` a never-configured doctor gets. A reading
+    # merely due for its own refresh interval renders its last-known verdict
+    # instead (#1635).
     blocks.append(_doctor_field(facts.get("doctor_state"), symbols, color))
     return symbols["sep"].join(blocks)
 
@@ -1431,14 +1652,9 @@ def repo_root(start):
 
 def repo_config(root):
     try:
-        doc = json.loads((Path(root) / ".oss.json").read_text(encoding="utf-8"))
+        return json.loads((Path(root) / ".oss.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
-    # #727 sibling: every caller of this function does `.get(...)` on the
-    # result with no isinstance check of its own (repo_version's sibling
-    # crash class, F14/F15) -- .oss.json is repo-tracked and PR-editable, so
-    # a non-object document must not propagate as one.
-    return doc if isinstance(doc, dict) else {}
 
 
 def repo_version(root):
@@ -1449,13 +1665,7 @@ def repo_version(root):
     """
     manifest = Path(root) / ".claude-plugin" / "plugin.json"
     try:
-        doc = json.loads(manifest.read_text(encoding="utf-8"))
-        # #727 (F14): plugin.json is repo-tracked and PR-editable, and
-        # json.loads happily returns a list/str/int/None for a syntactically
-        # valid non-object document -- `.get` on any of those raised
-        # AttributeError with no `except` above it, crashing the whole
-        # status line render, not just this field.
-        version = doc.get("version") if isinstance(doc, dict) else None
+        version = json.loads(manifest.read_text(encoding="utf-8")).get("version")
         if version:
             return version
     except (OSError, ValueError):
@@ -1566,11 +1776,7 @@ def installed_plugins(project_root, plugins_root=None):
         return {}
     project = _normalized_path(project_root) if project_root is not None else None
     found = {}
-    # #727 sibling: installed_plugins.json is not this module's own file
-    # either -- same non-dict-JSON crash class as F14/F15, guarded the same
-    # way rather than assuming `doc` is a dict.
-    plugins = doc.get("plugins") if isinstance(doc, dict) else None
-    for key, entries in (plugins or {}).items():
+    for key, entries in (doc.get("plugins") or {}).items():
         name = key.split("@", 1)[0]
         for entry in entries or []:
             if not _entry_applies(entry, project):
@@ -1591,15 +1797,6 @@ def installed_plugins(project_root, plugins_root=None):
                         ).read_text(encoding="utf-8")
                     )
                 except (OSError, ValueError):
-                    continue
-                # Self-review finding on this issue (#727): this manifest is
-                # the same PR-editable/attacker-plantable class F14 already
-                # names for repo_version's own read of the identical file --
-                # a syntactically valid non-object plugin.json here raised
-                # AttributeError out of `.get`, uncaught by anything in this
-                # function, the same crash the surrounding guards exist to
-                # close.
-                if not isinstance(manifest, dict):
                     continue
                 record["repository"] = manifest.get("repository")
                 record["dependencies"] = manifest.get("dependencies") or []
@@ -1684,16 +1881,35 @@ def _malformed_repo(repo):
     """
     if not isinstance(repo, str) or not _REPO_RE.match(repo):
         return True
-    return ".." in repo.split("/")
+    if ".." in repo.split("/"):
+        return True
+    # #1401 closed this gap with a separate check because `_REPO_RE` was, at
+    # the time, pinned byte-for-byte against `oss_config.REPO_RE`
+    # (`tests/test_statusline_watch_name_refusal_653.py`) and widening it
+    # here alone would have broken that pin. #1475 widened the excluded
+    # class at the canonical source instead -- `oss_config.REPO_RE` itself
+    # now excludes `?` and `#`, and this copy was updated to match, so
+    # `_REPO_RE.match(repo)` above already refuses both. This explicit
+    # check is redundant for `repo` as a result; kept rather than deleted,
+    # both as a second line of defense and because `_BRANCH_UNSAFE_RE`
+    # reuses the identical two characters for `branch`, which has no
+    # equivalent pinned pattern to fold them into.
+    return bool(_REPO_QUERY_FRAGMENT_RE.search(repo))
 
 
 #: A branch name may legitimately carry a slash (`release/1.0`) and sits as
-#: the LAST path segment in `"repos/{}/commits/{}/...".format(repo, branch)`,
-#: so this excludes it -- unlike `_REPO_RE`, which requires exactly one.
-#: Whitespace and `?` (which would start a bogus query string mid-path) are
-#: refused outright; `..` is checked separately in `_malformed_api_ref` below,
-#: matching claude-supertool's own split (#1035, upstream #2245).
-_BRANCH_UNSAFE_RE = re.compile(r"[\s?]")
+#: a path segment in `"repos/{}/commits/{}/...".format(repo, branch)` -- NOT
+#: always the last one, correcting this comment's own prior claim (self-review
+#: finding, #1399's own reviewer round): `_reading_from_check_runs` appends
+#: `/check-runs` after it and `_reading_from_combined_status` appends
+#: `/status`, so this excludes the slash unlike `_REPO_RE`, which requires
+#: exactly one. Whitespace, `?` and `#` (either of which would start a bogus
+#: query string or fragment mid-path, truncating or redirecting whatever
+#: segment follows `branch`) are refused outright -- `#` added alongside `?`
+#: for the identical reason `_REPO_QUERY_FRAGMENT_RE` above refuses both for
+#: `repo`; `..` is checked separately in `_malformed_api_ref` below, matching
+#: claude-supertool's own split (#1035, upstream #2245).
+_BRANCH_UNSAFE_RE = re.compile(r"[\s?#]")
 
 
 def _malformed_api_ref(repo, branch):
@@ -1888,7 +2104,12 @@ def _gh_external_pr_count(repo, total):
     return external
 
 
-def inbound_reading(repo, issues_total, prs_total):
+_NOT_GIVEN = (
+    object()
+)  # sentinel: distinguishes "no precomputed count" from a real `None`
+
+
+def inbound_reading(repo, issues_total, prs_total, unruled_issues=_NOT_GIVEN):
     """How much of what arrived from outside is still waiting -- #1405/#1406.
 
     **One module, two consumers**, per the design note on #1405: `refresh()`
@@ -1896,7 +2117,7 @@ def inbound_reading(repo, issues_total, prs_total):
     the statusline must never block a prompt on a fresh forge round trip.
     `scripts/next_action.py`'s own `_fresh_inbound_reading` calls this
     function directly, with totals it took a moment ago, because the loop is
-    about to act on the answer and can afford the two calls. Neither is a
+    about to act on the answer and can afford the reads. Neither is a
     second opinion about the other; both call this.
 
     `unruled_issues` -- open issues authored by someone outside repository
@@ -1907,6 +2128,14 @@ def inbound_reading(repo, issues_total, prs_total):
     that. `unreviewed_prs` -- the identical reading for open pull requests
     (`_gh_external_pr_count` against `prs_total`): the loop's own review has
     not landed a merge or a close on it yet.
+
+    The `unruled_issues` *parameter* (confusingly the same name as the
+    return key -- see below) lets a caller that already took this exact
+    reading hand it in rather than pay for it twice (#1463): `refresh()`
+    passes its own `document["issues_external"]`, `None` included, so a
+    failed read is not retried here either. Left unset (`next_action.py`'s
+    own call shape, three positional arguments, nothing precomputed), this
+    function takes the reading itself, exactly as it always has.
 
     `unanswered_comments` is always `None` here. Counting it for real means
     walking every open issue and pull request's own comment thread -- one
@@ -1922,7 +2151,10 @@ def inbound_reading(repo, issues_total, prs_total):
     quietly reads as `0`, the same discipline `_gh_external_issue_count`
     already applies to its own row-count cross-check.
     """
-    unruled = _gh_external_issue_count(repo, issues_total)
+    if unruled_issues is _NOT_GIVEN:
+        unruled = _gh_external_issue_count(repo, issues_total)
+    else:
+        unruled = unruled_issues
     unreviewed = _gh_external_pr_count(repo, prs_total)
     state = (
         "measured"
@@ -2367,17 +2599,9 @@ def _latest_release(repo):
     try:
         import base64
 
-        doc = json.loads(base64.b64decode(encoded).decode("utf-8"))
+        return json.loads(base64.b64decode(encoded).decode("utf-8")).get("version")
     except (ValueError, TypeError, UnicodeDecodeError):
         return None
-    # #727 (F15): a remote manifest that parses to a JSON list/string/number/
-    # null raised AttributeError out of `.get`, which the except tuple above
-    # did not catch -- the cache was never rewritten and the lock at
-    # `_lock_path` was never released, freezing the rendered board at stale
-    # counts every 180s thereafter.
-    if not isinstance(doc, dict):
-        return None
-    return doc.get("version")
 
 
 def _watch_preset_declared(root):
@@ -2415,20 +2639,20 @@ def _run_channel_health(timeout=30):
     """The raw text of `supertool 'channel:health'`, regardless of its exit code.
 
     NOT `_run`: that helper returns `None` on any non-zero exit, and `NOT
-    DELIVERING`/`CANNOT DETERMINE`/`CONTRADICTED`/`BOUND, NOT SUBSCRIBED` are
-    all real, distinct findings that exit non-zero on purpose (supertool's own
-    `presets/watch/channel.py`: "a single non-zero would put answers this op
-    exists to separate back into one bucket"). Using `_run` here would fold
-    four of the five real states into the same `None` a missing binary
-    produces, which is the exact defect this field exists to stop happening to
-    the loop's own instrumentation.
+    DELIVERING`/`CANNOT DETERMINE`/`CONTRADICTED`/`BOUND, NOT SUBSCRIBED`/
+    `BOUND, UNPROVEN` are all real, distinct findings that exit non-zero on
+    purpose (supertool's own `presets/watch/channel.py`: "a single non-zero
+    would put answers this op exists to separate back into one bucket").
+    Using `_run` here would fold five of the six real states into the same
+    `None` a missing binary produces, which is the exact defect this field
+    exists to stop happening to the loop's own instrumentation.
 
     30s, not the 1-3s the issue's own measurement names: that number is the
     ordinary case, and `MCP_LOOKUP_BUDGET` plus `PS_TIMEOUT` (supertool's own
     constants) put a documented worst case north of 20s when a lookup is slow
     rather than merely present.
 
-    **`argv[0]` is resolved through `_safe_which` first (#725), the same way
+    **`argv[0]` is resolved through `_safe_which` first (#1399), the same way
     `_run` above resolves `git`/`gh`.** This used to hand `"supertool"` to
     `subprocess.run` bare, which on Windows lets a same-named
     `supertool.exe`/`supertool.cmd` planted at the root of the repository
@@ -2628,9 +2852,7 @@ def _installed_plugin_root(project_root, name, plugins_root=None):
     except (OSError, ValueError):
         return None
     project = _normalized_path(project_root) if project_root is not None else None
-    # #727 sibling: same non-dict-JSON crash class as F14/F15/installed_plugins.
-    plugins = doc.get("plugins") if isinstance(doc, dict) else None
-    for key, entries in (plugins or {}).items():
+    for key, entries in (doc.get("plugins") or {}).items():
         if key.split("@", 1)[0] != name:
             continue
         for entry in entries or []:
@@ -2704,13 +2926,25 @@ def _doctor_verdict_state(verdict):
     return None
 
 
+#: Sentinel `_doctor_reading` returns instead of `None` specifically when
+#: `DOCTOR_TIMEOUT` was hit (#1650) -- distinct from every other absence (no
+#: `doctor.py` found, the subprocess could not start, a non-zero exit, no
+#: `VERDICT:` line in its output), which still return plain `None`. A timeout
+#: is real work that ran out of time, not evidence there is nothing to report;
+#: folding it into the same `None` as a never-configured doctor is this
+#: repository's own defect class -- an absence produced by the instrument,
+#: rendered the same as an absence in the world (#1650).
+_DOCTOR_TIMED_OUT = object()
+
+
 def _doctor_reading(root):
     """Run `doctor.py --root <root>` and read back its own last `VERDICT:` line
-    (#1314). Returns the raw text after `"VERDICT:"`, or `None` when no `doctor.py`
-    could be located (`_doctor_script_path`), the subprocess could not be started,
-    timed out, or exited non-zero -- which, by doctor's own "exit 0 always" contract
-    (see its module docstring), should never happen, but is treated here as a real
-    absence rather than trusted blindly.
+    (#1314). Returns the raw text after `"VERDICT:"`; `_DOCTOR_TIMED_OUT` when the
+    run hit `DOCTOR_TIMEOUT` specifically (#1650); or `None` for every other kind
+    of absence -- no `doctor.py` could be located (`_doctor_script_path`), the
+    subprocess could not be started, or it exited non-zero, which, by doctor's own
+    "exit 0 always" contract (see its module docstring), should never happen, but
+    is treated here as a real absence rather than trusted blindly.
 
     Not routed through `_run()`: that helper resolves `command[0]` on `PATH` via
     `_safe_which` (#1295), which defends against a same-named `git.exe`/`gh.cmd`
@@ -2734,6 +2968,8 @@ def _doctor_reading(root):
             stderr=subprocess.DEVNULL,
             timeout=DOCTOR_TIMEOUT,
         )
+    except subprocess.TimeoutExpired:
+        return _DOCTOR_TIMED_OUT
     except (OSError, subprocess.SubprocessError):
         return None
     if result.returncode != 0:
@@ -2801,13 +3037,21 @@ def refresh(root, now=None, session_id=None):
         document["issues_no_priority"] = (unlabelled or {}).get("no_priority")
         document["issues_no_lane"] = (unlabelled or {}).get("no_lane")
         document["pr_checks"] = check_rollup_counts(_gh_rollups(repo), document["prs"])
-        # Same board clock as everything above (#1406): two more calls of the
+        # Same board clock as everything above (#1406): one more call of the
         # identical shape `issues_external` already makes, so folding this
         # into the existing REFRESH_AFTER cadence rather than inventing a
         # separate clock is a deliberate choice, not an oversight -- see
         # `inbound_reading`'s own docstring for the "one module, two
-        # consumers" design this composes into.
-        document["inbound"] = inbound_reading(repo, document["issues"], document["prs"])
+        # consumers" design this composes into. `unruled_issues` is handed
+        # the count `issues_external` above already took (#1463) rather than
+        # letting `inbound_reading` take it a second time -- None included,
+        # so a failed read is not silently retried into a second forge call.
+        document["inbound"] = inbound_reading(
+            repo,
+            document["issues"],
+            document["prs"],
+            unruled_issues=document["issues_external"],
+        )
         # Same call group, same `fetched_at`, same `stale_after` (#856): the default
         # branch's own CI state is exactly as time-sensitive as the pull-request board
         # it sits beside, and it shares the moment (a merge or an issue close in this
@@ -2819,18 +3063,36 @@ def refresh(root, now=None, session_id=None):
         # be indistinguishable from a cache written before this field existed, which
         # is exactly the ambiguity `pr_checks`' own `isinstance` guard exists to avoid.
         # `_gh_default_branch_state` itself already answers `None` for an unconfigured
-        # `default_branch`, so no separate `if` is needed here.
-        document["default_branch_state"] = _gh_default_branch_state(
-            repo, config.get("default_branch")
-        )
+        # `default_branch`, so no separate `if` is needed to tell the two `None`s apart
+        # here -- only `board_refresh_failed_at` below needs to, since ONLY the second
+        # (configured-but-unanswered) is a genuine failure to record (#1635).
+        new_branch_state = _gh_default_branch_state(repo, config.get("default_branch"))
+        if config.get("default_branch") and new_branch_state is None:
+            # Configured, but this attempt got nothing back. Mirrors `latest`'s own
+            # failure handling (#1464): keep the last-known state rather than
+            # overwriting it with `None`, and record that this attempt failed so
+            # `gather()` can tell "still due" from "asked and failed" (#1635).
+            document["default_branch_state"] = previous.get("default_branch_state")
+            document["board_refresh_failed_at"] = now
+        else:
+            document["default_branch_state"] = new_branch_state
+            # A success -- or a deliberately unconfigured `default_branch`, which is
+            # not a failure at all -- clears any prior failure marker, exactly as
+            # `latest` does: a stale marker left in place would keep folding a
+            # now-good (or now-moot) reading to `unknown`.
+            document["board_refresh_failed_at"] = None
     carried = previous.get("latest")
     carried = dict(carried) if isinstance(carried, dict) else {}
     carried_stamp = previous.get("latest_fetched_at")
     if not isinstance(carried_stamp, (int, float)):
         carried_stamp = previous.get("fetched_at")
+    carried_failed_at = previous.get("latest_refresh_failed_at")
     if not latest_is_due(previous, now):
         document["latest"] = carried
         document["latest_fetched_at"] = carried_stamp
+        # Not attempted this pass -- whatever failure record was already there (or
+        # was not) carries forward unchanged; this is not itself an ask.
+        document["latest_refresh_failed_at"] = carried_failed_at
     else:
         latest = {}
         answered = False
@@ -2844,12 +3106,19 @@ def refresh(root, now=None, session_id=None):
         if answered:
             document["latest"] = latest
             document["latest_fetched_at"] = now
+            # A success clears any prior failure -- leaving a stale failure marker in
+            # place would keep folding a now-good reading to `unknown` (#1464).
+            document["latest_refresh_failed_at"] = None
         else:
             # Asked and got nothing back. A network that answered once and cannot now is
             # not a plugin with no published version, so the previous reading stays --
             # under its own old stamp, which is what makes it due again immediately.
+            # The failure IS recorded, though (#1464): silently leaving the old stamp in
+            # place read identically to "not due yet", and `latest_is_unknown` needs to
+            # tell "still due" from "asked and got nothing" to fold correctly.
             document["latest"] = carried
             document["latest_fetched_at"] = carried_stamp
+            document["latest_refresh_failed_at"] = now
     if config.get("watch_channel") is False:
         # A deliberate off switch (#613): no reading, no stamp, and never
         # carried forward from a previous `on` state -- `channel_status` reads
@@ -2858,41 +3127,103 @@ def refresh(root, now=None, session_id=None):
         # question nobody could answer.
         document["channel"] = None
         document["channel_fetched_at"] = None
+        document["channel_refresh_failed_at"] = None
     else:
         previous_channel_stamp = previous.get("channel_fetched_at")
+        previous_channel_failed_at = previous.get("channel_refresh_failed_at")
         channel_due = not isinstance(previous_channel_stamp, (int, float)) or (
             now - previous_channel_stamp >= CHANNEL_REFRESH_AFTER
         )
         if channel_due:
             raw_state, attribution = _channel_reading(root, config)
-            document["channel"] = {
-                "raw_state": raw_state,
-                "attribution": attribution,
-                # #1362 -- which session took this reading, so a later render
-                # (possibly a different session on this same repository) can
-                # tell whether it is entitled to adopt it.
-                "session": session_id,
-            }
-            document["channel_fetched_at"] = now
+            if raw_state is None:
+                # Asked and got nothing back (#1636, mirroring `latest`'s own
+                # failure handling, #1464, and the board's/doctor's, #1635):
+                # the old reading and its old stamp stay in place (so the next
+                # render treats this as still due, retrying sooner rather than
+                # waiting out a fresh-looking `CHANNEL_REFRESH_AFTER`), and the
+                # failure IS recorded so `channel_status` can tell "still due"
+                # from "asked and failed". A raw_state that IS a string but not
+                # one of the six recognised ones is a DIFFERENT case (a real
+                # answer, just an unexpected one) and takes the `else` branch
+                # below like any other success -- `channel_status`'s own
+                # `"unrecognized"` reason catches that one, unconditionally.
+                document["channel"] = previous.get("channel")
+                document["channel_fetched_at"] = previous_channel_stamp
+                document["channel_refresh_failed_at"] = now
+            else:
+                document["channel"] = {
+                    "raw_state": raw_state,
+                    "attribution": attribution,
+                    # #1362 -- which session took this reading, so a later
+                    # render (possibly a different session on this same
+                    # repository) can tell whether it is entitled to adopt it.
+                    "session": session_id,
+                }
+                document["channel_fetched_at"] = now
+                # A success clears any prior failure -- leaving a stale
+                # failure marker in place would keep folding a now-good
+                # reading to `cannot_determine` (#1636).
+                document["channel_refresh_failed_at"] = None
         else:
             # Carried forward under its OWN old stamp, same shape as `latest`
             # above and for the same reason: re-stamping `now` would make an
             # old reading indistinguishable from a fresh one at the render.
             document["channel"] = previous.get("channel")
             document["channel_fetched_at"] = previous_channel_stamp
+            # Not attempted this pass -- whatever failure record was already
+            # there (or was not) carries forward unchanged; this is not
+            # itself an ask.
+            document["channel_refresh_failed_at"] = previous_channel_failed_at
     previous_doctor_stamp = previous.get("doctor_fetched_at")
+    previous_doctor_failed_at = previous.get("doctor_refresh_failed_at")
     doctor_due = not isinstance(previous_doctor_stamp, (int, float)) or (
         now - previous_doctor_stamp >= DOCTOR_REFRESH_AFTER
     )
+    previous_doctor_timed_out_at = previous.get("doctor_refresh_timed_out_at")
     if doctor_due:
-        document["doctor_verdict"] = _doctor_reading(root)
-        document["doctor_fetched_at"] = now
+        new_verdict = _doctor_reading(root)
+        if new_verdict is _DOCTOR_TIMED_OUT:
+            # Asked and the run itself hit DOCTOR_TIMEOUT (#1650) -- a real
+            # attempt that ran out of time, not the same "nothing to report" as
+            # every other absence. Same carry-forward shape as the plain-failure
+            # branch below, plus its own stamp so `gather()` can render a state
+            # distinct from "asked and failed for some other reason".
+            document["doctor_verdict"] = previous.get("doctor_verdict")
+            document["doctor_fetched_at"] = previous_doctor_stamp
+            document["doctor_refresh_failed_at"] = now
+            document["doctor_refresh_timed_out_at"] = now
+        elif new_verdict is None:
+            # Asked and got nothing back, for a reason other than a timeout.
+            # Mirrors `latest`'s own failure handling (#1464) and the board's
+            # above (#1635): the old stamp stays in place (so the next render
+            # treats this as still due, retrying sooner rather than waiting out
+            # a fresh-looking `DOCTOR_REFRESH_AFTER`), the old verdict is kept
+            # rather than overwritten with `None`, and the failure IS recorded
+            # so `gather()` can tell "still due" from "asked and failed".
+            document["doctor_verdict"] = previous.get("doctor_verdict")
+            document["doctor_fetched_at"] = previous_doctor_stamp
+            document["doctor_refresh_failed_at"] = now
+            # This attempt was not a timeout -- clear a stale timeout marker so
+            # a later, non-timeout failure does not keep rendering as one.
+            document["doctor_refresh_timed_out_at"] = None
+        else:
+            document["doctor_verdict"] = new_verdict
+            document["doctor_fetched_at"] = now
+            # A success clears any prior failure -- leaving a stale failure marker
+            # in place would keep folding a now-good reading to `unknown`.
+            document["doctor_refresh_failed_at"] = None
+            document["doctor_refresh_timed_out_at"] = None
     else:
         # Carried forward under its OWN old stamp, same shape as `channel`/`latest`
         # above and for the same reason: re-stamping `now` would make an old reading
         # indistinguishable from a fresh one at the render.
         document["doctor_verdict"] = previous.get("doctor_verdict")
         document["doctor_fetched_at"] = previous_doctor_stamp
+        # Not attempted this pass -- whatever failure record was already there (or
+        # was not) carries forward unchanged; this is not itself an ask.
+        document["doctor_refresh_failed_at"] = previous_doctor_failed_at
+        document["doctor_refresh_timed_out_at"] = previous_doctor_timed_out_at
     path = cache_path(repo)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
@@ -3072,14 +3403,23 @@ def _fork_refresh(root, repo, session_id=None):
     `.supertool.json`: a value this module cannot trust is treated as
     absent, never as a crash.
     """
+    # #1373's own reviewer round: this used to return nothing on every path,
+    # so a caller like `doctor_check_statusline_unknowns.py`'s
+    # `_maybe_fork_refresh` could not tell "a fresh refresh was actually
+    # started just now" from "nothing happened" (a busy lock, a lock write
+    # that failed, a `Popen` that could not start) -- and reported a WARN
+    # claiming a fork had "just" happened regardless of which one occurred.
+    # Returns `True` only when this call itself started a NEW detached
+    # process; `False` for every skip or failure below, so the caller's own
+    # message can stop overclaiming.
     lock = _lock_path(repo)
     try:
         lock.parent.mkdir(parents=True, exist_ok=True)
         if lock.exists() and time.time() - lock.stat().st_mtime < LOCK_STALE_AFTER:
-            return
+            return False
         lock.write_text(str(time.time()), encoding="utf-8")
     except OSError:
-        return
+        return False
     argv = [
         sys.executable,
         os.path.abspath(__file__),
@@ -3098,7 +3438,35 @@ def _fork_refresh(root, repo, session_id=None):
             start_new_session=True,
         )
     except (OSError, ValueError):
-        pass
+        return False
+    return True
+
+
+def fork_refresh(root, repo, now=None, session_id=None):
+    """Public entry point for `_fork_refresh`, for a caller outside this
+    module's own render path (#1373) -- `doctor_check_statusline_unknowns.py`
+    calls this the moment IT finds a stale cache during its own read, rather
+    than reaching into the leading-underscore `_fork_refresh` this module's
+    own `_fork_refresh` docstring says every other cross-module caller in
+    this codebase avoids.
+
+    Same lock-file dedup, same detached `Popen` as the render path's own
+    call inside `gather()` -- a doctor run and a live statusline render
+    racing on the same stale cache fork at most one refresh between them,
+    never two. `now` is accepted for signature symmetry with this module's
+    other now-taking functions but is not itself used: the lock's own
+    staleness check reads the real wall clock via `time.time()`, the same
+    as `_fork_refresh` always has, so a test driving `now` synthetically
+    does not change which lock state this function sees.
+
+    Returns `_fork_refresh`'s own `True`/`False` (#1373's own reviewer
+    round) -- `True` only when THIS call started a fresh detached process,
+    `False` for a busy lock, a lock write that failed, or a `Popen` that
+    could not start -- so a caller like `doctor_check_statusline_unknowns.
+    py` can word its own message honestly instead of always claiming a
+    refresh was "just" forked.
+    """
+    return _fork_refresh(root, repo, session_id=session_id)
 
 
 # ---------------------------------------------------------------------------- main
@@ -3126,19 +3494,50 @@ def gather(payload, root, now=None):
     board_stale = board_is_due(cache, now)
     if board_stale:
         _fork_refresh(root, config.get("repo"), current_session)
-    # Same fold `plugin_facts`/`version_status` already do for `latest` (#550), on
-    # the same board clock `board_is_due` already computes above -- `default_branch`
-    # itself present-but-unconfigured stays `None` (never asked, #613's own
-    # convention), and a configured one whose reading has outlived `board_is_due`'s
-    # own interval (or was marked stale by this session's own merge/close, #516)
-    # folds to `"unknown"` rather than rendering whatever it last said. This is the
-    # one field on this line where a stale `ok` is actively dangerous: #856's own
-    # motivating case is the moment right after a merge, when the previous reading
-    # is confidently green about a commit that no longer exists.
+    # #1635: MERE interval age is a trigger to refresh (via `board_stale`/
+    # `_fork_refresh` just above), never a reason to distrust what is already
+    # known -- the same rule #1464 already applied to `latest` below, extended
+    # here to the board. A reading merely due for `REFRESH_AFTER` keeps
+    # rendering its last-known state; `_fork_refresh` has already been asked to
+    # replace it in this same pass.
+    #
+    # `stale_after` is a DIFFERENT trigger of `board_is_due` and is NOT covered
+    # by that relaxation (self-review finding, #1635): it is written by the
+    # `PostToolUse` hook the moment THIS session merges a pull request or
+    # closes an issue (#516), and the issue's own recon left this exact
+    # question open ("item 4") without resolving it either way. The danger
+    # #856 was filed over is real here specifically: right after a merge, the
+    # cached `raw_branch_state` is not merely old, it is confidently `green`
+    # about a commit that no longer exists, for the whole gap until the forked
+    # refresh (6+ `gh` calls, not instant) lands. So `stale_after` having
+    # passed still folds the render to `"unknown"` immediately, exactly as it
+    # did before this issue -- only the pure-age leg of `board_is_due` stopped
+    # folding.
+    #
+    # Beyond both of those: a recorded failed refresh (`board_refresh_failed_at`,
+    # set by `refresh()` when the forge did not answer), or a value that is not
+    # one of the four real states at all (never fetched, or a hand-edited/
+    # corrupted cache), also folds to `"unknown"`. `default_branch` itself
+    # present-but-unconfigured stays `None` (never asked, #613's own
+    # convention).
     default_branch_state = None
     if config.get("default_branch"):
         raw_branch_state = (cache or {}).get("default_branch_state")
-        if board_stale or raw_branch_state not in ("green", "bad", "running", "no-run"):
+        board_fetched_at = (cache or {}).get("fetched_at")
+        board_failed_at = (cache or {}).get("board_refresh_failed_at")
+        board_refresh_failed = isinstance(board_failed_at, (int, float)) and (
+            not isinstance(board_fetched_at, (int, float))
+            or board_failed_at >= board_fetched_at
+        )
+        board_stale_after = (cache or {}).get("stale_after")
+        board_invalidated = isinstance(board_stale_after, (int, float)) and (
+            now >= board_stale_after
+        )
+        if (
+            board_refresh_failed
+            or board_invalidated
+            or raw_branch_state not in ("green", "bad", "running", "no-run")
+        ):
             default_branch_state = "unknown"
         else:
             default_branch_state = raw_branch_state
@@ -3146,12 +3545,14 @@ def gather(payload, root, now=None):
     # `latest_fetched_at` used to be read here and dropped, so `plugin_facts` decided
     # `current`/`behind`/`ahead` with no knowledge of the reading's own age -- the
     # same defect `refresh()`'s docstring warns against, one function later (#550).
-    # `latest_is_due` is the same threshold `refresh()` itself uses to decide whether
-    # a reading needs asking again; a comparison this old is folded into `unknown`
-    # rather than rendered as a real answer. It does NOT catch a reading that is
-    # fresh by that same rule and simply wrong -- #549 closes that gap by
-    # invalidating the cache at the moment a publish falsifies it.
-    stale_latest = latest_is_due(cache, now)
+    # `latest_is_unknown` -- NOT `latest_is_due` -- decides the render-time fold
+    # (#1464): a reading merely due keeps rendering its last-known state, because the
+    # detached refresh a due reading provokes can take up to ~60s to land, and
+    # `latest_is_due`'s own threshold folded to `unknown` the instant that refresh
+    # became due rather than once it had had a real chance to land. It does NOT catch
+    # a reading that is fresh by either rule and simply wrong -- #549 closes that gap
+    # by invalidating the cache at the moment a publish falsifies it.
+    stale_latest = latest_is_unknown(cache, now)
     loop_name = os.environ.get("OSS_STATUSLINE_PLUGIN", "oss")
 
     channel = None
@@ -3174,18 +3575,35 @@ def gather(payload, root, now=None):
             now,
             session=raw_channel.get("session"),
             current_session=current_session,
+            refresh_failed_at=(cache or {}).get("channel_refresh_failed_at"),
         )
 
-    # Its own clock (`DOCTOR_REFRESH_AFTER`), independent of the board clock above --
-    # `default_branch_state` folds on `board_stale` because a fresh commit falsifies it
-    # within seconds; a doctor reading has no such falsifying event and is only ever
-    # too old on its own much longer interval. A reading absent or older than that
-    # interval folds to `None` here, rendered `?` by `_doctor_field`, never a guess.
+    # #1635: same rule as the board and `latest` above -- a doctor reading merely
+    # due for its own (much longer, `DOCTOR_REFRESH_AFTER`) interval keeps rendering
+    # its last-known verdict, rather than folding to `None`/`?` on age alone. `?` is
+    # reserved for a reading that was never taken at all, or one `refresh()` just
+    # attempted and could not get an answer for (`doctor_refresh_failed_at`, set the
+    # same way `board_refresh_failed_at`/`latest_refresh_failed_at` are).
     raw_doctor_stamp = (cache or {}).get("doctor_fetched_at")
-    if isinstance(raw_doctor_stamp, (int, float)) and (
-        now - raw_doctor_stamp < DOCTOR_REFRESH_AFTER
-    ):
+    doctor_failed_at = (cache or {}).get("doctor_refresh_failed_at")
+    doctor_refresh_failed = isinstance(doctor_failed_at, (int, float)) and (
+        not isinstance(raw_doctor_stamp, (int, float))
+        or doctor_failed_at >= raw_doctor_stamp
+    )
+    # #1650: a refresh that hit DOCTOR_TIMEOUT is a distinct state from every
+    # other flavour of "asked and got nothing back" -- real work that ran out
+    # of time, not the same absence a never-configured doctor renders. Only
+    # consulted once a failure is already established above, and only when
+    # this specific failed attempt (not a stale, superseded one) was the timeout.
+    doctor_timed_out_at = (cache or {}).get("doctor_refresh_timed_out_at")
+    doctor_timed_out = doctor_refresh_failed and (
+        isinstance(doctor_timed_out_at, (int, float))
+        and doctor_timed_out_at >= doctor_failed_at
+    )
+    if isinstance(raw_doctor_stamp, (int, float)) and not doctor_refresh_failed:
         doctor_state = _doctor_verdict_state((cache or {}).get("doctor_verdict"))
+    elif doctor_timed_out:
+        doctor_state = "timeout"
     else:
         doctor_state = None
 
@@ -3198,8 +3616,9 @@ def gather(payload, root, now=None):
         "default_branch": config.get("default_branch"),
         "version": repo_version(root),
         "board": board,
-        "release": git_release_progress(root),
+        "release": _with_release_trigger(git_release_progress(root), config),
         "traps": _trap_count(root),
+        "outbound": _outbound_count(root),
         "last": _render_stamp(now),
         "plugins": plugin_facts(
             loop_name, installed_plugins(root), latest, stale=stale_latest
@@ -3245,11 +3664,19 @@ def _arg_value(argv, flag, default):
     hand-rolled the same broken ``argv[argv.index(flag) + 1]`` independently.
     One helper, used by both, so a trailing flag with nothing after it falls
     back to ``default`` instead of crashing.
+
+    ``flag`` may be a single string or a tuple/list of equivalent spellings
+    (#1435): ``next_action.py`` and this file spell the repo-root concept
+    ``--root``; ``triage_trigger.py`` and ``cohort_freeze_record.py`` spell
+    it ``--repo``. A caller passing either wins here too, rather than only
+    for the argparse-based scripts.
     """
-    if flag in argv:
-        i = argv.index(flag)
-        if i + 1 < len(argv):
-            return argv[i + 1]
+    flags = (flag,) if isinstance(flag, str) else tuple(flag)
+    for candidate in flags:
+        if candidate in argv:
+            i = argv.index(candidate)
+            if i + 1 < len(argv):
+                return argv[i + 1]
     return default
 
 
@@ -3284,7 +3711,7 @@ def main(argv=None):
                 stream.reconfigure(errors="backslashreplace")
             except (AttributeError, ValueError):  # pragma: no cover - very old Python
                 pass
-        root = _arg_value(argv, "--root", ".")
+        root = _arg_value(argv, ("--root", "--repo"), ".")
         repo = repo_config(root).get("repo")
         if repo and mark_board_stale(repo):
             print("mark-stale: marked {} stale".format(repo))
@@ -3300,7 +3727,7 @@ def main(argv=None):
             )
         return 0
     if "--refresh" in argv:
-        root = _arg_value(argv, "--root", ".")
+        root = _arg_value(argv, ("--root", "--repo"), ".")
         # #1362 -- forwarded by `_fork_refresh` so the detached process can
         # record whose render triggered it; absent for a manual `--refresh`.
         session_id = _arg_value(argv, "--session-id", None)
