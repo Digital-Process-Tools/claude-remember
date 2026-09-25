@@ -37,6 +37,9 @@ SESSION_START_SCRIPT = REPO_ROOT / "scripts" / "session-start-hook.sh"
 
 from pipeline.slug import session_dir_slug as _slug
 
+sys.path.insert(0, os.path.dirname(__file__))
+from spawn_counting import make_shim_dir, spawns  # noqa: E402
+
 
 def _git(cwd: Path, *args: str) -> None:
     subprocess.run(
@@ -385,3 +388,124 @@ class TestGitUnavailableMustRefuseNotDeliver:
 
         assert "Working on the parser fix." in out
         assert "refused" not in out.lower()
+
+
+class TestSymlinkRefusedInExternalStorageToo:
+    """Coordinator review of 5e40a70: the symlink refusal must apply in
+    every storage mode, not only legacy/in-project. #757's own first-run
+    migration (`bootstrap-dirs.sh`'s `mv "$_legacy_dir" "$REMEMBER_DIR"`)
+    carries a legacy store's files -- symlink and all -- into the external
+    store on first session; after that move, a `.remember/now.md` symlink
+    a repository committed before migration would sit in a directory this
+    guard, if scoped to legacy mode only, would no longer check at all."""
+
+    def test_symlinked_now_md_in_external_storage_is_refused(self, tmp_path):
+        home = tmp_path / "home"
+        project = tmp_path / "proj"
+        project.mkdir()
+        ext_base = tmp_path / "ext-mem"
+        (home / ".remember").mkdir(parents=True)
+        (home / ".remember" / "config.json").write_text(
+            json.dumps({"data_dir": str(ext_base) + "/{slug}", "features": {"recovery": False}})
+        )
+        (home / ".claude" / "projects" / _slug(str(project))).mkdir(parents=True)
+
+        ext_dir = ext_base / _slug(str(project))
+        ext_dir.mkdir(parents=True)
+        secret = tmp_path / "outside-the-store-secret.txt"
+        secret.write_text("AKIA-FAKE-SECRET-DO-NOT-LEAK\n")
+        (ext_dir / "now.md").symlink_to(secret)
+
+        out = _session_start(project, home)
+
+        assert "AKIA-FAKE-SECRET-DO-NOT-LEAK" not in out, (
+            f"a symlinked now.md in EXTERNAL storage had its target's "
+            f"content injected -- the symlink refusal must not be gated on "
+            f"legacy/in-project mode.\noutput: {out[:800]}"
+        )
+        assert "refused" in out.lower()
+        assert "symlink" in out.lower()
+
+    def test_ordinary_external_now_md_is_still_delivered(self, tmp_path):
+        """Positive control, already covered by
+        TestExternalStorageStillInjects.test_external_mode_now_md_is_still_delivered
+        -- repeated here so this class stands on its own."""
+        home = tmp_path / "home"
+        project = tmp_path / "proj"
+        project.mkdir()
+        ext_base = tmp_path / "ext-mem"
+        (home / ".remember").mkdir(parents=True)
+        (home / ".remember" / "config.json").write_text(
+            json.dumps({"data_dir": str(ext_base) + "/{slug}", "features": {"recovery": False}})
+        )
+        (home / ".claude" / "projects" / _slug(str(project))).mkdir(parents=True)
+
+        ext_dir = ext_base / _slug(str(project))
+        ext_dir.mkdir(parents=True)
+        (ext_dir / "now.md").write_text("Working on the parser fix.\n")
+
+        out = _session_start(project, home)
+
+        assert "Working on the parser fix." in out
+        assert "refused" not in out.lower()
+
+
+class TestTrackedCheckIsScopedNotWholeRepo:
+    """Coordinator review of 5e40a70: `git -C root ls-files` with no
+    pathspec lists the WHOLE repository on every session start -- on a
+    large monorepo, tens or hundreds of thousands of lines of output for a
+    check that only needs an answer about a handful of memory files. The
+    `ls-files` call the tracked check makes must carry a pathspec scoping
+    it to the memory file's own directory."""
+
+    def test_ls_files_call_carries_a_scoping_pathspec(self, tmp_path):
+        project = tmp_path / "proj"
+        project.mkdir()
+        subprocess.run(["git", "init", "-q", str(project)], check=True, capture_output=True)
+        # A big, unrelated part of the repository the pathspec must NOT
+        # need to be read for this check to answer -- if the guard ever
+        # regresses to an unscoped `ls-files`, this file existing changes
+        # nothing observable about that regression, which is exactly why a
+        # spawn-argv assertion (below) is the only thing that catches it;
+        # size alone is not something this test can watch.
+        (project / "unrelated.txt").write_text("noise\n" * 10)
+        subprocess.run(["git", "-C", str(project), "add", "-A"], check=True, capture_output=True)
+        _git(project, "commit", "-q", "-m", "seed")
+        # now.md is created AFTER the commit -- untracked, the ordinary case
+        # for a plugin-written memory file, and the positive control this
+        # test needs: if it were committed, "refused" would be the correct
+        # answer and this test would prove nothing about scoping.
+        (project / ".remember").mkdir(parents=True)
+        (project / ".remember" / "now.md").write_text("Working on the parser fix.\n")
+
+        home = _home_for(tmp_path, project)
+        log = tmp_path / "spawn.log"
+        shim_dir = make_shim_dir(tmp_path, log)
+
+        env = {
+            **os.environ,
+            "CLAUDE_PROJECT_DIR": str(project),
+            "CLAUDE_PLUGIN_ROOT": str(REPO_ROOT),
+            "HOME": str(home),
+            "SPAWN_LOG": str(log),
+            "PATH": f"{shim_dir}{os.pathsep}{os.environ['PATH']}",
+        }
+        result = subprocess.run(
+            ["bash", str(SESSION_START_SCRIPT)], env=env, capture_output=True, text=True, check=False
+        )
+        assert result.returncode == 0, f"hook exited {result.returncode}: {result.stderr[:500]}"
+        assert "Working on the parser fix." in result.stdout, (
+            "positive control failed: now.md was never delivered, so this "
+            "spawn-argv assertion would be checking a call that never ran"
+        )
+
+        ls_files_calls = [
+            line for line in spawns(log)
+            if line.startswith("git ") and "ls-files" in line
+        ]
+        assert ls_files_calls, "no `git ls-files` call was observed at all"
+        for call in ls_files_calls:
+            assert "--" in call and ".remember" in call, (
+                f"ls-files call carries no scoping pathspec -- this lists "
+                f"the WHOLE repository on every session start: {call}"
+            )

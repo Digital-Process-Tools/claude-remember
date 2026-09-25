@@ -172,64 +172,76 @@ _remember_wc_size_get_into() {
 
 # ============================================================================
 # INJECTION GUARD -- "may this memory file be injected?" (#721 follow-ups:
-# GHSA-6q55-m29c-3xgj, #754, #755, #756)
+# GHSA-6q55-m29c-3xgj, #754, #755, #756, #760)
 # ============================================================================
 # One shared decision, used for EVERY file the context loader injects (and
 # also the handoff, session-start-hook.sh's own separate render path --
 # see _remember_may_inject below). Refuses:
 #
-#   - a SYMLINK (`[ -L ]`). A cloned repository can commit `.remember/now.md`
-#     (or any other injected file) as a symlink to a path outside the repo
-#     -- e.g. `~/.aws/credentials` -- and have THAT file's bytes read
-#     through the link and injected as though they were the user's own
-#     memory. Refused unconditionally, not "only when the resolved target
-#     is outside the store": nothing in this plugin ever creates a symlink
-#     inside a memory store (no `ln -s` anywhere under scripts/*.sh), so
-#     there is no legitimate in-store symlink this would need to spare.
-#   - a GIT-TRACKED file, asked about BY THE FILE ITSELF: the nearest git
-#     repository above the file's OWN directory (`git -C "$dir" rev-parse
-#     --show-toplevel`, #754's own suggested fix direction), not by
-#     comparing REMEMBER_ROOT / MEMORY_PROJECT_DIR / PROJECT_DIR against
-#     each other. #747 and #756 were exactly that comparison anchoring on
-#     the wrong root from a linked worktree; #754 was a fixed
-#     `.git`-in-one-directory lookup that a repository SUBDIRECTORY has
-#     none of. `rev-parse --show-toplevel` needs neither fact: git resolves
-#     the nearest repository itself -- worktree, subdirectory or submodule
-#     alike. A repository can ship a memory file committed; this plugin
-#     never commits one itself (bootstrap-dirs.sh writes a .gitignore for
-#     the whole directory), so a tracked one was shipped by the repository,
-#     not written by the user's own /remember.
-#   - nothing else. A file outside any git repository (external-storage
-#     mode) is passed through unchanged, exactly as before this guard
-#     existed -- `rev-parse --show-toplevel` over a non-repository
-#     directory prints nothing and exits non-zero, which reads the same as
-#     "asked, and there is nothing to be tracked by".
+#   - a SYMLINK (`[ -L ]`), in EVERY storage mode. A cloned repository can
+#     commit `.remember/now.md` (or any other injected file) as a symlink
+#     to a path outside the repo -- e.g. `~/.aws/credentials` -- and have
+#     THAT file's bytes read through the link and injected as though they
+#     were the user's own memory. Refused unconditionally, not "only when
+#     the resolved target is outside the store": nothing in this plugin
+#     ever creates a symlink inside a memory store (no `ln -s` anywhere
+#     under scripts/*.sh), so there is no legitimate in-store symlink this
+#     would need to spare. Not gated on legacy/in-project storage either
+#     (unlike the tracked check below): #757's own first-run migration
+#     (`bootstrap-dirs.sh`'s `mv "$_legacy_dir" "$REMEMBER_DIR"`) carries a
+#     legacy store's files, symlink and all, into the external store, so
+#     restricting this check to legacy mode would leave a migrated symlink
+#     unrefused from that point on.
+#   - a GIT-TRACKED file, asked about BY THE FILE ITSELF: whether the
+#     nearest repository above the file's OWN directory tracks it, found
+#     by walking the FILESYSTEM for `.git` (_remember_repo_root_walk_into,
+#     no `git` spawn) rather than by comparing REMEMBER_ROOT /
+#     MEMORY_PROJECT_DIR / PROJECT_DIR against each other. #747 and #756
+#     were exactly that comparison anchoring on the wrong root from a
+#     linked worktree; #754 was a fixed `.git`-in-one-directory lookup that
+#     a repository SUBDIRECTORY has none of. Walking the filesystem needs
+#     neither fact and resolves the nearest repository itself --
+#     worktree, subdirectory or submodule alike. A repository can ship a
+#     memory file committed; this plugin never commits one itself
+#     (bootstrap-dirs.sh writes a .gitignore for the whole directory), so a
+#     tracked one was shipped by the repository, not written by the user's
+#     own /remember. Gated on legacy/in-project storage only
+#     (_remember_in_project_store): external storage can legitimately be
+#     the user's own git-backup repository, and this plugin commits into
+#     THAT one on purpose -- see that function's own comment.
+#   - a file a repository IS there to answer about, but git's answer could
+#     not be trusted (#760: missing binary, corrupted `.git`, a broken
+#     shim on PATH). This is a THIRD state, not folded into "not tracked":
+#     see _remember_file_tracked_state_into's own comment.
+#   - nothing else. A file with no repository anywhere above it (external-
+#     storage mode's ordinary case) is passed through unchanged, exactly
+#     as before this guard existed.
 #
 # Every refusal is LOGGED via log() (never silent); the caller is expected
 # to also surface it in whatever it hands back to the model/user --
 # _remember_may_inject only decides and records, it does not itself print
 # anything user-visible.
 #
-# Spawn budget (#754/#755/#756 note, #660/#665/#689 fork-count tests): TWO
-# `git` spawns (`rev-parse --show-toplevel`, then `ls-files`) per DISTINCT
-# REPOSITORY ROOT per process, not per file and not per directory -- a
-# typical render checks up to six memory files that share at most one
-# repository root even when they span two directories (REMEMBER_DIR, and
-# REMEMBER_ROOT for the identity.md fallback), so this costs at most four
-# `git` spawns per render regardless of file count, cached via the same
-# indirect-variable convention _remember_wc_size_set (above) uses for the
-# same bash-3.2-has-no-associative-arrays reason. Listing every tracked
-# path ONCE per root, rather than asking `ls-files --error-unmatch` once
-# per file (which would also satisfy the letter of "ask git about the file
-# itself" but reintroduces the per-file spawn this budget note exists to
-# rule out), is also what makes a repository-committed DIFFERENTLY-CASED
-# directory (e.g. `.Remember/remember.md` on a case-insensitive
-# filesystem) detectable: the comparison below is done against the file's
-# path RELATIVE TO THE REPOSITORY ROOT, exactly like
-# _remember_handoff_is_tracked's own case-insensitive fallback did before
-# this guard replaced it, not against a directory-scoped pathspec (which
-# cannot match a differently-cased PARENT directory at all -- pathspec
-# matching is byte-exact regardless of core.ignorecase).
+# Spawn budget (#754/#755/#756/#760 note, #660/#665/#689 fork-count tests):
+# repository existence costs NO `git` spawn at all (a filesystem walk, see
+# _remember_repo_root_walk_into) and asking what is tracked costs at most
+# ONE `git` spawn per DISTINCT (repository root, file's own directory)
+# pair, cached, scoped to that one directory via an `:(icase)` pathspec
+# rather than listing the whole repository -- `git -C root ls-files` with
+# NO pathspec lists everything the repository has ever committed, which on
+# a large monorepo is a listing many orders of magnitude bigger than the
+# handful of memory files this guard actually needs an answer about. A
+# typical render touches at most two distinct directories (REMEMBER_DIR,
+# and REMEMBER_ROOT only for the identity.md fallback), so this is at most
+# two scoped `git` spawns per render, cached via the same indirect-variable
+# convention _remember_wc_size_set (above) uses for the same
+# bash-3.2-has-no-associative-arrays reason. `:(icase)` (pathspec magic,
+# present since git 1.8, well below anything a supported CI runner ships)
+# is what keeps a repository-committed DIFFERENTLY-CASED directory (e.g.
+# `.Remember/remember.md` on a case-insensitive filesystem) detectable
+# without a second, unscoped listing: a pathspec of `:(icase).remember/`
+# matches a tracked `.Remember/remember.md` even though a byte-exact
+# pathspec would not.
 
 # _remember_ci_eq <a> <b> -- case-insensitive string equality, no fork.
 # Same trick session-start-hook.sh's own (now-removed) _remember_th_ci_eq
@@ -295,7 +307,7 @@ _remember_repo_root_walk_into() {
     return 1
 }
 
-# _remember_root_tracked_state_into <list-outvar> <state-outvar> <root>
+# _remember_root_tracked_state_into <list-outvar> <state-outvar> <root> <rel-dir>
 # STATE-OUTVAR is "ok" (LIST-OUTVAR holds a newline-joined `git -C root
 # ls-files` listing, possibly empty for a genuinely empty repository) or
 # "unavailable" (#760: `git` is missing, or the `ls-files` call itself
@@ -306,16 +318,41 @@ _remember_repo_root_walk_into() {
 # genuinely-empty repository (a fresh `git init`, nothing committed yet)
 # still reads as "ok, empty" rather than as a failure.
 #
-# One `git` spawn per DISTINCT ROOT, cached: every file under the same
-# repository, however many directories they span, reuses this one result
-# (#754/#755/#756 spawn-budget note).
+# REL-DIR scopes the listing to one directory of ROOT via a pathspec --
+# without it, `git -C root ls-files` with no pathspec lists the WHOLE
+# repository on every session start, which on a large monorepo is a
+# listing of everything the user has ever committed, not the handful of
+# memory files this guard actually needs to check. `:(icase)` (pathspec
+# magic, git >= 1.8 -- confirmed against the git this host ships, 2.x;
+# every CI runner's git is well past that floor) keeps the differently-
+# cased-directory case correct WITHOUT a second, unscoped listing: a
+# repository that commits `.Remember/remember.md` still matches a pathspec
+# of `:(icase).remember/`. REL-DIR of "." (the memory file sits directly at
+# the repository root -- the rare REMEMBER_ROOT/identity.md fallback, not
+# the ordinary REMEMBER_DIR case) has no meaningful subdirectory to scope
+# to, so the pathspec is omitted and the call is genuinely whole-repo --
+# unavoidable in that one case, since "the file's own directory" and "the
+# repository root" are the same directory there.
+#
+# One `git` spawn per DISTINCT (ROOT, REL-DIR) pair, cached: every file
+# that shares both reuses this one result (#754/#755/#756 spawn-budget
+# note). A typical render touches at most two distinct directories
+# (REMEMBER_DIR, and REMEMBER_ROOT only for the identity.md fallback), so
+# this is at most two `git` spawns per render, each scoped, never one
+# unscoped whole-repo listing.
 _remember_root_tracked_state_into() {
-    local _rts_list_outvar="$1" _rts_state_outvar="$2" _rts_root="$3"
-    local _rts_list_key _rts_state_key _rts_list _rts_rc
-    _remember_cache_key_into _rts_list_key "list" "$_rts_root"
-    _remember_cache_key_into _rts_state_key "state" "$_rts_root"
+    local _rts_list_outvar="$1" _rts_state_outvar="$2" _rts_root="$3" _rts_reldir="$4"
+    local _rts_list_key _rts_state_key _rts_list _rts_rc _rts_cache_id _rts_pathspec
+    _rts_cache_id="${_rts_root}#${_rts_reldir}"
+    _remember_cache_key_into _rts_list_key "list" "$_rts_cache_id"
+    _remember_cache_key_into _rts_state_key "state" "$_rts_cache_id"
     if [ -z "${!_rts_state_key+x}" ]; then
         if command -v git >/dev/null 2>&1; then
+            if [ "$_rts_reldir" = "." ]; then
+                _rts_pathspec=""
+            else
+                _rts_pathspec=":(icase)${_rts_reldir}/"
+            fi
             # Leaked GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE would resolve this
             # against a different repository entirely -- the same
             # sanitisation the case-divergence probe and the (now-removed)
@@ -327,8 +364,13 @@ _remember_root_tracked_state_into() {
             # case is not -- the pre-existing NUL-delimited handling
             # elsewhere in this codebase reads exactly that general case and
             # stays NUL-delimited for it.
-            _rts_list=$(unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
-                        git -C "$_rts_root" ls-files 2>/dev/null)
+            if [ -n "$_rts_pathspec" ]; then
+                _rts_list=$(unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+                            git -C "$_rts_root" ls-files -- "$_rts_pathspec" 2>/dev/null)
+            else
+                _rts_list=$(unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+                            git -C "$_rts_root" ls-files 2>/dev/null)
+            fi
             _rts_rc=$?
         else
             _rts_list=""
@@ -365,7 +407,7 @@ _remember_root_tracked_state_into() {
 #                    a memory file through un-checked.
 _remember_file_tracked_state_into() {
     local _fts_outvar="$1" _fts_file="$2"
-    local _fts_dir _fts_root _fts_root_fs _fts_file_fs _fts_rel
+    local _fts_dir _fts_root _fts_root_fs _fts_file_fs _fts_dir_fs _fts_rel _fts_reldir
     local _fts_list _fts_state _fts_line
     case "$_fts_file" in
         (*/*) _fts_dir="${_fts_file%/*}" ;;
@@ -376,19 +418,30 @@ _remember_file_tracked_state_into() {
         printf -v "$_fts_outvar" 'no-repo'
         return 0
     fi
-    _remember_root_tracked_state_into _fts_list _fts_state "$_fts_root"
-    if [ "$_fts_state" != "ok" ]; then
-        printf -v "$_fts_outvar" 'unavailable'
-        return 0
-    fi
     _remember_forward_slash_into _fts_root_fs "$_fts_root"
     _remember_forward_slash_into _fts_file_fs "$_fts_file"
+    _remember_forward_slash_into _fts_dir_fs "$_fts_dir"
     _fts_rel="${_fts_file_fs#$_fts_root_fs/}"
     if [ "$_fts_rel" = "$_fts_file_fs" ]; then
         # FILE does not actually sit under the repository the walk found --
         # should not happen (the walk starts from FILE's own directory), but
         # if it ever does, "could not verify" is the honest answer, not a
         # silent allow.
+        printf -v "$_fts_outvar" 'unavailable'
+        return 0
+    fi
+    # REL-DIR (FILE's own directory, relative to ROOT) scopes the `ls-files`
+    # pathspec below to one directory instead of the whole repository --
+    # "." when the file sits directly at the repository root (the rare
+    # REMEMBER_ROOT/identity.md fallback), otherwise the directory portion
+    # of _fts_rel.
+    if [ "$_fts_dir_fs" = "$_fts_root_fs" ]; then
+        _fts_reldir="."
+    else
+        _fts_reldir="${_fts_dir_fs#$_fts_root_fs/}"
+    fi
+    _remember_root_tracked_state_into _fts_list _fts_state "$_fts_root" "$_fts_reldir"
+    if [ "$_fts_state" != "ok" ]; then
         printf -v "$_fts_outvar" 'unavailable'
         return 0
     fi
@@ -417,15 +470,18 @@ EOF
 # REMEMBER_DIR is redirected into the MAIN checkout's .remember/ (#56).
 #
 # External-storage mode (REMEMBER_ROOT elsewhere entirely, e.g.
-# ~/.remember/<slug>) is deliberately EXEMPT from every check below, not
-# only from the tracked-check: that store can be, and commonly is, its own
-# PRIVATE git repository (the git_backup feature) that the plugin itself
-# commits memory files into ON PURPOSE, to sync them across machines. A
-# first version of this guard applied the tracked-check unconditionally
-# and broke exactly that -- tests/test_delivery_record_per_machine_285.py
+# ~/.remember/<slug>) is deliberately EXEMPT from the TRACKED check below
+# (only): that store can be, and commonly is, its own PRIVATE git
+# repository (the git_backup feature) that the plugin itself commits
+# memory files into ON PURPOSE, to sync them across machines. A first
+# version of this guard applied the tracked-check unconditionally and
+# broke exactly that -- tests/test_delivery_record_per_machine_285.py
 # reproduces the scenario (a handoff genuinely committed by git_backup,
 # genuinely meant to be delivered on the second machine) and went red
 # until this gate was added.
+#
+# The SYMLINK check does NOT go through this gate -- see _remember_may_inject
+# below for why external storage is not exempt from it.
 _remember_in_project_store() {
     [ "$REMEMBER_ROOT" = "${MEMORY_PROJECT_DIR:-$PROJECT_DIR}" ]
 }
@@ -434,18 +490,26 @@ _remember_in_project_store() {
 # The one decision every injection site calls. Sets _REMEMBER_INJECT_REFUSAL
 # to a one-line, user-facing reason (empty string when allowed) and returns
 # 0 (allowed) / 1 (refused). Logs every refusal; prints nothing itself.
-# Every check below is gated on _remember_in_project_store -- see its own
-# comment for why external storage is exempt from the whole function, not
-# merely from the tracked half.
 _remember_may_inject() {
     local _mi_file="$1" _mi_component="${2:-memory-context}" _mi_state
     _REMEMBER_INJECT_REFUSAL=""
-    _remember_in_project_store || return 0
+    # The symlink refusal applies in EVERY storage mode, including
+    # external -- not gated on _remember_in_project_store. #757's own
+    # first-run migration (`bootstrap-dirs.sh`'s `mv "$_legacy_dir"
+    # "$REMEMBER_DIR"`) carries a legacy/in-project store's files, symlink
+    # and all, straight into the external store; after that move, a
+    # committed `now.md` symlink planted before migration would otherwise
+    # sit in a directory this guard no longer scoped its checks to at all,
+    # and the advisory's read-outside-the-repo bug would be back. Costs no
+    # spawn (`[ -L ]` is a builtin) and nothing in this plugin ever creates
+    # a symlink inside a memory store, so there is no legitimate case this
+    # widening could break.
     if [ -L "$_mi_file" ]; then
         _REMEMBER_INJECT_REFUSAL="$_mi_file is a symlink -- refusing to follow it into session context. This plugin never creates a symlink inside a memory store; if you did not create this one, treat it as planted and inspect what it points at before deleting it."
         log "$_mi_component" "refused injecting $_mi_file: symlink"
         return 1
     fi
+    _remember_in_project_store || return 0
     _remember_file_tracked_state_into _mi_state "$_mi_file"
     case "$_mi_state" in
         (tracked)
