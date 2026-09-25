@@ -374,6 +374,92 @@ def test_a_session_captured_only_by_recovery_is_not_flagged(tmp_path):
     )
 
 
+# ---------------------------------------------------------------------------
+# The notice must not contradict /remember:doctor's own verdict (#745)
+# ---------------------------------------------------------------------------
+#
+# The recovery block above (config default `features.recovery: true`) force-
+# saves an unsaved PREV_ID from its transcript, in the background, before this
+# check runs. A reporter saw the flat "not captured, run doctor" wording fire,
+# then ran /remember:doctor nine hours later and got "capture is working" --
+# consistent with a recovery save landing well after the notice was written
+# and read. Both statements were true; only the notice sounded like a fault
+# nothing had addressed.
+#
+# `features.recovery: false` in config.json cannot be exercised here: the
+# `_env`/`_project` harness sets `_LIB_MEMORY_DIR_LOADED=1` so config_into's
+# merged-file lookup never runs and every config key reads its bundled
+# default (see `_project`'s own comment on this). The user-facing case this
+# fix actually distinguishes is "a recovery attempt was made for PREV_ID this
+# run" vs. "it was not" -- which config.json's recovery flag is only one of
+# several ways to reach (the others being a missing SESSIONS_DIR/last-
+# save.json, or PREV_ID already recorded saved). These two tests exercise
+# that distinction directly, by giving or withholding the preconditions the
+# recovery block itself checks, rather than by toggling the inert config key.
+
+
+def test_an_unsaved_previous_session_gets_the_recovered_wording(tmp_path):
+    """Recovery has what it needs to attempt PREV_ID's rescue this run: the
+    notice must say so instead of flatly claiming nothing happened."""
+    home, project, remember, session_dir = _project(tmp_path)
+    _transcripts(session_dir, previous=TOOL_USE_LINE * 5)
+    # last-save.json exists (so the recovery block's own [-f] guard passes)
+    # but records a DIFFERENT session -- PREV_ID ("sess-prev") is still
+    # unsaved, which is exactly what triggers save-session.sh --force below.
+    (remember / "tmp" / "last-save.json").write_text(
+        json.dumps({"sessions": {"sess-older": 10}, "session": "sess-older", "line": 10}),
+        encoding="utf-8",
+    )
+
+    result = _run(SESSION_START, _env(home, project, remember))
+    assert result.returncode == 0, subprocess_failure_detail(result, remember)
+
+    notice = remember / "tmp" / "capture-gap-notice"
+    assert _wait_for_notice(notice), (
+        "a genuinely unsaved previous session with a recovery attempt in "
+        "flight still has to be reported -- silence here is the same #200 "
+        "regression the flat wording already guards against"
+    )
+    text = notice.read_text()
+    assert "is being recovered" in text, (
+        f"recovery had what it needed to attempt PREV_ID's rescue this run, "
+        f"but the notice does not say so -- got: {text!r}"
+    )
+    assert "has been recovered" not in text, (
+        "the fork is asynchronous (& disown) -- this hook cannot know it "
+        "succeeded, so the wording must not claim completion"
+    )
+
+
+def test_a_previous_session_recovery_cannot_save_keeps_the_original_wording(tmp_path):
+    """No last-save.json at all: the recovery block's own [-f] guard never
+    passes, so no fork is attempted for PREV_ID -- the original wording,
+    unchanged, is the honest one (equivalent to `features.recovery: false`
+    for the notice's purposes: nothing was attempted either way)."""
+    home, project, remember, session_dir = _project(tmp_path)
+    _transcripts(session_dir, previous=TOOL_USE_LINE * 5)
+    assert not (remember / "tmp" / "last-save.json").exists(), (
+        "precondition: recovery's own [-f LAST_SAVE_FILE] guard must fail"
+    )
+
+    result = _run(SESSION_START, _env(home, project, remember))
+    assert result.returncode == 0, subprocess_failure_detail(result, remember)
+
+    notice = remember / "tmp" / "capture-gap-notice"
+    assert _wait_for_notice(notice), "a real gap with no recovery in play must still warn"
+    text = notice.read_text()
+    assert "is being recovered" not in text, (
+        f"no recovery attempt was made for PREV_ID -- the notice must not "
+        f"imply one, got: {text!r}"
+    )
+    assert text.strip() == (
+        "remember: your previous session was not captured. If you just "
+        "installed or enabled the plugin, that is expected -- capture starts "
+        "now. Otherwise its hooks were not registered for that session; run "
+        "/remember:doctor."
+    ), f"original wording changed unexpectedly: {text!r}"
+
+
 def test_a_real_capture_gap_still_warns(tmp_path):
     """The pin that stops this fix degenerating into deleting the warning.
 

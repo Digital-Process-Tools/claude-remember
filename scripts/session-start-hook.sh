@@ -991,6 +991,13 @@ fi
 # no command-substitution subshell on top of the flattened-cache-hit table.
 _recovery_enabled=""
 config_into _recovery_enabled '.features.recovery' true
+# Tracks whether THIS run actually kicked off a recovery fork for PREV_ID --
+# distinct from _recovery_enabled, which reads "true" even when the extra
+# preconditions below (SESSIONS_DIR, LAST_SAVE_FILE, an unsaved PREV_ID) are
+# not met. The capture-gap notice further down reads THIS flag, not the
+# feature flag alone: "enabled" with nothing to attempt is the same
+# user-facing case as "disabled", so both get the original wording (#745).
+_recovery_attempted=""
 if [ "$_recovery_enabled" = "true" ]; then
 if [ -d "$SESSIONS_DIR" ] && [ -f "$LAST_SAVE_FILE" ] && [ -n "$PREV_ID" ]; then
     if [ "$PREV_WAS_SAVED" = "no" ]; then
@@ -1004,6 +1011,12 @@ if [ -d "$SESSIONS_DIR" ] && [ -f "$LAST_SAVE_FILE" ] && [ -n "$PREV_ID" ]; then
         # this hook's own later use. Pinned by
         # tests/test_recovery_transcript_leak_407.py.
         ( unset REMEMBER_TRANSCRIPT_PATH; "$PLUGIN_ROOT/scripts/save-session.sh" "$PREV_ID" --force ) </dev/null >/dev/null 2>&1 & disown 2>/dev/null || true
+        # Set BEFORE we know whether the forked save-session.sh above actually
+        # succeeds (#745) -- it runs detached (`& disown`, just above) and this
+        # hook can exit long before it finishes, so "attempted" is the only
+        # claim honestly available here. The notice below says "is being
+        # recovered", never "has been recovered", for the same reason.
+        _recovery_attempted="true"
     fi
 fi
 fi
@@ -1180,7 +1193,18 @@ else
     if [ -n "$PREV_ID" ] && [ "$REPORTED_ID" != "$PREV_ID" ] \
        && ! capture_was_seen "$PREV_ID" \
        && grep -q '"tool_use"' "$PREV_JSONL" 2>/dev/null; then
-        echo "remember: your previous session was not captured. If you just installed or enabled the plugin, that is expected -- capture starts now. Otherwise its hooks were not registered for that session; run /remember:doctor." \
+        # Two wordings (#745): the flat "not captured, run doctor" notice
+        # contradicts /remember:doctor's own "capture is working" verdict once
+        # the recovery fork above finishes and last-save.json records the
+        # rescue -- a reporter's save landed 9h after the session ended, long
+        # after this notice had already been written and read. When THIS run
+        # kicked off that fork for PREV_ID, say so instead of leaving the two
+        # disagree.
+        _capture_gap_notice="remember: your previous session was not captured. If you just installed or enabled the plugin, that is expected -- capture starts now. Otherwise its hooks were not registered for that session; run /remember:doctor."
+        if [ "$_recovery_attempted" = "true" ]; then
+            _capture_gap_notice="remember: your previous session was not captured live -- its hooks did not run. It is being recovered from its transcript now, so nothing should be lost; if this keeps happening for interactive sessions, run /remember:doctor."
+        fi
+        echo "$_capture_gap_notice" \
             > "$REMEMBER_DIR/tmp/capture-gap-notice" 2>/dev/null || true
         printf '%s' "$PREV_ID" > "$CAPTURE_REPORTED" 2>/dev/null || true
     fi
