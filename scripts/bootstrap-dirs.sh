@@ -44,6 +44,16 @@ SYS_TMPDIR="${TMPDIR:-/tmp}"
 # legacy dir we migrate/gitignore matches where REMEMBER_DIR now resolves.
 _mem_proj="${MEMORY_PROJECT_DIR:-$PROJECT_DIR}"
 _legacy_dir="${_mem_proj}/.remember"
+# #782 self-review: set only when the tracked-content scan below refuses a
+# migration. Checked by the unconditional directory-scaffold step further
+# down, which must NOT create REMEMBER_DIR in that case -- the migration
+# guard above is `[ ! -e "$REMEMBER_DIR" ]`, so once REMEMBER_DIR exists
+# (even as an empty scaffold nothing else has written to yet) the guard
+# reads false forever after, and the "start a new session to retry" the
+# refusal message itself promises would silently never fire again, even
+# after the operator does exactly what it says. Refusing the migration
+# must leave REMEMBER_DIR exactly as absent as it was before this session.
+_remember_legacy_migration_refused=""
 # -L before -d: -d follows a symlink, so a LEGACY DIRECTORY ITSELF that
 # is a symlink (a repository can commit one, pointing anywhere on disk)
 # would otherwise satisfy this condition and get `mv`'d wholesale into
@@ -135,17 +145,46 @@ if [ "$REMEMBER_DIR" != "$_legacy_dir" ] && [ ! -L "$_legacy_dir" ] && [ -d "$_l
                     (*) _legacy_other_tracked="could-not-tell" ;;
                 esac
             elif [ "$_legacy_repo_check" = "true" ]; then
+                # `:(icase)` pathspec magic, matching _remember_may_inject's
+                # own tracked check (lib-memory-context.sh) rather than a
+                # plain ".remember/" -- a case-insensitive filesystem
+                # (macOS APFS default, Windows) lets a repository commit
+                # `.Remember/now.md` and have this exact-case pathspec find
+                # nothing while the real on-disk directory this migration
+                # is about to `mv` is the SAME directory, so the tracked
+                # content would sail through as "clean" (self-review
+                # finding).
                 _legacy_ls_list=$(unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
-                                   git -c core.quotePath=false -C "$_mem_proj" ls-files -- ".remember/" 2>/dev/null) && _legacy_ls_rc=0 || _legacy_ls_rc=$?
+                                   git -c core.quotePath=false -C "$_mem_proj" ls-files -- ":(icase).remember/" 2>/dev/null) && _legacy_ls_rc=0 || _legacy_ls_rc=$?
                 if [ "$_legacy_ls_rc" -ne 0 ]; then
                     _legacy_other_tracked="could-not-tell"
                 else
                     while IFS= read -r _legacy_ls_line; do
                         [ -n "$_legacy_ls_line" ] || continue
-                        case "$_legacy_ls_line" in
-                            (.remember/config.json) : ;;
-                            (*) _legacy_other_tracked="tracked" ;;
-                        esac
+                        # Case-insensitive compare too: `:(icase)` can hand
+                        # back the differently-cased path itself (e.g.
+                        # `.Remember/config.json`), which a case-SENSITIVE
+                        # `case` pattern would miss and misclassify as
+                        # "other tracked content" even for the file this
+                        # scan means to exclude. `_remember_ci_eq`
+                        # (lib-memory-context.sh) is NOT sourced into this
+                        # file's context -- inlined here rather than
+                        # sourcing that whole file just for one helper
+                        # (self-review finding: the first version of this
+                        # called it anyway and failed with "command not
+                        # found", silently misclassifying config.json
+                        # itself as "other tracked content" on every run).
+                        _legacy_was_nocasematch=0
+                        shopt -q nocasematch && _legacy_was_nocasematch=1
+                        shopt -s nocasematch
+                        if [[ "$_legacy_ls_line" == ".remember/config.json" ]]; then
+                            _legacy_ci_match=1
+                        else
+                            _legacy_ci_match=0
+                        fi
+                        [ "$_legacy_was_nocasematch" -eq 1 ] || shopt -u nocasematch
+                        [ "$_legacy_ci_match" -eq 1 ] && continue
+                        _legacy_other_tracked="tracked"
                     done <<EOF
 $_legacy_ls_list
 EOF
@@ -166,9 +205,10 @@ EOF
             done
             unset _legacy_walk
         fi
-        unset _legacy_ls_list _legacy_ls_line _legacy_repo_check _legacy_repo_rc _legacy_ls_rc
+        unset _legacy_ls_list _legacy_ls_line _legacy_repo_check _legacy_repo_rc _legacy_ls_rc _legacy_was_nocasematch _legacy_ci_match
 
         if [ "$_legacy_other_tracked" != "clean" ]; then
+            _remember_legacy_migration_refused="1"
             printf 'remember: %s contains git-tracked content beyond config.json (%s) -- refusing to migrate it into the external memory store, which would launder repository-committed content into a location the injection guard trusts unconditionally (#782). Left in place, untouched; move your own files out of it by hand, or `git rm --cached` whatever the repository should not have committed, then start a new session to retry.\n' \
                 "$_legacy_dir" "$_legacy_other_tracked" >&2
         fi
@@ -289,13 +329,22 @@ unset _legacy_dir
 # pays it — PostToolUse on every single tool call. The deepest path implies its
 # parents, so two tests settle all three, and a partially-removed tree still
 # falls through to the unchanged mkdir.
-if [ ! -d "$REMEMBER_DIR/logs/autonomous" ] || [ ! -d "$REMEMBER_DIR/tmp" ]; then
+#
+# ALSO gated on the #782 migration refusal above never having fired this
+# session (self-review finding): this `mkdir -p` runs on every session
+# regardless of migration outcome, so an unguarded version of it would
+# create REMEMBER_DIR as an empty scaffold immediately after a refused
+# migration -- permanently satisfying the migration guard's own
+# `[ ! -e "$REMEMBER_DIR" ]` and silently defeating the "start a new
+# session to retry" instruction the refusal message itself just printed.
+if [ -z "$_remember_legacy_migration_refused" ] && { [ ! -d "$REMEMBER_DIR/logs/autonomous" ] || [ ! -d "$REMEMBER_DIR/tmp" ]; }; then
     mkdir -p \
         "$REMEMBER_DIR/tmp" \
         "$REMEMBER_DIR/logs" \
         "$REMEMBER_DIR/logs/autonomous" \
         2>/dev/null
 fi
+unset _remember_legacy_migration_refused
 
 # --- Relocate the per-invocation merged config out of the shared OS temp
 # root, and sweep what a killed process left behind (#362) ---
