@@ -75,11 +75,17 @@ def _path_without_git(tmp_path: Path) -> str:
     SPECIFIC external tools bootstrap-dirs.sh, detect-tools.sh and
     lib-memory-dir.sh are known to call (mkdir, mv, cp, rm, mktemp, find,
     dirname, grep, sed -- the last two are the no-jq data_dir fallback,
-    which runs regardless of whether jq itself is preserved), resolved to
-    their real absolute paths BEFORE any directory is dropped -- so a
-    tool that happened to live alongside git is not lost along with it,
-    and nothing else on PATH is touched."""
-    needed = ("mkdir", "mv", "cp", "rm", "mktemp", "find", "dirname", "grep", "sed")
+    which runs regardless of whether jq itself is preserved), PLUS `bash`
+    itself -- the script-under-test is invoked VIA bash (subprocess), and
+    on a ubuntu-latest runner `git` and `bash` live in the SAME PATH
+    directory (typically /usr/bin), so dropping that directory to hide
+    git used to drop bash along with it, making subprocess itself fail
+    to start with `FileNotFoundError: ... 'bash'` before this test class
+    could exercise anything about missing git (PR #768) -- resolved to
+    their real absolute paths BEFORE any directory is dropped, so a tool
+    that happened to live alongside git is not lost along with it, and
+    nothing else on PATH is touched."""
+    needed = ("mkdir", "mv", "cp", "rm", "mktemp", "find", "dirname", "grep", "sed", "bash")
     resolved = [shutil.which(name) for name in needed]
 
     orig_dirs = os.environ.get("PATH", "").split(os.pathsep)
@@ -106,6 +112,46 @@ def _path_without_git(tmp_path: Path) -> str:
                 pass
 
     return os.pathsep.join([str(fake_bin), *kept_dirs])
+
+
+def test_path_without_git_keeps_bash_reachable_when_colocated_with_git(tmp_path, monkeypatch):
+    """Repro for the PR #768 CI failure (job #108216073091 and 7 sibling
+    legs, all red on the same commit): on ubuntu-latest, `git` and `bash`
+    live in the SAME PATH directory (typically `/usr/bin`), so dropping
+    that whole directory to hide `git` also dropped `bash` -- and the
+    script-under-test is invoked VIA `bash` (subprocess), so subprocess
+    itself could not even start:
+    `FileNotFoundError: [Errno 2] No such file or directory: 'bash'`,
+    never reaching anything this test class actually means to exercise.
+
+    Builds a synthetic PATH directory holding both a `git` and a `bash`
+    shim -- mirroring the real ubuntu-latest layout regardless of whether
+    this dev machine happens to share it -- so the repro does not depend
+    on the local platform's own PATH layout, per CLAUDE.md's "reasoned vs
+    observed" split for cross-platform claims."""
+    real_git = shutil.which("git")
+    real_bash = shutil.which("bash")
+    assert real_git and real_bash, "need a real git and bash on PATH to build the repro"
+
+    colocated = tmp_path / "colocated-bin"
+    colocated.mkdir()
+    os.symlink(real_git, colocated / "git")
+    os.symlink(real_bash, colocated / "bash")
+
+    monkeypatch.setenv("PATH", str(colocated))
+
+    no_git_path = _path_without_git(tmp_path)
+
+    assert shutil.which("git", path=no_git_path) is None, (
+        "git must still be unreachable after _path_without_git -- if this "
+        "fails, the helper stopped hiding git at all"
+    )
+    assert shutil.which("bash", path=no_git_path) is not None, (
+        "bash was dropped along with git's directory -- this is the exact "
+        "cause of 'FileNotFoundError: No such file or directory: bash' on "
+        "PR #768's ubuntu-latest CI legs, because git and bash live in the "
+        "same PATH directory there"
+    )
 
 
 def _path_with_mv_that_refuses_config_restore(tmp_path: Path) -> str:
