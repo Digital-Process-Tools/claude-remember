@@ -49,55 +49,93 @@ pytestmark = pytest.mark.skipif(_BASH is None, reason="Git Bash not found (Windo
 
 
 def _path_without_git(tmp_path: Path) -> str:
-    """A PATH with every OTHER real binary reachable but no `git` at all --
-    not even a shim that answers wrong, `git` is simply not found."""
+    """PATH with git made genuinely UNREACHABLE (`command -v git` must
+    fail -- not merely `git` itself failing when invoked, which is what
+    `_path_with_broken_git`, a scenario #766 does not test, already
+    covers), while every OTHER tool this script actually calls stays
+    reachable exactly as it already was.
+
+    The previous shape of this helper rebuilt a whole fake bin directory
+    by symlinking every top-level entry of every original PATH directory
+    in, skipping only literal "git". On a windows-latest Git-Bash leg
+    that broke a Chocolatey-installed `jq` shim -- a tiny launcher stub
+    that locates the REAL jq.exe relative to its own installed location,
+    which a symlink elsewhere breaks -- so the broken shim's own error
+    text ("Cannot find ... jq.exe ...") landed on stdout where jq's real
+    output was expected, and from there into REMEMBER_DIR/config.json.
+    Nothing this test's own assertions depend on jq (or python3, lib-
+    memory-dir.sh's own jq-missing fallback) being present at all -- both
+    are already exercised elsewhere -- so this stops trying to preserve
+    anything it does not explicitly name: it DROPS any PATH directory
+    that contains a `git`/`git.exe` executable (on this Windows runner,
+    git and coreutils like `mv` can live in the SAME directory --
+    `_path_with_mv_that_refuses_config_restore` hit the same fact from
+    the other side) rather than trying to sift git back out of it file by
+    file, then PREPENDS one small shim directory holding only the
+    SPECIFIC external tools bootstrap-dirs.sh, detect-tools.sh and
+    lib-memory-dir.sh are known to call (mkdir, mv, cp, rm, mktemp, find,
+    dirname, grep, sed -- the last two are the no-jq data_dir fallback,
+    which runs regardless of whether jq itself is preserved), resolved to
+    their real absolute paths BEFORE any directory is dropped -- so a
+    tool that happened to live alongside git is not lost along with it,
+    and nothing else on PATH is touched."""
+    needed = ("mkdir", "mv", "cp", "rm", "mktemp", "find", "dirname", "grep", "sed")
+    resolved = [shutil.which(name) for name in needed]
+
+    orig_dirs = os.environ.get("PATH", "").split(os.pathsep)
+    git_dirs = {
+        d for d in orig_dirs
+        if any((Path(d) / n).exists() for n in ("git", "git.exe"))
+    }
+    kept_dirs = [d for d in orig_dirs if d not in git_dirs]
+
     fake_bin = tmp_path / "no-git-bin"
     fake_bin.mkdir()
-    for d in os.environ.get("PATH", "").split(os.pathsep):
-        try:
-            names = os.listdir(d)
-        except OSError:
+    for path in resolved:
+        if not path or str(Path(path).parent) not in git_dirs:
+            continue  # not lost -- still reachable via kept_dirs, no shim needed
+        target = fake_bin / Path(path).name
+        if target.exists() or target.is_symlink():
             continue
-        for name in names:
-            if name == "git":
-                continue
-            target = fake_bin / name
-            if target.exists() or target.is_symlink():
-                continue
+        try:
+            os.symlink(path, target)
+        except OSError:
             try:
-                os.symlink(os.path.join(d, name), target)
+                shutil.copy2(path, target)
             except OSError:
                 pass
-    return str(fake_bin)
+
+    return os.pathsep.join([str(fake_bin), *kept_dirs])
 
 
 def _path_with_mv_that_refuses_config_restore(tmp_path: Path) -> str:
-    """A PATH where every real binary works normally EXCEPT `mv`, which is
-    a shim that fails only when its destination ends in
+    """The FULL current PATH, with one shim directory PREPENDED, holding
+    ONLY an `mv` override that fails when its destination ends in
     `.remember/config.json` -- the config-restore write, and only that
     write. The holdout-creation `mv` (destination is a mktemp path) and the
     whole-directory migration `mv` (destination is REMEMBER_DIR, not this
     literal suffix) are both untouched, so this simulates exactly "the
-    destination is unwritable" for the restore step alone."""
+    destination is unwritable" for the restore step alone.
+
+    Rebuilding a whole fake bin directory by symlinking every OTHER real
+    binary in (the previous shape of this helper) silently dropped `git`
+    on a windows-latest Git-Bash leg: `mv`(`.exe`) and `git`(`.exe`) can
+    live in the SAME PATH directory there, and the exclusion this helper
+    used to apply (`if name == "mv": continue`, a bare-name compare) never
+    matched Windows' `mv.exe`, so nothing about that shape was actually
+    excluding `mv` on that platform in the first place -- yet `git` still
+    went missing, because rebuilding PATH from a `os.listdir()` walk of
+    each original directory's TOP LEVEL misses however git for Windows
+    actually resolves its own supporting files. PREPENDING one single-file
+    shim directory to the untouched, real PATH sidesteps all of that: every
+    real binary -- git included, wherever and however it is actually laid
+    out on this platform -- stays exactly as reachable as it already was;
+    only `mv` resolves to the shim first, because shells resolve PATH
+    left-to-right."""
     real_mv = shutil.which("mv")
     assert real_mv is not None, "no real mv on PATH to wrap"
     fake_bin = tmp_path / "restore-fails-bin"
     fake_bin.mkdir()
-    for d in os.environ.get("PATH", "").split(os.pathsep):
-        try:
-            names = os.listdir(d)
-        except OSError:
-            continue
-        for name in names:
-            if name == "mv":
-                continue
-            target = fake_bin / name
-            if target.exists() or target.is_symlink():
-                continue
-            try:
-                os.symlink(os.path.join(d, name), target)
-            except OSError:
-                pass
     shim = fake_bin / "mv"
     shim.write_text(
         "#!/bin/sh\n"
@@ -112,7 +150,7 @@ def _path_with_mv_that_refuses_config_restore(tmp_path: Path) -> str:
         "esac\n"
     )
     shim.chmod(0o755)
-    return str(fake_bin)
+    return str(fake_bin) + os.pathsep + os.environ.get("PATH", "")
 
 
 def _fs_is_case_insensitive() -> bool:
@@ -139,6 +177,23 @@ def _fs_is_case_insensitive() -> bool:
     finally:
         if probe_dir is not None:
             shutil.rmtree(probe_dir, ignore_errors=True)
+
+
+def _symlink_targets(link: Path, expected_target: Path) -> bool:
+    """Whether a symlink's recorded target resolves to the SAME file as
+    `expected_target` -- tolerant of Windows' `os.readlink()` returning
+    the `\\\\?\\C:\\...` extended-length form rather than the plain
+    path a symlink was created with, which made a bare string-equality
+    compare against `str(expected_target)` fail there even though the
+    link was correct. `os.path.samefile` resolves both sides through the
+    filesystem (device+inode / Windows file ID) instead of comparing
+    text, so the prefix form -- and a drive-letter case difference --
+    never matters. Requires both paths to exist; a dangling link (this
+    module never creates one) would need a different check."""
+    try:
+        return os.path.samefile(link, expected_target)
+    except OSError:
+        return False
 
 
 class TestSymlinkedTrackedConfigNeverFollowed:
@@ -178,7 +233,7 @@ class TestSymlinkedTrackedConfigNeverFollowed:
         # same target.
         cfg_after = legacy / "config.json"
         assert cfg_after.is_symlink(), "the symlink itself was replaced or removed"
-        assert os.readlink(cfg_after) == str(secret)
+        assert _symlink_targets(cfg_after, secret), "the symlink does not resolve to the expected target"
 
         # No file anywhere under REMEMBER_DIR holds the secret's bytes.
         remember_root = Path(remember_dir)
@@ -535,7 +590,7 @@ class TestSymlinkedLegacyDirectoryNeverMigrated:
 
         legacy = project / ".remember"
         assert legacy.is_symlink(), "the symlinked legacy directory was replaced or removed"
-        assert os.readlink(legacy) == str(outside)
+        assert _symlink_targets(legacy, outside), "the symlink does not resolve to the expected target"
         assert not Path(remember_dir).exists() or not (Path(remember_dir) / "now.md").exists(), (
             "the external store ended up holding the symlink target's data -- "
             "the symlinked directory was migrated"
