@@ -1789,15 +1789,26 @@ _remember_handoff_fingerprint() {
     fi
 }
 
-# _remember_handoff_is_tracked <handoff-abs-path> (#721)
-# True only in legacy mode (REMEMBER_ROOT == PROJECT_DIR -- the only layout
-# where the handoff sits inside a repository the user did not necessarily
-# write it into) AND the project has a git repo AND that repo's index
-# tracks the handoff file. A repository can ship .remember/remember.md
+# _remember_handoff_is_tracked <handoff-abs-path> (#721, worktree case #747)
+# True only in legacy mode (REMEMBER_ROOT == MEMORY_PROJECT_DIR -- the only
+# layout where the handoff sits inside a repository the user did not
+# necessarily write it into) AND that repository has a git repo AND its
+# index tracks the handoff file. A repository can ship .remember/remember.md
 # committed; this plugin never commits one itself (bootstrap-dirs.sh writes
 # a .gitignore for the whole directory), so a tracked file did not come
 # from this plugin and must not be injected as though it were the user's
 # own prior-session note.
+#
+# Anchored on MEMORY_PROJECT_DIR (lib-memory-dir.sh), not PROJECT_DIR (#747):
+# from a linked git worktree, PROJECT_DIR is the worktree path, but
+# REMEMBER_DIR -- and therefore REMEMBER_ROOT, its dirname -- is redirected
+# into the MAIN checkout's .remember/ (#56), the same repository just a
+# different path. Comparing against PROJECT_DIR made that redirect look like
+# "not legacy mode" and skipped the tracked-check entirely, letting a
+# repo-shipped, git-tracked handoff through unrefused from any worktree.
+# MEMORY_PROJECT_DIR already equals PROJECT_DIR outside a worktree (it is the
+# fail-safe default in _resolve_memory_project_dir), so this is additive: the
+# non-worktree behaviour this function already had is unchanged.
 # Case-insensitive string equality with no fork -- the same trick
 # lib-case-divergence.sh's own `_remember_case_fold_eq` uses, duplicated
 # rather than sourced: that library is only loaded on demand, deep inside
@@ -1814,11 +1825,12 @@ _remember_th_ci_eq() {
 }
 
 _remember_handoff_is_tracked() {
-    local _path="$1" _rel _proj_fs _path_fs _tracked_out _line
-    [ "$REMEMBER_ROOT" = "$PROJECT_DIR" ] || return 1
-    [ -e "$PROJECT_DIR/.git" ] || return 1
+    local _path="$1" _rel _proj_fs _path_fs _tracked_out _line _mem_proj
+    _mem_proj="${MEMORY_PROJECT_DIR:-$PROJECT_DIR}"
+    [ "$REMEMBER_ROOT" = "$_mem_proj" ] || return 1
+    [ -e "$_mem_proj/.git" ] || return 1
     command -v git >/dev/null 2>&1 || return 1
-    _remember_forward_slash_into _proj_fs "$PROJECT_DIR"
+    _remember_forward_slash_into _proj_fs "$_mem_proj"
     _remember_forward_slash_into _path_fs "$_path"
     _rel="${_path_fs#$_proj_fs/}"
     [ "$_rel" != "$_path_fs" ] || return 1
@@ -1826,7 +1838,7 @@ _remember_handoff_is_tracked() {
     # a different repository entirely -- the same sanitisation the case-
     # divergence probe uses for the same reason.
     if (unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
-        git -C "$PROJECT_DIR" ls-files --error-unmatch -- "$_rel") >/dev/null 2>&1; then
+        git -C "$_mem_proj" ls-files --error-unmatch -- "$_rel") >/dev/null 2>&1; then
         return 0
     fi
     # Case-insensitive fallback. An exact-case `ls-files` miss is not proof
@@ -1865,7 +1877,7 @@ _remember_handoff_is_tracked() {
         [ -n "$_line" ] || continue
         _remember_th_ci_eq "$_line" "$_rel" && return 0
     done < <(unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
-              git -C "$PROJECT_DIR" ls-files -z 2>/dev/null)
+              git -C "$_mem_proj" ls-files -z 2>/dev/null)
     return 1
 }
 
