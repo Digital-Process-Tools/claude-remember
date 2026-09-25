@@ -24,6 +24,15 @@ The refusal names its own fix. Use it rather than routing around the write path:
 literal_backslashes = true          # or: literal_backslashes = ["new"]
 ```
 
+**Even with `literal_backslashes = true` set, escaping direction still matters (#705).** An
+embedded literal double quote meant to land on disk as `\"` needs the payload to carry exactly
+that -- `\\\"` (a Python string escaping a backslash then a quote) is the wrong direction and
+still refuses, because `literal_backslashes` changes how an even run of bare backslashes is
+treated, not how quote-escaping inside the field works. When a payload needs an embedded double
+quote, prefer a single-quoted Python string literal in the field instead of juggling the
+backslash count -- it sidesteps the double-quote escaping question entirely, verified to work on
+the first try where the escaped form cost two extra edit round-trips.
+
 Observed cost of not trusting it: a lane fell back to a raw `python3 - <<'PYEOF'` heredoc for one
 40-line edit, bypassing supertool's post-write validators (ruff, git-status, py-syntax) entirely,
 then re-ran ruff and pytest by hand to compensate. The flag was never tried.
