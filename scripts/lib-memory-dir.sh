@@ -615,10 +615,14 @@ elif [ "${#_cfg_sources[@]}" -gt 0 ]; then
     # layer (the `except (OSError, ValueError): continue` below) used to
     # happen with nothing logged anywhere either. There is no fd left to
     # signal it on -- the interpreter's stdout/stderr are already thrown
-    # away (`> /dev/null 2>&1`) so a real subprocess exit or a printed
-    # marker cannot be told apart from success -- so the except branch
-    # drops a one-byte marker file instead, and this shell checks for it
-    # once the interpreter has exited.
+    # away (`> /dev/null 2>&1`) -- so the except branch drops a one-byte
+    # marker file instead, and this shell checks for it once the
+    # interpreter has exited. #804: the marker's own mktemp call (below)
+    # can itself fail, so this is no longer the ONLY signal -- the
+    # interpreter's own exit code (rc 3, captured further down) now tells
+    # a real subprocess exit apart from success independently of this
+    # file ever being written at all; the marker stays as a second,
+    # redundant-on-purpose channel rather than being replaced by the rc.
     _project_drop_marker=$(mktemp "${SYS_TMPDIR}/remember-config-drop-marker-XXXXXX" 2>/dev/null) || _project_drop_marker=""
     rm -f "$_project_drop_marker" 2>/dev/null
     # #804: capture the interpreter's own exit code rather than folding it
