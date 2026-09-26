@@ -460,6 +460,131 @@ def test_a_previous_session_recovery_cannot_save_keeps_the_original_wording(tmp_
     ), f"original wording changed unexpectedly: {text!r}"
 
 
+def test_a_pluginless_sdk_transcript_is_never_picked_as_the_previous_session(tmp_path):
+    """#745 (kenspc's report): the marker-less transcripts are not the
+    user's own sessions at all. security-guidance's commit/push review starts
+    a Claude Agent SDK session with `setting_sources=[]` -- no plugins loaded,
+    so remember's hooks are never registered and no `capture-alive.d/<id>`
+    marker is ever written, or will be. Such a transcript writes into the
+    same project directory and can be newer than the real previous session.
+
+    The real previous session here (`sess-real`) captured fine and has both a
+    marker and a save record. The SDK transcript (`sess-sdk`) must not be
+    picked as "the previous session" at all -- if it were, the notice would
+    fire over a session that was captured fine.
+    """
+    home, project, remember, session_dir = _project(tmp_path)
+    real = session_dir / "sess-real.jsonl"
+    real.write_text(TOOL_USE_LINE * 5)
+    sdk = session_dir / "sess-sdk.jsonl"
+    sdk.write_text(
+        '{"type":"queue-operation","operation":"dequeue",'
+        '"entrypoint":"sdk-py","sessionId":"sess-sdk"}\n'
+        + TOOL_USE_LINE * 4
+    )
+    cur = session_dir / "sess-cur.jsonl"
+    cur.write_text(PLAIN_LINE)
+    now = int(time.time())
+    os.utime(real, (now - 240, now - 240))
+    os.utime(sdk, (now - 120, now - 120))
+    os.utime(cur, (now, now))
+
+    (remember / "tmp" / "last-save.json").write_text(
+        json.dumps({"sessions": {"sess-real": 5}, "session": "sess-real", "line": 5}),
+        encoding="utf-8",
+    )
+    (remember / "tmp" / "capture-alive").write_text("sess-real")
+
+    _run(SESSION_START, _env(home, project, remember, defer=False))
+
+    assert not (remember / "tmp" / "capture-gap-notice").exists(), (
+        "warned even though the genuine previous session ('sess-real') was "
+        "captured fine -- an SDK review session that never loaded this "
+        "plugin must not be picked as 'the previous session' at all (#745)"
+    )
+
+
+def test_a_pluginless_sdk_transcript_with_no_real_session_behind_it_warns_nothing(tmp_path):
+    """The SDK transcript is the ONLY past transcript -- there is no genuine
+    previous session to accuse, and none should be invented. This is the
+    'no eligible candidate at all' case, distinct from the case above where
+    skipping the SDK transcript still finds a real one behind it."""
+    home, project, remember, session_dir = _project(tmp_path)
+    sdk = session_dir / "sess-sdk.jsonl"
+    sdk.write_text(
+        '{"type":"queue-operation","operation":"dequeue",'
+        '"entrypoint":"sdk-py","sessionId":"sess-sdk"}\n'
+        + TOOL_USE_LINE * 4
+    )
+    cur = session_dir / "sess-cur.jsonl"
+    cur.write_text(PLAIN_LINE)
+    now = int(time.time())
+    os.utime(sdk, (now - 120, now - 120))
+    os.utime(cur, (now, now))
+
+    _run(SESSION_START, _env(home, project, remember, defer=False))
+
+    assert not (remember / "tmp" / "capture-gap-notice").exists(), (
+        "warned about a session with no genuine previous session behind it "
+        "-- an SDK-only project directory must not be treated as a gap (#745)"
+    )
+
+
+def test_dialogue_content_that_quotes_the_entrypoint_string_is_not_mistaken_for_a_marker(tmp_path):
+    """Self-review finding carried over from the branch this supersedes: the
+    sniff is a raw substring scan, not a JSON parse, so it must not fire on
+    ordinary conversation content that happens to quote the literal text
+    entrypoint/sdk-py -- exactly what a transcript of a session discussing
+    THIS issue's own test fixtures would contain. Real dialogue is always
+    wrapped in a `message` field in every fixture and real transcript
+    examined for #745; a line carrying one is skipped outright, never
+    scanned for `entrypoint`, however tightly the two literal substrings sit
+    inside it."""
+    home, project, remember, session_dir = _project(tmp_path)
+    previous = (
+        '{"type":"assistant","message":{"content":"note for #745: this '
+        'message literally contains "entrypoint":"sdk-py" verbatim"}}\n'
+        + TOOL_USE_LINE * 5
+    )
+    _transcripts(session_dir, previous=previous)
+    (remember / "tmp" / "capture-session-start").write_text(str(int(time.time())))
+
+    result = _run(SESSION_START, _env(home, project, remember))
+    assert result.returncode == 0, subprocess_failure_detail(result, remember)
+
+    notice = remember / "tmp" / "capture-gap-notice"
+    assert _wait_for_notice(notice), (
+        "a genuinely uncaptured interactive session was excluded as "
+        "'pluginless SDK' merely because its own dialogue quoted the "
+        "literal text entrypoint/sdk-py -- a substring scan is not a JSON "
+        "parse and must not fire on message content (#745)"
+    )
+
+
+def test_an_entrypoint_field_present_but_not_sdk_still_warns(tmp_path):
+    """Positive control: the mere PRESENCE of an `entrypoint` field must not
+    suppress the notice -- only a value that actually opens with `sdk-`. A
+    genuinely uncaptured interactive session (`entrypoint: claude-vscode`,
+    real tool_use, no marker) must still raise (#745)."""
+    home, project, remember, session_dir = _project(tmp_path)
+    previous = (
+        '{"type":"queue-operation","operation":"dequeue",'
+        '"entrypoint":"claude-vscode","sessionId":"sess-prev"}\n'
+        + TOOL_USE_LINE * 5
+    )
+    _transcripts(session_dir, previous=previous)
+    (remember / "tmp" / "capture-session-start").write_text(str(int(time.time())))
+
+    result = _run(SESSION_START, _env(home, project, remember))
+    assert result.returncode == 0, subprocess_failure_detail(result, remember)
+
+    notice = remember / "tmp" / "capture-gap-notice"
+    assert _wait_for_notice(notice), (
+        "an interactive session's own entrypoint field ('claude-vscode') "
+        "suppressed a real capture gap -- only 'sdk-*' may do that (#745)"
+    )
+
+
 def test_a_real_capture_gap_still_warns(tmp_path):
     """The pin that stops this fix degenerating into deleting the warning.
 
