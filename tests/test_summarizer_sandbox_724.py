@@ -29,6 +29,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from pipeline.haiku import (
     _build_cmd,
+    _build_codex_cmd,
     _call_codex,
     _codex_child_env,
     call_haiku,
@@ -281,3 +282,53 @@ def test_call_codex_uses_the_allowlisted_env(mock_run, monkeypatch):
     _call_codex("prompt")
     env = mock_run.call_args[1]["env"]
     assert "SOME_UNRELATED_TOKEN" not in env
+
+
+# ── #798: the allow-list only bounds CODEX's OWN process env -- a command ──
+# the model spawns inside the sandbox does not automatically inherit that
+# same allow-listed dict; Codex's own `shell_environment_policy` is the
+# mechanism that governs what environment SPAWNED commands receive, and it
+# must be set independently of `_codex_child_env` (#751's allow-list stays
+# necessary for Codex's own auth/proxy needs; it is not sufficient for what
+# a model-issued shell command can read).
+
+
+def test_build_codex_cmd_denies_spawned_commands_the_allowlisted_env():
+    """The argv Codex's own process receives must carry a `-c` override
+    telling Codex's OWN shell_environment_policy to hand spawned commands an
+    empty environment (`inherit=none`) -- confirmed against codex-cli
+    0.153.2's own `--help` and the official Codex manual (fetched
+    2026-09-26): `shell_environment_policy` is a real, documented dotted-path
+    config key, settable via `-c` independently of whether config.toml is
+    loaded (this call already passes `--ignore-user-config`). Without this,
+    #751's widened `_codex_child_env` allow-list -- CODEX_API_KEY, the proxy
+    vars, the CA bundle -- is exactly as reachable by a transcript-injected
+    shell command as it is by Codex's own process, because nothing here
+    currently distinguishes the two (#798, gate-3 audit)."""
+    cmd = _build_codex_cmd("/tmp/out.txt", "/tmp/cwd")
+    assert "-c" in cmd
+    override_index = cmd.index("-c") + 1
+    assert cmd[override_index] == "shell_environment_policy.inherit=none"
+
+
+@patch("pipeline.haiku.subprocess.run")
+def test_call_codex_still_authenticates_and_proxies_while_denying_spawned_commands(
+    mock_run, monkeypatch
+):
+    """Positive control for #798: the fix must not regress #751/#792 --
+    Codex's OWN process (the `env=` kwarg subprocess.run receives) still
+    gets CODEX_API_KEY and the proxy vars, in the SAME call whose argv also
+    carries the `shell_environment_policy.inherit=none` override that keeps
+    those same values from reaching a command Codex spawns internally. If
+    this test's first two assertions failed, the fix would have re-broken
+    #751 while "fixing" #798 -- the two must hold together."""
+    monkeypatch.setenv("CODEX_API_KEY", "sk-codex-example")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:8080")
+    _write_codex_output.next_text = "## codex thing"
+    mock_run.side_effect = _write_codex_output
+    _call_codex("prompt")
+    env = mock_run.call_args[1]["env"]
+    cmd = mock_run.call_args[0][0]
+    assert env.get("CODEX_API_KEY") == "sk-codex-example"
+    assert _env_value_ci(env, "HTTPS_PROXY") == "http://proxy.example:8080"
+    assert "shell_environment_policy.inherit=none" in cmd
