@@ -523,6 +523,23 @@ elif [ "${#_cfg_sources[@]}" -gt 0 ] && command -v jq >/dev/null 2>&1; then
                 # entirely rather than merged unsanitized. The trusted
                 # bundled/user layers above are unaffected; only the
                 # untrusted one's own contribution is lost.
+                #
+                # #748: that drop used to happen with nothing logged
+                # anywhere -- a project config's own `handoff_mode` (or any
+                # other setting) disappeared with no explanation. This file
+                # is sourced by log.sh BEFORE log.sh defines `log`/
+                # `report_error` (log.sh sources this file at line 49, long
+                # before its own `log()`/`report_error()` at lines
+                # 941/1360), so neither can be assumed to exist here --
+                # `declare -F` (not `command -v`; see lib-lock.sh's own
+                # comment on why) asks whether THIS shell already has the
+                # function, falling back to a plain stderr line when it
+                # does not.
+                if declare -F report_error >/dev/null 2>&1; then
+                    report_error "lib-memory-dir" "sanitizing the project config layer failed (mktemp, an unreadable project file, or jq itself) -- that layer was dropped; bundled/user-global config still applies"
+                else
+                    printf '%s\n' "[lib-memory-dir] WARNING: sanitizing the project config layer failed (mktemp, an unreadable project file, or jq itself) -- that layer was dropped; bundled/user-global config still applies" >&2
+                fi
                 [ -n "$_project_sanitized_tmp" ] && rm -f "$_project_sanitized_tmp"
                 _project_sanitized_tmp=""
             fi
@@ -573,7 +590,17 @@ elif [ "${#_cfg_sources[@]}" -gt 0 ]; then
     # haiku's own strip is not.
     _strip_model_reject="0"
     [ "$_project_cfg_model_reject_untrusted" = "1" ] && _strip_model_reject="1"
-    "${PYTHON:-python3}" - "$_merged_cfg" "$_untrusted_haiku_source" "$_strip_model_reject" "${_cfg_sources[@]}" > /dev/null 2>&1 <<'PYMERGE' || cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null
+    # #748: the Python fallback's own fail-CLOSED drop of the untrusted
+    # layer (the `except (OSError, ValueError): continue` below) used to
+    # happen with nothing logged anywhere either. There is no fd left to
+    # signal it on -- the interpreter's stdout/stderr are already thrown
+    # away (`> /dev/null 2>&1`) so a real subprocess exit or a printed
+    # marker cannot be told apart from success -- so the except branch
+    # drops a one-byte marker file instead, and this shell checks for it
+    # once the interpreter has exited.
+    _project_drop_marker=$(mktemp "${SYS_TMPDIR}/remember-config-drop-marker-XXXXXX" 2>/dev/null) || _project_drop_marker=""
+    rm -f "$_project_drop_marker" 2>/dev/null
+    "${PYTHON:-python3}" - "$_merged_cfg" "$_untrusted_haiku_source" "$_strip_model_reject" "$_project_drop_marker" "${_cfg_sources[@]}" > /dev/null 2>&1 <<'PYMERGE' || cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null
 import json
 import sys
 
@@ -596,6 +623,10 @@ untrusted_haiku_path = sys.argv[2]
 # model/reject_pattern are stripped alongside haiku only then, never for
 # an untracked (the operator's own) in-project config.
 strip_model_reject = sys.argv[3] == "1"
+# #748: empty when mktemp itself failed above -- tolerated the same way
+# every other mktemp-failure path in this file is (fall through, don't
+# crash the merge over the logging side-channel itself).
+drop_marker_path = sys.argv[4]
 
 
 def load_documents(path):
@@ -621,7 +652,7 @@ def load_documents(path):
 
 
 merged = {}
-for path in sys.argv[4:]:
+for path in sys.argv[5:]:
     if untrusted_haiku_path and path == untrusted_haiku_path:
         # #744: fail CLOSED -- if the untrusted file can't even be loaded
         # (unreadable, a permissions error, malformed JSON, anything
@@ -637,6 +668,14 @@ for path in sys.argv[4:]:
         try:
             docs = load_documents(path)
         except (OSError, ValueError):
+            # #748: drop a marker for the shell to notice and report --
+            # this process's own stdout/stderr are discarded by the caller.
+            if drop_marker_path:
+                try:
+                    with open(drop_marker_path, "w") as _marker:
+                        _marker.write("1")
+                except OSError:
+                    pass
             continue
         for data in docs:
             if isinstance(data, dict):
@@ -654,6 +693,15 @@ merged = {k: v for k, v in merged.items() if not str(k).startswith("_")}
 with open(out_path, "w") as f:
     json.dump(merged, f)
 PYMERGE
+    if [ -n "$_project_drop_marker" ] && [ -f "$_project_drop_marker" ]; then
+        rm -f "$_project_drop_marker" 2>/dev/null
+        if declare -F report_error >/dev/null 2>&1; then
+            report_error "lib-memory-dir" "sanitizing the project config layer failed (unreadable project file or malformed JSON) -- that layer was dropped; bundled/user-global config still applies"
+        else
+            printf '%s\n' "[lib-memory-dir] WARNING: sanitizing the project config layer failed (unreadable project file or malformed JSON) -- that layer was dropped; bundled/user-global config still applies" >&2
+        fi
+    fi
+    [ -n "$_project_drop_marker" ] && rm -f "$_project_drop_marker" 2>/dev/null
 else
     # No config files at all — fall back to the bundled defaults.
     cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null || echo '{}' > "$_merged_cfg"
