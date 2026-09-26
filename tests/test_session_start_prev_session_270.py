@@ -381,6 +381,68 @@ def test_recovery_and_the_gap_check_agree_on_which_session_is_previous(tmp_path)
     )
 
 
+def test_recovery_skips_a_pluginless_sdk_transcript_with_no_session_id_on_stdin(tmp_path):
+    """Self-review finding (#745): the pluginless-SDK exclusion was wired
+    into `previous_transcript()` alone, the branch used whenever the
+    SessionStart payload carries a `session_id`. The sibling branch --
+    `_second_newest_jsonl()`, reached whenever the payload carries none at
+    all (`_run(..., None, ...)` below models that) -- had no such filter, so
+    recovery's force-save could still be handed a pluginless Agent SDK
+    transcript (`entrypoint: sdk-py`) through the one call site the original
+    #745 fix did not touch. This is the exact defect #745 exists to
+    eliminate, reachable through its one untouched branch.
+
+    Three files, not two -- `_second_newest_jsonl()` treats the ABSOLUTE
+    newest file as positionally "this session's own" and never considers it
+    for recovery at all, so the SDK transcript has to sit at the
+    SECOND-newest position (the slot that fallback actually picks) for this
+    to reproduce the bug the way #745's own reporter's project layout does.
+    """
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    remember = project / ".remember"
+    session_dir = home / ".claude" / "projects" / _slug(str(project))
+    session_dir.mkdir(parents=True)
+    (remember / "tmp").mkdir(parents=True)
+
+    now = int(time.time())
+    real = session_dir / f"{PREV}.jsonl"
+    real.write_text(TOOL_USE_LINE * 5)
+    os.utime(real, (now - 600, now - 600))
+    sdk = session_dir / "sess-sdk.jsonl"
+    sdk.write_text(
+        '{"type":"queue-operation","operation":"dequeue",'
+        '"entrypoint":"sdk-py","sessionId":"sess-sdk"}\n'
+        + TOOL_USE_LINE * 4
+    )
+    os.utime(sdk, (now - 60, now - 60))  # second-newest -- the slot the fallback picks
+    own = session_dir / "sess-own-placeholder.jsonl"  # positionally "this session's own"
+    own.write_text(TOOL_USE_LINE)
+    os.utime(own, (now, now))
+
+    (remember / "tmp" / "last-save.json").write_text(json.dumps({"sessions": {}}))
+    record = tmp_path / "save-argv.txt"
+    root = _plugin_root_with_stub_save(tmp_path, record)
+
+    result = _run(
+        _env(home, project, remember, plugin_root=root),
+        None,
+        script=root / "scripts" / "session-start-hook.sh",
+    )
+    assert result.returncode == 0, subprocess_failure_detail(result, remember)
+
+    argv = _await_record(record)
+    assert "sess-sdk" not in argv, (
+        f"recovery force-saved the pluginless Agent SDK transcript {argv!r} "
+        "through the no-session_id fallback path -- the exact bug #745 "
+        "fixes, reachable through the branch its own exclusion never reached"
+    )
+    assert PREV in argv, (
+        f"expected recovery to rescue the genuine previous session {PREV!r} "
+        f"once the SDK transcript is correctly excluded, got {argv!r}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Reading stdin must never cost a session its start
 # ---------------------------------------------------------------------------

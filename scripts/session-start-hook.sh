@@ -973,21 +973,46 @@ previous_transcript() {
 # id filtering at all -- the sibling call site below (#691's own "sibling
 # instance" note) has no CURRENT_SESSION_ID to exclude by and instead picks
 # positionally, on the premise that the newest untagged file is this
-# session's own. Same single-pass, fork-free shape as previous_transcript()
-# above; sets a global rather than being captured via $(...) so calling it
-# costs no subshell either.
+# session's own.
+#
+# NOT a strict single pass since #745 (self-review finding: the original
+# #745 fix wired the pluginless-SDK exclusion into previous_transcript()
+# alone, leaving this sibling -- reached whenever the SessionStart payload
+# carries no session_id at all -- free to hand recovery's force-save the
+# exact kind of transcript the fix exists to keep it away from). The first
+# pass finds the positionally-"own" newest file, unchanged; the second
+# excludes a pluginless-SDK transcript from "second-newest" and retries,
+# the same shape previous_transcript() uses above. Still fork-free: `-nt`
+# is a builtin and _transcript_is_pluginless_sdk only ever forks the
+# subshell _stdin_json_string already costs elsewhere in this file.
 _second_newest_jsonl() {
-    local dir=$1 f newest="" second=""
+    local dir=$1 f own="" newest="" excluded=""
     for f in "$dir"/*.jsonl; do
         [ -e "$f" ] || continue
-        if [ -z "$newest" ] || [ "$f" -nt "$newest" ]; then
-            second=$newest
-            newest=$f
-        elif [ -z "$second" ] || [ "$f" -nt "$second" ]; then
-            second=$f
+        if [ -z "$own" ] || [ "$f" -nt "$own" ]; then
+            own=$f
         fi
     done
-    _TWO_NEWEST_JSONL_SECOND=$second
+    while :; do
+        newest=""
+        for f in "$dir"/*.jsonl; do
+            [ -e "$f" ] || continue
+            [ "$f" = "$own" ] && continue
+            if [ -n "$excluded" ]; then
+                case " $excluded " in *" $f "*) continue ;; esac
+            fi
+            if [ -z "$newest" ] || [ "$f" -nt "$newest" ]; then
+                newest=$f
+            fi
+        done
+        [ -z "$newest" ] && break
+        if _transcript_is_pluginless_sdk "$newest"; then
+            excluded="$excluded $newest"
+            continue
+        fi
+        break
+    done
+    _TWO_NEWEST_JSONL_SECOND=$newest
 }
 
 # ── Deferred: previous-session recovery and capture-gap detection (#660) ──

@@ -60,6 +60,22 @@ def _function_body(name: str) -> str:
     return source[start + 1 : end]
 
 
+def _function_bodies(*names: str) -> str:
+    """Both `previous_transcript` and `_second_newest_jsonl` call
+    `_transcript_is_pluginless_sdk` since #745, which in turn calls
+    `_stdin_json_string` -- neither extracted alone, an isolated script would
+    hit an UNDEFINED function (a plain PATH lookup, not a fork the spawn
+    shims below would ever catch), print "command not found" to stderr, and
+    -- because this file runs no `set -e` -- carry on to the final `printf`
+    regardless, silently exercising a positional/id fallback that happens to
+    equal the intended answer for every fixture in this file (none of which
+    contain an `entrypoint` field at all). Pulling every dependency's own
+    body in, not just the one under test, is what makes a real regression in
+    the pluginless-SDK exclusion actually fail here instead of being masked
+    by a fixture set that never needed it."""
+    return "\n".join(_function_body(name) for name in names)
+
+
 def _run(script: str, args: list[str], env: dict) -> subprocess.CompletedProcess:
     return subprocess.run(
         [BASH, "-c", script, "bash", *args],
@@ -136,7 +152,7 @@ def test_previous_transcript_picks_the_newest_excluding_current_at_scale(tmp_pat
     current = files[-1]  # newest -- excluding it must fall back to the next one
     expected = files[-2]
 
-    body = _function_body("previous_transcript")
+    body = _function_bodies("_stdin_json_string", "_transcript_is_pluginless_sdk", "previous_transcript")
     script = PREVIOUS_TRANSCRIPT_SCRIPT % body
     log = tmp_path / "spawn.log"
     shims = make_shim_dir(tmp_path, log)
@@ -169,7 +185,7 @@ def test_previous_transcript_excludes_current_by_id_not_position(tmp_path):
     middle = files[10]
     newest = files[-1]
 
-    body = _function_body("previous_transcript")
+    body = _function_bodies("_stdin_json_string", "_transcript_is_pluginless_sdk", "previous_transcript")
     script = PREVIOUS_TRANSCRIPT_SCRIPT % body
     env = {**os.environ}
 
@@ -183,7 +199,7 @@ def test_previous_transcript_returns_nothing_when_only_file_is_current(tmp_path)
     sessions.mkdir()
     files = _populate(sessions, 1)
 
-    body = _function_body("previous_transcript")
+    body = _function_bodies("_stdin_json_string", "_transcript_is_pluginless_sdk", "previous_transcript")
     script = PREVIOUS_TRANSCRIPT_SCRIPT % body
     env = {**os.environ}
 
@@ -204,7 +220,7 @@ def test_second_newest_fallback_matches_ls_t_tail_head_semantics_at_scale(tmp_pa
     files = _populate(sessions, REALISTIC_COUNT)
     expected = files[-2]  # second-newest by mtime
 
-    body = _function_body("_second_newest_jsonl")
+    body = _function_bodies("_stdin_json_string", "_transcript_is_pluginless_sdk", "_second_newest_jsonl")
     script = SECOND_NEWEST_SCRIPT % body
     log = tmp_path / "spawn.log"
     shims = make_shim_dir(tmp_path, log)
@@ -233,7 +249,7 @@ def test_second_newest_fallback_empty_with_fewer_than_two_transcripts(tmp_path):
     sessions.mkdir()
     _populate(sessions, 1)
 
-    body = _function_body("_second_newest_jsonl")
+    body = _function_bodies("_stdin_json_string", "_transcript_is_pluginless_sdk", "_second_newest_jsonl")
     script = SECOND_NEWEST_SCRIPT % body
     env = {**os.environ}
 
