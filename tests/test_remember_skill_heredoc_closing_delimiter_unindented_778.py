@@ -26,7 +26,7 @@ class TestHeredocClosingDelimiterIsUnindented:
 
     def test_example_opening_and_closing_lines_exist(self):
         """Positive control: the example itself must still be present."""
-        lines = SKILL_MD.read_text().splitlines()
+        lines = SKILL_MD.read_text(encoding="utf-8").splitlines()
         opening = [l for l in lines if "<<" + chr(39) + TOKEN + chr(39) in l]
         closing = [l for l in lines if l.strip() == TOKEN]
         assert opening, "the heredoc opening line (<<'PICK_A_RANDOM_TOKEN') is missing from SKILL.md"
@@ -35,7 +35,7 @@ class TestHeredocClosingDelimiterIsUnindented:
     def test_closing_delimiter_line_has_no_leading_whitespace(self):
         """`<<'X'` only terminates on a line that is exactly `X` -- any
         leading whitespace means the heredoc never closes."""
-        lines = SKILL_MD.read_text().splitlines()
+        lines = SKILL_MD.read_text(encoding="utf-8").splitlines()
         closing_lines = [l for l in lines if l.strip() == TOKEN]
         assert closing_lines, "no line in SKILL.md consists solely of the closing token PICK_A_RANDOM_TOKEN"
         for line in closing_lines:
