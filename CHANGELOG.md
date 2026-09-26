@@ -7,6 +7,134 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.35.0] - 2026-09-26 — hardening write-handoff's tracked-target guard against symlinked ancestors, widening Codex's env allow-list and locking down its sandboxed command environment, plus a deferred-injection-guard gap, an NDC timeout knob, and a flaky test fix (#745, #750-751, #776-777, #784, #788, #794, #798-799)
+
+### Changed
+
+- Declined milestones for this repo explicitly, recording the decision in `.oss.json`'s new `_milestones_note` key so future triage sweeps stop re-surfacing it as an open question (#784).
+
+### Fixed
+
+- Fixed: the capture-gap notice ("your previous session was not captured")
+  no longer accuses a session that `/remember:doctor` reports as saved, and
+  recovery no longer force-saves it into memory either. The marker-less
+  transcripts turned out not to be the user's own sessions at all: another
+  plugin's commit/push review starts a Claude Agent SDK session
+  (`setting_sources=[]`) that writes its transcript into the same
+  `~/.claude/projects/<slug>/` directory, loads no plugins, and so never
+  registers remember's hooks -- there is no `capture-alive.d/<id>` marker to
+  find, and there never will be, because PostToolUse was never there to write
+  one. `previous_transcript()` now skips a transcript whose own `entrypoint`
+  field opens with `sdk-` when choosing "the previous session", for both the
+  notice and recovery's force-save (#745).
+
+- Fixed (#750): `write-handoff.sh` had no check against the repository's
+  own git index, so it would happily overwrite a tracked `remember.md`,
+  report success, and leave the next SessionStart refusing to show the
+  operator their own note -- falsely blaming a commit they never made. The
+  writer now refuses (rather than overwrites) any target the repository
+  already tracks, mirroring the check the read-side injection guard
+  (`_remember_may_inject`, #721) already applies before ever showing a
+  memory file back to the session, with the same external-storage exemption
+  (#285) so a private git_backup store is unaffected.
+
+- Fixed (#751): the nested Codex summarizer's child-environment allow-list
+  dropped Windows process variables (`SYSTEMROOT`, `USERPROFILE`, `APPDATA`,
+  `PATHEXT`) and, on every platform, `CODEX_API_KEY` and the standard
+  proxy/CA variables (`HTTPS_PROXY`/`HTTP_PROXY`/`NO_PROXY`, plus
+  `SSL_CERT_FILE`/`NODE_EXTRA_CA_CERTS`). Anyone on Windows, behind a
+  proxy, or authenticating Codex via an environment variable would have had
+  every Codex-routed summary fail. The allow-list is widened to include
+  them, and matched case-insensitively against the real environment (some
+  HTTP client libraries only ever check the lowercase form of the proxy
+  names, and Windows itself folds every environment variable's name to
+  uppercase regardless of which case it was actually set under); nothing
+  else passes through.
+
+- Fixed (#776): `write-handoff.sh`'s #743 fix (prefer the git repository
+  root over a possibly-stale `$PWD`) broke a project deliberately started
+  from a repository subdirectory -- a supported shape -- by routing every
+  write to the enclosing repository's own store instead of the
+  subdirectory project's own. The writer now disambiguates using this
+  session's own session-keyed handoff hint (#738): when the subdirectory
+  project's store already carries it but the enclosing repository's store
+  does not, the write goes to the subdirectory project. The #743 behaviour
+  (prefer the git root) is unchanged when neither store carries a hint for
+  this session, which is what an accidental mid-call `cd` -- the case #743
+  fixed -- still looks like.
+
+- Fixed (#777): at `source=compact`, the deferred-file loop that lists which
+  memory files were "delivered at session start; read or grep on request"
+  never called the injection guard (`_remember_may_inject`) before adding a
+  file to that list. A git-tracked or symlinked memory file -- exactly the
+  kind session start itself refuses to inject -- was still listed there,
+  under a header asserting it had been delivered, when it never was. The
+  deferred loop now runs the same guard check the main injection loop already
+  applies, and a refused file is now named under its own
+  `--- refused, would have been listed as deferred (not injected) ---`
+  header -- distinct from the main loop's own `--- refused (not injected) ---`,
+  since both can fire in the same compact-mode render (identity-file
+  refusal from the main loop, any other file's refusal from this one) and an
+  identical header on both would let a reader merge or misattribute the two
+  populations (self-review finding).
+
+- Fixed (#788): NDC compression (`now.md` -> `today-*.md`) had a hard 180s
+  timeout with no config key controlling it. Output length scales with input
+  length, so a `now.md` large enough to need longer than that timed out on
+  every run, was left untouched, and grew further every round -- a one-way
+  ratchet that never recovered on its own. `thresholds.ndc_timeout_seconds`
+  (default 180, unchanged) now lets an install raise the budget instead.
+  Separately, the NDC reject gate only checked whether the reply's first line
+  opened with `## `, so a genuine compression behind a short preamble ("I'll
+  compress the log directly...") was rejected outright and lost -- a header
+  found within the first few lines is now accepted, with the preamble
+  stripped before the compression is written to permanent memory.
+
+- Fixed (#794): `test_remember_date_into_matches_remember_date_with_tz` flaked
+  across a minute boundary on slow CI legs (`pytest (macos-latest, 3.9)`
+  observed). The test read the clock twice, once via `_remember_date` and
+  once via `_remember_date_into`, and asserted the two minute-resolution
+  strings were equal; a boundary crossed between the two reads made the
+  assertion fail even though both functions were correct. It now retries
+  once on a mismatch, mirroring the sibling `..._builtin_path` test's
+  existing pattern -- the assertion stays exact, only the race is tolerated.
+
+- Fixed (#798, gate-3 audit): #751 widened the Codex child-env allow-list
+  (`CODEX_API_KEY`, `HTTPS_PROXY`/`HTTP_PROXY`/`NO_PROXY`,
+  `SSL_CERT_FILE`/`NODE_EXTRA_CA_CERTS`) to keep the nested `codex exec`
+  summarizer authenticated and reachable through a proxy -- but that
+  allow-list only ever governed the env `subprocess.run` gave to Codex's OWN
+  process. It did nothing to stop a transcript-injected instruction from
+  getting the model to run a shell command inside Codex's still-permitted
+  `--sandbox read-only`, and reading those same secrets directly out of
+  THAT command's environment (#724's threat model: the read-only sandbox
+  denies writes and network, not command execution). `_build_codex_cmd` now
+  passes `-c shell_environment_policy.inherit=none`, Codex's own documented
+  mechanism (confirmed against codex-cli 0.153.2 and the official Codex
+  manual) for controlling what environment commands IT spawns receive --
+  independently of what its own process received. Codex's own auth and
+  proxy access are unaffected: `_codex_child_env`'s allow-list still reaches
+  Codex's process via the `env=` kwarg exactly as before. Trade-off worth
+  naming: `inherit=none` gives a spawned command NO environment at all, not
+  only no secrets -- including `PATH`/`HOME` -- accepted because this
+  feature never depended on a spawned command succeeding. The evidence
+  itself is version-pinned to codex-cli 0.153.2, not re-verified against
+  0.150.1 (the version this repo's README reports as observed working),
+  though `shell_environment_policy` is a long-standing Codex config key
+  rather than something new in 0.153.2.
+
+- Fixed (#799): `write-handoff.sh`'s #750 tracked-target guard refused a
+  `tracked` or `unavailable` target but fell through silently for
+  `symlinked-ancestor` -- a state the read-side injection guard
+  (`_remember_may_inject`, #721) already refused. A repository could commit
+  `.remember` as a symlink pointing anywhere its author chose, and
+  `/remember` would write straight through it while reporting success,
+  reproducing the "reports success, then silently refuses on read" shape
+  #750 was meant to close. The write side now refuses every state the read
+  side refuses, via a list (`_REMEMBER_REFUSED_TRACKED_STATES`,
+  `lib-memory-context.sh`) shared between both guards instead of a second,
+  independently maintained copy.
+
 ## [0.34.1] - 2026-09-26 — closing eight more injection-guard bypasses found while auditing the #754 fix itself, plus a symlinked .git that could redirect the config trust check (#754-757, #760-761, #774-775, #780-782)
 
 ### Fixed
@@ -3479,7 +3607,8 @@ Fixes [#9](https://github.com/Digital-Process-Tools/claude-remember/issues/9), a
 
 ## [0.1.0] — Initial release
 
-[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.34.1...HEAD
+[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.35.0...HEAD
+[0.35.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.35.0
 [0.34.1]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.34.1
 [0.34.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.34.0
 [0.33.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.33.0
