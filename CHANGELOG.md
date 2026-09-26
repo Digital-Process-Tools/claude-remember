@@ -7,6 +7,223 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.1] - 2026-09-26 — closing eight more injection-guard bypasses found while auditing the #754 fix itself, plus a symlinked .git that could redirect the config trust check (#754-757, #760-761, #774-775, #780-782)
+
+### Fixed
+
+- **A cross-machine `git` fast-forward could silently delete `.remember/$SLUG/config.json`** ([#741](https://github.com/Digital-Process-Tools/claude-remember/issues/741)) -- when one machine ran the #719 storage-mode upgrade (an index-only `git rm --cached` untracking `config.json`, keeping its own working-tree copy) and pushed, `hooks.d/before_session_start/50-git-restore.sh`'s `git merge --ff-only` on every other machine sharing the store adopted that commit the way an ordinary fast-forward adopts any removal: a locally-unmodified `config.json` was deleted from disk with no signal, taking `haiku.oauth_token` and per-project settings with it. The restore hook now detects a `config.json` the fast-forward it just performed removed from tracking and restores its exact pre-merge bytes to disk (staying untracked, matching the new `HEAD`) rather than accepting the deletion silently; a failure to restore is logged loudly rather than left quiet.
+
+- Fixed (#742): the `/remember` skill piped a model-written handoff note into
+  `write-handoff.sh` behind a fixed `<<'EOF'` heredoc terminator. The note is
+  written from session content that can include untrusted text (a fetched
+  page, an issue body, a file read earlier in the session), so a note
+  containing a line reading exactly `EOF` would end the heredoc early and let
+  the remainder be parsed as shell commands in the same call. The skill now
+  instructs a fresh, unpredictable terminator per invocation instead of the
+  literal `EOF`.
+- Fixed (#743): `write-handoff.sh` fell back to the raw `$PWD` when
+  `CLAUDE_PROJECT_DIR` was unset, but the Bash tool's cwd persists across a
+  `cd` earlier in the same tool call -- so a session that changed directory
+  before running `/remember` wrote its handoff note under that
+  subdirectory's own `.remember/`, a place `SessionStart` (keyed to the
+  project root) never reads. The fallback now prefers `git rev-parse
+  --show-toplevel`, which resolves the project root correctly regardless of
+  the current subdirectory, falling back to `$PWD` only outside a git repo.
+
+- Fixed (#745): the capture-gap notice ("your previous session was not
+  captured ... run /remember:doctor") no longer flatly contradicts
+  `/remember:doctor`'s own "capture is working" verdict when the recovery
+  block force-saves the same session from its transcript. A reporter saw the
+  original wording fire, then ran `/remember:doctor` nine hours later and got
+  a clean "capture is working" -- consistent with a recovery save landing
+  well after the notice had already been written and read. `session-start-
+  hook.sh` now tracks, per run, whether it actually kicked off a recovery
+  fork for the previous session's id (distinct from `features.recovery`
+  merely being on: the fork also needs `SESSIONS_DIR`, an existing
+  `last-save.json`, and an unsaved previous session) and, when it did, says
+  "your previous session was not captured live ... It is being recovered from
+  its transcript now" instead of the flat "not captured" wording. Says
+  "is being recovered", never "has been recovered": the recovery fork runs
+  detached (`& disown`) and this hook exits long before it can know whether
+  that background save actually succeeded. The original wording is
+  unchanged for every case where no recovery attempt was made this run
+  (`features.recovery: false`, or the preconditions above are not met).
+  The root cause of why PostToolUse did not register for the reporter's
+  session in the first place is still open on #745; this closes only the
+  contradiction between the two surfaces.
+
+- **A project config sanitize failure silently dropped that whole layer, with nothing logged anywhere** ([#748](https://github.com/Digital-Process-Tools/claude-remember/issues/748)) -- when the untrusted per-project layer's own `haiku` (and, for a git-tracked config, `model`/`reject_pattern`) fields could not be stripped before merging (an unreadable project config, malformed JSON, or `jq`/`mktemp` itself failing), `scripts/lib-memory-dir.sh` correctly failed CLOSED and dropped the project layer -- but said nothing, so a project's own settings (e.g. `handoff_mode`) disappeared with no explanation. Both the `jq` path and its no-`jq` Python fallback now report the drop via `report_error` where it is already in scope, falling back to a plain stderr line where it is not (this file is sourced by `log.sh` before `log.sh` defines `log`/`report_error`).
+
+- Fixed (#758): `REMEMBER_EMIT_READ_MAX` -- the threshold `_remember_emit_file`
+  uses to decide between reading a memory file with bash's own `read` builtin
+  and forking `cat` -- had no numeric guard, unlike every sibling knob in the
+  same file (`MEMORY_INJECT_MAX_BYTES`) and in `log.sh` (`_budget`, `_grace`).
+  A non-numeric value in the environment made the `[ "$2" -gt "$_remember_emit_max" ]`
+  comparison print `integer expression expected` to stderr and, because the
+  test sits in an `if` condition (`set -e` does not fire there), fall through
+  to the `read` arm -- sending the file down the quadratic path the threshold
+  exists to keep it off. `_remember_emit_file` now guards the threshold with
+  the same `case (''|*[!0-9]*) ... ;; esac` convention its neighbours already
+  use, falling back to the documented default of `16384` on garbage. Low
+  severity: this is an undocumented, dev-only env knob, not user-facing input.
+
+- **A failed `mkdir -p` on the git-backup common dir's `info/` silently skipped the `config.json` exclusion rule** ([#759](https://github.com/Digital-Process-Tools/claude-remember/issues/759)) -- filed while curating a #719/#723 self-review finding that was argued down to non-blocking and logged rather than fixed at the time. Every OTHER failure path in `hooks.d/after_save/50-git-backup.sh` (commit failure, push rejection, untrack failure) already logs a WARNING/ERROR; this one didn't, so a read-only filesystem or a permissions error on the common dir left the `logs/tmp/config.json` exclusion rule silently unwritten, and the subsequent `git add -- "$SLUG/"` could then stage `config.json` -- which can carry a live `haiku.oauth_token` -- exactly as before the #719 fix, with the caller seeing an ordinary success line either way. The `mkdir -p` failure now reports a WARNING via `report_error`.
+
+- **The plugin-promo probe could fire the promo for an already-installed plugin instead of staying silent** ([#762](https://github.com/Digital-Process-Tools/claude-remember/issues/762)) -- `scripts/session-start-hook.sh`'s up-front `installed_plugins.json` probe used `to_entries` on `.plugins`, which (unlike the per-candidate query it replaced) does not error on a non-object `.plugins` shape; a JSON array there was silently read as "no installed keys" rather than "cannot tell", firing the promo in exactly the situation the #574 design meant to suppress it in. The probe now checks `.plugins`' type before calling `to_entries`, falling back to the same cannot-tell suppression as every other malformed-file case.
+
+- **A missing `git` binary used to be read the same as "no repository here", trusting a legacy config it should have refused** ([#766](https://github.com/Digital-Process-Tools/claude-remember/issues/766)) -- the tracked-config check in `scripts/lib-memory-dir.sh` returned `untracked` whenever `git` was not on `PATH`, with no way to tell that apart from the genuine "nothing to check" case, contradicting the documented fail-closed behaviour. It now walks the filesystem by hand for an enclosing `.git` when no `git` spawn is possible: found means `could-not-tell` (fails closed, same as a confirmed-tracked file), not found means there is genuinely nothing to check and the config migrates normally.
+
+- Fixed (#778): the `/remember` skill's heredoc example lived inside a
+  4-space indented markdown block, so its closing delimiter line read
+  `    PICK_A_RANDOM_TOKEN` -- indented -- rather than flush with column 0.
+  A bash heredoc with a quoted terminator only closes on a line that is
+  exactly the terminator, so a model that copied the example literally,
+  indentation included, emitted a heredoc that never closed: everything
+  after the intended closing line became part of the handoff note's content
+  instead of ending the pipe. The example now lives inside a fenced code
+  block, with the closing delimiter flush with column 0.
+
+### Security
+
+- Security (#754): the #721 tracked-handoff guard tested for `.git` in one
+  fixed directory, so launching Claude Code from a repository SUBDIRECTORY
+  (where `.remember/` resolves under that subdirectory, with no `.git` of
+  its own) bypassed it entirely -- a repository-committed handoff file was
+  injected as though it were the user's own prior-session note. The guard
+  now asks git about the handoff file itself, which resolves the nearest
+  repository regardless of subdirectory, worktree or submodule.
+- Security (follow-up): the injection guard now also refuses a symlinked
+  directory anywhere between the memory file and the repository root, not
+  only a symlinked leaf file -- and normalises a Windows/msys path to
+  forward slashes before the repository-root walk, so that walk keeps
+  climbing past the project root on that platform exactly as it already
+  did elsewhere.
+
+- Security (#755): the #721 tracked-file guard only ever checked the
+  handoff file by name. Every other file the session-start context loader
+  injects (`now.md`, `identity.md`, `recent.md`, `archive.md`, ...) went
+  through unrefused even when a cloned repository committed it. A single
+  shared check now covers every file the loader injects.
+
+- Security (#756): `identity.md`'s own fallback path selection was still
+  anchored on `PROJECT_DIR` rather than the memory project directory --
+  the #747 bug at a second site -- so it could pick the wrong file from a
+  linked git worktree. Now anchored the same way #747 fixed the handoff,
+  and routed through the same shared injection guard as #754/#755.
+
+- **A repository-committed legacy `.remember/config.json` could become the trusted external
+  config for good** ([#757](https://github.com/Digital-Process-Tools/claude-remember/issues/757)) —
+  the one-shot migration into external storage moved a project's whole legacy `.remember/`,
+  `config.json` included, into the new external `REMEMBER_DIR`, where it is trusted
+  unconditionally from then on. A repository that committed `.remember/config.json` before a
+  clone ever switched to external storage could therefore pick the summarizer's OAuth
+  credential, force the operator's own `ANTHROPIC_API_KEY` to be stripped, or reach into
+  the refusal gate (`reject_pattern: "none"` disables it outright; any other value is a
+  regex run over model output, an attacker-controlled ReDoS surface). A `config.json` that is
+  tracked by git — the enclosing repository's index, not just a `.git` in the project
+  directory itself, so a project started from a repo subdirectory is still covered — is now
+  left behind during migration, still tracked, doing nothing for the new external store,
+  logged in both `MIGRATED-TO.txt` and `hook-errors.log` rather than silently. A tracked
+  status that could not be determined at all (a git failure unrelated to a confirmed answer)
+  fails CLOSED the same way. An untracked legacy config — the user's own, never committed —
+  still migrates and is still trusted, as before.
+- The untrusted-project-layer strip [#726](https://github.com/Digital-Process-Tools/claude-remember/issues/726)/[#740](https://github.com/Digital-Process-Tools/claude-remember/issues/740)
+  built for `haiku` now also strips `model` and `reject_pattern` — but only when the
+  per-project `.remember/config.json` is git-tracked, not merely sitting in the default
+  (legacy) storage layout the way `haiku` already is unconditionally. Neither key can
+  redirect where transcripts go, only which model is billed or whether the refusal gate
+  runs at all — severe enough to strip from a file the repository itself committed, not
+  severe enough to break every single-user project's own untracked per-project override.
+- Migration hardening on the same code path: the tracked-config holdout in
+  `scripts/bootstrap-dirs.sh` never follows a symlinked `config.json` -- it is moved, not
+  copied, so a link pointing anywhere on disk is left exactly as it is, never read, never
+  migrated. `scripts/lib-memory-dir.sh`'s own merge refuses a symlinked project
+  `config.json` the same way, logging the refusal instead of reading through the link.
+- The holdout restore is now checked at every step: a failed restore never deletes the
+  operator's only remaining copy, and logs loudly with the path it is still sitting at.
+- The git-tracked check now compares case-insensitively (`git ls-files -- ':(icase)...'`),
+  so a config committed under a differently-cased path is still seen as tracked on a
+  case-insensitive filesystem (macOS APFS default) rather than migrating as trusted.
+- A symlinked legacy `.remember` DIRECTORY (not just a symlinked `config.json` inside it) is
+  also refused at migration time -- moving the link itself into the external store would make
+  it indistinguishable from a legitimate operator-configured external directory from then on.
+  Left in place, untouched, logged.
+
+- Security (#760): the shared injection guard's tracked-file check used to
+  read "git itself failed" (a missing binary, a corrupted `.git`, a broken
+  shim on PATH) the same way as "asked, and the file is not tracked" --
+  silently delivering the file on a git failure. The check now has three
+  states (allowed / refused / unavailable) rather than two: a repository
+  that genuinely could not be asked now REFUSES and says so, while a
+  directory that is genuinely not inside any repository at all (the
+  ordinary external-storage case) is unaffected and still delivers.
+
+- **A pre-planted symlink at the repository's own `.git` could redirect the config tracked-check at an unrelated repository** ([#761](https://github.com/Digital-Process-Tools/claude-remember/issues/761)) -- `_remember_config_tracked_status` (`scripts/lib-memory-dir.sh`) resolved `.git` the ordinary way, following whatever it pointed to; a symlink swapped in before the process started would answer the whole check against a different repository's own objects and index, potentially reporting `.remember/config.json` as untracked (safe to deliver) when it was in fact committed. The check now refuses to trust the result (fails closed, same as every other ambiguous case here) when the repository's own toplevel `.git` is a symlink -- a shape neither an ordinary checkout nor a linked git worktree ever produces.
+
+- Security (#774): the shared injection guard's tracked-file check listed
+  the repository with a plain `git ls-files`, which quotes and
+  octal-escapes any non-ASCII byte in a path (`core.quotePath`, on by
+  default everywhere) -- but the check then compared that line against a
+  raw, unquoted relative path. A tracked memory file whose path ran
+  through a non-ASCII directory name never matched, so the guard silently
+  answered "not tracked" and injected it. The `ls-files` call now runs
+  with `-c core.quotePath=false`, and the comparison itself now unquotes
+  each `ls-files` line before comparing it (`_remember_git_unquote_into`)
+  -- found in this fix's own self-review: `core.quotePath` only covers
+  non-ASCII bytes, but `ls-files` C-quotes a literal backslash, double
+  quote or control byte in a path unconditionally, which the same
+  literal-comparison bypass still let through for those characters.
+
+- Security (#775): the session-start context cache could serve a render
+  made BEFORE the #721/#754/#755/#756/#760 injection guard existed, or
+  before a later fix to it -- the cache-hit path never consults the guard
+  at all, and the cache manifest previously invalidated only on source
+  mtime, which an upgrade does not change. A cache published before a
+  guard fix could therefore keep replaying content that same fix now
+  refuses to inject. The manifest now also carries a format-version
+  stamp; any cache missing it (every one published before this fix) or
+  naming a different version is always a miss, on top of the existing
+  mtime check.
+
+- Security (#780): #774's own fix -- `_remember_git_unquote_into`
+  (`_remember_may_inject`'s tracked-file check) -- used `printf '%b'` to
+  unescape `git ls-files`' C-quoted output, but `%b` does not know the
+  two-character escape `\"`, unlike `\\`, `\n`, `\t` and the rest of the
+  table it does handle. A tracked memory file whose path ran through a
+  directory containing a literal double-quote byte still unquoted to
+  `\"` instead of `"`, never matched the raw relative path, and the
+  guard silently answered "not tracked" and injected it -- the same class
+  #774 fixed for non-ASCII bytes and the literal backslash, left open for
+  this one character. The unquote now pre-translates every `\"` pair into
+  the octal escape `\042` before calling `%b`, which does expand it.
+  `_REMEMBER_CACHE_FORMAT_VERSION` is bumped so a cache rendered through
+  this hole is invalidated rather than served again.
+
+- Security (#781): the start-context cache loader
+  (`_remember_start_cache_context_load`) served a cache hit without ever
+  consulting the injection guard. A repository could commit
+  `.remember/tmp/start-context.cache` together with a manifest containing
+  only a `VERSION=` line -- git checks both files out owned by the user and
+  as regular files, so the existing `-O`/`-L` checks passed, and with no
+  `SRC=` line the `-nt` mtime check never ran against anything. The loader
+  now routes the cache and manifest files themselves through the same
+  tracked/symlink check (`_remember_may_inject`) every other injected file
+  goes through, and refuses any manifest naming zero `SRC=` lines -- a
+  legitimate cache always depends on at least one source file.
+
+- Security (#782): the one-shot legacy-store migration
+  (`scripts/bootstrap-dirs.sh`) held back only a tracked `config.json` and
+  moved every other tracked file in a legacy `.remember/` directory --
+  including a planted `now.md` -- wholesale into the external memory
+  store, which the injection guard exempts from its tracked-file check
+  entirely by design (external storage can legitimately be the plugin's
+  own `git_backup` repository). Once a repository-tracked memory file
+  landed inside the external store this way, nothing downstream ever
+  refused it again. The migration now scans the legacy directory for any
+  git-tracked content beyond `config.json` and refuses the whole migration
+  when it finds any (or cannot tell), logging why and leaving the legacy
+  directory untouched for the operator to sort out by hand.
+
 ## [0.34.0] - 2026-09-25 — a git-tracked handoff reaches an untrusted worktree past the #721 injection guard, and a second untrusted-config JSON document survives the #726 credential strip (#740, #747)
 
 ### Added
@@ -3262,7 +3479,8 @@ Fixes [#9](https://github.com/Digital-Process-Tools/claude-remember/issues/9), a
 
 ## [0.1.0] — Initial release
 
-[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.34.0...HEAD
+[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.34.1...HEAD
+[0.34.1]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.34.1
 [0.34.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.34.0
 [0.33.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.33.0
 [0.32.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.32.0
