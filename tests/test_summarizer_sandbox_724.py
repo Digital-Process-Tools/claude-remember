@@ -140,6 +140,63 @@ def test_codex_child_env_keeps_what_the_cli_needs(monkeypatch):
     assert env.get("HOME") == "/home/example"
 
 
+# ── #751: the allow-list must not drop Windows or credential/proxy vars ────
+
+
+def test_codex_child_env_keeps_windows_process_vars(monkeypatch):
+    """Reasoned in #751, checked here without needing an actual Windows
+    runner: SYSTEMROOT/USERPROFILE/APPDATA/PATHEXT must pass through when
+    they are set, whatever the host platform actually is -- the allow-list
+    itself carries no platform branch to get wrong."""
+    monkeypatch.setenv("SYSTEMROOT", "C:_SEP_Windows".replace("_SEP_", chr(92)))
+    monkeypatch.setenv("USERPROFILE", "C:_SEP_Users_SEP_example".replace("_SEP_", chr(92)))
+    monkeypatch.setenv("APPDATA", "C:_SEP_Users_SEP_example_SEP_AppData_SEP_Roaming".replace("_SEP_", chr(92)))
+    monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT")
+    env = _codex_child_env()
+    assert env.get("SYSTEMROOT") == os.environ["SYSTEMROOT"]
+    assert env.get("USERPROFILE") == os.environ["USERPROFILE"]
+    assert env.get("APPDATA") == os.environ["APPDATA"]
+    assert env.get("PATHEXT") == ".COM;.EXE;.BAT"
+
+
+def test_codex_child_env_keeps_the_codex_api_key(monkeypatch):
+    """#751: dropping CODEX_API_KEY breaks anyone who authenticates Codex
+    via env var rather than a filesystem auth.json."""
+    monkeypatch.setenv("CODEX_API_KEY", "sk-codex-example")
+    env = _codex_child_env()
+    assert env.get("CODEX_API_KEY") == "sk-codex-example"
+
+
+def test_codex_child_env_keeps_proxy_and_ca_vars(monkeypatch):
+    """#751: dropping these breaks anyone behind a proxy or a custom CA
+    bundle, on every platform -- both cases, since some HTTP client
+    libraries only ever check one."""
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:8080")
+    monkeypatch.setenv("https_proxy", "http://proxy.example:8080")
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.example:8080")
+    monkeypatch.setenv("NO_PROXY", "localhost")
+    monkeypatch.setenv("SSL_CERT_FILE", "/etc/ssl/custom-ca.pem")
+    monkeypatch.setenv("NODE_EXTRA_CA_CERTS", "/etc/ssl/custom-ca.pem")
+    env = _codex_child_env()
+    assert env.get("HTTPS_PROXY") == "http://proxy.example:8080"
+    assert env.get("https_proxy") == "http://proxy.example:8080"
+    assert env.get("HTTP_PROXY") == "http://proxy.example:8080"
+    assert env.get("NO_PROXY") == "localhost"
+    assert env.get("SSL_CERT_FILE") == "/etc/ssl/custom-ca.pem"
+    assert env.get("NODE_EXTRA_CA_CERTS") == "/etc/ssl/custom-ca.pem"
+
+
+def test_codex_child_env_still_excludes_unrelated_secrets_after_widening(monkeypatch):
+    """Negative assertion's own positive control, restated after the
+    widening: an unrelated secret must still not reach the child even now
+    that the allow-list has grown."""
+    monkeypatch.setenv("SOME_UNRELATED_TOKEN", "sk-super-secret")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-example")
+    env = _codex_child_env()
+    assert "SOME_UNRELATED_TOKEN" not in env
+    assert "ANTHROPIC_API_KEY" not in env
+
+
 @patch("pipeline.haiku.subprocess.run")
 def test_call_codex_uses_the_allowlisted_env(mock_run, monkeypatch):
     monkeypatch.setenv("SOME_UNRELATED_TOKEN", "sk-super-secret")

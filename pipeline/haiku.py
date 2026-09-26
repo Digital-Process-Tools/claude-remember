@@ -1099,8 +1099,39 @@ def _isolated_summarizer_cwd():
 # does) is not enough -- a command like `env`/`printenv` reads the child's
 # environment directly. This keeps only what the CLI itself needs to run
 # and resolve its own filesystem-based auth.
+#
+# #751 (release-audit, reasoned not observed): the original list was
+# PATH/HOME/LANG/LC_ALL/CODEX_HOME/TMPDIR/TEMP/TMP only -- no Windows entry,
+# and no route for anyone who authenticates Codex through an env var or
+# sits behind a proxy, on ANY platform. Both are widened here rather than
+# switched to a deny-list: #724's own rationale above (a command the model
+# runs can read the child's environment directly) is exactly as true on
+# Windows and behind a proxy as it is everywhere else this allow-list
+# already applied, so the fix is the same shape, just wider.
+#
+# The Windows-only names are listed UNCONDITIONALLY, not behind an
+# ``os.name == "nt"`` branch: this dict comprehension only ever passes
+# through a name that is ALSO a key in the parent's real ``os.environ``, so
+# adding ``SYSTEMROOT``/``USERPROFILE``/``APPDATA``/``PATHEXT`` to the
+# allow-list is a no-op on POSIX (nothing there sets them) and is exactly
+# the widening Codex needs on Windows -- no platform check needed, and
+# nothing here would read as "passing" on a platform it does not actually
+# cover the way a branched implementation could.
 _CODEX_CHILD_ENV_ALLOW = frozenset({
     "PATH", "HOME", "LANG", "LC_ALL", "CODEX_HOME", "TMPDIR", "TEMP", "TMP",
+    # Windows: resolving %SystemRoot%-relative paths, the user profile dir,
+    # per-user app data, and which extensions CreateProcess treats as
+    # executable when a bare command name (no extension) is looked up on
+    # PATH -- without PATHEXT a bare "codex" can fail to resolve at all.
+    "SYSTEMROOT", "USERPROFILE", "APPDATA", "PATHEXT",
+    # Codex's own env-var credential (its filesystem-based CODEX_HOME/
+    # auth.json is unaffected either way) plus the standard proxy/CA
+    # variables -- every platform, not just Windows. Both cases of the
+    # proxy names: some HTTP client libraries only ever check one.
+    "CODEX_API_KEY",
+    "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY",
+    "https_proxy", "http_proxy", "no_proxy",
+    "SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS",
 })
 
 
@@ -1113,6 +1144,14 @@ def _codex_child_env() -> dict[str, str]:
     ``CODEX_HOME``: where Codex's own ``auth.json`` lives, if overridden --
     unaffected by this allow-list either way, matching the note in
     `_build_codex_cmd`'s docstring.
+    ``SYSTEMROOT``/``USERPROFILE``/``APPDATA``/``PATHEXT``: Windows-only in
+    practice (#751) -- absent from ``os.environ`` everywhere else, so listing
+    them here costs nothing on POSIX.
+    ``CODEX_API_KEY``: Codex's own env-var credential, when that is how this
+    host authenticates it rather than a filesystem ``auth.json`` (#751).
+    ``HTTPS_PROXY``/``HTTP_PROXY``/``NO_PROXY`` (both cases) and
+    ``SSL_CERT_FILE``/``NODE_EXTRA_CA_CERTS``: anyone running this behind a
+    proxy or a custom CA bundle (#751).
 
     Nothing else -- no Anthropic key, no cloud credential, no unrelated
     shell secret this process's own environment happens to carry -- is
