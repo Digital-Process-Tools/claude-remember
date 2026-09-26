@@ -1139,8 +1139,16 @@ if [ "$RUN_NDC" = true ]; then
     if [ -s "$NDC_PROMPT" ]; then
         (set +e  # don't inherit set -e -- a haiku non-zero exit must not kill the subshell
             NDC_ERR=$(mktemp "${TMPDIR:-/tmp}"/remember-ndc-err-XXXXXX)
-            # 180s (not the 120s default): NDC compresses a whole now.md.
-            NDC_VARS=$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell call-haiku "$NDC_PROMPT" "" 180 2>"$NDC_ERR")
+            # 180s default (not the 120s default): NDC compresses a whole
+            # now.md, and output length scales with input length. #788:
+            # this was fixed with no config key, so a now.md large enough to
+            # need more than 180s timed out on every run, left untouched
+            # (see the ERROR branch below), and kept growing -- a one-way
+            # ratchet. Configurable so an install with a larger buffer can
+            # raise it instead of being stuck.
+            NDC_TIMEOUT_SECONDS=$(config ".thresholds.ndc_timeout_seconds" 180)
+            case "$NDC_TIMEOUT_SECONDS" in ''|*[!0-9]*) NDC_TIMEOUT_SECONDS=180 ;; esac
+            NDC_VARS=$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell call-haiku "$NDC_PROMPT" "" "$NDC_TIMEOUT_SECONDS" 2>"$NDC_ERR")
             NDC_EXIT=$?
 
             if [ "$NDC_EXIT" -eq "$SPAWN_DECLINED_EXIT" ]; then
@@ -1201,8 +1209,26 @@ if [ "$RUN_NDC" = true ]; then
                 # compression instead of a refusal, which is this same failure
                 # mode with the trigger swapped. The plain "## " check is the
                 # one thing every legitimate shape shares that no refusal does.
-                case "$(head -1 "$HAIKU_TEXT_FILE" 2>/dev/null)" in
-                    ('## '*) NDC_LOOKS_LIKE_HEADER=true ;;
+                # #788 (minor, fix 4): a genuine compression can arrive with a
+                # short preamble before the first real "## " header ("I'll
+                # compress the log directly...Here's the maximally compressed
+                # version:"). Checking only line 1 rejected that whole reply
+                # and let now.md keep growing for no reason. Find the first
+                # header line instead, but only within a short window (lines
+                # 2-4): a "## " that only shows up much later is far more
+                # likely a refusal that happens to mention it in passing than
+                # a short preamble, and is left to the reject branch below.
+                NDC_HEADER_LINE=$(grep -n -m1 '^## ' "$HAIKU_TEXT_FILE" 2>/dev/null | cut -d: -f1)
+                case "$NDC_HEADER_LINE" in
+                    (1) NDC_LOOKS_LIKE_HEADER=true ;;
+                    ([2-4])
+                        NDC_LOOKS_LIKE_HEADER=true
+                        NDC_STRIPPED_FILE=$(mktemp "${TMPDIR:-/tmp}"/remember-ndc-stripped-XXXXXX)
+                        tail -n "+$NDC_HEADER_LINE" "$HAIKU_TEXT_FILE" > "$NDC_STRIPPED_FILE"
+                        mv "$NDC_STRIPPED_FILE" "$HAIKU_TEXT_FILE"
+                        NDC_TEXT=$(cat "$HAIKU_TEXT_FILE")
+                        log "ndc" "preamble stripped ($((NDC_HEADER_LINE - 1)) line(s) before the first '## ')"
+                        ;;
                     (*) NDC_LOOKS_LIKE_HEADER=false ;;
                 esac
                 if [ "$IS_SKIP" = "true" ] || [ "${IS_REJECTED:-false}" = "true" ] || [ "$NDC_LOOKS_LIKE_HEADER" = "false" ]; then
