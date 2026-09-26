@@ -24,3 +24,19 @@ add a new pair alongside the old one. A stacked pair is not additive: once your 
 older pair's "old" form no longer exists anywhere in history the test can reach, and its "new"
 form no longer exists in the tree either, so it can never pass again. This has to be checked by
 reading the test file itself, not by trusting your own branch's CI green.
+
+**The fold replaces `old_code`; it does not extend `new_code` in place (#761).** A first attempt at
+folding a new change into an existing pinned pair naturally reaches for the `new_code` half --
+that is the tuple element that looks like it should grow -- and edits only that, leaving `old_code`
+exactly as it was. That breaks the guard: "neither the old nor the new code of this sanctioned
+substitution is on origin/main," because what was previously `new_code` has, since the earlier fold
+shipped, become the form that is now actually live on `origin/main` -- it is `old_code`'s job to
+name that, not `new_code`'s. The correct move is: replace the WHOLE `old_code` element with the
+byte-for-byte text `origin/main` currently ships at that site (verify with `git show
+origin/main:PATH`), and only then extend `new_code` with the newest change on top of that. Costs
+roughly 3 read/edit cycles to diagnose when done backwards (re-reading the guard's failure message,
+diffing `old_code` against `git show origin/main:...` by hand, then realizing the whole element
+needs replacing) -- cheaper to get the direction right the first time: before editing either half
+of a pinned tuple, check whether the existing `new_code` half already matches what `origin/main`
+currently ships; if so, that whole half moves to `old_code` verbatim, and only then does `new_code`
+grow the newest diff on top of it.
