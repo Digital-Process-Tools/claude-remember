@@ -855,26 +855,114 @@ _remember_write_case_divergence() {
 # nothing in this hook reads back, and the foreground path's only obligation
 # is the injected context.
 
+# Args: $1 -- path to a transcript file. Reports (via exit status) whether
+# its own first bookkeeping records name it as an Agent SDK session that
+# never loaded this plugin at all (#745).
+#
+# A reporter's transcripts opened with `"type":"queue-operation"` and had no
+# `capture-alive.d/<id>` marker -- the capture-gap notice fired even though
+# `/remember:doctor` reported the session as saved, and separately, recovery
+# force-saved another plugin's own review into the user's memory. A second
+# report on the same issue (kenspc, 16 real transcripts) found the real
+# discriminator: every marker-less transcript in that sample was
+# `entrypoint: sdk-py`, written by another plugin's own `agentic_review()`
+# call (security-guidance's commit/push review) starting a Claude Agent SDK
+# session with `setting_sources=[]` -- no settings, no plugins, so
+# remember's hooks were never REGISTERED for it, not merely unwired. There
+# is no marker to find because PostToolUse was never there to write one, and
+# there never will be.
+#
+# Claude Code writes `entrypoint` on a transcript's own bookkeeping records
+# (`cli`, `claude-vscode`, `sdk-py`, ...); an SDK client's own transcript
+# carries it before the plugin can be blamed. This is deliberately narrow:
+# only a value opening with `sdk-` is treated as pluginless.
+#
+# NOT SOUND, on two counts logged to trap.d/745 (curator to decide) rather
+# than fixed here:
+#   1. An SDK integration that DOES pass `setting_sources` and loads this
+#      plugin would write its own marker exactly like any other host, but
+#      this check has no way to tell that apart from a pluginless one -- it
+#      looks only at the entrypoint prefix, never at whether evidence of
+#      capture already exists for this same transcript. No real-world
+#      instance of a plugin-loaded SDK entrypoint has been observed; #745's
+#      own dataset (16 transcripts) had none.
+#   2. The match below is a substring scan over up to 50 RAW transcript
+#      lines, not a check that the matching line is a bookkeeping record --
+#      ordinary conversation content (a pasted JSON snippet, a tool result
+#      quoting this very file) could in principle carry the literal text
+#      `"entrypoint":"sdk-...` and be misread as a bookkeeping line. Lines
+#      that carry a `"message"` field are real dialogue in every fixture and
+#      real transcript examined for #745 and are skipped outright below,
+#      which closes the concrete case self-review raised (a session whose
+#      own transcript discusses this issue's test fixtures) without a real
+#      JSON parse -- a residual false match confined to bookkeeping-shaped,
+#      non-dialogue content is not eliminated.
+# The field also carries no documented stability contract; absence, or a
+# shape this cannot parse, falls through to "not sdk" -- the safe direction,
+# since keeping a transcript in contention risks at most the false notice
+# this exists to fix, never a real gap going unreported.
+#
+# Bounded to the same scan depth pipeline/extract.py's own envelope sniff
+# uses for the same shape of problem (#543/#556's _ENVELOPE_SNIFF_SCAN_CAP) --
+# a transcript that never says who wrote it in its first 50 lines is read as
+# not-sdk rather than scanned to the end.
+_ENTRYPOINT_SNIFF_CAP=50
+_transcript_is_pluginless_sdk() {
+    local f=$1 n=0 line ep
+    while IFS= read -r line; do
+        n=$((n + 1))
+        case "$line" in
+            *'"message"'*) ;;  # real dialogue, never a bookkeeping record
+            *'"entrypoint"'*)
+                ep=$(_stdin_json_string entrypoint "$line" 2>/dev/null) || return 1
+                case "$ep" in
+                    sdk-*) return 0 ;;
+                    *) return 1 ;;
+                esac
+                ;;
+        esac
+        [ "$n" -ge "$_ENTRYPOINT_SNIFF_CAP" ] && return 1
+    done < "$f" 2>/dev/null
+    return 1
+}
+
 # Args: $1 — sessions dir. Prints the newest transcript that is not this
 # session's, or nothing.
 #
-# A single pass over the glob, comparing mtimes with bash's own `-nt` TEST
-# BUILTIN (no fork) instead of forking `ls -t` to sort the whole directory
-# and throwing away every line but the first (#691). Measured cost of the
-# old shape (windows-latest, the #660 diagnostic): 0.104s at 500 past
-# transcripts, 0.41s at 2000 -- the only per-session cost in this hook that
-# grows with how long a project has been used. This has none: it forks
-# nothing, so its cost is the glob expansion alone.
+# NOT a strict single pass since #745: excludes a pluginless-SDK transcript
+# (above) and retries, so a run of several such transcripts costs one glob
+# pass and one bounded content scan per excluded candidate, not one pass
+# total. Comparing mtimes still uses bash's own `-nt` TEST BUILTIN (no fork)
+# rather than forking `ls -t` to sort the whole directory (#691); the content
+# scan only ever runs against a candidate that is already "newest so far",
+# never against every file in the directory.
 previous_transcript() {
-    local dir=$1 f base newest=""
-    for f in "$dir"/*.jsonl; do
-        [ -e "$f" ] || continue
-        base=${f##*/}
-        base=${base%.jsonl}
-        [ "$base" = "$CURRENT_SESSION_ID" ] && continue
-        if [ -z "$newest" ] || [ "$f" -nt "$newest" ]; then
-            newest=$f
+    local dir=$1 f base newest="" excluded=""
+    while :; do
+        newest=""
+        for f in "$dir"/*.jsonl; do
+            [ -e "$f" ] || continue
+            base=${f##*/}
+            base=${base%.jsonl}
+            [ "$base" = "$CURRENT_SESSION_ID" ] && continue
+            if [ -n "$excluded" ]; then
+                case " $excluded " in *" $f "*) continue ;; esac
+            fi
+            if [ -z "$newest" ] || [ "$f" -nt "$newest" ]; then
+                newest=$f
+            fi
+        done
+        [ -z "$newest" ] && break
+        if _transcript_is_pluginless_sdk "$newest"; then
+            # #745: never picked as "the previous session" at all -- neither
+            # the notice nor recovery's force-save may aim at a transcript no
+            # plugin was ever loaded into. Keep looking for the next-newest
+            # eligible one; a run of several such pairs is excluded one at a
+            # time rather than assumed to be exactly one or two.
+            excluded="$excluded $newest"
+            continue
         fi
+        break
     done
     [ -n "$newest" ] && printf '%s\n' "$newest"
     return 0
@@ -885,21 +973,46 @@ previous_transcript() {
 # id filtering at all -- the sibling call site below (#691's own "sibling
 # instance" note) has no CURRENT_SESSION_ID to exclude by and instead picks
 # positionally, on the premise that the newest untagged file is this
-# session's own. Same single-pass, fork-free shape as previous_transcript()
-# above; sets a global rather than being captured via $(...) so calling it
-# costs no subshell either.
+# session's own.
+#
+# NOT a strict single pass since #745 (self-review finding: the original
+# #745 fix wired the pluginless-SDK exclusion into previous_transcript()
+# alone, leaving this sibling -- reached whenever the SessionStart payload
+# carries no session_id at all -- free to hand recovery's force-save the
+# exact kind of transcript the fix exists to keep it away from). The first
+# pass finds the positionally-"own" newest file, unchanged; the second
+# excludes a pluginless-SDK transcript from "second-newest" and retries,
+# the same shape previous_transcript() uses above. Still fork-free: `-nt`
+# is a builtin and _transcript_is_pluginless_sdk only ever forks the
+# subshell _stdin_json_string already costs elsewhere in this file.
 _second_newest_jsonl() {
-    local dir=$1 f newest="" second=""
+    local dir=$1 f own="" newest="" excluded=""
     for f in "$dir"/*.jsonl; do
         [ -e "$f" ] || continue
-        if [ -z "$newest" ] || [ "$f" -nt "$newest" ]; then
-            second=$newest
-            newest=$f
-        elif [ -z "$second" ] || [ "$f" -nt "$second" ]; then
-            second=$f
+        if [ -z "$own" ] || [ "$f" -nt "$own" ]; then
+            own=$f
         fi
     done
-    _TWO_NEWEST_JSONL_SECOND=$second
+    while :; do
+        newest=""
+        for f in "$dir"/*.jsonl; do
+            [ -e "$f" ] || continue
+            [ "$f" = "$own" ] && continue
+            if [ -n "$excluded" ]; then
+                case " $excluded " in *" $f "*) continue ;; esac
+            fi
+            if [ -z "$newest" ] || [ "$f" -nt "$newest" ]; then
+                newest=$f
+            fi
+        done
+        [ -z "$newest" ] && break
+        if _transcript_is_pluginless_sdk "$newest"; then
+            excluded="$excluded $newest"
+            continue
+        fi
+        break
+    done
+    _TWO_NEWEST_JSONL_SECOND=$newest
 }
 
 # ── Deferred: previous-session recovery and capture-gap detection (#660) ──
