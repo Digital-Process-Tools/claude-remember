@@ -659,32 +659,43 @@ _remember_may_inject() {
     fi
     _remember_in_project_store || return 0
     _remember_file_tracked_state_into _mi_state "$_mi_file"
-    case "$_mi_state" in
-        (tracked)
-            _REMEMBER_INJECT_REFUSAL="$_mi_file is tracked by this repository's own git index. This plugin never commits a memory file itself (.remember/.gitignore excludes the whole directory), so a tracked one was shipped by the repository, not written by your own /remember. Not injecting it. If it is genuinely yours: git rm --cached it. If you did not add it: delete it and consider what else the commit that added it changed."
-            log "$_mi_component" "refused injecting $_mi_file: git-tracked"
-            return 1
-            ;;
-        (unavailable)
-            # #760: a repository really is above this file, but asking git
-            # whether it tracks the file could not be trusted (missing
-            # binary, broken state, a shim on PATH). Refuse rather than
-            # deliver on a guess -- an untrustworthy "no" from the tracked
-            # check must read the same as "yes", not the same as a clean
-            # "not tracked".
-            _REMEMBER_INJECT_REFUSAL="$_mi_file could not be checked against this repository's git index (git is missing, or the check itself failed) -- refusing rather than injecting unverified. Run /remember:doctor to see why git could not be asked."
-            log "$_mi_component" "refused injecting $_mi_file: git status unavailable"
-            return 1
-            ;;
-        (symlinked-ancestor)
-            _REMEMBER_INJECT_REFUSAL="$_mi_file sits under a directory that is itself a symlink -- refusing to follow it into session context. This plugin never creates a symlink inside a memory store; if you did not create this one, treat it as planted and inspect what it points at before deleting it."
-            log "$_mi_component" "refused injecting $_mi_file: symlinked ancestor directory"
-            return 1
-            ;;
-        (*)
-            return 0
-            ;;
-    esac
+    # #799 follow-up (self-review): this used to be its OWN independent
+    # `tracked|unavailable|symlinked-ancestor` case, kept in sync with
+    # write-handoff.sh's copy by hand only -- the exact hazard #799 fixed on
+    # the write side. Gating on the shared _remember_tracked_state_is_refused
+    # first means a state added to _REMEMBER_REFUSED_TRACKED_STATES without
+    # also adding a case arm HERE now fails closed (falls to the `*` arm
+    # below, which refuses) instead of silently falling through to the old
+    # unconditional `(*) return 0` -- the injection guard was previously the
+    # one side that would have allowed an unrecognised refused state through.
+    if _remember_tracked_state_is_refused "$_mi_state"; then
+        case "$_mi_state" in
+            (tracked)
+                _REMEMBER_INJECT_REFUSAL="$_mi_file is tracked by this repository's own git index. This plugin never commits a memory file itself (.remember/.gitignore excludes the whole directory), so a tracked one was shipped by the repository, not written by your own /remember. Not injecting it. If it is genuinely yours: git rm --cached it. If you did not add it: delete it and consider what else the commit that added it changed."
+                log "$_mi_component" "refused injecting $_mi_file: git-tracked"
+                ;;
+            (unavailable)
+                # #760: a repository really is above this file, but asking git
+                # whether it tracks the file could not be trusted (missing
+                # binary, broken state, a shim on PATH). Refuse rather than
+                # deliver on a guess -- an untrustworthy "no" from the tracked
+                # check must read the same as "yes", not the same as a clean
+                # "not tracked".
+                _REMEMBER_INJECT_REFUSAL="$_mi_file could not be checked against this repository's git index (git is missing, or the check itself failed) -- refusing rather than injecting unverified. Run /remember:doctor to see why git could not be asked."
+                log "$_mi_component" "refused injecting $_mi_file: git status unavailable"
+                ;;
+            (symlinked-ancestor)
+                _REMEMBER_INJECT_REFUSAL="$_mi_file sits under a directory that is itself a symlink -- refusing to follow it into session context. This plugin never creates a symlink inside a memory store; if you did not create this one, treat it as planted and inspect what it points at before deleting it."
+                log "$_mi_component" "refused injecting $_mi_file: symlinked ancestor directory"
+                ;;
+            (*)
+                _REMEMBER_INJECT_REFUSAL="$_mi_file could not be verified (tracked state: $_mi_state) -- refusing rather than injecting unverified."
+                log "$_mi_component" "refused injecting $_mi_file: unrecognised refused state $_mi_state"
+                ;;
+        esac
+        return 1
+    fi
+    return 0
 }
 
 # Args: $1 -- a file. $2 -- its size in bytes. Writes its bytes to stdout,
