@@ -528,6 +528,22 @@ def test_untracked_cache_inside_a_git_repo_is_still_served(tmp_path):
     )
     assert publish.returncode == 0, (publish.stdout, publish.stderr)
 
+    cache_file = remember / "tmp" / "start-context.cache"
+    manifest_file = remember / "tmp" / "start-context.manifest"
+    # The manifest must name at least one real source, or a hit below would
+    # not prove the -nt loop ran against anything at all.
+    manifest_text = manifest_file.read_text(encoding="utf-8")
+    assert f"SRC={core}" in manifest_text, manifest_text
+    # Force the cache strictly newer than every source by whole seconds, as
+    # the sibling positive case does. Without this the hit depended on the
+    # publish landing in a later second than `now`: macOS's stock /bin/bash
+    # 3.2 compares `-nt` at one-second granularity (a same-second write is a
+    # tie, and a tie is a deliberate miss), while bash 5 compares
+    # nanoseconds -- so this case passed under Homebrew bash and failed on
+    # the macOS CI legs.
+    os.utime(cache_file, (now + 5, now + 5))
+    assert int(cache_file.stat().st_mtime) > int(core.stat().st_mtime)
+
     load = subprocess.run(
         [BASH, "-c", HARNESS, "_", "load"],
         env=env, capture_output=True, text=True, timeout=30, check=False,
