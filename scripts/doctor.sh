@@ -94,7 +94,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ "${1:-}" = "--json" ]; then
     _JSON_PROJECT_DIR_ASSUMED=0
     if [ -z "${CLAUDE_PROJECT_DIR:-}" ]; then
-        CLAUDE_PROJECT_DIR="$PWD"
+        # #802: prefer the git top level over a possibly-stale $PWD -- immune
+        # to a `cd` that happened earlier in the same Bash-tool call. Falls
+        # back to $PWD, unchanged, when the cwd is not inside a git repo at
+        # all. Same pattern write-handoff.sh's own #743 fix established.
+        _DOCTOR_JSON_GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || _DOCTOR_JSON_GIT_ROOT=""
+        if [ -n "$_DOCTOR_JSON_GIT_ROOT" ]; then
+            CLAUDE_PROJECT_DIR="$_DOCTOR_JSON_GIT_ROOT"
+        else
+            CLAUDE_PROJECT_DIR="$PWD"
+        fi
+        unset _DOCTOR_JSON_GIT_ROOT
         _JSON_PROJECT_DIR_ASSUMED=1
         export CLAUDE_PROJECT_DIR
     fi
@@ -223,7 +233,17 @@ echo "-- Paths --"
 # just be a quieter version of the same false signal.
 _PROJECT_DIR_ASSUMED=0
 if [ -z "${CLAUDE_PROJECT_DIR:-}" ]; then
-    CLAUDE_PROJECT_DIR="$PWD"
+    # #802: prefer the git top level over a possibly-stale $PWD -- immune to
+    # a `cd` that happened earlier in the same Bash-tool call. Falls back to
+    # $PWD, unchanged, when the cwd is not inside a git repo at all. Same
+    # pattern write-handoff.sh's own #743 fix established.
+    _DOCTOR_GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || _DOCTOR_GIT_ROOT=""
+    if [ -n "$_DOCTOR_GIT_ROOT" ]; then
+        CLAUDE_PROJECT_DIR="$_DOCTOR_GIT_ROOT"
+    else
+        CLAUDE_PROJECT_DIR="$PWD"
+    fi
+    unset _DOCTOR_GIT_ROOT
     _PROJECT_DIR_ASSUMED=1
     export CLAUDE_PROJECT_DIR
 fi
