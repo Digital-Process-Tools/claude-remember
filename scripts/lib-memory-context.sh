@@ -883,7 +883,16 @@ _remember_render_memory_section() {
             esac
         done)
         if [ -n "$_remember_deferred_refused" ]; then
-            echo "--- refused (not injected) ---"
+            # A DIFFERENT header from the main loop's own "--- refused (not
+            # injected) ---" above (833-837), on purpose: both loops can fire
+            # in the same compact render (the main loop's identity-only pass
+            # refuses IDENTITY_FILE itself; this one refuses any OTHER file
+            # that would otherwise have been listed as deferred), and an
+            # identical header on both would let a reader -- or anything that
+            # parses this output by header text rather than by sequence --
+            # merge or misattribute the two populations (self-review finding,
+            # #777).
+            echo "--- refused, would have been listed as deferred (not injected) ---"
             printf '%s' "$_remember_deferred_refused"
             echo ""
         fi
