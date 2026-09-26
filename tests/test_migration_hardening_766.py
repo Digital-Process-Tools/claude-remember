@@ -69,9 +69,20 @@ def _session_start_full(project: Path, home: Path) -> str:
     # (`_find_bash()`'s own docstring in test_migration.py; review finding).
     # This module is already `pytestmark`-skipped when `_BASH is None`, so
     # this call never runs where `_BASH` would be missing.
+    #
+    # `.as_posix()`, never `str()`, for the SCRIPT path (#783): the hook
+    # derives its own directory with `_HOOK_DIR="${BASH_SOURCE[0]%/*}"`,
+    # pure string matching that only ever splits on `/`. On windows-latest
+    # `str()` is all backslashes, so `_HOOK_DIR` fell back to "." and
+    # `source "$_HOOK_DIR/resolve-paths.sh" || exit 0` exited 0 with EMPTY
+    # stdout before any guard ran -- every assertion on `out` then passed or
+    # failed vacuously. Same root cause and same fix as #669 round 5 / #712
+    # (test_session_start_windows_benchmark_669.py,
+    # test_trace_not_swallowed_690.py). hooks.json always joins with `/`
+    # (`${CLAUDE_PLUGIN_ROOT}/scripts/...`), so the real host never hits it.
     (home / ".claude" / "projects" / _slug(str(project))).mkdir(parents=True, exist_ok=True)
     result = subprocess.run(
-        [_BASH, str(SESSION_START_SCRIPT)],
+        [_BASH, SESSION_START_SCRIPT.as_posix()],
         env={
             **os.environ,
             "CLAUDE_PROJECT_DIR": str(project),
