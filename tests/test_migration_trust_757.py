@@ -321,3 +321,80 @@ class TestUncertainGitStatusFailsClosed:
             "CLOSED, the same as a confirmed-tracked file"
         )
         assert not (Path(remember_dir) / "config.json").exists()
+
+
+class TestSymlinkedGitDirFailsClosed:
+    """#761: `_remember_config_tracked_status` resolves `.git` the ordinary
+    way -- a pre-planted SYMLINK swapping it for a DIFFERENT repository's
+    git directory (its own, independent objects and index) must not let
+    the tracked-check answer against that unrelated repo. It must fail
+    CLOSED (could-not-tell), the same as #760's broken-git-shim case."""
+
+    def test_a_symlinked_git_dir_to_an_unrelated_repo_leaves_the_config_behind(self, tmp_path):
+        project = tmp_path / "proj"
+        project.mkdir()
+        pipeline = tmp_path / "plugin"
+        pipeline.mkdir()
+        home = tmp_path / "home"
+        (home / ".remember").mkdir(parents=True)
+
+        _make_legacy_dir(project)
+        legacy = project / ".remember"
+        (legacy / "config.json").write_text(json.dumps({"haiku": {"oauth_token": "sub-token"}}))
+
+        # No real repo for `project` at all. Instead, project/.git is a
+        # SYMLINK to an UNRELATED repository's git dir that never tracked
+        # (and cannot track) project/.remember/config.json -- the shape a
+        # pre-planted swap produces.
+        unrelated = tmp_path / "unrelated"
+        unrelated.mkdir()
+        _init_git(unrelated)
+        (unrelated / "readme.txt").write_text("hi\n")
+        _git(unrelated, ["add", "readme.txt"])
+        _git(unrelated, ["commit", "-q", "-m", "seed"])
+        (project / ".git").symlink_to(unrelated / ".git", target_is_directory=True)
+
+        ext_base = tmp_path / "ext"
+        (pipeline / "config.json").write_text(
+            json.dumps({"data_dir": f"{_bash_path(ext_base)}/{{slug}}"})
+        )
+
+        result = _source_bootstrap_with_env(str(project), str(pipeline), str(home))
+        assert result.returncode == 0, f"bootstrap failed:\n{result.stderr}"
+        remember_dir = result.stdout.strip().split("REMEMBER_DIR=")[-1].strip()
+
+        assert (legacy / "config.json").exists(), (
+            "a project/.git SYMLINK to an unrelated repository answered the "
+            "tracked-check against that repo's own index instead of failing "
+            "closed"
+        )
+        assert not (Path(remember_dir) / "config.json").exists()
+
+    def test_an_ordinary_untracked_git_dir_still_migrates(self, tmp_path):
+        """Positive control (#602): same shape minus the symlink -- an
+        ordinary, untracked project repo must still migrate normally,
+        proving the fix above does not fail closed unconditionally."""
+        project = tmp_path / "proj"
+        project.mkdir()
+        pipeline = tmp_path / "plugin"
+        pipeline.mkdir()
+        home = tmp_path / "home"
+        (home / ".remember").mkdir(parents=True)
+
+        _make_legacy_dir(project)
+        legacy = project / ".remember"
+        (legacy / "config.json").write_text(json.dumps({"haiku": {"oauth_token": "sub-token"}}))
+        _init_git(project)
+        # Deliberately never `git add`ed.
+
+        ext_base = tmp_path / "ext"
+        (pipeline / "config.json").write_text(
+            json.dumps({"data_dir": f"{_bash_path(ext_base)}/{{slug}}"})
+        )
+
+        result = _source_bootstrap_with_env(str(project), str(pipeline), str(home))
+        assert result.returncode == 0, f"bootstrap failed:\n{result.stderr}"
+        remember_dir = result.stdout.strip().split("REMEMBER_DIR=")[-1].strip()
+
+        assert not (legacy / "config.json").exists()
+        assert (Path(remember_dir) / "config.json").exists()
