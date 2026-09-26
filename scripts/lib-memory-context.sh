@@ -836,11 +836,27 @@ _remember_render_memory_section() {
         echo ""
     fi
     if [ "${SESSION_START_SOURCE:-}" = "compact" ]; then
-        local DEFERRED_MEMORY _remember_deferred=()
+        local DEFERRED_MEMORY _remember_deferred=() _remember_deferred_refused=""
         for MFILE in "${MEMORY_FILES[@]}"; do
             [ "$MFILE" != "$IDENTITY_FILE" ] || continue
             [ -f "$MFILE" ] && [ -s "$MFILE" ] || continue
-            _remember_deferred+=("$MFILE")
+            # #777: the main loop above (772-787) skips every non-identity
+            # file at source=compact BEFORE it ever reaches the guard call at
+            # line 780 -- so during compact, _remember_may_inject is invoked
+            # on zero non-identity files unless this loop calls it itself. A
+            # git-tracked or symlinked file must be refused here exactly as
+            # it would be by the main loop at any other source, never
+            # silently added to the deferred list: that list's own header
+            # asserts the file "was delivered at session start", which is
+            # false for a refused file, and its path is printed right below
+            # the false claim -- an invitation to read the planted content
+            # through a follow-up tool call.
+            if _remember_may_inject "$MFILE" "memory-context"; then
+                _remember_deferred+=("$MFILE")
+            else
+                _remember_deferred_refused="${_remember_deferred_refused}${_REMEMBER_INJECT_REFUSAL}
+"
+            fi
         done
         # Same one-batched-`wc` shape as the main loop above (#664): compact
         # mode is the one branch that did NOT already have these files'
@@ -866,6 +882,11 @@ _remember_render_memory_section() {
                 (*) printf '%s (%s bytes)\n' "$MFILE" "$MFILE_BYTES" ;;
             esac
         done)
+        if [ -n "$_remember_deferred_refused" ]; then
+            echo "--- refused (not injected) ---"
+            printf '%s' "$_remember_deferred_refused"
+            echo ""
+        fi
         if [ -n "$DEFERRED_MEMORY" ]; then
             echo "--- not re-injected at compact (delivered at session start); read or grep on request ---"
             printf '%s\n' "$DEFERRED_MEMORY"
