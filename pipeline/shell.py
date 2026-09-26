@@ -587,7 +587,8 @@ def cmd_consolidate_snapshot(staging_dir: str, snapshot_dir: str) -> None:
 
 
 def cmd_consolidate(staging_dir: str, recent_file: str, archive_file: str,
-                    max_prompt_bytes: int = 0, snapshot_dir: str = "") -> None:
+                    max_prompt_bytes: int = 0, snapshot_dir: str = "",
+                    timeout: int = 180) -> None:
     """Run the full consolidation pipeline and print shell variables.
 
     Collects staging files (excluding today's and ``.done`` files), reads
@@ -607,6 +608,9 @@ def cmd_consolidate(staging_dir: str, recent_file: str, archive_file: str,
             because the basenames are identical on both sides. Empty reads the
             live directory — the pre-#235 behaviour, kept so a caller that has
             not been taught the two-step still works.
+        timeout: Wall-clock budget (seconds) forwarded to ``consolidate()``'s
+            Haiku call (#806), configurable via
+            ``thresholds.consolidate_timeout_seconds``.
 
     Prints:
         STAGING_COUNT (0 if nothing to consolidate), RECENT_OUT and
@@ -750,7 +754,7 @@ def cmd_consolidate(staging_dir: str, recent_file: str, archive_file: str,
 
     try:
         result = consolidate(staging_contents, recent, archive,
-                             max_prompt_bytes=max_prompt_bytes)
+                             max_prompt_bytes=max_prompt_bytes, timeout=timeout)
     except ConsolidationTooLarge:
         # archive.md is the bulk of the oversized prompt. Rotate it to a dated
         # sibling (memory preserved in cold storage) and retry once with a fresh
@@ -783,7 +787,7 @@ def cmd_consolidate(staging_dir: str, recent_file: str, archive_file: str,
             return
         try:
             result = consolidate(staging_contents, recent, "",
-                                 max_prompt_bytes=max_prompt_bytes)
+                                 max_prompt_bytes=max_prompt_bytes, timeout=timeout)
         except ConsolidationSkipped:
             _restore_rotation()  # still too big -> undo, skip
             _emit_skip()
@@ -917,6 +921,7 @@ def main() -> None:
             archive_file=sys.argv[4],
             max_prompt_bytes=int(sys.argv[5]) if len(sys.argv) > 5 else 0,
             snapshot_dir=sys.argv[6] if len(sys.argv) > 6 else "",
+            timeout=int(sys.argv[7]) if len(sys.argv) > 7 else 180,
         )
     else:
         print(f"Unknown command: {cmd}", file=sys.stderr)

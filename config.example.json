@@ -13,6 +13,7 @@
     "delta_lines_trigger": 50,
     "extract_max_bytes": 300000,
     "consolidate_max_bytes": 600000,
+    "consolidate_timeout_seconds": 180,
     "memory_inject_max_bytes": 200000,
     "staging_warn_bytes": 2000000,
     "autonomous_log_retention_days": 7,
@@ -92,6 +93,17 @@
       "and a fresh one started. Nothing is deleted and the slices are named at",
       "session start. If the past-day staging files are over the cap on their",
       "own, nothing is rotated — no rotation would change the next round."
+    ],
+    "consolidate_timeout_seconds": [
+      "Wall-clock budget (seconds) for the staging -> recent/archive",
+      "consolidation call. Default 180. Output length scales with input",
+      "length, so a large enough staging batch can genuinely need longer than",
+      "that to finish. On timeout the batch is left uncompressed and grows",
+      "further, so every later run is even more likely to time out too -- a",
+      "one-way ratchet (#806), the same shape #788/#792 fixed for the sibling",
+      "NDC now.md -> today-*.md path via ndc_timeout_seconds. Raise this if",
+      "the daily log shows repeated 'consolidation' ERROR lines mentioning a",
+      "timeout."
     ],
     "staging_warn_bytes": [
       "Byte threshold (UTF-8) for a one-time WARNING when a today-*.md staging",

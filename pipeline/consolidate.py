@@ -282,6 +282,7 @@ def consolidate(
     recent: str,
     archive: str,
     max_prompt_bytes: int = 0,
+    timeout: int = 180,
 ) -> ConsolidationResult:
     """Run full consolidation: build prompt, call Haiku, parse response.
 
@@ -293,6 +294,12 @@ def consolidate(
         max_prompt_bytes: Upper bound on the assembled prompt's UTF-8 byte
             size. ``0`` disables the guard. When the prompt would exceed the
             bound, consolidation is SKIPPED (not truncated) -- see below.
+        timeout: Wall-clock budget (seconds) for the Haiku call. Output
+            length scales with input length, so a large enough staging
+            batch can genuinely need longer than the 180s default --
+            configurable via ``thresholds.consolidate_timeout_seconds``
+            (#806), the same fix shape #788/#792 gave the sibling NDC
+            ``now.md`` -> ``today-*.md`` compression path.
 
     Returns:
         ConsolidationResult with new recent/archive content and token usage.
@@ -321,7 +328,7 @@ def consolidate(
                 f"overflow; staging + memory left untouched"
             )
 
-    result = call_haiku(prompt, timeout=180)
+    result = call_haiku(prompt, timeout=timeout)
 
     # Guard: never let a SKIP or a conversational reply overwrite memory.
     # Without this, a non-conforming response falls through to the parser's

@@ -272,6 +272,39 @@ def test_consolidate_no_cap_by_default():
     mock_haiku.assert_called_once()
 
 
+# --- Configurable timeout (#806, reopening the intent of #788/#792) ---
+
+class TestConsolidateTimeoutIsConfigurable:
+    """The staging -> recent/archive consolidation call had a hardcoded 180s
+    timeout with no config key. Output length scales with input length, so a
+    large enough staging batch can time out on every run, be left
+    uncompressed, and grow further every round with no recovery -- the same
+    shape #788 reported and #792 fixed for the sibling NDC now.md path."""
+
+    def test_configured_timeout_reaches_call_haiku(self):
+        ok = HaikuResult(
+            text="===RECENT===\n# Recent\n\n## 2026-01-01\nx\n\n===ARCHIVE===\n# Archive\n",
+            tokens=TokenUsage(input=10, output=5, cache=0, cost_usd=0.0),
+        )
+        with patch("pipeline.consolidate.call_haiku", return_value=ok) as mock_haiku:
+            consolidate({"today-2026-01-01.md": "x"}, recent="", archive="", timeout=42)
+        assert mock_haiku.call_args.kwargs.get("timeout") == 42, (
+            f"configured timeout=42 did not reach call_haiku: {mock_haiku.call_args!r}"
+        )
+
+    def test_default_timeout_is_still_180(self):
+        """Negative control: with no override the default must not move."""
+        ok = HaikuResult(
+            text="===RECENT===\n# Recent\n\n## 2026-01-01\nx\n\n===ARCHIVE===\n# Archive\n",
+            tokens=TokenUsage(input=10, output=5, cache=0, cost_usd=0.0),
+        )
+        with patch("pipeline.consolidate.call_haiku", return_value=ok) as mock_haiku:
+            consolidate({"today-2026-01-01.md": "x"}, recent="", archive="")
+        assert mock_haiku.call_args.kwargs.get("timeout") == 180, (
+            f"default timeout must stay 180: {mock_haiku.call_args!r}"
+        )
+
+
 # --- Wrapping code fence: strip it so headers aren't doubled (issue #126) ---
 
 def test_parse_strips_stray_leading_fence_no_double_header():

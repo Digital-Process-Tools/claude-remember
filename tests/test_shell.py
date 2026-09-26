@@ -437,6 +437,57 @@ def test_cmd_consolidate_skip_emits_status_and_no_output_paths(capsys):
         assert "STAGING_PATHS_FILE=" not in output
 
 
+def test_cmd_consolidate_passes_timeout_to_consolidate():
+    """#806: cmd_consolidate must forward its own timeout to consolidate()
+    rather than letting the 180s default hide a configured override -- same
+    shape as test_cmd_call_haiku_passes_timeout for the NDC path."""
+    fake_tokens = TokenUsage(input=1, output=1, cache=0, cost_usd=0.0)
+    fake_result = ConsolidationResult(recent="r", archive="a", tokens=fake_tokens)
+
+    with tempfile.TemporaryDirectory() as d:
+        past_file = os.path.join(d, "today-2020-01-01.md")
+        with open(past_file, "w") as f:
+            f.write("old entry")
+
+        with patch("pipeline.consolidate.consolidate", return_value=fake_result) as mock_con:
+            cmd_consolidate(staging_dir=d, recent_file="/nonexistent",
+                            archive_file="/nonexistent", timeout=42)
+        assert mock_con.call_args.kwargs.get("timeout") == 42, (
+            f"configured timeout=42 did not reach consolidate(): {mock_con.call_args!r}"
+        )
+
+
+def test_cmd_consolidate_default_timeout_is_still_180():
+    """Negative control: with no override the default must not move."""
+    fake_tokens = TokenUsage(input=1, output=1, cache=0, cost_usd=0.0)
+    fake_result = ConsolidationResult(recent="r", archive="a", tokens=fake_tokens)
+
+    with tempfile.TemporaryDirectory() as d:
+        past_file = os.path.join(d, "today-2020-01-01.md")
+        with open(past_file, "w") as f:
+            f.write("old entry")
+
+        with patch("pipeline.consolidate.consolidate", return_value=fake_result) as mock_con:
+            cmd_consolidate(staging_dir=d, recent_file="/nonexistent", archive_file="/nonexistent")
+        assert mock_con.call_args.kwargs.get("timeout") == 180, (
+            f"default timeout must stay 180: {mock_con.call_args!r}"
+        )
+
+
+def test_main_dispatches_consolidate_with_timeout():
+    """#806: the CLI dispatch must forward argv[7] as cmd_consolidate's timeout,
+    same argv-threading shape as call-haiku's own timeout argv[4]. The negative
+    control (no argv[7] -> default 180) is already covered by
+    test_main_dispatches_consolidate above, updated for the same reason."""
+    with patch("pipeline.shell.cmd_consolidate") as mock_fn:
+        with patch("sys.argv", ["shell.py", "consolidate", "sd", "rf", "af", "600000", "snap", "42"]):
+            main()
+    mock_fn.assert_called_once_with(
+        staging_dir="sd", recent_file="rf", archive_file="af",
+        max_prompt_bytes=600000, snapshot_dir="snap", timeout=42,
+    )
+
+
 # --- cmd_consolidate: oversized-archive rotation (deeper fix) ---
 
 def _valid_envelope():
@@ -859,6 +910,7 @@ def test_main_dispatches_consolidate():
         archive_file="archive.md",
         max_prompt_bytes=0,  # absent 6th arg -> guard disabled
         snapshot_dir="",     # absent 7th arg -> read the live staging dir
+        timeout=180,         # absent 8th arg -> #806 default
     )
 
 
@@ -873,6 +925,7 @@ def test_main_dispatches_consolidate_with_max_bytes():
         archive_file="archive.md",
         max_prompt_bytes=600000,
         snapshot_dir="",
+        timeout=180,
     )
 
 
@@ -892,6 +945,7 @@ def test_main_dispatches_consolidate_with_snapshot_dir():
         archive_file="archive.md",
         max_prompt_bytes=600000,
         snapshot_dir="/snap",
+        timeout=180,
     )
 
 
@@ -955,7 +1009,7 @@ class TestConsolidateSnapshot:
 
         seen = {}
 
-        def _fake(staging_contents, recent, archive, max_prompt_bytes=0):
+        def _fake(staging_contents, recent, archive, max_prompt_bytes=0, timeout=180):
             seen.update(staging_contents)
             raise RuntimeError("stop here — the read is what this test is about")
 
