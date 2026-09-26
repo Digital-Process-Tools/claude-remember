@@ -1652,9 +1652,10 @@ def repo_root(start):
 
 def repo_config(root):
     try:
-        return json.loads((Path(root) / ".oss.json").read_text(encoding="utf-8"))
+        doc = json.loads((Path(root) / ".oss.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
+    return doc if isinstance(doc, dict) else {}
 
 
 def repo_version(root):
@@ -1665,7 +1666,8 @@ def repo_version(root):
     """
     manifest = Path(root) / ".claude-plugin" / "plugin.json"
     try:
-        version = json.loads(manifest.read_text(encoding="utf-8")).get("version")
+        doc = json.loads(manifest.read_text(encoding="utf-8"))
+        version = doc.get("version") if isinstance(doc, dict) else None
         if version:
             return version
     except (OSError, ValueError):
@@ -1774,6 +1776,8 @@ def installed_plugins(project_root, plugins_root=None):
         doc = json.loads((root / "installed_plugins.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
+    if not isinstance(doc, dict):
+        return {}
     project = _normalized_path(project_root) if project_root is not None else None
     found = {}
     for key, entries in (doc.get("plugins") or {}).items():
@@ -1797,6 +1801,8 @@ def installed_plugins(project_root, plugins_root=None):
                         ).read_text(encoding="utf-8")
                     )
                 except (OSError, ValueError):
+                    continue
+                if not isinstance(manifest, dict):
                     continue
                 record["repository"] = manifest.get("repository")
                 record["dependencies"] = manifest.get("dependencies") or []
@@ -1975,9 +1981,31 @@ def _gh_count(repo, kind):
 _INSIDE_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
 
 
-def _gh_external_issue_count(repo, total):
+def _gh_external_issue_count(repo, total, priority_labels=None, lane_labels=None):
     """How many of the `total` open issues (`_gh_count`'s own answer) were filed by
-    someone outside repository membership, per GitHub's `authorAssociation` (#595).
+    someone outside repository membership, per GitHub's `authorAssociation` (#595),
+    **and have not yet been triaged** (#1748).
+
+    An outside issue that already carries a declared priority label AND a declared
+    lane label has been accepted and triaged -- the existing accept-and-triage path
+    (`skills/manager/phases/inbound.md`) -- even while it stays open pending the fix
+    itself. Counting it as still "unruled" made this route due forever: nothing in
+    this loop's own inbound step is allowed to close an issue (#1395's own scope
+    line), so the only way the count ever cleared was a human closing it by hand.
+    `priority_labels`/`lane_labels`, when given, are this repo's own declared
+    spellings (`labels.priority`, `oss_config.effective_lane_labels`) -- an issue
+    missing either one still counts as unruled; one carrying both does not. **Both
+    axes must actually be declared for this to apply at all** -- a repo declaring
+    only one of the two has no signal on the other, and treating an undeclared axis
+    as automatically satisfied would silently degrade the stated AND into "whichever
+    axis happens to be configured", the same false-triaged reading
+    `_gh_unlabelled_issue_counts` avoids by reporting `None` for an axis with
+    nothing declared rather than treating it as satisfied. So with only one axis
+    declared, or with neither declared (the legacy, no-config call shape), every
+    external issue counts as unruled regardless of its labels, exactly as this
+    function always has -- there is no signal to tell a triaged issue from an
+    untriaged one without a repo that declares what triage looks like on both
+    axes.
 
     Not `-author:@me`: that resolves to whoever is authenticated on this machine, so
     the count would be a fact about a laptop rather than about the repository, and a
@@ -2006,12 +2034,15 @@ def _gh_external_issue_count(repo, total):
     What matters for `--paginate` *without* `--jq` is that each page is a raw JSON
     array, and concatenating two JSON arrays end to end produces text no parser can
     read (`[...][...]`) -- the exact trap #620's own writeup names for a naive fix.
-    `--jq` sidesteps it by construction: piping `.[] | select(...) | .author_association`
-    through jq's raw-output mode prints one bare `author_association` value per line,
-    and *lines* concatenate safely across pages -- unlike JSON arrays, there is no
-    boundary for two pages' lines to collide on. `--paginate` alone still walks every
-    page regardless of the repository's issue count, so there is no analogue of the
-    old `--limit`-at-100 hazard to reintroduce here.
+    `--jq` sidesteps it by construction: piping `.[] | select(...) | ({...} | tojson)`
+    through jq's raw-output mode prints one JSON object per line -- `{"a":
+    author_association, "l": label names}` since #1748 added the label read this
+    function needs to tell a triaged issue from an untriaged one, a bare
+    `author_association` string before that -- and *lines* concatenate safely across
+    pages either way, unlike JSON arrays: there is no boundary for two pages' lines to
+    collide on. `--paginate` alone still walks every page regardless of the
+    repository's issue count, so there is no analogue of the old `--limit`-at-100
+    hazard to reintroduce here.
 
     The row count is cross-checked against `total` exactly as before: fewer lines
     than the count `_gh_count` already took means this call did not cover every open
@@ -2025,6 +2056,8 @@ def _gh_external_issue_count(repo, total):
         return None
     if _malformed_repo(repo):
         return None
+    priority_set = {str(name) for name in priority_labels} if priority_labels else set()
+    lane_set = {str(name) for name in lane_labels} if lane_labels else set()
     out = _run(
         [
             "gh",
@@ -2038,7 +2071,8 @@ def _gh_external_issue_count(repo, total):
             "-f",
             "per_page=100",
             "--jq",
-            ".[] | select(.pull_request == null) | .author_association",
+            ".[] | select(.pull_request == null) | "
+            "({a: .author_association, l: [.labels[].name]} | tojson)",
         ],
         timeout=25,
     )
@@ -2049,11 +2083,34 @@ def _gh_external_issue_count(repo, total):
         return None
     external = 0
     for line in lines:
-        assoc = line.strip()
+        try:
+            parsed = json.loads(line)
+        except ValueError:
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        assoc = str(parsed.get("a") or "").strip()
         if not assoc or assoc.upper() == "NULL":
             return None
-        if assoc.upper() not in _INSIDE_ASSOCIATIONS:
-            external += 1
+        if assoc.upper() in _INSIDE_ASSOCIATIONS:
+            continue
+        if priority_set and lane_set:
+            # Both axes declared (#1748's own reviewer finding, self-review):
+            # only then can "carries every declared label" actually be told.
+            # A repo declaring just one axis has no signal on the other, and
+            # `bool(priority_set) and not (...)` on an undeclared axis is
+            # unconditionally `False` -- treating that as "not missing" would
+            # silently degrade the stated AND into "whichever axis happens to
+            # be configured", exactly the false-triaged reading
+            # `_gh_unlabelled_issue_counts` avoids by reporting `None` for an
+            # axis with nothing declared rather than treating it as satisfied.
+            names = {str(name) for name in (parsed.get("l") or [])}
+            missing_priority = not (names & priority_set)
+            missing_lane = not (names & lane_set)
+            if not missing_priority and not missing_lane:
+                # Triaged: carries every declared label, even while still open.
+                continue
+        external += 1
     return external
 
 
@@ -2109,7 +2166,14 @@ _NOT_GIVEN = (
 )  # sentinel: distinguishes "no precomputed count" from a real `None`
 
 
-def inbound_reading(repo, issues_total, prs_total, unruled_issues=_NOT_GIVEN):
+def inbound_reading(
+    repo,
+    issues_total,
+    prs_total,
+    unruled_issues=_NOT_GIVEN,
+    priority_labels=None,
+    lane_labels=None,
+):
     """How much of what arrived from outside is still waiting -- #1405/#1406.
 
     **One module, two consumers**, per the design note on #1405: `refresh()`
@@ -2150,9 +2214,16 @@ def inbound_reading(repo, issues_total, prs_total, unruled_issues=_NOT_GIVEN):
     `"could-not-tell"` the moment either one comes back `None` -- never
     quietly reads as `0`, the same discipline `_gh_external_issue_count`
     already applies to its own row-count cross-check.
+
+    `priority_labels`/`lane_labels` (#1748) are threaded straight through to
+    `_gh_external_issue_count` when it takes its own fresh reading below --
+    never applied to a precomputed `unruled_issues` handed in, which has
+    already made whatever choice its own caller made about them.
     """
     if unruled_issues is _NOT_GIVEN:
-        unruled = _gh_external_issue_count(repo, issues_total)
+        unruled = _gh_external_issue_count(
+            repo, issues_total, priority_labels=priority_labels, lane_labels=lane_labels
+        )
     else:
         unruled = unruled_issues
     unreviewed = _gh_external_pr_count(repo, prs_total)
@@ -2599,9 +2670,10 @@ def _latest_release(repo):
     try:
         import base64
 
-        return json.loads(base64.b64decode(encoded).decode("utf-8")).get("version")
+        doc = json.loads(base64.b64decode(encoded).decode("utf-8"))
     except (ValueError, TypeError, UnicodeDecodeError):
         return None
+    return doc.get("version") if isinstance(doc, dict) else None
 
 
 def _watch_preset_declared(root):
@@ -2851,6 +2923,8 @@ def _installed_plugin_root(project_root, name, plugins_root=None):
         doc = json.loads((root / "installed_plugins.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+    if not isinstance(doc, dict):
+        return None
     project = _normalized_path(project_root) if project_root is not None else None
     for key, entries in (doc.get("plugins") or {}).items():
         if key.split("@", 1)[0] != name:
@@ -3014,23 +3088,33 @@ def refresh(root, now=None, session_id=None):
     root = Path(root)
     config = repo_config(root)
     repo = config.get("repo")
-    previous = read_cache(cache_path(repo)) or {}
+    previous = read_cache(cache_path(repo))
+    previous = previous if isinstance(previous, dict) else {}
     document = {"fetched_at": now, "repo": repo}
     if repo:
         document["prs"] = _gh_count(repo, "pr")
         document["issues"] = _gh_count(repo, "issue")
-        document["issues_external"] = _gh_external_issue_count(repo, document["issues"])
-        # Two separate counts, never summed (#1079): `select_issues_rank.py` cannot rank an
-        # issue with no priority label, and a lane-less issue is simply one no sweep
-        # placed -- one number covering both would answer neither question. Cached
-        # alongside the rest of the board, per this module's own no-network-call-at-
-        # render rule, and read from the labels this repo's own `.oss.json` declares
-        # rather than a hardcoded spelling (the fact-about-one-repo rule, CLAUDE.md).
+        # Read this repo's own declared label spellings before either count below,
+        # rather than a hardcoded spelling (the fact-about-one-repo rule, CLAUDE.md):
+        # `issues_external` (#1748) needs them too, to tell a triaged outside issue
+        # (carries both) from one still waiting, not only `issues_no_priority`/
+        # `issues_no_lane` below.
         labels_config = config.get("labels")
         labels_config = labels_config if isinstance(labels_config, dict) else {}
         priority_labels = labels_config.get("priority")
         priority_labels = priority_labels if isinstance(priority_labels, list) else []
         lane_labels = _effective_lane_labels(labels_config)
+        document["issues_external"] = _gh_external_issue_count(
+            repo,
+            document["issues"],
+            priority_labels=priority_labels,
+            lane_labels=lane_labels,
+        )
+        # Two separate counts, never summed (#1079): `select_issues_rank.py` cannot rank an
+        # issue with no priority label, and a lane-less issue is simply one no sweep
+        # placed -- one number covering both would answer neither question. Cached
+        # alongside the rest of the board, per this module's own no-network-call-at-
+        # render rule.
         unlabelled = _gh_unlabelled_issue_counts(
             repo, document["issues"], priority_labels, lane_labels
         )

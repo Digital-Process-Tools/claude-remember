@@ -14,6 +14,17 @@ why this directory exists at all:
 
 To change something here, copy it out and point your own config at the copy.
 
+## Found a bug in one of these files?
+
+A defect in a file under `.oss/`, or in `.github/workflows/oss-changelog.yml` (the one
+exception below), is not this repository's bug. It ships from https://github.com/Digital-Process-Tools/claude-oss, and this
+directory is replaced wholesale on every `/oss:scaffold` run, so a patch or a test written
+against it here is undone at the next resync — silently, with no error, whenever that
+resync happens. Report it there instead, with a reproduction, the same way you would report a
+bug in any dependency you did not write. Never patch or test the file in this repository, and
+never let a scan, a triage sweep or a fix lane close a finding here as this repository's own
+issue — file it upstream and stop.
+
 ## The one exception
 
 `.github/workflows/oss-changelog.yml` is ours too and is replaced the same way. It
