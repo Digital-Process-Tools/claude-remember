@@ -129,6 +129,36 @@ def _run_lib_and_dump_config(project_dir, pipeline_dir, home_dir, env_extra=None
     return merged, remember_dir
 
 
+def _run_lib_and_dump_config_with_stderr(project_dir, pipeline_dir, home_dir, env_extra=None):
+    """Same shape as `_run_lib_and_dump_config`, but also returns the
+    subprocess's stderr (#748: the sanitize-failure disclosure this file
+    adds is a `log`/`report_error` fallback that writes to stderr when
+    neither function is in scope yet -- exactly the case here, since this
+    helper sources lib-memory-dir.sh directly, never log.sh)."""
+    script = f"""
+    set -e
+    export PROJECT_DIR={project_dir}
+    export PIPELINE_DIR={pipeline_dir}
+    export HOME={home_dir}
+    source {DETECT_SCRIPT}
+    source {LIB_SCRIPT}
+    echo "REMEMBER_DIR=$REMEMBER_DIR"
+    echo "---MERGED---"
+    if [ -f "$REMEMBER_CONFIG" ]; then
+        cat "$REMEMBER_CONFIG"
+    fi
+    """
+    env = {**os.environ, **(env_extra or {})}
+    result = subprocess.run(["bash", "-c", script], env=env, check=False,
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, f"lib-memory-dir.sh failed:\n{result.stderr}"
+    remember_dir_line, _, merged_json = result.stdout.partition("---MERGED---\n")
+    assert remember_dir_line.startswith("REMEMBER_DIR="), result.stdout
+    remember_dir = remember_dir_line.strip().split("=", 1)[1]
+    merged = json.loads(merged_json) if merged_json.strip() else {}
+    return merged, remember_dir, result.stderr
+
+
 class TestProjectLocalHaikuConfigIsUntrusted:
 
     def test_project_haiku_oauth_token_does_not_reach_the_merged_config(self, tmp_path):
@@ -522,6 +552,73 @@ class TestSanitizeStepFailsClosed:
         assert merged["cooldowns"]["save_seconds"] == 322
 
         assert "haiku" not in merged or "oauth_token" not in merged.get("haiku", {})
+
+    def test_an_unreadable_project_cfg_logs_the_drop(self, tmp_path):
+        """#748: the drop above used to happen with nothing logged anywhere
+        -- a project config's own settings (e.g. `handoff_mode`) vanished
+        with no explanation. Now a WARNING appears on stderr (the `log`/
+        `report_error` fallback this helper's own subprocess falls back to,
+        since it sources lib-memory-dir.sh directly, never log.sh)."""
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(json.dumps({}))
+        remember = project / ".remember"
+        remember.mkdir()
+        project_cfg_path = remember / "config.json"
+        project_cfg_path.write_text(
+            json.dumps({"haiku": {"oauth_token": "r" * 40}})
+        )
+        project_cfg_path.chmod(0o000)
+        try:
+            merged, _, stderr = _run_lib_and_dump_config_with_stderr(project, pipeline, home)
+        finally:
+            project_cfg_path.chmod(0o644)
+
+        assert "haiku" not in merged or "oauth_token" not in merged.get("haiku", {})
+        assert "lib-memory-dir" in stderr, stderr
+        assert "project config layer" in stderr, stderr
+
+    def test_a_readable_project_cfg_does_not_log_a_drop_warning(self, tmp_path):
+        """Positive control for the test above: an ordinary, readable
+        project config with no haiku block at all must NOT trip the
+        drop-warning path -- pairing the "must fire" case with the "must
+        not fire" one (CLAUDE.md: a negative assertion needs a positive
+        control), since a broken harness that emits no stderr at all would
+        otherwise also pass a bare `assert "..." not in stderr`."""
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(json.dumps({}))
+        remember = project / ".remember"
+        remember.mkdir()
+        (remember / "config.json").write_text(json.dumps({"cooldowns": {"save_seconds": 111}}))
+
+        merged, _, stderr = _run_lib_and_dump_config_with_stderr(project, pipeline, home)
+
+        assert merged["cooldowns"]["save_seconds"] == 111
+        assert "lib-memory-dir" not in stderr, stderr
+
+    def test_an_unreadable_project_cfg_no_jq_fallback_logs_the_drop(self, tmp_path):
+        """Same shape, no-jq Python fallback: the marker-file signal the
+        fallback's `except (OSError, ValueError)` branch writes must reach
+        the shell as the same WARNING."""
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(json.dumps({}))
+        remember = project / ".remember"
+        remember.mkdir()
+        project_cfg_path = remember / "config.json"
+        project_cfg_path.write_text(
+            json.dumps({"haiku": {"oauth_token": "s" * 40}})
+        )
+        project_cfg_path.chmod(0o000)
+        try:
+            merged, _, stderr = _run_lib_and_dump_config_with_stderr(
+                project, pipeline, home,
+                env_extra={"PATH": _path_without_jq(tmp_path)},
+            )
+        finally:
+            project_cfg_path.chmod(0o644)
+
+        assert "haiku" not in merged or "oauth_token" not in merged.get("haiku", {})
+        assert "lib-memory-dir" in stderr, stderr
+        assert "project config layer" in stderr, stderr
 
     def test_a_malformed_project_cfg_drops_the_layer_without_losing_the_rest(
         self, tmp_path

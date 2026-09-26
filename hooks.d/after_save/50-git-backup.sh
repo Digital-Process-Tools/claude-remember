@@ -522,6 +522,18 @@ esac
             grep -qxF "$_gb_rule" "$GB_EXCLUDE_FILE" 2>/dev/null && continue
             printf '%s\n' "$_gb_rule" >> "$GB_EXCLUDE_FILE" 2>/dev/null || true
         done
+    else
+        # #759 (filed while curating #719's own trap.d note on this same gap):
+        # every OTHER failure path in this hook -- commit, push, untrack --
+        # logs a WARNING/ERROR when it can't do its job. This one didn't: if
+        # BACKUP_COMMON_DIR is empty or mkdir -p fails (read-only filesystem,
+        # permission issue), the config.json exclusion above is silently
+        # never written, and the `git add -- "$SLUG/"` below stages
+        # config.json -- which can carry a live haiku.oauth_token -- exactly
+        # as it did before #719. The caller sees the ordinary "committed
+        # $SLUG" success line either way, indistinguishable from the
+        # exclusion having worked.
+        report_error "git-backup" "WARNING: could not create $BACKUP_COMMON_DIR/info -- the logs/tmp/config.json exclusion was NOT written, so this backup's git add may stage config.json (which can carry haiku.oauth_token)"
     fi
 
     # ── An exclude cannot untrack, and a partial commit cannot delete (#288) ─

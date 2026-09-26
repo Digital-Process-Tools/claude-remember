@@ -470,14 +470,20 @@ _SANCTIONED_DIVERGENCE = {
         # The #726 pair (pre-#726 plain `jq -s` -> #726 `strip_last_haiku`) is gone
         # (#734 precedent): #744 composed #740 directly on top of it, so origin/main
         # never again holds either side of it -- the "neither old nor new" state
-        # this test correctly refused on ba2a592. The pair below starts from the
-        # #726 form. Its one-line-filter rule still applies: a literal newline
+        # this test correctly refused on ba2a592. #748 composes directly on top of
+        # #744/#757 the SAME way: old_code below is now the #757 steady state
+        # (already landed on origin/main -- the #744 `.haiku` literal it used to
+        # start from is gone for the identical #734 reason), new_code is the #748
+        # form with a report_error/stderr disclosure in the sanitize-failure else
+        # branch. Its one-line-filter rule still applies: a literal newline
         # inside a jq filter argument costs phantom lines in every spawn-count
         # budget (tests/spawn_counting.py logs argv with printf, split on newlines).
         (
             'elif [ "${#_cfg_sources[@]}" -gt 0 ] && command -v jq >/dev/null 2>&1; then\n'
             '    _strip_project_haiku="false"\n'
             '    [ "$_project_cfg_haiku_untrusted" = "1" ] && [ -f "$_project_cfg" ] && _strip_project_haiku="true"\n'
+            '    _project_del_filter=".haiku"\n'
+            '    [ "$_project_cfg_model_reject_untrusted" = "1" ] && _project_del_filter="${_project_del_filter}, .model, .reject_pattern"\n'
             '    _jq_merge_sources=()\n'
             '    [ -f "$_bundled_cfg" ] && _jq_merge_sources+=("$_bundled_cfg")\n'
             '    [ -f "$_user_cfg"    ] && _jq_merge_sources+=("$_user_cfg")\n'
@@ -485,7 +491,7 @@ _SANCTIONED_DIVERGENCE = {
             '    if [ -f "$_project_cfg" ]; then\n'
             '        if [ "$_strip_project_haiku" = "true" ]; then\n'
             '            _project_sanitized_tmp=$(mktemp "${SYS_TMPDIR}/remember-config-sanitized-XXXXXX" 2>/dev/null) || _project_sanitized_tmp=""\n'
-            '            if [ -n "$_project_sanitized_tmp" ] && jq -c \'del(.haiku)\' "$_project_cfg" > "$_project_sanitized_tmp" 2>/dev/null; then\n'
+            '            if [ -n "$_project_sanitized_tmp" ] && jq -c "del($_project_del_filter)" "$_project_cfg" > "$_project_sanitized_tmp" 2>/dev/null; then\n'
             '                _jq_merge_sources+=("$_project_sanitized_tmp")\n'
             '            else\n'
             '                [ -n "$_project_sanitized_tmp" ] && rm -f "$_project_sanitized_tmp"\n'
@@ -550,6 +556,11 @@ _SANCTIONED_DIVERGENCE = {
             '            if [ -n "$_project_sanitized_tmp" ] && jq -c "del($_project_del_filter)" "$_project_cfg" > "$_project_sanitized_tmp" 2>/dev/null; then\n'
             '                _jq_merge_sources+=("$_project_sanitized_tmp")\n'
             '            else\n'
+            '                if declare -F report_error >/dev/null 2>&1; then\n'
+            '                    report_error "lib-memory-dir" "sanitizing the project config layer failed (mktemp, an unreadable project file, or jq itself) -- that layer was dropped; bundled/user-global config still applies"\n'
+            '                else\n'
+            '                    printf \'%s\\n\' "[lib-memory-dir] WARNING: sanitizing the project config layer failed (mktemp, an unreadable project file, or jq itself) -- that layer was dropped; bundled/user-global config still applies" >&2\n'
+            '                fi\n'
             '                [ -n "$_project_sanitized_tmp" ] && rm -f "$_project_sanitized_tmp"\n'
             '                _project_sanitized_tmp=""\n'
             '            fi\n'
@@ -567,14 +578,19 @@ _SANCTIONED_DIVERGENCE = {
             'elif [ "${#_cfg_sources[@]}" -gt 0 ]; then\n',
         ),
         (
-            # #757 fold: old_code is the #726 form (matches origin/main
-            # verbatim, "old" only relative to #757) -- same steady-state
-            # extension shape as the classify pair above, not a stacked
-            # third pair on this site.
+            # #748: old_code is now the #757 steady state (already landed on
+            # origin/main), matching the same "compose directly on top of an
+            # already-landed pair rather than nest a new one inside it"
+            # precedent as the classify pair above -- new_code adds a
+            # drop-marker mktemp and threads it through the heredoc
+            # invocation, since a dropped project layer used to happen with
+            # nothing logged anywhere.
             '    declare -f _remember_python >/dev/null 2>&1 && _remember_python\n'
             '    _untrusted_haiku_source=""\n'
             '    [ "$_project_cfg_haiku_untrusted" = "1" ] && _untrusted_haiku_source="$_project_cfg"\n'
-            '    "${PYTHON:-python3}" - "$_merged_cfg" "$_untrusted_haiku_source" "${_cfg_sources[@]}" > /dev/null 2>&1 <<\'PYMERGE\' || cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null\n'
+            '    _strip_model_reject="0"\n'
+            '    [ "$_project_cfg_model_reject_untrusted" = "1" ] && _strip_model_reject="1"\n'
+            '    "${PYTHON:-python3}" - "$_merged_cfg" "$_untrusted_haiku_source" "$_strip_model_reject" "${_cfg_sources[@]}" > /dev/null 2>&1 <<\'PYMERGE\' || cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null\n'
             'import json\n',
             # #726: the same untrusted-source verdict, threaded through the
             # no-jq Python fallback.
@@ -585,70 +601,15 @@ _SANCTIONED_DIVERGENCE = {
             '    [ "$_project_cfg_haiku_untrusted" = "1" ] && _untrusted_haiku_source="$_project_cfg"\n'
             '    _strip_model_reject="0"\n'
             '    [ "$_project_cfg_model_reject_untrusted" = "1" ] && _strip_model_reject="1"\n'
-            '    "${PYTHON:-python3}" - "$_merged_cfg" "$_untrusted_haiku_source" "$_strip_model_reject" "${_cfg_sources[@]}" > /dev/null 2>&1 <<\'PYMERGE\' || cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null\n'
+            '    _project_drop_marker=$(mktemp "${SYS_TMPDIR}/remember-config-drop-marker-XXXXXX" 2>/dev/null) || _project_drop_marker=""\n'
+            '    rm -f "$_project_drop_marker" 2>/dev/null\n'
+            '    "${PYTHON:-python3}" - "$_merged_cfg" "$_untrusted_haiku_source" "$_strip_model_reject" "$_project_drop_marker" "${_cfg_sources[@]}" > /dev/null 2>&1 <<\'PYMERGE\' || cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null\n'
             'import json\n',
         ),
         (
-            'out_path = sys.argv[1]\n'
-            'untrusted_haiku_path = sys.argv[2]\n'
-            '\n'
-            '\n'
-            'def load_documents(path):\n'
-            '    """Parse every whitespace-concatenated JSON document in `path` (#740):\n'
-            '    the untrusted project layer may ship more than one, and a plain\n'
-            '    json.load() raises `JSONDecodeError` on any file with more than one --\n'
-            '    which used to take the WHOLE merge down with it (the `|| cp\n'
-            '    "$_bundled_cfg" ...` fallback below), dropping the trusted user-global\n'
-            '    layer too rather than just stripping `haiku` from this file\'s own\n'
-            '    documents and keeping everything else."""\n'
-            '    with open(path) as f:\n'
-            '        raw = f.read()\n'
-            '    decoder = json.JSONDecoder()\n'
-            '    idx, n, docs = 0, len(raw), []\n'
-            '    while idx < n:\n'
-            '        while idx < n and raw[idx].isspace():\n'
-            '            idx += 1\n'
-            '        if idx >= n:\n'
-            '            break\n'
-            '        obj, idx = decoder.raw_decode(raw, idx)\n'
-            '        docs.append(obj)\n'
-            '    return docs\n'
-            '\n'
-            '\n'
-            'merged = {}\n'
-            'for path in sys.argv[3:]:\n'
-            '    if untrusted_haiku_path and path == untrusted_haiku_path:\n'
-            '        try:\n'
-            '            docs = load_documents(path)\n'
-            '        except (OSError, ValueError):\n'
-            '            continue\n'
-            '        for data in docs:\n'
-            '            if isinstance(data, dict):\n'
-            '                data = {k: v for k, v in data.items() if k != "haiku"}\n'
-            '            merged = deep_merge(merged, data)\n'
-            '        continue\n'
-            '    with open(path) as f:\n'
-            '        data = json.load(f)\n'
-            '    merged = deep_merge(merged, data)\n'
-            'merged = {k: v for k, v in merged.items() if not str(k).startswith("_")}\n',
-            # #726 shipped this line by line, one field per pre-726 line, so
-            # there used to be a SEPARATE tuple here (old=pre-726 single
-            # json.load loop, new=this #726 form) -- gone (#734's own
-            # reasoning, restated): #726 already landed, so real origin/main
-            # can never again be at the pre-726 state that tuple's own
-            # old_code named, and keeping it around only existed to trip the
-            # same synthetic-ref_code collision #740 hit composing directly
-            # on top of it (below). #740: a plain `json.load(f)` on the
-            # untrusted project file raises `JSONDecodeError` if that file
-            # ships more than one JSON document -- uncaught, so it took the
-            # WHOLE merge down with it (falling back to bundled-only
-            # defaults, dropping the trusted user-global layer's own
-            # overrides too) rather than stripping `haiku` from each of the
-            # untrusted file's own documents and keeping everything else,
-            # the same shape the jq path now has. `load_documents()` parses
-            # one or more whitespace-concatenated JSON documents from the
-            # untrusted file specifically; every other (trusted) source file
-            # keeps the original single `json.load()`, unchanged.
+            # #748: extends the #757 fold immediately above -- adds a
+            # drop-marker signal, since the interpreter's own stdout/stderr
+            # are already discarded by the caller and cannot carry one.
             'out_path = sys.argv[1]\n'
             'untrusted_haiku_path = sys.argv[2]\n'
             'strip_model_reject = sys.argv[3] == "1"\n'
@@ -694,7 +655,95 @@ _SANCTIONED_DIVERGENCE = {
             '    with open(path) as f:\n'
             '        data = json.load(f)\n'
             '    merged = deep_merge(merged, data)\n'
-            'merged = {k: v for k, v in merged.items() if not str(k).startswith("_")}\n',
+            'merged = {k: v for k, v in merged.items() if not str(k).startswith("_")}\n'
+            'with open(out_path, "w") as f:\n'
+            '    json.dump(merged, f)\n'
+            'PYMERGE\n'
+            'else\n',
+            # #726 shipped this line by line, one field per pre-726 line, so
+            # there used to be a SEPARATE tuple here (old=pre-726 single
+            # json.load loop, new=this #726 form) -- gone (#734's own
+            # reasoning, restated): #726 already landed, so real origin/main
+            # can never again be at the pre-726 state that tuple's own
+            # old_code named, and keeping it around only existed to trip the
+            # same synthetic-ref_code collision #740 hit composing directly
+            # on top of it (below). #740: a plain `json.load(f)` on the
+            # untrusted project file raises `JSONDecodeError` if that file
+            # ships more than one JSON document -- uncaught, so it took the
+            # WHOLE merge down with it (falling back to bundled-only
+            # defaults, dropping the trusted user-global layer's own
+            # overrides too) rather than stripping `haiku` from each of the
+            # untrusted file's own documents and keeping everything else,
+            # the same shape the jq path now has. `load_documents()` parses
+            # one or more whitespace-concatenated JSON documents from the
+            # untrusted file specifically; every other (trusted) source file
+            # keeps the original single `json.load()`, unchanged.
+            'out_path = sys.argv[1]\n'
+            'untrusted_haiku_path = sys.argv[2]\n'
+            'strip_model_reject = sys.argv[3] == "1"\n'
+            'drop_marker_path = sys.argv[4]\n'
+            '\n'
+            '\n'
+            'def load_documents(path):\n'
+            '    """Parse every whitespace-concatenated JSON document in `path` (#740):\n'
+            '    the untrusted project layer may ship more than one, and a plain\n'
+            '    json.load() raises `JSONDecodeError` on any file with more than one --\n'
+            '    which used to take the WHOLE merge down with it (the `|| cp\n'
+            '    "$_bundled_cfg" ...` fallback below), dropping the trusted user-global\n'
+            '    layer too rather than just stripping `haiku` from this file\'s own\n'
+            '    documents and keeping everything else."""\n'
+            '    with open(path) as f:\n'
+            '        raw = f.read()\n'
+            '    decoder = json.JSONDecoder()\n'
+            '    idx, n, docs = 0, len(raw), []\n'
+            '    while idx < n:\n'
+            '        while idx < n and raw[idx].isspace():\n'
+            '            idx += 1\n'
+            '        if idx >= n:\n'
+            '            break\n'
+            '        obj, idx = decoder.raw_decode(raw, idx)\n'
+            '        docs.append(obj)\n'
+            '    return docs\n'
+            '\n'
+            '\n'
+            'merged = {}\n'
+            'for path in sys.argv[5:]:\n'
+            '    if untrusted_haiku_path and path == untrusted_haiku_path:\n'
+            '        try:\n'
+            '            docs = load_documents(path)\n'
+            '        except (OSError, ValueError):\n'
+            '            if drop_marker_path:\n'
+            '                try:\n'
+            '                    with open(drop_marker_path, "w") as _marker:\n'
+            '                        _marker.write("1")\n'
+            '                except OSError:\n'
+            '                    pass\n'
+            '            continue\n'
+            '        for data in docs:\n'
+            '            if isinstance(data, dict):\n'
+            '                drop = {"haiku"}\n'
+            '                if strip_model_reject:\n'
+            '                    drop |= {"model", "reject_pattern"}\n'
+            '                data = {k: v for k, v in data.items() if k not in drop}\n'
+            '            merged = deep_merge(merged, data)\n'
+            '        continue\n'
+            '    with open(path) as f:\n'
+            '        data = json.load(f)\n'
+            '    merged = deep_merge(merged, data)\n'
+            'merged = {k: v for k, v in merged.items() if not str(k).startswith("_")}\n'
+            'with open(out_path, "w") as f:\n'
+            '    json.dump(merged, f)\n'
+            'PYMERGE\n'
+            '    if [ -n "$_project_drop_marker" ] && [ -f "$_project_drop_marker" ]; then\n'
+            '        rm -f "$_project_drop_marker" 2>/dev/null\n'
+            '        if declare -F report_error >/dev/null 2>&1; then\n'
+            '            report_error "lib-memory-dir" "sanitizing the project config layer failed (unreadable project file or malformed JSON) -- that layer was dropped; bundled/user-global config still applies"\n'
+            '        else\n'
+            '            printf \'%s\\n\' "[lib-memory-dir] WARNING: sanitizing the project config layer failed (unreadable project file or malformed JSON) -- that layer was dropped; bundled/user-global config still applies" >&2\n'
+            '        fi\n'
+            '    fi\n'
+            '    [ -n "$_project_drop_marker" ] && rm -f "$_project_drop_marker" 2>/dev/null\n'
+            'else\n',
         ),
     ],
 }
