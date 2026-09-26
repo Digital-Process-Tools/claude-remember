@@ -20,6 +20,7 @@ project layer -- or the whole `haiku` key everywhere -- cannot pass as
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -31,6 +32,47 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from pipeline.haiku import _config_candidates, _remember_dir_is_project_local
 from tests.test_jq_free_config import _path_without_jq
 from tests.test_layered_config import DETECT_SCRIPT, LIB_SCRIPT, _run_lib
+
+
+def _path_no_jq_broken_drop_marker_mktemp(tmp_path: Path) -> str:
+    """#804: a PATH resolving every real binary as-is except `jq` (absent,
+    forcing the no-jq Python fallback) and `mktemp` (replaced by a shim
+    that fails ONLY for the `*drop-marker*` template lib-memory-dir.sh
+    uses for `_project_drop_marker`). This simulates the drop-marker's OWN
+    `mktemp` call failing without breaking the file's OTHER `mktemp` calls
+    ($_merged_cfg, $_project_sanitized_tmp), which must keep succeeding
+    for the harness itself to produce a merged config at all."""
+    fake_bin = tmp_path / "no-jq-broken-mktemp-bin"
+    fake_bin.mkdir()
+    real_mktemp = shutil.which("mktemp")
+    assert real_mktemp, "mktemp not found on PATH"
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for name in names:
+            if name in ("jq", "mktemp"):
+                continue
+            target = fake_bin / name
+            if target.exists() or target.is_symlink():
+                continue
+            try:
+                os.symlink(os.path.join(d, name), target)
+            except OSError:
+                pass
+    shim = fake_bin / "mktemp"
+    shim.write_text(
+        '#!/bin/sh\n'
+        'for a in "$@"; do\n'
+        '    case "$a" in\n'
+        '        *drop-marker*) exit 1 ;;\n'
+        '    esac\n'
+        'done\n'
+        'exec "' + real_mktemp + '" "$@"\n'
+    )
+    shim.chmod(0o755)
+    return str(fake_bin)
 
 pytestmark = pytest.mark.skipif(
     sys.platform == "win32",
@@ -619,6 +661,67 @@ class TestSanitizeStepFailsClosed:
         assert "haiku" not in merged or "oauth_token" not in merged.get("haiku", {})
         assert "lib-memory-dir" in stderr, stderr
         assert "project config layer" in stderr, stderr
+
+    def test_mktemp_failing_for_the_drop_marker_itself_still_logs_the_drop(
+        self, tmp_path
+    ):
+        """#804: the no-jq fallback's own drop-marker `mktemp` call can fail
+        (a full or read-only $TMPDIR), leaving `$_project_drop_marker` empty
+        -- and the Python subprocess's `if drop_marker_path:` guard then
+        skips writing the marker even when the untrusted project layer ALSO
+        fails to load in that same run, so the drop used to happen with
+        nothing logged (the compound case #748 left open). The fix's
+        second, independent signal -- the subprocess's own exit code -- does
+        not depend on this mktemp succeeding at all, so the WARNING must
+        still surface here."""
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(json.dumps({}))
+        remember = project / ".remember"
+        remember.mkdir()
+        project_cfg_path = remember / "config.json"
+        project_cfg_path.write_text(
+            json.dumps({"haiku": {"oauth_token": "t" * 40}})
+        )
+        project_cfg_path.chmod(0o000)
+        try:
+            merged, _, stderr = _run_lib_and_dump_config_with_stderr(
+                project, pipeline, home,
+                env_extra={"PATH": _path_no_jq_broken_drop_marker_mktemp(tmp_path)},
+            )
+        finally:
+            project_cfg_path.chmod(0o644)
+
+        assert "haiku" not in merged or "oauth_token" not in merged.get("haiku", {})
+        assert "lib-memory-dir" in stderr, stderr
+        assert "project config layer" in stderr, stderr
+
+    def test_mktemp_failing_for_the_drop_marker_does_not_warn_when_nothing_dropped(
+        self, tmp_path
+    ):
+        """Positive control for the test above (CLAUDE.md: a negative
+        assertion needs a positive control): the SAME broken-mktemp shim,
+        but a readable project config with no `haiku` block at all -- must
+        NOT trip the drop-warning path. Proves the shim alone (mktemp
+        failing for the drop-marker template specifically) does not itself
+        manufacture a false-positive warning, and that the file's OTHER
+        mktemp calls still succeed under it -- a broken harness that
+        emitted no stderr at all would otherwise also pass a bare
+        `assert "..." not in stderr`."""
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(json.dumps({}))
+        remember = project / ".remember"
+        remember.mkdir()
+        (remember / "config.json").write_text(
+            json.dumps({"cooldowns": {"save_seconds": 777}})
+        )
+
+        merged, _, stderr = _run_lib_and_dump_config_with_stderr(
+            project, pipeline, home,
+            env_extra={"PATH": _path_no_jq_broken_drop_marker_mktemp(tmp_path)},
+        )
+
+        assert merged["cooldowns"]["save_seconds"] == 777
+        assert "lib-memory-dir" not in stderr, stderr
 
     def test_a_malformed_project_cfg_drops_the_layer_without_losing_the_rest(
         self, tmp_path

@@ -958,9 +958,23 @@ _remember_render_memory_section() {
         echo "--- rotated memory slices (not shown; grep on request) ---"
         # One batched `wc -c` over at most ROTATED_LIST_MAX (10) slices
         # instead of one `wc` + one `tr` per slice (#664/#666).
-        local _remember_newest_arr=() _remember_newest_line
+        local _remember_newest_arr=() _remember_newest_line _remember_newest_refused=""
         while IFS= read -r _remember_newest_line; do
-            [ -f "$_remember_newest_line" ] && _remember_newest_arr+=("$_remember_newest_line")
+            [ -f "$_remember_newest_line" ] || continue
+            # #805: a rotated slice is named by path here exactly like the
+            # main memory-file loop (line ~814) and the compact-mode
+            # deferred-file loop (#777, line ~888) name theirs -- so it goes
+            # through the same `_remember_may_inject` gate before its path
+            # is ever printed. Without this, a git-tracked or symlinked
+            # slice was listed under a header implying it is safe/expected,
+            # inviting a follow-up read of content the guard exists to
+            # refuse.
+            if _remember_may_inject "$_remember_newest_line" "memory-context"; then
+                _remember_newest_arr+=("$_remember_newest_line")
+            else
+                _remember_newest_refused="${_remember_newest_refused}${_REMEMBER_INJECT_REFUSAL}
+"
+            fi
         done <<< "$ROTATED_NEWEST"
         if [ "${#_remember_newest_arr[@]}" -gt 0 ]; then
             local _remember_newest_bytes
@@ -982,6 +996,26 @@ _remember_render_memory_section() {
                     (*) printf '%s (%s bytes)\n' "$_remember_newest_line" "$_remember_newest_bytes" ;;
                 esac
             done
+        fi
+        if [ -n "$_remember_newest_refused" ]; then
+            # A blank line before this header, always -- self-review finding
+            # (#805): without it, this header ran straight into either the
+            # accepted-slices header above (when every slice was refused) or
+            # the last accepted path's own line (when some were), unlike
+            # every other header transition in this same function, which
+            # always separates sections with one blank line (the main
+            # memory-file loop's per-file `echo ""` and its own REFUSED_MEMORY
+            # header; the compact-mode deferred loop's equivalent).
+            echo ""
+            # A THIRD header, distinct from both of #790's own two ("---
+            # refused (not injected) ---" and "--- refused, would have been
+            # listed as deferred (not injected) ---") -- reusing either
+            # would misattribute this population (a refused ROTATED slice)
+            # to one of those two unrelated populations (self-review finding
+            # carried over from #790 itself, per #805's own issue text).
+            echo "--- refused, not listed as a rotated slice (not injected) ---"
+            printf '%s' "$_remember_newest_refused"
+            echo ""
         fi
         if [ "$ROTATED_COUNT" -gt "$ROTATED_LIST_MAX" ]; then
             printf '... and %s older: %s/archive-*.md, %s/recent-*.md\n' \

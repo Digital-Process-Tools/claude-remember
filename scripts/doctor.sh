@@ -94,7 +94,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ "${1:-}" = "--json" ]; then
     _JSON_PROJECT_DIR_ASSUMED=0
     if [ -z "${CLAUDE_PROJECT_DIR:-}" ]; then
-        CLAUDE_PROJECT_DIR="$PWD"
+        # #802: prefer the git top level over a possibly-stale $PWD -- immune
+        # to a `cd` that happened earlier in the same Bash-tool call. Falls
+        # back to $PWD, unchanged, when the cwd is not inside a git repo at
+        # all. Same pattern write-handoff.sh's own #743 fix established.
+        _DOCTOR_JSON_GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || _DOCTOR_JSON_GIT_ROOT=""
+        if [ -n "$_DOCTOR_JSON_GIT_ROOT" ]; then
+            CLAUDE_PROJECT_DIR="$_DOCTOR_JSON_GIT_ROOT"
+        else
+            CLAUDE_PROJECT_DIR="$PWD"
+        fi
+        unset _DOCTOR_JSON_GIT_ROOT
         _JSON_PROJECT_DIR_ASSUMED=1
         export CLAUDE_PROJECT_DIR
     fi
@@ -216,14 +226,25 @@ echo "-- Paths --"
 # wrong project) but turns this read-only report into a false FAIL on a
 # healthy install (#207).
 #
-# Scoped to doctor.sh only: default to the current directory here, never in
+# Scoped to doctor.sh only: default to the git top level (or the current
+# directory, if that is not inside a git repo -- see #802) here, never in
 # resolve-paths.sh itself, so every other caller keeps the strict refusal.
 # The guess is reported as a guess below (see _PROJECT_DIR_ASSUMED) — a
 # diagnostic that silently assumes a project and reports on it as fact would
 # just be a quieter version of the same false signal.
 _PROJECT_DIR_ASSUMED=0
 if [ -z "${CLAUDE_PROJECT_DIR:-}" ]; then
-    CLAUDE_PROJECT_DIR="$PWD"
+    # #802: prefer the git top level over a possibly-stale $PWD -- immune to
+    # a `cd` that happened earlier in the same Bash-tool call. Falls back to
+    # $PWD, unchanged, when the cwd is not inside a git repo at all. Same
+    # pattern write-handoff.sh's own #743 fix established.
+    _DOCTOR_GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || _DOCTOR_GIT_ROOT=""
+    if [ -n "$_DOCTOR_GIT_ROOT" ]; then
+        CLAUDE_PROJECT_DIR="$_DOCTOR_GIT_ROOT"
+    else
+        CLAUDE_PROJECT_DIR="$PWD"
+    fi
+    unset _DOCTOR_GIT_ROOT
     _PROJECT_DIR_ASSUMED=1
     export CLAUDE_PROJECT_DIR
 fi
@@ -242,7 +263,7 @@ if [ "$_RESOLVE_STATUS" -ne 0 ]; then
 fi
 
 if [ "$_PROJECT_DIR_ASSUMED" -eq 1 ]; then
-    echo "WARN CLAUDE_PROJECT_DIR was not set -- assumed the current directory:"
+    echo "WARN CLAUDE_PROJECT_DIR was not set -- assumed:"
     echo "     $PROJECT_DIR"
     echo "     Everything below describes that directory, not one Claude Code told"
     echo "     us about. Rerun with CLAUDE_PROJECT_DIR set to check a different project."

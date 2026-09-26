@@ -615,13 +615,22 @@ elif [ "${#_cfg_sources[@]}" -gt 0 ]; then
     # layer (the `except (OSError, ValueError): continue` below) used to
     # happen with nothing logged anywhere either. There is no fd left to
     # signal it on -- the interpreter's stdout/stderr are already thrown
-    # away (`> /dev/null 2>&1`) so a real subprocess exit or a printed
-    # marker cannot be told apart from success -- so the except branch
-    # drops a one-byte marker file instead, and this shell checks for it
-    # once the interpreter has exited.
+    # away (`> /dev/null 2>&1`) -- so the except branch drops a one-byte
+    # marker file instead, and this shell checks for it once the
+    # interpreter has exited. #804: the marker's own mktemp call (below)
+    # can itself fail, so this is no longer the ONLY signal -- the
+    # interpreter's own exit code (rc 3, captured further down) now tells
+    # a real subprocess exit apart from success independently of this
+    # file ever being written at all; the marker stays as a second,
+    # redundant-on-purpose channel rather than being replaced by the rc.
     _project_drop_marker=$(mktemp "${SYS_TMPDIR}/remember-config-drop-marker-XXXXXX" 2>/dev/null) || _project_drop_marker=""
     rm -f "$_project_drop_marker" 2>/dev/null
-    "${PYTHON:-python3}" - "$_merged_cfg" "$_untrusted_haiku_source" "$_strip_model_reject" "$_project_drop_marker" "${_cfg_sources[@]}" > /dev/null 2>&1 <<'PYMERGE' || cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null
+    # #804: capture the interpreter's own exit code rather than folding it
+    # straight into `|| cp ...` -- rc 3 below means "merged, but the
+    # untrusted project layer was dropped" and must NOT trigger the
+    # bundled-only fallback the way a genuine merge failure does.
+    _py_merge_rc=0
+    "${PYTHON:-python3}" - "$_merged_cfg" "$_untrusted_haiku_source" "$_strip_model_reject" "$_project_drop_marker" "${_cfg_sources[@]}" > /dev/null 2>&1 <<'PYMERGE' || _py_merge_rc=$?
 import json
 import sys
 
@@ -673,6 +682,7 @@ def load_documents(path):
 
 
 merged = {}
+_dropped_project_layer = False
 for path in sys.argv[5:]:
     if untrusted_haiku_path and path == untrusted_haiku_path:
         # #744: fail CLOSED -- if the untrusted file can't even be loaded
@@ -691,6 +701,11 @@ for path in sys.argv[5:]:
         except (OSError, ValueError):
             # #748: drop a marker for the shell to notice and report --
             # this process's own stdout/stderr are discarded by the caller.
+            # #804: also record the drop in a flag that becomes THIS
+            # process's own exit code below -- a second, independent
+            # signal that does not depend on drop_marker_path's own
+            # mktemp (the shell side, above) having succeeded at all.
+            _dropped_project_layer = True
             if drop_marker_path:
                 try:
                     with open(drop_marker_path, "w") as _marker:
@@ -713,8 +728,26 @@ for path in sys.argv[5:]:
 merged = {k: v for k, v in merged.items() if not str(k).startswith("_")}
 with open(out_path, "w") as f:
     json.dump(merged, f)
+# #804: exit 3 means "merge above completed and $out_path was written, but
+# the untrusted project layer was dropped" -- distinct from 0 (clean) and
+# from any other non-zero exit (a genuine merge failure, still handled by
+# the shell's own bundled-only fallback below).
+if _dropped_project_layer:
+    sys.exit(3)
 PYMERGE
-    if [ -n "$_project_drop_marker" ] && [ -f "$_project_drop_marker" ]; then
+    # #804: rc 3 above means the merge SUCCEEDED (the write already
+    # happened) but the untrusted layer was dropped -- must NOT trigger the
+    # bundled-only fallback the way a genuine merge failure (any other
+    # non-zero rc) still does.
+    if [ "$_py_merge_rc" != "0" ] && [ "$_py_merge_rc" != "3" ]; then
+        cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null
+    fi
+    # #804: the drop is disclosed on EITHER signal now -- the marker file
+    # (whose own mktemp can fail) OR this exit code (which cannot, since it
+    # travels on the subprocess's own exit path, not a second filesystem
+    # write) -- closing the compound "mktemp AND project config both fail"
+    # gap #748 left open.
+    if { [ -n "$_project_drop_marker" ] && [ -f "$_project_drop_marker" ]; } || [ "$_py_merge_rc" = "3" ]; then
         rm -f "$_project_drop_marker" 2>/dev/null
         if declare -F report_error >/dev/null 2>&1; then
             report_error "lib-memory-dir" "sanitizing the project config layer failed (unreadable project file or malformed JSON) -- that layer was dropped; bundled/user-global config still applies"
