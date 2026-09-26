@@ -532,8 +532,16 @@ def test_untracked_cache_inside_a_git_repo_is_still_served(tmp_path):
     manifest_file = remember / "tmp" / "start-context.manifest"
     # The manifest must name at least one real source, or a hit below would
     # not prove the -nt loop ran against anything at all.
+    # Separator-agnostic exact match: on Windows the manifest can carry a
+    # mixed-separator path (C:\\...\\project/.remember/...) while str(core)
+    # is all backslashes, so normalise both sides before comparing.
     manifest_text = manifest_file.read_text(encoding="utf-8")
-    assert f"SRC={core}" in manifest_text, manifest_text
+    src_paths = [
+        line[len("SRC="):].rstrip("\r").replace("\\", "/")
+        for line in manifest_text.splitlines()
+        if line.startswith("SRC=")
+    ]
+    assert str(core).replace("\\", "/") in src_paths, manifest_text
     # Force the cache strictly newer than every source by whole seconds, as
     # the sibling positive case does. Without this the hit depended on the
     # publish landing in a later second than `now`: macOS's stock /bin/bash
