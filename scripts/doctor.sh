@@ -226,7 +226,8 @@ echo "-- Paths --"
 # wrong project) but turns this read-only report into a false FAIL on a
 # healthy install (#207).
 #
-# Scoped to doctor.sh only: default to the current directory here, never in
+# Scoped to doctor.sh only: default to the git top level (or the current
+# directory, if that is not inside a git repo -- see #802) here, never in
 # resolve-paths.sh itself, so every other caller keeps the strict refusal.
 # The guess is reported as a guess below (see _PROJECT_DIR_ASSUMED) — a
 # diagnostic that silently assumes a project and reports on it as fact would
@@ -262,7 +263,7 @@ if [ "$_RESOLVE_STATUS" -ne 0 ]; then
 fi
 
 if [ "$_PROJECT_DIR_ASSUMED" -eq 1 ]; then
-    echo "WARN CLAUDE_PROJECT_DIR was not set -- assumed the current directory:"
+    echo "WARN CLAUDE_PROJECT_DIR was not set -- assumed:"
     echo "     $PROJECT_DIR"
     echo "     Everything below describes that directory, not one Claude Code told"
     echo "     us about. Rerun with CLAUDE_PROJECT_DIR set to check a different project."
