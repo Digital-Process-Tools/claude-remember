@@ -295,16 +295,32 @@ unset _WH_ROOT_SCRATCH
 if [ "$_WH_REMEMBER_ROOT" = "${MEMORY_PROJECT_DIR:-$PROJECT_DIR}" ]; then
     _WH_TRACKED_STATE=""
     _remember_file_tracked_state_into _WH_TRACKED_STATE "$_WH_TARGET"
-    case "$_WH_TRACKED_STATE" in
-        tracked)
-            echo "REFUSED: $_WH_TARGET is tracked by this repository's own git index -- this plugin never commits a memory file itself, so writing your note over it would report success and then have the next SessionStart refuse to show it back to you, blaming a commit you never made. If this file is genuinely yours: git rm --cached it, then retry." >&2
-            exit 1
-            ;;
-        unavailable)
-            echo "REFUSED: $_WH_TARGET could not be checked against this repository's git index (git is missing, or the check itself failed) -- refusing to write unverified." >&2
-            exit 1
-            ;;
-    esac
+    # #799: refuse every state _REMEMBER_REFUSED_TRACKED_STATES (shared with
+    # the read-side guard, _remember_may_inject in lib-memory-context.sh)
+    # names as refused, not just the two this case used to list inline. A
+    # state added to that shared list only needs adding there now -- before
+    # #799 this case had its own independent copy of the list, and
+    # symlinked-ancestor was added to the shared one (#754/#755/#756)
+    # without ever being added here, so a write proceeded straight through
+    # a symlinked .remember directory the read side already refused to
+    # inject from.
+    if _remember_tracked_state_is_refused "$_WH_TRACKED_STATE"; then
+        case "$_WH_TRACKED_STATE" in
+            tracked)
+                echo "REFUSED: $_WH_TARGET is tracked by this repository's own git index -- this plugin never commits a memory file itself, so writing your note over it would report success and then have the next SessionStart refuse to show it back to you, blaming a commit you never made. If this file is genuinely yours: git rm --cached it, then retry." >&2
+                ;;
+            unavailable)
+                echo "REFUSED: $_WH_TARGET could not be checked against this repository's git index (git is missing, or the check itself failed) -- refusing to write unverified." >&2
+                ;;
+            symlinked-ancestor)
+                echo "REFUSED: $_WH_TARGET sits under a directory that is itself a symlink -- this plugin never creates a symlink inside a memory store, so writing through one would land your note somewhere outside the store you think you are writing to. If you did not create this symlink, treat it as planted and inspect what it points at before deleting it." >&2
+                ;;
+            *)
+                echo "REFUSED: $_WH_TARGET could not be verified (tracked state: $_WH_TRACKED_STATE) -- refusing to write unverified." >&2
+                ;;
+        esac
+        exit 1
+    fi
 fi
 
 [ -d "$REMEMBER_DIR" ] || mkdir -p "$REMEMBER_DIR" 2>/dev/null

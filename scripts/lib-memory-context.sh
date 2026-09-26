@@ -485,6 +485,29 @@ _remember_root_tracked_state_into() {
 #                    repository-controlled tree and out of a user-chosen
 #                    external store, whose own root is trusted regardless
 #                    of how it is reached.
+# _REMEMBER_REFUSED_TRACKED_STATES -- the single list of
+# _remember_file_tracked_state_into outcomes that must never be permitted
+# through, on EITHER side of the guard: injecting a memory file back into
+# session context (_remember_may_inject below) or writing a NEW one
+# (write-handoff.sh's own #750 guard). Before #799, write-handoff.sh kept
+# its own inline `case ... tracked|unavailable)` list, independently of
+# this one, and a state added here (symlinked-ancestor) was never added
+# there -- the write side silently let it through while the read side
+# already refused it. Keeping one list and a helper that consults it means
+# a future addition here is enough; it does not also have to be
+# remembered in a second, unrelated case statement.
+_REMEMBER_REFUSED_TRACKED_STATES="tracked unavailable symlinked-ancestor"
+
+# _remember_tracked_state_is_refused <state>
+# True (exit 0) when STATE (a _remember_file_tracked_state_into outcome)
+# must be refused by every guard that consults it.
+_remember_tracked_state_is_refused() {
+    case " $_REMEMBER_REFUSED_TRACKED_STATES " in
+        (*" $1 "*) return 0 ;;
+        (*) return 1 ;;
+    esac
+}
+
 _remember_file_tracked_state_into() {
     local _fts_outvar="$1" _fts_file="$2"
     local _fts_dir _fts_root _fts_root_fs _fts_file_fs _fts_dir_fs _fts_rel _fts_reldir
