@@ -1126,13 +1126,27 @@ _CODEX_CHILD_ENV_ALLOW = frozenset({
     "SYSTEMROOT", "USERPROFILE", "APPDATA", "PATHEXT",
     # Codex's own env-var credential (its filesystem-based CODEX_HOME/
     # auth.json is unaffected either way) plus the standard proxy/CA
-    # variables -- every platform, not just Windows. Both cases of the
-    # proxy names: some HTTP client libraries only ever check one.
+    # variables -- every platform, not just Windows.
     "CODEX_API_KEY",
     "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY",
-    "https_proxy", "http_proxy", "no_proxy",
     "SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS",
 })
+
+# #792 (CI, windows-latest): matched case-sensitively, this allow-list would
+# need BOTH "HTTPS_PROXY" and "https_proxy" listed to cover either casing a
+# user might set -- and even then, CPython's own os.py folds EVERY
+# os.environ key to uppercase on `nt` at process-startup time
+# (_createenviron's `encodekey = key.upper()`, applied when the initial
+# `data` dict is built from the inherited environment, not just when Python
+# itself calls __setitem__), so a lowercase entry in this allow-list could
+# never match anything on Windows regardless -- os.environ.items() never
+# yields a lowercase key there. Matching case-insensitively removes the
+# need to enumerate both cases at all: one canonical name per variable
+# above, compared against `k.upper()` below, works identically on a
+# platform that preserves case (POSIX -- a real https_proxy still gets
+# through, since "HTTPS_PROXY" is in the allow-list and .upper() of either
+# side lands on the same string) and one that folds it (Windows).
+_CODEX_CHILD_ENV_ALLOW_UPPER = frozenset(name.upper() for name in _CODEX_CHILD_ENV_ALLOW)
 
 
 def _codex_child_env() -> dict[str, str]:
@@ -1149,16 +1163,25 @@ def _codex_child_env() -> dict[str, str]:
     them here costs nothing on POSIX.
     ``CODEX_API_KEY``: Codex's own env-var credential, when that is how this
     host authenticates it rather than a filesystem ``auth.json`` (#751).
-    ``HTTPS_PROXY``/``HTTP_PROXY``/``NO_PROXY`` (both cases) and
+    ``HTTPS_PROXY``/``HTTP_PROXY``/``NO_PROXY`` and
     ``SSL_CERT_FILE``/``NODE_EXTRA_CA_CERTS``: anyone running this behind a
-    proxy or a custom CA bundle (#751).
+    proxy or a custom CA bundle (#751). Matched case-insensitively against
+    the parent's real ``os.environ`` (#792) -- some HTTP client libraries
+    only ever check the lowercase form of the proxy names, and Windows
+    folds every ``os.environ`` key to uppercase regardless of which case
+    the variable was actually set under, so a case-sensitive match would
+    either miss the lowercase form everywhere, or need both cases listed
+    and still never match the lowercase one on Windows.
 
     Nothing else -- no Anthropic key, no cloud credential, no unrelated
     shell secret this process's own environment happens to carry -- is
     passed through, because a command the model runs inside Codex's
     read-only sandbox can read the child's environment directly.
     """
-    env = {k: v for k, v in os.environ.items() if k in _CODEX_CHILD_ENV_ALLOW}
+    env = {
+        k: v for k, v in os.environ.items()
+        if k.upper() in _CODEX_CHILD_ENV_ALLOW_UPPER
+    }
     env[NESTED_SUMMARIZER_ENV] = "1"
     return env
 
