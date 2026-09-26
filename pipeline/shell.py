@@ -833,7 +833,8 @@ def cmd_consolidate(staging_dir: str, recent_file: str, archive_file: str,
     #   while IFS= read -r -d '' path; do ...; done < "$STAGING_PATHS_FILE"
     # Each record is path\0consumed_bytes\0. The byte count is what was actually
     # read into this prompt: run-consolidation.sh renames the file afterwards,
-    # and a save can land in between — the Haiku call above has a 180s budget
+    # and a save can land in between — the Haiku call above has a configurable
+    # budget (180s by default, thresholds.consolidate_timeout_seconds, #806)
     # and consolidation runs disowned alongside any live session. Renaming
     # blindly sealed those newer bytes inside the .done.md, which nothing globs
     # again and session start never injects: written to disk, then unreachable.
