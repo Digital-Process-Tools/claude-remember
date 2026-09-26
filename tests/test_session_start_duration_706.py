@@ -75,11 +75,19 @@ def _daily_log_text(remember: Path) -> str:
 
 
 def test_a_fast_run_logs_its_duration_but_stays_quiet_in_the_session(tmp_path):
-    """Default threshold (5s, config.example.json's own default -- nothing
-    written here overrides it). A test fixture's hook run is nowhere near
-    5s, so the daily log gets the record and the session output stays
-    exactly as it was before #706 -- no new section, no new noise."""
+    """#808: the default threshold (5s) is not pinned -- on a loaded runner
+    (observed on windows-latest) a real hook run can exceed it, making the
+    hook CORRECTLY surface the duration and turning this "stays quiet"
+    assertion into a wall-clock race rather than a test of the hook's own
+    logic. Same fix shape as the positive control below: make the THRESHOLD
+    the variable, not the CLOCK -- set it far above anything a test fixture's
+    hook run could plausibly take, so "fast" is guaranteed by the fixture,
+    never by luck."""
     home, project, remember = _store(tmp_path)
+    _write_no_crlf(
+        remember / "config.json",
+        json.dumps({"session_start_slow_threshold_s": 600}),
+    )
     env = _env(home, project, remember, os.environ["PATH"])
 
     result = _run_hook(env)
