@@ -40,4 +40,10 @@ it is refused at validation, because reading an empty list that way would silent
 for the whole repository. A list names the patterns; `oss_config.user_visible_paths_problem` is
 where all three states are decided.
 
+**`milestones` and `_milestones_note` are a declare-or-decline pair.** A non-empty `milestones`
+list means the repo is actually using GitHub milestones. An empty list with no `_milestones_note`
+means nobody has decided either way yet -- expect a triage sweep to keep re-filing that as an open
+question (#784). `_milestones_note` records a deliberate decision to decline them, with the reason,
+so the sweep stops treating silence as a gap.
+
 **No key here holds a credential.** The file is committed; tokens live in the forge CLI's own auth.

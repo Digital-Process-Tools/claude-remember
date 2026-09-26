@@ -33,6 +33,7 @@
     "lane_other": "lane-other"
   },
   "milestones": [],
+  "_milestones_note": "Declined: single-maintainer repo with no existing milestone structure, and the backlog is tracked well enough via issues and labels alone -- the overhead of milestones is not worth it right now (#784).",
   "release": {
     "authority": "loop",
     "tag_pattern": "v{version}",
