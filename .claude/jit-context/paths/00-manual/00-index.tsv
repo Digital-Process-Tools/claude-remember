@@ -1,6 +1,7 @@
 scripts/.*\.sh$	bash-locale-pin-byte-and-case-ops.md
 tests/test_case_divergence_298\.py$	case-divergence-pin-fold-dont-stack.md
 scripts/.*\.sh$	dollar-paren-lt-file-is-a-special-case.md
+scripts/.*\.sh$	generalizing-a-narrow-security-check-needs-a-whole-suite-grep.md
 (scripts/.*\.sh|tests/.*\.py)$	hand-kept-completeness-list-goes-stale.md
 scripts/.*\.sh$	kill-a-subshell-not-its-forked-child.md
 scripts/.*\.sh$	per-session-value-shared-channel.md
