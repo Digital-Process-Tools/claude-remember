@@ -1219,7 +1219,29 @@ def _build_codex_cmd(output_file: str, cwd: str) -> list[str]:
         official Codex manual (fetched 2026-09-26): `shell_environment_policy`
         is a real, documented dotted-path config key, and ``-c`` overrides
         apply regardless of whether ``config.toml`` is loaded -- relevant
-        since this call also passes ``--ignore-user-config``.
+        since this call also passes ``--ignore-user-config``. NOT re-verified
+        against codex-cli 0.150.1, the version this repo's own README pins as
+        "observed working" (unlike the ``--ignore-user-config`` isolation
+        claim two paragraphs below, which was) -- `ShellEnvironmentPolicyInherit`
+        is a long-standing enum in Codex's own config schema, not something
+        new in 0.153.2, so the risk of it being absent on 0.150.1 is judged
+        low, but this is reasoned, not observed, on that specific version.
+        ``inherit=none`` also means a spawned command gets NO environment at
+        all -- not just no secrets, but no ``PATH``/``HOME``/locale either.
+        That is a real behavioral change from "full inherit", not only a
+        narrowing of what secrets are visible: a command the model tries to
+        run that relies on ``PATH`` to resolve a bare command name will now
+        fail to find it. Accepted here because nothing about this
+        summarizer's actual job (producing the model's final text message)
+        depends on a spawned command succeeding -- unlike `_codex_child_env`,
+        which deliberately keeps just enough (``PATH``/``HOME``/proxy/CA) for
+        Codex's OWN process to run and authenticate, this policy governs a
+        code path this feature does not intend to rely on at all.
+        Unit tests here can only assert the argv carries this exact string;
+        none can spawn a real `codex exec` to confirm the CLI actually
+        empties a spawned command's environment when given it -- that trust
+        boundary (does codex-cli honor its own documented flag at runtime)
+        is not verifiable from this codebase.
     the fresh, empty `cwd` this call is given (`_isolated_summarizer_cwd`,
     #724) narrows what such a command could even find to act on, but does
     not touch what it can read from its own environment -- that is this
