@@ -35,8 +35,10 @@ Rules:
 1. Pick a fresh word you have not used before this session (not "EOF", not "PICK_A_RANDOM_TOKEN", not anything reused from an earlier call) and substitute it for every occurrence of `PICK_A_RANDOM_TOKEN` below, opening and closing line alike, keeping the surrounding single quotes exactly as shown so none of the note's own content is shell-expanded.
 2. Check the note itself for a line that equals your chosen word exactly. If one exists, pick a different word and check again.
 
-    "${CLAUDE_PLUGIN_ROOT}/scripts/write-handoff.sh" <<'PICK_A_RANDOM_TOKEN'
-    {the note, in the format above}
-    PICK_A_RANDOM_TOKEN
+```
+"${CLAUDE_PLUGIN_ROOT}/scripts/write-handoff.sh" <<'PICK_A_RANDOM_TOKEN'
+{the note, in the format above}
+PICK_A_RANDOM_TOKEN
+```
 
 Relay the script's own last line back to the user verbatim — it is either `Wrote handoff to: <path>` or a `REFUSED: ...` line — and say nothing else. Never claim "Saved." if the script printed a refusal.
