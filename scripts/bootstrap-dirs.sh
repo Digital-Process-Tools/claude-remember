@@ -44,6 +44,16 @@ SYS_TMPDIR="${TMPDIR:-/tmp}"
 # legacy dir we migrate/gitignore matches where REMEMBER_DIR now resolves.
 _mem_proj="${MEMORY_PROJECT_DIR:-$PROJECT_DIR}"
 _legacy_dir="${_mem_proj}/.remember"
+# #782 self-review: set only when the tracked-content scan below refuses a
+# migration. Checked by the unconditional directory-scaffold step further
+# down, which must NOT create REMEMBER_DIR in that case -- the migration
+# guard above is `[ ! -e "$REMEMBER_DIR" ]`, so once REMEMBER_DIR exists
+# (even as an empty scaffold nothing else has written to yet) the guard
+# reads false forever after, and the "start a new session to retry" the
+# refusal message itself promises would silently never fire again, even
+# after the operator does exactly what it says. Refusing the migration
+# must leave REMEMBER_DIR exactly as absent as it was before this session.
+_remember_legacy_migration_refused=""
 # -L before -d: -d follows a symlink, so a LEGACY DIRECTORY ITSELF that
 # is a symlink (a repository can commit one, pointing anywhere on disk)
 # would otherwise satisfy this condition and get `mv`'d wholesale into
@@ -86,6 +96,124 @@ if [ "$REMEMBER_DIR" != "$_legacy_dir" ] && [ ! -L "$_legacy_dir" ] && [ -d "$_l
     if [ "$_migrating_user_config_home" = false ]; then
         mkdir -p "$(dirname "$REMEMBER_DIR")" 2>/dev/null
 
+        # #782: the config.json holdout just below is the ONLY tracked-
+        # content protection this migration has ever applied -- every OTHER
+        # file the legacy directory holds, including a planted now.md,
+        # still moved wholesale into REMEMBER_DIR. The injection guard
+        # exempts external storage from its tracked-file check entirely BY
+        # DESIGN (`_remember_in_project_store || return 0`,
+        # lib-memory-context.sh, #764) because that store can legitimately
+        # be the plugin's OWN git_backup repository -- so once a
+        # repository-tracked memory file lands inside REMEMBER_DIR via this
+        # migration, nothing downstream ever refuses it again. Scanning for
+        # tracked content BEYOND config.json (already held out on its own
+        # below) and refusing the WHOLE migration when any is found is
+        # simpler and safer than generalizing the single-file holdout into a
+        # per-file loop: REMEMBER_DIR is never created here, so this
+        # session's live render still has nothing to inject FROM the
+        # external store, and the legacy directory (with its tracked
+        # content) is left exactly where it was for the operator to sort
+        # out by hand.
+        # Same repo-existence-first shape as _remember_config_tracked_status
+        # (lib-memory-dir.sh, #766): "no git binary" and "not a git
+        # repository at all" must never read the same way. Only an
+        # ENCLOSING repository that git cannot be asked about fails closed
+        # (could-not-tell, treated the same as tracked below) -- no
+        # repository anywhere above _mem_proj means there is nothing to
+        # check, same as the ordinary non-git project.
+        # Every assignment from a `git ...` call below is deliberately
+        # written `CMD && RC=0 || RC=$?` rather than the plainer `CMD; RC=$?`
+        # -- this file can be sourced by a CALLER running under `set -e`
+        # (see the nullglob comment further down in this same file for the
+        # established precedent), and `git rev-parse --is-inside-work-tree`
+        # is EXPECTED to exit non-zero for the ordinary non-repo case. A bare
+        # failing command substitution assignment aborts the whole script
+        # under `set -e` before this function ever gets to inspect the exit
+        # code -- observed directly: `test_an_ordinary_legacy_directory_
+        # still_migrates` and `test_migration_moves_legacy_to_external`
+        # (both plain non-git tmp dirs) failed with returncode 128 and empty
+        # output until this shape was used. Per POSIX, a command that is not
+        # the LAST element of an AND-OR list is exempt from triggering
+        # errexit, so the first `git ...` call here never aborts the caller.
+        _legacy_other_tracked="clean"
+        if command -v git >/dev/null 2>&1; then
+            _legacy_repo_check=$( (unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+                                    LC_ALL=C LANGUAGE=C git -C "$_mem_proj" rev-parse --is-inside-work-tree) 2>&1 ) && _legacy_repo_rc=0 || _legacy_repo_rc=$?
+            if [ "$_legacy_repo_rc" -ne 0 ]; then
+                case "$_legacy_repo_check" in
+                    *"not a git repository"*) : ;;
+                    (*) _legacy_other_tracked="could-not-tell" ;;
+                esac
+            elif [ "$_legacy_repo_check" = "true" ]; then
+                # `:(icase)` pathspec magic, matching _remember_may_inject's
+                # own tracked check (lib-memory-context.sh) rather than a
+                # plain ".remember/" -- a case-insensitive filesystem
+                # (macOS APFS default, Windows) lets a repository commit
+                # `.Remember/now.md` and have this exact-case pathspec find
+                # nothing while the real on-disk directory this migration
+                # is about to `mv` is the SAME directory, so the tracked
+                # content would sail through as "clean" (self-review
+                # finding).
+                _legacy_ls_list=$(unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+                                   git -c core.quotePath=false -C "$_mem_proj" ls-files -- ":(icase).remember/" 2>/dev/null) && _legacy_ls_rc=0 || _legacy_ls_rc=$?
+                if [ "$_legacy_ls_rc" -ne 0 ]; then
+                    _legacy_other_tracked="could-not-tell"
+                else
+                    while IFS= read -r _legacy_ls_line; do
+                        [ -n "$_legacy_ls_line" ] || continue
+                        # Case-insensitive compare too: `:(icase)` can hand
+                        # back the differently-cased path itself (e.g.
+                        # `.Remember/config.json`), which a case-SENSITIVE
+                        # `case` pattern would miss and misclassify as
+                        # "other tracked content" even for the file this
+                        # scan means to exclude. `_remember_ci_eq`
+                        # (lib-memory-context.sh) is NOT sourced into this
+                        # file's context -- inlined here rather than
+                        # sourcing that whole file just for one helper
+                        # (self-review finding: the first version of this
+                        # called it anyway and failed with "command not
+                        # found", silently misclassifying config.json
+                        # itself as "other tracked content" on every run).
+                        _legacy_was_nocasematch=0
+                        shopt -q nocasematch && _legacy_was_nocasematch=1
+                        shopt -s nocasematch
+                        if [[ "$_legacy_ls_line" == ".remember/config.json" ]]; then
+                            _legacy_ci_match=1
+                        else
+                            _legacy_ci_match=0
+                        fi
+                        [ "$_legacy_was_nocasematch" -eq 1 ] || shopt -u nocasematch
+                        [ "$_legacy_ci_match" -eq 1 ] && continue
+                        _legacy_other_tracked="tracked"
+                    done <<EOF
+$_legacy_ls_list
+EOF
+                fi
+            fi
+            # else: a real repository, but $_mem_proj is not inside its work
+            # tree (a bare repo) -- nothing to check, stays "clean".
+        else
+            _legacy_walk=$(cd "$_mem_proj" 2>/dev/null && pwd -P) || _legacy_walk="$_mem_proj"
+            while [ -n "$_legacy_walk" ]; do
+                if [ -e "$_legacy_walk/.git" ]; then
+                    _legacy_other_tracked="could-not-tell"
+                    break
+                fi
+                [ "$_legacy_walk" = "/" ] && break
+                _legacy_walk="${_legacy_walk%/*}"
+                [ -z "$_legacy_walk" ] && _legacy_walk="/"
+            done
+            unset _legacy_walk
+        fi
+        unset _legacy_ls_list _legacy_ls_line _legacy_repo_check _legacy_repo_rc _legacy_ls_rc _legacy_was_nocasematch _legacy_ci_match
+
+        if [ "$_legacy_other_tracked" != "clean" ]; then
+            _remember_legacy_migration_refused="1"
+            printf 'remember: %s contains git-tracked content beyond config.json (%s) -- refusing to migrate it into the external memory store, which would launder repository-committed content into a location the injection guard trusts unconditionally (#782). Left in place, untouched; move your own files out of it by hand, or `git rm --cached` whatever the repository should not have committed, then start a new session to retry.\n' \
+                "$_legacy_dir" "$_legacy_other_tracked" >&2
+        fi
+    fi
+    if [ "$_migrating_user_config_home" = false ] && [ "${_legacy_other_tracked:-clean}" = "clean" ]; then
         # #757: lib-memory-dir.sh trusts ${REMEMBER_DIR}/config.json outright
         # once REMEMBER_DIR is external (~293-300) -- that is right for a
         # config an OPERATOR wrote, but a legacy .remember/config.json a
@@ -185,7 +313,7 @@ if [ "$REMEMBER_DIR" != "$_legacy_dir" ] && [ ! -L "$_legacy_dir" ] && [ -d "$_l
         # exactly the failure case this exists to protect.
         unset _legacy_cfg _legacy_cfg_holdout
     fi
-    unset _migrating_user_config_home
+    unset _migrating_user_config_home _legacy_other_tracked
 elif [ "$REMEMBER_DIR" != "$_legacy_dir" ] && [ -L "$_legacy_dir" ] && [ ! -e "$REMEMBER_DIR" ]; then
     # The legacy .remember DIRECTORY itself is a symlink -- never
     # migrated, left exactly where it is, logged loudly rather than
@@ -201,13 +329,22 @@ unset _legacy_dir
 # pays it — PostToolUse on every single tool call. The deepest path implies its
 # parents, so two tests settle all three, and a partially-removed tree still
 # falls through to the unchanged mkdir.
-if [ ! -d "$REMEMBER_DIR/logs/autonomous" ] || [ ! -d "$REMEMBER_DIR/tmp" ]; then
+#
+# ALSO gated on the #782 migration refusal above never having fired this
+# session (self-review finding): this `mkdir -p` runs on every session
+# regardless of migration outcome, so an unguarded version of it would
+# create REMEMBER_DIR as an empty scaffold immediately after a refused
+# migration -- permanently satisfying the migration guard's own
+# `[ ! -e "$REMEMBER_DIR" ]` and silently defeating the "start a new
+# session to retry" instruction the refusal message itself just printed.
+if [ -z "$_remember_legacy_migration_refused" ] && { [ ! -d "$REMEMBER_DIR/logs/autonomous" ] || [ ! -d "$REMEMBER_DIR/tmp" ]; }; then
     mkdir -p \
         "$REMEMBER_DIR/tmp" \
         "$REMEMBER_DIR/logs" \
         "$REMEMBER_DIR/logs/autonomous" \
         2>/dev/null
 fi
+unset _remember_legacy_migration_refused
 
 # --- Relocate the per-invocation merged config out of the shared OS temp
 # root, and sweep what a killed process left behind (#362) ---
