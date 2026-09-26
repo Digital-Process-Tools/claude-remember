@@ -320,3 +320,36 @@ class TestNdcTolerantOfShortPreamble:
         assert "compressed summary" not in written, (
             f"a long preamble reached today-*.md: {written!r}"
         )
+
+    def test_refusal_with_header_shaped_line_keeps_its_full_text(self, tmp_path):
+        """A genuine refusal can itself mention a "## " line (a model
+        describing the expected format while declining to produce it). The
+        header-search must not run at all once the model's own verdict is
+        already SKIP/REJECTED -- otherwise the destructive strip would
+        corrupt the diagnostic copy keep_rejected_text exists to preserve,
+        discarding exactly the preamble that explains why it was rejected."""
+        env, project, plugin, calls, sid = _ndc_env(tmp_path)
+        refusal = (
+            "I cannot compress this conversation.\n"
+            "The expected format would look like:\n"
+            "## example-header-i-am-not-producing\n"
+        )
+        env["STUB_NDC_TEXT"] = refusal
+        env["STUB_NDC_REJECTED"] = "1"
+
+        result = _run(plugin, env, sid)
+        assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")
+        _wait_for_calls_to_settle(calls)
+
+        parked = list((project / ".remember" / "tmp").glob("rejected-*.md"))
+        assert parked, "no rejected-text diagnostic file was parked at all"
+        parked_text = parked[0].read_text()
+        assert "I cannot compress this conversation" in parked_text, (
+            f"the refusal preamble was stripped out of the parked diagnostic "
+            f"copy, even though this reply was already a known REJECTED verdict: {parked_text!r}"
+        )
+
+        logs = "".join(p.read_text() for p in (project / ".remember" / "logs").glob("*.log"))
+        assert "I cannot compress this conversation" in logs, (
+            f"the REJECTED log line no longer shows the actual refusal text: {logs}"
+        )
