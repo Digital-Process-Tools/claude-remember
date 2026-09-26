@@ -1092,13 +1092,17 @@ def _isolated_summarizer_cwd():
         shutil.rmtree(d, ignore_errors=True)
 
 
-# Minimal environment for the nested `codex exec` (#724, F9/F10). Unlike the
-# Claude route, Codex's `--sandbox read-only` still executes whatever
-# commands the model issues (see _build_codex_cmd's docstring below), so
-# stripping a deny-list off an otherwise-full os.environ (what _child_env()
-# does) is not enough -- a command like `env`/`printenv` reads the child's
-# environment directly. This keeps only what the CLI itself needs to run
-# and resolve its own filesystem-based auth.
+# Minimal environment for the nested `codex exec` PROCESS ITSELF (#724,
+# F9/F10) -- NOT for a command that process spawns; that is a SEPARATE
+# mechanism, `-c shell_environment_policy.inherit=none` in
+# `_build_codex_cmd` (#798). Unlike the Claude route, Codex's
+# `--sandbox read-only` still executes whatever commands the model issues
+# (see _build_codex_cmd's docstring below), so stripping a deny-list off an
+# otherwise-full os.environ (what _child_env() does) is not enough -- a
+# command like `env`/`printenv` reads the child's environment directly.
+# This keeps only what the CLI itself needs to run and resolve its own
+# filesystem-based auth; #798's shell_environment_policy override is what
+# keeps a command spawned BY that CLI from seeing this same dict.
 #
 # #751 (release-audit, reasoned not observed): the original list was
 # PATH/HOME/LANG/LC_ALL/CODEX_HOME/TMPDIR/TEMP/TMP only -- no Windows entry,
@@ -1193,10 +1197,33 @@ def _build_codex_cmd(output_file: str, cwd: str) -> list[str]:
     execution. Codex's read-only sandbox still runs whatever commands the
     model issues; this is NOT the tool-less guarantee the comment here used
     to claim (mirroring the Claude path's default empty ``--allowedTools``,
-    itself incomplete for the same reason -- see #724, F8/F9). What actually
-    bounds the blast radius of a command run here is the allow-listed
-    environment (`_codex_child_env`) and the fresh, empty `cwd` this call is
-    given (`_isolated_summarizer_cwd`, #724).
+    itself incomplete for the same reason -- see #724, F8/F9). Two SEPARATE
+    mechanisms bound the blast radius of a command run here, for two
+    SEPARATE audiences:
+      * `_codex_child_env` -- the ``env=`` kwarg passed to `subprocess.run`
+        -- is what CODEX'S OWN PROCESS receives from this host (its CLI
+        needs PATH/HOME to run at all, plus CODEX_API_KEY/proxy/CA vars to
+        authenticate and reach the network, #751).
+      * the ``-c shell_environment_policy.inherit=none`` override below is
+        what a COMMAND CODEX SPAWNS internally receives. These are not the
+        same environment: Codex does not hand a spawned command its own
+        process env by default just because that is what this host gave
+        it. Before #798, nothing here set this policy at all, so a
+        transcript-injected instruction that got the model to run a shell
+        command inside this sandbox could read CODEX_API_KEY and the proxy
+        vars directly out of that command's environment -- exactly the class
+        of secret #751 had just finished making Codex's OWN process able to
+        see. `_codex_child_env`'s allow-list stays necessary (Codex's own
+        auth/proxy needs do not go away); it was never sufficient for this.
+        Confirmed against codex-cli 0.153.2's own ``--help`` and the
+        official Codex manual (fetched 2026-09-26): `shell_environment_policy`
+        is a real, documented dotted-path config key, and ``-c`` overrides
+        apply regardless of whether ``config.toml`` is loaded -- relevant
+        since this call also passes ``--ignore-user-config``.
+    the fresh, empty `cwd` this call is given (`_isolated_summarizer_cwd`,
+    #724) narrows what such a command could even find to act on, but does
+    not touch what it can read from its own environment -- that is this
+    policy's job, not the cwd's.
     ``--skip-git-repo-check``: cwd is a temp dir, never a git repo.
     ``--ephemeral``: no session file persisted for a one-shot summarizer call.
     ``--ignore-user-config``: Codex's own equivalent of the Claude path's
@@ -1218,6 +1245,7 @@ def _build_codex_cmd(output_file: str, cwd: str) -> list[str]:
         "--skip-git-repo-check",
         "--ephemeral",
         "--ignore-user-config",
+        "-c", "shell_environment_policy.inherit=none",
         "-C", cwd,
         "-o", output_file,
         "-",
