@@ -166,7 +166,18 @@ def test_remember_date_into_matches_remember_date_with_tz():
     result = subprocess.run([BASH, "-c", script], capture_output=True, text=True, timeout=10, check=False)
     assert result.returncode == 0, result.stderr
     lines = {l.split("=", 1)[0]: l.split("=", 1)[1] for l in result.stdout.splitlines()}
-    assert lines["OLD"] == lines["NEW"], lines
+    # Same minute-boundary race as the builtin-path sibling above (#794): the
+    # two reads happen back to back, but a crossing between them is the one
+    # legitimate way OLD and NEW can differ without a bug. Retry once rather
+    # than asserting `... or True`, which would never fail in the first
+    # place: re-running immediately makes a boundary-crossing false pass
+    # implausible, since both calls happen back to back and a real bug would
+    # reproduce on the second run too.
+    if lines["OLD"] != lines["NEW"]:
+        result2 = subprocess.run([BASH, "-c", script], capture_output=True, text=True, timeout=10, check=False)
+        assert result2.returncode == 0, result2.stderr
+        lines2 = {l.split("=", 1)[0]: l.split("=", 1)[1] for l in result2.stdout.splitlines()}
+        assert lines2["OLD"] == lines2["NEW"], (lines, lines2)
 
 
 # ── The two subshells #511 removes must actually be gone from the source ───
