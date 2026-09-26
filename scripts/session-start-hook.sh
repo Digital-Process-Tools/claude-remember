@@ -1491,7 +1491,15 @@ if [ "$_promos_enabled" = "true" ] \
         local -a installed_keys=()
         if [ -f "$installed_file" ]; then
             local _iprobe
-            _iprobe=$($JQ -r 'if (.version // empty) == "2" then (["#ok"] + ((.plugins // {}) | to_entries | map(.key))) | .[] else empty end' "$installed_file" 2>/dev/null)
+            # #762: `to_entries` does not error on a non-object `.plugins`
+            # the way the old per-candidate `.plugins[$k]` query did (jq exit
+            # 5 on an array), so a bare `to_entries` here would read a real
+            # installed_key as absent and fire the promo -- exactly backwards
+            # from the cannot-tell-suppresses decision above. Guard the shape
+            # explicitly: only an object reaches to_entries; anything else
+            # (array, string, number, null, missing) falls to `empty`, same
+            # as the old query's caught error.
+            _iprobe=$($JQ -r 'if (.version // empty) == "2" and (((.plugins // {}) | type) == "object") then (["#ok"] + ((.plugins // {}) | to_entries | map(.key))) | .[] else empty end' "$installed_file" 2>/dev/null)
             if [ -n "$_iprobe" ]; then
                 local _iline _ifirst=1
                 while IFS= read -r _iline; do

@@ -323,7 +323,7 @@ _classify_project_cfg_haiku_trust
 # --error-unmatch` run, to ask about the file itself; ITS exit status (0 /
 # 1 / anything else) is what separates the three states from there.
 _remember_config_tracked_status() {
-    local _dir="$1" _name="$2" _out _rc
+    local _dir="$1" _name="$2" _out _rc _toplevel
 
     if ! command -v git >/dev/null 2>&1; then
         # #766: "no git binary" used to fall straight through to
@@ -374,6 +374,26 @@ _remember_config_tracked_status() {
         # A real repository, but $_dir itself is not inside its work tree
         # (a bare repo) -- nothing to check either.
         echo "untracked"
+        return 0
+    fi
+
+    # #761: everything above resolved `.git` the ORDINARY way -- following
+    # wherever it points, with no check on what it actually is. A `.git`
+    # SYMLINK is not a shape either a normal checkout (`.git` a directory)
+    # or a linked worktree (`.git` a plain FILE holding a `gitdir:`
+    # pointer -- see _resolve_memory_project_dir above) ever produces, so
+    # one found here is only ever a pre-planted swap pointing this whole
+    # tracked-check at an UNRELATED repository's own, independent objects
+    # and index. Answering "untracked" against that repository would be
+    # answering the wrong question entirely -- fail CLOSED here exactly
+    # like every other ambiguous case in this function (could-not-tell ==
+    # tracked for every caller). A linked worktree's `.git` FILE is left
+    # untouched: that shape is already trusted elsewhere in this codebase
+    # (#56) and is not what this check is guarding against.
+    _toplevel=$( (unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+                  git -C "$_dir" rev-parse --show-toplevel) 2>/dev/null )
+    if [ -n "$_toplevel" ] && [ -L "${_toplevel}/.git" ]; then
+        echo "could-not-tell"
         return 0
     fi
 
