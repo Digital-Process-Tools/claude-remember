@@ -890,13 +890,15 @@ _remember_write_case_divergence() {
 #      lines, not a check that the matching line is a bookkeeping record --
 #      ordinary conversation content (a pasted JSON snippet, a tool result
 #      quoting this very file) could in principle carry the literal text
-#      `"entrypoint":"sdk-...` and be misread as a bookkeeping line. Lines
-#      that carry a `"message"` field are real dialogue in every fixture and
-#      real transcript examined for #745 and are skipped outright below,
-#      which closes the concrete case self-review raised (a session whose
-#      own transcript discusses this issue's test fixtures) without a real
-#      JSON parse -- a residual false match confined to bookkeeping-shaped,
-#      non-dialogue content is not eliminated.
+#      `"entrypoint":"sdk-...` and be misread as a bookkeeping line. A line
+#      whose "message" field is the nested {role, content} OBJECT real
+#      dialogue always uses is skipped outright below (#803: a bookkeeping
+#      record's own "message" field, when present, is instead a plain
+#      string, discriminated from the object shape rather than assumed
+#      absent) -- which closes the concrete case self-review raised (a
+#      session whose own transcript discusses this issue's test fixtures)
+#      without a real JSON parse -- a residual false match confined to
+#      bookkeeping-shaped, non-dialogue content is not eliminated.
 # The field also carries no documented stability contract; absence, or a
 # shape this cannot parse, falls through to "not sdk" -- the safe direction,
 # since keeping a transcript in contention risks at most the false notice
@@ -908,9 +910,10 @@ _remember_write_case_divergence() {
 # not-sdk rather than scanned to the end.
 _ENTRYPOINT_SNIFF_CAP=50
 _transcript_is_pluginless_sdk() {
-    local f=$1 n=0 line ep msg
+    local f=$1 n=0 line ep msg is_dialogue
     while IFS= read -r line; do
         n=$((n + 1))
+        is_dialogue=0
         case "$line" in
             *'"message"'*)
                 # #803: real dialogue's own "message" field is always the
@@ -921,24 +924,43 @@ _transcript_is_pluginless_sdk() {
                 # the object shape and succeeds on the string shape -- the
                 # discriminator, reusing the helper already in this file
                 # rather than a new JSON parser. Only the object shape (real
-                # dialogue) is skipped outright; a string-shaped "message"
-                # falls through to the entrypoint check below like any other
+                # dialogue) is skipped; a string-shaped "message" falls
+                # through to the entrypoint check below like any other
                 # bookkeeping line, so it can no longer mask an "entrypoint"
                 # field on the same line the way a bare substring skip did.
+                # Skipping via `is_dialogue` (an `if`, not a `continue`) --
+                # self-review caught that a `continue` here would jump past
+                # the CAP check below on every dialogue line, silently
+                # defeating _ENTRYPOINT_SNIFF_CAP for the overwhelmingly
+                # common case (ordinary transcripts are mostly dialogue).
                 if ! msg=$(_stdin_json_string message "$line" 2>/dev/null); then
-                    continue
+                    # _stdin_json_string also fails on a genuinely
+                    # EMPTY string value (its own `[ -n "$value" ]` guard),
+                    # which is indistinguishable by return code alone from
+                    # the object shape this branch means to catch (auditor
+                    # finding, self-review round). An empty status string on
+                    # a bookkeeping record is not dialogue either, so it
+                    # must not be collapsed into the same skip -- checked
+                    # directly here rather than by relaxing the shared
+                    # helper's own non-empty contract for every other caller.
+                    case "$line" in
+                        *'"message":""'*|*'"message": ""'*) ;;
+                        *) is_dialogue=1 ;;
+                    esac
                 fi
                 ;;
         esac
-        case "$line" in
-            *'"entrypoint"'*)
-                ep=$(_stdin_json_string entrypoint "$line" 2>/dev/null) || return 1
-                case "$ep" in
-                    sdk-*) return 0 ;;
-                    *) return 1 ;;
-                esac
-                ;;
-        esac
+        if [ "$is_dialogue" -eq 0 ]; then
+            case "$line" in
+                *'"entrypoint"'*)
+                    ep=$(_stdin_json_string entrypoint "$line" 2>/dev/null) || return 1
+                    case "$ep" in
+                        sdk-*) return 0 ;;
+                        *) return 1 ;;
+                    esac
+                    ;;
+            esac
+        fi
         [ "$n" -ge "$_ENTRYPOINT_SNIFF_CAP" ] && return 1
     done < "$f" 2>/dev/null
     return 1

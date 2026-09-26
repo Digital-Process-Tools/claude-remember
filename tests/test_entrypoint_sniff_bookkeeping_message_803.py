@@ -111,3 +111,79 @@ def test_real_dialogue_object_message_is_still_skipped(tmp_path):
         "a real dialogue line (object-shaped \"message\") must still be skipped "
         f"even when it mentions the entrypoint substring in its own text, got exit {exit_code!r}"
     )
+
+
+def test_empty_string_message_does_not_mask_entrypoint(tmp_path):
+    """Must-fire case, sibling of the string-message case above: an empty-string
+    "message" field (`"message":""`) is still a STRING, not the {role, content}
+    OBJECT real dialogue uses -- but _stdin_json_string's own non-empty-value
+    guard fails identically on both shapes, so the naive fix (auditor finding,
+    self-review round) would collapse "object" and "empty string" into the same
+    skip. An entrypoint on the same line as an empty "message" string must still
+    be detected."""
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text(
+        '{"type":"queue-operation","message":"","entrypoint":"sdk-py"}\n'
+    )
+    exit_code = _run_sniff(transcript)
+    assert exit_code == "0", (
+        "an empty-string bookkeeping \"message\" field must not mask the "
+        f"\"entrypoint\" field on the same line, got exit {exit_code!r}"
+    )
+
+
+# The real file's own _ENTRYPOINT_SNIFF_CAP, duplicated here (not imported --
+# it lives in shell, not Python) because the two cap-enforcement tests below
+# need it to build a fixture on either side of the boundary. If the shipped
+# value ever changes, SNIFF_SCRIPT's own hardcoded 50 (which the real function
+# body never sees, since _function_body only extracts the function itself)
+# must change with it, so this constant and that literal must always agree.
+_CAP = 50
+
+
+def _dialogue_line(i: int) -> str:
+    """An ordinary object-shaped-"message" dialogue line, indistinguishable
+    from real content, carrying no "entrypoint" field of its own."""
+    return (
+        '{"type":"assistant","message":{"role":"assistant","content":'
+        f'[{{"type":"text","text":"dialogue line {i}"}}]}}}}\n'
+    )
+
+
+def test_cap_still_enforced_past_dialogue_lines(tmp_path):
+    """Regression test for the cap-bypass finding (self-review round): the fix's
+    skip-branch for real dialogue must fall through to the CAP check on every
+    iteration, not `continue` past it. Built as a paired must-fire/must-not-fire
+    case sharing one fixture shape: an sdk- entrypoint sitting AFTER the cap,
+    behind a wall of ordinary dialogue lines, must NOT be found (the scan must
+    still stop at the cap) -- if a `continue` were bypassing the cap check, this
+    line would incorrectly be found instead."""
+    transcript = tmp_path / "session.jsonl"
+    lines = [_dialogue_line(i) for i in range(_CAP + 4)]
+    lines[_CAP + 3] = (
+        '{"type":"queue-operation","message":"waiting","entrypoint":"sdk-py"}\n'
+    )
+    transcript.write_text("".join(lines))
+    exit_code = _run_sniff(transcript)
+    assert exit_code == "1", (
+        "an sdk- entrypoint past the scan cap, behind a wall of dialogue lines, "
+        f"must not be found -- the cap must still stop the scan, got exit {exit_code!r}"
+    )
+
+
+def test_entrypoint_within_cap_past_dialogue_lines_is_still_found(tmp_path):
+    """Positive control, paired with the case above: the identical entrypoint
+    line, moved to WITHIN the cap (still behind a wall of dialogue lines), must
+    still be found -- proving the cap test above fails because of the cap, not
+    because dialogue lines break detection generally."""
+    transcript = tmp_path / "session.jsonl"
+    lines = [_dialogue_line(i) for i in range(_CAP - 5)]
+    lines.append(
+        '{"type":"queue-operation","message":"waiting","entrypoint":"sdk-py"}\n'
+    )
+    transcript.write_text("".join(lines))
+    exit_code = _run_sniff(transcript)
+    assert exit_code == "0", (
+        "an sdk- entrypoint within the scan cap, behind a wall of dialogue "
+        f"lines, must still be found, got exit {exit_code!r}"
+    )
