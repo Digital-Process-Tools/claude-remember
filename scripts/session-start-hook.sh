@@ -908,11 +908,29 @@ _remember_write_case_divergence() {
 # not-sdk rather than scanned to the end.
 _ENTRYPOINT_SNIFF_CAP=50
 _transcript_is_pluginless_sdk() {
-    local f=$1 n=0 line ep
+    local f=$1 n=0 line ep msg
     while IFS= read -r line; do
         n=$((n + 1))
         case "$line" in
-            *'"message"'*) ;;  # real dialogue, never a bookkeeping record
+            *'"message"'*)
+                # #803: real dialogue's own "message" field is always the
+                # nested {role, content} OBJECT; a bookkeeping record's
+                # "message" field (an error/status STRING on, say, a
+                # queue-operation record) is not. _stdin_json_string only
+                # succeeds when the value opens with a quote, so it fails on
+                # the object shape and succeeds on the string shape -- the
+                # discriminator, reusing the helper already in this file
+                # rather than a new JSON parser. Only the object shape (real
+                # dialogue) is skipped outright; a string-shaped "message"
+                # falls through to the entrypoint check below like any other
+                # bookkeeping line, so it can no longer mask an "entrypoint"
+                # field on the same line the way a bare substring skip did.
+                if ! msg=$(_stdin_json_string message "$line" 2>/dev/null); then
+                    continue
+                fi
+                ;;
+        esac
+        case "$line" in
             *'"entrypoint"'*)
                 ep=$(_stdin_json_string entrypoint "$line" 2>/dev/null) || return 1
                 case "$ep" in
