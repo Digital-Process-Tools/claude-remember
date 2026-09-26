@@ -910,7 +910,7 @@ _remember_write_case_divergence() {
 # not-sdk rather than scanned to the end.
 _ENTRYPOINT_SNIFF_CAP=50
 _transcript_is_pluginless_sdk() {
-    local f=$1 n=0 line ep msg is_dialogue
+    local f=$1 n=0 line ep rest prefix is_dialogue
     while IFS= read -r line; do
         n=$((n + 1))
         is_dialogue=0
@@ -918,36 +918,31 @@ _transcript_is_pluginless_sdk() {
             *'"message"'*)
                 # #803: real dialogue's own "message" field is always the
                 # nested {role, content} OBJECT; a bookkeeping record's
-                # "message" field (an error/status STRING on, say, a
-                # queue-operation record) is not. _stdin_json_string only
-                # succeeds when the value opens with a quote, so it fails on
-                # the object shape and succeeds on the string shape -- the
-                # discriminator, reusing the helper already in this file
-                # rather than a new JSON parser. Only the object shape (real
-                # dialogue) is skipped; a string-shaped "message" falls
-                # through to the entrypoint check below like any other
-                # bookkeeping line, so it can no longer mask an "entrypoint"
-                # field on the same line the way a bare substring skip did.
-                # Skipping via `is_dialogue` (an `if`, not a `continue`) --
-                # self-review caught that a `continue` here would jump past
-                # the CAP check below on every dialogue line, silently
-                # defeating _ENTRYPOINT_SNIFF_CAP for the overwhelmingly
-                # common case (ordinary transcripts are mostly dialogue).
-                if ! msg=$(_stdin_json_string message "$line" 2>/dev/null); then
-                    # _stdin_json_string also fails on a genuinely
-                    # EMPTY string value (its own `[ -n "$value" ]` guard),
-                    # which is indistinguishable by return code alone from
-                    # the object shape this branch means to catch (auditor
-                    # finding, self-review round). An empty status string on
-                    # a bookkeeping record is not dialogue either, so it
-                    # must not be collapsed into the same skip -- checked
-                    # directly here rather than by relaxing the shared
-                    # helper's own non-empty contract for every other caller.
-                    case "$line" in
-                        *'"message":""'*|*'"message": ""'*) ;;
-                        *) is_dialogue=1 ;;
-                    esac
-                fi
+                # "message" field (an error/status STRING, possibly empty,
+                # on say a queue-operation record) is not. Checked directly
+                # by shape rather than by reusing _stdin_json_string (its
+                # own `[ -n "$value" ]` non-empty guard cannot tell an empty
+                # STRING apart from an OBJECT by return code alone --
+                # auditor finding, self-review round): everything between
+                # the "message" key and the first `"` after it must be only
+                # colon and whitespace for the value to be quote-opened
+                # (string-shaped, any length, any whitespace width); any
+                # other character there (a `{`, most plainly) means the
+                # value is an object, and only that shape is real dialogue.
+                # A string-shaped "message" falls through to the entrypoint
+                # check below like any other bookkeeping line, so it can no
+                # longer mask an "entrypoint" field on the same line the way
+                # a bare substring skip did. Skipping via `is_dialogue` (an
+                # `if`, not a `continue`) -- self-review caught that a
+                # `continue` here would jump past the CAP check below on
+                # every dialogue line, silently defeating
+                # _ENTRYPOINT_SNIFF_CAP for the overwhelmingly common case
+                # (ordinary transcripts are mostly dialogue).
+                rest=${line#*\"message\"}
+                prefix=${rest%%\"*}
+                case "$prefix" in
+                    *[!:[:space:]]*) is_dialogue=1 ;;
+                esac
                 ;;
         esac
         if [ "$is_dialogue" -eq 0 ]; then

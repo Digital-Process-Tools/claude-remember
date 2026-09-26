@@ -132,6 +132,24 @@ def test_empty_string_message_does_not_mask_entrypoint(tmp_path):
     )
 
 
+def test_extra_whitespace_after_message_colon_does_not_mask_entrypoint(tmp_path):
+    """Must-fire case, sibling of the two cases above: the shape check must not
+    be a fixed-width literal match on zero or one space after the colon (round-2
+    self-review finding -- a first attempt at the empty-string fix matched only
+    `"message":""` and `"message": ""` literally, so two spaces, a tab, or any
+    other width fell through to the object-shaped branch and re-masked the
+    entrypoint). Two spaces here is an arbitrary width past that fixed set."""
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text(
+        '{"type":"queue-operation","message":  "","entrypoint":"sdk-py"}\n'
+    )
+    exit_code = _run_sniff(transcript)
+    assert exit_code == "0", (
+        "a bookkeeping \"message\" string with unusual colon-value whitespace "
+        f"must not mask the \"entrypoint\" field on the same line, got exit {exit_code!r}"
+    )
+
+
 # The real file's own _ENTRYPOINT_SNIFF_CAP, duplicated here (not imported --
 # it lives in shell, not Python) because the two cap-enforcement tests below
 # need it to build a fixture on either side of the boundary. If the shipped
