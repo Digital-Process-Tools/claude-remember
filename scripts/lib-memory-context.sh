@@ -998,6 +998,15 @@ _remember_render_memory_section() {
             done
         fi
         if [ -n "$_remember_newest_refused" ]; then
+            # A blank line before this header, always -- self-review finding
+            # (#805): without it, this header ran straight into either the
+            # accepted-slices header above (when every slice was refused) or
+            # the last accepted path's own line (when some were), unlike
+            # every other header transition in this same function, which
+            # always separates sections with one blank line (the main
+            # memory-file loop's per-file `echo ""` and its own REFUSED_MEMORY
+            # header; the compact-mode deferred loop's equivalent).
+            echo ""
             # A THIRD header, distinct from both of #790's own two ("---
             # refused (not injected) ---" and "--- refused, would have been
             # listed as deferred (not injected) ---") -- reusing either
