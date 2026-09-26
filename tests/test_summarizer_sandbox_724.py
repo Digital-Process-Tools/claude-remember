@@ -140,6 +140,139 @@ def test_codex_child_env_keeps_what_the_cli_needs(monkeypatch):
     assert env.get("HOME") == "/home/example"
 
 
+# ── #751: the allow-list must not drop Windows or credential/proxy vars ────
+
+
+def test_codex_child_env_keeps_windows_process_vars(monkeypatch):
+    """Reasoned in #751, checked here without needing an actual Windows
+    runner: SYSTEMROOT/USERPROFILE/APPDATA/PATHEXT must pass through when
+    they are set, whatever the host platform actually is -- the allow-list
+    itself carries no platform branch to get wrong."""
+    monkeypatch.setenv("SYSTEMROOT", "C:_SEP_Windows".replace("_SEP_", chr(92)))
+    monkeypatch.setenv("USERPROFILE", "C:_SEP_Users_SEP_example".replace("_SEP_", chr(92)))
+    monkeypatch.setenv("APPDATA", "C:_SEP_Users_SEP_example_SEP_AppData_SEP_Roaming".replace("_SEP_", chr(92)))
+    monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT")
+    env = _codex_child_env()
+    assert env.get("SYSTEMROOT") == os.environ["SYSTEMROOT"]
+    assert env.get("USERPROFILE") == os.environ["USERPROFILE"]
+    assert env.get("APPDATA") == os.environ["APPDATA"]
+    assert env.get("PATHEXT") == ".COM;.EXE;.BAT"
+
+
+def test_codex_child_env_keeps_the_codex_api_key(monkeypatch):
+    """#751: dropping CODEX_API_KEY breaks anyone who authenticates Codex
+    via env var rather than a filesystem auth.json."""
+    monkeypatch.setenv("CODEX_API_KEY", "sk-codex-example")
+    env = _codex_child_env()
+    assert env.get("CODEX_API_KEY") == "sk-codex-example"
+
+
+def _env_value_ci(env: dict, name: str):
+    """Case-insensitive lookup into the plain dict `_codex_child_env()`
+    returns (#792). CPython's `os.environ` on Windows folds every key to
+    ONE case internally (`os.py`'s `_Environ` uses `str.upper` as both
+    `encodekey` and `decodekey` on `nt`), so `os.environ.items()` there
+    only ever yields uppercase keys, regardless of which case a caller
+    used to set the variable -- confirmed by reading `os.py`'s own
+    `_Environ.__setitem__`/`__iter__`, not merely asserted. A test that
+    sets both `HTTPS_PROXY` and `https_proxy` in the SAME run and then
+    asserts on the plain dict `_codex_child_env()` built from
+    `os.environ.items()` collapses to one real variable there, and the
+    OTHER case's literal key is simply absent from the result -- not a
+    production bug (the value still reaches the child correctly, under
+    whichever case Windows folded it to, and Windows' own environment
+    block is itself case-insensitive), but a test written against
+    POSIX's case-preserving `os.environ` failing on Windows for a reason
+    that has nothing to do with the allow-list itself. Checking
+    case-insensitively here is what makes the assertion platform-
+    independent instead of platform-lucky."""
+    name_upper = name.upper()
+    for k, v in env.items():
+        if k.upper() == name_upper:
+            return v
+    return None
+
+
+def test_codex_child_env_keeps_proxy_and_ca_vars(monkeypatch):
+    """#751: dropping these breaks anyone behind a proxy or a custom CA
+    bundle, on every platform. Uses one case per variable here -- the
+    OTHER case is exercised by
+    test_codex_child_env_keeps_lowercase_proxy_vars_too below, kept in a
+    SEPARATE test so the two cases of the same variable are never set in
+    the same run (#792: they are not independently observable on
+    Windows, where os.environ folds casing)."""
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:8080")
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.example:8080")
+    monkeypatch.setenv("NO_PROXY", "localhost")
+    monkeypatch.setenv("SSL_CERT_FILE", "/etc/ssl/custom-ca.pem")
+    monkeypatch.setenv("NODE_EXTRA_CA_CERTS", "/etc/ssl/custom-ca.pem")
+    env = _codex_child_env()
+    assert _env_value_ci(env, "HTTPS_PROXY") == "http://proxy.example:8080"
+    assert _env_value_ci(env, "HTTP_PROXY") == "http://proxy.example:8080"
+    assert _env_value_ci(env, "NO_PROXY") == "localhost"
+    assert env.get("SSL_CERT_FILE") == "/etc/ssl/custom-ca.pem"
+    assert env.get("NODE_EXTRA_CA_CERTS") == "/etc/ssl/custom-ca.pem"
+
+
+def test_codex_child_env_keeps_lowercase_proxy_vars_too(monkeypatch):
+    """#751: some HTTP client libraries only ever check the lowercase
+    form. Sets ONLY the lowercase form -- never alongside the uppercase
+    one in the same test (#792, see _env_value_ci's own docstring) -- so
+    this proves the lowercase allow-list entries actually do something,
+    without depending on a coexistence Windows cannot produce."""
+    monkeypatch.setenv("https_proxy", "http://proxy.example:9090")
+    monkeypatch.setenv("http_proxy", "http://proxy.example:9090")
+    monkeypatch.setenv("no_proxy", "localhost")
+    env = _codex_child_env()
+    assert _env_value_ci(env, "https_proxy") == "http://proxy.example:9090"
+    assert _env_value_ci(env, "http_proxy") == "http://proxy.example:9090"
+    assert _env_value_ci(env, "no_proxy") == "localhost"
+
+
+def test_codex_child_env_matches_a_windows_style_folded_environ(monkeypatch):
+    """#792, exercised directly rather than only inferred from CI: real
+    Windows `os.environ` folds EVERY key to uppercase at process-startup
+    time -- confirmed by reading CPython's own `os.py` (`_createenviron`'s
+    `nt` branch sets `encodekey = key.upper()` and applies it while
+    building the initial `data` dict from the inherited environment, not
+    only when Python itself calls `__setitem__`) -- so
+    `os.environ.items()` there NEVER yields a key in the exact case a
+    user originally set a variable under, only ever uppercase. Simulated
+    here by replacing `pipeline.haiku.os.environ` outright with a plain
+    dict whose only key is already uppercase, which is exactly the shape
+    a real Windows process would hand to `_codex_child_env()` regardless
+    of which case the underlying variable was actually set under.
+
+    NOTE on what this test does and does not pin: because the allow-list
+    itself already carries the canonical UPPERCASE name for every
+    variable, a Windows-folded key matches it whether the comparison is
+    case-sensitive or case-insensitive -- this test passes either way, and
+    is not what distinguishes the two (that is
+    test_codex_child_env_keeps_lowercase_proxy_vars_too above, which only
+    makes sense on a case-preserving platform and is genuinely red without
+    the #792 fix). What this test guards against is a DIFFERENT, later
+    regression: code that reads `_codex_child_env()`'s OUTPUT expecting a
+    specific-cased key (the exact mistake the original #751 test made,
+    which is how #792 was found in the first place) would break silently
+    against a real Windows environ shaped like this one."""
+    fake_windows_environ = {"HTTPS_PROXY": "http://proxy.example:7070"}
+    monkeypatch.setattr("pipeline.haiku.os.environ", fake_windows_environ)
+    env = _codex_child_env()
+    assert _env_value_ci(env, "https_proxy") == "http://proxy.example:7070"
+    assert _env_value_ci(env, "HTTPS_PROXY") == "http://proxy.example:7070"
+
+
+def test_codex_child_env_still_excludes_unrelated_secrets_after_widening(monkeypatch):
+    """Negative assertion's own positive control, restated after the
+    widening: an unrelated secret must still not reach the child even now
+    that the allow-list has grown."""
+    monkeypatch.setenv("SOME_UNRELATED_TOKEN", "sk-super-secret")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-example")
+    env = _codex_child_env()
+    assert "SOME_UNRELATED_TOKEN" not in env
+    assert "ANTHROPIC_API_KEY" not in env
+
+
 @patch("pipeline.haiku.subprocess.run")
 def test_call_codex_uses_the_allowlisted_env(mock_run, monkeypatch):
     monkeypatch.setenv("SOME_UNRELATED_TOKEN", "sk-super-secret")

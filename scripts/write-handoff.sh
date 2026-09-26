@@ -27,7 +27,13 @@
 #      project root itself (#743). This prefers `git rev-parse
 #      --show-toplevel` when the cwd is inside a git repo -- the common
 #      case, and immune to an earlier `cd` -- falling back to the plain
-#      $PWD default only outside a git repo, same as before.
+#      $PWD default only outside a git repo, same as before. #776: that
+#      preference is wrong for a project deliberately started from a repo
+#      SUBDIRECTORY (a supported shape), so when $PWD and the toplevel
+#      disagree AND this session's own id is known, this checks which
+#      candidate's own store already carries THIS session's session-keyed
+#      handoff hint (#738) and prefers that one -- falling back to the
+#      toplevel, unchanged, when neither or both do.
 #   2. If the SessionStart hook this session left a resolved path at
 #      $REMEMBER_DIR/tmp/handoff-path (written every session start, #720),
 #      and that path's shape passes the check below, use it -- this is what
@@ -71,11 +77,72 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Session id, sanitized at the point of entry -- moved ahead of the
+# CLAUDE_PROJECT_DIR resolution below (#776) because that resolution now
+# needs it too. Unchanged from its pre-#776 position otherwise: see the
+# #738/#720 comment further down, next to where this is actually USED for
+# the session-keyed hint file.
+_WH_SESSION_ID="${CLAUDE_CODE_SESSION_ID:-}"
+case "$_WH_SESSION_ID" in
+    ''|.|..|*[!A-Za-z0-9._-]*) _WH_SESSION_ID="" ;;
+esac
+
+# _wh_trial_remember_dir <candidate-project-dir>
+# Prints the REMEMBER_DIR that candidate would resolve to, by running the
+# SAME resolve-paths.sh + lib-memory-dir.sh chain the real resolution below
+# uses, in a subshell -- so it can be tried twice (#776) with neither trial
+# able to leak an export, a cd, or a set -e/-u state change into this
+# script's own environment. Prints nothing and exits nonzero if the chain
+# itself fails for that candidate.
+_wh_trial_remember_dir() {
+    (
+        CLAUDE_PROJECT_DIR="$1"
+        export CLAUDE_PROJECT_DIR
+        REMEMBER_PATHS_SOFT_FAIL=1 source "$SCRIPT_DIR/resolve-paths.sh" >/dev/null 2>&1 || exit 1
+        source "$SCRIPT_DIR/lib-memory-dir.sh" >/dev/null 2>&1 || exit 1
+        [ -n "${REMEMBER_DIR:-}" ] || exit 1
+        printf '%s\n' "$REMEMBER_DIR"
+    )
+}
+
 if [ -z "${CLAUDE_PROJECT_DIR:-}" ]; then
     # #743: prefer the git top level over a possibly-stale $PWD -- immune to
     # a `cd` that happened earlier in the same Bash-tool call. Falls back to
     # $PWD, unchanged, when the cwd is not inside a git repo at all.
     _WH_GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || _WH_GIT_ROOT=""
+
+    # #776: #743's blanket preference above breaks a project deliberately
+    # started from a repository SUBDIRECTORY -- a supported shape per
+    # tests/test_injection_guard_754_755_756.py's own TestSubdirectoryHandoff
+    # -- by routing every write to the enclosing repository's root store
+    # instead of the subdirectory's own. $PWD and the git toplevel can only
+    # disagree here if $PWD is genuinely a subdirectory of a git repository,
+    # so this is exactly the case that needs disambiguating; a plain
+    # non-git project, or one already sitting at its repo's own root, takes
+    # the unchanged path below (git toplevel or $PWD, whichever is set).
+    #
+    # THIS session's SessionStart already published a hint file keyed by
+    # THIS session's own id (#738) into whichever REMEMBER_DIR it actually
+    # resolved -- nothing else can have written that file, and nothing else
+    # is asked to disambiguate. Whichever candidate's derived store carries
+    # it is the one SessionStart itself used for this very session; if
+    # neither or both do (no session id reached this script, a session that
+    # predates #738/#776, or -- unreachable in the ordinary case -- both
+    # somehow agree) this falls through to the pre-#776 default of
+    # preferring the git toplevel, unchanged.
+    if [ -n "$_WH_GIT_ROOT" ] && [ "$_WH_GIT_ROOT" != "$PWD" ] && [ -n "$_WH_SESSION_ID" ]; then
+        _WH_RD_PWD=$(_wh_trial_remember_dir "$PWD") || _WH_RD_PWD=""
+        _WH_RD_GITROOT=$(_wh_trial_remember_dir "$_WH_GIT_ROOT") || _WH_RD_GITROOT=""
+        _WH_PWD_HAS_HINT=0
+        _WH_GITROOT_HAS_HINT=0
+        [ -n "$_WH_RD_PWD" ] && [ -f "$_WH_RD_PWD/tmp/handoff-path.$_WH_SESSION_ID" ] && _WH_PWD_HAS_HINT=1
+        [ -n "$_WH_RD_GITROOT" ] && [ -f "$_WH_RD_GITROOT/tmp/handoff-path.$_WH_SESSION_ID" ] && _WH_GITROOT_HAS_HINT=1
+        if [ "$_WH_PWD_HAS_HINT" = 1 ] && [ "$_WH_GITROOT_HAS_HINT" = 0 ]; then
+            _WH_GIT_ROOT=""
+        fi
+        unset _WH_RD_PWD _WH_RD_GITROOT _WH_PWD_HAS_HINT _WH_GITROOT_HAS_HINT
+    fi
+
     if [ -n "$_WH_GIT_ROOT" ]; then
         CLAUDE_PROJECT_DIR="$_WH_GIT_ROOT"
     else
@@ -107,6 +174,16 @@ if [ -z "${REMEMBER_DIR:-}" ]; then
     echo "REFUSED: REMEMBER_DIR did not resolve" >&2
     exit 1
 fi
+
+# #750: sourced for _remember_file_tracked_state_into only, used just below
+# to refuse writing into a git-tracked target -- the write-side half of the
+# same question #721's read-side guard (_remember_may_inject, defined in
+# this same file) already asks before ever injecting a memory file into
+# context. Safe to source unconditionally: at source time this file only
+# defines functions and sets one load-guard variable, and none of the
+# functions this script calls read PLUGIN_ROOT or any other variable this
+# script does not already have.
+source "$SCRIPT_DIR/lib-memory-context.sh"
 
 # _wh_shape_ok <candidate-path>
 # The parent must be exactly REMEMBER_DIR (string compare, both already
@@ -150,14 +227,12 @@ _WH_TARGET=""
 # which #207 already established is hook-only), never a value the model
 # reads, asserts or can forge the way transcript text could pre-#720.
 #
-# Same character allowlist CURRENT_SESSION_ID is sanitized against in
-# session-start-hook.sh (#270) -- this value did not arrive through that
-# hook's stdin JSON here, so it gets the same point-of-entry validation
-# before it is ever used to build a path.
-_WH_SESSION_ID="${CLAUDE_CODE_SESSION_ID:-}"
-case "$_WH_SESSION_ID" in
-    ''|.|..|*[!A-Za-z0-9._-]*) _WH_SESSION_ID="" ;;
-esac
+# _WH_SESSION_ID itself is computed once, up top, before the
+# CLAUDE_PROJECT_DIR resolution -- #776 needs it there too. Same character
+# allowlist CURRENT_SESSION_ID is sanitized against in session-start-hook.sh
+# (#270) -- this value did not arrive through that hook's stdin JSON here,
+# so it gets the same point-of-entry validation before it is ever used to
+# build a path.
 
 if [ -n "$_WH_SESSION_ID" ]; then
     _WH_SESSION_HINT_FILE="$REMEMBER_DIR/tmp/handoff-path.$_WH_SESSION_ID"
@@ -189,6 +264,47 @@ fi
 if ! _wh_shape_ok "$_WH_TARGET"; then
     echo "REFUSED: resolved target does not have the expected shape: $_WH_TARGET" >&2
     exit 1
+fi
+
+# #750: refuse to overwrite a target the repository's own git index already
+# tracks. Mirrors _remember_in_project_store's own gate (lib-memory-context.sh)
+# so external storage (its own possibly-private git_backup repository, #285)
+# stays exempt -- only legacy/in-project storage, where REMEMBER_DIR sits
+# directly under the memory project's own directory, can ALSO be a path the
+# project's own repository tracks.
+#
+# REMEMBER_ROOT computed the same way lib-memory-context.sh's own
+# _remember_memory_paths does (trim trailing slashes, then take the parent),
+# without calling that function directly: it also requires PLUGIN_ROOT (for
+# an identity.md fallback this script never uses) and _remember_date (from
+# lib-clock.sh, not sourced here) -- neither of which this refusal needs.
+_WH_ROOT_SCRATCH="$REMEMBER_DIR"
+while [ "${_WH_ROOT_SCRATCH%/}" != "$_WH_ROOT_SCRATCH" ] && [ "$_WH_ROOT_SCRATCH" != "/" ]; do
+    _WH_ROOT_SCRATCH="${_WH_ROOT_SCRATCH%/}"
+done
+case "$_WH_ROOT_SCRATCH" in
+    (/) _WH_REMEMBER_ROOT="/" ;;
+    (*/*)
+        _WH_REMEMBER_ROOT="${_WH_ROOT_SCRATCH%/*}"
+        [ -n "$_WH_REMEMBER_ROOT" ] || _WH_REMEMBER_ROOT="/"
+        ;;
+    (*) _WH_REMEMBER_ROOT="." ;;
+esac
+unset _WH_ROOT_SCRATCH
+
+if [ "$_WH_REMEMBER_ROOT" = "${MEMORY_PROJECT_DIR:-$PROJECT_DIR}" ]; then
+    _WH_TRACKED_STATE=""
+    _remember_file_tracked_state_into _WH_TRACKED_STATE "$_WH_TARGET"
+    case "$_WH_TRACKED_STATE" in
+        tracked)
+            echo "REFUSED: $_WH_TARGET is tracked by this repository's own git index -- this plugin never commits a memory file itself, so writing your note over it would report success and then have the next SessionStart refuse to show it back to you, blaming a commit you never made. If this file is genuinely yours: git rm --cached it, then retry." >&2
+            exit 1
+            ;;
+        unavailable)
+            echo "REFUSED: $_WH_TARGET could not be checked against this repository's git index (git is missing, or the check itself failed) -- refusing to write unverified." >&2
+            exit 1
+            ;;
+    esac
 fi
 
 [ -d "$REMEMBER_DIR" ] || mkdir -p "$REMEMBER_DIR" 2>/dev/null
