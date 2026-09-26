@@ -314,13 +314,14 @@ _classify_project_cfg_haiku_trust
 # as `tracked` (fail CLOSED): the class of input this guards is more
 # expensive to leak than to occasionally over-protect.
 #
-# Two spawns at most, and the common "no git at all" case pays only one:
+# Up to three spawns, and the common "no git at all" case pays only one:
 # `rev-parse --is-inside-work-tree` answers "is there a work tree reachable
 # from here" on its exit status alone (no output parsing, so no locale/
 # translation risk from git's own error text) -- a plain non-git project
 # fails it immediately and this returns `untracked` without ever running
-# `ls-files`. Only once inside a real work tree does `ls-files
-# --error-unmatch` run, to ask about the file itself; ITS exit status (0 /
+# `ls-files`. Only once inside a real work tree does this run `rev-parse
+# --show-toplevel` (#761's symlinked-.git guard) and then `ls-files
+# --error-unmatch`, to ask about the file itself; ITS exit status (0 /
 # 1 / anything else) is what separates the three states from there.
 _remember_config_tracked_status() {
     local _dir="$1" _name="$2" _out _rc _toplevel

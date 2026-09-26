@@ -352,7 +352,7 @@ class TestSymlinkedGitDirFailsClosed:
         (unrelated / "readme.txt").write_text("hi\n")
         _git(unrelated, ["add", "readme.txt"])
         _git(unrelated, ["commit", "-q", "-m", "seed"])
-        (project / ".git").symlink_to(unrelated / ".git")
+        (project / ".git").symlink_to(unrelated / ".git", target_is_directory=True)
 
         ext_base = tmp_path / "ext"
         (pipeline / "config.json").write_text(
