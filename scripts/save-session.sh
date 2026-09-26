@@ -1139,8 +1139,16 @@ if [ "$RUN_NDC" = true ]; then
     if [ -s "$NDC_PROMPT" ]; then
         (set +e  # don't inherit set -e -- a haiku non-zero exit must not kill the subshell
             NDC_ERR=$(mktemp "${TMPDIR:-/tmp}"/remember-ndc-err-XXXXXX)
-            # 180s (not the 120s default): NDC compresses a whole now.md.
-            NDC_VARS=$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell call-haiku "$NDC_PROMPT" "" 180 2>"$NDC_ERR")
+            # 180s default (not the 120s default): NDC compresses a whole
+            # now.md, and output length scales with input length. #788:
+            # this was fixed with no config key, so a now.md large enough to
+            # need more than 180s timed out on every run, left untouched
+            # (see the ERROR branch below), and kept growing -- a one-way
+            # ratchet. Configurable so an install with a larger buffer can
+            # raise it instead of being stuck.
+            NDC_TIMEOUT_SECONDS=$(config ".thresholds.ndc_timeout_seconds" 180)
+            case "$NDC_TIMEOUT_SECONDS" in ''|*[!0-9]*) NDC_TIMEOUT_SECONDS=180 ;; esac
+            NDC_VARS=$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell call-haiku "$NDC_PROMPT" "" "$NDC_TIMEOUT_SECONDS" 2>"$NDC_ERR")
             NDC_EXIT=$?
 
             if [ "$NDC_EXIT" -eq "$SPAWN_DECLINED_EXIT" ]; then
@@ -1201,10 +1209,55 @@ if [ "$RUN_NDC" = true ]; then
                 # compression instead of a refusal, which is this same failure
                 # mode with the trigger swapped. The plain "## " check is the
                 # one thing every legitimate shape shares that no refusal does.
-                case "$(head -1 "$HAIKU_TEXT_FILE" 2>/dev/null)" in
-                    ('## '*) NDC_LOOKS_LIKE_HEADER=true ;;
-                    (*) NDC_LOOKS_LIKE_HEADER=false ;;
-                esac
+                # #788 (minor, fix 4): a genuine compression can arrive with a
+                # short preamble before the first real "## " header ("I'll
+                # compress the log directly...Here's the maximally compressed
+                # version:"). Checking only line 1 rejected that whole reply
+                # and let now.md keep growing for no reason. Find the first
+                # header line instead, but only within a short window (lines
+                # 2-4): a "## " that only shows up much later is far more
+                # likely a refusal that happens to mention it in passing than
+                # a short preamble, and is left to the reject branch below.
+                #
+                # Only attempted when this is not already a known SKIP/REJECT:
+                # a refusal can itself contain a line matching "## " (a model
+                # describing the expected format while declining to produce
+                # it), and this search-and-strip used to run unconditionally
+                # ahead of the branch below. When that happened, the rewrite
+                # destroyed the refusal text before the REJECTED log line and
+                # keep_rejected_text -- the exact diagnostic trail this whole
+                # mechanism exists to preserve -- ever saw it (review of
+                # 53ff4f7). Left alone entirely for an already-rejected reply.
+                if [ "$IS_SKIP" != "true" ] && [ "${IS_REJECTED:-false}" != "true" ]; then
+                    NDC_HEADER_LINE=$(grep -n -m1 '^## ' "$HAIKU_TEXT_FILE" 2>/dev/null | cut -d: -f1)
+                    case "$NDC_HEADER_LINE" in
+                        (1) NDC_LOOKS_LIKE_HEADER=true ;;
+                        ([2-4])
+                            # The strip is destructive (it overwrites
+                            # HAIKU_TEXT_FILE in place), so a failed mktemp/
+                            # tail/mv must not be reported as a successful
+                            # strip (review of 53ff4f7): that would leave the
+                            # ORIGINAL, unstripped preamble in the file while
+                            # logging "stripped" and still writing it to
+                            # today-*.md as though it had been cleaned. On
+                            # failure this falls through to the reject branch
+                            # below instead, with an explicit WARNING.
+                            NDC_STRIPPED_FILE=$(mktemp "${TMPDIR:-/tmp}"/remember-ndc-stripped-XXXXXX)
+                            if [ -n "$NDC_STRIPPED_FILE" ] \
+                                && tail -n "+$NDC_HEADER_LINE" "$HAIKU_TEXT_FILE" > "$NDC_STRIPPED_FILE" \
+                                && mv "$NDC_STRIPPED_FILE" "$HAIKU_TEXT_FILE"; then
+                                NDC_LOOKS_LIKE_HEADER=true
+                                NDC_TEXT=$(cat "$HAIKU_TEXT_FILE")
+                                log "ndc" "preamble stripped ($((NDC_HEADER_LINE - 1)) line(s) before the first '## ')"
+                            else
+                                rm -f "$NDC_STRIPPED_FILE" 2>/dev/null
+                                NDC_LOOKS_LIKE_HEADER=false
+                                report_error "ndc" "WARNING: could not strip a short preamble from the NDC reply -- treating it as rejected instead of risking a partially-written file"
+                            fi
+                            ;;
+                        (*) NDC_LOOKS_LIKE_HEADER=false ;;
+                    esac
+                fi
                 if [ "$IS_SKIP" = "true" ] || [ "${IS_REJECTED:-false}" = "true" ] || [ "$NDC_LOOKS_LIKE_HEADER" = "false" ]; then
                     if [ "$IS_SKIP" = "true" ] || [ "${IS_REJECTED:-false}" = "true" ]; then
                         log "ndc" "REJECTED (provider: ${PROVIDER:-claude}; not a summary -- refusal or clarification): $(head -c 80 "$HAIKU_TEXT_FILE" 2>/dev/null)"
@@ -1241,14 +1294,15 @@ if [ "$RUN_NDC" = true ]; then
                     fi
                     # Drop exactly the bytes that were compressed, not the whole
                     # file (#142). now.md was snapshotted before the Haiku call
-                    # above, which can take up to 180s — and by then the parent
-                    # has released the save lock and exited, so a *newer* save
-                    # may well have appended an entry. `: >` erased those
-                    # entries, and their position had already been advanced, so
-                    # they were unrecoverable and nothing was logged. Keep
-                    # everything past the snapshot offset instead.
+                    # above, which can take up to NDC_TIMEOUT_SECONDS (180s by
+                    # default, #788) — and by then the parent has released the
+                    # save lock and exited, so a *newer* save may well have
+                    # appended an entry. `: >` erased those entries, and their
+                    # position had already been advanced, so they were
+                    # unrecoverable and nothing was logged. Keep everything
+                    # past the snapshot offset instead.
                     #
-                    # The offset arithmetic closes the 180s window. It does NOT
+                    # The offset arithmetic closes that window. It does NOT
                     # close the commit itself (#223, @Jutiphan's defect (b) in
                     # #173): `tail` reads to EOF, a concurrent save appends —
                     # entitled to, since nothing was held here — and `mv` puts
@@ -1387,7 +1441,8 @@ if [ "$RUN_NDC" = true ]; then
                                 # Anything kept was appended during this compression,
                                 # so stamp it with the day it is NOW — not $TODAY_DATE,
                                 # which was computed once in the parent before a Haiku
-                                # call that can run 180s. A compression that started
+                                # call that can run NDC_TIMEOUT_SECONDS (180s by
+                                # default, #788). A compression that started
                                 # before midnight would otherwise stamp those newer
                                 # bytes with the previous day: not the day they were
                                 # appended, not their own day, but a third stale one
@@ -1473,7 +1528,8 @@ if [ "$RUN_NDC" = true ]; then
                                 # recoverable; erased entries are neither. Rolling back
                                 # the TODAY_FILE append instead was considered and
                                 # rejected — TODAY_FILE can itself receive concurrent
-                                # appends during this same 180s window (any other save's
+                                # appends during this same NDC_TIMEOUT_SECONDS window
+                                # (180s by default, #788; any other save's
                                 # own NDC round, or a future flush), and truncating it
                                 # back to a byte count captured earlier would risk
                                 # erasing exactly that concurrent write: the same #142

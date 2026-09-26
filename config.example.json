@@ -15,7 +15,8 @@
     "consolidate_max_bytes": 600000,
     "memory_inject_max_bytes": 200000,
     "staging_warn_bytes": 2000000,
-    "autonomous_log_retention_days": 7
+    "autonomous_log_retention_days": 7,
+    "ndc_timeout_seconds": 180
   },
   "features": {
     "ndc_compression": true,
@@ -114,6 +115,14 @@
       "kilobytes, so this only fires on a store that is already broken; in #346",
       "a 6.4GB recent.md froze every `claude` launch in that project. Set 0 to",
       "disable."
+    ],
+    "ndc_timeout_seconds": [
+      "Wall-clock budget (seconds) for the NDC now.md -> today-*.md compression",
+      "call. Default 180. Output length scales with input length, so a large",
+      "now.md can genuinely need longer than that to finish. On timeout now.md",
+      "is left untouched and grows further, so every later run is even more",
+      "likely to time out too -- a one-way ratchet (#788). Raise this if the",
+      "daily log shows repeated 'ndc' ERROR lines mentioning a timeout."
     ],
     "prompt_stamp": [
       "What the UserPromptSubmit hook injects into the model's context.",
