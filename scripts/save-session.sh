@@ -1147,7 +1147,15 @@ if [ "$RUN_NDC" = true ]; then
             # ratchet. Configurable so an install with a larger buffer can
             # raise it instead of being stuck.
             NDC_TIMEOUT_SECONDS=$(config ".thresholds.ndc_timeout_seconds" 180)
-            case "$NDC_TIMEOUT_SECONDS" in ''|*[!0-9]*) NDC_TIMEOUT_SECONDS=180 ;; esac
+            # #816: same fix shape as run-consolidation.sh's sibling guard --
+            # a typo'd config value used to be swapped for the default with
+            # no trace of what was discarded.
+            case "$NDC_TIMEOUT_SECONDS" in
+                ''|*[!0-9]*)
+                    log "ndc" "WARNING: thresholds.ndc_timeout_seconds is not a valid non-negative integer (got '$NDC_TIMEOUT_SECONDS') -- using default 180"
+                    NDC_TIMEOUT_SECONDS=180
+                    ;;
+            esac
             NDC_VARS=$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell call-haiku "$NDC_PROMPT" "" "$NDC_TIMEOUT_SECONDS" 2>"$NDC_ERR")
             NDC_EXIT=$?
 
