@@ -135,7 +135,15 @@ CONSOLIDATE_MAX_BYTES=$(config ".thresholds.consolidate_max_bytes" 600000)
 # every run, be left uncompressed, and grow further every round with no
 # recovery. Configurable so an install with a larger buffer can raise it.
 CONSOLIDATE_TIMEOUT_SECONDS=$(config ".thresholds.consolidate_timeout_seconds" 180)
-case "$CONSOLIDATE_TIMEOUT_SECONDS" in ''|*[!0-9]*) CONSOLIDATE_TIMEOUT_SECONDS=180 ;; esac
+# #816: this used to substitute the default silently, so a typo'd config
+# value (e.g. "18O") looked identical to a deliberate 180 -- nothing in the
+# daily log told an operator their override was never read.
+case "$CONSOLIDATE_TIMEOUT_SECONDS" in
+    ''|*[!0-9]*)
+        log "consolidation" "WARNING: thresholds.consolidate_timeout_seconds is not a valid non-negative integer (got '$CONSOLIDATE_TIMEOUT_SECONDS') -- using default 180"
+        CONSOLIDATE_TIMEOUT_SECONDS=180
+        ;;
+esac
 log "consolidation" "start"
 RESULT=$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell consolidate "$STAGING_DIR" "$RECENT_FILE" "$ARCHIVE_FILE" "$CONSOLIDATE_MAX_BYTES" "$SNAPSHOT_DIR" "$CONSOLIDATE_TIMEOUT_SECONDS" 2>&1) || {
     # 3 is the spawn guard declining, not a broken pipeline (#204). Staging is

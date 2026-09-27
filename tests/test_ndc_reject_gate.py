@@ -265,6 +265,44 @@ class TestNdcTimeoutIsConfigurable:
             f"the unconfigured NDC timeout is no longer 180s: {line!r}"
         )
 
+    def test_malformed_timeout_falls_back_and_is_logged(self, tmp_path):
+        """#816: a malformed thresholds.ndc_timeout_seconds must not be
+        silently swapped for the 180s default -- the daily log must name
+        what was discarded, matching run-consolidation.sh's sibling guard."""
+        env, project, plugin, calls, sid = _ndc_env(tmp_path, config={"ndc_timeout_seconds": "18O"})
+
+        result = _run(plugin, env, sid)
+        assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")
+        _wait_for_calls_to_settle(calls)
+
+        line = _ndc_call_line(calls)
+        assert line.split(" ")[-1] == "180", (
+            f"a malformed thresholds.ndc_timeout_seconds did not fall back to 180: {line!r}"
+        )
+
+        logs = "".join(p.read_text() for p in (project / ".remember" / "logs").glob("*.log"))
+        assert "18O" in logs, (
+            f"the malformed thresholds.ndc_timeout_seconds value was discarded "
+            f"with no trace of what it was: {logs!r}"
+        )
+        assert "ndc_timeout_seconds" in logs, (
+            f"the log line does not even name the config key that failed to parse: {logs!r}"
+        )
+
+    def test_valid_override_is_not_logged_as_malformed(self, tmp_path):
+        """Positive control: a genuinely valid override must not trip the
+        new warning."""
+        env, project, plugin, calls, sid = _ndc_env(tmp_path, config={"ndc_timeout_seconds": 42})
+
+        result = _run(plugin, env, sid)
+        assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")
+        _wait_for_calls_to_settle(calls)
+
+        logs = "".join(p.read_text() for p in (project / ".remember" / "logs").glob("*.log"))
+        assert "ndc_timeout_seconds" not in logs, (
+            f"a valid configured timeout was reported as malformed: {logs!r}"
+        )
+
 
 class TestNdcTolerantOfShortPreamble:
     """#788 fix 4 (minor): a genuine compression can arrive with a short
