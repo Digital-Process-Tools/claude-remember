@@ -987,7 +987,13 @@ _transcript_is_pluginless_sdk() {
 # `-nt` TEST BUILTIN (no fork) rather than forking `ls -t` to sort the whole
 # directory (#691); the content scan only ever runs against a candidate that
 # is already "newest so far", never against every file in the directory.
-_PREV_TRANSCRIPT_EXCLUDE_CAP=20
+# `:-`, not a plain `=`, so a value already set in the calling environment
+# survives (self-review finding, Explore round: a bare `=20` here
+# unconditionally clobbers any caller-supplied override before either
+# function ever reads it via its own `${_PREV_TRANSCRIPT_EXCLUDE_CAP:-20}`
+# fallback below, making the "configurable" cap dead code in production --
+# always exactly 20 regardless of what the environment set).
+_PREV_TRANSCRIPT_EXCLUDE_CAP="${_PREV_TRANSCRIPT_EXCLUDE_CAP:-20}"
 previous_transcript() {
     local dir=$1 f base newest="" tries=0 i best_idx
     local -a candidates=()
