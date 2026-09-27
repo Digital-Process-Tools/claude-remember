@@ -26,7 +26,10 @@ TRAP_DIR = REPO_ROOT / "trap.d"
 
 # Matches an absolute POSIX home-directory path, e.g. /Users/floriandavid/foo
 # or /home/someone/bar -- the shape a real maintainer checkout path takes.
-HOME_PATH_RE = re.compile(r"/(?:Users|home)/[A-Za-z0-9_.-]+/")
+# The username segment need not be followed by a further path component --
+# a bare "/Users/floriandavid" with no trailing slash is just as much a leak
+# as "/Users/floriandavid/foo" (#822 self-review finding).
+HOME_PATH_RE = re.compile(r"/(?:Users|home)/[A-Za-z0-9_.-]+(?:/|\b)")
 
 
 def _offending_lines(text):
