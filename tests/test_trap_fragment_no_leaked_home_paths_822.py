@@ -1,6 +1,6 @@
 """
 trap.d/804.edit-op-defaulted-to-main-clone-not-worktree.md leaked this
-maintainer's actual local checkout paths (`/Users/floriandavid/...`) at two
+maintainer's actual local checkout paths (`/Users/someone/...`) at two
 lines describing a class of trap that has nothing to do with any one
 maintainer's disk layout (#822). A fragment naming one person's home
 directory reads as personal data rather than a portable lesson, and nothing
@@ -24,11 +24,11 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TRAP_DIR = REPO_ROOT / "trap.d"
 
-# Matches an absolute POSIX home-directory path, e.g. /Users/floriandavid/foo
+# Matches an absolute POSIX home-directory path, e.g. /Users/someone/foo
 # or /home/someone/bar -- the shape a real maintainer checkout path takes.
 # The username segment need not be followed by a further path component --
-# a bare "/Users/floriandavid" with no trailing slash is just as much a leak
-# as "/Users/floriandavid/foo" (#822 self-review finding).
+# a bare "/Users/someone" with no trailing slash is just as much a leak
+# as "/Users/someone/foo" (#822 self-review finding).
 HOME_PATH_RE = re.compile(r"/(?:Users|home)/[A-Za-z0-9_.-]+(?:/|\b)")
 
 
@@ -61,7 +61,7 @@ def test_positive_control_a_real_leaked_path_is_detected():
     otherwise the assertion above passes trivially because nothing is ever
     flagged, not because the real fragment is clean."""
     hits = _offending_lines(
-        "Working issue #804 in worktree /Users/floriandavid/Documents/"
+        "Working issue #804 in worktree /Users/someone/Documents/"
         "claude-remember-wt/804.\n"
     )
     assert hits, "the detector must flag a real leaked home-directory path"
