@@ -130,8 +130,14 @@ staging_lock_release
 # Oversized-prompt skip-guard: cap the assembled prompt so a runaway staging/
 # archive never overflows Haiku's window (skips cleanly instead of crashing).
 CONSOLIDATE_MAX_BYTES=$(config ".thresholds.consolidate_max_bytes" 600000)
+# #806: same fix shape as #788/#792's NDC ndc_timeout_seconds -- output length
+# scales with input length, so a large enough staging batch can time out on
+# every run, be left uncompressed, and grow further every round with no
+# recovery. Configurable so an install with a larger buffer can raise it.
+CONSOLIDATE_TIMEOUT_SECONDS=$(config ".thresholds.consolidate_timeout_seconds" 180)
+case "$CONSOLIDATE_TIMEOUT_SECONDS" in ''|*[!0-9]*) CONSOLIDATE_TIMEOUT_SECONDS=180 ;; esac
 log "consolidation" "start"
-RESULT=$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell consolidate "$STAGING_DIR" "$RECENT_FILE" "$ARCHIVE_FILE" "$CONSOLIDATE_MAX_BYTES" "$SNAPSHOT_DIR" 2>&1) || {
+RESULT=$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell consolidate "$STAGING_DIR" "$RECENT_FILE" "$ARCHIVE_FILE" "$CONSOLIDATE_MAX_BYTES" "$SNAPSHOT_DIR" "$CONSOLIDATE_TIMEOUT_SECONDS" 2>&1) || {
     # 3 is the spawn guard declining, not a broken pipeline (#204). Staging is
     # untouched in both cases and the next run picks it up, but "declined" and
     # "failed" send an operator looking in different places.
