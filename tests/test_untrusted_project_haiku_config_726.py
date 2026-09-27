@@ -800,6 +800,87 @@ class TestSanitizeStepFailsClosed:
         assert merged == {}
 
 
+class TestMalformedTrustedConfigDisclosure:
+    """#815: the untrusted-project-layer branch above (TestSanitizeStepFailsClosed)
+    already fails closed and discloses the drop via rc 3 / the drop-marker file
+    (#748, #804). The no-jq fallback's OTHER branch -- bundled config and
+    user-global config, both TRUSTED sources -- had no equivalent: a malformed
+    file there raised uncaught, exiting neither 0 nor 3, so the shell's
+    bundled-only fallback fired with NO warning at all. "Trusted" means "the
+    operator wrote it", not "it parses". Neither test's malformed file is a
+    project config: the first test also writes a WELL-FORMED project config
+    purely as a discriminator (see its own docstring below -- in this file's
+    default legacy layout that layer is the untrusted-haiku source and goes
+    through the pre-existing #744 branch, not the trusted-load branch this
+    class is about), and the second test has no project config at all."""
+
+    def test_a_malformed_user_global_cfg_no_jq_fallback_warns_and_drops_just_that_layer(
+        self, tmp_path
+    ):
+        """A THIRD source (a well-formed, non-haiku project config) is the
+        part that actually discriminates the fix from the bug: `_cfg_sources`
+        is ordered bundled, user-global, project, so the malformed
+        user-global layer is hit BEFORE the project layer is ever read. Pre-
+        fix, the uncaught exception aborts the whole merge subprocess before
+        the project layer's own line is reached -- nothing is ever written,
+        the shell's bundled-only fallback fires, and `extra_layer` is lost.
+        Post-fix, the malformed layer is skipped in place and the loop
+        continues on to merge the project layer -- so `extra_layer` survives
+        only under the fix. Asserting solely on a value that also lives in
+        the bundled config (as an earlier version of this test did) cannot
+        tell the two apart, since bundled-only-fallback and
+        drop-just-that-layer produce an IDENTICAL merged value whenever
+        bundled is the only OTHER source in play."""
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(
+            json.dumps({"cooldowns": {"save_seconds": 111}})
+        )
+        (home / ".remember").mkdir(parents=True)
+        (home / ".remember" / "config.json").write_text(
+            '{"cooldowns": {"save_seconds": ' + "9" * 40
+        )
+        remember = project / ".remember"
+        remember.mkdir()
+        (remember / "config.json").write_text(
+            json.dumps({"extra_layer": "still-here"})
+        )
+
+        merged, _, stderr = _run_lib_and_dump_config_with_stderr(
+            project, pipeline, home,
+            env_extra={"PATH": _path_without_jq(tmp_path)},
+        )
+
+        # The malformed user-global layer is dropped; the bundled layer
+        # beneath it AND the project layer read after it both still apply,
+        # rather than everything past the malformed layer being lost to the
+        # old "any nonzero rc -> cp bundled over everything" fallback.
+        assert merged["cooldowns"]["save_seconds"] == 111
+        assert merged["extra_layer"] == "still-here"
+        assert "lib-memory-dir" in stderr, stderr
+        assert "WARNING" in stderr, stderr
+
+    def test_a_well_formed_user_global_cfg_no_jq_fallback_does_not_warn(
+        self, tmp_path
+    ):
+        """Positive control for the test above (CLAUDE.md: a negative
+        assertion needs a positive control): the SAME no-jq PATH, but a
+        well-formed user-global config -- must NOT trip the new warning."""
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(json.dumps({}))
+        (home / ".remember").mkdir(parents=True)
+        (home / ".remember" / "config.json").write_text(
+            json.dumps({"cooldowns": {"save_seconds": 222}})
+        )
+
+        merged, _, stderr = _run_lib_and_dump_config_with_stderr(
+            project, pipeline, home,
+            env_extra={"PATH": _path_without_jq(tmp_path)},
+        )
+
+        assert merged["cooldowns"]["save_seconds"] == 222
+        assert "lib-memory-dir" not in stderr, stderr
+
+
 def test_run_lib_sanity_check_still_works():
     """Sanity: the sibling _run_lib helper this file imports (used only for
     its constants above) is still importable and unbroken."""
