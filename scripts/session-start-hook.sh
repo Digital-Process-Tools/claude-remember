@@ -964,28 +964,51 @@ _transcript_is_pluginless_sdk() {
 # Args: $1 — sessions dir. Prints the newest transcript that is not this
 # session's, or nothing.
 #
-# NOT a strict single pass since #745: excludes a pluginless-SDK transcript
-# (above) and retries, so a run of several such transcripts costs one glob
-# pass and one bounded content scan per excluded candidate, not one pass
-# total. Comparing mtimes still uses bash's own `-nt` TEST BUILTIN (no fork)
-# rather than forking `ls -t` to sort the whole directory (#691); the content
-# scan only ever runs against a candidate that is already "newest so far",
-# never against every file in the directory.
+# #819: the #745 retry (excludes a pluginless-SDK transcript and restarts)
+# was itself quadratic -- every excluded candidate re-ran a FULL glob pass
+# PLUS a `case " $excluded " in *" $f "*)` string scan against an
+# ever-growing string, so a directory whose newest files are mostly headless
+# runs (thousands of them, in the field) never realistically finished: a
+# hook with no parent left to read its output, spinning at 30-60% CPU for
+# 70+ minutes.
+#
+# Fixed by separating "which files are in play" from "which one is newest
+# among those not yet excluded": the glob itself still runs exactly ONCE,
+# into an array (`candidates`), and exclusion is tracked by array INDEX
+# (`taken`) rather than by growing a string every real transcript then has
+# to be compared against. Finding "the newest not-yet-taken" still walks the
+# whole array on every retry -- that part is unchanged in shape -- but it is
+# now bounded by `_PREV_TRANSCRIPT_EXCLUDE_CAP` retries rather than by how
+# many pluginless transcripts happen to exist: worst case is (cap + 1) * n
+# array comparisons, never n * (however many thousand headless runs sit in
+# the directory). A "previous session" hidden behind that many headless runs
+# is not worth finding (the issue's own words) -- past the cap this returns
+# nothing rather than keep looking. Comparing mtimes still uses bash's own
+# `-nt` TEST BUILTIN (no fork) rather than forking `ls -t` to sort the whole
+# directory (#691); the content scan only ever runs against a candidate that
+# is already "newest so far", never against every file in the directory.
+_PREV_TRANSCRIPT_EXCLUDE_CAP=20
 previous_transcript() {
-    local dir=$1 f base newest="" excluded=""
+    local dir=$1 f base newest="" tries=0 i best_idx
+    local -a candidates=()
+    local -a taken=()
+    for f in "$dir"/*.jsonl; do
+        [ -e "$f" ] || continue
+        base=${f##*/}
+        base=${base%.jsonl}
+        [ "$base" = "$CURRENT_SESSION_ID" ] && continue
+        candidates+=("$f")
+    done
     while :; do
-        newest=""
-        for f in "$dir"/*.jsonl; do
-            [ -e "$f" ] || continue
-            base=${f##*/}
-            base=${base%.jsonl}
-            [ "$base" = "$CURRENT_SESSION_ID" ] && continue
-            if [ -n "$excluded" ]; then
-                case " $excluded " in *" $f "*) continue ;; esac
+        newest="" best_idx=-1 i=0
+        for f in "${candidates[@]}"; do
+            if [ -z "${taken[$i]:-}" ]; then
+                if [ -z "$newest" ] || [ "$f" -nt "$newest" ]; then
+                    newest=$f
+                    best_idx=$i
+                fi
             fi
-            if [ -z "$newest" ] || [ "$f" -nt "$newest" ]; then
-                newest=$f
-            fi
+            i=$((i + 1))
         done
         [ -z "$newest" ] && break
         if _transcript_is_pluginless_sdk "$newest"; then
@@ -994,7 +1017,12 @@ previous_transcript() {
             # plugin was ever loaded into. Keep looking for the next-newest
             # eligible one; a run of several such pairs is excluded one at a
             # time rather than assumed to be exactly one or two.
-            excluded="$excluded $newest"
+            taken[$best_idx]=1
+            tries=$((tries + 1))
+            if [ "$tries" -ge "${_PREV_TRANSCRIPT_EXCLUDE_CAP:-20}" ]; then
+                newest=""
+                break
+            fi
             continue
         fi
         break
@@ -1010,39 +1038,47 @@ previous_transcript() {
 # positionally, on the premise that the newest untagged file is this
 # session's own.
 #
-# NOT a strict single pass since #745 (self-review finding: the original
-# #745 fix wired the pluginless-SDK exclusion into previous_transcript()
-# alone, leaving this sibling -- reached whenever the SessionStart payload
-# carries no session_id at all -- free to hand recovery's force-save the
-# exact kind of transcript the fix exists to keep it away from). The first
-# pass finds the positionally-"own" newest file, unchanged; the second
-# excludes a pluginless-SDK transcript from "second-newest" and retries,
-# the same shape previous_transcript() uses above. Still fork-free: `-nt`
-# is a builtin and _transcript_is_pluginless_sdk only ever forks the
-# subshell _stdin_json_string already costs elsewhere in this file.
+# #819: same shape and same fix as previous_transcript() above -- the glob
+# runs once into `candidates`, exclusion is tracked by array index rather
+# than a growing string, and the retry is bounded by
+# _PREV_TRANSCRIPT_EXCLUDE_CAP rather than by how many pluginless
+# transcripts happen to sit in the directory. Still fork-free: `-nt` is a
+# builtin and _transcript_is_pluginless_sdk only ever forks the subshell
+# _stdin_json_string already costs elsewhere in this file.
 _second_newest_jsonl() {
-    local dir=$1 f own="" newest="" excluded=""
+    local dir=$1 f own="" newest="" tries=0 i best_idx
+    local -a candidates=()
+    local -a taken=()
     for f in "$dir"/*.jsonl; do
         [ -e "$f" ] || continue
         if [ -z "$own" ] || [ "$f" -nt "$own" ]; then
             own=$f
         fi
     done
+    for f in "$dir"/*.jsonl; do
+        [ -e "$f" ] || continue
+        [ "$f" = "$own" ] && continue
+        candidates+=("$f")
+    done
     while :; do
-        newest=""
-        for f in "$dir"/*.jsonl; do
-            [ -e "$f" ] || continue
-            [ "$f" = "$own" ] && continue
-            if [ -n "$excluded" ]; then
-                case " $excluded " in *" $f "*) continue ;; esac
+        newest="" best_idx=-1 i=0
+        for f in "${candidates[@]}"; do
+            if [ -z "${taken[$i]:-}" ]; then
+                if [ -z "$newest" ] || [ "$f" -nt "$newest" ]; then
+                    newest=$f
+                    best_idx=$i
+                fi
             fi
-            if [ -z "$newest" ] || [ "$f" -nt "$newest" ]; then
-                newest=$f
-            fi
+            i=$((i + 1))
         done
         [ -z "$newest" ] && break
         if _transcript_is_pluginless_sdk "$newest"; then
-            excluded="$excluded $newest"
+            taken[$best_idx]=1
+            tries=$((tries + 1))
+            if [ "$tries" -ge "${_PREV_TRANSCRIPT_EXCLUDE_CAP:-20}" ]; then
+                newest=""
+                break
+            fi
             continue
         fi
         break
