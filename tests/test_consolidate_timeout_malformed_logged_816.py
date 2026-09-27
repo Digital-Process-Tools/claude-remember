@@ -1,0 +1,126 @@
+"""#816: `run-consolidation.sh`'s `CONSOLIDATE_TIMEOUT_SECONDS` guard silently
+substituted the 180s default whenever `thresholds.consolidate_timeout_seconds`
+was empty or contained a non-digit, with no log line anywhere near the
+substitution -- an operator who typo'd the value (e.g. "18O") saw exactly the
+same behaviour as one who deliberately configured 180, with nothing in the
+daily log distinguishing the two.
+
+The fix logs the malformed value it discarded, on the same daily-log channel
+every other event in this script already uses -- so the sibling guard in
+`save-session.sh` (`NDC_TIMEOUT_SECONDS`, tested in test_ndc_reject_gate.py)
+gets the identical shape, per the issue's own "matching shape must move
+together" argument.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from ._bash_runner import resolve_bash
+
+BASH = resolve_bash()
+
+pytestmark = pytest.mark.skipif(
+    BASH is None,
+    reason="no usable bash found (checked PATH, then Git-for-Windows install locations)",
+)
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+STUB_SHELL = '''\
+import sys
+
+cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+if cmd == "consolidate":
+    print("STAGING_COUNT=0")
+    print("CONSOLIDATION_STATUS=ok")
+'''
+
+
+def _make_env(tmp_path: Path, *, consolidate_timeout_seconds):
+    """A project with an empty staging dir -- the guard fires long before
+    staging count is even checked, so nothing else needs to be real here."""
+    project = tmp_path / "project"
+    remember = project / ".remember"
+    (remember / "tmp").mkdir(parents=True)
+    (remember / "logs").mkdir(parents=True)
+
+    plugin = tmp_path / "plugin"
+    (plugin / "scripts").mkdir(parents=True)
+    (plugin / "pipeline").mkdir(parents=True)
+    (plugin / "pipeline" / "__init__.py").write_text("")
+    (plugin / "pipeline" / "haiku.py").write_text("# marker\n")
+    (plugin / "pipeline" / "shell.py").write_text(STUB_SHELL)
+    for script in ("run-consolidation.sh", "resolve-paths.sh", "detect-tools.sh",
+                   "bootstrap-dirs.sh", "log.sh", "lib-memory-dir.sh",
+                   "lib-lock.sh", "lib-staging-lock.sh", "lib-slug.sh",
+                   "lib-clock.sh"):
+        (plugin / "scripts" / script).write_text((REPO_ROOT / "scripts" / script).read_text())
+
+    # Written as REMEMBER_CONFIG directly (the already-merged form config()
+    # reads), same as test_save_session_gates.py's _make_env -- with
+    # _LIB_MEMORY_DIR_LOADED=1 set below, lib-memory-dir.sh's real 3-layer
+    # merge never runs, so a plugin/config.json alone would never be read at
+    # all; REMEMBER_CONFIG is the only route a threshold value reaches config().
+    cfg = {"cooldowns": {}, "thresholds": {"consolidate_timeout_seconds": consolidate_timeout_seconds}}
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps(cfg))
+
+    env = {
+        **os.environ,
+        "HOME": str(tmp_path / "home"),
+        "CLAUDE_PROJECT_DIR": str(project),
+        "CLAUDE_PLUGIN_ROOT": str(plugin),
+        "REMEMBER_CONFIG": str(cfg_path),
+        "REMEMBER_DIR": str(remember),
+        "_LIB_MEMORY_DIR_LOADED": "1",
+    }
+    return env, project, remember
+
+
+def _run(plugin: Path, env: dict):
+    return subprocess.run([BASH, str(plugin / "scripts" / "run-consolidation.sh")],
+                          capture_output=True, text=True, env=env, timeout=90, check=False)
+
+
+def _daily_log_text(remember: Path) -> str:
+    return "".join(p.read_text(encoding="utf-8") for p in (remember / "logs").glob("*.log"))
+
+
+class TestConsolidateTimeoutMalformedIsLogged:
+    """#816: the fallback branch must name what it discarded, not stay silent."""
+
+    def test_malformed_value_is_logged(self, tmp_path):
+        env, _project, remember = _make_env(tmp_path, consolidate_timeout_seconds="18O")
+        plugin = Path(env["CLAUDE_PLUGIN_ROOT"])
+
+        result = _run(plugin, env)
+        assert result.returncode == 0, result.stderr
+
+        logs = _daily_log_text(remember)
+        assert "18O" in logs, (
+            f"the malformed thresholds.consolidate_timeout_seconds value was "
+            f"discarded with no trace of what it was: {logs!r}"
+        )
+        assert "consolidate_timeout_seconds" in logs, (
+            f"the log line does not even name the config key that failed to parse: {logs!r}"
+        )
+
+    def test_valid_value_is_not_logged_as_malformed(self, tmp_path):
+        """Positive control: a genuinely valid override must not trip the
+        new warning."""
+        env, _project, remember = _make_env(tmp_path, consolidate_timeout_seconds=42)
+        plugin = Path(env["CLAUDE_PLUGIN_ROOT"])
+
+        result = _run(plugin, env)
+        assert result.returncode == 0, result.stderr
+
+        logs = _daily_log_text(remember)
+        assert "consolidate_timeout_seconds" not in logs, (
+            f"a valid configured timeout was reported as malformed: {logs!r}"
+        )
