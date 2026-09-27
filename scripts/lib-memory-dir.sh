@@ -683,6 +683,7 @@ def load_documents(path):
 
 merged = {}
 _dropped_project_layer = False
+_dropped_trusted_layer = False
 for path in sys.argv[5:]:
     if untrusted_haiku_path and path == untrusted_haiku_path:
         # #744: fail CLOSED -- if the untrusted file can't even be loaded
@@ -721,8 +722,22 @@ for path in sys.argv[5:]:
                 data = {k: v for k, v in data.items() if k not in drop}
             merged = deep_merge(merged, data)
         continue
-    with open(path) as f:
-        data = json.load(f)
+    # #815: this is a TRUSTED source (bundled config, user-global config, or
+    # the project config when it is NOT the untrusted-haiku source handled
+    # above) -- but "trusted" only means the operator wrote it, not that it
+    # parses. A malformed file here used to raise uncaught, exiting neither
+    # 0 nor 3, so the shell's bundled-only fallback fired below with NO
+    # disclosure at all -- the #804 gate only checks the drop-marker file
+    # (which this path never touches) or rc == 3 (reserved for the
+    # untrusted-layer drop above). Skip just this layer instead, the same
+    # fail-CLOSED shape the untrusted branch already uses, and signal it on
+    # the interpreter's own exit path rather than a second marker file.
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        _dropped_trusted_layer = True
+        continue
     merged = deep_merge(merged, data)
 # Strip `_`-prefixed doc keys, top-level only — same convention as the jq path.
 merged = {k: v for k, v in merged.items() if not str(k).startswith("_")}
@@ -732,14 +747,23 @@ with open(out_path, "w") as f:
 # the untrusted project layer was dropped" -- distinct from 0 (clean) and
 # from any other non-zero exit (a genuine merge failure, still handled by
 # the shell's own bundled-only fallback below).
-if _dropped_project_layer:
+# #815: exit 4 means the same, but for a malformed TRUSTED layer (bundled
+# config, user-global config, or project config outside the untrusted-haiku
+# case); exit 5 means both a trusted AND the untrusted layer were dropped.
+# Distinct codes so the shell can choose which warning(s) to print without a
+# second marker file.
+if _dropped_project_layer and _dropped_trusted_layer:
+    sys.exit(5)
+elif _dropped_project_layer:
     sys.exit(3)
+elif _dropped_trusted_layer:
+    sys.exit(4)
 PYMERGE
     # #804: rc 3 above means the merge SUCCEEDED (the write already
     # happened) but the untrusted layer was dropped -- must NOT trigger the
     # bundled-only fallback the way a genuine merge failure (any other
     # non-zero rc) still does.
-    if [ "$_py_merge_rc" != "0" ] && [ "$_py_merge_rc" != "3" ]; then
+    if [ "$_py_merge_rc" != "0" ] && [ "$_py_merge_rc" != "3" ] && [ "$_py_merge_rc" != "4" ] && [ "$_py_merge_rc" != "5" ]; then
         cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null
     fi
     # #804: the drop is disclosed on EITHER signal now -- the marker file
@@ -747,12 +771,23 @@ PYMERGE
     # travels on the subprocess's own exit path, not a second filesystem
     # write) -- closing the compound "mktemp AND project config both fail"
     # gap #748 left open.
-    if { [ -n "$_project_drop_marker" ] && [ -f "$_project_drop_marker" ]; } || [ "$_py_merge_rc" = "3" ]; then
+    if { [ -n "$_project_drop_marker" ] && [ -f "$_project_drop_marker" ]; } || [ "$_py_merge_rc" = "3" ] || [ "$_py_merge_rc" = "5" ]; then
         rm -f "$_project_drop_marker" 2>/dev/null
         if declare -F report_error >/dev/null 2>&1; then
             report_error "lib-memory-dir" "sanitizing the project config layer failed (unreadable project file or malformed JSON) -- that layer was dropped; bundled/user-global config still applies"
         else
             printf '%s\n' "[lib-memory-dir] WARNING: sanitizing the project config layer failed (unreadable project file or malformed JSON) -- that layer was dropped; bundled/user-global config still applies" >&2
+        fi
+    fi
+    # #815: rc 4 (or 5, alongside the untrusted drop above) means a TRUSTED
+    # layer (bundled config, user-global config, or project config outside
+    # the untrusted-haiku case) was malformed and dropped -- previously
+    # silent, since neither the marker file nor rc == 3 catches it.
+    if [ "$_py_merge_rc" = "4" ] || [ "$_py_merge_rc" = "5" ]; then
+        if declare -F report_error >/dev/null 2>&1; then
+            report_error "lib-memory-dir" "sanitizing the bundled or user-global config layer failed (unreadable file or malformed JSON) -- that layer was dropped; the remaining layers still applied"
+        else
+            printf '%s\n' "[lib-memory-dir] WARNING: sanitizing the bundled or user-global config layer failed (unreadable file or malformed JSON) -- that layer was dropped; the remaining layers still applied" >&2
         fi
     fi
     [ -n "$_project_drop_marker" ] && rm -f "$_project_drop_marker" 2>/dev/null

@@ -800,6 +800,63 @@ class TestSanitizeStepFailsClosed:
         assert merged == {}
 
 
+class TestMalformedTrustedConfigDisclosure:
+    """#815: the untrusted-project-layer branch above (TestSanitizeStepFailsClosed)
+    already fails closed and discloses the drop via rc 3 / the drop-marker file
+    (#748, #804). The no-jq fallback's OTHER branch -- bundled config and
+    user-global config, both TRUSTED sources -- had no equivalent: a malformed
+    file there raised uncaught, exiting neither 0 nor 3, so the shell's
+    bundled-only fallback fired with NO warning at all. "Trusted" means "the
+    operator wrote it", not "it parses" -- these tests hold no project config
+    at all, so `untrusted_haiku_path` is empty and both sources here go
+    through the plain trusted-load branch being fixed."""
+
+    def test_a_malformed_user_global_cfg_no_jq_fallback_warns_and_drops_just_that_layer(
+        self, tmp_path
+    ):
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(
+            json.dumps({"cooldowns": {"save_seconds": 111}})
+        )
+        (home / ".remember").mkdir(parents=True)
+        (home / ".remember" / "config.json").write_text(
+            '{"cooldowns": {"save_seconds": ' + "9" * 40
+        )
+
+        merged, _, stderr = _run_lib_and_dump_config_with_stderr(
+            project, pipeline, home,
+            env_extra={"PATH": _path_without_jq(tmp_path)},
+        )
+
+        # The malformed user-global layer is dropped; the bundled layer
+        # beneath it still applies rather than being replaced wholesale by
+        # the old "any nonzero rc -> cp bundled over everything" fallback.
+        assert merged["cooldowns"]["save_seconds"] == 111
+        assert "lib-memory-dir" in stderr, stderr
+        assert "WARNING" in stderr, stderr
+
+    def test_a_well_formed_user_global_cfg_no_jq_fallback_does_not_warn(
+        self, tmp_path
+    ):
+        """Positive control for the test above (CLAUDE.md: a negative
+        assertion needs a positive control): the SAME no-jq PATH, but a
+        well-formed user-global config -- must NOT trip the new warning."""
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(json.dumps({}))
+        (home / ".remember").mkdir(parents=True)
+        (home / ".remember" / "config.json").write_text(
+            json.dumps({"cooldowns": {"save_seconds": 222}})
+        )
+
+        merged, _, stderr = _run_lib_and_dump_config_with_stderr(
+            project, pipeline, home,
+            env_extra={"PATH": _path_without_jq(tmp_path)},
+        )
+
+        assert merged["cooldowns"]["save_seconds"] == 222
+        assert "lib-memory-dir" not in stderr, stderr
+
+
 def test_run_lib_sanity_check_still_works():
     """Sanity: the sibling _run_lib helper this file imports (used only for
     its constants above) is still importable and unbroken."""
