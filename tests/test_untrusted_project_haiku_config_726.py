@@ -807,9 +807,12 @@ class TestMalformedTrustedConfigDisclosure:
     user-global config, both TRUSTED sources -- had no equivalent: a malformed
     file there raised uncaught, exiting neither 0 nor 3, so the shell's
     bundled-only fallback fired with NO warning at all. "Trusted" means "the
-    operator wrote it", not "it parses" -- these tests hold no project config
-    at all, so `untrusted_haiku_path` is empty and both sources here go
-    through the plain trusted-load branch being fixed."""
+    operator wrote it", not "it parses". Neither test's malformed file is a
+    project config: the first test also writes a WELL-FORMED project config
+    purely as a discriminator (see its own docstring below -- in this file's
+    default legacy layout that layer is the untrusted-haiku source and goes
+    through the pre-existing #744 branch, not the trusted-load branch this
+    class is about), and the second test has no project config at all."""
 
     def test_a_malformed_user_global_cfg_no_jq_fallback_warns_and_drops_just_that_layer(
         self, tmp_path
