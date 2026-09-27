@@ -7,6 +7,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.35.1] - 2026-09-27 — disclosing dropped trusted config layers, hardening timeout guards and the doctor project-root fallback, refusing tracked/symlinked rotated memory slices, fixing the previous-transcript lookup's quadratic blowup, and scrubbing a maintainer-path leak this release's own audit found and re-found (#802-806, #808, #815-816, #819, #822, #825)
+
+### Fixed
+
+- Fixed: `scripts/doctor.sh` (#802) resolved `CLAUDE_PROJECT_DIR` with a raw `$PWD` fallback in
+  two places when the variable was unset, so a `cd` into a subdirectory earlier in the same shell
+  call made the report resolve project root as that subdirectory instead of the real top level.
+  Both fallback sites now prefer `git rev-parse --show-toplevel`, the same fix #743 applied to
+  `scripts/write-handoff.sh`, falling back to `$PWD` only when the cwd is not inside a git repo.
+
+- `_transcript_is_pluginless_sdk()`'s entrypoint sniff (#745) no longer treats
+  every line carrying a `"message"` key as real dialogue: a bookkeeping
+  record's own `"message"` field (a plain string, unlike real dialogue's
+  nested `{role, content}` object) now falls through to the `"entrypoint"`
+  check instead of masking it, closing one of the three edges logged to
+  `trap.d/745.entrypoint-sniff-has-two-unfixed-edges.md` (#803).
+
+- Fixed (#804): `lib-memory-dir.sh`'s no-jq config-merge fallback now reports a dropped
+  untrusted project config layer even when the drop-marker's own `mktemp` call fails --
+  the merge's own exit code is now a second, independent disclosure signal that does not
+  depend on that `mktemp` succeeding, closing the compound "both fail silently" gap #748
+  left open.
+
+- Fixed: `pipeline/consolidate.py`'s staging -> `recent.md`/`archive.md` consolidation call carried
+  a hardcoded 180s `call_haiku` timeout with no config key (#806, reopening the intent of #788).
+  Output length scales with input length, so a large enough staging batch could time out on every
+  run, be left uncompressed, and grow further every round with no recovery. Now configurable via
+  `thresholds.consolidate_timeout_seconds`, the same fix shape #792 gave the sibling NDC `now.md`
+  -> `today-*.md` path's `thresholds.ndc_timeout_seconds`.
+
+- Fixed: `tests/test_session_start_duration_706.py`'s "a fast run stays quiet" assertion (#808)
+  depended on the real session-start hook finishing under the default 5s threshold, which a
+  loaded CI runner (observed on `windows-latest`) can exceed, making the hook correctly surface
+  the duration and flaking the test. The test now pins the threshold high instead of relying on
+  wall-clock speed, matching the pattern its own positive control already used.
+
+- Fixed (#815): `lib-memory-dir.sh`'s no-jq config-merge fallback now reports a dropped
+  TRUSTED config layer (bundled config, user-global config, or the project config when
+  it is not the untrusted-haiku source) the same way #804 already reports a dropped
+  untrusted layer -- a malformed file there used to raise uncaught, exit neither 0 nor 3,
+  and silently fall back to bundled-only config with no warning at all. Distinct exit
+  codes (4 for a trusted-only drop, 5 for both) let the shell disclose it without a
+  second marker file, and the new warning names all three trusted sources it covers.
+
+- Fixed (#816): the `CONSOLIDATE_TIMEOUT_SECONDS` guard in `scripts/run-consolidation.sh` and
+  the `NDC_TIMEOUT_SECONDS` guard in `scripts/save-session.sh` silently substituted the 180s
+  default whenever `thresholds.consolidate_timeout_seconds` / `thresholds.ndc_timeout_seconds`
+  was empty or contained a non-digit -- an operator who typo'd the value (e.g. "18O") saw
+  exactly the same behaviour as one who deliberately configured 180, with nothing in the daily
+  log distinguishing the two. Both fallback branches now log the malformed value they discard
+  before substituting the default.
+
+- Fixed (#819): `session-start-hook.sh`'s previous-transcript lookup (`previous_transcript()`
+  and `_second_newest_jsonl()`) no longer goes quadratic when the newest transcripts in a
+  sessions directory are pluginless-SDK headless runs. The #745 retry re-ran a full directory
+  glob plus a linear string scan against a growing exclusion list for every excluded candidate,
+  so a directory with thousands of headless transcripts never realistically finished -- orphaned
+  hook processes were found spinning at 30-60% CPU for 70+ minutes with no session left to read
+  their output. The glob now runs exactly once into an array, exclusion is tracked by array
+  index instead of a growing string, and the retry gives up after 20 excluded candidates rather
+  than continuing indefinitely.
+
+- Fixed (#822): `trap.d/804.edit-op-defaulted-to-main-clone-not-worktree.md` no longer names this
+  maintainer's actual local checkout paths -- two leaked local checkout paths are now generic
+  placeholders (`<worktree>`, `<main clone>`), so the fragment still describes the class of trap
+  without disclosing one person's disk layout.
+
+- Fixed (#825): the #822 fix itself put the same maintainer's real local checkout path back
+  into two files it added -- this fragment's own prose, and the positive-control fixture in
+  `tests/test_trap_fragment_no_leaked_home_paths_822.py`. Both now use a generic made-up
+  path/username instead, so neither one ships a real person's disk layout.
+
+### Security
+
+- Refused a git-tracked or symlinked rotated memory slice (`archive-*.md`,
+  `recent-*.md`) rather than listing its path under the "rotated memory
+  slices" header as if it were an ordinary, safe entry -- the same
+  `_remember_may_inject` guard the main memory-file listing and the
+  compact-mode deferred-file listing already apply, now applied here too
+  (#805).
+
 ## [0.35.0] - 2026-09-26 — hardening write-handoff's tracked-target guard against symlinked ancestors, widening Codex's env allow-list and locking down its sandboxed command environment, plus a deferred-injection-guard gap, an NDC timeout knob, and a flaky test fix (#745, #750-751, #776-777, #784, #788, #794, #798-799)
 
 ### Changed
@@ -3607,7 +3688,8 @@ Fixes [#9](https://github.com/Digital-Process-Tools/claude-remember/issues/9), a
 
 ## [0.1.0] — Initial release
 
-[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.35.0...HEAD
+[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.35.1...HEAD
+[0.35.1]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.35.1
 [0.35.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.35.0
 [0.34.1]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.34.1
 [0.34.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.34.0
