@@ -814,6 +814,20 @@ class TestMalformedTrustedConfigDisclosure:
     def test_a_malformed_user_global_cfg_no_jq_fallback_warns_and_drops_just_that_layer(
         self, tmp_path
     ):
+        """A THIRD source (a well-formed, non-haiku project config) is the
+        part that actually discriminates the fix from the bug: `_cfg_sources`
+        is ordered bundled, user-global, project, so the malformed
+        user-global layer is hit BEFORE the project layer is ever read. Pre-
+        fix, the uncaught exception aborts the whole merge subprocess before
+        the project layer's own line is reached -- nothing is ever written,
+        the shell's bundled-only fallback fires, and `extra_layer` is lost.
+        Post-fix, the malformed layer is skipped in place and the loop
+        continues on to merge the project layer -- so `extra_layer` survives
+        only under the fix. Asserting solely on a value that also lives in
+        the bundled config (as an earlier version of this test did) cannot
+        tell the two apart, since bundled-only-fallback and
+        drop-just-that-layer produce an IDENTICAL merged value whenever
+        bundled is the only OTHER source in play."""
         project, pipeline, home = _dirs(tmp_path)
         (pipeline / "config.json").write_text(
             json.dumps({"cooldowns": {"save_seconds": 111}})
@@ -822,6 +836,11 @@ class TestMalformedTrustedConfigDisclosure:
         (home / ".remember" / "config.json").write_text(
             '{"cooldowns": {"save_seconds": ' + "9" * 40
         )
+        remember = project / ".remember"
+        remember.mkdir()
+        (remember / "config.json").write_text(
+            json.dumps({"extra_layer": "still-here"})
+        )
 
         merged, _, stderr = _run_lib_and_dump_config_with_stderr(
             project, pipeline, home,
@@ -829,9 +848,11 @@ class TestMalformedTrustedConfigDisclosure:
         )
 
         # The malformed user-global layer is dropped; the bundled layer
-        # beneath it still applies rather than being replaced wholesale by
-        # the old "any nonzero rc -> cp bundled over everything" fallback.
+        # beneath it AND the project layer read after it both still apply,
+        # rather than everything past the malformed layer being lost to the
+        # old "any nonzero rc -> cp bundled over everything" fallback.
         assert merged["cooldowns"]["save_seconds"] == 111
+        assert merged["extra_layer"] == "still-here"
         assert "lib-memory-dir" in stderr, stderr
         assert "WARNING" in stderr, stderr
 

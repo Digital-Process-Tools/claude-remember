@@ -785,9 +785,9 @@ PYMERGE
     # silent, since neither the marker file nor rc == 3 catches it.
     if [ "$_py_merge_rc" = "4" ] || [ "$_py_merge_rc" = "5" ]; then
         if declare -F report_error >/dev/null 2>&1; then
-            report_error "lib-memory-dir" "sanitizing the bundled or user-global config layer failed (unreadable file or malformed JSON) -- that layer was dropped; the remaining layers still applied"
+            report_error "lib-memory-dir" "sanitizing a trusted config layer failed (unreadable file or malformed JSON) -- bundled config, user-global config, and project config (when it is not the untrusted-haiku source) are all reached here, and one of them was dropped; the remaining layers still applied"
         else
-            printf '%s\n' "[lib-memory-dir] WARNING: sanitizing the bundled or user-global config layer failed (unreadable file or malformed JSON) -- that layer was dropped; the remaining layers still applied" >&2
+            printf '%s\n' "[lib-memory-dir] WARNING: sanitizing a trusted config layer failed (unreadable file or malformed JSON) -- bundled config, user-global config, and project config (when it is not the untrusted-haiku source) are all reached here, and one of them was dropped; the remaining layers still applied" >&2
         fi
     fi
     [ -n "$_project_drop_marker" ] && rm -f "$_project_drop_marker" 2>/dev/null
