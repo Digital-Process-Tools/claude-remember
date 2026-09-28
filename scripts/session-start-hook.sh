@@ -139,6 +139,9 @@ _stdin_json_string() {
     case "$prefix" in *[!:[:space:]]*) return 1 ;; esac
     value=${rest#*\"}
     value=${value%%\"*}
+    # A JSON encoder writes each backslash as `\\` -- a Windows `cwd` from
+    # Codex arrives as `C:\\work\\proj` otherwise (#829).
+    value=${value//\\\\/\\}
     [ -n "$value" ] || return 1
     printf '%s' "$value"
 }
@@ -166,6 +169,7 @@ _stdin_json_string_into() {
     case "$_sjsi_prefix" in *[!:[:space:]]*) return 1 ;; esac
     _sjsi_value=${_sjsi_rest#*\"}
     _sjsi_value=${_sjsi_value%%\"*}
+    _sjsi_value=${_sjsi_value//\\\\/\\}  # decode `\\`, as above (#829)
     [ -n "$_sjsi_value" ] || return 1
     printf -v "$_sjsi_var" '%s' "$_sjsi_value"
 }

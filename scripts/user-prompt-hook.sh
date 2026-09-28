@@ -263,6 +263,9 @@ _stdin_cwd() {
     case "$prefix" in *[!:[:space:]]*) return 1 ;; esac
     value=${rest#*\"}
     value=${value%%\"*}
+    # A JSON encoder writes each backslash as `\\` -- a Windows `cwd` from
+    # Codex arrives as `C:\\work\\proj` otherwise (#829).
+    value=${value//\\\\/\\}
     [ -n "$value" ] || return 1
     printf '%s' "$value"
 }
@@ -287,6 +290,7 @@ _stdin_cwd_into() {
     case "$prefix" in *[!:[:space:]]*) return 1 ;; esac
     value=${rest#*\"}
     value=${value%%\"*}
+    value=${value//\\\\/\\}  # decode `\\`, as in _stdin_cwd (#829)
     [ -n "$value" ] || return 1
     printf -v "$_var" '%s' "$value"
 }

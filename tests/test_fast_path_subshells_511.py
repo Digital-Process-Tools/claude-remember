@@ -102,10 +102,13 @@ def test_stdin_cwd_into_agrees_with_stdin_cwd(raw, expected):
     # confirm this mechanism directly; test_env_cache_key_windows_normalize_504.py
     # in this same commit hits an adjacent but distinct Windows subprocess
     # hazard (bash resolving to the WSL launcher stub) at the same review pass.
+    # The script goes in on stdin for the same reason: Git for Windows'
+    # bash.exe collapses the extractors' `\\` sequences (#829) in a `-c`
+    # argument, observed on Windows 11 / Git Bash 5.2.
     env = dict(os.environ)
     env["STDIN_CWD_TEST_RAW"] = raw
     result = subprocess.run(
-        [BASH, "-c", script], env=env, capture_output=True, text=True, timeout=10, check=False,
+        [BASH], input=script, env=env, capture_output=True, text=True, timeout=10, check=False,
     )
     assert result.returncode == 0, result.stderr
     lines = result.stdout.splitlines()

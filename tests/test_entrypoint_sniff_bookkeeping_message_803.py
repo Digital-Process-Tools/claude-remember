@@ -62,12 +62,17 @@ printf '%%s' "$?"
 
 
 def _run_sniff(transcript_path: Path) -> str:
+    """The script goes in on stdin, not as a `-c` argument: Git for Windows'
+    bash.exe re-parses its command line and collapses the `\\\\` sequences the
+    decode-bearing extractor contains (#829), observed on Windows 11 / Git
+    Bash 5.2."""
     body = "\n".join(
         _function_body(name) for name in ("_stdin_json_string", "_transcript_is_pluginless_sdk")
     )
     script = SNIFF_SCRIPT % body
     result = subprocess.run(
-        [BASH, "-c", script, "bash", str(transcript_path)],
+        [BASH, "-s", "--", str(transcript_path)],
+        input=script,
         env={**os.environ},
         capture_output=True,
         text=True,

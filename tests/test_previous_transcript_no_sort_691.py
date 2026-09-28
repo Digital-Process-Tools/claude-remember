@@ -77,8 +77,13 @@ def _function_bodies(*names: str) -> str:
 
 
 def _run(script: str, args: list[str], env: dict) -> subprocess.CompletedProcess:
+    """The script goes in on stdin, not as a `-c` argument: Git for Windows'
+    bash.exe re-parses its command line and collapses the `\\\\` sequences the
+    decode-bearing extractor contains (#829), observed on Windows 11 / Git
+    Bash 5.2."""
     return subprocess.run(
-        [BASH, "-c", script, "bash", *args],
+        [BASH, "-s", "--", *args],
+        input=script,
         env=env, capture_output=True, text=True, timeout=60, check=False,
     )
 
