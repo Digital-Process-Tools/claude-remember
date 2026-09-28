@@ -11,6 +11,7 @@
 [![Antigravity](https://img.shields.io/badge/Antigravity-plugin-4285F4)](docs/install-antigravity.md)
 [![Version](https://img.shields.io/badge/version-0.35.1-orange)](.claude-plugin/plugin.json)
 [![Stars](https://img.shields.io/github/stars/Digital-Process-Tools/claude-remember?style=social)](https://github.com/Digital-Process-Tools/claude-remember/stargazers)
+[![clones](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/Digital-Process-Tools/claude-remember/badges/clones.json)](https://github.com/Digital-Process-Tools/claude-remember/pulse)
 
 Your coding agent starts every session blank. It doesn't know what you worked on yesterday, what conventions your team follows, or what mistakes it already made. You re-explain everything, every time.
 
