@@ -143,6 +143,24 @@ case "$CONSOLIDATE_TIMEOUT_SECONDS" in
         log "consolidation" "WARNING: thresholds.consolidate_timeout_seconds is not a valid non-negative integer (got '$CONSOLIDATE_TIMEOUT_SECONDS') -- using default 180"
         CONSOLIDATE_TIMEOUT_SECONDS=180
         ;;
+    *)
+        # #823: digits-only at this point, but the guard above never bounded
+        # the VALUE -- 0 times out this call immediately on every run (the
+        # one-way staging ratchet #806 exists to prevent), and a value with
+        # 10+ digits (>= 1e9s) reaches the same overflow this repo already
+        # reproduced for pipeline.shell's subprocess.run(timeout=...):
+        # OverflowError inside PyTime_t at 9e9 and 1e10, logged as a generic
+        # pipeline failure rather than this key's own malformed-value
+        # WARNING. Length-gated (no arithmetic on the raw digits) so this
+        # check itself cannot overflow on an arbitrarily long digit string.
+        if [ "${#CONSOLIDATE_TIMEOUT_SECONDS}" -gt 9 ]; then
+            log "consolidation" "WARNING: thresholds.consolidate_timeout_seconds ($CONSOLIDATE_TIMEOUT_SECONDS) is too large and would crash the consolidation call with an OverflowError -- using default 180"
+            CONSOLIDATE_TIMEOUT_SECONDS=180
+        elif [ "$CONSOLIDATE_TIMEOUT_SECONDS" -eq 0 ]; then
+            log "consolidation" "WARNING: thresholds.consolidate_timeout_seconds is 0, which times out the consolidation call immediately on every run -- using default 180"
+            CONSOLIDATE_TIMEOUT_SECONDS=180
+        fi
+        ;;
 esac
 log "consolidation" "start"
 RESULT=$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell consolidate "$STAGING_DIR" "$RECENT_FILE" "$ARCHIVE_FILE" "$CONSOLIDATE_MAX_BYTES" "$SNAPSHOT_DIR" "$CONSOLIDATE_TIMEOUT_SECONDS" 2>&1) || {

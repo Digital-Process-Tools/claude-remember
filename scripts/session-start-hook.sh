@@ -1026,6 +1026,13 @@ previous_transcript() {
             taken[$best_idx]=1
             tries=$((tries + 1))
             if [ "$tries" -ge "${_PREV_TRANSCRIPT_EXCLUDE_CAP:-20}" ]; then
+                # #823: this used to return exactly the same empty result as
+                # "no previous transcript exists at all", so a real one
+                # sitting behind more than the cap's worth of pluginless-SDK
+                # runs was indistinguishable from there being none -- the
+                # recovery force-save and the #200 capture-gap warning (both
+                # gated on PREV_ID) skipped silently, with no trace anywhere.
+                log "hook" "WARNING: previous_transcript gave up after ${_PREV_TRANSCRIPT_EXCLUDE_CAP:-20} pluginless-SDK exclusions in $dir -- a real previous session may exist beyond the cap; recovery and the #200 capture-gap check will both treat this the same as no previous session existing"
                 newest=""
                 break
             fi
@@ -1082,6 +1089,11 @@ _second_newest_jsonl() {
             taken[$best_idx]=1
             tries=$((tries + 1))
             if [ "$tries" -ge "${_PREV_TRANSCRIPT_EXCLUDE_CAP:-20}" ]; then
+                # #823: same silent give-up as previous_transcript() above --
+                # identical to "no second-newest transcript exists", so the
+                # #200 capture-gap check treats a real one hidden behind the
+                # cap the same as there being none at all.
+                log "hook" "WARNING: _second_newest_jsonl gave up after ${_PREV_TRANSCRIPT_EXCLUDE_CAP:-20} pluginless-SDK exclusions in $dir -- a real second-newest transcript may exist beyond the cap; the #200 capture-gap check will treat this the same as no previous session existing"
                 newest=""
                 break
             fi

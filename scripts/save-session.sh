@@ -1155,6 +1155,21 @@ if [ "$RUN_NDC" = true ]; then
                     log "ndc" "WARNING: thresholds.ndc_timeout_seconds is not a valid non-negative integer (got '$NDC_TIMEOUT_SECONDS') -- using default 180"
                     NDC_TIMEOUT_SECONDS=180
                     ;;
+                *)
+                    # #823: same fix shape as run-consolidation.sh's sibling
+                    # guard -- 0 times out this call immediately every run,
+                    # and 10+ digits (>= 1e9s) reaches the same OverflowError
+                    # this repo reproduced inside PyTime_t at 9e9/1e10.
+                    # Length-gated so the check itself never does arithmetic
+                    # on an arbitrarily long digit string.
+                    if [ "${#NDC_TIMEOUT_SECONDS}" -gt 9 ]; then
+                        log "ndc" "WARNING: thresholds.ndc_timeout_seconds ($NDC_TIMEOUT_SECONDS) is too large and would crash the NDC call with an OverflowError -- using default 180"
+                        NDC_TIMEOUT_SECONDS=180
+                    elif [ "$NDC_TIMEOUT_SECONDS" -eq 0 ]; then
+                        log "ndc" "WARNING: thresholds.ndc_timeout_seconds is 0, which times out the NDC call immediately on every run -- using default 180"
+                        NDC_TIMEOUT_SECONDS=180
+                    fi
+                    ;;
             esac
             NDC_VARS=$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell call-haiku "$NDC_PROMPT" "" "$NDC_TIMEOUT_SECONDS" 2>"$NDC_ERR")
             NDC_EXIT=$?
