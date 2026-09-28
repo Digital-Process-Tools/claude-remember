@@ -1,0 +1,126 @@
+# #828 -- accumulate GitHub's traffic/clones count past its 14-day window and
+# publish it as a shields.io endpoint badge.
+#
+# GitHub's traffic API only keeps the last 14 days (see issue #828), so a
+# total needs a job that runs regularly and keeps its own history. This
+# writes that history to an orphan `badges` branch rather than `main`, so the
+# nightly commit never shows up in this repository's real history and never
+# triggers `tests.yml` or `oss-changelog.yml` (both trigger on `main`/pull
+# requests, not on a push to an unrelated branch).
+name: clones badge
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch: {}
+
+# One run at a time: two concurrent runs both reading history.json, both
+# appending today's entry and both pushing would race on the push, and the
+# loser's data is silently dropped rather than merged.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+# Declared at workflow level so a step added later inherits read-only rather
+# than the repository default, which is read/write in a repository whose
+# owner has never changed it. `contents: write` is granted on the job below --
+# GitHub Actions has no step-level `permissions:` key, so every step in that
+# job runs with write access, not only the one that pushes to `badges` -- and
+# every other job in this workflow stays read-only (#1462 in
+# .github/workflows/oss-changelog.yml documents why this split matters).
+permissions:
+  contents: read
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      # Pinned to a commit SHA, not a moving major tag, for the same reason
+      # .github/workflows/oss-changelog.yml pins it (#1462): an unpinned tag
+      # runs whatever its publisher pushes next under this repository's own
+      # token. Same SHA already vetted and watched by .github/dependabot.yml.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+
+      # The `badges` branch is an orphan: it holds only `history.json` and
+      # `clones.json`, never `main`'s tree. Its first-ever run has to create
+      # it, so this checks for it rather than assuming it exists.
+      - name: Switch to (or create) the orphan badges branch
+        run: |
+          set -eu
+          if git ls-remote --exit-code --heads origin badges >/dev/null 2>&1; then
+            git fetch origin badges:badges
+            git checkout badges
+          else
+            git checkout --orphan badges
+            git rm -rf . >/dev/null 2>&1 || true
+          fi
+
+      # TRAFFIC_TOKEN is a fine-grained PAT with "Administration: read" on
+      # this repo, created by a maintainer (issue #828 step 1) -- a step that
+      # happens after this workflow file merges, not before. Until then (or
+      # if the PAT is ever revoked) this must skip cleanly rather than
+      # redden every nightly run: the default GITHUB_TOKEN cannot read this
+      # endpoint at all (no `administration` key in `permissions:`).
+      - name: Fetch traffic/clones
+        env:
+          GH_TOKEN: ${{ secrets.TRAFFIC_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -eu
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "clones-badge: skipped (TRAFFIC_TOKEN secret is not set -- see issue #828 step 1)"
+            exit 0
+          fi
+          gh api "repos/${GH_REPO}/traffic/clones" > traffic.json
+
+      # Merge today's daily entries into the running history, deduplicated by
+      # timestamp so a re-run (workflow_dispatch, or a retried cron) does not
+      # double-count a day the API already reported. GitHub's traffic/clones
+      # endpoint reports the current (in-progress) day with a partial count
+      # that grows on later fetches, so on a timestamp collision the FRESH
+      # `traffic.json` entry must win over the STALE one already recorded in
+      # `history.json` -- `unique_by` keeps the first element it sees per key
+      # (it is `group_by | map(.[0])`, and `group_by`'s sort is stable), so
+      # `traffic.json`'s entries are concatenated first, not `history.json`'s.
+      - name: Merge into history and write the badge
+        if: hashFiles('traffic.json') != ''
+        run: |
+          set -eu
+          [ -f history.json ] || echo '[]' > history.json
+          jq -s '
+            ((.[1].clones // []) + .[0])
+            | unique_by(.timestamp)
+            | sort_by(.timestamp)
+          ' history.json traffic.json > history.json.tmp
+          mv history.json.tmp history.json
+          rm -f traffic.json
+
+          total=$(jq '[.[].count] | add // 0' history.json)
+          # shields.io endpoint format wants a short human label ("2.9M"),
+          # not the raw integer -- matches the "clones", not "downloads"
+          # framing from issue #828: GitHub's own number, shown as-is.
+          human=$(awk -v n="$total" 'BEGIN {
+            if (n >= 1000000) printf "%.1fM", n / 1000000
+            else if (n >= 1000) printf "%.1fk", n / 1000
+            else printf "%d", n
+          }')
+          jq -n --arg msg "$human" '{schemaVersion: 1, label: "clones", message: $msg, color: "blue"}' > clones.json
+
+      - name: Commit and push
+        if: hashFiles('clones.json') != ''
+        run: |
+          set -eu
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add history.json clones.json
+          if git diff --cached --quiet; then
+            echo "clones-badge: no new data to commit"
+            exit 0
+          fi
+          git commit -m "chore: update clones badge data"
+          git push origin HEAD:badges
