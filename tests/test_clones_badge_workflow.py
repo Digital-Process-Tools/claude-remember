@@ -9,10 +9,12 @@ pass on a typo just as readily as on a correct file.
 
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 
+import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -104,6 +106,14 @@ def test_workflow_does_not_fail_loudly_when_the_secret_is_absent():
     stubbed `gh` that would leave a marker file if invoked, so a regression
     that deletes the guard's `exit 0` (letting execution reach `gh api`) fails
     this test rather than passing it.
+
+    Both scripts are written to real files with an explicit LF newline and
+    bash is invoked on the FILE PATH rather than via `bash -c "<multi-line
+    string>"`: passing a multi-line script as one command-line argument, and
+    `Path.write_text`'s platform-default newline translation (CRLF on
+    Windows), are both real cross-platform risk here -- windows-latest CI
+    caught this test itself failing for exactly that class of reason (#828
+    PR review round), independently of the guard logic under test.
     """
     doc = _load_workflow()
     steps = doc["jobs"]["update"]["steps"]
@@ -117,20 +127,29 @@ def test_workflow_does_not_fail_loudly_when_the_secret_is_absent():
         f"{WORKFLOW} never references the TRAFFIC_TOKEN secret described in issue #828"
     )
 
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("no `bash` on PATH -- cannot exercise the guard's own shell script here")
+
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         marker = tmp_path / "gh_was_called"
+
         fake_gh = tmp_path / "gh"
-        fake_gh.write_text(f"#!/bin/sh\ntouch '{marker}'\nexit 1\n", encoding="utf-8")
+        with open(fake_gh, "w", encoding="utf-8", newline="\n") as f:
+            f.write(f"#!/bin/sh\ntouch '{marker}'\nexit 1\n")
         fake_gh.chmod(0o755)
 
-        env = dict(os.environ)
-        env.pop("GH_TOKEN", None)
+        script = tmp_path / "fetch-step.sh"
+        with open(script, "w", encoding="utf-8", newline="\n") as f:
+            f.write(fetch_step["run"])
+
+        env = {k: v for k, v in os.environ.items() if k.upper() != "GH_TOKEN"}
         env["GH_REPO"] = "example/example"
         env["PATH"] = f"{tmp_path}{os.pathsep}{env.get('PATH', '')}"
 
         result = subprocess.run(
-            ["bash", "-c", fetch_step["run"]],
+            [bash, str(script)],
             env=env,
             cwd=tmp_path,
             capture_output=True,
@@ -140,8 +159,9 @@ def test_workflow_does_not_fail_loudly_when_the_secret_is_absent():
         )
 
     assert result.returncode == 0, (
-        "the TRAFFIC_TOKEN guard did not skip cleanly with GH_TOKEN unset -- "
-        f"exit {result.returncode}, stderr={result.stderr!r}"
+        f"the TRAFFIC_TOKEN guard did not skip cleanly with GH_TOKEN unset -- "
+        f"bash={bash!r}, exit {result.returncode}, "
+        f"stdout={result.stdout!r}, stderr={result.stderr!r}"
     )
     assert not marker.exists(), (
         "the guard let execution reach `gh api` even though GH_TOKEN was unset "
