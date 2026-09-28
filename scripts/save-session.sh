@@ -694,6 +694,16 @@ TMP_PROMPT=$(mktemp "${TMPDIR:-/tmp}"/remember-prompt-XXXXXX)
 CLEANUP_FILES+=("$TMP_PROMPT")
 
 EXTRACT_MAX_BYTES=$(config ".thresholds.extract_max_bytes" 300000)
+# #834: this used to substitute the default silently, so a typo'd config value
+# (e.g. "3OOOOO") looked identical to a deliberate 300000 -- nothing in the
+# daily log told an operator their override was never read. Same guard shape
+# as #816/#821's consolidate_timeout_seconds/ndc_timeout_seconds fix.
+case "$EXTRACT_MAX_BYTES" in
+    ''|*[!0-9]*)
+        log "prompt" "WARNING: thresholds.extract_max_bytes is not a valid non-negative integer (got '$EXTRACT_MAX_BYTES') -- using default 300000"
+        EXTRACT_MAX_BYTES=300000
+        ;;
+esac
 cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell build-prompt "$EXTRACT_FILE" "$TMP_LAST_ENTRY" "$CURRENT_TIME" "$BRANCH" "$TMP_PROMPT" "$EXTRACT_MAX_BYTES"
 
 [ ! -s "$TMP_PROMPT" ] && { log "prompt" "ERROR: empty"; exit 1; }

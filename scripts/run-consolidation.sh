@@ -130,6 +130,17 @@ staging_lock_release
 # Oversized-prompt skip-guard: cap the assembled prompt so a runaway staging/
 # archive never overflows Haiku's window (skips cleanly instead of crashing).
 CONSOLIDATE_MAX_BYTES=$(config ".thresholds.consolidate_max_bytes" 600000)
+# #834: this used to substitute the default silently, so a typo'd config value
+# (e.g. "6OOOOO") looked identical to a deliberate 600000 -- nothing in the
+# daily log told an operator their override was never read. Unlike the
+# timeout guard below, 0 is a valid, meaningful value here (#360: disables the
+# cap), so this only rejects empty/non-digit strings, never 0 itself.
+case "$CONSOLIDATE_MAX_BYTES" in
+    ''|*[!0-9]*)
+        log "consolidation" "WARNING: thresholds.consolidate_max_bytes is not a valid non-negative integer (got '$CONSOLIDATE_MAX_BYTES') -- using default 600000"
+        CONSOLIDATE_MAX_BYTES=600000
+        ;;
+esac
 # #806: same fix shape as #788/#792's NDC ndc_timeout_seconds -- output length
 # scales with input length, so a large enough staging batch can time out on
 # every run, be left uncompressed, and grow further every round with no
