@@ -33,9 +33,12 @@ pytestmark = pytest.mark.skipif(
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 STUB_SHELL = '''\
-import sys
+import os, sys
 
+CALLS = os.environ["STUB_CALLS_LOG"]
 cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+with open(CALLS, "a") as f:
+    f.write(" ".join([cmd] + sys.argv[2:]) + chr(10))
 if cmd == "consolidate":
     print("STAGING_COUNT=0")
     print("CONSOLIDATION_STATUS=ok")
@@ -71,6 +74,8 @@ def _make_env(tmp_path: Path, *, consolidate_timeout_seconds):
     cfg_path = tmp_path / "config.json"
     cfg_path.write_text(json.dumps(cfg))
 
+    calls_log = tmp_path / "calls.log"
+    calls_log.write_text("")
     env = {
         **os.environ,
         "HOME": str(tmp_path / "home"),
@@ -79,8 +84,9 @@ def _make_env(tmp_path: Path, *, consolidate_timeout_seconds):
         "REMEMBER_CONFIG": str(cfg_path),
         "REMEMBER_DIR": str(remember),
         "_LIB_MEMORY_DIR_LOADED": "1",
+        "STUB_CALLS_LOG": str(calls_log),
     }
-    return env, project, remember
+    return env, project, remember, calls_log
 
 
 def _run(plugin: Path, env: dict):
@@ -92,11 +98,20 @@ def _daily_log_text(remember: Path) -> str:
     return "".join(p.read_text(encoding="utf-8") for p in (remember / "logs").glob("*.log"))
 
 
+def _consolidate_call_line(calls_log: Path) -> str:
+    """The one `consolidate ...` invocation this stub records -- its last
+    argv slot is the CONSOLIDATE_TIMEOUT_SECONDS value actually forwarded,
+    after the guard has run (#823 self-review finding)."""
+    lines = [line for line in calls_log.read_text().splitlines() if line.startswith("consolidate")]
+    assert lines, f"no consolidate invocation found in the calls log: {calls_log.read_text()!r}"
+    return lines[-1]
+
+
 class TestConsolidateTimeoutMalformedIsLogged:
     """#816: the fallback branch must name what it discarded, not stay silent."""
 
     def test_malformed_value_is_logged(self, tmp_path):
-        env, _project, remember = _make_env(tmp_path, consolidate_timeout_seconds="18O")
+        env, _project, remember, _calls = _make_env(tmp_path, consolidate_timeout_seconds="18O")
         plugin = Path(env["CLAUDE_PLUGIN_ROOT"])
 
         result = _run(plugin, env)
@@ -114,7 +129,7 @@ class TestConsolidateTimeoutMalformedIsLogged:
     def test_valid_value_is_not_logged_as_malformed(self, tmp_path):
         """Positive control: a genuinely valid override must not trip the
         new warning."""
-        env, _project, remember = _make_env(tmp_path, consolidate_timeout_seconds=42)
+        env, _project, remember, _calls = _make_env(tmp_path, consolidate_timeout_seconds=42)
         plugin = Path(env["CLAUDE_PLUGIN_ROOT"])
 
         result = _run(plugin, env)
@@ -135,7 +150,7 @@ class TestConsolidateTimeoutDestructiveValuesRejected:
     this key's own malformed-value message."""
 
     def test_zero_is_rejected_and_logged(self, tmp_path):
-        env, _project, remember = _make_env(tmp_path, consolidate_timeout_seconds=0)
+        env, _project, remember, calls = _make_env(tmp_path, consolidate_timeout_seconds=0)
         plugin = Path(env["CLAUDE_PLUGIN_ROOT"])
 
         result = _run(plugin, env)
@@ -147,12 +162,18 @@ class TestConsolidateTimeoutDestructiveValuesRejected:
             f"was not reported at all: {logs!r}"
         )
 
+        line = _consolidate_call_line(calls)
+        assert line.split(" ")[-1] == "180", (
+            f"a configured timeout of 0 was not rejected and fell through to "
+            f"the pipeline.shell consolidate invocation unchanged: {line!r}"
+        )
+
     def test_huge_value_is_rejected_and_logged(self, tmp_path):
         """9000000000 is the smallest value this repo has reproduced
         crashing pipeline.shell's subprocess.run(timeout=...) with
         OverflowError -- the guard must catch it before it ever reaches
         there."""
-        env, _project, remember = _make_env(tmp_path, consolidate_timeout_seconds=9000000000)
+        env, _project, remember, calls = _make_env(tmp_path, consolidate_timeout_seconds=9000000000)
         plugin = Path(env["CLAUDE_PLUGIN_ROOT"])
 
         result = _run(plugin, env)
@@ -164,10 +185,16 @@ class TestConsolidateTimeoutDestructiveValuesRejected:
             f"downstream) was not reported at all: {logs!r}"
         )
 
+        line = _consolidate_call_line(calls)
+        assert line.split(" ")[-1] == "180", (
+            f"a configured timeout of 9000000000 was not rejected and fell "
+            f"through to the pipeline.shell consolidate invocation unchanged: {line!r}"
+        )
+
     def test_moderately_large_value_is_not_rejected(self, tmp_path):
         """Positive control: a large but sane override (1 hour) must not
         trip either new guard."""
-        env, _project, remember = _make_env(tmp_path, consolidate_timeout_seconds=3600)
+        env, _project, remember, calls = _make_env(tmp_path, consolidate_timeout_seconds=3600)
         plugin = Path(env["CLAUDE_PLUGIN_ROOT"])
 
         result = _run(plugin, env)
@@ -176,4 +203,9 @@ class TestConsolidateTimeoutDestructiveValuesRejected:
         logs = _daily_log_text(remember)
         assert "consolidate_timeout_seconds" not in logs, (
             f"a sane 3600s override was reported as malformed/too large: {logs!r}"
+        )
+
+        line = _consolidate_call_line(calls)
+        assert line.split(" ")[-1] == "3600", (
+            f"a sane 3600s override did not reach the pipeline.shell consolidate invocation: {line!r}"
         )
