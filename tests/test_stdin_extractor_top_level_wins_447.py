@@ -107,12 +107,18 @@ def _extract_function(script: str, func_name: str) -> str:
 
 
 def _call(script: str, func_name: str, keyed: bool, key: str, raw: str):
-    """Run the extracted function in a fresh bash, return (returncode, stdout)."""
+    """Run the extracted function in a fresh bash, return (returncode, stdout).
+
+    The script goes in on stdin, not as a `-c` argument: Git for Windows'
+    bash.exe re-parses its command line and collapses the `\\\\` sequences
+    the extractors contain (#829), observed on Windows 11 / Git Bash 5.2.
+    """
     body = _extract_function(script, func_name)
     args = [key, raw] if keyed else [raw]
     call = func_name + " " + " ".join(shlex.quote(a) for a in args)
     result = subprocess.run(
-        [BASH, "-c", body + "\n" + call],
+        [BASH],
+        input=body + "\n" + call,
         capture_output=True,
         text=True,
         timeout=10,
