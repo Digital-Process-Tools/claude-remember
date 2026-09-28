@@ -1,5 +1,6 @@
 """Committed files must not carry a real OS home-directory path or the
-current machine's real OS username (#467).
+current machine's real OS username (#467), and must not carry a value
+already confirmed to have leaked once before (#835's recurrence guard).
 
 ## The mechanism -- and a correction to this file's own first draft
 
@@ -186,9 +187,28 @@ can run everywhere, always, including CI.
 an entry yet. It is not a place to paste a real leaked value -- that would
 just reintroduce the exact leak this detector exists to prevent recurrence
 of, the same composition #474 already found and fixed for THIS_FILE above.
-Instead it holds `hashlib.sha256(leaked_value.encode()).hexdigest()` for
-each confirmed-real leaked value; a maintainer adds one hex digest after a
+Instead it holds the return value of `_leak_hash(token)` for each
+confirmed-real leaked value; a maintainer adds one hex digest after a
 future incident is confirmed and scrubbed, never the plaintext.
+
+Use `_leak_hash()`, not a bare `hashlib.sha256(...).hexdigest()` call, to
+build an entry. The scanner below only ever hashes whatever `_LEAK_TOKEN`
+extracts -- a run of `[A-Za-z0-9_.-]` characters -- so hashing a full
+leaked PATH or sentence (`/Users/realname/project`, say) produces a digest
+that can never match: the tokenizer only ever sees the pieces between the
+`/` separators ("Users", "realname", "project"), never the whole string,
+and no error says so. That is exactly the shape #822 leaked. `_leak_hash`
+refuses a value that is not already a single bare token, so this mistake
+fails loudly when the entry is added rather than shipping as a permanently
+silent no-op that still reads as a correctly configured guard.
+
+Scope, stated precisely rather than left to be read as more than it is:
+this only ever matches an EXACT, case-sensitive, separator-delimited
+recurrence of an already-hashed token. A previously-leaked value
+resurfacing with different case, or concatenated into a larger token with
+no separator (`backup_realname_2024`), is invisible to it by construction
+-- narrower than "this value can never come back unnoticed," which this
+detector does not promise.
 
 This does NOT solve #835's general question -- a genuinely NEW leaked
 value, never seen before, has no hash on this list and is invisible to
@@ -580,11 +600,35 @@ def test_no_tracked_file_leaks_the_current_machine_username():
 
 # Ships empty: no incident has yet been converted into an entry. See the
 # module docstring's "Detector 3" section for the rationale and for how to
-# add one after a future incident -- the hex digest of the leaked value,
-# never the plaintext value itself.
+# add one after a future incident -- build each entry with _leak_hash(),
+# never a bare hashlib call and never the plaintext value itself.
 _KNOWN_LEAK_HASHES: frozenset[str] = frozenset()
 
 _LEAK_TOKEN = re.compile(r"[A-Za-z0-9_.-]{4,}")
+
+
+def _leak_hash(token: str) -> str:
+    """The only supported way to build a _KNOWN_LEAK_HASHES entry (#835
+    review finding). `token` must already be exactly what _LEAK_TOKEN
+    would extract on its own -- a bare username or single path segment,
+    no `/`, `:`, `@`, quote or whitespace character. Hashing a full
+    leaked PATH or sentence here (e.g. "/Users/realname/project") would
+    build an entry that can never match anything: the scanner below only
+    ever hashes the pieces _LEAK_TOKEN extracts ("Users", "realname",
+    "project"), never the whole string, so the mismatch would ship as a
+    permanently silent no-op with no error to say so -- exactly the shape
+    #822 leaked. Refusing it here turns that into a loud failure at the
+    moment the entry is written instead."""
+    if _LEAK_TOKEN.fullmatch(token) is None:
+        raise ValueError(
+            f"{token!r} is not a bare _LEAK_TOKEN unit -- it contains a "
+            "separator (e.g. '/', ':', '@', a quote, or whitespace) that "
+            "the scanner would split on, so hashing it as-is would build "
+            "an entry that can never match any tracked file. Hash the "
+            "leaked username or single path segment itself, not the full "
+            "path or sentence it appeared in."
+        )
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
 def _known_leak_offenders(files: list[Path]) -> list[str]:
@@ -610,11 +654,12 @@ def test_known_leak_hash_detector_fires_on_a_planted_leak(monkeypatch, tmp_path)
     """Positive control (#835): _KNOWN_LEAK_HASHES ships empty, so the
     real check below would pass vacuously forever without this. Plants a
     token, hashes it the same way a maintainer would after a future
-    incident, and drives it through the real matching function
-    (_known_leak_offenders), not a bare string comparison -- proving the
-    hashing and the file scan actually connect."""
+    incident (via _leak_hash, not a bare hashlib call), and drives it
+    through the real matching function (_known_leak_offenders), not a
+    bare string comparison -- proving the hashing and the file scan
+    actually connect."""
     planted = "definitely-not-a-real-leaked-value-835"
-    digest = hashlib.sha256(planted.encode("utf-8")).hexdigest()
+    digest = _leak_hash(planted)
     monkeypatch.setattr(f"{__name__}._KNOWN_LEAK_HASHES", frozenset({digest}))
     leaking = tmp_path / "leaked.py"
     leaking.write_text(f'value = "{planted}"\n', encoding="utf-8")
@@ -630,7 +675,7 @@ def test_known_leak_hash_detector_does_not_fire_on_an_unrelated_file(monkeypatch
     real hash on the list must not make the detector fire on unrelated
     content that happens to share no token with it)."""
     planted = "definitely-not-a-real-leaked-value-835"
-    digest = hashlib.sha256(planted.encode("utf-8")).hexdigest()
+    digest = _leak_hash(planted)
     monkeypatch.setattr(f"{__name__}._KNOWN_LEAK_HASHES", frozenset({digest}))
     clean = tmp_path / "clean.py"
     clean.write_text('value = "totally-unrelated-content"\n', encoding="utf-8")
@@ -638,6 +683,26 @@ def test_known_leak_hash_detector_does_not_fire_on_an_unrelated_file(monkeypatch
     offenders = _known_leak_offenders([clean])
 
     assert not offenders, f"known-leak hash detector false-fired on unrelated content: {offenders}"
+
+
+def test_leak_hash_rejects_a_value_that_is_not_a_bare_token():
+    """MUST-FIRE regression case for the review finding this fixes: a
+    maintainer who follows the module docstring's old wording and hashes
+    a full leaked PATH (rather than a single username/path-segment
+    token) would build a _KNOWN_LEAK_HASHES entry that can never match
+    anything, silently, because _LEAK_TOKEN would only ever see the
+    pieces between the '/' separators. _leak_hash must refuse that input
+    outright rather than accept it and hash the wrong thing."""
+    with pytest.raises(ValueError, match="not a bare _LEAK_TOKEN unit"):
+        _leak_hash("/Users/realname/project")
+
+
+def test_leak_hash_accepts_a_bare_token():
+    """Positive control pairing the one above: a value that IS already a
+    single bare token (no separators) must be accepted and hashed, or
+    the rejection above would just be a detector that accepts nothing."""
+    digest = _leak_hash("realname")
+    assert digest == hashlib.sha256(b"realname").hexdigest()
 
 
 def test_no_tracked_file_matches_a_known_leaked_value_hash():
@@ -648,7 +713,11 @@ def test_no_tracked_file_matches_a_known_leaked_value_hash():
     This is what would have caught #822's fix reintroducing the same
     real value into two OTHER files while CI stayed green throughout:
     once that value's hash is on _KNOWN_LEAK_HASHES, any tracked file
-    matching it fails here, forever, on every platform.
+    carrying an EXACT, case-sensitive, separator-delimited recurrence of
+    it fails here on every platform -- see _leak_hash and the module
+    docstring's Detector 3 section for what "exact" excludes (a
+    different case, or the same value fused into a larger token with no
+    separator).
 
     This does NOT solve #835's general question -- a genuinely NEW leak,
     never seen before, has no hash on this list and is invisible to this
