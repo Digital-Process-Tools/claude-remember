@@ -50,7 +50,11 @@ jobs:
       - name: Install test deps
         run: |
           python -m pip install --upgrade pip
-          pip install pytest pytest-cov
+          # pyyaml: tests/test_clones_badge_workflow.py (#828) parses
+          # .github/workflows/clones-badge.yml with yaml.safe_load to check
+          # its shape (SHA-pinned actions, permissions, triggers) rather than
+          # regex-matching a hand-rolled YAML subset.
+          pip install pytest pytest-cov pyyaml
       - name: Install Windows tzdata
         if: runner.os == 'Windows'
         run: pip install tzdata
