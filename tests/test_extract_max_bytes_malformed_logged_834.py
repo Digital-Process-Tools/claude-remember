@@ -67,3 +67,21 @@ class TestExtractMaxBytesMalformedIsLogged:
             f"a valid configured cap was reported as malformed: {log_text!r}"
         )
         assert _build_prompt_max_bytes_arg(calls) == "54321"
+
+    def test_zero_is_not_rejected_it_means_disabled(self, tmp_path):
+        """#360: 0 is a valid, meaningful value for the sibling
+        consolidate_max_bytes key (disables the cap) -- the same guard shape
+        here must not treat extract_max_bytes=0 as malformed either."""
+        env, project, plugin, calls, sid = _make_env(
+            tmp_path, exchanges=4, humans=5, config={"extract_max_bytes": 0},
+        )
+        result = _run(plugin, env, sid)
+        assert result.returncode == 0, result.stderr
+
+        log_text = _memory_log_text(project)
+        assert "extract_max_bytes" not in log_text, (
+            f"a deliberate 0 was reported as malformed: {log_text!r}"
+        )
+        assert _build_prompt_max_bytes_arg(calls) == "0", (
+            "a deliberate 0 was replaced with the default instead of passed through"
+        )
