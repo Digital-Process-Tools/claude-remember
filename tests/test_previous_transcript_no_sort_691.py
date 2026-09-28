@@ -130,13 +130,28 @@ def _populate_with_pluginless_sdk_prefix(
     return paths
 
 
+# #823: `log` is not defined in this extracted-function sandbox at all (the
+# real definition lives in scripts/log.sh, never sourced here) -- a bare
+# `log "hook" "..."` call inside either function under test would print
+# "command not found" to stderr and otherwise be silently swallowed (no
+# `set -e`), which is worse than useless for a test asserting the WARNING
+# fires: it would look identical to the message being written correctly.
+# This stub gives the cap-hit warning somewhere real to land.
+_LOG_STUB = r"""
+log() {
+    printf 'LOG[%%s]: %%s\n' "$1" "$2" >&2
+}
+"""
+
 PREVIOUS_TRANSCRIPT_SCRIPT = r"""
+""" + _LOG_STUB + r"""
 %s
 CURRENT_SESSION_ID="$2"
 previous_transcript "$1"
 """
 
 SECOND_NEWEST_SCRIPT = r"""
+""" + _LOG_STUB + r"""
 %s
 _second_newest_jsonl "$1"
 printf '%%s' "$_TWO_NEWEST_JSONL_SECOND"
@@ -399,4 +414,88 @@ def test_second_newest_gives_up_past_the_exclusion_cap(tmp_path):
         f"and return nothing, got {result.stdout.strip()!r} (the real "
         f"transcript {real_second_newest} exists but sits behind "
         f"{pluginless_run} pluginless-SDK transcripts): {result.stderr}"
+    )
+
+
+def test_previous_transcript_logs_on_cap_give_up(tmp_path):
+    """#823: giving up past the exclusion cap used to return the exact same
+    empty result as "no previous transcript exists at all", with nothing
+    logged anywhere -- so a real previous session sitting behind more than
+    the cap's worth of pluginless-SDK runs was never reported as skipped.
+    Must-fire case: hitting the cap must log something naming the cap."""
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    pluginless_run = 25  # > _PREV_TRANSCRIPT_EXCLUDE_CAP (20)
+    _populate_with_pluginless_sdk_prefix(
+        sessions, pluginless_run + 1, pluginless_count=pluginless_run
+    )
+
+    body = _function_bodies("_stdin_json_string", "_transcript_is_pluginless_sdk", "previous_transcript")
+    script = PREVIOUS_TRANSCRIPT_SCRIPT % body
+    env = {**os.environ}
+
+    result = _run(script, [str(sessions), "no-such-session-id"], env)
+    assert result.returncode == 0, result.stderr
+    assert "previous_transcript" in result.stderr, (
+        f"hitting the exclusion cap logged nothing identifying which "
+        f"function gave up: {result.stderr!r}"
+    )
+
+
+def test_previous_transcript_does_not_log_below_the_cap(tmp_path):
+    """Positive control: the new cap-hit log line must not fire on the
+    ordinary "found it below the cap" path this file already pins above."""
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    _populate_with_pluginless_sdk_prefix(sessions, 30, pluginless_count=5)
+
+    body = _function_bodies("_stdin_json_string", "_transcript_is_pluginless_sdk", "previous_transcript")
+    script = PREVIOUS_TRANSCRIPT_SCRIPT % body
+    env = {**os.environ}
+
+    result = _run(script, [str(sessions), "no-such-session-id"], env)
+    assert result.returncode == 0, result.stderr
+    assert "LOG[" not in result.stderr, (
+        f"the cap-hit warning fired even though the real transcript was "
+        f"found well below the cap: {result.stderr!r}"
+    )
+
+
+def test_second_newest_logs_on_cap_give_up(tmp_path):
+    """Sibling of test_previous_transcript_logs_on_cap_give_up for
+    _second_newest_jsonl()'s own copy of the same retry shape."""
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    pluginless_run = 22  # > _PREV_TRANSCRIPT_EXCLUDE_CAP (20) once "own" is excluded
+    _populate_with_pluginless_sdk_prefix(
+        sessions, pluginless_run + 2, pluginless_count=pluginless_run
+    )
+
+    body = _function_bodies("_stdin_json_string", "_transcript_is_pluginless_sdk", "_second_newest_jsonl")
+    script = SECOND_NEWEST_SCRIPT % body
+    env = {**os.environ}
+
+    result = _run(script, [str(sessions)], env)
+    assert result.returncode == 0, result.stderr
+    assert "_second_newest_jsonl" in result.stderr, (
+        f"hitting the exclusion cap logged nothing identifying which "
+        f"function gave up: {result.stderr!r}"
+    )
+
+
+def test_second_newest_does_not_log_below_the_cap(tmp_path):
+    """Positive control: sibling of the previous_transcript() one above."""
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    _populate_with_pluginless_sdk_prefix(sessions, 31, pluginless_count=6)
+
+    body = _function_bodies("_stdin_json_string", "_transcript_is_pluginless_sdk", "_second_newest_jsonl")
+    script = SECOND_NEWEST_SCRIPT % body
+    env = {**os.environ}
+
+    result = _run(script, [str(sessions)], env)
+    assert result.returncode == 0, result.stderr
+    assert "LOG[" not in result.stderr, (
+        f"the cap-hit warning fired even though the real transcript was "
+        f"found well below the cap: {result.stderr!r}"
     )

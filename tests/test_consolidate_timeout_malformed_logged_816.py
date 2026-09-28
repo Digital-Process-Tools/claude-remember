@@ -124,3 +124,56 @@ class TestConsolidateTimeoutMalformedIsLogged:
         assert "consolidate_timeout_seconds" not in logs, (
             f"a valid configured timeout was reported as malformed: {logs!r}"
         )
+
+
+class TestConsolidateTimeoutDestructiveValuesRejected:
+    """#823: the #816 guard above only rejects empty/non-digit strings -- an
+    all-digits value of 0 or one large enough to overflow the pipeline's own
+    subprocess.run(timeout=...) call (observed: OverflowError inside PyTime_t
+    at 9e9 and 1e10) sailed through with no warning at all, either timing out
+    every run or crashing with a generic pipeline-failed error instead of
+    this key's own malformed-value message."""
+
+    def test_zero_is_rejected_and_logged(self, tmp_path):
+        env, _project, remember = _make_env(tmp_path, consolidate_timeout_seconds=0)
+        plugin = Path(env["CLAUDE_PLUGIN_ROOT"])
+
+        result = _run(plugin, env)
+        assert result.returncode == 0, result.stderr
+
+        logs = _daily_log_text(remember)
+        assert "consolidate_timeout_seconds" in logs, (
+            f"a configured timeout of 0 (times out every run immediately) "
+            f"was not reported at all: {logs!r}"
+        )
+
+    def test_huge_value_is_rejected_and_logged(self, tmp_path):
+        """9000000000 is the smallest value this repo has reproduced
+        crashing pipeline.shell's subprocess.run(timeout=...) with
+        OverflowError -- the guard must catch it before it ever reaches
+        there."""
+        env, _project, remember = _make_env(tmp_path, consolidate_timeout_seconds=9000000000)
+        plugin = Path(env["CLAUDE_PLUGIN_ROOT"])
+
+        result = _run(plugin, env)
+        assert result.returncode == 0, result.stderr
+
+        logs = _daily_log_text(remember)
+        assert "consolidate_timeout_seconds" in logs, (
+            f"a configured timeout of 9000000000s (crashes with OverflowError "
+            f"downstream) was not reported at all: {logs!r}"
+        )
+
+    def test_moderately_large_value_is_not_rejected(self, tmp_path):
+        """Positive control: a large but sane override (1 hour) must not
+        trip either new guard."""
+        env, _project, remember = _make_env(tmp_path, consolidate_timeout_seconds=3600)
+        plugin = Path(env["CLAUDE_PLUGIN_ROOT"])
+
+        result = _run(plugin, env)
+        assert result.returncode == 0, result.stderr
+
+        logs = _daily_log_text(remember)
+        assert "consolidate_timeout_seconds" not in logs, (
+            f"a sane 3600s override was reported as malformed/too large: {logs!r}"
+        )

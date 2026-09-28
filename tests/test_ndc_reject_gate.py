@@ -304,6 +304,71 @@ class TestNdcTimeoutIsConfigurable:
         )
 
 
+class TestNdcTimeoutDestructiveValuesRejected:
+    """#823: the #816 guard above only rejects empty/non-digit strings -- a
+    configured 0 or a value large enough to overflow pipeline.shell's own
+    subprocess.run(timeout=...) call (observed: OverflowError inside PyTime_t
+    at 9e9/1e10) reached call-haiku unchanged, matching run-consolidation.sh's
+    sibling defect."""
+
+    def test_zero_is_rejected_and_logged(self, tmp_path):
+        env, project, plugin, calls, sid = _ndc_env(tmp_path, config={"ndc_timeout_seconds": 0})
+
+        result = _run(plugin, env, sid)
+        assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")
+        _wait_for_calls_to_settle(calls)
+
+        line = _ndc_call_line(calls)
+        assert line.split(" ")[-1] == "180", (
+            f"a configured timeout of 0 was not rejected and fell through to "
+            f"the call-haiku invocation unchanged: {line!r}"
+        )
+
+        logs = "".join(p.read_text() for p in (project / ".remember" / "logs").glob("*.log"))
+        assert "ndc_timeout_seconds" in logs, (
+            f"a configured timeout of 0 (times out every run immediately) "
+            f"was not reported at all: {logs!r}"
+        )
+
+    def test_huge_value_is_rejected_and_logged(self, tmp_path):
+        env, project, plugin, calls, sid = _ndc_env(tmp_path, config={"ndc_timeout_seconds": 9000000000})
+
+        result = _run(plugin, env, sid)
+        assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")
+        _wait_for_calls_to_settle(calls)
+
+        line = _ndc_call_line(calls)
+        assert line.split(" ")[-1] == "180", (
+            f"a configured timeout of 9000000000 was not rejected and fell "
+            f"through to the call-haiku invocation unchanged: {line!r}"
+        )
+
+        logs = "".join(p.read_text() for p in (project / ".remember" / "logs").glob("*.log"))
+        assert "ndc_timeout_seconds" in logs, (
+            f"a configured timeout of 9000000000s (crashes with OverflowError "
+            f"downstream) was not reported at all: {logs!r}"
+        )
+
+    def test_moderately_large_value_is_not_rejected(self, tmp_path):
+        """Positive control: a large but sane override (1 hour) must not
+        trip either new guard."""
+        env, project, plugin, calls, sid = _ndc_env(tmp_path, config={"ndc_timeout_seconds": 3600})
+
+        result = _run(plugin, env, sid)
+        assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")
+        _wait_for_calls_to_settle(calls)
+
+        line = _ndc_call_line(calls)
+        assert line.split(" ")[-1] == "3600", (
+            f"a sane 3600s override did not reach the call-haiku invocation: {line!r}"
+        )
+
+        logs = "".join(p.read_text() for p in (project / ".remember" / "logs").glob("*.log"))
+        assert "ndc_timeout_seconds" not in logs, (
+            f"a sane 3600s override was reported as malformed/too large: {logs!r}"
+        )
+
+
 class TestNdcTolerantOfShortPreamble:
     """#788 fix 4 (minor): a genuine compression can arrive with a short
     preamble before the first real '## ' header ("I'll compress the log
