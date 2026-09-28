@@ -22,6 +22,27 @@ hits them. They are filed upstream and should be deleted here once they ship in 
 The rule builder skips this file by name, so an absence recorded here reads as a decision rather
 than an oversight.
 
+- **`705.edit-toml-literal-double-escape`** -- declined 2026-09-28 as a new rule: already
+  promoted. `supertool-literal-backslashes.md` in this same layer already documents exactly this
+  incident by number (#705) -- an embedded literal double quote needing \" written through
+  `edit:@-`'s TOML payload with `literal_backslashes = true`, and the fix (use a single-quoted
+  Python string literal instead of juggling the backslash count). This fragment is a duplicate
+  record of an already-shipped rule, not a new lesson.
+- **`705.supertool-cwd-default-wrong-tree`** -- declined 2026-09-28 as a new rule: already
+  promoted as `supertool-cwd-verify-tree.md` in this same layer, which documents this exact
+  incident (#705) -- supertool's default cwd silently resolving against the main clone instead of
+  the lane's own worktree. Duplicate record, not a new lesson.
+- **`706.raw-append-write-unguarded`** -- declined 2026-09-28 as a new rule: already promoted as
+  `raw-append-write-unguarded.md` in this same layer, which documents this exact incident and is
+  filed upstream as
+  [claude-supertool#2699](https://github.com/Digital-Process-Tools/claude-supertool/issues/2699).
+  Duplicate record, not a new lesson.
+- **`819.exclusion-cap-give-up-indistinguishable-from-no-previous-session`** -- declined
+  2026-09-28. Already fixed: `scripts/session-start-hook.sh`'s `previous_transcript()` and
+  `_second_newest_jsonl()` both now log a WARNING on the cap-hit give-up branch (`#823`), naming
+  the exclusion count and that a real previous session may exist beyond the cap -- exactly the
+  auditor's suggested fix. Checked against HEAD (2026-09-28).
+
 - **`487.ostype-immutable-on-windows-gitbash`** — declined 2026-09-05. `$OSTYPE` could not be
   forced away from its real value inside bash under real Windows Git Bash: neither
   `subprocess.run(env={"OSTYPE": ...})` nor `local OSTYPE=...` inside a function had any effect,

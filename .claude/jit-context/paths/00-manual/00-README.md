@@ -6,6 +6,38 @@ description: "Traps curated and deliberately not promoted here, with the reason.
 The rule builder skips this file by name, so an absence recorded here reads as a decision rather
 than an oversight.
 
+- **`725.recon-reads-dirty-sibling-clone-not-origin-main`** (duplicate, second copy) -- swept
+  2026-09-28. This is a leftover untracked copy of a fragment already declined on 2026-09-25 (see
+  the tools-layer entry filed as
+  [claude-oss#1745](https://github.com/Digital-Process-Tools/claude-oss/issues/1745)) -- the file
+  survived, unstaged, in the primary clone's working tree past that pass's own commit, and this
+  pass's `--copy-stray-from` swept it in again as if new. Deleted with no new decision: nothing
+  here has changed since the 2026-09-25 entry.
+- **`816.make-env-fixture-threshold-merge-trap`** -- declined 2026-09-28. Still true at HEAD:
+  `tests/test_consolidation_append_race.py`'s `_make_env(tmp_path)` still writes
+  `config.json` as the hard-coded literal `{"cooldowns": {}, "thresholds": {}}`, with no
+  parameter for a caller to merge a threshold value into. Declined as a rule because the fix (an
+  optional `thresholds` dict merged into the literal) is a one-fixture-shaped change, not a
+  generalizable lesson, and the gap is currently latent (no test in the file exercises a threshold
+  value today). **Filed as
+  [#833](https://github.com/Digital-Process-Tools/claude-remember/issues/833) instead.**
+- **`816.six-more-silent-coercion-config-keys`** -- declined 2026-09-28. Partially stale: of the
+  seven `config ".thresholds.*"` reads the fragment named as unguarded, five already carry
+  #816/#821's malformed-value guard at HEAD (`min_human_messages`, `min_exchanges_without_human`,
+  `staging_warn_bytes`, `memory_inject_max_bytes`, `autonomous_log_retention_days`). Two still
+  lack it: `consolidate_max_bytes` (`scripts/run-consolidation.sh:132`) and `extract_max_bytes`
+  (`scripts/save-session.sh:696`) -- still true, confirmed by reading both files at HEAD. Declined
+  as a rule because the fix is the same scoped `case ... esac` guard shape #816/#821 already
+  established, not a new lesson. **Filed as
+  [#834](https://github.com/Digital-Process-Tools/claude-remember/issues/834) instead, scoped to
+  the two remaining sites.**
+- **`825.ci-skip-lets-username-leaks-reach-main`** -- declined 2026-09-28. Still true at HEAD:
+  `_username_check_should_run()` in `tests/test_no_real_home_paths_467.py` still unconditionally
+  skips the real-username-leak guard whenever `CI`/`GITHUB_ACTIONS` is set, by design (#472), with
+  no other mechanism to catch this class of leak reaching `main` with green CI. Declined as a rule
+  because the open question is a design decision (a genuinely CI-safe detection mechanism, or an
+  accepted local-only gap), not a lesson a standing rule would teach anyone away from. **Filed as
+  [#835](https://github.com/Digital-Process-Tools/claude-remember/issues/835) instead.**
 - **`524.readme-call-site-count-stale`** — declined as a rule 2026-09-05, **filed as
   [#580](https://github.com/Digital-Process-Tools/claude-remember/issues/580) instead**.
   `docs/windows.md:16` claims 10 `_remember_forward_slash` call sites; the live `grep` count was 12
