@@ -97,20 +97,26 @@ than an oversight.
   converting the three convertible rows to `resolve_bash()`, and resolving the one unclear row) is
   visible directly in `docs/windows-skip-triage.md`'s own verdict column, the same way this repo
   already tracks backlog outside of milestones -- no new issue filed.
-- **`804.trusted-config-json-load-uncaught-misreports`** — declined 2026-09-27. Still true at HEAD:
-  `scripts/lib-memory-dir.sh:724-725`'s no-jq Python-fallback merge still loads each TRUSTED config
-  source (a corrupted `~/.remember/config.json` or `${REMEMBER_DIR}/config.json`) with a bare
-  `with open(path) as f: data = json.load(f)`, no `try/except`. A malformed file there raises
-  uncaught, exits nonzero-but-not-3, and the shell's own bundled-only fallback runs with no WARNING
-  from #804's disclosure guard -- the identical silent behaviour as no config existing at all.
-  Declined as a rule because the fix (a third exit code, or a stated well-formed-is-assumed
+- **`804.trusted-config-json-load-uncaught-misreports`** — declined 2026-09-27. At the time of
+  this entry, `scripts/lib-memory-dir.sh:724-725`'s no-jq Python-fallback merge still loaded each
+  TRUSTED config source (a corrupted `~/.remember/config.json` or `${REMEMBER_DIR}/config.json`)
+  with a bare `with open(path) as f: data = json.load(f)`, no `try/except`. A malformed file there
+  raised uncaught, exited nonzero-but-not-3, and the shell's own bundled-only fallback ran with no
+  WARNING from #804's disclosure guard -- the identical silent behaviour as no config existing at
+  all. Declined as a rule because the fix (a third exit code, or a stated well-formed-is-assumed
   boundary) is a single-site design call adjacent to #804, not a generalizable lesson. **Filed as
-  [#815](https://github.com/Digital-Process-Tools/claude-remember/issues/815) instead.**
-- **806.timeout-guard-silent-substitution** -- declined 2026-09-27. Still true at HEAD: both
+  [#815](https://github.com/Digital-Process-Tools/claude-remember/issues/815), which fixed it**
+  (`lib-memory-dir.sh` now wraps the load in `try: ... except (OSError, ValueError):`) -- this
+  entry's own "still true at HEAD" claim went stale the moment #815 merged, uncorrected until
+  #827 (#815 and #817 landed close enough together that #817's curation pass captured this
+  entry's text before #815's fix was visible in the same review).
+- **806.timeout-guard-silent-substitution** -- declined 2026-09-27. At the time of this entry, both
   `scripts/run-consolidation.sh:137-138` (thresholds.consolidate_timeout_seconds) and its sibling
-  `scripts/save-session.sh:1149-1150` (thresholds.ndc_timeout_seconds) still silently substitute
+  `scripts/save-session.sh:1149-1150` (thresholds.ndc_timeout_seconds) still silently substituted
   the default 180 on an empty or non-digit configured value, with no log line naming the
   substitution. Declined as a rule because the fix (a log/report_error call on the fallback branch
   of both guards, plus a regression test) is a scoped fix to a known pair of sites, not a
   generalizable lesson. **Filed as
-  [#816](https://github.com/Digital-Process-Tools/claude-remember/issues/816) instead.**
+  [#816](https://github.com/Digital-Process-Tools/claude-remember/issues/816), which fixed it**
+  (both guards now log the malformed value before substituting the default) -- the same stale
+  "still true at HEAD" gap as the #804 entry above, corrected here by #827.

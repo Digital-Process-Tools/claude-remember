@@ -61,6 +61,60 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Session id, sanitized at the point of entry -- same restriction
+# session-start-hook.sh applies before ever using it in a filename. Ported
+# from write-handoff.sh's own #776 fix so both --json and the human report
+# below can disambiguate a subdirectory project the same way (#827).
+_DOCTOR_SESSION_ID="${CLAUDE_CODE_SESSION_ID:-}"
+case "$_DOCTOR_SESSION_ID" in
+    ''|.|..|*[!A-Za-z0-9._-]*) _DOCTOR_SESSION_ID="" ;;
+esac
+
+# _doctor_trial_remember_dir <candidate-project-dir>
+# Prints the REMEMBER_DIR that candidate would resolve to, by running the
+# same resolve-paths.sh + lib-memory-dir.sh chain the real resolution below
+# uses, in a subshell -- mirrors write-handoff.sh's own _wh_trial_remember_dir
+# (#776/#827). Prints nothing and exits nonzero if the chain itself fails.
+_doctor_trial_remember_dir() {
+    (
+        CLAUDE_PROJECT_DIR="$1"
+        export CLAUDE_PROJECT_DIR
+        REMEMBER_PATHS_SOFT_FAIL=1 source "$SCRIPT_DIR/resolve-paths.sh" >/dev/null 2>&1 || exit 1
+        source "$SCRIPT_DIR/lib-memory-dir.sh" >/dev/null 2>&1 || exit 1
+        [ -n "${REMEMBER_DIR:-}" ] || exit 1
+        printf '%s\n' "$REMEMBER_DIR"
+    )
+}
+
+# _doctor_resolve_project_dir_candidate <git-root>
+# #827: the #802 blanket git-root preference below (both --json and the
+# human report) breaks a project deliberately started from a repository
+# SUBDIRECTORY -- the same shape write-handoff.sh's own #776 fix
+# disambiguates -- by routing the report onto the enclosing repository's
+# store instead of the subdirectory project's own. When $PWD and the git
+# toplevel disagree AND this session's id is known, prefer whichever
+# candidate's own store already carries THIS session's session-keyed
+# handoff hint (#738); fall back to the toplevel, unchanged, when neither or
+# both do (the #743/#802 shape: an accidental `cd`, no session hint
+# published anywhere for this session).
+_doctor_resolve_project_dir_candidate() {
+    _doctor_git_root="$1"
+    if [ -n "$_doctor_git_root" ] && [ "$_doctor_git_root" != "$PWD" ] && [ -n "$_DOCTOR_SESSION_ID" ]; then
+        _doctor_rd_pwd=$(_doctor_trial_remember_dir "$PWD") || _doctor_rd_pwd=""
+        _doctor_rd_gitroot=$(_doctor_trial_remember_dir "$_doctor_git_root") || _doctor_rd_gitroot=""
+        _doctor_pwd_has_hint=0
+        _doctor_gitroot_has_hint=0
+        [ -n "$_doctor_rd_pwd" ] && [ -f "$_doctor_rd_pwd/tmp/handoff-path.$_DOCTOR_SESSION_ID" ] && _doctor_pwd_has_hint=1
+        [ -n "$_doctor_rd_gitroot" ] && [ -f "$_doctor_rd_gitroot/tmp/handoff-path.$_DOCTOR_SESSION_ID" ] && _doctor_gitroot_has_hint=1
+        if [ "$_doctor_pwd_has_hint" = 1 ] && [ "$_doctor_gitroot_has_hint" = 0 ]; then
+            _doctor_git_root=""
+        fi
+        unset _doctor_rd_pwd _doctor_rd_gitroot _doctor_pwd_has_hint _doctor_gitroot_has_hint
+    fi
+    printf '%s' "$_doctor_git_root"
+    unset _doctor_git_root
+}
+
 # ── --json: machine-readable resolution surface (#408) ──────────────────────
 #
 # Every field this prints is already computed for the human report below —
@@ -99,6 +153,7 @@ if [ "${1:-}" = "--json" ]; then
         # back to $PWD, unchanged, when the cwd is not inside a git repo at
         # all. Same pattern write-handoff.sh's own #743 fix established.
         _DOCTOR_JSON_GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || _DOCTOR_JSON_GIT_ROOT=""
+        _DOCTOR_JSON_GIT_ROOT=$(_doctor_resolve_project_dir_candidate "$_DOCTOR_JSON_GIT_ROOT")
         if [ -n "$_DOCTOR_JSON_GIT_ROOT" ]; then
             CLAUDE_PROJECT_DIR="$_DOCTOR_JSON_GIT_ROOT"
         else
@@ -239,6 +294,7 @@ if [ -z "${CLAUDE_PROJECT_DIR:-}" ]; then
     # $PWD, unchanged, when the cwd is not inside a git repo at all. Same
     # pattern write-handoff.sh's own #743 fix established.
     _DOCTOR_GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || _DOCTOR_GIT_ROOT=""
+    _DOCTOR_GIT_ROOT=$(_doctor_resolve_project_dir_candidate "$_DOCTOR_GIT_ROOT")
     if [ -n "$_DOCTOR_GIT_ROOT" ]; then
         CLAUDE_PROJECT_DIR="$_DOCTOR_GIT_ROOT"
     else
