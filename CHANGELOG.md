@@ -7,6 +7,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.36.0] - 2026-09-28 — adding a repo clones badge and a known-leaked-value detector, guarding two more threshold configs, decoding backslash-escaped stdin fields on Windows, and fixing the doctor subdirectory project-root preference (#823, #827-829, #833-835)
+
+### Added
+
+- Added (#828): a nightly `clones` badge in the README, sourced from GitHub's
+  own traffic API. GitHub only keeps 14 days of clone counts, so
+  `.github/workflows/clones-badge.yml` runs nightly (and on demand), merges
+  each day's count into a running history on an orphan `badges` branch, and
+  publishes a shields.io endpoint badge from it. Labelled "clones", not
+  "downloads": it is GitHub's own number, including Claude Code re-cloning
+  the marketplace for updates, shown as-is. Requires a maintainer to create a
+  `TRAFFIC_TOKEN` repo secret (a fine-grained PAT with "Administration: read"
+  on this repo) before the workflow can fetch real data; until then it skips
+  cleanly rather than failing.
+
+- Added (#835): `tests/test_no_real_home_paths_467.py` gained a third, CI-safe detector
+  (`_KNOWN_LEAK_HASHES` / `_known_leak_offenders`) that scans every tracked file for a hash match
+  against previously-confirmed leaked values. Unlike the existing username detector, it does not
+  rely on `CI`/`GITHUB_ACTIONS` or `getpass.getuser()`, so it runs everywhere, CI included, and
+  would have caught #822's fix reintroducing the same real value into two other files while CI
+  stayed green throughout. It ships with an empty hash list (no incident has been converted into
+  an entry yet) and only ever guards recurrence of an already-known-bad value -- it does not solve
+  the general "detect any new leaked username on CI" problem #835 also raises, which stays open;
+  see the module docstring's "Detector 3" section for why no general CI-safe mechanism was found.
+
+### Fixed
+
+- Fixed (#823): two silent-report gaps found by the v0.35.1 release audit. `previous_transcript()`
+  and `_second_newest_jsonl()` in `scripts/session-start-hook.sh` (#819) now log a WARNING when
+  they give up past `_PREV_TRANSCRIPT_EXCLUDE_CAP` -- previously they returned the exact same
+  empty result as "no previous transcript exists at all", so a real one sitting behind more than
+  the cap's worth of pluginless-SDK runs silently skipped both the recovery force-save and the
+  #200 capture-gap warning. The `thresholds.consolidate_timeout_seconds` /
+  `thresholds.ndc_timeout_seconds` guards (#816) in `scripts/run-consolidation.sh` and
+  `scripts/save-session.sh` now also reject `0` (times out every run immediately, the one-way
+  staging ratchet #806 exists to prevent) and any 10+ digit value (>= 1e9s, reaching the same
+  `OverflowError` inside `PyTime_t` this repo reproduced at 9e9 and 1e10 seconds), each falling
+  back to the 180s default with a named WARNING instead of crashing downstream with a generic
+  pipeline-failed error.
+
+- Fixed (#827): `scripts/doctor.sh`'s #802 git-root preference for a project
+  deliberately started from a repository subdirectory now carries the same
+  session-hint disambiguation write-handoff.sh's own #776 fix already applies
+  -- both the `--json` and human-report project-dir resolution prefer the
+  subdirectory project's own store, not the enclosing repository's, when this
+  session's session-keyed handoff hint (#738) is found there. Also corrected
+  two `.claude/jit-context/paths/00-manual/00-README.md` entries that claimed
+  bugs fixed by #815 and #816 were "still true at HEAD" after those fixes had
+  already merged. A third carried-forward finding -- CHANGELOG.md naming
+  trap.d fragments a later curate pass deleted -- was logged as a trap.d
+  fragment for a future curate pass; that pass (#836) has since promoted it
+  into `.claude/jit-context/paths/00-manual/changelog-trap-citation-goes-stale.md`,
+  the rule that a changelog entry must never cite a trap.d path by name, since
+  curate can delete the path out from under the citation.
+
+- Fixed (#829): the hooks' stdin extractors returned JSON string values without decoding
+  `\\`, so on Windows under Codex -- which never sets `CLAUDE_PROJECT_DIR` -- the project
+  directory arrived as `C:\\work\\proj` and its Claude Code session slug came out
+  `c---work--proj`. A Codex-hosted SessionStart could not find the previous Claude Code
+  session it tries to recover. Each `\\` is now decoded to one backslash.
+
+- Fixed (#833): `_make_env` in `tests/test_consolidation_append_race.py` wrote `config.json` as a
+  hard-coded string literal with `thresholds` always empty, giving callers no way to seed a
+  threshold value without overwriting the fixture's config wholesale (risking a silent drop of the
+  sibling `"cooldowns": {}` key). `_make_env` now accepts an optional `thresholds` dict and merges
+  it into the config it builds via `json.dumps`, matching every sibling fixture in the suite.
+
+- Fixed (#834): `thresholds.consolidate_max_bytes` (`scripts/run-consolidation.sh`) and
+  `thresholds.extract_max_bytes` (`scripts/save-session.sh`) now get the same #816/#821
+  malformed-value guard their sibling timeout keys already had -- an empty or non-numeric
+  configured value is logged with a named WARNING and falls back to the 600000/300000 default,
+  instead of substituting the default silently with nothing in the daily log to tell an operator
+  their override was never read. Unlike the timeout guards, `0` is left untouched for both keys:
+  it is a valid, meaningful value (disables the cap, #360), not a malformed one.
+
 ## [0.35.1] - 2026-09-27 — disclosing dropped trusted config layers, hardening timeout guards and the doctor project-root fallback, refusing tracked/symlinked rotated memory slices, fixing the previous-transcript lookup's quadratic blowup, and scrubbing a maintainer-path leak this release's own audit found and re-found (#802-806, #808, #815-816, #819, #822, #825)
 
 ### Fixed
@@ -3688,7 +3763,8 @@ Fixes [#9](https://github.com/Digital-Process-Tools/claude-remember/issues/9), a
 
 ## [0.1.0] — Initial release
 
-[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.35.1...HEAD
+[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.36.0...HEAD
+[0.36.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.36.0
 [0.35.1]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.35.1
 [0.35.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.35.0
 [0.34.1]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.34.1
