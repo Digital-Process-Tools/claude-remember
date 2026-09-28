@@ -160,11 +160,47 @@ same run, rather than a guard that stays green because it cannot look
 at itself. That is a strictly better failure mode than the one this
 issue reports, so THIS_FILE is no longer exempted and is no longer
 defined below.
+
+## Detector 3: known-leaked-value regression guard (#835) -- CI-safe by design
+
+Detector 2 above is deliberately skipped on CI (#472): a CI runner's account
+name is not evidence of anything, and no general, CI-safe way to tell a
+contributor's own leaked username apart from a CI provider's own runner
+account was found -- every mechanism considered for that general problem
+(a growing per-image skiplist, asserting against the runner's own account
+name) was rejected above for good reason, and #835 does not change that
+argument. The general problem detector 2 exists for stays open.
+
+#835's own text describes a NARROWER, already-observed failure mode this
+detector solves completely: #822's fix (PR #824) scrubbed the file the
+issue named, but reintroduced the SAME real value into two other files the
+same commit added, and CI stayed green throughout because detector 2 never
+runs there. #825 was the second occurrence of the identical shape. Once a
+real value has already leaked and been confirmed, the SAME value
+reappearing in a DIFFERENT tracked file carries none of detector 2's
+false-positive risk: it does not depend on `CI`/`GITHUB_ACTIONS`, on
+`getpass.getuser()`, or on any CI provider's account-naming scheme, so it
+can run everywhere, always, including CI.
+
+`_KNOWN_LEAK_HASHES` below ships empty: no incident has been converted into
+an entry yet. It is not a place to paste a real leaked value -- that would
+just reintroduce the exact leak this detector exists to prevent recurrence
+of, the same composition #474 already found and fixed for THIS_FILE above.
+Instead it holds `hashlib.sha256(leaked_value.encode()).hexdigest()` for
+each confirmed-real leaked value; a maintainer adds one hex digest after a
+future incident is confirmed and scrubbed, never the plaintext.
+
+This does NOT solve #835's general question -- a genuinely NEW leaked
+value, never seen before, has no hash on this list and is invisible to
+this detector by construction. It only ever guards recurrence of a value
+already known to be bad, which is exactly the shape #822 and #825 both
+were.
 """
 
 from __future__ import annotations
 
 import getpass
+import hashlib
 import os
 import re
 import subprocess
@@ -535,4 +571,92 @@ def test_no_tracked_file_leaks_the_current_machine_username():
     assert not offenders, (
         f"the current machine's OS username {username!r} appears in "
         f"committed file(s) -- #467's own second-file mechanism: {offenders}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Detector 3: known-leaked-value regression guard (#835), CI-safe by design.
+# ---------------------------------------------------------------------------
+
+# Ships empty: no incident has yet been converted into an entry. See the
+# module docstring's "Detector 3" section for the rationale and for how to
+# add one after a future incident -- the hex digest of the leaked value,
+# never the plaintext value itself.
+_KNOWN_LEAK_HASHES: frozenset[str] = frozenset()
+
+_LEAK_TOKEN = re.compile(r"[A-Za-z0-9_.-]{4,}")
+
+
+def _known_leak_offenders(files: list[Path]) -> list[str]:
+    """Shared by the real check and its positive control, so the control
+    actually exercises the detector's own matching logic rather than a
+    hand-rolled stand-in that could silently diverge from it."""
+    offenders: list[str] = []
+    if not _KNOWN_LEAK_HASHES:
+        return offenders
+    for f in files:
+        try:
+            text = f.read_text(encoding="utf-8", errors="replace")
+        except (IsADirectoryError, PermissionError, OSError):
+            continue
+        for token in _LEAK_TOKEN.findall(text):
+            if hashlib.sha256(token.encode("utf-8")).hexdigest() in _KNOWN_LEAK_HASHES:
+                offenders.append(str(f))
+                break
+    return offenders
+
+
+def test_known_leak_hash_detector_fires_on_a_planted_leak(monkeypatch, tmp_path):
+    """Positive control (#835): _KNOWN_LEAK_HASHES ships empty, so the
+    real check below would pass vacuously forever without this. Plants a
+    token, hashes it the same way a maintainer would after a future
+    incident, and drives it through the real matching function
+    (_known_leak_offenders), not a bare string comparison -- proving the
+    hashing and the file scan actually connect."""
+    planted = "definitely-not-a-real-leaked-value-835"
+    digest = hashlib.sha256(planted.encode("utf-8")).hexdigest()
+    monkeypatch.setattr(f"{__name__}._KNOWN_LEAK_HASHES", frozenset({digest}))
+    leaking = tmp_path / "leaked.py"
+    leaking.write_text(f'value = "{planted}"\n', encoding="utf-8")
+
+    offenders = _known_leak_offenders([leaking])
+
+    assert offenders, "known-leak hash detector did not fire on a planted known-bad token"
+
+
+def test_known_leak_hash_detector_does_not_fire_on_an_unrelated_file(monkeypatch, tmp_path):
+    """MUST-NOT-FIRE case pairing the one above (CLAUDE.md: a negative
+    assertion needs a positive control, and the reverse holds too -- a
+    real hash on the list must not make the detector fire on unrelated
+    content that happens to share no token with it)."""
+    planted = "definitely-not-a-real-leaked-value-835"
+    digest = hashlib.sha256(planted.encode("utf-8")).hexdigest()
+    monkeypatch.setattr(f"{__name__}._KNOWN_LEAK_HASHES", frozenset({digest}))
+    clean = tmp_path / "clean.py"
+    clean.write_text('value = "totally-unrelated-content"\n', encoding="utf-8")
+
+    offenders = _known_leak_offenders([clean])
+
+    assert not offenders, f"known-leak hash detector false-fired on unrelated content: {offenders}"
+
+
+def test_no_tracked_file_matches_a_known_leaked_value_hash():
+    """Detector 3 (#835): CI-safe complement to detector 2. Runs
+    unconditionally, everywhere, CI included -- unlike detector 2, it
+    depends on neither `CI`/`GITHUB_ACTIONS` nor `getpass.getuser()`, so
+    it carries none of the CI-account-name false-positive risk (#472).
+    This is what would have caught #822's fix reintroducing the same
+    real value into two OTHER files while CI stayed green throughout:
+    once that value's hash is on _KNOWN_LEAK_HASHES, any tracked file
+    matching it fails here, forever, on every platform.
+
+    This does NOT solve #835's general question -- a genuinely NEW leak,
+    never seen before, has no hash on this list and is invisible to this
+    detector by construction. See the module docstring's Detector 3
+    section, and detector 2 above for the contributor-machine-only guard
+    that covers the general case instead."""
+    offenders = _known_leak_offenders(_tracked_files())
+    assert not offenders, (
+        "tracked file(s) match a previously-confirmed leaked value's hash "
+        f"-- see _KNOWN_LEAK_HASHES: {offenders}"
     )
