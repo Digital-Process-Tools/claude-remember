@@ -23,8 +23,10 @@ concurrency:
 
 # Declared at workflow level so a step added later inherits read-only rather
 # than the repository default, which is read/write in a repository whose
-# owner has never changed it. `contents: write` is granted only on the job
-# below, and only for the one step that pushes to `badges` (#1462 in
+# owner has never changed it. `contents: write` is granted on the job below --
+# GitHub Actions has no step-level `permissions:` key, so every step in that
+# job runs with write access, not only the one that pushes to `badges` -- and
+# every other job in this workflow stays read-only (#1462 in
 # .github/workflows/oss-changelog.yml documents why this split matters).
 permissions:
   contents: read
@@ -78,14 +80,20 @@ jobs:
 
       # Merge today's daily entries into the running history, deduplicated by
       # timestamp so a re-run (workflow_dispatch, or a retried cron) does not
-      # double-count a day the API already reported.
+      # double-count a day the API already reported. GitHub's traffic/clones
+      # endpoint reports the current (in-progress) day with a partial count
+      # that grows on later fetches, so on a timestamp collision the FRESH
+      # `traffic.json` entry must win over the STALE one already recorded in
+      # `history.json` -- `unique_by` keeps the first element it sees per key
+      # (it is `group_by | map(.[0])`, and `group_by`'s sort is stable), so
+      # `traffic.json`'s entries are concatenated first, not `history.json`'s.
       - name: Merge into history and write the badge
         if: hashFiles('traffic.json') != ''
         run: |
           set -eu
           [ -f history.json ] || echo '[]' > history.json
           jq -s '
-            (.[0] + (.[1].clones // []))
+            ((.[1].clones // []) + .[0])
             | unique_by(.timestamp)
             | sort_by(.timestamp)
           ' history.json traffic.json > history.json.tmp

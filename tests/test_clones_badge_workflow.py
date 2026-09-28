@@ -7,7 +7,10 @@ is the point -- a test that could not tell "missing" from "wrong shape" would
 pass on a typo just as readily as on a correct file.
 """
 
+import os
 import re
+import subprocess
+import tempfile
 from pathlib import Path
 
 import yaml
@@ -93,15 +96,57 @@ def test_workflow_does_not_fail_loudly_when_the_secret_is_absent():
     """Issue #828 step 1 says the TRAFFIC_TOKEN secret is 'Created by a
     maintainer' -- a step that happens after this workflow file merges, not
     before. The workflow must not turn every nightly run red until then.
+
+    A plain text-search for the guard's own source (e.g. `-z ... GH_TOKEN`)
+    cannot tell a guard that actually skips from one that only *logs* and
+    falls through to `gh api` anyway -- both contain the same substring. This
+    actually runs the step's own shell script with GH_TOKEN unset and a
+    stubbed `gh` that would leave a marker file if invoked, so a regression
+    that deletes the guard's `exit 0` (letting execution reach `gh api`) fails
+    this test rather than passing it.
     """
-    text = WORKFLOW.read_text(encoding="utf-8")
-    assert "TRAFFIC_TOKEN" in text, (
+    doc = _load_workflow()
+    steps = doc["jobs"]["update"]["steps"]
+    fetch_step = next(
+        (s for s in steps if s.get("name") == "Fetch traffic/clones"), None
+    )
+    assert fetch_step is not None, (
+        f"{WORKFLOW} has no step named 'Fetch traffic/clones' to guard-test"
+    )
+    assert "TRAFFIC_TOKEN" in WORKFLOW.read_text(encoding="utf-8"), (
         f"{WORKFLOW} never references the TRAFFIC_TOKEN secret described in issue #828"
     )
-    assert re.search(r"-z\s+\S*\{?GH_TOKEN|-z\s+\S*\{?TRAFFIC_TOKEN", text), (
-        f"{WORKFLOW} does not appear to guard against an unset TRAFFIC_TOKEN "
-        "secret -- a maintainer has not created it yet, and a nightly cron "
-        "run should skip cleanly rather than fail"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        marker = tmp_path / "gh_was_called"
+        fake_gh = tmp_path / "gh"
+        fake_gh.write_text(f"#!/bin/sh\ntouch '{marker}'\nexit 1\n", encoding="utf-8")
+        fake_gh.chmod(0o755)
+
+        env = dict(os.environ)
+        env.pop("GH_TOKEN", None)
+        env["GH_REPO"] = "example/example"
+        env["PATH"] = f"{tmp_path}{os.pathsep}{env.get('PATH', '')}"
+
+        result = subprocess.run(
+            ["bash", "-c", fetch_step["run"]],
+            env=env,
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+
+    assert result.returncode == 0, (
+        "the TRAFFIC_TOKEN guard did not skip cleanly with GH_TOKEN unset -- "
+        f"exit {result.returncode}, stderr={result.stderr!r}"
+    )
+    assert not marker.exists(), (
+        "the guard let execution reach `gh api` even though GH_TOKEN was unset "
+        "-- a maintainer has not created the TRAFFIC_TOKEN secret yet (issue "
+        "#828 step 1), so every nightly run would fail until they do"
     )
 
 
