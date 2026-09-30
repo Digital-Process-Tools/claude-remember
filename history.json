@@ -68,5 +68,35 @@
     "timestamp": "2026-09-23T00:00:00Z",
     "count": 276491,
     "uniques": 36942
+  },
+  {
+    "timestamp": "2026-09-24T00:00:00Z",
+    "count": 263719,
+    "uniques": 36588
+  },
+  {
+    "timestamp": "2026-09-25T00:00:00Z",
+    "count": 238881,
+    "uniques": 32355
+  },
+  {
+    "timestamp": "2026-09-26T00:00:00Z",
+    "count": 162865,
+    "uniques": 22015
+  },
+  {
+    "timestamp": "2026-09-27T00:00:00Z",
+    "count": 163720,
+    "uniques": 21097
+  },
+  {
+    "timestamp": "2026-09-28T00:00:00Z",
+    "count": 269771,
+    "uniques": 35490
+  },
+  {
+    "timestamp": "2026-09-29T00:00:00Z",
+    "count": 278069,
+    "uniques": 36862
   }
 ]
