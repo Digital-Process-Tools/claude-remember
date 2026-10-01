@@ -861,7 +861,16 @@ _remember_render_memory_section() {
     if [ -n "$OVERSIZED_MEMORY" ]; then
         echo "--- too large to inject (kept on disk; grep on request) ---"
         printf '%s' "$OVERSIZED_MEMORY"
-        printf 'A healthy memory file is kilobytes. One this size means consolidation wrote a response nobody bounded (see thresholds.memory_inject_max_bytes) and has been skipping ever since; run /remember:doctor.\n'
+        if [ "$MEMORY_INJECT_MAX_BYTES" -lt 200000 ]; then
+            # #842: a cap set BELOW the bundled 200000 default is a
+            # deliberate choice (e.g. to stay under thresholds.
+            # session_start_max_bytes), not evidence of a broken store --
+            # /remember:doctor has nothing to diagnose here, and telling an
+            # operator to run it for a cap they set on purpose is noise.
+            printf 'Capped by config (thresholds.memory_inject_max_bytes=%s, below the bundled default of 200000) -- this is a deliberately lowered cap, not a sign of a malformed memory file.\n' "$MEMORY_INJECT_MAX_BYTES"
+        else
+            printf 'A healthy memory file is kilobytes. One this size means consolidation wrote a response nobody bounded (see thresholds.memory_inject_max_bytes) and has been skipping ever since; run /remember:doctor.\n'
+        fi
         echo ""
     fi
     if [ -n "$REFUSED_MEMORY" ]; then
@@ -1188,4 +1197,109 @@ _remember_start_cache_context_publish() {
     _tmp_cache=$(mktemp "${_cache}.XXXXXX" 2>/dev/null) || return 0
     _remember_render_memory_section > "$_tmp_cache" 2>/dev/null
     _remember_start_cache_context_finish_publish "$_tmp_cache"
+}
+
+# ============================================================================
+# SESSION-START TOTAL BUDGET (#842)
+# ============================================================================
+# Claude Code persists hook stdout over roughly 10,000 CHARACTERS to a file
+# and hands the model only a short preview plus the file's path -- so a
+# SessionStart body that fits comfortably in a terminal can still never
+# reach the model if its TOTAL crosses that line. Per-file
+# memory_inject_max_bytes (above) cannot fix this: it caps one file at a
+# time and has no way to prefer one memory section over another when the
+# total, not any single file, is the problem (#842's own repro: six
+# healthy files summing to 11-14.7KB).
+#
+# Budget is counted in BYTES, not characters, on purpose. Claude Code's own
+# cap is reported in characters, and measuring actual Unicode codepoints
+# portably across this plugin's three supported shells (stock macOS bash
+# 3.2, Linux bash, Git Bash on Windows) is not reliable: bash's own
+# `${#var}` length is locale-sensitive (multibyte-aware only when the
+# shell's build and the active locale both support it), while `wc -c`
+# always counts bytes, unconditionally, everywhere this plugin already
+# relies on it for memory_inject_max_bytes above. A byte is never SHORTER
+# than the character it is part of in UTF-8, so counting bytes can only be
+# as-strict-or-stricter than the real character cap, never looser: staying
+# under a 9000-BYTE budget guarantees staying under a 9000-CHARACTER one
+# too, with margin to spare under Claude Code's ~10,000. The failure mode
+# on the conservative side is listing a file by name that would, in fact,
+# have fit under the real character cap -- strictly better than the
+# alternative, which is the bug this file exists to fix.
+_remember_session_start_max_bytes_into() {
+    local _outvar="$1"
+    local _val=""
+    config_into _val ".thresholds.session_start_max_bytes" 9000
+    case "$_val" in
+        (''|*[!0-9]*)
+            log "memory-context" "WARNING: thresholds.session_start_max_bytes is not a valid non-negative integer (got $_val) -- using default 9000"
+            _val=9000
+            ;;
+    esac
+    printf -v "$_outvar" %s "$_val"
+}
+
+# _remember_apply_session_start_budget VARNAME MAX_BYTES
+#
+# VARNAME names a variable holding the already-assembled SessionStart body
+# (handoff block + REMEMBER legend + MEMORY section, in that order -- see
+# the call site in session-start-hook.sh). When the body's byte length
+# exceeds MAX_BYTES, drops whole named sections -- never truncates one
+# mid-content -- in REVERSE priority order (archive.md, then today-*.md,
+# then recent.md, then now.md) until it fits or all four are gone, and
+# appends one line per dropped file naming its path and size. Handoff and
+# the identity/core-memories head are never touched here: #842's own
+# priority order is handoff -> now -> recent -> today -> archive, and both
+# of those sit earlier in VARNAME than the first header this function ever
+# matches against, so they survive by construction, not by a special case.
+#
+# A section is identified by its own "--- BASENAME ---" header line, the
+# same marker _remember_render_memory_section already prints for every
+# memory file (see above) -- so dropped files are listed exactly the way
+# source=compact already lists its own deferred files, not a second
+# convention. MAX_BYTES <= 0 or non-numeric disables the budget outright (0
+# is a deliberate "no cap", the same convention every other threshold in
+# this file uses).
+_remember_apply_session_start_budget() {
+    local _outvar="$1" _max="$2"
+    case "$_max" in (''|*[!0-9]*) return 0 ;; esac
+    [ "$_max" -gt 0 ] || return 0
+    local LC_ALL=C  # byte length, not a locale-dependent character count (see header above)
+    local _text="${!_outvar}"
+    [ "${#_text}" -gt "$_max" ] || return 0
+
+    local _path _base _header _before _after _chunk _remaining _size _notes=""
+    local _nl_dash="
+--- "
+    local _drop_order=("${REMEMBER_ARCHIVE:-}" "${REMEMBER_TODAY_FILE:-}" "${REMEMBER_RECENT:-}" "${REMEMBER_NOW:-}")
+    for _path in "${_drop_order[@]}"; do
+        [ -n "$_path" ] || continue
+        [ "${#_text}" -gt "$_max" ] || break
+        _base="${_path##*/}"
+        _header="--- ${_base} ---"
+        case "$_text" in
+            *"$_header"*) ;;
+            *) continue ;;
+        esac
+        _before="${_text%%"$_header"*}"
+        _after="${_text#*"$_header"}"
+        _chunk="${_after%%"$_nl_dash"*}"
+        _remaining="${_after#"$_chunk"}"
+        _text="${_before}${_remaining}"
+        _size=""
+        [ -f "$_path" ] && _size=$(wc -c < "$_path" 2>/dev/null | tr -d ' ')
+        if [ -n "$_size" ]; then
+            _notes="${_notes}${_path} (${_size} bytes)
+"
+        else
+            _notes="${_notes}${_path}
+"
+        fi
+    done
+    if [ -n "$_notes" ]; then
+        _text="${_text}--- not injected (over thresholds.session_start_max_bytes) -- grep or read on request ---
+${_notes}
+"
+    fi
+    printf -v "$_outvar" %s "$_text"
 }
