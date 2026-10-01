@@ -48,6 +48,13 @@
 #   layer that is still absent cannot have changed. Creating one makes it newer
 #   than the cache, so the cache loses.
 #
+#   #843: `-nt` alone cannot see a layer that EXISTED at publish time and was
+#   since DELETED -- deleting a file changes no mtime a `-nt` check looks at,
+#   so that case would otherwise read as "fresh" forever. Each `CACHE_CONFIG`
+#   value therefore carries a `1:`/`0:` prefix recording whether that layer
+#   existed at publish time, and the loader rejects the cache outright if
+#   today's existence does not match, regardless of what `-nt` says.
+#
 #   Not covered: a project that becomes (or stops being) a linked git worktree
 #   while a cache is live, which would move REMEMBER_DIR. SessionStart
 #   republishes unconditionally, so the window is one session.
@@ -208,7 +215,7 @@ _remember_env_cache_load() {
     [ -r "$_f" ] || return 1
 
     local _line _dir="" _tz="" _mem="" _proj="" _pipe="" _stamp=""
-    local _cooldown="" _delta=""
+    local _cooldown="" _delta="" _cfg_exists_raw="" _cfg_raw=""
     local _env_proj="" _env_pipe="" _env_home=""
     local _cfgs=()
     while IFS= read -r _line || [ -n "$_line" ]; do
@@ -228,7 +235,31 @@ _remember_env_cache_load() {
             CACHE_ENV_PROJECT_DIR=*) _env_proj="${_line#*=}" ;;
             CACHE_ENV_PLUGIN_ROOT=*) _env_pipe="${_line#*=}" ;;
             CACHE_ENV_HOME=*)        _env_home="${_line#*=}" ;;
-            CACHE_CONFIG=*)          _cfgs[${#_cfgs[@]}]="${_line#*=}" ;;
+            # #843: the value carries a "1:" or "0:" prefix recording whether
+            # this layer existed AT PUBLISH time, before the path -- not a
+            # separate header line, which would cost one more `read` builtin
+            # on every load and was measured to blow the #330/#395 hot-path
+            # read budget by exactly one. Splitting on the FIRST `:` is safe
+            # even for a Windows path with its own drive-letter colon
+            # (`C:\path`), since the prefix colon always comes first. Any
+            # other shape (a cache from a release before this prefix existed,
+            # or anything else unrecognised) is rejected outright -- same
+            # "distrust the whole thing" rule the catch-all case below applies
+            # to any other unknown line.
+            CACHE_CONFIG=*)
+                _cfg_raw="${_line#*=}"
+                case "$_cfg_raw" in
+                    1:*)
+                        _cfgs[${#_cfgs[@]}]="${_cfg_raw#1:}"
+                        _cfg_exists_raw="${_cfg_exists_raw}1"
+                        ;;
+                    0:*)
+                        _cfgs[${#_cfgs[@]}]="${_cfg_raw#0:}"
+                        _cfg_exists_raw="${_cfg_exists_raw}0"
+                        ;;
+                    *) return 1 ;;
+                esac
+                ;;
             # An unknown line means this is not our file, or not our version of
             # it. Distrust the whole thing; the cost of being wrong is one slow
             # prompt, and the cost of guessing is memory in the wrong place.
@@ -267,12 +298,25 @@ _remember_env_cache_load() {
     [ "$_env_home" = "${HOME:-}" ] || return 1
     [ -d "$_pipe" ] || return 1
 
-    local _cfg
+    local _cfg _cfg_exists_now=""
     for _cfg in ${_cfgs[@]+"${_cfgs[@]}"}; do
         [ -n "$_cfg" ] || continue
-        # Newer config than cache — including a layer created since — wins.
-        [ "$_f" -nt "$_cfg" ] || return 1
+        # #843: -nt is only meaningful for a layer that exists right now --
+        # true against an absent one, which is the right answer for a layer
+        # that NEVER existed, but says nothing about a layer that existed at
+        # publish time and has since been DELETED (deleting a file changes
+        # no mtime -nt looks at). Build the current existence manifest here;
+        # it is compared against the one recorded at publish time below,
+        # after the loop, so a layer appearing or vanishing is always a miss.
+        if [ -e "$_cfg" ]; then
+            _cfg_exists_now="${_cfg_exists_now}1"
+            # Newer config than cache — including a layer created since — wins.
+            [ "$_f" -nt "$_cfg" ] || return 1
+        else
+            _cfg_exists_now="${_cfg_exists_now}0"
+        fi
     done
+    [ "$_cfg_exists_raw" = "$_cfg_exists_now" ] || return 1
 
     PROJECT_DIR="$_proj"
     PIPELINE_DIR="$_pipe"
@@ -353,9 +397,24 @@ _remember_env_cache_publish() {
         printf 'REMEMBER_SAVE_COOLDOWN=%s\n' "$REMEMBER_SAVE_COOLDOWN"
         printf 'REMEMBER_DELTA_THRESHOLD=%s\n' "$REMEMBER_DELTA_THRESHOLD"
         printf 'MEMORY_PROJECT_DIR=%s\n' "${MEMORY_PROJECT_DIR:-$PROJECT_DIR}"
-        printf 'CACHE_CONFIG=%s\n' "${PIPELINE_DIR}/config.json"
-        printf 'CACHE_CONFIG=%s\n' "${HOME:-}/.remember/config.json"
-        printf 'CACHE_CONFIG=%s\n' "${REMEMBER_DIR}/config.json"
+        # #843: each CACHE_CONFIG value carries a "1:" or "0:" prefix
+        # recording whether that layer existed RIGHT NOW (at publish time),
+        # so the loader can reject a cache whose manifest no longer matches
+        # -- a deleted layer changes no mtime the loader's -nt loop looks
+        # at, so without this a deleted layer's value would stay in effect
+        # forever. Embedded in the existing line rather than a new one: a
+        # separate header line costs one more `read` builtin on every load,
+        # which blew the #330/#395 hot-path read budget by exactly one when
+        # tried first.
+        local _c
+        for _c in "${PIPELINE_DIR}/config.json" "${HOME:-}/.remember/config.json" \
+                  "${REMEMBER_DIR}/config.json"; do
+            if [ -e "$_c" ]; then
+                printf 'CACHE_CONFIG=1:%s\n' "$_c"
+            else
+                printf 'CACHE_CONFIG=0:%s\n' "$_c"
+            fi
+        done
     } > "$_t" 2>/dev/null || { rm -f "$_t" 2>/dev/null; return 0; }
     # Rename, so no reader ever parses a partial file and rejects a resolution
     # that was merely mid-write.

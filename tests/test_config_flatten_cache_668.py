@@ -754,3 +754,103 @@ def test_colon_tilde_value_does_not_expand_a_home_directory_on_bash_3_2(tmp_path
     assert "foo:~/bar" in out or "foo:/" not in out, (
         f"the colon-tilde value was mangled rather than preserved literally: {out!r}"
     )
+
+
+def test_deleting_a_config_layer_invalidates_the_flatten_cache(tmp_path):
+    """#843: `-nt` is true against a file that does not exist, which is the
+    right answer for a layer that NEVER existed -- but the loader applies
+    the exact same check to a layer that existed when the cache was
+    published and has since been DELETED. Deleting a file does not change
+    any mtime the `-nt` loop looks at, so before the fix the cache stayed
+    valid and kept serving the deleted layer's value forever (until some
+    OTHER layer's mtime happened to change). This is the generalised form
+    of the issue's own repro (thresholds.memory_inject_max_bytes going from
+    present to absent); cooldowns.save_seconds is used here only to match
+    this file's existing HARNESS and sibling tests."""
+    home, project, remember = _project(tmp_path)
+    cfg = remember / "config.json"
+    cfg.write_text(json.dumps({"cooldowns": {"save_seconds": 42}}), encoding="utf-8")
+
+    _lines1, result1, sys_tmp = _run_with_shim(tmp_path, home, project)
+    assert result1.returncode == 0, (result1.stdout, result1.stderr)
+    assert "42" in result1.stdout
+    caches = cache_files(sys_tmp)
+    assert caches
+    cache = caches[0]
+    now = time.time()
+    # Force the cache strictly newer than it would naturally be, so the ONLY
+    # thing that changes between run 1 and run 2 is the layer's existence --
+    # never its mtime, which is exactly the gap #843 reports.
+    os.utime(cache, (now + 5, now + 5))
+
+    cfg.unlink()
+
+    _lines2, result2, _sys_tmp2 = _run_with_shim(tmp_path, home, project, sys_tmp=sys_tmp)
+    assert result2.returncode == 0, (result2.stdout, result2.stderr)
+    assert "42" not in result2.stdout, (
+        "a DELETED config layer must make the flatten cache miss -- the "
+        f"stale value stayed in effect instead: {result2.stdout!r}"
+    )
+    assert "default" in result2.stdout, (
+        "with the layer gone and no other layer supplying a value, config() "
+        f"must fall back to its default, not silently keep the old one: {result2.stdout!r}"
+    )
+
+
+def test_cache_is_reused_when_nothing_changes_843(tmp_path):
+    """Positive control, paired with the deletion test above: the fix for
+    #843 must not turn every cache hit into a miss. With the SAME config
+    layers present on both runs (nothing deleted, nothing edited), the
+    second run must still skip the flatten fork entirely -- proving this
+    test harness can tell a real cache hit from a broken one that always
+    reflattens."""
+    home, project, remember = _project(tmp_path)
+    cfg = remember / "config.json"
+    cfg.write_text(json.dumps({"cooldowns": {"save_seconds": 42}}), encoding="utf-8")
+
+    _lines1, result1, sys_tmp = _run_with_shim(tmp_path, home, project)
+    assert result1.returncode == 0, (result1.stdout, result1.stderr)
+    caches = cache_files(sys_tmp)
+    assert caches
+    cache = caches[0]
+    now = time.time()
+    os.utime(cache, (now + 5, now + 5))
+
+    lines2, result2, _sys_tmp2 = _run_with_shim(tmp_path, home, project, sys_tmp=sys_tmp)
+    assert result2.returncode == 0, (result2.stdout, result2.stderr)
+    assert "42" in result2.stdout
+    flatten_spawns_2 = [l for l in lines2 if l.startswith("jq ") and "paths(" in l]
+    py_flatten_spawns_2 = [
+        l for l in lines2 if l.startswith(("python3 ", "python ")) and "walk(node" in l
+    ]
+    assert not flatten_spawns_2, f"cache hit must skip the jq reflatten: {lines2}"
+    assert not py_flatten_spawns_2, f"cache hit must skip the python reflatten: {lines2}"
+
+
+def test_a_layer_that_never_existed_stays_a_hit_843(tmp_path):
+    """Third case from #843: a layer that was NEVER present (here, both the
+    HOME and PIPELINE_DIR config layers, which this whole test file never
+    creates) must still count as a cache hit on an unrelated layer's value
+    -- the fix must distinguish 'vanished after existing' from 'never
+    existed', not treat every currently-absent layer as a miss."""
+    home, project, remember = _project(tmp_path)
+    cfg = remember / "config.json"
+    cfg.write_text(json.dumps({"cooldowns": {"save_seconds": 42}}), encoding="utf-8")
+    assert not (home / ".remember" / "config.json").exists()
+
+    _lines1, result1, sys_tmp = _run_with_shim(tmp_path, home, project)
+    assert result1.returncode == 0, (result1.stdout, result1.stderr)
+    caches = cache_files(sys_tmp)
+    assert caches
+    cache = caches[0]
+    now = time.time()
+    os.utime(cache, (now + 5, now + 5))
+
+    assert not (home / ".remember" / "config.json").exists()
+    lines2, result2, _sys_tmp2 = _run_with_shim(tmp_path, home, project, sys_tmp=sys_tmp)
+    assert result2.returncode == 0, (result2.stdout, result2.stderr)
+    assert "42" in result2.stdout
+    flatten_spawns_2 = [l for l in lines2 if l.startswith("jq ") and "paths(" in l]
+    assert not flatten_spawns_2, (
+        f"a layer that never existed (home config) must not force a miss: {lines2}"
+    )
