@@ -1491,7 +1491,7 @@ _dispatch_report_timeout() {
 # process that is actually stalling dispatch and on nothing else.
 #
 # The cost of that choice, stated rather than hidden: a listener blocked in a
-# FOREGROUND child (a `curl` with no timeout, say) leaves that child running
+# FOREGROUND child (a network client with no timeout, say) leaves that child running
 # when its parent dies. The stall is over — dispatch returns, the agent moves —
 # but the process leaks until it finishes or the machine does. A leaked process
 # is recoverable; a half-written git index in someone's memory store is not.

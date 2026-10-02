@@ -7,18 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 This file carries only the latest release. The full history is in [CHANGELOG.md on the default branch](https://github.com/Digital-Process-Tools/claude-remember/blob/main/CHANGELOG.md).
 
-## [0.37.0] - 2026-10-02 — a slim `release` branch for the Anthropic plugin directory, a config-cache invalidation fix for deleted layers, and README disclosures
+## [0.38.0] - 2026-10-02 — a SessionStart total byte budget with a handoff redelivery cap, and /remember:doctor's shell grant scoped to its own script
 
 ### Added
 
-- Added (#851): a slim `release` branch for the Anthropic plugin directory, which was holding every version since v0.29.1 because the full repository (474 files, 9.2 MB, a 611 KiB CHANGELOG.md) broke its file rules. A tag push now runs `.github/workflows/release-branch.yml`: it builds the tree from the tag without `tests/`, `docs/` and the maintainer tooling (73 files, 1.3 MB for v0.36.0), cuts CHANGELOG.md to the latest release, points the README's `docs/` links and logo at `main`, checks the result against the directory's pre-submission checklist, runs `claude plugin validate --strict` and every hook once in isolation, and only then pushes one commit to `release`. Nothing changes for installs from `main`. The release sequence and the one manual portal step are in `docs/releasing.md`.
-
-### Changed
-
-- Changed: README.md now discloses everything the plugin runs, sends and writes outside the memory store -- the `codex exec` summarizer path and `REMEMBER_SUMMARIZER`/`REMEMBER_SUMMARIZER_FALLBACK`; the opt-in `git fetch` in `hooks.d/before_session_start/50-git-restore.sh` (`git_restore.enabled`); `~/.remember/tmp/promo-notice`, `~/.remember/run/summarizers/`, and the `$TMPDIR/remember-*` temp files (some holding transcript text, all removed by an `EXIT` trap when the save finishes); and credential handling for `CLAUDE_CODE_OAUTH_TOKEN`, `REMEMBER_OAUTH_TOKEN`/`haiku.oauth_token`, `ANTHROPIC_API_KEY`/`haiku.anthropic_api_key`, and `CODEX_API_KEY`. Also fixed: the git backup section wrongly said the push "If you enable it" -- `hooks.d/after_save/50-git-backup.sh` has no enable flag; it runs whenever the external store's parent directory is itself a git repository with an upstream (#854).
+- Added `thresholds.session_start_max_bytes` (default 9000) and `thresholds.handoff_max_redeliveries` (default 3): SessionStart's total body (handoff + the `=== REMEMBER ===` legend + the `=== MEMORY ===` section) can sum past Claude Code's own ~10,000-character preview/persist threshold even when every individual memory file is healthy, at which point the model never sees the `=== MEMORY ===` section at all. The budget fills in priority order handoff -> now.md -> recent.md -> today-*.md -> archive.md and lists whatever does not fit by name and size, never dropping it silently. A handoff delivered unchanged `handoff_max_redeliveries` times in a row stops being re-injected in full and is listed by path instead, since re-sending the same ~2KB note forever was most of what was pushing stores over the new budget (#842).
 
 ### Fixed
 
-- Fixed a config-cache staleness bug (#843, split out of #842, reported by @books-around-trees): deleting a config layer (`config.json` in the project, `~/.remember/`, or the plugin root) left its values in effect indefinitely. Both the flattened-config cache (`scripts/log.sh`) and the resolved-environment cache (`scripts/lib-env-cache.sh`) invalidated themselves by comparing mtimes with `-nt`, which reads a missing file as "unchanged" -- correct for a layer that never existed, but wrong for one that existed when the cache was published and was since deleted, since deleting a file changes no mtime a `-nt` check looks at. Both caches now also record which layers existed at publish time and treat any layer appearing or disappearing as a cache miss, regardless of mtime.
+- Fixed: the over-cap notice for `thresholds.memory_inject_max_bytes` recommended running `/remember:doctor` even when the cap had been deliberately lowered below the bundled 200000 default (e.g. to stay under the new `thresholds.session_start_max_bytes` budget). It now says the file was "capped by config" and drops the `/remember:doctor` suggestion in that case -- but only while every over-cap file is within the bundled default; a file larger than 200000 bytes keeps the original "this store looks broken" wording and the doctor advice whatever the cap, as does a cap at or above the bundled default (#842).
 
-[0.37.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.37.0
+### Security
+
+- Security: `/remember:doctor`'s front matter granted bare `Bash` --
+  unrestricted shell access for the full run of the command -- when the command
+  body only ever needs one script. `allowed-tools` is now scoped to
+  `Bash(${CLAUDE_PLUGIN_ROOT}/scripts/doctor.sh:*)`, mirroring
+  `skills/remember/SKILL.md`'s existing narrow grant for `write-handoff.sh`, and
+  `scripts/doctor.sh` is invoked directly rather than through `bash "..."` (a
+  scoped pattern cannot match a `bash` prefix). `scripts/doctor.sh` is now
+  executable in git (mode 100755), the same as `write-handoff.sh` already is.
+  `.github/scripts/check_release_tree.py`'s pre-submission preflight now fails
+  on any shipped skill, command or agent whose `allowed-tools` grants
+  unrestricted shell, matching the directory's own `ALLOWED_TOOLS_BROAD`
+  wording: bare `Bash`, `Bash(*)`, `Bash(:*)`, a wildcard right after a shell,
+  interpreter, package manager or runner, or `curl`/`wget` (`Bash(bash:*)`,
+  `Bash(pwsh:*)`, `Bash(python3:*)`, `Bash(npx:*)`, `Bash(curl:*)` ...), a relative path, or a
+  wildcard inside the path -- in both the string and the YAML-list form, so this
+  class is caught before a release tree ships rather than by the directory's own
+  scan. The portal's own accepted examples (`Bash(git status:*)`,
+  `Bash(python3 ${CLAUDE_PLUGIN_ROOT}/scripts/run.py:*)`) still pass (#859).
+- Two comments that described code the plugin does not run were reworded: the
+  `pipeline/shell.py` docstring said scripts consume its output with an
+  `eval` of a command substitution, but the real consumer is `safe_eval`, which
+  never runs the text; and a `scripts/log.sh` comment used `curl` as an example
+  of a stalled child. The directory's `RUNTIME_FETCH_EXEC` warning was raised on
+  exactly these two files of the `release` tree, which contain no download (#859).
+
+[0.38.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.38.0

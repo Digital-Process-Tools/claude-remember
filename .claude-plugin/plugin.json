@@ -1,11 +1,15 @@
 {
   "name": "remember",
   "description": "Continuous memory for Claude Code. Extracts, summarizes, and compresses conversations into tiered daily logs. Claude remembers what you did yesterday.",
-  "version": "0.37.0",
+  "version": "0.38.0",
   "author": {
     "name": "Digital Process Tools"
   },
   "license": "Community License",
   "repository": "https://github.com/Digital-Process-Tools/claude-remember",
-  "keywords": ["memory", "context", "persistence", "session"]
+  "keywords": ["memory", "context", "persistence", "session"],
+  "documentationUrl": "https://github.com/Digital-Process-Tools/claude-remember#readme",
+  "supportUrl": "https://github.com/Digital-Process-Tools/claude-remember/issues",
+  "privacyPolicyUrl": "https://github.com/Digital-Process-Tools/claude-remember/blob/main/docs/privacy.md",
+  "termsOfServiceUrl": "https://github.com/Digital-Process-Tools/claude-remember/blob/main/docs/terms.md"
 }
