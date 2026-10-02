@@ -375,6 +375,16 @@ _remember_cfg_flatten_q_encode() {
 # why this is a correctness property, not a safety one: `printf -v` never
 # asks a shell to execute $2, so there is no metacharacter in it this ever
 # needed to defuse.
+#
+# Both call sites below wrap this in `|| { rm -f ...; return 1; }`. That
+# branch is DEFENSIVE and, as far as every bash build tested here goes,
+# UNREACHABLE: `printf`'s own `%b` conversion does not fail on a malformed
+# escape (confirmed directly in this file's own test suite -- see the test
+# named for this function below in tests/ -- it leaves an unparseable
+# escape unexpanded and warns on stderr, exit 0 regardless). The
+# identity/value MISMATCH checks just below each call are the real
+# rejection path; this `||` stays as insurance against a future bash that
+# does fail here, not because today's bash ever takes it.
 _remember_cfg_flatten_q_decode() {
     printf -v "$1" '%b' "$2"
 }

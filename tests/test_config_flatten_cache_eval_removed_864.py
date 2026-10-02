@@ -198,6 +198,89 @@ def test_no_eval_curl_wget_substring(path):
     assert not hits, f"{path} still contains eval/curl/wget: {hits}"
 
 
+def _latest_changelog_section(text: str) -> str:
+    """Mirrors .github/scripts/build_release_tree.py's cut_changelog(): the
+    first `## [x.y.z]` section that is not `[Unreleased]`, up to (not
+    including) the next `## [` header or EOF -- this is the ONLY section
+    the slim `release` branch actually ships, so it is the only section a
+    future edit here needs to keep clean of eval/curl/wget."""
+    lines = text.splitlines()
+    heads = [i for i, line in enumerate(lines) if line.startswith("## [")]
+    for n, i in enumerate(heads):
+        label = lines[i].split("[", 1)[1].split("]", 1)[0].strip().lower()
+        if label == "unreleased":
+            continue
+        end = heads[n + 1] if n + 1 < len(heads) else len(lines)
+        return "\n".join(lines[i:end])
+    raise AssertionError("no released `## [x.y.z]` section found in CHANGELOG.md")
+
+
+def test_no_eval_curl_wget_in_current_changelog_section():
+    """The third file the issue's own portal row named (CHANGELOG.md) was
+    missing from `test_no_eval_curl_wget_substring` above -- flagged in
+    review: that test only covered scripts/log.sh and pipeline/shell.py, so
+    nothing would catch a future edit reintroducing eval/curl/wget into the
+    one CHANGELOG.md section the slim `release` branch actually ships. This
+    checks ONLY that section (see _latest_changelog_section), never the
+    whole file -- the whole file still documents real historical eval/curl
+    bugs (#84, #322, #695) by name, correctly, in sections the release
+    branch never ships."""
+    changelog = REPO_ROOT / "CHANGELOG.md"
+    section = _latest_changelog_section(changelog.read_text())
+    hits = [
+        (i + 1, line)
+        for i, line in enumerate(section.splitlines())
+        if re.search(r"eval|curl|wget", line, re.IGNORECASE)
+    ]
+    assert not hits, f"current CHANGELOG.md section still contains eval/curl/wget: {hits}"
+
+
+def test_decode_never_fails_even_bypassing_the_whitelist():
+    """Review finding: given `_remember_cfg_flatten_cache_valid_value`'s
+    whitelist (only `\\\\`, `\\\\n`, `\\\\t` ever reach decode through the
+    validated loader path), the `|| { rm -f ...; return 1; }` at both real
+    call sites in `_remember_cfg_flatten_cache_load` can never actually
+    fire -- confirmed here directly, calling `_remember_cfg_flatten_q_decode`
+    with escapes the whitelist would already reject (`\\\\xZZ`, a bad hex
+    digit; `\\\\c`, which `%b` treats as end-of-output). Both return exit 0:
+    bash's `printf` builtin does not fail on a malformed `%b` escape, it
+    just leaves the bytes it could not parse unexpanded (confirmed by the
+    second assertion below) and warns on stderr. The `||` branch is
+    DEFENSIVE DEAD CODE under every bash build tested, not a tested failure
+    path, and not a bug -- the identity/value MISMATCH rejection a few
+    lines below it is the real guard; this test exists so that fact is
+    recorded rather than silently assumed."""
+    script = f"""
+set -eu
+source "{LOG_SH.as_posix()}" >/dev/null 2>&1
+_remember_cfg_flatten_q_decode out1 '\\\\xZZ'
+echo "decode1_rc=$?"
+_remember_cfg_flatten_q_decode out2 '\\\\c'
+echo "decode2_rc=$?"
+printf 'out1=[%s]' "$out1"
+"""
+    result = subprocess.run(
+        [BASH, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+        env={**os.environ, "PROJECT_DIR": "/tmp"},
+    )
+    assert result.returncode == 0, f"harness itself failed: {result.stderr!r}"
+    assert "decode1_rc=0" in result.stdout, (
+        f"expected decode of a malformed hex escape to still return 0 "
+        f"(confirming the || guard is unreachable): {result.stdout!r}"
+    )
+    assert "decode2_rc=0" in result.stdout, (
+        f"expected decode of \\\\c to still return 0: {result.stdout!r}"
+    )
+    assert "out1=[\\xZZ]" in result.stdout, (
+        f"expected the unparseable escape to pass through verbatim, not be "
+        f"silently dropped: {result.stdout!r}"
+    )
+
+
 def test_identity_check_at_l518_rejects_mismatched_remember_dir(tmp_path):
     """Integration-level positive control for the identity-line call site
     specifically: the publish/load round trip for the REMEMBER_DIR identity
