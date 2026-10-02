@@ -111,17 +111,79 @@ python3 .github/scripts/smoke_release_tree.py /tmp/release-tree   # needs bash; 
 and API key handling in `pipeline/haiku.py`, for example). Those never fail the check; they are
 what a directory reviewer will look at, and README.md should disclose them.
 
+## How the directory decides what to read
+
+The directory never looks at tags. It follows **one branch or tag**, set in the developer portal
+(claude.ai/directory/manage, the plugin's page, **Settings, Source, "Tracked branch or tag"**).
+Left empty, that field follows the repository's default branch, which is why every merge to
+`main` used to show up in the portal's **Versions** tab as a new version to check. The version
+label the portal shows next to each commit appears to come from `version` in that commit's
+`plugin.json`, not from a tag (several different commits were all labelled `v0.34.0`).
+
+Once the field says `release`:
+
+- merges to `main` are invisible to the directory;
+- the tag is never seen by Anthropic either. It only starts our workflow;
+- the directory sees one new commit on `release` per release, and scans it.
+
+**Claude Code updates an installed plugin only when `version` in `plugin.json` changes.** The
+updater compares manifests, not commits ([#133](https://github.com/Digital-Process-Tools/claude-remember/issues/133)).
+A commit with an unchanged version reaches new installs only, never existing ones. `release`
+moves only at a tag, and a tag always comes with a version bump, so every `release` commit is an
+update that installed copies will pick up.
+
 ## One manual step, done once
 
-The directory listing must be switched to follow `release` by hand, in the developer portal
-(claude.ai/directory/manage, the plugin's page, Settings). Run the workflow once first
-(`gh workflow run release-branch.yml -f ref=<latest tag>`) so the branch exists. Until the switch,
-the listing keeps following `main`, and every push to `main` keeps landing there as a held
+Switch the listing to follow `release`, in the portal field above. Do it **after** the first
+`release` commit exists: run the workflow once (`gh workflow run release-branch.yml -f ref=<latest tag>`),
+check on GitHub that `release` holds only the slim tree, then type `release` and save. Until the
+switch, the listing keeps following `main`, and every push to `main` keeps landing there as a held
 version.
 
-## Reusing this in another repository
+What saving does, per the portal's own text: it scans the latest commit on `release` as a new
+version straight away; the version already live stays live while that runs; and a publish request
+still waiting is cancelled.
 
+While you are on that page:
+
+- **GitHub push webhook** (Settings, Updates). Without it the portal checks for new commits about
+  every 6 hours; with it, it sees a `release` push immediately.
+- **"This plugin collects or transmits user data."** The portal's hint asks plugins that call
+  remote MCP servers or HTTP hooks to say yes. Whatever you choose, README.md has to describe what
+  the plugin sends and where, because the security scan holds behaviour the README does not
+  disclose.
+- **A listing held for the directory team** ("Needs the directory team" in the portal) does not
+  clear itself when a clean version arrives. Contact the directory team from the plugin's contact
+  address and say the listing now follows `release`.
+
+## Our own marketplace
+
+The DPT marketplace (`Digital-Process-Tools/claude-marketplace`) declares this plugin as
+`{"source": "github", "repo": "Digital-Process-Tools/claude-remember"}`: no ref, so it installs
+`main` as it is at that moment. New installs therefore get unreleased merges under the last
+released version number, while existing installs only move at a version bump. Pointing that entry
+at `release` would make both marketplaces serve the same tagged builds; do it only after the first
+`release` commit exists, and only once Claude Code's `github` source is confirmed to accept a
+`ref`.
+
+## Reusing this in another plugin repository
+
+claude-jit-context and claude-supertool hit the same directory holds and plan to reuse this.
 The three scripts read everything repository-specific from `.github/release-branch.json`
 (`repo`, `default_branch`, `deny`, `budget`, `changelog`, `rewrite_links`), and the smoke test
-reads its hook list from `hooks/hooks.json`. Copy `.github/scripts/`, the config and the workflow,
-then edit the config.
+reads its hook list from `hooks/hooks.json`. To adopt it:
+
+1. Copy `.github/scripts/{build,check,smoke}_release_tree.py`, `.github/release-branch.json` and
+   `.github/workflows/release-branch.yml`.
+2. Rewrite the deny-list from that repository's own tree. Check every candidate against what the
+   plugin loads at runtime (hooks, scripts they call, skills, commands, manifests) before denying
+   it, and keep `LICENSE` and `README.md`: the directory blocks without them.
+3. Build from the latest tag and run the check and the smoke test locally (section above). Look
+   at the `REVIEW` lines and make sure README.md discloses each of them.
+4. Port the tests (`tests/test_release_branch_*_851.py`) and adjust their fixtures.
+5. Push a tag, confirm `release` exists, then do the portal steps above.
+
+Known limits of the shared scripts: the CHANGELOG cut assumes Keep a Changelog `## [x.y.z]`
+headings; the smoke test builds payloads only for the common hook events; and the launcher,
+credential and image-reference checks are pattern-based, so a reviewer may still see something
+they miss.
