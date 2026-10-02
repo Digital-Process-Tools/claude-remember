@@ -194,6 +194,7 @@ Everything that used to sit on this page and did not need to be read before inst
 - [Data files](docs/data-files.md)
 - [Git worktrees](docs/git-worktrees.md)
 - [How this repo is maintained](docs/maintainer.md)
+- [Releasing, and the `release` branch the Anthropic directory reads](docs/releasing.md)
 - [Configuration](docs/configuration.md)
 - [External storage mode](docs/external-storage-mode.md)
 - [Git backup security](docs/git-backup-security.md)

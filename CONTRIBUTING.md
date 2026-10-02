@@ -62,7 +62,8 @@ request ends in a permission refusal:
   and it has been reviewed.
 - **Tag or release.** Version numbers, tags and the published release are cut by
   the maintainer's own release process, from the changelog fragments merged pull
-  requests leave behind.
+  requests leave behind. The sequence, and why the tag push is what publishes to
+  the Anthropic directory: [docs/releasing.md](docs/releasing.md).
 
 ## Further reading
 

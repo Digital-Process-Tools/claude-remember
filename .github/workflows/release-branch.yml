@@ -1,0 +1,163 @@
+# #851 -- build the slim `release` branch the Anthropic plugin directory follows.
+#
+# `main` keeps everything (tests, docs, maintainer tooling). The directory holds any
+# version whose plugin folder has a non-image file of 256 KiB or more, more than 512
+# files, or a `.gitattributes` with export-ignore/export-subst/filter -- and on v0.36.0
+# it ran out of time on 474 files / 9.2 MB. So a tag push builds a tree that carries
+# only what the plugin runs (.github/release-branch.json's deny-list), checks it
+# against the directory's pre-submission checklist, smoke-tests it, and only then pushes
+# it as ONE commit on top of `release` (a branch with its own history, none of main's).
+# Nothing is pushed if any step fails. docs/releasing.md has the whole release sequence.
+#
+# The tag must be pushed with a person's credentials (`git push origin vX.Y.Z`, as the
+# release flow does). A tag pushed by another workflow with GITHUB_TOKEN would not
+# start this one -- GitHub suppresses workflow runs for GITHUB_TOKEN pushes.
+name: release branch
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Tag (or sha) to build and publish to the release branch, e.g. v0.36.0"
+        required: true
+        type: string
+
+# Two runs racing a force-push to the same branch: the loser's tree would silently
+# replace the winner's. One at a time, never cancelled half-way through a push.
+concurrency:
+  group: release-branch
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  # Never interpolated into a script: read back as "$SOURCE_REF" (a dispatch input is
+  # free text from whoever can dispatch).
+  SOURCE_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref_name }}
+  # Pinned: the validator's verdict should change when we choose, not when npm does.
+  CLAUDE_CLI_VERSION: "2.1.280"
+
+jobs:
+  # Read-only. Runs the plugin's own hooks (the smoke test), so it never holds a
+  # token that can push.
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      tree: ${{ steps.build.outputs.tree }}
+      sha: ${{ steps.build.outputs.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      # PyYAML: the check parses skill/command front matter with a real YAML parser
+      # (its fallback reads `key: value` lines only).
+      - run: python3 -m pip install --disable-pip-version-check pyyaml
+
+      - name: Build the release tree
+        id: build
+        run: |
+          set -eu
+          sha=$(git rev-parse --verify "${SOURCE_REF}^{commit}")
+          out="$RUNNER_TEMP/release-tree"
+          python3 .github/scripts/build_release_tree.py --ref "$sha" --out "$out"
+          export GIT_INDEX_FILE="$RUNNER_TEMP/verify.index"
+          git --work-tree="$out" add --all --force .
+          echo "tree=$(git write-tree)" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Check the tree against the directory's file rules
+        run: python3 .github/scripts/check_release_tree.py "$RUNNER_TEMP/release-tree"
+
+      - name: Install the claude CLI for `claude plugin validate`
+        id: cli
+        run: |
+          if npm install -g "@anthropic-ai/claude-code@${CLAUDE_CLI_VERSION}"; then
+            echo "validate=require" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::claude CLI ${CLAUDE_CLI_VERSION} did not install; 'claude plugin validate --strict' is SKIPPED in this run. The hook smoke still runs."
+            echo "validate=skip" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Smoke test (validate + every hook once, isolated)
+        env:
+          VALIDATE: ${{ steps.cli.outputs.validate }}
+        run: python3 .github/scripts/smoke_release_tree.py "$RUNNER_TEMP/release-tree" --validate "$VALIDATE"
+
+  # The only job that can write. It rebuilds from the same sha (the build is
+  # deterministic) rather than trusting an artifact, refuses to push unless the
+  # rebuilt tree is byte-for-byte the one `verify` passed, and pushes one commit.
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      # PyYAML: the check parses skill/command front matter with a real YAML parser
+      # (its fallback reads `key: value` lines only).
+      - run: python3 -m pip install --disable-pip-version-check pyyaml
+
+      - name: Rebuild and re-check
+        env:
+          SHA: ${{ needs.verify.outputs.sha }}
+        run: |
+          set -eu
+          out="$RUNNER_TEMP/release-tree"
+          python3 .github/scripts/build_release_tree.py --ref "$SHA" --out "$out"
+          python3 .github/scripts/check_release_tree.py "$out"
+
+      # One commit per release, on top of the previous `release` commit -- the branch
+      # shares no history with main, but keeps its own. Not an orphan force-push: a
+      # catalogue that pins a plugin by commit sha must still be able to fetch an older
+      # release commit after the next one lands, and a force-push would leave it
+      # unreachable. A plain push also refuses (rather than overwrites) if anything else
+      # moved `release` while this ran.
+      - name: Commit the tree on top of `release` and push it
+        env:
+          SHA: ${{ needs.verify.outputs.sha }}
+          VERIFIED_TREE: ${{ needs.verify.outputs.tree }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -eu
+          out="$RUNNER_TEMP/release-tree"
+          export GIT_INDEX_FILE="$RUNNER_TEMP/publish.index"
+          # --force: the tree carries its own .gitignore, which must not drop files here.
+          git --work-tree="$out" add --all --force .
+          tree=$(git write-tree)
+          if [ "$tree" != "$VERIFIED_TREE" ]; then
+            echo "::error::rebuilt tree $tree is not the verified tree $VERIFIED_TREE -- not pushing"
+            exit 1
+          fi
+          set --  # the parent, if there is one, ends up in "$@"
+          if git ls-remote --exit-code --heads origin release >/dev/null 2>&1; then
+            git fetch --no-tags origin +refs/heads/release:refs/remotes/origin/release
+            parent=$(git rev-parse refs/remotes/origin/release)
+            if [ "$(git rev-parse "$parent^{tree}")" = "$tree" ]; then
+              echo "release already carries tree $tree ($SOURCE_REF) -- nothing to push"
+              exit 0
+            fi
+            set -- -p "$parent"
+          else
+            echo "no release branch yet -- creating it with a root commit"
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          commit=$(printf 'release: %s (%s)\n\nSource: %s at %s\nBuilt by .github/workflows/release-branch.yml (#851): %s\nThe full repository, tests and history live on main.\n' \
+            "$SOURCE_REF" "$SHA" "$SOURCE_REF" "$SHA" "$RUN_URL" | git commit-tree "$tree" "$@")
+          git push origin "$commit:refs/heads/release"
+          echo "pushed $commit (tree $tree) to release from $SOURCE_REF ($SHA)"
+          test "$(git ls-remote origin refs/heads/release | cut -f1)" = "$commit"
