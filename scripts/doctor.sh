@@ -917,6 +917,55 @@ else
 fi
 echo ""
 
+# ── 6a. Summarizer failures (#870) ──────────────────────────────────────────
+# tmp/last-summary-failure is written by save-session.sh's record_summary_failure
+# on every failed attempt and removed only on a successful append, a SKIP, or
+# the give-up threshold (scripts/save-session.sh ~L758-784) -- so its mere
+# presence means the most recent summarizer attempt failed and nothing has
+# succeeded since. doctor.sh never read it before this: a 10-day auth outage
+# reported "capture is working" throughout (#870), because "Last successful
+# save" above is the cursor file's mtime, which save-position rewrites on
+# every attempt regardless of whether it summarized anything.
+echo "-- Summarizer failures (#870) --"
+_SUMMARY_FAILURE_MARKER="$REMEMBER_DIR/tmp/last-summary-failure"
+_SUMMARIZER_FAILING=0
+if [ -s "$_SUMMARY_FAILURE_MARKER" ]; then
+    _SUMMARIZER_FAILING=1
+    # Pull the newest "call-haiku error" line out of the latest daily log --
+    # the marker alone says "something failed", not what. Same glob pattern
+    # the SessionStart-duration check below already uses.
+    _remember_sf_glob_dir=$(_remember_forward_slash "$REMEMBER_DIR")
+    _SF_LATEST_LOG=""
+    for _sf_f in "$_remember_sf_glob_dir"/logs/memory-*.log; do
+        [ -f "$_sf_f" ] || continue
+        if [ -z "$_SF_LATEST_LOG" ] || [ "$_sf_f" -nt "$_SF_LATEST_LOG" ]; then
+            _SF_LATEST_LOG="$_sf_f"
+        fi
+    done
+    _SF_DETAIL=""
+    if [ -n "$_SF_LATEST_LOG" ]; then
+        _SF_DETAIL=$(grep -F "call-haiku error:" "$_SF_LATEST_LOG" 2>/dev/null | tail -n 1)
+    fi
+    echo "FAIL summarizer: last attempt failed${_SF_DETAIL:+: $_SF_DETAIL}"
+    # Same marker family _isolation_may_be_the_cause (pipeline/haiku.py) scans
+    # for -- an expired login reads as a generic failure here, so this is the
+    # one lowercased substring match worth doing in bash rather than naming
+    # REMEMBER_OAUTH_TOKEN for every kind of failure, which would be as wrong
+    # in the other direction as never naming it at all.
+    _SF_DETAIL_LOWER=$(printf '%s' "$_SF_DETAIL" | tr '[:upper:]' '[:lower:]')
+    case "$_SF_DETAIL_LOWER" in
+        *"not logged in"*|*"please run /login"*|*"invalid api key"*|\
+        *"invalid bearer token"*|*"authentication_error"*|*"failed to authenticate"*)
+            echo "     this looks like an expired login -- set REMEMBER_OAUTH_TOKEN"
+            echo "     (see \`claude setup-token\`, #129/#131)"
+            ;;
+    esac
+    unset _remember_sf_glob_dir _SF_LATEST_LOG _SF_DETAIL _SF_DETAIL_LOWER _sf_f
+else
+    echo "OK   No summarizer failure recorded ($_SUMMARY_FAILURE_MARKER empty or absent)"
+fi
+echo ""
+
 # ── 6b. SessionStart duration (#706) ────────────────────────────────────────
 # "The daily log is right for the record, and /remember:doctor is right for
 # the read-out" -- the issue's own words. session-start-hook.sh writes
@@ -1068,6 +1117,14 @@ elif [ "$_POST_TOOL_FIRED" -eq 1 ] && [ -z "$_LAST_SAVE_TIME" ] \
     echo "VERDICT: problem -- PostToolUse has fired but no save has completed yet; check hook-errors.log above$_ASSUMED_NOTE"
 elif [ "$_SESSION_END_STATE" = "not-fired" ]; then
     echo "VERDICT: problem -- SessionEnd has never fired despite prior sessions ending in this project; the last-chance flush is not running (see above)$_ASSUMED_NOTE"
+elif [ "${_SUMMARIZER_FAILING:-0}" -eq 1 ]; then
+    # #870: ranked above "capture is working" -- the whole point is that the
+    # cursor-mtime check above cannot tell a real append apart from a
+    # cursor-only rewrite, so a run of failed attempts must not be masked by
+    # it. Ranked below the SessionEnd/no-Python/oversized-store arms above
+    # for the same reason those outrank each other: this is a narrower,
+    # single-mechanism failure, not evidence the whole pipeline is down.
+    echo "VERDICT: problem -- the summarizer's last attempt failed and no save has completed since (see Summarizer failures above)$_ASSUMED_NOTE"
 elif [ "$_POST_TOOL_FIRED" -eq 1 ] && [ -n "$_LAST_SAVE_TIME" ]; then
     echo "VERDICT: capture is working -- last save $_LAST_SAVE_TIME$_ASSUMED_NOTE"
 elif [ -n "$_SESSION_DIR" ] && [ ! -d "$_SESSION_DIR" ]; then

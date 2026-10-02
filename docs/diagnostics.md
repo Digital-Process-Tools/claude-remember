@@ -6,6 +6,18 @@ The `SessionEnd` check only counts a quiet transcript as evidence once it is new
 
 The VERDICT line's own ranking of `SessionEnd`'s silence against a `PostToolUse` cause already named above it changed as well ([#404](https://github.com/Digital-Process-Tools/claude-remember/issues/404)): "PostToolUse is wired and running, but has not serviced a session -- it is exiting early" now outranks "SessionEnd has never fired" when both are true on an aged store, since the exiting-early diagnosis already explains SessionEnd's own silence and is the more specific, actionable cause. SessionEnd's own priority over a healthy-looking "capture is working" line, and over "PostToolUse has never fired at all", is unchanged.
 
+"Last successful save" is the mtime of the cursor file `save-position` rewrites on every
+attempt -- a quarantined span, a `SKIP`, or an ordinary append, not only a real one -- so it
+cannot by itself tell a healthy install from one where the summarizer has failed every single
+attempt for days ([#870](https://github.com/Digital-Process-Tools/claude-remember/issues/870)).
+A new "Summarizer failures" section reads `tmp/last-summary-failure` -- written on every failed
+attempt and removed only on a successful append, a `SKIP`, or the give-up threshold -- and, when
+present, `FAIL`s with the latest `call-haiku error` line from the daily log, pointing at
+`REMEMBER_OAUTH_TOKEN` (`claude setup-token`) when that detail matches an authentication marker.
+The VERDICT line now reads "the summarizer's last attempt failed" instead of "capture is
+working" whenever that marker is present, ranked below the SessionEnd/no-Python/oversized-store
+arms (still the more structural causes) but above the plain success verdict.
+
 Available on plugin installs, which auto-discover `commands/`. If you set the plugin up manually into `<project>/.claude/remember/`, that discovery does not apply — copy `commands/doctor.md` into `.claude/commands/`, or just run the script directly: `bash .claude/remember/scripts/doctor.sh`.
 
 Reach for it whenever memory is not appearing and nothing says why — the two silent failures it names outright are a slug mismatch ([#144](https://github.com/Digital-Process-Tools/claude-remember/issues/144)) and hooks that were never registered ([#200](https://github.com/Digital-Process-Tools/claude-remember/issues/200)).

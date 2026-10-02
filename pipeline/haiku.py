@@ -1520,6 +1520,23 @@ def call_haiku(
                 "(#202)."
             )
             result = _run(isolate_hooks=False)
+            if result.returncode != 0 and any(
+                marker in _failure_haystack(result.stdout, result.stderr)
+                for marker in _AUTH_FAILURE_MARKERS
+            ):
+                # #870: the warning above blames the rejected flag, but an
+                # un-isolated retry failing with the SAME auth marker proves
+                # isolation was never the cause -- the CLI's own saved login
+                # is the thing that is dead. Without this, every save keeps
+                # spawning a second nested session with the user's hooks
+                # live for no benefit, and nothing ever points at the fix.
+                _warn(
+                    "WARNING: the un-isolated retry failed with the same "
+                    f"authentication error ({_failure_detail(result.stdout, result.stderr)}) "
+                    "-- hook isolation was not the cause. The CLI's own saved "
+                    "login has expired; set REMEMBER_OAUTH_TOKEN (see "
+                    "`claude setup-token`, #129/#131)."
+                )
     finally:
         slot.release()
 
