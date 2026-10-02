@@ -397,14 +397,27 @@ _remember_cfg_flatten_cache_load() {
     [ -L "$_f" ] && return 1
     [ -O "$_f" ] || return 1
     [ -r "$_f" ] || return 1
-    local _src _sources
+    local _src _sources _exists_now=""
     _sources=$(_remember_cfg_flatten_cache_sources)
     while IFS= read -r _src; do
         [ -n "$_src" ] || continue
-        # -nt: strictly newer, never a tie -- the same "ambiguous means miss"
-        # guardrail #668 asks for everywhere else in this codebase, and true
-        # against a layer that does not exist (absent cannot have changed).
-        [ "$_f" -nt "$_src" ] || return 1
+        # #843: a layer that never existed cannot have changed, so -nt is
+        # the right answer for it (true against an absent file). A layer
+        # that EXISTED when the cache was published and was since DELETED
+        # is a different case -- deleting it changes no mtime this -nt
+        # check looks at, so the comparison alone would say "fresh" forever.
+        # Build a manifest of current existence per source here, and after
+        # the identity line is read below, reject any cache whose manifest
+        # does not match this run's -- a layer appearing or vanishing is
+        # always a miss, never silently absorbed into "nothing changed".
+        if [ -e "$_src" ]; then
+            _exists_now="${_exists_now}1"
+            # -nt: strictly newer, never a tie -- the same "ambiguous means
+            # miss" guardrail #668 asks for everywhere else in this codebase.
+            [ "$_f" -nt "$_src" ] || return 1
+        else
+            _exists_now="${_exists_now}0"
+        fi
     done <<EOF
 $_sources
 EOF
@@ -435,12 +448,12 @@ EOF
     # `#` (see the flattener's own comment further up this file), so this
     # shape can never collide with a real config key's own line, unlike
     # reusing the `_RCFG_` namespace would risk.
-    local _line _lines=() _first=1 _identity_raw=""
+    local _line _lines=() _stage=0 _identity_raw="" _exists_raw=""
     while IFS= read -r _line || [ -n "$_line" ]; do
         _line="${_line%$'\r'}"
         [ -n "$_line" ] || continue
-        if [ "$_first" = "1" ]; then
-            _first=0
+        if [ "$_stage" = "0" ]; then
+            _stage=1
             case "$_line" in
                 '#REMEMBER_DIR='*)
                     _identity_raw="${_line#'#REMEMBER_DIR='}"
@@ -448,6 +461,31 @@ EOF
                         rm -f "$_f" 2>/dev/null
                         return 1
                     }
+                    continue
+                    ;;
+                *)
+                    rm -f "$_f" 2>/dev/null
+                    return 1
+                    ;;
+            esac
+        fi
+        if [ "$_stage" = "1" ]; then
+            _stage=2
+            # #843: the second header line is the exist/absent manifest the
+            # publisher recorded for the same sources the loop above just
+            # re-checked. Any shape other than this exact fixed-width field
+            # of 0/1 digits is rejected the same way a malformed identity
+            # line is -- it is never eval'd, but trusting an unrecognised
+            # shape here would be trusting bytes that were never inspected.
+            case "$_line" in
+                '#RCFG_EXISTS='*)
+                    _exists_raw="${_line#'#RCFG_EXISTS='}"
+                    case "$_exists_raw" in
+                        *[!01]*|'')
+                            rm -f "$_f" 2>/dev/null
+                            return 1
+                            ;;
+                    esac
                     continue
                     ;;
                 *)
@@ -464,8 +502,17 @@ EOF
         fi
         _lines[${#_lines[@]}]="$_line"
     done < "$_f"
-    # No lines at all (including "no identity line" -- see above): reject.
-    [ "$_first" = "0" ] || { rm -f "$_f" 2>/dev/null; return 1; }
+    # No lines at all, or the file ended before both header lines were seen
+    # (including "no identity line" -- see above): reject.
+    [ "$_stage" = "2" ] || { rm -f "$_f" 2>/dev/null; return 1; }
+
+    # #843: a layer that appeared OR vanished since publish is always a
+    # miss, even though neither change necessarily flips the -nt comparison
+    # above (a deletion changes no mtime; the create case is already caught
+    # by -nt in the ordinary case, this is belt-and-suspenders for it). Not
+    # removed -- like the plain -nt miss above, this is staleness, not
+    # corruption, and the next publish overwrites it regardless.
+    [ "$_exists_raw" = "$_exists_now" ] || return 1
 
     local _identity
     eval "_identity=$_identity_raw"
@@ -504,12 +551,31 @@ _remember_cfg_flatten_cache_publish() {
     [ -d "$_dir" ] || mkdir -p "$_dir" 2>/dev/null || return 0
     local _t
     _t=$(mktemp "${_f}.XXXXXX" 2>/dev/null) || return 0
-    local _k _v
+    local _k _v _src _sources _exists_now=""
+    # #843: record which of the standard sources exist RIGHT NOW, in the
+    # same order _remember_cfg_flatten_cache_sources always returns them in.
+    # The loader compares this against its own fresh read of the same
+    # question, so a layer that appears or disappears between publish and
+    # load is always a miss -- the exact gap an mtime-only -nt check cannot
+    # see for a DELETED layer (deleting a file changes no mtime a -nt check
+    # looks at).
+    _sources=$(_remember_cfg_flatten_cache_sources)
+    while IFS= read -r _src; do
+        [ -n "$_src" ] || continue
+        if [ -e "$_src" ]; then
+            _exists_now="${_exists_now}1"
+        else
+            _exists_now="${_exists_now}0"
+        fi
+    done <<EOF
+$_sources
+EOF
     {
         # Identity line FIRST, always -- see the #682 comment in the loader
         # above for why a file at this (many-to-one-mangled) path cannot be
         # trusted without one.
         printf '#REMEMBER_DIR=%q\n' "${REMEMBER_DIR:-}"
+        printf '#RCFG_EXISTS=%s\n' "$_exists_now"
         while IFS=$'\t' read -r _k _v; do
             [ -n "$_k" ] || continue
             printf '_RCFG_%s=%q\n' "${_k//./_}" "$_v"
