@@ -943,11 +943,33 @@ if [ -s "$_SUMMARY_FAILURE_MARKER" ]; then
     # the previous match standing instead of blanking it.
     _remember_sf_glob_dir=$(_remember_forward_slash "$REMEMBER_DIR")
     _SF_DETAIL=""
-    for _sf_f in $(printf '%s\n' "$_remember_sf_glob_dir"/logs/memory-*.log 2>/dev/null | LC_ALL=C sort); do
+    _SF_FILES=()
+    for _sf_f in "$_remember_sf_glob_dir"/logs/memory-*.log; do
         [ -f "$_sf_f" ] || continue
-        _sf_match=$(grep -F "call-haiku error:" "$_sf_f" 2>/dev/null | tail -n 1)
-        [ -n "$_sf_match" ] && _SF_DETAIL="$_sf_match"
+        _SF_FILES+=("$_sf_f")
     done
+    # #870 (second self-review pass): sorting via an UNQUOTED `$(...)` used
+    # directly as a `for ... in` list re-splits on every IFS character,
+    # including space -- a project path containing one (common on macOS:
+    # "/Users/John Smith/...", an iCloud/Dropbox folder name) tore every
+    # matched path into fragments, none of which passed `[ -f ]`, so the
+    # loop silently found nothing at all. Restricting IFS to newline only
+    # while building the sorted array keeps each path intact as one element
+    # regardless of embedded spaces -- filenames containing a literal
+    # newline are not a case anything else in this script handles either.
+    if [ "${#_SF_FILES[@]}" -gt 0 ]; then
+        _SF_OLD_IFS="$IFS"
+        IFS=$'\n'
+        _SF_SORTED=($(printf '%s\n' "${_SF_FILES[@]}" | LC_ALL=C sort))
+        IFS="$_SF_OLD_IFS"
+        unset _SF_OLD_IFS
+        for _sf_f in "${_SF_SORTED[@]}"; do
+            _sf_match=$(grep -F "call-haiku error:" "$_sf_f" 2>/dev/null | tail -n 1)
+            [ -n "$_sf_match" ] && _SF_DETAIL="$_sf_match"
+        done
+        unset _SF_SORTED
+    fi
+    unset _SF_FILES
     echo "FAIL summarizer: last attempt failed${_SF_DETAIL:+: $_SF_DETAIL}"
     # Same marker family _isolation_may_be_the_cause (pipeline/haiku.py) scans
     # for -- an expired login reads as a generic failure here, so this is the
@@ -1119,7 +1141,8 @@ elif [ "$_POST_TOOL_FIRED" -eq 1 ] && [ -z "$_LAST_SAVE_TIME" ] \
     echo "VERDICT: problem -- PostToolUse has fired but no save has completed yet; check hook-errors.log above$_ASSUMED_NOTE"
 elif [ "$_SESSION_END_STATE" = "not-fired" ]; then
     echo "VERDICT: problem -- SessionEnd has never fired despite prior sessions ending in this project; the last-chance flush is not running (see above)$_ASSUMED_NOTE"
-elif [ "$_POST_TOOL_FIRED" -eq 1 ] && [ -n "$_LAST_SAVE_TIME" ] && [ "${_SUMMARIZER_FAILING:-0}" -eq 1 ]; then
+elif [ "$_POST_TOOL_FIRED" -eq 1 ] && [ -n "$_LAST_SAVE_TIME" ] && [ "${_SUMMARIZER_FAILING:-0}" -eq 1 ] \
+    && { [ -z "$_SESSION_DIR" ] || [ -d "$_SESSION_DIR" ]; }; then
     # #870: this arm shares its base condition with "capture is working"
     # below on purpose -- it exists ONLY to override that one verdict when
     # the cursor-mtime check cannot tell a real append apart from a
@@ -1130,6 +1153,16 @@ elif [ "$_POST_TOOL_FIRED" -eq 1 ] && [ -n "$_LAST_SAVE_TIME" ] && [ "${_SUMMARI
     # unconditional arm here would intercept those more specific, structural
     # causes below before they are ever reached, rather than only replacing
     # the one verdict it is actually more accurate than.
+    #
+    # #870 (second self-review pass): $_LAST_SAVE_TIME alone is NOT enough to
+    # exclude #144 -- a project can carry a stale last-save.json from BEFORE
+    # a slug mismatch (prior successful saves, then a rename/move) alongside
+    # a stale, equally pre-mismatch _SUMMARIZER_FAILING marker, which would
+    # satisfy this arm's first three conditions while #144 is the real,
+    # live cause. The trailing `{ -z SESSION_DIR || -d SESSION_DIR }` clause
+    # is the exact guard the promoted PostToolUse-fired-no-save arm above
+    # already uses for this same reason -- copied here rather than
+    # reinvented, so a slug mismatch always falls through to its own arm.
     echo "VERDICT: problem -- the summarizer's last attempt failed and no save has completed since (see Summarizer failures above)$_ASSUMED_NOTE"
 elif [ "$_POST_TOOL_FIRED" -eq 1 ] && [ -n "$_LAST_SAVE_TIME" ]; then
     echo "VERDICT: capture is working -- last save $_LAST_SAVE_TIME$_ASSUMED_NOTE"

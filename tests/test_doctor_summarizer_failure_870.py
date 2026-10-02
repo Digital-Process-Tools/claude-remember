@@ -18,6 +18,7 @@ marker must still reach it once the marker is removed again.
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -166,6 +167,48 @@ def test_detail_survives_a_newer_log_with_no_summarizer_lines_in_it(tmp_path):
     )
 
 
+def test_detail_is_found_when_the_project_path_contains_a_space(tmp_path):
+    """Second-pass self-review regression: the multi-log scan fed a sorted,
+    newline-joined list of paths through an UNQUOTED $(...) used directly
+    as a `for ... in` list, which IFS-word-splits on spaces too -- a
+    project path containing one (common on macOS: a folder named with a
+    person's full name, an iCloud/Dropbox sync folder) tore every matched
+    path into fragments, none of which passed `[ -f ]`, so the scan
+    silently found nothing at all even though a real log with real detail
+    existed on disk."""
+    home = tmp_path / "home"
+    project = tmp_path / "Project With Spaces"
+    remember = project / ".remember"
+    for name in ("aaaa-old-a.jsonl", "bbbb-old-b.jsonl", "cccc-old-c.jsonl"):
+        session_dir = home / ".claude" / "projects" / _doctor_144._slug(str(project))
+        session_dir.mkdir(parents=True, exist_ok=True)
+        f = session_dir / name
+        f.write_text("{}\n", encoding="utf-8")
+        _backdate(f, 3 * 24 * 3600)
+    (remember / "tmp").mkdir(parents=True)
+    (remember / "tmp" / "capture-alive").write_text("sess-1", encoding="utf-8")
+    (remember / "tmp" / "last-save.json").write_text(
+        '{"session": "sess-1", "line": 500}', encoding="utf-8")
+    (remember / "tmp" / "last-summary-failure").write_text(
+        "sess-2:9001 1", encoding="utf-8")
+    logs = remember / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    (logs / "memory-2026-09-22.log").write_text(
+        "05:52:37 [haiku] ERROR: call-haiku error: claude exited 1: "
+        "Failed to authenticate: OAuth session expired and could not be "
+        "refreshed\n",
+        encoding="utf-8",
+    )
+
+    result = _run(home, project, remember)
+
+    assert result.returncode == 0, result.stderr
+    assert "Failed to authenticate" in result.stdout, (
+        "a project path containing a space silently lost the summarizer "
+        f"failure detail:\n{result.stdout}"
+    )
+
+
 def test_stale_failure_marker_does_not_mask_a_slug_mismatch(tmp_path):
     """Regression for the new arm's own ordering (#870 self-review): a stale
     tmp/last-summary-failure marker is independent of session-dir/slug state
@@ -194,4 +237,45 @@ def test_stale_failure_marker_does_not_mask_a_slug_mismatch(tmp_path):
     )
     assert "restart claude code" not in verdict.lower(), (
         f"told a slug-mismatch victim to restart Claude Code: {verdict}"
+    )
+
+
+def test_a_stale_last_save_time_does_not_let_the_new_arm_mask_a_slug_mismatch(tmp_path):
+    """Second-pass self-review regression, scoped to #870's OWN arm only.
+
+    The first #144 fix above only closed the _LAST_SAVE_TIME-empty half of
+    the masking bug: a project that (a) had at least one successful save
+    before a rename/move, so tmp/last-save.json still carries an old,
+    non-empty mtime, (b) later developed a slug mismatch, and (c) still
+    carries a stale tmp/last-summary-failure marker from before the
+    mismatch, satisfied this arm's first three conditions even with the
+    session-dir guard missing.
+
+    This does NOT assert the overall verdict says "#144" -- that is gated
+    by the pre-existing "capture is working" arm immediately below this
+    one, which has the SAME missing-session-dir-guard defect and already
+    masked #144 before #870 ever touched this file (confirmed by running
+    origin/main's own scripts/doctor.sh against this identical fixture: it
+    too prints "VERDICT: capture is working", never "#144"). That is a
+    separate, pre-existing bug, out of #870's scope, and belongs in its own
+    issue/fix rather than being silently absorbed here. What #870 owns is
+    narrower and is what this test actually pins: the NEW arm this issue
+    added must not ALSO fire and compound the existing problem."""
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    remember = project / ".remember"
+    (remember / "tmp").mkdir(parents=True)
+    (home / ".claude" / "projects").mkdir(parents=True)
+    (remember / "tmp" / "post-tool-ran").write_text("")
+    (remember / "tmp" / "last-summary-failure").write_text(
+        "sess-old:100 1", encoding="utf-8")
+    (remember / "tmp" / "last-save.json").write_text(
+        json.dumps({"session": "sess-old", "line": 100}), encoding="utf-8")
+
+    result = _doctor_144._run(home, project, remember)
+
+    verdict = _doctor_144._verdict(result.stdout)
+    assert "the summarizer's last attempt failed" not in verdict, (
+        "the #870 arm fired despite the session-dir guard, compounding the "
+        f"pre-existing capture-is-working/#144 masking:\n{result.stdout}"
     )
