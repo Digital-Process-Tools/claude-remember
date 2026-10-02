@@ -146,6 +146,7 @@ def test_a_quick_background_child_is_waited_for_not_killed(tmp_path):
     assert (tmp_path / "keep" / "project" / "bg-done").exists()
 
 
+@posix_only
 def test_validate_required_without_a_claude_binary_fails_loudly(tmp_path):
     mod = _load(SCRIPT, "smoke_release_tree")
     tree = _tree(tmp_path, {"SessionStart": "exit 0\n"})
@@ -155,6 +156,7 @@ def test_validate_required_without_a_claude_binary_fails_loudly(tmp_path):
     assert "claude" in result.report() and "not found" in result.report()
 
 
+@posix_only
 def test_validate_skipped_says_so_out_loud(tmp_path):
     mod = _load(SCRIPT, "smoke_release_tree")
     tree = _tree(tmp_path, {"SessionStart": "exit 0\n"})
@@ -178,6 +180,7 @@ def test_no_hooks_json_fails_the_smoke_and_is_named(tmp_path):
     assert "hooks/hooks.json" in result.report()
 
 
+@posix_only
 def test_hooks_json_with_zero_command_hooks_fails_the_smoke(tmp_path):
     mod = _load(SCRIPT, "smoke_release_tree")
     tree = _tree(tmp_path, {"SessionStart": "exit 0\n"})
