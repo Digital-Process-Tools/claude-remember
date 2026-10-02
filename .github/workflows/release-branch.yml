@@ -23,9 +23,17 @@ on:
         description: "Tag (or sha) to build and publish to the release branch, e.g. v0.36.0"
         required: true
         type: string
+      allow_version_regression:
+        description: "Publish even though plugin.json's version is not strictly greater than release's current version (e.g. intentionally republishing a patch for an older line)"
+        required: false
+        type: boolean
+        default: false
 
-# Two runs racing a force-push to the same branch: the loser's tree would silently
-# replace the winner's. One at a time, never cancelled half-way through a push.
+# `publish` pushes a plain (never forced) commit on top of the previous `release`
+# commit, so two runs racing to do that would have the second's push simply
+# refuse (the ref moved since it read `parent`) rather than silently lose work --
+# but the loser would then need a retry anyway. One at a time, never cancelled
+# half-way through a push, same reasoning as tests.yml and oss-changelog.yml.
 concurrency:
   group: release-branch
   cancel-in-progress: false
@@ -37,11 +45,17 @@ env:
   # Never interpolated into a script: read back as "$SOURCE_REF" (a dispatch input is
   # free text from whoever can dispatch).
   SOURCE_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref_name }}
+  # Same reasoning: never interpolated, read back as "$ALLOW_VERSION_REGRESSION".
+  ALLOW_VERSION_REGRESSION: ${{ github.event_name == 'workflow_dispatch' && inputs.allow_version_regression == true }}
   # Pinned: the validator's verdict should change when we choose, not when npm does.
   # >= 2.1.281: earlier versions warn "Unknown field" on the directory listing fields
   # (documentationUrl, supportUrl, privacyPolicyUrl, termsOfServiceUrl, icon) in
   # plugin.json, and --strict turns that warning into a failure.
   CLAUDE_CLI_VERSION: "2.1.287"
+  # Pinned for the same reason -- the check's verdict (a real YAML parser for
+  # skill/command front matter, vs its key:-value-only fallback) should change
+  # only when we choose.
+  PYYAML_VERSION: "6.0.3"
 
 jobs:
   # Read-only. Runs the plugin's own hooks (the smoke test), so it never holds a
@@ -62,7 +76,7 @@ jobs:
           python-version: "3.12"
       # PyYAML: the check parses skill/command front matter with a real YAML parser
       # (its fallback reads `key: value` lines only).
-      - run: python3 -m pip install --disable-pip-version-check pyyaml
+      - run: python3 -m pip install --disable-pip-version-check "pyyaml==${PYYAML_VERSION}"
 
       - name: Build the release tree
         id: build
@@ -112,7 +126,7 @@ jobs:
           python-version: "3.12"
       # PyYAML: the check parses skill/command front matter with a real YAML parser
       # (its fallback reads `key: value` lines only).
-      - run: python3 -m pip install --disable-pip-version-check pyyaml
+      - run: python3 -m pip install --disable-pip-version-check "pyyaml==${PYYAML_VERSION}"
 
       - name: Rebuild and re-check
         env:
@@ -149,9 +163,25 @@ jobs:
           if git ls-remote --exit-code --heads origin release >/dev/null 2>&1; then
             git fetch --no-tags origin +refs/heads/release:refs/remotes/origin/release
             parent=$(git rev-parse refs/remotes/origin/release)
-            if [ "$(git rev-parse "$parent^{tree}")" = "$tree" ]; then
+            parent_tree=$(git rev-parse "$parent^{tree}")
+            if [ "$parent_tree" = "$tree" ]; then
               echo "release already carries tree $tree ($SOURCE_REF) -- nothing to push"
               exit 0
+            fi
+            # #856: refuse to publish a version that does not move release forward
+            # (a patch tag for an older line pushed after a newer one would
+            # otherwise land on top of it, and the directory would show the older
+            # version until something newer is pushed again).
+            new_version=$(git cat-file -p "$tree:.claude-plugin/plugin.json" \
+              | python3 -c "import json,sys; print(json.load(sys.stdin)['version'])")
+            parent_version=$(git cat-file -p "$parent_tree:.claude-plugin/plugin.json" \
+              | python3 -c "import json,sys; print(json.load(sys.stdin)['version'])")
+            if [ "$ALLOW_VERSION_REGRESSION" = "true" ]; then
+              python3 .github/scripts/check_version_order.py --new "$new_version" \
+                --parent "$parent_version" --allow-regression
+            else
+              python3 .github/scripts/check_version_order.py --new "$new_version" \
+                --parent "$parent_version"
             fi
             set -- -p "$parent"
           else
