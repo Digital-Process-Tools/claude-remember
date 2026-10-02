@@ -1,0 +1,34 @@
+{
+  "_about": "Config for .github/scripts/{build,check,smoke}_release_tree.py (#851). The `release` branch is what the Anthropic plugin directory fetches; main keeps everything. See docs/releasing.md.",
+  "repo": "Digital-Process-Tools/claude-remember",
+  "default_branch": "main",
+  "_deny_why": "Deny-list, not allow-list: a path forgotten here ships and is caught loudly by the size/count check; a path forgotten in an allow-list would vanish from users' installs silently. Entry ending in '/' = directory prefix, otherwise an exact path.",
+  "deny": [
+    ".claude/",
+    ".github/",
+    ".oss/",
+    "changelog.d/",
+    "docs/",
+    "tests/",
+    "trap.d/",
+    ".oss.json",
+    ".supertool.json",
+    "CLAUDE.md",
+    "CONTRIBUTING.md",
+    "conftest.py",
+    "pyproject.toml",
+    "scripts/bench-slug.sh",
+    "scripts/report_test_durations.py",
+    "scripts/report_windows_skip_floor.py",
+    "scripts/run-tests.sh",
+    "scripts/windows_skip_triage_497.py"
+  ],
+  "_budget_why": "max_file_bytes and max_files are the directory's own rules (pre-submission checklist, 'Files in the plugin folder'); images and fonts are exempt from the per-file limit. max_total_bytes (3 MiB) is this repo's own ceiling: the directory timed out validating 9.2 MB.",
+  "budget": {
+    "max_file_bytes": 262144,
+    "max_files": 512,
+    "max_total_bytes": 3145728
+  },
+  "changelog": "CHANGELOG.md",
+  "rewrite_links": true
+}
