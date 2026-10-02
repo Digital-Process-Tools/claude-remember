@@ -421,6 +421,8 @@ def test_package_manager_config_fails(tmp_path, name):
     "Bash(pipx:*)",
     "Bash(curl:*)",
     "Bash(wget:*)",
+    "Bash(pwsh:*)",
+    "Bash(powershell:*)",
     "Bash(python3 *)",
     "Bash(bash scripts/run.sh:*)",
     "Bash(./scripts/run.sh:*)",

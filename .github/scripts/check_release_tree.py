@@ -25,9 +25,13 @@ Rows that block or stop validation
   - YAML front matter with a non-empty text `description` in skills/*/SKILL.md,
     commands/*.md and agents/*.md
   - that same front matter's `allowed-tools` never grants unrestricted shell: bare
-    `Bash`, `Bash(*)`, `Bash(:*)`, or `Bash(<shell-or-interpreter>:*)` with no path
-    (bash, sh, zsh, env, python, python2, python3, with or without a trailing `*`);
-    a narrow `Bash(<path>:*)` naming one script passes
+    `Bash`, `Bash(*)`, `Bash(:*)`, or `Bash(<command>:*)` / `Bash(<command> *)`
+    where the command is a shell (bash, sh, zsh, dash, ksh, fish, pwsh, powershell,
+    env), an interpreter (python, node, ruby, perl, ...), a package manager or
+    runner (npm, npx, pip, uv, cargo, ...) or a downloader (curl, wget) and no
+    plugin script is named -- the full list is _UNSCOPED_COMMANDS below; a
+    relative path or a wildcard in a path is held too. A specific command
+    (`Bash(git status:*)`) or a named `${CLAUDE_PLUGIN_ROOT}/...` script passes
   - nothing shaped like a real credential (Anthropic, GitHub, AWS, Slack, Google,
     GitLab keys, private key blocks)
 
@@ -443,7 +447,7 @@ def _check_hooks(files: dict, manifest, off: list) -> None:
 # no plugin script is not scoped to anything.
 _UNSCOPED_COMMANDS = {
     # shells
-    "bash", "sh", "zsh", "dash", "ksh", "fish", "env",
+    "bash", "sh", "zsh", "dash", "ksh", "fish", "pwsh", "powershell", "env",
     # interpreters
     "python", "python2", "python3", "node", "deno", "ruby", "perl", "php", "lua",
     # package managers and runners

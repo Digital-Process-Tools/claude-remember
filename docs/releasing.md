@@ -2,9 +2,12 @@
 
 `main` carries everything: the plugin, its 300 test files, the docs and their images, the
 maintainer tooling, and a CHANGELOG.md over 600 KiB. The Anthropic plugin directory does not
-accept that. It holds any version whose plugin folder has a non-image file of 256 KiB or more,
-more than 512 files, or a `.gitattributes` with `export-ignore`, `export-subst` or `filter`.
-On v0.36.0 it fetched 474 files and 9.2 MB and then reported "Validation ran out of time"
+accept that. Its pre-submission checklist holds any version whose plugin folder has more than
+512 files, or a file of 256 KiB or more that is not an image or font. A `.gitattributes` with
+`export-ignore`, `export-subst` or `filter` (any content-rewriting attribute, including in a
+`.gitattributes` above the plugin folder) is worse than a hold: validation stops with "Couldn't
+validate that repository". On v0.36.0 the directory fetched 474 files and 9.2 MB and then
+reported "Validation ran out of time"
 ([#851](https://github.com/Digital-Process-Tools/claude-remember/issues/851)).
 
 So there are two branches people install from:
@@ -12,7 +15,7 @@ So there are two branches people install from:
 | Branch | Who reads it | What decides the version they get |
 | --- | --- | --- |
 | `main` | the DPT marketplace (`dpt-plugins`), manual installs | `version` in `.claude-plugin/plugin.json` on `main` |
-| `release` | the Anthropic directory, **once its listing is switched to follow `release`** (see the last section) | the latest commit on `release`, which only the release workflow writes |
+| `release` | the Anthropic directory, which has followed `release` since 2026-10-02 (see "Switching the listing to `release`" below) | the latest commit on `release`, which only the release workflow writes |
 
 `release` is built by [`.github/workflows/release-branch.yml`](../.github/workflows/release-branch.yml)
 from a tag. It never shares history with `main`: each release is one commit on top of the
@@ -26,11 +29,13 @@ previous release commit, and its message names the tag and the `main` commit it 
    *Why:* DPT-marketplace installs follow `main`, and the `version` field in `plugin.json` is the
    only thing that tells them there is something new. The tag does not matter to them.
 
-2. **Run the full suite (`pytest`), open the pull request, squash-merge it on green.**
-   *Why:* the merge commit is what gets tagged; CI across three OSes is the gate.
+2. **Run the full suite (`pytest`) and commit the release on `main`.** In this repository that is
+   a direct `chore(release): x.y.z` commit on `main`, not a pull request: v0.35.0 to v0.37.0 were
+   all made that way, and `.oss.json` leaves `merge_method` unset (`null`).
+   *Why:* that commit is what gets tagged; CI across three OSes is the gate.
 
-3. **Tag that merge commit `vx.y.z` and push the tag with your own credentials**:
-   `git tag vx.y.z <merge-sha> && git push origin vx.y.z`, then check it landed with
+3. **Tag that commit `vx.y.z` and push the tag with your own credentials**:
+   `git tag vx.y.z <release-commit-sha> && git push origin vx.y.z`, then check it landed with
    `git ls-remote --tags origin vx.y.z`.
    *Why:* **pushing the tag is what publishes to the directory now.** The tag push starts the
    `release branch` workflow, and that workflow is the only thing that writes `release`. No tag,
@@ -41,26 +46,37 @@ previous release commit, and its message names the tag and the `main` commit it 
 
 4. **Watch the `release branch` run** (Actions tab, or `gh run list --workflow release-branch.yml`).
    It has two jobs:
-   - `verify`, read-only: builds the tree from the tag, runs
+   - `verify`, read-only: installs PyYAML, builds the tree from the tag, runs
      [`check_release_tree.py`](../.github/scripts/check_release_tree.py) (the directory's
-     pre-submission checklist), installs the claude CLI and runs
-     `claude plugin validate --strict`, then runs every hook in `hooks/hooks.json` once in an
-     isolated temp HOME and project, with a fake `claude` that refuses every call
-     ([`smoke_release_tree.py`](../.github/scripts/smoke_release_tree.py));
+     pre-submission checklist), installs the pinned claude CLI (`CLAUDE_CLI_VERSION` in the
+     workflow, 2.1.287 as of 2026-10-02) and runs `claude plugin validate --strict`, then runs
+     every hook in `hooks/hooks.json` once in an isolated temp HOME and project, with a fake
+     `claude` that refuses every call
+     ([`smoke_release_tree.py`](../.github/scripts/smoke_release_tree.py)).
+     **If the npm install of the CLI fails, the run does not fail**: validate is SKIPPED and the
+     only trace is a `::warning::` annotation, so read the run rather than its status. The pin
+     must be 2.1.281 or later: earlier CLIs warn "Unknown field" on the directory listing fields
+     in `plugin.json`, and `--strict` makes that a failure (observed 2026-10-02: 2.1.280 fails on
+     our `plugin.json` with `privacyPolicyUrl` and `termsOfServiceUrl`, 2.1.287 passes);
    - `publish`, the only job allowed to write: rebuilds the same tree, refuses to push unless it
      is byte-for-byte the tree `verify` passed, and pushes one commit to `release`.
    *Why two jobs:* the smoke test runs the plugin's own hooks, so it never holds a token that can
    push.
 
-5. **Publish the GitHub release** (`release_publish.py`, which runs `gh release create --verify-tag`).
+5. **Publish the GitHub release** (`scripts/release_publish.py` from the oss plugin, not a file in
+   this repository; it runs `gh release create --verify-tag`).
    *Why it is unaffected:* the release notes are read from `CHANGELOG.md` in the maintainer's
    local `main` checkout (the script's default is `<repo>/CHANGELOG.md`), never from the release
    tree. The release tree's CHANGELOG.md is cut to the latest section, but nothing reads that copy
    except people browsing `release`. Keep `--verify-tag`: without it `gh release create` would
    create a missing tag itself, through the API.
 
-6. **The directory picks up the new `release` commit** and scans it. A version can still sit
-   "In review" for a while; that is the directory's queue, not a failed release.
+6. **The directory picks up the new `release` commit** (at once through the push webhook,
+   otherwise within about 6 hours) and scans it. A version with a **Policy hold** waits for an
+   Anthropic reviewer. And while the listing itself is flagged ("A scan flagged this plugin for
+   review; newer versions won't go live until a reviewer clears it"), no newer version goes live,
+   however clean, until a reviewer clears it. Read the **Versions** tab (below) rather than
+   assuming a waiting version is only in a queue.
 
 ## What the release tree contains
 
@@ -102,14 +118,22 @@ pushes nothing.
 ## Building and checking locally
 
 ```bash
-python3 .github/scripts/build_release_tree.py --ref v0.36.0 --out /tmp/release-tree
+python3 .github/scripts/build_release_tree.py --ref vX.Y.Z --out /tmp/release-tree   # the latest tag
 python3 .github/scripts/check_release_tree.py /tmp/release-tree
 python3 .github/scripts/smoke_release_tree.py /tmp/release-tree   # needs bash; validate needs `claude`
 ```
 
+The scripts come from your checkout; the plugin files come from the tag. A tag cut before the
+check was tightened can fail it: with #859's `allowed-tools` check in place, a tree built from
+v0.36.0 or v0.37.0 fails on `commands/doctor.md`. That is expected, and re-dispatching such an
+old tag through the workflow would fail the same way.
+
 `check_release_tree.py` prints `REVIEW` lines for code that reads a credential (the OAuth token
-and API key handling in `pipeline/haiku.py`, for example). Those never fail the check; they are
-what a directory reviewer will look at, and README.md should disclose them.
+and API key handling in `pipeline/haiku.py`, for example). Those never fail the check. Treat them
+as a starting list for what README.md must disclose, not as a prediction of what the portal will
+flag: on `e6cf58f` the portal's credential warning named `README.md`,
+`scripts/session-start-hook.sh` and `.claude-plugin/plugin.json`, and none of those is a `REVIEW`
+line (the check skips `.md` files for this).
 
 ## How the directory decides what to read
 
@@ -120,7 +144,7 @@ Left empty, that field follows the repository's default branch, which is why eve
 label the portal shows next to each commit appears to come from `version` in that commit's
 `plugin.json`, not from a tag (several different commits were all labelled `v0.34.0`).
 
-Once the field says `release`:
+Since the field says `release` (2026-10-02):
 
 - merges to `main` are invisible to the directory;
 - the tag is never seen by Anthropic either. It only starts our workflow;
@@ -128,33 +152,36 @@ Once the field says `release`:
 
 **Claude Code updates an installed plugin only when `version` in `plugin.json` changes.** The
 updater compares manifests, not commits ([#133](https://github.com/Digital-Process-Tools/claude-remember/issues/133)).
-A commit with an unchanged version reaches new installs only, never existing ones. `release`
-moves only at a tag, and a tag always comes with a version bump, so every `release` commit is an
-update that installed copies will pick up.
+A commit with an unchanged version reaches new installs only, never existing ones. The release
+flow bumps the version before it tags, so a normal release is an update installed copies pick up.
+Nothing enforces that, though: a manual re-run for a tooling fix (see "When the workflow fails")
+can write a new `release` commit carrying the same version, and existing installs never receive
+it.
 
-## One manual step, done once
+## Switching the listing to `release` (done 2026-10-02)
 
-Switch the listing to follow `release`, in the portal field above. Do it **after** the first
-`release` commit exists: run the workflow once (`gh workflow run release-branch.yml -f ref=<latest tag>`),
-check on GitHub that `release` holds only the slim tree, then type `release` and save. Until the
-switch, the listing keeps following `main`, and every push to `main` keeps landing there as a held
-version.
+For this repository this is done. `release` was created by the v0.37.0 tag push (run
+37004187570, event `push`), the listing was switched to it on 2026-10-02, and its first scan is
+`e6cf58f`.
 
-What saving does, per the portal's own text: it scans the latest commit on `release` as a new
-version straight away; the version already live stays live while that runs; and a publish request
-still waiting is cancelled.
+For another repository, in this order:
 
-While you are on that page:
+1. Create `release` first: push a tag, or `gh workflow run release-branch.yml -f ref=<tag>`.
+2. Check on GitHub that `release` holds only the slim tree.
+3. In the portal field above (**Settings → Source → "Tracked branch or tag"**), type `release` and
+   **Save**.
 
-- **GitHub push webhook** (Settings, Updates). Without it the portal checks for new commits about
-  every 6 hours; with it, it sees a `release` push immediately.
-- **"This plugin collects or transmits user data."** The portal's hint asks plugins that call
-  remote MCP servers or HTTP hooks to say yes. Whatever you choose, README.md has to describe what
-  the plugin sends and where, because the security scan holds behaviour the README does not
-  disclose.
-- **A listing held for the directory team** ("Needs the directory team" in the portal) does not
-  clear itself when a clean version arrives. Contact the directory team from the plugin's contact
-  address and say the listing now follows `release`.
+The portal's text on saving, verbatim: "Saving a change scans the latest commit on the new branch
+or tag as a new version. A version that is already live stays up while that happens, and a
+publish request that is still waiting is cancelled." Per the submission docs, the branch cannot be
+changed while the plugin is with a reviewer. Until the switch, the listing keeps following the
+default branch, and every push to it lands in the portal as a new version.
+
+While you are on that page, set up the **GitHub push webhook** (**Settings → Updates → Set up**;
+connected for this repository). Portal text: "With a push webhook, GitHub tells the directory the
+moment you push. With or without one, a scheduled check looks for new commits about every 6
+hours." Setting it up needs admin rights on the repository, and the portal shows the webhook
+secret only once. The other Settings fields are covered under "Listing details" below.
 
 ## Our own marketplace
 
@@ -162,9 +189,11 @@ The DPT marketplace (`Digital-Process-Tools/claude-marketplace`) declares this p
 `{"source": "github", "repo": "Digital-Process-Tools/claude-remember"}`: no ref, so it installs
 `main` as it is at that moment. New installs therefore get unreleased merges under the last
 released version number, while existing installs only move at a version bump. Pointing that entry
-at `release` would make both marketplaces serve the same tagged builds; do it only after the first
-`release` commit exists, and only once Claude Code's `github` source is confirmed to accept a
-`ref`.
+at `release` would make both marketplaces serve the same tagged builds, and both preconditions now
+hold: `release` exists, and Claude Code's `github` source accepts `ref` (a branch or tag) and `sha`
+(code.claude.com, "Host and maintain a marketplace"). **Switching the entry in
+Digital-Process-Tools/claude-marketplace to `"ref": "release"` is a pending follow-up, not done**
+(as of 2026-10-02).
 
 ## What the directory actually checks: observed scans
 
@@ -187,8 +216,10 @@ Publish. The **Directory policy** step lists every finding, with a title, a code
 A **Blocks** finding (red cross) is worse than a hold: fix it before anything else.
 
 Separately from any version, a listing can be marked **"Needs the directory team"** (a flagged
-version or a delist). That does not clear when a clean version arrives: contact the directory team
-from the plugin's contact address.
+version or a delist). The portal's toast says "Contact the directory team to publish or relist
+it"; *inferred from that wording, not observed*: it does not clear by itself when a clean version
+arrives. Contact them as described under "Contacting Anthropic about a plugin" below, and say
+what changed (for example, that the listing now follows `release`).
 
 ### Full tree (`main`) vs `release`, same release
 
@@ -198,7 +229,7 @@ after it was switched to `release`.
 | Code (portal title) | Full tree `81ffecb` (486 files, 9.3 MB) | `release` `e6cf58f` (73 files, 1.3 MB) |
 | --- | --- | --- |
 | `SECRET_IN_SCRIPT` (Secret in a shipped file) | **Blocks**: fake API keys in `tests/test_haiku.py` | gone: `tests/` is not shipped |
-| `ALLOWED_TOOLS_BROAD` (Pre-approves broad shell access in allowed-tools) | Policy hold: `commands/doctor.md` | **Policy hold**, the only one: same file. Fixed in v0.37.1 (#859) |
+| `ALLOWED_TOOLS_BROAD` (Pre-approves broad shell access in allowed-tools) | Policy hold: `commands/doctor.md` | **Policy hold**, the only one: same file. Fixed by #859 (next release); confirm on that release's scan |
 | Files or downloads the validator couldn't inspect | Policy hold (2) | gone |
 | Image or font file that the plugin's code could run | Warning (3): the PNGs under `docs/` | gone |
 | `MCP_FORWARDS_CREDENTIAL_ENV` (Uses a credential from the user's machine) | Warning (21) | Warning (3): `README.md`, `scripts/session-start-hook.sh`, `.claude-plugin/plugin.json` |
@@ -209,8 +240,8 @@ after it was switched to `release`.
 | Security scan | Passed | Passed |
 
 On the earlier v0.36.0 (`a92a072`, full tree, 474 files / 9.2 MB) the validator never finished:
-`VALIDATION_INCOMPLETE` and `VALIDATION_NOT_EVALUATED`, both policy holds ("usually because the
-plugin folder is very large"). That is the failure the `release` branch exists to remove.
+`VALIDATION_INCOMPLETE` and `VALIDATION_NOT_EVALUATED`, both policy holds; the portal's wording
+was "Validation ran out of time". That is the failure the `release` branch exists to remove.
 
 ### The rules, one by one
 
@@ -223,53 +254,117 @@ plugin folder is very large"). That is the failure the `release` branch exists t
   accepted form. `check_release_tree.py` now fails on the broad forms (#859).
 - **`SECRET_IN_SCRIPT`** blocks on anything that looks like a literal credential, including fake
   keys in test fixtures. A deny-list that drops `tests/` removes it. If a test fixture must ship,
-  build the key at runtime instead of writing it literally.
+  build the key at runtime instead of writing it literally. Our check is **not** a superset of the
+  portal's: `check_release_tree.py`'s Anthropic-key pattern needs 20 or more characters after
+  `sk-ant-`, so the fixture `sk-ant-api03-example` in `tests/test_haiku.py` does not match it. The
+  deny-list, not our check, is what keeps those fixtures out of `release`.
 - **`MCP_FORWARDS_CREDENTIAL_ENV`** fires where the plugin reads a credential from the user's
-  machine. It also fired on `README.md`, i.e. on the disclosure itself, and on a comment that only
-  contains the word "credentials". The portal's own text: "If the credential is for that host's own
-  vendor, you can leave it as it is and a reviewer confirms that." Ours is the user's own Claude
-  Code / Codex login, so we left it. The fix that clears it is to ask for the value through a
-  `userConfig` entry in `plugin.json` with `sensitive: true` and use `${user_config.KEY}`. Do not
-  make it disappear by removing the disclosure: the security scan holds undisclosed behaviour.
+  machine. The checklist puts this row under "Held for a reviewer", but on our scans the portal
+  showed it as a warning; we do not know which one wins. It also fired on `README.md`, i.e. on the
+  disclosure itself, on a comment that only contains the word "credentials", and on
+  `.claude-plugin/plugin.json`, which contains no credential text at all. The portal's own text:
+  "If the credential is for that host's own vendor, you can leave it as it is and a reviewer
+  confirms that." Ours is the user's own Claude Code / Codex login, so we left it. The form the
+  portal suggests, **not yet observed to clear it**, is to ask for the value through a
+  `userConfig` entry in `plugin.json` with `sensitive: true` and use `${user_config.KEY}`.
+  `userConfig` values reach hook processes as the environment variable
+  `CLAUDE_PLUGIN_OPTION_<KEY>` (code.claude.com, plugin manifest reference). Tracked in
+  [#860](https://github.com/Digital-Process-Tools/claude-remember/issues/860). Do not make the
+  warning disappear by removing the disclosure: the security scan holds undisclosed behaviour.
 - **`RUNTIME_FETCH_EXEC`** flags text that downloads and runs code, and the portal says it looks at
   "a hook, a server or settings command, a script, or text such as a skill or README". On our tree
   the two files contain no download at all; *inferred, not confirmed*: it matched comment text (a
-  docstring showing `eval "$(...)"` and a comment mentioning curl), reworded in v0.37.1. Check the
-  v0.37.1 scan before relying on this.
-- **`ICON_MISSING`**: put a square PNG, 512 to 2048 px, under 2 MB, at `.claude-plugin/icon.png`
-  (or set `icon` in `plugin.json`; SVG and WebP are not accepted). **It is set only once**: "the
-  first time the plugin is saved or submitted… Adding or changing it later does not change the
-  icon." Choose it deliberately, before it matters, and keep it outside any denied path: an icon
-  under `docs/` vanishes from `release`.
+  docstring showing `eval "$(...)"` and a comment mentioning curl). #859 rewords only those two:
+  the curl comment and the `pipeline/shell.py` docstring. `scripts/log.sh` still contains real
+  `eval "$_assign"`-style lines and the word "fetch", so the next release's scan decides whether
+  the warning goes.
+- **`ICON_MISSING`**: the portal accepts a square PNG **or JPEG**, 512 to 2048 px, under 2 MB,
+  through `icon` in `plugin.json` (SVG and WebP are not accepted). Keep it inside the plugin
+  folder and outside any denied path: an icon under `docs/` vanishes from `release`. **The listing
+  icon is set only once**: "the first time the plugin is saved or submitted… Adding or changing it
+  later does not change the icon." remember was saved before it shipped an icon, and its portal
+  **Details** page shows the icon as "Set by an Anthropic reviewer" (Approved). Shipping one now
+  would only clear the `ICON_MISSING` warning; it would not change the listing icon. For another
+  repository: put the icon in the plugin folder **before** the first save or submit.
 - **`USES_HOOKS`** is information only and stays for any plugin that ships hooks.
 
-### For another plugin repository, in addition to the reuse steps above
+### For another plugin repository, in addition to the reuse steps below
 
 1. Read your own **Versions** tab first: the full-tree scan of your latest commit already lists
-   every rule your plugin trips, before you build anything.
-2. Grep every shipped skill, command and agent for `allowed-tools`. Anything broader than a named
-   `${CLAUDE_PLUGIN_ROOT}` script is a hold.
+   every rule your plugin trips, before you build anything. A plugin never submitted has no
+   Versions tab: use **Submit new → Plugin bundle → Validate** in the portal for the same report.
+2. Grep every shipped skill, command and agent for `allowed-tools`. A bare `Bash`, `Bash(*)`, or
+   a wildcard after a shell, interpreter, package manager or runner, or `curl` is a hold. A
+   specific command (`Bash(git status:*)`) or a named `${CLAUDE_PLUGIN_ROOT}` script is not.
 3. Make sure fake credentials live only in denied paths (`tests/`).
-4. Decide the icon before the first submission, and ship it inside the plugin folder.
+4. Put the icon in the plugin folder before the first save or submission (see `ICON_MISSING`).
 5. Disclose in README.md everything the plugin runs, sends and stores; expect that disclosure to
    raise warnings, and leave it in.
 
+## Listing details: what comes from where
+
+Sourced on 2026-10-02.
+
+- **The listing fields in `plugin.json`.** Per the code.claude.com plugin manifest reference, the
+  directory reads `icon`, `documentationUrl`, `supportUrl`, `privacyPolicyUrl` and
+  `termsOfServiceUrl` from `plugin.json`, and Claude Code itself ignores them. The four URLs must
+  be `https`. `claude plugin validate` accepts them without a warning only from 2.1.281, hence the
+  workflow's pin. #859 adds the four URLs to our `plugin.json`, for the next release.
+- **Name and short description.** From claude.com, "Manage your listing after publishing": "A
+  plugin listing's name and short description come from plugin.json and the README of the version
+  that's live. To change them, edit those files and publish a new version… If an Anthropic
+  reviewer edited either field during review, the listing keeps the reviewer's text." The
+  **Settings** tab changes the surfaces, the contact email and the "collects or transmits user
+  data" answer.
+- **Observed for remember:** the **Details** page showed Short description "No value" and
+  Keywords "No value", although `plugin.json` has carried `description` and `keywords` since
+  March, before the May 7 submission and in the live v0.29.1. So the portal does not fill
+  Keywords from `plugin.json`'s `keywords`, at least for this listing; why is unresolved, and the
+  question is with the directory team. Homepage, Repository and License were filled.
+- **"This plugin collects or transmits user data"** (Settings). The portal's hint names remote MCP
+  servers and HTTP hooks. remember switched it on, pointing at [privacy.md](privacy.md), because it
+  sends conversation text to the user's own `claude -p` / codex; that is our judgement, not a rule.
+  Whatever you choose, README.md has to describe what the plugin sends and where: the security
+  scan holds behaviour the README does not disclose.
+
+### Contacting Anthropic about a plugin
+
+Per claude.com, "Track your directory submission": open the plugin's menu in the portal and choose
+**Get help** or **Contact Anthropic**, or email `directory@anthropic.com` ("replies can be
+delayed"). Include the listing name, the organisation and the status the portal shows.
+
 ## Reusing this in another plugin repository
 
-claude-jit-context and claude-supertool hit the same directory holds and plan to reuse this.
-The three scripts read everything repository-specific from `.github/release-branch.json`
-(`repo`, `default_branch`, `deny`, `budget`, `changelog`, `rewrite_links`), and the smoke test
-reads its hook list from `hooks/hooks.json`. To adopt it:
+claude-jit-context and claude-supertool hit the same directory holds and plan to reuse this. Not
+everything repository-specific lives in `.github/release-branch.json`:
+
+- `build_release_tree.py` reads `repo`, `default_branch`, `deny`, `changelog`, `rewrite_links` and
+  the optional `link_ref` from it; `check_release_tree.py` reads only `budget`. In `budget`,
+  `max_file_bytes` and `max_files` are the directory's rules, but `max_total_bytes` (3 MiB) is this
+  repository's own ceiling, not a directory rule: set your own.
+- `smoke_release_tree.py` reads its hook list from `hooks/hooks.json`, but hard-codes remember's
+  `REMEMBER_CLAUDE_BIN` / `REMEMBER_CODEX_BIN` (how it hands the hooks a fake `claude` and
+  `codex`) and remember's `hook-errors.log`. Adapt those to your plugin.
+- `release-branch.yml` pins `CLAUDE_CLI_VERSION`; keep it at 2.1.281 or later.
+- Rewritten links point at the head of the default branch (or `link_ref`), not at the tag, so a
+  released README's links into removed paths can drift from the version that shipped.
+
+To adopt it:
 
 1. Copy `.github/scripts/{build,check,smoke}_release_tree.py`, `.github/release-branch.json` and
-   `.github/workflows/release-branch.yml`.
+   `.github/workflows/release-branch.yml`, and adapt the points above.
 2. Rewrite the deny-list from that repository's own tree. Check every candidate against what the
    plugin loads at runtime (hooks, scripts they call, skills, commands, manifests) before denying
    it, and keep `LICENSE` and `README.md`: the directory blocks without them.
-3. Build from the latest tag and run the check and the smoke test locally (section above). Look
-   at the `REVIEW` lines and make sure README.md discloses each of them.
+3. Build from the latest tag and run the check and the smoke test locally (section above). Use
+   the `REVIEW` lines as a starting list for the README disclosure, then compare with what the
+   portal actually flags.
 4. Port the tests (`tests/test_release_branch_*_851.py`) and adjust their fixtures.
-5. Push a tag, confirm `release` exists, then do the portal steps above.
+5. Make sure `github-actions[bot]` can push `release` (no ruleset or branch protection blocking
+   it), never make `release` the default branch, and treat push rights on `v*` tags as publish
+   rights: whoever can push such a tag publishes to the directory.
+6. Push a tag, confirm `release` exists, then do the portal steps in "Switching the listing to
+   `release`" above.
 
 Known limits of the shared scripts: the CHANGELOG cut assumes Keep a Changelog `## [x.y.z]`
 headings; the smoke test builds payloads only for the common hook events; and the launcher,
