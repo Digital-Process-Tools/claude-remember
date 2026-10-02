@@ -300,21 +300,25 @@ was "Validation ran out of time". That is the failure the `release` branch exist
     `CODEX_API_KEY` -- the host CLI's own credentials, read straight from the environment -- are
     not ours to move into `userConfig`: they belong to the user's existing Claude Code / Codex
     login, not to a value this plugin asks the user to configure. They would keep reading a
-    credential from the same files the scan already named, so the finding's own condition (reads
-    a credential from the user's machine) would still hold even after the move. The
-    `RUNTIME_FETCH_EXEC` precedent above is the same shape: a partial, cosmetic change to text the
-    scanner matches on is not evidence it moves the scanner's verdict, and on that row it measurably
-    didn't.
+    credential in `README.md`'s disclosure and in `scripts/session-start-hook.sh`, two of the
+    three files the scan named, so the finding's own condition (reads a credential from the
+    user's machine) would still hold on those even after the move -- `.claude-plugin/plugin.json`
+    is the anomaly noted two paragraphs up, with no credential text at all, and nothing here
+    changes that. The `RUNTIME_FETCH_EXEC` precedent above is the same shape: a partial, cosmetic
+    change to text the scanner matches on is not evidence it moves the scanner's verdict, and on
+    that row it measurably didn't.
   - **The portal's own text already accepts this case as it stands**: "If the credential is for
     that host's own vendor, you can leave it as it is and a reviewer confirms that." That is
     exactly what the optional recovery token and the three passthroughs are -- the host CLI's own
     vendor credentials -- so the warning is accepted by design, confirmed at each review, rather
     than chased to zero.
-  - **The cost the other four sub-questions in #860 would add** -- a migration period for
-    `REMEMBER_OAUTH_TOKEN` / `haiku.oauth_token` users, a parallel non-`userConfig` path for
-    Codex/`.codex-plugin` and any other host with no `userConfig` mechanism, and an unverified
-    mechanism that would need a real plugin install to confirm -- buys, at best, a warning that
-    would still remain on the other three vars.
+  - **The cost of building it, against sub-questions 1, 3 and 4 in #860** -- an unverified
+    mechanism that would need a real plugin install to confirm, a migration period for
+    `REMEMBER_OAUTH_TOKEN` / `haiku.oauth_token` users, and a parallel non-`userConfig` path for
+    Codex/`.codex-plugin` and any other host with no `userConfig` mechanism -- buys, at best, a
+    warning that would still remain on the other three vars. Sub-question 5 (the README
+    disclosure) is not an added cost either way: it stays by design regardless of this decision,
+    per the note below.
   Do not make the warning disappear by removing the disclosure: the security scan holds
   undisclosed behaviour.
 - **`RUNTIME_FETCH_EXEC`** flags text that downloads and runs code, and the portal says it looks at
