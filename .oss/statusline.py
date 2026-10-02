@@ -1809,6 +1809,28 @@ def installed_plugins(project_root, plugins_root=None):
     return found
 
 
+def installed_plugins_registry_readable(plugins_root=None):
+    """Could `installed_plugins.json` itself be read and parsed to an object?
+
+    `installed_plugins()` above returns ``{}`` for two different situations --
+    the file is absent or unreadable, or it exists, parses, and genuinely
+    lists nothing that applies here -- and a caller that only sees `{}` cannot
+    tell them apart (#1779). This answers the narrower question alone, so a
+    caller that needs the distinction can ask it directly instead of reading
+    the registry's read-failure into the empty-registry shape.
+
+    Uses the same two `except` clauses `installed_plugins()` does (`OSError`
+    for "could not be read at all", `ValueError` for "read, but not JSON"),
+    so the two functions can never disagree about what counts as unreadable.
+    """
+    root = Path(plugins_root) if plugins_root is not None else plugins_root_default()
+    try:
+        doc = json.loads((root / "installed_plugins.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(doc, dict)
+
+
 def repo_from_url(url):
     if not url:
         return None
