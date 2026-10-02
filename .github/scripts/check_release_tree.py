@@ -405,6 +405,10 @@ def _check_hooks(files: dict, manifest, off: list) -> None:
             off.append(f".claude-plugin/plugin.json: `hooks` also names {rel}, "
                        "which is loaded by default (double registration)")
     if rel not in files:
+        # #858: a hookless tree of a plugin that works only through its hooks would
+        # otherwise pass every gate silently and get pushed to the directory.
+        off.append(f"{rel}: missing -- this plugin works only through its hooks, "
+                   "so a release tree with none would be silently broken")
         return
     try:
         doc = json.loads(files[rel].decode("utf-8"))
@@ -414,6 +418,7 @@ def _check_hooks(files: dict, manifest, off: list) -> None:
     if not isinstance(doc, dict) or not isinstance(doc.get("hooks"), dict):
         off.append(f"{rel}: no top-level `hooks` object")
         return
+    command_hooks = 0
     for event, groups in doc["hooks"].items():
         if event not in KNOWN_EVENTS:
             off.append(f"{rel}: unknown event {event!r} (known: {', '.join(sorted(KNOWN_EVENTS))})")
@@ -431,12 +436,18 @@ def _check_hooks(files: dict, manifest, off: list) -> None:
                     off.append(f"{rel}: {event} hook has unknown type {htype!r}")
                     continue
                 if htype == "command":
+                    command_hooks += 1
                     cmd = hook.get("command")
                     if not isinstance(cmd, str) or not cmd.strip():
                         off.append(f"{rel}: {event} command hook has no command")
                         continue
                     for problem in hook_command_problems(cmd):
                         off.append(f"{rel}: {event} command {cmd!r}: {problem}")
+    if command_hooks == 0:
+        # #858: a hooks.json with no `command` hook runs nothing -- same silent
+        # breakage as a missing file, just one layer deeper.
+        off.append(f"{rel}: declares hooks but has zero `command` hooks -- "
+                   "a release that would run nothing")
 
 
 # The directory holds ALLOWED_TOOLS_BROAD on "bare Bash, Bash(*), or a wildcard

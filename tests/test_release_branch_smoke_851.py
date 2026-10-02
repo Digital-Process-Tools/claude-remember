@@ -148,7 +148,7 @@ def test_a_quick_background_child_is_waited_for_not_killed(tmp_path):
 
 def test_validate_required_without_a_claude_binary_fails_loudly(tmp_path):
     mod = _load(SCRIPT, "smoke_release_tree")
-    tree = _tree(tmp_path, {})
+    tree = _tree(tmp_path, {"SessionStart": "exit 0\n"})
     result = mod.run_smoke(tree, validate="require", claude_bin=str(tmp_path / "no-claude"),
                            linger_seconds=1)
     assert not result.ok
@@ -157,9 +157,38 @@ def test_validate_required_without_a_claude_binary_fails_loudly(tmp_path):
 
 def test_validate_skipped_says_so_out_loud(tmp_path):
     mod = _load(SCRIPT, "smoke_release_tree")
-    result = mod.run_smoke(_tree(tmp_path, {}), validate="skip", linger_seconds=1)
+    tree = _tree(tmp_path, {"SessionStart": "exit 0\n"})
+    result = mod.run_smoke(tree, validate="skip", linger_seconds=1)
     assert result.ok
     assert "SKIPPED" in result.report() and "validate" in result.report()
+
+
+# -- hooks (#858) -----------------------------------------------------------------
+#
+# A hookless tree, or a hooks.json declaring zero `command` hooks, must fail the
+# smoke test loudly -- not print "nothing to run" and exit 0, which is what this
+# plugin's own hooks.json-less install would otherwise do unnoticed.
+
+def test_no_hooks_json_fails_the_smoke_and_is_named(tmp_path):
+    mod = _load(SCRIPT, "smoke_release_tree")
+    tree = _tree(tmp_path, {"SessionStart": "exit 0\n"})
+    (tree / "hooks" / "hooks.json").unlink()
+    result = mod.run_smoke(tree, validate="skip", linger_seconds=1)
+    assert not result.ok
+    assert "hooks/hooks.json" in result.report()
+
+
+def test_hooks_json_with_zero_command_hooks_fails_the_smoke(tmp_path):
+    mod = _load(SCRIPT, "smoke_release_tree")
+    tree = _tree(tmp_path, {"SessionStart": "exit 0\n"})
+    (tree / "hooks" / "hooks.json").write_text(json.dumps({"hooks": {}}), encoding="utf-8")
+    result = mod.run_smoke(tree, validate="skip", linger_seconds=1)
+    assert not result.ok
+    assert "zero" in result.report() and "command hooks" in result.report()
+    # Positive control: the same shape of tree, with its original one-hook
+    # hooks.json intact, passes.
+    passing = _tree(tmp_path / "passing", {"SessionStart": "exit 0\n"})
+    assert mod.run_smoke(passing, validate="skip", linger_seconds=1).ok
 
 
 @posix_only
@@ -230,3 +259,35 @@ def test_workflow_pushes_only_after_build_check_and_smoke():
     # No step may be allowed to fail open on the way to the push.
     for s in steps:
         assert not s.get("continue-on-error"), s.get("name")
+
+
+# -- #856: three follow-ups from the #853 review --------------------------------
+
+def test_workflow_pins_pyyaml():
+    text = WORKFLOW.read_text(encoding="utf-8")
+    assert "pip install --disable-pip-version-check pyyaml" not in text, \
+        "pyyaml must be pinned, not installed unpinned"
+    assert 'pyyaml==${PYYAML_VERSION}' in text
+    doc = _workflow()
+    assert re.match(r"^\d+\.\d+(\.\d+)?$", str(doc["env"]["PYYAML_VERSION"]))
+
+
+def test_workflow_refuses_to_publish_a_version_that_does_not_move_release_forward():
+    text = WORKFLOW.read_text(encoding="utf-8")
+    assert "check_version_order.py" in text
+    idx_check = text.index("check_version_order.py")
+    # The actual push command, not the unrelated mention in the top-of-file
+    # comment about who must push the tag.
+    idx_push = text.rindex('git push origin "$commit')
+    assert idx_check < idx_push, "the version-order guard must run before the push"
+    # The guard has an explicit, named override -- not a silent skip.
+    doc = _workflow()
+    assert "allow_version_regression" in doc[True]["workflow_dispatch"]["inputs"]
+
+
+def test_workflow_concurrency_comment_does_not_claim_a_force_push_race():
+    """#856 item 3: the push is a plain push (test above pins this), so the
+    comment above `concurrency:` must not still describe a force-push race."""
+    text = WORKFLOW.read_text(encoding="utf-8")
+    assert "racing a force-push" not in text
+    assert "never forced" in text or "plain (never forced)" in text

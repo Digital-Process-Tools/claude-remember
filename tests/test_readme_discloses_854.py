@@ -39,6 +39,11 @@ _REQUIRED_NAMES = [
     "promo-notice",
     "run/summarizers",
     "remember-",
+    # #857: the persistent caches, not just the per-save temp files sharing the
+    # remember-* prefix.
+    "remember-env-",
+    "remember-config-cache-",
+    "remember-detect-tools-cache",
     "CLAUDE_CODE_OAUTH_TOKEN",
     "REMEMBER_OAUTH_TOKEN",
     "haiku.oauth_token",

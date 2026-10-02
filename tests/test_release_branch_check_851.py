@@ -13,6 +13,7 @@ everything would pass every "must fail" test here, and the twins are what catch 
 from __future__ import annotations
 
 import importlib.util
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -57,6 +58,11 @@ def _tree(tmp_path: Path, files: dict) -> Path:
         "README.md": ("# x\n\n" + " ".join(["word"] * 40) + "\n").encode(),
         "LICENSE": b"license\n",
         "scripts/run.sh": b"#!/bin/sh\necho hi\n",
+        # #858: the hooks check now requires at least one `command` hook, so the
+        # otherwise-clean base tree needs one too.
+        "hooks/hooks.json": json.dumps({"hooks": {"SessionStart": [{"hooks": [
+            {"type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/scripts/run.sh"},
+        ]}]}}).encode(),
     }
     base.update(files)
     for rel, data in base.items():
@@ -76,7 +82,7 @@ def _check(root: Path, **budget):
 def test_a_clean_tree_passes(tmp_path):
     result = _check(_tree(tmp_path, {}))
     assert result.offenders == []
-    assert result.files == 4
+    assert result.files == 5
     assert result.total_bytes > 0
 
 
@@ -108,14 +114,14 @@ def test_a_large_text_file_named_png_is_not_exempt(tmp_path):
 # -- file count and total -------------------------------------------------------
 
 def test_more_files_than_the_budget_fails(tmp_path):
-    root = _tree(tmp_path, {f"f/{i}.txt": b"x" for i in range(3)})  # 7 files
+    root = _tree(tmp_path, {f"f/{i}.txt": b"x" for i in range(3)})  # 8 files
     offenders = _check(root, max_files=6).offenders
-    assert any("7 files" in o and "6" in o for o in offenders), offenders
+    assert any("8 files" in o and "6" in o for o in offenders), offenders
 
 
 def test_exactly_the_file_budget_passes(tmp_path):
-    root = _tree(tmp_path, {f"f/{i}.txt": b"x" for i in range(3)})  # 7 files
-    assert _check(root, max_files=7).offenders == []
+    root = _tree(tmp_path, {f"f/{i}.txt": b"x" for i in range(3)})  # 8 files
+    assert _check(root, max_files=8).offenders == []
 
 
 def test_a_total_over_the_budget_fails(tmp_path):
@@ -215,15 +221,41 @@ def test_cli_exits_non_zero_and_names_offenders(tmp_path):
 def test_cli_exits_zero_on_a_clean_tree(tmp_path):
     r = _cli(_tree(tmp_path, {}))
     assert r.returncode == 0, (r.stdout, r.stderr)
-    assert "4 files" in r.stdout
+    assert "5 files" in r.stdout
 
 
 def test_cli_budget_comes_from_the_config(tmp_path):
     root = _tree(tmp_path, {})
     cfg = tmp_path / "cfg.json"
-    cfg.write_text('{"budget": {"max_file_bytes": 262144, "max_files": 3, '
-                   '"max_total_bytes": 3145728}}', encoding="utf-8")
-    assert _cli(root, "--config", str(cfg)).returncode == 1
     cfg.write_text('{"budget": {"max_file_bytes": 262144, "max_files": 4, '
                    '"max_total_bytes": 3145728}}', encoding="utf-8")
+    assert _cli(root, "--config", str(cfg)).returncode == 1
+    cfg.write_text('{"budget": {"max_file_bytes": 262144, "max_files": 5, '
+                   '"max_total_bytes": 3145728}}', encoding="utf-8")
     assert _cli(root, "--config", str(cfg)).returncode == 0
+
+
+# -- hooks (#858) -----------------------------------------------------------------
+#
+# A tree that works only through its hooks must not pass with none, or with a
+# hooks.json that declares none of them as a `command` -- either way nothing
+# would ever run, and the gate would have silently approved it.
+
+def test_tree_with_no_hooks_json_is_an_offender(tmp_path):
+    root = _tree(tmp_path, {})
+    (root / "hooks" / "hooks.json").unlink()
+    offenders = _check(root).offenders
+    assert any("hooks/hooks.json" in o and "missing" in o for o in offenders), offenders
+
+
+def test_hooks_json_with_zero_command_hooks_is_an_offender(tmp_path):
+    root = _tree(tmp_path, {"hooks/hooks.json": json.dumps({"hooks": {}}).encode()})
+    offenders = _check(root).offenders
+    assert any("hooks/hooks.json" in o and "zero" in o for o in offenders), offenders
+
+
+def test_hooks_json_with_one_command_hook_passes(tmp_path):
+    # Positive control: the base fixture's own hooks.json (one command hook)
+    # must not itself be flagged by either of the two checks above.
+    offenders = _check(_tree(tmp_path, {})).offenders
+    assert not any("hooks/hooks.json" in o for o in offenders), offenders

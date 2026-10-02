@@ -243,7 +243,9 @@ def run_smoke(tree: Path, validate: str = "auto", claude_bin: str | None = None,
         run_validate(tree, validate, claude_bin, home, result)
 
         if not (tree / "hooks" / "hooks.json").is_file():
-            result.notes.append("hooks: no hooks/hooks.json in the tree, nothing to run")
+            # #858: this plugin works only through its hooks -- a tree shipped with
+            # none would otherwise print "nothing to run" and exit 0.
+            result.errors.append("hooks: no hooks/hooks.json in the tree")
             return result
 
         plugin = work / "plugin"
@@ -258,8 +260,15 @@ def run_smoke(tree: Path, validate: str = "auto", claude_bin: str | None = None,
         transcript = _transcript(home, project, session_id)
         env = _env(work, plugin, project, home, fakebin)
 
+        commands = hook_commands(plugin)
+        if not commands:
+            # #858: hooks.json present but declaring zero command hooks is the same
+            # silent breakage one layer deeper -- nothing would ever run.
+            result.errors.append("hooks: hooks/hooks.json declares zero command hooks")
+            return result
+
         pgids: set = set()
-        for event, command, timeout in hook_commands(plugin):
+        for event, command, timeout in commands:
             payload = json.dumps(payload_for(event, session_id, transcript, project))
             start = time.monotonic()
             proc = subprocess.Popen(["/bin/sh", "-c", command], cwd=str(project), env=env,

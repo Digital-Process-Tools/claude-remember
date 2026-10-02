@@ -21,6 +21,13 @@ So there are two branches people install from:
 from a tag. It never shares history with `main`: each release is one commit on top of the
 previous release commit, and its message names the tag and the `main` commit it came from.
 
+**The `publish` job refuses to push a tree whose `plugin.json` version is not strictly greater
+than `release`'s current one** ([#856](https://github.com/Digital-Process-Tools/claude-remember/issues/856)):
+pushing a patch tag for an older line (say `v0.36.2`) after `v0.37.0` is already on `release` would
+otherwise land `0.36.2` on top of it, and every install pinned to `release` would see the version
+drop. If you really do need to publish an older line on purpose, re-run the workflow via
+`workflow_dispatch` with the `allow_version_regression` input set.
+
 ## The sequence
 
 1. **Fold `changelog.d/` into a `## [x.y.z]` section of CHANGELOG.md and bump every version
