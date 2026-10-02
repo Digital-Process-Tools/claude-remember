@@ -288,13 +288,39 @@ was "Validation ran out of time". That is the failure the `release` branch exist
   disclosure itself, on a comment that only contains the word "credentials", and on
   `.claude-plugin/plugin.json`, which contains no credential text at all. The portal's own text:
   "If the credential is for that host's own vendor, you can leave it as it is and a reviewer
-  confirms that." Ours is the user's own Claude Code / Codex login, so we left it. The form the
-  portal suggests, **not yet observed to clear it**, is to ask for the value through a
-  `userConfig` entry in `plugin.json` with `sensitive: true` and use `${user_config.KEY}`.
-  `userConfig` values reach hook processes as the environment variable
-  `CLAUDE_PLUGIN_OPTION_<KEY>` (code.claude.com, plugin manifest reference). Tracked in
-  [#860](https://github.com/Digital-Process-Tools/claude-remember/issues/860). Do not make the
-  warning disappear by removing the disclosure: the security scan holds undisclosed behaviour.
+  confirms that." Ours is the user's own Claude Code / Codex login, so we left it, and
+  [#860](https://github.com/Digital-Process-Tools/claude-remember/issues/860) evaluated the
+  alternative the portal suggests and **decided against building it**. The option: ask for the
+  optional `REMEMBER_OAUTH_TOKEN` / `haiku.oauth_token` recovery token through a `userConfig`
+  entry in `plugin.json` with `sensitive: true`, read as `${user_config.KEY}` instead (reaching a
+  hook process as the environment variable `CLAUDE_PLUGIN_OPTION_<KEY>`, per the code.claude.com
+  plugin manifest reference -- reasoned from docs, not observed against a real install). Declined
+  because:
+  - **It would not clear the finding.** `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY` and
+    `CODEX_API_KEY` -- the host CLI's own credentials, read straight from the environment -- are
+    not ours to move into `userConfig`: they belong to the user's existing Claude Code / Codex
+    login, not to a value this plugin asks the user to configure. They would keep reading a
+    credential in `README.md`'s disclosure and in `scripts/session-start-hook.sh`, two of the
+    three files the scan named, so the finding's own condition (reads a credential from the
+    user's machine) would still hold on those even after the move -- `.claude-plugin/plugin.json`
+    is the anomaly noted two paragraphs up, with no credential text at all, and nothing here
+    changes that. The `RUNTIME_FETCH_EXEC` precedent above is the same shape: a partial, cosmetic
+    change to text the scanner matches on is not evidence it moves the scanner's verdict, and on
+    that row it measurably didn't.
+  - **The portal's own text already accepts this case as it stands**: "If the credential is for
+    that host's own vendor, you can leave it as it is and a reviewer confirms that." That is
+    exactly what the optional recovery token and the three passthroughs are -- the host CLI's own
+    vendor credentials -- so the warning is accepted by design, confirmed at each review, rather
+    than chased to zero.
+  - **The cost of building it, against sub-questions 1, 3 and 4 in #860** -- an unverified
+    mechanism that would need a real plugin install to confirm, a migration period for
+    `REMEMBER_OAUTH_TOKEN` / `haiku.oauth_token` users, and a parallel non-`userConfig` path for
+    Codex/`.codex-plugin` and any other host with no `userConfig` mechanism -- buys, at best, a
+    warning that would still remain on the other three vars. Sub-question 5 (the README
+    disclosure) is not an added cost either way: it stays by design regardless of this decision,
+    per the note below.
+  Do not make the warning disappear by removing the disclosure: the security scan holds
+  undisclosed behaviour.
 - **`RUNTIME_FETCH_EXEC`** flags text that downloads and runs code, and the portal says it looks at
   "a hook, a server or settings command, a script, or text such as a skill or README". On v0.37.0
   (`e6cf58f`) it named `pipeline/shell.py` and `scripts/log.sh`, which contain no download at all.
