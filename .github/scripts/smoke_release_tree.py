@@ -286,7 +286,7 @@ def run_smoke(tree: Path, validate: str = "auto", claude_bin: str | None = None,
                                 "(and refused each one)")
         written = sum(1 for p in project.rglob("*") if p.is_file() and ".git" not in p.parts)
         result.after.append(f"hooks: {written} file(s) written under the temp project "
-                            "(none outside the temp directory)")
+                            "(HOME, TMPDIR and the project all sat inside the temp directory)")
         # Not a verdict: with the model refused, error lines are expected. Shown so a
         # human reading the run sees anything else that went wrong behind an exit 0.
         for log in sorted(project.rglob("hook-errors.log")):
