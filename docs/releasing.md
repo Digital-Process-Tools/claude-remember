@@ -72,11 +72,13 @@ previous release commit, and its message names the tag and the `main` commit it 
    create a missing tag itself, through the API.
 
 6. **The directory picks up the new `release` commit** (at once through the push webhook,
-   otherwise within about 6 hours) and scans it. A version with a **Policy hold** waits for an
-   Anthropic reviewer. And while the listing itself is flagged ("A scan flagged this plugin for
-   review; newer versions won't go live until a reviewer clears it"), no newer version goes live,
-   however clean, until a reviewer clears it. Read the **Versions** tab (below) rather than
-   assuming a waiting version is only in a queue.
+   otherwise within about 6 hours) and scans it. For v0.38.0 the webhook delivery got 200 OK and
+   the version was in the **Versions** tab 3 to 4 minutes after the push. A version with a
+   **Policy hold** waits for an Anthropic reviewer. And while the listing itself is flagged ("A
+   scan flagged this plugin for review; newer versions won't go live until a reviewer clears it"),
+   no newer version goes live, however clean, until a reviewer clears it: v0.38.0 was
+   **Approved** with no hold and still waited (see "Needs the directory team" below). Read the
+   **Versions** tab (below) rather than assuming a waiting version is only in a queue.
 
 ## What the release tree contains
 
@@ -200,8 +202,8 @@ Digital-Process-Tools/claude-marketplace to `"ref": "release"` is a pending foll
 The [pre-submission checklist](https://claude.com/docs/plugins/pre-submission-checklist) is not
 the whole story: the portal raised at least one hold (`ALLOWED_TOOLS_BROAD`) that the checklist does
 not list. What follows is what the portal reported on this plugin, **as observed on 2026-10-02**
-(v0.37.0). Rules changed once already (around Sep 24), so treat this as a dated record: re-read the
-**Versions** tab after every release instead of assuming it still holds.
+(v0.37.0, then v0.38.0). Rules changed once already (around Sep 24), so treat this as a dated
+record: re-read the **Versions** tab after every release instead of assuming it still holds.
 
 ### Reading a scan
 
@@ -216,28 +218,47 @@ Publish. The **Directory policy** step lists every finding, with a title, a code
 A **Blocks** finding (red cross) is worse than a hold: fix it before anything else.
 
 Separately from any version, a listing can be marked **"Needs the directory team"** (a flagged
-version or a delist). The portal's toast says "Contact the directory team to publish or relist
-it"; *inferred from that wording, not observed*: it does not clear by itself when a clean version
-arrives. Contact them as described under "Contacting Anthropic about a plugin" below, and say
-what changed (for example, that the listing now follows `release`).
+version or a delist). Before v0.38.0 this section said, *inferred from the toast's wording*, that
+the mark does not clear by itself when a clean version arrives. **v0.38.0 confirmed it (observed
+2026-10-02):** the version had no policy hold, its status badge read **Approved** with a
+**Publish update** button, and its Review step said "No reviewer action recorded for this
+version". Its Publish step still said "Waits until a reviewer clears the hold on this plugin.
+This plugin's versions wait for an Anthropic reviewer. Your Publish click is recorded as a
+request for the reviewer." Clicking **Publish update** showed the toast "Needs the directory
+team. This listing is held for the directory team (a flagged version, or a delist they applied).
+Contact the directory team to publish or relist it."
 
-### Full tree (`main`) vs `release`, same release
+So approving a version and holding the plugin are two separate things: an Approved version does
+not go live while the plugin carries a reviewer hold, and only the directory team clears that.
+Contact them as described under "Contacting Anthropic about a plugin" below, and say what changed
+(for us: the listing now follows `release`, and the holds went from 1 to 0).
 
-Both rows are v0.37.0. `81ffecb` was scanned while the listing still followed `main`; `e6cf58f`
-after it was switched to `release`.
+### Full tree (`main`) vs `release`, and the release after
 
-| Code (portal title) | Full tree `81ffecb` (486 files, 9.3 MB) | `release` `e6cf58f` (73 files, 1.3 MB) |
-| --- | --- | --- |
-| `SECRET_IN_SCRIPT` (Secret in a shipped file) | **Blocks**: fake API keys in `tests/test_haiku.py` | gone: `tests/` is not shipped |
-| `ALLOWED_TOOLS_BROAD` (Pre-approves broad shell access in allowed-tools) | Policy hold: `commands/doctor.md` | **Policy hold**, the only one: same file. Fixed by #859 (next release); confirm on that release's scan |
-| Files or downloads the validator couldn't inspect | Policy hold (2) | gone |
-| Image or font file that the plugin's code could run | Warning (3): the PNGs under `docs/` | gone |
-| `MCP_FORWARDS_CREDENTIAL_ENV` (Uses a credential from the user's machine) | Warning (21) | Warning (3): `README.md`, `scripts/session-start-hook.sh`, `.claude-plugin/plugin.json` |
-| `RUNTIME_FETCH_EXEC` (Contains a download-and-run command) | Warning (6) | Warning (2): `pipeline/shell.py`, `scripts/log.sh` |
-| CLAUDE.md at the plugin root isn't loaded | Warning | gone |
-| `ICON_MISSING` (No icon) | Warning | Warning |
-| `USES_HOOKS` (Uses hooks) | Info | Info: permanent for a hooks plugin, "Nothing to do" |
-| Security scan | Passed | Passed |
+The first two columns are v0.37.0: `81ffecb` was scanned while the listing still followed `main`,
+`e6cf58f` after it was switched to `release`. The third is v0.38.0: `e3cfd5b` is the `release`
+commit built from tag v0.38.0 (`4cda472` on `main`), the first release carrying #859's fixes.
+
+| Code (portal title) | Full tree `81ffecb` (486 files, 9.3 MB) | `release` `e6cf58f` (73 files, 1.3 MB) | v0.38.0 `release` `e3cfd5b` (73 files, 1.3 MB) |
+| --- | --- | --- | --- |
+| `SECRET_IN_SCRIPT` (Secret in a shipped file) | **Blocks**: fake API keys in `tests/test_haiku.py` | gone: `tests/` is not shipped | gone |
+| `ALLOWED_TOOLS_BROAD` (Pre-approves broad shell access in allowed-tools) | Policy hold: `commands/doctor.md` | **Policy hold**, the only one: same file | **gone**: observed cleared by #859's scoped `allowed-tools` |
+| Files or downloads the validator couldn't inspect | Policy hold (2) | gone | gone |
+| Image or font file that the plugin's code could run | Warning (3): the PNGs under `docs/` | gone | gone |
+| `MCP_FORWARDS_CREDENTIAL_ENV` (Uses a credential from the user's machine) | Warning (21) | Warning (3): `README.md`, `scripts/session-start-hook.sh`, `.claude-plugin/plugin.json` | Warning (3), unchanged |
+| Unrecognized field in plugin.json | not raised | not raised | **Warning (4), new**: fields not yet read from the portal (see the rule below) |
+| `RUNTIME_FETCH_EXEC` (Contains a download-and-run command) | Warning (6) | Warning (2): `pipeline/shell.py`, `scripts/log.sh` | **Warning (3)**, up from 2; files not yet read from the portal |
+| CLAUDE.md at the plugin root isn't loaded | Warning | gone | gone |
+| `ICON_MISSING` (No icon) | Warning | Warning | Warning |
+| `USES_HOOKS` (Uses hooks) | Info | Info: permanent for a hooks plugin, "Nothing to do" | Info |
+| Policy holds | see the rows above | 1 | **0** |
+| Security scan | Passed | Passed | Passed, "took 3 min" |
+| Directory policy verdict, status | not recorded | not recorded | "Meets directory policy, with warnings"; status **Approved** |
+
+The rest of the v0.38.0 run, as the portal showed it: Received "Arrived by a push to the tracked
+branch"; Fetch "Fetched and unpacked: 73 files, 1.3 MB"; Validation "Passed with warnings"; Review
+"No reviewer action recorded for this version". It did not go live: the plugin-level hold
+described under "Reading a scan" above still applies.
 
 On the earlier v0.36.0 (`a92a072`, full tree, 474 files / 9.2 MB) the validator never finished:
 `VALIDATION_INCOMPLETE` and `VALIDATION_NOT_EVALUATED`, both policy holds; the portal's wording
@@ -251,7 +272,10 @@ was "Validation ran out of time". That is the failure the `release` branch exist
   Accepted form, also quoted: "For the plugin's own script, name the file and keep the braces:
   `Bash(python3 ${CLAUDE_PLUGIN_ROOT}/scripts/run.py:*)`. A relative path or a wildcard in the path
   is still held." Ours was `allowed-tools: Bash` in `commands/doctor.md`; the skill already used the
-  accepted form. `check_release_tree.py` now fails on the broad forms (#859).
+  accepted form. `check_release_tree.py` now fails on the broad forms (#859). **Observed cleared
+  on v0.38.0 (`e3cfd5b`)** with `allowed-tools: Bash(${CLAUDE_PLUGIN_ROOT}/scripts/doctor.sh:*)`
+  and the script run directly (no `bash` prefix, `doctor.sh` committed as mode 100755): a named
+  plugin script with no interpreter in front is accepted too.
 - **`SECRET_IN_SCRIPT`** blocks on anything that looks like a literal credential, including fake
   keys in test fixtures. A deny-list that drops `tests/` removes it. If a test fixture must ship,
   build the key at runtime instead of writing it literally. Our check is **not** a superset of the
@@ -272,12 +296,25 @@ was "Validation ran out of time". That is the failure the `release` branch exist
   [#860](https://github.com/Digital-Process-Tools/claude-remember/issues/860). Do not make the
   warning disappear by removing the disclosure: the security scan holds undisclosed behaviour.
 - **`RUNTIME_FETCH_EXEC`** flags text that downloads and runs code, and the portal says it looks at
-  "a hook, a server or settings command, a script, or text such as a skill or README". On our tree
-  the two files contain no download at all; *inferred, not confirmed*: it matched comment text (a
-  docstring showing `eval "$(...)"` and a comment mentioning curl). #859 rewords only those two:
-  the curl comment and the `pipeline/shell.py` docstring. `scripts/log.sh` still contains real
-  `eval "$_assign"`-style lines and the word "fetch", so the next release's scan decides whether
-  the warning goes.
+  "a hook, a server or settings command, a script, or text such as a skill or README". On v0.37.0
+  (`e6cf58f`) it named `pipeline/shell.py` and `scripts/log.sh`, which contain no download at all.
+  We inferred that it matched comment text (a docstring showing `eval "$(...)"` and a comment
+  mentioning curl), and #859 reworded those two comments expecting the warning to go. **That
+  inference was wrong, or at best is unconfirmed: rewording the comments did not clear it.** On
+  v0.38.0 (`e3cfd5b`) the count went *up*, from 2 to 3. v0.38.0 also added #842's SessionStart
+  budget code (#845), so a new match there is possible, but which lines matched is unknown until
+  someone expands the row in the portal. `scripts/log.sh` still contains real
+  `eval "$_assign"`-style lines and the word "fetch". For another plugin: do not spend effort
+  rewording comments for this one. It is a warning, and the portal's own text says "Where it only
+  appears in documentation, nothing needs to change".
+- **Unrecognized field in `plugin.json`** (warning, 4 findings, new on v0.38.0). Portal text: "If
+  you expected the field to do something, check its spelling against the plugins reference.
+  Otherwise it can stay." *Inferred, not yet confirmed from the expanded row:* the four are
+  `documentationUrl`, `supportUrl`, `privacyPolicyUrl` and `termsOfServiceUrl`, the only top-level
+  keys v0.38.0 added to `plugin.json` (#859, #861). That contradicts the code.claude.com plugin
+  manifest reference, which says the directory reads exactly these fields for the listing (see
+  "Listing details" below). We keep them: the warning itself says they can stay, and the
+  reference says they feed the listing. The question is with the directory team.
 - **`ICON_MISSING`**: the portal accepts a square PNG **or JPEG**, 512 to 2048 px, under 2 MB,
   through `icon` in `plugin.json` (SVG and WebP are not accepted). Keep it inside the plugin
   folder and outside any denied path: an icon under `docs/` vanishes from `release`. **The listing
@@ -300,6 +337,10 @@ was "Validation ran out of time". That is the failure the `release` branch exist
 4. Put the icon in the plugin folder before the first save or submission (see `ICON_MISSING`).
 5. Disclose in README.md everything the plugin runs, sends and stores; expect that disclosure to
    raise warnings, and leave it in.
+6. If the plugin itself was ever flagged, a clean, **Approved** version still needs the directory
+   team: it waits for them however clean it is (observed on v0.38.0, see "Reading a scan").
+   Contact them as soon as the first clean version is Approved, with the before and after
+   numbers (ours: policy holds 1 to 0, security scan passed, status Approved).
 
 ## Listing details: what comes from where
 
@@ -309,7 +350,9 @@ Sourced on 2026-10-02.
   directory reads `icon`, `documentationUrl`, `supportUrl`, `privacyPolicyUrl` and
   `termsOfServiceUrl` from `plugin.json`, and Claude Code itself ignores them. The four URLs must
   be `https`. `claude plugin validate` accepts them without a warning only from 2.1.281, hence the
-  workflow's pin. #859 adds the four URLs to our `plugin.json`, for the next release.
+  workflow's pin. #859 added the four URLs to our `plugin.json`, shipped in v0.38.0. On that
+  version's scan the portal raised "Unrecognized field in plugin.json" (4 findings), almost
+  certainly these four (*inferred*; see the rule above). We keep them.
 - **Name and short description.** From claude.com, "Manage your listing after publishing": "A
   plugin listing's name and short description come from plugin.json and the README of the version
   that's live. To change them, edit those files and publish a new version… If an Anthropic
@@ -331,7 +374,12 @@ Sourced on 2026-10-02.
 
 Per claude.com, "Track your directory submission": open the plugin's menu in the portal and choose
 **Get help** or **Contact Anthropic**, or email `directory@anthropic.com` ("replies can be
-delayed"). Include the listing name, the organisation and the status the portal shows.
+delayed"). Include the listing name, the organisation and the status the portal shows. The
+portal's **Contact Anthropic** opens a mail to `directory@anthropic.com` with the subject "Plugin
+submission".
+
+For remember, the maintainer sent that mail on 2026-10-02, after the v0.38.0 scan, asking the
+directory team to clear the plugin-level hold. No reply had arrived as of writing.
 
 ## Reusing this in another plugin repository
 
