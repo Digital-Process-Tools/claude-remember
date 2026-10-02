@@ -158,7 +158,31 @@ Per-session handoff files, the session index, and the temp files `tmp/` holds: [
 
 This plugin runs with your full shell privileges, like any other hook your coding agent runs. The **default install** stores memory locally under `<project>/.remember/` (or `~/.remember/<slug>/` in external mode) and does not push anything anywhere — no new attack surface beyond your coding agent itself.
 
-The optional **git backup** feature does push memory to a remote you configure. If you enable it, read [`docs/git-backup-security.md`](docs/git-backup-security.md) for the full threat model — short version: treat `~/.remember/` with the same care you give `~/.ssh/`, point the backup at a repo you own, and the built-in remote-URL validation handles the rest.
+**Git backup** commits (and, if there is a remote, pushes) your memory whenever the external store's parent directory is itself a git repository with an upstream — there is no separate enable flag; that condition alone is the trigger. Read [`docs/git-backup-security.md`](docs/git-backup-security.md) for the full threat model — short version: treat `~/.remember/` with the same care you give `~/.ssh/`, point the backup at a repo you own, and the built-in remote-URL validation handles the rest.
+
+### What this plugin runs, sends and stores
+
+**Summarization** shells out to a CLI you already have installed and authenticated — never a bundled binary, never a third-party service beyond the one that CLI already talks to:
+
+- `REMEMBER_SUMMARIZER` selects the provider: `claude` (the nested `claude -p`), `codex` (the nested `codex exec`), or `auto` (the default — reads the transcript the host actually wrote to pick one). `REMEMBER_SUMMARIZER_FALLBACK=claude` (opt-in, unset by default) retries a failed `codex` call via `claude -p` instead of raising, and logs every time it fires.
+- `claude -p` runs with no tools (`--tools ""`), no MCP servers (`--mcp-config '{}' --strict-mcp-config`), no hooks (`--setting-sources ''`), and an isolated temp working directory — not the shared tempdir other concurrent saves use. Verified against claude-code 2.1.219.
+- `codex exec` runs with `--sandbox read-only` (denies writes and network to the process Codex itself spawns — not a guarantee against a command the model asks Codex to run inside that sandbox), `--ignore-user-config` (skips the operator's own Codex hooks), and `-c shell_environment_policy.inherit=none` (a command Codex spawns internally gets no environment at all, not even `PATH`). Verified against codex-cli 0.150.1 / 0.153.2.
+- Either route sends only the extracted, filtered session transcript (the prompt built for that save) to that CLI's own configured provider — never to any other service.
+
+**Credentials** — nothing is read from OS credential storage; only what is already in the process environment or in `config.json`:
+
+- `CLAUDE_CODE_OAUTH_TOKEN`, if already present in the environment, passes through unchanged to the nested `claude -p`.
+- If it is absent, `REMEMBER_OAUTH_TOKEN` (env) or `haiku.oauth_token` (`config.json`) — a token you deliberately configured — is injected as `CLAUDE_CODE_OAUTH_TOKEN` for that one call. The value itself is never logged, only its source and length.
+- `ANTHROPIC_API_KEY` is passed through to `claude -p` unless `haiku.anthropic_api_key` is `"strip"` (or, under the default `"auto"`, a `claude.ai` login is visible on disk) — the strip exists because this key outranks a login and otherwise bills every summarizer call to it without warning.
+- `CODEX_API_KEY` is passed through to `codex exec`'s own process when present, so Codex can authenticate.
+
+**`git fetch`** (opt-in, `git_restore.enabled` in `config.json`, default `false`) runs a background fetch against the memory store's own git remote before a session starts, so this session can compare local memory against what a backup pushed from elsewhere. It only fast-forwards local refs — it never merges, rebases, or pushes.
+
+**Files written outside the project**, beyond the `REMEMBER_DIR` memory store documented above:
+
+- `~/.remember/tmp/promo-notice` — a marker file so the plugin-promo line (above) is shown once, never again.
+- `~/.remember/run/summarizers/` (override: `REMEMBER_RUNTIME_DIR`) — small per-process records used only to cap how many concurrent summarizer calls can run; holds no transcript content.
+- `$TMPDIR/remember-*` — temp files for a single `save-session.sh` run: the extracted transcript, the built summarization prompt (so some of these do hold session text), the summarizer's stderr, and compression intermediates. Written 0600 via `mktemp`, and removed by an `EXIT` trap when that save finishes — they do not outlive the process that created them.
 
 [![The Interview](https://max.dp.tools/art/og/og-the-interview-video.jpg)](https://max.dp.tools/art/2026/03/the-interview-claude-remember.mp4)
 
