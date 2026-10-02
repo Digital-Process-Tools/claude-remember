@@ -1,0 +1,354 @@
+#!/usr/bin/env bash
+# ============================================================================
+# write-handoff.sh — write a handoff note to the ONE path this session
+# resolved, never a path chosen by the model or parsed out of a transcript
+# ============================================================================
+#
+# DESCRIPTION
+#   The /remember skill used to instruct the model to parse its Write target
+#   out of "the most recent === HANDOFF === block in this session's context"
+#   -- text that any untrusted content the session ingested (a Read of a
+#   hostile README, a fetched page, an issue body, or a repo-committed
+#   .remember/remember.md the SessionStart hook itself cats into context,
+#   #721) can supply, with Write pre-approved for any path (#720). This
+#   script closes that off structurally: it takes no destination argument at
+#   all. The note comes in on stdin; the destination is derived the same way
+#   session-start-hook.sh derives REMEMBER_DIR, from config, never from
+#   anything the model said or read.
+#
+# RESOLUTION
+#   1. Source resolve-paths.sh + lib-memory-dir.sh to get REMEMBER_DIR, the
+#      same way the hook does. CLAUDE_PROJECT_DIR is not exported to the
+#      Bash tool (#207, see doctor.sh). Claude Code runs the Bash tool with
+#      the project directory as its INITIAL cwd, but that cwd is the same
+#      shell state across every command in one Bash-tool call -- a `cd`
+#      earlier in the call persists, so a bare `$PWD` fallback can be a
+#      subdirectory of the project by the time this script runs, not the
+#      project root itself (#743). This prefers `git rev-parse
+#      --show-toplevel` when the cwd is inside a git repo -- the common
+#      case, and immune to an earlier `cd` -- falling back to the plain
+#      $PWD default only outside a git repo, same as before. #776: that
+#      preference is wrong for a project deliberately started from a repo
+#      SUBDIRECTORY (a supported shape), so when $PWD and the toplevel
+#      disagree AND this session's own id is known, this checks which
+#      candidate's own store already carries THIS session's session-keyed
+#      handoff hint (#738) and prefers that one -- falling back to the
+#      toplevel, unchanged, when neither or both do.
+#   2. If the SessionStart hook this session left a resolved path at
+#      $REMEMBER_DIR/tmp/handoff-path (written every session start, #720),
+#      and that path's shape passes the check below, use it -- this is what
+#      makes per_session mode's remember.<id>.md work without this script
+#      ever seeing the session id itself.
+#   3. Otherwise fall back to $REMEMBER_DIR/remember.md, the same hardcoded
+#      default the skill used to fall back to.
+#
+# SHAPE CHECK (defense in depth, applied to BOTH paths above)
+#   The resolved path's parent directory must be exactly $REMEMBER_DIR, and
+#   its basename must be `remember.md` or `remember.<token>.md` where
+#   <token> is restricted to [A-Za-z0-9._-]+ -- the same allowlist
+#   session-start-hook.sh already applies to CURRENT_SESSION_ID before ever
+#   using it in a filename. A hint file that fails this check is refused,
+#   not silently widened to "write wherever it says".
+#
+# USAGE
+#   The note is untrusted content (#742): the caller must pipe it in behind
+#   a fresh, unpredictable heredoc terminator each time -- never the literal
+#   `EOF` -- since a note containing a line matching the terminator exactly
+#   would end the heredoc early and let the remainder be parsed as shell in
+#   this same call.
+#
+#     bash "${CLAUDE_PLUGIN_ROOT}/scripts/write-handoff.sh" <<'HANDOFF_<random>'
+#     <handoff note>
+#     HANDOFF_<random>
+#
+#   Always prints exactly one of:
+#     Wrote handoff to: <path>
+#     REFUSED: <reason>
+#   never silence -- an unattended overwrite with no visible destination is
+#   the exposure #720 and #721 exist to close, not something to keep in a
+#   different form.
+#
+# EXIT CODES
+#   0  written
+#   1  refused (bad shape, unresolvable REMEMBER_DIR, or write failed)
+# ============================================================================
+
+set -u
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Session id, sanitized at the point of entry -- moved ahead of the
+# CLAUDE_PROJECT_DIR resolution below (#776) because that resolution now
+# needs it too. Unchanged from its pre-#776 position otherwise: see the
+# #738/#720 comment further down, next to where this is actually USED for
+# the session-keyed hint file.
+_WH_SESSION_ID="${CLAUDE_CODE_SESSION_ID:-}"
+case "$_WH_SESSION_ID" in
+    ''|.|..|*[!A-Za-z0-9._-]*) _WH_SESSION_ID="" ;;
+esac
+
+# _wh_trial_remember_dir <candidate-project-dir>
+# Prints the REMEMBER_DIR that candidate would resolve to, by running the
+# SAME resolve-paths.sh + lib-memory-dir.sh chain the real resolution below
+# uses, in a subshell -- so it can be tried twice (#776) with neither trial
+# able to leak an export, a cd, or a set -e/-u state change into this
+# script's own environment. Prints nothing and exits nonzero if the chain
+# itself fails for that candidate.
+_wh_trial_remember_dir() {
+    (
+        CLAUDE_PROJECT_DIR="$1"
+        export CLAUDE_PROJECT_DIR
+        REMEMBER_PATHS_SOFT_FAIL=1 source "$SCRIPT_DIR/resolve-paths.sh" >/dev/null 2>&1 || exit 1
+        source "$SCRIPT_DIR/lib-memory-dir.sh" >/dev/null 2>&1 || exit 1
+        [ -n "${REMEMBER_DIR:-}" ] || exit 1
+        printf '%s\n' "$REMEMBER_DIR"
+    )
+}
+
+if [ -z "${CLAUDE_PROJECT_DIR:-}" ]; then
+    # #743: prefer the git top level over a possibly-stale $PWD -- immune to
+    # a `cd` that happened earlier in the same Bash-tool call. Falls back to
+    # $PWD, unchanged, when the cwd is not inside a git repo at all.
+    _WH_GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || _WH_GIT_ROOT=""
+
+    # #776: #743's blanket preference above breaks a project deliberately
+    # started from a repository SUBDIRECTORY -- a supported shape per
+    # tests/test_injection_guard_754_755_756.py's own TestSubdirectoryHandoff
+    # -- by routing every write to the enclosing repository's root store
+    # instead of the subdirectory's own. $PWD and the git toplevel can only
+    # disagree here if $PWD is genuinely a subdirectory of a git repository,
+    # so this is exactly the case that needs disambiguating; a plain
+    # non-git project, or one already sitting at its repo's own root, takes
+    # the unchanged path below (git toplevel or $PWD, whichever is set).
+    #
+    # THIS session's SessionStart already published a hint file keyed by
+    # THIS session's own id (#738) into whichever REMEMBER_DIR it actually
+    # resolved -- nothing else can have written that file, and nothing else
+    # is asked to disambiguate. Whichever candidate's derived store carries
+    # it is the one SessionStart itself used for this very session; if
+    # neither or both do (no session id reached this script, a session that
+    # predates #738/#776, or -- unreachable in the ordinary case -- both
+    # somehow agree) this falls through to the pre-#776 default of
+    # preferring the git toplevel, unchanged.
+    if [ -n "$_WH_GIT_ROOT" ] && [ "$_WH_GIT_ROOT" != "$PWD" ] && [ -n "$_WH_SESSION_ID" ]; then
+        _WH_RD_PWD=$(_wh_trial_remember_dir "$PWD") || _WH_RD_PWD=""
+        _WH_RD_GITROOT=$(_wh_trial_remember_dir "$_WH_GIT_ROOT") || _WH_RD_GITROOT=""
+        _WH_PWD_HAS_HINT=0
+        _WH_GITROOT_HAS_HINT=0
+        [ -n "$_WH_RD_PWD" ] && [ -f "$_WH_RD_PWD/tmp/handoff-path.$_WH_SESSION_ID" ] && _WH_PWD_HAS_HINT=1
+        [ -n "$_WH_RD_GITROOT" ] && [ -f "$_WH_RD_GITROOT/tmp/handoff-path.$_WH_SESSION_ID" ] && _WH_GITROOT_HAS_HINT=1
+        if [ "$_WH_PWD_HAS_HINT" = 1 ] && [ "$_WH_GITROOT_HAS_HINT" = 0 ]; then
+            _WH_GIT_ROOT=""
+        fi
+        unset _WH_RD_PWD _WH_RD_GITROOT _WH_PWD_HAS_HINT _WH_GITROOT_HAS_HINT
+    fi
+
+    if [ -n "$_WH_GIT_ROOT" ]; then
+        CLAUDE_PROJECT_DIR="$_WH_GIT_ROOT"
+    else
+        CLAUDE_PROJECT_DIR="$PWD"
+    fi
+    export CLAUDE_PROJECT_DIR
+fi
+
+_WH_RESOLVE_ERR_FILE=$(mktemp "${TMPDIR:-/tmp}/remember-write-handoff-resolve-XXXXXX" 2>/dev/null) || _WH_RESOLVE_ERR_FILE=""
+if [ -n "$_WH_RESOLVE_ERR_FILE" ]; then
+    REMEMBER_PATHS_SOFT_FAIL=1 source "$SCRIPT_DIR/resolve-paths.sh" 2>"$_WH_RESOLVE_ERR_FILE"
+else
+    REMEMBER_PATHS_SOFT_FAIL=1 source "$SCRIPT_DIR/resolve-paths.sh" 2>/dev/null
+fi
+_WH_RESOLVE_STATUS=$?
+if [ -n "$_WH_RESOLVE_ERR_FILE" ]; then
+    _WH_RESOLVE_ERR=$(cat "$_WH_RESOLVE_ERR_FILE" 2>/dev/null)
+    rm -f "$_WH_RESOLVE_ERR_FILE" 2>/dev/null
+fi
+
+if [ "$_WH_RESOLVE_STATUS" -ne 0 ]; then
+    echo "REFUSED: path resolution failed: ${_WH_RESOLVE_ERR:-unknown error}" >&2
+    exit 1
+fi
+
+source "$SCRIPT_DIR/lib-memory-dir.sh"
+
+if [ -z "${REMEMBER_DIR:-}" ]; then
+    echo "REFUSED: REMEMBER_DIR did not resolve" >&2
+    exit 1
+fi
+
+# #750: sourced for _remember_file_tracked_state_into only, used just below
+# to refuse writing into a git-tracked target -- the write-side half of the
+# same question #721's read-side guard (_remember_may_inject, defined in
+# this same file) already asks before ever injecting a memory file into
+# context. Safe to source unconditionally: at source time this file only
+# defines functions and sets one load-guard variable, and none of the
+# functions this script calls read PLUGIN_ROOT or any other variable this
+# script does not already have.
+source "$SCRIPT_DIR/lib-memory-context.sh"
+
+# _wh_shape_ok <candidate-path>
+# The parent must be exactly REMEMBER_DIR (string compare, both already
+# forward-slash-normalized by resolve-paths.sh's own convention) and the
+# basename must be remember.md or remember.<safe-token>.md.
+_wh_shape_ok() {
+    local _cand="$1" _parent _base
+    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
+    _parent="${_cand%/*}"
+    _base="${_cand##*/}"
+    [ "$_parent" = "$REMEMBER_DIR" ] || return 1
+    case "$_base" in
+        remember.md) return 0 ;;
+        remember.*.md)
+            _token="${_base#remember.}"
+            _token="${_token%.md}"
+            case "$_token" in
+                ''|*[!A-Za-z0-9._-]*) return 1 ;;
+                *) return 0 ;;
+            esac
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+_WH_TARGET=""
+
+# Session-keyed hint, checked FIRST (#738). $REMEMBER_DIR/tmp/handoff-path is
+# published by EVERY SessionStart, project-wide -- in per_session mode the
+# last session to start owns that one file, so an earlier session's later
+# /remember read a pointer some other, more-recently-started session had
+# already overwritten and clobbered that session's own remember.<id>.md.
+# The value being published (a resolved handoff path) is per-SESSION; the
+# channel it was published over was per-PROJECT -- one shared, last-writer-
+# wins file. session-start-hook.sh now ALSO publishes a copy keyed by that
+# session's own id, $REMEMBER_DIR/tmp/handoff-path.<session_id>, which
+# nothing else can overwrite. This script can only read its OWN copy of
+# that file if it knows which session it is running as -- CLAUDE_CODE_SESSION_ID
+# is the answer: an env var Claude Code itself sets for the Bash tool
+# (observed live, macOS, this session; distinct from CLAUDE_PROJECT_DIR,
+# which #207 already established is hook-only), never a value the model
+# reads, asserts or can forge the way transcript text could pre-#720.
+#
+# _WH_SESSION_ID itself is computed once, up top, before the
+# CLAUDE_PROJECT_DIR resolution -- #776 needs it there too. Same character
+# allowlist CURRENT_SESSION_ID is sanitized against in session-start-hook.sh
+# (#270) -- this value did not arrive through that hook's stdin JSON here,
+# so it gets the same point-of-entry validation before it is ever used to
+# build a path.
+
+if [ -n "$_WH_SESSION_ID" ]; then
+    _WH_SESSION_HINT_FILE="$REMEMBER_DIR/tmp/handoff-path.$_WH_SESSION_ID"
+    if [ -f "$_WH_SESSION_HINT_FILE" ]; then
+        _WH_HINTED=$(head -n 1 "$_WH_SESSION_HINT_FILE" 2>/dev/null)
+        if [ -n "$_WH_HINTED" ] && _wh_shape_ok "$_WH_HINTED"; then
+            _WH_TARGET="$_WH_HINTED"
+        fi
+    fi
+fi
+
+# Fallback: no usable session id reached this script, or no session-keyed
+# hint file exists yet (single/external mode, or a session that predates
+# this fix) -- same shared-pointer lookup as before #738, unchanged.
+if [ -z "$_WH_TARGET" ]; then
+    _WH_HINT_FILE="$REMEMBER_DIR/tmp/handoff-path"
+    if [ -f "$_WH_HINT_FILE" ]; then
+        _WH_HINTED=$(head -n 1 "$_WH_HINT_FILE" 2>/dev/null)
+        if [ -n "$_WH_HINTED" ] && _wh_shape_ok "$_WH_HINTED"; then
+            _WH_TARGET="$_WH_HINTED"
+        fi
+    fi
+fi
+
+if [ -z "$_WH_TARGET" ]; then
+    _WH_TARGET="$REMEMBER_DIR/remember.md"
+fi
+
+if ! _wh_shape_ok "$_WH_TARGET"; then
+    echo "REFUSED: resolved target does not have the expected shape: $_WH_TARGET" >&2
+    exit 1
+fi
+
+# #750: refuse to overwrite a target the repository's own git index already
+# tracks. Mirrors _remember_in_project_store's own gate (lib-memory-context.sh)
+# so external storage (its own possibly-private git_backup repository, #285)
+# stays exempt -- only legacy/in-project storage, where REMEMBER_DIR sits
+# directly under the memory project's own directory, can ALSO be a path the
+# project's own repository tracks.
+#
+# REMEMBER_ROOT computed the same way lib-memory-context.sh's own
+# _remember_memory_paths does (trim trailing slashes, then take the parent),
+# without calling that function directly: it also requires PLUGIN_ROOT (for
+# an identity.md fallback this script never uses) and _remember_date (from
+# lib-clock.sh, not sourced here) -- neither of which this refusal needs.
+_WH_ROOT_SCRATCH="$REMEMBER_DIR"
+while [ "${_WH_ROOT_SCRATCH%/}" != "$_WH_ROOT_SCRATCH" ] && [ "$_WH_ROOT_SCRATCH" != "/" ]; do
+    _WH_ROOT_SCRATCH="${_WH_ROOT_SCRATCH%/}"
+done
+case "$_WH_ROOT_SCRATCH" in
+    (/) _WH_REMEMBER_ROOT="/" ;;
+    (*/*)
+        _WH_REMEMBER_ROOT="${_WH_ROOT_SCRATCH%/*}"
+        [ -n "$_WH_REMEMBER_ROOT" ] || _WH_REMEMBER_ROOT="/"
+        ;;
+    (*) _WH_REMEMBER_ROOT="." ;;
+esac
+unset _WH_ROOT_SCRATCH
+
+if [ "$_WH_REMEMBER_ROOT" = "${MEMORY_PROJECT_DIR:-$PROJECT_DIR}" ]; then
+    _WH_TRACKED_STATE=""
+    _remember_file_tracked_state_into _WH_TRACKED_STATE "$_WH_TARGET"
+    # #799: refuse every state _REMEMBER_REFUSED_TRACKED_STATES (shared with
+    # the read-side guard, _remember_may_inject in lib-memory-context.sh)
+    # names as refused, not just the two this case used to list inline. A
+    # state added to that shared list only needs adding there now -- before
+    # #799 this case had its own independent copy of the list, and
+    # symlinked-ancestor was added to the shared one (#754/#755/#756)
+    # without ever being added here, so a write proceeded straight through
+    # a symlinked .remember directory the read side already refused to
+    # inject from.
+    if _remember_tracked_state_is_refused "$_WH_TRACKED_STATE"; then
+        case "$_WH_TRACKED_STATE" in
+            tracked)
+                echo "REFUSED: $_WH_TARGET is tracked by this repository's own git index -- this plugin never commits a memory file itself, so writing your note over it would report success and then have the next SessionStart refuse to show it back to you, blaming a commit you never made. If this file is genuinely yours: git rm --cached it, then retry." >&2
+                ;;
+            unavailable)
+                echo "REFUSED: $_WH_TARGET could not be checked against this repository's git index (git is missing, or the check itself failed) -- refusing to write unverified." >&2
+                ;;
+            symlinked-ancestor)
+                echo "REFUSED: $_WH_TARGET sits under a directory that is itself a symlink -- this plugin never creates a symlink inside a memory store, so writing through one would land your note somewhere outside the store you think you are writing to. If you did not create this symlink, treat it as planted and inspect what it points at before deleting it." >&2
+                ;;
+            *)
+                echo "REFUSED: $_WH_TARGET could not be verified (tracked state: $_WH_TRACKED_STATE) -- refusing to write unverified." >&2
+                ;;
+        esac
+        exit 1
+    fi
+fi
+
+[ -d "$REMEMBER_DIR" ] || mkdir -p "$REMEMBER_DIR" 2>/dev/null
+
+# mktemp, not a $$-suffixed literal path -- the exact hazard
+# lib-memory-dir.sh's own merged-config write already documents at length
+# for this SAME directory: a name built from the PID is predictable from
+# the outside the instant this process starts, and a symlink pre-seeded at
+# that predictable name would have the note's content written straight
+# through it by `cat >`, then `mv -f` would move the symlink itself (not
+# its target) onto $_WH_TARGET. mktemp both creates the file atomically
+# and names it unpredictably. No trailing content after the X's: BSD/macOS
+# mktemp only randomizes a run of X's at the very end of the template.
+_WH_TMP=$(mktemp "${_WH_TARGET%/*}/.write-handoff-XXXXXX" 2>/dev/null) || _WH_TMP=""
+if [ -z "$_WH_TMP" ]; then
+    echo "REFUSED: could not create a temp file to write $_WH_TARGET" >&2
+    exit 1
+fi
+if ! cat > "$_WH_TMP" 2>/dev/null; then
+    rm -f "$_WH_TMP" 2>/dev/null
+    echo "REFUSED: could not write $_WH_TARGET" >&2
+    exit 1
+fi
+if ! mv -f "$_WH_TMP" "$_WH_TARGET" 2>/dev/null; then
+    rm -f "$_WH_TMP" 2>/dev/null
+    echo "REFUSED: could not write $_WH_TARGET" >&2
+    exit 1
+fi
+
+echo "Wrote handoff to: $_WH_TARGET"
+exit 0
