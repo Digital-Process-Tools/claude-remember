@@ -1511,14 +1511,34 @@ def call_haiku(
             # which is the exact condition #202 is about, and the only thing
             # still standing between a blocked prompt and the memory record is
             # the echo guard in consolidate.py.
-            _warn(
-                f"WARNING: this CLI rejected {_HOOK_ISOLATION_FLAG} "
-                f"({_failure_detail(result.stdout, result.stderr)}); retrying "
-                "WITHOUT hook isolation so saves keep working. The nested call "
-                "will run with your hooks registered -- a hook that blocks it "
-                "returns its block message as if it were the model's reply "
-                "(#202)."
-            )
+            #
+            # #870 (self-review finding): _isolation_may_be_the_cause() returns
+            # True down two unrelated paths -- an "unknown option" naming this
+            # flag, or ANY auth marker, with no further qualification. The
+            # warning used to always say "this CLI rejected the flag" even on
+            # the pure-auth path, where no such rejection ever happened -- a
+            # false claim on the very first attempt, independent of whether
+            # the retry below ever triggers the second (#870) correction.
+            _isolation_haystack = _failure_haystack(result.stdout, result.stderr)
+            if "unknown option" in _isolation_haystack:
+                _warn(
+                    f"WARNING: this CLI rejected {_HOOK_ISOLATION_FLAG} "
+                    f"({_failure_detail(result.stdout, result.stderr)}); retrying "
+                    "WITHOUT hook isolation so saves keep working. The nested call "
+                    "will run with your hooks registered -- a hook that blocks it "
+                    "returns its block message as if it were the model's reply "
+                    "(#202)."
+                )
+            else:
+                _warn(
+                    f"WARNING: this CLI failed authentication "
+                    f"({_failure_detail(result.stdout, result.stderr)}); retrying "
+                    "WITHOUT hook isolation in case the isolated run's own "
+                    "environment is simply missing a credential the normal one "
+                    "has. The nested call will run with your hooks registered -- "
+                    "a hook that blocks it returns its block message as if it "
+                    "were the model's reply (#202)."
+                )
             result = _run(isolate_hooks=False)
             if result.returncode != 0 and any(
                 marker in _failure_haystack(result.stdout, result.stderr)

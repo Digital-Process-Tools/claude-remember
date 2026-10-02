@@ -931,21 +931,23 @@ _SUMMARY_FAILURE_MARKER="$REMEMBER_DIR/tmp/last-summary-failure"
 _SUMMARIZER_FAILING=0
 if [ -s "$_SUMMARY_FAILURE_MARKER" ]; then
     _SUMMARIZER_FAILING=1
-    # Pull the newest "call-haiku error" line out of the latest daily log --
-    # the marker alone says "something failed", not what. Same glob pattern
-    # the SessionStart-duration check below already uses.
+    # Pull the newest "call-haiku error" line out of ALL daily logs, not only
+    # the single newest-mtime one (#870 self-review): the marker can persist
+    # into a new day (cleared only on success/give-up) while that day's log
+    # is created by an unrelated hook write with no summarizer attempt in it
+    # yet, which would make "today's" file the newest-mtime one and silently
+    # discard the real detail still sitting in yesterday's log. Walking every
+    # log in filename order (memory-YYYY-MM-DD.log sorts chronologically) and
+    # keeping the last ACTUAL match seen, rather than the contents of the
+    # last FILE seen, survives that gap -- a file with no match simply leaves
+    # the previous match standing instead of blanking it.
     _remember_sf_glob_dir=$(_remember_forward_slash "$REMEMBER_DIR")
-    _SF_LATEST_LOG=""
-    for _sf_f in "$_remember_sf_glob_dir"/logs/memory-*.log; do
-        [ -f "$_sf_f" ] || continue
-        if [ -z "$_SF_LATEST_LOG" ] || [ "$_sf_f" -nt "$_SF_LATEST_LOG" ]; then
-            _SF_LATEST_LOG="$_sf_f"
-        fi
-    done
     _SF_DETAIL=""
-    if [ -n "$_SF_LATEST_LOG" ]; then
-        _SF_DETAIL=$(grep -F "call-haiku error:" "$_SF_LATEST_LOG" 2>/dev/null | tail -n 1)
-    fi
+    for _sf_f in $(printf '%s\n' "$_remember_sf_glob_dir"/logs/memory-*.log 2>/dev/null | LC_ALL=C sort); do
+        [ -f "$_sf_f" ] || continue
+        _sf_match=$(grep -F "call-haiku error:" "$_sf_f" 2>/dev/null | tail -n 1)
+        [ -n "$_sf_match" ] && _SF_DETAIL="$_sf_match"
+    done
     echo "FAIL summarizer: last attempt failed${_SF_DETAIL:+: $_SF_DETAIL}"
     # Same marker family _isolation_may_be_the_cause (pipeline/haiku.py) scans
     # for -- an expired login reads as a generic failure here, so this is the
@@ -1117,13 +1119,17 @@ elif [ "$_POST_TOOL_FIRED" -eq 1 ] && [ -z "$_LAST_SAVE_TIME" ] \
     echo "VERDICT: problem -- PostToolUse has fired but no save has completed yet; check hook-errors.log above$_ASSUMED_NOTE"
 elif [ "$_SESSION_END_STATE" = "not-fired" ]; then
     echo "VERDICT: problem -- SessionEnd has never fired despite prior sessions ending in this project; the last-chance flush is not running (see above)$_ASSUMED_NOTE"
-elif [ "${_SUMMARIZER_FAILING:-0}" -eq 1 ]; then
-    # #870: ranked above "capture is working" -- the whole point is that the
-    # cursor-mtime check above cannot tell a real append apart from a
-    # cursor-only rewrite, so a run of failed attempts must not be masked by
-    # it. Ranked below the SessionEnd/no-Python/oversized-store arms above
-    # for the same reason those outrank each other: this is a narrower,
-    # single-mechanism failure, not evidence the whole pipeline is down.
+elif [ "$_POST_TOOL_FIRED" -eq 1 ] && [ -n "$_LAST_SAVE_TIME" ] && [ "${_SUMMARIZER_FAILING:-0}" -eq 1 ]; then
+    # #870: this arm shares its base condition with "capture is working"
+    # below on purpose -- it exists ONLY to override that one verdict when
+    # the cursor-mtime check cannot tell a real append apart from a
+    # cursor-only rewrite. It must NOT be reachable on its own (a bare
+    # `_SUMMARIZER_FAILING -eq 1` check, tried first): $_LAST_SAVE_TIME can
+    # be empty for reasons that have nothing to do with the summarizer --
+    # a #144 slug mismatch, a project PostToolUse never serviced -- and an
+    # unconditional arm here would intercept those more specific, structural
+    # causes below before they are ever reached, rather than only replacing
+    # the one verdict it is actually more accurate than.
     echo "VERDICT: problem -- the summarizer's last attempt failed and no save has completed since (see Summarizer failures above)$_ASSUMED_NOTE"
 elif [ "$_POST_TOOL_FIRED" -eq 1 ] && [ -n "$_LAST_SAVE_TIME" ]; then
     echo "VERDICT: capture is working -- last save $_LAST_SAVE_TIME$_ASSUMED_NOTE"
