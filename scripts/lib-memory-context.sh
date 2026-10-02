@@ -795,7 +795,8 @@ _remember_render_memory_section() {
     # (see _remember_emit_file, above, for why the render no longer forks cat)
     config_into MEMORY_INJECT_MAX_BYTES ".thresholds.memory_inject_max_bytes" 200000
     case "$MEMORY_INJECT_MAX_BYTES" in (''|*[!0-9]*) MEMORY_INJECT_MAX_BYTES=200000 ;; esac
-    local OVERSIZED_MEMORY="" BASENAME MFILE_BYTES
+    local OVERSIZED_MEMORY="" BASENAME MFILE_BYTES _remember_oversized_max=0
+    local _remember_budget_dropped=""
     local REFUSED_MEMORY=""
     # One batched `wc -c` over every memory file that is present AND
     # non-empty (#664), instead of one `wc` + one `tr` PER file -- a typical
@@ -851,22 +852,51 @@ _remember_render_memory_section() {
             if [ -n "$MFILE_BYTES" ] && [ "$MEMORY_INJECT_MAX_BYTES" -gt 0 ] && [ "$MFILE_BYTES" -gt "$MEMORY_INJECT_MAX_BYTES" ]; then
                 OVERSIZED_MEMORY="${OVERSIZED_MEMORY}${MFILE} (${MFILE_BYTES} bytes)
 "
+                [ "$MFILE_BYTES" -gt "$_remember_oversized_max" ] && _remember_oversized_max="$MFILE_BYTES"
                 continue
+            fi
+            # #842: a file the SessionStart budget excluded is decided HERE,
+            # per section, before a single byte of it is emitted -- never
+            # cut back out of the concatenated body afterwards (see
+            # _remember_apply_session_start_budget for why that was both
+            # quadratic and steerable by content). Unset on every other
+            # caller, so the cache publish and every other render is
+            # unaffected.
+            if [ -n "${_REMEMBER_BUDGET_EXCLUDE:-}" ]; then
+                case "
+${_REMEMBER_BUDGET_EXCLUDE}" in
+                    (*"
+${MFILE}
+"*)
+                        _remember_budget_dropped="${_remember_budget_dropped}${MFILE}${MFILE_BYTES:+ (${MFILE_BYTES} bytes)}
+"
+                        continue
+                        ;;
+                esac
             fi
             BASENAME="${MFILE##*/}"
             echo "--- $BASENAME ---"
             _remember_emit_file "$MFILE" "$MFILE_BYTES"
             echo ""
     done
+    if [ -n "$_remember_budget_dropped" ]; then
+        echo "--- not injected (over thresholds.session_start_max_bytes) -- grep or read on request ---"
+        printf '%s' "$_remember_budget_dropped"
+        echo ""
+    fi
     if [ -n "$OVERSIZED_MEMORY" ]; then
         echo "--- too large to inject (kept on disk; grep on request) ---"
         printf '%s' "$OVERSIZED_MEMORY"
-        if [ "$MEMORY_INJECT_MAX_BYTES" -lt 200000 ]; then
+        if [ "$MEMORY_INJECT_MAX_BYTES" -lt 200000 ] && [ "$_remember_oversized_max" -le 200000 ]; then
             # #842: a cap set BELOW the bundled 200000 default is a
             # deliberate choice (e.g. to stay under thresholds.
             # session_start_max_bytes), not evidence of a broken store --
             # /remember:doctor has nothing to diagnose here, and telling an
             # operator to run it for a cap they set on purpose is noise.
+            # Only while every over-cap file is ALSO within that bundled
+            # default, though: the lowered cap explains a 100 KB file, not a
+            # 6 GB recent.md (#346). A file past 200000 is malformed whatever
+            # the configured cap, so it keeps the doctor advice below.
             printf 'Capped by config (thresholds.memory_inject_max_bytes=%s, below the bundled default of 200000) -- this is a deliberately lowered cap, not a sign of a malformed memory file.\n' "$MEMORY_INJECT_MAX_BYTES"
         else
             printf 'A healthy memory file is kilobytes. One this size means consolidation wrote a response nobody bounded (see thresholds.memory_inject_max_bytes) and has been skipping ever since; run /remember:doctor.\n'
@@ -1239,27 +1269,54 @@ _remember_session_start_max_bytes_into() {
     printf -v "$_outvar" %s "$_val"
 }
 
+# Never inherited: only _remember_apply_session_start_budget sets this, and
+# only inside the subshell it renders in. An exported value from the
+# environment would otherwise silently drop files from every render,
+# including the cache that later starts serve.
+unset _REMEMBER_BUDGET_EXCLUDE
+
 # _remember_apply_session_start_budget VARNAME MAX_BYTES
 #
 # VARNAME names a variable holding the already-assembled SessionStart body
 # (handoff block + REMEMBER legend + MEMORY section, in that order -- see
 # the call site in session-start-hook.sh). When the body's byte length
-# exceeds MAX_BYTES, drops whole named sections -- never truncates one
+# exceeds MAX_BYTES, whole memory files are left out -- never truncated
 # mid-content -- in REVERSE priority order (archive.md, then today-*.md,
-# then recent.md, then now.md) until it fits or all four are gone, and
-# appends one line per dropped file naming its path and size. Handoff and
-# the identity/core-memories head are never touched here: #842's own
-# priority order is handoff -> now -> recent -> today -> archive, and both
-# of those sit earlier in VARNAME than the first header this function ever
-# matches against, so they survive by construction, not by a special case.
+# then recent.md, then now.md) until it fits or all four are gone, and the
+# renderer lists each one it left out by path and size. Handoff and the
+# identity/core-memories head are never touched: #842's own priority order
+# is handoff -> now -> recent -> today -> archive.
 #
-# A section is identified by its own "--- BASENAME ---" header line, the
-# same marker _remember_render_memory_section already prints for every
-# memory file (see above) -- so dropped files are listed exactly the way
-# source=compact already lists its own deferred files, not a second
-# convention. MAX_BYTES <= 0 or non-numeric disables the budget outright (0
-# is a deliberate "no cap", the same convention every other threshold in
-# this file uses).
+# How, and why not by cutting the body (review of #845). The first version
+# searched the captured body for each file's "--- BASENAME ---" header and
+# cut around the first match with ${text%%"$h"*} / ${text#*"$h"}. Both
+# defects of that shape are structural, so the fix is too:
+#   - bash 3.2 and 5 evaluate those expansions in time that grows with the
+#     SQUARE of the body (one ${t#*"$h"} measured ~5s at 80 KB, ~72s at
+#     320 KB), and this only ever runs on a body that is already big;
+#   - the first match is not the real section: the handoff (file content,
+#     the #721 threat model) and every earlier memory file are content, and
+#     a header-shaped line in either moved the cut into them -- removing the
+#     handoff's random-token fence and "=== MEMORY ===", and listing a file
+#     as dropped whose content was still injected.
+# So nothing here searches content. The MEMORY section is re-rendered with
+# _REMEMBER_BUDGET_EXCLUDE naming the files to leave out, and the renderer
+# decides inclusion per section BEFORE emitting it. The head (everything
+# before the MEMORY section) is recovered by LENGTH, not by a marker: the
+# memory section is the body's tail, so head = the first
+# ${#body} - ${#memory} bytes, and that split is trusted only after the tail
+# is confirmed byte-identical to a fresh render. ${var:off:len} and string
+# equality are both linear. A mismatch (a memory file changed between the
+# two renders) leaves the body untouched and logs it -- the pre-#842 shape,
+# never a cut at a guessed offset.
+#
+# Cost: none on the common path. An under-budget body returns at the length
+# check below, before any render, fork or copy; only an over-budget body
+# pays for the renders (one, plus at most one per dropped file).
+#
+# MAX_BYTES <= 0 or non-numeric disables the budget outright (0 is a
+# deliberate "no cap", the same convention every other threshold in this
+# file uses).
 _remember_apply_session_start_budget() {
     local _outvar="$1" _max="$2"
     case "$_max" in (''|*[!0-9]*) return 0 ;; esac
@@ -1268,38 +1325,27 @@ _remember_apply_session_start_budget() {
     local _text="${!_outvar}"
     [ "${#_text}" -gt "$_max" ] || return 0
 
-    local _path _base _header _before _after _chunk _remaining _size _notes=""
-    local _nl_dash="
---- "
+    # Both captures strip trailing newlines the same way the body's own
+    # capture in session-start-hook.sh did, and the memory section is the
+    # body's tail -- so the two tails compare equal byte for byte.
+    local _mem _head_len _head _exclude="" _path _next
+    _mem=$(_remember_render_memory_section 2>/dev/null)
+    [ -n "$_mem" ] || return 0
+    _head_len=$(( ${#_text} - ${#_mem} ))
+    if [ "$_head_len" -lt 0 ] || [ "${_text:$_head_len}" != "$_mem" ]; then
+        log "memory-context" "WARNING: session_start_max_bytes: the MEMORY section changed between render and budget check -- injected as rendered, over budget"
+        return 0
+    fi
+    _head="${_text:0:$_head_len}"
+
     local _drop_order=("${REMEMBER_ARCHIVE:-}" "${REMEMBER_TODAY_FILE:-}" "${REMEMBER_RECENT:-}" "${REMEMBER_NOW:-}")
     for _path in "${_drop_order[@]}"; do
-        [ -n "$_path" ] || continue
-        [ "${#_text}" -gt "$_max" ] || break
-        _base="${_path##*/}"
-        _header="--- ${_base} ---"
-        case "$_text" in
-            *"$_header"*) ;;
-            *) continue ;;
-        esac
-        _before="${_text%%"$_header"*}"
-        _after="${_text#*"$_header"}"
-        _chunk="${_after%%"$_nl_dash"*}"
-        _remaining="${_after#"$_chunk"}"
-        _text="${_before}${_remaining}"
-        _size=""
-        [ -f "$_path" ] && _size=$(wc -c < "$_path" 2>/dev/null | tr -d ' ')
-        if [ -n "$_size" ]; then
-            _notes="${_notes}${_path} (${_size} bytes)
+        [ $(( _head_len + ${#_mem} )) -gt "$_max" ] || break
+        [ -n "$_path" ] && [ -s "$_path" ] || continue
+        _exclude="${_exclude}${_path}
 "
-        else
-            _notes="${_notes}${_path}
-"
-        fi
+        _next=$(_REMEMBER_BUDGET_EXCLUDE="$_exclude"; _remember_render_memory_section 2>/dev/null)
+        _mem="$_next"
     done
-    if [ -n "$_notes" ]; then
-        _text="${_text}--- not injected (over thresholds.session_start_max_bytes) -- grep or read on request ---
-${_notes}
-"
-    fi
-    printf -v "$_outvar" %s "$_text"
+    printf -v "$_outvar" %s "${_head}${_mem}"
 }

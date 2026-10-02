@@ -115,3 +115,27 @@ class TestCapAtOrAboveBundledDefaultKeepsTheBrokenStoreWording:
             f"lowered one either.\noutput tail: {out[-800:]}"
         )
         assert "capped by config" not in out.lower()
+
+
+class TestLoweredCapDoesNotHideAGenuinelyMalformedFile:
+    """Review of #845: a lowered cap explains a file OVER the cap but within
+    the bundled default. It explains nothing about a file larger than the
+    bundled default itself -- that is still the #346 shape (consolidation
+    wrote an unbounded response), and calling it a deliberate cap would call
+    a broken store healthy."""
+
+    def test_file_above_the_bundled_default_keeps_doctor_advice_under_a_lowered_cap(self, tmp_path):
+        out, _ = _run(tmp_path, memory_inject_max_bytes=50000, archive_bytes=250000)
+        assert "/remember:doctor" in out, (
+            f"a file past the bundled 200000 default is malformed whatever the "
+            f"configured cap.\noutput tail: {out[-800:]}"
+        )
+        assert "not a sign of a malformed memory file" not in out, (
+            f"a 250000-byte file was called healthy.\noutput tail: {out[-800:]}"
+        )
+
+    def test_file_between_lowered_cap_and_bundled_default_is_capped_by_config(self, tmp_path):
+        """Positive control: same lowered cap, a file the cap alone explains."""
+        out, _ = _run(tmp_path, memory_inject_max_bytes=50000, archive_bytes=100000)
+        assert "capped by config" in out.lower(), f"output tail: {out[-800:]}"
+        assert "/remember:doctor" not in out, f"output tail: {out[-800:]}"
