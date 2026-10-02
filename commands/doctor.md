@@ -1,12 +1,12 @@
 ---
 description: Diagnose the Remember plugin — resolved paths, detected tools, storage mode, and whether capture is actually saving memory.
-allowed-tools: Bash
+allowed-tools: Bash(${CLAUDE_PLUGIN_ROOT}/scripts/doctor.sh:*)
 ---
 
 Run this exact command and relay its output back to the user **verbatim**, inside a code block, with no summarizing, editing, or omitting of lines:
 
 ```
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/doctor.sh"
+"${CLAUDE_PLUGIN_ROOT}/scripts/doctor.sh"
 ```
 
 The report can quote values read out of this project's own store (a session id, a line

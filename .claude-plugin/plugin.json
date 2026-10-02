@@ -7,5 +7,9 @@
   },
   "license": "Community License",
   "repository": "https://github.com/Digital-Process-Tools/claude-remember",
-  "keywords": ["memory", "context", "persistence", "session"]
+  "keywords": ["memory", "context", "persistence", "session"],
+  "documentationUrl": "https://github.com/Digital-Process-Tools/claude-remember#readme",
+  "supportUrl": "https://github.com/Digital-Process-Tools/claude-remember/issues",
+  "privacyPolicyUrl": "https://github.com/Digital-Process-Tools/claude-remember/blob/main/docs/privacy.md",
+  "termsOfServiceUrl": "https://github.com/Digital-Process-Tools/claude-remember/blob/main/docs/terms.md"
 }

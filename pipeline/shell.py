@@ -1,7 +1,8 @@
 """Shell integration helpers — output shell-evaluable variables from Python.
 
 Each ``cmd_*`` function prints ``KEY=VALUE`` pairs to stdout that shell
-scripts consume via ``eval "$(python3 -m pipeline.shell <command> ...)"```.
+scripts read through ``safe_eval`` (scripts/log.sh), which assigns only lines
+shaped like a plain variable assignment and never runs the text as code.
 This eliminates the pattern of calling ``python3 -c`` multiple times to
 read individual fields from the same JSON.
 

@@ -24,6 +24,14 @@ Rows that block or stop validation
     backticks and no `python -c`
   - YAML front matter with a non-empty text `description` in skills/*/SKILL.md,
     commands/*.md and agents/*.md
+  - that same front matter's `allowed-tools` never grants unrestricted shell: bare
+    `Bash`, `Bash(*)`, `Bash(:*)`, or `Bash(<command>:*)` / `Bash(<command> *)`
+    where the command is a shell (bash, sh, zsh, dash, ksh, fish, pwsh, powershell,
+    env), an interpreter (python, node, ruby, perl, ...), a package manager or
+    runner (npm, npx, pip, uv, cargo, ...) or a downloader (curl, wget) and no
+    plugin script is named -- the full list is _UNSCOPED_COMMANDS below; a
+    relative path or a wildcard in a path is held too. A specific command
+    (`Bash(git status:*)`) or a named `${CLAUDE_PLUGIN_ROOT}/...` script passes
   - nothing shaped like a real credential (Anthropic, GitHub, AWS, Slack, Google,
     GitLab keys, private key blocks)
 
@@ -431,6 +439,60 @@ def _check_hooks(files: dict, manifest, off: list) -> None:
                         off.append(f"{rel}: {event} command {cmd!r}: {problem}")
 
 
+# The directory holds ALLOWED_TOOLS_BROAD on "bare Bash, Bash(*), or a wildcard
+# right after a shell, an interpreter, a package manager or runner, or curl, as in
+# Bash(python3:*)", and for a plugin's own script "A relative path or a wildcard in
+# the path is still held" (portal wording, observed 2026-10-02; #859). A command
+# named here takes arbitrary arguments, so a pattern that starts with one and names
+# no plugin script is not scoped to anything.
+_UNSCOPED_COMMANDS = {
+    # shells
+    "bash", "sh", "zsh", "dash", "ksh", "fish", "pwsh", "powershell", "env",
+    # interpreters
+    "python", "python2", "python3", "node", "deno", "ruby", "perl", "php", "lua",
+    # package managers and runners
+    "npm", "npx", "pnpm", "yarn", "bun", "bunx", "pip", "pip3", "uv", "uvx", "pipx",
+    "poetry", "cargo", "go", "gem", "brew",
+    # downloaders
+    "curl", "wget",
+}
+_PLUGIN_ROOT = "${CLAUDE_PLUGIN_ROOT}/"
+
+
+def bash_grant_problem(entry: str) -> str | None:
+    """None if `entry` is a safely scoped allowed-tools Bash grant; otherwise the
+    reason the directory would hold it as broad shell access (#859)."""
+    entry = entry.strip()
+    if entry == "Bash":
+        return "bare `Bash` grants every shell command"
+    m = re.fullmatch(r"Bash\((.*)\)", entry)
+    if not m:
+        return None
+    pattern = m.group(1).strip()
+    if pattern in ("", "*", "**", ":*"):
+        return f"`Bash({pattern})` grants every shell command"
+    # The command part: drop a trailing `:*` (prefix match) or ` *` (any args).
+    cmd = re.sub(r"(:\*|\s+\*)$", "", pattern).strip()
+    words = cmd.split()
+    if not words:
+        return f"`Bash({pattern})` grants every shell command"
+    paths = [w for w in words if "/" in w]
+    for p in paths:
+        if "*" in p or "?" in p:
+            return f"`Bash({pattern})` has a wildcard in the path"
+        if not p.startswith(_PLUGIN_ROOT):
+            base = p.rsplit("/", 1)[-1].lower()
+            if base in _UNSCOPED_COMMANDS or base.rstrip("0123456789.") in _UNSCOPED_COMMANDS:
+                return f"`Bash({pattern})` grants an interpreter by absolute path, not one script"
+            if not p.startswith("/"):
+                return (f"`Bash({pattern})` names a relative path; name the plugin's script "
+                        f"as {_PLUGIN_ROOT}...")
+    first = words[0].rstrip("*").lower()
+    if first in _UNSCOPED_COMMANDS and not any(p.startswith(_PLUGIN_ROOT) for p in paths):
+        return f"`Bash({pattern})` is a wildcard after `{words[0]}`, not one plugin script"
+    return None
+
+
 def _check_front_matter(files: dict, off: list) -> None:
     for rel, data in sorted(files.items()):
         parts = rel.split("/")
@@ -446,6 +508,18 @@ def _check_front_matter(files: dict, off: list) -> None:
         desc = meta.get("description")
         if not isinstance(desc, str) or not desc.strip():
             off.append(f"{rel}: front matter has no text `description`")
+        allowed = meta.get("allowed-tools")
+        if isinstance(allowed, list):
+            entries = [str(x) for x in allowed]
+        elif isinstance(allowed, str):
+            entries = [s.strip() for s in allowed.split(",") if s.strip()]
+        else:
+            entries = []
+        for entry in entries:
+            reason = bash_grant_problem(entry)
+            if reason:
+                off.append(f"{rel}: allowed-tools grants unrestricted shell "
+                           f"({entry!r}): {reason}")
 
 
 def _check_images(files: dict, kinds: dict, off: list) -> None:
