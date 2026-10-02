@@ -280,6 +280,39 @@ def test_good_front_matter_in_an_agent_passes(tmp_path):
     _passes(_tree(tmp_path, {"agents/a.md": b"---\nname: a\ndescription: \"Quoted: fine\"\n---\nx\n"}))
 
 
+# -- allowed-tools unrestricted shell (#859) -------------------------------------
+
+@pytest.mark.parametrize("rel", ["skills/s/SKILL.md", "commands/c.md", "agents/a.md"])
+@pytest.mark.parametrize("value", [
+    "Bash",
+    "Bash(*)",
+    "Bash(:*)",
+    "Bash(bash:*)",
+    "Bash(sh:*)",
+    "Bash(zsh:*)",
+    "Bash(env:*)",
+    "Bash(python*:*)",
+    "Bash(python3:*)",
+])
+def test_unrestricted_bash_grant_as_a_string_fails(tmp_path, rel, value):
+    body = f"---\ndescription: d\nallowed-tools: {value}\n---\n\nx\n".encode()
+    _fails(_tree(tmp_path, {rel: body}), rel, "allowed-tools")
+
+
+def test_unrestricted_bash_grant_as_a_yaml_list_fails(tmp_path):
+    body = b"---\ndescription: d\nallowed-tools:\n  - Bash\n  - Read\n---\n\nx\n"
+    _fails(_tree(tmp_path, {"commands/c.md": body}), "commands/c.md", "allowed-tools")
+
+
+@pytest.mark.parametrize("value", [
+    "Bash(${CLAUDE_PLUGIN_ROOT}/scripts/doctor.sh:*)",
+    "Bash(${CLAUDE_PLUGIN_ROOT}/scripts/write-handoff.sh:*)",
+])
+def test_narrow_bash_grant_scoped_to_a_file_passes(tmp_path, value):
+    body = f"---\ndescription: d\nallowed-tools: {value}\n---\n\nx\n".encode()
+    _passes(_tree(tmp_path, {"commands/c.md": body}))
+
+
 # -- credentials ----------------------------------------------------------------
 
 @pytest.mark.parametrize("secret", [

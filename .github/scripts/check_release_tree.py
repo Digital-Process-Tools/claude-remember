@@ -24,6 +24,10 @@ Rows that block or stop validation
     backticks and no `python -c`
   - YAML front matter with a non-empty text `description` in skills/*/SKILL.md,
     commands/*.md and agents/*.md
+  - that same front matter's `allowed-tools` never grants unrestricted shell: bare
+    `Bash`, `Bash(*)`, `Bash(:*)`, or `Bash(<shell-or-interpreter>:*)` with no path
+    (bash, sh, zsh, env, python, python2, python3, with or without a trailing `*`);
+    a narrow `Bash(<path>:*)` naming one script passes
   - nothing shaped like a real credential (Anthropic, GitHub, AWS, Slack, Google,
     GitLab keys, private key blocks)
 
@@ -431,6 +435,33 @@ def _check_hooks(files: dict, manifest, off: list) -> None:
                         off.append(f"{rel}: {event} command {cmd!r}: {problem}")
 
 
+# Shells and interpreters that, named bare in a `Bash(NAME:*)` pattern (no path),
+# grant unrestricted shell: NAME on PATH accepts arbitrary arguments, so the
+# pattern is not scoped to one script. `python*` style wildcards are matched
+# through the trailing `*` stripped before the name check (#859).
+_UNSCOPED_INTERPRETERS = {"bash", "sh", "zsh", "env", "python", "python2", "python3"}
+
+
+def bash_grant_problem(entry: str) -> str | None:
+    """None if `entry` is a safely scoped allowed-tools Bash grant; otherwise the
+    reason it grants unrestricted shell access (#859)."""
+    entry = entry.strip()
+    if entry == "Bash":
+        return "bare `Bash` grants every shell command"
+    m = re.fullmatch(r"Bash\((.*)\)", entry)
+    if not m:
+        return None
+    pattern = m.group(1).strip()
+    if pattern in ("", "*", "**", ":*"):
+        return f"`Bash({pattern})` grants every shell command"
+    pm = re.fullmatch(r"([^:]*):\*", pattern)
+    if pm:
+        name = pm.group(1).strip()
+        if "/" not in name and name.rstrip("*").lower() in _UNSCOPED_INTERPRETERS:
+            return f"`Bash({pattern})` grants an interpreter wildcard, not one script"
+    return None
+
+
 def _check_front_matter(files: dict, off: list) -> None:
     for rel, data in sorted(files.items()):
         parts = rel.split("/")
@@ -446,6 +477,18 @@ def _check_front_matter(files: dict, off: list) -> None:
         desc = meta.get("description")
         if not isinstance(desc, str) or not desc.strip():
             off.append(f"{rel}: front matter has no text `description`")
+        allowed = meta.get("allowed-tools")
+        if isinstance(allowed, list):
+            entries = [str(x) for x in allowed]
+        elif isinstance(allowed, str):
+            entries = [s.strip() for s in allowed.split(",") if s.strip()]
+        else:
+            entries = []
+        for entry in entries:
+            reason = bash_grant_problem(entry)
+            if reason:
+                off.append(f"{rel}: allowed-tools grants unrestricted shell "
+                           f"({entry!r}): {reason}")
 
 
 def _check_images(files: dict, kinds: dict, off: list) -> None:
