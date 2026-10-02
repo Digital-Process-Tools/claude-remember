@@ -1,6 +1,6 @@
 # Privacy Policy — Remember
 
-Last updated: 2026-09-12. Publisher: Digital Process Tools (Florian David).
+Last updated: 2026-10-02. Publisher: Digital Process Tools (Florian David).
 
 ## What Remember does with data
 
@@ -19,8 +19,12 @@ stopped.
 
 ## Where data goes
 
-- All files stay on your machine. Digital Process Tools operates no server and
-  receives no data from Remember.
+- Files stay on your machine, with one exception you control: the **git backup**
+  commits and pushes the memory store to that store's own git remote whenever the
+  external store's parent directory is a git repository with an upstream. The
+  remote is one you configured; Remember adds none. See
+  [git-backup-security.md](git-backup-security.md).
+- Digital Process Tools operates no server and receives no data from Remember.
 - Summaries are produced by calling the host CLI's model (for example `claude -p`).
   That call is governed by the privacy policy of the model provider you already use
   (Anthropic, OpenAI, or Google), under your own account. Remember adds no other
