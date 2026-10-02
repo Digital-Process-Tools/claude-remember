@@ -180,9 +180,9 @@ This plugin runs with your full shell privileges, like any other hook your codin
 
 **Files written outside the project**, beyond the `REMEMBER_DIR` memory store documented above:
 
-- `~/.remember/tmp/promo-notice` — a marker file so the plugin-promo line (above) is shown once, never again.
+- `~/.remember/tmp/promo-notice` — a marker recording when the plugin-promo line (above) was last shown and which one, so it appears at most once per `cooldowns.promo_seconds` (default 7 days) across all your projects.
 - `~/.remember/run/summarizers/` (override: `REMEMBER_RUNTIME_DIR`) — small per-process records used only to cap how many concurrent summarizer calls can run; holds no transcript content.
-- `$TMPDIR/remember-*` — temp files for a single `save-session.sh` run: the extracted transcript, the built summarization prompt (so some of these do hold session text), the summarizer's stderr, and compression intermediates. Written 0600 via `mktemp`, and removed by an `EXIT` trap when that save finishes — they do not outlive the process that created them.
+- `$TMPDIR/remember-*` — temp files for a single `save-session.sh` run: the extracted transcript, the built summarization prompt (so some of these do hold session text), the summarizer's stderr, and compression intermediates. Written 0600 via `mktemp`, and removed by an `EXIT` trap when that save finishes. Only a save killed outright (e.g. `SIGKILL`) can leave them behind in `$TMPDIR`.
 
 [![The Interview](https://max.dp.tools/art/og/og-the-interview-video.jpg)](https://max.dp.tools/art/2026/03/the-interview-claude-remember.mp4)
 
