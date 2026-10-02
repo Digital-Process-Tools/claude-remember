@@ -435,16 +435,29 @@ def _check_hooks(files: dict, manifest, off: list) -> None:
                         off.append(f"{rel}: {event} command {cmd!r}: {problem}")
 
 
-# Shells and interpreters that, named bare in a `Bash(NAME:*)` pattern (no path),
-# grant unrestricted shell: NAME on PATH accepts arbitrary arguments, so the
-# pattern is not scoped to one script. `python*` style wildcards are matched
-# through the trailing `*` stripped before the name check (#859).
-_UNSCOPED_INTERPRETERS = {"bash", "sh", "zsh", "env", "python", "python2", "python3"}
+# The directory holds ALLOWED_TOOLS_BROAD on "bare Bash, Bash(*), or a wildcard
+# right after a shell, an interpreter, a package manager or runner, or curl, as in
+# Bash(python3:*)", and for a plugin's own script "A relative path or a wildcard in
+# the path is still held" (portal wording, observed 2026-10-02; #859). A command
+# named here takes arbitrary arguments, so a pattern that starts with one and names
+# no plugin script is not scoped to anything.
+_UNSCOPED_COMMANDS = {
+    # shells
+    "bash", "sh", "zsh", "dash", "ksh", "fish", "env",
+    # interpreters
+    "python", "python2", "python3", "node", "deno", "ruby", "perl", "php", "lua",
+    # package managers and runners
+    "npm", "npx", "pnpm", "yarn", "bun", "bunx", "pip", "pip3", "uv", "uvx", "pipx",
+    "poetry", "cargo", "go", "gem", "brew",
+    # downloaders
+    "curl", "wget",
+}
+_PLUGIN_ROOT = "${CLAUDE_PLUGIN_ROOT}/"
 
 
 def bash_grant_problem(entry: str) -> str | None:
     """None if `entry` is a safely scoped allowed-tools Bash grant; otherwise the
-    reason it grants unrestricted shell access (#859)."""
+    reason the directory would hold it as broad shell access (#859)."""
     entry = entry.strip()
     if entry == "Bash":
         return "bare `Bash` grants every shell command"
@@ -454,11 +467,25 @@ def bash_grant_problem(entry: str) -> str | None:
     pattern = m.group(1).strip()
     if pattern in ("", "*", "**", ":*"):
         return f"`Bash({pattern})` grants every shell command"
-    pm = re.fullmatch(r"([^:]*):\*", pattern)
-    if pm:
-        name = pm.group(1).strip()
-        if "/" not in name and name.rstrip("*").lower() in _UNSCOPED_INTERPRETERS:
-            return f"`Bash({pattern})` grants an interpreter wildcard, not one script"
+    # The command part: drop a trailing `:*` (prefix match) or ` *` (any args).
+    cmd = re.sub(r"(:\*|\s+\*)$", "", pattern).strip()
+    words = cmd.split()
+    if not words:
+        return f"`Bash({pattern})` grants every shell command"
+    paths = [w for w in words if "/" in w]
+    for p in paths:
+        if "*" in p or "?" in p:
+            return f"`Bash({pattern})` has a wildcard in the path"
+        if not p.startswith(_PLUGIN_ROOT):
+            base = p.rsplit("/", 1)[-1].lower()
+            if base in _UNSCOPED_COMMANDS or base.rstrip("0123456789.") in _UNSCOPED_COMMANDS:
+                return f"`Bash({pattern})` grants an interpreter by absolute path, not one script"
+            if not p.startswith("/"):
+                return (f"`Bash({pattern})` names a relative path; name the plugin's script "
+                        f"as {_PLUGIN_ROOT}...")
+    first = words[0].rstrip("*").lower()
+    if first in _UNSCOPED_COMMANDS and not any(p.startswith(_PLUGIN_ROOT) for p in paths):
+        return f"`Bash({pattern})` is a wildcard after `{words[0]}`, not one plugin script"
     return None
 
 

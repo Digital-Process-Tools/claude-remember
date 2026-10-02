@@ -166,6 +166,94 @@ at `release` would make both marketplaces serve the same tagged builds; do it on
 `release` commit exists, and only once Claude Code's `github` source is confirmed to accept a
 `ref`.
 
+## What the directory actually checks: observed scans
+
+The [pre-submission checklist](https://claude.com/docs/plugins/pre-submission-checklist) is not
+the whole story: the portal raised at least one hold (`ALLOWED_TOOLS_BROAD`) that the checklist does
+not list. What follows is what the portal reported on this plugin, **as observed on 2026-10-02**
+(v0.37.0). Rules changed once already (around Sep 24), so treat this as a dated record: re-read the
+**Versions** tab after every release instead of assuming it still holds.
+
+### Reading a scan
+
+Developer portal → the plugin → **Versions** → expand a version (the `>` chevron). Each version
+shows Received → Queue → Fetch → Validation → **Directory policy** → Security scan → Review →
+Publish. The **Directory policy** step lists every finding, with a title, a code (for example
+`ALLOWED_TOOLS_BROAD`) and the file that triggered it. Two kinds matter:
+
+- **Policy hold** (clock icon): the version cannot go live until an Anthropic reviewer clears it.
+- **Warning** (triangle icon): shown to the reviewer; does not hold the version by itself.
+
+A **Blocks** finding (red cross) is worse than a hold: fix it before anything else.
+
+Separately from any version, a listing can be marked **"Needs the directory team"** (a flagged
+version or a delist). That does not clear when a clean version arrives: contact the directory team
+from the plugin's contact address.
+
+### Full tree (`main`) vs `release`, same release
+
+Both rows are v0.37.0. `81ffecb` was scanned while the listing still followed `main`; `e6cf58f`
+after it was switched to `release`.
+
+| Code (portal title) | Full tree `81ffecb` (486 files, 9.3 MB) | `release` `e6cf58f` (73 files, 1.3 MB) |
+| --- | --- | --- |
+| `SECRET_IN_SCRIPT` (Secret in a shipped file) | **Blocks**: fake API keys in `tests/test_haiku.py` | gone: `tests/` is not shipped |
+| `ALLOWED_TOOLS_BROAD` (Pre-approves broad shell access in allowed-tools) | Policy hold: `commands/doctor.md` | **Policy hold**, the only one: same file. Fixed in v0.37.1 (#859) |
+| Files or downloads the validator couldn't inspect | Policy hold (2) | gone |
+| Image or font file that the plugin's code could run | Warning (3): the PNGs under `docs/` | gone |
+| `MCP_FORWARDS_CREDENTIAL_ENV` (Uses a credential from the user's machine) | Warning (21) | Warning (3): `README.md`, `scripts/session-start-hook.sh`, `.claude-plugin/plugin.json` |
+| `RUNTIME_FETCH_EXEC` (Contains a download-and-run command) | Warning (6) | Warning (2): `pipeline/shell.py`, `scripts/log.sh` |
+| CLAUDE.md at the plugin root isn't loaded | Warning | gone |
+| `ICON_MISSING` (No icon) | Warning | Warning |
+| `USES_HOOKS` (Uses hooks) | Info | Info: permanent for a hooks plugin, "Nothing to do" |
+| Security scan | Passed | Passed |
+
+On the earlier v0.36.0 (`a92a072`, full tree, 474 files / 9.2 MB) the validator never finished:
+`VALIDATION_INCOMPLETE` and `VALIDATION_NOT_EVALUATED`, both policy holds ("usually because the
+plugin folder is very large"). That is the failure the `release` branch exists to remove.
+
+### The rules, one by one
+
+- **`ALLOWED_TOOLS_BROAD`: not in the published checklist.** Portal wording: "A skill or command
+  lists a broad shell entry in `allowed-tools`, such as bare `Bash`, `Bash(*)`, or a wildcard right
+  after a shell, an interpreter, a package manager or runner, or `curl`, as in `Bash(python3:*)`."
+  Accepted form, also quoted: "For the plugin's own script, name the file and keep the braces:
+  `Bash(python3 ${CLAUDE_PLUGIN_ROOT}/scripts/run.py:*)`. A relative path or a wildcard in the path
+  is still held." Ours was `allowed-tools: Bash` in `commands/doctor.md`; the skill already used the
+  accepted form. `check_release_tree.py` now fails on the broad forms (#859).
+- **`SECRET_IN_SCRIPT`** blocks on anything that looks like a literal credential, including fake
+  keys in test fixtures. A deny-list that drops `tests/` removes it. If a test fixture must ship,
+  build the key at runtime instead of writing it literally.
+- **`MCP_FORWARDS_CREDENTIAL_ENV`** fires where the plugin reads a credential from the user's
+  machine. It also fired on `README.md`, i.e. on the disclosure itself, and on a comment that only
+  contains the word "credentials". The portal's own text: "If the credential is for that host's own
+  vendor, you can leave it as it is and a reviewer confirms that." Ours is the user's own Claude
+  Code / Codex login, so we left it. The fix that clears it is to ask for the value through a
+  `userConfig` entry in `plugin.json` with `sensitive: true` and use `${user_config.KEY}`. Do not
+  make it disappear by removing the disclosure: the security scan holds undisclosed behaviour.
+- **`RUNTIME_FETCH_EXEC`** flags text that downloads and runs code, and the portal says it looks at
+  "a hook, a server or settings command, a script, or text such as a skill or README". On our tree
+  the two files contain no download at all; *inferred, not confirmed*: it matched comment text (a
+  docstring showing `eval "$(...)"` and a comment mentioning curl), reworded in v0.37.1. Check the
+  v0.37.1 scan before relying on this.
+- **`ICON_MISSING`**: put a square PNG, 512 to 2048 px, under 2 MB, at `.claude-plugin/icon.png`
+  (or set `icon` in `plugin.json`; SVG and WebP are not accepted). **It is set only once**: "the
+  first time the plugin is saved or submitted… Adding or changing it later does not change the
+  icon." Choose it deliberately, before it matters, and keep it outside any denied path: an icon
+  under `docs/` vanishes from `release`.
+- **`USES_HOOKS`** is information only and stays for any plugin that ships hooks.
+
+### For another plugin repository, in addition to the reuse steps above
+
+1. Read your own **Versions** tab first: the full-tree scan of your latest commit already lists
+   every rule your plugin trips, before you build anything.
+2. Grep every shipped skill, command and agent for `allowed-tools`. Anything broader than a named
+   `${CLAUDE_PLUGIN_ROOT}` script is a hold.
+3. Make sure fake credentials live only in denied paths (`tests/`).
+4. Decide the icon before the first submission, and ship it inside the plugin folder.
+5. Disclose in README.md everything the plugin runs, sends and stores; expect that disclosure to
+   raise warnings, and leave it in.
+
 ## Reusing this in another plugin repository
 
 claude-jit-context and claude-supertool hit the same directory holds and plan to reuse this.

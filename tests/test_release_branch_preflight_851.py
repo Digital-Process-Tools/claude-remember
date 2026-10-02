@@ -399,3 +399,48 @@ def test_root_package_json_alone_passes(tmp_path):
 @pytest.mark.parametrize("name", [".npmrc", "sub/bunfig.toml", "uv.toml"])
 def test_package_manager_config_fails(tmp_path, name):
     _fails(_tree(tmp_path, {name: b"x = 1\n"}), name)
+
+# The portal's own wording for ALLOWED_TOOLS_BROAD (observed 2026-10-02 on v0.37.0):
+# "bare Bash, Bash(*), or a wildcard right after a shell, an interpreter, a package
+# manager or runner, or curl, as in Bash(python3:*)" -- and, for a plugin's own script,
+# "A relative path or a wildcard in the path is still held." (#859)
+@pytest.mark.parametrize("value", [
+    "Bash(node:*)",
+    "Bash(ruby:*)",
+    "Bash(perl:*)",
+    "Bash(npm:*)",
+    "Bash(npx:*)",
+    "Bash(pnpm:*)",
+    "Bash(yarn:*)",
+    "Bash(bun:*)",
+    "Bash(bunx:*)",
+    "Bash(pip:*)",
+    "Bash(pip3:*)",
+    "Bash(uv:*)",
+    "Bash(uvx:*)",
+    "Bash(pipx:*)",
+    "Bash(curl:*)",
+    "Bash(wget:*)",
+    "Bash(python3 *)",
+    "Bash(bash scripts/run.sh:*)",
+    "Bash(./scripts/run.sh:*)",
+    "Bash(${CLAUDE_PLUGIN_ROOT}/scripts/*:*)",
+    "Bash(${CLAUDE_PLUGIN_ROOT}/scripts/*.sh:*)",
+    "Bash(/usr/bin/python3:*)",
+])
+def test_portal_broad_forms_fail(tmp_path, value):
+    body = f"---\ndescription: d\nallowed-tools: {value}\n---\n\nx\n".encode()
+    _fails(_tree(tmp_path, {"commands/c.md": body}), "commands/c.md", "allowed-tools")
+
+
+# Positive controls: the portal's own accepted examples must stay accepted.
+@pytest.mark.parametrize("value", [
+    "Bash(git status:*)",
+    "Bash(python3 ${CLAUDE_PLUGIN_ROOT}/scripts/run.py:*)",
+    "Bash(bash ${CLAUDE_PLUGIN_ROOT}/scripts/doctor.sh:*)",
+    "Bash(${CLAUDE_PLUGIN_ROOT}/scripts/doctor.sh:*)",
+    "Read",
+])
+def test_portal_accepted_forms_pass(tmp_path, value):
+    body = f"---\ndescription: d\nallowed-tools: {value}\n---\n\nx\n".encode()
+    _passes(_tree(tmp_path, {"commands/c.md": body}))
