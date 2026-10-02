@@ -14,11 +14,13 @@ while `case` patterns and `${v//[!...]/}` did not move at all, in either
 direction. So two live sites are in scope here, both reached through `=~`:
 
   * `_remember_cfg_flatten_cache_valid_line` (scripts/log.sh) validates each
-    line of the config-data cache against `^_RCFG_[A-Za-z0-9_]+=`. A config
-    key carrying an `I` makes the line read as malformed, the cache is
-    refused, and every hook falls back to re-reading and re-flattening the
-    config -- permanently, silently, on that host. Not a wrong answer: a
-    performance floor that nothing reports, which is the same shape of
+    line of the config-data cache against `^_RCFG_[A-Za-z0-9_]+` followed by
+    a TAB (#864 changed the separator from `=` to TAB; the collation-
+    sensitive `[A-Za-z0-9_]` range this test is about is unchanged). A
+    config key carrying an `I` makes the line read as malformed, the cache
+    is refused, and every hook falls back to re-reading and re-flattening
+    the config -- permanently, silently, on that host. Not a wrong answer:
+    a performance floor that nothing reports, which is the same shape of
     invisible loss #695 itself was.
 
   * `_remember_normalize_win_path` (scripts/resolve-paths.sh, mirrored in
@@ -76,12 +78,21 @@ def _bash(script: str, env_extra: dict, tmp_path: Path) -> str:
     return result.stdout.strip()
 
 
+def _cache_line(name: str, value: str) -> str:
+    """Builds a line in the shape `_remember_cfg_flatten_cache_valid_line`
+    actually expects post-#864: `NAME` TAB `VALUE`, not `NAME=VALUE`."""
+    return f"{name}\t{value}"
+
+
 def _cache_line_verdict(line: str, env_extra: dict, tmp_path: Path) -> str:
+    line_file = tmp_path / "cache_line.txt"
+    line_file.write_text(line, encoding="utf-8")
     return _bash(f"""
         source {DETECT} >/dev/null 2>&1
         source {LIBDIR} >/dev/null 2>&1
         source {LOG_SH} >/dev/null 2>&1
-        if _remember_cfg_flatten_cache_valid_line '{line}'; then
+        _line=$(cat '{line_file.as_posix()}')
+        if _remember_cfg_flatten_cache_valid_line "$_line"; then
             echo VALID
         else
             echo REJECTED
@@ -133,9 +144,9 @@ class TestConfigCacheLineUnderTurkishCollation:
 
     def test_a_key_containing_i_is_still_a_valid_cache_line(self, tmp_path):
         name, env = _locale_env()
-        assert _cache_line_verdict("_RCFG_ID=x", env, tmp_path) == "VALID", (
-            f"the config-data cache rejected `_RCFG_ID=x` under {name!r}: "
-            f"`^_RCFG_[A-Za-z0-9_]+=` is matched by that locale's collation, "
+        assert _cache_line_verdict(_cache_line("_RCFG_ID", "x"), env, tmp_path) == "VALID", (
+            f"the config-data cache rejected `_RCFG_ID` TAB `x` under {name!r}: "
+            f"`^_RCFG_[A-Za-z0-9_]+` is matched by that locale's collation, "
             f"which does not place `I` inside A-Z. Every hook then falls back "
             f"to re-reading and re-flattening the config, forever, with "
             f"nothing said (#695)"
@@ -145,14 +156,14 @@ class TestConfigCacheLineUnderTurkishCollation:
         """If this one failed too, the harness never reached the function and
         the assertion above would be about nothing."""
         _name, env = _locale_env()
-        assert _cache_line_verdict("_RCFG_MODEL=x", env, tmp_path) == "VALID"
+        assert _cache_line_verdict(_cache_line("_RCFG_MODEL", "x"), env, tmp_path) == "VALID"
 
     def test_the_validator_still_rejects_a_non_cache_line(self, tmp_path):
         """Must-not-fire half: the C locale must not be bought by accepting
         anything that is not an `_RCFG_` assignment."""
         _name, env = _locale_env()
         assert _cache_line_verdict("rm -rf /", env, tmp_path) == "REJECTED"
-        assert _cache_line_verdict("_OTHER_KEY=x", env, tmp_path) == "REJECTED"
+        assert _cache_line_verdict(_cache_line("_OTHER_KEY", "x"), env, tmp_path) == "REJECTED"
 
 
 class TestWindowsDriveUnderTurkishCollation:
@@ -201,7 +212,7 @@ class TestTheHarnessItselfRuns:
     """
 
     def test_the_cache_line_validator_is_reachable(self, tmp_path):
-        assert _cache_line_verdict("_RCFG_ID=x", {"LC_ALL": "C"}, tmp_path) == "VALID"
+        assert _cache_line_verdict(_cache_line("_RCFG_ID", "x"), {"LC_ALL": "C"}, tmp_path) == "VALID"
 
     def test_the_win_path_normaliser_is_reachable(self, tmp_path):
         assert _normalized("I:/x", {"LC_ALL": "C"}, tmp_path) == "I:\\x"
