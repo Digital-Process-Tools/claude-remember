@@ -64,7 +64,7 @@ def test_log_sh_safe_eval_strips_crlf(tmp_path):
     Without the strip, `EXCHANGE_COUNT=15\\r` fails integer tests in
     save-session.sh on Windows.
     """
-    script = f'source "{LOG_SH}"; safe_eval < <(printf "FOO=bar\\r\\n"); printf "[%s]" "$FOO"'
+    script = f'source "{LOG_SH}"; assign_kv < <(printf "FOO=bar\\r\\n"); printf "[%s]" "$FOO"'
     r = _run_bash(script, tmp_path)
     assert r.returncode == 0, r.stderr
     assert r.stdout == "[bar]", f"got {r.stdout!r}"
@@ -74,7 +74,7 @@ def test_log_sh_safe_eval_crlf_value_is_integer(tmp_path):
     """safe_eval value must be usable in `[ -eq ]` after CRLF input."""
     script = (
         f'source "{LOG_SH}"; '
-        'safe_eval < <(printf "NUM=42\\r\\n"); '
+        'assign_kv < <(printf "NUM=42\\r\\n"); '
         'if [ "$NUM" -eq 42 ]; then echo OK; else echo FAIL; fi'
     )
     r = _run_bash(script, tmp_path)
@@ -87,7 +87,7 @@ def test_log_sh_safe_eval_passes_backslash_path_verbatim(tmp_path):
     no longer quotes, so safe_eval sees the raw path)."""
     script = (
         f'source "{LOG_SH}"; '
-        r"""safe_eval <<< "P=C:\Users\x.txt"; """
+        r"""assign_kv <<< "P=C:\Users\x.txt"; """
         'printf "[%s]" "$P"'
     )
     r = _run_bash(script, tmp_path)
@@ -101,7 +101,7 @@ def test_real_sourcing_order_safe_eval_handles_crlf(tmp_path):
     """detect-tools.sh THEN log.sh — the order used by save-session.sh."""
     script = (
         f'source "{DETECT_SH}"; source "{LOG_SH}"; '
-        'safe_eval < <(printf "FOO=bar\\r\\n"); '
+        'assign_kv < <(printf "FOO=bar\\r\\n"); '
         'printf "[%s]" "$FOO"'
     )
     r = _run_bash(script, tmp_path)
@@ -129,7 +129,7 @@ def test_shell_escape_safe_eval_roundtrip(value, tmp_path):
     escaped = _shell_escape(value)
     script = (
         f'source "{LOG_SH}"; '
-        f'safe_eval <<< "VAL={escaped}"; '
+        f'assign_kv <<< "VAL={escaped}"; '
         'printf "%s" "$VAL"'
     )
     r = _run_bash(script, tmp_path)

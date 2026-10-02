@@ -1,10 +1,10 @@
-"""Shell integration helpers — output shell-evaluable variables from Python.
+"""Shell integration helpers — output KEY=VALUE variables a shell script assigns.
 
 Each ``cmd_*`` function prints ``KEY=VALUE`` pairs to stdout that shell
-scripts read through ``safe_eval`` (scripts/log.sh), which assigns only lines
-shaped like a plain variable assignment and never runs the text as code.
-This eliminates the pattern of calling ``python3 -c`` multiple times to
-read individual fields from the same JSON.
+scripts read through ``assign_kv`` (scripts/log.sh), which assigns only
+lines shaped like a plain variable assignment and never runs the text as
+code. This eliminates the pattern of calling ``python3 -c`` multiple times
+to read individual fields from the same JSON.
 
 Large text values (exchanges, Haiku responses) are written to temp files
 and their paths are printed as shell variables, avoiding shell escaping
@@ -45,16 +45,17 @@ from .prompts import build_save_prompt, build_ndc_prompt
 
 
 def _shell_escape(value: str) -> str:
-    """Emit a value for the shell variable bridge consumed by ``safe_eval``.
+    """Emit a value for the shell variable bridge consumed by ``assign_kv``.
 
-    ``scripts/log.sh:safe_eval`` parses ``KEY=VALUE`` lines and assigns
-    ``VALUE`` verbatim via ``printf -v`` — no shell expansion, no ``eval``.
-    The only constraint is that ``VALUE`` must not contain a newline
-    (the parser is line-oriented).
+    ``scripts/log.sh:assign_kv`` parses ``KEY=VALUE`` lines and assigns
+    ``VALUE`` verbatim via ``printf -v`` — no shell expansion, no
+    re-parsing of the text as shell source. The only constraint is that
+    ``VALUE`` must not contain a newline (the parser is line-oriented).
 
-    Earlier versions single-quote-wrapped per POSIX ``eval`` convention,
-    which broke on Windows: paths with backslashes were quoted, but
-    ``safe_eval``'s verbatim assignment kept the quotes literal (issue #84).
+    Earlier versions single-quote-wrapped per the convention the shell's own
+    command-substitution/parsing builtin expects, which broke on Windows:
+    paths with backslashes were quoted, but ``assign_kv``'s verbatim
+    assignment kept the quotes literal (issue #84).
 
     Args:
         value: Raw string. Must not contain newlines.

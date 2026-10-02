@@ -77,7 +77,7 @@ source "{_bash_path(LOG_SH)}"
 safe_val << 'EVAL_INPUT'
 EXTRACT_FILE={canary}; rm -f {canary}
 EVAL_INPUT
-""".replace("safe_val", "safe_eval")
+""".replace("safe_val", "assign_kv")
     result = subprocess.run(
         [_BASH, "-c", script],
         capture_output=True,
@@ -101,7 +101,7 @@ source "{_bash_path(LOG_SH)}"
 safe_val << 'EVAL_INPUT'
 EXTRACT_FILE=$(rm -f {canary})
 EVAL_INPUT
-""".replace("safe_val", "safe_eval")
+""".replace("safe_val", "assign_kv")
     result = subprocess.run(
         [_BASH, "-c", script],
         capture_output=True,
@@ -127,7 +127,7 @@ EVAL_INPUT
 echo "EXTRACT_FILE=$EXTRACT_FILE"
 echo "EXCHANGE_COUNT=$EXCHANGE_COUNT"
 echo "HUMAN_COUNT=$HUMAN_COUNT"
-""".replace("safe_val", "safe_eval")
+""".replace("safe_val", "assign_kv")
     result = subprocess.run(
         [_BASH, "-c", script],
         capture_output=True,
@@ -149,7 +149,7 @@ safe_val << 'EVAL_INPUT'
 EXTRACT_FILE=/tmp/a=b=c
 EVAL_INPUT
 echo "RESULT=$EXTRACT_FILE"
-""".replace("safe_val", "safe_eval")
+""".replace("safe_val", "assign_kv")
     result = subprocess.run(
         [_BASH, "-c", script],
         capture_output=True,
@@ -169,7 +169,7 @@ safe_val << 'EVAL_INPUT'
 lowercase_var=something
 EVAL_INPUT
 echo "lowercase_var=${{lowercase_var:-UNSET}}"
-""".replace("safe_val", "safe_eval")
+""".replace("safe_val", "assign_kv")
     result = subprocess.run(
         [_BASH, "-c", script],
         capture_output=True,

@@ -351,6 +351,27 @@ was "Validation ran out of time". That is the failure the `release` branch exist
   the strongest literal candidate for why it, specifically, keeps matching even after #859's
   reword, but this is still a guess, not a confirmed trigger.
 
+  **#864's actual fix** (same issue, second lane, no portal access either): removed both real
+  `eval` calls from `scripts/log.sh`'s config-flatten cache loader. Rather than keep `%q` as
+  the on-disk format and hand-decode it without `eval` (the first version of this fix, dropped
+  mid-review as a fragile byte-by-byte bash loop for no gain over `eval` -- this cache's
+  publisher and loader are both owned by this same file, so there was no reason to keep %q's
+  shape at all), the format changed to a trivial one this file fully controls: one `NAME` TAB
+  `VALUE` record per line, escaping only backslash/newline/tab, decoded with a single
+  `printf -v NAME '%b' VALUE` call -- a pure byte-level format directive, never a re-parse of
+  the text as shell source. The cache's on-disk path was bumped
+  (`remember-config-cache-v2-...`) so an older build's `%q`-based cache is simply never opened.
+  Renamed `safe_eval` (in `scripts/log.sh` and every caller) to `assign_kv`, since the old
+  name's own text contained the substring `eval` regardless of what its body called. Reworded
+  `CHANGELOG.md`'s v0.38.0 entry to drop the literal `curl`/`wget`/`eval "$(...)"` text. After
+  this fix, `grep -rniE 'eval|curl|wget'` finds nothing in `pipeline/shell.py`,
+  `scripts/log.sh`, or the `CHANGELOG.md` text the slim `release` branch actually ships (the
+  latest released section only -- `build_release_tree.py` trims the rest). Whether this
+  reaches 0 `RUNTIME_FETCH_EXEC` findings, rather than a lower but nonzero count, is
+  unconfirmed without the next portal scan: the matcher's exact mechanism (literal `eval`
+  token? command substitution shape? something else?) was never confirmed by either #859's or
+  this lane's source-only analysis.
+
   **Still needs a human with portal access**: expand the "Contains a download-and-run command" row
   under Versions → v0.38.0 (`e3cfd5b`) → Directory policy, and record the file(s) and line(s) shown
   there; update this entry once that is known. Until then, do not spend more effort guessing or
