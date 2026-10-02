@@ -327,12 +327,30 @@ was "Validation ran out of time". That is the failure the `release` branch exist
   We inferred that it matched comment text (a docstring showing `eval "$(...)"` and a comment
   mentioning curl), and #859 reworded those two comments expecting the warning to go. **That
   inference was wrong, or at best is unconfirmed: rewording the comments did not clear it.** On
-  v0.38.0 (`e3cfd5b`) the count went *up*, from 2 to 3. v0.38.0 also added #842's SessionStart
-  budget code (#845), so a new match there is possible, but which lines matched is unknown until
-  someone expands the row in the portal. `scripts/log.sh` still contains real
-  `eval "$_assign"`-style lines and the word "fetch". For another plugin: do not spend effort
-  rewording comments for this one. It is a warning, and the portal's own text says "Where it only
-  appears in documentation, nothing needs to change".
+  v0.38.0 (`e3cfd5b`) the count went *up*, from 2 to 3, and which third file matched is **still
+  unknown**: the file/line detail only shows behind the expanded row in the portal's web UI, which
+  neither this write-up nor #864's follow-up investigation had access to.
+
+  **#864's source-only follow-up** (no portal access, so this narrows the guess rather than
+  confirming it): the v0.37.0→v0.38.0 shipped-tree diff touches five code files besides the two
+  already flagged -- `commands/doctor.md` (4 lines, #859's `allowed-tools` fix), `scripts/doctor.sh`
+  (mode bit only, no content change), `scripts/lib-memory-context.sh` (+164 lines, #842/#845),
+  `scripts/session-start-hook.sh` (+74 lines, #842/#845) and `config.example.json` (+28 lines,
+  likely denied from `release`, not checked). Grepping the two largest additions
+  (`lib-memory-context.sh`, `session-start-hook.sh`) for `curl`, `wget`, `download`, `fetch`,
+  `eval` and `exec` found **nothing** in either, so the earlier guess that #842/#845's SessionStart
+  budget code is the new third match has no textual support -- it should not be assumed true just
+  because it is the largest diff. `scripts/log.sh` is the one file here with **real** `eval` calls
+  on validated input (`eval "$name=$value"`, `eval "$_assign"`), not just the word in a comment --
+  the strongest literal candidate for why it, specifically, keeps matching even after #859's
+  reword, but this is still a guess, not a confirmed trigger.
+
+  **Still needs a human with portal access**: expand the "Contains a download-and-run command" row
+  under Versions → v0.38.0 (`e3cfd5b`) → Directory policy, and record the file(s) and line(s) shown
+  there; update this entry once that is known. Until then, do not spend more effort guessing or
+  rewording comments for this row -- #859 already tried that once and the count went up, not down.
+  It is a warning, and the portal's own text says "Where it only appears in documentation, nothing
+  needs to change".
 - **Unrecognized field in `plugin.json`** (warning, 4 findings, new on v0.38.0). Portal text: "If
   you expected the field to do something, check its spelling against the plugins reference.
   Otherwise it can stay." *Inferred, not yet confirmed from the expanded row:* the four are
