@@ -1,5 +1,6 @@
 {
   "name": "remember",
+  "icon": "./docs/icon.png",
   "description": "Continuous memory for Claude Code. Extracts, summarizes, and compresses conversations into tiered daily logs. Claude remembers what you did yesterday.",
   "version": "0.36.0",
   "author": {
