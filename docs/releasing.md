@@ -333,14 +333,20 @@ was "Validation ran out of time". That is the failure the `release` branch exist
 
   **#864's source-only follow-up** (no portal access, so this narrows the guess rather than
   confirming it): the v0.37.0→v0.38.0 shipped-tree diff touches five code files besides the two
-  already flagged -- `commands/doctor.md` (4 lines, #859's `allowed-tools` fix), `scripts/doctor.sh`
-  (mode bit only, no content change), `scripts/lib-memory-context.sh` (+164 lines, #842/#845),
-  `scripts/session-start-hook.sh` (+74 lines, #842/#845) and `config.example.json` (+28 lines,
-  likely denied from `release`, not checked). Grepping the two largest additions
-  (`lib-memory-context.sh`, `session-start-hook.sh`) for `curl`, `wget`, `download`, `fetch`,
-  `eval` and `exec` found **nothing** in either, so the earlier guess that #842/#845's SessionStart
-  budget code is the new third match has no textual support -- it should not be assumed true just
-  because it is the largest diff. `scripts/log.sh` is the one file here with **real** `eval` calls
+  already flagged -- `commands/doctor.md` (2 insertions/2 deletions, #859's `allowed-tools` fix),
+  `scripts/doctor.sh` (mode bit only, no content change), `scripts/lib-memory-context.sh`
+  (162 insertions/2 deletions, `git diff --stat` churn 164, #842/#845), `scripts/session-start-hook.sh`
+  (63 insertions/11 deletions, `git diff --stat` churn 74, #842/#845) and `config.example.json`
+  (28 insertions, likely denied from `release`, not checked). Grepping only the **added** (`+`)
+  lines of the two largest diffs -- `git diff v0.37.0 v0.38.0 -- scripts/lib-memory-context.sh
+  scripts/session-start-hook.sh | grep -E '^\+' | grep -iE '\b(curl|wget|download|fetch|eval|exec)\b'`
+  -- found **nothing** in either, so the earlier guess that #842/#845's SessionStart budget code is
+  the new third match has no textual support in the lines that version actually added -- it should
+  not be assumed true just because it is the largest diff. (Grepping the *whole file as shipped*
+  rather than just the diff gives a different, misleading answer: `scripts/session-start-hook.sh`
+  contains `exec` nine times, e.g. `exec 3>&1`, but every one of those pre-dates v0.38.0 and is
+  already present verbatim in v0.37.0's copy of the file, so it cannot explain a count that only
+  rose between those two versions.) `scripts/log.sh` is the one file here with **real** `eval` calls
   on validated input (`eval "$name=$value"`, `eval "$_assign"`), not just the word in a comment --
   the strongest literal candidate for why it, specifically, keeps matching even after #859's
   reword, but this is still a guess, not a confirmed trigger.
