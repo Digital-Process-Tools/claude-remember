@@ -336,6 +336,16 @@ BACKSLASH_QUOTE = re.compile(r'\\\\"')
 # Either quote style: a single-quoted '.' reads the same to the scanner
 # (round-7 self-review -- the sweep tool itself only checks double quotes).
 DOT_STRING = re.compile(r'(["\'])\.\.?\1')
+# #898 round 8: the sweep tool's two newest needles (triggers.md 7 and 8).
+# An escaped quote -- a backslash that is not itself escaped, then `"` --
+# held in an awk string on jit-context and is flagged by the sweep anywhere
+# in a shell script; same expression as the sweep's own.
+ESCAPED_QUOTE = re.compile(r'(?<!\\)\\"')
+# A `*/*` glob used as a case pattern: at the start of a line, after `in`,
+# or after a `|` in a joined arm, and closed by `|` or `)`. Leading
+# whitespace is allowed here, which the sweep's own `^` does not: an
+# indented arm on its own line is the commonest way to write one.
+SLASH_GLOB_CASE = re.compile(r'(?:^\s*|\bin\s+|\|\s*)[^\s"$|()]*\*/\*[^\s|()]*\s*[|)]')
 
 
 def _download_piped_to_shell(line: str) -> bool:
@@ -626,6 +636,8 @@ def check_tree(root: Path, budget: dict) -> CheckResult:
     _check_backslash_quote(files, kinds, off)
     _check_catch_all_in_loop(files, kinds, off)
     _check_dot_string(files, kinds, result.reviews)
+    _check_escaped_quote(files, kinds, result.reviews)
+    _check_slash_glob_case(files, kinds, result.reviews)
     if "package.json" in files:
         locks = [lf for lf in LOCKFILES if lf in files]
         if locks:
@@ -1225,6 +1237,48 @@ def _check_dot_string(files: dict, kinds: dict, reviews: list) -> None:
             if DOT_STRING.search(line):
                 reviews.append(f"{rel}:{n}: a lone '.'/'..' as a quoted "
                                 f"string value: {line.strip()[:80]}")
+
+
+def _sh_lines(files: dict, kinds: dict):
+    """Yield (rel, line_no, line) for every non-comment line of every
+    shipped `.sh` file -- the scope round 7's shell-shape guards settled on
+    (a Python or jq file carries these byte shapes as ordinary code)."""
+    for rel, data in sorted(files.items()):
+        top = rel.split("/")[0]
+        if top not in _SCRIPT_DIRS or kinds.get(rel) != "text" or not rel.endswith(".sh"):
+            continue
+        for n, line in enumerate(data.decode("utf-8").splitlines(), 1):
+            if line.lstrip().startswith("#"):
+                continue
+            yield rel, n, line
+
+
+def _check_escaped_quote(files: dict, kinds: dict, reviews: list) -> None:
+    """#898 round 8: an escaped double quote in a shipped shell script --
+    claude-directory-publishing triggers.md 7 (jit-context's stop hook held
+    on the JSON envelope builders in an awk string and cleared with every
+    one written `\\042`; the same lines cleared in another hook, so the
+    scanner trips on it only in some states). The rewrite is a
+    single-quoted literal, a `printf` format, or a variable holding the
+    quote (`printf -v dq '\\042'`). REVIEW, not FAIL, like the other
+    scanner-shape guards: the portal's hold is state-dependent, so a hit
+    is a candidate to rewrite, not a proven hold."""
+    for rel, n, line in _sh_lines(files, kinds):
+        if ESCAPED_QUOTE.search(line):
+            reviews.append(f"{rel}:{n}: an escaped quote (backslash, then a "
+                           f"double quote): {line.strip()[:80]}")
+
+
+def _check_slash_glob_case(files: dict, kinds: dict, reviews: list) -> None:
+    """#898 round 8: a `*/*` glob as a case pattern in a shipped shell
+    script -- claude-directory-publishing triggers.md 8 (held in
+    jit-context's stop hook, cleared when spelled without the slash). The
+    rewrite is a `[ ]` test: "no slash" is `[ "${x#*/}" = "$x" ]`. REVIEW,
+    not FAIL, for the same state-dependence as the escaped quote."""
+    for rel, n, line in _sh_lines(files, kinds):
+        if SLASH_GLOB_CASE.search(line):
+            reviews.append(f"{rel}:{n}: a '*/*' glob as a case pattern: "
+                           f"{line.strip()[:80]}")
 
 
 def _check_credential_shaped_name(files: dict, kinds: dict, off: list) -> None:

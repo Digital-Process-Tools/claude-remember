@@ -492,3 +492,79 @@ def test_a_real_path_string_is_not_a_lone_dot(tmp_path):
     root = _tree(tmp_path, {"scripts/run.sh": b'#!/bin/sh\nROOT="/some/path"\n'})
     reviews = _check(root).reviews
     assert not any("run.sh" in r and "'.'" in r for r in reviews), reviews
+
+
+# -- round 8 (#898): the sweep tool's two newest needles (REVIEW) ------------
+# claude-directory-publishing triggers.md 7 and 8: an escaped quote `\"`
+# (held in an awk string on jit-context; the sweep flags it anywhere in a
+# shell script) and a `*/*` glob used as a case pattern.
+
+def test_escaped_quote_is_reviewed(tmp_path):
+    root = _tree(tmp_path, {"scripts/run.sh": b'#!/bin/sh\necho "say \\"hi\\""\n'})
+    reviews = _check(root).reviews
+    assert any("run.sh:2" in r and "escaped quote" in r for r in reviews), reviews
+
+
+def test_escaped_quote_in_a_parameter_expansion_is_reviewed(tmp_path):
+    root = _tree(tmp_path, {"scripts/run.sh": b'#!/bin/sh\nrest=${raw#*\\"cwd\\"}\n'})
+    reviews = _check(root).reviews
+    assert any("run.sh:2" in r and "escaped quote" in r for r in reviews), reviews
+
+
+def test_quotes_inside_single_quotes_are_not_an_escaped_quote(tmp_path):
+    """Positive control: the documented rewrite -- a single-quoted literal
+    carrying the double quotes as plain text -- must not trip this guard."""
+    root = _tree(tmp_path, {"scripts/run.sh": b"#!/bin/sh\necho 'say \"hi\"'\n"})
+    reviews = _check(root).reviews
+    assert not any("run.sh" in r and "escaped quote" in r for r in reviews), reviews
+
+
+def test_an_escaped_backslash_before_a_quote_is_not_an_escaped_quote(tmp_path):
+    """Positive control: `"\\\\"` is one escaped backslash closing the string
+    -- the sweep's own lookbehind skips it, and so must this guard."""
+    root = _tree(tmp_path, {"scripts/run.sh": b'#!/bin/sh\nbs="\\\\"\n'})
+    reviews = _check(root).reviews
+    assert not any("run.sh" in r and "escaped quote" in r for r in reviews), reviews
+
+
+def test_escaped_quote_in_a_python_file_is_not_reviewed(tmp_path):
+    """Scoped to `.sh`, like round 7's guards: `"\\""` is ordinary Python."""
+    root = _tree(tmp_path, {"scripts/tool.py": b'q = "\\""\n'})
+    reviews = _check(root).reviews
+    assert not any("tool.py" in r and "escaped quote" in r for r in reviews), reviews
+
+
+def test_slash_glob_case_pattern_is_reviewed(tmp_path):
+    root = _tree(tmp_path, {"scripts/run.sh": b'#!/bin/sh\ncase "$0" in */*) echo y ;; esac\n'})
+    reviews = _check(root).reviews
+    assert any("run.sh:2" in r and "'*/*'" in r for r in reviews), reviews
+
+
+def test_slash_glob_in_a_joined_case_arm_is_reviewed(tmp_path):
+    root = _tree(tmp_path, {"scripts/run.sh": (b'#!/bin/sh\ncase "$x" in\n'
+                                               b"    '' | */* | *z) echo y ;;\nesac\n")})
+    reviews = _check(root).reviews
+    assert any("run.sh:3" in r and "'*/*'" in r for r in reviews), reviews
+
+
+def test_slash_glob_case_arm_on_its_own_indented_line_is_reviewed(tmp_path):
+    root = _tree(tmp_path, {"scripts/run.sh": (b'#!/bin/sh\ncase "$x" in\n'
+                                               b"    */*/*) echo y ;;\nesac\n")})
+    reviews = _check(root).reviews
+    assert any("run.sh:3" in r and "'*/*'" in r for r in reviews), reviews
+
+
+def test_a_slash_glob_in_a_for_list_is_not_a_case_pattern(tmp_path):
+    """Positive control: `*/*` as a pathname glob in a `for` list is not a
+    case pattern and must not trip this guard; neither must the rewrite
+    (`*yq*`-style arm with no slash)."""
+    root = _tree(tmp_path, {"scripts/run.sh": (b'#!/bin/sh\nfor f in dir/*/*.md; do :; done\n'
+                                               b'case "$0" in *yq*) echo y ;; esac\n')})
+    reviews = _check(root).reviews
+    assert not any("run.sh" in r and "'*/*'" in r for r in reviews), reviews
+
+
+def test_slash_glob_case_in_a_python_file_is_not_reviewed(tmp_path):
+    root = _tree(tmp_path, {"scripts/tool.py": b'm = {"a": "*/*)"}  # x | */*)\n'})
+    reviews = _check(root).reviews
+    assert not any("tool.py" in r and "'*/*'" in r for r in reviews), reviews
