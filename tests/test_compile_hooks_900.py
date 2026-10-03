@@ -267,6 +267,34 @@ def test_inline_sources_does_not_match_inside_an_unrelated_quoted_string():
     assert compile_hooks.unresolved_sources(out) == []
 
 
+def test_inline_sources_raises_on_a_single_quoted_sh_target():
+    # Audit finding (Class B): a single-quoted target naming a real `.sh`
+    # sibling must fail loudly, not be silently passed through unresolved
+    # the way the first SOURCE_LINE-only draft did.
+    contents = {"scripts/hook.sh": "source '${X}/scripts/lib.sh'\n"}
+    with pytest.raises(compile_hooks.InlineError):
+        compile_hooks.inline_sources("scripts/hook.sh", contents)
+
+
+def test_inline_sources_raises_on_a_bare_unquoted_sh_target():
+    # Same finding, the other spelling: no quotes at all.
+    contents = {"scripts/hook.sh": "source ${X}/scripts/lib.sh\n"}
+    with pytest.raises(compile_hooks.InlineError):
+        compile_hooks.inline_sources("scripts/hook.sh", contents)
+
+
+def test_cli_exits_non_zero_when_a_hook_name_is_missing(tmp_path):
+    # Audit finding (Class A): main()'s "not found" branch used to leave
+    # `status` at 0, so a caller reading only the exit code (the new CI
+    # job's own compile step does exactly this) would see success even
+    # though nothing compiled.
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "lib.sh").write_text("echo hi\n", encoding="utf-8")
+    rc = compile_hooks.main(["--repo", str(tmp_path)])
+    assert rc != 0
+
+
 def test_a_real_statement_followed_by_unrelated_code_on_the_same_line_fails_loudly():
     # A `;`-separated REAL second statement after a plain source call is
     # not a redirect/exit-status guard and is not observed anywhere in
