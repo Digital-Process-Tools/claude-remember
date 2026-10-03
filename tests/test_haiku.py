@@ -667,13 +667,17 @@ def _log_text(remember_dir) -> str:
 #
 # plugin.json no longer declares a userConfig recovery-token option -- round
 # 2's own CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN env var is never read either, by
-# design, now that the option that populated it is gone. REMEMBER_OAUTH_TOKEN
+# design, now that the option that populated it is gone. A `claude -p` call
+# now runs with whatever authentication it inherits from its own
+# environment or none.
+#
+# #898, round 4: the one remaining presence check for REMEMBER_OAUTH_TOKEN
 # and haiku.oauth_token (this plugin's own earlier, already-removed attempts
-# at the same feature) are still PRESENCE-checked, never read for content,
-# and reported once per save, by name, never by value -- the directory's
-# security scan holds on reading ANY credential from the user's machine,
-# independent of consent or provenance, and a `claude -p` call now runs with
-# whatever authentication it inherits from its own environment or none.
+# at the same feature) is ALSO gone now -- the directory's scanner read a
+# value-free presence check's own existence as the read half of the
+# plugin.json-aggregate credential pairing, independent of what the check
+# ever logged. Neither setting produces a NOTICE line, or any other log
+# output, any more; they are simply never read, for any purpose.
 
 
 @patch("pipeline.haiku.subprocess.run")
@@ -716,10 +720,14 @@ def test_host_token_still_passes_through_unconditionally(mock_run, monkeypatch, 
 
 
 @patch("pipeline.haiku.subprocess.run")
-def test_legacy_env_var_presence_notice_is_value_free(mock_run, monkeypatch, tmp_path):
-    """The one thing this module still does about the removed feature: report
-    a still-set legacy REMEMBER_OAUTH_TOKEN by name only, never by value
-    (#860, round 3 -- merges what used to be two separate checks)."""
+def test_legacy_env_var_configured_logs_no_notice_at_all(mock_run, monkeypatch, tmp_path):
+    """#898, round 4: a still-set legacy REMEMBER_OAUTH_TOKEN no longer gets
+    a notice of any kind -- the presence check that used to report it is
+    removed entirely, because the directory's scanner read the check's own
+    existence as a credential read regardless of what it logged. Must-fire
+    control for the detection mechanism itself is the sibling test right
+    below (a NOTICE line written directly IS seen by _log_text), so this
+    absence is not merely a broken reader passing vacuously."""
     monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
     configured_value = "a-short-but-distinctive-secret-marker"
     monkeypatch.setenv("REMEMBER_OAUTH_TOKEN", configured_value)
@@ -733,29 +741,46 @@ def test_legacy_env_var_presence_notice_is_value_free(mock_run, monkeypatch, tmp
     assert configured_value not in logged, (
         "the configured value itself must never reach the log:\n" + logged
     )
-    assert "REMEMBER_OAUTH_TOKEN" in logged and "NOTICE" in logged, (
-        "positive control: the notice must still name the setting so an "
-        "operator who has not noticed the feature is gone hears about "
-        "it:\n" + logged
+    assert "NOTICE" not in logged, (
+        "the legacy-setting presence check is removed entirely -- a still-"
+        "configured REMEMBER_OAUTH_TOKEN must produce no notice at all:\n"
+        + logged
     )
 
 
 @patch("pipeline.haiku.subprocess.run")
-def test_no_legacy_setting_configured_logs_no_notice(mock_run, monkeypatch, tmp_path):
-    """Positive control for the test above: with neither legacy setting
-    configured, no NOTICE line is written at all (#860, round 3)."""
+def test_legacy_config_key_configured_logs_no_notice_at_all(mock_run, monkeypatch, tmp_path):
+    """Same absence for the config.json `haiku.oauth_token` key (#898, round
+    4) -- paired with the env-var case above so both removed sources are
+    covered, not just one."""
     monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
-    monkeypatch.delenv("REMEMBER_OAUTH_TOKEN", raising=False)
     monkeypatch.delenv("CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN", raising=False)
+    monkeypatch.delenv("REMEMBER_OAUTH_TOKEN", raising=False)
     monkeypatch.setenv("REMEMBER_DIR", str(tmp_path))
+    monkeypatch.setattr("pipeline.haiku.os.path.expanduser", lambda p: str(tmp_path))
+    (tmp_path / "config.json").write_text(
+        json.dumps({"haiku": {"oauth_token": "sk-ant-oat-legacy-config-00009"}}),
+        encoding="utf-8")
     mock_run.return_value = MagicMock(
         returncode=0, stdout=_mock_claude_response("x"), stderr="")
 
     call_haiku("p")
 
-    assert "NOTICE" not in _log_text(tmp_path), (
-        "nothing legacy is configured -- there is nothing to notice about"
-    )
+    assert "NOTICE" not in _log_text(tmp_path)
+
+
+def test_log_text_helper_sees_a_notice_when_one_is_actually_written(tmp_path):
+    """Positive control for the two tests above's own detection mechanism:
+    _log_text() must actually surface a NOTICE line when one is written to
+    a daily log, so the preceding "no NOTICE" assertions are not passing
+    because the reader itself is broken or pointed at the wrong directory.
+    Writes directly under logs/, matching _log_text's own flat iterdir()."""
+    remember_dir = tmp_path / "remember"
+    log_dir = remember_dir / "logs"
+    log_dir.mkdir(parents=True)
+    (log_dir / "today-sentinel.log").write_text(
+        "NOTICE: sentinel line written directly by the test\n", encoding="utf-8")
+    assert "NOTICE" in _log_text(remember_dir)
 
 
 @patch("pipeline.haiku.subprocess.run")
@@ -800,97 +825,6 @@ def test_haiku_oauth_token_config_no_longer_authenticates(mock_run, monkeypatch,
 
     env = mock_run.call_args[1]["env"]
     assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
-
-
-@patch("pipeline.haiku.subprocess.run")
-def test_legacy_remember_oauth_token_env_triggers_value_free_notice(mock_run, monkeypatch, tmp_path):
-    """A still-configured REMEMBER_OAUTH_TOKEN gets a loud, visible notice --
-    not silence -- but the notice names the SOURCE, never the value (#860,
-    round 2)."""
-    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
-    monkeypatch.delenv("CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN", raising=False)
-    monkeypatch.setenv("REMEMBER_OAUTH_TOKEN", "sk-ant-oat-legacy-env-0000003")
-    monkeypatch.setenv("REMEMBER_DIR", str(tmp_path))
-    mock_run.return_value = MagicMock(
-        returncode=0, stdout=_mock_claude_response("x"), stderr="")
-
-    call_haiku("p")
-
-    logged = _log_text(tmp_path)
-    assert "NOTICE" in logged and "REMEMBER_OAUTH_TOKEN" in logged, (
-        "a still-configured legacy env var must be reported loudly:\n" + logged
-    )
-    assert "sk-ant-oat-legacy-env-0000003" not in logged, (
-        "the notice must never contain the configured value itself"
-    )
-
-
-@patch("pipeline.haiku.subprocess.run")
-def test_legacy_haiku_oauth_token_config_triggers_value_free_notice(mock_run, monkeypatch, tmp_path):
-    """Same value-free notice for a still-configured `haiku.oauth_token`
-    (#860, round 2)."""
-    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
-    monkeypatch.delenv("CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN", raising=False)
-    monkeypatch.delenv("REMEMBER_OAUTH_TOKEN", raising=False)
-    monkeypatch.setenv("REMEMBER_DIR", str(tmp_path))
-    monkeypatch.setattr("pipeline.haiku.os.path.expanduser", lambda p: str(tmp_path))
-    (tmp_path / "config.json").write_text(
-        json.dumps({"haiku": {"oauth_token": "sk-ant-oat-legacy-config-00004"}}),
-        encoding="utf-8")
-    mock_run.return_value = MagicMock(
-        returncode=0, stdout=_mock_claude_response("x"), stderr="")
-
-    call_haiku("p")
-
-    logged = _log_text(tmp_path)
-    assert "NOTICE" in logged and "haiku.oauth_token" in logged
-    assert "sk-ant-oat-legacy-config-00004" not in logged, (
-        "the notice must never contain the configured value itself"
-    )
-
-
-@patch("pipeline.haiku.subprocess.run")
-def test_empty_legacy_config_triggers_no_notice(mock_run, monkeypatch, tmp_path):
-    """Positive control for the notice's own presence check: `"oauth_token":
-    ""` -- how the bundled config ships the key, meaning "not configured" --
-    must not be reported as "still configured" (#860, round 2)."""
-    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
-    monkeypatch.delenv("CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN", raising=False)
-    monkeypatch.delenv("REMEMBER_OAUTH_TOKEN", raising=False)
-    monkeypatch.setenv("REMEMBER_DIR", str(tmp_path))
-    monkeypatch.setattr("pipeline.haiku.os.path.expanduser", lambda p: str(tmp_path))
-    (tmp_path / "config.json").write_text(
-        json.dumps({"haiku": {"oauth_token": ""}}), encoding="utf-8")
-    mock_run.return_value = MagicMock(
-        returncode=0, stdout=_mock_claude_response("x"), stderr="")
-
-    call_haiku("p")
-
-    assert "NOTICE" not in _log_text(tmp_path)
-
-
-@patch("pipeline.haiku.subprocess.run")
-def test_legacy_notice_logs_once_not_twice(mock_run, monkeypatch, tmp_path):
-    """_legacy_oauth_config_present() must be consulted by exactly one call
-    site -- _other_credential() (deciding whether to strip ANTHROPIC_API_KEY)
-    must not ALSO trigger this notice, or one save would log it twice (the
-    same double-count bug round 1 had for the old DEPRECATED line, #860)."""
-    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
-    monkeypatch.delenv("CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN", raising=False)
-    monkeypatch.setenv("REMEMBER_OAUTH_TOKEN", "sk-ant-oat-legacy-env-0000005")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-irrelevant-value-00")
-    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
-    monkeypatch.setattr("pipeline.haiku._host_login_present", lambda: False)
-    monkeypatch.setenv("REMEMBER_DIR", str(tmp_path))
-    mock_run.return_value = MagicMock(
-        returncode=0, stdout=_mock_claude_response("x"), stderr="")
-
-    call_haiku("p")
-
-    logged = _log_text(tmp_path)
-    assert logged.count("NOTICE") == 1, (
-        "one save must log the legacy-config notice exactly once:\n" + logged
-    )
 
 
 @patch("pipeline.haiku.subprocess.run")

@@ -1024,45 +1024,11 @@ else
 fi
 unset _remember_ss_glob_dir _SS_LATEST_LOG _SS_LAST_LINE _ss_f
 
-# ── 6c. Legacy recovery-token config, no longer read at all (#860, round 3) ─
-# pipeline/haiku.py reads no credential of its own any more -- there is no
-# userConfig recovery-token option, and no replacement for the legacy
-# REMEMBER_OAUTH_TOKEN env var or haiku.oauth_token config.json key either.
-# A still-configured legacy value is detected by PRESENCE ONLY and logged as
-# a "NOTICE:" line to the daily log every time a save runs -- this surfaces
-# the most recent one here, same pattern as the summarizer failure detail
-# above (sorted scan across every daily log, last match wins), so an
-# operator who has not noticed hears that the setting now does nothing.
-echo "-- Legacy recovery-token config (#860) --"
-_remember_dep_glob_dir=$(_remember_forward_slash "$REMEMBER_DIR")
-_DEP_LINE=""
-_DEP_ANY_LOG=0
-_DEP_FILES=("$_remember_dep_glob_dir"/logs/memory-*.log)
-if [ -e "${_DEP_FILES[0]}" ]; then
-    _DEP_ANY_LOG=1
-    _DEP_OLD_IFS="$IFS"
-    IFS=$'\n'
-    _DEP_SORTED=($(printf '%s\n' "${_DEP_FILES[@]}" | LC_ALL=C sort))
-    IFS="$_DEP_OLD_IFS"
-    unset _DEP_OLD_IFS
-    for _dep_f in "${_DEP_SORTED[@]}"; do
-        _dep_match=$(grep -F "NOTICE:" "$_dep_f" 2>/dev/null | tail -n 1)
-        [ -n "$_dep_match" ] && _DEP_LINE="$_dep_match"
-    done
-    unset _DEP_SORTED
-fi
-unset _DEP_FILES
-if [ -n "$_DEP_LINE" ]; then
-    echo "WARN $_DEP_LINE"
-    echo "     This setting has no effect any more and nothing replaces it --"
-    echo "     the plugin reads no credential of its own. Remove it."
-elif [ "$_DEP_ANY_LOG" = 1 ]; then
-    echo "OK   No legacy recovery-token config in use"
-else
-    echo "--   No daily log found yet -- nothing scanned for legacy recovery-token config"
-fi
-unset _remember_dep_glob_dir _DEP_LINE _DEP_ANY_LOG _dep_f
-echo ""
+# #898, round 4: the "Legacy recovery-token config (#860)" section that used
+# to live here is removed entirely. It scanned the daily log for a "NOTICE:"
+# line pipeline/haiku.py no longer writes (#898 round 4 removed the presence
+# check that produced it) -- this diagnostic would only ever report "OK"
+# from here on, which is not a check worth keeping.
 
 # Log rotation (#252). A rotation that cannot run is invisible by construction:
 # it happens inside a consolidation the user never watches, it writes one line

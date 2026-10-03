@@ -473,10 +473,16 @@ def _failure_detail(stdout: str, stderr: str) -> str:
 # aggregate kept pairing that read with the real, kept git-backup feature's
 # own "sends data" shape. The nested `claude -p` now runs with whatever
 # authentication it inherits from its own environment, or none at all; this
-# module reads no credential of its own to offer it one. See
-# _warn_if_legacy_recovery_token_configured() below for the one thing this
-# module still does about the removed feature: a loud, value-free notice for
-# an operator who still has the old setting configured.
+# module reads no credential of its own to offer it one.
+#
+# #898, round 4: the previous fix for this same pairing kept one value-free
+# presence check (a function that only ever returned a bool, never a name or
+# a value) so an operator with a still-set legacy setting would hear it is
+# gone. The directory's scanner read that check's own existence as the read
+# side of the pairing regardless -- a presence check of a now-dead setting
+# is still a read of something the scanner treats as credential-shaped. That
+# check, and the notice built on it, are removed entirely; the docs alone
+# say the recovery token is gone.
 
 
 def _warn(message: str) -> None:
@@ -568,53 +574,11 @@ def _config_candidates() -> list[str]:
     return candidates
 
 
-# #860, round 3: plugin.json no longer declares a userConfig recovery-token
-# option at all -- there is no credential-shaped setting left for this
-# plugin to read. REMEMBER_OAUTH_TOKEN (an env var) and haiku.oauth_token (a
-# config.json key) were this plugin's own earlier, now-removed attempts at
-# the same feature; neither is read for authentication any more, by round 2
-# already. One generic, value-free presence check remains for whichever of
-# the two an operator still has configured, so migrating away is not a
-# silent surprise -- see _legacy_recovery_token_configured() below.
-
-
-def _legacy_recovery_token_configured() -> bool:
-    """True when ANY now-removed recovery-token setting is still configured
-    -- the env var, or the config.json key -- boolean existence only, the
-    same "is something there" check ``test -n`` makes in a shell script,
-    nothing more (#860, round 3; merges what used to be two separate
-    checks, round 2's own split between an env-var check and a config-key
-    check, into one -- there is only one caller, and it has only ever had
-    one message to show regardless of which source it was).
-
-    Deliberately returns a plain ``bool``, not either variable's name or
-    value: a CodeQL round (py/clear-text-logging-sensitive-data) flagged an
-    earlier version of this fix for exactly the shape where a function
-    whose name contained "oauth" returned ANY value that then reached a
-    log sink, treated as a sensitive source independent of what the value
-    actually was ("NAME-based", not value-based, in the SARIF codeFlow). A
-    bool cannot carry a name or a value, so there is nothing left for that
-    heuristic to key on, and the caller below writes both settings' names
-    as hardcoded literals in the warning text instead of interpolating
-    anything this function returns.
-    """
-    if os.environ.get("REMEMBER_OAUTH_TOKEN", "").strip():
-        return True
-    for path in _config_candidates():
-        try:
-            with open(path, encoding="utf-8") as f:
-                cfg = json.load(f)
-        except (OSError, ValueError):
-            continue
-        if not isinstance(cfg, dict):
-            continue
-        haiku_cfg = cfg.get("haiku")
-        if not isinstance(haiku_cfg, dict):
-            continue
-        value = haiku_cfg.get("oauth_token")
-        if isinstance(value, str) and value.strip():
-            return True
-    return False
+# #898, round 4: the value-free presence check that used to live here (and
+# the notice built on it) are gone entirely -- see the module note above.
+# REMEMBER_OAUTH_TOKEN (an env var) and haiku.oauth_token (a config.json
+# key) were this plugin's own earlier, now-removed attempts at a recovery
+# token; this file reads neither any more, for any purpose.
 
 
 # ── The ambient ANTHROPIC_API_KEY (#703, reported in #693) ────────────────────
@@ -794,35 +758,12 @@ def _anthropic_api_key_hint(env: dict[str, str], detail: str) -> str:
     )
 
 
-def _warn_if_legacy_recovery_token_configured() -> None:
-    """Report a still-configured legacy recovery-token setting, once per save,
-    by name only (never the value) -- there is no replacement to migrate it
-    to, so an operator who has not noticed the feature is gone simply hears
-    that it is gone (#860, round 3; this plugin reads no credential at all
-    now, see the module note above).
-
-    Never raises: this is pure diagnostics on the way to a call that must
-    still happen regardless of what this finds.
-    """
-    # The message below is a complete, hardcoded literal naming both settings
-    # by hand -- never built by interpolating a function's return value or a
-    # module constant. A CodeQL round flagged an earlier version of this fix
-    # (py/clear-text-logging-sensitive-data) for exactly that shape: a
-    # function whose name contained "oauth" returning a value that reached
-    # _warn() was itself treated as a sensitive source, independent of what
-    # the value actually was. _legacy_recovery_token_configured() returns a
-    # plain bool (see its own docstring), so there is nothing left to
-    # interpolate.
-    if _legacy_recovery_token_configured():
-        _warn(
-            "NOTICE: a legacy recovery-token setting (REMEMBER_OAUTH_TOKEN, "
-            "or the haiku.oauth_token key in config.json) is still "
-            "configured but has no effect any more -- this plugin no longer "
-            "reads any credential of its own for the nested summarizer call "
-            "(#860). Remove it; there is nothing to migrate it to. If the "
-            "nested call needs authentication, refresh your coding agent's "
-            "own CLI login instead."
-        )
+# #898, round 4: _warn_if_legacy_recovery_token_configured() used to live
+# here. It only ever reported a value-free presence check (never a name or
+# a value reaching the log), but the directory's scanner read the presence
+# check's own existence as the read half of the plugin.json-aggregate
+# credential pairing regardless of what it logged -- removed entirely,
+# along with the check it called, per the module note above.
 
 
 # Hook isolation (#202). The nested `claude -p` was sandboxed against MCP
@@ -1447,7 +1388,6 @@ def call_haiku(
     # list too long") at exec time and silently kills saves of long sessions.
     # `claude -p` with no positional prompt reads the prompt from stdin.
     env = _child_env()
-    _warn_if_legacy_recovery_token_configured()
 
     # Bound the spawn before spawning (#204). Every defence above this line
     # depends on a signal reaching the child — an env marker a host can redact,
