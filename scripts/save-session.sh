@@ -43,7 +43,7 @@
 #
 # DEPENDENCIES
 #   python3, claude CLI (Haiku), git, date, mktemp
-#   Sources: log.sh (logging, safe_eval, config)
+#   Sources: log.sh (logging, assign_kv, config)
 #   Python: pipeline.shell (extract, build-prompt, parse-haiku, save-position,
 #           build-ndc-prompt)
 #
@@ -437,11 +437,11 @@ dispatch "before_save"
 
 # --- Step 1: Extract ---
 log "extract" "session $SESSION_ID"
-safe_eval <<< "$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell extract "$SESSION_ID" "$PROJECT_DIR")"
+assign_kv <<< "$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell extract "$SESSION_ID" "$PROJECT_DIR")"
 # #695: the bridge is load-bearing, so its failure must be said here rather
 # than discovered three layers down. `pipeline.shell extract` ALWAYS prints
 # EXTRACT_FILE; an empty one means the line did not survive the crossing --
-# the locale bug fixed in log.sh's safe_eval dropped exactly this variable
+# the locale bug fixed in log.sh's assign_kv dropped exactly this variable
 # (its name carries an "I", which tr_TR collation puts outside [A-Z]), and
 # any future reason for the same absence is no less serious.
 #
@@ -454,7 +454,7 @@ safe_eval <<< "$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell extract "$SESSI
 # cooldown marker is already written by the time we get here: continuing
 # past this point does not "try again later", it burns the span.
 if [ -z "${EXTRACT_FILE:-}" ]; then
-    report_error "extract" "FAILED: the extract step produced no EXTRACT_FILE. Every variable it prints crosses into this script through safe_eval, so an absent one means the bridge lost it, not that there was nothing to extract. Stopping here rather than calling build-prompt with an empty path (#695)."
+    report_error "extract" "FAILED: the extract step produced no EXTRACT_FILE. Every variable it prints crosses into this script through assign_kv, so an absent one means the bridge lost it, not that there was nothing to extract. Stopping here rather than calling build-prompt with an empty path (#695)."
     exit 1
 fi
 CLEANUP_FILES+=("$EXTRACT_FILE")
@@ -814,7 +814,7 @@ HAIKU_VARS=$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell call-haiku "$TMP_PR
     report_error "haiku" "ERROR: $(head -1 "$HAIKU_STDERR")"; record_summary_failure; exit 1
 }
 
-safe_eval <<< "$HAIKU_VARS"
+assign_kv <<< "$HAIKU_VARS"
 CLEANUP_FILES+=("$HAIKU_TEXT_FILE")
 log_tokens "tokens" "$TK_IN" "$TK_OUT" "$TK_CACHE" "$TK_COST"
 
@@ -1196,16 +1196,17 @@ if [ "$RUN_NDC" = true ]; then
                 log "ndc" "ERROR: $(head -1 "$NDC_ERR" 2>/dev/null)"
             else
                 # Defensive, and not load-bearing today: Step 6 exits before
-                # this block whenever either flag is true, and safe_eval rewrites
-                # both from NDC_VARS on every successful call, so no reachable
-                # path currently carries a stale value in here. Kept so the gate
-                # below cannot quietly start reading an inherited value if either
-                # invariant changes — a reset that costs nothing, guarding a
-                # failure mode that writes into permanent memory.
+                # this block whenever either flag is true, and assign_kv
+                # rewrites both from NDC_VARS on every successful call, so no
+                # reachable path currently carries a stale value in here. Kept
+                # so the gate below cannot quietly start reading an inherited
+                # value if either invariant changes — a reset that costs
+                # nothing, guarding a failure mode that writes into permanent
+                # memory.
                 IS_SKIP=false
                 IS_REJECTED=false
                 PROVIDER=claude
-                safe_eval <<< "$NDC_VARS"
+                assign_kv <<< "$NDC_VARS"
                 NDC_TEXT=$(cat "$HAIKU_TEXT_FILE")
                 # Before the branch, not inside the success arm: the call has
                 # already gone out and already cost money by this point, and

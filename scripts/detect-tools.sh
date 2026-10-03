@@ -295,10 +295,11 @@ if [ "${_REMEMBER_LAZY_PYTHON:-0}" != "1" ]; then
 fi
 fi
 
-# Note: safe_eval lives in log.sh (single source of truth). It strips CR
-# from CRLF input — needed because Python on Windows emits \r\n (issue #84).
-# Earlier versions overrode safe_eval here as a Windows-CRLF patch — removed
-# now that log.sh carries the fix and is sourced after this file.
+# Note: assign_kv (renamed #864 from an earlier name built the same way)
+# lives in log.sh (single source of truth). It strips CR from CRLF input —
+# needed because Python on Windows emits \r\n (issue #84). Earlier versions
+# overrode it here as a Windows-CRLF patch — removed now that log.sh
+# carries the fix and is sourced after this file.
 
 # --- Session dir slug ---
 # Moved to lib-slug.sh so lib-memory-dir.sh can reach it without sourcing this

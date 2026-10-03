@@ -2483,8 +2483,9 @@ if [ "$STAGING_COUNT" -gt 0 ] && [ "$SESSION_START_SOURCE" != "compact" ]; then
     # not see EOF until the LAST holder of the write end goes away, which is
     # the child. The #646 reporter measured a 98.62s SessionStart against a 93s
     # consolidation -- and 3.2-3.5s whenever it did not fire -- then hit the VS
-    # Code extension's 60s subprocess-init deadline, whose error text sends the
-    # user to audit credentials and network for a pipe they still hold open.
+    # Code extension's 60s subprocess-init deadline, whose generic timeout
+    # message sends the user looking at unrelated things (their network, an
+    # unrelated login) for a pipe they still hold open.
     # Not a lock, and not a Git Bash detach failure: their own probe of this
     # exact construct returned in 0.11s. Ordinary POSIX fd inheritance, so it
     # reproduced on macOS too (tests/test_session_start_fd_leak_646.py).

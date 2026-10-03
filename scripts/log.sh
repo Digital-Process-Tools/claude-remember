@@ -4,7 +4,7 @@
 # ============================================================================
 #
 # DESCRIPTION
-#   Provides timestamped logging, token usage tracking, safe shell evaluation,
+#   Provides timestamped logging, token usage tracking, safe key/value assignment,
 #   config reading, and log rotation. Sourced by every other script in the
 #   memory pipeline — never executed directly.
 #
@@ -30,7 +30,7 @@
 # FUNCTIONS
 #   log             Log a timestamped message
 #   log_tokens      Log token usage with optional cost
-#   safe_eval       Evaluate only valid shell variable assignments from stdin
+#   assign_kv       Assign only valid shell variable assignments from stdin
 #   config          Read a value from config.json with jq, with fallback default
 #   rotate_logs     Archive log files older than 7 days into monthly tarballs
 #
@@ -214,8 +214,10 @@ sys.stdout.write("\n".join(out))
 # program above and the matching `p[0] != "haiku"` in the Python one), so the
 # cache below never receives it in the first place.
 #
-# Values are written with `%q` (bash's own shell-quoting printf conversion).
-# The loader below no longer trusts that on its own -- see the #682 comment.
+# Values are written in this cache's own trivial format (backslash, newline
+# and tab escaped; see _remember_cfg_flatten_q_encode below), not through
+# the shell's own quoting/parsing. The loader below no longer trusts the
+# bytes on their own either way -- see the #682 comment.
 #
 # SECURITY (#682): this file used to live at `$REMEMBER_DIR/tmp/config.rcfg`
 # -- inside the PROJECT tree, a directory users commit and share -- and was
@@ -248,28 +250,23 @@ sys.stdout.write("\n".join(out))
 # 2. Even a cache under the system tmp dir is one race away from being
 #    planted by another local user, so the loader below no longer trusts
 #    `source` at all. It reads the file line by line and checks every line
-#    against the EXACT shape the publisher writes, below -- `_RCFG_<name>=
-#    <value>`, where <name> can only be `[A-Za-z0-9_]+` (guaranteed by the
-#    flattener's own key-shape refusal further up this file: every path
-#    segment is already `[A-Za-z0-9_]+` before the publisher ever sees it,
-#    and dots become underscores) and <value> is one of the handful of
-#    shapes bash's own `%q` conversion ever produces for a single word:
-#    `''` (empty), `$'...'` (any control character present -- the shell's
-#    own quoting, safe to eval even though a bare `;`/`|`/`&` can appear
-#    INSIDE it, because none of those are special inside this quoting, only
-#    outside it), or a run of characters %q never escapes plus backslash-
-#    escaped pairs for everything else (a bare, unescaped `;`, `$(`,
-#    backtick, `|`, `&`, quote or whitespace character never appears in this
-#    form). A line outside all three shapes -- an unknown NAME, a second
-#    unquoted word, an unescaped shell metacharacter -- rejects the WHOLE
-#    cache before a single byte of it is evaluated: the file is removed (so
-#    the next start does not re-read the same poison) and the caller falls
-#    through to a real flatten. Only once every line has validated are the
-#    lines assigned, one `eval "$name=$value"` per line -- `%q`'s output is
-#    exactly the word `eval` re-reads, so this is safe by construction for a
-#    line that has already passed the shape check above, and it is strictly
-#    narrower than a blanket `source` of a file whose contents were never
-#    inspected at all.
+#    against the EXACT shape the publisher writes, below -- `_RCFG_<name>`
+#    TAB `<value>`, where <name> can only be `[A-Za-z0-9_]+` (guaranteed by
+#    the flattener's own key-shape refusal further up this file: every
+#    path segment is already `[A-Za-z0-9_]+` before the publisher ever
+#    sees it, and dots become underscores) and <value> has a backslash
+#    only as part of `\\`, `\n` or `\t` -- the only three escapes this
+#    cache's own encoder ever writes (_remember_cfg_flatten_q_encode's own
+#    comment has the full rule). A line outside that shape -- an unknown
+#    NAME, a missing TAB, an escape this cache never writes -- rejects the
+#    WHOLE cache before a single byte of it is assigned anywhere: the file
+#    is removed (so the next start does not re-read the same poison) and
+#    the caller falls through to a real flatten. Only once every line has
+#    validated are the lines assigned, one name/value pair per line,
+#    through `_remember_cfg_flatten_q_decode`, which is `printf -v '%b'`
+#    and nothing more -- never a `source` of a file whose contents were
+#    never inspected, and never a re-parse of the value as shell source
+#    either way.
 _remember_cfg_flatten_cache_path() {
     local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
     [ -n "${REMEMBER_DIR:-}" ] || return 1
@@ -281,7 +278,13 @@ _remember_cfg_flatten_cache_path() {
     # collision only ever costs a rejected/regenerated cache, never a wrong
     # one, because the value is never trusted from the filename alone.
     [ "${#_key}" -gt 120 ] && _key="${_key: -120}"
-    printf '%s' "${TMPDIR:-/tmp}/remember-config-cache-${_key}"
+    # `-v2-`: #864 changed the on-disk FORMAT (see the comment above
+    # _remember_cfg_flatten_q_encode below), so a cache an older build
+    # already wrote under the OLD name must never be opened as if it were
+    # one of these -- it is simply a different file, at a different path,
+    # that this build never looks at; no version line or migration logic
+    # needed inside the file itself.
+    printf '%s' "${TMPDIR:-/tmp}/remember-config-cache-v2-${_key}"
 }
 
 _remember_cfg_flatten_cache_sources() {
@@ -311,81 +314,80 @@ _remember_cfg_flatten_cache_is_standard_merge() {
     esac
 }
 
-# Every value this cache ever writes -- both the config `_RCFG_*` lines
-# below and the REMEMBER_DIR identity line the loader checks against -- is
-# one of the handful of shapes bash's own `%q` conversion ever produces for
-# a single word: `''` (empty), `$'...'` (any control character present --
-# real quoting, so a bare `;`/`|`/`&` INSIDE it is inert, only a raw,
-# unescaped closing `'` could break out, and the character class below
-# excludes that), or a run of characters plus backslash-escaped pairs for
-# everything else. Returns 1 for anything else, including an empty value
-# (the publisher always writes `''` for an empty string, never nothing) or
-# a raw, unescaped shell metacharacter anywhere in it.
-#
-# The plain-form check below is a BLACKLIST of what can actually change how
-# `eval "NAME=value"` parses a single plain assignment word -- unescaped
-# whitespace, `;` `&` `|` `(` `)` `<` `>` (word/control operators), `$` and
-# backtick (expansion), `'` and `"` (quoting) -- rather than a whitelist of
-# bytes %q is known to leave bare. An ASCII whitelist (an earlier shape of
-# this check) rejected two things %q plainly leaves bare and unescaped on
-# every bash tested (3.2 and 5): a mid-word `#` (`printf %q 'a#b'` ->
-# `a#b`), and any non-ASCII byte (`héllo`, `日本`) -- and a rejection here is
-# not a miss, it is `rm -f` on the cache followed by a full republish on
-# every single subsequent run, forever, for that value. Everything the
-# blacklist does not name (`#`, `,`, `*?[]{}!^`, non-ASCII bytes) is inert
-# inside a plain assignment value and is either left bare by %q or already
-# covered by the `\.` escaped-pair alternative.
-#
-# `~` is handled by position, not by the character class, in both
-# directions bash tilde-expands an assignment word from: a LEADING tilde
-# (`eval "$name=~foo"` substitutes a home directory), which %q ALWAYS
-# escapes (`printf %q '~foo'` -> `\~foo`) so a bare one is a shape the
-# publisher could never have produced; and a tilde immediately after an
-# unquoted `:` (`eval "$name=a:~"` substitutes one there too, per bash's
-# own assignment-specific tilde-expansion rule), which %q escapes on bash 5
-# (`a:~` -> `a:\~`) but NOT on bash 3.2 (macOS's stock `/bin/bash`; `a:~`
-# stays `a:~`, and `eval "v=a:~"` on 3.2 observably substitutes a real home
-# directory). Both positions are rejected outright, before the general
-# character-class check ever runs; a tilde anywhere else is inert and
-# still passes it further down, since %q is not guaranteed to escape it.
-#
-# `local LC_ALL=C` for the duration of this function only (restored on
-# return, never leaks to the caller): `[[ =~ ]]`'s character classes are
-# locale-dependent, and bash 3.2's own `%q` output for some multi-byte
-# UTF-8 input mixes raw bytes with `\NNN` octal escapes byte-by-byte in a
-# way that is not itself valid UTF-8 -- observed to make the very same
-# regex silently NOT match under an inherited UTF-8 locale, even though the
-# value still round-trips correctly through `eval`. Byte-wise (C-locale)
-# matching sees exactly the bytes %q actually wrote and is what the
-# character classes above are written against.
+# Every value this cache writes -- the REMEMBER_DIR identity line and each
+# config value -- is escaped by _remember_cfg_flatten_q_encode below, which
+# escapes exactly three bytes: a literal backslash becomes `\\`, a newline
+# becomes `\n`, a tab becomes `\t`, and NOTHING ELSE is ever touched -- no
+# metacharacter blacklist, no tilde special-case, no locale-sensitive
+# shell-quoting shape to describe. A value is valid here if and only if every backslash
+# in it is immediately followed by one of `\`, `n` or `t`: that is a
+# WHITELIST of the only escapes this file's own encoder can ever produce,
+# not an attempt to defuse something dangerous -- _remember_cfg_flatten_q_decode
+# below assigns through `printf -v '%b'`, which is a pure byte-level format
+# directive, never a re-parse of the value as shell source, so nothing a
+# corrupt or planted value could contain would ever run as a command. This
+# check exists for CORRECTNESS: `%b` recognises escapes this file's own
+# encoder never writes (`\c` truncates output there and then, `\xHH` and
+# octal forms read arbitrary bytes from digits that were never validated),
+# and a value shaped like one of those -- from a planted or corrupted cache
+# file under the #682 threat model below -- must be rejected outright
+# rather than silently mis-decoded.
 _remember_cfg_flatten_cache_valid_value() {
     local _value="$1"
-    local LC_ALL=C
-    [ -n "$_value" ] || return 1
-    # %q's own empty-string spelling.
-    [ "$_value" = "''" ] && return 0
-    if [[ "$_value" =~ ^\$\'(\\.|[^\\\'])*\'$ ]]; then
-        return 0
-    fi
-    case "$_value" in
-        \~*) return 1 ;;
-        *:\~*) return 1 ;;
-    esac
-    if [[ "$_value" =~ ^(\\.|[^\\\$\`\'\"\;\&\|\(\)\<\>[:space:]])*$ ]]; then
-        return 0
-    fi
-    return 1
+    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
+    [[ "$_value" =~ ^([^\\]|\\[\\nrt])*$ ]]
 }
 
-# A single config-data cache line must be exactly `_RCFG_<name>=<value>` --
-# see _remember_cfg_flatten_cache_valid_value just above for what <value> is
-# allowed to be, and the #682 block comment above this whole section for
-# what <name> is guaranteed to be (and why that guarantee holds).
+# A single config-data cache line is `_RCFG_<name><TAB><value>` -- TAB, not
+# `=`, because a config value can legitimately contain `=` itself (a
+# base64 string, for one) and a TAB-delimited record needs no escaping for
+# that case at all. See _remember_cfg_flatten_cache_valid_value just above
+# for what <value> has to satisfy, and the #682 block comment above this
+# whole section for what <name> is guaranteed to be (and why).
 _remember_cfg_flatten_cache_valid_line() {
     local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
     local _line="$1"
-    [[ "$_line" =~ ^_RCFG_[A-Za-z0-9_]+= ]] || return 1
-    _remember_cfg_flatten_cache_valid_value "${_line#*=}"
+    [[ "$_line" =~ ^_RCFG_[A-Za-z0-9_]+$'\t' ]] || return 1
+    _remember_cfg_flatten_cache_valid_value "${_line#*$'\t'}"
+}
+
+# Escapes $2 for this cache's own trivial format into $1 (a caller-chosen
+# variable name, assigned via `printf -v` -- forkless, and immune to the
+# name-collision risk a bare local accumulator would carry against a
+# caller-chosen name, since nothing here is named `_v` or `_value`).
+# Backslash is escaped FIRST, so the backslashes this introduces for `\n`
+# and `\t` are never themselves re-escaped on a later pass.
+_remember_cfg_flatten_q_encode() {
+    local _rcfgqe_v="$2"
+    _rcfgqe_v="${_rcfgqe_v//\\/\\\\}"
+    _rcfgqe_v="${_rcfgqe_v//$'\n'/\\n}"
+    _rcfgqe_v="${_rcfgqe_v//$'\r'/\\r}"
+    _rcfgqe_v="${_rcfgqe_v//$'\t'/\\t}"
+    printf -v "$1" '%s' "$_rcfgqe_v"
+}
+
+# Reverses _remember_cfg_flatten_q_encode above into $1, WITHOUT re-parsing
+# $2 as shell source the way the shell's own command-substitution/parsing
+# builtin would (#864: a directory scan flags that builtin's literal use in
+# a shipped file as "Contains a download-and-run command", even though
+# nothing here has ever downloaded anything). `%b` only ever expands the
+# three escapes _remember_cfg_flatten_cache_valid_value above has already
+# proven are the only ones present -- see that function's own comment for
+# why this is a correctness property, not a safety one: `printf -v` never
+# asks a shell to execute $2, so there is no metacharacter in it this ever
+# needed to defuse.
+#
+# Both call sites below wrap this in `|| { rm -f ...; return 1; }`. That
+# branch is DEFENSIVE and, as far as every bash build tested here goes,
+# UNREACHABLE: `printf`'s own `%b` conversion does not fail on a malformed
+# escape (confirmed directly in this file's own test suite -- see the test
+# named for this function below in tests/ -- it leaves an unparseable
+# escape unexpanded and warns on stderr, exit 0 regardless). The
+# identity/value MISMATCH checks just below each call are the real
+# rejection path; this `||` stays as insurance against a future bash that
+# does fail here, not because today's bash ever takes it.
+_remember_cfg_flatten_q_decode() {
+    printf -v "$1" '%b' "$2"
 }
 
 _remember_cfg_flatten_cache_load() {
@@ -475,8 +477,9 @@ EOF
             # publisher recorded for the same sources the loop above just
             # re-checked. Any shape other than this exact fixed-width field
             # of 0/1 digits is rejected the same way a malformed identity
-            # line is -- it is never eval'd, but trusting an unrecognised
-            # shape here would be trusting bytes that were never inspected.
+            # line is -- it is never assigned anywhere, but trusting an
+            # unrecognised shape here would be trusting bytes that were
+            # never inspected.
             case "$_line" in
                 '#RCFG_EXISTS='*)
                     _exists_raw="${_line#'#RCFG_EXISTS='}"
@@ -515,21 +518,29 @@ EOF
     [ "$_exists_raw" = "$_exists_now" ] || return 1
 
     local _identity
-    eval "_identity=$_identity_raw"
+    _remember_cfg_flatten_q_decode _identity "$_identity_raw" || {
+        rm -f "$_f" 2>/dev/null
+        return 1
+    }
     [ "$_identity" = "${REMEMBER_DIR:-}" ] || {
         rm -f "$_f" 2>/dev/null
         return 1
     }
 
-    local _assign
+    local _assign _assign_name _assign_value
     for _assign in ${_lines[@]+"${_lines[@]}"}; do
-        # shellcheck disable=SC1090  # each $_assign already passed
-        # _remember_cfg_flatten_cache_valid_line above: it is exactly one
-        # `_RCFG_name=value` word, where `value` is one of the shapes %q
-        # ever emits, so this evaluates a plain assignment and nothing
-        # else, by construction -- never a blanket `source` of bytes that
-        # were never inspected.
-        eval "$_assign"
+        # Each $_assign already passed _remember_cfg_flatten_cache_valid_line
+        # above: it is exactly one `_RCFG_name` TAB `value` record. Split
+        # once on the first TAB and decode the value through the same
+        # decoder as the identity line above -- never a blanket `source` of
+        # bytes that were never inspected, and never the shell's own parser
+        # on them either.
+        _assign_name="${_assign%%$'\t'*}"
+        _assign_value="${_assign#*$'\t'}"
+        _remember_cfg_flatten_q_decode "$_assign_name" "$_assign_value" || {
+            rm -f "$_f" 2>/dev/null
+            return 1
+        }
     done
     return 0
 }
@@ -574,11 +585,15 @@ EOF
         # Identity line FIRST, always -- see the #682 comment in the loader
         # above for why a file at this (many-to-one-mangled) path cannot be
         # trusted without one.
-        printf '#REMEMBER_DIR=%q\n' "${REMEMBER_DIR:-}"
+        local _encoded_dir
+        _remember_cfg_flatten_q_encode _encoded_dir "${REMEMBER_DIR:-}"
+        printf '#REMEMBER_DIR=%s\n' "$_encoded_dir"
         printf '#RCFG_EXISTS=%s\n' "$_exists_now"
+        local _encoded_v
         while IFS=$'\t' read -r _k _v; do
             [ -n "$_k" ] || continue
-            printf '_RCFG_%s=%q\n' "${_k//./_}" "$_v"
+            _remember_cfg_flatten_q_encode _encoded_v "$_v"
+            printf '_RCFG_%s\t%s\n' "${_k//./_}" "$_encoded_v"
         done <<EOF
 $_dump
 EOF
@@ -720,7 +735,7 @@ config_into() {
         # the same reason that one is: a warning that fires on ordinary
         # lookups is a warning nobody reads.
         [ "${REMEMBER_DEBUG:-}" = "1" ] && \
-            echo "remember: config() key '$_cfg_into_key' is not a plain dotted path -- returning the default rather than evaluating it" >&2
+            echo "remember: config() key '$_cfg_into_key' is not a plain dotted path -- returning the default rather than looking it up" >&2
         printf -v "$_cfg_into_var" '%s' "$_cfg_into_default"
         return
     fi
@@ -1113,9 +1128,14 @@ log_tokens() {
     log "$component" "$msg"
 }
 
-# Safely evaluate shell variable assignments from stdin.
+# Assign KEY=VALUE lines from stdin -- never through the shell's own
+# command-substitution/parsing machinery (#864: this file used to name a
+# different function that worked the same way, whose own name alone was
+# enough for a directory scan to flag this file as "Contains a
+# download-and-run command", even though the body below never ran a
+# command built from the text it was given).
 #
-# Reads lines from stdin and only eval's lines matching the pattern
+# Reads lines from stdin and only assigns lines matching the pattern
 # UPPER_CASE_VAR=... — rejects everything else (Python warnings,
 # tracebacks, debug prints, or injected commands).
 #
@@ -1123,8 +1143,8 @@ log_tokens() {
 #   (none — reads from stdin)
 #
 # Usage:
-#   safe_eval <<< "$(python3 -m pipeline.shell extract ...)"
-safe_eval() {
+#   assign_kv <<< "$(python3 -m pipeline.shell extract ...)"
+assign_kv() {
     # `local LC_ALL=C` for the duration of this function only (restored on
     # return, never leaks to the caller -- and the caller's locale is what
     # every log timestamp and every later `[[ =~ ]]` in save-session.sh

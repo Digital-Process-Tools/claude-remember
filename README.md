@@ -9,7 +9,7 @@
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-5A67D8)](https://github.com/Digital-Process-Tools/claude-marketplace)
 [![Codex](https://img.shields.io/badge/Codex-plugin-000000)](.agents/plugins/marketplace.json)
 [![Antigravity](https://img.shields.io/badge/Antigravity-plugin-4285F4)](https://github.com/Digital-Process-Tools/claude-remember/blob/main/docs/install-antigravity.md)
-[![Version](https://img.shields.io/badge/version-0.38.0-orange)](.claude-plugin/plugin.json)
+[![Version](https://img.shields.io/badge/version-0.39.0-orange)](.claude-plugin/plugin.json)
 [![Stars](https://img.shields.io/github/stars/Digital-Process-Tools/claude-remember?style=social)](https://github.com/Digital-Process-Tools/claude-remember/stargazers)
 [![clones](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/Digital-Process-Tools/claude-remember/badges/clones.json)](https://github.com/Digital-Process-Tools/claude-remember/pulse)
 
@@ -169,12 +169,14 @@ This plugin runs with your full shell privileges, like any other hook your codin
 - `codex exec` runs with `--sandbox read-only` (denies writes and network to the process Codex itself spawns — not a guarantee against a command the model asks Codex to run inside that sandbox), `--ignore-user-config` (skips the operator's own Codex hooks), and `-c shell_environment_policy.inherit=none` (a command Codex spawns internally gets no environment at all, not even `PATH`). Verified against codex-cli 0.150.1 / 0.153.2.
 - Either route sends only the extracted, filtered session transcript (the prompt built for that save) to that CLI's own configured provider — never to any other service.
 
-**Credentials** — nothing is read from OS credential storage; only what is already in the process environment or in `config.json`:
+**Credentials.** The summarizer runs your own `claude` CLI with your own login — the same one your interactive session already uses. Nothing is typed in, nothing is read out of your OS credential storage, and the plugin does not ask for your login anywhere.
 
-- `CLAUDE_CODE_OAUTH_TOKEN`, if already present in the environment, passes through unchanged to the nested `claude -p`.
-- If it is absent, `REMEMBER_OAUTH_TOKEN` (env) or `haiku.oauth_token` (`config.json`) — a token you deliberately configured — is injected as `CLAUDE_CODE_OAUTH_TOKEN` for that one call. The value itself is never logged, only its source and length.
-- `ANTHROPIC_API_KEY` is passed through to `claude -p` unless `haiku.anthropic_api_key` is `"strip"` (or, under the default `"auto"`, a `claude.ai` login is visible on disk) — the strip exists because this key outranks a login and otherwise bills every summarizer call to it without warning.
-- `CODEX_API_KEY` is passed through to `codex exec`'s own process when present, so Codex can authenticate.
+- Most hosts simply hand that login to every tool and hook they spawn, this one included, and that is the whole story: nothing else to configure, nothing else this plugin does.
+- Some hosts do not hand hooks that login (an older desktop build, a hosted Agent SDK). When that happens, set an optional recovery token through `/plugin` → `remember` → Configure (or `claude plugin config set remember oauth_token <token>`) — Claude Code stores it in its own secure credential store, never in a settings file on disk, and only this plugin's own save can read it back.
+  - Codex has no equivalent "Configure" option, and no recovery-token path at all any more: `codex exec` simply relies on its own host's login, the same as every other tool Codex spawns. Review finding (#860): an earlier draft of this paragraph said Codex kept using the two env/config fallbacks below "unchanged" — that was wrong even before this change, since the recovery-token code has never branched by host, and it is more wrong now that the fallback is gone everywhere.
+  - Two older ways of setting that same recovery token — an environment variable, and a `haiku.oauth_token` key in `config.json` — are no longer read at all, on any host. If either is still set from before, `/remember:doctor` and the daily log say so loudly (by name only, never the value); on Claude Code that notice points at the `/plugin` → `remember` → Configure option above, and on Codex it is simply informational, since there is nothing to move it to.
+- If you also happen to have an unrelated Anthropic API key set in your environment for something else, the plugin leaves it alone when it is your only credential, and unsets it for just this one call when your own login is also available — so an old habit does not quietly bill the wrong account. Set `haiku.anthropic_api_key` to `"keep"` or `"strip"` in `config.json` to decide that for yourself instead.
+- The same applies to an API key set for Codex: Codex's own process picks it up the same way it always would, unrelated to anything this plugin does.
 
 **`git fetch`** (opt-in, `git_restore.enabled` in `config.json`, default `false`) runs a background fetch against the memory store's own git remote before a session starts, so this session can compare local memory against what a backup pushed from elsewhere. It only fast-forwards local refs — it never merges, rebases, or pushes.
 
@@ -182,7 +184,7 @@ This plugin runs with your full shell privileges, like any other hook your codin
 
 - `~/.remember/tmp/promo-notice` — a marker recording when the plugin-promo line (above) was last shown and which one, so it appears at most once per `cooldowns.promo_seconds` (default 7 days) across all your projects.
 - `~/.remember/run/summarizers/` (override: `REMEMBER_RUNTIME_DIR`) — small per-process records used only to cap how many concurrent summarizer calls can run; holds no transcript content.
-- `$TMPDIR/remember-*` — temp files for a single `save-session.sh` run: the extracted transcript, the built summarization prompt (so some of these do hold session text), the summarizer's stderr, and compression intermediates. Written 0600 via `mktemp`, and removed by an `EXIT` trap when that save finishes. Only a save killed outright (e.g. `SIGKILL`) can leave them behind in `$TMPDIR`.
+- `$TMPDIR/remember-*` — most of these are temp files for a single `save-session.sh` run: the extracted transcript, the built summarization prompt (so some of these do hold session text), the summarizer's stderr, and compression intermediates. Written 0600 via `mktemp`, and removed by an `EXIT` trap when that save finishes. Only a save killed outright (e.g. `SIGKILL`) can leave them behind in `$TMPDIR`. Three files under the same prefix are not scoped to one save and persist by design, written by every hook invocation: `remember-env-<key>` (the project dir, plugin root and HOME), `remember-config-cache-<key>` (a flattened read of `config.json`, excluding `.haiku.*`) and `remember-detect-tools-cache` (which CLIs were found on PATH). None of the three ever holds `haiku.oauth_token` or another secret value.
 
 [![The Interview](https://max.dp.tools/art/og/og-the-interview-video.jpg)](https://max.dp.tools/art/2026/03/the-interview-claude-remember.mp4)
 
