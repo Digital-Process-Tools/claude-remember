@@ -144,6 +144,41 @@ EVAL_OF_SUBSTITUTION = re.compile(
 )
 _SHELL_NAMES = {"sh", "bash", "zsh", "dash", "ksh"}
 
+# #898: a typed `<<` (here-document) anywhere in a shipped script is a hard
+# block at the directory, filed as "Unpinned npx launcher" -- the scanner
+# cannot place where the here-document ends. `<<<` (a here-string) is not
+# flagged, so the pattern must not match three or more `<` in a row either.
+TYPED_HEREDOC = re.compile(r"(?<!<)<<(?!<)")
+
+# #898: "any URL host, even inside a comment" is one half of the directory's
+# MCP_FORWARDS_CREDENTIAL_ENV pair (the other half is CREDENTIAL_USE below).
+# `sh` is deliberately not in this TLD list: half of this repo's own shipped
+# scripts end in `.sh`, and that suffix is not a URL.
+URL_HOST = re.compile(
+    r"[a-zA-Z][a-zA-Z0-9+.-]*://|\b(?:[a-zA-Z0-9-]+\.){1,}"
+    r"(?:com|org|net|io|dev|ai|co|gov|edu|app)\b"
+)
+
+# #898: the directory's own bundled-word-list scan tripped on curl/ftp/dig/
+# drill as plain dictionary entries, one per line -- not as shell commands.
+# Catching every English use of "host" or "fetch" would FAIL this repo's own
+# prose (`pipeline/host.py` alone uses the word "host" as an identifier and
+# in docstring prose dozens of times), so this only fires at a position that
+# looks like an actual invocation: after a shell separator, inside a command
+# substitution, or after `then`/`do`/`else`/`exec`/`xargs`/`sudo`/`env`.
+# Backtick is deliberately excluded from the separator set (unlike LAUNCHER
+# above): a backtick in prose is almost always Markdown inline code, not a
+# shell command substitution, and `` `host:path` `` (a real comment in this
+# repo) is not an invocation of anything.
+NETWORK_COMMAND_NAMES = ("curl", "wget", "ftp", "dig", "drill", "finger", "mail",
+                         "lynx", "links", "fetch", "talk", "host", "http")
+_NETWORK_CMD_POS = re.compile(
+    r"(?:[;&|]|\$\(|\b(?:then|do|else|exec|xargs|sudo|env)\s)\s*(" +
+    "|".join(NETWORK_COMMAND_NAMES) + r")\b", re.IGNORECASE
+)
+
+RELEASE_README_VAR = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*")
+
 
 def _download_piped_to_shell(line: str) -> bool:
     """True if LINE pipes a `curl`/`wget` download into a shell, with any
@@ -414,6 +449,11 @@ def check_tree(root: Path, budget: dict) -> CheckResult:
     _check_front_matter(files, off)
     _check_images(files, kinds, off)
     _check_launchers(files, kinds, off)
+    _check_typed_heredoc(files, kinds, off)
+    _check_url_in_comment(files, kinds, off)
+    _check_network_command_names(files, kinds, off)
+    _check_credential_pair(files, kinds, off)
+    _check_release_readme_vars(files, off)
     if "package.json" in files:
         locks = [lf for lf in LOCKFILES if lf in files]
         if locks:
@@ -625,6 +665,78 @@ def _check_images(files: dict, kinds: dict, off: list) -> None:
                     off.append(f"{img}: bundled image referenced from {rel}")
             elif rel.lower().endswith(".md") and any(_in_code(text, n) for n in needles):
                 off.append(f"{img}: path written in code (backticks or a code block) in {rel}")
+
+
+def _check_typed_heredoc(files: dict, kinds: dict, off: list) -> None:
+    """#898: a typed `<<` anywhere in a shipped script is a directory hold."""
+    for rel, data in sorted(files.items()):
+        top = rel.split("/")[0]
+        if top not in ("hooks", "hooks.d", "scripts") or kinds.get(rel) != "text":
+            continue
+        text = data.decode("utf-8")
+        for n, line in enumerate(text.splitlines(), 1):
+            if TYPED_HEREDOC.search(line):
+                off.append(f"{rel}:{n}: a typed '<<' (here-document) -- build it "
+                           f"instead (e.g. concatenation), never type two '<' in a "
+                           f"row: {line.strip()[:80]}")
+
+
+def _check_url_in_comment(files: dict, kinds: dict, off: list) -> None:
+    """#898: a URL host inside a comment of a shipped script."""
+    for rel, data in sorted(files.items()):
+        top = rel.split("/")[0]
+        if top not in ("hooks", "hooks.d", "scripts") or kinds.get(rel) != "text":
+            continue
+        text = data.decode("utf-8")
+        for n, line in enumerate(text.splitlines(), 1):
+            if line.lstrip().startswith("#") and URL_HOST.search(line):
+                off.append(f"{rel}:{n}: a URL host in a comment: {line.strip()[:80]}")
+
+
+def _check_network_command_names(files: dict, kinds: dict, off: list) -> None:
+    """#898: a network command name at a shell-command position in a shipped
+    file. Scoped to command position, not every English occurrence of a word
+    like "host" or "fetch" -- see NETWORK_COMMAND_NAMES above."""
+    for rel, data in sorted(files.items()):
+        if kinds.get(rel) != "text":
+            continue
+        text = data.decode("utf-8")
+        for n, line in enumerate(text.splitlines(), 1):
+            m = _NETWORK_CMD_POS.search(line)
+            if m:
+                off.append(f"{rel}:{n}: network command name {m.group(1)!r} is not "
+                           f"allowed in a shipped file: {line.strip()[:80]}")
+
+
+def _check_credential_pair(files: dict, kinds: dict, off: list) -> None:
+    """#898: the directory's MCP_FORWARDS_CREDENTIAL_ENV pair -- an env-read
+    token and a send-capable token (a URL host or a network command name) in
+    the same shipped non-code file (README, LICENSE, any other shipped
+    prose). Scripts are excluded here: CREDENTIAL_USE already reports them
+    as REVIEW-only (a reviewer's judgement call), and this FAIL guard is
+    specifically for the prose files the directory actually flagged."""
+    for rel, data in sorted(files.items()):
+        top = rel.split("/")[0]
+        if top in ("hooks", "hooks.d", "scripts") or kinds.get(rel) != "text":
+            continue
+        text = data.decode("utf-8")
+        if CREDENTIAL_USE.search(text) and (URL_HOST.search(text)
+                                             or _NETWORK_CMD_POS.search(text)):
+            off.append(f"{rel}: reads a credential-shaped token and also carries a "
+                       "URL host or network command name -- the directory's "
+                       "MCP_FORWARDS_CREDENTIAL_ENV pair")
+
+
+def _check_release_readme_vars(files: dict, off: list) -> None:
+    """#898: no $VAR/${VAR} anywhere in the shipped README.md."""
+    readme = next((r for r in files if r.lower() == "readme.md"), None)
+    if not readme:
+        return
+    text = files[readme].decode("utf-8", "replace")
+    for n, line in enumerate(text.splitlines(), 1):
+        if RELEASE_README_VAR.search(line):
+            off.append(f"{readme}:{n}: '$VAR'/'${{VAR}}' is not allowed in the "
+                       f"release README: {line.strip()[:80]}")
 
 
 def _check_launchers(files: dict, kinds: dict, off: list) -> None:

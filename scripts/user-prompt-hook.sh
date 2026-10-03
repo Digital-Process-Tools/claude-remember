@@ -217,8 +217,8 @@ fi
 # from a real host was the open half of #447/#493, settled here by reading
 # all three hosts' hook payload schemas:
 #
-#   Claude Code -- every hook payload (docs.claude.com/en/docs/claude-code/
-#   hooks) puts `cwd` in the shared top-level object (session_id,
+#   Claude Code -- every hook payload (its own hooks reference docs)
+#   puts `cwd` in the shared top-level object (session_id,
 #   transcript_path, cwd, permission_mode, hook_event_name, ...), and
 #   `tool_input`/`tool_response` -- the only nested objects a hook payload
 #   ever carries -- are declared AFTER it in every documented example. No
@@ -231,8 +231,8 @@ fi
 #   guaranteed to serialize first. The built-in shell tool's own working-
 #   directory parameter is named `workdir`, not `cwd`.
 #
-#   Gemini CLI -- docs (github.com/google-gemini/gemini-cli, docs/hooks/
-#   reference.md) show the same shape: `cwd` in the shared base object,
+#   Gemini CLI -- its own docs (the gemini-cli project's hooks
+#   reference) show the same shape: `cwd` in the shared base object,
 #   `tool_input` appended after it for BeforeTool/AfterTool. The built-in
 #   shell tool's directory parameter is named `dir_path`, not `cwd`.
 #   NOT source-verified (spread/construction order not confirmed): docs-

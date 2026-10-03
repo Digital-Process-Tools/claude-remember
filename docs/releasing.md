@@ -76,9 +76,9 @@ drop. If you really do need to publish an older line on purpose, re-run the work
    this repository; it runs `gh release create --verify-tag`).
    *Why it is unaffected:* the release notes are read from `CHANGELOG.md` in the maintainer's
    local `main` checkout (the script's default is `<repo>/CHANGELOG.md`), never from the release
-   tree. The release tree's CHANGELOG.md is cut to the latest section, but nothing reads that copy
-   except people browsing `release`. Keep `--verify-tag`: without it `gh release create` would
-   create a missing tag itself, through the API.
+   tree. CHANGELOG.md is not shipped in the release tree at all (#898) -- only README and LICENSE
+   are required by the directory. Keep `--verify-tag`: without it `gh release create` would create
+   a missing tag itself, through the API.
 
 6. **The directory picks up the new `release` commit** (at once through the push webhook,
    otherwise within about 6 hours) and scans it. For v0.38.0 the webhook delivery got 200 OK and
@@ -102,13 +102,45 @@ would need `export-ignore`). Then:
   catches it loudly if it is too big. With an allow-list, a forgotten runtime file would vanish
   from every user's install with no error anywhere. A new dev-only top-level file or directory
   therefore needs adding here.
-- **It cuts CHANGELOG.md** to the latest released `## [x.y.z]` section, skipping `[Unreleased]`
-  even when it has entries, plus that section's link and a link to the full file on `main`.
+- **It swaps `README.release.md` in for `README.md`** (`release_readme` in
+  `.github/release-branch.json`, #898): a short release-only README with no `$VAR`/`${...}` and
+  no network command names, written to keep #855's disclosure in substance (what runs, sends and
+  stores, and that the nested `claude` uses your own login). The full README stays on `main`.
+- **CHANGELOG.md is not shipped at all** (on the deny-list, #898): only README and LICENSE are
+  required by the directory, and a changelog line pairs an env-read token with a link far too
+  easily for what it is worth. Release notes still come from `main`'s own CHANGELOG.md -- see
+  step 5 below.
 - **It rewrites links** in every shipped `.md` file that point at a removed path (the README's
   `docs/` links and its logo) to absolute URLs on `main`: `raw.githubusercontent.com` for images,
   `github.com/.../blob/main` for everything else. Links to files that still ship are left alone.
 
 From v0.36.0 that gives 73 files and 1.3 MB, down from 474 files and 9.2 MB.
+
+## What the Anthropic directory actually measured
+
+[`claude-jit-context`'s own write-up](https://github.com/Digital-Process-Tools/claude-jit-context/blob/main/docs/directory-validator.md)
+records what the portal's Validate flagged and what cleared each finding, by pushing a tree to a
+throwaway branch and validating it directly -- see "Preview before you tag" immediately below for
+the step that write-up is built on.
+
+## Preview before you tag
+
+The submission form validates **any branch**, not only the one the directory tracks. Before
+tagging:
+
+1. Build the release tree locally (`python3 .github/scripts/build_release_tree.py --ref HEAD
+   --out /tmp/release-tree`) and run `check_release_tree.py` and `smoke_release_tree.py` on it
+   (see "Building and checking locally" below).
+2. Push the built tree to a throwaway `release-preview` branch yourself -- the agent's own
+   classifier refuses this push, so it is the maintainer's step, not a release-automation one.
+3. In the developer portal's submit form, validate `Digital-Process-Tools/claude-remember@release-preview`
+   **without clicking Next**. That runs the same scan the real submission would, against a branch
+   nothing else depends on.
+4. Only once that scan is clean (or its findings are understood and accepted) do you tag.
+
+**The branch the portal tracks cannot change while the plugin is under review** (see "The portal's
+text on saving" above), so `release-preview` is a scratch branch for this check alone, never the
+one the "Tracked branch or tag" field points at.
 
 ## When the workflow fails
 

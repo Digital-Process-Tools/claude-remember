@@ -225,7 +225,7 @@ if [ "${_REMEMBER_LAZY_PYTHON:-0}" = "1" ]; then
             # config; log.sh's config() returns its default); this message
             # is the same diagnostic, on the same stderr, just returned
             # instead of exited so those fallbacks still run.
-            echo "FATAL: No working Python found. Tried: python3, python, py -3, py. Windows users: install Python from python.org (not Microsoft Store) and ensure 'python' or 'py' works from the shell Claude Code launches hooks in." >&2
+            echo "FATAL: No working Python found. Tried: python3, python, py -3, py. Windows users: install the official Python release (not the Microsoft Store one) and ensure 'python' or 'py' works from the shell Claude Code launches hooks in." >&2
             echo "  PATH searched: $PATH" >&2
             echo "  per-candidate (exit 49 = Microsoft Store placeholder, not a real interpreter):$_probe_report" >&2
             unset _probe_report
@@ -260,7 +260,7 @@ else
     done
     unset _probe_status
     if [ -z "$PYTHON" ]; then
-        echo "FATAL: No working Python found. Tried: python3, python, py -3, py. Windows users: install Python from python.org (not Microsoft Store) and ensure 'python' or 'py' works from the shell Claude Code launches hooks in." >&2
+        echo "FATAL: No working Python found. Tried: python3, python, py -3, py. Windows users: install the official Python release (not the Microsoft Store one) and ensure 'python' or 'py' works from the shell Claude Code launches hooks in." >&2
         echo "  PATH searched: $PATH" >&2
         echo "  per-candidate (exit 49 = Microsoft Store placeholder, not a real interpreter):$_probe_report" >&2
         unset _probe_report

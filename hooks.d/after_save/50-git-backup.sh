@@ -513,8 +513,8 @@ esac
         # the per-slug rules rather than left to be discovered.
         # /$SLUG/config.json (#719): the per-project config layer
         # (${REMEMBER_DIR}/config.json, i.e. $SLUG/config.json under the store
-        # root) is a documented home for haiku.oauth_token -- a live claude.ai
-        # OAuth credential. `git add -- "$SLUG/"` below has no exclusion for
+        # root) is a documented home for haiku.oauth_token -- a live
+        # coding-agent OAuth credential. `git add -- "$SLUG/"` below has no exclusion for
         # it otherwise, so it would be committed and pushed to the configured
         # remote right alongside memory, landing a live credential in git
         # history and in every clone of the store.

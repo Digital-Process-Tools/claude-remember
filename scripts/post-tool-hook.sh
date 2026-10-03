@@ -202,8 +202,8 @@ fi
 # generalization session-start-hook.sh already made of its own copy.
 #
 # #494: whether a real host's `tool_input` can carry a `cwd` key AHEAD of
-# the top-level one is researched in scripts/user-prompt-hook.sh, next to
-# its own `_stdin_cwd` -- same extractor mechanism, same finding (on every
+# the top-level one is researched next to the prompt hook's own `_stdin_cwd`
+# -- same extractor mechanism, same finding (on every
 # host checked, `tool_input` is positioned AFTER the top-level `cwd` field,
 # so this stays the safe nested-after case), not repeated here.
 _stdin_json_string() {
