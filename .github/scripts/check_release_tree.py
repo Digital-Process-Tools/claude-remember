@@ -326,10 +326,16 @@ HOOK_SCRIPT_NAMES = ("session-start-hook.sh", "session-end-hook.sh",
 # regex a single line can answer (the fifth, catch-all-in-loop, needs the
 # same stateful nesting-depth tracking that tool's own loopcase.pl carries,
 # and is implemented as its own function below rather than a constant).
+# `${!NAME}` AND `${!arr[@]}` alike: the portal cited an array's index list
+# as "reads an environment variable named at run time" too (claude-
+# directory-publishing portal.md/triggers.md) -- its rewrite is a counted
+# `for ((i = 0; i < n; i++))`, so the guard must not exempt it (round 8).
 INDIRECT_EXPANSION = re.compile(r'\$\{![A-Za-z_]')
 LONE_QUOTE = re.compile(r"'\"'|\"'\"")
 BACKSLASH_QUOTE = re.compile(r'\\\\"')
-DOT_STRING = re.compile(r'"\.\.?"')
+# Either quote style: a single-quoted '.' reads the same to the scanner
+# (round-7 self-review -- the sweep tool itself only checks double quotes).
+DOT_STRING = re.compile(r'(["\'])\.\.?\1')
 
 
 def _download_piped_to_shell(line: str) -> bool:

@@ -394,6 +394,17 @@ def test_indirect_expansion_is_reviewed(tmp_path):
     assert any("run.sh" in r and "indirect-name" in r for r in reviews), reviews
 
 
+def test_array_indices_expansion_is_reviewed_too(tmp_path):
+    """Round 8: `${!arr[@]}` (an array's index list) is NOT exempt -- the
+    portal cited exactly this shape as "reads an environment variable named
+    at run time" (claude-directory-publishing portal.md / triggers.md, whose
+    rewrite is a counted `for ((i = 0; i < n; i++))`). A round-7 self-review
+    narrowed the regex to skip it; that was wrong and is reverted."""
+    root = _tree(tmp_path, {"scripts/run.sh": b'#!/bin/sh\nfor i in "${!arr[@]}"; do :; done\n'})
+    reviews = _check(root).reviews
+    assert any("run.sh" in r and "indirect-name" in r for r in reviews), reviews
+
+
 def test_an_array_subscript_is_not_indirect_expansion(tmp_path):
     """Positive control: `${arr[0]}` carries no `!` at all and must not trip
     this guard."""
@@ -465,6 +476,12 @@ def test_catch_all_case_arm_outside_any_loop_does_not_fail_this_guard(tmp_path):
 
 def test_lone_dot_string_is_reviewed(tmp_path):
     root = _tree(tmp_path, {"scripts/run.sh": b'#!/bin/sh\nROOT="."\n'})
+    reviews = _check(root).reviews
+    assert any("run.sh" in r and "'.'" in r for r in reviews), reviews
+
+
+def test_single_quoted_lone_dot_is_reviewed(tmp_path):
+    root = _tree(tmp_path, {"scripts/run.sh": b"#!/bin/sh\nROOT='.'\n"})
     reviews = _check(root).reviews
     assert any("run.sh" in r and "'.'" in r for r in reviews), reviews
 
