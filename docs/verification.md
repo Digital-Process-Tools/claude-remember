@@ -1,4 +1,12 @@
-# Verifying the userConfig recovery-token fallback
+# Verifying the userConfig recovery-token fallback (historical, removed #860 round 3)
+
+**This feature no longer exists.** The plugin's own recovery-token setting described
+below -- the manifest option, the function that read it, and the config/env-var
+predecessors it replaced -- was removed entirely in round 3 of #860: the nested
+summarizer call now authenticates only through whatever the host already hands it or
+the CLI's own login, with no recovery path of this plugin's own on any host. Everything
+past this notice describes code and configuration that is gone; it is kept only as a
+record of what was once tested by hand, not as a live procedure.
 
 `pipeline/haiku.py` normally lets the nested `claude -p` inherit its
 credential from the parent's `CLAUDE_CODE_OAUTH_TOKEN`, kept across the

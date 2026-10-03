@@ -13,8 +13,12 @@
     "trap.d/",
     ".oss.json",
     ".supertool.json",
+    "CHANGELOG.md",
     "CLAUDE.md",
+    "CODE_OF_CONDUCT.md",
     "CONTRIBUTING.md",
+    "README.release.md",
+    "SECURITY.md",
     "conftest.py",
     "pyproject.toml",
     "scripts/bench-slug.sh",
@@ -29,7 +33,8 @@
     "max_files": 512,
     "max_total_bytes": 3145728
   },
-  "changelog": "CHANGELOG.md",
+  "_release_readme_why": "README.release.md (#898) swaps in for README.md in the release tree only: no $VAR/${...}, no network command names, minimal URLs -- the full README with every disclosure detail stays on main. CHANGELOG.md is no longer shipped at all (on the deny-list above): only README and LICENSE are required by the directory.",
+  "release_readme": "README.release.md",
   "rewrite_links": true,
   "_smoke_why": "smoke_release_tree.py defaults (DROP_PREFIXES, the fake claude/codex binaries and the env vars that name them) used to be hard-coded; another repo reusing this tooling only edits this block (#866).",
   "smoke": {

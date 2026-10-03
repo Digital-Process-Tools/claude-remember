@@ -69,6 +69,10 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+_HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(_HERE))
+from compile_hooks import HOOK_SCRIPT_NAMES, unresolved_sources
+
 DEFAULT_CONFIG = Path(__file__).resolve().parent.parent / "release-branch.json"
 DEFAULT_BUDGET = {"max_file_bytes": 256 * 1024, "max_files": 512,
                   "max_total_bytes": 3 * 1024 * 1024}
@@ -143,6 +147,201 @@ EVAL_OF_SUBSTITUTION = re.compile(
     r")"
 )
 _SHELL_NAMES = {"sh", "bash", "zsh", "dash", "ksh"}
+
+# #898/#900: a typed `<<` (here-document) anywhere in a shipped script is a
+# hard block at the directory, filed as "Unpinned npx launcher" -- the
+# scanner cannot place where the here-document ends. `<<<` (a here-string)
+# is not flagged, so the pattern must not match three or more `<` in a row
+# either. `$(( x << 4 ))` (the arithmetic left-shift operator) is also not
+# a heredoc and must not be flagged -- see _mask_arithmetic in
+# _check_typed_heredoc, which removes that span before this pattern ever
+# sees the line, rather than trying to teach the regex itself to tell the
+# two apart.
+TYPED_HEREDOC = re.compile(r"(?<!<)<<(?!<)")
+
+# A simple (non-nested-parens) `$(( ... ))` arithmetic expansion -- masked
+# out of a line before TYPED_HEREDOC is tested against it, so a real
+# bitshift (`$(( x << 4 ))`) is never read as an unpinned here-document
+# operator. A `$(( ))` whose own expression contains a nested, unbalanced
+# paren is not matched here and is left for TYPED_HEREDOC to flag --
+# over-flagging a rare, genuinely-nested arithmetic expression is the safe
+# direction for a FAIL guard; under-flagging a real heredoc is not.
+_ARITH_EXPANSION = re.compile(r"\$\(\([^()]*\)\)")
+
+
+def _mask_arithmetic(line: str) -> str:
+    return _ARITH_EXPANSION.sub(lambda m: " " * len(m.group(0)), line)
+
+# #898: "any URL host, even inside a comment" is one half of the directory's
+# MCP_FORWARDS_CREDENTIAL_ENV pair (the other half is CREDENTIAL_USE below).
+# `sh` is deliberately not in this TLD list: half of this repo's own shipped
+# scripts end in `.sh`, and that suffix is not a URL.
+URL_HOST = re.compile(
+    r"[a-zA-Z][a-zA-Z0-9+.-]*://|\b(?:[a-zA-Z0-9-]+\.){1,}"
+    r"(?:com|org|net|io|dev|ai|co|gov|edu|app)\b"
+)
+
+# #898: the directory's own bundled-word-list scan tripped on curl/ftp/dig/
+# drill as plain dictionary entries, one per line -- not as shell commands.
+# Catching every English use of "host" or "fetch" would FAIL this repo's own
+# prose (`pipeline/host.py` alone uses the word "host" as an identifier and
+# in docstring prose dozens of times), so this only fires at a position that
+# looks like an actual invocation: after a shell separator, inside a command
+# substitution, or after `then`/`do`/`else`/`exec`/`xargs`/`sudo`/`env`.
+# Backtick is deliberately excluded from the separator set (unlike LAUNCHER
+# above): a backtick in prose is almost always Markdown inline code, not a
+# shell command substitution, and `` `host:path` `` (a real comment in this
+# repo) is not an invocation of anything.
+NETWORK_COMMAND_NAMES = ("curl", "wget", "ftp", "dig", "drill", "finger", "mail",
+                         "lynx", "links", "fetch", "talk", "host", "http")
+# A bare command at the very start of a line (`curl ... | sh`, or a bundled
+# word-list data file's one-entry-per-line shape) is a real command-position
+# shape the original markers below miss -- but `^` alone over EVERY shipped
+# file also matches plain English prose starting a sentence with one of
+# these words ("host authenticates it...", a real line in pipeline/haiku.py's
+# own docstring; "host's own name...", pipeline/host.py's). There is no
+# regex-only way to tell "a shell command" from "a sentence" by shape alone,
+# so `^` is scoped to files that are actually shell scripts (the same
+# hooks/hooks.d/scripts scope _check_typed_heredoc and _check_url_in_comment
+# use) -- in a .sh file a bare word at column 0 really is a command; in a .py
+# docstring or a .md file it is prose. The `;&|$(then/do/.../env )` markers
+# stay unscoped: those are shell punctuation, not English, in any file type.
+_SCRIPT_DIRS = ("hooks", "hooks.d", "scripts")
+_NETWORK_CMD_POS = re.compile(
+    r"(?:[;&|]|\$\(|\b(?:then|do|else|exec|xargs|sudo|env)\s)\s*(" +
+    "|".join(NETWORK_COMMAND_NAMES) + r")(?=\s|$)", re.IGNORECASE
+)
+_NETWORK_CMD_POS_SCRIPT = re.compile(
+    r"(?:^|[;&|]|\$\(|\b(?:then|do|else|exec|xargs|sudo|env)\s)\s*(" +
+    "|".join(NETWORK_COMMAND_NAMES) + r")(?=\s|$)", re.IGNORECASE
+)
+
+RELEASE_README_VAR = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*")
+
+# #898 round 2: a scheme literal read as a URL host even inside shell
+# parameter-expansion syntax (a shell strip of the literal "h-t-t-p-s-:-/-/"
+# prefix, not just a bare URL). Four plugin.json listing fields and
+# promos.json's own star-ask/promo URLs are the only places the directory
+# requires or expects a real URL at all; everywhere else in the shipped
+# tree, code that needs to strip or match a scheme should use a wildcard
+# (parameter-expansion `*` followed by a colon and two slashes), never the
+# literal scheme string -- including in a comment that merely explains this
+# rule, which is why this comment avoids spelling either scheme out loud.
+SCHEME_LITERAL = re.compile(r"https?://")
+SCHEME_ALLOWLIST = frozenset({
+    ".claude-plugin/plugin.json",
+    ".codex-plugin/plugin.json",
+    "promos.json",
+})
+
+# #898 round 2: a standalone network-command word (including "host" and
+# "ssh", both on the directory's own list -- `host` the DNS lookup tool,
+# `ssh` the remote-shell client) anywhere in a shipped file, outside an
+# allowlist of files where the word is this plugin's own architecture
+# vocabulary rather than a network tool: `pipeline/` names its own
+# per-coding-agent abstraction `Host` (Claude Code / Codex / Gemini /
+# Antigravity), and the git-backup/git-restore machinery's own prose
+# legitimately describes real `git fetch` calls and a real
+# `GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o...}"`. Renaming either across
+# its ~280 shipped occurrences was judged out of proportion for this guard
+# to force by itself -- see the lane's own report. Review finding, #898
+# round 2: this allowlist is scoped to files that were CONFIRMED (by this
+# repo's own built tree, not guessed) to actually carry one of these words
+# at the time it was written -- a file added to it later without a real
+# occurrence would be the same staleness risk the guard exists to avoid,
+# so re-check with a fresh grep before adding one, not before trusting this
+# list unchanged. A NEW file outside this allowlist still has to earn its
+# way onto it.
+NETWORK_WORDS_EXTENDED = NETWORK_COMMAND_NAMES + ("nc", "telnet", "ssh", "scp", "rsync")
+_NETWORK_WORD_STANDALONE = re.compile(
+    r"\b(" + "|".join(NETWORK_WORDS_EXTENDED) + r")\b", re.IGNORECASE
+)
+NETWORK_WORD_ALLOWLIST = frozenset({
+    "pipeline/extract.py", "pipeline/haiku.py", "pipeline/host.py",
+    "pipeline/shell.py", "pipeline/slug.py", "pipeline/spawn_guard.py", "pipeline/types.py",
+    "scripts/agy-session-start-hook.sh", "scripts/agy-stop-hook.sh",
+    "scripts/doctor.sh", "scripts/install_agy_hooks.py",
+    "scripts/lib-env-cache.sh", "scripts/lib-lock.sh", "scripts/lib-memory-context.sh",
+    "scripts/lib-staging-lock.sh", "scripts/log.sh", "scripts/post-tool-hook.sh",
+    "scripts/resolve-paths.sh", "scripts/save-session.sh", "scripts/session-end-hook.sh",
+    "scripts/session-start-hook.sh", "scripts/user-prompt-hook.sh",
+    "hooks.d/after_save/50-git-backup.sh", "hooks.d/before_session_start/50-git-restore.sh",
+})
+
+# #898 round 2: `[ "$VAR" = "${BASH_SOURCE[0]}" ] && VAR="."` -- jit-context's
+# own measured "dead SCRIPT_DIR='.' fallback" shape, item 4 of its write-up.
+# Not dead in this repo (it is the real Windows-backslash fallback, #766/#783),
+# so the fix is the value, not the branch: this repo's own scripts now use
+# `$PWD` instead, never the literal "." the scanner reads as a further file.
+DIR_FALLBACK_DOT = re.compile(r'\$\{BASH_SOURCE\[0\]\}"\s*\]\s*&&\s*\w+="\."')
+
+# #898, round 5: a bare "$VAR"/"${VAR...}" as the first word of a (sub)command
+# -- the program name is computed at run time by a shell expansion the
+# directory's scanner cannot read (UNPINNED_NPX). Matched only at COMMAND
+# POSITION (start of line, or right after &&/;/||) so an ordinary argument
+# use ("$PYTHON" passed to echo, say) is not a false positive. Deliberately
+# NOT anchored on a bare "(" or "|" -- measured against this repo's own
+# scripts: a literal "(" inside ordinary prose text ("(123 bytes)") directly
+# followed by a variable reference false-matched that anchor with no real
+# subshell anywhere nearby, and a bare "|" risks the same against a message
+# string that happens to contain one. A positional parameter ($1, $2...) or
+# a lowercase/mixed name never matches -- scoped to the ALL-CAPS shape every
+# real interpreter variable in this repo uses (PYTHON, JQ, JQ_BIN).
+COMPUTED_COMMAND_WORD = re.compile(
+    r'(?:^|&&|;|\|\|)\s*\$\{?[A-Z][A-Z0-9_]*(?::-[^}]*)?\}?(?=\s|$)'
+)
+
+# #898, round 5: $PWD as a literal -- "." as a shell-expansion value is a
+# command-position concern for the scanner the same way the typed-heredoc and
+# computed-command-word findings are; $PWD was the round-4 fix for a
+# different "." literal-fallback finding, and it has since been swapped for
+# $(pwd) everywhere in this repo on the same reasoning #898 round 4 recorded.
+PWD_LITERAL = re.compile(r'\$\{?PWD\}?')
+
+# #898, round 4/5: a bare `env` word at command position -- the directory's
+# checklist calls this out by name for the credential-pair finding (a command
+# that reads the whole environment, e.g. to search it for a credential).
+BARE_ENV_WORD = re.compile(r'(?:^|&&|;|\|\|)\s*env(?=\s|$)')
+
+# #898, round 4/5: a nested default expansion, "${X:-$Y}" or "${X:-$(...)}" --
+# a command the scanner reads as "assembled at run time" per the
+# MCP_FORWARDS_CREDENTIAL_ENV send-side vocabulary; round 4 converted every
+# instance in this repo to an explicit if/else with identical behaviour.
+NESTED_DEFAULT_EXPANSION = re.compile(r'\$\{[A-Za-z_][A-Za-z0-9_]*:-\$')
+
+# #898, round 5: a credential-shaped env-var name as a literal string in
+# shipped code -- the read half of the directory's MCP_FORWARDS_CREDENTIAL_ENV
+# pairing, independent of what the code does with it (round 4's own lesson:
+# the scanner read a value-free presence CHECK as a read regardless of its
+# behaviour). ANTHROPIC_API_KEY and CODEX_API_KEY are accepted today (#898
+# round 5 reported, not fixed, pending a maintainer decision on the smallest
+# change that would stop naming them). CLAUDE_CODE_OAUTH_TOKEN used to be
+# deliberately left OUT of this allowlist, so this guard would catch a
+# regression of round 5's own fix for that one name -- splitting it across
+# two literal string halves rather than naming it whole. #898, round 6: the
+# maintainer ruled that split itself obfuscation, not a fix, and reverted it.
+# So the gap this guard used to protect is now the wrong direction:
+# CLAUDE_CODE_OAUTH_TOKEN is a real, intentionally shipped identifier (the
+# one host credential this plugin's child-env strip deliberately keeps,
+# #131), and it belongs in this allowlist written out in full, same as
+# ANTHROPIC_API_KEY and CODEX_API_KEY. "OAUTH_TOKEN" alone (the second half
+# of the now-reverted split) stays allowlisted too: it is not, by itself, a
+# full credential name for any variable this plugin reads.
+CREDENTIAL_NAME_ALLOWLIST = {
+    "ANTHROPIC_API_KEY", "CODEX_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "OAUTH_TOKEN",
+}
+CREDENTIAL_SHAPED_NAME = re.compile(
+    r'\b([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_(?:TOKEN|KEY|SECRET|PASSWORD))\b'
+)
+
+# #898 round 2: one shipped hook script naming another by filename in a
+# comment -- the other half of COMMAND_SCRIPT_NOT_FOLLOWED, alongside the
+# dead-dot fallback above. Scoped to the four hooks.json-registered scripts,
+# which is what the hold actually named; REVIEW, not FAIL (see
+# _check_hook_names_other_hook's own docstring for why). HOOK_SCRIPT_NAMES
+# itself now lives in compile_hooks.py (imported above) -- that module
+# compiles these same four scripts for the release tree, so it is the
+# canonical list of which scripts count as "a hooks.json-registered hook".
 
 
 def _download_piped_to_shell(line: str) -> bool:
@@ -411,9 +610,24 @@ def check_tree(root: Path, budget: dict) -> CheckResult:
     manifest = _check_manifest(files, off)
     _check_readme_and_licence(files, manifest, off)
     _check_hooks(files, manifest, off)
+    _check_hook_still_sources(files, kinds, off)
     _check_front_matter(files, off)
     _check_images(files, kinds, off)
     _check_launchers(files, kinds, off)
+    _check_typed_heredoc(files, kinds, off)
+    _check_url_in_comment(files, kinds, off)
+    _check_network_command_names(files, kinds, off)
+    _check_credential_pair(files, kinds, off)
+    _check_release_readme_vars(files, off)
+    _check_scheme_literal(files, kinds, off)
+    _check_network_word_standalone(files, kinds, off)
+    _check_dir_fallback_dot(files, kinds, off)
+    _check_hook_names_other_hook(files, kinds, result.reviews)
+    _check_computed_command_word(files, kinds, result.reviews)
+    _check_pwd_literal(files, kinds, off)
+    _check_bare_env_word(files, kinds, off)
+    _check_nested_default_expansion(files, kinds, off)
+    _check_credential_shaped_name(files, kinds, off)
     if "package.json" in files:
         locks = [lf for lf in LOCKFILES if lf in files]
         if locks:
@@ -625,6 +839,288 @@ def _check_images(files: dict, kinds: dict, off: list) -> None:
                     off.append(f"{img}: bundled image referenced from {rel}")
             elif rel.lower().endswith(".md") and any(_in_code(text, n) for n in needles):
                 off.append(f"{img}: path written in code (backticks or a code block) in {rel}")
+
+
+def _check_typed_heredoc(files: dict, kinds: dict, off: list) -> None:
+    """#898/#900: a typed `<<` anywhere in a shipped script is a directory
+    hold, filed as "Unpinned npx launcher" -- the scanner cannot place the
+    here-document's start or end. This used to be REVIEW, unconfirmed
+    without a real release-preview validation -- a maintainer validation of
+    the combined tree (fix/898 round 3 + this lane's own #900 round 1)
+    CONFIRMED it as BLOCKING (3 instances, all from compiled-in library
+    content: post-tool-hook.sh, session-end-hook.sh, user-prompt-hook.sh),
+    so this is now FAIL, not REVIEW.
+
+    `<<<` (a here-string) is excluded by TYPED_HEREDOC's own lookaround, and
+    a `$(( x << 4 ))` arithmetic left-shift is excluded by masking that span
+    out first (_mask_arithmetic) -- neither is a heredoc the portal's
+    scanner has ever held.
+
+    This FAILS against this repo's OWN scripts today: the source-level
+    rewrite from `<<EOF`/`<<'PYEOF'` heredocs to here-strings/printf is
+    being done on fix/898, concurrently with this lane, not here -- this
+    guard exists so that rewrite has something to turn green, not to ship
+    alongside scripts this lane itself edited to satisfy it."""
+    for rel, data in sorted(files.items()):
+        top = rel.split("/")[0]
+        if top not in ("hooks", "hooks.d", "scripts") or kinds.get(rel) != "text":
+            continue
+        text = data.decode("utf-8")
+        for n, line in enumerate(text.splitlines(), 1):
+            if line.lstrip().startswith("#"):
+                continue
+            if TYPED_HEREDOC.search(_mask_arithmetic(line)):
+                off.append(f"{rel}:{n}: a typed '<<' (here-document) -- the "
+                           f"directory holds this as UNPINNED_NPX (the "
+                           f"scanner cannot place where it ends): "
+                           f"{line.strip()[:80]}")
+
+
+def _check_url_in_comment(files: dict, kinds: dict, off: list) -> None:
+    """#898: a URL host inside a `#`-prefixed comment line of any shipped
+    text file -- not scoped to hooks/hooks.d/scripts (review finding): a
+    `#` comment is just as real in a shipped `.py` file (pipeline/) as in a
+    shipped `.sh` one, and the sibling guards below (network command names,
+    the credential pair) are not directory-scoped either. A `.md` file's
+    `#` heading is a false-positive risk this does not special-case; none of
+    this repo's shipped headings happens to carry a URL host today."""
+    for rel, data in sorted(files.items()):
+        if kinds.get(rel) != "text":
+            continue
+        text = data.decode("utf-8")
+        for n, line in enumerate(text.splitlines(), 1):
+            if line.lstrip().startswith("#") and URL_HOST.search(line):
+                off.append(f"{rel}:{n}: a URL host in a comment: {line.strip()[:80]}")
+
+
+def _check_network_command_names(files: dict, kinds: dict, off: list) -> None:
+    """#898: a network command name at a shell-command position in a shipped
+    file. Scoped to command position, not every English occurrence of a word
+    like "host" or "fetch" -- see NETWORK_COMMAND_NAMES above. A shell script
+    (hooks/hooks.d/scripts) also checks a bare word at the very start of a
+    line, which is not safe to do for every file type -- see the comment on
+    _NETWORK_CMD_POS_SCRIPT above."""
+    for rel, data in sorted(files.items()):
+        if kinds.get(rel) != "text":
+            continue
+        pattern = (_NETWORK_CMD_POS_SCRIPT if rel.split("/")[0] in _SCRIPT_DIRS
+                   else _NETWORK_CMD_POS)
+        text = data.decode("utf-8")
+        for n, line in enumerate(text.splitlines(), 1):
+            m = pattern.search(line)
+            if m:
+                off.append(f"{rel}:{n}: network command name {m.group(1)!r} is not "
+                           f"allowed in a shipped file: {line.strip()[:80]}")
+
+
+def _check_credential_pair(files: dict, kinds: dict, off: list) -> None:
+    """#898: the directory's MCP_FORWARDS_CREDENTIAL_ENV pair -- an env-read
+    token and a send-capable token (a URL host or a network command name) in
+    the same shipped **non-code** file: a `.md` file (README, any other
+    shipped prose), the shape the directory actually flagged on this plugin
+    (README.md, #866). Scoped to `.md` on purpose: `.claude-plugin/
+    plugin.json` legitimately carries both `documentationUrl`/`supportUrl`
+    (github.com, required by the directory itself) and the `oauth_token`
+    userConfig field (the feature, not a leaked secret) -- that pairing is
+    already a REVIEW-only judgement call for code and config
+    (`CREDENTIAL_USE` above), not a hard FAIL here."""
+    for rel, data in sorted(files.items()):
+        if not rel.lower().endswith(".md") or kinds.get(rel) != "text":
+            continue
+        text = data.decode("utf-8")
+        if CREDENTIAL_USE.search(text) and (URL_HOST.search(text)
+                                             or _NETWORK_CMD_POS.search(text)):
+            off.append(f"{rel}: reads a credential-shaped token and also carries a "
+                       "URL host or network command name -- the directory's "
+                       "MCP_FORWARDS_CREDENTIAL_ENV pair")
+
+
+def _check_release_readme_vars(files: dict, off: list) -> None:
+    """#898: no $VAR/${VAR} anywhere in the shipped README.md."""
+    readme = next((r for r in files if r.lower() == "readme.md"), None)
+    if not readme:
+        return
+    text = files[readme].decode("utf-8", "replace")
+    for n, line in enumerate(text.splitlines(), 1):
+        if RELEASE_README_VAR.search(line):
+            off.append(f"{readme}:{n}: '$VAR'/'${{VAR}}' is not allowed in the "
+                       f"release README: {line.strip()[:80]}")
+
+
+def _check_scheme_literal(files: dict, kinds: dict, off: list) -> None:
+    """#898 round 2: a scheme literal outside SCHEME_ALLOWLIST."""
+    for rel, data in sorted(files.items()):
+        if rel in SCHEME_ALLOWLIST or kinds.get(rel) != "text":
+            continue
+        text = data.decode("utf-8")
+        for n, line in enumerate(text.splitlines(), 1):
+            if SCHEME_LITERAL.search(line):
+                off.append(f"{rel}:{n}: a scheme literal ('https://'/'http://') outside "
+                           f"the allowlist -- use a wildcard ('*://') instead: "
+                           f"{line.strip()[:80]}")
+
+
+def _check_network_word_standalone(files: dict, kinds: dict, off: list) -> None:
+    """#898 round 2: a standalone network-command word outside
+    NETWORK_WORD_ALLOWLIST -- see that constant's own docstring."""
+    for rel, data in sorted(files.items()):
+        if rel in NETWORK_WORD_ALLOWLIST or kinds.get(rel) != "text":
+            continue
+        text = data.decode("utf-8")
+        for n, line in enumerate(text.splitlines(), 1):
+            m = _NETWORK_WORD_STANDALONE.search(line)
+            if m:
+                off.append(f"{rel}:{n}: network-command word {m.group(1)!r} outside "
+                           f"the allowlist: {line.strip()[:80]}")
+
+
+def _check_dir_fallback_dot(files: dict, kinds: dict, off: list) -> None:
+    """#898 round 2: the dead/typed-'.' SCRIPT_DIR fallback shape."""
+    for rel, data in sorted(files.items()):
+        top = rel.split("/")[0]
+        if top not in ("hooks", "hooks.d", "scripts") or kinds.get(rel) != "text":
+            continue
+        text = data.decode("utf-8")
+        for n, line in enumerate(text.splitlines(), 1):
+            if DIR_FALLBACK_DOT.search(line):
+                off.append(f"{rel}:{n}: a literal '.' directory fallback -- use "
+                           f"'$PWD' instead: {line.strip()[:80]}")
+
+
+def _check_hook_names_other_hook(files: dict, kinds: dict, reviews: list) -> None:
+    """#898 round 2: one hooks.json-registered hook script naming another by
+    filename in a comment -- REVIEW, not FAIL. Fully scrubbed from
+    post-tool-hook.sh in this same round; the other three scripts' own
+    cross-references are a known, reported, not-yet-done follow-up (see the
+    lane's own report) rather than silently absorbed into a FAIL that would
+    red this repo's own current tree."""
+    for rel, data in sorted(files.items()):
+        name = posixpath.basename(rel)
+        if name not in HOOK_SCRIPT_NAMES or kinds.get(rel) != "text":
+            continue
+        text = data.decode("utf-8")
+        for n, line in enumerate(text.splitlines(), 1):
+            if line.lstrip().startswith("#"):
+                for other in HOOK_SCRIPT_NAMES:
+                    if other != name and other in line:
+                        reviews.append(f"{rel}:{n}: names {other!r} in a comment -- "
+                                       f"reword in words: {line.strip()[:80]}")
+                        break
+
+
+def _check_computed_command_word(files: dict, kinds: dict, reviews: list) -> None:
+    """#898, round 5: "$VAR"/"${VAR...}" as the first word of a (sub)command
+    in a shipped script -- the program is computed at run time by a shell
+    expansion (UNPINNED_NPX). REVIEW, not FAIL, like the typed-heredoc guard
+    above: the regex is a command-position heuristic, not a shell parser, and
+    an unconfirmed false positive here must not immediately red the release
+    gate on this repo's own current, working scripts."""
+    for rel, data in sorted(files.items()):
+        top = rel.split("/")[0]
+        if top not in _SCRIPT_DIRS or kinds.get(rel) != "text":
+            continue
+        text = data.decode("utf-8")
+        for n, line in enumerate(text.splitlines(), 1):
+            if line.lstrip().startswith("#"):
+                continue
+            m = COMPUTED_COMMAND_WORD.search(line)
+            if m:
+                reviews.append(f"{rel}:{n}: a bare variable as the command word -- "
+                                f"the program is computed at run time: "
+                                f"{line.strip()[:80]}")
+
+
+def _check_pwd_literal(files: dict, kinds: dict, off: list) -> None:
+    """#898, round 4/5: $PWD as a literal in a shipped script."""
+    for rel, data in sorted(files.items()):
+        top = rel.split("/")[0]
+        if top not in _SCRIPT_DIRS or kinds.get(rel) != "text":
+            continue
+        text = data.decode("utf-8")
+        for n, line in enumerate(text.splitlines(), 1):
+            if line.lstrip().startswith("#"):
+                continue
+            if PWD_LITERAL.search(line):
+                off.append(f"{rel}:{n}: '$PWD' is not allowed -- use '$(pwd)' instead: "
+                           f"{line.strip()[:80]}")
+
+
+def _check_bare_env_word(files: dict, kinds: dict, off: list) -> None:
+    """#898, round 4/5: a bare `env` word at command position in a shipped
+    script -- the directory's checklist names this explicitly."""
+    for rel, data in sorted(files.items()):
+        top = rel.split("/")[0]
+        if top not in _SCRIPT_DIRS or kinds.get(rel) != "text":
+            continue
+        text = data.decode("utf-8")
+        for n, line in enumerate(text.splitlines(), 1):
+            if line.lstrip().startswith("#"):
+                continue
+            if BARE_ENV_WORD.search(line):
+                off.append(f"{rel}:{n}: a bare 'env' command is not allowed: "
+                           f"{line.strip()[:80]}")
+
+
+def _check_nested_default_expansion(files: dict, kinds: dict, off: list) -> None:
+    """#898, round 4/5: a nested default expansion ("${X:-$Y}") in a shipped
+    script -- rewrite as an explicit if/else with identical behaviour."""
+    for rel, data in sorted(files.items()):
+        top = rel.split("/")[0]
+        if top not in _SCRIPT_DIRS or kinds.get(rel) != "text":
+            continue
+        text = data.decode("utf-8")
+        for n, line in enumerate(text.splitlines(), 1):
+            if line.lstrip().startswith("#"):
+                continue
+            if NESTED_DEFAULT_EXPANSION.search(line):
+                off.append(f"{rel}:{n}: a nested default expansion "
+                           f"('${{X:-$Y}}') is not allowed -- use an explicit "
+                           f"if/else: {line.strip()[:80]}")
+
+
+def _check_credential_shaped_name(files: dict, kinds: dict, off: list) -> None:
+    """#898, round 5: a credential-shaped env-var name as a literal string in
+    shipped code (scripts/hooks.d/pipeline), outside CREDENTIAL_NAME_ALLOWLIST
+    -- the read half of the directory's MCP_FORWARDS_CREDENTIAL_ENV pairing,
+    independent of what the code does with the value (round 4's own lesson)."""
+    for rel, data in sorted(files.items()):
+        top = rel.split("/")[0]
+        if top not in _SCRIPT_DIRS and top != "pipeline":
+            continue
+        if kinds.get(rel) != "text":
+            continue
+        text = data.decode("utf-8")
+        for n, line in enumerate(text.splitlines(), 1):
+            if line.lstrip().startswith("#"):
+                continue
+            for m in CREDENTIAL_SHAPED_NAME.finditer(line):
+                name = m.group(1)
+                if name in CREDENTIAL_NAME_ALLOWLIST:
+                    continue
+                off.append(f"{rel}:{n}: credential-shaped name {name!r} is not in "
+                           f"the allowlist: {line.strip()[:80]}")
+
+
+def _check_hook_still_sources(files: dict, kinds: dict, off: list) -> None:
+    """#900: a hooks.json-registered hook script that still `source`s/`.`s
+    another file in the SHIPPED tree -- FAIL, not REVIEW. The directory's
+    release-preview validator inspects only the command hooks.json names; it
+    never follows a `source`/`.` statement into a second file, so a hook
+    that still has one is exactly the COMMAND_SCRIPT_NOT_FOLLOWED shape
+    (jit-context's own write-up, #900). build_release_tree.py compiles each
+    of these four scripts (compile_hooks.compile_hook) before it ever
+    reaches this check -- a surviving source/`.` line here means that step
+    did not run for this file, or did not fully resolve its own source
+    chain, either of which the release build must not ship silently."""
+    for rel, data in sorted(files.items()):
+        name = posixpath.basename(rel)
+        if name not in HOOK_SCRIPT_NAMES or kinds.get(rel) != "text":
+            continue
+        text = data.decode("utf-8")
+        for n, line in unresolved_sources(text):
+            off.append(f"{rel}:{n}: still sources another file after the "
+                       f"compile step -- the directory holds this as "
+                       f"COMMAND_SCRIPT_NOT_FOLLOWED: {line.strip()[:80]}")
 
 
 def _check_launchers(files: dict, kinds: dict, off: list) -> None:

@@ -32,7 +32,7 @@
 _REMEMBER_SRC_DIR="${BASH_SOURCE[0]%/*}"
 # A path with no slash in it (`source log.sh` from the scripts dir) leaves the
 # filename behind, not a directory — `dirname` answered "." and this must too.
-[ "$_REMEMBER_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_SRC_DIR="."
+[ "$_REMEMBER_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_SRC_DIR="$(pwd)"
 source "$_REMEMBER_SRC_DIR/lib-memory-dir.sh"
 unset _REMEMBER_SRC_DIR
 
@@ -42,7 +42,8 @@ SYS_TMPDIR="${TMPDIR:-/tmp}"
 # --- One-shot migration: legacy .remember → external REMEMBER_DIR ---
 # Keyed to MEMORY_PROJECT_DIR (the main checkout when in a worktree) so the
 # legacy dir we migrate/gitignore matches where REMEMBER_DIR now resolves.
-_mem_proj="${MEMORY_PROJECT_DIR:-$PROJECT_DIR}"
+_mem_proj="${MEMORY_PROJECT_DIR:-}"
+[ -n "$_mem_proj" ] || _mem_proj="$PROJECT_DIR"
 _legacy_dir="${_mem_proj}/.remember"
 # #782 self-review: set only when the tracked-content scan below refuses a
 # migration. Checked by the unconditional directory-scaffold step further
@@ -185,9 +186,7 @@ if [ "$REMEMBER_DIR" != "$_legacy_dir" ] && [ ! -L "$_legacy_dir" ] && [ -d "$_l
                         [ "$_legacy_was_nocasematch" -eq 1 ] || shopt -u nocasematch
                         [ "$_legacy_ci_match" -eq 1 ] && continue
                         _legacy_other_tracked="tracked"
-                    done <<EOF
-$_legacy_ls_list
-EOF
+                    done <<< "$_legacy_ls_list"
                 fi
             fi
             # else: a real repository, but $_mem_proj is not inside its work

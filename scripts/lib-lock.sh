@@ -526,7 +526,7 @@ _lock_timing_key() {
 
 # _lock_timing_record <lock_dir> <event> <outcome> <wait_ms> <held_ms|->
 _lock_timing_record() {
-    local _name="${1##*/}" _dir _n
+    local _name="${1##*/}" _dir _n _lock_timing_pid
     _lock_timing_target
     if [ -z "$_LOCK_TIMING_FILE" ]; then
         _lock_timing_disclose "REMEMBER_LOCK_TIMING=1 but neither REMEMBER_LOCK_TIMING_FILE nor REMEMBER_DIR is set -- nothing is being recorded"
@@ -567,9 +567,11 @@ _lock_timing_record() {
     # two sides of the very contention #226 is about would be indistinguishable
     # in the pid column. Zero spawns, unlike _lock_self_set's bash 3.2 path,
     # where it degrades to $$ and the column says so by being equal.
+    _lock_timing_pid="${BASHPID:-}"
+    [ -n "$_lock_timing_pid" ] || _lock_timing_pid="$$"
     { printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
         "$_LOCK_TIMING_NOW" "$_name" "$2" "$3" "$4" "$5" \
-        "$_LOCK_TIMING_PRECISION" "${BASHPID:-$$}" >> "$_LOCK_TIMING_FILE"; } 2>/dev/null \
+        "$_LOCK_TIMING_PRECISION" "$_lock_timing_pid" >> "$_LOCK_TIMING_FILE"; } 2>/dev/null \
         || _lock_timing_disclose "could not append to $_LOCK_TIMING_FILE"
     return 0
 }

@@ -246,6 +246,49 @@ def test_a_benign_gitattributes_ships(tmp_path):
     assert (out / ".gitattributes").read_text(encoding="utf-8") == "*.sh text eol=lf\n"
 
 
+# -- release_readme swap (#898) ---------------------------------------------------
+
+RELEASE_README = "# Release-only README\n\n" + " ".join(["word"] * 40) + "\n"
+
+
+def test_release_readme_is_swapped_in_for_readme_md(tmp_path):
+    repo = _make_repo(tmp_path, extra={"README.release.md": RELEASE_README})
+    out = _build(tmp_path, repo, _config(release_readme="README.release.md",
+                                          deny=["tests/", "docs/", ".github/", ".claude/",
+                                                "CLAUDE.md", "scripts/run-tests.sh",
+                                                "README.release.md"]))
+    assert (out / "README.md").read_text(encoding="utf-8") == RELEASE_README
+    # Positive control: the swap source itself is not shipped under its own name.
+    assert not (out / "README.release.md").exists()
+
+
+def test_release_readme_not_found_at_ref_is_a_build_error(tmp_path):
+    mod = _load()
+    repo = _make_repo(tmp_path)  # no README.release.md committed
+    with pytest.raises(mod.BuildError, match="release_readme"):
+        mod.build(repo, "v0.2.0", tmp_path / "out",
+                  _config(release_readme="README.release.md"))
+
+
+def test_release_readme_as_a_symlink_is_refused(tmp_path):
+    mod = _load()
+    repo = _make_repo(tmp_path)
+    (repo / "README.release.md").symlink_to(repo / "README.md")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "add symlink release readme")
+    _git(repo, "tag", "-f", "v0.2.0")
+    with pytest.raises(mod.BuildError, match="symlink"):
+        mod.build(repo, "v0.2.0", tmp_path / "out",
+                  _config(release_readme="README.release.md"))
+
+
+def test_no_release_readme_configured_leaves_readme_untouched(tmp_path):
+    """Positive control: without `release_readme` set, README.md ships as committed."""
+    out = _build(tmp_path, _make_repo(tmp_path))
+    text = (out / "README.md").read_text(encoding="utf-8")
+    assert "Read" in text and "the guide" in text
+
+
 # -- CHANGELOG -------------------------------------------------------------------
 
 def test_changelog_keeps_only_the_latest_released_section(tmp_path):
@@ -328,8 +371,15 @@ def test_the_committed_config_parses_and_names_the_brief_deny_list():
     cfg = mod.load_config(CONFIG)
     for entry in ("tests/", "docs/", ".oss/", ".github/", ".claude/", "CLAUDE.md",
                   "CONTRIBUTING.md", "conftest.py", "scripts/run-tests.sh",
-                  "scripts/windows_skip_triage_497.py"):
+                  "scripts/windows_skip_triage_497.py",
+                  # #898: CHANGELOG.md is not shipped at all; SECURITY.md and
+                  # CODE_OF_CONDUCT.md are not required by the directory and
+                  # nothing the plugin runs reads them; README.release.md is
+                  # consumed by the swap below, not shipped under its own name.
+                  "CHANGELOG.md", "SECURITY.md", "CODE_OF_CONDUCT.md",
+                  "README.release.md"):
         assert entry in cfg["deny"], entry
+    assert cfg["release_readme"] == "README.release.md"
     # Positive control: nothing the plugin runs is denied.
     for runtime in ("hooks/", "scripts/", "pipeline/", "skills/", "commands/",
                     ".claude-plugin/", "prompts/", "hooks.d/"):
@@ -353,7 +403,12 @@ def test_building_this_repository_head_ships_every_hook_script(tmp_path):
         assert (out / rel).is_file(), f"{rel} (named by hooks.json) did not ship"
     assert not (out / "tests").exists()
     assert not (out / "docs").exists()
-    assert (out / "CHANGELOG.md").stat().st_size < 262144
+    # #898: CHANGELOG.md is not shipped at all, and README.md is the swapped-in
+    # release_readme content, not the full README that lives on main.
+    assert not (out / "CHANGELOG.md").exists()
+    assert not (out / "README.release.md").exists()
+    readme = (out / "README.md").read_text(encoding="utf-8")
+    assert "$" not in readme, "the release README must carry no $VAR/${...}"
 
 
 def test_cli_builds_and_reports(tmp_path):

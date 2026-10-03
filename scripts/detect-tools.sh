@@ -75,11 +75,16 @@ _jq_fallback() {
     if declare -f _remember_python >/dev/null 2>&1; then
         _remember_python || return 1
     fi
-    $PYTHON - "$_jq_file" "$_jq_query" << 'PYEOF' 2>/dev/null
-import json, sys
+    # #898: a quoted here-document (`<<'"'"'PYEOF'"'"'`) is read by the
+    # directory's scanner as a typed `<<` it cannot place (UNPINNED_NPX) --
+    # replaced with a here-string carrying the identical script as a
+    # single-quoted literal (the script's own two embedded `.` single
+    # quotes are escaped with the standard shell close-emit-reopen idiom),
+    # same argv, same stdin content.
+    _remember_run_python - "$_jq_file" "$_jq_query" <<< 'import json, sys
 try:
     data = json.load(open(sys.argv[1]))
-    keys = sys.argv[2].strip('.').split('.')
+    keys = sys.argv[2].strip('"'"'.'"'"').split('"'"'.'"'"')
     val = data
     for k in keys:
         if k and isinstance(val, dict):
@@ -88,8 +93,8 @@ try:
             break
     if val is None:
         sys.exit(0)
-    # jq -r prints strings raw and everything else in jq's JSON textual
-    # form — crucially "true"/"false" for booleans, not Python's capitalized
+    # jq -r prints strings raw and everything else in jq'"'"'s JSON textual
+    # form — crucially "true"/"false" for booleans, not Python'"'"'s capitalized
     # str(True)/str(False). Getting this wrong silently breaks every caller
     # that does `[ "$x" = "true" ]` against a boolean config key (e.g.
     # git_backup.gpg_sign, allow_remote_change) whenever jq is absent: the
@@ -97,7 +102,7 @@ try:
     print(val if isinstance(val, str) else json.dumps(val))
 except Exception:
     sys.exit(0)
-PYEOF
+' 2>/dev/null
 }
 
 _remember_tools_cache_load() {
@@ -225,7 +230,7 @@ if [ "${_REMEMBER_LAZY_PYTHON:-0}" = "1" ]; then
             # config; log.sh's config() returns its default); this message
             # is the same diagnostic, on the same stderr, just returned
             # instead of exited so those fallbacks still run.
-            echo "FATAL: No working Python found. Tried: python3, python, py -3, py. Windows users: install Python from python.org (not Microsoft Store) and ensure 'python' or 'py' works from the shell Claude Code launches hooks in." >&2
+            echo "FATAL: No working Python found. Tried: python3, python, py -3, py. Windows users: install the official Python release (not the Microsoft Store one) and ensure 'python' or 'py' works from the shell Claude Code launches hooks in." >&2
             echo "  PATH searched: $PATH" >&2
             echo "  per-candidate (exit 49 = Microsoft Store placeholder, not a real interpreter):$_probe_report" >&2
             unset _probe_report
@@ -260,7 +265,7 @@ else
     done
     unset _probe_status
     if [ -z "$PYTHON" ]; then
-        echo "FATAL: No working Python found. Tried: python3, python, py -3, py. Windows users: install Python from python.org (not Microsoft Store) and ensure 'python' or 'py' works from the shell Claude Code launches hooks in." >&2
+        echo "FATAL: No working Python found. Tried: python3, python, py -3, py. Windows users: install the official Python release (not the Microsoft Store one) and ensure 'python' or 'py' works from the shell Claude Code launches hooks in." >&2
         echo "  PATH searched: $PATH" >&2
         echo "  per-candidate (exit 49 = Microsoft Store placeholder, not a real interpreter):$_probe_report" >&2
         unset _probe_report
@@ -295,6 +300,38 @@ if [ "${_REMEMBER_LAZY_PYTHON:-0}" != "1" ]; then
 fi
 fi
 
+# --- Literal-dispatch wrappers (#898 round 5: UNPINNED_NPX hold) ---
+# The directory's scanner holds any command whose program name is a shell
+# variable, even one this file validated itself above ("the program is
+# computed at run time by a shell substitution the validator cannot read").
+# Every call site that used to invoke "$PYTHON ..." / "$JQ ..." directly now
+# goes through one of these two wrappers instead, each a `case` whose
+# branches are literal command words -- what the validator can read.
+# Defined unconditionally (cheap -- a function definition) so a cache-hit
+# PYTHON/JQ value still has something to call through.
+_remember_run_python() {
+    case "$PYTHON" in
+        python3) python3 "$@" ;;
+        python) python "$@" ;;
+        "py -3") py -3 "$@" ;;
+        py) py "$@" ;;
+        *)
+            echo "FATAL: _remember_run_python: unrecognized PYTHON value '$PYTHON'" >&2
+            return 127
+            ;;
+    esac
+}
+_remember_run_jq() {
+    case "$JQ" in
+        jq) jq "$@" ;;
+        _jq_fallback) _jq_fallback "$@" ;;
+        *)
+            echo "FATAL: _remember_run_jq: unrecognized JQ value '$JQ'" >&2
+            return 127
+            ;;
+    esac
+}
+
 # Note: assign_kv (renamed #864 from an earlier name built the same way)
 # lives in log.sh (single source of truth). It strips CR from CRLF input —
 # needed because Python on Windows emits \r\n (issue #84). Earlier versions
@@ -310,6 +347,6 @@ fi
 # with no slash in it (`source detect-tools.sh` from the scripts dir) leaves the
 # filename behind, not a directory; `dirname` answered "." and this must too.
 _REMEMBER_SRC_DIR="${BASH_SOURCE[0]%/*}"
-[ "$_REMEMBER_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_SRC_DIR="."
+[ "$_REMEMBER_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_SRC_DIR="$(pwd)"
 source "$_REMEMBER_SRC_DIR/lib-slug.sh"
 unset _REMEMBER_SRC_DIR

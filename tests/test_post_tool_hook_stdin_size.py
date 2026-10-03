@@ -299,10 +299,13 @@ def _plugin_root_with_consumer(tmp_path: Path, script: str) -> tuple[Path, Path]
     root = tmp_path / "plugin"
     (root / "hooks.d" / "after_post_tool").mkdir(parents=True)
     (root / "scripts").symlink_to(REPO_ROOT / "scripts")
-    # resolve-paths.sh (#471) now requires pipeline/haiku.py to accept a
+    # resolve-paths.sh (#471) now requires a marker file to accept a
     # CLAUDE_PLUGIN_ROOT/PLUGIN_ROOT value at all, not just [ -d ] -- symlink
-    # the real pipeline/ alongside scripts/ so this fake root still passes.
+    # the real pipeline/ and .claude-plugin/ alongside scripts/ so this fake
+    # root still passes. #898, round 5 moved that marker from
+    # pipeline/haiku.py to the install manifest.
     (root / "pipeline").symlink_to(REPO_ROOT / "pipeline")
+    (root / ".claude-plugin").symlink_to(REPO_ROOT / ".claude-plugin")
     consumer = root / "hooks.d" / "after_post_tool" / "50-consumer.sh"
     consumer.write_text(script, encoding="utf-8")
     consumer.chmod(0o755)

@@ -109,7 +109,8 @@ _remember_memory_paths() {
     # additive: non-worktree behaviour is unchanged. Whether the resulting
     # file may actually be injected is decided later, by _remember_may_inject
     # (#754/#755/#756), which is anchored on nothing but the file itself.
-    _remember_mem_proj="${MEMORY_PROJECT_DIR:-$PROJECT_DIR}"
+    _remember_mem_proj="${MEMORY_PROJECT_DIR:-}"
+    [ -n "$_remember_mem_proj" ] || _remember_mem_proj="$PROJECT_DIR"
     if [ -f "$REMEMBER_DIR/identity.md" ]; then
         IDENTITY_FILE="$REMEMBER_DIR/identity.md"
     elif [ -f "$REMEMBER_ROOT/identity.md" ] && [ "$REMEMBER_ROOT" != "$_remember_mem_proj" ]; then
@@ -603,9 +604,7 @@ _remember_file_tracked_state_into() {
             printf -v "$_fts_outvar" 'tracked'
             return 0
         fi
-    done <<EOF
-$_fts_list
-EOF
+    done <<< "$_fts_list"
     printf -v "$_fts_outvar" 'not-tracked'
 }
 
@@ -631,7 +630,9 @@ EOF
 # The SYMLINK check does NOT go through this gate -- see _remember_may_inject
 # below for why external storage is not exempt from it.
 _remember_in_project_store() {
-    [ "$REMEMBER_ROOT" = "${MEMORY_PROJECT_DIR:-$PROJECT_DIR}" ]
+    local _rips_mem_proj="${MEMORY_PROJECT_DIR:-}"
+    [ -n "$_rips_mem_proj" ] || _rips_mem_proj="$PROJECT_DIR"
+    [ "$REMEMBER_ROOT" = "$_rips_mem_proj" ]
 }
 
 # _remember_may_inject <file> [<log-component>]

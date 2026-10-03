@@ -38,14 +38,20 @@
 
 # Ensure PIPELINE_DIR is set. Should be set by resolve-paths.sh before
 # sourcing this file. Falls back to local-install convention if unset.
-PIPELINE_DIR="${PIPELINE_DIR:-${PROJECT_DIR:-.}/.claude/remember}"
+if [ -z "${PIPELINE_DIR:-}" ]; then
+    if [ -n "${PROJECT_DIR:-}" ]; then
+        PIPELINE_DIR="${PROJECT_DIR}/.claude/remember"
+    else
+        PIPELINE_DIR="./.claude/remember"
+    fi
+fi
 
 # Resolve REMEMBER_DIR and the merged REMEMBER_CONFIG (lib-memory-dir.sh is a
 # no-op if already loaded via the _LIB_MEMORY_DIR_LOADED guard).
 _REMEMBER_SRC_DIR="${BASH_SOURCE[0]%/*}"
 # A path with no slash in it (`source log.sh` from the scripts dir) leaves the
 # filename behind, not a directory — `dirname` answered "." and this must too.
-[ "$_REMEMBER_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_SRC_DIR="."
+[ "$_REMEMBER_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_SRC_DIR="$(pwd)"
 source "$_REMEMBER_SRC_DIR/lib-memory-dir.sh"
 unset _REMEMBER_SRC_DIR
 
@@ -420,9 +426,7 @@ _remember_cfg_flatten_cache_load() {
         else
             _exists_now="${_exists_now}0"
         fi
-    done <<EOF
-$_sources
-EOF
+    done <<< "$_sources"
 
     # Validate BEFORE trusting a single byte of it -- see the #682 block
     # comment above this whole section for why a shared-tmp-dir file is
@@ -578,9 +582,7 @@ _remember_cfg_flatten_cache_publish() {
         else
             _exists_now="${_exists_now}0"
         fi
-    done <<EOF
-$_sources
-EOF
+    done <<< "$_sources"
     {
         # Identity line FIRST, always -- see the #682 comment in the loader
         # above for why a file at this (many-to-one-mangled) path cannot be
@@ -594,9 +596,7 @@ EOF
             [ -n "$_k" ] || continue
             _remember_cfg_flatten_q_encode _encoded_v "$_v"
             printf '_RCFG_%s\t%s\n' "${_k//./_}" "$_encoded_v"
-        done <<EOF
-$_dump
-EOF
+        done <<< "$_dump"
     } > "$_t" 2>/dev/null || { rm -f "$_t" 2>/dev/null; return 0; }
     mv -f "$_t" "$_f" 2>/dev/null || rm -f "$_t" 2>/dev/null
     return 0
@@ -623,7 +623,7 @@ _config_load() {
     else
         # Resolves PYTHON on first use (#662); no-op outside lazy mode.
         declare -f _remember_python >/dev/null 2>&1 && _remember_python
-        _dump=$("${PYTHON:-python3}" -c "$_REMEMBER_CFG_FLATTEN_PY" "$REMEMBER_CONFIG" 2>/dev/null) || _rc=1
+        _dump=$(_remember_log_run_python -c "$_REMEMBER_CFG_FLATTEN_PY" "$REMEMBER_CONFIG" 2>/dev/null) || _rc=1
     fi
 
     if [ "$_rc" -ne 0 ]; then
@@ -656,9 +656,7 @@ _config_load() {
     while IFS=$'\t' read -r _k _v; do
         [ -n "$_k" ] || continue
         printf -v "_RCFG_${_k//./_}" '%s' "$_v"
-    done <<EOF
-$_dump
-EOF
+    done <<< "$_dump"
     _remember_cfg_flatten_cache_publish "$_dump"
     _REMEMBER_CFG_STATE="ok"
 }
@@ -711,6 +709,22 @@ config() {
 # this; it is a live constraint on any future one, the same residual risk
 # `_remember_date_into` (lib-clock.sh, #511) already carries for its own
 # `_var`/`_val` locals.
+# #898 round 5: "${PYTHON:-python3}" as a bare command word (used twice
+# below, in _config_load and config_into's own jq-less fallbacks) is a
+# computed program name (UNPINNED_NPX). log.sh can be sourced directly
+# without detect-tools.sh (see config_into's own comment on this), so it
+# cannot rely on that file's _remember_run_python wrapper -- same
+# literal-dispatch idea, local to this file.
+_remember_log_run_python() {
+    case "${PYTHON:-python3}" in
+        python3) python3 "$@" ;;
+        python) python "$@" ;;
+        "py -3") py -3 "$@" ;;
+        py) py "$@" ;;
+        *) return 127 ;;
+    esac
+}
+
 config_into() {
     local _cfg_into_var="$1"
     local _cfg_into_key="$2"
@@ -753,7 +767,8 @@ config_into() {
         local _cfg_into_slot="_RCFG_${_cfg_into_key#.}"
         _cfg_into_slot="${_cfg_into_slot//./_}"
         local _cfg_into_hit="${!_cfg_into_slot:-}"
-        printf -v "$_cfg_into_var" '%s' "${_cfg_into_hit:-$_cfg_into_default}"
+        [ -n "$_cfg_into_hit" ] || _cfg_into_hit="$_cfg_into_default"
+        printf -v "$_cfg_into_var" '%s' "$_cfg_into_hit"
         return
     fi
 
@@ -794,7 +809,7 @@ config_into() {
         # above: a genuine absent/null key leaves $_cfg_into_val empty (falls to
         # $_cfg_into_default below); a present `false` renders as jq's "false",
         # not Python's str(False).
-        _cfg_into_val=$("${PYTHON:-python3}" -c '
+        _cfg_into_val=$(_remember_log_run_python -c '
 import json, sys
 try:
     data = json.load(open(sys.argv[2]))
@@ -813,7 +828,8 @@ except Exception:
     pass
 ' "$_cfg_into_key" "$REMEMBER_CONFIG" 2>/dev/null)
     fi
-    printf -v "$_cfg_into_var" '%s' "${_cfg_into_val:-$_cfg_into_default}"
+    [ -n "$_cfg_into_val" ] || _cfg_into_val="$_cfg_into_default"
+    printf -v "$_cfg_into_var" '%s' "$_cfg_into_val"
 }
 
 # Build the table now, in THIS shell, so every `$(config ...)` subshell
@@ -926,7 +942,7 @@ export REMEMBER_REJECT_PATTERN
 _REMEMBER_SRC_DIR="${BASH_SOURCE[0]%/*}"
 # A path with no slash in it (`source log.sh` from the scripts dir) leaves the
 # filename behind, not a directory — `dirname` answered "." and this must too.
-[ "$_REMEMBER_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_SRC_DIR="."
+[ "$_REMEMBER_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_SRC_DIR="$(pwd)"
 source "$_REMEMBER_SRC_DIR/lib-clock.sh"
 unset _REMEMBER_SRC_DIR
 

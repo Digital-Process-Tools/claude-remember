@@ -109,7 +109,7 @@ _REMEMBER_LIB_STAGING_LOCK_SOURCED=1
 # `date` call that would silently ignore REMEMBER_TZ -- unlike every other
 # timestamp in this pipeline.
 _REMEMBER_STAGING_LOCK_SRC_DIR="${BASH_SOURCE[0]%/*}"
-[ "$_REMEMBER_STAGING_LOCK_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_STAGING_LOCK_SRC_DIR="."
+[ "$_REMEMBER_STAGING_LOCK_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_STAGING_LOCK_SRC_DIR="$(pwd)"
 source "$_REMEMBER_STAGING_LOCK_SRC_DIR/lib-clock.sh"
 unset _REMEMBER_STAGING_LOCK_SRC_DIR
 
@@ -184,7 +184,9 @@ staging_lock_dir() {
 # Safe in $( ): it only prints. Unlike lib-lock.sh's _lock_self_set, which
 # assigns and must never be called that way.
 staging_lock_acquire() {
-    lock_acquire "$(staging_lock_dir)" "${1:-$STAGING_LOCK_TIMEOUT}"
+    local _sla_timeout="${1:-}"
+    [ -n "$_sla_timeout" ] || _sla_timeout="$STAGING_LOCK_TIMEOUT"
+    lock_acquire "$(staging_lock_dir)" "$_sla_timeout"
 }
 
 # `|| true`: release returns 1 when the lock is not ours, and every caller

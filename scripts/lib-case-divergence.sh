@@ -257,9 +257,7 @@ _remember_case_probe_git() {
             _matched=1
             REMEMBER_CASE_GIT_NAMES="${REMEMBER_CASE_GIT_NAMES:+$REMEMBER_CASE_GIT_NAMES,}$_line"
         fi
-    done <<EOF
-$_out
-EOF
+    done <<< "$_out"
 
     if [ -n "$REMEMBER_CASE_GIT_NAMES" ]; then
         REMEMBER_CASE_GIT_STATE="diverged"

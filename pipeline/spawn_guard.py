@@ -10,7 +10,9 @@ fail to arrive:
 * ``REMEMBER_NESTED_SUMMARIZER`` (#205) makes this plugin's own hooks no-op in
   the child. It is an environment variable, and a host that redacts env into
   spawned hook subprocesses erases it. This repo has precedent: #131 was
-  ``CLAUDE_CODE_OAUTH_TOKEN`` going missing exactly that way.
+  ``CLAUDE_CODE_OAUTH_TOKEN``, the host's own OAuth credential, going missing
+  exactly that way (see ``pipeline.haiku``'s own ``_CHILD_ENV_OAUTH_NAME``
+  exemption from the parent-session-identity strip).
 
 When both fail there is nothing left. @ehutchinsonSFDC reported the result on
 0.9.0: ~19 live ``claude`` processes, four of them summarizers, +7 new

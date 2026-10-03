@@ -57,7 +57,8 @@ def _make_env(tmp_path: Path, *, consolidate_timeout_seconds):
     (plugin / "scripts").mkdir(parents=True)
     (plugin / "pipeline").mkdir(parents=True)
     (plugin / "pipeline" / "__init__.py").write_text("")
-    (plugin / "pipeline" / "haiku.py").write_text("# marker\n")
+    (plugin / ".claude-plugin").mkdir(parents=True, exist_ok=True)
+    (plugin / ".claude-plugin" / "plugin.json").write_text("{}", encoding="utf-8")
     (plugin / "pipeline" / "shell.py").write_text(STUB_SHELL)
     for script in ("run-consolidation.sh", "resolve-paths.sh", "detect-tools.sh",
                    "bootstrap-dirs.sh", "log.sh", "lib-memory-dir.sh",

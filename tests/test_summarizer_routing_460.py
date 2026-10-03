@@ -268,11 +268,43 @@ def test_legacy_oauth_token_does_not_authenticate_the_codex_fallback(mock_run, m
 
 
 @patch("pipeline.haiku.subprocess.run")
-def test_userconfig_token_does_authenticate_the_codex_fallback(mock_run, monkeypatch):
-    """Positive control for the test above: the userConfig option IS still
-    the one working recovery-token source on this same Codex-fallback path
-    (#860, round 2) -- without this twin, the negative assertion above would
-    pass just as well against code that broke the fallback path entirely."""
+def test_host_token_does_authenticate_the_codex_fallback(mock_run, monkeypatch):
+    """Positive control for the test above: a real host-vendor credential
+    (CLAUDE_CODE_OAUTH_TOKEN, passed straight through unconditionally) DOES
+    still authenticate this same Codex-fallback path -- without this twin,
+    the negative assertion above would pass just as well against code that
+    broke the fallback path entirely. The plugin's own removed userConfig
+    setting (#860, round 3) no longer has a positive control of its own:
+    there is nothing left for one to demonstrate."""
+    monkeypatch.setenv("REMEMBER_TRANSCRIPT_PATH", _CODEX_TRANSCRIPT)
+    monkeypatch.setenv("REMEMBER_SUMMARIZER_FALLBACK", "claude")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-host-codex02")
+    monkeypatch.delenv("CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN", raising=False)
+
+    calls = []
+
+    def _side_effect(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        if os.path.basename(cmd[0]) == "codex":
+            raise FileNotFoundError("no such file: codex")
+        return MagicMock(returncode=0, stdout=_mock_claude_stdout("fell back"), stderr="")
+
+    mock_run.side_effect = _side_effect
+    result = call_haiku("test prompt")
+
+    assert result.text == "fell back"
+    claude_call = next(c for c in calls if os.path.basename(c[0][0]).startswith("claude"))
+    claude_env = claude_call[1]["env"]
+    assert claude_env.get("CLAUDE_CODE_OAUTH_TOKEN") == "sk-ant-oat-host-codex02"
+
+
+@patch("pipeline.haiku.subprocess.run")
+def test_userconfig_env_var_no_longer_reaches_the_codex_fallback(mock_run, monkeypatch):
+    """#860, round 3: the plugin's own userConfig recovery-token setting is
+    gone entirely -- its env var must no longer authenticate the Codex
+    fallback call either, same as the legacy REMEMBER_OAUTH_TOKEN case
+    above. Would still pass if the code did nothing only if paired with the
+    positive control above, which is why both exist."""
     monkeypatch.setenv("REMEMBER_TRANSCRIPT_PATH", _CODEX_TRANSCRIPT)
     monkeypatch.setenv("REMEMBER_SUMMARIZER_FALLBACK", "claude")
     monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
@@ -292,7 +324,11 @@ def test_userconfig_token_does_authenticate_the_codex_fallback(mock_run, monkeyp
     assert result.text == "fell back"
     claude_call = next(c for c in calls if os.path.basename(c[0][0]).startswith("claude"))
     claude_env = claude_call[1]["env"]
-    assert claude_env.get("CLAUDE_CODE_OAUTH_TOKEN") == "sk-ant-oat-userconfig-codex02"
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in claude_env, (
+        "the removed userConfig option's own env var must not authenticate "
+        "the Codex-fallback claude -p call any more -- it is no longer read "
+        "at all (#860, round 3)"
+    )
 
 
 @patch("pipeline.haiku.subprocess.run")

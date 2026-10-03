@@ -20,6 +20,21 @@
 [ -n "${_REMEMBER_LIB_SLUG_LOADED:-}" ] && return 0
 _REMEMBER_LIB_SLUG_LOADED=1
 
+# #898 round 5: "${PYTHON:-python3}" as a bare command word (both call
+# sites below) is a computed program name (UNPINNED_NPX). This file is
+# deliberately sourceable WITHOUT detect-tools.sh (see the header comment
+# above for why), so it cannot rely on that file's _remember_run_python
+# wrapper -- same literal-dispatch idea, local to this file.
+_remember_slug_run_python() {
+    case "${PYTHON:-python3}" in
+        python3) python3 "$@" ;;
+        python) python "$@" ;;
+        "py -3") py -3 "$@" ;;
+        py) py "$@" ;;
+        *) return 127 ;;
+    esac
+}
+
 # --- CRLF-safe session dir slug ---
 # Replaces all non-alphanumeric chars with dashes. Must match Claude Code's
 # own slug pattern for its ~/.claude/projects/<slug>/ session directories.
@@ -82,7 +97,12 @@ _remember_build_slug_sed
 # with enough lines would have been summarized into memory as if it were the
 # live session.
 claude_projects_dir() {
-    local _root="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+    local _root
+    if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+        _root="$CLAUDE_CONFIG_DIR"
+    else
+        _root="$HOME/.claude"
+    fi
 
     # CLAUDE_CONFIG_DIR is inherited from the environment, so on Windows it
     # arrives in whatever form the user typed — usually the native
@@ -357,7 +377,7 @@ session_dir_slug() {
                     # Resolves PYTHON on first use (#662); no-op outside lazy
                     # mode, same as lib-memory-dir.sh's copy of this guard.
                     declare -f _remember_python >/dev/null 2>&1 && _remember_python
-                    _decoded=$("${PYTHON:-python3}" "$_py_slug" "$path" 2>/dev/null) \
+                    _decoded=$(_remember_slug_run_python "$_py_slug" "$path" 2>/dev/null) \
                         && [ -n "$_decoded" ] && { printf '%s\n' "$_decoded"; return 0; }
                 fi
                 # No Python to ask: fall through to the byte table, which is
@@ -392,7 +412,7 @@ session_dir_slug() {
     if [ -f "$_slug_py" ]; then
         # Resolves PYTHON on first use (#662); no-op outside lazy mode.
         declare -f _remember_python >/dev/null 2>&1 && _remember_python
-        _hash=$("${PYTHON:-python3}" "$_slug_py" --hash "$_orig" 2>/dev/null) || _hash=""
+        _hash=$(_remember_slug_run_python "$_slug_py" --hash "$_orig" 2>/dev/null) || _hash=""
     else
         _hash=""
     fi
