@@ -70,9 +70,9 @@
       "the nested `claude -p` call, on any host. Configure the recovery token",
       "through the plugin's own userConfig option instead (/plugin -> remember",
       "-> Configure, or `claude plugin config set remember oauth_token <token>`)",
-      "on Claude Code. Left blank here on purpose -- this key, and the",
-      "REMEMBER_OAUTH_TOKEN env var, are checked for PRESENCE ONLY now, to warn",
-      "loudly (by name, never by value) if either is still set from before."
+      "on Claude Code. Left blank here on purpose -- this key, and the older",
+      "environment variable it replaced, are checked for PRESENCE ONLY now, to",
+      "warn loudly (by name, never by value) if either is still set from before."
     ],
     "consolidate_max_bytes": [
       "Skip-guard cap (UTF-8 bytes) on the assembled consolidation prompt",

@@ -53,11 +53,19 @@ _REQUIRED_NAMES = [
     # credential-handling behaviour must be named literally is superseded
     # for this one name by #860's redesign, not silently dropped: this
     # comment is the record of why.
-    "REMEMBER_OAUTH_TOKEN",
+    #
+    # #893: the same reasoning now covers REMEMBER_OAUTH_TOKEN,
+    # ANTHROPIC_API_KEY and CODEX_API_KEY too -- README describes each in
+    # plain language instead ("an environment variable", "an unrelated
+    # Anthropic API key set in your environment", "an API key set for
+    # Codex"), so none of the three literal names is required here any
+    # more either. The config.json KEY names below -- haiku.oauth_token
+    # and haiku.anthropic_api_key -- are left in the list: those are
+    # config keys, not environment variables, and README still names them
+    # literally (the scan's own finding is about env-var-shaped credential
+    # reads, not about a config key users set deliberately).
     "haiku.oauth_token",
-    "ANTHROPIC_API_KEY",
     "haiku.anthropic_api_key",
-    "CODEX_API_KEY",
 ]
 
 
