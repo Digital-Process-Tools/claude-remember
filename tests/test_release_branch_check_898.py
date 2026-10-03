@@ -202,3 +202,92 @@ def test_a_dollar_sign_with_no_variable_name_does_not_fail(tmp_path):
     })
     offenders = _check(root).offenders
     assert not any("release README" in o for o in offenders), offenders
+
+
+# -- round 2 (#898): scheme literal outside the allowlist (FAIL) -----------------
+
+def test_a_scheme_literal_in_a_shipped_file_fails(tmp_path):
+    root = _tree(tmp_path, {
+        "docs-note.md": b"# note\n\nurl_display=${url#https://}\n",
+    })
+    offenders = _check(root).offenders
+    assert any("docs-note.md" in o and "scheme literal" in o for o in offenders), offenders
+
+
+def test_a_scheme_literal_in_plugin_json_is_allowlisted(tmp_path):
+    """Positive control: `.claude-plugin/plugin.json`'s own listing URLs are
+    required by the directory and must not fail."""
+    root = _tree(tmp_path, {
+        ".claude-plugin/plugin.json": json.dumps({
+            "name": "x", "description": "d", "version": "1.0.0",
+            "author": {"name": "a"},
+            "documentationUrl": "https://github.com/example/example",
+        }).encode(),
+    })
+    offenders = _check(root).offenders
+    assert not any("scheme literal" in o for o in offenders), offenders
+
+
+# -- round 2 (#898): standalone network word outside the allowlist (FAIL) -------
+
+def test_a_standalone_network_word_outside_the_allowlist_fails(tmp_path):
+    root = _tree(tmp_path, {
+        "docs-note.md": b"# note\n\nask your host to open a firewall port\n",
+    })
+    offenders = _check(root).offenders
+    assert any("docs-note.md" in o and "network-command word" in o for o in offenders), \
+        offenders
+
+
+def test_the_same_word_in_an_allowlisted_pipeline_file_does_not_fail(tmp_path):
+    """Positive control: pipeline/host.py's own architecture vocabulary must
+    not fail -- it is on NETWORK_WORD_ALLOWLIST."""
+    root = _tree(tmp_path, {
+        "pipeline/host.py": b'"""host is this plugin\'s own per-agent abstraction."""\n',
+    })
+    offenders = _check(root).offenders
+    assert not any("network-command word" in o for o in offenders), offenders
+
+
+# -- round 2 (#898): the dead/typed-'.' SCRIPT_DIR fallback (FAIL) ---------------
+
+def test_a_dot_fallback_fails(tmp_path):
+    root = _tree(tmp_path, {
+        "scripts/run.sh": (b'#!/bin/sh\n_D="${BASH_SOURCE[0]%/*}"\n'
+                           b'[ "$_D" = "${BASH_SOURCE[0]}" ] && _D="."\n'),
+    })
+    offenders = _check(root).offenders
+    assert any("run.sh" in o and "directory fallback" in o for o in offenders), offenders
+
+
+def test_a_pwd_fallback_does_not_fail(tmp_path):
+    """Positive control: the actual fix (#898) -- $PWD instead of '.'."""
+    root = _tree(tmp_path, {
+        "scripts/run.sh": (b'#!/bin/sh\n_D="${BASH_SOURCE[0]%/*}"\n'
+                           b'[ "$_D" = "${BASH_SOURCE[0]}" ] && _D="$PWD"\n'),
+    })
+    offenders = _check(root).offenders
+    assert not any("directory fallback" in o for o in offenders), offenders
+
+
+# -- round 2 (#898): one hook script naming another by filename (REVIEW) --------
+
+def test_one_hook_script_naming_another_is_reviewed(tmp_path):
+    root = _tree(tmp_path, {
+        "scripts/post-tool-hook.sh": (b"#!/bin/sh\n"
+                                      b"# see session-start-hook.sh for the same guard\n"),
+    })
+    reviews = _check(root).reviews
+    assert any("post-tool-hook.sh" in r and "session-start-hook.sh" in r
+               for r in reviews), reviews
+
+
+def test_a_non_hook_script_naming_a_hook_script_is_not_reviewed(tmp_path):
+    """Positive control: scoped to the four hooks.json-registered scripts
+    only -- an ordinary lib script naming one of them is not this guard's
+    concern (it is covered, if at all, by the FAIL guards above instead)."""
+    root = _tree(tmp_path, {
+        "scripts/lib-example.sh": b"#!/bin/sh\n# used by session-start-hook.sh\n",
+    })
+    reviews = _check(root).reviews
+    assert not any("lib-example.sh" in r for r in reviews), reviews

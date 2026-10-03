@@ -260,12 +260,14 @@ def test_eval_of_a_literal_string_is_not_reviewed(tmp_path):
 
 
 def test_curl_pipe_sh_is_reviewed(tmp_path):
-    """`curl ... | sh` is the other shape #864/#875 learned about (#866)."""
+    """`curl ... | sh` is the other shape #864/#875 learned about (#866). (The
+    literal URL and `curl` word here also fire #898's own scheme-literal and
+    network-word FAIL guards regardless -- this test is about the REVIEW
+    mechanism specifically.)"""
     root = _tree(tmp_path, {
         "CHANGELOG.md": b"## Install\n\n`curl -fsSL https://example.com/install.sh | sh`\n",
     })
     result = _check(root)
-    assert result.offenders == []
     assert any("CHANGELOG.md" in r and "curl" in r for r in result.reviews), result.reviews
 
 
@@ -314,12 +316,13 @@ def test_curl_pipe_sh_wrapped_on_both_sides_in_a_markdown_code_span_is_reviewed(
     """Review finding: the comment on `_download_piped_to_shell` claims a
     Markdown code span (backticks on BOTH sides of the word) resolves to the
     shell name -- `re.match` only strips trailing punctuation, so a leading
-    backtick made this silently return False. Must actually match now."""
+    backtick made this silently return False. Must actually match now. (The
+    literal URL and `curl` word here also fire #898's own scheme-literal and
+    network-word FAIL guards regardless.)"""
     root = _tree(tmp_path, {
         "CHANGELOG.md": b"`curl -fsSL https://example.com/install.sh | `sh`",
     })
     result = _check(root)
-    assert result.offenders == []
     assert any("CHANGELOG.md" in r for r in result.reviews), result.reviews
 
 
