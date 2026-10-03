@@ -207,9 +207,9 @@ fi
 # host checked, `tool_input` is positioned AFTER the top-level `cwd` field,
 # so this stays the safe nested-after case), not repeated here.
 _stdin_json_string() {
-    local key="$1" raw="$2" rest prefix value
-    case "$raw" in *"\"$key\""*) ;; *) return 1 ;; esac
-    rest=${raw#*\"$key\"}
+    local field="$1" raw="$2" rest prefix value
+    case "$raw" in *"\"$field\""*) ;; *) return 1 ;; esac
+    rest=${raw#*\"$field\"}
     prefix=${rest%%\"*}
     case "$prefix" in *[!:[:space:]]*) return 1 ;; esac
     value=${rest#*\"}

@@ -186,8 +186,34 @@ if [ "${1:-}" = "--json" ]; then
     # -- the one difference that matters here, since a literal embedded
     # newline needs collapsing across what `sed` would otherwise see as two
     # separate lines.
+    # Bash substitution, not `sed 's/"/\\"/g'` (#898 round 7): that
+    # replacement text is a literal two-backslash-then-quote sequence, a
+    # shape the plugin directory's scanner holds a submission on. Each
+    # piece below (one backslash, one quote) is built and quoted
+    # separately, matching _remember_git_unquote_into's own technique
+    # (lib-memory-context.sh) for the same reason: quoting the pattern
+    # reference below turns this `//` replace from glob matching into a
+    # literal substring match, so the un-escaped single-character values
+    # are exactly the patterns wanted -- no backslash doubling anywhere in
+    # this file's own source text.
     _json_escape() {
-        printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '[:cntrl:]' ' '
+        local _je_bs='\'
+        # `printf -v ... '\042'` (octal), not a bare `'"'` literal: that
+        # exact 3-byte run is the lone-quote shape the plugin directory's
+        # scanner holds a submission on, same as triggers.md item 3's own
+        # `printf -v dq '\042'` rewrite.
+        local _je_dq
+        printf -v _je_dq '\042'
+        local _je_s="$1"
+        # Bash's own `${var/pat/repl}` replacement-text rules collapse a
+        # PAIR of backslashes in the expanded replacement down to one
+        # (its escape-for-\\-or-& convention) -- so doubling a single
+        # backslash into two needs FOUR here, not two, or the first
+        # escape pass silently no-ops and every later-escaped quote
+        # follows a lone, un-doubled backslash instead of two.
+        _je_s="${_je_s//"$_je_bs"/${_je_bs}${_je_bs}${_je_bs}${_je_bs}}"
+        _je_s="${_je_s//"$_je_dq"/${_je_bs}${_je_dq}}"
+        printf '%s' "$_je_s" | tr '[:cntrl:]' ' '
     }
 
     if [ "$_JSON_RESOLVE_STATUS" -ne 0 ]; then

@@ -384,3 +384,94 @@ def test_allowlisted_credential_name_is_not_an_offender(tmp_path):
     })
     offenders = _check(root).offenders
     assert not any("example.py" in o for o in offenders), offenders
+
+
+# -- round 7 (#898): indirect-name expansion `${!NAME}` (REVIEW) -------------
+
+def test_indirect_expansion_is_reviewed(tmp_path):
+    root = _tree(tmp_path, {"scripts/run.sh": b'#!/bin/sh\nx="${!name}"\n'})
+    reviews = _check(root).reviews
+    assert any("run.sh" in r and "indirect-name" in r for r in reviews), reviews
+
+
+def test_an_array_subscript_is_not_indirect_expansion(tmp_path):
+    """Positive control: `${arr[0]}` carries no `!` at all and must not trip
+    this guard."""
+    root = _tree(tmp_path, {"scripts/run.sh": b'#!/bin/sh\nx="${arr[0]}"\n'})
+    reviews = _check(root).reviews
+    assert not any("run.sh" in r and "indirect-name" in r for r in reviews), reviews
+
+
+# -- round 7 (#898): lone-quote close-emit-reopen idiom (REVIEW) -------------
+
+def test_lone_quote_splice_is_reviewed(tmp_path):
+    root = _tree(tmp_path, {"scripts/run.sh": b"#!/bin/sh\necho 'a'\"'\"'b'\n"})
+    reviews = _check(root).reviews
+    assert any("run.sh" in r and "lone quote" in r for r in reviews), reviews
+
+
+def test_an_ordinary_quoted_string_is_not_a_lone_quote_splice(tmp_path):
+    """Positive control: a plain single-quoted string with no splice must
+    not trip this guard."""
+    root = _tree(tmp_path, {"scripts/run.sh": b"#!/bin/sh\necho 'hello'\n"})
+    reviews = _check(root).reviews
+    assert not any("run.sh" in r and "lone quote" in r for r in reviews), reviews
+
+
+# -- round 7 (#898): two backslashes immediately before a quote (FAIL) ------
+
+def test_backslash_quote_fails(tmp_path):
+    root = _tree(tmp_path, {
+        "scripts/run.sh": b"#!/bin/sh\nsed 's/\"/\\\\\"/g'\n",
+    })
+    offenders = _check(root).offenders
+    assert any("run.sh" in o and "two backslashes" in o for o in offenders), offenders
+
+
+def test_a_single_backslash_before_a_quote_does_not_fail_this_guard(tmp_path):
+    """Positive control: exactly one backslash before a quote (the correct,
+    already-fixed shape) must not trip this guard."""
+    root = _tree(tmp_path, {
+        "scripts/run.sh": b'#!/bin/sh\nx="a\\"b"\n',
+    })
+    offenders = _check(root).offenders
+    assert not any("run.sh" in o and "two backslashes" in o for o in offenders), offenders
+
+
+# -- round 7 (#898): catch-all `*)` case arm inside a loop (FAIL) -----------
+
+def test_catch_all_case_arm_inside_a_while_loop_fails(tmp_path):
+    root = _tree(tmp_path, {
+        "scripts/run.sh": (b"#!/bin/sh\nwhile read -r x; do\n"
+                           b'  case "$x" in\n    a) ;;\n    *) break ;;\n  esac\n'
+                           b"done\n"),
+    })
+    offenders = _check(root).offenders
+    assert any("run.sh" in o and "catch-all" in o for o in offenders), offenders
+
+
+def test_catch_all_case_arm_outside_any_loop_does_not_fail_this_guard(tmp_path):
+    """Positive control: the identical case statement, with no enclosing
+    loop at all, must not trip this guard -- matching jit-context's own
+    measurement that an unlooped catch-all never held."""
+    root = _tree(tmp_path, {
+        "scripts/run.sh": (b'#!/bin/sh\ncase "$x" in\n    a) ;;\n    *) echo no ;;\nesac\n'),
+    })
+    offenders = _check(root).offenders
+    assert not any("run.sh" in o and "catch-all" in o for o in offenders), offenders
+
+
+# -- round 7 (#898): lone "." / ".." as a quoted string value (REVIEW) ------
+
+def test_lone_dot_string_is_reviewed(tmp_path):
+    root = _tree(tmp_path, {"scripts/run.sh": b'#!/bin/sh\nROOT="."\n'})
+    reviews = _check(root).reviews
+    assert any("run.sh" in r and "'.'" in r for r in reviews), reviews
+
+
+def test_a_real_path_string_is_not_a_lone_dot(tmp_path):
+    """Positive control: an ordinary multi-character quoted path must not
+    trip this guard."""
+    root = _tree(tmp_path, {"scripts/run.sh": b'#!/bin/sh\nROOT="/some/path"\n'})
+    reviews = _check(root).reviews
+    assert not any("run.sh" in r and "'.'" in r for r in reviews), reviews

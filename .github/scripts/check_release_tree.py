@@ -320,6 +320,17 @@ CREDENTIAL_SHAPED_NAME = re.compile(
 HOOK_SCRIPT_NAMES = ("session-start-hook.sh", "session-end-hook.sh",
                      "user-prompt-hook.sh", "post-tool-hook.sh")
 
+# #898 round 7: the directory publishing repo's own offline sweep tool
+# (tools/sweep.sh in Digital-Process-Tools/claude-directory-publishing)
+# names five more shapes; these four are the ones with a free-standing
+# regex a single line can answer (the fifth, catch-all-in-loop, needs the
+# same stateful nesting-depth tracking that tool's own loopcase.pl carries,
+# and is implemented as its own function below rather than a constant).
+INDIRECT_EXPANSION = re.compile(r'\$\{![A-Za-z_]')
+LONE_QUOTE = re.compile(r"'\"'|\"'\"")
+BACKSLASH_QUOTE = re.compile(r'\\\\"')
+DOT_STRING = re.compile(r'"\.\.?"')
+
 
 def _download_piped_to_shell(line: str) -> bool:
     """True if LINE pipes a `curl`/`wget` download into a shell, with any
@@ -604,6 +615,11 @@ def check_tree(root: Path, budget: dict) -> CheckResult:
     _check_bare_env_word(files, kinds, off)
     _check_nested_default_expansion(files, kinds, off)
     _check_credential_shaped_name(files, kinds, off)
+    _check_indirect_expansion(files, kinds, result.reviews)
+    _check_lone_quote(files, kinds, result.reviews)
+    _check_backslash_quote(files, kinds, off)
+    _check_catch_all_in_loop(files, kinds, off)
+    _check_dot_string(files, kinds, result.reviews)
     if "package.json" in files:
         locks = [lf for lf in LOCKFILES if lf in files]
         if locks:
@@ -1042,6 +1058,147 @@ def _check_nested_default_expansion(files: dict, kinds: dict, off: list) -> None
                 off.append(f"{rel}:{n}: a nested default expansion "
                            f"('${{X:-$Y}}') is not allowed -- use an explicit "
                            f"if/else: {line.strip()[:80]}")
+
+
+def _check_indirect_expansion(files: dict, kinds: dict, reviews: list) -> None:
+    """#898 round 7: `${!NAME}` indirect-name expansion in a shipped script
+    -- the directory publishing repo's own sweep tool names this as one of
+    the shapes the real portal scanner holds a submission on. REVIEW, not
+    FAIL: round 7 redesigned every instance this repo could reach without a
+    behaviour change or a security regression, but one site in log.sh's
+    own config() stays on this shape deliberately (see that site's own
+    comment for the full reasoning -- the alternative, `eval`, is forbidden
+    by a dedicated regression test for a real #864 security fix), so a
+    hard FAIL here would red this repo's own current, working tree."""
+    for rel, data in sorted(files.items()):
+        top = rel.split("/")[0]
+        if top not in _SCRIPT_DIRS or kinds.get(rel) != "text":
+            continue
+        text = data.decode("utf-8")
+        for n, line in enumerate(text.splitlines(), 1):
+            if line.lstrip().startswith("#"):
+                continue
+            if INDIRECT_EXPANSION.search(line):
+                reviews.append(f"{rel}:{n}: '${{!NAME}}' indirect-name "
+                                f"expansion: {line.strip()[:80]}")
+
+
+def _check_lone_quote(files: dict, kinds: dict, reviews: list) -> None:
+    """#898 round 7: the close-emit-reopen idiom (a lone quote spliced
+    between two quoted strings), used to put a literal quote character
+    into an otherwise single/double-quoted shell string -- the sweep
+    tool's own write-up: the scanner reads this as a `.` (source) command
+    and mis-splits the rest of the file. REVIEW, not FAIL: one site (an
+    embedded Python docstring's own apostrophe) is a known, reported
+    holdout -- see that site's comment for why a lane judged rewriting the
+    much larger program around it too risky to do blind in one round."""
+    for rel, data in sorted(files.items()):
+        top = rel.split("/")[0]
+        if top not in _SCRIPT_DIRS or kinds.get(rel) != "text":
+            continue
+        text = data.decode("utf-8")
+        for n, line in enumerate(text.splitlines(), 1):
+            if line.lstrip().startswith("#"):
+                continue
+            if LONE_QUOTE.search(line):
+                reviews.append(f"{rel}:{n}: a lone quote spliced between two "
+                                f"quoted strings: {line.strip()[:80]}")
+
+
+def _check_backslash_quote(files: dict, kinds: dict, off: list) -> None:
+    """#898 round 7: two literal backslashes immediately followed by a
+    quote character in a shipped script -- typically a sed or awk
+    replacement string meaning "one escaped backslash" -- is a shape the
+    sweep tool's own write-up says the real portal scanner holds a
+    submission on. FAIL: round 7 found and rewrote every instance (bash
+    parameter-expansion substitution, piece by piece, rather than sed/awk
+    escaping), so this is a guard against a REintroduction, not a known
+    holdout."""
+    for rel, data in sorted(files.items()):
+        top = rel.split("/")[0]
+        if top not in _SCRIPT_DIRS or kinds.get(rel) != "text":
+            continue
+        text = data.decode("utf-8")
+        for n, line in enumerate(text.splitlines(), 1):
+            if line.lstrip().startswith("#"):
+                continue
+            if BACKSLASH_QUOTE.search(line):
+                off.append(f"{rel}:{n}: two backslashes immediately before "
+                           f"a quote -- rewrite without sed/awk escaping: "
+                           f"{line.strip()[:80]}")
+
+
+def _check_catch_all_in_loop(files: dict, kinds: dict, off: list) -> None:
+    """#898 round 7: a `case` statement's catch-all `*)` arm sitting
+    lexically inside a `while`/`for`/`until` loop -- COMMAND_SCRIPT_NOT_
+    FOLLOWED-adjacent, per the sweep tool's own write-up. Ported from that
+    tool's `loopcase.pl`: a running open/close depth across `while`/`for`/
+    `until` vs. `done`, skipping full-comment lines and the contents of
+    single-quoted strings and `awk` programs, exactly as that tool does --
+    intentionally the same coarse, line-oriented heuristic the real portal
+    scanner itself is (not a bash parser), rather than a tighter check that
+    would stop matching what the scanner matches. FAIL: round 7 rewrote
+    every instance this repo had as `[ ]` tests, so this guards against a
+    REintroduction, not a known holdout."""
+    _loop_open = re.compile(r'(?:^|[;&|\s])(?:while|for|until)\s')
+    _loop_close = re.compile(r'(?:^|[;&|\s])done(?=\s|;|$|\))')
+    _catch_all = re.compile(r'(?:^|[\s;(])\*\)')
+    _string_open = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*='[^']*$")
+    _awk_open = re.compile(r"\bawk\b[^']*'[^']*$")
+    for rel, data in sorted(files.items()):
+        top = rel.split("/")[0]
+        if top not in _SCRIPT_DIRS or kinds.get(rel) != "text":
+            continue
+        text = data.decode("utf-8")
+        depth = 0
+        in_string = False
+        for n, raw_line in enumerate(text.splitlines(), 1):
+            if in_string:
+                if raw_line.startswith("'") or re.search(r"^[^']*'\s*(\)|\"|$)", raw_line):
+                    in_string = False
+                continue
+            if raw_line.lstrip().startswith("#"):
+                continue
+            if _string_open.match(raw_line) or _awk_open.search(raw_line):
+                in_string = True
+                continue
+            code = re.sub(r"'[^']*'", "", raw_line)
+            code = re.sub(r'"(?:[^"\\]|\\.)*"', "", code)
+            code = re.sub(r'#.*', "", code)
+            opens = len(_loop_open.findall(code))
+            closes = len(_loop_close.findall(code))
+            if depth > 0 and _catch_all.search(raw_line):
+                off.append(f"{rel}:{n}: a catch-all '*)' case arm inside a "
+                           f"while/for/until loop: {raw_line.strip()[:80]}")
+            elif opens and _catch_all.search(raw_line):
+                off.append(f"{rel}:{n}: a catch-all '*)' case arm on the "
+                           f"same line a loop opens: {raw_line.strip()[:80]}")
+            depth += opens - closes
+            depth = max(depth, 0)
+
+
+def _check_dot_string(files: dict, kinds: dict, reviews: list) -> None:
+    """#898 round 7: a lone "." or ".." as a double-quoted string value in a
+    shipped script -- the sweep tool's own write-up: the real portal
+    scanner can misread this as a `.` (source) command. REVIEW, not FAIL:
+    round 7 found several sites where this is dirname's own documented
+    answer for a path with no separator, or a git-pathspec "no subdirectory
+    to scope to" sentinel, and a dedicated test (test_dirname_without_a_
+    fork_660.py) asserts byte-for-byte parity with real `dirname` including
+    this exact case -- rewriting those would be a real behaviour change,
+    not a no-op, so they stay as documented, reported holdouts rather than
+    redding this repo's own current, working tree."""
+    for rel, data in sorted(files.items()):
+        top = rel.split("/")[0]
+        if top not in _SCRIPT_DIRS or kinds.get(rel) != "text":
+            continue
+        text = data.decode("utf-8")
+        for n, line in enumerate(text.splitlines(), 1):
+            if line.lstrip().startswith("#"):
+                continue
+            if DOT_STRING.search(line):
+                reviews.append(f"{rel}:{n}: a lone '.'/'..' as a quoted "
+                                f"string value: {line.strip()[:80]}")
 
 
 def _check_credential_shaped_name(files: dict, kinds: dict, off: list) -> None:

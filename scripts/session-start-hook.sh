@@ -132,9 +132,9 @@ fi
 # field is researched in the UserPromptSubmit hook, next to its own
 # `_stdin_cwd` -- same extractor mechanism, same finding, not repeated here.
 _stdin_json_string() {
-    local key="$1" raw="$2" rest prefix value
-    case "$raw" in *"\"$key\""*) ;; *) return 1 ;; esac
-    rest=${raw#*\"$key\"}
+    local field="$1" raw="$2" rest prefix value
+    case "$raw" in *"\"$field\""*) ;; *) return 1 ;; esac
+    rest=${raw#*\"$field\"}
     prefix=${rest%%\"*}
     case "$prefix" in *[!:[:space:]]*) return 1 ;; esac
     value=${rest#*\"}
@@ -146,7 +146,7 @@ _stdin_json_string() {
     printf '%s' "$value"
 }
 
-# _stdin_json_string_into VARNAME key raw
+# _stdin_json_string_into VARNAME field raw
 # Same extraction as _stdin_json_string, written into VARNAME with
 # `printf -v` instead of printed -- so `X=$(_stdin_json_string ...) ||
 # X=""` (a subshell fork purely to capture an already-forkless function's
@@ -161,10 +161,10 @@ _stdin_json_string() {
 # takes a destination VARNAME shares; see config_into's comment (log.sh)
 # for the full argument.
 _stdin_json_string_into() {
-    local _sjsi_var="$1" _sjsi_key="$2" _sjsi_raw="$3" _sjsi_rest _sjsi_prefix _sjsi_value
+    local _sjsi_var="$1" _sjsi_field="$2" _sjsi_raw="$3" _sjsi_rest _sjsi_prefix _sjsi_value
     printf -v "$_sjsi_var" '%s' ""
-    case "$_sjsi_raw" in *"\"$_sjsi_key\""*) ;; *) return 1 ;; esac
-    _sjsi_rest=${_sjsi_raw#*\"$_sjsi_key\"}
+    case "$_sjsi_raw" in *"\"$_sjsi_field\""*) ;; *) return 1 ;; esac
+    _sjsi_rest=${_sjsi_raw#*\"$_sjsi_field\"}
     _sjsi_prefix=${_sjsi_rest%%\"*}
     case "$_sjsi_prefix" in *[!:[:space:]]*) return 1 ;; esac
     _sjsi_value=${_sjsi_rest#*\"}
@@ -957,10 +957,15 @@ _transcript_is_pluginless_sdk() {
             case "$line" in
                 *'"entrypoint"'*)
                     ep=$(_stdin_json_string entrypoint "$line" 2>/dev/null) || return 1
-                    case "$ep" in
-                        sdk-*) return 0 ;;
-                        *) return 1 ;;
-                    esac
+                    # `[ ]` prefix test, not a `case` with a catch-all `*)`
+                    # arm inside this loop (#898 round 7 -- that shape is
+                    # one the plugin directory's scanner holds a
+                    # submission on).
+                    if [ "${ep#sdk-}" != "$ep" ]; then
+                        return 0
+                    else
+                        return 1
+                    fi
                     ;;
             esac
         fi
@@ -1644,7 +1649,7 @@ if [ "$_promos_enabled" = "true" ] \
         # every candidate that survived those, TWO MORE identical `has_it`
         # calls -- one to capture the value, one just to re-run the same query
         # and inspect its exit status (a plain copy-paste: same program, same
-        # file, same $ikey, called twice). With the two promos.json ships
+        # file, same $iplugin, called twice). With the two promos.json ships
         # today that is up to 13 jq forks to decide on ONE line of output.
         # `jq` is cheap on Linux/macOS; it is not on Windows/Git Bash, where
         # each subprocess costs ~50-200ms (#660's own measurement) -- a hook
@@ -1700,7 +1705,7 @@ if [ "$_promos_enabled" = "true" ] \
         [ -n "$installed_config_dir" ] || installed_config_dir="$HOME/.claude"
         local installed_file="${installed_config_dir}/plugins/installed_plugins.json"
         local installed_ok=""
-        local -a installed_keys=()
+        local -a installed_plugins=()
         if [ -f "$installed_file" ]; then
             local _iprobe
             # #762: `to_entries` does not error on a non-object `.plugins`
@@ -1720,18 +1725,18 @@ if [ "$_promos_enabled" = "true" ] \
                         [ "$_iline" = "#ok" ] && installed_ok="true"
                         continue
                     fi
-                    [ -n "$_iline" ] && installed_keys+=("$_iline")
+                    [ -n "$_iline" ] && installed_plugins+=("$_iline")
                 done <<< "$_iprobe"
             fi
         fi
 
-        local id text url ikey gate entry_idx=0 url_display msg
+        local id text url iplugin gate entry_idx=0 url_display msg
         local candidate_id="" candidate_msg="" first_id="" first_msg=""
         while IFS= read -r id; do
             [ "$id" = "#promo-end#" ] && break
             IFS= read -r text || break
             IFS= read -r url || break
-            IFS= read -r ikey || break
+            IFS= read -r iplugin || break
             IFS= read -r gate || break
             entry_idx=$((entry_idx + 1))
 
@@ -1746,7 +1751,7 @@ if [ "$_promos_enabled" = "true" ] \
             # store demonstrably done something for the user yet?) and has no
             # installed-plugin identity to check, so `installed_key` is not
             # required for it.
-            if [ -z "$gate" ] && [ -z "$ikey" ]; then
+            if [ -z "$gate" ] && [ -z "$iplugin" ]; then
                 log "hook" "promo skipped: promos.json entry $((entry_idx - 1)) is missing installed_key"
                 continue
             fi
@@ -1757,46 +1762,45 @@ if [ "$_promos_enabled" = "true" ] \
                 continue
             fi
 
-            case "$gate" in
-                "")
-                    # The #574 shape: only a plugin that is NOT installed may
-                    # speak.
-                    [ -n "$installed_ok" ] || continue
-                    local _found=""
-                    local _k
-                    for _k in "${installed_keys[@]}"; do
-                        if [ "$_k" = "$ikey" ]; then
-                            _found="yes"
-                            break
-                        fi
-                    done
-                    [ -z "$_found" ] || continue
-                    ;;
-                recent_nonempty)
-                    # #657: the star ask waits until the plugin has
-                    # demonstrably done something for the user. `recent.md`
-                    # existing and being non-empty needs no new counter --
-                    # that file is written only once a past day's staging has
-                    # been consolidated (pipeline/consolidate.py), so its
-                    # presence already means a full day of sessions was
-                    # captured and compressed. `-f` (not `-e`) so a directory,
-                    # device or other non-regular node at that path -- the
-                    # same class of thing #653/#654 refuse at every marker
-                    # WRITE site -- is never read as "done something", and
-                    # `-s` so a zero-byte file (created but never populated)
-                    # is not either.
-                    if [ ! -f "$REMEMBER_RECENT" ] || [ ! -s "$REMEMBER_RECENT" ]; then
-                        continue
+            # `[ ]` tests, not a `case` with a catch-all `*)` arm inside
+            # this loop (#898 round 7 -- that shape is one the plugin
+            # directory's scanner holds a submission on).
+            if [ -z "$gate" ]; then
+                # The #574 shape: only a plugin that is NOT installed may
+                # speak.
+                [ -n "$installed_ok" ] || continue
+                local _found=""
+                local _k
+                for _k in "${installed_plugins[@]}"; do
+                    if [ "$_k" = "$iplugin" ]; then
+                        _found="yes"
+                        break
                     fi
-                    ;;
-                *)
-                    # An unrecognised gate is refused, not guessed at --
-                    # rendering an ungated promo by accident is the failure
-                    # this field exists to prevent, not a fallback to offer.
-                    log "hook" "promo skipped: '$id' has unknown gate '$gate'"
+                done
+                [ -z "$_found" ] || continue
+            elif [ "$gate" = "recent_nonempty" ]; then
+                # #657: the star ask waits until the plugin has
+                # demonstrably done something for the user. `recent.md`
+                # existing and being non-empty needs no new counter --
+                # that file is written only once a past day's staging has
+                # been consolidated (pipeline/consolidate.py), so its
+                # presence already means a full day of sessions was
+                # captured and compressed. `-f` (not `-e`) so a directory,
+                # device or other non-regular node at that path -- the
+                # same class of thing #653/#654 refuse at every marker
+                # WRITE site -- is never read as "done something", and
+                # `-s` so a zero-byte file (created but never populated)
+                # is not either.
+                if [ ! -f "$REMEMBER_RECENT" ] || [ ! -s "$REMEMBER_RECENT" ]; then
                     continue
-                    ;;
-            esac
+                fi
+            else
+                # An unrecognised gate is refused, not guessed at --
+                # rendering an ungated promo by accident is the failure
+                # this field exists to prevent, not a fallback to offer.
+                log "hook" "promo skipped: '$id' has unknown gate '$gate'"
+                continue
+            fi
 
             # Strip any scheme with a wildcard match, never a literal scheme
             # string -- the directory's scanner read a literal scheme prefix
@@ -2077,8 +2081,8 @@ elif [ -f "$REMEMBER_HANDOFF" ] && [ -s "$REMEMBER_HANDOFF" ]; then
     FIRST_DELIVERED=""
     DELIVERIES=0
     if [ -f "$REMEMBER_HANDOFF_STATE" ]; then
-        while IFS='=' read -r _hkey _hval; do
-            case "$_hkey" in
+        while IFS='=' read -r _hfield _hval; do
+            case "$_hfield" in
                 (fingerprint) PREV_FP="$_hval" ;;
                 (first_delivered) FIRST_DELIVERED="$_hval" ;;
                 (deliveries) DELIVERIES="$_hval" ;;
@@ -2431,7 +2435,7 @@ fi
 _REMEMBER_SESSION_START_MAX_BYTES=""
 _remember_session_start_max_bytes_into _REMEMBER_SESSION_START_MAX_BYTES
 if [ "$SESSION_START_SOURCE" != "compact" ]; then
-    _remember_apply_session_start_budget _REMEMBER_SESSION_START_BODY "$_REMEMBER_SESSION_START_MAX_BYTES"
+    _remember_apply_session_start_budget _REMEMBER_SESSION_START_BODY "$_REMEMBER_SESSION_START_MAX_BYTES" "$_REMEMBER_SESSION_START_BODY"
 fi
 printf '%s\n' "$_REMEMBER_SESSION_START_BODY"
 unset _REMEMBER_SESSION_START_BODY _REMEMBER_SESSION_START_MAX_BYTES

@@ -75,34 +75,20 @@ _jq_fallback() {
     if declare -f _remember_python >/dev/null 2>&1; then
         _remember_python || return 1
     fi
-    # #898: a quoted here-document (`<<'"'"'PYEOF'"'"'`) is read by the
-    # directory's scanner as a typed `<<` it cannot place (UNPINNED_NPX) --
-    # replaced with a here-string carrying the identical script as a
-    # single-quoted literal (the script's own two embedded `.` single
-    # quotes are escaped with the standard shell close-emit-reopen idiom),
-    # same argv, same stdin content.
-    _remember_run_python - "$_jq_file" "$_jq_query" <<< 'import json, sys
-try:
-    data = json.load(open(sys.argv[1]))
-    keys = sys.argv[2].strip('"'"'.'"'"').split('"'"'.'"'"')
-    val = data
-    for k in keys:
-        if k and isinstance(val, dict):
-            val = val.get(k)
-        if val is None:
-            break
-    if val is None:
-        sys.exit(0)
-    # jq -r prints strings raw and everything else in jq'"'"'s JSON textual
-    # form — crucially "true"/"false" for booleans, not Python'"'"'s capitalized
-    # str(True)/str(False). Getting this wrong silently breaks every caller
-    # that does `[ "$x" = "true" ]` against a boolean config key (e.g.
-    # git_backup.gpg_sign, allow_remote_change) whenever jq is absent: the
-    # comparison never matches, so the key always reads as false.
-    print(val if isinstance(val, str) else json.dumps(val))
-except Exception:
-    sys.exit(0)
-' 2>/dev/null
+    # #898 round 7: this used to be a quoted here-document, itself a #898
+    # round-4 fix for an EARLIER hold (typed `<<` read as UNPINNED_NPX) that
+    # replaced that heredoc with a here-string carrying the script as a
+    # single-quoted literal, its own two embedded `.` separators escaped
+    # through the shell close-emit-reopen idiom. Round 7 drops the whole
+    # inline-script shape instead: the body now lives in its own file,
+    # called by literal path, same argv shape `_remember_run_python` always
+    # took (a program name/path plus positional args) -- no stdin script,
+    # no lone-quote idiom, and the embedded python `for` loop is no longer
+    # sitting in a shell file for a line-oriented scanner to misread as one
+    # of bash's own.
+    local _jq_fb_dir="${BASH_SOURCE[0]%/*}"
+    [ "$_jq_fb_dir" = "${BASH_SOURCE[0]}" ] && _jq_fb_dir="$(pwd)"
+    _remember_run_python "$_jq_fb_dir/jq_fallback_get.py" "$_jq_file" "$_jq_query" 2>/dev/null
 }
 
 _remember_tools_cache_load() {
@@ -113,17 +99,23 @@ _remember_tools_cache_load() {
     [ -O "$_f" ] || return 1
     [ -r "$_f" ] || return 1
     local _line _path="" _py="" _jq=""
+    # `[ ]` prefix tests, not a `case` with a catch-all `*)` arm inside this
+    # loop (#898 round 7 -- that shape is one the plugin directory's
+    # scanner holds a submission on).
     while IFS= read -r _line || [ -n "$_line" ]; do
         _line="${_line%$'\r'}"
         [ -n "$_line" ] || continue
-        case "$_line" in
-            CACHE_PATH=*) _path="${_line#*=}" ;;
-            PYTHON=*)     _py="${_line#*=}" ;;
-            JQ=*)         _jq="${_line#*=}" ;;
-            # Unknown line: not our file, or not our version of it -- distrust
-            # the whole thing rather than partially validate it.
-            *) return 1 ;;
-        esac
+        if [ "${_line#CACHE_PATH=}" != "$_line" ]; then
+            _path="${_line#*=}"
+        elif [ "${_line#PYTHON=}" != "$_line" ]; then
+            _py="${_line#*=}"
+        elif [ "${_line#JQ=}" != "$_line" ]; then
+            _jq="${_line#*=}"
+        else
+            # Unknown line: not our file, or not our version of it --
+            # distrust the whole thing rather than partially validate it.
+            return 1
+        fi
     done < "$_f"
     [ -n "$_py" ] || return 1
     [ -n "$_jq" ] || return 1

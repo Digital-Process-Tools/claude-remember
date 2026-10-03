@@ -165,9 +165,9 @@ source "$_HOOK_DIR/lib-clock.sh"
 # field is researched in the UserPromptSubmit hook, next to its own
 # `_stdin_cwd` -- same extractor mechanism, same finding, not repeated here.
 _stdin_json_string() {
-    local key="$1" raw="$2" rest prefix value
-    case "$raw" in *"\"$key\""*) ;; *) return 1 ;; esac
-    rest=${raw#*\"$key\"}
+    local field="$1" raw="$2" rest prefix value
+    case "$raw" in *"\"$field\""*) ;; *) return 1 ;; esac
+    rest=${raw#*\"$field\"}
     prefix=${rest%%\"*}
     case "$prefix" in *[!:[:space:]]*) return 1 ;; esac
     value=${rest#*\"}

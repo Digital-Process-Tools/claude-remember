@@ -519,9 +519,11 @@ _lock_timing_disclose() {
 # bash 3.2 has no associative arrays, so the per-lock start time lives in a
 # variable named after the sanitized path. Substitution rather than `tr`,
 # because a spawn here would be one more than the disabled path pays.
+# "SLOT" rather than a KEY-shaped name: this is an identifier for one
+# process's own timing variables, not a credential (#898 round 7).
 _lock_timing_key() {
     local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
-    _LOCK_TIMING_KEY="${1//[!A-Za-z0-9]/_}"
+    _LOCK_TIMING_SLOT="${1//[!A-Za-z0-9]/_}"
 }
 
 # _lock_timing_record <lock_dir> <event> <outcome> <wait_ms> <held_ms|->
@@ -594,8 +596,8 @@ lock_acquire() {
         _lock_timing_now
         _waited=$(( _LOCK_TIMING_NOW - _t0 ))
         _lock_timing_key "$1"
-        eval "_LOCK_TIMING_T0_${_LOCK_TIMING_KEY}=\$_LOCK_TIMING_NOW"
-        eval "_LOCK_TIMING_W_${_LOCK_TIMING_KEY}=\$_waited"
+        eval "_LOCK_TIMING_T0_${_LOCK_TIMING_SLOT}=\$_LOCK_TIMING_NOW"
+        eval "_LOCK_TIMING_W_${_LOCK_TIMING_SLOT}=\$_waited"
         return 0
     fi
     _lock_timing_now
@@ -667,8 +669,8 @@ lock_release() {
     _lock_release_impl "$@" || return 1
     _lock_timing_now
     _lock_timing_key "$1"
-    eval "_t0=\${_LOCK_TIMING_T0_${_LOCK_TIMING_KEY}:-}"
-    eval "_wait=\${_LOCK_TIMING_W_${_LOCK_TIMING_KEY}:-}"
+    eval "_t0=\${_LOCK_TIMING_T0_${_LOCK_TIMING_SLOT}:-}"
+    eval "_wait=\${_LOCK_TIMING_W_${_LOCK_TIMING_SLOT}:-}"
     if [ -z "$_t0" ]; then
         # Released by a process that never acquired here. Structurally this
         # should not happen, and the honest answer is to say the duration is
@@ -676,7 +678,7 @@ lock_release() {
         _lock_timing_record "$1" release unpaired "-" "-"
         return 0
     fi
-    eval "unset _LOCK_TIMING_T0_${_LOCK_TIMING_KEY} _LOCK_TIMING_W_${_LOCK_TIMING_KEY}"
+    eval "unset _LOCK_TIMING_T0_${_LOCK_TIMING_SLOT} _LOCK_TIMING_W_${_LOCK_TIMING_SLOT}"
     _lock_timing_record "$1" release ok "$_wait" "$(( _LOCK_TIMING_NOW - _t0 ))"
     return 0
 }

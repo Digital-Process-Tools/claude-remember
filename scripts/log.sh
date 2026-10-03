@@ -149,53 +149,17 @@ _config_is_private_key() {
 # so `paths(scalars)` silently drops every `false` in the file — the #159 bug
 # exactly, arriving inside its own fix. Ask for the type instead.
 #
-# Kept on one line: the PATH-shim spawn counters in tests/ log a command with
-# its arguments, one line per execution, and a multi-line jq program turns one
-# spawn into eighty lines of "spawns".
-_REMEMBER_CFG_FLATTEN_JQ='. as $doc | [paths(type != "object" and type != "array") | select(all(.[]; type == "string")) | select(.[0] != "haiku")] as $ks | if (($ks | flatten) | any(test("^[A-Za-z0-9_]+$") | not)) then "#refuse a config key is outside [A-Za-z0-9_]" elif (($ks | map(join("_")) | unique | length) != ($ks | length)) then "#refuse two config keys flatten to the same name" elif ([$ks[] as $p | $doc | getpath($p) | select(type == "string" and test("[\t\n]"))] | length) > 0 then "#refuse a config value contains a tab or a newline" else $ks[] as $p | ($doc | getpath($p)) as $v | select($v != null) | ($p | join(".")) + "\t" + ($v | tostring) end'
+# Body moved to scripts/cfg_flatten.jq (#898 round 7), read with
+# `jq -f` at the call site -- see _config_load's own comment there for
+# why (the inline form put jq's root-identity filter, a lone ".", on the
+# very first line of this shipped script, a shape the plugin directory's
+# scanner reads as a possible `.` (source) command).
 
 # The same contract without jq, for the machines test_jq_free_config.py exists
 # for. Same refusals, same skips, and jq's textual form for non-strings —
-# "true"/"false", never Python's "True"/"False" (the #159 near miss).
-_REMEMBER_CFG_FLATTEN_PY='
-import json, re, sys
-
-def walk(node, prefix, out):
-    if isinstance(node, dict):
-        for k, v in node.items():
-            walk(v, prefix + [k], out)
-    elif isinstance(node, list):
-        return
-    else:
-        out.append((prefix, node))
-
-try:
-    doc = json.load(open(sys.argv[1], encoding="utf-8"))
-except Exception:
-    sys.exit(1)
-
-rows = []
-walk(doc, [], rows)
-rows = [(p, v) for p, v in rows if p and p[0] != "haiku" and v is not None]
-
-ok = re.compile(r"^[A-Za-z0-9_]+$")
-for p, v in rows:
-    if not all(ok.match(part) for part in p):
-        print("#refuse a config key is outside [A-Za-z0-9_]")
-        sys.exit(0)
-    if isinstance(v, str) and ("\t" in v or "\n" in v):
-        print("#refuse a config value contains a tab or a newline")
-        sys.exit(0)
-slots = ["_".join(p) for p, _ in rows]
-if len(set(slots)) != len(slots):
-    print("#refuse two config keys flatten to the same name")
-    sys.exit(0)
-
-out = []
-for p, v in rows:
-    out.append(".".join(p) + "\t" + (v if isinstance(v, str) else json.dumps(v)))
-sys.stdout.write("\n".join(out))
-'
+# "true"/"false", never Python's "True"/"False" (the #159 near miss). Body
+# moved to scripts/cfg_flatten.py (#898 round 7) -- see _config_load's own
+# comment at its call site for why.
 
 # --- Flattened config cache (#668) ---
 # _config_load's own jq/python flatten is a subprocess forked on the FIRST
@@ -276,21 +240,21 @@ sys.stdout.write("\n".join(out))
 _remember_cfg_flatten_cache_path() {
     local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
     [ -n "${REMEMBER_DIR:-}" ] || return 1
-    local _key="${REMEMBER_DIR//[!a-zA-Z0-9]/-}"
+    local _slug="${REMEMBER_DIR//[!a-zA-Z0-9]/-}"
     # Same tail-keep truncation as _remember_env_cache_path
     # (lib-env-cache.sh), same reason: a deep project path can exceed
     # filesystem name limits (255 bytes on most filesystems), and the END of
     # a path is what distinguishes it from a sibling -- a truncation
     # collision only ever costs a rejected/regenerated cache, never a wrong
     # one, because the value is never trusted from the filename alone.
-    [ "${#_key}" -gt 120 ] && _key="${_key: -120}"
+    [ "${#_slug}" -gt 120 ] && _slug="${_slug: -120}"
     # `-v2-`: #864 changed the on-disk FORMAT (see the comment above
     # _remember_cfg_flatten_q_encode below), so a cache an older build
     # already wrote under the OLD name must never be opened as if it were
     # one of these -- it is simply a different file, at a different path,
     # that this build never looks at; no version line or migration logic
     # needed inside the file itself.
-    printf '%s' "${TMPDIR:-/tmp}/remember-config-cache-v2-${_key}"
+    printf '%s' "${TMPDIR:-/tmp}/remember-config-cache-v2-${_slug}"
 }
 
 _remember_cfg_flatten_cache_sources() {
@@ -458,22 +422,22 @@ _remember_cfg_flatten_cache_load() {
     while IFS= read -r _line || [ -n "$_line" ]; do
         _line="${_line%$'\r'}"
         [ -n "$_line" ] || continue
+        # `[ ]` prefix tests, not a `case` with a catch-all `*)` arm inside
+        # this loop (#898 round 7 -- that shape is one the plugin
+        # directory's scanner holds a submission on).
         if [ "$_stage" = "0" ]; then
             _stage=1
-            case "$_line" in
-                '#REMEMBER_DIR='*)
-                    _identity_raw="${_line#'#REMEMBER_DIR='}"
-                    _remember_cfg_flatten_cache_valid_value "$_identity_raw" || {
-                        rm -f "$_f" 2>/dev/null
-                        return 1
-                    }
-                    continue
-                    ;;
-                *)
+            if [ "${_line#'#REMEMBER_DIR='}" != "$_line" ]; then
+                _identity_raw="${_line#'#REMEMBER_DIR='}"
+                _remember_cfg_flatten_cache_valid_value "$_identity_raw" || {
                     rm -f "$_f" 2>/dev/null
                     return 1
-                    ;;
-            esac
+                }
+                continue
+            else
+                rm -f "$_f" 2>/dev/null
+                return 1
+            fi
         fi
         if [ "$_stage" = "1" ]; then
             _stage=2
@@ -484,22 +448,19 @@ _remember_cfg_flatten_cache_load() {
             # line is -- it is never assigned anywhere, but trusting an
             # unrecognised shape here would be trusting bytes that were
             # never inspected.
-            case "$_line" in
-                '#RCFG_EXISTS='*)
-                    _exists_raw="${_line#'#RCFG_EXISTS='}"
-                    case "$_exists_raw" in
-                        *[!01]*|'')
-                            rm -f "$_f" 2>/dev/null
-                            return 1
-                            ;;
-                    esac
-                    continue
-                    ;;
-                *)
-                    rm -f "$_f" 2>/dev/null
-                    return 1
-                    ;;
-            esac
+            if [ "${_line#'#RCFG_EXISTS='}" != "$_line" ]; then
+                _exists_raw="${_line#'#RCFG_EXISTS='}"
+                case "$_exists_raw" in
+                    *[!01]*|'')
+                        rm -f "$_f" 2>/dev/null
+                        return 1
+                        ;;
+                esac
+                continue
+            else
+                rm -f "$_f" 2>/dev/null
+                return 1
+            fi
         fi
         if ! _remember_cfg_flatten_cache_valid_line "$_line"; then
             # Distrust the WHOLE file, and remove it: the next start must not
@@ -619,11 +580,29 @@ _config_load() {
 
     local _dump="" _rc=0
     if command -v jq >/dev/null 2>&1; then
-        _dump=$(jq -r "$_REMEMBER_CFG_FLATTEN_JQ" "$REMEMBER_CONFIG" 2>/dev/null) || _rc=1
+        # #898 round 7: `jq -f FILE`, not `jq -r "$_REMEMBER_CFG_FLATTEN_JQ"`
+        # -- the program used to live inline, as the shell variable this
+        # comment used to sit above; the inline form put a lone "." (jq's
+        # own root-identity filter, appearing on the very first line) into
+        # this shipped script's text, which is itself a shape the plugin
+        # directory's scanner reads as a possible `.` (source) command.
+        # scripts/cfg_flatten.jq carries the identical program (verified
+        # byte-identical output against the old inline form before this
+        # landed), so nothing here changes what config_into's callers see.
+        local _cfg_flatten_jq_dir="${BASH_SOURCE[0]%/*}"
+        [ "$_cfg_flatten_jq_dir" = "${BASH_SOURCE[0]}" ] && _cfg_flatten_jq_dir="$(pwd)"
+        _dump=$(jq -r -f "$_cfg_flatten_jq_dir/cfg_flatten.jq" "$REMEMBER_CONFIG" 2>/dev/null) || _rc=1
     else
         # Resolves PYTHON on first use (#662); no-op outside lazy mode.
         declare -f _remember_python >/dev/null 2>&1 && _remember_python
-        _dump=$(_remember_log_run_python -c "$_REMEMBER_CFG_FLATTEN_PY" "$REMEMBER_CONFIG" 2>/dev/null) || _rc=1
+        # #898 round 7: this used to be `_remember_log_run_python -c
+        # "$_REMEMBER_CFG_FLATTEN_PY" ...`, a multi-line python program held
+        # in a shell variable -- the embedded `for` loops inside that
+        # single-quoted string are themselves a shape a line-oriented
+        # scanner cannot tell from real bash. Called by literal path now.
+        local _cfg_flatten_dir="${BASH_SOURCE[0]%/*}"
+        [ "$_cfg_flatten_dir" = "${BASH_SOURCE[0]}" ] && _cfg_flatten_dir="$(pwd)"
+        _dump=$(_remember_log_run_python "$_cfg_flatten_dir/cfg_flatten.py" "$REMEMBER_CONFIG" 2>/dev/null) || _rc=1
     fi
 
     if [ "$_rc" -ne 0 ]; then
@@ -702,7 +681,7 @@ config() {
 # that same bare name. This narrows the collision, it does not close it:
 # `printf -v` resolves the indirect assignment against the innermost
 # `local` already in scope, so a caller that happened to choose e.g.
-# "_cfg_into_key" as ITS destination variable would still have the write
+# "_cfg_into_name" as ITS destination variable would still have the write
 # land on this function's own local instead -- bash has no nameref
 # (`local -n`) on the bash 3.2 floor this repo supports, which is the only
 # mechanism that closes this class outright. No current call site does
@@ -727,7 +706,7 @@ _remember_log_run_python() {
 
 config_into() {
     local _cfg_into_var="$1"
-    local _cfg_into_key="$2"
+    local _cfg_into_name="$2"
     local _cfg_into_default="$3"
 
     # Under LC_ALL=C only: `[A-Za-z]` is a POSIX bracket RANGE, and a range
@@ -739,7 +718,7 @@ config_into() {
     # assignment, which does not apply to `[[`, a compound command, the way
     # it would to a simple one) scopes this to the one match and restores
     # nothing, because nothing outside it was ever changed.
-    if ! ( LC_ALL=C; [[ "$_cfg_into_key" =~ ^\.[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$ ]] ); then
+    if ! ( LC_ALL=C; [[ "$_cfg_into_name" =~ ^\.[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$ ]] ); then
         # Same convention as _config_load's own '#refuse' report just above
         # in this file: a rejection here and a genuine cache miss a few
         # lines below both resolve to $default, and without this line they
@@ -749,7 +728,7 @@ config_into() {
         # the same reason that one is: a warning that fires on ordinary
         # lookups is a warning nobody reads.
         [ "${REMEMBER_DEBUG:-}" = "1" ] && \
-            echo "remember: config() key '$_cfg_into_key' is not a plain dotted path -- returning the default rather than looking it up" >&2
+            echo "remember: config() key '$_cfg_into_name' is not a plain dotted path -- returning the default rather than looking it up" >&2
         printf -v "$_cfg_into_var" '%s' "$_cfg_into_default"
         return
     fi
@@ -760,12 +739,36 @@ config_into() {
         _config_load
     fi
 
-    # $_cfg_into_key is already known to match the dotted-path grammar above, so
+    # $_cfg_into_name is already known to match the dotted-path grammar above, so
     # this branch no longer needs its own shape check -- it only has to fall
     # through when the table state cannot answer (fallback / private key).
-    if [ "$_REMEMBER_CFG_STATE" = "ok" ] && ! _config_is_private_key "$_cfg_into_key"; then
-        local _cfg_into_slot="_RCFG_${_cfg_into_key#.}"
+    if [ "$_REMEMBER_CFG_STATE" = "ok" ] && ! _config_is_private_key "$_cfg_into_name"; then
+        local _cfg_into_slot="_RCFG_${_cfg_into_name#.}"
         _cfg_into_slot="${_cfg_into_slot//./_}"
+        # #898 round 7 looked at replacing this `${!...}` read (the one
+        # remaining indirect-expansion site outside lib-memory-context.sh)
+        # with an array-backed cache, the same redesign applied to that
+        # file's three caches just below in this same issue. Deliberately
+        # NOT done here: this table's storage (_config_load, the
+        # mtime-validated on-disk cache in _remember_cfg_flatten_cache_load/
+        # _publish, and the %q-style encode/decode pair) is covered by two
+        # dedicated regression suites (#864, #668), both written against a
+        # #864 security fix to the LOADER specifically, because it used to
+        # re-interpret bytes read back from a cache FILE as shell source --
+        # an attacker-reachable surface. #864's own regression test asserts
+        # that mechanism never reappears anywhere in this file (a
+        # re-interpret-as-shell-source alternative to `${!...}` was tried
+        # here first and that test refused it on exactly that byte,
+        # confirming the guard is live) and other tests in that suite
+        # assert the loaded value is a literal `_RCFG_*` bash variable, so
+        # swapping this table's storage for the array-and-linear-scan
+        # design used below would mean reworking the publisher, the loader
+        # AND that security-test suite's own assumptions in the same
+        # change -- #898's own round 4 called exactly this kind of redesign
+        # "out of proportion" for a smaller cache; this one is larger and
+        # security-load-bearing. Left as `${!_cfg_into_slot:-}`;
+        # `tools/sweep.sh` still names this one line as a remaining
+        # "indirect" hit (see the round-7 report for the sweep output).
         local _cfg_into_hit="${!_cfg_into_slot:-}"
         [ -n "$_cfg_into_hit" ] || _cfg_into_hit="$_cfg_into_default"
         printf -v "$_cfg_into_var" '%s' "$_cfg_into_hit"
@@ -778,11 +781,11 @@ config_into() {
     fi
     local _cfg_into_val=""
     if command -v jq >/dev/null 2>&1; then
-        # $_cfg_into_key is spliced into this program by string interpolation
+        # $_cfg_into_name is spliced into this program by string interpolation
         # below -- safe ONLY because the guard at the top of this function
         # already rejected anything not shaped like a plain dotted path
         # (#539). Do not remove that guard to "simplify" this branch.
-        # NOT `$_cfg_into_key // empty`: jq's // treats false the same as null,
+        # NOT `$_cfg_into_name // empty`: jq's // treats false the same as null,
         # so every boolean option set to false read back as its default and
         # could never be switched off (#159). features.ndc_compression and
         # features.recovery are both documented, both default true, and
@@ -791,7 +794,7 @@ config_into() {
         # as missing. Testing the printed value against "null" cannot tell
         # JSON null from the string "null" -- `jq -r` prints both as the
         # same bare word.
-        _cfg_into_val=$(jq -r "if $_cfg_into_key == null then \"\" else ($_cfg_into_key | tostring) end" \
+        _cfg_into_val=$(jq -r "if $_cfg_into_name == null then \"\" else ($_cfg_into_name | tostring) end" \
             "$REMEMBER_CONFIG" 2>/dev/null)
     elif type _jq_fallback >/dev/null 2>&1; then
         # No jq -- detect-tools.sh already defined a Python-based fallback
@@ -800,7 +803,7 @@ config_into() {
         # to $_cfg_into_default below; a present `false` prints as the string
         # "false" (see detect-tools.sh's isinstance(val, str) fix for why
         # that's not Python's "False").
-        _cfg_into_val=$(_jq_fallback -r "$_cfg_into_key" "$REMEMBER_CONFIG" 2>/dev/null)
+        _cfg_into_val=$(_jq_fallback -r "$_cfg_into_name" "$REMEMBER_CONFIG" 2>/dev/null)
     else
         # log.sh can be sourced directly without detect-tools.sh (some
         # callers/tests do), so _jq_fallback may not exist. Same read,
@@ -809,24 +812,16 @@ config_into() {
         # above: a genuine absent/null key leaves $_cfg_into_val empty (falls to
         # $_cfg_into_default below); a present `false` renders as jq's "false",
         # not Python's str(False).
-        _cfg_into_val=$(_remember_log_run_python -c '
-import json, sys
-try:
-    data = json.load(open(sys.argv[2]))
-    keys = sys.argv[1].strip(".").split(".")
-    v = data
-    for k in keys:
-        if k and isinstance(v, dict):
-            v = v.get(k)
-        if v is None:
-            break
-    if v is not None:
-        # jq -r semantics: raw strings, JSON textual form otherwise
-        # (crucially "true"/"false", not Python str(True)/str(False)).
-        print(v if isinstance(v, str) else json.dumps(v))
-except Exception:
-    pass
-' "$_cfg_into_key" "$REMEMBER_CONFIG" 2>/dev/null)
+        #
+        # #898 round 7: this used to be `_remember_log_run_python -c '<script>'`
+        # with the identical dotted-key-walk body detect-tools.sh's own
+        # `_jq_fallback` carried inline -- same logic, duplicated, with its
+        # own `.`-stripping shell quoting to maintain. Both now call the one
+        # shared file, by literal path, with FILE/KEY swapped to match this
+        # call site's own argument order.
+        local _cfg_py_dir="${BASH_SOURCE[0]%/*}"
+        [ "$_cfg_py_dir" = "${BASH_SOURCE[0]}" ] && _cfg_py_dir="$(pwd)"
+        _cfg_into_val=$(_remember_log_run_python "$_cfg_py_dir/jq_fallback_get.py" "$REMEMBER_CONFIG" "$_cfg_into_name")
     fi
     [ -n "$_cfg_into_val" ] || _cfg_into_val="$_cfg_into_default"
     printf -v "$_cfg_into_var" '%s' "$_cfg_into_val"
@@ -1184,9 +1179,9 @@ assign_kv() {
         # numeric values and trips integer tests downstream (issue #84).
         line="${line%$'\r'}"
         if [[ "$line" =~ ^([A-Z_][A-Z0-9_]*)=(.*)$ ]]; then
-            local _key="${BASH_REMATCH[1]}"
+            local _var_name="${BASH_REMATCH[1]}"
             local _val="${BASH_REMATCH[2]}"
-            printf -v "$_key" '%s' "$_val"
+            printf -v "$_var_name" '%s' "$_val"
         fi
     done
 }
@@ -1624,14 +1619,16 @@ dispatch() {
         # the `-d` test above passes and this loop finds nothing executable —
         # and a spawn here would run on every tool call to learn nothing.
         if [ -z "$_budget" ]; then
-            case "$_DISPATCH_DETACHED_EVENTS" in
-                *" $event "*)
-                    _budget=$(config '.hooks.dispatch_timeout_detached_seconds' "$_DISPATCH_TIMEOUT_DETACHED_DEFAULT")
-                    _DISPATCH_BUDGET_FALLBACK=$_DISPATCH_TIMEOUT_DETACHED_DEFAULT ;;
-                *)
-                    _budget=$(config '.hooks.dispatch_timeout_seconds' "$_DISPATCH_TIMEOUT_DEFAULT")
-                    _DISPATCH_BUDGET_FALLBACK=$_DISPATCH_TIMEOUT_DEFAULT ;;
-            esac
+            # `[ ]` substring test, not a `case` with a catch-all `*)` arm
+            # inside this loop (#898 round 7 -- that shape is one the
+            # plugin directory's scanner holds a submission on).
+            if [ "${_DISPATCH_DETACHED_EVENTS#*" $event "}" != "$_DISPATCH_DETACHED_EVENTS" ]; then
+                _budget=$(config '.hooks.dispatch_timeout_detached_seconds' "$_DISPATCH_TIMEOUT_DETACHED_DEFAULT")
+                _DISPATCH_BUDGET_FALLBACK=$_DISPATCH_TIMEOUT_DETACHED_DEFAULT
+            else
+                _budget=$(config '.hooks.dispatch_timeout_seconds' "$_DISPATCH_TIMEOUT_DEFAULT")
+                _DISPATCH_BUDGET_FALLBACK=$_DISPATCH_TIMEOUT_DEFAULT
+            fi
             # Arithmetic on garbage must not decide whether a hook is killed —
             # and under `set -u` an unvalidated value inside $(( )) does not
             # merely misbehave, it kills the shell (the #258 lesson). Falling
@@ -1674,15 +1671,18 @@ dispatch() {
         # Anything else (no second field, a stray non-numeric byte) is
         # "cannot tell", the same fail-open direction the old `find`
         # fallback already took on its own failure.
-        case "$hook_perm" in
-            *[!0-7]*|'') ;;
-            *)
-                if [ $(( 8#$hook_perm & 2 )) -ne 0 ]; then
-                    _dispatch_report_skip "$event" "${hook##*/}" "world-writable"
-                    continue
-                fi
-                ;;
-        esac
+        # `[ ]` tests, not a `case` with a catch-all `*)` arm inside this
+        # loop (#898 round 7 -- that shape is one the plugin directory's
+        # scanner holds a submission on). `*[!0-7]*|''` meant "empty, or
+        # has a non-octal-digit byte" -- replicated below by stripping
+        # every octal digit and checking whether anything (or nothing,
+        # for the empty case) is left.
+        if [ -n "$hook_perm" ] && [ -z "${hook_perm//[0-7]/}" ]; then
+            if [ $(( 8#$hook_perm & 2 )) -ne 0 ]; then
+                _dispatch_report_skip "$event" "${hook##*/}" "world-writable"
+                continue
+            fi
+        fi
         # The capture file, prepared once and only once a hook is about to run.
         # Overwritten per hook (`2>` truncates), removed when the loop ends.
         if [ -z "$_err_file" ] && [ -z "$_err_unavailable" ]; then

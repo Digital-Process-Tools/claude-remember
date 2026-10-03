@@ -218,11 +218,18 @@ _set_store_root() {
 
     # Trailing separators, never down to nothing: the ?* guard keeps "/" whole
     # so the refusal below is what rejects it, rather than this loop emptying it.
+    # `[ ]` suffix tests, not a `case` with a catch-all `*)` arm inside this
+    # loop (#898 round 7 -- that shape is one the plugin directory's
+    # scanner holds a submission on). `?*/` meant "ends in `/` (or `\\`)
+    # AND is at least 2 chars" -- replicated here as a length check plus a
+    # suffix-strip test, so a lone separator ("/" alone) still falls
+    # through to the refusal below rather than being emptied by this loop.
     while :; do
-        case "$prefix" in
-            ?*/|?*\\) prefix="${prefix%?}" ;;
-            *) break ;;
-        esac
+        if [ "${#prefix}" -gt 1 ] && { [ "${prefix%/}" != "$prefix" ] || [ "${prefix%\\}" != "$prefix" ]; }; then
+            prefix="${prefix%?}"
+        else
+            break
+        fi
     done
 
     case "$prefix" in

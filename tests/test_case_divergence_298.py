@@ -303,6 +303,27 @@ _SANCTIONED_DIVERGENCE = {
             '[ "$_REMEMBER_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_SRC_DIR="$(pwd)"\n'
             'source "$_REMEMBER_SRC_DIR/lib-slug.sh"\n',
         ),
+        # #898 round 7: a `case` with a catch-all `*)` arm inside this
+        # `while :; do` loop is a catch-all-in-loop shape the plugin
+        # directory's scanner holds on -- replaced with `[ ]` prefix/
+        # suffix tests, same trailing-separator strip semantics (`?*/`
+        # meant "ends in / or a backslash AND is at least 2 chars",
+        # replicated via the length check plus a suffix-strip test below).
+        (
+            '    while :; do\n'
+            '        case "$prefix" in\n'
+            '            ?*/|?*\\\\) prefix="${prefix%?}" ;;\n'
+            '            *) break ;;\n'
+            '        esac\n'
+            '    done\n',
+            '    while :; do\n'
+            '        if [ "${#prefix}" -gt 1 ] && { [ "${prefix%/}" != "$prefix" ] || [ "${prefix%\\\\}" != "$prefix" ]; }; then\n'
+            '            prefix="${prefix%?}"\n'
+            '        else\n'
+            '            break\n'
+            '        fi\n'
+            '    done\n',
+        ),
         # #898 round 4: a typed here-document is read by the directory's
         # scanner as an UNPINNED_NPX hold -- the two-line `{ IFS= read ...
         # } <<EOF\n$_out\nEOF` is replaced with a single-line here-string,

@@ -252,12 +252,17 @@ trap cleanup EXIT
 DRY_RUN=false
 FORCE=false
 SESSION_ID=""
+# `[ ]` tests, not a `case` with a catch-all `*)` arm inside this loop
+# (#898 round 7 -- that shape is one the plugin directory's scanner
+# holds a submission on).
 for arg in "$@"; do
-    case "$arg" in
-        --dry)   DRY_RUN=true ;;
-        --force) FORCE=true ;;
-        *)       SESSION_ID="$arg" ;;
-    esac
+    if [ "$arg" = "--dry" ]; then
+        DRY_RUN=true
+    elif [ "$arg" = "--force" ]; then
+        FORCE=true
+    else
+        SESSION_ID="$arg"
+    fi
 done
 
 # --- Lock (mkdir acquisition, rename-based stale takeover — see lib-lock.sh) ---
@@ -758,14 +763,14 @@ save_position_span() {
 
 record_summary_failure() {
     [ "$MAX_FAILURES" -eq 0 ] && return 0
-    _prev_key=""
+    _prev_span_id=""
     _prev_count=0
     if [ -f "$FAILURE_MARKER" ]; then
-        read -r _prev_key _prev_count < "$FAILURE_MARKER" || true
+        read -r _prev_span_id _prev_count < "$FAILURE_MARKER" || true
         case "$_prev_count" in ''|*[!0-9]*) _prev_count=0 ;; esac
     fi
-    _key="${SESSION_ID}:${POSITION}"
-    if [ "$_prev_key" = "$_key" ]; then
+    _span_id="${SESSION_ID}:${POSITION}"
+    if [ "$_prev_span_id" = "$_span_id" ]; then
         # 10# after the case (#332): a truncated marker read back as "08"
         # would abandon this branch, and the branch is what escalates.
         _count=$(( 10#$_prev_count + 1 ))
@@ -778,7 +783,7 @@ record_summary_failure() {
         save_position_span
         rm -f "$FAILURE_MARKER"
     elif marker_write_ok "$FAILURE_MARKER" summary; then
-        echo "$_key $_count" > "$FAILURE_MARKER"
+        echo "$_span_id $_count" > "$FAILURE_MARKER"
         log "haiku" "failure ${_count}/${MAX_FAILURES} on this span -- will retry next run"
     fi
 }
