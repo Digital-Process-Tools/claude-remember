@@ -166,14 +166,12 @@ ALLOWLIST: dict[tuple[str, int], str] = {
     # Lines shifted +6 by #898 round 4's PIPELINE_DIR nested-default-expansion
     # fix near the top of this file (the case statements/strings themselves
     # are unchanged).
-    ("scripts/log.sh", 155):
-        "inside _REMEMBER_CFG_FLATTEN_JQ, a jq program string. jq matches "
-        "with Oniguruma, which is not driven by the shell's LC_COLLATE.",
-    ("scripts/log.sh", 181):
-        "inside the embedded Python fallback. Python's `re` over `str` "
-        "matches [A-Za-z0-9_] as ASCII regardless of locale.",
-    ("scripts/log.sh", 184):
-        "the same Python fallback's own message text, not a pattern.",
+    # #898 round 7: the three exemptions that used to sit here (the inline
+    # jq program and the inline Python fallback, both inside log.sh's own
+    # config() flattener) no longer apply -- both bodies moved to their own
+    # files (scripts/cfg_flatten.jq, scripts/cfg_flatten.py), so neither
+    # range exists in this shipped .sh file anymore and needs no exemption
+    # here at all.
     # Shifted +15 by #898 round 5's _remember_run_python/_remember_slug_run_python
     # wrapper function added near the top of this file (the array itself is
     # unchanged).
