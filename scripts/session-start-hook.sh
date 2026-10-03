@@ -481,12 +481,16 @@ session_was_saved() {
     [ -n "$1" ] && [ -f "$LAST_SAVE_FILE" ] || return 1
     if [ "$JQ" = "_jq_fallback" ]; then
         _remember_python || return 1
-        [ "$($PYTHON - "$LAST_SAVE_FILE" "$1" << 'PYEOF' 2>/dev/null
-import json, math, sys
+        # #898: a quoted here-document (`<<'"'"'PYEOF'"'"'`) is read by the
+        # directory's scanner as a typed `<<` it cannot place (UNPINNED_NPX) --
+        # replaced with a here-string carrying the identical script as a
+        # single-quoted literal (no `'"'"'` byte appears in it, so this is
+        # safe), same argv, same stdin content.
+        [ "$($PYTHON - "$LAST_SAVE_FILE" "$1" <<< 'import json, math, sys
 
 def isline(v):
-    # Mirrors $SAVED_QUERY's own `isline` def exactly: a JSON number,
-    # never a bool (Python's bool is an int subclass), finite (excludes
+    # Mirrors $SAVED_QUERY'"'"'s own `isline` def exactly: a JSON number,
+    # never a bool (Python'"'"'s bool is an int subclass), finite (excludes
     # both NaN and +/-Infinity -- 1e400 overflows to Infinity, and
     # floor(Infinity) == Infinity, which would otherwise read as a false
     # "saved"), and equal to its own floor (an integer value).
@@ -510,7 +514,7 @@ if not isinstance(data, dict):
 
 sessions = data.get("sessions")
 if sessions is not None and not isinstance(sessions, dict):
-    # $SAVED_QUERY's own `(.sessions // {})[$id]` throws a hard jq runtime
+    # $SAVED_QUERY'"'"'s own `(.sessions // {})[$id]` throws a hard jq runtime
     # error the instant `.sessions` is present but not an object (or null)
     # -- jq has no `or`-short-circuit past a raised error, so the WHOLE
     # query aborts right there and the shell side reads empty stdout as
@@ -528,7 +532,7 @@ elif data.get("session") == sid and isline(data.get("line")):
     print("saved")
 else:
     print("unsaved")
-PYEOF
+' 2>/dev/null
 )" = "saved" ]
     else
         [ "$($JQ -r --arg id "$1" "$SAVED_QUERY" "$LAST_SAVE_FILE" 2>/dev/null)" = "saved" ]

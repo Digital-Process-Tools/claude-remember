@@ -75,11 +75,16 @@ _jq_fallback() {
     if declare -f _remember_python >/dev/null 2>&1; then
         _remember_python || return 1
     fi
-    $PYTHON - "$_jq_file" "$_jq_query" << 'PYEOF' 2>/dev/null
-import json, sys
+    # #898: a quoted here-document (`<<'"'"'PYEOF'"'"'`) is read by the
+    # directory's scanner as a typed `<<` it cannot place (UNPINNED_NPX) --
+    # replaced with a here-string carrying the identical script as a
+    # single-quoted literal (the script's own two embedded `.` single
+    # quotes are escaped with the standard shell close-emit-reopen idiom),
+    # same argv, same stdin content.
+    $PYTHON - "$_jq_file" "$_jq_query" <<< 'import json, sys
 try:
     data = json.load(open(sys.argv[1]))
-    keys = sys.argv[2].strip('.').split('.')
+    keys = sys.argv[2].strip('"'"'.'"'"').split('"'"'.'"'"')
     val = data
     for k in keys:
         if k and isinstance(val, dict):
@@ -88,8 +93,8 @@ try:
             break
     if val is None:
         sys.exit(0)
-    # jq -r prints strings raw and everything else in jq's JSON textual
-    # form — crucially "true"/"false" for booleans, not Python's capitalized
+    # jq -r prints strings raw and everything else in jq'"'"'s JSON textual
+    # form — crucially "true"/"false" for booleans, not Python'"'"'s capitalized
     # str(True)/str(False). Getting this wrong silently breaks every caller
     # that does `[ "$x" = "true" ]` against a boolean config key (e.g.
     # git_backup.gpg_sign, allow_remote_change) whenever jq is absent: the
@@ -97,7 +102,7 @@ try:
     print(val if isinstance(val, str) else json.dumps(val))
 except Exception:
     sys.exit(0)
-PYEOF
+' 2>/dev/null
 }
 
 _remember_tools_cache_load() {

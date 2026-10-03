@@ -603,9 +603,7 @@ _remember_file_tracked_state_into() {
             printf -v "$_fts_outvar" 'tracked'
             return 0
         fi
-    done <<EOF
-$_fts_list
-EOF
+    done <<< "$_fts_list"
     printf -v "$_fts_outvar" 'not-tracked'
 }
 

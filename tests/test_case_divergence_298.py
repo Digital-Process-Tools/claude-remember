@@ -252,6 +252,16 @@ _SANCTIONED_DIVERGENCE = {
             '[ "$_REMEMBER_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_SRC_DIR="$PWD"\n'
             'source "$_REMEMBER_SRC_DIR/lib-slug.sh"\n',
         ),
+        # #898 round 4: a typed here-document is read by the directory's
+        # scanner as an UNPINNED_NPX hold -- the two-line `{ IFS= read ...
+        # } <<EOF\n$_out\nEOF` is replaced with a single-line here-string,
+        # same stdin content, same read semantics.
+        (
+            '    { IFS= read -r _gcd; IFS= read -r _gd; } <<EOF\n'
+            '$_out\n'
+            'EOF\n',
+            '    { IFS= read -r _gcd; IFS= read -r _gd; } <<< "$_out"\n',
+        ),
         # #662's own tuple (the `_LAZY_PYTHON_GUARD` insertion into the no-jq
         # elif, on its own, pre-#726 two-argument invocation) is gone (#734):
         # #726 (below) composed directly on top of it and shipped the guard
@@ -588,93 +598,60 @@ _SANCTIONED_DIVERGENCE = {
             '    [ -n "$_project_sanitized_tmp" ] && rm -f "$_project_sanitized_tmp"\n'
             'elif [ "${#_cfg_sources[@]}" -gt 0 ]; then\n',
         ),
+        # #898 round 4: folded per case-divergence-pin-fold-dont-stack.md,
+        # the same convention the #815 pair below already used to supersede
+        # #804 -- this REPLACES both the #804 and #815 pairs entirely (their
+        # own new_code, concatenated, is what origin/main ships today; their
+        # own old_codes are no longer reachable and are dropped along with
+        # them). new_code: a typed backtick<<PYMERGE here-document is read by
+        # the scanner as an UNPINNED_NPX hold -- replaced with a here-string
+        # carrying the identical script as a single-quoted literal (the
+        # scripts own embedded apostrophe is escaped with the standard shell
+        # close-emit-reopen idiom), same argv, same stdin content.
         (
-            # #804: folded per case-divergence-pin-fold-dont-stack.md --
-            # old_code is now the #748 steady state (already landed on
-            # origin/main); new_code adds a second, independent drop
-            # signal (the interpreter's own exit code) alongside the
-            # drop-marker file, since that marker's own mktemp can itself
-            # fail and leave the drop unreported (#748's own compound gap).
-            '    declare -f _remember_python >/dev/null 2>&1 && _remember_python\n'
-            '    _untrusted_haiku_source=""\n'
-            '    [ "$_project_cfg_haiku_untrusted" = "1" ] && _untrusted_haiku_source="$_project_cfg"\n'
-            '    _strip_model_reject="0"\n'
-            '    [ "$_project_cfg_model_reject_untrusted" = "1" ] && _strip_model_reject="1"\n'
-            '    _project_drop_marker=$(mktemp "${SYS_TMPDIR}/remember-config-drop-marker-XXXXXX" 2>/dev/null) || _project_drop_marker=""\n'
-            '    rm -f "$_project_drop_marker" 2>/dev/null\n'
-            '    "${PYTHON:-python3}" - "$_merged_cfg" "$_untrusted_haiku_source" "$_strip_model_reject" "$_project_drop_marker" "${_cfg_sources[@]}" > /dev/null 2>&1 <<\'PYMERGE\' || cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null\n'
-            'import json\n',
-            '    declare -f _remember_python >/dev/null 2>&1 && _remember_python\n'
-            '    _untrusted_haiku_source=""\n'
-            '    [ "$_project_cfg_haiku_untrusted" = "1" ] && _untrusted_haiku_source="$_project_cfg"\n'
-            '    _strip_model_reject="0"\n'
-            '    [ "$_project_cfg_model_reject_untrusted" = "1" ] && _strip_model_reject="1"\n'
-            '    _project_drop_marker=$(mktemp "${SYS_TMPDIR}/remember-config-drop-marker-XXXXXX" 2>/dev/null) || _project_drop_marker=""\n'
-            '    rm -f "$_project_drop_marker" 2>/dev/null\n'
-            '    _py_merge_rc=0\n'
+            '_py_merge_rc=0\n'
             '    "${PYTHON:-python3}" - "$_merged_cfg" "$_untrusted_haiku_source" "$_strip_model_reject" "$_project_drop_marker" "${_cfg_sources[@]}" > /dev/null 2>&1 <<\'PYMERGE\' || _py_merge_rc=$?\n'
-            'import json\n',
-        ),
-        (
-            # #815: folded per case-divergence-pin-fold-dont-stack.md -- this
-            # REPLACES the earlier #804 pair rather than stacking beside it
-            # (that pair's own new_code, the #804 steady state, is what
-            # origin/main ships today, so it moves here as the new old_code
-            # verbatim; #804's own old_code, the pre-#804 #748/#726 form, is
-            # no longer reachable and is dropped along with it). new_code
-            # adds `_dropped_trusted_layer` and its own exit codes (4, 5),
-            # plus the matching shell-side rc handling and a second WARNING,
-            # since a malformed TRUSTED source (bundled or user-global config,
-            # or project config outside the untrusted-haiku case) used to
-            # raise uncaught and fall through to the bundled-only fallback
-            # with no disclosure at all -- the #804 gate only ever checked
-            # the drop-marker file or rc == 3, neither of which this path
-            # touched.
-            'merged = {}\n'
-            '_dropped_project_layer = False\n'
-            'for path in sys.argv[5:]:\n'
-            '    if untrusted_haiku_path and path == untrusted_haiku_path:\n'
-            '        try:\n'
-            '            docs = load_documents(path)\n'
-            '        except (OSError, ValueError):\n'
-            '            _dropped_project_layer = True\n'
-            '            if drop_marker_path:\n'
-            '                try:\n'
-            '                    with open(drop_marker_path, "w") as _marker:\n'
-            '                        _marker.write("1")\n'
-            '                except OSError:\n'
-            '                    pass\n'
-            '            continue\n'
-            '        for data in docs:\n'
-            '            if isinstance(data, dict):\n'
-            '                drop = {"haiku"}\n'
-            '                if strip_model_reject:\n'
-            '                    drop |= {"model", "reject_pattern"}\n'
-            '                data = {k: v for k, v in data.items() if k not in drop}\n'
-            '            merged = deep_merge(merged, data)\n'
-            '        continue\n'
+            'import json\n'
+            'import sys\n'
+            '\n'
+            '\n'
+            'def deep_merge(a, b):\n'
+            '    if isinstance(a, dict) and isinstance(b, dict):\n'
+            '        out = dict(a)\n'
+            '        for k, v in b.items():\n'
+            '            out[k] = deep_merge(out[k], v) if k in out else v\n'
+            '        return out\n'
+            '    return b\n'
+            '\n'
+            '\n'
+            'out_path = sys.argv[1]\n'
+            'untrusted_haiku_path = sys.argv[2]\n'
+            'strip_model_reject = sys.argv[3] == "1"\n'
+            'drop_marker_path = sys.argv[4]\n'
+            '\n'
+            '\n'
+            'def load_documents(path):\n'
+            '    """Parse every whitespace-concatenated JSON document in `path` (#740):\n'
+            '    the untrusted project layer may ship more than one, and a plain\n'
+            '    json.load() raises `JSONDecodeError` on any file with more than one --\n'
+            '    which used to take the WHOLE merge down with it (the `|| cp\n'
+            '    "$_bundled_cfg" ...` fallback below), dropping the trusted user-global\n'
+            '    layer too rather than just stripping `haiku` from this file\'s own\n'
+            '    documents and keeping everything else."""\n'
             '    with open(path) as f:\n'
-            '        data = json.load(f)\n'
-            '    merged = deep_merge(merged, data)\n'
-            'merged = {k: v for k, v in merged.items() if not str(k).startswith("_")}\n'
-            'with open(out_path, "w") as f:\n'
-            '    json.dump(merged, f)\n'
-            'if _dropped_project_layer:\n'
-            '    sys.exit(3)\n'
-            'PYMERGE\n'
-            '    if [ "$_py_merge_rc" != "0" ] && [ "$_py_merge_rc" != "3" ]; then\n'
-            '        cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null\n'
-            '    fi\n'
-            '    if { [ -n "$_project_drop_marker" ] && [ -f "$_project_drop_marker" ]; } || [ "$_py_merge_rc" = "3" ]; then\n'
-            '        rm -f "$_project_drop_marker" 2>/dev/null\n'
-            '        if declare -F report_error >/dev/null 2>&1; then\n'
-            '            report_error "lib-memory-dir" "sanitizing the project config layer failed (unreadable project file or malformed JSON) -- that layer was dropped; bundled/user-global config still applies"\n'
-            '        else\n'
-            '            printf \'%s\\n\' "[lib-memory-dir] WARNING: sanitizing the project config layer failed (unreadable project file or malformed JSON) -- that layer was dropped; bundled/user-global config still applies" >&2\n'
-            '        fi\n'
-            '    fi\n'
-            '    [ -n "$_project_drop_marker" ] && rm -f "$_project_drop_marker" 2>/dev/null\n'
-            'else\n',
+            '        raw = f.read()\n'
+            '    decoder = json.JSONDecoder()\n'
+            '    idx, n, docs = 0, len(raw), []\n'
+            '    while idx < n:\n'
+            '        while idx < n and raw[idx].isspace():\n'
+            '            idx += 1\n'
+            '        if idx >= n:\n'
+            '            break\n'
+            '        obj, idx = decoder.raw_decode(raw, idx)\n'
+            '        docs.append(obj)\n'
+            '    return docs\n'
+            '\n'
+            '\n'
             'merged = {}\n'
             '_dropped_project_layer = False\n'
             '_dropped_trusted_layer = False\n'
@@ -736,6 +713,119 @@ _SANCTIONED_DIVERGENCE = {
             '    fi\n'
             '    [ -n "$_project_drop_marker" ] && rm -f "$_project_drop_marker" 2>/dev/null\n'
             'else\n',
+            '_py_merge_rc=0\n'
+            '    "${PYTHON:-python3}" - "$_merged_cfg" "$_untrusted_haiku_source" "$_strip_model_reject" "$_project_drop_marker" "${_cfg_sources[@]}" > /dev/null 2>&1 <<< \'import json\n'
+            'import sys\n'
+            '\n'
+            '\n'
+            'def deep_merge(a, b):\n'
+            '    if isinstance(a, dict) and isinstance(b, dict):\n'
+            '        out = dict(a)\n'
+            '        for k, v in b.items():\n'
+            '            out[k] = deep_merge(out[k], v) if k in out else v\n'
+            '        return out\n'
+            '    return b\n'
+            '\n'
+            '\n'
+            'out_path = sys.argv[1]\n'
+            'untrusted_haiku_path = sys.argv[2]\n'
+            'strip_model_reject = sys.argv[3] == "1"\n'
+            'drop_marker_path = sys.argv[4]\n'
+            '\n'
+            '\n'
+            'def load_documents(path):\n'
+            '    """Parse every whitespace-concatenated JSON document in `path` (#740):\n'
+            '    the untrusted project layer may ship more than one, and a plain\n'
+            '    json.load() raises `JSONDecodeError` on any file with more than one --\n'
+            '    which used to take the WHOLE merge down with it (the `|| cp\n'
+            '    "$_bundled_cfg" ...` fallback below), dropping the trusted user-global\n'
+            '    layer too rather than just stripping `haiku` from this file\'"\'"\'s own\n'
+            '    documents and keeping everything else."""\n'
+            '    with open(path) as f:\n'
+            '        raw = f.read()\n'
+            '    decoder = json.JSONDecoder()\n'
+            '    idx, n, docs = 0, len(raw), []\n'
+            '    while idx < n:\n'
+            '        while idx < n and raw[idx].isspace():\n'
+            '            idx += 1\n'
+            '        if idx >= n:\n'
+            '            break\n'
+            '        obj, idx = decoder.raw_decode(raw, idx)\n'
+            '        docs.append(obj)\n'
+            '    return docs\n'
+            '\n'
+            '\n'
+            'merged = {}\n'
+            '_dropped_project_layer = False\n'
+            '_dropped_trusted_layer = False\n'
+            'for path in sys.argv[5:]:\n'
+            '    if untrusted_haiku_path and path == untrusted_haiku_path:\n'
+            '        try:\n'
+            '            docs = load_documents(path)\n'
+            '        except (OSError, ValueError):\n'
+            '            _dropped_project_layer = True\n'
+            '            if drop_marker_path:\n'
+            '                try:\n'
+            '                    with open(drop_marker_path, "w") as _marker:\n'
+            '                        _marker.write("1")\n'
+            '                except OSError:\n'
+            '                    pass\n'
+            '            continue\n'
+            '        for data in docs:\n'
+            '            if isinstance(data, dict):\n'
+            '                drop = {"haiku"}\n'
+            '                if strip_model_reject:\n'
+            '                    drop |= {"model", "reject_pattern"}\n'
+            '                data = {k: v for k, v in data.items() if k not in drop}\n'
+            '            merged = deep_merge(merged, data)\n'
+            '        continue\n'
+            '    try:\n'
+            '        with open(path) as f:\n'
+            '            data = json.load(f)\n'
+            '    except (OSError, ValueError):\n'
+            '        _dropped_trusted_layer = True\n'
+            '        continue\n'
+            '    merged = deep_merge(merged, data)\n'
+            'merged = {k: v for k, v in merged.items() if not str(k).startswith("_")}\n'
+            'with open(out_path, "w") as f:\n'
+            '    json.dump(merged, f)\n'
+            'if _dropped_project_layer and _dropped_trusted_layer:\n'
+            '    sys.exit(5)\n'
+            'elif _dropped_project_layer:\n'
+            '    sys.exit(3)\n'
+            'elif _dropped_trusted_layer:\n'
+            '    sys.exit(4)\n'
+            '\' || _py_merge_rc=$?\n'
+            '    if [ "$_py_merge_rc" != "0" ] && [ "$_py_merge_rc" != "3" ] && [ "$_py_merge_rc" != "4" ] && [ "$_py_merge_rc" != "5" ]; then\n'
+            '        cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null\n'
+            '    fi\n'
+            '    if { [ -n "$_project_drop_marker" ] && [ -f "$_project_drop_marker" ]; } || [ "$_py_merge_rc" = "3" ] || [ "$_py_merge_rc" = "5" ]; then\n'
+            '        rm -f "$_project_drop_marker" 2>/dev/null\n'
+            '        if declare -F report_error >/dev/null 2>&1; then\n'
+            '            report_error "lib-memory-dir" "sanitizing the project config layer failed (unreadable project file or malformed JSON) -- that layer was dropped; bundled/user-global config still applies"\n'
+            '        else\n'
+            '            printf \'%s\\n\' "[lib-memory-dir] WARNING: sanitizing the project config layer failed (unreadable project file or malformed JSON) -- that layer was dropped; bundled/user-global config still applies" >&2\n'
+            '        fi\n'
+            '    fi\n'
+            '    if [ "$_py_merge_rc" = "4" ] || [ "$_py_merge_rc" = "5" ]; then\n'
+            '        if declare -F report_error >/dev/null 2>&1; then\n'
+            '            report_error "lib-memory-dir" "sanitizing a trusted config layer failed (unreadable file or malformed JSON) -- bundled config, user-global config, and project config (when it is not the untrusted-haiku source) are all reached here, and one of them was dropped; the remaining layers still applied"\n'
+            '        else\n'
+            '            printf \'%s\\n\' "[lib-memory-dir] WARNING: sanitizing a trusted config layer failed (unreadable file or malformed JSON) -- bundled config, user-global config, and project config (when it is not the untrusted-haiku source) are all reached here, and one of them was dropped; the remaining layers still applied" >&2\n'
+            '        fi\n'
+            '    fi\n'
+            '    [ -n "$_project_drop_marker" ] && rm -f "$_project_drop_marker" 2>/dev/null\n'
+            'else\n',
+        ),
+        # #898 round 4: the script's own docstring carries a literal
+        # apostrophe ("this file's own documents") that must be escaped as
+        # the standard shell close-emit-reopen idiom inside the new
+        # single-quoted here-string wrapper -- a byte-level consequence of
+        # the substitution above, not a content change (the apostrophe
+        # still reaches the interpreter's stdin as a single `'"'"'` byte).
+        (
+            "    layer too rather than just stripping `haiku` from this file's own\n",
+            '    layer too rather than just stripping `haiku` from this file\'"\'"\'s own\n',
         ),
     ],
 }

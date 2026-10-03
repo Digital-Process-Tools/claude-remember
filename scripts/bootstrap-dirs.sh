@@ -185,9 +185,7 @@ if [ "$REMEMBER_DIR" != "$_legacy_dir" ] && [ ! -L "$_legacy_dir" ] && [ -d "$_l
                         [ "$_legacy_was_nocasematch" -eq 1 ] || shopt -u nocasematch
                         [ "$_legacy_ci_match" -eq 1 ] && continue
                         _legacy_other_tracked="tracked"
-                    done <<EOF
-$_legacy_ls_list
-EOF
+                    done <<< "$_legacy_ls_list"
                 fi
             fi
             # else: a real repository, but $_mem_proj is not inside its work

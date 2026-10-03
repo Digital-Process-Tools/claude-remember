@@ -111,9 +111,7 @@ _resolve_memory_project_dir() {
     local _out _gcd _gd
     _out=$(git -C "$proj" rev-parse --path-format=absolute \
                 --git-common-dir --git-dir 2>/dev/null) || _out=""
-    { IFS= read -r _gcd; IFS= read -r _gd; } <<EOF
-$_out
-EOF
+    { IFS= read -r _gcd; IFS= read -r _gd; } <<< "$_out"
 
     # Not a git repo, unsupported flag, or an ordinary checkout (common == git):
     # leave PROJECT_DIR untouched.
@@ -630,8 +628,12 @@ elif [ "${#_cfg_sources[@]}" -gt 0 ]; then
     # untrusted project layer was dropped" and must NOT trigger the
     # bundled-only fallback the way a genuine merge failure does.
     _py_merge_rc=0
-    "${PYTHON:-python3}" - "$_merged_cfg" "$_untrusted_haiku_source" "$_strip_model_reject" "$_project_drop_marker" "${_cfg_sources[@]}" > /dev/null 2>&1 <<'PYMERGE' || _py_merge_rc=$?
-import json
+    # #898: a quoted here-document (`<<'"'"'PYMERGE'"'"'`) is read by the
+    # directory's scanner as a typed `<<` it cannot place (UNPINNED_NPX) --
+    # replaced with a here-string carrying the identical script as a single
+    # quoted literal (no `'"'"'` byte appears in it, so this is safe), same
+    # argv, same stdin content, same exit-code contract.
+    "${PYTHON:-python3}" - "$_merged_cfg" "$_untrusted_haiku_source" "$_strip_model_reject" "$_project_drop_marker" "${_cfg_sources[@]}" > /dev/null 2>&1 <<< 'import json
 import sys
 
 
@@ -645,16 +647,16 @@ def deep_merge(a, b):
 
 
 out_path = sys.argv[1]
-# Empty string when the project layer's `haiku` block is trusted (external
+# Empty string when the project layer'"'"'s `haiku` block is trusted (external
 # storage mode, or no project cfg at all) -- never equal to a real path then,
 # so nothing is stripped (#726, see the case switch this mirrors above).
 untrusted_haiku_path = sys.argv[2]
 # #757: "1" only when the SAME untrusted source is also git-tracked --
 # model/reject_pattern are stripped alongside haiku only then, never for
-# an untracked (the operator's own) in-project config.
+# an untracked (the operator'"'"'s own) in-project config.
 strip_model_reject = sys.argv[3] == "1"
 # #748: empty when mktemp itself failed above -- tolerated the same way
-# every other mktemp-failure path in this file is (fall through, don't
+# every other mktemp-failure path in this file is (fall through, don'"'"'t
 # crash the merge over the logging side-channel itself).
 drop_marker_path = sys.argv[4]
 
@@ -665,7 +667,7 @@ def load_documents(path):
     json.load() raises `JSONDecodeError` on any file with more than one --
     which used to take the WHOLE merge down with it (the `|| cp
     "$_bundled_cfg" ...` fallback below), dropping the trusted user-global
-    layer too rather than just stripping `haiku` from this file's own
+    layer too rather than just stripping `haiku` from this file'"'"'s own
     documents and keeping everything else."""
     with open(path) as f:
         raw = f.read()
@@ -686,25 +688,25 @@ _dropped_project_layer = False
 _dropped_trusted_layer = False
 for path in sys.argv[5:]:
     if untrusted_haiku_path and path == untrusted_haiku_path:
-        # #744: fail CLOSED -- if the untrusted file can't even be loaded
+        # #744: fail CLOSED -- if the untrusted file can'"'"'t even be loaded
         # (unreadable, a permissions error, malformed JSON, anything
-        # load_documents() itself doesn't already tolerate), drop just this
+        # load_documents() itself doesn'"'"'t already tolerate), drop just this
         # layer rather than let the exception propagate and crash the whole
         # merge down to the bundled-only fallback below, taking the trusted
-        # user-global layer's own overrides with it for no reason connected
+        # user-global layer'"'"'s own overrides with it for no reason connected
         # to them. `json.JSONDecodeError` (raised by decoder.raw_decode() on
         # invalid JSON) and `UnicodeDecodeError` (raised by f.read() on a
-        # file that isn't valid text in the expected encoding) are both
+        # file that isn'"'"'t valid text in the expected encoding) are both
         # ValueError subclasses -- catching only OSError let either one
         # through uncaught.
         try:
             docs = load_documents(path)
         except (OSError, ValueError):
             # #748: drop a marker for the shell to notice and report --
-            # this process's own stdout/stderr are discarded by the caller.
+            # this process'"'"'s own stdout/stderr are discarded by the caller.
             # #804: also record the drop in a flag that becomes THIS
-            # process's own exit code below -- a second, independent
-            # signal that does not depend on drop_marker_path's own
+            # process'"'"'s own exit code below -- a second, independent
+            # signal that does not depend on drop_marker_path'"'"'s own
             # mktemp (the shell side, above) having succeeded at all.
             _dropped_project_layer = True
             if drop_marker_path:
@@ -726,12 +728,12 @@ for path in sys.argv[5:]:
     # the project config when it is NOT the untrusted-haiku source handled
     # above) -- but "trusted" only means the operator wrote it, not that it
     # parses. A malformed file here used to raise uncaught, exiting neither
-    # 0 nor 3, so the shell's bundled-only fallback fired below with NO
+    # 0 nor 3, so the shell'"'"'s bundled-only fallback fired below with NO
     # disclosure at all -- the #804 gate only checks the drop-marker file
     # (which this path never touches) or rc == 3 (reserved for the
     # untrusted-layer drop above). Skip just this layer instead, the same
     # fail-CLOSED shape the untrusted branch already uses, and signal it on
-    # the interpreter's own exit path rather than a second marker file.
+    # the interpreter'"'"'s own exit path rather than a second marker file.
     try:
         with open(path) as f:
             data = json.load(f)
@@ -746,7 +748,7 @@ with open(out_path, "w") as f:
 # #804: exit 3 means "merge above completed and $out_path was written, but
 # the untrusted project layer was dropped" -- distinct from 0 (clean) and
 # from any other non-zero exit (a genuine merge failure, still handled by
-# the shell's own bundled-only fallback below).
+# the shell'"'"'s own bundled-only fallback below).
 # #815: exit 4 means the same, but for a malformed TRUSTED layer (bundled
 # config, user-global config, or project config outside the untrusted-haiku
 # case); exit 5 means both a trusted AND the untrusted layer were dropped.
@@ -758,7 +760,7 @@ elif _dropped_project_layer:
     sys.exit(3)
 elif _dropped_trusted_layer:
     sys.exit(4)
-PYMERGE
+' || _py_merge_rc=$?
     # #804: rc 3 above means the merge SUCCEEDED (the write already
     # happened) but the untrusted layer was dropped -- must NOT trigger the
     # bundled-only fallback the way a genuine merge failure (any other

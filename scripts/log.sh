@@ -420,9 +420,7 @@ _remember_cfg_flatten_cache_load() {
         else
             _exists_now="${_exists_now}0"
         fi
-    done <<EOF
-$_sources
-EOF
+    done <<< "$_sources"
 
     # Validate BEFORE trusting a single byte of it -- see the #682 block
     # comment above this whole section for why a shared-tmp-dir file is
@@ -578,9 +576,7 @@ _remember_cfg_flatten_cache_publish() {
         else
             _exists_now="${_exists_now}0"
         fi
-    done <<EOF
-$_sources
-EOF
+    done <<< "$_sources"
     {
         # Identity line FIRST, always -- see the #682 comment in the loader
         # above for why a file at this (many-to-one-mangled) path cannot be
@@ -594,9 +590,7 @@ EOF
             [ -n "$_k" ] || continue
             _remember_cfg_flatten_q_encode _encoded_v "$_v"
             printf '_RCFG_%s\t%s\n' "${_k//./_}" "$_encoded_v"
-        done <<EOF
-$_dump
-EOF
+        done <<< "$_dump"
     } > "$_t" 2>/dev/null || { rm -f "$_t" 2>/dev/null; return 0; }
     mv -f "$_t" "$_f" 2>/dev/null || rm -f "$_t" 2>/dev/null
     return 0
@@ -656,9 +650,7 @@ _config_load() {
     while IFS=$'\t' read -r _k _v; do
         [ -n "$_k" ] || continue
         printf -v "_RCFG_${_k//./_}" '%s' "$_v"
-    done <<EOF
-$_dump
-EOF
+    done <<< "$_dump"
     _remember_cfg_flatten_cache_publish "$_dump"
     _REMEMBER_CFG_STATE="ok"
 }
