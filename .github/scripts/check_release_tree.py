@@ -149,11 +149,29 @@ EVAL_OF_SUBSTITUTION = re.compile(
 )
 _SHELL_NAMES = {"sh", "bash", "zsh", "dash", "ksh"}
 
-# #898: a typed `<<` (here-document) anywhere in a shipped script is a hard
-# block at the directory, filed as "Unpinned npx launcher" -- the scanner
-# cannot place where the here-document ends. `<<<` (a here-string) is not
-# flagged, so the pattern must not match three or more `<` in a row either.
+# #898/#900: a typed `<<` (here-document) anywhere in a shipped script is a
+# hard block at the directory, filed as "Unpinned npx launcher" -- the
+# scanner cannot place where the here-document ends. `<<<` (a here-string)
+# is not flagged, so the pattern must not match three or more `<` in a row
+# either. `$(( x << 4 ))` (the arithmetic left-shift operator) is also not
+# a heredoc and must not be flagged -- see _mask_arithmetic in
+# _check_typed_heredoc, which removes that span before this pattern ever
+# sees the line, rather than trying to teach the regex itself to tell the
+# two apart.
 TYPED_HEREDOC = re.compile(r"(?<!<)<<(?!<)")
+
+# A simple (non-nested-parens) `$(( ... ))` arithmetic expansion -- masked
+# out of a line before TYPED_HEREDOC is tested against it, so a real
+# bitshift (`$(( x << 4 ))`) is never read as an unpinned here-document
+# operator. A `$(( ))` whose own expression contains a nested, unbalanced
+# paren is not matched here and is left for TYPED_HEREDOC to flag --
+# over-flagging a rare, genuinely-nested arithmetic expression is the safe
+# direction for a FAIL guard; under-flagging a real heredoc is not.
+_ARITH_EXPANSION = re.compile(r"\$\(\([^()]*\)\)")
+
+
+def _mask_arithmetic(line: str) -> str:
+    return _ARITH_EXPANSION.sub(lambda m: " " * len(m.group(0)), line)
 
 # #898: "any URL host, even inside a comment" is one half of the directory's
 # MCP_FORWARDS_CREDENTIAL_ENV pair (the other half is CREDENTIAL_USE below).
@@ -661,7 +679,7 @@ def check_tree(root: Path, budget: dict) -> CheckResult:
     _check_front_matter(files, off)
     _check_images(files, kinds, off)
     _check_launchers(files, kinds, off)
-    _check_typed_heredoc(files, kinds, result.reviews)
+    _check_typed_heredoc(files, kinds, off)
     _check_url_in_comment(files, kinds, off)
     _check_network_command_names(files, kinds, off)
     _check_credential_pair(files, kinds, off)
@@ -903,29 +921,37 @@ def _check_images(files: dict, kinds: dict, off: list) -> None:
                 off.append(f"{img}: path written in code (backticks or a code block) in {rel}")
 
 
-def _check_typed_heredoc(files: dict, kinds: dict, reviews: list) -> None:
-    """#898: a typed `<<` anywhere in a shipped script is a directory hold,
-    filed as "Unpinned npx launcher" -- the scanner cannot place the
-    here-document's start or end. jit-context's own measured instance was
-    one `<<` inside an awk regex *string*, not an ordinary shell heredoc;
-    this repo's own scripts use `<<EOF`/`<<'PYEOF'` heredocs in the normal,
-    unambiguous shell position in more than a dozen places. Whether the
-    portal's scanner holds those too is unconfirmed without a real
-    release-preview validation (docs/releasing.md), so this is REVIEW, like
-    the eval/curl findings below, not a hard FAIL that would immediately
-    red the release gate on this repo's own current, working scripts."""
+def _check_typed_heredoc(files: dict, kinds: dict, off: list) -> None:
+    """#898/#900: a typed `<<` anywhere in a shipped script is a directory
+    hold, filed as "Unpinned npx launcher" -- the scanner cannot place the
+    here-document's start or end. This used to be REVIEW, unconfirmed
+    without a real release-preview validation -- a maintainer validation of
+    the combined tree (fix/898 round 3 + this lane's own #900 round 1)
+    CONFIRMED it as BLOCKING (3 instances, all from compiled-in library
+    content: post-tool-hook.sh, session-end-hook.sh, user-prompt-hook.sh),
+    so this is now FAIL, not REVIEW.
+
+    `<<<` (a here-string) is excluded by TYPED_HEREDOC's own lookaround, and
+    a `$(( x << 4 ))` arithmetic left-shift is excluded by masking that span
+    out first (_mask_arithmetic) -- neither is a heredoc the portal's
+    scanner has ever held.
+
+    This FAILS against this repo's OWN scripts today: the source-level
+    rewrite from `<<EOF`/`<<'PYEOF'` heredocs to here-strings/printf is
+    being done on fix/898, concurrently with this lane, not here -- this
+    guard exists so that rewrite has something to turn green, not to ship
+    alongside scripts this lane itself edited to satisfy it."""
     for rel, data in sorted(files.items()):
         top = rel.split("/")[0]
         if top not in ("hooks", "hooks.d", "scripts") or kinds.get(rel) != "text":
             continue
         text = data.decode("utf-8")
         for n, line in enumerate(text.splitlines(), 1):
-            if TYPED_HEREDOC.search(line):
-                reviews.append(f"{rel}:{n}: a typed '<<' (here-document) -- the "
-                                f"directory's scanner has held this shape "
-                                f"elsewhere; confirm with a release-preview "
-                                f"validation before assuming it is safe: "
-                                f"{line.strip()[:80]}")
+            if TYPED_HEREDOC.search(_mask_arithmetic(line)):
+                off.append(f"{rel}:{n}: a typed '<<' (here-document) -- the "
+                           f"directory holds this as UNPINNED_NPX (the "
+                           f"scanner cannot place where it ends): "
+                           f"{line.strip()[:80]}")
 
 
 def _check_url_in_comment(files: dict, kinds: dict, off: list) -> None:

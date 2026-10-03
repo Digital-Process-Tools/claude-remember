@@ -169,6 +169,69 @@ exactly this to run the whole test suite against the compiled hooks, in
 `.github/workflows/tests.yml`'s `hook-tests-compiled` job, on all three OSes) -- never run
 `--apply` against your own working tree.
 
+### Inlining alone was not enough: tree-shaking and a stricter heredoc guard (#900 round 2)
+
+A maintainer validation of the combined tree (fix/898's round 3 plus this change's own first
+round) found inlining had made the directory's own holds **worse**, not cleared: three new
+BLOCKING `UNPINNED_NPX` findings (a typed `<<` the scanner can't place, now reachable inside the
+compiled hooks because the inlined library content carries its own heredocs) and
+`COMMAND_SCRIPT_NOT_FOLLOWED` still held, now also citing `.` and `pipeline/haiku.py`. Inlining a
+library whole, with none of its unused functions dropped, ships code the hook's own control flow
+never reaches -- the exact "perl code" shape `claude-jit-context`'s own `compile_scripts.py` was
+held for before it added tree-shaking (its own #461 finding).
+
+`compile_hooks.tree_shake`, modelled on that function, now runs as the last step of
+`compile_hook`/`compile_hook_report`: it drops every top-level `name() { ... }` function a
+compiled hook's own code never reaches, transitively through any function it keeps. Reachability
+is **textual and deliberately coarse** -- a function is kept the moment its name appears as a
+bare word anywhere outside a function definition, or inside an already-kept function's body,
+including inside a string, a comment, or an assigned value. This over-keeps rather than
+under-keeps, which is the safe direction: the failure mode this guards against is "the directory
+still can't follow this call", not "the file is a little bigger than it needed to be".
+
+**A command position occupied by nothing but a bare or quoted lowercase/mixed-case variable**
+(`"$fn"`, never `"$PYTHON"` -- an all-caps name is this codebase's own convention for an external
+tool or config value, not one of its snake_case functions) names a call target this textual
+analysis cannot see at all. Finding one anywhere in a hook means nothing is dropped from that
+file, and the report says why (`dynamic_dispatch: true`) rather than shaking anyway. None of the
+four real hooks trips this today.
+
+**Getting the detector to tell a real statement boundary from a look-alike took three separate
+fixes**, each found by running it against this repo's own real, already-compiled hook text rather
+than only synthetic fixtures:
+
+- `#` inside a parameter expansion (`${raw#pattern}`, `${raw##pattern}`) is pattern-removal
+  syntax, not a comment -- treating it as one stopped the brace-balance scan before the
+  expansion's own closing `}`, which produced a false "unbalanced braces" refusal.
+- `$(...)` establishes its own nested quoting scope in real bash -- a `"` inside a command
+  substitution embedded in an OUTER double-quoted string (`$(command -v "$_first" 2>/dev/null)`)
+  must never toggle the outer string's own quote state. `_command_substitution_end` skips the
+  whole span as one opaque unit for exactly this reason.
+- A backslash-continued line, or a line that starts already inside a quote carried over from an
+  earlier one (a double-quoted string containing a literal embedded newline, or a `case "..." in`
+  split across two physical lines), is not a fresh statement boundary even when its own revealed
+  `$`-expansion lands at offset 0 of the masked text and looks exactly like one.
+
+Measured against this repo's own four hooks, pre-shake (already inlined and comment-stripped)
+and post-shake: **session-start-hook.sh** 154.7 KiB -> 147.0 KiB (7 functions dropped),
+**session-end-hook.sh** 75.2 KiB -> 60.8 KiB (15 dropped -- the smallest hook, so shaking removes
+the largest *proportion*, including `dispatch` itself: this hook never calls it, only names it in
+a comment that comment-stripping already removes), **user-prompt-hook.sh** 76.2 KiB -> 71.1 KiB
+(8 dropped), and **post-tool-hook.sh** 87.8 KiB -> 87.5 KiB (2 dropped -- it already uses most of
+what it inlines). All four still pass `bash -n` and carry zero remaining `source`/`.` statements
+after shaking.
+
+**The typed-heredoc check moved from REVIEW to FAIL.** `_check_typed_heredoc` used to say the
+portal's hold was unconfirmed without a real release-preview validation; the same maintainer
+validation above confirmed it. `TYPED_HEREDOC` now runs against every shipped `hooks/`/`hooks.d/`/
+`scripts/` file with `$(( ... ))` arithmetic expansions masked out first (`_mask_arithmetic`) --
+`$(( x << 4 ))` is a left-shift operator, not a here-document, and the portal has never flagged
+it. `<<<` (a here-string) was never flagged either and still is not. **This guard currently FAILS
+against this repo's own scripts**: the source-level rewrite from `<<EOF`/`<<'PYEOF'` heredocs to
+here-strings/printf is being done concurrently on `fix/898`, not by this change -- this guard
+exists so that rewrite has something real to turn green against, not to ship alongside scripts
+this change itself edited to satisfy it.
+
 ## What the Anthropic directory actually measured
 
 [`claude-jit-context`'s own write-up](https://github.com/Digital-Process-Tools/claude-jit-context/blob/main/docs/directory-validator.md)
