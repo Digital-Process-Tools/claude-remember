@@ -57,9 +57,9 @@
 #   would end the heredoc early and let the remainder be parsed as shell in
 #   this same call.
 #
-#     bash "${CLAUDE_PLUGIN_ROOT}/scripts/write-handoff.sh" <<'HANDOFF_<random>'
-#     <handoff note>
-#     HANDOFF_<random>
+#     fence='HANDOFF_<random>'
+#     printf '%s\n' "$fence" "<handoff note>" "$fence" | \
+#       bash "${CLAUDE_PLUGIN_ROOT}/scripts/write-handoff.sh"
 #
 #   Always prints exactly one of:
 #     Wrote handoff to: <path>
