@@ -1072,7 +1072,10 @@ def _check_indirect_expansion(files: dict, kinds: dict, reviews: list) -> None:
     hard FAIL here would red this repo's own current, working tree."""
     for rel, data in sorted(files.items()):
         top = rel.split("/")[0]
-        if top not in _SCRIPT_DIRS or kinds.get(rel) != "text":
+        # bash-only shape: `.sh`, not every text file under these dirs --
+        # `${!NAME}` has no meaning in Python/jq and would false-positive
+        # on unrelated syntax there.
+        if top not in _SCRIPT_DIRS or kinds.get(rel) != "text" or not rel.endswith(".sh"):
             continue
         text = data.decode("utf-8")
         for n, line in enumerate(text.splitlines(), 1):
@@ -1094,7 +1097,10 @@ def _check_lone_quote(files: dict, kinds: dict, reviews: list) -> None:
     much larger program around it too risky to do blind in one round."""
     for rel, data in sorted(files.items()):
         top = rel.split("/")[0]
-        if top not in _SCRIPT_DIRS or kinds.get(rel) != "text":
+        # bash-only shape: `.sh`, not every text file under these dirs --
+        # the close-emit-reopen idiom is a shell quoting mechanism with no
+        # equivalent meaning in Python/jq.
+        if top not in _SCRIPT_DIRS or kinds.get(rel) != "text" or not rel.endswith(".sh"):
             continue
         text = data.decode("utf-8")
         for n, line in enumerate(text.splitlines(), 1):
@@ -1116,7 +1122,12 @@ def _check_backslash_quote(files: dict, kinds: dict, off: list) -> None:
     holdout."""
     for rel, data in sorted(files.items()):
         top = rel.split("/")[0]
-        if top not in _SCRIPT_DIRS or kinds.get(rel) != "text":
+        # bash-only shape: `.sh`, not every text file under these dirs --
+        # a Python string literal escaping a backslash ("\\\\") is this
+        # exact byte sequence and is ordinary, safe code; the sed/awk
+        # replacement-string danger this guard exists for is specific to
+        # shell scripts.
+        if top not in _SCRIPT_DIRS or kinds.get(rel) != "text" or not rel.endswith(".sh"):
             continue
         text = data.decode("utf-8")
         for n, line in enumerate(text.splitlines(), 1):
@@ -1147,7 +1158,10 @@ def _check_catch_all_in_loop(files: dict, kinds: dict, off: list) -> None:
     _awk_open = re.compile(r"\bawk\b[^']*'[^']*$")
     for rel, data in sorted(files.items()):
         top = rel.split("/")[0]
-        if top not in _SCRIPT_DIRS or kinds.get(rel) != "text":
+        # bash-only shape: `.sh`, not every text file under these dirs --
+        # `case`/`while`/`for`/`done` are shell keywords with no meaning
+        # in Python/jq.
+        if top not in _SCRIPT_DIRS or kinds.get(rel) != "text" or not rel.endswith(".sh"):
             continue
         text = data.decode("utf-8")
         depth = 0
@@ -1190,7 +1204,13 @@ def _check_dot_string(files: dict, kinds: dict, reviews: list) -> None:
     redding this repo's own current, working tree."""
     for rel, data in sorted(files.items()):
         top = rel.split("/")[0]
-        if top not in _SCRIPT_DIRS or kinds.get(rel) != "text":
+        # bash-only shape: `.sh`, not every text file under these dirs --
+        # a lone "." is an ordinary path-join/directory-separator value in
+        # Python and jq (install_agy_hooks.py's own os.path calls, this
+        # file's own cfg_flatten.py/.jq), not a shape that scanner-visible
+        # file ever reads as a possible `.` (source) command the way a
+        # shell script's own text can.
+        if top not in _SCRIPT_DIRS or kinds.get(rel) != "text" or not rel.endswith(".sh"):
             continue
         text = data.decode("utf-8")
         for n, line in enumerate(text.splitlines(), 1):
