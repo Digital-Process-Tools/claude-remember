@@ -980,11 +980,10 @@ if [ -s "$_SUMMARY_FAILURE_MARKER" ]; then
     case "$_SF_DETAIL_LOWER" in
         *"not logged in"*|*"please run /login"*|*"invalid api key"*|\
         *"invalid bearer token"*|*"authentication_error"*|*"failed to authenticate"*)
-            echo "     this looks like an expired login -- on Claude Code,"
-            echo "     configure the plugin's userConfig recovery token"
-            echo "     (/plugin -> remember -> Configure, or \`claude setup-token\`"
-            echo "     then \`claude plugin config set remember oauth_token <token>\`,"
-            echo "     #129/#131/#860)"
+            echo "     this looks like an expired login -- refresh it: run"
+            echo "     \`claude setup-token\`, or log in again in your coding"
+            echo "     agent's own CLI. This plugin reads no credential of"
+            echo "     its own any more (#129/#131/#860)."
             ;;
     esac
     unset _remember_sf_glob_dir _SF_LATEST_LOG _SF_DETAIL _SF_DETAIL_LOWER _sf_f
@@ -1025,15 +1024,15 @@ else
 fi
 unset _remember_ss_glob_dir _SS_LATEST_LOG _SS_LAST_LINE _ss_f
 
-# ── 6c. Legacy recovery-token config, no longer read (#860) ────────────────
-# pipeline/haiku.py no longer reads REMEMBER_OAUTH_TOKEN or haiku.oauth_token
-# at all -- the plugin's own `oauth_token` userConfig option
-# (CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN) is the only recovery-token source now.
+# ── 6c. Legacy recovery-token config, no longer read at all (#860, round 3) ─
+# pipeline/haiku.py reads no credential of its own any more -- there is no
+# userConfig recovery-token option, and no replacement for the legacy
+# REMEMBER_OAUTH_TOKEN env var or haiku.oauth_token config.json key either.
 # A still-configured legacy value is detected by PRESENCE ONLY and logged as
 # a "NOTICE:" line to the daily log every time a save runs -- this surfaces
 # the most recent one here, same pattern as the summarizer failure detail
 # above (sorted scan across every daily log, last match wins), so an
-# operator who has not migrated is not left silently unauthenticated.
+# operator who has not noticed hears that the setting now does nothing.
 echo "-- Legacy recovery-token config (#860) --"
 _remember_dep_glob_dir=$(_remember_forward_slash "$REMEMBER_DIR")
 _DEP_LINE=""
@@ -1055,9 +1054,8 @@ fi
 unset _DEP_FILES
 if [ -n "$_DEP_LINE" ]; then
     echo "WARN $_DEP_LINE"
-    echo "     Configure the recovery token through the plugin's userConfig"
-    echo "     option instead (/plugin -> remember -> Configure, or"
-    echo "     \`claude plugin config set remember oauth_token <token>\`)."
+    echo "     This setting has no effect any more and nothing replaces it --"
+    echo "     the plugin reads no credential of its own. Remove it."
 elif [ "$_DEP_ANY_LOG" = 1 ]; then
     echo "OK   No legacy recovery-token config in use"
 else

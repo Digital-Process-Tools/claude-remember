@@ -464,15 +464,19 @@ def _failure_detail(stdout: str, stderr: str) -> str:
 # there is nothing to keep and `claude -p` is unauthenticated: the silent-save
 # outage of #129 on a machine that *did* run `claude setup-token`.
 #
-# Recovery is consent-based: the operator hands THIS plugin a token to pass to
-# the nested CLI, via the plugin's own `oauth_token` userConfig option (#860,
-# round 2 -- stale prose found by review: this used to say "the
-# REMEMBER_OAUTH_TOKEN env var or a haiku.oauth_token key in config.json",
-# which is no longer true; see _configured_oauth_token() below). It is used
-# only when the child env has no CLAUDE_CODE_OAUTH_TOKEN, and only a value
-# the operator deliberately configured — nothing is read from OS credential
-# storage the platform withheld.
-_MIN_TOKEN_LEN = 20
+# #860, round 3: there is no recovery path here at all any more. The plugin
+# used to offer one -- a recovery token the operator could hand it, via a
+# `oauth_token` userConfig option, to fill CLAUDE_CODE_OAUTH_TOKEN when the
+# host withheld it from this hook's own subprocess -- but reading ANY
+# credential from the user's machine is itself the condition the directory's
+# security scan holds on, independent of consent or provenance, and the
+# aggregate kept pairing that read with the real, kept git-backup feature's
+# own "sends data" shape. The nested `claude -p` now runs with whatever
+# authentication it inherits from its own environment, or none at all; this
+# module reads no credential of its own to offer it one. See
+# _warn_if_legacy_recovery_token_configured() below for the one thing this
+# module still does about the removed feature: a loud, value-free notice for
+# an operator who still has the old setting configured.
 
 
 def _warn(message: str) -> None:
@@ -497,54 +501,6 @@ def _warn(message: str) -> None:
             print(f"[haiku] {message}", file=sys.stderr)
     except Exception:
         pass
-
-
-def _looks_like_token(value: object) -> bool:
-    """A configured value is usable only if it is a non-empty, whitespace-free
-    string of plausible length.
-    """
-    if not isinstance(value, str):
-        return False
-    stripped = value.strip()
-    return len(stripped) >= _MIN_TOKEN_LEN and not any(c.isspace() for c in stripped)
-
-
-def _accept_token(value: object) -> str | None:
-    """The configured value if usable, else ``None`` **and a log line**.
-
-    A rejected value used to vanish in silence, which made a typo'd or
-    truncated token indistinguishable from never having configured one: the
-    nested CLI ran unauthenticated and the operator got the same confusing auth
-    error this fallback exists to prevent, now with a misleading origin.
-
-    An empty value stays silent — that is how the bundled config ships the key
-    (``"oauth_token": ""``), i.e. "not configured", and it reaches here on
-    every save through the merged config.
-
-    The warning is one hardcoded literal naming the plugin's userConfig
-    option by hand -- round 1 of this fix logged ``len(value.strip())``
-    (#860): even a length is a value DERIVED from the secret, and CodeQL's
-    taint tracker correctly flagged that. Round 2 dropped the length but
-    kept a ``source: str`` parameter -- a constant the caller passed,
-    naming the setting -- and CodeQL's SECOND round flagged that too,
-    because the constant's own identifier (``USER_CONFIG_OAUTH_TOKEN_ENV``)
-    contains "TOKEN": a value flowing from a name that LOOKS sensitive is
-    treated as sensitive regardless of what it actually is. There is only
-    one caller now, so the message is written out in full here instead of
-    assembled from any parameter at all (#860, round 3).
-    """
-    if value is None or (isinstance(value, str) and not value.strip()):
-        return None
-    if not _looks_like_token(value):
-        _warn(
-            "WARNING: ignoring the plugin's userConfig oauth_token option "
-            "-- not a plausible OAuth token (want a whitespace-free "
-            f"string of at least {_MIN_TOKEN_LEN} chars); the nested CLI "
-            "will run unauthenticated unless the host provides a token of "
-            "its own"
-        )
-        return None
-    return str(value).strip()
 
 
 def _remember_dir_is_project_local(remember_dir: str) -> bool:
@@ -612,67 +568,38 @@ def _config_candidates() -> list[str]:
     return candidates
 
 
-# plugin.json declares an optional `oauth_token` userConfig entry
-# (`sensitive: true`). Claude Code exports every userConfig option to a hook's
-# subprocess as CLAUDE_PLUGIN_OPTION_<KEY> (uppercased), sensitive values
-# included -- see the Claude Code plugin manifest reference, "Reference a
-# saved value" / "Fields that run through a shell". This is the ONLY source
-# for the recovery token (#860, round 2). REMEMBER_OAUTH_TOKEN and
-# haiku.oauth_token -- an env var and a config key this plugin invented for
-# itself, not a host-vendor credential -- are no longer read anywhere: the
-# directory's security scan holds "reads a credential from the user's
-# machine", and merely deprecating-while-still-reading them (#860's first
-# pass) does not clear that condition. See _legacy_env_var_present() /
-# _legacy_config_key_present() for the loud, value-free notice an operator
-# who still has either one set gets instead.
-USER_CONFIG_OAUTH_TOKEN_ENV = "CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN"
+# #860, round 3: plugin.json no longer declares a userConfig recovery-token
+# option at all -- there is no credential-shaped setting left for this
+# plugin to read. REMEMBER_OAUTH_TOKEN (an env var) and haiku.oauth_token (a
+# config.json key) were this plugin's own earlier, now-removed attempts at
+# the same feature; neither is read for authentication any more, by round 2
+# already. One generic, value-free presence check remains for whichever of
+# the two an operator still has configured, so migrating away is not a
+# silent surprise -- see _legacy_recovery_token_configured() below.
 
 
-def _configured_oauth_token() -> str | None:
-    """Operator-configured OAuth token for the nested CLI, or ``None``.
+def _legacy_recovery_token_configured() -> bool:
+    """True when ANY now-removed recovery-token setting is still configured
+    -- the env var, or the config.json key -- boolean existence only, the
+    same "is something there" check ``test -n`` makes in a shell script,
+    nothing more (#860, round 3; merges what used to be two separate
+    checks, round 2's own split between an env-var check and a config-key
+    check, into one -- there is only one caller, and it has only ever had
+    one message to show regardless of which source it was).
 
-    The only source: the plugin's ``oauth_token`` userConfig option
-    (``CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN``, see the module comment above).
+    Deliberately returns a plain ``bool``, not either variable's name or
+    value: a CodeQL round (py/clear-text-logging-sensitive-data) flagged an
+    earlier version of this fix for exactly the shape where a function
+    whose name contained "oauth" returned ANY value that then reached a
+    log sink, treated as a sensitive source independent of what the value
+    actually was ("NAME-based", not value-based, in the SARIF codeFlow). A
+    bool cannot carry a name or a value, so there is nothing left for that
+    heuristic to key on, and the caller below writes both settings' names
+    as hardcoded literals in the warning text instead of interpolating
+    anything this function returns.
     """
-    option_token = os.environ.get(USER_CONFIG_OAUTH_TOKEN_ENV, "").strip()
-    if option_token:
-        token = _accept_token(option_token)
-        if token:
-            return token
-    return None
-
-
-def _legacy_env_var_present() -> bool:
-    """True when the legacy recovery-token env var is still set -- boolean
-    existence only, the same "is something there" check ``test -n`` makes
-    in a shell script, nothing more (#860, round 2).
-
-    Deliberately returns a plain ``bool``, not the variable's name or
-    value: a second CodeQL round (py/clear-text-logging-sensitive-data)
-    flagged the FIRST fix for this same alert, because a function whose
-    name contained "oauth" returning ANY value that then reached a log
-    sink was itself treated as a sensitive source, independent of what the
-    value actually was ("NAME-based", not value-based, in the SARIF
-    codeFlow). A bool cannot carry a name or a value, so there is nothing
-    left for that heuristic to key on, and the caller below writes the
-    setting's name as a hardcoded literal in the warning text instead of
-    interpolating anything this function returns.
-    """
-    return bool(os.environ.get("REMEMBER_OAUTH_TOKEN", "").strip())
-
-
-def _legacy_config_key_present() -> bool:
-    """True when the legacy ``haiku.oauth_token`` config.json key is still
-    configured with a non-empty value -- boolean existence only, same
-    rationale as ``_legacy_env_var_present()`` above (#860, round 2).
-
-    An empty string -- how the bundled config ships ``haiku.oauth_token``
-    (``""``), meaning "not configured" -- is not "present": the bar is the
-    same truthiness check ``_accept_token`` already used for "is a value
-    configured at all", just without the length/shape validation that
-    function also does (that validation reads the value for more than
-    presence, which this function deliberately does not).
-    """
+    if os.environ.get("REMEMBER_OAUTH_TOKEN", "").strip():
+        return True
     for path in _config_candidates():
         try:
             with open(path, encoding="utf-8") as f:
@@ -805,8 +732,6 @@ def _other_credential() -> str | None:
     """
     if os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "").strip():
         return "CLAUDE_CODE_OAUTH_TOKEN from the host"
-    if _configured_oauth_token():
-        return "the OAuth token you configured for this plugin"
     if _host_login_present():
         return f"the claude.ai login in {_claude_login_path()}"
     return None
@@ -870,49 +795,35 @@ def _anthropic_api_key_hint(env: dict[str, str], detail: str) -> str:
     )
 
 
-def _inject_configured_oauth_token(env: dict[str, str]) -> dict[str, str]:
-    """Fill CLAUDE_CODE_OAUTH_TOKEN from the userConfig option when the child
-    env lacks it (see the note above).
+def _warn_if_legacy_recovery_token_configured() -> None:
+    """Report a still-configured legacy recovery-token setting, once per save,
+    by name only (never the value) -- there is no replacement to migrate it
+    to, so an operator who has not noticed the feature is gone simply hears
+    that it is gone (#860, round 3; this plugin reads no credential at all
+    now, see the module note above).
 
-    Never overrides a value already present — the host-provided credential wins.
-    Never raises: token resolution is entirely best-effort.
-
-    Also the one call site that reports a still-configured legacy
-    REMEMBER_OAUTH_TOKEN / haiku.oauth_token: once per save, by name only
-    (never the value), so an operator who has not yet migrated hears about it
-    loudly instead of silently losing a recovery path they do not know was
-    removed (#860, round 2).
+    Never raises: this is pure diagnostics on the way to a call that must
+    still happen regardless of what this finds.
     """
-    if env.get("CLAUDE_CODE_OAUTH_TOKEN"):
-        return env
-    # Each branch below is a complete, hardcoded literal naming the setting
-    # by hand -- never built by interpolating a function's return value or
-    # a module constant into the message. A second CodeQL round flagged the
-    # first fix for this same alert (py/clear-text-logging-sensitive-data)
-    # on exactly that shape: a function whose name contained "oauth"
-    # returning a value that reached _warn() was itself treated as a
-    # sensitive source, independent of what the value actually was. These
-    # two checks now return plain booleans (see their own docstrings), so
-    # there is nothing left to interpolate (#860, round 2).
-    if _legacy_env_var_present():
+    # The message below is a complete, hardcoded literal naming both settings
+    # by hand -- never built by interpolating a function's return value or a
+    # module constant. A CodeQL round flagged an earlier version of this fix
+    # (py/clear-text-logging-sensitive-data) for exactly that shape: a
+    # function whose name contained "oauth" returning a value that reached
+    # _warn() was itself treated as a sensitive source, independent of what
+    # the value actually was. _legacy_recovery_token_configured() returns a
+    # plain bool (see its own docstring), so there is nothing left to
+    # interpolate.
+    if _legacy_recovery_token_configured():
         _warn(
-            "NOTICE: REMEMBER_OAUTH_TOKEN is set but is no longer read "
-            "(#860) -- configure the recovery token through the plugin's "
-            "userConfig option instead (/plugin -> remember -> Configure, "
-            "or `claude plugin config set remember oauth_token <token>`)"
+            "NOTICE: a legacy recovery-token setting (REMEMBER_OAUTH_TOKEN, "
+            "or the haiku.oauth_token key in config.json) is still "
+            "configured but has no effect any more -- this plugin no longer "
+            "reads any credential of its own for the nested summarizer call "
+            "(#860). Remove it; there is nothing to migrate it to. If the "
+            "nested call needs authentication, refresh your coding agent's "
+            "own CLI login instead."
         )
-    elif _legacy_config_key_present():
-        _warn(
-            "NOTICE: the haiku.oauth_token key in config.json is set but "
-            "is no longer read (#860) -- configure the recovery token "
-            "through the plugin's userConfig option instead (/plugin -> "
-            "remember -> Configure, or `claude plugin config set remember "
-            "oauth_token <token>`)"
-        )
-    token = _configured_oauth_token()
-    if token:
-        env["CLAUDE_CODE_OAUTH_TOKEN"] = token
-    return env
 
 
 # Hook isolation (#202). The nested `claude -p` was sandboxed against MCP
@@ -1537,7 +1448,7 @@ def call_haiku(
     # list too long") at exec time and silently kills saves of long sessions.
     # `claude -p` with no positional prompt reads the prompt from stdin.
     env = _child_env()
-    env = _inject_configured_oauth_token(env)
+    _warn_if_legacy_recovery_token_configured()
 
     # Bound the spawn before spawning (#204). Every defence above this line
     # depends on a signal reaching the child — an env marker a host can redact,
@@ -1640,11 +1551,10 @@ def call_haiku(
                     "WARNING: the un-isolated retry failed with the same "
                     f"authentication error ({_failure_detail(result.stdout, result.stderr)}) "
                     "-- hook isolation was not the cause. The CLI's own saved "
-                    "login has expired; configure the plugin's userConfig "
-                    "recovery token instead (/plugin -> remember -> "
-                    "Configure, or `claude setup-token` then "
-                    "`claude plugin config set remember oauth_token <token>`; "
-                    "#129/#131/#860)."
+                    "login has expired; refresh it (run `claude setup-token`, "
+                    "or log in again in your coding agent's own CLI). This "
+                    "plugin reads no credential of its own any more -- there "
+                    "is no setting here to configure (#129/#131/#860)."
                 )
     finally:
         slot.release()

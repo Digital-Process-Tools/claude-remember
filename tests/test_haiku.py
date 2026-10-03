@@ -279,17 +279,15 @@ def test_call_haiku_keeps_anthropic_api_key_when_it_is_the_only_credential(
 
 
 @patch("pipeline.haiku.subprocess.run")
-def test_call_haiku_strips_anthropic_api_key_when_the_operator_configured_a_token(
+def test_userconfig_oauth_token_env_no_longer_counts_as_another_credential(
     mock_run, monkeypatch, no_ambient_credentials
 ):
-    """The userConfig `oauth_token` counts as the deliberate credential too
-    (#703, updated for #860 round 2 -- it is the only recovery-token source
-    now, so it is the only one this signal can see).
-
-    It is the one the operator handed this plugin on purpose, so an ambient key
-    out-ranking it is the same defect as out-ranking a login -- and this is the
-    host shape (#129/#131) where CLAUDE_CODE_OAUTH_TOKEN never arrives at all.
-    """
+    """#860, round 3: the removed userConfig option's own env var must NOT
+    count as "another visible credential" for the ANTHROPIC_API_KEY
+    auto-strip decision any more -- this plugin reads it for nothing, so
+    treating its mere presence as a backup credential would strip the
+    operator's only real one on a host shape (#129/#131) where
+    CLAUDE_CODE_OAUTH_TOKEN never arrives at all."""
     monkeypatch.setenv("CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN", "sk-ant-oat-configured-123456")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-example")
     mock_run.return_value = MagicMock(
@@ -298,8 +296,11 @@ def test_call_haiku_strips_anthropic_api_key_when_the_operator_configured_a_toke
     call_haiku("p")
 
     env = mock_run.call_args[1]["env"]
-    assert "ANTHROPIC_API_KEY" not in env
-    assert env.get("CLAUDE_CODE_OAUTH_TOKEN") == "sk-ant-oat-configured-123456"
+    assert env.get("ANTHROPIC_API_KEY") == "sk-ant-api03-example", (
+        "the stale env var must not be treated as a credential that "
+        "displaces the operator's only real one"
+    )
+    assert env.get("CLAUDE_CODE_OAUTH_TOKEN") is None
 
 
 @patch("pipeline.haiku.subprocess.run")
@@ -662,63 +663,25 @@ def _log_text(remember_dir) -> str:
     return "".join(p.read_text(encoding="utf-8") for p in sorted(log_dir.iterdir()))
 
 
-# ── userConfig oauth_token is the ONLY recovery-token source (#860, round 2) ─
+# ── This plugin reads no recovery-token credential at all (#860, round 3) ────
 #
-# plugin.json declares an optional `oauth_token` userConfig entry (sensitive:
-# true), exported to this hook's subprocess as CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN
-# per the Claude Code plugin manifest reference. REMEMBER_OAUTH_TOKEN and
-# haiku.oauth_token are no longer read anywhere -- an env var/config key this
-# plugin invented for itself is exactly what the directory's security scan
-# means by "reads a credential from the user's machine", and merely
-# deprecating-while-still-reading them (round 1) did not clear that. A still
-# -configured legacy value is detected by PRESENCE ONLY (never its content)
-# and reported once per save, by name, never by value.
+# plugin.json no longer declares a userConfig recovery-token option -- round
+# 2's own CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN env var is never read either, by
+# design, now that the option that populated it is gone. REMEMBER_OAUTH_TOKEN
+# and haiku.oauth_token (this plugin's own earlier, already-removed attempts
+# at the same feature) are still PRESENCE-checked, never read for content,
+# and reported once per save, by name, never by value -- the directory's
+# security scan holds on reading ANY credential from the user's machine,
+# independent of consent or provenance, and a `claude -p` call now runs with
+# whatever authentication it inherits from its own environment or none.
 
 
 @patch("pipeline.haiku.subprocess.run")
-def test_malformed_userconfig_token_warning_never_logs_the_value(mock_run, monkeypatch, tmp_path):
-    """CodeQL finding (PR #894, HIGH, "Clear-text logging of sensitive
-    information"): the old malformed-token warning built its message with
-    `f"{len(value.strip())} chars"` -- a value DERIVED from the secret, which
-    CodeQL's taint tracker correctly flags as the secret itself reaching a log
-    sink, even though only a length was printed. The message must be built
-    from constants and the setting's NAME only, never from the configured
-    value in any form (#860)."""
-    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
-    configured_value = "a-short-but-distinctive-secret-marker"
-    monkeypatch.setenv("CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN", "too short")
-    monkeypatch.setenv("REMEMBER_DIR", str(tmp_path))
-    mock_run.return_value = MagicMock(
-        returncode=0, stdout=_mock_claude_response("x"), stderr="")
-
-    call_haiku("p")
-
-    logged = _log_text(tmp_path)
-    assert "too short" not in logged and configured_value not in logged, (
-        "the malformed value itself must never reach the log:\n" + logged
-    )
-    assert "got " not in logged, (
-        'a length DERIVED from the value (the old "...got 9 chars)" phrase) '
-        'is itself a value-derived leak and must not appear, even as a '
-        "count rather than the value -- the fixed constant phrase "
-        '"at least 20 chars" above is fine, since it is not derived from '
-        "anything the operator configured:\n" + logged
-    )
-    assert "userConfig oauth_token option" in logged, (
-        "positive control: the warning must still name the setting (as a "
-        "hardcoded literal naming the userConfig option, not by "
-        "interpolating the env var's own name -- CodeQL's second round "
-        "flagged that too, #860 round 3), just not anything derived from "
-        "its value:\n" + logged
-    )
-
-
-@patch("pipeline.haiku.subprocess.run")
-def test_call_haiku_uses_userconfig_token_env(mock_run, monkeypatch, tmp_path):
-    """The plugin.json `userConfig` option (`oauth_token`, `sensitive: true`)
-    reaches this hook's subprocess as `CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN` (per
-    the Claude Code plugin manifest reference) and authenticates the nested
-    CLI (#860)."""
+def test_userconfig_oauth_token_env_is_never_read(mock_run, monkeypatch, tmp_path):
+    """#860, round 3: the removed userConfig option's own env var is simply
+    never consulted any more -- not malformed-rejected, not read at all. A
+    value left behind in a stale environment (e.g. a host that still
+    populates it from an old plugin.json cache) must never reach the child."""
     monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
     monkeypatch.delenv("REMEMBER_OAUTH_TOKEN", raising=False)
     monkeypatch.setenv("CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN", "sk-ant-oat-userconfig-00001")
@@ -729,20 +692,20 @@ def test_call_haiku_uses_userconfig_token_env(mock_run, monkeypatch, tmp_path):
     call_haiku("p")
 
     env = mock_run.call_args[1]["env"]
-    assert env.get("CLAUDE_CODE_OAUTH_TOKEN") == "sk-ant-oat-userconfig-00001"
-    assert "NOTICE" not in _log_text(tmp_path), (
-        "the userConfig path is the current one -- it must not trigger the "
-        "legacy-config notice"
+    assert env.get("CLAUDE_CODE_OAUTH_TOKEN") is None, (
+        "the removed userConfig option's env var must never populate "
+        "CLAUDE_CODE_OAUTH_TOKEN any more"
     )
 
 
 @patch("pipeline.haiku.subprocess.run")
-def test_host_token_wins_over_userconfig_token(mock_run, monkeypatch):
-    """A host-provided CLAUDE_CODE_OAUTH_TOKEN still wins over the configured
-    userConfig fallback -- the default, nothing-configured path is unchanged
-    (#860)."""
+def test_host_token_still_passes_through_unconditionally(mock_run, monkeypatch, tmp_path):
+    """Positive control for the test above: a host-provided
+    CLAUDE_CODE_OAUTH_TOKEN must still reach the child -- this plugin removing
+    its OWN credential read must not touch the host's (#860, round 3)."""
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-from-host-00000001")
     monkeypatch.setenv("CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN", "sk-ant-oat-userconfig-00003")
+    monkeypatch.setenv("REMEMBER_DIR", str(tmp_path))
     mock_run.return_value = MagicMock(
         returncode=0, stdout=_mock_claude_response("x"), stderr="")
 
@@ -750,6 +713,49 @@ def test_host_token_wins_over_userconfig_token(mock_run, monkeypatch):
 
     env = mock_run.call_args[1]["env"]
     assert env.get("CLAUDE_CODE_OAUTH_TOKEN") == "sk-ant-oat-from-host-00000001"
+
+
+@patch("pipeline.haiku.subprocess.run")
+def test_legacy_env_var_presence_notice_is_value_free(mock_run, monkeypatch, tmp_path):
+    """The one thing this module still does about the removed feature: report
+    a still-set legacy REMEMBER_OAUTH_TOKEN by name only, never by value
+    (#860, round 3 -- merges what used to be two separate checks)."""
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    configured_value = "a-short-but-distinctive-secret-marker"
+    monkeypatch.setenv("REMEMBER_OAUTH_TOKEN", configured_value)
+    monkeypatch.setenv("REMEMBER_DIR", str(tmp_path))
+    mock_run.return_value = MagicMock(
+        returncode=0, stdout=_mock_claude_response("x"), stderr="")
+
+    call_haiku("p")
+
+    logged = _log_text(tmp_path)
+    assert configured_value not in logged, (
+        "the configured value itself must never reach the log:\n" + logged
+    )
+    assert "REMEMBER_OAUTH_TOKEN" in logged and "NOTICE" in logged, (
+        "positive control: the notice must still name the setting so an "
+        "operator who has not noticed the feature is gone hears about "
+        "it:\n" + logged
+    )
+
+
+@patch("pipeline.haiku.subprocess.run")
+def test_no_legacy_setting_configured_logs_no_notice(mock_run, monkeypatch, tmp_path):
+    """Positive control for the test above: with neither legacy setting
+    configured, no NOTICE line is written at all (#860, round 3)."""
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.delenv("REMEMBER_OAUTH_TOKEN", raising=False)
+    monkeypatch.delenv("CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN", raising=False)
+    monkeypatch.setenv("REMEMBER_DIR", str(tmp_path))
+    mock_run.return_value = MagicMock(
+        returncode=0, stdout=_mock_claude_response("x"), stderr="")
+
+    call_haiku("p")
+
+    assert "NOTICE" not in _log_text(tmp_path), (
+        "nothing legacy is configured -- there is nothing to notice about"
+    )
 
 
 @patch("pipeline.haiku.subprocess.run")
