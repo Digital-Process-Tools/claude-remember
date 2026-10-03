@@ -212,27 +212,33 @@ SCHEME_ALLOWLIST = frozenset({
     "promos.json",
 })
 
-# #898 round 2: a standalone network-command word (including "host", which is
-# on the directory's own list -- the `host` DNS lookup tool) anywhere in a
-# shipped file, outside an allowlist of files where the word is this plugin's
-# own architecture vocabulary rather than a network tool: `pipeline/` names
-# its own per-coding-agent abstraction `Host` (Claude Code / Codex / Gemini /
+# #898 round 2: a standalone network-command word (including "host" and
+# "ssh", both on the directory's own list -- `host` the DNS lookup tool,
+# `ssh` the remote-shell client) anywhere in a shipped file, outside an
+# allowlist of files where the word is this plugin's own architecture
+# vocabulary rather than a network tool: `pipeline/` names its own
+# per-coding-agent abstraction `Host` (Claude Code / Codex / Gemini /
 # Antigravity), and the git-backup/git-restore machinery's own prose
-# legitimately describes real `git fetch` calls and a real `GIT_SSH_COMMAND`.
-# Renaming either across its ~280 shipped occurrences was judged out of
-# proportion for this guard to force by itself -- see the lane's own report.
-# A NEW file outside this allowlist still has to earn its way onto it.
-NETWORK_WORDS_EXTENDED = NETWORK_COMMAND_NAMES + ("nc", "telnet", "scp", "rsync")
+# legitimately describes real `git fetch` calls and a real
+# `GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o...}"`. Renaming either across
+# its ~280 shipped occurrences was judged out of proportion for this guard
+# to force by itself -- see the lane's own report. Review finding, #898
+# round 2: this allowlist is scoped to files that were CONFIRMED (by this
+# repo's own built tree, not guessed) to actually carry one of these words
+# at the time it was written -- a file added to it later without a real
+# occurrence would be the same staleness risk the guard exists to avoid,
+# so re-check with a fresh grep before adding one, not before trusting this
+# list unchanged. A NEW file outside this allowlist still has to earn its
+# way onto it.
+NETWORK_WORDS_EXTENDED = NETWORK_COMMAND_NAMES + ("nc", "telnet", "ssh", "scp", "rsync")
 _NETWORK_WORD_STANDALONE = re.compile(
     r"\b(" + "|".join(NETWORK_WORDS_EXTENDED) + r")\b", re.IGNORECASE
 )
 NETWORK_WORD_ALLOWLIST = frozenset({
-    "pipeline/__init__.py", "pipeline/__main__.py", "pipeline/_tz.py",
-    "pipeline/consolidate.py", "pipeline/entry_header.py", "pipeline/extract.py",
-    "pipeline/haiku.py", "pipeline/host.py", "pipeline/log.py", "pipeline/prompts.py",
+    "pipeline/extract.py", "pipeline/haiku.py", "pipeline/host.py",
     "pipeline/shell.py", "pipeline/slug.py", "pipeline/spawn_guard.py", "pipeline/types.py",
     "scripts/agy-session-start-hook.sh", "scripts/agy-stop-hook.sh",
-    "scripts/detect-tools.sh", "scripts/doctor.sh", "scripts/install_agy_hooks.py",
+    "scripts/doctor.sh", "scripts/install_agy_hooks.py",
     "scripts/lib-env-cache.sh", "scripts/lib-lock.sh", "scripts/lib-memory-context.sh",
     "scripts/lib-staging-lock.sh", "scripts/log.sh", "scripts/post-tool-hook.sh",
     "scripts/resolve-paths.sh", "scripts/save-session.sh", "scripts/session-end-hook.sh",

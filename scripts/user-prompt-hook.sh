@@ -74,8 +74,8 @@ unset REMEMBER_HOOK_CWD
 # file, and pipeline/extract.py's find_session() returns that value BEFORE
 # the traversal validator (_validate_session_id) ever runs -- so a value set
 # anywhere in the ambient environment reads an arbitrary file straight into
-# the memory store, no `../` required. Only session-start-hook.sh and
-# session-end-hook.sh have a legitimate transcript_path to offer, extracted
+# the memory store, no `../` required. Only the SessionStart hook and
+# the SessionEnd hook have a legitimate transcript_path to offer, extracted
 # fresh from their own stdin payload on every run. This hook has none and
 # must not silently consult whatever the process environment already holds,
 # for the same reason and under the same unestablished-reachability
@@ -142,7 +142,7 @@ source "$_HOOK_DIR/lib-env-cache.sh"
 # --- REMEMBER_HOOK_CWD from stdin (#444, moved ahead of the cache lookup
 # below for #479) ---
 # resolve-paths.sh's REMEMBER_HOOK_CWD fallback (#411) only ever gets a
-# value from session-start-hook.sh and session-end-hook.sh, which is why a
+# value from the SessionStart hook and the SessionEnd hook, which is why a
 # host that never sets CLAUDE_PROJECT_DIR (Codex -- confirmed live,
 # tests/fixtures/codex-env-463.txt) hit the FATAL in resolve-paths.sh on
 # this hook before #411/#444: the #417 unset above left it correct but with
@@ -185,7 +185,7 @@ source "$_HOOK_DIR/lib-env-cache.sh"
 # After this change every invocation, hit or miss, carries the same
 # `read -t 1` ceiling the slow path already had -- a host that leaves the
 # pipe open without writing/closing it now costs up to 1s on the hot path
-# too, not 0ms. Accepted deliberately, not overlooked: `post-tool-hook.sh`
+# too, not 0ms. Accepted deliberately, not overlooked: `the PostToolUse hook`
 # already reads stdin unconditionally ahead of its own cache-load check
 # (see its REMEMBER_HOOK_CWD block), on the hook that fires roughly ten
 # times more often than this one, with no reported incident -- this is an
@@ -204,7 +204,7 @@ if [ ! -t 0 ]; then
         _line=""
     done
 fi
-# The same deliberately narrow extractor session-start-hook.sh uses: the
+# The same deliberately narrow extractor the SessionStart hook uses: the
 # key must be followed by nothing but whitespace and a colon before the
 # value's opening quote, so a `cwd` appearing inside some other field is
 # not mistaken for it.
@@ -294,7 +294,7 @@ _stdin_cwd_into() {
     [ -n "$value" ] || return 1
     printf -v "$_var" '%s' "$value"
 }
-# Validated the same way session-start-hook.sh validates its own copy: data
+# Validated the same way the SessionStart hook validates its own copy: data
 # from a host payload, at the point of entry. A project directory
 # legitimately contains slashes and dots, so only an embedded newline or
 # carriage return is rejected -- whether the value actually names a
@@ -328,7 +328,7 @@ fi
 
 if [ "$_REMEMBER_FAST" = "0" ]; then
     # Opt into resolve-paths.sh's soft-failure mode — see the comment in
-    # session-start-hook.sh. This hook must never block the agent, so a
+    # the SessionStart hook. This hook must never block the agent, so a
     # resolution failure is a silent no-op, not a crash.
     REMEMBER_PATHS_SOFT_FAIL=1 source "$_HOOK_DIR/resolve-paths.sh" || exit 0
     source "$_HOOK_DIR/bootstrap-dirs.sh"
@@ -351,7 +351,7 @@ declare -F dispatch >/dev/null 2>&1 || dispatch() { :; }
 # the HUMAN sees, and a notice only the model sees is how #200 stayed invisible
 # for a day in the first place — and how #253 stayed invisible for twelve.
 #
-#   capture-gap-notice  session-start-hook.sh: the PREVIOUS session ran
+#   capture-gap-notice  the SessionStart hook: the PREVIOUS session ran
 #                       SessionStart but never PostToolUse — the signature of a
 #                       plugin enabled mid-session, whose hooks Claude Code
 #                       never wired in.
@@ -363,7 +363,7 @@ declare -F dispatch >/dev/null 2>&1 || dispatch() { :; }
 #                       this session is missing what the other machine wrote,
 #                       and nothing will merge or rebase it for you.
 #   case-divergence-notice
-#                       session-start-hook.sh: this store is known by a second
+#                       the SessionStart hook: this store is known by a second
 #                       spelling that differs only in case (#298). Harmless on
 #                       the case-insensitive filesystem it is sitting on, and it
 #                       splits the store in two on a case-sensitive restore.

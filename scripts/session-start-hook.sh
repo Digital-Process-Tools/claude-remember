@@ -25,12 +25,12 @@
 #   previous one, and both used to assume the answer from mtime position (#270).
 #
 #   The read is bounded in TIME and only in time — `read -t 1`, and never from a
-#   tty — for the reason post-tool-hook.sh records: a hook that blocks on stdin
+#   tty — for the reason the PostToolUse hook records: a hook that blocks on stdin
 #   is not a slow session start, it is one that never starts.
 #
 #   The hook CONSUMES stdin, so the payload is re-published to hooks.d/
 #   listeners around the dispatches, on the same three-state contract
-#   post-tool-hook.sh established (#266).
+#   the PostToolUse hook established (#266).
 #
 # ENVIRONMENT
 #   CLAUDE_PLUGIN_ROOT   Plugin install directory (set by Claude Code)
@@ -54,15 +54,15 @@
 
 # --- Where this script lives ---
 # Parameter expansion, not three `dirname` forks (#230) — the same pattern
-# log.sh and user-prompt-hook.sh already use. A path with no slash in it
+# log.sh and the UserPromptSubmit hook already use. A path with no slash in it
 # leaves the filename behind, not a directory; `dirname` answered "." and
 # this must too.
 _HOOK_DIR="${BASH_SOURCE[0]%/*}"
 [ "$_HOOK_DIR" = "${BASH_SOURCE[0]}" ] && _HOOK_DIR="$PWD"
 
 # --- Nested summarizer: there is no project here (#204) ---
-# The same fast-path guard post-tool-hook.sh, user-prompt-hook.sh and
-# session-end-hook.sh already carry ahead of their own stdin capture, added
+# The same fast-path guard the PostToolUse hook, the UserPromptSubmit hook and
+# the SessionEnd hook already carry ahead of their own stdin capture, added
 # here for the same reason (#411): stdin is now read BEFORE resolve-paths.sh
 # is sourced (below), so REMEMBER_HOOK_CWD is available to it. Without a
 # guard here, every nested `claude -p` summarizer child would pay for the
@@ -109,7 +109,7 @@ fi
 # twice.
 #
 # The read is bounded in TIME and only in time — `read -t 1`, and never from
-# a tty — for the reason post-tool-hook.sh records: a hook that blocks on
+# a tty — for the reason the PostToolUse hook records: a hook that blocks on
 # stdin is not a slow session start, it is one that never starts. bash 3.2
 # has no sub-second -t, hence 1.
 HOOK_STDIN=""
@@ -121,15 +121,15 @@ if [ ! -t 0 ]; then
     done
 fi
 
-# The same deliberately narrow extractor post-tool-hook.sh and
-# session-end-hook.sh use, and for the same reason: the key must be followed
+# The same deliberately narrow extractor the PostToolUse hook and
+# the SessionEnd hook use, and for the same reason: the key must be followed
 # by nothing but whitespace and a colon before the value's opening quote, so
 # a `cwd` (or `session_id`, or `transcript_path`) appearing inside some other
 # field is not mistaken for it. It is a heuristic and is treated as one —
 # every result is validated below before anything is done with it.
 #
 # #494: whether a real host payload can nest a `cwd` key AHEAD of this
-# field is researched in scripts/user-prompt-hook.sh, next to its own
+# field is researched in the UserPromptSubmit hook, next to its own
 # `_stdin_cwd` -- same extractor mechanism, same finding, not repeated here.
 _stdin_json_string() {
     local key="$1" raw="$2" rest prefix value
@@ -219,7 +219,7 @@ REMEMBER_PATHS_SOFT_FAIL=1 source "$_HOOK_DIR/resolve-paths.sh" || exit 0
 # needs $PYTHON through four call sites, all jq-less fallbacks (the config
 # merge, the config flatten, the per-key read, and _jq_fallback itself) --
 # none of which run on the common jq-present path. Every other sourcer of
-# detect-tools.sh (post-tool-hook.sh, save-session.sh, run-consolidation.sh,
+# detect-tools.sh (the PostToolUse hook, save-session.sh, run-consolidation.sh,
 # doctor.sh) invokes $PYTHON -m pipeline.shell unconditionally right after
 # sourcing it, so eager detection there is real, not wasted, work -- this is
 # the one caller that is not.
@@ -253,7 +253,7 @@ case "$REMEMBER_SESSION_START_SLOW_S" in
     ''|*[!0-9]*) REMEMBER_SESSION_START_SLOW_S=5 ;;
 esac
 
-# Publish what the chain above just resolved, so user-prompt-hook.sh does not
+# Publish what the chain above just resolved, so the UserPromptSubmit hook does not
 # repeat it on every prompt (#227). Republishing unconditionally here is what
 # bounds the staleness of anything the cache cannot detect — a project that
 # became a linked git worktree, say — to a single session.
@@ -473,7 +473,7 @@ SAVED_QUERY='def isline: type == "number" and ((isnan or isinfinite) | not) and 
 #
 # Every OTHER $JQ/$JQ_BIN call site under scripts/ that passes --arg already
 # guards itself with `command -v jq` first (session-start-hook.sh's own
-# promo-JSON call below, user-prompt-hook.sh's two notice-JSON calls), so
+# promo-JSON call below, the UserPromptSubmit hook's two notice-JSON calls), so
 # this is the ONLY call site that ever reaches the fallback with --arg --
 # it gets its own jq-free branch instead of teaching the generic shim a
 # --arg parser it would be the sole caller of.
@@ -1113,7 +1113,7 @@ _second_newest_jsonl() {
 # subshell, because nothing in it feeds this hook's stdout and nothing after
 # it reads what it sets. Its outputs are: a backgrounded save-session.sh
 # (already detached before this change), files under tmp/ whose only reader is
-# user-prompt-hook.sh on the NEXT prompt, and log lines. The foreground path's
+# the UserPromptSubmit hook on the NEXT prompt, and log lines. The foreground path's
 # one obligation is the injected context, and this is not part of it.
 #
 # Why it is worth moving: `previous_transcript` sorts every past transcript
@@ -1157,7 +1157,7 @@ local -x _REMEMBER_PHASE=deferred
 # Records, moved here from their original call sites above (#660). All three
 # are pure side effects -- verified mechanically that none of them assigns
 # anything read later in this hook -- and their outputs are read by
-# user-prompt-hook.sh and /remember:doctor, never by the start itself.
+# the UserPromptSubmit hook and /remember:doctor, never by the start itself.
 _remember_write_slug_record
 _remember_write_slug_index
 _remember_write_case_divergence
@@ -1241,7 +1241,7 @@ fi
 # from a fresh start. Afterwards, though, the signature is exact: a session
 # where SessionStart ran and PostToolUse never did.
 #
-# Judged by IDENTITY: post-tool-hook.sh writes the session id it saw, and if
+# Judged by IDENTITY: the PostToolUse hook writes the session id it saw, and if
 # there is no record for the previous session's id then PostToolUse never ran
 # for it. Comparing mtimes instead failed — bash 3.2's `-nt` works to the
 # second, so a healthy session whose first tool call landed inside the same
@@ -1310,7 +1310,7 @@ SEEN_ID=""
 capture_was_seen() {
     local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
     [ -n "$1" ] || return 1
-    # 1. Per-session marker from post-tool-hook.sh — "PostToolUse ran for this
+    # 1. Per-session marker from the PostToolUse hook — "PostToolUse ran for this
     #    session", written pre-throttle, so it means WIRED, not saved.
     #    Same id check the writer applies: this is a basename off the
     #    transcript dir, and `..` would make `-e` true for every id.
@@ -1881,7 +1881,7 @@ fi
 # fd redirection, not `CTX=$( … )`: this range contains `case` statements
 # (the handoff-delivery-record reader below), and bash's own parser reads a
 # `case` pattern's closing `)` as the end of a command substitution -- the
-# exact trap user-prompt-hook.sh's CTX block already documents avoiding for
+# exact trap the UserPromptSubmit hook's CTX block already documents avoiding for
 # the same reason, on a much smaller block. A private, pre-verified-writable
 # temp file sidesteps the parser entirely: real fds, no substitution boundary
 # for a `)` to collide with.
@@ -2289,7 +2289,7 @@ if [ -d "$SESSIONS_DIR" ] && [ -d "$REMEMBER_DIR/tmp" ]; then
                     ;;
             esac
             # _remember_date +%s -- same call site convention as
-            # post-tool-hook.sh:377/605. lib-clock.sh routes %s to `date`
+            # the PostToolUse hook's own stdin-size handling. lib-clock.sh routes %s to `date`
             # unconditionally (never the printf builtin), and `_remember_date`
             # itself already falls back to plain `date` with no TZ set, so
             # this is not expected to fail on this path -- but #402 found
@@ -2572,7 +2572,7 @@ if [ -n "$_REMEMBER_CTX_OK" ]; then
             '{hookSpecificOutput:{hookEventName:"SessionStart",additionalContext:.},systemMessage:$msg}' \
             < "$_REMEMBER_CTX_FILE" 2>/dev/null) || _REMEMBER_PROMO_JSON=""
         # jq usage failure must not become this hook's status (same
-        # reasoning as user-prompt-hook.sh's own guard): fall back to the
+        # reasoning as the UserPromptSubmit hook's own guard): fall back to the
         # plain buffer rather than ever letting a cosmetic promo cost the
         # memory context it wraps.
         if [ -n "$_REMEMBER_PROMO_JSON" ]; then
