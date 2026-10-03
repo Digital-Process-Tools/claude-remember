@@ -521,20 +521,23 @@ def _accept_token(value: object, source: str) -> str | None:
     (``"oauth_token": ""``), i.e. "not configured", and it reaches here on
     every save through the merged config.
 
-    The value itself is never logged; only its source and its length.
+    The warning names only ``source`` (a constant the caller passes, never
+    derived from ``value``) -- CodeQL flagged a HIGH "clear-text logging of
+    sensitive information" alert on an earlier version of this function that
+    logged ``len(value.strip())`` (#860): even a length is a value DERIVED
+    from the secret, and CodeQL's taint tracker correctly follows that
+    derivation to the log sink regardless of how little of the original
+    value survives in it. The fix is not to log less of the value -- it is
+    to never read ``value`` into the message at all.
     """
     if value is None or (isinstance(value, str) and not value.strip()):
         return None
     if not _looks_like_token(value):
-        if isinstance(value, str):
-            detail = f"{len(value.strip())} chars"
-        else:
-            detail = f"a {type(value).__name__} value"
         _warn(
             f"WARNING: ignoring {source} -- not a plausible OAuth token "
             f"(want a whitespace-free string of at least {_MIN_TOKEN_LEN} "
-            f"chars, got {detail}); the nested CLI will run unauthenticated "
-            "unless the host provides a token of its own"
+            "chars); the nested CLI will run unauthenticated unless the "
+            "host provides a token of its own"
         )
         return None
     return str(value).strip()

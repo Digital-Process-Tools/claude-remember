@@ -676,6 +676,41 @@ def _log_text(remember_dir) -> str:
 
 
 @patch("pipeline.haiku.subprocess.run")
+def test_malformed_userconfig_token_warning_never_logs_the_value(mock_run, monkeypatch, tmp_path):
+    """CodeQL finding (PR #894, HIGH, "Clear-text logging of sensitive
+    information"): the old malformed-token warning built its message with
+    `f"{len(value.strip())} chars"` -- a value DERIVED from the secret, which
+    CodeQL's taint tracker correctly flags as the secret itself reaching a log
+    sink, even though only a length was printed. The message must be built
+    from constants and the setting's NAME only, never from the configured
+    value in any form (#860)."""
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    configured_value = "a-short-but-distinctive-secret-marker"
+    monkeypatch.setenv("CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN", "too short")
+    monkeypatch.setenv("REMEMBER_DIR", str(tmp_path))
+    mock_run.return_value = MagicMock(
+        returncode=0, stdout=_mock_claude_response("x"), stderr="")
+
+    call_haiku("p")
+
+    logged = _log_text(tmp_path)
+    assert "too short" not in logged and configured_value not in logged, (
+        "the malformed value itself must never reach the log:\n" + logged
+    )
+    assert "got " not in logged, (
+        'a length DERIVED from the value (the old "...got 9 chars)" phrase) '
+        'is itself a value-derived leak and must not appear, even as a '
+        "count rather than the value -- the fixed constant phrase "
+        '"at least 20 chars" above is fine, since it is not derived from '
+        "anything the operator configured:\n" + logged
+    )
+    assert "CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN" in logged, (
+        "positive control: the warning must still name the setting, just not "
+        "anything derived from its value:\n" + logged
+    )
+
+
+@patch("pipeline.haiku.subprocess.run")
 def test_call_haiku_uses_userconfig_token_env(mock_run, monkeypatch, tmp_path):
     """The plugin.json `userConfig` option (`oauth_token`, `sensitive: true`)
     reaches this hook's subprocess as `CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN` (per

@@ -108,15 +108,20 @@ Expected in the daily log (`$REMEMBER_DIR/logs/`, written via
 
 ```
 WARNING: ignoring CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN — not a plausible OAuth
-token (want a whitespace-free string of at least 20 chars, got 9 chars);
-the nested CLI will run unauthenticated unless the host provides a token
-of its own
+token (want a whitespace-free string of at least 20 chars); the nested CLI
+will run unauthenticated unless the host provides a token of its own
 ```
 
 Check specifically:
 
 - the warning names its **source** (`CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN`),
-- it reports a **length** (`9 chars` above), not the value,
+- an earlier version of this message also reported the configured value's
+  **length** (e.g. "got 9 chars") -- CodeQL flagged that as a HIGH "clear
+  -text logging of sensitive information" alert (#860): a length is still a
+  value DERIVED from the secret, and the taint tracker follows that
+  derivation to the log sink regardless of how little survives. The message
+  now carries no value-derived content at all, only the fixed constant text
+  above and the setting's name,
 - the configured value itself never appears anywhere in the log line
   (`_accept_token` in `pipeline/haiku.py` — see
   [#184](https://github.com/Digital-Process-Tools/claude-remember/issues/184),
