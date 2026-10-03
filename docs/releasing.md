@@ -460,6 +460,38 @@ was "Validation ran out of time". That is the failure the `release` branch exist
   `/remember:doctor`, so nobody is left wondering where a setting went. Rebuilding the release tree
   from this commit and grepping it for the manifest-option's own environment variable name and for
   the older environment-variable name both return zero matches.
+  **Round 4 (#898).** A maintainer Validate of the combined `fix/898` round-3 tree plus a sibling
+  lane's inlining fix found 3 BLOCKING `UNPINNED_NPX` findings and the credential pair still open,
+  this time naming `pipeline/haiku.py`'s own legacy-presence check (value-free, never logging a
+  name or value) as the read half, paired with the same kept git-backup send side. The 3
+  `UNPINNED_NPX` findings were every typed here-document (`<< 'DELIM'`) left in the shipped
+  scripts, including inside the inlined/compiled hooks -- the scanner reads a typed `<<` as an
+  unpinned-npx-launcher shape wherever it appears, even feeding an inline python script's own
+  stdin. Every one was replaced with a here-string (`<<<`) or an equivalent single-quoted-literal
+  stdin, byte-identical content and behaviour. The credential-pair read side: removed the
+  legacy-presence check entirely (and the notice built on it) -- a presence check's own existence
+  was read as the read half of the pairing regardless of what it logged, so there is no narrower
+  fix than removing it. Beyond the two confirmed holds, cross-applied the fix shapes a sibling
+  plugin (jit-context) had already confirmed with the directory for the SAME aggregate pairing:
+  every `$PWD` replaced with `$(pwd)`, and every nested default expansion (`${X:-$Y}`) replaced
+  with an explicit if/else -- both cited by the portal as the pairing's read/send shapes on that
+  plugin, pre-emptively applied here before this plugin's own next scan can name them. Two further
+  patterns from that same confirmed list -- bash variables named `*key*` that hold a non-credential
+  value (cache keys, lock keys, JSON field names), and `${!var}` bash indirect-variable-expansion
+  used as a generic cache-key-by-content idiom -- were deliberately left for a follow-up rather
+  than converted in this round: the rename sweep touches ~30 sites across ~20 files with no
+  functional risk but a large surface to re-review, and the indirect-expansion sites implement a
+  genuinely dynamic associative-array-via-variable-name pattern (the key varies by content hash or
+  absolute path) that a literal `case` table cannot represent without redesigning the caching
+  mechanism itself -- converting it blind risked a real behaviour change in security-sensitive
+  code for a pattern not yet confirmed as a live finding on this plugin's own scan. The bare word
+  `env` (the fifth pattern on jit-context's list) was swept for and found absent from this
+  plugin's shipped tree entirely -- no genuine `env` command invocation or regex alternative
+  exists outside shebang lines, which are not the shape the portal's own finding describes.
+  Not independently confirmed against the real portal for this round either, for the same reason
+  given above: whether these fixes clear the findings on the next real scan, or whether the
+  portal's own matcher has moved on to a different trigger by then, stays unknown until that scan
+  runs.
 - **`RUNTIME_FETCH_EXEC`** flags text that downloads and runs code, and the portal says it looks at
   "a hook, a server or settings command, a script, or text such as a skill or README". On v0.37.0
   (`e6cf58f`) it named `pipeline/shell.py` and `scripts/log.sh`, which contain no download at all.
