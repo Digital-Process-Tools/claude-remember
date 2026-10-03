@@ -361,20 +361,26 @@ def test_plain_default_expansion_is_not_a_nested_one(tmp_path):
 # -- round 5 (#898): credential-shaped name outside the allowlist (FAIL) ------
 
 def test_credential_shaped_name_outside_allowlist_fails(tmp_path):
+    """A credential-shaped name this plugin has no reason to ship (a made-up
+    example, never a real one this repo reads) must still be caught."""
     root = _tree(tmp_path, {
-        "pipeline/example.py": b'TOKEN = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")\n',
+        "pipeline/example.py": b'TOKEN = os.environ.get("EXAMPLE_UNRELATED_API_KEY")\n',
     })
     offenders = _check(root).offenders
-    assert any("example.py" in o and "CLAUDE_CODE_OAUTH_TOKEN" in o for o in offenders), offenders
+    assert any("example.py" in o and "EXAMPLE_UNRELATED_API_KEY" in o for o in offenders), offenders
 
 
 def test_allowlisted_credential_name_is_not_an_offender(tmp_path):
-    """Positive control: ANTHROPIC_API_KEY (and the round-5 split-name half,
-    OAUTH_TOKEN alone) are accepted today -- reported, not fixed, per the
-    round-5 brief's own instruction not to remove that behaviour unasked."""
+    """Positive control: ANTHROPIC_API_KEY, CODEX_API_KEY and
+    CLAUDE_CODE_OAUTH_TOKEN -- real, intentionally shipped identifiers named
+    in full -- are accepted (#898, round 6: the round-5 split of the last one
+    into two string halves was itself ruled obfuscation and reverted; naming
+    the real credential plainly is the fix, not a regression this guard
+    should catch)."""
     root = _tree(tmp_path, {
         "pipeline/example.py": (b'KEY_ENV = "ANTHROPIC_API_KEY"\n'
-                                 b'NAME = "CLAUDE_CODE_" + "OAUTH_TOKEN"\n'),
+                                 b'CODEX_ENV = "CODEX_API_KEY"\n'
+                                 b'OAUTH_NAME = "CLAUDE_CODE_OAUTH_TOKEN"\n'),
     })
     offenders = _check(root).offenders
     assert not any("example.py" in o for o in offenders), offenders

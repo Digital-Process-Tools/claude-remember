@@ -293,13 +293,21 @@ NESTED_DEFAULT_EXPANSION = re.compile(r'\$\{[A-Za-z_][A-Za-z0-9_]*:-\$')
 # the scanner read a value-free presence CHECK as a read regardless of its
 # behaviour). ANTHROPIC_API_KEY and CODEX_API_KEY are accepted today (#898
 # round 5 reported, not fixed, pending a maintainer decision on the smallest
-# change that would stop naming them); CLAUDE_CODE_OAUTH_TOKEN is NOT -- this
-# guard exists specifically to catch a regression of the round-5 fix that
-# assembled that name from two literal halves rather than naming it whole --
-# "OAUTH_TOKEN" alone (the second half) is accepted here on purpose: it is
-# not, by itself, a full credential name for any variable this plugin reads,
-# and it is exactly the shape the round-5 split deliberately leaves behind.
-CREDENTIAL_NAME_ALLOWLIST = {"ANTHROPIC_API_KEY", "CODEX_API_KEY", "OAUTH_TOKEN"}
+# change that would stop naming them). CLAUDE_CODE_OAUTH_TOKEN used to be
+# deliberately left OUT of this allowlist, so this guard would catch a
+# regression of round 5's own fix for that one name -- splitting it across
+# two literal string halves rather than naming it whole. #898, round 6: the
+# maintainer ruled that split itself obfuscation, not a fix, and reverted it.
+# So the gap this guard used to protect is now the wrong direction:
+# CLAUDE_CODE_OAUTH_TOKEN is a real, intentionally shipped identifier (the
+# one host credential this plugin's child-env strip deliberately keeps,
+# #131), and it belongs in this allowlist written out in full, same as
+# ANTHROPIC_API_KEY and CODEX_API_KEY. "OAUTH_TOKEN" alone (the second half
+# of the now-reverted split) stays allowlisted too: it is not, by itself, a
+# full credential name for any variable this plugin reads.
+CREDENTIAL_NAME_ALLOWLIST = {
+    "ANTHROPIC_API_KEY", "CODEX_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "OAUTH_TOKEN",
+}
 CREDENTIAL_SHAPED_NAME = re.compile(
     r'\b([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_(?:TOKEN|KEY|SECRET|PASSWORD))\b'
 )
