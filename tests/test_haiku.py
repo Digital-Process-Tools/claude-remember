@@ -917,6 +917,33 @@ def test_legacy_haiku_oauth_token_config_still_works_but_logs_deprecation(mock_r
 
 
 @patch("pipeline.haiku.subprocess.run")
+def test_legacy_token_deprecation_warning_logs_once_not_twice(mock_run, monkeypatch, tmp_path):
+    """_configured_oauth_token() is consulted twice per save on this path: once
+    by _other_credential() (deciding whether to strip ANTHROPIC_API_KEY, which
+    only needs to know a credential EXISTS) and once by
+    _inject_configured_oauth_token() (which actually injects it). Review
+    finding: before this fix, both calls logged the DEPRECATED line, so one
+    save wrote it twice -- contradicting "every time it is actually used"."""
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.delenv("CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN", raising=False)
+    monkeypatch.setenv("REMEMBER_OAUTH_TOKEN", "sk-ant-oat-legacy-env-0000005")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-irrelevant-value-00")
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.setattr("pipeline.haiku._host_login_present", lambda: False)
+    monkeypatch.setenv("REMEMBER_DIR", str(tmp_path))
+    mock_run.return_value = MagicMock(
+        returncode=0, stdout=_mock_claude_response("x"), stderr="")
+
+    call_haiku("p")
+
+    logged = _log_text(tmp_path)
+    assert logged.count("DEPRECATED") == 1, (
+        "one save must log the deprecation line exactly once, not once per "
+        "internal call to _configured_oauth_token():\n" + logged
+    )
+
+
+@patch("pipeline.haiku.subprocess.run")
 def test_a_failed_call_reports_what_it_spent(mock_run, monkeypatch, tmp_path):
     """#190: a non-zero exit still cost money if the payload says so."""
     monkeypatch.setenv("REMEMBER_DIR", str(tmp_path))

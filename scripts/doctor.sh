@@ -1033,8 +1033,10 @@ unset _remember_ss_glob_dir _SS_LATEST_LOG _SS_LAST_LINE _ss_f
 echo "-- Deprecated recovery-token config (#860) --"
 _remember_dep_glob_dir=$(_remember_forward_slash "$REMEMBER_DIR")
 _DEP_LINE=""
+_DEP_ANY_LOG=0
 _DEP_FILES=("$_remember_dep_glob_dir"/logs/memory-*.log)
 if [ -e "${_DEP_FILES[0]}" ]; then
+    _DEP_ANY_LOG=1
     _DEP_OLD_IFS="$IFS"
     IFS=$'\n'
     _DEP_SORTED=($(printf '%s\n' "${_DEP_FILES[@]}" | LC_ALL=C sort))
@@ -1052,10 +1054,12 @@ if [ -n "$_DEP_LINE" ]; then
     echo "     Configure the recovery token through the plugin's userConfig"
     echo "     option instead (/plugin -> remember -> Configure, or"
     echo "     \`claude plugin config set remember oauth_token <token>\`)."
-else
+elif [ "$_DEP_ANY_LOG" = 1 ]; then
     echo "OK   No deprecated recovery-token config in use"
+else
+    echo "--   No daily log found yet -- nothing scanned for deprecated recovery-token config"
 fi
-unset _remember_dep_glob_dir _DEP_LINE _dep_f
+unset _remember_dep_glob_dir _DEP_LINE _DEP_ANY_LOG _dep_f
 echo ""
 
 # Log rotation (#252). A rotation that cannot run is invisible by construction:

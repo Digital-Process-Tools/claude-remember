@@ -51,6 +51,42 @@ def test_positive_control_no_deprecated_usage_shows_no_notice(tmp_path):
     assert "DEPRECATED" not in result.stdout
 
 
+def test_no_log_at_all_is_distinguished_from_logs_with_no_deprecated_line(tmp_path):
+    """Review finding (auditor): the new section must not collapse "no daily
+    log exists yet" (fresh install, or logging unwritable) and "logs exist,
+    were genuinely scanned, and no DEPRECATED line was ever written" into the
+    same "OK" sentence -- the sibling SessionStart-duration section three
+    blocks above already keeps these two cases apart for exactly this reason,
+    and the new section must follow the same convention."""
+    home, project, remember, _session_dir = _healthy_baseline(tmp_path)
+    no_log_result = _run(home, project, remember)
+
+    import shutil
+    remember2 = remember.parent / "remember2"
+    shutil.copytree(remember, remember2)
+    (remember2 / "logs").mkdir(parents=True, exist_ok=True)
+    (remember2 / "logs" / "memory-2026-10-03.log").write_text(
+        "09:00:00 [haiku] everything fine, nothing deprecated here\n",
+        encoding="utf-8",
+    )
+    clean_log_result = _run(home, project, remember2)
+
+    def _verdict_line(stdout: str) -> str:
+        return next(
+            line for line in stdout.splitlines()
+            if "recovery-token config" in line.lower()
+            and not line.rstrip().endswith("--"))
+
+    no_log_line = _verdict_line(no_log_result.stdout)
+    clean_log_line = _verdict_line(clean_log_result.stdout)
+    assert no_log_line != clean_log_line, (
+        "a fresh install with no daily log at all must not print the exact "
+        "same line as an install whose logs were genuinely scanned and "
+        "found clean:\n  no-log:    " + no_log_line
+        + "\n  logs-clean: " + clean_log_line
+    )
+
+
 def test_deprecated_remember_oauth_token_usage_is_surfaced(tmp_path):
     """Must-fire: once pipeline/haiku.py has logged a DEPRECATED line for
     REMEMBER_OAUTH_TOKEN, doctor.sh must surface it rather than leave it

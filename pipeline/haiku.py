@@ -615,7 +615,7 @@ def _config_candidates() -> list[str]:
 USER_CONFIG_OAUTH_TOKEN_ENV = "CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN"
 
 
-def _configured_oauth_token() -> str | None:
+def _configured_oauth_token(warn: bool = True) -> str | None:
     """Operator-configured OAuth token for the nested CLI, or ``None``.
 
     Precedence: the plugin's ``oauth_token`` userConfig option
@@ -626,6 +626,15 @@ def _configured_oauth_token() -> str | None:
     ``_config_candidates``). Best-effort: any missing file, read error, or
     malformed JSON yields ``None`` and never raises -- but a value that is
     present and unusable is logged rather than dropped silently.
+
+    ``warn=False`` suppresses only the DEPRECATED line for a legacy source,
+    for a caller that is merely checking whether SOME configured credential
+    exists (``_other_credential()``, deciding whether to strip
+    ``ANTHROPIC_API_KEY``) rather than one that is actually about to inject
+    this token for the nested CLI to use (``_inject_configured_oauth_token()``,
+    the only caller that keeps the default). Without this, one save logged
+    the deprecation line twice -- once per caller -- for a single use of the
+    token (review finding, #860).
     """
     option_token = os.environ.get(USER_CONFIG_OAUTH_TOKEN_ENV, "").strip()
     if option_token:
@@ -637,14 +646,15 @@ def _configured_oauth_token() -> str | None:
     if env_token:
         token = _accept_token(env_token, "REMEMBER_OAUTH_TOKEN")
         if token:
-            _warn(
-                "DEPRECATED: REMEMBER_OAUTH_TOKEN is still read as a fallback "
-                "but will be removed in a future release -- configure the "
-                "recovery token through the plugin's userConfig option "
-                "instead (/plugin -> remember -> Configure, or "
-                "`claude plugin config set remember oauth_token <token>`); "
-                "see #860"
-            )
+            if warn:
+                _warn(
+                    "DEPRECATED: REMEMBER_OAUTH_TOKEN is still read as a "
+                    "fallback but will be removed in a future release -- "
+                    "configure the recovery token through the plugin's "
+                    "userConfig option instead (/plugin -> remember -> "
+                    "Configure, or `claude plugin config set remember "
+                    "oauth_token <token>`); see #860"
+                )
             return token
 
     for path in _config_candidates():
@@ -660,14 +670,15 @@ def _configured_oauth_token() -> str | None:
             continue
         token = _accept_token(haiku_cfg["oauth_token"], f"haiku.oauth_token in {path}")
         if token:
-            _warn(
-                f"DEPRECATED: haiku.oauth_token in {path} is still read as a "
-                "fallback but will be removed in a future release -- "
-                "configure the recovery token through the plugin's "
-                "userConfig option instead (/plugin -> remember -> "
-                "Configure, or `claude plugin config set remember "
-                "oauth_token <token>`); see #860"
-            )
+            if warn:
+                _warn(
+                    f"DEPRECATED: haiku.oauth_token in {path} is still read "
+                    "as a fallback but will be removed in a future release "
+                    "-- configure the recovery token through the plugin's "
+                    "userConfig option instead (/plugin -> remember -> "
+                    "Configure, or `claude plugin config set remember "
+                    "oauth_token <token>`); see #860"
+                )
             return token
     return None
 
@@ -787,7 +798,12 @@ def _other_credential() -> str | None:
     """
     if os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "").strip():
         return "CLAUDE_CODE_OAUTH_TOKEN from the host"
-    if _configured_oauth_token():
+    # warn=False: this call only checks whether a configured token EXISTS
+    # (to decide whether ANTHROPIC_API_KEY should be stripped) -- it does
+    # not inject or otherwise use the token, so it must not also log the
+    # deprecation line _inject_configured_oauth_token() already logs for
+    # the one call per save that actually does (#860, review finding).
+    if _configured_oauth_token(warn=False):
         return "the OAuth token you configured for this plugin"
     if _host_login_present():
         return f"the claude.ai login in {_claude_login_path()}"
