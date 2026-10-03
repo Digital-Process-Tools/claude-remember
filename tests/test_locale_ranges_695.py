@@ -163,13 +163,16 @@ _CASE = (
 # Sites that are correct as they stand. A bare path is not accepted: every
 # exemption is argued once, in writing, where the next reader can weigh it.
 ALLOWLIST: dict[tuple[str, int], str] = {
-    ("scripts/log.sh", 149):
+    # Lines shifted +6 by #898 round 4's PIPELINE_DIR nested-default-expansion
+    # fix near the top of this file (the case statements/strings themselves
+    # are unchanged).
+    ("scripts/log.sh", 155):
         "inside _REMEMBER_CFG_FLATTEN_JQ, a jq program string. jq matches "
         "with Oniguruma, which is not driven by the shell's LC_COLLATE.",
-    ("scripts/log.sh", 175):
+    ("scripts/log.sh", 181):
         "inside the embedded Python fallback. Python's `re` over `str` "
         "matches [A-Za-z0-9_] as ASCII regardless of locale.",
-    ("scripts/log.sh", 178):
+    ("scripts/log.sh", 184):
         "the same Python fallback's own message text, not a pattern.",
     ("scripts/lib-slug.sh", 71):
         "a member of the _REMEMBER_SLUG_SED array, only ever invoked as "
@@ -194,7 +197,9 @@ ALLOWLIST: dict[tuple[str, int], str] = {
     ("scripts/session-start-hook.sh", 298): _CASE,
     ("scripts/write-handoff.sh", 87): _CASE,
     ("scripts/doctor.sh", 70): _CASE,
-    ("scripts/lib-slug.sh", 406): _CASE,
+    # Shifted +5 by #898 round 4's claude_projects_dir nested-default fix
+    # above in this same file (the case statement itself is unchanged).
+    ("scripts/lib-slug.sh", 411): _CASE,
 }
 
 
