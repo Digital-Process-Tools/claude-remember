@@ -143,11 +143,12 @@ def _download_piped_to_shell(line: str) -> bool:
     words = last.split()
     if not words:
         return False
-    # The first word may carry trailing punctuation from its context (a
-    # closing backtick in Markdown, a version suffix) -- take the leading
-    # run of letters only, so `sh`` (inside a Markdown code span) and `sh3`
-    # still resolve to the shell name they actually are.
-    m = re.match(r"^[A-Za-z]+", words[0])
+    # The first word may carry punctuation from its context on either side
+    # -- a Markdown code span's backticks on both ends, a version suffix
+    # trailing it -- so strip any leading/trailing run of non-letters first,
+    # then take the run of letters that remains.
+    core = words[0].strip("`'\"*_")
+    m = re.match(r"^[A-Za-z]+", core)
     return bool(m) and m.group(0) in _SHELL_NAMES
 
 

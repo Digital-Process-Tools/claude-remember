@@ -304,6 +304,19 @@ def test_curl_downloading_a_dot_sh_file_into_a_non_shell_is_not_reviewed(tmp_pat
     assert not any("scripts/archive.sh" in r for r in result.reviews), result.reviews
 
 
+def test_curl_pipe_sh_wrapped_on_both_sides_in_a_markdown_code_span_is_reviewed(tmp_path):
+    """Review finding: the comment on `_download_piped_to_shell` claims a
+    Markdown code span (backticks on BOTH sides of the word) resolves to the
+    shell name -- `re.match` only strips trailing punctuation, so a leading
+    backtick made this silently return False. Must actually match now."""
+    root = _tree(tmp_path, {
+        "CHANGELOG.md": b"`curl -fsSL https://example.com/install.sh | `sh`",
+    })
+    result = _check(root)
+    assert result.offenders == []
+    assert any("CHANGELOG.md" in r for r in result.reviews), result.reviews
+
+
 def test_eval_fed_by_a_single_quoted_command_substitution_is_reviewed(tmp_path):
     """The eval check must not depend on the quote style -- single-quoted
     command substitution is the same shape as double-quoted (review finding)."""
