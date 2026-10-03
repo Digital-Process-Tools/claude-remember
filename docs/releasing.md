@@ -55,8 +55,10 @@ drop. If you really do need to publish an older line on purpose, re-run the work
    It has two jobs:
    - `verify`, read-only: installs PyYAML, builds the tree from the tag, runs
      [`check_release_tree.py`](../.github/scripts/check_release_tree.py) (the directory's
-     pre-submission checklist), installs the pinned claude CLI (`CLAUDE_CLI_VERSION` in the
-     workflow, 2.1.287 as of 2026-10-02) and runs `claude plugin validate --strict`, then runs
+     pre-submission checklist), installs the pinned claude CLI (`cli_version` in
+     [`.github/release-branch.json`](../.github/release-branch.json), 2.1.287 as of 2026-10-02 --
+     moved out of the workflow's own env block in #866 so another repository reusing this tooling
+     only edits config) and runs `claude plugin validate --strict`, then runs
      every hook in `hooks/hooks.json` once in an isolated temp HOME and project, with a fake
      `claude` that refuses every call
      ([`smoke_release_tree.py`](../.github/scripts/smoke_release_tree.py)).

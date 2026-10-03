@@ -330,7 +330,14 @@ DEFAULT_CONFIG = Path(__file__).resolve().parent.parent / "release-branch.json"
 
 
 def load_smoke_config(config_path: Path) -> dict:
+    """The `smoke` block from CONFIG_PATH's JSON, or {} if the file has none.
+    A missing/typo'd path and a config that deliberately omits `smoke` both
+    resolve to the same {} (and therefore the same defaults) -- the two are
+    not distinguishable to a caller otherwise, so a missing path says so on
+    stderr rather than resolving silently (review finding on #866)."""
     if not Path(config_path).is_file():
+        print(f"smoke: --config {config_path} not found; using default smoke settings",
+              file=sys.stderr)
         return {}
     return json.loads(Path(config_path).read_text(encoding="utf-8")).get("smoke", {})
 

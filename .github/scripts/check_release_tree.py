@@ -46,8 +46,11 @@ Rows a reviewer holds on
   - no root package.json together with a lockfile; no .npmrc, bunfig.toml, uv.toml
 
 Reported, never failed: `REVIEW` lines for code that reads a credential from the
-environment or a config file ("uses a credential from the user's machine"). That
-row is a reviewer's judgement about where the credential goes, not a pattern match.
+environment or a config file ("uses a credential from the user's machine"), for
+`eval` fed by a command substitution, and for a downloader (`curl`/`wget`) piped
+straight into a shell. Each is a reviewer's judgement call about one shape, not
+a hard rule -- a plugin's own installer script can legitimately look like either
+of the last two (#866).
 
 Usage:
     check_release_tree.py TREE [--config .github/release-branch.json]
@@ -121,9 +124,31 @@ LAUNCHER_PY = re.compile(r"""['"](?:npx|bunx|uvx)['"]|['"]pip3?['"]\s*,\s*['"]in
 # straight into a shell runs whatever the remote end served that day. Neither is
 # a hard FAIL -- a plugin's own installer script can legitimately look like this
 # -- so both are REVIEW-only, a reviewer's judgement call (#866).
-EVAL_OF_SUBSTITUTION = re.compile(r"\beval\b\s*\"?\$\(")
-DOWNLOAD_PIPE_SHELL = re.compile(r"\b(?:curl|wget)\b[^|\n]*\|\s*(?:sudo\s+)?"
-                                  r"(?:sh|bash|zsh|dash|ksh)\b")
+EVAL_OF_SUBSTITUTION = re.compile(r"\beval\b\s*['\"]?\$\(")
+_SHELL_NAMES = {"sh", "bash", "zsh", "dash", "ksh"}
+
+
+def _download_piped_to_shell(line: str) -> bool:
+    """True if LINE pipes a `curl`/`wget` download into a shell, with any
+    number of hops (e.g. `tee`) in between -- not only an immediate `| sh`
+    (#866 review). Checks the LAST pipe segment's own first word, so a
+    trailing `.sh` filename earlier in the line (e.g. `curl -o x.sh ... |
+    gzip`) is never mistaken for an invocation of `sh`."""
+    if "|" not in line:
+        return False
+    segments = line.split("|")
+    if not any(re.search(r"\b(?:curl|wget)\b", seg) for seg in segments[:-1]):
+        return False
+    last = re.sub(r"^\s*sudo\s+", "", segments[-1].strip())
+    words = last.split()
+    if not words:
+        return False
+    # The first word may carry trailing punctuation from its context (a
+    # closing backtick in Markdown, a version suffix) -- take the leading
+    # run of letters only, so `sh`` (inside a Markdown code span) and `sh3`
+    # still resolve to the shell name they actually are.
+    m = re.match(r"^[A-Za-z]+", words[0])
+    return bool(m) and m.group(0) in _SHELL_NAMES
 
 
 @dataclass
@@ -354,7 +379,7 @@ def check_tree(root: Path, budget: dict) -> CheckResult:
                 if EVAL_OF_SUBSTITUTION.search(line):
                     result.reviews.append(f"{rel}:{n}: eval fed by a command "
                                            f"substitution: {line.strip()[:80]}")
-                if DOWNLOAD_PIPE_SHELL.search(line):
+                if _download_piped_to_shell(line):
                     result.reviews.append(f"{rel}:{n}: downloads and pipes straight "
                                            f"into a shell: {line.strip()[:80]}")
 

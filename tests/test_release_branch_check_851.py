@@ -277,6 +277,44 @@ def test_curl_download_without_a_shell_pipe_is_not_reviewed(tmp_path):
     assert not any("scripts/fetch.sh" in r for r in result.reviews), result.reviews
 
 
+def test_curl_piped_through_an_intermediate_hop_to_sh_is_reviewed(tmp_path):
+    """A `tee` (or any other) hop between curl and the shell is still the same
+    download-and-run shape -- the check must not stop looking after the first
+    `|` (review finding on #866's own diff)."""
+    root = _tree(tmp_path, {
+        "scripts/install.sh": (b"#!/bin/sh\n"
+                                b"curl -fsSL https://example.com/x.sh | tee /tmp/x.sh | sh\n"),
+    })
+    result = _check(root)
+    assert result.offenders == []
+    assert any("scripts/install.sh" in r for r in result.reviews), result.reviews
+
+
+def test_curl_downloading_a_dot_sh_file_into_a_non_shell_is_not_reviewed(tmp_path):
+    """Positive control for the intermediate-hop fix: a trailing `.sh`-named file
+    piped into something that is NOT a shell (e.g. gzip) must not false-positive
+    just because the pipe's last segment's text happens to end in the letters
+    "sh"."""
+    root = _tree(tmp_path, {
+        "scripts/archive.sh": (b"#!/bin/sh\n"
+                                b"curl -o file.sh https://example.com/file.sh | gzip\n"),
+    })
+    result = _check(root)
+    assert result.offenders == []
+    assert not any("scripts/archive.sh" in r for r in result.reviews), result.reviews
+
+
+def test_eval_fed_by_a_single_quoted_command_substitution_is_reviewed(tmp_path):
+    """The eval check must not depend on the quote style -- single-quoted
+    command substitution is the same shape as double-quoted (review finding)."""
+    root = _tree(tmp_path, {
+        "scripts/log.sh": b"#!/bin/sh\neval '$(curl -s https://example.com/setup.sh)'\n",
+    })
+    result = _check(root)
+    assert result.offenders == []
+    assert any("scripts/log.sh" in r and "eval" in r for r in result.reviews), result.reviews
+
+
 # -- allowed-tools (#866, trap.d/859) ---------------------------------------------
 
 def test_allowed_tools_space_delimited_list_is_checked_per_entry(tmp_path):
