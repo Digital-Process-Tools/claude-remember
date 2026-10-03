@@ -92,6 +92,19 @@ jobs:
         run: |
           set -eu
           [ -f history.json ] || echo '[]' > history.json
+
+          # #877: `gh api` only treats a non-2xx HTTP status as a failure, so
+          # a 200 response whose body has no `clones` key (a schema change,
+          # or any other unexpected 200 shape) would otherwise make `// []`
+          # below silently substitute an empty array -- the workflow still
+          # reports success, having just added nothing to history.json, with
+          # no way for a reader of the badge to tell that apart from a
+          # genuine zero-clone day. Warn loudly rather than fail the run: a
+          # nightly cron going red on an API hiccup is its own cost.
+          if ! jq -e 'has("clones")' traffic.json > /dev/null 2>&1; then
+            echo "::warning::clones-badge: traffic.json has no 'clones' key -- GitHub's traffic API response shape may have changed; no new data was added today"
+          fi
+
           jq -s '
             ((.[1].clones // []) + .[0])
             | unique_by(.timestamp)

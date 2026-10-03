@@ -170,6 +170,113 @@ def test_workflow_does_not_fail_loudly_when_the_secret_is_absent():
     )
 
 
+def test_merge_step_warns_when_traffic_json_has_no_clones_key():
+    """#877 -- `gh api` only treats a non-2xx HTTP status as a failure. A 200
+    response whose body has no `clones` key (a schema change, or any other
+    200 shape) makes `// []` silently substitute an empty array, and the
+    workflow still reports success -- it just adds nothing to history.json
+    that day, with no signal anywhere that the fetch step actually ran and
+    produced an unparseable shape.
+
+    This runs the "Merge into history and write the badge" step's own shell
+    script against a crafted traffic.json missing the `clones` key, and
+    asserts it still exits 0 (a schema hiccup must not redden a nightly
+    cron) while printing a loud `::warning::` annotation naming the gap --
+    the positive control below pins that the warning does NOT fire when
+    `clones` is present, so a guard that always warns would fail that half.
+    """
+    doc = _load_workflow()
+    steps = doc["jobs"]["update"]["steps"]
+    merge_step = next(
+        (s for s in steps if s.get("name") == "Merge into history and write the badge"),
+        None,
+    )
+    assert merge_step is not None, (
+        f"{WORKFLOW} has no step named 'Merge into history and write the badge' to guard-test"
+    )
+
+    bash = shutil.which("bash")
+    jq = shutil.which("jq")
+    if bash is None or jq is None:
+        pytest.skip("no `bash`/`jq` on PATH -- cannot exercise the merge step's own shell script here")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        (tmp_path / "history.json").write_text("[]", encoding="utf-8")
+        (tmp_path / "traffic.json").write_text('{"count": 1, "uniques": 1}', encoding="utf-8")
+
+        script = tmp_path / "merge-step.sh"
+        with open(script, "w", encoding="utf-8", newline="\n") as f:
+            f.write(merge_step["run"])
+
+        result = subprocess.run(
+            [bash, str(script)],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+
+    assert result.returncode == 0, (
+        f"a traffic.json missing the 'clones' key must not fail the step -- "
+        f"exit {result.returncode}, stdout={result.stdout!r}, stderr={result.stderr!r}"
+    )
+    assert "::warning::" in result.stdout, (
+        "the merge step produced no ::warning:: annotation when traffic.json had no "
+        f"'clones' key -- stdout={result.stdout!r}"
+    )
+
+
+def test_merge_step_does_not_warn_when_clones_key_is_present():
+    """Positive control for the test above: a traffic.json shaped the way
+    GitHub's API actually documents it (a `clones` key present, even if
+    empty) must not trip the schema-drift warning -- a guard that warns
+    unconditionally would pass the test above and fail this one.
+    """
+    doc = _load_workflow()
+    steps = doc["jobs"]["update"]["steps"]
+    merge_step = next(
+        (s for s in steps if s.get("name") == "Merge into history and write the badge"),
+        None,
+    )
+    assert merge_step is not None
+
+    bash = shutil.which("bash")
+    jq = shutil.which("jq")
+    if bash is None or jq is None:
+        pytest.skip("no `bash`/`jq` on PATH -- cannot exercise the merge step's own shell script here")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        (tmp_path / "history.json").write_text("[]", encoding="utf-8")
+        (tmp_path / "traffic.json").write_text(
+            '{"count": 1, "uniques": 1, "clones": [{"timestamp": "2026-01-01T00:00:00Z", "count": 1, "uniques": 1}]}',
+            encoding="utf-8",
+        )
+
+        script = tmp_path / "merge-step.sh"
+        with open(script, "w", encoding="utf-8", newline="\n") as f:
+            f.write(merge_step["run"])
+
+        result = subprocess.run(
+            [bash, str(script)],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+
+    assert result.returncode == 0, (
+        f"exit {result.returncode}, stdout={result.stdout!r}, stderr={result.stderr!r}"
+    )
+    assert "::warning::" not in result.stdout, (
+        "the merge step warned about a missing 'clones' key even though traffic.json "
+        f"had one -- stdout={result.stdout!r}"
+    )
+
+
 def test_readme_has_a_clones_badge_pointing_at_the_badges_branch():
     text = README.read_text(encoding="utf-8")
     assert "clones" in text.lower(), "README.md has no clones badge text at all"
