@@ -72,7 +72,7 @@ from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
-from compile_hooks import HOOK_SCRIPT_NAMES, SOURCE_LINE
+from compile_hooks import HOOK_SCRIPT_NAMES, unresolved_sources
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent.parent / "release-branch.json"
 DEFAULT_BUDGET = {"max_file_bytes": 256 * 1024, "max_files": 512,
@@ -1608,11 +1608,10 @@ def _check_hook_still_sources(files: dict, kinds: dict, off: list) -> None:
         if name not in HOOK_SCRIPT_NAMES or kinds.get(rel) != "text":
             continue
         text = data.decode("utf-8")
-        for n, line in enumerate(text.splitlines(), 1):
-            if SOURCE_LINE.match(line):
-                off.append(f"{rel}:{n}: still sources another file after the "
-                           f"compile step -- the directory holds this as "
-                           f"COMMAND_SCRIPT_NOT_FOLLOWED: {line.strip()[:80]}")
+        for n, line in unresolved_sources(text):
+            off.append(f"{rel}:{n}: still sources another file after the "
+                       f"compile step -- the directory holds this as "
+                       f"COMMAND_SCRIPT_NOT_FOLLOWED: {line.strip()[:80]}")
 
 
 def _check_launchers(files: dict, kinds: dict, off: list) -> None:

@@ -178,7 +178,7 @@ def test_source_line_does_not_match_a_quoted_argument_named_source():
     # repo's own session-start-hook.sh:334 would otherwise trip on:
     # `_stdin_json_string_into VAR source "$HOOK_STDIN"`).
     line = '_stdin_json_string_into SESSION_START_SOURCE source "$HOOK_STDIN"'
-    assert compile_hooks.SOURCE_LINE.match(line) is None
+    assert compile_hooks.unresolved_sources(line) == []
 
 
 def test_unresolved_sources_reports_remaining_lines():
@@ -186,6 +186,98 @@ def test_unresolved_sources_reports_remaining_lines():
     remaining = compile_hooks.unresolved_sources(text)
     assert len(remaining) == 1
     assert remaining[0][0] == 2
+
+
+# -- the two real shapes self-review found the first draft missing --------
+#
+# A naive regex anchored at line-start (`^source ...`) misses both of these
+# real patterns from this repo's own hooks -- confirmed by direct
+# inspection during review (session-start-hook.sh:217,
+# post-tool-hook.sh:833) -- so both are pinned here against the real text,
+# not just a synthetic stand-in.
+
+def test_inline_sources_handles_an_assignment_prefixed_trailing_guard():
+    # REMEMBER_PATHS_SOFT_FAIL=1 source "..." || exit 0 -- a VAR=value
+    # prefix before a shell BUILTIN (source/. is one) persists in the
+    # current shell afterward, so it must be emitted as its own statement;
+    # the trailing `|| exit 0` guards against sourcing FAILING, which
+    # inlining makes moot, so it must be dropped rather than left dangling.
+    contents = {
+        "scripts/hook.sh": (
+            'FOO=1 source "${X}/scripts/lib.sh" || exit 0\n'
+            'echo after\n'
+        ),
+        "scripts/lib.sh": 'echo from-lib\n',
+    }
+    out = compile_hooks.inline_sources("scripts/hook.sh", contents)
+    assert "FOO=1" in out
+    assert "echo from-lib" in out
+    assert "echo after" in out
+    assert "|| exit 0" not in out
+    assert compile_hooks.unresolved_sources(out) == []
+
+
+def test_inline_sources_preserves_a_conditional_gate():
+    # COND || source "..." decides WHETHER sourcing happens at all (a
+    # lazy-init / cost-avoidance gate) -- dropping COND would be a
+    # behavior change, not a correctness-neutral inlining. The condition
+    # must survive, with the inlined body as the right-hand side of the
+    # same `||`.
+    contents = {
+        "scripts/hook.sh": (
+            '[ -n "${ALREADY:-}" ] || source "${X}/scripts/lib.sh"\n'
+            'echo after\n'
+        ),
+        "scripts/lib.sh": 'echo from-lib\n',
+    }
+    out = compile_hooks.inline_sources("scripts/hook.sh", contents)
+    assert '[ -n "${ALREADY:-}" ] ||' in out
+    assert "echo from-lib" in out
+    assert "echo after" in out
+    assert compile_hooks.unresolved_sources(out) == []
+
+
+def test_source_detection_never_fires_inside_an_unrelated_single_quoted_string():
+    # The exact false-positive self-review found: a `;`/`.`-shaped jq
+    # filter sitting inside a SINGLE-QUOTED bash argument, on the same
+    # physical line as a real statement earlier in the file -- confirmed
+    # against this repo's own scripts/lib-memory-dir.sh merge-config jq
+    # script, which contains the literal text "; . * $x" as jq syntax.
+    line = ("jq -s 'reduce .[] as $x ({}; . * $x) | with_entries(select"
+            '(.key | startswith("_") | not))\' "${_jq_merge_sources[@]}" '
+            '> "$_merged_cfg" 2>/dev/null')
+    assert compile_hooks.unresolved_sources(line) == []
+
+
+def test_inline_sources_does_not_match_inside_an_unrelated_quoted_string():
+    # Positive control for the test above: a REAL source statement must
+    # still be found and inlined even in a file that elsewhere carries an
+    # unrelated quoted jq-like filter -- the quote-awareness must never
+    # swallow a genuine statement, only skip unrelated quoted text.
+    contents = {
+        "scripts/hook.sh": (
+            'source "${X}/scripts/lib.sh"\n'
+            "jq -s 'reduce .[] as $x ({}; . * $x)' > /dev/null\n"
+        ),
+        "scripts/lib.sh": 'echo from-lib\n',
+    }
+    out = compile_hooks.inline_sources("scripts/hook.sh", contents)
+    assert "echo from-lib" in out
+    assert "jq -s" in out
+    assert compile_hooks.unresolved_sources(out) == []
+
+
+def test_a_real_statement_followed_by_unrelated_code_on_the_same_line_fails_loudly():
+    # A `;`-separated REAL second statement after a plain source call is
+    # not a redirect/exit-status guard and is not observed anywhere in
+    # this repo's own hooks -- InlineError is the correct, safe response
+    # (never silently drop code that was not a recognised guard shape).
+    contents = {
+        "scripts/hook.sh": 'source "${X}/scripts/lib.sh"; echo also-this\n',
+        "scripts/lib.sh": 'echo from-lib\n',
+    }
+    with pytest.raises(compile_hooks.InlineError):
+        compile_hooks.inline_sources("scripts/hook.sh", contents)
 
 
 # -- synthetic end-to-end: sourced vs compiled must behave identically ------

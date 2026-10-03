@@ -118,6 +118,13 @@ jobs:
         if: runner.os == 'Windows'
         run: pip install tzdata
       - name: Compile the four hooks.json-registered hooks in place (#900)
-        run: python3 .github/scripts/compile_hooks.py --repo . --apply
+        # `python`, not `python3`: every other python3 invocation anywhere
+        # in this repo's CI runs on ubuntu-latest only (release-branch.yml,
+        # oss-changelog.yml); this is the first python call on a Windows
+        # runner in this workflow, and actions/setup-python does not
+        # reliably provide a `python3` shim on Windows the way it does on
+        # Linux/macOS. `python` matches the convention the pip-install step
+        # above already uses on this same matrix.
+        run: python .github/scripts/compile_hooks.py --repo . --apply
       - name: Run the full suite against the compiled hooks
         run: pytest
