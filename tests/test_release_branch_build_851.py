@@ -328,8 +328,15 @@ def test_the_committed_config_parses_and_names_the_brief_deny_list():
     cfg = mod.load_config(CONFIG)
     for entry in ("tests/", "docs/", ".oss/", ".github/", ".claude/", "CLAUDE.md",
                   "CONTRIBUTING.md", "conftest.py", "scripts/run-tests.sh",
-                  "scripts/windows_skip_triage_497.py"):
+                  "scripts/windows_skip_triage_497.py",
+                  # #898: CHANGELOG.md is not shipped at all; SECURITY.md and
+                  # CODE_OF_CONDUCT.md are not required by the directory and
+                  # nothing the plugin runs reads them; README.release.md is
+                  # consumed by the swap below, not shipped under its own name.
+                  "CHANGELOG.md", "SECURITY.md", "CODE_OF_CONDUCT.md",
+                  "README.release.md"):
         assert entry in cfg["deny"], entry
+    assert cfg["release_readme"] == "README.release.md"
     # Positive control: nothing the plugin runs is denied.
     for runtime in ("hooks/", "scripts/", "pipeline/", "skills/", "commands/",
                     ".claude-plugin/", "prompts/", "hooks.d/"):
@@ -353,7 +360,12 @@ def test_building_this_repository_head_ships_every_hook_script(tmp_path):
         assert (out / rel).is_file(), f"{rel} (named by hooks.json) did not ship"
     assert not (out / "tests").exists()
     assert not (out / "docs").exists()
-    assert (out / "CHANGELOG.md").stat().st_size < 262144
+    # #898: CHANGELOG.md is not shipped at all, and README.md is the swapped-in
+    # release_readme content, not the full README that lives on main.
+    assert not (out / "CHANGELOG.md").exists()
+    assert not (out / "README.release.md").exists()
+    readme = (out / "README.md").read_text(encoding="utf-8")
+    assert "$" not in readme, "the release README must carry no $VAR/${...}"
 
 
 def test_cli_builds_and_reports(tmp_path):

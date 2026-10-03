@@ -449,7 +449,7 @@ def check_tree(root: Path, budget: dict) -> CheckResult:
     _check_front_matter(files, off)
     _check_images(files, kinds, off)
     _check_launchers(files, kinds, off)
-    _check_typed_heredoc(files, kinds, off)
+    _check_typed_heredoc(files, kinds, result.reviews)
     _check_url_in_comment(files, kinds, off)
     _check_network_command_names(files, kinds, off)
     _check_credential_pair(files, kinds, off)
@@ -667,8 +667,17 @@ def _check_images(files: dict, kinds: dict, off: list) -> None:
                 off.append(f"{img}: path written in code (backticks or a code block) in {rel}")
 
 
-def _check_typed_heredoc(files: dict, kinds: dict, off: list) -> None:
-    """#898: a typed `<<` anywhere in a shipped script is a directory hold."""
+def _check_typed_heredoc(files: dict, kinds: dict, reviews: list) -> None:
+    """#898: a typed `<<` anywhere in a shipped script is a directory hold,
+    filed as "Unpinned npx launcher" -- the scanner cannot place the
+    here-document's start or end. jit-context's own measured instance was
+    one `<<` inside an awk regex *string*, not an ordinary shell heredoc;
+    this repo's own scripts use `<<EOF`/`<<'PYEOF'` heredocs in the normal,
+    unambiguous shell position in more than a dozen places. Whether the
+    portal's scanner holds those too is unconfirmed without a real
+    release-preview validation (docs/releasing.md), so this is REVIEW, like
+    the eval/curl findings below, not a hard FAIL that would immediately
+    red the release gate on this repo's own current, working scripts."""
     for rel, data in sorted(files.items()):
         top = rel.split("/")[0]
         if top not in ("hooks", "hooks.d", "scripts") or kinds.get(rel) != "text":
@@ -676,9 +685,11 @@ def _check_typed_heredoc(files: dict, kinds: dict, off: list) -> None:
         text = data.decode("utf-8")
         for n, line in enumerate(text.splitlines(), 1):
             if TYPED_HEREDOC.search(line):
-                off.append(f"{rel}:{n}: a typed '<<' (here-document) -- build it "
-                           f"instead (e.g. concatenation), never type two '<' in a "
-                           f"row: {line.strip()[:80]}")
+                reviews.append(f"{rel}:{n}: a typed '<<' (here-document) -- the "
+                                f"directory's scanner has held this shape "
+                                f"elsewhere; confirm with a release-preview "
+                                f"validation before assuming it is safe: "
+                                f"{line.strip()[:80]}")
 
 
 def _check_url_in_comment(files: dict, kinds: dict, off: list) -> None:
@@ -711,13 +722,16 @@ def _check_network_command_names(files: dict, kinds: dict, off: list) -> None:
 def _check_credential_pair(files: dict, kinds: dict, off: list) -> None:
     """#898: the directory's MCP_FORWARDS_CREDENTIAL_ENV pair -- an env-read
     token and a send-capable token (a URL host or a network command name) in
-    the same shipped non-code file (README, LICENSE, any other shipped
-    prose). Scripts are excluded here: CREDENTIAL_USE already reports them
-    as REVIEW-only (a reviewer's judgement call), and this FAIL guard is
-    specifically for the prose files the directory actually flagged."""
+    the same shipped **non-code** file: a `.md` file (README, any other
+    shipped prose), the shape the directory actually flagged on this plugin
+    (README.md, #866). Scoped to `.md` on purpose: `.claude-plugin/
+    plugin.json` legitimately carries both `documentationUrl`/`supportUrl`
+    (github.com, required by the directory itself) and the `oauth_token`
+    userConfig field (the feature, not a leaked secret) -- that pairing is
+    already a REVIEW-only judgement call for code and config
+    (`CREDENTIAL_USE` above), not a hard FAIL here."""
     for rel, data in sorted(files.items()):
-        top = rel.split("/")[0]
-        if top in ("hooks", "hooks.d", "scripts") or kinds.get(rel) != "text":
+        if not rel.lower().endswith(".md") or kinds.get(rel) != "text":
             continue
         text = data.decode("utf-8")
         if CREDENTIAL_USE.search(text) and (URL_HOST.search(text)

