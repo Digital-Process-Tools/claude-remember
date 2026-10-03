@@ -32,7 +32,7 @@
 _REMEMBER_SRC_DIR="${BASH_SOURCE[0]%/*}"
 # A path with no slash in it (`source log.sh` from the scripts dir) leaves the
 # filename behind, not a directory — `dirname` answered "." and this must too.
-[ "$_REMEMBER_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_SRC_DIR="$PWD"
+[ "$_REMEMBER_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_SRC_DIR="$(pwd)"
 source "$_REMEMBER_SRC_DIR/lib-memory-dir.sh"
 unset _REMEMBER_SRC_DIR
 

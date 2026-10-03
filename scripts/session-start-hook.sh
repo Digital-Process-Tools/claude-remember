@@ -58,7 +58,7 @@
 # leaves the filename behind, not a directory; `dirname` answered "." and
 # this must too.
 _HOOK_DIR="${BASH_SOURCE[0]%/*}"
-[ "$_HOOK_DIR" = "${BASH_SOURCE[0]}" ] && _HOOK_DIR="$PWD"
+[ "$_HOOK_DIR" = "${BASH_SOURCE[0]}" ] && _HOOK_DIR="$(pwd)"
 
 # --- Nested summarizer: there is no project here (#204) ---
 # The same fast-path guard the PostToolUse hook, the UserPromptSubmit hook and

@@ -49,7 +49,7 @@ _LIB_MEMORY_DIR_LOADED=1
 _REMEMBER_SRC_DIR="${BASH_SOURCE[0]%/*}"
 # A path with no slash in it (`source log.sh` from the scripts dir) leaves the
 # filename behind, not a directory — `dirname` answered "." and this must too.
-[ "$_REMEMBER_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_SRC_DIR="$PWD"
+[ "$_REMEMBER_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_SRC_DIR="$(pwd)"
 source "$_REMEMBER_SRC_DIR/lib-slug.sh"
 unset _REMEMBER_SRC_DIR
 

@@ -109,7 +109,7 @@ _REMEMBER_LIB_STAGING_LOCK_SOURCED=1
 # `date` call that would silently ignore REMEMBER_TZ -- unlike every other
 # timestamp in this pipeline.
 _REMEMBER_STAGING_LOCK_SRC_DIR="${BASH_SOURCE[0]%/*}"
-[ "$_REMEMBER_STAGING_LOCK_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_STAGING_LOCK_SRC_DIR="$PWD"
+[ "$_REMEMBER_STAGING_LOCK_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_STAGING_LOCK_SRC_DIR="$(pwd)"
 source "$_REMEMBER_STAGING_LOCK_SRC_DIR/lib-clock.sh"
 unset _REMEMBER_STAGING_LOCK_SRC_DIR
 

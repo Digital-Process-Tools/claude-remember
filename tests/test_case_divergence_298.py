@@ -249,7 +249,7 @@ _SANCTIONED_DIVERGENCE = {
             '[ "$_REMEMBER_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_SRC_DIR="."\n'
             'source "$_REMEMBER_SRC_DIR/lib-slug.sh"\n',
             '_REMEMBER_SRC_DIR="${BASH_SOURCE[0]%/*}"\n'
-            '[ "$_REMEMBER_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_SRC_DIR="$PWD"\n'
+            '[ "$_REMEMBER_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_SRC_DIR="$(pwd)"\n'
             'source "$_REMEMBER_SRC_DIR/lib-slug.sh"\n',
         ),
         # #898 round 4: a typed here-document is read by the directory's

@@ -22,14 +22,14 @@
 #      Bash tool (#207, see doctor.sh). Claude Code runs the Bash tool with
 #      the project directory as its INITIAL cwd, but that cwd is the same
 #      shell state across every command in one Bash-tool call -- a `cd`
-#      earlier in the call persists, so a bare `$PWD` fallback can be a
+#      earlier in the call persists, so a bare `$(pwd)` fallback can be a
 #      subdirectory of the project by the time this script runs, not the
 #      project root itself (#743). This prefers `git rev-parse
 #      --show-toplevel` when the cwd is inside a git repo -- the common
 #      case, and immune to an earlier `cd` -- falling back to the plain
-#      $PWD default only outside a git repo, same as before. #776: that
+#      $(pwd) default only outside a git repo, same as before. #776: that
 #      preference is wrong for a project deliberately started from a repo
-#      SUBDIRECTORY (a supported shape), so when $PWD and the toplevel
+#      SUBDIRECTORY (a supported shape), so when $(pwd) and the toplevel
 #      disagree AND this session's own id is known, this checks which
 #      candidate's own store already carries THIS session's session-keyed
 #      handoff hint (#738) and prefers that one -- falling back to the
@@ -106,20 +106,21 @@ _wh_trial_remember_dir() {
 }
 
 if [ -z "${CLAUDE_PROJECT_DIR:-}" ]; then
-    # #743: prefer the git top level over a possibly-stale $PWD -- immune to
-    # a `cd` that happened earlier in the same Bash-tool call. Falls back to
-    # $PWD, unchanged, when the cwd is not inside a git repo at all.
+    # #743: prefer the git top level over a possibly-stale $(pwd) -- immune
+    # to a `cd` that happened earlier in the same Bash-tool call. Falls back
+    # to $(pwd), unchanged, when the cwd is not inside a git repo at all.
     _WH_GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || _WH_GIT_ROOT=""
 
     # #776: #743's blanket preference above breaks a project deliberately
     # started from a repository SUBDIRECTORY -- a supported shape per
     # tests/test_injection_guard_754_755_756.py's own TestSubdirectoryHandoff
     # -- by routing every write to the enclosing repository's root store
-    # instead of the subdirectory's own. $PWD and the git toplevel can only
-    # disagree here if $PWD is genuinely a subdirectory of a git repository,
-    # so this is exactly the case that needs disambiguating; a plain
-    # non-git project, or one already sitting at its repo's own root, takes
-    # the unchanged path below (git toplevel or $PWD, whichever is set).
+    # instead of the subdirectory's own. $(pwd) and the git toplevel can
+    # only disagree here if $(pwd) is genuinely a subdirectory of a git
+    # repository, so this is exactly the case that needs disambiguating; a
+    # plain non-git project, or one already sitting at its repo's own root,
+    # takes the unchanged path below (git toplevel or $(pwd), whichever is
+    # set).
     #
     # THIS session's SessionStart already published a hint file keyed by
     # THIS session's own id (#738) into whichever REMEMBER_DIR it actually
@@ -130,8 +131,8 @@ if [ -z "${CLAUDE_PROJECT_DIR:-}" ]; then
     # predates #738/#776, or -- unreachable in the ordinary case -- both
     # somehow agree) this falls through to the pre-#776 default of
     # preferring the git toplevel, unchanged.
-    if [ -n "$_WH_GIT_ROOT" ] && [ "$_WH_GIT_ROOT" != "$PWD" ] && [ -n "$_WH_SESSION_ID" ]; then
-        _WH_RD_PWD=$(_wh_trial_remember_dir "$PWD") || _WH_RD_PWD=""
+    if [ -n "$_WH_GIT_ROOT" ] && [ "$_WH_GIT_ROOT" != "$(pwd)" ] && [ -n "$_WH_SESSION_ID" ]; then
+        _WH_RD_PWD=$(_wh_trial_remember_dir "$(pwd)") || _WH_RD_PWD=""
         _WH_RD_GITROOT=$(_wh_trial_remember_dir "$_WH_GIT_ROOT") || _WH_RD_GITROOT=""
         _WH_PWD_HAS_HINT=0
         _WH_GITROOT_HAS_HINT=0
@@ -146,7 +147,7 @@ if [ -z "${CLAUDE_PROJECT_DIR:-}" ]; then
     if [ -n "$_WH_GIT_ROOT" ]; then
         CLAUDE_PROJECT_DIR="$_WH_GIT_ROOT"
     else
-        CLAUDE_PROJECT_DIR="$PWD"
+        CLAUDE_PROJECT_DIR="$(pwd)"
     fi
     export CLAUDE_PROJECT_DIR
 fi

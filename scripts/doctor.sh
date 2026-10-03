@@ -91,7 +91,7 @@ _doctor_trial_remember_dir() {
 # human report) breaks a project deliberately started from a repository
 # SUBDIRECTORY -- the same shape write-handoff.sh's own #776 fix
 # disambiguates -- by routing the report onto the enclosing repository's
-# store instead of the subdirectory project's own. When $PWD and the git
+# store instead of the subdirectory project's own. When $(pwd) and the git
 # toplevel disagree AND this session's id is known, prefer whichever
 # candidate's own store already carries THIS session's session-keyed
 # handoff hint (#738); fall back to the toplevel, unchanged, when neither or
@@ -99,8 +99,8 @@ _doctor_trial_remember_dir() {
 # published anywhere for this session).
 _doctor_resolve_project_dir_candidate() {
     _doctor_git_root="$1"
-    if [ -n "$_doctor_git_root" ] && [ "$_doctor_git_root" != "$PWD" ] && [ -n "$_DOCTOR_SESSION_ID" ]; then
-        _doctor_rd_pwd=$(_doctor_trial_remember_dir "$PWD") || _doctor_rd_pwd=""
+    if [ -n "$_doctor_git_root" ] && [ "$_doctor_git_root" != "$(pwd)" ] && [ -n "$_DOCTOR_SESSION_ID" ]; then
+        _doctor_rd_pwd=$(_doctor_trial_remember_dir "$(pwd)") || _doctor_rd_pwd=""
         _doctor_rd_gitroot=$(_doctor_trial_remember_dir "$_doctor_git_root") || _doctor_rd_gitroot=""
         _doctor_pwd_has_hint=0
         _doctor_gitroot_has_hint=0
@@ -148,16 +148,17 @@ _doctor_resolve_project_dir_candidate() {
 if [ "${1:-}" = "--json" ]; then
     _JSON_PROJECT_DIR_ASSUMED=0
     if [ -z "${CLAUDE_PROJECT_DIR:-}" ]; then
-        # #802: prefer the git top level over a possibly-stale $PWD -- immune
-        # to a `cd` that happened earlier in the same Bash-tool call. Falls
-        # back to $PWD, unchanged, when the cwd is not inside a git repo at
-        # all. Same pattern write-handoff.sh's own #743 fix established.
+        # #802: prefer the git top level over a possibly-stale $(pwd) --
+        # immune to a `cd` that happened earlier in the same Bash-tool call.
+        # Falls back to $(pwd), unchanged, when the cwd is not inside a git
+        # repo at all. Same pattern write-handoff.sh's own #743 fix
+        # established.
         _DOCTOR_JSON_GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || _DOCTOR_JSON_GIT_ROOT=""
         _DOCTOR_JSON_GIT_ROOT=$(_doctor_resolve_project_dir_candidate "$_DOCTOR_JSON_GIT_ROOT")
         if [ -n "$_DOCTOR_JSON_GIT_ROOT" ]; then
             CLAUDE_PROJECT_DIR="$_DOCTOR_JSON_GIT_ROOT"
         else
-            CLAUDE_PROJECT_DIR="$PWD"
+            CLAUDE_PROJECT_DIR="$(pwd)"
         fi
         unset _DOCTOR_JSON_GIT_ROOT
         _JSON_PROJECT_DIR_ASSUMED=1
@@ -289,16 +290,16 @@ echo "-- Paths --"
 # just be a quieter version of the same false signal.
 _PROJECT_DIR_ASSUMED=0
 if [ -z "${CLAUDE_PROJECT_DIR:-}" ]; then
-    # #802: prefer the git top level over a possibly-stale $PWD -- immune to
-    # a `cd` that happened earlier in the same Bash-tool call. Falls back to
-    # $PWD, unchanged, when the cwd is not inside a git repo at all. Same
-    # pattern write-handoff.sh's own #743 fix established.
+    # #802: prefer the git top level over a possibly-stale $(pwd) -- immune
+    # to a `cd` that happened earlier in the same Bash-tool call. Falls back
+    # to $(pwd), unchanged, when the cwd is not inside a git repo at all.
+    # Same pattern write-handoff.sh's own #743 fix established.
     _DOCTOR_GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || _DOCTOR_GIT_ROOT=""
     _DOCTOR_GIT_ROOT=$(_doctor_resolve_project_dir_candidate "$_DOCTOR_GIT_ROOT")
     if [ -n "$_DOCTOR_GIT_ROOT" ]; then
         CLAUDE_PROJECT_DIR="$_DOCTOR_GIT_ROOT"
     else
-        CLAUDE_PROJECT_DIR="$PWD"
+        CLAUDE_PROJECT_DIR="$(pwd)"
     fi
     unset _DOCTOR_GIT_ROOT
     _PROJECT_DIR_ASSUMED=1

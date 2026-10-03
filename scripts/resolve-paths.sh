@@ -108,7 +108,7 @@ umask 077
 #   2. Walk up from this script's real location to find the plugin root
 #      (works for local installs where scripts/ is inside the plugin dir)
 _SCRIPT_DIR="${BASH_SOURCE[0]%/*}"
-[ "$_SCRIPT_DIR" = "${BASH_SOURCE[0]}" ] && _SCRIPT_DIR="$PWD"
+[ "$_SCRIPT_DIR" = "${BASH_SOURCE[0]}" ] && _SCRIPT_DIR="$(pwd)"
 _PLUGIN_ROOT_CANDIDATE="$(cd "$_SCRIPT_DIR/.." && pwd)"
 
 # _resolve_paths_fail <message> [log_dir]

@@ -107,7 +107,7 @@
 # slash in it (invoked by bare filename from the scripts dir) leaves
 # the filename behind, not a directory; `dirname` answered "." and this must too.
 _HOOK_DIR="${BASH_SOURCE[0]%/*}"
-[ "$_HOOK_DIR" = "${BASH_SOURCE[0]}" ] && _HOOK_DIR="$PWD"
+[ "$_HOOK_DIR" = "${BASH_SOURCE[0]}" ] && _HOOK_DIR="$(pwd)"
 
 # --- Nested summarizer: there is no project here (#204) ---
 # Normally this guard lives in resolve-paths.sh, which the fast path below does
