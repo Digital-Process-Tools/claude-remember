@@ -150,11 +150,17 @@ validator never inspects them. Only the four hooks' own shipped bytes change.
 **Measured sizes** (session-start-hook.sh is the largest, since it has the deepest source
 chain): raw transitive closure before any inlining is well over the 256 KiB budget on its own,
 but comment lines make up roughly 60-70% of these files by line count, so the compiled,
-comment-stripped result lands at about 151 KiB for session-start-hook.sh and well under 90 KiB
+comment-stripped result lands at about 155 KiB for session-start-hook.sh and well under 90 KiB
 for the other three -- comfortably under budget, with headroom before the next library addition
 would need re-measuring. `check_release_tree.py`'s `_check_hook_still_sources` FAILs the build if
-a compiled hook still carries a `source`/`.` line pointing at another file -- the compile step not
-running, or not fully resolving, is a release-blocking error rather than a silent miss.
+a compiled hook still carries a `source`/`.` statement pointing at another file -- the compile
+step not running, or not fully resolving, is a release-blocking error rather than a silent miss.
+That statement detector is quote/heredoc-aware (the same scan `compile_hooks.py` itself uses to
+find a statement to inline in the first place): a self-review round caught both a first draft that
+missed two of this repo's own real source statements (one assignment-prefixed, one behind a
+lazy-init conditional gate -- see the module's own docstring for both shapes) and a second draft
+whose wider matching then fired on an unrelated jq filter sitting inside a single-quoted bash
+argument on the same physical line as a real statement elsewhere in the file.
 
 `compile_hooks.py` is also a standalone CLI for local use: `python3
 .github/scripts/compile_hooks.py --repo .` prints each hook's compiled size without writing
