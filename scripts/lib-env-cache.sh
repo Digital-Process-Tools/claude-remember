@@ -176,7 +176,8 @@ _remember_env_cache_path() {
     if [ -n "${_REMEMBER_ENV_CACHE_KEY:-}" ]; then
         return 0
     fi
-    local _key="${CLAUDE_PROJECT_DIR:-${REMEMBER_HOOK_CWD:-}}"
+    local _key="${CLAUDE_PROJECT_DIR:-}"
+    [ -n "$_key" ] || _key="${REMEMBER_HOOK_CWD:-}"
     [ -n "$_key" ] || return 1
     # #504: normalise BEFORE pinning, so a raw (pre-resolve-paths.sh) and an
     # already-normalised (post-resolve-paths.sh) spelling of the same project
@@ -325,7 +326,8 @@ _remember_env_cache_load() {
     REMEMBER_PROMPT_STAMP="$_stamp"
     REMEMBER_SAVE_COOLDOWN="$_cooldown"
     REMEMBER_DELTA_THRESHOLD="$_delta"
-    MEMORY_PROJECT_DIR="${_mem:-$_proj}"
+    MEMORY_PROJECT_DIR="$_mem"
+    [ -n "$MEMORY_PROJECT_DIR" ] || MEMORY_PROJECT_DIR="$_proj"
     export PROJECT_DIR PIPELINE_DIR REMEMBER_DIR REMEMBER_TZ MEMORY_PROJECT_DIR
     export REMEMBER_PROMPT_STAMP REMEMBER_SAVE_COOLDOWN REMEMBER_DELTA_THRESHOLD
     return 0
@@ -396,7 +398,9 @@ _remember_env_cache_publish() {
         # #358 was filed about.
         printf 'REMEMBER_SAVE_COOLDOWN=%s\n' "$REMEMBER_SAVE_COOLDOWN"
         printf 'REMEMBER_DELTA_THRESHOLD=%s\n' "$REMEMBER_DELTA_THRESHOLD"
-        printf 'MEMORY_PROJECT_DIR=%s\n' "${MEMORY_PROJECT_DIR:-$PROJECT_DIR}"
+        local _ecp_mem_proj="${MEMORY_PROJECT_DIR:-}"
+        [ -n "$_ecp_mem_proj" ] || _ecp_mem_proj="$PROJECT_DIR"
+        printf 'MEMORY_PROJECT_DIR=%s\n' "$_ecp_mem_proj"
         # #843: each CACHE_CONFIG value carries a "1:" or "0:" prefix
         # recording whether that layer existed RIGHT NOW (at publish time),
         # so the loader can reject a cache whose manifest no longer matches

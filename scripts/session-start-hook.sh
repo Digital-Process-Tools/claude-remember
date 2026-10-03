@@ -1696,7 +1696,9 @@ if [ "$_promos_enabled" = "true" ] \
         # never sees an entry whose install status could not be confirmed.
         # Collapsing that into one up-front probe changes nothing selectable,
         # only how many processes it costs to find out.
-        local installed_file="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/installed_plugins.json"
+        local installed_config_dir="${CLAUDE_CONFIG_DIR:-}"
+        [ -n "$installed_config_dir" ] || installed_config_dir="$HOME/.claude"
+        local installed_file="${installed_config_dir}/plugins/installed_plugins.json"
         local installed_ok=""
         local -a installed_keys=()
         if [ -f "$installed_file" ]; then

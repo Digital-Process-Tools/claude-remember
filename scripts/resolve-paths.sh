@@ -129,7 +129,11 @@ _resolve_paths_fail() {
 # hand-copied list that would drift from pipeline/host.PLUGIN_ROOT_VARS
 # unnoticed. Validation (#471) below is layered on top of it, not folded
 # into the assignment itself, so that regex keeps matching.
-_REMEMBER_PLUGIN_ROOT="${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}"
+if [ -n "${PLUGIN_ROOT:-}" ]; then
+    _REMEMBER_PLUGIN_ROOT="$PLUGIN_ROOT"
+else
+    _REMEMBER_PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
+fi
 if [ -n "$_REMEMBER_PLUGIN_ROOT" ] && [ -f "$_REMEMBER_PLUGIN_ROOT/pipeline/haiku.py" ]; then
     PIPELINE_DIR="$_REMEMBER_PLUGIN_ROOT"
 elif [ -n "${PLUGIN_ROOT:-}" ] && [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] \

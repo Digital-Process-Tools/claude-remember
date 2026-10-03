@@ -38,7 +38,13 @@
 
 # Ensure PIPELINE_DIR is set. Should be set by resolve-paths.sh before
 # sourcing this file. Falls back to local-install convention if unset.
-PIPELINE_DIR="${PIPELINE_DIR:-${PROJECT_DIR:-.}/.claude/remember}"
+if [ -z "${PIPELINE_DIR:-}" ]; then
+    if [ -n "${PROJECT_DIR:-}" ]; then
+        PIPELINE_DIR="${PROJECT_DIR}/.claude/remember"
+    else
+        PIPELINE_DIR="./.claude/remember"
+    fi
+fi
 
 # Resolve REMEMBER_DIR and the merged REMEMBER_CONFIG (lib-memory-dir.sh is a
 # no-op if already loaded via the _LIB_MEMORY_DIR_LOADED guard).
@@ -745,7 +751,8 @@ config_into() {
         local _cfg_into_slot="_RCFG_${_cfg_into_key#.}"
         _cfg_into_slot="${_cfg_into_slot//./_}"
         local _cfg_into_hit="${!_cfg_into_slot:-}"
-        printf -v "$_cfg_into_var" '%s' "${_cfg_into_hit:-$_cfg_into_default}"
+        [ -n "$_cfg_into_hit" ] || _cfg_into_hit="$_cfg_into_default"
+        printf -v "$_cfg_into_var" '%s' "$_cfg_into_hit"
         return
     fi
 
@@ -805,7 +812,8 @@ except Exception:
     pass
 ' "$_cfg_into_key" "$REMEMBER_CONFIG" 2>/dev/null)
     fi
-    printf -v "$_cfg_into_var" '%s' "${_cfg_into_val:-$_cfg_into_default}"
+    [ -n "$_cfg_into_val" ] || _cfg_into_val="$_cfg_into_default"
+    printf -v "$_cfg_into_var" '%s' "$_cfg_into_val"
 }
 
 # Build the table now, in THIS shell, so every `$(config ...)` subshell

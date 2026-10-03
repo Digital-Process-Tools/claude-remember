@@ -82,7 +82,12 @@ _remember_build_slug_sed
 # with enough lines would have been summarized into memory as if it were the
 # live session.
 claude_projects_dir() {
-    local _root="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+    local _root
+    if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+        _root="$CLAUDE_CONFIG_DIR"
+    else
+        _root="$HOME/.claude"
+    fi
 
     # CLAUDE_CONFIG_DIR is inherited from the environment, so on Windows it
     # arrives in whatever form the user typed — usually the native

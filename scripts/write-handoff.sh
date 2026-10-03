@@ -293,7 +293,9 @@ case "$_WH_ROOT_SCRATCH" in
 esac
 unset _WH_ROOT_SCRATCH
 
-if [ "$_WH_REMEMBER_ROOT" = "${MEMORY_PROJECT_DIR:-$PROJECT_DIR}" ]; then
+_WH_MEM_PROJ="${MEMORY_PROJECT_DIR:-}"
+[ -n "$_WH_MEM_PROJ" ] || _WH_MEM_PROJ="$PROJECT_DIR"
+if [ "$_WH_REMEMBER_ROOT" = "$_WH_MEM_PROJ" ]; then
     _WH_TRACKED_STATE=""
     _remember_file_tracked_state_into _WH_TRACKED_STATE "$_WH_TARGET"
     # #799: refuse every state _REMEMBER_REFUSED_TRACKED_STATES (shared with

@@ -376,7 +376,7 @@ log "consolidation" "done: ${STAGING_COUNT} files consolidated"
 # operation that rotates archive.md/recent.md and rewrites core-memories.md,
 # so refreshing the cache here -- after those files have landed -- is what
 # lets the NEXT SessionStart skip re-reading and re-sizing them.
-PLUGIN_ROOT="${PLUGIN_ROOT:-$PIPELINE_DIR}"
+[ -n "${PLUGIN_ROOT:-}" ] || PLUGIN_ROOT="$PIPELINE_DIR"
 if source "$(dirname "$0")/lib-memory-context.sh" 2>/dev/null; then
     _remember_memory_paths
     _remember_start_cache_context_publish

@@ -211,6 +211,20 @@ _SANCTIONED_DIVERGENCE = {
             '}\n'
             '_remember_build_slug_sed\n',
         ),
+        # #898 round 4: a nested default expansion (`${X:-$Y}`) is read by
+        # the directory's scanner as "a command assembled at run time" --
+        # the plugin.json-aggregate credential pairing's send side. Replaced
+        # with an explicit if/else, same resolution order, no new fork
+        # (both arms are plain assignment).
+        (
+            '    local _root="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"\n',
+            '    local _root\n'
+            '    if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then\n'
+            '        _root="$CLAUDE_CONFIG_DIR"\n'
+            '    else\n'
+            '        _root="$HOME/.claude"\n'
+            '    fi\n',
+        ),
     ],
     "scripts/lib-memory-dir.sh": [
         # #695: `[A-Za-z]:` in the drive-form `case` patterns below is a

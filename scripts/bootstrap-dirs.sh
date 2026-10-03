@@ -42,7 +42,8 @@ SYS_TMPDIR="${TMPDIR:-/tmp}"
 # --- One-shot migration: legacy .remember → external REMEMBER_DIR ---
 # Keyed to MEMORY_PROJECT_DIR (the main checkout when in a worktree) so the
 # legacy dir we migrate/gitignore matches where REMEMBER_DIR now resolves.
-_mem_proj="${MEMORY_PROJECT_DIR:-$PROJECT_DIR}"
+_mem_proj="${MEMORY_PROJECT_DIR:-}"
+[ -n "$_mem_proj" ] || _mem_proj="$PROJECT_DIR"
 _legacy_dir="${_mem_proj}/.remember"
 # #782 self-review: set only when the tracked-content scan below refuses a
 # migration. Checked by the unconditional directory-scaffold step further

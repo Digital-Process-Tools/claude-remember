@@ -1757,7 +1757,7 @@ unset _remember_auto_dir _remember_auto_log _remember_auto_mtime _remember_auto_
 # itself documents for its OWN consolidation trigger. Refreshing the cache
 # here, right after the memory files this save may have just written/rotated
 # have landed, is what lets the NEXT SessionStart skip re-reading them.
-PLUGIN_ROOT="${PLUGIN_ROOT:-$PIPELINE_DIR}"
+[ -n "${PLUGIN_ROOT:-}" ] || PLUGIN_ROOT="$PIPELINE_DIR"
 if source "$(dirname "$0")/lib-memory-context.sh" 2>/dev/null; then
     _remember_memory_paths
     _remember_start_cache_context_publish

@@ -425,7 +425,13 @@ fi
 # the effective user is not the login user (`su` without `-`), which is not a
 # shape a Claude Code hook runs in — and whoami is still the fallback when the
 # environment carries neither name.
-_REMEMBER_WHO="${USER:-${USERNAME:-}}"
+if [ -n "${USER:-}" ]; then
+    _REMEMBER_WHO="$USER"
+elif [ -n "${USERNAME:-}" ]; then
+    _REMEMBER_WHO="$USERNAME"
+else
+    _REMEMBER_WHO=""
+fi
 [ -n "$_REMEMBER_WHO" ] || _REMEMBER_WHO=$(whoami 2>/dev/null)
 if [ "$_REMEMBER_STAMP" = "stable" ]; then
   # The username is the one field here that does not change between turns, and

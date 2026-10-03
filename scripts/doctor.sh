@@ -384,7 +384,9 @@ else
     _PY_FIRST="${PYTHON%% *}"
     _PY_PATH=$(command -v "$_PY_FIRST" 2>/dev/null)
     _PY_VERSION=$($PYTHON -V 2>&1)
-    echo "OK   python: $PYTHON -> ${_PY_PATH:-$_PY_FIRST} ($_PY_VERSION)"
+    _PY_DISPLAY="$_PY_PATH"
+    [ -n "$_PY_DISPLAY" ] || _PY_DISPLAY="$_PY_FIRST"
+    echo "OK   python: $PYTHON -> $_PY_DISPLAY ($_PY_VERSION)"
 
     if command -v jq >/dev/null 2>&1; then
         _JQ_PATH=$(command -v jq)
