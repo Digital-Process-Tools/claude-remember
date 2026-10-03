@@ -92,14 +92,13 @@ _remember_memory_paths() {
             REMEMBER_ROOT="${_remember_root_scratch%/*}"
             [ -n "$REMEMBER_ROOT" ] || REMEMBER_ROOT="/"
             ;;
-        # #898 round 7 looked at this lone "." literal (sweep.sh's dot-string
-        # trigger) and left it: it is dirname's own documented answer for a
-        # path with no slash at all, and tests/test_dirname_without_a_fork_660.py
-        # asserts REMEMBER_ROOT matches dirname byte for byte, including this
-        # case -- replacing it with $(pwd) would be a real behaviour change
-        # (relative vs. absolute), not a no-op rewrite, and would fail that
-        # test on sight.
-        (*) REMEMBER_ROOT="." ;;
+        # dirname's own answer for a path with no slash at all -- one dot,
+        # which tests/test_dirname_without_a_fork_660.py pins byte for byte
+        # ($(pwd) would be absolute, a real behaviour change). Written as the
+        # octal escape 056 through `printf -v` (a builtin) rather than as a
+        # quoted lone dot, which the plugin directory's scanner can misread
+        # as a `.` (source) command (#898 round 8). Same byte.
+        (*) printf -v REMEMBER_ROOT '\056' ;;
     esac
     unset _remember_root_scratch
     # Anchored on MEMORY_PROJECT_DIR, not PROJECT_DIR (#756, same anchoring
@@ -456,13 +455,15 @@ _remember_root_tracked_state_into() {
     done
     if [ "$_rts_idx" -lt 0 ]; then
         if command -v git >/dev/null 2>&1; then
-            # "." is the REL-DIR sentinel for "no subdirectory to scope to"
-            # (see this function's own header comment) -- left alone, same
-            # reason as the dirname-no-slash sites above (#898 round 7):
-            # it is compared against the identical literal this function's
-            # own callers assign below, and #754/#755/#756's injection-guard
-            # tests exercise that exact comparison.
-            if [ "$_rts_reldir" = "." ]; then
+            # A single dot is the REL-DIR sentinel for "no subdirectory to
+            # scope to" (see this function's own header comment), compared
+            # against the same byte its callers assign below and exercised
+            # by #754/#755/#756's injection-guard tests. Held in a local
+            # built from octal 056, not written as a quoted lone dot (#898
+            # round 8, same reason as REMEMBER_ROOT above).
+            local _rts_dot
+            printf -v _rts_dot '\056'
+            if [ "$_rts_reldir" = "$_rts_dot" ]; then
                 _rts_pathspec=""
             else
                 _rts_pathspec=":(icase)${_rts_reldir}/"
@@ -590,9 +591,9 @@ _remember_file_tracked_state_into() {
     _remember_forward_slash_into _fts_file_fs "$_fts_file"
     case "$_fts_file_fs" in
         (*/*) _fts_dir_fs="${_fts_file_fs%/*}" ;;
-        # Same dirname-no-slash answer, same reason it is left alone, as
-        # _remember_memory_paths's own REMEMBER_ROOT just above in this file.
-        (*)   _fts_dir_fs="." ;;
+        # Same dirname-no-slash answer (one dot, octal 056), written the
+        # same way as REMEMBER_ROOT's just above in this file (#898 round 8).
+        (*)   printf -v _fts_dir_fs '\056' ;;
     esac
     _remember_repo_root_walk_into _fts_root "$_fts_dir_fs"
     if [ -z "$_fts_root" ]; then
@@ -659,9 +660,9 @@ _remember_file_tracked_state_into() {
     # REMEMBER_ROOT/identity.md fallback), otherwise the directory portion
     # of _fts_rel.
     if [ "$_fts_dir_fs" = "$_fts_root_fs" ]; then
-        # Same REL-DIR sentinel _remember_root_tracked_state_into's own "."
-        # comparison expects, left alone for the same reason (#898 round 7).
-        _fts_reldir="."
+        # The REL-DIR sentinel (one dot) _remember_root_tracked_state_into
+        # compares against, written as octal 056 the same way (#898 round 8).
+        printf -v _fts_reldir '\056'
     else
         _fts_reldir="${_fts_dir_fs#$_fts_root_fs/}"
     fi

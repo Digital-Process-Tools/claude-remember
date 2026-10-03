@@ -91,6 +91,8 @@ SHAPE_CHECKS = {
     # `${!name}` and `${!arr[@]}` alike -- the portal cited both as "reads an
     # environment variable named at run time" (triggers.md).
     "_check_indirect_expansion": 'v="${!slot:-}"\n',
+    # A quoted lone dot, either quote style.
+    "_check_dot_string": 'ROOT="."\n',
 }
 
 
