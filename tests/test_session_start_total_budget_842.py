@@ -237,6 +237,57 @@ class TestTotalStaysUnderBudgetAfterDropping:
         )
 
 
+class TestStillOverBudgetAfterExhaustingTheDropLoop:
+    """#878: if the body is STILL over budget after every droppable section
+    (archive/today/recent/now) has been dropped, the drop loop must say so
+    loudly in the log -- never return silently as though the budget had
+    been satisfied. Paired positive control: an under-budget render must
+    NOT log this."""
+
+    def test_still_over_budget_after_dropping_everything_is_logged(self, tmp_path):
+        filler = "X" * 2200
+        bodies = {
+            "identity.md": "IDENTITY-842\n",
+            "core-memories.md": "CORE-842\n",
+            TODAY_FILE: "TODAY-" + filler + "\n",
+            "now.md": "NOW-" + filler + "\n",
+            "recent.md": "RECENT-" + filler + "\n",
+            "archive.md": "ARCHIVE-" + filler + "\n",
+        }
+        config = {"thresholds": {"session_start_max_bytes": 50}}
+        out, remember = _run(tmp_path, bodies, config=config)
+        for fname in (TODAY_FILE, "now.md", "recent.md", "archive.md"):
+            assert str(remember / fname) in out, f"{fname} should be listed as dropped"
+        log_dir = remember / "logs"
+        logs = "".join(p.read_text(encoding="utf-8", errors="replace") for p in log_dir.glob("*.log")) if log_dir.is_dir() else ""
+        assert "session_start_max_bytes" in logs and "still over" in logs, (
+            f"a body still over budget after every droppable section is gone "
+            f"must be logged loudly, not returned silently: {logs!r}"
+        )
+
+    def test_under_budget_after_dropping_is_not_logged_as_still_over(self, tmp_path):
+        """Positive control: a store that successfully fits under budget once
+        the lowest-priority sections are dropped must NOT log the still-over
+        warning -- it would still pass if the budget were simply never
+        applied, which is exactly the shape this guards against."""
+        bodies = {
+            "identity.md": "IDENTITY-842\n",
+            "core-memories.md": "CORE-842\n",
+            TODAY_FILE: "TODAY-" + ("X" * 2200) + "\n",
+            "now.md": "NOW-" + ("X" * 2200) + "\n",
+            "recent.md": "RECENT-" + ("X" * 2200) + "\n",
+            "archive.md": "ARCHIVE-" + ("X" * 2200) + "\n",
+        }
+        out, remember = _run(tmp_path, bodies)
+        assert "ARCHIVE-" not in out
+        log_dir = remember / "logs"
+        logs = "".join(p.read_text(encoding="utf-8", errors="replace") for p in log_dir.glob("*.log")) if log_dir.is_dir() else ""
+        assert "still over" not in logs, (
+            f"a render that fit under budget after dropping must not log the "
+            f"still-over-budget warning: {logs!r}"
+        )
+
+
 class TestMultibyteHeavyStoreRespectsByteBudget:
 
     def test_multibyte_content_still_fits_under_the_byte_budget(self, tmp_path):
