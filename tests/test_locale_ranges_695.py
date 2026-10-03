@@ -189,13 +189,13 @@ ALLOWLIST: dict[tuple[str, int], str] = {
     # Lines shifted +1 by #898's role-based-phrasing rewording of this
     # file's own hook-naming comments (the case statements themselves are
     # unchanged).
-    ("scripts/post-tool-hook.sh", 428): _CASE,
-    ("scripts/post-tool-hook.sh", 620): _CASE,
-    ("scripts/post-tool-hook.sh", 662): _CASE,
-    ("scripts/post-tool-hook.sh", 716): _CASE,
-    ("scripts/session-end-hook.sh", 196): _CASE,
-    ("scripts/session-end-hook.sh", 204): _CASE,
-    ("scripts/session-start-hook.sh", 298): _CASE,
+    ("scripts/post-tool-hook.sh", 437): _CASE,
+    ("scripts/post-tool-hook.sh", 629): _CASE,
+    ("scripts/post-tool-hook.sh", 671): _CASE,
+    ("scripts/post-tool-hook.sh", 725): _CASE,
+    ("scripts/session-end-hook.sh", 200): _CASE,
+    ("scripts/session-end-hook.sh", 208): _CASE,
+    ("scripts/session-start-hook.sh", 303): _CASE,
     ("scripts/write-handoff.sh", 87): _CASE,
     ("scripts/doctor.sh", 70): _CASE,
     # Shifted +5 by #898 round 4's claude_projects_dir nested-default fix,
