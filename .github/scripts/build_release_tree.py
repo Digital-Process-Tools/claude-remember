@@ -45,6 +45,7 @@ from urllib.parse import quote, unquote
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
 from check_release_tree import gitattributes_offences
+from compile_hooks import HOOK_SCRIPT_NAMES, InlineError, compile_hook
 
 DEFAULT_CONFIG = _HERE.parent / "release-branch.json"
 
@@ -288,6 +289,26 @@ def build(repo: Path, ref: str, out: Path, config: dict) -> dict:
                              f"release tree")
         swap_blobs = _cat_blobs(repo, [swap_sha])
         contents["README.md"] = swap_blobs[swap_sha]
+
+    # #900: the directory's release-preview validator never follows a
+    # `source`/`.` statement out of a hooks.json command into a second file,
+    # so each of the four hooks.json-registered scripts ships self-contained
+    # -- every file in its own source chain inlined, recursively, each
+    # inlined at most once (include-guard semantics), with comment-only
+    # lines then stripped to fit the 256 KiB per-file budget. A source line
+    # this cannot resolve fails the build rather than shipping a hook that
+    # still needs a second file to exist on disk.
+    sh_texts = {p: contents[p].decode("utf-8") for p in contents
+                if p.startswith("scripts/") and p.endswith(".sh")}
+    for hname in HOOK_SCRIPT_NAMES:
+        hrel = f"scripts/{hname}"
+        if hrel not in contents:
+            continue
+        try:
+            compiled = compile_hook(hrel, sh_texts)
+        except InlineError as exc:
+            raise BuildError(f"{hrel}: {exc}") from None
+        contents[hrel] = compiled.encode("utf-8")
 
     for path, data in contents.items():
         if posixpath.basename(path) == ".gitattributes":

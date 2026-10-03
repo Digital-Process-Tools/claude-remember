@@ -69,6 +69,10 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+_HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(_HERE))
+from compile_hooks import HOOK_SCRIPT_NAMES, SOURCE_LINE
+
 DEFAULT_CONFIG = Path(__file__).resolve().parent.parent / "release-branch.json"
 DEFAULT_BUDGET = {"max_file_bytes": 256 * 1024, "max_files": 512,
                   "max_total_bytes": 3 * 1024 * 1024}
@@ -316,9 +320,10 @@ CREDENTIAL_SHAPED_NAME = re.compile(
 # comment -- the other half of COMMAND_SCRIPT_NOT_FOLLOWED, alongside the
 # dead-dot fallback above. Scoped to the four hooks.json-registered scripts,
 # which is what the hold actually named; REVIEW, not FAIL (see
-# _check_hook_names_other_hook's own docstring for why).
-HOOK_SCRIPT_NAMES = ("session-start-hook.sh", "session-end-hook.sh",
-                     "user-prompt-hook.sh", "post-tool-hook.sh")
+# _check_hook_names_other_hook's own docstring for why). HOOK_SCRIPT_NAMES
+# itself now lives in compile_hooks.py (imported above) -- that module
+# compiles these same four scripts for the release tree, so it is the
+# canonical list of which scripts count as "a hooks.json-registered hook".
 
 
 def _download_piped_to_shell(line: str) -> bool:
@@ -587,6 +592,7 @@ def check_tree(root: Path, budget: dict) -> CheckResult:
     manifest = _check_manifest(files, off)
     _check_readme_and_licence(files, manifest, off)
     _check_hooks(files, manifest, off)
+    _check_hook_still_sources(files, kinds, off)
     _check_front_matter(files, off)
     _check_images(files, kinds, off)
     _check_launchers(files, kinds, off)
@@ -1065,6 +1071,29 @@ def _check_credential_shaped_name(files: dict, kinds: dict, off: list) -> None:
                     continue
                 off.append(f"{rel}:{n}: credential-shaped name {name!r} is not in "
                            f"the allowlist: {line.strip()[:80]}")
+
+
+def _check_hook_still_sources(files: dict, kinds: dict, off: list) -> None:
+    """#900: a hooks.json-registered hook script that still `source`s/`.`s
+    another file in the SHIPPED tree -- FAIL, not REVIEW. The directory's
+    release-preview validator inspects only the command hooks.json names; it
+    never follows a `source`/`.` statement into a second file, so a hook
+    that still has one is exactly the COMMAND_SCRIPT_NOT_FOLLOWED shape
+    (jit-context's own write-up, #900). build_release_tree.py compiles each
+    of these four scripts (compile_hooks.compile_hook) before it ever
+    reaches this check -- a surviving source/`.` line here means that step
+    did not run for this file, or did not fully resolve its own source
+    chain, either of which the release build must not ship silently."""
+    for rel, data in sorted(files.items()):
+        name = posixpath.basename(rel)
+        if name not in HOOK_SCRIPT_NAMES or kinds.get(rel) != "text":
+            continue
+        text = data.decode("utf-8")
+        for n, line in enumerate(text.splitlines(), 1):
+            if SOURCE_LINE.match(line):
+                off.append(f"{rel}:{n}: still sources another file after the "
+                           f"compile step -- the directory holds this as "
+                           f"COMMAND_SCRIPT_NOT_FOLLOWED: {line.strip()[:80]}")
 
 
 def _check_launchers(files: dict, kinds: dict, off: list) -> None:
