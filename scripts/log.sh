@@ -335,7 +335,7 @@ _remember_cfg_flatten_cache_is_standard_merge() {
 _remember_cfg_flatten_cache_valid_value() {
     local _value="$1"
     local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
-    [[ "$_value" =~ ^([^\\]|\\[\\nt])*$ ]]
+    [[ "$_value" =~ ^([^\\]|\\[\\nrt])*$ ]]
 }
 
 # A single config-data cache line is `_RCFG_<name><TAB><value>` -- TAB, not
@@ -361,6 +361,7 @@ _remember_cfg_flatten_q_encode() {
     local _rcfgqe_v="$2"
     _rcfgqe_v="${_rcfgqe_v//\\/\\\\}"
     _rcfgqe_v="${_rcfgqe_v//$'\n'/\\n}"
+    _rcfgqe_v="${_rcfgqe_v//$'\r'/\\r}"
     _rcfgqe_v="${_rcfgqe_v//$'\t'/\\t}"
     printf -v "$1" '%s' "$_rcfgqe_v"
 }

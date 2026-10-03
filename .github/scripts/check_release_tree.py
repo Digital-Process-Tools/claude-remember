@@ -124,7 +124,23 @@ LAUNCHER_PY = re.compile(r"""['"](?:npx|bunx|uvx)['"]|['"]pip3?['"]\s*,\s*['"]in
 # straight into a shell runs whatever the remote end served that day. Neither is
 # a hard FAIL -- a plugin's own installer script can legitimately look like this
 # -- so both are REVIEW-only, a reviewer's judgement call (#866).
-EVAL_OF_SUBSTITUTION = re.compile(r"\beval\b\s*['\"]?\$\(")
+#
+# #891: the pattern below used to require `$(` immediately after `eval`
+# (optionally through a quote), which never matched the two lines #864 itself
+# had to remove by hand from scripts/log.sh -- `eval "_identity=$_identity_raw"`
+# and `eval "$_assign"` -- because neither feeds eval a command substitution,
+# both are a plain variable expansion. Three alternatives now, in the order a
+# line is most likely to hit one: `eval $(...)`/`eval "$(...)"` (unchanged),
+# a bare `eval $var` with no quotes, and `eval "...$var..."` -- a variable
+# expansion anywhere inside a quoted argument, which is what both #864 shapes
+# above actually are.
+EVAL_OF_SUBSTITUTION = re.compile(
+    r"\beval\b\s*(?:"
+    r"['\"]?\$\("
+    r"|\$[A-Za-z_][A-Za-z0-9_]*\b"
+    r"|['\"][^'\"]*\$[A-Za-z_{]"
+    r")"
+)
 _SHELL_NAMES = {"sh", "bash", "zsh", "dash", "ksh"}
 
 
