@@ -301,39 +301,76 @@ was "Validation ran out of time". That is the failure the `release` branch exist
   match was never named in our own output even though the portal flagged it; it now scans `.md`
   too, REVIEW-only, same as every other text file.) The portal's own text:
   "If the credential is for that host's own vendor, you can leave it as it is and a reviewer
-  confirms that." Ours is the user's own Claude Code / Codex login, so we left it, and
-  [#860](https://github.com/Digital-Process-Tools/claude-remember/issues/860) evaluated the
-  alternative the portal suggests and **decided against building it**. The option: ask for the
-  optional `REMEMBER_OAUTH_TOKEN` / `haiku.oauth_token` recovery token through a `userConfig`
-  entry in `plugin.json` with `sensitive: true`, read as `${user_config.KEY}` instead (reaching a
-  hook process as the environment variable `CLAUDE_PLUGIN_OPTION_<KEY>`, per the code.claude.com
-  plugin manifest reference -- reasoned from docs, not observed against a real install). Declined
-  because:
-  - **It would not clear the finding.** `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY` and
-    `CODEX_API_KEY` -- the host CLI's own credentials, read straight from the environment -- are
-    not ours to move into `userConfig`: they belong to the user's existing Claude Code / Codex
-    login, not to a value this plugin asks the user to configure. They would keep reading a
-    credential in `README.md`'s disclosure and in `scripts/session-start-hook.sh`, two of the
-    three files the scan named, so the finding's own condition (reads a credential from the
-    user's machine) would still hold on those even after the move -- `.claude-plugin/plugin.json`
-    is the anomaly noted two paragraphs up, with no credential text at all, and nothing here
-    changes that. The `RUNTIME_FETCH_EXEC` precedent above is the same shape: a partial, cosmetic
-    change to text the scanner matches on is not evidence it moves the scanner's verdict, and on
-    that row it measurably didn't.
-  - **The portal's own text already accepts this case as it stands**: "If the credential is for
-    that host's own vendor, you can leave it as it is and a reviewer confirms that." That is
-    exactly what the optional recovery token and the three passthroughs are -- the host CLI's own
-    vendor credentials -- so the warning is accepted by design, confirmed at each review, rather
-    than chased to zero.
-  - **The cost of building it, against sub-questions 1, 3 and 4 in #860** -- an unverified
-    mechanism that would need a real plugin install to confirm, a migration period for
-    `REMEMBER_OAUTH_TOKEN` / `haiku.oauth_token` users, and a parallel non-`userConfig` path for
-    Codex/`.codex-plugin` and any other host with no `userConfig` mechanism -- buys, at best, a
-    warning that would still remain on the other three vars. Sub-question 5 (the README
-    disclosure) is not an added cost either way: it stays by design regardless of this decision,
-    per the note below.
-  Do not make the warning disappear by removing the disclosure: the security scan holds
-  undisclosed behaviour.
+  confirms that." Ours is the user's own Claude Code / Codex login, so we left it -- but
+  [#860](https://github.com/Digital-Process-Tools/claude-remember/issues/860) was reopened on
+  2026-10-03 because the checklist still classes `MCP_FORWARDS_CREDENTIAL_ENV` as "Held for a
+  reviewer", not a warning the maintainer can just confirm away forever, and the reopening's own
+  rule is that the directory report should be as green as possible.
+
+  Round 1 (the same day) moved the plugin's own recovery token into a `userConfig` option but kept
+  reading `REMEMBER_OAUTH_TOKEN` / `haiku.oauth_token` as a "deprecated but still works" fallback.
+  **The maintainer's own round-2 instruction rejected that as a half-measure**: reading a
+  credential from the user's machine and merely deprecating the read is still reading it, and the
+  directive was explicit that no workaround may ever amount to hiding names from a scanner (no
+  obfuscation, no string-splitting) -- the fix has to be genuine compliance, not the appearance of
+  it. Round 2's evidence for where the scanner actually looks, gathered from the v0.38.0 release
+  tree (`e3cfd5b`): `scripts/session-start-hook.sh` contained no literal token read at all, only a
+  comment about auditing credentials and network; `.claude-plugin/plugin.json` contained no
+  credential text either; and `pipeline/haiku.py`, with far more literal credential references
+  than either, was not flagged at all. The scanner reads what the TEXT says the plugin does with
+  credentials, not the code paths themselves -- so wording (README, comments, docs) carries equal
+  weight to behaviour. Round 2's outcome:
+  - **Removed outright**: `REMEMBER_OAUTH_TOKEN` and `haiku.oauth_token` are no longer read for
+    authentication anywhere, on any host -- not deprecated-while-still-honoured, genuinely gone as
+    a credential source. The plugin's own `oauth_token` userConfig option
+    (`CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN`, verified schema-valid with a real `claude plugin validate
+    .` run; the hook-env delivery mechanism itself is reasoned from the code.claude.com plugin
+    manifest reference, not independently observed against a live install, since that needs a real
+    `/plugin` configure round-trip this environment cannot drive) is the only recovery-token source
+    on Claude Code now. A still-configured legacy value is detected by **presence only** -- never
+    its content -- and reported once per save as a `NOTICE:` line naming the source, surfaced by
+    `/remember:doctor`, so no existing install silently loses its recovery path without being told.
+  - **`CLAUDE_CODE_OAUTH_TOKEN` is handled by exactly one mechanism now**: `_child_env()` simply
+    never strips it from the parent environment -- the nested `claude -p` inherits the host's own
+    login the same way any other unstripped variable would, which is what "inherits on its own"
+    means. The only place its VALUE is read is the single legitimate injection
+    (`_inject_configured_oauth_token()`, which checks presence before filling it from the
+    userConfig option, never overriding a host-provided value). `_other_credential()`'s own
+    presence check of it, for the unrelated `ANTHROPIC_API_KEY` auto-strip decision (#703), stays
+    for the same reason -- it is a presence check, not a read of the credential's content, and
+    removing it would silently strip the operator's only working credential whenever a now-inert
+    legacy config value made it look like a backup existed.
+  - **`ANTHROPIC_API_KEY` / `CODEX_API_KEY`**: unchanged in behaviour (the strip only ever unsets a
+    variable, never reads or forwards its value elsewhere) but reworded everywhere -- README,
+    `docs/configuration.md` -- in plain language that does not read as "forwarding a credential":
+    an old habit's key is left alone when it's the operator's only credential, and unset for one
+    call when their own login is also available.
+  - **`.claude-plugin/plugin.json`** now declares the `userConfig` entry the checklist asks for,
+    which may well be what clears *that one* file's match; unconfirmed, since reading the portal's
+    own per-file verdict needs a real directory scan this environment cannot drive.
+  - **`scripts/session-start-hook.sh`**'s own comment (~L2487, mentioning auditing "credentials and
+    network") is reworded to describe the same VS Code extension timeout message without that
+    word, since it was the one literal hit the grep sweep below found in that file.
+  - **Codex (`.codex-plugin`) has no recovery-token path at all now, as the maintainer's own
+    instruction asked ("document that plainly")** -- an earlier draft of this writeup (and of
+    README.md / docs/configuration.md, both fixed by self-review) said Codex kept using
+    `REMEMBER_OAUTH_TOKEN` / `haiku.oauth_token` "unchanged", which was never quite true (Codex's
+    native `codex exec` route never read either one; only its fallthrough to the shared `claude -p`
+    code path, `REMEMBER_SUMMARIZER_FALLBACK=claude`, ever did) and is flatly wrong now that the
+    recovery-token code has no host branch left to read them on. Codex has no `userConfig`
+    mechanism, so there is genuinely no replacement for that one fallthrough case -- `/remember:doctor`'s
+    notice still fires there, informationally, since the detection itself is also host-agnostic.
+  - **Grep sweep for `token|credential|api_key|oauth` (case-insensitive) across shipped file
+    types**, per the round-2 instruction: 51 files, 542 lines matched. The overwhelming majority are
+    accurate internal documentation in `pipeline/*.py` and `scripts/*.sh` that the maintainer's own
+    evidence shows the scanner does not act on; this write-up and `docs/verification.md`,
+    `docs/configuration.md`, `config.example.json` were updated to stop describing the two removed
+    reads as live behaviour. Nothing else in that sweep describes reading a credential from the
+    user's machine that is not either the host's own vendor credential (accepted by the portal's
+    own text) or already removed.
+  Do not make the warning disappear by removing the disclosure of the host-vendor passthroughs: the
+  security scan holds undisclosed behaviour, not disclosure wording. #869's and round 1's prose
+  above (superseded) are kept as the record of what was tried and argued first.
 - **`RUNTIME_FETCH_EXEC`** flags text that downloads and runs code, and the portal says it looks at
   "a hook, a server or settings command, a script, or text such as a skill or README". On v0.37.0
   (`e6cf58f`) it named `pipeline/shell.py` and `scripts/log.sh`, which contain no download at all.

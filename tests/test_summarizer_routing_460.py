@@ -232,6 +232,70 @@ def test_codex_spawn_declined_is_never_treated_as_unavailable(mock_run, mock_cla
 
 
 @patch("pipeline.haiku.subprocess.run")
+def test_legacy_oauth_token_does_not_authenticate_the_codex_fallback(mock_run, monkeypatch):
+    """Review finding (#860, round 2): the recovery-token code has never
+    branched by host, so a Codex host falling through to the shared
+    `claude -p` code (REMEMBER_SUMMARIZER_FALLBACK=claude) gets exactly the
+    same -- empty -- precedence as Claude Code. A still-configured legacy
+    REMEMBER_OAUTH_TOKEN must NOT reach CLAUDE_CODE_OAUTH_TOKEN on this path
+    either, closing the untested gap a self-review reviewer found (zero
+    "codex" references in tests/test_haiku.py's own token-precedence
+    tests)."""
+    monkeypatch.setenv("REMEMBER_TRANSCRIPT_PATH", _CODEX_TRANSCRIPT)
+    monkeypatch.setenv("REMEMBER_SUMMARIZER_FALLBACK", "claude")
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.delenv("CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN", raising=False)
+    monkeypatch.setenv("REMEMBER_OAUTH_TOKEN", "sk-ant-oat-legacy-env-codex01")
+
+    calls = []
+
+    def _side_effect(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        if os.path.basename(cmd[0]) == "codex":
+            raise FileNotFoundError("no such file: codex")
+        return MagicMock(returncode=0, stdout=_mock_claude_stdout("fell back"), stderr="")
+
+    mock_run.side_effect = _side_effect
+    result = call_haiku("test prompt")
+
+    assert result.text == "fell back"
+    claude_call = next(c for c in calls if os.path.basename(c[0][0]).startswith("claude"))
+    claude_env = claude_call[1]["env"]
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in claude_env, (
+        "the legacy REMEMBER_OAUTH_TOKEN must not authenticate the "
+        "Codex-fallback claude -p call -- it is no longer read on any host"
+    )
+
+
+@patch("pipeline.haiku.subprocess.run")
+def test_userconfig_token_does_authenticate_the_codex_fallback(mock_run, monkeypatch):
+    """Positive control for the test above: the userConfig option IS still
+    the one working recovery-token source on this same Codex-fallback path
+    (#860, round 2) -- without this twin, the negative assertion above would
+    pass just as well against code that broke the fallback path entirely."""
+    monkeypatch.setenv("REMEMBER_TRANSCRIPT_PATH", _CODEX_TRANSCRIPT)
+    monkeypatch.setenv("REMEMBER_SUMMARIZER_FALLBACK", "claude")
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.setenv("CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN", "sk-ant-oat-userconfig-codex02")
+
+    calls = []
+
+    def _side_effect(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        if os.path.basename(cmd[0]) == "codex":
+            raise FileNotFoundError("no such file: codex")
+        return MagicMock(returncode=0, stdout=_mock_claude_stdout("fell back"), stderr="")
+
+    mock_run.side_effect = _side_effect
+    result = call_haiku("test prompt")
+
+    assert result.text == "fell back"
+    claude_call = next(c for c in calls if os.path.basename(c[0][0]).startswith("claude"))
+    claude_env = claude_call[1]["env"]
+    assert claude_env.get("CLAUDE_CODE_OAUTH_TOKEN") == "sk-ant-oat-userconfig-codex02"
+
+
+@patch("pipeline.haiku.subprocess.run")
 def test_invalid_summarizer_env_falls_back_to_auto(mock_run):
     """A typo'd REMEMBER_SUMMARIZER value must not silently do something
     unexpected -- it is reported and treated as unset (\"auto\"), same

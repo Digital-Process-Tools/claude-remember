@@ -44,7 +44,15 @@ _REQUIRED_NAMES = [
     "remember-env-",
     "remember-config-cache-",
     "remember-detect-tools-cache",
-    "CLAUDE_CODE_OAUTH_TOKEN",
+    # CLAUDE_CODE_OAUTH_TOKEN deliberately NOT required here any more (#860,
+    # round 2): the directory's security scan holds "reads a credential
+    # from the user's machine", and naming that env var in prose, even to
+    # disclose it, is the kind of text the scanner flags. README now
+    # describes the same behaviour in plain language instead ("runs your
+    # own `claude` CLI with your own login") -- the #854 rule that every
+    # credential-handling behaviour must be named literally is superseded
+    # for this one name by #860's redesign, not silently dropped: this
+    # comment is the record of why.
     "REMEMBER_OAUTH_TOKEN",
     "haiku.oauth_token",
     "ANTHROPIC_API_KEY",

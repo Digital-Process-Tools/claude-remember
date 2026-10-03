@@ -94,9 +94,10 @@ def test_summarizer_failure_marker_overrides_capture_is_working(tmp_path):
         + result.stdout
     )
     assert "Failed to authenticate" in result.stdout
-    assert "REMEMBER_OAUTH_TOKEN" in result.stdout, (
-        "an auth-shaped failure detail must point at the documented remedy:\n"
-        + result.stdout
+    assert "userConfig" in result.stdout, (
+        "an auth-shaped failure detail must point at the documented remedy "
+        "(#860, round 2: the userConfig recovery token, not the removed "
+        "REMEMBER_OAUTH_TOKEN env var):\n" + result.stdout
     )
     verdict = _verdict(result.stdout)
     assert verdict.startswith(
@@ -129,7 +130,7 @@ def test_non_auth_failure_detail_gets_no_oauth_remedy(tmp_path):
     assert result.returncode == 0, result.stderr
     assert "FAIL summarizer: last attempt failed" in result.stdout
     assert "rate_limit_error" in result.stdout
-    assert "REMEMBER_OAUTH_TOKEN" not in result.stdout, (
+    assert "userConfig" not in result.stdout, (
         "a non-auth failure must not print the auth-specific remedy:\n"
         + result.stdout
     )

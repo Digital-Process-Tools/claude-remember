@@ -974,14 +974,17 @@ if [ -s "$_SUMMARY_FAILURE_MARKER" ]; then
     # Same marker family _isolation_may_be_the_cause (pipeline/haiku.py) scans
     # for -- an expired login reads as a generic failure here, so this is the
     # one lowercased substring match worth doing in bash rather than naming
-    # REMEMBER_OAUTH_TOKEN for every kind of failure, which would be as wrong
+    # a specific remedy for every kind of failure, which would be as wrong
     # in the other direction as never naming it at all.
     _SF_DETAIL_LOWER=$(printf '%s' "$_SF_DETAIL" | tr '[:upper:]' '[:lower:]')
     case "$_SF_DETAIL_LOWER" in
         *"not logged in"*|*"please run /login"*|*"invalid api key"*|\
         *"invalid bearer token"*|*"authentication_error"*|*"failed to authenticate"*)
-            echo "     this looks like an expired login -- set REMEMBER_OAUTH_TOKEN"
-            echo "     (see \`claude setup-token\`, #129/#131)"
+            echo "     this looks like an expired login -- on Claude Code,"
+            echo "     configure the plugin's userConfig recovery token"
+            echo "     (/plugin -> remember -> Configure, or \`claude setup-token\`"
+            echo "     then \`claude plugin config set remember oauth_token <token>\`,"
+            echo "     #129/#131/#860)"
             ;;
     esac
     unset _remember_sf_glob_dir _SF_LATEST_LOG _SF_DETAIL _SF_DETAIL_LOWER _sf_f
@@ -1021,6 +1024,47 @@ else
     fi
 fi
 unset _remember_ss_glob_dir _SS_LATEST_LOG _SS_LAST_LINE _ss_f
+
+# ── 6c. Legacy recovery-token config, no longer read (#860) ────────────────
+# pipeline/haiku.py no longer reads REMEMBER_OAUTH_TOKEN or haiku.oauth_token
+# at all -- the plugin's own `oauth_token` userConfig option
+# (CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN) is the only recovery-token source now.
+# A still-configured legacy value is detected by PRESENCE ONLY and logged as
+# a "NOTICE:" line to the daily log every time a save runs -- this surfaces
+# the most recent one here, same pattern as the summarizer failure detail
+# above (sorted scan across every daily log, last match wins), so an
+# operator who has not migrated is not left silently unauthenticated.
+echo "-- Legacy recovery-token config (#860) --"
+_remember_dep_glob_dir=$(_remember_forward_slash "$REMEMBER_DIR")
+_DEP_LINE=""
+_DEP_ANY_LOG=0
+_DEP_FILES=("$_remember_dep_glob_dir"/logs/memory-*.log)
+if [ -e "${_DEP_FILES[0]}" ]; then
+    _DEP_ANY_LOG=1
+    _DEP_OLD_IFS="$IFS"
+    IFS=$'\n'
+    _DEP_SORTED=($(printf '%s\n' "${_DEP_FILES[@]}" | LC_ALL=C sort))
+    IFS="$_DEP_OLD_IFS"
+    unset _DEP_OLD_IFS
+    for _dep_f in "${_DEP_SORTED[@]}"; do
+        _dep_match=$(grep -F "NOTICE:" "$_dep_f" 2>/dev/null | tail -n 1)
+        [ -n "$_dep_match" ] && _DEP_LINE="$_dep_match"
+    done
+    unset _DEP_SORTED
+fi
+unset _DEP_FILES
+if [ -n "$_DEP_LINE" ]; then
+    echo "WARN $_DEP_LINE"
+    echo "     Configure the recovery token through the plugin's userConfig"
+    echo "     option instead (/plugin -> remember -> Configure, or"
+    echo "     \`claude plugin config set remember oauth_token <token>\`)."
+elif [ "$_DEP_ANY_LOG" = 1 ]; then
+    echo "OK   No legacy recovery-token config in use"
+else
+    echo "--   No daily log found yet -- nothing scanned for legacy recovery-token config"
+fi
+unset _remember_dep_glob_dir _DEP_LINE _DEP_ANY_LOG _dep_f
+echo ""
 
 # Log rotation (#252). A rotation that cannot run is invisible by construction:
 # it happens inside a consolidation the user never watches, it writes one line
