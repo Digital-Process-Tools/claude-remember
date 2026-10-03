@@ -557,6 +557,79 @@ def test_tree_shake_refuses_to_guess_on_unbalanced_braces():
     assert out == text
 
 
+def test_tree_shake_handles_a_command_substitution_spanning_multiple_lines():
+    # #900 round 3: a "$(... <<< '...')" here-string reading a multi-line
+    # Python script, the shape fix/898's own heredoc-to-here-string
+    # rewrite introduced -- a verbatim excerpt of the real
+    # session-start-hook.sh's own `session_was_saved` (renamed `used`
+    # here), which tripped this exact false "unbalanced braces" alarm:
+    # _command_substitution_end only resolved a '$(...)' that closed on
+    # the SAME physical line, so falling through to ordinary
+    # per-character handling for this unresolved (multi-line) substitution
+    # let its own internal quotes leak into and desync the outer quote
+    # state, silently swallowing `used`'s own closing '}' several lines
+    # later. The closing function here must still be found, and the
+    # embedded Python's own "return (" + lowercase-identifier-shaped lines
+    # (the text _cmdsub_continue must keep masked, not reveal) must not be
+    # misread as bash dynamic dispatch either. Confirmed red against this
+    # module's pre-fix form (reported "a quote or heredoc never closed by
+    # end of file") before this fix made it green.
+    text = (
+        "#!/bin/sh\n"
+        "used() {\n"
+        "    [ -n \"$1\" ] && [ -f \"$LAST_SAVE_FILE\" ] || return 1\n"
+        "    if [ \"$JQ\" = \"_jq_fallback\" ]; then\n"
+        "        _remember_python || return 1\n"
+        "        [ \"$(_remember_run_python - \"$LAST_SAVE_FILE\" \"$1\" <<< 'import json, math, sys\n"
+        "\n"
+        "def isline(v):\n"
+        "    # Mirrors $SAVED_QUERY'\"'\"'s own `isline` def exactly: a JSON number,\n"
+        "    return (\n"
+        "        isinstance(v, (int, float))\n"
+        "        and not isinstance(v, bool)\n"
+        "        and math.isfinite(v)\n"
+        "        and v == math.floor(v)\n"
+        "    )\n"
+        "\n"
+        "try:\n"
+        "    data = json.load(open(sys.argv[1]))\n"
+        "except Exception:\n"
+        "    print(\"unsaved\")\n"
+        "    sys.exit(0)\n"
+        "\n"
+        "sid = sys.argv[2]\n"
+        "if not isinstance(data, dict):\n"
+        "    print(\"unsaved\")\n"
+        "    sys.exit(0)\n"
+        "\n"
+        "sessions = data.get(\"sessions\")\n"
+        "if sessions is not None and not isinstance(sessions, dict):\n"
+        "    print(\"unsaved\")\n"
+        "    sys.exit(0)\n"
+        "\n"
+        "if isinstance(sessions, dict) and isline(sessions.get(sid)):\n"
+        "    print(\"saved\")\n"
+        "elif data.get(\"session\") == sid and isline(data.get(\"line\")):\n"
+        "    print(\"saved\")\n"
+        "else:\n"
+        "    print(\"unsaved\")\n"
+        "' 2>/dev/null\n"
+        ")\" = \"saved\" ]\n"
+        "    else\n"
+        "        [ \"$(_remember_run_jq -r --arg id \"$1\" \"$SAVED_QUERY\" \"$LAST_SAVE_FILE\" 2>/dev/null)\" = \"saved\" ]\n"
+        "    fi\n"
+        "}\n"
+        "unused() {\n"
+        "    echo unused\n"
+        "}\n"
+        "used\n"
+    )
+    _out, report = compile_hooks.tree_shake(text)
+    assert report["shaken"] is True, report.get("reason")
+    assert report["dynamic_dispatch"] is False
+    assert report["dropped"] == ["unused"]
+
+
 @pytest.mark.parametrize("hook_name", compile_hooks.HOOK_SCRIPT_NAMES)
 def test_real_hook_tree_shaking_drops_at_least_one_function_and_stays_valid(hook_name):
     # Real-repo positive control for the issue's own ask: each of the four

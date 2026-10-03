@@ -521,30 +521,17 @@ _DYNAMIC_CALL_RE = re.compile(
 )
 
 
-def _command_substitution_end(line, i):
-    """If line[i:i+2] is '$(' (not '$((', arithmetic expansion), the index
-    just past its MATCHING ')' on this same physical line, tracking the
-    substitution's own LOCAL quote state independently of whatever quote
-    the substitution itself sits inside -- `$(...)` establishes its own
-    nested lexical scope in real bash, so a '\"' inside it (e.g.
-    `$(command -v "$_first" 2>/dev/null)`, embedded in an OUTER
-    double-quoted string) must never toggle the outer string's own quote
-    state. Treating every '\"' uniformly, with no notion of this nested
-    scope, is exactly what produced a false "this text is code, not still
-    inside the outer string" read during this module's own testing
-    (scripts/user-prompt-hook.sh:386's `$_notice_body\"` continuation
-    line). Returns None if there is no '$(' here, or if the matching ')'
-    is not found on this same line (a command substitution spanning
-    multiple physical lines is not resolved by this helper -- the caller
-    falls back to its ordinary per-character handling for that rare case,
-    which does not miscount braces either way since '(' and ')' are not
-    counted by this module's own brace-delta tracking)."""
+def _cmdsub_continue(line, start, depth, sq, dq):
+    """The character-by-character scan _command_substitution_end uses for
+    a fresh '$(', also re-entered at the start of a physical line that
+    CONTINUES an unresolved '$(...)' carried from an earlier line (#900
+    round 3) -- same rules, generalized to accept an already-nonzero
+    DEPTH/SQ/DQ instead of always starting at depth 1. Returns (end,
+    depth, sq, dq): END is the index just past the matching ')' once
+    DEPTH returns to 0 on this line; otherwise None, with DEPTH/SQ/DQ the
+    state to carry into the next physical line."""
     n = len(line)
-    if line[i:i + 2] != "$(" or line[i:i + 3] == "$((":
-        return None
-    j = i + 2
-    depth = 1
-    sq = dq = False
+    j = start
     while j < n:
         c = line[j]
         if sq:
@@ -572,12 +559,45 @@ def _command_substitution_end(line, i):
         elif c == ")":
             depth -= 1
             if depth == 0:
-                return j + 1
+                return j + 1, 0, sq, dq
         j += 1
-    return None
+    return None, depth, sq, dq
 
 
-def _scan_line_braces(line, in_squote, in_dquote, brace_stack):
+def _command_substitution_end(line, i):
+    """If line[i:i+2] is '$(' (not '$((', arithmetic expansion), scans for
+    its matching ')', tracking the substitution's own LOCAL quote state
+    independently of whatever quote the substitution itself sits inside --
+    `$(...)` establishes its own nested lexical scope in real bash, so a
+    '\"' inside it (e.g. `$(command -v "$_first" 2>/dev/null)`, embedded in
+    an OUTER double-quoted string) must never toggle the outer string's own
+    quote state. Treating every '\"' uniformly, with no notion of this
+    nested scope, is exactly what produced a false "this text is code, not
+    still inside the outer string" read during this module's own testing
+    (scripts/user-prompt-hook.sh:386's `$_notice_body\"` continuation line).
+
+    Returns (end, depth, sq, dq). END is None if there is no '$(' here (in
+    which case depth/sq/dq are always 0/False/False); otherwise END is the
+    index just past the matching ')' if found on this same physical line,
+    or None with DEPTH/SQ/DQ set to the substitution's own open state --
+    the caller carries those three into _cmdsub_continue on the next
+    physical line (#900 round 3: a substitution spanning multiple lines,
+    e.g. a `<<<` here-string reading a multi-line Python script inside
+    `"$(... <<< '...')"`, used to fall through to this module's ordinary
+    per-character handling the moment it went unresolved here -- not a
+    braces/parens miscount directly, since neither is counted by this
+    module's own brace-delta tracking, but a QUOTE-parity drift: the
+    substitution's own internal quotes leaked into and desynced the OUTER
+    quote state they are supposed to be opaque to, which silently swallowed
+    one genuine top-level '}' several lines later in this repo's own
+    session-start-hook.sh `session_was_saved` -- the unbalanced-braces
+    false alarm this fixes)."""
+    if line[i:i + 2] != "$(" or line[i:i + 3] == "$((":
+        return None, 0, False, False
+    return _cmdsub_continue(line, i + 2, 1, False, False)
+
+
+def _scan_line_braces(line, in_squote, in_dquote, brace_stack, cmdsub=None):
     """Like compile_hooks._scan_line, but also returns the net count of
     unquoted '{' minus '}' characters on this line, and a MASKED copy of
     the line (same length) with every quoted span and real trailing
@@ -588,6 +608,13 @@ def _scan_line_braces(line, in_squote, in_dquote, brace_stack):
     the innermost currently-open unquoted '{' is part of a '${' parameter
     expansion, False means an ordinary block/group open.
 
+    CMDSUB, when not None, is a (depth, sq, dq) triple carried from a
+    '$(...)' left open by the END of a PREVIOUS physical line (#900 round
+    3) -- this line is scanned as that substitution's own continuation
+    first (via _cmdsub_continue), before anything else on it is treated as
+    ordinary bash, since the whole line still belongs to the substitution's
+    nested lexical scope until its own depth returns to 0.
+
     That distinction is why '#' does not always start a comment: inside a
     parameter expansion (`${raw#pattern}`, `${raw##pattern}`) '#' is a
     pattern-removal OPERATOR, not a comment marker -- treating it as one
@@ -597,12 +624,34 @@ def _scan_line_braces(line, in_squote, in_dquote, brace_stack):
     repo's own scripts/session-end-hook.sh:79 (`rest=${raw#*\\"$key\\"}`)
     during this module's own testing. A '#' while the innermost open
     bracket is an ordinary block (`{ # comment`) is still a real comment,
-    so the stack records WHICH kind is open, not just whether one is."""
+    so the stack records WHICH kind is open, not just whether one is.
+
+    Returns an 8-tuple: the usual (delta, heredoc_term, heredoc_strip_tabs,
+    in_squote, in_dquote, masked_line, continuation), plus a new CMDSUB
+    carry (None once any open substitution has resolved, else the
+    (depth, sq, dq) to pass back in on the next physical line)."""
     i, n = 0, len(line)
     heredoc_term = None
     heredoc_strip_tabs = False
     delta = 0
     masked = ["\x00"] * n
+    if cmdsub is not None:
+        end, cs_depth, cs_sq, cs_dq = _cmdsub_continue(line, 0, *cmdsub)
+        if end is None:
+            # The whole line is still inside the carried-over substitution
+            # -- stays masked (NUL), not revealed: unlike a same-line
+            # $(...) (always a short bash expression in this codebase),
+            # a substitution spanning multiple physical lines is the
+            # embedded-Python/jq-script shape, and revealing THAT content
+            # to the dynamic-dispatch scan below risks a foreign-language
+            # token (jq's own "(" . "$lowercase_name" syntax, say)
+            # matching a pattern meant only for real bash command words.
+            masked_line = "".join(masked)
+            return (delta, heredoc_term, heredoc_strip_tabs, in_squote,
+                    in_dquote, masked_line, False, (cs_depth, cs_sq, cs_dq))
+        # The substitution's own closing span stays masked for the same
+        # reason -- only code AFTER "i = end" is ordinary bash again.
+        i = end
     while i < n:
         c = line[i]
         if in_squote:
@@ -622,7 +671,7 @@ def _scan_line_braces(line, in_squote, in_dquote, brace_stack):
                 i += 1
                 continue
             if c == "$":
-                cmdsub_end = _command_substitution_end(line, i)
+                cmdsub_end, cs_depth, cs_sq, cs_dq = _command_substitution_end(line, i)
                 if cmdsub_end is not None:
                     # $(...) is its own nested lexical scope -- skip it as
                     # one opaque unit (masked, not revealed) so its OWN
@@ -631,6 +680,20 @@ def _scan_line_braces(line, in_squote, in_dquote, brace_stack):
                     # docstring for the real false-positive this fixes.
                     i = cmdsub_end
                     continue
+                if line[i:i + 2] == "$(" and line[i:i + 3] != "$((":
+                    # This $(...) does not close on this physical line --
+                    # the whole rest of the line still belongs to its own
+                    # nested scope and stays masked (same reasoning as the
+                    # top-of-function carry entry above: it is the
+                    # embedded-script shape, not a short bash expression),
+                    # carrying the open state into the next line rather
+                    # than falling through to ordinary per-character
+                    # handling (#900 round 3: see
+                    # _command_substitution_end's own docstring for the
+                    # quote-parity drift that produced).
+                    masked_line = "".join(masked)
+                    return (delta, heredoc_term, heredoc_strip_tabs, in_squote,
+                            in_dquote, masked_line, False, (cs_depth, cs_sq, cs_dq))
                 # Reveal a variable expansion even though it sits inside a
                 # double-quoted string: bash expands $VAR/${VAR} identically
                 # whether quoted or not, and a command-position check that
@@ -730,7 +793,7 @@ def _scan_line_braces(line, in_squote, in_dquote, brace_stack):
             i = j
             continue
         if c == "$":
-            cmdsub_end = _command_substitution_end(line, i)
+            cmdsub_end, cs_depth, cs_sq, cs_dq = _command_substitution_end(line, i)
             if cmdsub_end is not None:
                 # Same nested-scope reasoning as the in_dquote branch above
                 # -- a $(...) outside any quote still has its own internal
@@ -738,6 +801,16 @@ def _scan_line_braces(line, in_squote, in_dquote, brace_stack):
                 masked[i:cmdsub_end] = line[i:cmdsub_end]
                 i = cmdsub_end
                 continue
+            if line[i:i + 2] == "$(" and line[i:i + 3] != "$((":
+                # Same multi-line carry as the in_dquote branch above --
+                # a $(...) started in CODE state (not inside any outer
+                # quote) that does not close on this line still must not
+                # let its own internal quotes leak into in_squote/
+                # in_dquote on the next physical line, and stays masked
+                # for the same dynamic-dispatch-noise reason.
+                masked_line = "".join(masked)
+                return (delta, heredoc_term, heredoc_strip_tabs, in_squote,
+                        in_dquote, masked_line, False, (cs_depth, cs_sq, cs_dq))
         masked[i] = c
         if c == "{":
             brace_stack.append(i > 0 and line[i - 1] == "$")
@@ -762,7 +835,7 @@ def _scan_line_braces(line, in_squote, in_dquote, brace_stack):
     # log/report call this repo's own real hooks wrap across lines did
     # exactly that before this fix.
     continuation = (not in_squote and not in_dquote and n > 0 and line[-1] == "\\")
-    return delta, heredoc_term, heredoc_strip_tabs, in_squote, in_dquote, masked_line, continuation
+    return delta, heredoc_term, heredoc_strip_tabs, in_squote, in_dquote, masked_line, continuation, None
 
 
 def tree_shake(text):
@@ -801,6 +874,7 @@ def tree_shake(text):
     in_squote = in_dquote = False
     brace_stack = []
     pending_continuation = False
+    pending_cmdsub = None
     for i, line in enumerate(lines):
         if heredoc_term is not None:
             in_heredoc[i] = True
@@ -809,27 +883,33 @@ def tree_shake(text):
                 heredoc_term = None
             continue
         entering_in_quote = in_squote or in_dquote
-        delta, heredoc_term, heredoc_strip_tabs, in_squote, in_dquote, masked, continuation = _scan_line_braces(
-            line, in_squote, in_dquote, brace_stack)
+        entering_in_cmdsub = pending_cmdsub is not None
+        (delta, heredoc_term, heredoc_strip_tabs, in_squote, in_dquote, masked,
+         continuation, pending_cmdsub) = _scan_line_braces(
+            line, in_squote, in_dquote, brace_stack, pending_cmdsub)
         deltas[i] = delta
         # Neither a backslash-continued line NOR a line that starts
         # already inside a quote carried over from an earlier one (a
         # double-quoted string containing a literal embedded newline --
-        # `case "\n${VAR}" in`, or a multi-line printf/echo message) is a
-        # fresh statement boundary, even though its revealed $-expansion
-        # can otherwise land at offset 0 of the masked text and look
-        # exactly like one. Prefixing one NUL byte makes either shape
-        # unmatchable by _DYNAMIC_CALL_RE's `^` alternative without
-        # disturbing any OTHER separator the line may still contain
-        # (';', '||', ...), and without shifting any other
+        # `case "\n${VAR}" in`, or a multi-line printf/echo message) NOR
+        # a line that continues a '$(...)' left open by an earlier one
+        # (#900 round 3) is a fresh statement boundary, even though its
+        # revealed $-expansion can otherwise land at offset 0 of the
+        # masked text and look exactly like one. Prefixing one NUL byte
+        # makes any of these shapes unmatchable by _DYNAMIC_CALL_RE's `^`
+        # alternative without disturbing any OTHER separator the line may
+        # still contain (';', '||', ...), and without shifting any other
         # position-sensitive use of masked_lines (there is none -- it is
         # read only by the dynamic-dispatch search below).
-        masked_lines[i] = ("\x00" + masked) if (pending_continuation or entering_in_quote) else masked
+        masked_lines[i] = (("\x00" + masked)
+                            if (pending_continuation or entering_in_quote or entering_in_cmdsub)
+                            else masked)
         pending_continuation = continuation
-    if in_squote or in_dquote or heredoc_term is not None:
+    if in_squote or in_dquote or heredoc_term is not None or pending_cmdsub is not None:
         return text, {"shaken": False, "kept": [], "dropped": [],
                        "dynamic_dispatch": False,
-                       "reason": "a quote or heredoc never closed by end of file"}
+                       "reason": "a quote, heredoc or command substitution never "
+                                 "closed by end of file"}
 
     funcs = {}
     depth = 0

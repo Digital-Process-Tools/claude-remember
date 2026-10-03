@@ -947,6 +947,8 @@ def _check_typed_heredoc(files: dict, kinds: dict, off: list) -> None:
             continue
         text = data.decode("utf-8")
         for n, line in enumerate(text.splitlines(), 1):
+            if line.lstrip().startswith("#"):
+                continue
             if TYPED_HEREDOC.search(_mask_arithmetic(line)):
                 off.append(f"{rel}:{n}: a typed '<<' (here-document) -- the "
                            f"directory holds this as UNPINNED_NPX (the "
