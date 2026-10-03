@@ -1,0 +1,45 @@
+{
+  "description": "Codex-side binding of Remember's existing hook scripts to Codex lifecycle events. Observed against a real codex-cli 0.150.1 install (#443, #444, #460, #463, #465). See hooks/hooks.json for the Claude Code manifest these scripts also ship for.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${PLUGIN_ROOT}/scripts/session-start-hook.sh\""
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${PLUGIN_ROOT}/scripts/user-prompt-hook.sh\""
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${PLUGIN_ROOT}/scripts/post-tool-hook.sh\""
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${PLUGIN_ROOT}/scripts/session-end-hook.sh\""
+          }
+        ]
+      }
+    ]
+  }
+}
