@@ -1347,5 +1347,16 @@ _remember_apply_session_start_budget() {
         _next=$(_REMEMBER_BUDGET_EXCLUDE="$_exclude"; _remember_render_memory_section 2>/dev/null)
         _mem="$_next"
     done
+    # #878: the loop above can exit still over budget -- every droppable
+    # section (archive/today/recent/now) gone and the head (handoff +
+    # identity/core-memories, never touched) plus what remains of the
+    # MEMORY section still exceeds _max. That is a distinct outcome from
+    # "fits now" and must say so loudly (not a failure: the body is still
+    # delivered, dropped sections and all -- see the function header), or
+    # an operator has no way to tell "budget satisfied" from "budget
+    # exhausted, still over" from the log alone.
+    if [ $(( _head_len + ${#_mem} )) -gt "$_max" ]; then
+        log "memory-context" "WARNING: thresholds.session_start_max_bytes: still over budget ($(( _head_len + ${#_mem} )) bytes > ${_max}) after dropping every droppable section"
+    fi
     printf -v "$_outvar" %s "${_head}${_mem}"
 }
