@@ -312,13 +312,20 @@ _remember_ci_eq() {
 # uses) back into the original bytes, so unquoting is one call, not a
 # hand-rolled parser -- and it is applied unconditionally: an UNQUOTED
 # line (the common case) has no leading/trailing `"` and falls through
-# the `*)` arm unchanged.
+# the `else` branch unchanged.
 _remember_git_unquote_into() {
-    local _gu_outvar="$1" _gu_line="$2"
-    case "$_gu_line" in
-        (\"*\")
-            _gu_line="${_gu_line#\"}"
-            _gu_line="${_gu_line%\"}"
+    local _gu_outvar="$1" _gu_line="$2" _gu_dq
+    # The double quote is held in a variable (octal 042) rather than written
+    # backslash-escaped, and "starts and ends with it" is two `[ ]` tests
+    # plus a length check (one `"` alone is not a quoted entry) -- the same
+    # match the old `case` arm made, without the escaped quote the plugin
+    # directory's scanner mis-tracks (#898 round 8).
+    printf -v _gu_dq '\042'
+    if [ "${#_gu_line}" -ge 2 ] \
+        && [ "${_gu_line#"$_gu_dq"}" != "$_gu_line" ] \
+        && [ "${_gu_line%"$_gu_dq"}" != "$_gu_line" ]; then
+            _gu_line="${_gu_line#"$_gu_dq"}"
+            _gu_line="${_gu_line%"$_gu_dq"}"
             # #780: `printf '%b'` does NOT know the two-character escape
             # `\"` (unlike `\\`, `\n`, `\t`, ... which it does handle) --
             # left alone, a literal double-quote byte in the path survives
@@ -342,14 +349,12 @@ _remember_git_unquote_into() {
             # 2-char value is exactly the pattern we want.
             local _gu_bs _gu_bsq
             _gu_bs='\'
-            _gu_bsq="${_gu_bs}\""
+            _gu_bsq="${_gu_bs}${_gu_dq}"
             _gu_line="${_gu_line//"$_gu_bsq"/\\042}"
             printf -v "$_gu_outvar" '%b' "$_gu_line"
-            ;;
-        (*)
+    else
             printf -v "$_gu_outvar" '%s' "$_gu_line"
-            ;;
-    esac
+    fi
 }
 
 # No `_remember_cache_key_into` helper here (#898 round 7 removed it along

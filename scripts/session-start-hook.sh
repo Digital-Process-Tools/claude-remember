@@ -132,13 +132,17 @@ fi
 # field is researched in the UserPromptSubmit hook, next to its own
 # `_stdin_cwd` -- same extractor mechanism, same finding, not repeated here.
 _stdin_json_string() {
-    local field="$1" raw="$2" rest prefix value
-    case "$raw" in *"\"$field\""*) ;; *) return 1 ;; esac
-    rest=${raw#*\"$field\"}
-    prefix=${rest%%\"*}
+    local field="$1" raw="$2" rest prefix value dq
+    # The double quote is held in `dq` (octal 042) rather than written
+    # backslash-escaped: the plugin directory's scanner mis-tracks an
+    # escaped quote (#898 round 8). Same patterns, same quoting of $field.
+    printf -v dq '\042'
+    case "$raw" in *"$dq$field$dq"*) ;; *) return 1 ;; esac
+    rest=${raw#*"$dq"$field"$dq"}
+    prefix=${rest%%"$dq"*}
     case "$prefix" in *[!:[:space:]]*) return 1 ;; esac
-    value=${rest#*\"}
-    value=${value%%\"*}
+    value=${rest#*"$dq"}
+    value=${value%%"$dq"*}
     # A JSON encoder writes each backslash as `\\` -- a Windows `cwd` from
     # Codex arrives as `C:\\work\\proj` otherwise (#829).
     value=${value//\\\\/\\}
@@ -161,14 +165,15 @@ _stdin_json_string() {
 # takes a destination VARNAME shares; see config_into's comment (log.sh)
 # for the full argument.
 _stdin_json_string_into() {
-    local _sjsi_var="$1" _sjsi_field="$2" _sjsi_raw="$3" _sjsi_rest _sjsi_prefix _sjsi_value
+    local _sjsi_var="$1" _sjsi_field="$2" _sjsi_raw="$3" _sjsi_rest _sjsi_prefix _sjsi_value _sjsi_dq
     printf -v "$_sjsi_var" '%s' ""
-    case "$_sjsi_raw" in *"\"$_sjsi_field\""*) ;; *) return 1 ;; esac
-    _sjsi_rest=${_sjsi_raw#*\"$_sjsi_field\"}
-    _sjsi_prefix=${_sjsi_rest%%\"*}
+    printf -v _sjsi_dq '\042'  # the double quote, as in _stdin_json_string
+    case "$_sjsi_raw" in *"$_sjsi_dq$_sjsi_field$_sjsi_dq"*) ;; *) return 1 ;; esac
+    _sjsi_rest=${_sjsi_raw#*"$_sjsi_dq"$_sjsi_field"$_sjsi_dq"}
+    _sjsi_prefix=${_sjsi_rest%%"$_sjsi_dq"*}
     case "$_sjsi_prefix" in *[!:[:space:]]*) return 1 ;; esac
-    _sjsi_value=${_sjsi_rest#*\"}
-    _sjsi_value=${_sjsi_value%%\"*}
+    _sjsi_value=${_sjsi_rest#*"$_sjsi_dq"}
+    _sjsi_value=${_sjsi_value%%"$_sjsi_dq"*}
     _sjsi_value=${_sjsi_value//\\\\/\\}  # decode `\\`, as above (#829)
     [ -n "$_sjsi_value" ] || return 1
     printf -v "$_sjsi_var" '%s' "$_sjsi_value"
@@ -918,7 +923,8 @@ _remember_write_case_divergence() {
 # not-sdk rather than scanned to the end.
 _ENTRYPOINT_SNIFF_CAP=50
 _transcript_is_pluginless_sdk() {
-    local f=$1 n=0 line ep rest prefix is_dialogue
+    local f=$1 n=0 line ep rest prefix is_dialogue dq
+    printf -v dq '\042'  # the double quote, as in _stdin_json_string
     while IFS= read -r line; do
         n=$((n + 1))
         is_dialogue=0
@@ -946,8 +952,8 @@ _transcript_is_pluginless_sdk() {
                 # every dialogue line, silently defeating
                 # _ENTRYPOINT_SNIFF_CAP for the overwhelmingly common case
                 # (ordinary transcripts are mostly dialogue).
-                rest=${line#*\"message\"}
-                prefix=${rest%%\"*}
+                rest=${line#*'"message"'}
+                prefix=${rest%%"$dq"*}
                 case "$prefix" in
                     *[!:[:space:]]*) is_dialogue=1 ;;
                 esac
@@ -1940,7 +1946,7 @@ if [ "$REMEMBER_ROOT" != "$PROJECT_DIR" ] || [ -n "$PER_SESSION_HANDOFF" ] || [ 
     echo "=== HANDOFF ==="
     echo "Write next handoff to: $REMEMBER_HANDOFF"
     if [ -n "$HANDOFF_MODE_DEGRADED" ]; then
-        echo "(handoff_mode is \"per_session\", but no session_id reached this hook -- writing to the shared file above, not a per-session one.)"
+        echo '(handoff_mode is "per_session", but no session_id reached this hook -- writing to the shared file above, not a per-session one.)'
     fi
     echo ""
 fi

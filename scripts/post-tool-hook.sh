@@ -207,19 +207,28 @@ fi
 # host checked, `tool_input` is positioned AFTER the top-level `cwd` field,
 # so this stays the safe nested-after case), not repeated here.
 _stdin_json_string() {
-    local field="$1" raw="$2" rest prefix value
-    case "$raw" in *"\"$field\""*) ;; *) return 1 ;; esac
-    rest=${raw#*\"$field\"}
-    prefix=${rest%%\"*}
+    local field="$1" raw="$2" rest prefix value dq
+    # The double quote is held in `dq` (octal 042) rather than written
+    # backslash-escaped: the plugin directory's scanner mis-tracks an
+    # escaped quote (#898 round 8). Same patterns, same quoting of $field.
+    printf -v dq '\042'
+    case "$raw" in *"$dq$field$dq"*) ;; *) return 1 ;; esac
+    rest=${raw#*"$dq"$field"$dq"}
+    prefix=${rest%%"$dq"*}
     case "$prefix" in *[!:[:space:]]*) return 1 ;; esac
-    value=${rest#*\"}
-    value=${value%%\"*}
+    value=${rest#*"$dq"}
+    value=${value%%"$dq"*}
     # A JSON encoder writes each backslash as `\\` -- a Windows `cwd` from
     # Codex arrives as `C:\\work\\proj` otherwise (#829).
     value=${value//\\\\/\\}
     [ -n "$value" ] || return 1
     printf '%s' "$value"
 }
+
+# The double quote, for the last-save.json scope check and the sanitiser
+# log line below -- held in a variable rather than backslash-escaped, the
+# same reason as dq in _stdin_json_string (#898 round 8).
+printf -v _pt_dq '\042'
 
 # ── The cwd the host handed us (#411, #444) ─────────────────────────────
 # resolve-paths.sh's REMEMBER_HOOK_CWD fallback (#411) only ever got a value
@@ -800,13 +809,13 @@ if [ -n "$SIDECAR" ] && [ -f "$SIDECAR" ]; then
                 fi
                 _SESSIONS_SCOPE=""
                 case "$_LAST_SAVE_CONTENT" in
-                    *\"sessions\"*)
-                        _SESSIONS_SCOPE="${_LAST_SAVE_CONTENT#*\"sessions\"}"
+                    *'"sessions"'*)
+                        _SESSIONS_SCOPE=${_LAST_SAVE_CONTENT#*'"sessions"'}
                         _SESSIONS_SCOPE="${_SESSIONS_SCOPE%%\}*}"
                         ;;
                 esac
                 case "$_SESSIONS_SCOPE" in
-                    *\"$SESSION_ID\":*)
+                    *"$_pt_dq"$SESSION_ID"$_pt_dq":*)
                         LAST_LINE=$((10#$_SIDECAR_LINE))
                         SIDECAR_TRUSTED=1
                         ;;
@@ -917,7 +926,7 @@ if [ "$DELTA" -gt "$DELTA_THRESHOLD" ] && [ "$IN_COOLDOWN" = false ]; then
     # as "no id given" and silently substitutes the newest .jsonl by mtime
     # (save-session.sh:273-275) rather than refusing, so the fork must be
     # skipped here rather than let that happen.
-    log "hook" "post-tool: transcript basename \"${TRANSCRIPT##*/}\" failed the session id sanitiser -- refusing to save rather than handing save-session.sh an empty id"
+    log "hook" "post-tool: transcript basename $_pt_dq${TRANSCRIPT##*/}$_pt_dq failed the session id sanitiser -- refusing to save rather than handing save-session.sh an empty id"
   else
     ALREADY_RUNNING=false
     if [ -f "$PID_FILE" ]; then

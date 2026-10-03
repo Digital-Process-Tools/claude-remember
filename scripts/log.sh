@@ -794,8 +794,14 @@ config_into() {
         # as missing. Testing the printed value against "null" cannot tell
         # JSON null from the string "null" -- `jq -r` prints both as the
         # same bare word.
-        _cfg_into_val=$(jq -r "if $_cfg_into_name == null then \"\" else ($_cfg_into_name | tostring) end" \
-            "$REMEMBER_CONFIG" 2>/dev/null)
+        # The program is built from a single-quoted printf format (#898
+        # round 8): the same text the double-quoted string used to splice,
+        # without the escaped quotes around its empty string, which the
+        # plugin directory's scanner mis-tracks. printf -v is a builtin.
+        local _cfg_into_prog
+        printf -v _cfg_into_prog 'if %s == null then "" else (%s | tostring) end' \
+            "$_cfg_into_name" "$_cfg_into_name"
+        _cfg_into_val=$(jq -r "$_cfg_into_prog" "$REMEMBER_CONFIG" 2>/dev/null)
     elif type _jq_fallback >/dev/null 2>&1; then
         # No jq -- detect-tools.sh already defined a Python-based fallback
         # for exactly this (bare-key `jq -r '.key' file` reads). Matching

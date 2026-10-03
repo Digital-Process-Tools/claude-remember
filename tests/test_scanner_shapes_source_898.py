@@ -74,3 +74,32 @@ def test_shipped_script_leaves_the_loop_counter_closed(path):
         "once the build inlines it into a hook, every later catch-all `*)` "
         "reads as inside a loop. Move multi-line programs out of quoted "
         "strings into their own files.")
+
+
+def _shape_hits(check_name: str, text: str) -> list:
+    mod = _load()
+    hits: list = []
+    files = {"scripts/x.sh": text.encode("utf-8")}
+    getattr(mod, check_name)(files, {"scripts/x.sh": "text"}, hits)
+    return hits
+
+
+SHAPE_CHECKS = {
+    # check function -> a line that carries the shape (positive control)
+    "_check_escaped_quote": 'echo "say \\"hi\\""\n',
+    "_check_slash_glob_case": 'case "$0" in */*) : ;; esac\n',
+}
+
+
+@pytest.mark.parametrize("check_name", sorted(SHAPE_CHECKS))
+def test_shape_check_fires_on_its_own_shape(check_name):
+    """Positive control for the per-file assertions below: the harness
+    reaches the check and the check fires."""
+    assert _shape_hits(check_name, SHAPE_CHECKS[check_name])
+
+
+@pytest.mark.parametrize("check_name", sorted(SHAPE_CHECKS))
+@pytest.mark.parametrize("path", SHIPPED_SH, ids=lambda p: p.name)
+def test_shipped_script_carries_no_sweep_shape(path, check_name):
+    hits = _shape_hits(check_name, path.read_text(encoding="utf-8"))
+    assert not hits, f"{path.name}: {hits}"

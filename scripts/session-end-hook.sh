@@ -165,13 +165,17 @@ source "$_HOOK_DIR/lib-clock.sh"
 # field is researched in the UserPromptSubmit hook, next to its own
 # `_stdin_cwd` -- same extractor mechanism, same finding, not repeated here.
 _stdin_json_string() {
-    local field="$1" raw="$2" rest prefix value
-    case "$raw" in *"\"$field\""*) ;; *) return 1 ;; esac
-    rest=${raw#*\"$field\"}
-    prefix=${rest%%\"*}
+    local field="$1" raw="$2" rest prefix value dq
+    # The double quote is held in `dq` (octal 042) rather than written
+    # backslash-escaped: the plugin directory's scanner mis-tracks an
+    # escaped quote (#898 round 8). Same patterns, same quoting of $field.
+    printf -v dq '\042'
+    case "$raw" in *"$dq$field$dq"*) ;; *) return 1 ;; esac
+    rest=${raw#*"$dq"$field"$dq"}
+    prefix=${rest%%"$dq"*}
     case "$prefix" in *[!:[:space:]]*) return 1 ;; esac
-    value=${rest#*\"}
-    value=${value%%\"*}
+    value=${rest#*"$dq"}
+    value=${value%%"$dq"*}
     # A JSON encoder writes each backslash as `\\` -- a Windows `cwd` from
     # Codex arrives as `C:\\work\\proj` otherwise (#829).
     value=${value//\\\\/\\}

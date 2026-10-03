@@ -256,13 +256,14 @@ fi
 # acquire a JSON parser for a hook that must survive a broken install is
 # unchanged by this finding.
 _stdin_cwd() {
-    local raw="$1" rest prefix value
+    local raw="$1" rest prefix value dq
+    printf -v dq '\042'  # the double quote, held in a variable (#898 round 8)
     case "$raw" in *'"cwd"'*) ;; *) return 1 ;; esac
-    rest=${raw#*\"cwd\"}
-    prefix=${rest%%\"*}
+    rest=${raw#*'"cwd"'}
+    prefix=${rest%%"$dq"*}
     case "$prefix" in *[!:[:space:]]*) return 1 ;; esac
-    value=${rest#*\"}
-    value=${value%%\"*}
+    value=${rest#*"$dq"}
+    value=${value%%"$dq"*}
     # A JSON encoder writes each backslash as `\\` -- a Windows `cwd` from
     # Codex arrives as `C:\\work\\proj` otherwise (#829).
     value=${value//\\\\/\\}
@@ -283,13 +284,14 @@ _stdin_cwd() {
 # function this hook can safely delegate to a sourced library it might fail
 # to load -- see _stdin_cwd's own comment above).
 _stdin_cwd_into() {
-    local _var="$1" raw="$2" rest prefix value
+    local _var="$1" raw="$2" rest prefix value dq
+    printf -v dq '\042'  # the double quote, held in a variable (#898 round 8)
     case "$raw" in *'"cwd"'*) ;; *) return 1 ;; esac
-    rest=${raw#*\"cwd\"}
-    prefix=${rest%%\"*}
+    rest=${raw#*'"cwd"'}
+    prefix=${rest%%"$dq"*}
     case "$prefix" in *[!:[:space:]]*) return 1 ;; esac
-    value=${rest#*\"}
-    value=${value%%\"*}
+    value=${rest#*"$dq"}
+    value=${value%%"$dq"*}
     value=${value//\\\\/\\}  # decode `\\`, as in _stdin_cwd (#829)
     [ -n "$value" ] || return 1
     printf -v "$_var" '%s' "$value"
