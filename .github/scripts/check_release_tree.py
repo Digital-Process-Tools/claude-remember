@@ -196,12 +196,15 @@ _NETWORK_CMD_POS_SCRIPT = re.compile(
 
 RELEASE_README_VAR = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*")
 
-# #898 round 2: a scheme literal ("https://"/"http://") read as a URL host even
-# inside shell parameter-expansion syntax (`${url#https://}`). Four plugin.json
-# listing fields and promos.json's own star-ask/promo URLs are the only places
-# the directory requires or expects a real URL at all; everywhere else in the
-# shipped tree, code that needs to strip or match a scheme should use a
-# wildcard (`${url#*://}`), never the literal string.
+# #898 round 2: a scheme literal read as a URL host even inside shell
+# parameter-expansion syntax (a shell strip of the literal "h-t-t-p-s-:-/-/"
+# prefix, not just a bare URL). Four plugin.json listing fields and
+# promos.json's own star-ask/promo URLs are the only places the directory
+# requires or expects a real URL at all; everywhere else in the shipped
+# tree, code that needs to strip or match a scheme should use a wildcard
+# (parameter-expansion `*` followed by a colon and two slashes), never the
+# literal scheme string -- including in a comment that merely explains this
+# rule, which is why this comment avoids spelling either scheme out loud.
 SCHEME_LITERAL = re.compile(r"https?://")
 SCHEME_ALLOWLIST = frozenset({
     ".claude-plugin/plugin.json",

@@ -15,8 +15,8 @@ is typed in, and nothing is read from your operating system's credential storage
 Memory is stored locally under your project by default, and nothing is pushed
 anywhere unless you opt into git backup yourself.
 
-If your host does not hand hooks that login, set an optional recovery token through
-the plugin's own Configure option in your coding agent's plugin settings.
+If your coding agent does not hand hooks that login, set an optional recovery token
+through the plugin's own Configure option in your coding agent's plugin settings.
 
 The full README, including the install guide, the complete trust model, and every
 configuration key, lives on this project's default branch.

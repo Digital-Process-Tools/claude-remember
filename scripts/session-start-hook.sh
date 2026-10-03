@@ -1792,10 +1792,10 @@ if [ "$_promos_enabled" = "true" ] \
                     ;;
             esac
 
-            # Strip any scheme (`*://`, not the literal strings "https://"/
-            # "http://") so this code carries no scheme literal at all --
-            # the directory's scanner read `${url#https://}` itself as a URL
-            # host (#898 round 2).
+            # Strip any scheme with a wildcard match, never a literal scheme
+            # string -- the directory's scanner read a literal scheme prefix
+            # in this same parameter-expansion position as a URL host
+            # (#898 round 2).
             url_display="${url#*://}"
             # The off switch travels WITH the message (#631). It was
             # already documented in README.md, docs/configuration.md and

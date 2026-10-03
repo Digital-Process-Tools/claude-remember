@@ -16,7 +16,7 @@
     "oauth_token": {
       "type": "string",
       "title": "Recovery OAuth token",
-      "description": "Optional. Only needed if the nested `claude -p` summarizer call runs unauthenticated because your host does not give hook subprocesses your Claude Code login (see /remember:doctor). Leave blank to keep using your host's own login -- nothing is read from it without this.",
+      "description": "Optional. Only needed if the nested `claude -p` summarizer call runs unauthenticated because your coding agent does not give hook subprocesses your Claude Code login (see /remember:doctor). Leave blank to keep using that login -- nothing is read from it without this.",
       "sensitive": true
     }
   }
