@@ -568,7 +568,7 @@ def _make_path_probe(plugin_dir: str, script_name: str) -> str:
     if not os.path.exists(log_stub):
         with open(log_stub, "w") as f:
             f.write('#!/bin/bash\nlog() { :; }\nlog_tokens() { :; }\n'
-                    'safe_eval() { :; }\nconfig() { echo "$2"; }\n'
+                    'assign_kv() { :; }\nconfig() { echo "$2"; }\n'
                     'dispatch() { :; }\nrotate_logs() { :; }\n'
                     'REMEMBER_TZ="UTC"\n')
 
@@ -1434,7 +1434,7 @@ class TestWindowsCompatIssue11:
             ["bash", "-c",
              f'export PROJECT_DIR="{REPO_ROOT}" PIPELINE_DIR="{REPO_ROOT}" REMEMBER_DIR="{REPO_ROOT}/.remember-test"; '
              f'source "{REPO_ROOT}/scripts/detect-tools.sh"; source "{REPO_ROOT}/scripts/log.sh"; '
-             'safe_eval <<< "FOO=bar"; echo "FOO=$FOO"'],
+             'assign_kv <<< "FOO=bar"; echo "FOO=$FOO"'],
             capture_output=True, text=True,
         )
         assert "FOO=bar" in result.stdout
@@ -1445,7 +1445,7 @@ class TestWindowsCompatIssue11:
             ["bash", "-c",
              f'export PROJECT_DIR="{REPO_ROOT}" PIPELINE_DIR="{REPO_ROOT}" REMEMBER_DIR="{REPO_ROOT}/.remember-test"; '
              f'source "{REPO_ROOT}/scripts/detect-tools.sh"; source "{REPO_ROOT}/scripts/log.sh"; '
-             'safe_eval < <(printf "FOO=bar\\r\\n"); '
+             'assign_kv < <(printf "FOO=bar\\r\\n"); '
              'echo -n "$FOO" | xxd | grep -q "0d" && echo "CORRUPTED" || echo "CLEAN"'],
             capture_output=True, text=True,
         )
@@ -1459,7 +1459,7 @@ class TestWindowsCompatIssue11:
             ["bash", "-c",
              f'export PROJECT_DIR="{REPO_ROOT}" PIPELINE_DIR="{REPO_ROOT}" REMEMBER_DIR="{REPO_ROOT}/.remember-test"; '
              f'source "{REPO_ROOT}/scripts/detect-tools.sh"; source "{REPO_ROOT}/scripts/log.sh"; '
-             'safe_eval < <(printf "NUM=42\\r\\n"); '
+             'assign_kv < <(printf "NUM=42\\r\\n"); '
              'echo "RESULT=$((NUM + 1))"'],
             capture_output=True, text=True,
         )

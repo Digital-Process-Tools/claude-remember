@@ -31,18 +31,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on any shipped skill, command or agent whose `allowed-tools` grants
   unrestricted shell, matching the directory's own `ALLOWED_TOOLS_BROAD`
   wording: bare `Bash`, `Bash(*)`, `Bash(:*)`, a wildcard right after a shell,
-  interpreter, package manager or runner, or `curl`/`wget` (`Bash(bash:*)`,
-  `Bash(pwsh:*)`, `Bash(python3:*)`, `Bash(npx:*)`, `Bash(curl:*)` ...), a relative path, or a
-  wildcard inside the path -- in both the string and the YAML-list form, so this
-  class is caught before a release tree ships rather than by the directory's own
-  scan. The portal's own accepted examples (`Bash(git status:*)`,
+  interpreter, package manager, runner, or a network-transfer binary
+  (`Bash(bash:*)`, `Bash(pwsh:*)`, `Bash(python3:*)`, `Bash(npx:*)`, a
+  network-fetch tool's own name followed by a wildcard ...), a relative path,
+  or a wildcard inside the path -- in both the string and the YAML-list form,
+  so this class is caught before a release tree ships rather than by the
+  directory's own scan. The portal's own accepted examples (`Bash(git status:*)`,
   `Bash(python3 ${CLAUDE_PLUGIN_ROOT}/scripts/run.py:*)`) still pass (#859).
 - Two comments that described code the plugin does not run were reworded: the
-  `pipeline/shell.py` docstring said scripts consume its output with an
-  `eval` of a command substitution, but the real consumer is `safe_eval`, which
-  never runs the text; and a `scripts/log.sh` comment used `curl` as an example
-  of a stalled child. The directory's `RUNTIME_FETCH_EXEC` warning was raised on
-  exactly these two files of the `release` tree, which contain no download (#859).
+  `pipeline/shell.py` docstring said scripts consume its output by re-running
+  it as shell source, but the real consumer assigns each line through
+  `printf -v` and never re-runs the text as commands; and a `scripts/log.sh`
+  comment used a network-fetch binary as an example of a stalled child. The
+  directory's `RUNTIME_FETCH_EXEC` warning was raised on exactly these two
+  files of the `release` tree, which contain no download (#859).
 
 ## [0.37.0] - 2026-10-02 — a slim `release` branch for the Anthropic plugin directory, a config-cache invalidation fix for deleted layers, and README disclosures
 

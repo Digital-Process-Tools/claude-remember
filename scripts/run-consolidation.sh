@@ -18,7 +18,7 @@
 #
 # DEPENDENCIES
 #   python3, claude CLI (Haiku)
-#   Sources: log.sh (logging, safe_eval, rotate_logs)
+#   Sources: log.sh (logging, assign_kv, rotate_logs)
 #   Python: pipeline.shell (consolidate)
 #
 # EXIT CODES
@@ -187,8 +187,8 @@ RESULT=$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell consolidate "$STAGING_D
     exit 1
 }
 
-# eval sets: STAGING_COUNT, CONSOLIDATION_STATUS, RECENT_OUT, ARCHIVE_OUT, TK_IN/OUT/CACHE/COST, STAGING_PATHS_FILE
-safe_eval <<< "$RESULT"
+# assign_kv sets: STAGING_COUNT, CONSOLIDATION_STATUS, RECENT_OUT, ARCHIVE_OUT, TK_IN/OUT/CACHE/COST, STAGING_PATHS_FILE
+assign_kv <<< "$RESULT"
 
 if [ "${STAGING_COUNT:-0}" -eq 0 ]; then
     log "consolidation" "no staging files"; exit 0

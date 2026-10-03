@@ -78,7 +78,7 @@ def _run_safe_eval(tmp_path: Path, payload: str,
     source {LIB_SCRIPT} >/dev/null 2>&1
     source {LOG_SH} >/dev/null 2>&1
     EXTRACT_FILE=""; POSITION=""; HUMAN_COUNT=""; lower_key=""
-    safe_eval < '{payload_file}'
+    assign_kv < '{payload_file}'
     printf 'EXTRACT_FILE=[%s]\\n' "$EXTRACT_FILE"
     printf 'POSITION=[%s]\\n' "$POSITION"
     printf 'HUMAN_COUNT=[%s]\\n' "$HUMAN_COUNT"
