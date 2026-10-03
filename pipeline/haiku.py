@@ -602,19 +602,49 @@ def _config_candidates() -> list[str]:
     return candidates
 
 
+# plugin.json declares an optional `oauth_token` userConfig entry
+# (`sensitive: true`). Claude Code exports every userConfig option to a hook's
+# subprocess as CLAUDE_PLUGIN_OPTION_<KEY> (uppercased), sensitive values
+# included -- see the Claude Code plugin manifest reference, "Reference a
+# saved value" / "Fields that run through a shell". This is now the preferred
+# source for the recovery token, ahead of REMEMBER_OAUTH_TOKEN / the
+# haiku.oauth_token config key (#860): those two keep working for anyone who
+# already set them, but are deprecated, and _configured_oauth_token() logs a
+# loud deprecation line every time either one is actually used, so the
+# migration is not silent and /remember:doctor has something to point at.
+USER_CONFIG_OAUTH_TOKEN_ENV = "CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN"
+
+
 def _configured_oauth_token() -> str | None:
     """Operator-configured OAuth token for the nested CLI, or ``None``.
 
-    Precedence: the ``REMEMBER_OAUTH_TOKEN`` env var, then a
+    Precedence: the plugin's ``oauth_token`` userConfig option
+    (``CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN``, see the module comment above),
+    then -- deprecated, kept only so existing installs don't silently lose
+    their recovery token -- the ``REMEMBER_OAUTH_TOKEN`` env var, then a
     ``haiku.oauth_token`` key in the first config file that declares one (see
     ``_config_candidates``). Best-effort: any missing file, read error, or
-    malformed JSON yields ``None`` and never raises — but a value that is
+    malformed JSON yields ``None`` and never raises -- but a value that is
     present and unusable is logged rather than dropped silently.
     """
+    option_token = os.environ.get(USER_CONFIG_OAUTH_TOKEN_ENV, "").strip()
+    if option_token:
+        token = _accept_token(option_token, USER_CONFIG_OAUTH_TOKEN_ENV)
+        if token:
+            return token
+
     env_token = os.environ.get("REMEMBER_OAUTH_TOKEN", "").strip()
     if env_token:
         token = _accept_token(env_token, "REMEMBER_OAUTH_TOKEN")
         if token:
+            _warn(
+                "DEPRECATED: REMEMBER_OAUTH_TOKEN is still read as a fallback "
+                "but will be removed in a future release -- configure the "
+                "recovery token through the plugin's userConfig option "
+                "instead (/plugin -> remember -> Configure, or "
+                "`claude plugin config set remember oauth_token <token>`); "
+                "see #860"
+            )
             return token
 
     for path in _config_candidates():
@@ -630,6 +660,14 @@ def _configured_oauth_token() -> str | None:
             continue
         token = _accept_token(haiku_cfg["oauth_token"], f"haiku.oauth_token in {path}")
         if token:
+            _warn(
+                f"DEPRECATED: haiku.oauth_token in {path} is still read as a "
+                "fallback but will be removed in a future release -- "
+                "configure the recovery token through the plugin's "
+                "userConfig option instead (/plugin -> remember -> "
+                "Configure, or `claude plugin config set remember "
+                "oauth_token <token>`); see #860"
+            )
             return token
     return None
 

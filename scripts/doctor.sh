@@ -1022,6 +1022,42 @@ else
 fi
 unset _remember_ss_glob_dir _SS_LATEST_LOG _SS_LAST_LINE _ss_f
 
+# ── 6c. Deprecated recovery-token config (#860) ─────────────────────────────
+# pipeline/haiku.py now prefers the plugin's own `oauth_token` userConfig
+# option (CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN) over REMEMBER_OAUTH_TOKEN /
+# haiku.oauth_token, and logs a "DEPRECATED:" line to the daily log every
+# time either legacy path is actually used to authenticate the nested
+# `claude -p`. That line is useless if nobody but the log file ever sees it
+# -- this surfaces the most recent one here, same pattern as the summarizer
+# failure detail above (sorted scan across every daily log, last match wins).
+echo "-- Deprecated recovery-token config (#860) --"
+_remember_dep_glob_dir=$(_remember_forward_slash "$REMEMBER_DIR")
+_DEP_LINE=""
+_DEP_FILES=("$_remember_dep_glob_dir"/logs/memory-*.log)
+if [ -e "${_DEP_FILES[0]}" ]; then
+    _DEP_OLD_IFS="$IFS"
+    IFS=$'\n'
+    _DEP_SORTED=($(printf '%s\n' "${_DEP_FILES[@]}" | LC_ALL=C sort))
+    IFS="$_DEP_OLD_IFS"
+    unset _DEP_OLD_IFS
+    for _dep_f in "${_DEP_SORTED[@]}"; do
+        _dep_match=$(grep -F "DEPRECATED:" "$_dep_f" 2>/dev/null | tail -n 1)
+        [ -n "$_dep_match" ] && _DEP_LINE="$_dep_match"
+    done
+    unset _DEP_SORTED
+fi
+unset _DEP_FILES
+if [ -n "$_DEP_LINE" ]; then
+    echo "WARN $_DEP_LINE"
+    echo "     Configure the recovery token through the plugin's userConfig"
+    echo "     option instead (/plugin -> remember -> Configure, or"
+    echo "     \`claude plugin config set remember oauth_token <token>\`)."
+else
+    echo "OK   No deprecated recovery-token config in use"
+fi
+unset _remember_dep_glob_dir _DEP_LINE _dep_f
+echo ""
+
 # Log rotation (#252). A rotation that cannot run is invisible by construction:
 # it happens inside a consolidation the user never watches, it writes one line
 # into the very directory it failed to tidy, and it never escalates on its own.

@@ -169,10 +169,13 @@ This plugin runs with your full shell privileges, like any other hook your codin
 - `codex exec` runs with `--sandbox read-only` (denies writes and network to the process Codex itself spawns — not a guarantee against a command the model asks Codex to run inside that sandbox), `--ignore-user-config` (skips the operator's own Codex hooks), and `-c shell_environment_policy.inherit=none` (a command Codex spawns internally gets no environment at all, not even `PATH`). Verified against codex-cli 0.150.1 / 0.153.2.
 - Either route sends only the extracted, filtered session transcript (the prompt built for that save) to that CLI's own configured provider — never to any other service.
 
-**Credentials** — nothing is read from OS credential storage; only what is already in the process environment or in `config.json`:
+**Credentials** — nothing is read from OS credential storage; only what is already in the process environment, in the plugin's own `userConfig` (Claude Code only), or in `config.json`:
 
-- `CLAUDE_CODE_OAUTH_TOKEN`, if already present in the environment, passes through unchanged to the nested `claude -p`.
-- If it is absent, `REMEMBER_OAUTH_TOKEN` (env) or `haiku.oauth_token` (`config.json`) — a token you deliberately configured — is injected as `CLAUDE_CODE_OAUTH_TOKEN` for that one call. The value itself is never logged, only its source and length.
+- `CLAUDE_CODE_OAUTH_TOKEN`, if already present in the environment, passes through unchanged to the nested `claude -p`. This is your host's own Claude Code credential, the same one your interactive session already authenticates with — the plugin never asks you to type it anywhere.
+- If it is absent (some hosts never place it in a hook subprocess's environment at all), a recovery token you deliberately configure is injected as `CLAUDE_CODE_OAUTH_TOKEN` for that one call. On Claude Code, configure it through `/plugin` → `remember` → Configure (or `claude plugin config set remember oauth_token <token>`): it is declared as a `sensitive: true` `userConfig` option in `plugin.json`, so Claude Code stores it in its own secure credential store, never in `settings.json`, and the plugin never reads it from an environment variable it did not itself declare.
+  - Codex and other hosts have no `userConfig` mechanism, so this recovery path there is still the `REMEMBER_OAUTH_TOKEN` env var or `haiku.oauth_token` (`config.json`) — unchanged.
+  - On Claude Code, those two remain supported for anyone already using them, but are **deprecated**: using either one now logs a `DEPRECATED` warning to the daily log and to `/remember:doctor`'s output, pointing at the `userConfig` option above. Nothing stops working; nothing is removed silently.
+  - The value itself is never logged, only its source and length.
 - `ANTHROPIC_API_KEY` is passed through to `claude -p` unless `haiku.anthropic_api_key` is `"strip"` (or, under the default `"auto"`, a `claude.ai` login is visible on disk) — the strip exists because this key outranks a login and otherwise bills every summarizer call to it without warning.
 - `CODEX_API_KEY` is passed through to `codex exec`'s own process when present, so Codex can authenticate.
 
