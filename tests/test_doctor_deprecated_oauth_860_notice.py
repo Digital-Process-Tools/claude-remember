@@ -1,13 +1,13 @@
-"""#860: /remember:doctor must surface a deprecated-credential-path notice.
+"""#860 (round 2): /remember:doctor must surface the legacy-config notice.
 
-pipeline/haiku.py now logs a "DEPRECATED:" line to the daily log every time
-the legacy REMEMBER_OAUTH_TOKEN env var or the haiku.oauth_token config.json
-key is actually used to authenticate the nested `claude -p` -- the plugin's
-own userConfig `oauth_token` option is the preferred path now (see
-plugin.json, pipeline/haiku.py's _configured_oauth_token()). This pins that
-doctor.sh surfaces that line rather than only logging it where nobody looks,
-and the positive/negative-control pair that makes the check meaningful: a
-healthy install with no deprecated usage must NOT show the notice.
+pipeline/haiku.py no longer reads REMEMBER_OAUTH_TOKEN or haiku.oauth_token
+at all -- the plugin's own userConfig `oauth_token` option is the only
+recovery-token source. A still-configured legacy value is detected by
+PRESENCE ONLY (never its content) and logged as a "NOTICE:" line to the
+daily log every time a save runs; this pins that doctor.sh surfaces that
+line rather than only logging it where nobody looks, and the
+positive/negative-control pair that makes the check meaningful: a healthy
+install with no legacy config must NOT show the notice.
 """
 
 from __future__ import annotations
@@ -40,24 +40,24 @@ def _healthy_baseline(tmp_path):
     return home, project, remember, session_dir
 
 
-def test_positive_control_no_deprecated_usage_shows_no_notice(tmp_path):
-    """Must-not-fire twin: a healthy install that never used the deprecated
-    fallback must not be told it did."""
+def test_positive_control_no_legacy_config_shows_no_notice(tmp_path):
+    """Must-not-fire twin: a healthy install that never configured a legacy
+    recovery token must not be told it did."""
     home, project, remember, _session_dir = _healthy_baseline(tmp_path)
 
     result = _run(home, project, remember)
 
     assert result.returncode == 0, result.stderr
-    assert "DEPRECATED" not in result.stdout
+    assert "NOTICE" not in result.stdout
 
 
-def test_no_log_at_all_is_distinguished_from_logs_with_no_deprecated_line(tmp_path):
-    """Review finding (auditor): the new section must not collapse "no daily
-    log exists yet" (fresh install, or logging unwritable) and "logs exist,
-    were genuinely scanned, and no DEPRECATED line was ever written" into the
-    same "OK" sentence -- the sibling SessionStart-duration section three
-    blocks above already keeps these two cases apart for exactly this reason,
-    and the new section must follow the same convention."""
+def test_no_log_at_all_is_distinguished_from_logs_with_no_notice_line(tmp_path):
+    """Review finding (auditor, round 1): the new section must not collapse
+    "no daily log exists yet" (fresh install, or logging unwritable) and
+    "logs exist, were genuinely scanned, and no NOTICE line was ever
+    written" into the same "OK" sentence -- the sibling SessionStart-duration
+    section three blocks above already keeps these two cases apart for
+    exactly this reason, and this section must follow the same convention."""
     home, project, remember, _session_dir = _healthy_baseline(tmp_path)
     no_log_result = _run(home, project, remember)
 
@@ -66,7 +66,7 @@ def test_no_log_at_all_is_distinguished_from_logs_with_no_deprecated_line(tmp_pa
     shutil.copytree(remember, remember2)
     (remember2 / "logs").mkdir(parents=True, exist_ok=True)
     (remember2 / "logs" / "memory-2026-10-03.log").write_text(
-        "09:00:00 [haiku] everything fine, nothing deprecated here\n",
+        "09:00:00 [haiku] everything fine, nothing to notice here\n",
         encoding="utf-8",
     )
     clean_log_result = _run(home, project, remember2)
@@ -87,29 +87,28 @@ def test_no_log_at_all_is_distinguished_from_logs_with_no_deprecated_line(tmp_pa
     )
 
 
-def test_deprecated_remember_oauth_token_usage_is_surfaced(tmp_path):
-    """Must-fire: once pipeline/haiku.py has logged a DEPRECATED line for
-    REMEMBER_OAUTH_TOKEN, doctor.sh must surface it rather than leave it
-    buried in a daily log nobody reads."""
+def test_legacy_remember_oauth_token_notice_is_surfaced(tmp_path):
+    """Must-fire: once pipeline/haiku.py has logged a NOTICE line for a
+    still-configured REMEMBER_OAUTH_TOKEN, doctor.sh must surface it rather
+    than leave it buried in a daily log nobody reads."""
     home, project, remember, _session_dir = _healthy_baseline(tmp_path)
     logs = remember / "logs"
     logs.mkdir(parents=True, exist_ok=True)
     (logs / "memory-2026-10-03.log").write_text(
-        "09:15:02 [haiku] DEPRECATED: REMEMBER_OAUTH_TOKEN is still read as "
-        "a fallback but will be removed in a future release -- configure "
-        "the recovery token through the plugin's userConfig option "
-        "instead; see #860\n",
+        "09:15:02 [haiku] NOTICE: REMEMBER_OAUTH_TOKEN is set but is no "
+        "longer read (#860) -- configure the recovery token through the "
+        "plugin's userConfig option instead\n",
         encoding="utf-8",
     )
 
     result = _run(home, project, remember)
 
     assert result.returncode == 0, result.stderr
-    assert "DEPRECATED" in result.stdout and "REMEMBER_OAUTH_TOKEN" in result.stdout, (
-        "a logged deprecation line did not reach doctor.sh's output:\n"
+    assert "NOTICE" in result.stdout and "REMEMBER_OAUTH_TOKEN" in result.stdout, (
+        "a logged legacy-config notice did not reach doctor.sh's output:\n"
         + result.stdout
     )
     assert "userConfig" in result.stdout, (
         "the doctor notice must point at the replacement, not just name "
-        "what is deprecated:\n" + result.stdout
+        "what is no longer read:\n" + result.stdout
     )

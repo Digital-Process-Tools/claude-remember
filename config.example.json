@@ -66,15 +66,13 @@
       "quiet). Remove the key entirely to keep those defaults."
     ],
     "haiku.oauth_token": [
-      "OAuth token the plugin hands to the nested `claude -p` ONLY when the host",
-      "did not put CLAUDE_CODE_OAUTH_TOKEN in the hook subprocess environment.",
-      "Some desktop / Agent-SDK hosts withhold it from spawned children, so the",
-      "summarization call is unauthenticated and nothing ever saves (#129/#131).",
-      "Create one with `claude setup-token`. The plugin holds this credential and",
-      "passes it to the CLI — set it deliberately. A host-provided token always",
-      "wins; the REMEMBER_OAUTH_TOKEN env var overrides this. Blank = disabled.",
-      "A malformed value (whitespace, under 20 chars, not a string) is refused",
-      "and reported in the daily log — it is never passed to the CLI."
+      "REMOVED as an authentication source (#860, round 2): no longer read for",
+      "the nested `claude -p` call, on any host. Configure the recovery token",
+      "through the plugin's own userConfig option instead (/plugin -> remember",
+      "-> Configure, or `claude plugin config set remember oauth_token <token>`)",
+      "on Claude Code. Left blank here on purpose -- this key, and the",
+      "REMEMBER_OAUTH_TOKEN env var, are checked for PRESENCE ONLY now, to warn",
+      "loudly (by name, never by value) if either is still set from before."
     ],
     "consolidate_max_bytes": [
       "Skip-guard cap (UTF-8 bytes) on the assembled consolidation prompt",

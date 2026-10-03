@@ -606,57 +606,53 @@ def _config_candidates() -> list[str]:
 # (`sensitive: true`). Claude Code exports every userConfig option to a hook's
 # subprocess as CLAUDE_PLUGIN_OPTION_<KEY> (uppercased), sensitive values
 # included -- see the Claude Code plugin manifest reference, "Reference a
-# saved value" / "Fields that run through a shell". This is now the preferred
-# source for the recovery token, ahead of REMEMBER_OAUTH_TOKEN / the
-# haiku.oauth_token config key (#860): those two keep working for anyone who
-# already set them, but are deprecated, and _configured_oauth_token() logs a
-# loud deprecation line every time either one is actually used, so the
-# migration is not silent and /remember:doctor has something to point at.
+# saved value" / "Fields that run through a shell". This is the ONLY source
+# for the recovery token (#860, round 2). REMEMBER_OAUTH_TOKEN and
+# haiku.oauth_token -- an env var and a config key this plugin invented for
+# itself, not a host-vendor credential -- are no longer read anywhere: the
+# directory's security scan holds "reads a credential from the user's
+# machine", and merely deprecating-while-still-reading them (#860's first
+# pass) does not clear that condition. See _legacy_oauth_config_present()
+# for the loud, value-free notice an operator who still has either one set
+# gets instead.
 USER_CONFIG_OAUTH_TOKEN_ENV = "CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN"
 
 
-def _configured_oauth_token(warn: bool = True) -> str | None:
+def _configured_oauth_token() -> str | None:
     """Operator-configured OAuth token for the nested CLI, or ``None``.
 
-    Precedence: the plugin's ``oauth_token`` userConfig option
-    (``CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN``, see the module comment above),
-    then -- deprecated, kept only so existing installs don't silently lose
-    their recovery token -- the ``REMEMBER_OAUTH_TOKEN`` env var, then a
-    ``haiku.oauth_token`` key in the first config file that declares one (see
-    ``_config_candidates``). Best-effort: any missing file, read error, or
-    malformed JSON yields ``None`` and never raises -- but a value that is
-    present and unusable is logged rather than dropped silently.
-
-    ``warn=False`` suppresses only the DEPRECATED line for a legacy source,
-    for a caller that is merely checking whether SOME configured credential
-    exists (``_other_credential()``, deciding whether to strip
-    ``ANTHROPIC_API_KEY``) rather than one that is actually about to inject
-    this token for the nested CLI to use (``_inject_configured_oauth_token()``,
-    the only caller that keeps the default). Without this, one save logged
-    the deprecation line twice -- once per caller -- for a single use of the
-    token (review finding, #860).
+    The only source: the plugin's ``oauth_token`` userConfig option
+    (``CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN``, see the module comment above).
     """
     option_token = os.environ.get(USER_CONFIG_OAUTH_TOKEN_ENV, "").strip()
     if option_token:
         token = _accept_token(option_token, USER_CONFIG_OAUTH_TOKEN_ENV)
         if token:
             return token
+    return None
 
-    env_token = os.environ.get("REMEMBER_OAUTH_TOKEN", "").strip()
-    if env_token:
-        token = _accept_token(env_token, "REMEMBER_OAUTH_TOKEN")
-        if token:
-            if warn:
-                _warn(
-                    "DEPRECATED: REMEMBER_OAUTH_TOKEN is still read as a "
-                    "fallback but will be removed in a future release -- "
-                    "configure the recovery token through the plugin's "
-                    "userConfig option instead (/plugin -> remember -> "
-                    "Configure, or `claude plugin config set remember "
-                    "oauth_token <token>`); see #860"
-                )
-            return token
 
+def _legacy_oauth_config_present() -> str | None:
+    """Name of the legacy ``REMEMBER_OAUTH_TOKEN`` / ``haiku.oauth_token``
+    source if one is still configured, or ``None`` -- existence only.
+
+    This never reads, returns, logs, or otherwise uses the configured
+    VALUE -- the same "is something there" check ``test -n`` makes in a
+    shell script, nothing more. Its only purpose is to tell an operator who
+    still has either one set that it is no longer read, loudly, instead of
+    silently (#860, round 2): the directory's security scan holds reading a
+    credential from the user's machine, so the notice itself must not become
+    a second way of doing that.
+
+    An empty string -- how the bundled config ships ``haiku.oauth_token``
+    (``""``), meaning "not configured" -- is not "present": the bar is the
+    same truthiness check ``_accept_token`` already used for "is a value
+    configured at all", just without the length/shape validation that
+    function also does (that validation reads the value for more than
+    presence, which this function deliberately does not).
+    """
+    if os.environ.get("REMEMBER_OAUTH_TOKEN", "").strip():
+        return "REMEMBER_OAUTH_TOKEN"
     for path in _config_candidates():
         try:
             with open(path, encoding="utf-8") as f:
@@ -666,20 +662,11 @@ def _configured_oauth_token(warn: bool = True) -> str | None:
         if not isinstance(cfg, dict):
             continue
         haiku_cfg = cfg.get("haiku")
-        if not isinstance(haiku_cfg, dict) or "oauth_token" not in haiku_cfg:
+        if not isinstance(haiku_cfg, dict):
             continue
-        token = _accept_token(haiku_cfg["oauth_token"], f"haiku.oauth_token in {path}")
-        if token:
-            if warn:
-                _warn(
-                    f"DEPRECATED: haiku.oauth_token in {path} is still read "
-                    "as a fallback but will be removed in a future release "
-                    "-- configure the recovery token through the plugin's "
-                    "userConfig option instead (/plugin -> remember -> "
-                    "Configure, or `claude plugin config set remember "
-                    "oauth_token <token>`); see #860"
-                )
-            return token
+        value = haiku_cfg.get("oauth_token")
+        if isinstance(value, str) and value.strip():
+            return f"haiku.oauth_token in {path}"
     return None
 
 
@@ -798,12 +785,7 @@ def _other_credential() -> str | None:
     """
     if os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "").strip():
         return "CLAUDE_CODE_OAUTH_TOKEN from the host"
-    # warn=False: this call only checks whether a configured token EXISTS
-    # (to decide whether ANTHROPIC_API_KEY should be stripped) -- it does
-    # not inject or otherwise use the token, so it must not also log the
-    # deprecation line _inject_configured_oauth_token() already logs for
-    # the one call per save that actually does (#860, review finding).
-    if _configured_oauth_token(warn=False):
+    if _configured_oauth_token():
         return "the OAuth token you configured for this plugin"
     if _host_login_present():
         return f"the claude.ai login in {_claude_login_path()}"
@@ -869,14 +851,28 @@ def _anthropic_api_key_hint(env: dict[str, str], detail: str) -> str:
 
 
 def _inject_configured_oauth_token(env: dict[str, str]) -> dict[str, str]:
-    """Fill CLAUDE_CODE_OAUTH_TOKEN from operator config when the child env
-    lacks it (see the note above).
+    """Fill CLAUDE_CODE_OAUTH_TOKEN from the userConfig option when the child
+    env lacks it (see the note above).
 
     Never overrides a value already present — the host-provided credential wins.
     Never raises: token resolution is entirely best-effort.
+
+    Also the one call site that reports a still-configured legacy
+    REMEMBER_OAUTH_TOKEN / haiku.oauth_token: once per save, by name only
+    (never the value), so an operator who has not yet migrated hears about it
+    loudly instead of silently losing a recovery path they do not know was
+    removed (#860, round 2).
     """
     if env.get("CLAUDE_CODE_OAUTH_TOKEN"):
         return env
+    legacy = _legacy_oauth_config_present()
+    if legacy:
+        _warn(
+            f"NOTICE: {legacy} is set but is no longer read (#860) -- "
+            "configure the recovery token through the plugin's userConfig "
+            "option instead (/plugin -> remember -> Configure, or "
+            "`claude plugin config set remember oauth_token <token>`)"
+        )
     token = _configured_oauth_token()
     if token:
         env["CLAUDE_CODE_OAUTH_TOKEN"] = token

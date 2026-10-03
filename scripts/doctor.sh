@@ -1022,15 +1022,16 @@ else
 fi
 unset _remember_ss_glob_dir _SS_LATEST_LOG _SS_LAST_LINE _ss_f
 
-# ── 6c. Deprecated recovery-token config (#860) ─────────────────────────────
-# pipeline/haiku.py now prefers the plugin's own `oauth_token` userConfig
-# option (CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN) over REMEMBER_OAUTH_TOKEN /
-# haiku.oauth_token, and logs a "DEPRECATED:" line to the daily log every
-# time either legacy path is actually used to authenticate the nested
-# `claude -p`. That line is useless if nobody but the log file ever sees it
-# -- this surfaces the most recent one here, same pattern as the summarizer
-# failure detail above (sorted scan across every daily log, last match wins).
-echo "-- Deprecated recovery-token config (#860) --"
+# ── 6c. Legacy recovery-token config, no longer read (#860) ────────────────
+# pipeline/haiku.py no longer reads REMEMBER_OAUTH_TOKEN or haiku.oauth_token
+# at all -- the plugin's own `oauth_token` userConfig option
+# (CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN) is the only recovery-token source now.
+# A still-configured legacy value is detected by PRESENCE ONLY and logged as
+# a "NOTICE:" line to the daily log every time a save runs -- this surfaces
+# the most recent one here, same pattern as the summarizer failure detail
+# above (sorted scan across every daily log, last match wins), so an
+# operator who has not migrated is not left silently unauthenticated.
+echo "-- Legacy recovery-token config (#860) --"
 _remember_dep_glob_dir=$(_remember_forward_slash "$REMEMBER_DIR")
 _DEP_LINE=""
 _DEP_ANY_LOG=0
@@ -1043,7 +1044,7 @@ if [ -e "${_DEP_FILES[0]}" ]; then
     IFS="$_DEP_OLD_IFS"
     unset _DEP_OLD_IFS
     for _dep_f in "${_DEP_SORTED[@]}"; do
-        _dep_match=$(grep -F "DEPRECATED:" "$_dep_f" 2>/dev/null | tail -n 1)
+        _dep_match=$(grep -F "NOTICE:" "$_dep_f" 2>/dev/null | tail -n 1)
         [ -n "$_dep_match" ] && _DEP_LINE="$_dep_match"
     done
     unset _DEP_SORTED
@@ -1055,9 +1056,9 @@ if [ -n "$_DEP_LINE" ]; then
     echo "     option instead (/plugin -> remember -> Configure, or"
     echo "     \`claude plugin config set remember oauth_token <token>\`)."
 elif [ "$_DEP_ANY_LOG" = 1 ]; then
-    echo "OK   No deprecated recovery-token config in use"
+    echo "OK   No legacy recovery-token config in use"
 else
-    echo "--   No daily log found yet -- nothing scanned for deprecated recovery-token config"
+    echo "--   No daily log found yet -- nothing scanned for legacy recovery-token config"
 fi
 unset _remember_dep_glob_dir _DEP_LINE _DEP_ANY_LOG _dep_f
 echo ""
