@@ -116,6 +116,53 @@ would need `export-ignore`). Then:
 
 From v0.36.0 that gives 73 files and 1.3 MB, down from 474 files and 9.2 MB.
 
+### The four hooks are compiled, not just copied (#900)
+
+The directory's release-preview validator inspects only the **command** a `hooks/hooks.json`
+entry names; it never follows a `source`/`.` statement out of that command into a second file.
+Every one of this plugin's four hooks.json-registered scripts (`session-start-hook.sh`,
+`session-end-hook.sh`, `user-prompt-hook.sh`, `post-tool-hook.sh`) sources shared library code
+that way on `main`, so the validator held all four as COMMAND_SCRIPT_NOT_FOLLOWED
+(`claude-jit-context`'s own write-up, linked below).
+
+`build_release_tree.py` fixes this by calling
+[`compile_hooks.py`](../.github/scripts/compile_hooks.py) on exactly these four scripts before
+writing the release tree:
+
+- every file in a hook's own `source`/`.` chain is **inlined, recursively**, in place of the
+  statement that named it;
+- each file is inlined **at most once per hook** (include-guard semantics) -- a repeat of an
+  already-inlined path has its source line simply dropped. This matches the runtime guard most of
+  the shared libraries already carry (`[ -n "${X_LOADED:-}" ] && return 0`): re-sourcing one of
+  them today is already a no-op past the first time, so not re-embedding it changes nothing a
+  hook actually does;
+- comment-only lines (the whole line, after leading whitespace, starts with `#`) are then
+  **stripped**, to fit the directory's 256 KiB per-file budget. A shebang (only ever the file's
+  own first line), a heredoc body, and anything inside an open single- or double-quoted string are
+  never touched -- `compile_hooks.strip_whole_line_comments` tracks quote and heredoc state across
+  the whole file for exactly that reason, not line by line.
+
+**The library files themselves are untouched and still ship** -- other scripts
+(`save-session.sh`, `doctor.sh`, `run-consolidation.sh`, ...) still `source` them normally, in
+both the source tree and the release tree; they are not hooks.json-registered, so the directory's
+validator never inspects them. Only the four hooks' own shipped bytes change.
+
+**Measured sizes** (session-start-hook.sh is the largest, since it has the deepest source
+chain): raw transitive closure before any inlining is well over the 256 KiB budget on its own,
+but comment lines make up roughly 60-70% of these files by line count, so the compiled,
+comment-stripped result lands at about 151 KiB for session-start-hook.sh and well under 90 KiB
+for the other three -- comfortably under budget, with headroom before the next library addition
+would need re-measuring. `check_release_tree.py`'s `_check_hook_still_sources` FAILs the build if
+a compiled hook still carries a `source`/`.` line pointing at another file -- the compile step not
+running, or not fully resolving, is a release-blocking error rather than a silent miss.
+
+`compile_hooks.py` is also a standalone CLI for local use: `python3
+.github/scripts/compile_hooks.py --repo .` prints each hook's compiled size without writing
+anything; add `--apply` to overwrite the four scripts in place on a disposable checkout (CI uses
+exactly this to run the whole test suite against the compiled hooks, in
+`.github/workflows/tests.yml`'s `hook-tests-compiled` job, on all three OSes) -- never run
+`--apply` against your own working tree.
+
 ## What the Anthropic directory actually measured
 
 [`claude-jit-context`'s own write-up](https://github.com/Digital-Process-Tools/claude-jit-context/blob/main/docs/directory-validator.md)
