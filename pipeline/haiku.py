@@ -679,9 +679,8 @@ def _host_login_present() -> bool:
 def _configured_anthropic_key_policy() -> str:
     """`haiku.anthropic_api_key` from config: ``auto``, ``keep`` or ``strip``.
 
-    A value nothing recognises falls back to ``auto`` and is reported -- the
-    same rule ``_accept_token`` follows, and for the same reason: a typo'd
-    policy that silently graded as one of the two behaviours would be
+    A value nothing recognises falls back to ``auto`` and is reported: a
+    typo'd policy that silently graded as one of the two behaviours would be
     indistinguishable from never having configured one, on a key whose whole
     purpose is to overrule what this module inferred.
     """
