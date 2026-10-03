@@ -107,21 +107,28 @@ Expected in the daily log (`$REMEMBER_DIR/logs/`, written via
 `pipeline/log.py`; falls back to stderr only when `REMEMBER_DIR` is unset):
 
 ```
-WARNING: ignoring CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN — not a plausible OAuth
-token (want a whitespace-free string of at least 20 chars); the nested CLI
-will run unauthenticated unless the host provides a token of its own
+WARNING: ignoring the plugin's userConfig oauth_token option — not a
+plausible OAuth token (want a whitespace-free string of at least 20
+chars); the nested CLI will run unauthenticated unless the host provides a
+token of its own
 ```
 
 Check specifically:
 
-- the warning names its **source** (`CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN`),
+- the warning names the **setting** (the plugin's userConfig option),
+  written as a hardcoded literal rather than interpolated from any
+  identifier -- round 1 of this message named it by interpolating the env
+  var's own name (`CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN`), and a second CodeQL
+  round flagged that too: a value flowing from a constant whose own
+  identifier contains "TOKEN" is treated as sensitive regardless of what
+  it actually is (#860, round 3),
 - an earlier version of this message also reported the configured value's
   **length** (e.g. "got 9 chars") -- CodeQL flagged that as a HIGH "clear
-  -text logging of sensitive information" alert (#860): a length is still a
-  value DERIVED from the secret, and the taint tracker follows that
-  derivation to the log sink regardless of how little survives. The message
-  now carries no value-derived content at all, only the fixed constant text
-  above and the setting's name,
+  -text logging of sensitive information" alert (#860, round 1 of the
+  fix): a length is still a value DERIVED from the secret, and the taint
+  tracker follows that derivation to the log sink regardless of how little
+  survives. The message now carries no value-derived content at all, and
+  no identifier-derived content either -- only fixed, hand-written text,
 - the configured value itself never appears anywhere in the log line
   (`_accept_token` in `pipeline/haiku.py` — see
   [#184](https://github.com/Digital-Process-Tools/claude-remember/issues/184),

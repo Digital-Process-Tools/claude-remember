@@ -704,9 +704,12 @@ def test_malformed_userconfig_token_warning_never_logs_the_value(mock_run, monke
         '"at least 20 chars" above is fine, since it is not derived from '
         "anything the operator configured:\n" + logged
     )
-    assert "CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN" in logged, (
-        "positive control: the warning must still name the setting, just not "
-        "anything derived from its value:\n" + logged
+    assert "userConfig oauth_token option" in logged, (
+        "positive control: the warning must still name the setting (as a "
+        "hardcoded literal naming the userConfig option, not by "
+        "interpolating the env var's own name -- CodeQL's second round "
+        "flagged that too, #860 round 3), just not anything derived from "
+        "its value:\n" + logged
     )
 
 
