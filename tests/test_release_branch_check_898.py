@@ -59,25 +59,38 @@ def _check(root: Path):
 def test_a_clean_tree_passes_with_no_offenders_or_reviews_from_the_new_guards(tmp_path):
     result = _check(_tree(tmp_path, {}))
     assert result.offenders == []
-    assert not any("<<" in r or "URL host" in r or "network command" in r
+    assert not any("URL host" in r or "network command" in r
                    or "MCP_FORWARDS_CREDENTIAL_ENV" in r or "VAR" in r
                    for r in result.reviews)
 
 
-# -- typed heredoc (REVIEW, not FAIL -- see _check_typed_heredoc's own docstring) --
+# -- typed heredoc (FAIL, not REVIEW -- #900: a maintainer validation of the
+# combined fix/898 round 3 + #900 round 1 tree CONFIRMED this as blocking, so
+# _check_typed_heredoc moved from reviews to offenders; see that function's
+# own updated docstring) --
 
-def test_a_typed_heredoc_in_a_shipped_script_is_reviewed(tmp_path):
+def test_a_typed_heredoc_in_a_shipped_script_fails(tmp_path):
     root = _tree(tmp_path, {"scripts/run.sh": b"#!/bin/sh\ncat << EOF\nhi\nEOF\n"})
-    reviews = _check(root).reviews
-    assert any("run.sh" in r and ("<" "<") in r for r in reviews), reviews
+    offenders = _check(root).offenders
+    assert any("run.sh" in o and ("<" "<") in o for o in offenders), offenders
 
 
 def test_a_here_string_is_not_a_typed_heredoc(tmp_path):
     """Positive control: `<<<` (a here-string) must not trip the same guard --
     the directory did not flag it in jit-context's own measurement."""
     root = _tree(tmp_path, {"scripts/run.sh": b"#!/bin/sh\ncat <<< hi\n"})
-    reviews = _check(root).reviews
-    assert not any("run.sh" in r and ("<" "<") in r for r in reviews), reviews
+    offenders = _check(root).offenders
+    assert not any("run.sh" in o and ("<" "<") in o for o in offenders), offenders
+
+
+def test_an_arithmetic_left_shift_is_not_a_typed_heredoc(tmp_path):
+    """Positive control, #900: `$(( x << 4 ))` is the arithmetic left-shift
+    operator, not a here-document -- the portal has never flagged this shape,
+    and masking it out (_mask_arithmetic) is what keeps this guard from
+    reading every bitshift in a shipped script as UNPINNED_NPX."""
+    root = _tree(tmp_path, {"scripts/run.sh": b"#!/bin/sh\nx=$(( 1 << 4 ))\necho \"$x\"\n"})
+    offenders = _check(root).offenders
+    assert not any("run.sh" in o and ("<" "<") in o for o in offenders), offenders
 
 
 # -- URL host in a comment of a shipped script (FAIL) ----------------------------

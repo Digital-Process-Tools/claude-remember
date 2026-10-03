@@ -380,6 +380,201 @@ def test_compiled_hook_behaves_identically_to_the_sourced_one(tmp_path):
     ]
 
 
+# -- tree-shaking (#900 round 2): drop a function the hook never reaches --
+#
+# review of the combined tree (fix/898 round 3 + this lane's round 1) found
+# that inlining a library whole, with none of its functions dropped, ships
+# code the hook's own control flow never reaches -- exactly the "perl code"
+# shape jit-context's own compile_scripts.py was held for (#461) before it
+# added tree-shaking. compile_hooks.tree_shake is modelled on that function:
+# a function is dropped only when its own name never appears as a bare word
+# anywhere outside a function definition, or inside an already-kept
+# function's body, transitively.
+
+def test_tree_shake_drops_an_unreached_function_and_keeps_a_reached_one():
+    # Positive AND negative control in one fixture, per the issue's own
+    # ask: 'used' is called from root code and must survive; 'unused' is
+    # never called from anywhere and must be dropped.
+    text = (
+        "#!/bin/sh\n"
+        "used() {\n"
+        "    echo used\n"
+        "}\n"
+        "unused() {\n"
+        "    echo unused\n"
+        "}\n"
+        "used\n"
+    )
+    out, report = compile_hooks.tree_shake(text)
+    assert report["shaken"] is True
+    assert report["kept"] == ["used"]
+    assert report["dropped"] == ["unused"]
+    assert "unused" not in out
+    assert "used" in out
+
+
+def test_tree_shake_keeps_a_function_reached_only_transitively():
+    text = (
+        "#!/bin/sh\n"
+        "a() {\n"
+        "    b\n"
+        "}\n"
+        "b() {\n"
+        "    echo b\n"
+        "}\n"
+        "c() {\n"
+        "    echo c\n"
+        "}\n"
+        "a\n"
+    )
+    out, report = compile_hooks.tree_shake(text)
+    assert set(report["kept"]) == {"a", "b"}
+    assert report["dropped"] == ["c"]
+    assert "echo c" not in out
+    assert "echo b" in out
+
+
+def test_tree_shake_keeps_everything_when_dispatch_is_dynamic():
+    # A call through a lowercase/mixed-case variable (`"$FN"`) names a
+    # target this textual analysis cannot resolve -- nothing may be
+    # dropped, and the report must say why rather than silently shaking
+    # anyway.
+    text = (
+        '#!/bin/sh\n'
+        'real_fn() {\n'
+        "    echo real\n"
+        "}\n"
+        'fn="real_fn"\n'
+        '"$fn"\n'
+    )
+    out, report = compile_hooks.tree_shake(text)
+    assert report["shaken"] is False
+    assert report["dynamic_dispatch"] is True
+    assert report["dropped"] == []
+    assert "real_fn" in out
+
+
+def test_tree_shake_an_all_caps_variable_call_is_not_dynamic_dispatch():
+    # $PYTHON/$JQ-shaped calls (this repo's own external-tool convention)
+    # must not themselves trigger the conservative bail -- otherwise
+    # nothing in any real hook here could ever be shaken (all four call
+    # $PYTHON this way).
+    text = (
+        "#!/bin/sh\n"
+        "unused() {\n"
+        "    echo unused\n"
+        "}\n"
+        '"${PYTHON:-python3}" -c "pass"\n'
+    )
+    _out, report = compile_hooks.tree_shake(text)
+    assert report["dynamic_dispatch"] is False
+    assert report["shaken"] is True
+    assert report["dropped"] == ["unused"]
+
+
+def test_tree_shake_correctly_finds_a_functions_end_despite_a_nested_brace_group():
+    # The exact risk this module's own inliner introduces: a gated source
+    # statement's `{ ...; }` wrapper can land INSIDE a function body (this
+    # repo's own session-start-hook.sh lazily sources lib-lock.sh/
+    # lib-case-divergence.sh from inside a function). A naive "the next
+    # bare '}' line ends the function" scan would stop at the nested
+    # group's own close; depth-tracking must not.
+    text = (
+        "#!/bin/sh\n"
+        "outer() {\n"
+        '    COND=1\n'
+        '    if [ "$COND" = 1 ]; then\n'
+        "        : || {\n"
+        "            echo nested\n"
+        "        }\n"
+        "    fi\n"
+        "}\n"
+        "unused_fn() {\n"
+        "    echo unused\n"
+        "}\n"
+        "outer\n"
+    )
+    out, report = compile_hooks.tree_shake(text)
+    assert report["shaken"] is True
+    assert report["dropped"] == ["unused_fn"]
+    assert "echo nested" in out
+    assert "fi" in out
+
+
+def test_tree_shake_handles_the_param_expansion_hash_correctly():
+    # `${raw#*"$key"}` has a literal '#' that is pattern-removal syntax,
+    # not a comment -- treating it as one stops the brace-balance scan
+    # before this line's own closing '}', which is exactly the false
+    # "unbalanced braces" alarm this repo's own compiled
+    # scripts/session-end-hook.sh produced during this module's own
+    # development (line 79, `rest=${raw#*\"$key\"}`) before the fix.
+    text = (
+        "#!/bin/sh\n"
+        "used() {\n"
+        '    rest=${raw#*\\"$key\\"}\n'
+        "    echo \"$rest\"\n"
+        "}\n"
+        "unused() {\n"
+        "    echo unused\n"
+        "}\n"
+        "used\n"
+    )
+    _out, report = compile_hooks.tree_shake(text)
+    assert report["shaken"] is True
+    assert report["dropped"] == ["unused"]
+
+
+def test_tree_shake_does_not_mistake_a_mid_line_string_continuation_for_code():
+    # A multi-line double-quoted string whose continuation line happens to
+    # start, after masking, with something `$`-shaped must never be read
+    # as a command -- the exact false positive this module's own
+    # development hit against scripts/user-prompt-hook.sh:386
+    # (a bare `$_notice_body"` continuation line inside a help/log string).
+    text = (
+        "#!/bin/sh\n"
+        "used() {\n"
+        '    msg="line one\n'
+        "  $_candidate: on PATH ($(command -v \"$_first\" 2>/dev/null))\n"
+        '"\n'
+        "    echo \"$msg\"\n"
+        "}\n"
+        "unused() {\n"
+        "    echo unused\n"
+        "}\n"
+        "used\n"
+    )
+    _out, report = compile_hooks.tree_shake(text)
+    assert report["dynamic_dispatch"] is False
+    assert report["shaken"] is True
+    assert report["dropped"] == ["unused"]
+
+
+def test_tree_shake_refuses_to_guess_on_unbalanced_braces():
+    text = "#!/bin/sh\nfoo() {\n    echo unbalanced\n"
+    out, report = compile_hooks.tree_shake(text)
+    assert report["shaken"] is False
+    assert "unbalanced" in report["reason"]
+    assert out == text
+
+
+@pytest.mark.parametrize("hook_name", compile_hooks.HOOK_SCRIPT_NAMES)
+def test_real_hook_tree_shaking_drops_at_least_one_function_and_stays_valid(hook_name):
+    # Real-repo positive control for the issue's own ask: each of the four
+    # actual compiled hooks must genuinely shrink (at least one function
+    # dropped) and must still be syntactically valid bash afterward.
+    key = f"scripts/{hook_name}"
+    contents = _sh_texts()
+    if key not in contents:
+        pytest.skip(f"{key} not present in this checkout")
+    text, report = compile_hooks.compile_hook_report(key, contents)
+    assert report["shaken"] is True, (
+        f"{hook_name}: tree-shaking did not run: {report['reason'] or report}"
+    )
+    assert len(report["dropped"]) >= 1, f"{hook_name}: no function was dropped"
+    result = subprocess.run([_bash(), "-n"], input=text, capture_output=True, text=True, check=False)
+    assert result.returncode == 0, f"{hook_name}: shaken output fails bash -n:\n{result.stderr}"
+
+
 # -- real-repo regression: the actual four hooks compile cleanly -----------
 
 def _sh_texts() -> dict:

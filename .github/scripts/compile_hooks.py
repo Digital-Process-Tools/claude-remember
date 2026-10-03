@@ -500,12 +500,428 @@ def inline_sources(name: str, contents: dict[str, str], script_dir: str = "scrip
     return "\n".join(out_lines)
 
 
+_FUNC_START_RE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)\(\) \{[ \t]*$')
+_IDENT_RE = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')
+# A command position (start of line, or right after a real shell separator)
+# occupied by nothing but a bare or quoted variable expansion whose NAME is
+# not all-uppercase. All-caps names (PYTHON, JQ, PIPELINE_DIR, ...) are this
+# codebase's own convention for an external tool or config value, never one
+# of its own snake_case/leading-underscore functions, so a call through one
+# of those cannot resolve to a function this analysis is shaking -- keeping
+# it out of the dynamic-dispatch trigger is what lets tree-shaking do
+# anything at all against real files, all four of which call $PYTHON/$JQ
+# this way. Matched only against a MASKED line (quotes and comments already
+# blanked out by _scan_line_braces) -- a raw per-line regex match caught a
+# continuation line INSIDE a multi-line double-quoted string
+# (user-prompt-hook.sh:386, `$_notice_body"`) as if it were code, which
+# this masking exists specifically to rule out.
+_DYNAMIC_CALL_RE = re.compile(
+    r'(?:^|[;&|(]|\bthen\b|\bdo\b|\belse\b)\s*'
+    r'"?\$\{?([a-z_][A-Za-z0-9_]*)(?::-[^}]*)?\}?"?(?=\s|$)'
+)
+
+
+def _command_substitution_end(line, i):
+    """If line[i:i+2] is '$(' (not '$((', arithmetic expansion), the index
+    just past its MATCHING ')' on this same physical line, tracking the
+    substitution's own LOCAL quote state independently of whatever quote
+    the substitution itself sits inside -- `$(...)` establishes its own
+    nested lexical scope in real bash, so a '\"' inside it (e.g.
+    `$(command -v "$_first" 2>/dev/null)`, embedded in an OUTER
+    double-quoted string) must never toggle the outer string's own quote
+    state. Treating every '\"' uniformly, with no notion of this nested
+    scope, is exactly what produced a false "this text is code, not still
+    inside the outer string" read during this module's own testing
+    (scripts/user-prompt-hook.sh:386's `$_notice_body\"` continuation
+    line). Returns None if there is no '$(' here, or if the matching ')'
+    is not found on this same line (a command substitution spanning
+    multiple physical lines is not resolved by this helper -- the caller
+    falls back to its ordinary per-character handling for that rare case,
+    which does not miscount braces either way since '(' and ')' are not
+    counted by this module's own brace-delta tracking)."""
+    n = len(line)
+    if line[i:i + 2] != "$(" or line[i:i + 3] == "$((":
+        return None
+    j = i + 2
+    depth = 1
+    sq = dq = False
+    while j < n:
+        c = line[j]
+        if sq:
+            if c == "'":
+                sq = False
+            j += 1
+            continue
+        if dq:
+            if c == "\\" and j + 1 < n:
+                j += 2
+                continue
+            if c == '"':
+                dq = False
+            j += 1
+            continue
+        if c == "\\" and j + 1 < n:
+            j += 2
+            continue
+        if c == "'":
+            sq = True
+        elif c == '"':
+            dq = True
+        elif c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return j + 1
+        j += 1
+    return None
+
+
+def _scan_line_braces(line, in_squote, in_dquote, brace_stack):
+    """Like compile_hooks._scan_line, but also returns the net count of
+    unquoted '{' minus '}' characters on this line, and a MASKED copy of
+    the line (same length) with every quoted span and real trailing
+    comment replaced by spaces -- so a later scan for code-shaped patterns
+    (the dynamic-dispatch check) never mistakes the contents of a string or
+    comment for a command. BRACE_STACK is a list of bool, mutated in place
+    and threaded across lines exactly like IN_SQUOTE/IN_DQUOTE: True means
+    the innermost currently-open unquoted '{' is part of a '${' parameter
+    expansion, False means an ordinary block/group open.
+
+    That distinction is why '#' does not always start a comment: inside a
+    parameter expansion (`${raw#pattern}`, `${raw##pattern}`) '#' is a
+    pattern-removal OPERATOR, not a comment marker -- treating it as one
+    stops the scan before the expansion's own closing '}' (and anything
+    after it on the line, including a real quote), which is exactly the
+    shape that produced an "unbalanced braces" false alarm against this
+    repo's own scripts/session-end-hook.sh:79 (`rest=${raw#*\\"$key\\"}`)
+    during this module's own testing. A '#' while the innermost open
+    bracket is an ordinary block (`{ # comment`) is still a real comment,
+    so the stack records WHICH kind is open, not just whether one is."""
+    i, n = 0, len(line)
+    heredoc_term = None
+    heredoc_strip_tabs = False
+    delta = 0
+    masked = ["\x00"] * n
+    while i < n:
+        c = line[i]
+        if in_squote:
+            if c == "'":
+                in_squote = False
+            i += 1
+            continue
+        if in_dquote:
+            if c == "\\" and i + 1 < n:
+                masked[i] = c
+                masked[i + 1] = line[i + 1]
+                i += 2
+                continue
+            if c == '"':
+                in_dquote = False
+                masked[i] = c
+                i += 1
+                continue
+            if c == "$":
+                cmdsub_end = _command_substitution_end(line, i)
+                if cmdsub_end is not None:
+                    # $(...) is its own nested lexical scope -- skip it as
+                    # one opaque unit (masked, not revealed) so its OWN
+                    # internal quotes never toggle the OUTER string's
+                    # in_dquote state. See _command_substitution_end's own
+                    # docstring for the real false-positive this fixes.
+                    i = cmdsub_end
+                    continue
+                # Reveal a variable expansion even though it sits inside a
+                # double-quoted string: bash expands $VAR/${VAR} identically
+                # whether quoted or not, and a command-position check that
+                # could never see "$fn" would miss every quoted dynamic
+                # dispatch there is. Everything else inside the quote
+                # (literal string data) stays masked -- only the $-token
+                # itself is copied through.
+                j = i + 1
+                if j < n and line[j] == "{":
+                    # Depth-counted, not "find the first '}'": a
+                    # parameter expansion's own pattern can legally
+                    # nest another one (`${X%%"${path:0:1}"*}`), and
+                    # stopping at the FIRST '}' truncates mid-expansion
+                    # -- the exact bug that left in_dquote stuck True
+                    # for the rest of this repo's own
+                    # session-start-hook.sh (line 408's drive-letter
+                    # check) during this module's own testing. Quotes
+                    # inside this span are not separately tracked: the
+                    # whole '${...}' is skipped as one atomic unit, the
+                    # same treatment _command_substitution_end already
+                    # gives '$(...)'.
+                    depth = 1
+                    j += 1
+                    inner_start = j
+                    while j < n and depth > 0:
+                        if line[j] == "{":
+                            depth += 1
+                        elif line[j] == "}":
+                            depth -= 1
+                        j += 1
+                    inner = line[inner_start:j - 1]
+                    if inner and inner[0].isalpha() or inner.startswith("_"):
+                        is_plain_name = all(c == "_" or c.isalnum() for c in inner)
+                    else:
+                        is_plain_name = False
+                    if is_plain_name:
+                        # A PLAIN `${NAME}` (no `:-`/`:+`/`#`/`%`/`/`
+                        # modifier) is the only shape revealed -- a
+                        # literal "(" or ";" inside a modifier's own
+                        # alternate-value text
+                        # (`${X:+ (${Y} bytes)}`) is DATA, not a
+                        # separator, and revealing the whole span let
+                        # that literal "(" masquerade as a real command
+                        # boundary during this module's own testing
+                        # (session-start-hook.sh's handoff-size notice
+                        # message). Anything else stays masked.
+                        masked[i:j] = line[i:j]
+                else:
+                    while j < n and (line[j].isalnum() or line[j] == "_"):
+                        j += 1
+                    masked[i:j] = line[i:j]
+                i = j
+                continue
+            i += 1
+            continue
+        if c == "#":
+            if brace_stack and brace_stack[-1]:
+                masked[i] = c
+                i += 1
+                continue
+            break
+        if c == "'":
+            in_squote = True
+            masked[i] = c
+            i += 1
+            continue
+        if c == '"':
+            in_dquote = True
+            masked[i] = c
+            i += 1
+            continue
+        if c == "\\" and i + 1 < n:
+            masked[i] = c
+            masked[i + 1] = line[i + 1]
+            i += 2
+            continue
+        if heredoc_term is None and line[i:i + 2] == "<<":
+            j = i + 2
+            strip_tabs = False
+            if j < n and line[j] == "-":
+                strip_tabs = True
+                j += 1
+            while j < n and line[j] in " \t":
+                j += 1
+            quote_char = line[j] if j < n and line[j] in "'\"" else None
+            if quote_char:
+                j += 1
+            start = j
+            while j < n and (line[j].isalnum() or line[j] == "_"):
+                j += 1
+            ident = line[start:j]
+            if quote_char and j < n and line[j] == quote_char:
+                j += 1
+            if ident:
+                heredoc_term, heredoc_strip_tabs = ident, strip_tabs
+            masked[i:j] = line[i:j]
+            i = j
+            continue
+        if c == "$":
+            cmdsub_end = _command_substitution_end(line, i)
+            if cmdsub_end is not None:
+                # Same nested-scope reasoning as the in_dquote branch above
+                # -- a $(...) outside any quote still has its own internal
+                # quotes that must not leak into whatever comes after it.
+                masked[i:cmdsub_end] = line[i:cmdsub_end]
+                i = cmdsub_end
+                continue
+        masked[i] = c
+        if c == "{":
+            brace_stack.append(i > 0 and line[i - 1] == "$")
+            delta += 1
+            i += 1
+            continue
+        if c == "}":
+            if brace_stack:
+                brace_stack.pop()
+            delta -= 1
+            i += 1
+            continue
+        i += 1
+    masked_line = "".join(masked)
+    # A lone trailing backslash in CODE state (not inside any quote) means
+    # the LOGICAL statement continues onto the next physical line:
+    # `log "hook" \` / `    "$_legacy_dir" >&2` is one statement, and that
+    # second physical line is not a fresh statement boundary even though
+    # it is the literal start of its own line. tree_shake uses this to
+    # avoid reading a continuation line's own leading argument as "a bare
+    # quoted variable occupying command position" -- every multi-argument
+    # log/report call this repo's own real hooks wrap across lines did
+    # exactly that before this fix.
+    continuation = (not in_squote and not in_dquote and n > 0 and line[-1] == "\\")
+    return delta, heredoc_term, heredoc_strip_tabs, in_squote, in_dquote, masked_line, continuation
+
+
+def tree_shake(text):
+    """Drop every top-level `name() { ... }` function TEXT never reaches
+    from its own root-level code (outside any function), transitively
+    through kept functions' own bodies.
+
+    Reachability is textual and deliberately coarse, matching jit-context's
+    own compile_scripts.py::tree_shake: a function is kept the moment its
+    name appears as a bare identifier ANYWHERE outside a function
+    definition's start/end lines, or inside an already-kept function's
+    body -- including inside a string, a comment, or an assigned value
+    (`NAME="do_thing"` keeps do_thing). This over-keeps rather than
+    under-keeps, which is the safe direction for a change whose failure
+    mode is "the directory still can't follow this call", not "the file is
+    a little bigger than it needed to be".
+
+    A command position occupied by nothing but a lowercase/mixed-case
+    variable (_DYNAMIC_CALL_RE) names a target this analysis cannot see at
+    all -- the function it resolves to at runtime is not necessarily
+    spelled anywhere in the source. Finding one anywhere in TEXT means
+    shaking is not provably safe for this file: nothing is dropped, and the
+    report says so (dynamic_dispatch=True) rather than silently proceeding
+    as if the textual scan had seen everything a real interpreter would.
+
+    Returns (new_text, report) where report has keys: shaken (bool), kept
+    (sorted list of function names), dropped (sorted list), dynamic_dispatch
+    (bool), reason (str, only set when shaken is False)."""
+    lines = text.split("\n")
+    n = len(lines)
+    deltas = [0] * n
+    in_heredoc = [False] * n
+    masked_lines = [""] * n
+    heredoc_term = None
+    heredoc_strip_tabs = False
+    in_squote = in_dquote = False
+    brace_stack = []
+    pending_continuation = False
+    for i, line in enumerate(lines):
+        if heredoc_term is not None:
+            in_heredoc[i] = True
+            check = line.strip() if heredoc_strip_tabs else line
+            if check == heredoc_term:
+                heredoc_term = None
+            continue
+        entering_in_quote = in_squote or in_dquote
+        delta, heredoc_term, heredoc_strip_tabs, in_squote, in_dquote, masked, continuation = _scan_line_braces(
+            line, in_squote, in_dquote, brace_stack)
+        deltas[i] = delta
+        # Neither a backslash-continued line NOR a line that starts
+        # already inside a quote carried over from an earlier one (a
+        # double-quoted string containing a literal embedded newline --
+        # `case "\n${VAR}" in`, or a multi-line printf/echo message) is a
+        # fresh statement boundary, even though its revealed $-expansion
+        # can otherwise land at offset 0 of the masked text and look
+        # exactly like one. Prefixing one NUL byte makes either shape
+        # unmatchable by _DYNAMIC_CALL_RE's `^` alternative without
+        # disturbing any OTHER separator the line may still contain
+        # (';', '||', ...), and without shifting any other
+        # position-sensitive use of masked_lines (there is none -- it is
+        # read only by the dynamic-dispatch search below).
+        masked_lines[i] = ("\x00" + masked) if (pending_continuation or entering_in_quote) else masked
+        pending_continuation = continuation
+    if in_squote or in_dquote or heredoc_term is not None:
+        return text, {"shaken": False, "kept": [], "dropped": [],
+                       "dynamic_dispatch": False,
+                       "reason": "a quote or heredoc never closed by end of file"}
+
+    funcs = {}
+    depth = 0
+    stack = []
+    duplicate = None
+    for i, line in enumerate(lines):
+        if in_heredoc[i]:
+            continue
+        if depth == 0 and not stack:
+            m = _FUNC_START_RE.match(line)
+            if m:
+                stack.append((m.group(1), i, depth))
+        depth += deltas[i]
+        while stack and depth == stack[-1][2]:
+            name, start, _ = stack.pop()
+            if name in funcs:
+                duplicate = name
+            funcs[name] = (start, i)
+    if depth != 0 or stack:
+        return text, {"shaken": False, "kept": [], "dropped": [],
+                       "dynamic_dispatch": False,
+                       "reason": f"unbalanced braces by end of file (final depth {depth}) -- refusing to guess"}
+    if duplicate:
+        return text, {"shaken": False, "kept": [], "dropped": [],
+                       "dynamic_dispatch": False,
+                       "reason": f"duplicate top-level function name {duplicate!r}"}
+    if not funcs:
+        return text, {"shaken": True, "kept": [], "dropped": [],
+                       "dynamic_dispatch": False, "reason": ""}
+
+    in_func_line = set()
+    for s, e in funcs.values():
+        in_func_line.update(range(s, e + 1))
+
+    dynamic_dispatch = any(_DYNAMIC_CALL_RE.search(ml) for ml in masked_lines if ml)
+
+    if dynamic_dispatch:
+        return text, {"shaken": False, "kept": sorted(funcs), "dropped": [],
+                       "dynamic_dispatch": True,
+                       "reason": ("a command position occupied by a bare/quoted "
+                                  "lowercase variable was found -- its call target is "
+                                  "not provably resolvable from the source text, so "
+                                  "no function in this file can be proven unreachable")}
+
+    root_words = set()
+    for i, line in enumerate(lines):
+        if i not in in_func_line:
+            root_words.update(_IDENT_RE.findall(line))
+    keep = {name for name in funcs if name in root_words}
+    frontier = list(keep)
+    while frontier:
+        s, e = funcs[frontier.pop()]
+        body = "\n".join(lines[s + 1:e])
+        for word in set(_IDENT_RE.findall(body)):
+            if word in funcs and word not in keep:
+                keep.add(word)
+                frontier.append(word)
+    drop_lines = set()
+    for name, (s, e) in funcs.items():
+        if name not in keep:
+            drop_lines.update(range(s, e + 1))
+    new_text = "\n".join(line for i, line in enumerate(lines) if i not in drop_lines)
+    dropped = sorted(set(funcs) - keep)
+    return new_text, {"shaken": True, "kept": sorted(keep), "dropped": dropped,
+                       "dynamic_dispatch": False, "reason": ""}
+
+
 def compile_hook(name: str, contents: dict[str, str], script_dir: str = "scripts") -> str:
-    """The self-contained, comment-stripped text for hook NAME -- no
-    `source`/`.` statement pointing at another file should survive this
-    (check_release_tree.py's _check_hook_still_sources FAILs the release
-    build if one does)."""
-    return strip_whole_line_comments(inline_sources(name, contents, script_dir))
+    """The self-contained, comment-stripped, tree-shaken text for hook
+    NAME -- no `source`/`.` statement pointing at another file should
+    survive this (check_release_tree.py's _check_hook_still_sources FAILs
+    the release build if one does), and no function the hook itself never
+    reaches should either (a directory scan that holds a plugin for
+    something only an UNUSED inlined helper contains -- "perl code",
+    `jit-doctor.sh`'s own #461 finding -- is a hold the hook's own code
+    never earns). tree_shake's own report (which functions were dropped,
+    or why none were) is discarded here; compile_hook_report below returns
+    it for callers that want to log it."""
+    text = strip_whole_line_comments(inline_sources(name, contents, script_dir))
+    shaken, _report = tree_shake(text)
+    return shaken
+
+
+def compile_hook_report(name: str, contents: dict[str, str],
+                         script_dir: str = "scripts") -> tuple[str, dict]:
+    """Like compile_hook, but also returns tree_shake's own report dict
+    (shaken, kept, dropped, dynamic_dispatch, reason) -- for a caller that
+    wants to log how many functions were dropped per hook, or why shaking
+    was skipped for one."""
+    text = strip_whole_line_comments(inline_sources(name, contents, script_dir))
+    shaken, report = tree_shake(text)
+    return shaken, report
 
 
 # -- CLI (local dev use: see docs/releasing.md) ---------------------------
