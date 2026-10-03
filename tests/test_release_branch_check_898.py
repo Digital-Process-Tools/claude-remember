@@ -93,6 +93,22 @@ def test_an_arithmetic_left_shift_is_not_a_typed_heredoc(tmp_path):
     assert not any("run.sh" in o and ("<" "<") in o for o in offenders), offenders
 
 
+def test_a_typed_heredoc_mentioned_in_a_comment_does_not_fail(tmp_path):
+    """Positive control, #900 round 3: a `#`-comment that quotes `<<'PYEOF'`
+    in backticks to EXPLAIN a heredoc rewrite (fix/898's own convention, seen
+    at scripts/detect-tools.sh and scripts/lib-memory-dir.sh) is prose, not
+    code -- every sibling guard in this file already skips a comment line
+    the same way; this one must too."""
+    root = _tree(tmp_path, {
+        "scripts/run.sh": (b"#!/bin/sh\n"
+                           b"# #898: a quoted here-document (`<<'PYEOF'`) is read by the\n"
+                           b"# directory's scanner as a typed `<<` it cannot place.\n"
+                           b"cat <<< hi\n"),
+    })
+    offenders = _check(root).offenders
+    assert not any("run.sh" in o and ("<" "<") in o for o in offenders), offenders
+
+
 # -- URL host in a comment of a shipped script (FAIL) ----------------------------
 
 def test_a_url_host_in_a_script_comment_fails(tmp_path):
