@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.39.0] - 2026-10-03 — the recovery OAuth token moves to plugin.json userConfig, and a credential/eval changelog-leak cleanup
+## [0.39.0] - 2026-10-03 — the recovery OAuth token moves to plugin.json userConfig, and a credential-wording and changelog-safety cleanup
 
 ### Changed
 
