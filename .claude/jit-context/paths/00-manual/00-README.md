@@ -38,6 +38,54 @@ than an oversight.
   because the open question is a design decision (a genuinely CI-safe detection mechanism, or an
   accepted local-only gap), not a lesson a standing rule would teach anyone away from. **Filed as
   [#835](https://github.com/Digital-Process-Tools/claude-remember/issues/835) instead.**
+- **`827.changelog-cited-a-trap-fragment-curate-already-deleted`** -- declined 2026-10-03.
+  Duplicate of the existing rule `changelog-trap-citation-goes-stale.md` in this same layer, which
+  already cites this exact #827 incident. Already fixed: the release that folded
+  `changelog.d/827.fixed.md` (commit `a92a072`, "chore(release): 0.36.0") reworded the entry
+  before it ever reached `CHANGELOG.md` -- the live #827 entry in `CHANGELOG.md` today names no
+  `trap.d/` path at all. The fragment's own suggestion of a mechanical grep check is not acted on:
+  the existing rule already states explicitly that this is a naming-convention fix, not a tooling
+  gap to route around, and a second rule saying the same thing would only grow this layer for no
+  new lesson.
+- **`828.clones-badge-silent-schema-drift`** -- declined 2026-10-03. Still true at HEAD:
+  `.github/workflows/clones-badge.yml`'s merge step still reads `(.[1].clones // []) + .[0])` with
+  no check for whether the traffic/clones response actually carried a `clones` key, so a 200
+  response with an unexpected schema would silently add nothing to `history.json` with no error
+  anywhere. Declined as a rule because the fix (a loud, non-failing warning when `.[1] |
+  has("clones")` is false) is a single-workflow design call, not a generalizable lesson. **Filed
+  as [#877](https://github.com/Digital-Process-Tools/claude-remember/issues/877) instead.**
+- **`842.session-start-budget-exhausted-not-logged`** -- declined 2026-10-03. Still true at HEAD:
+  `_remember_apply_session_start_budget` (`scripts/lib-memory-context.sh`, ~lines 1341-1350) still
+  returns after its drop loop with no check of whether the budget was actually met and no log line
+  either way. Declined as a rule because the fix is a single-function comparison-and-log addition,
+  not a lesson a standing rule would teach anyone away from. **Filed as
+  [#878](https://github.com/Digital-Process-Tools/claude-remember/issues/878) instead.**
+- **`859.release-tree-preflight-spelling-gaps`** -- declined 2026-10-03. Partially stale: the
+  fragment's space-delimited `allowed-tools` case (`Read Bash`, no comma) is already fixed at HEAD
+  -- `_check_front_matter` (`.github/scripts/check_release_tree.py`) now tokenizes on whitespace as
+  well as commas (#866), confirmed by driving `_check_front_matter` directly against that exact
+  spelling. The remaining gaps are still true, confirmed the same way: a `..` path segment inside
+  a `Bash(${CLAUDE_PLUGIN_ROOT}/...)` grant, an unlisted `bash5` binary name, and nine wrapper
+  commands (`xargs`, `sudo`, `eval`, `exec`, `source`, `find`, `awk`, `nohup`, `timeout`) absent
+  from `_UNSCOPED_COMMANDS` all still pass the preflight silently. Declined as a rule because the
+  fix is the same kind of list/check extension #866 already made, not a new lesson. **Filed as
+  [#879](https://github.com/Digital-Process-Tools/claude-remember/issues/879), scoped to the
+  remaining gaps only.**
+- **`870.doctor-capture-is-working-arm-missing-144-guard`** -- declined 2026-10-03. Still true at
+  HEAD: `scripts/doctor.sh`'s "capture is working" verdict arm still lacks the
+  `{ [ -z "$_SESSION_DIR" ] || [ -d "$_SESSION_DIR" ]; }` guard the #870 arm immediately above it
+  already carries for the identical masking reason, confirmed by reading both arms. Declined as a
+  rule because the fix is copying one existing guard clause onto a sibling condition, not a new
+  lesson. **Filed as [#880](https://github.com/Digital-Process-Tools/claude-remember/issues/880)
+  instead.**
+- **`870.log-py-no-control-char-flattening`** -- declined 2026-10-03. Still true at HEAD:
+  `pipeline/log.py`'s `log()` still writes `message` with no control-character flattening, unlike
+  the shell-side `report_error()` / `_dispatch_report_skip()` (#599/#618), confirmed by reading
+  `log()` directly. Declined as a rule because the fix touches every caller of `log()` repo-wide in
+  one shape (sanitize inside `log()` itself), which is a single-function change, not a
+  generalizable lesson. **Filed as
+  [#881](https://github.com/Digital-Process-Tools/claude-remember/issues/881) instead.**
+
 - **`524.readme-call-site-count-stale`** — declined as a rule 2026-09-05, **filed as
   [#580](https://github.com/Digital-Process-Tools/claude-remember/issues/580) instead**.
   `docs/windows.md:16` claims 10 `_remember_forward_slash` call sites; the live `grep` count was 12
