@@ -58,7 +58,7 @@
 # leaves the filename behind, not a directory; `dirname` answered "." and
 # this must too.
 _HOOK_DIR="${BASH_SOURCE[0]%/*}"
-[ "$_HOOK_DIR" = "${BASH_SOURCE[0]}" ] && _HOOK_DIR="."
+[ "$_HOOK_DIR" = "${BASH_SOURCE[0]}" ] && _HOOK_DIR="$PWD"
 
 # --- Nested summarizer: there is no project here (#204) ---
 # The same fast-path guard post-tool-hook.sh, user-prompt-hook.sh and
@@ -1792,8 +1792,11 @@ if [ "$_promos_enabled" = "true" ] \
                     ;;
             esac
 
-            url_display="${url#https://}"
-            url_display="${url_display#http://}"
+            # Strip any scheme (`*://`, not the literal strings "https://"/
+            # "http://") so this code carries no scheme literal at all --
+            # the directory's scanner read `${url#https://}` itself as a URL
+            # host (#898 round 2).
+            url_display="${url#*://}"
             # The off switch travels WITH the message (#631). It was
             # already documented in README.md, docs/configuration.md and
             # docs/hooks.md -- none of which a user reads at the moment a

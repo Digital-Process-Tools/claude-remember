@@ -45,7 +45,7 @@
 # ============================================================================
 
 _HOOK_DIR="${BASH_SOURCE[0]%/*}"
-[ "$_HOOK_DIR" = "${BASH_SOURCE[0]}" ] && _HOOK_DIR="."
+[ "$_HOOK_DIR" = "${BASH_SOURCE[0]}" ] && _HOOK_DIR="$PWD"
 
 # --- Nested summarizer: there is no project here (#204) ---
 # Normally this guard lives in resolve-paths.sh, which the fast path below does

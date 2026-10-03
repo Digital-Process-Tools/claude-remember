@@ -310,6 +310,6 @@ fi
 # with no slash in it (`source detect-tools.sh` from the scripts dir) leaves the
 # filename behind, not a directory; `dirname` answered "." and this must too.
 _REMEMBER_SRC_DIR="${BASH_SOURCE[0]%/*}"
-[ "$_REMEMBER_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_SRC_DIR="."
+[ "$_REMEMBER_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_SRC_DIR="$PWD"
 source "$_REMEMBER_SRC_DIR/lib-slug.sh"
 unset _REMEMBER_SRC_DIR

@@ -196,6 +196,62 @@ _NETWORK_CMD_POS_SCRIPT = re.compile(
 
 RELEASE_README_VAR = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*")
 
+# #898 round 2: a scheme literal ("https://"/"http://") read as a URL host even
+# inside shell parameter-expansion syntax (`${url#https://}`). Four plugin.json
+# listing fields and promos.json's own star-ask/promo URLs are the only places
+# the directory requires or expects a real URL at all; everywhere else in the
+# shipped tree, code that needs to strip or match a scheme should use a
+# wildcard (`${url#*://}`), never the literal string.
+SCHEME_LITERAL = re.compile(r"https?://")
+SCHEME_ALLOWLIST = frozenset({
+    ".claude-plugin/plugin.json",
+    ".codex-plugin/plugin.json",
+    "promos.json",
+})
+
+# #898 round 2: a standalone network-command word (including "host", which is
+# on the directory's own list -- the `host` DNS lookup tool) anywhere in a
+# shipped file, outside an allowlist of files where the word is this plugin's
+# own architecture vocabulary rather than a network tool: `pipeline/` names
+# its own per-coding-agent abstraction `Host` (Claude Code / Codex / Gemini /
+# Antigravity), and the git-backup/git-restore machinery's own prose
+# legitimately describes real `git fetch` calls and a real `GIT_SSH_COMMAND`.
+# Renaming either across its ~280 shipped occurrences was judged out of
+# proportion for this guard to force by itself -- see the lane's own report.
+# A NEW file outside this allowlist still has to earn its way onto it.
+NETWORK_WORDS_EXTENDED = NETWORK_COMMAND_NAMES + ("nc", "telnet", "scp", "rsync")
+_NETWORK_WORD_STANDALONE = re.compile(
+    r"\b(" + "|".join(NETWORK_WORDS_EXTENDED) + r")\b", re.IGNORECASE
+)
+NETWORK_WORD_ALLOWLIST = frozenset({
+    "pipeline/__init__.py", "pipeline/__main__.py", "pipeline/_tz.py",
+    "pipeline/consolidate.py", "pipeline/entry_header.py", "pipeline/extract.py",
+    "pipeline/haiku.py", "pipeline/host.py", "pipeline/log.py", "pipeline/prompts.py",
+    "pipeline/shell.py", "pipeline/slug.py", "pipeline/spawn_guard.py", "pipeline/types.py",
+    "scripts/agy-session-start-hook.sh", "scripts/agy-stop-hook.sh",
+    "scripts/detect-tools.sh", "scripts/doctor.sh", "scripts/install_agy_hooks.py",
+    "scripts/lib-env-cache.sh", "scripts/lib-lock.sh", "scripts/lib-memory-context.sh",
+    "scripts/lib-staging-lock.sh", "scripts/log.sh", "scripts/post-tool-hook.sh",
+    "scripts/resolve-paths.sh", "scripts/save-session.sh", "scripts/session-end-hook.sh",
+    "scripts/session-start-hook.sh", "scripts/user-prompt-hook.sh",
+    "hooks.d/after_save/50-git-backup.sh", "hooks.d/before_session_start/50-git-restore.sh",
+})
+
+# #898 round 2: `[ "$VAR" = "${BASH_SOURCE[0]}" ] && VAR="."` -- jit-context's
+# own measured "dead SCRIPT_DIR='.' fallback" shape, item 4 of its write-up.
+# Not dead in this repo (it is the real Windows-backslash fallback, #766/#783),
+# so the fix is the value, not the branch: this repo's own scripts now use
+# `$PWD` instead, never the literal "." the scanner reads as a further file.
+DIR_FALLBACK_DOT = re.compile(r'\$\{BASH_SOURCE\[0\]\}"\s*\]\s*&&\s*\w+="\."')
+
+# #898 round 2: one shipped hook script naming another by filename in a
+# comment -- the other half of COMMAND_SCRIPT_NOT_FOLLOWED, alongside the
+# dead-dot fallback above. Scoped to the four hooks.json-registered scripts,
+# which is what the hold actually named; REVIEW, not FAIL (see
+# _check_hook_names_other_hook's own docstring for why).
+HOOK_SCRIPT_NAMES = ("session-start-hook.sh", "session-end-hook.sh",
+                     "user-prompt-hook.sh", "post-tool-hook.sh")
+
 
 def _download_piped_to_shell(line: str) -> bool:
     """True if LINE pipes a `curl`/`wget` download into a shell, with any
@@ -471,6 +527,10 @@ def check_tree(root: Path, budget: dict) -> CheckResult:
     _check_network_command_names(files, kinds, off)
     _check_credential_pair(files, kinds, off)
     _check_release_readme_vars(files, off)
+    _check_scheme_literal(files, kinds, off)
+    _check_network_word_standalone(files, kinds, off)
+    _check_dir_fallback_dot(files, kinds, off)
+    _check_hook_names_other_hook(files, kinds, result.reviews)
     if "package.json" in files:
         locks = [lf for lf in LOCKFILES if lf in files]
         if locks:
@@ -778,6 +838,67 @@ def _check_release_readme_vars(files: dict, off: list) -> None:
         if RELEASE_README_VAR.search(line):
             off.append(f"{readme}:{n}: '$VAR'/'${{VAR}}' is not allowed in the "
                        f"release README: {line.strip()[:80]}")
+
+
+def _check_scheme_literal(files: dict, kinds: dict, off: list) -> None:
+    """#898 round 2: a scheme literal outside SCHEME_ALLOWLIST."""
+    for rel, data in sorted(files.items()):
+        if rel in SCHEME_ALLOWLIST or kinds.get(rel) != "text":
+            continue
+        text = data.decode("utf-8")
+        for n, line in enumerate(text.splitlines(), 1):
+            if SCHEME_LITERAL.search(line):
+                off.append(f"{rel}:{n}: a scheme literal ('https://'/'http://') outside "
+                           f"the allowlist -- use a wildcard ('*://') instead: "
+                           f"{line.strip()[:80]}")
+
+
+def _check_network_word_standalone(files: dict, kinds: dict, off: list) -> None:
+    """#898 round 2: a standalone network-command word outside
+    NETWORK_WORD_ALLOWLIST -- see that constant's own docstring."""
+    for rel, data in sorted(files.items()):
+        if rel in NETWORK_WORD_ALLOWLIST or kinds.get(rel) != "text":
+            continue
+        text = data.decode("utf-8")
+        for n, line in enumerate(text.splitlines(), 1):
+            m = _NETWORK_WORD_STANDALONE.search(line)
+            if m:
+                off.append(f"{rel}:{n}: network-command word {m.group(1)!r} outside "
+                           f"the allowlist: {line.strip()[:80]}")
+
+
+def _check_dir_fallback_dot(files: dict, kinds: dict, off: list) -> None:
+    """#898 round 2: the dead/typed-'.' SCRIPT_DIR fallback shape."""
+    for rel, data in sorted(files.items()):
+        top = rel.split("/")[0]
+        if top not in ("hooks", "hooks.d", "scripts") or kinds.get(rel) != "text":
+            continue
+        text = data.decode("utf-8")
+        for n, line in enumerate(text.splitlines(), 1):
+            if DIR_FALLBACK_DOT.search(line):
+                off.append(f"{rel}:{n}: a literal '.' directory fallback -- use "
+                           f"'$PWD' instead: {line.strip()[:80]}")
+
+
+def _check_hook_names_other_hook(files: dict, kinds: dict, reviews: list) -> None:
+    """#898 round 2: one hooks.json-registered hook script naming another by
+    filename in a comment -- REVIEW, not FAIL. Fully scrubbed from
+    post-tool-hook.sh in this same round; the other three scripts' own
+    cross-references are a known, reported, not-yet-done follow-up (see the
+    lane's own report) rather than silently absorbed into a FAIL that would
+    red this repo's own current tree."""
+    for rel, data in sorted(files.items()):
+        name = posixpath.basename(rel)
+        if name not in HOOK_SCRIPT_NAMES or kinds.get(rel) != "text":
+            continue
+        text = data.decode("utf-8")
+        for n, line in enumerate(text.splitlines(), 1):
+            if line.lstrip().startswith("#"):
+                for other in HOOK_SCRIPT_NAMES:
+                    if other != name and other in line:
+                        reviews.append(f"{rel}:{n}: names {other!r} in a comment -- "
+                                       f"reword in words: {line.strip()[:80]}")
+                        break
 
 
 def _check_launchers(files: dict, kinds: dict, off: list) -> None:
