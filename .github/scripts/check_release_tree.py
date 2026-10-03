@@ -47,9 +47,10 @@ Rows a reviewer holds on
 
 Reported, never failed: `REVIEW` lines for code that reads a credential from the
 environment or a config file ("uses a credential from the user's machine"), for
-`eval` fed by a command substitution, and for a downloader (`curl`/`wget`) piped
-straight into a shell. Each is a reviewer's judgement call about one shape, not
-a hard rule -- a plugin's own installer script can legitimately look like either
+`eval` fed by a command substitution or a bare/embedded variable expansion, and
+for a downloader (`curl`/`wget`) piped straight into a shell. Each is a
+reviewer's judgement call about one shape, not a hard rule -- a plugin's own
+installer script can legitimately look like either
 of the last two (#866).
 
 Usage:
@@ -395,7 +396,8 @@ def check_tree(root: Path, budget: dict) -> CheckResult:
                     continue
                 if EVAL_OF_SUBSTITUTION.search(line):
                     result.reviews.append(f"{rel}:{n}: eval fed by a command "
-                                           f"substitution: {line.strip()[:80]}")
+                                           f"substitution or a variable "
+                                           f"expansion: {line.strip()[:80]}")
                 if _download_piped_to_shell(line):
                     result.reviews.append(f"{rel}:{n}: downloads and pipes straight "
                                            f"into a shell: {line.strip()[:80]}")
