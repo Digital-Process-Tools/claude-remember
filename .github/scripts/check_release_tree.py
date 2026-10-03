@@ -172,9 +172,26 @@ URL_HOST = re.compile(
 # repo) is not an invocation of anything.
 NETWORK_COMMAND_NAMES = ("curl", "wget", "ftp", "dig", "drill", "finger", "mail",
                          "lynx", "links", "fetch", "talk", "host", "http")
+# A bare command at the very start of a line (`curl ... | sh`, or a bundled
+# word-list data file's one-entry-per-line shape) is a real command-position
+# shape the original markers below miss -- but `^` alone over EVERY shipped
+# file also matches plain English prose starting a sentence with one of
+# these words ("host authenticates it...", a real line in pipeline/haiku.py's
+# own docstring; "host's own name...", pipeline/host.py's). There is no
+# regex-only way to tell "a shell command" from "a sentence" by shape alone,
+# so `^` is scoped to files that are actually shell scripts (the same
+# hooks/hooks.d/scripts scope _check_typed_heredoc and _check_url_in_comment
+# use) -- in a .sh file a bare word at column 0 really is a command; in a .py
+# docstring or a .md file it is prose. The `;&|$(then/do/.../env )` markers
+# stay unscoped: those are shell punctuation, not English, in any file type.
+_SCRIPT_DIRS = ("hooks", "hooks.d", "scripts")
 _NETWORK_CMD_POS = re.compile(
     r"(?:[;&|]|\$\(|\b(?:then|do|else|exec|xargs|sudo|env)\s)\s*(" +
-    "|".join(NETWORK_COMMAND_NAMES) + r")\b", re.IGNORECASE
+    "|".join(NETWORK_COMMAND_NAMES) + r")(?=\s|$)", re.IGNORECASE
+)
+_NETWORK_CMD_POS_SCRIPT = re.compile(
+    r"(?:^|[;&|]|\$\(|\b(?:then|do|else|exec|xargs|sudo|env)\s)\s*(" +
+    "|".join(NETWORK_COMMAND_NAMES) + r")(?=\s|$)", re.IGNORECASE
 )
 
 RELEASE_README_VAR = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*")
@@ -693,10 +710,15 @@ def _check_typed_heredoc(files: dict, kinds: dict, reviews: list) -> None:
 
 
 def _check_url_in_comment(files: dict, kinds: dict, off: list) -> None:
-    """#898: a URL host inside a comment of a shipped script."""
+    """#898: a URL host inside a `#`-prefixed comment line of any shipped
+    text file -- not scoped to hooks/hooks.d/scripts (review finding): a
+    `#` comment is just as real in a shipped `.py` file (pipeline/) as in a
+    shipped `.sh` one, and the sibling guards below (network command names,
+    the credential pair) are not directory-scoped either. A `.md` file's
+    `#` heading is a false-positive risk this does not special-case; none of
+    this repo's shipped headings happens to carry a URL host today."""
     for rel, data in sorted(files.items()):
-        top = rel.split("/")[0]
-        if top not in ("hooks", "hooks.d", "scripts") or kinds.get(rel) != "text":
+        if kinds.get(rel) != "text":
             continue
         text = data.decode("utf-8")
         for n, line in enumerate(text.splitlines(), 1):
@@ -707,13 +729,18 @@ def _check_url_in_comment(files: dict, kinds: dict, off: list) -> None:
 def _check_network_command_names(files: dict, kinds: dict, off: list) -> None:
     """#898: a network command name at a shell-command position in a shipped
     file. Scoped to command position, not every English occurrence of a word
-    like "host" or "fetch" -- see NETWORK_COMMAND_NAMES above."""
+    like "host" or "fetch" -- see NETWORK_COMMAND_NAMES above. A shell script
+    (hooks/hooks.d/scripts) also checks a bare word at the very start of a
+    line, which is not safe to do for every file type -- see the comment on
+    _NETWORK_CMD_POS_SCRIPT above."""
     for rel, data in sorted(files.items()):
         if kinds.get(rel) != "text":
             continue
+        pattern = (_NETWORK_CMD_POS_SCRIPT if rel.split("/")[0] in _SCRIPT_DIRS
+                   else _NETWORK_CMD_POS)
         text = data.decode("utf-8")
         for n, line in enumerate(text.splitlines(), 1):
-            m = _NETWORK_CMD_POS.search(line)
+            m = pattern.search(line)
             if m:
                 off.append(f"{rel}:{n}: network command name {m.group(1)!r} is not "
                            f"allowed in a shipped file: {line.strip()[:80]}")

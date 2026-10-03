@@ -693,7 +693,7 @@ def _legacy_config_key_present() -> bool:
 # ── The ambient ANTHROPIC_API_KEY (#703, reported in #693) ────────────────────
 #
 # The Claude CLI resolves credentials in a fixed order, and ANTHROPIC_API_KEY
-# out-ranks a claude.ai login. So an operator who has a login AND keeps that
+# out-ranks the CLI's own login. So an operator who has that login AND keeps that
 # var set for some unrelated tool gets every nested summarizer call billed to
 # the key -- and when its balance is exhausted, every background save dies with
 # "Credit balance is too low" while their own interactive sessions carry on
@@ -707,8 +707,8 @@ def _legacy_config_key_present() -> bool:
 # every save failing in exactly the same silent shape.
 #
 # So the strip is conditional on another credential actually being visible.
-# "Visible" is the honest limit here: a claude.ai login in the macOS Keychain
-# is not something this process can see without probing the operator's keychain
+# "Visible" is the honest limit here: the CLI's own login, stored in the macOS
+# Keychain, is not something this process can see without probing the operator's keychain
 # (which prompts, and reads a secret we have no business reading), so `auto`
 # keeps the key for those operators -- today's behaviour, not a new failure --
 # and `haiku.anthropic_api_key` lets them say `strip` once. The failure hint in

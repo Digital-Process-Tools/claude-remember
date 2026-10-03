@@ -246,6 +246,49 @@ def test_a_benign_gitattributes_ships(tmp_path):
     assert (out / ".gitattributes").read_text(encoding="utf-8") == "*.sh text eol=lf\n"
 
 
+# -- release_readme swap (#898) ---------------------------------------------------
+
+RELEASE_README = "# Release-only README\n\n" + " ".join(["word"] * 40) + "\n"
+
+
+def test_release_readme_is_swapped_in_for_readme_md(tmp_path):
+    repo = _make_repo(tmp_path, extra={"README.release.md": RELEASE_README})
+    out = _build(tmp_path, repo, _config(release_readme="README.release.md",
+                                          deny=["tests/", "docs/", ".github/", ".claude/",
+                                                "CLAUDE.md", "scripts/run-tests.sh",
+                                                "README.release.md"]))
+    assert (out / "README.md").read_text(encoding="utf-8") == RELEASE_README
+    # Positive control: the swap source itself is not shipped under its own name.
+    assert not (out / "README.release.md").exists()
+
+
+def test_release_readme_not_found_at_ref_is_a_build_error(tmp_path):
+    mod = _load()
+    repo = _make_repo(tmp_path)  # no README.release.md committed
+    with pytest.raises(mod.BuildError, match="release_readme"):
+        mod.build(repo, "v0.2.0", tmp_path / "out",
+                  _config(release_readme="README.release.md"))
+
+
+def test_release_readme_as_a_symlink_is_refused(tmp_path):
+    mod = _load()
+    repo = _make_repo(tmp_path)
+    (repo / "README.release.md").symlink_to(repo / "README.md")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "add symlink release readme")
+    _git(repo, "tag", "-f", "v0.2.0")
+    with pytest.raises(mod.BuildError, match="symlink"):
+        mod.build(repo, "v0.2.0", tmp_path / "out",
+                  _config(release_readme="README.release.md"))
+
+
+def test_no_release_readme_configured_leaves_readme_untouched(tmp_path):
+    """Positive control: without `release_readme` set, README.md ships as committed."""
+    out = _build(tmp_path, _make_repo(tmp_path))
+    text = (out / "README.md").read_text(encoding="utf-8")
+    assert "Read" in text and "the guide" in text
+
+
 # -- CHANGELOG -------------------------------------------------------------------
 
 def test_changelog_keeps_only_the_latest_released_section(tmp_path):
