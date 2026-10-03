@@ -90,7 +90,6 @@ def _make_env(tmp_path: Path, name: str, extract_sleep: float = 0.0, hold_file=N
     (plugin / "scripts").mkdir(parents=True, exist_ok=True)
     (plugin / "pipeline").mkdir(parents=True, exist_ok=True)
     (plugin / "pipeline" / "__init__.py").write_text("")
-    (plugin / "pipeline" / "haiku.py").write_text("# marker\n")
     (plugin / ".claude-plugin").mkdir(parents=True, exist_ok=True)
     (plugin / ".claude-plugin" / "plugin.json").write_text("{}", encoding="utf-8")
     (plugin / "pipeline" / "shell.py").write_text(STUB_SHELL)

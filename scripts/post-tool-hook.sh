@@ -830,7 +830,18 @@ if [ -n "$SIDECAR" ] && [ -f "$SIDECAR" ]; then
 fi
 
 if [ -z "$SIDECAR_TRUSTED" ] && [ -f "$LAST_SAVE_FILE" ]; then
-    [ -n "${PYTHON:-}" ] || source "$_HOOK_DIR/detect-tools.sh"
+    # #898 round 5 self-review: the old guard here only checked
+    # "${PYTHON:-}" -- enough back when this line called $PYTHON directly,
+    # since that only ever needed the inherited VARIABLE. It is not enough
+    # now: this line calls _remember_run_python, a FUNCTION defined inside
+    # detect-tools.sh, never exported (bash has no `export -f` use here), so
+    # a process that somehow inherited a resolved $PYTHON without this file
+    # ever sourcing detect-tools.sh itself would hit "command not found"
+    # (silently folded to position 0 by the 2>/dev/null and the case below).
+    # Checking for the function's own existence, not just the variable,
+    # covers both the already-sourced case and the inherited-variable-only
+    # case with one fast, no-fork test.
+    declare -f _remember_run_python >/dev/null 2>&1 || source "$_HOOK_DIR/detect-tools.sh"
     LAST_LINE=$(cd "$PIPELINE_DIR" && _remember_run_python -m pipeline.shell read-position "$LAST_SAVE_FILE" "$SESSION_ID" 2>/dev/null)
     case "$LAST_LINE" in ''|*[!0-9]*) LAST_LINE=0 ;; esac
 fi

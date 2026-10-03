@@ -183,7 +183,6 @@ def _make_env(tmp_path: Path, *, exchanges: int, humans: int, position: int = 50
     (plugin / "scripts").mkdir(parents=True)
     (plugin / "pipeline").mkdir(parents=True)
     (plugin / "pipeline" / "__init__.py").write_text("")
-    (plugin / "pipeline" / "haiku.py").write_text("# marker\n")
     # #898, round 5: resolve-paths.sh's own root-detection marker moved from
     # pipeline/haiku.py to .claude-plugin/plugin.json (an install manifest,
     # not a script path -- the directory's COMMAND_SCRIPT_NOT_FOLLOWED hold).
