@@ -146,6 +146,95 @@ def test_a_quick_background_child_is_waited_for_not_killed(tmp_path):
     assert (tmp_path / "keep" / "project" / "bg-done").exists()
 
 
+def test_load_smoke_config_warns_on_a_missing_config_path(tmp_path, capsys):
+    """Review finding (#866): a missing/typo'd --config path and a config that
+    intentionally has no `smoke` key both used to return {} identically, with
+    no way to tell them apart. A missing path must now say so."""
+    mod = _load(SCRIPT, "smoke_release_tree")
+    cfg = mod.load_smoke_config(tmp_path / "does-not-exist.json")
+    assert cfg == {}
+    assert "does-not-exist.json" in capsys.readouterr().err
+
+
+def test_load_smoke_config_is_quiet_for_a_config_with_no_smoke_key(tmp_path, capsys):
+    """Positive control: a config file that exists but deliberately carries no
+    `smoke` block is the normal case and must not warn."""
+    mod = _load(SCRIPT, "smoke_release_tree")
+    cfg_path = tmp_path / "release-branch.json"
+    cfg_path.write_text("{}", encoding="utf-8")
+    cfg = mod.load_smoke_config(cfg_path)
+    assert cfg == {}
+    assert capsys.readouterr().err == ""
+
+
+@posix_only
+def test_default_bin_env_vars_are_remember_prefixed(tmp_path):
+    """Positive control: with no smoke config, the existing REMEMBER_CLAUDE_BIN/
+    REMEMBER_CODEX_BIN names must still be set (#866)."""
+    mod = _load(SCRIPT, "smoke_release_tree")
+    tree = _tree(tmp_path, {
+        "SessionStart": 'printf "%s" "$REMEMBER_CLAUDE_BIN" > "$CLAUDE_PROJECT_DIR/bin.txt"\n',
+    })
+    result = mod.run_smoke(tree, validate="skip", linger_seconds=5, keep_dir=tmp_path / "keep")
+    assert result.ok, result.report()
+    seen = (tmp_path / "keep" / "project" / "bin.txt").read_text(encoding="utf-8")
+    assert seen.endswith("/claude"), seen
+
+
+@posix_only
+def test_bin_env_vars_come_from_config(tmp_path):
+    """#866: smoke_release_tree.py hard-coded REMEMBER_CLAUDE_BIN/REMEMBER_CODEX_BIN
+    -- another repo reusing this tooling needs to name its own env vars via config."""
+    mod = _load(SCRIPT, "smoke_release_tree")
+    tree = _tree(tmp_path, {
+        "SessionStart": ('printf "%s" "$OTHER_CLAUDE_BIN" > "$CLAUDE_PROJECT_DIR/bin.txt"\n'
+                         'printf "%s" "${REMEMBER_CLAUDE_BIN:-unset}" '
+                         '> "$CLAUDE_PROJECT_DIR/old-bin.txt"\n'),
+    })
+    cfg = {"bin_env_vars": {"claude": "OTHER_CLAUDE_BIN", "codex": "OTHER_CODEX_BIN"}}
+    result = mod.run_smoke(tree, validate="skip", linger_seconds=5, keep_dir=tmp_path / "keep",
+                           smoke_config=cfg)
+    assert result.ok, result.report()
+    project = tmp_path / "keep" / "project"
+    assert (project / "bin.txt").read_text(encoding="utf-8").endswith("/claude")
+    # The old, hard-coded name must not leak through once config replaces it.
+    assert (project / "old-bin.txt").read_text(encoding="utf-8") == "unset"
+
+
+@posix_only
+def test_fake_bins_come_from_config(tmp_path):
+    """#866 review finding: `bin_env_vars`/`drop_env_prefixes` had config tests
+    but `fake_bins` (the list of binaries actually faked on PATH) did not."""
+    mod = _load(SCRIPT, "smoke_release_tree")
+    tree = _tree(tmp_path, {
+        "SessionStart": 'command -v extra-tool > "$CLAUDE_PROJECT_DIR/found.txt" 2>&1 || true\n',
+    })
+    cfg = {"fake_bins": ["claude", "codex", "extra-tool"],
+           "bin_env_vars": {"claude": "REMEMBER_CLAUDE_BIN", "codex": "REMEMBER_CODEX_BIN"}}
+    result = mod.run_smoke(tree, validate="skip", linger_seconds=5, keep_dir=tmp_path / "keep",
+                           smoke_config=cfg)
+    assert result.ok, result.report()
+    found = (tmp_path / "keep" / "project" / "found.txt").read_text(encoding="utf-8")
+    assert "extra-tool" in found, found
+
+
+@posix_only
+def test_drop_env_prefixes_come_from_config(tmp_path, monkeypatch):
+    """#866: DROP_PREFIXES was a module constant -- config must be able to name
+    its own prefixes to scrub from the smoke environment."""
+    mod = _load(SCRIPT, "smoke_release_tree")
+    monkeypatch.setenv("MYPLUGIN_SECRET", "should-not-leak")
+    tree = _tree(tmp_path, {
+        "SessionStart": 'printf "%s" "${MYPLUGIN_SECRET:-gone}" > "$CLAUDE_PROJECT_DIR/seen.txt"\n',
+    })
+    cfg = {"drop_env_prefixes": ["MYPLUGIN_"]}
+    result = mod.run_smoke(tree, validate="skip", linger_seconds=5, keep_dir=tmp_path / "keep",
+                           smoke_config=cfg)
+    assert result.ok, result.report()
+    seen = (tmp_path / "keep" / "project" / "seen.txt").read_text(encoding="utf-8")
+    assert seen == "gone", seen
+
+
 @posix_only
 def test_validate_required_without_a_claude_binary_fails_loudly(tmp_path):
     mod = _load(SCRIPT, "smoke_release_tree")
@@ -286,6 +375,29 @@ def test_workflow_refuses_to_publish_a_version_that_does_not_move_release_forwar
     # The guard has an explicit, named override -- not a silent skip.
     doc = _workflow()
     assert "allow_version_regression" in doc[True]["workflow_dispatch"]["inputs"]
+
+
+def test_workflow_cli_version_comes_from_config():
+    """#866: CLAUDE_CLI_VERSION used to be hard-coded in the workflow -- another
+    repo reusing this tooling only edits .github/release-branch.json now."""
+    text = WORKFLOW.read_text(encoding="utf-8")
+    doc = _workflow()
+    assert "CLAUDE_CLI_VERSION" not in (doc.get("env") or {}), \
+        "the version must come from config, not a hard-coded workflow env entry"
+    assert "release-branch.json" in text and "cli_version" in text
+    config = json.loads((REPO_ROOT / ".github" / "release-branch.json").read_text(encoding="utf-8"))
+    assert re.match(r"^\d+\.\d+\.\d+$", config["cli_version"])
+
+
+def test_workflow_reads_cli_version_before_installing_the_cli():
+    """#866 review finding: the new config-reading step must run before the
+    step that consumes $CLAUDE_CLI_VERSION, or the variable is empty."""
+    doc = _workflow()
+    steps = [s for j in doc["jobs"].values() for s in j["steps"]]
+    runs = [s.get("run", "") for s in steps]
+    idx_read = next(i for i, r in enumerate(runs) if "cli_version" in r)
+    idx_install = next(i for i, r in enumerate(runs) if "CLAUDE_CLI_VERSION}" in r)
+    assert idx_read < idx_install, "cli_version must be read into $GITHUB_ENV before it is used"
 
 
 def test_workflow_concurrency_comment_does_not_claim_a_force_push_race():
