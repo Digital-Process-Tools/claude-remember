@@ -30,5 +30,13 @@
     "max_total_bytes": 3145728
   },
   "changelog": "CHANGELOG.md",
-  "rewrite_links": true
+  "rewrite_links": true,
+  "_smoke_why": "smoke_release_tree.py defaults (DROP_PREFIXES, the fake claude/codex binaries and the env vars that name them) used to be hard-coded; another repo reusing this tooling only edits this block (#866).",
+  "smoke": {
+    "drop_env_prefixes": ["CLAUDE", "REMEMBER_", "GIT_", "CODEX", "GEMINI", "ANTIGRAVITY"],
+    "fake_bins": ["claude", "codex"],
+    "bin_env_vars": {"claude": "REMEMBER_CLAUDE_BIN", "codex": "REMEMBER_CODEX_BIN"}
+  },
+  "_cli_version_why": "Pinned >= 2.1.281: earlier versions warn 'Unknown field' on the directory listing fields (documentationUrl, supportUrl, privacyPolicyUrl, termsOfServiceUrl, icon) in plugin.json, and --strict turns that warning into a failure (#866).",
+  "cli_version": "2.1.287"
 }

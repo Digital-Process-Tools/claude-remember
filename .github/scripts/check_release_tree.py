@@ -92,7 +92,9 @@ _FONT_MAGIC = (b"wOFF", b"wOF2", b"\x00\x01\x00\x00", b"true", b"OTTO", b"ttcf")
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}
 
 CREDENTIAL_PATTERNS = [
-    ("Anthropic API key", re.compile(r"sk-ant-[A-Za-z0-9_-]{20,}")),
+    # Widened from a {20,}-char tail: the portal blocked v0.37.0 on short fixture
+    # keys like `sk-ant-api03-example` that a long-tail regex never matched (#866).
+    ("Anthropic API key", re.compile(r"sk-ant-[A-Za-z0-9_-]+")),
     ("GitHub token", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,}")),
     ("GitHub fine-grained token", re.compile(r"\bgithub_pat_[A-Za-z0-9_]{40,}")),
     ("AWS access key id", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
@@ -113,6 +115,15 @@ _LAUNCH = (r"(?:npx|bunx|uvx|pipx\s+run|uv\s+run|pnpm\s+dlx|yarn\s+dlx"
            r"\s+(?:install|i|add)\b)")
 LAUNCHER = re.compile(_CMD_POS + _LAUNCH + r"(?=\s|$|\))")
 LAUNCHER_PY = re.compile(r"""['"](?:npx|bunx|uvx)['"]|['"]pip3?['"]\s*,\s*['"]install['"]""")
+
+# #864/#875 learned both of these the hard way: `eval` fed by a command
+# substitution runs whatever that substitution produced, and a downloader piped
+# straight into a shell runs whatever the remote end served that day. Neither is
+# a hard FAIL -- a plugin's own installer script can legitimately look like this
+# -- so both are REVIEW-only, a reviewer's judgement call (#866).
+EVAL_OF_SUBSTITUTION = re.compile(r"\beval\b\s*\"?\$\(")
+DOWNLOAD_PIPE_SHELL = re.compile(r"\b(?:curl|wget)\b[^|\n]*\|\s*(?:sudo\s+)?"
+                                  r"(?:sh|bash|zsh|dash|ksh)\b")
 
 
 @dataclass
@@ -333,8 +344,19 @@ def check_tree(root: Path, budget: dict) -> CheckResult:
                 if pat.search(text):
                     off.append(f"{rel}: looks like a real credential ({label})")
             uses = sorted(set(CREDENTIAL_USE.findall(text)))
-            if uses and not rel.lower().endswith(".md"):
+            if uses:
+                # Used to skip every .md file -- the portal flagged README.md
+                # naming a credential env var, which that skip hid from REVIEW (#866).
                 result.reviews.append(f"{rel}: reads or names {', '.join(uses)}")
+            for n, line in enumerate(text.splitlines(), 1):
+                if line.lstrip().startswith("#"):
+                    continue
+                if EVAL_OF_SUBSTITUTION.search(line):
+                    result.reviews.append(f"{rel}:{n}: eval fed by a command "
+                                           f"substitution: {line.strip()[:80]}")
+                if DOWNLOAD_PIPE_SHELL.search(line):
+                    result.reviews.append(f"{rel}:{n}: downloads and pipes straight "
+                                           f"into a shell: {line.strip()[:80]}")
 
     if result.files > b["max_files"]:
         off.append(f"tree: {result.files} files, more than the {b['max_files']} allowed")
@@ -523,7 +545,17 @@ def _check_front_matter(files: dict, off: list) -> None:
         if isinstance(allowed, list):
             entries = [str(x) for x in allowed]
         elif isinstance(allowed, str):
-            entries = [s.strip() for s in allowed.split(",") if s.strip()]
+            # A comma-split alone used to merge a space-delimited list (no commas)
+            # into one string, so `Bash(a.sh) Bash(curl)` fullmatched as a single
+            # pattern and the unscoped half was never checked on its own (#866,
+            # trap.d/859). Tokenize each `Bash(...)`/bare `Bash` entry directly.
+            entries = []
+            for piece in allowed.split(","):
+                piece = piece.strip()
+                if not piece:
+                    continue
+                tokens = re.findall(r"Bash\([^()]*\)|\bBash\b|\S+", piece)
+                entries.extend(tokens)
         else:
             entries = []
         for entry in entries:

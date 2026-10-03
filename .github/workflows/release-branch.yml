@@ -47,11 +47,6 @@ env:
   SOURCE_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref_name }}
   # Same reasoning: never interpolated, read back as "$ALLOW_VERSION_REGRESSION".
   ALLOW_VERSION_REGRESSION: ${{ github.event_name == 'workflow_dispatch' && inputs.allow_version_regression == true }}
-  # Pinned: the validator's verdict should change when we choose, not when npm does.
-  # >= 2.1.281: earlier versions warn "Unknown field" on the directory listing fields
-  # (documentationUrl, supportUrl, privacyPolicyUrl, termsOfServiceUrl, icon) in
-  # plugin.json, and --strict turns that warning into a failure.
-  CLAUDE_CLI_VERSION: "2.1.287"
   # Pinned for the same reason -- the check's verdict (a real YAML parser for
   # skill/command front matter, vs its key:-value-only fallback) should change
   # only when we choose.
@@ -92,6 +87,15 @@ jobs:
 
       - name: Check the tree against the directory's file rules
         run: python3 .github/scripts/check_release_tree.py "$RUNNER_TEMP/release-tree"
+
+      # The version (and its >= 2.1.281 floor, documented next to it) live in
+      # .github/release-branch.json's `cli_version`, not here -- another repo
+      # reusing this tooling only edits that config (#866).
+      - name: Read the pinned claude CLI version from config
+        id: cli_version
+        run: |
+          v=$(python3 -c "import json; print(json.load(open('.github/release-branch.json'))['cli_version'])")
+          echo "CLAUDE_CLI_VERSION=$v" >> "$GITHUB_ENV"
 
       - name: Install the claude CLI for `claude plugin validate`
         id: cli

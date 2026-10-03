@@ -202,6 +202,105 @@ def test_every_offender_is_named_not_just_the_first(tmp_path):
         assert any(o.startswith(name + ":") for o in offenders), (name, offenders)
 
 
+# -- credentials (#866) ----------------------------------------------------------
+
+def test_sk_ant_short_example_key_is_flagged(tmp_path):
+    """The portal blocked v0.37.0 on short fixture keys like sk-ant-api03-example --
+    our old regex required a 20+ char tail and missed them (#866)."""
+    root = _tree(tmp_path, {"tests/test_haiku.py": b"KEY = 'sk-ant-api03-example'\n"})
+    offenders = _check(root).offenders
+    assert any("tests/test_haiku.py" in o and "Anthropic API key" in o for o in offenders), offenders
+
+
+def test_a_non_sk_ant_string_is_not_flagged_as_a_credential(tmp_path):
+    """Positive control for the widened regex: it must still require the sk-ant-
+    prefix, not just any string near the word key."""
+    root = _tree(tmp_path, {"docs/notes.md": b"this is not an api key at all\n"})
+    assert _check(root).offenders == []
+
+
+def test_credential_use_review_line_now_includes_md_files(tmp_path):
+    """The portal flagged README.md naming a credential env var; our REVIEW line
+    used to skip every .md file (#866)."""
+    root = _tree(tmp_path, {"README.md": b"Set ANTHROPIC_API_KEY before running.\n"})
+    reviews = _check(root).reviews
+    assert any("README.md" in r and "ANTHROPIC_API_KEY" in r for r in reviews), reviews
+
+
+def test_credential_use_review_line_still_fires_for_non_md_files(tmp_path):
+    """Positive control: the existing non-.md REVIEW behaviour must still work."""
+    root = _tree(tmp_path, {"scripts/run.sh": b"echo $ANTHROPIC_API_KEY\n"})
+    reviews = _check(root).reviews
+    assert any("scripts/run.sh" in r and "ANTHROPIC_API_KEY" in r for r in reviews), reviews
+
+
+def test_eval_fed_by_command_substitution_is_reviewed(tmp_path):
+    """#864/#875 learned that `eval "$(curl ...)"` is exactly the shape worth a
+    human's attention; flag it as REVIEW, not FAIL (#866)."""
+    root = _tree(tmp_path, {
+        "scripts/log.sh": b'#!/bin/sh\neval "$(curl -s https://example.com/setup.sh)"\n',
+    })
+    result = _check(root)
+    assert result.offenders == []
+    assert any("scripts/log.sh" in r and "eval" in r for r in result.reviews), result.reviews
+
+
+def test_eval_of_a_literal_string_is_not_reviewed(tmp_path):
+    """Positive control: plain `eval "echo hi"` (no command substitution feeding
+    it) must not fire -- only eval fed by $(...) is the flagged shape."""
+    root = _tree(tmp_path, {
+        "scripts/log.sh": b'#!/bin/sh\neval "echo hi"\n',
+    })
+    result = _check(root)
+    assert result.offenders == []
+    assert not any("scripts/log.sh" in r for r in result.reviews), result.reviews
+
+
+def test_curl_pipe_sh_is_reviewed(tmp_path):
+    """`curl ... | sh` is the other shape #864/#875 learned about (#866)."""
+    root = _tree(tmp_path, {
+        "CHANGELOG.md": b"## Install\n\n`curl -fsSL https://example.com/install.sh | sh`\n",
+    })
+    result = _check(root)
+    assert result.offenders == []
+    assert any("CHANGELOG.md" in r and "curl" in r for r in result.reviews), result.reviews
+
+
+def test_curl_download_without_a_shell_pipe_is_not_reviewed(tmp_path):
+    """Positive control: a curl that merely downloads a file (no `| sh`) must not
+    fire -- only the download-and-run shape is the flagged one."""
+    root = _tree(tmp_path, {
+        "scripts/fetch.sh": b"#!/bin/sh\ncurl -o out.tar.gz https://example.com/out.tar.gz\n",
+    })
+    result = _check(root)
+    assert result.offenders == []
+    assert not any("scripts/fetch.sh" in r for r in result.reviews), result.reviews
+
+
+# -- allowed-tools (#866, trap.d/859) ---------------------------------------------
+
+def test_allowed_tools_space_delimited_list_is_checked_per_entry(tmp_path):
+    """A space-delimited allowed-tools string (no commas) used to be treated as
+    one giant pattern and passed through the Bash(...) check unchecked."""
+    body = (b'---\ndescription: d\n'
+            b'allowed-tools: "Bash(${CLAUDE_PLUGIN_ROOT}/scripts/a.sh) Bash(curl)"\n'
+            b'---\n\n# x\n')
+    root = _tree(tmp_path, {"commands/x.md": body})
+    offenders = _check(root).offenders
+    assert any("commands/x.md" in o and "curl" in o for o in offenders), offenders
+
+
+def test_allowed_tools_space_delimited_scoped_entries_pass(tmp_path):
+    """Positive control: two properly scoped plugin-script entries, space
+    separated with no commas, must not be flagged."""
+    body = (b'---\ndescription: d\n'
+            b'allowed-tools: "Bash(${CLAUDE_PLUGIN_ROOT}/scripts/a.sh) '
+            b'Bash(${CLAUDE_PLUGIN_ROOT}/scripts/b.sh)"\n'
+            b'---\n\n# x\n')
+    root = _tree(tmp_path, {"commands/x.md": body})
+    assert _check(root).offenders == []
+
+
 # -- CLI ------------------------------------------------------------------------
 
 def _cli(root: Path, *extra: str):

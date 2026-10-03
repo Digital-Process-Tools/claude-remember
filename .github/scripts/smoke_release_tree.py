@@ -45,7 +45,21 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
-DROP_PREFIXES = ("CLAUDE", "REMEMBER_", "GIT_", "CODEX", "GEMINI", "ANTIGRAVITY")
+# Defaults for this repo; another repo reusing this tooling overrides any of
+# these via the `smoke` block in its own --config file (#866).
+DEFAULT_SMOKE_CONFIG = {
+    "drop_env_prefixes": ["CLAUDE", "REMEMBER_", "GIT_", "CODEX", "GEMINI", "ANTIGRAVITY"],
+    "fake_bins": ["claude", "codex"],
+    "bin_env_vars": {"claude": "REMEMBER_CLAUDE_BIN", "codex": "REMEMBER_CODEX_BIN"},
+}
+
+
+def _resolve_smoke_config(smoke_config: dict | None) -> dict:
+    cfg = {k: (list(v) if isinstance(v, list) else dict(v) if isinstance(v, dict) else v)
+           for k, v in DEFAULT_SMOKE_CONFIG.items()}
+    if smoke_config:
+        cfg.update(smoke_config)
+    return cfg
 
 FAKE_BIN = """#!/bin/sh
 printf '%s\\n' "$0 $*" >> "${SMOKE_FAKE_CALLS:-/dev/null}"
@@ -136,8 +150,10 @@ def _transcript(home: Path, project: Path, session_id: str) -> Path:
     return path
 
 
-def _env(work: Path, plugin: Path, project: Path, home: Path, fakebin: Path) -> dict:
-    env = {k: v for k, v in os.environ.items() if not k.startswith(DROP_PREFIXES)}
+def _env(work: Path, plugin: Path, project: Path, home: Path, fakebin: Path,
+         cfg: dict) -> dict:
+    drop = tuple(cfg["drop_env_prefixes"])
+    env = {k: v for k, v in os.environ.items() if not k.startswith(drop)}
     tmp = work / "tmp"
     tmp.mkdir(exist_ok=True)
     env.update({
@@ -152,11 +168,11 @@ def _env(work: Path, plugin: Path, project: Path, home: Path, fakebin: Path) -> 
         "XDG_STATE_HOME": str(home / ".local" / "state"),
         "PATH": str(fakebin) + os.pathsep + os.environ.get("PATH", ""),
         "PYTHONDONTWRITEBYTECODE": "1",
-        "REMEMBER_CLAUDE_BIN": str(fakebin / "claude"),
-        "REMEMBER_CODEX_BIN": str(fakebin / "codex"),
         "SMOKE_FAKE_CALLS": str(work / "fake-calls.log"),
         "GIT_CONFIG_NOSYSTEM": "1",
     })
+    for name, var in cfg.get("bin_env_vars", {}).items():
+        env[var] = str(fakebin / name)
     return env
 
 
@@ -203,7 +219,7 @@ def _reap(pgids: set, marker: str, linger: float, result: SmokeResult) -> None:
 
 
 def run_validate(tree: Path, mode: str, claude_bin: str | None, home: Path,
-                 result: SmokeResult) -> None:
+                 result: SmokeResult, cfg: dict) -> None:
     if mode == "skip":
         result.notes.append("validate: SKIPPED (--validate skip)")
         return
@@ -216,7 +232,8 @@ def run_validate(tree: Path, mode: str, claude_bin: str | None, home: Path,
             result.notes.append(f"validate: SKIPPED -- {msg}; "
                                 "`claude plugin validate --strict` did not run")
         return
-    env = {k: v for k, v in os.environ.items() if not k.startswith(DROP_PREFIXES)}
+    drop = tuple(cfg["drop_env_prefixes"])
+    env = {k: v for k, v in os.environ.items() if not k.startswith(drop)}
     env["HOME"] = str(home)
     r = subprocess.run([binary, "plugin", "validate", "--strict", str(tree)],
                        capture_output=True, text=True, env=env, check=False, timeout=300)
@@ -228,7 +245,9 @@ def run_validate(tree: Path, mode: str, claude_bin: str | None, home: Path,
 
 
 def run_smoke(tree: Path, validate: str = "auto", claude_bin: str | None = None,
-              linger_seconds: float = 30, keep_dir: Path | None = None) -> SmokeResult:
+              linger_seconds: float = 30, keep_dir: Path | None = None,
+              smoke_config: dict | None = None) -> SmokeResult:
+    cfg = _resolve_smoke_config(smoke_config)
     tree = Path(tree).resolve()
     result = SmokeResult()
     if keep_dir:
@@ -240,7 +259,7 @@ def run_smoke(tree: Path, validate: str = "auto", claude_bin: str | None = None,
         home, project, fakebin = work / "home", work / "project", work / "bin"
         for d in (home, project, fakebin):
             d.mkdir(parents=True, exist_ok=True)
-        run_validate(tree, validate, claude_bin, home, result)
+        run_validate(tree, validate, claude_bin, home, result, cfg)
 
         if not (tree / "hooks" / "hooks.json").is_file():
             # #858: this plugin works only through its hooks -- a tree shipped with
@@ -250,7 +269,7 @@ def run_smoke(tree: Path, validate: str = "auto", claude_bin: str | None = None,
 
         plugin = work / "plugin"
         shutil.copytree(tree, plugin, symlinks=True)
-        for name in ("claude", "codex"):
+        for name in cfg["fake_bins"]:
             p = fakebin / name
             p.write_text(FAKE_BIN, encoding="utf-8")
             p.chmod(0o755)
@@ -258,7 +277,7 @@ def run_smoke(tree: Path, validate: str = "auto", claude_bin: str | None = None,
                        capture_output=True)
         session_id = str(uuid.uuid4())
         transcript = _transcript(home, project, session_id)
-        env = _env(work, plugin, project, home, fakebin)
+        env = _env(work, plugin, project, home, fakebin, cfg)
 
         commands = hook_commands(plugin)
         if not commands:
@@ -307,6 +326,15 @@ def run_smoke(tree: Path, validate: str = "auto", claude_bin: str | None = None,
             shutil.rmtree(work, ignore_errors=True)
 
 
+DEFAULT_CONFIG = Path(__file__).resolve().parent.parent / "release-branch.json"
+
+
+def load_smoke_config(config_path: Path) -> dict:
+    if not Path(config_path).is_file():
+        return {}
+    return json.loads(Path(config_path).read_text(encoding="utf-8")).get("smoke", {})
+
+
 def main(argv: list | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("tree")
@@ -314,9 +342,11 @@ def main(argv: list | None = None) -> int:
     ap.add_argument("--claude-bin", default=None)
     ap.add_argument("--linger", type=float, default=30.0)
     ap.add_argument("--keep", default=None, help="keep the temp HOME/project here")
+    ap.add_argument("--config", default=str(DEFAULT_CONFIG))
     args = ap.parse_args(argv)
     result = run_smoke(Path(args.tree), args.validate, args.claude_bin, args.linger,
-                       Path(args.keep) if args.keep else None)
+                       Path(args.keep) if args.keep else None,
+                       smoke_config=load_smoke_config(Path(args.config)))
     print(result.report())
     return 0 if result.ok else 1
 

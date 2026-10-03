@@ -285,15 +285,19 @@ was "Validation ran out of time". That is the failure the `release` branch exist
   plugin script with no interpreter in front is accepted too.
 - **`SECRET_IN_SCRIPT`** blocks on anything that looks like a literal credential, including fake
   keys in test fixtures. A deny-list that drops `tests/` removes it. If a test fixture must ship,
-  build the key at runtime instead of writing it literally. Our check is **not** a superset of the
-  portal's: `check_release_tree.py`'s Anthropic-key pattern needs 20 or more characters after
-  `sk-ant-`, so the fixture `sk-ant-api03-example` in `tests/test_haiku.py` does not match it. The
-  deny-list, not our check, is what keeps those fixtures out of `release`.
+  build the key at runtime instead of writing it literally. **Fixed in #866**: our Anthropic-key
+  pattern used to need 20 or more characters after `sk-ant-`, so the fixture
+  `sk-ant-api03-example` in `tests/test_haiku.py` did not match it and only the deny-list kept it
+  out of `release`; `check_release_tree.py` now matches any `sk-ant-` prefix, so the fixture is
+  caught even if a future change ever drops the deny-list entry.
 - **`MCP_FORWARDS_CREDENTIAL_ENV`** fires where the plugin reads a credential from the user's
   machine. The checklist puts this row under "Held for a reviewer", but on our scans the portal
   showed it as a warning; we do not know which one wins. It also fired on `README.md`, i.e. on the
   disclosure itself, on a comment that only contains the word "credentials", and on
-  `.claude-plugin/plugin.json`, which contains no credential text at all. The portal's own text:
+  `.claude-plugin/plugin.json`, which contains no credential text at all. (**Fixed in #866**:
+  `check_release_tree.py`'s own `REVIEW` line used to skip every `.md` file, so README.md's own
+  match was never named in our own output even though the portal flagged it; it now scans `.md`
+  too, REVIEW-only, same as every other text file.) The portal's own text:
   "If the credential is for that host's own vendor, you can leave it as it is and a reviewer
   confirms that." Ours is the user's own Claude Code / Codex login, so we left it, and
   [#860](https://github.com/Digital-Process-Tools/claude-remember/issues/860) evaluated the
@@ -385,6 +389,19 @@ was "Validation ran out of time". That is the failure the `release` branch exist
   rewording comments for this row -- #859 already tried that once and the count went up, not down.
   It is a warning, and the portal's own text says "Where it only appears in documentation, nothing
   needs to change".
+
+  **#866** added an automated, REVIEW-only signal for the two shapes #864/#875 actually learned
+  to watch for -- `eval` fed by a command substitution (`eval "$(...)"`) and a downloader piped
+  straight into a shell (`curl ... | sh`) -- across every shipped text file, not just
+  hooks/scripts. This is our own heuristic, not a reimplementation of the portal's matcher (still
+  unconfirmed, per the paragraph above): it exists so a REVIEW line names the shape before the
+  next portal scan does, not to predict what the portal will find.
+
+  **Observed, 2026-10-02 (#872):** the portal's "Contains a download-and-run command" row **names
+  files, not lines** -- on v0.38.0 (`e3cfd5b`) it named `CHANGELOG.md`, `pipeline/shell.py` and
+  `scripts/log.sh`, with no line number for any of the three, and all three were false positives
+  (#864's closing comment). So a file named in this row is not itself evidence of a real
+  download-and-run shape; the file still has to be read to tell.
 - **Unrecognized field in `plugin.json`** (warning, 4 findings, new on v0.38.0). Portal text: "If
   you expected the field to do something, check its spelling against the plugins reference.
   Otherwise it can stay." *Inferred, not yet confirmed from the expanded row:* the four are
@@ -393,14 +410,22 @@ was "Validation ran out of time". That is the failure the `release` branch exist
   manifest reference, which says the directory reads exactly these fields for the listing (see
   "Listing details" below). We keep them: the warning itself says they can stay, and the
   reference says they feed the listing. The question is with the directory team.
+  **Observed, 2026-10-02 (#872):** the expanded row settles this. For each of
+  `documentationUrl`, `privacyPolicyUrl`, `supportUrl` and `termsOfServiceUrl` the portal now
+  says "The plugin directory reads '<field>' for the listing; Claude Code itself ignores it at
+  load time. No action needed." -- the four findings above are these four fields, confirmed, not
+  just inferred, and the right action is still to keep them.
 - **`ICON_MISSING`**: the portal accepts a square PNG **or JPEG**, 512 to 2048 px, under 2 MB,
   through `icon` in `plugin.json` (SVG and WebP are not accepted). Keep it inside the plugin
-  folder and outside any denied path: an icon under `docs/` vanishes from `release`. **The listing
-  icon is set only once**: "the first time the plugin is saved or submitted… Adding or changing it
-  later does not change the icon." remember was saved before it shipped an icon, and its portal
-  **Details** page shows the icon as "Set by an Anthropic reviewer" (Approved). Shipping one now
-  would only clear the `ICON_MISSING` warning; it would not change the listing icon. For another
-  repository: put the icon in the plugin folder **before** the first save or submit.
+  folder and outside any denied path: an icon under `docs/` vanishes from `release`. **Observed,
+  2026-10-02 (#872): the listing icon is set only once.** The exact remedy text: "That file may
+  become the listing icon only once: the first time the plugin is saved or submitted in the
+  developer portal. Adding or changing it later does not change the icon." remember was saved
+  before it shipped an icon, and its portal **Details** page shows the icon as "Set by an
+  Anthropic reviewer" (Approved). Shipping one now would only clear the `ICON_MISSING` warning;
+  it would not change the listing icon. **The lesson for a new plugin: ship the icon before the
+  first portal submission** (see #865). For another repository: put the icon in the plugin
+  folder **before** the first save or submit.
 - **`USES_HOOKS`** is information only and stays for any plugin that ships hooks.
 
 ### For another plugin repository, in addition to the reuse steps below
@@ -411,6 +436,10 @@ was "Validation ran out of time". That is the failure the `release` branch exist
 2. Grep every shipped skill, command and agent for `allowed-tools`. A bare `Bash`, `Bash(*)`, or
    a wildcard after a shell, interpreter, package manager or runner, or `curl` is a hold. A
    specific command (`Bash(git status:*)`) or a named `${CLAUDE_PLUGIN_ROOT}` script is not.
+   `check_release_tree.py` checks a space-delimited `allowed-tools` string the same as a
+   comma-delimited one (#866, trap.d/859); a `..`-escaped path past `${CLAUDE_PLUGIN_ROOT}` or a
+   wrapper command (`env bash ...`, `sudo curl ...`) in front of an otherwise-scoped entry is
+   **not yet** covered -- read it by hand until that lands.
 3. Make sure fake credentials live only in denied paths (`tests/`).
 4. Put the icon in the plugin folder before the first save or submission (see `ICON_MISSING`).
 5. Disclose in README.md everything the plugin runs, sends and stores; expect that disclosure to
@@ -468,10 +497,14 @@ everything repository-specific lives in `.github/release-branch.json`:
   the optional `link_ref` from it; `check_release_tree.py` reads only `budget`. In `budget`,
   `max_file_bytes` and `max_files` are the directory's rules, but `max_total_bytes` (3 MiB) is this
   repository's own ceiling, not a directory rule: set your own.
-- `smoke_release_tree.py` reads its hook list from `hooks/hooks.json`, but hard-codes remember's
-  `REMEMBER_CLAUDE_BIN` / `REMEMBER_CODEX_BIN` (how it hands the hooks a fake `claude` and
-  `codex`) and remember's `hook-errors.log`. Adapt those to your plugin.
-- `release-branch.yml` pins `CLAUDE_CLI_VERSION`; keep it at 2.1.281 or later.
+- `smoke_release_tree.py` reads its hook list from `hooks/hooks.json`. The env-var names it hands
+  the hooks for the fake `claude`/`codex` binaries, the prefixes it drops from the smoke
+  environment, and the binaries it fakes all come from `.github/release-branch.json`'s `smoke`
+  block (`bin_env_vars`, `drop_env_prefixes`, `fake_bins`) -- edit that block, not the script
+  (#866). `hook-errors.log` is still read by name, not from config.
+- `release-branch.yml` reads the pinned `claude` CLI version from `.github/release-branch.json`'s
+  `cli_version`, not from a workflow env entry -- edit that, and keep it at 2.1.281 or later (the
+  floor is documented next to it in `_cli_version_why`) (#866).
 - Rewritten links point at the head of the default branch (or `link_ref`), not at the tag, so a
   released README's links into removed paths can drift from the version that shipped.
 
