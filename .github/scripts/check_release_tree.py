@@ -47,9 +47,10 @@ Rows a reviewer holds on
 
 Reported, never failed: `REVIEW` lines for code that reads a credential from the
 environment or a config file ("uses a credential from the user's machine"), for
-`eval` fed by a command substitution, and for a downloader (`curl`/`wget`) piped
-straight into a shell. Each is a reviewer's judgement call about one shape, not
-a hard rule -- a plugin's own installer script can legitimately look like either
+`eval` fed by a command substitution or a bare/embedded variable expansion, and
+for a downloader (`curl`/`wget`) piped straight into a shell. Each is a
+reviewer's judgement call about one shape, not a hard rule -- a plugin's own
+installer script can legitimately look like either
 of the last two (#866).
 
 Usage:
@@ -124,7 +125,23 @@ LAUNCHER_PY = re.compile(r"""['"](?:npx|bunx|uvx)['"]|['"]pip3?['"]\s*,\s*['"]in
 # straight into a shell runs whatever the remote end served that day. Neither is
 # a hard FAIL -- a plugin's own installer script can legitimately look like this
 # -- so both are REVIEW-only, a reviewer's judgement call (#866).
-EVAL_OF_SUBSTITUTION = re.compile(r"\beval\b\s*['\"]?\$\(")
+#
+# #891: the pattern below used to require `$(` immediately after `eval`
+# (optionally through a quote), which never matched the two lines #864 itself
+# had to remove by hand from scripts/log.sh -- `eval "_identity=$_identity_raw"`
+# and `eval "$_assign"` -- because neither feeds eval a command substitution,
+# both are a plain variable expansion. Three alternatives now, in the order a
+# line is most likely to hit one: `eval $(...)`/`eval "$(...)"` (unchanged),
+# a bare `eval $var` with no quotes, and `eval "...$var..."` -- a variable
+# expansion anywhere inside a quoted argument, which is what both #864 shapes
+# above actually are.
+EVAL_OF_SUBSTITUTION = re.compile(
+    r"\beval\b\s*(?:"
+    r"['\"]?\$\("
+    r"|\$[A-Za-z_][A-Za-z0-9_]*\b"
+    r"|['\"][^'\"]*\$[A-Za-z_{]"
+    r")"
+)
 _SHELL_NAMES = {"sh", "bash", "zsh", "dash", "ksh"}
 
 
@@ -379,7 +396,8 @@ def check_tree(root: Path, budget: dict) -> CheckResult:
                     continue
                 if EVAL_OF_SUBSTITUTION.search(line):
                     result.reviews.append(f"{rel}:{n}: eval fed by a command "
-                                           f"substitution: {line.strip()[:80]}")
+                                           f"substitution or a variable "
+                                           f"expansion: {line.strip()[:80]}")
                 if _download_piped_to_shell(line):
                     result.reviews.append(f"{rel}:{n}: downloads and pipes straight "
                                            f"into a shell: {line.strip()[:80]}")

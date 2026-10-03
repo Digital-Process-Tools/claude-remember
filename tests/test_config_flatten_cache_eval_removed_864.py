@@ -66,6 +66,8 @@ _VALUE_SHAPES = [
     "tab\there",
     "nl\nline2\nline3",
     "cr\rhere",
+    "trailing-cr\r",
+    "\rleading-cr",
     "semi;pipe|amp&paren(close)lt<gt>",
     "dollar$var`backtick`",
     "日本語",
@@ -235,6 +237,39 @@ def test_no_eval_curl_wget_in_current_changelog_section():
     assert not hits, f"current CHANGELOG.md section still contains eval/curl/wget: {hits}"
 
 
+def _changelog_fragment_eval_hits(dir_path: Path) -> list:
+    hits = []
+    for md in sorted(dir_path.glob("*.md")):
+        text = md.read_text()
+        for i, line in enumerate(text.splitlines()):
+            if re.search(r"eval|curl|wget", line, re.IGNORECASE):
+                hits.append((md.name, i + 1, line))
+    return hits
+
+
+def test_no_eval_curl_wget_in_changelog_fragments():
+    """#886's own longer-term fix: `test_no_eval_curl_wget_in_current_changelog_section`
+    above only checks the already-folded CHANGELOG.md section, never the
+    pending changelog.d/ fragments that BECOME that section at release-fold
+    time -- so a fragment reintroducing eval/curl/wget went undetected until
+    the release commit itself (and would have failed CI there, undoing
+    #864's own fix). This scans changelog.d/*.md directly, on every PR that
+    touches it, rather than only at release time."""
+    hits = _changelog_fragment_eval_hits(REPO_ROOT / "changelog.d")
+    assert not hits, f"changelog.d fragment(s) still contain eval/curl/wget: {hits}"
+
+
+def test_no_eval_curl_wget_in_changelog_fragments_positive_control(tmp_path):
+    """Must-fire pair for the test above: a planted fragment carrying the
+    banned substring is actually caught by the scan helper, proving the
+    assertion above is not vacuously true (e.g. an empty glob, or a helper
+    that never actually opens a file)."""
+    bad = tmp_path / "999.fixed.md"
+    bad.write_text("- #999: this fragment calls eval on untrusted input.\n")
+    hits = _changelog_fragment_eval_hits(tmp_path)
+    assert hits, "planted eval fragment was not detected by the scan"
+
+
 def test_decode_never_fails_even_bypassing_the_whitelist():
     """Review finding: given `_remember_cfg_flatten_cache_valid_value`'s
     whitelist (only `\\\\`, `\\\\n`, `\\\\t` ever reach decode through the
@@ -357,6 +392,66 @@ fi
     assert "LOADED:bar" in result.stdout, (
         f"matching REMEMBER_DIR failed to load: stdout={result.stdout!r} "
         f"stderr={result.stderr!r}"
+    )
+
+
+def test_trailing_cr_cache_hit_matches_cache_miss_byte_identical(tmp_path):
+    """#887: scripts/log.sh's cache loader strips ONE trailing CR byte off
+    every raw line it reads from the cache file (`_line="${_line%$'\r'}"`,
+    meant for a cache file with CRLF line endings) -- but before this fix,
+    `_remember_cfg_flatten_q_encode` never escaped a literal CR inside a
+    VALUE the way it already escapes `\\`, `\n` and `\t`, so a value
+    ending in CR put that CR as the LAST byte on its own on-disk line too,
+    and the strip removed it. Red before the fix: a value ending in CR
+    decodes to a shorter byte length on a cache HIT than it does on the
+    cache MISS path (`_config_load`'s own unescaped `printf -v NAME '%s'
+    VALUE` loop) that wrote the SAME raw value moments earlier."""
+    remember_dir = tmp_path / "project" / ".remember"
+    remember_dir.mkdir(parents=True)
+    sys_tmp = tmp_path / "systmp"
+    sys_tmp.mkdir()
+    script = f"""
+set -eu
+TMPDIR="{sys_tmp.as_posix()}"
+export TMPDIR
+source "{LOG_SH.as_posix()}" >/dev/null 2>&1
+export REMEMBER_DIR="{remember_dir.as_posix()}"
+_dump=$(printf 'FOO\\tsecret\\r')
+# Emulate _config_load's own cache-MISS assignment loop verbatim (the raw
+# dump value, unescaped, straight into the variable).
+while IFS=$'\\t' read -r _k _v; do
+    [ -n "$_k" ] || continue
+    printf -v "_RCFG_${{_k//./_}}" '%s' "$_v"
+done <<MISSEOF
+$_dump
+MISSEOF
+printf 'MISS_LEN=%d\\n' "${{#_RCFG_FOO}}"
+_remember_cfg_flatten_cache_publish "$_dump"
+unset _RCFG_FOO
+_remember_cfg_flatten_cache_load
+printf 'HIT_LEN=%d\\n' "${{#_RCFG_FOO}}"
+"""
+    result = subprocess.run(
+        [BASH, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+        env={**os.environ, "PROJECT_DIR": str(tmp_path)},
+    )
+    assert result.returncode == 0, f"harness itself failed: {result.stderr!r}"
+    lines = {
+        ln.split("=", 1)[0]: int(ln.split("=", 1)[1])
+        for ln in result.stdout.splitlines()
+        if "=" in ln
+    }
+    assert lines.get("MISS_LEN") == 7, (
+        f"sanity: the miss-path value ('secret' + CR) should be 7 bytes: {result.stdout!r}"
+    )
+    assert lines.get("HIT_LEN") == lines.get("MISS_LEN"), (
+        f"cache HIT decoded to a different byte length than the cache MISS "
+        f"for the same value (a trailing CR was silently dropped on the hit "
+        f"path): {result.stdout!r}"
     )
 
 
