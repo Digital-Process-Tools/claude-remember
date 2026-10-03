@@ -241,6 +241,17 @@ _SANCTIONED_DIVERGENCE = {
             '    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)\n'
             '    local data_dir="$1" prefix\n',
         ),
+        # #898: the directory's scanner read a typed "." SCRIPT_DIR fallback
+        # as a further shipped file (COMMAND_SCRIPT_NOT_FOLLOWED) -- replaced
+        # with $PWD here, same directory-resolution semantics, no literal dot.
+        (
+            '_REMEMBER_SRC_DIR="${BASH_SOURCE[0]%/*}"\n'
+            '[ "$_REMEMBER_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_SRC_DIR="."\n'
+            'source "$_REMEMBER_SRC_DIR/lib-slug.sh"\n',
+            '_REMEMBER_SRC_DIR="${BASH_SOURCE[0]%/*}"\n'
+            '[ "$_REMEMBER_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_SRC_DIR="$PWD"\n'
+            'source "$_REMEMBER_SRC_DIR/lib-slug.sh"\n',
+        ),
         # #662's own tuple (the `_LAZY_PYTHON_GUARD` insertion into the no-jq
         # elif, on its own, pre-#726 two-argument invocation) is gone (#734):
         # #726 (below) composed directly on top of it and shipped the guard
