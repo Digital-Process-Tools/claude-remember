@@ -486,7 +486,7 @@ session_was_saved() {
         # replaced with a here-string carrying the identical script as a
         # single-quoted literal (no `'"'"'` byte appears in it, so this is
         # safe), same argv, same stdin content.
-        [ "$($PYTHON - "$LAST_SAVE_FILE" "$1" <<< 'import json, math, sys
+        [ "$(_remember_run_python - "$LAST_SAVE_FILE" "$1" <<< 'import json, math, sys
 
 def isline(v):
     # Mirrors $SAVED_QUERY'"'"'s own `isline` def exactly: a JSON number,
@@ -535,7 +535,7 @@ else:
 ' 2>/dev/null
 )" = "saved" ]
     else
-        [ "$($JQ -r --arg id "$1" "$SAVED_QUERY" "$LAST_SAVE_FILE" 2>/dev/null)" = "saved" ]
+        [ "$(_remember_run_jq -r --arg id "$1" "$SAVED_QUERY" "$LAST_SAVE_FILE" 2>/dev/null)" = "saved" ]
     fi
 }
 
@@ -1677,7 +1677,7 @@ if [ "$_promos_enabled" = "true" ] \
         # rather than on EOF, so a genuinely empty trailing field is read
         # correctly instead of silently vanishing.
         local _promo_rows
-        _promo_rows=$($JQ -r '(.promos[]? | .id // "", .text // "", .url // "", .installed_key // "", .gate // ""), "#promo-end#"' "$promos_file" 2>/dev/null) || return 0
+        _promo_rows=$(_remember_run_jq -r '(.promos[]? | .id // "", .text // "", .url // "", .installed_key // "", .gate // ""), "#promo-end#"' "$promos_file" 2>/dev/null) || return 0
         [ -n "$_promo_rows" ] || return 0
 
         # Three states (#574 decision 3), never two. `installed_ok` is unset
@@ -1711,7 +1711,7 @@ if [ "$_promos_enabled" = "true" ] \
             # explicitly: only an object reaches to_entries; anything else
             # (array, string, number, null, missing) falls to `empty`, same
             # as the old query's caught error.
-            _iprobe=$($JQ -r 'if (.version // empty) == "2" and (((.plugins // {}) | type) == "object") then (["#ok"] + ((.plugins // {}) | to_entries | map(.key))) | .[] else empty end' "$installed_file" 2>/dev/null)
+            _iprobe=$(_remember_run_jq -r 'if (.version // empty) == "2" and (((.plugins // {}) | type) == "object") then (["#ok"] + ((.plugins // {}) | to_entries | map(.key))) | .[] else empty end' "$installed_file" 2>/dev/null)
             if [ -n "$_iprobe" ]; then
                 local _iline _ifirst=1
                 while IFS= read -r _iline; do
@@ -2574,7 +2574,7 @@ if [ -n "$_REMEMBER_CTX_OK" ]; then
     # regress. `cat`, never `$(cat …)`, so a trailing blank line the old
     # direct-print path always produced is not silently trimmed here.
     if [ -n "$PROMO_MSG" ] && command -v jq >/dev/null 2>&1; then
-        _REMEMBER_PROMO_JSON=$($JQ -Rs --arg msg "$PROMO_MSG" \
+        _REMEMBER_PROMO_JSON=$(_remember_run_jq -Rs --arg msg "$PROMO_MSG" \
             '{hookSpecificOutput:{hookEventName:"SessionStart",additionalContext:.},systemMessage:$msg}' \
             < "$_REMEMBER_CTX_FILE" 2>/dev/null) || _REMEMBER_PROMO_JSON=""
         # jq usage failure must not become this hook's status (same

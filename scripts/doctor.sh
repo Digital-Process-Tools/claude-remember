@@ -383,7 +383,7 @@ else
     source "$SCRIPT_DIR/detect-tools.sh" >/dev/null 2>&1
     _PY_FIRST="${PYTHON%% *}"
     _PY_PATH=$(command -v "$_PY_FIRST" 2>/dev/null)
-    _PY_VERSION=$($PYTHON -V 2>&1)
+    _PY_VERSION=$(_remember_run_python -V 2>&1)
     _PY_DISPLAY="$_PY_PATH"
     [ -n "$_PY_DISPLAY" ] || _PY_DISPLAY="$_PY_FIRST"
     echo "OK   python: $PYTHON -> $_PY_DISPLAY ($_PY_VERSION)"

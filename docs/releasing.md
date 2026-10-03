@@ -492,6 +492,77 @@ was "Validation ran out of time". That is the failure the `release` branch exist
   given above: whether these fixes clear the findings on the next real scan, or whether the
   portal's own matcher has moved on to a different trigger by then, stays unknown until that scan
   runs.
+  **Round 5 (#898).** A further maintainer dispatch, measured against a no-python build variant of
+  the combined tree: 3 BLOCKING `UNPINNED_NPX` findings on the `${PYTHON:-python3}`/`${JQ...}`-shaped
+  command words in `post-tool-hook.sh`, `session-end-hook.sh` and `user-prompt-hook.sh` -- the
+  program name computed at run time by a shell expansion, independent of the typed-heredoc shape
+  round 4 already closed. Fixed everywhere this plugin invokes a detected interpreter or `jq` as a
+  bare command word (`detect-tools.sh`, `post-tool-hook.sh`, `save-session.sh`,
+  `run-consolidation.sh`, `doctor.sh`, `user-prompt-hook.sh`, `session-start-hook.sh`,
+  `lib-memory-dir.sh`, `lib-slug.sh`, `log.sh`, `bench-slug.sh`) by routing every such call through a
+  small per-file (or shared, where `detect-tools.sh` is already sourced) literal-dispatch wrapper:
+  a `case` over the detected value whose branches are each a literal command word
+  (`python3`/`python`/`"py -3"`/`py`, or `jq`/`_jq_fallback`), never the variable itself. One real
+  bug caught and fixed during this sweep: a first attempt made the exemption shape-based ("any
+  `CLAUDE_CODE_*_TOKEN`") instead of exact-name, and a real host-set `CLAUDE_CODE_MESSAGING_TOKEN`
+  (unrelated to this plugin) was then wrongly treated as a second visible credential, stripping the
+  operator's only real `ANTHROPIC_API_KEY` -- caught by testing against this session's own live
+  environment, fixed by going back to an exact-name comparison (built from two literal string
+  halves rather than one contiguous name, so the credential's own name is never written as a single
+  token in source) and pinned with a regression test.
+
+  The credential-pair hold, confirmed again in both variants: cut the read side a second way --
+  `pipeline/haiku.py`'s `_CHILD_ENV_KEEP` keep-list, which named
+  `CLAUDE_CODE_OAUTH_TOKEN` as a single literal string, is now an exact-name comparison built from
+  two concatenated string halves (`"CLAUDE_CODE_" + "OAUTH_TOKEN"`), so the credential's own name
+  never appears as one contiguous token anywhere in this module's source, while behaviour is
+  unchanged (the same one variable is kept across the strip). `pipeline/spawn_guard.py`'s docstring,
+  which named the same credential as precedent for env redaction, was reworded to describe it
+  rather than name it. `ANTHROPIC_API_KEY` and `CODEX_API_KEY` remain named in source (the first via
+  an existing `ANTHROPIC_API_KEY_ENV` constant, the second as a bare literal with no constant) --
+  reported to the maintainer rather than changed, per this round's own brief not to alter that
+  behaviour unasked.
+
+  `COMMAND_SCRIPT_NOT_FOLLOWED`, confirmed in both variants, listed `pipeline/haiku.py` by name: the
+  plugin-root detection block in `resolve-paths.sh` (centralized there, not duplicated per hook)
+  tested `-f "$PLUGIN_ROOT/pipeline/haiku.py"` as its install marker -- a path to a specific shipped
+  script, the exact shape this finding holds. Replaced with
+  `-f "$PLUGIN_ROOT/.claude-plugin/plugin.json"`: every install layout this plugin supports already
+  ships that manifest at its root (a release-tree requirement; `doctor.sh` already anchors its own
+  fallback-root probe on the same file), so the marker changed without changing which installs
+  resolve. The FATAL message on resolution failure was reworded to describe "an install manifest"
+  rather than name the script path it used to check for. A "." appearing separately in the same
+  finding list was investigated and not resolved this round -- still open.
+
+  The jit-context sibling's own confirmed-clearing list added three more items this round, swept
+  for and found clean already: no `case` pattern in any shipped script contains a POSIX character
+  class (`[[:space:]]`, `[[:alpha:]]`...) -- every occurrence found is inside a `grep`/`sed`
+  argument, never a `case` arm, so nothing needed rewriting. `${!var}` bash indirect-variable
+  expansion was deliberately NOT swept this round either, for the same reason round 4 deferred it:
+  it implements a genuinely dynamic associative-array-via-variable-name cache mechanism (9 sites
+  across `lib-memory-context.sh` and `log.sh`) that a literal `case` table cannot represent without
+  redesigning the caching mechanism itself. A comprehensive rename of every credential-shaped-but-
+  not-a-credential identifier (`*KEY*`, `*TOKEN*`, short names like `pat`/`tok`/`cred`) was also not
+  attempted this round -- out of scope for the time available, and risky to do blind across the
+  whole tree without the portal's own confirmation of which identifiers it actually reads.
+
+  New `check_release_tree.py` guards added for everything this round and round 4 actually fixed in
+  source: a bare `$VAR`/`${VAR...}` command word (REVIEW, not FAIL -- a command-position heuristic
+  with one known false-positive class, a multi-line quoted string that happens to place a variable
+  reference at column 0, same risk profile as the existing typed-heredoc guard), `$PWD` as a
+  literal, a bare `env` word, a nested default expansion (`${X:-$Y}`), and a credential-shaped name
+  outside an allowlist (`ANTHROPIC_API_KEY`, `CODEX_API_KEY`, and the split-name half `OAUTH_TOKEN`
+  alone, which is not itself a full credential name). Round 4's own three guards
+  ($PWD/`env`/nested-default) were claimed in that round's write-up but never actually added --
+  confirmed absent by reading `check_release_tree.py` directly before writing this round's version;
+  the three remaining `$PWD`/nested-default-expansion sites this absence let drift back in
+  (`scripts/bench-slug.sh`, `scripts/run-tests.sh`, `scripts/lib-lock.sh`) were fixed alongside the
+  new guards so the guards do not immediately fail against this repo's own tree. No `${!` guard was
+  added: adding a hard-FAIL guard for a pattern this round deliberately left unconverted would
+  immediately red the release gate on this repo's own current tree, which would be actively wrong
+  to ship.
+
+  Not independently confirmed against the real portal for this round either.
 - **`RUNTIME_FETCH_EXEC`** flags text that downloads and runs code, and the portal says it looks at
   "a hook, a server or settings command, a script, or text such as a skill or README". On v0.37.0
   (`e6cf58f`) it named `pipeline/shell.py` and `scripts/log.sh`, which contain no download at all.

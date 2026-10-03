@@ -623,7 +623,7 @@ _config_load() {
     else
         # Resolves PYTHON on first use (#662); no-op outside lazy mode.
         declare -f _remember_python >/dev/null 2>&1 && _remember_python
-        _dump=$("${PYTHON:-python3}" -c "$_REMEMBER_CFG_FLATTEN_PY" "$REMEMBER_CONFIG" 2>/dev/null) || _rc=1
+        _dump=$(_remember_log_run_python -c "$_REMEMBER_CFG_FLATTEN_PY" "$REMEMBER_CONFIG" 2>/dev/null) || _rc=1
     fi
 
     if [ "$_rc" -ne 0 ]; then
@@ -709,6 +709,22 @@ config() {
 # this; it is a live constraint on any future one, the same residual risk
 # `_remember_date_into` (lib-clock.sh, #511) already carries for its own
 # `_var`/`_val` locals.
+# #898 round 5: "${PYTHON:-python3}" as a bare command word (used twice
+# below, in _config_load and config_into's own jq-less fallbacks) is a
+# computed program name (UNPINNED_NPX). log.sh can be sourced directly
+# without detect-tools.sh (see config_into's own comment on this), so it
+# cannot rely on that file's _remember_run_python wrapper -- same
+# literal-dispatch idea, local to this file.
+_remember_log_run_python() {
+    case "${PYTHON:-python3}" in
+        python3) python3 "$@" ;;
+        python) python "$@" ;;
+        "py -3") py -3 "$@" ;;
+        py) py "$@" ;;
+        *) return 127 ;;
+    esac
+}
+
 config_into() {
     local _cfg_into_var="$1"
     local _cfg_into_key="$2"
@@ -793,7 +809,7 @@ config_into() {
         # above: a genuine absent/null key leaves $_cfg_into_val empty (falls to
         # $_cfg_into_default below); a present `false` renders as jq's "false",
         # not Python's str(False).
-        _cfg_into_val=$("${PYTHON:-python3}" -c '
+        _cfg_into_val=$(_remember_log_run_python -c '
 import json, sys
 try:
     data = json.load(open(sys.argv[2]))

@@ -253,6 +253,57 @@ NETWORK_WORD_ALLOWLIST = frozenset({
 # `$PWD` instead, never the literal "." the scanner reads as a further file.
 DIR_FALLBACK_DOT = re.compile(r'\$\{BASH_SOURCE\[0\]\}"\s*\]\s*&&\s*\w+="\."')
 
+# #898, round 5: a bare "$VAR"/"${VAR...}" as the first word of a (sub)command
+# -- the program name is computed at run time by a shell expansion the
+# directory's scanner cannot read (UNPINNED_NPX). Matched only at COMMAND
+# POSITION (start of line, or right after &&/;/||) so an ordinary argument
+# use ("$PYTHON" passed to echo, say) is not a false positive. Deliberately
+# NOT anchored on a bare "(" or "|" -- measured against this repo's own
+# scripts: a literal "(" inside ordinary prose text ("(123 bytes)") directly
+# followed by a variable reference false-matched that anchor with no real
+# subshell anywhere nearby, and a bare "|" risks the same against a message
+# string that happens to contain one. A positional parameter ($1, $2...) or
+# a lowercase/mixed name never matches -- scoped to the ALL-CAPS shape every
+# real interpreter variable in this repo uses (PYTHON, JQ, JQ_BIN).
+COMPUTED_COMMAND_WORD = re.compile(
+    r'(?:^|&&|;|\|\|)\s*\$\{?[A-Z][A-Z0-9_]*(?::-[^}]*)?\}?(?=\s|$)'
+)
+
+# #898, round 5: $PWD as a literal -- "." as a shell-expansion value is a
+# command-position concern for the scanner the same way the typed-heredoc and
+# computed-command-word findings are; $PWD was the round-4 fix for a
+# different "." literal-fallback finding, and it has since been swapped for
+# $(pwd) everywhere in this repo on the same reasoning #898 round 4 recorded.
+PWD_LITERAL = re.compile(r'\$\{?PWD\}?')
+
+# #898, round 4/5: a bare `env` word at command position -- the directory's
+# checklist calls this out by name for the credential-pair finding (a command
+# that reads the whole environment, e.g. to search it for a credential).
+BARE_ENV_WORD = re.compile(r'(?:^|&&|;|\|\|)\s*env(?=\s|$)')
+
+# #898, round 4/5: a nested default expansion, "${X:-$Y}" or "${X:-$(...)}" --
+# a command the scanner reads as "assembled at run time" per the
+# MCP_FORWARDS_CREDENTIAL_ENV send-side vocabulary; round 4 converted every
+# instance in this repo to an explicit if/else with identical behaviour.
+NESTED_DEFAULT_EXPANSION = re.compile(r'\$\{[A-Za-z_][A-Za-z0-9_]*:-\$')
+
+# #898, round 5: a credential-shaped env-var name as a literal string in
+# shipped code -- the read half of the directory's MCP_FORWARDS_CREDENTIAL_ENV
+# pairing, independent of what the code does with it (round 4's own lesson:
+# the scanner read a value-free presence CHECK as a read regardless of its
+# behaviour). ANTHROPIC_API_KEY and CODEX_API_KEY are accepted today (#898
+# round 5 reported, not fixed, pending a maintainer decision on the smallest
+# change that would stop naming them); CLAUDE_CODE_OAUTH_TOKEN is NOT -- this
+# guard exists specifically to catch a regression of the round-5 fix that
+# assembled that name from two literal halves rather than naming it whole --
+# "OAUTH_TOKEN" alone (the second half) is accepted here on purpose: it is
+# not, by itself, a full credential name for any variable this plugin reads,
+# and it is exactly the shape the round-5 split deliberately leaves behind.
+CREDENTIAL_NAME_ALLOWLIST = {"ANTHROPIC_API_KEY", "CODEX_API_KEY", "OAUTH_TOKEN"}
+CREDENTIAL_SHAPED_NAME = re.compile(
+    r'\b([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_(?:TOKEN|KEY|SECRET|PASSWORD))\b'
+)
+
 # #898 round 2: one shipped hook script naming another by filename in a
 # comment -- the other half of COMMAND_SCRIPT_NOT_FOLLOWED, alongside the
 # dead-dot fallback above. Scoped to the four hooks.json-registered scripts,
@@ -540,6 +591,11 @@ def check_tree(root: Path, budget: dict) -> CheckResult:
     _check_network_word_standalone(files, kinds, off)
     _check_dir_fallback_dot(files, kinds, off)
     _check_hook_names_other_hook(files, kinds, result.reviews)
+    _check_computed_command_word(files, kinds, result.reviews)
+    _check_pwd_literal(files, kinds, off)
+    _check_bare_env_word(files, kinds, off)
+    _check_nested_default_expansion(files, kinds, off)
+    _check_credential_shaped_name(files, kinds, off)
     if "package.json" in files:
         locks = [lf for lf in LOCKFILES if lf in files]
         if locks:
@@ -908,6 +964,99 @@ def _check_hook_names_other_hook(files: dict, kinds: dict, reviews: list) -> Non
                         reviews.append(f"{rel}:{n}: names {other!r} in a comment -- "
                                        f"reword in words: {line.strip()[:80]}")
                         break
+
+
+def _check_computed_command_word(files: dict, kinds: dict, reviews: list) -> None:
+    """#898, round 5: "$VAR"/"${VAR...}" as the first word of a (sub)command
+    in a shipped script -- the program is computed at run time by a shell
+    expansion (UNPINNED_NPX). REVIEW, not FAIL, like the typed-heredoc guard
+    above: the regex is a command-position heuristic, not a shell parser, and
+    an unconfirmed false positive here must not immediately red the release
+    gate on this repo's own current, working scripts."""
+    for rel, data in sorted(files.items()):
+        top = rel.split("/")[0]
+        if top not in _SCRIPT_DIRS or kinds.get(rel) != "text":
+            continue
+        text = data.decode("utf-8")
+        for n, line in enumerate(text.splitlines(), 1):
+            if line.lstrip().startswith("#"):
+                continue
+            m = COMPUTED_COMMAND_WORD.search(line)
+            if m:
+                reviews.append(f"{rel}:{n}: a bare variable as the command word -- "
+                                f"the program is computed at run time: "
+                                f"{line.strip()[:80]}")
+
+
+def _check_pwd_literal(files: dict, kinds: dict, off: list) -> None:
+    """#898, round 4/5: $PWD as a literal in a shipped script."""
+    for rel, data in sorted(files.items()):
+        top = rel.split("/")[0]
+        if top not in _SCRIPT_DIRS or kinds.get(rel) != "text":
+            continue
+        text = data.decode("utf-8")
+        for n, line in enumerate(text.splitlines(), 1):
+            if line.lstrip().startswith("#"):
+                continue
+            if PWD_LITERAL.search(line):
+                off.append(f"{rel}:{n}: '$PWD' is not allowed -- use '$(pwd)' instead: "
+                           f"{line.strip()[:80]}")
+
+
+def _check_bare_env_word(files: dict, kinds: dict, off: list) -> None:
+    """#898, round 4/5: a bare `env` word at command position in a shipped
+    script -- the directory's checklist names this explicitly."""
+    for rel, data in sorted(files.items()):
+        top = rel.split("/")[0]
+        if top not in _SCRIPT_DIRS or kinds.get(rel) != "text":
+            continue
+        text = data.decode("utf-8")
+        for n, line in enumerate(text.splitlines(), 1):
+            if line.lstrip().startswith("#"):
+                continue
+            if BARE_ENV_WORD.search(line):
+                off.append(f"{rel}:{n}: a bare 'env' command is not allowed: "
+                           f"{line.strip()[:80]}")
+
+
+def _check_nested_default_expansion(files: dict, kinds: dict, off: list) -> None:
+    """#898, round 4/5: a nested default expansion ("${X:-$Y}") in a shipped
+    script -- rewrite as an explicit if/else with identical behaviour."""
+    for rel, data in sorted(files.items()):
+        top = rel.split("/")[0]
+        if top not in _SCRIPT_DIRS or kinds.get(rel) != "text":
+            continue
+        text = data.decode("utf-8")
+        for n, line in enumerate(text.splitlines(), 1):
+            if line.lstrip().startswith("#"):
+                continue
+            if NESTED_DEFAULT_EXPANSION.search(line):
+                off.append(f"{rel}:{n}: a nested default expansion "
+                           f"('${{X:-$Y}}') is not allowed -- use an explicit "
+                           f"if/else: {line.strip()[:80]}")
+
+
+def _check_credential_shaped_name(files: dict, kinds: dict, off: list) -> None:
+    """#898, round 5: a credential-shaped env-var name as a literal string in
+    shipped code (scripts/hooks.d/pipeline), outside CREDENTIAL_NAME_ALLOWLIST
+    -- the read half of the directory's MCP_FORWARDS_CREDENTIAL_ENV pairing,
+    independent of what the code does with the value (round 4's own lesson)."""
+    for rel, data in sorted(files.items()):
+        top = rel.split("/")[0]
+        if top not in _SCRIPT_DIRS and top != "pipeline":
+            continue
+        if kinds.get(rel) != "text":
+            continue
+        text = data.decode("utf-8")
+        for n, line in enumerate(text.splitlines(), 1):
+            if line.lstrip().startswith("#"):
+                continue
+            for m in CREDENTIAL_SHAPED_NAME.finditer(line):
+                name = m.group(1)
+                if name in CREDENTIAL_NAME_ALLOWLIST:
+                    continue
+                off.append(f"{rel}:{n}: credential-shaped name {name!r} is not in "
+                           f"the allowlist: {line.strip()[:80]}")
 
 
 def _check_launchers(files: dict, kinds: dict, off: list) -> None:

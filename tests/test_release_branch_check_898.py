@@ -291,3 +291,90 @@ def test_a_non_hook_script_naming_a_hook_script_is_not_reviewed(tmp_path):
     })
     reviews = _check(root).reviews
     assert not any("lib-example.sh" in r for r in reviews), reviews
+
+
+# -- round 5 (#898): computed command word, "$VAR ..." (REVIEW) ----------------
+
+def test_a_computed_command_word_is_reviewed(tmp_path):
+    root = _tree(tmp_path, {
+        "scripts/run.sh": b"#!/bin/sh\nPYTHON=python3\ncd /tmp && $PYTHON -m pipeline.shell\n",
+    })
+    reviews = _check(root).reviews
+    assert any("run.sh" in r and "command word" in r for r in reviews), reviews
+
+
+def test_a_quoted_variable_argument_is_not_a_computed_command_word(tmp_path):
+    """Positive control: an ordinary argument use ("$PYTHON" passed to a real
+    command) must not trip this guard -- only the command-word position."""
+    root = _tree(tmp_path, {
+        "scripts/run.sh": b"#!/bin/sh\nPYTHON=python3\necho \"using $PYTHON\"\n",
+    })
+    reviews = _check(root).reviews
+    assert not any("run.sh" in r and "command word" in r for r in reviews), reviews
+
+
+# -- round 4/5 (#898): $PWD literal, bare `env`, nested default (FAIL) ---------
+
+def test_pwd_literal_fails(tmp_path):
+    root = _tree(tmp_path, {"scripts/run.sh": b'#!/bin/sh\nX="$PWD/thing"\n'})
+    offenders = _check(root).offenders
+    assert any("run.sh" in o and "PWD" in o for o in offenders), offenders
+
+
+def test_pwd_subshell_is_not_a_pwd_literal(tmp_path):
+    """Positive control: $(pwd) -- the fix this guard exists to keep in
+    place -- must not itself trip the guard."""
+    root = _tree(tmp_path, {"scripts/run.sh": b'#!/bin/sh\nX="$(pwd)/thing"\n'})
+    offenders = _check(root).offenders
+    assert not any("run.sh" in o and "PWD" in o for o in offenders), offenders
+
+
+def test_bare_env_word_fails(tmp_path):
+    root = _tree(tmp_path, {"scripts/run.sh": b"#!/bin/sh\nenv | grep KEY\n"})
+    offenders = _check(root).offenders
+    assert any("run.sh" in o and "'env'" in o for o in offenders), offenders
+
+
+def test_env_as_part_of_a_longer_word_is_not_a_bare_env_word(tmp_path):
+    """Positive control: a variable named *environment* or a word ending in
+    'env' must not false-match the bare command."""
+    root = _tree(tmp_path, {"scripts/run.sh": b'#!/bin/sh\nX="$MY_ENV"\nenvironment_check\n'})
+    offenders = _check(root).offenders
+    assert not any("run.sh" in o and "'env'" in o for o in offenders), offenders
+
+
+def test_nested_default_expansion_fails(tmp_path):
+    root = _tree(tmp_path, {"scripts/run.sh": b'#!/bin/sh\nX="${FOO:-$BAR}"\n'})
+    offenders = _check(root).offenders
+    assert any("run.sh" in o and "nested default" in o for o in offenders), offenders
+
+
+def test_plain_default_expansion_is_not_a_nested_one(tmp_path):
+    """Positive control: an ordinary "${X:-literal}" default (round 4's own
+    fix shape) must not trip this guard -- only a default whose value is
+    itself another expansion."""
+    root = _tree(tmp_path, {"scripts/run.sh": b'#!/bin/sh\nX="${FOO:-bar}"\n'})
+    offenders = _check(root).offenders
+    assert not any("run.sh" in o and "nested default" in o for o in offenders), offenders
+
+
+# -- round 5 (#898): credential-shaped name outside the allowlist (FAIL) ------
+
+def test_credential_shaped_name_outside_allowlist_fails(tmp_path):
+    root = _tree(tmp_path, {
+        "pipeline/example.py": b'TOKEN = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")\n',
+    })
+    offenders = _check(root).offenders
+    assert any("example.py" in o and "CLAUDE_CODE_OAUTH_TOKEN" in o for o in offenders), offenders
+
+
+def test_allowlisted_credential_name_is_not_an_offender(tmp_path):
+    """Positive control: ANTHROPIC_API_KEY (and the round-5 split-name half,
+    OAUTH_TOKEN alone) are accepted today -- reported, not fixed, per the
+    round-5 brief's own instruction not to remove that behaviour unasked."""
+    root = _tree(tmp_path, {
+        "pipeline/example.py": (b'KEY_ENV = "ANTHROPIC_API_KEY"\n'
+                                 b'NAME = "CLAUDE_CODE_" + "OAUTH_TOKEN"\n'),
+    })
+    offenders = _check(root).offenders
+    assert not any("example.py" in o for o in offenders), offenders

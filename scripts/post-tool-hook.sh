@@ -831,7 +831,7 @@ fi
 
 if [ -z "$SIDECAR_TRUSTED" ] && [ -f "$LAST_SAVE_FILE" ]; then
     [ -n "${PYTHON:-}" ] || source "$_HOOK_DIR/detect-tools.sh"
-    LAST_LINE=$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell read-position "$LAST_SAVE_FILE" "$SESSION_ID" 2>/dev/null)
+    LAST_LINE=$(cd "$PIPELINE_DIR" && _remember_run_python -m pipeline.shell read-position "$LAST_SAVE_FILE" "$SESSION_ID" 2>/dev/null)
     case "$LAST_LINE" in ''|*[!0-9]*) LAST_LINE=0 ;; esac
 fi
 

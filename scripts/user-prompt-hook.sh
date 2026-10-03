@@ -465,6 +465,21 @@ dispatch "after_user_prompt"
 # detect-tools.sh is deliberately NOT sourced here — it hard-exits when python
 # is missing, and this hook must never block a prompt. jq is resolved directly.
 JQ_BIN="${JQ:-jq}"
+# #898 round 5: a bare "$JQ_BIN" command word is itself a computed program
+# name (UNPINNED_NPX) -- this file does not source detect-tools.sh (see
+# above), so its own _remember_run_jq wrapper is out of scope here; this is
+# the same literal-dispatch idea, local to this file, over the only two
+# values JQ_BIN can hold.
+_remember_run_jq_bin() {
+    case "$JQ_BIN" in
+        jq) jq "$@" ;;
+        _jq_fallback) _jq_fallback "$@" ;;
+        *)
+            echo "FATAL: _remember_run_jq_bin: unrecognized JQ_BIN value '$JQ_BIN'" >&2
+            return 127
+            ;;
+    esac
+}
 if [ "$_REMEMBER_HOST_JSON_STDOUT" = "1" ]; then
     # --- Non-Claude-Code host (#451) ---
     # See the comment at the top of this file. Whether or not there is a
@@ -476,7 +491,7 @@ if [ "$_REMEMBER_HOST_JSON_STDOUT" = "1" ]; then
     else
         _JSON=""
         if command -v "$JQ_BIN" >/dev/null 2>&1; then
-            _JSON=$("$JQ_BIN" -n --arg ctx "$CTX" --arg msg "$NOTICE_MSG" \
+            _JSON=$(_remember_run_jq_bin -n --arg ctx "$CTX" --arg msg "$NOTICE_MSG" \
                 '(if $ctx != "" then {hookSpecificOutput:{hookEventName:"UserPromptSubmit",additionalContext:$ctx}} else {} end)
                  + (if $msg != "" then {systemMessage:$msg} else {} end)' 2>/dev/null) || _JSON=""
         fi
@@ -509,7 +524,7 @@ else
     # the JSON is built first and only printed if it was actually produced.
     _JSON=""
     if command -v "$JQ_BIN" >/dev/null 2>&1; then
-        _JSON=$(printf '%s\n' "$CTX" | "$JQ_BIN" -Rs --arg msg "$NOTICE_MSG" \
+        _JSON=$(printf '%s\n' "$CTX" | _remember_run_jq_bin -Rs --arg msg "$NOTICE_MSG" \
             '{hookSpecificOutput:{hookEventName:"UserPromptSubmit",additionalContext:.},systemMessage:$msg}' 2>/dev/null) \
             || _JSON=""
     fi

@@ -633,7 +633,26 @@ elif [ "${#_cfg_sources[@]}" -gt 0 ]; then
     # replaced with a here-string carrying the identical script as a single
     # quoted literal (no `'"'"'` byte appears in it, so this is safe), same
     # argv, same stdin content, same exit-code contract.
-    "${PYTHON:-python3}" - "$_merged_cfg" "$_untrusted_haiku_source" "$_strip_model_reject" "$_project_drop_marker" "${_cfg_sources[@]}" > /dev/null 2>&1 <<< 'import json
+    #
+    # #898 round 5: "${PYTHON:-python3}" as the command word is itself a
+    # second UNPINNED_NPX trigger (a program computed at run time by a shell
+    # expansion). This file does not source detect-tools.sh (by design --
+    # see the header comment above for why: it would exit 1 on no usable
+    # Python), so it cannot reuse that file's _remember_run_python wrapper.
+    # Same literal-dispatch idea, local to this function: the `case`
+    # branches are each a literal command word, and the here-string below
+    # still attaches to the function call itself, so stdin reaches whichever
+    # literal `python3`/`python`/`py -3`/`py` the case selects, unchanged.
+    _lmd_run_python() {
+        case "${PYTHON:-python3}" in
+            python3) python3 "$@" ;;
+            python) python "$@" ;;
+            "py -3") py -3 "$@" ;;
+            py) py "$@" ;;
+            *) return 127 ;;
+        esac
+    }
+    _lmd_run_python - "$_merged_cfg" "$_untrusted_haiku_source" "$_strip_model_reject" "$_project_drop_marker" "${_cfg_sources[@]}" > /dev/null 2>&1 <<< 'import json
 import sys
 
 

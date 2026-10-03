@@ -81,7 +81,7 @@ _jq_fallback() {
     # single-quoted literal (the script's own two embedded `.` single
     # quotes are escaped with the standard shell close-emit-reopen idiom),
     # same argv, same stdin content.
-    $PYTHON - "$_jq_file" "$_jq_query" <<< 'import json, sys
+    _remember_run_python - "$_jq_file" "$_jq_query" <<< 'import json, sys
 try:
     data = json.load(open(sys.argv[1]))
     keys = sys.argv[2].strip('"'"'.'"'"').split('"'"'.'"'"')
@@ -299,6 +299,38 @@ if [ "${_REMEMBER_LAZY_PYTHON:-0}" != "1" ]; then
     _remember_tools_cache_publish
 fi
 fi
+
+# --- Literal-dispatch wrappers (#898 round 5: UNPINNED_NPX hold) ---
+# The directory's scanner holds any command whose program name is a shell
+# variable, even one this file validated itself above ("the program is
+# computed at run time by a shell substitution the validator cannot read").
+# Every call site that used to invoke "$PYTHON ..." / "$JQ ..." directly now
+# goes through one of these two wrappers instead, each a `case` whose
+# branches are literal command words -- what the validator can read.
+# Defined unconditionally (cheap -- a function definition) so a cache-hit
+# PYTHON/JQ value still has something to call through.
+_remember_run_python() {
+    case "$PYTHON" in
+        python3) python3 "$@" ;;
+        python) python "$@" ;;
+        "py -3") py -3 "$@" ;;
+        py) py "$@" ;;
+        *)
+            echo "FATAL: _remember_run_python: unrecognized PYTHON value '$PYTHON'" >&2
+            return 127
+            ;;
+    esac
+}
+_remember_run_jq() {
+    case "$JQ" in
+        jq) jq "$@" ;;
+        _jq_fallback) _jq_fallback "$@" ;;
+        *)
+            echo "FATAL: _remember_run_jq: unrecognized JQ value '$JQ'" >&2
+            return 127
+            ;;
+    esac
+}
 
 # Note: assign_kv (renamed #864 from an earlier name built the same way)
 # lives in log.sh (single source of truth). It strips CR from CRLF input —

@@ -77,11 +77,12 @@ def _make_env(tmp_path: Path):
         (plugin / "scripts" / script).write_text((REPO_ROOT / "scripts" / script).read_text())
     (plugin / "scripts" / "driver-no-log.sh").write_text(DRIVER_NO_LOG)
     (plugin / "scripts" / "driver-fallback.sh").write_text(DRIVER_FALLBACK_DIRECT)
-    # resolve-paths.sh (#471) now requires pipeline/haiku.py to accept a
+    # resolve-paths.sh (#471) now requires a marker file to accept a
     # CLAUDE_PLUGIN_ROOT/PLUGIN_ROOT value at all, not just [ -d ] -- an
-    # empty stub is enough, nothing here ever imports it.
-    (plugin / "pipeline").mkdir(parents=True)
-    (plugin / "pipeline" / "haiku.py").write_text("", encoding="utf-8")
+    # empty stub is enough, nothing here ever imports it. #898, round 5
+    # moved that marker from pipeline/haiku.py to the install manifest.
+    (plugin / ".claude-plugin").mkdir(parents=True)
+    (plugin / ".claude-plugin" / "plugin.json").write_text("{}", encoding="utf-8")
 
     env = {
         **os.environ,

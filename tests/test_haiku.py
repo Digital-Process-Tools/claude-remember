@@ -328,6 +328,35 @@ def test_legacy_oauth_config_no_longer_counts_as_another_credential(
 
 
 @patch("pipeline.haiku.subprocess.run")
+def test_unrelated_claude_code_token_var_does_not_count_as_another_credential(
+    mock_run, monkeypatch, no_ambient_credentials
+):
+    """#898, round 5: a real host can set an UNRELATED env var that happens to
+    share the ``CLAUDE_CODE_`` prefix and end in ``_TOKEN`` (an internal
+    messaging token, observed on a live Claude Code session) -- a
+    shape-based ("ends in _TOKEN") exemption was tried for the directory's
+    naming hold and wrongly treated that variable as another visible
+    credential, stripping the operator's only real ANTHROPIC_API_KEY. The
+    exact-name check must not be fooled by this."""
+    monkeypatch.setenv("CLAUDE_CODE_MESSAGING_TOKEN", "unrelated-harness-value")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-example")
+    mock_run.return_value = MagicMock(
+        returncode=0, stdout=_mock_claude_response("x"), stderr="")
+
+    call_haiku("p")
+
+    env = mock_run.call_args[1]["env"]
+    assert env.get("ANTHROPIC_API_KEY") == "sk-ant-api03-example", (
+        "an unrelated CLAUDE_CODE_*_TOKEN variable must not be treated as "
+        "another visible credential and strip the operator's only real one"
+    )
+    assert env.get("CLAUDE_CODE_MESSAGING_TOKEN") is None, (
+        "this variable is parent-session identity (the CLAUDE_CODE_ prefix) "
+        "and must still be stripped -- it is not the one named exemption"
+    )
+
+
+@patch("pipeline.haiku.subprocess.run")
 def test_call_haiku_strips_anthropic_api_key_when_a_host_login_file_exists(
     mock_run, monkeypatch, no_ambient_credentials
 ):

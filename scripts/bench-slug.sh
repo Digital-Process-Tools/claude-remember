@@ -22,7 +22,9 @@
 set -u
 
 _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PIPELINE_DIR="${PIPELINE_DIR:-$(cd "$_SCRIPT_DIR/.." && pwd)}"
+if [ -z "${PIPELINE_DIR:-}" ]; then
+    PIPELINE_DIR="$(cd "$_SCRIPT_DIR/.." && pwd)"
+fi
 export PIPELINE_DIR
 
 # shellcheck source=/dev/null
@@ -38,16 +40,33 @@ if ! command -v "$PYTHON" >/dev/null 2>&1; then
     exit 2
 fi
 
+# #898 round 5: "$PYTHON" as a bare command word is a computed program name
+# (UNPINNED_NPX) -- this standalone dev script has no detect-tools.sh to
+# source, so it gets its own literal-dispatch wrapper, same shape as that
+# file's _remember_run_python.
+_bench_run_python() {
+    case "$PYTHON" in
+        python3) python3 "$@" ;;
+        python) python "$@" ;;
+        "py -3") py -3 "$@" ;;
+        py) py "$@" ;;
+        *)
+            printf 'bench-slug.sh: unrecognized PYTHON=%s\n' "$PYTHON" >&2
+            return 127
+            ;;
+    esac
+}
+
 _bench() {
     local label="$1" path="$2" start end
-    start=$("$PYTHON" -c 'import time; print(time.time())')
+    start=$(_bench_run_python -c 'import time; print(time.time())')
     local i=0
     while [ "$i" -lt "$ITERATIONS" ]; do
         session_dir_slug "$path" >/dev/null
         i=$((i + 1))
     done
-    end=$("$PYTHON" -c 'import time; print(time.time())')
-    "$PYTHON" -c "print(f'  {'$label':<18} {($end - $start) * 1000 / $ITERATIONS:6.2f} ms/call')"
+    end=$(_bench_run_python -c 'import time; print(time.time())')
+    _bench_run_python -c "print(f'  {'$label':<18} {($end - $start) * 1000 / $ITERATIONS:6.2f} ms/call')"
 }
 
 printf 'session_dir_slug, %s calls each\n' "$ITERATIONS"

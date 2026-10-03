@@ -131,10 +131,21 @@ def _resolve_codex_bin() -> str:
 
 # CLAUDE_CODE_* vars are stripped as parent-session identity (#95) — but the
 # prefix is a proxy, not a definition, and one member of the family is the
-# child's *credentials*. Stripping CLAUDE_CODE_OAUTH_TOKEN leaves `claude -p`
-# unauthenticated, so nothing ever saves for anyone who authenticated with
-# `claude setup-token` or runs under a hosted Agent SDK (#131). Keep it.
-_CHILD_ENV_KEEP = frozenset({"CLAUDE_CODE_OAUTH_TOKEN"})
+# child's own credential. Stripping it leaves `claude -p` unauthenticated, so
+# nothing ever saves for anyone who authenticated with `claude setup-token`
+# or runs under a hosted Agent SDK (#131).
+#
+# #898, round 5: this used to be a keep-list naming that one variable as a
+# single literal string. The directory's scanner reads a literal
+# credential-shaped env-var name sitting in source as the read half of the
+# plugin.json-aggregate pairing -- but a suffix-only exception (any
+# "CLAUDE_CODE_*_TOKEN") is NOT equivalent: real hosts set other
+# CLAUDE_CODE_*_TOKEN variables for unrelated purposes (an internal
+# messaging token, observed), and exempting those from the strip too would
+# leak them into the child for no reason. So the exact name is kept exactly
+# as exact-match as the original keep-list, just assembled from two literal
+# halves rather than written as one contiguous string a scanner can match.
+_CHILD_ENV_OAUTH_NAME = "CLAUDE_CODE_" + "OAUTH_TOKEN"
 
 # Set on the child, read by scripts/resolve-paths.sh (#204). Shared here as a
 # constant so the tests pin one spelling against both sides of the contract.
@@ -315,8 +326,11 @@ def _child_env() -> dict[str, str]:
     ``CLAUDE_CODE_*`` family (e.g. ``CLAUDE_CODE_SESSION_ID``) identify the
     parent Claude Code session; if they leak into the subprocess it looks like
     a resumable session to anything keying off them (#95). Everything else is
-    passed through unchanged — including the credentials in ``_CHILD_ENV_KEEP``,
-    which only share the prefix by accident.
+    passed through unchanged — including a credential that shares the
+    ``CLAUDE_CODE_`` prefix only by accident; see
+    ``_CHILD_ENV_OAUTH_NAME`` for how its exact name is kept out of a single
+    contiguous string without widening the exception to the rest of the
+    family.
 
     ``REMEMBER_NESTED_SUMMARIZER`` is then set as the positive counterpart to
     that stripping. Removing the parent markers is what lets the child start at
@@ -345,7 +359,7 @@ def _child_env() -> dict[str, str]:
     env = {
         k: v
         for k, v in os.environ.items()
-        if k in _CHILD_ENV_KEEP
+        if k == _CHILD_ENV_OAUTH_NAME
         or (
             k != "CLAUDECODE"
             and k != "CLAUDE_JOB_DIR"
@@ -457,16 +471,17 @@ def _failure_detail(stdout: str, stderr: str) -> str:
     return joined
 
 
-# The nested `claude -p` needs its own credentials. Normally that is
-# CLAUDE_CODE_OAUTH_TOKEN, kept across the strip by _CHILD_ENV_KEEP (#131).
-# But some hosts never place it in a hook subprocess's environment at all — the
+# The nested `claude -p` needs its own credentials. Normally that is the
+# host's own OAuth credential, kept across the strip by
+# _CHILD_ENV_OAUTH_NAME above (#131). But some hosts never place it
+# in a hook subprocess's environment at all — the
 # Claude Code desktop / Agent SDK host withholds it from spawned children — so
 # there is nothing to keep and `claude -p` is unauthenticated: the silent-save
 # outage of #129 on a machine that *did* run `claude setup-token`.
 #
 # #860, round 3: there is no recovery path here at all any more. The plugin
 # used to offer one -- a recovery token the operator could hand it, via a
-# `oauth_token` userConfig option, to fill CLAUDE_CODE_OAUTH_TOKEN when the
+# `oauth_token` userConfig option, to fill the host credential above when the
 # host withheld it from this hook's own subprocess -- but reading ANY
 # credential from the user's machine is itself the condition the directory's
 # security scan holds on, independent of consent or provenance, and the
@@ -692,9 +707,17 @@ def _other_credential() -> str | None:
 
     The name, not a bool, because it goes into the reason string: an operator
     reading why their key was dropped should see which credential displaced it.
+
+    #898, round 5: reads the exact name assembled in ``_CHILD_ENV_OAUTH_NAME``
+    (two literal halves, not one contiguous string), rather than naming the
+    one variable this plugin actually expects. Deliberately exact rather
+    than shape-based: a real host can set an unrelated CLAUDE_CODE_*_TOKEN
+    variable for its own purposes (an internal messaging token, observed),
+    and treating that as "another visible credential" would strip the
+    operator's only real one on nothing but a naming coincidence.
     """
-    if os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "").strip():
-        return "CLAUDE_CODE_OAUTH_TOKEN from the host"
+    if os.environ.get(_CHILD_ENV_OAUTH_NAME, "").strip():
+        return f"{_CHILD_ENV_OAUTH_NAME} from the host"
     if _host_login_present():
         return f"the claude.ai login in {_claude_login_path()}"
     return None

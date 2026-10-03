@@ -174,7 +174,10 @@ ALLOWLIST: dict[tuple[str, int], str] = {
         "matches [A-Za-z0-9_] as ASCII regardless of locale.",
     ("scripts/log.sh", 184):
         "the same Python fallback's own message text, not a pattern.",
-    ("scripts/lib-slug.sh", 71):
+    # Shifted +15 by #898 round 5's _remember_run_python/_remember_slug_run_python
+    # wrapper function added near the top of this file (the array itself is
+    # unchanged).
+    ("scripts/lib-slug.sh", 86):
         "a member of the _REMEMBER_SLUG_SED array, only ever invoked as "
         "`LC_ALL=C sed` (lib-slug.sh:373). The locale is forced at the call "
         "site, which this scanner cannot see from the definition; "
@@ -197,9 +200,10 @@ ALLOWLIST: dict[tuple[str, int], str] = {
     ("scripts/session-start-hook.sh", 298): _CASE,
     ("scripts/write-handoff.sh", 87): _CASE,
     ("scripts/doctor.sh", 70): _CASE,
-    # Shifted +5 by #898 round 4's claude_projects_dir nested-default fix
-    # above in this same file (the case statement itself is unchanged).
-    ("scripts/lib-slug.sh", 411): _CASE,
+    # Shifted +5 by #898 round 4's claude_projects_dir nested-default fix,
+    # then +15 more by round 5's wrapper function above (the case statement
+    # itself is unchanged).
+    ("scripts/lib-slug.sh", 426): _CASE,
 }
 
 
