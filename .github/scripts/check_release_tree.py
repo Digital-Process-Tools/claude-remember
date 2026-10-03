@@ -1081,13 +1081,11 @@ def _check_nested_default_expansion(files: dict, kinds: dict, off: list) -> None
 def _check_indirect_expansion(files: dict, kinds: dict, reviews: list) -> None:
     """#898 round 7: `${!NAME}` indirect-name expansion in a shipped script
     -- the directory publishing repo's own sweep tool names this as one of
-    the shapes the real portal scanner holds a submission on. REVIEW, not
-    FAIL: round 7 redesigned every instance this repo could reach without a
-    behaviour change or a security regression, but one site in log.sh's
-    own config() stays on this shape deliberately (see that site's own
-    comment for the full reasoning -- the alternative, `eval`, is forbidden
-    by a dedicated regression test for a real #864 security fix), so a
-    hard FAIL here would red this repo's own current, working tree."""
+    the shapes the real portal scanner holds a submission on. REVIEW: round
+    7 left one site (log.sh's config table lookup); round 8 moved that
+    table into arrays, so this repo's own shipped scripts carry none now --
+    tests/test_scanner_shapes_source_898.py pins that zero. `${!arr[@]}`
+    is reported too: the portal cited an array's index list the same way."""
     for rel, data in sorted(files.items()):
         top = rel.split("/")[0]
         # bash-only shape: `.sh`, not every text file under these dirs --
@@ -1109,10 +1107,9 @@ def _check_lone_quote(files: dict, kinds: dict, reviews: list) -> None:
     between two quoted strings), used to put a literal quote character
     into an otherwise single/double-quoted shell string -- the sweep
     tool's own write-up: the scanner reads this as a `.` (source) command
-    and mis-splits the rest of the file. REVIEW, not FAIL: one site (an
-    embedded Python docstring's own apostrophe) is a known, reported
-    holdout -- see that site's comment for why a lane judged rewriting the
-    much larger program around it too risky to do blind in one round."""
+    and mis-splits the rest of the file. REVIEW: round 7 left one site (an
+    embedded Python docstring's own apostrophe); round 8 moved that program
+    into scripts/cfg_merge.py, so this repo's shipped scripts carry none."""
     for rel, data in sorted(files.items()):
         top = rel.split("/")[0]
         # bash-only shape: `.sh`, not every text file under these dirs --
@@ -1212,14 +1209,12 @@ def _check_catch_all_in_loop(files: dict, kinds: dict, off: list) -> None:
 def _check_dot_string(files: dict, kinds: dict, reviews: list) -> None:
     """#898 round 7: a lone "." or ".." as a double-quoted string value in a
     shipped script -- the sweep tool's own write-up: the real portal
-    scanner can misread this as a `.` (source) command. REVIEW, not FAIL:
-    round 7 found several sites where this is dirname's own documented
-    answer for a path with no separator, or a git-pathspec "no subdirectory
-    to scope to" sentinel, and a dedicated test (test_dirname_without_a_
-    fork_660.py) asserts byte-for-byte parity with real `dirname` including
-    this exact case -- rewriting those would be a real behaviour change,
-    not a no-op, so they stay as documented, reported holdouts rather than
-    redding this repo's own current, working tree."""
+    scanner can misread this as a `.` (source) command. REVIEW: round 7
+    left the sites where one dot is a real value (dirname's answer for a
+    path with no separator, a git-pathspec "no subdirectory" sentinel);
+    round 8 writes that same byte as octal 056 through `printf -v`, so this
+    repo's own shipped scripts carry none now --
+    tests/test_scanner_shapes_source_898.py pins that zero."""
     for rel, data in sorted(files.items()):
         top = rel.split("/")[0]
         # bash-only shape: `.sh`, not every text file under these dirs --
