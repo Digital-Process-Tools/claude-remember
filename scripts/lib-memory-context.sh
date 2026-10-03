@@ -1317,6 +1317,14 @@ unset _REMEMBER_BUDGET_EXCLUDE
 # MAX_BYTES <= 0 or non-numeric disables the budget outright (0 is a
 # deliberate "no cap", the same convention every other threshold in this
 # file uses).
+#
+# #878: if the body is STILL over budget once every droppable section is
+# gone (the head -- handoff + identity/core-memories -- is never dropped,
+# and can alone exceed a tightly configured MAX_BYTES), this function logs
+# a WARNING naming the final size and MAX_BYTES before returning. Never a
+# failure -- the body is still delivered in full, dropped sections and
+# all -- but without that log line an operator cannot tell "budget
+# satisfied" from "budget exhausted, still over" by reading the log alone.
 _remember_apply_session_start_budget() {
     local _outvar="$1" _max="$2"
     case "$_max" in (''|*[!0-9]*) return 0 ;; esac
