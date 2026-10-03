@@ -351,9 +351,15 @@ was "Validation ran out of time". That is the failure the `release` branch exist
   - **`scripts/session-start-hook.sh`**'s own comment (~L2487, mentioning auditing "credentials and
     network") is reworded to describe the same VS Code extension timeout message without that
     word, since it was the one literal hit the grep sweep below found in that file.
-  - Codex (`.codex-plugin`) has no `userConfig` mechanism, so its recovery path is genuinely
-    unchanged: still `REMEMBER_OAUTH_TOKEN` / `haiku.oauth_token`, still honoured there, because
-    there is nothing to move it to.
+  - **Codex (`.codex-plugin`) has no recovery-token path at all now, as the maintainer's own
+    instruction asked ("document that plainly")** -- an earlier draft of this writeup (and of
+    README.md / docs/configuration.md, both fixed by self-review) said Codex kept using
+    `REMEMBER_OAUTH_TOKEN` / `haiku.oauth_token` "unchanged", which was never quite true (Codex's
+    native `codex exec` route never read either one; only its fallthrough to the shared `claude -p`
+    code path, `REMEMBER_SUMMARIZER_FALLBACK=claude`, ever did) and is flatly wrong now that the
+    recovery-token code has no host branch left to read them on. Codex has no `userConfig`
+    mechanism, so there is genuinely no replacement for that one fallthrough case -- `/remember:doctor`'s
+    notice still fires there, informationally, since the detection itself is also host-agnostic.
   - **Grep sweep for `token|credential|api_key|oauth` (case-insensitive) across shipped file
     types**, per the round-2 instruction: 51 files, 542 lines matched. The overwhelming majority are
     accurate internal documentation in `pipeline/*.py` and `scripts/*.sh` that the maintainer's own

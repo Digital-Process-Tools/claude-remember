@@ -974,14 +974,17 @@ if [ -s "$_SUMMARY_FAILURE_MARKER" ]; then
     # Same marker family _isolation_may_be_the_cause (pipeline/haiku.py) scans
     # for -- an expired login reads as a generic failure here, so this is the
     # one lowercased substring match worth doing in bash rather than naming
-    # REMEMBER_OAUTH_TOKEN for every kind of failure, which would be as wrong
+    # a specific remedy for every kind of failure, which would be as wrong
     # in the other direction as never naming it at all.
     _SF_DETAIL_LOWER=$(printf '%s' "$_SF_DETAIL" | tr '[:upper:]' '[:lower:]')
     case "$_SF_DETAIL_LOWER" in
         *"not logged in"*|*"please run /login"*|*"invalid api key"*|\
         *"invalid bearer token"*|*"authentication_error"*|*"failed to authenticate"*)
-            echo "     this looks like an expired login -- set REMEMBER_OAUTH_TOKEN"
-            echo "     (see \`claude setup-token\`, #129/#131)"
+            echo "     this looks like an expired login -- on Claude Code,"
+            echo "     configure the plugin's userConfig recovery token"
+            echo "     (/plugin -> remember -> Configure, or \`claude setup-token\`"
+            echo "     then \`claude plugin config set remember oauth_token <token>\`,"
+            echo "     #129/#131/#860)"
             ;;
     esac
     unset _remember_sf_glob_dir _SF_LATEST_LOG _SF_DETAIL _SF_DETAIL_LOWER _sf_f

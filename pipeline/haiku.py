@@ -465,10 +465,13 @@ def _failure_detail(stdout: str, stderr: str) -> str:
 # outage of #129 on a machine that *did* run `claude setup-token`.
 #
 # Recovery is consent-based: the operator hands THIS plugin a token to pass to
-# the nested CLI, via the REMEMBER_OAUTH_TOKEN env var or a `haiku.oauth_token`
-# key in config.json. It is used only when the child env has no
-# CLAUDE_CODE_OAUTH_TOKEN, and only a value the operator deliberately
-# configured — nothing is read from OS credential storage the platform withheld.
+# the nested CLI, via the plugin's own `oauth_token` userConfig option (#860,
+# round 2 -- stale prose found by review: this used to say "the
+# REMEMBER_OAUTH_TOKEN env var or a haiku.oauth_token key in config.json",
+# which is no longer true; see _configured_oauth_token() below). It is used
+# only when the child env has no CLAUDE_CODE_OAUTH_TOKEN, and only a value
+# the operator deliberately configured — nothing is read from OS credential
+# storage the platform withheld.
 _MIN_TOKEN_LEN = 20
 
 
@@ -1604,8 +1607,11 @@ def call_haiku(
                     "WARNING: the un-isolated retry failed with the same "
                     f"authentication error ({_failure_detail(result.stdout, result.stderr)}) "
                     "-- hook isolation was not the cause. The CLI's own saved "
-                    "login has expired; set REMEMBER_OAUTH_TOKEN (see "
-                    "`claude setup-token`, #129/#131)."
+                    "login has expired; configure the plugin's userConfig "
+                    "recovery token instead (/plugin -> remember -> "
+                    "Configure, or `claude setup-token` then "
+                    "`claude plugin config set remember oauth_token <token>`; "
+                    "#129/#131/#860)."
                 )
     finally:
         slot.release()
