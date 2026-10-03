@@ -443,6 +443,23 @@ was "Validation ran out of time". That is the failure the `release` branch exist
   whether these specific fixes clear the 3 holds on the next real scan, or whether the scanner's own
   behaviour has moved on to a different trigger by then, the way `RUNTIME_FETCH_EXEC` below moved
   between v0.37.0 and v0.38.0. The "Preview before you tag" step above exists for exactly this.
+  **Round 3 (#898).** A maintainer Validate of `release-preview` at `302e8f5` (round 2's commit)
+  came back down to 2 holds. The session-start-hook.sh scheme-literal finding and the dot fallback
+  were both confirmed gone. The remaining credential hold was an **aggregate pairing**: the
+  portal's scanner read `pipeline/haiku.py` as reading the plugin's own `userConfig` recovery
+  setting, and paired that with `hooks.d/after_save/50-git-backup.sh` assembling a command at run
+  time, naming the combination as data leaving the machine through a configured credential. The
+  git-backup half is a real, intentional feature and stayed. The maintainer's decision: remove the
+  read side entirely rather than argue the pairing, since every policy hold is a human review on
+  every release and this is the only remaining one. `pipeline/haiku.py` no longer reads any
+  `userConfig`-sourced setting at all; the plugin manifest no longer declares that option; the
+  nested summarizer call authenticates only through whatever the host already hands it or the
+  CLI's own login, with no recovery path of this plugin's own on either host. A still-configured
+  legacy setting (the removed manifest option, or the older environment variable it replaced) is
+  still detected by presence only, never by value, and reported once per save and from
+  `/remember:doctor`, so nobody is left wondering where a setting went. Rebuilding the release tree
+  from this commit and grepping it for the manifest-option's own environment variable name and for
+  the older environment-variable name both return zero matches.
 - **`RUNTIME_FETCH_EXEC`** flags text that downloads and runs code, and the portal says it looks at
   "a hook, a server or settings command, a script, or text such as a skill or README". On v0.37.0
   (`e6cf58f`) it named `pipeline/shell.py` and `scripts/log.sh`, which contain no download at all.

@@ -15,8 +15,9 @@ is typed in, and nothing is read from your operating system's credential storage
 Memory is stored locally under your project by default, and nothing is pushed
 anywhere unless you opt into git backup yourself.
 
-If your coding agent does not hand hooks that login, set an optional recovery token
-through the plugin's own Configure option in your coding agent's plugin settings.
+If your coding agent does not hand hooks that login, the nested call simply runs
+unauthenticated; this plugin has no recovery path of its own. Refresh your coding
+agent's own CLI login instead and the next save picks it up.
 
 The full README, including the install guide, the complete trust model, and every
 configuration key, lives on this project's default branch.
