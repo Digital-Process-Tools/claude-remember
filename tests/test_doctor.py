@@ -140,6 +140,34 @@ def test_a_slug_mismatch_is_not_answered_with_restart_claude_code(tmp_path):
     )
 
 
+def test_a_stale_last_save_time_does_not_mask_a_slug_mismatch_880(tmp_path):
+    """#880: the pre-existing "capture is working" arm lacked the same
+    $_SESSION_DIR guard its #870 sibling arm carries, so a stale
+    tmp/last-save.json surviving a rename/move -- non-empty $_LAST_SAVE_TIME
+    from before the slug changed -- let this arm fire ahead of the #144
+    slug-mismatch arm below it, masking the real cause the same way the
+    #870 arm was fixed to stop doing."""
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    remember = project / ".remember"
+    (remember / "tmp").mkdir(parents=True)
+    (home / ".claude" / "projects").mkdir(parents=True)  # exists, but not the real slug
+    (remember / "tmp" / "post-tool-ran").write_text("")
+    (remember / "tmp" / "last-save.json").write_text(
+        json.dumps({"session": "sess-old", "line": 100}), encoding="utf-8"
+    )
+
+    result = _run(home, project, remember)
+
+    verdict = _verdict(result.stdout)
+    assert "#144" in verdict, (
+        f"a stale last-save.json masked the #144 slug-mismatch verdict:\n{verdict}"
+    )
+    assert "capture is working" not in verdict, (
+        f"stale last-save time let capture-is-working mask #144: {verdict}"
+    )
+
+
 def test_a_wired_hook_that_never_serviced_a_session_says_so(tmp_path):
     """"Wired" and "working" are different questions. post-tool-ran is written
     before every early exit; capture-alive only once a transcript is found."""

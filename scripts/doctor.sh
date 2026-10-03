@@ -1164,7 +1164,13 @@ elif [ "$_POST_TOOL_FIRED" -eq 1 ] && [ -n "$_LAST_SAVE_TIME" ] && [ "${_SUMMARI
     # already uses for this same reason -- copied here rather than
     # reinvented, so a slug mismatch always falls through to its own arm.
     echo "VERDICT: problem -- the summarizer's last attempt failed and no save has completed since (see Summarizer failures above)$_ASSUMED_NOTE"
-elif [ "$_POST_TOOL_FIRED" -eq 1 ] && [ -n "$_LAST_SAVE_TIME" ]; then
+elif [ "$_POST_TOOL_FIRED" -eq 1 ] && [ -n "$_LAST_SAVE_TIME" ] \
+    && { [ -z "$_SESSION_DIR" ] || [ -d "$_SESSION_DIR" ]; }; then
+    # #880: same guard as the #870 arm immediately above, and for the same
+    # reason -- a stale $_LAST_SAVE_TIME from a save that completed before a
+    # rename/move can be non-empty even when the session dir no longer
+    # matches Claude Code's own slug, so without this clause this arm fires
+    # ahead of the #144 slug-mismatch arm below and masks it.
     echo "VERDICT: capture is working -- last save $_LAST_SAVE_TIME$_ASSUMED_NOTE"
 elif [ -n "$_SESSION_DIR" ] && [ ! -d "$_SESSION_DIR" ]; then
     echo "VERDICT: problem -- session dir slug does not match Claude Code's transcript directory (#144); restarting will not help$_ASSUMED_NOTE"
