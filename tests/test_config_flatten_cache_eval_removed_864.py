@@ -375,7 +375,9 @@ export REMEMBER_CONFIG=$(mktemp "${{TMPDIR}}/remember-config-XXXXXX")
 export REMEMBER_DIR="{remember_dir.as_posix()}"
 _remember_cfg_flatten_cache_publish "$(printf 'FOO\\tbar')"
 if _remember_cfg_flatten_cache_load; then
-    printf 'LOADED:%s' "$_RCFG_FOO"
+    # #898 round 8: the table is two arrays now, read by slot name.
+    _remember_cfg_table_get_into _got _RCFG_FOO || _got="<absent>"
+    printf 'LOADED:%s' "$_got"
 else
     echo "REJECTED-WRONGLY"
 fi
@@ -418,18 +420,22 @@ source "{LOG_SH.as_posix()}" >/dev/null 2>&1
 export REMEMBER_DIR="{remember_dir.as_posix()}"
 _dump=$(printf 'FOO\\tsecret\\r')
 # Emulate _config_load's own cache-MISS assignment loop verbatim (the raw
-# dump value, unescaped, straight into the variable).
+# dump value, unescaped, straight into the table -- two arrays since #898
+# round 8, read back by slot name).
 while IFS=$'\\t' read -r _k _v; do
     [ -n "$_k" ] || continue
-    printf -v "_RCFG_${{_k//./_}}" '%s' "$_v"
+    _remember_cfg_table_set "_RCFG_${{_k//./_}}" "$_v"
 done <<MISSEOF
 $_dump
 MISSEOF
-printf 'MISS_LEN=%d\\n' "${{#_RCFG_FOO}}"
+_remember_cfg_table_get_into _miss _RCFG_FOO
+printf 'MISS_LEN=%d\\n' "${{#_miss}}"
 _remember_cfg_flatten_cache_publish "$_dump"
-unset _RCFG_FOO
+_REMEMBER_CFG_NAMES=()
+_REMEMBER_CFG_VALUES=()
 _remember_cfg_flatten_cache_load
-printf 'HIT_LEN=%d\\n' "${{#_RCFG_FOO}}"
+_remember_cfg_table_get_into _hit _RCFG_FOO
+printf 'HIT_LEN=%d\\n' "${{#_hit}}"
 """
     result = subprocess.run(
         [BASH, "-c", script],

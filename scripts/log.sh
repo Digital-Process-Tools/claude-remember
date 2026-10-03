@@ -107,6 +107,40 @@ fi
 _REMEMBER_CFG_STATE=""
 _REMEMBER_CFG_LOADED_FROM=""
 
+# The table itself: two parallel indexed arrays, slot name -> value, where a
+# slot name is `_RCFG_` plus the dotted key with dots turned into
+# underscores (`_RCFG_cooldowns_save_seconds`). Until #898 round 8 each slot
+# was a shell variable of that name, read back with an indirect `${!...}`
+# expansion; the plugin directory's scanner reads that expansion as "reads
+# an environment variable named at run time", so the table moved into
+# arrays (indexed, not associative: bash 3.2 is the floor). Setting appends
+# and lookup scans from the END, so a later set of the same slot wins --
+# the same answer the old overwrite-a-variable form gave, including across
+# a reload against another config file, with no per-set scan. Both are
+# builtins only: no fork on the lookup path.
+_REMEMBER_CFG_NAMES=()
+_REMEMBER_CFG_VALUES=()
+
+_remember_cfg_table_set() {
+    _REMEMBER_CFG_NAMES+=("$1")
+    _REMEMBER_CFG_VALUES+=("$2")
+}
+
+# _remember_cfg_table_get_into VARNAME SLOT: the slot's value into VARNAME
+# (`printf -v`), or "" and return 1 when the table has no such slot.
+_remember_cfg_table_get_into() {
+    local _rcfgtg_i="${#_REMEMBER_CFG_NAMES[@]}"
+    while [ "$_rcfgtg_i" -gt 0 ]; do
+        _rcfgtg_i=$((_rcfgtg_i - 1))
+        if [ "${_REMEMBER_CFG_NAMES[$_rcfgtg_i]}" = "$2" ]; then
+            printf -v "$1" '%s' "${_REMEMBER_CFG_VALUES[$_rcfgtg_i]}"
+            return 0
+        fi
+    done
+    printf -v "$1" '%s' ""
+    return 1
+}
+
 # `.haiku.*` is deliberately NOT flattened. Reading every key up front means
 # reading the OAuth token up front, and it would then sit in a shell variable
 # in every process that sources log.sh — including one that runs other people's
@@ -492,7 +526,7 @@ _remember_cfg_flatten_cache_load() {
         return 1
     }
 
-    local _assign _assign_name _assign_value
+    local _assign _assign_name _assign_value _assign_decoded
     for _assign in ${_lines[@]+"${_lines[@]}"}; do
         # Each $_assign already passed _remember_cfg_flatten_cache_valid_line
         # above: it is exactly one `_RCFG_name` TAB `value` record. Split
@@ -502,10 +536,11 @@ _remember_cfg_flatten_cache_load() {
         # on them either.
         _assign_name="${_assign%%$'\t'*}"
         _assign_value="${_assign#*$'\t'}"
-        _remember_cfg_flatten_q_decode "$_assign_name" "$_assign_value" || {
+        _remember_cfg_flatten_q_decode _assign_decoded "$_assign_value" || {
             rm -f "$_f" 2>/dev/null
             return 1
         }
+        _remember_cfg_table_set "$_assign_name" "$_assign_decoded"
     done
     return 0
 }
@@ -634,7 +669,7 @@ _config_load() {
     local _k _v
     while IFS=$'\t' read -r _k _v; do
         [ -n "$_k" ] || continue
-        printf -v "_RCFG_${_k//./_}" '%s' "$_v"
+        _remember_cfg_table_set "_RCFG_${_k//./_}" "$_v"
     done <<< "$_dump"
     _remember_cfg_flatten_cache_publish "$_dump"
     _REMEMBER_CFG_STATE="ok"
@@ -745,31 +780,16 @@ config_into() {
     if [ "$_REMEMBER_CFG_STATE" = "ok" ] && ! _config_is_private_key "$_cfg_into_name"; then
         local _cfg_into_slot="_RCFG_${_cfg_into_name#.}"
         _cfg_into_slot="${_cfg_into_slot//./_}"
-        # #898 round 7 looked at replacing this `${!...}` read (the one
-        # remaining indirect-expansion site outside lib-memory-context.sh)
-        # with an array-backed cache, the same redesign applied to that
-        # file's three caches just below in this same issue. Deliberately
-        # NOT done here: this table's storage (_config_load, the
-        # mtime-validated on-disk cache in _remember_cfg_flatten_cache_load/
-        # _publish, and the %q-style encode/decode pair) is covered by two
-        # dedicated regression suites (#864, #668), both written against a
-        # #864 security fix to the LOADER specifically, because it used to
-        # re-interpret bytes read back from a cache FILE as shell source --
-        # an attacker-reachable surface. #864's own regression test asserts
-        # that mechanism never reappears anywhere in this file (a
-        # re-interpret-as-shell-source alternative to `${!...}` was tried
-        # here first and that test refused it on exactly that byte,
-        # confirming the guard is live) and other tests in that suite
-        # assert the loaded value is a literal `_RCFG_*` bash variable, so
-        # swapping this table's storage for the array-and-linear-scan
-        # design used below would mean reworking the publisher, the loader
-        # AND that security-test suite's own assumptions in the same
-        # change -- #898's own round 4 called exactly this kind of redesign
-        # "out of proportion" for a smaller cache; this one is larger and
-        # security-load-bearing. Left as `${!_cfg_into_slot:-}`;
-        # `tools/sweep.sh` still names this one line as a remaining
-        # "indirect" hit (see the round-7 report for the sweep output).
-        local _cfg_into_hit="${!_cfg_into_slot:-}"
+        # #898 round 8: a lookup in the table's parallel arrays (see
+        # _remember_cfg_table_get_into near the top of this file), not an
+        # indirect `${!...}` read of a variable named by the slot. The
+        # loader's #864/#682 guarantees are untouched: every cached line is
+        # still validated before any is assigned, and values still go
+        # through `printf -v '%b'` only, never a re-parse as shell source.
+        local _cfg_into_hit
+        # `|| ...`: an absent slot returns 1, which must not end a caller
+        # running under `set -e`; absent and empty both mean the default.
+        _remember_cfg_table_get_into _cfg_into_hit "$_cfg_into_slot" || _cfg_into_hit=""
         [ -n "$_cfg_into_hit" ] || _cfg_into_hit="$_cfg_into_default"
         printf -v "$_cfg_into_var" '%s' "$_cfg_into_hit"
         return

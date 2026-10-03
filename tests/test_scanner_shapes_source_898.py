@@ -88,6 +88,9 @@ SHAPE_CHECKS = {
     # check function -> a line that carries the shape (positive control)
     "_check_escaped_quote": 'echo "say \\"hi\\""\n',
     "_check_slash_glob_case": 'case "$0" in */*) : ;; esac\n',
+    # `${!name}` and `${!arr[@]}` alike -- the portal cited both as "reads an
+    # environment variable named at run time" (triggers.md).
+    "_check_indirect_expansion": 'v="${!slot:-}"\n',
 }
 
 
