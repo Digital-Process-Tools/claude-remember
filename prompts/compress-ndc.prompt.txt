@@ -1,0 +1,15 @@
+Apply maximum non-destructive compression. Rules:
+- Keep ALL facts, ALL refs, ALL verbs, ALL relationships. Zero information loss.
+- Drop: articles (a/the/an), prepositions where context is clear, filler words, prose connectors
+- Use shortest form preserving same semantic vector: conf, env, MR, infra, impl, perm, EM, etc
+- No prose. Raw signal. Like developer shorthand notes.
+- Group entries by subject: if multiple entries describe the same work (same issue, same feature, same file), merge into ONE time-blocked entry (e.g. 08:48-09:22). This is the biggest compression win — 5 entries about the same skill becoming 1 entry.
+- Parentheses for context: "script.sh (dev detect via git conf)"
+- Semicolons to separate facts within one entry
+- Preserve ## timestamp | branch format
+- Maintain chronological order — entries must appear oldest to newest
+- Every verb, every object, every causal link must survive
+No preamble. Just the compressed output.
+
+Text:
+{{NOW_CONTENT}}

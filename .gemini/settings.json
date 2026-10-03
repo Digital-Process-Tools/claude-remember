@@ -1,0 +1,51 @@
+{
+  "hooks": {
+    "BeforeTool": [],
+    "AfterTool": [
+      {
+        "hooks": [
+          {
+            "command": "bash \"${GEMINI_PROJECT_DIR}/scripts/post-tool-hook.sh\"",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "BeforeAgent": [
+      {
+        "hooks": [
+          {
+            "command": "bash \"${GEMINI_PROJECT_DIR}/scripts/user-prompt-hook.sh\"",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "AfterAgent": [],
+    "Notification": [],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "bash \"${GEMINI_PROJECT_DIR}/scripts/session-start-hook.sh\"",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "command": "bash \"${GEMINI_PROJECT_DIR}/scripts/session-end-hook.sh\"",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "PreCompress": [],
+    "BeforeModel": [],
+    "AfterModel": [],
+    "BeforeToolSelection": []
+  }
+}
