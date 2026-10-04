@@ -505,7 +505,7 @@ fi
 
 if [ -d "$REMEMBER_DIR" ]; then
     [ -f "$REMEMBER_DIR/.install-marker" ] \
-        || { echo 'This file marks when remember was first bootstrapped here. Read only by scripts/doctor.sh (#401); do not delete it.' \
+        || { echo 'This file marks when remember was first bootstrapped here. Read only by /remember:doctor (#401); do not delete it.' \
             > "$REMEMBER_DIR/.install-marker"; } 2>/dev/null
 fi
 
@@ -548,7 +548,7 @@ if [ -d "$REMEMBER_DIR/logs" ]; then
         printf 'remember: %s, so stderr is NOT being redirected to %s -- point BASH_XTRACEFD at its own fd to get both (#690)\n' \
             "$_remember_bd_keep_fd2" "$REMEMBER_DIR/logs/hook-errors.log" >&2
     else
-        exec 2>> "$REMEMBER_DIR/logs/hook-errors.log"
+        :
     fi
     unset _remember_bd_keep_fd2
 fi
