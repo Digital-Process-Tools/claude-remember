@@ -72,7 +72,7 @@ from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
-from compile_hooks import HOOK_SCRIPT_NAMES, unresolved_sources
+from compile_hooks import HOOK_SCRIPT_NAMES, unresolved_sources, whole_line_comments
 from strip_python import StripError, leftovers
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent.parent / "release-branch.json"
@@ -678,6 +678,7 @@ def check_tree(root: Path, budget: dict) -> CheckResult:
     _check_hooks(files, manifest, off)
     _check_hook_still_sources(files, kinds, off)
     _check_python_comments(files, kinds, off)
+    _check_shell_comments(files, kinds, off)
     _check_front_matter(files, off)
     _check_images(files, kinds, off)
     _check_launchers(files, kinds, off)
@@ -1661,6 +1662,27 @@ def _check_python_comments(files: dict, kinds: dict, off: list) -> None:
         for n, kind, text in found:
             off.append(f"{rel}:{n}: a {kind} in a shipped .py -- the directory's scanner "
                        f"reads it as code; the build strips these: {text.strip()[:60]}")
+
+
+def _check_shell_comments(files: dict, kinds: dict, off: list) -> None:
+    """#900: a comment-only line left in a shipped .sh -- FAIL. The directory's scanner
+    reads shell comments as code too (a `${arr[$key]}` quoted in a lib-memory-context.sh
+    comment was cited as a credential read), so build_release_tree.py strips every
+    comment-only line from every shipped .sh (compile_hooks.strip_whole_line_comments).
+    One left here means that step did not run on this file. The shebang on line 1, a `#`
+    line inside a quoted string or a heredoc, and an inline `cmd # comment` are not
+    counted -- the same reading the stripper makes (compile_hooks.whole_line_comments)."""
+    for rel, data in sorted(files.items()):
+        if not rel.endswith(".sh") or kinds.get(rel) != "text":
+            continue
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            off.append(f"{rel}: not UTF-8, so its comment lines cannot be checked")
+            continue
+        for n, line in whole_line_comments(text):
+            off.append(f"{rel}:{n}: a comment-only line in a shipped .sh -- the directory's "
+                       f"scanner reads it as code; the build strips these: {line.strip()[:60]}")
 
 
 def _check_launchers(files: dict, kinds: dict, off: list) -> None:

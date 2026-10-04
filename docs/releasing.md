@@ -293,6 +293,34 @@ for the per-file sizes, or `--print FILE` to read one file as it ships. String l
 reach the scanner (probe hE cited a user-facing warning string next), and stripping cannot help
 there: those are real, needed text.
 
+### Every shipped `.sh` loses its comment-only lines too (#900)
+
+The scanner reads **shell comments as code** the same way. Release-preview probe L3 cited a
+credential read in `scripts/lib-memory-context.sh` whose only source was a comment: a
+`${arr[$key]}` quoted to explain a bash 3.2 pitfall. The four compiled hooks already went through
+the comment stripper on the way in, so this extends the `.py` policy to every other shipped `.sh`
+(the `scripts/` libraries and helpers, `hooks.d/`) -- and to the compiled hooks' own
+`COMPILED_MARKER` line, which only the compiled-in-place CI leg reads (`tests/_compiled_hooks.py`),
+never the release tree. **The source on `main` keeps every comment.**
+
+- the stripper is `compile_hooks.strip_whole_line_comments`, the one the hook compiler uses. It
+  drops a line only when its first non-blank character is `#`, and tracks quote and heredoc state
+  across the whole file: a `#` line inside a multi-line quoted string or a heredoc body stays, an
+  inline `cmd # comment` stays (only whole lines go), and a `#!` first line stays.
+- each changed file is **proven or the build fails**: `bash -n` must accept the result
+  (`BuildError: ... no longer parses once its comment lines are stripped`). A file with nothing to
+  strip ships byte-identical and is not re-parsed. The build therefore needs a bash: PATH's
+  `bash`, or on Windows Git Bash only (`resolve_bash`) -- a bare `bash` there is commonly the WSL
+  launcher, which CreateProcess finds first. No usable bash fails the build rather than skipping.
+- `check_release_tree.py`'s `_check_shell_comments` FAILs any comment-only line left in a shipped
+  `.sh`. It reads lines through `compile_hooks.whole_line_comments`, the same pass the stripper
+  uses, so the check and the build cannot disagree about what a comment line is.
+
+Measured on this repo's 26 shipped `.sh` files: **1,128,502 -> 595,725 bytes** (-47%);
+`scripts/lib-memory-context.sh` alone 83,042 -> 27,059. The whole release tree went from
+1,256,407 to 723,630 bytes. Built tree: `check_release_tree` 0 FAIL, `sweep.sh` "no known shape
+found", the hook smoke test passes all four hooks.
+
 ## What the Anthropic directory actually measured
 
 [`claude-jit-context`'s own write-up](https://github.com/Digital-Process-Tools/claude-jit-context/blob/main/docs/directory-validator.md)

@@ -390,12 +390,21 @@ def test_a_launcher_or_install_in_a_hook_script_fails(tmp_path, line):
 
 
 @pytest.mark.parametrize("line", [
-    "# pip install requests (a comment)",
     'echo "install jq first: brew install jq" >&2',
     "run_npx_free_path",
 ])
 def test_mentions_that_are_not_commands_pass(tmp_path, line):
     _passes(_tree(tmp_path, {"scripts/hook.sh": f"#!/bin/sh\n{line}\n".encode()}))
+
+
+def test_an_install_named_in_a_comment_is_not_read_as_a_launcher(tmp_path):
+    # #900: a comment-only line in a shipped .sh is a FAIL of its own now
+    # (_check_shell_comments -- the build strips them), so this tree cannot pass
+    # outright; what it pins is that the launcher guard does not read the comment
+    # as an install -- the comment-line FAIL is the only one.
+    root = _tree(tmp_path, {"scripts/hook.sh": b"#!/bin/sh\n# pip install requests (a comment)\n"})
+    offenders = _offenders(root)
+    assert offenders and all("comment-only line" in o for o in offenders), offenders
 
 
 # -- package manager files --------------------------------------------------------

@@ -377,33 +377,38 @@ def strip_whole_line_comments(text: str) -> str:
     earlier line -- quote and heredoc state is tracked across the whole
     file, not just within one line, so a multi-line quoted string
     containing a line that merely *looks* like a comment is kept intact."""
-    lines = text.split("\n")
-    out = []
+    drop = {n for n, _ in whole_line_comments(text)}
+    return "\n".join(line for n, line in enumerate(text.split("\n"), 1) if n not in drop)
+
+
+def whole_line_comments(text: str) -> list[tuple[int, str]]:
+    """(1-based line number, line) for every line strip_whole_line_comments
+    drops -- the one quote- and heredoc-aware pass both the stripper and
+    check_release_tree.py's shell-comment guard (#900) read, so the check
+    can never disagree with the build about what a comment line is."""
+    found = []
     heredoc_term = None
     heredoc_strip_tabs = False
     in_squote = in_dquote = False
-    for idx, line in enumerate(lines):
+    for idx, line in enumerate(text.split("\n")):
         if heredoc_term is not None:
-            out.append(line)
             check = line.strip() if heredoc_strip_tabs else line
             if check == heredoc_term:
                 heredoc_term = None
             continue
         if in_squote or in_dquote:
-            out.append(line)
             heredoc_term, heredoc_strip_tabs, in_squote, in_dquote = _scan_line(
                 line, in_squote, in_dquote)
             continue
         stripped = line.lstrip()
         if idx == 0 and stripped.startswith("#!"):
-            out.append(line)
             continue
         if stripped.startswith("#"):
+            found.append((idx + 1, line))
             continue
-        out.append(line)
         heredoc_term, heredoc_strip_tabs, in_squote, in_dquote = _scan_line(
             line, in_squote, in_dquote)
-    return "\n".join(out)
+    return found
 
 
 # -- linking -------------------------------------------------------------

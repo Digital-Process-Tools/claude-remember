@@ -36,6 +36,7 @@ import json
 import os
 import posixpath
 import re
+import shutil
 import subprocess
 import sys
 from collections.abc import Callable
@@ -45,7 +46,12 @@ from urllib.parse import quote, unquote
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
 from check_release_tree import gitattributes_offences
-from compile_hooks import HOOK_SCRIPT_NAMES, InlineError, compile_hook
+from compile_hooks import (
+    HOOK_SCRIPT_NAMES,
+    InlineError,
+    compile_hook,
+    strip_whole_line_comments,
+)
 from strip_python import StripError, strip_python
 
 DEFAULT_CONFIG = _HERE.parent / "release-branch.json"
@@ -55,6 +61,28 @@ IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}
 
 class BuildError(Exception):
     """A build that must not produce a tree."""
+
+
+def resolve_bash() -> str | None:
+    """The bash that proves a stripped .sh still parses (#900), or None.
+
+    Anywhere but Windows, PATH's `bash`. On Windows a bare "bash" is commonly
+    the WSL launcher in System32, which CreateProcess finds before PATH, so only
+    Git Bash is taken: a standard Git-for-Windows install, or a PATH `bash` that
+    lives under one (the same rule as tests/_bash_runner.py, #432)."""
+    if sys.platform != "win32":
+        return shutil.which("bash")
+    for var in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"):
+        base = os.environ.get(var)
+        if base:
+            for cand in (Path(base) / "Git" / "bin" / "bash.exe",
+                         Path(base) / "Git" / "usr" / "bin" / "bash.exe"):
+                if cand.is_file():
+                    return str(cand)
+    resolved = shutil.which("bash")
+    if resolved and "git" in resolved.replace("\\", "/").lower():
+        return resolved
+    return None
 
 
 # -- config -----------------------------------------------------------------------
@@ -312,6 +340,36 @@ def build(repo: Path, ref: str, out: Path, config: dict) -> dict:
         except InlineError as exc:
             raise BuildError(f"{hrel}: {exc}") from None
         contents[hrel] = compiled.encode("utf-8")
+
+    # #900: the scanner reads shell comments as code too (release-preview probe L3:
+    # a `${arr[$key]}` quoted in a lib-memory-context.sh comment was cited as a
+    # credential read). Every shipped .sh loses its comment-only lines here, through
+    # the same quote- and heredoc-aware stripper compile_hook uses, so a `#` line
+    # inside a string or heredoc stays. That includes the compiled hooks: their
+    # sources' comments are already gone, but compile_hook writes COMPILED_MARKER
+    # as line 2 for the compiled-in-place CI leg, which never reads this tree.
+    # A result that no longer parses fails the build.
+    bash = None
+    for path in sorted(contents):
+        if not path.endswith(".sh"):
+            continue
+        try:
+            src = contents[path].decode("utf-8")
+        except UnicodeDecodeError:
+            raise BuildError(f"{path}: not UTF-8, cannot strip it") from None
+        stripped = strip_whole_line_comments(src)
+        if stripped != src:
+            if bash is None:
+                bash = resolve_bash()
+                if bash is None:
+                    raise BuildError(f"{path}: no bash to prove the comment-stripped "
+                                     f"script still parses (on Windows: Git Bash)")
+            check = subprocess.run([bash, "-n"], input=stripped.encode("utf-8"),
+                                   capture_output=True, check=False)
+            if check.returncode != 0:
+                raise BuildError(f"{path}: no longer parses once its comment lines "
+                                 f"are stripped: {check.stderr.decode('utf-8', 'replace')[:200]}")
+            contents[path] = stripped.encode("utf-8")
 
     # #900: the directory's scanner reads Python comments and docstrings as code
     # (release-preview probe hD), so every shipped .py loses both here. strip_python

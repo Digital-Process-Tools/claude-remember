@@ -145,3 +145,30 @@ def test_a_stripped_py_with_a_hash_in_a_string_and_a_shebang_passes(tmp_path):
         b'X = "a # b"\nY = f"{X}#"\ndef f():\n    pass\n')})
     offenders = _check(root).offenders
     assert not any("scripts/x.py" in o for o in offenders), offenders
+
+
+# Shell comments are read as code too (a `${arr[$key]}` quoted in a lib-memory-context.sh
+# comment was cited as a credential read); build_release_tree.py strips every comment-only
+# line from every shipped .sh, and this check fails a tree that still carries one.
+
+def test_a_shipped_sh_with_a_comment_only_line_fails(tmp_path):
+    root = _tree(tmp_path, {
+        "scripts/lib-x.sh": b"#!/bin/bash\necho a\n    # quotes ${arr[$key]}\necho b\n",
+        "hooks.d/after_save/50-x.sh": b"#!/bin/sh\n# drop me\necho c\n",
+    })
+    offenders = _check(root).offenders
+    assert any("scripts/lib-x.sh:3" in o and "comment-only line" in o
+               for o in offenders), offenders
+    assert any("hooks.d/after_save/50-x.sh:2" in o for o in offenders), offenders
+
+
+def test_a_stripped_sh_with_a_shebang_quoted_hash_heredoc_and_inline_comment_passes(tmp_path):
+    # the must-NOT-fire control for the one above: the shebang, a `#` line inside a
+    # multi-line single- or double-quoted string, and an inline `cmd # comment`. (A
+    # heredoc is a FAIL of its own in a shipped tree -- _check_typed_heredoc -- so the
+    # heredoc case is pinned on the stripper, test_strip_shell_comments_900.py.)
+    root = _tree(tmp_path, {"scripts/lib-x.sh": (
+        b"#!/bin/bash\nmsg='one\n# in a string\ntwo'\nmsg2=\"three\n  # in another\nfour\"\n"
+        b'echo "$msg" "$msg2" # inline\n')})
+    offenders = _check(root).offenders
+    assert not any("scripts/lib-x.sh" in o for o in offenders), offenders

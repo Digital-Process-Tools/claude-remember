@@ -108,7 +108,10 @@ def test_a_typed_heredoc_mentioned_in_a_comment_does_not_fail(tmp_path):
                            b"cat <<< hi\n"),
     })
     offenders = _check(root).offenders
-    assert not any("run.sh" in o and ("<" "<") in o for o in offenders), offenders
+    # the comment lines themselves FAIL as comment-only lines (#900, _check_shell_comments
+    # -- the build strips them); what this pins is that the heredoc guard does not.
+    assert not any("run.sh" in o and ("<" "<") in o and "comment-only line" not in o
+                   for o in offenders), offenders
 
 
 # -- URL host in a comment of a shipped script (FAIL) ----------------------------
