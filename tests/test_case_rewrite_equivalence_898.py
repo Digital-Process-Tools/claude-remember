@@ -1,5 +1,5 @@
 """#898 round 19: every `case` statement in shipped shell code became an
-if/elif ladder of `[ ]` tests (the directory's scanner mis-parses `case`).
+if/elif ladder of `[ ]` / `[[ == ]]` tests (the directory's scanner mis-parses `case`).
 This module runs the OLD `case` and the NEW ladder on the same inputs, in the
 same bash and the same locale, and requires identical results -- output,
 variable state and exit status alike -- so "behaviour preserved" is measured

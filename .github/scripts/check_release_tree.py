@@ -1443,7 +1443,7 @@ def _check_case_statement(files: dict, kinds: dict, off: list) -> None:
         bare = _TRAILING_COMMENT.sub("", _QUOTED_SEGMENT.sub('""', line))
         if CASE_STATEMENT.search(bare):
             off.append(f"{rel}:{n}: a case statement -- the directory's scanner "
-                       f"mis-parses case; write it as if/elif with [ ] tests: "
+                       f"mis-parses case; write it as if/elif with [ ] or [[ == ]] tests: "
                        f"{line.strip()[:80]}")
 
 
