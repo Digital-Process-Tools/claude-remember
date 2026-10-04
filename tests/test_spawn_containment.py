@@ -383,7 +383,7 @@ def test_a_nonsense_cap_falls_back_to_the_default(monkeypatch, value):
 
     monkeypatch.setenv(spawn_guard.MAX_CONCURRENT_ENV, value)
     assert spawn_guard._positive_int(
-        spawn_guard.MAX_CONCURRENT_ENV, spawn_guard.DEFAULT_MAX_CONCURRENT
+        value, spawn_guard.DEFAULT_MAX_CONCURRENT
     ) == spawn_guard.DEFAULT_MAX_CONCURRENT
 
 

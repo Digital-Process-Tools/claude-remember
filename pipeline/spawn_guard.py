@@ -68,7 +68,7 @@ from pathlib import Path
 #: result) and 1 (a failure) so bash can act on the difference.
 EXIT_SPAWN_DECLINED = 3
 
-RUNTIME_DIR_ENV = "REMEMBER_RUNTIME_DIR"
+
 MAX_CONCURRENT_ENV = "REMEMBER_MAX_CONCURRENT_SUMMARIZERS"
 MAX_PER_MINUTE_ENV = "REMEMBER_MAX_SUMMARIZERS_PER_MIN"
 
@@ -104,13 +104,15 @@ def record_dir() -> Path:
     lifted simply by resolving a different project, which is the shape of the
     bug.
     """
-    base = os.environ.get(RUNTIME_DIR_ENV, "").strip()
+    base = os.environ.get("REMEMBER_RUNTIME_DIR", "").strip()
     root = Path(base) if base else Path.home() / ".remember" / "run"
     return root / "summarizers"
 
 
-def _positive_int(name: str, default: int) -> int:
-    raw = os.environ.get(name, "").strip()
+def _positive_int(value: str, default: int) -> int:
+    """The VALUE of a cap knob as a positive int, else ``default``. Each
+    caller reads its variable by literal name (#898 round 10)."""
+    raw = value.strip()
     if raw.isdigit() and int(raw) >= 1:
         return int(raw)
     return default
@@ -220,8 +222,10 @@ def claim(timeout: float = 120.0) -> _Slot:
             nothing was billed; the caller must report this and leave the span
             alone rather than treat it as a failed summary.
     """
-    max_concurrent = _positive_int(MAX_CONCURRENT_ENV, DEFAULT_MAX_CONCURRENT)
-    max_per_minute = _positive_int(MAX_PER_MINUTE_ENV, DEFAULT_MAX_PER_MINUTE)
+    max_concurrent = _positive_int(
+        os.environ.get("REMEMBER_MAX_CONCURRENT_SUMMARIZERS", ""), DEFAULT_MAX_CONCURRENT)
+    max_per_minute = _positive_int(
+        os.environ.get("REMEMBER_MAX_SUMMARIZERS_PER_MIN", ""), DEFAULT_MAX_PER_MINUTE)
     stale_after = timeout + STALE_GRACE_SECONDS
 
     directory = record_dir()
