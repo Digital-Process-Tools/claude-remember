@@ -554,7 +554,8 @@ was "Validation ran out of time". That is the failure the `release` branch exist
   outside an allowlist (`ANTHROPIC_API_KEY`, `CODEX_API_KEY`, and the split-name half `OAUTH_TOKEN`
   alone, which is not itself a full credential name; #898 round 13 took `ANTHROPIC_API_KEY` off that
   allowlist when the #703 strip was removed in favour of the generic `haiku.drop_env`, and added a
-  FAIL on any mention of that name in any shipped file -- code, comment, data or prose). Round 4's own three guards
+  FAIL on any mention of that name in any shipped file -- code, comment, data or prose; round 16
+  did the same for `CODEX_API_KEY`, below). Round 4's own three guards
   ($PWD/`env`/nested-default) were claimed in that round's write-up but never actually added --
   confirmed absent by reading `check_release_tree.py` directly before writing this round's version;
   the three remaining `$PWD`/nested-default-expansion sites this absence let drift back in
@@ -580,6 +581,17 @@ was "Validation ran out of time". That is the failure the `release` branch exist
   `CODEX_API_KEY`, `PWD`). `tests/test_scanner_shapes_source_898.py` pins it at zero for every
   shipped file except `pipeline/haiku.py` and the `tokens` field `HaikuResult` shares with it, both
   renamed in that file's own lane. Not yet confirmed against the portal.
+
+  **#898 round 16 took `CODEX_API_KEY` out of shipped code.** It was the last credential name
+  `pipeline/haiku.py` still carried: one entry of the Codex summarizer's #724 allow-list. The
+  allow-list is now config, `haiku.codex_env_allow`, read by the same reader as
+  `haiku.strip_session_env`; the shipped list in `config.json` names no credential, and an
+  operator who authenticates Codex through that variable adds it in `~/.remember/config.json`
+  (`docs/configuration.md`, "The Codex summarizer's allow-list"). `check_release_tree.py` drops it
+  from both allowlists above and FAILs on it in any shipped file, as for `ANTHROPIC_API_KEY`
+  (`NAMED_API_KEYS`). The one environment read by a config-named variable this adds,
+  `_codex_child_env`, is exempted by name and count in `tests/test_literal_env_reads_898.py`, beside
+  round 15's `_without_session_env` -- disclosed, not disguised; the portal may still cite it.
 - **`RUNTIME_FETCH_EXEC`** flags text that downloads and runs code, and the portal says it looks at
   "a hook, a server or settings command, a script, or text such as a skill or README". On v0.37.0
   (`e6cf58f`) it named `pipeline/shell.py` and `scripts/log.sh`, which contain no download at all.
