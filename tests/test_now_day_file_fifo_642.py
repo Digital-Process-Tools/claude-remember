@@ -36,12 +36,14 @@ def _extract_ndc_day_block() -> str:
     script = REPO_ROOT / "scripts" / "save-session.sh"
     text = script.read_text(encoding="utf-8")
     match = re.search(
-        r"^if \[ -f \"\$NOW_DAY_FILE\" \].*?^esac\n",
+        # Ends at the date-shape fallback: an if/fi since #898 round 19
+        # removed every `case` from shipped shell.
+        r"^if \[ -f \"\$NOW_DAY_FILE\" \].*?^    NDC_DAY=\"\$TODAY_DATE\"\nfi\n",
         text,
         re.MULTILINE | re.DOTALL,
     )
     assert match, (
-        "NDC_DAY read + case-fallback block not found in "
+        "NDC_DAY read + date-shape fallback block not found in "
         "scripts/save-session.sh -- extraction regex is stale"
     )
     return match.group(0)

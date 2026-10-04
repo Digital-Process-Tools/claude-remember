@@ -1378,7 +1378,8 @@ class TestWindowsCompatIssue11:
         """resolve-paths.sh contains the OSTYPE=msys|cygwin normalization block."""
         with open(os.path.join(REPO_ROOT, "scripts", "resolve-paths.sh")) as f:
             content = f.read()
-        assert 'msys|cygwin' in content, (
+        # An if/elif since #898 round 19 removed every shipped `case`.
+        assert '[ "$OSTYPE" = msys ] || [ "$OSTYPE" = cygwin ]' in content, (
             "resolve-paths.sh missing the Git Bash / MSYS / Cygwin normalization case"
         )
         assert 'BASH_REMATCH' in content, (
