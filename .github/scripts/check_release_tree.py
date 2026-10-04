@@ -309,8 +309,7 @@ NESTED_DEFAULT_EXPANSION = re.compile(r'\$\{[A-Za-z_][A-Za-z0-9_]*:-\$')
 # #898, round 13: ANTHROPIC_API_KEY is OFF this allowlist -- the maintainer
 # removed the #703 strip that named it, and NAMED_API_KEYS below now fails the
 # tree on any mention of it at all. Round 16: CODEX_API_KEY is off it too, for
-# the same reason -- the Codex allow-list moved to config
-# (`haiku.codex_env_allow`) and its shipped list names no credential.
+# the same reason -- the Codex allow-list names no credential.
 CREDENTIAL_NAME_ALLOWLIST = {
     "CLAUDE_CODE_OAUTH_TOKEN", "OAUTH_TOKEN",
 }
@@ -325,10 +324,10 @@ CREDENTIAL_NAME_ALLOWLIST = {
 # comments, data, prose) -- the portal cited a name whatever surrounded it.
 #
 # #898, round 16 (maintainer decision): CODEX_API_KEY joins it. The Codex
-# summarizer's allow-list (#724) used to name it in code; the list is now
-# `haiku.codex_env_allow` in config, the shipped list names no credential, and
-# an operator who authenticates Codex through an environment variable adds the
-# name in their own ~/.remember/config.json -- outside the shipped tree.
+# summarizer's allow-list (#724) used to name it in code; the list names no
+# credential now (round 17: still literal names in code, none of them a
+# credential), and a Codex login held only in that variable is not passed
+# through.
 NAMED_API_KEYS = ("ANTHROPIC_API_KEY", "CODEX_API_KEY")
 CREDENTIAL_SHAPED_NAME = re.compile(
     r'\b([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_(?:TOKEN|KEY|SECRET|PASSWORD))\b'

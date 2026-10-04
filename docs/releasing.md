@@ -583,15 +583,22 @@ was "Validation ran out of time". That is the failure the `release` branch exist
   renamed in that file's own lane. Not yet confirmed against the portal.
 
   **#898 round 16 took `CODEX_API_KEY` out of shipped code.** It was the last credential name
-  `pipeline/haiku.py` still carried: one entry of the Codex summarizer's #724 allow-list. The
-  allow-list is now config, `haiku.codex_env_allow`, read by the same reader as
-  `haiku.strip_session_env`; the shipped list in `config.json` names no credential, and an
-  operator who authenticates Codex through that variable adds it in `~/.remember/config.json`
+  `pipeline/haiku.py` still carried: one entry of the Codex summarizer's #724 allow-list, which
+  now names no credential; a Codex login held only in that variable is not passed through
   (`docs/configuration.md`, "The Codex summarizer's allow-list"). `check_release_tree.py` drops it
   from both allowlists above and FAILs on it in any shipped file, as for `ANTHROPIC_API_KEY`
-  (`NAMED_API_KEYS`). The one environment read by a config-named variable this adds,
-  `_codex_child_env`, is exempted by name and count in `tests/test_literal_env_reads_898.py`, beside
-  round 15's `_without_session_env` -- disclosed, not disguised; the portal may still cite it.
+  (`NAMED_API_KEYS`).
+
+  **#898 round 17 writes both environment-name lists back in code as literal names.** Rounds 15-16
+  read the #95 session-variable list and the #724 Codex allow-list from config
+  (`haiku.strip_session_env`, `haiku.codex_env_allow`); reading the environment by a name taken
+  from config is the shape the portal reports as "an environment variable named at run time", and
+  a literal name is not. `_without_session_env` is now one literal `os.environ.pop("NAME", None)`
+  and one literal restore per name, `_codex_child_env` one literal `os.environ.get("NAME")` per
+  name, same names and order as round 16's shipped config. The bundled `config.json` that carried
+  the two lists is gone. `tests/test_literal_env_reads_898.py`'s exemption list is empty and pinned
+  so: no shipped Python reads the environment by a non-literal name. Cost: changing either list
+  now needs a release.
 - **`RUNTIME_FETCH_EXEC`** flags text that downloads and runs code, and the portal says it looks at
   "a hook, a server or settings command, a script, or text such as a skill or README". On v0.37.0
   (`e6cf58f`) it named `pipeline/shell.py` and `scripts/log.sh`, which contain no download at all.
