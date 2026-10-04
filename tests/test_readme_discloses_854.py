@@ -65,10 +65,9 @@ _REQUIRED_NAMES = [
     # (the scan's own finding is about env-var-shaped credential reads, not
     # about a config key users set deliberately). #898 round 13:
     # haiku.drop_env replaced the removed haiku.anthropic_api_key here;
-    # round 15 removed haiku.drop_env and documents haiku.strip_session_env,
-    # the list of parent-session variables kept out of the nested call.
+    # round 15 removed haiku.drop_env and documented haiku.strip_session_env;
+    # round 17 moved that list back into code, so README names no list key.
     "haiku.oauth_token",
-    "haiku.strip_session_env",
 ]
 
 

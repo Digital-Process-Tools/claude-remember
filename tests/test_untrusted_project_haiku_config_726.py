@@ -218,28 +218,24 @@ class TestProjectLocalHaikuConfigIsUntrusted:
         merged, _ = _run_lib_and_dump_config(project, pipeline, home)
         assert "haiku" not in merged or "oauth_token" not in merged.get("haiku", {})
 
-    def test_project_haiku_strip_session_env_does_not_reach_the_merged_config(
-        self, tmp_path
-    ):
-        """The second `haiku.*` key a cloned repo could set:
-        haiku.strip_session_env decides which of the parent session's
-        variables are kept out of the nested summarizer (#95; #898 round 15,
-        replacing round 13's haiku.drop_env). A cloned repo emptying it would
-        let the child pass as the parent session -- the bundled list must
-        survive the merge untouched."""
+    def test_project_haiku_list_does_not_replace_the_bundled_one(self, tmp_path):
+        """A list under `haiku` in an untrusted project file must not replace
+        the bundled layer's list in the merge -- the bundled value survives
+        untouched. (#898 rounds 15-16 had two such lists; round 17 moved both
+        back into code, but the merge rule is generic and stays pinned.)"""
         project, pipeline, home = _dirs(tmp_path)
         bundled = ["CLAUDECODE", "CLAUDE_CODE_SESSION_ID"]
         (pipeline / "config.json").write_text(
-            json.dumps({"haiku": {"strip_session_env": bundled}})
+            json.dumps({"haiku": {"example_list": bundled}})
         )
         remember = project / ".remember"
         remember.mkdir()
         (remember / "config.json").write_text(
-            json.dumps({"haiku": {"strip_session_env": []}})
+            json.dumps({"haiku": {"example_list": []}})
         )
 
         merged, _ = _run_lib_and_dump_config(project, pipeline, home)
-        assert merged.get("haiku", {}).get("strip_session_env") == bundled
+        assert merged.get("haiku", {}).get("example_list") == bundled
 
     def test_project_haiku_removal_does_not_touch_other_project_keys(self, tmp_path):
         """Positive control: a non-haiku key from the SAME untrusted project

@@ -388,8 +388,8 @@ def test_allowlisted_credential_name_is_not_an_offender(tmp_path):
 # -- round 13/16 (#898): the shipped tree names no provider API key (FAIL) ---
 #
 # Round 13: the Anthropic one. Round 16 (maintainer decision): the Codex one
-# too -- the Codex allow-list moved to config (`haiku.codex_env_allow`) and
-# its shipped list names no credential, so nothing shipped needs the name.
+# too -- the Codex allow-list names no credential (round 16 in config, round
+# 17 back in code as literal names), so nothing shipped needs the name.
 
 _API_KEY_NAMES = ("ANTHROPIC_API_KEY", "CODEX_API_KEY")
 

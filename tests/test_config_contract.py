@@ -37,12 +37,6 @@ SOURCE_DIRS = ("scripts", "hooks.d", "hooks", "pipeline")
 # ahead of it.
 _CONFIG_CALL = re.compile(r"""config(?:_into\s+\S+)?\s+["']\.([A-Za-z0-9_.]+)["']""")
 
-# pipeline/haiku.py's shared reader for a `haiku.<key>` list of environment
-# variable names (#898 rounds 15/16): `_configured_env_names("<key>", ...)`.
-# Only that one function's call with a literal first argument counts, and it
-# yields `haiku.<key>` -- no other key and no other reader is widened by it.
-_ENV_NAMES_CALL = re.compile(r"""_configured_env_names\(\s*["']([A-Za-z0-9_]+)["']""")
-
 # Rows of the config table: | `key` | default | description |
 _README_ROW = re.compile(r"^\|\s*`([a-z][A-Za-z0-9_.]*)`\s*\|")
 
@@ -50,9 +44,6 @@ _README_ROW = re.compile(r"^\|\s*`([a-z][A-Za-z0-9_.]*)`\s*\|")
 # resolved by lib-memory-dir.sh's own reader before REMEMBER_CONFIG exists, and
 # haiku.oauth_token is read by pipeline/haiku.py from the merged config in
 # Python. Both are genuinely wired — they just do not go through config().
-# (haiku.strip_session_env and haiku.codex_env_allow are read in Python too,
-# but through `_configured_env_names`, which _ENV_NAMES_CALL sees -- so they
-# must really be read, not merely listed here.)
 _NOT_VIA_CONFIG = {"data_dir", "haiku.oauth_token"}
 
 # Documented and read, but deliberately NOT shipped in config.example.json:
@@ -86,19 +77,21 @@ def _keys_read_by_the_code() -> set[str]:
     for path in _source_files():
         text = path.read_text(encoding="utf-8")
         keys |= set(_CONFIG_CALL.findall(text))
-        if path.suffix == ".py":
-            keys |= {f"haiku.{k}" for k in _ENV_NAMES_CALL.findall(text)}
     return keys
 
 
-def test_the_env_names_reader_is_seen_for_both_of_its_keys():
-    """Positive control for _ENV_NAMES_CALL: both `haiku.*` env-name lists
-    are found as reads in the real source -- and the detector does not
-    invent a read from the reader's own definition or from prose."""
-    read = _keys_read_by_the_code()
-    assert {"haiku.strip_session_env", "haiku.codex_env_allow"} <= read
-    assert _ENV_NAMES_CALL.findall("def _configured_env_names(key: str, consequence: str):") == []
-    assert _ENV_NAMES_CALL.findall('_configured_env_names("codex_env_allow", "x")') == ["codex_env_allow"]
+@pytest.mark.parametrize("key", ["haiku.strip_session_env", "haiku.codex_env_allow"])
+def test_the_env_name_lists_are_no_longer_config(key):
+    """#898 round 17: both environment-name lists are literal code again, so
+    neither key is documented, shipped in the example, or read. Positive
+    control: the table and the example are really parsed (data_dir and
+    thresholds.consolidate_max_bytes are found)."""
+    documented = _keys_documented_in_readme()
+    shipped = _example_keys()
+    assert "data_dir" in documented and "thresholds.consolidate_max_bytes" in shipped
+    assert key not in documented
+    assert key not in shipped
+    assert key not in _keys_read_by_the_code()
 
 
 def _keys_documented_in_readme() -> set[str]:

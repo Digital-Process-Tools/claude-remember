@@ -164,9 +164,9 @@ def test_codex_child_env_keeps_windows_process_vars(monkeypatch):
     assert env.get("PATHEXT") == ".COM;.EXE;.BAT"
 
 
-# #898 round 16: the allow-list is config (`haiku.codex_env_allow`), and the
-# shipped list names no credential. Codex's own env-var credential now reaches
-# the child only when the operator lists it in a TRUSTED config layer (#726).
+# #898 rounds 16-17: the allow-list names no credential, and it is literal
+# code (round 17), not config: no config layer -- trusted or not -- can add
+# Codex's own env-var credential to it.
 _CODEX_CREDENTIAL = "CODEX_API_KEY"
 
 
@@ -185,15 +185,17 @@ def isolated_config(monkeypatch, tmp_path):
     return home
 
 
-def _shipped_codex_allow() -> list:
-    return json.loads((REPO_ROOT / "config.json").read_text(encoding="utf-8"))["haiku"]["codex_env_allow"]
+def _with_credential_listed() -> list:
+    """What a round-16 operator config would have listed: the old shipped
+    list plus the Codex credential's name."""
+    return ["PATH", "HOME", "CODEX_HOME", "HTTPS_PROXY", _CODEX_CREDENTIAL]
 
 
 def test_codex_child_env_drops_the_codex_api_key_by_default(monkeypatch, isolated_config):
-    """#898 round 16: the shipped allow-list names no credential, so an
-    env-var Codex credential does NOT reach the child unless the operator
-    lists it. Positive control in the same run: PATH, on the shipped list,
-    still does -- an env that passed nothing would not pass this test."""
+    """#898 rounds 16-17: the allow-list names no credential, so an env-var
+    Codex credential does NOT reach the child. Positive control in the same
+    run: PATH, on the list, still does -- an env that passed nothing would
+    not pass this test."""
     monkeypatch.setenv(_CODEX_CREDENTIAL, "sk-codex-example")
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
     env = _codex_child_env()
@@ -201,33 +203,30 @@ def test_codex_child_env_drops_the_codex_api_key_by_default(monkeypatch, isolate
     assert env.get("PATH") == "/usr/bin:/bin"
 
 
-def test_codex_child_env_keeps_the_codex_api_key_when_the_operator_lists_it(
-    monkeypatch, isolated_config
-):
-    """#751, kept as an opt-in: anyone who authenticates Codex via env var
-    rather than a filesystem auth.json adds the name to their own
-    ~/.remember/config.json -- the shipped list plus that one name."""
+def test_codex_child_env_ignores_the_operators_own_allow_list(monkeypatch, isolated_config):
+    """#898 round 17: round 16 let an operator add the Codex credential's
+    name in ~/.remember/config.json; the list is literal code now, so that
+    config no longer widens it. Positive control: PATH still passes."""
     d = isolated_config / ".remember"
     d.mkdir()
     (d / "config.json").write_text(json.dumps({"haiku": {
-        "codex_env_allow": _shipped_codex_allow() + [_CODEX_CREDENTIAL],
+        "codex_env_allow": _with_credential_listed(),
     }}), encoding="utf-8")
     monkeypatch.setenv(_CODEX_CREDENTIAL, "sk-codex-example")
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
     env = _codex_child_env()
-    assert env.get(_CODEX_CREDENTIAL) == "sk-codex-example"
+    assert _CODEX_CREDENTIAL not in env
     assert env.get("PATH") == "/usr/bin:/bin"
 
 
 def test_codex_child_env_ignores_a_cloned_repos_own_allow_list(monkeypatch, isolated_config, tmp_path):
     """#726: a cloned repository's own .remember/config.json cannot widen
-    the allow-list -- not even by one credential name. (The positive
-    control is the test above: the same list in a trusted layer works.)"""
+    the allow-list -- not even by one credential name."""
     project = tmp_path / "project"
     remember = project / ".remember"
     remember.mkdir(parents=True)
     (remember / "config.json").write_text(json.dumps({"haiku": {
-        "codex_env_allow": _shipped_codex_allow() + [_CODEX_CREDENTIAL],
+        "codex_env_allow": _with_credential_listed(),
     }}), encoding="utf-8")
     monkeypatch.setenv("MEMORY_PROJECT_DIR", str(project))
     monkeypatch.setenv("REMEMBER_DIR", str(remember))
@@ -383,23 +382,16 @@ def test_build_codex_cmd_denies_spawned_commands_the_allowlisted_env():
 
 
 @patch("pipeline.haiku.subprocess.run")
-def test_call_codex_still_authenticates_and_proxies_while_denying_spawned_commands(
+def test_call_codex_still_proxies_while_denying_spawned_commands(
     mock_run, monkeypatch, isolated_config
 ):
     """Positive control for #798: the fix must not regress #751/#792 --
     Codex's OWN process (the `env=` kwarg subprocess.run receives) still
-    gets an operator-listed credential and the proxy vars, in the SAME call
-    whose argv also carries the `shell_environment_policy.inherit=none`
-    override that keeps those same values from reaching a command Codex
-    spawns internally. If this test's first two assertions failed, the fix
-    would have re-broken #751 while "fixing" #798 -- the two must hold
-    together. #898 round 16: the credential reaches Codex only because the
-    operator's own config lists it; the shipped list does not."""
-    d = isolated_config / ".remember"
-    d.mkdir()
-    (d / "config.json").write_text(json.dumps({"haiku": {
-        "codex_env_allow": _shipped_codex_allow() + [_CODEX_CREDENTIAL],
-    }}), encoding="utf-8")
+    gets the proxy vars, in the SAME call whose argv also carries the
+    `shell_environment_policy.inherit=none` override that keeps those same
+    values from reaching a command Codex spawns internally. #898 rounds
+    16-17: the Codex credential reaches neither -- the allow-list names no
+    credential, and Codex authenticates from its own auth.json."""
     monkeypatch.setenv(_CODEX_CREDENTIAL, "sk-codex-example")
     monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:8080")
     _write_codex_output.next_text = "## codex thing"
@@ -407,6 +399,6 @@ def test_call_codex_still_authenticates_and_proxies_while_denying_spawned_comman
     _call_codex("prompt")
     env = mock_run.call_args[1]["env"]
     cmd = mock_run.call_args[0][0]
-    assert env.get(_CODEX_CREDENTIAL) == "sk-codex-example"
     assert _env_value_ci(env, "HTTPS_PROXY") == "http://proxy.example:8080"
+    assert _CODEX_CREDENTIAL not in env
     assert "shell_environment_policy.inherit=none" in cmd

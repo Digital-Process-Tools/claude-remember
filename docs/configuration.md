@@ -56,28 +56,24 @@ Put cross-project preferences (timezone, cooldowns) in `~/.remember/config.json`
 | `thresholds.consolidate_timeout_seconds` | `180`     | Wall-clock budget (seconds) for the staging -> `recent.md`/`archive.md` consolidation call. The same fix shape as `ndc_timeout_seconds` above ([#806](https://github.com/Digital-Process-Tools/claude-remember/issues/806), reopening the intent of [#788](https://github.com/Digital-Process-Tools/claude-remember/issues/788)): output length scales with input length, so a large enough staging batch can time out on every run, be left uncompressed, and grow further every round with no recovery. Raise this if the daily log shows repeated `consolidation` ERROR lines mentioning a timeout. |
 | `debug`                          | _(unset)_        | Verbose logging for cooldowns and locks. Unset, each script keeps its own default — `save-session.sh` is verbose, the git-backup hook is quiet — which is what they did before this option was wired up (#176). `REMEMBER_DEBUG` overrides it.                                                                                                                                                                                                |
 | `haiku.oauth_token`              | _(empty)_        | **Removed entirely (#860, round 4).** Never read for authentication, on any host -- this plugin has no recovery-token path of its own at all, on Claude Code or Codex; a nested call that cannot authenticate simply runs unauthenticated, and refreshing your coding agent's own CLI login is the fix. A still-configured value here is not read for anything, is not detected, and is not logged anywhere -- there is nothing to migrate it to; remove it whenever convenient, but leaving it in place is harmless. |
-| `haiku.strip_session_env`       | _(the list in the plugin's bundled `config.json`)_ | The parent Claude Code session's own variables, removed from the environment before the nested `claude -p` summarizer starts so it does not pass as that session ([#95](https://github.com/Digital-Process-Tools/claude-remember/issues/95), [#204](https://github.com/Digital-Process-Tools/claude-remember/issues/204)). Shipped: `CLAUDECODE`, `CLAUDE_JOB_DIR`, `CLAUDE_PROJECT_DIR`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_SESSION_ATTENDED`, `CLAUDE_CODE_EXECPATH`, `CLAUDE_CODE_MESSAGING_SOCKET`, `CLAUDE_CODE_MESSAGING_TOKEN`, `CLAUDE_CODE_SSE_PORT` -- the reason for each is a comment beside the code in `pipeline/haiku.py`. Everything else is **inherited**: the summarizer runs a nested `claude -p` that inherits your environment, including your Claude Code login, exactly like any process a hook starts, and remember itself reads no credential ([#898](https://github.com/Digital-Process-Tools/claude-remember/issues/898)). Your login credential is never on this list ([#131](https://github.com/Digital-Process-Tools/claude-remember/issues/131)); provider settings such as Bedrock selection are not either, so they now reach the nested call ([#316](https://github.com/Digital-Process-Tools/claude-remember/issues/316)). If a future Claude Code release adds a session variable, add it here without waiting for a plugin release -- but a list in `~/.remember/config.json` **replaces** the shipped one, so copy it whole and append. Exact variable names only; an entry that is not one is ignored and reported in the daily log by position and length, never echoed; a value that is not a list is reported and the next layer's list (in the end, the shipped one) applies. Applies to the `claude` summarizer only: the `codex` summarizer's environment is an allow-list. **Removed:** `haiku.drop_env` ([#898](https://github.com/Digital-Process-Tools/claude-remember/issues/898)) -- to keep any other variable away from the summarizer, for example an `ANTHROPIC_API_KEY` set for some unrelated tool that would out-rank your `claude.ai` login there ([#703](https://github.com/Digital-Process-Tools/claude-remember/issues/703)), unset it in the environment you start Claude Code from. |
-| `haiku.codex_env_allow`         | _(the list in the plugin's bundled `config.json`)_ | The **only** environment variables the nested `codex exec` summarizer is given -- an allow-list, not a strip list ([#724](https://github.com/Digital-Process-Tools/claude-remember/issues/724); see [the Codex allow-list](#the-codex-summarizers-allow-list-724) below). Shipped: `PATH`, `HOME`, `LANG`, `LC_ALL`, `CODEX_HOME`, `TMPDIR`, `TEMP`, `TMP`, `SYSTEMROOT`, `USERPROFILE`, `APPDATA`, `PATHEXT`, `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`, `https_proxy`, `http_proxy`, `no_proxy`, `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS` -- what the Codex CLI needs to run, find its own login in `CODEX_HOME`, and reach the network through a proxy or a custom CA bundle. **No credential is on it** ([#898](https://github.com/Digital-Process-Tools/claude-remember/issues/898), round 16): Codex's own login (`auth.json` in `CODEX_HOME`) is unaffected, but if you authenticate Codex through an environment variable instead, add that variable's name here (below). A list in `~/.remember/config.json` **replaces** the shipped one, so copy it whole and append. Exact variable names only; an entry that is not one is ignored and reported in the daily log by position and length, never echoed; a value that is not a list is reported and the next layer's list (in the end, the shipped one) applies. On Windows, where variable names are case-insensitive, a lowercase proxy name only repeats its upper-case twin and is skipped. Applies to the `codex` summarizer only. |
 | `session_start_slow_threshold_s` | `5`              | The `SessionStart` hook's own wall-clock duration is always written to the daily log (`session-start took Ns`); at or above this many whole seconds it is **also** printed into the session, under `=== SESSION-START ===`, so a slow host is visible without going looking for the daily log first ([#706](https://github.com/Digital-Process-Tools/claude-remember/issues/706)). Measured with bash 5's `EPOCHSECONDS` builtin (no added fork) or, on older bash, one `date +%s` at each end — never per log line. Set `0` to surface every start; there is no key that silences the daily-log line. |
 
-**`haiku.oauth_token`, `haiku.strip_session_env` and `haiku.codex_env_allow` are never
-read from a per-project `.remember/config.json`, in the default (legacy) storage layout.**
-All three live under the `haiku` block above, and all three are security-relevant: one
-chose the credential the nested summarizer authenticated with, one decides which of the
-parent session's variables are kept away from it, and one decides which of your
-variables the Codex summarizer can see at all. In the default layout `.remember/` sits inside the project checkout, so
-a repository you clone can ship a `.remember/config.json` of its own -- and before
+**A per-project `.remember/config.json`'s `haiku` block is never read, in the default
+(legacy) storage layout.** Keys under `haiku` have been security-relevant (`haiku.oauth_token`
+chose the credential the nested summarizer authenticated with). In the default layout
+`.remember/` sits inside the project checkout, so a repository you clone can ship a
+`.remember/config.json` of its own -- and before
 [#726](https://github.com/Digital-Process-Tools/claude-remember/issues/726), its `haiku`
 block was trusted exactly like one you wrote yourself. It no longer is, **regardless of
-whether that file is tracked by the repository's own git index** -- set these keys
-in `~/.remember/config.json` (user-global), never in a project's own config file, if you
+whether that file is tracked by the repository's own git index** -- set `haiku` keys in
+`~/.remember/config.json` (user-global), never in a project's own config file, if you
 want them honoured.
 
 **`model` and `reject_pattern` from that same per-project config are stripped too, but
 only when the file is git-TRACKED** -- committed by the repository, not merely sitting
 in the default layout
 ([#757](https://github.com/Digital-Process-Tools/claude-remember/issues/757)). Unlike
-the three `haiku.*` keys, neither can redirect where a transcript goes -- only which model
+the `haiku` block, neither can redirect where a transcript goes -- only which model
 is billed for every save, or whether the refusal gate runs at all (`reject_pattern:
 "none"` turns it off outright; any other value is a regex run over model output, an
 attacker-controlled ReDoS surface) -- severe enough to strip from a file the repository
@@ -99,47 +95,66 @@ ever wrote, or whose git status was confirmed clean, reaches the trusted externa
 See [git-backup-security.md](git-backup-security.md) for the wider "a cloned project's
 config is untrusted input" note.
 
+### The summarizer's environment
+
+**The `claude` summarizer.** The summarizer runs a nested `claude -p` that inherits your
+environment, including your Claude Code login, exactly like any process a hook starts, and
+remember itself reads no credential
+([#898](https://github.com/Digital-Process-Tools/claude-remember/issues/898)). Only the
+parent Claude Code session's own variables are removed for the length of that call, so it
+does not pass as that session
+([#95](https://github.com/Digital-Process-Tools/claude-remember/issues/95),
+[#204](https://github.com/Digital-Process-Tools/claude-remember/issues/204)), and put
+back afterwards: `CLAUDECODE`, `CLAUDE_JOB_DIR`, `CLAUDE_PROJECT_DIR`,
+`CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_CHILD_SESSION`,
+`CLAUDE_CODE_SESSION_ATTENDED`, `CLAUDE_CODE_EXECPATH`, `CLAUDE_CODE_MESSAGING_SOCKET`,
+`CLAUDE_CODE_MESSAGING_TOKEN`, `CLAUDE_CODE_SSE_PORT` -- the reason for each is a comment
+beside the code in `pipeline/haiku.py`. Your login credential is never on that list
+([#131](https://github.com/Digital-Process-Tools/claude-remember/issues/131)); provider
+settings such as Bedrock selection are not either, so they reach the nested call
+([#316](https://github.com/Digital-Process-Tools/claude-remember/issues/316)). To keep any
+other variable away from the summarizer -- for example an `ANTHROPIC_API_KEY` set for some
+unrelated tool that would out-rank your `claude.ai` login there
+([#703](https://github.com/Digital-Process-Tools/claude-remember/issues/703)) -- unset it
+in the environment you start Claude Code from.
+
+**The list is code, not config.** Each name is written out literally in
+`pipeline/haiku.py` and cannot be changed from `config.json`. If a future Claude Code
+release adds a session variable, it reaches the summarizer until a plugin release adds it
+to the list. (Two earlier development rounds of #898 read this list, and the Codex one
+below, from `config.json`; a release-candidate scan reports reading the environment by a
+name taken from config as "an environment variable named at run time", so both lists went
+back into code with the same names.) **Removed:** `haiku.drop_env`
+([#898](https://github.com/Digital-Process-Tools/claude-remember/issues/898)).
+
 ### The Codex summarizer's allow-list (#724)
 
 **What it protects.** Codex's `--sandbox read-only` denies writes and network, but it
 still runs whatever command the model asks for -- and a transcript can carry an
 instruction that gets the model to ask for `env`
 ([#724](https://github.com/Digital-Process-Tools/claude-remember/issues/724)). So the
-nested `codex exec` process is not given your environment: it is given only the
-variables named in `haiku.codex_env_allow`, and nothing else -- no Anthropic key, no
-cloud credential, no unrelated secret your shell happens to carry. (Separately,
+nested `codex exec` process is not given your environment: it is given only these
+variables, and nothing else -- no Anthropic key, no cloud credential, no unrelated secret
+your shell happens to carry: `PATH`, `HOME`, `LANG`, `LC_ALL`, `CODEX_HOME`, `TMPDIR`,
+`TEMP`, `TMP`, `SYSTEMROOT`, `USERPROFILE`, `APPDATA`, `PATHEXT`, `HTTPS_PROXY`,
+`HTTP_PROXY`, `NO_PROXY`, `https_proxy`, `http_proxy`, `no_proxy`, `SSL_CERT_FILE`,
+`NODE_EXTRA_CA_CERTS` -- what the Codex CLI needs to run, find its own login in
+`CODEX_HOME`, and reach the network through a proxy or a custom CA bundle. On Windows,
+where variable names are case-insensitive, the lowercase proxy names would only repeat
+their upper-case twins and are not read. (Separately,
 `-c shell_environment_policy.inherit=none` gives a command Codex spawns no environment
 at all; the allow-list bounds what Codex's own process can see.) An allow-list fails
-closed: a variable nobody thought about stays out.
+closed: a variable nobody thought about stays out. Like the `claude` list above, it is
+code, not config: it cannot be changed from `config.json`.
 
-**It is config now, not code** ([#898](https://github.com/Digital-Process-Tools/claude-remember/issues/898),
-round 16). The shipped list, in the plugin's bundled `config.json`, names no credential.
-That is narrower than before: earlier releases also passed Codex's own API-key
-variable through. If Codex finds its login in `auth.json` under `CODEX_HOME` (what
-`codex login` writes), nothing changes for you. **If you authenticate Codex only through
-an environment variable, the `codex` summarizer now starts without it** -- add one line
-to your own `~/.remember/config.json`: the shipped list, plus that variable's name
-(for an API key, the name Codex documents, `CODEX_API_KEY`):
-
-```json
-{
-  "haiku": {
-    "codex_env_allow": [
-      "PATH", "HOME", "LANG", "LC_ALL", "CODEX_HOME", "TMPDIR", "TEMP", "TMP",
-      "SYSTEMROOT", "USERPROFILE", "APPDATA", "PATHEXT",
-      "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy",
-      "SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS",
-      "CODEX_API_KEY"
-    ]
-  }
-}
-```
-
-The list **replaces** the shipped one -- it does not append -- so leaving out `PATH` or
-`HOME` there stops Codex from starting. Set it in `~/.remember/config.json` (or your
-external store's own config), never in a project's `.remember/config.json`: that file
-is not trusted for any `haiku` key (above), so a repository you clone cannot widen what
-the Codex child sees.
+**No credential is on it**
+([#898](https://github.com/Digital-Process-Tools/claude-remember/issues/898)). That is
+narrower than earlier releases, which also passed Codex's own API-key variable
+(`CODEX_API_KEY`) through. If Codex finds its login in `auth.json` under `CODEX_HOME`
+(what `codex login` writes), nothing changes for you. **If you authenticate Codex only
+through an environment variable, it is not passed through and the `codex` summarizer
+starts without it** -- run `codex login` so the login lives in `auth.json`, or use the
+`claude` summarizer (`REMEMBER_SUMMARIZER=claude`).
 
 ### Environment variables
 

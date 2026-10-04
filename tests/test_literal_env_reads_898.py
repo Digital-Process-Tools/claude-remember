@@ -134,22 +134,13 @@ NEGATIVE = (
     "    return child\n"
 )
 
-# The only sites allowed to touch the environment by a name they did not
-# write out, each with the exact number of such accesses it makes:
-#   _without_session_env -- removing the parent session's variables, named by
-#     config (`haiku.strip_session_env`, #95), so a future Claude Code session
-#     variable can be listed without a code release (maintainer decision, #898
-#     round 15): one read to save the value, one store to restore it.
-#   _codex_child_env -- copying the Codex child's allow-listed variables,
-#     named by config (`haiku.codex_env_allow`, #724), so the shipped list
-#     names no credential and an operator adds one in their own config
-#     (maintainer decision, #898 round 16): one read per configured name.
-# Both are run-time-named accesses by design, disclosed here rather than
-# disguised -- the directory scan may still cite them.
-EXEMPT = {
-    ("haiku.py", "_without_session_env"): 2,
-    ("haiku.py", "_codex_child_env"): 1,
-}
+# Sites allowed to touch the environment by a name they did not write out,
+# each with the exact number of such accesses it makes. Empty since #898
+# round 17: rounds 15-16 read the #95 session list and the #724 Codex
+# allow-list from config (`_without_session_env`, `_codex_child_env`), which
+# the directory scanner reports as "an environment variable named at run
+# time"; both lists are now literal names in code, so nothing is exempt.
+EXEMPT: dict = {}
 _EXEMPT_KINDS = {"env read by a non-literal name", "env subscript by a non-literal name"}
 
 
@@ -211,24 +202,29 @@ def test_shipped_python_reads_the_environment_by_literal_name(path):
     assert rest == [], f"{path.relative_to(REPO_ROOT)}: {rest}"
 
 
-def test_the_exempt_sites_are_real_and_exactly_counted():
-    """The exemption is not vacuous and not a blanket: each exempt function
-    in haiku.py accesses the environment by a configured name (so the scan
-    reaches it) exactly as many times as EXEMPT says -- one more access in
-    either function fails here -- and nothing else in the shipped set relies
-    on the exemption."""
+def test_nothing_is_exempt_any_more():
+    """#898 round 17: no shipped site reads the environment by a run-time
+    name, so the exemption list is empty -- adding one back is a decision,
+    not a drift, and fails here first."""
+    assert EXEMPT == {}
+
+
+def test_the_former_exempt_sites_now_read_literally():
+    """The two functions rounds 15-16 exempted still touch the environment
+    (positive control: the scan reaches real accesses there) and every one
+    of those accesses names its variable literally."""
     haiku_py = REPO_ROOT / "pipeline" / "haiku.py"
     source = haiku_py.read_text(encoding="utf-8")
     spans = _function_spans(source)
-    exempt, _ = _split_exempt(haiku_py, non_literal_env_reads(source))
-    assert exempt, "positive control: the exempt sites carry the shape"
-    per_function = {}
-    for line, _kind in exempt:
-        for (fname, fn) in EXEMPT:
-            if fn in spans and spans[fn][0] <= line <= spans[fn][1]:
-                per_function[(fname, fn)] = per_function.get((fname, fn), 0) + 1
-    assert per_function == EXEMPT, per_function
-    for path in SHIPPED_PY:
-        if path != haiku_py:
-            used, _ = _split_exempt(path, non_literal_env_reads(path.read_text(encoding="utf-8")))
-            assert used == [], path
+    tree = ast.parse(source)
+    for fn in ("_without_session_env", "_codex_child_env"):
+        start, end = spans[fn]
+        accesses = [n for n in ast.walk(tree)
+                    if isinstance(n, (ast.Call, ast.Subscript))
+                    and start <= getattr(n, "lineno", 0) <= end
+                    and (_is_os_environ(getattr(n, "value", None))
+                         or (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                             and _is_os_environ(n.func.value)))]
+        assert len(accesses) >= 10, f"positive control: {fn} touches the environment"
+        hits = [h for h in non_literal_env_reads(source) if start <= h[0] <= end]
+        assert hits == [], (fn, hits)

@@ -181,9 +181,8 @@ def test_call_haiku_sends_prompt_on_stdin_not_argv(mock_run):
 def test_call_haiku_strips_parent_session_env(mock_run, monkeypatch):
     """The nested claude -p must not inherit the PARENT Claude Code session
     vars — else it looks like a resumable session to anything keying off them
-    (#95). The names come from `haiku.strip_session_env` (the plugin's bundled
-    config.json since #898 round 15); the rest of the environment is
-    inherited intact."""
+    (#95). The names are literal in `_without_session_env` (#898 round 17);
+    the rest of the environment is inherited intact."""
     monkeypatch.delenv("REMEMBER_CONFIG", raising=False)
     monkeypatch.setenv("CLAUDECODE", "1")
     monkeypatch.setenv("CLAUDE_JOB_DIR", "/some/job/dir")

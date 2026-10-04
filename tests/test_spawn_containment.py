@@ -311,8 +311,8 @@ def test_the_child_env_does_not_carry_the_parents_project_dir(monkeypatch):
     child as having none. Claude Code 2.1.219 overwrites it from the sandbox
     cwd and the leak is inert there; a CLI that honoured the inherited value
     would instead point the summarizer at the real project, which is the
-    failure @ehutchinsonSFDC saw. It is on the shipped
-    `haiku.strip_session_env` list (#898 round 15).
+    failure @ehutchinsonSFDC saw. It is on the literal
+    `_without_session_env` list (#898 rounds 15, 17).
     """
     import os
 
