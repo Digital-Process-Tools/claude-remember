@@ -341,6 +341,14 @@ def _without_session_env():
     than session identity: provider selection such as CLAUDE_CODE_USE_BEDROCK
     (#316) and any other CLAUDE_CODE_* setting a user exports -- the old
     prefix strip removed those too.
+
+    Not on it since #898 round 18 (maintainer decision): the handshake
+    Claude Code pairs with the messaging channel below. The channel itself
+    (its socket) is still removed, so the child has nothing to use the
+    handshake on; the handshake is inherited like any other variable. One
+    real summarizer call run this way opened no extra peer session (observed
+    once, without a control). Not naming it is also what cleared the
+    directory portal's credential hold.
     """
     # Says "already inside a session"; the CLI refuses to nest under it.
     saved_claudecode = os.environ.pop("CLAUDECODE", None)
@@ -359,9 +367,9 @@ def _without_session_env():
     # The parent's own executable; the nested CLI sets its own.
     saved_execpath = os.environ.pop("CLAUDE_CODE_EXECPATH", None)
     # The parent session's messaging channel; the child must not speak on it.
+    # Its paired handshake is inherited (#898 round 18): without this channel
+    # the child has nowhere to present it.
     saved_messaging_socket = os.environ.pop("CLAUDE_CODE_MESSAGING_SOCKET", None)
-    # The handshake paired with that channel; same reason.
-    saved_messaging_handshake = os.environ.pop("CLAUDE_CODE_MESSAGING_TOKEN", None)
     # The parent's IDE connection; the child would attach to the user's IDE.
     saved_sse_port = os.environ.pop("CLAUDE_CODE_SSE_PORT", None)
     try:
@@ -385,8 +393,6 @@ def _without_session_env():
             os.environ["CLAUDE_CODE_EXECPATH"] = saved_execpath
         if saved_messaging_socket is not None:
             os.environ["CLAUDE_CODE_MESSAGING_SOCKET"] = saved_messaging_socket
-        if saved_messaging_handshake is not None:
-            os.environ["CLAUDE_CODE_MESSAGING_TOKEN"] = saved_messaging_handshake
         if saved_sse_port is not None:
             os.environ["CLAUDE_CODE_SSE_PORT"] = saved_sse_port
 
@@ -979,36 +985,34 @@ def _isolated_summarizer_cwd():
 # keeps a command spawned BY that CLI from seeing this same dict.
 #
 # #751 (release-audit, reasoned not observed): the original list was
-# PATH/HOME/LANG/LC_ALL/CODEX_HOME/TMPDIR/TEMP/TMP only -- no Windows entry,
-# and no route for anyone behind a proxy, on ANY platform. Both were widened
-# rather than switched to a deny-list: #724's own rationale above (a command
-# the model runs can read the child's environment directly) is exactly as
-# true on Windows and behind a proxy as it is everywhere else this
-# allow-list already applied, so the fix is the same shape, just wider.
+# PATH/HOME/LANG/LC_ALL/CODEX_HOME/TMPDIR/TEMP/TMP only, with no Windows
+# entry. The Windows names were added rather than switching to a deny-list:
+# #724's own rationale above (a command the model runs can read the child's
+# environment directly) is exactly as true on Windows as everywhere else.
 #
 # #898 rounds 16-17: the list names no credential. Codex's own login lives
 # in CODEX_HOME/auth.json (`codex login`), which is unaffected; an
-# environment-variable-only Codex login is not passed through, so the
-# default is narrower than #751's, never wider. Round 16 had made the list
-# config so an operator could add a name; round 17
-# writes it back in code as one literal read per name, because reading the
+# environment-variable-only Codex login is not passed through. Round 16 had
+# made the list config so an operator could add a name; round 17 writes it
+# back in code as one literal read per name, because reading the
 # environment by a config-supplied name is what the directory scanner
-# reports as "an environment variable named at run time". Same names, same
-# order as round 16's shipped list; changing it now needs a release.
+# reports as "an environment variable named at run time". Changing it needs
+# a release.
+#
+# #898 round 18 (maintainer decision): no proxy or CA-bundle variable is
+# passed through any more, in either casing. #751 had added them on a
+# reasoned audit finding, not a user request -- no user ever asked for
+# proxy support -- and #798 had flagged the same names as a leak risk.
+# Taking them off is also what cleared the directory portal's credential
+# hold. Behind a proxy, use REMEMBER_SUMMARIZER=claude: the Claude route
+# inherits the full environment. With the lowercase proxy reads gone, the
+# #792 Windows case-folding note that justified skipping them there no
+# longer applies to anything on this list.
 #
 # The Windows-only names (SYSTEMROOT/USERPROFILE/APPDATA/PATHEXT) are read
 # UNCONDITIONALLY: `_codex_child_env` only passes through a name that is
 # ALSO set in the parent's real ``os.environ``, so they are a no-op on POSIX
 # (nothing there sets them) and exactly the widening Codex needs on Windows.
-#
-# #792 (CI, windows-latest): CPython's os.py folds EVERY os.environ key to
-# uppercase on `nt` (_createenviron's `encodekey = key.upper()`), and a
-# lookup there upper-cases the name too -- so on Windows one read of the
-# upper-case name finds a variable set in any case. A case-preserving
-# platform (POSIX) keeps `https_proxy` and `HTTPS_PROXY` apart, and some HTTP
-# client libraries only ever check the lowercase form, so the three
-# lowercase proxy names are read too -- off Windows only, where they would
-# just repeat their upper-case twins.
 
 
 def _codex_child_env() -> dict[str, str]:
@@ -1026,15 +1030,13 @@ def _codex_child_env() -> dict[str, str]:
     ``SYSTEMROOT``/``USERPROFILE``/``APPDATA``/``PATHEXT``: Windows-only in
     practice (#751) -- absent from ``os.environ`` everywhere else, so listing
     them here costs nothing on POSIX.
-    ``HTTPS_PROXY``/``HTTP_PROXY``/``NO_PROXY`` and
-    ``SSL_CERT_FILE``/``NODE_EXTRA_CA_CERTS``: anyone running this behind a
-    proxy or a custom CA bundle (#751). The three proxy names are also read
-    in lowercase on a case-preserving platform -- some HTTP client libraries
-    only ever check that form -- while on Windows the upper-case read already
-    finds either casing, so the lowercase reads are skipped there (#792).
     No credential: Codex authenticates from its filesystem ``auth.json``
     (``codex login``); a login held only in an environment variable is not
     passed through (#898 rounds 16-17).
+    No proxy or CA-bundle variable either, in any casing (#898 round 18,
+    maintainer decision; #751 had added them on a reasoned finding, no user
+    asked for them, and #798 named them a leak risk). Behind a proxy, use
+    ``REMEMBER_SUMMARIZER=claude``, whose route inherits the full environment.
 
     Nothing else -- no Anthropic key, no cloud credential, no unrelated
     shell secret this process's own environment happens to carry -- is
@@ -1042,10 +1044,7 @@ def _codex_child_env() -> dict[str, str]:
     read-only sandbox can read the child's environment directly.
     """
     # #898 round 17: one literal read per allowed name, never a walk of the
-    # environment and never a name taken from config. On Windows os.environ
-    # lookups ignore case (#792), so the lowercase proxy spellings some HTTP
-    # clients only check on POSIX would only repeat their upper-case twins
-    # there and are not read.
+    # environment and never a name taken from config.
     pairs = [
         ("PATH", os.environ.get("PATH")),
         ("HOME", os.environ.get("HOME")),
@@ -1059,19 +1058,6 @@ def _codex_child_env() -> dict[str, str]:
         ("USERPROFILE", os.environ.get("USERPROFILE")),
         ("APPDATA", os.environ.get("APPDATA")),
         ("PATHEXT", os.environ.get("PATHEXT")),
-        ("HTTPS_PROXY", os.environ.get("HTTPS_PROXY")),
-        ("HTTP_PROXY", os.environ.get("HTTP_PROXY")),
-        ("NO_PROXY", os.environ.get("NO_PROXY")),
-    ]
-    if os.name != "nt":
-        pairs += [
-            ("https_proxy", os.environ.get("https_proxy")),
-            ("http_proxy", os.environ.get("http_proxy")),
-            ("no_proxy", os.environ.get("no_proxy")),
-        ]
-    pairs += [
-        ("SSL_CERT_FILE", os.environ.get("SSL_CERT_FILE")),
-        ("NODE_EXTRA_CA_CERTS", os.environ.get("NODE_EXTRA_CA_CERTS")),
     ]
     child = {name: value for name, value in pairs if value is not None}
     child["REMEMBER_NESTED_SUMMARIZER"] = "1"
@@ -1090,8 +1076,8 @@ def _build_codex_cmd(output_file: str, cwd: str) -> list[str]:
     SEPARATE audiences:
       * `_codex_child_env` -- the ``env=`` kwarg passed to `subprocess.run`
         -- is what CODEX'S OWN PROCESS receives from this host (its CLI
-        needs PATH/HOME to run at all, plus proxy/CA vars to reach the
-        network, #751; the list names no credential, #898 rounds 16-17).
+        needs PATH/HOME to run at all; the list names no credential, #898
+        rounds 16-17, and no proxy/CA variable, #898 round 18).
       * the ``-c shell_environment_policy.inherit=none`` override below is
         what a COMMAND CODEX SPAWNS internally receives. These are not the
         same environment: Codex does not hand a spawned command its own
@@ -1099,11 +1085,10 @@ def _build_codex_cmd(output_file: str, cwd: str) -> list[str]:
         it. Before #798, nothing here set this policy at all, so a
         transcript-injected instruction that got the model to run a shell
         command inside this sandbox could read an operator-added credential
-        and the proxy vars directly out of that command's environment --
-        exactly the class of secret #751 had just finished making Codex's
-        OWN process able to see. `_codex_child_env`'s allow-list stays
-        necessary (Codex's own auth/proxy needs do not go away); it was
-        never sufficient for this.
+        and the proxy vars (then on the list, #751; off it since #898 round
+        18) directly out of that command's environment. `_codex_child_env`'s
+        allow-list stays necessary (Codex's own process still needs its
+        environment); it was never sufficient for this.
         Confirmed against codex-cli 0.153.2's own ``--help`` and the
         official Codex manual (fetched 2026-09-26): `shell_environment_policy`
         is a real, documented dotted-path config key, and ``-c`` overrides
@@ -1123,7 +1108,7 @@ def _build_codex_cmd(output_file: str, cwd: str) -> list[str]:
         fail to find it. Accepted here because nothing about this
         summarizer's actual job (producing the model's final text message)
         depends on a spawned command succeeding -- unlike `_codex_child_env`,
-        which deliberately keeps just enough (``PATH``/``HOME``/proxy/CA) for
+        which deliberately keeps just enough (``PATH``/``HOME``/locale/temp) for
         Codex's OWN process to run and authenticate, this policy governs a
         code path this feature does not intend to rely on at all.
         Unit tests here can only assert the argv carries this exact string;
