@@ -938,11 +938,9 @@ def _check_typed_heredoc(files: dict, kinds: dict, off: list) -> None:
     out first (_mask_arithmetic) -- neither is a heredoc the portal's
     scanner has ever held.
 
-    This FAILS against this repo's OWN scripts today: the source-level
-    rewrite from `<<EOF`/`<<'PYEOF'` heredocs to here-strings/printf is
-    being done on fix/898, concurrently with this lane, not here -- this
-    guard exists so that rewrite has something to turn green, not to ship
-    alongside scripts this lane itself edited to satisfy it."""
+    The source-level rewrite from `<<EOF`/`<<'PYEOF'` heredocs to
+    here-strings/printf landed with #898; the built tree passes this with
+    0 FAIL, so a FAIL here is a new heredoc, not a known backlog."""
     for rel, data in sorted(files.items()):
         top = rel.split("/")[0]
         if top not in ("hooks", "hooks.d", "scripts") or kinds.get(rel) != "text":

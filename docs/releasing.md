@@ -252,11 +252,46 @@ portal's hold was unconfirmed without a real release-preview validation; the sam
 validation above confirmed it. `TYPED_HEREDOC` now runs against every shipped `hooks/`/`hooks.d/`/
 `scripts/` file with `$(( ... ))` arithmetic expansions masked out first (`_mask_arithmetic`) --
 `$(( x << 4 ))` is a left-shift operator, not a here-document, and the portal has never flagged
-it. `<<<` (a here-string) was never flagged either and still is not. **This guard currently FAILS
-against this repo's own scripts**: the source-level rewrite from `<<EOF`/`<<'PYEOF'` heredocs to
-here-strings/printf is being done concurrently on `fix/898`, not by this change -- this guard
-exists so that rewrite has something real to turn green against, not to ship alongside scripts
-this change itself edited to satisfy it.
+it. `<<<` (a here-string) was never flagged either and still is not. The source-level rewrite
+from `<<EOF`/`<<'PYEOF'` heredocs to here-strings/printf landed with #898, and the built tree now
+passes it with **0 FAIL**: any FAIL from this guard on a release build is a new heredoc, not a
+known backlog.
+
+### Every shipped `.py` loses its comments and docstrings (#900)
+
+The directory's scanner reads Python **comments and docstrings as code**. Release-preview probe
+hD (logged in `claude-directory-publishing`'s `triggers.md`) put `pipeline/haiku.py` through a
+comment-and-docstring strip and changed nothing else: the credential hold's citation moved from
+"an environment variable named at run time" -- prose in a comment describing a lookup -- to "the
+whole environment object", the file's one real read. A sentence explaining what the code does
+not do is, to the scanner, code that does it.
+
+So `build_release_tree.py` runs every shipped `.py` through
+[`strip_python.py`](../.github/scripts/strip_python.py) after compiling the hooks. **The source on
+`main` keeps every comment and docstring**; tests import the pipeline from source and see them.
+How it strips:
+
+- the source **text** is edited, not re-rendered: `COMMENT` tokens (from `tokenize`) are cut along
+  with the blanks before them, and each docstring statement's span (from `ast`) is cut -- replaced
+  by `pass` when it was its body's only statement. Lines left blank are dropped, except inside a
+  multi-line string. A `#!` first line and a `coding` cookie stay. Every other string literal,
+  f-strings included, keeps its exact bytes. `ast.unparse` is not used: it would re-render each
+  file from the AST of whichever Python runs the build, and users run 3.9. The built tree is
+  byte-identical whether the build runs on 3.9.6, 3.13 or 3.14 (observed on macOS).
+- each result is **proven or the build fails** (`StripError` -> `BuildError`): it parses with
+  `ast.parse(..., feature_version=(3, 9))`, its `ast.dump` equals the source's with docstrings
+  removed (a body left empty holds a lone `pass`), and no comment or docstring is left in it.
+- a file that reads `__doc__` is **refused**: stripping its docstring would change what it prints.
+  `scripts/install_agy_hooks.py` used its module docstring as `--help` text; it now passes an
+  explicit description string, the same on both trees.
+- `check_release_tree.py`'s `_check_python_comments` FAILs any shipped `.py` that still carries a
+  comment or docstring -- the strip step not running on a file, or missing a shape.
+
+Measured on this repo's 18 shipped `.py` files: **265,543 -> 83,322 bytes** (-69%);
+`pipeline/haiku.py` alone 78,724 -> 25,815. Run `python3 .github/scripts/strip_python.py FILE...`
+for the per-file sizes, or `--print FILE` to read one file as it ships. String literals still
+reach the scanner (probe hE cited a user-facing warning string next), and stripping cannot help
+there: those are real, needed text.
 
 ## What the Anthropic directory actually measured
 
