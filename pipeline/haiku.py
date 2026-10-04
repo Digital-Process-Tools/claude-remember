@@ -98,21 +98,47 @@ def _choose_summarizer_provider() -> str:
         )
     return "claude"
 @contextlib.contextmanager
-def _without_session_env(names: tuple[str, ...]):
-    removed = {}
-    for name in names:
-        value = os.environ.pop(name, None)
-        if value is not None:
-            removed[name] = value
+def _without_session_env():
+    saved_claudecode = os.environ.pop("CLAUDECODE", None)
+    saved_claude_job_dir = os.environ.pop("CLAUDE_JOB_DIR", None)
+    saved_claude_project_dir = os.environ.pop("CLAUDE_PROJECT_DIR", None)
+    saved_session_id = os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
+    saved_entrypoint = os.environ.pop("CLAUDE_CODE_ENTRYPOINT", None)
+    saved_child_session = os.environ.pop("CLAUDE_CODE_CHILD_SESSION", None)
+    saved_session_attended = os.environ.pop("CLAUDE_CODE_SESSION_ATTENDED", None)
+    saved_execpath = os.environ.pop("CLAUDE_CODE_EXECPATH", None)
+    saved_messaging_socket = os.environ.pop("CLAUDE_CODE_MESSAGING_SOCKET", None)
+    saved_messaging_handshake = os.environ.pop("CLAUDE_CODE_MESSAGING_TOKEN", None)
+    saved_sse_port = os.environ.pop("CLAUDE_CODE_SSE_PORT", None)
     try:
         yield
     finally:
-        for name, value in removed.items():
-            os.environ[name] = value
+        if saved_claudecode is not None:
+            os.environ["CLAUDECODE"] = saved_claudecode
+        if saved_claude_job_dir is not None:
+            os.environ["CLAUDE_JOB_DIR"] = saved_claude_job_dir
+        if saved_claude_project_dir is not None:
+            os.environ["CLAUDE_PROJECT_DIR"] = saved_claude_project_dir
+        if saved_session_id is not None:
+            os.environ["CLAUDE_CODE_SESSION_ID"] = saved_session_id
+        if saved_entrypoint is not None:
+            os.environ["CLAUDE_CODE_ENTRYPOINT"] = saved_entrypoint
+        if saved_child_session is not None:
+            os.environ["CLAUDE_CODE_CHILD_SESSION"] = saved_child_session
+        if saved_session_attended is not None:
+            os.environ["CLAUDE_CODE_SESSION_ATTENDED"] = saved_session_attended
+        if saved_execpath is not None:
+            os.environ["CLAUDE_CODE_EXECPATH"] = saved_execpath
+        if saved_messaging_socket is not None:
+            os.environ["CLAUDE_CODE_MESSAGING_SOCKET"] = saved_messaging_socket
+        if saved_messaging_handshake is not None:
+            os.environ["CLAUDE_CODE_MESSAGING_TOKEN"] = saved_messaging_handshake
+        if saved_sse_port is not None:
+            os.environ["CLAUDE_CODE_SSE_PORT"] = saved_sse_port
 @contextlib.contextmanager
 def _summarizer_environment():
     previous_marker = os.environ.get("REMEMBER_NESTED_SUMMARIZER")
-    with _without_session_env(_configured_strip_session_env()):
+    with _without_session_env():
         os.environ["REMEMBER_NESTED_SUMMARIZER"] = "1"
         try:
             yield
@@ -208,62 +234,6 @@ def _config_candidates() -> list[str]:
         candidates.append(os.path.join(remember_dir, "config.json"))
     candidates.append(os.path.join(os.path.expanduser("~"), ".remember", "config.json"))
     return candidates
-_BUNDLED_CONFIG = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.json"
-)
-_SESSION_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-def _configured_strip_session_env() -> tuple[str, ...]:
-    return _configured_env_names(
-        "strip_session_env",
-        "the summarizer inherits the parent session's own variables, which #95 removes",
-    )
-def _configured_codex_env_allow() -> tuple[str, ...]:
-    return _configured_env_names(
-        "codex_env_allow",
-        "the Codex summarizer gets no environment at all and will likely fail to start",
-    )
-def _configured_env_names(setting: str, consequence: str) -> tuple[str, ...]:
-    for path in [*_config_candidates(), _BUNDLED_CONFIG]:
-        try:
-            with open(path, encoding="utf-8") as f:
-                cfg = json.load(f)
-        except (OSError, ValueError):
-            continue
-        if not isinstance(cfg, dict):
-            continue
-        haiku_cfg = cfg.get("haiku")
-        if not isinstance(haiku_cfg, dict) or setting not in haiku_cfg:
-            continue
-        value = haiku_cfg[setting]
-        if not isinstance(value, list):
-            _warn(
-                f"WARNING: ignoring haiku.{setting} in {path} -- a "
-                f"{type(value).__name__} value, not a list of variable names; "
-                "the next config layer's list applies instead"
-            )
-            continue
-        names = []
-        for index, entry in enumerate(value):
-            if isinstance(entry, str) and _SESSION_ENV_NAME.fullmatch(entry):
-                names.append(entry)
-                continue
-            if isinstance(entry, str):
-                shape = f"a {len(entry)}-character string"
-            else:
-                shape = f"a {type(entry).__name__} value"
-            _warn(
-                f"WARNING: ignoring entry {index} of haiku.{setting} in "
-                f"{path} -- {shape}, not a variable name (letters, digits and "
-                "underscores). The entry itself is not logged: it may hold a "
-                "pasted value"
-            )
-        return tuple(names)
-    _warn(
-        f"WARNING: no haiku.{setting} list in any config layer (the plugin's "
-        f"bundled config.json is missing or unreadable) -- {consequence}; "
-        "reinstall the plugin or set the list in ~/.remember/config.json"
-    )
-    return ()
 _CREDENTIAL_FAILURE_MARKERS = (
     "credit balance",
     "takes precedence",
@@ -387,16 +357,34 @@ def _isolated_summarizer_cwd():
     finally:
         shutil.rmtree(d, ignore_errors=True)
 def _codex_child_env() -> dict[str, str]:
-    child = {}
-    seen = set()
-    for name in _configured_codex_env_allow():
-        folded = name.upper() if os.name == "nt" else name
-        if folded in seen:
-            continue
-        value = os.environ.get(name)
-        if value is not None:
-            child[name] = value
-            seen.add(folded)
+    pairs = [
+        ("PATH", os.environ.get("PATH")),
+        ("HOME", os.environ.get("HOME")),
+        ("LANG", os.environ.get("LANG")),
+        ("LC_ALL", os.environ.get("LC_ALL")),
+        ("CODEX_HOME", os.environ.get("CODEX_HOME")),
+        ("TMPDIR", os.environ.get("TMPDIR")),
+        ("TEMP", os.environ.get("TEMP")),
+        ("TMP", os.environ.get("TMP")),
+        ("SYSTEMROOT", os.environ.get("SYSTEMROOT")),
+        ("USERPROFILE", os.environ.get("USERPROFILE")),
+        ("APPDATA", os.environ.get("APPDATA")),
+        ("PATHEXT", os.environ.get("PATHEXT")),
+        ("HTTPS_PROXY", os.environ.get("HTTPS_PROXY")),
+        ("HTTP_PROXY", os.environ.get("HTTP_PROXY")),
+        ("NO_PROXY", os.environ.get("NO_PROXY")),
+    ]
+    if os.name != "nt":
+        pairs += [
+            ("https_proxy", os.environ.get("https_proxy")),
+            ("http_proxy", os.environ.get("http_proxy")),
+            ("no_proxy", os.environ.get("no_proxy")),
+        ]
+    pairs += [
+        ("SSL_CERT_FILE", os.environ.get("SSL_CERT_FILE")),
+        ("NODE_EXTRA_CA_CERTS", os.environ.get("NODE_EXTRA_CA_CERTS")),
+    ]
+    child = {name: value for name, value in pairs if value is not None}
     child["REMEMBER_NESTED_SUMMARIZER"] = "1"
     return child
 def _build_codex_cmd(output_file: str, cwd: str) -> list[str]:

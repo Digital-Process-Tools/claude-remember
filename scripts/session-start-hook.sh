@@ -1,5 +1,4 @@
 #!/bin/bash
-# Compiled by .github/scripts/compile_hooks.py (#900)
 __remember_src_resolve_paths() {
 :
 

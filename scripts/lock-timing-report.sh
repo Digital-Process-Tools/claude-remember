@@ -1,43 +1,4 @@
 #!/usr/bin/env bash
-#
-# lock-timing-report.sh — read what the lock recorder wrote (#226).
-#
-# A distribution nobody can see is not an instrument. `lib-lock.sh` writes one
-# TSV row per lock use when REMEMBER_LOCK_TIMING=1; this turns that file into
-# the two numbers a timeout is actually set from — the tail of the hold
-# distribution, and whether any wait ever ran out.
-#
-# USAGE
-#   scripts/lock-timing-report.sh [file]
-#
-#   Default file: $REMEMBER_LOCK_TIMING_FILE, else
-#   $REMEMBER_DIR/logs/lock-timing.tsv.
-#
-# EXIT CODES
-#   0  ok      — records found, distribution printed
-#   2  skipped — nothing to report, WITH THE REASON. Not a pass: a report that
-#                prints an empty table on a file that was never written reads
-#                exactly like one taken on an idle machine, and those are the
-#                two answers a maintainer most needs to tell apart.
-#   1  usage
-#
-# WHAT THE NUMBERS MEAN
-#   held_ms  how long the lock was held, acquire to release. For save.lock this
-#            spans the whole save INCLUDING its summarize Haiku call, which is
-#            why #226 exists: anything queued behind it waits behind a model
-#            call. This column's tail is what
-#            REMEMBER_NDC_COMMIT_LOCK_TIMEOUT has to cover.
-#   wait_ms  how long an acquire spent waiting. `timeout` rows are waits that
-#            ran out — for save.lock those are NDC commits that skipped and
-#            duplicated a span, the outcome the 30s default was chosen to
-#            avoid. A non-zero timeout count is the direct answer to #226.
-#   prec     resolution the row was taken at: `us` (bash >= 5 EPOCHREALTIME),
-#            `ms` (GNU date), `s` (BSD date / bash 3.2). Do not read a `s` file
-#            for sub-second structure — that is precisely the false confidence
-#            #226 was filed about.
-#
-# Percentiles are nearest-rank on the records present. They describe the file,
-# not the machine: a day of real saves is a sample, not a proof.
 
 set -u
 
@@ -90,12 +51,6 @@ if [ -n "$CAPPED" ]; then
 fi
 echo ""
 
-# Nearest-rank percentiles, insertion-sorted per lock. No `asort` — that is
-# gawk-only, and macOS ships the one-true-awk.
-# The tab separator is set in BEGIN rather than as `-F'\t'` (#898 round 8):
-# with a quoted word before the program's own opening quote, a line-oriented
-# scanner cannot see where the awk program starts, and counts its `for`
-# loops as shell loops.
 awk '
 BEGIN { FS = "\t" }
 function pct(arr, n, q,   i) {

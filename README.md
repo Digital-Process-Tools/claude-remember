@@ -13,9 +13,9 @@ never a bundled binary, never a third-party service. The summarizer runs a neste
 `claude -p` that inherits your environment, including your Claude Code login, exactly
 like any process a hook starts; only the parent session's own variables are removed
 first, so the nested call does not pass as that session. A nested `codex exec` is
-given only an allow-list of your variables, set in the plugin's own config, that names
-no credential: if you authenticate Codex through an environment variable rather than
-its own login, add that variable's name to the list in your own config. remember
+given only a fixed allow-list of your variables that names no credential: Codex's own
+login (what `codex login` writes) is unaffected, but a Codex login held only in an
+environment variable is not passed through. remember
 itself reads no credential: nothing is typed in, and nothing is read from your
 operating system's credential storage. Memory is stored locally under your project by
 default, and nothing is pushed anywhere unless you opt into git backup yourself.
