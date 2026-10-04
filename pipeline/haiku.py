@@ -1,6 +1,5 @@
 from __future__ import annotations
 import contextlib
-import fnmatch
 import json
 import os
 import re
@@ -36,7 +35,6 @@ def _resolve_codex_bin() -> str:
     if override:
         return override
     return shutil.which("codex") or "codex"
-_CHILD_ENV_OAUTH_NAME = "CLAUDE_CODE_OAUTH_TOKEN"
 NESTED_SUMMARIZER_ENV = "REMEMBER_NESTED_SUMMARIZER"
 _SUMMARIZER_PROVIDERS = frozenset({"claude", "codex", "auto"})
 def _resolve_summarizer_provider() -> str:
@@ -99,24 +97,30 @@ def _choose_summarizer_provider() -> str:
             "is falling back to 'claude', which may not be correct"
         )
     return "claude"
-def _child_env() -> dict[str, str]:
-    drop_globs = _configured_drop_env()
-    child = {
-        k: v
-        for k, v in os.environ.items()
-        if (
-            k == "CLAUDE_CODE_OAUTH_TOKEN"
-            or (
-                k != "CLAUDECODE"
-                and k != "CLAUDE_JOB_DIR"
-                and k != "CLAUDE_PROJECT_DIR"
-                and not k.startswith("CLAUDE_CODE_")
-            )
-        )
-        and not any(fnmatch.fnmatchcase(k, g) for g in drop_globs)
-    }
-    child["REMEMBER_NESTED_SUMMARIZER"] = "1"
-    return child
+@contextlib.contextmanager
+def _without_session_env(names: tuple[str, ...]):
+    removed = {}
+    for name in names:
+        value = os.environ.pop(name, None)
+        if value is not None:
+            removed[name] = value
+    try:
+        yield
+    finally:
+        for name, value in removed.items():
+            os.environ[name] = value
+@contextlib.contextmanager
+def _summarizer_environment():
+    previous_marker = os.environ.get("REMEMBER_NESTED_SUMMARIZER")
+    with _without_session_env(_configured_strip_session_env()):
+        os.environ["REMEMBER_NESTED_SUMMARIZER"] = "1"
+        try:
+            yield
+        finally:
+            if previous_marker is None:
+                os.environ.pop("REMEMBER_NESTED_SUMMARIZER", None)
+            else:
+                os.environ["REMEMBER_NESTED_SUMMARIZER"] = previous_marker
 def _usage_from_failure(stdout: object) -> TokenUsage | None:
     if isinstance(stdout, bytes):
         try:
@@ -204,9 +208,12 @@ def _config_candidates() -> list[str]:
         candidates.append(os.path.join(remember_dir, "config.json"))
     candidates.append(os.path.join(os.path.expanduser("~"), ".remember", "config.json"))
     return candidates
-_DROP_ENV_ENTRY = re.compile(r"[A-Za-z_*?][A-Za-z0-9_*?]*")
-def _configured_drop_env() -> tuple[str, ...]:
-    for path in _config_candidates():
+_BUNDLED_CONFIG = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.json"
+)
+_SESSION_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+def _configured_strip_session_env() -> tuple[str, ...]:
+    for path in [*_config_candidates(), _BUNDLED_CONFIG]:
         try:
             with open(path, encoding="utf-8") as f:
                 cfg = json.load(f)
@@ -215,32 +222,38 @@ def _configured_drop_env() -> tuple[str, ...]:
         if not isinstance(cfg, dict):
             continue
         haiku_cfg = cfg.get("haiku")
-        if not isinstance(haiku_cfg, dict) or "drop_env" not in haiku_cfg:
+        if not isinstance(haiku_cfg, dict) or "strip_session_env" not in haiku_cfg:
             continue
-        value = haiku_cfg["drop_env"]
+        value = haiku_cfg["strip_session_env"]
         if not isinstance(value, list):
             _warn(
-                f"WARNING: ignoring haiku.drop_env in {path} -- a "
-                f"{type(value).__name__} value, not a list of variable names or "
-                "globs; nothing is dropped from the summarizer's environment"
+                f"WARNING: ignoring haiku.strip_session_env in {path} -- a "
+                f"{type(value).__name__} value, not a list of variable names; "
+                "the next config layer's list applies instead"
             )
-            return ()
-        globs = []
+            continue
+        names = []
         for index, entry in enumerate(value):
-            if isinstance(entry, str) and _DROP_ENV_ENTRY.fullmatch(entry):
-                globs.append(entry.upper() if os.name == "nt" else entry)
+            if isinstance(entry, str) and _SESSION_ENV_NAME.fullmatch(entry):
+                names.append(entry)
                 continue
             if isinstance(entry, str):
                 shape = f"a {len(entry)}-character string"
             else:
                 shape = f"a {type(entry).__name__} value"
             _warn(
-                f"WARNING: ignoring entry {index} of haiku.drop_env in {path} -- "
-                f"{shape}, not a variable name or a */? glob over letters, digits "
-                "and underscores. The entry itself is not logged: it may hold a "
+                f"WARNING: ignoring entry {index} of haiku.strip_session_env in "
+                f"{path} -- {shape}, not a variable name (letters, digits and "
+                "underscores). The entry itself is not logged: it may hold a "
                 "pasted value"
             )
-        return tuple(globs)
+        return tuple(names)
+    _warn(
+        "WARNING: no haiku.strip_session_env list in any config layer (the "
+        "plugin's bundled config.json is missing or unreadable) -- the "
+        "summarizer inherits the parent session's own variables, which #95 "
+        "removes; reinstall the plugin or set the list in ~/.remember/config.json"
+    )
     return ()
 _CREDENTIAL_FAILURE_MARKERS = (
     "credit balance",
@@ -251,15 +264,15 @@ _CREDENTIAL_FAILURE_MARKERS = (
     "invalid x-api-key",
     "rate limit",
 )
-def _drop_env_hint(detail: str) -> str:
+def _inherited_env_hint(detail: str) -> str:
     lowered = detail.lower()
     if not any(marker in lowered for marker in _CREDENTIAL_FAILURE_MARKERS):
         return ""
     return (
-        " -- the nested CLI inherits this environment as-is, and a credential "
-        "variable set there for some other tool can out-rank your own login; "
-        "list its name (or a glob such as PREFIX_*) in `haiku.drop_env` in "
-        "config.json to keep it out of the summarizer (#703, #898)"
+        " -- the nested CLI inherits the environment you started your coding "
+        "agent from, and a credential variable set there for some other tool "
+        "can out-rank your own login; unset it in that environment to keep it "
+        "away from the summarizer (#703, #898)"
     )
 _HOOK_ISOLATION_FLAG = "--setting-sources"
 _AUTH_FAILURE_MARKERS = (
@@ -371,12 +384,38 @@ _CODEX_CHILD_ENV_ALLOW = frozenset({
     "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY",
     "SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS",
 })
-_CODEX_CHILD_ENV_ALLOW_UPPER = frozenset(name.upper() for name in _CODEX_CHILD_ENV_ALLOW)
 def _codex_child_env() -> dict[str, str]:
-    child = {
-        k: v for k, v in os.environ.items()
-        if k.upper() in _CODEX_CHILD_ENV_ALLOW_UPPER
-    }
+    child = {}
+    for name, value in (
+        ("PATH", os.environ.get("PATH")),
+        ("HOME", os.environ.get("HOME")),
+        ("LANG", os.environ.get("LANG")),
+        ("LC_ALL", os.environ.get("LC_ALL")),
+        ("CODEX_HOME", os.environ.get("CODEX_HOME")),
+        ("TMPDIR", os.environ.get("TMPDIR")),
+        ("TEMP", os.environ.get("TEMP")),
+        ("TMP", os.environ.get("TMP")),
+        ("SYSTEMROOT", os.environ.get("SYSTEMROOT")),
+        ("USERPROFILE", os.environ.get("USERPROFILE")),
+        ("APPDATA", os.environ.get("APPDATA")),
+        ("PATHEXT", os.environ.get("PATHEXT")),
+        ("CODEX_API_KEY", os.environ.get("CODEX_API_KEY")),
+        ("HTTPS_PROXY", os.environ.get("HTTPS_PROXY")),
+        ("HTTP_PROXY", os.environ.get("HTTP_PROXY")),
+        ("NO_PROXY", os.environ.get("NO_PROXY")),
+        ("SSL_CERT_FILE", os.environ.get("SSL_CERT_FILE")),
+        ("NODE_EXTRA_CA_CERTS", os.environ.get("NODE_EXTRA_CA_CERTS")),
+    ):
+        if value is not None:
+            child[name] = value
+    if os.name != "nt":
+        for name, value in (
+            ("https_proxy", os.environ.get("https_proxy")),
+            ("http_proxy", os.environ.get("http_proxy")),
+            ("no_proxy", os.environ.get("no_proxy")),
+        ):
+            if value is not None:
+                child[name] = value
     child["REMEMBER_NESTED_SUMMARIZER"] = "1"
     return child
 def _build_codex_cmd(output_file: str, cwd: str) -> list[str]:
@@ -489,7 +528,6 @@ def call_haiku(
                 "same complaint #460 was filed over, now opted into rather "
                 "than unconditional."
             )
-    child = _child_env()
     try:
         slot = spawn_guard.claim(timeout=timeout)
     except spawn_guard.SummarizerSpawnDeclined as declined:
@@ -505,7 +543,7 @@ def call_haiku(
         )
     def _run(isolate_hooks: bool):
         try:
-            with _isolated_summarizer_cwd() as summarizer_cwd:
+            with _isolated_summarizer_cwd() as summarizer_cwd, _summarizer_environment():
                 return subprocess.run(
                     _build_cmd(tools, isolate_hooks),
                     input=prompt,
@@ -514,7 +552,6 @@ def call_haiku(
                     encoding="utf-8",
                     errors="replace",
                     timeout=timeout,
-                    env=child,
                     cwd=summarizer_cwd,
                 )
         except subprocess.TimeoutExpired as timed_out:
@@ -554,8 +591,8 @@ def call_haiku(
                     "WARNING: the un-isolated retry failed with the same "
                     f"authentication error ({_failure_detail(result.stdout, result.stderr)}) "
                     "-- hook isolation was not the cause. The CLI's own saved "
-                    "login has expired; refresh it (run `claude setup-token`, "
-                    "or log in again in your coding agent's own CLI). This "
+                    "login has expired; log in again with "
+                    "your coding agent's own CLI. This "
                     "plugin reads no credential of its own any more -- there "
                     "is no setting here to configure (#129/#131/#860)."
                 )
@@ -566,7 +603,7 @@ def call_haiku(
         detail = _failure_detail(result.stdout, result.stderr)
         raise RuntimeError(
             f"claude exited {result.returncode}: {detail}"
-            f"{_drop_env_hint(detail)}"
+            f"{_inherited_env_hint(detail)}"
         )
     return _parse_response(result.stdout)
 DEFAULT_REJECT_PATTERN = (

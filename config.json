@@ -1,0 +1,17 @@
+{
+  "haiku": {
+    "strip_session_env": [
+      "CLAUDECODE",
+      "CLAUDE_JOB_DIR",
+      "CLAUDE_PROJECT_DIR",
+      "CLAUDE_CODE_SESSION_ID",
+      "CLAUDE_CODE_ENTRYPOINT",
+      "CLAUDE_CODE_CHILD_SESSION",
+      "CLAUDE_CODE_SESSION_ATTENDED",
+      "CLAUDE_CODE_EXECPATH",
+      "CLAUDE_CODE_MESSAGING_SOCKET",
+      "CLAUDE_CODE_MESSAGING_TOKEN",
+      "CLAUDE_CODE_SSE_PORT"
+    ]
+  }
+}

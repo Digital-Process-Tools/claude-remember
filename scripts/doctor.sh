@@ -1015,10 +1015,9 @@ if [ -s "$_SUMMARY_FAILURE_MARKER" ]; then
         [ "${_SF_DETAIL_LOWER#*"$_sf_m"}" != "$_SF_DETAIL_LOWER" ] && _sf_login=1
     done
     if [ "$_sf_login" = 1 ]; then
-        echo "     this looks like an expired login -- refresh it: run"
-        echo "     \`claude setup-token\`, or log in again in your coding"
-        echo "     agent's own CLI. This plugin reads no credential of"
-        echo "     its own any more (#129/#131/#860)."
+        echo "     this looks like an expired login -- log in again with"
+        echo "     your coding agent's own CLI. This plugin reads no"
+        echo "     credential of its own (#129/#131/#860)."
     fi
     unset _remember_sf_glob_dir _SF_LATEST_LOG _SF_DETAIL _SF_DETAIL_LOWER _sf_f _sf_m _sf_login
 else

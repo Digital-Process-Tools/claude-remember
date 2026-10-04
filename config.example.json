@@ -55,7 +55,19 @@
   "session_start_slow_threshold_s": 5,
   "haiku": {
     "oauth_token": "",
-    "drop_env": []
+    "strip_session_env": [
+      "CLAUDECODE",
+      "CLAUDE_JOB_DIR",
+      "CLAUDE_PROJECT_DIR",
+      "CLAUDE_CODE_SESSION_ID",
+      "CLAUDE_CODE_ENTRYPOINT",
+      "CLAUDE_CODE_CHILD_SESSION",
+      "CLAUDE_CODE_SESSION_ATTENDED",
+      "CLAUDE_CODE_EXECPATH",
+      "CLAUDE_CODE_MESSAGING_SOCKET",
+      "CLAUDE_CODE_MESSAGING_TOKEN",
+      "CLAUDE_CODE_SSE_PORT"
+    ]
   },
 
   "_comments": {
@@ -75,15 +87,18 @@
       "are checked for PRESENCE ONLY now, to warn loudly (by name, never by",
       "value) if either is still set from before."
     ],
-    "haiku.drop_env": [
-      "Environment variables to keep out of the nested summarizer call, as a",
-      "list of exact names or shell-style globs (* and ?), matched against",
-      "variable NAMES only. Default: an empty list -- the nested call inherits",
-      "the environment exactly as your coding agent gave it. Use it when a",
-      "variable set for some other tool (an API key, say) would otherwise",
-      "out-rank your own login inside that call. An entry that is not a name",
-      "or a glob over letters, digits and underscores is ignored with a",
-      "warning in the daily log, and never echoed there (#898)."
+    "haiku.strip_session_env": [
+      "The parent Claude Code session's own variables, removed before the",
+      "nested summarizer `claude -p` starts so it does not pass as that",
+      "session (#95). Everything else -- your Claude Code login included --",
+      "is inherited by that call exactly like any process a hook starts; this",
+      "plugin reads no credential itself. The shipped list is the plugin's",
+      "bundled config.json; setting this key in ~/.remember/config.json",
+      "REPLACES it (copy the list and add to it). Exact variable names only;",
+      "an entry that is not one is ignored with a warning in the daily log,",
+      "never echoed. A cloned repository's own .remember/config.json cannot",
+      "change it (#726). To keep any other variable away from the summarizer,",
+      "unset it in the environment you start Claude Code from (#898)."
     ],
     "consolidate_max_bytes": [
       "Skip-guard cap (UTF-8 bytes) on the assembled consolidation prompt",
