@@ -528,7 +528,7 @@ _lock_timing_disclose() {
 # `tr`, because a spawn here would be one more than the disabled path pays.
 # "SLOT" rather than a KEY-shaped name: this is an identifier for one
 # process's own timing entry, not a credential (#898 round 7).
-_lock_timing_key() {
+_lock_timing_slot() {
     local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
     _LOCK_TIMING_SLOT="${1//[!A-Za-z0-9]/_}"
 }
@@ -615,7 +615,7 @@ lock_acquire() {
     if _lock_acquire_impl "$@"; then
         _lock_timing_now
         _waited=$(( _LOCK_TIMING_NOW - _t0 ))
-        _lock_timing_key "$1"
+        _lock_timing_slot "$1"
         _lock_timing_find || _LOCK_TIMING_IDX="${#_LOCK_TIMING_SLOTS[@]}"
         _LOCK_TIMING_SLOTS[_LOCK_TIMING_IDX]="$_LOCK_TIMING_SLOT"
         _LOCK_TIMING_T0S[_LOCK_TIMING_IDX]="$_LOCK_TIMING_NOW"
@@ -690,7 +690,7 @@ lock_release() {
     fi
     _lock_release_impl "$@" || return 1
     _lock_timing_now
-    _lock_timing_key "$1"
+    _lock_timing_slot "$1"
     _t0=""
     _wait=""
     if _lock_timing_find; then

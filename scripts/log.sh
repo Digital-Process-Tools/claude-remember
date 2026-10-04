@@ -11,7 +11,7 @@
 # USAGE
 #   source "$(dirname "$0")/log.sh"
 #   log "save" "5 exchanges extracted"
-#   log_tokens "save" 1247 342
+#   log_usage "save" 1247 342
 #   config ".cooldowns.save_seconds" 120
 #
 # ENVIRONMENT
@@ -29,7 +29,7 @@
 #
 # FUNCTIONS
 #   log             Log a timestamped message
-#   log_tokens      Log token usage with optional cost
+#   log_usage      Log token usage with optional cost
 #   assign_kv       Assign only valid shell variable assignments from stdin
 #   config          Read a value from config.json with jq, with fallback default
 #   rotate_logs     Archive log files older than 7 days into monthly tarballs
@@ -148,7 +148,7 @@ _remember_cfg_table_get_into() {
 # token from the merged file in Python, and no config() caller asks for it.
 # This rule and the `select(.[0] != "haiku")` in the flattener are one decision
 # in two places — change both or neither.
-_config_is_private_key() {
+_config_is_private_path() {
     case "$1" in
         .haiku|.haiku.*) return 0 ;;
     esac
@@ -788,7 +788,7 @@ config_into() {
     # $_cfg_into_name is already known to match the dotted-path grammar above, so
     # this branch no longer needs its own shape check -- it only has to fall
     # through when the table state cannot answer (fallback / private key).
-    if [ "$_REMEMBER_CFG_STATE" = "ok" ] && ! _config_is_private_key "$_cfg_into_name"; then
+    if [ "$_REMEMBER_CFG_STATE" = "ok" ] && ! _config_is_private_path "$_cfg_into_name"; then
         local _cfg_into_slot="_RCFG_${_cfg_into_name#.}"
         _cfg_into_slot="${_cfg_into_slot//./_}"
         # #898 round 8: a lookup in the table's parallel arrays (see
@@ -1165,7 +1165,7 @@ log() {
 #
 # Output:
 #   Logs "tokens: {in}+{cache}cache->{out}out ($cost)" via log()
-log_tokens() {
+log_usage() {
     local component="$1"
     local input="${2:-0}"
     local output="${3:-0}"

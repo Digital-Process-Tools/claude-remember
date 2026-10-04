@@ -1,62 +1,7 @@
 #!/bin/bash
-
-_HOOK_DIR="${BASH_SOURCE[0]%/*}"
-[ "$_HOOK_DIR" = "${BASH_SOURCE[0]}" ] && _HOOK_DIR="$(pwd)"
-
-[ -n "${REMEMBER_NESTED_SUMMARIZER:-}" ] && exit 0
-
-_REMEMBER_HOOK_T0=""
-if [ "${BASH_VERSINFO[0]:-0}" -ge 5 ] && [ "${_REMEMBER_HOOK_FORCE_DATE_FALLBACK:-0}" != "1" ]; then
-    _REMEMBER_HOOK_T0="$EPOCHSECONDS"
-else
-    _REMEMBER_HOOK_T0=$(date +%s 2>/dev/null) || _REMEMBER_HOOK_T0=""
-fi
-
-HOOK_STDIN=""
-if [ ! -t 0 ]; then
-    _line=""
-    while IFS= read -r -t 1 _line || [ -n "$_line" ]; do
-        HOOK_STDIN="$HOOK_STDIN$_line"
-        _line=""
-    done
-fi
-
-_stdin_json_string() {
-    local field="$1" raw="$2" rest prefix value dq
-    printf -v dq '\042'
-    case "$raw" in *"$dq$field$dq"*) ;; *) return 1 ;; esac
-    rest=${raw#*"$dq"$field"$dq"}
-    prefix=${rest%%"$dq"*}
-    case "$prefix" in *[!:[:space:]]*) return 1 ;; esac
-    value=${rest#*"$dq"}
-    value=${value%%"$dq"*}
-    value=${value//\\\\/\\}
-    [ -n "$value" ] || return 1
-    printf '%s' "$value"
-}
-
-_stdin_json_string_into() {
-    local _sjsi_var="$1" _sjsi_field="$2" _sjsi_raw="$3" _sjsi_rest _sjsi_prefix _sjsi_value _sjsi_dq
-    printf -v "$_sjsi_var" '%s' ""
-    printf -v _sjsi_dq '\042'  # the double quote, as in _stdin_json_string
-    case "$_sjsi_raw" in *"$_sjsi_dq$_sjsi_field$_sjsi_dq"*) ;; *) return 1 ;; esac
-    _sjsi_rest=${_sjsi_raw#*"$_sjsi_dq"$_sjsi_field"$_sjsi_dq"}
-    _sjsi_prefix=${_sjsi_rest%%"$_sjsi_dq"*}
-    case "$_sjsi_prefix" in *[!:[:space:]]*) return 1 ;; esac
-    _sjsi_value=${_sjsi_rest#*"$_sjsi_dq"}
-    _sjsi_value=${_sjsi_value%%"$_sjsi_dq"*}
-    _sjsi_value=${_sjsi_value//\\\\/\\}  # decode `\\`, as above (#829)
-    [ -n "$_sjsi_value" ] || return 1
-    printf -v "$_sjsi_var" '%s' "$_sjsi_value"
-}
-
-_stdin_json_string_into REMEMBER_HOOK_CWD cwd "$HOOK_STDIN" 2>/dev/null
-case "$REMEMBER_HOOK_CWD" in
-    *$'\n'*|*$'\r'*) REMEMBER_HOOK_CWD="" ;;
-esac
-export REMEMBER_HOOK_CWD
-
-REMEMBER_PATHS_SOFT_FAIL=1
+# Compiled by .github/scripts/compile_hooks.py (#900)
+__remember_src_resolve_paths() {
+:
 
 if [ -n "${REMEMBER_NESTED_SUMMARIZER:-}" ]; then
     if [ "${REMEMBER_PATHS_SOFT_FAIL:-0}" = "1" ]; then
@@ -166,7 +111,9 @@ export CLAUDE_PLUGIN_ROOT="$PIPELINE_DIR"
 export PROJECT_DIR
 export PIPELINE_DIR
 
-_REMEMBER_LAZY_PYTHON=1
+}
+__remember_src_detect_tools() {
+:
 _REMEMBER_TOOLS_CACHE="${TMPDIR:-/tmp}/remember-detect-tools-cache"
 
 _jq_fallback() {
@@ -338,6 +285,12 @@ _remember_run_jq() {
 
 _REMEMBER_SRC_DIR="${BASH_SOURCE[0]%/*}"
 [ "$_REMEMBER_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_SRC_DIR="$(pwd)"
+__remember_src_lib_slug ${1+"$@"}
+unset _REMEMBER_SRC_DIR
+
+}
+__remember_src_lib_slug() {
+:
 
 [ -n "${_REMEMBER_LIB_SLUG_LOADED:-}" ] && return 0
 _REMEMBER_LIB_SLUG_LOADED=1
@@ -494,18 +447,245 @@ session_dir_slug() {
     printf '%s-%s\n' "${_slug:0:200}" "$_hash"
 }
 
-unset _REMEMBER_SRC_DIR
-
+}
+__remember_src_bootstrap_dirs() {
+:
 
 _REMEMBER_SRC_DIR="${BASH_SOURCE[0]%/*}"
 [ "$_REMEMBER_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_SRC_DIR="$(pwd)"
+__remember_src_lib_memory_dir ${1+"$@"}
+unset _REMEMBER_SRC_DIR
+
+SYS_TMPDIR="${TMPDIR:-/tmp}"
+
+_mem_proj="${MEMORY_PROJECT_DIR:-}"
+[ -n "$_mem_proj" ] || _mem_proj="$PROJECT_DIR"
+_legacy_dir="${_mem_proj}/.remember"
+_remember_legacy_migration_refused=""
+if [ "$REMEMBER_DIR" != "$_legacy_dir" ] && [ ! -L "$_legacy_dir" ] && [ -d "$_legacy_dir" ] && [ ! -e "$REMEMBER_DIR" ]; then
+    _migrating_user_config_home=false
+    if [ -n "$HOME" ]; then
+        if [ "${_mem_proj%/}" = "${HOME%/}" ]; then
+            _migrating_user_config_home=true
+        else
+            _mem_proj_real=$(cd "$_mem_proj" 2>/dev/null && pwd -P)
+            _home_real=$(cd "$HOME" 2>/dev/null && pwd -P)
+            if [ -n "$_mem_proj_real" ] && [ "$_mem_proj_real" = "$_home_real" ]; then
+                _migrating_user_config_home=true
+            fi
+            unset _mem_proj_real _home_real
+        fi
+    fi
+
+    if [ "$_migrating_user_config_home" = false ]; then
+        mkdir -p "$(dirname "$REMEMBER_DIR")" 2>/dev/null
+
+        _legacy_other_tracked="clean"
+        if command -v git >/dev/null 2>&1; then
+            _legacy_repo_check=$( (unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+                                    LC_ALL=C LANGUAGE=C git -C "$_mem_proj" rev-parse --is-inside-work-tree) 2>&1 ) && _legacy_repo_rc=0 || _legacy_repo_rc=$?
+            if [ "$_legacy_repo_rc" -ne 0 ]; then
+                if [ "${_legacy_repo_check#*not a git repository}" = "$_legacy_repo_check" ]; then
+                    _legacy_other_tracked="could-not-tell"
+                fi
+            elif [ "$_legacy_repo_check" = "true" ]; then
+                _legacy_ls_list=$(unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+                                   git -c core.quotePath=false -C "$_mem_proj" ls-files -- ":(icase).remember/" 2>/dev/null) && _legacy_ls_rc=0 || _legacy_ls_rc=$?
+                if [ "$_legacy_ls_rc" -ne 0 ]; then
+                    _legacy_other_tracked="could-not-tell"
+                else
+                    while IFS= read -r _legacy_ls_line; do
+                        [ -n "$_legacy_ls_line" ] || continue
+                        _legacy_was_nocasematch=0
+                        shopt -q nocasematch && _legacy_was_nocasematch=1
+                        shopt -s nocasematch
+                        if [[ "$_legacy_ls_line" == ".remember/config.json" ]]; then
+                            _legacy_ci_match=1
+                        else
+                            _legacy_ci_match=0
+                        fi
+                        [ "$_legacy_was_nocasematch" -eq 1 ] || shopt -u nocasematch
+                        [ "$_legacy_ci_match" -eq 1 ] && continue
+                        _legacy_other_tracked="tracked"
+                    done <<< "$_legacy_ls_list"
+                fi
+            fi
+        else
+            _legacy_walk=$(cd "$_mem_proj" 2>/dev/null && pwd -P) || _legacy_walk="$_mem_proj"
+            while [ -n "$_legacy_walk" ]; do
+                if [ -e "$_legacy_walk/.git" ]; then
+                    _legacy_other_tracked="could-not-tell"
+                    break
+                fi
+                [ "$_legacy_walk" = "/" ] && break
+                _legacy_walk="${_legacy_walk%/*}"
+                [ -z "$_legacy_walk" ] && _legacy_walk="/"
+            done
+            unset _legacy_walk
+        fi
+        unset _legacy_ls_list _legacy_ls_line _legacy_repo_check _legacy_repo_rc _legacy_ls_rc _legacy_was_nocasematch _legacy_ci_match
+
+        if [ "$_legacy_other_tracked" != "clean" ]; then
+            _remember_legacy_migration_refused="1"
+            printf 'remember: %s contains git-tracked content beyond config.json (%s) -- refusing to migrate it into the external memory store, which would launder repository-committed content into a location the injection guard trusts unconditionally (#782). Left in place, untouched; move your own files out of it by hand, or `git rm --cached` whatever the repository should not have committed, then start a new session to retry.\n' \
+                "$_legacy_dir" "$_legacy_other_tracked" >&2
+        fi
+    fi
+    if [ "$_migrating_user_config_home" = false ] && [ "${_legacy_other_tracked:-clean}" = "clean" ]; then
+        _legacy_cfg="$_legacy_dir/config.json"
+        _legacy_cfg_holdout=""
+        if [ -e "$_legacy_cfg" ] || [ -L "$_legacy_cfg" ]; then
+            case "$(_remember_config_tracked_status "$_mem_proj" ".remember/config.json")" in
+                untracked) : ;;
+                *)
+                    _legacy_cfg_holdout=$(mktemp "${SYS_TMPDIR:-/tmp}/remember-legacy-cfg-XXXXXX" 2>/dev/null) || _legacy_cfg_holdout=""
+                    if [ -n "$_legacy_cfg_holdout" ]; then
+                        mv "$_legacy_cfg" "$_legacy_cfg_holdout" 2>/dev/null || _legacy_cfg_holdout=""
+                    fi
+                    ;;
+            esac
+        fi
+
+        if mv "$_legacy_dir" "$REMEMBER_DIR" 2>/dev/null; then
+            mkdir -p "$_legacy_dir"
+            if [ -n "$_legacy_cfg_holdout" ] && { [ -e "$_legacy_cfg_holdout" ] || [ -L "$_legacy_cfg_holdout" ]; }; then
+                if mv "$_legacy_cfg_holdout" "$_legacy_cfg" 2>/dev/null; then
+                    printf 'Memory data migrated to:\n  %s\nThis directory is now empty; you may delete it.\n\nconfig.json was NOT migrated: it is tracked by this repository git\nindex (or its git status could not be determined, which this treats the\nsame way) -- treating it as your own trusted config would let a cloned\nrepo choose the summarizer credential, model, or refusal-gate settings\nyour memory pipeline runs with (#757). Left behind here, still doing\nnothing for the external store above. Put your own settings in\n%s/config.json instead.\n' \
+                        "$REMEMBER_DIR" "$REMEMBER_DIR" > "$_legacy_dir/MIGRATED-TO.txt"
+                    printf 'remember: %s is tracked by this repository git index (or its git status could not be determined); left behind rather than migrated into the trusted external config store (#757)\n' \
+                        "$_legacy_cfg" >&2
+                    _legacy_cfg_holdout=""
+                else
+                    printf 'Memory data migrated to:\n  %s\nconfig.json could NOT be restored to %s after migration --\nsee the error logged to stderr; it still exists at the path named there\nand was not deleted.\n' \
+                        "$REMEMBER_DIR" "$_legacy_cfg" > "$_legacy_dir/MIGRATED-TO.txt"
+                    printf 'remember: FAILED to restore %s from its holdout copy -- your config.json was NOT deleted, it is still sitting at %s; move it back to %s by hand. (#757)\n' \
+                        "$_legacy_cfg" "$_legacy_cfg_holdout" "$_legacy_cfg" >&2
+                fi
+            else
+                printf 'Memory data migrated to:\n  %s\nThis directory is now empty; you may delete it.\n' \
+                    "$REMEMBER_DIR" > "$_legacy_dir/MIGRATED-TO.txt"
+            fi
+        elif [ -n "$_legacy_cfg_holdout" ] && { [ -e "$_legacy_cfg_holdout" ] || [ -L "$_legacy_cfg_holdout" ]; }; then
+            if mv "$_legacy_cfg_holdout" "$_legacy_cfg" 2>/dev/null; then
+                _legacy_cfg_holdout=""
+            else
+                printf 'remember: FAILED to restore %s after the migration move itself failed -- your config.json was NOT deleted, it is still sitting at %s; move it back to %s by hand. (#757)\n' \
+                    "$_legacy_cfg" "$_legacy_cfg_holdout" "$_legacy_cfg" >&2
+            fi
+        fi
+        unset _legacy_cfg _legacy_cfg_holdout
+    fi
+    unset _migrating_user_config_home _legacy_other_tracked
+elif [ "$REMEMBER_DIR" != "$_legacy_dir" ] && [ -L "$_legacy_dir" ] && [ ! -e "$REMEMBER_DIR" ]; then
+    printf 'remember: %s is a symlink -- refusing to migrate it; left in place untouched. Move or replace it by hand if this was not intentional. (#757)\n' \
+        "$_legacy_dir" >&2
+fi
+unset _legacy_dir
+
+if [ -z "$_remember_legacy_migration_refused" ] && { [ ! -d "$REMEMBER_DIR/logs/autonomous" ] || [ ! -d "$REMEMBER_DIR/tmp" ]; }; then
+    mkdir -p \
+        "$REMEMBER_DIR/tmp" \
+        "$REMEMBER_DIR/logs" \
+        "$REMEMBER_DIR/logs/autonomous" \
+        2>/dev/null
+fi
+unset _remember_legacy_migration_refused
+
+if [ -d "$REMEMBER_DIR/tmp" ]; then
+    _remember_stale_cfg_was_nullglob=0
+    shopt -q nullglob && _remember_stale_cfg_was_nullglob=1
+    shopt -s nullglob
+    _remember_stale_cfg_candidates=("$REMEMBER_DIR/tmp"/remember-config-*.json)
+    [ "$_remember_stale_cfg_was_nullglob" = 1 ] || shopt -u nullglob
+    if [ "${#_remember_stale_cfg_candidates[@]}" -gt 0 ]; then
+        find "$REMEMBER_DIR/tmp" -maxdepth 1 -name 'remember-config-*.json' \
+            -mmin +30 -exec rm -f {} + 2>/dev/null || true
+    fi
+    unset _remember_stale_cfg_candidates _remember_stale_cfg_was_nullglob
+
+    _remember_relocated_cfg="$REMEMBER_DIR/tmp/remember-config-$$.json"
+    if [ -n "${REMEMBER_CONFIG:-}" ] && [ -f "$REMEMBER_CONFIG" ] \
+        && mv -f "$REMEMBER_CONFIG" "$_remember_relocated_cfg" 2>/dev/null; then
+        REMEMBER_CONFIG="$_remember_relocated_cfg"
+        export REMEMBER_CONFIG
+        _remember_relocated_cfg_q=$(printf %q "$_remember_relocated_cfg")
+        _remember_trap_raw=$(trap -p EXIT 2>/dev/null)
+        _remember_existing_trap="${_remember_trap_raw#trap -- \'}"
+        _remember_existing_trap="${_remember_existing_trap%\' EXIT}"
+        _remember_existing_trap="${_remember_existing_trap//\'\\\'\'/\'}"
+        unset _remember_trap_raw
+        if [ -n "$_remember_existing_trap" ]; then
+            trap "${_remember_existing_trap}; rm -f ${_remember_relocated_cfg_q}" EXIT
+        else
+            trap "rm -f ${_remember_relocated_cfg_q}" EXIT
+        fi
+        unset _remember_existing_trap
+        unset _remember_relocated_cfg_q
+    fi
+    unset _remember_relocated_cfg
+fi
+
+if [ -d "$REMEMBER_DIR" ]; then
+    [ -f "$REMEMBER_DIR/.install-marker" ] \
+        || { echo 'This file marks when remember was first bootstrapped here. Read only by scripts/doctor.sh (#401); do not delete it.' \
+            > "$REMEMBER_DIR/.install-marker"; } 2>/dev/null
+fi
+
+if [ -d "$REMEMBER_DIR" ]; then
+    _mem_bd_glob_dir="$REMEMBER_DIR"
+    _mem_bd_glob_proj="$_mem_proj"
+    case "$OSTYPE" in
+        msys|cygwin)
+            _mem_bd_glob_dir="${_mem_bd_glob_dir//\\//}"
+            _mem_bd_glob_proj="${_mem_bd_glob_proj//\\//}"
+            ;;
+    esac
+    case "$_mem_bd_glob_dir" in
+        "$_mem_bd_glob_proj"/*)
+            [ -f "$REMEMBER_DIR/.gitignore" ] || { echo '*' > "$REMEMBER_DIR/.gitignore"; } 2>/dev/null
+            ;;
+    esac
+fi
+unset _mem_proj _mem_bd_glob_dir _mem_bd_glob_proj
+
+_remember_bd_has_xtracefd=0
+if [ "${BASH_VERSINFO[0]:-0}" -gt 4 ] 2>/dev/null; then
+    _remember_bd_has_xtracefd=1
+elif [ "${BASH_VERSINFO[0]:-0}" -eq 4 ] 2>/dev/null && [ "${BASH_VERSINFO[1]:-0}" -ge 1 ] 2>/dev/null; then
+    _remember_bd_has_xtracefd=1
+fi
+if [ -d "$REMEMBER_DIR/logs" ]; then
+    _remember_bd_keep_fd2=""
+    case "$-" in
+        (*x*)
+            if [ "$_remember_bd_has_xtracefd" = "0" ]; then
+                _remember_bd_keep_fd2="an xtrace is running (this bash predates BASH_XTRACEFD, added in 4.1, so xtrace stays on fd 2 regardless of the variable)"
+            elif [ "${BASH_XTRACEFD:-2}" = "2" ]; then
+                _remember_bd_keep_fd2="an xtrace is running on fd 2"
+            fi
+            ;;
+    esac
+    [ "${REMEMBER_TRACE:-}" = "1" ] && _remember_bd_keep_fd2="REMEMBER_TRACE=1"
+    if [ -n "$_remember_bd_keep_fd2" ]; then
+        printf 'remember: %s, so stderr is NOT being redirected to %s -- point BASH_XTRACEFD at its own fd to get both (#690)\n' \
+            "$_remember_bd_keep_fd2" "$REMEMBER_DIR/logs/hook-errors.log" >&2
+    else
+        exec 2>> "$REMEMBER_DIR/logs/hook-errors.log"
+    fi
+    unset _remember_bd_keep_fd2
+fi
+unset _remember_bd_has_xtracefd
+
+}
+__remember_src_lib_memory_dir() {
+:
 
 [ -n "${_LIB_MEMORY_DIR_LOADED:-}" ] && return 0
 _LIB_MEMORY_DIR_LOADED=1
 
 _REMEMBER_SRC_DIR="${BASH_SOURCE[0]%/*}"
 [ "$_REMEMBER_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_SRC_DIR="$(pwd)"
-:
+__remember_src_lib_slug ${1+"$@"}
 unset _REMEMBER_SRC_DIR
 
 
@@ -807,230 +987,9 @@ unset _existing_trap _t
 
 unset _bundled_cfg _user_cfg _project_cfg _cfg_sources _data_dir_raw _val _merged_cfg _cfg_candidate
 
-unset _REMEMBER_SRC_DIR
-
-SYS_TMPDIR="${TMPDIR:-/tmp}"
-
-_mem_proj="${MEMORY_PROJECT_DIR:-}"
-[ -n "$_mem_proj" ] || _mem_proj="$PROJECT_DIR"
-_legacy_dir="${_mem_proj}/.remember"
-_remember_legacy_migration_refused=""
-if [ "$REMEMBER_DIR" != "$_legacy_dir" ] && [ ! -L "$_legacy_dir" ] && [ -d "$_legacy_dir" ] && [ ! -e "$REMEMBER_DIR" ]; then
-    _migrating_user_config_home=false
-    if [ -n "$HOME" ]; then
-        if [ "${_mem_proj%/}" = "${HOME%/}" ]; then
-            _migrating_user_config_home=true
-        else
-            _mem_proj_real=$(cd "$_mem_proj" 2>/dev/null && pwd -P)
-            _home_real=$(cd "$HOME" 2>/dev/null && pwd -P)
-            if [ -n "$_mem_proj_real" ] && [ "$_mem_proj_real" = "$_home_real" ]; then
-                _migrating_user_config_home=true
-            fi
-            unset _mem_proj_real _home_real
-        fi
-    fi
-
-    if [ "$_migrating_user_config_home" = false ]; then
-        mkdir -p "$(dirname "$REMEMBER_DIR")" 2>/dev/null
-
-        _legacy_other_tracked="clean"
-        if command -v git >/dev/null 2>&1; then
-            _legacy_repo_check=$( (unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
-                                    LC_ALL=C LANGUAGE=C git -C "$_mem_proj" rev-parse --is-inside-work-tree) 2>&1 ) && _legacy_repo_rc=0 || _legacy_repo_rc=$?
-            if [ "$_legacy_repo_rc" -ne 0 ]; then
-                if [ "${_legacy_repo_check#*not a git repository}" = "$_legacy_repo_check" ]; then
-                    _legacy_other_tracked="could-not-tell"
-                fi
-            elif [ "$_legacy_repo_check" = "true" ]; then
-                _legacy_ls_list=$(unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
-                                   git -c core.quotePath=false -C "$_mem_proj" ls-files -- ":(icase).remember/" 2>/dev/null) && _legacy_ls_rc=0 || _legacy_ls_rc=$?
-                if [ "$_legacy_ls_rc" -ne 0 ]; then
-                    _legacy_other_tracked="could-not-tell"
-                else
-                    while IFS= read -r _legacy_ls_line; do
-                        [ -n "$_legacy_ls_line" ] || continue
-                        _legacy_was_nocasematch=0
-                        shopt -q nocasematch && _legacy_was_nocasematch=1
-                        shopt -s nocasematch
-                        if [[ "$_legacy_ls_line" == ".remember/config.json" ]]; then
-                            _legacy_ci_match=1
-                        else
-                            _legacy_ci_match=0
-                        fi
-                        [ "$_legacy_was_nocasematch" -eq 1 ] || shopt -u nocasematch
-                        [ "$_legacy_ci_match" -eq 1 ] && continue
-                        _legacy_other_tracked="tracked"
-                    done <<< "$_legacy_ls_list"
-                fi
-            fi
-        else
-            _legacy_walk=$(cd "$_mem_proj" 2>/dev/null && pwd -P) || _legacy_walk="$_mem_proj"
-            while [ -n "$_legacy_walk" ]; do
-                if [ -e "$_legacy_walk/.git" ]; then
-                    _legacy_other_tracked="could-not-tell"
-                    break
-                fi
-                [ "$_legacy_walk" = "/" ] && break
-                _legacy_walk="${_legacy_walk%/*}"
-                [ -z "$_legacy_walk" ] && _legacy_walk="/"
-            done
-            unset _legacy_walk
-        fi
-        unset _legacy_ls_list _legacy_ls_line _legacy_repo_check _legacy_repo_rc _legacy_ls_rc _legacy_was_nocasematch _legacy_ci_match
-
-        if [ "$_legacy_other_tracked" != "clean" ]; then
-            _remember_legacy_migration_refused="1"
-            printf 'remember: %s contains git-tracked content beyond config.json (%s) -- refusing to migrate it into the external memory store, which would launder repository-committed content into a location the injection guard trusts unconditionally (#782). Left in place, untouched; move your own files out of it by hand, or `git rm --cached` whatever the repository should not have committed, then start a new session to retry.\n' \
-                "$_legacy_dir" "$_legacy_other_tracked" >&2
-        fi
-    fi
-    if [ "$_migrating_user_config_home" = false ] && [ "${_legacy_other_tracked:-clean}" = "clean" ]; then
-        _legacy_cfg="$_legacy_dir/config.json"
-        _legacy_cfg_holdout=""
-        if [ -e "$_legacy_cfg" ] || [ -L "$_legacy_cfg" ]; then
-            case "$(_remember_config_tracked_status "$_mem_proj" ".remember/config.json")" in
-                untracked) : ;;
-                *)
-                    _legacy_cfg_holdout=$(mktemp "${SYS_TMPDIR:-/tmp}/remember-legacy-cfg-XXXXXX" 2>/dev/null) || _legacy_cfg_holdout=""
-                    if [ -n "$_legacy_cfg_holdout" ]; then
-                        mv "$_legacy_cfg" "$_legacy_cfg_holdout" 2>/dev/null || _legacy_cfg_holdout=""
-                    fi
-                    ;;
-            esac
-        fi
-
-        if mv "$_legacy_dir" "$REMEMBER_DIR" 2>/dev/null; then
-            mkdir -p "$_legacy_dir"
-            if [ -n "$_legacy_cfg_holdout" ] && { [ -e "$_legacy_cfg_holdout" ] || [ -L "$_legacy_cfg_holdout" ]; }; then
-                if mv "$_legacy_cfg_holdout" "$_legacy_cfg" 2>/dev/null; then
-                    printf 'Memory data migrated to:\n  %s\nThis directory is now empty; you may delete it.\n\nconfig.json was NOT migrated: it is tracked by this repository git\nindex (or its git status could not be determined, which this treats the\nsame way) -- treating it as your own trusted config would let a cloned\nrepo choose the summarizer credential, model, or refusal-gate settings\nyour memory pipeline runs with (#757). Left behind here, still doing\nnothing for the external store above. Put your own settings in\n%s/config.json instead.\n' \
-                        "$REMEMBER_DIR" "$REMEMBER_DIR" > "$_legacy_dir/MIGRATED-TO.txt"
-                    printf 'remember: %s is tracked by this repository git index (or its git status could not be determined); left behind rather than migrated into the trusted external config store (#757)\n' \
-                        "$_legacy_cfg" >&2
-                    _legacy_cfg_holdout=""
-                else
-                    printf 'Memory data migrated to:\n  %s\nconfig.json could NOT be restored to %s after migration --\nsee the error logged to stderr; it still exists at the path named there\nand was not deleted.\n' \
-                        "$REMEMBER_DIR" "$_legacy_cfg" > "$_legacy_dir/MIGRATED-TO.txt"
-                    printf 'remember: FAILED to restore %s from its holdout copy -- your config.json was NOT deleted, it is still sitting at %s; move it back to %s by hand. (#757)\n' \
-                        "$_legacy_cfg" "$_legacy_cfg_holdout" "$_legacy_cfg" >&2
-                fi
-            else
-                printf 'Memory data migrated to:\n  %s\nThis directory is now empty; you may delete it.\n' \
-                    "$REMEMBER_DIR" > "$_legacy_dir/MIGRATED-TO.txt"
-            fi
-        elif [ -n "$_legacy_cfg_holdout" ] && { [ -e "$_legacy_cfg_holdout" ] || [ -L "$_legacy_cfg_holdout" ]; }; then
-            if mv "$_legacy_cfg_holdout" "$_legacy_cfg" 2>/dev/null; then
-                _legacy_cfg_holdout=""
-            else
-                printf 'remember: FAILED to restore %s after the migration move itself failed -- your config.json was NOT deleted, it is still sitting at %s; move it back to %s by hand. (#757)\n' \
-                    "$_legacy_cfg" "$_legacy_cfg_holdout" "$_legacy_cfg" >&2
-            fi
-        fi
-        unset _legacy_cfg _legacy_cfg_holdout
-    fi
-    unset _migrating_user_config_home _legacy_other_tracked
-elif [ "$REMEMBER_DIR" != "$_legacy_dir" ] && [ -L "$_legacy_dir" ] && [ ! -e "$REMEMBER_DIR" ]; then
-    printf 'remember: %s is a symlink -- refusing to migrate it; left in place untouched. Move or replace it by hand if this was not intentional. (#757)\n' \
-        "$_legacy_dir" >&2
-fi
-unset _legacy_dir
-
-if [ -z "$_remember_legacy_migration_refused" ] && { [ ! -d "$REMEMBER_DIR/logs/autonomous" ] || [ ! -d "$REMEMBER_DIR/tmp" ]; }; then
-    mkdir -p \
-        "$REMEMBER_DIR/tmp" \
-        "$REMEMBER_DIR/logs" \
-        "$REMEMBER_DIR/logs/autonomous" \
-        2>/dev/null
-fi
-unset _remember_legacy_migration_refused
-
-if [ -d "$REMEMBER_DIR/tmp" ]; then
-    _remember_stale_cfg_was_nullglob=0
-    shopt -q nullglob && _remember_stale_cfg_was_nullglob=1
-    shopt -s nullglob
-    _remember_stale_cfg_candidates=("$REMEMBER_DIR/tmp"/remember-config-*.json)
-    [ "$_remember_stale_cfg_was_nullglob" = 1 ] || shopt -u nullglob
-    if [ "${#_remember_stale_cfg_candidates[@]}" -gt 0 ]; then
-        find "$REMEMBER_DIR/tmp" -maxdepth 1 -name 'remember-config-*.json' \
-            -mmin +30 -exec rm -f {} + 2>/dev/null || true
-    fi
-    unset _remember_stale_cfg_candidates _remember_stale_cfg_was_nullglob
-
-    _remember_relocated_cfg="$REMEMBER_DIR/tmp/remember-config-$$.json"
-    if [ -n "${REMEMBER_CONFIG:-}" ] && [ -f "$REMEMBER_CONFIG" ] \
-        && mv -f "$REMEMBER_CONFIG" "$_remember_relocated_cfg" 2>/dev/null; then
-        REMEMBER_CONFIG="$_remember_relocated_cfg"
-        export REMEMBER_CONFIG
-        _remember_relocated_cfg_q=$(printf %q "$_remember_relocated_cfg")
-        _remember_trap_raw=$(trap -p EXIT 2>/dev/null)
-        _remember_existing_trap="${_remember_trap_raw#trap -- \'}"
-        _remember_existing_trap="${_remember_existing_trap%\' EXIT}"
-        _remember_existing_trap="${_remember_existing_trap//\'\\\'\'/\'}"
-        unset _remember_trap_raw
-        if [ -n "$_remember_existing_trap" ]; then
-            trap "${_remember_existing_trap}; rm -f ${_remember_relocated_cfg_q}" EXIT
-        else
-            trap "rm -f ${_remember_relocated_cfg_q}" EXIT
-        fi
-        unset _remember_existing_trap
-        unset _remember_relocated_cfg_q
-    fi
-    unset _remember_relocated_cfg
-fi
-
-if [ -d "$REMEMBER_DIR" ]; then
-    [ -f "$REMEMBER_DIR/.install-marker" ] \
-        || { echo 'This file marks when remember was first bootstrapped here. Read only by scripts/doctor.sh (#401); do not delete it.' \
-            > "$REMEMBER_DIR/.install-marker"; } 2>/dev/null
-fi
-
-if [ -d "$REMEMBER_DIR" ]; then
-    _mem_bd_glob_dir="$REMEMBER_DIR"
-    _mem_bd_glob_proj="$_mem_proj"
-    case "$OSTYPE" in
-        msys|cygwin)
-            _mem_bd_glob_dir="${_mem_bd_glob_dir//\\//}"
-            _mem_bd_glob_proj="${_mem_bd_glob_proj//\\//}"
-            ;;
-    esac
-    case "$_mem_bd_glob_dir" in
-        "$_mem_bd_glob_proj"/*)
-            [ -f "$REMEMBER_DIR/.gitignore" ] || { echo '*' > "$REMEMBER_DIR/.gitignore"; } 2>/dev/null
-            ;;
-    esac
-fi
-unset _mem_proj _mem_bd_glob_dir _mem_bd_glob_proj
-
-_remember_bd_has_xtracefd=0
-if [ "${BASH_VERSINFO[0]:-0}" -gt 4 ] 2>/dev/null; then
-    _remember_bd_has_xtracefd=1
-elif [ "${BASH_VERSINFO[0]:-0}" -eq 4 ] 2>/dev/null && [ "${BASH_VERSINFO[1]:-0}" -ge 1 ] 2>/dev/null; then
-    _remember_bd_has_xtracefd=1
-fi
-if [ -d "$REMEMBER_DIR/logs" ]; then
-    _remember_bd_keep_fd2=""
-    case "$-" in
-        (*x*)
-            if [ "$_remember_bd_has_xtracefd" = "0" ]; then
-                _remember_bd_keep_fd2="an xtrace is running (this bash predates BASH_XTRACEFD, added in 4.1, so xtrace stays on fd 2 regardless of the variable)"
-            elif [ "${BASH_XTRACEFD:-2}" = "2" ]; then
-                _remember_bd_keep_fd2="an xtrace is running on fd 2"
-            fi
-            ;;
-    esac
-    [ "${REMEMBER_TRACE:-}" = "1" ] && _remember_bd_keep_fd2="REMEMBER_TRACE=1"
-    if [ -n "$_remember_bd_keep_fd2" ]; then
-        printf 'remember: %s, so stderr is NOT being redirected to %s -- point BASH_XTRACEFD at its own fd to get both (#690)\n' \
-            "$_remember_bd_keep_fd2" "$REMEMBER_DIR/logs/hook-errors.log" >&2
-    else
-        exec 2>> "$REMEMBER_DIR/logs/hook-errors.log"
-    fi
-    unset _remember_bd_keep_fd2
-fi
-unset _remember_bd_has_xtracefd
-
-PLUGIN_ROOT="$PIPELINE_DIR"
-PROJECT="$PROJECT_DIR"
+}
+__remember_src_log() {
+:
 
 if [ -z "${PIPELINE_DIR:-}" ]; then
     if [ -n "${PROJECT_DIR:-}" ]; then
@@ -1042,7 +1001,7 @@ fi
 
 _REMEMBER_SRC_DIR="${BASH_SOURCE[0]%/*}"
 [ "$_REMEMBER_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_SRC_DIR="$(pwd)"
-:
+__remember_src_lib_memory_dir ${1+"$@"}
 unset _REMEMBER_SRC_DIR
 
 
@@ -1076,7 +1035,7 @@ _remember_cfg_table_get_into() {
     return 1
 }
 
-_config_is_private_key() {
+_config_is_private_path() {
     case "$1" in
         .haiku|.haiku.*) return 0 ;;
     esac
@@ -1341,7 +1300,7 @@ config_into() {
         _config_load
     fi
 
-    if [ "$_REMEMBER_CFG_STATE" = "ok" ] && ! _config_is_private_key "$_cfg_into_name"; then
+    if [ "$_REMEMBER_CFG_STATE" = "ok" ] && ! _config_is_private_path "$_cfg_into_name"; then
         local _cfg_into_slot="_RCFG_${_cfg_into_name#.}"
         _cfg_into_slot="${_cfg_into_slot//./_}"
         local _cfg_into_hit
@@ -1400,51 +1359,7 @@ export REMEMBER_REJECT_PATTERN
 
 _REMEMBER_SRC_DIR="${BASH_SOURCE[0]%/*}"
 [ "$_REMEMBER_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_SRC_DIR="$(pwd)"
-
-[ -n "${_REMEMBER_LIB_CLOCK_LOADED:-}" ] && return 0
-_REMEMBER_LIB_CLOCK_LOADED=1
-
-if [ "${BASH_VERSINFO[0]:-0}" -gt 4 ] 2>/dev/null; then
-    _REMEMBER_PRINTF_T=1
-elif [ "${BASH_VERSINFO[0]:-0}" -eq 4 ] 2>/dev/null && [ "${BASH_VERSINFO[1]:-0}" -ge 2 ] 2>/dev/null; then
-    _REMEMBER_PRINTF_T=1
-else
-    _REMEMBER_PRINTF_T=0
-fi
-[ "${REMEMBER_NO_PRINTF_T:-0}" = "1" ] && _REMEMBER_PRINTF_T=0
-
-_remember_date_builtin_ok() {
-    case "$1" in
-        *%-*|*%_*|*%0*|*%^*|*%#*) return 1 ;;
-    esac
-    return 0
-}
-
-_remember_date() {
-    if [ -n "${REMEMBER_TZ:-}" ]; then
-        TZ="$REMEMBER_TZ" date "$@"
-        return
-    fi
-    if [ "$_REMEMBER_PRINTF_T" = "1" ] && [ "$#" -eq 1 ] \
-        && _remember_date_builtin_ok "$1"; then
-        printf "%(${1#+})T\n" -1 && return
-    fi
-    date "$@"
-}
-
-_remember_date_into() {
-    local _var="$1"
-    shift
-    if [ -z "${REMEMBER_TZ:-}" ] && [ "$_REMEMBER_PRINTF_T" = "1" ] && [ "$#" -eq 1 ] \
-        && _remember_date_builtin_ok "$1"; then
-        printf -v "$_var" "%(${1#+})T" -1
-        return
-    fi
-    local _val
-    _val=$(_remember_date "$@")
-    printf -v "$_var" '%s' "$_val"
-}
-
+__remember_src_lib_clock ${1+"$@"}
 unset _REMEMBER_SRC_DIR
 
 MEMORY_LOG_DATE=""
@@ -1747,20 +1662,57 @@ _ROTATE_MAX_PARTS=100
 
 
 
-if ! command -v _remember_date >/dev/null 2>&1; then
-    echo "session-start-hook: ERROR -- failed to source $PLUGIN_ROOT/scripts/log.sh" >&2
-    exit 127
-fi
-TODAY=""
-_remember_date_into TODAY '+%Y-%m-%d'
-log "hook" "session-start: PROJECT_DIR=$PROJECT_DIR PIPELINE_DIR=$PIPELINE_DIR REMEMBER_DIR=$REMEMBER_DIR"
+}
+__remember_src_lib_clock() {
+:
 
-REMEMBER_SESSION_START_SLOW_S=""
-config_into REMEMBER_SESSION_START_SLOW_S ".session_start_slow_threshold_s" "5"
-if [ -z "$REMEMBER_SESSION_START_SLOW_S" ] || [ "${REMEMBER_SESSION_START_SLOW_S#*[!0-9]}" != "$REMEMBER_SESSION_START_SLOW_S" ]; then
-    REMEMBER_SESSION_START_SLOW_S=5
-fi
+[ -n "${_REMEMBER_LIB_CLOCK_LOADED:-}" ] && return 0
+_REMEMBER_LIB_CLOCK_LOADED=1
 
+if [ "${BASH_VERSINFO[0]:-0}" -gt 4 ] 2>/dev/null; then
+    _REMEMBER_PRINTF_T=1
+elif [ "${BASH_VERSINFO[0]:-0}" -eq 4 ] 2>/dev/null && [ "${BASH_VERSINFO[1]:-0}" -ge 2 ] 2>/dev/null; then
+    _REMEMBER_PRINTF_T=1
+else
+    _REMEMBER_PRINTF_T=0
+fi
+[ "${REMEMBER_NO_PRINTF_T:-0}" = "1" ] && _REMEMBER_PRINTF_T=0
+
+_remember_date_builtin_ok() {
+    case "$1" in
+        *%-*|*%_*|*%0*|*%^*|*%#*) return 1 ;;
+    esac
+    return 0
+}
+
+_remember_date() {
+    if [ -n "${REMEMBER_TZ:-}" ]; then
+        TZ="$REMEMBER_TZ" date "$@"
+        return
+    fi
+    if [ "$_REMEMBER_PRINTF_T" = "1" ] && [ "$#" -eq 1 ] \
+        && _remember_date_builtin_ok "$1"; then
+        printf "%(${1#+})T\n" -1 && return
+    fi
+    date "$@"
+}
+
+_remember_date_into() {
+    local _var="$1"
+    shift
+    if [ -z "${REMEMBER_TZ:-}" ] && [ "$_REMEMBER_PRINTF_T" = "1" ] && [ "$#" -eq 1 ] \
+        && _remember_date_builtin_ok "$1"; then
+        printf -v "$_var" "%(${1#+})T" -1
+        return
+    fi
+    local _val
+    _val=$(_remember_date "$@")
+    printf -v "$_var" '%s' "$_val"
+}
+
+}
+__remember_src_lib_env_cache() {
+:
 
 [ -n "${_REMEMBER_LIB_ENV_CACHE_LOADED:-}" ] && return 0
 _REMEMBER_LIB_ENV_CACHE_LOADED=1
@@ -1849,8 +1801,9 @@ _remember_env_cache_publish() {
     return 0
 }
 
-_remember_env_cache_publish
-
+}
+__remember_src_lib_memory_context() {
+:
 
 [ -n "${_REMEMBER_LIB_MEMORY_CONTEXT_LOADED:-}" ] && return 0
 _REMEMBER_LIB_MEMORY_CONTEXT_LOADED=1
@@ -2477,221 +2430,9 @@ _remember_apply_session_start_budget() {
     printf -v "$_outvar" %s "${_head}${_mem}"
 }
 
-
-_stdin_session_id() {
-    _stdin_json_string session_id "$1"
 }
-
-CURRENT_SESSION_ID=$(_stdin_session_id "$HOOK_STDIN" 2>/dev/null) || CURRENT_SESSION_ID=""
-case "$CURRENT_SESSION_ID" in
-    ''|[.]|[.][.]|*[!A-Za-z0-9._-]*) CURRENT_SESSION_ID="" ;;
-esac
-
-_stdin_json_string_into REMEMBER_TRANSCRIPT_PATH transcript_path "$HOOK_STDIN" 2>/dev/null
-case "$REMEMBER_TRANSCRIPT_PATH" in
-    *$'\n'*|*$'\r'*) REMEMBER_TRANSCRIPT_PATH="" ;;
-esac
-export REMEMBER_TRANSCRIPT_PATH
-
-_stdin_json_string_into SESSION_START_SOURCE source "$HOOK_STDIN" 2>/dev/null
-case "$SESSION_START_SOURCE" in
-    startup|resume|clear|compact|fork) ;;
-    *) SESSION_START_SOURCE="" ;;
-esac
-
-REMEMBER_HOOK_STDIN_MAX=32768
-_hook_stdin_file=""
-
-_session_start_listener() {
-    local f
-    for f in "$REMEMBER_HOOKS_DIR/before_session_start"/* \
-             "$REMEMBER_HOOKS_DIR/after_session_start"/*; do
-        [ -x "$f" ] && return 0
-    done
-    return 1
-}
-
-if [ -n "$HOOK_STDIN" ] && _session_start_listener; then
-    _hook_stdin_file="$REMEMBER_DIR/tmp/session-start-stdin.$$"
-    if (umask 077; printf '%s' "$HOOK_STDIN" > "$_hook_stdin_file") 2>/dev/null; then
-        export REMEMBER_HOOK_STDIN_FILE="$_hook_stdin_file"
-    else
-        rm -f "$_hook_stdin_file" 2>/dev/null
-        _hook_stdin_file=""
-    fi
-    if [ "${#HOOK_STDIN}" -le "$REMEMBER_HOOK_STDIN_MAX" ]; then
-        export REMEMBER_HOOK_STDIN="$HOOK_STDIN"
-    else
-        export REMEMBER_HOOK_STDIN=""
-    fi
-fi
-
-_remember_defer_dispatch=0
-if [ "${REMEMBER_DEFER:-1}" != "0" ]; then
-    _remember_git_restore_on=""
-    config_into _remember_git_restore_on '.git_restore.enabled' false
-    if [ "$_remember_git_restore_on" != "true" ]; then
-        _remember_bss_was_nullglob=0
-        shopt -q nullglob && _remember_bss_was_nullglob=1
-        shopt -s nullglob
-        _remember_bss_scripts=("$PLUGIN_ROOT/hooks.d/before_session_start/"*)
-        [ "$_remember_bss_was_nullglob" = 1 ] || shopt -u nullglob
-        if [ "${#_remember_bss_scripts[@]}" -eq 1 ]; then
-            case "${_remember_bss_scripts[0]}" in
-                (*/50-git-restore.sh) _remember_defer_dispatch=1 ;;
-            esac
-        fi
-        unset _remember_bss_scripts _remember_bss_was_nullglob
-    fi
-    unset _remember_git_restore_on
-fi
-if [ "$_remember_defer_dispatch" = 1 ]; then
-    {
-        export _REMEMBER_PHASE=deferred
-        dispatch "before_session_start"
-    } </dev/null >/dev/null 2>&1 3>&- & disown 2>/dev/null || true
-else
-    dispatch "before_session_start"
-fi
-unset _remember_defer_dispatch
-
-rm -f "$REMEMBER_DIR/tmp/save-session.pid"
-
-LAST_SAVE_FILE="$REMEMBER_DIR/tmp/last-save.json"
-SAVED_QUERY='def isline: type == "number" and ((isnan or isinfinite) | not) and . == floor; if (((.sessions // {})[$id]) | isline) or (.session == $id and (.line | isline)) then "saved" else "unsaved" end'
-
-session_was_saved() {
-    [ -n "$1" ] && [ -f "$LAST_SAVE_FILE" ] || return 1
-    if [ "$JQ" = "_jq_fallback" ]; then
-        _remember_python || return 1
-        [ "$(_remember_run_python - "$LAST_SAVE_FILE" "$1" <<< 'import json, math, sys
-
-def isline(v):
-    # Mirrors $SAVED_QUERY'"'"'s own `isline` def exactly: a JSON number,
-    return (
-        isinstance(v, (int, float))
-        and not isinstance(v, bool)
-        and math.isfinite(v)
-        and v == math.floor(v)
-    )
-
-try:
-    data = json.load(open(sys.argv[1]))
-except Exception:
-    print("unsaved")
-    sys.exit(0)
-
-sid = sys.argv[2]
-if not isinstance(data, dict):
-    print("unsaved")
-    sys.exit(0)
-
-sessions = data.get("sessions")
-if sessions is not None and not isinstance(sessions, dict):
-    print("unsaved")
-    sys.exit(0)
-
-if isinstance(sessions, dict) and isline(sessions.get(sid)):
-    print("saved")
-elif data.get("session") == sid and isline(data.get("line")):
-    print("saved")
-else:
-    print("unsaved")
-' 2>/dev/null
-)" = "saved" ]
-    else
-        [ "$(_remember_run_jq -r --arg id "$1" "$SAVED_QUERY" "$LAST_SAVE_FILE" 2>/dev/null)" = "saved" ]
-    fi
-}
-
-# ── Which session was the PREVIOUS one? (#270) ────────────────────────────
-# Resolved once, here, for the recovery block and the capture-gap check both.
-# They ask the same question, and they used to ask it in two places with two
-# copies of the same expression — which is exactly how two answers drift apart,
-# and how a detector came to report on a different session from the one being
-# rescued in the same invocation.
-#
-# "The newest transcript that is not ours" is correct at every source. At
-# startup there is nothing to exclude and the newest genuinely IS the previous
-# session. At resume/compact/fork ours exists and sorts newest, so excluding it
-# lands on the same file the positional skip did. At `/clear` the id is reused
-# and the transcript shared, so excluding by id excludes it there too.
-PROJECT_PATH_SLUG="$(session_dir_slug "$PROJECT")"
-SESSIONS_DIR="$(claude_projects_dir)/${PROJECT_PATH_SLUG}"
-
-# ── The slug, written down once, for callers that are not bash (#294) ─────
-# The slug is a pure function of PROJECT_DIR and PROJECT_DIR does not change
-# mid-session, so a caller in another language had no reason to recompute it —
-# and no way to ask for it except by sourcing lib-slug.sh in a subshell, once
-# per tool call. The reporter of #294 drives this plugin from PowerShell and
-# answered that by maintaining a port of session_dir_slug, which is how the
-# long-path divergence was found: a second implementation of the one function
-# whose disagreements are silent.
-#
-# So it is written here, where PROJECT_PATH_SLUG already exists two lines
-# above. This costs one `mv`; the per-tool-call path is not touched at all,
-# which is deliberate and is asserted by
-# tests/test_session_slug_record_294.py::test_the_per_tool_call_path_is_not_touched.
-#
-# In tmp/, with the locks, the cooldown markers and the delivery record: it
-# names one machine's session and one machine's absolute paths, and #285 is
-# what happens when that kind of state is committed like memory. The git
-# backup already excludes the whole directory.
-#
-# THREE STATES, NOT TWO. An empty slug is not an absence — it resolves to
-# ~/.claude/projects/ ITSELF, a directory that exists and holds every
-# project's transcripts, so a reader that cannot tell "nothing was written"
-_remember_write_slug_record() {
-    local _dir="$REMEMBER_DIR/tmp" _tmp
-    [ -d "$_dir" ] || mkdir -p "$_dir" 2>/dev/null || return 0
-    _tmp="$_dir/session-slug.$$"
-
-    local _reason=""
-    if [ -z "$PROJECT_PATH_SLUG" ]; then
-        _reason="empty-slug"
-    else
-        case "${PROJECT}${SESSIONS_DIR}${REMEMBER_DIR}" in
-            *$'\n'*) _reason="unrepresentable-path" ;;
-        esac
-    fi
-
-    if [ -n "$_reason" ]; then
-        printf 'format=1\nstatus=unavailable\nreason=%s\n' "$_reason" \
-            > "$_tmp" 2>/dev/null || { rm -f "$_tmp" 2>/dev/null; return 0; }
-    else
-        {
-            printf 'format=1\n'
-            printf 'status=ok\n'
-            printf 'project_dir=%s\n' "$PROJECT"
-            printf 'slug=%s\n' "$PROJECT_PATH_SLUG"
-            printf 'sessions_dir=%s\n' "$SESSIONS_DIR"
-            printf 'memory_dir=%s\n' "$REMEMBER_DIR"
-            if [ -n "$CURRENT_SESSION_ID" ]; then
-                printf 'session_id=%s\n' "$CURRENT_SESSION_ID"
-            fi
-        } > "$_tmp" 2>/dev/null || { rm -f "$_tmp" 2>/dev/null; return 0; }
-    fi
-
-    mv -f "$_tmp" "$_dir/session-slug" 2>/dev/null || rm -f "$_tmp" 2>/dev/null
-    return 0
-}
-
-SLUG_INDEX_LOCK_TIMEOUT=2
-SLUG_INDEX_MAX_ROWS=1000
-_remember_write_slug_index() {
-    [ -n "${REMEMBER_STORE_ROOT:-}" ] || return 0
-    [ "$REMEMBER_STORE_ROOT" != "$REMEMBER_DIR" ] || return 0
-    [ -n "$PROJECT_PATH_SLUG" ] || return 0
-
-    case "${PROJECT}${REMEMBER_DIR}" in
-        *$'\n'*|*$'\t'*) return 0 ;;
-    esac
-
-    local _dir="$REMEMBER_STORE_ROOT/tmp"
-    [ -d "$_dir" ] || mkdir -p "$_dir" 2>/dev/null || return 0
-
-    local _index="$_dir/sessions" _lock="$_dir/sessions.lock" _tmp
-
+__remember_src_lib_lock() {
+:
 
 [ -n "${_REMEMBER_LIB_LOCK_SOURCED:-}" ] && return 0
 _REMEMBER_LIB_LOCK_SOURCED=1
@@ -2909,7 +2650,7 @@ _lock_timing_disclose() {
     return 0
 }
 
-_lock_timing_key() {
+_lock_timing_slot() {
     local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
     _LOCK_TIMING_SLOT="${1//[!A-Za-z0-9]/_}"
 }
@@ -2978,7 +2719,7 @@ lock_acquire() {
     if _lock_acquire_impl "$@"; then
         _lock_timing_now
         _waited=$(( _LOCK_TIMING_NOW - _t0 ))
-        _lock_timing_key "$1"
+        _lock_timing_slot "$1"
         _lock_timing_find || _LOCK_TIMING_IDX="${#_LOCK_TIMING_SLOTS[@]}"
         _LOCK_TIMING_SLOTS[_LOCK_TIMING_IDX]="$_LOCK_TIMING_SLOT"
         _LOCK_TIMING_T0S[_LOCK_TIMING_IDX]="$_LOCK_TIMING_NOW"
@@ -3034,7 +2775,7 @@ lock_release() {
     fi
     _lock_release_impl "$@" || return 1
     _lock_timing_now
-    _lock_timing_key "$1"
+    _lock_timing_slot "$1"
     _t0=""
     _wait=""
     if _lock_timing_find; then
@@ -3063,42 +2804,9 @@ _lock_release_impl() {
     return 0
 }
 
-    command -v lock_acquire >/dev/null 2>&1 || return 0
-    lock_acquire "$_lock" "$SLUG_INDEX_LOCK_TIMEOUT" || return 0
-
-    _tmp="$_index.$$"
-    {
-        printf 'format=1\n'
-        if [ -f "$_index" ]; then
-            awk -v self="$PROJECT" -v max="$((SLUG_INDEX_MAX_ROWS - 1))" '
-                NR == 1 { if ($0 != "format=1") exit 0; next }
-                $0 == "" { next }
-                {
-                    n = index($0, "\tproject_dir=")
-                    if (n == 0) next
-                    if (substr($0, n + 13) == self) next
-                    rows[++c] = $0
-                }
-                END {
-                    start = (c > max) ? c - max + 1 : 1
-                    for (i = start; i <= c; i++) print rows[i]
-                }
-            ' "$_index" 2>/dev/null
-        fi
-        printf 'status=ok\tslug=%s\tmemory_dir=%s\tproject_dir=%s\n' \
-            "$PROJECT_PATH_SLUG" "$REMEMBER_DIR" "$PROJECT"
-    } > "$_tmp" 2>/dev/null || {
-        rm -f "$_tmp" 2>/dev/null
-        lock_release "$_lock" 2>/dev/null
-        return 0
-    }
-
-    mv -f "$_tmp" "$_index" 2>/dev/null || rm -f "$_tmp" 2>/dev/null
-    lock_release "$_lock" 2>/dev/null
-    return 0
 }
-
-_remember_write_case_divergence() {
+__remember_src_lib_case_divergence() {
+:
 
 [ -n "${_REMEMBER_LIB_CASE_DIVERGENCE_LOADED:-}" ] && return 0
 _REMEMBER_LIB_CASE_DIVERGENCE_LOADED=1
@@ -3242,6 +2950,342 @@ _remember_case_compose_message() {
     return 0
 }
 
+}
+
+_HOOK_DIR="${BASH_SOURCE[0]%/*}"
+[ "$_HOOK_DIR" = "${BASH_SOURCE[0]}" ] && _HOOK_DIR="$(pwd)"
+
+[ -n "${REMEMBER_NESTED_SUMMARIZER:-}" ] && exit 0
+
+_REMEMBER_HOOK_T0=""
+if [ "${BASH_VERSINFO[0]:-0}" -ge 5 ] && [ "${_REMEMBER_HOOK_FORCE_DATE_FALLBACK:-0}" != "1" ]; then
+    _REMEMBER_HOOK_T0="$EPOCHSECONDS"
+else
+    _REMEMBER_HOOK_T0=$(date +%s 2>/dev/null) || _REMEMBER_HOOK_T0=""
+fi
+
+HOOK_STDIN=""
+if [ ! -t 0 ]; then
+    _line=""
+    while IFS= read -r -t 1 _line || [ -n "$_line" ]; do
+        HOOK_STDIN="$HOOK_STDIN$_line"
+        _line=""
+    done
+fi
+
+_stdin_json_string() {
+    local field="$1" raw="$2" rest prefix value dq
+    printf -v dq '\042'
+    case "$raw" in *"$dq$field$dq"*) ;; *) return 1 ;; esac
+    rest=${raw#*"$dq"$field"$dq"}
+    prefix=${rest%%"$dq"*}
+    case "$prefix" in *[!:[:space:]]*) return 1 ;; esac
+    value=${rest#*"$dq"}
+    value=${value%%"$dq"*}
+    value=${value//\\\\/\\}
+    [ -n "$value" ] || return 1
+    printf '%s' "$value"
+}
+
+_stdin_json_string_into() {
+    local _sjsi_var="$1" _sjsi_field="$2" _sjsi_raw="$3" _sjsi_rest _sjsi_prefix _sjsi_value _sjsi_dq
+    printf -v "$_sjsi_var" '%s' ""
+    printf -v _sjsi_dq '\042'  # the double quote, as in _stdin_json_string
+    case "$_sjsi_raw" in *"$_sjsi_dq$_sjsi_field$_sjsi_dq"*) ;; *) return 1 ;; esac
+    _sjsi_rest=${_sjsi_raw#*"$_sjsi_dq"$_sjsi_field"$_sjsi_dq"}
+    _sjsi_prefix=${_sjsi_rest%%"$_sjsi_dq"*}
+    case "$_sjsi_prefix" in *[!:[:space:]]*) return 1 ;; esac
+    _sjsi_value=${_sjsi_rest#*"$_sjsi_dq"}
+    _sjsi_value=${_sjsi_value%%"$_sjsi_dq"*}
+    _sjsi_value=${_sjsi_value//\\\\/\\}  # decode `\\`, as above (#829)
+    [ -n "$_sjsi_value" ] || return 1
+    printf -v "$_sjsi_var" '%s' "$_sjsi_value"
+}
+
+_stdin_json_string_into REMEMBER_HOOK_CWD cwd "$HOOK_STDIN" 2>/dev/null
+case "$REMEMBER_HOOK_CWD" in
+    *$'\n'*|*$'\r'*) REMEMBER_HOOK_CWD="" ;;
+esac
+export REMEMBER_HOOK_CWD
+
+REMEMBER_PATHS_SOFT_FAIL=1 __remember_src_resolve_paths ${1+"$@"} || exit 0
+_REMEMBER_LAZY_PYTHON=1
+__remember_src_detect_tools ${1+"$@"}
+__remember_src_bootstrap_dirs ${1+"$@"}
+PLUGIN_ROOT="$PIPELINE_DIR"
+PROJECT="$PROJECT_DIR"
+__remember_src_log ${1+"$@"} 2>/dev/null
+if ! command -v _remember_date >/dev/null 2>&1; then
+    echo "session-start-hook: ERROR -- failed to source $PLUGIN_ROOT/scripts/log.sh" >&2
+    exit 127
+fi
+TODAY=""
+_remember_date_into TODAY '+%Y-%m-%d'
+log "hook" "session-start: PROJECT_DIR=$PROJECT_DIR PIPELINE_DIR=$PIPELINE_DIR REMEMBER_DIR=$REMEMBER_DIR"
+
+REMEMBER_SESSION_START_SLOW_S=""
+config_into REMEMBER_SESSION_START_SLOW_S ".session_start_slow_threshold_s" "5"
+if [ -z "$REMEMBER_SESSION_START_SLOW_S" ] || [ "${REMEMBER_SESSION_START_SLOW_S#*[!0-9]}" != "$REMEMBER_SESSION_START_SLOW_S" ]; then
+    REMEMBER_SESSION_START_SLOW_S=5
+fi
+
+__remember_src_lib_env_cache ${1+"$@"}
+_remember_env_cache_publish
+
+__remember_src_lib_memory_context ${1+"$@"}
+
+_stdin_session_id() {
+    _stdin_json_string session_id "$1"
+}
+
+CURRENT_SESSION_ID=$(_stdin_session_id "$HOOK_STDIN" 2>/dev/null) || CURRENT_SESSION_ID=""
+case "$CURRENT_SESSION_ID" in
+    ''|[.]|[.][.]|*[!A-Za-z0-9._-]*) CURRENT_SESSION_ID="" ;;
+esac
+
+_stdin_json_string_into REMEMBER_TRANSCRIPT_PATH transcript_path "$HOOK_STDIN" 2>/dev/null
+case "$REMEMBER_TRANSCRIPT_PATH" in
+    *$'\n'*|*$'\r'*) REMEMBER_TRANSCRIPT_PATH="" ;;
+esac
+export REMEMBER_TRANSCRIPT_PATH
+
+_stdin_json_string_into SESSION_START_SOURCE source "$HOOK_STDIN" 2>/dev/null
+case "$SESSION_START_SOURCE" in
+    startup|resume|clear|compact|fork) ;;
+    *) SESSION_START_SOURCE="" ;;
+esac
+
+REMEMBER_HOOK_STDIN_MAX=32768
+_hook_stdin_file=""
+
+_session_start_listener() {
+    local f
+    for f in "$REMEMBER_HOOKS_DIR/before_session_start"/* \
+             "$REMEMBER_HOOKS_DIR/after_session_start"/*; do
+        [ -x "$f" ] && return 0
+    done
+    return 1
+}
+
+if [ -n "$HOOK_STDIN" ] && _session_start_listener; then
+    _hook_stdin_file="$REMEMBER_DIR/tmp/session-start-stdin.$$"
+    if (umask 077; printf '%s' "$HOOK_STDIN" > "$_hook_stdin_file") 2>/dev/null; then
+        export REMEMBER_HOOK_STDIN_FILE="$_hook_stdin_file"
+    else
+        rm -f "$_hook_stdin_file" 2>/dev/null
+        _hook_stdin_file=""
+    fi
+    if [ "${#HOOK_STDIN}" -le "$REMEMBER_HOOK_STDIN_MAX" ]; then
+        export REMEMBER_HOOK_STDIN="$HOOK_STDIN"
+    else
+        export REMEMBER_HOOK_STDIN=""
+    fi
+fi
+
+_remember_defer_dispatch=0
+if [ "${REMEMBER_DEFER:-1}" != "0" ]; then
+    _remember_git_restore_on=""
+    config_into _remember_git_restore_on '.git_restore.enabled' false
+    if [ "$_remember_git_restore_on" != "true" ]; then
+        _remember_bss_was_nullglob=0
+        shopt -q nullglob && _remember_bss_was_nullglob=1
+        shopt -s nullglob
+        _remember_bss_scripts=("$PLUGIN_ROOT/hooks.d/before_session_start/"*)
+        [ "$_remember_bss_was_nullglob" = 1 ] || shopt -u nullglob
+        if [ "${#_remember_bss_scripts[@]}" -eq 1 ]; then
+            case "${_remember_bss_scripts[0]}" in
+                (*/50-git-restore.sh) _remember_defer_dispatch=1 ;;
+            esac
+        fi
+        unset _remember_bss_scripts _remember_bss_was_nullglob
+    fi
+    unset _remember_git_restore_on
+fi
+if [ "$_remember_defer_dispatch" = 1 ]; then
+    {
+        export _REMEMBER_PHASE=deferred
+        dispatch "before_session_start"
+    } </dev/null >/dev/null 2>&1 3>&- & disown 2>/dev/null || true
+else
+    dispatch "before_session_start"
+fi
+unset _remember_defer_dispatch
+
+rm -f "$REMEMBER_DIR/tmp/save-session.pid"
+
+LAST_SAVE_FILE="$REMEMBER_DIR/tmp/last-save.json"
+SAVED_QUERY='def isline: type == "number" and ((isnan or isinfinite) | not) and . == floor; if (((.sessions // {})[$id]) | isline) or (.session == $id and (.line | isline)) then "saved" else "unsaved" end'
+
+session_was_saved() {
+    [ -n "$1" ] && [ -f "$LAST_SAVE_FILE" ] || return 1
+    if [ "$JQ" = "_jq_fallback" ]; then
+        _remember_python || return 1
+        [ "$(_remember_run_python - "$LAST_SAVE_FILE" "$1" <<< 'import json, math, sys
+
+def isline(v):
+    # Mirrors $SAVED_QUERY'"'"'s own `isline` def exactly: a JSON number,
+    return (
+        isinstance(v, (int, float))
+        and not isinstance(v, bool)
+        and math.isfinite(v)
+        and v == math.floor(v)
+    )
+
+try:
+    data = json.load(open(sys.argv[1]))
+except Exception:
+    print("unsaved")
+    sys.exit(0)
+
+sid = sys.argv[2]
+if not isinstance(data, dict):
+    print("unsaved")
+    sys.exit(0)
+
+sessions = data.get("sessions")
+if sessions is not None and not isinstance(sessions, dict):
+    print("unsaved")
+    sys.exit(0)
+
+if isinstance(sessions, dict) and isline(sessions.get(sid)):
+    print("saved")
+elif data.get("session") == sid and isline(data.get("line")):
+    print("saved")
+else:
+    print("unsaved")
+' 2>/dev/null
+)" = "saved" ]
+    else
+        [ "$(_remember_run_jq -r --arg id "$1" "$SAVED_QUERY" "$LAST_SAVE_FILE" 2>/dev/null)" = "saved" ]
+    fi
+}
+
+# ── Which session was the PREVIOUS one? (#270) ────────────────────────────
+# Resolved once, here, for the recovery block and the capture-gap check both.
+# They ask the same question, and they used to ask it in two places with two
+# copies of the same expression — which is exactly how two answers drift apart,
+# and how a detector came to report on a different session from the one being
+# rescued in the same invocation.
+#
+# "The newest transcript that is not ours" is correct at every source. At
+# startup there is nothing to exclude and the newest genuinely IS the previous
+# session. At resume/compact/fork ours exists and sorts newest, so excluding it
+# lands on the same file the positional skip did. At `/clear` the id is reused
+# and the transcript shared, so excluding by id excludes it there too.
+PROJECT_PATH_SLUG="$(session_dir_slug "$PROJECT")"
+SESSIONS_DIR="$(claude_projects_dir)/${PROJECT_PATH_SLUG}"
+
+# ── The slug, written down once, for callers that are not bash (#294) ─────
+# The slug is a pure function of PROJECT_DIR and PROJECT_DIR does not change
+# mid-session, so a caller in another language had no reason to recompute it —
+# and no way to ask for it except by sourcing lib-slug.sh in a subshell, once
+# per tool call. The reporter of #294 drives this plugin from PowerShell and
+# answered that by maintaining a port of session_dir_slug, which is how the
+# long-path divergence was found: a second implementation of the one function
+# whose disagreements are silent.
+#
+# So it is written here, where PROJECT_PATH_SLUG already exists two lines
+# above. This costs one `mv`; the per-tool-call path is not touched at all,
+# which is deliberate and is asserted by
+# tests/test_session_slug_record_294.py::test_the_per_tool_call_path_is_not_touched.
+#
+# In tmp/, with the locks, the cooldown markers and the delivery record: it
+# names one machine's session and one machine's absolute paths, and #285 is
+# what happens when that kind of state is committed like memory. The git
+# backup already excludes the whole directory.
+#
+# THREE STATES, NOT TWO. An empty slug is not an absence — it resolves to
+# ~/.claude/projects/ ITSELF, a directory that exists and holds every
+# project's transcripts, so a reader that cannot tell "nothing was written"
+_remember_write_slug_record() {
+    local _dir="$REMEMBER_DIR/tmp" _tmp
+    [ -d "$_dir" ] || mkdir -p "$_dir" 2>/dev/null || return 0
+    _tmp="$_dir/session-slug.$$"
+
+    local _reason=""
+    if [ -z "$PROJECT_PATH_SLUG" ]; then
+        _reason="empty-slug"
+    else
+        case "${PROJECT}${SESSIONS_DIR}${REMEMBER_DIR}" in
+            *$'\n'*) _reason="unrepresentable-path" ;;
+        esac
+    fi
+
+    if [ -n "$_reason" ]; then
+        printf 'format=1\nstatus=unavailable\nreason=%s\n' "$_reason" \
+            > "$_tmp" 2>/dev/null || { rm -f "$_tmp" 2>/dev/null; return 0; }
+    else
+        {
+            printf 'format=1\n'
+            printf 'status=ok\n'
+            printf 'project_dir=%s\n' "$PROJECT"
+            printf 'slug=%s\n' "$PROJECT_PATH_SLUG"
+            printf 'sessions_dir=%s\n' "$SESSIONS_DIR"
+            printf 'memory_dir=%s\n' "$REMEMBER_DIR"
+            if [ -n "$CURRENT_SESSION_ID" ]; then
+                printf 'session_id=%s\n' "$CURRENT_SESSION_ID"
+            fi
+        } > "$_tmp" 2>/dev/null || { rm -f "$_tmp" 2>/dev/null; return 0; }
+    fi
+
+    mv -f "$_tmp" "$_dir/session-slug" 2>/dev/null || rm -f "$_tmp" 2>/dev/null
+    return 0
+}
+
+SLUG_INDEX_LOCK_TIMEOUT=2
+SLUG_INDEX_MAX_ROWS=1000
+_remember_write_slug_index() {
+    [ -n "${REMEMBER_STORE_ROOT:-}" ] || return 0
+    [ "$REMEMBER_STORE_ROOT" != "$REMEMBER_DIR" ] || return 0
+    [ -n "$PROJECT_PATH_SLUG" ] || return 0
+
+    case "${PROJECT}${REMEMBER_DIR}" in
+        *$'\n'*|*$'\t'*) return 0 ;;
+    esac
+
+    local _dir="$REMEMBER_STORE_ROOT/tmp"
+    [ -d "$_dir" ] || mkdir -p "$_dir" 2>/dev/null || return 0
+
+    local _index="$_dir/sessions" _lock="$_dir/sessions.lock" _tmp
+
+    __remember_src_lib_lock ${1+"$@"} 2>/dev/null || return 0
+    command -v lock_acquire >/dev/null 2>&1 || return 0
+    lock_acquire "$_lock" "$SLUG_INDEX_LOCK_TIMEOUT" || return 0
+
+    _tmp="$_index.$$"
+    {
+        printf 'format=1\n'
+        if [ -f "$_index" ]; then
+            awk -v self="$PROJECT" -v max="$((SLUG_INDEX_MAX_ROWS - 1))" '
+                NR == 1 { if ($0 != "format=1") exit 0; next }
+                $0 == "" { next }
+                {
+                    n = index($0, "\tproject_dir=")
+                    if (n == 0) next
+                    if (substr($0, n + 13) == self) next
+                    rows[++c] = $0
+                }
+                END {
+                    start = (c > max) ? c - max + 1 : 1
+                    for (i = start; i <= c; i++) print rows[i]
+                }
+            ' "$_index" 2>/dev/null
+        fi
+        printf 'status=ok\tslug=%s\tmemory_dir=%s\tproject_dir=%s\n' \
+            "$PROJECT_PATH_SLUG" "$REMEMBER_DIR" "$PROJECT"
+    } > "$_tmp" 2>/dev/null || {
+        rm -f "$_tmp" 2>/dev/null
+        lock_release "$_lock" 2>/dev/null
+        return 0
+    }
+
+    mv -f "$_tmp" "$_index" 2>/dev/null || rm -f "$_tmp" 2>/dev/null
+    lock_release "$_lock" 2>/dev/null
+    return 0
+}
+
+_remember_write_case_divergence() {
+    __remember_src_lib_case_divergence ${1+"$@"} 2>/dev/null || return 0
     command -v remember_case_divergence >/dev/null 2>&1 || return 0
     remember_case_divergence
 
@@ -3572,7 +3616,7 @@ if [ "$_promos_enabled" = "true" ] \
         fi
 
         local _promo_rows
-        _promo_rows=$(_remember_run_jq -r '(.promos[]? | .id // "", .text // "", .url // "", .installed_key // "", .gate // ""), "#promo-end#"' "$promos_file" 2>/dev/null) || return 0
+        _promo_rows=$(_remember_run_jq -r '(.promos[]? | .id // "", .text // "", .url // "", .installed_id // "", .gate // ""), "#promo-end#"' "$promos_file" 2>/dev/null) || return 0
         [ -n "$_promo_rows" ] || return 0
 
         local installed_config_dir="${CLAUDE_CONFIG_DIR:-}"
@@ -3611,7 +3655,7 @@ if [ "$_promos_enabled" = "true" ] \
                 continue
             fi
             if [ -z "$gate" ] && [ -z "$iplugin" ]; then
-                log "hook" "promo skipped: promos.json entry $((entry_idx - 1)) is missing installed_key"
+                log "hook" "promo skipped: promos.json entry $((entry_idx - 1)) is missing installed_id"
                 continue
             fi
             if [ -z "$url" ]; then

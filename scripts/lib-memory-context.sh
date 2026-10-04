@@ -145,7 +145,7 @@ _remember_memory_paths() {
 # available. Reads SESSION_START_SOURCE from the environment; unset/empty is
 # treated as the non-compact (full) render, same as the original code.
 # bash 3.2 (the documented floor -- lib-clock.sh's own header, lib-lock.sh's
-# _lock_timing_key comment) has no associative arrays, so this cache is two
+# _lock_timing_slot comment) has no associative arrays, so this cache is two
 # parallel INDEXED arrays (bash 3.2 has no trouble with those) -- KEYS[i]
 # holds the raw path, VALS[i] its cached byte count -- searched linearly by
 # index rather than through a dynamically-named variable. Round 4/5/6 of
