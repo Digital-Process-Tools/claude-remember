@@ -12,6 +12,28 @@
       "CLAUDE_CODE_MESSAGING_SOCKET",
       "CLAUDE_CODE_MESSAGING_TOKEN",
       "CLAUDE_CODE_SSE_PORT"
+    ],
+    "codex_env_allow": [
+      "PATH",
+      "HOME",
+      "LANG",
+      "LC_ALL",
+      "CODEX_HOME",
+      "TMPDIR",
+      "TEMP",
+      "TMP",
+      "SYSTEMROOT",
+      "USERPROFILE",
+      "APPDATA",
+      "PATHEXT",
+      "HTTPS_PROXY",
+      "HTTP_PROXY",
+      "NO_PROXY",
+      "https_proxy",
+      "http_proxy",
+      "no_proxy",
+      "SSL_CERT_FILE",
+      "NODE_EXTRA_CA_CERTS"
     ]
   }
 }

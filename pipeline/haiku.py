@@ -649,13 +649,36 @@ _SESSION_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 def _configured_strip_session_env() -> tuple[str, ...]:
     """`haiku.strip_session_env`: the parent-session variable names to keep
-    out of the nested call.
+    out of the nested call (#95)."""
+    return _configured_env_names(
+        "strip_session_env",
+        "the summarizer inherits the parent session's own variables, which #95 removes",
+    )
+
+
+def _configured_codex_env_allow() -> tuple[str, ...]:
+    """`haiku.codex_env_allow`: the only variables the Codex child is given
+    (#724). Config, not code, like `haiku.strip_session_env` (#898 round 16):
+    the shipped list in the bundled config.json names no credential, and an
+    operator who authenticates Codex through an environment variable adds its
+    name in their own ~/.remember/config.json (a list replaces, so they copy
+    the shipped one and add to it)."""
+    return _configured_env_names(
+        "codex_env_allow",
+        "the Codex summarizer gets no environment at all and will likely fail to start",
+    )
+
+
+def _configured_env_names(key: str, consequence: str) -> tuple[str, ...]:
+    """A `haiku.<key>` list of environment variable names from config.
 
     The first config layer that HAS the key decides, the same precedence
     every other `haiku.*` read here uses, with the bundled default last. A
     value that is not a list is reported and skipped, so the next layer's
     list (in the end, the shipped one) still applies -- a typo in a user
-    file must not silently turn the #95 strip off. An entry that is not a
+    file must not silently turn the #95 strip off, or empty the #724
+    allow-list. Which layers count is `_config_candidates`'s #726 rule: a
+    cloned repository's own config is not one of them. An entry that is not a
     variable name is skipped -- reported, never echoed: someone may have
     pasted ``NAME=value`` with a real value in it, and the daily log is a
     file on disk. No list anywhere is said out loud too.
@@ -669,12 +692,12 @@ def _configured_strip_session_env() -> tuple[str, ...]:
         if not isinstance(cfg, dict):
             continue
         haiku_cfg = cfg.get("haiku")
-        if not isinstance(haiku_cfg, dict) or "strip_session_env" not in haiku_cfg:
+        if not isinstance(haiku_cfg, dict) or key not in haiku_cfg:
             continue
-        value = haiku_cfg["strip_session_env"]
+        value = haiku_cfg[key]
         if not isinstance(value, list):
             _warn(
-                f"WARNING: ignoring haiku.strip_session_env in {path} -- a "
+                f"WARNING: ignoring haiku.{key} in {path} -- a "
                 f"{type(value).__name__} value, not a list of variable names; "
                 "the next config layer's list applies instead"
             )
@@ -689,17 +712,16 @@ def _configured_strip_session_env() -> tuple[str, ...]:
             else:
                 shape = f"a {type(entry).__name__} value"
             _warn(
-                f"WARNING: ignoring entry {index} of haiku.strip_session_env in "
+                f"WARNING: ignoring entry {index} of haiku.{key} in "
                 f"{path} -- {shape}, not a variable name (letters, digits and "
                 "underscores). The entry itself is not logged: it may hold a "
                 "pasted value"
             )
         return tuple(names)
     _warn(
-        "WARNING: no haiku.strip_session_env list in any config layer (the "
-        "plugin's bundled config.json is missing or unreadable) -- the "
-        "summarizer inherits the parent session's own variables, which #95 "
-        "removes; reinstall the plugin or set the list in ~/.remember/config.json"
+        f"WARNING: no haiku.{key} list in any config layer (the plugin's "
+        f"bundled config.json is missing or unreadable) -- {consequence}; "
+        "reinstall the plugin or set the list in ~/.remember/config.json"
     )
     return ()
 
@@ -1027,50 +1049,43 @@ def _isolated_summarizer_cwd():
 #
 # #751 (release-audit, reasoned not observed): the original list was
 # PATH/HOME/LANG/LC_ALL/CODEX_HOME/TMPDIR/TEMP/TMP only -- no Windows entry,
-# and no route for anyone who authenticates Codex through an env var or
-# sits behind a proxy, on ANY platform. Both are widened here rather than
-# switched to a deny-list: #724's own rationale above (a command the model
-# runs can read the child's environment directly) is exactly as true on
-# Windows and behind a proxy as it is everywhere else this allow-list
-# already applied, so the fix is the same shape, just wider.
+# and no route for anyone behind a proxy, on ANY platform. Both were widened
+# rather than switched to a deny-list: #724's own rationale above (a command
+# the model runs can read the child's environment directly) is exactly as
+# true on Windows and behind a proxy as it is everywhere else this
+# allow-list already applied, so the fix is the same shape, just wider.
 #
-# The Windows-only names are listed UNCONDITIONALLY, not behind an
-# ``os.name == "nt"`` branch: this dict comprehension only ever passes
-# through a name that is ALSO a key in the parent's real ``os.environ``, so
-# adding ``SYSTEMROOT``/``USERPROFILE``/``APPDATA``/``PATHEXT`` to the
-# allow-list is a no-op on POSIX (nothing there sets them) and is exactly
-# the widening Codex needs on Windows -- no platform check needed, and
-# nothing here would read as "passing" on a platform it does not actually
-# cover the way a branched implementation could.
-_CODEX_CHILD_ENV_ALLOW = frozenset({
-    "PATH", "HOME", "LANG", "LC_ALL", "CODEX_HOME", "TMPDIR", "TEMP", "TMP",
-    # Windows: resolving %SystemRoot%-relative paths, the user profile dir,
-    # per-user app data, and which extensions CreateProcess treats as
-    # executable when a bare command name (no extension) is looked up on
-    # PATH -- without PATHEXT a bare "codex" can fail to resolve at all.
-    "SYSTEMROOT", "USERPROFILE", "APPDATA", "PATHEXT",
-    # Codex's own env-var credential (its filesystem-based CODEX_HOME/
-    # auth.json is unaffected either way) plus the standard proxy/CA
-    # variables -- every platform, not just Windows.
-    "CODEX_API_KEY",
-    "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY",
-    "SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS",
-})
-
+# #898 round 16: the list itself is config, `haiku.codex_env_allow`, read by
+# the same `_configured_env_names` as `haiku.strip_session_env` -- same
+# precedence, same validation, same #726 trust rule (a cloned repository's
+# own .remember/config.json cannot widen it). The shipped list, in the
+# bundled config.json, names no credential: Codex's own login lives in
+# CODEX_HOME/auth.json, which is unaffected. An operator who authenticates
+# Codex through an environment variable adds that variable's name in their
+# own ~/.remember/config.json; the list replaces the shipped one, it does
+# not append. The default is therefore narrower than #751's, never wider.
+#
+# The Windows-only names (SYSTEMROOT/USERPROFILE/APPDATA/PATHEXT) are on the
+# shipped list UNCONDITIONALLY: `_codex_child_env` only passes through a
+# name that is ALSO set in the parent's real ``os.environ``, so they are a
+# no-op on POSIX (nothing there sets them) and exactly the widening Codex
+# needs on Windows.
+#
 # #792 (CI, windows-latest): CPython's os.py folds EVERY os.environ key to
 # uppercase on `nt` (_createenviron's `encodekey = key.upper()`), and a
 # lookup there upper-cases the name too -- so on Windows one read of the
-# canonical upper-case name finds a variable set in any case. A
-# case-preserving platform (POSIX) keeps `https_proxy` and `HTTPS_PROXY`
-# apart, and some HTTP client libraries only ever check the lowercase form,
-# so `_codex_child_env` reads those three lowercase proxy names too, there
-# only (#898 round 15: by literal name, where #792 had compared every key of
-# a walk against this set case-insensitively). `_CODEX_CHILD_ENV_ALLOW` above
-# stays the reference list the literal table is tested against.
+# upper-case name finds a variable set in any case. A case-preserving
+# platform (POSIX) keeps `https_proxy` and `HTTPS_PROXY` apart, and some HTTP
+# client libraries only ever check the lowercase form, so the shipped list
+# carries the three lowercase proxy names too; on Windows they would only
+# repeat their upper-case twins and `_codex_child_env` skips the repeat.
 
 
 def _codex_child_env() -> dict[str, str]:
     """Allow-listed environment for `_call_codex`'s subprocess (#724, F9/F10).
+
+    The allowed names are `haiku.codex_env_allow` (#898 round 16, see the
+    comment above); what the shipped list carries, and why:
 
     ``PATH``/``HOME``: find and run the binary, resolve ``~``.
     ``LANG``/``LC_ALL``: locale-dependent CLI output.
@@ -1081,56 +1096,38 @@ def _codex_child_env() -> dict[str, str]:
     ``SYSTEMROOT``/``USERPROFILE``/``APPDATA``/``PATHEXT``: Windows-only in
     practice (#751) -- absent from ``os.environ`` everywhere else, so listing
     them here costs nothing on POSIX.
-    ``CODEX_API_KEY``: Codex's own env-var credential, when that is how this
-    host authenticates it rather than a filesystem ``auth.json`` (#751).
     ``HTTPS_PROXY``/``HTTP_PROXY``/``NO_PROXY`` and
     ``SSL_CERT_FILE``/``NODE_EXTRA_CA_CERTS``: anyone running this behind a
-    proxy or a custom CA bundle (#751). The three proxy names are also read
-    in lowercase on a case-preserving platform -- some HTTP client libraries
+    proxy or a custom CA bundle (#751). The three proxy names are also listed
+    in lowercase for a case-preserving platform -- some HTTP client libraries
     only ever check that form -- while on Windows the upper-case read already
-    finds either casing (#792).
+    finds either casing, so the lowercase repeat is skipped there (#792).
+    No credential: the shipped list names none. An operator who authenticates
+    Codex through an environment variable rather than the filesystem
+    ``auth.json`` adds that operator-added credential name to their own
+    ``haiku.codex_env_allow`` (#751, #898 round 16).
 
     Nothing else -- no Anthropic key, no cloud credential, no unrelated
     shell secret this process's own environment happens to carry -- is
     passed through, because a command the model runs inside Codex's
     read-only sandbox can read the child's environment directly.
     """
-    # #898 round 15: one literal read per allowed name, never a walk of the
-    # environment. On Windows, os.environ lookups already ignore case (#792),
-    # so the upper-case read finds a variable set in any case there; on a
-    # case-preserving platform the lowercase proxy spellings some HTTP
-    # clients only ever check are read too, under their own names.
+    # #898 round 16: the names come from `haiku.codex_env_allow` (config,
+    # like `haiku.strip_session_env`), one read per name, never a walk of
+    # the environment. On Windows os.environ lookups ignore case (#792), so
+    # a lowercase name on the list (the `https_proxy` spellings some HTTP
+    # clients only check on POSIX) would only repeat its upper-case twin
+    # there -- the first spelling read wins and the repeat is skipped.
     child = {}
-    for name, value in (
-        ("PATH", os.environ.get("PATH")),
-        ("HOME", os.environ.get("HOME")),
-        ("LANG", os.environ.get("LANG")),
-        ("LC_ALL", os.environ.get("LC_ALL")),
-        ("CODEX_HOME", os.environ.get("CODEX_HOME")),
-        ("TMPDIR", os.environ.get("TMPDIR")),
-        ("TEMP", os.environ.get("TEMP")),
-        ("TMP", os.environ.get("TMP")),
-        ("SYSTEMROOT", os.environ.get("SYSTEMROOT")),
-        ("USERPROFILE", os.environ.get("USERPROFILE")),
-        ("APPDATA", os.environ.get("APPDATA")),
-        ("PATHEXT", os.environ.get("PATHEXT")),
-        ("CODEX_API_KEY", os.environ.get("CODEX_API_KEY")),
-        ("HTTPS_PROXY", os.environ.get("HTTPS_PROXY")),
-        ("HTTP_PROXY", os.environ.get("HTTP_PROXY")),
-        ("NO_PROXY", os.environ.get("NO_PROXY")),
-        ("SSL_CERT_FILE", os.environ.get("SSL_CERT_FILE")),
-        ("NODE_EXTRA_CA_CERTS", os.environ.get("NODE_EXTRA_CA_CERTS")),
-    ):
+    seen = set()
+    for name in _configured_codex_env_allow():
+        folded = name.upper() if os.name == "nt" else name
+        if folded in seen:
+            continue
+        value = os.environ.get(name)
         if value is not None:
             child[name] = value
-    if os.name != "nt":
-        for name, value in (
-            ("https_proxy", os.environ.get("https_proxy")),
-            ("http_proxy", os.environ.get("http_proxy")),
-            ("no_proxy", os.environ.get("no_proxy")),
-        ):
-            if value is not None:
-                child[name] = value
+            seen.add(folded)
     child["REMEMBER_NESTED_SUMMARIZER"] = "1"
     return child
 
@@ -1147,19 +1144,21 @@ def _build_codex_cmd(output_file: str, cwd: str) -> list[str]:
     SEPARATE audiences:
       * `_codex_child_env` -- the ``env=`` kwarg passed to `subprocess.run`
         -- is what CODEX'S OWN PROCESS receives from this host (its CLI
-        needs PATH/HOME to run at all, plus CODEX_API_KEY/proxy/CA vars to
-        authenticate and reach the network, #751).
+        needs PATH/HOME to run at all, plus proxy/CA vars -- and any
+        operator-added credential name -- to authenticate and reach the
+        network, #751; the list is `haiku.codex_env_allow`, #898 round 16).
       * the ``-c shell_environment_policy.inherit=none`` override below is
         what a COMMAND CODEX SPAWNS internally receives. These are not the
         same environment: Codex does not hand a spawned command its own
         process env by default just because that is what this host gave
         it. Before #798, nothing here set this policy at all, so a
         transcript-injected instruction that got the model to run a shell
-        command inside this sandbox could read CODEX_API_KEY and the proxy
-        vars directly out of that command's environment -- exactly the class
-        of secret #751 had just finished making Codex's OWN process able to
-        see. `_codex_child_env`'s allow-list stays necessary (Codex's own
-        auth/proxy needs do not go away); it was never sufficient for this.
+        command inside this sandbox could read an operator-added credential
+        and the proxy vars directly out of that command's environment --
+        exactly the class of secret #751 had just finished making Codex's
+        OWN process able to see. `_codex_child_env`'s allow-list stays
+        necessary (Codex's own auth/proxy needs do not go away); it was
+        never sufficient for this.
         Confirmed against codex-cli 0.153.2's own ``--help`` and the
         official Codex manual (fetched 2026-09-26): `shell_environment_policy`
         is a real, documented dotted-path config key, and ``-c`` overrides

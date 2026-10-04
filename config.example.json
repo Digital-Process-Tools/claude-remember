@@ -67,6 +67,28 @@
       "CLAUDE_CODE_MESSAGING_SOCKET",
       "CLAUDE_CODE_MESSAGING_TOKEN",
       "CLAUDE_CODE_SSE_PORT"
+    ],
+    "codex_env_allow": [
+      "PATH",
+      "HOME",
+      "LANG",
+      "LC_ALL",
+      "CODEX_HOME",
+      "TMPDIR",
+      "TEMP",
+      "TMP",
+      "SYSTEMROOT",
+      "USERPROFILE",
+      "APPDATA",
+      "PATHEXT",
+      "HTTPS_PROXY",
+      "HTTP_PROXY",
+      "NO_PROXY",
+      "https_proxy",
+      "http_proxy",
+      "no_proxy",
+      "SSL_CERT_FILE",
+      "NODE_EXTRA_CA_CERTS"
     ]
   },
 
@@ -99,6 +121,17 @@
       "never echoed. A cloned repository's own .remember/config.json cannot",
       "change it (#726). To keep any other variable away from the summarizer,",
       "unset it in the environment you start Claude Code from (#898)."
+    ],
+    "haiku.codex_env_allow": [
+      "The ONLY variables the Codex summarizer route is given (#724: a",
+      "command the model runs inside Codex's sandbox can read that",
+      "environment). The shipped list names no credential: Codex's own login",
+      "in CODEX_HOME (auth.json) is unaffected. If you authenticate Codex",
+      "through an environment variable instead, set this key in",
+      "~/.remember/config.json with the shipped list plus that variable's",
+      "name -- it REPLACES the shipped list, it does not append. Exact names",
+      "only; anything else is ignored with a warning, never echoed. A cloned",
+      "repository's own .remember/config.json cannot change it (#726)."
     ],
     "consolidate_max_bytes": [
       "Skip-guard cap (UTF-8 bytes) on the assembled consolidation prompt",

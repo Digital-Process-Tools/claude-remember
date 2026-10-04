@@ -9,8 +9,9 @@ removed first (#95), from a list that lives in config
 `config.json`), so a future Claude Code session variable can be added without
 a code release. `REMEMBER_NESTED_SUMMARIZER` is set the same way (#204).
 
-The Codex route keeps its allow-list (#724, a security control), now built
-from one literal read per allowed name.
+The Codex route keeps its allow-list (#724, a security control). Round 16
+moves that list into config too (`haiku.codex_env_allow`, same reader, same
+trust rules); the shipped list names no credential.
 
 Every "removed" case is paired with an "inherited" case in the same run, so a
 harness that captured nothing, or code that stripped everything, fails.
@@ -20,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -329,29 +331,209 @@ def test_shipped_tree_no_longer_names_drop_env():
     assert "strip_session_env" in (REPO_ROOT / "pipeline" / "haiku.py").read_text(encoding="utf-8")
 
 
-# ── the codex route: allow-list from literal reads ──────────────────────────
+# ── the codex route: allow-list from config (round 16) ──────────────────────
+#
+# Maintainer decision (round 16): the Codex child's allow-list (#724) is
+# `haiku.codex_env_allow`, read by the same `_configured_env_names` as the
+# strip list above. The shipped list is the round-15 literal table minus
+# Codex's own API-key variable, plus the three lowercase proxy names that
+# table read on POSIX only. It stays an allow-list: narrower, never wider.
+
+# The round-15 literal table, verbatim, as the reference the shipped list is
+# pinned against.
+_ROUND15_LITERAL_TABLE = {
+    "PATH", "HOME", "LANG", "LC_ALL", "CODEX_HOME", "TMPDIR", "TEMP", "TMP",
+    "SYSTEMROOT", "USERPROFILE", "APPDATA", "PATHEXT", "CODEX_API_KEY",
+    "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS",
+}
+EXPECTED_CODEX_ALLOW = (_ROUND15_LITERAL_TABLE - {"CODEX_API_KEY"}) | {
+    "https_proxy", "http_proxy", "no_proxy",
+}
+# A credential-shaped name: a `_`-separated part that names a secret.
+_CREDENTIAL_PART = re.compile(
+    r"(?:^|_)(?:API|KEY|KEYS|TOKEN|TOKENS|SECRET|SECRETS|PASSWORD|PASS|PWD|CRED|CREDS|AUTH)(?:_|$)",
+    re.IGNORECASE,
+)
 
 
-def test_codex_env_has_only_allowed_names(monkeypatch):
-    for name in haiku._CODEX_CHILD_ENV_ALLOW:
-        monkeypatch.setenv(name, f"v-{name}")
+def _shipped_codex_allow() -> list:
+    return json.loads(BUNDLED_CONFIG.read_text(encoding="utf-8"))["haiku"]["codex_env_allow"]
+
+
+def _upper_view(env: dict) -> dict:
+    """#792: on Windows one variable may come back under either casing."""
+    return {k.upper(): v for k, v in env.items()}
+
+
+def test_shipped_codex_list_is_the_old_table_minus_the_credential():
+    shipped = _shipped_codex_allow()
+    assert shipped, "positive control: the key exists and is non-empty"
+    assert len(shipped) == len(set(shipped)), "no entry twice"
+    assert set(shipped) == EXPECTED_CODEX_ALLOW
+
+
+def test_shipped_codex_list_names_no_credential():
+    assert _CREDENTIAL_PART.search("CODEX_API_KEY"), "positive control: the shape is caught"
+    assert _CREDENTIAL_PART.search("CLAUDE_CODE_OAUTH_TOKEN"), "positive control"
+    assert [n for n in _shipped_codex_allow() if _CREDENTIAL_PART.search(n)] == []
+
+
+def test_example_config_mirrors_the_shipped_codex_list():
+    example = json.loads((REPO_ROOT / "config.example.json").read_text(encoding="utf-8"))
+    assert example["haiku"]["codex_env_allow"] == _shipped_codex_allow()
+
+
+def test_no_shipped_file_names_the_codex_credential():
+    """The name lives only where an operator reads how to add it."""
+    name = "CODEX_" + "API_KEY"
+    for rel in ("pipeline/haiku.py", "config.json", "config.example.json", "README.release.md"):
+        assert name not in (REPO_ROOT / rel).read_text(encoding="utf-8"), rel
+    assert name in (REPO_ROOT / "docs" / "configuration.md").read_text(encoding="utf-8"), (
+        "positive control: the operator docs say which name to add")
+
+
+def test_codex_env_passes_every_listed_name_and_nothing_else(monkeypatch, isolated_config):
+    for name in _shipped_codex_allow():
+        # One value per upper-case name: on Windows `https_proxy` and
+        # `HTTPS_PROXY` are one variable (#792).
+        monkeypatch.setenv(name, f"v-{name.upper()}")
     monkeypatch.setenv("SOME_UNRELATED_SECRET_898", "nope")
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "nope")
+    monkeypatch.setenv("CODEX_" + "API_KEY", "nope")
     env = haiku._codex_child_env()
-    allowed = {n.upper() for n in haiku._CODEX_CHILD_ENV_ALLOW} | {"REMEMBER_NESTED_SUMMARIZER"}
+    allowed = {n.upper() for n in _shipped_codex_allow()} | {"REMEMBER_NESTED_SUMMARIZER"}
     assert {k.upper() for k in env} <= allowed
-    for name in haiku._CODEX_CHILD_ENV_ALLOW:
-        got = {k.upper(): v for k, v in env.items()}.get(name.upper())
-        assert got == f"v-{name}", f"{name} must reach the codex child"
+    for name in _shipped_codex_allow():
+        assert _upper_view(env).get(name.upper()) == f"v-{name.upper()}", name
     assert env["REMEMBER_NESTED_SUMMARIZER"] == "1"
 
 
-def test_codex_env_skips_missing_names(monkeypatch):
+def test_codex_env_skips_missing_names(monkeypatch, isolated_config):
     monkeypatch.delenv("CODEX_HOME", raising=False)
     monkeypatch.setenv("PATH", "/usr/bin")
     env = haiku._codex_child_env()
     assert "CODEX_HOME" not in env
     assert env.get("PATH") == "/usr/bin"
+
+
+def test_codex_env_sets_the_nested_marker(monkeypatch, isolated_config):
+    monkeypatch.delenv("REMEMBER_NESTED_SUMMARIZER", raising=False)
+    env = haiku._codex_child_env()
+    assert env.get("REMEMBER_NESTED_SUMMARIZER") == "1"
+    assert "REMEMBER_NESTED_SUMMARIZER" not in os.environ, "the parent is untouched"
+
+
+class _WindowsEnviron(dict):
+    """The lookup half of CPython's `nt` os.environ: keys stored upper-case,
+    every lookup upper-cased (#792)."""
+
+    def get(self, name, default=None):
+        return super().get(name.upper(), default)
+
+
+def test_codex_env_dedupes_case_twins_on_windows(monkeypatch):
+    monkeypatch.setattr(haiku, "_configured_codex_env_allow",
+                        lambda: ("PATH", "HTTPS_PROXY", "https_proxy"))
+    monkeypatch.setattr(haiku.os, "name", "nt")
+    monkeypatch.setattr(haiku.os, "environ",
+                        _WindowsEnviron({"PATH": "C:/bin", "HTTPS_PROXY": "http://p:1"}))
+    env = haiku._codex_child_env()
+    assert env == {"PATH": "C:/bin", "HTTPS_PROXY": "http://p:1",
+                   "REMEMBER_NESTED_SUMMARIZER": "1"}
+
+
+def test_codex_env_keeps_both_casings_where_they_differ(monkeypatch):
+    """Positive control for the dedupe: a case-preserving platform keeps the
+    lowercase twin, because it is a different variable there."""
+    monkeypatch.setattr(haiku, "_configured_codex_env_allow",
+                        lambda: ("PATH", "HTTPS_PROXY", "https_proxy"))
+    monkeypatch.setattr(haiku.os, "name", "posix")
+    monkeypatch.setattr(haiku.os, "environ",
+                        {"PATH": "/bin", "HTTPS_PROXY": "http://p:1", "https_proxy": "http://p:2"})
+    env = haiku._codex_child_env()
+    assert env == {"PATH": "/bin", "HTTPS_PROXY": "http://p:1", "https_proxy": "http://p:2",
+                   "REMEMBER_NESTED_SUMMARIZER": "1"}
+
+
+def test_user_codex_list_replaces_the_shipped_one(monkeypatch, isolated_config):
+    _user_config(isolated_config, {"codex_env_allow": ["PATH", "REMEMBER_TEST_ARBITRARY_898"]})
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setenv("REMEMBER_TEST_ARBITRARY_898", "listed")
+    monkeypatch.setenv("NODE_EXTRA_CA_CERTS", "/ca.pem")
+    env = haiku._codex_child_env()
+    assert env.get("REMEMBER_TEST_ARBITRARY_898") == "listed"
+    assert env.get("PATH") == "/usr/bin"
+    assert "NODE_EXTRA_CA_CERTS" not in env, "a list replaces, it does not append"
+
+
+def test_invalid_codex_entries_are_skipped_with_a_warning_that_never_echoes(
+    monkeypatch, isolated_config
+):
+    _user_config(isolated_config, {"codex_env_allow": [
+        "PATH", "SECRETISH=sk-pasted-value-898", "", "BAD-NAME", "GLOB_*", 7,
+    ]})
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setenv("SECRETISH", "nope")
+    with patch("pipeline.haiku._warn") as warn:
+        env = haiku._codex_child_env()
+    assert env.get("PATH") == "/usr/bin", "the valid entry beside the bad ones applies"
+    assert "SECRETISH" not in env
+    text = " ".join(str(c.args[0]) for c in warn.call_args_list)
+    assert "haiku.codex_env_allow" in text
+    assert "sk-pasted-value-898" not in text
+    assert "BAD-NAME" not in text
+
+
+def test_a_non_list_codex_value_falls_through_to_the_shipped_list(monkeypatch, isolated_config):
+    _user_config(isolated_config, {"codex_env_allow": "PATH REMEMBER_TEST_ARBITRARY_898"})
+    monkeypatch.setenv("REMEMBER_TEST_ARBITRARY_898", "nope")
+    monkeypatch.setenv("NODE_EXTRA_CA_CERTS", "/ca.pem")
+    with patch("pipeline.haiku._warn") as warn:
+        env = haiku._codex_child_env()
+    assert env.get("NODE_EXTRA_CA_CERTS") == "/ca.pem", "the shipped list applied"
+    assert "REMEMBER_TEST_ARBITRARY_898" not in env
+    assert "haiku.codex_env_allow" in " ".join(str(c.args[0]) for c in warn.call_args_list)
+
+
+def test_no_codex_list_anywhere_is_said_out_loud(monkeypatch, isolated_config, tmp_path):
+    monkeypatch.setattr(haiku, "_BUNDLED_CONFIG", str(tmp_path / "absent.json"))
+    monkeypatch.setenv("PATH", "/usr/bin")
+    with patch("pipeline.haiku._warn") as warn:
+        env = haiku._codex_child_env()
+    assert env == {"REMEMBER_NESTED_SUMMARIZER": "1"}, "fails closed: nothing passed"
+    assert "haiku.codex_env_allow" in " ".join(str(c.args[0]) for c in warn.call_args_list)
+
+
+def test_project_local_config_cannot_widen_the_codex_list(monkeypatch, isolated_config, tmp_path):
+    """#726: a cloned repo's `.remember/config.json` cannot add a name."""
+    project = tmp_path / "project"
+    remember = project / ".remember"
+    remember.mkdir(parents=True)
+    (remember / "config.json").write_text(json.dumps({"haiku": {
+        "codex_env_allow": _shipped_codex_allow() + ["REMEMBER_TEST_ARBITRARY_898"],
+    }}), encoding="utf-8")
+    monkeypatch.setenv("MEMORY_PROJECT_DIR", str(project))
+    monkeypatch.setenv("REMEMBER_DIR", str(remember))
+    monkeypatch.setenv("REMEMBER_TEST_ARBITRARY_898", "nope")
+    monkeypatch.setenv("PATH", "/usr/bin")
+    env = haiku._codex_child_env()
+    assert "REMEMBER_TEST_ARBITRARY_898" not in env
+    assert env.get("PATH") == "/usr/bin", "positive control: the shipped list applied"
+
+
+def test_trusted_external_config_can_widen_the_codex_list(monkeypatch, isolated_config, tmp_path):
+    """Positive control for the test above: the same file outside the
+    project checkout is the operator's own and is honoured."""
+    external = tmp_path / "external-store"
+    external.mkdir()
+    (external / "config.json").write_text(json.dumps({"haiku": {
+        "codex_env_allow": _shipped_codex_allow() + ["REMEMBER_TEST_ARBITRARY_898"],
+    }}), encoding="utf-8")
+    monkeypatch.setenv("MEMORY_PROJECT_DIR", str(tmp_path / "project"))
+    monkeypatch.setenv("REMEMBER_DIR", str(external))
+    monkeypatch.setenv("REMEMBER_TEST_ARBITRARY_898", "listed")
+    env = haiku._codex_child_env()
+    assert env.get("REMEMBER_TEST_ARBITRARY_898") == "listed"
 
 
 # ── the user-facing messages name no credential command ─────────────────────

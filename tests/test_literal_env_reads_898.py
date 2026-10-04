@@ -134,13 +134,22 @@ NEGATIVE = (
     "    return child\n"
 )
 
-# The one site allowed to touch the environment by a name it did not write
-# out: removing the parent session's variables, named by config
-# (`haiku.strip_session_env`, #95), so a future Claude Code session variable
-# can be listed without a code release (maintainer decision, #898 round 15).
-# It is a run-time-named access by design, disclosed here rather than
-# disguised -- the directory scan may still cite it.
-EXEMPT = {("haiku.py", "_without_session_env")}
+# The only sites allowed to touch the environment by a name they did not
+# write out, each with the exact number of such accesses it makes:
+#   _without_session_env -- removing the parent session's variables, named by
+#     config (`haiku.strip_session_env`, #95), so a future Claude Code session
+#     variable can be listed without a code release (maintainer decision, #898
+#     round 15): one read to save the value, one store to restore it.
+#   _codex_child_env -- copying the Codex child's allow-listed variables,
+#     named by config (`haiku.codex_env_allow`, #724), so the shipped list
+#     names no credential and an operator adds one in their own config
+#     (maintainer decision, #898 round 16): one read per configured name.
+# Both are run-time-named accesses by design, disclosed here rather than
+# disguised -- the directory scan may still cite them.
+EXEMPT = {
+    ("haiku.py", "_without_session_env"): 2,
+    ("haiku.py", "_codex_child_env"): 1,
+}
 _EXEMPT_KINDS = {"env read by a non-literal name", "env subscript by a non-literal name"}
 
 
@@ -202,14 +211,23 @@ def test_shipped_python_reads_the_environment_by_literal_name(path):
     assert rest == [], f"{path.relative_to(REPO_ROOT)}: {rest}"
 
 
-def test_the_one_exempt_site_is_real_and_bounded():
-    """The exemption is not vacuous: haiku.py's `_without_session_env` does
-    access the environment by a configured name (so the scan reaches it), and
-    nothing else in the shipped set relies on the exemption."""
+def test_the_exempt_sites_are_real_and_exactly_counted():
+    """The exemption is not vacuous and not a blanket: each exempt function
+    in haiku.py accesses the environment by a configured name (so the scan
+    reaches it) exactly as many times as EXEMPT says -- one more access in
+    either function fails here -- and nothing else in the shipped set relies
+    on the exemption."""
     haiku_py = REPO_ROOT / "pipeline" / "haiku.py"
-    exempt, _ = _split_exempt(haiku_py, non_literal_env_reads(haiku_py.read_text(encoding="utf-8")))
-    assert exempt, "positive control: the exempt site carries the shape"
-    assert len(exempt) <= 2, exempt
+    source = haiku_py.read_text(encoding="utf-8")
+    spans = _function_spans(source)
+    exempt, _ = _split_exempt(haiku_py, non_literal_env_reads(source))
+    assert exempt, "positive control: the exempt sites carry the shape"
+    per_function = {}
+    for line, _kind in exempt:
+        for (fname, fn) in EXEMPT:
+            if fn in spans and spans[fn][0] <= line <= spans[fn][1]:
+                per_function[(fname, fn)] = per_function.get((fname, fn), 0) + 1
+    assert per_function == EXEMPT, per_function
     for path in SHIPPED_PY:
         if path != haiku_py:
             used, _ = _split_exempt(path, non_literal_env_reads(path.read_text(encoding="utf-8")))
