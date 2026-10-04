@@ -365,6 +365,13 @@ _LOCK_TIMING_PRECISION=""
 _LOCK_TIMING_FILE=""
 _LOCK_TIMING_NOW=0
 _LOCK_TIMING_DISCLOSED=0
+# Per-lock acquire start and wait, as three parallel indexed arrays keyed by
+# slot (#898 round 10: no `eval`, no variable named at run time). A released
+# slot is blanked in place rather than removed, so indices stay stable.
+_LOCK_TIMING_SLOTS=()
+_LOCK_TIMING_T0S=()
+_LOCK_TIMING_WAITS=()
+_LOCK_TIMING_IDX=-1
 
 # True only for a `date` that really honours %N: BSD date prints a literal `N`
 # and some print `%N`, both rejected by the digits-only test; a `date` that
@@ -516,14 +523,27 @@ _lock_timing_disclose() {
     return 0
 }
 
-# bash 3.2 has no associative arrays, so the per-lock start time lives in a
-# variable named after the sanitized path. Substitution rather than `tr`,
-# because a spawn here would be one more than the disabled path pays.
+# bash 3.2 has no associative arrays, so the per-lock start time lives in
+# parallel arrays indexed by the sanitized path. Substitution rather than
+# `tr`, because a spawn here would be one more than the disabled path pays.
 # "SLOT" rather than a KEY-shaped name: this is an identifier for one
-# process's own timing variables, not a credential (#898 round 7).
+# process's own timing entry, not a credential (#898 round 7).
 _lock_timing_key() {
     local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
     _LOCK_TIMING_SLOT="${1//[!A-Za-z0-9]/_}"
+}
+
+# Set _LOCK_TIMING_IDX to the index holding _LOCK_TIMING_SLOT, or -1.
+_lock_timing_find() {
+    local _i _n="${#_LOCK_TIMING_SLOTS[@]}"
+    _LOCK_TIMING_IDX=-1
+    for ((_i = 0; _i < _n; _i++)); do
+        if [ "${_LOCK_TIMING_SLOTS[_i]}" = "$_LOCK_TIMING_SLOT" ]; then
+            _LOCK_TIMING_IDX=$_i
+            return 0
+        fi
+    done
+    return 1
 }
 
 # _lock_timing_record <lock_dir> <event> <outcome> <wait_ms> <held_ms|->
@@ -596,8 +616,10 @@ lock_acquire() {
         _lock_timing_now
         _waited=$(( _LOCK_TIMING_NOW - _t0 ))
         _lock_timing_key "$1"
-        eval "_LOCK_TIMING_T0_${_LOCK_TIMING_SLOT}=\$_LOCK_TIMING_NOW"
-        eval "_LOCK_TIMING_W_${_LOCK_TIMING_SLOT}=\$_waited"
+        _lock_timing_find || _LOCK_TIMING_IDX="${#_LOCK_TIMING_SLOTS[@]}"
+        _LOCK_TIMING_SLOTS[_LOCK_TIMING_IDX]="$_LOCK_TIMING_SLOT"
+        _LOCK_TIMING_T0S[_LOCK_TIMING_IDX]="$_LOCK_TIMING_NOW"
+        _LOCK_TIMING_WAITS[_LOCK_TIMING_IDX]="$_waited"
         return 0
     fi
     _lock_timing_now
@@ -669,8 +691,12 @@ lock_release() {
     _lock_release_impl "$@" || return 1
     _lock_timing_now
     _lock_timing_key "$1"
-    eval "_t0=\${_LOCK_TIMING_T0_${_LOCK_TIMING_SLOT}:-}"
-    eval "_wait=\${_LOCK_TIMING_W_${_LOCK_TIMING_SLOT}:-}"
+    _t0=""
+    _wait=""
+    if _lock_timing_find; then
+        _t0="${_LOCK_TIMING_T0S[_LOCK_TIMING_IDX]}"
+        _wait="${_LOCK_TIMING_WAITS[_LOCK_TIMING_IDX]}"
+    fi
     if [ -z "$_t0" ]; then
         # Released by a process that never acquired here. Structurally this
         # should not happen, and the honest answer is to say the duration is
@@ -678,7 +704,8 @@ lock_release() {
         _lock_timing_record "$1" release unpaired "-" "-"
         return 0
     fi
-    eval "unset _LOCK_TIMING_T0_${_LOCK_TIMING_SLOT} _LOCK_TIMING_W_${_LOCK_TIMING_SLOT}"
+    _LOCK_TIMING_T0S[_LOCK_TIMING_IDX]=""
+    _LOCK_TIMING_WAITS[_LOCK_TIMING_IDX]=""
     _lock_timing_record "$1" release ok "$_wait" "$(( _LOCK_TIMING_NOW - _t0 ))"
     return 0
 }

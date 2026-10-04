@@ -409,7 +409,13 @@ _spawn_fetch() {
         export GIT_TERMINAL_PROMPT=0
         export GIT_ASKPASS=
         export SSH_ASKPASS=
-        export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -oBatchMode=yes -oConnectTimeout=$FETCH_TIMEOUT}"
+        # A user's own GIT_SSH_COMMAND is kept; otherwise a fixed format with
+        # the timeout filled in, not a default expansion holding another
+        # expansion (#898 round 10).
+        if [ -z "${GIT_SSH_COMMAND:-}" ]; then
+            printf -v GIT_SSH_COMMAND 'ssh -oBatchMode=yes -oConnectTimeout=%s' "$FETCH_TIMEOUT"
+        fi
+        export GIT_SSH_COMMAND
 
         # --no-tags --prune-tags: this is a memory store, not a release repo, and
         # the fetch should move exactly one remote-tracking ref.
@@ -420,8 +426,14 @@ _spawn_fetch() {
         # slipped past would still be parsed as an option rather than an
         # operand -- the separator is cheap insurance the validation above
         # does not make redundant.
-        git -C "$REPO_ROOT" -c core.askPass= fetch --quiet --no-tags \
-            -- "$REMOTE_NAME" ${GIT_RESTORE_BRANCH:+"$GIT_RESTORE_BRANCH"} >/dev/null 2>&1 &
+        # One literal command per case (#898 round 10): with a branch, without.
+        if [ -n "$GIT_RESTORE_BRANCH" ]; then
+            git -C "$REPO_ROOT" -c core.askPass= fetch --quiet --no-tags \
+                -- "$REMOTE_NAME" "$GIT_RESTORE_BRANCH" >/dev/null 2>&1 &
+        else
+            git -C "$REPO_ROOT" -c core.askPass= fetch --quiet --no-tags \
+                -- "$REMOTE_NAME" >/dev/null 2>&1 &
+        fi
         _fetch_pid=$!
 
         # A portable watchdog rather than timeout(1), which macOS does not ship.

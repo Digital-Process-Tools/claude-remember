@@ -98,6 +98,9 @@ SHAPE_CHECKS = {
     "_check_indirect_expansion": 'v="${!slot:-}"\n',
     # A quoted lone dot, either quote style.
     "_check_dot_string": 'ROOT="."\n',
+    # #898 round 10: argv assembled at run time (MCP_FORWARDS_CREDENTIAL_ENV's
+    # send side, "a command assembled at run time").
+    "_check_runtime_argv": 'git -C "$d" push -- "$r" ${b:+"$b"}\n',
 }
 
 
@@ -113,3 +116,28 @@ def test_shape_check_fires_on_its_own_shape(check_name):
 def test_shipped_script_carries_no_sweep_shape(path, check_name):
     hits = _shape_hits(check_name, path.read_text(encoding="utf-8"))
     assert not hits, f"{path.name}: {hits}"
+
+
+# #898 round 10: every sub-shape the run-time-argv check reads, each a
+# positive control of its own, with the literal rewrite of each as the
+# matching negative -- the rewrite this round shipped must not still fire.
+RUNTIME_ARGV = {
+    "conditional word": ('git push -- "$r" ${b:+"$b"}\n',
+                         'git push -- "$r" "$b"\n'),
+    "unquoted variable in git argv": ('git -C "$d" commit $FLAG -m x\n',
+                                      'git -C "$d" commit --no-gpg-sign -m x\n'),
+    "eval": ('eval "x_${s}=\\$y"\n',
+             'x_slots[i]="$y"\n'),
+    "default holding an expansion": ('export C="${C:-ssh -oT=$T}"\n',
+                                     "printf -v C 'ssh -oT=%s' \"$T\"\n"),
+}
+
+
+@pytest.mark.parametrize("shape", sorted(RUNTIME_ARGV))
+def test_runtime_argv_fires_on_each_shape(shape):
+    assert _shape_hits("_check_runtime_argv", RUNTIME_ARGV[shape][0])
+
+
+@pytest.mark.parametrize("shape", sorted(RUNTIME_ARGV))
+def test_runtime_argv_clears_the_literal_rewrite(shape):
+    assert not _shape_hits("_check_runtime_argv", RUNTIME_ARGV[shape][1])

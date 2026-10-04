@@ -220,7 +220,7 @@ SCHEME_ALLOWLIST = frozenset({
 # per-coding-agent abstraction `Host` (Claude Code / Codex / Gemini /
 # Antigravity), and the git-backup/git-restore machinery's own prose
 # legitimately describes real `git fetch` calls and a real
-# `GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o...}"`. Renaming either across
+# `GIT_SSH_COMMAND` default of `ssh -o...`. Renaming either across
 # its ~280 shipped occurrences was judged out of proportion for this guard
 # to force by itself -- see the lane's own report. Review finding, #898
 # round 2: this allowlist is scoped to files that were CONFIRMED (by this
@@ -650,6 +650,7 @@ def check_tree(root: Path, budget: dict) -> CheckResult:
     _check_escaped_quote(files, kinds, result.reviews)
     _check_slash_glob_case(files, kinds, result.reviews)
     _check_quoted_literal_case(files, kinds, result.reviews)
+    _check_runtime_argv(files, kinds, result.reviews)
     if "package.json" in files:
         locks = [lf for lf in LOCKFILES if lf in files]
         if locks:
@@ -1302,6 +1303,39 @@ def _check_quoted_literal_case(files: dict, kinds: dict, reviews: list) -> None:
         if QUOTED_LITERAL_CASE.search(line):
             reviews.append(f"{rel}:{n}: a quoted literal inside a case pattern: "
                            f"{line.strip()[:80]}")
+
+
+# #898 round 10: argv assembled at run time. The portal's
+# MCP_FORWARDS_CREDENTIAL_ENV hold named the send side as "a command
+# assembled at run time" in the git backup hook; triggers.md lists
+# string-built and variable-named commands as cited send shapes.
+RUNTIME_ARGV_EVAL = re.compile(r'(?:^|[;&|({]|\bthen|\bdo|\belse)\s*eval\b')
+RUNTIME_ARGV_CONDITIONAL = re.compile(r'\$\{[A-Za-z_][A-Za-z0-9_]*:?\+')
+RUNTIME_ARGV_DEFAULT = re.compile(r'\$\{[A-Za-z_][A-Za-z0-9_]*:?-[^}]*\$')
+RUNTIME_ARGV_GIT_UNQUOTED = re.compile(
+    r'(?:^|[;&|(])\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*git\b.*?(?<![\w"=])\$\{?[A-Za-z_]')
+_QUOTED_SEGMENT = re.compile(r'"(?:[^"\\]|\\.)*"|\'[^\']*\'')
+
+
+def _check_runtime_argv(files: dict, kinds: dict, reviews: list) -> None:
+    """#898 round 10: an argument vector or command string assembled at
+    run time in a shipped shell script -- `eval`, an unquoted conditional
+    word `${X:+"$X"}`, a default expansion whose value holds another
+    expansion (`"${C:-ssh -o x=$T}"`, a command string built at run time),
+    or an unquoted variable split into a `git` argv. Each is written out
+    literally instead: an if/elif with one literal command per case,
+    `printf -v` for a string, parallel arrays for a per-name table.
+    The conditional and git-argv tests read the line with its quoted
+    segments removed, so a `${X:+ (detail)}` inside a message is not one.
+    REVIEW, not FAIL: a line heuristic, not a shell parser."""
+    for rel, n, line in _sh_lines(files, kinds):
+        bare = _QUOTED_SEGMENT.sub('""', line)
+        if (RUNTIME_ARGV_EVAL.search(bare)
+                or RUNTIME_ARGV_CONDITIONAL.search(bare)
+                or RUNTIME_ARGV_DEFAULT.search(line)
+                or RUNTIME_ARGV_GIT_UNQUOTED.search(bare)):
+            reviews.append(f"{rel}:{n}: an argument vector or command assembled "
+                           f"at run time: {line.strip()[:80]}")
 
 
 def _check_credential_shaped_name(files: dict, kinds: dict, off: list) -> None:

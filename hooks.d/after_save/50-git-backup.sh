@@ -324,7 +324,9 @@ fi
 # We pass --no-gpg-sign by default so background commits never hang on a
 # passphrase prompt. Users with non-interactive signing (e.g. a hardware key)
 # can set git_backup.gpg_sign=true to drop the flag and honour their own
-# commit.gpgSign config. Empty flag (unquoted) = no extra arg (#62).
+# commit.gpgSign config (#62). The flag is a yes/no, and each commit site
+# below writes both commands out literally rather than splitting an unquoted
+# variable into git's argv (#898 round 10).
 GIT_BACKUP_GPG_SIGN=$(config ".git_backup.gpg_sign" "false")
 GPG_SIGN_FLAG="--no-gpg-sign"
 if [ "$GIT_BACKUP_GPG_SIGN" = "true" ]; then
@@ -383,6 +385,25 @@ esac
     # Prevent outer git env vars from overriding git -C behaviour.
     unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
 
+    # `git commit` with or without --no-gpg-sign, the rest of the argv fixed
+    # per site: the untracking commit, and the slug's own commit.
+    _gb_commit_untrack() {
+        if [ -n "$GPG_SIGN_FLAG" ]; then
+            git -C "$REPO_ROOT" commit --no-gpg-sign \
+                -m "auto: stop tracking $SLUG/logs, $SLUG/tmp and $SLUG/config.json"
+        else
+            git -C "$REPO_ROOT" commit \
+                -m "auto: stop tracking $SLUG/logs, $SLUG/tmp and $SLUG/config.json"
+        fi
+    }
+    _gb_commit_slug() {
+        if [ -n "$GPG_SIGN_FLAG" ]; then
+            git -C "$REPO_ROOT" commit --no-gpg-sign -m "auto: $SLUG $1" -- "$SLUG/"
+        else
+            git -C "$REPO_ROOT" commit -m "auto: $SLUG $1" -- "$SLUG/"
+        fi
+    }
+
     # ── Push, and tell the three states apart (#253) ─────────────────────────
     # A network blip and a non-fast-forward rejection are different in kind. The
     # first will succeed later. The second cannot succeed on ANY later attempt
@@ -406,8 +427,12 @@ esac
         # slipped past would still be parsed as an option rather than an
         # operand -- the separator is cheap insurance the validation above does
         # not make redundant.
-        if [ -n "$GIT_BACKUP_REMOTE" ]; then
-            GIT_TERMINAL_PROMPT=0 git -C "$REPO_ROOT" push --porcelain -- "$GIT_BACKUP_REMOTE" ${GIT_BACKUP_BRANCH:+"$GIT_BACKUP_BRANCH"} 2>/dev/null
+        # One literal command per case, never an argv assembled at run time
+        # (#898 round 10): a remote with a branch, a remote alone, neither.
+        if [ -n "$GIT_BACKUP_REMOTE" ] && [ -n "$GIT_BACKUP_BRANCH" ]; then
+            GIT_TERMINAL_PROMPT=0 git -C "$REPO_ROOT" push --porcelain -- "$GIT_BACKUP_REMOTE" "$GIT_BACKUP_BRANCH" 2>/dev/null
+        elif [ -n "$GIT_BACKUP_REMOTE" ]; then
+            GIT_TERMINAL_PROMPT=0 git -C "$REPO_ROOT" push --porcelain -- "$GIT_BACKUP_REMOTE" 2>/dev/null
         else
             GIT_TERMINAL_PROMPT=0 git -C "$REPO_ROOT" push --porcelain 2>/dev/null
         fi
@@ -578,8 +603,7 @@ esac
         if ! git -C "$REPO_ROOT" diff --cached --quiet 2>/dev/null; then
             log "git-backup" "$SLUG/logs, $SLUG/tmp or $SLUG/config.json are tracked by a version older than the exclusion, but this store has staged changes in its index -- untracking them would commit those too, so it is left for the next backup."
         elif git -C "$REPO_ROOT" rm -r -q --cached --ignore-unmatch -- "$SLUG/logs/" "$SLUG/tmp/" "$SLUG/config.json" 2>/dev/null \
-            && git -C "$REPO_ROOT" commit $GPG_SIGN_FLAG \
-                -m "auto: stop tracking $SLUG/logs, $SLUG/tmp and $SLUG/config.json" >/dev/null 2>&1; then
+            && _gb_commit_untrack >/dev/null 2>&1; then
             log "git-backup" "untracked $SLUG/logs, $SLUG/tmp and $SLUG/config.json -- a version older than the exclusion had committed them. They stop being pushed from now on; commits that already carry them are left untouched, because removing those means rewriting history and force-pushing, which breaks every other clone of this store. If config.json carried a live haiku.oauth_token, treat that credential as compromised and rotate it."
         else
             git -C "$REPO_ROOT" reset -q 2>/dev/null || true
@@ -671,9 +695,7 @@ esac
     # direction that loses data. `test_nothing_to_commit_no_op` pins it.
     _gb_stamp_cooldown() { date +%s > "$COOLDOWN_MARKER" 2>/dev/null || true; }
 
-    if COMMIT_ERR=$(git -C "$REPO_ROOT" commit $GPG_SIGN_FLAG \
-            -m "auto: $SLUG $TS" \
-            -- "$SLUG/" 2>&1 >/dev/null); then
+    if COMMIT_ERR=$(_gb_commit_slug "$TS" 2>&1 >/dev/null); then
         log "git-backup" "committed $SLUG"
         _gb_stamp_cooldown
         rm -f "$COMMIT_FAIL_STATE_FILE" 2>/dev/null || true

@@ -952,7 +952,11 @@ ${_REMEMBER_BUDGET_EXCLUDE}" in
                     (*"
 ${MFILE}
 "*)
-                        _remember_budget_dropped="${_remember_budget_dropped}${MFILE}${MFILE_BYTES:+ (${MFILE_BYTES} bytes)}
+                        _remember_budget_dropped="${_remember_budget_dropped}${MFILE}"
+                        if [ -n "${MFILE_BYTES:-}" ]; then
+                            _remember_budget_dropped="${_remember_budget_dropped} (${MFILE_BYTES} bytes)"
+                        fi
+                        _remember_budget_dropped="${_remember_budget_dropped}
 "
                         continue
                         ;;
