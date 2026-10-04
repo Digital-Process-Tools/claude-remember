@@ -669,8 +669,8 @@ def _configured_codex_env_allow() -> tuple[str, ...]:
     )
 
 
-def _configured_env_names(key: str, consequence: str) -> tuple[str, ...]:
-    """A `haiku.<key>` list of environment variable names from config.
+def _configured_env_names(setting: str, consequence: str) -> tuple[str, ...]:
+    """A `haiku.<setting>` list of environment variable names from config.
 
     The first config layer that HAS the key decides, the same precedence
     every other `haiku.*` read here uses, with the bundled default last. A
@@ -692,12 +692,12 @@ def _configured_env_names(key: str, consequence: str) -> tuple[str, ...]:
         if not isinstance(cfg, dict):
             continue
         haiku_cfg = cfg.get("haiku")
-        if not isinstance(haiku_cfg, dict) or key not in haiku_cfg:
+        if not isinstance(haiku_cfg, dict) or setting not in haiku_cfg:
             continue
-        value = haiku_cfg[key]
+        value = haiku_cfg[setting]
         if not isinstance(value, list):
             _warn(
-                f"WARNING: ignoring haiku.{key} in {path} -- a "
+                f"WARNING: ignoring haiku.{setting} in {path} -- a "
                 f"{type(value).__name__} value, not a list of variable names; "
                 "the next config layer's list applies instead"
             )
@@ -712,14 +712,14 @@ def _configured_env_names(key: str, consequence: str) -> tuple[str, ...]:
             else:
                 shape = f"a {type(entry).__name__} value"
             _warn(
-                f"WARNING: ignoring entry {index} of haiku.{key} in "
+                f"WARNING: ignoring entry {index} of haiku.{setting} in "
                 f"{path} -- {shape}, not a variable name (letters, digits and "
                 "underscores). The entry itself is not logged: it may hold a "
                 "pasted value"
             )
         return tuple(names)
     _warn(
-        f"WARNING: no haiku.{key} list in any config layer (the plugin's "
+        f"WARNING: no haiku.{setting} list in any config layer (the plugin's "
         f"bundled config.json is missing or unreadable) -- {consequence}; "
         "reinstall the plugin or set the list in ~/.remember/config.json"
     )
