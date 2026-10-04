@@ -565,6 +565,21 @@ was "Validation ran out of time". That is the failure the `release` branch exist
   to ship.
 
   Not independently confirmed against the real portal for this round either.
+
+  **#898 round 14 did that rename.** With `pipeline/haiku.py` emptied, the credential hold cited
+  `_doctor_rd_pwd` in `scripts/doctor.sh` (a name with `pwd` in it, read as a password); earlier
+  scans had cited `_sjsi_key`, `*_token` names, `pat`, `pin` and `VOCAB_KEYS`. The portal names one
+  such read per scan, so one pass renamed every shipped `.sh`/`.py` identifier that holds no
+  credential but has a credential-like part (`pwd`, `pass`, `pw`, `key(s)`, `token(s)`, `tok`,
+  `secret`, `cred`, `auth`, `pat`, `pin`, `sig`, as the whole name or one `_`-separated part) to
+  say what it holds: `_doctor_rd_pwd` -> `_doctor_rd_cwd`, `_lock_timing_key` -> `_lock_timing_slot`,
+  `log_tokens` -> `log_usage`, `promos.json`'s `installed_key` -> `installed_id`, and the rest. A new
+  `check_release_tree.py` REVIEW reads every name a shipped `.sh` binds or expands and every name a
+  shipped `.py` binds, reads, calls with or imports (not strings, comments or keywords), with an
+  allowlist of genuine external names and a reason for each (`CLAUDE_CODE_OAUTH_TOKEN`,
+  `CODEX_API_KEY`, `PWD`). `tests/test_scanner_shapes_source_898.py` pins it at zero for every
+  shipped file except `pipeline/haiku.py` and the `tokens` field `HaikuResult` shares with it, both
+  renamed in that file's own lane. Not yet confirmed against the portal.
 - **`RUNTIME_FETCH_EXEC`** flags text that downloads and runs code, and the portal says it looks at
   "a hook, a server or settings command, a script, or text such as a skill or README". On v0.37.0
   (`e6cf58f`) it named `pipeline/shell.py` and `scripts/log.sh`, which contain no download at all.
