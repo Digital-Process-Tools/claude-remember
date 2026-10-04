@@ -149,9 +149,9 @@ _remember_cfg_table_get_into() {
 # This rule and the `select(.[0] != "haiku")` in the flattener are one decision
 # in two places — change both or neither.
 _config_is_private_path() {
-    case "$1" in
-        .haiku|.haiku.*) return 0 ;;
-    esac
+    if [ "$1" = .haiku ] || [ "${1#.haiku.}" != "$1" ]; then
+        return 0
+    fi
     return 1
 }
 
@@ -312,10 +312,13 @@ _remember_cfg_flatten_cache_sources() {
 # to the SECOND -- the exact "silently serve stale content" failure #668
 # names as never permitted -- before this guard existed.
 _remember_cfg_flatten_cache_is_standard_merge() {
-    case "${REMEMBER_CONFIG:-}" in
-        */remember-config-*) return 0 ;;
-        *) return 1 ;;
-    esac
+    # The needle sits in a variable: bash 3.2 ends `${x/PAT/}`'s pattern at
+    # a slash even inside quotes.
+    local _cfg_path="${REMEMBER_CONFIG:-}" _cfg_needle=/remember-config-
+    if [ "${_cfg_path/"$_cfg_needle"/}" != "$_cfg_path" ]; then
+        return 0
+    fi
+    return 1
 }
 
 # Every value this cache writes -- the REMEMBER_DIR identity line and each
@@ -496,12 +499,10 @@ _remember_cfg_flatten_cache_load() {
             # never inspected.
             if [ "${_line#'#RCFG_EXISTS='}" != "$_line" ]; then
                 _exists_raw="${_line#'#RCFG_EXISTS='}"
-                case "$_exists_raw" in
-                    *[!01]*|'')
-                        rm -f "$_f" 2>/dev/null
-                        return 1
-                        ;;
-                esac
+                if [ "${_exists_raw/[!01]/}" != "$_exists_raw" ] || [ -z "$_exists_raw" ]; then
+                    rm -f "$_f" 2>/dev/null
+                    return 1
+                fi
                 continue
             else
                 rm -f "$_f" 2>/dev/null
@@ -741,13 +742,17 @@ config() {
 # cannot rely on that file's _remember_run_python wrapper -- same
 # literal-dispatch idea, local to this file.
 _remember_log_run_python() {
-    case "${PYTHON:-python3}" in
-        python3) python3 "$@" ;;
-        python) python "$@" ;;
-        py\ -3) py -3 "$@" ;;
-        py) py "$@" ;;
-        *) return 127 ;;
-    esac
+    if [ "${PYTHON:-python3}" = python3 ]; then
+        python3 "$@"
+    elif [ "${PYTHON:-python3}" = python ]; then
+        python "$@"
+    elif [ "${PYTHON:-python3}" = "py -3" ]; then
+        py -3 "$@"
+    elif [ "${PYTHON:-python3}" = py ]; then
+        py "$@"
+    else
+        return 127
+    fi
 }
 
 config_into() {
@@ -890,10 +895,11 @@ debug_enabled() {
     fi
     local _debug_cfg
     config_into _debug_cfg '.debug' ''
-    case "$_debug_cfg" in
-        true) return 0 ;;
-        false) return 1 ;;
-    esac
+    if [ "$_debug_cfg" = true ]; then
+        return 0
+    elif [ "$_debug_cfg" = false ]; then
+        return 1
+    fi
     [ "$_default" = "1" ]
 }
 
@@ -913,10 +919,9 @@ export REMEMBER_TZ
 #   off    — nothing at all, warning included
 # An unrecognised value is `full`: a typo must not silently delete the clock.
 config_into REMEMBER_PROMPT_STAMP ".prompt_stamp" "full"
-case "$REMEMBER_PROMPT_STAMP" in
-    stable|off) ;;
-    *) REMEMBER_PROMPT_STAMP="full" ;;
-esac
+if [ "$REMEMBER_PROMPT_STAMP" != stable ] && [ "$REMEMBER_PROMPT_STAMP" != off ]; then
+    REMEMBER_PROMPT_STAMP="full"
+fi
 export REMEMBER_PROMPT_STAMP
 
 # The two numbers post-tool-hook.sh needs on every tool call (#350). Read here,
@@ -1626,9 +1631,9 @@ _dispatch_supervise() {
         # No writable tmp, so the watchdog had nowhere to leave a marker and the
         # signal is all there is to go on. A hook may legitimately exit 143, so
         # this is an INFERENCE and the report says so rather than asserting it.
-        case "$_DISPATCH_RC" in
-            143|137) _DISPATCH_TIMEDOUT=1 ;;
-        esac
+        if [ "$_DISPATCH_RC" = 143 ] || [ "$_DISPATCH_RC" = 137 ]; then
+            _DISPATCH_TIMEDOUT=1
+        fi
     fi
     return 0
 }

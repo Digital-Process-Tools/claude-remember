@@ -123,34 +123,32 @@ _remember_env_cache_normalize_into() {
     local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
     local _var="$1" _in="$2" _drive="" _rest=""
     local _re='^([a-zA-Z]):[/\](.*)$'
-    case "$OSTYPE" in
-        msys|cygwin)
-            if [[ "$_in" =~ ^/cygdrive/([a-zA-Z])/(.*)$ ]]; then
-                _drive="${BASH_REMATCH[1]}"
-                _rest="${BASH_REMATCH[2]}"
-            elif [[ "$_in" =~ ^/([a-zA-Z])/(.*)$ ]]; then
-                _drive="${BASH_REMATCH[1]}"
-                _rest="${BASH_REMATCH[2]}"
-            elif [[ "$_in" =~ $_re ]]; then
-                _drive="${BASH_REMATCH[1]}"
-                _rest="${BASH_REMATCH[2]}"
-            fi
-            if [ -n "$_drive" ]; then
-                # `LC_ALL=C` on the command, not just the function's `local`:
-                # `local` on a name the environment never exported leaves it
-                # unexported, so the child keeps the caller's locale. On a host
-                # whose language is set through LANG alone -- what setting a
-                # system language actually produces -- Turkish case rules then
-                # map `i` to the dotted `İ`, two bytes in a slot that holds one
-                # ASCII drive letter. The `local` above still does its own job:
-                # the bracket ranges bash matches itself (#695).
-                _drive=$(printf '%s' "$_drive" | LC_ALL=C tr '[:lower:]' '[:upper:]')
-                _rest="${_rest//\//\\}"
-                printf -v "$_var" '%s:\\%s' "$_drive" "$_rest"
-                return 0
-            fi
-            ;;
-    esac
+    if [ "$OSTYPE" = msys ] || [ "$OSTYPE" = cygwin ]; then
+        if [[ "$_in" =~ ^/cygdrive/([a-zA-Z])/(.*)$ ]]; then
+            _drive="${BASH_REMATCH[1]}"
+            _rest="${BASH_REMATCH[2]}"
+        elif [[ "$_in" =~ ^/([a-zA-Z])/(.*)$ ]]; then
+            _drive="${BASH_REMATCH[1]}"
+            _rest="${BASH_REMATCH[2]}"
+        elif [[ "$_in" =~ $_re ]]; then
+            _drive="${BASH_REMATCH[1]}"
+            _rest="${BASH_REMATCH[2]}"
+        fi
+        if [ -n "$_drive" ]; then
+            # `LC_ALL=C` on the command, not just the function's `local`:
+            # `local` on a name the environment never exported leaves it
+            # unexported, so the child keeps the caller's locale. On a host
+            # whose language is set through LANG alone -- what setting a
+            # system language actually produces -- Turkish case rules then
+            # map `i` to the dotted `İ`, two bytes in a slot that holds one
+            # ASCII drive letter. The `local` above still does its own job:
+            # the bracket ranges bash matches itself (#695).
+            _drive=$(printf '%s' "$_drive" | LC_ALL=C tr '[:lower:]' '[:upper:]')
+            _rest="${_rest//\//\\}"
+            printf -v "$_var" '%s:\\%s' "$_drive" "$_rest"
+            return 0
+        fi
+    fi
     printf -v "$_var" '%s' "$_in"
 }
 
@@ -294,8 +292,8 @@ _remember_env_cache_load() {
     # already refuses to publish anything else. A cache from a release before
     # these keys existed carries no answer for them and loses to the chain,
     # once, at upgrade.
-    case "$_cooldown" in '' | *[!0-9]*) return 1 ;; esac
-    case "$_delta" in '' | *[!0-9]*) return 1 ;; esac
+    if [ -z "$_cooldown" ] || [ "${_cooldown/[!0-9]/}" != "$_cooldown" ]; then return 1; fi
+    if [ -z "$_delta" ] || [ "${_delta/[!0-9]/}" != "$_delta" ]; then return 1; fi
     # Compared against the SAME identity _remember_env_cache_path just keyed
     # on (CLAUDE_PROJECT_DIR, falling back to REMEMBER_HOOK_CWD, #469) rather
     # than raw CLAUDE_PROJECT_DIR directly -- on Codex (live-confirmed,

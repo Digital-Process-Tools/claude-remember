@@ -134,9 +134,9 @@ _lock_try_steal() {
             # pattern itself, which -e rejects.
             [ -e "$_abandoned" ] || continue
             _owner="${_abandoned##*.}"
-            case "$_owner" in
-                *[!0-9]*) continue ;;
-            esac
+            if [ "${_owner/[!0-9]/}" != "$_owner" ]; then
+                continue
+            fi
             kill -0 "$_owner" 2>/dev/null && continue
             # First dead claim becomes the pid again; any further ones are
             # litter from earlier abandoned takeovers — drop them rather than
@@ -154,9 +154,9 @@ _lock_try_steal() {
     # No pid file yet: the holder created the directory microseconds ago and has
     # not written it. That is a live lock mid-acquisition, not a stale one.
     [ -z "$_pid" ] && return 1
-    case "$_pid" in
-        *[!0-9]*) return 1 ;;
-    esac
+    if [ "${_pid/[!0-9]/}" != "$_pid" ]; then
+        return 1
+    fi
     kill -0 "$_pid" 2>/dev/null && return 1
 
     # Claim the right to take over by RENAMING the pid file. Rename is atomic
@@ -427,16 +427,17 @@ fi
 _lock_timing_us_to_ms() {
     local _r="$1" _s _f
     # The separator is locale-dependent — de_DE gives `1753980000,123456`.
-    case "$_r" in
-        *[.,]*) _s="${_r%%[.,]*}"; _f="${_r#*[.,]}" ;;
-        *)      _s="$_r"; _f="000000" ;;
-    esac
+    if [ "${_r/[.,]/}" != "$_r" ]; then
+        _s="${_r%%[.,]*}"; _f="${_r#*[.,]}"
+    else
+        _s="$_r"; _f="000000"
+    fi
     if [ -z "$_s" ] || [ "${_s#*[!0-9]}" != "$_s" ]; then
         _LOCK_TIMING_NOW=0; return 0
     fi
-    case "$_f" in
-        *[!0-9]*) _f="000000" ;;
-    esac
+    if [ "${_f/[!0-9]/}" != "$_f" ]; then
+        _f="000000"
+    fi
     # Truncation, never rounding: a hold must not come back longer than it was.
     _f="${_f}000"
     _LOCK_TIMING_NOW=$(( 10#$_s * 1000 + 10#${_f:0:3} ))
@@ -466,19 +467,15 @@ _lock_timing_s_to_ms() {
 # forked subshell, which is a spawn on the path whose spawns are the point.
 _lock_timing_now() {
     local _n
-    case "$_LOCK_TIMING_PRECISION" in
-        us)
-            _lock_timing_us_to_ms "$EPOCHREALTIME"
-            ;;
-        ms)
-            _n=$(date +%s%N 2>/dev/null) || _n=""
-            _lock_timing_ns_to_ms "$_n"
-            ;;
-        *)
-            _n=$(date +%s 2>/dev/null) || _n=""
-            _lock_timing_s_to_ms "$_n"
-            ;;
-    esac
+    if [ "$_LOCK_TIMING_PRECISION" = us ]; then
+        _lock_timing_us_to_ms "$EPOCHREALTIME"
+    elif [ "$_LOCK_TIMING_PRECISION" = ms ]; then
+        _n=$(date +%s%N 2>/dev/null) || _n=""
+        _lock_timing_ns_to_ms "$_n"
+    else
+        _n=$(date +%s 2>/dev/null) || _n=""
+        _lock_timing_s_to_ms "$_n"
+    fi
     return 0
 }
 

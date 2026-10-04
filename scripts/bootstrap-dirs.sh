@@ -242,24 +242,25 @@ if [ "$REMEMBER_DIR" != "$_legacy_dir" ] && [ ! -L "$_legacy_dir" ] && [ -d "$_l
         # never treated as absent) -- -L catches that case without ever
         # resolving the link.
         if [ -e "$_legacy_cfg" ] || [ -L "$_legacy_cfg" ]; then
-            case "$(_remember_config_tracked_status "$_mem_proj" ".remember/config.json")" in
-                untracked) : ;;
-                *)
-                    # mv, never cp+rm: a git-tracked config.json can be a
-                    # SYMLINK pointing anywhere on disk (outside the repo
-                    # entirely), and `cp` follows a symlink by default --
-                    # the target file's own bytes would land as an ordinary
-                    # regular file inside the repo's working tree, ready to
-                    # be committed. `mv` renames the link itself and never
-                    # opens what it points to, so a symlink held out here
-                    # comes back exactly as it went in, never read, never
-                    # copied, never migrated (hardens #757).
-                    _legacy_cfg_holdout=$(mktemp "${SYS_TMPDIR:-/tmp}/remember-legacy-cfg-XXXXXX" 2>/dev/null) || _legacy_cfg_holdout=""
-                    if [ -n "$_legacy_cfg_holdout" ]; then
-                        mv "$_legacy_cfg" "$_legacy_cfg_holdout" 2>/dev/null || _legacy_cfg_holdout=""
-                    fi
-                    ;;
-            esac
+            # `|| true`: the answer is read from the output, and a non-zero
+            # exit must not abort a caller running under `set -e`.
+            _legacy_cfg_tracked_answer=$(_remember_config_tracked_status "$_mem_proj" ".remember/config.json") || true
+            if [ "$_legacy_cfg_tracked_answer" != untracked ]; then
+                # mv, never cp+rm: a git-tracked config.json can be a
+                # SYMLINK pointing anywhere on disk (outside the repo
+                # entirely), and `cp` follows a symlink by default --
+                # the target file's own bytes would land as an ordinary
+                # regular file inside the repo's working tree, ready to
+                # be committed. `mv` renames the link itself and never
+                # opens what it points to, so a symlink held out here
+                # comes back exactly as it went in, never read, never
+                # copied, never migrated (hardens #757).
+                _legacy_cfg_holdout=$(mktemp "${SYS_TMPDIR:-/tmp}/remember-legacy-cfg-XXXXXX" 2>/dev/null) || _legacy_cfg_holdout=""
+                if [ -n "$_legacy_cfg_holdout" ]; then
+                    mv "$_legacy_cfg" "$_legacy_cfg_holdout" 2>/dev/null || _legacy_cfg_holdout=""
+                fi
+            fi
+            unset _legacy_cfg_tracked_answer
         fi
 
         if mv "$_legacy_dir" "$REMEMBER_DIR" 2>/dev/null; then
@@ -524,7 +525,7 @@ fi
 # doctor.sh already renders as the honest answer for a fresh install.
 if [ -d "$REMEMBER_DIR" ]; then
     [ -f "$REMEMBER_DIR/.install-marker" ] \
-        || { echo 'This file marks when remember was first bootstrapped here. Read only by scripts/doctor.sh (#401); do not delete it.' \
+        || { echo 'This file marks when remember was first bootstrapped here. Read only by /remember:doctor (#401); do not delete it.' \
             > "$REMEMBER_DIR/.install-marker"; } 2>/dev/null
 fi
 
@@ -552,7 +553,7 @@ if [ -d "$REMEMBER_DIR" ]; then
     # #519: both sides forward-slashed before the case-glob match --
     # REMEMBER_DIR and _mem_proj both arrive backslash-separated on
     # msys/cygwin (resolve-paths.sh's own _remember_normalize_win_path),
-    # and a bash `case` pattern only ever recognises '/' as a path
+    # and a bash glob pattern only ever recognises '/' as a path
     # separator, so an in-project store's REMEMBER_DIR silently never
     # matched "$_mem_proj"/* there -- no .gitignore was ever written. This
     # is NOT the #401 doctor.sh baseline (that reads .install-marker,
@@ -585,17 +586,13 @@ if [ -d "$REMEMBER_DIR" ]; then
     # documents for the identical reason.
     _mem_bd_glob_dir="$REMEMBER_DIR"
     _mem_bd_glob_proj="$_mem_proj"
-    case "$OSTYPE" in
-        msys|cygwin)
-            _mem_bd_glob_dir="${_mem_bd_glob_dir//\\//}"
-            _mem_bd_glob_proj="${_mem_bd_glob_proj//\\//}"
-            ;;
-    esac
-    case "$_mem_bd_glob_dir" in
-        "$_mem_bd_glob_proj"/*)
-            [ -f "$REMEMBER_DIR/.gitignore" ] || { echo '*' > "$REMEMBER_DIR/.gitignore"; } 2>/dev/null
-            ;;
-    esac
+    if [ "$OSTYPE" = msys ] || [ "$OSTYPE" = cygwin ]; then
+        _mem_bd_glob_dir="${_mem_bd_glob_dir//\\//}"
+        _mem_bd_glob_proj="${_mem_bd_glob_proj//\\//}"
+    fi
+    if [ "${_mem_bd_glob_dir#"$_mem_bd_glob_proj"/}" != "$_mem_bd_glob_dir" ]; then
+        [ -f "$REMEMBER_DIR/.gitignore" ] || { echo '*' > "$REMEMBER_DIR/.gitignore"; } 2>/dev/null
+    fi
 fi
 unset _mem_proj _mem_bd_glob_dir _mem_bd_glob_proj
 
@@ -642,15 +639,13 @@ elif [ "${BASH_VERSINFO[0]:-0}" -eq 4 ] 2>/dev/null && [ "${BASH_VERSINFO[1]:-0}
 fi
 if [ -d "$REMEMBER_DIR/logs" ]; then
     _remember_bd_keep_fd2=""
-    case "$-" in
-        (*x*)
-            if [ "$_remember_bd_has_xtracefd" = "0" ]; then
-                _remember_bd_keep_fd2="an xtrace is running (this bash predates BASH_XTRACEFD, added in 4.1, so xtrace stays on fd 2 regardless of the variable)"
-            elif [ "${BASH_XTRACEFD:-2}" = "2" ]; then
-                _remember_bd_keep_fd2="an xtrace is running on fd 2"
-            fi
-            ;;
-    esac
+    if [ "${-/x/}" != "$-" ]; then
+        if [ "$_remember_bd_has_xtracefd" = "0" ]; then
+            _remember_bd_keep_fd2="an xtrace is running (this bash predates BASH_XTRACEFD, added in 4.1, so xtrace stays on fd 2 regardless of the variable)"
+        elif [ "${BASH_XTRACEFD:-2}" = "2" ]; then
+            _remember_bd_keep_fd2="an xtrace is running on fd 2"
+        fi
+    fi
     [ "${REMEMBER_TRACE:-}" = "1" ] && _remember_bd_keep_fd2="REMEMBER_TRACE=1"
     if [ -n "$_remember_bd_keep_fd2" ]; then
         # Said out loud, on the stream being kept: this hook's stderr is now in

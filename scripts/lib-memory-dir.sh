@@ -142,23 +142,21 @@ _resolve_remember_dir() {
     local data_dir="$1"
     local proj="$2"
 
-    case "$data_dir" in
-        /*|~*|[A-Za-z]:[/\\]*)
-            # Absolute / home-relative: expand ~ and substitute {slug}.
-            # Drive-letter forms (C:/... and C:\...) are absolute on Windows /
-            # Git Bash — without them a Windows data_dir is wrongly treated as
-            # relative and prepended to PROJECT_DIR (path doubling).
-            local slug
-            slug=$(session_dir_slug "$proj")
-            # shellcheck disable=SC2016  # we want literal ~ expansion here
-            local expanded="${data_dir/#\~/$HOME}"
-            echo "${expanded//\{slug\}/$slug}"
-            ;;
-        *)
-            # Relative (legacy): resolve against PROJECT_DIR.
-            echo "${proj}/${data_dir}"
-            ;;
-    esac
+    if [ "${data_dir#/}" != "$data_dir" ] || [ "${data_dir#[~]}" != "$data_dir" ] \
+        || [ "${data_dir#[A-Za-z]:[/\\]}" != "$data_dir" ]; then
+        # Absolute / home-relative: expand ~ and substitute {slug}.
+        # Drive-letter forms (C:/... and C:\...) are absolute on Windows /
+        # Git Bash — without them a Windows data_dir is wrongly treated as
+        # relative and prepended to PROJECT_DIR (path doubling).
+        local slug
+        slug=$(session_dir_slug "$proj")
+        # shellcheck disable=SC2016  # we want literal ~ expansion here
+        local expanded="${data_dir/#\~/$HOME}"
+        echo "${expanded//\{slug\}/$slug}"
+    else
+        # Relative (legacy): resolve against PROJECT_DIR.
+        echo "${proj}/${data_dir}"
+    fi
 }
 
 # _set_store_root <data_dir_value>
@@ -203,10 +201,10 @@ _set_store_root() {
 
     # Same absolute/home-relative test as _resolve_remember_dir, including the
     # Windows drive-letter forms: a relative data_dir has no store root.
-    case "$data_dir" in
-        /*|~*|[A-Za-z]:[/\\]*) ;;
-        *) return 0 ;;
-    esac
+    if [ "${data_dir#/}" = "$data_dir" ] && [ "${data_dir#[~]}" = "$data_dir" ] \
+        && [ "${data_dir#[A-Za-z]:[/\\]}" = "$data_dir" ]; then
+        return 0
+    fi
     # An expansion test, not a quoted literal in a case pattern (#898 round 9).
     [ "${data_dir#*\{slug\}}" != "$data_dir" ] || return 0
 
@@ -230,9 +228,10 @@ _set_store_root() {
         fi
     done
 
-    case "$prefix" in
-        ''|/|[A-Za-z]:|[A-Za-z]:[/\\]) return 0 ;;
-    esac
+    if [ -z "$prefix" ] || [ "$prefix" = / ] || [ -z "${prefix#[A-Za-z]:}" ] \
+        || [ -z "${prefix#[A-Za-z]:[/\\]}" ]; then
+        return 0
+    fi
 
     REMEMBER_STORE_ROOT="$prefix"
 }
@@ -295,10 +294,12 @@ _project_cfg="${REMEMBER_DIR}/config.json"
 # _set_store_root does for REMEMBER_STORE_ROOT.
 _classify_project_cfg_haiku_trust() {
     local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
-    case "$_data_dir_raw" in
-        /*|~*|[A-Za-z]:[/\\]*) _project_cfg_haiku_untrusted=0 ;;
-        *) _project_cfg_haiku_untrusted=1 ;;
-    esac
+    if [ "${_data_dir_raw#/}" != "$_data_dir_raw" ] || [ "${_data_dir_raw#[~]}" != "$_data_dir_raw" ] \
+        || [ "${_data_dir_raw#[A-Za-z]:[/\\]}" != "$_data_dir_raw" ]; then
+        _project_cfg_haiku_untrusted=0
+    else
+        _project_cfg_haiku_untrusted=1
+    fi
 }
 _classify_project_cfg_haiku_trust
 
@@ -438,10 +439,15 @@ _remember_config_tracked_status() {
 # something to check: legacy layout AND a project config file present.
 _project_cfg_model_reject_untrusted=0
 if [ "$_project_cfg_haiku_untrusted" = "1" ] && [ -f "$_project_cfg" ]; then
-    case "$(_remember_config_tracked_status "${_project_cfg%/*}" "${_project_cfg##*/}")" in
-        untracked) _project_cfg_model_reject_untrusted=0 ;;
-        *) _project_cfg_model_reject_untrusted=1 ;;  # tracked or could-not-tell -> fail CLOSED
-    esac
+    # `|| true`: the status is read from the answer, and a non-zero exit
+    # must not abort a caller running under `set -e`.
+    _project_cfg_tracked_answer=$(_remember_config_tracked_status "${_project_cfg%/*}" "${_project_cfg##*/}") || true
+    if [ "$_project_cfg_tracked_answer" = untracked ]; then
+        _project_cfg_model_reject_untrusted=0
+    else
+        _project_cfg_model_reject_untrusted=1  # tracked or could-not-tell -> fail CLOSED
+    fi
+    unset _project_cfg_tracked_answer
 fi
 
 # #757 hardening: a SYMLINKED project config.json is left exactly as it
@@ -647,16 +653,20 @@ elif [ "${#_cfg_sources[@]}" -gt 0 ]; then
     # expansion). This file does not source detect-tools.sh (by design --
     # see the header comment above for why: it would exit 1 on no usable
     # Python), so it cannot reuse that file's _remember_run_python wrapper.
-    # Same literal-dispatch idea, local to this function: the `case`
+    # Same literal-dispatch idea, local to this function: the if/elif
     # branches are each a literal command word.
     _lmd_run_python() {
-        case "${PYTHON:-python3}" in
-            python3) python3 "$@" ;;
-            python) python "$@" ;;
-            py\ -3) py -3 "$@" ;;
-            py) py "$@" ;;
-            *) return 127 ;;
-        esac
+        if [ "${PYTHON:-python3}" = python3 ]; then
+            python3 "$@"
+        elif [ "${PYTHON:-python3}" = python ]; then
+            python "$@"
+        elif [ "${PYTHON:-python3}" = "py -3" ]; then
+            py -3 "$@"
+        elif [ "${PYTHON:-python3}" = py ]; then
+            py "$@"
+        else
+            return 127
+        fi
     }
     # #898 round 8: the merge program itself lives in cfg_merge.py beside
     # this file (the compiled hooks sit in the same directory, so the

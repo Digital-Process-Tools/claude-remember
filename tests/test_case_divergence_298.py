@@ -486,6 +486,278 @@ _SANCTIONED_DIVERGENCE = {
     ],
 }
 
+# #898 round 19: every `case` statement in shipped shell became an if/elif
+# ladder of `[ ]` tests (the directory's scanner mis-parses `case`). A second
+# stage, applied AFTER _apply_sanctioned_divergence by the byte-pin compare
+# only: several of these hunks rewrite text an allowance above already
+# produces (the `_lmd_run_python` dispatch, the dedented high-byte branch), so
+# folding them into _SANCTIONED_DIVERGENCE would break the independent-pair
+# premise test_sanctioned_divergence_state_440 pins. Derived mechanically from
+# the round-18 code: one pair per changed hunk with one line of context. The
+# old/new equivalence of each shape is pinned in
+# tests/test_case_rewrite_equivalence_898.py.
+_ROUND_19_DIVERGENCE = {
+    "scripts/lib-slug.sh": [
+        (
+            '_remember_slug_run_python() {\n'
+            '    case "${PYTHON:-python3}" in\n'
+            '        python3) python3 "$@" ;;\n'
+            '        python) python "$@" ;;\n'
+            '        py\\ -3) py -3 "$@" ;;\n'
+            '        py) py "$@" ;;\n'
+            '        *) return 127 ;;\n'
+            '    esac\n'
+            '}\n',
+            '_remember_slug_run_python() {\n'
+            '    if [ "${PYTHON:-python3}" = python3 ]; then\n'
+            '        python3 "$@"\n'
+            '    elif [ "${PYTHON:-python3}" = python ]; then\n'
+            '        python "$@"\n'
+            '    elif [ "${PYTHON:-python3}" = "py -3" ]; then\n'
+            '        py -3 "$@"\n'
+            '    elif [ "${PYTHON:-python3}" = py ]; then\n'
+            '        py "$@"\n'
+            '    else\n'
+            '        return 127\n'
+            '    fi\n'
+            '}\n',
+        ),
+        (
+            '    else\n'
+            '        case "$_root" in\n'
+            '            /*) _root="" ;;\n'
+            '            *) ;;\n'
+            '        esac\n'
+            '    fi\n',
+            '    else\n'
+            '        if [ "${_root#/}" != "$_root" ]; then\n'
+            '            _root=""\n'
+            '        fi\n'
+            '    fi\n',
+        ),
+        (
+            '    [ "${REMEMBER_UTF8_STRICT:-0}" = "1" ] && return 0\n'
+            '    case "${OSTYPE:-}" in\n'
+            '        linux*) return 0 ;;\n'
+            '    esac\n'
+            '    return 1\n',
+            '    [ "${REMEMBER_UTF8_STRICT:-0}" = "1" ] && return 0\n'
+            '    local _os="${OSTYPE:-}"\n'
+            '    [ "${_os#linux}" != "$_os" ] && return 0\n'
+            '    return 1\n',
+        ),
+        (
+            '    fi\n'
+            '    case "$path" in\n'
+            '        ?:*)\n'
+            '            _drive_at="${_REMEMBER_DRIVE_UPPER%%"${path:0:1}"*}"\n'
+            '            if [ "$_drive_at" != "$_REMEMBER_DRIVE_UPPER" ]; then\n'
+            '                path="${_REMEMBER_DRIVE_LOWER:${#_drive_at}:1}${path:1}"\n'
+            '            fi\n'
+            '            ;;\n'
+            '    esac\n'
+            '    local _orig="$path"\n',
+            '    fi\n'
+            '    if [ "${path#?:}" != "$path" ]; then\n'
+            '        _drive_at="${_REMEMBER_DRIVE_UPPER%%"${path:0:1}"*}"\n'
+            '        if [ "$_drive_at" != "$_REMEMBER_DRIVE_UPPER" ]; then\n'
+            '            path="${_REMEMBER_DRIVE_LOWER:${#_drive_at}:1}${path:1}"\n'
+            '        fi\n'
+            '    fi\n'
+            '    local _orig="$path"\n',
+        ),
+        (
+            '    LC_ALL=C\n'
+            '    case "$path" in\n'
+            "        *[!$'\\001'-$'\\177']*) _high_byte=1 ;;\n"
+            '    esac\n'
+            '    if [ -n "$_lc_was_set" ]; then LC_ALL="$_lc_prev"; else unset LC_ALL; fi\n',
+            '    LC_ALL=C\n'
+            '    local _hb_glob="[!"$\'\\001\'"-"$\'\\177\'"]"\n'
+            '    if [ "${path/$_hb_glob/}" != "$path" ]; then\n'
+            '        _high_byte=1\n'
+            '    fi\n'
+            '    if [ -n "$_lc_was_set" ]; then LC_ALL="$_lc_prev"; else unset LC_ALL; fi\n',
+        ),
+        (
+            '\n'
+            '    case "$_high_byte" in\n'
+            '        1)\n'
+            '            if command -v iconv >/dev/null 2>&1 \\\n'
+            '                && ! printf \'%s\' "$path" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1; then\n'
+            '                local _py_slug="${PIPELINE_DIR:-}/pipeline/slug.py"\n'
+            '                if [ -f "$_py_slug" ]; then\n'
+            '                    local _decoded\n'
+            '                    declare -f _remember_python >/dev/null 2>&1 && _remember_python\n'
+            '                    _decoded=$(_remember_slug_run_python "$_py_slug" "$path" 2>/dev/null) \\\n'
+            '                        && [ -n "$_decoded" ] && { printf \'%s\\n\' "$_decoded"; return 0; }\n'
+            '                fi\n'
+            '            fi\n',
+            '\n'
+            '    if [ "$_high_byte" = 1 ]; then\n'
+            '        if command -v iconv >/dev/null 2>&1 \\\n'
+            '            && ! printf \'%s\' "$path" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1; then\n'
+            '            local _py_slug="${PIPELINE_DIR:-}/pipeline/slug.py"\n'
+            '            if [ -f "$_py_slug" ]; then\n'
+            '                local _decoded\n'
+            '                declare -f _remember_python >/dev/null 2>&1 && _remember_python\n'
+            '                _decoded=$(_remember_slug_run_python "$_py_slug" "$path" 2>/dev/null) \\\n'
+            '                    && [ -n "$_decoded" ] && { printf \'%s\\n\' "$_decoded"; return 0; }\n'
+            '            fi\n',
+        ),
+        (
+            '            fi\n'
+            '            ;;\n'
+            '    esac\n'
+            '    fi\n',
+            '            fi\n'
+            '        fi\n'
+            '    fi\n'
+            '    fi\n',
+        ),
+        (
+            '\n'
+            '    case "$_hash" in\n'
+            '        *[!0-9a-z]*) _hash="" ;;\n'
+            '    esac\n'
+            '\n',
+            '\n'
+            '    if [ "${_hash/[!0-9a-z]/}" != "$_hash" ]; then\n'
+            '        _hash=""\n'
+            '    fi\n'
+            '\n',
+        ),
+    ],
+    "scripts/lib-memory-dir.sh": [
+        (
+            '\n'
+            '    case "$data_dir" in\n'
+            '        /*|~*|[A-Za-z]:[/\\\\]*)\n'
+            '            local slug\n'
+            '            slug=$(session_dir_slug "$proj")\n'
+            '            local expanded="${data_dir/#\\~/$HOME}"\n'
+            '            echo "${expanded//\\{slug\\}/$slug}"\n'
+            '            ;;\n'
+            '        *)\n'
+            '            echo "${proj}/${data_dir}"\n'
+            '            ;;\n'
+            '    esac\n'
+            '}\n',
+            '\n'
+            '    if [ "${data_dir#/}" != "$data_dir" ] || [ "${data_dir#[~]}" != "$data_dir" ] \\\n'
+            '        || [ "${data_dir#[A-Za-z]:[/\\\\]}" != "$data_dir" ]; then\n'
+            '        local slug\n'
+            '        slug=$(session_dir_slug "$proj")\n'
+            '        local expanded="${data_dir/#\\~/$HOME}"\n'
+            '        echo "${expanded//\\{slug\\}/$slug}"\n'
+            '    else\n'
+            '        echo "${proj}/${data_dir}"\n'
+            '    fi\n'
+            '}\n',
+        ),
+        (
+            '\n'
+            '    case "$data_dir" in\n'
+            '        /*|~*|[A-Za-z]:[/\\\\]*) ;;\n'
+            '        *) return 0 ;;\n'
+            '    esac\n'
+            '    [ "${data_dir#*\\{slug\\}}" != "$data_dir" ] || return 0\n',
+            '\n'
+            '    if [ "${data_dir#/}" = "$data_dir" ] && [ "${data_dir#[~]}" = "$data_dir" ] \\\n'
+            '        && [ "${data_dir#[A-Za-z]:[/\\\\]}" = "$data_dir" ]; then\n'
+            '        return 0\n'
+            '    fi\n'
+            '    [ "${data_dir#*\\{slug\\}}" != "$data_dir" ] || return 0\n',
+        ),
+        (
+            '\n'
+            '    case "$prefix" in\n'
+            "        ''|/|[A-Za-z]:|[A-Za-z]:[/\\\\]) return 0 ;;\n"
+            '    esac\n'
+            '\n',
+            '\n'
+            '    if [ -z "$prefix" ] || [ "$prefix" = / ] || [ -z "${prefix#[A-Za-z]:}" ] \\\n'
+            '        || [ -z "${prefix#[A-Za-z]:[/\\\\]}" ]; then\n'
+            '        return 0\n'
+            '    fi\n'
+            '\n',
+        ),
+        (
+            '    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)\n'
+            '    case "$_data_dir_raw" in\n'
+            '        /*|~*|[A-Za-z]:[/\\\\]*) _project_cfg_haiku_untrusted=0 ;;\n'
+            '        *) _project_cfg_haiku_untrusted=1 ;;\n'
+            '    esac\n'
+            '}\n',
+            '    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)\n'
+            '    if [ "${_data_dir_raw#/}" != "$_data_dir_raw" ] || [ "${_data_dir_raw#[~]}" != "$_data_dir_raw" ] \\\n'
+            '        || [ "${_data_dir_raw#[A-Za-z]:[/\\\\]}" != "$_data_dir_raw" ]; then\n'
+            '        _project_cfg_haiku_untrusted=0\n'
+            '    else\n'
+            '        _project_cfg_haiku_untrusted=1\n'
+            '    fi\n'
+            '}\n',
+        ),
+        (
+            'if [ "$_project_cfg_haiku_untrusted" = "1" ] && [ -f "$_project_cfg" ]; then\n'
+            '    case "$(_remember_config_tracked_status "${_project_cfg%/*}" "${_project_cfg##*/}")" in\n'
+            '        untracked) _project_cfg_model_reject_untrusted=0 ;;\n'
+            '        *) _project_cfg_model_reject_untrusted=1 ;;  # tracked or could-not-tell -> fail CLOSED\n'
+            '    esac\n'
+            'fi\n',
+            'if [ "$_project_cfg_haiku_untrusted" = "1" ] && [ -f "$_project_cfg" ]; then\n'
+            '    _project_cfg_tracked_answer=$(_remember_config_tracked_status "${_project_cfg%/*}" "${_project_cfg##*/}") || true\n'
+            '    if [ "$_project_cfg_tracked_answer" = untracked ]; then\n'
+            '        _project_cfg_model_reject_untrusted=0\n'
+            '    else\n'
+            '        _project_cfg_model_reject_untrusted=1  # tracked or could-not-tell -> fail CLOSED\n'
+            '    fi\n'
+            '    unset _project_cfg_tracked_answer\n'
+            'fi\n',
+        ),
+        (
+            '    _lmd_run_python() {\n'
+            '        case "${PYTHON:-python3}" in\n'
+            '            python3) python3 "$@" ;;\n'
+            '            python) python "$@" ;;\n'
+            '            py\\ -3) py -3 "$@" ;;\n'
+            '            py) py "$@" ;;\n'
+            '            *) return 127 ;;\n'
+            '        esac\n'
+            '    }\n',
+            '    _lmd_run_python() {\n'
+            '        if [ "${PYTHON:-python3}" = python3 ]; then\n'
+            '            python3 "$@"\n'
+            '        elif [ "${PYTHON:-python3}" = python ]; then\n'
+            '            python "$@"\n'
+            '        elif [ "${PYTHON:-python3}" = "py -3" ]; then\n'
+            '            py -3 "$@"\n'
+            '        elif [ "${PYTHON:-python3}" = py ]; then\n'
+            '            py "$@"\n'
+            '        else\n'
+            '            return 127\n'
+            '        fi\n'
+            '    }\n',
+        ),
+    ],
+}
+
+
+def _apply_round_19(ref_code: str, rel: str) -> str:
+    """The same three states as _apply_sanctioned_divergence, for the round-19
+    pairs: old_code present is substituted, new_code present is the landed
+    state, neither is stale."""
+    for old_code, new_code in _ROUND_19_DIVERGENCE.get(rel, ()):
+        if old_code in ref_code:
+            ref_code = ref_code.replace(old_code, new_code)
+            continue
+        assert new_code in ref_code, (
+            f"{rel}: neither the old nor the new code of a round-19 substitution "
+            "is on origin/main -- re-derive the allowance"
+        )
+    return ref_code
+
+
 RECORD_NAME = "case-divergence"
 NOTICE_NAME = "case-divergence-notice"
 SESSION_ID = "eeeeeeee-0000-4000-8000-000000000298"
@@ -1061,7 +1333,7 @@ def test_the_per_tool_call_path_is_not_touched(tmp_path):
             f"{rel} on origin/main has no non-comment lines — this compare "
             "would pass against any file at all"
         )
-        ref_code = _apply_sanctioned_divergence(_code(ref.stdout), rel)
+        ref_code = _apply_round_19(_apply_sanctioned_divergence(_code(ref.stdout), rel), rel)
         assert ref_code == _code(path.read_text(encoding="utf-8")), rel
 
 

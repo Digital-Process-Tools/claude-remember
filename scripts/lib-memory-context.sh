@@ -557,17 +557,15 @@ _remember_root_tracked_state_into() {
 # there -- the write side silently let it through while the read side
 # already refused it. Keeping one list and a helper that consults it means
 # a future addition here is enough; it does not also have to be
-# remembered in a second, unrelated case statement.
+# remembered in a second, unrelated list of states.
 _REMEMBER_REFUSED_TRACKED_STATES="tracked unavailable symlinked-ancestor"
 
 # _remember_tracked_state_is_refused <state>
 # True (exit 0) when STATE (a _remember_file_tracked_state_into outcome)
 # must be refused by every guard that consults it.
 _remember_tracked_state_is_refused() {
-    case " $_REMEMBER_REFUSED_TRACKED_STATES " in
-        (*" $1 "*) return 0 ;;
-        (*) return 1 ;;
-    esac
+    local _ls=" $_REMEMBER_REFUSED_TRACKED_STATES "
+    [ "${_ls/" $1 "/}" != "$_ls" ]
 }
 
 # Parallel-array cache for the symlinked-ancestor walk below, same shape
@@ -749,35 +747,30 @@ _remember_may_inject() {
     # write-handoff.sh's copy by hand only -- the exact hazard #799 fixed on
     # the write side. Gating on the shared _remember_tracked_state_is_refused
     # first means a state added to _REMEMBER_REFUSED_TRACKED_STATES without
-    # also adding a case arm HERE now fails closed (falls to the `*` arm
+    # also adding a branch HERE now fails closed (falls to the `else` branch
     # below, which refuses) instead of silently falling through to the old
     # unconditional `(*) return 0` -- the injection guard was previously the
     # one side that would have allowed an unrecognised refused state through.
     if _remember_tracked_state_is_refused "$_mi_state"; then
-        case "$_mi_state" in
-            (tracked)
-                _REMEMBER_INJECT_REFUSAL="$_mi_file is tracked by this repository's own git index. This plugin never commits a memory file itself (.remember/.gitignore excludes the whole directory), so a tracked one was shipped by the repository, not written by your own /remember. Not injecting it. If it is genuinely yours: git rm --cached it. If you did not add it: delete it and consider what else the commit that added it changed."
-                log "$_mi_component" "refused injecting $_mi_file: git-tracked"
-                ;;
-            (unavailable)
-                # #760: a repository really is above this file, but asking git
-                # whether it tracks the file could not be trusted (missing
-                # binary, broken state, a shim on PATH). Refuse rather than
-                # deliver on a guess -- an untrustworthy "no" from the tracked
-                # check must read the same as "yes", not the same as a clean
-                # "not tracked".
-                _REMEMBER_INJECT_REFUSAL="$_mi_file could not be checked against this repository's git index (git is missing, or the check itself failed) -- refusing rather than injecting unverified. Run /remember:doctor to see why git could not be asked."
-                log "$_mi_component" "refused injecting $_mi_file: git status unavailable"
-                ;;
-            (symlinked-ancestor)
-                _REMEMBER_INJECT_REFUSAL="$_mi_file sits under a directory that is itself a symlink -- refusing to follow it into session context. This plugin never creates a symlink inside a memory store; if you did not create this one, treat it as planted and inspect what it points at before deleting it."
-                log "$_mi_component" "refused injecting $_mi_file: symlinked ancestor directory"
-                ;;
-            (*)
-                _REMEMBER_INJECT_REFUSAL="$_mi_file could not be verified (tracked state: $_mi_state) -- refusing rather than injecting unverified."
-                log "$_mi_component" "refused injecting $_mi_file: unrecognised refused state $_mi_state"
-                ;;
-        esac
+        if [ "$_mi_state" = tracked ]; then
+            _REMEMBER_INJECT_REFUSAL="$_mi_file is tracked by this repository's own git index. This plugin never commits a memory file itself (.remember/.gitignore excludes the whole directory), so a tracked one was shipped by the repository, not written by your own /remember. Not injecting it. If it is genuinely yours: git rm --cached it. If you did not add it: delete it and consider what else the commit that added it changed."
+            log "$_mi_component" "refused injecting $_mi_file: git-tracked"
+        elif [ "$_mi_state" = unavailable ]; then
+            # #760: a repository really is above this file, but asking git
+            # whether it tracks the file could not be trusted (missing
+            # binary, broken state, a shim on PATH). Refuse rather than
+            # deliver on a guess -- an untrustworthy "no" from the tracked
+            # check must read the same as "yes", not the same as a clean
+            # "not tracked".
+            _REMEMBER_INJECT_REFUSAL="$_mi_file could not be checked against this repository's git index (git is missing, or the check itself failed) -- refusing rather than injecting unverified. Run /remember:doctor to see why git could not be asked."
+            log "$_mi_component" "refused injecting $_mi_file: git status unavailable"
+        elif [ "$_mi_state" = symlinked-ancestor ]; then
+            _REMEMBER_INJECT_REFUSAL="$_mi_file sits under a directory that is itself a symlink -- refusing to follow it into session context. This plugin never creates a symlink inside a memory store; if you did not create this one, treat it as planted and inspect what it points at before deleting it."
+            log "$_mi_component" "refused injecting $_mi_file: symlinked ancestor directory"
+        else
+            _REMEMBER_INJECT_REFUSAL="$_mi_file could not be verified (tracked state: $_mi_state) -- refusing rather than injecting unverified."
+            log "$_mi_component" "refused injecting $_mi_file: unrecognised refused state $_mi_state"
+        fi
         return 1
     fi
     return 0
@@ -826,13 +819,12 @@ _remember_may_inject() {
 _remember_emit_file() {
     local _remember_emit_max="${REMEMBER_EMIT_READ_MAX:-16384}"
     if [ -z "$_remember_emit_max" ] || [ "${_remember_emit_max#*[!0-9]}" != "$_remember_emit_max" ]; then _remember_emit_max=16384; fi
-    case "${2:-}" in
-        (''|*[!0-9]*)
-            # No usable size: `cat` is the one that cannot go quadratic.
-            cat "$1"
-            return 0
-            ;;
-    esac
+    local _sz="${2:-}"
+    if [ -z "$_sz" ] || [ "${_sz/[!0-9]/}" != "$_sz" ]; then
+        # No usable size: `cat` is the one that cannot go quadratic.
+        cat "$1"
+        return 0
+    fi
     if [ "$2" -gt "$_remember_emit_max" ]; then
         cat "$1"
         return 0
@@ -950,16 +942,15 @@ _remember_render_memory_section() {
             # caller, so the cache publish and every other render is
             # unaffected.
             if [ -n "${_REMEMBER_BUDGET_EXCLUDE:-}" ]; then
-                case "${_remember_nl}${_REMEMBER_BUDGET_EXCLUDE}" in
-                    (*"${_remember_nl}${MFILE}${_remember_nl}"*)
-                        _remember_budget_dropped="${_remember_budget_dropped}${MFILE}"
-                        if [ -n "${MFILE_BYTES:-}" ]; then
-                            _remember_budget_dropped="${_remember_budget_dropped} (${MFILE_BYTES} bytes)"
-                        fi
-                        _remember_budget_dropped="${_remember_budget_dropped}${_remember_nl}"
-                        continue
-                        ;;
-                esac
+                _remember_budget_hay="${_remember_nl}${_REMEMBER_BUDGET_EXCLUDE}"
+                if [ "${_remember_budget_hay/"${_remember_nl}${MFILE}${_remember_nl}"/}" != "$_remember_budget_hay" ]; then
+                    _remember_budget_dropped="${_remember_budget_dropped}${MFILE}"
+                    if [ -n "${MFILE_BYTES:-}" ]; then
+                        _remember_budget_dropped="${_remember_budget_dropped} (${MFILE_BYTES} bytes)"
+                    fi
+                    _remember_budget_dropped="${_remember_budget_dropped}${_remember_nl}"
+                    continue
+                fi
             fi
             BASENAME="${MFILE##*/}"
             echo "--- $BASENAME ---"
@@ -1037,10 +1028,11 @@ _remember_render_memory_section() {
             _remember_wc_size_get_into MFILE_BYTES "$MFILE"
             # "(0 bytes)" for a file nobody measured reads exactly like an
             # empty file. Say which one it is (#695 round-1 audit).
-            case "$MFILE_BYTES" in
-                (''|*[!0-9]*) printf '%s (size unknown)\n' "$MFILE" ;;
-                (*) printf '%s (%s bytes)\n' "$MFILE" "$MFILE_BYTES" ;;
-            esac
+            if [ -z "$MFILE_BYTES" ] || [ "${MFILE_BYTES/[!0-9]/}" != "$MFILE_BYTES" ]; then
+                printf '%s (size unknown)\n' "$MFILE"
+            else
+                printf '%s (%s bytes)\n' "$MFILE" "$MFILE_BYTES"
+            fi
         done)
         if [ -n "$_remember_deferred_refused" ]; then
             # A DIFFERENT header from the main loop's own "--- refused (not
@@ -1358,12 +1350,10 @@ _remember_session_start_max_bytes_into() {
     local _outvar="$1"
     local _val=""
     config_into _val ".thresholds.session_start_max_bytes" 9000
-    case "$_val" in
-        (''|*[!0-9]*)
-            log "memory-context" "WARNING: thresholds.session_start_max_bytes is not a valid non-negative integer (got $_val) -- using default 9000"
-            _val=9000
-            ;;
-    esac
+    if [ -z "$_val" ] || [ "${_val/[!0-9]/}" != "$_val" ]; then
+        log "memory-context" "WARNING: thresholds.session_start_max_bytes is not a valid non-negative integer (got $_val) -- using default 9000"
+        _val=9000
+    fi
     printf -v "$_outvar" %s "$_val"
 }
 
