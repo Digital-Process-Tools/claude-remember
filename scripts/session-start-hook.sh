@@ -3115,7 +3115,7 @@ session_was_saved() {
         [ "$(_remember_run_python - "$LAST_SAVE_FILE" "$1" <<< 'import json, math, sys
 
 def isline(v):
-    # Mirrors $SAVED_QUERY'"'"'s own `isline` def exactly: a JSON number,
+    # Mirrors the isline def in SAVED_QUERY exactly: a JSON number,
     return (
         isinstance(v, (int, float))
         and not isinstance(v, bool)
