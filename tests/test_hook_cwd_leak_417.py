@@ -137,8 +137,14 @@ def test_hook_clears_the_variable_before_sourcing_anything(tmp_path, hook):
         "REMEMBER_HOOK_CWD": str(leaked_project),
         "PATH": "/usr/bin:/bin:/usr/local/bin",
     }
+    # Run from a file, not `bash -c <script>`: a compiled hook (#900) defines
+    # every sourced library ahead of this preamble, ~65 KB of text, past the
+    # 32,767-character command line Windows' CreateProcess accepts (WinError
+    # 206 on the compiled windows-latest leg). Bytes, so no CRLF reaches bash.
+    script_file = tmp_path / "preamble.sh"
+    script_file.write_bytes(script.encode("utf-8"))
     result = subprocess.run(
-        [BASH, "-c", script], env=env, cwd=str(tmp_path),
+        [BASH, script_file.as_posix()], env=env, cwd=str(tmp_path),
         capture_output=True, text=True, timeout=30,
     )
     assert "REMEMBER_HOOK_CWD=cleared" in result.stdout, (
