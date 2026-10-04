@@ -610,6 +610,20 @@ was "Validation ran out of time". That is the failure the `release` branch exist
   `NODE_EXTRA_CA_CERTS`); no user had asked for them and #798 had named them a leak risk. Proxy
   users are pointed at `REMEMBER_SUMMARIZER=claude` (`docs/configuration.md`). With both, the
   portal's credential hold cleared on the release-preview probe (M2).
+
+  **#898 round 19 (maintainer decision) removed every `case` statement from shipped shell.** The
+  portal's bash scanner mis-parses `case`: probes hc7 vs hc9 confirmed `case "$-" in (*x*)` (a
+  pattern with a leading parenthesis, in the bootstrap code the build inlines into each hook) made
+  it list the whole hook under `COMMAND_SCRIPT_NOT_FOLLOWED`, and five earlier triggers
+  (claude-directory-publishing `triggers.md` 1, 2, 8, 9, 11) were other `case` shapes. All 121
+  statements across 21 shipped `.sh` files are now if/elif ladders of `[ ]` tests over prefix and
+  suffix expansions -- "contains a non-digit" is `[ "${x#*[!0-9]}" != "$x" ]`, a literal dispatch
+  is `[ "$x" = lit ]`, first matching arm still wins. `check_release_tree.py` FAILs any `case`
+  keyword at command position in a shipped `.sh` (quoted text and comments excluded), and
+  `tests/test_case_rewrite_equivalence_898.py` runs each old shape and its rewrite on the same
+  inputs in every bash it finds (macOS `/bin/bash` 3.2 included) under C and a UTF-8 locale. The
+  `.install-marker` text no longer names `scripts/doctor.sh` by path (a script named in a string is
+  a script the portal lists); it says `/remember:doctor`.
 - **`RUNTIME_FETCH_EXEC`** flags text that downloads and runs code, and the portal says it looks at
   "a hook, a server or settings command, a script, or text such as a skill or README". On v0.37.0
   (`e6cf58f`) it named `pipeline/shell.py` and `scripts/log.sh`, which contain no download at all.
