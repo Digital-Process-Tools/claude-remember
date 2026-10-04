@@ -599,6 +599,17 @@ was "Validation ran out of time". That is the failure the `release` branch exist
   the two lists is gone. `tests/test_literal_env_reads_898.py`'s exemption list is empty and pinned
   so: no shipped Python reads the environment by a non-literal name. Cost: changing either list
   now needs a release.
+
+  **#898 round 18 (maintainer decisions) took the last two holds off.** `_without_session_env`
+  no longer removes `CLAUDE_CODE_MESSAGING_TOKEN` (the nested call inherits it;
+  `CLAUDE_CODE_MESSAGING_SOCKET` is still removed, so there is no channel to use it on -- one real
+  summarizer call opened no extra peer session, observed once, no control), so no shipped file
+  names it and `check_release_tree.py` drops round 17's allowlist entries for it: a shipped file
+  naming it FAILs again. `_codex_child_env` no longer passes the proxy and CA-bundle variables
+  #751 added (`HTTPS_PROXY`/`HTTP_PROXY`/`NO_PROXY` in both casings, `SSL_CERT_FILE`,
+  `NODE_EXTRA_CA_CERTS`); no user had asked for them and #798 had named them a leak risk. Proxy
+  users are pointed at `REMEMBER_SUMMARIZER=claude` (`docs/configuration.md`). With both, the
+  portal's credential hold cleared on the release-preview probe (M2).
 - **`RUNTIME_FETCH_EXEC`** flags text that downloads and runs code, and the portal says it looks at
   "a hook, a server or settings command, a script, or text such as a skill or README". On v0.37.0
   (`e6cf58f`) it named `pipeline/shell.py` and `scripts/log.sh`, which contain no download at all.

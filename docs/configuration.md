@@ -108,8 +108,10 @@ does not pass as that session
 back afterwards: `CLAUDECODE`, `CLAUDE_JOB_DIR`, `CLAUDE_PROJECT_DIR`,
 `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_CHILD_SESSION`,
 `CLAUDE_CODE_SESSION_ATTENDED`, `CLAUDE_CODE_EXECPATH`, `CLAUDE_CODE_MESSAGING_SOCKET`,
-`CLAUDE_CODE_MESSAGING_TOKEN`, `CLAUDE_CODE_SSE_PORT` -- the reason for each is a comment
-beside the code in `pipeline/haiku.py`. Your login credential is never on that list
+`CLAUDE_CODE_SSE_PORT` -- the reason for each is a comment beside the code in
+`pipeline/haiku.py`. `CLAUDE_CODE_MESSAGING_TOKEN`, the handshake paired with the messaging
+socket, is not on the list and reaches the nested call: with the socket removed, the nested
+call has no channel to present it on. Your login credential is never on that list
 ([#131](https://github.com/Digital-Process-Tools/claude-remember/issues/131)); provider
 settings such as Bedrock selection are not either, so they reach the nested call
 ([#316](https://github.com/Digital-Process-Tools/claude-remember/issues/316)). To keep any
@@ -136,12 +138,8 @@ instruction that gets the model to ask for `env`
 nested `codex exec` process is not given your environment: it is given only these
 variables, and nothing else -- no Anthropic key, no cloud credential, no unrelated secret
 your shell happens to carry: `PATH`, `HOME`, `LANG`, `LC_ALL`, `CODEX_HOME`, `TMPDIR`,
-`TEMP`, `TMP`, `SYSTEMROOT`, `USERPROFILE`, `APPDATA`, `PATHEXT`, `HTTPS_PROXY`,
-`HTTP_PROXY`, `NO_PROXY`, `https_proxy`, `http_proxy`, `no_proxy`, `SSL_CERT_FILE`,
-`NODE_EXTRA_CA_CERTS` -- what the Codex CLI needs to run, find its own login in
-`CODEX_HOME`, and reach the network through a proxy or a custom CA bundle. On Windows,
-where variable names are case-insensitive, the lowercase proxy names would only repeat
-their upper-case twins and are not read. (Separately,
+`TEMP`, `TMP`, `SYSTEMROOT`, `USERPROFILE`, `APPDATA`, `PATHEXT` -- what the Codex CLI
+needs to run and find its own login in `CODEX_HOME`. (Separately,
 `-c shell_environment_policy.inherit=none` gives a command Codex spawns no environment
 at all; the allow-list bounds what Codex's own process can see.) An allow-list fails
 closed: a variable nobody thought about stays out. Like the `claude` list above, it is
@@ -155,6 +153,15 @@ narrower than earlier releases, which also passed Codex's own API-key variable
 through an environment variable, it is not passed through and the `codex` summarizer
 starts without it** -- run `codex login` so the login lives in `auth.json`, or use the
 `claude` summarizer (`REMEMBER_SUMMARIZER=claude`).
+
+**No proxy or CA-bundle variable is on it either**
+([#898](https://github.com/Digital-Process-Tools/claude-remember/issues/898)).
+`HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY` (in either casing), `SSL_CERT_FILE` and
+`NODE_EXTRA_CA_CERTS` used to be passed through
+([#751](https://github.com/Digital-Process-Tools/claude-remember/issues/751)); they are not
+any more. **If you reach the network only through a proxy or a custom CA bundle, the `codex`
+summarizer cannot reach it -- set `REMEMBER_SUMMARIZER=claude`**: the `claude` summarizer
+inherits your whole environment, proxy variables included.
 
 ### Environment variables
 
