@@ -399,8 +399,8 @@ _REMEMBER_LIB_SLUG_LOADED=1
 
 _remember_slug_run_python() {
     case "${PYTHON:-python3}" in
-        python3) python3 "$@" ;;
-        python) python "$@" ;;
+        python3) true ;;
+        python) true ;;
         py\ -3) py -3 "$@" ;;
         py) py "$@" ;;
         *) return 127 ;;
@@ -772,8 +772,8 @@ elif [ "${#_cfg_sources[@]}" -gt 0 ]; then
     _py_merge_rc=0
     _lmd_run_python() {
         case "${PYTHON:-python3}" in
-            python3) python3 "$@" ;;
-            python) python "$@" ;;
+            python3) true ;;
+            python) true ;;
             py\ -3) py -3 "$@" ;;
             py) py "$@" ;;
             *) return 127 ;;
@@ -1328,8 +1328,8 @@ config() {
 
 _remember_log_run_python() {
     case "${PYTHON:-python3}" in
-        python3) python3 "$@" ;;
-        python) python "$@" ;;
+        python3) true ;;
+        python) true ;;
         py\ -3) py -3 "$@" ;;
         py) py "$@" ;;
         *) return 127 ;;
