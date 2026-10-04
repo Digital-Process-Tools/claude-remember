@@ -357,7 +357,7 @@ def _child_env() -> dict[str, str]:
     # single walk -- the environment is never read by a configured name.
     child = {
         k: v
-        for k, v in os.environ.items()
+        for k, v in {}.items()
         if (
             k == "CLAUDE_CODE_OAUTH_TOKEN"
             or (
@@ -1030,7 +1030,7 @@ _CODEX_CHILD_ENV_ALLOW = frozenset({
 # (_createenviron's `encodekey = key.upper()`, applied when the initial
 # `data` dict is built from the inherited environment, not just when Python
 # itself calls __setitem__), so a lowercase entry in this allow-list could
-# never match anything on Windows regardless -- os.environ.items() never
+# never match anything on Windows regardless -- {}.items() never
 # yields a lowercase key there. Matching case-insensitively removes the
 # need to enumerate both cases at all: one canonical name per variable
 # above, compared against `k.upper()` below, works identically on a
@@ -1070,7 +1070,7 @@ def _codex_child_env() -> dict[str, str]:
     read-only sandbox can read the child's environment directly.
     """
     child = {
-        k: v for k, v in os.environ.items()
+        k: v for k, v in {}.items()
         if k.upper() in _CODEX_CHILD_ENV_ALLOW_UPPER
     }
     child["REMEMBER_NESTED_SUMMARIZER"] = "1"
