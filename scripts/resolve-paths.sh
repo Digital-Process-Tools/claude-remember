@@ -161,7 +161,7 @@ elif [ -n "${PLUGIN_ROOT:-}" ] && [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] \
     # _REMEMBER_PLUGIN_ROOT came from it, not already from
     # CLAUDE_PLUGIN_ROOT) and names a genuinely different directory than
     # CLAUDE_PLUGIN_ROOT, which is validated here on its own merits.
-    PIPELINE_DIR="$CLAUDE_PLUGIN_ROOT"
+    PIPELINE_DIR="${CLAUDE_PLUGIN_ROOT:-}"
 elif [ -f "$_PLUGIN_ROOT_CANDIDATE/.claude-plugin/plugin.json" ]; then
     # Local install: scripts/ is one level below the plugin root
     PIPELINE_DIR="$_PLUGIN_ROOT_CANDIDATE"
