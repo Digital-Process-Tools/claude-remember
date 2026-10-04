@@ -280,8 +280,9 @@ _project_cfg="${REMEMBER_DIR}/config.json"
 # inside the project checkout (the default/legacy layout) -- a repository an
 # operator clones can ship .remember/config.json, and its own `haiku.*` block
 # would otherwise choose the credential the nested `claude -p` / `codex exec`
-# summarizer authenticates with, or which variables `haiku.drop_env` keeps
-# out of it (#726, #898). External storage mode (data_dir
+# summarizer authenticates with, or shorten the `haiku.strip_session_env`
+# list of parent-session variables kept out of it (#726, #95, #898).
+# External storage mode (data_dir
 # absolute or home-relative, e.g. ~/.remember/{slug}) resolves outside any
 # checkout the project itself controls, so that layer's `haiku` block IS
 # trusted there -- the same absolute/home-relative case switch

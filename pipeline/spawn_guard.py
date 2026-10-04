@@ -11,8 +11,8 @@ fail to arrive:
   the child. It is an environment variable, and a host that redacts env into
   spawned hook subprocesses erases it. This repo has precedent: #131 was
   ``CLAUDE_CODE_OAUTH_TOKEN``, the host's own OAuth credential, going missing
-  exactly that way (see ``pipeline.haiku``'s own ``_CHILD_ENV_OAUTH_NAME``
-  exemption from the parent-session-identity strip).
+  exactly that way (``pipeline.haiku`` never lists it in the parent-session
+  strip, ``haiku.strip_session_env``, so the child inherits it).
 
 When both fail there is nothing left. @ehutchinsonSFDC reported the result on
 0.9.0: ~19 live ``claude`` processes, four of them summarizers, +7 new

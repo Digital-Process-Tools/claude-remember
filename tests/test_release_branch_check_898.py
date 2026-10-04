@@ -394,7 +394,7 @@ _API_KEY_NAME = "ANTHROPIC_API_KEY"
 @pytest.mark.parametrize("rel, data", [
     ("pipeline/example.py", b'v = os.environ.get("ANTHROPIC_API_KEY", "")\n'),
     ("scripts/run.sh", b"#!/bin/sh\n# strips ANTHROPIC_API_KEY first\necho hi\n"),
-    ("config.example.json", b'{"haiku": {"drop_env": ["ANTHROPIC_API_KEY"]}}\n'),
+    ("config.example.json", b'{"haiku": {"strip_session_env": ["ANTHROPIC_API_KEY"]}}\n'),
     ("notes.md", b"Unset ANTHROPIC_API_KEY before running.\n"),
 ])
 def test_the_api_key_name_anywhere_in_the_shipped_tree_fails(tmp_path, rel, data):
@@ -412,7 +412,7 @@ def test_a_tree_without_the_api_key_name_has_no_such_offender(tmp_path):
     the generic option, the words in prose -- are not it."""
     root = _tree(tmp_path, {
         "pipeline/example.py": b'BASE = "ANTHROPIC_BASE_URL"\n',
-        "config.example.json": b'{"haiku": {"drop_env": []}}\n',
+        "config.example.json": b'{"haiku": {"strip_session_env": []}}\n',
         "notes.md": b"An Anthropic API key set for another tool.\n",
     })
     result = _check(root)

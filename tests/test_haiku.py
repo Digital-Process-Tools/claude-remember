@@ -22,6 +22,22 @@ def _mock_claude_response(result_text: str, input_tokens: int = 500,
     })
 
 
+def _record_env(mock_run) -> list:
+    """Record, per spawn, the environment the child actually gets (#898
+    round 15): the claude route passes no env= mapping -- the child inherits
+    this process's environment at the moment of the spawn -- so that is what
+    is captured. Call after setting ``return_value``."""
+    seen = []
+
+    def fake(*args, **kwargs):
+        env = kwargs.get("env")
+        seen.append(dict(os.environ) if env is None else dict(env))
+        return mock_run.return_value
+
+    mock_run.side_effect = fake
+    return seen
+
+
 def test_parse_response_basic():
     raw = _mock_claude_response("## 10:30 | did stuff\ndetails")
     result = _parse_response(raw)
@@ -120,6 +136,7 @@ def test_call_haiku_success(mock_run, monkeypatch):
         stdout=_mock_claude_response("hello from haiku"),
         stderr="",
     )
+    seen = _record_env(mock_run)
     result = call_haiku("test prompt")
     assert result.text == "hello from haiku"
     assert result.is_skip is False
@@ -136,9 +153,8 @@ def test_call_haiku_success(mock_run, monkeypatch):
     assert "--mcp-config" in cmd
     assert cmd[cmd.index("--mcp-config") + 1] == '{"mcpServers":{}}'
     assert "--strict-mcp-config" in cmd
-    # CLAUDECODE must be stripped from env
-    env = args[1]["env"]
-    assert "CLAUDECODE" not in env
+    # CLAUDECODE must be stripped from the environment the child inherits
+    assert "CLAUDECODE" not in seen[-1]
 
 
 @patch("pipeline.haiku.subprocess.run")
@@ -165,8 +181,10 @@ def test_call_haiku_sends_prompt_on_stdin_not_argv(mock_run):
 def test_call_haiku_strips_parent_session_env(mock_run, monkeypatch):
     """The nested claude -p must not inherit the PARENT Claude Code session
     vars — else it looks like a resumable session to anything keying off them
-    (#95). Strip CLAUDECODE, CLAUDE_JOB_DIR, and all CLAUDE_CODE_*; keep the
-    rest of the environment intact."""
+    (#95). The names come from `haiku.strip_session_env` (the plugin's bundled
+    config.json since #898 round 15); the rest of the environment is
+    inherited intact."""
+    monkeypatch.delenv("REMEMBER_CONFIG", raising=False)
     monkeypatch.setenv("CLAUDECODE", "1")
     monkeypatch.setenv("CLAUDE_JOB_DIR", "/some/job/dir")
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "abc-123")
@@ -174,8 +192,9 @@ def test_call_haiku_strips_parent_session_env(mock_run, monkeypatch):
     monkeypatch.setenv("PATH", "/usr/bin")  # an unrelated var must survive
     mock_run.return_value = MagicMock(
         returncode=0, stdout=_mock_claude_response("x"), stderr="")
+    seen = _record_env(mock_run)
     call_haiku("p")
-    env = mock_run.call_args[1]["env"]
+    env = seen[-1]
     assert "CLAUDECODE" not in env
     assert "CLAUDE_JOB_DIR" not in env
     assert "CLAUDE_CODE_SESSION_ID" not in env
@@ -183,203 +202,16 @@ def test_call_haiku_strips_parent_session_env(mock_run, monkeypatch):
     assert env.get("PATH") == "/usr/bin"
 
 
-# ── haiku.drop_env: an explicit, generic opt-in (#898 round 13) ──────────────
+# ── a credential-looking failure says where the variable comes from ─────────
 #
-# #898 round 13 (maintainer decision): the #703 strip of one named credential
-# is gone. The nested `claude -p` inherits the environment as Claude Code gave
-# it -- no variable is special-cased by name -- and `haiku.drop_env` is the one
-# generic, opt-in way to remove variables from that child: a list of exact
-# names or shell-style globs (`*`, `?`). Every "removed" case is paired with a
-# "kept" one, so a function that always dropped (or never dropped) fails.
-
-
-@pytest.fixture
-def no_ambient_credentials(monkeypatch, tmp_path):
-    """No config visible to `_child_env()` except what a test writes itself.
-
-    A developer machine can have a real `~/.remember/config.json`, so without
-    this fixture the drop list under test is the developer's own config rather
-    than the case the test describes -- and it would flip between their
-    machine and CI.
-    """
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setenv("USERPROFILE", str(home))  # Windows' expanduser reads this
-    monkeypatch.setenv("REMEMBER_DIR", str(tmp_path / "remember"))
-    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
-    monkeypatch.delenv("CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN", raising=False)
-    monkeypatch.delenv("REMEMBER_OAUTH_TOKEN", raising=False)
-    monkeypatch.delenv("REMEMBER_CONFIG", raising=False)
-    return home
-
-
-def _write_config(home, haiku_block):
-    cfg_dir = home / ".remember"
-    cfg_dir.mkdir(parents=True, exist_ok=True)
-    (cfg_dir / "config.json").write_text(
-        json.dumps({"haiku": haiku_block}), encoding="utf-8"
-    )
-
-
-def _child_env_for(mock_run):
-    mock_run.return_value = MagicMock(
-        returncode=0, stdout=_mock_claude_response("x"), stderr="")
-    call_haiku("p")
-    return mock_run.call_args[1]["env"]
+# #898 round 15 removed `haiku.drop_env`; the nested call inherits the
+# environment the user started their coding agent from. A failure that looks
+# like a credential failure says so, naming no variable and no knob.
 
 
 @patch("pipeline.haiku.subprocess.run")
-def test_call_haiku_inherits_the_environment_by_default(
-    mock_run, monkeypatch, no_ambient_credentials
-):
-    """No `haiku.drop_env`: every variable outside the parent-session
-    markers reaches the child untouched -- an API key included. This is
-    also the positive control for every drop test below."""
-    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-example")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-example")
-    monkeypatch.setenv("PATH", "/usr/bin")
-
-    env = _child_env_for(mock_run)
-
-    assert env.get("ANTHROPIC_API_KEY") == "sk-ant-api03-example"
-    assert env.get("CLAUDE_CODE_OAUTH_TOKEN") == "sk-ant-oat-example"
-    assert env.get("PATH") == "/usr/bin"
-
-
-@patch("pipeline.haiku.subprocess.run")
-def test_drop_env_empty_list_is_the_same_as_the_default(
-    mock_run, monkeypatch, no_ambient_credentials
-):
-    _write_config(no_ambient_credentials, {"drop_env": []})
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-example")
-
-    with patch("pipeline.haiku._warn") as mock_warn:
-        env = _child_env_for(mock_run)
-
-    assert env.get("ANTHROPIC_API_KEY") == "sk-ant-api03-example"
-    assert mock_warn.call_args_list == []
-
-
-@patch("pipeline.haiku.subprocess.run")
-def test_drop_env_removes_an_exact_name(
-    mock_run, monkeypatch, no_ambient_credentials
-):
-    _write_config(no_ambient_credentials, {"drop_env": ["ANTHROPIC_API_KEY"]})
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-example")
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://example.invalid")
-    monkeypatch.setenv("PATH", "/usr/bin")
-
-    with patch("pipeline.haiku._warn") as mock_warn:
-        env = _child_env_for(mock_run)
-
-    assert "ANTHROPIC_API_KEY" not in env
-    # Exact means exact: a sibling sharing the prefix is kept.
-    assert env.get("ANTHROPIC_BASE_URL") == "https://example.invalid"
-    assert env.get("PATH") == "/usr/bin"
-    assert mock_warn.call_args_list == [], "a valid list warns about nothing"
-
-
-@patch("pipeline.haiku.subprocess.run")
-def test_drop_env_glob_removes_every_matching_name(
-    mock_run, monkeypatch, no_ambient_credentials
-):
-    _write_config(no_ambient_credentials, {"drop_env": ["ANTHROPIC_*"]})
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-example")
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://example.invalid")
-    monkeypatch.setenv("MY_ANTHROPIC_THING", "kept")  # does not START with it
-    monkeypatch.setenv("PATH", "/usr/bin")
-
-    env = _child_env_for(mock_run)
-
-    assert "ANTHROPIC_API_KEY" not in env
-    assert "ANTHROPIC_BASE_URL" not in env
-    assert env.get("MY_ANTHROPIC_THING") == "kept"
-    assert env.get("PATH") == "/usr/bin"
-
-
-@patch("pipeline.haiku.subprocess.run")
-def test_drop_env_glob_that_matches_nothing_removes_nothing(
-    mock_run, monkeypatch, no_ambient_credentials
-):
-    _write_config(no_ambient_credentials, {"drop_env": ["UNRELATED_*", "X?Y"]})
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-example")
-    monkeypatch.setenv("XAY", "dropped-by-question-mark")
-    monkeypatch.setenv("XAAY", "kept")
-
-    env = _child_env_for(mock_run)
-
-    assert env.get("ANTHROPIC_API_KEY") == "sk-ant-api03-example"
-    assert "XAY" not in env, "`?` matches exactly one character"
-    assert env.get("XAAY") == "kept"
-
-
-@patch("pipeline.haiku.subprocess.run")
-def test_drop_env_can_remove_the_kept_oauth_token_too(
-    mock_run, monkeypatch, no_ambient_credentials
-):
-    """The operator's explicit list wins over the one built-in keep."""
-    _write_config(no_ambient_credentials, {"drop_env": ["CLAUDE_CODE_OAUTH_TOKEN"]})
-    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-example")
-
-    env = _child_env_for(mock_run)
-
-    assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
-
-
-@patch("pipeline.haiku.subprocess.run")
-def test_drop_env_invalid_entries_are_ignored_with_a_warning(
-    mock_run, monkeypatch, no_ambient_credentials
-):
-    """Anything that is not a name or a `*`/`?` glob over name characters is
-    skipped, said so in the log, and never echoed -- someone may paste
-    `NAME=value` with a real value in it. The valid entry still applies."""
-    _write_config(no_ambient_credentials, {"drop_env": [
-        "ANTHROPIC_API_KEY=sk-ant-api03-pasted-here",
-        "",
-        "BAD-NAME",
-        "[A]*",
-        "9LEADING_DIGIT",
-        7,
-        "VALID_ONE",
-    ]})
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-example")
-    monkeypatch.setenv("VALID_ONE", "x")
-    monkeypatch.setenv("AB", "kept")
-
-    with patch("pipeline.haiku._warn") as mock_warn:
-        env = _child_env_for(mock_run)
-
-    assert "VALID_ONE" not in env, "the valid entry beside the bad ones applies"
-    assert env.get("ANTHROPIC_API_KEY") == "sk-ant-api03-example"
-    assert env.get("AB") == "kept"
-    warnings = " ".join(str(c.args[0]) for c in mock_warn.call_args_list)
-    assert "haiku.drop_env" in warnings
-    assert "sk-ant-api03-pasted-here" not in warnings
-    assert "BAD-NAME" not in warnings, "entries are described, never echoed"
-
-
-@patch("pipeline.haiku.subprocess.run")
-def test_drop_env_that_is_not_a_list_is_ignored_with_a_warning(
-    mock_run, monkeypatch, no_ambient_credentials
-):
-    _write_config(no_ambient_credentials, {"drop_env": "ANTHROPIC_API_KEY"})
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-example")
-
-    with patch("pipeline.haiku._warn") as mock_warn:
-        env = _child_env_for(mock_run)
-
-    assert env.get("ANTHROPIC_API_KEY") == "sk-ant-api03-example"
-    warnings = " ".join(str(c.args[0]) for c in mock_warn.call_args_list)
-    assert "haiku.drop_env" in warnings
-
-
-@patch("pipeline.haiku.subprocess.run")
-def test_credential_failure_points_at_drop_env(
-    mock_run, monkeypatch, no_ambient_credentials
-):
-    """The discoverability half of #703, kept without naming any variable:
-    a failure that looks like a credential failure says the knob exists."""
+def test_credential_failure_points_at_the_inherited_environment(mock_run, monkeypatch):
+    """The discoverability half of #703, kept without naming any variable."""
     mock_run.return_value = MagicMock(
         returncode=1,
         stdout=json.dumps({"error": "Credit balance is too low"}),
@@ -391,14 +223,13 @@ def test_credential_failure_points_at_drop_env(
 
     message = str(raised.value)
     assert "Credit balance is too low" in message
-    assert "haiku.drop_env" in message
+    assert "unset it in that environment" in message
+    assert "drop_env" not in message
     assert "ANTHROPIC_API_KEY" not in message
 
 
 @patch("pipeline.haiku.subprocess.run")
-def test_failure_unrelated_to_credentials_gets_no_drop_env_hint(
-    mock_run, monkeypatch, no_ambient_credentials
-):
+def test_failure_unrelated_to_credentials_gets_no_environment_hint(mock_run, monkeypatch):
     """Positive control's twin: a hint that fired on every failure would
     point unrelated outages at the environment."""
     mock_run.return_value = MagicMock(
@@ -412,7 +243,7 @@ def test_failure_unrelated_to_credentials_gets_no_drop_env_hint(
 
     message = str(raised.value)
     assert "Prompt is too long" in message
-    assert "haiku.drop_env" not in message
+    assert "unset it in that environment" not in message
 
 
 def test_haiku_py_no_longer_names_the_credential_or_its_old_key():
@@ -422,7 +253,7 @@ def test_haiku_py_no_longer_names_the_credential_or_its_old_key():
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "pipeline", "haiku.py")
     with open(path, encoding="utf-8") as f:
         source = f.read()
-    assert "def _child_env" in source, "positive control: this is the right file"
+    assert "def _summarizer_environment" in source, "positive control: this is the right file"
     for needle in ("ANTHROPIC_API_KEY", "anthropic_api_key"):
         assert needle not in source, needle
 
@@ -572,9 +403,10 @@ def test_call_haiku_keeps_oauth_token(mock_run, monkeypatch):
     mock_run.return_value = MagicMock(
         returncode=0, stdout=_mock_claude_response("x"), stderr="")
 
+    seen = _record_env(mock_run)
     call_haiku("p")
 
-    env = mock_run.call_args[1]["env"]
+    env = seen[-1]
     assert env.get("CLAUDE_CODE_OAUTH_TOKEN") == "sk-ant-oat-example", (
         "the credential must survive the parent-session strip"
     )
@@ -621,9 +453,10 @@ def test_userconfig_oauth_token_env_is_never_read(mock_run, monkeypatch, tmp_pat
     mock_run.return_value = MagicMock(
         returncode=0, stdout=_mock_claude_response("x"), stderr="")
 
+    seen = _record_env(mock_run)
     call_haiku("p")
 
-    env = mock_run.call_args[1]["env"]
+    env = seen[-1]
     assert env.get("CLAUDE_CODE_OAUTH_TOKEN") is None, (
         "the removed userConfig option's env var must never populate "
         "CLAUDE_CODE_OAUTH_TOKEN any more"
@@ -641,9 +474,10 @@ def test_host_token_still_passes_through_unconditionally(mock_run, monkeypatch, 
     mock_run.return_value = MagicMock(
         returncode=0, stdout=_mock_claude_response("x"), stderr="")
 
+    seen = _record_env(mock_run)
     call_haiku("p")
 
-    env = mock_run.call_args[1]["env"]
+    env = seen[-1]
     assert env.get("CLAUDE_CODE_OAUTH_TOKEN") == "sk-ant-oat-from-host-00000001"
 
 
@@ -725,9 +559,10 @@ def test_remember_oauth_token_env_no_longer_authenticates(mock_run, monkeypatch,
     mock_run.return_value = MagicMock(
         returncode=0, stdout=_mock_claude_response("x"), stderr="")
 
+    seen = _record_env(mock_run)
     call_haiku("p")
 
-    env = mock_run.call_args[1]["env"]
+    env = seen[-1]
     assert "CLAUDE_CODE_OAUTH_TOKEN" not in env, (
         "REMEMBER_OAUTH_TOKEN must not reach the child env -- it is no "
         "longer read at all (#860, round 2)"
@@ -749,9 +584,10 @@ def test_haiku_oauth_token_config_no_longer_authenticates(mock_run, monkeypatch,
     mock_run.return_value = MagicMock(
         returncode=0, stdout=_mock_claude_response("x"), stderr="")
 
+    seen = _record_env(mock_run)
     call_haiku("p")
 
-    env = mock_run.call_args[1]["env"]
+    env = seen[-1]
     assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
 
 

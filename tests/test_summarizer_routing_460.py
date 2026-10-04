@@ -250,7 +250,10 @@ def test_legacy_oauth_token_does_not_authenticate_the_codex_fallback(mock_run, m
     calls = []
 
     def _side_effect(cmd, **kwargs):
-        calls.append((cmd, kwargs))
+        # #898 round 15: the claude route passes no env=; record what the
+        # child inherits at the moment of the spawn instead.
+        inherited = dict(os.environ) if kwargs.get("env") is None else kwargs["env"]
+        calls.append((cmd, dict(kwargs, env=inherited)))
         if os.path.basename(cmd[0]) == "codex":
             raise FileNotFoundError("no such file: codex")
         return MagicMock(returncode=0, stdout=_mock_claude_stdout("fell back"), stderr="")
@@ -284,7 +287,10 @@ def test_host_token_does_authenticate_the_codex_fallback(mock_run, monkeypatch):
     calls = []
 
     def _side_effect(cmd, **kwargs):
-        calls.append((cmd, kwargs))
+        # #898 round 15: the claude route passes no env=; record what the
+        # child inherits at the moment of the spawn instead.
+        inherited = dict(os.environ) if kwargs.get("env") is None else kwargs["env"]
+        calls.append((cmd, dict(kwargs, env=inherited)))
         if os.path.basename(cmd[0]) == "codex":
             raise FileNotFoundError("no such file: codex")
         return MagicMock(returncode=0, stdout=_mock_claude_stdout("fell back"), stderr="")
@@ -313,7 +319,10 @@ def test_userconfig_env_var_no_longer_reaches_the_codex_fallback(mock_run, monke
     calls = []
 
     def _side_effect(cmd, **kwargs):
-        calls.append((cmd, kwargs))
+        # #898 round 15: the claude route passes no env=; record what the
+        # child inherits at the moment of the spawn instead.
+        inherited = dict(os.environ) if kwargs.get("env") is None else kwargs["env"]
+        calls.append((cmd, dict(kwargs, env=inherited)))
         if os.path.basename(cmd[0]) == "codex":
             raise FileNotFoundError("no such file: codex")
         return MagicMock(returncode=0, stdout=_mock_claude_stdout("fell back"), stderr="")

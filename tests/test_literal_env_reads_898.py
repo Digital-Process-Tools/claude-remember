@@ -74,12 +74,20 @@ def non_literal_env_reads(source: str) -> list:
             if any(_is_os_environ(a) for a in node.args) or any(
                     _is_os_environ(k.value) for k in node.keywords):
                 hits.append((line, "os.environ passed wholesale"))
+            if (isinstance(f, ast.Attribute) and f.attr in ("items", "keys", "values", "copy")
+                    and _is_os_environ(f.value)):
+                hits.append((line, f"os.environ.{f.attr}() walks or copies the environment"))
         elif isinstance(node, ast.Subscript) and _is_env_receiver(node.value):
             key = node.slice
             if not isinstance(key, ast.Constant) and hasattr(key, "value"):
                 key = key.value  # ast.Index on Python 3.8
             if not _literal(key):
                 hits.append((line, "env subscript by a non-literal name"))
+        elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)) and _is_os_environ(node.iter):
+            hits.append((line, "iteration over os.environ"))
+        elif isinstance(node, ast.Dict) and any(
+                k is None and _is_os_environ(v) for k, v in zip(node.keys, node.values)):
+            hits.append((line, "os.environ unpacked into a dict"))
         elif isinstance(node, ast.IfExp):
             if _is_os_environ(node.body) or _is_os_environ(node.orelse):
                 hits.append((line, "an alias of os.environ"))
@@ -103,17 +111,57 @@ POSITIVE = {
     "env parameter": "def f(env):\n    return 1\n",
     "store by constant": "X_ENV = 'A'\nenv = {}\nenv[X_ENV] = '1'\n",
     "compare to constant": "X_ENV = 'A'\nok = [k for k in d if k == X_ENV]\n",
+    # #898 round 15: the environment is never walked or copied either.
+    "items walk": "import os\nd = {k: v for k, v in os.environ.items()}\n",
+    "keys walk": "import os\nd = list(os.environ.keys())\n",
+    "copy": "import os\nd = os.environ.copy()\n",
+    "dict copy": "import os\nd = dict(os.environ)\n",
+    "for loop": "import os\nfor k in os.environ:\n    pass\n",
+    "comprehension": "import os\nd = [k for k in os.environ]\n",
+    "unpacked": "import os\nd = {**os.environ}\n",
+    "pop by variable": "import os\nn = 'A'\nos.environ.pop(n, None)\n",
+    "store by variable": "import os\nn = 'A'\nos.environ[n] = '1'\n",
 }
 
 NEGATIVE = (
     "import os\n"
-    "v = os.environ.get('ANTHROPIC_API_KEY', '')\n"
+    "v = os.environ.get('HOME', '')\n"
     "w = os.environ['HOME']\n"
     "def f(overrides=None):\n"
-    "    child = {k: x for k, x in os.environ.items() if k != 'CLAUDECODE'}\n"
-    "    child['REMEMBER_NESTED_SUMMARIZER'] = '1'\n"
+    "    child = {'PATH': os.environ.get('PATH')}\n"
+    "    os.environ.pop('CLAUDECODE', None)\n"
+    "    os.environ['REMEMBER_NESTED_SUMMARIZER'] = '1'\n"
     "    return child\n"
 )
+
+# The one site allowed to touch the environment by a name it did not write
+# out: removing the parent session's variables, named by config
+# (`haiku.strip_session_env`, #95), so a future Claude Code session variable
+# can be listed without a code release (maintainer decision, #898 round 15).
+# It is a run-time-named access by design, disclosed here rather than
+# disguised -- the directory scan may still cite it.
+EXEMPT = {("haiku.py", "_without_session_env")}
+_EXEMPT_KINDS = {"env read by a non-literal name", "env subscript by a non-literal name"}
+
+
+def _function_spans(source: str) -> dict:
+    spans = {}
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            spans[node.name] = (node.lineno, max(
+                getattr(n, "lineno", node.lineno) for n in ast.walk(node)))
+    return spans
+
+
+def _split_exempt(path: Path, hits: list) -> tuple:
+    spans = _function_spans(path.read_text(encoding="utf-8"))
+    exempt, rest = [], []
+    for line, kind in hits:
+        inside = any(
+            fname == path.name and fn in spans and spans[fn][0] <= line <= spans[fn][1]
+            for fname, fn in EXEMPT)
+        (exempt if inside and kind in _EXEMPT_KINDS else rest).append((line, kind))
+    return exempt, rest
 
 
 @pytest.mark.parametrize("shape", sorted(POSITIVE))
@@ -150,4 +198,19 @@ def test_host_reads_every_name_its_registry_declares(monkeypatch):
 @pytest.mark.parametrize("path", SHIPPED_PY, ids=lambda p: str(p.relative_to(REPO_ROOT)))
 def test_shipped_python_reads_the_environment_by_literal_name(path):
     hits = non_literal_env_reads(path.read_text(encoding="utf-8"))
-    assert hits == [], f"{path.relative_to(REPO_ROOT)}: {hits}"
+    _, rest = _split_exempt(path, hits)
+    assert rest == [], f"{path.relative_to(REPO_ROOT)}: {rest}"
+
+
+def test_the_one_exempt_site_is_real_and_bounded():
+    """The exemption is not vacuous: haiku.py's `_without_session_env` does
+    access the environment by a configured name (so the scan reaches it), and
+    nothing else in the shipped set relies on the exemption."""
+    haiku_py = REPO_ROOT / "pipeline" / "haiku.py"
+    exempt, _ = _split_exempt(haiku_py, non_literal_env_reads(haiku_py.read_text(encoding="utf-8")))
+    assert exempt, "positive control: the exempt site carries the shape"
+    assert len(exempt) <= 2, exempt
+    for path in SHIPPED_PY:
+        if path != haiku_py:
+            used, _ = _split_exempt(path, non_literal_env_reads(path.read_text(encoding="utf-8")))
+            assert used == [], path

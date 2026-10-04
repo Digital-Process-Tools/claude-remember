@@ -1,6 +1,7 @@
 """#316 — the isolation fallback must recognise the Bedrock-proxy 401.
 
-`_child_env()` strips every `CLAUDE_CODE_*` var and `--setting-sources ''`
+`_child_env()` stripped every `CLAUDE_CODE_*` var (until #898 round 15,
+which strips only the listed session names) and `--setting-sources ''`
 stops `~/.claude/settings.json`'s `env` block from restoring them, so a
 Bedrock/proxy install loses `CLAUDE_CODE_USE_BEDROCK` in the child and the
 nested CLI talks to the real API with a proxy token. The API answers

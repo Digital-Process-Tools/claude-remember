@@ -94,7 +94,8 @@ def test_summarizer_failure_marker_overrides_capture_is_working(tmp_path):
         + result.stdout
     )
     assert "Failed to authenticate" in result.stdout
-    assert "claude setup-token" in result.stdout, (
+    assert "setup-token" not in result.stdout, "#898 round 15: no credential command is named"
+    assert "log in again with" in result.stdout, (
         "an auth-shaped failure detail must point at refreshing the CLI's "
         "own login (#860, round 3: the plugin reads no credential of its "
         "own any more, so there is no userConfig setting left to point "

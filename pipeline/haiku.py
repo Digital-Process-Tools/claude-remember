@@ -1,9 +1,13 @@
 """Claude CLI wrapper for calling Haiku and parsing structured JSON responses.
 
 Provides the single interface used by all pipeline stages to invoke Haiku.
-Handles subprocess management, parent-session env stripping (CLAUDECODE +
-CLAUDE_JOB_DIR + CLAUDE_CODE_*), JSON parsing, token counting, and cost
-estimation.
+Handles subprocess management, removal of the parent session's own variables
+before the spawn (the names in ``haiku.strip_session_env``, #95), JSON
+parsing, token counting, and cost estimation.
+
+The nested ``claude -p`` inherits this process's environment -- the one the
+hook was started with, including the user's Claude Code login -- exactly like
+any process a hook starts. This module reads no credential of its own.
 
 The CLI is invoked in a sandboxed configuration: a fresh, empty `cwd`
 created and torn down around each call (`_isolated_summarizer_cwd`, #724 --
@@ -14,14 +18,16 @@ still callable, and a hand-maintained deny-list is only ever as complete as
 its last update against the CLI's own tool inventory),
 ``max-turns`` configurable via ``REMEMBER_MAX_TURNS`` (default 4), no MCP
 servers (#94), no setting sources and therefore no hooks (#202), and the
-parent Claude Code session env vars are stripped (``CLAUDECODE`` to allow a
-nested session; ``CLAUDE_JOB_DIR`` / ``CLAUDE_CODE_*`` so the child doesn't
-masquerade as the parent's session, #95). ``REMEMBER_NESTED_SUMMARIZER`` is set
+parent Claude Code session's variables are removed for the spawn
+(``CLAUDECODE`` to allow a nested session; ``CLAUDE_JOB_DIR``,
+``CLAUDE_PROJECT_DIR`` and the session-scoped ``CLAUDE_CODE_*`` names so the
+child doesn't masquerade as the parent's session, #95 -- the list lives in
+config, ``haiku.strip_session_env``). ``REMEMBER_NESTED_SUMMARIZER`` is set
 so the plugin's own hooks recognise the child and no-op (#204) — that covers
 *our* hooks specifically, and stays load-bearing on the fallback path below,
 where setting-source isolation has been dropped and the user's hooks are live.
-The Codex route (`_call_codex`) additionally runs with an allow-listed child
-environment rather than the Claude route's deny-list one, since its
+The Codex route (`_call_codex`) instead runs with an allow-listed child
+environment, one literal read per allowed name, since its
 ``--sandbox read-only`` still permits command execution (#724, F9/F10).
 
 The output of that call is NOT guaranteed to be the model speaking — a blocking
@@ -37,7 +43,6 @@ Module-level constants:
 from __future__ import annotations
 
 import contextlib
-import fnmatch
 import json
 import os
 import re
@@ -130,17 +135,15 @@ def _resolve_codex_bin() -> str:
     return shutil.which("codex") or "codex"
 
 
-# CLAUDE_CODE_* vars are stripped as parent-session identity (#95) — but the
-# prefix is a proxy, not a definition, and one member of the family is the
-# child's own credential. Stripping it leaves `claude -p` unauthenticated, so
-# nothing ever saves for anyone who authenticated with `claude setup-token`
-# or runs under a hosted Agent SDK (#131). A suffix-only exception (any
-# "CLAUDE_CODE_*_TOKEN") is NOT equivalent: real hosts set other
-# CLAUDE_CODE_*_TOKEN variables for unrelated purposes (an internal
-# messaging token, observed), and exempting those from the strip too would
-# leak them into the child for no reason -- so this names the one exact
-# variable, not a shape.
-_CHILD_ENV_OAUTH_NAME = "CLAUDE_CODE_OAUTH_TOKEN"
+# #95 used to strip the whole CLAUDE_CODE_* prefix as parent-session
+# identity, with one exact exemption for the child's own login credential
+# (#131: stripping it left `claude -p` unauthenticated for anyone who logs in
+# with a long-lived token or runs under a hosted Agent SDK). #898 round 15
+# replaced the prefix with an explicit list of session names, in config
+# (`haiku.strip_session_env`); the credential is simply never on it, so the
+# child inherits it like any other variable. The prefix had also been
+# removing provider selection (CLAUDE_CODE_USE_BEDROCK, #316) and other
+# user-set CLAUDE_CODE_* settings that were never session identity.
 
 # Set on the child, read by scripts/resolve-paths.sh (#204). Shared here as a
 # constant so the tests pin one spelling against both sides of the contract.
@@ -313,64 +316,64 @@ def _choose_summarizer_provider() -> str:
     return "claude"
 
 
-def _child_env() -> dict[str, str]:
-    """Environment for the nested ``claude -p`` with the PARENT session vars
-    stripped.
+@contextlib.contextmanager
+def _without_session_env(names: tuple[str, ...]):
+    """Remove ``names`` from this process's environment for the duration of
+    the block, then put back exactly what was there.
 
-    ``CLAUDECODE`` blocks nested sessions. ``CLAUDE_JOB_DIR`` and the
-    ``CLAUDE_CODE_*`` family (e.g. ``CLAUDE_CODE_SESSION_ID``) identify the
-    parent Claude Code session; if they leak into the subprocess it looks like
-    a resumable session to anything keying off them (#95). Everything else is
-    passed through unchanged — including ``CLAUDE_CODE_OAUTH_TOKEN``, which
-    shares the ``CLAUDE_CODE_`` prefix only by accident; see
-    ``_CHILD_ENV_OAUTH_NAME`` for the one exact exemption, deliberately not
-    widened to the rest of the family (#898).
+    The one place this module touches the environment by a name it did not
+    write out: ``names`` is ``haiku.strip_session_env`` from config (see
+    ``_configured_strip_session_env``), so a future Claude Code session
+    variable can be listed without a code release (#898 round 15). Removing
+    from ``os.environ`` -- rather than handing the child an ``env=`` copy --
+    lets the nested CLI inherit everything else exactly as the hook got it.
+    Putting the values back afterwards keeps anything later in this process
+    that reads one of them (``pipeline.host``) working.
+    """
+    removed = {}
+    for name in names:
+        value = os.environ.pop(name, None)
+        if value is not None:
+            removed[name] = value
+    try:
+        yield
+    finally:
+        for name, value in removed.items():
+            os.environ[name] = value
+
+
+@contextlib.contextmanager
+def _summarizer_environment():
+    """This process's environment, made fit for the nested ``claude -p`` to
+    inherit, for the duration of the block.
+
+    Nothing is copied and nothing is walked: the child inherits this
+    process's environment -- the user's Claude Code login included, exactly
+    like any process a hook starts -- minus the parent session's own
+    variables (``haiku.strip_session_env``, #95: without that the child looks
+    like a resumable part of the parent's session). The login credential is
+    never on that list (#131).
 
     ``REMEMBER_NESTED_SUMMARIZER`` is then set as the positive counterpart to
-    that stripping. Removing the parent markers is what lets the child start at
-    all, and it also erases every trace that it IS a child — so the plugin's own
-    hooks fire inside it, resolve a project from ``cwd`` (an isolated, per-call
-    directory since #724 -- previously the shared ``gettempdir()``), and
-    scaffold a memory directory there (#204). The hooks were always
-    meant to no-op here; they were reading a signal this function had deleted.
-    A marker we set ourselves cannot be deleted by us and cannot false-positive
-    on an unrelated session, which ``CLAUDE_CODE_ENTRYPOINT=sdk-cli`` would.
-
-    ``CLAUDE_PROJECT_DIR`` goes too. It does not carry the ``CLAUDE_CODE_``
-    prefix, so it was never covered by the rule above — while #204's report, and
-    ``resolve-paths.sh``'s own comments, both describe the child as having none.
-    Claude Code 2.1.219 overwrites it from the sandbox cwd, so the leak is inert
-    there and is not the mechanism behind any report; a CLI that honoured the
-    inherited value would aim the summarizer's hooks at the REAL project, which
-    is the failure @ehutchinsonSFDC saw. Cheap to close, and it makes the code
-    say what the comments already claim.
-
-    Nothing else is special-cased by name (#898 round 13: the earlier strip
-    of one named API key is gone). The operator's own ``haiku.drop_env`` list
-    -- exact names or ``*``/``?`` globs, see ``_configured_drop_env`` -- is the
-    one opt-in way to keep more variables out of the child, and it applies to
-    every name, the one kept OAuth credential included.
+    that removal. Removing the parent markers is what lets the child start at
+    all, and it also erases every trace that it IS a child -- so the plugin's
+    own hooks would fire inside it, resolve a project from ``cwd`` (an
+    isolated, per-call directory since #724), and scaffold a memory directory
+    there (#204). A marker we set ourselves cannot be deleted by us and cannot
+    false-positive on an unrelated session, which ``CLAUDE_CODE_ENTRYPOINT=
+    sdk-cli`` would. Its previous state is restored afterwards, so the
+    plugin never goes silent in the user's real session.
     """
-    drop_globs = _configured_drop_env()
-    # Every name below written out (#898 round 10), never compared against a
-    # constant that holds it. The drop list is one more exclusion in the same
-    # single walk -- the environment is never read by a configured name.
-    child = {
-        k: v
-        for k, v in os.environ.items()
-        if (
-            k == "CLAUDE_CODE_OAUTH_TOKEN"
-            or (
-                k != "CLAUDECODE"
-                and k != "CLAUDE_JOB_DIR"
-                and k != "CLAUDE_PROJECT_DIR"
-                and not k.startswith("CLAUDE_CODE_")
-            )
-        )
-        and not any(fnmatch.fnmatchcase(k, g) for g in drop_globs)
-    }
-    child["REMEMBER_NESTED_SUMMARIZER"] = "1"
-    return child
+    previous_marker = os.environ.get("REMEMBER_NESTED_SUMMARIZER")
+    with _without_session_env(_configured_strip_session_env()):
+        os.environ["REMEMBER_NESTED_SUMMARIZER"] = "1"
+        try:
+            yield
+        finally:
+            if previous_marker is None:
+                os.environ.pop("REMEMBER_NESTED_SUMMARIZER", None)
+            else:
+                os.environ["REMEMBER_NESTED_SUMMARIZER"] = previous_marker
 
 
 def _usage_from_failure(stdout: object) -> TokenUsage | None:
@@ -473,12 +476,12 @@ def _failure_detail(stdout: str, stderr: str) -> str:
 
 
 # The nested `claude -p` needs its own credentials. Normally that is the
-# host's own OAuth credential, kept across the strip by
-# _CHILD_ENV_OAUTH_NAME above (#131). But some hosts never place it
+# host's own OAuth credential, which the child inherits -- it is never on the
+# `haiku.strip_session_env` list (#131). But some hosts never place it
 # in a hook subprocess's environment at all — the
 # Claude Code desktop / Agent SDK host withholds it from spawned children — so
-# there is nothing to keep and `claude -p` is unauthenticated: the silent-save
-# outage of #129 on a machine that *did* run `claude setup-token`.
+# there is nothing to inherit and `claude -p` is unauthenticated: the
+# silent-save outage of #129 on a machine that *had* a long-lived login.
 #
 # #860, round 3: there is no recovery path here at all any more. The plugin
 # used to offer one -- a recovery token the operator could hand it, via a
@@ -597,43 +600,67 @@ def _config_candidates() -> list[str]:
 # token; this file reads neither any more, for any purpose.
 
 
-# ── haiku.drop_env (#898 round 13; replaces the #703 strip) ──────────────────
+# ── haiku.strip_session_env (#95; #898 round 15) ────────────────────────────
 #
-# #703 (reported in #693) stripped one named API key from the nested call, on
-# a `haiku.*` policy key. #898 round 13 (maintainer decision) removed both: the
-# nested `claude -p` inherits the environment exactly as Claude Code gave it,
-# no variable special-cased by name, and the directory scan has no credential
-# name left to cite in this module. `haiku.drop_env` is the one generic,
-# opt-in way to keep variables out of that child: a list of exact names or
-# shell-style globs (`*`, `?`), matched against variable NAMES only. Default:
-# an empty list, so nothing is dropped.
+# The parent Claude Code session's own variables are removed from this
+# process's environment for the duration of the spawn, so the nested
+# `claude -p` -- which otherwise inherits everything, the user's Claude Code
+# login included -- does not pass as that session. Which names is config,
+# not code (maintainer decision, #898 round 15): the shipped list is the
+# plugin's bundled config.json, `haiku.strip_session_env`, and a user-global
+# or trusted per-project layer replaces it (a list replaces, it does not
+# append -- the same deep-merge every config layer gets). A future Claude
+# Code session variable is added there without a code release.
 #
-# Why the drop happens inside `_child_env()`'s existing walk and not anywhere
-# else: that walk already builds the child mapping by excluding names, so one
-# more exclusion there reads nothing new. No variable is looked up by a name
-# known only at run time, no alias of the environment is taken, nothing is
-# passed wholesale, and no parameter is named after it -- the read shapes the
-# directory scan cites (claude-directory-publishing triggers.md).
+# Why each shipped name is on the list (config.json is JSON and carries no
+# comments, so the reasons live here, beside the code that applies them):
+#   CLAUDECODE                   -- says "already inside a session"; the CLI refuses to nest under it.
+#   CLAUDE_JOB_DIR               -- the parent's background-job dir; the child would write into it (#95).
+#   CLAUDE_PROJECT_DIR           -- the real project; the child's hooks would aim at it (#204).
+#   CLAUDE_CODE_SESSION_ID       -- the parent's session id; the child would pass as that session (#95).
+#   CLAUDE_CODE_ENTRYPOINT       -- how the parent was launched: parent identity, not configuration (#95).
+#   CLAUDE_CODE_CHILD_SESSION    -- parent-session state Claude Code sets for its own children (seen on 2.1.280).
+#   CLAUDE_CODE_SESSION_ATTENDED -- whether a person attends the parent session; never true of this child.
+#   CLAUDE_CODE_EXECPATH         -- the parent's own executable; the nested CLI sets its own.
+#   CLAUDE_CODE_MESSAGING_SOCKET -- the parent session's messaging channel; the child must not speak on it.
+#   CLAUDE_CODE_MESSAGING_TOKEN  -- the handshake paired with that channel; same reason.
+#   CLAUDE_CODE_SSE_PORT         -- the parent's IDE connection; the child would attach to the user's IDE.
+# Never on the list: the child's own login credential (#131), which it simply
+# inherits. Not on it either, because they are configuration rather than
+# session identity: provider selection such as CLAUDE_CODE_USE_BEDROCK
+# (#316) and any other CLAUDE_CODE_* setting a user exports -- the old prefix
+# strip removed those too.
+#
+# #726: the merged config never carries an untrusted project layer's `haiku`
+# block, and `_config_candidates` skips a project-local config.json, so a
+# cloned repository cannot shorten this list.
 
-# A name, or a `*`/`?` glob over name characters. Anything else -- `=`, `-`,
-# brackets, whitespace -- is ignored with a warning.
-_DROP_ENV_ENTRY = re.compile(r"[A-Za-z_*?][A-Za-z0-9_*?]*")
+# The plugin's own bundled defaults: the lowest layer lib-memory-dir.sh merges
+# (PIPELINE_DIR/config.json). Read directly as the last candidate so a direct
+# python call with no merged config still gets the shipped list.
+_BUNDLED_CONFIG = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.json"
+)
+
+# A variable name. Anything else -- `=`, `-`, globs, whitespace -- is ignored
+# with a warning.
+_SESSION_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
-def _configured_drop_env() -> tuple[str, ...]:
-    """`haiku.drop_env` from config: the names/globs to keep out of the child.
+def _configured_strip_session_env() -> tuple[str, ...]:
+    """`haiku.strip_session_env`: the parent-session variable names to keep
+    out of the nested call.
 
-    The first config candidate that HAS the key decides, the same precedence
-    every other `haiku.*` read here uses. A value that is not a list drops
-    nothing; an entry that is not a name or a glob is skipped -- both are
-    reported, and neither is ever echoed: an operator may have pasted
-    ``NAME=value`` with a real value in it, and the daily log is a file on disk.
-
-    On Windows the process environment's names are upper-cased by Python, so
-    the globs are upper-cased there too: Windows names are case-insensitive,
-    and a lower-case entry should still match.
+    The first config layer that HAS the key decides, the same precedence
+    every other `haiku.*` read here uses, with the bundled default last. A
+    value that is not a list is reported and skipped, so the next layer's
+    list (in the end, the shipped one) still applies -- a typo in a user
+    file must not silently turn the #95 strip off. An entry that is not a
+    variable name is skipped -- reported, never echoed: someone may have
+    pasted ``NAME=value`` with a real value in it, and the daily log is a
+    file on disk. No list anywhere is said out loud too.
     """
-    for path in _config_candidates():
+    for path in [*_config_candidates(), _BUNDLED_CONFIG]:
         try:
             with open(path, encoding="utf-8") as f:
                 cfg = json.load(f)
@@ -642,32 +669,38 @@ def _configured_drop_env() -> tuple[str, ...]:
         if not isinstance(cfg, dict):
             continue
         haiku_cfg = cfg.get("haiku")
-        if not isinstance(haiku_cfg, dict) or "drop_env" not in haiku_cfg:
+        if not isinstance(haiku_cfg, dict) or "strip_session_env" not in haiku_cfg:
             continue
-        value = haiku_cfg["drop_env"]
+        value = haiku_cfg["strip_session_env"]
         if not isinstance(value, list):
             _warn(
-                f"WARNING: ignoring haiku.drop_env in {path} -- a "
-                f"{type(value).__name__} value, not a list of variable names or "
-                "globs; nothing is dropped from the summarizer's environment"
+                f"WARNING: ignoring haiku.strip_session_env in {path} -- a "
+                f"{type(value).__name__} value, not a list of variable names; "
+                "the next config layer's list applies instead"
             )
-            return ()
-        globs = []
+            continue
+        names = []
         for index, entry in enumerate(value):
-            if isinstance(entry, str) and _DROP_ENV_ENTRY.fullmatch(entry):
-                globs.append(entry.upper() if os.name == "nt" else entry)
+            if isinstance(entry, str) and _SESSION_ENV_NAME.fullmatch(entry):
+                names.append(entry)
                 continue
             if isinstance(entry, str):
                 shape = f"a {len(entry)}-character string"
             else:
                 shape = f"a {type(entry).__name__} value"
             _warn(
-                f"WARNING: ignoring entry {index} of haiku.drop_env in {path} -- "
-                f"{shape}, not a variable name or a */? glob over letters, digits "
-                "and underscores. The entry itself is not logged: it may hold a "
+                f"WARNING: ignoring entry {index} of haiku.strip_session_env in "
+                f"{path} -- {shape}, not a variable name (letters, digits and "
+                "underscores). The entry itself is not logged: it may hold a "
                 "pasted value"
             )
-        return tuple(globs)
+        return tuple(names)
+    _warn(
+        "WARNING: no haiku.strip_session_env list in any config layer (the "
+        "plugin's bundled config.json is missing or unreadable) -- the "
+        "summarizer inherits the parent session's own variables, which #95 "
+        "removes; reinstall the plugin or set the list in ~/.remember/config.json"
+    )
     return ()
 
 
@@ -686,25 +719,25 @@ _CREDENTIAL_FAILURE_MARKERS = (
 )
 
 
-def _drop_env_hint(detail: str) -> str:
+def _inherited_env_hint(detail: str) -> str:
     """The sentence a failure gets when it looks like a credential failure.
 
-    The discoverability half of #703, kept after #898 round 13 removed the
-    strip itself: the nested CLI inherits every variable it is given, and some
-    of those can out-rank the CLI's own login. This names no variable -- it
-    cannot know which one -- only the knob that keeps one out. Empty string
-    when the failure does not look like a credential failure. It lands in the
-    RuntimeError, which `save-session.sh` surfaces into `hook-errors.log` --
-    the place an operator is already looking (#694).
+    The discoverability half of #703: the nested CLI inherits the environment
+    the user started their coding agent from, and a variable set there for
+    some other tool can out-rank the CLI's own login. This names no variable
+    -- it cannot know which one. Empty string when the failure does not look
+    like a credential failure. It lands in the RuntimeError, which
+    `save-session.sh` surfaces into `hook-errors.log` -- the place an
+    operator is already looking (#694).
     """
     lowered = detail.lower()
     if not any(marker in lowered for marker in _CREDENTIAL_FAILURE_MARKERS):
         return ""
     return (
-        " -- the nested CLI inherits this environment as-is, and a credential "
-        "variable set there for some other tool can out-rank your own login; "
-        "list its name (or a glob such as PREFIX_*) in `haiku.drop_env` in "
-        "config.json to keep it out of the summarizer (#703, #898)"
+        " -- the nested CLI inherits the environment you started your coding "
+        "agent from, and a credential variable set there for some other tool "
+        "can out-rank your own login; unset it in that environment to keep it "
+        "away from the summarizer (#703, #898)"
     )
 
 
@@ -984,9 +1017,10 @@ def _isolated_summarizer_cwd():
 # mechanism, `-c shell_environment_policy.inherit=none` in
 # `_build_codex_cmd` (#798). Unlike the Claude route, Codex's
 # `--sandbox read-only` still executes whatever commands the model issues
-# (see _build_codex_cmd's docstring below), so stripping a deny-list off an
-# otherwise-full os.environ (what _child_env() does) is not enough -- a
-# command like `env`/`printenv` reads the child's environment directly.
+# (see _build_codex_cmd's docstring below), so inheriting the environment
+# minus the parent session's names (what the Claude route does) is not
+# enough -- a command like `env`/`printenv` reads the child's environment
+# directly.
 # This keeps only what the CLI itself needs to run and resolve its own
 # filesystem-based auth; #798's shell_environment_policy override is what
 # keeps a command spawned BY that CLI from seeing this same dict.
@@ -1023,21 +1057,16 @@ _CODEX_CHILD_ENV_ALLOW = frozenset({
     "SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS",
 })
 
-# #792 (CI, windows-latest): matched case-sensitively, this allow-list would
-# need BOTH "HTTPS_PROXY" and "https_proxy" listed to cover either casing a
-# user might set -- and even then, CPython's own os.py folds EVERY
-# os.environ key to uppercase on `nt` at process-startup time
-# (_createenviron's `encodekey = key.upper()`, applied when the initial
-# `data` dict is built from the inherited environment, not just when Python
-# itself calls __setitem__), so a lowercase entry in this allow-list could
-# never match anything on Windows regardless -- os.environ.items() never
-# yields a lowercase key there. Matching case-insensitively removes the
-# need to enumerate both cases at all: one canonical name per variable
-# above, compared against `k.upper()` below, works identically on a
-# platform that preserves case (POSIX -- a real https_proxy still gets
-# through, since "HTTPS_PROXY" is in the allow-list and .upper() of either
-# side lands on the same string) and one that folds it (Windows).
-_CODEX_CHILD_ENV_ALLOW_UPPER = frozenset(name.upper() for name in _CODEX_CHILD_ENV_ALLOW)
+# #792 (CI, windows-latest): CPython's os.py folds EVERY os.environ key to
+# uppercase on `nt` (_createenviron's `encodekey = key.upper()`), and a
+# lookup there upper-cases the name too -- so on Windows one read of the
+# canonical upper-case name finds a variable set in any case. A
+# case-preserving platform (POSIX) keeps `https_proxy` and `HTTPS_PROXY`
+# apart, and some HTTP client libraries only ever check the lowercase form,
+# so `_codex_child_env` reads those three lowercase proxy names too, there
+# only (#898 round 15: by literal name, where #792 had compared every key of
+# a walk against this set case-insensitively). `_CODEX_CHILD_ENV_ALLOW` above
+# stays the reference list the literal table is tested against.
 
 
 def _codex_child_env() -> dict[str, str]:
@@ -1056,23 +1085,52 @@ def _codex_child_env() -> dict[str, str]:
     host authenticates it rather than a filesystem ``auth.json`` (#751).
     ``HTTPS_PROXY``/``HTTP_PROXY``/``NO_PROXY`` and
     ``SSL_CERT_FILE``/``NODE_EXTRA_CA_CERTS``: anyone running this behind a
-    proxy or a custom CA bundle (#751). Matched case-insensitively against
-    the parent's real ``os.environ`` (#792) -- some HTTP client libraries
-    only ever check the lowercase form of the proxy names, and Windows
-    folds every ``os.environ`` key to uppercase regardless of which case
-    the variable was actually set under, so a case-sensitive match would
-    either miss the lowercase form everywhere, or need both cases listed
-    and still never match the lowercase one on Windows.
+    proxy or a custom CA bundle (#751). The three proxy names are also read
+    in lowercase on a case-preserving platform -- some HTTP client libraries
+    only ever check that form -- while on Windows the upper-case read already
+    finds either casing (#792).
 
     Nothing else -- no Anthropic key, no cloud credential, no unrelated
     shell secret this process's own environment happens to carry -- is
     passed through, because a command the model runs inside Codex's
     read-only sandbox can read the child's environment directly.
     """
-    child = {
-        k: v for k, v in os.environ.items()
-        if k.upper() in _CODEX_CHILD_ENV_ALLOW_UPPER
-    }
+    # #898 round 15: one literal read per allowed name, never a walk of the
+    # environment. On Windows, os.environ lookups already ignore case (#792),
+    # so the upper-case read finds a variable set in any case there; on a
+    # case-preserving platform the lowercase proxy spellings some HTTP
+    # clients only ever check are read too, under their own names.
+    child = {}
+    for name, value in (
+        ("PATH", os.environ.get("PATH")),
+        ("HOME", os.environ.get("HOME")),
+        ("LANG", os.environ.get("LANG")),
+        ("LC_ALL", os.environ.get("LC_ALL")),
+        ("CODEX_HOME", os.environ.get("CODEX_HOME")),
+        ("TMPDIR", os.environ.get("TMPDIR")),
+        ("TEMP", os.environ.get("TEMP")),
+        ("TMP", os.environ.get("TMP")),
+        ("SYSTEMROOT", os.environ.get("SYSTEMROOT")),
+        ("USERPROFILE", os.environ.get("USERPROFILE")),
+        ("APPDATA", os.environ.get("APPDATA")),
+        ("PATHEXT", os.environ.get("PATHEXT")),
+        ("CODEX_API_KEY", os.environ.get("CODEX_API_KEY")),
+        ("HTTPS_PROXY", os.environ.get("HTTPS_PROXY")),
+        ("HTTP_PROXY", os.environ.get("HTTP_PROXY")),
+        ("NO_PROXY", os.environ.get("NO_PROXY")),
+        ("SSL_CERT_FILE", os.environ.get("SSL_CERT_FILE")),
+        ("NODE_EXTRA_CA_CERTS", os.environ.get("NODE_EXTRA_CA_CERTS")),
+    ):
+        if value is not None:
+            child[name] = value
+    if os.name != "nt":
+        for name, value in (
+            ("https_proxy", os.environ.get("https_proxy")),
+            ("http_proxy", os.environ.get("http_proxy")),
+            ("no_proxy", os.environ.get("no_proxy")),
+        ):
+            if value is not None:
+                child[name] = value
     child["REMEMBER_NESTED_SUMMARIZER"] = "1"
     return child
 
@@ -1337,7 +1395,6 @@ def call_haiku(
     # MAX_ARG_STRLEN (128KB per single argument), which raises E2BIG ("Argument
     # list too long") at exec time and silently kills saves of long sessions.
     # `claude -p` with no positional prompt reads the prompt from stdin.
-    child = _child_env()
 
     # Bound the spawn before spawning (#204). Every defence above this line
     # depends on a signal reaching the child — an env marker a host can redact,
@@ -1361,7 +1418,10 @@ def call_haiku(
 
     def _run(isolate_hooks: bool):
         try:
-            with _isolated_summarizer_cwd() as summarizer_cwd:
+            # No env= here: the child inherits this process's environment,
+            # minus the parent session's own variables, for exactly as long
+            # as the spawn takes (`_summarizer_environment`, #95/#204).
+            with _isolated_summarizer_cwd() as summarizer_cwd, _summarizer_environment():
                 return subprocess.run(
                     _build_cmd(tools, isolate_hooks),
                     input=prompt,
@@ -1372,7 +1432,6 @@ def call_haiku(
                     encoding="utf-8",
                     errors="replace",
                     timeout=timeout,
-                    env=child,
                     cwd=summarizer_cwd,
                 )
         except subprocess.TimeoutExpired as timed_out:
@@ -1440,8 +1499,8 @@ def call_haiku(
                     "WARNING: the un-isolated retry failed with the same "
                     f"authentication error ({_failure_detail(result.stdout, result.stderr)}) "
                     "-- hook isolation was not the cause. The CLI's own saved "
-                    "login has expired; refresh it (run `claude setup-token`, "
-                    "or log in again in your coding agent's own CLI). This "
+                    "login has expired; log in again with "
+                    "your coding agent's own CLI. This "
                     "plugin reads no credential of its own any more -- there "
                     "is no setting here to configure (#129/#131/#860)."
                 )
@@ -1453,7 +1512,7 @@ def call_haiku(
         detail = _failure_detail(result.stdout, result.stderr)
         raise RuntimeError(
             f"claude exited {result.returncode}: {detail}"
-            f"{_drop_env_hint(detail)}"
+            f"{_inherited_env_hint(detail)}"
         )
 
     return _parse_response(result.stdout)

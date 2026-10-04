@@ -109,11 +109,12 @@ def test_retry_failing_with_the_same_auth_error_names_isolation_as_innocent(mock
         "a retry failing with the identical auth error must say isolation "
         "was not the cause:\n" + warnings
     )
-    assert "claude setup-token" in warnings, (
+    assert "log in again with your coding agent's own CLI" in warnings, (
         "the correction must point at refreshing the CLI's own login (#860, "
         "round 3: the plugin reads no credential of its own any more, so "
         "there is no userConfig setting left to point at):\n" + warnings
     )
+    assert "setup-token" not in warnings, "#898 round 15: no credential command is named"
     assert mock_run.call_count == 2, "the retry must actually have run"
 
 
