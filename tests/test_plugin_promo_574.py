@@ -273,6 +273,8 @@ class TestPromosFileIsData:
         (fake_plugin_root / "scripts").symlink_to(REPO_ROOT / "scripts")
         (fake_plugin_root / "prompts").symlink_to(REPO_ROOT / "prompts")
         (fake_plugin_root / "pipeline").symlink_to(REPO_ROOT / "pipeline")
+        # the install manifest is resolve-paths.sh's plugin-root marker (#898)
+        (fake_plugin_root / ".claude-plugin").symlink_to(REPO_ROOT / ".claude-plugin")
         (fake_plugin_root / "promos.json").write_text(
             json.dumps({"promos": [{"id": "no-url-promo", "text": "hello", "installed_key": "x@y"}]}),
             encoding="utf-8",
@@ -302,6 +304,8 @@ class TestPromosFileIsData:
         (fake_plugin_root / "scripts").symlink_to(REPO_ROOT / "scripts")
         (fake_plugin_root / "prompts").symlink_to(REPO_ROOT / "prompts")
         (fake_plugin_root / "pipeline").symlink_to(REPO_ROOT / "pipeline")
+        # the install manifest is resolve-paths.sh's plugin-root marker (#898)
+        (fake_plugin_root / ".claude-plugin").symlink_to(REPO_ROOT / ".claude-plugin")
         result = subprocess.run(
             ["bash", str(SESSION_START)],
             input=_payload(),
@@ -326,6 +330,8 @@ class TestPromosFileIsData:
         (fake_plugin_root / "scripts").symlink_to(REPO_ROOT / "scripts")
         (fake_plugin_root / "prompts").symlink_to(REPO_ROOT / "prompts")
         (fake_plugin_root / "pipeline").symlink_to(REPO_ROOT / "pipeline")
+        # the install manifest is resolve-paths.sh's plugin-root marker (#898)
+        (fake_plugin_root / ".claude-plugin").symlink_to(REPO_ROOT / ".claude-plugin")
         long_text = "x" * 130
         (fake_plugin_root / "promos.json").write_text(
             json.dumps(
