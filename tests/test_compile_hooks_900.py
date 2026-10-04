@@ -125,22 +125,29 @@ def test_strip_is_idempotent():
     assert once == twice
 
 
-# -- inline_sources -----------------------------------------------------
+# -- link_sources -------------------------------------------------------
 
-def test_inline_sources_substitutes_a_sibling_file():
+_CALL = '${1+"$@"}'
+
+
+def test_link_sources_turns_a_source_into_a_call_and_keeps_the_file():
     contents = {
         "scripts/hook.sh": '#!/usr/bin/env bash\nsource "${X}/scripts/lib.sh"\necho after\n',
         "scripts/lib.sh": '#!/usr/bin/env bash\necho from-lib\n',
     }
-    out = compile_hooks.inline_sources("scripts/hook.sh", contents)
-    assert 'source "${X}/scripts/lib.sh"' not in out
-    assert "echo from-lib" in out
-    assert "echo after" in out
+    body, libs = compile_hooks.link_sources("scripts/hook.sh", contents)
+    assert 'source "${X}/scripts/lib.sh"' not in body
+    assert f"__remember_src_lib {_CALL}" in body.splitlines()
+    assert "echo after" in body
+    assert list(libs) == ["scripts/lib.sh"]
+    assert "echo from-lib" in libs["scripts/lib.sh"]
 
 
-def test_inline_sources_include_guard_dedups_a_diamond():
-    # hook sources A and B; B also sources A -- A's body must appear
-    # exactly once in the final output (include-guard semantics).
+def test_link_sources_defines_one_wrapper_per_file_in_a_diamond():
+    # hook sources A and B; B also sources A -- A is ONE library (one
+    # wrapper definition), called from both sites. Whether the second call
+    # does anything is A's own runtime guard's business, exactly as with
+    # `source` (see the round-4 behaviour tests below).
     contents = {
         "scripts/hook.sh": (
             'source "${X}/scripts/a.sh"\n'
@@ -149,31 +156,34 @@ def test_inline_sources_include_guard_dedups_a_diamond():
         "scripts/a.sh": 'echo from-a\n',
         "scripts/b.sh": 'source "${X}/scripts/a.sh"\necho from-b\n',
     }
-    out = compile_hooks.inline_sources("scripts/hook.sh", contents)
-    assert out.count("echo from-a") == 1
-    assert "echo from-b" in out
-    assert 'source "${X}/scripts/a.sh"' not in out
+    body, libs = compile_hooks.link_sources("scripts/hook.sh", contents)
+    assert list(libs) == ["scripts/a.sh", "scripts/b.sh"]
+    assert f"__remember_src_a {_CALL}" in libs["scripts/b.sh"]
+    assert body.count("__remember_src_a ") == 1
+    compiled = compile_hooks.compile_hook("scripts/hook.sh", contents)
+    assert compiled.count("echo from-a") == 1
+    assert 'source "${X}/scripts/a.sh"' not in compiled
 
 
-def test_inline_sources_raises_on_cycle():
+def test_link_sources_raises_on_cycle():
     contents = {
         "scripts/hook.sh": 'source "${X}/scripts/a.sh"\n',
         "scripts/a.sh": 'source "${X}/scripts/hook.sh"\n',
     }
     with pytest.raises(compile_hooks.InlineError):
-        compile_hooks.inline_sources("scripts/hook.sh", contents)
+        compile_hooks.link_sources("scripts/hook.sh", contents)
 
 
-def test_inline_sources_raises_on_missing_target():
+def test_link_sources_raises_on_missing_target():
     contents = {"scripts/hook.sh": 'source "${X}/scripts/missing.sh"\n'}
     with pytest.raises(compile_hooks.InlineError):
-        compile_hooks.inline_sources("scripts/hook.sh", contents)
+        compile_hooks.link_sources("scripts/hook.sh", contents)
 
 
-def test_inline_sources_raises_on_unresolvable_target():
+def test_link_sources_raises_on_unresolvable_target():
     contents = {"scripts/hook.sh": 'source "${X}/not-a-shell-file"\n'}
     with pytest.raises(compile_hooks.InlineError):
-        compile_hooks.inline_sources("scripts/hook.sh", contents)
+        compile_hooks.link_sources("scripts/hook.sh", contents)
 
 
 def test_source_line_does_not_match_a_quoted_argument_named_source():
@@ -198,14 +208,14 @@ def test_unresolved_sources_reports_remaining_lines():
 # real patterns from this repo's own hooks -- confirmed by direct
 # inspection during review (session-start-hook.sh:217,
 # post-tool-hook.sh:833) -- so both are pinned here against the real text,
-# not just a synthetic stand-in.
+# not just a synthetic stand-in. Round 4: neither the prefix nor the
+# trailing guard is rewritten any more -- both apply to the call exactly as
+# they applied to `source` (the behaviour tests below run both forms).
 
-def test_inline_sources_handles_an_assignment_prefixed_trailing_guard():
-    # REMEMBER_PATHS_SOFT_FAIL=1 source "..." || exit 0 -- a VAR=value
-    # prefix before a shell BUILTIN (source/. is one) persists in the
-    # current shell afterward, so it must be emitted as its own statement;
-    # the trailing `|| exit 0` guards against sourcing FAILING, which
-    # inlining makes moot, so it must be dropped rather than left dangling.
+def test_link_sources_keeps_an_assignment_prefix_and_trailing_guard_on_the_call():
+    # REMEMBER_PATHS_SOFT_FAIL=1 source "..." || exit 0: the `|| exit 0` is
+    # NOT dead code -- resolve-paths.sh `return 1`s on a soft failure and
+    # this guard is what stops the hook. It stays, on the call.
     contents = {
         "scripts/hook.sh": (
             'FOO=1 source "${X}/scripts/lib.sh" || exit 0\n'
@@ -213,20 +223,17 @@ def test_inline_sources_handles_an_assignment_prefixed_trailing_guard():
         ),
         "scripts/lib.sh": 'echo from-lib\n',
     }
-    out = compile_hooks.inline_sources("scripts/hook.sh", contents)
-    assert "FOO=1" in out
-    assert "echo from-lib" in out
-    assert "echo after" in out
-    assert "|| exit 0" not in out
-    assert compile_hooks.unresolved_sources(out) == []
+    body, libs = compile_hooks.link_sources("scripts/hook.sh", contents)
+    assert f"FOO=1 __remember_src_lib {_CALL} || exit 0" in body.splitlines()
+    assert "echo after" in body
+    assert "echo from-lib" in libs["scripts/lib.sh"]
+    assert compile_hooks.unresolved_sources(body) == []
 
 
-def test_inline_sources_preserves_a_conditional_gate():
+def test_link_sources_preserves_a_conditional_gate():
     # COND || source "..." decides WHETHER sourcing happens at all (a
     # lazy-init / cost-avoidance gate) -- dropping COND would be a
-    # behavior change, not a correctness-neutral inlining. The condition
-    # must survive, with the inlined body as the right-hand side of the
-    # same `||`.
+    # behavior change. The condition survives, gating the call.
     contents = {
         "scripts/hook.sh": (
             '[ -n "${ALREADY:-}" ] || source "${X}/scripts/lib.sh"\n'
@@ -234,11 +241,9 @@ def test_inline_sources_preserves_a_conditional_gate():
         ),
         "scripts/lib.sh": 'echo from-lib\n',
     }
-    out = compile_hooks.inline_sources("scripts/hook.sh", contents)
-    assert '[ -n "${ALREADY:-}" ] ||' in out
-    assert "echo from-lib" in out
-    assert "echo after" in out
-    assert compile_hooks.unresolved_sources(out) == []
+    body, _libs = compile_hooks.link_sources("scripts/hook.sh", contents)
+    assert f'[ -n "${{ALREADY:-}}" ] || __remember_src_lib {_CALL}' in body.splitlines()
+    assert compile_hooks.unresolved_sources(body) == []
 
 
 def test_source_detection_never_fires_inside_an_unrelated_single_quoted_string():
@@ -253,9 +258,9 @@ def test_source_detection_never_fires_inside_an_unrelated_single_quoted_string()
     assert compile_hooks.unresolved_sources(line) == []
 
 
-def test_inline_sources_does_not_match_inside_an_unrelated_quoted_string():
+def test_link_sources_does_not_match_inside_an_unrelated_quoted_string():
     # Positive control for the test above: a REAL source statement must
-    # still be found and inlined even in a file that elsewhere carries an
+    # still be found and linked even in a file that elsewhere carries an
     # unrelated quoted jq-like filter -- the quote-awareness must never
     # swallow a genuine statement, only skip unrelated quoted text.
     contents = {
@@ -265,26 +270,26 @@ def test_inline_sources_does_not_match_inside_an_unrelated_quoted_string():
         ),
         "scripts/lib.sh": 'echo from-lib\n',
     }
-    out = compile_hooks.inline_sources("scripts/hook.sh", contents)
-    assert "echo from-lib" in out
-    assert "jq -s" in out
-    assert compile_hooks.unresolved_sources(out) == []
+    body, libs = compile_hooks.link_sources("scripts/hook.sh", contents)
+    assert list(libs) == ["scripts/lib.sh"]
+    assert "jq -s 'reduce .[] as $x ({}; . * $x)' > /dev/null" in body
+    assert compile_hooks.unresolved_sources(body) == []
 
 
-def test_inline_sources_raises_on_a_single_quoted_sh_target():
+def test_link_sources_raises_on_a_single_quoted_sh_target():
     # Audit finding (Class B): a single-quoted target naming a real `.sh`
     # sibling must fail loudly, not be silently passed through unresolved
     # the way the first SOURCE_LINE-only draft did.
     contents = {"scripts/hook.sh": "source '${X}/scripts/lib.sh'\n"}
     with pytest.raises(compile_hooks.InlineError):
-        compile_hooks.inline_sources("scripts/hook.sh", contents)
+        compile_hooks.link_sources("scripts/hook.sh", contents)
 
 
-def test_inline_sources_raises_on_a_bare_unquoted_sh_target():
+def test_link_sources_raises_on_a_bare_unquoted_sh_target():
     # Same finding, the other spelling: no quotes at all.
     contents = {"scripts/hook.sh": "source ${X}/scripts/lib.sh\n"}
     with pytest.raises(compile_hooks.InlineError):
-        compile_hooks.inline_sources("scripts/hook.sh", contents)
+        compile_hooks.link_sources("scripts/hook.sh", contents)
 
 
 def test_cli_exits_non_zero_when_a_hook_name_is_missing(tmp_path):
@@ -299,17 +304,84 @@ def test_cli_exits_non_zero_when_a_hook_name_is_missing(tmp_path):
     assert rc != 0
 
 
-def test_a_real_statement_followed_by_unrelated_code_on_the_same_line_fails_loudly():
-    # A `;`-separated REAL second statement after a plain source call is
-    # not a redirect/exit-status guard and is not observed anywhere in
-    # this repo's own hooks -- InlineError is the correct, safe response
-    # (never silently drop code that was not a recognised guard shape).
+def test_a_real_statement_after_a_source_on_the_same_line_is_kept_intact():
+    # Rounds 1-3 refused this (InlineError): pasting a file's body in place
+    # of `source` had nowhere to put the rest of the line. A call does --
+    # the rest of the line is simply left where it was.
     contents = {
         "scripts/hook.sh": 'source "${X}/scripts/lib.sh"; echo also-this\n',
         "scripts/lib.sh": 'echo from-lib\n',
     }
-    with pytest.raises(compile_hooks.InlineError):
-        compile_hooks.inline_sources("scripts/hook.sh", contents)
+    body, _libs = compile_hooks.link_sources("scripts/hook.sh", contents)
+    assert f"__remember_src_lib {_CALL}; echo also-this" in body.splitlines()
+
+
+@pytest.mark.parametrize("stmt", [
+    "local x=1",
+    "declare -a arr=()",
+    "typeset y",
+    "shift",
+    "set -- a b",
+    "if true; then local z; fi",
+])
+def test_a_library_statement_that_changes_meaning_in_a_function_fails_the_build(stmt):
+    # A sourced file's top-level `local`/`declare` and `shift`/`set --`
+    # would mean something else inside the wrapper function -- refused
+    # loudly rather than shipped with a changed meaning.
+    contents = {
+        "scripts/hook.sh": 'source "${X}/scripts/lib.sh"\n',
+        "scripts/lib.sh": f'{stmt}\necho from-lib\n',
+    }
+    with pytest.raises(compile_hooks.InlineError, match="would mean something different"):
+        compile_hooks.compile_hook("scripts/hook.sh", contents)
+
+
+def test_a_librarys_own_functions_may_use_local_and_queries_are_fine():
+    # Positive control for the refusal above: `local` inside a function
+    # the library defines -- at column 0 or indented inside an `if`, the
+    # shape detect-tools.sh's lazy `_remember_python` has -- is that
+    # function's own, and a `declare -F`/`-f` query changes nothing.
+    contents = {
+        "scripts/hook.sh": 'source "${X}/scripts/lib.sh"\nf\ng\n',
+        "scripts/lib.sh": (
+            'declare -F log >/dev/null 2>&1 || log() { :; }\n'
+            'f() {\n'
+            '    local a=1\n'
+            '}\n'
+            'if true; then\n'
+            '    g() {\n'
+            '        local b=2\n'
+            '    }\n'
+            'fi\n'
+        ),
+    }
+    compiled = compile_hooks.compile_hook("scripts/hook.sh", contents)
+    assert "local a=1" in compiled and "local b=2" in compiled
+
+
+def test_tree_shake_drops_an_unreached_function_defined_inside_a_wrapper():
+    # A library's functions sit one level inside its wrapper; they are
+    # shaken like top-level ones (positive AND negative control), and the
+    # wrapper itself -- called from root code -- always stays.
+    contents = {
+        "scripts/hook.sh": '#!/usr/bin/env bash\nsource "${X}/scripts/lib.sh"\nused_fn\n',
+        "scripts/lib.sh": (
+            'used_fn() {\n'
+            '    echo used\n'
+            '}\n'
+            'unused_fn() {\n'
+            '    echo unused\n'
+            '}\n'
+        ),
+    }
+    text, report = compile_hooks.compile_hook_report("scripts/hook.sh", contents)
+    assert report["shaken"] is True, report["reason"]
+    assert report["dropped"] == ["unused_fn"]
+    assert "used_fn() {" in text and "echo unused" not in text
+    assert "__remember_src_lib() {" in text
+    r = subprocess.run([_bash(), "-c", text], capture_output=True, text=True, check=False,
+                       env={**os.environ, "X": "/nonexistent"})
+    assert r.stdout == "used\n", r.stderr
 
 
 # -- synthetic end-to-end: sourced vs compiled must behave identically ------

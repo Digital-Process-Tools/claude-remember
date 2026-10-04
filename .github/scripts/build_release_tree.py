@@ -293,9 +293,11 @@ def build(repo: Path, ref: str, out: Path, config: dict) -> dict:
     # #900: the directory's release-preview validator never follows a
     # `source`/`.` statement out of a hooks.json command into a second file,
     # so each of the four hooks.json-registered scripts ships self-contained
-    # -- every file in its own source chain inlined, recursively, each
-    # inlined at most once (include-guard semantics), with comment-only
-    # lines then stripped to fit the 256 KiB per-file budget. A source line
+    # -- every file in its own source chain compiled in as one function,
+    # each `source` of it turned into a call (so each library's own runtime
+    # guard, not a build-time one, decides whether a repeat does anything),
+    # with comment-only lines then stripped to fit the 256 KiB per-file
+    # budget and unreached functions shaken out. A source line
     # this cannot resolve fails the build rather than shipping a hook that
     # still needs a second file to exist on disk.
     sh_texts = {p: contents[p].decode("utf-8") for p in contents

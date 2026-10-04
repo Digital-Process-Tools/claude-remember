@@ -129,13 +129,26 @@ that way on `main`, so the validator held all four as COMMAND_SCRIPT_NOT_FOLLOWE
 [`compile_hooks.py`](../.github/scripts/compile_hooks.py) on exactly these four scripts before
 writing the release tree:
 
-- every file in a hook's own `source`/`.` chain is **inlined, recursively**, in place of the
-  statement that named it;
-- each file is inlined **at most once per hook** (include-guard semantics) -- a repeat of an
-  already-inlined path has its source line simply dropped. This matches the runtime guard most of
-  the shared libraries already carry (`[ -n "${X_LOADED:-}" ] && return 0`): re-sourcing one of
-  them today is already a no-op past the first time, so not re-embedding it changes nothing a
-  hook actually does;
+- every file in a hook's own `source`/`.` chain becomes **one function** in the compiled file
+  (`scripts/lib-slug.sh` -> `__remember_src_lib_slug`), defined right after the shebang, and
+  every `source "$X/lib-slug.sh"` -- wherever it sits, inside a branch or a function -- becomes a
+  **call** to it with the arguments `source` would have passed (`${1+"$@"}`). Everything else on
+  that line stays exactly as written: an assignment prefix (`REMEMBER_PATHS_SOFT_FAIL=1`), a gate
+  (`declare -f ... ||`), a redirect, a trailing `|| exit 0` -- each applies to the call the way it
+  applied to `source`;
+- one definition however many sites source a file, and **no build-time "already inlined" guard**:
+  whether a second `source` of a library is a no-op is that library's own runtime guard's call
+  (`[ -n "${X_LOADED:-}" ] && return 0`), exactly as today. Rounds 1-3 pasted each file's text at
+  its first `source` and replaced every later one with `:`, which the compiled-hooks CI leg caught
+  breaking post-tool-hook.sh on every cold cache (round 4): the first `source` of lib-slug.sh,
+  lib-memory-dir.sh and log.sh sat on the FAST branch, so the slow branch -- the only one a cold
+  cache runs -- had none of them, and PROJECT_DIR never resolved. Pasting also broke `return`: a
+  sourced file's top-level `return` ends the sourcing (every load guard, and resolve-paths.sh's
+  soft failure, which the hook's `|| exit 0` then catches), but pasted at a script's top level it
+  is an error bash steps over. Inside the per-file function it means what it meant. A library
+  statement whose meaning WOULD change inside a function -- a top-level `local`/`declare`, or
+  `shift`/`set --` -- fails the build (`InlineError`) rather than shipping changed; none exists
+  today;
 - comment-only lines (the whole line, after leading whitespace, starts with `#`) are then
   **stripped**, to fit the directory's 256 KiB per-file budget. A shebang (only ever the file's
   own first line), a heredoc body, and anything inside an open single- or double-quoted string are
@@ -181,8 +194,9 @@ never reaches -- the exact "perl code" shape `claude-jit-context`'s own `compile
 held for before it added tree-shaking (its own #461 finding).
 
 `compile_hooks.tree_shake`, modelled on that function, now runs as the last step of
-`compile_hook`/`compile_hook_report`: it drops every top-level `name() { ... }` function a
-compiled hook's own code never reaches, transitively through any function it keeps. Reachability
+`compile_hook`/`compile_hook_report`: it drops every top-level `name() { ... }` function (and,
+since round 4, every one defined directly inside a per-file `__remember_src_*` wrapper -- the
+wrapper itself always stays) a compiled hook's own code never reaches, transitively through any function it keeps. Reachability
 is **textual and deliberately coarse** -- a function is kept the moment its name appears as a
 bare word anywhere outside a function definition, or inside an already-kept function's body,
 including inside a string, a comment, or an assigned value. This over-keeps rather than

@@ -7,54 +7,59 @@ statement into a second file, so a hook that pulls in shared library code
 that way is held as COMMAND_SCRIPT_NOT_FOLLOWED (jit-context's own
 directory-validator write-up, #900). `build_release_tree.py` calls
 `compile_hook` on each of the four HOOK_SCRIPT_NAMES scripts before writing
-the release tree: every file in a hook's own `source`/`.` closure is
-substituted in place, recursively, each file inlined at most once per hook
-(include-guard semantics -- a repeat of an already-inlined path is simply
-dropped rather than inlined a second time). Comment-only lines are then
-stripped from the result so the compiled file fits the directory's 256 KiB
-per-file budget; a shebang line (only ever the file's own first line, never
-one spliced in from an included file -- see below), a heredoc body, and
-anything inside an open quoted string are never touched.
+the release tree. Every file in a hook's own `source`/`.` closure becomes
+ONE function in the compiled file, defined right after the shebang and
+named after the file (`scripts/lib-slug.sh` -> `__remember_src_lib_slug`);
+every `source "$X/lib-slug.sh"` statement, wherever it sits, becomes a call
+to that function with the same arguments `source` would have passed
+(`__remember_src_lib_slug ${1+"$@"}`), everything else on the line kept
+exactly as written. Comment-only lines are then stripped so the compiled
+file fits the directory's 256 KiB per-file budget; a shebang line (only ever
+the file's own first line), a heredoc body, and anything inside an open
+quoted string are never touched.
 
-A `source`/`.` statement in this repo's own scripts appears in three shapes,
-all handled by `inline_sources` below -- self-review found the first
-version of this module matched only the first shape, silently leaving every
-hook still sourcing `resolve-paths.sh` (and, in post-tool-hook.sh,
-`detect-tools.sh`) after "compiling", and a second pass that widened the
-matching to catch those two shapes then matched INSIDE an unrelated
-single-quoted jq filter on the same line as a real statement elsewhere in
-the file (`scripts/lib-memory-dir.sh`'s merge-config jq script contains the
-literal text "; . * $x" as jq syntax, which a naive line-wide regex search
-read as a shell `;`-separated `.`-source statement). The detector below
-never tests any text inside a quote or a heredoc body: it walks the file
-once, tracking quote/heredoc state exactly as `strip_whole_line_comments`
-does, and only looks for a source statement within an UNQUOTED segment of
-a line, at a position that is genuinely a shell command boundary.
+Why a function per file, and not the file's text pasted at each `source`
+site (round 4 -- the compiled-hooks CI leg caught the pasted form breaking
+post-tool-hook.sh on every cold cache): a function call keeps what `source`
+does AT RUN TIME, and pasting does not.
 
-1. **Plain, unconditional**: `source "$X/lib.sh"` -- the statement is the
-   whole line (or whole unquoted segment). Replaced by the included file's
-   body in place.
-2. **Assignment-prefixed, trailing-guarded**:
-   `VAR=1 source "$X/lib.sh" || exit 0`. A leading `VAR=value` prefix before
-   a shell BUILTIN (`source`/`.` is one) persists in the current shell after
-   the builtin returns -- unlike before an external command -- so `VAR=1` is
-   emitted as its own persisting statement ahead of the inlined body. The
-   trailing `|| exit 0`/`2>/dev/null`/`|| return 0` guards against sourcing
-   FAILING; inlining guarantees the equivalent of success (the content is
-   embedded at build time, not loaded at run time), so that guard is dead
-   code once inlined and is dropped -- but only when it provably has that
-   shape (`_droppable_trailing`); anything else fails the build loudly
-   rather than being silently discarded.
-3. **Conditionally gated**: `COND || source "$X/lib.sh"` (or `COND &&`). This
-   is not a success/failure guard on sourcing -- it decides WHETHER sourcing
-   happens at all (a lazy-init / cost-avoidance gate: post-tool-hook.sh uses
-   exactly this shape to skip detect-tools.sh's own cost on a path that
-   already knows $PYTHON). Dropping the condition would be a performance
-   regression disguised as a correctness fix. The condition is preserved
-   exactly, and the inlined body is wrapped in a `{ ...; }` group as the
-   right-hand side of the same `||`/`&&` -- `{ }` runs in the current shell
-   (unlike a `( )` subshell), so persisting assignments inside it still
-   persist, and the short-circuit semantics of `||`/`&&` are unchanged.
+* **Which branch runs.** A library sourced on two branches (post-tool-hook's
+  fast path sources lib-slug.sh, its slow path sources detect-tools.sh,
+  which sources lib-slug.sh again) is loaded by whichever branch runs. A
+  build-time "already inlined" guard cannot know which one that is; pasting
+  once and replacing the rest with `:` left the slow path with no
+  lib-slug.sh, no lib-memory-dir.sh and no log.sh at all. With one
+  definition and a call at every site, each library's own runtime guard
+  (`[ -n "${X_LOADED:-}" ] && return 0`) decides, exactly as it does today.
+* **`return`.** A sourced file's top-level `return` ends the SOURCING; that
+  is how every library's load guard works, and how resolve-paths.sh's soft
+  failure (`return 1`, caught by the hook's `|| exit 0`) works. Pasted at a
+  script's top level, `return` is an error bash prints and steps over --
+  resolution failure carried on with an empty PROJECT_DIR. Pasted inside a
+  function (the fast path's lazy log() stub), it returned from THAT
+  function. Inside the per-file function it ends exactly what `source`
+  ended, and its status reaches the caller's `||` the same way.
+* **An assignment prefix** (`REMEMBER_PATHS_SOFT_FAIL=1 source ...`) lasts
+  for the duration of `source` in bash's default mode, and for the duration
+  of a function call the same way; pasting had to hoist it into a statement
+  that outlived the call.
+
+So no trailing guard (`|| exit 0`, `2>/dev/null`) and no gate (`COND ||`)
+is dropped or rewritten any more: each applies to the function call exactly
+as it applied to `source`. Two differences between a function and a sourced
+file remain, and neither occurs in a library here: a top-level
+`local`/`declare` would become local to the function (refused loudly,
+InlineError, by `_function_unsafe_lines`), and `${BASH_SOURCE[0]}` names the
+compiled hook rather than the library -- the same scripts/ directory, which
+is all any library here derives from it.
+
+The detector below never tests any text inside a quote or a heredoc body:
+it walks the file once, tracking quote/heredoc state exactly as
+`strip_whole_line_comments` does, and only looks for a source statement
+within an UNQUOTED segment of a line, at a position that is genuinely a
+shell command boundary (self-review on round 1 found a line-wide regex
+matching INSIDE an unrelated single-quoted jq filter --
+`scripts/lib-memory-dir.sh`'s merge-config script contains "; . * $x").
 
 A `source`/`.` whose target is not a plain double-quoted string (a bare
 `source $X/lib.sh` or a single-quoted one) does not occur anywhere in this
@@ -103,7 +108,7 @@ _ASSIGN_WORD_SRC = (
 )
 _SOURCE_BODY = (
     r'(?P<assigns>(?:' + _ASSIGN_WORD_SRC + r'[ \t]+)*)'
-    r'(?:source|\.)[ \t]+"(?P<target>[^"\n]*)"(?P<rest>.*)$'
+    r'(?P<kw>source|\.)[ \t]+"(?P<target>[^"\n]*)"(?P<rest>.*)$'
 )
 _SOURCE_UNHANDLED_BODY = (
     r'(?:' + _ASSIGN_WORD_SRC + r'[ \t]+)*'
@@ -122,19 +127,22 @@ _SEGMENT_SEPARATOR = re.compile(r'\|\||&&|[;{(|]')
 _SOURCE_BODY_ONLY = re.compile(r'[ \t]*' + _SOURCE_BODY)
 _SOURCE_UNHANDLED_BODY_ONLY = re.compile(r'[ \t]*' + _SOURCE_UNHANDLED_BODY)
 
-_ASSIGN_WORD = re.compile(_ASSIGN_WORD_SRC)
 _TRAILING_SH_NAME = re.compile(r'[A-Za-z0-9_.\-]+\.sh$')
 
-# What is safe to drop from a TRAILING (non-gated) source statement once it
-# is inlined: a redirect (`2>/dev/null`) and/or a post-condition on the
-# source command's own exit status (`|| exit 0`, `|| return 0`, `|| true`,
-# `|| :`). Inlining guarantees the equivalent of "sourcing succeeded", so
-# this is dead code once applied -- anything that does not fullmatch this
-# shape is NOT guessed at; `inline_sources` raises InlineError instead.
-_DROPPABLE_TRAILING = re.compile(
-    r'(?:[0-9]*(?:>>?|<)[ \t]*\S+[ \t]*)*'
-    r'(?:\|\|[ \t]*(?:exit|return|true|:)\b[ \t]*[0-9]*[ \t]*)?'
-)
+# Every function a compiled hook defines for one of its sourced files starts
+# with this, so tree_shake can tell such a wrapper (whose body is a
+# library's TOP-LEVEL code, run whenever the wrapper is called) from an
+# ordinary function.
+WRAPPER_PREFIX = "__remember_src_"
+# Written as the compiled file's second line (right after the shebang).
+# tests/_compiled_hooks.py keys off the same string so a source-text pin can
+# tell a compiled hook (the compiled CI leg compiles in place) from source.
+COMPILED_MARKER = "# Compiled by .github/scripts/compile_hooks.py (#900)"
+# What `source FILE` passes FILE when given no arguments of its own: the
+# caller's positional parameters, unchanged. `${1+"$@"}` rather than `"$@"`
+# because bash 3.2 (macOS /bin/bash) under `set -u` calls a bare "$@" with
+# no positional parameters an unbound variable.
+_CALL_ARGS = '${1+"$@"}'
 
 
 def target_basename(target: str) -> str | None:
@@ -145,11 +153,11 @@ def target_basename(target: str) -> str | None:
     return m.group(0) if m else None
 
 
-def _droppable_trailing(rest: str) -> bool:
-    rest = rest.strip()
-    if not rest:
-        return True
-    return _DROPPABLE_TRAILING.fullmatch(rest) is not None
+def wrapper_name(key: str) -> str:
+    """The function a compiled hook defines for CONTENTS key KEY
+    (`scripts/lib-slug.sh` -> `__remember_src_lib_slug`)."""
+    base = posixpath.basename(key).removesuffix(".sh")
+    return WRAPPER_PREFIX + re.sub(r'[^A-Za-z0-9_]', '_', base)
 
 
 # -- quote/heredoc-aware scanning (shared by inlining and comment stripping) --
@@ -398,106 +406,86 @@ def strip_whole_line_comments(text: str) -> str:
     return "\n".join(out)
 
 
-# -- inlining ------------------------------------------------------------
+# -- linking -------------------------------------------------------------
 
-def inline_sources(name: str, contents: dict[str, str], script_dir: str = "scripts",
-                    _seen: set[str] | None = None, _stack: tuple[str, ...] = ()) -> str:
-    """NAME's text (a key into CONTENTS, e.g. "scripts/session-start-hook.sh")
-    with every `source`/`.` statement in its own body recursively replaced
-    by the body of the file it names -- see the module docstring for the
-    three shapes this handles and why each is transformed the way it is.
+def link_sources(name: str, contents: dict[str, str],
+                 script_dir: str = "scripts") -> tuple[str, dict[str, str]]:
+    """(body, libraries) for hook NAME (a key into CONTENTS, e.g.
+    "scripts/post-tool-hook.sh").
 
-    Include-guard semantics: a file already inlined earlier in this same
-    top-level call (tracked in _seen, by its CONTENTS key) has its repeat
-    source statement replaced with a no-op rather than inlined a second
-    time. This matches the runtime guard most of this repo's own shared
-    libraries already carry (`[ -n "${X_LOADED:-}" ] && return 0`):
-    re-sourcing one of them today is already a no-op past the first time,
-    so compiling away the repeat inclusion changes nothing observable.
+    BODY is NAME's own text with every `source`/`.` statement's
+    `source "TARGET"` words replaced by a call to TARGET's wrapper function
+    (`wrapper_name`) passing `${1+"$@"}` -- anything before it on the line
+    (an assignment prefix, a `COND ||` gate) and after it (a redirect, an
+    `|| exit 0`) is left exactly as written, since each applies to the call
+    the same way it applied to `source`. LIBRARIES maps every file in NAME's
+    source closure (CONTENTS key -> that file's text, rewritten the same
+    way) in the order first reached; each becomes one wrapper function.
+
+    One wrapper per file however many sites source it: whether a second
+    `source` of a library is a no-op is that library's own RUNTIME guard's
+    call, not this module's -- see the module docstring for what the
+    build-time include guard this replaces got wrong.
 
     Only an UNQUOTED source/. statement is ever matched (see
     _find_source_in_line); quote and heredoc state is tracked across the
     whole file.
 
     Raises InlineError on a source statement this function cannot resolve
-    against CONTENTS, on a cycle, on a target that is not a plain
-    double-quoted string, or on trailing text after a (non-gated) source
-    statement that is not a recognised redirect/exit-status guard."""
-    if _seen is None:
-        _seen = set()
-    if name in _stack:
-        raise InlineError(f"source cycle: {' -> '.join(_stack)} -> {name}")
-    if name not in contents:
-        raise InlineError(f"{name}: not found")
+    against CONTENTS, on a cycle, or on a target that is not a plain
+    double-quoted string."""
+    libraries: dict[str, str] = {}
 
-    out_lines = []
-    in_squote = in_dquote = False
-    heredoc_term = None
-    heredoc_strip_tabs = False
-    for line in contents[name].split("\n"):
-        if heredoc_term is not None:
+    def rewrite(key: str, stack: tuple[str, ...]) -> str:
+        if key not in contents:
+            raise InlineError(f"{key}: not found")
+        out_lines = []
+        in_squote = in_dquote = False
+        heredoc_term = None
+        heredoc_strip_tabs = False
+        for line in contents[key].split("\n"):
+            if heredoc_term is not None:
+                out_lines.append(line)
+                check = line.strip() if heredoc_strip_tabs else line
+                if check == heredoc_term:
+                    heredoc_term = None
+                continue
+
+            incoming = (in_squote, in_dquote)
+            while True:
+                m, _sep_start, _sep_text, meta = _find_source_in_line(line, *incoming)
+                if m is None:
+                    break
+                if m == "unhandled":
+                    raise InlineError(
+                        f"{key}: a source/. statement's target is not a plain "
+                        f"double-quoted string (bare or single-quoted) -- refusing "
+                        f"to guess at it rather than leaving it silently unresolved: "
+                        f"{line.strip()!r}"
+                    )
+                target = m.group("target")
+                base = target_basename(target)
+                if base is None:
+                    raise InlineError(f"{key}: cannot resolve source target {target!r} "
+                                       f"(not a plain sibling '*.sh' path)")
+                candidate = posixpath.join(script_dir, base)
+                if candidate not in contents:
+                    raise InlineError(f"{key}: sources {candidate!r}, not present in "
+                                       f"this build")
+                if candidate in stack or candidate == key:
+                    raise InlineError(
+                        f"source cycle: {' -> '.join(stack + (key, candidate))}")
+                if candidate not in libraries:
+                    libraries[candidate] = ""  # reserve: first-reached order
+                    libraries[candidate] = rewrite(candidate, stack + (key,))
+                line = (line[:m.start("kw")] + wrapper_name(candidate) + " "
+                        + _CALL_ARGS + line[m.start("rest"):])
+            heredoc_term, heredoc_strip_tabs, in_squote, in_dquote = meta
             out_lines.append(line)
-            check = line.strip() if heredoc_strip_tabs else line
-            if check == heredoc_term:
-                heredoc_term = None
-            continue
+        return "\n".join(out_lines)
 
-        m, sep_start, sep_text, meta = _find_source_in_line(line, in_squote, in_dquote)
-        heredoc_term, heredoc_strip_tabs, in_squote, in_dquote = meta
-
-        if m is None:
-            out_lines.append(line)
-            continue
-        if m == "unhandled":
-            raise InlineError(
-                f"{name}: a source/. statement's target is not a plain "
-                f"double-quoted string (bare or single-quoted) -- refusing "
-                f"to guess at it rather than leaving it silently unresolved: "
-                f"{line.strip()!r}"
-            )
-
-        target = m.group("target")
-        base = target_basename(target)
-        if base is None:
-            raise InlineError(f"{name}: cannot resolve source target {target!r} "
-                               f"(not a plain sibling '*.sh' path)")
-        candidate = posixpath.join(script_dir, base)
-        if candidate not in contents:
-            raise InlineError(f"{name}: sources {candidate!r}, not present in "
-                               f"this build")
-
-        before = line[:sep_start]
-        gated = sep_text in ("||", "&&")
-
-        rest = m.group("rest")
-        if not gated and not _droppable_trailing(rest):
-            raise InlineError(
-                f"{name}: a source statement is followed by {rest!r}, which is "
-                f"not a recognised redirect/exit-status guard -- refusing to "
-                f"guess whether it is safe to drop"
-            )
-
-        assign_words = [a.group(0) for a in _ASSIGN_WORD.finditer(m.group("assigns") or "")]
-
-        if candidate in _seen:
-            body_lines = [":"]
-        else:
-            _seen.add(candidate)
-            included = inline_sources(candidate, contents, script_dir, _seen, _stack + (name,))
-            body_lines = included.split("\n")
-
-        if gated:
-            out_lines.append(before + sep_text + " {")
-            out_lines.extend(assign_words)
-            out_lines.extend(body_lines)
-            tail = rest.strip()
-            out_lines.append("}" + (" " + tail if tail else ""))
-        else:
-            if before.strip():
-                out_lines.append(before)
-            out_lines.extend(assign_words)
-            out_lines.extend(body_lines)
-    return "\n".join(out_lines)
+    body = rewrite(name, ())
+    return body, libraries
 
 
 _FUNC_START_RE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)\(\) \{[ \t]*$')
@@ -861,81 +849,25 @@ def tree_shake(text):
     report says so (dynamic_dispatch=True) rather than silently proceeding
     as if the textual scan had seen everything a real interpreter would.
 
+    Functions defined DIRECTLY inside a compiled hook's per-file wrapper
+    (WRAPPER_PREFIX -- each wrapper's body is one library's top-level code)
+    are shaken exactly like top-level ones; the wrapper itself is never
+    dropped, and its body's own non-function lines count as root code (a
+    wrapper runs whenever its library is sourced -- over-keeping again).
+
     Returns (new_text, report) where report has keys: shaken (bool), kept
     (sorted list of function names), dropped (sorted list), dynamic_dispatch
     (bool), reason (str, only set when shaken is False)."""
-    lines = text.split("\n")
-    n = len(lines)
-    deltas = [0] * n
-    in_heredoc = [False] * n
-    masked_lines = [""] * n
-    heredoc_term = None
-    heredoc_strip_tabs = False
-    in_squote = in_dquote = False
-    brace_stack = []
-    pending_continuation = False
-    pending_cmdsub = None
-    for i, line in enumerate(lines):
-        if heredoc_term is not None:
-            in_heredoc[i] = True
-            check = line.strip() if heredoc_strip_tabs else line
-            if check == heredoc_term:
-                heredoc_term = None
-            continue
-        entering_in_quote = in_squote or in_dquote
-        entering_in_cmdsub = pending_cmdsub is not None
-        (delta, heredoc_term, heredoc_strip_tabs, in_squote, in_dquote, masked,
-         continuation, pending_cmdsub) = _scan_line_braces(
-            line, in_squote, in_dquote, brace_stack, pending_cmdsub)
-        deltas[i] = delta
-        # Neither a backslash-continued line NOR a line that starts
-        # already inside a quote carried over from an earlier one (a
-        # double-quoted string containing a literal embedded newline --
-        # `case "\n${VAR}" in`, or a multi-line printf/echo message) NOR
-        # a line that continues a '$(...)' left open by an earlier one
-        # (#900 round 3) is a fresh statement boundary, even though its
-        # revealed $-expansion can otherwise land at offset 0 of the
-        # masked text and look exactly like one. Prefixing one NUL byte
-        # makes any of these shapes unmatchable by _DYNAMIC_CALL_RE's `^`
-        # alternative without disturbing any OTHER separator the line may
-        # still contain (';', '||', ...), and without shifting any other
-        # position-sensitive use of masked_lines (there is none -- it is
-        # read only by the dynamic-dispatch search below).
-        masked_lines[i] = (("\x00" + masked)
-                            if (pending_continuation or entering_in_quote or entering_in_cmdsub)
-                            else masked)
-        pending_continuation = continuation
-    if in_squote or in_dquote or heredoc_term is not None or pending_cmdsub is not None:
+    scan = _scan_structure(text)
+    if isinstance(scan, str):
         return text, {"shaken": False, "kept": [], "dropped": [],
-                       "dynamic_dispatch": False,
-                       "reason": "a quote, heredoc or command substitution never "
-                                 "closed by end of file"}
-
-    funcs = {}
-    depth = 0
-    stack = []
-    duplicate = None
-    for i, line in enumerate(lines):
-        if in_heredoc[i]:
-            continue
-        if depth == 0 and not stack:
-            m = _FUNC_START_RE.match(line)
-            if m:
-                stack.append((m.group(1), i, depth))
-        depth += deltas[i]
-        while stack and depth == stack[-1][2]:
-            name, start, _ = stack.pop()
-            if name in funcs:
-                duplicate = name
-            funcs[name] = (start, i)
-    if depth != 0 or stack:
+                       "dynamic_dispatch": False, "reason": scan}
+    lines, deltas, in_heredoc, masked_lines = scan
+    spans = _function_spans(lines, deltas, in_heredoc)
+    if isinstance(spans, str):
         return text, {"shaken": False, "kept": [], "dropped": [],
-                       "dynamic_dispatch": False,
-                       "reason": f"unbalanced braces by end of file (final depth {depth}) -- refusing to guess"}
-    if duplicate:
-        return text, {"shaken": False, "kept": [], "dropped": [],
-                       "dynamic_dispatch": False,
-                       "reason": f"duplicate top-level function name {duplicate!r}"}
+                       "dynamic_dispatch": False, "reason": spans}
+    funcs, _wrappers = spans
     if not funcs:
         return text, {"shaken": True, "kept": [], "dropped": [],
                        "dynamic_dispatch": False, "reason": ""}
@@ -977,6 +909,175 @@ def tree_shake(text):
                        "dynamic_dispatch": False, "reason": ""}
 
 
+def _scan_structure(text):
+    """(lines, deltas, in_heredoc, masked_lines) for TEXT -- per line: the
+    net unquoted brace count, whether it is a heredoc body line, and the
+    masked text the dynamic-dispatch search reads -- or a str saying why
+    the file could not be scanned (a quote, heredoc or command substitution
+    left open at end of file)."""
+    lines = text.split("\n")
+    n = len(lines)
+    deltas = [0] * n
+    in_heredoc = [False] * n
+    masked_lines = [""] * n
+    heredoc_term = None
+    heredoc_strip_tabs = False
+    in_squote = in_dquote = False
+    brace_stack = []
+    pending_continuation = False
+    pending_cmdsub = None
+    for i, line in enumerate(lines):
+        if heredoc_term is not None:
+            in_heredoc[i] = True
+            check = line.strip() if heredoc_strip_tabs else line
+            if check == heredoc_term:
+                heredoc_term = None
+            continue
+        entering_in_quote = in_squote or in_dquote
+        entering_in_cmdsub = pending_cmdsub is not None
+        (delta, heredoc_term, heredoc_strip_tabs, in_squote, in_dquote, masked,
+         continuation, pending_cmdsub) = _scan_line_braces(
+            line, in_squote, in_dquote, brace_stack, pending_cmdsub)
+        deltas[i] = delta
+        # Neither a backslash-continued line NOR a line that starts
+        # already inside a quote carried over from an earlier one (a
+        # double-quoted string containing a literal embedded newline --
+        # `case "\n${VAR}" in`, or a multi-line printf/echo message) NOR
+        # a line that continues a '$(...)' left open by an earlier one
+        # (#900 round 3) is a fresh statement boundary, even though its
+        # revealed $-expansion can otherwise land at offset 0 of the
+        # masked text and look exactly like one. Prefixing one NUL byte
+        # makes any of these shapes unmatchable by _DYNAMIC_CALL_RE's `^`
+        # alternative without disturbing any OTHER separator the line may
+        # still contain (';', '||', ...), and without shifting any other
+        # position-sensitive use of masked_lines (there is none -- it is
+        # read only by the dynamic-dispatch search and
+        # _function_unsafe_lines).
+        masked_lines[i] = (("\x00" + masked)
+                            if (pending_continuation or entering_in_quote or entering_in_cmdsub)
+                            else masked)
+        pending_continuation = continuation
+    if in_squote or in_dquote or heredoc_term is not None or pending_cmdsub is not None:
+        return "a quote, heredoc or command substitution never closed by end of file"
+    return lines, deltas, in_heredoc, masked_lines
+
+
+def _function_spans(lines, deltas, in_heredoc):
+    """(funcs, wrappers): name -> (start, end) line index for every
+    `name() {` opened at column 0 at brace depth 0, or at depth 1 directly
+    inside a WRAPPER_PREFIX wrapper (which goes in WRAPPERS, everything else
+    in FUNCS) -- or a str saying why not (unbalanced braces, a name defined
+    twice)."""
+    funcs: dict = {}
+    wrappers: dict = {}
+    depth = 0
+    stack = []  # (name, start, depth_before, is_wrapper)
+    duplicate = None
+    for i, line in enumerate(lines):
+        if in_heredoc[i]:
+            continue
+        top = not stack and depth == 0
+        in_wrapper = len(stack) == 1 and stack[0][3] and depth == stack[0][2] + 1
+        if top or in_wrapper:
+            m = _FUNC_START_RE.match(line)
+            if m:
+                name = m.group(1)
+                stack.append((name, i, depth, top and name.startswith(WRAPPER_PREFIX)))
+        depth += deltas[i]
+        while stack and depth == stack[-1][2]:
+            name, start, _, is_wrapper = stack.pop()
+            if name in funcs or name in wrappers:
+                duplicate = name
+            (wrappers if is_wrapper else funcs)[name] = (start, i)
+    if depth != 0 or stack:
+        return f"unbalanced braces by end of file (final depth {depth}) -- refusing to guess"
+    if duplicate:
+        return f"duplicate top-level function name {duplicate!r}"
+    return funcs, wrappers
+
+
+# A statement whose meaning changes when the code around it moves from a
+# sourced file's top level into a function body: `local`/`declare`/`typeset`
+# would declare a function-LOCAL variable where the sourced file declared a
+# global one (`local` at a sourced file's top level is an error; inside the
+# wrapper it would silently succeed), and `shift`/`set --` would rewrite the
+# wrapper's positional parameters rather than the caller's. A query
+# (`declare -F name`, `declare -f`, `declare -p`) changes nothing and is
+# fine. Matched against the MASKED line, so text inside a quote never counts.
+_ANY_FUNC_START_RE = re.compile(r'^[ \t]*[A-Za-z_][A-Za-z0-9_]*\(\)[ \t]*\{[ \t]*$')
+_FUNCTION_UNSAFE = re.compile(
+    r'(?:^|[;&|(]|\bthen\b|\bdo\b|\belse\b|\{)\s*'
+    r'(?:local\b|typeset\b|declare\b(?!\s+-[Ffp]\b)|shift\b|set\s+--)'
+)
+
+
+def _function_unsafe_lines(text: str) -> list[tuple[int, str]]:
+    """(line number, line) for every statement in TEXT's own top-level code
+    (outside every function it defines) that would mean something different
+    inside a function body -- see _FUNCTION_UNSAFE. TEXT is one library
+    about to become a wrapper function's body; a non-empty answer fails the
+    build (InlineError) rather than shipping a changed meaning. A file this
+    cannot scan is reported as unsafe on line 0, for the same reason."""
+    scan = _scan_structure(text)
+    if isinstance(scan, str):
+        return [(0, scan)]
+    lines, deltas, in_heredoc, masked_lines = scan
+    # Every function body, at any indentation and any nesting -- a library
+    # can define one inside an `if` (detect-tools.sh's lazy
+    # `_remember_python`), and a `local` there is the function's own.
+    in_func = set()
+    open_at: list[int] = []
+    depth = 0
+    for i, line in enumerate(lines):
+        if in_heredoc[i]:
+            if open_at:
+                in_func.add(i)
+            continue
+        if _ANY_FUNC_START_RE.match(line) or open_at:
+            in_func.add(i)
+            if _ANY_FUNC_START_RE.match(line):
+                open_at.append(depth)
+        depth += deltas[i]
+        while open_at and depth == open_at[-1]:
+            open_at.pop()
+    if open_at or depth != 0:
+        return [(0, f"unbalanced braces by end of file (final depth {depth})")]
+    found = []
+    for i, masked in enumerate(masked_lines):
+        if i in in_func or in_heredoc[i]:
+            continue
+        if _FUNCTION_UNSAFE.search(masked.lstrip("\x00")):
+            found.append((i + 1, lines[i]))
+    return found
+
+
+def _link(name: str, contents: dict[str, str], script_dir: str) -> str:
+    """NAME's text with one wrapper function per sourced file defined right
+    after its shebang and every `source` turned into a call to one -- see
+    link_sources and the module docstring."""
+    body, libraries = link_sources(name, contents, script_dir)
+    for key, text in libraries.items():
+        bad = _function_unsafe_lines(text)
+        if bad:
+            n, line = bad[0]
+            raise InlineError(
+                f"{key}:{n}: {line.strip()!r} would mean something different "
+                f"inside the function this file is compiled into (a top-level "
+                f"local/declare/typeset/shift/set --) -- refusing to change "
+                f"its meaning silently")
+    lines = body.split("\n")
+    head = lines[:1] if lines and lines[0].startswith("#!") else []
+    defs = []
+    for key, text in libraries.items():
+        # `:` first: a wrapper whose every line is later shaken or stripped
+        # must still be a syntactically valid (empty) function body.
+        defs.append(f"{wrapper_name(key)}() {{")
+        defs.append(":")
+        defs.extend(text.split("\n"))
+        defs.append("}")
+    return "\n".join(head + defs + lines[len(head):])
+
+
 def compile_hook(name: str, contents: dict[str, str], script_dir: str = "scripts") -> str:
     """The self-contained, comment-stripped, tree-shaken text for hook
     NAME -- no `source`/`.` statement pointing at another file should
@@ -988,9 +1089,7 @@ def compile_hook(name: str, contents: dict[str, str], script_dir: str = "scripts
     never earns). tree_shake's own report (which functions were dropped,
     or why none were) is discarded here; compile_hook_report below returns
     it for callers that want to log it."""
-    text = strip_whole_line_comments(inline_sources(name, contents, script_dir))
-    shaken, _report = tree_shake(text)
-    return shaken
+    return compile_hook_report(name, contents, script_dir)[0]
 
 
 def compile_hook_report(name: str, contents: dict[str, str],
@@ -998,10 +1097,14 @@ def compile_hook_report(name: str, contents: dict[str, str],
     """Like compile_hook, but also returns tree_shake's own report dict
     (shaken, kept, dropped, dynamic_dispatch, reason) -- for a caller that
     wants to log how many functions were dropped per hook, or why shaking
-    was skipped for one."""
-    text = strip_whole_line_comments(inline_sources(name, contents, script_dir))
+    was skipped for one. COMPILED_MARKER is written as the line right after
+    the shebang (the first line, if there is none)."""
+    text = strip_whole_line_comments(_link(name, contents, script_dir))
     shaken, report = tree_shake(text)
-    return shaken, report
+    lines = shaken.split("\n")
+    at = 1 if lines and lines[0].startswith("#!") else 0
+    lines.insert(at, COMPILED_MARKER)
+    return "\n".join(lines), report
 
 
 # -- CLI (local dev use: see docs/releasing.md) ---------------------------
