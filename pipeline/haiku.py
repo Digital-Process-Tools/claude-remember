@@ -109,7 +109,6 @@ def _without_session_env(names: tuple[str, ...]):
         os.environ.pop("CLAUDE_CODE_SESSION_ATTENDED", None),
         os.environ.pop("CLAUDE_CODE_EXECPATH", None),
         os.environ.pop("CLAUDE_CODE_MESSAGING_SOCKET", None),
-        os.environ.pop("CLAUDE_CODE_MESSAGING_TOKEN", None),
         os.environ.pop("CLAUDE_CODE_SSE_PORT", None),
     )
     try:
@@ -134,9 +133,7 @@ def _without_session_env(names: tuple[str, ...]):
         if saved[8] is not None:
             os.environ["CLAUDE_CODE_MESSAGING_SOCKET"] = saved[8]
         if saved[9] is not None:
-            os.environ["CLAUDE_CODE_MESSAGING_TOKEN"] = saved[9]
-        if saved[10] is not None:
-            os.environ["CLAUDE_CODE_SSE_PORT"] = saved[10]
+            os.environ["CLAUDE_CODE_SSE_PORT"] = saved[9]
 @contextlib.contextmanager
 def _summarizer_environment():
     previous_marker = os.environ.get("REMEMBER_NESTED_SUMMARIZER")
