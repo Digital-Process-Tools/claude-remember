@@ -310,8 +310,14 @@ NESTED_DEFAULT_EXPANSION = re.compile(r'\$\{[A-Za-z_][A-Za-z0-9_]*:-\$')
 # removed the #703 strip that named it, and NAMED_API_KEYS below now fails the
 # tree on any mention of it at all. Round 16: CODEX_API_KEY is off it too, for
 # the same reason -- the Codex allow-list names no credential.
+#
+# #898, round 17: CLAUDE_CODE_MESSAGING_TOKEN joins it. `_without_session_env`
+# removes it -- the parent session's messaging handshake, not a credential this
+# plugin reads or forwards -- from the environment for the length of the nested
+# `claude -p` spawn and puts it back, by its literal name (round 16 held it in
+# config, which the portal reads as an environment variable named at run time).
 CREDENTIAL_NAME_ALLOWLIST = {
-    "CLAUDE_CODE_OAUTH_TOKEN", "OAUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN", "OAUTH_TOKEN", "CLAUDE_CODE_MESSAGING_TOKEN",
 }
 
 # #898, round 13 (maintainer decision): the directory portal held the plugin
@@ -1468,6 +1474,9 @@ CREDENTIAL_FRAGMENTS = frozenset({
 # credential, or a name something outside this repo defines.
 CREDENTIAL_FRAGMENT_ALLOWLIST = {
     "CLAUDE_CODE_OAUTH_TOKEN": "a real credential; Claude Code defines the name",
+    "CLAUDE_CODE_MESSAGING_TOKEN": (
+        "the parent session's messaging handshake; Claude Code defines the name, "
+        "and the summarizer spawn removes it, never reads or forwards it (#95)"),
     "PWD": "the shell's own variable; a $PWD read is FAILed separately",
 }
 _SH_NAME_SITES = re.compile(r"""

@@ -385,6 +385,27 @@ def test_allowlisted_credential_name_is_not_an_offender(tmp_path):
     assert not any("example.py" in o for o in offenders), offenders
 
 
+def test_the_parent_session_messaging_handshake_name_is_allowlisted(tmp_path):
+    """#898 round 17: `_without_session_env` removes the parent session's
+    CLAUDE_CODE_MESSAGING_TOKEN from the nested call's environment by its
+    literal name (round 16 held it in config instead). It is not a
+    credential this plugin reads or forwards -- it is removed for the spawn,
+    then put back -- so naming it is allowlisted. Positive control:
+    test_credential_shaped_name_outside_allowlist_fails above, the same
+    shape with an unlisted name, still FAILs."""
+    root = _tree(tmp_path, {
+        "pipeline/example.py": (
+            b'saved = os.environ.pop("CLAUDE_CODE_MESSAGING_TOKEN", None)\n'
+            b'os.environ["CLAUDE_CODE_MESSAGING_TOKEN"] = saved\n'
+        ),
+    })
+    offenders = _check(root).offenders
+    assert not any("example.py" in o for o in offenders), offenders
+    mod = _load()
+    assert "CLAUDE_CODE_MESSAGING_TOKEN" in mod.CREDENTIAL_NAME_ALLOWLIST
+    assert "CLAUDE_CODE_MESSAGING_TOKEN" in mod.CREDENTIAL_FRAGMENT_ALLOWLIST
+
+
 # -- round 13/16 (#898): the shipped tree names no provider API key (FAIL) ---
 #
 # Round 13: the Anthropic one. Round 16 (maintainer decision): the Codex one
