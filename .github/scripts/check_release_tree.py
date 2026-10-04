@@ -674,6 +674,7 @@ def check_tree(root: Path, budget: dict) -> CheckResult:
     _check_lone_quote(files, kinds, result.reviews)
     _check_backslash_quote(files, kinds, off)
     _check_catch_all_in_loop(files, kinds, off)
+    _check_case_statement(files, kinds, off)
     _check_dot_string(files, kinds, result.reviews)
     _check_escaped_quote(files, kinds, result.reviews)
     _check_slash_glob_case(files, kinds, result.reviews)
@@ -1418,6 +1419,32 @@ def _check_plugin_root_copy(files: dict, kinds: dict, reviews: list) -> None:
         if PLUGIN_ROOT_COPY.search(line):
             reviews.append(f"{rel}:{n}: a plain plugin-root copy (write it "
                            f"with ':-'): {line.strip()[:80]}")
+
+
+# #898 round 19: a `case` statement anywhere in a shipped shell script. The
+# directory's scanner mis-parses `case`: a pattern with a leading parenthesis
+# (`case "$-" in (*x*)`, the bootstrap code the build inlines into the hooks)
+# made it list the whole hook as "a script it could not follow" (probes hc7 vs
+# hc9), and claude-directory-publishing triggers.md 1, 2, 8, 9 and 11 were
+# other `case` shapes. The keyword at command position -- line start, or
+# after `;` `&` `|` `(` `{` `!` or `then`/`do`/`else`/`elif`/`if`/`while`/
+# `until` -- followed by a word and `in`, read with quoted segments and a
+# trailing comment removed, so the word in a message or a comment is not one.
+CASE_STATEMENT = re.compile(
+    r'(?:^|[;&|({!]|\b(?:then|do|else|elif|if|while|until)\b)\s*case\s+\S.*?\s+in(?=\s|;|$)')
+_TRAILING_COMMENT = re.compile(r'(?:^|\s)#.*$')
+
+
+def _check_case_statement(files: dict, kinds: dict, off: list) -> None:
+    """#898 round 19: a `case` statement in a shipped shell script. FAIL:
+    round 19 rewrote all of them as if/elif ladders of `[ ]` tests, so this
+    guards against a REintroduction, not a known holdout."""
+    for rel, n, line in _sh_lines(files, kinds):
+        bare = _TRAILING_COMMENT.sub("", _QUOTED_SEGMENT.sub('""', line))
+        if CASE_STATEMENT.search(bare):
+            off.append(f"{rel}:{n}: a case statement -- the directory's scanner "
+                       f"mis-parses case; write it as if/elif with [ ] tests: "
+                       f"{line.strip()[:80]}")
 
 
 def _check_credential_shaped_name(files: dict, kinds: dict, off: list) -> None:

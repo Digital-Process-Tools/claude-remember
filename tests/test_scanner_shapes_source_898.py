@@ -254,3 +254,52 @@ def test_deferred_name_filter_still_sees_other_names():
     hits = _fragment_hits("pipeline/x.py", "tokens = 1\ncache_key = 2\n")
     kept = [h for h in hits if not any(f"({n!r})" in h for n in FRAGMENT_DEFERRED_NAMES)]
     assert len(hits) == 2 and len(kept) == 1 and "cache_key" in kept[0], hits
+
+
+# #898 round 19: no `case` statement in any shipped shell script. The
+# directory's scanner mis-parses `case` -- a pattern with a leading
+# parenthesis (`case "$-" in (*x*)`) made it list a whole hook as "a script it
+# could not follow" (probes hc7 vs hc9), and five earlier triggers were other
+# `case` shapes (claude-directory-publishing triggers.md 1, 2, 8, 9, 11).
+# Every statement is written as an if/elif ladder of `[ ]` tests instead.
+CASE_STATEMENT_POSITIVE = {
+    "multi-line": 'case "$x" in\n    a) : ;;\nesac\n',
+    "one line": 'case "$x" in a) : ;; esac\n',
+    "after a separator": 'f() { :; }; case "$x" in a) : ;; esac\n',
+    "after then": 'if true; then case "$x" in a) : ;; esac; fi\n',
+    "paren pattern": 'case "$-" in\n    (*x*) : ;;\nesac\n',
+    "command substitution subject": 'case "$(f "$a" b)" in\n    a) : ;;\nesac\n',
+}
+CASE_STATEMENT_NEGATIVE = {
+    "word in a double-quoted string": 'echo "in case of fire, run in circles"\n',
+    "word in a single-quoted string": "log 'case x in y'\n",
+    "whole-line comment": '# case "$x" in a) : ;; esac\n:\n',
+    "trailing comment": ': # case "$x" in a) ;; esac\n',
+    "a name holding the word": 'REMEMBER_CASE_STATUS=ok\n_case_in=1\n',
+    "an argument word": 'echo case in point\n',
+}
+
+
+@pytest.mark.parametrize("shape", sorted(CASE_STATEMENT_POSITIVE))
+def test_case_statement_check_fires(shape):
+    assert _shape_hits("_check_case_statement", CASE_STATEMENT_POSITIVE[shape])
+
+
+@pytest.mark.parametrize("shape", sorted(CASE_STATEMENT_NEGATIVE))
+def test_case_statement_check_ignores_the_word(shape):
+    assert not _shape_hits("_check_case_statement", CASE_STATEMENT_NEGATIVE[shape])
+
+
+def test_case_statement_check_is_a_fail_in_check_tree(tmp_path):
+    """Wired into check_tree as a FAIL, not a REVIEW."""
+    mod = _load()
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "x.sh").write_text('case "$x" in a) : ;; esac\n', encoding="utf-8")
+    result = mod.check_tree(tmp_path, {})
+    assert any("case statement" in o for o in result.offenders), result.offenders
+
+
+@pytest.mark.parametrize("path", SHAPE_SH, ids=lambda p: str(p.relative_to(REPO_ROOT)))
+def test_shipped_script_has_no_case_statement(path):
+    hits = _shape_hits("_check_case_statement", path.read_text(encoding="utf-8"))
+    assert hits == [], f"{path.name}: {len(hits)} case statement(s): {hits}"
