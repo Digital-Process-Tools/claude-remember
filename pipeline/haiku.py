@@ -108,7 +108,6 @@ def _without_session_env():
     saved_session_attended = os.environ.pop("CLAUDE_CODE_SESSION_ATTENDED", None)
     saved_execpath = os.environ.pop("CLAUDE_CODE_EXECPATH", None)
     saved_messaging_socket = os.environ.pop("CLAUDE_CODE_MESSAGING_SOCKET", None)
-    saved_messaging_handshake = os.environ.pop("CLAUDE_CODE_MESSAGING_TOKEN", None)
     saved_sse_port = os.environ.pop("CLAUDE_CODE_SSE_PORT", None)
     try:
         yield
@@ -131,8 +130,6 @@ def _without_session_env():
             os.environ["CLAUDE_CODE_EXECPATH"] = saved_execpath
         if saved_messaging_socket is not None:
             os.environ["CLAUDE_CODE_MESSAGING_SOCKET"] = saved_messaging_socket
-        if saved_messaging_handshake is not None:
-            os.environ["CLAUDE_CODE_MESSAGING_TOKEN"] = saved_messaging_handshake
         if saved_sse_port is not None:
             os.environ["CLAUDE_CODE_SSE_PORT"] = saved_sse_port
 @contextlib.contextmanager
