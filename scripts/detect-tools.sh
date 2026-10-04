@@ -305,7 +305,7 @@ _remember_run_python() {
     case "$PYTHON" in
         python3) python3 "$@" ;;
         python) python "$@" ;;
-        "py -3") py -3 "$@" ;;
+        py\ -3) py -3 "$@" ;;
         py) py "$@" ;;
         *)
             echo "FATAL: _remember_run_python: unrecognized PYTHON value '$PYTHON'" >&2

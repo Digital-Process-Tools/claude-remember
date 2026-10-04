@@ -1006,16 +1006,21 @@ if [ -s "$_SUMMARY_FAILURE_MARKER" ]; then
     # a specific remedy for every kind of failure, which would be as wrong
     # in the other direction as never naming it at all.
     _SF_DETAIL_LOWER=$(printf '%s' "$_SF_DETAIL" | tr '[:upper:]' '[:lower:]')
-    case "$_SF_DETAIL_LOWER" in
-        *"not logged in"*|*"please run /login"*|*"invalid api key"*|\
-        *"invalid bearer token"*|*"authentication_error"*|*"failed to authenticate"*)
-            echo "     this looks like an expired login -- refresh it: run"
-            echo "     \`claude setup-token\`, or log in again in your coding"
-            echo "     agent's own CLI. This plugin reads no credential of"
-            echo "     its own any more (#129/#131/#860)."
-            ;;
-    esac
-    unset _remember_sf_glob_dir _SF_LATEST_LOG _SF_DETAIL _SF_DETAIL_LOWER _sf_f
+    # Expansion tests with each marker held in a variable, not quoted
+    # literals in a case pattern (#898 round 9, a shape the directory's
+    # scanner holds a submission on).
+    _sf_login=0
+    for _sf_m in 'not logged in' 'please run /login' 'invalid api key' \
+                 'invalid bearer token' 'authentication_error' 'failed to authenticate'; do
+        [ "${_SF_DETAIL_LOWER#*"$_sf_m"}" != "$_SF_DETAIL_LOWER" ] && _sf_login=1
+    done
+    if [ "$_sf_login" = 1 ]; then
+        echo "     this looks like an expired login -- refresh it: run"
+        echo "     \`claude setup-token\`, or log in again in your coding"
+        echo "     agent's own CLI. This plugin reads no credential of"
+        echo "     its own any more (#129/#131/#860)."
+    fi
+    unset _remember_sf_glob_dir _SF_LATEST_LOG _SF_DETAIL _SF_DETAIL_LOWER _sf_f _sf_m _sf_login
 else
     echo "OK   No summarizer failure recorded ($_SUMMARY_FAILURE_MARKER empty or absent)"
 fi

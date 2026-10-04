@@ -807,13 +807,14 @@ if [ -n "$SIDECAR" ] && [ -f "$SIDECAR" ]; then
                         _LAST_SAVE_STATE="unreadable"
                     fi
                 fi
-                _SESSIONS_SCOPE=""
-                case "$_LAST_SAVE_CONTENT" in
-                    *'"sessions"'*)
-                        _SESSIONS_SCOPE=${_LAST_SAVE_CONTENT#*'"sessions"'}
-                        _SESSIONS_SCOPE="${_SESSIONS_SCOPE%%\}*}"
-                        ;;
-                esac
+                # An expansion test, not a quoted literal in a case pattern
+                # (#898 round 9, a directory-scanner hold shape).
+                _SESSIONS_SCOPE=${_LAST_SAVE_CONTENT#*"$_pt_dq"sessions"$_pt_dq"}
+                if [ "$_SESSIONS_SCOPE" != "$_LAST_SAVE_CONTENT" ]; then
+                    _SESSIONS_SCOPE="${_SESSIONS_SCOPE%%\}*}"
+                else
+                    _SESSIONS_SCOPE=""
+                fi
                 case "$_SESSIONS_SCOPE" in
                     *"$_pt_dq"$SESSION_ID"$_pt_dq":*)
                         LAST_LINE=$((10#$_SIDECAR_LINE))

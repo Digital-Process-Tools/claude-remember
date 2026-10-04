@@ -201,7 +201,7 @@ ALLOWLIST: dict[tuple[str, int], str] = {
     # Shifted +5 by #898 round 4's claude_projects_dir nested-default fix,
     # then +15 more by round 5's wrapper function above (the case statement
     # itself is unchanged).
-    ("scripts/lib-slug.sh", 426): _CASE,
+    ("scripts/lib-slug.sh", 432): _CASE,
 }
 
 

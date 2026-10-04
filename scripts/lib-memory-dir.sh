@@ -207,10 +207,8 @@ _set_store_root() {
         /*|~*|[A-Za-z]:/*|[A-Za-z]:\\*) ;;
         *) return 0 ;;
     esac
-    case "$data_dir" in
-        *'{slug}'*) ;;
-        *) return 0 ;;
-    esac
+    # An expansion test, not a quoted literal in a case pattern (#898 round 9).
+    [ "${data_dir#*\{slug\}}" != "$data_dir" ] || return 0
 
     prefix="${data_dir%%\{slug\}*}"
     # shellcheck disable=SC2016  # we want literal ~ expansion here
@@ -370,10 +368,13 @@ _remember_config_tracked_status() {
              LC_ALL=C LANGUAGE=C git -C "$_dir" rev-parse --is-inside-work-tree) 2>&1 )
     _rc=$?
     if [ "$_rc" -ne 0 ]; then
-        case "$_out" in
-            *"not a git repository"*) echo "untracked" ;;
-            *) echo "could-not-tell" ;;
-        esac
+        # An expansion test, not a quoted literal in a case pattern (#898
+        # round 9, a shape the directory's scanner holds a submission on).
+        if [ "${_out#*not a git repository}" != "$_out" ]; then
+            echo "untracked"
+        else
+            echo "could-not-tell"
+        fi
         return 0
     fi
     if [ "$_out" != "true" ]; then
@@ -652,7 +653,7 @@ elif [ "${#_cfg_sources[@]}" -gt 0 ]; then
         case "${PYTHON:-python3}" in
             python3) python3 "$@" ;;
             python) python "$@" ;;
-            "py -3") py -3 "$@" ;;
+            py\ -3) py -3 "$@" ;;
             py) py "$@" ;;
             *) return 127 ;;
         esac

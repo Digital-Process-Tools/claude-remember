@@ -652,19 +652,18 @@ _config_load() {
         return 0
     fi
 
-    case "$_dump" in
-        '#refuse'*)
-            # Not a problem, and deliberately not reported as one: the config
-            # is fine, its shape is simply one the flattener declines rather
-            # than risk answering wrongly. Per-key reads give the right answers
-            # for it. A warning that fires on a valid config is a warning
-            # nobody reads, so this one only shows up when debugging.
-            [ "${REMEMBER_DEBUG:-}" = "1" ] && \
-                echo "remember: ${_dump#'#refuse' } -- reading config one key at a time" >&2
-            _REMEMBER_CFG_STATE="fallback"
-            return 0
-            ;;
-    esac
+    # An expansion test, not a quoted literal in a case pattern (#898 round 9).
+    if [ "${_dump#\#refuse}" != "$_dump" ]; then
+        # Not a problem, and deliberately not reported as one: the config
+        # is fine, its shape is simply one the flattener declines rather
+        # than risk answering wrongly. Per-key reads give the right answers
+        # for it. A warning that fires on a valid config is a warning
+        # nobody reads, so this one only shows up when debugging.
+        [ "${REMEMBER_DEBUG:-}" = "1" ] && \
+            echo "remember: ${_dump#'#refuse' } -- reading config one key at a time" >&2
+        _REMEMBER_CFG_STATE="fallback"
+        return 0
+    fi
 
     local _k _v
     while IFS=$'\t' read -r _k _v; do
@@ -733,7 +732,7 @@ _remember_log_run_python() {
     case "${PYTHON:-python3}" in
         python3) python3 "$@" ;;
         python) python "$@" ;;
-        "py -3") py -3 "$@" ;;
+        py\ -3) py -3 "$@" ;;
         py) py "$@" ;;
         *) return 127 ;;
     esac

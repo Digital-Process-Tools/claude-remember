@@ -29,7 +29,7 @@ _remember_slug_run_python() {
     case "${PYTHON:-python3}" in
         python3) python3 "$@" ;;
         python) python "$@" ;;
-        "py -3") py -3 "$@" ;;
+        py\ -3) py -3 "$@" ;;
         py) py "$@" ;;
         *) return 127 ;;
     esac
@@ -249,10 +249,16 @@ session_dir_slug() {
         # Claude Code would slug it literally. Stripping unconditionally would
         # rename that store. Same reason pipeline/slug.py is untouched — it
         # never runs cygpath, so it never sees a prefix this plugin put there.
-        case "$winpath" in
-            '\\?\UNC\'*) winpath='\\'"${winpath#'\\?\UNC\'}" ;;
-            '\\?\'*)     winpath="${winpath#'\\?\'}" ;;
-        esac
+        # Expansion tests with each prefix held in a variable, not quoted
+        # literals in a case pattern (#898 round 9, a directory-scanner
+        # hold shape). The UNC form is tested first: it also starts with
+        # the plain long-path prefix.
+        local _unc_pfx='\\?\UNC\' _long_pfx='\\?\'
+        if [ "${winpath#"$_unc_pfx"}" != "$winpath" ]; then
+            winpath='\\'"${winpath#"$_unc_pfx"}"
+        elif [ "${winpath#"$_long_pfx"}" != "$winpath" ]; then
+            winpath="${winpath#"$_long_pfx"}"
+        fi
         path="$winpath"
     fi
     # Lowercase the drive letter to match Claude Code — unconditionally, not

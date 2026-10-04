@@ -26,6 +26,9 @@ SCRIPT = REPO_ROOT / ".github" / "scripts" / "check_release_tree.py"
 # Developer-only scripts the release build leaves out of the tree.
 NOT_SHIPPED = {"bench-slug.sh", "run-tests.sh"}
 SHIPPED_SH = sorted(p for p in (REPO_ROOT / "scripts").glob("*.sh") if p.name not in NOT_SHIPPED)
+# #898 round 9: the sweep-shape guards also cover hooks.d -- the opt-in git
+# backup/restore hooks ship in the release tree beside scripts/.
+SHAPE_SH = SHIPPED_SH + sorted((REPO_ROOT / "hooks.d").rglob("*.sh"))
 
 PROBE = 'case "$probe" in\n    *) : ;;\nesac\n'
 
@@ -88,6 +91,8 @@ SHAPE_CHECKS = {
     # check function -> a line that carries the shape (positive control)
     "_check_escaped_quote": 'echo "say \\"hi\\""\n',
     "_check_slash_glob_case": 'case "$0" in */*) : ;; esac\n',
+    # #898 round 9 (triggers.md 9): a quoted literal inside a case pattern.
+    "_check_quoted_literal_case": 'case "$x" in\n    *"not logged in"*) : ;;\nesac\n',
     # `${!name}` and `${!arr[@]}` alike -- the portal cited both as "reads an
     # environment variable named at run time" (triggers.md).
     "_check_indirect_expansion": 'v="${!slot:-}"\n',
@@ -104,7 +109,7 @@ def test_shape_check_fires_on_its_own_shape(check_name):
 
 
 @pytest.mark.parametrize("check_name", sorted(SHAPE_CHECKS))
-@pytest.mark.parametrize("path", SHIPPED_SH, ids=lambda p: p.name)
+@pytest.mark.parametrize("path", SHAPE_SH, ids=lambda p: str(p.relative_to(REPO_ROOT)))
 def test_shipped_script_carries_no_sweep_shape(path, check_name):
     hits = _shape_hits(check_name, path.read_text(encoding="utf-8"))
     assert not hits, f"{path.name}: {hits}"

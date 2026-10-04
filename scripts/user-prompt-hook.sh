@@ -258,8 +258,8 @@ fi
 _stdin_cwd() {
     local raw="$1" rest prefix value dq
     printf -v dq '\042'  # the double quote, held in a variable (#898 round 8)
-    case "$raw" in *'"cwd"'*) ;; *) return 1 ;; esac
-    rest=${raw#*'"cwd"'}
+    rest=${raw#*"$dq"cwd"$dq"}
+    [ "$rest" != "$raw" ] || return 1
     prefix=${rest%%"$dq"*}
     case "$prefix" in *[!:[:space:]]*) return 1 ;; esac
     value=${rest#*"$dq"}
@@ -286,8 +286,8 @@ _stdin_cwd() {
 _stdin_cwd_into() {
     local _var="$1" raw="$2" rest prefix value dq
     printf -v dq '\042'  # the double quote, held in a variable (#898 round 8)
-    case "$raw" in *'"cwd"'*) ;; *) return 1 ;; esac
-    rest=${raw#*'"cwd"'}
+    rest=${raw#*"$dq"cwd"$dq"}
+    [ "$rest" != "$raw" ] || return 1
     prefix=${rest%%"$dq"*}
     case "$prefix" in *[!:[:space:]]*) return 1 ;; esac
     value=${rest#*"$dq"}

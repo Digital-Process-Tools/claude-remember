@@ -48,7 +48,7 @@ _bench_run_python() {
     case "$PYTHON" in
         python3) python3 "$@" ;;
         python) python "$@" ;;
-        "py -3") py -3 "$@" ;;
+        py\ -3) py -3 "$@" ;;
         py) py "$@" ;;
         *)
             printf 'bench-slug.sh: unrecognized PYTHON=%s\n' "$PYTHON" >&2

@@ -928,52 +928,50 @@ _transcript_is_pluginless_sdk() {
     while IFS= read -r line; do
         n=$((n + 1))
         is_dialogue=0
-        case "$line" in
-            *'"message"'*)
-                # #803: real dialogue's own "message" field is always the
-                # nested {role, content} OBJECT; a bookkeeping record's
-                # "message" field (an error/status STRING, possibly empty,
-                # on say a queue-operation record) is not. Checked directly
-                # by shape rather than by reusing _stdin_json_string (its
-                # own `[ -n "$value" ]` non-empty guard cannot tell an empty
-                # STRING apart from an OBJECT by return code alone --
-                # auditor finding, self-review round): everything between
-                # the "message" key and the first `"` after it must be only
-                # colon and whitespace for the value to be quote-opened
-                # (string-shaped, any length, any whitespace width); any
-                # other character there (a `{`, most plainly) means the
-                # value is an object, and only that shape is real dialogue.
-                # A string-shaped "message" falls through to the entrypoint
-                # check below like any other bookkeeping line, so it can no
-                # longer mask an "entrypoint" field on the same line the way
-                # a bare substring skip did. Skipping via `is_dialogue` (an
-                # `if`, not a `continue`) -- self-review caught that a
-                # `continue` here would jump past the CAP check below on
-                # every dialogue line, silently defeating
-                # _ENTRYPOINT_SNIFF_CAP for the overwhelmingly common case
-                # (ordinary transcripts are mostly dialogue).
-                rest=${line#*'"message"'}
-                prefix=${rest%%"$dq"*}
-                case "$prefix" in
-                    *[!:[:space:]]*) is_dialogue=1 ;;
-                esac
-                ;;
-        esac
-        if [ "$is_dialogue" -eq 0 ]; then
-            case "$line" in
-                *'"entrypoint"'*)
-                    ep=$(_stdin_json_string entrypoint "$line" 2>/dev/null) || return 1
-                    # `[ ]` prefix test, not a `case` with a catch-all `*)`
-                    # arm inside this loop (#898 round 7 -- that shape is
-                    # one the plugin directory's scanner holds a
-                    # submission on).
-                    if [ "${ep#sdk-}" != "$ep" ]; then
-                        return 0
-                    else
-                        return 1
-                    fi
-                    ;;
+        # Expansion tests, not quoted literals in a case pattern (#898
+        # round 9, a directory-scanner hold shape).
+        rest=${line#*"$dq"message"$dq"}
+        if [ "$rest" != "$line" ]; then
+            # #803: real dialogue's own "message" field is always the
+            # nested {role, content} OBJECT; a bookkeeping record's
+            # "message" field (an error/status STRING, possibly empty,
+            # on say a queue-operation record) is not. Checked directly
+            # by shape rather than by reusing _stdin_json_string (its
+            # own `[ -n "$value" ]` non-empty guard cannot tell an empty
+            # STRING apart from an OBJECT by return code alone --
+            # auditor finding, self-review round): everything between
+            # the "message" key and the first `"` after it must be only
+            # colon and whitespace for the value to be quote-opened
+            # (string-shaped, any length, any whitespace width); any
+            # other character there (a `{`, most plainly) means the
+            # value is an object, and only that shape is real dialogue.
+            # A string-shaped "message" falls through to the entrypoint
+            # check below like any other bookkeeping line, so it can no
+            # longer mask an "entrypoint" field on the same line the way
+            # a bare substring skip did. Skipping via `is_dialogue` (an
+            # `if`, not a `continue`) -- self-review caught that a
+            # `continue` here would jump past the CAP check below on
+            # every dialogue line, silently defeating
+            # _ENTRYPOINT_SNIFF_CAP for the overwhelmingly common case
+            # (ordinary transcripts are mostly dialogue).
+            prefix=${rest%%"$dq"*}
+            case "$prefix" in
+                *[!:[:space:]]*) is_dialogue=1 ;;
             esac
+        fi
+        if [ "$is_dialogue" -eq 0 ]; then
+            if [ "${line#*"$dq"entrypoint"$dq"}" != "$line" ]; then
+                ep=$(_stdin_json_string entrypoint "$line" 2>/dev/null) || return 1
+                # `[ ]` prefix test, not a `case` with a catch-all `*)`
+                # arm inside this loop (#898 round 7 -- that shape is
+                # one the plugin directory's scanner holds a
+                # submission on).
+                if [ "${ep#sdk-}" != "$ep" ]; then
+                    return 0
+                else
+                    return 1
+                fi
+            fi
         fi
         [ "$n" -ge "$_ENTRYPOINT_SNIFF_CAP" ] && return 1
     done < "$f" 2>/dev/null
