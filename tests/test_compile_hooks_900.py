@@ -20,12 +20,16 @@ deduped, produce byte-identical *behaviour* when actually run.
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+
+from ._compiled_hooks import is_compiled_text
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / ".github" / "scripts" / "compile_hooks.py"
@@ -683,3 +687,188 @@ def test_real_hook_compiles_to_syntactically_valid_bash(hook_name):
         [_bash(), "-n"], input=compiled, capture_output=True, text=True, check=False,
     )
     assert result.returncode == 0, f"{hook_name}: compiled output fails `bash -n`:\n{result.stderr}"
+
+
+# -- round 4: the compiled form must keep `source`'s RUNTIME semantics --------
+#
+# The compiled-hooks CI leg (tests.yml hook-tests-compiled) found the real
+# post-tool-hook.sh no longer resolving PROJECT_DIR on its slow path: the
+# first inlining of lib-slug.sh / lib-memory-dir.sh / log.sh sat on the FAST
+# branch (or inside the fast path's lazy log() stub), so a build-time include
+# guard replaced every later `source` of them with `:` -- including the ones
+# on the slow branch, which is the only one that runs on a cold cache. A
+# build-time guard cannot know which branch runs; only the library's own
+# runtime guard can. Each fixture below runs the SAME text sourced and
+# compiled and requires identical output, in both directions of the branch
+# (the branch that worked before is the positive control).
+
+def _run_both(tmp_path: Path, files: dict, env_extra: dict) -> tuple:
+    scripts = tmp_path / "scripts"
+    scripts.mkdir(parents=True, exist_ok=True)
+    for name, text in files.items():
+        (scripts / name).write_text(text, encoding="utf-8")
+    contents = {f"scripts/{name}": text for name, text in files.items()}
+    compiled_text = compile_hooks.compile_hook("scripts/hook.sh", contents)
+    assert compile_hooks.unresolved_sources(compiled_text) == []
+    compiled_path = scripts / "hook-compiled.sh"
+    compiled_path.write_text(compiled_text, encoding="utf-8")
+    env = {**os.environ, "T_ROOT": str(tmp_path), **env_extra}
+    runs = []
+    for path in (scripts / "hook.sh", compiled_path):
+        r = subprocess.run([_bash(), str(path)], env=env, capture_output=True,
+                           text=True, check=False)
+        runs.append((r.returncode, r.stdout, r.stderr))
+    return runs[0], runs[1]
+
+
+_BRANCH_FILES = {
+    "lib-slug.sh": _LIB_SLUG,
+    "lib-boot.sh": 'source "${T_ROOT}/scripts/lib-slug.sh"\necho booted\n',
+    "hook.sh": (
+        '#!/usr/bin/env bash\n'
+        'set -u\n'
+        'if [ "${MODE:-}" = fast ]; then\n'
+        '    source "${T_ROOT}/scripts/lib-slug.sh"\n'
+        'else\n'
+        '    source "${T_ROOT}/scripts/lib-boot.sh"\n'
+        'fi\n'
+        'echo "$(slugify x)"\n'
+    ),
+}
+
+
+@pytest.mark.parametrize("mode", ["fast", "slow"])
+def test_a_library_first_sourced_on_a_branch_not_taken_still_loads(tmp_path, mode):
+    # "fast" is the positive control (the branch holding the FIRST source
+    # runs, which worked before round 4); "slow" is the shape that broke
+    # the real post-tool-hook.sh.
+    (src_rc, src_out, src_err), (c_rc, c_out, c_err) = _run_both(
+        tmp_path, _BRANCH_FILES, {"MODE": mode})
+    assert src_out.strip().endswith("slug-x"), src_err
+    assert (c_rc, c_out) == (src_rc, src_out), c_err
+
+
+_RESOLVE_FILES = {
+    "lib-resolve.sh": (
+        '[ -n "${T_FAIL:-}" ] && return 1\n'
+        'echo resolved\n'
+    ),
+    "hook.sh": (
+        '#!/usr/bin/env bash\n'
+        'SOFT=1 source "${T_ROOT}/scripts/lib-resolve.sh" || exit 0\n'
+        'echo after\n'
+    ),
+}
+
+
+@pytest.mark.parametrize("fail", ["", "1"])
+def test_a_librarys_own_return_status_still_reaches_the_caller(tmp_path, fail):
+    # resolve-paths.sh's soft-failure mode is exactly this shape: the
+    # library `return 1`s and the hook's `|| exit 0` is what stops it. That
+    # trailing guard is NOT dead code once inlined -- it is the library's
+    # own verdict. fail="" is the positive control (both print "after").
+    (src_rc, src_out, src_err), (c_rc, c_out, c_err) = _run_both(
+        tmp_path, _RESOLVE_FILES, {"T_FAIL": fail})
+    expected = "" if fail else "resolved\nafter\n"
+    assert src_out == expected, src_err
+    assert (c_rc, c_out) == (src_rc, src_out), c_err
+    assert "can only `return'" not in c_err
+
+
+def test_an_assignment_prefix_on_source_has_the_same_lifetime_compiled(tmp_path):
+    # Whatever bash does with `FOO=1 source lib` (temporary for the
+    # duration in bash's default mode), the compiled form must do the same
+    # -- the lib sees FOO=1 in both, and FOO's value afterwards matches.
+    files = {
+        "lib.sh": 'echo "inside=${FOO:-unset}"\n',
+        "hook.sh": (
+            '#!/usr/bin/env bash\n'
+            'FOO=1 source "${T_ROOT}/scripts/lib.sh"\n'
+            'echo "after=${FOO:-unset}"\n'
+        ),
+    }
+    (src_rc, src_out, src_err), (c_rc, c_out, c_err) = _run_both(tmp_path, files, {})
+    assert "inside=1" in src_out, src_err
+    assert (c_rc, c_out) == (src_rc, src_out), c_err
+
+
+def test_compiled_hook_carries_the_generated_marker_and_source_does_not():
+    # tests/_compiled_hooks.py keys off this marker to tell a compiled hook
+    # (the compiled CI leg compiles in place) from its source -- the
+    # source-TEXT pins (#367, #511, #637, #695) describe the source file,
+    # which a compiled build no longer is.
+    contents = _sh_texts()
+    key = "scripts/post-tool-hook.sh"
+    if is_compiled_text(contents[key]):
+        pytest.skip("this checkout's hooks are already compiled (compiled CI leg)")
+    compiled = compile_hooks.compile_hook(key, contents)
+    assert compiled.splitlines()[0].startswith("#!")
+    assert is_compiled_text(compiled)
+    assert not is_compiled_text(contents[key])
+
+
+# The real hooks, end to end on the COLD path: no env cache (fresh TMPDIR), no
+# CLAUDE_PROJECT_DIR, project root from the stdin `cwd`. This is the POSIX
+# twin of tests/test_windows_native_hook_cwd_448.py's post-tool case, which is
+# where the compiled CI leg first caught the slow-path library loss; there a
+# warm env cache left by an earlier test hid it on Linux/macOS. "source" is
+# the positive control: the same harness, uncompiled, must resolve.
+_PLUGIN_PARTS = (".claude-plugin", "scripts", "pipeline", "hooks", "hooks.d", "prompts")
+_PLUGIN_FILES = ("config.example.json", "config.user.example.json", "promos.json",
+                 "identity.example.md")
+
+
+def _plugin_copy(dest: Path, compiled: bool) -> Path:
+    for part in _PLUGIN_PARTS:
+        if (REPO_ROOT / part).is_dir():
+            shutil.copytree(REPO_ROOT / part, dest / part,
+                            ignore=shutil.ignore_patterns("__pycache__"))
+    for f in _PLUGIN_FILES:
+        if (REPO_ROOT / f).is_file():
+            shutil.copy2(REPO_ROOT / f, dest / f)
+    if compiled:
+        assert compile_hooks.main(["--repo", str(dest), "--apply"]) == 0
+    return dest
+
+
+_COLD_PAYLOADS = {
+    "post-tool-hook.sh": {"hook_event_name": "PostToolUse", "tool_name": "Read",
+                          "tool_input": {"file_path": "/x.py"},
+                          "tool_response": {"content": "ok"}},
+    "user-prompt-hook.sh": {"hook_event_name": "UserPromptSubmit", "prompt": "hello"},
+    "session-start-hook.sh": {"hook_event_name": "SessionStart", "source": "startup"},
+}
+
+
+@pytest.mark.parametrize("compiled", [False, True], ids=["source", "compiled"])
+@pytest.mark.parametrize("hook_name", sorted(_COLD_PAYLOADS))
+def test_real_hook_resolves_the_project_on_a_cold_cache(tmp_path, hook_name, compiled):
+    plugin = _plugin_copy(tmp_path / "plugin", compiled)
+    hook = plugin / "scripts" / hook_name
+    if not compiled and is_compiled_text(hook.read_text(encoding="utf-8")):
+        pytest.skip("this checkout's hooks are already compiled (compiled CI leg) "
+                    "-- the 'source' half has no source to run here")
+    home = tmp_path / "home"
+    home.mkdir()
+    tmp = tmp_path / "tmp"
+    tmp.mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+    payload = {"session_id": "aaaaaaaa-0000-4000-8000-000000000900",
+               "transcript_path": "/does/not/matter.jsonl", "cwd": str(project),
+               **_COLD_PAYLOADS[hook_name]}
+    env = {**os.environ, "HOME": str(home), "TMPDIR": str(tmp),
+           "CLAUDE_PLUGIN_ROOT": str(plugin)}
+    for k in ("CLAUDE_PROJECT_DIR", "REMEMBER_HOOK_CWD"):
+        env.pop(k, None)
+    r = subprocess.run([_bash(), str(hook)], env=env,
+                       input=json.dumps(payload), capture_output=True, text=True,
+                       timeout=60, cwd=str(project), check=False)
+    assert r.returncode == 0, r.stderr
+    assert (project / ".remember").is_dir(), (
+        f"{hook_name} ({'compiled' if compiled else 'source'}) did not resolve "
+        f"PROJECT_DIR from stdin cwd on a cold cache; stderr:\n{r.stderr}")
+    assert "command not found" not in r.stderr, r.stderr
+    errlog = project / ".remember" / "logs" / "hook-errors.log"
+    if errlog.is_file():
+        assert "command not found" not in errlog.read_text(encoding="utf-8", errors="replace")
