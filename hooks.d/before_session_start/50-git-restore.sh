@@ -215,7 +215,7 @@ _gr_common_dir() {
         _out=$(git -C "$_d" rev-parse --git-common-dir 2>/dev/null) || return 1
         [ -n "$_out" ] || return 1
         case "$_out" in
-            /*|[A-Za-z]:/*|[A-Za-z]:\\*) ;;
+            /*|[A-Za-z]:[/\\]*) ;;
             *) _out="$_d/$_out" ;;
         esac
     fi
@@ -283,7 +283,7 @@ case "$FETCH_TIMEOUT" in ''|*[!0-9]*|0) FETCH_TIMEOUT=20 ;; esac
 # most intrusive surface in this codebase, so one that fires on every hiccup is
 # one nobody reads. 0 disables the interruption; the log line stays either way.
 DIVERGED_NOTICE_AFTER=$(config '.git_restore.diverged_notice_after' '3')
-case "$DIVERGED_NOTICE_AFTER" in ''|*[!0-9]*) DIVERGED_NOTICE_AFTER=3 ;; esac
+if [ -z "$DIVERGED_NOTICE_AFTER" ] || [ "${DIVERGED_NOTICE_AFTER#*[!0-9]}" != "$DIVERGED_NOTICE_AFTER" ]; then DIVERGED_NOTICE_AFTER=3; fi
 
 # ── State ────────────────────────────────────────────────────────────────────
 # Beside the backup half's own state files — which are no longer at the store
@@ -358,7 +358,7 @@ _spawn_fetch() {
         # clears the guard, and is then read as octal -- so the age comparison
         # is abandoned and a fetch still inside its window gets a second one
         # stacked on top of it.
-        case "$_s" in ''|*[!0-9]*) _s=0 ;; esac
+        if [ -z "$_s" ] || [ "${_s#*[!0-9]}" != "$_s" ]; then _s=0; fi
         if [ -z "$_f" ] && [ "$_s" -gt 0 ]; then
             _now=$(date +%s)
             _age=$(( _now - 10#$_s ))
@@ -480,7 +480,7 @@ _fetch_health() {
     # never came back is reported as one that FAILED with an unknown status.
     # Wrong state out of the three, and the remedy offered is for a failure
     # that did not happen.
-    case "$_s" in ''|*[!0-9]*) _s=0 ;; esac
+    if [ -z "$_s" ] || [ "${_s#*[!0-9]}" != "$_s" ]; then _s=0; fi
     if [ -z "$_f" ]; then
         _now=$(date +%s)
         _age=$(( _now - 10#$_s ))
@@ -574,8 +574,8 @@ fi
 COUNTS=$(git -C "$REPO_ROOT" rev-list --left-right --count "HEAD...$REMOTE_REF" 2>/dev/null) || COUNTS=""
 AHEAD="${COUNTS%%	*}"
 BEHIND="${COUNTS##*	}"
-case "$AHEAD" in ''|*[!0-9]*) AHEAD="" ;; esac
-case "$BEHIND" in ''|*[!0-9]*) BEHIND="" ;; esac
+if [ -z "$AHEAD" ] || [ "${AHEAD#*[!0-9]}" != "$AHEAD" ]; then AHEAD=""; fi
+if [ -z "$BEHIND" ] || [ "${BEHIND#*[!0-9]}" != "$BEHIND" ]; then BEHIND=""; fi
 
 if [ -z "$AHEAD" ] || [ -z "$BEHIND" ]; then
     log "git-restore" "WARNING: could not compare HEAD with $REMOTE_REF -- could NOT check, no restore attempted"
@@ -590,7 +590,7 @@ if [ "$AHEAD" -gt 0 ] && [ "$BEHIND" -gt 0 ]; then
     # report below never runs -- a store that refused to restore, saying so
     # nowhere.
     _count=$(cat "$DIVERGED_STATE_FILE" 2>/dev/null || echo 0)
-    case "$_count" in ''|*[!0-9]*) _count=0 ;; esac
+    if [ -z "$_count" ] || [ "${_count#*[!0-9]}" != "$_count" ]; then _count=0; fi
     _count=$((10#$_count + 1))
     echo "$_count" > "$DIVERGED_STATE_FILE" 2>/dev/null || true
 

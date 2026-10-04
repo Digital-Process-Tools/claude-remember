@@ -651,6 +651,8 @@ def check_tree(root: Path, budget: dict) -> CheckResult:
     _check_slash_glob_case(files, kinds, result.reviews)
     _check_quoted_literal_case(files, kinds, result.reviews)
     _check_runtime_argv(files, kinds, result.reviews)
+    _check_bare_dot_word(files, kinds, result.reviews)
+    _check_backslash_case_pattern(files, kinds, result.reviews)
     if "package.json" in files:
         locks = [lf for lf in LOCKFILES if lf in files]
         if locks:
@@ -1309,7 +1311,9 @@ def _check_quoted_literal_case(files: dict, kinds: dict, reviews: list) -> None:
 # MCP_FORWARDS_CREDENTIAL_ENV hold named the send side as "a command
 # assembled at run time" in the git backup hook; triggers.md lists
 # string-built and variable-named commands as cited send shapes.
-RUNTIME_ARGV_EVAL = re.compile(r'(?:^|[;&|({]|\bthen|\bdo|\belse)\s*eval\b')
+# `eval` over an expansion: the command text is built at run time. `eval`
+# of a fixed literal (`eval "echo hi"`) is not (test_release_branch_check_851).
+RUNTIME_ARGV_EVAL = re.compile(r'(?:^|[;&|({]|\bthen|\bdo|\belse)\s*eval\b[^#]*\$')
 RUNTIME_ARGV_CONDITIONAL = re.compile(r'\$\{[A-Za-z_][A-Za-z0-9_]*:?\+')
 RUNTIME_ARGV_DEFAULT = re.compile(r'\$\{[A-Za-z_][A-Za-z0-9_]*:?-[^}]*\$')
 RUNTIME_ARGV_GIT_UNQUOTED = re.compile(
@@ -1330,12 +1334,42 @@ def _check_runtime_argv(files: dict, kinds: dict, reviews: list) -> None:
     REVIEW, not FAIL: a line heuristic, not a shell parser."""
     for rel, n, line in _sh_lines(files, kinds):
         bare = _QUOTED_SEGMENT.sub('""', line)
-        if (RUNTIME_ARGV_EVAL.search(bare)
+        if (RUNTIME_ARGV_EVAL.search(line)
                 or RUNTIME_ARGV_CONDITIONAL.search(bare)
                 or RUNTIME_ARGV_DEFAULT.search(line)
                 or RUNTIME_ARGV_GIT_UNQUOTED.search(bare)):
             reviews.append(f"{rel}:{n}: an argument vector or command assembled "
                            f"at run time: {line.strip()[:80]}")
+
+
+# #898 round 10, COMMAND_SCRIPT_NOT_FOLLOWED's bare "." entry: a lone `.`
+# or `..` word straight after `|`, `;` or `(`. triggers.md: the scanner reads
+# inside quoted programs and splits on those characters, so a case
+# alternative `''|.|..|-*)` or a jq program's `({}; . * $x)` reads as a `.`
+# (source) command. Rewrite: `[.]` / `[.][.]` in a case pattern (a bracket
+# dot was refuted as a trigger), `getpath([])` for jq's identity.
+BARE_DOT_WORD = re.compile(r'(?:^|[|;(])\s*\.\.?(?=[\s|;)]|$)')
+# A backslash glob in a case pattern -- `[A-Za-z]:\\)`, `*\\*)` -- one of
+# the shapes batch-cleared on jit-context with its bare dot.
+BACKSLASH_CASE_PATTERN = re.compile(r'\\\\\*?[|)]')
+
+
+def _check_bare_dot_word(files: dict, kinds: dict, reviews: list) -> None:
+    """#898 round 10: a lone `.`/`..` word after `|`, `;` or `(` in a
+    shipped shell script. REVIEW, not FAIL: a line heuristic."""
+    for rel, n, line in _sh_lines(files, kinds):
+        if BARE_DOT_WORD.search(line):
+            reviews.append(f"{rel}:{n}: a lone dot word after a separator: "
+                           f"{line.strip()[:80]}")
+
+
+def _check_backslash_case_pattern(files: dict, kinds: dict, reviews: list) -> None:
+    """#898 round 10: a backslash glob in a case pattern in a shipped shell
+    script; rewrite as `[ ]` expansion tests. REVIEW, not FAIL."""
+    for rel, n, line in _sh_lines(files, kinds):
+        if BACKSLASH_CASE_PATTERN.search(line):
+            reviews.append(f"{rel}:{n}: a backslash glob in a case pattern: "
+                           f"{line.strip()[:80]}")
 
 
 def _check_credential_shaped_name(files: dict, kinds: dict, off: list) -> None:

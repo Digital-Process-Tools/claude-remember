@@ -101,6 +101,15 @@ SHAPE_CHECKS = {
     # #898 round 10: argv assembled at run time (MCP_FORWARDS_CREDENTIAL_ENV's
     # send side, "a command assembled at run time").
     "_check_runtime_argv": 'git -C "$d" push -- "$r" ${b:+"$b"}\n',
+    # #898 round 10, the bare "." in COMMAND_SCRIPT_NOT_FOLLOWED's file list:
+    # a lone `.`/`..` word right after `|`, `;` or `(` -- a case alternative
+    # (`""|.|..|-*)`) or a jq/awk program's `; . * $x` -- reads as a `.`
+    # (source) command to a line scanner.
+    "_check_bare_dot_word": 'case "$1" in\n    ""|.|..|-*) : ;;\nesac\n',
+    # A backslash glob in a case pattern (`[A-Za-z]:` then two backslashes),
+    # batch-cleared on jit-context alongside the bare dot.
+    "_check_backslash_case_pattern":
+        'case "$p" in\n    [A-Za-z]:' + "\x5c" * 2 + ') : ;;\nesac\n',
 }
 
 

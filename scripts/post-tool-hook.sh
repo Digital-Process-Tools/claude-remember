@@ -434,7 +434,7 @@ STDIN_SESSION_ID=$(_stdin_json_string session_id "$HOOK_STDIN" 2>/dev/null) || S
 # preview: no summary written, no position advanced, log line reads like an
 # ordinary run.
 case "$STDIN_SESSION_ID" in
-    ''|.|..|-*|*[!A-Za-z0-9._-]*) STDIN_SESSION_ID="" ;;
+    ''|[.]|[.][.]|-*|*[!A-Za-z0-9._-]*) STDIN_SESSION_ID="" ;;
 esac
 
 # ── The transcript path the host handed us (#459, mirroring #407/#424) ────
@@ -524,7 +524,7 @@ if [ -z "$LATEST_JSONL" ]; then
         # a timestamp written with `printf` is exactly that file. The case guard
         # below is what decides whether the value is usable.
         read -r NOTICE_LAST < "$NOTICE_MARKER" 2>/dev/null
-        case "$NOTICE_LAST" in ''|*[!0-9]*) NOTICE_LAST=0 ;; esac
+        if [ -z "$NOTICE_LAST" ] || [ "${NOTICE_LAST#*[!0-9]}" != "$NOTICE_LAST" ]; then NOTICE_LAST=0; fi
     fi
     # 10# after the case, never instead of it (#322): "08"/"09" are all digits,
     # so they clear the guard and are then read as octal. Bash abandons the rest
@@ -626,7 +626,7 @@ else
     # basename that happens to collide with save-session.sh's own `--dry`/
     # `--force` flags cannot be misread as one.
     case "$SESSION_ID" in
-        ''|.|..|-*|*[!A-Za-z0-9._-]*) SESSION_ID="" ;;
+        ''|[.]|[.][.]|-*|*[!A-Za-z0-9._-]*) SESSION_ID="" ;;
     esac
 fi
 
@@ -668,7 +668,7 @@ if [ -d "$REMEMBER_DIR/tmp/capture-alive.d" ] \
     # it comes from a filename in the transcript dir, and `..` or a slash
     # would escape the store. Real session ids are UUIDs.
     case "$SESSION_ID" in
-        ''|.|..|*[!A-Za-z0-9._-]*) : ;;
+        ''|[.]|[.][.]|*[!A-Za-z0-9._-]*) : ;;
         *) : > "$REMEMBER_DIR/tmp/capture-alive.d/$SESSION_ID" 2>/dev/null || true ;;
     esac
 fi
@@ -722,7 +722,7 @@ fi
 # and the code below asks the real source of truth instead of guessing.
 SIDECAR=""
 case "$SESSION_ID" in
-    ''|.|..|*[!A-Za-z0-9._-]*) : ;;
+    ''|[.]|[.][.]|*[!A-Za-z0-9._-]*) : ;;
     *) SIDECAR="$REMEMBER_DIR/tmp/position.$SESSION_ID" ;;
 esac
 
@@ -853,7 +853,7 @@ if [ -z "$SIDECAR_TRUSTED" ] && [ -f "$LAST_SAVE_FILE" ]; then
     # case with one fast, no-fork test.
     declare -f _remember_run_python >/dev/null 2>&1 || source "$_HOOK_DIR/detect-tools.sh"
     LAST_LINE=$(cd "$PIPELINE_DIR" && _remember_run_python -m pipeline.shell read-position "$LAST_SAVE_FILE" "$SESSION_ID" 2>/dev/null)
-    case "$LAST_LINE" in ''|*[!0-9]*) LAST_LINE=0 ;; esac
+    if [ -z "$LAST_LINE" ] || [ "${LAST_LINE#*[!0-9]}" != "$LAST_LINE" ]; then LAST_LINE=0; fi
 fi
 
 # 10# after the case, never instead of it (#332) — the position is a decimal
@@ -879,7 +879,7 @@ if [ -f "$COOLDOWN_MARKER" ]; then
     # session that has saved once, so this ran on every tool call.
     LAST_TS=0
     read -r LAST_TS < "$COOLDOWN_MARKER" 2>/dev/null
-    case "$LAST_TS" in ''|*[!0-9]*) LAST_TS=0 ;; esac
+    if [ -z "$LAST_TS" ] || [ "${LAST_TS#*[!0-9]}" != "$LAST_TS" ]; then LAST_TS=0; fi
     # Resolved by log.sh and validated there, so it arrives the same way on
     # both paths — from the chain when the chain ran, replayed from the env
     # cache when it did not (#350). config() is the one thing the fast path

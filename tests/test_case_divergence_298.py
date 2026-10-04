@@ -733,6 +733,23 @@ _SANCTIONED_DIVERGENCE = {
             '            echo "could-not-tell"\n'
             '        fi\n',
         ),
+        # #898 round 10 (the bare "." hunt): a backslash glob in a case
+        # pattern is written as a bracket, `[A-Za-z]:[/\x5c\x5c]*` for the two
+        # drive-letter alternatives (same matches -- measured on bash 3.2), and
+        # jq's lone `.` after `;` is `getpath([])`, the same identity. Each
+        # pair is one sanctioned substring, applied to every line holding it.
+        (
+            "/*|~*|[A-Za-z]:/*|[A-Za-z]:" + "\x5c\x5c" + "*)",
+            "/*|~*|[A-Za-z]:[/" + "\x5c\x5c" + "]*)",
+        ),
+        (
+            "''|/|[A-Za-z]:|[A-Za-z]:/|[A-Za-z]:" + "\x5c\x5c" + ")",
+            "''|/|[A-Za-z]:|[A-Za-z]:[/" + "\x5c\x5c" + "])",
+        ),
+        (
+            "({}; . * $x)",
+            "({}; getpath([]) * $x)",
+        ),
     ],
 }
 

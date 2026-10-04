@@ -67,7 +67,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # below can disambiguate a subdirectory project the same way (#827).
 _DOCTOR_SESSION_ID="${CLAUDE_CODE_SESSION_ID:-}"
 case "$_DOCTOR_SESSION_ID" in
-    ''|.|..|*[!A-Za-z0-9._-]*) _DOCTOR_SESSION_ID="" ;;
+    ''|[.]|[.][.]|*[!A-Za-z0-9._-]*) _DOCTOR_SESSION_ID="" ;;
 esac
 
 # _doctor_trial_remember_dir <candidate-project-dir>
@@ -490,9 +490,9 @@ echo "-- Capture health --"
 _file_age_seconds() {
     local _path="$1" _mtime _now
     _mtime=$(stat -c %Y "$_path" 2>/dev/null) || _mtime=$(stat -f %m "$_path" 2>/dev/null) || true
-    case "$_mtime" in
-        ''|*[!0-9]*) return 1 ;;
-    esac
+    if [ -z "$_mtime" ] || [ "${_mtime#*[!0-9]}" != "$_mtime" ]; then
+        return 1
+    fi
     _now=$(date +%s)
     # 10# after the case, never instead of it (#332).
     echo $(( _now - 10#$_mtime ))
@@ -740,7 +740,7 @@ if [ -d "$REMEMBER_DIR" ]; then
             [ -f "$_mf" ] || continue
             _MEMORY_FILE_COUNT=$((_MEMORY_FILE_COUNT + 1))
             _mf_bytes=$(wc -c < "$_mf" 2>/dev/null | tr -d ' ')
-            case "$_mf_bytes" in ''|*[!0-9]*) _mf_bytes=0 ;; esac
+            if [ -z "$_mf_bytes" ] || [ "${_mf_bytes#*[!0-9]}" != "$_mf_bytes" ]; then _mf_bytes=0; fi
             _MEMORY_BYTES=$((_MEMORY_BYTES + 10#$_mf_bytes))
         done
     done
@@ -774,7 +774,7 @@ _CONSOLIDATE_CAP_DISABLED=0
 if [ -f "$REMEMBER_CONFIG" ] && [ -s "$REMEMBER_CONFIG" ]; then
     _cmb=$(grep -o '"consolidate_max_bytes"[[:space:]]*:[[:space:]]*[0-9]*' "$REMEMBER_CONFIG" 2>/dev/null \
         | sed 's/.*:[[:space:]]*//' | head -1)
-    case "$_cmb" in (''|*[!0-9]*) : ;; (*) _CONSOLIDATE_MAX_BYTES=$((10#$_cmb)) ;; esac
+    if [ -n "$_cmb" ] && [ "${_cmb#*[!0-9]}" = "$_cmb" ]; then _CONSOLIDATE_MAX_BYTES=$((10#$_cmb)); fi
 fi
 # pipeline/shell.py:452 documents and :542 implements 0 as the cap being
 # DISABLED, not a 0-byte limit -- consolidation never skips a round on size

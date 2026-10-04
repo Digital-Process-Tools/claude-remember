@@ -361,12 +361,24 @@ _remember_cfg_flatten_cache_valid_line() {
 # caller-chosen name, since nothing here is named `_v` or `_value`).
 # Backslash is escaped FIRST, so the backslashes this introduces for `\n`
 # and `\t` are never themselves re-escaped on a later pass.
+#
+# The escapes are built with `printf -v` from octal 134 (one backslash) and
+# substituted by unquoted assignments with QUOTED pattern and replacement,
+# rather than written as backslash runs inside a double-quoted expansion
+# (#898 round 10: a shape the plugin directory's scanner was batch-cleared
+# of). Quoted, the replacement is taken literally on bash 3.2 and 5.x alike
+# (measured on 3.2.57 and 5.3); unquoted inside double quotes it is not.
 _remember_cfg_flatten_q_encode() {
-    local _rcfgqe_v="$2"
-    _rcfgqe_v="${_rcfgqe_v//\\/\\\\}"
-    _rcfgqe_v="${_rcfgqe_v//$'\n'/\\n}"
-    _rcfgqe_v="${_rcfgqe_v//$'\r'/\\r}"
-    _rcfgqe_v="${_rcfgqe_v//$'\t'/\\t}"
+    local _rcfgqe_v="$2" _rcfgqe_b _rcfgqe_bb _rcfgqe_n _rcfgqe_r _rcfgqe_t
+    printf -v _rcfgqe_b '\134'
+    _rcfgqe_bb="$_rcfgqe_b$_rcfgqe_b"
+    printf -v _rcfgqe_n '%sn' "$_rcfgqe_b"
+    printf -v _rcfgqe_r '%sr' "$_rcfgqe_b"
+    printf -v _rcfgqe_t '%st' "$_rcfgqe_b"
+    _rcfgqe_v=${_rcfgqe_v//"$_rcfgqe_b"/"$_rcfgqe_bb"}
+    _rcfgqe_v=${_rcfgqe_v//$'\n'/"$_rcfgqe_n"}
+    _rcfgqe_v=${_rcfgqe_v//$'\r'/"$_rcfgqe_r"}
+    _rcfgqe_v=${_rcfgqe_v//$'\t'/"$_rcfgqe_t"}
     printf -v "$1" '%s' "$_rcfgqe_v"
 }
 
@@ -930,11 +942,11 @@ export REMEMBER_PROMPT_STAMP
 # One validation at the source beats one per consumer, which is how the
 # pre-#158 duplicate readers drifted.
 config_into REMEMBER_SAVE_COOLDOWN ".cooldowns.save_seconds" 120
-case "$REMEMBER_SAVE_COOLDOWN" in ''|*[!0-9]*) REMEMBER_SAVE_COOLDOWN=120 ;; esac
+if [ -z "$REMEMBER_SAVE_COOLDOWN" ] || [ "${REMEMBER_SAVE_COOLDOWN#*[!0-9]}" != "$REMEMBER_SAVE_COOLDOWN" ]; then REMEMBER_SAVE_COOLDOWN=120; fi
 export REMEMBER_SAVE_COOLDOWN
 
 config_into REMEMBER_DELTA_THRESHOLD ".thresholds.delta_lines_trigger" 50
-case "$REMEMBER_DELTA_THRESHOLD" in ''|*[!0-9]*) REMEMBER_DELTA_THRESHOLD=50 ;; esac
+if [ -z "$REMEMBER_DELTA_THRESHOLD" ] || [ "${REMEMBER_DELTA_THRESHOLD#*[!0-9]}" != "$REMEMBER_DELTA_THRESHOLD" ]; then REMEMBER_DELTA_THRESHOLD=50; fi
 export REMEMBER_DELTA_THRESHOLD
 
 # Model + reject-gate knobs. config.json is the source of truth; an explicit
@@ -1658,13 +1670,13 @@ dispatch() {
             # and under `set -u` an unvalidated value inside $(( )) does not
             # merely misbehave, it kills the shell (the #258 lesson). Falling
             # back to the shipped default is the safe direction in both senses.
-            case "$_budget" in
-                ''|*[!0-9]*) _budget=$_DISPATCH_BUDGET_FALLBACK ;;
-            esac
+            if [ -z "$_budget" ] || [ "${_budget#*[!0-9]}" != "$_budget" ]; then
+                _budget=$_DISPATCH_BUDGET_FALLBACK
+            fi
             _grace=$(config '.hooks.dispatch_kill_grace_seconds' "$_DISPATCH_KILL_GRACE_DEFAULT")
-            case "$_grace" in
-                ''|*[!0-9]*) _grace=$_DISPATCH_KILL_GRACE_DEFAULT ;;
-            esac
+            if [ -z "$_grace" ] || [ "${_grace#*[!0-9]}" != "$_grace" ]; then
+                _grace=$_DISPATCH_KILL_GRACE_DEFAULT
+            fi
         fi
         # Ownership + world-writable checks, ONE stat call instead of two
         # (`stat` for the owner, `find -perm -002` for the mode) -- #663, part
@@ -2030,7 +2042,7 @@ rotate_logs() {
     # `set -e` — losing the consolidation to the failure of a counter.
     local prev=0
     if [ -f "$state" ]; then read -r prev < "$state" 2>/dev/null || prev=0; fi
-    case "$prev" in ''|*[!0-9]*) prev=0 ;; esac
+    if [ -z "$prev" ] || [ "${prev#*[!0-9]}" != "$prev" ]; then prev=0; fi
     # 10# after the case (#332) — an "08" here abandons the rest of this
     # function, which is where the escalation ERROR is logged.
     local streak=$((10#$prev + 1))

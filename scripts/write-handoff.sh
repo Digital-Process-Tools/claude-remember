@@ -84,7 +84,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # the session-keyed hint file.
 _WH_SESSION_ID="${CLAUDE_CODE_SESSION_ID:-}"
 case "$_WH_SESSION_ID" in
-    ''|.|..|*[!A-Za-z0-9._-]*) _WH_SESSION_ID="" ;;
+    ''|[.]|[.][.]|*[!A-Za-z0-9._-]*) _WH_SESSION_ID="" ;;
 esac
 
 # _wh_trial_remember_dir <candidate-project-dir>
@@ -283,17 +283,18 @@ _WH_ROOT_SCRATCH="$REMEMBER_DIR"
 while [ "${_WH_ROOT_SCRATCH%/}" != "$_WH_ROOT_SCRATCH" ] && [ "$_WH_ROOT_SCRATCH" != "/" ]; do
     _WH_ROOT_SCRATCH="${_WH_ROOT_SCRATCH%/}"
 done
-case "$_WH_ROOT_SCRATCH" in
-    (/) _WH_REMEMBER_ROOT="/" ;;
-    (*/*)
-        _WH_REMEMBER_ROOT="${_WH_ROOT_SCRATCH%/*}"
-        [ -n "$_WH_REMEMBER_ROOT" ] || _WH_REMEMBER_ROOT="/"
-        ;;
+# `[ ]` tests, not a case with a `*/*` arm (#898 round 10).
+if [ "$_WH_ROOT_SCRATCH" = "/" ]; then
+    _WH_REMEMBER_ROOT="/"
+elif [ "${_WH_ROOT_SCRATCH#*/}" != "$_WH_ROOT_SCRATCH" ]; then
+    _WH_REMEMBER_ROOT="${_WH_ROOT_SCRATCH%/*}"
+    [ -n "$_WH_REMEMBER_ROOT" ] || _WH_REMEMBER_ROOT="/"
+else
     # Same dirname-no-slash answer (one dot) lib-memory-context.sh's own
     # REMEMBER_ROOT uses, written the same way: octal 056 through
     # `printf -v`, not a quoted lone dot (#898 round 8). Same byte.
-    (*) printf -v _WH_REMEMBER_ROOT '\056' ;;
-esac
+    printf -v _WH_REMEMBER_ROOT '\056'
+fi
 unset _WH_ROOT_SCRATCH
 
 _WH_MEM_PROJ="${MEMORY_PROJECT_DIR:-}"

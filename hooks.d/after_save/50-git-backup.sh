@@ -89,7 +89,7 @@ _gb_common_dir() {
         _out=$(git -C "$_d" rev-parse --git-common-dir 2>/dev/null) || return 1
         [ -n "$_out" ] || return 1
         case "$_out" in
-            /*|[A-Za-z]:/*|[A-Za-z]:\\*) ;;
+            /*|[A-Za-z]:[/\\]*) ;;
             *) _out="$_d/$_out" ;;
         esac
     fi
@@ -174,9 +174,9 @@ if [ -f "$COOLDOWN_MARKER" ]; then
     # never instead of it: `10#` on an empty string is itself an error on bash 5,
     # and the case is also what rejects a space-padded value that arithmetic
     # would have accepted. Same call save-session.sh already makes (#322).
-    case "$LAST_MOD" in
-        ''|*[!0-9]*) LAST_MOD=0 ;;
-    esac
+    if [ -z "$LAST_MOD" ] || [ "${LAST_MOD#*[!0-9]}" != "$LAST_MOD" ]; then
+        LAST_MOD=0
+    fi
     ELAPSED=$(( $(date +%s) - 10#$LAST_MOD ))
     if [ "$ELAPSED" -lt 0 ]; then
         # Range, not syntax (#326). A marker AHEAD of now is all digits, clears
@@ -343,9 +343,9 @@ ALLOW_REMOTE_CHANGE=$(config ".git_backup.allow_remote_change" "false")
 # default on a non-numeric value is the safe direction: the alternative is
 # arithmetic on garbage deciding whether a stopped backup gets reported.
 REJECT_NOTICE_AFTER=$(config ".git_backup.reject_notice_after" "3")
-case "$REJECT_NOTICE_AFTER" in
-    ''|*[!0-9]*) REJECT_NOTICE_AFTER=3 ;;
-esac
+if [ -z "$REJECT_NOTICE_AFTER" ] || [ "${REJECT_NOTICE_AFTER#*[!0-9]}" != "$REJECT_NOTICE_AFTER" ]; then
+    REJECT_NOTICE_AFTER=3
+fi
 
 # How many CONSECUTIVE failed commits before the human is interrupted (#257).
 # The same argument as the rejection counter above, and it applies harder: a
@@ -355,9 +355,9 @@ esac
 # pre-commit hook installed on the backup repo — so none of them self-heals and
 # the threshold can only postpone a true report, never swallow one.
 COMMIT_NOTICE_AFTER=$(config ".git_backup.commit_notice_after" "3")
-case "$COMMIT_NOTICE_AFTER" in
-    ''|*[!0-9]*) COMMIT_NOTICE_AFTER=3 ;;
-esac
+if [ -z "$COMMIT_NOTICE_AFTER" ] || [ "${COMMIT_NOTICE_AFTER#*[!0-9]}" != "$COMMIT_NOTICE_AFTER" ]; then
+    COMMIT_NOTICE_AFTER=3
+fi
 
 # How many consecutive saves with NO remote at all before saying so once (#257).
 # Deliberately higher than the two above and deliberately ONE-SHOT, because this
@@ -368,9 +368,9 @@ esac
 # steady state rather than a store mid-setup, and it is said once for the
 # lifetime of the store. 0 disables it entirely.
 NO_REMOTE_NOTICE_AFTER=$(config ".git_backup.no_remote_notice_after" "10")
-case "$NO_REMOTE_NOTICE_AFTER" in
-    ''|*[!0-9]*) NO_REMOTE_NOTICE_AFTER=10 ;;
-esac
+if [ -z "$NO_REMOTE_NOTICE_AFTER" ] || [ "${NO_REMOTE_NOTICE_AFTER#*[!0-9]}" != "$NO_REMOTE_NOTICE_AFTER" ]; then
+    NO_REMOTE_NOTICE_AFTER=10
+fi
 
 # ── Background subshell — never blocks save-session.sh ───────────────────────
 (
@@ -484,9 +484,9 @@ esac
         # `log "ERROR: push REJECTED …"` below never runs: the loudest report in
         # the file, silenced by the counter that exists to escalate it.
         _count=$(cat "$REJECT_STATE_FILE" 2>/dev/null || echo 0)
-        case "$_count" in
-            ''|*[!0-9]*) _count=0 ;;
-        esac
+        if [ -z "$_count" ] || [ "${_count#*[!0-9]}" != "$_count" ]; then
+            _count=0
+        fi
         _count=$((10#$_count + 1))
         echo "$_count" > "$REJECT_STATE_FILE" 2>/dev/null || true
 
@@ -706,9 +706,9 @@ esac
         # and here the abandoned branch is the one reporting that this memory is
         # in no git history at all.
         _cfail=$(cat "$COMMIT_FAIL_STATE_FILE" 2>/dev/null || echo 0)
-        case "$_cfail" in
-            ''|*[!0-9]*) _cfail=0 ;;
-        esac
+        if [ -z "$_cfail" ] || [ "${_cfail#*[!0-9]}" != "$_cfail" ]; then
+            _cfail=0
+        fi
         _cfail=$((10#$_cfail + 1))
         echo "$_cfail" > "$COMMIT_FAIL_STATE_FILE" 2>/dev/null || true
 
@@ -742,9 +742,9 @@ esac
         # so it is asked ONCE, of the only person who knows.
         # 10# after the case (#327), as above.
         _nr=$(cat "$NO_REMOTE_STATE_FILE" 2>/dev/null || echo 0)
-        case "$_nr" in
-            ''|*[!0-9]*) _nr=0 ;;
-        esac
+        if [ -z "$_nr" ] || [ "${_nr#*[!0-9]}" != "$_nr" ]; then
+            _nr=0
+        fi
         _nr=$((10#$_nr + 1))
         echo "$_nr" > "$NO_REMOTE_STATE_FILE" 2>/dev/null || true
 

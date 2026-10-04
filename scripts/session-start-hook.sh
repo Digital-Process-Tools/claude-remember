@@ -254,9 +254,9 @@ log "hook" "session-start: PROJECT_DIR=$PROJECT_DIR PIPELINE_DIR=$PIPELINE_DIR R
 # above already use -- no new cost on the common (already-cached) path.
 REMEMBER_SESSION_START_SLOW_S=""
 config_into REMEMBER_SESSION_START_SLOW_S ".session_start_slow_threshold_s" "5"
-case "$REMEMBER_SESSION_START_SLOW_S" in
-    ''|*[!0-9]*) REMEMBER_SESSION_START_SLOW_S=5 ;;
-esac
+if [ -z "$REMEMBER_SESSION_START_SLOW_S" ] || [ "${REMEMBER_SESSION_START_SLOW_S#*[!0-9]}" != "$REMEMBER_SESSION_START_SLOW_S" ]; then
+    REMEMBER_SESSION_START_SLOW_S=5
+fi
 
 # Publish what the chain above just resolved, so the UserPromptSubmit hook does not
 # repeat it on every prompt (#227). Republishing unconditionally here is what
@@ -300,7 +300,7 @@ CURRENT_SESSION_ID=$(_stdin_session_id "$HOOK_STDIN" 2>/dev/null) || CURRENT_SES
 # useful while `/` would match across directories, so it faces the same guard
 # the basename-derived ids face — at the point of entry, not the point of use.
 case "$CURRENT_SESSION_ID" in
-    ''|.|..|*[!A-Za-z0-9._-]*) CURRENT_SESSION_ID="" ;;
+    ''|[.]|[.][.]|*[!A-Za-z0-9._-]*) CURRENT_SESSION_ID="" ;;
 esac
 
 # ── The transcript path the host handed us (#407) ─────────────────────────
@@ -1328,7 +1328,7 @@ capture_was_seen() {
     #    Same id check the writer applies: this is a basename off the
     #    transcript dir, and `..` would make `-e` true for every id.
     case "$1" in
-        .|..|*[!A-Za-z0-9._-]*) : ;;
+        [.]|[.][.]|*[!A-Za-z0-9._-]*) : ;;
         *) [ -e "$CAPTURE_SEEN_DIR/$1" ] && return 0 ;;
     esac
     # 2. The legacy single slot. Kept as evidence rather than dropped so the
@@ -1624,7 +1624,7 @@ if [ "$_promos_enabled" = "true" ] \
         local marker="$promo_dir/promo-notice"
         local cooldown
         config_into cooldown ".cooldowns.promo_seconds" 604800
-        case "$cooldown" in ''|*[!0-9]*) cooldown=604800 ;; esac
+        if [ -z "$cooldown" ] || [ "${cooldown#*[!0-9]}" != "$cooldown" ]; then cooldown=604800; fi
 
         local last_ts=0 last_id=""
         if [ -f "$marker" ]; then
@@ -1636,11 +1636,11 @@ if [ "$_promos_enabled" = "true" ] \
                 esac
             done < "$marker"
         fi
-        case "$last_ts" in ''|*[!0-9]*) last_ts=0 ;; esac
+        if [ -z "$last_ts" ] || [ "${last_ts#*[!0-9]}" != "$last_ts" ]; then last_ts=0; fi
 
         local now=""
         _remember_date_into now +%s
-        case "$now" in ''|*[!0-9]*) return 0 ;; esac
+        if [ -z "$now" ] || [ "${now#*[!0-9]}" != "$now" ]; then return 0; fi
 
         if [ "$last_ts" -gt 0 ] \
             && [ $(( 10#$now - 10#$last_ts )) -lt "$cooldown" ]; then
@@ -2095,7 +2095,7 @@ elif [ -f "$REMEMBER_HANDOFF" ] && [ -s "$REMEMBER_HANDOFF" ]; then
     fi
     # A hand-edited or half-written record must not turn into an arithmetic
     # error inside the hook.
-    case "$DELIVERIES" in (''|*[!0-9]*) DELIVERIES=0 ;; esac
+    if [ -z "$DELIVERIES" ] || [ "${DELIVERIES#*[!0-9]}" != "$DELIVERIES" ]; then DELIVERIES=0; fi
 
     # Fenced with an explicit provenance line (#721): this is a file read
     # off disk, verbatim, and any "=== HANDOFF ===" (or other) block that

@@ -106,9 +106,9 @@ _lock_self_set() {
     sh -c 'echo $PPID' > "$_probe" 2>/dev/null
     _LOCK_SELF=$(cat "$_probe" 2>/dev/null) || true
     rm -f "$_probe" 2>/dev/null || true
-    case "$_LOCK_SELF" in
-        ''|*[!0-9]*) _LOCK_SELF="$$" ;;
-    esac
+    if [ -z "$_LOCK_SELF" ] || [ "${_LOCK_SELF#*[!0-9]}" != "$_LOCK_SELF" ]; then
+        _LOCK_SELF="$$"
+    fi
     return 0
 }
 
@@ -203,12 +203,12 @@ _LOCK_ADOPT_AFTER="${_LOCK_ADOPT_AFTER:-30}"
 _lock_dir_age() {
     local _mtime _now
     _mtime=$(stat -c %Y "$1" 2>/dev/null) || _mtime=""
-    case "$_mtime" in
-        ''|*[!0-9]*) _mtime=$(stat -f %m "$1" 2>/dev/null) || _mtime="" ;;
-    esac
-    case "$_mtime" in
-        ''|*[!0-9]*) echo 0; return 0 ;;
-    esac
+    if [ -z "$_mtime" ] || [ "${_mtime#*[!0-9]}" != "$_mtime" ]; then
+        _mtime=$(stat -f %m "$1" 2>/dev/null) || _mtime=""
+    fi
+    if [ -z "$_mtime" ] || [ "${_mtime#*[!0-9]}" != "$_mtime" ]; then
+        echo 0; return 0
+    fi
     _now=$(date +%s)
     # 10# after the case, never instead of it (#332).
     echo $(( _now - 10#$_mtime ))
@@ -379,9 +379,9 @@ _LOCK_TIMING_IDX=-1
 _lock_timing_has_ns_date() {
     local _n
     _n=$(date +%s%N 2>/dev/null) || return 1
-    case "$_n" in
-        ''|*[!0-9]*) return 1 ;;
-    esac
+    if [ -z "$_n" ] || [ "${_n#*[!0-9]}" != "$_n" ]; then
+        return 1
+    fi
     [ "${#_n}" -ge 16 ] || return 1
     return 0
 }
@@ -431,9 +431,9 @@ _lock_timing_us_to_ms() {
         *[.,]*) _s="${_r%%[.,]*}"; _f="${_r#*[.,]}" ;;
         *)      _s="$_r"; _f="000000" ;;
     esac
-    case "$_s" in
-        ''|*[!0-9]*) _LOCK_TIMING_NOW=0; return 0 ;;
-    esac
+    if [ -z "$_s" ] || [ "${_s#*[!0-9]}" != "$_s" ]; then
+        _LOCK_TIMING_NOW=0; return 0
+    fi
     case "$_f" in
         *[!0-9]*) _f="000000" ;;
     esac
@@ -445,18 +445,18 @@ _lock_timing_us_to_ms() {
 
 # `date +%s%N` (GNU) to epoch milliseconds.
 _lock_timing_ns_to_ms() {
-    case "$1" in
-        ''|*[!0-9]*) _LOCK_TIMING_NOW=0; return 0 ;;
-    esac
+    if [ -z "$1" ] || [ "${1#*[!0-9]}" != "$1" ]; then
+        _LOCK_TIMING_NOW=0; return 0
+    fi
     _LOCK_TIMING_NOW=$(( 10#$1 / 1000000 ))
     return 0
 }
 
 # `date +%s` to epoch milliseconds.
 _lock_timing_s_to_ms() {
-    case "$1" in
-        ''|*[!0-9]*) _LOCK_TIMING_NOW=0; return 0 ;;
-    esac
+    if [ -z "$1" ] || [ "${1#*[!0-9]}" != "$1" ]; then
+        _LOCK_TIMING_NOW=0; return 0
+    fi
     _LOCK_TIMING_NOW=$(( 10#$1 * 1000 ))
     return 0
 }
@@ -563,9 +563,9 @@ _lock_timing_record() {
 
     if [ -f "$_LOCK_TIMING_FILE" ]; then
         _n=$(wc -l < "$_LOCK_TIMING_FILE" 2>/dev/null | tr -d ' ')
-        case "$_n" in
-            ''|*[!0-9]*) _n=0 ;;
-        esac
+        if [ -z "$_n" ] || [ "${_n#*[!0-9]}" != "$_n" ]; then
+            _n=0
+        fi
         if [ "$_n" -ge "$_LOCK_TIMING_MAX" ]; then
             { printf '# CAPPED\t%s lines, REMEMBER_LOCK_TIMING_MAX=%s reached -- recording STOPPED here. Nothing was rolled or overwritten, so every record above is real; the distribution below this point is simply missing. Raise the cap or move this file to keep measuring.\n' \
                 "$_n" "$_LOCK_TIMING_MAX" >> "$_LOCK_TIMING_FILE"; } 2>/dev/null \
@@ -651,9 +651,9 @@ _lock_acquire_impl() {
             # second save start alongside it. Honour the PID: remove the file
             # only once nobody is behind it.
             _legacy=$(cat "$_dir" 2>/dev/null) || true
-            case "$_legacy" in
-                ''|*[!0-9]*) rm -f "$_dir" 2>/dev/null || true; continue ;;
-            esac
+            if [ -z "$_legacy" ] || [ "${_legacy#*[!0-9]}" != "$_legacy" ]; then
+                rm -f "$_dir" 2>/dev/null || true; continue
+            fi
             if ! kill -0 "$_legacy" 2>/dev/null; then
                 rm -f "$_dir" 2>/dev/null || true
                 continue

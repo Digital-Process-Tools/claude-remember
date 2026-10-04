@@ -86,20 +86,22 @@ _remember_memory_paths() {
         && [ "$_remember_root_scratch" != "/" ]; do
         _remember_root_scratch="${_remember_root_scratch%/}"
     done
-    case "$_remember_root_scratch" in
-        (/) REMEMBER_ROOT="/" ;;
-        (*/*)
-            REMEMBER_ROOT="${_remember_root_scratch%/*}"
-            [ -n "$REMEMBER_ROOT" ] || REMEMBER_ROOT="/"
-            ;;
+    # `[ ]` tests, not a case with a `*/*` arm (#898 round 10: a shape the
+    # plugin directory's scanner holds a submission on).
+    if [ "$_remember_root_scratch" = "/" ]; then
+        REMEMBER_ROOT="/"
+    elif [ "${_remember_root_scratch#*/}" != "$_remember_root_scratch" ]; then
+        REMEMBER_ROOT="${_remember_root_scratch%/*}"
+        [ -n "$REMEMBER_ROOT" ] || REMEMBER_ROOT="/"
+    else
         # dirname's own answer for a path with no slash at all -- one dot,
         # which tests/test_dirname_without_a_fork_660.py pins byte for byte
         # ($(pwd) would be absolute, a real behaviour change). Written as the
         # octal escape 056 through `printf -v` (a builtin) rather than as a
         # quoted lone dot, which the plugin directory's scanner can misread
         # as a `.` (source) command (#898 round 8). Same byte.
-        (*) printf -v REMEMBER_ROOT '\056' ;;
-    esac
+        printf -v REMEMBER_ROOT '\056'
+    fi
     unset _remember_root_scratch
     # Anchored on MEMORY_PROJECT_DIR, not PROJECT_DIR (#756, same anchoring
     # bug #747 fixed for the handoff tracked-check): from a linked git
@@ -423,7 +425,7 @@ _remember_repo_root_walk_into() {
 # every CI runner's git is well past that floor) keeps the differently-
 # cased-directory case correct WITHOUT a second, unscoped listing: a
 # repository that commits `.Remember/remember.md` still matches a pathspec
-# of `:(icase).remember/`. REL-DIR of "." (the memory file sits directly at
+# of `:(icase).remember/`. An empty REL-DIR (the memory file sits directly at
 # the repository root -- the rare REMEMBER_ROOT/identity.md fallback, not
 # the ordinary REMEMBER_DIR case) has no meaningful subdirectory to scope
 # to, so the pathspec is omitted and the call is genuinely whole-repo --
@@ -455,15 +457,11 @@ _remember_root_tracked_state_into() {
     done
     if [ "$_rts_idx" -lt 0 ]; then
         if command -v git >/dev/null 2>&1; then
-            # A single dot is the REL-DIR sentinel for "no subdirectory to
-            # scope to" (see this function's own header comment), compared
-            # against the same byte its callers assign below and exercised
-            # by #754/#755/#756's injection-guard tests. Held in a local
-            # built from octal 056, not written as a quoted lone dot (#898
-            # round 8, same reason as REMEMBER_ROOT above).
-            local _rts_dot
-            printf -v _rts_dot '\056'
-            if [ "$_rts_reldir" = "$_rts_dot" ]; then
+            # An empty REL-DIR is the sentinel for "no subdirectory to scope
+            # to" (see this function's own header comment), exercised by
+            # #754/#755/#756's injection-guard tests. Empty rather than a dot
+            # (#898 round 10): no lone-dot value at all, not one re-encoded.
+            if [ -z "$_rts_reldir" ]; then
                 _rts_pathspec=""
             else
                 _rts_pathspec=":(icase)${_rts_reldir}/"
@@ -589,12 +587,13 @@ _remember_file_tracked_state_into() {
     # climbs one `/`-delimited component at a time, so it needs the
     # forward-slashed form for the same reason.
     _remember_forward_slash_into _fts_file_fs "$_fts_file"
-    case "$_fts_file_fs" in
-        (*/*) _fts_dir_fs="${_fts_file_fs%/*}" ;;
+    if [ "${_fts_file_fs#*/}" != "$_fts_file_fs" ]; then
+        _fts_dir_fs="${_fts_file_fs%/*}"
+    else
         # Same dirname-no-slash answer (one dot, octal 056), written the
         # same way as REMEMBER_ROOT's just above in this file (#898 round 8).
-        (*)   printf -v _fts_dir_fs '\056' ;;
-    esac
+        printf -v _fts_dir_fs '\056'
+    fi
     _remember_repo_root_walk_into _fts_root "$_fts_dir_fs"
     if [ -z "$_fts_root" ]; then
         printf -v "$_fts_outvar" 'no-repo'
@@ -656,13 +655,13 @@ _remember_file_tracked_state_into() {
     fi
     # REL-DIR (FILE's own directory, relative to ROOT) scopes the `ls-files`
     # pathspec below to one directory instead of the whole repository --
-    # "." when the file sits directly at the repository root (the rare
+    # empty when the file sits directly at the repository root (the rare
     # REMEMBER_ROOT/identity.md fallback), otherwise the directory portion
     # of _fts_rel.
     if [ "$_fts_dir_fs" = "$_fts_root_fs" ]; then
-        # The REL-DIR sentinel (one dot) _remember_root_tracked_state_into
-        # compares against, written as octal 056 the same way (#898 round 8).
-        printf -v _fts_reldir '\056'
+        # The REL-DIR sentinel _remember_root_tracked_state_into tests for:
+        # empty, "no subdirectory" (#898 round 10).
+        _fts_reldir=""
     else
         _fts_reldir="${_fts_dir_fs#$_fts_root_fs/}"
     fi
@@ -824,7 +823,7 @@ _remember_may_inject() {
 # was never the more useful behaviour.
 _remember_emit_file() {
     local _remember_emit_max="${REMEMBER_EMIT_READ_MAX:-16384}"
-    case "$_remember_emit_max" in (''|*[!0-9]*) _remember_emit_max=16384 ;; esac
+    if [ -z "$_remember_emit_max" ] || [ "${_remember_emit_max#*[!0-9]}" != "$_remember_emit_max" ]; then _remember_emit_max=16384; fi
     case "${2:-}" in
         (''|*[!0-9]*)
             # No usable size: `cat` is the one that cannot go quadratic.
@@ -878,10 +877,14 @@ _remember_render_memory_section() {
     local MEMORY_INJECT_MAX_BYTES=""
     # (see _remember_emit_file, above, for why the render no longer forks cat)
     config_into MEMORY_INJECT_MAX_BYTES ".thresholds.memory_inject_max_bytes" 200000
-    case "$MEMORY_INJECT_MAX_BYTES" in (''|*[!0-9]*) MEMORY_INJECT_MAX_BYTES=200000 ;; esac
+    if [ -z "$MEMORY_INJECT_MAX_BYTES" ] || [ "${MEMORY_INJECT_MAX_BYTES#*[!0-9]}" != "$MEMORY_INJECT_MAX_BYTES" ]; then MEMORY_INJECT_MAX_BYTES=200000; fi
     local OVERSIZED_MEMORY="" BASENAME MFILE_BYTES _remember_oversized_max=0
     local _remember_budget_dropped=""
     local REFUSED_MEMORY=""
+    # A newline held in a variable, so no string below spans a line and no
+    # case pattern opens on a quoted newline (#898 round 10).
+    local _remember_nl
+    printf -v _remember_nl '\n'
     # One batched `wc -c` over every memory file that is present AND
     # non-empty (#664), instead of one `wc` + one `tr` PER file -- a typical
     # 4-6 file store paid 8-12 forks here alone before this. `tr -d ' '` is
@@ -899,8 +902,7 @@ _remember_render_memory_section() {
             if _remember_may_inject "$MFILE" "memory-context"; then
                 _remember_present+=("$MFILE")
             else
-                REFUSED_MEMORY="${REFUSED_MEMORY}${_REMEMBER_INJECT_REFUSAL}
-"
+                REFUSED_MEMORY="${REFUSED_MEMORY}${_REMEMBER_INJECT_REFUSAL}${_remember_nl}"
             fi
         fi
     done
@@ -913,7 +915,7 @@ _remember_render_memory_section() {
         # `read` dumps everything left over into the LAST variable rather
         # than re-splitting it.
         while read -r _remember_wc_bytes _remember_wc_path; do
-            case "$_remember_wc_bytes" in (''|*[!0-9]*) continue ;; esac
+            if [ -z "$_remember_wc_bytes" ] || [ "${_remember_wc_bytes#*[!0-9]}" != "$_remember_wc_bytes" ]; then continue; fi
             [ "$_remember_wc_path" = "total" ] && continue
             _remember_wc_size_set "$_remember_wc_path" "$_remember_wc_bytes"
         done < <(wc -c "${_remember_present[@]}")
@@ -932,10 +934,9 @@ _remember_render_memory_section() {
             # oversize check below is skipped for it because there is nothing
             # to compare -- failing open to injecting the file, the same way a
             # file measured under the cap is injected (#695 round-1 audit).
-            case "$MFILE_BYTES" in (*[!0-9]*) MFILE_BYTES="" ;; esac
+            if [ "${MFILE_BYTES#*[!0-9]}" != "$MFILE_BYTES" ]; then MFILE_BYTES=""; fi
             if [ -n "$MFILE_BYTES" ] && [ "$MEMORY_INJECT_MAX_BYTES" -gt 0 ] && [ "$MFILE_BYTES" -gt "$MEMORY_INJECT_MAX_BYTES" ]; then
-                OVERSIZED_MEMORY="${OVERSIZED_MEMORY}${MFILE} (${MFILE_BYTES} bytes)
-"
+                OVERSIZED_MEMORY="${OVERSIZED_MEMORY}${MFILE} (${MFILE_BYTES} bytes)${_remember_nl}"
                 [ "$MFILE_BYTES" -gt "$_remember_oversized_max" ] && _remember_oversized_max="$MFILE_BYTES"
                 continue
             fi
@@ -947,17 +948,13 @@ _remember_render_memory_section() {
             # caller, so the cache publish and every other render is
             # unaffected.
             if [ -n "${_REMEMBER_BUDGET_EXCLUDE:-}" ]; then
-                case "
-${_REMEMBER_BUDGET_EXCLUDE}" in
-                    (*"
-${MFILE}
-"*)
+                case "${_remember_nl}${_REMEMBER_BUDGET_EXCLUDE}" in
+                    (*"${_remember_nl}${MFILE}${_remember_nl}"*)
                         _remember_budget_dropped="${_remember_budget_dropped}${MFILE}"
                         if [ -n "${MFILE_BYTES:-}" ]; then
                             _remember_budget_dropped="${_remember_budget_dropped} (${MFILE_BYTES} bytes)"
                         fi
-                        _remember_budget_dropped="${_remember_budget_dropped}
-"
+                        _remember_budget_dropped="${_remember_budget_dropped}${_remember_nl}"
                         continue
                         ;;
                 esac
@@ -1027,7 +1024,7 @@ ${MFILE}
         # _remember_wc_size_set) as the main loop's own batch.
         if [ "${#_remember_deferred[@]}" -gt 0 ]; then
             while read -r _remember_wc_bytes _remember_wc_path; do
-                case "$_remember_wc_bytes" in (''|*[!0-9]*) continue ;; esac
+                if [ -z "$_remember_wc_bytes" ] || [ "${_remember_wc_bytes#*[!0-9]}" != "$_remember_wc_bytes" ]; then continue; fi
                 [ "$_remember_wc_path" = "total" ] && continue
                 _remember_wc_size_set "$_remember_wc_path" "$_remember_wc_bytes"
             done < <(wc -c "${_remember_deferred[@]}")
@@ -1083,7 +1080,7 @@ ${MFILE}
             else
                 _date=$_core;      _seq=1
             fi
-            case "$_seq" in (''|*[!0-9]*) _seq=1 ;; esac
+            if [ -z "$_seq" ] || [ "${_seq#*[!0-9]}" != "$_seq" ]; then _seq=1; fi
             printf '%s-%010d\t%s\n' "$_date" "$_seq" "$_slice"
         done | sort | tail -n "$ROTATED_LIST_MAX" | cut -f2-)
         echo "--- rotated memory slices (not shown; grep on request) ---"
@@ -1110,7 +1107,7 @@ ${MFILE}
         if [ "${#_remember_newest_arr[@]}" -gt 0 ]; then
             local _remember_newest_bytes
             while read -r _remember_wc_bytes _remember_wc_path; do
-                case "$_remember_wc_bytes" in (''|*[!0-9]*) continue ;; esac
+                if [ -z "$_remember_wc_bytes" ] || [ "${_remember_wc_bytes#*[!0-9]}" != "$_remember_wc_bytes" ]; then continue; fi
                 [ "$_remember_wc_path" = "total" ] && continue
                 _remember_wc_size_set "$_remember_wc_path" "$_remember_wc_bytes"
             done < <(wc -c "${_remember_newest_arr[@]}")
@@ -1430,7 +1427,7 @@ unset _REMEMBER_BUDGET_EXCLUDE
 # this cache's own, this file used that the scanner holds submissions on).
 _remember_apply_session_start_budget() {
     local _outvar="$1" _max="$2" _text="$3"
-    case "$_max" in (''|*[!0-9]*) return 0 ;; esac
+    if [ -z "$_max" ] || [ "${_max#*[!0-9]}" != "$_max" ]; then return 0; fi
     [ "$_max" -gt 0 ] || return 0
     local LC_ALL=C  # byte length, not a locale-dependent character count (see header above)
     [ "${#_text}" -gt "$_max" ] || return 0
