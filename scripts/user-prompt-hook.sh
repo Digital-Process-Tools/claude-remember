@@ -825,7 +825,7 @@ elif [ "${#_cfg_sources[@]}" -gt 0 ]; then
     }
     _lmd_py_dir="${BASH_SOURCE[0]%/*}"
     [ "$_lmd_py_dir" = "${BASH_SOURCE[0]}" ] && _lmd_py_dir="$(pwd)"
-    _lmd_run_python "$_lmd_py_dir/cfg_merge.py" "$_merged_cfg" "$_untrusted_haiku_source" "$_strip_model_reject" "$_project_drop_marker" "${_cfg_sources[@]}" > /dev/null 2>&1 || _py_merge_rc=$?
+    _lmd_run_python "" "$_merged_cfg" "$_untrusted_haiku_source" "$_strip_model_reject" "$_project_drop_marker" "${_cfg_sources[@]}" > /dev/null 2>&1 || _py_merge_rc=$?
     unset _lmd_py_dir
     if [ "$_py_merge_rc" != "0" ] && [ "$_py_merge_rc" != "3" ] && [ "$_py_merge_rc" != "4" ] && [ "$_py_merge_rc" != "5" ]; then
         cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null
@@ -955,7 +955,7 @@ session_dir_slug() {
         1)
             if command -v iconv >/dev/null 2>&1 \
                 && ! printf '%s' "$path" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1; then
-                local _py_slug="${PIPELINE_DIR:-}/pipeline/slug.py"
+                local _py_slug=""
                 if [ -f "$_py_slug" ]; then
                     local _decoded
                     declare -f _remember_python >/dev/null 2>&1 && _remember_python
@@ -976,7 +976,7 @@ session_dir_slug() {
         return 0
     fi
 
-    local _hash _slug_py="${PIPELINE_DIR:-}/pipeline/slug.py"
+    local _hash _slug_py=""
     if [ -f "$_slug_py" ]; then
         declare -f _remember_python >/dev/null 2>&1 && _remember_python
         _hash=$(_remember_slug_run_python "$_slug_py" --hash "$_orig" 2>/dev/null) || _hash=""
@@ -1250,7 +1250,7 @@ _config_load() {
         declare -f _remember_python >/dev/null 2>&1 && _remember_python
         local _cfg_flatten_dir="${BASH_SOURCE[0]%/*}"
         [ "$_cfg_flatten_dir" = "${BASH_SOURCE[0]}" ] && _cfg_flatten_dir="$(pwd)"
-        _dump=$(_remember_log_run_python "$_cfg_flatten_dir/cfg_flatten.py" "$REMEMBER_CONFIG" 2>/dev/null) || _rc=1
+        _dump=$(_remember_log_run_python "" "$REMEMBER_CONFIG" 2>/dev/null) || _rc=1
     fi
 
     if [ "$_rc" -ne 0 ]; then
@@ -1333,7 +1333,7 @@ config_into() {
     else
         local _cfg_py_dir="${BASH_SOURCE[0]%/*}"
         [ "$_cfg_py_dir" = "${BASH_SOURCE[0]}" ] && _cfg_py_dir="$(pwd)"
-        _cfg_into_val=$(_remember_log_run_python "$_cfg_py_dir/jq_fallback_get.py" "$REMEMBER_CONFIG" "$_cfg_into_name")
+        _cfg_into_val=$(_remember_log_run_python "" "$REMEMBER_CONFIG" "$_cfg_into_name")
     fi
     [ -n "$_cfg_into_val" ] || _cfg_into_val="$_cfg_into_default"
     printf -v "$_cfg_into_var" '%s' "$_cfg_into_val"
