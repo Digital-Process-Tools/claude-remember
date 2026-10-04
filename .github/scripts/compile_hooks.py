@@ -1147,7 +1147,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{key}: {size} bytes compiled ({len(contents[key].encode('utf-8'))} "
               f"before inlining+stripping)")
         if args.apply:
-            (script_dir / hname).write_text(compiled, encoding="utf-8", newline="\n")
+            # open(..., newline=) rather than Path.write_text(newline=):
+            # that keyword is 3.10+, and CI's 3.9 leg runs this --apply path.
+            with open(script_dir / hname, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write(compiled)
     return status
 
 
