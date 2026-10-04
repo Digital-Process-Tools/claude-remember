@@ -367,19 +367,6 @@ def _codex_child_env() -> dict[str, str]:
         ("USERPROFILE", os.environ.get("USERPROFILE")),
         ("APPDATA", os.environ.get("APPDATA")),
         ("PATHEXT", os.environ.get("PATHEXT")),
-        ("HTTPS_PROXY", os.environ.get("HTTPS_PROXY")),
-        ("HTTP_PROXY", os.environ.get("HTTP_PROXY")),
-        ("NO_PROXY", os.environ.get("NO_PROXY")),
-    ]
-    if os.name != "nt":
-        pairs += [
-            ("https_proxy", os.environ.get("https_proxy")),
-            ("http_proxy", os.environ.get("http_proxy")),
-            ("no_proxy", os.environ.get("no_proxy")),
-        ]
-    pairs += [
-        ("SSL_CERT_FILE", os.environ.get("SSL_CERT_FILE")),
-        ("NODE_EXTRA_CA_CERTS", os.environ.get("NODE_EXTRA_CA_CERTS")),
     ]
     child = {name: value for name, value in pairs if value is not None}
     child["REMEMBER_NESTED_SUMMARIZER"] = "1"
