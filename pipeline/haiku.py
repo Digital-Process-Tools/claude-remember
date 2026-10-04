@@ -426,19 +426,11 @@ def _codex_child_env() -> dict[str, str]:
         ("USERPROFILE", os.environ.get("USERPROFILE")),
         ("APPDATA", os.environ.get("APPDATA")),
         ("PATHEXT", os.environ.get("PATHEXT")),
-        ("HTTPS_PROXY", os.environ.get("HTTPS_PROXY")),
-        ("HTTP_PROXY", os.environ.get("HTTP_PROXY")),
-        ("NO_PROXY", os.environ.get("NO_PROXY")),
-        ("SSL_CERT_FILE", os.environ.get("SSL_CERT_FILE")),
-        ("NODE_EXTRA_CA_CERTS", os.environ.get("NODE_EXTRA_CA_CERTS")),
     ):
         if value is not None:
             child[name] = value
     if os.name != "nt":
         for name, value in (
-            ("https_proxy", os.environ.get("https_proxy")),
-            ("http_proxy", os.environ.get("http_proxy")),
-            ("no_proxy", os.environ.get("no_proxy")),
         ):
             if value is not None:
                 child[name] = value
