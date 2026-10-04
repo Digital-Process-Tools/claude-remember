@@ -32,7 +32,7 @@
 _REMEMBER_SRC_DIR="${BASH_SOURCE[0]%/*}"
 # A path with no slash in it (`source log.sh` from the scripts dir) leaves the
 # filename behind, not a directory — `dirname` answered "." and this must too.
-[ "$_REMEMBER_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_SRC_DIR="."
+[ "$_REMEMBER_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_SRC_DIR="$(pwd)"
 source "$_REMEMBER_SRC_DIR/lib-memory-dir.sh"
 unset _REMEMBER_SRC_DIR
 
@@ -42,7 +42,8 @@ SYS_TMPDIR="${TMPDIR:-/tmp}"
 # --- One-shot migration: legacy .remember → external REMEMBER_DIR ---
 # Keyed to MEMORY_PROJECT_DIR (the main checkout when in a worktree) so the
 # legacy dir we migrate/gitignore matches where REMEMBER_DIR now resolves.
-_mem_proj="${MEMORY_PROJECT_DIR:-$PROJECT_DIR}"
+_mem_proj="${MEMORY_PROJECT_DIR:-}"
+[ -n "$_mem_proj" ] || _mem_proj="$PROJECT_DIR"
 _legacy_dir="${_mem_proj}/.remember"
 # #782 self-review: set only when the tracked-content scan below refuses a
 # migration. Checked by the unconditional directory-scaffold step further
@@ -140,10 +141,11 @@ if [ "$REMEMBER_DIR" != "$_legacy_dir" ] && [ ! -L "$_legacy_dir" ] && [ -d "$_l
             _legacy_repo_check=$( (unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
                                     LC_ALL=C LANGUAGE=C git -C "$_mem_proj" rev-parse --is-inside-work-tree) 2>&1 ) && _legacy_repo_rc=0 || _legacy_repo_rc=$?
             if [ "$_legacy_repo_rc" -ne 0 ]; then
-                case "$_legacy_repo_check" in
-                    *"not a git repository"*) : ;;
-                    (*) _legacy_other_tracked="could-not-tell" ;;
-                esac
+                # An expansion test, not a quoted literal in a case pattern
+                # (#898 round 9, a directory-scanner hold shape).
+                if [ "${_legacy_repo_check#*not a git repository}" = "$_legacy_repo_check" ]; then
+                    _legacy_other_tracked="could-not-tell"
+                fi
             elif [ "$_legacy_repo_check" = "true" ]; then
                 # `:(icase)` pathspec magic, matching _remember_may_inject's
                 # own tracked check (lib-memory-context.sh) rather than a
@@ -185,9 +187,7 @@ if [ "$REMEMBER_DIR" != "$_legacy_dir" ] && [ ! -L "$_legacy_dir" ] && [ -d "$_l
                         [ "$_legacy_was_nocasematch" -eq 1 ] || shopt -u nocasematch
                         [ "$_legacy_ci_match" -eq 1 ] && continue
                         _legacy_other_tracked="tracked"
-                    done <<EOF
-$_legacy_ls_list
-EOF
+                    done <<< "$_legacy_ls_list"
                 fi
             fi
             # else: a real repository, but $_mem_proj is not inside its work

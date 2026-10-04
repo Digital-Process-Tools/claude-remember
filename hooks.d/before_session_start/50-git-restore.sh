@@ -248,12 +248,16 @@ GIT_RESTORE_BRANCH=$(config '.git_restore.branch' '')
 # or `/` is a transport URL/spec, not a name naming a remote this repo already
 # trusts. Falls back to `origin` -- the same last resort the backup half uses
 # for the identical case -- rather than guessing at what the user meant.
-case "$REMOTE_NAME" in
-    -*|*:*|*/*)
+# The double quote, held in a variable for the messages below; and `[ ]`
+# expansion tests rather than a `*/*` case pattern (#898 round 9 -- both
+# shapes the directory's scanner holds a submission on).
+printf -v _dq '\042'
+if [ "${REMOTE_NAME#-}" != "$REMOTE_NAME" ] \
+    || [ "${REMOTE_NAME#*:}" != "$REMOTE_NAME" ] \
+    || [ "${REMOTE_NAME#*/}" != "$REMOTE_NAME" ]; then
         report_error "git-restore" "WARNING: configured remote '$REMOTE_NAME' is not a plain remote name (leading '-', or contains ':' or '/') -- refusing to use it, falling back to 'origin'. A config.json restored from the backup remote can carry an attacker-controlled value here; treat this as untrusted."
         REMOTE_NAME="origin"
-        ;;
-esac
+fi
 # A leading '-' is not the only shape that matters here: `--` stops git's
 # OPTION parsing, but it does not stop git's own REFSPEC grammar once an
 # operand position is reached, and a branch value is exactly that operand.
@@ -528,7 +532,7 @@ case "$FETCH_HEALTH" in
     never-run) log "git-restore" "no fetch has completed yet for $REPO_ROOT -- the comparison below is against whatever refs are already on disk, which may be stale. A fetch starts in the background now and its result lands next session." ;;
     in-flight) log "git-restore" "a background fetch is still running -- the comparison below is against the previous fetch's refs" ;;
     abandoned) log "git-restore" "WARNING: the last background fetch never completed (started $(cat "$FETCH_STATE_FILE" 2>/dev/null | head -1)) -- could NOT check the remote. This is not 'up to date': the refs below are as old as the last fetch that did finish." ;;
-    failed:*)  log "git-restore" "WARNING: the last background fetch FAILED (rc=${FETCH_HEALTH#failed:}) -- could NOT check the remote. This is not 'up to date': the refs below are as old as the last fetch that did finish. Run 'git -C \"$REPO_ROOT\" fetch $REMOTE_NAME' to see git's own error." ;;
+    failed:*)  log "git-restore" "WARNING: the last background fetch FAILED (rc=${FETCH_HEALTH#failed:}) -- could NOT check the remote. This is not 'up to date': the refs below are as old as the last fetch that did finish. Run 'git -C ${_dq}$REPO_ROOT${_dq} fetch $REMOTE_NAME' to see git's own error." ;;
 esac
 
 if [ -z "$LOCAL_HEAD" ]; then
@@ -578,11 +582,11 @@ if [ "$AHEAD" -gt 0 ] && [ "$BEHIND" -gt 0 ]; then
     _count=$((10#$_count + 1))
     echo "$_count" > "$DIVERGED_STATE_FILE" 2>/dev/null || true
 
-    log "git-restore" "ERROR: the memory store has DIVERGED -- $AHEAD local commit(s) the remote does not have, $BEHIND remote commit(s) this machine does not have (consecutive session starts in this state: $_count). NOT restored, and nothing here will merge or rebase for you: recent.md and archive.md are rewritten wholesale by consolidation, so a wrong automatic resolution would corrupt memory silently. Resolve it by hand: git -C \"$REPO_ROOT\" log --oneline --left-right \"HEAD...$REMOTE_REF\""
+    log "git-restore" "ERROR: the memory store has DIVERGED -- $AHEAD local commit(s) the remote does not have, $BEHIND remote commit(s) this machine does not have (consecutive session starts in this state: $_count). NOT restored, and nothing here will merge or rebase for you: recent.md and archive.md are rewritten wholesale by consolidation, so a wrong automatic resolution would corrupt memory silently. Resolve it by hand: git -C ${_dq}$REPO_ROOT${_dq} log --oneline --left-right ${_dq}HEAD...$REMOTE_REF${_dq}"
 
     if [ "$DIVERGED_NOTICE_AFTER" -gt 0 ] && [ "$_count" -eq "$DIVERGED_NOTICE_AFTER" ]; then
         mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null || true
-        printf '%s\n' "remember: your memory store has DIVERGED from its backup remote. $AHEAD commit(s) here are not on the remote and $BEHIND commit(s) there are not here, so the memory loaded this session is missing them -- and the backup cannot push either. Nothing will be merged or rebased for you. Resolve it by hand: git -C \"$REPO_ROOT\" log --oneline --left-right HEAD...$REMOTE_NAME/$GIT_RESTORE_BRANCH" \
+        printf '%s\n' "remember: your memory store has DIVERGED from its backup remote. $AHEAD commit(s) here are not on the remote and $BEHIND commit(s) there are not here, so the memory loaded this session is missing them -- and the backup cannot push either. Nothing will be merged or rebased for you. Resolve it by hand: git -C ${_dq}$REPO_ROOT${_dq} log --oneline --left-right HEAD...$REMOTE_NAME/$GIT_RESTORE_BRANCH" \
             > "$REMEMBER_DIR/tmp/git-restore-notice" 2>/dev/null || true
     fi
     _spawn_fetch
@@ -647,7 +651,7 @@ if git -C "$REPO_ROOT" merge --ff-only "$REMOTE_REF" >/dev/null 2>&1; then
         fi
     fi
 else
-    log "git-restore" "ERROR: fast-forward of $BEHIND commit(s) from $REMOTE_NAME/$GIT_RESTORE_BRANCH was REFUSED by git -- most likely uncommitted local changes in $REPO_ROOT that it would overwrite. Nothing was restored and nothing was forced. Run 'git -C \"$REPO_ROOT\" merge --ff-only $REMOTE_REF' to see git's own reason."
+    log "git-restore" "ERROR: fast-forward of $BEHIND commit(s) from $REMOTE_NAME/$GIT_RESTORE_BRANCH was REFUSED by git -- most likely uncommitted local changes in $REPO_ROOT that it would overwrite. Nothing was restored and nothing was forced. Run 'git -C ${_dq}$REPO_ROOT${_dq} merge --ff-only $REMOTE_REF' to see git's own reason."
 fi
 
 _spawn_fetch

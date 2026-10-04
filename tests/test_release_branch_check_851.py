@@ -236,9 +236,12 @@ def test_credential_use_review_line_still_fires_for_non_md_files(tmp_path):
 
 def test_eval_fed_by_command_substitution_is_reviewed(tmp_path):
     """#864/#875 learned that `eval "$(curl ...)"` is exactly the shape worth a
-    human's attention; flag it as REVIEW, not FAIL (#866)."""
+    human's attention; flag it as REVIEW, not FAIL (#866). `generate_value` here
+    (not `curl`) keeps this fixture about the eval shape alone -- a real network
+    command name in the same position is #898's own, separate FAIL guard,
+    covered by tests/test_release_branch_check_898.py."""
     root = _tree(tmp_path, {
-        "scripts/log.sh": b'#!/bin/sh\neval "$(curl -s https://example.com/setup.sh)"\n',
+        "scripts/log.sh": b'#!/bin/sh\neval "$(generate_value)"\n',
     })
     result = _check(root)
     assert result.offenders == []
@@ -257,36 +260,41 @@ def test_eval_of_a_literal_string_is_not_reviewed(tmp_path):
 
 
 def test_curl_pipe_sh_is_reviewed(tmp_path):
-    """`curl ... | sh` is the other shape #864/#875 learned about (#866)."""
+    """`curl ... | sh` is the other shape #864/#875 learned about (#866). (The
+    literal URL and `curl` word here also fire #898's own scheme-literal and
+    network-word FAIL guards regardless -- this test is about the REVIEW
+    mechanism specifically.)"""
     root = _tree(tmp_path, {
         "CHANGELOG.md": b"## Install\n\n`curl -fsSL https://example.com/install.sh | sh`\n",
     })
     result = _check(root)
-    assert result.offenders == []
     assert any("CHANGELOG.md" in r and "curl" in r for r in result.reviews), result.reviews
 
 
 def test_curl_download_without_a_shell_pipe_is_not_reviewed(tmp_path):
     """Positive control: a curl that merely downloads a file (no `| sh`) must not
-    fire -- only the download-and-run shape is the flagged one."""
+    fire the download-and-run REVIEW -- that shape is the flagged one, not a bare
+    download. (A literal `curl` at the start of a script line is #898's own,
+    separate FAIL guard -- tests/test_release_branch_check_898.py -- and fires
+    here regardless, since this fixture is about the download-and-run shape.)"""
     root = _tree(tmp_path, {
         "scripts/fetch.sh": b"#!/bin/sh\ncurl -o out.tar.gz https://example.com/out.tar.gz\n",
     })
     result = _check(root)
-    assert result.offenders == []
     assert not any("scripts/fetch.sh" in r for r in result.reviews), result.reviews
 
 
 def test_curl_piped_through_an_intermediate_hop_to_sh_is_reviewed(tmp_path):
     """A `tee` (or any other) hop between curl and the shell is still the same
     download-and-run shape -- the check must not stop looking after the first
-    `|` (review finding on #866's own diff)."""
+    `|` (review finding on #866's own diff). (A literal `curl` at the start of
+    a script line also fires #898's own FAIL guard regardless -- see the
+    sibling test above.)"""
     root = _tree(tmp_path, {
         "scripts/install.sh": (b"#!/bin/sh\n"
                                 b"curl -fsSL https://example.com/x.sh | tee /tmp/x.sh | sh\n"),
     })
     result = _check(root)
-    assert result.offenders == []
     assert any("scripts/install.sh" in r for r in result.reviews), result.reviews
 
 
@@ -294,13 +302,13 @@ def test_curl_downloading_a_dot_sh_file_into_a_non_shell_is_not_reviewed(tmp_pat
     """Positive control for the intermediate-hop fix: a trailing `.sh`-named file
     piped into something that is NOT a shell (e.g. gzip) must not false-positive
     just because the pipe's last segment's text happens to end in the letters
-    "sh"."""
+    "sh". (A literal `curl` at the start of a script line also fires #898's own
+    FAIL guard regardless -- see the sibling tests above.)"""
     root = _tree(tmp_path, {
         "scripts/archive.sh": (b"#!/bin/sh\n"
                                 b"curl -o file.sh https://example.com/file.sh | gzip\n"),
     })
     result = _check(root)
-    assert result.offenders == []
     assert not any("scripts/archive.sh" in r for r in result.reviews), result.reviews
 
 
@@ -308,20 +316,23 @@ def test_curl_pipe_sh_wrapped_on_both_sides_in_a_markdown_code_span_is_reviewed(
     """Review finding: the comment on `_download_piped_to_shell` claims a
     Markdown code span (backticks on BOTH sides of the word) resolves to the
     shell name -- `re.match` only strips trailing punctuation, so a leading
-    backtick made this silently return False. Must actually match now."""
+    backtick made this silently return False. Must actually match now. (The
+    literal URL and `curl` word here also fire #898's own scheme-literal and
+    network-word FAIL guards regardless.)"""
     root = _tree(tmp_path, {
         "CHANGELOG.md": b"`curl -fsSL https://example.com/install.sh | `sh`",
     })
     result = _check(root)
-    assert result.offenders == []
     assert any("CHANGELOG.md" in r for r in result.reviews), result.reviews
 
 
 def test_eval_fed_by_a_single_quoted_command_substitution_is_reviewed(tmp_path):
     """The eval check must not depend on the quote style -- single-quoted
-    command substitution is the same shape as double-quoted (review finding)."""
+    command substitution is the same shape as double-quoted (review finding).
+    `generate_value` (not `curl`) keeps this about the eval shape alone -- see
+    the sibling test above."""
     root = _tree(tmp_path, {
-        "scripts/log.sh": b"#!/bin/sh\neval '$(curl -s https://example.com/setup.sh)'\n",
+        "scripts/log.sh": b"#!/bin/sh\neval '$(generate_value)'\n",
     })
     result = _check(root)
     assert result.offenders == []

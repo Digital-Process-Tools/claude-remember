@@ -94,10 +94,11 @@ def test_summarizer_failure_marker_overrides_capture_is_working(tmp_path):
         + result.stdout
     )
     assert "Failed to authenticate" in result.stdout
-    assert "userConfig" in result.stdout, (
-        "an auth-shaped failure detail must point at the documented remedy "
-        "(#860, round 2: the userConfig recovery token, not the removed "
-        "REMEMBER_OAUTH_TOKEN env var):\n" + result.stdout
+    assert "claude setup-token" in result.stdout, (
+        "an auth-shaped failure detail must point at refreshing the CLI's "
+        "own login (#860, round 3: the plugin reads no credential of its "
+        "own any more, so there is no userConfig setting left to point "
+        "at):\n" + result.stdout
     )
     verdict = _verdict(result.stdout)
     assert verdict.startswith(

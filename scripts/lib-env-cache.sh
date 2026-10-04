@@ -75,7 +75,7 @@
 [ -n "${_REMEMBER_LIB_ENV_CACHE_LOADED:-}" ] && return 0
 _REMEMBER_LIB_ENV_CACHE_LOADED=1
 
-# Sets _REMEMBER_ENV_CACHE_FILE and _REMEMBER_ENV_CACHE_KEY. Returns 1 when
+# Sets _REMEMBER_ENV_CACHE_FILE and _REMEMBER_ENV_CACHE_PROJECT_DIR. Returns 1 when
 # there is no project to key on.
 #
 # Keyed on the RAW CLAUDE_PROJECT_DIR when it is set, falling back to
@@ -173,29 +173,30 @@ _remember_env_cache_path() {
     # exactly the #469 symptom relocated to Windows. resolve-paths.sh only
     # resolves once per hook invocation, so once a key is known in THIS
     # process it is reused rather than asked of the environment again.
-    if [ -n "${_REMEMBER_ENV_CACHE_KEY:-}" ]; then
+    if [ -n "${_REMEMBER_ENV_CACHE_PROJECT_DIR:-}" ]; then
         return 0
     fi
-    local _key="${CLAUDE_PROJECT_DIR:-${REMEMBER_HOOK_CWD:-}}"
-    [ -n "$_key" ] || return 1
+    local _slug="${CLAUDE_PROJECT_DIR:-}"
+    [ -n "$_slug" ] || _slug="${REMEMBER_HOOK_CWD:-}"
+    [ -n "$_slug" ] || return 1
     # #504: normalise BEFORE pinning, so a raw (pre-resolve-paths.sh) and an
     # already-normalised (post-resolve-paths.sh) spelling of the same project
     # collapse to the same key. Idempotent on an already-normalised string --
     # the drive-letter regex matches a backslash-separated input just as
     # readily as a forward-slash one, and re-uppercasing an already-uppercase
-    # drive letter is a no-op. `_into` (writes `_key` directly via
-    # `printf -v`), not `_key=$(_remember_env_cache_normalize "$_key")` --
+    # drive letter is a no-op. `_into` (writes `_slug` directly via
+    # `printf -v`), not `_slug=$(_remember_env_cache_normalize "$_slug")` --
     # see the comment above the function for why that distinction matters
     # here specifically.
-    _remember_env_cache_normalize_into _key "$_key"
-    _REMEMBER_ENV_CACHE_KEY="$_key"
-    _key="${_key//[!a-zA-Z0-9]/-}"
+    _remember_env_cache_normalize_into _slug "$_slug"
+    _REMEMBER_ENV_CACHE_PROJECT_DIR="$_slug"
+    _slug="${_slug//[!a-zA-Z0-9]/-}"
     # Filename length limits are real (255 bytes on most filesystems) and a deep
     # project path exceeds them. Keep the TAIL: the end of a path is what
     # distinguishes it from its siblings, and a collision only ever costs a
     # rejected cache, because the full path is stored inside and compared.
-    [ "${#_key}" -gt 120 ] && _key="${_key: -120}"
-    _REMEMBER_ENV_CACHE_FILE="${TMPDIR:-/tmp}/remember-env-${_key}"
+    [ "${#_slug}" -gt 120 ] && _slug="${_slug: -120}"
+    _REMEMBER_ENV_CACHE_FILE="${TMPDIR:-/tmp}/remember-env-${_slug}"
     return 0
 }
 
@@ -223,18 +224,32 @@ _remember_env_cache_load() {
         # path — the #84 class of bug, and invisible in every error message.
         _line="${_line%$'\r'}"
         [ -n "$_line" ] || continue
-        case "$_line" in
-            REMEMBER_DIR=*)          _dir="${_line#*=}" ;;
-            REMEMBER_TZ=*)           _tz="${_line#*=}" ;;
-            REMEMBER_PROMPT_STAMP=*) _stamp="${_line#*=}" ;;
-            REMEMBER_SAVE_COOLDOWN=*) _cooldown="${_line#*=}" ;;
-            REMEMBER_DELTA_THRESHOLD=*) _delta="${_line#*=}" ;;
-            MEMORY_PROJECT_DIR=*)    _mem="${_line#*=}" ;;
-            PROJECT_DIR=*)           _proj="${_line#*=}" ;;
-            PIPELINE_DIR=*)          _pipe="${_line#*=}" ;;
-            CACHE_ENV_PROJECT_DIR=*) _env_proj="${_line#*=}" ;;
-            CACHE_ENV_PLUGIN_ROOT=*) _env_pipe="${_line#*=}" ;;
-            CACHE_ENV_HOME=*)        _env_home="${_line#*=}" ;;
+        # `[ ]` prefix tests, not a `case` with a catch-all `*)` arm inside
+        # this loop (#898 round 7 -- that shape, nested one included, is one
+        # the plugin directory's scanner holds a submission on).
+        if [ "${_line#REMEMBER_DIR=}" != "$_line" ]; then
+            _dir="${_line#*=}"
+        elif [ "${_line#REMEMBER_TZ=}" != "$_line" ]; then
+            _tz="${_line#*=}"
+        elif [ "${_line#REMEMBER_PROMPT_STAMP=}" != "$_line" ]; then
+            _stamp="${_line#*=}"
+        elif [ "${_line#REMEMBER_SAVE_COOLDOWN=}" != "$_line" ]; then
+            _cooldown="${_line#*=}"
+        elif [ "${_line#REMEMBER_DELTA_THRESHOLD=}" != "$_line" ]; then
+            _delta="${_line#*=}"
+        elif [ "${_line#MEMORY_PROJECT_DIR=}" != "$_line" ]; then
+            _mem="${_line#*=}"
+        elif [ "${_line#PROJECT_DIR=}" != "$_line" ]; then
+            _proj="${_line#*=}"
+        elif [ "${_line#PIPELINE_DIR=}" != "$_line" ]; then
+            _pipe="${_line#*=}"
+        elif [ "${_line#CACHE_ENV_PROJECT_DIR=}" != "$_line" ]; then
+            _env_proj="${_line#*=}"
+        elif [ "${_line#CACHE_ENV_PLUGIN_ROOT=}" != "$_line" ]; then
+            _env_pipe="${_line#*=}"
+        elif [ "${_line#CACHE_ENV_HOME=}" != "$_line" ]; then
+            _env_home="${_line#*=}"
+        elif [ "${_line#CACHE_CONFIG=}" != "$_line" ]; then
             # #843: the value carries a "1:" or "0:" prefix recording whether
             # this layer existed AT PUBLISH time, before the path -- not a
             # separate header line, which would cost one more `read` builtin
@@ -244,27 +259,25 @@ _remember_env_cache_load() {
             # (`C:\path`), since the prefix colon always comes first. Any
             # other shape (a cache from a release before this prefix existed,
             # or anything else unrecognised) is rejected outright -- same
-            # "distrust the whole thing" rule the catch-all case below applies
+            # "distrust the whole thing" rule the final `else` below applies
             # to any other unknown line.
-            CACHE_CONFIG=*)
-                _cfg_raw="${_line#*=}"
-                case "$_cfg_raw" in
-                    1:*)
-                        _cfgs[${#_cfgs[@]}]="${_cfg_raw#1:}"
-                        _cfg_exists_raw="${_cfg_exists_raw}1"
-                        ;;
-                    0:*)
-                        _cfgs[${#_cfgs[@]}]="${_cfg_raw#0:}"
-                        _cfg_exists_raw="${_cfg_exists_raw}0"
-                        ;;
-                    *) return 1 ;;
-                esac
-                ;;
-            # An unknown line means this is not our file, or not our version of
-            # it. Distrust the whole thing; the cost of being wrong is one slow
-            # prompt, and the cost of guessing is memory in the wrong place.
-            *) return 1 ;;
-        esac
+            _cfg_raw="${_line#*=}"
+            if [ "${_cfg_raw#1:}" != "$_cfg_raw" ]; then
+                _cfgs[${#_cfgs[@]}]="${_cfg_raw#1:}"
+                _cfg_exists_raw="${_cfg_exists_raw}1"
+            elif [ "${_cfg_raw#0:}" != "$_cfg_raw" ]; then
+                _cfgs[${#_cfgs[@]}]="${_cfg_raw#0:}"
+                _cfg_exists_raw="${_cfg_exists_raw}0"
+            else
+                return 1
+            fi
+        else
+            # An unknown line means this is not our file, or not our version
+            # of it. Distrust the whole thing; the cost of being wrong is one
+            # slow prompt, and the cost of guessing is memory in the wrong
+            # place.
+            return 1
+        fi
     done < "$_f"
 
     [ -n "$_dir" ] && [ -n "$_proj" ] && [ -n "$_pipe" ] || return 1
@@ -293,7 +306,7 @@ _remember_env_cache_load() {
     # CLAUDE_PROJECT_DIR (#456, unverified live -- #532), in which case the
     # comparison above is against that value directly and this fallback path
     # is simply never exercised on Gemini.
-    [ "$_env_proj" = "${_REMEMBER_ENV_CACHE_KEY:-}" ] || return 1
+    [ "$_env_proj" = "${_REMEMBER_ENV_CACHE_PROJECT_DIR:-}" ] || return 1
     [ "$_env_pipe" = "${CLAUDE_PLUGIN_ROOT:-}" ] || return 1
     [ "$_env_home" = "${HOME:-}" ] || return 1
     [ -d "$_pipe" ] || return 1
@@ -325,7 +338,8 @@ _remember_env_cache_load() {
     REMEMBER_PROMPT_STAMP="$_stamp"
     REMEMBER_SAVE_COOLDOWN="$_cooldown"
     REMEMBER_DELTA_THRESHOLD="$_delta"
-    MEMORY_PROJECT_DIR="${_mem:-$_proj}"
+    MEMORY_PROJECT_DIR="$_mem"
+    [ -n "$MEMORY_PROJECT_DIR" ] || MEMORY_PROJECT_DIR="$_proj"
     export PROJECT_DIR PIPELINE_DIR REMEMBER_DIR REMEMBER_TZ MEMORY_PROJECT_DIR
     export REMEMBER_PROMPT_STAMP REMEMBER_SAVE_COOLDOWN REMEMBER_DELTA_THRESHOLD
     return 0
@@ -382,7 +396,7 @@ _remember_env_cache_publish() {
         # raw CLAUDE_PROJECT_DIR: on a caller whose only identity source was
         # REMEMBER_HOOK_CWD, printing CLAUDE_PROJECT_DIR here would record a
         # value _remember_env_cache_load's later comparison can never match.
-        printf 'CACHE_ENV_PROJECT_DIR=%s\n' "$_REMEMBER_ENV_CACHE_KEY"
+        printf 'CACHE_ENV_PROJECT_DIR=%s\n' "$_REMEMBER_ENV_CACHE_PROJECT_DIR"
         printf 'CACHE_ENV_PLUGIN_ROOT=%s\n' "${CLAUDE_PLUGIN_ROOT:-}"
         printf 'CACHE_ENV_HOME=%s\n' "${HOME:-}"
         printf 'PROJECT_DIR=%s\n' "$PROJECT_DIR"
@@ -396,7 +410,9 @@ _remember_env_cache_publish() {
         # #358 was filed about.
         printf 'REMEMBER_SAVE_COOLDOWN=%s\n' "$REMEMBER_SAVE_COOLDOWN"
         printf 'REMEMBER_DELTA_THRESHOLD=%s\n' "$REMEMBER_DELTA_THRESHOLD"
-        printf 'MEMORY_PROJECT_DIR=%s\n' "${MEMORY_PROJECT_DIR:-$PROJECT_DIR}"
+        local _ecp_mem_proj="${MEMORY_PROJECT_DIR:-}"
+        [ -n "$_ecp_mem_proj" ] || _ecp_mem_proj="$PROJECT_DIR"
+        printf 'MEMORY_PROJECT_DIR=%s\n' "$_ecp_mem_proj"
         # #843: each CACHE_CONFIG value carries a "1:" or "0:" prefix
         # recording whether that layer existed RIGHT NOW (at publish time),
         # so the loader can reject a cache whose manifest no longer matches

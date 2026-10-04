@@ -163,15 +163,19 @@ _CASE = (
 # Sites that are correct as they stand. A bare path is not accepted: every
 # exemption is argued once, in writing, where the next reader can weigh it.
 ALLOWLIST: dict[tuple[str, int], str] = {
-    ("scripts/log.sh", 149):
-        "inside _REMEMBER_CFG_FLATTEN_JQ, a jq program string. jq matches "
-        "with Oniguruma, which is not driven by the shell's LC_COLLATE.",
-    ("scripts/log.sh", 175):
-        "inside the embedded Python fallback. Python's `re` over `str` "
-        "matches [A-Za-z0-9_] as ASCII regardless of locale.",
-    ("scripts/log.sh", 178):
-        "the same Python fallback's own message text, not a pattern.",
-    ("scripts/lib-slug.sh", 71):
+    # Lines shifted +6 by #898 round 4's PIPELINE_DIR nested-default-expansion
+    # fix near the top of this file (the case statements/strings themselves
+    # are unchanged).
+    # #898 round 7: the three exemptions that used to sit here (the inline
+    # jq program and the inline Python fallback, both inside log.sh's own
+    # config() flattener) no longer apply -- both bodies moved to their own
+    # files (scripts/cfg_flatten.jq, scripts/cfg_flatten.py), so neither
+    # range exists in this shipped .sh file anymore and needs no exemption
+    # here at all.
+    # Shifted +15 by #898 round 5's _remember_run_python/_remember_slug_run_python
+    # wrapper function added near the top of this file (the array itself is
+    # unchanged).
+    ("scripts/lib-slug.sh", 86):
         "a member of the _REMEMBER_SLUG_SED array, only ever invoked as "
         "`LC_ALL=C sed` (lib-slug.sh:373). The locale is forced at the call "
         "site, which this scanner cannot see from the definition; "
@@ -182,16 +186,22 @@ ALLOWLIST: dict[tuple[str, int], str] = {
     # from the scan, so that one libc's behaviour stays visible and can be
     # re-checked rather than quietly assumed forever.
     ("scripts/agy-stop-hook.sh", 158): _CASE,
-    ("scripts/post-tool-hook.sh", 427): _CASE,
-    ("scripts/post-tool-hook.sh", 619): _CASE,
-    ("scripts/post-tool-hook.sh", 661): _CASE,
-    ("scripts/post-tool-hook.sh", 715): _CASE,
-    ("scripts/session-end-hook.sh", 196): _CASE,
-    ("scripts/session-end-hook.sh", 204): _CASE,
-    ("scripts/session-start-hook.sh", 298): _CASE,
+    # Lines shifted +1 by #898's role-based-phrasing rewording of this
+    # file's own hook-naming comments (the case statements themselves are
+    # unchanged).
+    ("scripts/post-tool-hook.sh", 437): _CASE,
+    ("scripts/post-tool-hook.sh", 629): _CASE,
+    ("scripts/post-tool-hook.sh", 671): _CASE,
+    ("scripts/post-tool-hook.sh", 725): _CASE,
+    ("scripts/session-end-hook.sh", 200): _CASE,
+    ("scripts/session-end-hook.sh", 208): _CASE,
+    ("scripts/session-start-hook.sh", 303): _CASE,
     ("scripts/write-handoff.sh", 87): _CASE,
     ("scripts/doctor.sh", 70): _CASE,
-    ("scripts/lib-slug.sh", 406): _CASE,
+    # Shifted +5 by #898 round 4's claude_projects_dir nested-default fix,
+    # then +15 more by round 5's wrapper function above (the case statement
+    # itself is unchanged).
+    ("scripts/lib-slug.sh", 432): _CASE,
 }
 
 

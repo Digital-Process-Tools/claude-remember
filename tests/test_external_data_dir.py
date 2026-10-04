@@ -37,7 +37,8 @@ def _make_plugin_dir(tmp_path: Path, data_dir_value: str) -> Path:
     plugin.mkdir(parents=True)
     (plugin / "scripts").mkdir()
     (plugin / "pipeline").mkdir()
-    (plugin / "pipeline" / "haiku.py").write_text("# marker\n")
+    (plugin / ".claude-plugin").mkdir(parents=True, exist_ok=True)
+    (plugin / ".claude-plugin" / "plugin.json").write_text("{}", encoding="utf-8")
     (plugin / "config.json").write_text(json.dumps({
         "data_dir": data_dir_value,
         "cooldowns": {"save_seconds": 120, "ndc_seconds": 3600},

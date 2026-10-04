@@ -104,8 +104,8 @@ def test_second_invocation_with_no_claude_project_dir_hits_the_cache(tmp_path):
     project = tmp_path / "project"
     project.mkdir()
     pipeline = tmp_path / "pipeline"
-    (pipeline / "pipeline").mkdir(parents=True)
-    (pipeline / "pipeline" / "haiku.py").write_text("", encoding="utf-8")
+    (pipeline / ".claude-plugin").mkdir(parents=True, exist_ok=True)
+    (pipeline / ".claude-plugin" / "plugin.json").write_text("{}", encoding="utf-8")
     remember_dir = tmp_path / "remember"
     remember_dir.mkdir()
 
@@ -143,8 +143,8 @@ def test_different_hook_cwd_is_a_correctly_keyed_miss(tmp_path):
     project_b = tmp_path / "project_b"
     project_b.mkdir()
     pipeline = tmp_path / "pipeline"
-    (pipeline / "pipeline").mkdir(parents=True)
-    (pipeline / "pipeline" / "haiku.py").write_text("", encoding="utf-8")
+    (pipeline / ".claude-plugin").mkdir(parents=True, exist_ok=True)
+    (pipeline / ".claude-plugin" / "plugin.json").write_text("{}", encoding="utf-8")
     remember_dir = tmp_path / "remember"
     remember_dir.mkdir()
 
@@ -235,8 +235,8 @@ def test_windows_normalized_project_dir_does_not_orphan_the_hook_cwd_key(tmp_pat
     home.mkdir()
     (home / "tmp").mkdir()
     pipeline = tmp_path / "pipeline"
-    (pipeline / "pipeline").mkdir(parents=True)
-    (pipeline / "pipeline" / "haiku.py").write_text("", encoding="utf-8")
+    (pipeline / ".claude-plugin").mkdir(parents=True, exist_ok=True)
+    (pipeline / ".claude-plugin" / "plugin.json").write_text("{}", encoding="utf-8")
     remember_dir = tmp_path / "remember"
     remember_dir.mkdir()
 

@@ -117,7 +117,7 @@ if ! staging_lock_acquire "$STAGING_LOCK_TIMEOUT"; then
     log "consolidation" "staging.lock held for the whole ${STAGING_LOCK_TIMEOUT}s wait -- nothing read and nothing consolidated; staging, recent.md and archive.md are untouched and the next run picks up the same span (an NDC append may be half applied right now, and consuming its separator without its summary retires a blank line and defers the entry to a later day)"
     exit 0
 fi
-if ! SNAPSHOT_OUT=$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell consolidate-snapshot "$STAGING_DIR" "$SNAPSHOT_DIR" 2>&1); then
+if ! SNAPSHOT_OUT=$(cd "$PIPELINE_DIR" && _remember_run_python -m pipeline.shell consolidate-snapshot "$STAGING_DIR" "$SNAPSHOT_DIR" 2>&1); then
     staging_lock_release
     log "consolidation" "ERROR: staging snapshot failed -- $SNAPSHOT_OUT"
     exit 1
@@ -174,7 +174,7 @@ case "$CONSOLIDATE_TIMEOUT_SECONDS" in
         ;;
 esac
 log "consolidation" "start"
-RESULT=$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell consolidate "$STAGING_DIR" "$RECENT_FILE" "$ARCHIVE_FILE" "$CONSOLIDATE_MAX_BYTES" "$SNAPSHOT_DIR" "$CONSOLIDATE_TIMEOUT_SECONDS" 2>&1) || {
+RESULT=$(cd "$PIPELINE_DIR" && _remember_run_python -m pipeline.shell consolidate "$STAGING_DIR" "$RECENT_FILE" "$ARCHIVE_FILE" "$CONSOLIDATE_MAX_BYTES" "$SNAPSHOT_DIR" "$CONSOLIDATE_TIMEOUT_SECONDS" 2>&1) || {
     # 3 is the spawn guard declining, not a broken pipeline (#204). Staging is
     # untouched in both cases and the next run picks it up, but "declined" and
     # "failed" send an operator looking in different places.
@@ -376,7 +376,7 @@ log "consolidation" "done: ${STAGING_COUNT} files consolidated"
 # operation that rotates archive.md/recent.md and rewrites core-memories.md,
 # so refreshing the cache here -- after those files have landed -- is what
 # lets the NEXT SessionStart skip re-reading and re-sizing them.
-PLUGIN_ROOT="${PLUGIN_ROOT:-$PIPELINE_DIR}"
+[ -n "${PLUGIN_ROOT:-}" ] || PLUGIN_ROOT="$PIPELINE_DIR"
 if source "$(dirname "$0")/lib-memory-context.sh" 2>/dev/null; then
     _remember_memory_paths
     _remember_start_cache_context_publish

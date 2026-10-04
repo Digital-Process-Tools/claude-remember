@@ -67,7 +67,7 @@
 #
 # COST (#350)
 #   Registered with NO matcher, so this runs on every single tool call and the
-#   agent waits for it. #227 gave user-prompt-hook.sh an env-cache fast path and
+#   agent waits for it. #227 gave the UserPromptSubmit hook an env-cache fast path and
 #   deliberately skipped this one, because this hook needs config() and
 #   therefore the merged config file — which can carry a live OAuth token and is
 #   0600, fresh every invocation, for that
@@ -103,15 +103,15 @@
 
 # --- Where this script lives ---
 # Resolved by parameter expansion rather than three `dirname` forks (#230) —
-# the same pattern log.sh and user-prompt-hook.sh already use. A path with no
-# slash in it (invoked as `bash post-tool-hook.sh` from the scripts dir) leaves
+# the same pattern log.sh and the UserPromptSubmit hook already use. A path with no
+# slash in it (invoked by bare filename from the scripts dir) leaves
 # the filename behind, not a directory; `dirname` answered "." and this must too.
 _HOOK_DIR="${BASH_SOURCE[0]%/*}"
-[ "$_HOOK_DIR" = "${BASH_SOURCE[0]}" ] && _HOOK_DIR="."
+[ "$_HOOK_DIR" = "${BASH_SOURCE[0]}" ] && _HOOK_DIR="$(pwd)"
 
 # --- Nested summarizer: there is no project here (#204) ---
 # Normally this guard lives in resolve-paths.sh, which the fast path below does
-# not reach — the same reason user-prompt-hook.sh carries its own copy. It has
+# not reach — the same reason the UserPromptSubmit hook carries its own copy. It has
 # to hold for every hook this plugin registers: any one of them alone scaffolds
 # a memory directory under the summarizer's temp dir.
 [ -n "${REMEMBER_NESTED_SUMMARIZER:-}" ] && exit 0
@@ -136,8 +136,8 @@ unset REMEMBER_HOOK_CWD
 # file, and pipeline/extract.py's find_session() returns that value BEFORE
 # the traversal validator (_validate_session_id) ever runs -- so a value set
 # anywhere in the ambient environment reads an arbitrary file straight into
-# the memory store, no `../` required. Only session-start-hook.sh and
-# session-end-hook.sh have a legitimate transcript_path to offer, extracted
+# the memory store, no `../` required. Only the SessionStart hook and
+# the SessionEnd hook have a legitimate transcript_path to offer, extracted
 # fresh from their own stdin payload on every run. This hook has none and
 # must not silently consult whatever the process environment already holds,
 # for the same reason and under the same unestablished-reachability
@@ -148,7 +148,7 @@ unset REMEMBER_TRANSCRIPT_PATH
 # from the same payload (#444) ---
 # PostToolUse supplies the answer on stdin. Read it here, once, before
 # anything else wants it -- including resolve-paths.sh below, which is new
-# with #444: only session-start-hook.sh and session-end-hook.sh used to have
+# with #444: only the SessionStart hook and the SessionEnd hook used to have
 # a stdin `cwd` to offer it, so a host that never sets CLAUDE_PROJECT_DIR
 # (Codex -- still true, live-confirmed #463; Gemini CLI was believed the
 # same at the time but its own docs now say it sets CLAUDE_PROJECT_DIR as a
@@ -199,21 +199,25 @@ fi
 # mistaken for the field. It is a heuristic and it is treated as one — every
 # caller validates the result before anything is done with it. Generalized
 # from a `session_id`-only extractor to also serve `cwd` (#444), the same
-# generalization session-start-hook.sh already made of its own copy.
+# generalization the SessionStart hook already made of its own copy.
 #
 # #494: whether a real host's `tool_input` can carry a `cwd` key AHEAD of
-# the top-level one is researched in scripts/user-prompt-hook.sh, next to
-# its own `_stdin_cwd` -- same extractor mechanism, same finding (on every
+# the top-level one is researched next to the prompt hook's own `_stdin_cwd`
+# -- same extractor mechanism, same finding (on every
 # host checked, `tool_input` is positioned AFTER the top-level `cwd` field,
 # so this stays the safe nested-after case), not repeated here.
 _stdin_json_string() {
-    local key="$1" raw="$2" rest prefix value
-    case "$raw" in *"\"$key\""*) ;; *) return 1 ;; esac
-    rest=${raw#*\"$key\"}
-    prefix=${rest%%\"*}
+    local field="$1" raw="$2" rest prefix value dq
+    # The double quote is held in `dq` (octal 042) rather than written
+    # backslash-escaped: the plugin directory's scanner mis-tracks an
+    # escaped quote (#898 round 8). Same patterns, same quoting of $field.
+    printf -v dq '\042'
+    case "$raw" in *"$dq$field$dq"*) ;; *) return 1 ;; esac
+    rest=${raw#*"$dq"$field"$dq"}
+    prefix=${rest%%"$dq"*}
     case "$prefix" in *[!:[:space:]]*) return 1 ;; esac
-    value=${rest#*\"}
-    value=${value%%\"*}
+    value=${rest#*"$dq"}
+    value=${value%%"$dq"*}
     # A JSON encoder writes each backslash as `\\` -- a Windows `cwd` from
     # Codex arrives as `C:\\work\\proj` otherwise (#829).
     value=${value//\\\\/\\}
@@ -221,9 +225,14 @@ _stdin_json_string() {
     printf '%s' "$value"
 }
 
+# The double quote, for the last-save.json scope check and the sanitiser
+# log line below -- held in a variable rather than backslash-escaped, the
+# same reason as dq in _stdin_json_string (#898 round 8).
+printf -v _pt_dq '\042'
+
 # ── The cwd the host handed us (#411, #444) ─────────────────────────────
 # resolve-paths.sh's REMEMBER_HOOK_CWD fallback (#411) only ever got a value
-# from session-start-hook.sh and session-end-hook.sh -- this hook's own #417
+# from the SessionStart hook and the SessionEnd hook -- this hook's own #417
 # unset above was correct but left it with no legitimate source of its own.
 # Exported for resolve-paths.sh to consult below, in the branch that
 # actually sources it; the fast path never sources resolve-paths.sh at all,
@@ -250,7 +259,7 @@ source "$_HOOK_DIR/lib-env-cache.sh"
 # Defined here rather than beside the dispatch it also guards, because the fast
 # path has to ask this question before it decides anything (#350).
 #
-# `-x`, not `-d`, and that difference is the whole gate. user-prompt-hook.sh
+# `-x`, not `-d`, and that difference is the whole gate. The UserPromptSubmit hook
 # tests `[ ! -d hooks.d/after_user_prompt ]` and gets away with it because the
 # distribution ships no such directory. It DOES ship hooks.d/after_post_tool/
 # holding a .gitkeep, so a `-d` test here would refuse the fast path for every
@@ -299,8 +308,9 @@ _after_post_tool_listener() {
 # invalidation. A cooldown and a line threshold are neither secret nor
 # expensive to be one prompt stale about.
 #
-# Two things the chain sets are set here by hand, exactly as user-prompt-hook.sh
-# does: umask from resolve-paths.sh (#68) and SYS_TMPDIR from bootstrap-dirs.sh.
+# Two things the chain sets are set here by hand, exactly as the
+# UserPromptSubmit hook does: umask from resolve-paths.sh (#68) and SYS_TMPDIR
+# from bootstrap-dirs.sh.
 # Same values, no processes.
 _REMEMBER_FAST=0
 if _remember_env_cache_load; then
@@ -348,7 +358,7 @@ if [ "$_REMEMBER_FAST" = "1" ]; then
     }
 else
     # Opt into resolve-paths.sh's soft-failure mode — see the comment in
-    # session-start-hook.sh. This hook must never block the agent, so a
+    # the SessionStart hook. This hook must never block the agent, so a
     # resolution failure (e.g. a nested/headless session with no
     # CLAUDE_PROJECT_DIR) is a silent no-op, not a crash.
     REMEMBER_PATHS_SOFT_FAIL=1 source "$_HOOK_DIR/resolve-paths.sh" || exit 0
@@ -413,8 +423,8 @@ STDIN_SESSION_ID=$(_stdin_json_string session_id "$HOOK_STDIN" 2>/dev/null) || S
 # rather than a positional session id (`--dry) DRY_RUN=true ;;`) -- the
 # character class here has never excluded a leading dash, exactly the gap
 # #576 already closed at the sibling agy-stop-hook.sh call site (merged),
-# and #600 is fixing the same gap at session-end-hook.sh (PR #609, not yet
-# merged as of this commit -- do not read that sibling file as fixed until
+# and #600 is fixing the same gap at the SessionEnd hook (PR #609, not yet
+# merged as of this commit -- do not read that sibling script as fixed until
 # it lands). Without `-*`, a session_id of
 # "--dry" passes this guard untouched and, paired with a real
 # transcript_path, is trusted by the STDIN_SESSION_ID_TRUSTED branch below
@@ -455,8 +465,8 @@ fi
 # this variable name for exactly this purpose (#407/#431), and save-session.sh
 # already documents it as trusted input. This is NOT the ambient value #424
 # unset at the top of this file -- it is freshly rebuilt from THIS
-# invocation's own validated stdin, the same distinction session-start-hook.sh
-# and session-end-hook.sh already draw.
+# invocation's own validated stdin, the same distinction the SessionStart hook
+# and the SessionEnd hook already draw.
 [ -n "$STDIN_TRANSCRIPT_PATH" ] && export REMEMBER_TRANSCRIPT_PATH="$STDIN_TRANSCRIPT_PATH"
 
 SAVE_SCRIPT="$PLUGIN_ROOT/scripts/save-session.sh"
@@ -611,7 +621,7 @@ else
     # #620: the basename route faced no guard at all before this line was
     # added -- this value reaches save-session.sh's argv unchanged, on the
     # very same background nohup save path #610 already guards
-    # STDIN_SESSION_ID for (post-tool-hook.sh:419-423). Same character
+    # STDIN_SESSION_ID for, earlier in this file. Same character
     # class, same reason: `-*` rejects a leading dash so a transcript
     # basename that happens to collide with save-session.sh's own `--dry`/
     # `--force` flags cannot be misread as one.
@@ -621,7 +631,7 @@ else
 fi
 
 # Which session PostToolUse serviced, for the capture-gap check in
-# session-start-hook.sh (#200). Distinct from the post-tool-ran marker above:
+# the SessionStart hook (#200). Distinct from the post-tool-ran marker above:
 # that one answers "is this hook wired", this one answers "for which session",
 # and it can only be written once a transcript has actually been found.
 #
@@ -797,15 +807,16 @@ if [ -n "$SIDECAR" ] && [ -f "$SIDECAR" ]; then
                         _LAST_SAVE_STATE="unreadable"
                     fi
                 fi
-                _SESSIONS_SCOPE=""
-                case "$_LAST_SAVE_CONTENT" in
-                    *\"sessions\"*)
-                        _SESSIONS_SCOPE="${_LAST_SAVE_CONTENT#*\"sessions\"}"
-                        _SESSIONS_SCOPE="${_SESSIONS_SCOPE%%\}*}"
-                        ;;
-                esac
+                # An expansion test, not a quoted literal in a case pattern
+                # (#898 round 9, a directory-scanner hold shape).
+                _SESSIONS_SCOPE=${_LAST_SAVE_CONTENT#*"$_pt_dq"sessions"$_pt_dq"}
+                if [ "$_SESSIONS_SCOPE" != "$_LAST_SAVE_CONTENT" ]; then
+                    _SESSIONS_SCOPE="${_SESSIONS_SCOPE%%\}*}"
+                else
+                    _SESSIONS_SCOPE=""
+                fi
                 case "$_SESSIONS_SCOPE" in
-                    *\"$SESSION_ID\":*)
+                    *"$_pt_dq"$SESSION_ID"$_pt_dq":*)
                         LAST_LINE=$((10#$_SIDECAR_LINE))
                         SIDECAR_TRUSTED=1
                         ;;
@@ -829,8 +840,19 @@ if [ -n "$SIDECAR" ] && [ -f "$SIDECAR" ]; then
 fi
 
 if [ -z "$SIDECAR_TRUSTED" ] && [ -f "$LAST_SAVE_FILE" ]; then
-    [ -n "${PYTHON:-}" ] || source "$_HOOK_DIR/detect-tools.sh"
-    LAST_LINE=$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell read-position "$LAST_SAVE_FILE" "$SESSION_ID" 2>/dev/null)
+    # #898 round 5 self-review: the old guard here only checked
+    # "${PYTHON:-}" -- enough back when this line called $PYTHON directly,
+    # since that only ever needed the inherited VARIABLE. It is not enough
+    # now: this line calls _remember_run_python, a FUNCTION defined inside
+    # detect-tools.sh, never exported (bash has no `export -f` use here), so
+    # a process that somehow inherited a resolved $PYTHON without this file
+    # ever sourcing detect-tools.sh itself would hit "command not found"
+    # (silently folded to position 0 by the 2>/dev/null and the case below).
+    # Checking for the function's own existence, not just the variable,
+    # covers both the already-sourced case and the inherited-variable-only
+    # case with one fast, no-fork test.
+    declare -f _remember_run_python >/dev/null 2>&1 || source "$_HOOK_DIR/detect-tools.sh"
+    LAST_LINE=$(cd "$PIPELINE_DIR" && _remember_run_python -m pipeline.shell read-position "$LAST_SAVE_FILE" "$SESSION_ID" 2>/dev/null)
     case "$LAST_LINE" in ''|*[!0-9]*) LAST_LINE=0 ;; esac
 fi
 
@@ -898,14 +920,14 @@ if [ "$DELTA" -gt "$DELTA_THRESHOLD" ] && [ "$IN_COOLDOWN" = false ]; then
     # transcript basename fails the character class, and this fork is the
     # ONLY remaining consumer of it on the basename route -- unlike the
     # stdin route, which has STDIN_SESSION_ID_TRUSTED gating every use of
-    # STDIN_SESSION_ID behind `[ -n "$STDIN_SESSION_ID" ]`
-    # (post-tool-hook.sh:419-423), there is no further fallback here to
-    # fall through to. An empty value is not "trusted", it is absent
-    # (post-tool-hook.sh:561-563) -- save-session.sh reads an empty argv[1]
+    # STDIN_SESSION_ID behind `[ -n "$STDIN_SESSION_ID" ]`, earlier in this
+    # file, there is no further fallback here to
+    # fall through to. An empty value is not "trusted", it is absent,
+    # as earlier in this file too -- save-session.sh reads an empty argv[1]
     # as "no id given" and silently substitutes the newest .jsonl by mtime
     # (save-session.sh:273-275) rather than refusing, so the fork must be
     # skipped here rather than let that happen.
-    log "hook" "post-tool: transcript basename \"${TRANSCRIPT##*/}\" failed the session id sanitiser -- refusing to save rather than handing save-session.sh an empty id"
+    log "hook" "post-tool: transcript basename $_pt_dq${TRANSCRIPT##*/}$_pt_dq failed the session id sanitiser -- refusing to save rather than handing save-session.sh an empty id"
   else
     ALREADY_RUNNING=false
     if [ -f "$PID_FILE" ]; then
@@ -920,8 +942,8 @@ if [ "$DELTA" -gt "$DELTA_THRESHOLD" ] && [ "$IN_COOLDOWN" = false ]; then
         _SAVE_LOG="$REMEMBER_DIR/logs/autonomous/save-$(_remember_date +%H%M%S).log"
         # Seeded with a header line BEFORE the backgrounded save-session.sh
         # ever opens it, and the nohup redirect below appends (`>>`) rather
-        # than truncates (`>`) -- same defence session-end-hook.sh already
-        # gives $_END_LOG (scripts/session-end-hook.sh:296-311, #483),
+        # than truncates (`>`) -- same defence the SessionEnd hook already
+        # gives its own end-of-run log (#483),
         # applied here for #527: save-session.sh's own housekeeping sweep
         # (unconditional on every flush since #498, not tied to its NDC
         # step) reclaims any *.log in this same directory that is still

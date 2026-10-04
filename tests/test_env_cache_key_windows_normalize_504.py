@@ -37,7 +37,7 @@ _SCRIPT = r"""
 source "{lib}"
 export CLAUDE_PROJECT_DIR="{project_dir}"
 _remember_env_cache_path
-echo "KEY=$_REMEMBER_ENV_CACHE_KEY"
+echo "KEY=$_REMEMBER_ENV_CACHE_PROJECT_DIR"
 echo "FILE=$_REMEMBER_ENV_CACHE_FILE"
 """
 

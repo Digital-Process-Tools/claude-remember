@@ -191,7 +191,14 @@ def test_lfs_pointer_fails(tmp_path):
 
 
 def test_a_file_mentioning_lfs_later_passes(tmp_path):
-    _passes(_tree(tmp_path, {"notes.md": b"# n\n\nversion https://git-lfs.github.com/spec/v1\n"}))
+    """Must not fire the LFS-pointer FAIL -- unrelated to #898's own
+    scheme-literal guard, which this fixture's own URL legitimately also
+    fires; assert no LFS offender specifically, not a wholly offender-free
+    tree."""
+    offenders = _offenders(_tree(tmp_path, {
+        "notes.md": b"# n\n\nversion https://git-lfs.github.com/spec/v1\n",
+    }))
+    assert not any("LFS" in o for o in offenders), offenders
 
 
 def test_a_nested_git_file_marks_a_submodule_and_fails(tmp_path):

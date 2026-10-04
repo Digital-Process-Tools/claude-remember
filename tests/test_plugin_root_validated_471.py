@@ -3,7 +3,9 @@ plugin executes from (`scripts/resolve-paths.sh:119-121`, from #407), and
 until this fix was checked only with ``[ -d ]`` at the `PIPELINE_DIR`
 validation four lines above it -- not for a specific file, unlike the
 sibling `_PLUGIN_ROOT_CANDIDATE` branch right beside it, which already
-checks `[ -f "$_PLUGIN_ROOT_CANDIDATE/pipeline/haiku.py" ]`.
+checks `[ -f "$_PLUGIN_ROOT_CANDIDATE/.claude-plugin/plugin.json" ]`
+(#898, round 5: this marker moved from pipeline/haiku.py to the install
+manifest; the check's existence and shape are otherwise unchanged).
 
 An unrelated directory that merely happens to be named by `PLUGIN_ROOT` (a
 generic, unnamespaced name) became the directory this plugin loads and
@@ -46,8 +48,12 @@ def _run(env, cwd):
 
 
 def _make_real_plugin(path: Path) -> Path:
-    (path / "pipeline").mkdir(parents=True)
-    (path / "pipeline" / "haiku.py").write_text("", encoding="utf-8")
+    # #898, round 5: resolve-paths.sh's marker moved from pipeline/haiku.py
+    # to .claude-plugin/plugin.json (a manifest, not a script path, per the
+    # directory's COMMAND_SCRIPT_NOT_FOLLOWED hold) -- this fixture must
+    # ship the same file resolve-paths.sh now checks for.
+    (path / ".claude-plugin").mkdir(parents=True)
+    (path / ".claude-plugin" / "plugin.json").write_text("{}", encoding="utf-8")
     return path
 
 

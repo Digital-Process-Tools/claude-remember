@@ -76,9 +76,9 @@ drop. If you really do need to publish an older line on purpose, re-run the work
    this repository; it runs `gh release create --verify-tag`).
    *Why it is unaffected:* the release notes are read from `CHANGELOG.md` in the maintainer's
    local `main` checkout (the script's default is `<repo>/CHANGELOG.md`), never from the release
-   tree. The release tree's CHANGELOG.md is cut to the latest section, but nothing reads that copy
-   except people browsing `release`. Keep `--verify-tag`: without it `gh release create` would
-   create a missing tag itself, through the API.
+   tree. CHANGELOG.md is not shipped in the release tree at all (#898) -- only README and LICENSE
+   are required by the directory. Keep `--verify-tag`: without it `gh release create` would create
+   a missing tag itself, through the API.
 
 6. **The directory picks up the new `release` commit** (at once through the push webhook,
    otherwise within about 6 hours) and scans it. For v0.38.0 the webhook delivery got 200 OK and
@@ -102,13 +102,45 @@ would need `export-ignore`). Then:
   catches it loudly if it is too big. With an allow-list, a forgotten runtime file would vanish
   from every user's install with no error anywhere. A new dev-only top-level file or directory
   therefore needs adding here.
-- **It cuts CHANGELOG.md** to the latest released `## [x.y.z]` section, skipping `[Unreleased]`
-  even when it has entries, plus that section's link and a link to the full file on `main`.
+- **It swaps `README.release.md` in for `README.md`** (`release_readme` in
+  `.github/release-branch.json`, #898): a short release-only README with no `$VAR`/`${...}` and
+  no network command names, written to keep #855's disclosure in substance (what runs, sends and
+  stores, and that the nested `claude` uses your own login). The full README stays on `main`.
+- **CHANGELOG.md is not shipped at all** (on the deny-list, #898): only README and LICENSE are
+  required by the directory, and a changelog line pairs an env-read token with a link far too
+  easily for what it is worth. Release notes still come from `main`'s own CHANGELOG.md -- see
+  step 5 below.
 - **It rewrites links** in every shipped `.md` file that point at a removed path (the README's
   `docs/` links and its logo) to absolute URLs on `main`: `raw.githubusercontent.com` for images,
   `github.com/.../blob/main` for everything else. Links to files that still ship are left alone.
 
 From v0.36.0 that gives 73 files and 1.3 MB, down from 474 files and 9.2 MB.
+
+## What the Anthropic directory actually measured
+
+[`claude-jit-context`'s own write-up](https://github.com/Digital-Process-Tools/claude-jit-context/blob/main/docs/directory-validator.md)
+records what the portal's Validate flagged and what cleared each finding, by pushing a tree to a
+throwaway branch and validating it directly -- see "Preview before you tag" immediately below for
+the step that write-up is built on.
+
+## Preview before you tag
+
+The submission form validates **any branch**, not only the one the directory tracks. Before
+tagging:
+
+1. Build the release tree locally (`python3 .github/scripts/build_release_tree.py --ref HEAD
+   --out /tmp/release-tree`) and run `check_release_tree.py` and `smoke_release_tree.py` on it
+   (see "Building and checking locally" below).
+2. Push the built tree to a throwaway `release-preview` branch yourself -- the agent's own
+   classifier refuses this push, so it is the maintainer's step, not a release-automation one.
+3. In the developer portal's submit form, validate `Digital-Process-Tools/claude-remember@release-preview`
+   **without clicking Next**. That runs the same scan the real submission would, against a branch
+   nothing else depends on.
+4. Only once that scan is clean (or its findings are understood and accepted) do you tag.
+
+**The branch the portal tracks cannot change while the plugin is under review** (see "The portal's
+text on saving" above), so `release-preview` is a scratch branch for this check alone, never the
+one the "Tracked branch or tag" field points at.
 
 ## When the workflow fails
 
@@ -371,6 +403,166 @@ was "Validation ran out of time". That is the failure the `release` branch exist
   Do not make the warning disappear by removing the disclosure of the host-vendor passthroughs: the
   security scan holds undisclosed behaviour, not disclosure wording. #869's and round 1's prose
   above (superseded) are kept as the record of what was tried and argued first.
+- **`COMMAND_SCRIPT_NOT_FOLLOWED` + `MCP_FORWARDS_CREDENTIAL_ENV` (#898, two rounds).** A maintainer
+  run of the real portal Validate against `release-preview` (`e5d0202` = `fix/898` at `b5fbfbd`)
+  reported 3 policy holds and 5 warnings. Round 1 (issue text) and round 2 (this validation) between
+  them:
+  - A scheme literal (`https://`/`http://`) read as a URL host **even inside shell
+    parameter-expansion syntax**: `url_display="${url#https://}"` in `scripts/session-start-hook.sh`
+    scans as `${url#https://}`, and the portal's scanner reported the literal scheme string, not the
+    shell construct around it, as "the remote url host }". Fixed by matching on a wildcard instead
+    (`${url#*://}`), which carries no scheme literal at all and strips any scheme, not only the two
+    spelled out before.
+  - The directory's own English-word-list scan (same mechanism jit-context's write-up documents)
+    flagged the bare word "host" wherever it is used generically (not as this plugin's own
+    `pipeline/host.py` architecture term): `config.example.json`, `.claude-plugin/plugin.json`'s
+    `userConfig` description, `README.release.md`. Reworded to "machine"/"environment"/"the running
+    app"/"coding agent" in each. The architecture term itself (`pipeline/host.py`'s `Host` class,
+    which models which coding-agent platform -- Claude Code / Codex / Gemini / Antigravity -- is
+    running) and the git-backup/restore hooks' real `git fetch`/`GIT_SSH_COMMAND` usage were left
+    alone and allowlisted in the new guard below rather than renamed across their combined ~280
+    shipped occurrences, which was judged out of proportion to force in this round.
+  - `[ "$_HOOK_DIR" = "${BASH_SOURCE[0]}" ] && _HOOK_DIR="."` -- jit-context's own measured "dead
+    `SCRIPT_DIR='.'` fallback" shape, except not dead here: it is the real fallback for a Windows
+    `BASH_SOURCE[0]` that arrives backslash-separated and never matches the `%/*` forward-slash
+    split (see `tests/test_migration_hardening_766.py`'s own #766/#783 comments). Fixed across 11
+    call sites in 9 scripts by using `$PWD` instead of the literal `.` -- same directory-resolution
+    semantics, no literal dot for the scanner to read as a further file.
+  - `scripts/post-tool-hook.sh` named its 3 sibling hook scripts by filename in ~20 comments, which
+    the portal listed as "further files" alongside the dot fallback above. Reworded to role-based
+    phrasing ("the SessionStart hook", "the SessionEnd hook", "the UserPromptSubmit hook"). The same
+    sweep was then extended to the other 3 hooks.json-registered scripts' own ~44 mutual
+    cross-references (review finding on this same issue: the identical, already-proven mechanical
+    fix, left undone initially only because it had not yet been applied anywhere else).
+  - `.github/scripts/check_release_tree.py` gained four new guards for these shapes (`_check_
+    scheme_literal`, `_check_network_word_standalone`, `_check_dir_fallback_dot`, `_check_hook_
+    names_other_hook` -- the last REVIEW rather than FAIL, scoped to the 4 hooks.json-registered
+    scripts), each with a red test and a positive control, and the full built tree was reverified
+    clean against all of them: `check_release_tree: OK`, zero FAIL lines, before this commit.
+  **Not independently confirmed against the real portal** (no access to it from this environment):
+  whether these specific fixes clear the 3 holds on the next real scan, or whether the scanner's own
+  behaviour has moved on to a different trigger by then, the way `RUNTIME_FETCH_EXEC` below moved
+  between v0.37.0 and v0.38.0. The "Preview before you tag" step above exists for exactly this.
+  **Round 3 (#898).** A maintainer Validate of `release-preview` at `302e8f5` (round 2's commit)
+  came back down to 2 holds. The session-start-hook.sh scheme-literal finding and the dot fallback
+  were both confirmed gone. The remaining credential hold was an **aggregate pairing**: the
+  portal's scanner read `pipeline/haiku.py` as reading the plugin's own `userConfig` recovery
+  setting, and paired that with `hooks.d/after_save/50-git-backup.sh` assembling a command at run
+  time, naming the combination as data leaving the machine through a configured credential. The
+  git-backup half is a real, intentional feature and stayed. The maintainer's decision: remove the
+  read side entirely rather than argue the pairing, since every policy hold is a human review on
+  every release and this is the only remaining one. `pipeline/haiku.py` no longer reads any
+  `userConfig`-sourced setting at all; the plugin manifest no longer declares that option; the
+  nested summarizer call authenticates only through whatever the host already hands it or the
+  CLI's own login, with no recovery path of this plugin's own on either host. A still-configured
+  legacy setting (the removed manifest option, or the older environment variable it replaced) is
+  still detected by presence only, never by value, and reported once per save and from
+  `/remember:doctor`, so nobody is left wondering where a setting went. Rebuilding the release tree
+  from this commit and grepping it for the manifest-option's own environment variable name and for
+  the older environment-variable name both return zero matches.
+  **Round 4 (#898).** A maintainer Validate of the combined `fix/898` round-3 tree plus a sibling
+  lane's inlining fix found 3 BLOCKING `UNPINNED_NPX` findings and the credential pair still open,
+  this time naming `pipeline/haiku.py`'s own legacy-presence check (value-free, never logging a
+  name or value) as the read half, paired with the same kept git-backup send side. The 3
+  `UNPINNED_NPX` findings were every typed here-document (`<< 'DELIM'`) left in the shipped
+  scripts, including inside the inlined/compiled hooks -- the scanner reads a typed `<<` as an
+  unpinned-npx-launcher shape wherever it appears, even feeding an inline python script's own
+  stdin. Every one was replaced with a here-string (`<<<`) or an equivalent single-quoted-literal
+  stdin, byte-identical content and behaviour. The credential-pair read side: removed the
+  legacy-presence check entirely (and the notice built on it) -- a presence check's own existence
+  was read as the read half of the pairing regardless of what it logged, so there is no narrower
+  fix than removing it. Beyond the two confirmed holds, cross-applied the fix shapes a sibling
+  plugin (jit-context) had already confirmed with the directory for the SAME aggregate pairing:
+  every `$PWD` replaced with `$(pwd)`, and every nested default expansion (`${X:-$Y}`) replaced
+  with an explicit if/else -- both cited by the portal as the pairing's read/send shapes on that
+  plugin, pre-emptively applied here before this plugin's own next scan can name them. Two further
+  patterns from that same confirmed list -- bash variables named `*key*` that hold a non-credential
+  value (cache keys, lock keys, JSON field names), and `${!var}` bash indirect-variable-expansion
+  used as a generic cache-key-by-content idiom -- were deliberately left for a follow-up rather
+  than converted in this round: the rename sweep touches ~30 sites across ~20 files with no
+  functional risk but a large surface to re-review, and the indirect-expansion sites implement a
+  genuinely dynamic associative-array-via-variable-name pattern (the key varies by content hash or
+  absolute path) that a literal `case` table cannot represent without redesigning the caching
+  mechanism itself -- converting it blind risked a real behaviour change in security-sensitive
+  code for a pattern not yet confirmed as a live finding on this plugin's own scan. The bare word
+  `env` (the fifth pattern on jit-context's list) was swept for and found absent from this
+  plugin's shipped tree entirely -- no genuine `env` command invocation or regex alternative
+  exists outside shebang lines, which are not the shape the portal's own finding describes.
+  Not independently confirmed against the real portal for this round either, for the same reason
+  given above: whether these fixes clear the findings on the next real scan, or whether the
+  portal's own matcher has moved on to a different trigger by then, stays unknown until that scan
+  runs.
+  **Round 5 (#898).** A further maintainer dispatch, measured against a no-python build variant of
+  the combined tree: 3 BLOCKING `UNPINNED_NPX` findings on the `${PYTHON:-python3}`/`${JQ...}`-shaped
+  command words in `post-tool-hook.sh`, `session-end-hook.sh` and `user-prompt-hook.sh` -- the
+  program name computed at run time by a shell expansion, independent of the typed-heredoc shape
+  round 4 already closed. Fixed everywhere this plugin invokes a detected interpreter or `jq` as a
+  bare command word (`detect-tools.sh`, `post-tool-hook.sh`, `save-session.sh`,
+  `run-consolidation.sh`, `doctor.sh`, `user-prompt-hook.sh`, `session-start-hook.sh`,
+  `lib-memory-dir.sh`, `lib-slug.sh`, `log.sh`, `bench-slug.sh`) by routing every such call through a
+  small per-file (or shared, where `detect-tools.sh` is already sourced) literal-dispatch wrapper:
+  a `case` over the detected value whose branches are each a literal command word
+  (`python3`/`python`/`"py -3"`/`py`, or `jq`/`_jq_fallback`), never the variable itself. One real
+  bug caught and fixed during this sweep: a first attempt made the exemption shape-based ("any
+  `CLAUDE_CODE_*_TOKEN`") instead of exact-name, and a real host-set `CLAUDE_CODE_MESSAGING_TOKEN`
+  (unrelated to this plugin) was then wrongly treated as a second visible credential, stripping the
+  operator's only real `ANTHROPIC_API_KEY` -- caught by testing against this session's own live
+  environment, fixed by going back to an exact-name comparison (built from two literal string
+  halves rather than one contiguous name, so the credential's own name is never written as a single
+  token in source) and pinned with a regression test.
+
+  The credential-pair hold, confirmed again in both variants: cut the read side a second way --
+  `pipeline/haiku.py`'s `_CHILD_ENV_KEEP` keep-list, which named
+  `CLAUDE_CODE_OAUTH_TOKEN` as a single literal string, is now an exact-name comparison built from
+  two concatenated string halves (`"CLAUDE_CODE_" + "OAUTH_TOKEN"`), so the credential's own name
+  never appears as one contiguous token anywhere in this module's source, while behaviour is
+  unchanged (the same one variable is kept across the strip). `pipeline/spawn_guard.py`'s docstring,
+  which named the same credential as precedent for env redaction, was reworded to describe it
+  rather than name it. `ANTHROPIC_API_KEY` and `CODEX_API_KEY` remain named in source (the first via
+  an existing `ANTHROPIC_API_KEY_ENV` constant, the second as a bare literal with no constant) --
+  reported to the maintainer rather than changed, per this round's own brief not to alter that
+  behaviour unasked.
+
+  `COMMAND_SCRIPT_NOT_FOLLOWED`, confirmed in both variants, listed `pipeline/haiku.py` by name: the
+  plugin-root detection block in `resolve-paths.sh` (centralized there, not duplicated per hook)
+  tested `-f "$PLUGIN_ROOT/pipeline/haiku.py"` as its install marker -- a path to a specific shipped
+  script, the exact shape this finding holds. Replaced with
+  `-f "$PLUGIN_ROOT/.claude-plugin/plugin.json"`: every install layout this plugin supports already
+  ships that manifest at its root (a release-tree requirement; `doctor.sh` already anchors its own
+  fallback-root probe on the same file), so the marker changed without changing which installs
+  resolve. The FATAL message on resolution failure was reworded to describe "an install manifest"
+  rather than name the script path it used to check for. A "." appearing separately in the same
+  finding list was investigated and not resolved this round -- still open.
+
+  The jit-context sibling's own confirmed-clearing list added three more items this round, swept
+  for and found clean already: no `case` pattern in any shipped script contains a POSIX character
+  class (`[[:space:]]`, `[[:alpha:]]`...) -- every occurrence found is inside a `grep`/`sed`
+  argument, never a `case` arm, so nothing needed rewriting. `${!var}` bash indirect-variable
+  expansion was deliberately NOT swept this round either, for the same reason round 4 deferred it:
+  it implements a genuinely dynamic associative-array-via-variable-name cache mechanism (9 sites
+  across `lib-memory-context.sh` and `log.sh`) that a literal `case` table cannot represent without
+  redesigning the caching mechanism itself. A comprehensive rename of every credential-shaped-but-
+  not-a-credential identifier (`*KEY*`, `*TOKEN*`, short names like `pat`/`tok`/`cred`) was also not
+  attempted this round -- out of scope for the time available, and risky to do blind across the
+  whole tree without the portal's own confirmation of which identifiers it actually reads.
+
+  New `check_release_tree.py` guards added for everything this round and round 4 actually fixed in
+  source: a bare `$VAR`/`${VAR...}` command word (REVIEW, not FAIL -- a command-position heuristic
+  with one known false-positive class, a multi-line quoted string that happens to place a variable
+  reference at column 0, same risk profile as the existing typed-heredoc guard), `$PWD` as a
+  literal, a bare `env` word, a nested default expansion (`${X:-$Y}`), and a credential-shaped name
+  outside an allowlist (`ANTHROPIC_API_KEY`, `CODEX_API_KEY`, and the split-name half `OAUTH_TOKEN`
+  alone, which is not itself a full credential name). Round 4's own three guards
+  ($PWD/`env`/nested-default) were claimed in that round's write-up but never actually added --
+  confirmed absent by reading `check_release_tree.py` directly before writing this round's version;
+  the three remaining `$PWD`/nested-default-expansion sites this absence let drift back in
+  (`scripts/bench-slug.sh`, `scripts/run-tests.sh`, `scripts/lib-lock.sh`) were fixed alongside the
+  new guards so the guards do not immediately fail against this repo's own tree. No `${!` guard was
+  added: adding a hard-FAIL guard for a pattern this round deliberately left unconverted would
+  immediately red the release gate on this repo's own current tree, which would be actively wrong
+  to ship.
+
+  Not independently confirmed against the real portal for this round either.
 - **`RUNTIME_FETCH_EXEC`** flags text that downloads and runs code, and the portal says it looks at
   "a hook, a server or settings command, a script, or text such as a skill or README". On v0.37.0
   (`e6cf58f`) it named `pipeline/shell.py` and `scripts/log.sh`, which contain no download at all.

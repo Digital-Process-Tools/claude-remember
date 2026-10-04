@@ -153,7 +153,9 @@ if [ -f "$FIXTURES/sample-session.jsonl" ]; then
     # drift tomorrow" shape as the four copies of this rule #177 is about, and
     # it would not survive a non-ASCII or over-200-character TMPDIR.
     source "$(dirname "$0")/lib-slug.sh"
-    SESSION_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$(session_dir_slug "$TMP_PROJECT")"
+    _RT_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-}"
+    [ -n "$_RT_CONFIG_DIR" ] || _RT_CONFIG_DIR="$HOME/.claude"
+    SESSION_DIR="$_RT_CONFIG_DIR/projects/$(session_dir_slug "$TMP_PROJECT")"
     mkdir -p "$SESSION_DIR" "$(dirname "$TMP_PROJECT/.remember/tmp/last-save.json")"
     mkdir -p "$TMP_PROJECT/.remember/tmp"
     cp "$FIXTURES/sample-session.jsonl" "$SESSION_DIR/test-session.jsonl"

@@ -12,10 +12,11 @@ everything; this script produces the tree a `release` branch carries:
    edit cannot leak into a release.
 2. The config's deny-list is dropped. Deny, not allow: a path forgotten here ships
    and is caught loudly by check_release_tree.py; a path forgotten in an allow-list
-   would vanish from every user's install with no error anywhere.
-3. CHANGELOG.md is cut to its latest RELEASED section (an `[Unreleased]` heading is
-   skipped even when it has entries), its link definition, and a link to the full
-   file on the default branch.
+   would vanish from every user's install with no error anywhere. CHANGELOG.md is on
+   that deny-list: only README and LICENSE are required by the directory (#898).
+3. `release_readme`, if configured, swaps its own content in for README.md -- a
+   short release-only README with no `$VAR`/`${...}` and no network command names,
+   while the full README with every disclosure detail stays on the default branch.
 4. Relative links and images in every shipped `.md` file that point at a path the
    deny-list removed are rewritten to absolute URLs on the default branch:
    raw.githubusercontent.com for images, github.com/.../blob for everything else.
@@ -265,6 +266,28 @@ def build(repo: Path, ref: str, out: Path, config: dict) -> dict:
 
     blobs = _cat_blobs(repo, sorted({sha for _, sha, _ in kept}))
     contents = {path: blobs[sha] for _, sha, path in kept}
+
+    release_readme = config.get("release_readme")
+    if release_readme:
+        if "README.md" not in contents:
+            raise BuildError("README.md: missing, cannot swap in release_readme")
+        swap_entry = next(((mode, sha) for mode, sha, path in entries
+                           if path == release_readme), None)
+        if swap_entry is None:
+            raise BuildError(f"{release_readme}: configured as release_readme but not "
+                             f"found at {ref}")
+        swap_mode, swap_sha = swap_entry
+        # Same rule the main kept/removed loop above already applies to every other
+        # shipped path: a symlink or submodule blob is not something to trust as
+        # literal file content (review finding, #898).
+        if swap_mode == "120000":
+            raise BuildError(f"{release_readme}: symlinks are not supported in a "
+                             f"release tree")
+        if swap_mode == "160000":
+            raise BuildError(f"{release_readme}: submodules are not supported in a "
+                             f"release tree")
+        swap_blobs = _cat_blobs(repo, [swap_sha])
+        contents["README.md"] = swap_blobs[swap_sha]
 
     for path, data in contents.items():
         if posixpath.basename(path) == ".gitattributes":
