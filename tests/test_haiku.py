@@ -183,24 +183,24 @@ def test_call_haiku_strips_parent_session_env(mock_run, monkeypatch):
     assert env.get("PATH") == "/usr/bin"
 
 
-# ── ANTHROPIC_API_KEY, kept by default, stripped only on request (#703, #898) ──
+# ── haiku.drop_env: an explicit, generic opt-in (#898 round 13) ──────────────
 #
-# #898 round 6: the plugin no longer inspects the host for ANOTHER credential
-# to decide this. The nested `claude -p` inherits ANTHROPIC_API_KEY exactly as
-# it inherits every other unrelated variable; `haiku.anthropic_api_key:
-# "strip"` is the one explicit, opt-in way to unset it for this one call. A
-# strip test with no keep twin, or a keep test with no strip twin, would pass
-# just as well against a function that always did the one thing.
+# #898 round 13 (maintainer decision): the #703 strip of one named credential
+# is gone. The nested `claude -p` inherits the environment as Claude Code gave
+# it -- no variable is special-cased by name -- and `haiku.drop_env` is the one
+# generic, opt-in way to remove variables from that child: a list of exact
+# names or shell-style globs (`*`, `?`). Every "removed" case is paired with a
+# "kept" one, so a function that always dropped (or never dropped) fails.
 
 
 @pytest.fixture
 def no_ambient_credentials(monkeypatch, tmp_path):
-    """No credential visible to `_child_env()` except what a test sets itself.
+    """No config visible to `_child_env()` except what a test writes itself.
 
     A developer machine can have a real `~/.remember/config.json`, so without
-    this fixture the strip/keep decision under test is the developer's own
-    config rather than the case the test describes -- and it would flip
-    between their machine and CI.
+    this fixture the drop list under test is the developer's own config rather
+    than the case the test describes -- and it would flip between their
+    machine and CI.
     """
     home = tmp_path / "home"
     home.mkdir()
@@ -222,146 +222,164 @@ def _write_config(home, haiku_block):
     )
 
 
-@patch("pipeline.haiku.subprocess.run")
-def test_call_haiku_keeps_anthropic_api_key_by_default(
-    mock_run, monkeypatch, no_ambient_credentials
-):
-    """#898 round 6: the default is to inherit the environment untouched.
-    Even with a `CLAUDE_CODE_OAUTH_TOKEN` also present, an ambient
-    ANTHROPIC_API_KEY is passed through unless the operator explicitly asks
-    for it to be stripped -- the plugin no longer reads the host to decide
-    this for them."""
-    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-example")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-example")
-    monkeypatch.setenv("PATH", "/usr/bin")  # an unrelated var must survive
+def _child_env_for(mock_run):
     mock_run.return_value = MagicMock(
         returncode=0, stdout=_mock_claude_response("x"), stderr="")
-
     call_haiku("p")
+    return mock_run.call_args[1]["env"]
 
-    env = mock_run.call_args[1]["env"]
-    assert env.get("ANTHROPIC_API_KEY") == "sk-ant-api03-example", (
-        "the default must keep the ambient key -- nothing is stripped "
-        "unless the operator sets haiku.anthropic_api_key to 'strip'"
-    )
+
+@patch("pipeline.haiku.subprocess.run")
+def test_call_haiku_inherits_the_environment_by_default(
+    mock_run, monkeypatch, no_ambient_credentials
+):
+    """No `haiku.drop_env`: every variable outside the parent-session
+    markers reaches the child untouched -- an API key included. This is
+    also the positive control for every drop test below."""
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-example")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-example")
+    monkeypatch.setenv("PATH", "/usr/bin")
+
+    env = _child_env_for(mock_run)
+
+    assert env.get("ANTHROPIC_API_KEY") == "sk-ant-api03-example"
     assert env.get("CLAUDE_CODE_OAUTH_TOKEN") == "sk-ant-oat-example"
     assert env.get("PATH") == "/usr/bin"
 
 
 @patch("pipeline.haiku.subprocess.run")
-def test_call_haiku_strips_anthropic_api_key_when_policy_is_strip(
+def test_drop_env_empty_list_is_the_same_as_the_default(
     mock_run, monkeypatch, no_ambient_credentials
 ):
-    """`haiku.anthropic_api_key: "strip"` is the only way the ambient key is
-    removed (#703, #898 round 6) -- the explicit opt-in for an operator whose
-    own login this process cannot see (a macOS Keychain entry, say) or who
-    simply wants the nested call to never use the key."""
-    _write_config(no_ambient_credentials, {"anthropic_api_key": "strip"})
+    _write_config(no_ambient_credentials, {"drop_env": []})
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-example")
-    mock_run.return_value = MagicMock(
-        returncode=0, stdout=_mock_claude_response("x"), stderr="")
 
-    call_haiku("p")
+    with patch("pipeline.haiku._warn") as mock_warn:
+        env = _child_env_for(mock_run)
 
-    assert "ANTHROPIC_API_KEY" not in mock_run.call_args[1]["env"]
-
-
-@patch("pipeline.haiku.subprocess.run")
-def test_anthropic_api_key_policy_keep_is_the_same_as_the_default(
-    mock_run, monkeypatch, no_ambient_credentials
-):
-    """Writing `"keep"` explicitly must behave identically to leaving the key
-    out of config entirely -- both are the one kept behaviour (#898 round 6)."""
-    _write_config(no_ambient_credentials, {"anthropic_api_key": "keep"})
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-example")
-    mock_run.return_value = MagicMock(
-        returncode=0, stdout=_mock_claude_response("x"), stderr="")
-
-    call_haiku("p")
-
-    env = mock_run.call_args[1]["env"]
     assert env.get("ANTHROPIC_API_KEY") == "sk-ant-api03-example"
-
-
-@patch("pipeline.haiku.subprocess.run")
-def test_anthropic_api_key_policy_unrecognised_value_warns_and_falls_back(
-    mock_run, monkeypatch, no_ambient_credentials
-):
-    """A value nothing recognises must not silently grade as one of the two
-    behaviours (#703). It falls back to `keep` -- the new default -- and says
-    so where the operator reads warnings."""
-    _write_config(no_ambient_credentials, {"anthropic_api_key": "sk-ant-api03-pasted-here"})
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-example")
-    mock_run.return_value = MagicMock(
-        returncode=0, stdout=_mock_claude_response("x"), stderr="")
-
-    with patch("pipeline.haiku._warn") as mock_warn:
-        call_haiku("p")
-
-    assert mock_run.call_args[1]["env"].get("ANTHROPIC_API_KEY") == "sk-ant-api03-example", (
-        "an unrecognised policy value must fall back to keep, not strip"
-    )
-    warnings = " ".join(str(c.args[0]) for c in mock_warn.call_args_list)
-    assert "haiku.anthropic_api_key" in warnings
-    assert "keep, strip" in warnings, "the legal values belong in the warning"
-    assert "sk-ant-api03-pasted-here" not in warnings, (
-        "the refused value must NOT be echoed -- this key's name invites pasting a "
-        "real credential into it, and the daily log is a file on disk"
-    )
-
-
-@patch("pipeline.haiku.subprocess.run")
-def test_anthropic_api_key_policy_recognised_value_warns_about_nothing(
-    mock_run, monkeypatch, no_ambient_credentials
-):
-    """The positive control for the warning above: a value the code accepts
-    must produce no warning at all, or "warns on a bad value" would be
-    indistinguishable from "warns on every value" (#703)."""
-    _write_config(no_ambient_credentials, {"anthropic_api_key": "keep"})
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-example")
-    mock_run.return_value = MagicMock(
-        returncode=0, stdout=_mock_claude_response("x"), stderr="")
-
-    with patch("pipeline.haiku._warn") as mock_warn:
-        call_haiku("p")
-
     assert mock_warn.call_args_list == []
 
 
 @patch("pipeline.haiku.subprocess.run")
-def test_failure_names_anthropic_api_key_when_it_was_kept(
+def test_drop_env_removes_an_exact_name(
     mock_run, monkeypatch, no_ambient_credentials
 ):
-    """The discoverability half (#703). The key was kept -- the default -- and
-    the call died on that key's balance. The error reaches hook-errors.log
-    through save-session.sh, so the variable is named there rather than only
-    in the daily log (#694)."""
+    _write_config(no_ambient_credentials, {"drop_env": ["ANTHROPIC_API_KEY"]})
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-example")
-    mock_run.return_value = MagicMock(
-        returncode=1,
-        stdout=json.dumps({"error": "Credit balance is too low"}),
-        stderr="",
-    )
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("PATH", "/usr/bin")
 
-    with pytest.raises(RuntimeError) as raised:
-        call_haiku("p")
+    with patch("pipeline.haiku._warn") as mock_warn:
+        env = _child_env_for(mock_run)
 
-    message = str(raised.value)
-    assert "Credit balance is too low" in message
-    assert "ANTHROPIC_API_KEY" in message, (
-        "the failure must name the variable that plausibly caused it"
-    )
-    assert "haiku.anthropic_api_key" in message, "and the knob that changes it"
+    assert "ANTHROPIC_API_KEY" not in env
+    # Exact means exact: a sibling sharing the prefix is kept.
+    assert env.get("ANTHROPIC_BASE_URL") == "https://example.invalid"
+    assert env.get("PATH") == "/usr/bin"
+    assert mock_warn.call_args_list == [], "a valid list warns about nothing"
 
 
 @patch("pipeline.haiku.subprocess.run")
-def test_failure_does_not_name_anthropic_api_key_when_it_was_not_set(
+def test_drop_env_glob_removes_every_matching_name(
     mock_run, monkeypatch, no_ambient_credentials
 ):
-    """The positive control's twin: the same credit error, no such var in the
-    environment. A hint that fires here is a hint that fires always, which
-    would point every unrelated auth failure at an innocent variable (#703)."""
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    _write_config(no_ambient_credentials, {"drop_env": ["ANTHROPIC_*"]})
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-example")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("MY_ANTHROPIC_THING", "kept")  # does not START with it
+    monkeypatch.setenv("PATH", "/usr/bin")
+
+    env = _child_env_for(mock_run)
+
+    assert "ANTHROPIC_API_KEY" not in env
+    assert "ANTHROPIC_BASE_URL" not in env
+    assert env.get("MY_ANTHROPIC_THING") == "kept"
+    assert env.get("PATH") == "/usr/bin"
+
+
+@patch("pipeline.haiku.subprocess.run")
+def test_drop_env_glob_that_matches_nothing_removes_nothing(
+    mock_run, monkeypatch, no_ambient_credentials
+):
+    _write_config(no_ambient_credentials, {"drop_env": ["UNRELATED_*", "X?Y"]})
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-example")
+    monkeypatch.setenv("XAY", "dropped-by-question-mark")
+    monkeypatch.setenv("XAAY", "kept")
+
+    env = _child_env_for(mock_run)
+
+    assert env.get("ANTHROPIC_API_KEY") == "sk-ant-api03-example"
+    assert "XAY" not in env, "`?` matches exactly one character"
+    assert env.get("XAAY") == "kept"
+
+
+@patch("pipeline.haiku.subprocess.run")
+def test_drop_env_can_remove_the_kept_oauth_token_too(
+    mock_run, monkeypatch, no_ambient_credentials
+):
+    """The operator's explicit list wins over the one built-in keep."""
+    _write_config(no_ambient_credentials, {"drop_env": ["CLAUDE_CODE_OAUTH_TOKEN"]})
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-example")
+
+    env = _child_env_for(mock_run)
+
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
+
+
+@patch("pipeline.haiku.subprocess.run")
+def test_drop_env_invalid_entries_are_ignored_with_a_warning(
+    mock_run, monkeypatch, no_ambient_credentials
+):
+    """Anything that is not a name or a `*`/`?` glob over name characters is
+    skipped, said so in the log, and never echoed -- someone may paste
+    `NAME=value` with a real value in it. The valid entry still applies."""
+    _write_config(no_ambient_credentials, {"drop_env": [
+        "ANTHROPIC_API_KEY=sk-ant-api03-pasted-here",
+        "",
+        "BAD-NAME",
+        "[A]*",
+        "9LEADING_DIGIT",
+        7,
+        "VALID_ONE",
+    ]})
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-example")
+    monkeypatch.setenv("VALID_ONE", "x")
+    monkeypatch.setenv("AB", "kept")
+
+    with patch("pipeline.haiku._warn") as mock_warn:
+        env = _child_env_for(mock_run)
+
+    assert "VALID_ONE" not in env, "the valid entry beside the bad ones applies"
+    assert env.get("ANTHROPIC_API_KEY") == "sk-ant-api03-example"
+    assert env.get("AB") == "kept"
+    warnings = " ".join(str(c.args[0]) for c in mock_warn.call_args_list)
+    assert "haiku.drop_env" in warnings
+    assert "sk-ant-api03-pasted-here" not in warnings
+    assert "BAD-NAME" not in warnings, "entries are described, never echoed"
+
+
+@patch("pipeline.haiku.subprocess.run")
+def test_drop_env_that_is_not_a_list_is_ignored_with_a_warning(
+    mock_run, monkeypatch, no_ambient_credentials
+):
+    _write_config(no_ambient_credentials, {"drop_env": "ANTHROPIC_API_KEY"})
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-example")
+
+    with patch("pipeline.haiku._warn") as mock_warn:
+        env = _child_env_for(mock_run)
+
+    assert env.get("ANTHROPIC_API_KEY") == "sk-ant-api03-example"
+    warnings = " ".join(str(c.args[0]) for c in mock_warn.call_args_list)
+    assert "haiku.drop_env" in warnings
+
+
+@patch("pipeline.haiku.subprocess.run")
+def test_credential_failure_points_at_drop_env(
+    mock_run, monkeypatch, no_ambient_credentials
+):
+    """The discoverability half of #703, kept without naming any variable:
+    a failure that looks like a credential failure says the knob exists."""
     mock_run.return_value = MagicMock(
         returncode=1,
         stdout=json.dumps({"error": "Credit balance is too low"}),
@@ -373,17 +391,16 @@ def test_failure_does_not_name_anthropic_api_key_when_it_was_not_set(
 
     message = str(raised.value)
     assert "Credit balance is too low" in message
+    assert "haiku.drop_env" in message
     assert "ANTHROPIC_API_KEY" not in message
 
 
 @patch("pipeline.haiku.subprocess.run")
-def test_failure_unrelated_to_credentials_does_not_name_anthropic_api_key(
+def test_failure_unrelated_to_credentials_gets_no_drop_env_hint(
     mock_run, monkeypatch, no_ambient_credentials
 ):
-    """And the third case, which is the one that makes the hint worth having
-    rather than noise: the key IS set and kept, but the failure has nothing to
-    do with credentials, so the hint stays out of it (#703)."""
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-example")
+    """Positive control's twin: a hint that fired on every failure would
+    point unrelated outages at the environment."""
     mock_run.return_value = MagicMock(
         returncode=1,
         stdout=json.dumps({"error": "Prompt is too long"}),
@@ -395,7 +412,19 @@ def test_failure_unrelated_to_credentials_does_not_name_anthropic_api_key(
 
     message = str(raised.value)
     assert "Prompt is too long" in message
-    assert "ANTHROPIC_API_KEY" not in message
+    assert "haiku.drop_env" not in message
+
+
+def test_haiku_py_no_longer_names_the_credential_or_its_old_key():
+    """#898 round 13: the shipped module must not name the credential at all
+    (the directory portal holds on the name alone), nor the removed
+    `haiku.anthropic_api_key` policy key."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "pipeline", "haiku.py")
+    with open(path, encoding="utf-8") as f:
+        source = f.read()
+    assert "def _child_env" in source, "positive control: this is the right file"
+    for needle in ("ANTHROPIC_API_KEY", "anthropic_api_key"):
+        assert needle not in source, needle
 
 
 @patch("pipeline.haiku.subprocess.run")

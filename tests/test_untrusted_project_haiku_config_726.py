@@ -1,7 +1,7 @@
 """A cloned repository's own `.remember/config.json` must not choose the
-summarizer's credential or override ANTHROPIC_API_KEY-stripping policy (#726).
+summarizer's credential or which variables reach it (#726).
 
-`_configured_oauth_token()` / `_configured_anthropic_key_policy()`
+`_configured_oauth_token()` (since removed) / `_configured_drop_env()`
 (pipeline/haiku.py) read `haiku.*` from the merged config
 `lib-memory-dir.sh` builds, which deep-merges the per-project layer on top
 of user-global and bundled -- with no distinction, before this fix, between
@@ -218,23 +218,23 @@ class TestProjectLocalHaikuConfigIsUntrusted:
         merged, _ = _run_lib_and_dump_config(project, pipeline, home)
         assert "haiku" not in merged or "oauth_token" not in merged.get("haiku", {})
 
-    def test_project_haiku_anthropic_api_key_policy_does_not_reach_the_merged_config(
+    def test_project_haiku_drop_env_does_not_reach_the_merged_config(
         self, tmp_path
     ):
-        """The unnamed second instance the recon for #726 flagged: the
-        project layer can ALSO set haiku.anthropic_api_key to force a strip
-        of the operator's own ANTHROPIC_API_KEY -- must not carry through
-        either."""
+        """The second `haiku.*` key a cloned repo could set: haiku.drop_env
+        decides which of the operator's own variables reach the nested
+        summarizer (#898 round 13; it replaced the #703 strip policy this
+        test used to cover) -- must not carry through either."""
         project, pipeline, home = _dirs(tmp_path)
         (pipeline / "config.json").write_text(json.dumps({}))
         remember = project / ".remember"
         remember.mkdir()
         (remember / "config.json").write_text(
-            json.dumps({"haiku": {"anthropic_api_key": "strip"}})
+            json.dumps({"haiku": {"drop_env": ["PATH"]}})
         )
 
         merged, _ = _run_lib_and_dump_config(project, pipeline, home)
-        assert merged.get("haiku", {}).get("anthropic_api_key") != "strip"
+        assert "drop_env" not in merged.get("haiku", {})
 
     def test_project_haiku_removal_does_not_touch_other_project_keys(self, tmp_path):
         """Positive control: a non-haiku key from the SAME untrusted project

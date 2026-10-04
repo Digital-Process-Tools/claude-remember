@@ -37,6 +37,7 @@ Module-level constants:
 from __future__ import annotations
 
 import contextlib
+import fnmatch
 import json
 import os
 import re
@@ -344,24 +345,29 @@ def _child_env() -> dict[str, str]:
     is the failure @ehutchinsonSFDC saw. Cheap to close, and it makes the code
     say what the comments already claim.
 
-    ``ANTHROPIC_API_KEY`` goes too, but only on evidence — see
-    ``_anthropic_api_key_decision`` for which evidence and why the strip cannot
-    be unconditional (#703).
+    Nothing else is special-cased by name (#898 round 13: the earlier strip
+    of one named API key is gone). The operator's own ``haiku.drop_env`` list
+    -- exact names or ``*``/``?`` globs, see ``_configured_drop_env`` -- is the
+    one opt-in way to keep more variables out of the child, and it applies to
+    every name, the one kept OAuth credential included.
     """
-    strip_key, key_reason = _anthropic_api_key_decision()
+    drop_globs = _configured_drop_env()
     # Every name below written out (#898 round 10), never compared against a
-    # constant that holds it.
+    # constant that holds it. The drop list is one more exclusion in the same
+    # single walk -- the environment is never read by a configured name.
     child = {
         k: v
         for k, v in os.environ.items()
-        if k == "CLAUDE_CODE_OAUTH_TOKEN"
-        or (
-            k != "CLAUDECODE"
-            and k != "CLAUDE_JOB_DIR"
-            and k != "CLAUDE_PROJECT_DIR"
-            and not (k == "ANTHROPIC_API_KEY" and strip_key)
-            and not k.startswith("CLAUDE_CODE_")
+        if (
+            k == "CLAUDE_CODE_OAUTH_TOKEN"
+            or (
+                k != "CLAUDECODE"
+                and k != "CLAUDE_JOB_DIR"
+                and k != "CLAUDE_PROJECT_DIR"
+                and not k.startswith("CLAUDE_CODE_")
+            )
         )
+        and not any(fnmatch.fnmatchcase(k, g) for g in drop_globs)
     }
     child["REMEMBER_NESTED_SUMMARIZER"] = "1"
     return child
@@ -554,7 +560,7 @@ def _remember_dir_is_project_local(remember_dir: str) -> bool:
 
 
 def _config_candidates() -> list[str]:
-    """Config files to search for ``haiku.oauth_token``, highest priority first.
+    """Config files to search for ``haiku.*`` settings, highest priority first.
 
     ``REMEMBER_CONFIG`` is the merged config ``lib-memory-dir.sh`` builds from
     all three layers (plugin-bundled, user-global, per-project) and exports
@@ -591,38 +597,41 @@ def _config_candidates() -> list[str]:
 # token; this file reads neither any more, for any purpose.
 
 
-# ── The ambient ANTHROPIC_API_KEY (#703, reported in #693; #898 round 6) ───────
+# ── haiku.drop_env (#898 round 13; replaces the #703 strip) ──────────────────
 #
-# The Claude CLI resolves credentials in a fixed order, and ANTHROPIC_API_KEY
-# out-ranks the CLI's own login. So an operator who has that login AND keeps that
-# var set for some unrelated tool gets every nested summarizer call billed to
-# the key -- and when its balance is exhausted, every background save dies with
-# "Credit balance is too low" while their own interactive sessions carry on
-# working off the login. Nothing at any layer names the variable; the reporter
-# found it by reading the child's stderr in the daily log after days of opaque
-# `save-session.sh --force exited 1` warnings.
+# #703 (reported in #693) stripped one named API key from the nested call, on
+# a `haiku.*` policy key. #898 round 13 (maintainer decision) removed both: the
+# nested `claude -p` inherits the environment exactly as Claude Code gave it,
+# no variable special-cased by name, and the directory scan has no credential
+# name left to cite in this module. `haiku.drop_env` is the one generic,
+# opt-in way to keep variables out of that child: a list of exact names or
+# shell-style globs (`*`, `?`), matched against variable NAMES only. Default:
+# an empty list, so nothing is dropped.
 #
-# #898, round 6 (maintainer decision): this module no longer reads the host to
-# guess whether stripping is safe -- no login-file probe, no "is another
-# credential visible" check. The nested `claude -p` inherits ANTHROPIC_API_KEY
-# exactly as it inherits every other unrelated variable; the default is
-# `keep`. `haiku.anthropic_api_key: "strip"` is the one explicit, opt-in way
-# an operator removes it for this one call -- for a login this process cannot
-# see (a macOS Keychain entry, say) or simply because they want the nested
-# call to never touch the key. The failure hint in `call_haiku` is what tells
-# them the knob exists at the moment it matters.
+# Why the drop happens inside `_child_env()`'s existing walk and not anywhere
+# else: that walk already builds the child mapping by excluding names, so one
+# more exclusion there reads nothing new. No variable is looked up by a name
+# known only at run time, no alias of the environment is taken, nothing is
+# passed wholesale, and no parameter is named after it -- the read shapes the
+# directory scan cites (claude-directory-publishing triggers.md).
+
+# A name, or a `*`/`?` glob over name characters. Anything else -- `=`, `-`,
+# brackets, whitespace -- is ignored with a warning.
+_DROP_ENV_ENTRY = re.compile(r"[A-Za-z_*?][A-Za-z0-9_*?]*")
 
 
-_ANTHROPIC_KEY_POLICIES = ("keep", "strip")
-_ANTHROPIC_KEY_POLICY_DEFAULT = "keep"
+def _configured_drop_env() -> tuple[str, ...]:
+    """`haiku.drop_env` from config: the names/globs to keep out of the child.
 
+    The first config candidate that HAS the key decides, the same precedence
+    every other `haiku.*` read here uses. A value that is not a list drops
+    nothing; an entry that is not a name or a glob is skipped -- both are
+    reported, and neither is ever echoed: an operator may have pasted
+    ``NAME=value`` with a real value in it, and the daily log is a file on disk.
 
-def _configured_anthropic_key_policy() -> str:
-    """`haiku.anthropic_api_key` from config: ``keep`` or ``strip``.
-
-    A value nothing recognises falls back to ``keep`` -- the default -- and is
-    reported: a typo'd policy that silently graded as ``strip`` would remove a
-    credential the operator never asked to remove.
+    On Windows the process environment's names are upper-cased by Python, so
+    the globs are upper-cased there too: Windows names are case-insensitive,
+    and a lower-case entry should still match.
     """
     for path in _config_candidates():
         try:
@@ -633,49 +642,33 @@ def _configured_anthropic_key_policy() -> str:
         if not isinstance(cfg, dict):
             continue
         haiku_cfg = cfg.get("haiku")
-        if not isinstance(haiku_cfg, dict) or "anthropic_api_key" not in haiku_cfg:
+        if not isinstance(haiku_cfg, dict) or "drop_env" not in haiku_cfg:
             continue
-        value = haiku_cfg["anthropic_api_key"]
-        if isinstance(value, str) and value.strip().lower() in _ANTHROPIC_KEY_POLICIES:
-            return value.strip().lower()
-        if isinstance(value, str) and not value.strip():
-            # How the bundled config can ship the key as "not configured",
-            # matching `haiku.oauth_token`'s own empty-means-unset convention.
-            return _ANTHROPIC_KEY_POLICY_DEFAULT
-        # The refused value is described, never echoed. This key's NAME invites
-        # an operator to paste an actual API key into it, and a warning that
-        # quoted the value would then write that key to the daily log in clear
-        # text -- turning a typo into a leaked credential on disk. CodeQL flags
-        # exactly this shape, and it is right to.
-        if isinstance(value, str):
-            shape = f"a {len(value.strip())}-character string"
-        else:
-            shape = f"a {type(value).__name__} value"
-        _warn(
-            f"WARNING: ignoring haiku.anthropic_api_key in {path} -- {shape}, "
-            f"not one of {', '.join(_ANTHROPIC_KEY_POLICIES)}; falling back to "
-            f"'{_ANTHROPIC_KEY_POLICY_DEFAULT}'. The value itself is not logged: "
-            "this key takes a policy word, and anyone who pasted a real key here "
-            "must not have it written to disk"
-        )
-        return _ANTHROPIC_KEY_POLICY_DEFAULT
-    return _ANTHROPIC_KEY_POLICY_DEFAULT
-
-
-def _anthropic_api_key_decision() -> tuple[bool, str]:
-    """``(strip?, reason)`` for the ambient ANTHROPIC_API_KEY.
-
-    The reason is carried rather than logged on every save: this runs on the
-    hot path of every session end, and a line per save about a variable that is
-    behaving correctly is noise. It is surfaced only where it is actually
-    diagnostic -- in the failure hint below.
-    """
-    if not os.environ.get("ANTHROPIC_API_KEY", "").strip():
-        return False, "not set"
-    policy = _configured_anthropic_key_policy()
-    if policy == "strip":
-        return True, "haiku.anthropic_api_key is 'strip'"
-    return False, "haiku.anthropic_api_key is 'keep' (the default)"
+        value = haiku_cfg["drop_env"]
+        if not isinstance(value, list):
+            _warn(
+                f"WARNING: ignoring haiku.drop_env in {path} -- a "
+                f"{type(value).__name__} value, not a list of variable names or "
+                "globs; nothing is dropped from the summarizer's environment"
+            )
+            return ()
+        globs = []
+        for index, entry in enumerate(value):
+            if isinstance(entry, str) and _DROP_ENV_ENTRY.fullmatch(entry):
+                globs.append(entry.upper() if os.name == "nt" else entry)
+                continue
+            if isinstance(entry, str):
+                shape = f"a {len(entry)}-character string"
+            else:
+                shape = f"a {type(entry).__name__} value"
+            _warn(
+                f"WARNING: ignoring entry {index} of haiku.drop_env in {path} -- "
+                f"{shape}, not a variable name or a */? glob over letters, digits "
+                "and underscores. The entry itself is not logged: it may hold a "
+                "pasted value"
+            )
+        return tuple(globs)
+    return ()
 
 
 # Markers that a failed call plausibly died on credentials rather than on the
@@ -693,25 +686,25 @@ _CREDENTIAL_FAILURE_MARKERS = (
 )
 
 
-def _anthropic_api_key_hint(child: dict[str, str], detail: str) -> str:
-    """The sentence a failure gets when the ambient key plausibly caused it.
+def _drop_env_hint(detail: str) -> str:
+    """The sentence a failure gets when it looks like a credential failure.
 
-    Empty string when the key never reached the child, or when the failure does
-    not look like a credential failure. This lands in the RuntimeError, which
-    `save-session.sh` surfaces into `hook-errors.log` -- the place an operator
-    is already looking, rather than the daily log alone (#694).
+    The discoverability half of #703, kept after #898 round 13 removed the
+    strip itself: the nested CLI inherits every variable it is given, and some
+    of those can out-rank the CLI's own login. This names no variable -- it
+    cannot know which one -- only the knob that keeps one out. Empty string
+    when the failure does not look like a credential failure. It lands in the
+    RuntimeError, which `save-session.sh` surfaces into `hook-errors.log` --
+    the place an operator is already looking (#694).
     """
-    if not child.get("ANTHROPIC_API_KEY"):
-        return ""
     lowered = detail.lower()
     if not any(marker in lowered for marker in _CREDENTIAL_FAILURE_MARKERS):
         return ""
     return (
-        " -- note that ANTHROPIC_API_KEY was set in this environment and "
-        "was passed to the nested CLI, where it OUT-RANKS a claude.ai login; if "
-        "that key is exhausted or wrong, this is what failed. Set "
-        "`haiku.anthropic_api_key` to \"strip\" in config.json to keep it out of "
-        "the summarizer, or \"keep\" to silence this note (#703)"
+        " -- the nested CLI inherits this environment as-is, and a credential "
+        "variable set there for some other tool can out-rank your own login; "
+        "list its name (or a glob such as PREFIX_*) in `haiku.drop_env` in "
+        "config.json to keep it out of the summarizer (#703, #898)"
     )
 
 
@@ -1460,7 +1453,7 @@ def call_haiku(
         detail = _failure_detail(result.stdout, result.stderr)
         raise RuntimeError(
             f"claude exited {result.returncode}: {detail}"
-            f"{_anthropic_api_key_hint(child, detail)}"
+            f"{_drop_env_hint(detail)}"
         )
 
     return _parse_response(result.stdout)

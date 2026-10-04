@@ -55,7 +55,7 @@
   "session_start_slow_threshold_s": 5,
   "haiku": {
     "oauth_token": "",
-    "anthropic_api_key": "keep"
+    "drop_env": []
   },
 
   "_comments": {
@@ -74,6 +74,16 @@
       "purpose -- this key, and the older environment variable it replaced,",
       "are checked for PRESENCE ONLY now, to warn loudly (by name, never by",
       "value) if either is still set from before."
+    ],
+    "haiku.drop_env": [
+      "Environment variables to keep out of the nested summarizer call, as a",
+      "list of exact names or shell-style globs (* and ?), matched against",
+      "variable NAMES only. Default: an empty list -- the nested call inherits",
+      "the environment exactly as your coding agent gave it. Use it when a",
+      "variable set for some other tool (an API key, say) would otherwise",
+      "out-rank your own login inside that call. An entry that is not a name",
+      "or a glob over letters, digits and underscores is ignored with a",
+      "warning in the daily log, and never echoed there (#898)."
     ],
     "consolidate_max_bytes": [
       "Skip-guard cap (UTF-8 bytes) on the assembled consolidation prompt",
