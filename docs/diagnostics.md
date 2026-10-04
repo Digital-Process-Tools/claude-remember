@@ -14,6 +14,8 @@ A new "Summarizer failures" section reads `tmp/last-summary-failure` -- written 
 attempt and removed only on a successful append, a `SKIP`, or the give-up threshold -- and, when
 present, `FAIL`s with the latest `call-haiku error` line from the daily log, pointing at
 `REMEMBER_OAUTH_TOKEN` (`claude setup-token`) when that detail matches an authentication marker.
+(Since [#898](https://github.com/Digital-Process-Tools/claude-remember/issues/898) round 15 that
+line names no credential command: it says to log in again with your coding agent's own CLI.)
 The VERDICT line now reads "the summarizer's last attempt failed" instead of "capture is
 working" whenever that marker is present, ranked below the SessionEnd/no-Python/oversized-store
 arms (still the more structural causes) but above the plain success verdict.
