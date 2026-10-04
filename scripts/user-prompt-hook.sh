@@ -261,7 +261,7 @@ _stdin_cwd() {
     rest=${raw#*"$dq"cwd"$dq"}
     [ "$rest" != "$raw" ] || return 1
     prefix=${rest%%"$dq"*}
-    if [ "${prefix/[!:[:space:]]/}" != "$prefix" ]; then return 1; fi
+    if [[ "$prefix" == *[!:[:space:]]* ]]; then return 1; fi
     value=${rest#*"$dq"}
     value=${value%%"$dq"*}
     # A JSON encoder writes each backslash as `\\` -- a Windows `cwd` from
@@ -289,7 +289,7 @@ _stdin_cwd_into() {
     rest=${raw#*"$dq"cwd"$dq"}
     [ "$rest" != "$raw" ] || return 1
     prefix=${rest%%"$dq"*}
-    if [ "${prefix/[!:[:space:]]/}" != "$prefix" ]; then return 1; fi
+    if [[ "$prefix" == *[!:[:space:]]* ]]; then return 1; fi
     value=${rest#*"$dq"}
     value=${value%%"$dq"*}
     value=${value//\\\\/\\}  # decode `\\`, as in _stdin_cwd (#829)
@@ -303,8 +303,8 @@ _stdin_cwd_into() {
 # directory is decided in resolve-paths.sh, which falls back to the
 # existing derivation when it does not.
 _stdin_cwd_into REMEMBER_HOOK_CWD "$_HOOK_STDIN" || REMEMBER_HOOK_CWD=""
-if [ "${REMEMBER_HOOK_CWD/$'\n'/}" != "$REMEMBER_HOOK_CWD" ] \
-    || [ "${REMEMBER_HOOK_CWD/$'\r'/}" != "$REMEMBER_HOOK_CWD" ]; then
+if [[ "$REMEMBER_HOOK_CWD" == *$'\n'* ]] \
+    || [[ "$REMEMBER_HOOK_CWD" == *$'\r'* ]]; then
     REMEMBER_HOOK_CWD=""
 fi
 export REMEMBER_HOOK_CWD

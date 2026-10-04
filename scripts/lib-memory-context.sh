@@ -565,7 +565,7 @@ _REMEMBER_REFUSED_TRACKED_STATES="tracked unavailable symlinked-ancestor"
 # must be refused by every guard that consults it.
 _remember_tracked_state_is_refused() {
     local _ls=" $_REMEMBER_REFUSED_TRACKED_STATES "
-    [ "${_ls/" $1 "/}" != "$_ls" ]
+    [[ "$_ls" == *" $1 "* ]]
 }
 
 # Parallel-array cache for the symlinked-ancestor walk below, same shape
@@ -820,7 +820,7 @@ _remember_emit_file() {
     local _remember_emit_max="${REMEMBER_EMIT_READ_MAX:-16384}"
     if [ -z "$_remember_emit_max" ] || [ "${_remember_emit_max#*[!0-9]}" != "$_remember_emit_max" ]; then _remember_emit_max=16384; fi
     local _sz="${2:-}"
-    if [ -z "$_sz" ] || [ "${_sz/[!0-9]/}" != "$_sz" ]; then
+    if [ -z "$_sz" ] || [[ "$_sz" == *[!0-9]* ]]; then
         # No usable size: `cat` is the one that cannot go quadratic.
         cat "$1"
         return 0
@@ -943,7 +943,7 @@ _remember_render_memory_section() {
             # unaffected.
             if [ -n "${_REMEMBER_BUDGET_EXCLUDE:-}" ]; then
                 _remember_budget_hay="${_remember_nl}${_REMEMBER_BUDGET_EXCLUDE}"
-                if [ "${_remember_budget_hay/"${_remember_nl}${MFILE}${_remember_nl}"/}" != "$_remember_budget_hay" ]; then
+                if [[ "$_remember_budget_hay" == *"${_remember_nl}${MFILE}${_remember_nl}"* ]]; then
                     _remember_budget_dropped="${_remember_budget_dropped}${MFILE}"
                     if [ -n "${MFILE_BYTES:-}" ]; then
                         _remember_budget_dropped="${_remember_budget_dropped} (${MFILE_BYTES} bytes)"
@@ -1028,7 +1028,7 @@ _remember_render_memory_section() {
             _remember_wc_size_get_into MFILE_BYTES "$MFILE"
             # "(0 bytes)" for a file nobody measured reads exactly like an
             # empty file. Say which one it is (#695 round-1 audit).
-            if [ -z "$MFILE_BYTES" ] || [ "${MFILE_BYTES/[!0-9]/}" != "$MFILE_BYTES" ]; then
+            if [ -z "$MFILE_BYTES" ] || [[ "$MFILE_BYTES" == *[!0-9]* ]]; then
                 printf '%s (size unknown)\n' "$MFILE"
             else
                 printf '%s (%s bytes)\n' "$MFILE" "$MFILE_BYTES"
@@ -1350,7 +1350,7 @@ _remember_session_start_max_bytes_into() {
     local _outvar="$1"
     local _val=""
     config_into _val ".thresholds.session_start_max_bytes" 9000
-    if [ -z "$_val" ] || [ "${_val/[!0-9]/}" != "$_val" ]; then
+    if [ -z "$_val" ] || [[ "$_val" == *[!0-9]* ]]; then
         log "memory-context" "WARNING: thresholds.session_start_max_bytes is not a valid non-negative integer (got $_val) -- using default 9000"
         _val=9000
     fi

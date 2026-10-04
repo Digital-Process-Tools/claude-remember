@@ -266,13 +266,13 @@ fi
 # ref somewhere OTHER than the usual remote-tracking ref, to a destination
 # this value also controls. A colon is rejected for the identical reason the
 # remote-name check above rejects one.
-if [ "${GIT_RESTORE_BRANCH#-}" != "$GIT_RESTORE_BRANCH" ] || [ "${GIT_RESTORE_BRANCH/:/}" != "$GIT_RESTORE_BRANCH" ]; then
+if [ "${GIT_RESTORE_BRANCH#-}" != "$GIT_RESTORE_BRANCH" ] || [[ "$GIT_RESTORE_BRANCH" == *:* ]]; then
     report_error "git-restore" "WARNING: configured branch '$GIT_RESTORE_BRANCH' starts with '-' or contains ':' -- refusing to use it as a git fetch operand (a colon makes it a src:dst refspec, not a branch name)."
     GIT_RESTORE_BRANCH=""
 fi
 
 FETCH_TIMEOUT=$(config '.git_restore.fetch_timeout_seconds' '20')
-if [ -z "$FETCH_TIMEOUT" ] || [ "${FETCH_TIMEOUT/[!0-9]/}" != "$FETCH_TIMEOUT" ] \
+if [ -z "$FETCH_TIMEOUT" ] || [[ "$FETCH_TIMEOUT" == *[!0-9]* ]] \
     || [ "$FETCH_TIMEOUT" = 0 ]; then
     FETCH_TIMEOUT=20
 fi

@@ -67,7 +67,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # below can disambiguate a subdirectory project the same way (#827).
 _DOCTOR_SESSION_ID="${CLAUDE_CODE_SESSION_ID:-}"
 if [ -z "${_DOCTOR_SESSION_ID#.}" ] || [ -z "${_DOCTOR_SESSION_ID#..}" ] \
-    || [ "${_DOCTOR_SESSION_ID/[!A-Za-z0-9._-]/}" != "$_DOCTOR_SESSION_ID" ]; then
+    || [[ "$_DOCTOR_SESSION_ID" == *[!A-Za-z0-9._-]* ]]; then
     _DOCTOR_SESSION_ID=""
 fi
 
@@ -631,7 +631,7 @@ elif [ -n "$_SESSION_DIR" ] && [ -d "$_SESSION_DIR" ]; then
     for _tf in "$_SESSION_DIR"/*.jsonl; do
         [ -f "$_tf" ] || continue
         _tf_age=$(_file_age_seconds "$_tf")
-        if [ -z "$_tf_age" ] || [ "${_tf_age/[!0-9]/}" != "$_tf_age" ]; then
+        if [ -z "$_tf_age" ] || [[ "$_tf_age" == *[!0-9]* ]]; then
             # Found, but its age could not be read — the same third
             # state this file already names for the PostToolUse marker
             # above, not folded into either "counted" or "silently
@@ -797,7 +797,7 @@ _size_of() {
     _SIZE_BYTES=0
     [ -f "$1" ] || return 0
     _size_raw=$(wc -c < "$1" 2>/dev/null | tr -d ' ')
-    if [ -z "$_size_raw" ] || [ "${_size_raw/[!0-9]/}" != "$_size_raw" ]; then
+    if [ -z "$_size_raw" ] || [[ "$_size_raw" == *[!0-9]* ]]; then
         _STORE_UNREADABLE="${_STORE_UNREADABLE}${1}
 "
     else
@@ -853,7 +853,7 @@ else
         if [ "${_sf_name%.done.md}" != "$_sf_name" ]; then
             continue
         fi
-        if [ -z "$_DOCTOR_TODAY" ] || [ "${_sf_name/"$_DOCTOR_TODAY"/}" != "$_sf_name" ]; then
+        if [ -z "$_DOCTOR_TODAY" ] || [[ "$_sf_name" == *"$_DOCTOR_TODAY"* ]]; then
             continue
         fi
         _size_of "$_sf"

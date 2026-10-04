@@ -137,10 +137,10 @@ _stdin_json_string() {
     # backslash-escaped: the plugin directory's scanner mis-tracks an
     # escaped quote (#898 round 8). Same patterns, same quoting of $field.
     printf -v dq '\042'
-    [ "${raw/"$dq$field$dq"/}" != "$raw" ] || return 1
+    [[ "$raw" == *"$dq$field$dq"* ]] || return 1
     rest=${raw#*"$dq"$field"$dq"}
     prefix=${rest%%"$dq"*}
-    if [ "${prefix/[!:[:space:]]/}" != "$prefix" ]; then return 1; fi
+    if [[ "$prefix" == *[!:[:space:]]* ]]; then return 1; fi
     value=${rest#*"$dq"}
     value=${value%%"$dq"*}
     # A JSON encoder writes each backslash as `\\` -- a Windows `cwd` from
@@ -168,10 +168,10 @@ _stdin_json_string_into() {
     local _sjsi_var="$1" _sjsi_field="$2" _sjsi_raw="$3" _sjsi_rest _sjsi_prefix _sjsi_value _sjsi_dq
     printf -v "$_sjsi_var" '%s' ""
     printf -v _sjsi_dq '\042'  # the double quote, as in _stdin_json_string
-    [ "${_sjsi_raw/"$_sjsi_dq$_sjsi_field$_sjsi_dq"/}" != "$_sjsi_raw" ] || return 1
+    [[ "$_sjsi_raw" == *"$_sjsi_dq$_sjsi_field$_sjsi_dq"* ]] || return 1
     _sjsi_rest=${_sjsi_raw#*"$_sjsi_dq"$_sjsi_field"$_sjsi_dq"}
     _sjsi_prefix=${_sjsi_rest%%"$_sjsi_dq"*}
-    if [ "${_sjsi_prefix/[!:[:space:]]/}" != "$_sjsi_prefix" ]; then return 1; fi
+    if [[ "$_sjsi_prefix" == *[!:[:space:]]* ]]; then return 1; fi
     _sjsi_value=${_sjsi_rest#*"$_sjsi_dq"}
     _sjsi_value=${_sjsi_value%%"$_sjsi_dq"*}
     _sjsi_value=${_sjsi_value//\\\\/\\}  # decode `\\`, as above (#829)
@@ -203,8 +203,8 @@ _stdin_json_string_into() {
 # resolve-paths.sh, which falls back to the existing derivation when it does
 # not.
 _stdin_json_string_into REMEMBER_HOOK_CWD cwd "$HOOK_STDIN" 2>/dev/null
-if [ "${REMEMBER_HOOK_CWD/$'\n'/}" != "$REMEMBER_HOOK_CWD" ] \
-    || [ "${REMEMBER_HOOK_CWD/$'\r'/}" != "$REMEMBER_HOOK_CWD" ]; then
+if [[ "$REMEMBER_HOOK_CWD" == *$'\n'* ]] \
+    || [[ "$REMEMBER_HOOK_CWD" == *$'\r'* ]]; then
     REMEMBER_HOOK_CWD=""
 fi
 export REMEMBER_HOOK_CWD
@@ -301,7 +301,7 @@ CURRENT_SESSION_ID=$(_stdin_session_id "$HOOK_STDIN" 2>/dev/null) || CURRENT_SES
 # useful while `/` would match across directories, so it faces the same guard
 # the basename-derived ids face — at the point of entry, not the point of use.
 if [ -z "${CURRENT_SESSION_ID#.}" ] || [ -z "${CURRENT_SESSION_ID#..}" ] \
-    || [ "${CURRENT_SESSION_ID/[!A-Za-z0-9._-]/}" != "$CURRENT_SESSION_ID" ]; then
+    || [[ "$CURRENT_SESSION_ID" == *[!A-Za-z0-9._-]* ]]; then
     CURRENT_SESSION_ID=""
 fi
 
@@ -319,8 +319,8 @@ fi
 # Whether the value actually names an openable file is decided on the Python
 # side, which falls back to the existing derivation when it does not.
 _stdin_json_string_into REMEMBER_TRANSCRIPT_PATH transcript_path "$HOOK_STDIN" 2>/dev/null
-if [ "${REMEMBER_TRANSCRIPT_PATH/$'\n'/}" != "$REMEMBER_TRANSCRIPT_PATH" ] \
-    || [ "${REMEMBER_TRANSCRIPT_PATH/$'\r'/}" != "$REMEMBER_TRANSCRIPT_PATH" ]; then
+if [[ "$REMEMBER_TRANSCRIPT_PATH" == *$'\n'* ]] \
+    || [[ "$REMEMBER_TRANSCRIPT_PATH" == *$'\r'* ]]; then
     REMEMBER_TRANSCRIPT_PATH=""
 fi
 export REMEMBER_TRANSCRIPT_PATH
@@ -613,7 +613,7 @@ _remember_write_slug_record() {
         _reason="empty-slug"
     else
         local _paths_joined="${PROJECT}${SESSIONS_DIR}${REMEMBER_DIR}"
-        if [ "${_paths_joined/$'\n'/}" != "$_paths_joined" ]; then
+        if [[ "$_paths_joined" == *$'\n'* ]]; then
             _reason="unrepresentable-path"
         fi
     fi
@@ -706,7 +706,7 @@ _remember_write_slug_index() {
     [ -n "$PROJECT_PATH_SLUG" ] || return 0
 
     local _paths_joined="${PROJECT}${REMEMBER_DIR}"
-    if [ "${_paths_joined/$'\n'/}" != "$_paths_joined" ] || [ "${_paths_joined/$'\t'/}" != "$_paths_joined" ]; then
+    if [[ "$_paths_joined" == *$'\n'* ]] || [[ "$_paths_joined" == *$'\t'* ]]; then
         return 0
     fi
 
@@ -958,7 +958,7 @@ _transcript_is_pluginless_sdk() {
             # _ENTRYPOINT_SNIFF_CAP for the overwhelmingly common case
             # (ordinary transcripts are mostly dialogue).
             prefix=${rest%%"$dq"*}
-            if [ "${prefix/[!:[:space:]]/}" != "$prefix" ]; then
+            if [[ "$prefix" == *[!:[:space:]]* ]]; then
                 is_dialogue=1
             fi
         fi
@@ -1332,7 +1332,7 @@ capture_was_seen() {
     #    transcript dir, and `..` would make `-e` true for every id.
     if [ -n "$1" ] && { [ -z "${1#.}" ] || [ -z "${1#..}" ]; }; then
         :
-    elif [ "${1/[!A-Za-z0-9._-]/}" != "$1" ]; then
+    elif [[ "$1" == *[!A-Za-z0-9._-]* ]]; then
         :
     else
         [ -e "$CAPTURE_SEEN_DIR/$1" ] && return 0
@@ -1938,7 +1938,7 @@ _REMEMBER_CTX_OK=""
 # for an unwritable tmp/, so the only visible cost is the promo banner,
 # never the memory context itself.
 _REMEMBER_CTX_TRACE_ACTIVE=""
-if [ "${-/x/}" != "$-" ]; then
+if [[ "$-" == *x* ]]; then
     _REMEMBER_CTX_TRACE_ACTIVE="1"
 fi
 [ "${REMEMBER_TRACE:-}" = "1" ] && _REMEMBER_CTX_TRACE_ACTIVE="1"
@@ -2133,7 +2133,7 @@ elif [ -f "$REMEMBER_HANDOFF" ] && [ -s "$REMEMBER_HANDOFF" ]; then
     _remember_handoff_fence_nonce="${RANDOM:-0}${RANDOM:-0}"
     HANDOFF_MAX_REDELIVERIES=""
     config_into HANDOFF_MAX_REDELIVERIES ".thresholds.handoff_max_redeliveries" 3
-    if [ -z "$HANDOFF_MAX_REDELIVERIES" ] || [ "${HANDOFF_MAX_REDELIVERIES/[!0-9]/}" != "$HANDOFF_MAX_REDELIVERIES" ]; then
+    if [ -z "$HANDOFF_MAX_REDELIVERIES" ] || [[ "$HANDOFF_MAX_REDELIVERIES" == *[!0-9]* ]]; then
         log "hook" "WARNING: thresholds.handoff_max_redeliveries is not a valid non-negative integer (got $HANDOFF_MAX_REDELIVERIES) -- using default 3"
         HANDOFF_MAX_REDELIVERIES=3
     fi
@@ -2305,7 +2305,7 @@ if [ -d "$SESSIONS_DIR" ] && [ -d "$REMEMBER_DIR/tmp" ]; then
             # during #402's own review: the previous split of this check
             # only caught the fully-empty shape, and the -gt 0 gate does not
             # tell "confirmed zero" apart from "coerced from garbage").
-            if [ -z "$_remember_stale_mtime" ] || [ "${_remember_stale_mtime/[!0-9]/}" != "$_remember_stale_mtime" ]; then
+            if [ -z "$_remember_stale_mtime" ] || [[ "$_remember_stale_mtime" == *[!0-9]* ]]; then
                 continue
             fi
             # _remember_date +%s -- same call site convention as
@@ -2320,7 +2320,7 @@ if [ -d "$SESSIONS_DIR" ] && [ -d "$REMEMBER_DIR/tmp" ]; then
             # guess in either failure shape, same as the mtime check does.
             _remember_now=""
             _remember_date_into _remember_now +%s
-            if [ -z "$_remember_now" ] || [ "${_remember_now/[!0-9]/}" != "$_remember_now" ]; then
+            if [ -z "$_remember_now" ] || [[ "$_remember_now" == *[!0-9]* ]]; then
                 continue
             fi
             if [ "$_remember_now" -gt 0 ] && [ "$_remember_stale_mtime" -gt 0 ] \
@@ -2361,12 +2361,12 @@ if [ -d "$SESSIONS_DIR" ] && [ -d "$REMEMBER_DIR/tmp" ]; then
             _remember_stale_mtime=$(stat -c %Y "$_remember_stale_hint" 2>/dev/null) \
                 || _remember_stale_mtime=$(stat -f %m "$_remember_stale_hint" 2>/dev/null) \
                 || _remember_stale_mtime=""
-            if [ -z "$_remember_stale_mtime" ] || [ "${_remember_stale_mtime/[!0-9]/}" != "$_remember_stale_mtime" ]; then
+            if [ -z "$_remember_stale_mtime" ] || [[ "$_remember_stale_mtime" == *[!0-9]* ]]; then
                 continue
             fi
             _remember_now=""
             _remember_date_into _remember_now +%s
-            if [ -z "$_remember_now" ] || [ "${_remember_now/[!0-9]/}" != "$_remember_now" ]; then
+            if [ -z "$_remember_now" ] || [[ "$_remember_now" == *[!0-9]* ]]; then
                 continue
             fi
             if [ "$_remember_now" -gt 0 ] && [ "$_remember_stale_mtime" -gt 0 ] \
@@ -2544,7 +2544,7 @@ if [ -n "$_REMEMBER_HOOK_T0" ]; then
     else
         _remember_hook_t1=$(date +%s 2>/dev/null) || _remember_hook_t1=""
     fi
-    if [ -z "$_remember_hook_t1" ] || [ "${_remember_hook_t1/[!0-9]/}" != "$_remember_hook_t1" ]; then
+    if [ -z "$_remember_hook_t1" ] || [[ "$_remember_hook_t1" == *[!0-9]* ]]; then
         _REMEMBER_HOOK_ELAPSED_S=""
     else
         _REMEMBER_HOOK_ELAPSED_S=$(( 10#$_remember_hook_t1 - 10#$_REMEMBER_HOOK_T0 ))

@@ -312,10 +312,8 @@ _remember_cfg_flatten_cache_sources() {
 # to the SECOND -- the exact "silently serve stale content" failure #668
 # names as never permitted -- before this guard existed.
 _remember_cfg_flatten_cache_is_standard_merge() {
-    # The needle sits in a variable: bash 3.2 ends `${x/PAT/}`'s pattern at
-    # a slash even inside quotes.
-    local _cfg_path="${REMEMBER_CONFIG:-}" _cfg_needle=/remember-config-
-    if [ "${_cfg_path/"$_cfg_needle"/}" != "$_cfg_path" ]; then
+    local _cfg_path="${REMEMBER_CONFIG:-}"
+    if [[ "$_cfg_path" == */remember-config-* ]]; then
         return 0
     fi
     return 1
@@ -499,7 +497,7 @@ _remember_cfg_flatten_cache_load() {
             # never inspected.
             if [ "${_line#'#RCFG_EXISTS='}" != "$_line" ]; then
                 _exists_raw="${_line#'#RCFG_EXISTS='}"
-                if [ "${_exists_raw/[!01]/}" != "$_exists_raw" ] || [ -z "$_exists_raw" ]; then
+                if [[ "$_exists_raw" == *[!01]* ]] || [ -z "$_exists_raw" ]; then
                     rm -f "$_f" 2>/dev/null
                     return 1
                 fi

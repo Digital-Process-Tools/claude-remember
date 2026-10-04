@@ -60,10 +60,10 @@ _DIGIT_ARM = re.compile(r"\*\[!0-9\]\*")
 # `case "$VAR" in`, `case $VAR in`, `case "${VAR}" in`.
 _CASE_HEAD = re.compile(r"\bcase\s+\"?\$\{?(\w+)\}?\"?\s+in\b")
 
-# The same guard as a `[ ]` test: "contains a non-digit" written
-# `[ "${X/[!0-9]/}" != "$X" ]` (#898 round 19 removed every shipped `case`) or
-# the earlier `[ "${X#*[!0-9]}" != "$X" ]`. The name is read off the expansion.
-_DIGIT_TEST = re.compile(r"\$\{(\w+)(?:#\*\[!0-9\]|/\[!0-9\]/)\}")
+# The same guard as a test: `[[ "$X" == *[!0-9]* ]]` (#898 round 19 removed
+# every shipped `case`) or the earlier `[ "${X#*[!0-9]}" != "$X" ]`.
+_DIGIT_TEST = re.compile(
+    r"\$\{(\w+)#\*\[!0-9\]\}|\[\[ \"?\$\{?(\w+)\}?\"? == \*\[!0-9\]\* \]\]")
 
 # How far above a digit-rejecting arm the `case` head may sit. The single-line
 # form puts them on the same line; the block form in this repo spans two.
@@ -75,7 +75,7 @@ def _guarded_names(text: str) -> set:
     lines = text.splitlines()
     names = set()
     for i, line in enumerate(lines):
-        names.update(_DIGIT_TEST.findall(line))
+        names.update(n for pair in _DIGIT_TEST.findall(line) for n in pair if n)
         if not _DIGIT_ARM.search(line):
             continue
         for j in range(i, max(-1, i - _CASE_LOOKBACK) - 1, -1):
@@ -192,7 +192,7 @@ def test_the_detector_finds_a_planted_instance():
 
 TEST_FORM_GUARD = (
     'LAST=$(cat "$f")\n'
-    'if [ -z "$LAST" ] || [ "${LAST/[!0-9]/}" != "$LAST" ]; then LAST=0; fi\n'
+    'if [ -z "$LAST" ] || [[ "$LAST" == *[!0-9]* ]]; then LAST=0; fi\n'
 )
 
 

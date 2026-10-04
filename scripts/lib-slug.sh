@@ -368,12 +368,10 @@ session_dir_slug() {
     # locale changed.
     local _high_byte=0 _lc_was_set="${LC_ALL+set}" _lc_prev="${LC_ALL:-}"
     LC_ALL=C
-    # The pattern is held in a variable: bash 3.2 does not expand $'...'
-    # inside a double-quoted ${path/...}, and a quoted pattern would match
-    # literally anyway. `${x/PAT/}` (first match removed), not `${x#*PAT}`:
-    # the latter is quadratic in the string's length in bash.
+    # The bracket is built in a variable, unquoted in the pattern so it stays
+    # a pattern: the same bytes $'\001'-$'\177' the old `case` arm held.
     local _hb_glob="[!"$'\001'"-"$'\177'"]"
-    if [ "${path/$_hb_glob/}" != "$path" ]; then
+    if [[ "$path" == *$_hb_glob* ]]; then
         _high_byte=1
     fi
     if [ -n "$_lc_was_set" ]; then LC_ALL="$_lc_prev"; else unset LC_ALL; fi
@@ -431,7 +429,7 @@ session_dir_slug() {
     # appended verbatim — a NEW wrong directory rather than the old wrong one.
     # Base36 is the whole alphabet a real hash can use, so anything else is not
     # one, and falling back is safer than trusting it.
-    if [ "${_hash/[!0-9a-z]/}" != "$_hash" ]; then
+    if [[ "$_hash" == *[!0-9a-z]* ]]; then
         _hash=""
     fi
 

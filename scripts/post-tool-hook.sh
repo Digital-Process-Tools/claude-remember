@@ -212,10 +212,10 @@ _stdin_json_string() {
     # backslash-escaped: the plugin directory's scanner mis-tracks an
     # escaped quote (#898 round 8). Same patterns, same quoting of $field.
     printf -v dq '\042'
-    [ "${raw/"$dq$field$dq"/}" != "$raw" ] || return 1
+    [[ "$raw" == *"$dq$field$dq"* ]] || return 1
     rest=${raw#*"$dq"$field"$dq"}
     prefix=${rest%%"$dq"*}
-    if [ "${prefix/[!:[:space:]]/}" != "$prefix" ]; then return 1; fi
+    if [[ "$prefix" == *[!:[:space:]]* ]]; then return 1; fi
     value=${rest#*"$dq"}
     value=${value%%"$dq"*}
     # A JSON encoder writes each backslash as `\\` -- a Windows `cwd` from
@@ -248,8 +248,8 @@ printf -v _pt_dq '\042'
 # .claude/remember layout derivation, then the existing failure -- resolved
 # entirely inside resolve-paths.sh, unchanged by this hook.
 REMEMBER_HOOK_CWD=$(_stdin_json_string cwd "$HOOK_STDIN" 2>/dev/null) || REMEMBER_HOOK_CWD=""
-if [ "${REMEMBER_HOOK_CWD/$'\n'/}" != "$REMEMBER_HOOK_CWD" ] \
-    || [ "${REMEMBER_HOOK_CWD/$'\r'/}" != "$REMEMBER_HOOK_CWD" ]; then
+if [[ "$REMEMBER_HOOK_CWD" == *$'\n'* ]] \
+    || [[ "$REMEMBER_HOOK_CWD" == *$'\r'* ]]; then
     REMEMBER_HOOK_CWD=""
 fi
 export REMEMBER_HOOK_CWD
@@ -436,7 +436,7 @@ STDIN_SESSION_ID=$(_stdin_json_string session_id "$HOOK_STDIN" 2>/dev/null) || S
 # ordinary run.
 if [ -z "${STDIN_SESSION_ID#.}" ] || [ -z "${STDIN_SESSION_ID#..}" ] \
     || [ "${STDIN_SESSION_ID#-}" != "$STDIN_SESSION_ID" ] \
-    || [ "${STDIN_SESSION_ID/[!A-Za-z0-9._-]/}" != "$STDIN_SESSION_ID" ]; then
+    || [[ "$STDIN_SESSION_ID" == *[!A-Za-z0-9._-]* ]]; then
     STDIN_SESSION_ID=""
 fi
 
@@ -457,7 +457,7 @@ fi
 # the `[ -f ]` check below, not a character allowlist -- a transcript path
 # legitimately contains slashes and dots.
 STDIN_TRANSCRIPT_PATH=$(_stdin_json_string transcript_path "$HOOK_STDIN" 2>/dev/null) || STDIN_TRANSCRIPT_PATH=""
-if [ "${STDIN_TRANSCRIPT_PATH/$'\r'/}" != "$STDIN_TRANSCRIPT_PATH" ]; then
+if [[ "$STDIN_TRANSCRIPT_PATH" == *$'\r'* ]]; then
     STDIN_TRANSCRIPT_PATH=""
 fi
 if [ -n "$STDIN_TRANSCRIPT_PATH" ] && [ ! -f "$STDIN_TRANSCRIPT_PATH" ]; then
@@ -630,7 +630,7 @@ else
     # `--force` flags cannot be misread as one.
     if [ -z "${SESSION_ID#.}" ] || [ -z "${SESSION_ID#..}" ] \
         || [ "${SESSION_ID#-}" != "$SESSION_ID" ] \
-        || [ "${SESSION_ID/[!A-Za-z0-9._-]/}" != "$SESSION_ID" ]; then
+        || [[ "$SESSION_ID" == *[!A-Za-z0-9._-]* ]]; then
         SESSION_ID=""
     fi
 fi
@@ -673,7 +673,7 @@ if [ -d "$REMEMBER_DIR/tmp/capture-alive.d" ] \
     # it comes from a filename in the transcript dir, and `..` or a slash
     # would escape the store. Real session ids are UUIDs.
     if [ -z "${SESSION_ID#.}" ] || [ -z "${SESSION_ID#..}" ] \
-        || [ "${SESSION_ID/[!A-Za-z0-9._-]/}" != "$SESSION_ID" ]; then
+        || [[ "$SESSION_ID" == *[!A-Za-z0-9._-]* ]]; then
         :
     else
         : > "$REMEMBER_DIR/tmp/capture-alive.d/$SESSION_ID" 2>/dev/null || true
@@ -729,7 +729,7 @@ fi
 # and the code below asks the real source of truth instead of guessing.
 SIDECAR=""
 if [ -z "${SESSION_ID#.}" ] || [ -z "${SESSION_ID#..}" ] \
-    || [ "${SESSION_ID/[!A-Za-z0-9._-]/}" != "$SESSION_ID" ]; then
+    || [[ "$SESSION_ID" == *[!A-Za-z0-9._-]* ]]; then
     :
 else
     SIDECAR="$REMEMBER_DIR/tmp/position.$SESSION_ID"
@@ -740,7 +740,7 @@ SIDECAR_TRUSTED=""
 if [ -n "$SIDECAR" ] && [ -f "$SIDECAR" ]; then
     _SIDECAR_LINE=""
     read -r _SIDECAR_LINE < "$SIDECAR" 2>/dev/null
-    if [ -z "$_SIDECAR_LINE" ] || [ "${_SIDECAR_LINE/[!0-9]/}" != "$_SIDECAR_LINE" ]; then
+    if [ -z "$_SIDECAR_LINE" ] || [[ "$_SIDECAR_LINE" == *[!0-9]* ]]; then
         log "hook" "WARNING: sidecar $SIDECAR held a non-numeric value ($_SIDECAR_LINE) -- disagrees with last-save.json, falling back to read-position"
     else
         # 10# (#332): a leading zero in the sidecar would otherwise be
@@ -822,7 +822,7 @@ if [ -n "$SIDECAR" ] && [ -f "$SIDECAR" ]; then
             else
                 _SESSIONS_SCOPE=""
             fi
-            if [ "${_SESSIONS_SCOPE/"$_pt_dq"$SESSION_ID"$_pt_dq":/}" != "$_SESSIONS_SCOPE" ]; then
+            if [[ "$_SESSIONS_SCOPE" == *"$_pt_dq"$SESSION_ID"$_pt_dq":* ]]; then
                 LAST_LINE=$((10#$_SIDECAR_LINE))
                 SIDECAR_TRUSTED=1
             elif [ "$_LAST_SAVE_STATE" = absent ]; then

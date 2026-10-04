@@ -574,7 +574,7 @@ _ROUND_19_DIVERGENCE = {
             '    if [ -n "$_lc_was_set" ]; then LC_ALL="$_lc_prev"; else unset LC_ALL; fi\n',
             '    LC_ALL=C\n'
             '    local _hb_glob="[!"$\'\\001\'"-"$\'\\177\'"]"\n'
-            '    if [ "${path/$_hb_glob/}" != "$path" ]; then\n'
+            '    if [[ "$path" == *$_hb_glob* ]]; then\n'
             '        _high_byte=1\n'
             '    fi\n'
             '    if [ -n "$_lc_was_set" ]; then LC_ALL="$_lc_prev"; else unset LC_ALL; fi\n',
@@ -622,7 +622,7 @@ _ROUND_19_DIVERGENCE = {
             '    esac\n'
             '\n',
             '\n'
-            '    if [ "${_hash/[!0-9a-z]/}" != "$_hash" ]; then\n'
+            '    if [[ "$_hash" == *[!0-9a-z]* ]]; then\n'
             '        _hash=""\n'
             '    fi\n'
             '\n',

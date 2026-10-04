@@ -135,7 +135,7 @@ CONSOLIDATE_MAX_BYTES=$(config ".thresholds.consolidate_max_bytes" 600000)
 # daily log told an operator their override was never read. Unlike the
 # timeout guard below, 0 is a valid, meaningful value here (#360: disables the
 # cap), so this only rejects empty/non-digit strings, never 0 itself.
-if [ -z "$CONSOLIDATE_MAX_BYTES" ] || [ "${CONSOLIDATE_MAX_BYTES/[!0-9]/}" != "$CONSOLIDATE_MAX_BYTES" ]; then
+if [ -z "$CONSOLIDATE_MAX_BYTES" ] || [[ "$CONSOLIDATE_MAX_BYTES" == *[!0-9]* ]]; then
     log "consolidation" "WARNING: thresholds.consolidate_max_bytes is not a valid non-negative integer (got '$CONSOLIDATE_MAX_BYTES') -- using default 600000"
     CONSOLIDATE_MAX_BYTES=600000
 fi
@@ -147,7 +147,7 @@ CONSOLIDATE_TIMEOUT_SECONDS=$(config ".thresholds.consolidate_timeout_seconds" 1
 # #816: this used to substitute the default silently, so a typo'd config
 # value (e.g. "18O") looked identical to a deliberate 180 -- nothing in the
 # daily log told an operator their override was never read.
-if [ -z "$CONSOLIDATE_TIMEOUT_SECONDS" ] || [ "${CONSOLIDATE_TIMEOUT_SECONDS/[!0-9]/}" != "$CONSOLIDATE_TIMEOUT_SECONDS" ]; then
+if [ -z "$CONSOLIDATE_TIMEOUT_SECONDS" ] || [[ "$CONSOLIDATE_TIMEOUT_SECONDS" == *[!0-9]* ]]; then
     log "consolidation" "WARNING: thresholds.consolidate_timeout_seconds is not a valid non-negative integer (got '$CONSOLIDATE_TIMEOUT_SECONDS') -- using default 180"
     CONSOLIDATE_TIMEOUT_SECONDS=180
 else

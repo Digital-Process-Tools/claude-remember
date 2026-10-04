@@ -292,8 +292,8 @@ _remember_env_cache_load() {
     # already refuses to publish anything else. A cache from a release before
     # these keys existed carries no answer for them and loses to the chain,
     # once, at upgrade.
-    if [ -z "$_cooldown" ] || [ "${_cooldown/[!0-9]/}" != "$_cooldown" ]; then return 1; fi
-    if [ -z "$_delta" ] || [ "${_delta/[!0-9]/}" != "$_delta" ]; then return 1; fi
+    if [ -z "$_cooldown" ] || [[ "$_cooldown" == *[!0-9]* ]]; then return 1; fi
+    if [ -z "$_delta" ] || [[ "$_delta" == *[!0-9]* ]]; then return 1; fi
     # Compared against the SAME identity _remember_env_cache_path just keyed
     # on (CLAUDE_PROJECT_DIR, falling back to REMEMBER_HOOK_CWD, #469) rather
     # than raw CLAUDE_PROJECT_DIR directly -- on Codex (live-confirmed,

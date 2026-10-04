@@ -616,9 +616,12 @@ was "Validation ran out of time". That is the failure the `release` branch exist
   pattern with a leading parenthesis, in the bootstrap code the build inlines into each hook) made
   it list the whole hook under `COMMAND_SCRIPT_NOT_FOLLOWED`, and five earlier triggers
   (claude-directory-publishing `triggers.md` 1, 2, 8, 9, 11) were other `case` shapes. All 121
-  statements across 21 shipped `.sh` files are now if/elif ladders of `[ ]` tests over prefix and
-  suffix expansions -- "contains a non-digit" is `[ "${x#*[!0-9]}" != "$x" ]`, a literal dispatch
-  is `[ "$x" = lit ]`, first matching arm still wins. `check_release_tree.py` FAILs any `case`
+  statements across 21 shipped `.sh` files are now if/elif ladders, first matching arm still
+  wins: a literal is `[ "$x" = lit ]`, an anchored literal prefix or suffix `[ "${x#-}" != "$x" ]`,
+  and a glob ("contains a non-digit") `[[ "$x" == *[!0-9]* ]]` -- the matcher `case` used, so the
+  same answer at the same linear cost. Every parameter-expansion spelling of a glob test was
+  measured quadratic somewhere on a 300 KB hook payload: `${x#*P}` and `${x%%P*}` on a miss (a
+  minute and more, bash 3.2 and 5.3), `${x/P/}` on an early hit in bash 3.2 (66 s). `check_release_tree.py` FAILs any `case`
   keyword at command position in a shipped `.sh` (quoted text and comments excluded), and
   `tests/test_case_rewrite_equivalence_898.py` runs each old shape and its rewrite on the same
   inputs in every bash it finds (macOS `/bin/bash` 3.2 included) under C and a UTF-8 locale. The

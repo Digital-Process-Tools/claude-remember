@@ -139,7 +139,7 @@ ndc_read_gen() {
     fi
     local _ndc_gen
     _ndc_gen=$(cat "$NDC_GEN_FILE" 2>/dev/null)
-    if [ -z "$_ndc_gen" ] || [ "${_ndc_gen/[!0-9]/}" != "$_ndc_gen" ]; then
+    if [ -z "$_ndc_gen" ] || [[ "$_ndc_gen" == *[!0-9]* ]]; then
         echo unreadable
     else
         echo "$_ndc_gen"
@@ -187,7 +187,7 @@ ts_marker_read() {
     fi
     local _val
     _val=$(cat "$_marker" 2>/dev/null)
-    if [ -z "$_val" ] || [ "${_val/[!0-9]/}" != "$_val" ]; then
+    if [ -z "$_val" ] || [[ "$_val" == *[!0-9]* ]]; then
         echo unreadable
     else
         echo "$_val"
@@ -675,7 +675,7 @@ else
     BRANCH=""
     if [ -n "${REMEMBER_BRANCH_CMD:-}" ]; then
         if CMD_BRANCH=$("$REMEMBER_BRANCH_CMD" "$SESSION_ID" 2>/dev/null) && [ -n "$CMD_BRANCH" ]; then
-            if [ "${CMD_BRANCH/$'\n'/}" != "$CMD_BRANCH" ] || [ "${CMD_BRANCH/$'\r'/}" != "$CMD_BRANCH" ]; then
+            if [[ "$CMD_BRANCH" == *$'\n'* ]] || [[ "$CMD_BRANCH" == *$'\r'* ]]; then
                 log "branch" "WARNING: REMEMBER_BRANCH_CMD ($REMEMBER_BRANCH_CMD) printed multi-line (or carriage-return-bearing) output for session $SESSION_ID -- refusing to use it unbounded, falling back to git branch lookup"
             else
                 BRANCH="$CMD_BRANCH"
@@ -704,7 +704,7 @@ EXTRACT_MAX_BYTES=$(config ".thresholds.extract_max_bytes" 300000)
 # as #816/#821's consolidate_timeout_seconds/ndc_timeout_seconds fix, except
 # 0 is never rejected here -- like consolidate_max_bytes (#360), 0 is a
 # valid, meaningful value (disables the cap), not a malformed one.
-if [ -z "$EXTRACT_MAX_BYTES" ] || [ "${EXTRACT_MAX_BYTES/[!0-9]/}" != "$EXTRACT_MAX_BYTES" ]; then
+if [ -z "$EXTRACT_MAX_BYTES" ] || [[ "$EXTRACT_MAX_BYTES" == *[!0-9]* ]]; then
     log "prompt" "WARNING: thresholds.extract_max_bytes is not a valid non-negative integer (got '$EXTRACT_MAX_BYTES') -- using default 300000"
     EXTRACT_MAX_BYTES=300000
 fi
@@ -1163,7 +1163,7 @@ if [ "$RUN_NDC" = true ]; then
             # #816: same fix shape as run-consolidation.sh's sibling guard --
             # a typo'd config value used to be swapped for the default with
             # no trace of what was discarded.
-            if [ -z "$NDC_TIMEOUT_SECONDS" ] || [ "${NDC_TIMEOUT_SECONDS/[!0-9]/}" != "$NDC_TIMEOUT_SECONDS" ]; then
+            if [ -z "$NDC_TIMEOUT_SECONDS" ] || [[ "$NDC_TIMEOUT_SECONDS" == *[!0-9]* ]]; then
                 log "ndc" "WARNING: thresholds.ndc_timeout_seconds is not a valid non-negative integer (got '$NDC_TIMEOUT_SECONDS') -- using default 180"
                 NDC_TIMEOUT_SECONDS=180
             else
@@ -1728,12 +1728,12 @@ for _remember_auto_log in "${_remember_auto_dir}/logs/autonomous"/*.log; do
     # safe direction, same as session-start-hook.sh's identical guard: skip
     # this file rather than coerce garbage into a comparable age and risk
     # reclaiming something this read could not actually confirm is old.
-    if [ -z "$_remember_auto_mtime" ] || [ "${_remember_auto_mtime/[!0-9]/}" != "$_remember_auto_mtime" ]; then
+    if [ -z "$_remember_auto_mtime" ] || [[ "$_remember_auto_mtime" == *[!0-9]* ]]; then
         log "housekeeping" "WARNING: could not read mtime of $_remember_auto_log -- leaving it in place"
         continue
     fi
     _remember_auto_now=$(_remember_date +%s)
-    if [ -z "$_remember_auto_now" ] || [ "${_remember_auto_now/[!0-9]/}" != "$_remember_auto_now" ]; then
+    if [ -z "$_remember_auto_now" ] || [[ "$_remember_auto_now" == *[!0-9]* ]]; then
         log "housekeeping" "WARNING: could not read the clock -- skipping the retention sweep for $_remember_auto_log"
         continue
     fi

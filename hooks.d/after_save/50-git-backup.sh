@@ -275,7 +275,7 @@ fi
 # destination ref OTHER than the usual one, one this value also controls. A
 # colon is rejected for the identical reason the remote-name check above
 # rejects one.
-if [ "${GIT_BACKUP_BRANCH#-}" != "$GIT_BACKUP_BRANCH" ] || [ "${GIT_BACKUP_BRANCH/:/}" != "$GIT_BACKUP_BRANCH" ]; then
+if [ "${GIT_BACKUP_BRANCH#-}" != "$GIT_BACKUP_BRANCH" ] || [[ "$GIT_BACKUP_BRANCH" == *:* ]]; then
     report_error "git-backup" "WARNING: configured git_backup.branch '$GIT_BACKUP_BRANCH' starts with '-' or contains ':' -- refusing to use it as a git push operand (a colon makes it a src:dst refspec, not a branch name)."
     GIT_BACKUP_BRANCH=""
 fi

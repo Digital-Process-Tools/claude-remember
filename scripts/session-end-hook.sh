@@ -170,10 +170,10 @@ _stdin_json_string() {
     # backslash-escaped: the plugin directory's scanner mis-tracks an
     # escaped quote (#898 round 8). Same patterns, same quoting of $field.
     printf -v dq '\042'
-    [ "${raw/"$dq$field$dq"/}" != "$raw" ] || return 1
+    [[ "$raw" == *"$dq$field$dq"* ]] || return 1
     rest=${raw#*"$dq"$field"$dq"}
     prefix=${rest%%"$dq"*}
-    if [ "${prefix/[!:[:space:]]/}" != "$prefix" ]; then return 1; fi
+    if [[ "$prefix" == *[!:[:space:]]* ]]; then return 1; fi
     value=${rest#*"$dq"}
     value=${value%%"$dq"*}
     # A JSON encoder writes each backslash as `\\` -- a Windows `cwd` from
@@ -198,7 +198,7 @@ STDIN_SESSION_ID=$(_stdin_json_string session_id "$HOOK_STDIN" 2>/dev/null) || S
 # not advanced, log line reads like an ordinary run.
 if [ -z "${STDIN_SESSION_ID#.}" ] || [ -z "${STDIN_SESSION_ID#..}" ] \
     || [ "${STDIN_SESSION_ID#-}" != "$STDIN_SESSION_ID" ] \
-    || [ "${STDIN_SESSION_ID/[!A-Za-z0-9._-]/}" != "$STDIN_SESSION_ID" ]; then
+    || [[ "$STDIN_SESSION_ID" == *[!A-Za-z0-9._-]* ]]; then
     STDIN_SESSION_ID=""
 fi
 
@@ -206,7 +206,7 @@ SESSION_END_REASON=$(_stdin_json_string reason "$HOOK_STDIN" 2>/dev/null) || SES
 # Not narrowed to a known enum on purpose (see STDIN comment above) — only
 # sanitised so an unexpected payload shape cannot put an arbitrary byte
 # sequence into a log line.
-if [ -z "$SESSION_END_REASON" ] || [ "${SESSION_END_REASON/[!A-Za-z0-9_]/}" != "$SESSION_END_REASON" ]; then
+if [ -z "$SESSION_END_REASON" ] || [[ "$SESSION_END_REASON" == *[!A-Za-z0-9_]* ]]; then
     SESSION_END_REASON="unknown"
 fi
 
@@ -223,8 +223,8 @@ fi
 # preserves one.) Whether the value names an openable file is decided on the
 # Python side, which falls back to derivation when it does not.
 REMEMBER_TRANSCRIPT_PATH=$(_stdin_json_string transcript_path "$HOOK_STDIN" 2>/dev/null) || REMEMBER_TRANSCRIPT_PATH=""
-if [ "${REMEMBER_TRANSCRIPT_PATH/$'\n'/}" != "$REMEMBER_TRANSCRIPT_PATH" ] \
-    || [ "${REMEMBER_TRANSCRIPT_PATH/$'\r'/}" != "$REMEMBER_TRANSCRIPT_PATH" ]; then
+if [[ "$REMEMBER_TRANSCRIPT_PATH" == *$'\n'* ]] \
+    || [[ "$REMEMBER_TRANSCRIPT_PATH" == *$'\r'* ]]; then
     REMEMBER_TRANSCRIPT_PATH=""
 fi
 export REMEMBER_TRANSCRIPT_PATH
@@ -245,8 +245,8 @@ export REMEMBER_TRANSCRIPT_PATH
 # actually names a directory is decided in resolve-paths.sh, which falls
 # back to the existing derivation when it does not.
 REMEMBER_HOOK_CWD=$(_stdin_json_string cwd "$HOOK_STDIN" 2>/dev/null) || REMEMBER_HOOK_CWD=""
-if [ "${REMEMBER_HOOK_CWD/$'\n'/}" != "$REMEMBER_HOOK_CWD" ] \
-    || [ "${REMEMBER_HOOK_CWD/$'\r'/}" != "$REMEMBER_HOOK_CWD" ]; then
+if [[ "$REMEMBER_HOOK_CWD" == *$'\n'* ]] \
+    || [[ "$REMEMBER_HOOK_CWD" == *$'\r'* ]]; then
     REMEMBER_HOOK_CWD=""
 fi
 export REMEMBER_HOOK_CWD

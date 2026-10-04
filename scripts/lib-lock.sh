@@ -134,7 +134,7 @@ _lock_try_steal() {
             # pattern itself, which -e rejects.
             [ -e "$_abandoned" ] || continue
             _owner="${_abandoned##*.}"
-            if [ "${_owner/[!0-9]/}" != "$_owner" ]; then
+            if [[ "$_owner" == *[!0-9]* ]]; then
                 continue
             fi
             kill -0 "$_owner" 2>/dev/null && continue
@@ -154,7 +154,7 @@ _lock_try_steal() {
     # No pid file yet: the holder created the directory microseconds ago and has
     # not written it. That is a live lock mid-acquisition, not a stale one.
     [ -z "$_pid" ] && return 1
-    if [ "${_pid/[!0-9]/}" != "$_pid" ]; then
+    if [[ "$_pid" == *[!0-9]* ]]; then
         return 1
     fi
     kill -0 "$_pid" 2>/dev/null && return 1
@@ -427,7 +427,7 @@ fi
 _lock_timing_us_to_ms() {
     local _r="$1" _s _f
     # The separator is locale-dependent — de_DE gives `1753980000,123456`.
-    if [ "${_r/[.,]/}" != "$_r" ]; then
+    if [[ "$_r" == *[.,]* ]]; then
         _s="${_r%%[.,]*}"; _f="${_r#*[.,]}"
     else
         _s="$_r"; _f="000000"
@@ -435,7 +435,7 @@ _lock_timing_us_to_ms() {
     if [ -z "$_s" ] || [ "${_s#*[!0-9]}" != "$_s" ]; then
         _LOCK_TIMING_NOW=0; return 0
     fi
-    if [ "${_f/[!0-9]/}" != "$_f" ]; then
+    if [[ "$_f" == *[!0-9]* ]]; then
         _f="000000"
     fi
     # Truncation, never rounding: a hold must not come back longer than it was.

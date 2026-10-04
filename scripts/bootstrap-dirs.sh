@@ -639,7 +639,7 @@ elif [ "${BASH_VERSINFO[0]:-0}" -eq 4 ] 2>/dev/null && [ "${BASH_VERSINFO[1]:-0}
 fi
 if [ -d "$REMEMBER_DIR/logs" ]; then
     _remember_bd_keep_fd2=""
-    if [ "${-/x/}" != "$-" ]; then
+    if [[ "$-" == *x* ]]; then
         if [ "$_remember_bd_has_xtracefd" = "0" ]; then
             _remember_bd_keep_fd2="an xtrace is running (this bash predates BASH_XTRACEFD, added in 4.1, so xtrace stays on fd 2 regardless of the variable)"
         elif [ "${BASH_XTRACEFD:-2}" = "2" ]; then

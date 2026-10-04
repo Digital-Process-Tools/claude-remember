@@ -84,7 +84,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # the session-keyed hint file.
 _WH_SESSION_ID="${CLAUDE_CODE_SESSION_ID:-}"
 if [ -z "${_WH_SESSION_ID#.}" ] || [ -z "${_WH_SESSION_ID#..}" ] \
-    || [ "${_WH_SESSION_ID/[!A-Za-z0-9._-]/}" != "$_WH_SESSION_ID" ]; then
+    || [[ "$_WH_SESSION_ID" == *[!A-Za-z0-9._-]* ]]; then
     _WH_SESSION_ID=""
 fi
 
@@ -207,7 +207,7 @@ _wh_shape_ok() {
         return 1
     fi
     _variant="${_rest%.md}"
-    if [ -z "$_variant" ] || [ "${_variant/[!A-Za-z0-9._-]/}" != "$_variant" ]; then
+    if [ -z "$_variant" ] || [[ "$_variant" == *[!A-Za-z0-9._-]* ]]; then
         return 1
     fi
     return 0
