@@ -697,15 +697,7 @@ def _drop_env_hint(detail: str) -> str:
     RuntimeError, which `save-session.sh` surfaces into `hook-errors.log` --
     the place an operator is already looking (#694).
     """
-    lowered = detail.lower()
-    if not any(marker in lowered for marker in _CREDENTIAL_FAILURE_MARKERS):
-        return ""
-    return (
-        " -- the nested CLI inherits this environment as-is, and a credential "
-        "variable set there for some other tool can out-rank your own login; "
-        "list its name (or a glob such as PREFIX_*) in `haiku.drop_env` in "
-        "config.json to keep it out of the summarizer (#703, #898)"
-    )
+    ...
 
 
 # #898, round 4: _warn_if_legacy_recovery_token_configured() used to live
@@ -808,33 +800,7 @@ def _failure_haystack(stdout: str, stderr: str) -> str:
     the caller reports that case rather than acting on it: see
     `_marker_missed_by_the_scan`.
     """
-    stdout = stdout or ""
-    stderr = stderr or ""
-
-    try:
-        payload = json.loads(stdout)
-    except ValueError:
-        return f"{stdout}\n{stderr}".lower()
-
-    if isinstance(payload, list):
-        payload = payload[-1] if payload else None
-
-    authored: list[str] = []
-    if isinstance(payload, dict):
-        for key in _SCANNED_FAILURE_FIELDS:
-            value = payload.get(key)
-            if isinstance(value, dict):
-                value = value.get("message")
-            if isinstance(value, str) and value.strip():
-                authored.append(value)
-        for key in _SCANNED_FAILURE_LIST_FIELDS:
-            values = payload.get(key)
-            if isinstance(values, list):
-                authored.extend(e for e in values if isinstance(e, str))
-
-    if not authored:
-        return f"{stdout}\n{stderr}".lower()
-    return "\n".join(authored + [stderr]).lower()
+    ...
 
 
 # The tokens that decide the un-isolated retry. Finding one of these outside the
@@ -855,27 +821,7 @@ def _marker_missed_by_the_scan(stdout: str, haystack: str) -> tuple[str, str] | 
     A token already present in ``haystack`` was scanned, so nothing was missed;
     that also covers the raw-scan fallback, where the haystack is everything.
     """
-    try:
-        payload = json.loads(stdout or "")
-    except ValueError:
-        return None
-    if isinstance(payload, list):
-        payload = payload[-1] if payload else None
-    if not isinstance(payload, dict):
-        return None
-
-    skip = set(_SCANNED_FAILURE_FIELDS) | set(_SCANNED_FAILURE_LIST_FIELDS)
-    for field, value in payload.items():
-        if field in skip:
-            continue
-        try:
-            text = json.dumps(value, default=str).lower()
-        except (TypeError, ValueError):
-            text = str(value).lower()
-        for token in _DECIDING_TOKENS:
-            if token in text and token not in haystack:
-                return token, field
-    return None
+    ...
 
 
 def _isolation_may_be_the_cause(stdout: str, stderr: str) -> bool:
@@ -885,35 +831,7 @@ def _isolation_may_be_the_cause(stdout: str, stderr: str) -> bool:
     double a spend that already happened and hide the cause — the #129/#190
     shape, where a real failure was reported as costing nothing.
     """
-    haystack = _failure_haystack(stdout, stderr)
-    if "unknown option" in haystack:
-        # Only ours. An unknown option naming some other flag says the CLI
-        # disagrees about something we did not just add, and dropping this one
-        # would not fix it.
-        return _HOOK_ISOLATION_FLAG in haystack
-    if any(marker in haystack for marker in _AUTH_FAILURE_MARKERS):
-        return True
-
-    # Three states, not two. "No marker in the fields we read" and "the fields
-    # we read are the wrong ones" are different answers, and only the first is
-    # silence. The verdict below is unchanged either way: widening the scan on
-    # this branch would hand every non-auth failure back to the conversation,
-    # which is exactly what #318 closed. So this says so and declines.
-    missed = _marker_missed_by_the_scan(stdout, haystack)
-    if missed:
-        token, field = missed
-        _warn(
-            f"WARNING: this failure carries {token!r} in the terminal record's "
-            f"{field!r} field, which the marker scan does not read. It reads "
-            f"{', '.join(repr(f) for f in _SCANNED_FAILURE_FIELDS)}, the "
-            f"{_SCANNED_FAILURE_LIST_FIELDS[0]!r} list, and stderr (#318). NOT "
-            "retrying without hook isolation on the strength of an unrecognised "
-            "field -- that decision may not be reachable from arbitrary content "
-            "(#202). If this is a genuine auth failure, capture is failing "
-            f"permanently and the fix is to add {field!r} to the scanned set: "
-            "please file it against #320."
-        )
-    return False
+    ...
 
 
 def _build_cmd(tools: list[str] | None, isolate_hooks: bool) -> list[str]:
@@ -937,25 +855,7 @@ def _build_cmd(tools: list[str] | None, isolate_hooks: bool) -> list[str]:
     all. ``--allowedTools`` is kept alongside it, unchanged, to pre-approve
     within whatever set ``--tools`` names, when a caller does ask for tools.
     """
-    allowed = tools or []
-    cmd = [
-        _resolve_claude_bin(),
-        "-p",
-        "--output-format", "json",
-        "--no-session-persistence",
-        "--exclude-dynamic-system-prompt-sections",
-        "--model", _resolve_model(),
-        "--max-turns", _resolve_max_turns(),
-        "--tools", ",".join(allowed),
-        "--allowedTools", ",".join(allowed),
-        # Sandbox MCP: no servers + strict, so the nested session inherits none (#94)
-        "--mcp-config", '{"mcpServers":{}}',
-        "--strict-mcp-config",
-    ]
-    if isolate_hooks:
-        # Sandbox settings: no sources, so the nested session inherits no hooks (#202)
-        cmd += [_HOOK_ISOLATION_FLAG, ""]
-    return cmd
+    ...
 
 
 @contextlib.contextmanager
@@ -972,11 +872,7 @@ def _isolated_summarizer_cwd():
     -- could read any of that. An empty directory, created and torn down
     around exactly one call, has nothing project-specific in it either way.
     """
-    d = tempfile.mkdtemp(prefix="remember-summarizer-cwd-")
-    try:
-        yield d
-    finally:
-        shutil.rmtree(d, ignore_errors=True)
+    ...
 
 
 # Minimal environment for the nested `codex exec` PROCESS ITSELF (#724,
@@ -1069,12 +965,7 @@ def _codex_child_env() -> dict[str, str]:
     passed through, because a command the model runs inside Codex's
     read-only sandbox can read the child's environment directly.
     """
-    child = {
-        k: v for k, v in os.environ.items()
-        if k.upper() in _CODEX_CHILD_ENV_ALLOW_UPPER
-    }
-    child["REMEMBER_NESTED_SUMMARIZER"] = "1"
-    return child
+    ...
 
 
 def _build_codex_cmd(output_file: str, cwd: str) -> list[str]:
@@ -1147,18 +1038,7 @@ def _build_codex_cmd(output_file: str, cwd: str) -> list[str]:
     ``-``: read the prompt from stdin, not argv (mirrors the Claude path's
     E2BIG concern -- see ``call_haiku``'s docstring).
     """
-    return [
-        _resolve_codex_bin(),
-        "exec",
-        "--sandbox", "read-only",
-        "--skip-git-repo-check",
-        "--ephemeral",
-        "--ignore-user-config",
-        "-c", "shell_environment_policy.inherit=none",
-        "-C", cwd,
-        "-o", output_file,
-        "-",
-    ]
+    ...
 
 
 def _call_codex(prompt: str, timeout: int = 120) -> HaikuResult:
@@ -1176,100 +1056,7 @@ def _call_codex(prompt: str, timeout: int = 120) -> HaikuResult:
     via the Claude CLI (only when REMEMBER_SUMMARIZER_FALLBACK=claude was
     set, and only for the ONE call that failed).
     """
-    try:
-        slot = spawn_guard.claim(timeout=timeout)
-    except spawn_guard.SummarizerSpawnDeclined as declined:
-        _warn(f"WARNING: {declined}")
-        raise
-    if slot.degraded:
-        _warn(
-            "WARNING: the summarizer spawn guard could not use "
-            f"{spawn_guard.record_dir()} ({slot.degraded}); this spawn is "
-            "UNBOUNDED. Saves keep working -- an unusable runtime directory "
-            "must not become a permanent save outage (#204) -- but nothing "
-            "is counting summarizers until it is writable again."
-        )
-
-    try:
-        # The -o output file is created INSIDE the isolated cwd (dir=), not
-        # the shared tempdir (#724): a file living in the shared tempdir
-        # would be exactly the kind of concurrent-save artefact
-        # _isolated_summarizer_cwd exists to keep away from a command this
-        # sandbox still lets run. It is read back before the `with` block
-        # exits, since _isolated_summarizer_cwd's own cleanup removes the
-        # directory (and everything in it, including this file) the moment
-        # the block closes.
-        with _isolated_summarizer_cwd() as summarizer_cwd:
-            fd, out_path = tempfile.mkstemp(
-                prefix="remember-codex-out-", suffix=".txt", dir=summarizer_cwd
-            )
-            os.close(fd)
-            try:
-                result = subprocess.run(
-                    _build_codex_cmd(out_path, summarizer_cwd),
-                    input=prompt,
-                    capture_output=True,
-                    text=True,
-                    # codex emits UTF-8; same rationale as the Claude path (#91).
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=timeout,
-                    env=_codex_child_env(),
-                    cwd=summarizer_cwd,
-                )
-            except FileNotFoundError as missing:
-                raise RuntimeError(f"codex CLI not found: {missing}") from missing
-            except subprocess.TimeoutExpired as timed_out:
-                # NOT _log_failed_spend: that helper is written for the Anthropic
-                # billing path (it hunts timed_out.stdout for Claude's
-                # `--output-format json` usage block and warns "tokens already
-                # spent are unknown"), and reusing it here would tell the operator
-                # an Anthropic cost was left unaccounted when this call was never
-                # billed to Anthropic in the first place -- self-contradicting the
-                # very reason this route exists. codex's own token/cost figures
-                # are a different provider's accounting and are not tracked here
-                # (see the HaikuResult construction below).
-                _warn(
-                    f"WARNING: codex timed out after {timeout}s; codex's own "
-                    "usage/cost for this call (a different provider's figures, "
-                    "not tracked here) is unknown"
-                )
-                raise RuntimeError(f"codex timed out after {timeout}s") from timed_out
-
-            if result.returncode != 0:
-                raise RuntimeError(
-                    f"codex exited {result.returncode}: "
-                    f"{_failure_detail(result.stdout, result.stderr)}"
-                )
-
-            try:
-                with open(out_path, encoding="utf-8", errors="replace") as f:
-                    text = f.read()
-            except OSError as unreadable:
-                raise RuntimeError(
-                    f"codex exited 0 but its output file could not be read: {unreadable}"
-                ) from unreadable
-    finally:
-        slot.release()
-
-    if not text.strip():
-        raise RuntimeError(
-            "codex exited 0 but wrote no final message (-o file was empty)"
-        )
-
-    model_skipped = text.strip().upper().startswith("SKIP")
-    rejected = not model_skipped and (_is_non_summary(text) or _is_cli_notice(text))
-    return HaikuResult(
-        text=text,
-        # Not billed to Anthropic -- that is the whole point of this route --
-        # and codex's own token/cost accounting is a different provider's
-        # figures, not tracked here. Zero, not "unknown": nothing on this
-        # call touched the API these numbers price.
-        tokens=TokenUsage(),
-        is_skip=model_skipped or rejected,
-        is_rejected=rejected,
-        provider="codex",
-    )
+    ...
 
 
 def call_haiku(
@@ -1303,160 +1090,7 @@ def call_haiku(
         RuntimeError: If the subprocess times out or exits with a non-zero
             return code, or if the JSON response cannot be parsed.
     """
-    provider = _choose_summarizer_provider()
-    if provider == "codex":
-        try:
-            return _call_codex(prompt, timeout=timeout)
-        except spawn_guard.SummarizerSpawnDeclined:
-            # A decline is "skip this span, try again later" (#204), not
-            # "this route is unavailable" -- never reinterpreted as a
-            # fallback trigger, which would just claim a second slot for the
-            # same span under a different provider.
-            raise
-        except RuntimeError as codex_error:
-            fallback = _resolve_summarizer_fallback()
-            if fallback != "claude":
-                raise RuntimeError(
-                    f"could not summarize: {codex_error} (host-native "
-                    "summarizer unavailable, and no fallback is configured "
-                    "-- set REMEMBER_SUMMARIZER_FALLBACK=claude to opt into "
-                    "the Claude CLI as a fallback, or REMEMBER_SUMMARIZER="
-                    "claude to always use it)"
-                ) from codex_error
-            _warn(
-                f"WARNING: codex summarization failed ({codex_error}); "
-                "falling back to claude -p because "
-                "REMEMBER_SUMMARIZER_FALLBACK=claude is set. This bills "
-                "Anthropic for what was meant to summarize on-host -- the "
-                "same complaint #460 was filed over, now opted into rather "
-                "than unconditional."
-            )
-            # Falls through to the claude -p path below.
-
-    # Prompt goes on STDIN, not argv: a session extract can exceed Linux's
-    # MAX_ARG_STRLEN (128KB per single argument), which raises E2BIG ("Argument
-    # list too long") at exec time and silently kills saves of long sessions.
-    # `claude -p` with no positional prompt reads the prompt from stdin.
-    child = _child_env()
-
-    # Bound the spawn before spawning (#204). Every defence above this line
-    # depends on a signal reaching the child — an env marker a host can redact,
-    # a CLI flag a CLI can reject — and when both failed, nothing limited how
-    # many summarizers came into being. This does, from the parent side, through
-    # the filesystem. Declining RAISES rather than returning a lesser result: a
-    # cap that fires is a state the operator has to be able to see.
-    try:
-        slot = spawn_guard.claim(timeout=timeout)
-    except spawn_guard.SummarizerSpawnDeclined as declined:
-        _warn(f"WARNING: {declined}")
-        raise
-    if slot.degraded:
-        _warn(
-            "WARNING: the summarizer spawn guard could not use "
-            f"{spawn_guard.record_dir()} ({slot.degraded}); this spawn is "
-            "UNBOUNDED. Saves keep working -- an unusable runtime directory must "
-            "not become a permanent save outage (#204) -- but nothing is "
-            "counting summarizers until it is writable again."
-        )
-
-    def _run(isolate_hooks: bool):
-        try:
-            with _isolated_summarizer_cwd() as summarizer_cwd:
-                return subprocess.run(
-                    _build_cmd(tools, isolate_hooks),
-                    input=prompt,
-                    capture_output=True,
-                    text=True,
-                    # claude emits UTF-8; without this, text=True decodes with the
-                    # locale codec (cp1252 on Windows) → mojibake / UnicodeDecodeError (#91).
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=timeout,
-                    env=child,
-                    cwd=summarizer_cwd,
-                )
-        except subprocess.TimeoutExpired as timed_out:
-            # A client-side timeout aborts a call the API has already been
-            # billing. Whatever partial output arrived is the only evidence of
-            # what it cost.
-            _log_failed_spend(f"timed out after {timeout}s", timed_out.stdout)
-            raise RuntimeError(f"claude timed out after {timeout}s")
-
-    # One claimed slot covers the retry below as well: it is the same logical
-    # summarizer, and the first attempt died resolving arguments or credentials
-    # without reaching the API.
-    try:
-        result = _run(isolate_hooks=True)
-
-        if result.returncode != 0 and _isolation_may_be_the_cause(
-            result.stdout, result.stderr
-        ):
-            # Nothing was billed — the call died resolving arguments or
-            # credentials — so this retry is free. Say so where an operator will
-            # read it: the nested call is now running with the user's hooks live,
-            # which is the exact condition #202 is about, and the only thing
-            # still standing between a blocked prompt and the memory record is
-            # the echo guard in consolidate.py.
-            #
-            # #870 (self-review finding): _isolation_may_be_the_cause() returns
-            # True down two unrelated paths -- an "unknown option" naming this
-            # flag, or ANY auth marker, with no further qualification. The
-            # warning used to always say "this CLI rejected the flag" even on
-            # the pure-auth path, where no such rejection ever happened -- a
-            # false claim on the very first attempt, independent of whether
-            # the retry below ever triggers the second (#870) correction.
-            _isolation_haystack = _failure_haystack(result.stdout, result.stderr)
-            if "unknown option" in _isolation_haystack:
-                _warn(
-                    f"WARNING: this CLI rejected {_HOOK_ISOLATION_FLAG} "
-                    f"({_failure_detail(result.stdout, result.stderr)}); retrying "
-                    "WITHOUT hook isolation so saves keep working. The nested call "
-                    "will run with your hooks registered -- a hook that blocks it "
-                    "returns its block message as if it were the model's reply "
-                    "(#202)."
-                )
-            else:
-                _warn(
-                    f"WARNING: this CLI failed authentication "
-                    f"({_failure_detail(result.stdout, result.stderr)}); retrying "
-                    "WITHOUT hook isolation in case the isolated run's own "
-                    "environment is simply missing a credential the normal one "
-                    "has. The nested call will run with your hooks registered -- "
-                    "a hook that blocks it returns its block message as if it "
-                    "were the model's reply (#202)."
-                )
-            result = _run(isolate_hooks=False)
-            if result.returncode != 0 and any(
-                marker in _failure_haystack(result.stdout, result.stderr)
-                for marker in _AUTH_FAILURE_MARKERS
-            ):
-                # #870: the warning above blames the rejected flag, but an
-                # un-isolated retry failing with the SAME auth marker proves
-                # isolation was never the cause -- the CLI's own saved login
-                # is the thing that is dead. Without this, every save keeps
-                # spawning a second nested session with the user's hooks
-                # live for no benefit, and nothing ever points at the fix.
-                _warn(
-                    "WARNING: the un-isolated retry failed with the same "
-                    f"authentication error ({_failure_detail(result.stdout, result.stderr)}) "
-                    "-- hook isolation was not the cause. The CLI's own saved "
-                    "login has expired; refresh it (run `claude setup-token`, "
-                    "or log in again in your coding agent's own CLI). This "
-                    "plugin reads no credential of its own any more -- there "
-                    "is no setting here to configure (#129/#131/#860)."
-                )
-    finally:
-        slot.release()
-
-    if result.returncode != 0:
-        _log_failed_spend(f"exited {result.returncode}", result.stdout)
-        detail = _failure_detail(result.stdout, result.stderr)
-        raise RuntimeError(
-            f"claude exited {result.returncode}: {detail}"
-            f"{_drop_env_hint(detail)}"
-        )
-
-    return _parse_response(result.stdout)
+    ...
 
 
 # Reject-gate: conversational refusals / clarifications must NEVER reach the
@@ -1483,20 +1117,12 @@ def _resolve_reject_pattern() -> "re.Pattern[str] | None":
     case-insensitive regex. An invalid custom regex falls back to the default
     rather than crashing the backgrounded consolidation run.
     """
-    raw = os.environ.get("REMEMBER_REJECT_PATTERN", "").strip()
-    if raw.lower() == "none":
-        return None
-    pattern = raw if raw else DEFAULT_REJECT_PATTERN
-    try:
-        return re.compile(pattern, re.I)
-    except re.error:
-        return re.compile(DEFAULT_REJECT_PATTERN, re.I)
+    ...
 
 
 def _is_non_summary(text: str) -> bool:
     """True if the output looks like a refusal/clarification, not a summary."""
-    pattern = _resolve_reject_pattern()
-    return bool(pattern.match(text or "")) if pattern else False
+    ...
 
 
 # The CLI's own voice, arriving where the model's reply is expected (#202).
@@ -1514,7 +1140,7 @@ _CLI_NOTICE = re.compile(r"^\s*\w+ operation blocked by hook:", re.I)
 
 def _is_cli_notice(text: str) -> bool:
     """True if this is the CLI talking about the call, not a reply to it."""
-    return bool(_CLI_NOTICE.match(text or ""))
+    ...
 
 
 def _parse_response(raw: str) -> HaikuResult:
@@ -1529,46 +1155,7 @@ def _parse_response(raw: str) -> HaikuResult:
     Raises:
         RuntimeError: If the raw string is not valid JSON.
     """
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise RuntimeError(f"invalid JSON from claude: {e}")
-
-    # Claude CLI v2.1.86+ returns a list of message objects instead of a
-    # dict with a "result" key.  Normalize both formats.
-    if isinstance(data, list):
-        # Find the last assistant message with text content
-        text = ""
-        for msg in reversed(data):
-            if msg.get("type") == "result":
-                text = msg.get("result", "") or ""
-                break
-            content = msg.get("content", "")
-            if isinstance(content, str) and content.strip():
-                text = content
-                break
-            if isinstance(content, list):
-                parts = [
-                    b.get("text", "")
-                    for b in content
-                    if isinstance(b, dict) and b.get("type") == "text"
-                ]
-                if parts:
-                    text = "\n".join(parts)
-                    break
-        tokens = _extract_tokens(data[-1] if data else {})
-    else:
-        text = data.get("result") or ""
-        tokens = _extract_tokens(data)
-
-    # Drop SKIP (model found nothing worth saving) AND refusals/clarifications
-    # (the reject-gate) so neither is ever written to the memory layer.
-    model_skipped = text.strip().upper().startswith("SKIP")
-    rejected = not model_skipped and (_is_non_summary(text) or _is_cli_notice(text))
-
-    return HaikuResult(text=text, tokens=tokens,
-                       is_skip=model_skipped or rejected, is_rejected=rejected,
-                       provider="claude")
+    ...
 
 
 def _extract_tokens(data: dict) -> TokenUsage:
@@ -1584,20 +1171,4 @@ def _extract_tokens(data: dict) -> TokenUsage:
     Returns:
         TokenUsage with input, output, cache counts and estimated cost.
     """
-    usage = data.get("usage", {})
-    input_tokens = usage.get("input_tokens", 0) or data.get("input_tokens", 0)
-    output_tokens = usage.get("output_tokens", 0) or data.get("output_tokens", 0)
-    cache_tokens = usage.get("cache_read_input_tokens", 0) or data.get("cache_read_input_tokens", 0)
-
-    cost = data.get("total_cost_usd") or (
-        (input_tokens - cache_tokens) * HAIKU_INPUT_PRICE
-        + output_tokens * HAIKU_OUTPUT_PRICE
-        + cache_tokens * HAIKU_CACHE_PRICE
-    )
-
-    return TokenUsage(
-        input=input_tokens,
-        output=output_tokens,
-        cache=cache_tokens,
-        cost_usd=cost,
-    )
+    ...
