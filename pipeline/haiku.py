@@ -213,6 +213,16 @@ _BUNDLED_CONFIG = os.path.join(
 )
 _SESSION_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 def _configured_strip_session_env() -> tuple[str, ...]:
+    return _configured_env_names(
+        "strip_session_env",
+        "the summarizer inherits the parent session's own variables, which #95 removes",
+    )
+def _configured_codex_env_allow() -> tuple[str, ...]:
+    return _configured_env_names(
+        "codex_env_allow",
+        "the Codex summarizer gets no environment at all and will likely fail to start",
+    )
+def _configured_env_names(setting: str, consequence: str) -> tuple[str, ...]:
     for path in [*_config_candidates(), _BUNDLED_CONFIG]:
         try:
             with open(path, encoding="utf-8") as f:
@@ -222,12 +232,12 @@ def _configured_strip_session_env() -> tuple[str, ...]:
         if not isinstance(cfg, dict):
             continue
         haiku_cfg = cfg.get("haiku")
-        if not isinstance(haiku_cfg, dict) or "strip_session_env" not in haiku_cfg:
+        if not isinstance(haiku_cfg, dict) or setting not in haiku_cfg:
             continue
-        value = haiku_cfg["strip_session_env"]
+        value = haiku_cfg[setting]
         if not isinstance(value, list):
             _warn(
-                f"WARNING: ignoring haiku.strip_session_env in {path} -- a "
+                f"WARNING: ignoring haiku.{setting} in {path} -- a "
                 f"{type(value).__name__} value, not a list of variable names; "
                 "the next config layer's list applies instead"
             )
@@ -242,17 +252,16 @@ def _configured_strip_session_env() -> tuple[str, ...]:
             else:
                 shape = f"a {type(entry).__name__} value"
             _warn(
-                f"WARNING: ignoring entry {index} of haiku.strip_session_env in "
+                f"WARNING: ignoring entry {index} of haiku.{setting} in "
                 f"{path} -- {shape}, not a variable name (letters, digits and "
                 "underscores). The entry itself is not logged: it may hold a "
                 "pasted value"
             )
         return tuple(names)
     _warn(
-        "WARNING: no haiku.strip_session_env list in any config layer (the "
-        "plugin's bundled config.json is missing or unreadable) -- the "
-        "summarizer inherits the parent session's own variables, which #95 "
-        "removes; reinstall the plugin or set the list in ~/.remember/config.json"
+        f"WARNING: no haiku.{setting} list in any config layer (the plugin's "
+        f"bundled config.json is missing or unreadable) -- {consequence}; "
+        "reinstall the plugin or set the list in ~/.remember/config.json"
     )
     return ()
 _CREDENTIAL_FAILURE_MARKERS = (
@@ -377,45 +386,17 @@ def _isolated_summarizer_cwd():
         yield d
     finally:
         shutil.rmtree(d, ignore_errors=True)
-_CODEX_CHILD_ENV_ALLOW = frozenset({
-    "PATH", "HOME", "LANG", "LC_ALL", "CODEX_HOME", "TMPDIR", "TEMP", "TMP",
-    "SYSTEMROOT", "USERPROFILE", "APPDATA", "PATHEXT",
-    "CODEX_API_KEY",
-    "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY",
-    "SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS",
-})
 def _codex_child_env() -> dict[str, str]:
     child = {}
-    for name, value in (
-        ("PATH", os.environ.get("PATH")),
-        ("HOME", os.environ.get("HOME")),
-        ("LANG", os.environ.get("LANG")),
-        ("LC_ALL", os.environ.get("LC_ALL")),
-        ("CODEX_HOME", os.environ.get("CODEX_HOME")),
-        ("TMPDIR", os.environ.get("TMPDIR")),
-        ("TEMP", os.environ.get("TEMP")),
-        ("TMP", os.environ.get("TMP")),
-        ("SYSTEMROOT", os.environ.get("SYSTEMROOT")),
-        ("USERPROFILE", os.environ.get("USERPROFILE")),
-        ("APPDATA", os.environ.get("APPDATA")),
-        ("PATHEXT", os.environ.get("PATHEXT")),
-        ("CODEX_API_KEY", os.environ.get("CODEX_API_KEY")),
-        ("HTTPS_PROXY", os.environ.get("HTTPS_PROXY")),
-        ("HTTP_PROXY", os.environ.get("HTTP_PROXY")),
-        ("NO_PROXY", os.environ.get("NO_PROXY")),
-        ("SSL_CERT_FILE", os.environ.get("SSL_CERT_FILE")),
-        ("NODE_EXTRA_CA_CERTS", os.environ.get("NODE_EXTRA_CA_CERTS")),
-    ):
+    seen = set()
+    for name in _configured_codex_env_allow():
+        folded = name.upper() if os.name == "nt" else name
+        if folded in seen:
+            continue
+        value = os.environ.get(name)
         if value is not None:
             child[name] = value
-    if os.name != "nt":
-        for name, value in (
-            ("https_proxy", os.environ.get("https_proxy")),
-            ("http_proxy", os.environ.get("http_proxy")),
-            ("no_proxy", os.environ.get("no_proxy")),
-        ):
-            if value is not None:
-                child[name] = value
+            seen.add(folded)
     child["REMEMBER_NESTED_SUMMARIZER"] = "1"
     return child
 def _build_codex_cmd(output_file: str, cwd: str) -> list[str]:
