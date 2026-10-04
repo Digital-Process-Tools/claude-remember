@@ -653,6 +653,7 @@ def check_tree(root: Path, budget: dict) -> CheckResult:
     _check_runtime_argv(files, kinds, result.reviews)
     _check_bare_dot_word(files, kinds, result.reviews)
     _check_backslash_case_pattern(files, kinds, result.reviews)
+    _check_plugin_root_copy(files, kinds, result.reviews)
     if "package.json" in files:
         locks = [lf for lf in LOCKFILES if lf in files]
         if locks:
@@ -1370,6 +1371,24 @@ def _check_backslash_case_pattern(files: dict, kinds: dict, reviews: list) -> No
         if BACKSLASH_CASE_PATTERN.search(line):
             reviews.append(f"{rel}:{n}: a backslash glob in a case pattern: "
                            f"{line.strip()[:80]}")
+
+
+# #898 round 11, triggers.md 10: a plain copy of the plugin-root variable,
+# `X="$CLAUDE_PLUGIN_ROOT"` (or `"${CLAUDE_PLUGIN_ROOT}"`, `local`/`export`
+# forms), made the portal list a bare "." under COMMAND_SCRIPT_NOT_FOLLOWED;
+# `X="${CLAUDE_PLUGIN_ROOT:-}"` removed it on the full release tree.
+PLUGIN_ROOT_COPY = re.compile(
+    r'^\s*(?:local\s+|export\s+)?[A-Za-z_]\w*="\$\{?CLAUDE_PLUGIN_ROOT\}?"\s*(?:;|$)')
+
+
+def _check_plugin_root_copy(files: dict, kinds: dict, reviews: list) -> None:
+    """#898 round 11: a plain copy of the plugin-root variable in a shipped
+    shell script; rewrite as `X="${CLAUDE_PLUGIN_ROOT:-}"`. REVIEW, not
+    FAIL: a line heuristic for a portal-observed shape."""
+    for rel, n, line in _sh_lines(files, kinds):
+        if PLUGIN_ROOT_COPY.search(line):
+            reviews.append(f"{rel}:{n}: a plain plugin-root copy (write it "
+                           f"with ':-'): {line.strip()[:80]}")
 
 
 def _check_credential_shaped_name(files: dict, kinds: dict, off: list) -> None:

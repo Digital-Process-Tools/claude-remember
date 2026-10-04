@@ -622,3 +622,35 @@ def test_quoted_literal_case_in_a_python_file_is_not_reviewed(tmp_path):
     root = _tree(tmp_path, {"scripts/tool.py": b'    "py -3") \n'})
     reviews = _check(root).reviews
     assert not any("tool.py" in r and "quoted literal" in r for r in reviews), reviews
+
+
+# #898 round 11 (triggers.md 10): a plain copy of the plugin-root variable,
+# `X="$CLAUDE_PLUGIN_ROOT"`, makes the portal list a bare "." under
+# COMMAND_SCRIPT_NOT_FOLLOWED; `X="${CLAUDE_PLUGIN_ROOT:-}"` cleared it.
+
+def test_plain_plugin_root_copy_is_reviewed(tmp_path):
+    root = _tree(tmp_path, {"scripts/run.sh": (
+        b'#!/bin/sh\nA="$CLAUDE_PLUGIN_ROOT"\n'
+        b'  local B="${CLAUDE_PLUGIN_ROOT}"\n'
+        b'export C="$CLAUDE_PLUGIN_ROOT"; echo x\n')})
+    reviews = [r for r in _check(root).reviews if "plugin-root" in r]
+    assert any("run.sh:2" in r for r in reviews), reviews
+    assert any("run.sh:3" in r for r in reviews), reviews
+    assert any("run.sh:4" in r for r in reviews), reviews
+
+
+def test_defaulted_plugin_root_copy_and_path_use_are_not_reviewed(tmp_path):
+    """Negative half; the test above is its positive control on the same
+    harness. The rewrite and a path built on the variable both clear."""
+    root = _tree(tmp_path, {"scripts/run.sh": (
+        b'#!/bin/sh\nA="${CLAUDE_PLUGIN_ROOT:-}"\n'
+        b'[ -f "${CLAUDE_PLUGIN_ROOT}/x" ] && echo y\n'
+        b'B="$CLAUDE_PLUGIN_ROOT/scripts"\n')})
+    reviews = _check(root).reviews
+    assert not any("plugin-root" in r for r in reviews), reviews
+
+
+def test_plain_plugin_root_copy_in_a_python_file_is_not_reviewed(tmp_path):
+    root = _tree(tmp_path, {"scripts/tool.py": b'A="$CLAUDE_PLUGIN_ROOT"\n'})
+    reviews = _check(root).reviews
+    assert not any("tool.py" in r and "plugin-root" in r for r in reviews), reviews

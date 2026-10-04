@@ -110,6 +110,9 @@ SHAPE_CHECKS = {
     # batch-cleared on jit-context alongside the bare dot.
     "_check_backslash_case_pattern":
         'case "$p" in\n    [A-Za-z]:' + "\x5c" * 2 + ') : ;;\nesac\n',
+    # #898 round 11 (triggers.md 10): a plain copy of the plugin-root
+    # variable reads as a bare "." under COMMAND_SCRIPT_NOT_FOLLOWED.
+    "_check_plugin_root_copy": 'PIPELINE_DIR="$CLAUDE_PLUGIN_ROOT"\n',
 }
 
 
