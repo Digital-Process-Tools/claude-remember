@@ -7,26 +7,24 @@ _remember_env_cache_normalize_into() {
     local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
     local _var="$1" _in="$2" _drive="" _rest=""
     local _re='^([a-zA-Z]):[/\](.*)$'
-    case "$OSTYPE" in
-        msys|cygwin)
-            if [[ "$_in" =~ ^/cygdrive/([a-zA-Z])/(.*)$ ]]; then
-                _drive="${BASH_REMATCH[1]}"
-                _rest="${BASH_REMATCH[2]}"
-            elif [[ "$_in" =~ ^/([a-zA-Z])/(.*)$ ]]; then
-                _drive="${BASH_REMATCH[1]}"
-                _rest="${BASH_REMATCH[2]}"
-            elif [[ "$_in" =~ $_re ]]; then
-                _drive="${BASH_REMATCH[1]}"
-                _rest="${BASH_REMATCH[2]}"
-            fi
-            if [ -n "$_drive" ]; then
-                _drive=$(printf '%s' "$_drive" | LC_ALL=C tr '[:lower:]' '[:upper:]')
-                _rest="${_rest//\//\\}"
-                printf -v "$_var" '%s:\\%s' "$_drive" "$_rest"
-                return 0
-            fi
-            ;;
-    esac
+    if [ "$OSTYPE" = msys ] || [ "$OSTYPE" = cygwin ]; then
+        if [[ "$_in" =~ ^/cygdrive/([a-zA-Z])/(.*)$ ]]; then
+            _drive="${BASH_REMATCH[1]}"
+            _rest="${BASH_REMATCH[2]}"
+        elif [[ "$_in" =~ ^/([a-zA-Z])/(.*)$ ]]; then
+            _drive="${BASH_REMATCH[1]}"
+            _rest="${BASH_REMATCH[2]}"
+        elif [[ "$_in" =~ $_re ]]; then
+            _drive="${BASH_REMATCH[1]}"
+            _rest="${BASH_REMATCH[2]}"
+        fi
+        if [ -n "$_drive" ]; then
+            _drive=$(printf '%s' "$_drive" | LC_ALL=C tr '[:lower:]' '[:upper:]')
+            _rest="${_rest//\//\\}"
+            printf -v "$_var" '%s:\\%s' "$_drive" "$_rest"
+            return 0
+        fi
+    fi
     printf -v "$_var" '%s' "$_in"
 }
 
@@ -102,8 +100,8 @@ _remember_env_cache_load() {
 
     [ -n "$_dir" ] && [ -n "$_proj" ] && [ -n "$_pipe" ] || return 1
     [ -n "$_stamp" ] || return 1
-    case "$_cooldown" in '' | *[!0-9]*) return 1 ;; esac
-    case "$_delta" in '' | *[!0-9]*) return 1 ;; esac
+    if [ -z "$_cooldown" ] || [[ "$_cooldown" == *[!0-9]* ]]; then return 1; fi
+    if [ -z "$_delta" ] || [[ "$_delta" == *[!0-9]* ]]; then return 1; fi
     [ "$_env_proj" = "${_REMEMBER_ENV_CACHE_PROJECT_DIR:-}" ] || return 1
     [ "$_env_pipe" = "${CLAUDE_PLUGIN_ROOT:-}" ] || return 1
     [ "$_env_home" = "${HOME:-}" ] || return 1

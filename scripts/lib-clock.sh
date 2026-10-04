@@ -13,9 +13,10 @@ fi
 [ "${REMEMBER_NO_PRINTF_T:-0}" = "1" ] && _REMEMBER_PRINTF_T=0
 
 _remember_date_builtin_ok() {
-    case "$1" in
-        *%-*|*%_*|*%0*|*%^*|*%#*) return 1 ;;
-    esac
+    if [[ "$1" == *"%-"* ]] || [[ "$1" == *"%_"* ]] || [[ "$1" == *"%0"* ]] \
+        || [[ "$1" == *"%^"* ]] || [[ "$1" == *"%#"* ]]; then
+        return 1
+    fi
     return 0
 }
 

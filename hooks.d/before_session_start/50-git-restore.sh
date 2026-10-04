@@ -4,12 +4,13 @@ set -u  # not -e -- we never want to fail loudly here
 
 [ -n "${REMEMBER_DIR:-}" ] && [ -n "${PROJECT_DIR:-}" ] && [ -n "${PIPELINE_DIR:-}" ] || exit 0
 
-case "${OSTYPE:-}" in
-    msys|cygwin) _gr_normalized_dir="${REMEMBER_DIR//\\//}"
-                 _gr_normalized_project="${PROJECT_DIR//\\//}" ;;
-    *)           _gr_normalized_dir="$REMEMBER_DIR"
-                 _gr_normalized_project="$PROJECT_DIR" ;;
-esac
+if [ "${OSTYPE:-}" = msys ] || [ "${OSTYPE:-}" = cygwin ]; then
+    _gr_normalized_dir="${REMEMBER_DIR//\\//}"
+    _gr_normalized_project="${PROJECT_DIR//\\//}"
+else
+    _gr_normalized_dir="$REMEMBER_DIR"
+    _gr_normalized_project="$PROJECT_DIR"
+fi
 REPO_ROOT="${_gr_normalized_dir%/*}"
 SLUG="${_gr_normalized_dir##*/}"
 unset _gr_normalized_dir
@@ -67,10 +68,9 @@ _gr_common_dir() {
     if [ -z "$_out" ]; then
         _out=$(git -C "$_d" rev-parse --git-common-dir 2>/dev/null) || return 1
         [ -n "$_out" ] || return 1
-        case "$_out" in
-            /*|[A-Za-z]:[/\\]*) ;;
-            *) _out="$_d/$_out" ;;
-        esac
+        if [ "${_out#/}" = "$_out" ] && [ "${_out#[A-Za-z]:[/\\]}" = "$_out" ]; then
+            _out="$_d/$_out"
+        fi
     fi
     _gr_realpath "$_out"
 }
@@ -95,15 +95,16 @@ if [ "${REMOTE_NAME#-}" != "$REMOTE_NAME" ] \
         report_error "git-restore" "WARNING: configured remote '$REMOTE_NAME' is not a plain remote name (leading '-', or contains ':' or '/') -- refusing to use it, falling back to 'origin'. A config.json restored from the backup remote can carry an attacker-controlled value here; treat this as untrusted."
         REMOTE_NAME="origin"
 fi
-case "$GIT_RESTORE_BRANCH" in
-    -*|*:*)
-        report_error "git-restore" "WARNING: configured branch '$GIT_RESTORE_BRANCH' starts with '-' or contains ':' -- refusing to use it as a git fetch operand (a colon makes it a src:dst refspec, not a branch name)."
-        GIT_RESTORE_BRANCH=""
-        ;;
-esac
+if [ "${GIT_RESTORE_BRANCH#-}" != "$GIT_RESTORE_BRANCH" ] || [[ "$GIT_RESTORE_BRANCH" == *:* ]]; then
+    report_error "git-restore" "WARNING: configured branch '$GIT_RESTORE_BRANCH' starts with '-' or contains ':' -- refusing to use it as a git fetch operand (a colon makes it a src:dst refspec, not a branch name)."
+    GIT_RESTORE_BRANCH=""
+fi
 
 FETCH_TIMEOUT=$(config '.git_restore.fetch_timeout_seconds' '20')
-case "$FETCH_TIMEOUT" in ''|*[!0-9]*|0) FETCH_TIMEOUT=20 ;; esac
+if [ -z "$FETCH_TIMEOUT" ] || [[ "$FETCH_TIMEOUT" == *[!0-9]* ]] \
+    || [ "$FETCH_TIMEOUT" = 0 ]; then
+    FETCH_TIMEOUT=20
+fi
 
 DIVERGED_NOTICE_AFTER=$(config '.git_restore.diverged_notice_after' '3')
 if [ -z "$DIVERGED_NOTICE_AFTER" ] || [ "${DIVERGED_NOTICE_AFTER#*[!0-9]}" != "$DIVERGED_NOTICE_AFTER" ]; then DIVERGED_NOTICE_AFTER=3; fi
@@ -138,7 +139,7 @@ _spawn_fetch() {
     if [ -f "$FETCH_STATE_FILE" ]; then
         local _s='' _f='' _now _age
         while IFS='=' read -r _k _v; do
-            case "$_k" in started) _s="$_v" ;; finished) _f="$_v" ;; esac
+            if [ "$_k" = started ]; then _s="$_v"; elif [ "$_k" = finished ]; then _f="$_v"; fi
         done < "$FETCH_STATE_FILE"
         if [ -z "$_s" ] || [ "${_s#*[!0-9]}" != "$_s" ]; then _s=0; fi
         if [ -z "$_f" ] && [ "$_s" -gt 0 ]; then
@@ -199,7 +200,13 @@ _fetch_health() {
     [ -f "$FETCH_STATE_FILE" ] || { echo "never-run"; return; }
     local _s='' _f='' _rc='' _now _age
     while IFS='=' read -r _k _v; do
-        case "$_k" in started) _s="$_v" ;; finished) _f="$_v" ;; rc) _rc="$_v" ;; esac
+        if [ "$_k" = started ]; then
+            _s="$_v"
+        elif [ "$_k" = finished ]; then
+            _f="$_v"
+        elif [ "$_k" = rc ]; then
+            _rc="$_v"
+        fi
     done < "$FETCH_STATE_FILE"
     if [ -z "$_s" ] || [ "${_s#*[!0-9]}" != "$_s" ]; then _s=0; fi
     if [ -z "$_f" ]; then
@@ -237,13 +244,17 @@ if ! _take_lock; then
     exit 0
 fi
 
-case "$FETCH_HEALTH" in
-    ok)        : ;;
-    never-run) log "git-restore" "no fetch has completed yet for $REPO_ROOT -- the comparison below is against whatever refs are already on disk, which may be stale. A fetch starts in the background now and its result lands next session." ;;
-    in-flight) log "git-restore" "a background fetch is still running -- the comparison below is against the previous fetch's refs" ;;
-    abandoned) log "git-restore" "WARNING: the last background fetch never completed (started $(cat "$FETCH_STATE_FILE" 2>/dev/null | head -1)) -- could NOT check the remote. This is not 'up to date': the refs below are as old as the last fetch that did finish." ;;
-    failed:*)  log "git-restore" "WARNING: the last background fetch FAILED (rc=${FETCH_HEALTH#failed:}) -- could NOT check the remote. This is not 'up to date': the refs below are as old as the last fetch that did finish. Run 'git -C ${_dq}$REPO_ROOT${_dq} fetch $REMOTE_NAME' to see git's own error." ;;
-esac
+if [ "$FETCH_HEALTH" = ok ]; then
+    :
+elif [ "$FETCH_HEALTH" = never-run ]; then
+    log "git-restore" "no fetch has completed yet for $REPO_ROOT -- the comparison below is against whatever refs are already on disk, which may be stale. A fetch starts in the background now and its result lands next session."
+elif [ "$FETCH_HEALTH" = in-flight ]; then
+    log "git-restore" "a background fetch is still running -- the comparison below is against the previous fetch's refs"
+elif [ "$FETCH_HEALTH" = abandoned ]; then
+    log "git-restore" "WARNING: the last background fetch never completed (started $(cat "$FETCH_STATE_FILE" 2>/dev/null | head -1)) -- could NOT check the remote. This is not 'up to date': the refs below are as old as the last fetch that did finish."
+elif [ "${FETCH_HEALTH#failed:}" != "$FETCH_HEALTH" ]; then
+    log "git-restore" "WARNING: the last background fetch FAILED (rc=${FETCH_HEALTH#failed:}) -- could NOT check the remote. This is not 'up to date': the refs below are as old as the last fetch that did finish. Run 'git -C ${_dq}$REPO_ROOT${_dq} fetch $REMOTE_NAME' to see git's own error."
+fi
 
 if [ -z "$LOCAL_HEAD" ]; then
     log "git-restore" "local branch is unborn (no commits in $REPO_ROOT) -- nothing to fast-forward onto, refusing. Clone or check out the backup branch by hand."

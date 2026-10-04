@@ -39,10 +39,9 @@ _remember_tools_cache_load() {
     [ -n "$_jq" ] || return 1
     [ -n "$_path" ] || return 1
     [ "$_path" = "$PATH" ] || return 1
-    case "$_jq" in
-        jq|_jq_fallback) ;;
-        *) return 1 ;;
-    esac
+    if [ "$_jq" != jq ] && [ "$_jq" != _jq_fallback ]; then
+        return 1
+    fi
     PYTHON="$_py"
     JQ="$_jq"
     export PYTHON JQ
@@ -145,26 +144,28 @@ fi
 fi
 
 _remember_run_python() {
-    case "$PYTHON" in
-        python3) python3 "$@" ;;
-        python) python "$@" ;;
-        py\ -3) py -3 "$@" ;;
-        py) py "$@" ;;
-        *)
-            echo "FATAL: _remember_run_python: unrecognized PYTHON value '$PYTHON'" >&2
-            return 127
-            ;;
-    esac
+    if [ "$PYTHON" = python3 ]; then
+        python3 "$@"
+    elif [ "$PYTHON" = python ]; then
+        python "$@"
+    elif [ "$PYTHON" = "py -3" ]; then
+        py -3 "$@"
+    elif [ "$PYTHON" = py ]; then
+        py "$@"
+    else
+        echo "FATAL: _remember_run_python: unrecognized PYTHON value '$PYTHON'" >&2
+        return 127
+    fi
 }
 _remember_run_jq() {
-    case "$JQ" in
-        jq) jq "$@" ;;
-        _jq_fallback) _jq_fallback "$@" ;;
-        *)
-            echo "FATAL: _remember_run_jq: unrecognized JQ value '$JQ'" >&2
-            return 127
-            ;;
-    esac
+    if [ "$JQ" = jq ]; then
+        jq "$@"
+    elif [ "$JQ" = _jq_fallback ]; then
+        _jq_fallback "$@"
+    else
+        echo "FATAL: _remember_run_jq: unrecognized JQ value '$JQ'" >&2
+        return 127
+    fi
 }
 
 

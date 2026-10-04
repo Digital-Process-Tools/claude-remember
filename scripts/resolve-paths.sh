@@ -44,41 +44,41 @@ _remember_normalize_win_path() {
     local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
     local _in="$1" _drive="" _rest=""
     local _re='^([a-zA-Z]):[/\](.*)$'
-    case "$OSTYPE" in
-        msys|cygwin)
-            if [[ "$_in" =~ ^/cygdrive/([a-zA-Z])/(.*)$ ]]; then
-                _drive="${BASH_REMATCH[1]}"
-                _rest="${BASH_REMATCH[2]}"
-            elif [[ "$_in" =~ ^/([a-zA-Z])/(.*)$ ]]; then
-                _drive="${BASH_REMATCH[1]}"
-                _rest="${BASH_REMATCH[2]}"
-            elif [[ "$_in" =~ $_re ]]; then
-                _drive="${BASH_REMATCH[1]}"
-                _rest="${BASH_REMATCH[2]}"
-            fi
-            if [ -n "$_drive" ]; then
-                _drive=$(printf '%s' "$_drive" | LC_ALL=C tr '[:lower:]' '[:upper:]')
-                _rest="${_rest//\//\\}"
-                printf '%s' "${_drive}:\\${_rest}"
-                return 0
-            fi
-            ;;
-    esac
+    if [ "$OSTYPE" = msys ] || [ "$OSTYPE" = cygwin ]; then
+        if [[ "$_in" =~ ^/cygdrive/([a-zA-Z])/(.*)$ ]]; then
+            _drive="${BASH_REMATCH[1]}"
+            _rest="${BASH_REMATCH[2]}"
+        elif [[ "$_in" =~ ^/([a-zA-Z])/(.*)$ ]]; then
+            _drive="${BASH_REMATCH[1]}"
+            _rest="${BASH_REMATCH[2]}"
+        elif [[ "$_in" =~ $_re ]]; then
+            _drive="${BASH_REMATCH[1]}"
+            _rest="${BASH_REMATCH[2]}"
+        fi
+        if [ -n "$_drive" ]; then
+            _drive=$(printf '%s' "$_drive" | LC_ALL=C tr '[:lower:]' '[:upper:]')
+            _rest="${_rest//\//\\}"
+            printf '%s' "${_drive}:\\${_rest}"
+            return 0
+        fi
+    fi
     printf '%s' "$_in"
 }
 
 _remember_forward_slash() {
-    case "$OSTYPE" in
-        msys|cygwin) printf '%s' "${1//\\//}" ;;
-        *) printf '%s' "$1" ;;
-    esac
+    if [ "$OSTYPE" = msys ] || [ "$OSTYPE" = cygwin ]; then
+        printf '%s' "${1//\\//}"
+    else
+        printf '%s' "$1"
+    fi
 }
 
 _remember_forward_slash_into() {
-    case "$OSTYPE" in
-        msys|cygwin) printf -v "$1" '%s' "${2//\\//}" ;;
-        *) printf -v "$1" '%s' "$2" ;;
-    esac
+    if [ "$OSTYPE" = msys ] || [ "$OSTYPE" = cygwin ]; then
+        printf -v "$1" '%s' "${2//\\//}"
+    else
+        printf -v "$1" '%s' "$2"
+    fi
 }
 
 if [ -n "$CLAUDE_PROJECT_DIR" ]; then

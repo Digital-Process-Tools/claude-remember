@@ -27,10 +27,11 @@ ndc_read_gen() {
     fi
     local _ndc_gen
     _ndc_gen=$(cat "$NDC_GEN_FILE" 2>/dev/null)
-    case "$_ndc_gen" in
-        (''|*[!0-9]*) echo unreadable ;;
-        (*) echo "$_ndc_gen" ;;
-    esac
+    if [ -z "$_ndc_gen" ] || [[ "$_ndc_gen" == *[!0-9]* ]]; then
+        echo unreadable
+    else
+        echo "$_ndc_gen"
+    fi
 }
 ts_marker_read() {
     local _marker="$1"
@@ -44,10 +45,11 @@ ts_marker_read() {
     fi
     local _val
     _val=$(cat "$_marker" 2>/dev/null)
-    case "$_val" in
-        (''|*[!0-9]*) echo unreadable ;;
-        (*) echo "$_val" ;;
-    esac
+    if [ -z "$_val" ] || [[ "$_val" == *[!0-9]* ]]; then
+        echo unreadable
+    else
+        echo "$_val"
+    fi
 }
 marker_write_ok() {
     local _path="$1" _tag="$2"
@@ -228,14 +230,11 @@ else
     BRANCH=""
     if [ -n "${REMEMBER_BRANCH_CMD:-}" ]; then
         if CMD_BRANCH=$("$REMEMBER_BRANCH_CMD" "$SESSION_ID" 2>/dev/null) && [ -n "$CMD_BRANCH" ]; then
-            case "$CMD_BRANCH" in
-                *$'\n'*|*$'\r'*)
-                    log "branch" "WARNING: REMEMBER_BRANCH_CMD ($REMEMBER_BRANCH_CMD) printed multi-line (or carriage-return-bearing) output for session $SESSION_ID -- refusing to use it unbounded, falling back to git branch lookup"
-                    ;;
-                *)
-                    BRANCH="$CMD_BRANCH"
-                    ;;
-            esac
+            if [[ "$CMD_BRANCH" == *$'\n'* ]] || [[ "$CMD_BRANCH" == *$'\r'* ]]; then
+                log "branch" "WARNING: REMEMBER_BRANCH_CMD ($REMEMBER_BRANCH_CMD) printed multi-line (or carriage-return-bearing) output for session $SESSION_ID -- refusing to use it unbounded, falling back to git branch lookup"
+            else
+                BRANCH="$CMD_BRANCH"
+            fi
         else
             log "branch" "WARNING: REMEMBER_BRANCH_CMD ($REMEMBER_BRANCH_CMD) exited non-zero or printed nothing for session $SESSION_ID -- falling back to git branch lookup"
         fi
@@ -252,12 +251,10 @@ TMP_PROMPT=$(mktemp "${TMPDIR:-/tmp}"/remember-prompt-XXXXXX)
 CLEANUP_FILES+=("$TMP_PROMPT")
 
 EXTRACT_MAX_BYTES=$(config ".thresholds.extract_max_bytes" 300000)
-case "$EXTRACT_MAX_BYTES" in
-    ''|*[!0-9]*)
-        log "prompt" "WARNING: thresholds.extract_max_bytes is not a valid non-negative integer (got '$EXTRACT_MAX_BYTES') -- using default 300000"
-        EXTRACT_MAX_BYTES=300000
-        ;;
-esac
+if [ -z "$EXTRACT_MAX_BYTES" ] || [[ "$EXTRACT_MAX_BYTES" == *[!0-9]* ]]; then
+    log "prompt" "WARNING: thresholds.extract_max_bytes is not a valid non-negative integer (got '$EXTRACT_MAX_BYTES') -- using default 300000"
+    EXTRACT_MAX_BYTES=300000
+fi
 cd "$PIPELINE_DIR" && _remember_run_python -m pipeline.shell build-prompt "$EXTRACT_FILE" "$TMP_LAST_ENTRY" "$CURRENT_TIME" "$BRANCH" "$TMP_PROMPT" "$EXTRACT_MAX_BYTES"
 
 [ ! -s "$TMP_PROMPT" ] && { log "prompt" "ERROR: empty"; exit 1; }
@@ -444,10 +441,9 @@ elif [ -e "$NOW_DAY_FILE" ]; then
 else
     NDC_DAY=""
 fi
-case "$NDC_DAY" in
-    ([0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;;
-    (*) NDC_DAY="$TODAY_DATE" ;;
-esac
+if [ -z "$NDC_DAY" ] || [ -n "${NDC_DAY#[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]}" ]; then
+    NDC_DAY="$TODAY_DATE"
+fi
 TODAY_FILE="${REMEMBER_DIR}/today-${NDC_DAY}.md"
 
 if [ "$RUN_NDC" = true ]; then
@@ -466,21 +462,18 @@ if [ "$RUN_NDC" = true ]; then
         (set +e  # don't inherit set -e -- a haiku non-zero exit must not kill the subshell
             NDC_ERR=$(mktemp "${TMPDIR:-/tmp}"/remember-ndc-err-XXXXXX)
             NDC_TIMEOUT_SECONDS=$(config ".thresholds.ndc_timeout_seconds" 180)
-            case "$NDC_TIMEOUT_SECONDS" in
-                ''|*[!0-9]*)
-                    log "ndc" "WARNING: thresholds.ndc_timeout_seconds is not a valid non-negative integer (got '$NDC_TIMEOUT_SECONDS') -- using default 180"
+            if [ -z "$NDC_TIMEOUT_SECONDS" ] || [[ "$NDC_TIMEOUT_SECONDS" == *[!0-9]* ]]; then
+                log "ndc" "WARNING: thresholds.ndc_timeout_seconds is not a valid non-negative integer (got '$NDC_TIMEOUT_SECONDS') -- using default 180"
+                NDC_TIMEOUT_SECONDS=180
+            else
+                if [ "${#NDC_TIMEOUT_SECONDS}" -gt 9 ]; then
+                    log "ndc" "WARNING: thresholds.ndc_timeout_seconds ($NDC_TIMEOUT_SECONDS) is too large and would crash the NDC call with an OverflowError -- using default 180"
                     NDC_TIMEOUT_SECONDS=180
-                    ;;
-                *)
-                    if [ "${#NDC_TIMEOUT_SECONDS}" -gt 9 ]; then
-                        log "ndc" "WARNING: thresholds.ndc_timeout_seconds ($NDC_TIMEOUT_SECONDS) is too large and would crash the NDC call with an OverflowError -- using default 180"
-                        NDC_TIMEOUT_SECONDS=180
-                    elif [ "$NDC_TIMEOUT_SECONDS" -eq 0 ]; then
-                        log "ndc" "WARNING: thresholds.ndc_timeout_seconds is 0, which times out the NDC call immediately on every run -- using default 180"
-                        NDC_TIMEOUT_SECONDS=180
-                    fi
-                    ;;
-            esac
+                elif [ "$NDC_TIMEOUT_SECONDS" -eq 0 ]; then
+                    log "ndc" "WARNING: thresholds.ndc_timeout_seconds is 0, which times out the NDC call immediately on every run -- using default 180"
+                    NDC_TIMEOUT_SECONDS=180
+                fi
+            fi
             NDC_VARS=$(cd "$PIPELINE_DIR" && _remember_run_python -m pipeline.shell call-haiku "$NDC_PROMPT" "" "$NDC_TIMEOUT_SECONDS" 2>"$NDC_ERR")
             NDC_EXIT=$?
 
@@ -497,24 +490,24 @@ if [ "$RUN_NDC" = true ]; then
                 log_usage "ndc" "$TK_IN" "$TK_OUT" "$TK_CACHE" "$TK_COST"
                 if [ "$IS_SKIP" != "true" ] && [ "${IS_REJECTED:-false}" != "true" ]; then
                     NDC_HEADER_LINE=$(grep -n -m1 '^## ' "$HAIKU_TEXT_FILE" 2>/dev/null | cut -d: -f1)
-                    case "$NDC_HEADER_LINE" in
-                        (1) NDC_LOOKS_LIKE_HEADER=true ;;
-                        ([2-4])
-                            NDC_STRIPPED_FILE=$(mktemp "${TMPDIR:-/tmp}"/remember-ndc-stripped-XXXXXX)
-                            if [ -n "$NDC_STRIPPED_FILE" ] \
-                                && tail -n "+$NDC_HEADER_LINE" "$HAIKU_TEXT_FILE" > "$NDC_STRIPPED_FILE" \
-                                && mv "$NDC_STRIPPED_FILE" "$HAIKU_TEXT_FILE"; then
-                                NDC_LOOKS_LIKE_HEADER=true
-                                NDC_TEXT=$(cat "$HAIKU_TEXT_FILE")
-                                log "ndc" "preamble stripped ($((NDC_HEADER_LINE - 1)) line(s) before the first '## ')"
-                            else
-                                rm -f "$NDC_STRIPPED_FILE" 2>/dev/null
-                                NDC_LOOKS_LIKE_HEADER=false
-                                report_error "ndc" "WARNING: could not strip a short preamble from the NDC reply -- treating it as rejected instead of risking a partially-written file"
-                            fi
-                            ;;
-                        (*) NDC_LOOKS_LIKE_HEADER=false ;;
-                    esac
+                    if [ "$NDC_HEADER_LINE" = 1 ]; then
+                        NDC_LOOKS_LIKE_HEADER=true
+                    elif [ "$NDC_HEADER_LINE" = 2 ] || [ "$NDC_HEADER_LINE" = 3 ] || [ "$NDC_HEADER_LINE" = 4 ]; then
+                        NDC_STRIPPED_FILE=$(mktemp "${TMPDIR:-/tmp}"/remember-ndc-stripped-XXXXXX)
+                        if [ -n "$NDC_STRIPPED_FILE" ] \
+                            && tail -n "+$NDC_HEADER_LINE" "$HAIKU_TEXT_FILE" > "$NDC_STRIPPED_FILE" \
+                            && mv "$NDC_STRIPPED_FILE" "$HAIKU_TEXT_FILE"; then
+                            NDC_LOOKS_LIKE_HEADER=true
+                            NDC_TEXT=$(cat "$HAIKU_TEXT_FILE")
+                            log "ndc" "preamble stripped ($((NDC_HEADER_LINE - 1)) line(s) before the first '## ')"
+                        else
+                            rm -f "$NDC_STRIPPED_FILE" 2>/dev/null
+                            NDC_LOOKS_LIKE_HEADER=false
+                            report_error "ndc" "WARNING: could not strip a short preamble from the NDC reply -- treating it as rejected instead of risking a partially-written file"
+                        fi
+                    else
+                        NDC_LOOKS_LIKE_HEADER=false
+                    fi
                 fi
                 if [ "$IS_SKIP" = "true" ] || [ "${IS_REJECTED:-false}" = "true" ] || [ "$NDC_LOOKS_LIKE_HEADER" = "false" ]; then
                     if [ "$IS_SKIP" = "true" ] || [ "${IS_REJECTED:-false}" = "true" ]; then
@@ -600,10 +593,11 @@ fi
 
 _AUTONOMOUS_LOG_RETENTION_DAYS=$(config ".thresholds.autonomous_log_retention_days" 7)
 if [ -z "$_AUTONOMOUS_LOG_RETENTION_DAYS" ] || [ "${_AUTONOMOUS_LOG_RETENTION_DAYS#*[!0-9]}" != "$_AUTONOMOUS_LOG_RETENTION_DAYS" ]; then _AUTONOMOUS_LOG_RETENTION_DAYS=7; fi
-case "$OSTYPE" in
-    msys|cygwin) _remember_auto_dir="${REMEMBER_DIR//\\//}" ;;
-    *) _remember_auto_dir="$REMEMBER_DIR" ;;
-esac
+if [ "$OSTYPE" = msys ] || [ "$OSTYPE" = cygwin ]; then
+    _remember_auto_dir="${REMEMBER_DIR//\\//}"
+else
+    _remember_auto_dir="$REMEMBER_DIR"
+fi
 for _remember_auto_log in "${_remember_auto_dir}/logs/autonomous"/*.log; do
     [ -f "$_remember_auto_log" ] || continue
     if [ ! -s "$_remember_auto_log" ]; then
@@ -614,19 +608,15 @@ for _remember_auto_log in "${_remember_auto_dir}/logs/autonomous"/*.log; do
     _remember_auto_mtime=$(stat -c %Y "$_remember_auto_log" 2>/dev/null) \
         || _remember_auto_mtime=$(stat -f %m "$_remember_auto_log" 2>/dev/null) \
         || _remember_auto_mtime=""
-    case "$_remember_auto_mtime" in
-        (''|*[!0-9]*)
-            log "housekeeping" "WARNING: could not read mtime of $_remember_auto_log -- leaving it in place"
-            continue
-            ;;
-    esac
+    if [ -z "$_remember_auto_mtime" ] || [[ "$_remember_auto_mtime" == *[!0-9]* ]]; then
+        log "housekeeping" "WARNING: could not read mtime of $_remember_auto_log -- leaving it in place"
+        continue
+    fi
     _remember_auto_now=$(_remember_date +%s)
-    case "$_remember_auto_now" in
-        (''|*[!0-9]*)
-            log "housekeeping" "WARNING: could not read the clock -- skipping the retention sweep for $_remember_auto_log"
-            continue
-            ;;
-    esac
+    if [ -z "$_remember_auto_now" ] || [[ "$_remember_auto_now" == *[!0-9]* ]]; then
+        log "housekeeping" "WARNING: could not read the clock -- skipping the retention sweep for $_remember_auto_log"
+        continue
+    fi
     _remember_auto_age_days=$(( (10#$_remember_auto_now - 10#$_remember_auto_mtime) / 86400 ))
     if [ "$_remember_auto_age_days" -gt "$_AUTONOMOUS_LOG_RETENTION_DAYS" ]; then
         rm -f "$_remember_auto_log" 2>/dev/null \

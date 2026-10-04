@@ -55,17 +55,15 @@ _resolve_remember_dir() {
     local data_dir="$1"
     local proj="$2"
 
-    case "$data_dir" in
-        /*|~*|[A-Za-z]:[/\\]*)
-            local slug
-            slug=$(session_dir_slug "$proj")
-            local expanded="${data_dir/#\~/$HOME}"
-            echo "${expanded//\{slug\}/$slug}"
-            ;;
-        *)
-            echo "${proj}/${data_dir}"
-            ;;
-    esac
+    if [ "${data_dir#/}" != "$data_dir" ] || [ "${data_dir#[~]}" != "$data_dir" ] \
+        || [ "${data_dir#[A-Za-z]:[/\\]}" != "$data_dir" ]; then
+        local slug
+        slug=$(session_dir_slug "$proj")
+        local expanded="${data_dir/#\~/$HOME}"
+        echo "${expanded//\{slug\}/$slug}"
+    else
+        echo "${proj}/${data_dir}"
+    fi
 }
 
 _set_store_root() {
@@ -73,10 +71,10 @@ _set_store_root() {
     local data_dir="$1" prefix
     REMEMBER_STORE_ROOT=""
 
-    case "$data_dir" in
-        /*|~*|[A-Za-z]:[/\\]*) ;;
-        *) return 0 ;;
-    esac
+    if [ "${data_dir#/}" = "$data_dir" ] && [ "${data_dir#[~]}" = "$data_dir" ] \
+        && [ "${data_dir#[A-Za-z]:[/\\]}" = "$data_dir" ]; then
+        return 0
+    fi
     [ "${data_dir#*\{slug\}}" != "$data_dir" ] || return 0
 
     prefix="${data_dir%%\{slug\}*}"
@@ -90,9 +88,10 @@ _set_store_root() {
         fi
     done
 
-    case "$prefix" in
-        ''|/|[A-Za-z]:|[A-Za-z]:[/\\]) return 0 ;;
-    esac
+    if [ -z "$prefix" ] || [ "$prefix" = / ] || [ -z "${prefix#[A-Za-z]:}" ] \
+        || [ -z "${prefix#[A-Za-z]:[/\\]}" ]; then
+        return 0
+    fi
 
     REMEMBER_STORE_ROOT="$prefix"
 }
@@ -126,10 +125,12 @@ _project_cfg="${REMEMBER_DIR}/config.json"
 
 _classify_project_cfg_haiku_trust() {
     local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
-    case "$_data_dir_raw" in
-        /*|~*|[A-Za-z]:[/\\]*) _project_cfg_haiku_untrusted=0 ;;
-        *) _project_cfg_haiku_untrusted=1 ;;
-    esac
+    if [ "${_data_dir_raw#/}" != "$_data_dir_raw" ] || [ "${_data_dir_raw#[~]}" != "$_data_dir_raw" ] \
+        || [ "${_data_dir_raw#[A-Za-z]:[/\\]}" != "$_data_dir_raw" ]; then
+        _project_cfg_haiku_untrusted=0
+    else
+        _project_cfg_haiku_untrusted=1
+    fi
 }
 _classify_project_cfg_haiku_trust
 
@@ -191,10 +192,13 @@ _remember_config_tracked_status() {
 
 _project_cfg_model_reject_untrusted=0
 if [ "$_project_cfg_haiku_untrusted" = "1" ] && [ -f "$_project_cfg" ]; then
-    case "$(_remember_config_tracked_status "${_project_cfg%/*}" "${_project_cfg##*/}")" in
-        untracked) _project_cfg_model_reject_untrusted=0 ;;
-        *) _project_cfg_model_reject_untrusted=1 ;;  # tracked or could-not-tell -> fail CLOSED
-    esac
+    _project_cfg_tracked_answer=$(_remember_config_tracked_status "${_project_cfg%/*}" "${_project_cfg##*/}") || true
+    if [ "$_project_cfg_tracked_answer" = untracked ]; then
+        _project_cfg_model_reject_untrusted=0
+    else
+        _project_cfg_model_reject_untrusted=1  # tracked or could-not-tell -> fail CLOSED
+    fi
+    unset _project_cfg_tracked_answer
 fi
 
 if [ -L "$_project_cfg" ]; then
@@ -257,13 +261,17 @@ elif [ "${#_cfg_sources[@]}" -gt 0 ]; then
     rm -f "$_project_drop_marker" 2>/dev/null
     _py_merge_rc=0
     _lmd_run_python() {
-        case "${PYTHON:-python3}" in
-            python3) python3 "$@" ;;
-            python) python "$@" ;;
-            py\ -3) py -3 "$@" ;;
-            py) py "$@" ;;
-            *) return 127 ;;
-        esac
+        if [ "${PYTHON:-python3}" = python3 ]; then
+            python3 "$@"
+        elif [ "${PYTHON:-python3}" = python ]; then
+            python "$@"
+        elif [ "${PYTHON:-python3}" = "py -3" ]; then
+            py -3 "$@"
+        elif [ "${PYTHON:-python3}" = py ]; then
+            py "$@"
+        else
+            return 127
+        fi
     }
     _lmd_py_dir="${BASH_SOURCE[0]%/*}"
     [ "$_lmd_py_dir" = "${BASH_SOURCE[0]}" ] && _lmd_py_dir="$(pwd)"

@@ -37,9 +37,11 @@ _TRANSCRIPT_PATH="${_TRANSCRIPT_PATH%$'\r'}"
 _WORKSPACE_PATH="${_WORKSPACE_PATH%$'\r'}"
 _PARSE_STATUS="${_PARSE_STATUS%$'\r'}"
 
-case "$_CONVERSATION_ID" in
-    ''|[.]|[.][.]|-*|*[!A-Za-z0-9._-]*) _CONVERSATION_ID="" ;;
-esac
+if [ -z "${_CONVERSATION_ID#.}" ] || [ -z "${_CONVERSATION_ID#..}" ] \
+    || [ "${_CONVERSATION_ID#-}" != "$_CONVERSATION_ID" ] \
+    || [[ "$_CONVERSATION_ID" == *[!A-Za-z0-9._-]* ]]; then
+    _CONVERSATION_ID=""
+fi
 
 if [ -z "$_CONVERSATION_ID" ] || [ -z "$_TRANSCRIPT_PATH" ]; then
     if [ "$_PARSE_STATUS" != "ok" ]; then

@@ -37,9 +37,9 @@ _lock_try_steal() {
         for _abandoned in "${_dir}"/pid.stealing.*; do
             [ -e "$_abandoned" ] || continue
             _owner="${_abandoned##*.}"
-            case "$_owner" in
-                *[!0-9]*) continue ;;
-            esac
+            if [[ "$_owner" == *[!0-9]* ]]; then
+                continue
+            fi
             kill -0 "$_owner" 2>/dev/null && continue
             if [ ! -e "${_dir}/pid" ]; then
                 mv "$_abandoned" "${_dir}/pid" 2>/dev/null || true
@@ -52,9 +52,9 @@ _lock_try_steal() {
     _pid=$(cat "${_dir}/pid" 2>/dev/null) || true
 
     [ -z "$_pid" ] && return 1
-    case "$_pid" in
-        *[!0-9]*) return 1 ;;
-    esac
+    if [[ "$_pid" == *[!0-9]* ]]; then
+        return 1
+    fi
     kill -0 "$_pid" 2>/dev/null && return 1
 
     mv "${_dir}/pid" "$_claim" 2>/dev/null || return 1
@@ -144,16 +144,17 @@ fi
 
 _lock_timing_us_to_ms() {
     local _r="$1" _s _f
-    case "$_r" in
-        *[.,]*) _s="${_r%%[.,]*}"; _f="${_r#*[.,]}" ;;
-        *)      _s="$_r"; _f="000000" ;;
-    esac
+    if [[ "$_r" == *[.,]* ]]; then
+        _s="${_r%%[.,]*}"; _f="${_r#*[.,]}"
+    else
+        _s="$_r"; _f="000000"
+    fi
     if [ -z "$_s" ] || [ "${_s#*[!0-9]}" != "$_s" ]; then
         _LOCK_TIMING_NOW=0; return 0
     fi
-    case "$_f" in
-        *[!0-9]*) _f="000000" ;;
-    esac
+    if [[ "$_f" == *[!0-9]* ]]; then
+        _f="000000"
+    fi
     _f="${_f}000"
     _LOCK_TIMING_NOW=$(( 10#$_s * 1000 + 10#${_f:0:3} ))
     return 0
@@ -177,19 +178,15 @@ _lock_timing_s_to_ms() {
 
 _lock_timing_now() {
     local _n
-    case "$_LOCK_TIMING_PRECISION" in
-        us)
-            _lock_timing_us_to_ms "$EPOCHREALTIME"
-            ;;
-        ms)
-            _n=$(date +%s%N 2>/dev/null) || _n=""
-            _lock_timing_ns_to_ms "$_n"
-            ;;
-        *)
-            _n=$(date +%s 2>/dev/null) || _n=""
-            _lock_timing_s_to_ms "$_n"
-            ;;
-    esac
+    if [ "$_LOCK_TIMING_PRECISION" = us ]; then
+        _lock_timing_us_to_ms "$EPOCHREALTIME"
+    elif [ "$_LOCK_TIMING_PRECISION" = ms ]; then
+        _n=$(date +%s%N 2>/dev/null) || _n=""
+        _lock_timing_ns_to_ms "$_n"
+    else
+        _n=$(date +%s 2>/dev/null) || _n=""
+        _lock_timing_s_to_ms "$_n"
+    fi
     return 0
 }
 

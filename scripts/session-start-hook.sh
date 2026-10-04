@@ -46,41 +46,41 @@ _remember_normalize_win_path() {
     local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
     local _in="$1" _drive="" _rest=""
     local _re='^([a-zA-Z]):[/\](.*)$'
-    case "$OSTYPE" in
-        msys|cygwin)
-            if [[ "$_in" =~ ^/cygdrive/([a-zA-Z])/(.*)$ ]]; then
-                _drive="${BASH_REMATCH[1]}"
-                _rest="${BASH_REMATCH[2]}"
-            elif [[ "$_in" =~ ^/([a-zA-Z])/(.*)$ ]]; then
-                _drive="${BASH_REMATCH[1]}"
-                _rest="${BASH_REMATCH[2]}"
-            elif [[ "$_in" =~ $_re ]]; then
-                _drive="${BASH_REMATCH[1]}"
-                _rest="${BASH_REMATCH[2]}"
-            fi
-            if [ -n "$_drive" ]; then
-                _drive=$(printf '%s' "$_drive" | LC_ALL=C tr '[:lower:]' '[:upper:]')
-                _rest="${_rest//\//\\}"
-                printf '%s' "${_drive}:\\${_rest}"
-                return 0
-            fi
-            ;;
-    esac
+    if [ "$OSTYPE" = msys ] || [ "$OSTYPE" = cygwin ]; then
+        if [[ "$_in" =~ ^/cygdrive/([a-zA-Z])/(.*)$ ]]; then
+            _drive="${BASH_REMATCH[1]}"
+            _rest="${BASH_REMATCH[2]}"
+        elif [[ "$_in" =~ ^/([a-zA-Z])/(.*)$ ]]; then
+            _drive="${BASH_REMATCH[1]}"
+            _rest="${BASH_REMATCH[2]}"
+        elif [[ "$_in" =~ $_re ]]; then
+            _drive="${BASH_REMATCH[1]}"
+            _rest="${BASH_REMATCH[2]}"
+        fi
+        if [ -n "$_drive" ]; then
+            _drive=$(printf '%s' "$_drive" | LC_ALL=C tr '[:lower:]' '[:upper:]')
+            _rest="${_rest//\//\\}"
+            printf '%s' "${_drive}:\\${_rest}"
+            return 0
+        fi
+    fi
     printf '%s' "$_in"
 }
 
 _remember_forward_slash() {
-    case "$OSTYPE" in
-        msys|cygwin) printf '%s' "${1//\\//}" ;;
-        *) printf '%s' "$1" ;;
-    esac
+    if [ "$OSTYPE" = msys ] || [ "$OSTYPE" = cygwin ]; then
+        printf '%s' "${1//\\//}"
+    else
+        printf '%s' "$1"
+    fi
 }
 
 _remember_forward_slash_into() {
-    case "$OSTYPE" in
-        msys|cygwin) printf -v "$1" '%s' "${2//\\//}" ;;
-        *) printf -v "$1" '%s' "$2" ;;
-    esac
+    if [ "$OSTYPE" = msys ] || [ "$OSTYPE" = cygwin ]; then
+        printf -v "$1" '%s' "${2//\\//}"
+    else
+        printf -v "$1" '%s' "$2"
+    fi
 }
 
 if [ -n "$CLAUDE_PROJECT_DIR" ]; then
@@ -153,10 +153,9 @@ _remember_tools_cache_load() {
     [ -n "$_jq" ] || return 1
     [ -n "$_path" ] || return 1
     [ "$_path" = "$PATH" ] || return 1
-    case "$_jq" in
-        jq|_jq_fallback) ;;
-        *) return 1 ;;
-    esac
+    if [ "$_jq" != jq ] && [ "$_jq" != _jq_fallback ]; then
+        return 1
+    fi
     PYTHON="$_py"
     JQ="$_jq"
     export PYTHON JQ
@@ -259,26 +258,28 @@ fi
 fi
 
 _remember_run_python() {
-    case "$PYTHON" in
-        python3) python3 "$@" ;;
-        python) python "$@" ;;
-        py\ -3) py -3 "$@" ;;
-        py) py "$@" ;;
-        *)
-            echo "FATAL: _remember_run_python: unrecognized PYTHON value '$PYTHON'" >&2
-            return 127
-            ;;
-    esac
+    if [ "$PYTHON" = python3 ]; then
+        python3 "$@"
+    elif [ "$PYTHON" = python ]; then
+        python "$@"
+    elif [ "$PYTHON" = "py -3" ]; then
+        py -3 "$@"
+    elif [ "$PYTHON" = py ]; then
+        py "$@"
+    else
+        echo "FATAL: _remember_run_python: unrecognized PYTHON value '$PYTHON'" >&2
+        return 127
+    fi
 }
 _remember_run_jq() {
-    case "$JQ" in
-        jq) jq "$@" ;;
-        _jq_fallback) _jq_fallback "$@" ;;
-        *)
-            echo "FATAL: _remember_run_jq: unrecognized JQ value '$JQ'" >&2
-            return 127
-            ;;
-    esac
+    if [ "$JQ" = jq ]; then
+        jq "$@"
+    elif [ "$JQ" = _jq_fallback ]; then
+        _jq_fallback "$@"
+    else
+        echo "FATAL: _remember_run_jq: unrecognized JQ value '$JQ'" >&2
+        return 127
+    fi
 }
 
 
@@ -295,13 +296,17 @@ __remember_src_lib_slug() {
 _REMEMBER_LIB_SLUG_LOADED=1
 
 _remember_slug_run_python() {
-    case "${PYTHON:-python3}" in
-        python3) python3 "$@" ;;
-        python) python "$@" ;;
-        py\ -3) py -3 "$@" ;;
-        py) py "$@" ;;
-        *) return 127 ;;
-    esac
+    if [ "${PYTHON:-python3}" = python3 ]; then
+        python3 "$@"
+    elif [ "${PYTHON:-python3}" = python ]; then
+        python "$@"
+    elif [ "${PYTHON:-python3}" = "py -3" ]; then
+        py -3 "$@"
+    elif [ "${PYTHON:-python3}" = py ]; then
+        py "$@"
+    else
+        return 127
+    fi
 }
 
 _remember_build_slug_sed() {
@@ -349,10 +354,9 @@ claude_projects_dir() {
     if [ -n "$_stripped" ]; then
         _root="$_stripped"
     else
-        case "$_root" in
-            /*) _root="" ;;
-            *) ;;
-        esac
+        if [ "${_root#/}" != "$_root" ]; then
+            _root=""
+        fi
     fi
 
     printf '%s/projects' "$_root"
@@ -360,9 +364,8 @@ claude_projects_dir() {
 
 _remember_should_check_utf8() {
     [ "${REMEMBER_UTF8_STRICT:-0}" = "1" ] && return 0
-    case "${OSTYPE:-}" in
-        linux*) return 0 ;;
-    esac
+    local _os="${OSTYPE:-}"
+    [ "${_os#linux}" != "$_os" ] && return 0
     return 1
 }
 
@@ -384,38 +387,35 @@ session_dir_slug() {
         fi
         path="$winpath"
     fi
-    case "$path" in
-        ?:*)
-            _drive_at="${_REMEMBER_DRIVE_UPPER%%"${path:0:1}"*}"
-            if [ "$_drive_at" != "$_REMEMBER_DRIVE_UPPER" ]; then
-                path="${_REMEMBER_DRIVE_LOWER:${#_drive_at}:1}${path:1}"
-            fi
-            ;;
-    esac
+    if [ "${path#?:}" != "$path" ]; then
+        _drive_at="${_REMEMBER_DRIVE_UPPER%%"${path:0:1}"*}"
+        if [ "$_drive_at" != "$_REMEMBER_DRIVE_UPPER" ]; then
+            path="${_REMEMBER_DRIVE_LOWER:${#_drive_at}:1}${path:1}"
+        fi
+    fi
     local _orig="$path"
 
     if _remember_should_check_utf8; then
     local _high_byte=0 _lc_was_set="${LC_ALL+set}" _lc_prev="${LC_ALL:-}"
     LC_ALL=C
-    case "$path" in
-        *[!$'\001'-$'\177']*) _high_byte=1 ;;
-    esac
+    local _hb_glob="[!"$'\001'"-"$'\177'"]"
+    if [[ "$path" == *$_hb_glob* ]]; then
+        _high_byte=1
+    fi
     if [ -n "$_lc_was_set" ]; then LC_ALL="$_lc_prev"; else unset LC_ALL; fi
 
-    case "$_high_byte" in
-        1)
-            if command -v iconv >/dev/null 2>&1 \
-                && ! printf '%s' "$path" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1; then
-                local _py_slug="${PIPELINE_DIR:-}/pipeline/slug.py"
-                if [ -f "$_py_slug" ]; then
-                    local _decoded
-                    declare -f _remember_python >/dev/null 2>&1 && _remember_python
-                    _decoded=$(_remember_slug_run_python "$_py_slug" "$path" 2>/dev/null) \
-                        && [ -n "$_decoded" ] && { printf '%s\n' "$_decoded"; return 0; }
-                fi
+    if [ "$_high_byte" = 1 ]; then
+        if command -v iconv >/dev/null 2>&1 \
+            && ! printf '%s' "$path" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1; then
+            local _py_slug="${PIPELINE_DIR:-}/pipeline/slug.py"
+            if [ -f "$_py_slug" ]; then
+                local _decoded
+                declare -f _remember_python >/dev/null 2>&1 && _remember_python
+                _decoded=$(_remember_slug_run_python "$_py_slug" "$path" 2>/dev/null) \
+                    && [ -n "$_decoded" ] && { printf '%s\n' "$_decoded"; return 0; }
             fi
-            ;;
-    esac
+        fi
+    fi
     fi
 
     path=${path//$'\n'/-}
@@ -435,9 +435,9 @@ session_dir_slug() {
         _hash=""
     fi
 
-    case "$_hash" in
-        *[!0-9a-z]*) _hash="" ;;
-    esac
+    if [[ "$_hash" == *[!0-9a-z]* ]]; then
+        _hash=""
+    fi
 
     if [ -z "$_hash" ]; then
         printf '%s\n' "$_slug"
@@ -534,15 +534,14 @@ if [ "$REMEMBER_DIR" != "$_legacy_dir" ] && [ ! -L "$_legacy_dir" ] && [ -d "$_l
         _legacy_cfg="$_legacy_dir/config.json"
         _legacy_cfg_holdout=""
         if [ -e "$_legacy_cfg" ] || [ -L "$_legacy_cfg" ]; then
-            case "$(_remember_config_tracked_status "$_mem_proj" ".remember/config.json")" in
-                untracked) : ;;
-                *)
-                    _legacy_cfg_holdout=$(mktemp "${SYS_TMPDIR:-/tmp}/remember-legacy-cfg-XXXXXX" 2>/dev/null) || _legacy_cfg_holdout=""
-                    if [ -n "$_legacy_cfg_holdout" ]; then
-                        mv "$_legacy_cfg" "$_legacy_cfg_holdout" 2>/dev/null || _legacy_cfg_holdout=""
-                    fi
-                    ;;
-            esac
+            _legacy_cfg_tracked_answer=$(_remember_config_tracked_status "$_mem_proj" ".remember/config.json") || true
+            if [ "$_legacy_cfg_tracked_answer" != untracked ]; then
+                _legacy_cfg_holdout=$(mktemp "${SYS_TMPDIR:-/tmp}/remember-legacy-cfg-XXXXXX" 2>/dev/null) || _legacy_cfg_holdout=""
+                if [ -n "$_legacy_cfg_holdout" ]; then
+                    mv "$_legacy_cfg" "$_legacy_cfg_holdout" 2>/dev/null || _legacy_cfg_holdout=""
+                fi
+            fi
+            unset _legacy_cfg_tracked_answer
         fi
 
         if mv "$_legacy_dir" "$REMEMBER_DIR" 2>/dev/null; then
@@ -626,24 +625,20 @@ fi
 
 if [ -d "$REMEMBER_DIR" ]; then
     [ -f "$REMEMBER_DIR/.install-marker" ] \
-        || { echo 'This file marks when remember was first bootstrapped here. Read only by scripts/doctor.sh (#401); do not delete it.' \
+        || { echo 'This file marks when remember was first bootstrapped here. Read only by /remember:doctor (#401); do not delete it.' \
             > "$REMEMBER_DIR/.install-marker"; } 2>/dev/null
 fi
 
 if [ -d "$REMEMBER_DIR" ]; then
     _mem_bd_glob_dir="$REMEMBER_DIR"
     _mem_bd_glob_proj="$_mem_proj"
-    case "$OSTYPE" in
-        msys|cygwin)
-            _mem_bd_glob_dir="${_mem_bd_glob_dir//\\//}"
-            _mem_bd_glob_proj="${_mem_bd_glob_proj//\\//}"
-            ;;
-    esac
-    case "$_mem_bd_glob_dir" in
-        "$_mem_bd_glob_proj"/*)
-            [ -f "$REMEMBER_DIR/.gitignore" ] || { echo '*' > "$REMEMBER_DIR/.gitignore"; } 2>/dev/null
-            ;;
-    esac
+    if [ "$OSTYPE" = msys ] || [ "$OSTYPE" = cygwin ]; then
+        _mem_bd_glob_dir="${_mem_bd_glob_dir//\\//}"
+        _mem_bd_glob_proj="${_mem_bd_glob_proj//\\//}"
+    fi
+    if [ "${_mem_bd_glob_dir#"$_mem_bd_glob_proj"/}" != "$_mem_bd_glob_dir" ]; then
+        [ -f "$REMEMBER_DIR/.gitignore" ] || { echo '*' > "$REMEMBER_DIR/.gitignore"; } 2>/dev/null
+    fi
 fi
 unset _mem_proj _mem_bd_glob_dir _mem_bd_glob_proj
 
@@ -655,15 +650,13 @@ elif [ "${BASH_VERSINFO[0]:-0}" -eq 4 ] 2>/dev/null && [ "${BASH_VERSINFO[1]:-0}
 fi
 if [ -d "$REMEMBER_DIR/logs" ]; then
     _remember_bd_keep_fd2=""
-    case "$-" in
-        (*x*)
-            if [ "$_remember_bd_has_xtracefd" = "0" ]; then
-                _remember_bd_keep_fd2="an xtrace is running (this bash predates BASH_XTRACEFD, added in 4.1, so xtrace stays on fd 2 regardless of the variable)"
-            elif [ "${BASH_XTRACEFD:-2}" = "2" ]; then
-                _remember_bd_keep_fd2="an xtrace is running on fd 2"
-            fi
-            ;;
-    esac
+    if [[ "$-" == *x* ]]; then
+        if [ "$_remember_bd_has_xtracefd" = "0" ]; then
+            _remember_bd_keep_fd2="an xtrace is running (this bash predates BASH_XTRACEFD, added in 4.1, so xtrace stays on fd 2 regardless of the variable)"
+        elif [ "${BASH_XTRACEFD:-2}" = "2" ]; then
+            _remember_bd_keep_fd2="an xtrace is running on fd 2"
+        fi
+    fi
     [ "${REMEMBER_TRACE:-}" = "1" ] && _remember_bd_keep_fd2="REMEMBER_TRACE=1"
     if [ -n "$_remember_bd_keep_fd2" ]; then
         printf 'remember: %s, so stderr is NOT being redirected to %s -- point BASH_XTRACEFD at its own fd to get both (#690)\n' \
@@ -734,17 +727,15 @@ _resolve_remember_dir() {
     local data_dir="$1"
     local proj="$2"
 
-    case "$data_dir" in
-        /*|~*|[A-Za-z]:[/\\]*)
-            local slug
-            slug=$(session_dir_slug "$proj")
-            local expanded="${data_dir/#\~/$HOME}"
-            echo "${expanded//\{slug\}/$slug}"
-            ;;
-        *)
-            echo "${proj}/${data_dir}"
-            ;;
-    esac
+    if [ "${data_dir#/}" != "$data_dir" ] || [ "${data_dir#[~]}" != "$data_dir" ] \
+        || [ "${data_dir#[A-Za-z]:[/\\]}" != "$data_dir" ]; then
+        local slug
+        slug=$(session_dir_slug "$proj")
+        local expanded="${data_dir/#\~/$HOME}"
+        echo "${expanded//\{slug\}/$slug}"
+    else
+        echo "${proj}/${data_dir}"
+    fi
 }
 
 _set_store_root() {
@@ -752,10 +743,10 @@ _set_store_root() {
     local data_dir="$1" prefix
     REMEMBER_STORE_ROOT=""
 
-    case "$data_dir" in
-        /*|~*|[A-Za-z]:[/\\]*) ;;
-        *) return 0 ;;
-    esac
+    if [ "${data_dir#/}" = "$data_dir" ] && [ "${data_dir#[~]}" = "$data_dir" ] \
+        && [ "${data_dir#[A-Za-z]:[/\\]}" = "$data_dir" ]; then
+        return 0
+    fi
     [ "${data_dir#*\{slug\}}" != "$data_dir" ] || return 0
 
     prefix="${data_dir%%\{slug\}*}"
@@ -769,9 +760,10 @@ _set_store_root() {
         fi
     done
 
-    case "$prefix" in
-        ''|/|[A-Za-z]:|[A-Za-z]:[/\\]) return 0 ;;
-    esac
+    if [ -z "$prefix" ] || [ "$prefix" = / ] || [ -z "${prefix#[A-Za-z]:}" ] \
+        || [ -z "${prefix#[A-Za-z]:[/\\]}" ]; then
+        return 0
+    fi
 
     REMEMBER_STORE_ROOT="$prefix"
 }
@@ -805,10 +797,12 @@ _project_cfg="${REMEMBER_DIR}/config.json"
 
 _classify_project_cfg_haiku_trust() {
     local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
-    case "$_data_dir_raw" in
-        /*|~*|[A-Za-z]:[/\\]*) _project_cfg_haiku_untrusted=0 ;;
-        *) _project_cfg_haiku_untrusted=1 ;;
-    esac
+    if [ "${_data_dir_raw#/}" != "$_data_dir_raw" ] || [ "${_data_dir_raw#[~]}" != "$_data_dir_raw" ] \
+        || [ "${_data_dir_raw#[A-Za-z]:[/\\]}" != "$_data_dir_raw" ]; then
+        _project_cfg_haiku_untrusted=0
+    else
+        _project_cfg_haiku_untrusted=1
+    fi
 }
 _classify_project_cfg_haiku_trust
 
@@ -870,10 +864,13 @@ _remember_config_tracked_status() {
 
 _project_cfg_model_reject_untrusted=0
 if [ "$_project_cfg_haiku_untrusted" = "1" ] && [ -f "$_project_cfg" ]; then
-    case "$(_remember_config_tracked_status "${_project_cfg%/*}" "${_project_cfg##*/}")" in
-        untracked) _project_cfg_model_reject_untrusted=0 ;;
-        *) _project_cfg_model_reject_untrusted=1 ;;  # tracked or could-not-tell -> fail CLOSED
-    esac
+    _project_cfg_tracked_answer=$(_remember_config_tracked_status "${_project_cfg%/*}" "${_project_cfg##*/}") || true
+    if [ "$_project_cfg_tracked_answer" = untracked ]; then
+        _project_cfg_model_reject_untrusted=0
+    else
+        _project_cfg_model_reject_untrusted=1  # tracked or could-not-tell -> fail CLOSED
+    fi
+    unset _project_cfg_tracked_answer
 fi
 
 if [ -L "$_project_cfg" ]; then
@@ -936,13 +933,17 @@ elif [ "${#_cfg_sources[@]}" -gt 0 ]; then
     rm -f "$_project_drop_marker" 2>/dev/null
     _py_merge_rc=0
     _lmd_run_python() {
-        case "${PYTHON:-python3}" in
-            python3) python3 "$@" ;;
-            python) python "$@" ;;
-            py\ -3) py -3 "$@" ;;
-            py) py "$@" ;;
-            *) return 127 ;;
-        esac
+        if [ "${PYTHON:-python3}" = python3 ]; then
+            python3 "$@"
+        elif [ "${PYTHON:-python3}" = python ]; then
+            python "$@"
+        elif [ "${PYTHON:-python3}" = "py -3" ]; then
+            py -3 "$@"
+        elif [ "${PYTHON:-python3}" = py ]; then
+            py "$@"
+        else
+            return 127
+        fi
     }
     _lmd_py_dir="${BASH_SOURCE[0]%/*}"
     [ "$_lmd_py_dir" = "${BASH_SOURCE[0]}" ] && _lmd_py_dir="$(pwd)"
@@ -1035,9 +1036,9 @@ _remember_cfg_table_get_into() {
 }
 
 _config_is_private_path() {
-    case "$1" in
-        .haiku|.haiku.*) return 0 ;;
-    esac
+    if [ "$1" = .haiku ] || [ "${1#.haiku.}" != "$1" ]; then
+        return 0
+    fi
     return 1
 }
 
@@ -1058,10 +1059,11 @@ _remember_cfg_flatten_cache_sources() {
 }
 
 _remember_cfg_flatten_cache_is_standard_merge() {
-    case "${REMEMBER_CONFIG:-}" in
-        */remember-config-*) return 0 ;;
-        *) return 1 ;;
-    esac
+    local _cfg_path="${REMEMBER_CONFIG:-}"
+    if [[ "$_cfg_path" == */remember-config-* ]]; then
+        return 0
+    fi
+    return 1
 }
 
 _remember_cfg_flatten_cache_valid_value() {
@@ -1138,12 +1140,10 @@ _remember_cfg_flatten_cache_load() {
             _stage=2
             if [ "${_line#'#RCFG_EXISTS='}" != "$_line" ]; then
                 _exists_raw="${_line#'#RCFG_EXISTS='}"
-                case "$_exists_raw" in
-                    *[!01]*|'')
-                        rm -f "$_f" 2>/dev/null
-                        return 1
-                        ;;
-                esac
+                if [[ "$_exists_raw" == *[!01]* ]] || [ -z "$_exists_raw" ]; then
+                    rm -f "$_f" 2>/dev/null
+                    return 1
+                fi
                 continue
             else
                 rm -f "$_f" 2>/dev/null
@@ -1273,13 +1273,17 @@ config() {
 }
 
 _remember_log_run_python() {
-    case "${PYTHON:-python3}" in
-        python3) python3 "$@" ;;
-        python) python "$@" ;;
-        py\ -3) py -3 "$@" ;;
-        py) py "$@" ;;
-        *) return 127 ;;
-    esac
+    if [ "${PYTHON:-python3}" = python3 ]; then
+        python3 "$@"
+    elif [ "${PYTHON:-python3}" = python ]; then
+        python "$@"
+    elif [ "${PYTHON:-python3}" = "py -3" ]; then
+        py -3 "$@"
+    elif [ "${PYTHON:-python3}" = py ]; then
+        py "$@"
+    else
+        return 127
+    fi
 }
 
 config_into() {
@@ -1337,10 +1341,9 @@ config_into REMEMBER_TZ ".timezone" ""
 export REMEMBER_TZ
 
 config_into REMEMBER_PROMPT_STAMP ".prompt_stamp" "full"
-case "$REMEMBER_PROMPT_STAMP" in
-    stable|off) ;;
-    *) REMEMBER_PROMPT_STAMP="full" ;;
-esac
+if [ "$REMEMBER_PROMPT_STAMP" != stable ] && [ "$REMEMBER_PROMPT_STAMP" != off ]; then
+    REMEMBER_PROMPT_STAMP="full"
+fi
 export REMEMBER_PROMPT_STAMP
 
 config_into REMEMBER_SAVE_COOLDOWN ".cooldowns.save_seconds" 120
@@ -1547,9 +1550,9 @@ _dispatch_supervise() {
             rm -f "$_sentinel" 2>/dev/null || true
         fi
     elif [ "$_budget" -gt 0 ]; then
-        case "$_DISPATCH_RC" in
-            143|137) _DISPATCH_TIMEDOUT=1 ;;
-        esac
+        if [ "$_DISPATCH_RC" = 143 ] || [ "$_DISPATCH_RC" = 137 ]; then
+            _DISPATCH_TIMEDOUT=1
+        fi
     fi
     return 0
 }
@@ -1678,9 +1681,10 @@ fi
 [ "${REMEMBER_NO_PRINTF_T:-0}" = "1" ] && _REMEMBER_PRINTF_T=0
 
 _remember_date_builtin_ok() {
-    case "$1" in
-        *%-*|*%_*|*%0*|*%^*|*%#*) return 1 ;;
-    esac
+    if [[ "$1" == *"%-"* ]] || [[ "$1" == *"%_"* ]] || [[ "$1" == *"%0"* ]] \
+        || [[ "$1" == *"%^"* ]] || [[ "$1" == *"%#"* ]]; then
+        return 1
+    fi
     return 0
 }
 
@@ -1720,26 +1724,24 @@ _remember_env_cache_normalize_into() {
     local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
     local _var="$1" _in="$2" _drive="" _rest=""
     local _re='^([a-zA-Z]):[/\](.*)$'
-    case "$OSTYPE" in
-        msys|cygwin)
-            if [[ "$_in" =~ ^/cygdrive/([a-zA-Z])/(.*)$ ]]; then
-                _drive="${BASH_REMATCH[1]}"
-                _rest="${BASH_REMATCH[2]}"
-            elif [[ "$_in" =~ ^/([a-zA-Z])/(.*)$ ]]; then
-                _drive="${BASH_REMATCH[1]}"
-                _rest="${BASH_REMATCH[2]}"
-            elif [[ "$_in" =~ $_re ]]; then
-                _drive="${BASH_REMATCH[1]}"
-                _rest="${BASH_REMATCH[2]}"
-            fi
-            if [ -n "$_drive" ]; then
-                _drive=$(printf '%s' "$_drive" | LC_ALL=C tr '[:lower:]' '[:upper:]')
-                _rest="${_rest//\//\\}"
-                printf -v "$_var" '%s:\\%s' "$_drive" "$_rest"
-                return 0
-            fi
-            ;;
-    esac
+    if [ "$OSTYPE" = msys ] || [ "$OSTYPE" = cygwin ]; then
+        if [[ "$_in" =~ ^/cygdrive/([a-zA-Z])/(.*)$ ]]; then
+            _drive="${BASH_REMATCH[1]}"
+            _rest="${BASH_REMATCH[2]}"
+        elif [[ "$_in" =~ ^/([a-zA-Z])/(.*)$ ]]; then
+            _drive="${BASH_REMATCH[1]}"
+            _rest="${BASH_REMATCH[2]}"
+        elif [[ "$_in" =~ $_re ]]; then
+            _drive="${BASH_REMATCH[1]}"
+            _rest="${BASH_REMATCH[2]}"
+        fi
+        if [ -n "$_drive" ]; then
+            _drive=$(printf '%s' "$_drive" | LC_ALL=C tr '[:lower:]' '[:upper:]')
+            _rest="${_rest//\//\\}"
+            printf -v "$_var" '%s:\\%s' "$_drive" "$_rest"
+            return 0
+        fi
+    fi
     printf -v "$_var" '%s' "$_in"
 }
 
@@ -1970,10 +1972,8 @@ _remember_root_tracked_state_into() {
 _REMEMBER_REFUSED_TRACKED_STATES="tracked unavailable symlinked-ancestor"
 
 _remember_tracked_state_is_refused() {
-    case " $_REMEMBER_REFUSED_TRACKED_STATES " in
-        (*" $1 "*) return 0 ;;
-        (*) return 1 ;;
-    esac
+    local _ls=" $_REMEMBER_REFUSED_TRACKED_STATES "
+    [[ "$_ls" == *" $1 "* ]]
 }
 
 _REMEMBER_FTS_SYM_DIRS=()
@@ -2075,24 +2075,19 @@ _remember_may_inject() {
     _remember_in_project_store || return 0
     _remember_file_tracked_state_into _mi_state "$_mi_file"
     if _remember_tracked_state_is_refused "$_mi_state"; then
-        case "$_mi_state" in
-            (tracked)
-                _REMEMBER_INJECT_REFUSAL="$_mi_file is tracked by this repository's own git index. This plugin never commits a memory file itself (.remember/.gitignore excludes the whole directory), so a tracked one was shipped by the repository, not written by your own /remember. Not injecting it. If it is genuinely yours: git rm --cached it. If you did not add it: delete it and consider what else the commit that added it changed."
-                log "$_mi_component" "refused injecting $_mi_file: git-tracked"
-                ;;
-            (unavailable)
-                _REMEMBER_INJECT_REFUSAL="$_mi_file could not be checked against this repository's git index (git is missing, or the check itself failed) -- refusing rather than injecting unverified. Run /remember:doctor to see why git could not be asked."
-                log "$_mi_component" "refused injecting $_mi_file: git status unavailable"
-                ;;
-            (symlinked-ancestor)
-                _REMEMBER_INJECT_REFUSAL="$_mi_file sits under a directory that is itself a symlink -- refusing to follow it into session context. This plugin never creates a symlink inside a memory store; if you did not create this one, treat it as planted and inspect what it points at before deleting it."
-                log "$_mi_component" "refused injecting $_mi_file: symlinked ancestor directory"
-                ;;
-            (*)
-                _REMEMBER_INJECT_REFUSAL="$_mi_file could not be verified (tracked state: $_mi_state) -- refusing rather than injecting unverified."
-                log "$_mi_component" "refused injecting $_mi_file: unrecognised refused state $_mi_state"
-                ;;
-        esac
+        if [ "$_mi_state" = tracked ]; then
+            _REMEMBER_INJECT_REFUSAL="$_mi_file is tracked by this repository's own git index. This plugin never commits a memory file itself (.remember/.gitignore excludes the whole directory), so a tracked one was shipped by the repository, not written by your own /remember. Not injecting it. If it is genuinely yours: git rm --cached it. If you did not add it: delete it and consider what else the commit that added it changed."
+            log "$_mi_component" "refused injecting $_mi_file: git-tracked"
+        elif [ "$_mi_state" = unavailable ]; then
+            _REMEMBER_INJECT_REFUSAL="$_mi_file could not be checked against this repository's git index (git is missing, or the check itself failed) -- refusing rather than injecting unverified. Run /remember:doctor to see why git could not be asked."
+            log "$_mi_component" "refused injecting $_mi_file: git status unavailable"
+        elif [ "$_mi_state" = symlinked-ancestor ]; then
+            _REMEMBER_INJECT_REFUSAL="$_mi_file sits under a directory that is itself a symlink -- refusing to follow it into session context. This plugin never creates a symlink inside a memory store; if you did not create this one, treat it as planted and inspect what it points at before deleting it."
+            log "$_mi_component" "refused injecting $_mi_file: symlinked ancestor directory"
+        else
+            _REMEMBER_INJECT_REFUSAL="$_mi_file could not be verified (tracked state: $_mi_state) -- refusing rather than injecting unverified."
+            log "$_mi_component" "refused injecting $_mi_file: unrecognised refused state $_mi_state"
+        fi
         return 1
     fi
     return 0
@@ -2101,12 +2096,11 @@ _remember_may_inject() {
 _remember_emit_file() {
     local _remember_emit_max="${REMEMBER_EMIT_READ_MAX:-16384}"
     if [ -z "$_remember_emit_max" ] || [ "${_remember_emit_max#*[!0-9]}" != "$_remember_emit_max" ]; then _remember_emit_max=16384; fi
-    case "${2:-}" in
-        (''|*[!0-9]*)
-            cat "$1"
-            return 0
-            ;;
-    esac
+    local _sz="${2:-}"
+    if [ -z "$_sz" ] || [[ "$_sz" == *[!0-9]* ]]; then
+        cat "$1"
+        return 0
+    fi
     if [ "$2" -gt "$_remember_emit_max" ]; then
         cat "$1"
         return 0
@@ -2176,16 +2170,15 @@ _remember_render_memory_section() {
                 continue
             fi
             if [ -n "${_REMEMBER_BUDGET_EXCLUDE:-}" ]; then
-                case "${_remember_nl}${_REMEMBER_BUDGET_EXCLUDE}" in
-                    (*"${_remember_nl}${MFILE}${_remember_nl}"*)
-                        _remember_budget_dropped="${_remember_budget_dropped}${MFILE}"
-                        if [ -n "${MFILE_BYTES:-}" ]; then
-                            _remember_budget_dropped="${_remember_budget_dropped} (${MFILE_BYTES} bytes)"
-                        fi
-                        _remember_budget_dropped="${_remember_budget_dropped}${_remember_nl}"
-                        continue
-                        ;;
-                esac
+                _remember_budget_hay="${_remember_nl}${_REMEMBER_BUDGET_EXCLUDE}"
+                if [[ "$_remember_budget_hay" == *"${_remember_nl}${MFILE}${_remember_nl}"* ]]; then
+                    _remember_budget_dropped="${_remember_budget_dropped}${MFILE}"
+                    if [ -n "${MFILE_BYTES:-}" ]; then
+                        _remember_budget_dropped="${_remember_budget_dropped} (${MFILE_BYTES} bytes)"
+                    fi
+                    _remember_budget_dropped="${_remember_budget_dropped}${_remember_nl}"
+                    continue
+                fi
             fi
             BASENAME="${MFILE##*/}"
             echo "--- $BASENAME ---"
@@ -2234,10 +2227,11 @@ _remember_render_memory_section() {
         DEFERRED_MEMORY=""
         [ "${#_remember_deferred[@]}" -gt 0 ] && DEFERRED_MEMORY=$(for MFILE in "${_remember_deferred[@]}"; do
             _remember_wc_size_get_into MFILE_BYTES "$MFILE"
-            case "$MFILE_BYTES" in
-                (''|*[!0-9]*) printf '%s (size unknown)\n' "$MFILE" ;;
-                (*) printf '%s (%s bytes)\n' "$MFILE" "$MFILE_BYTES" ;;
-            esac
+            if [ -z "$MFILE_BYTES" ] || [[ "$MFILE_BYTES" == *[!0-9]* ]]; then
+                printf '%s (size unknown)\n' "$MFILE"
+            else
+                printf '%s (%s bytes)\n' "$MFILE" "$MFILE_BYTES"
+            fi
         done)
         if [ -n "$_remember_deferred_refused" ]; then
             echo "--- refused, would have been listed as deferred (not injected) ---"
@@ -2386,12 +2380,10 @@ _remember_session_start_max_bytes_into() {
     local _outvar="$1"
     local _val=""
     config_into _val ".thresholds.session_start_max_bytes" 9000
-    case "$_val" in
-        (''|*[!0-9]*)
-            log "memory-context" "WARNING: thresholds.session_start_max_bytes is not a valid non-negative integer (got $_val) -- using default 9000"
-            _val=9000
-            ;;
-    esac
+    if [ -z "$_val" ] || [[ "$_val" == *[!0-9]* ]]; then
+        log "memory-context" "WARNING: thresholds.session_start_max_bytes is not a valid non-negative integer (got $_val) -- using default 9000"
+        _val=9000
+    fi
     printf -v "$_outvar" %s "$_val"
 }
 
@@ -2470,9 +2462,9 @@ _lock_try_steal() {
         for _abandoned in "${_dir}"/pid.stealing.*; do
             [ -e "$_abandoned" ] || continue
             _owner="${_abandoned##*.}"
-            case "$_owner" in
-                *[!0-9]*) continue ;;
-            esac
+            if [[ "$_owner" == *[!0-9]* ]]; then
+                continue
+            fi
             kill -0 "$_owner" 2>/dev/null && continue
             if [ ! -e "${_dir}/pid" ]; then
                 mv "$_abandoned" "${_dir}/pid" 2>/dev/null || true
@@ -2485,9 +2477,9 @@ _lock_try_steal() {
     _pid=$(cat "${_dir}/pid" 2>/dev/null) || true
 
     [ -z "$_pid" ] && return 1
-    case "$_pid" in
-        *[!0-9]*) return 1 ;;
-    esac
+    if [[ "$_pid" == *[!0-9]* ]]; then
+        return 1
+    fi
     kill -0 "$_pid" 2>/dev/null && return 1
 
     mv "${_dir}/pid" "$_claim" 2>/dev/null || return 1
@@ -2577,16 +2569,17 @@ fi
 
 _lock_timing_us_to_ms() {
     local _r="$1" _s _f
-    case "$_r" in
-        *[.,]*) _s="${_r%%[.,]*}"; _f="${_r#*[.,]}" ;;
-        *)      _s="$_r"; _f="000000" ;;
-    esac
+    if [[ "$_r" == *[.,]* ]]; then
+        _s="${_r%%[.,]*}"; _f="${_r#*[.,]}"
+    else
+        _s="$_r"; _f="000000"
+    fi
     if [ -z "$_s" ] || [ "${_s#*[!0-9]}" != "$_s" ]; then
         _LOCK_TIMING_NOW=0; return 0
     fi
-    case "$_f" in
-        *[!0-9]*) _f="000000" ;;
-    esac
+    if [[ "$_f" == *[!0-9]* ]]; then
+        _f="000000"
+    fi
     _f="${_f}000"
     _LOCK_TIMING_NOW=$(( 10#$_s * 1000 + 10#${_f:0:3} ))
     return 0
@@ -2610,19 +2603,15 @@ _lock_timing_s_to_ms() {
 
 _lock_timing_now() {
     local _n
-    case "$_LOCK_TIMING_PRECISION" in
-        us)
-            _lock_timing_us_to_ms "$EPOCHREALTIME"
-            ;;
-        ms)
-            _n=$(date +%s%N 2>/dev/null) || _n=""
-            _lock_timing_ns_to_ms "$_n"
-            ;;
-        *)
-            _n=$(date +%s 2>/dev/null) || _n=""
-            _lock_timing_s_to_ms "$_n"
-            ;;
-    esac
+    if [ "$_LOCK_TIMING_PRECISION" = us ]; then
+        _lock_timing_us_to_ms "$EPOCHREALTIME"
+    elif [ "$_LOCK_TIMING_PRECISION" = ms ]; then
+        _n=$(date +%s%N 2>/dev/null) || _n=""
+        _lock_timing_ns_to_ms "$_n"
+    else
+        _n=$(date +%s 2>/dev/null) || _n=""
+        _lock_timing_s_to_ms "$_n"
+    fi
     return 0
 }
 
@@ -2975,10 +2964,10 @@ fi
 _stdin_json_string() {
     local field="$1" raw="$2" rest prefix value dq
     printf -v dq '\042'
-    case "$raw" in *"$dq$field$dq"*) ;; *) return 1 ;; esac
+    [[ "$raw" == *"$dq$field$dq"* ]] || return 1
     rest=${raw#*"$dq"$field"$dq"}
     prefix=${rest%%"$dq"*}
-    case "$prefix" in *[!:[:space:]]*) return 1 ;; esac
+    if [[ "$prefix" == *[!:[:space:]]* ]]; then return 1; fi
     value=${rest#*"$dq"}
     value=${value%%"$dq"*}
     value=${value//\\\\/\\}
@@ -2990,10 +2979,10 @@ _stdin_json_string_into() {
     local _sjsi_var="$1" _sjsi_field="$2" _sjsi_raw="$3" _sjsi_rest _sjsi_prefix _sjsi_value _sjsi_dq
     printf -v "$_sjsi_var" '%s' ""
     printf -v _sjsi_dq '\042'  # the double quote, as in _stdin_json_string
-    case "$_sjsi_raw" in *"$_sjsi_dq$_sjsi_field$_sjsi_dq"*) ;; *) return 1 ;; esac
+    [[ "$_sjsi_raw" == *"$_sjsi_dq$_sjsi_field$_sjsi_dq"* ]] || return 1
     _sjsi_rest=${_sjsi_raw#*"$_sjsi_dq"$_sjsi_field"$_sjsi_dq"}
     _sjsi_prefix=${_sjsi_rest%%"$_sjsi_dq"*}
-    case "$_sjsi_prefix" in *[!:[:space:]]*) return 1 ;; esac
+    if [[ "$_sjsi_prefix" == *[!:[:space:]]* ]]; then return 1; fi
     _sjsi_value=${_sjsi_rest#*"$_sjsi_dq"}
     _sjsi_value=${_sjsi_value%%"$_sjsi_dq"*}
     _sjsi_value=${_sjsi_value//\\\\/\\}  # decode `\\`, as above (#829)
@@ -3002,9 +2991,10 @@ _stdin_json_string_into() {
 }
 
 _stdin_json_string_into REMEMBER_HOOK_CWD cwd "$HOOK_STDIN" 2>/dev/null
-case "$REMEMBER_HOOK_CWD" in
-    *$'\n'*|*$'\r'*) REMEMBER_HOOK_CWD="" ;;
-esac
+if [[ "$REMEMBER_HOOK_CWD" == *$'\n'* ]] \
+    || [[ "$REMEMBER_HOOK_CWD" == *$'\r'* ]]; then
+    REMEMBER_HOOK_CWD=""
+fi
 export REMEMBER_HOOK_CWD
 
 REMEMBER_PATHS_SOFT_FAIL=1 __remember_src_resolve_paths ${1+"$@"} || exit 0
@@ -3038,21 +3028,24 @@ _stdin_session_id() {
 }
 
 CURRENT_SESSION_ID=$(_stdin_session_id "$HOOK_STDIN" 2>/dev/null) || CURRENT_SESSION_ID=""
-case "$CURRENT_SESSION_ID" in
-    ''|[.]|[.][.]|*[!A-Za-z0-9._-]*) CURRENT_SESSION_ID="" ;;
-esac
+if [ -z "${CURRENT_SESSION_ID#.}" ] || [ -z "${CURRENT_SESSION_ID#..}" ] \
+    || [[ "$CURRENT_SESSION_ID" == *[!A-Za-z0-9._-]* ]]; then
+    CURRENT_SESSION_ID=""
+fi
 
 _stdin_json_string_into REMEMBER_TRANSCRIPT_PATH transcript_path "$HOOK_STDIN" 2>/dev/null
-case "$REMEMBER_TRANSCRIPT_PATH" in
-    *$'\n'*|*$'\r'*) REMEMBER_TRANSCRIPT_PATH="" ;;
-esac
+if [[ "$REMEMBER_TRANSCRIPT_PATH" == *$'\n'* ]] \
+    || [[ "$REMEMBER_TRANSCRIPT_PATH" == *$'\r'* ]]; then
+    REMEMBER_TRANSCRIPT_PATH=""
+fi
 export REMEMBER_TRANSCRIPT_PATH
 
 _stdin_json_string_into SESSION_START_SOURCE source "$HOOK_STDIN" 2>/dev/null
-case "$SESSION_START_SOURCE" in
-    startup|resume|clear|compact|fork) ;;
-    *) SESSION_START_SOURCE="" ;;
-esac
+if [ "$SESSION_START_SOURCE" != startup ] && [ "$SESSION_START_SOURCE" != resume ] \
+    && [ "$SESSION_START_SOURCE" != clear ] \
+    && [ "$SESSION_START_SOURCE" != compact ] && [ "$SESSION_START_SOURCE" != fork ]; then
+    SESSION_START_SOURCE=""
+fi
 
 REMEMBER_HOOK_STDIN_MAX=32768
 _hook_stdin_file=""
@@ -3092,9 +3085,9 @@ if [ "${REMEMBER_DEFER:-1}" != "0" ]; then
         _remember_bss_scripts=("$PLUGIN_ROOT/hooks.d/before_session_start/"*)
         [ "$_remember_bss_was_nullglob" = 1 ] || shopt -u nullglob
         if [ "${#_remember_bss_scripts[@]}" -eq 1 ]; then
-            case "${_remember_bss_scripts[0]}" in
-                (*/50-git-restore.sh) _remember_defer_dispatch=1 ;;
-            esac
+            if [ "${_remember_bss_scripts[0]%/50-git-restore.sh}" != "${_remember_bss_scripts[0]}" ]; then
+                _remember_defer_dispatch=1
+            fi
         fi
         unset _remember_bss_scripts _remember_bss_was_nullglob
     fi
@@ -3205,9 +3198,10 @@ _remember_write_slug_record() {
     if [ -z "$PROJECT_PATH_SLUG" ]; then
         _reason="empty-slug"
     else
-        case "${PROJECT}${SESSIONS_DIR}${REMEMBER_DIR}" in
-            *$'\n'*) _reason="unrepresentable-path" ;;
-        esac
+        local _paths_joined="${PROJECT}${SESSIONS_DIR}${REMEMBER_DIR}"
+        if [[ "$_paths_joined" == *$'\n'* ]]; then
+            _reason="unrepresentable-path"
+        fi
     fi
 
     if [ -n "$_reason" ]; then
@@ -3238,9 +3232,10 @@ _remember_write_slug_index() {
     [ "$REMEMBER_STORE_ROOT" != "$REMEMBER_DIR" ] || return 0
     [ -n "$PROJECT_PATH_SLUG" ] || return 0
 
-    case "${PROJECT}${REMEMBER_DIR}" in
-        *$'\n'*|*$'\t'*) return 0 ;;
-    esac
+    local _paths_joined="${PROJECT}${REMEMBER_DIR}"
+    if [[ "$_paths_joined" == *$'\n'* ]] || [[ "$_paths_joined" == *$'\t'* ]]; then
+        return 0
+    fi
 
     local _dir="$REMEMBER_STORE_ROOT/tmp"
     [ -d "$_dir" ] || mkdir -p "$_dir" 2>/dev/null || return 0
@@ -3325,18 +3320,15 @@ _remember_write_case_divergence() {
         mv -f "$_tmp" "$_dir/case-divergence" 2>/dev/null || rm -f "$_tmp" 2>/dev/null
     fi
 
-    case "$REMEMBER_CASE_STATUS" in
-        diverged)
-            log "case-divergence" "$REMEMBER_CASE_MESSAGE"
-            [ "$_old" = "$_body" ] && return 0
-            printf '%s\n' "$REMEMBER_CASE_MESSAGE" \
-                > "$_dir/case-divergence-notice" 2>/dev/null || true
-            ;;
-        unavailable)
-            [ "$_old" = "$_body" ] && return 0
-            log "case-divergence" "could not check whether this store is known by a second spelling (disk=$REMEMBER_CASE_DISK_STATE${REMEMBER_CASE_DISK_REASON:+/$REMEMBER_CASE_DISK_REASON} git=$REMEMBER_CASE_GIT_STATE${REMEMBER_CASE_GIT_REASON:+/$REMEMBER_CASE_GIT_REASON}) -- this is not a report that they agree"
-            ;;
-    esac
+    if [ "$REMEMBER_CASE_STATUS" = diverged ]; then
+        log "case-divergence" "$REMEMBER_CASE_MESSAGE"
+        [ "$_old" = "$_body" ] && return 0
+        printf '%s\n' "$REMEMBER_CASE_MESSAGE" \
+            > "$_dir/case-divergence-notice" 2>/dev/null || true
+    elif [ "$REMEMBER_CASE_STATUS" = unavailable ]; then
+        [ "$_old" = "$_body" ] && return 0
+        log "case-divergence" "could not check whether this store is known by a second spelling (disk=$REMEMBER_CASE_DISK_STATE${REMEMBER_CASE_DISK_REASON:+/$REMEMBER_CASE_DISK_REASON} git=$REMEMBER_CASE_GIT_STATE${REMEMBER_CASE_GIT_REASON:+/$REMEMBER_CASE_GIT_REASON}) -- this is not a report that they agree"
+    fi
     return 0
 }
 
@@ -3350,9 +3342,9 @@ _transcript_is_pluginless_sdk() {
         rest=${line#*"$dq"message"$dq"}
         if [ "$rest" != "$line" ]; then
             prefix=${rest%%"$dq"*}
-            case "$prefix" in
-                *[!:[:space:]]*) is_dialogue=1 ;;
-            esac
+            if [[ "$prefix" == *[!:[:space:]]* ]]; then
+                is_dialogue=1
+            fi
         fi
         if [ "$is_dialogue" -eq 0 ]; then
             if [ "${line#*"$dq"entrypoint"$dq"}" != "$line" ]; then
@@ -3498,10 +3490,13 @@ SEEN_ID=""
 capture_was_seen() {
     local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
     [ -n "$1" ] || return 1
-    case "$1" in
-        [.]|[.][.]|*[!A-Za-z0-9._-]*) : ;;
-        *) [ -e "$CAPTURE_SEEN_DIR/$1" ] && return 0 ;;
-    esac
+    if [ -n "$1" ] && { [ -z "${1#.}" ] || [ -z "${1#..}" ]; }; then
+        :
+    elif [[ "$1" == *[!A-Za-z0-9._-]* ]]; then
+        :
+    else
+        [ -e "$CAPTURE_SEEN_DIR/$1" ] && return 0
+    fi
     [ "$SEEN_ID" = "$1" ] && return 0
     [ "$1" = "$PREV_ID" ] && [ "$PREV_WAS_SAVED" = "yes" ] && return 0
     [ "$1" != "$PREV_ID" ] && session_was_saved "$1" && return 0
@@ -3597,10 +3592,11 @@ if [ "$_promos_enabled" = "true" ] \
         if [ -f "$marker" ]; then
             local _pk _pv
             while IFS='=' read -r _pk _pv; do
-                case "$_pk" in
-                    ts) last_ts="$_pv" ;;
-                    id) last_id="$_pv" ;;
-                esac
+                if [ "$_pk" = ts ]; then
+                    last_ts="$_pv"
+                elif [ "$_pk" = id ]; then
+                    last_id="$_pv"
+                fi
             done < "$marker"
         fi
         if [ -z "$last_ts" ] || [ "${last_ts#*[!0-9]}" != "$last_ts" ]; then last_ts=0; fi
@@ -3713,9 +3709,9 @@ _REMEMBER_CTX_FILE="$REMEMBER_DIR/tmp/session-start-ctx.$$"
 _REMEMBER_CTX_OK=""
 [ -d "$REMEMBER_DIR/tmp" ] || mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null
 _REMEMBER_CTX_TRACE_ACTIVE=""
-case "$-" in
-    (*x*) _REMEMBER_CTX_TRACE_ACTIVE="1" ;;
-esac
+if [[ "$-" == *x* ]]; then
+    _REMEMBER_CTX_TRACE_ACTIVE="1"
+fi
 [ "${REMEMBER_TRACE:-}" = "1" ] && _REMEMBER_CTX_TRACE_ACTIVE="1"
 if [ -z "$_REMEMBER_CTX_TRACE_ACTIVE" ] && : > "$_REMEMBER_CTX_FILE" 2>/dev/null; then
     exec 3>&1
@@ -3773,11 +3769,13 @@ elif [ -f "$REMEMBER_HANDOFF" ] && [ -s "$REMEMBER_HANDOFF" ]; then
     DELIVERIES=0
     if [ -f "$REMEMBER_HANDOFF_STATE" ]; then
         while IFS='=' read -r _hfield _hval; do
-            case "$_hfield" in
-                (fingerprint) PREV_FP="$_hval" ;;
-                (first_delivered) FIRST_DELIVERED="$_hval" ;;
-                (deliveries) DELIVERIES="$_hval" ;;
-            esac
+            if [ "$_hfield" = fingerprint ]; then
+                PREV_FP="$_hval"
+            elif [ "$_hfield" = first_delivered ]; then
+                FIRST_DELIVERED="$_hval"
+            elif [ "$_hfield" = deliveries ]; then
+                DELIVERIES="$_hval"
+            fi
         done < "$REMEMBER_HANDOFF_STATE"
     fi
     if [ -z "$DELIVERIES" ] || [ "${DELIVERIES#*[!0-9]}" != "$DELIVERIES" ]; then DELIVERIES=0; fi
@@ -3785,12 +3783,10 @@ elif [ -f "$REMEMBER_HANDOFF" ] && [ -s "$REMEMBER_HANDOFF" ]; then
     _remember_handoff_fence_nonce="${RANDOM:-0}${RANDOM:-0}"
     HANDOFF_MAX_REDELIVERIES=""
     config_into HANDOFF_MAX_REDELIVERIES ".thresholds.handoff_max_redeliveries" 3
-    case "$HANDOFF_MAX_REDELIVERIES" in
-        (''|*[!0-9]*)
-            log "hook" "WARNING: thresholds.handoff_max_redeliveries is not a valid non-negative integer (got $HANDOFF_MAX_REDELIVERIES) -- using default 3"
-            HANDOFF_MAX_REDELIVERIES=3
-            ;;
-    esac
+    if [ -z "$HANDOFF_MAX_REDELIVERIES" ] || [[ "$HANDOFF_MAX_REDELIVERIES" == *[!0-9]* ]]; then
+        log "hook" "WARNING: thresholds.handoff_max_redeliveries is not a valid non-negative integer (got $HANDOFF_MAX_REDELIVERIES) -- using default 3"
+        HANDOFF_MAX_REDELIVERIES=3
+    fi
     _remember_handoff_prev_deliveries=0
     if [ -n "$PREV_FP" ] && [ "$HANDOFF_FP" = "$PREV_FP" ]; then
         _remember_handoff_prev_deliveries="$DELIVERIES"
@@ -3837,18 +3833,14 @@ if [ -d "$SESSIONS_DIR" ] && [ -d "$REMEMBER_DIR/tmp" ]; then
             _remember_stale_mtime=$(stat -c %Y "$_remember_stale_record" 2>/dev/null) \
                 || _remember_stale_mtime=$(stat -f %m "$_remember_stale_record" 2>/dev/null) \
                 || _remember_stale_mtime=""
-            case "$_remember_stale_mtime" in
-                (''|*[!0-9]*)
-                    continue
-                    ;;
-            esac
+            if [ -z "$_remember_stale_mtime" ] || [[ "$_remember_stale_mtime" == *[!0-9]* ]]; then
+                continue
+            fi
             _remember_now=""
             _remember_date_into _remember_now +%s
-            case "$_remember_now" in
-                (''|*[!0-9]*)
-                    continue
-                    ;;
-            esac
+            if [ -z "$_remember_now" ] || [[ "$_remember_now" == *[!0-9]* ]]; then
+                continue
+            fi
             if [ "$_remember_now" -gt 0 ] && [ "$_remember_stale_mtime" -gt 0 ] \
                 && [ $((10#$_remember_now - 10#$_remember_stale_mtime)) -lt $((GRACE_MIN * 60)) ]; then
                 continue
@@ -3872,18 +3864,14 @@ if [ -d "$SESSIONS_DIR" ] && [ -d "$REMEMBER_DIR/tmp" ]; then
             _remember_stale_mtime=$(stat -c %Y "$_remember_stale_hint" 2>/dev/null) \
                 || _remember_stale_mtime=$(stat -f %m "$_remember_stale_hint" 2>/dev/null) \
                 || _remember_stale_mtime=""
-            case "$_remember_stale_mtime" in
-                (''|*[!0-9]*)
-                    continue
-                    ;;
-            esac
+            if [ -z "$_remember_stale_mtime" ] || [[ "$_remember_stale_mtime" == *[!0-9]* ]]; then
+                continue
+            fi
             _remember_now=""
             _remember_date_into _remember_now +%s
-            case "$_remember_now" in
-                (''|*[!0-9]*)
-                    continue
-                    ;;
-            esac
+            if [ -z "$_remember_now" ] || [[ "$_remember_now" == *[!0-9]* ]]; then
+                continue
+            fi
             if [ "$_remember_now" -gt 0 ] && [ "$_remember_stale_mtime" -gt 0 ] \
                 && [ $((10#$_remember_now - 10#$_remember_stale_mtime)) -lt $((GRACE_MIN * 60)) ]; then
                 continue
@@ -3937,10 +3925,10 @@ _remember_staging_candidates=("$_remember_staging_glob_dir/today-"*.md)
 [ "$_remember_staging_was_nullglob" = 1 ] || shopt -u nullglob
 STAGING_COUNT=0
 [ "${#_remember_staging_candidates[@]}" -gt 0 ] && for _remember_staging_file in "${_remember_staging_candidates[@]}"; do
-    case "$_remember_staging_file" in
-        (*"today-${TODAY}.md") continue ;;
-        (*.done.md) continue ;;
-    esac
+    if [ "${_remember_staging_file%"today-${TODAY}.md"}" != "$_remember_staging_file" ] \
+        || [ "${_remember_staging_file%.done.md}" != "$_remember_staging_file" ]; then
+        continue
+    fi
     STAGING_COUNT=$((STAGING_COUNT + 1))
 done
 unset _remember_staging_candidates _remember_staging_was_nullglob _remember_staging_file
@@ -3960,13 +3948,12 @@ if [ -n "$_REMEMBER_HOOK_T0" ]; then
     else
         _remember_hook_t1=$(date +%s 2>/dev/null) || _remember_hook_t1=""
     fi
-    case "$_remember_hook_t1" in
-        ''|*[!0-9]*) _REMEMBER_HOOK_ELAPSED_S="" ;;
-        *)
-            _REMEMBER_HOOK_ELAPSED_S=$(( 10#$_remember_hook_t1 - 10#$_REMEMBER_HOOK_T0 ))
-            [ "$_REMEMBER_HOOK_ELAPSED_S" -ge 0 ] || _REMEMBER_HOOK_ELAPSED_S=""
-            ;;
-    esac
+    if [ -z "$_remember_hook_t1" ] || [[ "$_remember_hook_t1" == *[!0-9]* ]]; then
+        _REMEMBER_HOOK_ELAPSED_S=""
+    else
+        _REMEMBER_HOOK_ELAPSED_S=$(( 10#$_remember_hook_t1 - 10#$_REMEMBER_HOOK_T0 ))
+        [ "$_REMEMBER_HOOK_ELAPSED_S" -ge 0 ] || _REMEMBER_HOOK_ELAPSED_S=""
+    fi
     unset _remember_hook_t1
 fi
 if [ -n "$_REMEMBER_HOOK_ELAPSED_S" ]; then

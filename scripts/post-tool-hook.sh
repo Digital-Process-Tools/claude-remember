@@ -15,9 +15,10 @@ fi
 [ "${REMEMBER_NO_PRINTF_T:-0}" = "1" ] && _REMEMBER_PRINTF_T=0
 
 _remember_date_builtin_ok() {
-    case "$1" in
-        *%-*|*%_*|*%0*|*%^*|*%#*) return 1 ;;
-    esac
+    if [[ "$1" == *"%-"* ]] || [[ "$1" == *"%_"* ]] || [[ "$1" == *"%0"* ]] \
+        || [[ "$1" == *"%^"* ]] || [[ "$1" == *"%#"* ]]; then
+        return 1
+    fi
     return 0
 }
 
@@ -57,26 +58,24 @@ _remember_env_cache_normalize_into() {
     local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
     local _var="$1" _in="$2" _drive="" _rest=""
     local _re='^([a-zA-Z]):[/\](.*)$'
-    case "$OSTYPE" in
-        msys|cygwin)
-            if [[ "$_in" =~ ^/cygdrive/([a-zA-Z])/(.*)$ ]]; then
-                _drive="${BASH_REMATCH[1]}"
-                _rest="${BASH_REMATCH[2]}"
-            elif [[ "$_in" =~ ^/([a-zA-Z])/(.*)$ ]]; then
-                _drive="${BASH_REMATCH[1]}"
-                _rest="${BASH_REMATCH[2]}"
-            elif [[ "$_in" =~ $_re ]]; then
-                _drive="${BASH_REMATCH[1]}"
-                _rest="${BASH_REMATCH[2]}"
-            fi
-            if [ -n "$_drive" ]; then
-                _drive=$(printf '%s' "$_drive" | LC_ALL=C tr '[:lower:]' '[:upper:]')
-                _rest="${_rest//\//\\}"
-                printf -v "$_var" '%s:\\%s' "$_drive" "$_rest"
-                return 0
-            fi
-            ;;
-    esac
+    if [ "$OSTYPE" = msys ] || [ "$OSTYPE" = cygwin ]; then
+        if [[ "$_in" =~ ^/cygdrive/([a-zA-Z])/(.*)$ ]]; then
+            _drive="${BASH_REMATCH[1]}"
+            _rest="${BASH_REMATCH[2]}"
+        elif [[ "$_in" =~ ^/([a-zA-Z])/(.*)$ ]]; then
+            _drive="${BASH_REMATCH[1]}"
+            _rest="${BASH_REMATCH[2]}"
+        elif [[ "$_in" =~ $_re ]]; then
+            _drive="${BASH_REMATCH[1]}"
+            _rest="${BASH_REMATCH[2]}"
+        fi
+        if [ -n "$_drive" ]; then
+            _drive=$(printf '%s' "$_drive" | LC_ALL=C tr '[:lower:]' '[:upper:]')
+            _rest="${_rest//\//\\}"
+            printf -v "$_var" '%s:\\%s' "$_drive" "$_rest"
+            return 0
+        fi
+    fi
     printf -v "$_var" '%s' "$_in"
 }
 
@@ -152,8 +151,8 @@ _remember_env_cache_load() {
 
     [ -n "$_dir" ] && [ -n "$_proj" ] && [ -n "$_pipe" ] || return 1
     [ -n "$_stamp" ] || return 1
-    case "$_cooldown" in '' | *[!0-9]*) return 1 ;; esac
-    case "$_delta" in '' | *[!0-9]*) return 1 ;; esac
+    if [ -z "$_cooldown" ] || [[ "$_cooldown" == *[!0-9]* ]]; then return 1; fi
+    if [ -z "$_delta" ] || [[ "$_delta" == *[!0-9]* ]]; then return 1; fi
     [ "$_env_proj" = "${_REMEMBER_ENV_CACHE_PROJECT_DIR:-}" ] || return 1
     [ "$_env_pipe" = "${CLAUDE_PLUGIN_ROOT:-}" ] || return 1
     [ "$_env_home" = "${HOME:-}" ] || return 1
@@ -233,13 +232,17 @@ __remember_src_lib_slug() {
 _REMEMBER_LIB_SLUG_LOADED=1
 
 _remember_slug_run_python() {
-    case "${PYTHON:-python3}" in
-        python3) python3 "$@" ;;
-        python) python "$@" ;;
-        py\ -3) py -3 "$@" ;;
-        py) py "$@" ;;
-        *) return 127 ;;
-    esac
+    if [ "${PYTHON:-python3}" = python3 ]; then
+        python3 "$@"
+    elif [ "${PYTHON:-python3}" = python ]; then
+        python "$@"
+    elif [ "${PYTHON:-python3}" = "py -3" ]; then
+        py -3 "$@"
+    elif [ "${PYTHON:-python3}" = py ]; then
+        py "$@"
+    else
+        return 127
+    fi
 }
 
 _remember_build_slug_sed() {
@@ -287,10 +290,9 @@ claude_projects_dir() {
     if [ -n "$_stripped" ]; then
         _root="$_stripped"
     else
-        case "$_root" in
-            /*) _root="" ;;
-            *) ;;
-        esac
+        if [ "${_root#/}" != "$_root" ]; then
+            _root=""
+        fi
     fi
 
     printf '%s/projects' "$_root"
@@ -298,9 +300,8 @@ claude_projects_dir() {
 
 _remember_should_check_utf8() {
     [ "${REMEMBER_UTF8_STRICT:-0}" = "1" ] && return 0
-    case "${OSTYPE:-}" in
-        linux*) return 0 ;;
-    esac
+    local _os="${OSTYPE:-}"
+    [ "${_os#linux}" != "$_os" ] && return 0
     return 1
 }
 
@@ -322,38 +323,35 @@ session_dir_slug() {
         fi
         path="$winpath"
     fi
-    case "$path" in
-        ?:*)
-            _drive_at="${_REMEMBER_DRIVE_UPPER%%"${path:0:1}"*}"
-            if [ "$_drive_at" != "$_REMEMBER_DRIVE_UPPER" ]; then
-                path="${_REMEMBER_DRIVE_LOWER:${#_drive_at}:1}${path:1}"
-            fi
-            ;;
-    esac
+    if [ "${path#?:}" != "$path" ]; then
+        _drive_at="${_REMEMBER_DRIVE_UPPER%%"${path:0:1}"*}"
+        if [ "$_drive_at" != "$_REMEMBER_DRIVE_UPPER" ]; then
+            path="${_REMEMBER_DRIVE_LOWER:${#_drive_at}:1}${path:1}"
+        fi
+    fi
     local _orig="$path"
 
     if _remember_should_check_utf8; then
     local _high_byte=0 _lc_was_set="${LC_ALL+set}" _lc_prev="${LC_ALL:-}"
     LC_ALL=C
-    case "$path" in
-        *[!$'\001'-$'\177']*) _high_byte=1 ;;
-    esac
+    local _hb_glob="[!"$'\001'"-"$'\177'"]"
+    if [[ "$path" == *$_hb_glob* ]]; then
+        _high_byte=1
+    fi
     if [ -n "$_lc_was_set" ]; then LC_ALL="$_lc_prev"; else unset LC_ALL; fi
 
-    case "$_high_byte" in
-        1)
-            if command -v iconv >/dev/null 2>&1 \
-                && ! printf '%s' "$path" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1; then
-                local _py_slug="${PIPELINE_DIR:-}/pipeline/slug.py"
-                if [ -f "$_py_slug" ]; then
-                    local _decoded
-                    declare -f _remember_python >/dev/null 2>&1 && _remember_python
-                    _decoded=$(_remember_slug_run_python "$_py_slug" "$path" 2>/dev/null) \
-                        && [ -n "$_decoded" ] && { printf '%s\n' "$_decoded"; return 0; }
-                fi
+    if [ "$_high_byte" = 1 ]; then
+        if command -v iconv >/dev/null 2>&1 \
+            && ! printf '%s' "$path" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1; then
+            local _py_slug="${PIPELINE_DIR:-}/pipeline/slug.py"
+            if [ -f "$_py_slug" ]; then
+                local _decoded
+                declare -f _remember_python >/dev/null 2>&1 && _remember_python
+                _decoded=$(_remember_slug_run_python "$_py_slug" "$path" 2>/dev/null) \
+                    && [ -n "$_decoded" ] && { printf '%s\n' "$_decoded"; return 0; }
             fi
-            ;;
-    esac
+        fi
+    fi
     fi
 
     path=${path//$'\n'/-}
@@ -373,9 +371,9 @@ session_dir_slug() {
         _hash=""
     fi
 
-    case "$_hash" in
-        *[!0-9a-z]*) _hash="" ;;
-    esac
+    if [[ "$_hash" == *[!0-9a-z]* ]]; then
+        _hash=""
+    fi
 
     if [ -z "$_hash" ]; then
         printf '%s\n' "$_slug"
@@ -433,9 +431,9 @@ _remember_cfg_table_get_into() {
 }
 
 _config_is_private_path() {
-    case "$1" in
-        .haiku|.haiku.*) return 0 ;;
-    esac
+    if [ "$1" = .haiku ] || [ "${1#.haiku.}" != "$1" ]; then
+        return 0
+    fi
     return 1
 }
 
@@ -456,10 +454,11 @@ _remember_cfg_flatten_cache_sources() {
 }
 
 _remember_cfg_flatten_cache_is_standard_merge() {
-    case "${REMEMBER_CONFIG:-}" in
-        */remember-config-*) return 0 ;;
-        *) return 1 ;;
-    esac
+    local _cfg_path="${REMEMBER_CONFIG:-}"
+    if [[ "$_cfg_path" == */remember-config-* ]]; then
+        return 0
+    fi
+    return 1
 }
 
 _remember_cfg_flatten_cache_valid_value() {
@@ -536,12 +535,10 @@ _remember_cfg_flatten_cache_load() {
             _stage=2
             if [ "${_line#'#RCFG_EXISTS='}" != "$_line" ]; then
                 _exists_raw="${_line#'#RCFG_EXISTS='}"
-                case "$_exists_raw" in
-                    *[!01]*|'')
-                        rm -f "$_f" 2>/dev/null
-                        return 1
-                        ;;
-                esac
+                if [[ "$_exists_raw" == *[!01]* ]] || [ -z "$_exists_raw" ]; then
+                    rm -f "$_f" 2>/dev/null
+                    return 1
+                fi
                 continue
             else
                 rm -f "$_f" 2>/dev/null
@@ -671,13 +668,17 @@ config() {
 }
 
 _remember_log_run_python() {
-    case "${PYTHON:-python3}" in
-        python3) python3 "$@" ;;
-        python) python "$@" ;;
-        py\ -3) py -3 "$@" ;;
-        py) py "$@" ;;
-        *) return 127 ;;
-    esac
+    if [ "${PYTHON:-python3}" = python3 ]; then
+        python3 "$@"
+    elif [ "${PYTHON:-python3}" = python ]; then
+        python "$@"
+    elif [ "${PYTHON:-python3}" = "py -3" ]; then
+        py -3 "$@"
+    elif [ "${PYTHON:-python3}" = py ]; then
+        py "$@"
+    else
+        return 127
+    fi
 }
 
 config_into() {
@@ -735,10 +736,9 @@ config_into REMEMBER_TZ ".timezone" ""
 export REMEMBER_TZ
 
 config_into REMEMBER_PROMPT_STAMP ".prompt_stamp" "full"
-case "$REMEMBER_PROMPT_STAMP" in
-    stable|off) ;;
-    *) REMEMBER_PROMPT_STAMP="full" ;;
-esac
+if [ "$REMEMBER_PROMPT_STAMP" != stable ] && [ "$REMEMBER_PROMPT_STAMP" != off ]; then
+    REMEMBER_PROMPT_STAMP="full"
+fi
 export REMEMBER_PROMPT_STAMP
 
 config_into REMEMBER_SAVE_COOLDOWN ".cooldowns.save_seconds" 120
@@ -945,9 +945,9 @@ _dispatch_supervise() {
             rm -f "$_sentinel" 2>/dev/null || true
         fi
     elif [ "$_budget" -gt 0 ]; then
-        case "$_DISPATCH_RC" in
-            143|137) _DISPATCH_TIMEDOUT=1 ;;
-        esac
+        if [ "$_DISPATCH_RC" = 143 ] || [ "$_DISPATCH_RC" = 137 ]; then
+            _DISPATCH_TIMEDOUT=1
+        fi
     fi
     return 0
 }
@@ -1118,17 +1118,15 @@ _resolve_remember_dir() {
     local data_dir="$1"
     local proj="$2"
 
-    case "$data_dir" in
-        /*|~*|[A-Za-z]:[/\\]*)
-            local slug
-            slug=$(session_dir_slug "$proj")
-            local expanded="${data_dir/#\~/$HOME}"
-            echo "${expanded//\{slug\}/$slug}"
-            ;;
-        *)
-            echo "${proj}/${data_dir}"
-            ;;
-    esac
+    if [ "${data_dir#/}" != "$data_dir" ] || [ "${data_dir#[~]}" != "$data_dir" ] \
+        || [ "${data_dir#[A-Za-z]:[/\\]}" != "$data_dir" ]; then
+        local slug
+        slug=$(session_dir_slug "$proj")
+        local expanded="${data_dir/#\~/$HOME}"
+        echo "${expanded//\{slug\}/$slug}"
+    else
+        echo "${proj}/${data_dir}"
+    fi
 }
 
 _set_store_root() {
@@ -1136,10 +1134,10 @@ _set_store_root() {
     local data_dir="$1" prefix
     REMEMBER_STORE_ROOT=""
 
-    case "$data_dir" in
-        /*|~*|[A-Za-z]:[/\\]*) ;;
-        *) return 0 ;;
-    esac
+    if [ "${data_dir#/}" = "$data_dir" ] && [ "${data_dir#[~]}" = "$data_dir" ] \
+        && [ "${data_dir#[A-Za-z]:[/\\]}" = "$data_dir" ]; then
+        return 0
+    fi
     [ "${data_dir#*\{slug\}}" != "$data_dir" ] || return 0
 
     prefix="${data_dir%%\{slug\}*}"
@@ -1153,9 +1151,10 @@ _set_store_root() {
         fi
     done
 
-    case "$prefix" in
-        ''|/|[A-Za-z]:|[A-Za-z]:[/\\]) return 0 ;;
-    esac
+    if [ -z "$prefix" ] || [ "$prefix" = / ] || [ -z "${prefix#[A-Za-z]:}" ] \
+        || [ -z "${prefix#[A-Za-z]:[/\\]}" ]; then
+        return 0
+    fi
 
     REMEMBER_STORE_ROOT="$prefix"
 }
@@ -1189,10 +1188,12 @@ _project_cfg="${REMEMBER_DIR}/config.json"
 
 _classify_project_cfg_haiku_trust() {
     local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
-    case "$_data_dir_raw" in
-        /*|~*|[A-Za-z]:[/\\]*) _project_cfg_haiku_untrusted=0 ;;
-        *) _project_cfg_haiku_untrusted=1 ;;
-    esac
+    if [ "${_data_dir_raw#/}" != "$_data_dir_raw" ] || [ "${_data_dir_raw#[~]}" != "$_data_dir_raw" ] \
+        || [ "${_data_dir_raw#[A-Za-z]:[/\\]}" != "$_data_dir_raw" ]; then
+        _project_cfg_haiku_untrusted=0
+    else
+        _project_cfg_haiku_untrusted=1
+    fi
 }
 _classify_project_cfg_haiku_trust
 
@@ -1254,10 +1255,13 @@ _remember_config_tracked_status() {
 
 _project_cfg_model_reject_untrusted=0
 if [ "$_project_cfg_haiku_untrusted" = "1" ] && [ -f "$_project_cfg" ]; then
-    case "$(_remember_config_tracked_status "${_project_cfg%/*}" "${_project_cfg##*/}")" in
-        untracked) _project_cfg_model_reject_untrusted=0 ;;
-        *) _project_cfg_model_reject_untrusted=1 ;;  # tracked or could-not-tell -> fail CLOSED
-    esac
+    _project_cfg_tracked_answer=$(_remember_config_tracked_status "${_project_cfg%/*}" "${_project_cfg##*/}") || true
+    if [ "$_project_cfg_tracked_answer" = untracked ]; then
+        _project_cfg_model_reject_untrusted=0
+    else
+        _project_cfg_model_reject_untrusted=1  # tracked or could-not-tell -> fail CLOSED
+    fi
+    unset _project_cfg_tracked_answer
 fi
 
 if [ -L "$_project_cfg" ]; then
@@ -1320,13 +1324,17 @@ elif [ "${#_cfg_sources[@]}" -gt 0 ]; then
     rm -f "$_project_drop_marker" 2>/dev/null
     _py_merge_rc=0
     _lmd_run_python() {
-        case "${PYTHON:-python3}" in
-            python3) python3 "$@" ;;
-            python) python "$@" ;;
-            py\ -3) py -3 "$@" ;;
-            py) py "$@" ;;
-            *) return 127 ;;
-        esac
+        if [ "${PYTHON:-python3}" = python3 ]; then
+            python3 "$@"
+        elif [ "${PYTHON:-python3}" = python ]; then
+            python "$@"
+        elif [ "${PYTHON:-python3}" = "py -3" ]; then
+            py -3 "$@"
+        elif [ "${PYTHON:-python3}" = py ]; then
+            py "$@"
+        else
+            return 127
+        fi
     }
     _lmd_py_dir="${BASH_SOURCE[0]%/*}"
     [ "$_lmd_py_dir" = "${BASH_SOURCE[0]}" ] && _lmd_py_dir="$(pwd)"
@@ -1418,26 +1426,24 @@ _remember_normalize_win_path() {
     local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
     local _in="$1" _drive="" _rest=""
     local _re='^([a-zA-Z]):[/\](.*)$'
-    case "$OSTYPE" in
-        msys|cygwin)
-            if [[ "$_in" =~ ^/cygdrive/([a-zA-Z])/(.*)$ ]]; then
-                _drive="${BASH_REMATCH[1]}"
-                _rest="${BASH_REMATCH[2]}"
-            elif [[ "$_in" =~ ^/([a-zA-Z])/(.*)$ ]]; then
-                _drive="${BASH_REMATCH[1]}"
-                _rest="${BASH_REMATCH[2]}"
-            elif [[ "$_in" =~ $_re ]]; then
-                _drive="${BASH_REMATCH[1]}"
-                _rest="${BASH_REMATCH[2]}"
-            fi
-            if [ -n "$_drive" ]; then
-                _drive=$(printf '%s' "$_drive" | LC_ALL=C tr '[:lower:]' '[:upper:]')
-                _rest="${_rest//\//\\}"
-                printf '%s' "${_drive}:\\${_rest}"
-                return 0
-            fi
-            ;;
-    esac
+    if [ "$OSTYPE" = msys ] || [ "$OSTYPE" = cygwin ]; then
+        if [[ "$_in" =~ ^/cygdrive/([a-zA-Z])/(.*)$ ]]; then
+            _drive="${BASH_REMATCH[1]}"
+            _rest="${BASH_REMATCH[2]}"
+        elif [[ "$_in" =~ ^/([a-zA-Z])/(.*)$ ]]; then
+            _drive="${BASH_REMATCH[1]}"
+            _rest="${BASH_REMATCH[2]}"
+        elif [[ "$_in" =~ $_re ]]; then
+            _drive="${BASH_REMATCH[1]}"
+            _rest="${BASH_REMATCH[2]}"
+        fi
+        if [ -n "$_drive" ]; then
+            _drive=$(printf '%s' "$_drive" | LC_ALL=C tr '[:lower:]' '[:upper:]')
+            _rest="${_rest//\//\\}"
+            printf '%s' "${_drive}:\\${_rest}"
+            return 0
+        fi
+    fi
     printf '%s' "$_in"
 }
 
@@ -1513,10 +1519,9 @@ _remember_tools_cache_load() {
     [ -n "$_jq" ] || return 1
     [ -n "$_path" ] || return 1
     [ "$_path" = "$PATH" ] || return 1
-    case "$_jq" in
-        jq|_jq_fallback) ;;
-        *) return 1 ;;
-    esac
+    if [ "$_jq" != jq ] && [ "$_jq" != _jq_fallback ]; then
+        return 1
+    fi
     PYTHON="$_py"
     JQ="$_jq"
     export PYTHON JQ
@@ -1619,16 +1624,18 @@ fi
 fi
 
 _remember_run_python() {
-    case "$PYTHON" in
-        python3) python3 "$@" ;;
-        python) python "$@" ;;
-        py\ -3) py -3 "$@" ;;
-        py) py "$@" ;;
-        *)
-            echo "FATAL: _remember_run_python: unrecognized PYTHON value '$PYTHON'" >&2
-            return 127
-            ;;
-    esac
+    if [ "$PYTHON" = python3 ]; then
+        python3 "$@"
+    elif [ "$PYTHON" = python ]; then
+        python "$@"
+    elif [ "$PYTHON" = "py -3" ]; then
+        py -3 "$@"
+    elif [ "$PYTHON" = py ]; then
+        py "$@"
+    else
+        echo "FATAL: _remember_run_python: unrecognized PYTHON value '$PYTHON'" >&2
+        return 127
+    fi
 }
 
 
@@ -1725,15 +1732,14 @@ if [ "$REMEMBER_DIR" != "$_legacy_dir" ] && [ ! -L "$_legacy_dir" ] && [ -d "$_l
         _legacy_cfg="$_legacy_dir/config.json"
         _legacy_cfg_holdout=""
         if [ -e "$_legacy_cfg" ] || [ -L "$_legacy_cfg" ]; then
-            case "$(_remember_config_tracked_status "$_mem_proj" ".remember/config.json")" in
-                untracked) : ;;
-                *)
-                    _legacy_cfg_holdout=$(mktemp "${SYS_TMPDIR:-/tmp}/remember-legacy-cfg-XXXXXX" 2>/dev/null) || _legacy_cfg_holdout=""
-                    if [ -n "$_legacy_cfg_holdout" ]; then
-                        mv "$_legacy_cfg" "$_legacy_cfg_holdout" 2>/dev/null || _legacy_cfg_holdout=""
-                    fi
-                    ;;
-            esac
+            _legacy_cfg_tracked_answer=$(_remember_config_tracked_status "$_mem_proj" ".remember/config.json") || true
+            if [ "$_legacy_cfg_tracked_answer" != untracked ]; then
+                _legacy_cfg_holdout=$(mktemp "${SYS_TMPDIR:-/tmp}/remember-legacy-cfg-XXXXXX" 2>/dev/null) || _legacy_cfg_holdout=""
+                if [ -n "$_legacy_cfg_holdout" ]; then
+                    mv "$_legacy_cfg" "$_legacy_cfg_holdout" 2>/dev/null || _legacy_cfg_holdout=""
+                fi
+            fi
+            unset _legacy_cfg_tracked_answer
         fi
 
         if mv "$_legacy_dir" "$REMEMBER_DIR" 2>/dev/null; then
@@ -1817,24 +1823,20 @@ fi
 
 if [ -d "$REMEMBER_DIR" ]; then
     [ -f "$REMEMBER_DIR/.install-marker" ] \
-        || { echo 'This file marks when remember was first bootstrapped here. Read only by scripts/doctor.sh (#401); do not delete it.' \
+        || { echo 'This file marks when remember was first bootstrapped here. Read only by /remember:doctor (#401); do not delete it.' \
             > "$REMEMBER_DIR/.install-marker"; } 2>/dev/null
 fi
 
 if [ -d "$REMEMBER_DIR" ]; then
     _mem_bd_glob_dir="$REMEMBER_DIR"
     _mem_bd_glob_proj="$_mem_proj"
-    case "$OSTYPE" in
-        msys|cygwin)
-            _mem_bd_glob_dir="${_mem_bd_glob_dir//\\//}"
-            _mem_bd_glob_proj="${_mem_bd_glob_proj//\\//}"
-            ;;
-    esac
-    case "$_mem_bd_glob_dir" in
-        "$_mem_bd_glob_proj"/*)
-            [ -f "$REMEMBER_DIR/.gitignore" ] || { echo '*' > "$REMEMBER_DIR/.gitignore"; } 2>/dev/null
-            ;;
-    esac
+    if [ "$OSTYPE" = msys ] || [ "$OSTYPE" = cygwin ]; then
+        _mem_bd_glob_dir="${_mem_bd_glob_dir//\\//}"
+        _mem_bd_glob_proj="${_mem_bd_glob_proj//\\//}"
+    fi
+    if [ "${_mem_bd_glob_dir#"$_mem_bd_glob_proj"/}" != "$_mem_bd_glob_dir" ]; then
+        [ -f "$REMEMBER_DIR/.gitignore" ] || { echo '*' > "$REMEMBER_DIR/.gitignore"; } 2>/dev/null
+    fi
 fi
 unset _mem_proj _mem_bd_glob_dir _mem_bd_glob_proj
 
@@ -1846,15 +1848,13 @@ elif [ "${BASH_VERSINFO[0]:-0}" -eq 4 ] 2>/dev/null && [ "${BASH_VERSINFO[1]:-0}
 fi
 if [ -d "$REMEMBER_DIR/logs" ]; then
     _remember_bd_keep_fd2=""
-    case "$-" in
-        (*x*)
-            if [ "$_remember_bd_has_xtracefd" = "0" ]; then
-                _remember_bd_keep_fd2="an xtrace is running (this bash predates BASH_XTRACEFD, added in 4.1, so xtrace stays on fd 2 regardless of the variable)"
-            elif [ "${BASH_XTRACEFD:-2}" = "2" ]; then
-                _remember_bd_keep_fd2="an xtrace is running on fd 2"
-            fi
-            ;;
-    esac
+    if [[ "$-" == *x* ]]; then
+        if [ "$_remember_bd_has_xtracefd" = "0" ]; then
+            _remember_bd_keep_fd2="an xtrace is running (this bash predates BASH_XTRACEFD, added in 4.1, so xtrace stays on fd 2 regardless of the variable)"
+        elif [ "${BASH_XTRACEFD:-2}" = "2" ]; then
+            _remember_bd_keep_fd2="an xtrace is running on fd 2"
+        fi
+    fi
     [ "${REMEMBER_TRACE:-}" = "1" ] && _remember_bd_keep_fd2="REMEMBER_TRACE=1"
     if [ -n "$_remember_bd_keep_fd2" ]; then
         printf 'remember: %s, so stderr is NOT being redirected to %s -- point BASH_XTRACEFD at its own fd to get both (#690)\n' \
@@ -1891,10 +1891,10 @@ fi
 _stdin_json_string() {
     local field="$1" raw="$2" rest prefix value dq
     printf -v dq '\042'
-    case "$raw" in *"$dq$field$dq"*) ;; *) return 1 ;; esac
+    [[ "$raw" == *"$dq$field$dq"* ]] || return 1
     rest=${raw#*"$dq"$field"$dq"}
     prefix=${rest%%"$dq"*}
-    case "$prefix" in *[!:[:space:]]*) return 1 ;; esac
+    if [[ "$prefix" == *[!:[:space:]]* ]]; then return 1; fi
     value=${rest#*"$dq"}
     value=${value%%"$dq"*}
     value=${value//\\\\/\\}
@@ -1905,9 +1905,10 @@ _stdin_json_string() {
 printf -v _pt_dq '\042'
 
 REMEMBER_HOOK_CWD=$(_stdin_json_string cwd "$HOOK_STDIN" 2>/dev/null) || REMEMBER_HOOK_CWD=""
-case "$REMEMBER_HOOK_CWD" in
-    *$'\n'*|*$'\r'*) REMEMBER_HOOK_CWD="" ;;
-esac
+if [[ "$REMEMBER_HOOK_CWD" == *$'\n'* ]] \
+    || [[ "$REMEMBER_HOOK_CWD" == *$'\r'* ]]; then
+    REMEMBER_HOOK_CWD=""
+fi
 export REMEMBER_HOOK_CWD
 
 __remember_src_lib_clock ${1+"$@"}
@@ -1958,14 +1959,16 @@ if ! : > "$REMEMBER_DIR/tmp/post-tool-ran" 2>/dev/null; then
 fi
 
 STDIN_SESSION_ID=$(_stdin_json_string session_id "$HOOK_STDIN" 2>/dev/null) || STDIN_SESSION_ID=""
-case "$STDIN_SESSION_ID" in
-    ''|[.]|[.][.]|-*|*[!A-Za-z0-9._-]*) STDIN_SESSION_ID="" ;;
-esac
+if [ -z "${STDIN_SESSION_ID#.}" ] || [ -z "${STDIN_SESSION_ID#..}" ] \
+    || [ "${STDIN_SESSION_ID#-}" != "$STDIN_SESSION_ID" ] \
+    || [[ "$STDIN_SESSION_ID" == *[!A-Za-z0-9._-]* ]]; then
+    STDIN_SESSION_ID=""
+fi
 
 STDIN_TRANSCRIPT_PATH=$(_stdin_json_string transcript_path "$HOOK_STDIN" 2>/dev/null) || STDIN_TRANSCRIPT_PATH=""
-case "$STDIN_TRANSCRIPT_PATH" in
-    *$'\r'*) STDIN_TRANSCRIPT_PATH="" ;;
-esac
+if [[ "$STDIN_TRANSCRIPT_PATH" == *$'\r'* ]]; then
+    STDIN_TRANSCRIPT_PATH=""
+fi
 if [ -n "$STDIN_TRANSCRIPT_PATH" ] && [ ! -f "$STDIN_TRANSCRIPT_PATH" ]; then
     STDIN_TRANSCRIPT_PATH=""
 fi
@@ -2023,17 +2026,21 @@ if [ "$STDIN_SESSION_ID_TRUSTED" = true ]; then
 else
     SESSION_ID="${TRANSCRIPT##*/}"
     SESSION_ID="${SESSION_ID%.jsonl}"
-    case "$SESSION_ID" in
-        ''|[.]|[.][.]|-*|*[!A-Za-z0-9._-]*) SESSION_ID="" ;;
-    esac
+    if [ -z "${SESSION_ID#.}" ] || [ -z "${SESSION_ID#..}" ] \
+        || [ "${SESSION_ID#-}" != "$SESSION_ID" ] \
+        || [[ "$SESSION_ID" == *[!A-Za-z0-9._-]* ]]; then
+        SESSION_ID=""
+    fi
 fi
 
 if [ -d "$REMEMBER_DIR/tmp/capture-alive.d" ] \
     || mkdir -p "$REMEMBER_DIR/tmp/capture-alive.d" 2>/dev/null; then
-    case "$SESSION_ID" in
-        ''|[.]|[.][.]|*[!A-Za-z0-9._-]*) : ;;
-        *) : > "$REMEMBER_DIR/tmp/capture-alive.d/$SESSION_ID" 2>/dev/null || true ;;
-    esac
+    if [ -z "${SESSION_ID#.}" ] || [ -z "${SESSION_ID#..}" ] \
+        || [[ "$SESSION_ID" == *[!A-Za-z0-9._-]* ]]; then
+        :
+    else
+        : > "$REMEMBER_DIR/tmp/capture-alive.d/$SESSION_ID" 2>/dev/null || true
+    fi
 fi
 if printf '%s' "$SESSION_ID" > "$REMEMBER_DIR/tmp/capture-alive.$$" 2>/dev/null; then
     mv -f "$REMEMBER_DIR/tmp/capture-alive.$$" "$REMEMBER_DIR/tmp/capture-alive" 2>/dev/null \
@@ -2041,61 +2048,51 @@ if printf '%s' "$SESSION_ID" > "$REMEMBER_DIR/tmp/capture-alive.$$" 2>/dev/null;
 fi
 
 SIDECAR=""
-case "$SESSION_ID" in
-    ''|[.]|[.][.]|*[!A-Za-z0-9._-]*) : ;;
-    *) SIDECAR="$REMEMBER_DIR/tmp/position.$SESSION_ID" ;;
-esac
+if [ -z "${SESSION_ID#.}" ] || [ -z "${SESSION_ID#..}" ] \
+    || [[ "$SESSION_ID" == *[!A-Za-z0-9._-]* ]]; then
+    :
+else
+    SIDECAR="$REMEMBER_DIR/tmp/position.$SESSION_ID"
+fi
 
 LAST_LINE=0
 SIDECAR_TRUSTED=""
 if [ -n "$SIDECAR" ] && [ -f "$SIDECAR" ]; then
     _SIDECAR_LINE=""
     read -r _SIDECAR_LINE < "$SIDECAR" 2>/dev/null
-    case "$_SIDECAR_LINE" in
-        ''|*[!0-9]*)
-            log "hook" "WARNING: sidecar $SIDECAR held a non-numeric value ($_SIDECAR_LINE) -- disagrees with last-save.json, falling back to read-position"
-            ;;
-        *)
-            if [ "$((10#$_SIDECAR_LINE))" -gt "$CURRENT_LINES" ]; then
-                log "hook" "WARNING: sidecar $SIDECAR reports position $_SIDECAR_LINE, past this run's own $CURRENT_LINES transcript lines -- disagrees with last-save.json, falling back to read-position"
-            else
-                _LAST_SAVE_STATE="absent"
-                _LAST_SAVE_CONTENT=""
-                if [ -f "$LAST_SAVE_FILE" ]; then
-                    if { _LAST_SAVE_CONTENT=$(< "$LAST_SAVE_FILE"); } 2>/dev/null; then
-                        _LAST_SAVE_STATE="read"
-                    else
-                        _LAST_SAVE_STATE="unreadable"
-                    fi
-                fi
-                _SESSIONS_SCOPE=${_LAST_SAVE_CONTENT#*"$_pt_dq"sessions"$_pt_dq"}
-                if [ "$_SESSIONS_SCOPE" != "$_LAST_SAVE_CONTENT" ]; then
-                    _SESSIONS_SCOPE="${_SESSIONS_SCOPE%%\}*}"
+    if [ -z "$_SIDECAR_LINE" ] || [[ "$_SIDECAR_LINE" == *[!0-9]* ]]; then
+        log "hook" "WARNING: sidecar $SIDECAR held a non-numeric value ($_SIDECAR_LINE) -- disagrees with last-save.json, falling back to read-position"
+    else
+        if [ "$((10#$_SIDECAR_LINE))" -gt "$CURRENT_LINES" ]; then
+            log "hook" "WARNING: sidecar $SIDECAR reports position $_SIDECAR_LINE, past this run's own $CURRENT_LINES transcript lines -- disagrees with last-save.json, falling back to read-position"
+        else
+            _LAST_SAVE_STATE="absent"
+            _LAST_SAVE_CONTENT=""
+            if [ -f "$LAST_SAVE_FILE" ]; then
+                if { _LAST_SAVE_CONTENT=$(< "$LAST_SAVE_FILE"); } 2>/dev/null; then
+                    _LAST_SAVE_STATE="read"
                 else
-                    _SESSIONS_SCOPE=""
+                    _LAST_SAVE_STATE="unreadable"
                 fi
-                case "$_SESSIONS_SCOPE" in
-                    *"$_pt_dq"$SESSION_ID"$_pt_dq":*)
-                        LAST_LINE=$((10#$_SIDECAR_LINE))
-                        SIDECAR_TRUSTED=1
-                        ;;
-                    *)
-                        case "$_LAST_SAVE_STATE" in
-                            absent)
-                                log "hook" "WARNING: sidecar $SIDECAR exists but last-save.json is absent -- nothing to compare against, falling back to read-position"
-                                ;;
-                            unreadable)
-                                log "hook" "WARNING: sidecar $SIDECAR exists but last-save.json could not be read -- falling back to read-position"
-                                ;;
-                            *)
-                                log "hook" "WARNING: sidecar $SIDECAR's session $SESSION_ID is absent from last-save.json -- disagrees with last-save.json, falling back to read-position"
-                                ;;
-                        esac
-                        ;;
-                esac
             fi
-            ;;
-    esac
+            _SESSIONS_SCOPE=${_LAST_SAVE_CONTENT#*"$_pt_dq"sessions"$_pt_dq"}
+            if [ "$_SESSIONS_SCOPE" != "$_LAST_SAVE_CONTENT" ]; then
+                _SESSIONS_SCOPE="${_SESSIONS_SCOPE%%\}*}"
+            else
+                _SESSIONS_SCOPE=""
+            fi
+            if [[ "$_SESSIONS_SCOPE" == *"$_pt_dq"$SESSION_ID"$_pt_dq":* ]]; then
+                LAST_LINE=$((10#$_SIDECAR_LINE))
+                SIDECAR_TRUSTED=1
+            elif [ "$_LAST_SAVE_STATE" = absent ]; then
+                log "hook" "WARNING: sidecar $SIDECAR exists but last-save.json is absent -- nothing to compare against, falling back to read-position"
+            elif [ "$_LAST_SAVE_STATE" = unreadable ]; then
+                log "hook" "WARNING: sidecar $SIDECAR exists but last-save.json could not be read -- falling back to read-position"
+            else
+                log "hook" "WARNING: sidecar $SIDECAR's session $SESSION_ID is absent from last-save.json -- disagrees with last-save.json, falling back to read-position"
+            fi
+        fi
+    fi
 fi
 
 if [ -z "$SIDECAR_TRUSTED" ] && [ -f "$LAST_SAVE_FILE" ]; then

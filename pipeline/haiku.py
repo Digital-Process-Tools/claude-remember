@@ -108,7 +108,6 @@ def _without_session_env():
     saved_session_attended = os.environ.pop("CLAUDE_CODE_SESSION_ATTENDED", None)
     saved_execpath = os.environ.pop("CLAUDE_CODE_EXECPATH", None)
     saved_messaging_socket = os.environ.pop("CLAUDE_CODE_MESSAGING_SOCKET", None)
-    saved_messaging_handshake = os.environ.pop("CLAUDE_CODE_MESSAGING_TOKEN", None)
     saved_sse_port = os.environ.pop("CLAUDE_CODE_SSE_PORT", None)
     try:
         yield
@@ -131,8 +130,6 @@ def _without_session_env():
             os.environ["CLAUDE_CODE_EXECPATH"] = saved_execpath
         if saved_messaging_socket is not None:
             os.environ["CLAUDE_CODE_MESSAGING_SOCKET"] = saved_messaging_socket
-        if saved_messaging_handshake is not None:
-            os.environ["CLAUDE_CODE_MESSAGING_TOKEN"] = saved_messaging_handshake
         if saved_sse_port is not None:
             os.environ["CLAUDE_CODE_SSE_PORT"] = saved_sse_port
 @contextlib.contextmanager
@@ -370,19 +367,6 @@ def _codex_child_env() -> dict[str, str]:
         ("USERPROFILE", os.environ.get("USERPROFILE")),
         ("APPDATA", os.environ.get("APPDATA")),
         ("PATHEXT", os.environ.get("PATHEXT")),
-        ("HTTPS_PROXY", os.environ.get("HTTPS_PROXY")),
-        ("HTTP_PROXY", os.environ.get("HTTP_PROXY")),
-        ("NO_PROXY", os.environ.get("NO_PROXY")),
-    ]
-    if os.name != "nt":
-        pairs += [
-            ("https_proxy", os.environ.get("https_proxy")),
-            ("http_proxy", os.environ.get("http_proxy")),
-            ("no_proxy", os.environ.get("no_proxy")),
-        ]
-    pairs += [
-        ("SSL_CERT_FILE", os.environ.get("SSL_CERT_FILE")),
-        ("NODE_EXTRA_CA_CERTS", os.environ.get("NODE_EXTRA_CA_CERTS")),
     ]
     child = {name: value for name, value in pairs if value is not None}
     child["REMEMBER_NESTED_SUMMARIZER"] = "1"

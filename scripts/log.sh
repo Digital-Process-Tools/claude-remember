@@ -45,9 +45,9 @@ _remember_cfg_table_get_into() {
 }
 
 _config_is_private_path() {
-    case "$1" in
-        .haiku|.haiku.*) return 0 ;;
-    esac
+    if [ "$1" = .haiku ] || [ "${1#.haiku.}" != "$1" ]; then
+        return 0
+    fi
     return 1
 }
 
@@ -68,10 +68,11 @@ _remember_cfg_flatten_cache_sources() {
 }
 
 _remember_cfg_flatten_cache_is_standard_merge() {
-    case "${REMEMBER_CONFIG:-}" in
-        */remember-config-*) return 0 ;;
-        *) return 1 ;;
-    esac
+    local _cfg_path="${REMEMBER_CONFIG:-}"
+    if [[ "$_cfg_path" == */remember-config-* ]]; then
+        return 0
+    fi
+    return 1
 }
 
 _remember_cfg_flatten_cache_valid_value() {
@@ -148,12 +149,10 @@ _remember_cfg_flatten_cache_load() {
             _stage=2
             if [ "${_line#'#RCFG_EXISTS='}" != "$_line" ]; then
                 _exists_raw="${_line#'#RCFG_EXISTS='}"
-                case "$_exists_raw" in
-                    *[!01]*|'')
-                        rm -f "$_f" 2>/dev/null
-                        return 1
-                        ;;
-                esac
+                if [[ "$_exists_raw" == *[!01]* ]] || [ -z "$_exists_raw" ]; then
+                    rm -f "$_f" 2>/dev/null
+                    return 1
+                fi
                 continue
             else
                 rm -f "$_f" 2>/dev/null
@@ -283,13 +282,17 @@ config() {
 }
 
 _remember_log_run_python() {
-    case "${PYTHON:-python3}" in
-        python3) python3 "$@" ;;
-        python) python "$@" ;;
-        py\ -3) py -3 "$@" ;;
-        py) py "$@" ;;
-        *) return 127 ;;
-    esac
+    if [ "${PYTHON:-python3}" = python3 ]; then
+        python3 "$@"
+    elif [ "${PYTHON:-python3}" = python ]; then
+        python "$@"
+    elif [ "${PYTHON:-python3}" = "py -3" ]; then
+        py -3 "$@"
+    elif [ "${PYTHON:-python3}" = py ]; then
+        py "$@"
+    else
+        return 127
+    fi
 }
 
 config_into() {
@@ -350,10 +353,11 @@ debug_enabled() {
     fi
     local _debug_cfg
     config_into _debug_cfg '.debug' ''
-    case "$_debug_cfg" in
-        true) return 0 ;;
-        false) return 1 ;;
-    esac
+    if [ "$_debug_cfg" = true ]; then
+        return 0
+    elif [ "$_debug_cfg" = false ]; then
+        return 1
+    fi
     [ "$_default" = "1" ]
 }
 
@@ -361,10 +365,9 @@ config_into REMEMBER_TZ ".timezone" ""
 export REMEMBER_TZ
 
 config_into REMEMBER_PROMPT_STAMP ".prompt_stamp" "full"
-case "$REMEMBER_PROMPT_STAMP" in
-    stable|off) ;;
-    *) REMEMBER_PROMPT_STAMP="full" ;;
-esac
+if [ "$REMEMBER_PROMPT_STAMP" != stable ] && [ "$REMEMBER_PROMPT_STAMP" != off ]; then
+    REMEMBER_PROMPT_STAMP="full"
+fi
 export REMEMBER_PROMPT_STAMP
 
 config_into REMEMBER_SAVE_COOLDOWN ".cooldowns.save_seconds" 120
@@ -592,9 +595,9 @@ _dispatch_supervise() {
             rm -f "$_sentinel" 2>/dev/null || true
         fi
     elif [ "$_budget" -gt 0 ]; then
-        case "$_DISPATCH_RC" in
-            143|137) _DISPATCH_TIMEDOUT=1 ;;
-        esac
+        if [ "$_DISPATCH_RC" = 143 ] || [ "$_DISPATCH_RC" = 137 ]; then
+            _DISPATCH_TIMEDOUT=1
+        fi
     fi
     return 0
 }

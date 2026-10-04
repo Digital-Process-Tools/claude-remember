@@ -15,7 +15,8 @@ like any process a hook starts; only the parent session's own variables are remo
 first, so the nested call does not pass as that session. A nested `codex exec` is
 given only a fixed allow-list of your variables that names no credential: Codex's own
 login (what `codex login` writes) is unaffected, but a Codex login held only in an
-environment variable is not passed through. remember
+environment variable is not passed through. That allow-list carries no proxy or CA-bundle
+setting either: behind a proxy, use the `claude` summarizer, which inherits them. remember
 itself reads no credential: nothing is typed in, and nothing is read from your
 operating system's credential storage. Memory is stored locally under your project by
 default, and nothing is pushed anywhere unless you opt into git backup yourself.

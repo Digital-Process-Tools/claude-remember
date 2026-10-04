@@ -39,28 +39,23 @@ fi
 staging_lock_release
 
 CONSOLIDATE_MAX_BYTES=$(config ".thresholds.consolidate_max_bytes" 600000)
-case "$CONSOLIDATE_MAX_BYTES" in
-    ''|*[!0-9]*)
-        log "consolidation" "WARNING: thresholds.consolidate_max_bytes is not a valid non-negative integer (got '$CONSOLIDATE_MAX_BYTES') -- using default 600000"
-        CONSOLIDATE_MAX_BYTES=600000
-        ;;
-esac
+if [ -z "$CONSOLIDATE_MAX_BYTES" ] || [[ "$CONSOLIDATE_MAX_BYTES" == *[!0-9]* ]]; then
+    log "consolidation" "WARNING: thresholds.consolidate_max_bytes is not a valid non-negative integer (got '$CONSOLIDATE_MAX_BYTES') -- using default 600000"
+    CONSOLIDATE_MAX_BYTES=600000
+fi
 CONSOLIDATE_TIMEOUT_SECONDS=$(config ".thresholds.consolidate_timeout_seconds" 180)
-case "$CONSOLIDATE_TIMEOUT_SECONDS" in
-    ''|*[!0-9]*)
-        log "consolidation" "WARNING: thresholds.consolidate_timeout_seconds is not a valid non-negative integer (got '$CONSOLIDATE_TIMEOUT_SECONDS') -- using default 180"
+if [ -z "$CONSOLIDATE_TIMEOUT_SECONDS" ] || [[ "$CONSOLIDATE_TIMEOUT_SECONDS" == *[!0-9]* ]]; then
+    log "consolidation" "WARNING: thresholds.consolidate_timeout_seconds is not a valid non-negative integer (got '$CONSOLIDATE_TIMEOUT_SECONDS') -- using default 180"
+    CONSOLIDATE_TIMEOUT_SECONDS=180
+else
+    if [ "${#CONSOLIDATE_TIMEOUT_SECONDS}" -gt 9 ]; then
+        log "consolidation" "WARNING: thresholds.consolidate_timeout_seconds ($CONSOLIDATE_TIMEOUT_SECONDS) is too large and would crash the consolidation call with an OverflowError -- using default 180"
         CONSOLIDATE_TIMEOUT_SECONDS=180
-        ;;
-    *)
-        if [ "${#CONSOLIDATE_TIMEOUT_SECONDS}" -gt 9 ]; then
-            log "consolidation" "WARNING: thresholds.consolidate_timeout_seconds ($CONSOLIDATE_TIMEOUT_SECONDS) is too large and would crash the consolidation call with an OverflowError -- using default 180"
-            CONSOLIDATE_TIMEOUT_SECONDS=180
-        elif [ "$CONSOLIDATE_TIMEOUT_SECONDS" -eq 0 ]; then
-            log "consolidation" "WARNING: thresholds.consolidate_timeout_seconds is 0, which times out the consolidation call immediately on every run -- using default 180"
-            CONSOLIDATE_TIMEOUT_SECONDS=180
-        fi
-        ;;
-esac
+    elif [ "$CONSOLIDATE_TIMEOUT_SECONDS" -eq 0 ]; then
+        log "consolidation" "WARNING: thresholds.consolidate_timeout_seconds is 0, which times out the consolidation call immediately on every run -- using default 180"
+        CONSOLIDATE_TIMEOUT_SECONDS=180
+    fi
+fi
 log "consolidation" "start"
 RESULT=$(cd "$PIPELINE_DIR" && _remember_run_python -m pipeline.shell consolidate "$STAGING_DIR" "$RECENT_FILE" "$ARCHIVE_FILE" "$CONSOLIDATE_MAX_BYTES" "$SNAPSHOT_DIR" "$CONSOLIDATE_TIMEOUT_SECONDS" 2>&1) || {
     CONSOLIDATE_EXIT=$?

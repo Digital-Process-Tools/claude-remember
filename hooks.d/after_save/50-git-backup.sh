@@ -28,10 +28,9 @@ _gb_common_dir() {
     if [ -z "$_out" ]; then
         _out=$(git -C "$_d" rev-parse --git-common-dir 2>/dev/null) || return 1
         [ -n "$_out" ] || return 1
-        case "$_out" in
-            /*|[A-Za-z]:[/\\]*) ;;
-            *) _out="$_d/$_out" ;;
-        esac
+        if [ "${_out#/}" = "$_out" ] && [ "${_out#[A-Za-z]:[/\\]}" = "$_out" ]; then
+            _out="$_d/$_out"
+        fi
     fi
     _gb_realpath "$_out"
 }
@@ -115,12 +114,10 @@ if [ "${GIT_BACKUP_REMOTE#-}" != "$GIT_BACKUP_REMOTE" ] \
         report_error "git-backup" "WARNING: configured git_backup.remote '$GIT_BACKUP_REMOTE' is not a plain remote name (leading '-', or contains ':' or '/') -- refusing to use it, falling back to the branch's push target. A config.json restored from a shared store can carry an attacker-controlled value here; treat this as untrusted."
         GIT_BACKUP_REMOTE=""
 fi
-case "$GIT_BACKUP_BRANCH" in
-    -*|*:*)
-        report_error "git-backup" "WARNING: configured git_backup.branch '$GIT_BACKUP_BRANCH' starts with '-' or contains ':' -- refusing to use it as a git push operand (a colon makes it a src:dst refspec, not a branch name)."
-        GIT_BACKUP_BRANCH=""
-        ;;
-esac
+if [ "${GIT_BACKUP_BRANCH#-}" != "$GIT_BACKUP_BRANCH" ] || [[ "$GIT_BACKUP_BRANCH" == *:* ]]; then
+    report_error "git-backup" "WARNING: configured git_backup.branch '$GIT_BACKUP_BRANCH' starts with '-' or contains ':' -- refusing to use it as a git push operand (a colon makes it a src:dst refspec, not a branch name)."
+    GIT_BACKUP_BRANCH=""
+fi
 REMOTE_NAME="$GIT_BACKUP_REMOTE"
 if [ -z "$REMOTE_NAME" ]; then
     GB_CAND=$(git -C "$REPO_ROOT" rev-parse --abbrev-ref --symbolic-full-name '@{push}' 2>/dev/null) || GB_CAND=""

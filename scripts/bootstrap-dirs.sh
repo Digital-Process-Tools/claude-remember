@@ -84,15 +84,14 @@ if [ "$REMEMBER_DIR" != "$_legacy_dir" ] && [ ! -L "$_legacy_dir" ] && [ -d "$_l
         _legacy_cfg="$_legacy_dir/config.json"
         _legacy_cfg_holdout=""
         if [ -e "$_legacy_cfg" ] || [ -L "$_legacy_cfg" ]; then
-            case "$(_remember_config_tracked_status "$_mem_proj" ".remember/config.json")" in
-                untracked) : ;;
-                *)
-                    _legacy_cfg_holdout=$(mktemp "${SYS_TMPDIR:-/tmp}/remember-legacy-cfg-XXXXXX" 2>/dev/null) || _legacy_cfg_holdout=""
-                    if [ -n "$_legacy_cfg_holdout" ]; then
-                        mv "$_legacy_cfg" "$_legacy_cfg_holdout" 2>/dev/null || _legacy_cfg_holdout=""
-                    fi
-                    ;;
-            esac
+            _legacy_cfg_tracked_answer=$(_remember_config_tracked_status "$_mem_proj" ".remember/config.json") || true
+            if [ "$_legacy_cfg_tracked_answer" != untracked ]; then
+                _legacy_cfg_holdout=$(mktemp "${SYS_TMPDIR:-/tmp}/remember-legacy-cfg-XXXXXX" 2>/dev/null) || _legacy_cfg_holdout=""
+                if [ -n "$_legacy_cfg_holdout" ]; then
+                    mv "$_legacy_cfg" "$_legacy_cfg_holdout" 2>/dev/null || _legacy_cfg_holdout=""
+                fi
+            fi
+            unset _legacy_cfg_tracked_answer
         fi
 
         if mv "$_legacy_dir" "$REMEMBER_DIR" 2>/dev/null; then
@@ -176,24 +175,20 @@ fi
 
 if [ -d "$REMEMBER_DIR" ]; then
     [ -f "$REMEMBER_DIR/.install-marker" ] \
-        || { echo 'This file marks when remember was first bootstrapped here. Read only by scripts/doctor.sh (#401); do not delete it.' \
+        || { echo 'This file marks when remember was first bootstrapped here. Read only by /remember:doctor (#401); do not delete it.' \
             > "$REMEMBER_DIR/.install-marker"; } 2>/dev/null
 fi
 
 if [ -d "$REMEMBER_DIR" ]; then
     _mem_bd_glob_dir="$REMEMBER_DIR"
     _mem_bd_glob_proj="$_mem_proj"
-    case "$OSTYPE" in
-        msys|cygwin)
-            _mem_bd_glob_dir="${_mem_bd_glob_dir//\\//}"
-            _mem_bd_glob_proj="${_mem_bd_glob_proj//\\//}"
-            ;;
-    esac
-    case "$_mem_bd_glob_dir" in
-        "$_mem_bd_glob_proj"/*)
-            [ -f "$REMEMBER_DIR/.gitignore" ] || { echo '*' > "$REMEMBER_DIR/.gitignore"; } 2>/dev/null
-            ;;
-    esac
+    if [ "$OSTYPE" = msys ] || [ "$OSTYPE" = cygwin ]; then
+        _mem_bd_glob_dir="${_mem_bd_glob_dir//\\//}"
+        _mem_bd_glob_proj="${_mem_bd_glob_proj//\\//}"
+    fi
+    if [ "${_mem_bd_glob_dir#"$_mem_bd_glob_proj"/}" != "$_mem_bd_glob_dir" ]; then
+        [ -f "$REMEMBER_DIR/.gitignore" ] || { echo '*' > "$REMEMBER_DIR/.gitignore"; } 2>/dev/null
+    fi
 fi
 unset _mem_proj _mem_bd_glob_dir _mem_bd_glob_proj
 
@@ -205,15 +200,13 @@ elif [ "${BASH_VERSINFO[0]:-0}" -eq 4 ] 2>/dev/null && [ "${BASH_VERSINFO[1]:-0}
 fi
 if [ -d "$REMEMBER_DIR/logs" ]; then
     _remember_bd_keep_fd2=""
-    case "$-" in
-        (*x*)
-            if [ "$_remember_bd_has_xtracefd" = "0" ]; then
-                _remember_bd_keep_fd2="an xtrace is running (this bash predates BASH_XTRACEFD, added in 4.1, so xtrace stays on fd 2 regardless of the variable)"
-            elif [ "${BASH_XTRACEFD:-2}" = "2" ]; then
-                _remember_bd_keep_fd2="an xtrace is running on fd 2"
-            fi
-            ;;
-    esac
+    if [[ "$-" == *x* ]]; then
+        if [ "$_remember_bd_has_xtracefd" = "0" ]; then
+            _remember_bd_keep_fd2="an xtrace is running (this bash predates BASH_XTRACEFD, added in 4.1, so xtrace stays on fd 2 regardless of the variable)"
+        elif [ "${BASH_XTRACEFD:-2}" = "2" ]; then
+            _remember_bd_keep_fd2="an xtrace is running on fd 2"
+        fi
+    fi
     [ "${REMEMBER_TRACE:-}" = "1" ] && _remember_bd_keep_fd2="REMEMBER_TRACE=1"
     if [ -n "$_remember_bd_keep_fd2" ]; then
         printf 'remember: %s, so stderr is NOT being redirected to %s -- point BASH_XTRACEFD at its own fd to get both (#690)\n' \

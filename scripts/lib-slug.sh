@@ -4,13 +4,17 @@
 _REMEMBER_LIB_SLUG_LOADED=1
 
 _remember_slug_run_python() {
-    case "${PYTHON:-python3}" in
-        python3) python3 "$@" ;;
-        python) python "$@" ;;
-        py\ -3) py -3 "$@" ;;
-        py) py "$@" ;;
-        *) return 127 ;;
-    esac
+    if [ "${PYTHON:-python3}" = python3 ]; then
+        python3 "$@"
+    elif [ "${PYTHON:-python3}" = python ]; then
+        python "$@"
+    elif [ "${PYTHON:-python3}" = "py -3" ]; then
+        py -3 "$@"
+    elif [ "${PYTHON:-python3}" = py ]; then
+        py "$@"
+    else
+        return 127
+    fi
 }
 
 _remember_build_slug_sed() {
@@ -58,10 +62,9 @@ claude_projects_dir() {
     if [ -n "$_stripped" ]; then
         _root="$_stripped"
     else
-        case "$_root" in
-            /*) _root="" ;;
-            *) ;;
-        esac
+        if [ "${_root#/}" != "$_root" ]; then
+            _root=""
+        fi
     fi
 
     printf '%s/projects' "$_root"
@@ -69,9 +72,8 @@ claude_projects_dir() {
 
 _remember_should_check_utf8() {
     [ "${REMEMBER_UTF8_STRICT:-0}" = "1" ] && return 0
-    case "${OSTYPE:-}" in
-        linux*) return 0 ;;
-    esac
+    local _os="${OSTYPE:-}"
+    [ "${_os#linux}" != "$_os" ] && return 0
     return 1
 }
 
@@ -93,38 +95,35 @@ session_dir_slug() {
         fi
         path="$winpath"
     fi
-    case "$path" in
-        ?:*)
-            _drive_at="${_REMEMBER_DRIVE_UPPER%%"${path:0:1}"*}"
-            if [ "$_drive_at" != "$_REMEMBER_DRIVE_UPPER" ]; then
-                path="${_REMEMBER_DRIVE_LOWER:${#_drive_at}:1}${path:1}"
-            fi
-            ;;
-    esac
+    if [ "${path#?:}" != "$path" ]; then
+        _drive_at="${_REMEMBER_DRIVE_UPPER%%"${path:0:1}"*}"
+        if [ "$_drive_at" != "$_REMEMBER_DRIVE_UPPER" ]; then
+            path="${_REMEMBER_DRIVE_LOWER:${#_drive_at}:1}${path:1}"
+        fi
+    fi
     local _orig="$path"
 
     if _remember_should_check_utf8; then
     local _high_byte=0 _lc_was_set="${LC_ALL+set}" _lc_prev="${LC_ALL:-}"
     LC_ALL=C
-    case "$path" in
-        *[!$'\001'-$'\177']*) _high_byte=1 ;;
-    esac
+    local _hb_glob="[!"$'\001'"-"$'\177'"]"
+    if [[ "$path" == *$_hb_glob* ]]; then
+        _high_byte=1
+    fi
     if [ -n "$_lc_was_set" ]; then LC_ALL="$_lc_prev"; else unset LC_ALL; fi
 
-    case "$_high_byte" in
-        1)
-            if command -v iconv >/dev/null 2>&1 \
-                && ! printf '%s' "$path" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1; then
-                local _py_slug="${PIPELINE_DIR:-}/pipeline/slug.py"
-                if [ -f "$_py_slug" ]; then
-                    local _decoded
-                    declare -f _remember_python >/dev/null 2>&1 && _remember_python
-                    _decoded=$(_remember_slug_run_python "$_py_slug" "$path" 2>/dev/null) \
-                        && [ -n "$_decoded" ] && { printf '%s\n' "$_decoded"; return 0; }
-                fi
+    if [ "$_high_byte" = 1 ]; then
+        if command -v iconv >/dev/null 2>&1 \
+            && ! printf '%s' "$path" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1; then
+            local _py_slug="${PIPELINE_DIR:-}/pipeline/slug.py"
+            if [ -f "$_py_slug" ]; then
+                local _decoded
+                declare -f _remember_python >/dev/null 2>&1 && _remember_python
+                _decoded=$(_remember_slug_run_python "$_py_slug" "$path" 2>/dev/null) \
+                    && [ -n "$_decoded" ] && { printf '%s\n' "$_decoded"; return 0; }
             fi
-            ;;
-    esac
+        fi
+    fi
     fi
 
     path=${path//$'\n'/-}
@@ -144,9 +143,9 @@ session_dir_slug() {
         _hash=""
     fi
 
-    case "$_hash" in
-        *[!0-9a-z]*) _hash="" ;;
-    esac
+    if [[ "$_hash" == *[!0-9a-z]* ]]; then
+        _hash=""
+    fi
 
     if [ -z "$_hash" ]; then
         printf '%s\n' "$_slug"
