@@ -73,6 +73,7 @@ from pathlib import Path
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
 from compile_hooks import HOOK_SCRIPT_NAMES, unresolved_sources
+from strip_python import StripError, leftovers
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent.parent / "release-branch.json"
 DEFAULT_BUDGET = {"max_file_bytes": 256 * 1024, "max_files": 512,
@@ -676,6 +677,7 @@ def check_tree(root: Path, budget: dict) -> CheckResult:
     _check_readme_and_licence(files, manifest, off)
     _check_hooks(files, manifest, off)
     _check_hook_still_sources(files, kinds, off)
+    _check_python_comments(files, kinds, off)
     _check_front_matter(files, off)
     _check_images(files, kinds, off)
     _check_launchers(files, kinds, off)
@@ -1640,6 +1642,27 @@ def _check_hook_still_sources(files: dict, kinds: dict, off: list) -> None:
             off.append(f"{rel}:{n}: still sources another file after the "
                        f"compile step -- the directory holds this as "
                        f"COMMAND_SCRIPT_NOT_FOLLOWED: {line.strip()[:80]}")
+
+
+def _check_python_comments(files: dict, kinds: dict, off: list) -> None:
+    """#900: a comment or a docstring left in a shipped .py -- FAIL. The directory's
+    scanner reads both as code (release-preview probe hD: stripping them from
+    pipeline/haiku.py and nothing else changed the credential hold's citation), so
+    build_release_tree.py strips every shipped .py (strip_python.py). One left here
+    means that step did not run on this file, or missed a shape. The shebang and a
+    coding cookie are not counted; a `#` inside a string is not a comment."""
+    for rel, data in sorted(files.items()):
+        if not rel.endswith(".py") or kinds.get(rel) != "text":
+            continue
+        try:
+            found = leftovers(data.decode("utf-8"))
+        except (StripError, SyntaxError, ValueError) as exc:
+            off.append(f"{rel}: does not parse as Python, so its comments and docstrings "
+                       f"cannot be checked: {exc}")
+            continue
+        for n, kind, text in found:
+            off.append(f"{rel}:{n}: a {kind} in a shipped .py -- the directory's scanner "
+                       f"reads it as code; the build strips these: {text.strip()[:60]}")
 
 
 def _check_launchers(files: dict, kinds: dict, off: list) -> None:

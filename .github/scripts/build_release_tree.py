@@ -46,6 +46,7 @@ _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
 from check_release_tree import gitattributes_offences
 from compile_hooks import HOOK_SCRIPT_NAMES, InlineError, compile_hook
+from strip_python import StripError, strip_python
 
 DEFAULT_CONFIG = _HERE.parent / "release-branch.json"
 
@@ -312,6 +313,26 @@ def build(repo: Path, ref: str, out: Path, config: dict) -> dict:
             raise BuildError(f"{hrel}: {exc}") from None
         contents[hrel] = compiled.encode("utf-8")
 
+    # #900: the directory's scanner reads Python comments and docstrings as code
+    # (release-preview probe hD), so every shipped .py loses both here. strip_python
+    # proves each result -- parses as 3.9, same AST as the source minus its
+    # docstrings, nothing left -- and a file it cannot prove fails the build.
+    py_before = py_after = 0
+    for path in sorted(contents):
+        if not path.endswith(".py"):
+            continue
+        try:
+            src = contents[path].decode("utf-8")
+        except UnicodeDecodeError:
+            raise BuildError(f"{path}: not UTF-8, cannot strip it") from None
+        try:
+            stripped = strip_python(src, path).encode("utf-8")
+        except StripError as exc:
+            raise BuildError(str(exc)) from None
+        py_before += len(contents[path])
+        py_after += len(stripped)
+        contents[path] = stripped
+
     for path, data in contents.items():
         if posixpath.basename(path) == ".gitattributes":
             bad = gitattributes_offences(data.decode("utf-8", "replace"))
@@ -367,7 +388,8 @@ def build(repo: Path, ref: str, out: Path, config: dict) -> dict:
 
     unused = [e for e in deny if not any(is_denied(p, [e]) for _, _, p in entries)]
     return {"ref": ref, "commit": commit, "kept": len(kept), "removed": removed,
-            "rewritten": rewritten, "unused_deny": unused}
+            "rewritten": rewritten, "unused_deny": unused,
+            "py_bytes": (py_before, py_after)}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -391,6 +413,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     print(f"built {report['ref']} ({report['commit']}): {report['kept']} files kept, "
           f"{len(report['removed'])} removed by the deny-list")
+    before, after = report["py_bytes"]
+    print(f"  stripped comments and docstrings from shipped .py: {before} -> {after} bytes")
     for path, n in sorted(report["rewritten"].items()):
         print(f"  rewrote {n} link(s) in {path}")
     for entry in report["unused_deny"]:

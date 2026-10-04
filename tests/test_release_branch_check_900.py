@@ -118,3 +118,30 @@ def test_a_function_argument_literally_named_source_is_not_mistaken_for_a_source
     })
     offenders = _check(root).offenders
     assert not any("still sources another file" in o for o in offenders)
+
+
+# -- #900: no comment and no docstring in any shipped .py -----------------------------
+# The directory's scanner reads Python comments and docstrings as code (release-preview
+# probe hD); build_release_tree.py strips both, and this check fails a tree that still
+# carries one -- the strip step not running, or missing a shape.
+
+def test_a_shipped_py_with_a_comment_fails(tmp_path):
+    root = _tree(tmp_path, {"pipeline/x.py": b"x = 1  # names a variable at run time\n"})
+    offenders = _check(root).offenders
+    assert any("pipeline/x.py:1" in o and "comment" in o for o in offenders), offenders
+
+
+def test_a_shipped_py_with_a_docstring_fails(tmp_path):
+    root = _tree(tmp_path, {"pipeline/x.py": b'def f():\n    """Doc."""\n    return 1\n'})
+    offenders = _check(root).offenders
+    assert any("pipeline/x.py:2" in o and "docstring" in o for o in offenders), offenders
+
+
+def test_a_stripped_py_with_a_hash_in_a_string_and_a_shebang_passes(tmp_path):
+    # the must-NOT-fire control for the two above: a `#` inside a string or an
+    # f-string, the shebang and a coding cookie are not comments to remove.
+    root = _tree(tmp_path, {"scripts/x.py": (
+        b"#!/usr/bin/env python3\n# -*- coding: utf-8 -*-\n"
+        b'X = "a # b"\nY = f"{X}#"\ndef f():\n    pass\n')})
+    offenders = _check(root).offenders
+    assert not any("scripts/x.py" in o for o in offenders), offenders
