@@ -18,6 +18,13 @@ time", while a literal name is not. The names and every protection are the
 same as round 16's shipped defaults; only the ability to change the lists in
 config is gone. A new Claude Code session variable now needs a release.
 
+Round 18 (maintainer decision): the session's messaging handshake variable is
+no longer removed -- the messaging socket still is, so the child has no channel
+to present it on -- and the Codex allow-list no longer carries any proxy or
+CA-bundle variable (HTTPS_PROXY/HTTP_PROXY/NO_PROXY in either casing,
+SSL_CERT_FILE, NODE_EXTRA_CA_CERTS). Behind a proxy, REMEMBER_SUMMARIZER=claude
+inherits the full environment.
+
 Every "removed" case is paired with an "inherited" case in the same run, so a
 harness that captured nothing, or code that stripped everything, fails.
 """
@@ -47,9 +54,9 @@ HAIKU_PY = REPO_ROOT / "pipeline" / "haiku.py"
 # from a tool subprocess), plus the three non-`CLAUDE_CODE_` names #95 and
 # #204 already covered, and the IDE port (reasoned: set when an IDE is
 # attached, not observed in that dump). Same names, same order as round 16's
-# shipped `haiku.strip_session_env`. A future Claude Code session variable
-# that is not here reaches the summarizer until a release adds it to
-# `_without_session_env` AND here.
+# shipped `haiku.strip_session_env`, minus the messaging handshake (round
+# 18). A future Claude Code session variable that is not here reaches the
+# summarizer until a release adds it to `_without_session_env` AND here.
 EXPECTED_SESSION_NAMES = (
     "CLAUDECODE",
     "CLAUDE_JOB_DIR",
@@ -60,13 +67,14 @@ EXPECTED_SESSION_NAMES = (
     "CLAUDE_CODE_SESSION_ATTENDED",
     "CLAUDE_CODE_EXECPATH",
     "CLAUDE_CODE_MESSAGING_SOCKET",
-    "CLAUDE_CODE_MESSAGING_TOKEN",
     "CLAUDE_CODE_SSE_PORT",
 )
+# Round 18: inherited, no longer on the list.
+MESSAGING_HANDSHAKE = "CLAUDE_CODE_MESSAGING_TOKEN"
 
-# Round 16's shipped `haiku.codex_env_allow`, same names, same order: the
-# round-15 literal table minus Codex's own API-key variable, plus the three
-# lowercase proxy names (read on a case-preserving platform only, #792).
+# Round 16's shipped `haiku.codex_env_allow` minus every proxy and CA-bundle
+# name (round 18, maintainer decision): the round-15 literal table minus
+# Codex's own API-key variable.
 EXPECTED_CODEX_NAMES = (
     "PATH",
     "HOME",
@@ -80,6 +88,9 @@ EXPECTED_CODEX_NAMES = (
     "USERPROFILE",
     "APPDATA",
     "PATHEXT",
+)
+# On the list from #751/#792 until round 18; none may reach the Codex child.
+REMOVED_CODEX_NAMES = (
     "HTTPS_PROXY",
     "HTTP_PROXY",
     "NO_PROXY",
@@ -89,7 +100,6 @@ EXPECTED_CODEX_NAMES = (
     "SSL_CERT_FILE",
     "NODE_EXTRA_CA_CERTS",
 )
-_LOWERCASE_PROXIES = ("https_proxy", "http_proxy", "no_proxy")
 
 # A credential-shaped name: a `_`-separated part that names a secret.
 _CREDENTIAL_PART = re.compile(
@@ -302,6 +312,31 @@ def test_oauth_credential_reaches_the_child_by_inheritance(mock_run, monkeypatch
 
 
 @patch("pipeline.haiku.subprocess.run")
+def test_messaging_handshake_is_inherited_while_its_socket_is_removed(
+        mock_run, monkeypatch, isolated_config):
+    """Round 18 (maintainer decision): the handshake reaches the child by
+    inheritance; the socket it would be presented on does not. The socket
+    removal in the same run is the positive control that the strip ran."""
+    monkeypatch.setenv(MESSAGING_HANDSHAKE, "parent-handshake")
+    monkeypatch.setenv("CLAUDE_CODE_MESSAGING_SOCKET", "/tmp/parent.sock")
+    seen = _capture(mock_run)
+    call_haiku("p")
+    env = seen[-1]["env"]
+    assert "CLAUDE_CODE_MESSAGING_SOCKET" not in env, "positive control: the strip ran"
+    assert env.get(MESSAGING_HANDSHAKE) == "parent-handshake"
+    assert os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET") == "/tmp/parent.sock"
+
+
+def test_shipped_code_no_longer_names_the_messaging_handshake():
+    """Round 18: nothing in `_without_session_env` -- nor anywhere in
+    pipeline/haiku.py -- names the handshake any more, so the release-tree
+    checker no longer needs it allowlisted."""
+    source = HAIKU_PY.read_text(encoding="utf-8")
+    assert "CLAUDE_CODE_MESSAGING_SOCKET" in source, "positive control"
+    assert MESSAGING_HANDSHAKE not in source
+
+
+@patch("pipeline.haiku.subprocess.run")
 def test_provider_selection_variables_are_now_inherited(mock_run, monkeypatch, isolated_config):
     """#316: the old prefix strip also removed provider selection (Bedrock),
     sending a proxy token to the wrong API. Not a session variable, so not
@@ -335,15 +370,15 @@ def test_this_process_gets_its_environment_back(mock_run, monkeypatch, isolated_
 @patch("pipeline.haiku.subprocess.run")
 def test_environment_is_restored_when_the_call_fails(mock_run, monkeypatch, isolated_config):
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "abc-123")
-    monkeypatch.setenv("CLAUDE_CODE_MESSAGING_TOKEN", "parent-handshake")
+    monkeypatch.setenv("CLAUDE_CODE_MESSAGING_SOCKET", "/tmp/parent.sock")
     monkeypatch.delenv("REMEMBER_NESTED_SUMMARIZER", raising=False)
     seen = _capture(mock_run, MagicMock(returncode=1, stdout="boom", stderr=""))
     with pytest.raises(RuntimeError):
         call_haiku("p")
     assert seen and "CLAUDE_CODE_SESSION_ID" not in seen[-1]["env"]
-    assert "CLAUDE_CODE_MESSAGING_TOKEN" not in seen[-1]["env"]
+    assert "CLAUDE_CODE_MESSAGING_SOCKET" not in seen[-1]["env"]
     assert os.environ.get("CLAUDE_CODE_SESSION_ID") == "abc-123"
-    assert os.environ.get("CLAUDE_CODE_MESSAGING_TOKEN") == "parent-handshake"
+    assert os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET") == "/tmp/parent.sock"
     assert "REMEMBER_NESTED_SUMMARIZER" not in os.environ
 
 
@@ -419,20 +454,16 @@ def test_codex_names_are_read_literally_in_order():
         EXPECTED_CODEX_NAMES)
 
 
-def test_codex_lowercase_proxies_are_read_only_off_windows():
-    """The three lowercase reads sit under `if os.name != "nt":`, and nothing
-    else does."""
+def test_codex_list_names_no_proxy_or_ca_variable():
+    """Round 18 (maintainer decision): no proxy or CA-bundle name appears
+    anywhere in `_codex_child_env`, and the per-platform branch that read the
+    lowercase proxy names (#792) is gone with them."""
     func = _function("_codex_child_env")
-    guarded = []
-    for node in ast.walk(func):
-        if (isinstance(node, ast.If) and isinstance(node.test, ast.Compare)
-                and ast.dump(node.test.left) == ast.dump(ast.parse("os.name", mode="eval").body)
-                and isinstance(node.test.ops[0], ast.NotEq)
-                and getattr(node.test.comparators[0], "value", None) == "nt"):
-            guarded += [n.args[0].value for n in ast.walk(node)
-                        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-                        and n.func.attr == "get" and _is_os_environ(n.func.value)]
-    assert guarded == list(_LOWERCASE_PROXIES)
+    constants = {n.value for n in ast.walk(func)
+                 if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+    assert "PATH" in constants, "positive control: the scan reads constants"
+    assert [n for n in REMOVED_CODEX_NAMES if n in constants] == []
+    assert not [n for n in ast.walk(func) if isinstance(n, ast.If)]
 
 
 def test_codex_list_names_no_credential():
@@ -452,29 +483,32 @@ def test_no_shipped_file_names_the_codex_credential():
         "positive control: the operator docs say which name is not passed")
 
 
-@pytest.mark.skipif(os.name == "nt", reason="lowercase twins are one variable on Windows (#792)")
 def test_codex_env_passes_every_listed_name_and_nothing_else(monkeypatch, isolated_config):
+    """Round 18: no lowercase twin is on the list any more, so this holds on
+    every platform (reasoned for Windows: every listed name is upper-case)."""
     for name in EXPECTED_CODEX_NAMES:
         monkeypatch.setenv(name, f"v-{name}")
     monkeypatch.setenv("SOME_UNRELATED_SECRET_898", "nope")
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "nope")
     monkeypatch.setenv("CODEX_" + "API_KEY", "nope")
+    for name in REMOVED_CODEX_NAMES:
+        monkeypatch.setenv(name, "http://proxy.example:8080")
     env = haiku._codex_child_env()
     assert env == {**{n: f"v-{n}" for n in EXPECTED_CODEX_NAMES},
                    "REMEMBER_NESTED_SUMMARIZER": "1"}
 
 
-def test_codex_env_passes_every_upper_case_name_on_any_platform(monkeypatch, isolated_config):
-    for name in EXPECTED_CODEX_NAMES:
-        if name not in _LOWERCASE_PROXIES:
-            monkeypatch.setenv(name, f"v-{name}")
-    monkeypatch.setenv("SOME_UNRELATED_SECRET_898", "nope")
+def test_codex_env_passes_no_proxy_or_ca_variable(monkeypatch, isolated_config):
+    """Round 18 (maintainer decision): set, in either casing, and none of
+    them reaches the child; PATH, set in the same run, does (positive
+    control). Behind a proxy, REMEMBER_SUMMARIZER=claude is the route."""
+    monkeypatch.setenv("PATH", "/usr/bin")
+    for name in REMOVED_CODEX_NAMES:
+        monkeypatch.setenv(name, "http://proxy.example:8080")
     env = haiku._codex_child_env()
     view = _upper_view(env)
-    for name in EXPECTED_CODEX_NAMES:
-        if name not in _LOWERCASE_PROXIES:
-            assert view.get(name) == f"v-{name}", name
-    assert "SOME_UNRELATED_SECRET_898" not in view
+    assert env.get("PATH") == "/usr/bin", "positive control"
+    assert [n for n in REMOVED_CODEX_NAMES if n.upper() in view] == []
 
 
 def test_codex_env_skips_missing_names(monkeypatch, isolated_config):
@@ -500,24 +534,23 @@ class _WindowsEnviron(dict):
         return super().get(name.upper(), default)
 
 
-def test_codex_env_skips_the_lowercase_proxies_on_windows(monkeypatch):
+def test_codex_env_drops_the_proxies_on_a_windows_style_environ(monkeypatch):
+    """Round 18: a Windows-style (case-folding) environ passes no proxy."""
     monkeypatch.setattr(haiku.os, "name", "nt")
     monkeypatch.setattr(haiku.os, "environ",
                         _WindowsEnviron({"PATH": "C:/bin", "HTTPS_PROXY": "http://p:1"}))
     env = haiku._codex_child_env()
-    assert env == {"PATH": "C:/bin", "HTTPS_PROXY": "http://p:1",
-                   "REMEMBER_NESTED_SUMMARIZER": "1"}
+    assert env == {"PATH": "C:/bin", "REMEMBER_NESTED_SUMMARIZER": "1"}
 
 
-def test_codex_env_keeps_both_casings_where_they_differ(monkeypatch):
-    """Positive control for the Windows skip: a case-preserving platform keeps
-    the lowercase twin, because it is a different variable there."""
+def test_codex_env_drops_both_casings_on_a_case_preserving_environ(monkeypatch):
+    """Round 18: neither casing passes where they are two variables (POSIX);
+    PATH in the same environ does (positive control)."""
     monkeypatch.setattr(haiku.os, "name", "posix")
     monkeypatch.setattr(haiku.os, "environ",
                         {"PATH": "/bin", "HTTPS_PROXY": "http://p:1", "https_proxy": "http://p:2"})
     env = haiku._codex_child_env()
-    assert env == {"PATH": "/bin", "HTTPS_PROXY": "http://p:1", "https_proxy": "http://p:2",
-                   "REMEMBER_NESTED_SUMMARIZER": "1"}
+    assert env == {"PATH": "/bin", "REMEMBER_NESTED_SUMMARIZER": "1"}
 
 
 def test_user_config_can_no_longer_widen_the_codex_list(monkeypatch, isolated_config):
@@ -533,10 +566,10 @@ def test_user_config_can_no_longer_widen_the_codex_list(monkeypatch, isolated_co
 def test_user_config_can_no_longer_narrow_the_codex_list(monkeypatch, isolated_config):
     _user_config(isolated_config, {"codex_env_allow": ["PATH"]})
     monkeypatch.setenv("PATH", "/usr/bin")
-    monkeypatch.setenv("NODE_EXTRA_CA_CERTS", "/ca.pem")
+    monkeypatch.setenv("LANG", "C.UTF-8")
     env = haiku._codex_child_env()
     assert env.get("PATH") == "/usr/bin"
-    assert env.get("NODE_EXTRA_CA_CERTS") == "/ca.pem"
+    assert env.get("LANG") == "C.UTF-8"
 
 
 def test_codex_spawned_commands_still_get_no_environment():
