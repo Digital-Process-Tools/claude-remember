@@ -9,7 +9,7 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(__file__))
 
-from pipeline.log import log, log_tokens, format_duration
+from pipeline.log import log, log_usage, format_duration
 from pipeline.types import TokenUsage
 
 
@@ -40,7 +40,7 @@ def test_log_appends():
 def test_log_tokens_format():
     with tempfile.TemporaryDirectory() as d:
         usage = TokenUsage(input=1000, output=200, cache=500, cost_usd=0.0012)
-        log_tokens("save", usage, d)
+        log_usage("save", usage, d)
         files = os.listdir(d)
         content = open(os.path.join(d, files[0])).read()
         assert "[save] tokens:" in content
@@ -76,10 +76,10 @@ def test_log_fallback_to_stderr_on_oserror(capsys):
 
 
 def test_log_tokens_with_nonzero_cost():
-    """log_tokens() includes the $ cost in the output when cost_usd is non-zero."""
+    """log_usage() includes the $ cost in the output when cost_usd is non-zero."""
     with tempfile.TemporaryDirectory() as d:
         usage = TokenUsage(input=500, output=100, cache=0, cost_usd=0.0042)
-        log_tokens("consolidate", usage, d)
+        log_usage("consolidate", usage, d)
         files = os.listdir(d)
         content = open(os.path.join(d, files[0])).read()
         assert "[consolidate] tokens:" in content
@@ -87,10 +87,10 @@ def test_log_tokens_with_nonzero_cost():
 
 
 def test_log_tokens_with_zero_cost():
-    """log_tokens() still formats correctly when cost_usd is 0.0 (the default)."""
+    """log_usage() still formats correctly when cost_usd is 0.0 (the default)."""
     with tempfile.TemporaryDirectory() as d:
         usage = TokenUsage(input=300, output=80, cache=50)
-        log_tokens("save", usage, d)
+        log_usage("save", usage, d)
         files = os.listdir(d)
         content = open(os.path.join(d, files[0])).read()
         assert "[save] tokens:" in content
@@ -127,9 +127,9 @@ def test_log_timestamp_uses_remember_tz(monkeypatch):
 
 
 def test_log_tokens_filename_uses_remember_tz(monkeypatch):
-    """log_tokens() writes to the same TZ-aware filename as log().
+    """log_usage() writes to the same TZ-aware filename as log().
 
-    Both go through _log_path() → today_str(), but log_tokens() is a
+    Both go through _log_path() → today_str(), but log_usage() is a
     separate code path worth proving independently — a 20k-download
     plugin can't assume code paths share behavior without testing both.
     """
@@ -138,21 +138,21 @@ def test_log_tokens_filename_uses_remember_tz(monkeypatch):
     usage = TokenUsage(input=100, output=50, cache=0)
     with tempfile.TemporaryDirectory() as d:
         with patch("pipeline._tz.datetime", frozen_datetime(moment)):
-            log_tokens("save", usage, d)
+            log_usage("save", usage, d)
         files = os.listdir(d)
     assert files == ["memory-2026-04-22.log"], (
-        f"log_tokens should use EDT date, got {files}"
+        f"log_usage should use EDT date, got {files}"
     )
 
 
 def test_log_tokens_timestamp_uses_remember_tz(monkeypatch):
-    """Timestamp inside the log_tokens line must be in REMEMBER_TZ."""
+    """Timestamp inside the log_usage line must be in REMEMBER_TZ."""
     monkeypatch.setenv("REMEMBER_TZ", "America/New_York")
     moment = datetime(2026, 4, 23, 3, 12, 45, tzinfo=timezone.utc)
     usage = TokenUsage(input=100, output=50, cache=0)
     with tempfile.TemporaryDirectory() as d:
         with patch("pipeline._tz.datetime", frozen_datetime(moment)):
-            log_tokens("save", usage, d)
+            log_usage("save", usage, d)
         content = open(os.path.join(d, os.listdir(d)[0])).read()
     assert content.startswith("23:12:45 [save] tokens:"), (
         f"unexpected content: {content!r}"

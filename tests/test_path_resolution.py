@@ -581,7 +581,7 @@ def _make_path_probe(plugin_dir: str, script_name: str) -> str:
     log_stub = os.path.join(plugin_dir, "scripts", "log.sh")
     if not os.path.exists(log_stub):
         with open(log_stub, "w") as f:
-            f.write('#!/bin/bash\nlog() { :; }\nlog_tokens() { :; }\n'
+            f.write('#!/bin/bash\nlog() { :; }\nlog_usage() { :; }\n'
                     'assign_kv() { :; }\nconfig() { echo "$2"; }\n'
                     'dispatch() { :; }\nrotate_logs() { :; }\n'
                     'REMEMBER_TZ="UTC"\n')

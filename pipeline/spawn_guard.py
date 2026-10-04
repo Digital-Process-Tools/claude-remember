@@ -154,8 +154,8 @@ def _pid_alive(pid: int) -> bool:
 def _parse(path: Path) -> dict[str, str]:
     fields: dict[str, str] = {}
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        key, _, value = line.partition("=")
-        fields[key.strip()] = value.strip()
+        name, _, value = line.partition("=")
+        fields[name.strip()] = value.strip()
     return fields
 
 

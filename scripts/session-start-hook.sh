@@ -1649,7 +1649,7 @@ if [ "$_promos_enabled" = "true" ] \
 
         # ── #660: one jq call for the whole promo list, not four per entry ──
         # The pre-#660 shape ran, per candidate, one `jq -r '.promos | length'`
-        # plus FOUR more `jq` calls (id/text/url/installed_key) and then, for
+        # plus FOUR more `jq` calls (id/text/url/installed_id) and then, for
         # every candidate that survived those, TWO MORE identical `has_it`
         # calls -- one to capture the value, one just to re-run the same query
         # and inspect its exit status (a plain copy-paste: same program, same
@@ -1686,7 +1686,7 @@ if [ "$_promos_enabled" = "true" ] \
         # rather than on EOF, so a genuinely empty trailing field is read
         # correctly instead of silently vanishing.
         local _promo_rows
-        _promo_rows=$(_remember_run_jq -r '(.promos[]? | .id // "", .text // "", .url // "", .installed_key // "", .gate // ""), "#promo-end#"' "$promos_file" 2>/dev/null) || return 0
+        _promo_rows=$(_remember_run_jq -r '(.promos[]? | .id // "", .text // "", .url // "", .installed_id // "", .gate // ""), "#promo-end#"' "$promos_file" 2>/dev/null) || return 0
         [ -n "$_promo_rows" ] || return 0
 
         # Three states (#574 decision 3), never two. `installed_ok` is unset
@@ -1715,7 +1715,7 @@ if [ "$_promos_enabled" = "true" ] \
             # #762: `to_entries` does not error on a non-object `.plugins`
             # the way the old per-candidate `.plugins[$k]` query did (jq exit
             # 5 on an array), so a bare `to_entries` here would read a real
-            # installed_key as absent and fire the promo -- exactly backwards
+            # installed_id as absent and fire the promo -- exactly backwards
             # from the cannot-tell-suppresses decision above. Guard the shape
             # explicitly: only an object reaches to_entries; anything else
             # (array, string, number, null, missing) falls to `empty`, same
@@ -1750,13 +1750,13 @@ if [ "$_promos_enabled" = "true" ] \
             fi
             # `gate` (#657) is the escape from the cross-plugin-only shape
             # #574 shipped: an entry with no `gate` is the original kind and
-            # still needs `installed_key` to know what to check for; an entry
+            # still needs `installed_id` to know what to check for; an entry
             # WITH a `gate` is asking a different question entirely (has this
             # store demonstrably done something for the user yet?) and has no
-            # installed-plugin identity to check, so `installed_key` is not
+            # installed-plugin identity to check, so `installed_id` is not
             # required for it.
             if [ -z "$gate" ] && [ -z "$iplugin" ]; then
-                log "hook" "promo skipped: promos.json entry $((entry_idx - 1)) is missing installed_key"
+                log "hook" "promo skipped: promos.json entry $((entry_idx - 1)) is missing installed_id"
                 continue
             fi
             # An entry with no url is skipped, and the skip is VISIBLE

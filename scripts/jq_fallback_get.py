@@ -21,9 +21,9 @@ def main() -> None:
     try:
         with open(sys.argv[1]) as f:
             data = json.load(f)
-        keys = sys.argv[2].strip(".").split(".")
+        path_parts = sys.argv[2].strip(".").split(".")
         val = data
-        for k in keys:
+        for k in path_parts:
             if k and isinstance(val, dict):
                 val = val.get(k)
             if val is None:

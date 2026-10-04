@@ -291,7 +291,7 @@ def test_no_printed_pipeline_string_contains_non_ascii():
     """MUST FIRE (before the fix): pipeline/haiku.py's _warn() calls and
     pipeline/spawn_guard.py's raised SummarizerSpawnDeclined message carried
     em-dashes, and pipeline/types.py's TokenUsage.__str__() (consumed by
-    pipeline/log.py's log_tokens()) carried an arrow. Each of those reaches
+    pipeline/log.py's log_usage()) carried an arrow. Each of those reaches
     Python's print(..., file=sys.stderr) fallback, which -- unlike bash's
     echo -- performs a real encode step against the console's codepage, so
     this is the one place in this pin where the failure is not cosmetic

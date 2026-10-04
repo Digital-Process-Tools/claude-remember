@@ -100,16 +100,16 @@ _doctor_trial_remember_dir() {
 _doctor_resolve_project_dir_candidate() {
     _doctor_git_root="$1"
     if [ -n "$_doctor_git_root" ] && [ "$_doctor_git_root" != "$(pwd)" ] && [ -n "$_DOCTOR_SESSION_ID" ]; then
-        _doctor_rd_pwd=$(_doctor_trial_remember_dir "$(pwd)") || _doctor_rd_pwd=""
+        _doctor_rd_cwd=$(_doctor_trial_remember_dir "$(pwd)") || _doctor_rd_cwd=""
         _doctor_rd_gitroot=$(_doctor_trial_remember_dir "$_doctor_git_root") || _doctor_rd_gitroot=""
-        _doctor_pwd_has_hint=0
+        _doctor_cwd_has_hint=0
         _doctor_gitroot_has_hint=0
-        [ -n "$_doctor_rd_pwd" ] && [ -f "$_doctor_rd_pwd/tmp/handoff-path.$_DOCTOR_SESSION_ID" ] && _doctor_pwd_has_hint=1
+        [ -n "$_doctor_rd_cwd" ] && [ -f "$_doctor_rd_cwd/tmp/handoff-path.$_DOCTOR_SESSION_ID" ] && _doctor_cwd_has_hint=1
         [ -n "$_doctor_rd_gitroot" ] && [ -f "$_doctor_rd_gitroot/tmp/handoff-path.$_DOCTOR_SESSION_ID" ] && _doctor_gitroot_has_hint=1
-        if [ "$_doctor_pwd_has_hint" = 1 ] && [ "$_doctor_gitroot_has_hint" = 0 ]; then
+        if [ "$_doctor_cwd_has_hint" = 1 ] && [ "$_doctor_gitroot_has_hint" = 0 ]; then
             _doctor_git_root=""
         fi
-        unset _doctor_rd_pwd _doctor_rd_gitroot _doctor_pwd_has_hint _doctor_gitroot_has_hint
+        unset _doctor_rd_cwd _doctor_rd_gitroot _doctor_cwd_has_hint _doctor_gitroot_has_hint
     fi
     printf '%s' "$_doctor_git_root"
     unset _doctor_git_root

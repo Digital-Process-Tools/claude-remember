@@ -209,7 +209,7 @@ cp "$RECENT_OUT" "$RECENT_FILE"
 cp "$ARCHIVE_OUT" "$ARCHIVE_FILE"
 rm -f "$RECENT_OUT" "$ARCHIVE_OUT"
 
-log_tokens "consolidation" "$TK_IN" "$TK_OUT" "$TK_CACHE" "$TK_COST"
+log_usage "consolidation" "$TK_IN" "$TK_OUT" "$TK_CACHE" "$TK_COST"
 
 # --- Rename processed staging files → .done.md ---
 # Paths are NUL-separated in STAGING_PATHS_FILE, safe for any filename.

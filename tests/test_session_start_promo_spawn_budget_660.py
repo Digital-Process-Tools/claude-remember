@@ -13,7 +13,7 @@ lever, per the brief): `config()` was already collapsed to one `jq` process
 per session by #232, and the recovery/consolidation forks below are already
 backgrounded by #646 -- so they were not the lever either. What remained was
 `_remember_compute_promo()`: one `jq -r '.promos | length'`, then FOUR more
-`jq` calls per candidate entry (id/text/url/installed_key), and then, for
+`jq` calls per candidate entry (id/text/url/installed_id), and then, for
 every candidate that survived those, the exact same `.plugins[$k]` query run
 TWICE -- once to capture its value, once again just to inspect its exit
 status. Measured on this file before #660 (`spawn_counting`'s PATH shim, one

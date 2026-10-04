@@ -821,7 +821,7 @@ HAIKU_VARS=$(cd "$PIPELINE_DIR" && _remember_run_python -m pipeline.shell call-h
 
 assign_kv <<< "$HAIKU_VARS"
 CLEANUP_FILES+=("$HAIKU_TEXT_FILE")
-log_tokens "tokens" "$TK_IN" "$TK_OUT" "$TK_CACHE" "$TK_COST"
+log_usage "tokens" "$TK_IN" "$TK_OUT" "$TK_CACHE" "$TK_COST"
 
 HAIKU_TEXT=$(cat "$HAIKU_TEXT_FILE")
 # report_error, not log() alone -- same #694 shape as the call-haiku
@@ -1220,7 +1220,7 @@ if [ "$RUN_NDC" = true ]; then
                 # memory stopped growing AND reported cost fell to zero — which
                 # reads as "nothing happened" rather than "this failed
                 # repeatedly and was paid for" (#180).
-                log_tokens "ndc" "$TK_IN" "$TK_OUT" "$TK_CACHE" "$TK_COST"
+                log_usage "ndc" "$TK_IN" "$TK_OUT" "$TK_CACHE" "$TK_COST"
                 # Compression runs through the same reject gate as the summarize
                 # call, but nothing here consumed the verdict: a refusal came
                 # back non-empty, passed `[ -n ... ]`, and was appended to

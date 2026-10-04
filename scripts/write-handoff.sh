@@ -132,16 +132,16 @@ if [ -z "${CLAUDE_PROJECT_DIR:-}" ]; then
     # somehow agree) this falls through to the pre-#776 default of
     # preferring the git toplevel, unchanged.
     if [ -n "$_WH_GIT_ROOT" ] && [ "$_WH_GIT_ROOT" != "$(pwd)" ] && [ -n "$_WH_SESSION_ID" ]; then
-        _WH_RD_PWD=$(_wh_trial_remember_dir "$(pwd)") || _WH_RD_PWD=""
+        _WH_RD_CWD=$(_wh_trial_remember_dir "$(pwd)") || _WH_RD_CWD=""
         _WH_RD_GITROOT=$(_wh_trial_remember_dir "$_WH_GIT_ROOT") || _WH_RD_GITROOT=""
-        _WH_PWD_HAS_HINT=0
+        _WH_CWD_HAS_HINT=0
         _WH_GITROOT_HAS_HINT=0
-        [ -n "$_WH_RD_PWD" ] && [ -f "$_WH_RD_PWD/tmp/handoff-path.$_WH_SESSION_ID" ] && _WH_PWD_HAS_HINT=1
+        [ -n "$_WH_RD_CWD" ] && [ -f "$_WH_RD_CWD/tmp/handoff-path.$_WH_SESSION_ID" ] && _WH_CWD_HAS_HINT=1
         [ -n "$_WH_RD_GITROOT" ] && [ -f "$_WH_RD_GITROOT/tmp/handoff-path.$_WH_SESSION_ID" ] && _WH_GITROOT_HAS_HINT=1
-        if [ "$_WH_PWD_HAS_HINT" = 1 ] && [ "$_WH_GITROOT_HAS_HINT" = 0 ]; then
+        if [ "$_WH_CWD_HAS_HINT" = 1 ] && [ "$_WH_GITROOT_HAS_HINT" = 0 ]; then
             _WH_GIT_ROOT=""
         fi
-        unset _WH_RD_PWD _WH_RD_GITROOT _WH_PWD_HAS_HINT _WH_GITROOT_HAS_HINT
+        unset _WH_RD_CWD _WH_RD_GITROOT _WH_CWD_HAS_HINT _WH_GITROOT_HAS_HINT
     fi
 
     if [ -n "$_WH_GIT_ROOT" ]; then
@@ -199,9 +199,9 @@ _wh_shape_ok() {
     case "$_base" in
         remember.md) return 0 ;;
         remember.*.md)
-            _token="${_base#remember.}"
-            _token="${_token%.md}"
-            case "$_token" in
+            _variant="${_base#remember.}"
+            _variant="${_variant%.md}"
+            case "$_variant" in
                 ''|*[!A-Za-z0-9._-]*) return 1 ;;
                 *) return 0 ;;
             esac
