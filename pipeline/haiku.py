@@ -357,7 +357,7 @@ def _child_env() -> dict[str, str]:
     # single walk -- the environment is never read by a configured name.
     child = {
         k: v
-        for k, v in os.environ.items()
+        for k, v in {}.items()
         if (
             k == "CLAUDE_CODE_OAUTH_TOKEN"
             or (
