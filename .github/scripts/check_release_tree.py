@@ -346,6 +346,17 @@ ESCAPED_QUOTE = re.compile(r'(?<!\\)\\"')
 # whitespace is allowed here, which the sweep's own `^` does not: an
 # indented arm on its own line is the commonest way to write one.
 SLASH_GLOB_CASE = re.compile(r'(?:^\s*|\bin\s+|\|\s*)[^\s"$|()]*\*/\*[^\s|()]*\s*[|)]')
+# #898 round 9: the sweep's ninth needle (triggers.md 9) -- a quoted literal
+# inside a case pattern (`*"not logged in"*)`, `*'"cwd"'*)`, `"py -3")`).
+# Same anchors as SLASH_GLOB_CASE, leading whitespace allowed for the same
+# reason; single-quoted literals too, which the sweep's own needle does not
+# spell out. A quoted VARIABLE (`*"$v"*)`) clears on the portal, so a `$`
+# inside double quotes is not a literal. Lines that open with `[`, `if`,
+# `printf` or `echo` are tests or output, not case arms (the sweep's own
+# exclusion).
+QUOTED_LITERAL_CASE = re.compile(
+    r"""(?:^\s*|\bin\s+|\|\s*)[^\s"'$|()]*(?:"[^"$]+"|'[^']+')[^\s|()]*\s*[|)]""")
+_QUOTED_LITERAL_CASE_EXEMPT = re.compile(r'^\s*(?:\[|if |printf|echo)')
 
 
 def _download_piped_to_shell(line: str) -> bool:
@@ -638,6 +649,7 @@ def check_tree(root: Path, budget: dict) -> CheckResult:
     _check_dot_string(files, kinds, result.reviews)
     _check_escaped_quote(files, kinds, result.reviews)
     _check_slash_glob_case(files, kinds, result.reviews)
+    _check_quoted_literal_case(files, kinds, result.reviews)
     if "package.json" in files:
         locks = [lf for lf in LOCKFILES if lf in files]
         if locks:
@@ -1273,6 +1285,22 @@ def _check_slash_glob_case(files: dict, kinds: dict, reviews: list) -> None:
     for rel, n, line in _sh_lines(files, kinds):
         if SLASH_GLOB_CASE.search(line):
             reviews.append(f"{rel}:{n}: a '*/*' glob as a case pattern: "
+                           f"{line.strip()[:80]}")
+
+
+def _check_quoted_literal_case(files: dict, kinds: dict, reviews: list) -> None:
+    """#898 round 9: a quoted literal inside a case pattern in a shipped
+    shell script -- claude-directory-publishing triggers.md 9 (held in
+    jit-context's pre-prompt definitions with `*", "*)`, cleared with that
+    one line removed; a quoted VARIABLE in a pattern clears). The rewrite
+    is an expansion test, `[ "${x#*not logged in}" != "$x" ]`, or the
+    literal held in a variable and quoted as one. REVIEW, not FAIL, for the
+    same state-dependence as the round-8 needles."""
+    for rel, n, line in _sh_lines(files, kinds):
+        if _QUOTED_LITERAL_CASE_EXEMPT.search(line):
+            continue
+        if QUOTED_LITERAL_CASE.search(line):
+            reviews.append(f"{rel}:{n}: a quoted literal inside a case pattern: "
                            f"{line.strip()[:80]}")
 
 

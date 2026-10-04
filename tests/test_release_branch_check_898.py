@@ -568,3 +568,57 @@ def test_slash_glob_case_in_a_python_file_is_not_reviewed(tmp_path):
     root = _tree(tmp_path, {"scripts/tool.py": b'm = {"a": "*/*)"}  # x | */*)\n'})
     reviews = _check(root).reviews
     assert not any("tool.py" in r and "'*/*'" in r for r in reviews), reviews
+
+
+def test_round8_shapes_are_reviewed_in_hooks_d(tmp_path):
+    """#898 round 9: the opt-in git backup/restore hooks under hooks.d ship
+    in the release tree too, so both round-8 needles must reach them."""
+    root = _tree(tmp_path, {"hooks.d/after_save/50-x.sh": (
+        b'#!/bin/bash\ncase "$r" in\n    -*|*:*|*/*) r="" ;;\nesac\n'
+        b'log "run git -C \\"$ROOT\\" push"\n')})
+    reviews = _check(root).reviews
+    assert any("50-x.sh:3" in r and "'*/*'" in r for r in reviews), reviews
+    assert any("50-x.sh:5" in r and "escaped quote" in r for r in reviews), reviews
+
+
+# -- round 9 (#898): a quoted literal inside a case pattern (REVIEW) ---------
+# claude-directory-publishing triggers.md 9: `*", "*)`, `"no such file"*)`,
+# `*'"cwd"'*)`. A quoted VARIABLE in a pattern clears.
+
+def test_quoted_literal_case_arm_on_its_own_indented_line_is_reviewed(tmp_path):
+    root = _tree(tmp_path, {"scripts/run.sh": (b'#!/bin/sh\ncase "$x" in\n'
+                                               b'    *"not logged in"*|*"bad key"*) echo y ;;\nesac\n')})
+    reviews = _check(root).reviews
+    assert any("run.sh:3" in r and "quoted literal" in r for r in reviews), reviews
+
+
+def test_quoted_literal_case_after_in_is_reviewed(tmp_path):
+    root = _tree(tmp_path, {"scripts/run.sh": (b"#!/bin/sh\ncase \"$raw\" in *'\"cwd\"'*) ;; *) exit 1 ;; esac\n")})
+    reviews = _check(root).reviews
+    assert any("run.sh:2" in r and "quoted literal" in r for r in reviews), reviews
+
+
+def test_quoted_literal_whole_word_case_arm_is_reviewed(tmp_path):
+    root = _tree(tmp_path, {"scripts/run.sh": (b'#!/bin/sh\ncase "$P" in\n'
+                                               b'    "py -3") py -3 "$@" ;;\nesac\n')})
+    reviews = _check(root).reviews
+    assert any("run.sh:3" in r and "quoted literal" in r for r in reviews), reviews
+
+
+def test_quoted_variable_case_arm_and_expansion_test_are_not_reviewed(tmp_path):
+    """Positive control: a quoted VARIABLE in a pattern clears on the portal
+    (triggers.md 9), and so does the documented rewrite -- an expansion test
+    with the literal held in a variable or written bare."""
+    root = _tree(tmp_path, {"scripts/run.sh": (
+        b'#!/bin/sh\ncase "$x" in\n    *"$NL$v$NL"*) echo y ;;\nesac\n'
+        b'[ "${x#*"$lit"}" != "$x" ] && echo y\n'
+        b'if [ "${x#*not logged in}" != "$x" ]; then echo y; fi\n'
+        b'py\\ -3) : ;;\n')})
+    reviews = _check(root).reviews
+    assert not any("run.sh" in r and "quoted literal" in r for r in reviews), reviews
+
+
+def test_quoted_literal_case_in_a_python_file_is_not_reviewed(tmp_path):
+    root = _tree(tmp_path, {"scripts/tool.py": b'    "py -3") \n'})
+    reviews = _check(root).reviews
+    assert not any("tool.py" in r and "quoted literal" in r for r in reviews), reviews
