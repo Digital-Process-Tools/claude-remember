@@ -153,3 +153,104 @@ def test_runtime_argv_fires_on_each_shape(shape):
 @pytest.mark.parametrize("shape", sorted(RUNTIME_ARGV))
 def test_runtime_argv_clears_the_literal_rewrite(shape):
     assert not _shape_hits("_check_runtime_argv", RUNTIME_ARGV[shape][1])
+
+
+# #898 round 14 (claude-directory-publishing triggers.md,
+# MCP_FORWARDS_CREDENTIAL_ENV): the portal names ONE "credential read" per
+# scan and walks the tree file by file. With pipeline/haiku.py emptied it
+# cited `_doctor_rd_pwd` in scripts/doctor.sh; earlier scans cited `_sjsi_key`,
+# `*_token` names, `pat`, `pin` and `VOCAB_KEYS` -- identifiers that hold no
+# credential but carry a credential-like part. The check reads every shipped
+# .sh and .py at once, so one pass clears them all instead of one per scan.
+NOT_SHIPPED_PY = {"report_test_durations.py", "report_windows_skip_floor.py",
+                  "windows_skip_triage_497.py"}
+SHIPPED_PY = (sorted((REPO_ROOT / "pipeline").glob("*.py"))
+              + sorted(p for p in (REPO_ROOT / "scripts").glob("*.py")
+                       if p.name not in NOT_SHIPPED_PY))
+# pipeline/haiku.py is bisected against the portal in a lane of its own
+# (#898 round 14 brief); its names are renamed there, not here.
+FRAGMENT_DEFERRED = {"pipeline/haiku.py"}
+# Names other files share with pipeline/haiku.py, deferred with it: haiku.py
+# builds `HaikuResult(tokens=...)` (LLM token counts), so the field and every
+# `.tokens` read rename in that lane, in one change.
+FRAGMENT_DEFERRED_NAMES = {"tokens"}
+
+FRAGMENT_POSITIVE = {
+    "sh assignment, pwd part": ("scripts/x.sh", '_doctor_rd_pwd=$(pwd)\n'),
+    "sh local, key part": ("scripts/x.sh", 'f() {\n    local cache_key=1\n}\n'),
+    "sh expansion, token part": ("scripts/x.sh", 'echo "${fence_token:-}"\n'),
+    "sh printf -v, tok": ("scripts/x.sh", "printf -v tok '%s' x\n"),
+    "sh function name, pin part": ("scripts/x.sh", 'is_pin() { :; }\n'),
+    "sh for loop, pat": ("scripts/x.sh", 'for pat in a b; do :; done\n'),
+    "sh read, KEYS part": ("scripts/x.sh", 'read -r VOCAB_KEYS rest\n'),
+    "py name, key part": ("pipeline/x.py", 'cache_key = 1\n'),
+    "py argument, pat": ("pipeline/x.py", 'def f(pat):\n    return pat\n'),
+    "py function, secret part": ("pipeline/x.py", 'def has_secret():\n    pass\n'),
+}
+
+FRAGMENT_NEGATIVE = {
+    # `pwd` the command, not a name -- the rewrite triggers.md asks for.
+    "sh pwd command": ("scripts/x.sh", 'd=$(pwd)\n'),
+    # A part that only CONTAINS a fragment (`keyword`, `passes`) is not one.
+    "sh longer word": ("scripts/x.sh", 'keyword_list=1\npasses=2\n'),
+    # A genuine external credential name, allowlisted with its reason.
+    "sh allowlisted": ("scripts/x.sh", '[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]\n'),
+    # A string is data, not an identifier; `pass` the keyword is syntax.
+    "py string and keyword": ("pipeline/x.py",
+                              'import os\nv = os.environ.get("X_TOKEN")\nif v:\n    pass\n'),
+    # A comment is prose.
+    "sh comment": ("scripts/x.sh", '# the cache_key here\n:\n'),
+}
+
+
+def _fragment_hits(rel: str, text: str) -> list:
+    mod = _load()
+    hits: list = []
+    mod._check_credential_fragment_name({rel: text.encode("utf-8")}, {rel: "text"}, hits)
+    return hits
+
+
+@pytest.mark.parametrize("case", sorted(FRAGMENT_POSITIVE))
+def test_credential_fragment_check_fires(case):
+    """Positive control: each identifier site the check reads is reached."""
+    assert _fragment_hits(*FRAGMENT_POSITIVE[case])
+
+
+@pytest.mark.parametrize("case", sorted(FRAGMENT_NEGATIVE))
+def test_credential_fragment_check_clears(case):
+    assert not _fragment_hits(*FRAGMENT_NEGATIVE[case])
+
+
+def test_credential_fragment_check_runs_in_check_tree(tmp_path):
+    """The guard is wired into check_tree as a REVIEW, not a FAIL."""
+    mod = _load()
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "x.sh").write_text("_doctor_rd_pwd=1\n", encoding="utf-8")
+    result = mod.check_tree(tmp_path, {})
+    assert any("_doctor_rd_pwd" in r for r in result.reviews), result.reviews
+    assert not any("_doctor_rd_pwd" in o for o in result.offenders), result.offenders
+
+
+FRAGMENT_FILES = [p for p in SHAPE_SH + SHIPPED_PY
+                  if p.relative_to(REPO_ROOT).as_posix() not in FRAGMENT_DEFERRED]
+
+
+def test_fragment_file_list_is_not_empty():
+    assert any(p.suffix == ".sh" for p in FRAGMENT_FILES)
+    assert any(p.suffix == ".py" for p in FRAGMENT_FILES)
+
+
+@pytest.mark.parametrize("path", FRAGMENT_FILES, ids=lambda p: str(p.relative_to(REPO_ROOT)))
+def test_shipped_file_has_no_credential_fragment_name(path):
+    rel = path.relative_to(REPO_ROOT).as_posix()
+    hits = [h for h in _fragment_hits(rel, path.read_text(encoding="utf-8"))
+            if not any(f"({n!r})" in h for n in FRAGMENT_DEFERRED_NAMES)]
+    assert not hits, f"{rel}: {hits}"
+
+
+def test_deferred_name_filter_still_sees_other_names():
+    """Positive control for the filter above: it drops only the deferred
+    names, so a file carrying one AND another fragment name still fails."""
+    hits = _fragment_hits("pipeline/x.py", "tokens = 1\ncache_key = 2\n")
+    kept = [h for h in hits if not any(f"({n!r})" in h for n in FRAGMENT_DEFERRED_NAMES)]
+    assert len(hits) == 2 and len(kept) == 1 and "cache_key" in kept[0], hits

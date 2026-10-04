@@ -60,6 +60,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import os
 import posixpath
@@ -669,6 +670,7 @@ def check_tree(root: Path, budget: dict) -> CheckResult:
     _check_bare_dot_word(files, kinds, result.reviews)
     _check_backslash_case_pattern(files, kinds, result.reviews)
     _check_plugin_root_copy(files, kinds, result.reviews)
+    _check_credential_fragment_name(files, kinds, result.reviews)
     if "package.json" in files:
         locks = [lf for lf in LOCKFILES if lf in files]
         if locks:
@@ -1439,6 +1441,109 @@ def _check_named_api_key(files: dict, kinds: dict, off: list) -> None:
             if NAMED_API_KEY in line:
                 off.append(f"{rel}:{n}: names {NAMED_API_KEY}, which nothing shipped "
                            f"may (#898 round 13): {line.strip()[:80]}")
+
+
+# #898 round 14 (claude-directory-publishing triggers.md,
+# MCP_FORWARDS_CREDENTIAL_ENV): the portal's "credential read" walks the tree
+# one identifier per scan -- `_doctor_rd_pwd`, `_sjsi_key`, `*_token` fence
+# names, `pat`, `pin`, `VOCAB_KEYS` -- names that hold no credential but have
+# a credential-like part, as the whole name or one `_`-separated part. This
+# reads every name in every shipped .sh and .py at once. A part that only
+# contains a fragment (`keyword`, `passes`, `tokenize`) is not one.
+CREDENTIAL_FRAGMENTS = frozenset({
+    "pwd", "passwd", "pass", "password", "passwords", "pw",
+    "key", "keys", "apikey", "token", "tokens", "tok", "toks",
+    "secret", "secrets", "cred", "creds", "credential", "credentials",
+    "auth", "pat", "pats", "pin", "pins", "sig", "sigs",
+})
+# Names a shipped file may still carry, each with the reason it stays: a real
+# credential, or a name something outside this repo defines.
+CREDENTIAL_FRAGMENT_ALLOWLIST = {
+    "CLAUDE_CODE_OAUTH_TOKEN": "a real credential; Claude Code defines the name",
+    "CODEX_API_KEY": "a real credential; the Codex CLI defines the name",
+    "PWD": "the shell's own variable; a $PWD read is FAILed separately",
+}
+_SH_NAME_SITES = re.compile(r"""
+      \$\{?[#!]?(?P<exp>[A-Za-z_]\w*)
+    | (?:^|[\s;&|(])(?P<asg>[A-Za-z_]\w*)(?:\[[^\]]*\])?\+?=
+    | ^\s*(?:function\s+)?(?P<fn>[A-Za-z_]\w*)\s*\(\)
+    | \bfunction\s+(?P<fn2>[A-Za-z_]\w*)
+    | \bfor\s+(?P<loop>[A-Za-z_]\w*)\s+in\b
+    | \bprintf\s+-v\s+(?P<pv>[A-Za-z_]\w*)
+""", re.X)
+_SH_DECLARE = re.compile(
+    r"\b(?:local|export|declare|typeset|readonly|unset|read)\b((?:\s+[^\s;&|<>]+)+)")
+_IDENT = re.compile(r"[A-Za-z_]\w*\Z")
+
+
+def _credential_fragment(name: str) -> bool:
+    return any(p.lower() in CREDENTIAL_FRAGMENTS for p in name.split("_") if p)
+
+
+def _sh_names(line: str):
+    for m in _SH_NAME_SITES.finditer(line):
+        yield next(v for v in m.groupdict().values() if v)
+    for m in _SH_DECLARE.finditer(line):
+        for word in m.group(1).split():
+            if word.startswith("-"):
+                continue
+            word = word.split("=", 1)[0]
+            if not _IDENT.match(word):
+                break
+            yield word
+
+
+def _py_names(text: str):
+    """(line, name) for every name a Python file binds or reads -- not its
+    strings, comments or keywords."""
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return
+    for node in ast.walk(tree):
+        line = getattr(node, "lineno", 0)
+        if isinstance(node, ast.Name):
+            yield line, node.id
+        elif isinstance(node, ast.arg):
+            yield line, node.arg
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            yield line, node.name
+        elif isinstance(node, ast.Attribute):
+            yield line, node.attr
+        elif isinstance(node, ast.keyword) and node.arg:
+            yield line, node.arg
+        elif isinstance(node, ast.alias):
+            yield line, (node.asname or node.name).split(".")[0]
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            for name in node.names:
+                yield line, name
+
+
+def _check_credential_fragment_name(files: dict, kinds: dict, reviews: list) -> None:
+    """#898 round 14: a shipped .sh or .py identifier with a credential-like
+    part, outside CREDENTIAL_FRAGMENT_ALLOWLIST. Rename it to what it holds
+    (`_doctor_rd_pwd` -> `_doctor_rd_dir`). One line per name per file.
+    REVIEW, not FAIL: a name heuristic for a portal-observed read."""
+    for rel, data in sorted(files.items()):
+        top = rel.split("/")[0]
+        if top not in _SCRIPT_DIRS and top != "pipeline":
+            continue
+        if kinds.get(rel) != "text" or not rel.endswith((".sh", ".py")):
+            continue
+        text = data.decode("utf-8")
+        if rel.endswith(".py"):
+            sites = _py_names(text)
+        else:
+            sites = ((n, name) for n, line in enumerate(text.splitlines(), 1)
+                     if not line.lstrip().startswith("#") for name in _sh_names(line))
+        seen = set()
+        for n, name in sites:
+            if name in seen or name in CREDENTIAL_FRAGMENT_ALLOWLIST:
+                continue
+            if _credential_fragment(name):
+                seen.add(name)
+                reviews.append(f"{rel}:{n}: a name with a credential-like part "
+                               f"({name!r}) -- rename it to what it holds")
 
 
 def _check_launchers(files: dict, kinds: dict, off: list) -> None:
