@@ -552,7 +552,9 @@ was "Validation ran out of time". That is the failure the `release` branch exist
   reference at column 0, same risk profile as the existing typed-heredoc guard), `$PWD` as a
   literal, a bare `env` word, a nested default expansion (`${X:-$Y}`), and a credential-shaped name
   outside an allowlist (`ANTHROPIC_API_KEY`, `CODEX_API_KEY`, and the split-name half `OAUTH_TOKEN`
-  alone, which is not itself a full credential name). Round 4's own three guards
+  alone, which is not itself a full credential name; #898 round 13 took `ANTHROPIC_API_KEY` off that
+  allowlist when the #703 strip was removed in favour of the generic `haiku.drop_env`, and added a
+  FAIL on any mention of that name in any shipped file -- code, comment, data or prose). Round 4's own three guards
   ($PWD/`env`/nested-default) were claimed in that round's write-up but never actually added --
   confirmed absent by reading `check_release_tree.py` directly before writing this round's version;
   the three remaining `$PWD`/nested-default-expansion sites this absence let drift back in

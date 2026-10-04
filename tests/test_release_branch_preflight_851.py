@@ -337,7 +337,9 @@ def test_a_real_looking_credential_fails(tmp_path, secret):
 
 @pytest.mark.parametrize("text", [
     "pattern = r'sk-ant-[A-Za-z0-9_-]{20,}'",
-    "export ANTHROPIC_API_KEY=sk-ant-...",
+    # #898 round 13: any credential name but the Anthropic one, which now
+    # FAILs anywhere in the tree on its own (check_release_tree NAMED_API_KEY).
+    "export EXAMPLE_API_KEY=sk-ant-...",
     "token: ghp_xxx (example)",
 ])
 def test_patterns_and_placeholders_pass(tmp_path, text):
@@ -345,10 +347,13 @@ def test_patterns_and_placeholders_pass(tmp_path, text):
 
 
 def test_reading_a_credential_is_reported_for_review_not_failed(tmp_path):
-    root = _tree(tmp_path, {"pipeline/x.py": b'import os\nkey = os.environ.get("ANTHROPIC_API_KEY")\n'})
+    # #898 round 13: CODEX_API_KEY, not the Anthropic name -- that one now
+    # FAILs on its own (check_release_tree NAMED_API_KEY); this row is about
+    # the generic REVIEW for a credential read.
+    root = _tree(tmp_path, {"pipeline/x.py": b'import os\nkey = os.environ.get("CODEX_API_KEY")\n'})
     result = _load().check_tree(root, {})
     assert result.offenders == []
-    assert any("pipeline/x.py" in r and "ANTHROPIC_API_KEY" in r for r in result.reviews), result.reviews
+    assert any("pipeline/x.py" in r and "CODEX_API_KEY" in r for r in result.reviews), result.reviews
 
 
 # -- images ---------------------------------------------------------------------

@@ -305,9 +305,23 @@ NESTED_DEFAULT_EXPANSION = re.compile(r'\$\{[A-Za-z_][A-Za-z0-9_]*:-\$')
 # ANTHROPIC_API_KEY and CODEX_API_KEY. "OAUTH_TOKEN" alone (the second half
 # of the now-reverted split) stays allowlisted too: it is not, by itself, a
 # full credential name for any variable this plugin reads.
+#
+# #898, round 13: ANTHROPIC_API_KEY is OFF this allowlist -- the maintainer
+# removed the #703 strip that named it, and NAMED_API_KEY below now fails the
+# tree on any mention of it at all.
 CREDENTIAL_NAME_ALLOWLIST = {
-    "ANTHROPIC_API_KEY", "CODEX_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "OAUTH_TOKEN",
+    "CODEX_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "OAUTH_TOKEN",
 }
+
+# #898, round 13 (maintainer decision): the directory portal held the plugin
+# on MCP_FORWARDS_CREDENTIAL_ENV with this name as the read side -- first as a
+# constant holding it, then as the literal read itself. The #703 strip that
+# needed it is gone; `haiku.drop_env` (a generic list of names/globs, empty by
+# default) replaces it, and the docs that show `haiku.drop_env:
+# ["ANTHROPIC_API_KEY"]` live outside the shipped tree. FAIL, not REVIEW:
+# one exact string, no false positive to weigh, every file kind (code,
+# comments, data, prose) -- the portal cited a name whatever surrounded it.
+NAMED_API_KEY = "ANTHROPIC_API_KEY"
 CREDENTIAL_SHAPED_NAME = re.compile(
     r'\b([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_(?:TOKEN|KEY|SECRET|PASSWORD))\b'
 )
@@ -642,6 +656,7 @@ def check_tree(root: Path, budget: dict) -> CheckResult:
     _check_bare_env_word(files, kinds, off)
     _check_nested_default_expansion(files, kinds, off)
     _check_credential_shaped_name(files, kinds, off)
+    _check_named_api_key(files, kinds, off)
     _check_indirect_expansion(files, kinds, result.reviews)
     _check_lone_quote(files, kinds, result.reviews)
     _check_backslash_quote(files, kinds, off)
@@ -1412,6 +1427,18 @@ def _check_credential_shaped_name(files: dict, kinds: dict, off: list) -> None:
                     continue
                 off.append(f"{rel}:{n}: credential-shaped name {name!r} is not in "
                            f"the allowlist: {line.strip()[:80]}")
+
+
+def _check_named_api_key(files: dict, kinds: dict, off: list) -> None:
+    """#898, round 13: no shipped text file names NAMED_API_KEY, anywhere --
+    code, comment, JSON or Markdown alike. See NAMED_API_KEY for why FAIL."""
+    for rel, data in sorted(files.items()):
+        if kinds.get(rel) != "text":
+            continue
+        for n, line in enumerate(data.decode("utf-8").splitlines(), 1):
+            if NAMED_API_KEY in line:
+                off.append(f"{rel}:{n}: names {NAMED_API_KEY}, which nothing shipped "
+                           f"may (#898 round 13): {line.strip()[:80]}")
 
 
 def _check_launchers(files: dict, kinds: dict, off: list) -> None:

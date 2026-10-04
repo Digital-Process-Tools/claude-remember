@@ -14,6 +14,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / ".github" / "scripts" / "check_release_tree.py"
 
@@ -371,19 +373,50 @@ def test_credential_shaped_name_outside_allowlist_fails(tmp_path):
 
 
 def test_allowlisted_credential_name_is_not_an_offender(tmp_path):
-    """Positive control: ANTHROPIC_API_KEY, CODEX_API_KEY and
-    CLAUDE_CODE_OAUTH_TOKEN -- real, intentionally shipped identifiers named
-    in full -- are accepted (#898, round 6: the round-5 split of the last one
-    into two string halves was itself ruled obfuscation and reverted; naming
-    the real credential plainly is the fix, not a regression this guard
-    should catch)."""
+    """Positive control: CODEX_API_KEY and CLAUDE_CODE_OAUTH_TOKEN -- real,
+    intentionally shipped identifiers named in full -- are accepted (#898,
+    round 6: the round-5 split of the last one into two string halves was
+    itself ruled obfuscation and reverted). Round 13 took the Anthropic API
+    key's name OFF this list: nothing shipped names it any more."""
     root = _tree(tmp_path, {
-        "pipeline/example.py": (b'KEY_ENV = "ANTHROPIC_API_KEY"\n'
-                                 b'CODEX_ENV = "CODEX_API_KEY"\n'
+        "pipeline/example.py": (b'CODEX_ENV = "CODEX_API_KEY"\n'
                                  b'OAUTH_NAME = "CLAUDE_CODE_OAUTH_TOKEN"\n'),
     })
     offenders = _check(root).offenders
     assert not any("example.py" in o for o in offenders), offenders
+
+
+# -- round 13 (#898): the shipped tree names no ANTHROPIC_API_KEY (FAIL) -----
+
+_API_KEY_NAME = "ANTHROPIC_API_KEY"
+
+
+@pytest.mark.parametrize("rel, data", [
+    ("pipeline/example.py", b'v = os.environ.get("ANTHROPIC_API_KEY", "")\n'),
+    ("scripts/run.sh", b"#!/bin/sh\n# strips ANTHROPIC_API_KEY first\necho hi\n"),
+    ("config.example.json", b'{"haiku": {"drop_env": ["ANTHROPIC_API_KEY"]}}\n'),
+    ("notes.md", b"Unset ANTHROPIC_API_KEY before running.\n"),
+])
+def test_the_api_key_name_anywhere_in_the_shipped_tree_fails(tmp_path, rel, data):
+    """#898 round 13 (maintainer decision): the directory portal held the
+    plugin on this name alone (MCP_FORWARDS_CREDENTIAL_ENV), whatever the
+    code did with it -- in code, a comment, shipped data or prose. FAIL, not
+    REVIEW: one exact string, no false positive to weigh, and a hold."""
+    result = _check(_tree(tmp_path, {rel: data}))
+    hits = [o for o in result.offenders if o.startswith(rel) and _API_KEY_NAME in o]
+    assert hits, result.offenders
+
+
+def test_a_tree_without_the_api_key_name_has_no_such_offender(tmp_path):
+    """Positive control: neighbours of the name -- another ANTHROPIC_ variable,
+    the generic option, the words in prose -- are not it."""
+    root = _tree(tmp_path, {
+        "pipeline/example.py": b'BASE = "ANTHROPIC_BASE_URL"\n',
+        "config.example.json": b'{"haiku": {"drop_env": []}}\n',
+        "notes.md": b"An Anthropic API key set for another tool.\n",
+    })
+    result = _check(root)
+    assert not any(_API_KEY_NAME in o for o in result.offenders), result.offenders
 
 
 # -- round 7 (#898): indirect-name expansion `${!NAME}` (REVIEW) -------------
