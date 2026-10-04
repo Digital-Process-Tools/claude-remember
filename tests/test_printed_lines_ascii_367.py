@@ -28,6 +28,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from tests._compiled_hooks import skip_if_compiled
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HOOK = REPO_ROOT / "scripts" / "session-start-hook.sh"
 
@@ -93,7 +95,9 @@ def test_comment_em_dashes_are_untouched():
     """The file-wide decision is scoped to PRINTED lines only -- comment
     em-dashes (the other ~94) are explicitly out of scope and must survive.
     A fix that stripped every em-dash in the file rather than deciding
-    per-stream would pass the test above too, so this pins the boundary."""
+    per-stream would pass the test above too, so this pins the boundary.
+    Comments are the source's: a compiled hook has none by design."""
+    skip_if_compiled(HOOK)
     text = HOOK.read_text(encoding="utf-8")
     comment_dashes = sum(
         1 for line in text.splitlines()

@@ -38,11 +38,18 @@ def is_compiled_text(text: str) -> bool:
     return len(lines) == 2 and lines[1].startswith(COMPILED_MARKER)
 
 
-def skip_if_compiled(path: Path) -> None:
-    """Skip the calling test when PATH is a compiled hook, naming why."""
+def skip_if_compiled(path, why: str = "") -> None:
+    """Skip the calling test when PATH is a compiled hook, naming why.
+
+    WHY replaces the default reason (source text) for a test whose premise
+    is something else a compiled hook does not have -- e.g. that the hook
+    loads a library from disk at run time, which a self-contained compiled
+    hook by construction does not."""
+    path = Path(path)
     if is_compiled_text(path.read_text(encoding="utf-8")):
         pytest.skip(
             f"{path.name} is the compiled build (#900 compiled CI leg), not "
-            f"its source -- this test pins source text, which the plain "
-            f"pytest job checks on every leg"
+            f"its source -- "
+            + (why or "this test pins source text")
+            + ", which the plain pytest job checks on every leg"
         )

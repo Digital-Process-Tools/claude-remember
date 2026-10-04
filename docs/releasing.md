@@ -182,6 +182,18 @@ exactly this to run the whole test suite against the compiled hooks, in
 `.github/workflows/tests.yml`'s `hook-tests-compiled` job, on all three OSes) -- never run
 `--apply` against your own working tree.
 
+**In that compiled leg, a test that pins a hook's SOURCE text skips the compiled hook and says
+so** -- a comment's wording (#637), comment em-dashes (#367), what the hook's own code spells
+(#511, #298), where a `source` statement sits (`test_path_resolution.py`), which source lines
+carry a letter range (#695). The compiled hook is a build product of that source: its comments
+are gone by design and it carries its libraries' text too, so those facts are not about it; the
+plain `pytest` job checks every one of them against the real source on all twelve legs.
+`tests/_compiled_hooks.py` tells the two apart by the marker line `compile_hooks.py` writes right
+after the shebang (`# Compiled by .github/scripts/compile_hooks.py (#900)`). Every behavioural test
+still runs against the compiled hook -- that is the leg's whole point, and it is how round 4's
+cold-cache regression was caught. Reproduce it locally on a disposable clone: `git clone` the
+branch, `python3 .github/scripts/compile_hooks.py --repo . --apply`, then `pytest`.
+
 ### Inlining alone was not enough: tree-shaking and a stricter heredoc guard (#900 round 2)
 
 A maintainer validation of the combined tree (fix/898's round 3 plus this change's own first

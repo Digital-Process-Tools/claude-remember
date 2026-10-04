@@ -715,6 +715,9 @@ def test_real_hook_tree_shaking_drops_at_least_one_function_and_stays_valid(hook
     contents = _sh_texts()
     if key not in contents:
         pytest.skip(f"{key} not present in this checkout")
+    if is_compiled_text(contents[key]):
+        pytest.skip(f"{key} is already compiled (#900 compiled CI leg): there is "
+                    f"no source left here to shake, only its already-shaken build")
     text, report = compile_hooks.compile_hook_report(key, contents)
     assert report["shaken"] is True, (
         f"{hook_name}: tree-shaking did not run: {report['reason'] or report}"

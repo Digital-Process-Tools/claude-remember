@@ -50,6 +50,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from tests._compiled_hooks import is_compiled_text
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # Every shipped shell script. tests/ is excluded: a test's own ranges never
@@ -78,11 +80,18 @@ _INLINE_LC = re.compile(r"\bLC_ALL=C\b")
 
 
 def _shell_files() -> list[Path]:
+    """Every shipped shell SOURCE file. A hook compiled in place (#900's
+    compiled CI leg) is a build product of files this list already holds --
+    the hook's own source is scanned by the plain pytest job, and every
+    library inlined into it is scanned here as itself -- so it is left out
+    rather than re-scanned with its libraries' lines at shifted numbers."""
     files: list[Path] = []
     for d in SHELL_DIRS:
         root = REPO_ROOT / d
         if root.is_dir():
-            files.extend(sorted(p for p in root.rglob("*.sh") if p.is_file()))
+            files.extend(sorted(
+                p for p in root.rglob("*.sh")
+                if p.is_file() and not is_compiled_text(p.read_text(encoding="utf-8"))))
     return files
 
 
@@ -312,6 +321,9 @@ def test_every_allowlist_entry_still_points_at_a_range():
     for (rel, line_no), reason in ALLOWLIST.items():
         path = REPO_ROOT / rel
         assert path.is_file(), f"allowlisted file is gone: {rel}"
+        if is_compiled_text(path.read_text(encoding="utf-8")):
+            # Line pins name SOURCE lines; see _shell_files.
+            continue
         lines = path.read_text(encoding="utf-8").splitlines()
         assert line_no <= len(lines), f"{rel}:{line_no} is past end of file"
         assert _RANGE.search(lines[line_no - 1]), (

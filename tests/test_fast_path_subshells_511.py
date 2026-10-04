@@ -20,6 +20,7 @@ import subprocess
 from pathlib import Path
 
 from ._bash_runner import resolve_bash
+from ._compiled_hooks import skip_if_compiled
 
 BASH = resolve_bash()
 import pytest
@@ -206,6 +207,9 @@ def test_stdin_cwd_is_no_longer_captured_through_a_subshell():
 
 
 def test_remember_date_is_no_longer_captured_through_a_subshell_on_the_fast_path():
+    # The hook's OWN code: a compiled hook also carries its libraries', and
+    # log.sh legitimately captures `$(_remember_date ...)` off this path.
+    skip_if_compiled(HOOK)
     text = HOOK.read_text(encoding="utf-8")
     assert text.count("_remember_date_into _REMEMBER_NOW") == 2, (
         "expected both stamp branches (with and without CTX_PCT) to use the "

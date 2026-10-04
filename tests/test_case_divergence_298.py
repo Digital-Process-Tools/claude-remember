@@ -86,6 +86,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from pipeline.slug import session_dir_slug as _slug  # noqa: E402
+from tests._compiled_hooks import skip_if_compiled  # noqa: E402
 
 pytestmark = pytest.mark.skipif(
     sys.platform == "win32",
@@ -1288,6 +1289,9 @@ def test_the_per_tool_call_path_is_not_touched(tmp_path):
     else that diverges from origin/main in either file still fails this
     test.
     """
+    # The hook's OWN text: a compiled hook also carries its libraries'
+    # (lib-memory-dir.sh calls git, off the per-tool-call path).
+    skip_if_compiled(POST_TOOL)
     body = POST_TOOL.read_text(encoding="utf-8")
     code = "\n".join(line for line in body.splitlines()
                      if not line.lstrip().startswith("#"))
