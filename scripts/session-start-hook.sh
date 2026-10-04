@@ -90,7 +90,7 @@ if [ -n "$_REMEMBER_PLUGIN_ROOT" ] && [ -f "$_REMEMBER_PLUGIN_ROOT/.claude-plugi
 elif [ -n "${PLUGIN_ROOT:-}" ] && [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] \
         && [ "$_REMEMBER_PLUGIN_ROOT" != "$CLAUDE_PLUGIN_ROOT" ] \
         && [ -f "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json" ]; then
-    PIPELINE_DIR="$CLAUDE_PLUGIN_ROOT"
+    PIPELINE_DIR="${CLAUDE_PLUGIN_ROOT:-}"
 elif [ -f "$_PLUGIN_ROOT_CANDIDATE/.claude-plugin/plugin.json" ]; then
     PIPELINE_DIR="$_PLUGIN_ROOT_CANDIDATE"
 else
@@ -1915,7 +1915,7 @@ _remember_wc_size_get_into() {
         fi
         _i=$((_i + 1))
     done
-    printf -v "$_remember_wc_size_outvar" ''
+    printf -v "$_remember_wc_size_outvar" '%s' ''
 }
 
 
@@ -1964,7 +1964,7 @@ _remember_repo_root_walk_into() {
             break
         fi
     done
-    printf -v "$_rrw_outvar" ''
+    printf -v "$_rrw_outvar" '%s' ''  # not an empty format: see above
     return 1
 }
 

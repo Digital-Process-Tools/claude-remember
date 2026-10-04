@@ -196,7 +196,9 @@ _remember_wc_size_get_into() {
         fi
         _i=$((_i + 1))
     done
-    printf -v "$_remember_wc_size_outvar" ''
+    # '%s' with an empty argument, not an empty format: bash 3.2 leaves the
+    # variable unassigned for `printf -v VAR ''` (#898 round 12).
+    printf -v "$_remember_wc_size_outvar" '%s' ''
 }
 
 # ============================================================================
@@ -401,7 +403,7 @@ _remember_repo_root_walk_into() {
             break
         fi
     done
-    printf -v "$_rrw_outvar" ''
+    printf -v "$_rrw_outvar" '%s' ''  # not an empty format: see above
     return 1
 }
 
