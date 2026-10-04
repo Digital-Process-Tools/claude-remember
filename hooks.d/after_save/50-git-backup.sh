@@ -88,10 +88,9 @@ _gb_common_dir() {
     if [ -z "$_out" ]; then
         _out=$(git -C "$_d" rev-parse --git-common-dir 2>/dev/null) || return 1
         [ -n "$_out" ] || return 1
-        case "$_out" in
-            /*|[A-Za-z]:[/\\]*) ;;
-            *) _out="$_d/$_out" ;;
-        esac
+        if [ "${_out#/}" = "$_out" ] && [ "${_out#[A-Za-z]:[/\\]}" = "$_out" ]; then
+            _out="$_d/$_out"
+        fi
     fi
     _gb_realpath "$_out"
 }
@@ -168,9 +167,9 @@ if [ -f "$COOLDOWN_MARKER" ]; then
     # Falling back to 0 self-heals, because the run it allows is the run that
     # rewrites the marker.
     #
-    # `case` AND `10#`, not one or the other (#327). "08"/"09" are all digits,
+    # The digits test AND `10#`, not one or the other (#327). "08"/"09" are all digits,
     # so they clear the guard above and are then read as OCTAL -- the same
-    # abandonment, from a marker that looks clean. `10#` goes AFTER the case and
+    # abandonment, from a marker that looks clean. `10#` goes AFTER the test and
     # never instead of it: `10#` on an empty string is itself an error on bash 5,
     # and the case is also what rejects a space-padded value that arithmetic
     # would have accepted. Same call save-session.sh already makes (#322).
@@ -276,12 +275,10 @@ fi
 # destination ref OTHER than the usual one, one this value also controls. A
 # colon is rejected for the identical reason the remote-name check above
 # rejects one.
-case "$GIT_BACKUP_BRANCH" in
-    -*|*:*)
-        report_error "git-backup" "WARNING: configured git_backup.branch '$GIT_BACKUP_BRANCH' starts with '-' or contains ':' -- refusing to use it as a git push operand (a colon makes it a src:dst refspec, not a branch name)."
-        GIT_BACKUP_BRANCH=""
-        ;;
-esac
+if [ "${GIT_BACKUP_BRANCH#-}" != "$GIT_BACKUP_BRANCH" ] || [ "${GIT_BACKUP_BRANCH/:/}" != "$GIT_BACKUP_BRANCH" ]; then
+    report_error "git-backup" "WARNING: configured git_backup.branch '$GIT_BACKUP_BRANCH' starts with '-' or contains ':' -- refusing to use it as a git push operand (a colon makes it a src:dst refspec, not a branch name)."
+    GIT_BACKUP_BRANCH=""
+fi
 # Which remote a bare `git push` would ACTUALLY use (#257). This was hardcoded
 # to `origin` whenever git_backup.remote is unset, while `_push` in that same
 # case runs a bare `git push` — which follows the branch's upstream. Two
@@ -422,7 +419,7 @@ fi
     # remote is read off text the remote did not write.
     _push() {
         # -- required (#723): GIT_BACKUP_REMOTE/GIT_BACKUP_BRANCH are validated
-        # plain names by this point (see the case statements above, right after
+        # plain names by this point (see the dash/colon tests above, right after
         # they are read from config), but without a `--` separator a value that
         # slipped past would still be parsed as an option rather than an
         # operand -- the separator is cheap insurance the validation above does

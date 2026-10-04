@@ -91,12 +91,13 @@ set -u  # not -e -- we never want to fail loudly here
 # this normalization exists to protect. scripts/doctor.sh:141 and
 # scripts/lib-case-divergence.sh:162 normalize both sides of this identical
 # REMEMBER_DIR-vs-PROJECT_DIR comparison for the same reason.
-case "${OSTYPE:-}" in
-    msys|cygwin) _gr_normalized_dir="${REMEMBER_DIR//\\//}"
-                 _gr_normalized_project="${PROJECT_DIR//\\//}" ;;
-    *)           _gr_normalized_dir="$REMEMBER_DIR"
-                 _gr_normalized_project="$PROJECT_DIR" ;;
-esac
+if [ "${OSTYPE:-}" = msys ] || [ "${OSTYPE:-}" = cygwin ]; then
+    _gr_normalized_dir="${REMEMBER_DIR//\\//}"
+    _gr_normalized_project="${PROJECT_DIR//\\//}"
+else
+    _gr_normalized_dir="$REMEMBER_DIR"
+    _gr_normalized_project="$PROJECT_DIR"
+fi
 REPO_ROOT="${_gr_normalized_dir%/*}"
 SLUG="${_gr_normalized_dir##*/}"
 unset _gr_normalized_dir
@@ -214,10 +215,9 @@ _gr_common_dir() {
     if [ -z "$_out" ]; then
         _out=$(git -C "$_d" rev-parse --git-common-dir 2>/dev/null) || return 1
         [ -n "$_out" ] || return 1
-        case "$_out" in
-            /*|[A-Za-z]:[/\\]*) ;;
-            *) _out="$_d/$_out" ;;
-        esac
+        if [ "${_out#/}" = "$_out" ] && [ "${_out#[A-Za-z]:[/\\]}" = "$_out" ]; then
+            _out="$_d/$_out"
+        fi
     fi
     _gr_realpath "$_out"
 }
@@ -266,15 +266,16 @@ fi
 # ref somewhere OTHER than the usual remote-tracking ref, to a destination
 # this value also controls. A colon is rejected for the identical reason the
 # remote-name check above rejects one.
-case "$GIT_RESTORE_BRANCH" in
-    -*|*:*)
-        report_error "git-restore" "WARNING: configured branch '$GIT_RESTORE_BRANCH' starts with '-' or contains ':' -- refusing to use it as a git fetch operand (a colon makes it a src:dst refspec, not a branch name)."
-        GIT_RESTORE_BRANCH=""
-        ;;
-esac
+if [ "${GIT_RESTORE_BRANCH#-}" != "$GIT_RESTORE_BRANCH" ] || [ "${GIT_RESTORE_BRANCH/:/}" != "$GIT_RESTORE_BRANCH" ]; then
+    report_error "git-restore" "WARNING: configured branch '$GIT_RESTORE_BRANCH' starts with '-' or contains ':' -- refusing to use it as a git fetch operand (a colon makes it a src:dst refspec, not a branch name)."
+    GIT_RESTORE_BRANCH=""
+fi
 
 FETCH_TIMEOUT=$(config '.git_restore.fetch_timeout_seconds' '20')
-case "$FETCH_TIMEOUT" in ''|*[!0-9]*|0) FETCH_TIMEOUT=20 ;; esac
+if [ -z "$FETCH_TIMEOUT" ] || [ "${FETCH_TIMEOUT/[!0-9]/}" != "$FETCH_TIMEOUT" ] \
+    || [ "$FETCH_TIMEOUT" = 0 ]; then
+    FETCH_TIMEOUT=20
+fi
 
 # How many CONSECUTIVE session starts finding a diverged store before the human
 # is interrupted rather than merely logged. Same escalation argument part 1
@@ -352,9 +353,9 @@ _spawn_fetch() {
     if [ -f "$FETCH_STATE_FILE" ]; then
         local _s='' _f='' _now _age
         while IFS='=' read -r _k _v; do
-            case "$_k" in started) _s="$_v" ;; finished) _f="$_v" ;; esac
+            if [ "$_k" = started ]; then _s="$_v"; elif [ "$_k" = finished ]; then _f="$_v"; fi
         done < "$FETCH_STATE_FILE"
-        # 10# after the case, never instead of it (#327): "08" is all digits,
+        # 10# after the digits test, never instead of it (#327): "08" is all digits,
         # clears the guard, and is then read as octal -- so the age comparison
         # is abandoned and a fetch still inside its window gets a second one
         # stacked on top of it.
@@ -421,7 +422,7 @@ _spawn_fetch() {
         # the fetch should move exactly one remote-tracking ref.
         #
         # -- required (#723): REMOTE_NAME/GIT_RESTORE_BRANCH are validated
-        # plain names by this point (see the case statements above, right
+        # plain names by this point (see the dash/colon tests above, right
         # after they are computed), but without a `--` separator a value that
         # slipped past would still be parsed as an option rather than an
         # operand -- the separator is cheap insurance the validation above
@@ -472,9 +473,15 @@ _fetch_health() {
     [ -f "$FETCH_STATE_FILE" ] || { echo "never-run"; return; }
     local _s='' _f='' _rc='' _now _age
     while IFS='=' read -r _k _v; do
-        case "$_k" in started) _s="$_v" ;; finished) _f="$_v" ;; rc) _rc="$_v" ;; esac
+        if [ "$_k" = started ]; then
+            _s="$_v"
+        elif [ "$_k" = finished ]; then
+            _f="$_v"
+        elif [ "$_k" = rc ]; then
+            _rc="$_v"
+        fi
     done < "$FETCH_STATE_FILE"
-    # 10# after the case, never instead of it (#327). Without it "08" is octal,
+    # 10# after the digits test, never instead of it (#327). Without it "08" is octal,
     # the arithmetic fails, bash abandons this whole `if` body, and control
     # falls through to the `rc` test below with `_rc` empty -- so a fetch that
     # never came back is reported as one that FAILED with an unknown status.
@@ -539,13 +546,17 @@ fi
 # because that is the difference #253 part 1 exists to protect on the write
 # side and it is exactly as easy to lose here: a store whose fetch has been
 # failing for a week looks identical to a store that is genuinely current.
-case "$FETCH_HEALTH" in
-    ok)        : ;;
-    never-run) log "git-restore" "no fetch has completed yet for $REPO_ROOT -- the comparison below is against whatever refs are already on disk, which may be stale. A fetch starts in the background now and its result lands next session." ;;
-    in-flight) log "git-restore" "a background fetch is still running -- the comparison below is against the previous fetch's refs" ;;
-    abandoned) log "git-restore" "WARNING: the last background fetch never completed (started $(cat "$FETCH_STATE_FILE" 2>/dev/null | head -1)) -- could NOT check the remote. This is not 'up to date': the refs below are as old as the last fetch that did finish." ;;
-    failed:*)  log "git-restore" "WARNING: the last background fetch FAILED (rc=${FETCH_HEALTH#failed:}) -- could NOT check the remote. This is not 'up to date': the refs below are as old as the last fetch that did finish. Run 'git -C ${_dq}$REPO_ROOT${_dq} fetch $REMOTE_NAME' to see git's own error." ;;
-esac
+if [ "$FETCH_HEALTH" = ok ]; then
+    :
+elif [ "$FETCH_HEALTH" = never-run ]; then
+    log "git-restore" "no fetch has completed yet for $REPO_ROOT -- the comparison below is against whatever refs are already on disk, which may be stale. A fetch starts in the background now and its result lands next session."
+elif [ "$FETCH_HEALTH" = in-flight ]; then
+    log "git-restore" "a background fetch is still running -- the comparison below is against the previous fetch's refs"
+elif [ "$FETCH_HEALTH" = abandoned ]; then
+    log "git-restore" "WARNING: the last background fetch never completed (started $(cat "$FETCH_STATE_FILE" 2>/dev/null | head -1)) -- could NOT check the remote. This is not 'up to date': the refs below are as old as the last fetch that did finish."
+elif [ "${FETCH_HEALTH#failed:}" != "$FETCH_HEALTH" ]; then
+    log "git-restore" "WARNING: the last background fetch FAILED (rc=${FETCH_HEALTH#failed:}) -- could NOT check the remote. This is not 'up to date': the refs below are as old as the last fetch that did finish. Run 'git -C ${_dq}$REPO_ROOT${_dq} fetch $REMOTE_NAME' to see git's own error."
+fi
 
 if [ -z "$LOCAL_HEAD" ]; then
     log "git-restore" "local branch is unborn (no commits in $REPO_ROOT) -- nothing to fast-forward onto, refusing. Clone or check out the backup branch by hand."
