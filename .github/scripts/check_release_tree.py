@@ -292,26 +292,27 @@ NESTED_DEFAULT_EXPANSION = re.compile(r'\$\{[A-Za-z_][A-Za-z0-9_]*:-\$')
 # shipped code -- the read half of the directory's MCP_FORWARDS_CREDENTIAL_ENV
 # pairing, independent of what the code does with it (round 4's own lesson:
 # the scanner read a value-free presence CHECK as a read regardless of its
-# behaviour). ANTHROPIC_API_KEY and CODEX_API_KEY are accepted today (#898
-# round 5 reported, not fixed, pending a maintainer decision on the smallest
-# change that would stop naming them). CLAUDE_CODE_OAUTH_TOKEN used to be
-# deliberately left OUT of this allowlist, so this guard would catch a
+# behaviour). Round 5 accepted the two provider API key names here, pending a
+# maintainer decision on the smallest change that would stop naming them;
+# rounds 13 and 16 took them off (see NAMED_API_KEYS). CLAUDE_CODE_OAUTH_TOKEN
+# used to be deliberately left OUT of this allowlist, so this guard would catch a
 # regression of round 5's own fix for that one name -- splitting it across
 # two literal string halves rather than naming it whole. #898, round 6: the
 # maintainer ruled that split itself obfuscation, not a fix, and reverted it.
 # So the gap this guard used to protect is now the wrong direction:
 # CLAUDE_CODE_OAUTH_TOKEN is a real, intentionally shipped identifier (the
 # one host credential this plugin's child-env strip deliberately keeps,
-# #131), and it belongs in this allowlist written out in full, same as
-# ANTHROPIC_API_KEY and CODEX_API_KEY. "OAUTH_TOKEN" alone (the second half
-# of the now-reverted split) stays allowlisted too: it is not, by itself, a
-# full credential name for any variable this plugin reads.
+# #131), and it belongs in this allowlist written out in full. "OAUTH_TOKEN"
+# alone (the second half of the now-reverted split) stays allowlisted too: it
+# is not, by itself, a full credential name for any variable this plugin reads.
 #
 # #898, round 13: ANTHROPIC_API_KEY is OFF this allowlist -- the maintainer
-# removed the #703 strip that named it, and NAMED_API_KEY below now fails the
-# tree on any mention of it at all.
+# removed the #703 strip that named it, and NAMED_API_KEYS below now fails the
+# tree on any mention of it at all. Round 16: CODEX_API_KEY is off it too, for
+# the same reason -- the Codex allow-list moved to config
+# (`haiku.codex_env_allow`) and its shipped list names no credential.
 CREDENTIAL_NAME_ALLOWLIST = {
-    "CODEX_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "OAUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN", "OAUTH_TOKEN",
 }
 
 # #898, round 13 (maintainer decision): the directory portal held the plugin
@@ -322,7 +323,13 @@ CREDENTIAL_NAME_ALLOWLIST = {
 # ["ANTHROPIC_API_KEY"]` live outside the shipped tree. FAIL, not REVIEW:
 # one exact string, no false positive to weigh, every file kind (code,
 # comments, data, prose) -- the portal cited a name whatever surrounded it.
-NAMED_API_KEY = "ANTHROPIC_API_KEY"
+#
+# #898, round 16 (maintainer decision): CODEX_API_KEY joins it. The Codex
+# summarizer's allow-list (#724) used to name it in code; the list is now
+# `haiku.codex_env_allow` in config, the shipped list names no credential, and
+# an operator who authenticates Codex through an environment variable adds the
+# name in their own ~/.remember/config.json -- outside the shipped tree.
+NAMED_API_KEYS = ("ANTHROPIC_API_KEY", "CODEX_API_KEY")
 CREDENTIAL_SHAPED_NAME = re.compile(
     r'\b([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_(?:TOKEN|KEY|SECRET|PASSWORD))\b'
 )
@@ -1432,15 +1439,17 @@ def _check_credential_shaped_name(files: dict, kinds: dict, off: list) -> None:
 
 
 def _check_named_api_key(files: dict, kinds: dict, off: list) -> None:
-    """#898, round 13: no shipped text file names NAMED_API_KEY, anywhere --
-    code, comment, JSON or Markdown alike. See NAMED_API_KEY for why FAIL."""
+    """#898, rounds 13 and 16: no shipped text file names any of
+    NAMED_API_KEYS, anywhere -- code, comment, JSON or Markdown alike. See
+    NAMED_API_KEYS for why FAIL."""
     for rel, data in sorted(files.items()):
         if kinds.get(rel) != "text":
             continue
         for n, line in enumerate(data.decode("utf-8").splitlines(), 1):
-            if NAMED_API_KEY in line:
-                off.append(f"{rel}:{n}: names {NAMED_API_KEY}, which nothing shipped "
-                           f"may (#898 round 13): {line.strip()[:80]}")
+            for name in NAMED_API_KEYS:
+                if name in line:
+                    off.append(f"{rel}:{n}: names {name}, which nothing shipped "
+                               f"may (#898 rounds 13/16): {line.strip()[:80]}")
 
 
 # #898 round 14 (claude-directory-publishing triggers.md,
@@ -1460,7 +1469,6 @@ CREDENTIAL_FRAGMENTS = frozenset({
 # credential, or a name something outside this repo defines.
 CREDENTIAL_FRAGMENT_ALLOWLIST = {
     "CLAUDE_CODE_OAUTH_TOKEN": "a real credential; Claude Code defines the name",
-    "CODEX_API_KEY": "a real credential; the Codex CLI defines the name",
     "PWD": "the shell's own variable; a $PWD read is FAILed separately",
 }
 _SH_NAME_SITES = re.compile(r"""

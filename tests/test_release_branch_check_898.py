@@ -373,50 +373,70 @@ def test_credential_shaped_name_outside_allowlist_fails(tmp_path):
 
 
 def test_allowlisted_credential_name_is_not_an_offender(tmp_path):
-    """Positive control: CODEX_API_KEY and CLAUDE_CODE_OAUTH_TOKEN -- real,
-    intentionally shipped identifiers named in full -- are accepted (#898,
-    round 6: the round-5 split of the last one into two string halves was
-    itself ruled obfuscation and reverted). Round 13 took the Anthropic API
-    key's name OFF this list: nothing shipped names it any more."""
+    """Positive control: CLAUDE_CODE_OAUTH_TOKEN -- a real, intentionally
+    shipped identifier named in full -- is accepted (#898, round 6: the
+    round-5 split of it into two string halves was itself ruled obfuscation
+    and reverted). Round 13 took the Anthropic API key's name OFF this list,
+    round 16 the Codex one: nothing shipped names either any more."""
     root = _tree(tmp_path, {
-        "pipeline/example.py": (b'CODEX_ENV = "CODEX_API_KEY"\n'
-                                 b'OAUTH_NAME = "CLAUDE_CODE_OAUTH_TOKEN"\n'),
+        "pipeline/example.py": b'OAUTH_NAME = "CLAUDE_CODE_OAUTH_TOKEN"\n',
     })
     offenders = _check(root).offenders
     assert not any("example.py" in o for o in offenders), offenders
 
 
-# -- round 13 (#898): the shipped tree names no ANTHROPIC_API_KEY (FAIL) -----
+# -- round 13/16 (#898): the shipped tree names no provider API key (FAIL) ---
+#
+# Round 13: the Anthropic one. Round 16 (maintainer decision): the Codex one
+# too -- the Codex allow-list moved to config (`haiku.codex_env_allow`) and
+# its shipped list names no credential, so nothing shipped needs the name.
 
-_API_KEY_NAME = "ANTHROPIC_API_KEY"
+_API_KEY_NAMES = ("ANTHROPIC_API_KEY", "CODEX_API_KEY")
 
 
-@pytest.mark.parametrize("rel, data", [
-    ("pipeline/example.py", b'v = os.environ.get("ANTHROPIC_API_KEY", "")\n'),
-    ("scripts/run.sh", b"#!/bin/sh\n# strips ANTHROPIC_API_KEY first\necho hi\n"),
-    ("config.example.json", b'{"haiku": {"strip_session_env": ["ANTHROPIC_API_KEY"]}}\n'),
-    ("notes.md", b"Unset ANTHROPIC_API_KEY before running.\n"),
+@pytest.mark.parametrize("name", _API_KEY_NAMES)
+@pytest.mark.parametrize("rel, template", [
+    ("pipeline/example.py", 'v = os.environ.get("{}", "")\n'),
+    ("scripts/run.sh", "#!/bin/sh\n# strips {} first\necho hi\n"),
+    ("config.example.json", '{{"haiku": {{"codex_env_allow": ["PATH", "{}"]}}}}\n'),
+    ("config.json", '{{"haiku": {{"strip_session_env": ["{}"]}}}}\n'),
+    ("notes.md", "Unset {} before running.\n"),
 ])
-def test_the_api_key_name_anywhere_in_the_shipped_tree_fails(tmp_path, rel, data):
+def test_the_api_key_name_anywhere_in_the_shipped_tree_fails(tmp_path, name, rel, template):
     """#898 round 13 (maintainer decision): the directory portal held the
     plugin on this name alone (MCP_FORWARDS_CREDENTIAL_ENV), whatever the
     code did with it -- in code, a comment, shipped data or prose. FAIL, not
-    REVIEW: one exact string, no false positive to weigh, and a hold."""
-    result = _check(_tree(tmp_path, {rel: data}))
-    hits = [o for o in result.offenders if o.startswith(rel) and _API_KEY_NAME in o]
+    REVIEW: one exact string, no false positive to weigh, and a hold.
+    Round 16 adds the Codex name, in every file kind the Anthropic one is
+    checked in -- shipped config included, where the allow-list now lives."""
+    result = _check(_tree(tmp_path, {rel: template.format(name).encode()}))
+    hits = [o for o in result.offenders if o.startswith(rel) and name in o]
     assert hits, result.offenders
 
 
-def test_a_tree_without_the_api_key_name_has_no_such_offender(tmp_path):
-    """Positive control: neighbours of the name -- another ANTHROPIC_ variable,
-    the generic option, the words in prose -- are not it."""
+def test_no_allowlist_accepts_the_codex_api_key_name():
+    """#898 round 16: neither the round-5 credential-name allowlist nor the
+    round-14 fragment allowlist may carry the Codex name any more -- a
+    stale entry would be the first thing to re-admit it. Positive control:
+    the real Claude Code credential is still on both."""
+    mod = _load()
+    assert "CODEX_API_KEY" not in mod.CREDENTIAL_NAME_ALLOWLIST
+    assert "CODEX_API_KEY" not in mod.CREDENTIAL_FRAGMENT_ALLOWLIST
+    assert "CLAUDE_CODE_OAUTH_TOKEN" in mod.CREDENTIAL_NAME_ALLOWLIST
+    assert "CLAUDE_CODE_OAUTH_TOKEN" in mod.CREDENTIAL_FRAGMENT_ALLOWLIST
+
+
+def test_a_tree_without_the_api_key_names_has_no_such_offender(tmp_path):
+    """Positive control: neighbours of the names -- another ANTHROPIC_ or
+    CODEX_ variable, the generic options, the words in prose -- are not them."""
     root = _tree(tmp_path, {
-        "pipeline/example.py": b'BASE = "ANTHROPIC_BASE_URL"\n',
-        "config.example.json": b'{"haiku": {"strip_session_env": []}}\n',
-        "notes.md": b"An Anthropic API key set for another tool.\n",
+        "pipeline/example.py": b'BASE = "ANTHROPIC_BASE_URL"\nHOME_DIR = "CODEX_HOME"\n',
+        "config.example.json": b'{"haiku": {"strip_session_env": [], "codex_env_allow": ["PATH", "CODEX_HOME"]}}\n',
+        "notes.md": b"An Anthropic API key or a Codex API key set for another tool.\n",
     })
     result = _check(root)
-    assert not any(_API_KEY_NAME in o for o in result.offenders), result.offenders
+    for name in _API_KEY_NAMES:
+        assert not any(name in o for o in result.offenders), result.offenders
 
 
 # -- round 7 (#898): indirect-name expansion `${!NAME}` (REVIEW) -------------
