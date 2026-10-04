@@ -399,9 +399,9 @@ if [[ ( -e "$COOLDOWN_MARKER" || -L "$COOLDOWN_MARKER" ) && "$DRY_RUN" != true &
     #
     # The case also rejects a marker padded with spaces, which arithmetic would
     # have accepted. Deliberate, and the same call #258's guard makes.
-    case "$LAST_MOD" in
-        ''|*[!0-9]*) LAST_MOD=0 ;;
-    esac
+    if [ -z "$LAST_MOD" ] || [ "${LAST_MOD#*[!0-9]}" != "$LAST_MOD" ]; then
+        LAST_MOD=0
+    fi
     ELAPSED=$(( $(date +%s) - 10#$LAST_MOD ))
     SAVE_COOLDOWN=$(config ".cooldowns.save_seconds" 120)
     if [ "$ELAPSED" -lt 0 ]; then
@@ -554,8 +554,8 @@ MIN_HUMAN=$(config ".thresholds.min_human_messages" 3)
 MIN_EXCHANGES=$(config ".thresholds.min_exchanges_without_human" 30)
 # A non-numeric value in config.json would abort the script at the comparisons
 # below (set -e + ERR trap), turning a typo into "memory silently stopped".
-case "$MIN_HUMAN" in ''|*[!0-9]*) MIN_HUMAN=3 ;; esac
-case "$MIN_EXCHANGES" in ''|*[!0-9]*) MIN_EXCHANGES=30 ;; esac
+if [ -z "$MIN_HUMAN" ] || [ "${MIN_HUMAN#*[!0-9]}" != "$MIN_HUMAN" ]; then MIN_HUMAN=3; fi
+if [ -z "$MIN_EXCHANGES" ] || [ "${MIN_EXCHANGES#*[!0-9]}" != "$MIN_EXCHANGES" ]; then MIN_EXCHANGES=30; fi
 if [ "$HUMAN_COUNT" -lt "$MIN_HUMAN" ] && [ "$DRY_RUN" = false ] && [ "$FORCE" != true ]; then
     if [ "$MIN_EXCHANGES" -gt 0 ] && [ "$EXCHANGE_COUNT" -ge "$MIN_EXCHANGES" ]; then
         log "extract" "${HUMAN_COUNT} human < ${MIN_HUMAN} but ${EXCHANGE_COUNT} exchanges >= ${MIN_EXCHANGES}, saving (agentic session)"
@@ -614,7 +614,7 @@ else
     else
         LAST_LINE="${LAST_ENTRY_HEADERS##*$'\n'}"
         LAST_LINE="${LAST_LINE%%:*}"
-        case "$LAST_LINE" in ''|*[!0-9]*) LAST_LINE="" ;; esac
+        if [ -z "$LAST_LINE" ] || [ "${LAST_LINE#*[!0-9]}" != "$LAST_LINE" ]; then LAST_LINE=""; fi
         if [ -z "$LAST_LINE" ]; then
             printf '%s\n' "$NO_PREVIOUS_ENTRY" > "$TMP_LAST_ENTRY"
         elif tail -n +"$LAST_LINE" "$MEMORY_FILE" > "$TMP_LAST_ENTRY"; then
@@ -732,7 +732,7 @@ CLEANUP_FILES+=("$HAIKU_STDERR")
 # Set the threshold to 0 to retry forever (the old behaviour).
 FAILURE_MARKER="${REMEMBER_DIR}/tmp/last-summary-failure"
 MAX_FAILURES=$(config ".thresholds.max_summary_failures" 3)
-case "$MAX_FAILURES" in ''|*[!0-9]*) MAX_FAILURES=3 ;; esac
+if [ -z "$MAX_FAILURES" ] || [ "${MAX_FAILURES#*[!0-9]}" != "$MAX_FAILURES" ]; then MAX_FAILURES=3; fi
 
 # #583: every save-position call site below this point runs only once
 # EXCHANGE_COUNT -gt 0 (the EXCHANGE_COUNT -eq 0 branch above already
@@ -767,7 +767,7 @@ record_summary_failure() {
     _prev_count=0
     if [ -f "$FAILURE_MARKER" ]; then
         read -r _prev_span_id _prev_count < "$FAILURE_MARKER" || true
-        case "$_prev_count" in ''|*[!0-9]*) _prev_count=0 ;; esac
+        if [ -z "$_prev_count" ] || [ "${_prev_count#*[!0-9]}" != "$_prev_count" ]; then _prev_count=0; fi
     fi
     _span_id="${SESSION_ID}:${POSITION}"
     if [ "$_prev_span_id" = "$_span_id" ]; then
@@ -1075,9 +1075,9 @@ if [[ "$RUN_NDC" = true && ( -e "$NDC_MARKER" || -L "$NDC_MARKER" ) ]]; then
     # comments that follow describe a route ts_marker_read already
     # intercepts -- kept as a defensive backstop, not this path's normal
     # behaviour (#625).
-    case "$NDC_MOD" in
-        ''|*[!0-9]*) NDC_MOD=0 ;;
-    esac
+    if [ -z "$NDC_MOD" ] || [ "${NDC_MOD#*[!0-9]}" != "$NDC_MOD" ]; then
+        NDC_MOD=0
+    fi
     NDC_COOLDOWN=$(config ".cooldowns.ndc_seconds" 3600)
     NDC_ELAPSED=$(( $(date +%s) - 10#$NDC_MOD ))
     if [ "$NDC_ELAPSED" -lt 0 ]; then
@@ -1376,9 +1376,9 @@ if [ "$RUN_NDC" = true ]; then
                         # yields either nothing or a fragment cut mid-line, which the
                         # `mv` would then install over live content.
                         NDC_LIVE_BYTES=$(wc -c < "$MEMORY_FILE" 2>/dev/null | tr -d ' ')
-                        case "$NDC_LIVE_BYTES" in
-                            (''|*[!0-9]*) NDC_LIVE_BYTES=0 ;;
-                        esac
+                        if [ -z "$NDC_LIVE_BYTES" ] || [ "${NDC_LIVE_BYTES#*[!0-9]}" != "$NDC_LIVE_BYTES" ]; then
+                            NDC_LIVE_BYTES=0
+                        fi
                         # #614: size alone cannot tell a legitimate append from
                         # a REPLACEMENT that happens to still be >= this
                         # round's snapshot -- and a replacement is exactly what
@@ -1456,9 +1456,9 @@ if [ "$RUN_NDC" = true ]; then
                                 # arm and deletes the day marker — the exact damage
                                 # this whole block is being fixed for, arriving by
                                 # a different route.
-                                case "$NDC_KEPT" in
-                                    (''|*[!0-9]*) NDC_KEPT=0 ;;
-                                esac
+                                if [ -z "$NDC_KEPT" ] || [ "${NDC_KEPT#*[!0-9]}" != "$NDC_KEPT" ]; then
+                                    NDC_KEPT=0
+                                fi
                                 # The commit's result gates everything below it
                                 # (#243). It used to be unread, and under `set +e`
                                 # that meant a failed truncate still rewrote the day
@@ -1667,7 +1667,7 @@ fi
 # GNU-first-then-BSD-fallback order already used there, at doctor.sh:257
 # and at lib-lock.sh:183.
 _AUTONOMOUS_LOG_RETENTION_DAYS=$(config ".thresholds.autonomous_log_retention_days" 7)
-case "$_AUTONOMOUS_LOG_RETENTION_DAYS" in (''|*[!0-9]*) _AUTONOMOUS_LOG_RETENTION_DAYS=7 ;; esac
+if [ -z "$_AUTONOMOUS_LOG_RETENTION_DAYS" ] || [ "${_AUTONOMOUS_LOG_RETENTION_DAYS#*[!0-9]}" != "$_AUTONOMOUS_LOG_RETENTION_DAYS" ]; then _AUTONOMOUS_LOG_RETENTION_DAYS=7; fi
 # CI (job 100831279309 and its 3.10/3.11/3.12 siblings on PR #499): every
 # windows-latest leg left both the backdated file AND this run's own fresh
 # log in place -- no deletion at any age, default retention or configured,

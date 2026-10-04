@@ -89,7 +89,7 @@ _gb_common_dir() {
         _out=$(git -C "$_d" rev-parse --git-common-dir 2>/dev/null) || return 1
         [ -n "$_out" ] || return 1
         case "$_out" in
-            /*|[A-Za-z]:/*|[A-Za-z]:\\*) ;;
+            /*|[A-Za-z]:[/\\]*) ;;
             *) _out="$_d/$_out" ;;
         esac
     fi
@@ -174,9 +174,9 @@ if [ -f "$COOLDOWN_MARKER" ]; then
     # never instead of it: `10#` on an empty string is itself an error on bash 5,
     # and the case is also what rejects a space-padded value that arithmetic
     # would have accepted. Same call save-session.sh already makes (#322).
-    case "$LAST_MOD" in
-        ''|*[!0-9]*) LAST_MOD=0 ;;
-    esac
+    if [ -z "$LAST_MOD" ] || [ "${LAST_MOD#*[!0-9]}" != "$LAST_MOD" ]; then
+        LAST_MOD=0
+    fi
     ELAPSED=$(( $(date +%s) - 10#$LAST_MOD ))
     if [ "$ELAPSED" -lt 0 ]; then
         # Range, not syntax (#326). A marker AHEAD of now is all digits, clears
@@ -324,7 +324,9 @@ fi
 # We pass --no-gpg-sign by default so background commits never hang on a
 # passphrase prompt. Users with non-interactive signing (e.g. a hardware key)
 # can set git_backup.gpg_sign=true to drop the flag and honour their own
-# commit.gpgSign config. Empty flag (unquoted) = no extra arg (#62).
+# commit.gpgSign config (#62). The flag is a yes/no, and each commit site
+# below writes both commands out literally rather than splitting an unquoted
+# variable into git's argv (#898 round 10).
 GIT_BACKUP_GPG_SIGN=$(config ".git_backup.gpg_sign" "false")
 GPG_SIGN_FLAG="--no-gpg-sign"
 if [ "$GIT_BACKUP_GPG_SIGN" = "true" ]; then
@@ -341,9 +343,9 @@ ALLOW_REMOTE_CHANGE=$(config ".git_backup.allow_remote_change" "false")
 # default on a non-numeric value is the safe direction: the alternative is
 # arithmetic on garbage deciding whether a stopped backup gets reported.
 REJECT_NOTICE_AFTER=$(config ".git_backup.reject_notice_after" "3")
-case "$REJECT_NOTICE_AFTER" in
-    ''|*[!0-9]*) REJECT_NOTICE_AFTER=3 ;;
-esac
+if [ -z "$REJECT_NOTICE_AFTER" ] || [ "${REJECT_NOTICE_AFTER#*[!0-9]}" != "$REJECT_NOTICE_AFTER" ]; then
+    REJECT_NOTICE_AFTER=3
+fi
 
 # How many CONSECUTIVE failed commits before the human is interrupted (#257).
 # The same argument as the rejection counter above, and it applies harder: a
@@ -353,9 +355,9 @@ esac
 # pre-commit hook installed on the backup repo — so none of them self-heals and
 # the threshold can only postpone a true report, never swallow one.
 COMMIT_NOTICE_AFTER=$(config ".git_backup.commit_notice_after" "3")
-case "$COMMIT_NOTICE_AFTER" in
-    ''|*[!0-9]*) COMMIT_NOTICE_AFTER=3 ;;
-esac
+if [ -z "$COMMIT_NOTICE_AFTER" ] || [ "${COMMIT_NOTICE_AFTER#*[!0-9]}" != "$COMMIT_NOTICE_AFTER" ]; then
+    COMMIT_NOTICE_AFTER=3
+fi
 
 # How many consecutive saves with NO remote at all before saying so once (#257).
 # Deliberately higher than the two above and deliberately ONE-SHOT, because this
@@ -366,9 +368,9 @@ esac
 # steady state rather than a store mid-setup, and it is said once for the
 # lifetime of the store. 0 disables it entirely.
 NO_REMOTE_NOTICE_AFTER=$(config ".git_backup.no_remote_notice_after" "10")
-case "$NO_REMOTE_NOTICE_AFTER" in
-    ''|*[!0-9]*) NO_REMOTE_NOTICE_AFTER=10 ;;
-esac
+if [ -z "$NO_REMOTE_NOTICE_AFTER" ] || [ "${NO_REMOTE_NOTICE_AFTER#*[!0-9]}" != "$NO_REMOTE_NOTICE_AFTER" ]; then
+    NO_REMOTE_NOTICE_AFTER=10
+fi
 
 # ── Background subshell — never blocks save-session.sh ───────────────────────
 (
@@ -382,6 +384,25 @@ esac
 
     # Prevent outer git env vars from overriding git -C behaviour.
     unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+
+    # `git commit` with or without --no-gpg-sign, the rest of the argv fixed
+    # per site: the untracking commit, and the slug's own commit.
+    _gb_commit_untrack() {
+        if [ -n "$GPG_SIGN_FLAG" ]; then
+            git -C "$REPO_ROOT" commit --no-gpg-sign \
+                -m "auto: stop tracking $SLUG/logs, $SLUG/tmp and $SLUG/config.json"
+        else
+            git -C "$REPO_ROOT" commit \
+                -m "auto: stop tracking $SLUG/logs, $SLUG/tmp and $SLUG/config.json"
+        fi
+    }
+    _gb_commit_slug() {
+        if [ -n "$GPG_SIGN_FLAG" ]; then
+            git -C "$REPO_ROOT" commit --no-gpg-sign -m "auto: $SLUG $1" -- "$SLUG/"
+        else
+            git -C "$REPO_ROOT" commit -m "auto: $SLUG $1" -- "$SLUG/"
+        fi
+    }
 
     # ── Push, and tell the three states apart (#253) ─────────────────────────
     # A network blip and a non-fast-forward rejection are different in kind. The
@@ -406,8 +427,12 @@ esac
         # slipped past would still be parsed as an option rather than an
         # operand -- the separator is cheap insurance the validation above does
         # not make redundant.
-        if [ -n "$GIT_BACKUP_REMOTE" ]; then
-            GIT_TERMINAL_PROMPT=0 git -C "$REPO_ROOT" push --porcelain -- "$GIT_BACKUP_REMOTE" ${GIT_BACKUP_BRANCH:+"$GIT_BACKUP_BRANCH"} 2>/dev/null
+        # One literal command per case, never an argv assembled at run time
+        # (#898 round 10): a remote with a branch, a remote alone, neither.
+        if [ -n "$GIT_BACKUP_REMOTE" ] && [ -n "$GIT_BACKUP_BRANCH" ]; then
+            GIT_TERMINAL_PROMPT=0 git -C "$REPO_ROOT" push --porcelain -- "$GIT_BACKUP_REMOTE" "$GIT_BACKUP_BRANCH" 2>/dev/null
+        elif [ -n "$GIT_BACKUP_REMOTE" ]; then
+            GIT_TERMINAL_PROMPT=0 git -C "$REPO_ROOT" push --porcelain -- "$GIT_BACKUP_REMOTE" 2>/dev/null
         else
             GIT_TERMINAL_PROMPT=0 git -C "$REPO_ROOT" push --porcelain 2>/dev/null
         fi
@@ -459,9 +484,9 @@ esac
         # `log "ERROR: push REJECTED …"` below never runs: the loudest report in
         # the file, silenced by the counter that exists to escalate it.
         _count=$(cat "$REJECT_STATE_FILE" 2>/dev/null || echo 0)
-        case "$_count" in
-            ''|*[!0-9]*) _count=0 ;;
-        esac
+        if [ -z "$_count" ] || [ "${_count#*[!0-9]}" != "$_count" ]; then
+            _count=0
+        fi
         _count=$((10#$_count + 1))
         echo "$_count" > "$REJECT_STATE_FILE" 2>/dev/null || true
 
@@ -578,8 +603,7 @@ esac
         if ! git -C "$REPO_ROOT" diff --cached --quiet 2>/dev/null; then
             log "git-backup" "$SLUG/logs, $SLUG/tmp or $SLUG/config.json are tracked by a version older than the exclusion, but this store has staged changes in its index -- untracking them would commit those too, so it is left for the next backup."
         elif git -C "$REPO_ROOT" rm -r -q --cached --ignore-unmatch -- "$SLUG/logs/" "$SLUG/tmp/" "$SLUG/config.json" 2>/dev/null \
-            && git -C "$REPO_ROOT" commit $GPG_SIGN_FLAG \
-                -m "auto: stop tracking $SLUG/logs, $SLUG/tmp and $SLUG/config.json" >/dev/null 2>&1; then
+            && _gb_commit_untrack >/dev/null 2>&1; then
             log "git-backup" "untracked $SLUG/logs, $SLUG/tmp and $SLUG/config.json -- a version older than the exclusion had committed them. They stop being pushed from now on; commits that already carry them are left untouched, because removing those means rewriting history and force-pushing, which breaks every other clone of this store. If config.json carried a live haiku.oauth_token, treat that credential as compromised and rotate it."
         else
             git -C "$REPO_ROOT" reset -q 2>/dev/null || true
@@ -671,9 +695,7 @@ esac
     # direction that loses data. `test_nothing_to_commit_no_op` pins it.
     _gb_stamp_cooldown() { date +%s > "$COOLDOWN_MARKER" 2>/dev/null || true; }
 
-    if COMMIT_ERR=$(git -C "$REPO_ROOT" commit $GPG_SIGN_FLAG \
-            -m "auto: $SLUG $TS" \
-            -- "$SLUG/" 2>&1 >/dev/null); then
+    if COMMIT_ERR=$(_gb_commit_slug "$TS" 2>&1 >/dev/null); then
         log "git-backup" "committed $SLUG"
         _gb_stamp_cooldown
         rm -f "$COMMIT_FAIL_STATE_FILE" 2>/dev/null || true
@@ -684,9 +706,9 @@ esac
         # and here the abandoned branch is the one reporting that this memory is
         # in no git history at all.
         _cfail=$(cat "$COMMIT_FAIL_STATE_FILE" 2>/dev/null || echo 0)
-        case "$_cfail" in
-            ''|*[!0-9]*) _cfail=0 ;;
-        esac
+        if [ -z "$_cfail" ] || [ "${_cfail#*[!0-9]}" != "$_cfail" ]; then
+            _cfail=0
+        fi
         _cfail=$((10#$_cfail + 1))
         echo "$_cfail" > "$COMMIT_FAIL_STATE_FILE" 2>/dev/null || true
 
@@ -720,9 +742,9 @@ esac
         # so it is asked ONCE, of the only person who knows.
         # 10# after the case (#327), as above.
         _nr=$(cat "$NO_REMOTE_STATE_FILE" 2>/dev/null || echo 0)
-        case "$_nr" in
-            ''|*[!0-9]*) _nr=0 ;;
-        esac
+        if [ -z "$_nr" ] || [ "${_nr#*[!0-9]}" != "$_nr" ]; then
+            _nr=0
+        fi
         _nr=$((10#$_nr + 1))
         echo "$_nr" > "$NO_REMOTE_STATE_FILE" 2>/dev/null || true
 

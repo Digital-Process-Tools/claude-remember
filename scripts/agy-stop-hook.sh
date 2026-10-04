@@ -150,12 +150,12 @@ _PARSE_STATUS="${_PARSE_STATUS%$'\r'}"
 # minimum-human-message gates -- a real, reachable route confirmed by
 # reading save-session.sh's own arg loop, not a hypothetical one. The
 # sibling hooks' own guard (session-end-hook.sh, post-tool-hook.sh,
-# session-start-hook.sh: `''|.|..|*[!A-Za-z0-9._-]*`) does not by itself
+# session-start-hook.sh: `''|[.]|[.][.]|*[!A-Za-z0-9._-]*`) does not by itself
 # close this: "--force" and "--dry" both consist entirely of characters that
 # guard already allows. Extended here with a leading-dash rejection (`-*`)
 # so nothing shaped like an option can ever reach that argv position.
 case "$_CONVERSATION_ID" in
-    ''|.|..|-*|*[!A-Za-z0-9._-]*) _CONVERSATION_ID="" ;;
+    ''|[.]|[.][.]|-*|*[!A-Za-z0-9._-]*) _CONVERSATION_ID="" ;;
 esac
 
 if [ -z "$_CONVERSATION_ID" ] || [ -z "$_TRANSCRIPT_PATH" ]; then

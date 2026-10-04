@@ -42,7 +42,7 @@ _remember_date() {
     fi
     if [ "$_REMEMBER_PRINTF_T" = "1" ] && [ "$#" -eq 1 ] \
         && _remember_date_builtin_ok "$1"; then
-        printf "%(${1#+})T\\n" -1 && return
+        printf "%(${1#+})T\n" -1 && return
     fi
     date "$@"
 }
@@ -570,7 +570,7 @@ _resolve_remember_dir() {
     local proj="$2"
 
     case "$data_dir" in
-        /*|~*|[A-Za-z]:/*|[A-Za-z]:\\*)
+        /*|~*|[A-Za-z]:[/\\]*)
             local slug
             slug=$(session_dir_slug "$proj")
             local expanded="${data_dir/#\~/$HOME}"
@@ -588,7 +588,7 @@ _set_store_root() {
     REMEMBER_STORE_ROOT=""
 
     case "$data_dir" in
-        /*|~*|[A-Za-z]:/*|[A-Za-z]:\\*) ;;
+        /*|~*|[A-Za-z]:[/\\]*) ;;
         *) return 0 ;;
     esac
     [ "${data_dir#*\{slug\}}" != "$data_dir" ] || return 0
@@ -605,7 +605,7 @@ _set_store_root() {
     done
 
     case "$prefix" in
-        ''|/|[A-Za-z]:|[A-Za-z]:/|[A-Za-z]:\\) return 0 ;;
+        ''|/|[A-Za-z]:|[A-Za-z]:[/\\]) return 0 ;;
     esac
 
     REMEMBER_STORE_ROOT="$prefix"
@@ -641,7 +641,7 @@ _project_cfg="${REMEMBER_DIR}/config.json"
 _classify_project_cfg_haiku_trust() {
     local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
     case "$_data_dir_raw" in
-        /*|~*|[A-Za-z]:/*|[A-Za-z]:\\*) _project_cfg_haiku_untrusted=0 ;;
+        /*|~*|[A-Za-z]:[/\\]*) _project_cfg_haiku_untrusted=0 ;;
         *) _project_cfg_haiku_untrusted=1 ;;
     esac
 }
@@ -757,7 +757,7 @@ elif [ "${#_cfg_sources[@]}" -gt 0 ] && command -v jq >/dev/null 2>&1; then
     if [ "${#_jq_merge_sources[@]}" -eq 0 ]; then
         echo '{}' > "$_merged_cfg"
     else
-        jq -s 'reduce .[] as $x ({}; . * $x) | with_entries(select(.key | startswith("_") | not))' "${_jq_merge_sources[@]}" > "$_merged_cfg" 2>/dev/null \
+        jq -s 'reduce .[] as $x ({}; getpath([]) * $x) | with_entries(select(.key | startswith("_") | not))' "${_jq_merge_sources[@]}" > "$_merged_cfg" 2>/dev/null \
             || cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null
     fi
     [ -n "$_project_sanitized_tmp" ] && rm -f "$_project_sanitized_tmp"
@@ -1132,11 +1132,16 @@ _remember_cfg_flatten_cache_valid_line() {
 }
 
 _remember_cfg_flatten_q_encode() {
-    local _rcfgqe_v="$2"
-    _rcfgqe_v="${_rcfgqe_v//\\/\\\\}"
-    _rcfgqe_v="${_rcfgqe_v//$'\n'/\\n}"
-    _rcfgqe_v="${_rcfgqe_v//$'\r'/\\r}"
-    _rcfgqe_v="${_rcfgqe_v//$'\t'/\\t}"
+    local _rcfgqe_v="$2" _rcfgqe_b _rcfgqe_bb _rcfgqe_n _rcfgqe_r _rcfgqe_t
+    printf -v _rcfgqe_b '\134'
+    _rcfgqe_bb="$_rcfgqe_b$_rcfgqe_b"
+    printf -v _rcfgqe_n '%sn' "$_rcfgqe_b"
+    printf -v _rcfgqe_r '%sr' "$_rcfgqe_b"
+    printf -v _rcfgqe_t '%st' "$_rcfgqe_b"
+    _rcfgqe_v=${_rcfgqe_v//"$_rcfgqe_b"/"$_rcfgqe_bb"}
+    _rcfgqe_v=${_rcfgqe_v//$'\n'/"$_rcfgqe_n"}
+    _rcfgqe_v=${_rcfgqe_v//$'\r'/"$_rcfgqe_r"}
+    _rcfgqe_v=${_rcfgqe_v//$'\t'/"$_rcfgqe_t"}
     printf -v "$1" '%s' "$_rcfgqe_v"
 }
 
@@ -1393,11 +1398,11 @@ esac
 export REMEMBER_PROMPT_STAMP
 
 config_into REMEMBER_SAVE_COOLDOWN ".cooldowns.save_seconds" 120
-case "$REMEMBER_SAVE_COOLDOWN" in ''|*[!0-9]*) REMEMBER_SAVE_COOLDOWN=120 ;; esac
+if [ -z "$REMEMBER_SAVE_COOLDOWN" ] || [ "${REMEMBER_SAVE_COOLDOWN#*[!0-9]}" != "$REMEMBER_SAVE_COOLDOWN" ]; then REMEMBER_SAVE_COOLDOWN=120; fi
 export REMEMBER_SAVE_COOLDOWN
 
 config_into REMEMBER_DELTA_THRESHOLD ".thresholds.delta_lines_trigger" 50
-case "$REMEMBER_DELTA_THRESHOLD" in ''|*[!0-9]*) REMEMBER_DELTA_THRESHOLD=50 ;; esac
+if [ -z "$REMEMBER_DELTA_THRESHOLD" ] || [ "${REMEMBER_DELTA_THRESHOLD#*[!0-9]}" != "$REMEMBER_DELTA_THRESHOLD" ]; then REMEMBER_DELTA_THRESHOLD=50; fi
 export REMEMBER_DELTA_THRESHOLD
 
 [ -n "${REMEMBER_MODEL:-}" ] || config_into REMEMBER_MODEL ".model" "haiku"
@@ -1620,13 +1625,13 @@ dispatch() {
                 _budget=$(config '.hooks.dispatch_timeout_seconds' "$_DISPATCH_TIMEOUT_DEFAULT")
                 _DISPATCH_BUDGET_FALLBACK=$_DISPATCH_TIMEOUT_DEFAULT
             fi
-            case "$_budget" in
-                ''|*[!0-9]*) _budget=$_DISPATCH_BUDGET_FALLBACK ;;
-            esac
+            if [ -z "$_budget" ] || [ "${_budget#*[!0-9]}" != "$_budget" ]; then
+                _budget=$_DISPATCH_BUDGET_FALLBACK
+            fi
             _grace=$(config '.hooks.dispatch_kill_grace_seconds' "$_DISPATCH_KILL_GRACE_DEFAULT")
-            case "$_grace" in
-                ''|*[!0-9]*) _grace=$_DISPATCH_KILL_GRACE_DEFAULT ;;
-            esac
+            if [ -z "$_grace" ] || [ "${_grace#*[!0-9]}" != "$_grace" ]; then
+                _grace=$_DISPATCH_KILL_GRACE_DEFAULT
+            fi
         fi
         local hook_stat hook_uid hook_perm
         hook_stat=$(stat -c '%u %a' "$hook" 2>/dev/null || stat -f '%u %Lp' "$hook" 2>/dev/null || echo "")

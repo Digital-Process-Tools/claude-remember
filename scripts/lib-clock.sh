@@ -105,7 +105,7 @@ _remember_date() {
     fi
     if [ "$_REMEMBER_PRINTF_T" = "1" ] && [ "$#" -eq 1 ] \
         && _remember_date_builtin_ok "$1"; then
-        printf "%(${1#+})T\\n" -1 && return
+        printf "%(${1#+})T\n" -1 && return
     fi
     date "$@"
 }

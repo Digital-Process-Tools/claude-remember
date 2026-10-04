@@ -69,7 +69,7 @@ _remember_date() {
     fi
     if [ "$_REMEMBER_PRINTF_T" = "1" ] && [ "$#" -eq 1 ] \
         && _remember_date_builtin_ok "$1"; then
-        printf "%(${1#+})T\\n" -1 && return
+        printf "%(${1#+})T\n" -1 && return
     fi
     date "$@"
 }
@@ -509,7 +509,7 @@ _resolve_remember_dir() {
     local proj="$2"
 
     case "$data_dir" in
-        /*|~*|[A-Za-z]:/*|[A-Za-z]:\\*)
+        /*|~*|[A-Za-z]:[/\\]*)
             local slug
             slug=$(session_dir_slug "$proj")
             local expanded="${data_dir/#\~/$HOME}"
@@ -527,7 +527,7 @@ _set_store_root() {
     REMEMBER_STORE_ROOT=""
 
     case "$data_dir" in
-        /*|~*|[A-Za-z]:/*|[A-Za-z]:\\*) ;;
+        /*|~*|[A-Za-z]:[/\\]*) ;;
         *) return 0 ;;
     esac
     [ "${data_dir#*\{slug\}}" != "$data_dir" ] || return 0
@@ -544,7 +544,7 @@ _set_store_root() {
     done
 
     case "$prefix" in
-        ''|/|[A-Za-z]:|[A-Za-z]:/|[A-Za-z]:\\) return 0 ;;
+        ''|/|[A-Za-z]:|[A-Za-z]:[/\\]) return 0 ;;
     esac
 
     REMEMBER_STORE_ROOT="$prefix"
@@ -580,7 +580,7 @@ _project_cfg="${REMEMBER_DIR}/config.json"
 _classify_project_cfg_haiku_trust() {
     local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
     case "$_data_dir_raw" in
-        /*|~*|[A-Za-z]:/*|[A-Za-z]:\\*) _project_cfg_haiku_untrusted=0 ;;
+        /*|~*|[A-Za-z]:[/\\]*) _project_cfg_haiku_untrusted=0 ;;
         *) _project_cfg_haiku_untrusted=1 ;;
     esac
 }
@@ -696,7 +696,7 @@ elif [ "${#_cfg_sources[@]}" -gt 0 ] && command -v jq >/dev/null 2>&1; then
     if [ "${#_jq_merge_sources[@]}" -eq 0 ]; then
         echo '{}' > "$_merged_cfg"
     else
-        jq -s 'reduce .[] as $x ({}; . * $x) | with_entries(select(.key | startswith("_") | not))' "${_jq_merge_sources[@]}" > "$_merged_cfg" 2>/dev/null \
+        jq -s 'reduce .[] as $x ({}; getpath([]) * $x) | with_entries(select(.key | startswith("_") | not))' "${_jq_merge_sources[@]}" > "$_merged_cfg" 2>/dev/null \
             || cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null
     fi
     [ -n "$_project_sanitized_tmp" ] && rm -f "$_project_sanitized_tmp"
@@ -837,11 +837,16 @@ _remember_cfg_flatten_cache_valid_line() {
 }
 
 _remember_cfg_flatten_q_encode() {
-    local _rcfgqe_v="$2"
-    _rcfgqe_v="${_rcfgqe_v//\\/\\\\}"
-    _rcfgqe_v="${_rcfgqe_v//$'\n'/\\n}"
-    _rcfgqe_v="${_rcfgqe_v//$'\r'/\\r}"
-    _rcfgqe_v="${_rcfgqe_v//$'\t'/\\t}"
+    local _rcfgqe_v="$2" _rcfgqe_b _rcfgqe_bb _rcfgqe_n _rcfgqe_r _rcfgqe_t
+    printf -v _rcfgqe_b '\134'
+    _rcfgqe_bb="$_rcfgqe_b$_rcfgqe_b"
+    printf -v _rcfgqe_n '%sn' "$_rcfgqe_b"
+    printf -v _rcfgqe_r '%sr' "$_rcfgqe_b"
+    printf -v _rcfgqe_t '%st' "$_rcfgqe_b"
+    _rcfgqe_v=${_rcfgqe_v//"$_rcfgqe_b"/"$_rcfgqe_bb"}
+    _rcfgqe_v=${_rcfgqe_v//$'\n'/"$_rcfgqe_n"}
+    _rcfgqe_v=${_rcfgqe_v//$'\r'/"$_rcfgqe_r"}
+    _rcfgqe_v=${_rcfgqe_v//$'\t'/"$_rcfgqe_t"}
     printf -v "$1" '%s' "$_rcfgqe_v"
 }
 
@@ -1112,11 +1117,11 @@ esac
 export REMEMBER_PROMPT_STAMP
 
 config_into REMEMBER_SAVE_COOLDOWN ".cooldowns.save_seconds" 120
-case "$REMEMBER_SAVE_COOLDOWN" in ''|*[!0-9]*) REMEMBER_SAVE_COOLDOWN=120 ;; esac
+if [ -z "$REMEMBER_SAVE_COOLDOWN" ] || [ "${REMEMBER_SAVE_COOLDOWN#*[!0-9]}" != "$REMEMBER_SAVE_COOLDOWN" ]; then REMEMBER_SAVE_COOLDOWN=120; fi
 export REMEMBER_SAVE_COOLDOWN
 
 config_into REMEMBER_DELTA_THRESHOLD ".thresholds.delta_lines_trigger" 50
-case "$REMEMBER_DELTA_THRESHOLD" in ''|*[!0-9]*) REMEMBER_DELTA_THRESHOLD=50 ;; esac
+if [ -z "$REMEMBER_DELTA_THRESHOLD" ] || [ "${REMEMBER_DELTA_THRESHOLD#*[!0-9]}" != "$REMEMBER_DELTA_THRESHOLD" ]; then REMEMBER_DELTA_THRESHOLD=50; fi
 export REMEMBER_DELTA_THRESHOLD
 
 [ -n "${REMEMBER_MODEL:-}" ] || config_into REMEMBER_MODEL ".model" "haiku"
@@ -1360,13 +1365,13 @@ dispatch() {
                 _budget=$(config '.hooks.dispatch_timeout_seconds' "$_DISPATCH_TIMEOUT_DEFAULT")
                 _DISPATCH_BUDGET_FALLBACK=$_DISPATCH_TIMEOUT_DEFAULT
             fi
-            case "$_budget" in
-                ''|*[!0-9]*) _budget=$_DISPATCH_BUDGET_FALLBACK ;;
-            esac
+            if [ -z "$_budget" ] || [ "${_budget#*[!0-9]}" != "$_budget" ]; then
+                _budget=$_DISPATCH_BUDGET_FALLBACK
+            fi
             _grace=$(config '.hooks.dispatch_kill_grace_seconds' "$_DISPATCH_KILL_GRACE_DEFAULT")
-            case "$_grace" in
-                ''|*[!0-9]*) _grace=$_DISPATCH_KILL_GRACE_DEFAULT ;;
-            esac
+            if [ -z "$_grace" ] || [ "${_grace#*[!0-9]}" != "$_grace" ]; then
+                _grace=$_DISPATCH_KILL_GRACE_DEFAULT
+            fi
         fi
         local hook_stat hook_uid hook_perm
         hook_stat=$(stat -c '%u %a' "$hook" 2>/dev/null || stat -f '%u %Lp' "$hook" 2>/dev/null || echo "")
@@ -1522,7 +1527,7 @@ rotate_logs() {
 
     local prev=0
     if [ -f "$state" ]; then read -r prev < "$state" 2>/dev/null || prev=0; fi
-    case "$prev" in ''|*[!0-9]*) prev=0 ;; esac
+    if [ -z "$prev" ] || [ "${prev#*[!0-9]}" != "$prev" ]; then prev=0; fi
     local streak=$((10#$prev + 1))
     printf '%s\n%s\n%s\n' "$streak" "$(date '+%Y-%m-%d %H:%M:%S')" "$first_line" \
         > "$state" 2>/dev/null || true
@@ -2043,7 +2048,7 @@ fi
 
 STDIN_SESSION_ID=$(_stdin_json_string session_id "$HOOK_STDIN" 2>/dev/null) || STDIN_SESSION_ID=""
 case "$STDIN_SESSION_ID" in
-    ''|.|..|-*|*[!A-Za-z0-9._-]*) STDIN_SESSION_ID="" ;;
+    ''|[.]|[.][.]|-*|*[!A-Za-z0-9._-]*) STDIN_SESSION_ID="" ;;
 esac
 
 STDIN_TRANSCRIPT_PATH=$(_stdin_json_string transcript_path "$HOOK_STDIN" 2>/dev/null) || STDIN_TRANSCRIPT_PATH=""
@@ -2073,7 +2078,7 @@ if [ -z "$LATEST_JSONL" ]; then
     NOTICE_LAST=0
     if [ -f "$NOTICE_MARKER" ]; then
         read -r NOTICE_LAST < "$NOTICE_MARKER" 2>/dev/null
-        case "$NOTICE_LAST" in ''|*[!0-9]*) NOTICE_LAST=0 ;; esac
+        if [ -z "$NOTICE_LAST" ] || [ "${NOTICE_LAST#*[!0-9]}" != "$NOTICE_LAST" ]; then NOTICE_LAST=0; fi
     fi
     if [ $(( $(_remember_date +%s) - 10#$NOTICE_LAST )) -ge "$NOTICE_TTL" ]; then
         mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null
@@ -2108,14 +2113,14 @@ else
     SESSION_ID="${TRANSCRIPT##*/}"
     SESSION_ID="${SESSION_ID%.jsonl}"
     case "$SESSION_ID" in
-        ''|.|..|-*|*[!A-Za-z0-9._-]*) SESSION_ID="" ;;
+        ''|[.]|[.][.]|-*|*[!A-Za-z0-9._-]*) SESSION_ID="" ;;
     esac
 fi
 
 if [ -d "$REMEMBER_DIR/tmp/capture-alive.d" ] \
     || mkdir -p "$REMEMBER_DIR/tmp/capture-alive.d" 2>/dev/null; then
     case "$SESSION_ID" in
-        ''|.|..|*[!A-Za-z0-9._-]*) : ;;
+        ''|[.]|[.][.]|*[!A-Za-z0-9._-]*) : ;;
         *) : > "$REMEMBER_DIR/tmp/capture-alive.d/$SESSION_ID" 2>/dev/null || true ;;
     esac
 fi
@@ -2126,7 +2131,7 @@ fi
 
 SIDECAR=""
 case "$SESSION_ID" in
-    ''|.|..|*[!A-Za-z0-9._-]*) : ;;
+    ''|[.]|[.][.]|*[!A-Za-z0-9._-]*) : ;;
     *) SIDECAR="$REMEMBER_DIR/tmp/position.$SESSION_ID" ;;
 esac
 
@@ -2187,7 +2192,7 @@ if [ -z "$SIDECAR_TRUSTED" ] && [ -f "$LAST_SAVE_FILE" ]; then
 :
 }
     LAST_LINE=$(cd "$PIPELINE_DIR" && _remember_run_python -m pipeline.shell read-position "$LAST_SAVE_FILE" "$SESSION_ID" 2>/dev/null)
-    case "$LAST_LINE" in ''|*[!0-9]*) LAST_LINE=0 ;; esac
+    if [ -z "$LAST_LINE" ] || [ "${LAST_LINE#*[!0-9]}" != "$LAST_LINE" ]; then LAST_LINE=0; fi
 fi
 
 DELTA=$((CURRENT_LINES - 10#$LAST_LINE))
@@ -2198,7 +2203,7 @@ COOLDOWN_MARKER="$REMEMBER_DIR/tmp/last-save-ts"
 if [ -f "$COOLDOWN_MARKER" ]; then
     LAST_TS=0
     read -r LAST_TS < "$COOLDOWN_MARKER" 2>/dev/null
-    case "$LAST_TS" in ''|*[!0-9]*) LAST_TS=0 ;; esac
+    if [ -z "$LAST_TS" ] || [ "${LAST_TS#*[!0-9]}" != "$LAST_TS" ]; then LAST_TS=0; fi
     SAVE_COOLDOWN="${REMEMBER_SAVE_COOLDOWN:-120}"
     _ELAPSED=$(( $(_remember_date +%s) - 10#$LAST_TS ))
     [ "$_ELAPSED" -ge 0 ] && [ "$_ELAPSED" -lt "$SAVE_COOLDOWN" ] && IN_COOLDOWN=true

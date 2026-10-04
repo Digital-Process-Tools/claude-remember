@@ -269,7 +269,7 @@ while IFS= read -r -d '' staging_path && IFS= read -r -d '' staging_consumed; do
         log "consolidation" "WARN: $(basename "$staging_path") disappeared"
         continue
     fi
-    case "$staging_consumed" in (''|*[!0-9]*) staging_consumed=0 ;; esac
+    if [ -z "$staging_consumed" ] || [ "${staging_consumed#*[!0-9]}" != "$staging_consumed" ]; then staging_consumed=0; fi
     staging_now=$(wc -c < "$staging_path" | tr -d ' ')
     staging_done="${staging_path%.md}.done.md"
 

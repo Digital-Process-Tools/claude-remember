@@ -143,7 +143,7 @@ _resolve_remember_dir() {
     local proj="$2"
 
     case "$data_dir" in
-        /*|~*|[A-Za-z]:/*|[A-Za-z]:\\*)
+        /*|~*|[A-Za-z]:[/\\]*)
             # Absolute / home-relative: expand ~ and substitute {slug}.
             # Drive-letter forms (C:/... and C:\...) are absolute on Windows /
             # Git Bash — without them a Windows data_dir is wrongly treated as
@@ -204,7 +204,7 @@ _set_store_root() {
     # Same absolute/home-relative test as _resolve_remember_dir, including the
     # Windows drive-letter forms: a relative data_dir has no store root.
     case "$data_dir" in
-        /*|~*|[A-Za-z]:/*|[A-Za-z]:\\*) ;;
+        /*|~*|[A-Za-z]:[/\\]*) ;;
         *) return 0 ;;
     esac
     # An expansion test, not a quoted literal in a case pattern (#898 round 9).
@@ -231,7 +231,7 @@ _set_store_root() {
     done
 
     case "$prefix" in
-        ''|/|[A-Za-z]:|[A-Za-z]:/|[A-Za-z]:\\) return 0 ;;
+        ''|/|[A-Za-z]:|[A-Za-z]:[/\\]) return 0 ;;
     esac
 
     REMEMBER_STORE_ROOT="$prefix"
@@ -296,7 +296,7 @@ _project_cfg="${REMEMBER_DIR}/config.json"
 _classify_project_cfg_haiku_trust() {
     local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
     case "$_data_dir_raw" in
-        /*|~*|[A-Za-z]:/*|[A-Za-z]:\\*) _project_cfg_haiku_untrusted=0 ;;
+        /*|~*|[A-Za-z]:[/\\]*) _project_cfg_haiku_untrusted=0 ;;
         *) _project_cfg_haiku_untrusted=1 ;;
     esac
 }
@@ -593,7 +593,7 @@ elif [ "${#_cfg_sources[@]}" -gt 0 ] && command -v jq >/dev/null 2>&1; then
         # when jq isn't even on PATH.
         echo '{}' > "$_merged_cfg"
     else
-        jq -s 'reduce .[] as $x ({}; . * $x) | with_entries(select(.key | startswith("_") | not))' "${_jq_merge_sources[@]}" > "$_merged_cfg" 2>/dev/null \
+        jq -s 'reduce .[] as $x ({}; getpath([]) * $x) | with_entries(select(.key | startswith("_") | not))' "${_jq_merge_sources[@]}" > "$_merged_cfg" 2>/dev/null \
             || cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null
     fi
     [ -n "$_project_sanitized_tmp" ] && rm -f "$_project_sanitized_tmp"

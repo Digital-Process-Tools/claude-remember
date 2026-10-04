@@ -70,9 +70,9 @@ if [ ! -r "$FILE" ]; then
 fi
 
 RECORDS=$(grep -c -v '^#' "$FILE" 2>/dev/null || echo 0)
-case "$RECORDS" in
-    ''|*[!0-9]*) RECORDS=0 ;;
-esac
+if [ -z "$RECORDS" ] || [ "${RECORDS#*[!0-9]}" != "$RECORDS" ]; then
+    RECORDS=0
+fi
 
 if [ "$RECORDS" -eq 0 ]; then
     echo "lock-timing: skipped -- $FILE has no records yet (REMEMBER_LOCK_TIMING=1 was set, but no lock was taken while it was)"

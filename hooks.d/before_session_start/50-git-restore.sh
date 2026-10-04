@@ -215,7 +215,7 @@ _gr_common_dir() {
         _out=$(git -C "$_d" rev-parse --git-common-dir 2>/dev/null) || return 1
         [ -n "$_out" ] || return 1
         case "$_out" in
-            /*|[A-Za-z]:/*|[A-Za-z]:\\*) ;;
+            /*|[A-Za-z]:[/\\]*) ;;
             *) _out="$_d/$_out" ;;
         esac
     fi
@@ -283,7 +283,7 @@ case "$FETCH_TIMEOUT" in ''|*[!0-9]*|0) FETCH_TIMEOUT=20 ;; esac
 # most intrusive surface in this codebase, so one that fires on every hiccup is
 # one nobody reads. 0 disables the interruption; the log line stays either way.
 DIVERGED_NOTICE_AFTER=$(config '.git_restore.diverged_notice_after' '3')
-case "$DIVERGED_NOTICE_AFTER" in ''|*[!0-9]*) DIVERGED_NOTICE_AFTER=3 ;; esac
+if [ -z "$DIVERGED_NOTICE_AFTER" ] || [ "${DIVERGED_NOTICE_AFTER#*[!0-9]}" != "$DIVERGED_NOTICE_AFTER" ]; then DIVERGED_NOTICE_AFTER=3; fi
 
 # ── State ────────────────────────────────────────────────────────────────────
 # Beside the backup half's own state files — which are no longer at the store
@@ -358,7 +358,7 @@ _spawn_fetch() {
         # clears the guard, and is then read as octal -- so the age comparison
         # is abandoned and a fetch still inside its window gets a second one
         # stacked on top of it.
-        case "$_s" in ''|*[!0-9]*) _s=0 ;; esac
+        if [ -z "$_s" ] || [ "${_s#*[!0-9]}" != "$_s" ]; then _s=0; fi
         if [ -z "$_f" ] && [ "$_s" -gt 0 ]; then
             _now=$(date +%s)
             _age=$(( _now - 10#$_s ))
@@ -409,7 +409,13 @@ _spawn_fetch() {
         export GIT_TERMINAL_PROMPT=0
         export GIT_ASKPASS=
         export SSH_ASKPASS=
-        export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -oBatchMode=yes -oConnectTimeout=$FETCH_TIMEOUT}"
+        # A user's own GIT_SSH_COMMAND is kept; otherwise a fixed format with
+        # the timeout filled in, not a default expansion holding another
+        # expansion (#898 round 10).
+        if [ -z "${GIT_SSH_COMMAND:-}" ]; then
+            printf -v GIT_SSH_COMMAND 'ssh -oBatchMode=yes -oConnectTimeout=%s' "$FETCH_TIMEOUT"
+        fi
+        export GIT_SSH_COMMAND
 
         # --no-tags --prune-tags: this is a memory store, not a release repo, and
         # the fetch should move exactly one remote-tracking ref.
@@ -420,8 +426,14 @@ _spawn_fetch() {
         # slipped past would still be parsed as an option rather than an
         # operand -- the separator is cheap insurance the validation above
         # does not make redundant.
-        git -C "$REPO_ROOT" -c core.askPass= fetch --quiet --no-tags \
-            -- "$REMOTE_NAME" ${GIT_RESTORE_BRANCH:+"$GIT_RESTORE_BRANCH"} >/dev/null 2>&1 &
+        # One literal command per case (#898 round 10): with a branch, without.
+        if [ -n "$GIT_RESTORE_BRANCH" ]; then
+            git -C "$REPO_ROOT" -c core.askPass= fetch --quiet --no-tags \
+                -- "$REMOTE_NAME" "$GIT_RESTORE_BRANCH" >/dev/null 2>&1 &
+        else
+            git -C "$REPO_ROOT" -c core.askPass= fetch --quiet --no-tags \
+                -- "$REMOTE_NAME" >/dev/null 2>&1 &
+        fi
         _fetch_pid=$!
 
         # A portable watchdog rather than timeout(1), which macOS does not ship.
@@ -468,7 +480,7 @@ _fetch_health() {
     # never came back is reported as one that FAILED with an unknown status.
     # Wrong state out of the three, and the remedy offered is for a failure
     # that did not happen.
-    case "$_s" in ''|*[!0-9]*) _s=0 ;; esac
+    if [ -z "$_s" ] || [ "${_s#*[!0-9]}" != "$_s" ]; then _s=0; fi
     if [ -z "$_f" ]; then
         _now=$(date +%s)
         _age=$(( _now - 10#$_s ))
@@ -562,8 +574,8 @@ fi
 COUNTS=$(git -C "$REPO_ROOT" rev-list --left-right --count "HEAD...$REMOTE_REF" 2>/dev/null) || COUNTS=""
 AHEAD="${COUNTS%%	*}"
 BEHIND="${COUNTS##*	}"
-case "$AHEAD" in ''|*[!0-9]*) AHEAD="" ;; esac
-case "$BEHIND" in ''|*[!0-9]*) BEHIND="" ;; esac
+if [ -z "$AHEAD" ] || [ "${AHEAD#*[!0-9]}" != "$AHEAD" ]; then AHEAD=""; fi
+if [ -z "$BEHIND" ] || [ "${BEHIND#*[!0-9]}" != "$BEHIND" ]; then BEHIND=""; fi
 
 if [ -z "$AHEAD" ] || [ -z "$BEHIND" ]; then
     log "git-restore" "WARNING: could not compare HEAD with $REMOTE_REF -- could NOT check, no restore attempted"
@@ -578,7 +590,7 @@ if [ "$AHEAD" -gt 0 ] && [ "$BEHIND" -gt 0 ]; then
     # report below never runs -- a store that refused to restore, saying so
     # nowhere.
     _count=$(cat "$DIVERGED_STATE_FILE" 2>/dev/null || echo 0)
-    case "$_count" in ''|*[!0-9]*) _count=0 ;; esac
+    if [ -z "$_count" ] || [ "${_count#*[!0-9]}" != "$_count" ]; then _count=0; fi
     _count=$((10#$_count + 1))
     echo "$_count" > "$DIVERGED_STATE_FILE" 2>/dev/null || true
 

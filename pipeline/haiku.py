@@ -261,7 +261,7 @@ def _choose_summarizer_provider() -> str:
         # than widening transcript_path()'s own return shape, keeps that
         # function's contract ("a usable path or None") unchanged for every
         # other caller.
-        raw = (os.environ.get(_host.TRANSCRIPT_PATH_VAR) or "").strip()
+        raw = (os.environ.get("REMEMBER_TRANSCRIPT_PATH") or "").strip()
         if raw:
             _warn(
                 f"WARNING: REMEMBER_TRANSCRIPT_PATH={raw!r} names a "
@@ -349,20 +349,22 @@ def _child_env() -> dict[str, str]:
     be unconditional (#703).
     """
     strip_key, key_reason = _anthropic_api_key_decision()
-    env = {
+    # Every name below written out (#898 round 10), never compared against a
+    # constant that holds it.
+    child = {
         k: v
         for k, v in os.environ.items()
-        if k == _CHILD_ENV_OAUTH_NAME
+        if k == "CLAUDE_CODE_OAUTH_TOKEN"
         or (
             k != "CLAUDECODE"
             and k != "CLAUDE_JOB_DIR"
             and k != "CLAUDE_PROJECT_DIR"
-            and not (k == ANTHROPIC_API_KEY_ENV and strip_key)
+            and not (k == "ANTHROPIC_API_KEY" and strip_key)
             and not k.startswith("CLAUDE_CODE_")
         )
     }
-    env[NESTED_SUMMARIZER_ENV] = "1"
-    return env
+    child["REMEMBER_NESTED_SUMMARIZER"] = "1"
+    return child
 
 
 def _usage_from_failure(stdout: object) -> TokenUsage | None:
@@ -609,7 +611,7 @@ def _config_candidates() -> list[str]:
 # see (a macOS Keychain entry, say) or simply because they want the nested
 # call to never touch the key. The failure hint in `call_haiku` is what tells
 # them the knob exists at the moment it matters.
-ANTHROPIC_API_KEY_ENV = "ANTHROPIC_API_KEY"
+
 
 _ANTHROPIC_KEY_POLICIES = ("keep", "strip")
 _ANTHROPIC_KEY_POLICY_DEFAULT = "keep"
@@ -668,7 +670,7 @@ def _anthropic_api_key_decision() -> tuple[bool, str]:
     behaving correctly is noise. It is surfaced only where it is actually
     diagnostic -- in the failure hint below.
     """
-    if not os.environ.get(ANTHROPIC_API_KEY_ENV, "").strip():
+    if not os.environ.get("ANTHROPIC_API_KEY", "").strip():
         return False, "not set"
     policy = _configured_anthropic_key_policy()
     if policy == "strip":
@@ -691,7 +693,7 @@ _CREDENTIAL_FAILURE_MARKERS = (
 )
 
 
-def _anthropic_api_key_hint(env: dict[str, str], detail: str) -> str:
+def _anthropic_api_key_hint(child: dict[str, str], detail: str) -> str:
     """The sentence a failure gets when the ambient key plausibly caused it.
 
     Empty string when the key never reached the child, or when the failure does
@@ -699,13 +701,13 @@ def _anthropic_api_key_hint(env: dict[str, str], detail: str) -> str:
     `save-session.sh` surfaces into `hook-errors.log` -- the place an operator
     is already looking, rather than the daily log alone (#694).
     """
-    if not env.get(ANTHROPIC_API_KEY_ENV):
+    if not child.get("ANTHROPIC_API_KEY"):
         return ""
     lowered = detail.lower()
     if not any(marker in lowered for marker in _CREDENTIAL_FAILURE_MARKERS):
         return ""
     return (
-        f" -- note that {ANTHROPIC_API_KEY_ENV} was set in this environment and "
+        " -- note that ANTHROPIC_API_KEY was set in this environment and "
         "was passed to the nested CLI, where it OUT-RANKS a claude.ai login; if "
         "that key is exhausted or wrong, this is what failed. Set "
         "`haiku.anthropic_api_key` to \"strip\" in config.json to keep it out of "
@@ -1074,12 +1076,12 @@ def _codex_child_env() -> dict[str, str]:
     passed through, because a command the model runs inside Codex's
     read-only sandbox can read the child's environment directly.
     """
-    env = {
+    child = {
         k: v for k, v in os.environ.items()
         if k.upper() in _CODEX_CHILD_ENV_ALLOW_UPPER
     }
-    env[NESTED_SUMMARIZER_ENV] = "1"
-    return env
+    child["REMEMBER_NESTED_SUMMARIZER"] = "1"
+    return child
 
 
 def _build_codex_cmd(output_file: str, cwd: str) -> list[str]:
@@ -1342,7 +1344,7 @@ def call_haiku(
     # MAX_ARG_STRLEN (128KB per single argument), which raises E2BIG ("Argument
     # list too long") at exec time and silently kills saves of long sessions.
     # `claude -p` with no positional prompt reads the prompt from stdin.
-    env = _child_env()
+    child = _child_env()
 
     # Bound the spawn before spawning (#204). Every defence above this line
     # depends on a signal reaching the child — an env marker a host can redact,
@@ -1377,7 +1379,7 @@ def call_haiku(
                     encoding="utf-8",
                     errors="replace",
                     timeout=timeout,
-                    env=env,
+                    env=child,
                     cwd=summarizer_cwd,
                 )
         except subprocess.TimeoutExpired as timed_out:
@@ -1458,7 +1460,7 @@ def call_haiku(
         detail = _failure_detail(result.stdout, result.stderr)
         raise RuntimeError(
             f"claude exited {result.returncode}: {detail}"
-            f"{_anthropic_api_key_hint(env, detail)}"
+            f"{_anthropic_api_key_hint(child, detail)}"
         )
 
     return _parse_response(result.stdout)

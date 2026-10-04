@@ -556,7 +556,7 @@ _resolve_remember_dir() {
     local proj="$2"
 
     case "$data_dir" in
-        /*|~*|[A-Za-z]:/*|[A-Za-z]:\\*)
+        /*|~*|[A-Za-z]:[/\\]*)
             local slug
             slug=$(session_dir_slug "$proj")
             local expanded="${data_dir/#\~/$HOME}"
@@ -574,7 +574,7 @@ _set_store_root() {
     REMEMBER_STORE_ROOT=""
 
     case "$data_dir" in
-        /*|~*|[A-Za-z]:/*|[A-Za-z]:\\*) ;;
+        /*|~*|[A-Za-z]:[/\\]*) ;;
         *) return 0 ;;
     esac
     [ "${data_dir#*\{slug\}}" != "$data_dir" ] || return 0
@@ -591,7 +591,7 @@ _set_store_root() {
     done
 
     case "$prefix" in
-        ''|/|[A-Za-z]:|[A-Za-z]:/|[A-Za-z]:\\) return 0 ;;
+        ''|/|[A-Za-z]:|[A-Za-z]:[/\\]) return 0 ;;
     esac
 
     REMEMBER_STORE_ROOT="$prefix"
@@ -627,7 +627,7 @@ _project_cfg="${REMEMBER_DIR}/config.json"
 _classify_project_cfg_haiku_trust() {
     local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
     case "$_data_dir_raw" in
-        /*|~*|[A-Za-z]:/*|[A-Za-z]:\\*) _project_cfg_haiku_untrusted=0 ;;
+        /*|~*|[A-Za-z]:[/\\]*) _project_cfg_haiku_untrusted=0 ;;
         *) _project_cfg_haiku_untrusted=1 ;;
     esac
 }
@@ -743,7 +743,7 @@ elif [ "${#_cfg_sources[@]}" -gt 0 ] && command -v jq >/dev/null 2>&1; then
     if [ "${#_jq_merge_sources[@]}" -eq 0 ]; then
         echo '{}' > "$_merged_cfg"
     else
-        jq -s 'reduce .[] as $x ({}; . * $x) | with_entries(select(.key | startswith("_") | not))' "${_jq_merge_sources[@]}" > "$_merged_cfg" 2>/dev/null \
+        jq -s 'reduce .[] as $x ({}; getpath([]) * $x) | with_entries(select(.key | startswith("_") | not))' "${_jq_merge_sources[@]}" > "$_merged_cfg" 2>/dev/null \
             || cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null
     fi
     [ -n "$_project_sanitized_tmp" ] && rm -f "$_project_sanitized_tmp"
@@ -1120,11 +1120,16 @@ _remember_cfg_flatten_cache_valid_line() {
 }
 
 _remember_cfg_flatten_q_encode() {
-    local _rcfgqe_v="$2"
-    _rcfgqe_v="${_rcfgqe_v//\\/\\\\}"
-    _rcfgqe_v="${_rcfgqe_v//$'\n'/\\n}"
-    _rcfgqe_v="${_rcfgqe_v//$'\r'/\\r}"
-    _rcfgqe_v="${_rcfgqe_v//$'\t'/\\t}"
+    local _rcfgqe_v="$2" _rcfgqe_b _rcfgqe_bb _rcfgqe_n _rcfgqe_r _rcfgqe_t
+    printf -v _rcfgqe_b '\134'
+    _rcfgqe_bb="$_rcfgqe_b$_rcfgqe_b"
+    printf -v _rcfgqe_n '%sn' "$_rcfgqe_b"
+    printf -v _rcfgqe_r '%sr' "$_rcfgqe_b"
+    printf -v _rcfgqe_t '%st' "$_rcfgqe_b"
+    _rcfgqe_v=${_rcfgqe_v//"$_rcfgqe_b"/"$_rcfgqe_bb"}
+    _rcfgqe_v=${_rcfgqe_v//$'\n'/"$_rcfgqe_n"}
+    _rcfgqe_v=${_rcfgqe_v//$'\r'/"$_rcfgqe_r"}
+    _rcfgqe_v=${_rcfgqe_v//$'\t'/"$_rcfgqe_t"}
     printf -v "$1" '%s' "$_rcfgqe_v"
 }
 
@@ -1381,11 +1386,11 @@ esac
 export REMEMBER_PROMPT_STAMP
 
 config_into REMEMBER_SAVE_COOLDOWN ".cooldowns.save_seconds" 120
-case "$REMEMBER_SAVE_COOLDOWN" in ''|*[!0-9]*) REMEMBER_SAVE_COOLDOWN=120 ;; esac
+if [ -z "$REMEMBER_SAVE_COOLDOWN" ] || [ "${REMEMBER_SAVE_COOLDOWN#*[!0-9]}" != "$REMEMBER_SAVE_COOLDOWN" ]; then REMEMBER_SAVE_COOLDOWN=120; fi
 export REMEMBER_SAVE_COOLDOWN
 
 config_into REMEMBER_DELTA_THRESHOLD ".thresholds.delta_lines_trigger" 50
-case "$REMEMBER_DELTA_THRESHOLD" in ''|*[!0-9]*) REMEMBER_DELTA_THRESHOLD=50 ;; esac
+if [ -z "$REMEMBER_DELTA_THRESHOLD" ] || [ "${REMEMBER_DELTA_THRESHOLD#*[!0-9]}" != "$REMEMBER_DELTA_THRESHOLD" ]; then REMEMBER_DELTA_THRESHOLD=50; fi
 export REMEMBER_DELTA_THRESHOLD
 
 [ -n "${REMEMBER_MODEL:-}" ] || config_into REMEMBER_MODEL ".model" "haiku"
@@ -1422,7 +1427,7 @@ _remember_date() {
     fi
     if [ "$_REMEMBER_PRINTF_T" = "1" ] && [ "$#" -eq 1 ] \
         && _remember_date_builtin_ok "$1"; then
-        printf "%(${1#+})T\\n" -1 && return
+        printf "%(${1#+})T\n" -1 && return
     fi
     date "$@"
 }
@@ -1652,13 +1657,13 @@ dispatch() {
                 _budget=$(config '.hooks.dispatch_timeout_seconds' "$_DISPATCH_TIMEOUT_DEFAULT")
                 _DISPATCH_BUDGET_FALLBACK=$_DISPATCH_TIMEOUT_DEFAULT
             fi
-            case "$_budget" in
-                ''|*[!0-9]*) _budget=$_DISPATCH_BUDGET_FALLBACK ;;
-            esac
+            if [ -z "$_budget" ] || [ "${_budget#*[!0-9]}" != "$_budget" ]; then
+                _budget=$_DISPATCH_BUDGET_FALLBACK
+            fi
             _grace=$(config '.hooks.dispatch_kill_grace_seconds' "$_DISPATCH_KILL_GRACE_DEFAULT")
-            case "$_grace" in
-                ''|*[!0-9]*) _grace=$_DISPATCH_KILL_GRACE_DEFAULT ;;
-            esac
+            if [ -z "$_grace" ] || [ "${_grace#*[!0-9]}" != "$_grace" ]; then
+                _grace=$_DISPATCH_KILL_GRACE_DEFAULT
+            fi
         fi
         local hook_stat hook_uid hook_perm
         hook_stat=$(stat -c '%u %a' "$hook" 2>/dev/null || stat -f '%u %Lp' "$hook" 2>/dev/null || echo "")
@@ -1752,9 +1757,9 @@ log "hook" "session-start: PROJECT_DIR=$PROJECT_DIR PIPELINE_DIR=$PIPELINE_DIR R
 
 REMEMBER_SESSION_START_SLOW_S=""
 config_into REMEMBER_SESSION_START_SLOW_S ".session_start_slow_threshold_s" "5"
-case "$REMEMBER_SESSION_START_SLOW_S" in
-    ''|*[!0-9]*) REMEMBER_SESSION_START_SLOW_S=5 ;;
-esac
+if [ -z "$REMEMBER_SESSION_START_SLOW_S" ] || [ "${REMEMBER_SESSION_START_SLOW_S#*[!0-9]}" != "$REMEMBER_SESSION_START_SLOW_S" ]; then
+    REMEMBER_SESSION_START_SLOW_S=5
+fi
 
 
 [ -n "${_REMEMBER_LIB_ENV_CACHE_LOADED:-}" ] && return 0
@@ -1858,14 +1863,14 @@ _remember_memory_paths() {
         && [ "$_remember_root_scratch" != "/" ]; do
         _remember_root_scratch="${_remember_root_scratch%/}"
     done
-    case "$_remember_root_scratch" in
-        (/) REMEMBER_ROOT="/" ;;
-        (*/*)
-            REMEMBER_ROOT="${_remember_root_scratch%/*}"
-            [ -n "$REMEMBER_ROOT" ] || REMEMBER_ROOT="/"
-            ;;
-        (*) printf -v REMEMBER_ROOT '\056' ;;
-    esac
+    if [ "$_remember_root_scratch" = "/" ]; then
+        REMEMBER_ROOT="/"
+    elif [ "${_remember_root_scratch#*/}" != "$_remember_root_scratch" ]; then
+        REMEMBER_ROOT="${_remember_root_scratch%/*}"
+        [ -n "$REMEMBER_ROOT" ] || REMEMBER_ROOT="/"
+    else
+        printf -v REMEMBER_ROOT '\056'
+    fi
     unset _remember_root_scratch
     _remember_mem_proj="${MEMORY_PROJECT_DIR:-}"
     [ -n "$_remember_mem_proj" ] || _remember_mem_proj="$PROJECT_DIR"
@@ -1979,9 +1984,7 @@ _remember_root_tracked_state_into() {
     done
     if [ "$_rts_idx" -lt 0 ]; then
         if command -v git >/dev/null 2>&1; then
-            local _rts_dot
-            printf -v _rts_dot '\056'
-            if [ "$_rts_reldir" = "$_rts_dot" ]; then
+            if [ -z "$_rts_reldir" ]; then
                 _rts_pathspec=""
             else
                 _rts_pathspec=":(icase)${_rts_reldir}/"
@@ -2028,10 +2031,11 @@ _remember_file_tracked_state_into() {
     local _fts_dir _fts_root _fts_root_fs _fts_file_fs _fts_dir_fs _fts_rel _fts_reldir
     local _fts_list _fts_state _fts_line _fts_line_raw _fts_walk _fts_sym_idx _fts_sym_i
     _remember_forward_slash_into _fts_file_fs "$_fts_file"
-    case "$_fts_file_fs" in
-        (*/*) _fts_dir_fs="${_fts_file_fs%/*}" ;;
-        (*)   printf -v _fts_dir_fs '\056' ;;
-    esac
+    if [ "${_fts_file_fs#*/}" != "$_fts_file_fs" ]; then
+        _fts_dir_fs="${_fts_file_fs%/*}"
+    else
+        printf -v _fts_dir_fs '\056'
+    fi
     _remember_repo_root_walk_into _fts_root "$_fts_dir_fs"
     if [ -z "$_fts_root" ]; then
         printf -v "$_fts_outvar" 'no-repo'
@@ -2078,7 +2082,7 @@ _remember_file_tracked_state_into() {
         return 0
     fi
     if [ "$_fts_dir_fs" = "$_fts_root_fs" ]; then
-        printf -v _fts_reldir '\056'
+        _fts_reldir=""
     else
         _fts_reldir="${_fts_dir_fs#$_fts_root_fs/}"
     fi
@@ -2144,7 +2148,7 @@ _remember_may_inject() {
 
 _remember_emit_file() {
     local _remember_emit_max="${REMEMBER_EMIT_READ_MAX:-16384}"
-    case "$_remember_emit_max" in (''|*[!0-9]*) _remember_emit_max=16384 ;; esac
+    if [ -z "$_remember_emit_max" ] || [ "${_remember_emit_max#*[!0-9]}" != "$_remember_emit_max" ]; then _remember_emit_max=16384; fi
     case "${2:-}" in
         (''|*[!0-9]*)
             cat "$1"
@@ -2185,10 +2189,12 @@ _remember_render_memory_section() {
     echo "=== MEMORY ==="
     local MEMORY_INJECT_MAX_BYTES=""
     config_into MEMORY_INJECT_MAX_BYTES ".thresholds.memory_inject_max_bytes" 200000
-    case "$MEMORY_INJECT_MAX_BYTES" in (''|*[!0-9]*) MEMORY_INJECT_MAX_BYTES=200000 ;; esac
+    if [ -z "$MEMORY_INJECT_MAX_BYTES" ] || [ "${MEMORY_INJECT_MAX_BYTES#*[!0-9]}" != "$MEMORY_INJECT_MAX_BYTES" ]; then MEMORY_INJECT_MAX_BYTES=200000; fi
     local OVERSIZED_MEMORY="" BASENAME MFILE_BYTES _remember_oversized_max=0
     local _remember_budget_dropped=""
     local REFUSED_MEMORY=""
+    local _remember_nl
+    printf -v _remember_nl '\n'
     local _remember_present=() _remember_wc_bytes _remember_wc_path
     for MFILE in "${MEMORY_FILES[@]}"; do
         if [ -f "$MFILE" ] && [ -s "$MFILE" ]; then
@@ -2198,35 +2204,33 @@ _remember_render_memory_section() {
             if _remember_may_inject "$MFILE" "memory-context"; then
                 _remember_present+=("$MFILE")
             else
-                REFUSED_MEMORY="${REFUSED_MEMORY}${_REMEMBER_INJECT_REFUSAL}
-"
+                REFUSED_MEMORY="${REFUSED_MEMORY}${_REMEMBER_INJECT_REFUSAL}${_remember_nl}"
             fi
         fi
     done
     if [ "${#_remember_present[@]}" -gt 0 ]; then
         while read -r _remember_wc_bytes _remember_wc_path; do
-            case "$_remember_wc_bytes" in (''|*[!0-9]*) continue ;; esac
+            if [ -z "$_remember_wc_bytes" ] || [ "${_remember_wc_bytes#*[!0-9]}" != "$_remember_wc_bytes" ]; then continue; fi
             [ "$_remember_wc_path" = "total" ] && continue
             _remember_wc_size_set "$_remember_wc_path" "$_remember_wc_bytes"
         done < <(wc -c "${_remember_present[@]}")
     fi
     [ "${#_remember_present[@]}" -gt 0 ] && for MFILE in "${_remember_present[@]}"; do
             _remember_wc_size_get_into MFILE_BYTES "$MFILE"
-            case "$MFILE_BYTES" in (*[!0-9]*) MFILE_BYTES="" ;; esac
+            if [ "${MFILE_BYTES#*[!0-9]}" != "$MFILE_BYTES" ]; then MFILE_BYTES=""; fi
             if [ -n "$MFILE_BYTES" ] && [ "$MEMORY_INJECT_MAX_BYTES" -gt 0 ] && [ "$MFILE_BYTES" -gt "$MEMORY_INJECT_MAX_BYTES" ]; then
-                OVERSIZED_MEMORY="${OVERSIZED_MEMORY}${MFILE} (${MFILE_BYTES} bytes)
-"
+                OVERSIZED_MEMORY="${OVERSIZED_MEMORY}${MFILE} (${MFILE_BYTES} bytes)${_remember_nl}"
                 [ "$MFILE_BYTES" -gt "$_remember_oversized_max" ] && _remember_oversized_max="$MFILE_BYTES"
                 continue
             fi
             if [ -n "${_REMEMBER_BUDGET_EXCLUDE:-}" ]; then
-                case "
-${_REMEMBER_BUDGET_EXCLUDE}" in
-                    (*"
-${MFILE}
-"*)
-                        _remember_budget_dropped="${_remember_budget_dropped}${MFILE}${MFILE_BYTES:+ (${MFILE_BYTES} bytes)}
-"
+                case "${_remember_nl}${_REMEMBER_BUDGET_EXCLUDE}" in
+                    (*"${_remember_nl}${MFILE}${_remember_nl}"*)
+                        _remember_budget_dropped="${_remember_budget_dropped}${MFILE}"
+                        if [ -n "${MFILE_BYTES:-}" ]; then
+                            _remember_budget_dropped="${_remember_budget_dropped} (${MFILE_BYTES} bytes)"
+                        fi
+                        _remember_budget_dropped="${_remember_budget_dropped}${_remember_nl}"
                         continue
                         ;;
                 esac
@@ -2270,7 +2274,7 @@ ${MFILE}
         done
         if [ "${#_remember_deferred[@]}" -gt 0 ]; then
             while read -r _remember_wc_bytes _remember_wc_path; do
-                case "$_remember_wc_bytes" in (''|*[!0-9]*) continue ;; esac
+                if [ -z "$_remember_wc_bytes" ] || [ "${_remember_wc_bytes#*[!0-9]}" != "$_remember_wc_bytes" ]; then continue; fi
                 [ "$_remember_wc_path" = "total" ] && continue
                 _remember_wc_size_set "$_remember_wc_path" "$_remember_wc_bytes"
             done < <(wc -c "${_remember_deferred[@]}")
@@ -2308,7 +2312,7 @@ ${MFILE}
             else
                 _date=$_core;      _seq=1
             fi
-            case "$_seq" in (''|*[!0-9]*) _seq=1 ;; esac
+            if [ -z "$_seq" ] || [ "${_seq#*[!0-9]}" != "$_seq" ]; then _seq=1; fi
             printf '%s-%010d\t%s\n' "$_date" "$_seq" "$_slice"
         done | sort | tail -n "$ROTATED_LIST_MAX" | cut -f2-)
         echo "--- rotated memory slices (not shown; grep on request) ---"
@@ -2325,7 +2329,7 @@ ${MFILE}
         if [ "${#_remember_newest_arr[@]}" -gt 0 ]; then
             local _remember_newest_bytes
             while read -r _remember_wc_bytes _remember_wc_path; do
-                case "$_remember_wc_bytes" in (''|*[!0-9]*) continue ;; esac
+                if [ -z "$_remember_wc_bytes" ] || [ "${_remember_wc_bytes#*[!0-9]}" != "$_remember_wc_bytes" ]; then continue; fi
                 [ "$_remember_wc_path" = "total" ] && continue
                 _remember_wc_size_set "$_remember_wc_path" "$_remember_wc_bytes"
             done < <(wc -c "${_remember_newest_arr[@]}")
@@ -2443,7 +2447,7 @@ unset _REMEMBER_BUDGET_EXCLUDE
 
 _remember_apply_session_start_budget() {
     local _outvar="$1" _max="$2" _text="$3"
-    case "$_max" in (''|*[!0-9]*) return 0 ;; esac
+    if [ -z "$_max" ] || [ "${_max#*[!0-9]}" != "$_max" ]; then return 0; fi
     [ "$_max" -gt 0 ] || return 0
     local LC_ALL=C  # byte length, not a locale-dependent character count (see header above)
     [ "${#_text}" -gt "$_max" ] || return 0
@@ -2480,7 +2484,7 @@ _stdin_session_id() {
 
 CURRENT_SESSION_ID=$(_stdin_session_id "$HOOK_STDIN" 2>/dev/null) || CURRENT_SESSION_ID=""
 case "$CURRENT_SESSION_ID" in
-    ''|.|..|*[!A-Za-z0-9._-]*) CURRENT_SESSION_ID="" ;;
+    ''|[.]|[.][.]|*[!A-Za-z0-9._-]*) CURRENT_SESSION_ID="" ;;
 esac
 
 _stdin_json_string_into REMEMBER_TRANSCRIPT_PATH transcript_path "$HOOK_STDIN" 2>/dev/null
@@ -2711,9 +2715,9 @@ _lock_self_set() {
     sh -c 'echo $PPID' > "$_probe" 2>/dev/null
     _LOCK_SELF=$(cat "$_probe" 2>/dev/null) || true
     rm -f "$_probe" 2>/dev/null || true
-    case "$_LOCK_SELF" in
-        ''|*[!0-9]*) _LOCK_SELF="$$" ;;
-    esac
+    if [ -z "$_LOCK_SELF" ] || [ "${_LOCK_SELF#*[!0-9]}" != "$_LOCK_SELF" ]; then
+        _LOCK_SELF="$$"
+    fi
     return 0
 }
 
@@ -2764,12 +2768,12 @@ _LOCK_ADOPT_AFTER="${_LOCK_ADOPT_AFTER:-30}"
 _lock_dir_age() {
     local _mtime _now
     _mtime=$(stat -c %Y "$1" 2>/dev/null) || _mtime=""
-    case "$_mtime" in
-        ''|*[!0-9]*) _mtime=$(stat -f %m "$1" 2>/dev/null) || _mtime="" ;;
-    esac
-    case "$_mtime" in
-        ''|*[!0-9]*) echo 0; return 0 ;;
-    esac
+    if [ -z "$_mtime" ] || [ "${_mtime#*[!0-9]}" != "$_mtime" ]; then
+        _mtime=$(stat -f %m "$1" 2>/dev/null) || _mtime=""
+    fi
+    if [ -z "$_mtime" ] || [ "${_mtime#*[!0-9]}" != "$_mtime" ]; then
+        echo 0; return 0
+    fi
     _now=$(date +%s)
     echo $(( _now - 10#$_mtime ))
 }
@@ -2805,13 +2809,17 @@ _LOCK_TIMING_PRECISION=""
 _LOCK_TIMING_FILE=""
 _LOCK_TIMING_NOW=0
 _LOCK_TIMING_DISCLOSED=0
+_LOCK_TIMING_SLOTS=()
+_LOCK_TIMING_T0S=()
+_LOCK_TIMING_WAITS=()
+_LOCK_TIMING_IDX=-1
 
 _lock_timing_has_ns_date() {
     local _n
     _n=$(date +%s%N 2>/dev/null) || return 1
-    case "$_n" in
-        ''|*[!0-9]*) return 1 ;;
-    esac
+    if [ -z "$_n" ] || [ "${_n#*[!0-9]}" != "$_n" ]; then
+        return 1
+    fi
     [ "${#_n}" -ge 16 ] || return 1
     return 0
 }
@@ -2833,9 +2841,9 @@ _lock_timing_us_to_ms() {
         *[.,]*) _s="${_r%%[.,]*}"; _f="${_r#*[.,]}" ;;
         *)      _s="$_r"; _f="000000" ;;
     esac
-    case "$_s" in
-        ''|*[!0-9]*) _LOCK_TIMING_NOW=0; return 0 ;;
-    esac
+    if [ -z "$_s" ] || [ "${_s#*[!0-9]}" != "$_s" ]; then
+        _LOCK_TIMING_NOW=0; return 0
+    fi
     case "$_f" in
         *[!0-9]*) _f="000000" ;;
     esac
@@ -2845,17 +2853,17 @@ _lock_timing_us_to_ms() {
 }
 
 _lock_timing_ns_to_ms() {
-    case "$1" in
-        ''|*[!0-9]*) _LOCK_TIMING_NOW=0; return 0 ;;
-    esac
+    if [ -z "$1" ] || [ "${1#*[!0-9]}" != "$1" ]; then
+        _LOCK_TIMING_NOW=0; return 0
+    fi
     _LOCK_TIMING_NOW=$(( 10#$1 / 1000000 ))
     return 0
 }
 
 _lock_timing_s_to_ms() {
-    case "$1" in
-        ''|*[!0-9]*) _LOCK_TIMING_NOW=0; return 0 ;;
-    esac
+    if [ -z "$1" ] || [ "${1#*[!0-9]}" != "$1" ]; then
+        _LOCK_TIMING_NOW=0; return 0
+    fi
     _LOCK_TIMING_NOW=$(( 10#$1 * 1000 ))
     return 0
 }
@@ -2906,6 +2914,18 @@ _lock_timing_key() {
     _LOCK_TIMING_SLOT="${1//[!A-Za-z0-9]/_}"
 }
 
+_lock_timing_find() {
+    local _i _n="${#_LOCK_TIMING_SLOTS[@]}"
+    _LOCK_TIMING_IDX=-1
+    for ((_i = 0; _i < _n; _i++)); do
+        if [ "${_LOCK_TIMING_SLOTS[_i]}" = "$_LOCK_TIMING_SLOT" ]; then
+            _LOCK_TIMING_IDX=$_i
+            return 0
+        fi
+    done
+    return 1
+}
+
 _lock_timing_record() {
     local _name="${1##*/}" _dir _n _lock_timing_pid
     _lock_timing_target
@@ -2922,9 +2942,9 @@ _lock_timing_record() {
 
     if [ -f "$_LOCK_TIMING_FILE" ]; then
         _n=$(wc -l < "$_LOCK_TIMING_FILE" 2>/dev/null | tr -d ' ')
-        case "$_n" in
-            ''|*[!0-9]*) _n=0 ;;
-        esac
+        if [ -z "$_n" ] || [ "${_n#*[!0-9]}" != "$_n" ]; then
+            _n=0
+        fi
         if [ "$_n" -ge "$_LOCK_TIMING_MAX" ]; then
             { printf '# CAPPED\t%s lines, REMEMBER_LOCK_TIMING_MAX=%s reached -- recording STOPPED here. Nothing was rolled or overwritten, so every record above is real; the distribution below this point is simply missing. Raise the cap or move this file to keep measuring.\n' \
                 "$_n" "$_LOCK_TIMING_MAX" >> "$_LOCK_TIMING_FILE"; } 2>/dev/null \
@@ -2959,8 +2979,10 @@ lock_acquire() {
         _lock_timing_now
         _waited=$(( _LOCK_TIMING_NOW - _t0 ))
         _lock_timing_key "$1"
-        eval "_LOCK_TIMING_T0_${_LOCK_TIMING_SLOT}=\$_LOCK_TIMING_NOW"
-        eval "_LOCK_TIMING_W_${_LOCK_TIMING_SLOT}=\$_waited"
+        _lock_timing_find || _LOCK_TIMING_IDX="${#_LOCK_TIMING_SLOTS[@]}"
+        _LOCK_TIMING_SLOTS[_LOCK_TIMING_IDX]="$_LOCK_TIMING_SLOT"
+        _LOCK_TIMING_T0S[_LOCK_TIMING_IDX]="$_LOCK_TIMING_NOW"
+        _LOCK_TIMING_WAITS[_LOCK_TIMING_IDX]="$_waited"
         return 0
     fi
     _lock_timing_now
@@ -2983,9 +3005,9 @@ _lock_acquire_impl() {
 
         if [ -f "$_dir" ]; then
             _legacy=$(cat "$_dir" 2>/dev/null) || true
-            case "$_legacy" in
-                ''|*[!0-9]*) rm -f "$_dir" 2>/dev/null || true; continue ;;
-            esac
+            if [ -z "$_legacy" ] || [ "${_legacy#*[!0-9]}" != "$_legacy" ]; then
+                rm -f "$_dir" 2>/dev/null || true; continue
+            fi
             if ! kill -0 "$_legacy" 2>/dev/null; then
                 rm -f "$_dir" 2>/dev/null || true
                 continue
@@ -3013,13 +3035,18 @@ lock_release() {
     _lock_release_impl "$@" || return 1
     _lock_timing_now
     _lock_timing_key "$1"
-    eval "_t0=\${_LOCK_TIMING_T0_${_LOCK_TIMING_SLOT}:-}"
-    eval "_wait=\${_LOCK_TIMING_W_${_LOCK_TIMING_SLOT}:-}"
+    _t0=""
+    _wait=""
+    if _lock_timing_find; then
+        _t0="${_LOCK_TIMING_T0S[_LOCK_TIMING_IDX]}"
+        _wait="${_LOCK_TIMING_WAITS[_LOCK_TIMING_IDX]}"
+    fi
     if [ -z "$_t0" ]; then
         _lock_timing_record "$1" release unpaired "-" "-"
         return 0
     fi
-    eval "unset _LOCK_TIMING_T0_${_LOCK_TIMING_SLOT} _LOCK_TIMING_W_${_LOCK_TIMING_SLOT}"
+    _LOCK_TIMING_T0S[_LOCK_TIMING_IDX]=""
+    _LOCK_TIMING_WAITS[_LOCK_TIMING_IDX]=""
     _lock_timing_record "$1" release ok "$_wait" "$(( _LOCK_TIMING_NOW - _t0 ))"
     return 0
 }
@@ -3429,7 +3456,7 @@ capture_was_seen() {
     local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
     [ -n "$1" ] || return 1
     case "$1" in
-        .|..|*[!A-Za-z0-9._-]*) : ;;
+        [.]|[.][.]|*[!A-Za-z0-9._-]*) : ;;
         *) [ -e "$CAPTURE_SEEN_DIR/$1" ] && return 0 ;;
     esac
     [ "$SEEN_ID" = "$1" ] && return 0
@@ -3521,7 +3548,7 @@ if [ "$_promos_enabled" = "true" ] \
         local marker="$promo_dir/promo-notice"
         local cooldown
         config_into cooldown ".cooldowns.promo_seconds" 604800
-        case "$cooldown" in ''|*[!0-9]*) cooldown=604800 ;; esac
+        if [ -z "$cooldown" ] || [ "${cooldown#*[!0-9]}" != "$cooldown" ]; then cooldown=604800; fi
 
         local last_ts=0 last_id=""
         if [ -f "$marker" ]; then
@@ -3533,11 +3560,11 @@ if [ "$_promos_enabled" = "true" ] \
                 esac
             done < "$marker"
         fi
-        case "$last_ts" in ''|*[!0-9]*) last_ts=0 ;; esac
+        if [ -z "$last_ts" ] || [ "${last_ts#*[!0-9]}" != "$last_ts" ]; then last_ts=0; fi
 
         local now=""
         _remember_date_into now +%s
-        case "$now" in ''|*[!0-9]*) return 0 ;; esac
+        if [ -z "$now" ] || [ "${now#*[!0-9]}" != "$now" ]; then return 0; fi
 
         if [ "$last_ts" -gt 0 ] \
             && [ $(( 10#$now - 10#$last_ts )) -lt "$cooldown" ]; then
@@ -3710,7 +3737,7 @@ elif [ -f "$REMEMBER_HANDOFF" ] && [ -s "$REMEMBER_HANDOFF" ]; then
             esac
         done < "$REMEMBER_HANDOFF_STATE"
     fi
-    case "$DELIVERIES" in (''|*[!0-9]*) DELIVERIES=0 ;; esac
+    if [ -z "$DELIVERIES" ] || [ "${DELIVERIES#*[!0-9]}" != "$DELIVERIES" ]; then DELIVERIES=0; fi
 
     _remember_handoff_fence_nonce="${RANDOM:-0}${RANDOM:-0}"
     HANDOFF_MAX_REDELIVERIES=""
