@@ -99,20 +99,48 @@ def _choose_summarizer_provider() -> str:
     return "claude"
 @contextlib.contextmanager
 def _without_session_env(names: tuple[str, ...]):
-    removed = {}
-    for name in names:
-        value = os.environ.pop(name, None)
-        if value is not None:
-            removed[name] = value
+    saved = (
+        os.environ.pop("CLAUDECODE", None),
+        os.environ.pop("CLAUDE_JOB_DIR", None),
+        os.environ.pop("CLAUDE_PROJECT_DIR", None),
+        os.environ.pop("CLAUDE_CODE_SESSION_ID", None),
+        os.environ.pop("CLAUDE_CODE_ENTRYPOINT", None),
+        os.environ.pop("CLAUDE_CODE_CHILD_SESSION", None),
+        os.environ.pop("CLAUDE_CODE_SESSION_ATTENDED", None),
+        os.environ.pop("CLAUDE_CODE_EXECPATH", None),
+        os.environ.pop("CLAUDE_CODE_MESSAGING_SOCKET", None),
+        os.environ.pop("CLAUDE_CODE_MESSAGING_TOKEN", None),
+        os.environ.pop("CLAUDE_CODE_SSE_PORT", None),
+    )
     try:
         yield
     finally:
-        for name, value in removed.items():
-            os.environ[name] = value
+        if saved[0] is not None:
+            os.environ["CLAUDECODE"] = saved[0]
+        if saved[1] is not None:
+            os.environ["CLAUDE_JOB_DIR"] = saved[1]
+        if saved[2] is not None:
+            os.environ["CLAUDE_PROJECT_DIR"] = saved[2]
+        if saved[3] is not None:
+            os.environ["CLAUDE_CODE_SESSION_ID"] = saved[3]
+        if saved[4] is not None:
+            os.environ["CLAUDE_CODE_ENTRYPOINT"] = saved[4]
+        if saved[5] is not None:
+            os.environ["CLAUDE_CODE_CHILD_SESSION"] = saved[5]
+        if saved[6] is not None:
+            os.environ["CLAUDE_CODE_SESSION_ATTENDED"] = saved[6]
+        if saved[7] is not None:
+            os.environ["CLAUDE_CODE_EXECPATH"] = saved[7]
+        if saved[8] is not None:
+            os.environ["CLAUDE_CODE_MESSAGING_SOCKET"] = saved[8]
+        if saved[9] is not None:
+            os.environ["CLAUDE_CODE_MESSAGING_TOKEN"] = saved[9]
+        if saved[10] is not None:
+            os.environ["CLAUDE_CODE_SSE_PORT"] = saved[10]
 @contextlib.contextmanager
 def _summarizer_environment():
     previous_marker = os.environ.get("REMEMBER_NESTED_SUMMARIZER")
-    with _without_session_env(_configured_strip_session_env()):
+    with _without_session_env(()):
         os.environ["REMEMBER_NESTED_SUMMARIZER"] = "1"
         try:
             yield
@@ -388,15 +416,35 @@ def _isolated_summarizer_cwd():
         shutil.rmtree(d, ignore_errors=True)
 def _codex_child_env() -> dict[str, str]:
     child = {}
-    seen = set()
-    for name in _configured_codex_env_allow():
-        folded = name.upper() if os.name == "nt" else name
-        if folded in seen:
-            continue
-        value = os.environ.get(name)
+    for name, value in (
+        ("PATH", os.environ.get("PATH")),
+        ("HOME", os.environ.get("HOME")),
+        ("LANG", os.environ.get("LANG")),
+        ("LC_ALL", os.environ.get("LC_ALL")),
+        ("CODEX_HOME", os.environ.get("CODEX_HOME")),
+        ("TMPDIR", os.environ.get("TMPDIR")),
+        ("TEMP", os.environ.get("TEMP")),
+        ("TMP", os.environ.get("TMP")),
+        ("SYSTEMROOT", os.environ.get("SYSTEMROOT")),
+        ("USERPROFILE", os.environ.get("USERPROFILE")),
+        ("APPDATA", os.environ.get("APPDATA")),
+        ("PATHEXT", os.environ.get("PATHEXT")),
+        ("HTTPS_PROXY", os.environ.get("HTTPS_PROXY")),
+        ("HTTP_PROXY", os.environ.get("HTTP_PROXY")),
+        ("NO_PROXY", os.environ.get("NO_PROXY")),
+        ("SSL_CERT_FILE", os.environ.get("SSL_CERT_FILE")),
+        ("NODE_EXTRA_CA_CERTS", os.environ.get("NODE_EXTRA_CA_CERTS")),
+    ):
         if value is not None:
             child[name] = value
-            seen.add(folded)
+    if os.name != "nt":
+        for name, value in (
+            ("https_proxy", os.environ.get("https_proxy")),
+            ("http_proxy", os.environ.get("http_proxy")),
+            ("no_proxy", os.environ.get("no_proxy")),
+        ):
+            if value is not None:
+                child[name] = value
     child["REMEMBER_NESTED_SUMMARIZER"] = "1"
     return child
 def _build_codex_cmd(output_file: str, cwd: str) -> list[str]:
