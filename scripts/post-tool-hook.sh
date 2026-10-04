@@ -212,10 +212,10 @@ _stdin_json_string() {
     # backslash-escaped: the plugin directory's scanner mis-tracks an
     # escaped quote (#898 round 8). Same patterns, same quoting of $field.
     printf -v dq '\042'
-    case "$raw" in *"$dq$field$dq"*) ;; *) return 1 ;; esac
+    [ "${raw/"$dq$field$dq"/}" != "$raw" ] || return 1
     rest=${raw#*"$dq"$field"$dq"}
     prefix=${rest%%"$dq"*}
-    case "$prefix" in *[!:[:space:]]*) return 1 ;; esac
+    if [ "${prefix/[!:[:space:]]/}" != "$prefix" ]; then return 1; fi
     value=${rest#*"$dq"}
     value=${value%%"$dq"*}
     # A JSON encoder writes each backslash as `\\` -- a Windows `cwd` from
@@ -248,9 +248,10 @@ printf -v _pt_dq '\042'
 # .claude/remember layout derivation, then the existing failure -- resolved
 # entirely inside resolve-paths.sh, unchanged by this hook.
 REMEMBER_HOOK_CWD=$(_stdin_json_string cwd "$HOOK_STDIN" 2>/dev/null) || REMEMBER_HOOK_CWD=""
-case "$REMEMBER_HOOK_CWD" in
-    *$'\n'*|*$'\r'*) REMEMBER_HOOK_CWD="" ;;
-esac
+if [ "${REMEMBER_HOOK_CWD/$'\n'/}" != "$REMEMBER_HOOK_CWD" ] \
+    || [ "${REMEMBER_HOOK_CWD/$'\r'/}" != "$REMEMBER_HOOK_CWD" ]; then
+    REMEMBER_HOOK_CWD=""
+fi
 export REMEMBER_HOOK_CWD
 
 source "$_HOOK_DIR/lib-clock.sh"
@@ -433,9 +434,11 @@ STDIN_SESSION_ID=$(_stdin_json_string session_id "$HOOK_STDIN" 2>/dev/null) || S
 # -- silently turning a real delta-triggered save into a no-op dry-run
 # preview: no summary written, no position advanced, log line reads like an
 # ordinary run.
-case "$STDIN_SESSION_ID" in
-    ''|[.]|[.][.]|-*|*[!A-Za-z0-9._-]*) STDIN_SESSION_ID="" ;;
-esac
+if [ -z "${STDIN_SESSION_ID#.}" ] || [ -z "${STDIN_SESSION_ID#..}" ] \
+    || [ "${STDIN_SESSION_ID#-}" != "$STDIN_SESSION_ID" ] \
+    || [ "${STDIN_SESSION_ID/[!A-Za-z0-9._-]/}" != "$STDIN_SESSION_ID" ]; then
+    STDIN_SESSION_ID=""
+fi
 
 # ── The transcript path the host handed us (#459, mirroring #407/#424) ────
 # ~/.claude/projects/<slug> is Claude Code's OWN session layout, not a
@@ -454,9 +457,9 @@ esac
 # the `[ -f ]` check below, not a character allowlist -- a transcript path
 # legitimately contains slashes and dots.
 STDIN_TRANSCRIPT_PATH=$(_stdin_json_string transcript_path "$HOOK_STDIN" 2>/dev/null) || STDIN_TRANSCRIPT_PATH=""
-case "$STDIN_TRANSCRIPT_PATH" in
-    *$'\r'*) STDIN_TRANSCRIPT_PATH="" ;;
-esac
+if [ "${STDIN_TRANSCRIPT_PATH/$'\r'/}" != "$STDIN_TRANSCRIPT_PATH" ]; then
+    STDIN_TRANSCRIPT_PATH=""
+fi
 if [ -n "$STDIN_TRANSCRIPT_PATH" ] && [ ! -f "$STDIN_TRANSCRIPT_PATH" ]; then
     STDIN_TRANSCRIPT_PATH=""
 fi
@@ -625,9 +628,11 @@ else
     # class, same reason: `-*` rejects a leading dash so a transcript
     # basename that happens to collide with save-session.sh's own `--dry`/
     # `--force` flags cannot be misread as one.
-    case "$SESSION_ID" in
-        ''|[.]|[.][.]|-*|*[!A-Za-z0-9._-]*) SESSION_ID="" ;;
-    esac
+    if [ -z "${SESSION_ID#.}" ] || [ -z "${SESSION_ID#..}" ] \
+        || [ "${SESSION_ID#-}" != "$SESSION_ID" ] \
+        || [ "${SESSION_ID/[!A-Za-z0-9._-]/}" != "$SESSION_ID" ]; then
+        SESSION_ID=""
+    fi
 fi
 
 # Which session PostToolUse serviced, for the capture-gap check in
@@ -667,10 +672,12 @@ if [ -d "$REMEMBER_DIR/tmp/capture-alive.d" ] \
     # The id becomes a path component, so it is checked rather than trusted:
     # it comes from a filename in the transcript dir, and `..` or a slash
     # would escape the store. Real session ids are UUIDs.
-    case "$SESSION_ID" in
-        ''|[.]|[.][.]|*[!A-Za-z0-9._-]*) : ;;
-        *) : > "$REMEMBER_DIR/tmp/capture-alive.d/$SESSION_ID" 2>/dev/null || true ;;
-    esac
+    if [ -z "${SESSION_ID#.}" ] || [ -z "${SESSION_ID#..}" ] \
+        || [ "${SESSION_ID/[!A-Za-z0-9._-]/}" != "$SESSION_ID" ]; then
+        :
+    else
+        : > "$REMEMBER_DIR/tmp/capture-alive.d/$SESSION_ID" 2>/dev/null || true
+    fi
 fi
 if printf '%s' "$SESSION_ID" > "$REMEMBER_DIR/tmp/capture-alive.$$" 2>/dev/null; then
     mv -f "$REMEMBER_DIR/tmp/capture-alive.$$" "$REMEMBER_DIR/tmp/capture-alive" 2>/dev/null \
@@ -721,122 +728,112 @@ fi
 # absent or invalid sidecar simply means there was nothing here to trust,
 # and the code below asks the real source of truth instead of guessing.
 SIDECAR=""
-case "$SESSION_ID" in
-    ''|[.]|[.][.]|*[!A-Za-z0-9._-]*) : ;;
-    *) SIDECAR="$REMEMBER_DIR/tmp/position.$SESSION_ID" ;;
-esac
+if [ -z "${SESSION_ID#.}" ] || [ -z "${SESSION_ID#..}" ] \
+    || [ "${SESSION_ID/[!A-Za-z0-9._-]/}" != "$SESSION_ID" ]; then
+    :
+else
+    SIDECAR="$REMEMBER_DIR/tmp/position.$SESSION_ID"
+fi
 
 LAST_LINE=0
 SIDECAR_TRUSTED=""
 if [ -n "$SIDECAR" ] && [ -f "$SIDECAR" ]; then
     _SIDECAR_LINE=""
     read -r _SIDECAR_LINE < "$SIDECAR" 2>/dev/null
-    case "$_SIDECAR_LINE" in
-        ''|*[!0-9]*)
-            log "hook" "WARNING: sidecar $SIDECAR held a non-numeric value ($_SIDECAR_LINE) -- disagrees with last-save.json, falling back to read-position"
-            ;;
-        *)
-            # 10# (#332): a leading zero in the sidecar would otherwise be
-            # read as octal and take this comparison — and the delta
-            # arithmetic below it — down with it.
-            if [ "$((10#$_SIDECAR_LINE))" -gt "$CURRENT_LINES" ]; then
-                log "hook" "WARNING: sidecar $SIDECAR reports position $_SIDECAR_LINE, past this run's own $CURRENT_LINES transcript lines -- disagrees with last-save.json, falling back to read-position"
-            else
-                # #403: the bound above only rules out a value the sidecar
-                # could never legitimately reach — it says nothing about
-                # whether last-save.json still remembers this session at
-                # all. The evicted-sidecar cleanup in pipeline/shell.py's
-                # cmd_save_position (the loop right after the #353 sidecar
-                # write) is best-effort by its own comment: a failed unlink
-                # leaves an orphaned sidecar that still falls well inside
-                # CURRENT_LINES, which the bound above cannot see. Trusting
-                # it would resume from a position the authoritative store no
-                # longer recognises — #140's duplicate-resummarization bug,
-                # reintroduced through this mirror. So the sidecar is
-                # trusted only when this run's own session id is still a
-                # key in last-save.json's "sessions" map, which is the
-                # comparison the two log lines here already claim to make.
-                #
-                # Read via bash's fork-free `$(< file)` (a single
-                # redirection as the whole command substitution — bash
-                # reads the file directly, no subprocess, and it traces as
-                # no separate xtrace line at all) rather than a `read` loop
-                # or a spawn, so the hot path this feature exists to keep
-                # cheap stays cheap. The membership test is a literal
-                # substring match on `"<id>":`, not a JSON parse — safe
-                # because SESSION_ID was already filtered to
-                # [A-Za-z0-9._-]+ above (no quote or backslash it could
-                # inject) and the trailing `":` anchors the match to a full
-                # key, so "sess-1" cannot false-match a stored "sess-10".
-                #
-                # Scoped to the "sessions" object's own text, not the whole
-                # file: cmd_save_position's payload always carries the
-                # fixed top-level keys "session" and "line" alongside
-                # "sessions" (pipeline/shell.py), so a session id that
-                # happened to equal one of THOSE field names would
-                # false-match a whole-file search even with an empty
-                # "sessions" map. Values in "sessions" are always bare
-                # integers (never braces), so the text between the key and
-                # the object's own closing brace is exactly its content.
-                # #426: "absent", "present but unreadable", and "genuinely
-                # evicted" all used to fold into ONE message that claims a
-                # comparison happened -- `[ -f ]` passes on an unreadable
-                # file, and `$(< file)` cannot tell "read empty content" from
-                # "the read itself failed", so both silently looked
-                # identical to a file whose "sessions" map genuinely lacks
-                # this session. Behaviour is unchanged (fall back to
-                # read-position in all three cases); only the receipt is
-                # split, on whether the file was actually read.
-                _LAST_SAVE_STATE="absent"
-                _LAST_SAVE_CONTENT=""
-                if [ -f "$LAST_SAVE_FILE" ]; then
-                    # The stderr redirect has to sit OUTSIDE the command
-                    # substitution (a `{ ...; } 2>/dev/null` group), not
-                    # inside it as `$(< file 2>/dev/null)` -- bash's
-                    # no-fork fast path for `$(< file)` only engages when
-                    # the substitution is EXACTLY that redirection with no
-                    # other token in it; adding one turns it into an empty
-                    # command with a redirection, which reads nothing and
-                    # always "succeeds" silently. That would have made
-                    # unreadable indistinguishable from empty again -- the
-                    # exact bug this fix exists to close, reintroduced one
-                    # line lower.
-                    if { _LAST_SAVE_CONTENT=$(< "$LAST_SAVE_FILE"); } 2>/dev/null; then
-                        _LAST_SAVE_STATE="read"
-                    else
-                        _LAST_SAVE_STATE="unreadable"
-                    fi
-                fi
-                # An expansion test, not a quoted literal in a case pattern
-                # (#898 round 9, a directory-scanner hold shape).
-                _SESSIONS_SCOPE=${_LAST_SAVE_CONTENT#*"$_pt_dq"sessions"$_pt_dq"}
-                if [ "$_SESSIONS_SCOPE" != "$_LAST_SAVE_CONTENT" ]; then
-                    _SESSIONS_SCOPE="${_SESSIONS_SCOPE%%\}*}"
+    if [ -z "$_SIDECAR_LINE" ] || [ "${_SIDECAR_LINE/[!0-9]/}" != "$_SIDECAR_LINE" ]; then
+        log "hook" "WARNING: sidecar $SIDECAR held a non-numeric value ($_SIDECAR_LINE) -- disagrees with last-save.json, falling back to read-position"
+    else
+        # 10# (#332): a leading zero in the sidecar would otherwise be
+        # read as octal and take this comparison — and the delta
+        # arithmetic below it — down with it.
+        if [ "$((10#$_SIDECAR_LINE))" -gt "$CURRENT_LINES" ]; then
+            log "hook" "WARNING: sidecar $SIDECAR reports position $_SIDECAR_LINE, past this run's own $CURRENT_LINES transcript lines -- disagrees with last-save.json, falling back to read-position"
+        else
+            # #403: the bound above only rules out a value the sidecar
+            # could never legitimately reach — it says nothing about
+            # whether last-save.json still remembers this session at
+            # all. The evicted-sidecar cleanup in pipeline/shell.py's
+            # cmd_save_position (the loop right after the #353 sidecar
+            # write) is best-effort by its own comment: a failed unlink
+            # leaves an orphaned sidecar that still falls well inside
+            # CURRENT_LINES, which the bound above cannot see. Trusting
+            # it would resume from a position the authoritative store no
+            # longer recognises — #140's duplicate-resummarization bug,
+            # reintroduced through this mirror. So the sidecar is
+            # trusted only when this run's own session id is still a
+            # key in last-save.json's "sessions" map, which is the
+            # comparison the two log lines here already claim to make.
+            #
+            # Read via bash's fork-free `$(< file)` (a single
+            # redirection as the whole command substitution — bash
+            # reads the file directly, no subprocess, and it traces as
+            # no separate xtrace line at all) rather than a `read` loop
+            # or a spawn, so the hot path this feature exists to keep
+            # cheap stays cheap. The membership test is a literal
+            # substring match on `"<id>":`, not a JSON parse — safe
+            # because SESSION_ID was already filtered to
+            # [A-Za-z0-9._-]+ above (no quote or backslash it could
+            # inject) and the trailing `":` anchors the match to a full
+            # key, so "sess-1" cannot false-match a stored "sess-10".
+            #
+            # Scoped to the "sessions" object's own text, not the whole
+            # file: cmd_save_position's payload always carries the
+            # fixed top-level keys "session" and "line" alongside
+            # "sessions" (pipeline/shell.py), so a session id that
+            # happened to equal one of THOSE field names would
+            # false-match a whole-file search even with an empty
+            # "sessions" map. Values in "sessions" are always bare
+            # integers (never braces), so the text between the key and
+            # the object's own closing brace is exactly its content.
+            # #426: "absent", "present but unreadable", and "genuinely
+            # evicted" all used to fold into ONE message that claims a
+            # comparison happened -- `[ -f ]` passes on an unreadable
+            # file, and `$(< file)` cannot tell "read empty content" from
+            # "the read itself failed", so both silently looked
+            # identical to a file whose "sessions" map genuinely lacks
+            # this session. Behaviour is unchanged (fall back to
+            # read-position in all three cases); only the receipt is
+            # split, on whether the file was actually read.
+            _LAST_SAVE_STATE="absent"
+            _LAST_SAVE_CONTENT=""
+            if [ -f "$LAST_SAVE_FILE" ]; then
+                # The stderr redirect has to sit OUTSIDE the command
+                # substitution (a `{ ...; } 2>/dev/null` group), not
+                # inside it as `$(< file 2>/dev/null)` -- bash's
+                # no-fork fast path for `$(< file)` only engages when
+                # the substitution is EXACTLY that redirection with no
+                # other token in it; adding one turns it into an empty
+                # command with a redirection, which reads nothing and
+                # always "succeeds" silently. That would have made
+                # unreadable indistinguishable from empty again -- the
+                # exact bug this fix exists to close, reintroduced one
+                # line lower.
+                if { _LAST_SAVE_CONTENT=$(< "$LAST_SAVE_FILE"); } 2>/dev/null; then
+                    _LAST_SAVE_STATE="read"
                 else
-                    _SESSIONS_SCOPE=""
+                    _LAST_SAVE_STATE="unreadable"
                 fi
-                case "$_SESSIONS_SCOPE" in
-                    *"$_pt_dq"$SESSION_ID"$_pt_dq":*)
-                        LAST_LINE=$((10#$_SIDECAR_LINE))
-                        SIDECAR_TRUSTED=1
-                        ;;
-                    *)
-                        case "$_LAST_SAVE_STATE" in
-                            absent)
-                                log "hook" "WARNING: sidecar $SIDECAR exists but last-save.json is absent -- nothing to compare against, falling back to read-position"
-                                ;;
-                            unreadable)
-                                log "hook" "WARNING: sidecar $SIDECAR exists but last-save.json could not be read -- falling back to read-position"
-                                ;;
-                            *)
-                                log "hook" "WARNING: sidecar $SIDECAR's session $SESSION_ID is absent from last-save.json -- disagrees with last-save.json, falling back to read-position"
-                                ;;
-                        esac
-                        ;;
-                esac
             fi
-            ;;
-    esac
+            # An expansion test, not a quoted literal in a case pattern
+            # (#898 round 9, a directory-scanner hold shape).
+            _SESSIONS_SCOPE=${_LAST_SAVE_CONTENT#*"$_pt_dq"sessions"$_pt_dq"}
+            if [ "$_SESSIONS_SCOPE" != "$_LAST_SAVE_CONTENT" ]; then
+                _SESSIONS_SCOPE="${_SESSIONS_SCOPE%%\}*}"
+            else
+                _SESSIONS_SCOPE=""
+            fi
+            if [ "${_SESSIONS_SCOPE/"$_pt_dq"$SESSION_ID"$_pt_dq":/}" != "$_SESSIONS_SCOPE" ]; then
+                LAST_LINE=$((10#$_SIDECAR_LINE))
+                SIDECAR_TRUSTED=1
+            elif [ "$_LAST_SAVE_STATE" = absent ]; then
+                log "hook" "WARNING: sidecar $SIDECAR exists but last-save.json is absent -- nothing to compare against, falling back to read-position"
+            elif [ "$_LAST_SAVE_STATE" = unreadable ]; then
+                log "hook" "WARNING: sidecar $SIDECAR exists but last-save.json could not be read -- falling back to read-position"
+            else
+                log "hook" "WARNING: sidecar $SIDECAR's session $SESSION_ID is absent from last-save.json -- disagrees with last-save.json, falling back to read-position"
+            fi
+        fi
+    fi
 fi
 
 if [ -z "$SIDECAR_TRUSTED" ] && [ -f "$LAST_SAVE_FILE" ]; then

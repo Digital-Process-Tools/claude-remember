@@ -66,9 +66,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # from write-handoff.sh's own #776 fix so both --json and the human report
 # below can disambiguate a subdirectory project the same way (#827).
 _DOCTOR_SESSION_ID="${CLAUDE_CODE_SESSION_ID:-}"
-case "$_DOCTOR_SESSION_ID" in
-    ''|[.]|[.][.]|*[!A-Za-z0-9._-]*) _DOCTOR_SESSION_ID="" ;;
-esac
+if [ -z "${_DOCTOR_SESSION_ID#.}" ] || [ -z "${_DOCTOR_SESSION_ID#..}" ] \
+    || [ "${_DOCTOR_SESSION_ID/[!A-Za-z0-9._-]/}" != "$_DOCTOR_SESSION_ID" ]; then
+    _DOCTOR_SESSION_ID=""
+fi
 
 # _doctor_trial_remember_dir <candidate-project-dir>
 # Prints the REMEMBER_DIR that candidate would resolve to, by running the
@@ -458,23 +459,19 @@ fi
 if source "$SCRIPT_DIR/lib-case-divergence.sh" 2>/dev/null && \
    command -v remember_case_divergence >/dev/null 2>&1; then
     remember_case_divergence
-    case "$REMEMBER_CASE_STATUS" in
-        diverged)
-            echo "WARN Store spelling: this store is known by more than one spelling, differing only in case (resolved: $REMEMBER_CASE_RESOLVED)"
-            echo "     $REMEMBER_CASE_MESSAGE"
-            ;;
-        ok)
-            echo "OK   Store spelling: $REMEMBER_CASE_RESOLVED, on disk and in the store's git repository alike"
-            ;;
-        unavailable)
-            # Both halves named, because the commonest case by far is a disk
-            # that answered `ok` beside a git that has nothing to say — an
-            # external store with no backup repository. Printing only "could
-            # not check" would hide the half that did answer, and printing
-            # "OK" would claim the half that did not.
-            echo "WARN Store spelling: could not check in full -- on disk: $REMEMBER_CASE_DISK_STATE${REMEMBER_CASE_DISK_REASON:+ ($REMEMBER_CASE_DISK_REASON)}; in git: $REMEMBER_CASE_GIT_STATE${REMEMBER_CASE_GIT_REASON:+ ($REMEMBER_CASE_GIT_REASON)}. This is not a report that they agree."
-            ;;
-    esac
+    if [ "$REMEMBER_CASE_STATUS" = diverged ]; then
+        echo "WARN Store spelling: this store is known by more than one spelling, differing only in case (resolved: $REMEMBER_CASE_RESOLVED)"
+        echo "     $REMEMBER_CASE_MESSAGE"
+    elif [ "$REMEMBER_CASE_STATUS" = ok ]; then
+        echo "OK   Store spelling: $REMEMBER_CASE_RESOLVED, on disk and in the store's git repository alike"
+    elif [ "$REMEMBER_CASE_STATUS" = unavailable ]; then
+        # Both halves named, because the commonest case by far is a disk
+        # that answered `ok` beside a git that has nothing to say — an
+        # external store with no backup repository. Printing only "could
+        # not check" would hide the half that did answer, and printing
+        # "OK" would claim the half that did not.
+        echo "WARN Store spelling: could not check in full -- on disk: $REMEMBER_CASE_DISK_STATE${REMEMBER_CASE_DISK_REASON:+ ($REMEMBER_CASE_DISK_REASON)}; in git: $REMEMBER_CASE_GIT_STATE${REMEMBER_CASE_GIT_REASON:+ ($REMEMBER_CASE_GIT_REASON)}. This is not a report that they agree."
+    fi
 fi
 echo ""
 
@@ -634,16 +631,14 @@ elif [ -n "$_SESSION_DIR" ] && [ -d "$_SESSION_DIR" ]; then
     for _tf in "$_SESSION_DIR"/*.jsonl; do
         [ -f "$_tf" ] || continue
         _tf_age=$(_file_age_seconds "$_tf")
-        case "$_tf_age" in
-            ''|*[!0-9]*)
-                # Found, but its age could not be read — the same third
-                # state this file already names for the PostToolUse marker
-                # above, not folded into either "counted" or "silently
-                # dropped" (#392, defect 2).
-                _SE_UNREADABLE_COUNT=$((_SE_UNREADABLE_COUNT + 1))
-                continue
-                ;;
-        esac
+        if [ -z "$_tf_age" ] || [ "${_tf_age/[!0-9]/}" != "$_tf_age" ]; then
+            # Found, but its age could not be read — the same third
+            # state this file already names for the PostToolUse marker
+            # above, not folded into either "counted" or "silently
+            # dropped" (#392, defect 2).
+            _SE_UNREADABLE_COUNT=$((_SE_UNREADABLE_COUNT + 1))
+            continue
+        fi
         if [ -z "$_STORE_INSTALL_AGE" ] || [ "$_tf_age" -gt "$_STORE_INSTALL_AGE" ]; then
             # Quiet since before remember's own store existed for this
             # project (or no baseline could be read at all) — this
@@ -802,13 +797,12 @@ _size_of() {
     _SIZE_BYTES=0
     [ -f "$1" ] || return 0
     _size_raw=$(wc -c < "$1" 2>/dev/null | tr -d ' ')
-    case "$_size_raw" in
-        (''|*[!0-9]*)
-            _STORE_UNREADABLE="${_STORE_UNREADABLE}${1}
+    if [ -z "$_size_raw" ] || [ "${_size_raw/[!0-9]/}" != "$_size_raw" ]; then
+        _STORE_UNREADABLE="${_STORE_UNREADABLE}${1}
 "
-            ;;
-        (*) _SIZE_BYTES=$((10#$_size_raw)) ;;
-    esac
+    else
+        _SIZE_BYTES=$((10#$_size_raw))
+    fi
 }
 
 if [ ! -d "$REMEMBER_DIR" ]; then
@@ -855,10 +849,13 @@ else
     _STAGING_BYTES=0
     for _sf in "$_remember_staging_bytes_glob_dir"/today-*.md; do
         [ -f "$_sf" ] || continue
-        case "${_sf##*/}" in
-            (*.done.md) continue ;;
-            (*"$_DOCTOR_TODAY"*) continue ;;
-        esac
+        _sf_name="${_sf##*/}"
+        if [ "${_sf_name%.done.md}" != "$_sf_name" ]; then
+            continue
+        fi
+        if [ -z "$_DOCTOR_TODAY" ] || [ "${_sf_name/"$_DOCTOR_TODAY"/}" != "$_sf_name" ]; then
+            continue
+        fi
         _size_of "$_sf"
         _STAGING_BYTES=$((_STAGING_BYTES + _SIZE_BYTES))
     done

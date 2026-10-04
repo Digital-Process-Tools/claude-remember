@@ -261,7 +261,7 @@ _stdin_cwd() {
     rest=${raw#*"$dq"cwd"$dq"}
     [ "$rest" != "$raw" ] || return 1
     prefix=${rest%%"$dq"*}
-    case "$prefix" in *[!:[:space:]]*) return 1 ;; esac
+    if [ "${prefix/[!:[:space:]]/}" != "$prefix" ]; then return 1; fi
     value=${rest#*"$dq"}
     value=${value%%"$dq"*}
     # A JSON encoder writes each backslash as `\\` -- a Windows `cwd` from
@@ -289,7 +289,7 @@ _stdin_cwd_into() {
     rest=${raw#*"$dq"cwd"$dq"}
     [ "$rest" != "$raw" ] || return 1
     prefix=${rest%%"$dq"*}
-    case "$prefix" in *[!:[:space:]]*) return 1 ;; esac
+    if [ "${prefix/[!:[:space:]]/}" != "$prefix" ]; then return 1; fi
     value=${rest#*"$dq"}
     value=${value%%"$dq"*}
     value=${value//\\\\/\\}  # decode `\\`, as in _stdin_cwd (#829)
@@ -303,9 +303,10 @@ _stdin_cwd_into() {
 # directory is decided in resolve-paths.sh, which falls back to the
 # existing derivation when it does not.
 _stdin_cwd_into REMEMBER_HOOK_CWD "$_HOOK_STDIN" || REMEMBER_HOOK_CWD=""
-case "$REMEMBER_HOOK_CWD" in
-    *$'\n'*|*$'\r'*) REMEMBER_HOOK_CWD="" ;;
-esac
+if [ "${REMEMBER_HOOK_CWD/$'\n'/}" != "$REMEMBER_HOOK_CWD" ] \
+    || [ "${REMEMBER_HOOK_CWD/$'\r'/}" != "$REMEMBER_HOOK_CWD" ]; then
+    REMEMBER_HOOK_CWD=""
+fi
 export REMEMBER_HOOK_CWD
 
 # --- Resolve paths ---
@@ -473,14 +474,14 @@ JQ_BIN="${JQ:-jq}"
 # the same literal-dispatch idea, local to this file, over the only two
 # values JQ_BIN can hold.
 _remember_run_jq_bin() {
-    case "$JQ_BIN" in
-        jq) jq "$@" ;;
-        _jq_fallback) _jq_fallback "$@" ;;
-        *)
-            echo "FATAL: _remember_run_jq_bin: unrecognized JQ_BIN value '$JQ_BIN'" >&2
-            return 127
-            ;;
-    esac
+    if [ "$JQ_BIN" = jq ]; then
+        jq "$@"
+    elif [ "$JQ_BIN" = _jq_fallback ]; then
+        _jq_fallback "$@"
+    else
+        echo "FATAL: _remember_run_jq_bin: unrecognized JQ_BIN value '$JQ_BIN'" >&2
+        return 127
+    fi
 }
 if [ "$_REMEMBER_HOST_JSON_STDOUT" = "1" ]; then
     # --- Non-Claude-Code host (#451) ---

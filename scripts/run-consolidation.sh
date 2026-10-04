@@ -135,12 +135,10 @@ CONSOLIDATE_MAX_BYTES=$(config ".thresholds.consolidate_max_bytes" 600000)
 # daily log told an operator their override was never read. Unlike the
 # timeout guard below, 0 is a valid, meaningful value here (#360: disables the
 # cap), so this only rejects empty/non-digit strings, never 0 itself.
-case "$CONSOLIDATE_MAX_BYTES" in
-    ''|*[!0-9]*)
-        log "consolidation" "WARNING: thresholds.consolidate_max_bytes is not a valid non-negative integer (got '$CONSOLIDATE_MAX_BYTES') -- using default 600000"
-        CONSOLIDATE_MAX_BYTES=600000
-        ;;
-esac
+if [ -z "$CONSOLIDATE_MAX_BYTES" ] || [ "${CONSOLIDATE_MAX_BYTES/[!0-9]/}" != "$CONSOLIDATE_MAX_BYTES" ]; then
+    log "consolidation" "WARNING: thresholds.consolidate_max_bytes is not a valid non-negative integer (got '$CONSOLIDATE_MAX_BYTES') -- using default 600000"
+    CONSOLIDATE_MAX_BYTES=600000
+fi
 # #806: same fix shape as #788/#792's NDC ndc_timeout_seconds -- output length
 # scales with input length, so a large enough staging batch can time out on
 # every run, be left uncompressed, and grow further every round with no
@@ -149,30 +147,27 @@ CONSOLIDATE_TIMEOUT_SECONDS=$(config ".thresholds.consolidate_timeout_seconds" 1
 # #816: this used to substitute the default silently, so a typo'd config
 # value (e.g. "18O") looked identical to a deliberate 180 -- nothing in the
 # daily log told an operator their override was never read.
-case "$CONSOLIDATE_TIMEOUT_SECONDS" in
-    ''|*[!0-9]*)
-        log "consolidation" "WARNING: thresholds.consolidate_timeout_seconds is not a valid non-negative integer (got '$CONSOLIDATE_TIMEOUT_SECONDS') -- using default 180"
+if [ -z "$CONSOLIDATE_TIMEOUT_SECONDS" ] || [ "${CONSOLIDATE_TIMEOUT_SECONDS/[!0-9]/}" != "$CONSOLIDATE_TIMEOUT_SECONDS" ]; then
+    log "consolidation" "WARNING: thresholds.consolidate_timeout_seconds is not a valid non-negative integer (got '$CONSOLIDATE_TIMEOUT_SECONDS') -- using default 180"
+    CONSOLIDATE_TIMEOUT_SECONDS=180
+else
+    # #823: digits-only at this point, but the guard above never bounded
+    # the VALUE -- 0 times out this call immediately on every run (the
+    # one-way staging ratchet #806 exists to prevent), and a value with
+    # 10+ digits (>= 1e9s) reaches the same overflow this repo already
+    # reproduced for pipeline.shell's subprocess.run(timeout=...):
+    # OverflowError inside PyTime_t at 9e9 and 1e10, logged as a generic
+    # pipeline failure rather than this key's own malformed-value
+    # WARNING. Length-gated (no arithmetic on the raw digits) so this
+    # check itself cannot overflow on an arbitrarily long digit string.
+    if [ "${#CONSOLIDATE_TIMEOUT_SECONDS}" -gt 9 ]; then
+        log "consolidation" "WARNING: thresholds.consolidate_timeout_seconds ($CONSOLIDATE_TIMEOUT_SECONDS) is too large and would crash the consolidation call with an OverflowError -- using default 180"
         CONSOLIDATE_TIMEOUT_SECONDS=180
-        ;;
-    *)
-        # #823: digits-only at this point, but the guard above never bounded
-        # the VALUE -- 0 times out this call immediately on every run (the
-        # one-way staging ratchet #806 exists to prevent), and a value with
-        # 10+ digits (>= 1e9s) reaches the same overflow this repo already
-        # reproduced for pipeline.shell's subprocess.run(timeout=...):
-        # OverflowError inside PyTime_t at 9e9 and 1e10, logged as a generic
-        # pipeline failure rather than this key's own malformed-value
-        # WARNING. Length-gated (no arithmetic on the raw digits) so this
-        # check itself cannot overflow on an arbitrarily long digit string.
-        if [ "${#CONSOLIDATE_TIMEOUT_SECONDS}" -gt 9 ]; then
-            log "consolidation" "WARNING: thresholds.consolidate_timeout_seconds ($CONSOLIDATE_TIMEOUT_SECONDS) is too large and would crash the consolidation call with an OverflowError -- using default 180"
-            CONSOLIDATE_TIMEOUT_SECONDS=180
-        elif [ "$CONSOLIDATE_TIMEOUT_SECONDS" -eq 0 ]; then
-            log "consolidation" "WARNING: thresholds.consolidate_timeout_seconds is 0, which times out the consolidation call immediately on every run -- using default 180"
-            CONSOLIDATE_TIMEOUT_SECONDS=180
-        fi
-        ;;
-esac
+    elif [ "$CONSOLIDATE_TIMEOUT_SECONDS" -eq 0 ]; then
+        log "consolidation" "WARNING: thresholds.consolidate_timeout_seconds is 0, which times out the consolidation call immediately on every run -- using default 180"
+        CONSOLIDATE_TIMEOUT_SECONDS=180
+    fi
+fi
 log "consolidation" "start"
 RESULT=$(cd "$PIPELINE_DIR" && _remember_run_python -m pipeline.shell consolidate "$STAGING_DIR" "$RECENT_FILE" "$ARCHIVE_FILE" "$CONSOLIDATE_MAX_BYTES" "$SNAPSHOT_DIR" "$CONSOLIDATE_TIMEOUT_SECONDS" 2>&1) || {
     # 3 is the spawn guard declining, not a broken pipeline (#204). Staging is

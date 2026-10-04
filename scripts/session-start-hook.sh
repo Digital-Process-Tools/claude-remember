@@ -137,10 +137,10 @@ _stdin_json_string() {
     # backslash-escaped: the plugin directory's scanner mis-tracks an
     # escaped quote (#898 round 8). Same patterns, same quoting of $field.
     printf -v dq '\042'
-    case "$raw" in *"$dq$field$dq"*) ;; *) return 1 ;; esac
+    [ "${raw/"$dq$field$dq"/}" != "$raw" ] || return 1
     rest=${raw#*"$dq"$field"$dq"}
     prefix=${rest%%"$dq"*}
-    case "$prefix" in *[!:[:space:]]*) return 1 ;; esac
+    if [ "${prefix/[!:[:space:]]/}" != "$prefix" ]; then return 1; fi
     value=${rest#*"$dq"}
     value=${value%%"$dq"*}
     # A JSON encoder writes each backslash as `\\` -- a Windows `cwd` from
@@ -168,10 +168,10 @@ _stdin_json_string_into() {
     local _sjsi_var="$1" _sjsi_field="$2" _sjsi_raw="$3" _sjsi_rest _sjsi_prefix _sjsi_value _sjsi_dq
     printf -v "$_sjsi_var" '%s' ""
     printf -v _sjsi_dq '\042'  # the double quote, as in _stdin_json_string
-    case "$_sjsi_raw" in *"$_sjsi_dq$_sjsi_field$_sjsi_dq"*) ;; *) return 1 ;; esac
+    [ "${_sjsi_raw/"$_sjsi_dq$_sjsi_field$_sjsi_dq"/}" != "$_sjsi_raw" ] || return 1
     _sjsi_rest=${_sjsi_raw#*"$_sjsi_dq"$_sjsi_field"$_sjsi_dq"}
     _sjsi_prefix=${_sjsi_rest%%"$_sjsi_dq"*}
-    case "$_sjsi_prefix" in *[!:[:space:]]*) return 1 ;; esac
+    if [ "${_sjsi_prefix/[!:[:space:]]/}" != "$_sjsi_prefix" ]; then return 1; fi
     _sjsi_value=${_sjsi_rest#*"$_sjsi_dq"}
     _sjsi_value=${_sjsi_value%%"$_sjsi_dq"*}
     _sjsi_value=${_sjsi_value//\\\\/\\}  # decode `\\`, as above (#829)
@@ -203,9 +203,10 @@ _stdin_json_string_into() {
 # resolve-paths.sh, which falls back to the existing derivation when it does
 # not.
 _stdin_json_string_into REMEMBER_HOOK_CWD cwd "$HOOK_STDIN" 2>/dev/null
-case "$REMEMBER_HOOK_CWD" in
-    *$'\n'*|*$'\r'*) REMEMBER_HOOK_CWD="" ;;
-esac
+if [ "${REMEMBER_HOOK_CWD/$'\n'/}" != "$REMEMBER_HOOK_CWD" ] \
+    || [ "${REMEMBER_HOOK_CWD/$'\r'/}" != "$REMEMBER_HOOK_CWD" ]; then
+    REMEMBER_HOOK_CWD=""
+fi
 export REMEMBER_HOOK_CWD
 
 # resolve-paths.sh exits its caller on failure by default (a caller that keeps
@@ -299,9 +300,10 @@ CURRENT_SESSION_ID=$(_stdin_session_id "$HOOK_STDIN" 2>/dev/null) || CURRENT_SES
 # names taken off the transcript directory, and `..` would match nothing
 # useful while `/` would match across directories, so it faces the same guard
 # the basename-derived ids face — at the point of entry, not the point of use.
-case "$CURRENT_SESSION_ID" in
-    ''|[.]|[.][.]|*[!A-Za-z0-9._-]*) CURRENT_SESSION_ID="" ;;
-esac
+if [ -z "${CURRENT_SESSION_ID#.}" ] || [ -z "${CURRENT_SESSION_ID#..}" ] \
+    || [ "${CURRENT_SESSION_ID/[!A-Za-z0-9._-]/}" != "$CURRENT_SESSION_ID" ]; then
+    CURRENT_SESSION_ID=""
+fi
 
 # ── The transcript path the host handed us (#407) ─────────────────────────
 # Read from the same payload, exported for pipeline/host.transcript_path() to
@@ -317,9 +319,10 @@ esac
 # Whether the value actually names an openable file is decided on the Python
 # side, which falls back to the existing derivation when it does not.
 _stdin_json_string_into REMEMBER_TRANSCRIPT_PATH transcript_path "$HOOK_STDIN" 2>/dev/null
-case "$REMEMBER_TRANSCRIPT_PATH" in
-    *$'\n'*|*$'\r'*) REMEMBER_TRANSCRIPT_PATH="" ;;
-esac
+if [ "${REMEMBER_TRANSCRIPT_PATH/$'\n'/}" != "$REMEMBER_TRANSCRIPT_PATH" ] \
+    || [ "${REMEMBER_TRANSCRIPT_PATH/$'\r'/}" != "$REMEMBER_TRANSCRIPT_PATH" ]; then
+    REMEMBER_TRANSCRIPT_PATH=""
+fi
 export REMEMBER_TRANSCRIPT_PATH
 
 # ── Which KIND of SessionStart is this? (#339) ────────────────────────────
@@ -337,10 +340,11 @@ export REMEMBER_TRANSCRIPT_PATH
 # payload shape differs from the one this heuristic was written against —
 # the failure this plugin exists to prevent, not to cause.
 _stdin_json_string_into SESSION_START_SOURCE source "$HOOK_STDIN" 2>/dev/null
-case "$SESSION_START_SOURCE" in
-    startup|resume|clear|compact|fork) ;;
-    *) SESSION_START_SOURCE="" ;;
-esac
+if [ "$SESSION_START_SOURCE" != startup ] && [ "$SESSION_START_SOURCE" != resume ] \
+    && [ "$SESSION_START_SOURCE" != clear ] \
+    && [ "$SESSION_START_SOURCE" != compact ] && [ "$SESSION_START_SOURCE" != fork ]; then
+    SESSION_START_SOURCE=""
+fi
 
 # ── Publish the consumed payload to hooks.d/ ──────────────────────────────
 # This hook now reads stdin, so a listener that wanted the payload would find
@@ -415,9 +419,9 @@ if [ "${REMEMBER_DEFER:-1}" != "0" ]; then
         _remember_bss_scripts=("$PLUGIN_ROOT/hooks.d/before_session_start/"*)
         [ "$_remember_bss_was_nullglob" = 1 ] || shopt -u nullglob
         if [ "${#_remember_bss_scripts[@]}" -eq 1 ]; then
-            case "${_remember_bss_scripts[0]}" in
-                (*/50-git-restore.sh) _remember_defer_dispatch=1 ;;
-            esac
+            if [ "${_remember_bss_scripts[0]%/50-git-restore.sh}" != "${_remember_bss_scripts[0]}" ]; then
+                _remember_defer_dispatch=1
+            fi
         fi
         unset _remember_bss_scripts _remember_bss_was_nullglob
     fi
@@ -608,9 +612,10 @@ _remember_write_slug_record() {
     if [ -z "$PROJECT_PATH_SLUG" ]; then
         _reason="empty-slug"
     else
-        case "${PROJECT}${SESSIONS_DIR}${REMEMBER_DIR}" in
-            *$'\n'*) _reason="unrepresentable-path" ;;
-        esac
+        local _paths_joined="${PROJECT}${SESSIONS_DIR}${REMEMBER_DIR}"
+        if [ "${_paths_joined/$'\n'/}" != "$_paths_joined" ]; then
+            _reason="unrepresentable-path"
+        fi
     fi
 
     # Written whole to a private temp name and moved into place, because two
@@ -700,9 +705,10 @@ _remember_write_slug_index() {
     [ "$REMEMBER_STORE_ROOT" != "$REMEMBER_DIR" ] || return 0
     [ -n "$PROJECT_PATH_SLUG" ] || return 0
 
-    case "${PROJECT}${REMEMBER_DIR}" in
-        *$'\n'*|*$'\t'*) return 0 ;;
-    esac
+    local _paths_joined="${PROJECT}${REMEMBER_DIR}"
+    if [ "${_paths_joined/$'\n'/}" != "$_paths_joined" ] || [ "${_paths_joined/$'\t'/}" != "$_paths_joined" ]; then
+        return 0
+    fi
 
     local _dir="$REMEMBER_STORE_ROOT/tmp"
     [ -d "$_dir" ] || mkdir -p "$_dir" 2>/dev/null || return 0
@@ -839,29 +845,26 @@ _remember_write_case_divergence() {
         mv -f "$_tmp" "$_dir/case-divergence" 2>/dev/null || rm -f "$_tmp" 2>/dev/null
     fi
 
-    case "$REMEMBER_CASE_STATUS" in
-        diverged)
-            log "case-divergence" "$REMEMBER_CASE_MESSAGE"
-            # An unchanged record is an unchanged finding, and the human has
-            # already been told. Saying it again every session start would
-            # spend the one channel they actually read on a condition that is
-            # harmless today and never clears itself.
-            [ "$_old" = "$_body" ] && return 0
-            printf '%s\n' "$REMEMBER_CASE_MESSAGE" \
-                > "$_dir/case-divergence-notice" 2>/dev/null || true
-            ;;
-        unavailable)
-            # Logged on change only. The commonest reason by far is
-            # `not-a-repository` — an external store nobody has pointed a git
-            # backup at — and that is a standing condition, not an event: one
-            # identical line per session for the life of the install is the
-            # wallpaper #252's five weeks of identical daily lines proved
-            # nobody reads. It is still never rendered as agreement anywhere
-            # that reports it; `/remember:doctor` says it every time.
-            [ "$_old" = "$_body" ] && return 0
-            log "case-divergence" "could not check whether this store is known by a second spelling (disk=$REMEMBER_CASE_DISK_STATE${REMEMBER_CASE_DISK_REASON:+/$REMEMBER_CASE_DISK_REASON} git=$REMEMBER_CASE_GIT_STATE${REMEMBER_CASE_GIT_REASON:+/$REMEMBER_CASE_GIT_REASON}) -- this is not a report that they agree"
-            ;;
-    esac
+    if [ "$REMEMBER_CASE_STATUS" = diverged ]; then
+        log "case-divergence" "$REMEMBER_CASE_MESSAGE"
+        # An unchanged record is an unchanged finding, and the human has
+        # already been told. Saying it again every session start would
+        # spend the one channel they actually read on a condition that is
+        # harmless today and never clears itself.
+        [ "$_old" = "$_body" ] && return 0
+        printf '%s\n' "$REMEMBER_CASE_MESSAGE" \
+            > "$_dir/case-divergence-notice" 2>/dev/null || true
+    elif [ "$REMEMBER_CASE_STATUS" = unavailable ]; then
+        # Logged on change only. The commonest reason by far is
+        # `not-a-repository` — an external store nobody has pointed a git
+        # backup at — and that is a standing condition, not an event: one
+        # identical line per session for the life of the install is the
+        # wallpaper #252's five weeks of identical daily lines proved
+        # nobody reads. It is still never rendered as agreement anywhere
+        # that reports it; `/remember:doctor` says it every time.
+        [ "$_old" = "$_body" ] && return 0
+        log "case-divergence" "could not check whether this store is known by a second spelling (disk=$REMEMBER_CASE_DISK_STATE${REMEMBER_CASE_DISK_REASON:+/$REMEMBER_CASE_DISK_REASON} git=$REMEMBER_CASE_GIT_STATE${REMEMBER_CASE_GIT_REASON:+/$REMEMBER_CASE_GIT_REASON}) -- this is not a report that they agree"
+    fi
     return 0
 }
 # Called in the deferred block below (#660), not here: this writes a record
@@ -955,9 +958,9 @@ _transcript_is_pluginless_sdk() {
             # _ENTRYPOINT_SNIFF_CAP for the overwhelmingly common case
             # (ordinary transcripts are mostly dialogue).
             prefix=${rest%%"$dq"*}
-            case "$prefix" in
-                *[!:[:space:]]*) is_dialogue=1 ;;
-            esac
+            if [ "${prefix/[!:[:space:]]/}" != "$prefix" ]; then
+                is_dialogue=1
+            fi
         fi
         if [ "$is_dialogue" -eq 0 ]; then
             if [ "${line#*"$dq"entrypoint"$dq"}" != "$line" ]; then
@@ -1327,10 +1330,13 @@ capture_was_seen() {
     #    session", written pre-throttle, so it means WIRED, not saved.
     #    Same id check the writer applies: this is a basename off the
     #    transcript dir, and `..` would make `-e` true for every id.
-    case "$1" in
-        [.]|[.][.]|*[!A-Za-z0-9._-]*) : ;;
-        *) [ -e "$CAPTURE_SEEN_DIR/$1" ] && return 0 ;;
-    esac
+    if [ -n "$1" ] && { [ -z "${1#.}" ] || [ -z "${1#..}" ]; }; then
+        :
+    elif [ "${1/[!A-Za-z0-9._-]/}" != "$1" ]; then
+        :
+    else
+        [ -e "$CAPTURE_SEEN_DIR/$1" ] && return 0
+    fi
     # 2. The legacy single slot. Kept as evidence rather than dropped so the
     #    first run after an upgrade — old file present, new store empty — is
     #    not itself a false positive. It can still speak for exactly one
@@ -1630,10 +1636,11 @@ if [ "$_promos_enabled" = "true" ] \
         if [ -f "$marker" ]; then
             local _pk _pv
             while IFS='=' read -r _pk _pv; do
-                case "$_pk" in
-                    ts) last_ts="$_pv" ;;
-                    id) last_id="$_pv" ;;
-                esac
+                if [ "$_pk" = ts ]; then
+                    last_ts="$_pv"
+                elif [ "$_pk" = id ]; then
+                    last_id="$_pv"
+                fi
             done < "$marker"
         fi
         if [ -z "$last_ts" ] || [ "${last_ts#*[!0-9]}" != "$last_ts" ]; then last_ts=0; fi
@@ -1892,8 +1899,9 @@ fi
 # when PROMO_MSG is non-empty it must become `hookSpecificOutput.
 # additionalContext` inside one JSON object instead.
 #
-# fd redirection, not `CTX=$( … )`: this range contains `case` statements
-# (the handoff-delivery-record reader below), and bash's own parser reads a
+# fd redirection, not `CTX=$( … )`: this range used to contain `case`
+# statements (the handoff-delivery-record reader below; if/elif since #898
+# round 19), and bash's own parser reads a
 # `case` pattern's closing `)` as the end of a command substitution -- the
 # exact trap the UserPromptSubmit hook's CTX block already documents avoiding for
 # the same reason, on a much smaller block. A private, pre-verified-writable
@@ -1930,9 +1938,9 @@ _REMEMBER_CTX_OK=""
 # for an unwritable tmp/, so the only visible cost is the promo banner,
 # never the memory context itself.
 _REMEMBER_CTX_TRACE_ACTIVE=""
-case "$-" in
-    (*x*) _REMEMBER_CTX_TRACE_ACTIVE="1" ;;
-esac
+if [ "${-/x/}" != "$-" ]; then
+    _REMEMBER_CTX_TRACE_ACTIVE="1"
+fi
 [ "${REMEMBER_TRACE:-}" = "1" ] && _REMEMBER_CTX_TRACE_ACTIVE="1"
 if [ -z "$_REMEMBER_CTX_TRACE_ACTIVE" ] && : > "$_REMEMBER_CTX_FILE" 2>/dev/null; then
     exec 3>&1
@@ -2086,11 +2094,13 @@ elif [ -f "$REMEMBER_HANDOFF" ] && [ -s "$REMEMBER_HANDOFF" ]; then
     DELIVERIES=0
     if [ -f "$REMEMBER_HANDOFF_STATE" ]; then
         while IFS='=' read -r _hfield _hval; do
-            case "$_hfield" in
-                (fingerprint) PREV_FP="$_hval" ;;
-                (first_delivered) FIRST_DELIVERED="$_hval" ;;
-                (deliveries) DELIVERIES="$_hval" ;;
-            esac
+            if [ "$_hfield" = fingerprint ]; then
+                PREV_FP="$_hval"
+            elif [ "$_hfield" = first_delivered ]; then
+                FIRST_DELIVERED="$_hval"
+            elif [ "$_hfield" = deliveries ]; then
+                DELIVERIES="$_hval"
+            fi
         done < "$REMEMBER_HANDOFF_STATE"
     fi
     # A hand-edited or half-written record must not turn into an arithmetic
@@ -2123,12 +2133,10 @@ elif [ -f "$REMEMBER_HANDOFF" ] && [ -s "$REMEMBER_HANDOFF" ]; then
     _remember_handoff_fence_nonce="${RANDOM:-0}${RANDOM:-0}"
     HANDOFF_MAX_REDELIVERIES=""
     config_into HANDOFF_MAX_REDELIVERIES ".thresholds.handoff_max_redeliveries" 3
-    case "$HANDOFF_MAX_REDELIVERIES" in
-        (''|*[!0-9]*)
-            log "hook" "WARNING: thresholds.handoff_max_redeliveries is not a valid non-negative integer (got $HANDOFF_MAX_REDELIVERIES) -- using default 3"
-            HANDOFF_MAX_REDELIVERIES=3
-            ;;
-    esac
+    if [ -z "$HANDOFF_MAX_REDELIVERIES" ] || [ "${HANDOFF_MAX_REDELIVERIES/[!0-9]/}" != "$HANDOFF_MAX_REDELIVERIES" ]; then
+        log "hook" "WARNING: thresholds.handoff_max_redeliveries is not a valid non-negative integer (got $HANDOFF_MAX_REDELIVERIES) -- using default 3"
+        HANDOFF_MAX_REDELIVERIES=3
+    fi
     _remember_handoff_prev_deliveries=0
     if [ -n "$PREV_FP" ] && [ "$HANDOFF_FP" = "$PREV_FP" ]; then
         # The counter's own wording ("already delivered N times") is a claim
@@ -2291,17 +2299,15 @@ if [ -d "$SESSIONS_DIR" ] && [ -d "$REMEMBER_DIR/tmp" ]; then
             # Empty (stat failed outright) and non-numeric (stat exited 0 but
             # printed something that is not a timestamp) are both
             # could-not-tell, same safe direction as an unreadable
-            # $SESSIONS_DIR above -- caught in the same `case` so a
+            # $SESSIONS_DIR above -- caught in the same test so a
             # non-empty garbage read cannot be coerced to 0 and then treated
             # by the -gt 0 gate below as a confirmed, comparable age (found
             # during #402's own review: the previous split of this check
             # only caught the fully-empty shape, and the -gt 0 gate does not
             # tell "confirmed zero" apart from "coerced from garbage").
-            case "$_remember_stale_mtime" in
-                (''|*[!0-9]*)
-                    continue
-                    ;;
-            esac
+            if [ -z "$_remember_stale_mtime" ] || [ "${_remember_stale_mtime/[!0-9]/}" != "$_remember_stale_mtime" ]; then
+                continue
+            fi
             # _remember_date +%s -- same call site convention as
             # the PostToolUse hook's own stdin-size handling. lib-clock.sh routes %s to `date`
             # unconditionally (never the printf builtin), and `_remember_date`
@@ -2314,11 +2320,9 @@ if [ -d "$SESSIONS_DIR" ] && [ -d "$REMEMBER_DIR/tmp" ]; then
             # guess in either failure shape, same as the mtime check does.
             _remember_now=""
             _remember_date_into _remember_now +%s
-            case "$_remember_now" in
-                (''|*[!0-9]*)
-                    continue
-                    ;;
-            esac
+            if [ -z "$_remember_now" ] || [ "${_remember_now/[!0-9]/}" != "$_remember_now" ]; then
+                continue
+            fi
             if [ "$_remember_now" -gt 0 ] && [ "$_remember_stale_mtime" -gt 0 ] \
                 && [ $((10#$_remember_now - 10#$_remember_stale_mtime)) -lt $((GRACE_MIN * 60)) ]; then
                 continue
@@ -2357,18 +2361,14 @@ if [ -d "$SESSIONS_DIR" ] && [ -d "$REMEMBER_DIR/tmp" ]; then
             _remember_stale_mtime=$(stat -c %Y "$_remember_stale_hint" 2>/dev/null) \
                 || _remember_stale_mtime=$(stat -f %m "$_remember_stale_hint" 2>/dev/null) \
                 || _remember_stale_mtime=""
-            case "$_remember_stale_mtime" in
-                (''|*[!0-9]*)
-                    continue
-                    ;;
-            esac
+            if [ -z "$_remember_stale_mtime" ] || [ "${_remember_stale_mtime/[!0-9]/}" != "$_remember_stale_mtime" ]; then
+                continue
+            fi
             _remember_now=""
             _remember_date_into _remember_now +%s
-            case "$_remember_now" in
-                (''|*[!0-9]*)
-                    continue
-                    ;;
-            esac
+            if [ -z "$_remember_now" ] || [ "${_remember_now/[!0-9]/}" != "$_remember_now" ]; then
+                continue
+            fi
             if [ "$_remember_now" -gt 0 ] && [ "$_remember_stale_mtime" -gt 0 ] \
                 && [ $((10#$_remember_now - 10#$_remember_stale_mtime)) -lt $((GRACE_MIN * 60)) ]; then
                 continue
@@ -2463,11 +2463,11 @@ unset _REMEMBER_SESSION_START_BODY _REMEMBER_SESSION_START_MAX_BYTES
 # consolidation trigger off for real.
 _remember_staging_glob_dir=""
 _remember_forward_slash_into _remember_staging_glob_dir "$REMEMBER_DIR"
-# Glob array + a bash `case` per entry, not `ls | grep -v | grep -v | wc -l |
+# Glob array + a suffix test per entry, not `ls | grep -v | grep -v | wc -l |
 # tr -d ' '` (#666) -- five forks collapsed to zero: nullglob turns "no
 # matches" into an empty array instead of the literal pattern string, and the
 # two `grep -v` exclusions (today's own file; anything already marked
-# `.done.md`) are exactly what a `case` pattern already expresses.
+# `.done.md`) are exactly what a `${f%suffix}` test already expresses.
 # `shopt -p nullglob` exits 1 (even though it prints correctly) whenever
 # the option is currently OFF -- which it is by default -- so capturing it
 # via `var=$(...)` would abort this script if it ever ran under `set -e`.
@@ -2482,10 +2482,10 @@ STAGING_COUNT=0
 # error under `set -u` on bash < 4.4, and an empty staging dir is the
 # common case.
 [ "${#_remember_staging_candidates[@]}" -gt 0 ] && for _remember_staging_file in "${_remember_staging_candidates[@]}"; do
-    case "$_remember_staging_file" in
-        (*"today-${TODAY}.md") continue ;;
-        (*.done.md) continue ;;
-    esac
+    if [ "${_remember_staging_file%"today-${TODAY}.md"}" != "$_remember_staging_file" ] \
+        || [ "${_remember_staging_file%.done.md}" != "$_remember_staging_file" ]; then
+        continue
+    fi
     STAGING_COUNT=$((STAGING_COUNT + 1))
 done
 unset _remember_staging_candidates _remember_staging_was_nullglob _remember_staging_file
@@ -2544,13 +2544,12 @@ if [ -n "$_REMEMBER_HOOK_T0" ]; then
     else
         _remember_hook_t1=$(date +%s 2>/dev/null) || _remember_hook_t1=""
     fi
-    case "$_remember_hook_t1" in
-        ''|*[!0-9]*) _REMEMBER_HOOK_ELAPSED_S="" ;;
-        *)
-            _REMEMBER_HOOK_ELAPSED_S=$(( 10#$_remember_hook_t1 - 10#$_REMEMBER_HOOK_T0 ))
-            [ "$_REMEMBER_HOOK_ELAPSED_S" -ge 0 ] || _REMEMBER_HOOK_ELAPSED_S=""
-            ;;
-    esac
+    if [ -z "$_remember_hook_t1" ] || [ "${_remember_hook_t1/[!0-9]/}" != "$_remember_hook_t1" ]; then
+        _REMEMBER_HOOK_ELAPSED_S=""
+    else
+        _REMEMBER_HOOK_ELAPSED_S=$(( 10#$_remember_hook_t1 - 10#$_REMEMBER_HOOK_T0 ))
+        [ "$_REMEMBER_HOOK_ELAPSED_S" -ge 0 ] || _REMEMBER_HOOK_ELAPSED_S=""
+    fi
     unset _remember_hook_t1
 fi
 if [ -n "$_REMEMBER_HOOK_ELAPSED_S" ]; then

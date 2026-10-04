@@ -154,9 +154,11 @@ _PARSE_STATUS="${_PARSE_STATUS%$'\r'}"
 # close this: "--force" and "--dry" both consist entirely of characters that
 # guard already allows. Extended here with a leading-dash rejection (`-*`)
 # so nothing shaped like an option can ever reach that argv position.
-case "$_CONVERSATION_ID" in
-    ''|[.]|[.][.]|-*|*[!A-Za-z0-9._-]*) _CONVERSATION_ID="" ;;
-esac
+if [ -z "${_CONVERSATION_ID#.}" ] || [ -z "${_CONVERSATION_ID#..}" ] \
+    || [ "${_CONVERSATION_ID#-}" != "$_CONVERSATION_ID" ] \
+    || [ "${_CONVERSATION_ID/[!A-Za-z0-9._-]/}" != "$_CONVERSATION_ID" ]; then
+    _CONVERSATION_ID=""
+fi
 
 if [ -z "$_CONVERSATION_ID" ] || [ -z "$_TRANSCRIPT_PATH" ]; then
     if [ "$_PARSE_STATUS" != "ok" ]; then
