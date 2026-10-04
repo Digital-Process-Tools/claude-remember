@@ -73,10 +73,7 @@ def _resolve_max_turns() -> str:
     bound keeps a misconfiguration bounded instead of opening an unbounded run.
     Returns the normalized form (leading zeros stripped).
     """
-    raw = os.environ.get("REMEMBER_MAX_TURNS", "").strip()
-    if raw.isdigit() and 1 <= int(raw) <= MAX_ALLOWED_TURNS:
-        return str(int(raw))
-    return DEFAULT_MAX_TURNS
+    ...
 
 
 DEFAULT_MODEL = "haiku"
@@ -91,8 +88,7 @@ def _resolve_model() -> str:
     interactive-latency cost, since this runs backgrounded. Kept as an env knob,
     consistent with REMEMBER_MAX_TURNS / REMEMBER_TZ / REMEMBER_BRANCH.
     """
-    raw = os.environ.get("REMEMBER_MODEL", "").strip()
-    return raw if raw else DEFAULT_MODEL
+    ...
 
 
 def _resolve_claude_bin() -> str:
@@ -110,10 +106,7 @@ def _resolve_claude_bin() -> str:
     REMEMBER_MAX_TURNS). When ``which`` finds nothing, fall back to the bare
     name so behaviour matches the pre-fix code on a misconfigured PATH.
     """
-    override = os.environ.get("REMEMBER_CLAUDE_BIN", "").strip()
-    if override:
-        return override
-    return shutil.which("claude") or "claude"
+    ...
 
 
 def _resolve_codex_bin() -> str:
@@ -124,10 +117,7 @@ def _resolve_codex_bin() -> str:
     resolves nothing falls back to the bare name so a spawn failure reports
     what was actually tried rather than an internal resolution error.
     """
-    override = os.environ.get("REMEMBER_CODEX_BIN", "").strip()
-    if override:
-        return override
-    return shutil.which("codex") or "codex"
+    ...
 
 
 # CLAUDE_CODE_* vars are stripped as parent-session identity (#95) — but the
@@ -203,30 +193,12 @@ _SUMMARIZER_PROVIDERS = frozenset({"claude", "codex", "auto"})
 
 def _resolve_summarizer_provider() -> str:
     """REMEMBER_SUMMARIZER, validated, else "auto"."""
-    raw = os.environ.get("REMEMBER_SUMMARIZER", "").strip().lower()
-    if not raw:
-        return "auto"
-    if raw in _SUMMARIZER_PROVIDERS:
-        return raw
-    _warn(
-        f"WARNING: ignoring REMEMBER_SUMMARIZER={raw!r} -- must be one of "
-        f"{sorted(_SUMMARIZER_PROVIDERS)}; using 'auto'"
-    )
-    return "auto"
+    ...
 
 
 def _resolve_summarizer_fallback() -> str | None:
     """REMEMBER_SUMMARIZER_FALLBACK, validated, else None (no fallback)."""
-    raw = os.environ.get("REMEMBER_SUMMARIZER_FALLBACK", "").strip().lower()
-    if not raw:
-        return None
-    if raw == "claude":
-        return raw
-    _warn(
-        f"WARNING: ignoring REMEMBER_SUMMARIZER_FALLBACK={raw!r} -- 'claude' "
-        "is the only supported fallback target; not falling back"
-    )
-    return None
+    ...
 
 
 def _choose_summarizer_provider() -> str:
@@ -248,69 +220,7 @@ def _choose_summarizer_provider() -> str:
     distinction every other UNKNOWN-shaped result in this module already
     makes loudly (see pipeline.host.sniff_envelope()'s own docstring).
     """
-    provider = _resolve_summarizer_provider()
-    if provider != "auto":
-        return provider
-    path = _host.transcript_path()
-    if not path:
-        # transcript_path() collapses two different facts into one None:
-        # the var was never set (ordinary -- no hook preamble, nothing to
-        # say), and the var WAS set but the file it names is gone (#477 --
-        # exported, then vanished before this read, the exact "deleted
-        # between export and this read" case the docstring above already
-        # promises a receipt for). Re-reading the environment here, rather
-        # than widening transcript_path()'s own return shape, keeps that
-        # function's contract ("a usable path or None") unchanged for every
-        # other caller.
-        raw = (os.environ.get("REMEMBER_TRANSCRIPT_PATH") or "").strip()
-        if raw:
-            _warn(
-                f"WARNING: REMEMBER_TRANSCRIPT_PATH={raw!r} names a "
-                "transcript that no longer exists (exported, then vanished "
-                "before this read) -- REMEMBER_SUMMARIZER=auto is falling "
-                "back to 'claude', which may not be correct"
-            )
-        return "claude"
-    envelope, envelope_unreadable, envelope_capped = _extract.sniff_file_envelope_status(path)
-    if envelope == "codex":
-        return "codex"
-    if envelope == "antigravity":
-        # #567: Antigravity has no summarizer provider of its own --
-        # _SUMMARIZER_PROVIDERS is still {"claude", "codex", "auto"} -- so
-        # "claude" is the correct answer here, the same as it is for a
-        # genuine Claude Code transcript. But unlike Claude Code, this is
-        # a DIFFERENT host's session being billed through `claude -p`, the
-        # exact shape #460/#477 already warn about elsewhere in this
-        # function; teaching sniff_envelope() the Antigravity shape (#563)
-        # moved this transcript out of the "unrecognised" arm below -- the
-        # only arm that used to warn -- into a silent fall-through, with
-        # no receipt for an operator debugging a wrongly-billed session.
-        _warn(
-            f"WARNING: transcript {path!r} is an Antigravity session -- "
-            "REMEMBER_SUMMARIZER=auto has no Antigravity-native summarizer "
-            "and is falling back to 'claude'"
-        )
-        return "claude"
-    if envelope == "unrecognised":
-        # #556: "unreadable or an unrecognised shape" used to be the whole
-        # story, but it collapsed a THIRD cause into "unrecognised shape" --
-        # the scan giving up at extract._ENVELOPE_SNIFF_SCAN_CAP without
-        # ever exhausting the file. sniff_file_envelope_status() (rather
-        # than the plain sniff_file_envelope() this used to call) is what
-        # makes the cap visible here, so the warning can name it instead of
-        # misfiling it under a shape genuinely never recognised.
-        if envelope_unreadable:
-            reason = "unreadable"
-        elif envelope_capped:
-            reason = "gave up after scanning too many unplaceable lines"
-        else:
-            reason = "an unrecognised shape"
-        _warn(
-            f"WARNING: could not identify the host from transcript {path!r} "
-            f"({reason}) -- REMEMBER_SUMMARIZER=auto "
-            "is falling back to 'claude', which may not be correct"
-        )
-    return "claude"
+    ...
 
 
 def _child_env() -> dict[str, str]:
@@ -351,26 +261,7 @@ def _child_env() -> dict[str, str]:
     one opt-in way to keep more variables out of the child, and it applies to
     every name, the one kept OAuth credential included.
     """
-    drop_globs = _configured_drop_env()
-    # Every name below written out (#898 round 10), never compared against a
-    # constant that holds it. The drop list is one more exclusion in the same
-    # single walk -- the environment is never read by a configured name.
-    child = {
-        k: v
-        for k, v in os.environ.items()
-        if (
-            k == "CLAUDE_CODE_OAUTH_TOKEN"
-            or (
-                k != "CLAUDECODE"
-                and k != "CLAUDE_JOB_DIR"
-                and k != "CLAUDE_PROJECT_DIR"
-                and not k.startswith("CLAUDE_CODE_")
-            )
-        )
-        and not any(fnmatch.fnmatchcase(k, g) for g in drop_globs)
-    }
-    child["REMEMBER_NESTED_SUMMARIZER"] = "1"
-    return child
+    ...
 
 
 def _usage_from_failure(stdout: object) -> TokenUsage | None:
@@ -381,27 +272,7 @@ def _usage_from_failure(stdout: object) -> TokenUsage | None:
     usage block a success does. A timeout usually leaves nothing parseable —
     the process was killed mid-write — so this returns None more often than not.
     """
-    if isinstance(stdout, bytes):
-        try:
-            stdout = stdout.decode("utf-8", errors="replace")
-        except Exception:
-            return None
-    if not isinstance(stdout, str) or not stdout.strip():
-        return None
-    try:
-        payload = json.loads(stdout)
-    except ValueError:
-        return None
-    if isinstance(payload, list):
-        payload = payload[-1] if payload else {}
-    if not isinstance(payload, dict):
-        return None
-    usage = _extract_tokens(payload)
-    # An all-zero reading means the payload had no usage block at all, which is
-    # not the same as a call that cost nothing — say unknown rather than free.
-    if usage.input or usage.output or usage.cache:
-        return usage
-    return None
+    ...
 
 
 def _log_failed_spend(what_happened: str, stdout: object) -> None:
@@ -416,15 +287,7 @@ def _log_failed_spend(what_happened: str, stdout: object) -> None:
     "unknown" is the honest answer when the payload carries no usage. Zero is
     not.
     """
-    usage = _usage_from_failure(stdout)
-    if usage is not None:
-        _warn(f"call {what_happened} after spending tokens: {usage}")
-    else:
-        _warn(
-            f"call {what_happened}; tokens already spent are unknown -- the "
-            "failure carried no usage block, so this run's reported cost is "
-            "lower than what it actually cost"
-        )
+    ...
 
 
 # Cap on the failure detail carried into the exception: enough to identify an
@@ -443,33 +306,7 @@ def _failure_detail(stdout: str, stderr: str) -> str:
     fall back to raw stdout, then stderr, and say so explicitly when both are
     empty rather than trailing off.
     """
-    detail = ""
-    stdout = (stdout or "").strip()
-    stderr = (stderr or "").strip()
-
-    if stdout:
-        try:
-            payload = json.loads(stdout)
-        except ValueError:
-            detail = stdout
-        else:
-            if isinstance(payload, dict):
-                for key in ("error", "result", "message"):
-                    value = payload.get(key)
-                    if isinstance(value, dict):
-                        value = value.get("message")
-                    if isinstance(value, str) and value.strip():
-                        detail = value.strip()
-                        break
-            detail = detail or stdout
-
-    parts = [p for p in (detail, stderr) if p]
-    if not parts:
-        return "(no output on stdout or stderr)"
-    joined = " | ".join(parts)
-    if len(joined) > _FAILURE_DETAIL_MAX:
-        joined = joined[:_FAILURE_DETAIL_MAX] + "..."
-    return joined
+    ...
 
 
 # The nested `claude -p` needs its own credentials. Normally that is the
@@ -513,16 +350,7 @@ def _warn(message: str) -> None:
     Never raises — this sits on the path to authenticating, and a logging
     failure must not become an auth failure.
     """
-    try:
-        remember_dir = os.environ.get("REMEMBER_DIR", "").strip()
-        if remember_dir:
-            from .log import log
-
-            log("haiku", message, os.path.join(remember_dir, "logs"))
-        else:
-            print(f"[haiku] {message}", file=sys.stderr)
-    except Exception:
-        pass
+    ...
 
 
 def _remember_dir_is_project_local(remember_dir: str) -> bool:
@@ -548,15 +376,7 @@ def _remember_dir_is_project_local(remember_dir: str) -> bool:
     returns True (treat as project-local, exclude the raw candidate) instead,
     so an unresolvable path fails safe rather than falling open.
     """
-    project_dir = os.environ.get("MEMORY_PROJECT_DIR", "").strip()
-    if not project_dir:
-        return False
-    try:
-        remember_abs = os.path.realpath(remember_dir)
-        project_abs = os.path.realpath(project_dir)
-    except OSError:
-        return True
-    return remember_abs == project_abs or remember_abs.startswith(project_abs + os.sep)
+    ...
 
 
 def _config_candidates() -> list[str]:
@@ -579,15 +399,7 @@ def _config_candidates() -> list[str]:
     would reopen the same hole for exactly the code path this fallback exists
     to cover.
     """
-    candidates = []
-    merged = os.environ.get("REMEMBER_CONFIG", "").strip()
-    if merged:
-        candidates.append(merged)
-    remember_dir = os.environ.get("REMEMBER_DIR", "").strip()
-    if remember_dir and not _remember_dir_is_project_local(remember_dir):
-        candidates.append(os.path.join(remember_dir, "config.json"))
-    candidates.append(os.path.join(os.path.expanduser("~"), ".remember", "config.json"))
-    return candidates
+    ...
 
 
 # #898, round 4: the value-free presence check that used to live here (and
@@ -633,42 +445,7 @@ def _configured_drop_env() -> tuple[str, ...]:
     the globs are upper-cased there too: Windows names are case-insensitive,
     and a lower-case entry should still match.
     """
-    for path in _config_candidates():
-        try:
-            with open(path, encoding="utf-8") as f:
-                cfg = json.load(f)
-        except (OSError, ValueError):
-            continue
-        if not isinstance(cfg, dict):
-            continue
-        haiku_cfg = cfg.get("haiku")
-        if not isinstance(haiku_cfg, dict) or "drop_env" not in haiku_cfg:
-            continue
-        value = haiku_cfg["drop_env"]
-        if not isinstance(value, list):
-            _warn(
-                f"WARNING: ignoring haiku.drop_env in {path} -- a "
-                f"{type(value).__name__} value, not a list of variable names or "
-                "globs; nothing is dropped from the summarizer's environment"
-            )
-            return ()
-        globs = []
-        for index, entry in enumerate(value):
-            if isinstance(entry, str) and _DROP_ENV_ENTRY.fullmatch(entry):
-                globs.append(entry.upper() if os.name == "nt" else entry)
-                continue
-            if isinstance(entry, str):
-                shape = f"a {len(entry)}-character string"
-            else:
-                shape = f"a {type(entry).__name__} value"
-            _warn(
-                f"WARNING: ignoring entry {index} of haiku.drop_env in {path} -- "
-                f"{shape}, not a variable name or a */? glob over letters, digits "
-                "and underscores. The entry itself is not logged: it may hold a "
-                "pasted value"
-            )
-        return tuple(globs)
-    return ()
+    ...
 
 
 # Markers that a failed call plausibly died on credentials rather than on the
