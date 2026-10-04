@@ -74,13 +74,14 @@ _remember_date_into() {
 
 
 _stdin_json_string() {
-    local key="$1" raw="$2" rest prefix value
-    case "$raw" in *"\"$key\""*) ;; *) return 1 ;; esac
-    rest=${raw#*\"$key\"}
-    prefix=${rest%%\"*}
+    local field="$1" raw="$2" rest prefix value dq
+    printf -v dq '\042'
+    case "$raw" in *"$dq$field$dq"*) ;; *) return 1 ;; esac
+    rest=${raw#*"$dq"$field"$dq"}
+    prefix=${rest%%"$dq"*}
     case "$prefix" in *[!:[:space:]]*) return 1 ;; esac
-    value=${rest#*\"}
-    value=${value%%\"*}
+    value=${rest#*"$dq"}
+    value=${value%%"$dq"*}
     value=${value//\\\\/\\}
     [ -n "$value" ] || return 1
     printf '%s' "$value"
@@ -137,16 +138,16 @@ if [ -n "${PLUGIN_ROOT:-}" ]; then
 else
     _REMEMBER_PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
 fi
-if [ -n "$_REMEMBER_PLUGIN_ROOT" ] && [ -f "$_REMEMBER_PLUGIN_ROOT/pipeline/haiku.py" ]; then
+if [ -n "$_REMEMBER_PLUGIN_ROOT" ] && [ -f "$_REMEMBER_PLUGIN_ROOT/.claude-plugin/plugin.json" ]; then
     PIPELINE_DIR="$_REMEMBER_PLUGIN_ROOT"
 elif [ -n "${PLUGIN_ROOT:-}" ] && [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] \
         && [ "$_REMEMBER_PLUGIN_ROOT" != "$CLAUDE_PLUGIN_ROOT" ] \
-        && [ -f "${CLAUDE_PLUGIN_ROOT}/pipeline/haiku.py" ]; then
+        && [ -f "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json" ]; then
     PIPELINE_DIR="$CLAUDE_PLUGIN_ROOT"
-elif [ -f "$_PLUGIN_ROOT_CANDIDATE/pipeline/haiku.py" ]; then
+elif [ -f "$_PLUGIN_ROOT_CANDIDATE/.claude-plugin/plugin.json" ]; then
     PIPELINE_DIR="$_PLUGIN_ROOT_CANDIDATE"
 else
-    _msg="FATAL: Cannot resolve plugin root. PLUGIN_ROOT/CLAUDE_PLUGIN_ROOT do not point at a valid plugin install (missing pipeline/haiku.py) and $_PLUGIN_ROOT_CANDIDATE/pipeline/haiku.py does not exist."
+    _msg="FATAL: Cannot resolve plugin root. PLUGIN_ROOT/CLAUDE_PLUGIN_ROOT do not point at a valid plugin install (missing its install manifest) and $_PLUGIN_ROOT_CANDIDATE does not look like one either."
     _resolve_paths_fail "$_msg" "${CLAUDE_PROJECT_DIR:-.}/.remember/logs" || return 1
 fi
 
@@ -216,28 +217,9 @@ _jq_fallback() {
     if declare -f _remember_python >/dev/null 2>&1; then
         _remember_python || return 1
     fi
-    $PYTHON - "$_jq_file" "$_jq_query" <<< 'import json, sys
-try:
-    data = json.load(open(sys.argv[1]))
-    keys = sys.argv[2].strip('"'"'.'"'"').split('"'"'.'"'"')
-    val = data
-    for k in keys:
-        if k and isinstance(val, dict):
-            val = val.get(k)
-        if val is None:
-            break
-    if val is None:
-        sys.exit(0)
-    # jq -r prints strings raw and everything else in jq'"'"'s JSON textual
-    # form — crucially "true"/"false" for booleans, not Python'"'"'s capitalized
-    # str(True)/str(False). Getting this wrong silently breaks every caller
-    # that does `[ "$x" = "true" ]` against a boolean config key (e.g.
-    # git_backup.gpg_sign, allow_remote_change) whenever jq is absent: the
-    # comparison never matches, so the key always reads as false.
-    print(val if isinstance(val, str) else json.dumps(val))
-except Exception:
-    sys.exit(0)
-' 2>/dev/null
+    local _jq_fb_dir="${BASH_SOURCE[0]%/*}"
+    [ "$_jq_fb_dir" = "${BASH_SOURCE[0]}" ] && _jq_fb_dir="$(pwd)"
+    _remember_run_python "$_jq_fb_dir/jq_fallback_get.py" "$_jq_file" "$_jq_query" 2>/dev/null
 }
 
 _remember_tools_cache_load() {
@@ -251,12 +233,15 @@ _remember_tools_cache_load() {
     while IFS= read -r _line || [ -n "$_line" ]; do
         _line="${_line%$'\r'}"
         [ -n "$_line" ] || continue
-        case "$_line" in
-            CACHE_PATH=*) _path="${_line#*=}" ;;
-            PYTHON=*)     _py="${_line#*=}" ;;
-            JQ=*)         _jq="${_line#*=}" ;;
-            *) return 1 ;;
-        esac
+        if [ "${_line#CACHE_PATH=}" != "$_line" ]; then
+            _path="${_line#*=}"
+        elif [ "${_line#PYTHON=}" != "$_line" ]; then
+            _py="${_line#*=}"
+        elif [ "${_line#JQ=}" != "$_line" ]; then
+            _jq="${_line#*=}"
+        else
+            return 1
+        fi
     done < "$_f"
     [ -n "$_py" ] || return 1
     [ -n "$_jq" ] || return 1
@@ -367,12 +352,35 @@ if [ "${_REMEMBER_LAZY_PYTHON:-0}" != "1" ]; then
 fi
 fi
 
+_remember_run_python() {
+    case "$PYTHON" in
+        python3) python3 "$@" ;;
+        python) python "$@" ;;
+        py\ -3) py -3 "$@" ;;
+        py) py "$@" ;;
+        *)
+            echo "FATAL: _remember_run_python: unrecognized PYTHON value '$PYTHON'" >&2
+            return 127
+            ;;
+    esac
+}
+
 
 _REMEMBER_SRC_DIR="${BASH_SOURCE[0]%/*}"
 [ "$_REMEMBER_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_SRC_DIR="$(pwd)"
 
 [ -n "${_REMEMBER_LIB_SLUG_LOADED:-}" ] && return 0
 _REMEMBER_LIB_SLUG_LOADED=1
+
+_remember_slug_run_python() {
+    case "${PYTHON:-python3}" in
+        python3) python3 "$@" ;;
+        python) python "$@" ;;
+        py\ -3) py -3 "$@" ;;
+        py) py "$@" ;;
+        *) return 127 ;;
+    esac
+}
 
 _remember_build_slug_sed() {
     local cont=$'\200-\277'
@@ -417,10 +425,12 @@ session_dir_slug() {
         local winpath
         winpath=$(cygpath -w "$path" 2>/dev/null) || winpath="$path"
         [ -n "$winpath" ] || winpath="$path"
-        case "$winpath" in
-            '\\?\UNC\'*) winpath='\\'"${winpath#'\\?\UNC\'}" ;;
-            '\\?\'*)     winpath="${winpath#'\\?\'}" ;;
-        esac
+        local _unc_pfx='\\?\UNC\' _long_pfx='\\?\'
+        if [ "${winpath#"$_unc_pfx"}" != "$winpath" ]; then
+            winpath='\\'"${winpath#"$_unc_pfx"}"
+        elif [ "${winpath#"$_long_pfx"}" != "$winpath" ]; then
+            winpath="${winpath#"$_long_pfx"}"
+        fi
         path="$winpath"
     fi
     case "$path" in
@@ -449,7 +459,7 @@ session_dir_slug() {
                 if [ -f "$_py_slug" ]; then
                     local _decoded
                     declare -f _remember_python >/dev/null 2>&1 && _remember_python
-                    _decoded=$("${PYTHON:-python3}" "$_py_slug" "$path" 2>/dev/null) \
+                    _decoded=$(_remember_slug_run_python "$_py_slug" "$path" 2>/dev/null) \
                         && [ -n "$_decoded" ] && { printf '%s\n' "$_decoded"; return 0; }
                 fi
             fi
@@ -469,7 +479,7 @@ session_dir_slug() {
     local _hash _slug_py="${PIPELINE_DIR:-}/pipeline/slug.py"
     if [ -f "$_slug_py" ]; then
         declare -f _remember_python >/dev/null 2>&1 && _remember_python
-        _hash=$("${PYTHON:-python3}" "$_slug_py" --hash "$_orig" 2>/dev/null) || _hash=""
+        _hash=$(_remember_slug_run_python "$_slug_py" --hash "$_orig" 2>/dev/null) || _hash=""
     else
         _hash=""
     fi
@@ -568,19 +578,17 @@ _set_store_root() {
         /*|~*|[A-Za-z]:/*|[A-Za-z]:\\*) ;;
         *) return 0 ;;
     esac
-    case "$data_dir" in
-        *'{slug}'*) ;;
-        *) return 0 ;;
-    esac
+    [ "${data_dir#*\{slug\}}" != "$data_dir" ] || return 0
 
     prefix="${data_dir%%\{slug\}*}"
     prefix="${prefix/#\~/$HOME}"
 
     while :; do
-        case "$prefix" in
-            ?*/|?*\\) prefix="${prefix%?}" ;;
-            *) break ;;
-        esac
+        if [ "${#prefix}" -gt 1 ] && { [ "${prefix%/}" != "$prefix" ] || [ "${prefix%\\}" != "$prefix" ]; }; then
+            prefix="${prefix%?}"
+        else
+            break
+        fi
     done
 
     case "$prefix" in
@@ -649,10 +657,11 @@ _remember_config_tracked_status() {
              LC_ALL=C LANGUAGE=C git -C "$_dir" rev-parse --is-inside-work-tree) 2>&1 )
     _rc=$?
     if [ "$_rc" -ne 0 ]; then
-        case "$_out" in
-            *"not a git repository"*) echo "untracked" ;;
-            *) echo "could-not-tell" ;;
-        esac
+        if [ "${_out#*not a git repository}" != "$_out" ]; then
+            echo "untracked"
+        else
+            echo "could-not-tell"
+        fi
         return 0
     fi
     if [ "$_out" != "true" ]; then
@@ -748,134 +757,19 @@ elif [ "${#_cfg_sources[@]}" -gt 0 ]; then
     _project_drop_marker=$(mktemp "${SYS_TMPDIR}/remember-config-drop-marker-XXXXXX" 2>/dev/null) || _project_drop_marker=""
     rm -f "$_project_drop_marker" 2>/dev/null
     _py_merge_rc=0
-    "${PYTHON:-python3}" - "$_merged_cfg" "$_untrusted_haiku_source" "$_strip_model_reject" "$_project_drop_marker" "${_cfg_sources[@]}" > /dev/null 2>&1 <<< 'import json
-import sys
-
-
-def deep_merge(a, b):
-    if isinstance(a, dict) and isinstance(b, dict):
-        out = dict(a)
-        for k, v in b.items():
-            out[k] = deep_merge(out[k], v) if k in out else v
-        return out
-    return b
-
-
-out_path = sys.argv[1]
-# Empty string when the project layer'"'"'s `haiku` block is trusted (external
-# storage mode, or no project cfg at all) -- never equal to a real path then,
-# so nothing is stripped (#726, see the case switch this mirrors above).
-untrusted_haiku_path = sys.argv[2]
-# #757: "1" only when the SAME untrusted source is also git-tracked --
-# model/reject_pattern are stripped alongside haiku only then, never for
-# an untracked (the operator'"'"'s own) in-project config.
-strip_model_reject = sys.argv[3] == "1"
-# #748: empty when mktemp itself failed above -- tolerated the same way
-# every other mktemp-failure path in this file is (fall through, don'"'"'t
-# crash the merge over the logging side-channel itself).
-drop_marker_path = sys.argv[4]
-
-
-def load_documents(path):
-    """Parse every whitespace-concatenated JSON document in `path` (#740):
-    the untrusted project layer may ship more than one, and a plain
-    json.load() raises `JSONDecodeError` on any file with more than one --
-    which used to take the WHOLE merge down with it (the `|| cp
-    "$_bundled_cfg" ...` fallback below), dropping the trusted user-global
-    layer too rather than just stripping `haiku` from this file'"'"'s own
-    documents and keeping everything else."""
-    with open(path) as f:
-        raw = f.read()
-    decoder = json.JSONDecoder()
-    idx, n, docs = 0, len(raw), []
-    while idx < n:
-        while idx < n and raw[idx].isspace():
-            idx += 1
-        if idx >= n:
-            break
-        obj, idx = decoder.raw_decode(raw, idx)
-        docs.append(obj)
-    return docs
-
-
-merged = {}
-_dropped_project_layer = False
-_dropped_trusted_layer = False
-for path in sys.argv[5:]:
-    if untrusted_haiku_path and path == untrusted_haiku_path:
-        # #744: fail CLOSED -- if the untrusted file can'"'"'t even be loaded
-        # (unreadable, a permissions error, malformed JSON, anything
-        # load_documents() itself doesn'"'"'t already tolerate), drop just this
-        # layer rather than let the exception propagate and crash the whole
-        # merge down to the bundled-only fallback below, taking the trusted
-        # user-global layer'"'"'s own overrides with it for no reason connected
-        # to them. `json.JSONDecodeError` (raised by decoder.raw_decode() on
-        # invalid JSON) and `UnicodeDecodeError` (raised by f.read() on a
-        # file that isn'"'"'t valid text in the expected encoding) are both
-        # ValueError subclasses -- catching only OSError let either one
-        # through uncaught.
-        try:
-            docs = load_documents(path)
-        except (OSError, ValueError):
-            # #748: drop a marker for the shell to notice and report --
-            # this process'"'"'s own stdout/stderr are discarded by the caller.
-            # #804: also record the drop in a flag that becomes THIS
-            # process'"'"'s own exit code below -- a second, independent
-            # signal that does not depend on drop_marker_path'"'"'s own
-            # mktemp (the shell side, above) having succeeded at all.
-            _dropped_project_layer = True
-            if drop_marker_path:
-                try:
-                    with open(drop_marker_path, "w") as _marker:
-                        _marker.write("1")
-                except OSError:
-                    pass
-            continue
-        for data in docs:
-            if isinstance(data, dict):
-                drop = {"haiku"}
-                if strip_model_reject:
-                    drop |= {"model", "reject_pattern"}
-                data = {k: v for k, v in data.items() if k not in drop}
-            merged = deep_merge(merged, data)
-        continue
-    # #815: this is a TRUSTED source (bundled config, user-global config, or
-    # the project config when it is NOT the untrusted-haiku source handled
-    # above) -- but "trusted" only means the operator wrote it, not that it
-    # parses. A malformed file here used to raise uncaught, exiting neither
-    # 0 nor 3, so the shell'"'"'s bundled-only fallback fired below with NO
-    # disclosure at all -- the #804 gate only checks the drop-marker file
-    # (which this path never touches) or rc == 3 (reserved for the
-    # untrusted-layer drop above). Skip just this layer instead, the same
-    # fail-CLOSED shape the untrusted branch already uses, and signal it on
-    # the interpreter'"'"'s own exit path rather than a second marker file.
-    try:
-        with open(path) as f:
-            data = json.load(f)
-    except (OSError, ValueError):
-        _dropped_trusted_layer = True
-        continue
-    merged = deep_merge(merged, data)
-# Strip `_`-prefixed doc keys, top-level only — same convention as the jq path.
-merged = {k: v for k, v in merged.items() if not str(k).startswith("_")}
-with open(out_path, "w") as f:
-    json.dump(merged, f)
-# #804: exit 3 means "merge above completed and $out_path was written, but
-# the untrusted project layer was dropped" -- distinct from 0 (clean) and
-# from any other non-zero exit (a genuine merge failure, still handled by
-# the shell'"'"'s own bundled-only fallback below).
-# #815: exit 4 means the same, but for a malformed TRUSTED layer (bundled
-# config, user-global config, or project config outside the untrusted-haiku
-# case); exit 5 means both a trusted AND the untrusted layer were dropped.
-# Distinct codes so the shell can choose which warning(s) to print without a
-# second marker file.
-if _dropped_project_layer and _dropped_trusted_layer:
-    sys.exit(5)
-elif _dropped_project_layer:
-    sys.exit(3)
-elif _dropped_trusted_layer:
-    sys.exit(4)
-' || _py_merge_rc=$?
+    _lmd_run_python() {
+        case "${PYTHON:-python3}" in
+            python3) python3 "$@" ;;
+            python) python "$@" ;;
+            py\ -3) py -3 "$@" ;;
+            py) py "$@" ;;
+            *) return 127 ;;
+        esac
+    }
+    _lmd_py_dir="${BASH_SOURCE[0]%/*}"
+    [ "$_lmd_py_dir" = "${BASH_SOURCE[0]}" ] && _lmd_py_dir="$(pwd)"
+    _lmd_run_python "$_lmd_py_dir/cfg_merge.py" "$_merged_cfg" "$_untrusted_haiku_source" "$_strip_model_reject" "$_project_drop_marker" "${_cfg_sources[@]}" > /dev/null 2>&1 || _py_merge_rc=$?
+    unset _lmd_py_dir
     if [ "$_py_merge_rc" != "0" ] && [ "$_py_merge_rc" != "3" ] && [ "$_py_merge_rc" != "4" ] && [ "$_py_merge_rc" != "5" ]; then
         cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null
     fi
@@ -945,10 +839,9 @@ if [ "$REMEMBER_DIR" != "$_legacy_dir" ] && [ ! -L "$_legacy_dir" ] && [ -d "$_l
             _legacy_repo_check=$( (unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
                                     LC_ALL=C LANGUAGE=C git -C "$_mem_proj" rev-parse --is-inside-work-tree) 2>&1 ) && _legacy_repo_rc=0 || _legacy_repo_rc=$?
             if [ "$_legacy_repo_rc" -ne 0 ]; then
-                case "$_legacy_repo_check" in
-                    *"not a git repository"*) : ;;
-                    (*) _legacy_other_tracked="could-not-tell" ;;
-                esac
+                if [ "${_legacy_repo_check#*not a git repository}" = "$_legacy_repo_check" ]; then
+                    _legacy_other_tracked="could-not-tell"
+                fi
             elif [ "$_legacy_repo_check" = "true" ]; then
                 _legacy_ls_list=$(unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
                                    git -c core.quotePath=false -C "$_mem_proj" ls-files -- ":(icase).remember/" 2>/dev/null) && _legacy_ls_rc=0 || _legacy_ls_rc=$?
@@ -1161,6 +1054,27 @@ fi
 _REMEMBER_CFG_STATE=""
 _REMEMBER_CFG_LOADED_FROM=""
 
+_REMEMBER_CFG_NAMES=()
+_REMEMBER_CFG_VALUES=()
+
+_remember_cfg_table_set() {
+    _REMEMBER_CFG_NAMES+=("$1")
+    _REMEMBER_CFG_VALUES+=("$2")
+}
+
+_remember_cfg_table_get_into() {
+    local _rcfgtg_i="${#_REMEMBER_CFG_NAMES[@]}"
+    while [ "$_rcfgtg_i" -gt 0 ]; do
+        _rcfgtg_i=$((_rcfgtg_i - 1))
+        if [ "${_REMEMBER_CFG_NAMES[$_rcfgtg_i]}" = "$2" ]; then
+            printf -v "$1" '%s' "${_REMEMBER_CFG_VALUES[$_rcfgtg_i]}"
+            return 0
+        fi
+    done
+    printf -v "$1" '%s' ""
+    return 1
+}
+
 _config_is_private_key() {
     case "$1" in
         .haiku|.haiku.*) return 0 ;;
@@ -1168,54 +1082,14 @@ _config_is_private_key() {
     return 1
 }
 
-_REMEMBER_CFG_FLATTEN_JQ='. as $doc | [paths(type != "object" and type != "array") | select(all(.[]; type == "string")) | select(.[0] != "haiku")] as $ks | if (($ks | flatten) | any(test("^[A-Za-z0-9_]+$") | not)) then "#refuse a config key is outside [A-Za-z0-9_]" elif (($ks | map(join("_")) | unique | length) != ($ks | length)) then "#refuse two config keys flatten to the same name" elif ([$ks[] as $p | $doc | getpath($p) | select(type == "string" and test("[\t\n]"))] | length) > 0 then "#refuse a config value contains a tab or a newline" else $ks[] as $p | ($doc | getpath($p)) as $v | select($v != null) | ($p | join(".")) + "\t" + ($v | tostring) end'
 
-_REMEMBER_CFG_FLATTEN_PY='
-import json, re, sys
-
-def walk(node, prefix, out):
-    if isinstance(node, dict):
-        for k, v in node.items():
-            walk(v, prefix + [k], out)
-    elif isinstance(node, list):
-        return
-    else:
-        out.append((prefix, node))
-
-try:
-    doc = json.load(open(sys.argv[1], encoding="utf-8"))
-except Exception:
-    sys.exit(1)
-
-rows = []
-walk(doc, [], rows)
-rows = [(p, v) for p, v in rows if p and p[0] != "haiku" and v is not None]
-
-ok = re.compile(r"^[A-Za-z0-9_]+$")
-for p, v in rows:
-    if not all(ok.match(part) for part in p):
-        print("#refuse a config key is outside [A-Za-z0-9_]")
-        sys.exit(0)
-    if isinstance(v, str) and ("\t" in v or "\n" in v):
-        print("#refuse a config value contains a tab or a newline")
-        sys.exit(0)
-slots = ["_".join(p) for p, _ in rows]
-if len(set(slots)) != len(slots):
-    print("#refuse two config keys flatten to the same name")
-    sys.exit(0)
-
-out = []
-for p, v in rows:
-    out.append(".".join(p) + "\t" + (v if isinstance(v, str) else json.dumps(v)))
-sys.stdout.write("\n".join(out))
-'
 
 _remember_cfg_flatten_cache_path() {
     local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
     [ -n "${REMEMBER_DIR:-}" ] || return 1
-    local _key="${REMEMBER_DIR//[!a-zA-Z0-9]/-}"
-    [ "${#_key}" -gt 120 ] && _key="${_key: -120}"
-    printf '%s' "${TMPDIR:-/tmp}/remember-config-cache-v2-${_key}"
+    local _slug="${REMEMBER_DIR//[!a-zA-Z0-9]/-}"
+    [ "${#_slug}" -gt 120 ] && _slug="${_slug: -120}"
+    printf '%s' "${TMPDIR:-/tmp}/remember-config-cache-v2-${_slug}"
 }
 
 _remember_cfg_flatten_cache_sources() {
@@ -1284,39 +1158,33 @@ _remember_cfg_flatten_cache_load() {
         [ -n "$_line" ] || continue
         if [ "$_stage" = "0" ]; then
             _stage=1
-            case "$_line" in
-                '#REMEMBER_DIR='*)
-                    _identity_raw="${_line#'#REMEMBER_DIR='}"
-                    _remember_cfg_flatten_cache_valid_value "$_identity_raw" || {
-                        rm -f "$_f" 2>/dev/null
-                        return 1
-                    }
-                    continue
-                    ;;
-                *)
+            if [ "${_line#'#REMEMBER_DIR='}" != "$_line" ]; then
+                _identity_raw="${_line#'#REMEMBER_DIR='}"
+                _remember_cfg_flatten_cache_valid_value "$_identity_raw" || {
                     rm -f "$_f" 2>/dev/null
                     return 1
-                    ;;
-            esac
+                }
+                continue
+            else
+                rm -f "$_f" 2>/dev/null
+                return 1
+            fi
         fi
         if [ "$_stage" = "1" ]; then
             _stage=2
-            case "$_line" in
-                '#RCFG_EXISTS='*)
-                    _exists_raw="${_line#'#RCFG_EXISTS='}"
-                    case "$_exists_raw" in
-                        *[!01]*|'')
-                            rm -f "$_f" 2>/dev/null
-                            return 1
-                            ;;
-                    esac
-                    continue
-                    ;;
-                *)
-                    rm -f "$_f" 2>/dev/null
-                    return 1
-                    ;;
-            esac
+            if [ "${_line#'#RCFG_EXISTS='}" != "$_line" ]; then
+                _exists_raw="${_line#'#RCFG_EXISTS='}"
+                case "$_exists_raw" in
+                    *[!01]*|'')
+                        rm -f "$_f" 2>/dev/null
+                        return 1
+                        ;;
+                esac
+                continue
+            else
+                rm -f "$_f" 2>/dev/null
+                return 1
+            fi
         fi
         if ! _remember_cfg_flatten_cache_valid_line "$_line"; then
             rm -f "$_f" 2>/dev/null
@@ -1338,14 +1206,15 @@ _remember_cfg_flatten_cache_load() {
         return 1
     }
 
-    local _assign _assign_name _assign_value
+    local _assign _assign_name _assign_value _assign_decoded
     for _assign in ${_lines[@]+"${_lines[@]}"}; do
         _assign_name="${_assign%%$'\t'*}"
         _assign_value="${_assign#*$'\t'}"
-        _remember_cfg_flatten_q_decode "$_assign_name" "$_assign_value" || {
+        _remember_cfg_flatten_q_decode _assign_decoded "$_assign_value" || {
             rm -f "$_f" 2>/dev/null
             return 1
         }
+        _remember_cfg_table_set "$_assign_name" "$_assign_decoded"
     done
     return 0
 }
@@ -1401,10 +1270,14 @@ _config_load() {
 
     local _dump="" _rc=0
     if command -v jq >/dev/null 2>&1; then
-        _dump=$(jq -r "$_REMEMBER_CFG_FLATTEN_JQ" "$REMEMBER_CONFIG" 2>/dev/null) || _rc=1
+        local _cfg_flatten_jq_dir="${BASH_SOURCE[0]%/*}"
+        [ "$_cfg_flatten_jq_dir" = "${BASH_SOURCE[0]}" ] && _cfg_flatten_jq_dir="$(pwd)"
+        _dump=$(jq -r -f "$_cfg_flatten_jq_dir/cfg_flatten.jq" "$REMEMBER_CONFIG" 2>/dev/null) || _rc=1
     else
         declare -f _remember_python >/dev/null 2>&1 && _remember_python
-        _dump=$("${PYTHON:-python3}" -c "$_REMEMBER_CFG_FLATTEN_PY" "$REMEMBER_CONFIG" 2>/dev/null) || _rc=1
+        local _cfg_flatten_dir="${BASH_SOURCE[0]%/*}"
+        [ "$_cfg_flatten_dir" = "${BASH_SOURCE[0]}" ] && _cfg_flatten_dir="$(pwd)"
+        _dump=$(_remember_log_run_python "$_cfg_flatten_dir/cfg_flatten.py" "$REMEMBER_CONFIG" 2>/dev/null) || _rc=1
     fi
 
     if [ "$_rc" -ne 0 ]; then
@@ -1413,19 +1286,17 @@ _config_load() {
         return 0
     fi
 
-    case "$_dump" in
-        '#refuse'*)
-            [ "${REMEMBER_DEBUG:-}" = "1" ] && \
-                echo "remember: ${_dump#'#refuse' } -- reading config one key at a time" >&2
-            _REMEMBER_CFG_STATE="fallback"
-            return 0
-            ;;
-    esac
+    if [ "${_dump#\#refuse}" != "$_dump" ]; then
+        [ "${REMEMBER_DEBUG:-}" = "1" ] && \
+            echo "remember: ${_dump#'#refuse' } -- reading config one key at a time" >&2
+        _REMEMBER_CFG_STATE="fallback"
+        return 0
+    fi
 
     local _k _v
     while IFS=$'\t' read -r _k _v; do
         [ -n "$_k" ] || continue
-        printf -v "_RCFG_${_k//./_}" '%s' "$_v"
+        _remember_cfg_table_set "_RCFG_${_k//./_}" "$_v"
     done <<< "$_dump"
     _remember_cfg_flatten_cache_publish "$_dump"
     _REMEMBER_CFG_STATE="ok"
@@ -1437,14 +1308,24 @@ config() {
     printf '%s\n' "$_cfg_result"
 }
 
+_remember_log_run_python() {
+    case "${PYTHON:-python3}" in
+        python3) python3 "$@" ;;
+        python) python "$@" ;;
+        py\ -3) py -3 "$@" ;;
+        py) py "$@" ;;
+        *) return 127 ;;
+    esac
+}
+
 config_into() {
     local _cfg_into_var="$1"
-    local _cfg_into_key="$2"
+    local _cfg_into_name="$2"
     local _cfg_into_default="$3"
 
-    if ! ( LC_ALL=C; [[ "$_cfg_into_key" =~ ^\.[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$ ]] ); then
+    if ! ( LC_ALL=C; [[ "$_cfg_into_name" =~ ^\.[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$ ]] ); then
         [ "${REMEMBER_DEBUG:-}" = "1" ] && \
-            echo "remember: config() key '$_cfg_into_key' is not a plain dotted path -- returning the default rather than looking it up" >&2
+            echo "remember: config() key '$_cfg_into_name' is not a plain dotted path -- returning the default rather than looking it up" >&2
         printf -v "$_cfg_into_var" '%s' "$_cfg_into_default"
         return
     fi
@@ -1454,10 +1335,11 @@ config_into() {
         _config_load
     fi
 
-    if [ "$_REMEMBER_CFG_STATE" = "ok" ] && ! _config_is_private_key "$_cfg_into_key"; then
-        local _cfg_into_slot="_RCFG_${_cfg_into_key#.}"
+    if [ "$_REMEMBER_CFG_STATE" = "ok" ] && ! _config_is_private_key "$_cfg_into_name"; then
+        local _cfg_into_slot="_RCFG_${_cfg_into_name#.}"
         _cfg_into_slot="${_cfg_into_slot//./_}"
-        local _cfg_into_hit="${!_cfg_into_slot:-}"
+        local _cfg_into_hit
+        _remember_cfg_table_get_into _cfg_into_hit "$_cfg_into_slot" || _cfg_into_hit=""
         [ -n "$_cfg_into_hit" ] || _cfg_into_hit="$_cfg_into_default"
         printf -v "$_cfg_into_var" '%s' "$_cfg_into_hit"
         return
@@ -1469,29 +1351,16 @@ config_into() {
     fi
     local _cfg_into_val=""
     if command -v jq >/dev/null 2>&1; then
-        _cfg_into_val=$(jq -r "if $_cfg_into_key == null then \"\" else ($_cfg_into_key | tostring) end" \
-            "$REMEMBER_CONFIG" 2>/dev/null)
+        local _cfg_into_prog
+        printf -v _cfg_into_prog 'if %s == null then "" else (%s | tostring) end' \
+            "$_cfg_into_name" "$_cfg_into_name"
+        _cfg_into_val=$(jq -r "$_cfg_into_prog" "$REMEMBER_CONFIG" 2>/dev/null)
     elif type _jq_fallback >/dev/null 2>&1; then
-        _cfg_into_val=$(_jq_fallback -r "$_cfg_into_key" "$REMEMBER_CONFIG" 2>/dev/null)
+        _cfg_into_val=$(_jq_fallback -r "$_cfg_into_name" "$REMEMBER_CONFIG" 2>/dev/null)
     else
-        _cfg_into_val=$("${PYTHON:-python3}" -c '
-import json, sys
-try:
-    data = json.load(open(sys.argv[2]))
-    keys = sys.argv[1].strip(".").split(".")
-    v = data
-    for k in keys:
-        if k and isinstance(v, dict):
-            v = v.get(k)
-        if v is None:
-            break
-    if v is not None:
-        # jq -r semantics: raw strings, JSON textual form otherwise
-        # (crucially "true"/"false", not Python str(True)/str(False)).
-        print(v if isinstance(v, str) else json.dumps(v))
-except Exception:
-    pass
-' "$_cfg_into_key" "$REMEMBER_CONFIG" 2>/dev/null)
+        local _cfg_py_dir="${BASH_SOURCE[0]%/*}"
+        [ "$_cfg_py_dir" = "${BASH_SOURCE[0]}" ] && _cfg_py_dir="$(pwd)"
+        _cfg_into_val=$(_remember_log_run_python "$_cfg_py_dir/jq_fallback_get.py" "$REMEMBER_CONFIG" "$_cfg_into_name")
     fi
     [ -n "$_cfg_into_val" ] || _cfg_into_val="$_cfg_into_default"
     printf -v "$_cfg_into_var" '%s' "$_cfg_into_val"

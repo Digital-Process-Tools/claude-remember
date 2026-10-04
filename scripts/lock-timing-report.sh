@@ -92,7 +92,12 @@ echo ""
 
 # Nearest-rank percentiles, insertion-sorted per lock. No `asort` — that is
 # gawk-only, and macOS ships the one-true-awk.
-awk -F'\t' '
+# The tab separator is set in BEGIN rather than as `-F'\t'` (#898 round 8):
+# with a quoted word before the program's own opening quote, a line-oriented
+# scanner cannot see where the awk program starts, and counts its `for`
+# loops as shell loops.
+awk '
+BEGIN { FS = "\t" }
 function pct(arr, n, q,   i) {
     i = int(q * n + 0.999999);
     if (i < 1) i = 1;

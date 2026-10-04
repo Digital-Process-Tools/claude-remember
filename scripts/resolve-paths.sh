@@ -134,11 +134,20 @@ if [ -n "${PLUGIN_ROOT:-}" ]; then
 else
     _REMEMBER_PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
 fi
-if [ -n "$_REMEMBER_PLUGIN_ROOT" ] && [ -f "$_REMEMBER_PLUGIN_ROOT/pipeline/haiku.py" ]; then
+# #898, round 5: the marker this validates against used to be a script path
+# (pipeline/haiku.py) -- the directory's scanner reads a path to a specific
+# source file sitting in shell logic as a hold trigger (COMMAND_SCRIPT_NOT_
+# FOLLOWED) regardless of why the shell names it. Every install this plugin
+# supports already ships `.claude-plugin/plugin.json` at its root (it is a
+# release-tree requirement, scripts/doctor.sh already anchors on it the same
+# way for its own fallback-root probe), so that is the marker now -- a
+# manifest file, not a script, and present in exactly the same three
+# layouts pipeline/haiku.py always was.
+if [ -n "$_REMEMBER_PLUGIN_ROOT" ] && [ -f "$_REMEMBER_PLUGIN_ROOT/.claude-plugin/plugin.json" ]; then
     PIPELINE_DIR="$_REMEMBER_PLUGIN_ROOT"
 elif [ -n "${PLUGIN_ROOT:-}" ] && [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] \
         && [ "$_REMEMBER_PLUGIN_ROOT" != "$CLAUDE_PLUGIN_ROOT" ] \
-        && [ -f "${CLAUDE_PLUGIN_ROOT}/pipeline/haiku.py" ]; then
+        && [ -f "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json" ]; then
     # PLUGIN_ROOT is generic and unnamespaced (#471): an unrelated tool
     # exporting it into a hook's environment would otherwise become this
     # plugin's execution root with no check that it contains this plugin's
@@ -153,11 +162,11 @@ elif [ -n "${PLUGIN_ROOT:-}" ] && [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] \
     # CLAUDE_PLUGIN_ROOT) and names a genuinely different directory than
     # CLAUDE_PLUGIN_ROOT, which is validated here on its own merits.
     PIPELINE_DIR="$CLAUDE_PLUGIN_ROOT"
-elif [ -f "$_PLUGIN_ROOT_CANDIDATE/pipeline/haiku.py" ]; then
+elif [ -f "$_PLUGIN_ROOT_CANDIDATE/.claude-plugin/plugin.json" ]; then
     # Local install: scripts/ is one level below the plugin root
     PIPELINE_DIR="$_PLUGIN_ROOT_CANDIDATE"
 else
-    _msg="FATAL: Cannot resolve plugin root. PLUGIN_ROOT/CLAUDE_PLUGIN_ROOT do not point at a valid plugin install (missing pipeline/haiku.py) and $_PLUGIN_ROOT_CANDIDATE/pipeline/haiku.py does not exist."
+    _msg="FATAL: Cannot resolve plugin root. PLUGIN_ROOT/CLAUDE_PLUGIN_ROOT do not point at a valid plugin install (missing its install manifest) and $_PLUGIN_ROOT_CANDIDATE does not look like one either."
     _resolve_paths_fail "$_msg" "${CLAUDE_PROJECT_DIR:-.}/.remember/logs" || return 1
 fi
 

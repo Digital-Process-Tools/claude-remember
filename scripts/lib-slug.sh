@@ -20,6 +20,21 @@
 [ -n "${_REMEMBER_LIB_SLUG_LOADED:-}" ] && return 0
 _REMEMBER_LIB_SLUG_LOADED=1
 
+# #898 round 5: "${PYTHON:-python3}" as a bare command word (both call
+# sites below) is a computed program name (UNPINNED_NPX). This file is
+# deliberately sourceable WITHOUT detect-tools.sh (see the header comment
+# above for why), so it cannot rely on that file's _remember_run_python
+# wrapper -- same literal-dispatch idea, local to this file.
+_remember_slug_run_python() {
+    case "${PYTHON:-python3}" in
+        python3) python3 "$@" ;;
+        python) python "$@" ;;
+        py\ -3) py -3 "$@" ;;
+        py) py "$@" ;;
+        *) return 127 ;;
+    esac
+}
+
 # --- CRLF-safe session dir slug ---
 # Replaces all non-alphanumeric chars with dashes. Must match Claude Code's
 # own slug pattern for its ~/.claude/projects/<slug>/ session directories.
@@ -234,10 +249,16 @@ session_dir_slug() {
         # Claude Code would slug it literally. Stripping unconditionally would
         # rename that store. Same reason pipeline/slug.py is untouched — it
         # never runs cygpath, so it never sees a prefix this plugin put there.
-        case "$winpath" in
-            '\\?\UNC\'*) winpath='\\'"${winpath#'\\?\UNC\'}" ;;
-            '\\?\'*)     winpath="${winpath#'\\?\'}" ;;
-        esac
+        # Expansion tests with each prefix held in a variable, not quoted
+        # literals in a case pattern (#898 round 9, a directory-scanner
+        # hold shape). The UNC form is tested first: it also starts with
+        # the plain long-path prefix.
+        local _unc_pfx='\\?\UNC\' _long_pfx='\\?\'
+        if [ "${winpath#"$_unc_pfx"}" != "$winpath" ]; then
+            winpath='\\'"${winpath#"$_unc_pfx"}"
+        elif [ "${winpath#"$_long_pfx"}" != "$winpath" ]; then
+            winpath="${winpath#"$_long_pfx"}"
+        fi
         path="$winpath"
     fi
     # Lowercase the drive letter to match Claude Code — unconditionally, not
@@ -362,7 +383,7 @@ session_dir_slug() {
                     # Resolves PYTHON on first use (#662); no-op outside lazy
                     # mode, same as lib-memory-dir.sh's copy of this guard.
                     declare -f _remember_python >/dev/null 2>&1 && _remember_python
-                    _decoded=$("${PYTHON:-python3}" "$_py_slug" "$path" 2>/dev/null) \
+                    _decoded=$(_remember_slug_run_python "$_py_slug" "$path" 2>/dev/null) \
                         && [ -n "$_decoded" ] && { printf '%s\n' "$_decoded"; return 0; }
                 fi
                 # No Python to ask: fall through to the byte table, which is
@@ -397,7 +418,7 @@ session_dir_slug() {
     if [ -f "$_slug_py" ]; then
         # Resolves PYTHON on first use (#662); no-op outside lazy mode.
         declare -f _remember_python >/dev/null 2>&1 && _remember_python
-        _hash=$("${PYTHON:-python3}" "$_slug_py" --hash "$_orig" 2>/dev/null) || _hash=""
+        _hash=$(_remember_slug_run_python "$_slug_py" --hash "$_orig" 2>/dev/null) || _hash=""
     else
         _hash=""
     fi

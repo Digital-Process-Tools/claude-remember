@@ -131,10 +131,15 @@ def _resolve_codex_bin() -> str:
 
 # CLAUDE_CODE_* vars are stripped as parent-session identity (#95) — but the
 # prefix is a proxy, not a definition, and one member of the family is the
-# child's *credentials*. Stripping CLAUDE_CODE_OAUTH_TOKEN leaves `claude -p`
-# unauthenticated, so nothing ever saves for anyone who authenticated with
-# `claude setup-token` or runs under a hosted Agent SDK (#131). Keep it.
-_CHILD_ENV_KEEP = frozenset({"CLAUDE_CODE_OAUTH_TOKEN"})
+# child's own credential. Stripping it leaves `claude -p` unauthenticated, so
+# nothing ever saves for anyone who authenticated with `claude setup-token`
+# or runs under a hosted Agent SDK (#131). A suffix-only exception (any
+# "CLAUDE_CODE_*_TOKEN") is NOT equivalent: real hosts set other
+# CLAUDE_CODE_*_TOKEN variables for unrelated purposes (an internal
+# messaging token, observed), and exempting those from the strip too would
+# leak them into the child for no reason -- so this names the one exact
+# variable, not a shape.
+_CHILD_ENV_OAUTH_NAME = "CLAUDE_CODE_OAUTH_TOKEN"
 
 # Set on the child, read by scripts/resolve-paths.sh (#204). Shared here as a
 # constant so the tests pin one spelling against both sides of the contract.
@@ -315,8 +320,10 @@ def _child_env() -> dict[str, str]:
     ``CLAUDE_CODE_*`` family (e.g. ``CLAUDE_CODE_SESSION_ID``) identify the
     parent Claude Code session; if they leak into the subprocess it looks like
     a resumable session to anything keying off them (#95). Everything else is
-    passed through unchanged — including the credentials in ``_CHILD_ENV_KEEP``,
-    which only share the prefix by accident.
+    passed through unchanged — including ``CLAUDE_CODE_OAUTH_TOKEN``, which
+    shares the ``CLAUDE_CODE_`` prefix only by accident; see
+    ``_CHILD_ENV_OAUTH_NAME`` for the one exact exemption, deliberately not
+    widened to the rest of the family (#898).
 
     ``REMEMBER_NESTED_SUMMARIZER`` is then set as the positive counterpart to
     that stripping. Removing the parent markers is what lets the child start at
@@ -345,7 +352,7 @@ def _child_env() -> dict[str, str]:
     env = {
         k: v
         for k, v in os.environ.items()
-        if k in _CHILD_ENV_KEEP
+        if k == _CHILD_ENV_OAUTH_NAME
         or (
             k != "CLAUDECODE"
             and k != "CLAUDE_JOB_DIR"
@@ -457,16 +464,17 @@ def _failure_detail(stdout: str, stderr: str) -> str:
     return joined
 
 
-# The nested `claude -p` needs its own credentials. Normally that is
-# CLAUDE_CODE_OAUTH_TOKEN, kept across the strip by _CHILD_ENV_KEEP (#131).
-# But some hosts never place it in a hook subprocess's environment at all — the
+# The nested `claude -p` needs its own credentials. Normally that is the
+# host's own OAuth credential, kept across the strip by
+# _CHILD_ENV_OAUTH_NAME above (#131). But some hosts never place it
+# in a hook subprocess's environment at all — the
 # Claude Code desktop / Agent SDK host withholds it from spawned children — so
 # there is nothing to keep and `claude -p` is unauthenticated: the silent-save
 # outage of #129 on a machine that *did* run `claude setup-token`.
 #
 # #860, round 3: there is no recovery path here at all any more. The plugin
 # used to offer one -- a recovery token the operator could hand it, via a
-# `oauth_token` userConfig option, to fill CLAUDE_CODE_OAUTH_TOKEN when the
+# `oauth_token` userConfig option, to fill the host credential above when the
 # host withheld it from this hook's own subprocess -- but reading ANY
 # credential from the user's machine is itself the condition the directory's
 # security scan holds on, independent of consent or provenance, and the
@@ -581,7 +589,7 @@ def _config_candidates() -> list[str]:
 # token; this file reads neither any more, for any purpose.
 
 
-# ── The ambient ANTHROPIC_API_KEY (#703, reported in #693) ────────────────────
+# ── The ambient ANTHROPIC_API_KEY (#703, reported in #693; #898 round 6) ───────
 #
 # The Claude CLI resolves credentials in a fixed order, and ANTHROPIC_API_KEY
 # out-ranks the CLI's own login. So an operator who has that login AND keeps that
@@ -592,61 +600,27 @@ def _config_candidates() -> list[str]:
 # found it by reading the child's stderr in the daily log after days of opaque
 # `save-session.sh --force exited 1` warnings.
 #
-# Stripping it unconditionally does not remove that failure, it relocates it:
-# authenticating the CLI with ANTHROPIC_API_KEY alone is normal and documented,
-# and for those installs a strip leaves the child with no credential at all and
-# every save failing in exactly the same silent shape.
-#
-# So the strip is conditional on another credential actually being visible.
-# "Visible" is the honest limit here: the CLI's own login, stored in the macOS
-# Keychain, is not something this process can see without probing the operator's keychain
-# (which prompts, and reads a secret we have no business reading), so `auto`
-# keeps the key for those operators -- today's behaviour, not a new failure --
-# and `haiku.anthropic_api_key` lets them say `strip` once. The failure hint in
-# `call_haiku` is what tells them the knob exists at the moment it matters.
+# #898, round 6 (maintainer decision): this module no longer reads the host to
+# guess whether stripping is safe -- no login-file probe, no "is another
+# credential visible" check. The nested `claude -p` inherits ANTHROPIC_API_KEY
+# exactly as it inherits every other unrelated variable; the default is
+# `keep`. `haiku.anthropic_api_key: "strip"` is the one explicit, opt-in way
+# an operator removes it for this one call -- for a login this process cannot
+# see (a macOS Keychain entry, say) or simply because they want the nested
+# call to never touch the key. The failure hint in `call_haiku` is what tells
+# them the knob exists at the moment it matters.
 ANTHROPIC_API_KEY_ENV = "ANTHROPIC_API_KEY"
 
-_ANTHROPIC_KEY_POLICIES = ("auto", "keep", "strip")
-_ANTHROPIC_KEY_POLICY_DEFAULT = "auto"
-
-
-def _claude_login_path() -> str:
-    """Where the Claude CLI keeps a `claude.ai` login on disk.
-
-    ``CLAUDE_CONFIG_DIR`` relocates the CLI's whole config directory, so it is
-    honoured here rather than assuming ``~/.claude`` -- an operator who moved it
-    has a login this function would otherwise declare absent.
-    """
-    config_dir = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
-    if not config_dir:
-        config_dir = os.path.join(os.path.expanduser("~"), ".claude")
-    return os.path.join(config_dir, ".credentials.json")
-
-
-def _host_login_present() -> bool:
-    """True when a `claude.ai` login is visible ON DISK.
-
-    False means "not visible", never "absent": a login held in the macOS
-    Keychain is invisible here by design (see the note above). Every caller has
-    to treat a False as the weaker claim it is, which is why `auto` KEEPS the
-    ambient key on a False rather than stripping it.
-
-    Never raises -- a permission error reading a path under HOME must not become
-    a save outage.
-    """
-    try:
-        return os.path.getsize(_claude_login_path()) > 0
-    except OSError:
-        return False
+_ANTHROPIC_KEY_POLICIES = ("keep", "strip")
+_ANTHROPIC_KEY_POLICY_DEFAULT = "keep"
 
 
 def _configured_anthropic_key_policy() -> str:
-    """`haiku.anthropic_api_key` from config: ``auto``, ``keep`` or ``strip``.
+    """`haiku.anthropic_api_key` from config: ``keep`` or ``strip``.
 
-    A value nothing recognises falls back to ``auto`` and is reported: a
-    typo'd policy that silently graded as one of the two behaviours would be
-    indistinguishable from never having configured one, on a key whose whole
-    purpose is to overrule what this module inferred.
+    A value nothing recognises falls back to ``keep`` -- the default -- and is
+    reported: a typo'd policy that silently graded as ``strip`` would remove a
+    credential the operator never asked to remove.
     """
     for path in _config_candidates():
         try:
@@ -686,20 +660,6 @@ def _configured_anthropic_key_policy() -> str:
     return _ANTHROPIC_KEY_POLICY_DEFAULT
 
 
-def _other_credential() -> str | None:
-    """Name of a credential the child can authenticate with besides the ambient
-    key, or ``None`` when none is visible.
-
-    The name, not a bool, because it goes into the reason string: an operator
-    reading why their key was dropped should see which credential displaced it.
-    """
-    if os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "").strip():
-        return "CLAUDE_CODE_OAUTH_TOKEN from the host"
-    if _host_login_present():
-        return f"the claude.ai login in {_claude_login_path()}"
-    return None
-
-
 def _anthropic_api_key_decision() -> tuple[bool, str]:
     """``(strip?, reason)`` for the ambient ANTHROPIC_API_KEY.
 
@@ -711,14 +671,9 @@ def _anthropic_api_key_decision() -> tuple[bool, str]:
     if not os.environ.get(ANTHROPIC_API_KEY_ENV, "").strip():
         return False, "not set"
     policy = _configured_anthropic_key_policy()
-    if policy == "keep":
-        return False, "haiku.anthropic_api_key is 'keep'"
     if policy == "strip":
         return True, "haiku.anthropic_api_key is 'strip'"
-    other = _other_credential()
-    if other:
-        return True, f"another credential is available ({other})"
-    return False, "it is the only credential this process can see"
+    return False, "haiku.anthropic_api_key is 'keep' (the default)"
 
 
 # Markers that a failed call plausibly died on credentials rather than on the

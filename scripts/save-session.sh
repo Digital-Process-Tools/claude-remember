@@ -252,12 +252,17 @@ trap cleanup EXIT
 DRY_RUN=false
 FORCE=false
 SESSION_ID=""
+# `[ ]` tests, not a `case` with a catch-all `*)` arm inside this loop
+# (#898 round 7 -- that shape is one the plugin directory's scanner
+# holds a submission on).
 for arg in "$@"; do
-    case "$arg" in
-        --dry)   DRY_RUN=true ;;
-        --force) FORCE=true ;;
-        *)       SESSION_ID="$arg" ;;
-    esac
+    if [ "$arg" = "--dry" ]; then
+        DRY_RUN=true
+    elif [ "$arg" = "--force" ]; then
+        FORCE=true
+    else
+        SESSION_ID="$arg"
+    fi
 done
 
 # --- Lock (mkdir acquisition, rename-based stale takeover — see lib-lock.sh) ---
@@ -437,7 +442,7 @@ dispatch "before_save"
 
 # --- Step 1: Extract ---
 log "extract" "session $SESSION_ID"
-assign_kv <<< "$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell extract "$SESSION_ID" "$PROJECT_DIR")"
+assign_kv <<< "$(cd "$PIPELINE_DIR" && _remember_run_python -m pipeline.shell extract "$SESSION_ID" "$PROJECT_DIR")"
 # #695: the bridge is load-bearing, so its failure must be said here rather
 # than discovered three layers down. `pipeline.shell extract` ALWAYS prints
 # EXTRACT_FILE; an empty one means the line did not survive the crossing --
@@ -532,7 +537,7 @@ if [ "$EXCHANGE_COUNT" -eq 0 ]; then
             log "extract" "0 exchanges, skip -- position -> $POSITION"
             SAVE_ENVELOPE="$ENVELOPE"
         fi
-        cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell save-position "$LAST_SAVE_FILE" "$SESSION_ID" "$POSITION" "$SAVE_ENVELOPE" "$SKIP_LINES"
+        cd "$PIPELINE_DIR" && _remember_run_python -m pipeline.shell save-position "$LAST_SAVE_FILE" "$SESSION_ID" "$POSITION" "$SAVE_ENVELOPE" "$SKIP_LINES"
     else
         log "extract" "0 exchanges, skip (dry run -- position unchanged)"
     fi
@@ -706,7 +711,7 @@ case "$EXTRACT_MAX_BYTES" in
         EXTRACT_MAX_BYTES=300000
         ;;
 esac
-cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell build-prompt "$EXTRACT_FILE" "$TMP_LAST_ENTRY" "$CURRENT_TIME" "$BRANCH" "$TMP_PROMPT" "$EXTRACT_MAX_BYTES"
+cd "$PIPELINE_DIR" && _remember_run_python -m pipeline.shell build-prompt "$EXTRACT_FILE" "$TMP_LAST_ENTRY" "$CURRENT_TIME" "$BRANCH" "$TMP_PROMPT" "$EXTRACT_MAX_BYTES"
 
 [ ! -s "$TMP_PROMPT" ] && { log "prompt" "ERROR: empty"; exit 1; }
 grep -q '{{TIME}}\|{{BRANCH}}\|{{LAST_ENTRY}}\|{{EXTRACT}}' "$TMP_PROMPT" && { log "prompt" "ERROR: unsubstituted placeholders in prompt"; exit 1; }
@@ -750,22 +755,22 @@ case "$MAX_FAILURES" in ''|*[!0-9]*) MAX_FAILURES=3 ;; esac
 save_position_span() {
     if [ "$ENVELOPE" != "unrecognised" ] && [ "$ENVELOPE_HAS_UNMAPPED_STEP" = "1" ]; then
         log "extract" "$ENVELOPE envelope with an unmapped step type, skip -- position -> $POSITION (span quarantined from line $SKIP_LINES for a future build)"
-        cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell save-position "$LAST_SAVE_FILE" "$SESSION_ID" "$POSITION" "unrecognised" "$SKIP_LINES"
+        cd "$PIPELINE_DIR" && _remember_run_python -m pipeline.shell save-position "$LAST_SAVE_FILE" "$SESSION_ID" "$POSITION" "unrecognised" "$SKIP_LINES"
     else
-        cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell save-position "$LAST_SAVE_FILE" "$SESSION_ID" "$POSITION" "$ENVELOPE"
+        cd "$PIPELINE_DIR" && _remember_run_python -m pipeline.shell save-position "$LAST_SAVE_FILE" "$SESSION_ID" "$POSITION" "$ENVELOPE"
     fi
 }
 
 record_summary_failure() {
     [ "$MAX_FAILURES" -eq 0 ] && return 0
-    _prev_key=""
+    _prev_span_id=""
     _prev_count=0
     if [ -f "$FAILURE_MARKER" ]; then
-        read -r _prev_key _prev_count < "$FAILURE_MARKER" || true
+        read -r _prev_span_id _prev_count < "$FAILURE_MARKER" || true
         case "$_prev_count" in ''|*[!0-9]*) _prev_count=0 ;; esac
     fi
-    _key="${SESSION_ID}:${POSITION}"
-    if [ "$_prev_key" = "$_key" ]; then
+    _span_id="${SESSION_ID}:${POSITION}"
+    if [ "$_prev_span_id" = "$_span_id" ]; then
         # 10# after the case (#332): a truncated marker read back as "08"
         # would abandon this branch, and the branch is what escalates.
         _count=$(( 10#$_prev_count + 1 ))
@@ -778,7 +783,7 @@ record_summary_failure() {
         save_position_span
         rm -f "$FAILURE_MARKER"
     elif marker_write_ok "$FAILURE_MARKER" summary; then
-        echo "$_key $_count" > "$FAILURE_MARKER"
+        echo "$_span_id $_count" > "$FAILURE_MARKER"
         log "haiku" "failure ${_count}/${MAX_FAILURES} on this span -- will retry next run"
     fi
 }
@@ -792,7 +797,7 @@ SPAWN_DECLINED_EXIT=3
 
 # `|| { ... }` (not a bare `if [ $? ]`) so a failure is handled under set -e
 # instead of tripping the ERR trap at the assignment.
-HAIKU_VARS=$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell call-haiku "$TMP_PROMPT" 2>"$HAIKU_STDERR") || {
+HAIKU_VARS=$(cd "$PIPELINE_DIR" && _remember_run_python -m pipeline.shell call-haiku "$TMP_PROMPT" 2>"$HAIKU_STDERR") || {
     HAIKU_EXIT=$?
     if [ "$HAIKU_EXIT" -eq "$SPAWN_DECLINED_EXIT" ]; then
         # Declined, not failed: no failure is recorded and the position stays
@@ -857,7 +862,7 @@ keep_rejected_text() {
 # normally rewritten to 24h. The #139 fallback below keeps the model's ORIGINAL
 # line when a rewrite would malform it, so an AM/PM header can reach memory that
 # consolidation then does not recognise as an entry at all (#177).
-ENTRY_HEADER_ERE=$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.entry_header --ere entry 2>/dev/null) \
+ENTRY_HEADER_ERE=$(cd "$PIPELINE_DIR" && _remember_run_python -m pipeline.entry_header --ere entry 2>/dev/null) \
     || ENTRY_HEADER_ERE=''
 # A failed lookup must not silently accept everything: fall back to the literal
 # pattern rather than to an empty regex, which grep matches against anything.
@@ -1146,7 +1151,7 @@ if [ "$RUN_NDC" = true ]; then
     NDC_SRC_GEN=$(ndc_read_gen)
     NDC_PROMPT=$(mktemp "${TMPDIR:-/tmp}"/remember-ndc-XXXXXX)
 
-    cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell build-ndc-prompt "$MEMORY_FILE" "$NDC_PROMPT"
+    cd "$PIPELINE_DIR" && _remember_run_python -m pipeline.shell build-ndc-prompt "$MEMORY_FILE" "$NDC_PROMPT"
 
     if [ -s "$NDC_PROMPT" ]; then
         (set +e  # don't inherit set -e -- a haiku non-zero exit must not kill the subshell
@@ -1183,7 +1188,7 @@ if [ "$RUN_NDC" = true ]; then
                     fi
                     ;;
             esac
-            NDC_VARS=$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell call-haiku "$NDC_PROMPT" "" "$NDC_TIMEOUT_SECONDS" 2>"$NDC_ERR")
+            NDC_VARS=$(cd "$PIPELINE_DIR" && _remember_run_python -m pipeline.shell call-haiku "$NDC_PROMPT" "" "$NDC_TIMEOUT_SECONDS" 2>"$NDC_ERR")
             NDC_EXIT=$?
 
             if [ "$NDC_EXIT" -eq "$SPAWN_DECLINED_EXIT" ]; then

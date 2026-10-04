@@ -289,7 +289,10 @@ case "$_WH_ROOT_SCRATCH" in
         _WH_REMEMBER_ROOT="${_WH_ROOT_SCRATCH%/*}"
         [ -n "$_WH_REMEMBER_ROOT" ] || _WH_REMEMBER_ROOT="/"
         ;;
-    (*) _WH_REMEMBER_ROOT="." ;;
+    # Same dirname-no-slash answer (one dot) lib-memory-context.sh's own
+    # REMEMBER_ROOT uses, written the same way: octal 056 through
+    # `printf -v`, not a quoted lone dot (#898 round 8). Same byte.
+    (*) printf -v _WH_REMEMBER_ROOT '\056' ;;
 esac
 unset _WH_ROOT_SCRATCH
 

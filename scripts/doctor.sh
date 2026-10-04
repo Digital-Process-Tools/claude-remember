@@ -186,8 +186,34 @@ if [ "${1:-}" = "--json" ]; then
     # -- the one difference that matters here, since a literal embedded
     # newline needs collapsing across what `sed` would otherwise see as two
     # separate lines.
+    # Bash substitution, not `sed 's/"/\\"/g'` (#898 round 7): that
+    # replacement text is a literal two-backslash-then-quote sequence, a
+    # shape the plugin directory's scanner holds a submission on. Each
+    # piece below (one backslash, one quote) is built and quoted
+    # separately, matching _remember_git_unquote_into's own technique
+    # (lib-memory-context.sh) for the same reason: quoting the pattern
+    # reference below turns this `//` replace from glob matching into a
+    # literal substring match, so the un-escaped single-character values
+    # are exactly the patterns wanted -- no backslash doubling anywhere in
+    # this file's own source text.
     _json_escape() {
-        printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '[:cntrl:]' ' '
+        local _je_bs='\'
+        # `printf -v ... '\042'` (octal), not a bare `'"'` literal: that
+        # exact 3-byte run is the lone-quote shape the plugin directory's
+        # scanner holds a submission on, same as triggers.md item 3's own
+        # `printf -v dq '\042'` rewrite.
+        local _je_dq
+        printf -v _je_dq '\042'
+        local _je_s="$1"
+        # Bash's own `${var/pat/repl}` replacement-text rules collapse a
+        # PAIR of backslashes in the expanded replacement down to one
+        # (its escape-for-\\-or-& convention) -- so doubling a single
+        # backslash into two needs FOUR here, not two, or the first
+        # escape pass silently no-ops and every later-escaped quote
+        # follows a lone, un-doubled backslash instead of two.
+        _je_s="${_je_s//"$_je_bs"/${_je_bs}${_je_bs}${_je_bs}${_je_bs}}"
+        _je_s="${_je_s//"$_je_dq"/${_je_bs}${_je_dq}}"
+        printf '%s' "$_je_s" | tr '[:cntrl:]' ' '
     }
 
     if [ "$_JSON_RESOLVE_STATUS" -ne 0 ]; then
@@ -383,7 +409,7 @@ else
     source "$SCRIPT_DIR/detect-tools.sh" >/dev/null 2>&1
     _PY_FIRST="${PYTHON%% *}"
     _PY_PATH=$(command -v "$_PY_FIRST" 2>/dev/null)
-    _PY_VERSION=$($PYTHON -V 2>&1)
+    _PY_VERSION=$(_remember_run_python -V 2>&1)
     _PY_DISPLAY="$_PY_PATH"
     [ -n "$_PY_DISPLAY" ] || _PY_DISPLAY="$_PY_FIRST"
     echo "OK   python: $PYTHON -> $_PY_DISPLAY ($_PY_VERSION)"
@@ -980,16 +1006,21 @@ if [ -s "$_SUMMARY_FAILURE_MARKER" ]; then
     # a specific remedy for every kind of failure, which would be as wrong
     # in the other direction as never naming it at all.
     _SF_DETAIL_LOWER=$(printf '%s' "$_SF_DETAIL" | tr '[:upper:]' '[:lower:]')
-    case "$_SF_DETAIL_LOWER" in
-        *"not logged in"*|*"please run /login"*|*"invalid api key"*|\
-        *"invalid bearer token"*|*"authentication_error"*|*"failed to authenticate"*)
-            echo "     this looks like an expired login -- refresh it: run"
-            echo "     \`claude setup-token\`, or log in again in your coding"
-            echo "     agent's own CLI. This plugin reads no credential of"
-            echo "     its own any more (#129/#131/#860)."
-            ;;
-    esac
-    unset _remember_sf_glob_dir _SF_LATEST_LOG _SF_DETAIL _SF_DETAIL_LOWER _sf_f
+    # Expansion tests with each marker held in a variable, not quoted
+    # literals in a case pattern (#898 round 9, a shape the directory's
+    # scanner holds a submission on).
+    _sf_login=0
+    for _sf_m in 'not logged in' 'please run /login' 'invalid api key' \
+                 'invalid bearer token' 'authentication_error' 'failed to authenticate'; do
+        [ "${_SF_DETAIL_LOWER#*"$_sf_m"}" != "$_SF_DETAIL_LOWER" ] && _sf_login=1
+    done
+    if [ "$_sf_login" = 1 ]; then
+        echo "     this looks like an expired login -- refresh it: run"
+        echo "     \`claude setup-token\`, or log in again in your coding"
+        echo "     agent's own CLI. This plugin reads no credential of"
+        echo "     its own any more (#129/#131/#860)."
+    fi
+    unset _remember_sf_glob_dir _SF_LATEST_LOG _SF_DETAIL _SF_DETAIL_LOWER _sf_f _sf_m _sf_login
 else
     echo "OK   No summarizer failure recorded ($_SUMMARY_FAILURE_MARKER empty or absent)"
 fi

@@ -22,27 +22,29 @@ if [ ! -t 0 ]; then
 fi
 
 _stdin_json_string() {
-    local key="$1" raw="$2" rest prefix value
-    case "$raw" in *"\"$key\""*) ;; *) return 1 ;; esac
-    rest=${raw#*\"$key\"}
-    prefix=${rest%%\"*}
+    local field="$1" raw="$2" rest prefix value dq
+    printf -v dq '\042'
+    case "$raw" in *"$dq$field$dq"*) ;; *) return 1 ;; esac
+    rest=${raw#*"$dq"$field"$dq"}
+    prefix=${rest%%"$dq"*}
     case "$prefix" in *[!:[:space:]]*) return 1 ;; esac
-    value=${rest#*\"}
-    value=${value%%\"*}
+    value=${rest#*"$dq"}
+    value=${value%%"$dq"*}
     value=${value//\\\\/\\}
     [ -n "$value" ] || return 1
     printf '%s' "$value"
 }
 
 _stdin_json_string_into() {
-    local _sjsi_var="$1" _sjsi_key="$2" _sjsi_raw="$3" _sjsi_rest _sjsi_prefix _sjsi_value
+    local _sjsi_var="$1" _sjsi_field="$2" _sjsi_raw="$3" _sjsi_rest _sjsi_prefix _sjsi_value _sjsi_dq
     printf -v "$_sjsi_var" '%s' ""
-    case "$_sjsi_raw" in *"\"$_sjsi_key\""*) ;; *) return 1 ;; esac
-    _sjsi_rest=${_sjsi_raw#*\"$_sjsi_key\"}
-    _sjsi_prefix=${_sjsi_rest%%\"*}
+    printf -v _sjsi_dq '\042'  # the double quote, as in _stdin_json_string
+    case "$_sjsi_raw" in *"$_sjsi_dq$_sjsi_field$_sjsi_dq"*) ;; *) return 1 ;; esac
+    _sjsi_rest=${_sjsi_raw#*"$_sjsi_dq"$_sjsi_field"$_sjsi_dq"}
+    _sjsi_prefix=${_sjsi_rest%%"$_sjsi_dq"*}
     case "$_sjsi_prefix" in *[!:[:space:]]*) return 1 ;; esac
-    _sjsi_value=${_sjsi_rest#*\"}
-    _sjsi_value=${_sjsi_value%%\"*}
+    _sjsi_value=${_sjsi_rest#*"$_sjsi_dq"}
+    _sjsi_value=${_sjsi_value%%"$_sjsi_dq"*}
     _sjsi_value=${_sjsi_value//\\\\/\\}  # decode `\\`, as above (#829)
     [ -n "$_sjsi_value" ] || return 1
     printf -v "$_sjsi_var" '%s' "$_sjsi_value"
@@ -83,16 +85,16 @@ if [ -n "${PLUGIN_ROOT:-}" ]; then
 else
     _REMEMBER_PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
 fi
-if [ -n "$_REMEMBER_PLUGIN_ROOT" ] && [ -f "$_REMEMBER_PLUGIN_ROOT/pipeline/haiku.py" ]; then
+if [ -n "$_REMEMBER_PLUGIN_ROOT" ] && [ -f "$_REMEMBER_PLUGIN_ROOT/.claude-plugin/plugin.json" ]; then
     PIPELINE_DIR="$_REMEMBER_PLUGIN_ROOT"
 elif [ -n "${PLUGIN_ROOT:-}" ] && [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] \
         && [ "$_REMEMBER_PLUGIN_ROOT" != "$CLAUDE_PLUGIN_ROOT" ] \
-        && [ -f "${CLAUDE_PLUGIN_ROOT}/pipeline/haiku.py" ]; then
+        && [ -f "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json" ]; then
     PIPELINE_DIR="$CLAUDE_PLUGIN_ROOT"
-elif [ -f "$_PLUGIN_ROOT_CANDIDATE/pipeline/haiku.py" ]; then
+elif [ -f "$_PLUGIN_ROOT_CANDIDATE/.claude-plugin/plugin.json" ]; then
     PIPELINE_DIR="$_PLUGIN_ROOT_CANDIDATE"
 else
-    _msg="FATAL: Cannot resolve plugin root. PLUGIN_ROOT/CLAUDE_PLUGIN_ROOT do not point at a valid plugin install (missing pipeline/haiku.py) and $_PLUGIN_ROOT_CANDIDATE/pipeline/haiku.py does not exist."
+    _msg="FATAL: Cannot resolve plugin root. PLUGIN_ROOT/CLAUDE_PLUGIN_ROOT do not point at a valid plugin install (missing its install manifest) and $_PLUGIN_ROOT_CANDIDATE does not look like one either."
     _resolve_paths_fail "$_msg" "${CLAUDE_PROJECT_DIR:-.}/.remember/logs" || return 1
 fi
 
@@ -175,28 +177,9 @@ _jq_fallback() {
     if declare -f _remember_python >/dev/null 2>&1; then
         _remember_python || return 1
     fi
-    $PYTHON - "$_jq_file" "$_jq_query" <<< 'import json, sys
-try:
-    data = json.load(open(sys.argv[1]))
-    keys = sys.argv[2].strip('"'"'.'"'"').split('"'"'.'"'"')
-    val = data
-    for k in keys:
-        if k and isinstance(val, dict):
-            val = val.get(k)
-        if val is None:
-            break
-    if val is None:
-        sys.exit(0)
-    # jq -r prints strings raw and everything else in jq'"'"'s JSON textual
-    # form — crucially "true"/"false" for booleans, not Python'"'"'s capitalized
-    # str(True)/str(False). Getting this wrong silently breaks every caller
-    # that does `[ "$x" = "true" ]` against a boolean config key (e.g.
-    # git_backup.gpg_sign, allow_remote_change) whenever jq is absent: the
-    # comparison never matches, so the key always reads as false.
-    print(val if isinstance(val, str) else json.dumps(val))
-except Exception:
-    sys.exit(0)
-' 2>/dev/null
+    local _jq_fb_dir="${BASH_SOURCE[0]%/*}"
+    [ "$_jq_fb_dir" = "${BASH_SOURCE[0]}" ] && _jq_fb_dir="$(pwd)"
+    _remember_run_python "$_jq_fb_dir/jq_fallback_get.py" "$_jq_file" "$_jq_query" 2>/dev/null
 }
 
 _remember_tools_cache_load() {
@@ -210,12 +193,15 @@ _remember_tools_cache_load() {
     while IFS= read -r _line || [ -n "$_line" ]; do
         _line="${_line%$'\r'}"
         [ -n "$_line" ] || continue
-        case "$_line" in
-            CACHE_PATH=*) _path="${_line#*=}" ;;
-            PYTHON=*)     _py="${_line#*=}" ;;
-            JQ=*)         _jq="${_line#*=}" ;;
-            *) return 1 ;;
-        esac
+        if [ "${_line#CACHE_PATH=}" != "$_line" ]; then
+            _path="${_line#*=}"
+        elif [ "${_line#PYTHON=}" != "$_line" ]; then
+            _py="${_line#*=}"
+        elif [ "${_line#JQ=}" != "$_line" ]; then
+            _jq="${_line#*=}"
+        else
+            return 1
+        fi
     done < "$_f"
     [ -n "$_py" ] || return 1
     [ -n "$_jq" ] || return 1
@@ -326,12 +312,45 @@ if [ "${_REMEMBER_LAZY_PYTHON:-0}" != "1" ]; then
 fi
 fi
 
+_remember_run_python() {
+    case "$PYTHON" in
+        python3) python3 "$@" ;;
+        python) python "$@" ;;
+        py\ -3) py -3 "$@" ;;
+        py) py "$@" ;;
+        *)
+            echo "FATAL: _remember_run_python: unrecognized PYTHON value '$PYTHON'" >&2
+            return 127
+            ;;
+    esac
+}
+_remember_run_jq() {
+    case "$JQ" in
+        jq) jq "$@" ;;
+        _jq_fallback) _jq_fallback "$@" ;;
+        *)
+            echo "FATAL: _remember_run_jq: unrecognized JQ value '$JQ'" >&2
+            return 127
+            ;;
+    esac
+}
+
 
 _REMEMBER_SRC_DIR="${BASH_SOURCE[0]%/*}"
 [ "$_REMEMBER_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_SRC_DIR="$(pwd)"
 
 [ -n "${_REMEMBER_LIB_SLUG_LOADED:-}" ] && return 0
 _REMEMBER_LIB_SLUG_LOADED=1
+
+_remember_slug_run_python() {
+    case "${PYTHON:-python3}" in
+        python3) python3 "$@" ;;
+        python) python "$@" ;;
+        py\ -3) py -3 "$@" ;;
+        py) py "$@" ;;
+        *) return 127 ;;
+    esac
+}
 
 _remember_build_slug_sed() {
     local cont=$'\200-\277'
@@ -405,10 +424,12 @@ session_dir_slug() {
         local winpath
         winpath=$(cygpath -w "$path" 2>/dev/null) || winpath="$path"
         [ -n "$winpath" ] || winpath="$path"
-        case "$winpath" in
-            '\\?\UNC\'*) winpath='\\'"${winpath#'\\?\UNC\'}" ;;
-            '\\?\'*)     winpath="${winpath#'\\?\'}" ;;
-        esac
+        local _unc_pfx='\\?\UNC\' _long_pfx='\\?\'
+        if [ "${winpath#"$_unc_pfx"}" != "$winpath" ]; then
+            winpath='\\'"${winpath#"$_unc_pfx"}"
+        elif [ "${winpath#"$_long_pfx"}" != "$winpath" ]; then
+            winpath="${winpath#"$_long_pfx"}"
+        fi
         path="$winpath"
     fi
     case "$path" in
@@ -437,7 +458,7 @@ session_dir_slug() {
                 if [ -f "$_py_slug" ]; then
                     local _decoded
                     declare -f _remember_python >/dev/null 2>&1 && _remember_python
-                    _decoded=$("${PYTHON:-python3}" "$_py_slug" "$path" 2>/dev/null) \
+                    _decoded=$(_remember_slug_run_python "$_py_slug" "$path" 2>/dev/null) \
                         && [ -n "$_decoded" ] && { printf '%s\n' "$_decoded"; return 0; }
                 fi
             fi
@@ -457,7 +478,7 @@ session_dir_slug() {
     local _hash _slug_py="${PIPELINE_DIR:-}/pipeline/slug.py"
     if [ -f "$_slug_py" ]; then
         declare -f _remember_python >/dev/null 2>&1 && _remember_python
-        _hash=$("${PYTHON:-python3}" "$_slug_py" --hash "$_orig" 2>/dev/null) || _hash=""
+        _hash=$(_remember_slug_run_python "$_slug_py" --hash "$_orig" 2>/dev/null) || _hash=""
     else
         _hash=""
     fi
@@ -556,19 +577,17 @@ _set_store_root() {
         /*|~*|[A-Za-z]:/*|[A-Za-z]:\\*) ;;
         *) return 0 ;;
     esac
-    case "$data_dir" in
-        *'{slug}'*) ;;
-        *) return 0 ;;
-    esac
+    [ "${data_dir#*\{slug\}}" != "$data_dir" ] || return 0
 
     prefix="${data_dir%%\{slug\}*}"
     prefix="${prefix/#\~/$HOME}"
 
     while :; do
-        case "$prefix" in
-            ?*/|?*\\) prefix="${prefix%?}" ;;
-            *) break ;;
-        esac
+        if [ "${#prefix}" -gt 1 ] && { [ "${prefix%/}" != "$prefix" ] || [ "${prefix%\\}" != "$prefix" ]; }; then
+            prefix="${prefix%?}"
+        else
+            break
+        fi
     done
 
     case "$prefix" in
@@ -637,10 +656,11 @@ _remember_config_tracked_status() {
              LC_ALL=C LANGUAGE=C git -C "$_dir" rev-parse --is-inside-work-tree) 2>&1 )
     _rc=$?
     if [ "$_rc" -ne 0 ]; then
-        case "$_out" in
-            *"not a git repository"*) echo "untracked" ;;
-            *) echo "could-not-tell" ;;
-        esac
+        if [ "${_out#*not a git repository}" != "$_out" ]; then
+            echo "untracked"
+        else
+            echo "could-not-tell"
+        fi
         return 0
     fi
     if [ "$_out" != "true" ]; then
@@ -736,134 +756,19 @@ elif [ "${#_cfg_sources[@]}" -gt 0 ]; then
     _project_drop_marker=$(mktemp "${SYS_TMPDIR}/remember-config-drop-marker-XXXXXX" 2>/dev/null) || _project_drop_marker=""
     rm -f "$_project_drop_marker" 2>/dev/null
     _py_merge_rc=0
-    "${PYTHON:-python3}" - "$_merged_cfg" "$_untrusted_haiku_source" "$_strip_model_reject" "$_project_drop_marker" "${_cfg_sources[@]}" > /dev/null 2>&1 <<< 'import json
-import sys
-
-
-def deep_merge(a, b):
-    if isinstance(a, dict) and isinstance(b, dict):
-        out = dict(a)
-        for k, v in b.items():
-            out[k] = deep_merge(out[k], v) if k in out else v
-        return out
-    return b
-
-
-out_path = sys.argv[1]
-# Empty string when the project layer'"'"'s `haiku` block is trusted (external
-# storage mode, or no project cfg at all) -- never equal to a real path then,
-# so nothing is stripped (#726, see the case switch this mirrors above).
-untrusted_haiku_path = sys.argv[2]
-# #757: "1" only when the SAME untrusted source is also git-tracked --
-# model/reject_pattern are stripped alongside haiku only then, never for
-# an untracked (the operator'"'"'s own) in-project config.
-strip_model_reject = sys.argv[3] == "1"
-# #748: empty when mktemp itself failed above -- tolerated the same way
-# every other mktemp-failure path in this file is (fall through, don'"'"'t
-# crash the merge over the logging side-channel itself).
-drop_marker_path = sys.argv[4]
-
-
-def load_documents(path):
-    """Parse every whitespace-concatenated JSON document in `path` (#740):
-    the untrusted project layer may ship more than one, and a plain
-    json.load() raises `JSONDecodeError` on any file with more than one --
-    which used to take the WHOLE merge down with it (the `|| cp
-    "$_bundled_cfg" ...` fallback below), dropping the trusted user-global
-    layer too rather than just stripping `haiku` from this file'"'"'s own
-    documents and keeping everything else."""
-    with open(path) as f:
-        raw = f.read()
-    decoder = json.JSONDecoder()
-    idx, n, docs = 0, len(raw), []
-    while idx < n:
-        while idx < n and raw[idx].isspace():
-            idx += 1
-        if idx >= n:
-            break
-        obj, idx = decoder.raw_decode(raw, idx)
-        docs.append(obj)
-    return docs
-
-
-merged = {}
-_dropped_project_layer = False
-_dropped_trusted_layer = False
-for path in sys.argv[5:]:
-    if untrusted_haiku_path and path == untrusted_haiku_path:
-        # #744: fail CLOSED -- if the untrusted file can'"'"'t even be loaded
-        # (unreadable, a permissions error, malformed JSON, anything
-        # load_documents() itself doesn'"'"'t already tolerate), drop just this
-        # layer rather than let the exception propagate and crash the whole
-        # merge down to the bundled-only fallback below, taking the trusted
-        # user-global layer'"'"'s own overrides with it for no reason connected
-        # to them. `json.JSONDecodeError` (raised by decoder.raw_decode() on
-        # invalid JSON) and `UnicodeDecodeError` (raised by f.read() on a
-        # file that isn'"'"'t valid text in the expected encoding) are both
-        # ValueError subclasses -- catching only OSError let either one
-        # through uncaught.
-        try:
-            docs = load_documents(path)
-        except (OSError, ValueError):
-            # #748: drop a marker for the shell to notice and report --
-            # this process'"'"'s own stdout/stderr are discarded by the caller.
-            # #804: also record the drop in a flag that becomes THIS
-            # process'"'"'s own exit code below -- a second, independent
-            # signal that does not depend on drop_marker_path'"'"'s own
-            # mktemp (the shell side, above) having succeeded at all.
-            _dropped_project_layer = True
-            if drop_marker_path:
-                try:
-                    with open(drop_marker_path, "w") as _marker:
-                        _marker.write("1")
-                except OSError:
-                    pass
-            continue
-        for data in docs:
-            if isinstance(data, dict):
-                drop = {"haiku"}
-                if strip_model_reject:
-                    drop |= {"model", "reject_pattern"}
-                data = {k: v for k, v in data.items() if k not in drop}
-            merged = deep_merge(merged, data)
-        continue
-    # #815: this is a TRUSTED source (bundled config, user-global config, or
-    # the project config when it is NOT the untrusted-haiku source handled
-    # above) -- but "trusted" only means the operator wrote it, not that it
-    # parses. A malformed file here used to raise uncaught, exiting neither
-    # 0 nor 3, so the shell'"'"'s bundled-only fallback fired below with NO
-    # disclosure at all -- the #804 gate only checks the drop-marker file
-    # (which this path never touches) or rc == 3 (reserved for the
-    # untrusted-layer drop above). Skip just this layer instead, the same
-    # fail-CLOSED shape the untrusted branch already uses, and signal it on
-    # the interpreter'"'"'s own exit path rather than a second marker file.
-    try:
-        with open(path) as f:
-            data = json.load(f)
-    except (OSError, ValueError):
-        _dropped_trusted_layer = True
-        continue
-    merged = deep_merge(merged, data)
-# Strip `_`-prefixed doc keys, top-level only — same convention as the jq path.
-merged = {k: v for k, v in merged.items() if not str(k).startswith("_")}
-with open(out_path, "w") as f:
-    json.dump(merged, f)
-# #804: exit 3 means "merge above completed and $out_path was written, but
-# the untrusted project layer was dropped" -- distinct from 0 (clean) and
-# from any other non-zero exit (a genuine merge failure, still handled by
-# the shell'"'"'s own bundled-only fallback below).
-# #815: exit 4 means the same, but for a malformed TRUSTED layer (bundled
-# config, user-global config, or project config outside the untrusted-haiku
-# case); exit 5 means both a trusted AND the untrusted layer were dropped.
-# Distinct codes so the shell can choose which warning(s) to print without a
-# second marker file.
-if _dropped_project_layer and _dropped_trusted_layer:
-    sys.exit(5)
-elif _dropped_project_layer:
-    sys.exit(3)
-elif _dropped_trusted_layer:
-    sys.exit(4)
-' || _py_merge_rc=$?
+    _lmd_run_python() {
+        case "${PYTHON:-python3}" in
+            python3) python3 "$@" ;;
+            python) python "$@" ;;
+            py\ -3) py -3 "$@" ;;
+            py) py "$@" ;;
+            *) return 127 ;;
+        esac
+    }
+    _lmd_py_dir="${BASH_SOURCE[0]%/*}"
+    [ "$_lmd_py_dir" = "${BASH_SOURCE[0]}" ] && _lmd_py_dir="$(pwd)"
+    _lmd_run_python "$_lmd_py_dir/cfg_merge.py" "$_merged_cfg" "$_untrusted_haiku_source" "$_strip_model_reject" "$_project_drop_marker" "${_cfg_sources[@]}" > /dev/null 2>&1 || _py_merge_rc=$?
+    unset _lmd_py_dir
     if [ "$_py_merge_rc" != "0" ] && [ "$_py_merge_rc" != "3" ] && [ "$_py_merge_rc" != "4" ] && [ "$_py_merge_rc" != "5" ]; then
         cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null
     fi
@@ -933,10 +838,9 @@ if [ "$REMEMBER_DIR" != "$_legacy_dir" ] && [ ! -L "$_legacy_dir" ] && [ -d "$_l
             _legacy_repo_check=$( (unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
                                     LC_ALL=C LANGUAGE=C git -C "$_mem_proj" rev-parse --is-inside-work-tree) 2>&1 ) && _legacy_repo_rc=0 || _legacy_repo_rc=$?
             if [ "$_legacy_repo_rc" -ne 0 ]; then
-                case "$_legacy_repo_check" in
-                    *"not a git repository"*) : ;;
-                    (*) _legacy_other_tracked="could-not-tell" ;;
-                esac
+                if [ "${_legacy_repo_check#*not a git repository}" = "$_legacy_repo_check" ]; then
+                    _legacy_other_tracked="could-not-tell"
+                fi
             elif [ "$_legacy_repo_check" = "true" ]; then
                 _legacy_ls_list=$(unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
                                    git -c core.quotePath=false -C "$_mem_proj" ls-files -- ":(icase).remember/" 2>/dev/null) && _legacy_ls_rc=0 || _legacy_ls_rc=$?
@@ -1151,6 +1055,27 @@ fi
 _REMEMBER_CFG_STATE=""
 _REMEMBER_CFG_LOADED_FROM=""
 
+_REMEMBER_CFG_NAMES=()
+_REMEMBER_CFG_VALUES=()
+
+_remember_cfg_table_set() {
+    _REMEMBER_CFG_NAMES+=("$1")
+    _REMEMBER_CFG_VALUES+=("$2")
+}
+
+_remember_cfg_table_get_into() {
+    local _rcfgtg_i="${#_REMEMBER_CFG_NAMES[@]}"
+    while [ "$_rcfgtg_i" -gt 0 ]; do
+        _rcfgtg_i=$((_rcfgtg_i - 1))
+        if [ "${_REMEMBER_CFG_NAMES[$_rcfgtg_i]}" = "$2" ]; then
+            printf -v "$1" '%s' "${_REMEMBER_CFG_VALUES[$_rcfgtg_i]}"
+            return 0
+        fi
+    done
+    printf -v "$1" '%s' ""
+    return 1
+}
+
 _config_is_private_key() {
     case "$1" in
         .haiku|.haiku.*) return 0 ;;
@@ -1158,54 +1083,14 @@ _config_is_private_key() {
     return 1
 }
 
-_REMEMBER_CFG_FLATTEN_JQ='. as $doc | [paths(type != "object" and type != "array") | select(all(.[]; type == "string")) | select(.[0] != "haiku")] as $ks | if (($ks | flatten) | any(test("^[A-Za-z0-9_]+$") | not)) then "#refuse a config key is outside [A-Za-z0-9_]" elif (($ks | map(join("_")) | unique | length) != ($ks | length)) then "#refuse two config keys flatten to the same name" elif ([$ks[] as $p | $doc | getpath($p) | select(type == "string" and test("[\t\n]"))] | length) > 0 then "#refuse a config value contains a tab or a newline" else $ks[] as $p | ($doc | getpath($p)) as $v | select($v != null) | ($p | join(".")) + "\t" + ($v | tostring) end'
 
-_REMEMBER_CFG_FLATTEN_PY='
-import json, re, sys
-
-def walk(node, prefix, out):
-    if isinstance(node, dict):
-        for k, v in node.items():
-            walk(v, prefix + [k], out)
-    elif isinstance(node, list):
-        return
-    else:
-        out.append((prefix, node))
-
-try:
-    doc = json.load(open(sys.argv[1], encoding="utf-8"))
-except Exception:
-    sys.exit(1)
-
-rows = []
-walk(doc, [], rows)
-rows = [(p, v) for p, v in rows if p and p[0] != "haiku" and v is not None]
-
-ok = re.compile(r"^[A-Za-z0-9_]+$")
-for p, v in rows:
-    if not all(ok.match(part) for part in p):
-        print("#refuse a config key is outside [A-Za-z0-9_]")
-        sys.exit(0)
-    if isinstance(v, str) and ("\t" in v or "\n" in v):
-        print("#refuse a config value contains a tab or a newline")
-        sys.exit(0)
-slots = ["_".join(p) for p, _ in rows]
-if len(set(slots)) != len(slots):
-    print("#refuse two config keys flatten to the same name")
-    sys.exit(0)
-
-out = []
-for p, v in rows:
-    out.append(".".join(p) + "\t" + (v if isinstance(v, str) else json.dumps(v)))
-sys.stdout.write("\n".join(out))
-'
 
 _remember_cfg_flatten_cache_path() {
     local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
     [ -n "${REMEMBER_DIR:-}" ] || return 1
-    local _key="${REMEMBER_DIR//[!a-zA-Z0-9]/-}"
-    [ "${#_key}" -gt 120 ] && _key="${_key: -120}"
-    printf '%s' "${TMPDIR:-/tmp}/remember-config-cache-v2-${_key}"
+    local _slug="${REMEMBER_DIR//[!a-zA-Z0-9]/-}"
+    [ "${#_slug}" -gt 120 ] && _slug="${_slug: -120}"
+    printf '%s' "${TMPDIR:-/tmp}/remember-config-cache-v2-${_slug}"
 }
 
 _remember_cfg_flatten_cache_sources() {
@@ -1274,39 +1159,33 @@ _remember_cfg_flatten_cache_load() {
         [ -n "$_line" ] || continue
         if [ "$_stage" = "0" ]; then
             _stage=1
-            case "$_line" in
-                '#REMEMBER_DIR='*)
-                    _identity_raw="${_line#'#REMEMBER_DIR='}"
-                    _remember_cfg_flatten_cache_valid_value "$_identity_raw" || {
-                        rm -f "$_f" 2>/dev/null
-                        return 1
-                    }
-                    continue
-                    ;;
-                *)
+            if [ "${_line#'#REMEMBER_DIR='}" != "$_line" ]; then
+                _identity_raw="${_line#'#REMEMBER_DIR='}"
+                _remember_cfg_flatten_cache_valid_value "$_identity_raw" || {
                     rm -f "$_f" 2>/dev/null
                     return 1
-                    ;;
-            esac
+                }
+                continue
+            else
+                rm -f "$_f" 2>/dev/null
+                return 1
+            fi
         fi
         if [ "$_stage" = "1" ]; then
             _stage=2
-            case "$_line" in
-                '#RCFG_EXISTS='*)
-                    _exists_raw="${_line#'#RCFG_EXISTS='}"
-                    case "$_exists_raw" in
-                        *[!01]*|'')
-                            rm -f "$_f" 2>/dev/null
-                            return 1
-                            ;;
-                    esac
-                    continue
-                    ;;
-                *)
-                    rm -f "$_f" 2>/dev/null
-                    return 1
-                    ;;
-            esac
+            if [ "${_line#'#RCFG_EXISTS='}" != "$_line" ]; then
+                _exists_raw="${_line#'#RCFG_EXISTS='}"
+                case "$_exists_raw" in
+                    *[!01]*|'')
+                        rm -f "$_f" 2>/dev/null
+                        return 1
+                        ;;
+                esac
+                continue
+            else
+                rm -f "$_f" 2>/dev/null
+                return 1
+            fi
         fi
         if ! _remember_cfg_flatten_cache_valid_line "$_line"; then
             rm -f "$_f" 2>/dev/null
@@ -1328,14 +1207,15 @@ _remember_cfg_flatten_cache_load() {
         return 1
     }
 
-    local _assign _assign_name _assign_value
+    local _assign _assign_name _assign_value _assign_decoded
     for _assign in ${_lines[@]+"${_lines[@]}"}; do
         _assign_name="${_assign%%$'\t'*}"
         _assign_value="${_assign#*$'\t'}"
-        _remember_cfg_flatten_q_decode "$_assign_name" "$_assign_value" || {
+        _remember_cfg_flatten_q_decode _assign_decoded "$_assign_value" || {
             rm -f "$_f" 2>/dev/null
             return 1
         }
+        _remember_cfg_table_set "$_assign_name" "$_assign_decoded"
     done
     return 0
 }
@@ -1391,10 +1271,14 @@ _config_load() {
 
     local _dump="" _rc=0
     if command -v jq >/dev/null 2>&1; then
-        _dump=$(jq -r "$_REMEMBER_CFG_FLATTEN_JQ" "$REMEMBER_CONFIG" 2>/dev/null) || _rc=1
+        local _cfg_flatten_jq_dir="${BASH_SOURCE[0]%/*}"
+        [ "$_cfg_flatten_jq_dir" = "${BASH_SOURCE[0]}" ] && _cfg_flatten_jq_dir="$(pwd)"
+        _dump=$(jq -r -f "$_cfg_flatten_jq_dir/cfg_flatten.jq" "$REMEMBER_CONFIG" 2>/dev/null) || _rc=1
     else
         declare -f _remember_python >/dev/null 2>&1 && _remember_python
-        _dump=$("${PYTHON:-python3}" -c "$_REMEMBER_CFG_FLATTEN_PY" "$REMEMBER_CONFIG" 2>/dev/null) || _rc=1
+        local _cfg_flatten_dir="${BASH_SOURCE[0]%/*}"
+        [ "$_cfg_flatten_dir" = "${BASH_SOURCE[0]}" ] && _cfg_flatten_dir="$(pwd)"
+        _dump=$(_remember_log_run_python "$_cfg_flatten_dir/cfg_flatten.py" "$REMEMBER_CONFIG" 2>/dev/null) || _rc=1
     fi
 
     if [ "$_rc" -ne 0 ]; then
@@ -1403,19 +1287,17 @@ _config_load() {
         return 0
     fi
 
-    case "$_dump" in
-        '#refuse'*)
-            [ "${REMEMBER_DEBUG:-}" = "1" ] && \
-                echo "remember: ${_dump#'#refuse' } -- reading config one key at a time" >&2
-            _REMEMBER_CFG_STATE="fallback"
-            return 0
-            ;;
-    esac
+    if [ "${_dump#\#refuse}" != "$_dump" ]; then
+        [ "${REMEMBER_DEBUG:-}" = "1" ] && \
+            echo "remember: ${_dump#'#refuse' } -- reading config one key at a time" >&2
+        _REMEMBER_CFG_STATE="fallback"
+        return 0
+    fi
 
     local _k _v
     while IFS=$'\t' read -r _k _v; do
         [ -n "$_k" ] || continue
-        printf -v "_RCFG_${_k//./_}" '%s' "$_v"
+        _remember_cfg_table_set "_RCFG_${_k//./_}" "$_v"
     done <<< "$_dump"
     _remember_cfg_flatten_cache_publish "$_dump"
     _REMEMBER_CFG_STATE="ok"
@@ -1427,14 +1309,24 @@ config() {
     printf '%s\n' "$_cfg_result"
 }
 
+_remember_log_run_python() {
+    case "${PYTHON:-python3}" in
+        python3) python3 "$@" ;;
+        python) python "$@" ;;
+        py\ -3) py -3 "$@" ;;
+        py) py "$@" ;;
+        *) return 127 ;;
+    esac
+}
+
 config_into() {
     local _cfg_into_var="$1"
-    local _cfg_into_key="$2"
+    local _cfg_into_name="$2"
     local _cfg_into_default="$3"
 
-    if ! ( LC_ALL=C; [[ "$_cfg_into_key" =~ ^\.[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$ ]] ); then
+    if ! ( LC_ALL=C; [[ "$_cfg_into_name" =~ ^\.[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$ ]] ); then
         [ "${REMEMBER_DEBUG:-}" = "1" ] && \
-            echo "remember: config() key '$_cfg_into_key' is not a plain dotted path -- returning the default rather than looking it up" >&2
+            echo "remember: config() key '$_cfg_into_name' is not a plain dotted path -- returning the default rather than looking it up" >&2
         printf -v "$_cfg_into_var" '%s' "$_cfg_into_default"
         return
     fi
@@ -1444,10 +1336,11 @@ config_into() {
         _config_load
     fi
 
-    if [ "$_REMEMBER_CFG_STATE" = "ok" ] && ! _config_is_private_key "$_cfg_into_key"; then
-        local _cfg_into_slot="_RCFG_${_cfg_into_key#.}"
+    if [ "$_REMEMBER_CFG_STATE" = "ok" ] && ! _config_is_private_key "$_cfg_into_name"; then
+        local _cfg_into_slot="_RCFG_${_cfg_into_name#.}"
         _cfg_into_slot="${_cfg_into_slot//./_}"
-        local _cfg_into_hit="${!_cfg_into_slot:-}"
+        local _cfg_into_hit
+        _remember_cfg_table_get_into _cfg_into_hit "$_cfg_into_slot" || _cfg_into_hit=""
         [ -n "$_cfg_into_hit" ] || _cfg_into_hit="$_cfg_into_default"
         printf -v "$_cfg_into_var" '%s' "$_cfg_into_hit"
         return
@@ -1459,29 +1352,16 @@ config_into() {
     fi
     local _cfg_into_val=""
     if command -v jq >/dev/null 2>&1; then
-        _cfg_into_val=$(jq -r "if $_cfg_into_key == null then \"\" else ($_cfg_into_key | tostring) end" \
-            "$REMEMBER_CONFIG" 2>/dev/null)
+        local _cfg_into_prog
+        printf -v _cfg_into_prog 'if %s == null then "" else (%s | tostring) end' \
+            "$_cfg_into_name" "$_cfg_into_name"
+        _cfg_into_val=$(jq -r "$_cfg_into_prog" "$REMEMBER_CONFIG" 2>/dev/null)
     elif type _jq_fallback >/dev/null 2>&1; then
-        _cfg_into_val=$(_jq_fallback -r "$_cfg_into_key" "$REMEMBER_CONFIG" 2>/dev/null)
+        _cfg_into_val=$(_jq_fallback -r "$_cfg_into_name" "$REMEMBER_CONFIG" 2>/dev/null)
     else
-        _cfg_into_val=$("${PYTHON:-python3}" -c '
-import json, sys
-try:
-    data = json.load(open(sys.argv[2]))
-    keys = sys.argv[1].strip(".").split(".")
-    v = data
-    for k in keys:
-        if k and isinstance(v, dict):
-            v = v.get(k)
-        if v is None:
-            break
-    if v is not None:
-        # jq -r semantics: raw strings, JSON textual form otherwise
-        # (crucially "true"/"false", not Python str(True)/str(False)).
-        print(v if isinstance(v, str) else json.dumps(v))
-except Exception:
-    pass
-' "$_cfg_into_key" "$REMEMBER_CONFIG" 2>/dev/null)
+        local _cfg_py_dir="${BASH_SOURCE[0]%/*}"
+        [ "$_cfg_py_dir" = "${BASH_SOURCE[0]}" ] && _cfg_py_dir="$(pwd)"
+        _cfg_into_val=$(_remember_log_run_python "$_cfg_py_dir/jq_fallback_get.py" "$REMEMBER_CONFIG" "$_cfg_into_name")
     fi
     [ -n "$_cfg_into_val" ] || _cfg_into_val="$_cfg_into_default"
     printf -v "$_cfg_into_var" '%s' "$_cfg_into_val"
@@ -1489,20 +1369,6 @@ except Exception:
 
 _config_load
 
-debug_enabled() {
-    local _default="${1:-0}"
-    if [ -n "${REMEMBER_DEBUG:-}" ]; then
-        [ "$REMEMBER_DEBUG" = "1" ]
-        return
-    fi
-    local _debug_cfg
-    config_into _debug_cfg '.debug' ''
-    case "$_debug_cfg" in
-        true) return 0 ;;
-        false) return 1 ;;
-    esac
-    [ "$_default" = "1" ]
-}
 
 config_into REMEMBER_TZ ".timezone" ""
 export REMEMBER_TZ
@@ -1613,28 +1479,7 @@ log() {
         || echo "${timestamp} [${component}] ${message}" >&2
 }
 
-log_tokens() {
-    local component="$1"
-    local input="${2:-0}"
-    local output="${3:-0}"
-    local cache="${4:-0}"
-    local cost="${5:-}"
-    local msg="tokens: ${input}+${cache}cache->${output}out"
-    [ -n "$cost" ] && msg="${msg} (\$${cost})"
-    log "$component" "$msg"
-}
 
-assign_kv() {
-    local LC_ALL=C
-    while IFS= read -r line; do
-        line="${line%$'\r'}"
-        if [[ "$line" =~ ^([A-Z_][A-Z0-9_]*)=(.*)$ ]]; then
-            local _key="${BASH_REMATCH[1]}"
-            local _val="${BASH_REMATCH[2]}"
-            printf -v "$_key" '%s' "$_val"
-        fi
-    done
-}
 
 REMEMBER_HOOKS_DIR="$PIPELINE_DIR/hooks.d"
 
@@ -1800,14 +1645,13 @@ dispatch() {
     for hook in "$event_dir"/*; do
         [ -x "$hook" ] || continue
         if [ -z "$_budget" ]; then
-            case "$_DISPATCH_DETACHED_EVENTS" in
-                *" $event "*)
-                    _budget=$(config '.hooks.dispatch_timeout_detached_seconds' "$_DISPATCH_TIMEOUT_DETACHED_DEFAULT")
-                    _DISPATCH_BUDGET_FALLBACK=$_DISPATCH_TIMEOUT_DETACHED_DEFAULT ;;
-                *)
-                    _budget=$(config '.hooks.dispatch_timeout_seconds' "$_DISPATCH_TIMEOUT_DEFAULT")
-                    _DISPATCH_BUDGET_FALLBACK=$_DISPATCH_TIMEOUT_DEFAULT ;;
-            esac
+            if [ "${_DISPATCH_DETACHED_EVENTS#*" $event "}" != "$_DISPATCH_DETACHED_EVENTS" ]; then
+                _budget=$(config '.hooks.dispatch_timeout_detached_seconds' "$_DISPATCH_TIMEOUT_DETACHED_DEFAULT")
+                _DISPATCH_BUDGET_FALLBACK=$_DISPATCH_TIMEOUT_DETACHED_DEFAULT
+            else
+                _budget=$(config '.hooks.dispatch_timeout_seconds' "$_DISPATCH_TIMEOUT_DEFAULT")
+                _DISPATCH_BUDGET_FALLBACK=$_DISPATCH_TIMEOUT_DEFAULT
+            fi
             case "$_budget" in
                 ''|*[!0-9]*) _budget=$_DISPATCH_BUDGET_FALLBACK ;;
             esac
@@ -1824,15 +1668,12 @@ dispatch() {
             _dispatch_report_skip "$event" "${hook##*/}" "not owned by the current user"
             continue
         fi
-        case "$hook_perm" in
-            *[!0-7]*|'') ;;
-            *)
-                if [ $(( 8#$hook_perm & 2 )) -ne 0 ]; then
-                    _dispatch_report_skip "$event" "${hook##*/}" "world-writable"
-                    continue
-                fi
-                ;;
-        esac
+        if [ -n "$hook_perm" ] && [ -z "${hook_perm//[0-7]/}" ]; then
+            if [ $(( 8#$hook_perm & 2 )) -ne 0 ]; then
+                _dispatch_report_skip "$event" "${hook##*/}" "world-writable"
+                continue
+            fi
+        fi
         if [ -z "$_err_file" ] && [ -z "$_err_unavailable" ]; then
             _err_file="$REMEMBER_DIR/tmp/dispatch-stderr.$event.$$"
             _out_file="$REMEMBER_DIR/tmp/dispatch-stdout.$event.$$"
@@ -1899,92 +1740,7 @@ _ROTATE_STATE_NAME=".rotate-failed"
 
 _ROTATE_MAX_PARTS=100
 
-_rotate_missing_members() {
-    local dir="$1" archive="$2"
-    shift 2
-    local listing member missing=""
-    if ! listing=$( { cd "$dir" && tar -tzf "$archive"; } 2>/dev/null ); then
-        printf '%s' "the archive cannot be read back"
-        return 0
-    fi
-    for member in "$@"; do
-        printf '%s\n' "$listing" | grep -Fqx -- "$member" \
-            || missing="${missing}${missing:+, }${member}"
-    done
-    printf '%s' "$missing"
-}
 
-rotate_logs() {
-    local state="${REMEMBER_LOG_DIR}/${_ROTATE_STATE_NAME}"
-
-    local old_logs
-    old_logs=$(find "$REMEMBER_LOG_DIR" -name "memory-*.log" -mtime +7 2>/dev/null)
-    if [ -z "$old_logs" ]; then
-        rm -f "$state" 2>/dev/null || true
-        return 0
-    fi
-
-    local archive_month
-    archive_month=$(date -v-7d +%Y-%m 2>/dev/null || date -d '7 days ago' +%Y-%m)
-    local count
-    count=$(echo "$old_logs" | wc -l | tr -d ' ')
-
-    local basenames=()
-    while IFS= read -r f; do
-        basenames+=("$(basename "$f")")
-    done <<< "$old_logs"
-
-    local archive_name="" candidate part=1
-    while [ "$part" -le "$_ROTATE_MAX_PARTS" ]; do
-        if [ "$part" -eq 1 ]; then
-            candidate="logs-${archive_month}.tar.gz"
-        else
-            candidate="logs-${archive_month}-part${part}.tar.gz"
-        fi
-        if [ ! -e "${REMEMBER_LOG_DIR}/${candidate}" ] \
-           && ( set -C; : > "${REMEMBER_LOG_DIR}/${candidate}" ) 2>/dev/null; then
-            archive_name="$candidate"
-            break
-        fi
-        part=$((part + 1))
-    done
-
-    local err=""
-    if [ -z "$archive_name" ]; then
-        err="no unused archive name for ${archive_month} after ${_ROTATE_MAX_PARTS} tries -- the names are taken, or ${REMEMBER_LOG_DIR} is not writable. Refusing to overwrite an existing archive"
-    elif err=$( { cd "$REMEMBER_LOG_DIR" && tar -czf "$archive_name" "${basenames[@]}"; } 2>&1 ); then
-        local missing
-        missing=$(_rotate_missing_members "$REMEMBER_LOG_DIR" "$archive_name" "${basenames[@]}")
-        if [ -z "$missing" ]; then
-            while IFS= read -r f; do rm -f "$f"; done <<< "$old_logs"
-            rm -f "$state" 2>/dev/null || true
-            log "rotate" "archived ${count} logs -> ${archive_name}"
-            return 0
-        fi
-        rm -f "${REMEMBER_LOG_DIR}/${archive_name}" 2>/dev/null || true
-        err="tar exited 0 but ${archive_name} does not list back: ${missing}"
-    else
-        rm -f "${REMEMBER_LOG_DIR}/${archive_name}" 2>/dev/null || true
-    fi
-
-    local first_line
-    first_line=$(printf '%s\n' "$err" | head -1)
-    [ -z "$first_line" ] && first_line="tar exited non-zero without a diagnostic"
-
-    local prev=0
-    if [ -f "$state" ]; then read -r prev < "$state" 2>/dev/null || prev=0; fi
-    case "$prev" in ''|*[!0-9]*) prev=0 ;; esac
-    local streak=$((10#$prev + 1))
-    printf '%s\n%s\n%s\n' "$streak" "$(date '+%Y-%m-%d %H:%M:%S')" "$first_line" \
-        > "$state" 2>/dev/null || true
-
-    if [ "$streak" -ge "$_ROTATE_ESCALATE_AFTER" ]; then
-        log "rotate" "ERROR: log rotation has now failed ${streak} times in a row -- ${count} aged log files are accumulating unarchived in ${REMEMBER_LOG_DIR} and nothing will clear them until this is fixed. Run /remember:doctor. Last error: ${first_line}"
-    else
-        log "rotate" "ERROR: tar failed for ${count} logs: ${first_line}"
-    fi
-    return 1
-}
 
 if ! command -v _remember_date >/dev/null 2>&1; then
     echo "session-start-hook: ERROR -- failed to source $PLUGIN_ROOT/scripts/log.sh" >&2
@@ -2033,100 +1789,20 @@ _remember_env_cache_normalize_into() {
 
 _remember_env_cache_path() {
     local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
-    if [ -n "${_REMEMBER_ENV_CACHE_KEY:-}" ]; then
+    if [ -n "${_REMEMBER_ENV_CACHE_PROJECT_DIR:-}" ]; then
         return 0
     fi
-    local _key="${CLAUDE_PROJECT_DIR:-}"
-    [ -n "$_key" ] || _key="${REMEMBER_HOOK_CWD:-}"
-    [ -n "$_key" ] || return 1
-    _remember_env_cache_normalize_into _key "$_key"
-    _REMEMBER_ENV_CACHE_KEY="$_key"
-    _key="${_key//[!a-zA-Z0-9]/-}"
-    [ "${#_key}" -gt 120 ] && _key="${_key: -120}"
-    _REMEMBER_ENV_CACHE_FILE="${TMPDIR:-/tmp}/remember-env-${_key}"
+    local _slug="${CLAUDE_PROJECT_DIR:-}"
+    [ -n "$_slug" ] || _slug="${REMEMBER_HOOK_CWD:-}"
+    [ -n "$_slug" ] || return 1
+    _remember_env_cache_normalize_into _slug "$_slug"
+    _REMEMBER_ENV_CACHE_PROJECT_DIR="$_slug"
+    _slug="${_slug//[!a-zA-Z0-9]/-}"
+    [ "${#_slug}" -gt 120 ] && _slug="${_slug: -120}"
+    _REMEMBER_ENV_CACHE_FILE="${TMPDIR:-/tmp}/remember-env-${_slug}"
     return 0
 }
 
-_remember_env_cache_load() {
-    [ "${REMEMBER_ENV_CACHE:-1}" = "1" ] || return 1
-    _remember_env_cache_path || return 1
-    local _f="$_REMEMBER_ENV_CACHE_FILE"
-    [ -f "$_f" ] || return 1
-    [ -L "$_f" ] && return 1
-    [ -O "$_f" ] || return 1
-    [ -r "$_f" ] || return 1
-
-    local _line _dir="" _tz="" _mem="" _proj="" _pipe="" _stamp=""
-    local _cooldown="" _delta="" _cfg_exists_raw="" _cfg_raw=""
-    local _env_proj="" _env_pipe="" _env_home=""
-    local _cfgs=()
-    while IFS= read -r _line || [ -n "$_line" ]; do
-        _line="${_line%$'\r'}"
-        [ -n "$_line" ] || continue
-        case "$_line" in
-            REMEMBER_DIR=*)          _dir="${_line#*=}" ;;
-            REMEMBER_TZ=*)           _tz="${_line#*=}" ;;
-            REMEMBER_PROMPT_STAMP=*) _stamp="${_line#*=}" ;;
-            REMEMBER_SAVE_COOLDOWN=*) _cooldown="${_line#*=}" ;;
-            REMEMBER_DELTA_THRESHOLD=*) _delta="${_line#*=}" ;;
-            MEMORY_PROJECT_DIR=*)    _mem="${_line#*=}" ;;
-            PROJECT_DIR=*)           _proj="${_line#*=}" ;;
-            PIPELINE_DIR=*)          _pipe="${_line#*=}" ;;
-            CACHE_ENV_PROJECT_DIR=*) _env_proj="${_line#*=}" ;;
-            CACHE_ENV_PLUGIN_ROOT=*) _env_pipe="${_line#*=}" ;;
-            CACHE_ENV_HOME=*)        _env_home="${_line#*=}" ;;
-            CACHE_CONFIG=*)
-                _cfg_raw="${_line#*=}"
-                case "$_cfg_raw" in
-                    1:*)
-                        _cfgs[${#_cfgs[@]}]="${_cfg_raw#1:}"
-                        _cfg_exists_raw="${_cfg_exists_raw}1"
-                        ;;
-                    0:*)
-                        _cfgs[${#_cfgs[@]}]="${_cfg_raw#0:}"
-                        _cfg_exists_raw="${_cfg_exists_raw}0"
-                        ;;
-                    *) return 1 ;;
-                esac
-                ;;
-            *) return 1 ;;
-        esac
-    done < "$_f"
-
-    [ -n "$_dir" ] && [ -n "$_proj" ] && [ -n "$_pipe" ] || return 1
-    [ -n "$_stamp" ] || return 1
-    case "$_cooldown" in '' | *[!0-9]*) return 1 ;; esac
-    case "$_delta" in '' | *[!0-9]*) return 1 ;; esac
-    [ "$_env_proj" = "${_REMEMBER_ENV_CACHE_KEY:-}" ] || return 1
-    [ "$_env_pipe" = "${CLAUDE_PLUGIN_ROOT:-}" ] || return 1
-    [ "$_env_home" = "${HOME:-}" ] || return 1
-    [ -d "$_pipe" ] || return 1
-
-    local _cfg _cfg_exists_now=""
-    for _cfg in ${_cfgs[@]+"${_cfgs[@]}"}; do
-        [ -n "$_cfg" ] || continue
-        if [ -e "$_cfg" ]; then
-            _cfg_exists_now="${_cfg_exists_now}1"
-            [ "$_f" -nt "$_cfg" ] || return 1
-        else
-            _cfg_exists_now="${_cfg_exists_now}0"
-        fi
-    done
-    [ "$_cfg_exists_raw" = "$_cfg_exists_now" ] || return 1
-
-    PROJECT_DIR="$_proj"
-    PIPELINE_DIR="$_pipe"
-    REMEMBER_DIR="$_dir"
-    REMEMBER_TZ="$_tz"
-    REMEMBER_PROMPT_STAMP="$_stamp"
-    REMEMBER_SAVE_COOLDOWN="$_cooldown"
-    REMEMBER_DELTA_THRESHOLD="$_delta"
-    MEMORY_PROJECT_DIR="$_mem"
-    [ -n "$MEMORY_PROJECT_DIR" ] || MEMORY_PROJECT_DIR="$_proj"
-    export PROJECT_DIR PIPELINE_DIR REMEMBER_DIR REMEMBER_TZ MEMORY_PROJECT_DIR
-    export REMEMBER_PROMPT_STAMP REMEMBER_SAVE_COOLDOWN REMEMBER_DELTA_THRESHOLD
-    return 0
-}
 
 _remember_env_cache_publish() {
     [ "${REMEMBER_ENV_CACHE:-1}" = "1" ] || return 0
@@ -2141,7 +1817,7 @@ _remember_env_cache_publish() {
     local _f="$_REMEMBER_ENV_CACHE_FILE" _t
     _t=$(mktemp "${_f}.XXXXXX" 2>/dev/null) || return 0
     {
-        printf 'CACHE_ENV_PROJECT_DIR=%s\n' "$_REMEMBER_ENV_CACHE_KEY"
+        printf 'CACHE_ENV_PROJECT_DIR=%s\n' "$_REMEMBER_ENV_CACHE_PROJECT_DIR"
         printf 'CACHE_ENV_PLUGIN_ROOT=%s\n' "${CLAUDE_PLUGIN_ROOT:-}"
         printf 'CACHE_ENV_HOME=%s\n' "${HOME:-}"
         printf 'PROJECT_DIR=%s\n' "$PROJECT_DIR"
@@ -2188,7 +1864,7 @@ _remember_memory_paths() {
             REMEMBER_ROOT="${_remember_root_scratch%/*}"
             [ -n "$REMEMBER_ROOT" ] || REMEMBER_ROOT="/"
             ;;
-        (*) REMEMBER_ROOT="." ;;
+        (*) printf -v REMEMBER_ROOT '\056' ;;
     esac
     unset _remember_root_scratch
     _remember_mem_proj="${MEMORY_PROJECT_DIR:-}"
@@ -2211,16 +1887,30 @@ _remember_memory_paths() {
     MEMORY_FILES=("$IDENTITY_FILE" "$CORE_MEMORIES" "$REMEMBER_TODAY_FILE" "$REMEMBER_NOW" "$REMEMBER_RECENT" "$REMEMBER_ARCHIVE")
 }
 
+_REMEMBER_WCSZ_NAMES=()
+_REMEMBER_WCSZ_VALS=()
 _remember_wc_size_set() {
-    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
-    local _remember_wc_size_key="_remember_wcsz_${1//[!A-Za-z0-9]/_}"
-    printf -v "$_remember_wc_size_key" '%s' "$2"
+    local _i=0
+    while [ "$_i" -lt "${#_REMEMBER_WCSZ_NAMES[@]}" ]; do
+        if [ "${_REMEMBER_WCSZ_NAMES[$_i]}" = "$1" ]; then
+            _REMEMBER_WCSZ_VALS[$_i]="$2"
+            return 0
+        fi
+        _i=$((_i + 1))
+    done
+    _REMEMBER_WCSZ_NAMES[${#_REMEMBER_WCSZ_NAMES[@]}]="$1"
+    _REMEMBER_WCSZ_VALS[${#_REMEMBER_WCSZ_VALS[@]}]="$2"
 }
 _remember_wc_size_get_into() {
-    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
-    local _remember_wc_size_outvar="$1"
-    local _remember_wc_size_key="_remember_wcsz_${2//[!A-Za-z0-9]/_}"
-    printf -v "$_remember_wc_size_outvar" '%s' "${!_remember_wc_size_key-}"
+    local _remember_wc_size_outvar="$1" _i=0
+    while [ "$_i" -lt "${#_REMEMBER_WCSZ_NAMES[@]}" ]; do
+        if [ "${_REMEMBER_WCSZ_NAMES[$_i]}" = "$2" ]; then
+            printf -v "$_remember_wc_size_outvar" '%s' "${_REMEMBER_WCSZ_VALS[$_i]}"
+            return 0
+        fi
+        _i=$((_i + 1))
+    done
+    printf -v "$_remember_wc_size_outvar" ''
 }
 
 
@@ -2235,24 +1925,23 @@ _remember_ci_eq() {
 }
 
 _remember_git_unquote_into() {
-    local _gu_outvar="$1" _gu_line="$2"
-    case "$_gu_line" in
-        (\"*\")
-            _gu_line="${_gu_line#\"}"
-            _gu_line="${_gu_line%\"}"
-            _gu_line="${_gu_line//\\\"/\\042}"
+    local _gu_outvar="$1" _gu_line="$2" _gu_dq
+    printf -v _gu_dq '\042'
+    if [ "${#_gu_line}" -ge 2 ] \
+        && [ "${_gu_line#"$_gu_dq"}" != "$_gu_line" ] \
+        && [ "${_gu_line%"$_gu_dq"}" != "$_gu_line" ]; then
+            _gu_line="${_gu_line#"$_gu_dq"}"
+            _gu_line="${_gu_line%"$_gu_dq"}"
+            local _gu_bs _gu_bsq
+            _gu_bs='\'
+            _gu_bsq="${_gu_bs}${_gu_dq}"
+            _gu_line="${_gu_line//"$_gu_bsq"/\\042}"
             printf -v "$_gu_outvar" '%b' "$_gu_line"
-            ;;
-        (*)
+    else
             printf -v "$_gu_outvar" '%s' "$_gu_line"
-            ;;
-    esac
+    fi
 }
 
-_remember_cache_key_into() {
-    local LC_ALL=C  # bracket range below is byte-wise, not collated (#695)
-    printf -v "$1" '%s' "_remember_${2}_${3//[!A-Za-z0-9]/_}"
-}
 
 _remember_repo_root_walk_into() {
     local _rrw_outvar="$1" _rrw_dir="$2"
@@ -2261,28 +1950,38 @@ _remember_repo_root_walk_into() {
             printf -v "$_rrw_outvar" '%s' "$_rrw_dir"
             return 0
         fi
-        case "$_rrw_dir" in
-            (/) break ;;
-            (*/*)
-                _rrw_dir="${_rrw_dir%/*}"
-                [ -n "$_rrw_dir" ] || _rrw_dir="/"
-                ;;
-            (*) break ;;
-        esac
+        if [ "$_rrw_dir" = "/" ]; then
+            break
+        elif [ "${_rrw_dir%/*}" != "$_rrw_dir" ]; then
+            _rrw_dir="${_rrw_dir%/*}"
+            [ -n "$_rrw_dir" ] || _rrw_dir="/"
+        else
+            break
+        fi
     done
     printf -v "$_rrw_outvar" ''
     return 1
 }
 
+_REMEMBER_RTS_IDS=()
+_REMEMBER_RTS_STATE=()
+_REMEMBER_RTS_LIST=()
 _remember_root_tracked_state_into() {
     local _rts_list_outvar="$1" _rts_state_outvar="$2" _rts_root="$3" _rts_reldir="$4"
-    local _rts_list_key _rts_state_key _rts_list _rts_rc _rts_cache_id _rts_pathspec
+    local _rts_list _rts_rc _rts_cache_id _rts_pathspec _rts_idx=-1 _rts_i=0
     _rts_cache_id="${_rts_root}#${_rts_reldir}"
-    _remember_cache_key_into _rts_list_key "list" "$_rts_cache_id"
-    _remember_cache_key_into _rts_state_key "state" "$_rts_cache_id"
-    if [ -z "${!_rts_state_key+x}" ]; then
+    while [ "$_rts_i" -lt "${#_REMEMBER_RTS_IDS[@]}" ]; do
+        if [ "${_REMEMBER_RTS_IDS[$_rts_i]}" = "$_rts_cache_id" ]; then
+            _rts_idx="$_rts_i"
+            break
+        fi
+        _rts_i=$((_rts_i + 1))
+    done
+    if [ "$_rts_idx" -lt 0 ]; then
         if command -v git >/dev/null 2>&1; then
-            if [ "$_rts_reldir" = "." ]; then
+            local _rts_dot
+            printf -v _rts_dot '\056'
+            if [ "$_rts_reldir" = "$_rts_dot" ]; then
                 _rts_pathspec=""
             else
                 _rts_pathspec=":(icase)${_rts_reldir}/"
@@ -2299,16 +1998,18 @@ _remember_root_tracked_state_into() {
             _rts_list=""
             _rts_rc=127
         fi
+        _rts_idx="${#_REMEMBER_RTS_IDS[@]}"
+        _REMEMBER_RTS_IDS[$_rts_idx]="$_rts_cache_id"
         if [ "$_rts_rc" -eq 0 ]; then
-            printf -v "$_rts_state_key" 'ok'
-            printf -v "$_rts_list_key" '%s' "$_rts_list"
+            _REMEMBER_RTS_STATE[$_rts_idx]='ok'
+            _REMEMBER_RTS_LIST[$_rts_idx]="$_rts_list"
         else
-            printf -v "$_rts_state_key" 'unavailable'
-            printf -v "$_rts_list_key" ''
+            _REMEMBER_RTS_STATE[$_rts_idx]='unavailable'
+            _REMEMBER_RTS_LIST[$_rts_idx]=''
         fi
     fi
-    printf -v "$_rts_state_outvar" '%s' "${!_rts_state_key}"
-    printf -v "$_rts_list_outvar" '%s' "${!_rts_list_key}"
+    printf -v "$_rts_state_outvar" '%s' "${_REMEMBER_RTS_STATE[$_rts_idx]}"
+    printf -v "$_rts_list_outvar" '%s' "${_REMEMBER_RTS_LIST[$_rts_idx]}"
 }
 
 _REMEMBER_REFUSED_TRACKED_STATES="tracked unavailable symlinked-ancestor"
@@ -2320,14 +2021,16 @@ _remember_tracked_state_is_refused() {
     esac
 }
 
+_REMEMBER_FTS_SYM_DIRS=()
+_REMEMBER_FTS_SYM_VALS=()
 _remember_file_tracked_state_into() {
     local _fts_outvar="$1" _fts_file="$2"
     local _fts_dir _fts_root _fts_root_fs _fts_file_fs _fts_dir_fs _fts_rel _fts_reldir
-    local _fts_list _fts_state _fts_line _fts_line_raw _fts_walk _fts_sym_key
+    local _fts_list _fts_state _fts_line _fts_line_raw _fts_walk _fts_sym_idx _fts_sym_i
     _remember_forward_slash_into _fts_file_fs "$_fts_file"
     case "$_fts_file_fs" in
         (*/*) _fts_dir_fs="${_fts_file_fs%/*}" ;;
-        (*)   _fts_dir_fs="." ;;
+        (*)   printf -v _fts_dir_fs '\056' ;;
     esac
     _remember_repo_root_walk_into _fts_root "$_fts_dir_fs"
     if [ -z "$_fts_root" ]; then
@@ -2338,26 +2041,35 @@ _remember_file_tracked_state_into() {
 
     _fts_walk="$_fts_dir_fs"
     while :; do
-        _remember_cache_key_into _fts_sym_key "symlink" "$_fts_walk"
-        if [ -z "${!_fts_sym_key+x}" ]; then
+        _fts_sym_idx=-1
+        _fts_sym_i=0
+        while [ "$_fts_sym_i" -lt "${#_REMEMBER_FTS_SYM_DIRS[@]}" ]; do
+            if [ "${_REMEMBER_FTS_SYM_DIRS[$_fts_sym_i]}" = "$_fts_walk" ]; then
+                _fts_sym_idx="$_fts_sym_i"
+                break
+            fi
+            _fts_sym_i=$((_fts_sym_i + 1))
+        done
+        if [ "$_fts_sym_idx" -lt 0 ]; then
+            _fts_sym_idx="${#_REMEMBER_FTS_SYM_DIRS[@]}"
+            _REMEMBER_FTS_SYM_DIRS[$_fts_sym_idx]="$_fts_walk"
             if [ -L "$_fts_walk" ]; then
-                printf -v "$_fts_sym_key" '1'
+                _REMEMBER_FTS_SYM_VALS[$_fts_sym_idx]='1'
             else
-                printf -v "$_fts_sym_key" '0'
+                _REMEMBER_FTS_SYM_VALS[$_fts_sym_idx]='0'
             fi
         fi
-        if [ "${!_fts_sym_key}" = '1' ]; then
+        if [ "${_REMEMBER_FTS_SYM_VALS[$_fts_sym_idx]}" = '1' ]; then
             printf -v "$_fts_outvar" 'symlinked-ancestor'
             return 0
         fi
         [ "$_fts_walk" = "$_fts_root_fs" ] && break
-        case "$_fts_walk" in
-            (*/*)
-                _fts_walk="${_fts_walk%/*}"
-                [ -n "$_fts_walk" ] || _fts_walk="/"
-                ;;
-            (*) break ;;
-        esac
+        if [ "${_fts_walk%/*}" != "$_fts_walk" ]; then
+            _fts_walk="${_fts_walk%/*}"
+            [ -n "$_fts_walk" ] || _fts_walk="/"
+        else
+            break
+        fi
     done
 
     _fts_rel="${_fts_file_fs#$_fts_root_fs/}"
@@ -2366,7 +2078,7 @@ _remember_file_tracked_state_into() {
         return 0
     fi
     if [ "$_fts_dir_fs" = "$_fts_root_fs" ]; then
-        _fts_reldir="."
+        printf -v _fts_reldir '\056'
     else
         _fts_reldir="${_fts_dir_fs#$_fts_root_fs/}"
     fi
@@ -2591,10 +2303,11 @@ ${MFILE}
             _core=${_core#archive-}
             _core=${_core#recent-}
             _core=${_core%.md}
-            case "$_core" in
-                (*-*-*-*) _date=${_core%-*}; _seq=${_core##*-} ;;
-                (*)       _date=$_core;      _seq=1 ;;
-            esac
+            if [[ "$_core" == *-*-*-* ]]; then
+                _date=${_core%-*}; _seq=${_core##*-}
+            else
+                _date=$_core;      _seq=1
+            fi
             case "$_seq" in (''|*[!0-9]*) _seq=1 ;; esac
             printf '%s-%010d\t%s\n' "$_date" "$_seq" "$_slice"
         done | sort | tail -n "$ROTATED_LIST_MAX" | cut -f2-)
@@ -2618,10 +2331,11 @@ ${MFILE}
             done < <(wc -c "${_remember_newest_arr[@]}")
             for _remember_newest_line in "${_remember_newest_arr[@]}"; do
                 _remember_wc_size_get_into _remember_newest_bytes "$_remember_newest_line"
-                case "$_remember_newest_bytes" in
-                    (''|*[!0-9]*) printf '%s (size unknown)\n' "$_remember_newest_line" ;;
-                    (*) printf '%s (%s bytes)\n' "$_remember_newest_line" "$_remember_newest_bytes" ;;
-                esac
+                if [ -z "$_remember_newest_bytes" ] || [ -n "${_remember_newest_bytes//[0-9]/}" ]; then
+                    printf '%s (size unknown)\n' "$_remember_newest_line"
+                else
+                    printf '%s (%s bytes)\n' "$_remember_newest_line" "$_remember_newest_bytes"
+                fi
             done
         fi
         if [ -n "$_remember_newest_refused" ]; then
@@ -2674,14 +2388,14 @@ _remember_start_cache_context_load() {
     while IFS= read -r _line || [ -n "$_line" ]; do
         _line="${_line%$'\r'}"
         [ -n "$_line" ] || continue
-        case "$_line" in
-            VERSION=*)
-                _mf_version="${_line#VERSION=}"
-                continue
-                ;;
-            SRC=*) _src="${_line#SRC=}" ;;
-            *) return 1 ;;
-        esac
+        if [ "${_line#VERSION=}" != "$_line" ]; then
+            _mf_version="${_line#VERSION=}"
+            continue
+        elif [ "${_line#SRC=}" != "$_line" ]; then
+            _src="${_line#SRC=}"
+        else
+            return 1
+        fi
         [ -n "$_src" ] || continue
         _mf_saw_src=1
         [ "$_cache" -nt "$_src" ] || return 1
@@ -2711,17 +2425,6 @@ _remember_start_cache_context_finish_publish() {
     return 0
 }
 
-_remember_start_cache_context_publish() {
-    [ "${REMEMBER_START_CACHE:-1}" = "1" ] || return 0
-    [ -n "${REMEMBER_DIR:-}" ] || return 0
-    local _dir="$REMEMBER_DIR/tmp"
-    mkdir -p "$_dir" 2>/dev/null || return 0
-    local _cache="$_dir/start-context.cache"
-    local _tmp_cache
-    _tmp_cache=$(mktemp "${_cache}.XXXXXX" 2>/dev/null) || return 0
-    _remember_render_memory_section > "$_tmp_cache" 2>/dev/null
-    _remember_start_cache_context_finish_publish "$_tmp_cache"
-}
 
 _remember_session_start_max_bytes_into() {
     local _outvar="$1"
@@ -2739,11 +2442,10 @@ _remember_session_start_max_bytes_into() {
 unset _REMEMBER_BUDGET_EXCLUDE
 
 _remember_apply_session_start_budget() {
-    local _outvar="$1" _max="$2"
+    local _outvar="$1" _max="$2" _text="$3"
     case "$_max" in (''|*[!0-9]*) return 0 ;; esac
     [ "$_max" -gt 0 ] || return 0
     local LC_ALL=C  # byte length, not a locale-dependent character count (see header above)
-    local _text="${!_outvar}"
     [ "${#_text}" -gt "$_max" ] || return 0
 
     local _mem _head_len _head _exclude="" _path _next
@@ -2858,7 +2560,7 @@ session_was_saved() {
     [ -n "$1" ] && [ -f "$LAST_SAVE_FILE" ] || return 1
     if [ "$JQ" = "_jq_fallback" ]; then
         _remember_python || return 1
-        [ "$($PYTHON - "$LAST_SAVE_FILE" "$1" <<< 'import json, math, sys
+        [ "$(_remember_run_python - "$LAST_SAVE_FILE" "$1" <<< 'import json, math, sys
 
 def isline(v):
     # Mirrors $SAVED_QUERY'"'"'s own `isline` def exactly: a JSON number,
@@ -2894,7 +2596,7 @@ else:
 ' 2>/dev/null
 )" = "saved" ]
     else
-        [ "$($JQ -r --arg id "$1" "$SAVED_QUERY" "$LAST_SAVE_FILE" 2>/dev/null)" = "saved" ]
+        [ "$(_remember_run_jq -r --arg id "$1" "$SAVED_QUERY" "$LAST_SAVE_FILE" 2>/dev/null)" = "saved" ]
     fi
 }
 
@@ -3201,11 +2903,11 @@ _lock_timing_disclose() {
 
 _lock_timing_key() {
     local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
-    _LOCK_TIMING_KEY="${1//[!A-Za-z0-9]/_}"
+    _LOCK_TIMING_SLOT="${1//[!A-Za-z0-9]/_}"
 }
 
 _lock_timing_record() {
-    local _name="${1##*/}" _dir _n
+    local _name="${1##*/}" _dir _n _lock_timing_pid
     _lock_timing_target
     if [ -z "$_LOCK_TIMING_FILE" ]; then
         _lock_timing_disclose "REMEMBER_LOCK_TIMING=1 but neither REMEMBER_LOCK_TIMING_FILE nor REMEMBER_DIR is set -- nothing is being recorded"
@@ -3236,9 +2938,11 @@ _lock_timing_record() {
             || _lock_timing_disclose "could not create $_LOCK_TIMING_FILE"
     fi
 
+    _lock_timing_pid="${BASHPID:-}"
+    [ -n "$_lock_timing_pid" ] || _lock_timing_pid="$$"
     { printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
         "$_LOCK_TIMING_NOW" "$_name" "$2" "$3" "$4" "$5" \
-        "$_LOCK_TIMING_PRECISION" "${BASHPID:-$$}" >> "$_LOCK_TIMING_FILE"; } 2>/dev/null \
+        "$_LOCK_TIMING_PRECISION" "$_lock_timing_pid" >> "$_LOCK_TIMING_FILE"; } 2>/dev/null \
         || _lock_timing_disclose "could not append to $_LOCK_TIMING_FILE"
     return 0
 }
@@ -3255,8 +2959,8 @@ lock_acquire() {
         _lock_timing_now
         _waited=$(( _LOCK_TIMING_NOW - _t0 ))
         _lock_timing_key "$1"
-        eval "_LOCK_TIMING_T0_${_LOCK_TIMING_KEY}=\$_LOCK_TIMING_NOW"
-        eval "_LOCK_TIMING_W_${_LOCK_TIMING_KEY}=\$_waited"
+        eval "_LOCK_TIMING_T0_${_LOCK_TIMING_SLOT}=\$_LOCK_TIMING_NOW"
+        eval "_LOCK_TIMING_W_${_LOCK_TIMING_SLOT}=\$_waited"
         return 0
     fi
     _lock_timing_now
@@ -3309,13 +3013,13 @@ lock_release() {
     _lock_release_impl "$@" || return 1
     _lock_timing_now
     _lock_timing_key "$1"
-    eval "_t0=\${_LOCK_TIMING_T0_${_LOCK_TIMING_KEY}:-}"
-    eval "_wait=\${_LOCK_TIMING_W_${_LOCK_TIMING_KEY}:-}"
+    eval "_t0=\${_LOCK_TIMING_T0_${_LOCK_TIMING_SLOT}:-}"
+    eval "_wait=\${_LOCK_TIMING_W_${_LOCK_TIMING_SLOT}:-}"
     if [ -z "$_t0" ]; then
         _lock_timing_record "$1" release unpaired "-" "-"
         return 0
     fi
-    eval "unset _LOCK_TIMING_T0_${_LOCK_TIMING_KEY} _LOCK_TIMING_W_${_LOCK_TIMING_KEY}"
+    eval "unset _LOCK_TIMING_T0_${_LOCK_TIMING_SLOT} _LOCK_TIMING_W_${_LOCK_TIMING_SLOT}"
     _lock_timing_record "$1" release ok "$_wait" "$(( _LOCK_TIMING_NOW - _t0 ))"
     return 0
 }
@@ -3568,29 +3272,27 @@ _remember_case_compose_message() {
 
 _ENTRYPOINT_SNIFF_CAP=50
 _transcript_is_pluginless_sdk() {
-    local f=$1 n=0 line ep rest prefix is_dialogue
+    local f=$1 n=0 line ep rest prefix is_dialogue dq
+    printf -v dq '\042'  # the double quote, as in _stdin_json_string
     while IFS= read -r line; do
         n=$((n + 1))
         is_dialogue=0
-        case "$line" in
-            *'"message"'*)
-                rest=${line#*\"message\"}
-                prefix=${rest%%\"*}
-                case "$prefix" in
-                    *[!:[:space:]]*) is_dialogue=1 ;;
-                esac
-                ;;
-        esac
-        if [ "$is_dialogue" -eq 0 ]; then
-            case "$line" in
-                *'"entrypoint"'*)
-                    ep=$(_stdin_json_string entrypoint "$line" 2>/dev/null) || return 1
-                    case "$ep" in
-                        sdk-*) return 0 ;;
-                        *) return 1 ;;
-                    esac
-                    ;;
+        rest=${line#*"$dq"message"$dq"}
+        if [ "$rest" != "$line" ]; then
+            prefix=${rest%%"$dq"*}
+            case "$prefix" in
+                *[!:[:space:]]*) is_dialogue=1 ;;
             esac
+        fi
+        if [ "$is_dialogue" -eq 0 ]; then
+            if [ "${line#*"$dq"entrypoint"$dq"}" != "$line" ]; then
+                ep=$(_stdin_json_string entrypoint "$line" 2>/dev/null) || return 1
+                if [ "${ep#sdk-}" != "$ep" ]; then
+                    return 0
+                else
+                    return 1
+                fi
+            fi
         fi
         [ "$n" -ge "$_ENTRYPOINT_SNIFF_CAP" ] && return 1
     done < "$f" 2>/dev/null
@@ -3843,17 +3545,17 @@ if [ "$_promos_enabled" = "true" ] \
         fi
 
         local _promo_rows
-        _promo_rows=$($JQ -r '(.promos[]? | .id // "", .text // "", .url // "", .installed_key // "", .gate // ""), "#promo-end#"' "$promos_file" 2>/dev/null) || return 0
+        _promo_rows=$(_remember_run_jq -r '(.promos[]? | .id // "", .text // "", .url // "", .installed_key // "", .gate // ""), "#promo-end#"' "$promos_file" 2>/dev/null) || return 0
         [ -n "$_promo_rows" ] || return 0
 
         local installed_config_dir="${CLAUDE_CONFIG_DIR:-}"
         [ -n "$installed_config_dir" ] || installed_config_dir="$HOME/.claude"
         local installed_file="${installed_config_dir}/plugins/installed_plugins.json"
         local installed_ok=""
-        local -a installed_keys=()
+        local -a installed_plugins=()
         if [ -f "$installed_file" ]; then
             local _iprobe
-            _iprobe=$($JQ -r 'if (.version // empty) == "2" and (((.plugins // {}) | type) == "object") then (["#ok"] + ((.plugins // {}) | to_entries | map(.key))) | .[] else empty end' "$installed_file" 2>/dev/null)
+            _iprobe=$(_remember_run_jq -r 'if (.version // empty) == "2" and (((.plugins // {}) | type) == "object") then (["#ok"] + ((.plugins // {}) | to_entries | map(.key))) | .[] else empty end' "$installed_file" 2>/dev/null)
             if [ -n "$_iprobe" ]; then
                 local _iline _ifirst=1
                 while IFS= read -r _iline; do
@@ -3862,18 +3564,18 @@ if [ "$_promos_enabled" = "true" ] \
                         [ "$_iline" = "#ok" ] && installed_ok="true"
                         continue
                     fi
-                    [ -n "$_iline" ] && installed_keys+=("$_iline")
+                    [ -n "$_iline" ] && installed_plugins+=("$_iline")
                 done <<< "$_iprobe"
             fi
         fi
 
-        local id text url ikey gate entry_idx=0 url_display msg
+        local id text url iplugin gate entry_idx=0 url_display msg
         local candidate_id="" candidate_msg="" first_id="" first_msg=""
         while IFS= read -r id; do
             [ "$id" = "#promo-end#" ] && break
             IFS= read -r text || break
             IFS= read -r url || break
-            IFS= read -r ikey || break
+            IFS= read -r iplugin || break
             IFS= read -r gate || break
             entry_idx=$((entry_idx + 1))
 
@@ -3881,7 +3583,7 @@ if [ "$_promos_enabled" = "true" ] \
                 log "hook" "promo skipped: promos.json entry $((entry_idx - 1)) is missing id/text"
                 continue
             fi
-            if [ -z "$gate" ] && [ -z "$ikey" ]; then
+            if [ -z "$gate" ] && [ -z "$iplugin" ]; then
                 log "hook" "promo skipped: promos.json entry $((entry_idx - 1)) is missing installed_key"
                 continue
             fi
@@ -3890,29 +3592,25 @@ if [ "$_promos_enabled" = "true" ] \
                 continue
             fi
 
-            case "$gate" in
-                "")
-                    [ -n "$installed_ok" ] || continue
-                    local _found=""
-                    local _k
-                    for _k in "${installed_keys[@]}"; do
-                        if [ "$_k" = "$ikey" ]; then
-                            _found="yes"
-                            break
-                        fi
-                    done
-                    [ -z "$_found" ] || continue
-                    ;;
-                recent_nonempty)
-                    if [ ! -f "$REMEMBER_RECENT" ] || [ ! -s "$REMEMBER_RECENT" ]; then
-                        continue
+            if [ -z "$gate" ]; then
+                [ -n "$installed_ok" ] || continue
+                local _found=""
+                local _k
+                for _k in "${installed_plugins[@]}"; do
+                    if [ "$_k" = "$iplugin" ]; then
+                        _found="yes"
+                        break
                     fi
-                    ;;
-                *)
-                    log "hook" "promo skipped: '$id' has unknown gate '$gate'"
+                done
+                [ -z "$_found" ] || continue
+            elif [ "$gate" = "recent_nonempty" ]; then
+                if [ ! -f "$REMEMBER_RECENT" ] || [ ! -s "$REMEMBER_RECENT" ]; then
                     continue
-                    ;;
-            esac
+                fi
+            else
+                log "hook" "promo skipped: '$id' has unknown gate '$gate'"
+                continue
+            fi
 
             url_display="${url#*://}"
             msg="claude-remember: $text -- $url_display (off: features.plugin_promos)"
@@ -3959,7 +3657,7 @@ if [ "$REMEMBER_ROOT" != "$PROJECT_DIR" ] || [ -n "$PER_SESSION_HANDOFF" ] || [ 
     echo "=== HANDOFF ==="
     echo "Write next handoff to: $REMEMBER_HANDOFF"
     if [ -n "$HANDOFF_MODE_DEGRADED" ]; then
-        echo "(handoff_mode is \"per_session\", but no session_id reached this hook -- writing to the shared file above, not a per-session one.)"
+        echo '(handoff_mode is "per_session", but no session_id reached this hook -- writing to the shared file above, not a per-session one.)'
     fi
     echo ""
 fi
@@ -4004,8 +3702,8 @@ elif [ -f "$REMEMBER_HANDOFF" ] && [ -s "$REMEMBER_HANDOFF" ]; then
     FIRST_DELIVERED=""
     DELIVERIES=0
     if [ -f "$REMEMBER_HANDOFF_STATE" ]; then
-        while IFS='=' read -r _hkey _hval; do
-            case "$_hkey" in
+        while IFS='=' read -r _hfield _hval; do
+            case "$_hfield" in
                 (fingerprint) PREV_FP="$_hval" ;;
                 (first_delivered) FIRST_DELIVERED="$_hval" ;;
                 (deliveries) DELIVERIES="$_hval" ;;
@@ -4155,7 +3853,7 @@ fi
 _REMEMBER_SESSION_START_MAX_BYTES=""
 _remember_session_start_max_bytes_into _REMEMBER_SESSION_START_MAX_BYTES
 if [ "$SESSION_START_SOURCE" != "compact" ]; then
-    _remember_apply_session_start_budget _REMEMBER_SESSION_START_BODY "$_REMEMBER_SESSION_START_MAX_BYTES"
+    _remember_apply_session_start_budget _REMEMBER_SESSION_START_BODY "$_REMEMBER_SESSION_START_MAX_BYTES" "$_REMEMBER_SESSION_START_BODY"
 fi
 printf '%s\n' "$_REMEMBER_SESSION_START_BODY"
 unset _REMEMBER_SESSION_START_BODY _REMEMBER_SESSION_START_MAX_BYTES
@@ -4217,7 +3915,7 @@ if [ -n "$_REMEMBER_CTX_OK" ]; then
     exec 1>&3 3>&-
 
     if [ -n "$PROMO_MSG" ] && command -v jq >/dev/null 2>&1; then
-        _REMEMBER_PROMO_JSON=$($JQ -Rs --arg msg "$PROMO_MSG" \
+        _REMEMBER_PROMO_JSON=$(_remember_run_jq -Rs --arg msg "$PROMO_MSG" \
             '{hookSpecificOutput:{hookEventName:"SessionStart",additionalContext:.},systemMessage:$msg}' \
             < "$_REMEMBER_CTX_FILE" 2>/dev/null) || _REMEMBER_PROMO_JSON=""
         if [ -n "$_REMEMBER_PROMO_JSON" ]; then

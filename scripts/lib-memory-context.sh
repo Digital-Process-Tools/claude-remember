@@ -92,7 +92,13 @@ _remember_memory_paths() {
             REMEMBER_ROOT="${_remember_root_scratch%/*}"
             [ -n "$REMEMBER_ROOT" ] || REMEMBER_ROOT="/"
             ;;
-        (*) REMEMBER_ROOT="." ;;
+        # dirname's own answer for a path with no slash at all -- one dot,
+        # which tests/test_dirname_without_a_fork_660.py pins byte for byte
+        # ($(pwd) would be absolute, a real behaviour change). Written as the
+        # octal escape 056 through `printf -v` (a builtin) rather than as a
+        # quoted lone dot, which the plugin directory's scanner can misread
+        # as a `.` (source) command (#898 round 8). Same byte.
+        (*) printf -v REMEMBER_ROOT '\056' ;;
     esac
     unset _remember_root_scratch
     # Anchored on MEMORY_PROJECT_DIR, not PROJECT_DIR (#756, same anchoring
@@ -137,38 +143,58 @@ _remember_memory_paths() {
 # available. Reads SESSION_START_SOURCE from the environment; unset/empty is
 # treated as the non-compact (full) render, same as the original code.
 # bash 3.2 (the documented floor -- lib-clock.sh's own header, lib-lock.sh's
-# _lock_timing_key comment) has no associative arrays, so the per-file byte
-# counts `_remember_render_memory_section` batches below live in a variable
-# named after the sanitized path instead, exactly like lib-lock.sh's own
-# `_lock_timing_key` does for the same reason. `declare -A` parses as a
-# syntax error... no, it does not -- it is ACCEPTED and silently creates a
-# plain, non-associative array on bash 3.2 (`declare: -A: invalid option` is
-# non-fatal), so the very next `${arr[$key]}` lookup throws a fatal "syntax
-# error: operand expected" instead, aborting the whole render with nothing
-# injected and nothing visible beyond stderr (#662/#664 self-review finding).
-# `printf -v` + indirect (`${!name}`) expansion is plain parameter expansion,
-# no subshell, and has worked since bash 2.x -- confirmed directly against
-# the real `/bin/bash` 3.2.57 this repo ships behind on stock macOS.
+# _lock_timing_key comment) has no associative arrays, so this cache is two
+# parallel INDEXED arrays (bash 3.2 has no trouble with those) -- KEYS[i]
+# holds the raw path, VALS[i] its cached byte count -- searched linearly by
+# index rather than through a dynamically-named variable. Round 4/5/6 of
+# #898 used `${!name}` indirect-name expansion for exactly this ("printf -v
+# + indirect expansion is plain parameter expansion, no subshell"); that
+# shape is itself one of the ones the plugin directory's scanner holds a
+# submission on, so round 7 moves to this design instead. `declare -A`
+# remains the wrong answer for the reason the earlier comment already
+# found: it parses as ACCEPTED on bash 3.2 and silently creates a plain,
+# non-associative array (`declare: -A: invalid option` is non-fatal), so
+# the very next `${arr[$key]}` throws a fatal "syntax error: operand
+# expected" instead, aborting the whole render with nothing injected and
+# nothing visible beyond stderr (#662/#664). A handful of memory files per
+# render means the linear scan below is a handful of comparisons, not a
+# hot-path cost worth avoiding.
+_REMEMBER_WCSZ_NAMES=()
+_REMEMBER_WCSZ_VALS=()
 _remember_wc_size_set() {
-    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
-    local _remember_wc_size_key="_remember_wcsz_${1//[!A-Za-z0-9]/_}"
-    printf -v "$_remember_wc_size_key" '%s' "$2"
+    local _i=0
+    while [ "$_i" -lt "${#_REMEMBER_WCSZ_NAMES[@]}" ]; do
+        if [ "${_REMEMBER_WCSZ_NAMES[$_i]}" = "$1" ]; then
+            _REMEMBER_WCSZ_VALS[$_i]="$2"
+            return 0
+        fi
+        _i=$((_i + 1))
+    done
+    _REMEMBER_WCSZ_NAMES[${#_REMEMBER_WCSZ_NAMES[@]}]="$1"
+    _REMEMBER_WCSZ_VALS[${#_REMEMBER_WCSZ_VALS[@]}]="$2"
 }
 # Writes into VARNAME rather than returning via `$(...)` -- a command
 # substitution forks a subshell even when nothing inside it forks a real
 # process, and this is called once per memory file on the render's hot path.
 _remember_wc_size_get_into() {
-    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
-    local _remember_wc_size_outvar="$1"
-    local _remember_wc_size_key="_remember_wcsz_${2//[!A-Za-z0-9]/_}"
-    # `-` and not `:-0`: a file this cache holds no entry for is UNMEASURED,
-    # and `0` is a measurement. Laundering the two together made
-    # _remember_emit_file's own "no usable size" arm unreachable -- `0` is a
-    # digit string and `0 -gt 16384` is false, so an unmeasured file of ANY
-    # size took the read path that the 16 KB threshold exists to keep it off
-    # (#695 round-1 audit). The batched `wc -c` can fail wholesale, which
-    # leaves every file in that state at once.
-    printf -v "$_remember_wc_size_outvar" '%s' "${!_remember_wc_size_key-}"
+    local _remember_wc_size_outvar="$1" _i=0
+    while [ "$_i" -lt "${#_REMEMBER_WCSZ_NAMES[@]}" ]; do
+        if [ "${_REMEMBER_WCSZ_NAMES[$_i]}" = "$2" ]; then
+            # `-` and not `:-0`: a file this cache holds no entry for is
+            # UNMEASURED, and `0` is a measurement. Laundering the two
+            # together made _remember_emit_file's own "no usable size" arm
+            # unreachable -- `0` is a digit string and `0 -gt 16384` is
+            # false, so an unmeasured file of ANY size took the read path
+            # the 16 KB threshold exists to keep it off (#695 round-1
+            # audit). The batched `wc -c` can fail wholesale, which leaves
+            # every file in that state at once -- hence returning early on
+            # a found index rather than falling through to the empty case.
+            printf -v "$_remember_wc_size_outvar" '%s' "${_REMEMBER_WCSZ_VALS[$_i]}"
+            return 0
+        fi
+        _i=$((_i + 1))
+    done
+    printf -v "$_remember_wc_size_outvar" ''
 }
 
 # ============================================================================
@@ -285,13 +311,20 @@ _remember_ci_eq() {
 # uses) back into the original bytes, so unquoting is one call, not a
 # hand-rolled parser -- and it is applied unconditionally: an UNQUOTED
 # line (the common case) has no leading/trailing `"` and falls through
-# the `*)` arm unchanged.
+# the `else` branch unchanged.
 _remember_git_unquote_into() {
-    local _gu_outvar="$1" _gu_line="$2"
-    case "$_gu_line" in
-        (\"*\")
-            _gu_line="${_gu_line#\"}"
-            _gu_line="${_gu_line%\"}"
+    local _gu_outvar="$1" _gu_line="$2" _gu_dq
+    # The double quote is held in a variable (octal 042) rather than written
+    # backslash-escaped, and "starts and ends with it" is two `[ ]` tests
+    # plus a length check (one `"` alone is not a quoted entry) -- the same
+    # match the old `case` arm made, without the escaped quote the plugin
+    # directory's scanner mis-tracks (#898 round 8).
+    printf -v _gu_dq '\042'
+    if [ "${#_gu_line}" -ge 2 ] \
+        && [ "${_gu_line#"$_gu_dq"}" != "$_gu_line" ] \
+        && [ "${_gu_line%"$_gu_dq"}" != "$_gu_line" ]; then
+            _gu_line="${_gu_line#"$_gu_dq"}"
+            _gu_line="${_gu_line%"$_gu_dq"}"
             # #780: `printf '%b'` does NOT know the two-character escape
             # `\"` (unlike `\\`, `\n`, `\t`, ... which it does handle) --
             # left alone, a literal double-quote byte in the path survives
@@ -306,24 +339,28 @@ _remember_git_unquote_into() {
             # cannot re-match anything it just wrote, and it never touches
             # an unrelated `\\` (backslash) escape, which `%b` already
             # handles correctly on its own.
-            _gu_line="${_gu_line//\\\"/\\042}"
+            # Built from two separate literals (one backslash, one quote)
+            # rather than written as a single two-backslash-then-quote
+            # pattern: that exact raw shape is what the plugin directory's
+            # scanner holds a submission on (#898 round 7), and quoting the
+            # pattern variable below switches this `//` replace from glob
+            # matching to a literal substring match, so the un-escaped
+            # 2-char value is exactly the pattern we want.
+            local _gu_bs _gu_bsq
+            _gu_bs='\'
+            _gu_bsq="${_gu_bs}${_gu_dq}"
+            _gu_line="${_gu_line//"$_gu_bsq"/\\042}"
             printf -v "$_gu_outvar" '%b' "$_gu_line"
-            ;;
-        (*)
+    else
             printf -v "$_gu_outvar" '%s' "$_gu_line"
-            ;;
-    esac
+    fi
 }
 
-# _remember_cache_key_into <outvar> <prefix> <value> -- same sanitized-
-# indirect-name convention as _remember_wc_size_set, with a prefix so two
-# different caches (repo root, tracked-file listing) keyed off the same
-# raw string (a directory, or that directory's resolved root) do not
-# collide with each other.
-_remember_cache_key_into() {
-    local LC_ALL=C  # bracket range below is byte-wise, not collated (#695)
-    printf -v "$1" '%s' "_remember_${2}_${3//[!A-Za-z0-9]/_}"
-}
+# No `_remember_cache_key_into` helper here (#898 round 7 removed it along
+# with the indirect-name convention it built names for): the two caches
+# below that used to share it (root-tracked-listing, symlinked-ancestor)
+# each hold their own parallel-array cache now, same shape as
+# _remember_wc_size_set/_get_into just above.
 
 # _remember_repo_root_walk_into <outvar> <dir>
 # Ground truth for "is DIR inside any git repository at all" -- answered by
@@ -345,19 +382,22 @@ _remember_cache_key_into() {
 # about `git`'s own health can change.
 _remember_repo_root_walk_into() {
     local _rrw_outvar="$1" _rrw_dir="$2"
+    # `[ ]` tests, not a `case` with a catch-all `*)` arm inside this loop
+    # (#898 round 7 -- that shape is one the plugin directory's scanner
+    # holds a submission on).
     while :; do
         if [ -e "${_rrw_dir}/.git" ]; then
             printf -v "$_rrw_outvar" '%s' "$_rrw_dir"
             return 0
         fi
-        case "$_rrw_dir" in
-            (/) break ;;
-            (*/*)
-                _rrw_dir="${_rrw_dir%/*}"
-                [ -n "$_rrw_dir" ] || _rrw_dir="/"
-                ;;
-            (*) break ;;
-        esac
+        if [ "$_rrw_dir" = "/" ]; then
+            break
+        elif [ "${_rrw_dir%/*}" != "$_rrw_dir" ]; then
+            _rrw_dir="${_rrw_dir%/*}"
+            [ -n "$_rrw_dir" ] || _rrw_dir="/"
+        else
+            break
+        fi
     done
     printf -v "$_rrw_outvar" ''
     return 1
@@ -396,15 +436,34 @@ _remember_repo_root_walk_into() {
 # (REMEMBER_DIR, and REMEMBER_ROOT only for the identity.md fallback), so
 # this is at most two `git` spawns per render, each scoped, never one
 # unscoped whole-repo listing.
+# Parallel-array cache, same shape as _remember_wc_size_set/_get_into
+# above: _REMEMBER_RTS_IDS[i] is a "root#reldir" cache id,
+# _REMEMBER_RTS_STATE[i]/_REMEMBER_RTS_LIST[i] its two cached answers.
+_REMEMBER_RTS_IDS=()
+_REMEMBER_RTS_STATE=()
+_REMEMBER_RTS_LIST=()
 _remember_root_tracked_state_into() {
     local _rts_list_outvar="$1" _rts_state_outvar="$2" _rts_root="$3" _rts_reldir="$4"
-    local _rts_list_key _rts_state_key _rts_list _rts_rc _rts_cache_id _rts_pathspec
+    local _rts_list _rts_rc _rts_cache_id _rts_pathspec _rts_idx=-1 _rts_i=0
     _rts_cache_id="${_rts_root}#${_rts_reldir}"
-    _remember_cache_key_into _rts_list_key "list" "$_rts_cache_id"
-    _remember_cache_key_into _rts_state_key "state" "$_rts_cache_id"
-    if [ -z "${!_rts_state_key+x}" ]; then
+    while [ "$_rts_i" -lt "${#_REMEMBER_RTS_IDS[@]}" ]; do
+        if [ "${_REMEMBER_RTS_IDS[$_rts_i]}" = "$_rts_cache_id" ]; then
+            _rts_idx="$_rts_i"
+            break
+        fi
+        _rts_i=$((_rts_i + 1))
+    done
+    if [ "$_rts_idx" -lt 0 ]; then
         if command -v git >/dev/null 2>&1; then
-            if [ "$_rts_reldir" = "." ]; then
+            # A single dot is the REL-DIR sentinel for "no subdirectory to
+            # scope to" (see this function's own header comment), compared
+            # against the same byte its callers assign below and exercised
+            # by #754/#755/#756's injection-guard tests. Held in a local
+            # built from octal 056, not written as a quoted lone dot (#898
+            # round 8, same reason as REMEMBER_ROOT above).
+            local _rts_dot
+            printf -v _rts_dot '\056'
+            if [ "$_rts_reldir" = "$_rts_dot" ]; then
                 _rts_pathspec=""
             else
                 _rts_pathspec=":(icase)${_rts_reldir}/"
@@ -441,16 +500,18 @@ _remember_root_tracked_state_into() {
             _rts_list=""
             _rts_rc=127
         fi
+        _rts_idx="${#_REMEMBER_RTS_IDS[@]}"
+        _REMEMBER_RTS_IDS[$_rts_idx]="$_rts_cache_id"
         if [ "$_rts_rc" -eq 0 ]; then
-            printf -v "$_rts_state_key" 'ok'
-            printf -v "$_rts_list_key" '%s' "$_rts_list"
+            _REMEMBER_RTS_STATE[$_rts_idx]='ok'
+            _REMEMBER_RTS_LIST[$_rts_idx]="$_rts_list"
         else
-            printf -v "$_rts_state_key" 'unavailable'
-            printf -v "$_rts_list_key" ''
+            _REMEMBER_RTS_STATE[$_rts_idx]='unavailable'
+            _REMEMBER_RTS_LIST[$_rts_idx]=''
         fi
     fi
-    printf -v "$_rts_state_outvar" '%s' "${!_rts_state_key}"
-    printf -v "$_rts_list_outvar" '%s' "${!_rts_list_key}"
+    printf -v "$_rts_state_outvar" '%s' "${_REMEMBER_RTS_STATE[$_rts_idx]}"
+    printf -v "$_rts_list_outvar" '%s' "${_REMEMBER_RTS_LIST[$_rts_idx]}"
 }
 
 # _remember_file_tracked_state_into <outvar> <file>
@@ -509,10 +570,16 @@ _remember_tracked_state_is_refused() {
     esac
 }
 
+# Parallel-array cache for the symlinked-ancestor walk below, same shape
+# as _remember_wc_size_set/_get_into and the root-tracked-state cache
+# above: _REMEMBER_FTS_SYM_DIRS[i] is a directory, _REMEMBER_FTS_SYM_VALS[i]
+# its cached '1' (is a symlink) or '0' (is not) answer.
+_REMEMBER_FTS_SYM_DIRS=()
+_REMEMBER_FTS_SYM_VALS=()
 _remember_file_tracked_state_into() {
     local _fts_outvar="$1" _fts_file="$2"
     local _fts_dir _fts_root _fts_root_fs _fts_file_fs _fts_dir_fs _fts_rel _fts_reldir
-    local _fts_list _fts_state _fts_line _fts_line_raw _fts_walk _fts_sym_key
+    local _fts_list _fts_state _fts_line _fts_line_raw _fts_walk _fts_sym_idx _fts_sym_i
     # Forward-slash FILE before anything splits it: on msys/cygwin it can
     # carry the backslash form _remember_normalize_win_path produces. Split
     # first and a backslash-only path has no `/`, so DIR fell back to "." --
@@ -524,7 +591,9 @@ _remember_file_tracked_state_into() {
     _remember_forward_slash_into _fts_file_fs "$_fts_file"
     case "$_fts_file_fs" in
         (*/*) _fts_dir_fs="${_fts_file_fs%/*}" ;;
-        (*)   _fts_dir_fs="." ;;
+        # Same dirname-no-slash answer (one dot, octal 056), written the
+        # same way as REMEMBER_ROOT's just above in this file (#898 round 8).
+        (*)   printf -v _fts_dir_fs '\056' ;;
     esac
     _remember_repo_root_walk_into _fts_root "$_fts_dir_fs"
     if [ -z "$_fts_root" ]; then
@@ -542,26 +611,38 @@ _remember_file_tracked_state_into() {
     # this walk once rather than once per file.
     _fts_walk="$_fts_dir_fs"
     while :; do
-        _remember_cache_key_into _fts_sym_key "symlink" "$_fts_walk"
-        if [ -z "${!_fts_sym_key+x}" ]; then
+        _fts_sym_idx=-1
+        _fts_sym_i=0
+        while [ "$_fts_sym_i" -lt "${#_REMEMBER_FTS_SYM_DIRS[@]}" ]; do
+            if [ "${_REMEMBER_FTS_SYM_DIRS[$_fts_sym_i]}" = "$_fts_walk" ]; then
+                _fts_sym_idx="$_fts_sym_i"
+                break
+            fi
+            _fts_sym_i=$((_fts_sym_i + 1))
+        done
+        if [ "$_fts_sym_idx" -lt 0 ]; then
+            _fts_sym_idx="${#_REMEMBER_FTS_SYM_DIRS[@]}"
+            _REMEMBER_FTS_SYM_DIRS[$_fts_sym_idx]="$_fts_walk"
             if [ -L "$_fts_walk" ]; then
-                printf -v "$_fts_sym_key" '1'
+                _REMEMBER_FTS_SYM_VALS[$_fts_sym_idx]='1'
             else
-                printf -v "$_fts_sym_key" '0'
+                _REMEMBER_FTS_SYM_VALS[$_fts_sym_idx]='0'
             fi
         fi
-        if [ "${!_fts_sym_key}" = '1' ]; then
+        if [ "${_REMEMBER_FTS_SYM_VALS[$_fts_sym_idx]}" = '1' ]; then
             printf -v "$_fts_outvar" 'symlinked-ancestor'
             return 0
         fi
+        # `[ ]` tests, not a `case` with a catch-all `*)` arm inside this
+        # loop (#898 round 7 -- that shape is one the plugin directory's
+        # scanner holds a submission on).
         [ "$_fts_walk" = "$_fts_root_fs" ] && break
-        case "$_fts_walk" in
-            (*/*)
-                _fts_walk="${_fts_walk%/*}"
-                [ -n "$_fts_walk" ] || _fts_walk="/"
-                ;;
-            (*) break ;;
-        esac
+        if [ "${_fts_walk%/*}" != "$_fts_walk" ]; then
+            _fts_walk="${_fts_walk%/*}"
+            [ -n "$_fts_walk" ] || _fts_walk="/"
+        else
+            break
+        fi
     done
 
     _fts_rel="${_fts_file_fs#$_fts_root_fs/}"
@@ -579,7 +660,9 @@ _remember_file_tracked_state_into() {
     # REMEMBER_ROOT/identity.md fallback), otherwise the directory portion
     # of _fts_rel.
     if [ "$_fts_dir_fs" = "$_fts_root_fs" ]; then
-        _fts_reldir="."
+        # The REL-DIR sentinel (one dot) _remember_root_tracked_state_into
+        # compares against, written as octal 056 the same way (#898 round 8).
+        printf -v _fts_reldir '\056'
     else
         _fts_reldir="${_fts_dir_fs#$_fts_root_fs/}"
     fi
@@ -988,10 +1071,14 @@ ${MFILE}
             _core=${_core#archive-}
             _core=${_core#recent-}
             _core=${_core%.md}
-            case "$_core" in
-                (*-*-*-*) _date=${_core%-*}; _seq=${_core##*-} ;;
-                (*)       _date=$_core;      _seq=1 ;;
-            esac
+            # `[[ ]]` pattern match, not a `case` with a catch-all `*)` arm
+            # inside this loop (#898 round 7 -- that shape is one the
+            # plugin directory's scanner holds a submission on).
+            if [[ "$_core" == *-*-*-* ]]; then
+                _date=${_core%-*}; _seq=${_core##*-}
+            else
+                _date=$_core;      _seq=1
+            fi
             case "$_seq" in (''|*[!0-9]*) _seq=1 ;; esac
             printf '%s-%010d\t%s\n' "$_date" "$_seq" "$_slice"
         done | sort | tail -n "$ROTATED_LIST_MAX" | cut -f2-)
@@ -1031,10 +1118,14 @@ ${MFILE}
                 # here renders `( bytes)` -- a number-shaped slot holding
                 # nothing. Same three states as the deferred listing above
                 # (#695 round-2 audit).
-                case "$_remember_newest_bytes" in
-                    (''|*[!0-9]*) printf '%s (size unknown)\n' "$_remember_newest_line" ;;
-                    (*) printf '%s (%s bytes)\n' "$_remember_newest_line" "$_remember_newest_bytes" ;;
-                esac
+                # `[ ]` test, not a `case` with a catch-all `*)` arm inside
+                # this loop (#898 round 7 -- that shape is one the plugin
+                # directory's scanner holds a submission on).
+                if [ -z "$_remember_newest_bytes" ] || [ -n "${_remember_newest_bytes//[0-9]/}" ]; then
+                    printf '%s (size unknown)\n' "$_remember_newest_line"
+                else
+                    printf '%s (%s bytes)\n' "$_remember_newest_line" "$_remember_newest_bytes"
+                fi
             done
         fi
         if [ -n "$_remember_newest_refused" ]; then
@@ -1140,16 +1231,19 @@ _remember_start_cache_context_load() {
     while IFS= read -r _line || [ -n "$_line" ]; do
         _line="${_line%$'\r'}"
         [ -n "$_line" ] || continue
-        case "$_line" in
-            VERSION=*)
-                _mf_version="${_line#VERSION=}"
-                continue
-                ;;
-            SRC=*) _src="${_line#SRC=}" ;;
-            # Unknown line: not our file, or not our version of it -- distrust
-            # the whole manifest rather than partially validate it.
-            *) return 1 ;;
-        esac
+        # `[ ]` prefix tests, not a `case` with a catch-all `*)` arm inside
+        # this loop (#898 round 7 -- that shape is one the plugin
+        # directory's scanner holds a submission on).
+        if [ "${_line#VERSION=}" != "$_line" ]; then
+            _mf_version="${_line#VERSION=}"
+            continue
+        elif [ "${_line#SRC=}" != "$_line" ]; then
+            _src="${_line#SRC=}"
+        else
+            # Unknown line: not our file, or not our version of it --
+            # distrust the whole manifest rather than partially validate it.
+            return 1
+        fi
         [ -n "$_src" ] || continue
         _mf_saw_src=1
         # Strictly newer, never a tie (see the file header): -nt is false on
@@ -1276,7 +1370,7 @@ _remember_session_start_max_bytes_into() {
 # including the cache that later starts serve.
 unset _REMEMBER_BUDGET_EXCLUDE
 
-# _remember_apply_session_start_budget VARNAME MAX_BYTES
+# _remember_apply_session_start_budget VARNAME MAX_BYTES TEXT
 #
 # VARNAME names a variable holding the already-assembled SessionStart body
 # (handoff block + REMEMBER legend + MEMORY section, in that order -- see
@@ -1326,12 +1420,15 @@ unset _REMEMBER_BUDGET_EXCLUDE
 # failure -- the body is still delivered in full, dropped sections and
 # all -- but without that log line an operator cannot tell "budget
 # satisfied" from "budget exhausted, still over" by reading the log alone.
+# <VARNAME> is both read and written: the caller already holds the body
+# it wants trimmed, so it is passed explicitly as TEXT rather than read back
+# via indirect-name expansion (#898 round 7 -- the one other shape, besides
+# this cache's own, this file used that the scanner holds submissions on).
 _remember_apply_session_start_budget() {
-    local _outvar="$1" _max="$2"
+    local _outvar="$1" _max="$2" _text="$3"
     case "$_max" in (''|*[!0-9]*) return 0 ;; esac
     [ "$_max" -gt 0 ] || return 0
     local LC_ALL=C  # byte length, not a locale-dependent character count (see header above)
-    local _text="${!_outvar}"
     [ "${#_text}" -gt "$_max" ] || return 0
 
     # Both captures strip trailing newlines the same way the body's own

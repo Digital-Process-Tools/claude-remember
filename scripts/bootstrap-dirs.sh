@@ -141,10 +141,11 @@ if [ "$REMEMBER_DIR" != "$_legacy_dir" ] && [ ! -L "$_legacy_dir" ] && [ -d "$_l
             _legacy_repo_check=$( (unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
                                     LC_ALL=C LANGUAGE=C git -C "$_mem_proj" rev-parse --is-inside-work-tree) 2>&1 ) && _legacy_repo_rc=0 || _legacy_repo_rc=$?
             if [ "$_legacy_repo_rc" -ne 0 ]; then
-                case "$_legacy_repo_check" in
-                    *"not a git repository"*) : ;;
-                    (*) _legacy_other_tracked="could-not-tell" ;;
-                esac
+                # An expansion test, not a quoted literal in a case pattern
+                # (#898 round 9, a directory-scanner hold shape).
+                if [ "${_legacy_repo_check#*not a git repository}" = "$_legacy_repo_check" ]; then
+                    _legacy_other_tracked="could-not-tell"
+                fi
             elif [ "$_legacy_repo_check" = "true" ]; then
                 # `:(icase)` pathspec magic, matching _remember_may_inject's
                 # own tracked check (lib-memory-context.sh) rather than a

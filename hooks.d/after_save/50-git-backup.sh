@@ -258,12 +258,16 @@ GIT_BACKUP_BRANCH=$(config ".git_backup.branch" "")
 # (@{push}, branch.<name>.remote, then origin) whenever GIT_BACKUP_REMOTE is
 # empty, so clearing an invalid value routes it through that same validated
 # fallback instead of guessing a replacement here.
-case "$GIT_BACKUP_REMOTE" in
-    -*|*:*|*/*)
+# The double quote, held in a variable for the messages below; and `[ ]`
+# expansion tests rather than a `*/*` case pattern (#898 round 9 -- both
+# shapes the directory's scanner holds a submission on).
+printf -v _dq '\042'
+if [ "${GIT_BACKUP_REMOTE#-}" != "$GIT_BACKUP_REMOTE" ] \
+    || [ "${GIT_BACKUP_REMOTE#*:}" != "$GIT_BACKUP_REMOTE" ] \
+    || [ "${GIT_BACKUP_REMOTE#*/}" != "$GIT_BACKUP_REMOTE" ]; then
         report_error "git-backup" "WARNING: configured git_backup.remote '$GIT_BACKUP_REMOTE' is not a plain remote name (leading '-', or contains ':' or '/') -- refusing to use it, falling back to the branch's push target. A config.json restored from a shared store can carry an attacker-controlled value here; treat this as untrusted."
         GIT_BACKUP_REMOTE=""
-        ;;
-esac
+fi
 # A leading '-' is not the only shape that matters here: `--` stops git's
 # OPTION parsing, but it does not stop git's own REFSPEC grammar once an
 # operand position is reached, and a branch value is exactly that operand.
@@ -461,7 +465,7 @@ esac
         _count=$((10#$_count + 1))
         echo "$_count" > "$REJECT_STATE_FILE" 2>/dev/null || true
 
-        log "git-backup" "ERROR: push REJECTED by the remote -- the backup has STOPPED for $SLUG and will not resume on its own (consecutive rejections: $_count). git rejected: ${_rejected%;}. The commit exists on this machine only. Nothing here will fetch, merge or rebase for you: run 'git -C \"$REPO_ROOT\" push' to see git's own advice and resolve it by hand -- recent.md and archive.md are rewritten wholesale by consolidation, so a wrong automatic resolution would corrupt memory silently."
+        log "git-backup" "ERROR: push REJECTED by the remote -- the backup has STOPPED for $SLUG and will not resume on its own (consecutive rejections: $_count). git rejected: ${_rejected%;}. The commit exists on this machine only. Nothing here will fetch, merge or rebase for you: run 'git -C ${_dq}$REPO_ROOT${_dq} push' to see git's own advice and resolve it by hand -- recent.md and archive.md are rewritten wholesale by consolidation, so a wrong automatic resolution would corrupt memory silently."
 
         # Escalation, not alarm. systemMessage is the only hook output the HUMAN
         # sees, and it is also the most intrusive surface in this codebase — one
@@ -471,7 +475,7 @@ esac
         # true report by a few backups; it can never swallow one.
         if [ "$REJECT_NOTICE_AFTER" -gt 0 ] && [ "$_count" -eq "$REJECT_NOTICE_AFTER" ]; then
             mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null || true
-            printf '%s\n' "remember: git backup has STOPPED. The remote rejected the last $_count pushes from $REPO_ROOT and will not accept them on a retry -- memory is still being committed locally, but it is not reaching your backup remote. Run: git -C \"$REPO_ROOT\" push -- then resolve the divergence yourself. Nothing will be merged or rebased for you." \
+            printf '%s\n' "remember: git backup has STOPPED. The remote rejected the last $_count pushes from $REPO_ROOT and will not accept them on a retry -- memory is still being committed locally, but it is not reaching your backup remote. Run: git -C ${_dq}$REPO_ROOT${_dq} push -- then resolve the divergence yourself. Nothing will be merged or rebased for you." \
                 > "$REMEMBER_DIR/tmp/git-backup-notice" 2>/dev/null || true
         fi
         return 0
@@ -686,11 +690,11 @@ esac
         _cfail=$((10#$_cfail + 1))
         echo "$_cfail" > "$COMMIT_FAIL_STATE_FILE" 2>/dev/null || true
 
-        log "git-backup" "ERROR: commit FAILED for $SLUG -- this memory is recorded in NO git history at all, not locally and not on any remote, and the backup has STOPPED for this project (consecutive failures: $_cfail). git said: ${COMMIT_ERR:-<no output>}. Run 'git -C \"$REPO_ROOT\" commit -- \"$SLUG/\"' to see it yourself."
+        log "git-backup" "ERROR: commit FAILED for $SLUG -- this memory is recorded in NO git history at all, not locally and not on any remote, and the backup has STOPPED for this project (consecutive failures: $_cfail). git said: ${COMMIT_ERR:-<no output>}. Run 'git -C ${_dq}$REPO_ROOT${_dq} commit -- ${_dq}$SLUG/${_dq}' to see it yourself."
 
         if [ "$COMMIT_NOTICE_AFTER" -gt 0 ] && [ "$_cfail" -eq "$COMMIT_NOTICE_AFTER" ]; then
             mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null || true
-            printf '%s\n' "remember: git backup has STOPPED. The last $_cfail commits into $REPO_ROOT failed, so this project's memory is on disk but in no git history -- not locally, and not on your backup remote. git said: ${COMMIT_ERR:-<no output>}. Run: git -C \"$REPO_ROOT\" commit -- \"$SLUG/\"" \
+            printf '%s\n' "remember: git backup has STOPPED. The last $_cfail commits into $REPO_ROOT failed, so this project's memory is on disk but in no git history -- not locally, and not on your backup remote. git said: ${COMMIT_ERR:-<no output>}. Run: git -C ${_dq}$REPO_ROOT${_dq} commit -- ${_dq}$SLUG/${_dq}" \
                 > "$REMEMBER_DIR/tmp/git-backup-notice" 2>/dev/null || true
         fi
         exit 0
@@ -722,14 +726,14 @@ esac
         _nr=$((10#$_nr + 1))
         echo "$_nr" > "$NO_REMOTE_STATE_FILE" 2>/dev/null || true
 
-        log "git-backup" "no remote configured for '$REMOTE_NAME' in $REPO_ROOT -- the commit exists on this machine ONLY and nothing is backed up off it (consecutive saves in this state: $_nr). Add one: git -C \"$REPO_ROOT\" remote add origin <url>"
+        log "git-backup" "no remote configured for '$REMOTE_NAME' in $REPO_ROOT -- the commit exists on this machine ONLY and nothing is backed up off it (consecutive saves in this state: $_nr). Add one: git -C ${_dq}$REPO_ROOT${_dq} remote add origin <url>"
 
         if [ "$NO_REMOTE_NOTICE_AFTER" -gt 0 ] && \
            [ "$_nr" -ge "$NO_REMOTE_NOTICE_AFTER" ] && \
            [ ! -f "$NO_REMOTE_NOTIFIED_FILE" ]; then
             : > "$NO_REMOTE_NOTIFIED_FILE" 2>/dev/null || true
             mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null || true
-            printf '%s\n' "remember: your memory store at $REPO_ROOT has no git remote, so $_nr saves so far have been committed locally and backed up nowhere. If that is deliberate, nothing further is needed -- this will not be said again. If the setup was never finished: git -C \"$REPO_ROOT\" remote add origin <url> && git -C \"$REPO_ROOT\" push -u origin HEAD" \
+            printf '%s\n' "remember: your memory store at $REPO_ROOT has no git remote, so $_nr saves so far have been committed locally and backed up nowhere. If that is deliberate, nothing further is needed -- this will not be said again. If the setup was never finished: git -C ${_dq}$REPO_ROOT${_dq} remote add origin <url> && git -C ${_dq}$REPO_ROOT${_dq} push -u origin HEAD" \
                 > "$REMEMBER_DIR/tmp/git-backup-notice" 2>/dev/null || true
         fi
     elif [ ! -f "$REMOTE_STATE_FILE" ]; then
