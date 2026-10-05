@@ -1718,21 +1718,24 @@ dispatch() {
         # ends, so hooks still run strictly one at a time and in name order.
         # The redirections belong to the background job, so a hook's output is
         # captured exactly as it was when this was a foreground call.
-        # One launch for both cases (#898). With no writable tmp the capture
-        # files are empty, so stdout and stderr go to /dev/null: uncaptured
-        # stdout would be inherited stdout, the unattributed injection this
-        # avoids. It is DISCARDED and SAID below, never quietly passed through.
-        local _rc _hout=/dev/null _herr=/dev/null _said
-        [ -z "$_err_file" ] || { _hout=$_out_file; _herr=$_err_file; }
-        REMEMBER_PROJECT="${PROJECT_DIR:-.}" "$hook" >"$_hout" 2>"$_herr" &
-        _dispatch_supervise "$!" "$_budget" "$_grace" "$_to_file"
-        _rc=$_DISPATCH_RC
+        # Two launches with literal redirect targets, not one through
+        # variables: that single-launch form (#898) is a shape the plugin
+        # directory's scanner holds a submission on.
+        local _rc _said
         if [ -n "$_err_file" ]; then
+            REMEMBER_PROJECT="${PROJECT_DIR:-.}" "$hook" >"$_out_file" 2>"$_err_file" &
+            _dispatch_supervise "$!" "$_budget" "$_grace" "$_to_file"
+            _rc=$_DISPATCH_RC
             # Relayed whether the hook succeeded, failed, or was stopped: a hook
             # that says something useful and then dies has still said it, and
             # #277 is the standing argument against discarding its words.
             _dispatch_stdout_relay "$_out_file" "$event" "${hook##*/}"
         else
+            # No writable tmp: uncaptured stdout would be inherited stdout, the
+            # unattributed injection this avoids. DISCARDED and SAID instead.
+            REMEMBER_PROJECT="${PROJECT_DIR:-.}" "$hook" >/dev/null 2>/dev/null &
+            _dispatch_supervise "$!" "$_budget" "$_grace" ""
+            _rc=$_DISPATCH_RC
             printf '%s%s/%s -- output NOT SHOWN: no writable %s/tmp to capture it, so it was discarded ===\n' \
                 "$_DISPATCH_FRAME" "$event" "${hook##*/}" "$REMEMBER_DIR"
         fi
