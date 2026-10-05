@@ -59,6 +59,21 @@ source "$_remember_log_src_dir/lib-memory-dir.sh"
 # ── Logging setup ─────────────────────────────────────────────────────────────
 
 REMEMBER_LOG_DIR="${REMEMBER_DIR}/logs"
+# #902: a REMEMBER_DIR carrying a newline/CR, or not absolute, must never
+# reach mkdir -p -- a directory name CAN legally hold a literal newline, so
+# mkdir never errors on one, it just builds garbage under cwd. Same
+# drive-letter test as lib-memory-dir.sh's own absolute check. A function,
+# not an inline `[[ ]]` at this top-level scope, so `local LC_ALL=C` can
+# scope the bracket range byte-wise (#695) without exporting it past here.
+_remember_log_dir_unsafe() {
+    local LC_ALL=C
+    { [[ "$REMEMBER_DIR" != /* ]] && [[ "$REMEMBER_DIR" != [A-Za-z]:[/\\]* ]]; } \
+        || [[ "$REMEMBER_DIR" == *$'\n'* || "$REMEMBER_DIR" == *$'\r'* ]]
+}
+if _remember_log_dir_unsafe; then
+    echo "FATAL: unsafe REMEMBER_DIR ($REMEMBER_DIR) -- refusing to mkdir" >&2
+    return 1 2>/dev/null || true
+fi
 # `[ -d ]` first (#230): bootstrap-dirs.sh has almost always just created this,
 # and re-asking `mkdir` costs a process per hook invocation to learn nothing. The
 # mkdir — and its FATAL — is still exactly what runs when the directory is not

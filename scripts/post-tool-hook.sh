@@ -936,7 +936,11 @@ if [ "$DELTA" -gt "$DELTA_THRESHOLD" ] && [ "$IN_COOLDOWN" = false ]; then
 
     if [ "$ALREADY_RUNNING" = false ]; then
         mkdir -p "$REMEMBER_DIR/logs/autonomous"
-        _SAVE_LOG="$REMEMBER_DIR/logs/autonomous/save-$(_remember_date +%H%M%S).log"
+        # #902: date + PID, not HHMMSS alone -- a bare HHMMSS collides with a
+        # file from an earlier day still inside the retention window, and a
+        # seed appended to THAT file's stale content is what first surfaced
+        # the missing REMEMBER_DIR guard above.
+        _SAVE_LOG="$REMEMBER_DIR/logs/autonomous/save-$(_remember_date +%Y%m%d-%H%M%S)-$$.log"
         # Seeded with a header line BEFORE the backgrounded save-session.sh
         # ever opens it, and the nohup redirect below appends (`>>`) rather
         # than truncates (`>`) -- same defence the SessionEnd hook already
