@@ -670,9 +670,14 @@ _remember_write_slug_index() {
     # Sourced here rather than at the top of the file: this is the only caller,
     # and lib-lock.sh probes for fractional sleep at source time — a fork the
     # legacy layout has no reason to pay at every session start.
+    #
+    # The primitive, not the lock_acquire/lock_release wrappers (#898): the
+    # wrappers only add the opt-in hold-duration recorder (#226), which sizes
+    # the save and staging locks, and calling them here would compile that
+    # whole recorder into this hook for a lock it was never about.
     source "$_HOOK_DIR/lib-lock.sh" 2>/dev/null || return 0
-    command -v lock_acquire >/dev/null 2>&1 || return 0
-    lock_acquire "$_lock" "$SLUG_INDEX_LOCK_TIMEOUT" || return 0
+    command -v _lock_acquire_impl >/dev/null 2>&1 || return 0
+    _lock_acquire_impl "$_lock" "$SLUG_INDEX_LOCK_TIMEOUT" || return 0
 
     _tmp="$_index.$$"
     {
@@ -706,12 +711,12 @@ _remember_write_slug_index() {
             "$PROJECT_PATH_SLUG" "$REMEMBER_DIR" "$PROJECT"
     } > "$_tmp" 2>/dev/null || {
         rm -f "$_tmp" 2>/dev/null
-        lock_release "$_lock" 2>/dev/null
+        _lock_release_impl "$_lock" 2>/dev/null
         return 0
     }
 
     mv -f "$_tmp" "$_index" 2>/dev/null || rm -f "$_tmp" 2>/dev/null
-    lock_release "$_lock" 2>/dev/null
+    _lock_release_impl "$_lock" 2>/dev/null
     return 0
 }
 # Called in the deferred block below (#660), not here: this writes a record
