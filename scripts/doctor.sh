@@ -1,80 +1,13 @@
 #!/bin/bash
-# ============================================================================
-# doctor.sh — User-facing diagnostics command for the Remember plugin
-# ============================================================================
-#
-# DESCRIPTION
-#   Manual, human-run health check. Reports plugin version, resolved paths,
-#   detected tools, storage mode, and capture health (whether PostToolUse has
-#   ever actually fired and produced a save, and whether SessionEnd — the
-#   last-chance flush, #370 — has ever fired) in a single plain-text report.
-#
-#   Closes suggestion 3 of issue #200: the plugin can go silently no-op when
-#   it is enabled mid-session (PostToolUse is never registered because Claude
-#   Code reads hook definitions once, at session start — see issue #144 for
-#   the sibling failure, a slug mismatch that no-ops the same way). This
-#   script exists so a user can ask "is capture actually working?" and get a
-#   direct answer instead of hours of silence.
-#
-# USAGE
-#   bash scripts/doctor.sh
-#   Invoked by the /remember:doctor slash command (commands/doctor.md), which runs
-#   this via ${CLAUDE_PLUGIN_ROOT}/scripts/doctor.sh and relays the output
-#   verbatim. Safe to also run directly from a shell for the same report.
-#
-# ENVIRONMENT
-#   CLAUDE_PLUGIN_ROOT   Plugin install directory (set by Claude Code)
-#   CLAUDE_PROJECT_DIR   Project root. Claude Code exports this to *hooks*,
-#                        not to the Bash tool that runs this script, so on a
-#                        marketplace install it normally arrives unset here
-#                        (#207). When unset, doctor.sh — and only doctor.sh,
-#                        never resolve-paths.sh's other callers — defaults it
-#                        to the current directory, and says so in the report
-#                        instead of presenting the guess as given.
-#
-# DEPENDENCIES
-#   resolve-paths.sh  (sourced with REMEMBER_PATHS_SOFT_FAIL=1 — unlike the
-#                      hooks, a resolution failure is reported as a FAIL
-#                      finding here, not swallowed, since this command exists
-#                      specifically to surface problems)
-#   detect-tools.sh   (sourced, but only after a subshell probe: it calls
-#                      `exit 1` when no python is found, which would kill a
-#                      hook silently — the exact failure mode this report
-#                      needs to SHOW, not die from. See lib-slug.sh's own
-#                      comment on the same hazard.)
-#   lib-memory-dir.sh (sourced directly, not via bootstrap-dirs.sh: this is a
-#                      read-only report and must not trigger bootstrap-dirs'
-#                      legacy-to-external migration or its stderr redirect —
-#                      a diagnostic tool that hides its own errors defeats
-#                      the point.)
-#
-# EXIT CODES
-#   0   Always — a diagnostic tool must print its findings, not fail to run.
-#
-# OUTPUT
-#   Plain text, one finding per line, prefixed OK / WARN / FAIL so the report
-#   greps cleanly. No colour (matches the rest of the plugin's scripts — the
-#   reporting environment includes Windows Git Bash/MSYS terminals that don't
-#   reliably render ANSI). Ends with a single VERDICT line.
-#
-# ============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Session id, sanitized at the point of entry -- same restriction
-# session-start-hook.sh applies before ever using it in a filename. Ported
-# from write-handoff.sh's own #776 fix so both --json and the human report
-# below can disambiguate a subdirectory project the same way (#827).
 _DOCTOR_SESSION_ID="${CLAUDE_CODE_SESSION_ID:-}"
-case "$_DOCTOR_SESSION_ID" in
-    ''|.|..|*[!A-Za-z0-9._-]*) _DOCTOR_SESSION_ID="" ;;
-esac
+if [ -z "${_DOCTOR_SESSION_ID#.}" ] || [ -z "${_DOCTOR_SESSION_ID#..}" ] \
+    || [[ "$_DOCTOR_SESSION_ID" == *[!A-Za-z0-9._-]* ]]; then
+    _DOCTOR_SESSION_ID=""
+fi
 
-# _doctor_trial_remember_dir <candidate-project-dir>
-# Prints the REMEMBER_DIR that candidate would resolve to, by running the
-# same resolve-paths.sh + lib-memory-dir.sh chain the real resolution below
-# uses, in a subshell -- mirrors write-handoff.sh's own _wh_trial_remember_dir
-# (#776/#827). Prints nothing and exits nonzero if the chain itself fails.
 _doctor_trial_remember_dir() {
     (
         CLAUDE_PROJECT_DIR="$1"
@@ -86,78 +19,33 @@ _doctor_trial_remember_dir() {
     )
 }
 
-# _doctor_resolve_project_dir_candidate <git-root>
-# #827: the #802 blanket git-root preference below (both --json and the
-# human report) breaks a project deliberately started from a repository
-# SUBDIRECTORY -- the same shape write-handoff.sh's own #776 fix
-# disambiguates -- by routing the report onto the enclosing repository's
-# store instead of the subdirectory project's own. When $PWD and the git
-# toplevel disagree AND this session's id is known, prefer whichever
-# candidate's own store already carries THIS session's session-keyed
-# handoff hint (#738); fall back to the toplevel, unchanged, when neither or
-# both do (the #743/#802 shape: an accidental `cd`, no session hint
-# published anywhere for this session).
 _doctor_resolve_project_dir_candidate() {
     _doctor_git_root="$1"
-    if [ -n "$_doctor_git_root" ] && [ "$_doctor_git_root" != "$PWD" ] && [ -n "$_DOCTOR_SESSION_ID" ]; then
-        _doctor_rd_pwd=$(_doctor_trial_remember_dir "$PWD") || _doctor_rd_pwd=""
+    if [ -n "$_doctor_git_root" ] && [ "$_doctor_git_root" != "$(pwd)" ] && [ -n "$_DOCTOR_SESSION_ID" ]; then
+        _doctor_rd_cwd=$(_doctor_trial_remember_dir "$(pwd)") || _doctor_rd_cwd=""
         _doctor_rd_gitroot=$(_doctor_trial_remember_dir "$_doctor_git_root") || _doctor_rd_gitroot=""
-        _doctor_pwd_has_hint=0
+        _doctor_cwd_has_hint=0
         _doctor_gitroot_has_hint=0
-        [ -n "$_doctor_rd_pwd" ] && [ -f "$_doctor_rd_pwd/tmp/handoff-path.$_DOCTOR_SESSION_ID" ] && _doctor_pwd_has_hint=1
+        [ -n "$_doctor_rd_cwd" ] && [ -f "$_doctor_rd_cwd/tmp/handoff-path.$_DOCTOR_SESSION_ID" ] && _doctor_cwd_has_hint=1
         [ -n "$_doctor_rd_gitroot" ] && [ -f "$_doctor_rd_gitroot/tmp/handoff-path.$_DOCTOR_SESSION_ID" ] && _doctor_gitroot_has_hint=1
-        if [ "$_doctor_pwd_has_hint" = 1 ] && [ "$_doctor_gitroot_has_hint" = 0 ]; then
+        if [ "$_doctor_cwd_has_hint" = 1 ] && [ "$_doctor_gitroot_has_hint" = 0 ]; then
             _doctor_git_root=""
         fi
-        unset _doctor_rd_pwd _doctor_rd_gitroot _doctor_pwd_has_hint _doctor_gitroot_has_hint
+        unset _doctor_rd_cwd _doctor_rd_gitroot _doctor_cwd_has_hint _doctor_gitroot_has_hint
     fi
     printf '%s' "$_doctor_git_root"
     unset _doctor_git_root
 }
 
-# ── --json: machine-readable resolution surface (#408) ──────────────────────
-#
-# Every field this prints is already computed for the human report below —
-# resolved directory, storage mode — but only in a form meant to be read by
-# a person. An external caller wanting a `{slug}`-keyed external store's real
-# directory had exactly two options before this: vendor session_dir_slug
-# (UTF-8-aware, hashes over 200 characters, folds Windows drive letters) —
-# a second copy of another project's logic, going stale on its own schedule
-# — or give up and report unknown, which is what claude-oss now does
-# correctly, at the cost of a real diagnostic every time (claude-oss#614).
-#
-# PROVISIONAL, not a stable contract: `schema_version` is 1 and will be
-# bumped on any incompatible change to these keys or their meaning — a
-# caller parsing this should check it rather than assume the shape below is
-# permanent. This is the first release of this surface; nothing has yet
-# exercised whether these three states are the right cut.
-#
-# Three states, not two, deliberately mirroring the ladder two sections below
-# (soft-fail vs the assumed-CLAUDE_PROJECT_DIR guess, #207): a caller must be
-# able to tell "resolved, and trustworthy" from "resolved, but only because
-# CLAUDE_PROJECT_DIR was guessed from the current directory" from "did not
-# resolve at all" — folding any two of these into one state would make
-# `could_not_resolve` (or a guessed path presented as given) indistinguishable
-# from the shape that error case must never take: an absent key or an empty
-# object read as "nothing to report", exactly the gap claude-oss#614 hit on
-# the other side of this same problem.
-#
-# Deliberately short-circuits before any of the human report's own output —
-# a single line of JSON is the whole contract; nothing before or after it on
-# stdout would still parse as one.
 if [ "${1:-}" = "--json" ]; then
     _JSON_PROJECT_DIR_ASSUMED=0
     if [ -z "${CLAUDE_PROJECT_DIR:-}" ]; then
-        # #802: prefer the git top level over a possibly-stale $PWD -- immune
-        # to a `cd` that happened earlier in the same Bash-tool call. Falls
-        # back to $PWD, unchanged, when the cwd is not inside a git repo at
-        # all. Same pattern write-handoff.sh's own #743 fix established.
         _DOCTOR_JSON_GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || _DOCTOR_JSON_GIT_ROOT=""
         _DOCTOR_JSON_GIT_ROOT=$(_doctor_resolve_project_dir_candidate "$_DOCTOR_JSON_GIT_ROOT")
         if [ -n "$_DOCTOR_JSON_GIT_ROOT" ]; then
             CLAUDE_PROJECT_DIR="$_DOCTOR_JSON_GIT_ROOT"
         else
-            CLAUDE_PROJECT_DIR="$PWD"
+            CLAUDE_PROJECT_DIR="$(pwd)"
         fi
         unset _DOCTOR_JSON_GIT_ROOT
         _JSON_PROJECT_DIR_ASSUMED=1
@@ -170,23 +58,14 @@ if [ "${1:-}" = "--json" ]; then
     _JSON_RESOLVE_ERR=$(cat "$_JSON_RESOLVE_ERR_FILE" 2>/dev/null)
     rm -f "$_JSON_RESOLVE_ERR_FILE"
 
-    # sed order matters: backslashes escaped before quotes, else a quote
-    # introduced by the first substitution would be re-escaped by the second.
-    # `tr '[:cntrl:]' ' '` runs LAST, after both sed passes, and flattens every
-    # C0 control byte -- not only the newline the original version of this
-    # handled -- to a plain space. A resolved path is not guaranteed to be
-    # free of a raw tab or carriage return just because it is unusual (POSIX
-    # filesystems allow both), and passing one through unescaped produces a
-    # JSON string literal with a literal control character in it, which is
-    # invalid per RFC 8259 and breaks any real parser this output exists to
-    # be read by (#408 self-review). `[:cntrl:]` is a POSIX bracket
-    # expression class, supported identically by GNU and BSD `tr`, and `tr`
-    # operates on the whole byte stream rather than `sed`'s per-line records
-    # -- the one difference that matters here, since a literal embedded
-    # newline needs collapsing across what `sed` would otherwise see as two
-    # separate lines.
     _json_escape() {
-        printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '[:cntrl:]' ' '
+        local _je_bs='\'
+        local _je_dq
+        printf -v _je_dq '\042'
+        local _je_s="$1"
+        _je_s="${_je_s//"$_je_bs"/${_je_bs}${_je_bs}${_je_bs}${_je_bs}}"
+        _je_s="${_je_s//"$_je_dq"/${_je_bs}${_je_dq}}"
+        printf '%s' "$_je_s" | tr '[:cntrl:]' ' '
     }
 
     if [ "$_JSON_RESOLVE_STATUS" -ne 0 ]; then
@@ -197,11 +76,6 @@ if [ "${1:-}" = "--json" ]; then
 
     source "$SCRIPT_DIR/lib-memory-dir.sh"
 
-    # #517: both sides forward-slashed before the `==`-glob comparison --
-    # REMEMBER_DIR and PROJECT_DIR both arrive backslash-separated on
-    # msys/cygwin, and `[[ == ]]`'s own glob only ever splits on '/', so an
-    # in-project store misreports as "external" there for any REMEMBER_DIR
-    # that is not the literal default `${PROJECT_DIR}/.remember`.
     if [ "$REMEMBER_DIR" = "${PROJECT_DIR}/.remember" ] \
         || [[ "$(_remember_forward_slash "$REMEMBER_DIR")" == "$(_remember_forward_slash "$PROJECT_DIR")"/* ]]; then
         _JSON_STORAGE_MODE="legacy"
@@ -224,10 +98,6 @@ echo "Remember Doctor"
 echo "==============="
 echo ""
 
-# ── 1. Plugin version ───────────────────────────────────────────────────────
-# Best-effort plugin root from the script's own location, independent of
-# whether path resolution below succeeds — this line should print even when
-# everything else fails.
 _FALLBACK_PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 _PLUGIN_JSON="$_FALLBACK_PLUGIN_ROOT/.claude-plugin/plugin.json"
 if [ -f "$_PLUGIN_JSON" ]; then
@@ -240,22 +110,6 @@ else
 fi
 echo ""
 
-# REMEMBER_TRANSCRIPT_PATH is trusted input for a manual run by design (#431):
-# pipeline/host.transcript_path() gates on existence alone, with no
-# containment check, and this script never clears it the way
-# post-tool-hook.sh and user-prompt-hook.sh do (#424/#430) -- doctor.sh is
-# itself a manual invocation, not a hook with a payload of its own. That
-# decision must not be the absence of a check that nobody decided, so say it
-# loudly rather than proceeding in silence. Checked here, ahead of path
-# resolution below, so a broken CLAUDE_CONFIG_DIR/HOME does not also silence
-# this warning by way of the early `exit 0` a few lines down.
-#
-# The value is untrusted text that this script goes on to print in its own
-# report (#408's own reasoning for the --json branch's _json_escape, above):
-# `tr -d '[:cntrl:]'` strips every C0 control byte, including an embedded
-# newline, so a value cannot forge a second report line -- a fake "OK" or
-# "FAIL" at column 0 that a reader (or a relaying assistant) cannot tell from
-# a real one.
 if [ -n "${REMEMBER_TRANSCRIPT_PATH:-}" ]; then
     _DT_TRANSCRIPT_PATH_SAFE=$(printf '%s' "$REMEMBER_TRANSCRIPT_PATH" | tr -d '[:cntrl:]')
     echo "WARN REMEMBER_TRANSCRIPT_PATH is set in this shell's environment:"
@@ -270,35 +124,16 @@ if [ -n "${REMEMBER_TRANSCRIPT_PATH:-}" ]; then
     echo ""
 fi
 
-# ── 2. Resolved paths ────────────────────────────────────────────────────────
 echo "-- Paths --"
 
-# Claude Code exports CLAUDE_PROJECT_DIR to its *hooks*, not to a plain shell —
-# and this script runs through the Bash tool, where it is unset on any install
-# that isn't a local .claude/remember/ layout (marketplace and symlinked
-# installs both hit this). resolve-paths.sh then refuses to guess and fatals,
-# which is correct for the hooks (a wrong guess there writes memory into the
-# wrong project) but turns this read-only report into a false FAIL on a
-# healthy install (#207).
-#
-# Scoped to doctor.sh only: default to the git top level (or the current
-# directory, if that is not inside a git repo -- see #802) here, never in
-# resolve-paths.sh itself, so every other caller keeps the strict refusal.
-# The guess is reported as a guess below (see _PROJECT_DIR_ASSUMED) — a
-# diagnostic that silently assumes a project and reports on it as fact would
-# just be a quieter version of the same false signal.
 _PROJECT_DIR_ASSUMED=0
 if [ -z "${CLAUDE_PROJECT_DIR:-}" ]; then
-    # #802: prefer the git top level over a possibly-stale $PWD -- immune to
-    # a `cd` that happened earlier in the same Bash-tool call. Falls back to
-    # $PWD, unchanged, when the cwd is not inside a git repo at all. Same
-    # pattern write-handoff.sh's own #743 fix established.
     _DOCTOR_GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || _DOCTOR_GIT_ROOT=""
     _DOCTOR_GIT_ROOT=$(_doctor_resolve_project_dir_candidate "$_DOCTOR_GIT_ROOT")
     if [ -n "$_DOCTOR_GIT_ROOT" ]; then
         CLAUDE_PROJECT_DIR="$_DOCTOR_GIT_ROOT"
     else
-        CLAUDE_PROJECT_DIR="$PWD"
+        CLAUDE_PROJECT_DIR="$(pwd)"
     fi
     unset _DOCTOR_GIT_ROOT
     _PROJECT_DIR_ASSUMED=1
@@ -328,17 +163,9 @@ else
 fi
 echo "OK   PIPELINE_DIR       = $PIPELINE_DIR"
 
-# lib-memory-dir.sh directly (not bootstrap-dirs.sh — see header). It sources
-# lib-slug.sh itself, so session_dir_slug/claude_projects_dir are available
-# without going through detect-tools.sh's exit-prone python check.
 source "$SCRIPT_DIR/lib-memory-dir.sh"
 echo "OK   REMEMBER_DIR       = $REMEMBER_DIR"
 
-# lib-memory-dir.sh returns early when already loaded, and the slug helpers
-# live in lib-slug.sh, so they are not guaranteed to be defined by the source
-# above. Take them from their definer, and if they are still missing SAY so —
-# an empty slug printed as OK, with the existence check quietly skipped, is
-# precisely the no-answer-mistaken-for-a-clean-answer this tool exists to end.
 if ! command -v session_dir_slug >/dev/null 2>&1; then
     source "$SCRIPT_DIR/lib-slug.sh" 2>/dev/null || true
 fi
@@ -362,12 +189,8 @@ else
 fi
 echo ""
 
-# ── 3. Detected tools ────────────────────────────────────────────────────────
 echo "-- Tools --"
 
-# Probe detect-tools.sh in a subshell first: it `exit 1`s when no usable
-# python is found, and sourcing it directly here would take doctor.sh down
-# with it — the one failure mode this section most needs to report cleanly.
 _DT_LOG=$(source "$SCRIPT_DIR/detect-tools.sh" 2>&1 1>/dev/null)
 _DT_STATUS=$?
 
@@ -377,13 +200,13 @@ if [ "$_DT_STATUS" -ne 0 ]; then
     echo "FAIL Python: ${_DT_LOG:-no usable python found (tried python3, python, py -3, py)}"
     echo "WARN jq: skipped (python detection failed first)"
 else
-    # Safe to source for real now — the subshell probe already proved this
-    # succeeds, so the exit path inside it will not trigger.
     source "$SCRIPT_DIR/detect-tools.sh" >/dev/null 2>&1
     _PY_FIRST="${PYTHON%% *}"
     _PY_PATH=$(command -v "$_PY_FIRST" 2>/dev/null)
-    _PY_VERSION=$($PYTHON -V 2>&1)
-    echo "OK   python: $PYTHON -> ${_PY_PATH:-$_PY_FIRST} ($_PY_VERSION)"
+    _PY_VERSION=$(_remember_run_python -V 2>&1)
+    _PY_DISPLAY="$_PY_PATH"
+    [ -n "$_PY_DISPLAY" ] || _PY_DISPLAY="$_PY_FIRST"
+    echo "OK   python: $PYTHON -> $_PY_DISPLAY ($_PY_VERSION)"
 
     if command -v jq >/dev/null 2>&1; then
         _JQ_PATH=$(command -v jq)
@@ -395,13 +218,8 @@ else
 fi
 echo ""
 
-# ── 4. Storage mode ──────────────────────────────────────────────────────────
 echo "-- Storage --"
 
-# #517: both sides forward-slashed before the `==`-glob comparison -- see
-# the JSON-mode branch above for why an unnormalized REMEMBER_DIR/
-# PROJECT_DIR here misreports an in-project store as "external" on
-# msys/cygwin.
 if [ "$REMEMBER_DIR" = "${PROJECT_DIR}/.remember" ] \
     || [[ "$(_remember_forward_slash "$REMEMBER_DIR")" == "$(_remember_forward_slash "$PROJECT_DIR")"/* ]]; then
     echo "OK   Storage mode: legacy (in-project: $REMEMBER_DIR)"
@@ -409,71 +227,54 @@ else
     echo "OK   Storage mode: external ($REMEMBER_DIR)"
 fi
 
+_legacy_store="${MEMORY_PROJECT_DIR:-}"
+[ -n "$_legacy_store" ] || _legacy_store="$PROJECT_DIR"
+_remember_forward_slash_into _legacy_store "$_legacy_store/.remember"
+_remember_forward_slash_into _legacy_rd "$REMEMBER_DIR"
+if [ "$_legacy_rd" != "$_legacy_store" ] && [ "${_legacy_rd#"$_legacy_store"/}" = "$_legacy_rd" ]; then
+    for _legacy_f in now.md recent.md archive.md core-memories.md remember.md; do
+        if [ -f "$_legacy_store/$_legacy_f" ]; then
+            echo "WARN Legacy store: $_legacy_store still holds memory data ($_legacy_f); data_dir now points to $REMEMBER_DIR"
+            echo "     Move the memory files there by hand, then remove $_legacy_store (nothing moves them automatically since #898)."
+            break
+        fi
+    done
+fi
+unset _legacy_store _legacy_rd _legacy_f
+
 if [ -f "$REMEMBER_CONFIG" ] && [ -s "$REMEMBER_CONFIG" ]; then
     echo "OK   config.json: parsed (merged from bundled/user-global/per-project layers)"
 else
     echo "WARN config.json: none found -- running on bundled defaults"
 fi
 
-# Is this store known by a second spelling? (#298)
-#
-# A user who suspects their memory went missing had no way to check this, which
-# is why it is here and not only in a log. Re-run live rather than read from
-# tmp/case-divergence: the record is written at session start, and someone
-# running the doctor has usually just changed something.
-#
-# WARN, never FAIL, and the VERDICT is deliberately left alone. On a
-# case-insensitive filesystem this condition is harmless — the reporter of #298
-# measured 88 files reachable through either spelling on the same directory
-# object — and capture is entirely unaffected. It is a heads-up about a restore.
 if source "$SCRIPT_DIR/lib-case-divergence.sh" 2>/dev/null && \
    command -v remember_case_divergence >/dev/null 2>&1; then
     remember_case_divergence
-    case "$REMEMBER_CASE_STATUS" in
-        diverged)
-            echo "WARN Store spelling: this store is known by more than one spelling, differing only in case (resolved: $REMEMBER_CASE_RESOLVED)"
-            echo "     $REMEMBER_CASE_MESSAGE"
-            ;;
-        ok)
-            echo "OK   Store spelling: $REMEMBER_CASE_RESOLVED, on disk and in the store's git repository alike"
-            ;;
-        unavailable)
-            # Both halves named, because the commonest case by far is a disk
-            # that answered `ok` beside a git that has nothing to say — an
-            # external store with no backup repository. Printing only "could
-            # not check" would hide the half that did answer, and printing
-            # "OK" would claim the half that did not.
-            echo "WARN Store spelling: could not check in full -- on disk: $REMEMBER_CASE_DISK_STATE${REMEMBER_CASE_DISK_REASON:+ ($REMEMBER_CASE_DISK_REASON)}; in git: $REMEMBER_CASE_GIT_STATE${REMEMBER_CASE_GIT_REASON:+ ($REMEMBER_CASE_GIT_REASON)}. This is not a report that they agree."
-            ;;
-    esac
+    if [ "$REMEMBER_CASE_STATUS" = diverged ]; then
+        echo "WARN Store spelling: this store is known by more than one spelling, differing only in case (resolved: $REMEMBER_CASE_RESOLVED)"
+        echo "     $REMEMBER_CASE_MESSAGE"
+    elif [ "$REMEMBER_CASE_STATUS" = ok ]; then
+        echo "OK   Store spelling: $REMEMBER_CASE_RESOLVED, on disk and in the store's git repository alike"
+    elif [ "$REMEMBER_CASE_STATUS" = unavailable ]; then
+        echo "WARN Store spelling: could not check in full -- on disk: $REMEMBER_CASE_DISK_STATE${REMEMBER_CASE_DISK_REASON:+ ($REMEMBER_CASE_DISK_REASON)}; in git: $REMEMBER_CASE_GIT_STATE${REMEMBER_CASE_GIT_REASON:+ ($REMEMBER_CASE_GIT_REASON)}. This is not a report that they agree."
+    fi
 fi
 echo ""
 
-# ── 5. Capture health ────────────────────────────────────────────────────────
 echo "-- Capture health --"
 
-# _file_age_seconds <path> — mtime age in seconds, or empty if unreadable.
-# GNU stat (-c) tried first, then BSD stat (-f): the reverse order silently
-# succeeds on Linux because BSD `stat -f` there reports something else
-# entirely, and the OR fallback never fires (same hazard as lib-lock.sh's
-# _lock_dir_age, which this mirrors). Each probe's stdout must stay isolated
-# from the other so a failing GNU probe never contaminates the BSD one.
 _file_age_seconds() {
     local _path="$1" _mtime _now
     _mtime=$(stat -c %Y "$_path" 2>/dev/null) || _mtime=$(stat -f %m "$_path" 2>/dev/null) || true
-    case "$_mtime" in
-        ''|*[!0-9]*) return 1 ;;
-    esac
+    if [ -z "$_mtime" ] || [ "${_mtime#*[!0-9]}" != "$_mtime" ]; then
+        return 1
+    fi
     _now=$(date +%s)
-    # 10# after the case, never instead of it (#332).
     echo $(( _now - 10#$_mtime ))
     return 0
 }
 
-# "Has the hook run at all" is a different question from "which session did it
-# service", and conflating them is what made this report tell a slug-mismatch
-# victim to restart Claude Code. post-tool-ran is written before every early
-# exit in the hook; capture-alive only after a transcript is found.
 _RAN_MARKER="$REMEMBER_DIR/tmp/post-tool-ran"
 _ALIVE_MARKER="$REMEMBER_DIR/tmp/capture-alive"
 _POST_TOOL_FIRED=0
@@ -492,11 +293,6 @@ elif [ -f "$_ALIVE_MARKER" ]; then
         _POST_TOOL_FIRED=1
     fi
 elif [ -f "$REMEMBER_DIR/tmp/last-save.json" ]; then
-    # The marker arrived with the #200 fix. An install that predates it has
-    # never written one and never will until its next tool call — but a
-    # completed save proves PostToolUse HAS run here. Calling that "never
-    # fired" would send a working user off to restart for nothing, and a
-    # diagnostic that cries wolf is worse than none.
     echo "WARN PostToolUse marker absent, but a save has completed -- capture has"
     echo "     worked here. The marker is new; it appears on the next tool call."
     _POST_TOOL_FIRED=1
@@ -504,93 +300,13 @@ else
     echo "FAIL PostToolUse has never fired for this project (no $_ALIVE_MARKER)"
 fi
 
-# ── SessionEnd liveness (#370) ──────────────────────────────────────────────
-#
-# PostToolUse's freshness-window reading above (a marker refreshed on every
-# one of its many calls inside a live session) does not transfer here:
-# SessionEnd fires at most once per session, so "how old is the marker" is a
-# different question from "did the hook run last time it had the chance".
-#
-# No new marker is written for this. session-end-hook.sh already leaves
-# usable evidence of its own accord, as a side effect of its background
-# flush: a logs/autonomous/session-end-<HHMMSS>-<PID>.log file, created
-# unconditionally once that hook gets past its own SAVE_SCRIPT-missing check
-# (see session-end-hook.sh's own comments around its `_END_LOG` redirect).
-# The `-<PID>` suffix (#488) is why the glob below stays a plain
-# `session-end-*.log`, not `session-end-??????.log` -- narrowing it to the
-# old fixed-width shape would stop matching the very files this hook now
-# writes. Presence of even one such file is proof the hook has run; absence needs a
-# second signal before it can be called a problem, since a hook that never
-# had the chance to fire yet is not the same as one that had the chance and
-# stayed silent — the third state the issue calls out by name.
-#
-# $_SESSION_DIR (Paths section, above) is Claude Code's own transcript
-# directory for this project — one *.jsonl file per session it has ever
-# started. A COUNT of files there is not evidence a session ended: two or
-# more concurrently open Claude Code windows on the same project each keep
-# their own transcript, live, at the same time, and neither has ended just
-# because the other exists (#370 review). What distinguishes "a session
-# existed and stopped being active" from "another window is open right now"
-# is whether a transcript OTHER than the one currently growing has gone
-# quiet — Claude Code appends to the active transcript on every turn, so a
-# file nobody has touched in a while is read as no longer live. 900s (15
-# minutes) is generous on purpose: false NEGATIVES here (a truly-ended
-# session not yet counted) cost nothing but a delayed FAIL, while false
-# POSITIVES are the failure mode #370's own review caught — a hard "problem"
-# verdict for an ordinary two-windows-open workflow. It is not proof
-# SessionEnd itself was invoked (its firing conditions on a crash or a
-# killed terminal are undocumented; see session-end-hook.sh's own header) —
-# only that the opportunity existed and the window for it has passed.
 _SESSION_END_LOG_DIR="$REMEMBER_DIR/logs/autonomous"
 _SESSION_END_FIRED=0
-# #524: normalize before the glob -- REMEMBER_DIR arrives backslash-
-# separated on msys/cygwin, and bash's glob only ever splits on '/', so
-# without this _SESSION_END_FIRED silently stays 0 there and doctor falls
-# through to its transcript heuristic, misreporting SessionEnd as never
-# having fired for a project that genuinely has one.
 _remember_session_end_glob_dir=$(_remember_forward_slash "$_SESSION_END_LOG_DIR")
 for _sel in "$_remember_session_end_glob_dir"/session-end-*.log; do
     [ -f "$_sel" ] && _SESSION_END_FIRED=1 && break
 done
 
-# Quietness alone is not proof of a genuine SessionEnd failure (#392): a
-# transcript can go quiet because a session that ran here predates this
-# project ever having a remember store, in which case no SessionEnd hook was
-# ever registered to fire for it. REMEMBER_DIR's own mtime looked like the
-# earliest "remember became active here" signal doctor.sh could read without
-# new marker infrastructure, but it is NOT stable: save-session.sh writes
-# now.md via mktemp-in-REMEMBER_DIR + mv (see save-session.sh's own Step 6
-# comments), and both the mktemp and the mv update REMEMBER_DIR's own mtime,
-# not just now.md's — so on any project with ongoing captures it reads as
-# "time since the last save", not "time since install", reopening the exact
-# false-negative window this fix exists to close (measured: a genuinely
-# 2-day-old store with one ordinary save 5 minutes ago reads as installed 5
-# minutes ago). $REMEMBER_DIR/.install-marker is what this reads instead
-# (#401; originally $REMEMBER_DIR/.gitignore, see below): bootstrap-dirs.sh
-# writes it exactly once, gated on `[ -f "$REMEMBER_DIR/.install-marker" ]
-# || …`, and unlike every other path under REMEMBER_DIR it is never
-# rewritten by ordinary hook activity.
-#
-# #401: this originally read $REMEMBER_DIR/.gitignore's mtime instead, which
-# was NOT permanently stable — a legacy (in-project) store that is later
-# migrated to external mode and backed up with git has that exact file
-# deleted by hooks.d/after_save/50-git-backup.sh's own cleanup of the
-# migration artifact ("removed per-slug .gitignore (legacy bootstrap
-# artifact)") the first time a backed-up save runs, and bootstrap-dirs.sh's
-# write of it is gated on the store being inside the project (`case
-# "$REMEMBER_DIR" in "$_mem_proj"/*)`), which is false once external, so it
-# was never recreated — permanently degrading this check to WARN-only for
-# that store. EXTERNAL storage mode had the same gap from the start
-# (bootstrap-dirs.sh never wrote .gitignore there either), reached via
-# migration instead of from day one.
-#
-# $REMEMBER_DIR/.install-marker (bootstrap-dirs.sh, "Install marker (#401)")
-# replaces it: written once, unconditional of storage mode, and nothing in
-# this codebase — including the .gitignore cleanup above — has any reason to
-# touch it again. Absent or unreadable for any reason (including a store
-# that upgraded into this fix before its next hook run ever wrote one), no
-# transcript can be attributed to "after install", which is the safe
-# default: fall through to the third state below rather than guess.
 _STORE_INSTALL_AGE=$(_file_age_seconds "$REMEMBER_DIR/.install-marker")
 
 _SESSION_END_STATE="unknown"
@@ -605,20 +321,11 @@ elif [ -n "$_SESSION_DIR" ] && [ -d "$_SESSION_DIR" ]; then
     for _tf in "$_SESSION_DIR"/*.jsonl; do
         [ -f "$_tf" ] || continue
         _tf_age=$(_file_age_seconds "$_tf")
-        case "$_tf_age" in
-            ''|*[!0-9]*)
-                # Found, but its age could not be read — the same third
-                # state this file already names for the PostToolUse marker
-                # above, not folded into either "counted" or "silently
-                # dropped" (#392, defect 2).
-                _SE_UNREADABLE_COUNT=$((_SE_UNREADABLE_COUNT + 1))
-                continue
-                ;;
-        esac
+        if [ -z "$_tf_age" ] || [[ "$_tf_age" == *[!0-9]* ]]; then
+            _SE_UNREADABLE_COUNT=$((_SE_UNREADABLE_COUNT + 1))
+            continue
+        fi
         if [ -z "$_STORE_INSTALL_AGE" ] || [ "$_tf_age" -gt "$_STORE_INSTALL_AGE" ]; then
-            # Quiet since before remember's own store existed for this
-            # project (or no baseline could be read at all) — this
-            # transcript's silence proves nothing about SessionEnd (#392).
             _SE_PREDATES_STORE_COUNT=$((_SE_PREDATES_STORE_COUNT + 1))
             continue
         fi
@@ -655,12 +362,6 @@ else
 fi
 echo ""
 
-# The capture-gap check can decline to answer (#270): without a session_id on
-# the SessionStart payload it cannot tell the current session's transcript from
-# the previous one, and it stays silent rather than accuse a healthy install.
-# Silence is a claim of its own, so the skip is reported here — otherwise "no
-# capture-gap warning" would mean both "nothing was missed" and "nobody looked".
-# WARN, and the VERDICT is deliberately left alone: capture itself is unaffected.
 _GAP_SKIPPED="$REMEMBER_DIR/tmp/capture-gap-skipped"
 if [ -f "$_GAP_SKIPPED" ]; then
     _GAP_WHY=$(cat "$_GAP_SKIPPED" 2>/dev/null)
@@ -676,19 +377,9 @@ if [ -f "$_LAST_SAVE_FILE" ]; then
     _LS_SESSION=""
     _LS_LINE=""
     if command -v jq >/dev/null 2>&1; then
-        # last-save.json is store-derived, not this script's own text -- the
-        # same trust boundary REMEMBER_TRANSCRIPT_PATH crosses above (#727,
-        # mirroring the tr -d '[:cntrl:]' scrub at :195): an embedded newline
-        # in .session/.line could otherwise forge a column-0 VERDICT:/FAIL:
-        # line that commands/doctor.md tells the relaying assistant to quote
-        # back verbatim.
         _LS_SESSION=$(jq -r '.session // empty' "$_LAST_SAVE_FILE" 2>/dev/null | tr -d '[:cntrl:]')
         _LS_LINE=$(jq -r '.line // empty' "$_LAST_SAVE_FILE" 2>/dev/null | tr -d '[:cntrl:]')
     fi
-    # `date -r <file>` prints the file's mtime, formatted — true on both GNU
-    # date (documented: --reference=FILE) and BSD/macOS date (undocumented in
-    # the man page, which only shows the epoch-seconds form, but verified to
-    # accept a file path the same way). No `date -d` (GNU-only) needed.
     _LAST_SAVE_TIME=$(date -r "$_LAST_SAVE_FILE" '+%Y-%m-%d %H:%M:%S' 2>/dev/null)
     if [ -n "$_LAST_SAVE_TIME" ]; then
         echo "OK   Last successful save: $_LAST_SAVE_TIME (session ${_LS_SESSION:-unknown}, line ${_LS_LINE:-unknown})"
@@ -702,112 +393,48 @@ fi
 _MEMORY_FILE_COUNT=0
 _MEMORY_BYTES=0
 if [ -d "$REMEMBER_DIR" ]; then
-    # #525: normalize before the glob -- see #524's comment above for why
-    # an unnormalized REMEMBER_DIR here means this operator-facing total
-    # silently undercounts to 0 on msys/cygwin.
     _remember_memory_glob_dir=$(_remember_forward_slash "$REMEMBER_DIR")
     for _pattern in "today-"'*.md' "now.md" "recent.md" "archive"'*.md'; do
         for _mf in "$_remember_memory_glob_dir"/$_pattern; do
             [ -f "$_mf" ] || continue
             _MEMORY_FILE_COUNT=$((_MEMORY_FILE_COUNT + 1))
             _mf_bytes=$(wc -c < "$_mf" 2>/dev/null | tr -d ' ')
-            case "$_mf_bytes" in ''|*[!0-9]*) _mf_bytes=0 ;; esac
+            if [ -z "$_mf_bytes" ] || [ "${_mf_bytes#*[!0-9]}" != "$_mf_bytes" ]; then _mf_bytes=0; fi
             _MEMORY_BYTES=$((_MEMORY_BYTES + 10#$_mf_bytes))
         done
     done
 fi
 echo "OK   Memory files: $_MEMORY_FILE_COUNT file(s), $_MEMORY_BYTES bytes total"
 
-# ── Is the store too large to consolidate? (#348) ────────────────────────────
-#
-# The session-start notice added in #347 tells the user to run this command
-# when a memory file is too large to inject — and until now this command had
-# nothing whatever to say about that condition. A remedy that points at a
-# diagnostic which is silent about the thing it was pointed at is worse than no
-# pointer: the user follows it, reads a clean report, and concludes the notice
-# was noise.
-#
-# The number being checked is the one the pipeline actually enforces:
-# pipeline/shell.py sizes staging + recent.md + archive.md before it reads any
-# of them and skips the round when that sum is over thresholds.
-# consolidate_max_bytes. So this measures the same three parts against the same
-# cap, rather than warning on one file's size and hoping it correlates.
-#
-# Read without config() on purpose. That helper lives in log.sh, and this
-# script must not source log.sh (read-only report; see the header). One grep
-# against the merged config, which is flat JSON produced by lib-memory-dir.sh's
-# merger and carries this key exactly once.
-# Initialised before any branch can set it, so the VERDICT ladder below reads a
-# defined value even when this whole section is skipped for an absent store.
 _STORE_NEEDS_A_HUMAN=0
 _CONSOLIDATE_MAX_BYTES=600000
 _CONSOLIDATE_CAP_DISABLED=0
 if [ -f "$REMEMBER_CONFIG" ] && [ -s "$REMEMBER_CONFIG" ]; then
     _cmb=$(grep -o '"consolidate_max_bytes"[[:space:]]*:[[:space:]]*[0-9]*' "$REMEMBER_CONFIG" 2>/dev/null \
         | sed 's/.*:[[:space:]]*//' | head -1)
-    case "$_cmb" in (''|*[!0-9]*) : ;; (*) _CONSOLIDATE_MAX_BYTES=$((10#$_cmb)) ;; esac
+    if [ -n "$_cmb" ] && [ "${_cmb#*[!0-9]}" = "$_cmb" ]; then _CONSOLIDATE_MAX_BYTES=$((10#$_cmb)); fi
 fi
-# pipeline/shell.py:452 documents and :542 implements 0 as the cap being
-# DISABLED, not a 0-byte limit -- consolidation never skips a round on size
-# when it is set. "0" is all-digits, so the case guard above happily parses
-# it, and without this the block below would compare every non-empty store
-# against a floor nothing can clear (#360). Read once, here, so the
-# comparison below can render the disabled state instead of a permanent
-# false alarm.
 [ "$_CONSOLIDATE_MAX_BYTES" -eq 0 ] && _CONSOLIDATE_CAP_DISABLED=1
 
-# Three states, not two. An absent file contributes 0 to the prompt and that is
-# a measurement; a file that EXISTS and cannot be read contributes an unknown
-# number, and folding it into the same 0 makes "I looked and found nothing"
-# and "I could not look" arrive as the same sentence — from the one command
-# whose whole job is telling a human whether to worry. So the unreadable ones
-# are named, and the total they are missing from is not signed off as healthy.
-#
-# Sets _SIZE_BYTES rather than echoing it: a caller writing
-# `x=$(_size_of f)` runs the function in a subshell, and the _STORE_UNREADABLE
-# append below would die with it — the third state detected and then discarded,
-# which is the same defect one level down.
 _STORE_UNREADABLE=""
 _SIZE_BYTES=0
 _size_of() {
     _SIZE_BYTES=0
     [ -f "$1" ] || return 0
     _size_raw=$(wc -c < "$1" 2>/dev/null | tr -d ' ')
-    case "$_size_raw" in
-        (''|*[!0-9]*)
-            _STORE_UNREADABLE="${_STORE_UNREADABLE}${1}
+    if [ -z "$_size_raw" ] || [[ "$_size_raw" == *[!0-9]* ]]; then
+        _STORE_UNREADABLE="${_STORE_UNREADABLE}${1}
 "
-            ;;
-        (*) _SIZE_BYTES=$((10#$_size_raw)) ;;
-    esac
+    else
+        _SIZE_BYTES=$((10#$_size_raw))
+    fi
 }
 
 if [ ! -d "$REMEMBER_DIR" ]; then
-    # The third state, and it is not "healthy". A check that cannot look has to
-    # say it could not look; reporting OK here would be a clean bill of health
-    # for a store nothing measured.
     echo "WARN Consolidation size check: skipped -- $REMEMBER_DIR does not exist"
 else
     _size_of "$REMEMBER_DIR/recent.md";  _RECENT_BYTES=$_SIZE_BYTES
     _size_of "$REMEMBER_DIR/archive.md"; _ARCHIVE_BYTES=$_SIZE_BYTES
-    # Staging as consolidation counts it: past days only, and never a file
-    # already retired to .done.md. The pipeline reaches "today" through
-    # config.timezone -> REMEMBER_TZ (scripts/log.sh:366) ->
-    # pipeline/_tz.py's today_str(), which is what _eligible_staging
-    # (pipeline/shell.py:393) excludes today by -- so TODAY here has to be
-    # read the same way, or a configured timezone ahead of the machine's own
-    # can make this diagnostic exclude the file the pipeline counts and count
-    # the file the pipeline excludes, at once. That is a divergence in BOTH
-    # directions, not the safe under-counting one this comment used to claim
-    # (#357): when the excluded/counted file is the larger of the two,
-    # _STAGING_BYTES can cross the cap on a store the pipeline is about to
-    # rotate happily.
-    #
-    # Read without config() on purpose, same grep-then-use shape
-    # _CONSOLIDATE_MAX_BYTES already uses above: this script must not source
-    # log.sh (read-only report; see the header). An empty/absent timezone
-    # must NOT become `TZ="" date` -- that's UTC on macOS/BSD, the same trap
-    # lib-clock.sh's own comment names.
     _doctor_tz=""
     if [ -f "$REMEMBER_CONFIG" ] && [ -s "$REMEMBER_CONFIG" ]; then
         _doctor_tz=$(grep -o '"timezone"[[:space:]]*:[[:space:]]*"[^"]*"' "$REMEMBER_CONFIG" 2>/dev/null \
@@ -818,18 +445,17 @@ else
     else
         _DOCTOR_TODAY=$(date '+%Y-%m-%d')
     fi
-    # #517: normalize before the glob -- REMEMBER_DIR arrives backslash-
-    # separated on msys/cygwin, and bash's glob only ever splits on '/', so
-    # without this _STAGING_BYTES silently undercounts to 0 there, a
-    # number printed directly to the operator two branches below.
     _remember_staging_bytes_glob_dir=$(_remember_forward_slash "$REMEMBER_DIR")
     _STAGING_BYTES=0
     for _sf in "$_remember_staging_bytes_glob_dir"/today-*.md; do
         [ -f "$_sf" ] || continue
-        case "${_sf##*/}" in
-            (*.done.md) continue ;;
-            (*"$_DOCTOR_TODAY"*) continue ;;
-        esac
+        _sf_name="${_sf##*/}"
+        if [ "${_sf_name%.done.md}" != "$_sf_name" ]; then
+            continue
+        fi
+        if [ -z "$_DOCTOR_TODAY" ] || [[ "$_sf_name" == *"$_DOCTOR_TODAY"* ]]; then
+            continue
+        fi
         _size_of "$_sf"
         _STAGING_BYTES=$((_STAGING_BYTES + _SIZE_BYTES))
     done
@@ -845,19 +471,9 @@ else
     fi
 
     if [ "$_CONSOLIDATE_CAP_DISABLED" -eq 1 ]; then
-        # Three states, not "OK" doing double duty for "measured and fine"
-        # and "never measured against anything" -- that would be this file's
-        # own defect class one line up (#360). thresholds.consolidate_max_bytes
-        # of 0 is not a 0-byte cap; pipeline/shell.py:542 never skips a round
-        # on size when it reads 0, so nothing below is compared against it.
         echo "OK   Consolidation size check: disabled (thresholds.consolidate_max_bytes: 0) -- size never blocks a round"
     elif [ "$_STORE_BYTES" -gt "$_CONSOLIDATE_MAX_BYTES" ]; then
         if [ "$_STAGING_BYTES" -gt "$_CONSOLIDATE_MAX_BYTES" ]; then
-            # The one shape rotation cannot fix. FAIL, and it takes a VERDICT
-            # arm below, because nothing in the pipeline will clear it and the
-            # user reading this was sent here by a notice that promised an
-            # answer. Rotating recent.md here would split an unconsolidated
-            # span for nothing and the very next round would skip identically.
             _STORE_NEEDS_A_HUMAN=1
             echo "FAIL Store is too large to consolidate and cannot heal itself:"
             echo "     $_STORE_BYTES bytes against a thresholds.consolidate_max_bytes cap"
@@ -868,11 +484,6 @@ else
             echo "     round would skip on the same sum. Every round skips while this holds."
             echo "     The oversized today-*.md files under $REMEMBER_DIR are the thing to look at."
         else
-            # WARN, not FAIL, and the VERDICT is deliberately left alone — the
-            # same trade the log-rotation and case-divergence checks make above.
-            # Capture is entirely unaffected (saves still land in today-*.md),
-            # and since #348 the remedy is "do nothing": the next consolidation
-            # rotates the oversized file and resumes on its own.
             echo "WARN Store is too large to consolidate right now: $_STORE_BYTES bytes"
             echo "     against a thresholds.consolidate_max_bytes cap of $_CONSOLIDATE_MAX_BYTES"
             echo "     -- recent.md $_RECENT_BYTES + archive.md $_ARCHIVE_BYTES + past-day staging $_STAGING_BYTES."
@@ -885,9 +496,6 @@ else
             echo "     names the rotated slices."
         fi
     elif [ -n "$_STORE_UNREADABLE" ]; then
-        # A floor under the cap proves nothing. Saying OK here would be the
-        # absence this section exists to remove, one level up: an unmeasured
-        # store signed off as a measured one.
         echo "WARN Whether the store fits the consolidation cap could not be determined:"
         echo "     the $_STORE_BYTES bytes that could be read are under the"
         echo "     $_CONSOLIDATE_MAX_BYTES cap, but the files named above went uncounted."
@@ -904,7 +512,6 @@ if [ "$_POST_TOOL_FIRED" -eq 0 ]; then
 fi
 echo ""
 
-# ── 6. Recent errors ─────────────────────────────────────────────────────────
 echo "-- Recent errors --"
 _ERR_LOG="$REMEMBER_DIR/logs/hook-errors.log"
 if [ -s "$_ERR_LOG" ]; then
@@ -917,30 +524,11 @@ else
 fi
 echo ""
 
-# ── 6a. Summarizer failures (#870) ──────────────────────────────────────────
-# tmp/last-summary-failure is written by save-session.sh's record_summary_failure
-# on every failed attempt and removed only on a successful append, a SKIP, or
-# the give-up threshold (scripts/save-session.sh ~L758-784) -- so its mere
-# presence means the most recent summarizer attempt failed and nothing has
-# succeeded since. doctor.sh never read it before this: a 10-day auth outage
-# reported "capture is working" throughout (#870), because "Last successful
-# save" above is the cursor file's mtime, which save-position rewrites on
-# every attempt regardless of whether it summarized anything.
 echo "-- Summarizer failures (#870) --"
 _SUMMARY_FAILURE_MARKER="$REMEMBER_DIR/tmp/last-summary-failure"
 _SUMMARIZER_FAILING=0
 if [ -s "$_SUMMARY_FAILURE_MARKER" ]; then
     _SUMMARIZER_FAILING=1
-    # Pull the newest "call-haiku error" line out of ALL daily logs, not only
-    # the single newest-mtime one (#870 self-review): the marker can persist
-    # into a new day (cleared only on success/give-up) while that day's log
-    # is created by an unrelated hook write with no summarizer attempt in it
-    # yet, which would make "today's" file the newest-mtime one and silently
-    # discard the real detail still sitting in yesterday's log. Walking every
-    # log in filename order (memory-YYYY-MM-DD.log sorts chronologically) and
-    # keeping the last ACTUAL match seen, rather than the contents of the
-    # last FILE seen, survives that gap -- a file with no match simply leaves
-    # the previous match standing instead of blanking it.
     _remember_sf_glob_dir=$(_remember_forward_slash "$REMEMBER_DIR")
     _SF_DETAIL=""
     _SF_FILES=()
@@ -948,15 +536,6 @@ if [ -s "$_SUMMARY_FAILURE_MARKER" ]; then
         [ -f "$_sf_f" ] || continue
         _SF_FILES+=("$_sf_f")
     done
-    # #870 (second self-review pass): sorting via an UNQUOTED `$(...)` used
-    # directly as a `for ... in` list re-splits on every IFS character,
-    # including space -- a project path containing one (common on macOS:
-    # "/Users/John Smith/...", an iCloud/Dropbox folder name) tore every
-    # matched path into fragments, none of which passed `[ -f ]`, so the
-    # loop silently found nothing at all. Restricting IFS to newline only
-    # while building the sorted array keeps each path intact as one element
-    # regardless of embedded spaces -- filenames containing a literal
-    # newline are not a case anything else in this script handles either.
     if [ "${#_SF_FILES[@]}" -gt 0 ]; then
         _SF_OLD_IFS="$IFS"
         IFS=$'\n'
@@ -971,37 +550,23 @@ if [ -s "$_SUMMARY_FAILURE_MARKER" ]; then
     fi
     unset _SF_FILES
     echo "FAIL summarizer: last attempt failed${_SF_DETAIL:+: $_SF_DETAIL}"
-    # Same marker family _isolation_may_be_the_cause (pipeline/haiku.py) scans
-    # for -- an expired login reads as a generic failure here, so this is the
-    # one lowercased substring match worth doing in bash rather than naming
-    # a specific remedy for every kind of failure, which would be as wrong
-    # in the other direction as never naming it at all.
     _SF_DETAIL_LOWER=$(printf '%s' "$_SF_DETAIL" | tr '[:upper:]' '[:lower:]')
-    case "$_SF_DETAIL_LOWER" in
-        *"not logged in"*|*"please run /login"*|*"invalid api key"*|\
-        *"invalid bearer token"*|*"authentication_error"*|*"failed to authenticate"*)
-            echo "     this looks like an expired login -- on Claude Code,"
-            echo "     configure the plugin's userConfig recovery token"
-            echo "     (/plugin -> remember -> Configure, or \`claude setup-token\`"
-            echo "     then \`claude plugin config set remember oauth_token <token>\`,"
-            echo "     #129/#131/#860)"
-            ;;
-    esac
-    unset _remember_sf_glob_dir _SF_LATEST_LOG _SF_DETAIL _SF_DETAIL_LOWER _sf_f
+    _sf_login=0
+    for _sf_m in 'not logged in' 'please run /login' 'invalid api key' \
+                 'invalid bearer token' 'authentication_error' 'failed to authenticate'; do
+        [ "${_SF_DETAIL_LOWER#*"$_sf_m"}" != "$_SF_DETAIL_LOWER" ] && _sf_login=1
+    done
+    if [ "$_sf_login" = 1 ]; then
+        echo "     this looks like an expired login -- log in again with"
+        echo "     your coding agent's own CLI. This plugin reads no"
+        echo "     credential of its own (#129/#131/#860)."
+    fi
+    unset _remember_sf_glob_dir _SF_LATEST_LOG _SF_DETAIL _SF_DETAIL_LOWER _sf_f _sf_m _sf_login
 else
     echo "OK   No summarizer failure recorded ($_SUMMARY_FAILURE_MARKER empty or absent)"
 fi
 echo ""
 
-# ── 6b. SessionStart duration (#706) ────────────────────────────────────────
-# "The daily log is right for the record, and /remember:doctor is right for
-# the read-out" -- the issue's own words. session-start-hook.sh writes
-# "session-start took Ns" into the daily log on EVERY start (never gated);
-# this reads the most recent one back so "is my host slow" is one command
-# away instead of a manual grep through logs/. Three states, not two: found,
-# no daily log exists yet (a fresh install, or capture never ran), and a
-# daily log exists but has no such line (an install from before #706 shipped
-# -- not the same as "never ran", and not reported as if it were).
 echo "-- SessionStart duration (#706) --"
 _remember_ss_glob_dir=$(_remember_forward_slash "$REMEMBER_DIR")
 _SS_LATEST_LOG=""
@@ -1025,71 +590,12 @@ else
 fi
 unset _remember_ss_glob_dir _SS_LATEST_LOG _SS_LAST_LINE _ss_f
 
-# ── 6c. Legacy recovery-token config, no longer read (#860) ────────────────
-# pipeline/haiku.py no longer reads REMEMBER_OAUTH_TOKEN or haiku.oauth_token
-# at all -- the plugin's own `oauth_token` userConfig option
-# (CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN) is the only recovery-token source now.
-# A still-configured legacy value is detected by PRESENCE ONLY and logged as
-# a "NOTICE:" line to the daily log every time a save runs -- this surfaces
-# the most recent one here, same pattern as the summarizer failure detail
-# above (sorted scan across every daily log, last match wins), so an
-# operator who has not migrated is not left silently unauthenticated.
-echo "-- Legacy recovery-token config (#860) --"
-_remember_dep_glob_dir=$(_remember_forward_slash "$REMEMBER_DIR")
-_DEP_LINE=""
-_DEP_ANY_LOG=0
-_DEP_FILES=("$_remember_dep_glob_dir"/logs/memory-*.log)
-if [ -e "${_DEP_FILES[0]}" ]; then
-    _DEP_ANY_LOG=1
-    _DEP_OLD_IFS="$IFS"
-    IFS=$'\n'
-    _DEP_SORTED=($(printf '%s\n' "${_DEP_FILES[@]}" | LC_ALL=C sort))
-    IFS="$_DEP_OLD_IFS"
-    unset _DEP_OLD_IFS
-    for _dep_f in "${_DEP_SORTED[@]}"; do
-        _dep_match=$(grep -F "NOTICE:" "$_dep_f" 2>/dev/null | tail -n 1)
-        [ -n "$_dep_match" ] && _DEP_LINE="$_dep_match"
-    done
-    unset _DEP_SORTED
-fi
-unset _DEP_FILES
-if [ -n "$_DEP_LINE" ]; then
-    echo "WARN $_DEP_LINE"
-    echo "     Configure the recovery token through the plugin's userConfig"
-    echo "     option instead (/plugin -> remember -> Configure, or"
-    echo "     \`claude plugin config set remember oauth_token <token>\`)."
-elif [ "$_DEP_ANY_LOG" = 1 ]; then
-    echo "OK   No legacy recovery-token config in use"
-else
-    echo "--   No daily log found yet -- nothing scanned for legacy recovery-token config"
-fi
-unset _remember_dep_glob_dir _DEP_LINE _DEP_ANY_LOG _dep_f
-echo ""
 
-# Log rotation (#252). A rotation that cannot run is invisible by construction:
-# it happens inside a consolidation the user never watches, it writes one line
-# into the very directory it failed to tidy, and it never escalates on its own.
-# The reporter's install failed every day for five weeks — hook-errors.log was
-# empty throughout, so this report would have said "OK" the entire time. This
-# is the pull-based half of the fix: rotate_logs leaves a breadcrumb, and the
-# command whose whole job is answering "is something silently broken?" reads it.
-#
-# WARN, not FAIL, and the VERDICT is deliberately left alone: rotation failing
-# does not stop capture, and overstating it would devalue the verdict line that
-# commands/doctor.md tells the operator to trust without scrolling up.
-#
-# The filename is log.sh's `_ROTATE_STATE_NAME`, spelled again here because this
-# script must not source log.sh (read-only report; see the header). Rename both
-# or neither.
 _ROTATE_STATE="$REMEMBER_DIR/logs/.rotate-failed"
 if [ -f "$_ROTATE_STATE" ]; then
     _RT_COUNT=$(sed -n 1p "$_ROTATE_STATE" 2>/dev/null)
     _RT_WHEN=$(sed -n 2p "$_ROTATE_STATE" 2>/dev/null)
     _RT_ERR=$(sed -n 3p "$_ROTATE_STATE" 2>/dev/null)
-    # #517: normalize before the glob -- see the _STAGING_BYTES comment
-    # above for why an unnormalized REMEMBER_DIR here means $_RT_PENDING
-    # silently undercounts to 0 on msys/cygwin, another number printed
-    # directly to the operator two lines below.
     _remember_rt_pending_glob_dir=$(_remember_forward_slash "$REMEMBER_DIR")
     _RT_PENDING=0
     for _rt_f in "$_remember_rt_pending_glob_dir"/logs/memory-*.log; do
@@ -1097,8 +603,6 @@ if [ -f "$_ROTATE_STATE" ]; then
     done
     echo "WARN Log rotation has failed ${_RT_COUNT:-?} time(s) in a row (last ${_RT_WHEN:-unknown})"
     echo "     Reason: ${_RT_ERR:-not recorded}"
-    # The count is every log file present, not only the aged ones — the live
-    # log is in there too. Worded so it does not claim they are all overdue.
     echo "     $_RT_PENDING log file(s) currently in $REMEMBER_DIR/logs; the aged"
     echo "     ones will not be archived until this is fixed. Capture is unaffected."
 else
@@ -1106,126 +610,29 @@ else
 fi
 echo ""
 
-# ── Verdict ──────────────────────────────────────────────────────────────────
-# Order matters more than it looks. Every one of these ends with "capture is
-# not running", but they need different actions, and the generic
-# "restart Claude Code" was previously reached FIRST — so a missing Python and
-# a mismatched slug were both answered with a restart that fixes neither, on a
-# line commands/doctor.md tells the operator not to second-guess. Specific
-# causes are named before the general one.
-#
-# _ASSUMED_NOTE repeats the CLAUDE_PROJECT_DIR-was-guessed disclosure from the
-# Paths section on the one line commands/doctor.md tells the operator to trust
-# without scrolling up — every verdict below describes $PROJECT_DIR whether or
-# not that's the project the operator meant (#207).
 _ASSUMED_NOTE=""
 if [ "$_PROJECT_DIR_ASSUMED" -eq 1 ]; then
     _ASSUMED_NOTE=" (CLAUDE_PROJECT_DIR was not set; this describes $PROJECT_DIR, assumed from the current directory)"
 fi
-# One new arm (#348), and only for the store shape nothing in the pipeline will
-# clear on its own. The self-healing shape stays a WARN with the verdict left
-# alone: capture is unaffected there and the next round repairs it, so claiming
-# a problem would devalue the line commands/doctor.md tells the operator to
-# trust without scrolling. This arm sits ABOVE "capture is working" because
-# capture usually IS working in this state — saves land in today-*.md and pile
-# up unconsolidated, which is exactly why a healthy-looking verdict here would
-# send away the user the session-start notice sent in.
-#
-# It sits BELOW the no-usable-Python arm (#359): staging over the cap on its
-# own is the EFFECT of consolidation not running, and no usable Python is one
-# CAUSE of that. This ladder's own rule above is specific causes before the
-# general one, and "no usable Python" is the more specific of the two — a
-# broken interpreter on an already-large store used to read as "the staging
-# files are over the prompt cap on their own," sending the operator to look
-# at oversized files instead of the Tools section that actually explains it.
-# One more arm (#370), and it sits ABOVE "capture is working" rather than
-# below it — a break with how every other secondary WARN-only check in this
-# file behaves (log rotation, case divergence, the self-healing oversized-
-# store shape all leave the VERDICT alone on purpose). Those all describe
-# conditions where capture ITSELF is unaffected; this one does not. A
-# SessionEnd that never fires is capture's own last-chance flush silently
-# not running, which is #370's whole complaint: a user whose PostToolUse
-# capture looks perfectly healthy sees the exact same "capture is working"
-# line as one whose SessionEnd hook is unregistered or dying before it
-# forks, right up until the session that ends in conversation rather than
-# tool calls loses its tail with no warning at all. The ladder's own rule
-# above is "specific causes before the general one" for DIFFERENT
-# explanations of the SAME symptom; here it is a genuinely separate hook
-# with its own failure mode, and reaching the general "capture is working"
-# line first would be exactly the invisibility this issue reports, just
-# moved one arm down the same ladder. It sits BELOW the no-usable-Python and
-# oversized-store arms because those mean literally nothing in the pipeline
-# runs at all, which outranks a narrower, single-hook failure every time.
 if [ "$_PYTHON_OK" -eq 0 ]; then
     echo "VERDICT: problem -- no usable Python; the pipeline cannot run at all (see Tools above)$_ASSUMED_NOTE"
 elif [ "${_STORE_NEEDS_A_HUMAN:-0}" -eq 1 ]; then
     echo "VERDICT: problem -- memory is being captured but never consolidated; the staging files are over the prompt cap on their own (see above)$_ASSUMED_NOTE"
 elif [ "$_POST_TOOL_FIRED" -eq 1 ] && [ -z "$_LAST_SAVE_TIME" ] \
     && { [ -z "$_SESSION_DIR" ] || [ -d "$_SESSION_DIR" ]; }; then
-    # #404: this is the same condition the final `else` below names — PostToolUse
-    # HAS fired (a marker or a ran-flag exists) but no save has ever completed —
-    # promoted up here, ahead of the SessionEnd arm, because on an AGED store
-    # (baseline genuinely in the past, a transcript genuinely quiet since) this
-    # is the more specific, actionable cause: SessionEnd's own silence is fully
-    # explained by capture never reaching a save in the first place, and the
-    # ladder's own rule above (specific causes before the general one) says the
-    # explanation wins, not the symptom. #392/#400 closed the FRESH-install half
-    # of this same displacement (a transcript predating the store no longer
-    # counts as SessionEnd evidence); this closes the aged-store half, where
-    # `_SESSION_END_STATE` genuinely does become "not-fired". SessionEnd's
-    # priority over "capture is working" and over "PostToolUse never fired at
-    # all" (#370, below) is untouched — those are the two states this
-    # condition's own `-z "$_LAST_SAVE_TIME"` and `_POST_TOOL_FIRED -eq 1`
-    # cannot both be true for. The trailing session-dir-mismatch exclusion
-    # (#144, tested by test_a_slug_mismatch_is_not_answered_with_restart_claude_code)
-    # keeps the still-more-specific slug-mismatch arm below reachable: a
-    # mismatched slug can leave PostToolUse having run (`post-tool-ran`
-    # written) with no save either, and that structural cause outranks this
-    # one — this arm must not swallow it just because it moved earlier.
     echo "VERDICT: problem -- PostToolUse has fired but no save has completed yet; check hook-errors.log above$_ASSUMED_NOTE"
 elif [ "$_SESSION_END_STATE" = "not-fired" ]; then
     echo "VERDICT: problem -- SessionEnd has never fired despite prior sessions ending in this project; the last-chance flush is not running (see above)$_ASSUMED_NOTE"
 elif [ "$_POST_TOOL_FIRED" -eq 1 ] && [ -n "$_LAST_SAVE_TIME" ] && [ "${_SUMMARIZER_FAILING:-0}" -eq 1 ] \
     && { [ -z "$_SESSION_DIR" ] || [ -d "$_SESSION_DIR" ]; }; then
-    # #870: this arm shares its base condition with "capture is working"
-    # below on purpose -- it exists ONLY to override that one verdict when
-    # the cursor-mtime check cannot tell a real append apart from a
-    # cursor-only rewrite. It must NOT be reachable on its own (a bare
-    # `_SUMMARIZER_FAILING -eq 1` check, tried first): $_LAST_SAVE_TIME can
-    # be empty for reasons that have nothing to do with the summarizer --
-    # a #144 slug mismatch, a project PostToolUse never serviced -- and an
-    # unconditional arm here would intercept those more specific, structural
-    # causes below before they are ever reached, rather than only replacing
-    # the one verdict it is actually more accurate than.
-    #
-    # #870 (second self-review pass): $_LAST_SAVE_TIME alone is NOT enough to
-    # exclude #144 -- a project can carry a stale last-save.json from BEFORE
-    # a slug mismatch (prior successful saves, then a rename/move) alongside
-    # a stale, equally pre-mismatch _SUMMARIZER_FAILING marker, which would
-    # satisfy this arm's first three conditions while #144 is the real,
-    # live cause. The trailing `{ -z SESSION_DIR || -d SESSION_DIR }` clause
-    # is the exact guard the promoted PostToolUse-fired-no-save arm above
-    # already uses for this same reason -- copied here rather than
-    # reinvented, so a slug mismatch always falls through to its own arm.
     echo "VERDICT: problem -- the summarizer's last attempt failed and no save has completed since (see Summarizer failures above)$_ASSUMED_NOTE"
 elif [ "$_POST_TOOL_FIRED" -eq 1 ] && [ -n "$_LAST_SAVE_TIME" ] \
     && { [ -z "$_SESSION_DIR" ] || [ -d "$_SESSION_DIR" ]; }; then
-    # #880: same guard as the #870 arm immediately above, and for the same
-    # reason -- a stale $_LAST_SAVE_TIME from a save that completed before a
-    # rename/move can be non-empty even when the session dir no longer
-    # matches Claude Code's own slug, so without this clause this arm fires
-    # ahead of the #144 slug-mismatch arm below and masks it.
     echo "VERDICT: capture is working -- last save $_LAST_SAVE_TIME$_ASSUMED_NOTE"
 elif [ -n "$_SESSION_DIR" ] && [ ! -d "$_SESSION_DIR" ]; then
     echo "VERDICT: problem -- session dir slug does not match Claude Code's transcript directory (#144); restarting will not help$_ASSUMED_NOTE"
 elif [ "$_POST_TOOL_FIRED" -eq 0 ]; then
     echo "VERDICT: problem -- PostToolUse has never fired; restart Claude Code (see REMEDIATION above)$_ASSUMED_NOTE"
 else
-    # Unreachable in practice — every combination of $_POST_TOOL_FIRED and
-    # $_LAST_SAVE_TIME is now caught by an arm above (0 by the last elif,
-    # 1-with-no-save by the promoted arm near the top, 1-with-a-save by
-    # "capture is working") — kept as a defensive fallback rather than
-    # deleted, so a future arm added between them without re-auditing the
-    # whole ladder still prints something instead of falling off the end.
     echo "VERDICT: problem -- PostToolUse has fired but no save has completed yet; check hook-errors.log above$_ASSUMED_NOTE"
 fi

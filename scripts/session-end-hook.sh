@@ -1,135 +1,1227 @@
 #!/bin/bash
-# ============================================================================
-# session-end-hook.sh — SessionEnd hook for the Remember plugin
-# ============================================================================
-#
-# DESCRIPTION
-#   Fires when a Claude Code session ends. Flushes whatever has not yet been
-#   saved to now.md, ignoring both the cooldown (cooldowns.save_seconds) and
-#   the min-human-message gate that PostToolUse's routine saves respect
-#   (#345). Those gates exist to throttle a LIVE session; this hook runs once,
-#   at the point where there is no next tool call and no next cooldown window
-#   to catch up on the missed span. A session that ends in conversation rather
-#   than tool calls — a design discussion, a review, a decision — is exactly
-#   what PostToolUse's delta/cooldown gates can leave unsaved, because nothing
-#   after the last save cleared them.
-#
-#   Does NOT write a handoff note. `/remember` (skills/remember/SKILL.md)
-#   composes remember.md from the model's own first-person recollection of
-#   the session — "What's done, what's not", "what to pick up", written in
-#   "I". There is no model turn running at SessionEnd for this hook to
-#   narrate from; it is a bash script with the raw transcript, not the agent
-#   that lived the session. A generated placeholder ("session ended, see
-#   now.md") would silently overwrite a real handoff a user wrote earlier in
-#   the same session with something that carries no forward-looking content
-#   at all — worse than leaving the existing file alone, and adjacent to
-#   #341's stale-banner problem rather than a fix for it. now.md (this hook's
-#   actual output) is what a next session's recovery block and consolidation
-#   pipeline read; a real, older remember.md is left untouched.
-#
-# STDIN
-#   The SessionEnd payload. `session_id` and `reason` are read with the same
-#   bounded, non-blocking approach post-tool-hook.sh uses for `session_id`:
-#   never from a tty, and time-bounded (`read -t 1`) so a pipe held open with
-#   nothing in it costs at most a second rather than hanging session teardown.
-#   Read once, by the process Claude Code invoked; the detached child gets
-#   the same bytes through REMEMBER_SESSION_END_PAYLOAD and never touches
-#   stdin (it has /dev/null there).
-#
-#   `reason` is documented (Claude Code hooks reference, checked 2026-08) as
-#   one of clear/resume/logout/prompt_input_exit/other, but is treated here as
-#   an opaque, unvalidated token — logged for diagnostics, never branched on.
-#   No reason this hook has actually observed in the wild disqualifies a
-#   flush: the whole point is that this is the last chance, not a routine
-#   tick, so every reason gets the same unconditional attempt.
-#
-#   Whether SessionEnd fires at all on a crash, a killed terminal, or a
-#   process hitting the usage cap is NOT established by that same reference —
-#   it documents the graceful paths (clear, logout, prompt_input_exit,
-#   resume) and is silent on the abrupt ones. This hook cannot make it fire
-#   where Claude Code itself would not invoke it; `features.recovery` softens
-#   exactly that gap from the next session's start and is deliberately left
-#   in place rather than treated as superseded by this hook (#345).
-#
-# ENVIRONMENT
-#   CLAUDE_PLUGIN_ROOT   Plugin install directory (set by Claude Code)
-#   CLAUDE_PROJECT_DIR   Project root (default: .)
-#
-# EXIT CODES
-#   0   Always, and immediately — since #647 this process does nothing but
-#       read stdin and re-launch itself detached (see the detach section
-#       below), so its own exit waits on neither the path/tool preamble nor
-#       save-session.sh. Claude Code's SessionEnd budget is 1.5s shared
-#       across every hook on the event, and the preamble alone was measured
-#       past that on a slow Windows machine (#560). A failed flush is reported loudly
-#       once that subshell finishes (report_error(), which reaches both the
-#       daily log and hook-errors.log — surfaced by /remember:doctor) rather
-#       than swallowed silently: the other hooks in this plugin can afford
-#       silence on failure because there is always a next tool call or a
-#       next session to retry from. This one is the last chance a session
-#       gets, which is also why it is the one hook here NOT allowed to lose
-#       its own failure to the same 60s kill it is trying to survive.
-#
-# ============================================================================
+__remember_src_lib_clock() {
+:
 
-# --- Where this script lives ---
-# Same parameter-expansion resolution as post-tool-hook.sh / user-prompt-hook.sh
-# (#230) rather than three `dirname` forks. A path with no slash in it leaves
-# the filename behind, not a directory; `dirname` answered "." and this must
-# too.
+[ -n "${_REMEMBER_LIB_CLOCK_LOADED:-}" ] && return 0
+_REMEMBER_LIB_CLOCK_LOADED=1
+
+if [ "${BASH_VERSINFO[0]:-0}" -gt 4 ] 2>/dev/null; then
+    _REMEMBER_PRINTF_T=1
+elif [ "${BASH_VERSINFO[0]:-0}" -eq 4 ] 2>/dev/null && [ "${BASH_VERSINFO[1]:-0}" -ge 2 ] 2>/dev/null; then
+    _REMEMBER_PRINTF_T=1
+else
+    _REMEMBER_PRINTF_T=0
+fi
+[ "${REMEMBER_NO_PRINTF_T:-0}" = "1" ] && _REMEMBER_PRINTF_T=0
+
+_remember_date_builtin_ok() {
+    if [[ "$1" == *"%-"* ]] || [[ "$1" == *"%_"* ]] || [[ "$1" == *"%0"* ]] \
+        || [[ "$1" == *"%^"* ]] || [[ "$1" == *"%#"* ]]; then
+        return 1
+    fi
+    return 0
+}
+
+_remember_date() {
+    if [ -n "${REMEMBER_TZ:-}" ]; then
+        TZ="$REMEMBER_TZ" date "$@"
+        return
+    fi
+    if [ "$_REMEMBER_PRINTF_T" = "1" ] && [ "$#" -eq 1 ] \
+        && _remember_date_builtin_ok "$1"; then
+        printf "%(${1#+})T\n" -1 && return
+    fi
+    date "$@"
+}
+
+_remember_date_into() {
+    local _var="$1"
+    shift
+    if [ -z "${REMEMBER_TZ:-}" ] && [ "$_REMEMBER_PRINTF_T" = "1" ] && [ "$#" -eq 1 ] \
+        && _remember_date_builtin_ok "$1"; then
+        printf -v "$_var" "%(${1#+})T" -1
+        return
+    fi
+    local _val
+    _val=$(_remember_date "$@")
+    printf -v "$_var" '%s' "$_val"
+}
+
+}
+__remember_src_resolve_paths() {
+:
+
+if [ -n "${REMEMBER_NESTED_SUMMARIZER:-}" ]; then
+    if [ "${REMEMBER_PATHS_SOFT_FAIL:-0}" = "1" ]; then
+        return 1
+    fi
+    exit 0
+fi
+
+umask 077
+
+_SCRIPT_DIR="${BASH_SOURCE[0]%/*}"
+[ "$_SCRIPT_DIR" = "${BASH_SOURCE[0]}" ] && _SCRIPT_DIR="$(pwd)"
+_PLUGIN_ROOT_CANDIDATE="$(cd "$_SCRIPT_DIR/.." && pwd)"
+
+_resolve_paths_fail() {
+    echo "$1" >&2
+    if [ -n "${2:-}" ] && [ -d "$2" ]; then
+        echo "$(date '+%H:%M:%S') [resolve] $1" >> "$2/memory-$(date '+%Y-%m-%d').log" 2>/dev/null
+    fi
+    [ "${REMEMBER_PATHS_SOFT_FAIL:-0}" = "1" ] && return 1
+    exit 1
+}
+
+if [ -n "${PLUGIN_ROOT:-}" ]; then
+    _REMEMBER_PLUGIN_ROOT="$PLUGIN_ROOT"
+else
+    _REMEMBER_PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
+fi
+if [ -n "$_REMEMBER_PLUGIN_ROOT" ] && [ -f "$_REMEMBER_PLUGIN_ROOT/.claude-plugin/plugin.json" ]; then
+    PIPELINE_DIR="$_REMEMBER_PLUGIN_ROOT"
+elif [ -n "${PLUGIN_ROOT:-}" ] && [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] \
+        && [ "$_REMEMBER_PLUGIN_ROOT" != "$CLAUDE_PLUGIN_ROOT" ] \
+        && [ -f "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json" ]; then
+    PIPELINE_DIR="${CLAUDE_PLUGIN_ROOT:-}"
+elif [ -f "$_PLUGIN_ROOT_CANDIDATE/.claude-plugin/plugin.json" ]; then
+    PIPELINE_DIR="$_PLUGIN_ROOT_CANDIDATE"
+else
+    _msg="FATAL: Cannot resolve plugin root. PLUGIN_ROOT/CLAUDE_PLUGIN_ROOT do not point at a valid plugin install (missing its install manifest) and $_PLUGIN_ROOT_CANDIDATE does not look like one either."
+    _resolve_paths_fail "$_msg" "${CLAUDE_PROJECT_DIR:-.}/.remember/logs" || return 1
+fi
+
+_remember_normalize_win_path() {
+    local LC_ALL=C
+    local _in="$1" _drive="" _rest=""
+    local _re='^([a-zA-Z]):[/\](.*)$'
+    if [ "$OSTYPE" = msys ] || [ "$OSTYPE" = cygwin ]; then
+        if [[ "$_in" =~ ^/cygdrive/([a-zA-Z])/(.*)$ ]] || [[ "$_in" =~ ^/([a-zA-Z])/(.*)$ ]] \
+            || [[ "$_in" =~ $_re ]]; then
+            _drive="${BASH_REMATCH[1]}"
+            _rest="${BASH_REMATCH[2]}"
+        fi
+        if [ -n "$_drive" ]; then
+            _drive=$(printf '%s' "$_drive" | LC_ALL=C tr '[:lower:]' '[:upper:]')
+            _rest="${_rest//\//\\}"
+            printf '%s' "${_drive}:\\${_rest}"
+            return 0
+        fi
+    fi
+    printf '%s' "$_in"
+}
+
+
+
+if [ -n "$CLAUDE_PROJECT_DIR" ]; then
+    PROJECT_DIR="$(_remember_normalize_win_path "$CLAUDE_PROJECT_DIR")"
+elif [ -n "${REMEMBER_HOOK_CWD:-}" ] && [ -d "$(_remember_normalize_win_path "${REMEMBER_HOOK_CWD:-}")" ]; then
+    PROJECT_DIR="$(_remember_normalize_win_path "$REMEMBER_HOOK_CWD")"
+elif [[ "$PIPELINE_DIR" == *"/.claude/remember" ]]; then
+    PROJECT_DIR="$(cd "$PIPELINE_DIR/../.." && pwd)"
+else
+    _msg="FATAL: Cannot resolve project root. CLAUDE_PROJECT_DIR is not set, REMEMBER_HOOK_CWD is not set or not a directory, and plugin is not in a local .claude/remember/ layout (PIPELINE_DIR=$PIPELINE_DIR)."
+    _resolve_paths_fail "$_msg" "${PROJECT_DIR:-.}/.remember/logs" || return 1
+fi
+unset -f _remember_normalize_win_path
+
+if [ ! -d "$PROJECT_DIR" ]; then
+    _msg="FATAL: PROJECT_DIR does not exist: $PROJECT_DIR"
+    _resolve_paths_fail "$_msg" || return 1
+fi
+
+if [ ! -d "$PIPELINE_DIR" ]; then
+    _msg="FATAL: PIPELINE_DIR does not exist: $PIPELINE_DIR"
+    _resolve_paths_fail "$_msg" || return 1
+fi
+
+export CLAUDE_PROJECT_DIR="$PROJECT_DIR"
+export CLAUDE_PLUGIN_ROOT="$PIPELINE_DIR"
+export PROJECT_DIR
+export PIPELINE_DIR
+
+}
+__remember_src_detect_tools() {
+:
+_REMEMBER_TOOLS_CACHE="${TMPDIR:-/tmp}/remember-detect-tools-cache"
+
+_jq_fallback() {
+    local _jq_flags=""
+    while [[ "$1" == -* ]]; do _jq_flags="$_jq_flags $1"; shift; done
+    local _jq_query="$1"
+    local _jq_file="$2"
+    if declare -f _remember_python >/dev/null 2>&1; then
+        _remember_python || return 1
+    fi
+    local _jq_fb_dir="${BASH_SOURCE[0]%/*}"
+    [ "$_jq_fb_dir" = "${BASH_SOURCE[0]}" ] && _jq_fb_dir="$(pwd)"
+    _remember_run_python "$_jq_fb_dir/jq_fallback_get.py" "$_jq_file" "$_jq_query" 2>/dev/null
+}
+
+_remember_tools_cache_load() {
+    [ "${REMEMBER_TOOLS_CACHE:-1}" = "1" ] || return 1
+    local _f="$_REMEMBER_TOOLS_CACHE"
+    [ -f "$_f" ] && [ ! -L "$_f" ] && [ -O "$_f" ] && [ -r "$_f" ] || return 1
+    local _line _path="" _py="" _jq=""
+    while IFS= read -r _line || [ -n "$_line" ]; do
+        _line="${_line%$'\r'}"
+        [ -n "$_line" ] || continue
+        if [ "${_line#CACHE_PATH=}" != "$_line" ]; then
+            _path="${_line#*=}"
+        elif [ "${_line#PYTHON=}" != "$_line" ]; then
+            _py="${_line#*=}"
+        elif [ "${_line#JQ=}" != "$_line" ]; then
+            _jq="${_line#*=}"
+        else
+            return 1
+        fi
+    done < "$_f"
+    [ -n "$_py" ] || return 1
+    [ -n "$_jq" ] || return 1
+    [ -n "$_path" ] || return 1
+    [ "$_path" = "$PATH" ] || return 1
+    [ "$_jq" = jq ] || [ "$_jq" = _jq_fallback ] || return 1
+    PYTHON="$_py"
+    JQ="$_jq"
+    export PYTHON JQ
+    return 0
+}
+
+_remember_tools_cache_publish() {
+    [ "${REMEMBER_TOOLS_CACHE:-1}" = "1" ] || return 0
+    local _f="$_REMEMBER_TOOLS_CACHE" _t
+    _t=$(mktemp "${_f}.XXXXXX" 2>/dev/null) || return 0
+    printf '%s=%s\n' CACHE_PATH "$PATH" PYTHON "$PYTHON" JQ "$JQ" \
+        > "$_t" 2>/dev/null || { rm -f "$_t" 2>/dev/null; return 0; }
+    mv -f "$_t" "$_f" 2>/dev/null || rm -f "$_t" 2>/dev/null
+    return 0
+}
+
+if _remember_tools_cache_load; then
+    _remember_python() { [ -n "${PYTHON:-}" ]; }
+else
+
+PYTHON=""
+_remember_python() {
+    [ -n "${PYTHON:-}" ] && return 0
+    local _candidate _first _probe_status _probe_report=""
+    for _candidate in "python3" "python" "py -3" "py"; do
+        _first="${_candidate%% *}"
+        if ! command -v "$_first" >/dev/null 2>&1; then
+            _probe_report="$_probe_report
+  $_candidate: not on PATH"
+            continue
+        fi
+        if $_candidate -V >/dev/null 2>&1; then
+            PYTHON="$_candidate"
+            break
+        else
+            _probe_status=$?
+        fi
+        _probe_report="$_probe_report
+  $_candidate: on PATH ($(command -v "$_first" 2>/dev/null)), '-V' exit $_probe_status"
+    done
+    if [ -z "$PYTHON" ]; then
+        echo "FATAL: No working Python found. Tried: python3, python, py -3, py. Windows users: install the official Python release (not the Microsoft Store one) and ensure 'python' or 'py' works from the shell Claude Code launches hooks in." >&2
+        echo "  PATH searched: $PATH" >&2
+        echo "  per-candidate (exit 49 = Microsoft Store placeholder, not a real interpreter):$_probe_report" >&2
+        return 1
+    fi
+    export PYTHON
+    _remember_tools_cache_publish
+    return 0
+}
+
+if command -v jq >/dev/null 2>&1; then
+    JQ="jq"
+else
+    JQ="_jq_fallback"
+fi
+export JQ
+
+if [ "${_REMEMBER_LAZY_PYTHON:-0}" != "1" ]; then
+    _remember_python || exit 1
+fi
+fi
+
+_remember_run_python() {
+    if [ "$PYTHON" = python3 ]; then
+        python3 "$@"
+    elif [ "$PYTHON" = python ]; then
+        python "$@"
+    elif [ "$PYTHON" = "py -3" ]; then
+        py -3 "$@"
+    elif [ "$PYTHON" = py ]; then
+        py "$@"
+    else
+        echo "FATAL: _remember_run_python: unrecognized PYTHON value '$PYTHON'" >&2
+        return 127
+    fi
+}
+
+
+_REMEMBER_SRC_DIR="${BASH_SOURCE[0]%/*}"
+[ "$_REMEMBER_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_SRC_DIR="$(pwd)"
+__remember_src_lib_slug ${1+"$@"}
+unset _REMEMBER_SRC_DIR
+
+}
+__remember_src_lib_slug() {
+:
+
+[ -n "${_REMEMBER_LIB_SLUG_LOADED:-}" ] && return 0
+_REMEMBER_LIB_SLUG_LOADED=1
+
+_remember_slug_run_python() {
+    if [ "${PYTHON:-python3}" = python3 ]; then
+        python3 "$@"
+    elif [ "${PYTHON:-python3}" = python ]; then
+        python "$@"
+    elif [ "${PYTHON:-python3}" = "py -3" ]; then
+        py -3 "$@"
+    elif [ "${PYTHON:-python3}" = py ]; then
+        py "$@"
+    else
+        return 127
+    fi
+}
+
+_remember_build_slug_sed() {
+    local cont=$'\200-\277'
+    local r220_277=$'\220-\277'
+    local r361_363=$'\361-\363'
+    local r200_217=$'\200-\217'
+    local r240_277=$'\240-\277'
+    local r341_354=$'\341-\354'
+    local r200_237=$'\200-\237'
+    local r356_357=$'\356-\357'
+    local r302_337=$'\302-\337'
+    _REMEMBER_SLUG_SED=(
+        -e "s/"$'\360'"[$r220_277][$cont][$cont]/--/g"
+        -e "s/[$r361_363][$cont][$cont][$cont]/--/g"
+        -e "s/"$'\364'"[$r200_217][$cont][$cont]/--/g"
+        -e "s/"$'\340'"[$r240_277][$cont]/-/g"
+        -e "s/[$r341_354][$cont][$cont]/-/g"
+        -e "s/"$'\355'"[$r200_237][$cont]/-/g"
+        -e "s/[$r356_357][$cont][$cont]/-/g"
+        -e "s/[$r302_337][$cont]/-/g"
+        -e 's/[^a-zA-Z0-9]/-/g'
+    )
+}
+_remember_build_slug_sed
+
+
+_remember_should_check_utf8() {
+    local _os="${OSTYPE:-}"
+    [ "${REMEMBER_UTF8_STRICT:-0}" = "1" ] || [ "${_os#linux}" != "$_os" ]
+}
+
+_REMEMBER_DRIVE_UPPER="ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+_REMEMBER_DRIVE_LOWER="abcdefghijklmnopqrstuvwxyz"
+
+session_dir_slug() {
+    local path="$1"
+    local _drive_at
+    if command -v cygpath >/dev/null 2>&1; then
+        local winpath
+        winpath=$(cygpath -w "$path" 2>/dev/null) || winpath="$path"
+        [ -n "$winpath" ] || winpath="$path"
+        local _unc_pfx='\\?\UNC\' _long_pfx='\\?\'
+        if [ "${winpath#"$_unc_pfx"}" != "$winpath" ]; then
+            winpath='\\'"${winpath#"$_unc_pfx"}"
+        elif [ "${winpath#"$_long_pfx"}" != "$winpath" ]; then
+            winpath="${winpath#"$_long_pfx"}"
+        fi
+        path="$winpath"
+    fi
+    if [ "${path#?:}" != "$path" ]; then
+        _drive_at="${_REMEMBER_DRIVE_UPPER%%"${path:0:1}"*}"
+        if [ "$_drive_at" != "$_REMEMBER_DRIVE_UPPER" ]; then
+            path="${_REMEMBER_DRIVE_LOWER:${#_drive_at}:1}${path:1}"
+        fi
+    fi
+    local _orig="$path"
+
+    if _remember_should_check_utf8; then
+    local _high_byte=0 _lc_was_set="${LC_ALL+set}" _lc_prev="${LC_ALL:-}"
+    LC_ALL=C
+    local _hb_glob="[!"$'\001'"-"$'\177'"]"
+    if [[ "$path" == *$_hb_glob* ]]; then
+        _high_byte=1
+    fi
+    if [ -n "$_lc_was_set" ]; then LC_ALL="$_lc_prev"; else unset LC_ALL; fi
+
+    if [ "$_high_byte" = 1 ]; then
+        if command -v iconv >/dev/null 2>&1 \
+            && ! printf '%s' "$path" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1; then
+            local _py_slug="${PIPELINE_DIR:-}/pipeline/slug.py"
+            if [ -f "$_py_slug" ]; then
+                local _decoded
+                declare -f _remember_python >/dev/null 2>&1 && _remember_python
+                _decoded=$(_remember_slug_run_python "$_py_slug" "$path" 2>/dev/null) \
+                    && [ -n "$_decoded" ] && { printf '%s\n' "$_decoded"; return 0; }
+            fi
+        fi
+    fi
+    fi
+
+    path=${path//$'\n'/-}
+    local _slug
+    _slug=$(printf '%s\n' "$path" | LC_ALL=C sed "${_REMEMBER_SLUG_SED[@]}")
+
+    if [ ${#_slug} -le 200 ]; then
+        printf '%s\n' "$_slug"
+        return 0
+    fi
+
+    local _hash _slug_py="${PIPELINE_DIR:-}/pipeline/slug.py"
+    if [ -f "$_slug_py" ]; then
+        declare -f _remember_python >/dev/null 2>&1 && _remember_python
+        _hash=$(_remember_slug_run_python "$_slug_py" --hash "$_orig" 2>/dev/null) || _hash=""
+    else
+        _hash=""
+    fi
+
+    if [[ "$_hash" == *[!0-9a-z]* ]]; then
+        _hash=""
+    fi
+
+    if [ -z "$_hash" ]; then
+        printf '%s\n' "$_slug"
+        return 0
+    fi
+    printf '%s-%s\n' "${_slug:0:200}" "$_hash"
+}
+
+}
+__remember_src_bootstrap_dirs() {
+:
+
+_REMEMBER_SRC_DIR="${BASH_SOURCE[0]%/*}"
+[ "$_REMEMBER_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_SRC_DIR="$(pwd)"
+__remember_src_lib_memory_dir ${1+"$@"}
+unset _REMEMBER_SRC_DIR
+
+SYS_TMPDIR="${TMPDIR:-/tmp}"
+
+_mem_proj="${MEMORY_PROJECT_DIR:-}"
+[ -n "$_mem_proj" ] || _mem_proj="$PROJECT_DIR"
+_legacy_dir="${_mem_proj}/.remember"
+if [ "$REMEMBER_DIR" != "$_legacy_dir" ] && [ "${REMEMBER_DIR#"$_legacy_dir"/}" = "$REMEMBER_DIR" ] \
+    && [ ! -e "$REMEMBER_DIR" ] && [ -d "$_legacy_dir" ]; then
+    for _legacy_f in now.md recent.md archive.md core-memories.md remember.md; do
+        if [ -f "$_legacy_dir/$_legacy_f" ]; then
+            printf 'remember: %s holds memory data but data_dir points to %s -- move it by hand (see /remember:doctor)\n' \
+                "$_legacy_dir" "$REMEMBER_DIR" >&2
+            break
+        fi
+    done
+    unset _legacy_f
+fi
+unset _legacy_dir
+
+if [ ! -d "$REMEMBER_DIR/logs/autonomous" ] || [ ! -d "$REMEMBER_DIR/tmp" ]; then
+    mkdir -p \
+        "$REMEMBER_DIR/tmp" \
+        "$REMEMBER_DIR/logs" \
+        "$REMEMBER_DIR/logs/autonomous" \
+        2>/dev/null
+fi
+
+if [ -d "$REMEMBER_DIR/tmp" ]; then
+    for _remember_stale_cfg in "$REMEMBER_DIR/tmp"/remember-config-*.json; do
+        [ -e "$_remember_stale_cfg" ] || [ -L "$_remember_stale_cfg" ] || continue
+        find "$REMEMBER_DIR/tmp" -maxdepth 1 -name 'remember-config-*.json' \
+            -mmin +30 -exec rm -f {} + 2>/dev/null || true
+        break
+    done
+    unset _remember_stale_cfg
+
+    _remember_relocated_cfg="$REMEMBER_DIR/tmp/remember-config-$$.json"
+    if [ -n "${REMEMBER_CONFIG:-}" ] && [ -f "$REMEMBER_CONFIG" ] \
+        && mv -f "$REMEMBER_CONFIG" "$_remember_relocated_cfg" 2>/dev/null; then
+        REMEMBER_CONFIG="$_remember_relocated_cfg"
+        export REMEMBER_CONFIG
+        _remember_relocated_cfg_q=$(printf %q "$_remember_relocated_cfg")
+        _remember_trap_raw=$(trap -p EXIT 2>/dev/null)
+        _remember_existing_trap="${_remember_trap_raw#trap -- \'}"
+        _remember_existing_trap="${_remember_existing_trap%\' EXIT}"
+        _remember_existing_trap="${_remember_existing_trap//\'\\\'\'/\'}"
+        unset _remember_trap_raw
+        if [ -n "$_remember_existing_trap" ]; then
+            trap "${_remember_existing_trap}; rm -f ${_remember_relocated_cfg_q}" EXIT
+        else
+            trap "rm -f ${_remember_relocated_cfg_q}" EXIT
+        fi
+        unset _remember_existing_trap
+        unset _remember_relocated_cfg_q
+    fi
+    unset _remember_relocated_cfg
+fi
+
+if [ -d "$REMEMBER_DIR" ]; then
+    [ -f "$REMEMBER_DIR/.install-marker" ] \
+        || { echo 'This file marks when remember was first bootstrapped here. Read only by /remember:doctor (#401); do not delete it.' \
+            > "$REMEMBER_DIR/.install-marker"; } 2>/dev/null
+fi
+
+if [ -d "$REMEMBER_DIR" ]; then
+    _mem_bd_glob_dir="$REMEMBER_DIR"
+    _mem_bd_glob_proj="$_mem_proj"
+    if [ "$OSTYPE" = msys ] || [ "$OSTYPE" = cygwin ]; then
+        _mem_bd_glob_dir="${_mem_bd_glob_dir//\\//}"
+        _mem_bd_glob_proj="${_mem_bd_glob_proj//\\//}"
+    fi
+    if [ "${_mem_bd_glob_dir#"$_mem_bd_glob_proj"/}" != "$_mem_bd_glob_dir" ]; then
+        [ -f "$REMEMBER_DIR/.gitignore" ] || { echo '*' > "$REMEMBER_DIR/.gitignore"; } 2>/dev/null
+    fi
+fi
+unset _mem_proj _mem_bd_glob_dir _mem_bd_glob_proj
+
+if [ -d "$REMEMBER_DIR/logs" ]; then
+    _remember_bd_keep_fd2=""
+    if [[ "$-" == *x* ]]; then
+        if ! { [ "${BASH_VERSINFO[0]:-0}" -gt 4 ] || { [ "${BASH_VERSINFO[0]:-0}" -eq 4 ] && [ "${BASH_VERSINFO[1]:-0}" -ge 1 ]; }; } 2>/dev/null; then
+            _remember_bd_keep_fd2="an xtrace is running and this bash (< 4.1) has no BASH_XTRACEFD, so it stays on fd 2"
+        elif [ "${BASH_XTRACEFD:-2}" = "2" ]; then
+            _remember_bd_keep_fd2="an xtrace is running on fd 2"
+        fi
+    fi
+    [ "${REMEMBER_TRACE:-}" = "1" ] && _remember_bd_keep_fd2="REMEMBER_TRACE=1"
+    if [ -n "$_remember_bd_keep_fd2" ]; then
+        printf 'remember: %s, so stderr is NOT being redirected to %s -- point BASH_XTRACEFD at its own fd to get both (#690)\n' \
+            "$_remember_bd_keep_fd2" "$REMEMBER_DIR/logs/hook-errors.log" >&2
+    else
+        exec 2>> "$REMEMBER_DIR/logs/hook-errors.log"
+    fi
+    unset _remember_bd_keep_fd2
+fi
+
+}
+__remember_src_lib_memory_dir() {
+:
+
+[ -n "${_LIB_MEMORY_DIR_LOADED:-}" ] && return 0
+_LIB_MEMORY_DIR_LOADED=1
+
+_REMEMBER_SRC_DIR="${BASH_SOURCE[0]%/*}"
+[ "$_REMEMBER_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_SRC_DIR="$(pwd)"
+__remember_src_lib_slug ${1+"$@"}
+unset _REMEMBER_SRC_DIR
+
+
+_lmd_warn() {
+    if declare -F report_error >/dev/null 2>&1; then
+        report_error "lib-memory-dir" "$1"
+    else
+        printf '%s\n' "[lib-memory-dir] WARNING: $1" >&2
+    fi
+}
+
+_read_data_dir() {
+    local cfg="$1"
+    [ -f "$cfg" ] || return 0
+    if command -v jq >/dev/null 2>&1; then
+        jq -r '.data_dir // empty' "$cfg" 2>/dev/null || true
+    else
+        grep -o '"data_dir"[[:space:]]*:[[:space:]]*"[^"]*"' "$cfg" 2>/dev/null \
+            | sed 's/.*"data_dir"[[:space:]]*:[[:space:]]*"\([^"]*\)"/\1/'
+    fi
+}
+
+_resolve_memory_project_dir() {
+    local proj="$1"
+
+    if [ -d "$proj/.git" ]; then
+        echo "$proj"
+        return 0
+    fi
+
+    command -v git >/dev/null 2>&1 || { echo "$proj"; return 0; }
+
+    local _out _gcd _gd
+    _out=$(git -C "$proj" rev-parse --path-format=absolute \
+                --git-common-dir --git-dir 2>/dev/null) || _out=""
+    { IFS= read -r _gcd; IFS= read -r _gd; } <<< "$_out"
+
+    if [ -z "$_gcd" ] || [ -z "$_gd" ] || [ "$_gcd" = "$_gd" ]; then
+        echo "$proj"
+        return 0
+    fi
+
+    local _main
+    _main=$(dirname "$_gcd")
+    if [ -d "$_main" ] && \
+       git -C "$_main" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        echo "$_main"
+    else
+        echo "$proj"
+    fi
+}
+
+_resolve_remember_dir() {
+    local LC_ALL=C
+    local data_dir="$1"
+    local proj="$2"
+
+    if [ "${data_dir#/}" != "$data_dir" ] || [ "${data_dir#[~]}" != "$data_dir" ] \
+        || [ "${data_dir#[A-Za-z]:[/\\]}" != "$data_dir" ]; then
+        local slug
+        slug=$(session_dir_slug "$proj")
+        local expanded="${data_dir/#\~/$HOME}"
+        echo "${expanded//\{slug\}/$slug}"
+    else
+        echo "${proj}/${data_dir}"
+    fi
+}
+
+_set_store_root() {
+    local LC_ALL=C
+    local data_dir="$1" prefix
+    REMEMBER_STORE_ROOT=""
+
+    if [ "${data_dir#/}" = "$data_dir" ] && [ "${data_dir#[~]}" = "$data_dir" ] \
+        && [ "${data_dir#[A-Za-z]:[/\\]}" = "$data_dir" ]; then
+        return 0
+    fi
+    [ "${data_dir#*\{slug\}}" != "$data_dir" ] || return 0
+
+    prefix="${data_dir%%\{slug\}*}"
+    prefix="${prefix/#\~/$HOME}"
+
+    while :; do
+        if [ "${#prefix}" -gt 1 ] && { [ "${prefix%/}" != "$prefix" ] || [ "${prefix%\\}" != "$prefix" ]; }; then
+            prefix="${prefix%?}"
+        else
+            break
+        fi
+    done
+
+    if [ -z "$prefix" ] || [ "$prefix" = / ] || [ -z "${prefix#[A-Za-z]:}" ] \
+        || [ -z "${prefix#[A-Za-z]:[/\\]}" ]; then
+        return 0
+    fi
+
+    REMEMBER_STORE_ROOT="$prefix"
+}
+
+
+_bundled_cfg="${PIPELINE_DIR}/config.json"
+_user_cfg="${HOME}/.remember/config.json"
+
+_data_dir_raw=""
+for _cfg_candidate in "$_user_cfg" "$_bundled_cfg"; do
+    _val=$(_read_data_dir "$_cfg_candidate")
+    if [ -n "$_val" ]; then
+        _data_dir_raw="$_val"
+        break
+    fi
+done
+
+_data_dir_raw="${_data_dir_raw:-.remember}"
+
+MEMORY_PROJECT_DIR=$(_resolve_memory_project_dir "$PROJECT_DIR")
+export MEMORY_PROJECT_DIR
+
+REMEMBER_DIR=$(_resolve_remember_dir "$_data_dir_raw" "$MEMORY_PROJECT_DIR")
+export REMEMBER_DIR
+
+_set_store_root "$_data_dir_raw"
+export REMEMBER_STORE_ROOT
+
+
+_project_cfg="${REMEMBER_DIR}/config.json"
+
+_classify_project_cfg_haiku_trust() {
+    local LC_ALL=C
+    if [ "${_data_dir_raw#/}" != "$_data_dir_raw" ] || [ "${_data_dir_raw#[~]}" != "$_data_dir_raw" ] \
+        || [ "${_data_dir_raw#[A-Za-z]:[/\\]}" != "$_data_dir_raw" ]; then
+        _project_cfg_haiku_untrusted=0
+    else
+        _project_cfg_haiku_untrusted=1
+    fi
+}
+_classify_project_cfg_haiku_trust
+
+_remember_config_tracked_status() {
+    local _dir="$1" _name="$2" _out _rc _toplevel
+
+    if ! command -v git >/dev/null 2>&1; then
+        local _walk
+        _walk=$(cd "$_dir" 2>/dev/null && pwd -P) || _walk="$_dir"
+        while [ -n "$_walk" ]; do
+            if [ -e "$_walk/.git" ]; then
+                echo "could-not-tell"
+                return 0
+            fi
+            [ "$_walk" = "/" ] && break
+            _walk="${_walk%/*}"
+            [ -z "$_walk" ] && _walk="/"
+        done
+        echo "untracked"
+        return 0
+    fi
+
+    _out=$( (unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+             LC_ALL=C LANGUAGE=C git -C "$_dir" rev-parse --is-inside-work-tree) 2>&1 )
+    _rc=$?
+    if [ "$_rc" -ne 0 ]; then
+        if [ "${_out#*not a git repository}" != "$_out" ]; then
+            echo "untracked"
+        else
+            echo "could-not-tell"
+        fi
+        return 0
+    fi
+    if [ "$_out" != "true" ]; then
+        echo "untracked"
+        return 0
+    fi
+
+    _toplevel=$( (unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+                  git -C "$_dir" rev-parse --show-toplevel) 2>/dev/null )
+    if [ -n "$_toplevel" ] && [ -L "${_toplevel}/.git" ]; then
+        echo "could-not-tell"
+        return 0
+    fi
+
+    _out=$( (unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+             git -C "$_dir" ls-files -- ":(icase)$_name") 2>/dev/null )
+    _rc=$?
+    if [ "$_rc" -ne 0 ]; then
+        echo "could-not-tell"
+        return 0
+    fi
+    if [ -n "$_out" ]; then
+        echo "tracked"
+    else
+        echo "untracked"
+    fi
+}
+
+_project_cfg_model_reject_untrusted=0
+if [ "$_project_cfg_haiku_untrusted" = "1" ] && [ -f "$_project_cfg" ]; then
+    _project_cfg_tracked_answer=$(_remember_config_tracked_status "${_project_cfg%/*}" "${_project_cfg##*/}") || true
+    if [ "$_project_cfg_tracked_answer" = untracked ]; then
+        _project_cfg_model_reject_untrusted=0
+    else
+        _project_cfg_model_reject_untrusted=1
+    fi
+    unset _project_cfg_tracked_answer
+fi
+
+if [ -L "$_project_cfg" ]; then
+    printf 'remember: %s is a symlink -- refusing to read it through the link; this project config layer is skipped entirely for this session (#757)\n' \
+        "$_project_cfg" >&2
+    _project_cfg="${REMEMBER_DIR}/.remember-symlinked-config-refused"
+fi
+
+SYS_TMPDIR="${TMPDIR:-/tmp}"
+_merged_cfg=$(mktemp "${SYS_TMPDIR}/remember-config-XXXXXX" 2>/dev/null) || _merged_cfg=""
+
+_cfg_sources=()
+[ -f "$_bundled_cfg"  ] && _cfg_sources+=("$_bundled_cfg")
+[ -f "$_user_cfg"     ] && _cfg_sources+=("$_user_cfg")
+[ -f "$_project_cfg"  ] && _cfg_sources+=("$_project_cfg")
+
+if [ -z "$_merged_cfg" ]; then
+    :
+elif [ "${#_cfg_sources[@]}" -gt 0 ] && command -v jq >/dev/null 2>&1; then
+    _strip_project_haiku="false"
+    [ "$_project_cfg_haiku_untrusted" = "1" ] && [ -f "$_project_cfg" ] && _strip_project_haiku="true"
+    _project_del_filter=".haiku"
+    [ "$_project_cfg_model_reject_untrusted" = "1" ] && _project_del_filter="${_project_del_filter}, .model, .reject_pattern"
+    _jq_merge_sources=()
+    [ -f "$_bundled_cfg" ] && _jq_merge_sources+=("$_bundled_cfg")
+    [ -f "$_user_cfg"    ] && _jq_merge_sources+=("$_user_cfg")
+    _project_sanitized_tmp=""
+    if [ -f "$_project_cfg" ]; then
+        if [ "$_strip_project_haiku" = "true" ]; then
+            _project_sanitized_tmp=$(mktemp "${SYS_TMPDIR}/remember-config-sanitized-XXXXXX" 2>/dev/null) || _project_sanitized_tmp=""
+            if [ -n "$_project_sanitized_tmp" ] && jq -c "del($_project_del_filter)" "$_project_cfg" > "$_project_sanitized_tmp" 2>/dev/null; then
+                _jq_merge_sources+=("$_project_sanitized_tmp")
+            else
+                _lmd_warn "sanitizing the project config layer failed (mktemp, an unreadable project file, or jq itself) -- that layer was dropped; bundled/user-global config still applies"
+                [ -n "$_project_sanitized_tmp" ] && rm -f "$_project_sanitized_tmp"
+                _project_sanitized_tmp=""
+            fi
+        else
+            _jq_merge_sources+=("$_project_cfg")
+        fi
+    fi
+    if [ "${#_jq_merge_sources[@]}" -eq 0 ]; then
+        echo '{}' > "$_merged_cfg"
+    else
+        jq -s 'reduce .[] as $x ({}; getpath([]) * $x) | with_entries(select(.key | startswith("_") | not))' "${_jq_merge_sources[@]}" > "$_merged_cfg" 2>/dev/null \
+            || cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null
+    fi
+    [ -n "$_project_sanitized_tmp" ] && rm -f "$_project_sanitized_tmp"
+elif [ "${#_cfg_sources[@]}" -gt 0 ]; then
+    declare -f _remember_python >/dev/null 2>&1 && _remember_python
+    _untrusted_haiku_source=""
+    [ "$_project_cfg_haiku_untrusted" = "1" ] && _untrusted_haiku_source="$_project_cfg"
+    _strip_model_reject="0"
+    [ "$_project_cfg_model_reject_untrusted" = "1" ] && _strip_model_reject="1"
+    _project_drop_marker=$(mktemp "${SYS_TMPDIR}/remember-config-drop-marker-XXXXXX" 2>/dev/null) || _project_drop_marker=""
+    rm -f "$_project_drop_marker" 2>/dev/null
+    _py_merge_rc=0
+    _lmd_py_dir="${BASH_SOURCE[0]%/*}"
+    [ "$_lmd_py_dir" = "${BASH_SOURCE[0]}" ] && _lmd_py_dir="$(pwd)"
+    _remember_slug_run_python "$_lmd_py_dir/cfg_merge.py" "$_merged_cfg" "$_untrusted_haiku_source" "$_strip_model_reject" "$_project_drop_marker" "${_cfg_sources[@]}" > /dev/null 2>&1 || _py_merge_rc=$?
+    unset _lmd_py_dir
+    if [ "$_py_merge_rc" != "0" ] && [ "$_py_merge_rc" != "3" ] && [ "$_py_merge_rc" != "4" ] && [ "$_py_merge_rc" != "5" ]; then
+        cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null
+    fi
+    if { [ -n "$_project_drop_marker" ] && [ -f "$_project_drop_marker" ]; } || [ "$_py_merge_rc" = "3" ] || [ "$_py_merge_rc" = "5" ]; then
+        rm -f "$_project_drop_marker" 2>/dev/null
+        _lmd_warn "sanitizing the project config layer failed (unreadable project file or malformed JSON) -- that layer was dropped; bundled/user-global config still applies"
+    fi
+    if [ "$_py_merge_rc" = "4" ] || [ "$_py_merge_rc" = "5" ]; then
+        _lmd_warn "sanitizing a trusted config layer failed (unreadable file or malformed JSON) -- bundled config, user-global config, and project config (when it is not the untrusted-haiku source) are all reached here, and one of them was dropped; the remaining layers still applied"
+    fi
+    [ -n "$_project_drop_marker" ] && rm -f "$_project_drop_marker" 2>/dev/null
+else
+    cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null || echo '{}' > "$_merged_cfg"
+fi
+
+REMEMBER_CONFIG="$_merged_cfg"
+export REMEMBER_CONFIG
+
+_t=$(trap -p EXIT 2>/dev/null)
+_existing_trap="${_t#trap -- \'}"
+_existing_trap="${_existing_trap%\' EXIT}"
+if [ -n "$_existing_trap" ]; then
+    trap "${_existing_trap}; rm -f '${_merged_cfg}'" EXIT
+else
+    trap "rm -f '${_merged_cfg}'" EXIT
+fi
+unset _existing_trap _t
+
+unset _bundled_cfg _user_cfg _project_cfg _cfg_sources _data_dir_raw _val _merged_cfg _cfg_candidate
+
+}
+__remember_src_log() {
+:
+
+if [ -z "${PIPELINE_DIR:-}" ]; then
+    if [ -n "${PROJECT_DIR:-}" ]; then
+        PIPELINE_DIR="${PROJECT_DIR}/.claude/remember"
+    else
+        PIPELINE_DIR="./.claude/remember"
+    fi
+fi
+
+_remember_log_src_dir="${BASH_SOURCE[0]%/*}"
+[ "$_remember_log_src_dir" = "${BASH_SOURCE[0]}" ] && _remember_log_src_dir="$(pwd)"
+__remember_src_lib_memory_dir ${1+"$@"}
+
+
+REMEMBER_LOG_DIR="${REMEMBER_DIR}/logs"
+if [ ! -d "$REMEMBER_LOG_DIR" ] && ! mkdir -p "$REMEMBER_LOG_DIR" 2>/dev/null; then
+    echo "FATAL: cannot create $REMEMBER_LOG_DIR" >&2
+    return 1 2>/dev/null || true
+fi
+
+_REMEMBER_CFG_STATE=""
+_REMEMBER_CFG_LOADED_FROM=""
+
+_REMEMBER_CFG_NAMES=()
+_REMEMBER_CFG_VALUES=()
+
+_remember_cfg_table_set() {
+    _REMEMBER_CFG_NAMES+=("$1")
+    _REMEMBER_CFG_VALUES+=("$2")
+}
+
+_remember_cfg_table_get_into() {
+    local _rcfgtg_i="${#_REMEMBER_CFG_NAMES[@]}"
+    while [ "$_rcfgtg_i" -gt 0 ]; do
+        _rcfgtg_i=$((_rcfgtg_i - 1))
+        if [ "${_REMEMBER_CFG_NAMES[$_rcfgtg_i]}" = "$2" ]; then
+            printf -v "$1" '%s' "${_REMEMBER_CFG_VALUES[$_rcfgtg_i]}"
+            return 0
+        fi
+    done
+    printf -v "$1" '%s' ""
+    return 1
+}
+
+_config_is_private_path() {
+    [ "$1" = .haiku ] || [ "${1#.haiku.}" != "$1" ]
+}
+
+
+
+_remember_cfg_flatten_cache_path() {
+    local LC_ALL=C
+    [ -n "${REMEMBER_DIR:-}" ] || return 1
+    local _slug="${REMEMBER_DIR//[!a-zA-Z0-9]/-}"
+    [ "${#_slug}" -gt 120 ] && _slug="${_slug: -120}"
+    printf '%s' "${TMPDIR:-/tmp}/remember-config-cache-v2-${_slug}"
+}
+
+_remember_cfg_flatten_cache_sources() {
+    printf '%s\n' "${PIPELINE_DIR:-}/config.json"
+    printf '%s\n' "${HOME:-}/.remember/config.json"
+    printf '%s\n' "${REMEMBER_DIR:-}/config.json"
+}
+
+_remember_cfg_flatten_cache_is_standard_merge() {
+    [[ "${REMEMBER_CONFIG:-}" == */remember-config-* ]]
+}
+
+_remember_cfg_flatten_cache_valid_value() {
+    local _value="$1"
+    local LC_ALL=C
+    [[ "$_value" =~ ^([^\\]|\\[\\nrt])*$ ]]
+}
+
+_remember_cfg_flatten_cache_valid_line() {
+    local LC_ALL=C
+    local _line="$1"
+    [[ "$_line" =~ ^_RCFG_[A-Za-z0-9_]+$'\t' ]] || return 1
+    _remember_cfg_flatten_cache_valid_value "${_line#*$'\t'}"
+}
+
+_remember_cfg_flatten_q_encode() {
+    local _rcfgqe_v="$2" _rcfgqe_b _rcfgqe_bb _rcfgqe_n _rcfgqe_r _rcfgqe_t
+    printf -v _rcfgqe_b '\134'
+    _rcfgqe_bb="$_rcfgqe_b$_rcfgqe_b"
+    printf -v _rcfgqe_n '%sn' "$_rcfgqe_b"
+    printf -v _rcfgqe_r '%sr' "$_rcfgqe_b"
+    printf -v _rcfgqe_t '%st' "$_rcfgqe_b"
+    _rcfgqe_v=${_rcfgqe_v//"$_rcfgqe_b"/"$_rcfgqe_bb"}
+    _rcfgqe_v=${_rcfgqe_v//$'\n'/"$_rcfgqe_n"}
+    _rcfgqe_v=${_rcfgqe_v//$'\r'/"$_rcfgqe_r"}
+    _rcfgqe_v=${_rcfgqe_v//$'\t'/"$_rcfgqe_t"}
+    printf -v "$1" '%s' "$_rcfgqe_v"
+}
+
+_remember_cfg_flatten_q_decode() {
+    printf -v "$1" '%b' "$2"
+}
+
+_remember_cfg_flatten_cache_exists_into() {
+    local _src _sources _m=""
+    _sources=$(_remember_cfg_flatten_cache_sources)
+    while IFS= read -r _src; do
+        [ -n "$_src" ] || continue
+        if [ -e "$_src" ]; then
+            _m="${_m}1"
+            [ -z "${2:-}" ] || [ "$2" -nt "$_src" ] || return 1
+        else
+            _m="${_m}0"
+        fi
+    done <<< "$_sources"
+    printf -v "$1" '%s' "$_m"
+}
+
+_remember_cfg_flatten_cache_load() {
+    [ "${REMEMBER_CONFIG_CACHE:-1}" = "1" ] || return 1
+    _remember_cfg_flatten_cache_is_standard_merge || return 1
+    local _f
+    _f=$(_remember_cfg_flatten_cache_path) || return 1
+    [ -f "$_f" ] && [ ! -L "$_f" ] && [ -O "$_f" ] && [ -r "$_f" ] || return 1
+    local _exists_now=""
+    _remember_cfg_flatten_cache_exists_into _exists_now "$_f" || return 1
+
+    local _line _lines=() _stage=0 _identity_raw="" _exists_raw="" _bad=""
+    while IFS= read -r _line || [ -n "$_line" ]; do
+        _line="${_line%$'\r'}"
+        [ -n "$_line" ] || continue
+        if [ "$_stage" = "0" ]; then
+            _stage=1
+            _identity_raw="${_line#'#REMEMBER_DIR='}"
+            [ "$_identity_raw" != "$_line" ] \
+                && _remember_cfg_flatten_cache_valid_value "$_identity_raw" || { _bad=1; break; }
+        elif [ "$_stage" = "1" ]; then
+            _stage=2
+            _exists_raw="${_line#'#RCFG_EXISTS='}"
+            [ "$_exists_raw" != "$_line" ] || { _bad=1; break; }
+            if [[ "$_exists_raw" == *[!01]* ]] || [ -z "$_exists_raw" ]; then
+                _bad=1
+                break
+            fi
+        elif _remember_cfg_flatten_cache_valid_line "$_line"; then
+            _lines[${#_lines[@]}]="$_line"
+        else
+            _bad=1
+            break
+        fi
+    done < "$_f"
+    if [ -n "$_bad" ] || [ "$_stage" != "2" ]; then
+        rm -f "$_f" 2>/dev/null
+        return 1
+    fi
+
+    [ "$_exists_raw" = "$_exists_now" ] || return 1
+
+    local _identity
+    if ! _remember_cfg_flatten_q_decode _identity "$_identity_raw" \
+        || [ "$_identity" != "${REMEMBER_DIR:-}" ]; then
+        rm -f "$_f" 2>/dev/null
+        return 1
+    fi
+
+    local _assign _assign_name _assign_value _assign_decoded
+    for _assign in ${_lines[@]+"${_lines[@]}"}; do
+        _assign_name="${_assign%%$'\t'*}"
+        _assign_value="${_assign#*$'\t'}"
+        _remember_cfg_flatten_q_decode _assign_decoded "$_assign_value" || {
+            rm -f "$_f" 2>/dev/null
+            return 1
+        }
+        _remember_cfg_table_set "$_assign_name" "$_assign_decoded"
+    done
+    return 0
+}
+
+_remember_cfg_flatten_cache_publish() {
+    [ "${REMEMBER_CONFIG_CACHE:-1}" = "1" ] || return 0
+    _remember_cfg_flatten_cache_is_standard_merge || return 0
+    local _dump="$1"
+    local _f
+    _f=$(_remember_cfg_flatten_cache_path) || return 0
+    local _dir
+    _dir="${_f%/*}"
+    [ -d "$_dir" ] || mkdir -p "$_dir" 2>/dev/null || return 0
+    local _t
+    _t=$(mktemp "${_f}.XXXXXX" 2>/dev/null) || return 0
+    local _k _v _exists_now=""
+    _remember_cfg_flatten_cache_exists_into _exists_now
+    {
+        local _encoded_dir
+        _remember_cfg_flatten_q_encode _encoded_dir "${REMEMBER_DIR:-}"
+        printf '#REMEMBER_DIR=%s\n' "$_encoded_dir"
+        printf '#RCFG_EXISTS=%s\n' "$_exists_now"
+        local _encoded_v
+        while IFS=$'\t' read -r _k _v; do
+            [ -n "$_k" ] || continue
+            _remember_cfg_flatten_q_encode _encoded_v "$_v"
+            printf '_RCFG_%s\t%s\n' "${_k//./_}" "$_encoded_v"
+        done <<< "$_dump"
+    } > "$_t" 2>/dev/null || { rm -f "$_t" 2>/dev/null; return 0; }
+    mv -f "$_t" "$_f" 2>/dev/null || rm -f "$_t" 2>/dev/null
+    return 0
+}
+
+_config_load() {
+    _REMEMBER_CFG_LOADED_FROM="${REMEMBER_CONFIG:-}"
+    if [ ! -f "${REMEMBER_CONFIG:-}" ]; then
+        _REMEMBER_CFG_STATE="ok"
+        return 0
+    fi
+
+    if _remember_cfg_flatten_cache_load; then
+        _REMEMBER_CFG_STATE="ok"
+        return 0
+    fi
+
+    local _dump="" _rc=0 _cfg_flatten_dir="${BASH_SOURCE[0]%/*}"
+    [ "$_cfg_flatten_dir" = "${BASH_SOURCE[0]}" ] && _cfg_flatten_dir="$(pwd)"
+    if command -v jq >/dev/null 2>&1; then
+        _dump=$(jq -r -f "$_cfg_flatten_dir/cfg_flatten.jq" "$REMEMBER_CONFIG" 2>/dev/null) || _rc=1
+    else
+        declare -f _remember_python >/dev/null 2>&1 && _remember_python
+        _dump=$(_remember_slug_run_python "$_cfg_flatten_dir/cfg_flatten.py" "$REMEMBER_CONFIG" 2>/dev/null) || _rc=1
+    fi
+
+    if [ "$_rc" -ne 0 ]; then
+        echo "remember: could not read ${REMEMBER_CONFIG} -- is it valid JSON? falling back to per-key reads" >&2
+        _REMEMBER_CFG_STATE="fallback"
+        return 0
+    fi
+
+    if [ "${_dump#\#refuse}" != "$_dump" ]; then
+        [ "${REMEMBER_DEBUG:-}" = "1" ] && \
+            echo "remember: ${_dump#'#refuse' } -- reading config one key at a time" >&2
+        _REMEMBER_CFG_STATE="fallback"
+        return 0
+    fi
+
+    local _k _v
+    while IFS=$'\t' read -r _k _v; do
+        [ -n "$_k" ] || continue
+        _remember_cfg_table_set "_RCFG_${_k//./_}" "$_v"
+    done <<< "$_dump"
+    _remember_cfg_flatten_cache_publish "$_dump"
+    _REMEMBER_CFG_STATE="ok"
+}
+
+config() {
+    local _cfg_result
+    config_into _cfg_result "$1" "$2"
+    printf '%s\n' "$_cfg_result"
+}
+
+
+config_into() {
+    local _cfg_into_var="$1"
+    local _cfg_into_name="$2"
+    local _cfg_into_default="$3"
+
+    if ! ( LC_ALL=C; [[ "$_cfg_into_name" =~ ^\.[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$ ]] ); then
+        [ "${REMEMBER_DEBUG:-}" = "1" ] && \
+            echo "remember: config() key '$_cfg_into_name' is not a plain dotted path -- returning the default" >&2
+        printf -v "$_cfg_into_var" '%s' "$_cfg_into_default"
+        return
+    fi
+
+    if [ -z "$_REMEMBER_CFG_STATE" ] || \
+       [ "$_REMEMBER_CFG_LOADED_FROM" != "${REMEMBER_CONFIG:-}" ]; then
+        _config_load
+    fi
+
+    if [ "$_REMEMBER_CFG_STATE" = "ok" ] && ! _config_is_private_path "$_cfg_into_name"; then
+        local _cfg_into_slot="_RCFG_${_cfg_into_name#.}"
+        _cfg_into_slot="${_cfg_into_slot//./_}"
+        local _cfg_into_hit
+        _remember_cfg_table_get_into _cfg_into_hit "$_cfg_into_slot" || _cfg_into_hit=""
+        [ -n "$_cfg_into_hit" ] || _cfg_into_hit="$_cfg_into_default"
+        printf -v "$_cfg_into_var" '%s' "$_cfg_into_hit"
+        return
+    fi
+
+    if [ ! -f "${REMEMBER_CONFIG:-}" ]; then
+        printf -v "$_cfg_into_var" '%s' "$_cfg_into_default"
+        return
+    fi
+    local _cfg_into_val=""
+    if command -v jq >/dev/null 2>&1; then
+        local _cfg_into_prog
+        printf -v _cfg_into_prog 'if %s == null then "" else (%s | tostring) end' \
+            "$_cfg_into_name" "$_cfg_into_name"
+        _cfg_into_val=$(jq -r "$_cfg_into_prog" "$REMEMBER_CONFIG" 2>/dev/null)
+    elif type _jq_fallback >/dev/null 2>&1; then
+        _cfg_into_val=$(_jq_fallback -r "$_cfg_into_name" "$REMEMBER_CONFIG" 2>/dev/null)
+    else
+        local _cfg_py_dir="${BASH_SOURCE[0]%/*}"
+        [ "$_cfg_py_dir" = "${BASH_SOURCE[0]}" ] && _cfg_py_dir="$(pwd)"
+        _cfg_into_val=$(_remember_slug_run_python "$_cfg_py_dir/jq_fallback_get.py" "$REMEMBER_CONFIG" "$_cfg_into_name")
+    fi
+    [ -n "$_cfg_into_val" ] || _cfg_into_val="$_cfg_into_default"
+    printf -v "$_cfg_into_var" '%s' "$_cfg_into_val"
+}
+
+_config_load
+
+
+config_into REMEMBER_TZ ".timezone" ""
+export REMEMBER_TZ
+
+config_into REMEMBER_PROMPT_STAMP ".prompt_stamp" "full"
+if [ "$REMEMBER_PROMPT_STAMP" != stable ] && [ "$REMEMBER_PROMPT_STAMP" != off ]; then
+    REMEMBER_PROMPT_STAMP="full"
+fi
+export REMEMBER_PROMPT_STAMP
+
+_remember_is_uint() { [[ -n "$1" && "$1" != *[!0-9]* ]]; }
+config_into REMEMBER_SAVE_COOLDOWN ".cooldowns.save_seconds" 120
+_remember_is_uint "$REMEMBER_SAVE_COOLDOWN" || REMEMBER_SAVE_COOLDOWN=120
+export REMEMBER_SAVE_COOLDOWN
+
+config_into REMEMBER_DELTA_THRESHOLD ".thresholds.delta_lines_trigger" 50
+_remember_is_uint "$REMEMBER_DELTA_THRESHOLD" || REMEMBER_DELTA_THRESHOLD=50
+export REMEMBER_DELTA_THRESHOLD
+
+[ -n "${REMEMBER_MODEL:-}" ] || config_into REMEMBER_MODEL ".model" "haiku"
+export REMEMBER_MODEL
+[ -n "${REMEMBER_REJECT_PATTERN:-}" ] || config_into REMEMBER_REJECT_PATTERN ".reject_pattern" ""
+export REMEMBER_REJECT_PATTERN
+
+__remember_src_lib_clock ${1+"$@"}
+unset _remember_log_src_dir
+
+MEMORY_LOG_DATE=""
+_remember_date_into MEMORY_LOG_DATE +%Y-%m-%d
+MEMORY_LOG_FILE="${REMEMBER_LOG_DIR}/memory-${MEMORY_LOG_DATE}.log"
+
+_REMEMBER_LOG_LAST_TIME=""
+_remember_date_into _REMEMBER_LOG_LAST_TIME +%H:%M:%S
+
+_REMEMBER_LOG_LAST_EPOCH=""
+[ "${BASH_VERSINFO[0]:-0}" -ge 5 ] && _REMEMBER_LOG_LAST_EPOCH="$EPOCHSECONDS"
+_REMEMBER_LOG_DAY_SECONDS="${_REMEMBER_LOG_DAY_SECONDS_TEST:-86400}"
+
+log() {
+    local component="$1"
+    local message="$2"
+    local timestamp
+    local LC_ALL=C
+    _remember_date_into timestamp +%H:%M:%S
+    local _remember_log_rolled=0 _remember_log_now_epoch
+    if [ -n "$_REMEMBER_LOG_LAST_TIME" ] && [[ "$timestamp" < "$_REMEMBER_LOG_LAST_TIME" ]]; then
+        _remember_log_rolled=1
+    elif [ -n "$_REMEMBER_LOG_LAST_EPOCH" ]; then
+        _remember_log_now_epoch="$EPOCHSECONDS"
+        if [ $(( _remember_log_now_epoch - _REMEMBER_LOG_LAST_EPOCH )) -ge "$_REMEMBER_LOG_DAY_SECONDS" ]; then
+            _remember_log_rolled=1
+        fi
+    fi
+    if [ "$_remember_log_rolled" = 1 ]; then
+        _remember_date_into MEMORY_LOG_DATE +%Y-%m-%d
+        MEMORY_LOG_FILE="${REMEMBER_LOG_DIR}/memory-${MEMORY_LOG_DATE}.log"
+    fi
+    _REMEMBER_LOG_LAST_TIME="$timestamp"
+    [ -n "$_REMEMBER_LOG_LAST_EPOCH" ] && _REMEMBER_LOG_LAST_EPOCH="$EPOCHSECONDS"
+    message="${timestamp} [${component}] $(printf '%s' "$message" | LC_ALL=C tr '[:cntrl:]' ' ')"
+    echo "$message" >> "$MEMORY_LOG_FILE" 2>/dev/null || echo "$message" >&2
+}
+
+
+
+REMEMBER_HOOKS_DIR="$PIPELINE_DIR/hooks.d"
+
+_DISPATCH_STDERR_LINES=5
+_DISPATCH_STDERR_LINE_CHARS=400
+
+_DISPATCH_STDOUT_LINES=200
+_DISPATCH_STDOUT_LINE_CHARS=2000
+_DISPATCH_STDOUT_PREFIX="[hook] "
+_DISPATCH_FRAME="=== hooks.d: "
+
+_DISPATCH_TIMEOUT_DEFAULT=15
+_DISPATCH_TIMEOUT_DETACHED_DEFAULT=120
+
+_DISPATCH_DETACHED_EVENTS=" before_save after_save before_consolidate after_consolidate "
+
+_DISPATCH_KILL_GRACE_DEFAULT=5
+
+
+
+
+
+report_error() {
+    local _component="$1"
+    local _msg
+    _msg="$(printf '%s' "$2" | LC_ALL=C tr '[:cntrl:]' ' ')"
+    log "$_component" "$_msg"
+    [ -d "$REMEMBER_DIR/logs" ] || return 0
+    printf '%s\n' "$(_remember_date +%H:%M:%S) [$_component] $_msg" \
+        >> "$REMEMBER_DIR/logs/hook-errors.log" 2>/dev/null || true
+    return 0
+}
+
+
+
+
+_ROTATE_ESCALATE_AFTER=3
+
+_ROTATE_STATE_NAME=".rotate-failed"
+
+_ROTATE_MAX_PARTS=100
+
+
+
+}
+
 _HOOK_DIR="${BASH_SOURCE[0]%/*}"
-[ "$_HOOK_DIR" = "${BASH_SOURCE[0]}" ] && _HOOK_DIR="."
+[ "$_HOOK_DIR" = "${BASH_SOURCE[0]}" ] && _HOOK_DIR="$(pwd)"
 
-# --- Nested summarizer: there is no project here (#204) ---
-# Same guard every hook in this plugin carries: this plugin can re-enter its
-# own hooks from a nested/headless session, and scaffolding a memory
-# directory under the summarizer's own temp dir is a bug regardless of which
-# hook does it.
 [ -n "${REMEMBER_NESTED_SUMMARIZER:-}" ] && exit 0
 
-# --- Read stdin: session_id and reason ---
-# Cleared, not merely left alone (#266) — see post-tool-hook.sh's identical
-# comment. This plugin can re-enter its own hooks from a nested session, and
-# both names are exported at points elsewhere in this plugin's hooks, so a
-# stale value here would be the plausible-and-wrong answer rather than the
-# honest absent one.
 unset REMEMBER_HOOK_STDIN REMEMBER_HOOK_STDIN_FILE
 
-# ── Detach BEFORE the preamble, not after it (#647, #560) ─────────────────
-# Claude Code gives SessionEnd a 1.5-second budget shared across every hook
-# registered for the event. #560 measured everything this script used to do
-# synchronously before forking its flush -- lib-clock.sh, resolve-paths.sh,
-# detect-tools.sh's python/jq probing, bootstrap-dirs.sh, log.sh -- at ~3.4s
-# on a slow Windows/Git-Bash machine, so the hook was cancelled before the
-# flush existed, on every exit. #561 declared `"timeout": 10` in
-# hooks/hooks.json to raise that ceiling. Claude Code's own reference says
-# "Timeouts set on plugin-provided hooks don't raise the budget", and
-# hooks.json ships inside a plugin: on the install route both reporters are
-# on, that declaration may do nothing at all, and the #647 reporter (0.29.1,
-# claude-plugins-official) still sees `Hook cancelled` on every exit.
-#
-# So this process now does the least it can: read stdin, hand the ENTIRE
-# job -- preamble, trace seed, flush -- to a detached copy of itself, exit.
-# Tens of milliseconds, on any machine, on any install route, under any
-# budget. The child is this same script re-entered with
-# REMEMBER_SESSION_END_DETACHED set and the payload carried in an env var
-# (never re-read from a stdin it no longer has). Both are unset again the
-# moment the child has consumed them, so nothing this hook spawns in turn
-# sees either.
-#
-# fd hygiene (#646): nothing above this line opens a descriptor beyond
-# 0/1/2, so redirecting those three is the whole set. If that ever changes,
-# close the extra ones here too -- an inherited dup of the client's pipe
-# keeps the client waiting for the child, hook exit notwithstanding.
-#
-# REMEMBER_SESSION_END_FOREGROUND=1 (opt-in, unset in production) runs the
-# old inline shape: no detach, stderr reaching the caller. The one thing
-# the detached path cannot do is report a store that could never be
-# created (#372) -- that warning went to this hook's own stderr because
-# there is no hook-errors.log to write to when the directory that would
-# hold it is what failed, and a detached child has no stderr the caller
-# can see. That report survives only in foreground mode; the trade is
-# stated in docs/hooks.md rather than left for someone to discover.
 if [ -n "${REMEMBER_SESSION_END_DETACHED:-}" ]; then
     HOOK_STDIN="${REMEMBER_SESSION_END_PAYLOAD:-}"
     unset REMEMBER_SESSION_END_DETACHED REMEMBER_SESSION_END_PAYLOAD
@@ -150,235 +1242,66 @@ else
     fi
 fi
 
-source "$_HOOK_DIR/lib-clock.sh"
+__remember_src_lib_clock ${1+"$@"}
 
-# The same deliberately narrow extractor post-tool-hook.sh and
-# session-start-hook.sh use: the key must be followed by nothing but
-# whitespace and a colon before the value's opening quote, so a field of the
-# same name appearing inside some other part of the payload is not mistaken
-# for it. Duplicated rather than sourced from session-start-hook.sh, for the
-# same reason that file gives for keeping its own copy: a hook that has to
-# survive a broken install is better served by a few duplicated lines than a
-# shared library it might fail to source.
-#
-# #494: whether a real host payload can nest a `cwd` key AHEAD of this
-# field is researched in scripts/user-prompt-hook.sh, next to its own
-# `_stdin_cwd` -- same extractor mechanism, same finding, not repeated here.
 _stdin_json_string() {
-    local key="$1" raw="$2" rest prefix value
-    case "$raw" in *"\"$key\""*) ;; *) return 1 ;; esac
-    rest=${raw#*\"$key\"}
-    prefix=${rest%%\"*}
-    case "$prefix" in *[!:[:space:]]*) return 1 ;; esac
-    value=${rest#*\"}
-    value=${value%%\"*}
-    # A JSON encoder writes each backslash as `\\` -- a Windows `cwd` from
-    # Codex arrives as `C:\\work\\proj` otherwise (#829).
+    local field="$1" raw="$2" rest prefix value dq
+    printf -v dq '\042'
+    [[ "$raw" == *"$dq$field$dq"* ]] || return 1
+    rest=${raw#*"$dq"$field"$dq"}
+    prefix=${rest%%"$dq"*}
+    if [[ "$prefix" == *[!:[:space:]]* ]]; then return 1; fi
+    value=${rest#*"$dq"}
+    value=${value%%"$dq"*}
     value=${value//\\\\/\\}
     [ -n "$value" ] || return 1
     printf '%s' "$value"
 }
 
 STDIN_SESSION_ID=$(_stdin_json_string session_id "$HOOK_STDIN" 2>/dev/null) || STDIN_SESSION_ID=""
-# stdin is not more trustworthy than a basename — same validation
-# post-tool-hook.sh applies before this id becomes a path component or an
-# argument to another script.
-#
-# #600: this value reaches save-session.sh's argv below (`bash "$SAVE_SCRIPT"
-# "$STDIN_SESSION_ID" --force`), and that script's own arg loop treats a
-# leading-dash value as a FLAG rather than a positional session id, exactly
-# the gap #576 already closed at the sibling agy-stop-hook.sh call site
-# (`case ... in ''|.|..|-*|*[!A-Za-z0-9._-]*)`). Without `-*` here, a
-# session_id of "--dry" passes this guard untouched and turns the last-
-# chance flush into a silent dry-run preview: no summary written, position
-# not advanced, log line reads like an ordinary run.
-case "$STDIN_SESSION_ID" in
-    ''|.|..|-*|*[!A-Za-z0-9._-]*) STDIN_SESSION_ID="" ;;
-esac
+if [ -z "${STDIN_SESSION_ID#.}" ] || [ -z "${STDIN_SESSION_ID#..}" ] \
+    || [ "${STDIN_SESSION_ID#-}" != "$STDIN_SESSION_ID" ] \
+    || [[ "$STDIN_SESSION_ID" == *[!A-Za-z0-9._-]* ]]; then
+    STDIN_SESSION_ID=""
+fi
 
 SESSION_END_REASON=$(_stdin_json_string reason "$HOOK_STDIN" 2>/dev/null) || SESSION_END_REASON=""
-# Not narrowed to a known enum on purpose (see STDIN comment above) — only
-# sanitised so an unexpected payload shape cannot put an arbitrary byte
-# sequence into a log line.
-case "$SESSION_END_REASON" in
-    ''|*[!A-Za-z0-9_]*) SESSION_END_REASON="unknown" ;;
-esac
+if [ -z "$SESSION_END_REASON" ] || [[ "$SESSION_END_REASON" == *[!A-Za-z0-9_]* ]]; then
+    SESSION_END_REASON="unknown"
+fi
 
-# ── The transcript path the host handed us (#407) ─────────────────────────
-# Same field, same reasoning as session-start-hook.sh's identical block:
-# exported for pipeline/host.transcript_path() to pick up in any Python
-# process this hook spawns. Data from a host payload, validated at the point
-# of entry -- only a carriage return is rejected, since a transcript path
-# legitimately contains slashes and dots and cannot share STDIN_SESSION_ID's
-# character allowlist. (A raw newline cannot reach this point at all: the
-# read loop above already strips every line terminator before HOOK_STDIN is
-# assembled, so the newline arm below is a belt no buckle can ever need --
-# kept rather than dropped, in case a future change to that loop ever
-# preserves one.) Whether the value names an openable file is decided on the
-# Python side, which falls back to derivation when it does not.
 REMEMBER_TRANSCRIPT_PATH=$(_stdin_json_string transcript_path "$HOOK_STDIN" 2>/dev/null) || REMEMBER_TRANSCRIPT_PATH=""
-case "$REMEMBER_TRANSCRIPT_PATH" in
-    *$'\n'*|*$'\r'*) REMEMBER_TRANSCRIPT_PATH="" ;;
-esac
+if [[ "$REMEMBER_TRANSCRIPT_PATH" == *$'\n'* ]] \
+    || [[ "$REMEMBER_TRANSCRIPT_PATH" == *$'\r'* ]]; then
+    REMEMBER_TRANSCRIPT_PATH=""
+fi
 export REMEMBER_TRANSCRIPT_PATH
 
-# ── The cwd the host handed us (#411) ─────────────────────────────────────
-# Same field, same reasoning as session-start-hook.sh's identical block:
-# exported for resolve-paths.sh (sourced below) to consult as its fallback
-# once CLAUDE_PROJECT_DIR is unset -- still the state Codex leaves it in
-# (live-confirmed, #463); Gemini CLI's own bundled docs now say it DOES set
-# CLAUDE_PROJECT_DIR, as a compatibility alias (#456, unverified live --
-# #532), so this fallback is expected to go unused on Gemini rather than be
-# what makes it resolvable. It stays correct and needed for Codex and any
-# other host that genuinely leaves the variable unset. Data from a host
-# payload, validated
-# at the point of entry: only a carriage return or raw newline is rejected,
-# since a project directory legitimately contains slashes and dots and
-# cannot share STDIN_SESSION_ID's character allowlist. Whether the value
-# actually names a directory is decided in resolve-paths.sh, which falls
-# back to the existing derivation when it does not.
 REMEMBER_HOOK_CWD=$(_stdin_json_string cwd "$HOOK_STDIN" 2>/dev/null) || REMEMBER_HOOK_CWD=""
-case "$REMEMBER_HOOK_CWD" in
-    *$'\n'*|*$'\r'*) REMEMBER_HOOK_CWD="" ;;
-esac
+if [[ "$REMEMBER_HOOK_CWD" == *$'\n'* ]] \
+    || [[ "$REMEMBER_HOOK_CWD" == *$'\r'* ]]; then
+    REMEMBER_HOOK_CWD=""
+fi
 export REMEMBER_HOOK_CWD
 
-# --- Resolve paths, tools, directories, logging ---
-# Opt into resolve-paths.sh's soft-failure mode, exactly as post-tool-hook.sh
-# does: this hook must never block session teardown, so a resolution failure
-# (e.g. a nested/headless session with no CLAUDE_PROJECT_DIR) is a silent
-# no-op, not a crash.
-REMEMBER_PATHS_SOFT_FAIL=1 source "$_HOOK_DIR/resolve-paths.sh" || exit 0
-source "$_HOOK_DIR/detect-tools.sh"
-source "$_HOOK_DIR/bootstrap-dirs.sh"
-source "$PIPELINE_DIR/scripts/log.sh" 2>/dev/null
-# log.sh returns early on a store it cannot create a logs/ dir in — before it
-# defines log(), report_error() or dispatch() — so the source succeeding
-# above is not the same question as those existing (#361, #372). Same guard
-# post-tool-hook.sh and user-prompt-hook.sh already carry, for the same
-# reason: `declare -F`, NOT `type` or `command -v` — on macOS /usr/bin/log is
-# Apple's unified-logging CLI, so `type log` is true whether or not a shell
-# function was ever defined, the guard would pass, and the stub below would
-# never be installed: `log "hook" "..."` two lines down would instead exec
-# that binary, dump its own usage text to stderr, and exit 64 from a hook
-# documented "EXIT CODES: 0 Always". Measured on bash 3.2.57 (macOS).
-#
-# Unlike the no-op stubs the hot paths install, these two still have to
-# report SOMETHING: this is the one file whose own docstring (EXIT CODES,
-# above) promises a failed flush is "reported loudly ... rather than
-# swallowed silently", and the `report_error` call further down (guarding
-# the `[ ! -d "$REMEMBER_DIR" ]` branch) is reachable only when this source
-# has already failed for that exact reason. log.sh's own log() documents
-# "Falls back to stderr if log file is unwritable" — this reproduces exactly
-# that fallback, because it is the same fallback for the same reason:
-# $REMEMBER_DIR/logs is what could not be created. hook-errors.log and the
-# notices channel user-prompt-hook.sh reads (#200, #253) are both files under
-# that same directory, so neither is reachable here; stderr is the only
-# channel left, and bootstrap-dirs.sh only redirects it into hook-errors.log
-# once that directory exists (bootstrap-dirs.sh:230-231) — on this path it is
-# still going wherever Claude Code sends an unredirected hook's stderr,
-# which is not nowhere.
+REMEMBER_PATHS_SOFT_FAIL=1 __remember_src_resolve_paths ${1+"$@"} || exit 0
+__remember_src_detect_tools ${1+"$@"}
+__remember_src_bootstrap_dirs ${1+"$@"}
+__remember_src_log ${1+"$@"} 2>/dev/null
 declare -F log >/dev/null 2>&1 || log() {
     printf '%s [%s] %s\n' "$(_remember_date +%H:%M:%S)" "$1" "$2" >&2
 }
 declare -F report_error >/dev/null 2>&1 || report_error() { log "$1" "$2"; }
 log "hook" "session-end: reason=$SESSION_END_REASON session=${STDIN_SESSION_ID:-unresolved}"
 
-# ── The on-disk trace that this hook fired, written FIRST (#647) ──────────
-# Moved up here, ahead of the $REMEMBER_DIR and $SAVE_SCRIPT checks and
-# ahead of the flush itself, from the bottom of the file where it used to
-# sit immediately before the backgrounded subshell.
-#
-# Every exit path below this line -- a store that could not be created, a
-# missing save-session.sh on a half-finished install -- used to leave the
-# store in exactly the state an unregistered hook leaves it in: no
-# session-end-*.log at all. That is the only evidence scripts/doctor.sh
-# has, so it reported "SessionEnd has never fired for this project" and
-# blamed hook registration, which was correct about the file and wrong
-# about the cause. The #647 reporter went and audited a registration that
-# was fine.
-#
-# This is as early as the trace can go: it needs $REMEMBER_DIR, which
-# resolve-paths.sh and bootstrap-dirs.sh above are what establish, and
-# report_error(), which the log.sh source above is what defines. Nothing
-# between there and here can fail without being reported.
-#
-# On its own this move could not rescue a hook cancelled DURING that
-# preamble -- #560 measured the preamble at ~3.4s on a slow Windows/Git-
-# Bash machine against SessionEnd's 1.5s shared budget, and everything
-# this seed depends on is inside it. That is why the detach at the top of
-# this file now happens before the preamble rather than after it: by the
-# time this line runs, the process running it is the detached child, on
-# no budget at all. The two changes are one fix -- the detach makes this
-# line reachable on that machine, and this line is what makes the result
-# visible to /remember:doctor.
-# Checked and reported (#503): this mkdir is best-effort defensive
-# re-creation on top of bootstrap-dirs.sh's own earlier attempt, and a
-# failure here means the seed write two lines down cannot land either --
-# leaving $_END_LOG absent, which an ordinary housekeeping sweep cannot
-# then be blamed for reclaiming (there is nothing to reclaim), and which
-# scripts/doctor.sh's own SessionEnd-liveness check then misreports as
-# "SessionEnd has never fired for this project" -- a hook-registration
-# problem that does not exist. Reported the same way save-session.sh:428
-# reports its own fall-through, so a read-only store or a full disk shows
-# up as a fault rather than as silence.
 if ! mkdir -p "$REMEMBER_DIR/logs/autonomous" 2>/dev/null; then
     report_error "session-end" "WARNING: could not create $REMEMBER_DIR/logs/autonomous -- this session's flush will not be recorded, and /remember:doctor may misreport SessionEnd as never having fired."
 fi
-# `$$` (this hook process's own PID) suffixes the second-granularity
-# timestamp so two SessionEnd hooks for the same project, ending inside the
-# same wall-clock second, no longer resolve to the same path (#488). That
-# collision was not contrived -- scripts/doctor.sh's own SessionEnd-liveness
-# comments already treat two concurrently open windows on one project as an
-# ordinary case, and PR #486 only made the collision harmless (both hooks
-# append rather than truncate) rather than absent: two flushes still
-# interleaved into one file, with no way for a reader to tell whose lines
-# were whose. `$$` is unique per invocation of THIS script -- it is not the
-# backgrounded subshell's own PID, which is assigned only after this line
-# runs -- so it is available before the header below is ever written, and
-# distinct siblings still get distinct files. scripts/doctor.sh's own
-# `session-end-*.log` glob (#370's SessionEnd-liveness check) needs no
-# change for this: the `*` already matches whatever follows the timestamp,
-# suffix included.
 _END_LOG="$REMEMBER_DIR/logs/autonomous/session-end-$(_remember_date +%H%M%S)-$$.log"
-# Seeded with a header line BEFORE the subshell below ever opens it, and the
-# subshell appends (`>>`) rather than truncates (`>`) -- not cosmetic (#483).
-# save-session.sh's own housekeeping sweep (unconditional on every flush
-# since #498, not tied to its NDC step) reclaims an empty file in this same
-# directory unconditionally (scripts/save-session.sh), and on an ordinary
-# successful flush NOTHING ever writes to this file: every
-# save-session.sh log line goes to its own daily narrative file, not to
-# stdout/stderr, so a `>`-truncated, still-empty $_END_LOG is exactly what
-# that same sweep -- run from INSIDE the process writing into it -- matches
-# and deletes. Two costs followed: the WARNING below named a path that was
-# already gone by the time anyone read it, and a healthy flush left nothing
-# on disk to confirm it ran at all. A non-empty file at open time is never
-# `-empty`, so it survives its own run's housekeeping while a genuinely
-# stale, still-empty log from an abandoned run is untouched by this and
-# keeps getting swept exactly as before.
-# `>>`, not `>`, is kept even now that `$$` makes an ordinary same-second
-# collision unreachable: a PID can still be recycled across a long-lived
-# store, and appending costs nothing when the file is otherwise guaranteed
-# fresh. Belt, not the buckle.
-# Checked and reported (#503): a failed seed write leaves $_END_LOG
-# absent or empty exactly as if it had never been opened, so the very
-# next housekeeping sweep reclaims it as an abandoned run's redirect
-# target -- and #483's original bug (no on-disk trace that SessionEnd
-# ever fired) is silently back for this session, with
-# scripts/doctor.sh's own liveness check then misreporting it as a hook
-# that never fired at all. Reported the same way save-session.sh:428
-# reports its own fall-through.
 if ! printf '%s [session-end] flush started\n' "$(_remember_date +%H:%M:%S)" >> "$_END_LOG" 2>/dev/null; then
     report_error "session-end" "WARNING: could not seed $_END_LOG -- if this file stays absent or empty, an ordinary housekeeping sweep will reclaim it, and /remember:doctor may misreport this session as one where SessionEnd never fired."
 fi
 
-# bootstrap-dirs.sh's mkdir is best-effort, and by the time this line runs it
-# has already tried once for THIS invocation — so unlike an ordinary "nothing
-# to flush" exit, reaching here means that attempt just failed (read-only
-# root, missing parent). Reported, not silently folded into the same no-op
-# every other early exit in this hook takes: without this line, a store that
-# can never be created and a session with nothing new to save are the same
-# line in hook-errors.log, which is no line at all.
 if [ ! -d "$REMEMBER_DIR" ]; then
     report_error "session-end" "WARNING: $REMEMBER_DIR does not exist and could not be created -- nothing was flushed at session end."
     exit 0
@@ -390,61 +1313,6 @@ if [ ! -f "$SAVE_SCRIPT" ]; then
     exit 0
 fi
 
-# --- Flush, unconditionally, in the BACKGROUND ---
-# save-session.sh --force bypasses its own cooldown timer AND its
-# min-human-message gate (see its own USAGE block) — exactly the two gates
-# this issue exists to route around. It does NOT bypass the zero-exchange
-# gate: a session with nothing new since the last save advances the saved
-# position without a Haiku call, so this hook costs nothing extra when there
-# is genuinely nothing to flush.
-#
-# Backgrounded, the same way post-tool-hook.sh forks its own call — NOT run
-# and waited on in the foreground, which an earlier version of this hook did.
-# Claude Code kills a hook process after `hooks.dispatch_timeout_seconds`'
-# sibling budget for the events it waits on: this repo's own README documents
-# "Claude Code kills a hook at 60s of its own accord" for exactly this
-# reason. save-session.sh's own Haiku call already asks for up to 120s and
-# NDC compression up to 180s (scripts/save-session.sh) — both past 60s on
-# the sessions this hook exists to rescue, which are the long, content-heavy
-# ones. A foreground
-# wait risks losing the ENTIRE flush to Claude Code's own kill with no trace
-# at all; a backgrounded one gets to keep running after this hook returns,
-# the same way `hooks.d/after_save/50-git-backup.sh`'s own git push does
-# ("a listener blocked in a foreground child leaks that child when the
-# script is killed" — the shape this rewrite avoids). The trade is explicit:
-# this hook can no longer report a flush failure to the SAME invocation of
-# `/remember:doctor` that ran a second later, only to hook-errors.log once
-# the background flush itself finishes — which is what the subshell below
-# does.
-#
-# tmp/save-session.pid is the SAME marker post-tool-hook.sh's own
-# background fork writes (scripts/post-tool-hook.sh), not a second one: both
-# are "a save-session.sh is in flight" and nothing downstream needs to tell
-# them apart.
-# REMEMBER_TEST_COMPLETION_MARKER (opt-in, unset in production): CI
-# iteration on #487 (PR #499) found the test harness's own PID-liveness
-# wait (tasklist, on Windows) does not reliably observe this backgrounded
-# flush finish on a real windows-latest runner -- $OSTYPE there reports
-# "cygwin", and its PID does not appear to line up with what `tasklist`
-# can find, so a test polling PID liveness alone gives up long before the
-# real flush -- which does complete -- is done, and asserts against a
-# still-running one. Rather than trust PID liveness at all, a caller that
-# sets this var gets an explicit, unambiguous completion line appended to
-# a file it names -- at zero cost to every real session, where the var is
-# never set and this whole block is a no-op.
-#
-# Unlike the $_END_LOG seed write just above, a failed marker write here
-# is NOT routed through report_error() (self-review finding, PR #499):
-# report_error writes to hook-errors.log, a real, user-facing file every
-# production session's own tests assert the CONTENTS of (see
-# TestSeedWriteFailureIsReported's own "WARNING" checks), and this whole
-# block is test-only opt-in scaffolding that must never add a line there
-# a real session could see. A failed marker write still is not silent:
-# bash reports a redirection failure it cannot honor to whatever this
-# block's own enclosing stderr already is, which for the first `printf`
-# below is this hook's own stderr (captured by the test harness as
-# `result.stderr`) and for the second, inside the subshell, is $_END_LOG
-# (which _dump_dir already surfaces in full on assertion failure).
 if [ -n "${REMEMBER_TEST_COMPLETION_MARKER:-}" ]; then
     printf '%s session-end: about to launch subshell\n' "$(_remember_date +%H:%M:%S)" \
         >> "$REMEMBER_TEST_COMPLETION_MARKER" 2>&1

@@ -1,37 +1,8 @@
-"""Shell integration helpers — output KEY=VALUE variables a shell script assigns.
-
-Each ``cmd_*`` function prints ``KEY=VALUE`` pairs to stdout that shell
-scripts read through ``assign_kv`` (scripts/log.sh), which assigns only
-lines shaped like a plain variable assignment and never runs the text as
-code. This eliminates the pattern of calling ``python3 -c`` multiple times
-to read individual fields from the same JSON.
-
-Large text values (exchanges, Haiku responses) are written to temp files
-and their paths are printed as shell variables, avoiding shell escaping
-issues with multi-line or quote-containing text.
-
-The ``main()`` function acts as a CLI dispatcher, routing subcommands
-to the appropriate ``cmd_*`` function.
-
-Available subcommands::
-
-    extract         Extract session exchanges
-    build-prompt    Build save-summary prompt file
-    build-ndc-prompt Build NDC compression prompt file
-    parse-haiku     Parse Haiku JSON response from stdin
-    call-haiku      Invoke Haiku on a prompt file (sandbox + parse in one)
-    save-position   Write position to last-save.json
-    consolidate     Run full consolidation pipeline
-
-"""
-
 from __future__ import annotations
-
 import json
 import os
 import re
 import sys
-
 from .extract import (
     _is_line_number,
     _validate_session_id,
@@ -42,115 +13,28 @@ from .extract import (
 )
 from .haiku import _parse_response
 from .prompts import build_save_prompt, build_ndc_prompt
-
-
 def _shell_escape(value: str) -> str:
-    """Emit a value for the shell variable bridge consumed by ``assign_kv``.
-
-    ``scripts/log.sh:assign_kv`` parses ``KEY=VALUE`` lines and assigns
-    ``VALUE`` verbatim via ``printf -v`` — no shell expansion, no
-    re-parsing of the text as shell source. The only constraint is that
-    ``VALUE`` must not contain a newline (the parser is line-oriented).
-
-    Earlier versions single-quote-wrapped per the convention the shell's own
-    command-substitution/parsing builtin expects, which broke on Windows:
-    paths with backslashes were quoted, but ``assign_kv``'s verbatim
-    assignment kept the quotes literal (issue #84).
-
-    Args:
-        value: Raw string. Must not contain newlines.
-
-    Returns:
-        The value as-is — emission is verbatim to match parser semantics.
-
-    Raises:
-        ValueError: If ``value`` contains a newline character.
-    """
     if "\n" in value or "\r" in value:
         raise ValueError("shell-bridged values must not contain newlines")
     return value
-
-
 def cmd_extract(session_id: str, project_dir: str) -> None:
-    """Extract session exchanges and print shell variables to stdout.
-
-    Writes the formatted exchange text to a temp file (avoiding shell
-    escaping of large text) and prints its path as ``EXTRACT_FILE``.
-
-    Respects the REMEMBER_DIR environment variable for external-mode
-    last-save.json lookup.
-
-    Args:
-        session_id: UUID of the session to extract.
-        project_dir: Root directory of the Claude Code project.
-
-    Prints:
-        POSITION, HUMAN_COUNT, ASSISTANT_COUNT, EXCHANGE_COUNT,
-        EXTRACT_FILE (path to temp file containing exchange text), ENVELOPE,
-        SKIP_LINES, UNREAD_SIDECAR_UNREADABLE, ENVELOPE_UNREADABLE,
-        ENVELOPE_CAPPED, ENVELOPE_HAS_UNMAPPED_STEP.
-    """
     import tempfile
     remember_dir = os.environ.get("REMEMBER_DIR") or None
     r = extract_session(session_id=session_id, project_dir=project_dir, remember_dir=remember_dir)
-
-    # Write exchanges to temp file (avoids shell escaping of large text)
     fd, extract_file = tempfile.mkstemp(prefix="remember-extract-", suffix=".txt")
     with os.fdopen(fd, "w", encoding="utf-8", errors="replace") as f:
         f.write(r.exchanges)
-
     print(f"POSITION={r.position}")
     print(f"HUMAN_COUNT={r.human_count}")
     print(f"ASSISTANT_COUNT={r.assistant_count}")
     print(f"EXCHANGE_COUNT={r.human_count + r.assistant_count}")
     print(f"EXTRACT_FILE={_shell_escape(extract_file)}")
-    # "unrecognised" is a transcript shape neither known host wrote -- distinct
-    # from a genuine 0-exchange session, which save-session.sh must not report
-    # the same way (#443).
     print(f"ENVELOPE={_shell_escape(r.envelope)}")
-    # The JSONL line this extraction actually started reading from (#450) --
-    # ordinarily the saved position, but the earlier, still-unread point when
-    # a prior "unrecognised" envelope quarantined one. save-session.sh passes
-    # this straight to `save-position`, which is what either keeps the
-    # quarantine pinned to its earliest point or clears it once something has
-    # actually read that span.
     print(f"SKIP_LINES={r.skip_lines}")
-    # #458: distinct from ENVELOPE/SKIP_LINES above -- this is the sidecar
-    # extract_session() consulted to CHOOSE those values, not the transcript
-    # itself. "1" means the unread-envelope.json quarantine sidecar exists
-    # but could not be trusted (a torn write, a disk fault, a truncated
-    # file), so this run resumed as though nothing were quarantined even
-    # though the sidecar may disagree -- the same silent-degrade #450's
-    # quarantine exists to catch, one level inside its own recovery path.
-    # Additive: no current consumer reads this key yet (that plumbing --
-    # reaching a shell-visible log line -- is a decision the issue
-    # explicitly left to whoever wires save-session.sh next), but the
-    # signal is on the bridge rather than only inside this process.
     print(f"UNREAD_SIDECAR_UNREADABLE={1 if r.unread_sidecar_unreadable else 0}")
-    # #478: ENVELOPE="unrecognised" collapses two different facts -- the
-    # transcript could not even be opened (OSError), or it was opened and
-    # read to exhaustion and simply never named a known host shape. Additive
-    # for the same reason as UNREAD_SIDECAR_UNREADABLE above: no current
-    # consumer reads this key yet, but the distinction is on the bridge for
-    # whoever next revises save-session.sh:276's receipt, which today points
-    # every "unrecognised" case at the shape-sniffing function even when the
-    # real answer is "the file could not be read at all".
     print(f"ENVELOPE_UNREADABLE={1 if r.envelope_unreadable else 0}")
-    # #556: ENVELOPE="unrecognised" with ENVELOPE_UNREADABLE=0 still collapses
-    # two different causes -- a file read to genuine exhaustion without ever
-    # naming a known host shape, and one that hit
-    # extract._ENVELOPE_SNIFF_SCAN_CAP and gave up before exhausting the
-    # file. Additive for the same reason as the two keys above: no current
-    # consumer reads this yet, but the distinction is on the bridge.
     print(f"ENVELOPE_CAPPED={1 if r.envelope_capped else 0}")
-    # #575: distinct from ENVELOPE=="unrecognised" -- this fires for a KNOWN
-    # envelope (today, only "antigravity") whose read span still contained a
-    # step this build's pipeline.host adapter cannot map to a role. Read
-    # unconditionally by scripts/save-session.sh, so it prints 0 rather than
-    # being omitted for every other envelope.
     print(f"ENVELOPE_HAS_UNMAPPED_STEP={1 if r.envelope_has_unmapped_step else 0}")
-
-
 def cmd_build_prompt(
     extract_file: str,
     last_entry_file: str,
@@ -159,29 +43,10 @@ def cmd_build_prompt(
     output_file: str,
     max_extract_bytes: int = 0,
 ) -> None:
-    """Build the save-summary prompt and write it to an output file.
-
-    Reads extract and last-entry content from files rather than shell
-    arguments, avoiding interpolation issues with large or complex text.
-
-    Args:
-        extract_file: Path to the temp file containing extracted exchanges.
-        last_entry_file: Path to a file containing the last staging entry.
-        time: Current timestamp string (e.g., "14:32").
-        branch: Current git branch name.
-        output_file: Path where the assembled prompt will be written.
-        max_extract_bytes: Upper bound on the extract's UTF-8 byte size. A
-            long-lived session can accumulate an extract larger than Haiku's
-            context window, making the prompt unsendable and silently halting
-            daily rotation (#96). When the extract exceeds this size, keep only
-            the most-recent tail (the work worth summarizing) and prepend a
-            truncation note. ``0`` disables the cap.
-    """
     with open(extract_file, encoding="utf-8", errors="replace") as f:
         extract = f.read().strip()
     with open(last_entry_file, encoding="utf-8", errors="replace") as f:
         last_entry = f.read().strip()
-
     if max_extract_bytes > 0:
         raw = extract.encode("utf-8")
         if len(raw) > max_extract_bytes:
@@ -191,7 +56,6 @@ def cmd_build_prompt(
                 f"of {len(raw)} bytes — summarize the most recent work below]"
                 f"\n\n{kept}"
             )
-
     prompt = build_save_prompt(
         time=time,
         branch=branch,
@@ -200,101 +64,36 @@ def cmd_build_prompt(
     )
     with open(output_file, "w", encoding="utf-8", errors="replace") as f:
         f.write(prompt)
-
-
 def cmd_build_ndc_prompt(memory_file: str, output_file: str) -> None:
-    """Build the NDC compression prompt and write it to an output file.
-
-    Args:
-        memory_file: Path to now.md (the file to be compressed).
-        output_file: Path where the assembled prompt will be written.
-    """
     with open(memory_file, encoding="utf-8", errors="replace") as f:
         content = f.read()
     prompt = build_ndc_prompt(content)
     with open(output_file, "w", encoding="utf-8", errors="replace") as f:
         f.write(prompt)
-
-
 def cmd_parse_haiku(output_file: str = "") -> None:
-    """Parse Haiku JSON response from stdin and print shell variables.
-
-    Reads the raw JSON from stdin, parses it into a HaikuResult, writes
-    the text to a temp file (since it can contain newlines, quotes, and
-    arbitrary content), and prints metadata as shell variables.
-
-    Args:
-        output_file: If non-empty, also writes the Haiku text to this
-            path (in addition to the temp file).
-
-    Prints:
-        HAIKU_TEXT_FILE (path to temp file), IS_SKIP (true/false),
-        TK_IN, TK_OUT, TK_CACHE, TK_COST.
-    """
-    # Redirected stdin/pipes use the locale codec on Windows (cp1252), not
-    # UTF-8 — PEP 528's UTF-8 console only covers interactive consoles. Force
-    # UTF-8 so the claude JSON decodes correctly (#91). Guarded: a StringIO
-    # substituted in tests has no reconfigure().
     if hasattr(sys.stdin, "reconfigure"):
         sys.stdin.reconfigure(encoding="utf-8", errors="replace")
     raw = sys.stdin.read()
     _emit_haiku_result(_parse_response(raw), output_file)
-
-
 def _emit_haiku_result(r, output_file: str = "") -> None:
-    """Write Haiku text to a temp file and print the shell vars bash consumes.
-
-    Shared by ``parse-haiku`` (parse pre-fetched JSON) and ``call-haiku``
-    (invoke + parse), so both emit an identical contract:
-    HAIKU_TEXT_FILE, IS_SKIP, TK_IN/OUT/CACHE/COST.
-    """
     import tempfile
-
-    # Write text to temp file (can contain newlines, quotes, anything)
     fd, text_file = tempfile.mkstemp(prefix="remember-haiku-text-", suffix=".txt")
     with os.fdopen(fd, "w", encoding="utf-8", errors="replace") as f:
         f.write(r.text)
-
     print(f"HAIKU_TEXT_FILE={_shell_escape(text_file)}")
     print(f"IS_SKIP={'true' if r.is_skip else 'false'}")
     print(f"IS_REJECTED={'true' if r.is_rejected else 'false'}")
-    # Which route produced this (#461): a plain "SKIP" in the log is
-    # ambiguous about which provider declined once more than one exists
-    # (#460). Threaded through rather than reconstructed at log time, since
-    # a call-haiku declines (spawn guard) before it even reaches whichever
-    # provider it would have used.
     print(f"PROVIDER={_shell_escape(r.provider)}")
     print(f"TK_IN={r.tokens.input}")
     print(f"TK_OUT={r.tokens.output}")
     print(f"TK_CACHE={r.tokens.cache}")
     print(f"TK_COST={r.tokens.cost_usd:.6f}")
-
     if output_file:
         with open(output_file, "w", encoding="utf-8", errors="replace") as f:
             f.write(r.text)
-
-
 def cmd_call_haiku(prompt_file: str, output_file: str = "", timeout: int = 120) -> None:
-    """Invoke Haiku on the prompt in ``prompt_file`` and print the shell vars.
-
-    The single entry point bash uses to run the summarizer subprocess: the
-    ``claude -p`` invocation itself lives only in ``haiku.call_haiku`` (one
-    place — no inline duplicate that could drift, #94/#98/#100). ``timeout``
-    is forwarded to ``call_haiku`` (NDC compresses a whole now.md and needs a
-    longer budget than the per-session summary). On any failure — a missing
-    prompt file (OSError) or a claude error (RuntimeError) — prints the error
-    to stderr and exits 1 so the caller aborts; never leaks a traceback to
-    stdout, which the bash caller captures as the shell-var payload.
-
-    A spawn the guard DECLINED (#204) is not a failure and exits
-    ``EXIT_SPAWN_DECLINED`` instead. The difference is load-bearing:
-    ``save-session.sh`` counts failures against a span and, past
-    ``thresholds.max_summary_failures``, advances the read cursor past it — so
-    reporting a working cap as a failure would lose the span it protected.
-    """
     from .haiku import call_haiku
     from .spawn_guard import EXIT_SPAWN_DECLINED, SummarizerSpawnDeclined
-
     try:
         with open(prompt_file, encoding="utf-8", errors="replace") as f:
             prompt = f.read()
@@ -306,13 +105,7 @@ def cmd_call_haiku(prompt_file: str, output_file: str = "", timeout: int = 120) 
         print(f"call-haiku error: {e}", file=sys.stderr)
         sys.exit(1)
     _emit_haiku_result(r, output_file)
-
-
-#: How many sessions keep a remembered position. Interleaved work is a handful
-#: of terminals, not dozens, and the file is read on every tool call.
 _POSITION_SLOTS = 32
-
-
 def cmd_save_position(
     last_save_file: str,
     session_id: str,
@@ -320,228 +113,61 @@ def cmd_save_position(
     envelope: str | None = None,
     skip_lines: int | None = None,
 ) -> None:
-    """Record the current extraction position for this session.
-
-    Positions are keyed by session ID. A single slot meant two live sessions
-    overwrote each other: A saves, B saves, and A's next save no longer
-    recognises its own ID, resumes from 0, and re-summarizes its whole span as
-    duplicate entries (issue #140). Sessions interleave whenever someone runs
-    two terminals, or a background/worktree session shares the store.
-
-    The newest ``_POSITION_SLOTS`` sessions are kept, oldest evicted first.
-    ``session``/``line`` are still written as a mirror of the most recent save,
-    so a reader from an older install — or one mid-upgrade — keeps working.
-
-    Args:
-        last_save_file: Path to the last-save.json file.
-        session_id: UUID of the session being saved.
-        position: JSONL line number to resume from next time.
-        envelope: This run's ``ExtractResult.envelope`` (#450), or ``None``
-            from a caller that predates it (existing tests, an older
-            wrapper). ``None`` leaves the unread-envelope quarantine
-            untouched -- neither marked nor cleared -- so a caller that has
-            nothing to say about the envelope cannot accidentally erase a
-            quarantine some OTHER, envelope-aware caller set. ``"unrecognised"``
-            marks/keeps ``session_id`` quarantined from ``skip_lines``; any
-            other value clears it, because a save with a recognised envelope
-            means whatever quarantined span there was has now been read.
-        skip_lines: The line this run's extraction actually started from
-            (``ExtractResult.skip_lines``). Used as the quarantine mark point
-            when ``envelope`` is ``"unrecognised"``; falls back to
-            ``position`` if omitted.
-    """
     _validate_session_id(session_id)
     sessions = read_positions(last_save_file)
-    # Re-insert at the end: dicts keep insertion order, so the oldest entry is
-    # simply the first one, and a session that keeps saving keeps its slot.
     sessions.pop(session_id, None)
     sessions[session_id] = position
     evicted: list[str] = []
     while len(sessions) > _POSITION_SLOTS:
         evicted.append(next(iter(sessions)))
         del sessions[evicted[-1]]
-
     payload = {"sessions": sessions, "session": session_id, "line": position}
-    # Strict: machine-written structured JSON. session_id is an ASCII UUID
-    # (regex-validated upstream) and position is an int, so this never raises;
-    # keeping it strict avoids silently U+FFFD-corrupting the recovery file.
-    #
-    # Written via a temp file and renamed: the read-merge-write above is not
-    # atomic, and a reader hitting the file mid-write would see truncated JSON
-    # and resume from 0 — the very duplicate this is fixing.
     tmp = f"{last_save_file}.tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(payload, f)
     os.replace(tmp, last_save_file)
-
-    # A bash-`read`-able mirror of THIS session's own position (#353, part 2
-    # of #350), so scripts/post-tool-hook.sh's per-tool-call hot path can skip
-    # the `pipeline.shell read-position` spawn once a save has landed, instead
-    # of paying an interpreter launch on every single tool call.
-    #
-    # Written AFTER last-save.json above is committed, never before: this is
-    # the ordering that makes the two files agree by construction rather than
-    # by luck. A crash between the two writes leaves this sidecar holding the
-    # PREVIOUS position — stale, and detectable, because the reader on the
-    # other end bounds it against the transcript's own line count — never a
-    # value ahead of the truth. Writing it first would risk the opposite: a
-    # sidecar the hot path trusts reporting a position last-save.json never
-    # actually reached, which is the silently-wrong-delta this feature exists
-    # to avoid.
-    #
-    # One file per session, not one slot shared by all of them — the same
-    # #140 lesson last-save.json itself already learned, for the same reason:
-    # two live sessions saving in the same store would otherwise stamp on
-    # each other's sidecar.
     sidecar_dir = os.path.dirname(last_save_file)
     sidecar = os.path.join(sidecar_dir, f"position.{session_id}")
     sidecar_tmp = f"{sidecar}.tmp"
     with open(sidecar_tmp, "w", encoding="utf-8") as f:
         f.write(str(position))
     os.replace(sidecar_tmp, sidecar)
-
-    # An evicted session's sidecar must not outlive its entry above. Left in
-    # place, a later `read-position` for that same id correctly answers 0 --
-    # this store has forgotten it -- while the hot path's bounds check in
-    # post-tool-hook.sh only compares the sidecar's own value against the
-    # CURRENT transcript's line count, which cannot see that last-save.json
-    # itself has moved on. A stale sidecar that still happens to fall inside
-    # that bound would be trusted, resuming from a position the authoritative
-    # store no longer recognises — the exact duplicate-resummarization bug
-    # #140 fixed for last-save.json, reintroduced through its own mirror.
-    # Best-effort: a session that is gone from the store losing its sidecar a
-    # little late (a failed unlink here) is no worse than #353 not existing.
-    # `evicted_id` comes from a key already present in the persisted store, so
-    # a store written before #538 -- or hand-edited -- can hold one that fails
-    # `_validate_session_id` today. That must not abort the save that has
-    # already landed above: treat a rejected id the same as a failed unlink,
-    # never let it become worse than #353 not existing.
     for evicted_id in evicted:
         try:
             _validate_session_id(evicted_id)
             os.remove(os.path.join(sidecar_dir, f"position.{evicted_id}"))
         except (OSError, ValueError):
             pass
-
-    # #450: keep the unread-envelope quarantine in step with the position it
-    # rides beside. `envelope is None` means this caller (an existing test, a
-    # pre-#450 wrapper) has nothing to say about it -- touch nothing, so an
-    # envelope-unaware save cannot silently erase a quarantine some OTHER,
-    # envelope-aware save set for the same session.
     unread_path = os.path.join(sidecar_dir, "unread-envelope.json")
     if envelope == "unrecognised":
         mark_unread_envelope(unread_path, session_id,
                               skip_lines if skip_lines is not None else position)
     elif envelope is not None:
         clear_unread_envelope(unread_path, session_id)
-    # An evicted session's quarantine entry must not outlive it either, for
-    # the same reason as the position sidecar above: last-save.json has
-    # forgotten the session, so a surviving quarantine entry would still be
-    # consulted by a later extraction that can no longer even resume it
-    # against a real saved position.
     for evicted_id in evicted:
         clear_unread_envelope(unread_path, evicted_id)
-
-
 def cmd_read_position(last_save_file: str, session_id: str) -> None:
-    """Print the saved position for a session, or 0.
-
-    Exists so scripts/post-tool-hook.sh does not need its own JSON parser.
-    It had one, and it drifted: while every other reader was taught that a
-    bool is not a position and an integral float is, that copy kept a bare
-    isinstance check and reported 0 for a position the rest of the pipeline
-    resumed from. Five copies of this rule was four too many.
-
-    Args:
-        last_save_file: Path to the last-save.json file.
-        session_id: Session whose position is wanted.
-
-    Prints:
-        The line number, or 0 when this session has no usable position.
-    """
     print(read_positions(last_save_file).get(session_id, 0))
-
-
 def _rotate_to_dated_sibling(path: str, stem: str) -> str | None:
-    """Rename a non-empty memory file to a dated sibling of the same family.
-
-    The move ``archive.md`` has had since #123, factored out in #348 so
-    ``recent.md`` gets exactly the same one rather than a second, subtly
-    different resting place. Both families are read back by the session-start
-    hook, which parses the date and the ``-N`` out of the NAME to order them —
-    so a second naming scheme here would be a second parser there.
-
-    Returns the rotated path, or ``None`` when there is nothing worth rotating:
-    a missing or empty file means the oversized bulk is somewhere else, and
-    rotating would produce an empty dated sibling no recall ever wants while
-    leaving the round exactly as over-cap as it was.
-
-    Args:
-        path: The live file (``.../archive.md``, ``.../recent.md``).
-        stem: Family prefix for the sibling — ``archive`` or ``recent``.
-
-    Returns:
-        The new path (e.g. ``archive-2026-06-29.md``, or
-        ``recent-2026-06-29-2.md`` on a same-day collision), or ``None``.
-    """
     if not path or not os.path.exists(path) or os.path.getsize(path) == 0:
         return None
     from ._tz import today_str
     parent = os.path.dirname(path)
     base = f"{stem}-{today_str()}"
     target = os.path.join(parent, f"{base}.md")
-    # Never os.rename onto an existing sibling: a second over-cap round on the
-    # same day would silently eat the first slice, which is the history loss
-    # rotation exists to avoid.
     n = 2
     while os.path.exists(target):
         target = os.path.join(parent, f"{base}-{n}.md")
         n += 1
     os.rename(path, target)
     return target
-
-
 def _rotate_archive(archive_file: str) -> str | None:
-    """Rotate archive.md to ``archive-YYYY-MM-DD.md`` (#123). See
-    ``_rotate_to_dated_sibling`` for the contract."""
     return _rotate_to_dated_sibling(archive_file, "archive")
-
-
 def _rotate_recent(recent_file: str) -> str | None:
-    """Rotate recent.md to ``recent-YYYY-MM-DD.md`` (#348).
-
-    Called only when ``recent.md`` is measurably the reason a round will not
-    fit — see the ladder in ``cmd_consolidate``. The span it retires was never
-    consolidated into ``archive.md``, so this is not the same thing as ageing
-    it out; it is putting it somewhere reachable so the pipeline can start
-    working again. Re-feeding it as staging was the alternative and was
-    rejected: an over-cap span fed back as staging reproduces the oversize on
-    the very next round, which is the loop this exists to break.
-    """
     return _rotate_to_dated_sibling(recent_file, "recent")
-
-
 def _eligible_staging(directory: str, filter_today: bool = True) -> list[str]:
-    """Sorted paths of the staging files a consolidation round may consume.
-
-    One answer to "which files are in scope", shared by the snapshot step and
-    the read that follows it. Two copies of the predicate would be two chances
-    to disagree about which day is today, and the whole point of the snapshot
-    is that the second step sees exactly what the first one took under the lock.
-
-    Args:
-        directory: Directory to scan.
-        filter_today: Whether to exclude today's file. False when scanning a
-            snapshot: its contents were already filtered under the lock, and a
-            round that crosses midnight must not drop a file it has taken.
-
-    Returns:
-        Sorted paths, today's file and ``.done.md`` files excluded.
-    """
     import glob as globmod
-
     from ._tz import today_str
-
     today = today_str() if filter_today else ""
     eligible = []
     for path in sorted(globmod.glob(os.path.join(directory, "today-*.md"))):
@@ -552,31 +178,7 @@ def _eligible_staging(directory: str, filter_today: bool = True) -> list[str]:
             continue
         eligible.append(path)
     return eligible
-
-
 def cmd_consolidate_snapshot(staging_dir: str, snapshot_dir: str) -> None:
-    """Copy the eligible staging files into ``snapshot_dir``.
-
-    run-consolidation.sh calls this while holding staging.lock, so every append
-    it sees is whole. ``staging_append`` writes a separator and then the summary
-    as two operations, and a reader landing between them consumes a blank line
-    as if it were the end of the day — the span retired into ``.done.md`` ends
-    with a separator whose entry is not there, and the entry is re-consolidated
-    on a later round under a later timestamp (#235).
-
-    The lock could not simply be held across ``cmd_consolidate``: that call
-    contains the Haiku round, and a critical section containing a model call is
-    how #142 happened and why save.lock was rejected as the staging lock in
-    #225. So the critical section ends here, at a process boundary, and the
-    bytes cross it on disk. The caller owns ``snapshot_dir`` and its cleanup.
-
-    Args:
-        staging_dir: Directory containing ``today-*.md`` staging files.
-        snapshot_dir: Directory to copy them into. Created if absent.
-
-    Prints:
-        STAGING_COUNT — how many files were snapshotted.
-    """
     os.makedirs(snapshot_dir, exist_ok=True)
     count = 0
     for path in _eligible_staging(staging_dir):
@@ -586,60 +188,14 @@ def cmd_consolidate_snapshot(staging_dir: str, snapshot_dir: str) -> None:
             dst.write(raw)
         count += 1
     print(f"STAGING_COUNT={count}")
-
-
 def cmd_consolidate(staging_dir: str, recent_file: str, archive_file: str,
                     max_prompt_bytes: int = 0, snapshot_dir: str = "",
                     timeout: int = 180) -> None:
-    """Run the full consolidation pipeline and print shell variables.
-
-    Collects staging files (excluding today's and ``.done`` files), reads
-    current recent and archive content, calls Haiku for consolidation,
-    and writes results to temp files.
-
-    Args:
-        staging_dir: Directory containing ``today-*.md`` staging files.
-        recent_file: Path to the current recent.md file.
-        archive_file: Path to the current archive.md file.
-        max_prompt_bytes: Skip-guard cap on the assembled consolidation
-            prompt's UTF-8 byte size. ``0`` disables it. An oversized prompt
-            yields ``CONSOLIDATION_STATUS=skip`` instead of overflowing.
-        snapshot_dir: Directory of copies taken under staging.lock by
-            cmd_consolidate_snapshot. Read instead of ``staging_dir`` when set;
-            the paths emitted for the retire step still name ``staging_dir``,
-            because the basenames are identical on both sides. Empty reads the
-            live directory — the pre-#235 behaviour, kept so a caller that has
-            not been taught the two-step still works.
-        timeout: Wall-clock budget (seconds) forwarded to ``consolidate()``'s
-            Haiku call (#806), configurable via
-            ``thresholds.consolidate_timeout_seconds``.
-
-    Prints:
-        STAGING_COUNT (0 if nothing to consolidate), RECENT_OUT and
-        ARCHIVE_OUT (paths to temp files with new content), TK_IN,
-        TK_OUT, TK_CACHE, TK_COST, and one STAGING line per processed
-        staging file (for the shell rename step).
-    """
     import tempfile
-
     from .consolidate import consolidate, ConsolidationSkipped, ConsolidationTooLarge
     from .spawn_guard import EXIT_SPAWN_DECLINED, SummarizerSpawnDeclined
-
-    # Read the snapshot taken under staging.lock when there is one, the live
-    # directory otherwise. Either way the basenames are the staging basenames,
-    # so the paths emitted for the retire loop below still name the real files.
     source_dir = snapshot_dir or staging_dir
-
     staging_contents: dict[str, str] = {}
-    # Raw file size, captured at read time. The consumed-byte count below drives
-    # the retire-vs-keep-tail split, so it has to describe the FILE, not the
-    # decoded string: errors="replace" turns each undecodable byte into one
-    # U+FFFD that re-encodes to three, and len(decoded.encode()) then overstates
-    # the file. Overstated, `staging_now -gt staging_consumed` reads false in
-    # run-consolidation.sh and it falls through to the blind rename — sealing
-    # concurrently appended entries inside .done.md, which is the exact loss
-    # this count exists to prevent. #142 measures now.md with `wc -c` for the
-    # same reason.
     staging_raw_bytes: dict[str, int] = {}
     for path in _eligible_staging(source_dir, filter_today=not snapshot_dir):
         basename = os.path.basename(path)
@@ -647,78 +203,25 @@ def cmd_consolidate(staging_dir: str, recent_file: str, archive_file: str,
             raw = f.read()
         staging_raw_bytes[basename] = len(raw)
         staging_contents[basename] = raw.decode("utf-8", errors="replace")
-
     if not staging_contents:
         print("STAGING_COUNT=0")
         return
-
     def _emit_skip() -> None:
-        # Skip status so the shell leaves recent.md/archive.md untouched and does
-        # NOT rename the source staging files to .done.md — they remain available
-        # for the next run. STAGING_COUNT is non-zero (we found files) but the
-        # shell gates on CONSOLIDATION_STATUS.
         print(f"STAGING_COUNT={len(staging_contents)}")
         print("CONSOLIDATION_STATUS=skip")
-
-    # Size the store before reading it (#346). The cap is enforced on the
-    # assembled prompt, so the whole store had to be read into memory and a
-    # prompt built around it before the pipeline was allowed to notice it was
-    # too large to send: several times the store's size in allocation to reach
-    # a decision ``stat`` answers for free. Against the reporter's 6.4 GB
-    # recent.md that is what took the machine down, from a script that runs
-    # disowned beside a live session.
-    #
-    # It can never be a false skip. The assembled prompt is the template plus
-    # per-file labels plus these bytes, so it is strictly larger than their
-    # sum, and a sum already over the cap is proof the prompt would be.
     rotated: str | None = None
     rotated_recent: str | None = None
-
     def _restore_rotation() -> None:
-        """Undo an up-front rotation when the round did not go through.
-
-        Both families, because #348 can rotate archive.md and recent.md in the
-        same round. A half-undone pair is worse than no rotation at all: the
-        store is then split across two names, one of which nothing ever
-        consolidated, for a round that never happened.
-
-        Existence-checked because the handlers inside ``ConsolidationTooLarge``
-        below do their own restore and then re-raise; an exception raised
-        inside an except clause does not re-enter its siblings, but the guard
-        keeps that a property of this function rather than of Python's
-        control flow.
-        """
         if rotated is not None and os.path.exists(rotated):
             os.replace(rotated, archive_file)
         if rotated_recent is not None and os.path.exists(rotated_recent):
             os.replace(rotated_recent, recent_file)
-
     recent_size = os.path.getsize(recent_file) if os.path.exists(recent_file) else 0
     archive_size = os.path.getsize(archive_file) if os.path.exists(archive_file) else 0
     if max_prompt_bytes > 0:
         staging_size = sum(staging_raw_bytes.values())
         embedded = staging_size + recent_size + archive_size
         if embedded > max_prompt_bytes:
-            # An escalating ladder, and which rung fires is the whole decision
-            # (#348). "The store is over the cap" is NOT the same question as
-            # "which file is why", and rotating the wrong one is destructive
-            # for nothing: it splits a span across a name nothing consolidated
-            # AND leaves the next round skipping identically.
-            #
-            # So each rung is conditioned on the rotation actually healing the
-            # round, measured on the sizes already in hand:
-            #
-            #   1. archive.md alone is enough  -> rotate it (the #123 move,
-            #      taken before the read rather than after it since #347).
-            #   2. it is not, but staging alone fits -> recent.md is the bulk,
-            #      #346's shape. Rotate it too, and archive.md as well only if
-            #      staging + archive would still not fit — a healthy archive is
-            #      not collateral.
-            #   3. staging alone is already over the cap -> rotate NOTHING and
-            #      skip. No file available here would change the next round,
-            #      so a rotation would be pure loss. Unbounded staging growth
-            #      is a different bug in different files and is filed on its
-            #      own; this rung declines rather than pretending to fix it.
             if embedded - archive_size <= max_prompt_bytes:
                 rotated = _rotate_archive(archive_file)
                 if rotated is None:
@@ -728,8 +231,6 @@ def cmd_consolidate(staging_dir: str, recent_file: str, archive_file: str,
             elif staging_size <= max_prompt_bytes:
                 rotated_recent = _rotate_recent(recent_file)
                 if rotated_recent is None:
-                    # recent.md is missing or empty, so the bulk is not what
-                    # the arithmetic said it was and there is nothing to move.
                     _emit_skip()
                     return
                 recent_size = 0
@@ -743,40 +244,18 @@ def cmd_consolidate(staging_dir: str, recent_file: str, archive_file: str,
             else:
                 _emit_skip()
                 return
-
     recent = ""
     if os.path.exists(recent_file):
         with open(recent_file, encoding="utf-8", errors="replace") as f:
             recent = f.read()
-
     archive = ""
     if os.path.exists(archive_file):
         with open(archive_file, encoding="utf-8", errors="replace") as f:
             archive = f.read()
-
     try:
         result = consolidate(staging_contents, recent, archive,
                              max_prompt_bytes=max_prompt_bytes, timeout=timeout)
     except ConsolidationTooLarge:
-        # archive.md is the bulk of the oversized prompt. Rotate it to a dated
-        # sibling (memory preserved in cold storage) and retry once with a fresh
-        # empty archive, so consolidation keeps progressing instead of skipping
-        # every run forever. If there is nothing to rotate, or the retry still
-        # overflows (staging + recent alone exceed the cap), restore and skip.
-        # Only reachable when the stat guard above let the round through and
-        # the template plus per-file labels tipped it over, or when the guard
-        # is disabled. An up-front rotation has already happened in the first
-        # case, so do not rotate a second time and orphan the first sibling.
-        #
-        # If the up-front ladder already rotated recent.md (#348) it took every
-        # shrink available: `recent` below is the empty string it read back from
-        # a file that is no longer there, and archive.md is either gone too or
-        # was never the problem. The retry would assemble a byte-identical
-        # prompt and raise identically. Declining here is not the point though —
-        # the point is that it declines through `_restore_rotation`, because the
-        # `rotated is None` exit two lines down returns WITHOUT undoing anything,
-        # and reaching it with recent.md rotated would leave the store split
-        # across a dated sibling for a round that never happened.
         if rotated_recent is not None:
             _restore_rotation()
             _emit_skip()
@@ -784,71 +263,41 @@ def cmd_consolidate(staging_dir: str, recent_file: str, archive_file: str,
         if rotated is None:
             rotated = _rotate_archive(archive_file)
         if rotated is None:
-            _restore_rotation()  # no-op unless something above moved a file
+            _restore_rotation()
             _emit_skip()
             return
         try:
             result = consolidate(staging_contents, recent, "",
                                  max_prompt_bytes=max_prompt_bytes, timeout=timeout)
         except ConsolidationSkipped:
-            _restore_rotation()  # still too big -> undo, skip
+            _restore_rotation()
             _emit_skip()
             return
         except Exception:
-            _restore_rotation()  # retry errored -> undo, re-raise
+            _restore_rotation()
             raise
     except SummarizerSpawnDeclined as declined:
-        # The spawn guard refused (#204). Staging is left exactly as it is and
-        # the next run consolidates it — not a skip, which retires staging, and
-        # not a failure either. An up-front rotation is undone for the same
-        # reason: this round never happened, so nothing it moved may persist.
         _restore_rotation()
         print(f"consolidate declined: {declined}", file=sys.stderr)
         sys.exit(EXIT_SPAWN_DECLINED)
     except ConsolidationSkipped:
-        # Model declined (SKIP), returned non-conforming output, or returned
-        # more bytes than the pipeline is willing to write (#346).
         _restore_rotation()
         _emit_skip()
         return
     except Exception:
-        # A transient failure (the model call erroring, say) must not leave the
-        # up-front rotation applied: nothing was consolidated, so archive.md
-        # has to be where the next run expects it. The post-hoc rotation path
-        # has restored itself on this branch since #123; the pre-read one owes
-        # the same guarantee.
         _restore_rotation()
         raise
-
-    # Write results to temp files
     fd_r, recent_out = tempfile.mkstemp(prefix="remember-recent-", suffix=".md")
     with os.fdopen(fd_r, "w", encoding="utf-8", errors="replace") as f:
         f.write(result.recent)
-
     fd_a, archive_out = tempfile.mkstemp(prefix="remember-archive-", suffix=".md")
     with os.fdopen(fd_a, "w", encoding="utf-8", errors="replace") as f:
         f.write(result.archive)
-
-    # Write staging paths to a NUL-separated temp file so the shell rename step
-    # can read them safely regardless of single quotes, spaces, or other
-    # metacharacters in the filename.  Shell reads with:
-    #   while IFS= read -r -d '' path; do ...; done < "$STAGING_PATHS_FILE"
-    # Each record is path\0consumed_bytes\0. The byte count is what was actually
-    # read into this prompt: run-consolidation.sh renames the file afterwards,
-    # and a save can land in between — the Haiku call above has a configurable
-    # budget (180s by default, thresholds.consolidate_timeout_seconds, #806)
-    # and consolidation runs disowned alongside any live session. Renaming
-    # blindly sealed those newer bytes inside the .done.md, which nothing globs
-    # again and session start never injects: written to disk, then unreachable.
-    # Same shape as #142, which fixed it for now.md and not for staging.
     fd_s, staging_paths_file = tempfile.mkstemp(prefix="remember-staging-paths-", suffix=".bin")
     with os.fdopen(fd_s, "wb") as f:
         for name in staging_contents:
-            # surrogatepass: os.listdir() surrogate-escapes undecodable filename
-            # bytes on Windows; round-trip them so the shell gets the real path.
             f.write(os.path.join(staging_dir, name).encode("utf-8", "surrogatepass") + b"\x00")
             f.write(str(staging_raw_bytes[name]).encode("ascii") + b"\x00")
-
     print(f"STAGING_COUNT={len(staging_contents)}")
     print("CONSOLIDATION_STATUS=ok")
     print(f"RECENT_OUT={_shell_escape(recent_out)}")
@@ -858,33 +307,14 @@ def cmd_consolidate(staging_dir: str, recent_file: str, archive_file: str,
     print(f"TK_CACHE={result.tokens.cache}")
     print(f"TK_COST={result.tokens.cost_usd:.6f}")
     print(f"STAGING_PATHS_FILE={_shell_escape(staging_paths_file)}")
-
-
 def main() -> None:
-    """CLI dispatcher for ``python3 -m pipeline.shell <command> [args]``.
-
-    Routes the first positional argument to the corresponding ``cmd_*``
-    function, passing remaining arguments positionally. Exits with
-    status 1 on unknown commands or missing arguments.
-    """
-    # Every cmd_* funnels its KEY=value lines through print(), and bash captures
-    # them by command substitution to pass on as argv to the next call. On
-    # Windows print() encodes with the console's ANSI codepage, not UTF-8 — the
-    # same boundary class as #91/#104, on the output side this time — so a temp
-    # path under a non-ASCII profile came back mojibake and the very next step
-    # failed with FileNotFoundError on a file that existed (issue #145). Same
-    # guard as the stdin reconfigure in cmd_parse_haiku: tests substitute a
-    # StringIO, which has no reconfigure().
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
-
     if len(sys.argv) < 2:
         print("Usage: python3 -m pipeline.shell <command> [args]", file=sys.stderr)
         sys.exit(1)
-
     cmd = sys.argv[1]
-
     if cmd == "extract":
         cmd_extract(session_id=sys.argv[2], project_dir=sys.argv[3])
     elif cmd == "build-prompt":
@@ -929,7 +359,5 @@ def main() -> None:
     else:
         print(f"Unknown command: {cmd}", file=sys.stderr)
         sys.exit(1)
-
-
 if __name__ == "__main__":
     main()
