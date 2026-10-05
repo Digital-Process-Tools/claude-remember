@@ -223,27 +223,24 @@ _remember_case_probe_git() {
     # trick lib-memory-dir.sh uses for the worktree question. Its absence proves
     # only that we cannot answer: the store may sit inside a larger repository,
     # which the backup hook declines to manage anyway.
+    # remember_case_divergence clears REMEMBER_CASE_GIT_REASON before calling
+    # this, so a reason set below is the one "could not check" answer (#898).
     if [ ! -e "$_root/.git" ]; then
-        REMEMBER_CASE_GIT_STATE="unavailable"
         REMEMBER_CASE_GIT_REASON="not-a-repository"
-        return 0
-    fi
-    if ! command -v git >/dev/null 2>&1; then
-        REMEMBER_CASE_GIT_STATE="unavailable"
+    elif ! command -v git >/dev/null 2>&1; then
         REMEMBER_CASE_GIT_REASON="git-not-installed"
-        return 0
+    else
+        # A leaked GIT_DIR from a bare-repo dotfiles setup, or from running
+        # inside another git hook, would resolve this against a different
+        # repository entirely — the sanitisation 50-git-backup.sh does for the
+        # same reason, done here in a subshell so the caller's environment is
+        # left alone.
+        _out=$(unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+               git -C "$_root" ls-tree --name-only HEAD 2>/dev/null) || _out=""
+        [ -n "$_out" ] || REMEMBER_CASE_GIT_REASON="nothing-committed"
     fi
-
-    # A leaked GIT_DIR from a bare-repo dotfiles setup, or from running inside
-    # another git hook, would resolve this against a different repository
-    # entirely — the sanitisation 50-git-backup.sh does for the same reason,
-    # done here in a subshell so the caller's environment is left alone.
-    _out=$(unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
-           git -C "$_root" ls-tree --name-only HEAD 2>/dev/null) || _out=""
-
-    if [ -z "$_out" ]; then
+    if [ -n "$REMEMBER_CASE_GIT_REASON" ]; then
         REMEMBER_CASE_GIT_STATE="unavailable"
-        REMEMBER_CASE_GIT_REASON="nothing-committed"
         return 0
     fi
 
@@ -251,9 +248,7 @@ _remember_case_probe_git() {
         [ -n "$_line" ] || continue
         if [ "$_line" = "$_name" ]; then
             _matched=1
-            continue
-        fi
-        if _remember_case_fold_eq "$_line" "$_name"; then
+        elif _remember_case_fold_eq "$_line" "$_name"; then
             _matched=1
             REMEMBER_CASE_GIT_NAMES="${REMEMBER_CASE_GIT_NAMES:+$REMEMBER_CASE_GIT_NAMES,}$_line"
         fi
