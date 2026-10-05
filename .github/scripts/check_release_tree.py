@@ -1552,7 +1552,11 @@ def _check_single_line_delegate_positional(files: dict, kinds: dict, off: list) 
         # literal newline anchors and `_FUNC_DEF_SINGLE`'s end-of-line anchor;
         # normalizing first keeps the newline count (and so the reported
         # line number) identical to the original file.
-        text = data.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+        try:
+            text = data.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+        except UnicodeDecodeError:
+            off.append(f"{rel}: not UTF-8, so its function bodies cannot be checked")
+            continue
         for name, body, body_start in _iter_function_bodies(text):
             code = [ln for ln in body.splitlines()
                     if ln.strip() and not ln.lstrip().startswith("#")]
