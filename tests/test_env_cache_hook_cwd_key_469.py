@@ -328,9 +328,16 @@ def test_user_prompt_hook_hits_cache_on_second_invocation_with_no_claude_project
             check=False, errors="replace",
         )
 
+    # Under `bash -x`, the source hook's slow path traces
+    # `source .../resolve-paths.sh`; a compiled hook (#900 compiled CI leg)
+    # traces a call to the function resolve-paths.sh was compiled into
+    # instead. Either is "resolution ran".
+    def _resolved(stderr: str) -> bool:
+        return "resolve-paths.sh" in stderr or "__remember_src_resolve_paths" in stderr
+
     first = _run()
     assert first.returncode == 0, first.stderr
-    assert "resolve-paths.sh" in first.stderr, (
+    assert _resolved(first.stderr), (
         "first (cold) invocation should take the slow path and source "
         "resolve-paths.sh -- if it never shows up here the harness itself "
         "is broken, not the fix: " + first.stderr
@@ -338,7 +345,7 @@ def test_user_prompt_hook_hits_cache_on_second_invocation_with_no_claude_project
 
     second = _run()
     assert second.returncode == 0, second.stderr
-    assert "resolve-paths.sh" not in second.stderr, (
+    assert not _resolved(second.stderr), (
         "second invocation, same stdin cwd, no CLAUDE_PROJECT_DIR anywhere: "
         "must be a cache HIT (fast path), never re-sourcing resolve-paths.sh. "
         "If this fires, REMEMBER_HOOK_CWD is still unset at the point "

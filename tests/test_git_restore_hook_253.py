@@ -49,6 +49,7 @@ pytestmark = pytest.mark.skipif(
     reason="bash hook subprocess + POSIX flock/git semantics — not portable to Windows runners (#79)",
 )
 
+from ._compiled_hooks import skip_if_compiled  # noqa: E402
 from .test_git_backup_hook import (  # noqa: E402
     REPO_ROOT,
     _git,
@@ -278,7 +279,9 @@ class TestCleanlyBehindFastForwards:
         both a cache-hit and a cache-miss branch here -- so the marker this
         test now anchors on is the call site that reads memory (cache or
         live) at all, `_remember_start_cache_context_load`, rather than a
-        literal line that no longer lives in this file."""
+        literal line that no longer lives in this file. Offsets in the
+        hook's own SOURCE text: a compiled hook puts its libraries first."""
+        skip_if_compiled(REPO_ROOT / "scripts" / "session-start-hook.sh")
         body = (REPO_ROOT / "scripts" / "session-start-hook.sh").read_text(encoding="utf-8")
         dispatch_at = body.index('dispatch "before_session_start"')
         inject_at = body.index('_remember_start_cache_context_load')

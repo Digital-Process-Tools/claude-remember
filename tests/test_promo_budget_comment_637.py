@@ -14,6 +14,8 @@ time they drift, whatever the new enforced value turns out to be.
 import re
 from pathlib import Path
 
+from tests._compiled_hooks import skip_if_compiled
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SESSION_START = REPO_ROOT / "scripts" / "session-start-hook.sh"
 
@@ -45,6 +47,7 @@ def test_promo_budget_comment_matches_enforced_value():
     is 150 while the code enforces 170 -- a 20-character gap that produces
     silent under-estimation of headroom for a future promo string.
     """
+    skip_if_compiled(SESSION_START)
     enforced = _enforced_budget()
     claimed = _comment_claimed_budget()
     assert claimed == enforced, (

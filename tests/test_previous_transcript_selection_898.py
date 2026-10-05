@@ -35,6 +35,7 @@ from pathlib import Path
 import pytest
 
 from ._bash_runner import resolve_bash
+from ._compiled_hooks import skip_if_compiled
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SESSION_START = REPO_ROOT / "scripts" / "session-start-hook.sh"
@@ -63,6 +64,13 @@ def _function_body(source: str, name: str) -> str:
 
 
 def _lookup_script() -> str:
+    # The region is cut out between COMMENT markers of the hook's source; the
+    # compiled build (#900 compiled CI leg) strips comments, so it has none.
+    skip_if_compiled(
+        SESSION_START,
+        "this test slices the hook between source comment markers the "
+        "compiler strips",
+    )
     source = SESSION_START.read_text(encoding="utf-8")
     deps = "\n".join(
         _function_body(source, n)

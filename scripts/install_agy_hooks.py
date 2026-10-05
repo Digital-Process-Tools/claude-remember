@@ -186,7 +186,11 @@ def _sorted_tree(value):
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    # An explicit string, not __doc__: the release build strips every docstring from a
+    # shipped .py (#900), and --help must say the same thing on both trees.
+    parser = argparse.ArgumentParser(
+        description="Merge Remember's Antigravity (agy) hooks into the shared "
+                    "~/.gemini/config/hooks.json (#563).")
     parser.add_argument("--target", default=DEFAULT_TARGET)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)

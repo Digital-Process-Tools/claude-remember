@@ -18,6 +18,9 @@ Rows that block or stop validation
   - no symlink, no `.git` file or directory (a submodule), no Git LFS pointer
   - no `.gitattributes` setting export-ignore, export-subst or filter
   - every file under 5 MiB
+  - every hook script (the HOOK_SCRIPT_NAMES and any .sh a hooks.json command
+    names) at most HOOK_SCRIPT_MAX_BYTES, 120 KiB: the scanner stops following
+    a hook script past 128 KiB (COMMAND_SCRIPT_NOT_FOLLOWED, #900)
   - hooks/hooks.json: valid JSON, a top-level `hooks` object, known events and
     hook types only, not also named by plugin.json's `hooks`; every command spells
     each path from `${CLAUDE_PLUGIN_ROOT}`, with no other variable, no `$(...)` or
@@ -69,6 +72,11 @@ import shlex
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+
+_HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(_HERE))
+from compile_hooks import HOOK_SCRIPT_NAMES, unresolved_sources, whole_line_comments
+from strip_python import StripError, leftovers
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent.parent / "release-branch.json"
 DEFAULT_BUDGET = {"max_file_bytes": 256 * 1024, "max_files": 512,
@@ -145,11 +153,29 @@ EVAL_OF_SUBSTITUTION = re.compile(
 )
 _SHELL_NAMES = {"sh", "bash", "zsh", "dash", "ksh"}
 
-# #898: a typed `<<` (here-document) anywhere in a shipped script is a hard
-# block at the directory, filed as "Unpinned npx launcher" -- the scanner
-# cannot place where the here-document ends. `<<<` (a here-string) is not
-# flagged, so the pattern must not match three or more `<` in a row either.
+# #898/#900: a typed `<<` (here-document) anywhere in a shipped script is a
+# hard block at the directory, filed as "Unpinned npx launcher" -- the
+# scanner cannot place where the here-document ends. `<<<` (a here-string)
+# is not flagged, so the pattern must not match three or more `<` in a row
+# either. `$(( x << 4 ))` (the arithmetic left-shift operator) is also not
+# a heredoc and must not be flagged -- see _mask_arithmetic in
+# _check_typed_heredoc, which removes that span before this pattern ever
+# sees the line, rather than trying to teach the regex itself to tell the
+# two apart.
 TYPED_HEREDOC = re.compile(r"(?<!<)<<(?!<)")
+
+# A simple (non-nested-parens) `$(( ... ))` arithmetic expansion -- masked
+# out of a line before TYPED_HEREDOC is tested against it, so a real
+# bitshift (`$(( x << 4 ))`) is never read as an unpinned here-document
+# operator. A `$(( ))` whose own expression contains a nested, unbalanced
+# paren is not matched here and is left for TYPED_HEREDOC to flag --
+# over-flagging a rare, genuinely-nested arithmetic expression is the safe
+# direction for a FAIL guard; under-flagging a real heredoc is not.
+_ARITH_EXPANSION = re.compile(r"\$\(\([^()]*\)\)")
+
+
+def _mask_arithmetic(line: str) -> str:
+    return _ARITH_EXPANSION.sub(lambda m: " " * len(m.group(0)), line)
 
 # #898: "any URL host, even inside a comment" is one half of the directory's
 # MCP_FORWARDS_CREDENTIAL_ENV pair (the other half is CREDENTIAL_USE below).
@@ -343,9 +369,21 @@ CREDENTIAL_SHAPED_NAME = re.compile(
 # comment -- the other half of COMMAND_SCRIPT_NOT_FOLLOWED, alongside the
 # dead-dot fallback above. Scoped to the four hooks.json-registered scripts,
 # which is what the hold actually named; REVIEW, not FAIL (see
-# _check_hook_names_other_hook's own docstring for why).
-HOOK_SCRIPT_NAMES = ("session-start-hook.sh", "session-end-hook.sh",
-                     "user-prompt-hook.sh", "post-tool-hook.sh")
+# _check_hook_names_other_hook's own docstring for why). HOOK_SCRIPT_NAMES
+# itself now lives in compile_hooks.py (imported above) -- that module
+# compiles these same four scripts for the release tree, so it is the
+# canonical list of which scripts count as "a hooks.json-registered hook".
+
+# #900: the byte budget for one hook script. Observed 2026-10-05 across 21
+# release-preview portal probes: every hook script of 130,955 bytes or less
+# cleared, every one of 131,120 bytes or more was held as
+# COMMAND_SCRIPT_NOT_FOLLOWED -- the scanner stops following a hook script
+# past 128 KiB (131,072 bytes). 120 KiB leaves a margin under that observed
+# limit, so a hook growing by one feature is caught here rather than as a
+# portal hold after a tag is spent.
+HOOK_SCRIPT_OBSERVED_LIMIT = 128 * 1024
+HOOK_SCRIPT_MAX_BYTES = 120 * 1024
+_HOOKS_JSON_SCRIPT = re.compile(r"\$\{CLAUDE_PLUGIN_ROOT\}/([^\s\"'$`;|&()]+\.sh)")
 
 # #898 round 7: the directory publishing repo's own offline sweep tool
 # (tools/sweep.sh in Digital-Process-Tools/claude-directory-publishing)
@@ -652,10 +690,14 @@ def check_tree(root: Path, budget: dict) -> CheckResult:
     manifest = _check_manifest(files, off)
     _check_readme_and_licence(files, manifest, off)
     _check_hooks(files, manifest, off)
+    _check_hook_still_sources(files, kinds, off)
+    _check_hook_script_size(files, off)
+    _check_python_comments(files, kinds, off)
+    _check_shell_comments(files, kinds, off)
     _check_front_matter(files, off)
     _check_images(files, kinds, off)
     _check_launchers(files, kinds, off)
-    _check_typed_heredoc(files, kinds, result.reviews)
+    _check_typed_heredoc(files, kinds, off)
     _check_url_in_comment(files, kinds, off)
     _check_network_command_names(files, kinds, off)
     _check_credential_pair(files, kinds, off)
@@ -897,29 +939,37 @@ def _check_images(files: dict, kinds: dict, off: list) -> None:
                 off.append(f"{img}: path written in code (backticks or a code block) in {rel}")
 
 
-def _check_typed_heredoc(files: dict, kinds: dict, reviews: list) -> None:
-    """#898: a typed `<<` anywhere in a shipped script is a directory hold,
-    filed as "Unpinned npx launcher" -- the scanner cannot place the
-    here-document's start or end. jit-context's own measured instance was
-    one `<<` inside an awk regex *string*, not an ordinary shell heredoc;
-    this repo's own scripts use `<<EOF`/`<<'PYEOF'` heredocs in the normal,
-    unambiguous shell position in more than a dozen places. Whether the
-    portal's scanner holds those too is unconfirmed without a real
-    release-preview validation (docs/releasing.md), so this is REVIEW, like
-    the eval/curl findings below, not a hard FAIL that would immediately
-    red the release gate on this repo's own current, working scripts."""
+def _check_typed_heredoc(files: dict, kinds: dict, off: list) -> None:
+    """#898/#900: a typed `<<` anywhere in a shipped script is a directory
+    hold, filed as "Unpinned npx launcher" -- the scanner cannot place the
+    here-document's start or end. This used to be REVIEW, unconfirmed
+    without a real release-preview validation -- a maintainer validation of
+    the combined tree (fix/898 round 3 + this lane's own #900 round 1)
+    CONFIRMED it as BLOCKING (3 instances, all from compiled-in library
+    content: post-tool-hook.sh, session-end-hook.sh, user-prompt-hook.sh),
+    so this is now FAIL, not REVIEW.
+
+    `<<<` (a here-string) is excluded by TYPED_HEREDOC's own lookaround, and
+    a `$(( x << 4 ))` arithmetic left-shift is excluded by masking that span
+    out first (_mask_arithmetic) -- neither is a heredoc the portal's
+    scanner has ever held.
+
+    The source-level rewrite from `<<EOF`/`<<'PYEOF'` heredocs to
+    here-strings/printf landed with #898; the built tree passes this with
+    0 FAIL, so a FAIL here is a new heredoc, not a known backlog."""
     for rel, data in sorted(files.items()):
         top = rel.split("/")[0]
         if top not in ("hooks", "hooks.d", "scripts") or kinds.get(rel) != "text":
             continue
         text = data.decode("utf-8")
         for n, line in enumerate(text.splitlines(), 1):
-            if TYPED_HEREDOC.search(line):
-                reviews.append(f"{rel}:{n}: a typed '<<' (here-document) -- the "
-                                f"directory's scanner has held this shape "
-                                f"elsewhere; confirm with a release-preview "
-                                f"validation before assuming it is safe: "
-                                f"{line.strip()[:80]}")
+            if line.lstrip().startswith("#"):
+                continue
+            if TYPED_HEREDOC.search(_mask_arithmetic(line)):
+                off.append(f"{rel}:{n}: a typed '<<' (here-document) -- the "
+                           f"directory holds this as UNPINNED_NPX (the "
+                           f"scanner cannot place where it ends): "
+                           f"{line.strip()[:80]}")
 
 
 def _check_url_in_comment(files: dict, kinds: dict, off: list) -> None:
@@ -1584,6 +1634,105 @@ def _check_credential_fragment_name(files: dict, kinds: dict, reviews: list) -> 
                 seen.add(name)
                 reviews.append(f"{rel}:{n}: a name with a credential-like part "
                                f"({name!r}) -- rename it to what it holds")
+
+
+def _check_hook_still_sources(files: dict, kinds: dict, off: list) -> None:
+    """#900: a hooks.json-registered hook script that still `source`s/`.`s
+    another file in the SHIPPED tree -- FAIL, not REVIEW. The directory's
+    release-preview validator inspects only the command hooks.json names; it
+    never follows a `source`/`.` statement into a second file, so a hook
+    that still has one is exactly the COMMAND_SCRIPT_NOT_FOLLOWED shape
+    (jit-context's own write-up, #900). build_release_tree.py compiles each
+    of these four scripts (compile_hooks.compile_hook) before it ever
+    reaches this check -- a surviving source/`.` line here means that step
+    did not run for this file, or did not fully resolve its own source
+    chain, either of which the release build must not ship silently."""
+    for rel, data in sorted(files.items()):
+        name = posixpath.basename(rel)
+        if name not in HOOK_SCRIPT_NAMES or kinds.get(rel) != "text":
+            continue
+        text = data.decode("utf-8")
+        for n, line in unresolved_sources(text):
+            off.append(f"{rel}:{n}: still sources another file after the "
+                       f"compile step -- the directory holds this as "
+                       f"COMMAND_SCRIPT_NOT_FOLLOWED: {line.strip()[:80]}")
+
+
+def _hook_script_paths(files: dict) -> set:
+    """Every shipped path a hook runs: each of HOOK_SCRIPT_NAMES wherever it sits,
+    plus each `${CLAUDE_PLUGIN_ROOT}/....sh` a hooks/hooks.json command names."""
+    paths = {rel for rel in files if posixpath.basename(rel) in HOOK_SCRIPT_NAMES}
+    raw = files.get("hooks/hooks.json")
+    if raw is None:
+        return paths
+    try:
+        doc = json.loads(raw.decode("utf-8"))
+        commands = [h.get("command", "") for gs in doc.get("hooks", {}).values()
+                    for g in gs for h in g.get("hooks", []) if isinstance(h, dict)]
+    except (ValueError, AttributeError, TypeError):
+        return paths
+    for command in commands:
+        if isinstance(command, str):
+            paths.update(p for p in _HOOKS_JSON_SCRIPT.findall(command) if p in files)
+    return paths
+
+
+def _check_hook_script_size(files: dict, off: list) -> None:
+    """#900: a hook script over HOOK_SCRIPT_MAX_BYTES -- FAIL. The directory's scanner
+    stops following a hook script past 128 KiB and holds it as
+    COMMAND_SCRIPT_NOT_FOLLOWED (see the constant's comment for the observation).
+    The build already strips comments, so the only real fix is less code in the
+    hook's own source chain; minifying further would only hide the growth."""
+    for rel in sorted(_hook_script_paths(files)):
+        size = len(files[rel])
+        if size > HOOK_SCRIPT_MAX_BYTES:
+            off.append(f"{rel}: {size} bytes, over the {HOOK_SCRIPT_MAX_BYTES}-byte "
+                       f"hook-script budget ({HOOK_SCRIPT_MAX_BYTES // 1024} KiB, a margin "
+                       f"under the {HOOK_SCRIPT_OBSERVED_LIMIT // 1024} KiB limit past which "
+                       f"the directory holds a hook as COMMAND_SCRIPT_NOT_FOLLOWED) -- shrink "
+                       f"the real code the hook runs, do not minify it")
+
+
+def _check_python_comments(files: dict, kinds: dict, off: list) -> None:
+    """#900: a comment or a docstring left in a shipped .py -- FAIL. The directory's
+    scanner reads both as code (release-preview probe hD: stripping them from
+    pipeline/haiku.py and nothing else changed the credential hold's citation), so
+    build_release_tree.py strips every shipped .py (strip_python.py). One left here
+    means that step did not run on this file, or missed a shape. The shebang and a
+    coding cookie are not counted; a `#` inside a string is not a comment."""
+    for rel, data in sorted(files.items()):
+        if not rel.endswith(".py") or kinds.get(rel) != "text":
+            continue
+        try:
+            found = leftovers(data.decode("utf-8"))
+        except (StripError, SyntaxError, ValueError) as exc:
+            off.append(f"{rel}: does not parse as Python, so its comments and docstrings "
+                       f"cannot be checked: {exc}")
+            continue
+        for n, kind, text in found:
+            off.append(f"{rel}:{n}: a {kind} in a shipped .py -- the directory's scanner "
+                       f"reads it as code; the build strips these: {text.strip()[:60]}")
+
+
+def _check_shell_comments(files: dict, kinds: dict, off: list) -> None:
+    """#900: a comment-only line left in a shipped .sh -- FAIL. The directory's scanner
+    reads shell comments as code too (a `${arr[$key]}` quoted in a lib-memory-context.sh
+    comment was cited as a credential read), so build_release_tree.py strips every
+    comment-only line from every shipped .sh (compile_hooks.strip_whole_line_comments).
+    One left here means that step did not run on this file. The shebang on line 1, a `#`
+    line inside a quoted string or a heredoc, and an inline `cmd # comment` are not
+    counted -- the same reading the stripper makes (compile_hooks.whole_line_comments)."""
+    for rel, data in sorted(files.items()):
+        if not rel.endswith(".sh") or kinds.get(rel) != "text":
+            continue
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            off.append(f"{rel}: not UTF-8, so its comment lines cannot be checked")
+            continue
+        for n, line in whole_line_comments(text):
+            off.append(f"{rel}:{n}: a comment-only line in a shipped .sh -- the directory's "
+                       f"scanner reads it as code; the build strips these: {line.strip()[:60]}")
 
 
 def _check_launchers(files: dict, kinds: dict, off: list) -> None:

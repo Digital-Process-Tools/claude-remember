@@ -116,6 +116,238 @@ would need `export-ignore`). Then:
 
 From v0.36.0 that gives 73 files and 1.3 MB, down from 474 files and 9.2 MB.
 
+### The four hooks are compiled, not just copied (#900)
+
+The directory's release-preview validator inspects only the **command** a `hooks/hooks.json`
+entry names; it never follows a `source`/`.` statement out of that command into a second file.
+Every one of this plugin's four hooks.json-registered scripts (`session-start-hook.sh`,
+`session-end-hook.sh`, `user-prompt-hook.sh`, `post-tool-hook.sh`) sources shared library code
+that way on `main`, so the validator held all four as COMMAND_SCRIPT_NOT_FOLLOWED
+(`claude-jit-context`'s own write-up, linked below).
+
+`build_release_tree.py` fixes this by calling
+[`compile_hooks.py`](../.github/scripts/compile_hooks.py) on exactly these four scripts before
+writing the release tree:
+
+- every file in a hook's own `source`/`.` chain becomes **one function** in the compiled file
+  (`scripts/lib-slug.sh` -> `__remember_src_lib_slug`), defined right after the shebang, and
+  every `source "$X/lib-slug.sh"` -- wherever it sits, inside a branch or a function -- becomes a
+  **call** to it with the arguments `source` would have passed (`${1+"$@"}`). Everything else on
+  that line stays exactly as written: an assignment prefix (`REMEMBER_PATHS_SOFT_FAIL=1`), a gate
+  (`declare -f ... ||`), a redirect, a trailing `|| exit 0` -- each applies to the call the way it
+  applied to `source`;
+- one definition however many sites source a file, and **no build-time "already inlined" guard**:
+  whether a second `source` of a library is a no-op is that library's own runtime guard's call
+  (`[ -n "${X_LOADED:-}" ] && return 0`), exactly as today. Rounds 1-3 pasted each file's text at
+  its first `source` and replaced every later one with `:`, which the compiled-hooks CI leg caught
+  breaking post-tool-hook.sh on every cold cache (round 4): the first `source` of lib-slug.sh,
+  lib-memory-dir.sh and log.sh sat on the FAST branch, so the slow branch -- the only one a cold
+  cache runs -- had none of them, and PROJECT_DIR never resolved. Pasting also broke `return`: a
+  sourced file's top-level `return` ends the sourcing (every load guard, and resolve-paths.sh's
+  soft failure, which the hook's `|| exit 0` then catches), but pasted at a script's top level it
+  is an error bash steps over. Inside the per-file function it means what it meant. A library
+  statement whose meaning WOULD change inside a function -- a top-level `local`/`declare`, or
+  `shift`/`set --` -- fails the build (`InlineError`) rather than shipping changed; none exists
+  today;
+- comment-only lines (the whole line, after leading whitespace, starts with `#`) are then
+  **stripped**, to fit the directory's 256 KiB per-file budget. A shebang (only ever the file's
+  own first line), a heredoc body, and anything inside an open single- or double-quoted string are
+  never touched -- `compile_hooks.strip_whole_line_comments` tracks quote and heredoc state across
+  the whole file for exactly that reason, not line by line.
+
+**The library files themselves are untouched and still ship** -- other scripts
+(`save-session.sh`, `doctor.sh`, `run-consolidation.sh`, ...) still `source` them normally, in
+both the source tree and the release tree; they are not hooks.json-registered, so the directory's
+validator never inspects them. Only the four hooks' own shipped bytes change.
+
+**Measured sizes** (session-start-hook.sh is the largest, since it has the deepest source
+chain): raw transitive closure before any inlining is well over the 256 KiB budget on its own,
+but comment lines make up roughly 60-70% of these files by line count, so the compiled,
+comment-stripped result lands at about 155 KiB for session-start-hook.sh and well under 90 KiB
+for the other three. That is under the 256 KiB per-file budget, but **not** under the much
+tighter limit the directory's scanner applies to a hook script itself (128 KiB): see "A hook
+script over 120 KiB fails the build" further down. `check_release_tree.py`'s
+`_check_hook_still_sources` FAILs the build if a compiled hook still carries a `source`/`.`
+statement pointing at another file -- the compile step not running, or not fully resolving, is a release-blocking error rather than a silent miss.
+That statement detector is quote/heredoc-aware (the same scan `compile_hooks.py` itself uses to
+find a statement to inline in the first place): a self-review round caught both a first draft that
+missed two of this repo's own real source statements (one assignment-prefixed, one behind a
+lazy-init conditional gate -- see the module's own docstring for both shapes) and a second draft
+whose wider matching then fired on an unrelated jq filter sitting inside a single-quoted bash
+argument on the same physical line as a real statement elsewhere in the file.
+
+`compile_hooks.py` is also a standalone CLI for local use: `python3
+.github/scripts/compile_hooks.py --repo .` prints each hook's compiled size without writing
+anything; add `--apply` to overwrite the four scripts in place on a disposable checkout (CI uses
+exactly this to run the whole test suite against the compiled hooks, in
+`.github/workflows/tests.yml`'s `hook-tests-compiled` job, on all three OSes) -- never run
+`--apply` against your own working tree.
+
+**In that compiled leg, a test that pins a hook's SOURCE text skips the compiled hook and says
+so** -- a comment's wording (#637), comment em-dashes (#367), what the hook's own code spells
+(#511, #298), where a `source` statement sits (`test_path_resolution.py`), which source lines
+carry a letter range (#695). The compiled hook is a build product of that source: its comments
+are gone by design and it carries its libraries' text too, so those facts are not about it; the
+plain `pytest` job checks every one of them against the real source on all twelve legs.
+`tests/_compiled_hooks.py` tells the two apart by the marker line `compile_hooks.py` writes right
+after the shebang (`# Compiled by .github/scripts/compile_hooks.py (#900)`). Every behavioural test
+still runs against the compiled hook -- that is the leg's whole point, and it is how round 4's
+cold-cache regression was caught. Reproduce it locally on a disposable clone: `git clone` the
+branch, `python3 .github/scripts/compile_hooks.py --repo . --apply`, then `pytest`.
+
+### Inlining alone was not enough: tree-shaking and a stricter heredoc guard (#900 round 2)
+
+A maintainer validation of the combined tree (fix/898's round 3 plus this change's own first
+round) found inlining had made the directory's own holds **worse**, not cleared: three new
+BLOCKING `UNPINNED_NPX` findings (a typed `<<` the scanner can't place, now reachable inside the
+compiled hooks because the inlined library content carries its own heredocs) and
+`COMMAND_SCRIPT_NOT_FOLLOWED` still held, now also citing `.` and `pipeline/haiku.py`. Inlining a
+library whole, with none of its unused functions dropped, ships code the hook's own control flow
+never reaches -- the exact "perl code" shape `claude-jit-context`'s own `compile_scripts.py` was
+held for before it added tree-shaking (its own #461 finding).
+
+`compile_hooks.tree_shake`, modelled on that function, now runs as the last step of
+`compile_hook`/`compile_hook_report`: it drops every top-level `name() { ... }` function (and,
+since round 4, every one defined directly inside a per-file `__remember_src_*` wrapper -- the
+wrapper itself always stays) a compiled hook's own code never reaches, transitively through any function it keeps. Reachability
+is **textual and deliberately coarse** -- a function is kept the moment its name appears as a
+bare word anywhere outside a function definition, or inside an already-kept function's body,
+including inside a string, a comment, or an assigned value. This over-keeps rather than
+under-keeps, which is the safe direction: the failure mode this guards against is "the directory
+still can't follow this call", not "the file is a little bigger than it needed to be".
+
+**A command position occupied by nothing but a bare or quoted lowercase/mixed-case variable**
+(`"$fn"`, never `"$PYTHON"` -- an all-caps name is this codebase's own convention for an external
+tool or config value, not one of its snake_case functions) names a call target this textual
+analysis cannot see at all. Finding one anywhere in a hook means nothing is dropped from that
+file, and the report says why (`dynamic_dispatch: true`) rather than shaking anyway. None of the
+four real hooks trips this today.
+
+**Getting the detector to tell a real statement boundary from a look-alike took three separate
+fixes**, each found by running it against this repo's own real, already-compiled hook text rather
+than only synthetic fixtures:
+
+- `#` inside a parameter expansion (`${raw#pattern}`, `${raw##pattern}`) is pattern-removal
+  syntax, not a comment -- treating it as one stopped the brace-balance scan before the
+  expansion's own closing `}`, which produced a false "unbalanced braces" refusal.
+- `$(...)` establishes its own nested quoting scope in real bash -- a `"` inside a command
+  substitution embedded in an OUTER double-quoted string (`$(command -v "$_first" 2>/dev/null)`)
+  must never toggle the outer string's own quote state. `_command_substitution_end` skips the
+  whole span as one opaque unit for exactly this reason.
+- A backslash-continued line, or a line that starts already inside a quote carried over from an
+  earlier one (a double-quoted string containing a literal embedded newline, or a `case "..." in`
+  split across two physical lines), is not a fresh statement boundary even when its own revealed
+  `$`-expansion lands at offset 0 of the masked text and looks exactly like one.
+
+Measured against this repo's own four hooks, pre-shake (already inlined and comment-stripped)
+and post-shake: **session-start-hook.sh** 154.7 KiB -> 147.0 KiB (7 functions dropped),
+**session-end-hook.sh** 75.2 KiB -> 60.8 KiB (15 dropped -- the smallest hook, so shaking removes
+the largest *proportion*, including `dispatch` itself: this hook never calls it, only names it in
+a comment that comment-stripping already removes), **user-prompt-hook.sh** 76.2 KiB -> 71.1 KiB
+(8 dropped), and **post-tool-hook.sh** 87.8 KiB -> 87.5 KiB (2 dropped -- it already uses most of
+what it inlines). All four still pass `bash -n` and carry zero remaining `source`/`.` statements
+after shaking.
+
+**The typed-heredoc check moved from REVIEW to FAIL.** `_check_typed_heredoc` used to say the
+portal's hold was unconfirmed without a real release-preview validation; the same maintainer
+validation above confirmed it. `TYPED_HEREDOC` now runs against every shipped `hooks/`/`hooks.d/`/
+`scripts/` file with `$(( ... ))` arithmetic expansions masked out first (`_mask_arithmetic`) --
+`$(( x << 4 ))` is a left-shift operator, not a here-document, and the portal has never flagged
+it. `<<<` (a here-string) was never flagged either and still is not. The source-level rewrite
+from `<<EOF`/`<<'PYEOF'` heredocs to here-strings/printf landed with #898, and the built tree now
+passes it with **0 FAIL**: any FAIL from this guard on a release build is a new heredoc, not a
+known backlog.
+
+### Every shipped `.py` loses its comments and docstrings (#900)
+
+The directory's scanner reads Python **comments and docstrings as code**. Release-preview probe
+hD (logged in `claude-directory-publishing`'s `triggers.md`) put `pipeline/haiku.py` through a
+comment-and-docstring strip and changed nothing else: the credential hold's citation moved from
+"an environment variable named at run time" -- prose in a comment describing a lookup -- to "the
+whole environment object", the file's one real read. A sentence explaining what the code does
+not do is, to the scanner, code that does it.
+
+So `build_release_tree.py` runs every shipped `.py` through
+[`strip_python.py`](../.github/scripts/strip_python.py) after compiling the hooks. **The source on
+`main` keeps every comment and docstring**; tests import the pipeline from source and see them.
+How it strips:
+
+- the source **text** is edited, not re-rendered: `COMMENT` tokens (from `tokenize`) are cut along
+  with the blanks before them, and each docstring statement's span (from `ast`) is cut -- replaced
+  by `pass` when it was its body's only statement. Lines left blank are dropped, except inside a
+  multi-line string. A `#!` first line and a `coding` cookie stay. Every other string literal,
+  f-strings included, keeps its exact bytes. `ast.unparse` is not used: it would re-render each
+  file from the AST of whichever Python runs the build, and users run 3.9. The built tree is
+  byte-identical whether the build runs on 3.9.6, 3.13 or 3.14 (observed on macOS).
+- each result is **proven or the build fails** (`StripError` -> `BuildError`): it parses with
+  `ast.parse(..., feature_version=(3, 9))`, its `ast.dump` equals the source's with docstrings
+  removed (a body left empty holds a lone `pass`), and no comment or docstring is left in it.
+- a file that reads `__doc__` is **refused**: stripping its docstring would change what it prints.
+  `scripts/install_agy_hooks.py` used its module docstring as `--help` text; it now passes an
+  explicit description string, the same on both trees.
+- `check_release_tree.py`'s `_check_python_comments` FAILs any shipped `.py` that still carries a
+  comment or docstring -- the strip step not running on a file, or missing a shape.
+
+Measured on this repo's 18 shipped `.py` files: **265,543 -> 83,322 bytes** (-69%);
+`pipeline/haiku.py` alone 78,724 -> 25,815. Run `python3 .github/scripts/strip_python.py FILE...`
+for the per-file sizes, or `--print FILE` to read one file as it ships. String literals still
+reach the scanner (probe hE cited a user-facing warning string next), and stripping cannot help
+there: those are real, needed text.
+
+### Every shipped `.sh` loses its comment-only lines too (#900)
+
+The scanner reads **shell comments as code** the same way. Release-preview probe L3 cited a
+credential read in `scripts/lib-memory-context.sh` whose only source was a comment: a
+`${arr[$key]}` quoted to explain a bash 3.2 pitfall. The four compiled hooks already went through
+the comment stripper on the way in, so this extends the `.py` policy to every other shipped `.sh`
+(the `scripts/` libraries and helpers, `hooks.d/`) -- and to the compiled hooks' own
+`COMPILED_MARKER` line, which only the compiled-in-place CI leg reads (`tests/_compiled_hooks.py`),
+never the release tree. **The source on `main` keeps every comment.**
+
+- the stripper is `compile_hooks.strip_whole_line_comments`, the one the hook compiler uses. It
+  drops a line only when its first non-blank character is `#`, and tracks quote and heredoc state
+  across the whole file: a `#` line inside a multi-line quoted string or a heredoc body stays, an
+  inline `cmd # comment` stays (only whole lines go), and a `#!` first line stays.
+- each changed file is **proven or the build fails**: `bash -n` must accept the result
+  (`BuildError: ... no longer parses once its comment lines are stripped`). A file with nothing to
+  strip ships byte-identical and is not re-parsed. The build therefore needs a bash: PATH's
+  `bash`, or on Windows Git Bash only (`resolve_bash`) -- a bare `bash` there is commonly the WSL
+  launcher, which CreateProcess finds first. No usable bash fails the build rather than skipping.
+- `check_release_tree.py`'s `_check_shell_comments` FAILs any comment-only line left in a shipped
+  `.sh`. It reads lines through `compile_hooks.whole_line_comments`, the same pass the stripper
+  uses, so the check and the build cannot disagree about what a comment line is.
+
+Measured on this repo's 26 shipped `.sh` files: **1,128,502 -> 595,725 bytes** (-47%);
+`scripts/lib-memory-context.sh` alone 83,042 -> 27,059. The whole release tree went from
+1,256,407 to 723,630 bytes. Built tree: `check_release_tree` 0 FAIL, `sweep.sh` "no known shape
+found", the hook smoke test passes all four hooks.
+
+### A hook script over 120 KiB fails the build (#900)
+
+The directory's scanner stops following a hook script past **128 KiB** and holds it as
+`COMMAND_SCRIPT_NOT_FOLLOWED`, the same code an unfollowed `source` gets. Observed 2026-10-05
+across 21 release-preview portal probes: every hook script of 130,955 bytes or less cleared, every
+one of 131,120 bytes or more was held -- the edge sits at 131,072 bytes. The 256 KiB per-file
+budget above does not catch it, and nothing else in the build did, so it surfaced only as a portal
+hold after a tag was spent. The built `scripts/session-start-hook.sh` was 148,857 bytes that day.
+
+`check_release_tree.py`'s `_check_hook_script_size` now FAILs any hook script larger than
+`HOOK_SCRIPT_MAX_BYTES` (122,880 bytes, 120 KiB -- a margin under the observed limit, so one more
+feature in a hook's source chain is caught here rather than at the portal). A hook script is each
+of the four `HOOK_SCRIPT_NAMES` (from `compile_hooks.py`) plus any `${CLAUDE_PLUGIN_ROOT}/....sh`
+a `hooks/hooks.json` command names. Exactly 122,880 bytes passes; one byte more fails:
+
+```
+FAIL scripts/session-start-hook.sh: 148857 bytes, over the 122880-byte hook-script budget (120 KiB, a margin under the 128 KiB limit past which the directory holds a hook as COMMAND_SCRIPT_NOT_FOLLOWED) -- shrink the real code the hook runs, do not minify it
+```
+
+**The fix is less real code, not minification.** Comments are already gone by this point (the
+strip step above); squeezing whitespace or renaming variables to win bytes back would only hide
+the growth until the next feature, and makes the shipped hook unreadable to the reviewer who reads
+it. Move work the hook does not need at that event out of its source chain, or drop dead code the
+tree-shaker cannot prove unreachable. `python3 .github/scripts/compile_hooks.py --repo .` prints
+each hook's compiled size without writing anything.
+
 ## What the Anthropic directory actually measured
 
 [`claude-jit-context`'s own write-up](https://github.com/Digital-Process-Tools/claude-jit-context/blob/main/docs/directory-validator.md)
