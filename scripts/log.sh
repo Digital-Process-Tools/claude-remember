@@ -1437,19 +1437,11 @@ _dispatch_stdout_relay() {
 # process whose bootstrap redirect was skipped on a read-only store. A hook must
 # never gain the ability to write into the session, so the destination is named
 # rather than inherited.
+# All three dispatch reporters go through report_error below (#898): the
+# same #618 control-byte flatten before the same two writes. $4/$5 can carry
+# a hook's own untrusted output.
 _dispatch_report_failure() {
-    local _event="$1" _name="$2" _rc="$3" _why="$4"
-    local _msg="ERROR: hook failed: $_event/$_name (exit $_rc): $_why"
-    # #618: flattened HERE, once, before either write -- log() applies its
-    # own #599 flatten to $MEMORY_LOG_FILE, but the printf below writes a
-    # SECOND, raw copy straight to hook-errors.log, which #599 never
-    # touched. $_why can carry a hook's own untrusted output.
-    _msg="$(printf '%s' "$_msg" | LC_ALL=C tr '[:cntrl:]' ' ')"
-    log "dispatch" "$_msg"
-    [ -d "$REMEMBER_DIR/logs" ] || return 0
-    printf '%s\n' "$(_remember_date +%H:%M:%S) [dispatch] $_msg" \
-        >> "$REMEMBER_DIR/logs/hook-errors.log" 2>/dev/null || true
-    return 0
+    report_error "dispatch" "ERROR: hook failed: $1/$2 (exit $3): $4"
 }
 
 # Report one hook that was REFUSED, in both places a human looks (#280).
@@ -1462,16 +1454,7 @@ _dispatch_report_failure() {
 # had been silently skipped since it was installed. That is #252's finding
 # reached from another direction: the tool was not quiet, it was reassuring.
 _dispatch_report_skip() {
-    local _event="$1" _name="$2" _why="$3"
-    local _msg="WARNING: hook SKIPPED and did not run: $_event/$_name ($_why) -- it will not run on any later dispatch until this is fixed"
-    # #618: see _dispatch_report_failure above -- same second, raw copy of
-    # $_msg reaches hook-errors.log below, outside log()'s own #599 flatten.
-    _msg="$(printf '%s' "$_msg" | LC_ALL=C tr '[:cntrl:]' ' ')"
-    log "dispatch" "$_msg"
-    [ -d "$REMEMBER_DIR/logs" ] || return 0
-    printf '%s\n' "$(_remember_date +%H:%M:%S) [dispatch] $_msg" \
-        >> "$REMEMBER_DIR/logs/hook-errors.log" 2>/dev/null || true
-    return 0
+    report_error "dispatch" "WARNING: hook SKIPPED and did not run: $1/$2 ($3) -- it will not run on any later dispatch until this is fixed"
 }
 
 # Report one thing that went wrong, in both places a human looks (#326).
@@ -1521,16 +1504,7 @@ report_error() {
 # hung hook from a budget set too tight for an honest one, and those want
 # opposite fixes.
 _dispatch_report_timeout() {
-    local _event="$1" _name="$2" _budget="$3" _how="$4" _said="$5"
-    local _msg="WARNING: hook TIMED OUT: $_event/$_name did not return within ${_budget}s and was stopped ($_how). This is NOT a failure report from the hook -- it never answered, so whether it did its work is UNKNOWN, and anything it left half-done is its own to unwind. Raise hooks.dispatch_timeout_seconds if this listener is honestly slow, or 0 to disable the bound. It said: $_said"
-    # #618: see _dispatch_report_failure above. $_said is a hook's own
-    # (possibly hostile, definitely untrusted) reply text.
-    _msg="$(printf '%s' "$_msg" | LC_ALL=C tr '[:cntrl:]' ' ')"
-    log "dispatch" "$_msg"
-    [ -d "$REMEMBER_DIR/logs" ] || return 0
-    printf '%s\n' "$(_remember_date +%H:%M:%S) [dispatch] $_msg" \
-        >> "$REMEMBER_DIR/logs/hook-errors.log" 2>/dev/null || true
-    return 0
+    report_error "dispatch" "WARNING: hook TIMED OUT: $1/$2 did not return within ${3}s and was stopped ($4). Whether it did its work is UNKNOWN; this is not a failure report. Raise hooks.dispatch_timeout_seconds if it is honestly slow, or 0 to disable the bound. It said: $5"
 }
 
 # Run one already-started hook under a watchdog, and say what happened to it.
@@ -1766,61 +1740,42 @@ dispatch() {
         # ends, so hooks still run strictly one at a time and in name order.
         # The redirections belong to the background job, so a hook's output is
         # captured exactly as it was when this was a foreground call.
-        local _rc=0 _hpid=""
-        _DISPATCH_RC=0
-        _DISPATCH_TIMEDOUT=0
+        # One launch for both cases (#898). With no writable tmp the capture
+        # files are empty, so stdout and stderr go to /dev/null: uncaptured
+        # stdout would be inherited stdout, the unattributed injection this
+        # avoids. It is DISCARDED and SAID below, never quietly passed through.
+        local _rc _hout=/dev/null _herr=/dev/null _said
+        [ -z "$_err_file" ] || { _hout=$_out_file; _herr=$_err_file; }
+        REMEMBER_PROJECT="${PROJECT_DIR:-.}" "$hook" >"$_hout" 2>"$_herr" &
+        _dispatch_supervise "$!" "$_budget" "$_grace" "$_to_file"
+        _rc=$_DISPATCH_RC
         if [ -n "$_err_file" ]; then
-            REMEMBER_PROJECT="${PROJECT_DIR:-.}" "$hook" >"$_out_file" 2>"$_err_file" &
-            _hpid=$!
-            _dispatch_supervise "$_hpid" "$_budget" "$_grace" "$_to_file"
-            _rc=$_DISPATCH_RC
             # Relayed whether the hook succeeded, failed, or was stopped: a hook
             # that says something useful and then dies has still said it, and
-            # #277 is the standing argument against discarding its words. A hook
-            # that was killed mid-sentence is the case where they matter most —
-            # they are the only evidence of what it was doing when it stopped.
+            # #277 is the standing argument against discarding its words.
             _dispatch_stdout_relay "$_out_file" "$event" "${hook##*/}"
         else
-            # No writable tmp, so stdout cannot be captured — and uncaptured
-            # stdout is inherited stdout, which is exactly the unattributed
-            # injection this fixes. It is DISCARDED and SAID, never quietly
-            # passed through and never quietly dropped: "could not check" is a
-            # third state here as it is everywhere else in this codebase.
-            REMEMBER_PROJECT="${PROJECT_DIR:-.}" "$hook" >/dev/null 2>/dev/null &
-            _hpid=$!
-            _dispatch_supervise "$_hpid" "$_budget" "$_grace" ""
-            _rc=$_DISPATCH_RC
-            printf '%s%s/%s -- output NOT SHOWN: stdout could not be captured (no writable %s/tmp), so it was discarded rather than delivered unattributed ===\n' \
+            printf '%s%s/%s -- output NOT SHOWN: no writable %s/tmp to capture it, so it was discarded ===\n' \
                 "$_DISPATCH_FRAME" "$event" "${hook##*/}" "$REMEMBER_DIR"
         fi
 
-        # A stop is reported BEFORE the failure branch and instead of it. The
-        # status in $_rc is the signal WE sent, not an answer the hook gave.
-        if [ "$_DISPATCH_TIMEDOUT" -eq 1 ]; then
-            local _how="SIGTERM, then SIGKILL after ${_grace}s if it was still there"
-            [ -n "$_to_file" ] || _how="$_how; inferred from the exit status because $REMEMBER_DIR/tmp is not writable, so a hook that genuinely exited on this signal would look the same"
-            local _said
-            if [ -n "$_err_file" ]; then
-                _said=$(_dispatch_stderr_excerpt "$_err_file")
-            else
-                _said="nothing captured -- no writable $REMEMBER_DIR/tmp"
-            fi
-            _dispatch_report_timeout "$event" "${hook##*/}" "$_budget" "$_how" "$_said"
-            continue
-        fi
-
-        [ "$_rc" -eq 0 ] && continue
-
-        # Only a FAILING hook is reported. A hook that chatters and exits 0 is
-        # not an event, and this fires on every tool call — that noise is the
-        # one thing `2>/dev/null` was genuinely buying, and it is kept.
-        local _why
+        # Only a stopped or FAILING hook is reported. A hook that chatters and
+        # exits 0 is not an event, and this fires on every tool call.
+        [ "$_DISPATCH_TIMEDOUT" -eq 1 ] || [ "$_rc" -ne 0 ] || continue
         if [ -n "$_err_file" ]; then
-            _why=$(_dispatch_stderr_excerpt "$_err_file")
+            _said=$(_dispatch_stderr_excerpt "$_err_file")
         else
-            _why="stderr not captured -- no writable $REMEMBER_DIR/tmp, so the reason is MISSING, not absent; rerun the hook by hand to see what it says"
+            _said="stderr not captured (no writable $REMEMBER_DIR/tmp); rerun the hook by hand to see it"
         fi
-        _dispatch_report_failure "$event" "${hook##*/}" "$_rc" "$_why"
+        # A stop is reported instead of a failure: the status in $_rc is the
+        # signal WE sent, not an answer the hook gave.
+        if [ "$_DISPATCH_TIMEDOUT" -eq 1 ]; then
+            local _how="SIGTERM, then SIGKILL after ${_grace}s"
+            [ -n "$_to_file" ] || _how="$_how; inferred from the exit status (no writable tmp)"
+            _dispatch_report_timeout "$event" "${hook##*/}" "$_budget" "$_how" "$_said"
+        else
+            _dispatch_report_failure "$event" "${hook##*/}" "$_rc" "$_said"
+        fi
     done
     [ -z "$_err_file" ] || rm -f "$_err_file" "$_out_file" 2>/dev/null
     [ -z "$_to_file" ] || rm -f "$_to_file" 2>/dev/null
