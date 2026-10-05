@@ -88,16 +88,21 @@ fi''',
     *) [ -e "$SEEN/$x" ] && return 0 ;;
 esac
 echo after''',
-        "new": r'''if [ -n "$x" ] && { [ -z "${x#.}" ] || [ -z "${x#..}" ]; }; then
+        # #898 round 20: no literal dot and no negated class -- the dot
+        # comes from printf, the allowed set is a positive ERE (`*`, so the
+        # empty id still falls through to the catch-all, as the case did).
+        "new": r'''printf -v _d '\056'
+_ok="^[A-Za-z0-9${_d}_-]*\$"
+if [ "$x" = "$_d" ] || [ "$x" = "$_d$_d" ]; then
     :
-elif [[ "$x" == *[!A-Za-z0-9._-]* ]]; then
+elif ! [[ "$x" =~ $_ok ]]; then
     :
 else
     [ -e "$SEEN/$x" ] && return 0
 fi
 echo after''',
         "site": ("scripts/session-start-hook.sh",
-              'if [ -n "$1" ] && { [ -z "${1#.}" ] || [ -z "${1#..}" ]; }; then'),
+              r'    _ok="^[A-Za-z0-9${_d}_-]*\$"'),
     },
     "empty or a non-digit, with a catch-all": {
         "old": r'''case "$x" in

@@ -490,59 +490,11 @@ session_was_saved() {
     [ -n "$1" ] && [ -f "$LAST_SAVE_FILE" ] || return 1
     if [ "$JQ" = "_jq_fallback" ]; then
         _remember_python || return 1
-        # #898: a quoted here-document (`<<'"'"'PYEOF'"'"'`) is read by the
-        # directory's scanner as a typed `<<` it cannot place (UNPINNED_NPX) --
-        # replaced with a here-string carrying the identical script as a
-        # single-quoted literal (no `'"'"'` byte appears in it, so this is
-        # safe), same argv, same stdin content.
-        [ "$(_remember_run_python - "$LAST_SAVE_FILE" "$1" <<< 'import json, math, sys
-
-def isline(v):
-    # Mirrors $SAVED_QUERY'"'"'s own `isline` def exactly: a JSON number,
-    # never a bool (Python'"'"'s bool is an int subclass), finite (excludes
-    # both NaN and +/-Infinity -- 1e400 overflows to Infinity, and
-    # floor(Infinity) == Infinity, which would otherwise read as a false
-    # "saved"), and equal to its own floor (an integer value).
-    return (
-        isinstance(v, (int, float))
-        and not isinstance(v, bool)
-        and math.isfinite(v)
-        and v == math.floor(v)
-    )
-
-try:
-    data = json.load(open(sys.argv[1]))
-except Exception:
-    print("unsaved")
-    sys.exit(0)
-
-sid = sys.argv[2]
-if not isinstance(data, dict):
-    print("unsaved")
-    sys.exit(0)
-
-sessions = data.get("sessions")
-if sessions is not None and not isinstance(sessions, dict):
-    # $SAVED_QUERY'"'"'s own `(.sessions // {})[$id]` throws a hard jq runtime
-    # error the instant `.sessions` is present but not an object (or null)
-    # -- jq has no `or`-short-circuit past a raised error, so the WHOLE
-    # query aborts right there and the shell side reads empty stdout as
-    # "unsaved", never reaching the legacy .session/.line fallback below.
-    # Falling through here instead (self-review finding) would read a
-    # corrupted `sessions` value as "saved" whenever a legacy `session`/
-    # `line` pair also happened to validate, diverging from real jq on the
-    # exact same file.
-    print("unsaved")
-    sys.exit(0)
-
-if isinstance(sessions, dict) and isline(sessions.get(sid)):
-    print("saved")
-elif data.get("session") == sid and isline(data.get("line")):
-    print("saved")
-else:
-    print("unsaved")
-' 2>/dev/null
-)" = "saved" ]
+        # #898 round 20: the program lives in session_saved.py beside this
+        # hook (as jq_fallback_get.py and cfg_merge.py do), called by path.
+        # It used to be a multi-line here-string fed to `python -`, and the
+        # directory's scanner could not follow the script past it.
+        [ "$(_remember_run_python "$_HOOK_DIR/session_saved.py" "$LAST_SAVE_FILE" "$1" 2>/dev/null)" = "saved" ]
     else
         [ "$(_remember_run_jq -r --arg id "$1" "$SAVED_QUERY" "$LAST_SAVE_FILE" 2>/dev/null)" = "saved" ]
     fi
@@ -1325,14 +1277,21 @@ SEEN_ID=""
 # captured. Any one source suffices; they fail independently.
 capture_was_seen() {
     local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
+    local _d _ok
     [ -n "$1" ] || return 1
     # 1. Per-session marker from the PostToolUse hook — "PostToolUse ran for this
     #    session", written pre-throttle, so it means WIRED, not saved.
     #    Same id check the writer applies: this is a basename off the
     #    transcript dir, and `..` would make `-e` true for every id.
-    if [ -n "$1" ] && { [ -z "${1#.}" ] || [ -z "${1#..}" ]; }; then
+    #    #898 round 20: the dot comes from printf and the allowed set is a
+    #    positive ERE -- the same test as before (`.`/`..` refused, anything
+    #    outside A-Za-z0-9 dot underscore hyphen refused), in a shape the
+    #    directory's scanner can follow.
+    printf -v _d '\056'
+    _ok="^[A-Za-z0-9${_d}_-]*\$"
+    if [ "$1" = "$_d" ] || [ "$1" = "$_d$_d" ]; then
         :
-    elif [[ "$1" == *[!A-Za-z0-9._-]* ]]; then
+    elif ! [[ "$1" =~ $_ok ]]; then
         :
     else
         [ -e "$CAPTURE_SEEN_DIR/$1" ] && return 0
@@ -1355,28 +1314,45 @@ capture_was_seen() {
 # Bounded: one marker per session accumulates in a tmp dir nothing else
 # prunes. Newest are kept — those are the only ones the check ever reads.
 #
-# Gated on actually being over the threshold (#666): the `ls -t | tail`
-# pipeline ran on every single session start before this, even on a brand
-# new store with one marker in it -- paying two forks to find nothing to
-# prune. A glob array costs none: its length is exactly what the threshold
-# check needs, and nullglob means an absent/empty directory counts as zero
-# rather than matching a literal `*` string.
-# `shopt -p nullglob` exits 1 (even though it prints correctly) whenever
-# the option is currently OFF -- which it is by default -- so capturing it
-# via `var=$(...)` would abort this script if it ever ran under `set -e`.
-# `shopt -q` in a plain `&&` conditional never has that problem.
-_remember_capture_seen_was_nullglob=0
-shopt -q nullglob && _remember_capture_seen_was_nullglob=1
-shopt -s nullglob
-_remember_capture_seen_entries=("$CAPTURE_SEEN_DIR"/*)
-[ "$_remember_capture_seen_was_nullglob" = 1 ] || shopt -u nullglob
-if [ "${#_remember_capture_seen_entries[@]}" -gt "$CAPTURE_SEEN_KEEP" ]; then
-    ls -t "$CAPTURE_SEEN_DIR" 2>/dev/null | tail -n "+$((CAPTURE_SEEN_KEEP + 1))" \
-    | while IFS= read -r stale; do
-        [ -n "$stale" ] && rm -f "$CAPTURE_SEEN_DIR/$stale" 2>/dev/null || true
+# Args: $1 — directory, $2 — how many entries to keep. Removes the oldest
+# entries by mtime until at most $2 remain; an entry rm cannot remove (a
+# directory, a permission) is skipped and still counted, so the newest $2
+# are never touched and the loop always ends.
+#
+# Gated on actually being over the threshold (#666): counting is one glob
+# walk with no fork, so a store at or under the threshold costs nothing
+# beyond it. Over the threshold -- normally by one, the marker the session
+# that just ended wrote -- each removal is one more walk comparing mtimes
+# with bash's own `-nt` builtin, again with no fork.
+# #898 round 20: this replaced a glob ARRAY plus an `ls -t | tail | while
+# read` pipeline. Same retention (the newest $2 by mtime); the directory's
+# scanner could not follow the script past the old shape. `[ -e ]` drops
+# the unmatched literal `*` an empty or absent directory leaves behind, so
+# nullglob is not needed either.
+_remember_prune_keep_newest() {
+    local dir=$1 keep=$2 f n=0 oldest nl skip
+    printf -v nl '\n'
+    skip=$nl
+    for f in "$dir"/*; do
+        [ -e "$f" ] && n=$((n + 1))
     done
-fi
-unset _remember_capture_seen_entries _remember_capture_seen_was_nullglob
+    while [ "$n" -gt "$keep" ]; do
+        oldest=""
+        for f in "$dir"/*; do
+            [ -e "$f" ] || continue
+            [[ "$skip" == *"$nl$f$nl"* ]] && continue
+            if [ -z "$oldest" ] || ! [ "$f" -nt "$oldest" ]; then
+                oldest=$f
+            fi
+        done
+        [ -n "$oldest" ] || break
+        rm -f "$oldest" 2>/dev/null
+        [ -e "$oldest" ] && skip="$skip$oldest$nl"
+        n=$((n - 1))
+    done
+    return 0
+}
+_remember_prune_keep_newest "$CAPTURE_SEEN_DIR" "$CAPTURE_SEEN_KEEP"
 
 # PREV_ID and PREV_JSONL were resolved once, above, for this check and for
 # recovery both. Guard against the honest zero-tool session too: a conversation

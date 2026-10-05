@@ -388,17 +388,21 @@ def test_capture_seen_prune_is_gated_on_the_threshold(tmp_path):
 
 def test_capture_seen_prune_still_fires_over_the_threshold(tmp_path):
     """Positive control for the gate above: one entry over CAPTURE_SEEN_KEEP,
-    the prune must run -- `ls -t` observed on the spawn log -- and leave
-    exactly CAPTURE_SEEN_KEEP entries behind. A gate that skipped the
-    prune outright would pass the test above and fail here.
+    the prune must run and leave exactly CAPTURE_SEEN_KEEP entries behind.
+    A gate that skipped the prune outright would pass the test above and
+    fail here.
+
+    #898 round 20: the prune no longer forks `ls -t | tail` at all -- it
+    counts with a glob and picks the oldest with bash's own `-nt` -- so the
+    run is observed by its effect, and the spawn log must stay free of
+    `ls` here too.
     """
     lines, result = _run_with_shim(
         tmp_path, extra_setup=lambda remember: _seed_capture_seen(remember, CAPTURE_SEEN_KEEP + 1)
     )
     assert result.returncode == 0, result.stderr
-    assert _prune_spawns(lines), (
-        f"{CAPTURE_SEEN_KEEP + 1} entries is over the threshold, so the prune must "
-        "actually run -- no `ls` against capture-alive.d was observed"
+    assert _prune_spawns(lines) == [], (
+        f"the prune must not fork `ls` against capture-alive.d: {_prune_spawns(lines)}"
     )
     seen_dir = tmp_path / "project" / ".remember" / "tmp" / "capture-alive.d"
     remaining = len(list(seen_dir.iterdir()))
