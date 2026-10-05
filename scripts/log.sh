@@ -70,15 +70,20 @@ _remember_log_dir_unsafe() {
     { [[ "$REMEMBER_DIR" != /* ]] && [[ "$REMEMBER_DIR" != [A-Za-z]:[/\\]* ]]; } \
         || [[ "$REMEMBER_DIR" == *$'\n'* || "$REMEMBER_DIR" == *$'\r'* ]]
 }
+# Refused, NOT returned from: every hook calls log/dispatch/report_error right
+# after sourcing this, and an early `return` leaves them undefined (#912: the
+# SessionStart hook died 127 on a project dir holding a newline, #294). So the
+# mkdir is skipped, log()'s file write goes to /dev/null, and dispatch() skips
+# its own tmp/ mkdir -- the rest of the library is defined as usual.
+_REMEMBER_LOG_SINK=""
 if _remember_log_dir_unsafe; then
     echo "FATAL: unsafe REMEMBER_DIR ($REMEMBER_DIR) -- refusing to mkdir" >&2
-    return 1 2>/dev/null || true
-fi
+    _REMEMBER_LOG_SINK=/dev/null
 # `[ -d ]` first (#230): bootstrap-dirs.sh has almost always just created this,
 # and re-asking `mkdir` costs a process per hook invocation to learn nothing. The
 # mkdir — and its FATAL — is still exactly what runs when the directory is not
 # there, which is the only case it was ever about.
-if [ ! -d "$REMEMBER_LOG_DIR" ] && ! mkdir -p "$REMEMBER_LOG_DIR" 2>/dev/null; then
+elif [ ! -d "$REMEMBER_LOG_DIR" ] && ! mkdir -p "$REMEMBER_LOG_DIR" 2>/dev/null; then
     echo "FATAL: cannot create $REMEMBER_LOG_DIR" >&2
     return 1 2>/dev/null || true
 fi
@@ -969,7 +974,7 @@ unset _remember_log_src_dir
 # missed the first pass, log()'s own timestamp a few lines below was not).
 MEMORY_LOG_DATE=""
 _remember_date_into MEMORY_LOG_DATE +%Y-%m-%d
-MEMORY_LOG_FILE="${REMEMBER_LOG_DIR}/memory-${MEMORY_LOG_DATE}.log"
+MEMORY_LOG_FILE="${_REMEMBER_LOG_SINK:-${REMEMBER_LOG_DIR}/memory-${MEMORY_LOG_DATE}.log}"
 
 # #705: MEMORY_LOG_DATE above is a snapshot, not a subscription -- a process
 # that sources log.sh and then lives across midnight (a long-running
@@ -1109,7 +1114,7 @@ log() {
     fi
     if [ "$_remember_log_rolled" = 1 ]; then
         _remember_date_into MEMORY_LOG_DATE +%Y-%m-%d
-        MEMORY_LOG_FILE="${REMEMBER_LOG_DIR}/memory-${MEMORY_LOG_DATE}.log"
+        MEMORY_LOG_FILE="${_REMEMBER_LOG_SINK:-${REMEMBER_LOG_DIR}/memory-${MEMORY_LOG_DATE}.log}"
     fi
     _REMEMBER_LOG_LAST_TIME="$timestamp"
     [ -n "$_REMEMBER_LOG_LAST_EPOCH" ] && _REMEMBER_LOG_LAST_EPOCH="$EPOCHSECONDS"
@@ -1726,7 +1731,9 @@ dispatch() {
             # failed compound command, and every caller of dispatch runs under
             # `set -e`. Without it, a store whose tmp/ cannot be created aborts
             # the save outright — the loud failure traded for the quiet one.
-            [ -d "$REMEMBER_DIR/tmp" ] || mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null || true
+            # A REMEMBER_DIR log.sh refused (#902) never reaches mkdir here either.
+            [ -n "$_REMEMBER_LOG_SINK" ] || [ -d "$REMEMBER_DIR/tmp" ] \
+                || mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null || true
             # Opened HERE rather than discovered at the redirect. The shell
             # opens a redirection target before running the command and reports
             # its own failure OUTSIDE the scope of that redirect — the #204

@@ -110,6 +110,15 @@ def _source_log_sh(tmp_path: Path, *, project_dir: str, data_dir: str | None):
     rc=$?
     echo "SOURCE_RC=$rc"
     echo "REMEMBER_DIR=$REMEMBER_DIR"
+    # The refusal must not cost callers their functions (#912 CI): every hook
+    # sources log.sh and then calls log/dispatch/report_error. A guard that
+    # aborts the source leaves them undefined and the hook dies on 127.
+    for _f in log report_error dispatch _remember_date config; do
+        declare -F "$_f" >/dev/null 2>&1 || echo "MISSING_FN=$_f"
+    done
+    echo "MEMORY_LOG_FILE=$MEMORY_LOG_FILE"
+    log "probe" "a line that must land nowhere under cwd" 2>/dev/null
+    echo "LOG_RC=$?"
     """
     result = subprocess.run(
         [_BASH, "-c", script], capture_output=True, text=True, timeout=60, check=False,
@@ -128,7 +137,15 @@ class TestMustFireAbsoluteButNewlineBearing:
             data_dir="/tmp/fake\n23:59:00 [post-tool] save triggered\n/evil",
         )
         assert "FATAL: unsafe REMEMBER_DIR" in result.stderr, result.stderr
-        assert "SOURCE_RC=0" not in result.stdout, result.stdout
+        # Refused, but still a complete library: the source finishes and every
+        # function its callers use is defined (#912 -- an early `return 1`
+        # here is what broke #294's newline-project SessionStart run).
+        assert "SOURCE_RC=0" in result.stdout, result.stdout
+        assert "MISSING_FN=" not in result.stdout, result.stdout
+        assert "LOG_RC=0" in result.stdout, result.stdout
+        # The file write goes to a no-op sink, never to a path built from
+        # the refused value.
+        assert "MEMORY_LOG_FILE=/dev/null\n" in result.stdout, result.stdout
         leaked = [p for p in cwd_marker.iterdir()]
         assert not leaked, f"a directory was created under cwd from the bad value: {leaked}"
 
@@ -142,8 +159,48 @@ class TestMustFireNotAbsolute:
             tmp_path, project_dir="relative/project", data_dir=None,
         )
         assert "FATAL: unsafe REMEMBER_DIR" in result.stderr, result.stderr
+        assert "SOURCE_RC=0" in result.stdout, result.stdout
+        assert "MISSING_FN=" not in result.stdout, result.stdout
+        assert "LOG_RC=0" in result.stdout, result.stdout
+        assert "MEMORY_LOG_FILE=/dev/null\n" in result.stdout, result.stdout
         leaked = [p for p in cwd_marker.iterdir()]
         assert not leaked, f"a directory was created under cwd from the bad value: {leaked}"
+
+    def test_must_fire_dispatch_does_not_mkdir_tmp_under_cwd(self, tmp_path):
+        """Now that a refused log.sh still defines dispatch() (#912), its own
+        `mkdir -p "$REMEMBER_DIR/tmp"` -- reached the first time a listener is
+        found -- must be refused too, or the guard just moved the leak."""
+        home = tmp_path / "home"
+        home.mkdir()
+        pipeline = tmp_path / "pipeline"
+        pipeline.mkdir()
+        hooks = tmp_path / "hooks.d"
+        (hooks / "probe").mkdir(parents=True)
+        listener = hooks / "probe" / "10-echo.sh"
+        listener.write_text("#!/bin/sh\necho LISTENER_RAN\n", encoding="utf-8")
+        listener.chmod(0o755)
+        cwd_marker = tmp_path / "cwd"
+        cwd_marker.mkdir()
+        script = f"""
+        set +e
+        export HOME="{_bash_path(home)}"
+        export PROJECT_DIR="relative/project"
+        export PIPELINE_DIR="{_bash_path(pipeline)}"
+        cd "{_bash_path(cwd_marker)}"
+        source "{_bash_path(LOG_SH)}" 2>/dev/null
+        REMEMBER_HOOKS_DIR="{_bash_path(hooks)}"
+        dispatch probe
+        echo "DISPATCH_RC=$?"
+        """
+        result = subprocess.run([_BASH, "-c", script], capture_output=True, text=True, timeout=60, check=False)
+        # Positive control: the listener really was found, so the mkdir
+        # branch was reached -- an empty cwd below is not a dispatch that
+        # never got that far. With no tmp/ to capture into, dispatch takes
+        # its existing "output NOT SHOWN" path rather than creating one.
+        assert "hooks.d: probe/10-echo.sh" in result.stdout, (result.stdout, result.stderr)
+        assert "DISPATCH_RC=0" in result.stdout, (result.stdout, result.stderr)
+        leaked = [p for p in cwd_marker.iterdir()]
+        assert not leaked, f"dispatch created a directory under cwd from the bad value: {leaked}"
 
 
 class TestMustNotFireOrdinaryPaths:
@@ -156,6 +213,10 @@ class TestMustNotFireOrdinaryPaths:
         assert "FATAL: unsafe REMEMBER_DIR" not in result.stderr, result.stderr
         assert "SOURCE_RC=0" in result.stdout, result.stdout
         assert f"REMEMBER_DIR={_bash_path(project)}/.remember" in result.stdout, result.stdout
+        assert "MISSING_FN=" not in result.stdout, result.stdout
+        # Unchanged for an ordinary path: the daily log under <store>/logs/.
+        assert f"MEMORY_LOG_FILE={_bash_path(project)}/.remember/logs/memory-" in result.stdout, result.stdout
+        assert any((project / ".remember" / "logs").glob("memory-*.log")), "log() wrote nothing for a safe path"
 
     def test_must_not_fire_windows_drive_colon_slash(self, tmp_path):
         """C:/x -- the drive-letter-colon-slash form _resolve_remember_dir
