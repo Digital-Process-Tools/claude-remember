@@ -2172,123 +2172,91 @@ GRACE_MIN=5
 # Legacy (un-namespaced) mode never matches the glob below regardless: it
 # only ever matches "remember.delivered.<something>", and the shared-mode
 # file is exactly "remember.delivered" with no trailing dot.
-if [ -d "$SESSIONS_DIR" ] && [ -d "$REMEMBER_DIR/tmp" ]; then
-    # #517: normalize before the glob -- REMEMBER_DIR arrives backslash-
-    # separated on msys/cygwin, and bash's glob only ever splits on '/', so
-    # without this the sweep below silently never fires there, leaking one
-    # stale delivery record per session forever (the #373 leak this sweep
-    # exists to stop, just on the one platform it was never proven to
-    # cover). _remember_stale_record itself then expands with '/'
-    # separators from this normalized directory, so the existing
-    # ##*/remember.delivered. strip further down still matches.
-    _remember_delivered_glob_dir=""
-    _remember_forward_slash_into _remember_delivered_glob_dir "$REMEMBER_DIR"
-    for _remember_stale_record in "$_remember_delivered_glob_dir"/tmp/remember.delivered.*; do
-        [ -f "$_remember_stale_record" ] || continue
-        _remember_stale_id="${_remember_stale_record##*/remember.delivered.}"
-        [ -n "$_remember_stale_id" ] || continue
-        # Never sweep the record this very invocation just wrote.
-        [ "$_remember_stale_id" = "$CURRENT_SESSION_ID" ] && continue
-        if [ ! -e "$SESSIONS_DIR/$_remember_stale_id.jsonl" ]; then
-            # #393: an absent transcript is not proof the session is over --
-            # it is also what a session still inside its own startup window
-            # looks like. Read the record's own mtime rather than shelling
-            # out to `find -mmin`: `find` is the one command on this path
-            # with a real PATH-shadowing risk on Windows Git Bash
-            # (System32's find.exe can resolve ahead of MinGW's find on
-            # some setups and silently answers a different question), so it
-            # would degrade "prune" into a silent always-keep with nothing
-            # surfaced. `stat` uses the same GNU-first-then-BSD-fallback
-            # order already used by doctor.sh:257 and lib-lock.sh:183 for
-            # exactly this portability split -- GNU first, because GNU
-            # `stat -f` on Linux pollutes stdout with a filesystem block
-            # before failing (the #327/#1072 class), so trying it second,
-            # only after `-c` has already failed cleanly, is load-bearing
-            # order and not a stylistic choice.
-            _remember_stale_mtime=$(stat -c %Y "$_remember_stale_record" 2>/dev/null) \
-                || _remember_stale_mtime=$(stat -f %m "$_remember_stale_record" 2>/dev/null) \
-                || _remember_stale_mtime=""
-            # Empty (stat failed outright) and non-numeric (stat exited 0 but
-            # printed something that is not a timestamp) are both
-            # could-not-tell, same safe direction as an unreadable
-            # $SESSIONS_DIR above -- caught in the same test so a
-            # non-empty garbage read cannot be coerced to 0 and then treated
-            # by the -gt 0 gate below as a confirmed, comparable age (found
-            # during #402's own review: the previous split of this check
-            # only caught the fully-empty shape, and the -gt 0 gate does not
-            # tell "confirmed zero" apart from "coerced from garbage").
-            if [ -z "$_remember_stale_mtime" ] || [[ "$_remember_stale_mtime" == *[!0-9]* ]]; then
-                continue
-            fi
-            # _remember_date +%s -- same call site convention as
-            # the PostToolUse hook's own stdin-size handling. lib-clock.sh routes %s to `date`
-            # unconditionally (never the printf builtin), and `_remember_date`
-            # itself already falls back to plain `date` with no TZ set, so
-            # this is not expected to fail on this path -- but #402 found
-            # that when it does (empty output, or a non-numeric one), the
-            # -gt 0 gates below silently coerced "could not read the clock"
-            # into "confirmed outside the grace window", the opposite of
-            # what an unreadable mtime does three lines above. Refuse to
-            # guess in either failure shape, same as the mtime check does.
-            _remember_now=""
-            _remember_date_into _remember_now +%s
-            if [ -z "$_remember_now" ] || [[ "$_remember_now" == *[!0-9]* ]]; then
-                continue
-            fi
-            if [ "$_remember_now" -gt 0 ] && [ "$_remember_stale_mtime" -gt 0 ] \
-                && [ $((10#$_remember_now - 10#$_remember_stale_mtime)) -lt $((GRACE_MIN * 60)) ]; then
-                continue
-            fi
-            rm -f "$_remember_stale_record" 2>/dev/null
-        fi
-    done
-    unset _remember_stale_record _remember_stale_id _remember_stale_mtime _remember_now GRACE_MIN
-fi
-
+#
 # ── Prune stale session-keyed handoff-path hints (#738) ───────────────────
 # The session-keyed pointer written above, tmp/handoff-path.<session_id>,
 # accumulates one file per session that ever started, same as the
-# remember.delivered.<session_id> records #373 already prunes just above --
-# and for the same reason nothing else in this codebase removes one. Same
-# sweep, same coupling (a live transcript under $SESSIONS_DIR means the
-# session could still resume and call /remember; one gone in every way this
-# hook can observe is genuinely over), same GRACE_MIN window so a session
-# still inside its own SessionStart-to-transcript-creation gap (#393) is
-# never mistaken for a dead one. Deliberately a second, self-contained loop
-# rather than folded into the one above: the two glob patterns
-# (remember.delivered.* vs handoff-path.*) live in different files with
-# different prefixes to strip, and #373's own loop already unset every
-# local it used, so nothing survives here to reuse.
-GRACE_MIN=5
-if [ -d "$SESSIONS_DIR" ] && [ -d "$REMEMBER_DIR/tmp" ]; then
-    _remember_handoff_glob_dir=""
-    _remember_forward_slash_into _remember_handoff_glob_dir "$REMEMBER_DIR"
-    for _remember_stale_hint in "$_remember_handoff_glob_dir"/tmp/handoff-path.*; do
-        [ -f "$_remember_stale_hint" ] || continue
-        _remember_stale_id="${_remember_stale_hint##*/handoff-path.}"
-        [ -n "$_remember_stale_id" ] || continue
-        # Never sweep the hint this very invocation just wrote.
-        [ "$_remember_stale_id" = "$CURRENT_SESSION_ID" ] && continue
-        if [ ! -e "$SESSIONS_DIR/$_remember_stale_id.jsonl" ]; then
-            _remember_stale_mtime=$(stat -c %Y "$_remember_stale_hint" 2>/dev/null) \
-                || _remember_stale_mtime=$(stat -f %m "$_remember_stale_hint" 2>/dev/null) \
-                || _remember_stale_mtime=""
-            if [ -z "$_remember_stale_mtime" ] || [[ "$_remember_stale_mtime" == *[!0-9]* ]]; then
-                continue
-            fi
-            _remember_now=""
-            _remember_date_into _remember_now +%s
-            if [ -z "$_remember_now" ] || [[ "$_remember_now" == *[!0-9]* ]]; then
-                continue
-            fi
-            if [ "$_remember_now" -gt 0 ] && [ "$_remember_stale_mtime" -gt 0 ] \
-                && [ $((10#$_remember_now - 10#$_remember_stale_mtime)) -lt $((GRACE_MIN * 60)) ]; then
-                continue
-            fi
-            rm -f "$_remember_stale_hint" 2>/dev/null
+# remember.delivered.<session_id> records -- and for the same reason nothing
+# else in this codebase removes one. Same sweep, same coupling (a live
+# transcript under $SESSIONS_DIR means the session could still resume and
+# call /remember; one gone in every way this hook can observe is genuinely
+# over), same GRACE_MIN window so a session still inside its own
+# SessionStart-to-transcript-creation gap (#393) is never mistaken for a
+# dead one. One helper serves both (#898): the two differ only in the
+# filename prefix in front of the session id.
+#
+# _remember_prune_stale_session_files <prefix>
+#   Removes $REMEMBER_DIR/tmp/<prefix>.<session_id> for every session id
+#   other than CURRENT_SESSION_ID whose transcript is absent from
+#   $SESSIONS_DIR and whose file is older than GRACE_MIN minutes. Every
+#   could-not-tell (unreadable mtime, unreadable clock) keeps the file.
+_remember_prune_stale_session_files() {
+    local _prefix="$1" _glob_dir="" _file _id _mtime _now
+    # #517: normalize before the glob -- REMEMBER_DIR arrives backslash-
+    # separated on msys/cygwin, and bash's glob only ever splits on '/', so
+    # without this the sweep below silently never fires there, leaking one
+    # stale record per session forever (the #373 leak this sweep exists to
+    # stop, just on the one platform it was never proven to cover). _file
+    # then expands with '/' separators from this normalized directory, so
+    # the ##*/<prefix>. strip below still matches.
+    _remember_forward_slash_into _glob_dir "$REMEMBER_DIR"
+    for _file in "$_glob_dir"/tmp/"$_prefix".*; do
+        [ -f "$_file" ] || continue
+        _id="${_file##*/"$_prefix".}"
+        [ -n "$_id" ] || continue
+        # Never sweep the file this very invocation just wrote.
+        [ "$_id" = "$CURRENT_SESSION_ID" ] && continue
+        [ ! -e "$SESSIONS_DIR/$_id.jsonl" ] || continue
+        # #393: an absent transcript is not proof the session is over -- it
+        # is also what a session still inside its own startup window looks
+        # like. Read the file's own mtime rather than shelling out to
+        # `find -mmin`: `find` is the one command on this path with a real
+        # PATH-shadowing risk on Windows Git Bash (System32's find.exe can
+        # resolve ahead of MinGW's find on some setups and silently answers
+        # a different question), so it would degrade "prune" into a silent
+        # always-keep with nothing surfaced. `stat` uses the same
+        # GNU-first-then-BSD-fallback order already used by doctor.sh and
+        # lib-lock.sh for exactly this portability split -- GNU first,
+        # because GNU `stat -f` on Linux pollutes stdout with a filesystem
+        # block before failing (the #327/#1072 class), so trying it second,
+        # only after `-c` has already failed cleanly, is load-bearing order
+        # and not a stylistic choice.
+        _mtime=$(stat -c %Y "$_file" 2>/dev/null) \
+            || _mtime=$(stat -f %m "$_file" 2>/dev/null) \
+            || _mtime=""
+        # Empty (stat failed outright) and non-numeric (stat exited 0 but
+        # printed something that is not a timestamp) are both
+        # could-not-tell, same safe direction as an unreadable
+        # $SESSIONS_DIR -- caught in the same test so a non-empty garbage
+        # read cannot be coerced to 0 and then treated by the -gt 0 gate
+        # below as a confirmed, comparable age (#402's own review).
+        if [ -z "$_mtime" ] || [[ "$_mtime" == *[!0-9]* ]]; then
+            continue
         fi
+        # lib-clock.sh routes %s to `date` unconditionally (never the printf
+        # builtin), and `_remember_date` itself already falls back to plain
+        # `date` with no TZ set, so this is not expected to fail -- but #402
+        # found that when it does (empty output, or a non-numeric one), the
+        # -gt 0 gates below silently coerced "could not read the clock" into
+        # "confirmed outside the grace window", the opposite of what an
+        # unreadable mtime does just above. Refuse to guess in either shape.
+        _now=""
+        _remember_date_into _now +%s
+        if [ -z "$_now" ] || [[ "$_now" == *[!0-9]* ]]; then
+            continue
+        fi
+        if [ "$_now" -gt 0 ] && [ "$_mtime" -gt 0 ] \
+            && [ $((10#$_now - 10#$_mtime)) -lt $((GRACE_MIN * 60)) ]; then
+            continue
+        fi
+        rm -f "$_file" 2>/dev/null
     done
-    unset _remember_handoff_glob_dir _remember_stale_hint _remember_stale_id _remember_stale_mtime _remember_now
+    return 0
+}
+
+if [ -d "$SESSIONS_DIR" ] && [ -d "$REMEMBER_DIR/tmp" ]; then
+    _remember_prune_stale_session_files remember.delivered
+    _remember_prune_stale_session_files handoff-path
 fi
 unset GRACE_MIN
 

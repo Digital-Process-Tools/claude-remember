@@ -58,9 +58,6 @@ from _glob_backslash_517 import (
     extract_function as extract_function_517,
 )
 from _glob_backslash_517 import (
-    extract_lines as extract_lines_517,
-)
-from _glob_backslash_517 import (
     run_block as run_block_517,
 )
 
@@ -527,10 +524,13 @@ class TestStaleDeliveryRecordsPruningGlobBackslash517:
     compiled default regardless of the parent environment).
     """
 
-    _BLOCK = extract_lines_517(
-        "scripts/session-start-hook.sh",
-        '_remember_delivered_glob_dir=""',
-        "    done",
+    # #898: the sweep is one helper shared with the #738 handoff-path sweep;
+    # the block under test is that helper's real body, called the way the
+    # hook calls it for delivery records.
+    _BLOCK = (
+        extract_function_517(
+            "scripts/session-start-hook.sh", "_remember_prune_stale_session_files")
+        + "\n_remember_prune_stale_session_files remember.delivered"
     )
 
     def _run(self, remember_dir: str, sessions_dir, current_session_id: str, ostype: str):

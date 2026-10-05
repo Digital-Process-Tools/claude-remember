@@ -143,7 +143,7 @@ done''',
     echo kept
 done''',
         "site": ("scripts/session-start-hook.sh",
-              'if [ -z "$_remember_now" ] || [[ "$_remember_now" == *[!0-9]* ]]; then'),
+              'if [ -z "$_now" ] || [[ "$_now" == *[!0-9]* ]]; then'),
     },
     "newline or carriage return": {
         "old": r'''case "$x" in
