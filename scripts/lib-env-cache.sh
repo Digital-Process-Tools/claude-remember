@@ -208,10 +208,7 @@ _remember_env_cache_load() {
     [ "${REMEMBER_ENV_CACHE:-1}" = "1" ] || return 1
     _remember_env_cache_path || return 1
     local _f="$_REMEMBER_ENV_CACHE_FILE"
-    [ -f "$_f" ] || return 1
-    [ -L "$_f" ] && return 1
-    [ -O "$_f" ] || return 1
-    [ -r "$_f" ] || return 1
+    [ -f "$_f" ] && [ ! -L "$_f" ] && [ -O "$_f" ] && [ -r "$_f" ] || return 1
 
     local _line _dir="" _tz="" _mem="" _proj="" _pipe="" _stamp=""
     local _cooldown="" _delta="" _cfg_exists_raw="" _cfg_raw=""

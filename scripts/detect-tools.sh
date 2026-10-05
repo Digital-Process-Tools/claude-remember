@@ -94,10 +94,7 @@ _jq_fallback() {
 _remember_tools_cache_load() {
     [ "${REMEMBER_TOOLS_CACHE:-1}" = "1" ] || return 1
     local _f="$_REMEMBER_TOOLS_CACHE"
-    [ -f "$_f" ] || return 1
-    [ -L "$_f" ] && return 1
-    [ -O "$_f" ] || return 1
-    [ -r "$_f" ] || return 1
+    [ -f "$_f" ] && [ ! -L "$_f" ] && [ -O "$_f" ] && [ -r "$_f" ] || return 1
     local _line _path="" _py="" _jq=""
     # `[ ]` prefix tests, not a `case` with a catch-all `*)` arm inside this
     # loop (#898 round 7 -- that shape is one the plugin directory's

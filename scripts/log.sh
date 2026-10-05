@@ -433,10 +433,7 @@ _remember_cfg_flatten_cache_load() {
     _remember_cfg_flatten_cache_is_standard_merge || return 1
     local _f
     _f=$(_remember_cfg_flatten_cache_path) || return 1
-    [ -f "$_f" ] || return 1
-    [ -L "$_f" ] && return 1
-    [ -O "$_f" ] || return 1
-    [ -r "$_f" ] || return 1
+    [ -f "$_f" ] && [ ! -L "$_f" ] && [ -O "$_f" ] && [ -r "$_f" ] || return 1
     # #843: the per-source existence manifest, compared after the identity
     # line is read below; also a miss when any existing layer is not older
     # than the cache.
