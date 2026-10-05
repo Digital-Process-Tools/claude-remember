@@ -717,6 +717,7 @@ def check_tree(root: Path, budget: dict) -> CheckResult:
     _check_backslash_quote(files, kinds, off)
     _check_catch_all_in_loop(files, kinds, off)
     _check_case_statement(files, kinds, off)
+    _check_single_line_delegate_positional(files, kinds, off)
     _check_dot_string(files, kinds, result.reviews)
     _check_escaped_quote(files, kinds, result.reviews)
     _check_slash_glob_case(files, kinds, result.reviews)
@@ -1495,6 +1496,58 @@ def _check_case_statement(files: dict, kinds: dict, off: list) -> None:
             off.append(f"{rel}:{n}: a case statement -- the directory's scanner "
                        f"mis-parses case; write it as if/elif with [ ] or [[ == ]] tests: "
                        f"{line.strip()[:80]}")
+
+
+_FUNC_DEF = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\(\)\s*\{\n(.*?)^\}\n", re.MULTILINE | re.DOTALL)
+_POSITIONAL_IN_STRING = re.compile(r"\$\{?[1-9]")
+_SINGLE_LINE_DELEGATE_EXEMPT_WORDS = {
+    "if", "then", "else", "elif", "fi", "case", "esac", "for", "while",
+    "until", "do", "done", "function", "return", "local", "declare",
+    "export", "readonly", "unset", "shift", "exit", "break", "continue",
+    "eval", "source", ".", "trap", "set", "builtin", "command", "type",
+    "typeset", "echo", "printf", "read", "test", "true", "false", "time",
+    "exec", "wait",
+}
+
+
+def _check_single_line_delegate_positional(files: dict, kinds: dict, off: list) -> None:
+    """#905: a shell function whose whole body is a single call to another
+    function with a positional parameter ($1..$9, ${1}..) spliced into a
+    string argument -- FAIL. claude-directory-publishing triggers.md 14:
+    #899 folded scripts/log.sh's three dispatch reporters into one-liners
+    like `report_error "dispatch" "ERROR: hook failed: $1/$2 (exit $3): $4"`,
+    and the portal held exactly the three hooks that compile that dispatch
+    in, as COMMAND_SCRIPT_NOT_FOLLOWED. It cleared only once each reporter
+    went back to a self-contained body: its own locals, its own #618
+    flatten, its own writes (#899 r40) -- never delegate a positional splice
+    through another call. A bare "$1" (a named-local-style passthrough) is
+    fine; "$1" spliced into a longer message string is the held shape."""
+    for rel, data in sorted(files.items()):
+        top = rel.split("/")[0]
+        if top not in _SCRIPT_DIRS or kinds.get(rel) != "text" or not rel.endswith(".sh"):
+            continue
+        text = data.decode("utf-8")
+        for m in _FUNC_DEF.finditer(text):
+            name, body = m.group(1), m.group(2)
+            code = [ln for ln in body.splitlines()
+                    if ln.strip() and not ln.lstrip().startswith("#")]
+            if len(code) != 1:
+                continue
+            line = code[0].strip()
+            first = re.match(r"[^\s()]+", line)
+            first_word = first.group(0) if first else ""
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", first_word):
+                continue
+            if first_word in _SINGLE_LINE_DELEGATE_EXEMPT_WORDS:
+                continue
+            quoted = re.findall(r'"[^"]*"', line)
+            if any(_POSITIONAL_IN_STRING.search(q)
+                   and not re.fullmatch(r'"\$\{?[1-9]\}?"', q) for q in quoted):
+                n = text[:m.start(2)].count("\n") + 1
+                off.append(f"{rel}:{n}: {name} delegates its whole body to "
+                           f"{first_word!r} with a positional parameter spliced "
+                           f"into a string argument -- give it its own locals, "
+                           f"own flatten, own writes: {line[:80]}")
 
 
 def _check_credential_shaped_name(files: dict, kinds: dict, off: list) -> None:

@@ -348,6 +348,34 @@ it. Move work the hook does not need at that event out of its source chain, or d
 tree-shaker cannot prove unreachable. `python3 .github/scripts/compile_hooks.py --repo .` prints
 each hook's compiled size without writing anything.
 
+**This already gates every pull request, not only a release (#904).**
+`tests/test_strip_shell_comments_900.py::test_this_repository_built_tree_has_no_check_failures`
+builds the full release tree and asserts `check_release_tree.py` reports zero offenders --
+`_check_hook_script_size` included -- and that test is collected by the ordinary `pytest` job
+(`.github/workflows/tests.yml`), which runs on every pull request across the whole OS x Python
+matrix, not only the separate `hook-tests-compiled` job that recompiles hooks in place. A hook (or
+a library it compiles in) that crosses the 120 KiB budget already fails CI before merge; nothing
+further was added for this.
+
+A `.claude/jit-context` entry (`paths/00-manual/hook-script-size-budget.md`) also fires on any
+edit under `scripts/*.sh`, stating the 128 KiB scanner limit, the 120 KiB release budget, and the
+scanner's other known triggers below.
+
+### A one-line delegate splicing a positional parameter into a string (#905)
+
+claude-directory-publishing triggers.md 14: #899 folded `scripts/log.sh`'s three dispatch
+reporters into one-liners, e.g. `report_error "dispatch" "ERROR: hook failed: $1/$2 (exit $3): $4"`,
+and the portal held exactly the three hooks that compile that dispatch in, as
+`COMMAND_SCRIPT_NOT_FOLLOWED`. It cleared only once each reporter went back to a self-contained
+body -- its own locals, its own `#618` flatten, its own writes (r40).
+
+`check_release_tree.py`'s `_check_single_line_delegate_positional` now FAILs any shipped shell
+function whose whole body is a single call to another function with a positional parameter
+(`$1`..`$9`, `${1}`..) spliced into a string argument, anywhere in a shipped `.sh` -- not only the
+three named reporters `tests/test_dispatch_reporter_shape_898.py` already pins. A bare `"$1"` (a
+named-local-style passthrough) is fine; `"$1"` embedded in a longer message string is the held
+shape.
+
 ## What the Anthropic directory actually measured
 
 [`claude-jit-context`'s own write-up](https://github.com/Digital-Process-Tools/claude-jit-context/blob/main/docs/directory-validator.md)
