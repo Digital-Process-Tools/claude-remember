@@ -410,6 +410,30 @@ _remember_cfg_flatten_q_decode() {
     printf -v "$1" '%b' "$2"
 }
 
+# _remember_cfg_flatten_cache_exists_into VAR [CACHE]
+# VAR gets one 1/0 digit per standard source, in
+# _remember_cfg_flatten_cache_sources order: does it exist right now (#843).
+# A layer that never existed cannot have changed, so -nt is the right answer
+# for it; a layer that EXISTED at publish and was since DELETED changes no
+# mtime, which is why the loader also compares this manifest. With CACHE,
+# returns 1 as soon as an existing source is not strictly older than it
+# (-nt: never a tie -- the "ambiguous means miss" guardrail of #668).
+# Shared by the loader and the publisher (#898).
+_remember_cfg_flatten_cache_exists_into() {
+    local _src _sources _m=""
+    _sources=$(_remember_cfg_flatten_cache_sources)
+    while IFS= read -r _src; do
+        [ -n "$_src" ] || continue
+        if [ -e "$_src" ]; then
+            _m="${_m}1"
+            [ -z "${2:-}" ] || [ "$2" -nt "$_src" ] || return 1
+        else
+            _m="${_m}0"
+        fi
+    done <<< "$_sources"
+    printf -v "$1" '%s' "$_m"
+}
+
 _remember_cfg_flatten_cache_load() {
     [ "${REMEMBER_CONFIG_CACHE:-1}" = "1" ] || return 1
     _remember_cfg_flatten_cache_is_standard_merge || return 1
@@ -419,28 +443,11 @@ _remember_cfg_flatten_cache_load() {
     [ -L "$_f" ] && return 1
     [ -O "$_f" ] || return 1
     [ -r "$_f" ] || return 1
-    local _src _sources _exists_now=""
-    _sources=$(_remember_cfg_flatten_cache_sources)
-    while IFS= read -r _src; do
-        [ -n "$_src" ] || continue
-        # #843: a layer that never existed cannot have changed, so -nt is
-        # the right answer for it (true against an absent file). A layer
-        # that EXISTED when the cache was published and was since DELETED
-        # is a different case -- deleting it changes no mtime this -nt
-        # check looks at, so the comparison alone would say "fresh" forever.
-        # Build a manifest of current existence per source here, and after
-        # the identity line is read below, reject any cache whose manifest
-        # does not match this run's -- a layer appearing or vanishing is
-        # always a miss, never silently absorbed into "nothing changed".
-        if [ -e "$_src" ]; then
-            _exists_now="${_exists_now}1"
-            # -nt: strictly newer, never a tie -- the same "ambiguous means
-            # miss" guardrail #668 asks for everywhere else in this codebase.
-            [ "$_f" -nt "$_src" ] || return 1
-        else
-            _exists_now="${_exists_now}0"
-        fi
-    done <<< "$_sources"
+    # #843: the per-source existence manifest, compared after the identity
+    # line is read below; also a miss when any existing layer is not older
+    # than the cache.
+    local _exists_now=""
+    _remember_cfg_flatten_cache_exists_into _exists_now "$_f" || return 1
 
     # Validate BEFORE trusting a single byte of it -- see the #682 block
     # comment above this whole section for why a shared-tmp-dir file is
@@ -576,7 +583,7 @@ _remember_cfg_flatten_cache_publish() {
     [ -d "$_dir" ] || mkdir -p "$_dir" 2>/dev/null || return 0
     local _t
     _t=$(mktemp "${_f}.XXXXXX" 2>/dev/null) || return 0
-    local _k _v _src _sources _exists_now=""
+    local _k _v _exists_now=""
     # #843: record which of the standard sources exist RIGHT NOW, in the
     # same order _remember_cfg_flatten_cache_sources always returns them in.
     # The loader compares this against its own fresh read of the same
@@ -584,15 +591,7 @@ _remember_cfg_flatten_cache_publish() {
     # load is always a miss -- the exact gap an mtime-only -nt check cannot
     # see for a DELETED layer (deleting a file changes no mtime a -nt check
     # looks at).
-    _sources=$(_remember_cfg_flatten_cache_sources)
-    while IFS= read -r _src; do
-        [ -n "$_src" ] || continue
-        if [ -e "$_src" ]; then
-            _exists_now="${_exists_now}1"
-        else
-            _exists_now="${_exists_now}0"
-        fi
-    done <<< "$_sources"
+    _remember_cfg_flatten_cache_exists_into _exists_now
     {
         # Identity line FIRST, always -- see the #682 comment in the loader
         # above for why a file at this (many-to-one-mangled) path cannot be
