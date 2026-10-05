@@ -974,7 +974,11 @@ unset _remember_log_src_dir
 # missed the first pass, log()'s own timestamp a few lines below was not).
 MEMORY_LOG_DATE=""
 _remember_date_into MEMORY_LOG_DATE +%Y-%m-%d
-MEMORY_LOG_FILE="${_REMEMBER_LOG_SINK:-${REMEMBER_LOG_DIR}/memory-${MEMORY_LOG_DATE}.log}"
+if [ -n "$_REMEMBER_LOG_SINK" ]; then
+    MEMORY_LOG_FILE="$_REMEMBER_LOG_SINK"
+else
+    MEMORY_LOG_FILE="${REMEMBER_LOG_DIR}/memory-${MEMORY_LOG_DATE}.log"
+fi
 
 # #705: MEMORY_LOG_DATE above is a snapshot, not a subscription -- a process
 # that sources log.sh and then lives across midnight (a long-running
@@ -1114,7 +1118,11 @@ log() {
     fi
     if [ "$_remember_log_rolled" = 1 ]; then
         _remember_date_into MEMORY_LOG_DATE +%Y-%m-%d
-        MEMORY_LOG_FILE="${_REMEMBER_LOG_SINK:-${REMEMBER_LOG_DIR}/memory-${MEMORY_LOG_DATE}.log}"
+        if [ -n "$_REMEMBER_LOG_SINK" ]; then
+            MEMORY_LOG_FILE="$_REMEMBER_LOG_SINK"
+        else
+            MEMORY_LOG_FILE="${REMEMBER_LOG_DIR}/memory-${MEMORY_LOG_DATE}.log"
+        fi
     fi
     _REMEMBER_LOG_LAST_TIME="$timestamp"
     [ -n "$_REMEMBER_LOG_LAST_EPOCH" ] && _REMEMBER_LOG_LAST_EPOCH="$EPOCHSECONDS"
