@@ -541,10 +541,10 @@ _ROUND_19_DIVERGENCE = {
             '        linux*) return 0 ;;\n'
             '    esac\n'
             '    return 1\n',
-            '    [ "${REMEMBER_UTF8_STRICT:-0}" = "1" ] && return 0\n'
+            # #898 r41: one expression ending the function, whose status is
+            # the answer (test_case_rewrite_equivalence_898, "a prefix glob").
             '    local _os="${OSTYPE:-}"\n'
-            '    [ "${_os#linux}" != "$_os" ] && return 0\n'
-            '    return 1\n',
+            '    [ "${REMEMBER_UTF8_STRICT:-0}" = "1" ] || [ "${_os#linux}" != "$_os" ]\n',
         ),
         (
             '    fi\n'
