@@ -933,147 +933,88 @@ _transcript_is_pluginless_sdk() {
     return 1
 }
 
-# Args: $1 — sessions dir. Prints the newest transcript that is not this
-# session's, or nothing.
-#
-# #819: the #745 retry (excludes a pluginless-SDK transcript and restarts)
-# was itself quadratic -- every excluded candidate re-ran a FULL glob pass
-# PLUS a `case " $excluded " in *" $f "*)` string scan against an
-# ever-growing string, so a directory whose newest files are mostly headless
-# runs (thousands of them, in the field) never realistically finished: a
-# hook with no parent left to read its output, spinning at 30-60% CPU for
-# 70+ minutes.
-#
-# Fixed by separating "which files are in play" from "which one is newest
-# among those not yet excluded": the glob itself still runs exactly ONCE,
-# into an array (`candidates`), and exclusion is tracked by array INDEX
-# (`taken`) rather than by growing a string every real transcript then has
-# to be compared against. Finding "the newest not-yet-taken" still walks the
-# whole array on every retry -- that part is unchanged in shape -- but it is
-# now bounded by `_PREV_TRANSCRIPT_EXCLUDE_CAP` retries rather than by how
-# many pluginless transcripts happen to exist: worst case is (cap + 1) * n
-# array comparisons, never n * (however many thousand headless runs sit in
-# the directory). A "previous session" hidden behind that many headless runs
-# is not worth finding (the issue's own words) -- past the cap this returns
-# nothing rather than keep looking. Comparing mtimes still uses bash's own
-# `-nt` TEST BUILTIN (no fork) rather than forking `ls -t` to sort the whole
-# directory (#691); the content scan only ever runs against a candidate that
-# is already "newest so far", never against every file in the directory.
+# How many pluginless-SDK transcripts (#745) the previous-transcript lookup
+# below passes over before it gives up (#819).
 # `:-`, not a plain `=`, so a value already set in the calling environment
 # survives (self-review finding, Explore round: a bare `=20` here
-# unconditionally clobbers any caller-supplied override before either
-# function ever reads it via its own `${_PREV_TRANSCRIPT_EXCLUDE_CAP:-20}`
+# unconditionally clobbers any caller-supplied override before the
+# lookup ever reads it via its own `${_PREV_TRANSCRIPT_EXCLUDE_CAP:-20}`
 # fallback below, making the "configurable" cap dead code in production --
 # always exactly 20 regardless of what the environment set).
 _PREV_TRANSCRIPT_EXCLUDE_CAP="${_PREV_TRANSCRIPT_EXCLUDE_CAP:-20}"
-previous_transcript() {
-    local dir=$1 f base newest="" tries=0 i best_idx
-    local -a candidates=()
-    local -a taken=()
-    for f in "$dir"/*.jsonl; do
-        [ -e "$f" ] || continue
-        base=${f##*/}
-        base=${base%.jsonl}
-        [ "$base" = "$CURRENT_SESSION_ID" ] && continue
-        candidates+=("$f")
-    done
-    while :; do
-        newest="" best_idx=-1 i=0
-        for f in "${candidates[@]}"; do
-            if [ -z "${taken[$i]:-}" ]; then
-                if [ -z "$newest" ] || [ "$f" -nt "$newest" ]; then
-                    newest=$f
-                    best_idx=$i
-                fi
-            fi
-            i=$((i + 1))
-        done
-        [ -z "$newest" ] && break
-        if _transcript_is_pluginless_sdk "$newest"; then
-            # #745: never picked as "the previous session" at all -- neither
-            # the notice nor recovery's force-save may aim at a transcript no
-            # plugin was ever loaded into. Keep looking for the next-newest
-            # eligible one; a run of several such pairs is excluded one at a
-            # time rather than assumed to be exactly one or two.
-            taken[$best_idx]=1
-            tries=$((tries + 1))
-            if [ "$tries" -ge "${_PREV_TRANSCRIPT_EXCLUDE_CAP:-20}" ]; then
-                # #823: this used to return exactly the same empty result as
-                # "no previous transcript exists at all", so a real one
-                # sitting behind more than the cap's worth of pluginless-SDK
-                # runs was indistinguishable from there being none -- the
-                # recovery force-save and the #200 capture-gap warning (both
-                # gated on PREV_ID) skipped silently, with no trace anywhere.
-                log "hook" "WARNING: previous_transcript gave up after ${_PREV_TRANSCRIPT_EXCLUDE_CAP:-20} pluginless-SDK exclusions in $dir -- a real previous session may exist beyond the cap; recovery and the #200 capture-gap check will both treat this the same as no previous session existing"
-                newest=""
-                break
-            fi
-            continue
-        fi
-        break
-    done
-    [ -n "$newest" ] && printf '%s\n' "$newest"
-    return 0
-}
 
-# Args: $1 — sessions dir. Sets $_TWO_NEWEST_JSONL_SECOND to the
-# second-newest transcript in $1 (or "" when fewer than two exist), with no
-# id filtering at all -- the sibling call site below (#691's own "sibling
-# instance" note) has no CURRENT_SESSION_ID to exclude by and instead picks
-# positionally, on the premise that the newest untagged file is this
-# session's own.
+# The file suffix every transcript in SESSIONS_DIR carries; a transcript's
+# session id is its file name without it.
+_TRANSCRIPT_SUFFIX=.jsonl
+
+# Args: $1 — sessions dir, $2 — this session's id ("" when the payload had
+# none). Sets PREV_JSONL and PREV_ID to the previous session's transcript
+# path and session id, or both to "" when there is no previous session.
 #
-# #819: same shape and same fix as previous_transcript() above -- the glob
-# runs once into `candidates`, exclusion is tracked by array index rather
-# than a growing string, and the retry is bounded by
-# _PREV_TRANSCRIPT_EXCLUDE_CAP rather than by how many pluginless
-# transcripts happen to sit in the directory. Still fork-free: `-nt` is a
-# builtin and _transcript_is_pluginless_sdk only ever forks the subshell
-# _stdin_json_string already costs elsewhere in this file.
-_second_newest_jsonl() {
-    local dir=$1 f own="" newest="" tries=0 i best_idx
-    local -a candidates=()
-    local -a taken=()
-    for f in "$dir"/*.jsonl; do
-        [ -e "$f" ] || continue
-        if [ -z "$own" ] || [ "$f" -nt "$own" ]; then
-            own=$f
-        fi
-    done
-    for f in "$dir"/*.jsonl; do
-        [ -e "$f" ] || continue
-        [ "$f" = "$own" ] && continue
-        candidates+=("$f")
-    done
+# Transcripts are ranked newest first by mtime, compared with bash's own
+# `-nt` test builtin -- no `ls -t`, no sort, no fork, however many
+# transcripts exist (#691). Equal mtimes keep glob order. The lookup takes
+# the best-ranked transcript and passes over it while it is one of:
+#   * this session's own: with an id, the transcript named after it is
+#     never considered at all; without one, the best-ranked transcript is
+#     ASSUMED to be ours and passed over positionally (see the call site);
+#   * a pluginless-SDK transcript (#745): no plugin was ever loaded into
+#     it, so neither the capture-gap notice nor recovery's force-save may aim
+#     at it. At most _PREV_TRANSCRIPT_EXCLUDE_CAP of these are passed over
+#     (#819) -- a previous session hidden behind more headless runs than
+#     that is not worth finding -- and giving up is logged (#823), because
+#     otherwise it reads exactly like "no previous session exists" and the
+#     recovery save and the #200 capture-gap check both skip in silence.
+#
+# Passing over is a floor, not a list: each round takes the best-ranked
+# transcript ranked strictly BELOW the last one passed over, so nothing has
+# to remember which files were already excluded. The glob runs once; each
+# round walks its result, so the worst case is (cap + 2) * n `-nt` tests,
+# never n * (however many headless runs sit in the directory) (#819).
+_find_previous_transcript() {
+    local dir=$1 own_id=$2 floor="" before_floor tries=0 f id
+    local assume_newest_is_ours=""
+    local -a files
+    [ -z "$own_id" ] && assume_newest_is_ours=1
+    files=("$dir"/*"$_TRANSCRIPT_SUFFIX")
     while :; do
-        newest="" best_idx=-1 i=0
-        for f in "${candidates[@]}"; do
-            if [ -z "${taken[$i]:-}" ]; then
-                if [ -z "$newest" ] || [ "$f" -nt "$newest" ]; then
-                    newest=$f
-                    best_idx=$i
+        PREV_JSONL="" PREV_ID="" before_floor=1
+        for f in "${files[@]}"; do
+            [ -e "$f" ] || continue
+            if [ -n "$floor" ]; then
+                # Skip everything ranked at or above the floor: the floor
+                # itself, anything newer, and an equal-mtime file that comes
+                # before it in glob order.
+                if [ "$f" = "$floor" ]; then
+                    before_floor=""
+                    continue
                 fi
+                [ "$f" -nt "$floor" ] && continue
+                [ -n "$before_floor" ] && ! [ "$floor" -nt "$f" ] && continue
             fi
-            i=$((i + 1))
+            id=${f#"$dir"/}
+            id=${id%"$_TRANSCRIPT_SUFFIX"}
+            [ -n "$own_id" ] && [ "$id" = "$own_id" ] && continue
+            if [ -z "$PREV_JSONL" ] || [ "$f" -nt "$PREV_JSONL" ]; then
+                PREV_JSONL=$f
+                PREV_ID=$id
+            fi
         done
-        [ -z "$newest" ] && break
-        if _transcript_is_pluginless_sdk "$newest"; then
-            taken[$best_idx]=1
+        [ -z "$PREV_JSONL" ] && return 0
+        if [ -n "$assume_newest_is_ours" ]; then
+            assume_newest_is_ours=""
+        elif _transcript_is_pluginless_sdk "$PREV_JSONL"; then
             tries=$((tries + 1))
             if [ "$tries" -ge "${_PREV_TRANSCRIPT_EXCLUDE_CAP:-20}" ]; then
-                # #823: same silent give-up as previous_transcript() above --
-                # identical to "no second-newest transcript exists", so the
-                # #200 capture-gap check treats a real one hidden behind the
-                # cap the same as there being none at all.
-                log "hook" "WARNING: _second_newest_jsonl gave up after ${_PREV_TRANSCRIPT_EXCLUDE_CAP:-20} pluginless-SDK exclusions in $dir -- a real second-newest transcript may exist beyond the cap; the #200 capture-gap check will treat this the same as no previous session existing"
-                newest=""
-                break
+                log "hook" "WARNING: _find_previous_transcript gave up after ${_PREV_TRANSCRIPT_EXCLUDE_CAP:-20} pluginless-SDK exclusions in $dir -- a real previous session may exist beyond the cap; recovery and the #200 capture-gap check will both treat this the same as no previous session existing"
+                PREV_JSONL="" PREV_ID=""
+                return 0
             fi
-            continue
+        else
+            return 0
         fi
-        break
+        floor=$PREV_JSONL
     done
-    _TWO_NEWEST_JSONL_SECOND=$newest
 }
 
 # ── Deferred: previous-session recovery and capture-gap detection (#660) ──
@@ -1084,14 +1025,14 @@ _second_newest_jsonl() {
 # the UserPromptSubmit hook on the NEXT prompt, and log lines. The foreground path's
 # one obligation is the injected context, and this is not part of it.
 #
-# Why it is worth moving: `previous_transcript` sorts every past transcript
+# Why it is worth moving: `_find_previous_transcript` sorts every past transcript
 # (0.41s at 2000 of them) and the capture-gap check greps the previous
 # transcript to EOF whenever "tool_use" is absent (0.197s on a 100MB one,
 # windows-latest) -- both inside a start whose whole budget is a couple of
 # seconds on Git Bash.
 #
 # A brace group, not an extracted script: a subshell inherits the functions
-# and variables already defined above (previous_transcript, session_was_saved,
+# and variables already defined above (_find_previous_transcript, session_was_saved,
 # config_into, log, REMEMBER_DIR, SESSIONS_DIR...), so nothing has to be
 # duplicated and there is no second copy to drift. Verified before the move:
 # no variable assigned inside this span is referenced after it.
@@ -1130,24 +1071,14 @@ _remember_write_slug_record
 _remember_write_slug_index
 _remember_write_case_divergence
 
-if [ -n "$CURRENT_SESSION_ID" ]; then
-    PREV_JSONL=$(previous_transcript "$SESSIONS_DIR")
-else
-    # No id, so "not ours" has no meaning and there is no right answer to
-    # substitute — the positional guess is correct at resume and wrong at
-    # startup, and nothing here can tell which. Recovery keeps it unchanged
-    # rather than trading one guess for another: its failure mode is a save
-    # aimed at the wrong session, which the next startup can still correct.
-    # The capture-gap check gets no such fallback, because its failure mode is
-    # an accusation — see below.
-    _second_newest_jsonl "$SESSIONS_DIR"
-    PREV_JSONL=$_TWO_NEWEST_JSONL_SECOND
-fi
-PREV_ID=""
-if [ -n "$PREV_JSONL" ]; then
-    PREV_ID=${PREV_JSONL##*/}
-    PREV_ID=${PREV_ID%.jsonl}
-fi
+# With no CURRENT_SESSION_ID, "not ours" has no meaning and there is no right
+# answer to substitute — the lookup's positional guess (newest is ours) is
+# correct at resume and wrong at startup, and nothing here can tell which.
+# Recovery keeps it unchanged rather than trading one guess for another: its
+# failure mode is a save aimed at the wrong session, which the next startup
+# can still correct. The capture-gap check gets no such fallback, because its
+# failure mode is an accusation — see below.
+_find_previous_transcript "$SESSIONS_DIR" "$CURRENT_SESSION_ID"
 
 # Asked ONCE, and before recovery forks (#270). Recovery force-saves in the
 # background and the capture-gap check below re-read this same file through
@@ -2193,7 +2124,7 @@ fi
 # sweep keyed to it would reintroduce unbounded growth under a new name.
 # Coupled instead to the one fact that actually answers "is this session
 # over": whether Claude Code's own transcript for that session id still
-# exists under $SESSIONS_DIR -- the same directory `previous_transcript`
+# exists under $SESSIONS_DIR -- the same directory `_find_previous_transcript`
 # above already reads. A transcript still on disk means the session could
 # still resume and write another handoff; one that is gone means the session
 # is gone in every way this hook can observe.
