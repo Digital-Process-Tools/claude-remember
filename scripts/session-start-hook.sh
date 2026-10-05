@@ -92,12 +92,17 @@ _HOOK_DIR="${BASH_SOURCE[0]%/*}"
 # bash >= 5 -- a test-only seam, the same shape REMEMBER_NO_PRINTF_T gives
 # lib-clock.sh, needed because EPOCHSECONDS is a live bash builtin and
 # cannot be pinned by direct assignment (confirmed while writing this).
+# One reader for both ends of the measurement (#898): VAR gets the epoch
+# second, or the empty string when `date` cannot give one.
+_remember_hook_clock_into() {
+    if [ "${BASH_VERSINFO[0]:-0}" -ge 5 ] && [ "${_REMEMBER_HOOK_FORCE_DATE_FALLBACK:-0}" != "1" ]; then
+        printf -v "$1" '%s' "$EPOCHSECONDS"
+    else
+        printf -v "$1" '%s' "$(date +%s 2>/dev/null)"
+    fi
+}
 _REMEMBER_HOOK_T0=""
-if [ "${BASH_VERSINFO[0]:-0}" -ge 5 ] && [ "${_REMEMBER_HOOK_FORCE_DATE_FALLBACK:-0}" != "1" ]; then
-    _REMEMBER_HOOK_T0="$EPOCHSECONDS"
-else
-    _REMEMBER_HOOK_T0=$(date +%s 2>/dev/null) || _REMEMBER_HOOK_T0=""
-fi
+_remember_hook_clock_into _REMEMBER_HOOK_T0
 
 # ── Read stdin once, before resolving paths (#411) ────────────────────────
 # `session_id` / `transcript_path` / `source` used to be extracted here, just
@@ -2345,11 +2350,8 @@ dispatch "after_session_start"
 # outright rather than pass a coerced number downstream.
 _REMEMBER_HOOK_ELAPSED_S=""
 if [ -n "$_REMEMBER_HOOK_T0" ]; then
-    if [ "${BASH_VERSINFO[0]:-0}" -ge 5 ] && [ "${_REMEMBER_HOOK_FORCE_DATE_FALLBACK:-0}" != "1" ]; then
-        _remember_hook_t1="$EPOCHSECONDS"
-    else
-        _remember_hook_t1=$(date +%s 2>/dev/null) || _remember_hook_t1=""
-    fi
+    _remember_hook_t1=""
+    _remember_hook_clock_into _remember_hook_t1
     if _remember_is_uint "$_remember_hook_t1"; then
         _REMEMBER_HOOK_ELAPSED_S=$(( 10#$_remember_hook_t1 - 10#$_REMEMBER_HOOK_T0 ))
         [ "$_REMEMBER_HOOK_ELAPSED_S" -ge 0 ] || _REMEMBER_HOOK_ELAPSED_S=""
