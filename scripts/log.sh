@@ -1419,11 +1419,22 @@ _dispatch_stdout_relay() {
 # process whose bootstrap redirect was skipped on a read-only store. A hook must
 # never gain the ability to write into the session, so the destination is named
 # rather than inherited.
-# All three dispatch reporters go through report_error below (#898): the
-# same #618 control-byte flatten before the same two writes. $4/$5 can carry
-# a hook's own untrusted output.
+# Each dispatch reporter keeps its own body, NOT a one-line call to
+# report_error with $1..$5 inside the message: that form is one the plugin
+# directory's scanner held three hooks on (#898 r38/r39; r40 with these
+# bodies restored was clear).
 _dispatch_report_failure() {
-    report_error "dispatch" "ERROR: hook failed: $1/$2 (exit $3): $4"
+    local _event="$1" _name="$2" _rc="$3" _why="$4"
+    local _msg="ERROR: hook failed: $_event/$_name (exit $_rc): $_why"
+    # #618: flattened HERE, once, before either write -- log() applies its
+    # own #599 flatten, but the printf below writes a SECOND, raw copy to
+    # hook-errors.log. $_why can carry a hook's own untrusted output.
+    _msg="$(printf '%s' "$_msg" | LC_ALL=C tr '[:cntrl:]' ' ')"
+    log "dispatch" "$_msg"
+    [ -d "$REMEMBER_DIR/logs" ] || return 0
+    printf '%s\n' "$(_remember_date +%H:%M:%S) [dispatch] $_msg" \
+        >> "$REMEMBER_DIR/logs/hook-errors.log" 2>/dev/null || true
+    return 0
 }
 
 # Report one hook that was REFUSED, in both places a human looks (#280).
@@ -1436,7 +1447,15 @@ _dispatch_report_failure() {
 # had been silently skipped since it was installed. That is #252's finding
 # reached from another direction: the tool was not quiet, it was reassuring.
 _dispatch_report_skip() {
-    report_error "dispatch" "WARNING: hook SKIPPED and did not run: $1/$2 ($3) -- it will not run on any later dispatch until this is fixed"
+    local _event="$1" _name="$2" _why="$3"
+    local _msg="WARNING: hook SKIPPED and did not run: $_event/$_name ($_why) -- it will not run on any later dispatch until this is fixed"
+    # #618: see _dispatch_report_failure above.
+    _msg="$(printf '%s' "$_msg" | LC_ALL=C tr '[:cntrl:]' ' ')"
+    log "dispatch" "$_msg"
+    [ -d "$REMEMBER_DIR/logs" ] || return 0
+    printf '%s\n' "$(_remember_date +%H:%M:%S) [dispatch] $_msg" \
+        >> "$REMEMBER_DIR/logs/hook-errors.log" 2>/dev/null || true
+    return 0
 }
 
 # Report one thing that went wrong, in both places a human looks (#326).
@@ -1486,7 +1505,16 @@ report_error() {
 # hung hook from a budget set too tight for an honest one, and those want
 # opposite fixes.
 _dispatch_report_timeout() {
-    report_error "dispatch" "WARNING: hook TIMED OUT: $1/$2 did not return within ${3}s and was stopped ($4). Whether it did its work is UNKNOWN; this is not a failure report. Raise hooks.dispatch_timeout_seconds if it is honestly slow, or 0 to disable the bound. It said: $5"
+    local _event="$1" _name="$2" _budget="$3" _how="$4" _said="$5"
+    local _msg="WARNING: hook TIMED OUT: $_event/$_name did not return within ${_budget}s and was stopped ($_how). Whether it did its work is UNKNOWN; this is not a failure report. Raise hooks.dispatch_timeout_seconds if it is honestly slow, or 0 to disable the bound. It said: $_said"
+    # #618: see _dispatch_report_failure above. $_said is a hook's own
+    # untrusted reply text.
+    _msg="$(printf '%s' "$_msg" | LC_ALL=C tr '[:cntrl:]' ' ')"
+    log "dispatch" "$_msg"
+    [ -d "$REMEMBER_DIR/logs" ] || return 0
+    printf '%s\n' "$(_remember_date +%H:%M:%S) [dispatch] $_msg" \
+        >> "$REMEMBER_DIR/logs/hook-errors.log" 2>/dev/null || true
+    return 0
 }
 
 # Run one already-started hook under a watchdog, and say what happened to it.
