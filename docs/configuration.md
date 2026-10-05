@@ -85,13 +85,11 @@ still has `model`/`reject_pattern` take effect, exactly as before #757.
 External storage mode (`data_dir` absolute or home-relative, e.g. `~/.remember/{slug}`)
 is unaffected by any of the above -- `REMEMBER_DIR` there is the operator's own
 directory, never one a clone ships, so its config stays trusted **once it is genuinely
-the operator's own**. The one exception is the one-shot migration INTO that mode: a
-legacy `.remember/config.json` that is git-tracked (or whose tracked status could not be
-determined -- this fails CLOSED, the same as a confirmed-tracked file) is left behind
-rather than carried across trusted
+the operator's own**. Nothing is moved into that mode automatically any more (#898):
+if you move an old in-project `.remember/` there by hand, leave behind any `config.json`
+your repository tracks in git, or it becomes trusted config
 ([#757](https://github.com/Digital-Process-Tools/claude-remember/issues/757); see
-[external-storage-mode.md](external-storage-mode.md)) -- only a config nobody but you
-ever wrote, or whose git status was confirmed clean, reaches the trusted external layer.
+[external-storage-mode.md](external-storage-mode.md)).
 See [git-backup-security.md](git-backup-security.md) for the wider "a cloned project's
 config is untrusted input" note.
 
