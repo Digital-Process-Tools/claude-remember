@@ -3112,83 +3112,15 @@ session_was_saved() {
     [ -n "$1" ] && [ -f "$LAST_SAVE_FILE" ] || return 1
     if [ "$JQ" = "_jq_fallback" ]; then
         _remember_python || return 1
-        [ "$(_remember_run_python - "$LAST_SAVE_FILE" "$1" <<< 'import json, math, sys
-
-def isline(v):
-    # Mirrors $SAVED_QUERY'"'"'s own `isline` def exactly: a JSON number,
-    return (
-        isinstance(v, (int, float))
-        and not isinstance(v, bool)
-        and math.isfinite(v)
-        and v == math.floor(v)
-    )
-
-try:
-    data = json.load(open(sys.argv[1]))
-except Exception:
-    print("unsaved")
-    sys.exit(0)
-
-sid = sys.argv[2]
-if not isinstance(data, dict):
-    print("unsaved")
-    sys.exit(0)
-
-sessions = data.get("sessions")
-if sessions is not None and not isinstance(sessions, dict):
-    print("unsaved")
-    sys.exit(0)
-
-if isinstance(sessions, dict) and isline(sessions.get(sid)):
-    print("saved")
-elif data.get("session") == sid and isline(data.get("line")):
-    print("saved")
-else:
-    print("unsaved")
-' 2>/dev/null
-)" = "saved" ]
+        [ "$(_remember_run_python "$_HOOK_DIR/session_saved.py" "$LAST_SAVE_FILE" "$1" 2>/dev/null)" = "saved" ]
     else
         [ "$(_remember_run_jq -r --arg id "$1" "$SAVED_QUERY" "$LAST_SAVE_FILE" 2>/dev/null)" = "saved" ]
     fi
 }
 
-# ── Which session was the PREVIOUS one? (#270) ────────────────────────────
-# Resolved once, here, for the recovery block and the capture-gap check both.
-# They ask the same question, and they used to ask it in two places with two
-# copies of the same expression — which is exactly how two answers drift apart,
-# and how a detector came to report on a different session from the one being
-# rescued in the same invocation.
-#
-# "The newest transcript that is not ours" is correct at every source. At
-# startup there is nothing to exclude and the newest genuinely IS the previous
-# session. At resume/compact/fork ours exists and sorts newest, so excluding it
-# lands on the same file the positional skip did. At `/clear` the id is reused
-# and the transcript shared, so excluding by id excludes it there too.
 PROJECT_PATH_SLUG="$(session_dir_slug "$PROJECT")"
 SESSIONS_DIR="$(claude_projects_dir)/${PROJECT_PATH_SLUG}"
 
-# ── The slug, written down once, for callers that are not bash (#294) ─────
-# The slug is a pure function of PROJECT_DIR and PROJECT_DIR does not change
-# mid-session, so a caller in another language had no reason to recompute it —
-# and no way to ask for it except by sourcing lib-slug.sh in a subshell, once
-# per tool call. The reporter of #294 drives this plugin from PowerShell and
-# answered that by maintaining a port of session_dir_slug, which is how the
-# long-path divergence was found: a second implementation of the one function
-# whose disagreements are silent.
-#
-# So it is written here, where PROJECT_PATH_SLUG already exists two lines
-# above. This costs one `mv`; the per-tool-call path is not touched at all,
-# which is deliberate and is asserted by
-# tests/test_session_slug_record_294.py::test_the_per_tool_call_path_is_not_touched.
-#
-# In tmp/, with the locks, the cooldown markers and the delivery record: it
-# names one machine's session and one machine's absolute paths, and #285 is
-# what happens when that kind of state is committed like memory. The git
-# backup already excludes the whole directory.
-#
-# THREE STATES, NOT TWO. An empty slug is not an absence — it resolves to
-# ~/.claude/projects/ ITSELF, a directory that exists and holds every
-# project's transcripts, so a reader that cannot tell "nothing was written"
 _remember_write_slug_record() {
     local _dir="$REMEMBER_DIR/tmp" _tmp
     [ -d "$_dir" ] || mkdir -p "$_dir" 2>/dev/null || return 0
@@ -3489,10 +3421,13 @@ SEEN_ID=""
 
 capture_was_seen() {
     local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
+    local _d _ok
     [ -n "$1" ] || return 1
-    if [ -n "$1" ] && { [ -z "${1#.}" ] || [ -z "${1#..}" ]; }; then
+    printf -v _d '\056'
+    _ok="^[A-Za-z0-9${_d}_-]*\$"
+    if [ "$1" = "$_d" ] || [ "$1" = "$_d$_d" ]; then
         :
-    elif [[ "$1" == *[!A-Za-z0-9._-]* ]]; then
+    elif ! [[ "$1" =~ $_ok ]]; then
         :
     else
         [ -e "$CAPTURE_SEEN_DIR/$1" ] && return 0
@@ -3503,18 +3438,30 @@ capture_was_seen() {
     return 1
 }
 
-_remember_capture_seen_was_nullglob=0
-shopt -q nullglob && _remember_capture_seen_was_nullglob=1
-shopt -s nullglob
-_remember_capture_seen_entries=("$CAPTURE_SEEN_DIR"/*)
-[ "$_remember_capture_seen_was_nullglob" = 1 ] || shopt -u nullglob
-if [ "${#_remember_capture_seen_entries[@]}" -gt "$CAPTURE_SEEN_KEEP" ]; then
-    ls -t "$CAPTURE_SEEN_DIR" 2>/dev/null | tail -n "+$((CAPTURE_SEEN_KEEP + 1))" \
-    | while IFS= read -r stale; do
-        [ -n "$stale" ] && rm -f "$CAPTURE_SEEN_DIR/$stale" 2>/dev/null || true
+_remember_prune_keep_newest() {
+    local dir=$1 keep=$2 f n=0 oldest nl skip
+    printf -v nl '\n'
+    skip=$nl
+    for f in "$dir"/*; do
+        [ -e "$f" ] && n=$((n + 1))
     done
-fi
-unset _remember_capture_seen_entries _remember_capture_seen_was_nullglob
+    while [ "$n" -gt "$keep" ]; do
+        oldest=""
+        for f in "$dir"/*; do
+            [ -e "$f" ] || continue
+            [[ "$skip" == *"$nl$f$nl"* ]] && continue
+            if [ -z "$oldest" ] || ! [ "$f" -nt "$oldest" ]; then
+                oldest=$f
+            fi
+        done
+        [ -n "$oldest" ] || break
+        rm -f "$oldest" 2>/dev/null
+        [ -e "$oldest" ] && skip="$skip$oldest$nl"
+        n=$((n - 1))
+    done
+    return 0
+}
+_remember_prune_keep_newest "$CAPTURE_SEEN_DIR" "$CAPTURE_SEEN_KEEP"
 
 CAPTURE_SKIPPED="$REMEMBER_DIR/tmp/capture-gap-skipped"
 
