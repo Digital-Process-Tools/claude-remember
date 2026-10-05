@@ -354,17 +354,12 @@ unset _mem_proj _mem_bd_glob_dir _mem_bd_glob_proj
 # elsewhere, and redirects fd 2 into hook-errors.log anyway -- while the
 # trace, which never left fd 2, goes with it. Checked directly against
 # BASH_VERSINFO, the same version test lib-clock.sh and lib-lock.sh already
-# run before relying on a bash-4+ feature, rather than assumed.
-_remember_bd_has_xtracefd=0
-if [ "${BASH_VERSINFO[0]:-0}" -gt 4 ] 2>/dev/null; then
-    _remember_bd_has_xtracefd=1
-elif [ "${BASH_VERSINFO[0]:-0}" -eq 4 ] 2>/dev/null && [ "${BASH_VERSINFO[1]:-0}" -ge 1 ] 2>/dev/null; then
-    _remember_bd_has_xtracefd=1
-fi
+# run before relying on a bash-4+ feature, rather than assumed. Asked only
+# when an xtrace is actually on, the one case that reads the answer.
 if [ -d "$REMEMBER_DIR/logs" ]; then
     _remember_bd_keep_fd2=""
     if [[ "$-" == *x* ]]; then
-        if [ "$_remember_bd_has_xtracefd" = "0" ]; then
+        if ! { [ "${BASH_VERSINFO[0]:-0}" -gt 4 ] || { [ "${BASH_VERSINFO[0]:-0}" -eq 4 ] && [ "${BASH_VERSINFO[1]:-0}" -ge 1 ]; }; } 2>/dev/null; then
             _remember_bd_keep_fd2="an xtrace is running and this bash (< 4.1) has no BASH_XTRACEFD, so it stays on fd 2"
         elif [ "${BASH_XTRACEFD:-2}" = "2" ]; then
             _remember_bd_keep_fd2="an xtrace is running on fd 2"
@@ -383,4 +378,3 @@ if [ -d "$REMEMBER_DIR/logs" ]; then
     fi
     unset _remember_bd_keep_fd2
 fi
-unset _remember_bd_has_xtracefd
