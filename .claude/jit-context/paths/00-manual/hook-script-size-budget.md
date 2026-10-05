@@ -1,7 +1,7 @@
 ---
 title: "A hook script (or a library a hook compiles in) has a 120 KiB release budget, 128 KiB observed scanner limit"
 description: "The Anthropic directory's scanner stops following a hook script past 128 KiB and holds it as COMMAND_SCRIPT_NOT_FOLLOWED. check_release_tree.py FAILs any hook script over 120 KiB (122,880 bytes) at release time and in every PR's pytest matrix. Headroom is small: shrink real code, never minify, and watch the scanner's other known triggers while you are in here."
-match: scripts/.*\.sh$
+match: (scripts|hooks|hooks\.d)/.*\.sh$
 ---
 
 **Budget, not headroom to spend.** Observed 2026-10-05 across 21 portal probes: every hook script
@@ -28,6 +28,11 @@ each hook's compiled size with nothing written. As of #899, `session-start-hook.
 or renaming variables only hides the growth until the next feature and was refused by the agent's
 own safety classifier as scanner evasion when tried. Move work out of the hook's source chain
 instead.
+
+This entry also fires on `hooks/` and `hooks.d/*.sh` -- `check_release_tree.py`'s other
+scanner-shape needles (below) scan every `.sh` under `_SCRIPT_DIRS` (`hooks`, `hooks.d`,
+`scripts`), not only the four compiled hooks and their libraries; the 120 KiB size budget above
+is still scoped to those four plus what they `source`.
 
 **The scanner's other known triggers, while you are editing a hook or a library it compiles in:**
 - a one-line reporter whose whole body is a single call to another function with a positional

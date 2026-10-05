@@ -103,6 +103,24 @@ MULTI_STATEMENT_SCRIPT = (
     b"}\necho hi\n"
 )
 
+# r38/r39's own actual shape was one physical line, not the multi-line
+# pretty-printed form used above -- the needle must catch that too.
+HELD_ONE_LINE_SCRIPT = (
+    b'#!/bin/sh\n'
+    b'_dispatch_report_failure() { report_error "dispatch" "ERROR: hook failed: $1/$2 (exit $3): $4"; }\n'
+    b"echo hi\n"
+)
+
+# a shipped .sh checked out with CRLF line endings (no .gitattributes forces
+# LF) must not blind the needle to the exact same held shape.
+HELD_CRLF_SCRIPT = (
+    b"#!/bin/sh\r\n"
+    b"_dispatch_report_failure() {\r\n"
+    b'    report_error "dispatch" "ERROR: hook failed: $1/$2 (exit $3): $4"\r\n'
+    b"}\r\n"
+    b"echo hi\r\n"
+)
+
 
 def test_a_one_line_delegate_with_positional_param_in_a_string_fails(tmp_path):
     root = _tree(tmp_path, {"scripts/lib-dispatch.sh": HELD_SCRIPT})
@@ -132,6 +150,59 @@ def test_a_multi_statement_function_does_not_fail(tmp_path):
     root = _tree(tmp_path, {"scripts/lib-multi.sh": MULTI_STATEMENT_SCRIPT})
     offenders = _check(root).offenders
     assert not any(NEEDLE_MARKER in o for o in offenders), offenders
+
+
+def test_a_one_physical_line_delegate_fails(tmp_path):
+    # r38/r39's actual on-disk shape -- the whole `name() { stmt; }` on one
+    # line -- is at least as common as the pretty-printed multi-line form,
+    # and the needle must catch it too.
+    root = _tree(tmp_path, {"scripts/lib-dispatch-oneline.sh": HELD_ONE_LINE_SCRIPT})
+    offenders = _check(root).offenders
+    assert any("lib-dispatch-oneline.sh" in o and NEEDLE_MARKER in o
+               and "_dispatch_report_failure" in o for o in offenders), offenders
+
+
+def test_the_same_held_shape_under_crlf_line_endings_fails(tmp_path):
+    # this repo ships no .gitattributes, so nothing forces LF on checkout --
+    # a CRLF-encoded .sh must trip the same needle as its LF twin.
+    root = _tree(tmp_path, {"scripts/lib-dispatch-crlf.sh": HELD_CRLF_SCRIPT})
+    offenders = _check(root).offenders
+    assert any("lib-dispatch-crlf.sh" in o and NEEDLE_MARKER in o
+               and "_dispatch_report_failure" in o for o in offenders), offenders
+
+
+def test_an_unquoted_positional_splice_fails(tmp_path):
+    # the same held shape without the surrounding double quotes -- an
+    # unquoted bareword argument with $1 embedded is just as unfollowable.
+    root = _tree(tmp_path, {
+        "scripts/lib-unquoted.sh": b"#!/bin/sh\n_wrap() {\n    other_func msg:$1\n}\necho hi\n",
+    })
+    offenders = _check(root).offenders
+    assert any("lib-unquoted.sh" in o and NEEDLE_MARKER in o for o in offenders), offenders
+
+
+def test_an_unquoted_bare_passthrough_does_not_fail(tmp_path):
+    # must-NOT-fire control for the unquoted case: a bare $1 standing alone
+    # as its own argument is a passthrough, not a splice.
+    root = _tree(tmp_path, {
+        "scripts/lib-unquoted-bare.sh": b"#!/bin/sh\n_wrap() {\n    other_func $1\n}\necho hi\n",
+    })
+    offenders = _check(root).offenders
+    assert not any(NEEDLE_MARKER in o for o in offenders), offenders
+
+
+def test_a_function_keyword_declared_delegate_fails(tmp_path):
+    # `function name() { ... }` is as common as the bare `name() { ... }`
+    # form and must trip the same needle.
+    root = _tree(tmp_path, {
+        "scripts/lib-function-kw.sh": (
+            b'#!/bin/sh\nfunction _wrap() {\n'
+            b'    report_error "dispatch" "ERROR: $1/$2"\n'
+            b"}\necho hi\n"
+        ),
+    })
+    offenders = _check(root).offenders
+    assert any("lib-function-kw.sh" in o and NEEDLE_MARKER in o for o in offenders), offenders
 
 
 def test_todays_log_sh_dispatch_reporters_do_not_trip_this_needle():

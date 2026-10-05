@@ -1498,8 +1498,30 @@ def _check_case_statement(files: dict, kinds: dict, off: list) -> None:
                        f"{line.strip()[:80]}")
 
 
-_FUNC_DEF = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\(\)\s*\{\n(.*?)^\}\n", re.MULTILINE | re.DOTALL)
+_FUNC_DEF_MULTI = re.compile(
+    r"^(?:function\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*\(\)\s*\{\n(.*?)^\}\n",
+    re.MULTILINE | re.DOTALL)
+_FUNC_DEF_SINGLE = re.compile(
+    r"^(?:function\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*\(\)\s*\{[ \t]*(.*?)[ \t]*;?[ \t]*\}[ \t]*$",
+    re.MULTILINE)
 _POSITIONAL_IN_STRING = re.compile(r"\$\{?[1-9]")
+
+
+def _iter_function_bodies(text: str):
+    """Yield (name, body, body_start_offset) for every `name() { ... }` in
+    TEXT -- the body on its own lines (closing brace alone on a line) or the
+    whole function on one physical line (`name() { stmt; }`). A single-line
+    match that overlaps an already-yielded multi-line one is skipped."""
+    seen = []
+    for m in _FUNC_DEF_MULTI.finditer(text):
+        seen.append((m.start(), m.end()))
+        yield m.group(1), m.group(2), m.start(2)
+    for m in _FUNC_DEF_SINGLE.finditer(text):
+        if any(s <= m.start() < e for s, e in seen):
+            continue
+        yield m.group(1), m.group(2), m.start(2)
+
+
 _SINGLE_LINE_DELEGATE_EXEMPT_WORDS = {
     "if", "then", "else", "elif", "fi", "case", "esac", "for", "while",
     "until", "do", "done", "function", "return", "local", "declare",
@@ -1526,9 +1548,12 @@ def _check_single_line_delegate_positional(files: dict, kinds: dict, off: list) 
         top = rel.split("/")[0]
         if top not in _SCRIPT_DIRS or kinds.get(rel) != "text" or not rel.endswith(".sh"):
             continue
-        text = data.decode("utf-8")
-        for m in _FUNC_DEF.finditer(text):
-            name, body = m.group(1), m.group(2)
+        # CRLF (or lone CR) would otherwise break both `_FUNC_DEF_MULTI`'s
+        # literal newline anchors and `_FUNC_DEF_SINGLE`'s end-of-line anchor;
+        # normalizing first keeps the newline count (and so the reported
+        # line number) identical to the original file.
+        text = data.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+        for name, body, body_start in _iter_function_bodies(text):
             code = [ln for ln in body.splitlines()
                     if ln.strip() and not ln.lstrip().startswith("#")]
             if len(code) != 1:
@@ -1541,9 +1566,18 @@ def _check_single_line_delegate_positional(files: dict, kinds: dict, off: list) 
             if first_word in _SINGLE_LINE_DELEGATE_EXEMPT_WORDS:
                 continue
             quoted = re.findall(r'"[^"]*"', line)
-            if any(_POSITIONAL_IN_STRING.search(q)
-                   and not re.fullmatch(r'"\$\{?[1-9]\}?"', q) for q in quoted):
-                n = text[:m.start(2)].count("\n") + 1
+            spliced_in_string = any(
+                _POSITIONAL_IN_STRING.search(q)
+                and not re.fullmatch(r'"\$\{?[1-9]\}?"', q) for q in quoted)
+            # An unquoted positional (`other_func msg:$1`) is the same held
+            # shape without the quotes -- strip the quoted segments first so
+            # a bare "$1" standing alone as its own argument is still exempt.
+            bare_tokens = re.sub(r'"[^"]*"', "", line).split()
+            spliced_bare = any(
+                _POSITIONAL_IN_STRING.search(t)
+                and not re.fullmatch(r"\$\{?[1-9]\}?", t) for t in bare_tokens)
+            if spliced_in_string or spliced_bare:
+                n = text[:body_start].count("\n") + 1
                 off.append(f"{rel}:{n}: {name} delegates its whole body to "
                            f"{first_word!r} with a positional parameter spliced "
                            f"into a string argument -- give it its own locals, "
