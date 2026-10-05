@@ -917,12 +917,17 @@ export REMEMBER_PROMPT_STAMP
 # a leading zero that clears a digits-only guard is read as octal (#322/#332).
 # One validation at the source beats one per consumer, which is how the
 # pre-#158 duplicate readers drifted.
+#
+# _remember_is_uint: set, and digits only (#898). The one test behind what
+# was spelled out at each site as `[ -z "$x" ] || [ "${x#*[!0-9]}" != "$x" ]`
+# (tests/test_is_uint_helper_898.py holds the two to the same answers).
+_remember_is_uint() { [[ -n "$1" && "$1" != *[!0-9]* ]]; }
 config_into REMEMBER_SAVE_COOLDOWN ".cooldowns.save_seconds" 120
-if [ -z "$REMEMBER_SAVE_COOLDOWN" ] || [ "${REMEMBER_SAVE_COOLDOWN#*[!0-9]}" != "$REMEMBER_SAVE_COOLDOWN" ]; then REMEMBER_SAVE_COOLDOWN=120; fi
+_remember_is_uint "$REMEMBER_SAVE_COOLDOWN" || REMEMBER_SAVE_COOLDOWN=120
 export REMEMBER_SAVE_COOLDOWN
 
 config_into REMEMBER_DELTA_THRESHOLD ".thresholds.delta_lines_trigger" 50
-if [ -z "$REMEMBER_DELTA_THRESHOLD" ] || [ "${REMEMBER_DELTA_THRESHOLD#*[!0-9]}" != "$REMEMBER_DELTA_THRESHOLD" ]; then REMEMBER_DELTA_THRESHOLD=50; fi
+_remember_is_uint "$REMEMBER_DELTA_THRESHOLD" || REMEMBER_DELTA_THRESHOLD=50
 export REMEMBER_DELTA_THRESHOLD
 
 # Model + reject-gate knobs. config.json is the source of truth; an explicit

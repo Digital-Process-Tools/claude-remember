@@ -240,9 +240,7 @@ log "hook" "session-start: PROJECT_DIR=$PROJECT_DIR PIPELINE_DIR=$PIPELINE_DIR R
 # above already use -- no new cost on the common (already-cached) path.
 REMEMBER_SESSION_START_SLOW_S=""
 config_into REMEMBER_SESSION_START_SLOW_S ".session_start_slow_threshold_s" "5"
-if [ -z "$REMEMBER_SESSION_START_SLOW_S" ] || [ "${REMEMBER_SESSION_START_SLOW_S#*[!0-9]}" != "$REMEMBER_SESSION_START_SLOW_S" ]; then
-    REMEMBER_SESSION_START_SLOW_S=5
-fi
+_remember_is_uint "$REMEMBER_SESSION_START_SLOW_S" || REMEMBER_SESSION_START_SLOW_S=5
 
 # Publish what the chain above just resolved, so the UserPromptSubmit hook does not
 # repeat it on every prompt (#227). Republishing unconditionally here is what
@@ -1512,7 +1510,7 @@ if [ "$_promos_enabled" = "true" ] \
         local marker="$promo_dir/promo-notice"
         local cooldown
         config_into cooldown ".cooldowns.promo_seconds" 604800
-        if [ -z "$cooldown" ] || [ "${cooldown#*[!0-9]}" != "$cooldown" ]; then cooldown=604800; fi
+        _remember_is_uint "$cooldown" || cooldown=604800
 
         local last_ts=0 last_id=""
         if [ -f "$marker" ]; then
@@ -1525,11 +1523,11 @@ if [ "$_promos_enabled" = "true" ] \
                 fi
             done < "$marker"
         fi
-        if [ -z "$last_ts" ] || [ "${last_ts#*[!0-9]}" != "$last_ts" ]; then last_ts=0; fi
+        _remember_is_uint "$last_ts" || last_ts=0
 
         local now=""
         _remember_date_into now +%s
-        if [ -z "$now" ] || [ "${now#*[!0-9]}" != "$now" ]; then return 0; fi
+        _remember_is_uint "$now" || return 0
 
         if [ "$last_ts" -gt 0 ] \
             && [ $(( 10#$now - 10#$last_ts )) -lt "$cooldown" ]; then
@@ -1960,7 +1958,7 @@ elif [ -f "$REMEMBER_HANDOFF" ] && [ -s "$REMEMBER_HANDOFF" ]; then
     fi
     # A hand-edited or half-written record must not turn into an arithmetic
     # error inside the hook.
-    if [ -z "$DELIVERIES" ] || [ "${DELIVERIES#*[!0-9]}" != "$DELIVERIES" ]; then DELIVERIES=0; fi
+    _remember_is_uint "$DELIVERIES" || DELIVERIES=0
 
     # Fenced with an explicit provenance line (#721): this is a file read
     # off disk, verbatim, and any "=== HANDOFF ===" (or other) block that
@@ -1988,7 +1986,7 @@ elif [ -f "$REMEMBER_HANDOFF" ] && [ -s "$REMEMBER_HANDOFF" ]; then
     _remember_handoff_fence_nonce="${RANDOM:-0}${RANDOM:-0}"
     HANDOFF_MAX_REDELIVERIES=""
     config_into HANDOFF_MAX_REDELIVERIES ".thresholds.handoff_max_redeliveries" 3
-    if [ -z "$HANDOFF_MAX_REDELIVERIES" ] || [[ "$HANDOFF_MAX_REDELIVERIES" == *[!0-9]* ]]; then
+    if ! _remember_is_uint "$HANDOFF_MAX_REDELIVERIES"; then
         log "hook" "WARNING: thresholds.handoff_max_redeliveries is not a valid non-negative integer (got $HANDOFF_MAX_REDELIVERIES) -- using default 3"
         HANDOFF_MAX_REDELIVERIES=3
     fi
@@ -2358,7 +2356,7 @@ if [ -n "$_REMEMBER_HOOK_T0" ]; then
     else
         _remember_hook_t1=$(date +%s 2>/dev/null) || _remember_hook_t1=""
     fi
-    if [ -n "$_remember_hook_t1" ] && ! [[ "$_remember_hook_t1" == *[!0-9]* ]]; then
+    if _remember_is_uint "$_remember_hook_t1"; then
         _REMEMBER_HOOK_ELAPSED_S=$(( 10#$_remember_hook_t1 - 10#$_REMEMBER_HOOK_T0 ))
         [ "$_REMEMBER_HOOK_ELAPSED_S" -ge 0 ] || _REMEMBER_HOOK_ELAPSED_S=""
     fi
