@@ -14,12 +14,16 @@ from __future__ import annotations
 
 import re
 import shutil
-import subprocess
 from pathlib import Path
 
 import pytest
 
-from tests._bash_runner import decode_bash_output, resolve_bash
+from tests._bash_runner import (
+    bash_octal,
+    decode_bash_output,
+    resolve_bash,
+    run_bash_file,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOG_SH = REPO_ROOT / "scripts" / "log.sh"
@@ -32,14 +36,22 @@ BASHES = [b for b in {resolve_bash(), "/bin/bash" if Path("/bin/bash").exists() 
 
 
 def _helper() -> str:
-    m = re.search(r"^_remember_is_uint\(\) \{.*?^\}$|^_remember_is_uint\(\) \{[^\n]*\}$",
+    # The one-line form first: tried the other way round, the multi-line
+    # alternative matched too, from the one-liner down to the next `}` line
+    # of log.sh -- 209 lines of config reads and log() under test, not the helper.
+    m = re.search(r"^_remember_is_uint\(\) \{[^\n]*\}$|^_remember_is_uint\(\) \{\n.*?^\}$",
                   LOG_SH.read_text(encoding="utf-8"), re.MULTILINE | re.DOTALL)
     assert m, "_remember_is_uint not defined in scripts/log.sh"
     return m.group(0)
 
 
 def _run(bash: str, body: str, x: str) -> str:
-    out = subprocess.run([bash, "-c", body, "_", x], capture_output=True, check=False, timeout=30)
+    # X on stdin, the body from a file: Git Bash glob-expands and splits its
+    # own argv (see run_bash_file), so `*` or a newline never arrive as passed.
+    # bash 3.2's `printf -v arg %b ""` unsets arg: skipped for the empty input.
+    script = ('IFS= read -r enc; arg=""; [ -z "$enc" ] || printf -v arg "%b" "$enc"; '
+              'set -- "$arg"\n' + body)
+    out = run_bash_file(bash, script, stdin=(bash_octal(x) + "\n").encode("ascii"), timeout=30)
     return decode_bash_output(out.stdout).strip()
 
 
@@ -61,3 +73,14 @@ def test_helper_agrees_with_the_guard_it_replaces(bash):
 
 def test_bash_is_present_where_it_should_be():
     assert BASHES or shutil.which("bash") is None
+
+
+@pytest.mark.skipif(not BASHES, reason="no bash")
+@pytest.mark.parametrize("bash", sorted(BASHES))
+def test_the_text_under_test_is_the_helper_alone(bash):
+    """What the comparison above runs is the function definition and nothing
+    after it: defining it prints nothing and leaves exactly one function.
+    The first extraction ran 209 lines of log.sh along with it."""
+    out = run_bash_file(bash, _helper() + '\ndeclare -F | while read -r _ _ f; do echo "$f"; done')
+    assert decode_bash_output(out.stderr) == ""
+    assert decode_bash_output(out.stdout).split() == ["_remember_is_uint"]
