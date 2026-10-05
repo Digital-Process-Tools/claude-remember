@@ -365,7 +365,7 @@ if [ -d "$REMEMBER_DIR/logs" ]; then
     _remember_bd_keep_fd2=""
     if [[ "$-" == *x* ]]; then
         if [ "$_remember_bd_has_xtracefd" = "0" ]; then
-            _remember_bd_keep_fd2="an xtrace is running (this bash predates BASH_XTRACEFD, added in 4.1, so xtrace stays on fd 2 regardless of the variable)"
+            _remember_bd_keep_fd2="an xtrace is running and this bash (< 4.1) has no BASH_XTRACEFD, so it stays on fd 2"
         elif [ "${BASH_XTRACEFD:-2}" = "2" ]; then
             _remember_bd_keep_fd2="an xtrace is running on fd 2"
         fi

@@ -750,7 +750,7 @@ config_into() {
         # the same reason that one is: a warning that fires on ordinary
         # lookups is a warning nobody reads.
         [ "${REMEMBER_DEBUG:-}" = "1" ] && \
-            echo "remember: config() key '$_cfg_into_name' is not a plain dotted path -- returning the default rather than looking it up" >&2
+            echo "remember: config() key '$_cfg_into_name' is not a plain dotted path -- returning the default" >&2
         printf -v "$_cfg_into_var" '%s' "$_cfg_into_default"
         return
     fi
@@ -1125,9 +1125,8 @@ log() {
     # closed as not worth the fragility and log() unconditionally forks the
     # flatten again, as it did before #621 (the pre-#621 shape, restored
     # verbatim).
-    message="$(printf '%s' "$message" | LC_ALL=C tr '[:cntrl:]' ' ')"
-    echo "${timestamp} [${component}] ${message}" >> "$MEMORY_LOG_FILE" 2>/dev/null \
-        || echo "${timestamp} [${component}] ${message}" >&2
+    message="${timestamp} [${component}] $(printf '%s' "$message" | LC_ALL=C tr '[:cntrl:]' ' ')"
+    echo "$message" >> "$MEMORY_LOG_FILE" 2>/dev/null || echo "$message" >&2
 }
 
 # Log token usage for a Haiku API call.

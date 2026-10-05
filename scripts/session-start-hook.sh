@@ -2358,9 +2358,7 @@ if [ -n "$_REMEMBER_HOOK_T0" ]; then
     else
         _remember_hook_t1=$(date +%s 2>/dev/null) || _remember_hook_t1=""
     fi
-    if [ -z "$_remember_hook_t1" ] || [[ "$_remember_hook_t1" == *[!0-9]* ]]; then
-        _REMEMBER_HOOK_ELAPSED_S=""
-    else
+    if [ -n "$_remember_hook_t1" ] && ! [[ "$_remember_hook_t1" == *[!0-9]* ]]; then
         _REMEMBER_HOOK_ELAPSED_S=$(( 10#$_remember_hook_t1 - 10#$_REMEMBER_HOOK_T0 ))
         [ "$_REMEMBER_HOOK_ELAPSED_S" -ge 0 ] || _REMEMBER_HOOK_ELAPSED_S=""
     fi
