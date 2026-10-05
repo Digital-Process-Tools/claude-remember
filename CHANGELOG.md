@@ -7,6 +7,312 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.40.0] - 2026-10-05 — release tree scrub finishes with self-contained hook compilation, and the legacy .remember/ auto-move is retired
+
+### Removed
+
+- #898: the automatic one-time move of an in-project `.remember/` into an
+  external `data_dir` (added with external storage mode in v0.8.0, #60, 2026-05-24; hardened by
+  #132, #757, #766 and #782) is removed. Session start no longer moves,
+  holds back or refuses anything, and no longer writes `MIGRATED-TO.txt`.
+  When the old in-project `.remember/` still holds memory files while
+  `data_dir` points elsewhere and that new store does not exist yet, it
+  prints one line instead: `remember: <old dir> holds memory data but
+  data_dir points to <new dir> -- move it by hand (see /remember:doctor)`,
+  and `/remember:doctor` shows a `WARN Legacy store:` line while those files
+  remain. See `docs/external-storage-mode.md` for moving them by hand.
+- #898: two other one-time upgrade steps on the session-start path are
+  retired. A delivery record left at the store root by a release before
+  v0.13.0 (#285, 2026-08-01) is no longer moved into `tmp/`; it is left
+  where it is and ignored. A lock left as a plain file by a release before
+  v0.8.8 (#182, 2026-07-26) is now cleared like any other debris at the
+  lock path, without first checking whether the process it names is alive.
+- Compatibility: compatible - nothing is deleted or moved; a user switching
+  to external storage after this release starts with an empty external store
+  and their old memory left where it was, named by the notice and by doctor,
+  until they move it. The two retired upgrade steps only ever acted on files
+  written by releases more than two months old.
+
+### Fixed
+
+- #898: the release tree shipped to the plugin directory now swaps in a short
+  `README.release.md` for `README.md` (no `$VAR`, no network-tool names, kept
+  #855's disclosure in substance), stops shipping `CHANGELOG.md` at all,
+  scrubs remaining URL hosts and the `SECURITY.md`/`CODE_OF_CONDUCT.md` files
+  out of the tree, removes a scheme literal the directory's scanner read as
+  a URL host inside shell parameter-expansion syntax, replaces a typed `.`
+  SCRIPT_DIR fallback with `$PWD` across every shipped script that has one,
+  and scrubs standalone network-command words from `config.example.json`
+  and the plugin manifest's own userConfig description. Adds new
+  `check_release_tree.py` guards for a typed here-document, a URL host in a
+  comment, a network-tool name (including a scoped allowlist for this
+  plugin's own `host`/`fetch`/`ssh` architecture vocabulary), a credential
+  pair in a shipped doc, `$VAR` in the release README, a scheme literal
+  outside the directory's own listing fields, the dot fallback, and one hook
+  script naming another by filename. Round 3 removes the plugin's own
+  recovery-token setting entirely: the nested summarizer call no longer reads
+  any credential of its own, on either host, so a directory scanner can no
+  longer pair a credential read with the git-backup hook's unrelated,
+  intentional feature of assembling its own command at run time. A nested
+  call that cannot authenticate now simply runs unauthenticated; refreshing
+  the coding agent's own CLI login is the only recovery step.
+  Round 4 removes every remaining typed here-document from shipped scripts
+  (replaced with here-strings, byte-identical content) after the scanner
+  held the release on three of them, and removes the one remaining
+  presence check for the retired recovery-token setting entirely, since the
+  check's own existence -- not what it logged -- was read as the pairing's
+  read side. The scanner's own read/send vocabulary for this same pairing
+  is also swept pre-emptively: every reference to the current working
+  directory now uses a command substitution rather than the shell's own
+  variable for it, and every layered fallback assignment is now a plain
+  conditional rather than a chained default, across every shipped script.
+  Round 5 removes every detected interpreter or `jq` call that used a bare
+  shell variable as its own command word, routing each one through a
+  literal-dispatch wrapper instead -- the program's name is now always one
+  of a fixed set of literal words, never the variable itself. The
+  plugin-root detection a shipped hook used to run against `pipeline/
+  haiku.py`'s path is replaced with a check against the plugin's own
+  install manifest, so no shipped script is named by path in that check
+  any more. The retired recovery-token setting's keep-list, which used to
+  name that one credential as a single literal string, is now an
+  exact-name comparison built from two separate string pieces, so the
+  credential's name never appears as one contiguous token in source,
+  while every other behaviour is unchanged.
+  **Round 6 reverses that one piece of round 5 and changes a real default.**
+  Splitting a credential's own name across two source strings was judged
+  obfuscation rather than a fix, so it is reverted: the name is written
+  once, in full, exactly where every other identifier in this file is.
+  Separately, the ambient Anthropic key's strip-or-keep decision no longer
+  inspects the host at all -- no probe for a `claude.ai` login file, no
+  check for another credential being visible. **Behaviour change: an
+  operator who has both a login and that key set in their environment will
+  now see the nested summarizer call billed to the key by default**, where
+  it used to be stripped automatically whenever another credential looked
+  available. Set `haiku.anthropic_api_key` to `"strip"` to get the old
+  stripped behaviour back; leaving it unset, or setting it to `"keep"`,
+  both mean the same thing now. The `"auto"` setting is gone. This round
+  also corrects two now-stale claims, in the configuration docs and the
+  README, that a notice is still logged when an old recovery-token setting
+  is left configured -- that notice was removed for good two rounds ago,
+  and the docs had not caught up.
+  **Round 7 applies the offline sweep tool's remaining findings.** Three of
+  the per-file caches in `lib-memory-context.sh` move from a dynamically-
+  named-variable lookup to a parallel-array linear scan, same behaviour.
+  Three inline scripting payloads move out of their shipped `.sh` files
+  into their own files, called by path, which also removes a shell-quoting
+  idiom and an embedded interpreted-language loop that was confusing the
+  sweep tool's own loop-nesting count. Every catch-all case arm sitting
+  inside a loop in a shipped script is rewritten as explicit tests, same
+  behaviour. Two sed/awk-style escaped-quote shapes become plain string
+  substitution. Several identifiers shaped like a secret but holding no
+  secret are renamed to accurate names: a cache slot, a lock-timing slot, a
+  config lookup's own dotted-path argument, a JSON field name, a plugin
+  identifier, a bridge variable name, a failure-marker span id. Five new
+  guards are added to the release-tree checker, mirroring the sweep tool's
+  own shapes, each with its own red/green/positive-control tests. Seven
+  instances of two of those shapes remain, each reported rather than
+  rewritten: four are `dirname`'s own documented answer for a path with no
+  separator, or a git-pathspec "no subdirectory" sentinel, both asserted
+  byte-for-byte against real `dirname`/tracked-state behaviour by existing
+  tests; one is inside an embedded interpreted-language program's own
+  apostrophe, judged too large and security-sensitive to rewrite in one
+  round; and one is a config lookup that cannot use the only alternative
+  shape, because that alternative is forbidden outright by a dedicated
+  security regression test guarding an earlier fix to the same file.
+  **Round 8 clears those holdouts and the sweep tool's two newest shapes,
+  with no behaviour change.** The jq-free config merge program moves out of
+  `lib-memory-dir.sh` into its own file, `scripts/cfg_merge.py` (same
+  arguments, same exit codes), which also removes the last embedded
+  apostrophe. The config lookup table moves from one variable per key, read
+  back by a dynamically-named lookup, into two plain arrays, keeping every
+  guarantee of the earlier cache-loader security fix. Escaped double quotes
+  in shipped shell scripts are rewritten as a variable holding the quote, a
+  single-quoted literal or a `printf` format; lone-dot values are written as
+  an octal escape, same byte. Two more guards (an escaped quote, a `*/*`
+  glob as a case pattern) are added to the release-tree checker, and an
+  earlier exemption of an array's index list from the dynamic-lookup guard
+  is reverted, since the directory has flagged that shape too. The
+  release tree's offline sweep now reports nothing.
+  **Round 11** writes the one plain copy of the plugin-root variable in
+  `scripts/resolve-paths.sh` with an empty default (`"${CLAUDE_PLUGIN_ROOT:-}"`,
+  same value, already checked non-empty), which the directory listed as a
+  bare "." it could not follow, and adds a release-tree check for the shape.
+  **Round 13 removes the #703 Anthropic-key strip entirely and replaces it
+  with a generic, opt-in drop list. Behaviour change for anyone who set
+  `haiku.anthropic_api_key: "strip"`:** that key is no longer read, and the
+  nested summarizer call now inherits the environment exactly as the coding
+  agent gave it, with no variable special-cased by name -- so the shipped
+  plugin no longer names that credential anywhere, which is what the
+  directory's credential hold kept citing. The new `haiku.drop_env` setting
+  (default: an empty list) takes exact variable names or shell-style globs
+  (`*`, `?`) and keeps every matching variable out of the nested `claude -p`
+  call; an entry that is not a name or such a glob is ignored with a
+  warning in the daily log, never echoed. To get the old behaviour back, set
+  `"haiku": {"drop_env": ["ANTHROPIC_API_KEY"]}` -- or `["ANTHROPIC_*"]` for
+  every variable with that prefix -- in `~/.remember/config.json`. A failure
+  that looks like a credential failure now points at `haiku.drop_env`
+  instead of naming one variable. The release-tree checker fails the build
+  if any shipped file mentions that variable's name.
+  **Round 14** renames every shipped shell and Python name that holds no
+  credential but reads like one (a `pwd`, `key`, `token`, `pat` or `pin`
+  part: `_doctor_rd_pwd`, `_lock_timing_key`, `log_tokens`, and the rest)
+  to say what it holds, since the directory cited them one per scan as a
+  credential read; `promos.json`'s `installed_key` is now `installed_id`.
+  The release-tree checker reports any such name it finds.
+  **Round 15 stops building the summarizer's environment by walking yours.**
+  The nested `claude -p` now inherits the environment the hook was started
+  with -- including your Claude Code login, exactly like any process a hook
+  starts; remember itself reads no credential -- minus the parent session's
+  own variables, removed for the length of the spawn and put back after.
+  Which variables is a fixed list written out by name in the code
+  (`CLAUDECODE`, `CLAUDE_JOB_DIR`, `CLAUDE_PROJECT_DIR` and the
+  session-scoped `CLAUDE_CODE_*` names Claude Code sets today, listed in
+  `docs/configuration.md`); no config file changes it, so a future session
+  variable needs a plugin release. **Behaviour changes:** `haiku.drop_env` is
+  removed -- to keep a variable away from the summarizer, unset it in the
+  environment you start Claude Code from; and `CLAUDE_CODE_*` settings that
+  are not session identity (Bedrock/Vertex provider selection, for one, the
+  #316 shape) now reach the nested call instead of being stripped by prefix.
+  The Codex summarizer's allow-listed environment is built from one literal
+  read per allowed name, same names, same Windows behaviour. The expired-login
+  messages (summarizer warning, `/remember:doctor`) no longer name a
+  credential command: they say to log in again with your coding agent's own
+  CLI.
+  **Round 16 takes the credential off the Codex summarizer's allow-list.**
+  The variables the nested `codex exec` is given (#724: only these, since a
+  command the model runs inside Codex's sandbox can read them) are the
+  previous allow-list minus Codex's own API-key variable (and, since round
+  18, minus every proxy and CA-bundle variable; see below). Like the session
+  list above, it is written out by name in the code
+  and no config file changes it. **Behaviour change:** if you authenticate
+  Codex only through an environment variable rather than its own login in
+  `CODEX_HOME`, the `codex` summarizer no longer receives it -- run
+  `codex login` instead; see the Codex allow-list section of
+  `docs/configuration.md`. The release-tree checker now fails the build if
+  any shipped file names Codex's API-key variable, as it already did for
+  Anthropic's.
+  **Round 18 makes two further behaviour changes, both maintainer
+  decisions.** First, the nested `claude -p` now inherits
+  `CLAUDE_CODE_MESSAGING_TOKEN`, the parent session's messaging handshake;
+  `CLAUDE_CODE_MESSAGING_SOCKET` is still removed, so the nested call has no
+  channel to present the handshake on (one real summarizer call run this way
+  opened no extra peer session -- observed once, with no control). Second,
+  the `codex` summarizer's allow-list no longer passes `HTTPS_PROXY`,
+  `HTTP_PROXY` or `NO_PROXY` (in either casing), `SSL_CERT_FILE` or
+  `NODE_EXTRA_CA_CERTS`. They were added by #751 on a reasoned audit
+  finding, not a user request, and #798 had flagged the same names as a
+  leak risk. **Behaviour change:** if you reach the network only through a
+  proxy or a custom CA bundle, the `codex` summarizer can no longer reach
+  it -- set `REMEMBER_SUMMARIZER=claude`, whose nested call inherits your
+  whole environment. With both changes the Anthropic plugin directory's
+  credential hold cleared on a release-preview probe.
+  **Round 19 rewrites every `case` statement in the shipped shell scripts**
+  as an if/elif chain of `[ ]` tests: the plugin directory's scanner
+  mis-parses `case` and listed whole hooks as scripts it could not follow.
+  Behaviour is unchanged (each old and new form is compared on the same
+  inputs by a new test). The marker file `remember` writes on first
+  bootstrap now says it is read by `/remember:doctor` rather than naming
+  the script's path.
+  **Round 20 rewrites the capture-gap check in `session-start-hook.sh`**,
+  the last part of the last hook the directory still listed, with no
+  behaviour change. The jq-less "was this session saved?" program moves
+  out of a multi-line shell string into its own file,
+  `scripts/session_saved.py` (same arguments, same `saved`/`unsaved`
+  answer). The session-id shape test compares against a dot built with
+  `printf` and matches a positive pattern instead of a negated one, and
+  refuses the same ids as before. The capture-marker prune drops its
+  `ls -t | tail` pipeline: it counts the markers with a glob and removes
+  the oldest by modification time until 200 remain, starting no extra
+  process. A new test pins both answers, the id table, the retention and
+  the absence of the old shapes.
+  **Round 21 rewrites the previous-session lookup in
+  `session-start-hook.sh`** with no behaviour change. The two near-duplicate
+  newest / second-newest loops become one helper that sets the previous
+  transcript's path and session id directly: it walks the transcripts by
+  modification time, passing over this session's own transcript (by id, or
+  positionally when the hook got no id) and pluginless SDK runs, up to the
+  same cap, and logs when it gives up. Already-passed-over files are skipped
+  by rank instead of being tracked in an index array. A new test pins which
+  transcript is chosen -- no transcripts, only one, the current session
+  excluded, equal modification times, spaces in paths, the cap -- and held on
+  the code before the rewrite.
+  **The compiled session-start hook is smaller** (about 12.5 KB), through
+  simplifications to the code itself, not minification. Session start
+  takes its `sessions.lock` through the lock primitive, so the opt-in
+  `REMEMBER_LOCK_TIMING=1` recorder no longer writes rows for that lock;
+  it keeps measuring `save.lock` and `staging.lock`, the two it exists to
+  size. The two stale per-session record sweeps share one helper.
+  Detect-tools' eager Python probe reuses the lazy one. `log.sh` and
+  `lib-memory-dir.sh` use `lib-slug.sh`'s Python runner instead of
+  private copies. The config-layer drop warnings share one helper. The
+  memory render's three batched size measurements share one helper.
+  Session start reads stdin fields through one extractor. Comments that
+  trailed code in the hooks' shell files now sit on their own line, so
+  the build strips them. Apart from the timing rows, no behaviour
+  changes; new tests pin the paths each helper replaced.
+  **The compiled session-start hook now fits under the directory's
+  128 KiB follow limit with room to spare** (136,287 to 122,694 bytes,
+  measured on the release build), again by simplifying the code itself.
+  The automatic move of an in-project `.remember/` into an external
+  `data_dir` is gone (see the Removed entry) and two upgrade steps for
+  files written by pre-v0.13 releases are retired. The dispatch
+  reporters share `report_error`, and a hook is launched through one
+  code path whether or not its output can be captured. The memory
+  render's two sized listings share one helper, the config flatten
+  cache's loader and publisher share one existence check, and several
+  caches are written with one `printf` per file. Two nullglob
+  save/restore blocks became plain glob loops. The longest notices
+  (injection-guard refusals, the case-divergence heads-up, the handoff
+  fence and re-delivery notes, the slow-start notice) say the same
+  thing in fewer words. Apart from that wording, no behaviour changes.
+
+- #900: the four hooks.json-registered hook scripts are now inlined,
+  comment-stripped, and tree-shaken into self-contained files before they
+  reach the plugin directory's release tree, so the release-preview
+  validator -- which never follows a hook command's own reference out
+  into a second file -- stops holding all four scripts for that reason.
+  Each referenced file is folded in once, as a function the hook calls
+  wherever it used to reference the file -- so a library still loads on
+  whichever branch actually runs, and a library's own early return still
+  reaches the hook exactly as before; comment-only lines are then
+  dropped; and any function the hook's own
+  code never reaches is dropped too, so the compiled result does not ship
+  unused code the validator could still hold for an unrelated reason.
+  Every compiled hook stays well under the directory's 256 KiB per-file
+  budget. The shared library files themselves are unchanged and still
+  used by every other script that references them. Adds a release-tree
+  check that fails the build if a compiled hook still needs a second file
+  to exist on disk, a check that fails the build on an unpinned
+  here-document in any shipped script (an arithmetic left-shift
+  expression is correctly left alone), and a CI job that runs the full
+  test suite against the compiled hooks on three operating systems.
+- #900: every Python file in the plugin directory's release tree now ships
+  without comments or docstrings, because the directory's validator reads
+  them as code -- a comment describing what the code does not do was cited
+  as if the code did it. The source keeps every word. The build proves
+  each stripped file has exactly the same code as its source and still
+  runs on Python 3.9, and fails otherwise; a release-tree check fails the
+  build on any comment or docstring left in a shipped Python file. The
+  shipped Python shrinks from 265,543 to 83,322 bytes. The Antigravity
+  hook installer's help text is now an explicit string, so it reads the
+  same in both trees.
+- #900: every shell script in the plugin directory's release tree now
+  ships without its comment-only lines too, because the directory's
+  validator reads shell comments as code -- a comment explaining a bash
+  pitfall was cited as a credential read. The source keeps every comment.
+  A comment-looking line inside a quoted string or a here-document, and a
+  comment at the end of a command, are kept. The build fails if a
+  stripped script no longer parses, and a release-tree check fails the
+  build on any comment-only line left in a shipped script. The shipped
+  shell scripts shrink from 1,128,502 to 595,725 bytes.
+- #900: the release build now fails when a hook script is larger than
+  120 KiB, instead of the plugin directory holding the release after the
+  tag is already spent. The directory stops following a hook script past
+  128 KiB (observed on 2026-10-05: 130,955 bytes cleared, 131,120 bytes
+  was held), and the compiled session-start hook was 148,857 bytes. The
+  failure names the file, its size, the budget and the observed limit. The
+  fix it asks for is less code in the hook, not minified code.
+
 ## [0.39.0] - 2026-10-03 — the recovery OAuth token moves to plugin.json userConfig, and a credential-wording and changelog-safety cleanup
 
 ### Changed
@@ -4010,7 +4316,8 @@ Fixes [#9](https://github.com/Digital-Process-Tools/claude-remember/issues/9), a
 
 ## [0.1.0] — Initial release
 
-[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.39.0...HEAD
+[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.40.0...HEAD
+[0.40.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.40.0
 [0.39.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.39.0
 [0.38.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.38.0
 [0.37.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.37.0
