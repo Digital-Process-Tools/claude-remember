@@ -1817,17 +1817,11 @@ _REMEMBER_CTX_OK=""
 # test_unwritable_ctx_buffer_does_not_burn_the_cooldown already proves safe
 # for an unwritable tmp/, so the only visible cost is the promo banner,
 # never the memory context itself.
-_REMEMBER_CTX_TRACE_ACTIVE=""
-if [[ "$-" == *x* ]]; then
-    _REMEMBER_CTX_TRACE_ACTIVE="1"
-fi
-[ "${REMEMBER_TRACE:-}" = "1" ] && _REMEMBER_CTX_TRACE_ACTIVE="1"
-if [ -z "$_REMEMBER_CTX_TRACE_ACTIVE" ] && : > "$_REMEMBER_CTX_FILE" 2>/dev/null; then
+if ! [[ "$-" == *x* ]] && [ "${REMEMBER_TRACE:-}" != "1" ] && : > "$_REMEMBER_CTX_FILE" 2>/dev/null; then
     exec 3>&1
     exec > "$_REMEMBER_CTX_FILE"
     _REMEMBER_CTX_OK="true"
 fi
-unset _REMEMBER_CTX_TRACE_ACTIVE
 if [ "$REMEMBER_ROOT" != "$PROJECT_DIR" ] || [ -n "$PER_SESSION_HANDOFF" ] || [ -n "$HANDOFF_MODE_DEGRADED" ]; then
     echo "=== HANDOFF ==="
     echo "Write next handoff to: $REMEMBER_HANDOFF"
