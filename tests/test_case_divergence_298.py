@@ -758,6 +758,51 @@ def _apply_round_19(ref_code: str, rel: str) -> str:
     return ref_code
 
 
+# #898 hook-size lane: genuine simplifications to the two pinned libraries,
+# a third stage applied AFTER _apply_round_19 (its pairs rewrite text round
+# 19 produces). Same three states, same derivation: one pair per changed
+# hunk, code lines only.
+_SHRINK_898_DIVERGENCE = {
+    "scripts/lib-memory-dir.sh": [
+        # H: lib-memory-dir.sh calls lib-slug.sh's runner (sourced at the
+        # top of the file) instead of carrying an identical private copy.
+        (
+            '    _lmd_run_python() {\n'
+            '        if [ "${PYTHON:-python3}" = python3 ]; then\n'
+            '            python3 "$@"\n'
+            '        elif [ "${PYTHON:-python3}" = python ]; then\n'
+            '            python "$@"\n'
+            '        elif [ "${PYTHON:-python3}" = "py -3" ]; then\n'
+            '            py -3 "$@"\n'
+            '        elif [ "${PYTHON:-python3}" = py ]; then\n'
+            '            py "$@"\n'
+            '        else\n'
+            '            return 127\n'
+            '        fi\n'
+            '    }\n',
+            '',
+        ),
+        (
+            '    _lmd_run_python "$_lmd_py_dir/cfg_merge.py"',
+            '    _remember_slug_run_python "$_lmd_py_dir/cfg_merge.py"',
+        ),
+    ],
+}
+
+
+def _apply_shrink_898(ref_code: str, rel: str) -> str:
+    """Third stage, same three states as _apply_round_19."""
+    for old_code, new_code in _SHRINK_898_DIVERGENCE.get(rel, ()):
+        if old_code in ref_code:
+            ref_code = ref_code.replace(old_code, new_code)
+            continue
+        assert new_code in ref_code and (new_code or old_code not in ref_code), (
+            f"{rel}: neither the old nor the new code of a #898 shrink "
+            "substitution is on origin/main -- re-derive the allowance"
+        )
+    return ref_code
+
+
 RECORD_NAME = "case-divergence"
 NOTICE_NAME = "case-divergence-notice"
 SESSION_ID = "eeeeeeee-0000-4000-8000-000000000298"
@@ -1333,7 +1378,8 @@ def test_the_per_tool_call_path_is_not_touched(tmp_path):
             f"{rel} on origin/main has no non-comment lines — this compare "
             "would pass against any file at all"
         )
-        ref_code = _apply_round_19(_apply_sanctioned_divergence(_code(ref.stdout), rel), rel)
+        ref_code = _apply_shrink_898(
+            _apply_round_19(_apply_sanctioned_divergence(_code(ref.stdout), rel), rel), rel)
         assert ref_code == _code(path.read_text(encoding="utf-8")), rel
 
 

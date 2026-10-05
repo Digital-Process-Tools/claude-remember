@@ -20,11 +20,11 @@
 [ -n "${_REMEMBER_LIB_SLUG_LOADED:-}" ] && return 0
 _REMEMBER_LIB_SLUG_LOADED=1
 
-# #898 round 5: "${PYTHON:-python3}" as a bare command word (both call
-# sites below) is a computed program name (UNPINNED_NPX). This file is
-# deliberately sourceable WITHOUT detect-tools.sh (see the header comment
-# above for why), so it cannot rely on that file's _remember_run_python
-# wrapper -- same literal-dispatch idea, local to this file.
+# #898 round 5: "${PYTHON:-python3}" as a bare command word is a computed
+# program name (UNPINNED_NPX). This file is sourceable WITHOUT
+# detect-tools.sh (see the header above), so it has its own literal-dispatch
+# runner; lib-memory-dir.sh and log.sh, which both source this file, share
+# it (#898). Unset PYTHON means python3; an unrecognised one, a silent 127.
 _remember_slug_run_python() {
     if [ "${PYTHON:-python3}" = python3 ]; then
         python3 "$@"

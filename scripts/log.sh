@@ -648,7 +648,7 @@ _config_load() {
         # scanner cannot tell from real bash. Called by literal path now.
         local _cfg_flatten_dir="${BASH_SOURCE[0]%/*}"
         [ "$_cfg_flatten_dir" = "${BASH_SOURCE[0]}" ] && _cfg_flatten_dir="$(pwd)"
-        _dump=$(_remember_log_run_python "$_cfg_flatten_dir/cfg_flatten.py" "$REMEMBER_CONFIG" 2>/dev/null) || _rc=1
+        _dump=$(_remember_slug_run_python "$_cfg_flatten_dir/cfg_flatten.py" "$REMEMBER_CONFIG" 2>/dev/null) || _rc=1
     fi
 
     if [ "$_rc" -ne 0 ]; then
@@ -733,25 +733,12 @@ config() {
 # this; it is a live constraint on any future one, the same residual risk
 # `_remember_date_into` (lib-clock.sh, #511) already carries for its own
 # `_var`/`_val` locals.
-# #898 round 5: "${PYTHON:-python3}" as a bare command word (used twice
-# below, in _config_load and config_into's own jq-less fallbacks) is a
-# computed program name (UNPINNED_NPX). log.sh can be sourced directly
-# without detect-tools.sh (see config_into's own comment on this), so it
-# cannot rely on that file's _remember_run_python wrapper -- same
-# literal-dispatch idea, local to this file.
-_remember_log_run_python() {
-    if [ "${PYTHON:-python3}" = python3 ]; then
-        python3 "$@"
-    elif [ "${PYTHON:-python3}" = python ]; then
-        python "$@"
-    elif [ "${PYTHON:-python3}" = "py -3" ]; then
-        py -3 "$@"
-    elif [ "${PYTHON:-python3}" = py ]; then
-        py "$@"
-    else
-        return 127
-    fi
-}
+# The jq-less reads below (and _config_load's above) run Python through
+# _remember_slug_run_python, the literal-dispatch runner lib-slug.sh defines
+# (#898 round 5: a computed program name is an UNPINNED_NPX hold). log.sh
+# can be sourced without detect-tools.sh, so it cannot use that file's
+# _remember_run_python; lib-slug.sh always arrives first, through
+# lib-memory-dir.sh above, so the one shared copy is enough (#898).
 
 config_into() {
     local _cfg_into_var="$1"
@@ -861,7 +848,7 @@ config_into() {
         # call site's own argument order.
         local _cfg_py_dir="${BASH_SOURCE[0]%/*}"
         [ "$_cfg_py_dir" = "${BASH_SOURCE[0]}" ] && _cfg_py_dir="$(pwd)"
-        _cfg_into_val=$(_remember_log_run_python "$_cfg_py_dir/jq_fallback_get.py" "$REMEMBER_CONFIG" "$_cfg_into_name")
+        _cfg_into_val=$(_remember_slug_run_python "$_cfg_py_dir/jq_fallback_get.py" "$REMEMBER_CONFIG" "$_cfg_into_name")
     fi
     [ -n "$_cfg_into_val" ] || _cfg_into_val="$_cfg_into_default"
     printf -v "$_cfg_into_var" '%s' "$_cfg_into_val"

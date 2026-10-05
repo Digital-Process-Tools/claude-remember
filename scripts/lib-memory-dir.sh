@@ -653,27 +653,14 @@ elif [ "${#_cfg_sources[@]}" -gt 0 ]; then
     # expansion). This file does not source detect-tools.sh (by design --
     # see the header comment above for why: it would exit 1 on no usable
     # Python), so it cannot reuse that file's _remember_run_python wrapper.
-    # Same literal-dispatch idea, local to this function: the if/elif
-    # branches are each a literal command word.
-    _lmd_run_python() {
-        if [ "${PYTHON:-python3}" = python3 ]; then
-            python3 "$@"
-        elif [ "${PYTHON:-python3}" = python ]; then
-            python "$@"
-        elif [ "${PYTHON:-python3}" = "py -3" ]; then
-            py -3 "$@"
-        elif [ "${PYTHON:-python3}" = py ]; then
-            py "$@"
-        else
-            return 127
-        fi
-    }
+    # It uses lib-slug.sh's literal-dispatch runner instead, sourced at the
+    # top of this file (#898: one shared copy, not one per library).
     # #898 round 8: the merge program itself lives in cfg_merge.py beside
     # this file (the compiled hooks sit in the same directory, so the
     # lookup is the same either way); same argv, same exit-code contract.
     _lmd_py_dir="${BASH_SOURCE[0]%/*}"
     [ "$_lmd_py_dir" = "${BASH_SOURCE[0]}" ] && _lmd_py_dir="$(pwd)"
-    _lmd_run_python "$_lmd_py_dir/cfg_merge.py" "$_merged_cfg" "$_untrusted_haiku_source" "$_strip_model_reject" "$_project_drop_marker" "${_cfg_sources[@]}" > /dev/null 2>&1 || _py_merge_rc=$?
+    _remember_slug_run_python "$_lmd_py_dir/cfg_merge.py" "$_merged_cfg" "$_untrusted_haiku_source" "$_strip_model_reject" "$_project_drop_marker" "${_cfg_sources[@]}" > /dev/null 2>&1 || _py_merge_rc=$?
     unset _lmd_py_dir
     # #804: rc 3 above means the merge SUCCEEDED (the write already
     # happened) but the untrusted layer was dropped -- must NOT trigger the
