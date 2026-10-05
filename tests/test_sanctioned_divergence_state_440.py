@@ -19,11 +19,16 @@ asserted the instant its own sanctioned allowance's PR (#436) merged: once
 merged, origin/main held the *new* code and the old code the allowance still
 looked for was gone. `_apply_sanctioned_divergence` recognizes a third state --
 old code absent AND new code present is the post-merge steady state, not
-staleness -- and only asserts when neither is found. These three tests
-construct both shapes directly from `_SANCTIONED_DIVERGENCE`'s own recorded
-strings rather than depending on where origin/main happens to sit when they
-run, so they cannot pass or fail for the wrong reason depending on the
-repository's own history.
+staleness -- and only asserts when neither is found.
+
+These tests install their own (old_code, new_code) pairs into
+`_SANCTIONED_DIVERGENCE` for the duration of each test (#900). They used to
+read the live allowances, which tied the mechanism's pins to whatever the
+table happened to hold: when #899 landed, every live allowance was on
+origin/main and the table went empty, and this module stopped collecting.
+The mechanism does not depend on which allowances exist, so neither do its
+pins -- and they still cannot pass or fail depending on where origin/main
+happens to sit.
 """
 
 from __future__ import annotations
@@ -43,13 +48,24 @@ from tests.test_case_divergence_298 import (
 _REL = "scripts/lib-memory-dir.sh"
 
 
-# A file may carry more than one allowance (#429 and #726 both touch
+# A file may carry more than one allowance (#429 and #726 both touched
 # lib-memory-dir.sh), so `_SANCTIONED_DIVERGENCE[_REL]` is a list of
-# (old_code, new_code) pairs and each is judged on its own. `ref_code` is
-# built from every pair's shape at once so the helper sees each one in the
-# state under test; the per-pair assertions below say which pair failed.
-_PAIRS = _SANCTIONED_DIVERGENCE[_REL]
-assert _PAIRS, f"{_REL} carries no sanctioned divergence -- nothing to pin here"
+# (old_code, new_code) pairs and each is judged on its own. Three
+# independent pairs, multi-line like the real ones, none a substring of
+# another.
+_PAIRS = [
+    ('    tmp="${SYS_TMPDIR}/x-$$.json"\n',
+     '    tmp="$(mktemp "${SYS_TMPDIR}/x.XXXXXX")"\n'),
+    ('    case "$p" in\n        *a*) ;;\n    esac\n',
+     '    [ "${p#*a}" != "$p" ] || return 0\n'),
+    ('_old_helper() {\n    :\n}\n',
+     '_new_helper() {\n    true\n}\n'),
+]
+
+
+@pytest.fixture(autouse=True)
+def _installed_pairs(monkeypatch):
+    monkeypatch.setitem(_SANCTIONED_DIVERGENCE, _REL, _PAIRS)
 
 
 def test_sanctioned_divergence_applies_pre_merge_shape():
