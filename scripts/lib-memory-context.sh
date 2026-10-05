@@ -200,6 +200,27 @@ _remember_wc_size_get_into() {
     # variable unassigned for `printf -v VAR ''` (#898 round 12).
     printf -v "$_remember_wc_size_outvar" '%s' ''
 }
+# _remember_wc_size_batch FILE...
+# One batched `wc -c` over every file named, cached through
+# _remember_wc_size_set (#664) -- one fork for the lot instead of one `wc` +
+# one `tr` PER file. Default IFS (not `IFS=`): `wc -c`'s own right-justify
+# padding is entirely LEADING the byte count, never between the count and
+# the filename (exactly one space there, verified against both GNU and BSD
+# wc) -- so a plain `read bytes path` both trims the padding and hands the
+# filename back verbatim, spaces-in-paths included, since `read` dumps
+# everything left over into the LAST variable rather than re-splitting it.
+# A non-numeric count, or wc's own `total` line, is skipped. Called with no
+# files it measures nothing (and runs no `wc`).
+_remember_wc_size_batch() {
+    [ "$#" -gt 0 ] || return 0
+    local _remember_wc_bytes _remember_wc_path
+    while read -r _remember_wc_bytes _remember_wc_path; do
+        if [ -z "$_remember_wc_bytes" ] || [ "${_remember_wc_bytes#*[!0-9]}" != "$_remember_wc_bytes" ]; then continue; fi
+        [ "$_remember_wc_path" = "total" ] && continue
+        _remember_wc_size_set "$_remember_wc_path" "$_remember_wc_bytes"
+    done < <(wc -c "$@")
+    return 0
+}
 
 # ============================================================================
 # INJECTION GUARD -- "may this memory file be injected?" (#721 follow-ups:
@@ -881,10 +902,8 @@ _remember_render_memory_section() {
     printf -v _remember_nl '\n'
     # One batched `wc -c` over every memory file that is present AND
     # non-empty (#664), instead of one `wc` + one `tr` PER file -- a typical
-    # 4-6 file store paid 8-12 forks here alone before this. `tr -d ' '` is
-    # gone too: `read` already splits on (and discards) leading/trailing
-    # whitespace, which is all `wc -c`'s own leading-space padding is.
-    local _remember_present=() _remember_wc_bytes _remember_wc_path
+    # 4-6 file store paid 8-12 forks here alone before this.
+    local _remember_present=()
     for MFILE in "${MEMORY_FILES[@]}"; do
         if [ -f "$MFILE" ] && [ -s "$MFILE" ]; then
             if [ "${SESSION_START_SOURCE:-}" = "compact" ] && [ "$MFILE" != "$IDENTITY_FILE" ]; then
@@ -900,20 +919,7 @@ _remember_render_memory_section() {
             fi
         fi
     done
-    if [ "${#_remember_present[@]}" -gt 0 ]; then
-        # Default IFS (not `IFS=`): `wc -c`'s own right-justify padding is
-        # entirely LEADING the byte count, never between the count and the
-        # filename (exactly one space there, verified against both GNU and
-        # BSD wc) -- so a plain `read bytes path` both trims the padding and
-        # hands the filename back verbatim, spaces-in-paths included, since
-        # `read` dumps everything left over into the LAST variable rather
-        # than re-splitting it.
-        while read -r _remember_wc_bytes _remember_wc_path; do
-            if [ -z "$_remember_wc_bytes" ] || [ "${_remember_wc_bytes#*[!0-9]}" != "$_remember_wc_bytes" ]; then continue; fi
-            [ "$_remember_wc_path" = "total" ] && continue
-            _remember_wc_size_set "$_remember_wc_path" "$_remember_wc_bytes"
-        done < <(wc -c "${_remember_present[@]}")
-    fi
+    [ "${#_remember_present[@]}" -gt 0 ] && _remember_wc_size_batch "${_remember_present[@]}"
     # `"${arr[@]}"` on an EMPTY array is an "unbound variable" error under
     # `set -u` on bash < 4.4 (3.2 included), while `${#arr[@]}` is not -- so
     # every iteration over an array that can be empty is count-guarded.
@@ -1015,13 +1021,7 @@ _remember_render_memory_section() {
         # file once SESSION_START_SOURCE=compact). Same storage (indirect
         # variables, not an associative array -- see the comment above
         # _remember_wc_size_set) as the main loop's own batch.
-        if [ "${#_remember_deferred[@]}" -gt 0 ]; then
-            while read -r _remember_wc_bytes _remember_wc_path; do
-                if [ -z "$_remember_wc_bytes" ] || [ "${_remember_wc_bytes#*[!0-9]}" != "$_remember_wc_bytes" ]; then continue; fi
-                [ "$_remember_wc_path" = "total" ] && continue
-                _remember_wc_size_set "$_remember_wc_path" "$_remember_wc_bytes"
-            done < <(wc -c "${_remember_deferred[@]}")
-        fi
+        [ "${#_remember_deferred[@]}" -gt 0 ] && _remember_wc_size_batch "${_remember_deferred[@]}"
         DEFERRED_MEMORY=""
         # Same empty-array guard as the main loop above (bash < 4.4 + set -u).
         [ "${#_remember_deferred[@]}" -gt 0 ] && DEFERRED_MEMORY=$(for MFILE in "${_remember_deferred[@]}"; do
@@ -1100,11 +1100,7 @@ _remember_render_memory_section() {
         done <<< "$ROTATED_NEWEST"
         if [ "${#_remember_newest_arr[@]}" -gt 0 ]; then
             local _remember_newest_bytes
-            while read -r _remember_wc_bytes _remember_wc_path; do
-                if [ -z "$_remember_wc_bytes" ] || [ "${_remember_wc_bytes#*[!0-9]}" != "$_remember_wc_bytes" ]; then continue; fi
-                [ "$_remember_wc_path" = "total" ] && continue
-                _remember_wc_size_set "$_remember_wc_path" "$_remember_wc_bytes"
-            done < <(wc -c "${_remember_newest_arr[@]}")
+            _remember_wc_size_batch "${_remember_newest_arr[@]}"
             for _remember_newest_line in "${_remember_newest_arr[@]}"; do
                 _remember_wc_size_get_into _remember_newest_bytes "$_remember_newest_line"
                 # The third of this getter's three call sites, and the one the
