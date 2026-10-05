@@ -424,7 +424,8 @@ _remember_repo_root_walk_into() {
             break
         fi
     done
-    printf -v "$_rrw_outvar" '%s' ''  # not an empty format: see above
+    # not an empty format: see above
+    printf -v "$_rrw_outvar" '%s' ''
     return 1
 }
 
@@ -1417,7 +1418,8 @@ _remember_apply_session_start_budget() {
     local _outvar="$1" _max="$2" _text="$3"
     if [ -z "$_max" ] || [ "${_max#*[!0-9]}" != "$_max" ]; then return 0; fi
     [ "$_max" -gt 0 ] || return 0
-    local LC_ALL=C  # byte length, not a locale-dependent character count (see header above)
+    # byte length, not a locale-dependent character count (see header above)
+    local LC_ALL=C
     [ "${#_text}" -gt "$_max" ] || return 0
 
     # Both captures strip trailing newlines the same way the body's own

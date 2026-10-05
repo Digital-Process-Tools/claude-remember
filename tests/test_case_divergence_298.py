@@ -823,6 +823,18 @@ _SHRINK_898_DIVERGENCE = {
                       "source) are all reached here, and one of them was dropped; "
                       "the remaining layers still applied"),
         )
+    ] + [
+        # J: inline trailing comments moved onto their own line above, so
+        # the release build's whole-line strip removes them; the code part
+        # of each line is unchanged.
+        (
+            '    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)\n',
+            '    local LC_ALL=C\n',
+        ),
+        (
+            '        _project_cfg_model_reject_untrusted=1  # tracked or could-not-tell -> fail CLOSED\n',
+            '        _project_cfg_model_reject_untrusted=1\n',
+        ),
     ],
 }
 

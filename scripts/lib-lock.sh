@@ -526,7 +526,8 @@ _lock_timing_disclose() {
 # "SLOT" rather than a KEY-shaped name: this is an identifier for one
 # process's own timing entry, not a credential (#898 round 7).
 _lock_timing_slot() {
-    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
+    # bracket ranges below are byte-wise, not collated (#695)
+    local LC_ALL=C
     _LOCK_TIMING_SLOT="${1//[!A-Za-z0-9]/_}"
 }
 

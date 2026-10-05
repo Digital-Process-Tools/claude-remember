@@ -272,7 +272,8 @@ _config_is_private_path() {
 #    never inspected, and never a re-parse of the value as shell source
 #    either way.
 _remember_cfg_flatten_cache_path() {
-    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
+    # bracket ranges below are byte-wise, not collated (#695)
+    local LC_ALL=C
     [ -n "${REMEMBER_DIR:-}" ] || return 1
     local _slug="${REMEMBER_DIR//[!a-zA-Z0-9]/-}"
     # Same tail-keep truncation as _remember_env_cache_path
@@ -339,7 +340,8 @@ _remember_cfg_flatten_cache_is_standard_merge() {
 # rather than silently mis-decoded.
 _remember_cfg_flatten_cache_valid_value() {
     local _value="$1"
-    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
+    # bracket ranges below are byte-wise, not collated (#695)
+    local LC_ALL=C
     [[ "$_value" =~ ^([^\\]|\\[\\nrt])*$ ]]
 }
 
@@ -350,7 +352,8 @@ _remember_cfg_flatten_cache_valid_value() {
 # for what <value> has to satisfy, and the #682 block comment above this
 # whole section for what <name> is guaranteed to be (and why).
 _remember_cfg_flatten_cache_valid_line() {
-    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
+    # bracket ranges below are byte-wise, not collated (#695)
+    local LC_ALL=C
     local _line="$1"
     [[ "$_line" =~ ^_RCFG_[A-Za-z0-9_]+$'\t' ]] || return 1
     _remember_cfg_flatten_cache_valid_value "${_line#*$'\t'}"

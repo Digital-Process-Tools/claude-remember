@@ -866,7 +866,8 @@ _remember_write_case_divergence() {
 _ENTRYPOINT_SNIFF_CAP=50
 _transcript_is_pluginless_sdk() {
     local f=$1 n=0 line ep rest prefix is_dialogue dq
-    printf -v dq '\042'  # the double quote, as in _stdin_json_string_into
+    # the double quote, as in _stdin_json_string_into
+    printf -v dq '\042'
     while IFS= read -r line; do
         n=$((n + 1))
         is_dialogue=0
@@ -1194,7 +1195,8 @@ SEEN_ID=""
 # Args: $1 — session id. Exit 0 if anything can vouch for it having been
 # captured. Any one source suffices; they fail independently.
 capture_was_seen() {
-    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
+    # bracket ranges below are byte-wise, not collated (#695)
+    local LC_ALL=C
     local _d _ok
     [ -n "$1" ] || return 1
     # 1. Per-session marker from the PostToolUse hook — "PostToolUse ran for this

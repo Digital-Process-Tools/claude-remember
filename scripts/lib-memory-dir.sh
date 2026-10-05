@@ -152,7 +152,8 @@ _resolve_memory_project_dir() {
 # If data_dir starts with / or ~ treat as absolute; expand ~ and {slug}.
 # Otherwise treat as a path relative to PROJECT_DIR (legacy behaviour).
 _resolve_remember_dir() {
-    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
+    # bracket ranges below are byte-wise, not collated (#695)
+    local LC_ALL=C
     local data_dir="$1"
     local proj="$2"
 
@@ -209,7 +210,8 @@ _resolve_remember_dir() {
 # directory is a hijack waiting to happen, and no one keeps a memory store at
 # the filesystem root.
 _set_store_root() {
-    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
+    # bracket ranges below are byte-wise, not collated (#695)
+    local LC_ALL=C
     local data_dir="$1" prefix
     REMEMBER_STORE_ROOT=""
 
@@ -307,7 +309,8 @@ _project_cfg="${REMEMBER_DIR}/config.json"
 # the caller's `_project_cfg_haiku_untrusted` directly, same as
 # _set_store_root does for REMEMBER_STORE_ROOT.
 _classify_project_cfg_haiku_trust() {
-    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
+    # bracket ranges below are byte-wise, not collated (#695)
+    local LC_ALL=C
     if [ "${_data_dir_raw#/}" != "$_data_dir_raw" ] || [ "${_data_dir_raw#[~]}" != "$_data_dir_raw" ] \
         || [ "${_data_dir_raw#[A-Za-z]:[/\\]}" != "$_data_dir_raw" ]; then
         _project_cfg_haiku_untrusted=0
@@ -459,7 +462,8 @@ if [ "$_project_cfg_haiku_untrusted" = "1" ] && [ -f "$_project_cfg" ]; then
     if [ "$_project_cfg_tracked_answer" = untracked ]; then
         _project_cfg_model_reject_untrusted=0
     else
-        _project_cfg_model_reject_untrusted=1  # tracked or could-not-tell -> fail CLOSED
+        # tracked or could-not-tell -> fail CLOSED
+        _project_cfg_model_reject_untrusted=1
     fi
     unset _project_cfg_tracked_answer
 fi
