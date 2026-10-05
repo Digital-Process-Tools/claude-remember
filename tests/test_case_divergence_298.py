@@ -786,6 +786,43 @@ _SHRINK_898_DIVERGENCE = {
             '    _lmd_run_python "$_lmd_py_dir/cfg_merge.py"',
             '    _remember_slug_run_python "$_lmd_py_dir/cfg_merge.py"',
         ),
+        # I: the three report_error-or-printf drop warnings become one
+        # helper, _lmd_warn, defined with the other helpers; same text, same
+        # two destinations.
+        (
+            '\n_read_data_dir() {\n',
+            '\n_lmd_warn() {\n'
+            '    if declare -F report_error >/dev/null 2>&1; then\n'
+            '        report_error "lib-memory-dir" "$1"\n'
+            '    else\n'
+            '        printf \'%s\\n\' "[lib-memory-dir] WARNING: $1" >&2\n'
+            '    fi\n'
+            '}\n'
+            '\n'
+            '_read_data_dir() {\n',
+        ),
+    ] + [
+        (
+            f'{ind}if declare -F report_error >/dev/null 2>&1; then\n'
+            f'{ind}    report_error "lib-memory-dir" "{msg}"\n'
+            f'{ind}else\n'
+            f'{ind}    printf \'%s\\n\' "[lib-memory-dir] WARNING: {msg}" >&2\n'
+            f'{ind}fi\n',
+            f'{ind}_lmd_warn "{msg}"\n',
+        )
+        for ind, msg in (
+            (" " * 16, "sanitizing the project config layer failed (mktemp, an "
+                       "unreadable project file, or jq itself) -- that layer was "
+                       "dropped; bundled/user-global config still applies"),
+            (" " * 8, "sanitizing the project config layer failed (unreadable "
+                      "project file or malformed JSON) -- that layer was dropped; "
+                      "bundled/user-global config still applies"),
+            (" " * 8, "sanitizing a trusted config layer failed (unreadable file "
+                      "or malformed JSON) -- bundled config, user-global config, "
+                      "and project config (when it is not the untrusted-haiku "
+                      "source) are all reached here, and one of them was dropped; "
+                      "the remaining layers still applied"),
+        )
     ],
 }
 

@@ -882,6 +882,52 @@ class TestMalformedTrustedConfigDisclosure:
         assert "lib-memory-dir" not in stderr, stderr
 
 
+_TRUSTED_DROP_MSG = (
+    "sanitizing a trusted config layer failed (unreadable file or malformed "
+    "JSON) -- bundled config, user-global config, and project config (when it "
+    "is not the untrusted-haiku source) are all reached here, and one of them "
+    "was dropped; the remaining layers still applied"
+)
+
+
+class TestDropWarningGoesToReportErrorWhenDefined:
+    """#898 (I): the three drop warnings share one helper. Its contract, pinned
+    on the trusted-layer drop: with report_error() in scope the message goes
+    there, verbatim, tagged lib-memory-dir; without it, the same text goes to
+    stderr as one `[lib-memory-dir] WARNING: ...` line."""
+
+    def _run(self, tmp_path, define_report_error):
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(json.dumps({}))
+        (home / ".remember").mkdir(parents=True)
+        (home / ".remember" / "config.json").write_text('{"broken": ')
+        stub = ('report_error() { printf "REPORTED [%s] %s\\n" "$1" "$2" >&2; }'
+                if define_report_error else ":")
+        script = f"""
+        export PROJECT_DIR={project}
+        export PIPELINE_DIR={pipeline}
+        export HOME={home}
+        {stub}
+        source {DETECT_SCRIPT}
+        source {LIB_SCRIPT}
+        """
+        env = {**os.environ, "PATH": _path_without_jq(tmp_path)}
+        result = subprocess.run(["bash", "-c", script], env=env, check=False,
+                                capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, result.stderr
+        return result.stderr.splitlines()
+
+    def test_without_report_error_the_warning_is_one_stderr_line(self, tmp_path):
+        lines = self._run(tmp_path, define_report_error=False)
+        assert f"[lib-memory-dir] WARNING: {_TRUSTED_DROP_MSG}" in lines, lines
+        assert not any(line.startswith("REPORTED") for line in lines), lines
+
+    def test_with_report_error_the_warning_goes_through_it(self, tmp_path):
+        lines = self._run(tmp_path, define_report_error=True)
+        assert f"REPORTED [lib-memory-dir] {_TRUSTED_DROP_MSG}" in lines, lines
+        assert not any("WARNING" in line for line in lines), lines
+
+
 def test_run_lib_sanity_check_still_works():
     """Sanity: the sibling _run_lib helper this file imports (used only for
     its constants above) is still importable and unbroken."""

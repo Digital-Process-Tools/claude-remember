@@ -55,6 +55,20 @@ unset _REMEMBER_SRC_DIR
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
+# _lmd_warn <message>
+# A config-layer drop warning (#748, #815). This file is sourced by log.sh
+# BEFORE log.sh defines `log`/`report_error`, so neither can be assumed to
+# exist here: `declare -F` (not `command -v`; see lib-lock.sh's own comment
+# on why) asks whether THIS shell already has report_error, and the message
+# falls back to one plain stderr line when it does not.
+_lmd_warn() {
+    if declare -F report_error >/dev/null 2>&1; then
+        report_error "lib-memory-dir" "$1"
+    else
+        printf '%s\n' "[lib-memory-dir] WARNING: $1" >&2
+    fi
+}
+
 # _read_data_dir <config-file>
 # Prints the raw data_dir value from a single config file, empty if absent.
 _read_data_dir() {
@@ -559,20 +573,8 @@ elif [ "${#_cfg_sources[@]}" -gt 0 ] && command -v jq >/dev/null 2>&1; then
                 #
                 # #748: that drop used to happen with nothing logged
                 # anywhere -- a project config's own `handoff_mode` (or any
-                # other setting) disappeared with no explanation. This file
-                # is sourced by log.sh BEFORE log.sh defines `log`/
-                # `report_error` (log.sh sources this file at line 49, long
-                # before its own `log()`/`report_error()` at lines
-                # 941/1360), so neither can be assumed to exist here --
-                # `declare -F` (not `command -v`; see lib-lock.sh's own
-                # comment on why) asks whether THIS shell already has the
-                # function, falling back to a plain stderr line when it
-                # does not.
-                if declare -F report_error >/dev/null 2>&1; then
-                    report_error "lib-memory-dir" "sanitizing the project config layer failed (mktemp, an unreadable project file, or jq itself) -- that layer was dropped; bundled/user-global config still applies"
-                else
-                    printf '%s\n' "[lib-memory-dir] WARNING: sanitizing the project config layer failed (mktemp, an unreadable project file, or jq itself) -- that layer was dropped; bundled/user-global config still applies" >&2
-                fi
+                # other setting) disappeared with no explanation.
+                _lmd_warn "sanitizing the project config layer failed (mktemp, an unreadable project file, or jq itself) -- that layer was dropped; bundled/user-global config still applies"
                 [ -n "$_project_sanitized_tmp" ] && rm -f "$_project_sanitized_tmp"
                 _project_sanitized_tmp=""
             fi
@@ -676,22 +678,14 @@ elif [ "${#_cfg_sources[@]}" -gt 0 ]; then
     # gap #748 left open.
     if { [ -n "$_project_drop_marker" ] && [ -f "$_project_drop_marker" ]; } || [ "$_py_merge_rc" = "3" ] || [ "$_py_merge_rc" = "5" ]; then
         rm -f "$_project_drop_marker" 2>/dev/null
-        if declare -F report_error >/dev/null 2>&1; then
-            report_error "lib-memory-dir" "sanitizing the project config layer failed (unreadable project file or malformed JSON) -- that layer was dropped; bundled/user-global config still applies"
-        else
-            printf '%s\n' "[lib-memory-dir] WARNING: sanitizing the project config layer failed (unreadable project file or malformed JSON) -- that layer was dropped; bundled/user-global config still applies" >&2
-        fi
+        _lmd_warn "sanitizing the project config layer failed (unreadable project file or malformed JSON) -- that layer was dropped; bundled/user-global config still applies"
     fi
     # #815: rc 4 (or 5, alongside the untrusted drop above) means a TRUSTED
     # layer (bundled config, user-global config, or project config outside
     # the untrusted-haiku case) was malformed and dropped -- previously
     # silent, since neither the marker file nor rc == 3 catches it.
     if [ "$_py_merge_rc" = "4" ] || [ "$_py_merge_rc" = "5" ]; then
-        if declare -F report_error >/dev/null 2>&1; then
-            report_error "lib-memory-dir" "sanitizing a trusted config layer failed (unreadable file or malformed JSON) -- bundled config, user-global config, and project config (when it is not the untrusted-haiku source) are all reached here, and one of them was dropped; the remaining layers still applied"
-        else
-            printf '%s\n' "[lib-memory-dir] WARNING: sanitizing a trusted config layer failed (unreadable file or malformed JSON) -- bundled config, user-global config, and project config (when it is not the untrusted-haiku source) are all reached here, and one of them was dropped; the remaining layers still applied" >&2
-        fi
+        _lmd_warn "sanitizing a trusted config layer failed (unreadable file or malformed JSON) -- bundled config, user-global config, and project config (when it is not the untrusted-haiku source) are all reached here, and one of them was dropped; the remaining layers still applied"
     fi
     [ -n "$_project_drop_marker" ] && rm -f "$_project_drop_marker" 2>/dev/null
 else
