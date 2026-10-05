@@ -149,10 +149,7 @@ _remember_cfg_table_get_into() {
 # This rule and the `select(.[0] != "haiku")` in the flattener are one decision
 # in two places — change both or neither.
 _config_is_private_path() {
-    if [ "$1" = .haiku ] || [ "${1#.haiku.}" != "$1" ]; then
-        return 0
-    fi
-    return 1
+    [ "$1" = .haiku ] || [ "${1#.haiku.}" != "$1" ]
 }
 
 # Flatten every scalar to `dotted.key<TAB>value`, or decline to.
@@ -313,11 +310,7 @@ _remember_cfg_flatten_cache_sources() {
 # to the SECOND -- the exact "silently serve stale content" failure #668
 # names as never permitted -- before this guard existed.
 _remember_cfg_flatten_cache_is_standard_merge() {
-    local _cfg_path="${REMEMBER_CONFIG:-}"
-    if [[ "$_cfg_path" == */remember-config-* ]]; then
-        return 0
-    fi
-    return 1
+    [[ "${REMEMBER_CONFIG:-}" == */remember-config-* ]]
 }
 
 # Every value this cache writes -- the REMEMBER_DIR identity line and each

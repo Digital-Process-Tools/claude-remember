@@ -193,12 +193,10 @@ claude_projects_dir() {
 # be untestable everywhere except a Linux runner, and a fix nobody can exercise
 # locally is a fix nobody maintains.
 _remember_should_check_utf8() {
-    [ "${REMEMBER_UTF8_STRICT:-0}" = "1" ] && return 0
     # ${OSTYPE:-}: bash always sets it, but this file is sourced by callers
     # running under `set -u`, and one unguarded expansion there aborts the hook.
     local _os="${OSTYPE:-}"
-    [ "${_os#linux}" != "$_os" ] && return 0
-    return 1
+    [ "${REMEMBER_UTF8_STRICT:-0}" = "1" ] || [ "${_os#linux}" != "$_os" ]
 }
 
 # The two alphabets, for the drive-letter fold below. Held as constants so the

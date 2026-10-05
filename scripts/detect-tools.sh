@@ -124,9 +124,7 @@ _remember_tools_cache_load() {
     # detection on that coincidence.
     [ -n "$_path" ] || return 1
     [ "$_path" = "$PATH" ] || return 1
-    if [ "$_jq" != jq ] && [ "$_jq" != _jq_fallback ]; then
-        return 1
-    fi
+    [ "$_jq" = jq ] || [ "$_jq" = _jq_fallback ] || return 1
     PYTHON="$_py"
     JQ="$_jq"
     export PYTHON JQ

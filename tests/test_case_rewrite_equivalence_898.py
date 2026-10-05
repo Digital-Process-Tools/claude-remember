@@ -387,10 +387,10 @@ done''',
     linux*) return 0 ;;
 esac
 return 1''',
-        "new": r'''[ "${x#linux}" != "$x" ] && return 0
-return 1''',
+        "new": r'''[ "${x#linux}" != "$x" ]''',
         "extra": ["linux", "linux-gnu", "Linux", "darwin", "xlinux"],
-        "site": ("scripts/lib-slug.sh", '[ "${_os#linux}" != "$_os" ] && return 0'),
+        "site": ("scripts/lib-slug.sh",
+                 '[ "${REMEMBER_UTF8_STRICT:-0}" = "1" ] || [ "${_os#linux}" != "$_os" ]'),
     },
     "a literal list with an empty arm": {
         "old": r'''case "$x" in
@@ -421,13 +421,10 @@ echo ok''',
     */remember-config-*) return 0 ;;
     *) return 1 ;;
 esac''',
-        "new": r'''if [[ "$x" == */remember-config-* ]]; then
-    return 0
-fi
-return 1''',
+        "new": r'''[[ "$x" == */remember-config-* ]]''',
         "extra": ["/tmp/remember-config-1", "remember-config-x", "/remember-config-",
                   "a/remember-configx", "//remember-config--"],
-        "site": ("scripts/log.sh", 'if [[ "$_cfg_path" == */remember-config-* ]]; then'),
+        "site": ("scripts/log.sh", '[[ "${REMEMBER_CONFIG:-}" == */remember-config-* ]]'),
     },
     "a needle with an unquoted id in it": {
         "old": r'''S='{"a": 1, "abc-1.2": 3}'

@@ -379,11 +379,7 @@ _LOCK_TIMING_IDX=-1
 _lock_timing_has_ns_date() {
     local _n
     _n=$(date +%s%N 2>/dev/null) || return 1
-    if [ -z "$_n" ] || [ "${_n#*[!0-9]}" != "$_n" ]; then
-        return 1
-    fi
-    [ "${#_n}" -ge 16 ] || return 1
-    return 0
+    [ -n "$_n" ] && [ "${_n#*[!0-9]}" = "$_n" ] && [ "${#_n}" -ge 16 ]
 }
 
 if [ "$_LOCK_TIMING" = 1 ]; then
