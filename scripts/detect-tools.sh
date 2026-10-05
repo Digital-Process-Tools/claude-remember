@@ -186,55 +186,18 @@ else
 # right after sourcing, so eager detection there is real work, not waste)
 # gets the probe deferred into `_remember_python`, called at first actual
 # need instead of here. Every other sourcer keeps today's exact behavior:
-# `_remember_python` is defined as a no-op (PYTHON already set, below) so a
-# call site that unconditionally calls it (to cover BOTH modes) costs
-# nothing extra when lazy mode is off.
-if [ "${_REMEMBER_LAZY_PYTHON:-0}" = "1" ]; then
-    PYTHON=""
-    _remember_python() {
-        [ -n "${PYTHON:-}" ] && return 0
-        local _candidate _first _probe_status _probe_report=""
-        for _candidate in "python3" "python" "py -3" "py"; do
-            _first="${_candidate%% *}"
-            if ! command -v "$_first" >/dev/null 2>&1; then
-                _probe_report="$_probe_report
-  $_candidate: not on PATH"
-                continue
-            fi
-            if $_candidate -V >/dev/null 2>&1; then
-                PYTHON="$_candidate"
-                break
-            else
-                _probe_status=$?
-            fi
-            _probe_report="$_probe_report
-  $_candidate: on PATH ($(command -v "$_first" 2>/dev/null)), '-V' exit $_probe_status"
-        done
-        unset _probe_status
-        if [ -z "$PYTHON" ]; then
-            # Not `exit 1`: this runs lazily, on demand, deep inside whatever
-            # jq-less call site needed an interpreter -- exiting the whole
-            # hook from there is strictly worse than today's eager FATAL,
-            # which at least ran before any real work started. Every call
-            # site that reaches here already has a graceful fallback for "no
-            # interpreter available" (lib-memory-dir.sh copies the bundled
-            # config; log.sh's config() returns its default); this message
-            # is the same diagnostic, on the same stderr, just returned
-            # instead of exited so those fallbacks still run.
-            echo "FATAL: No working Python found. Tried: python3, python, py -3, py. Windows users: install the official Python release (not the Microsoft Store one) and ensure 'python' or 'py' works from the shell Claude Code launches hooks in." >&2
-            echo "  PATH searched: $PATH" >&2
-            echo "  per-candidate (exit 49 = Microsoft Store placeholder, not a real interpreter):$_probe_report" >&2
-            unset _probe_report
-            return 1
-        fi
-        unset _probe_report
-        export PYTHON
-        _remember_tools_cache_publish
-        return 0
-    }
-else
-    PYTHON=""
-    _probe_report=""
+# PYTHON is resolved at source time, so a call site that unconditionally
+# calls `_remember_python` (to cover BOTH modes) returns at its first test
+# and costs nothing extra when lazy mode is off.
+#
+# One probe serves both modes (#898): `_remember_python` probes on its first
+# call and publishes the verdict. Lazy mode leaves that first call to the
+# call site that needs an interpreter; eager mode makes it below, once JQ is
+# resolved too, so the published cache always carries both fields.
+PYTHON=""
+_remember_python() {
+    [ -n "${PYTHON:-}" ] && return 0
+    local _candidate _first _probe_status _probe_report=""
     for _candidate in "python3" "python" "py -3" "py"; do
         _first="${_candidate%% *}"
         if ! command -v "$_first" >/dev/null 2>&1; then
@@ -254,21 +217,22 @@ else
         _probe_report="$_probe_report
   $_candidate: on PATH ($(command -v "$_first" 2>/dev/null)), '-V' exit $_probe_status"
     done
-    unset _probe_status
     if [ -z "$PYTHON" ]; then
+        # Returned, not exited: in lazy mode this runs on demand, deep inside
+        # whatever jq-less call site needed an interpreter, and every such
+        # call site already has a graceful fallback for "no interpreter
+        # available" (lib-memory-dir.sh copies the bundled config; log.sh's
+        # config() returns its default). Eager mode turns it into the exit
+        # below, before any real work starts.
         echo "FATAL: No working Python found. Tried: python3, python, py -3, py. Windows users: install the official Python release (not the Microsoft Store one) and ensure 'python' or 'py' works from the shell Claude Code launches hooks in." >&2
         echo "  PATH searched: $PATH" >&2
         echo "  per-candidate (exit 49 = Microsoft Store placeholder, not a real interpreter):$_probe_report" >&2
-        unset _probe_report
-        exit 1
+        return 1
     fi
-    unset _probe_report
     export PYTHON
-    # No-op resolver for callers that call it unconditionally to cover both
-    # modes (see the comment above the lazy branch): PYTHON is already
-    # resolved above, so there is nothing left to probe.
-    _remember_python() { [ -n "${PYTHON:-}" ]; }
-fi
+    _remember_tools_cache_publish
+    return 0
+}
 
 # --- Detect jq ---
 # jq is optional — provide a Python-based fallback for simple JSON reads
@@ -282,12 +246,11 @@ else
 fi
 export JQ
 
-# In lazy mode PYTHON is still unresolved here -- publishing now would cache
-# an empty PYTHON field, which _remember_tools_cache_load already refuses to
-# load (it requires a non-empty PYTHON), so it would just be a wasted write.
-# `_remember_python` publishes for real once it has resolved something.
+# Eager mode probes now, after JQ, so the verdict `_remember_python`
+# publishes is complete. In lazy mode PYTHON stays unresolved here, and
+# publishing now would cache an empty PYTHON field the loader refuses.
 if [ "${_REMEMBER_LAZY_PYTHON:-0}" != "1" ]; then
-    _remember_tools_cache_publish
+    _remember_python || exit 1
 fi
 fi
 
