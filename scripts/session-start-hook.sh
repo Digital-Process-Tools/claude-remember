@@ -737,23 +737,15 @@ _remember_write_case_divergence() {
     # correct write look like a failed one, and cost this file a record it had
     # already produced until the trace said so.
     _body="format=1${NL}status=$REMEMBER_CASE_STATUS"
+    # Optional fields only when set, through `${VAR:+...}` (#898).
     if [ "$REMEMBER_CASE_STATUS" != "not-applicable" ]; then
-        _body="$_body${NL}resolved=$REMEMBER_CASE_RESOLVED"
-        _body="$_body${NL}store_root=$REMEMBER_CASE_ROOT"
+        _body="$_body${NL}resolved=$REMEMBER_CASE_RESOLVED${NL}store_root=$REMEMBER_CASE_ROOT"
         _body="$_body${NL}disk_state=$REMEMBER_CASE_DISK_STATE"
-        if [ -n "$REMEMBER_CASE_DISK_REASON" ]; then
-            _body="$_body${NL}disk_reason=$REMEMBER_CASE_DISK_REASON"
-        fi
-        if [ -n "$REMEMBER_CASE_DISK_NAMES" ]; then
-            _body="$_body${NL}disk_names=$REMEMBER_CASE_DISK_NAMES"
-        fi
+        _body="$_body${REMEMBER_CASE_DISK_REASON:+${NL}disk_reason=$REMEMBER_CASE_DISK_REASON}"
+        _body="$_body${REMEMBER_CASE_DISK_NAMES:+${NL}disk_names=$REMEMBER_CASE_DISK_NAMES}"
         _body="$_body${NL}git_state=$REMEMBER_CASE_GIT_STATE"
-        if [ -n "$REMEMBER_CASE_GIT_REASON" ]; then
-            _body="$_body${NL}git_reason=$REMEMBER_CASE_GIT_REASON"
-        fi
-        if [ -n "$REMEMBER_CASE_GIT_NAMES" ]; then
-            _body="$_body${NL}git_names=$REMEMBER_CASE_GIT_NAMES"
-        fi
+        _body="$_body${REMEMBER_CASE_GIT_REASON:+${NL}git_reason=$REMEMBER_CASE_GIT_REASON}"
+        _body="$_body${REMEMBER_CASE_GIT_NAMES:+${NL}git_names=$REMEMBER_CASE_GIT_NAMES}"
     fi
 
     # Read what is already there BEFORE deciding anything: it answers both

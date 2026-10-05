@@ -475,7 +475,7 @@ _remember_cfg_flatten_cache_load() {
     # `#` (see the flattener's own comment further up this file), so this
     # shape can never collide with a real config key's own line, unlike
     # reusing the `_RCFG_` namespace would risk.
-    local _line _lines=() _stage=0 _identity_raw="" _exists_raw=""
+    local _line _lines=() _stage=0 _identity_raw="" _exists_raw="" _bad=""
     while IFS= read -r _line || [ -n "$_line" ]; do
         _line="${_line%$'\r'}"
         [ -n "$_line" ] || continue
@@ -484,19 +484,10 @@ _remember_cfg_flatten_cache_load() {
         # directory's scanner holds a submission on).
         if [ "$_stage" = "0" ]; then
             _stage=1
-            if [ "${_line#'#REMEMBER_DIR='}" != "$_line" ]; then
-                _identity_raw="${_line#'#REMEMBER_DIR='}"
-                _remember_cfg_flatten_cache_valid_value "$_identity_raw" || {
-                    rm -f "$_f" 2>/dev/null
-                    return 1
-                }
-                continue
-            else
-                rm -f "$_f" 2>/dev/null
-                return 1
-            fi
-        fi
-        if [ "$_stage" = "1" ]; then
+            _identity_raw="${_line#'#REMEMBER_DIR='}"
+            [ "$_identity_raw" != "$_line" ] \
+                && _remember_cfg_flatten_cache_valid_value "$_identity_raw" || { _bad=1; break; }
+        elif [ "$_stage" = "1" ]; then
             _stage=2
             # #843: the second header line is the exist/absent manifest the
             # publisher recorded for the same sources the loop above just
@@ -505,29 +496,27 @@ _remember_cfg_flatten_cache_load() {
             # line is -- it is never assigned anywhere, but trusting an
             # unrecognised shape here would be trusting bytes that were
             # never inspected.
-            if [ "${_line#'#RCFG_EXISTS='}" != "$_line" ]; then
-                _exists_raw="${_line#'#RCFG_EXISTS='}"
-                if [[ "$_exists_raw" == *[!01]* ]] || [ -z "$_exists_raw" ]; then
-                    rm -f "$_f" 2>/dev/null
-                    return 1
-                fi
-                continue
-            else
-                rm -f "$_f" 2>/dev/null
-                return 1
+            _exists_raw="${_line#'#RCFG_EXISTS='}"
+            [ "$_exists_raw" != "$_line" ] || { _bad=1; break; }
+            if [[ "$_exists_raw" == *[!01]* ]] || [ -z "$_exists_raw" ]; then
+                _bad=1
+                break
             fi
+        elif _remember_cfg_flatten_cache_valid_line "$_line"; then
+            _lines[${#_lines[@]}]="$_line"
+        else
+            _bad=1
+            break
         fi
-        if ! _remember_cfg_flatten_cache_valid_line "$_line"; then
-            # Distrust the WHOLE file, and remove it: the next start must not
-            # re-read the same poison and re-pay this same rejection forever.
-            rm -f "$_f" 2>/dev/null
-            return 1
-        fi
-        _lines[${#_lines[@]}]="$_line"
     done < "$_f"
-    # No lines at all, or the file ended before both header lines were seen
-    # (including "no identity line" -- see above): reject.
-    [ "$_stage" = "2" ] || { rm -f "$_f" 2>/dev/null; return 1; }
+    # A line that failed, no lines at all, or a file that ended before both
+    # header lines were seen (including "no identity line" -- see above):
+    # distrust the WHOLE file, and remove it, so the next start does not
+    # re-read the same poison and re-pay this same rejection forever.
+    if [ -n "$_bad" ] || [ "$_stage" != "2" ]; then
+        rm -f "$_f" 2>/dev/null
+        return 1
+    fi
 
     # #843: a layer that appeared OR vanished since publish is always a
     # miss, even though neither change necessarily flips the -nt comparison
@@ -538,14 +527,11 @@ _remember_cfg_flatten_cache_load() {
     [ "$_exists_raw" = "$_exists_now" ] || return 1
 
     local _identity
-    _remember_cfg_flatten_q_decode _identity "$_identity_raw" || {
+    if ! _remember_cfg_flatten_q_decode _identity "$_identity_raw" \
+        || [ "$_identity" != "${REMEMBER_DIR:-}" ]; then
         rm -f "$_f" 2>/dev/null
         return 1
-    }
-    [ "$_identity" = "${REMEMBER_DIR:-}" ] || {
-        rm -f "$_f" 2>/dev/null
-        return 1
-    }
+    fi
 
     local _assign _assign_name _assign_value _assign_decoded
     for _assign in ${_lines[@]+"${_lines[@]}"}; do
