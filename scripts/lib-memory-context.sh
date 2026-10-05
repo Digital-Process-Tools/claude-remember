@@ -856,6 +856,25 @@ _remember_emit_file() {
     printf '%s' "$_remember_file_body"
 }
 
+# _remember_print_sized FILE...
+# One line per FILE, "FILE (N bytes)" -- or "FILE (size unknown)" when no
+# size could be measured, since "(0 bytes)" would read exactly like an empty
+# file (#695) -- after one batched `wc` over all of them (#664/#666). Shared
+# by the compact-mode deferred listing and the rotated-slice listing (#898).
+_remember_print_sized() {
+    local _rps_f _rps_b
+    [ "$#" -gt 0 ] || return 0
+    _remember_wc_size_batch "$@"
+    for _rps_f in "$@"; do
+        _remember_wc_size_get_into _rps_b "$_rps_f"
+        if [ -z "$_rps_b" ] || [ -n "${_rps_b//[0-9]/}" ]; then
+            printf '%s (size unknown)\n' "$_rps_f"
+        else
+            printf '%s (%s bytes)\n' "$_rps_f" "$_rps_b"
+        fi
+    done
+}
+
 _remember_render_memory_section() {
     local MFILE HAS_MEMORY="" ROTATED_SLICES _remember_rotated_glob_dir
     local _remember_rotated_arr=()
@@ -1016,25 +1035,9 @@ _remember_render_memory_section() {
 "
             fi
         done
-        # Same one-batched-`wc` shape as the main loop above (#664): compact
-        # mode is the one branch that did NOT already have these files'
-        # sizes cached yet (the main loop above skips every non-identity
-        # file once SESSION_START_SOURCE=compact). Same storage (indirect
-        # variables, not an associative array -- see the comment above
-        # _remember_wc_size_set) as the main loop's own batch.
-        [ "${#_remember_deferred[@]}" -gt 0 ] && _remember_wc_size_batch "${_remember_deferred[@]}"
-        DEFERRED_MEMORY=""
         # Same empty-array guard as the main loop above (bash < 4.4 + set -u).
-        [ "${#_remember_deferred[@]}" -gt 0 ] && DEFERRED_MEMORY=$(for MFILE in "${_remember_deferred[@]}"; do
-            _remember_wc_size_get_into MFILE_BYTES "$MFILE"
-            # "(0 bytes)" for a file nobody measured reads exactly like an
-            # empty file. Say which one it is (#695 round-1 audit).
-            if [ -z "$MFILE_BYTES" ] || [[ "$MFILE_BYTES" == *[!0-9]* ]]; then
-                printf '%s (size unknown)\n' "$MFILE"
-            else
-                printf '%s (%s bytes)\n' "$MFILE" "$MFILE_BYTES"
-            fi
-        done)
+        DEFERRED_MEMORY=""
+        [ "${#_remember_deferred[@]}" -gt 0 ] && DEFERRED_MEMORY=$(_remember_print_sized "${_remember_deferred[@]}")
         if [ -n "$_remember_deferred_refused" ]; then
             # A DIFFERENT header from the main loop's own "--- refused (not
             # injected) ---" above (833-837), on purpose: both loops can fire
@@ -1099,27 +1102,7 @@ _remember_render_memory_section() {
 "
             fi
         done <<< "$ROTATED_NEWEST"
-        if [ "${#_remember_newest_arr[@]}" -gt 0 ]; then
-            local _remember_newest_bytes
-            _remember_wc_size_batch "${_remember_newest_arr[@]}"
-            for _remember_newest_line in "${_remember_newest_arr[@]}"; do
-                _remember_wc_size_get_into _remember_newest_bytes "$_remember_newest_line"
-                # The third of this getter's three call sites, and the one the
-                # round-1 repair missed: since that repair the getter can
-                # answer with the empty string, so an unformatted `%s bytes`
-                # here renders `( bytes)` -- a number-shaped slot holding
-                # nothing. Same three states as the deferred listing above
-                # (#695 round-2 audit).
-                # `[ ]` test, not a `case` with a catch-all `*)` arm inside
-                # this loop (#898 round 7 -- that shape is one the plugin
-                # directory's scanner holds a submission on).
-                if [ -z "$_remember_newest_bytes" ] || [ -n "${_remember_newest_bytes//[0-9]/}" ]; then
-                    printf '%s (size unknown)\n' "$_remember_newest_line"
-                else
-                    printf '%s (%s bytes)\n' "$_remember_newest_line" "$_remember_newest_bytes"
-                fi
-            done
-        fi
+        [ "${#_remember_newest_arr[@]}" -eq 0 ] || _remember_print_sized "${_remember_newest_arr[@]}"
         if [ -n "$_remember_newest_refused" ]; then
             # A blank line before this header, always -- self-review finding
             # (#805): without it, this header ran straight into either the

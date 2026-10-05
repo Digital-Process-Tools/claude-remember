@@ -188,9 +188,10 @@ class TestEveryBytesSlotSaysWhenItDoesNotKnow:
     def test_the_shape_check_can_fail(self):
         """MUST-FIRE control: the assertion above passes trivially if the
         format string is ever spelled differently, so pin that the detector
-        sees the shape it is looking for at all."""
+        sees the shape it is looking for at all. One site since #898: the
+        deferred and rotated-slice listings share `_remember_print_sized`."""
         text = (REPO_ROOT / "scripts" / "lib-memory-context.sh").read_text(encoding="utf-8")
-        assert text.count("(%s bytes)") >= 2, (
+        assert text.count("(%s bytes)") >= 1, (
             "no byte-count format strings found in lib-memory-context.sh -- "
             "the check above is scanning for a shape that no longer exists "
             "and would pass over anything"
