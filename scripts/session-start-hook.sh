@@ -1665,15 +1665,12 @@ if [ "$_promos_enabled" = "true" ] \
                 # The #574 shape: only a plugin that is NOT installed may
                 # speak.
                 [ -n "$installed_ok" ] || continue
-                local _found=""
+                # Installed: `continue 2` moves on to the next promo entry,
+                # as the found-flag and `continue` after this loop did.
                 local _k
                 for _k in "${installed_plugins[@]}"; do
-                    if [ "$_k" = "$iplugin" ]; then
-                        _found="yes"
-                        break
-                    fi
+                    [ "$_k" = "$iplugin" ] && continue 2
                 done
-                [ -z "$_found" ] || continue
             elif [ "$gate" = "recent_nonempty" ]; then
                 # #657: the star ask waits until the plugin has
                 # demonstrably done something for the user. `recent.md`
