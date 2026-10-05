@@ -125,13 +125,11 @@ _remember_env_cache_normalize_into() {
     local _var="$1" _in="$2" _drive="" _rest=""
     local _re='^([a-zA-Z]):[/\](.*)$'
     if [ "$OSTYPE" = msys ] || [ "$OSTYPE" = cygwin ]; then
-        if [[ "$_in" =~ ^/cygdrive/([a-zA-Z])/(.*)$ ]]; then
-            _drive="${BASH_REMATCH[1]}"
-            _rest="${BASH_REMATCH[2]}"
-        elif [[ "$_in" =~ ^/([a-zA-Z])/(.*)$ ]]; then
-            _drive="${BASH_REMATCH[1]}"
-            _rest="${BASH_REMATCH[2]}"
-        elif [[ "$_in" =~ $_re ]]; then
+        # First match wins and fills BASH_REMATCH: Cygwin's mount prefix
+        # first (/cygdrive/c/... cannot match the MSYS form, "cygdrive" is
+        # not one character), then MSYS /c/..., then C:\ or C:/.
+        if [[ "$_in" =~ ^/cygdrive/([a-zA-Z])/(.*)$ ]] || [[ "$_in" =~ ^/([a-zA-Z])/(.*)$ ]] \
+            || [[ "$_in" =~ $_re ]]; then
             _drive="${BASH_REMATCH[1]}"
             _rest="${BASH_REMATCH[2]}"
         fi
