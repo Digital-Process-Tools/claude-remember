@@ -48,12 +48,13 @@ fi
 
 # Resolve REMEMBER_DIR and the merged REMEMBER_CONFIG (lib-memory-dir.sh is a
 # no-op if already loaded via the _LIB_MEMORY_DIR_LOADED guard).
-_REMEMBER_SRC_DIR="${BASH_SOURCE[0]%/*}"
+# Its own name, not _REMEMBER_SRC_DIR: lib-memory-dir.sh sets and unsets
+# that one for itself, and this is kept for lib-clock.sh below (#898).
+_remember_log_src_dir="${BASH_SOURCE[0]%/*}"
 # A path with no slash in it (`source log.sh` from the scripts dir) leaves the
 # filename behind, not a directory — `dirname` answered "." and this must too.
-[ "$_REMEMBER_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_SRC_DIR="$(pwd)"
-source "$_REMEMBER_SRC_DIR/lib-memory-dir.sh"
-unset _REMEMBER_SRC_DIR
+[ "$_remember_log_src_dir" = "${BASH_SOURCE[0]}" ] && _remember_log_src_dir="$(pwd)"
+source "$_remember_log_src_dir/lib-memory-dir.sh"
 
 # ── Logging setup ─────────────────────────────────────────────────────────────
 
@@ -945,12 +946,9 @@ export REMEMBER_REJECT_PATTERN
 # (#227). Sourced AFTER REMEMBER_TZ is read above, and from here rather than the
 # top of the file, so a log.sh that bailed early still leaves _remember_date
 # undefined and session-start-hook.sh's `command -v` guard still fires.
-_REMEMBER_SRC_DIR="${BASH_SOURCE[0]%/*}"
-# A path with no slash in it (`source log.sh` from the scripts dir) leaves the
-# filename behind, not a directory — `dirname` answered "." and this must too.
-[ "$_REMEMBER_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_SRC_DIR="$(pwd)"
-source "$_REMEMBER_SRC_DIR/lib-clock.sh"
-unset _REMEMBER_SRC_DIR
+# Same directory as lib-memory-dir.sh above, resolved there once.
+source "$_remember_log_src_dir/lib-clock.sh"
+unset _remember_log_src_dir
 
 # _remember_date_into (lib-clock.sh, #511), not $(_remember_date ...) --
 # this runs unconditionally at the top level every time log.sh is sourced,
