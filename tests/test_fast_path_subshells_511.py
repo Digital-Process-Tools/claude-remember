@@ -20,7 +20,7 @@ import subprocess
 from pathlib import Path
 
 from ._bash_runner import resolve_bash
-from ._compiled_hooks import skip_if_compiled
+from ._compiled_hooks import skip_if_compiled, skip_if_dropped
 
 BASH = resolve_bash()
 import pytest
@@ -76,6 +76,7 @@ CASES = [
 @_needs_bash
 @pytest.mark.parametrize("raw, expected", CASES)
 def test_stdin_cwd_into_agrees_with_stdin_cwd(raw, expected):
+    skip_if_dropped(HOOK, "_stdin_cwd")
     text = HOOK.read_text(encoding="utf-8")
     old_fn = _extract_function(text, "_stdin_cwd")
     new_fn = _extract_function(text, "_stdin_cwd_into")

@@ -74,6 +74,7 @@ from pathlib import Path
 import pytest
 
 from ._bash_runner import resolve_bash
+from ._compiled_hooks import skip_if_dropped
 
 # #432: a blanket skipif(sys.platform == "win32") makes the windows-latest CI
 # leg collect these tests, skip every one of them, and report the leg green --
@@ -92,6 +93,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 def _extract_function(script: str, func_name: str) -> str:
     """Pull `func_name() { ... }` verbatim out of `script`, brace-balanced."""
+    skip_if_dropped(REPO_ROOT / script, func_name)
     text = (REPO_ROOT / script).read_text(encoding="utf-8")
     m = re.search(rf"^{re.escape(func_name)}\(\)\s*\{{", text, re.MULTILINE)
     assert m, func_name + " not found in " + script

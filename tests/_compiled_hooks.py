@@ -25,6 +25,7 @@ source hook does not.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -53,3 +54,27 @@ def skip_if_compiled(path, why: str = "") -> None:
             + (why or "this test pins source text")
             + ", which the plain pytest job checks on every leg"
         )
+
+
+def skip_if_dropped(path, func_name: str) -> None:
+    """Skip the calling test when PATH is a compiled hook that no longer
+    defines FUNC_NAME.
+
+    The compiler drops every function the hook never reaches, so a pin that
+    extracts an uncalled function from the hook's text by name has nothing
+    to extract in the compiled build -- `_stdin_cwd` in user-prompt-hook.sh
+    is the case that found this (tests/test_compiled_hook_pins_900.py). A
+    compiled hook that still defines it does not skip, and source text never
+    does: there a missing function is the caller's own failure to report."""
+    path = Path(path)
+    text = path.read_text(encoding="utf-8")
+    if not is_compiled_text(text):
+        return
+    if re.search(rf"^{re.escape(func_name)}\(\)\s*\{{", text, re.MULTILINE):
+        return
+    pytest.skip(
+        f"{path.name} is the compiled build (#900 compiled CI leg) and does "
+        f"not define {func_name}: nothing in the hook calls it, so the "
+        f"compiler dropped it -- the plain pytest job pins it in the source "
+        f"on every leg"
+    )

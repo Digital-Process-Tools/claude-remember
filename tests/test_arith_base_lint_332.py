@@ -51,6 +51,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from tests._compiled_hooks import is_compiled_text
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 SHELL_DIRS = ("scripts", "hooks.d")
@@ -144,6 +146,31 @@ def _shell_files():
         yield from sorted((REPO_ROOT / directory).rglob("*.sh"))
 
 
+def _sweep(paths):
+    """One `path:line  $name  in  span` row per finding across PATHS.
+
+    A compiled hook (#900) is skipped: it is a dozen libraries in one file, so
+    a name guarded in one function would flag an unrelated use of the same
+    name in another -- and every file it was compiled from is swept as source
+    by the plain pytest job on every leg (tests/test_compiled_hook_pins_900.py).
+    """
+    offenders = []
+    for path in paths:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if is_compiled_text(text):
+            continue
+        names = _guarded_names(text)
+        if not names:
+            continue
+        for line, name, span in _unbased_uses(text, names):
+            try:
+                rel = path.relative_to(REPO_ROOT)
+            except ValueError:
+                rel = path
+            offenders.append(f"  {rel}:{line}  ${name}  in  {span}")
+    return offenders
+
+
 def test_no_case_guarded_value_reaches_arithmetic_without_a_radix():
     """The sweep. One finding fails the build and names file, line and variable.
 
@@ -152,15 +179,7 @@ def test_no_case_guarded_value_reaches_arithmetic_without_a_radix():
     on an empty string is itself an error on bash 5, and the `case` is also what
     rejects a space-padded value that arithmetic would otherwise accept.
     """
-    offenders = []
-    for path in _shell_files():
-        text = path.read_text(encoding="utf-8", errors="replace")
-        names = _guarded_names(text)
-        if not names:
-            continue
-        for line, name, span in _unbased_uses(text, names):
-            rel = path.relative_to(REPO_ROOT)
-            offenders.append(f"  {rel}:{line}  ${name}  in  {span}")
+    offenders = _sweep(_shell_files())
 
     assert not offenders, (
         "a value guarded by a digits-only `case` reaches `$(( ))` with no "
