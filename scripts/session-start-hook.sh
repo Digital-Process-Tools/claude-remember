@@ -561,15 +561,9 @@ _remember_write_slug_record() {
             > "$_tmp" 2>/dev/null || { rm -f "$_tmp" 2>/dev/null; return 0; }
     else
         {
-            printf 'format=1\n'
-            printf 'status=ok\n'
-            printf 'project_dir=%s\n' "$PROJECT"
-            printf 'slug=%s\n' "$PROJECT_PATH_SLUG"
-            printf 'sessions_dir=%s\n' "$SESSIONS_DIR"
-            printf 'memory_dir=%s\n' "$REMEMBER_DIR"
-            if [ -n "$CURRENT_SESSION_ID" ]; then
-                printf 'session_id=%s\n' "$CURRENT_SESSION_ID"
-            fi
+            printf '%s=%s\n' format 1 status ok project_dir "$PROJECT" slug "$PROJECT_PATH_SLUG" \
+                sessions_dir "$SESSIONS_DIR" memory_dir "$REMEMBER_DIR"
+            [ -z "$CURRENT_SESSION_ID" ] || printf 'session_id=%s\n' "$CURRENT_SESSION_ID"
         } > "$_tmp" 2>/dev/null || { rm -f "$_tmp" 2>/dev/null; return 0; }
     fi
 

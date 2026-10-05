@@ -137,11 +137,8 @@ _remember_tools_cache_publish() {
     [ "${REMEMBER_TOOLS_CACHE:-1}" = "1" ] || return 0
     local _f="$_REMEMBER_TOOLS_CACHE" _t
     _t=$(mktemp "${_f}.XXXXXX" 2>/dev/null) || return 0
-    {
-        printf 'CACHE_PATH=%s\n' "$PATH"
-        printf 'PYTHON=%s\n' "$PYTHON"
-        printf 'JQ=%s\n' "$JQ"
-    } > "$_t" 2>/dev/null || { rm -f "$_t" 2>/dev/null; return 0; }
+    printf '%s=%s\n' CACHE_PATH "$PATH" PYTHON "$PYTHON" JQ "$JQ" \
+        > "$_t" 2>/dev/null || { rm -f "$_t" 2>/dev/null; return 0; }
     mv -f "$_t" "$_f" 2>/dev/null || rm -f "$_t" 2>/dev/null
     return 0
 }

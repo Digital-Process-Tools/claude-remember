@@ -1181,14 +1181,10 @@ _remember_start_cache_context_load() {
     [ -n "${REMEMBER_DIR:-}" ] || return 1
     local _cache="$REMEMBER_DIR/tmp/start-context.cache"
     local _manifest="$REMEMBER_DIR/tmp/start-context.manifest"
-    [ -f "$_cache" ] || return 1
-    [ -f "$_manifest" ] || return 1
-    [ -L "$_cache" ] && return 1
-    [ -O "$_cache" ] || return 1
-    [ -r "$_cache" ] || return 1
-    [ -L "$_manifest" ] && return 1
-    [ -O "$_manifest" ] || return 1
-    [ -r "$_manifest" ] || return 1
+    local _f
+    for _f in "$_cache" "$_manifest"; do
+        [ -f "$_f" ] && [ ! -L "$_f" ] && [ -O "$_f" ] && [ -r "$_f" ] || return 1
+    done
     # #781: a repository can commit its own start-context.cache and a
     # manifest holding nothing but a VERSION= stamp -- git checks both out
     # owned by the user and as regular files, so every check above this
@@ -1252,13 +1248,15 @@ _remember_start_cache_context_load() {
 # consumes (removes or renames) $1; never fails the caller.
 _remember_start_cache_context_finish_publish() {
     local _tmp_cache="$1"
-    [ "${REMEMBER_START_CACHE:-1}" = "1" ] || { rm -f "$_tmp_cache" 2>/dev/null; return 0; }
     # Only the non-compact render is ever cached (see the file header): a
     # compact-mode render is the small, identity-only shape, and writing IT
     # into the cache would make the very next ordinary session start serve a
     # near-empty MEMORY section instead of falling through to a live render.
-    [ "${SESSION_START_SOURCE:-}" != "compact" ] || { rm -f "$_tmp_cache" 2>/dev/null; return 0; }
-    [ -n "${REMEMBER_DIR:-}" ] || { rm -f "$_tmp_cache" 2>/dev/null; return 0; }
+    if [ "${REMEMBER_START_CACHE:-1}" != "1" ] || [ "${SESSION_START_SOURCE:-}" = "compact" ] \
+        || [ -z "${REMEMBER_DIR:-}" ]; then
+        rm -f "$_tmp_cache" 2>/dev/null
+        return 0
+    fi
     [ -f "$_tmp_cache" ] || return 0
     local _dir="$REMEMBER_DIR/tmp"
     mkdir -p "$_dir" 2>/dev/null || { rm -f "$_tmp_cache" 2>/dev/null; return 0; }

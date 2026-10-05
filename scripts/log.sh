@@ -627,7 +627,9 @@ _config_load() {
         return 0
     fi
 
-    local _dump="" _rc=0
+    # Both flatteners live next to this file; one directory for either.
+    local _dump="" _rc=0 _cfg_flatten_dir="${BASH_SOURCE[0]%/*}"
+    [ "$_cfg_flatten_dir" = "${BASH_SOURCE[0]}" ] && _cfg_flatten_dir="$(pwd)"
     if command -v jq >/dev/null 2>&1; then
         # #898 round 7: `jq -f FILE`, not `jq -r "$_REMEMBER_CFG_FLATTEN_JQ"`
         # -- the program used to live inline, as the shell variable this
@@ -638,9 +640,7 @@ _config_load() {
         # scripts/cfg_flatten.jq carries the identical program (verified
         # byte-identical output against the old inline form before this
         # landed), so nothing here changes what config_into's callers see.
-        local _cfg_flatten_jq_dir="${BASH_SOURCE[0]%/*}"
-        [ "$_cfg_flatten_jq_dir" = "${BASH_SOURCE[0]}" ] && _cfg_flatten_jq_dir="$(pwd)"
-        _dump=$(jq -r -f "$_cfg_flatten_jq_dir/cfg_flatten.jq" "$REMEMBER_CONFIG" 2>/dev/null) || _rc=1
+        _dump=$(jq -r -f "$_cfg_flatten_dir/cfg_flatten.jq" "$REMEMBER_CONFIG" 2>/dev/null) || _rc=1
     else
         # Resolves PYTHON on first use (#662); no-op outside lazy mode.
         declare -f _remember_python >/dev/null 2>&1 && _remember_python
@@ -649,8 +649,6 @@ _config_load() {
         # in a shell variable -- the embedded `for` loops inside that
         # single-quoted string are themselves a shape a line-oriented
         # scanner cannot tell from real bash. Called by literal path now.
-        local _cfg_flatten_dir="${BASH_SOURCE[0]%/*}"
-        [ "$_cfg_flatten_dir" = "${BASH_SOURCE[0]}" ] && _cfg_flatten_dir="$(pwd)"
         _dump=$(_remember_slug_run_python "$_cfg_flatten_dir/cfg_flatten.py" "$REMEMBER_CONFIG" 2>/dev/null) || _rc=1
     fi
 
@@ -1637,13 +1635,9 @@ dispatch() {
             # and under `set -u` an unvalidated value inside $(( )) does not
             # merely misbehave, it kills the shell (the #258 lesson). Falling
             # back to the shipped default is the safe direction in both senses.
-            if [ -z "$_budget" ] || [ "${_budget#*[!0-9]}" != "$_budget" ]; then
-                _budget=$_DISPATCH_BUDGET_FALLBACK
-            fi
+            if [ -z "$_budget" ] || [ "${_budget#*[!0-9]}" != "$_budget" ]; then _budget=$_DISPATCH_BUDGET_FALLBACK; fi
             _grace=$(config '.hooks.dispatch_kill_grace_seconds' "$_DISPATCH_KILL_GRACE_DEFAULT")
-            if [ -z "$_grace" ] || [ "${_grace#*[!0-9]}" != "$_grace" ]; then
-                _grace=$_DISPATCH_KILL_GRACE_DEFAULT
-            fi
+            if [ -z "$_grace" ] || [ "${_grace#*[!0-9]}" != "$_grace" ]; then _grace=$_DISPATCH_KILL_GRACE_DEFAULT; fi
         fi
         # Ownership + world-writable checks, ONE stat call instead of two
         # (`stat` for the owner, `find -perm -002` for the mode) -- #663, part

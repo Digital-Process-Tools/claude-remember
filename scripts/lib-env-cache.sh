@@ -391,28 +391,31 @@ _remember_env_cache_publish() {
     # trailing suffix after the X's (BSD mktemp only substitutes a run of X's
     # at the very end of the template; anything after is left literal).
     _t=$(mktemp "${_f}.XXXXXX" 2>/dev/null) || return 0
+    local _ecp_mem_proj="${MEMORY_PROJECT_DIR:-}" _c _e
+    [ -n "$_ecp_mem_proj" ] || _ecp_mem_proj="$PROJECT_DIR"
     {
-        # The same identity the file is keyed and validated on (#469), not
-        # raw CLAUDE_PROJECT_DIR: on a caller whose only identity source was
-        # REMEMBER_HOOK_CWD, printing CLAUDE_PROJECT_DIR here would record a
-        # value _remember_env_cache_load's later comparison can never match.
-        printf 'CACHE_ENV_PROJECT_DIR=%s\n' "$_REMEMBER_ENV_CACHE_PROJECT_DIR"
-        printf 'CACHE_ENV_PLUGIN_ROOT=%s\n' "${CLAUDE_PLUGIN_ROOT:-}"
-        printf 'CACHE_ENV_HOME=%s\n' "${HOME:-}"
-        printf 'PROJECT_DIR=%s\n' "$PROJECT_DIR"
-        printf 'PIPELINE_DIR=%s\n' "$PIPELINE_DIR"
-        printf 'REMEMBER_DIR=%s\n' "$REMEMBER_DIR"
-        printf 'REMEMBER_TZ=%s\n' "${REMEMBER_TZ:-}"
-        printf 'REMEMBER_PROMPT_STAMP=%s\n' "${REMEMBER_PROMPT_STAMP:-full}"
-        # No `:-120`/`:-50` fallback here — the guard above already refused to
-        # reach this line unless both were actually set by log.sh, and a
-        # default at the point of writing is exactly the silent stand-in
-        # #358 was filed about.
-        printf 'REMEMBER_SAVE_COOLDOWN=%s\n' "$REMEMBER_SAVE_COOLDOWN"
-        printf 'REMEMBER_DELTA_THRESHOLD=%s\n' "$REMEMBER_DELTA_THRESHOLD"
-        local _ecp_mem_proj="${MEMORY_PROJECT_DIR:-}"
-        [ -n "$_ecp_mem_proj" ] || _ecp_mem_proj="$PROJECT_DIR"
-        printf 'MEMORY_PROJECT_DIR=%s\n' "$_ecp_mem_proj"
+        # One printf, which reuses its format for each KEY value pair (#898).
+        # CACHE_ENV_PROJECT_DIR is the same identity the file is keyed and
+        # validated on (#469), not raw CLAUDE_PROJECT_DIR: on a caller whose
+        # only identity source was REMEMBER_HOOK_CWD, printing
+        # CLAUDE_PROJECT_DIR here would record a value
+        # _remember_env_cache_load's later comparison can never match.
+        # No `:-120`/`:-50` fallback for the two thresholds -- the guard above
+        # already refused to reach this line unless both were actually set by
+        # log.sh, and a default at the point of writing is exactly the silent
+        # stand-in #358 was filed about.
+        printf '%s=%s\n' \
+            CACHE_ENV_PROJECT_DIR "$_REMEMBER_ENV_CACHE_PROJECT_DIR" \
+            CACHE_ENV_PLUGIN_ROOT "${CLAUDE_PLUGIN_ROOT:-}" \
+            CACHE_ENV_HOME "${HOME:-}" \
+            PROJECT_DIR "$PROJECT_DIR" \
+            PIPELINE_DIR "$PIPELINE_DIR" \
+            REMEMBER_DIR "$REMEMBER_DIR" \
+            REMEMBER_TZ "${REMEMBER_TZ:-}" \
+            REMEMBER_PROMPT_STAMP "${REMEMBER_PROMPT_STAMP:-full}" \
+            REMEMBER_SAVE_COOLDOWN "$REMEMBER_SAVE_COOLDOWN" \
+            REMEMBER_DELTA_THRESHOLD "$REMEMBER_DELTA_THRESHOLD" \
+            MEMORY_PROJECT_DIR "$_ecp_mem_proj"
         # #843: each CACHE_CONFIG value carries a "1:" or "0:" prefix
         # recording whether that layer existed RIGHT NOW (at publish time),
         # so the loader can reject a cache whose manifest no longer matches
@@ -422,14 +425,11 @@ _remember_env_cache_publish() {
         # separate header line costs one more `read` builtin on every load,
         # which blew the #330/#395 hot-path read budget by exactly one when
         # tried first.
-        local _c
         for _c in "${PIPELINE_DIR}/config.json" "${HOME:-}/.remember/config.json" \
                   "${REMEMBER_DIR}/config.json"; do
-            if [ -e "$_c" ]; then
-                printf 'CACHE_CONFIG=1:%s\n' "$_c"
-            else
-                printf 'CACHE_CONFIG=0:%s\n' "$_c"
-            fi
+            _e=0
+            [ -e "$_c" ] && _e=1
+            printf 'CACHE_CONFIG=%s:%s\n' "$_e" "$_c"
         done
     } > "$_t" 2>/dev/null || { rm -f "$_t" 2>/dev/null; return 0; }
     # Rename, so no reader ever parses a partial file and rejects a resolution
