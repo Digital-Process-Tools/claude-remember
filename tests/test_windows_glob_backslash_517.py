@@ -147,7 +147,7 @@ class TestSessionStartStagingCount:
     _BLOCK = extract_lines(
         "scripts/session-start-hook.sh",
         '_remember_staging_glob_dir=""',
-        'unset _remember_staging_candidates _remember_staging_was_nullglob _remember_staging_file',
+        'unset _remember_staging_file',
     )
 
     def _run(self, remember_dir, ostype):

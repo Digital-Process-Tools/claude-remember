@@ -118,22 +118,17 @@ if [ -d "$REMEMBER_DIR/tmp" ]; then
     # Gated on there being any candidate at all (#666): `find` ran
     # unconditionally on EVERY hook invocation before this, even on a store
     # where the EXIT trap has never once failed to fire and the glob below
-    # matches nothing. A glob array costs no fork; `find` still does the
-    # real mtime filtering once something is actually there to check.
-    # `shopt -p nullglob` exits 1 (even though it prints correctly) whenever
-    # the option is currently OFF -- which it is by default -- so capturing
-    # it via `var=$(...)` would abort any caller running under `set -e`.
-    # `shopt -q` in a plain `&&` conditional never has that problem.
-    _remember_stale_cfg_was_nullglob=0
-    shopt -q nullglob && _remember_stale_cfg_was_nullglob=1
-    shopt -s nullglob
-    _remember_stale_cfg_candidates=("$REMEMBER_DIR/tmp"/remember-config-*.json)
-    [ "$_remember_stale_cfg_was_nullglob" = 1 ] || shopt -u nullglob
-    if [ "${#_remember_stale_cfg_candidates[@]}" -gt 0 ]; then
+    # matches nothing. The glob costs no fork; `find` still does the real
+    # mtime filtering once something is actually there to check. `[ -e ] ||
+    # [ -L ]` drops the unmatched literal pattern, so no nullglob
+    # save/restore is needed (#898).
+    for _remember_stale_cfg in "$REMEMBER_DIR/tmp"/remember-config-*.json; do
+        [ -e "$_remember_stale_cfg" ] || [ -L "$_remember_stale_cfg" ] || continue
         find "$REMEMBER_DIR/tmp" -maxdepth 1 -name 'remember-config-*.json' \
             -mmin +30 -exec rm -f {} + 2>/dev/null || true
-    fi
-    unset _remember_stale_cfg_candidates _remember_stale_cfg_was_nullglob
+        break
+    done
+    unset _remember_stale_cfg
 
     # Move THIS invocation's file in, and repoint REMEMBER_CONFIG and the EXIT
     # trap at its new home. Best-effort: a failed mv (cross-device, the

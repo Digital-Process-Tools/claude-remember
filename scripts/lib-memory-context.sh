@@ -1411,7 +1411,7 @@ _remember_apply_session_start_budget() {
     [ -n "$_mem" ] || return 0
     _head_len=$(( ${#_text} - ${#_mem} ))
     if [ "$_head_len" -lt 0 ] || [ "${_text:$_head_len}" != "$_mem" ]; then
-        log "memory-context" "WARNING: session_start_max_bytes: the MEMORY section changed between render and budget check -- injected as rendered, over budget"
+        log "memory-context" "WARNING: session_start_max_bytes: MEMORY section changed before the budget check -- injected as rendered, over budget"
         return 0
     fi
     _head="${_text:0:$_head_len}"
@@ -1434,7 +1434,7 @@ _remember_apply_session_start_budget() {
     # an operator has no way to tell "budget satisfied" from "budget
     # exhausted, still over" from the log alone.
     if [ $(( _head_len + ${#_mem} )) -gt "$_max" ]; then
-        log "memory-context" "WARNING: thresholds.session_start_max_bytes: still over budget ($(( _head_len + ${#_mem} )) bytes > ${_max}) after dropping every droppable section"
+        log "memory-context" "WARNING: thresholds.session_start_max_bytes: still over budget ($(( _head_len + ${#_mem} )) > ${_max} bytes) with every droppable section dropped"
     fi
     printf -v "$_outvar" %s "${_head}${_mem}"
 }
