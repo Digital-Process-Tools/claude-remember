@@ -106,9 +106,7 @@ _lock_self_set() {
     sh -c 'echo $PPID' > "$_probe" 2>/dev/null
     _LOCK_SELF=$(cat "$_probe" 2>/dev/null) || true
     rm -f "$_probe" 2>/dev/null || true
-    if [ -z "$_LOCK_SELF" ] || [ "${_LOCK_SELF#*[!0-9]}" != "$_LOCK_SELF" ]; then
-        _LOCK_SELF="$$"
-    fi
+    [ -n "$_LOCK_SELF" ] && [[ "$_LOCK_SELF" != *[!0-9]* ]] || _LOCK_SELF="$$"
     return 0
 }
 
@@ -134,9 +132,7 @@ _lock_try_steal() {
             # pattern itself, which -e rejects.
             [ -e "$_abandoned" ] || continue
             _owner="${_abandoned##*.}"
-            if [[ "$_owner" == *[!0-9]* ]]; then
-                continue
-            fi
+            [[ "$_owner" == *[!0-9]* ]] && continue
             kill -0 "$_owner" 2>/dev/null && continue
             # First dead claim becomes the pid again; any further ones are
             # litter from earlier abandoned takeovers — drop them rather than
@@ -153,10 +149,7 @@ _lock_try_steal() {
 
     # No pid file yet: the holder created the directory microseconds ago and has
     # not written it. That is a live lock mid-acquisition, not a stale one.
-    [ -z "$_pid" ] && return 1
-    if [[ "$_pid" == *[!0-9]* ]]; then
-        return 1
-    fi
+    [ -n "$_pid" ] && [[ "$_pid" != *[!0-9]* ]] || return 1
     kill -0 "$_pid" 2>/dev/null && return 1
 
     # Claim the right to take over by RENAMING the pid file. Rename is atomic
@@ -203,12 +196,8 @@ _LOCK_ADOPT_AFTER="${_LOCK_ADOPT_AFTER:-30}"
 _lock_dir_age() {
     local _mtime _now
     _mtime=$(stat -c %Y "$1" 2>/dev/null) || _mtime=""
-    if [ -z "$_mtime" ] || [ "${_mtime#*[!0-9]}" != "$_mtime" ]; then
-        _mtime=$(stat -f %m "$1" 2>/dev/null) || _mtime=""
-    fi
-    if [ -z "$_mtime" ] || [ "${_mtime#*[!0-9]}" != "$_mtime" ]; then
-        echo 0; return 0
-    fi
+    [ -n "$_mtime" ] && [[ "$_mtime" != *[!0-9]* ]] || _mtime=$(stat -f %m "$1" 2>/dev/null) || _mtime=""
+    [ -n "$_mtime" ] && [[ "$_mtime" != *[!0-9]* ]] || { echo 0; return 0; }
     _now=$(date +%s)
     # 10# after the case, never instead of it (#332).
     echo $(( _now - 10#$_mtime ))
