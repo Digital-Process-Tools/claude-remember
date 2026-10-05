@@ -27,9 +27,32 @@ file, and none of them reproduce the corruption:
      exact name post-tool-hook.sh would pick for "now", made unwritable so the
      seed printf fails exactly as the report describes, and post-tool-hook.sh
      was run against it on the (cache-populated) fast path, which is the path
-     the report's author suspected. No stray directory was created; the
-     WARNING landed in hook-errors.log as intended
-     (``TestEndToEndSeedFailureNeverCorruptsPaths`` below pins this).
+     the report's author suspected. No stray directory was created
+     (``TestEndToEndSeedFailureNeverCorruptsPaths`` below pins this). Whether
+     the WARNING itself reaches hook-errors.log is a separate, pre-existing
+     question this fix does not change either way: every hook sources log.sh
+     as ``source ... 2>/dev/null``, which swallows stderr for the whole
+     sourced body including this guard's own FATAL line -- true of the
+     mkdir-failure FATAL log.sh already carried before this diff, not a
+     regression introduced here (self-review finding, #902).
+
+## Second self-review finding: the guard only covered log.sh's own mkdir
+
+The guard above protects `REMEMBER_LOG_DIR` ("$REMEMBER_DIR/logs"), resolved
+and mkdir'd inside log.sh. It does NOT protect the OTHER `mkdir -p
+"$REMEMBER_DIR/..."` call sites this repo has -- most importantly
+`post-tool-hook.sh`'s own `mkdir -p "$REMEMBER_DIR/logs/autonomous"`, which is
+the literal call site issue #902 names and runs on the fast path BEFORE
+log.sh is ever sourced. Fixed in the same commit: a twin
+``_remember_dir_is_unsafe()`` check, defined in post-tool-hook.sh itself
+(same logic, same LC_ALL=C scoping, #695), gates that mkdir directly
+(``TestFastPathMkdirSiteIsGuardedToo`` below). Several other `mkdir -p
+"$REMEMBER_DIR/..."` sites remain unguarded (session-start-hook.sh,
+session-end-hook.sh, write-handoff.sh, and three more in post-tool-hook.sh
+itself for `$REMEMBER_DIR/tmp`) -- reported to the maintainer rather than
+patched here, since centralising this check across five files is an
+architecture decision (where the shared helper lives, whether REMEMBER_DIR
+resolution itself should refuse to proceed) beyond this issue's own scope.
 
 So the planted-bad-value tests below exercise the new guard directly, via the
 one real path that can still hand ``_resolve_remember_dir`` an attacker- or
@@ -210,3 +233,59 @@ class TestEndToEndSeedFailureNeverCorruptsPaths:
             stray_in_claude = [p for p in claude_dir.iterdir()]
             assert not stray_in_claude, f"stray path created under .claude: {stray_in_claude}"
         _reap(remember)
+
+
+class TestFastPathMkdirSiteIsGuardedToo:
+    """Self-review finding #2: the guard above protects only log.sh's own
+    mkdir -- the literal call site issue #902 names,
+    post-tool-hook.sh's own `mkdir -p "$REMEMBER_DIR/logs/autonomous"`, runs
+    on the fast path BEFORE log.sh is ever sourced and was NOT covered by it.
+    Fixed with a twin `_remember_dir_is_unsafe()` defined directly in
+    post-tool-hook.sh. Tested two ways: the function's own logic in
+    isolation (would still pass if the WIRING at the mkdir call site were
+    ripped out), and a structural check that the call site is actually
+    gated by it (would still pass if the FUNCTION were deleted but a stray
+    reference remained) -- together they cover what either check alone
+    would miss."""
+
+    def _extract_function(self) -> str:
+        text = HOOK.read_text(encoding="utf-8")
+        start = text.index("_remember_dir_is_unsafe() {")
+        end = text.index("\n}\n", start) + len("\n}\n")
+        return text[start:end]
+
+    def test_must_fire_function_logic_matches_log_sh_twin(self, tmp_path):
+        bad_newline_path = "/abs/with" + "\n" + "newline"
+        script = f"""
+        set +e
+        {self._extract_function()}
+        REMEMBER_DIR="relative/path"
+        _remember_dir_is_unsafe; echo "relative=$?"
+        REMEMBER_DIR="/abs/safe/path"
+        _remember_dir_is_unsafe; echo "absolute=$?"
+        REMEMBER_DIR='{bad_newline_path}'
+        _remember_dir_is_unsafe; echo "newline=$?"
+        REMEMBER_DIR="C:/windows/safe"
+        _remember_dir_is_unsafe; echo "windows=$?"
+        """
+        result = subprocess.run([_BASH, "-c", script], capture_output=True, text=True, timeout=30, check=False)
+        assert "relative=0" in result.stdout, result.stdout   # 0 = unsafe (bash truthy "fires")
+        assert "absolute=1" in result.stdout, result.stdout   # 1 = safe
+        assert "newline=0" in result.stdout, result.stdout
+        assert "windows=1" in result.stdout, result.stdout
+
+    def test_must_fire_mkdir_call_site_is_actually_gated(self):
+        """Structural pin: the exact mkdir named in #902 must be preceded,
+        within a few lines, by a call to the guard -- not merely have the
+        guard function defined somewhere else in the file."""
+        lines = HOOK.read_text(encoding="utf-8").splitlines()
+        mkdir_idx = next(
+            i for i, line in enumerate(lines)
+            if 'mkdir -p "$REMEMBER_DIR/logs/autonomous"' in line
+        )
+        preceding = "\n".join(lines[max(0, mkdir_idx - 6):mkdir_idx])
+        assert "_remember_dir_is_unsafe" in preceding, (
+            "the save-log mkdir is no longer gated by the #902 guard -- "
+            "this is the exact call site the issue reported\n" + preceding
+        )
+

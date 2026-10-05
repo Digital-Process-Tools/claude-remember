@@ -197,10 +197,10 @@ ALLOWLIST: dict[tuple[str, int], str] = {
     # from the scan, so that one libc's behaviour stays visible and can be
     # re-checked rather than quietly assumed forever.
     ("scripts/agy-stop-hook.sh", 159): _CASE,
-    ("scripts/post-tool-hook.sh", 439): _CASE,
-    ("scripts/post-tool-hook.sh", 633): _CASE,
-    ("scripts/post-tool-hook.sh", 676): _CASE,
-    ("scripts/post-tool-hook.sh", 732): _CASE,
+    ("scripts/post-tool-hook.sh", 449): _CASE,
+    ("scripts/post-tool-hook.sh", 643): _CASE,
+    ("scripts/post-tool-hook.sh", 686): _CASE,
+    ("scripts/post-tool-hook.sh", 742): _CASE,
     ("scripts/session-end-hook.sh", 201): _CASE,
     ("scripts/session-end-hook.sh", 209): _CASE,
     ("scripts/session-start-hook.sh", 289): _CASE,

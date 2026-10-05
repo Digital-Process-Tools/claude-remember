@@ -385,6 +385,16 @@ fi
 PLUGIN_ROOT="$PIPELINE_DIR"
 PROJECT="$PROJECT_DIR"
 
+# #902: the same check log.sh's own REMEMBER_LOG_DIR guard applies, needed
+# again here because this file's own mkdir below runs on the fast path
+# BEFORE log.sh is ever sourced, so that guard has not run yet. Byte-wise
+# (#695), hence the function + `local LC_ALL=C` rather than an inline `[[ ]]`.
+_remember_dir_is_unsafe() {
+    local LC_ALL=C
+    { [[ "$REMEMBER_DIR" != /* ]] && [[ "$REMEMBER_DIR" != [A-Za-z]:[/\\]* ]]; } \
+        || [[ "$REMEMBER_DIR" == *$'\n'* || "$REMEMBER_DIR" == *$'\r'* ]]
+}
+
 # "PostToolUse ran at all" (#200) — written here, before every early exit
 # below, because the question the doctor asks is whether this hook is WIRED,
 # and the answers to that and to "did it find a transcript" are different.
@@ -934,6 +944,10 @@ if [ "$DELTA" -gt "$DELTA_THRESHOLD" ] && [ "$IN_COOLDOWN" = false ]; then
         fi
     fi
 
+    if [ "$ALREADY_RUNNING" = false ] && _remember_dir_is_unsafe; then
+        log "hook" "FATAL: unsafe REMEMBER_DIR ($REMEMBER_DIR) -- refusing to mkdir or save (#902)"
+        ALREADY_RUNNING=true
+    fi
     if [ "$ALREADY_RUNNING" = false ]; then
         mkdir -p "$REMEMBER_DIR/logs/autonomous"
         # #902: date + PID, not HHMMSS alone -- a bare HHMMSS collides with a
