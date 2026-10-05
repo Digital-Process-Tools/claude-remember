@@ -214,7 +214,7 @@ def test_previous_transcript_picks_the_newest_excluding_current_at_scale(tmp_pat
     current = files[-1]  # newest -- excluding it must fall back to the next one
     expected = files[-2]
 
-    body = _function_bodies("_stdin_json_string", "_transcript_is_pluginless_sdk", "_find_previous_transcript")
+    body = _function_bodies("_stdin_json_string_into", "_transcript_is_pluginless_sdk", "_find_previous_transcript")
     script = PREVIOUS_TRANSCRIPT_SCRIPT % body
     log = tmp_path / "spawn.log"
     shims = make_shim_dir(tmp_path, log)
@@ -247,7 +247,7 @@ def test_previous_transcript_excludes_current_by_id_not_position(tmp_path):
     middle = files[10]
     newest = files[-1]
 
-    body = _function_bodies("_stdin_json_string", "_transcript_is_pluginless_sdk", "_find_previous_transcript")
+    body = _function_bodies("_stdin_json_string_into", "_transcript_is_pluginless_sdk", "_find_previous_transcript")
     script = PREVIOUS_TRANSCRIPT_SCRIPT % body
     env = {**os.environ}
 
@@ -261,7 +261,7 @@ def test_previous_transcript_returns_nothing_when_only_file_is_current(tmp_path)
     sessions.mkdir()
     files = _populate(sessions, 1)
 
-    body = _function_bodies("_stdin_json_string", "_transcript_is_pluginless_sdk", "_find_previous_transcript")
+    body = _function_bodies("_stdin_json_string_into", "_transcript_is_pluginless_sdk", "_find_previous_transcript")
     script = PREVIOUS_TRANSCRIPT_SCRIPT % body
     env = {**os.environ}
 
@@ -282,7 +282,7 @@ def test_second_newest_fallback_matches_ls_t_tail_head_semantics_at_scale(tmp_pa
     files = _populate(sessions, REALISTIC_COUNT)
     expected = files[-2]  # second-newest by mtime
 
-    body = _function_bodies("_stdin_json_string", "_transcript_is_pluginless_sdk", "_find_previous_transcript")
+    body = _function_bodies("_stdin_json_string_into", "_transcript_is_pluginless_sdk", "_find_previous_transcript")
     script = SECOND_NEWEST_SCRIPT % body
     log = tmp_path / "spawn.log"
     shims = make_shim_dir(tmp_path, log)
@@ -311,7 +311,7 @@ def test_second_newest_fallback_empty_with_fewer_than_two_transcripts(tmp_path):
     sessions.mkdir()
     _populate(sessions, 1)
 
-    body = _function_bodies("_stdin_json_string", "_transcript_is_pluginless_sdk", "_find_previous_transcript")
+    body = _function_bodies("_stdin_json_string_into", "_transcript_is_pluginless_sdk", "_find_previous_transcript")
     script = SECOND_NEWEST_SCRIPT % body
     env = {**os.environ}
 
@@ -341,7 +341,7 @@ def test_previous_transcript_skips_a_run_of_pluginless_sdk_below_the_cap(tmp_pat
     files = _populate_with_pluginless_sdk_prefix(sessions, 30, pluginless_count=5)
     expected = files[-6]  # newest file that is NOT pluginless-SDK
 
-    body = _function_bodies("_stdin_json_string", "_transcript_is_pluginless_sdk", "_find_previous_transcript")
+    body = _function_bodies("_stdin_json_string_into", "_transcript_is_pluginless_sdk", "_find_previous_transcript")
     script = PREVIOUS_TRANSCRIPT_SCRIPT % body
     env = {**os.environ}
 
@@ -370,7 +370,7 @@ def test_previous_transcript_gives_up_past_the_exclusion_cap(tmp_path):
     real_previous = files[0]
     assert real_previous.read_text() == "{}\n"  # sanity: this is the one "findable" file
 
-    body = _function_bodies("_stdin_json_string", "_transcript_is_pluginless_sdk", "_find_previous_transcript")
+    body = _function_bodies("_stdin_json_string_into", "_transcript_is_pluginless_sdk", "_find_previous_transcript")
     script = PREVIOUS_TRANSCRIPT_SCRIPT % body
     env = {**os.environ}
 
@@ -394,7 +394,7 @@ def test_second_newest_skips_a_run_of_pluginless_sdk_below_the_cap(tmp_path):
     files = _populate_with_pluginless_sdk_prefix(sessions, 31, pluginless_count=6)
     expected = files[-7]  # newest candidate (excluding "own") that is NOT pluginless-SDK
 
-    body = _function_bodies("_stdin_json_string", "_transcript_is_pluginless_sdk", "_find_previous_transcript")
+    body = _function_bodies("_stdin_json_string_into", "_transcript_is_pluginless_sdk", "_find_previous_transcript")
     script = SECOND_NEWEST_SCRIPT % body
     env = {**os.environ}
 
@@ -420,7 +420,7 @@ def test_second_newest_gives_up_past_the_exclusion_cap(tmp_path):
     real_second_newest = files[0]
     assert real_second_newest.read_text() == "{}\n"
 
-    body = _function_bodies("_stdin_json_string", "_transcript_is_pluginless_sdk", "_find_previous_transcript")
+    body = _function_bodies("_stdin_json_string_into", "_transcript_is_pluginless_sdk", "_find_previous_transcript")
     script = SECOND_NEWEST_SCRIPT % body
     env = {**os.environ}
 
@@ -447,7 +447,7 @@ def test_previous_transcript_logs_on_cap_give_up(tmp_path):
         sessions, pluginless_run + 1, pluginless_count=pluginless_run
     )
 
-    body = _function_bodies("_stdin_json_string", "_transcript_is_pluginless_sdk", "_find_previous_transcript")
+    body = _function_bodies("_stdin_json_string_into", "_transcript_is_pluginless_sdk", "_find_previous_transcript")
     script = PREVIOUS_TRANSCRIPT_SCRIPT % body
     env = {**os.environ}
 
@@ -466,7 +466,7 @@ def test_previous_transcript_does_not_log_below_the_cap(tmp_path):
     sessions.mkdir()
     _populate_with_pluginless_sdk_prefix(sessions, 30, pluginless_count=5)
 
-    body = _function_bodies("_stdin_json_string", "_transcript_is_pluginless_sdk", "_find_previous_transcript")
+    body = _function_bodies("_stdin_json_string_into", "_transcript_is_pluginless_sdk", "_find_previous_transcript")
     script = PREVIOUS_TRANSCRIPT_SCRIPT % body
     env = {**os.environ}
 
@@ -488,7 +488,7 @@ def test_second_newest_logs_on_cap_give_up(tmp_path):
         sessions, pluginless_run + 2, pluginless_count=pluginless_run
     )
 
-    body = _function_bodies("_stdin_json_string", "_transcript_is_pluginless_sdk", "_find_previous_transcript")
+    body = _function_bodies("_stdin_json_string_into", "_transcript_is_pluginless_sdk", "_find_previous_transcript")
     script = SECOND_NEWEST_SCRIPT % body
     env = {**os.environ}
 
@@ -506,7 +506,7 @@ def test_second_newest_does_not_log_below_the_cap(tmp_path):
     sessions.mkdir()
     _populate_with_pluginless_sdk_prefix(sessions, 31, pluginless_count=6)
 
-    body = _function_bodies("_stdin_json_string", "_transcript_is_pluginless_sdk", "_find_previous_transcript")
+    body = _function_bodies("_stdin_json_string_into", "_transcript_is_pluginless_sdk", "_find_previous_transcript")
     script = SECOND_NEWEST_SCRIPT % body
     env = {**os.environ}
 

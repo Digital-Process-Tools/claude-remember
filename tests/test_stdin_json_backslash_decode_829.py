@@ -53,7 +53,6 @@ def _call_into(script: str, func_name: str, keyed: bool, key: str, raw: str):
 
 # (script, function, keyed, printf -v variant)
 EXTRACTORS = [
-    pytest.param("scripts/session-start-hook.sh", "_stdin_json_string", True, False, id="session-start"),
     pytest.param("scripts/session-start-hook.sh", "_stdin_json_string_into", True, True, id="session-start/into"),
     pytest.param("scripts/session-end-hook.sh", "_stdin_json_string", True, False, id="session-end"),
     pytest.param("scripts/post-tool-hook.sh", "_stdin_json_string", True, False, id="post-tool"),

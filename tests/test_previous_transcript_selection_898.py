@@ -66,7 +66,7 @@ def _lookup_script() -> str:
     source = SESSION_START.read_text(encoding="utf-8")
     deps = "\n".join(
         _function_body(source, n)
-        for n in ("_stdin_json_string", "_transcript_is_pluginless_sdk")
+        for n in ("_stdin_json_string_into", "_transcript_is_pluginless_sdk")
     )
     region = "_PREV_TRANSCRIPT_EXCLUDE_CAP=" + _between(
         source,

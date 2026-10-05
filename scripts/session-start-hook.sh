@@ -131,50 +131,35 @@ fi
 # #494: whether a real host payload can nest a `cwd` key AHEAD of this
 # field is researched in the UserPromptSubmit hook, next to its own
 # `_stdin_cwd` -- same extractor mechanism, same finding, not repeated here.
-_stdin_json_string() {
-    local field="$1" raw="$2" rest prefix value dq
-    # The double quote is held in `dq` (octal 042) rather than written
-    # backslash-escaped: the plugin directory's scanner mis-tracks an
-    # escaped quote (#898 round 8). Same patterns, same quoting of $field.
-    printf -v dq '\042'
-    [[ "$raw" == *"$dq$field$dq"* ]] || return 1
-    rest=${raw#*"$dq"$field"$dq"}
-    prefix=${rest%%"$dq"*}
-    if [[ "$prefix" == *[!:[:space:]]* ]]; then return 1; fi
-    value=${rest#*"$dq"}
-    value=${value%%"$dq"*}
-    # A JSON encoder writes each backslash as `\\` -- a Windows `cwd` from
-    # Codex arrives as `C:\\work\\proj` otherwise (#829).
-    value=${value//\\\\/\\}
-    [ -n "$value" ] || return 1
-    printf '%s' "$value"
-}
-
+#
 # _stdin_json_string_into VARNAME field raw
-# Same extraction as _stdin_json_string, written into VARNAME with
-# `printf -v` instead of printed -- so `X=$(_stdin_json_string ...) ||
-# X=""` (a subshell fork purely to capture an already-forkless function's
-# stdout, plus a second statement for the failure case) becomes one
-# unconditional call: VARNAME is set to the empty string up front, so a
-# `return 1` below leaves it exactly where the old `|| X=""` idiom did,
-# with no separate fallback statement needed at the call site (#665, part
-# of #660). Locals below are prefixed `_sjsi_` (this function's own name,
-# abbreviated) rather than the bare `_sjs_` tag config_into's own comment
-# warns about -- narrows, does not close, the same `printf -v`-resolves-
-# against-the-innermost-local collision every function in this file that
-# takes a destination VARNAME shares; see config_into's comment (log.sh)
-# for the full argument.
+# Written into VARNAME with `printf -v` rather than printed, so a call site
+# is one unconditional statement with no `$(...)` fork: VARNAME is set to
+# the empty string up front, so a `return 1` below leaves it empty, exactly
+# where the old `X=$(...) || X=""` idiom did (#665, part of #660). Every
+# reader in this hook uses this form, so the printing twin the two other
+# hooks keep is not carried here (#898). Locals below are prefixed `_sjsi_`
+# (this function's own name, abbreviated) rather than the bare `_sjs_` tag
+# config_into's own comment warns about -- narrows, does not close, the
+# same `printf -v`-resolves-against-the-innermost-local collision every
+# function in this file that takes a destination VARNAME shares; see
+# config_into's comment (log.sh) for the full argument.
 _stdin_json_string_into() {
     local _sjsi_var="$1" _sjsi_field="$2" _sjsi_raw="$3" _sjsi_rest _sjsi_prefix _sjsi_value _sjsi_dq
     printf -v "$_sjsi_var" '%s' ""
-    printf -v _sjsi_dq '\042'  # the double quote, as in _stdin_json_string
+    # The double quote is held in a variable (octal 042) rather than written
+    # backslash-escaped: the plugin directory's scanner mis-tracks an
+    # escaped quote (#898 round 8). Same patterns, same quoting of the field.
+    printf -v _sjsi_dq '\042'
     [[ "$_sjsi_raw" == *"$_sjsi_dq$_sjsi_field$_sjsi_dq"* ]] || return 1
     _sjsi_rest=${_sjsi_raw#*"$_sjsi_dq"$_sjsi_field"$_sjsi_dq"}
     _sjsi_prefix=${_sjsi_rest%%"$_sjsi_dq"*}
     if [[ "$_sjsi_prefix" == *[!:[:space:]]* ]]; then return 1; fi
     _sjsi_value=${_sjsi_rest#*"$_sjsi_dq"}
     _sjsi_value=${_sjsi_value%%"$_sjsi_dq"*}
-    _sjsi_value=${_sjsi_value//\\\\/\\}  # decode `\\`, as above (#829)
+    # A JSON encoder writes each backslash as `\\` -- a Windows `cwd` from
+    # Codex arrives as `C:\\work\\proj` otherwise (#829).
+    _sjsi_value=${_sjsi_value//\\\\/\\}
     [ -n "$_sjsi_value" ] || return 1
     printf -v "$_sjsi_var" '%s' "$_sjsi_value"
 }
@@ -289,13 +274,10 @@ source "$PLUGIN_ROOT/scripts/lib-memory-context.sh"
 # is read too, since #339, but for a different job entirely — how much of the
 # memory recap to print — and nothing on this path consults it.
 #
-# HOOK_STDIN was already captured, and _stdin_json_string already defined,
-# above -- ahead of resolve-paths.sh, since #411 -- so this only extracts.
-_stdin_session_id() {
-    _stdin_json_string session_id "$1"
-}
-
-CURRENT_SESSION_ID=$(_stdin_session_id "$HOOK_STDIN" 2>/dev/null) || CURRENT_SESSION_ID=""
+# HOOK_STDIN was already captured, and _stdin_json_string_into already
+# defined, above -- ahead of resolve-paths.sh, since #411 -- so this only
+# extracts.
+_stdin_json_string_into CURRENT_SESSION_ID session_id "$HOOK_STDIN" 2>/dev/null
 # stdin is not more trustworthy than a basename. This is compared against
 # names taken off the transcript directory, and `..` would match nothing
 # useful while `/` would match across directories, so it faces the same guard
@@ -884,7 +866,7 @@ _remember_write_case_divergence() {
 _ENTRYPOINT_SNIFF_CAP=50
 _transcript_is_pluginless_sdk() {
     local f=$1 n=0 line ep rest prefix is_dialogue dq
-    printf -v dq '\042'  # the double quote, as in _stdin_json_string
+    printf -v dq '\042'  # the double quote, as in _stdin_json_string_into
     while IFS= read -r line; do
         n=$((n + 1))
         is_dialogue=0
@@ -896,7 +878,7 @@ _transcript_is_pluginless_sdk() {
             # nested {role, content} OBJECT; a bookkeeping record's
             # "message" field (an error/status STRING, possibly empty,
             # on say a queue-operation record) is not. Checked directly
-            # by shape rather than by reusing _stdin_json_string (its
+            # by shape rather than by reusing _stdin_json_string_into (its
             # own `[ -n "$value" ]` non-empty guard cannot tell an empty
             # STRING apart from an OBJECT by return code alone --
             # auditor finding, self-review round): everything between
@@ -921,7 +903,7 @@ _transcript_is_pluginless_sdk() {
         fi
         if [ "$is_dialogue" -eq 0 ]; then
             if [ "${line#*"$dq"entrypoint"$dq"}" != "$line" ]; then
-                ep=$(_stdin_json_string entrypoint "$line" 2>/dev/null) || return 1
+                _stdin_json_string_into ep entrypoint "$line" 2>/dev/null || return 1
                 # `[ ]` prefix test, not a `case` with a catch-all `*)`
                 # arm inside this loop (#898 round 7 -- that shape is
                 # one the plugin directory's scanner holds a
