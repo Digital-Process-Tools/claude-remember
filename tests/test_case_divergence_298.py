@@ -151,18 +151,27 @@ _LAZY_PYTHON_GUARD = 'declare -f _remember_python >/dev/null 2>&1 && _remember_p
 _SANCTIONED_DIVERGENCE = {
     "scripts/lib-slug.sh": [
         (
-            '                    local _decoded\n'
-            '                    _decoded=$("${PYTHON:-python3}" "$_py_slug" "$path" 2>/dev/null) \\\n',
+            # #898 round 5 fold: old_code is the #662 form already live on
+            # origin/main (local + guard + python call) -- not a stacked
+            # third pair. "${PYTHON:-python3}" as the command word is a
+            # computed-program-name finding (UNPINNED_NPX) on its own;
+            # replaced with the literal-dispatch wrapper detect-tools.sh's
+            # own _remember_run_python already uses, same stdin/argv.
             '                    local _decoded\n'
             '                    ' + _LAZY_PYTHON_GUARD +
             '                    _decoded=$("${PYTHON:-python3}" "$_py_slug" "$path" 2>/dev/null) \\\n',
+            '                    local _decoded\n'
+            '                    ' + _LAZY_PYTHON_GUARD +
+            '                    _decoded=$(_remember_slug_run_python "$_py_slug" "$path" 2>/dev/null) \\\n',
         ),
         (
-            '    if [ -f "$_slug_py" ]; then\n'
-            '        _hash=$("${PYTHON:-python3}" "$_slug_py" --hash "$_orig" 2>/dev/null) || _hash=""\n',
+            # #898 round 5 fold: same reasoning as the pair above, same file.
             '    if [ -f "$_slug_py" ]; then\n'
             '        ' + _LAZY_PYTHON_GUARD +
             '        _hash=$("${PYTHON:-python3}" "$_slug_py" --hash "$_orig" 2>/dev/null) || _hash=""\n',
+            '    if [ -f "$_slug_py" ]; then\n'
+            '        ' + _LAZY_PYTHON_GUARD +
+            '        _hash=$(_remember_slug_run_python "$_slug_py" --hash "$_orig" 2>/dev/null) || _hash=""\n',
         ),
         (
             '_remember_build_slug_sed() {\n'
@@ -211,6 +220,65 @@ _SANCTIONED_DIVERGENCE = {
             '}\n'
             '_remember_build_slug_sed\n',
         ),
+        # #898 round 4: a nested default expansion (`${X:-$Y}`) is read by
+        # the directory's scanner as "a command assembled at run time" --
+        # the plugin.json-aggregate credential pairing's send side. Replaced
+        # with an explicit if/else, same resolution order, no new fork
+        # (both arms are plain assignment).
+        (
+            '    local _root="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"\n',
+            '    local _root\n'
+            '    if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then\n'
+            '        _root="$CLAUDE_CONFIG_DIR"\n'
+            '    else\n'
+            '        _root="$HOME/.claude"\n'
+            '    fi\n',
+        ),
+        # #898 round 5: "${PYTHON:-python3}" as the command word (both call
+        # sites the two folded pairs above cover) is a computed-program-name
+        # finding on its own (UNPINNED_NPX) -- this new wrapper function is
+        # the literal-dispatch fix, inserted once near the top of the file
+        # rather than inline at each call site.
+        (
+            # Comment lines are stripped from both sides before comparison
+            # (_code() above), so the anchor after the blank line is the
+            # next real CODE line -- _remember_build_slug_sed's own opener,
+            # not the "CRLF-safe" comment heading that precedes it in the
+            # actual file.
+            '_REMEMBER_LIB_SLUG_LOADED=1\n'
+            '\n'
+            '_remember_build_slug_sed() {\n',
+            '_REMEMBER_LIB_SLUG_LOADED=1\n'
+            '\n'
+            '_remember_slug_run_python() {\n'
+            '    case "${PYTHON:-python3}" in\n'
+            '        python3) python3 "$@" ;;\n'
+            '        python) python "$@" ;;\n'
+            '        py\\ -3) py -3 "$@" ;;\n'
+            '        py) py "$@" ;;\n'
+            '        *) return 127 ;;\n'
+            '    esac\n'
+            '}\n'
+            '\n'
+            '_remember_build_slug_sed() {\n',
+        ),
+        # #898 round 9: the long-path prefix strip, rewritten from quoted
+        # literals in a case pattern (a directory-scanner hold shape) to
+        # expansion tests with each prefix held in a variable.
+        (
+            r"""        case "$winpath" in
+            '\\?\UNC\'*) winpath='\\'"${winpath#'\\?\UNC\'}" ;;
+            '\\?\'*)     winpath="${winpath#'\\?\'}" ;;
+        esac
+""",
+            r"""        local _unc_pfx='\\?\UNC\' _long_pfx='\\?\'
+        if [ "${winpath#"$_unc_pfx"}" != "$winpath" ]; then
+            winpath='\\'"${winpath#"$_unc_pfx"}"
+        elif [ "${winpath#"$_long_pfx"}" != "$winpath" ]; then
+            winpath="${winpath#"$_long_pfx"}"
+        fi
+""",
+        ),
     ],
     "scripts/lib-memory-dir.sh": [
         # #695: `[A-Za-z]:` in the drive-form `case` patterns below is a
@@ -240,6 +308,48 @@ _SANCTIONED_DIVERGENCE = {
             '_set_store_root() {\n'
             '    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)\n'
             '    local data_dir="$1" prefix\n',
+        ),
+        # #898: the directory's scanner read a typed "." SCRIPT_DIR fallback
+        # as a further shipped file (COMMAND_SCRIPT_NOT_FOLLOWED) -- replaced
+        # with $PWD here, same directory-resolution semantics, no literal dot.
+        (
+            '_REMEMBER_SRC_DIR="${BASH_SOURCE[0]%/*}"\n'
+            '[ "$_REMEMBER_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_SRC_DIR="."\n'
+            'source "$_REMEMBER_SRC_DIR/lib-slug.sh"\n',
+            '_REMEMBER_SRC_DIR="${BASH_SOURCE[0]%/*}"\n'
+            '[ "$_REMEMBER_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_SRC_DIR="$(pwd)"\n'
+            'source "$_REMEMBER_SRC_DIR/lib-slug.sh"\n',
+        ),
+        # #898 round 7: a `case` with a catch-all `*)` arm inside this
+        # `while :; do` loop is a catch-all-in-loop shape the plugin
+        # directory's scanner holds on -- replaced with `[ ]` prefix/
+        # suffix tests, same trailing-separator strip semantics (`?*/`
+        # meant "ends in / or a backslash AND is at least 2 chars",
+        # replicated via the length check plus a suffix-strip test below).
+        (
+            '    while :; do\n'
+            '        case "$prefix" in\n'
+            '            ?*/|?*\\\\) prefix="${prefix%?}" ;;\n'
+            '            *) break ;;\n'
+            '        esac\n'
+            '    done\n',
+            '    while :; do\n'
+            '        if [ "${#prefix}" -gt 1 ] && { [ "${prefix%/}" != "$prefix" ] || [ "${prefix%\\\\}" != "$prefix" ]; }; then\n'
+            '            prefix="${prefix%?}"\n'
+            '        else\n'
+            '            break\n'
+            '        fi\n'
+            '    done\n',
+        ),
+        # #898 round 4: a typed here-document is read by the directory's
+        # scanner as an UNPINNED_NPX hold -- the two-line `{ IFS= read ...
+        # } <<EOF\n$_out\nEOF` is replaced with a single-line here-string,
+        # same stdin content, same read semantics.
+        (
+            '    { IFS= read -r _gcd; IFS= read -r _gd; } <<EOF\n'
+            '$_out\n'
+            'EOF\n',
+            '    { IFS= read -r _gcd; IFS= read -r _gd; } <<< "$_out"\n',
         ),
         # #662's own tuple (the `_LAZY_PYTHON_GUARD` insertion into the no-jq
         # elif, on its own, pre-#726 two-argument invocation) is gone (#734):
@@ -300,434 +410,447 @@ _SANCTIONED_DIVERGENCE = {
             "fi\n"
             "unset _existing_trap _t\n",
         ),
+        # #898 round 12: the #761/#766/#757 `_project_cfg` pair and the
+        # #748 jq-merge pair that stood here are retired, the way the #726
+        # pair was before them (#734 precedent): both are fully landed --
+        # origin/main holds their new_code verbatim and no longer holds their
+        # old_code, so on the byte-pin they were already a no-op. Kept, they
+        # broke #440's pre-merge pin: rounds 9-10's own pairs below rewrite
+        # lines that sit inside their (landed) new_code, so substituting
+        # every old_code at once could never leave both pairs' new_code
+        # intact. `git log -S` on this file recovers their text.
+        #
+        # #898 round 4: folded per case-divergence-pin-fold-dont-stack.md,
+        # the same convention the #815 pair below already used to supersede
+        # #804 -- this REPLACES both the #804 and #815 pairs entirely (their
+        # own new_code, concatenated, is what origin/main ships today; their
+        # own old_codes are no longer reachable and are dropped along with
+        # them). new_code: a typed backtick<<PYMERGE here-document is read by
+        # the scanner as an UNPINNED_NPX hold -- replaced with a here-string
+        # carrying the identical script as a single-quoted literal (the
+        # scripts own embedded apostrophe is escaped with the standard shell
+        # close-emit-reopen idiom), same argv, same stdin content.
         (
-            # #761 fold: old_code is the #766/#757 form (matches
-            # origin/main verbatim, "old" only relative to #761) -- same
-            # steady-state extension shape as the pairs above, not a
-            # stacked third pair on this site.
-            '_project_cfg="${REMEMBER_DIR}/config.json"\n'
-            '\n'
-            '_classify_project_cfg_haiku_trust() {\n'
-            '    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)\n'
-            '    case "$_data_dir_raw" in\n'
-            '        /*|~*|[A-Za-z]:/*|[A-Za-z]:\\\\*) _project_cfg_haiku_untrusted=0 ;;\n'
-            '        *) _project_cfg_haiku_untrusted=1 ;;\n'
-            '    esac\n'
-            '}\n'
-            '_classify_project_cfg_haiku_trust\n'
-            '\n'
-            '_remember_config_tracked_status() {\n'
-            '    local _dir="$1" _name="$2" _out _rc\n'
-            '\n'
-            '    if ! command -v git >/dev/null 2>&1; then\n'
-            '        local _walk\n'
-            '        _walk=$(cd "$_dir" 2>/dev/null && pwd -P) || _walk="$_dir"\n'
-            '        while [ -n "$_walk" ]; do\n'
-            '            if [ -e "$_walk/.git" ]; then\n'
-            '                echo "could-not-tell"\n'
-            '                return 0\n'
-            '            fi\n'
-            '            [ "$_walk" = "/" ] && break\n'
-            '            _walk="${_walk%/*}"\n'
-            '            [ -z "$_walk" ] && _walk="/"\n'
-            '        done\n'
-            '        echo "untracked"\n'
-            '        return 0\n'
-            '    fi\n'
-            '\n'
-            '    _out=$( (unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE\n'
-            '             LC_ALL=C LANGUAGE=C git -C "$_dir" rev-parse --is-inside-work-tree) 2>&1 )\n'
-            '    _rc=$?\n'
-            '    if [ "$_rc" -ne 0 ]; then\n'
+            # #898 round 5 fold: old_code is the round-3 PYMERGE heredoc form
+            # still genuinely on origin/main (round 4's own fix never merged
+            # past this branch) -- folded directly to the round-5 state (here-
+            # string + _lmd_run_python literal-dispatch wrapper) in one step,
+            # since the intermediate round-4-only form is not independently
+            # observable on origin/main and stacking it would only risk the
+            # exact drift this convention exists to avoid.
+            # #898 round 8 fold, same convention: the here-string program
+            # moved to scripts/cfg_merge.py (called by literal path, same
+            # argv and exit codes), so new_code is that call, and the
+            # round-4 apostrophe pair that used to follow this one is gone
+            # with the program it escaped.
+            '_py_merge_rc=0\n    "${PYTHON:-python3}" - "$_merged_cfg" "$_untrusted_haiku_source" "$_strip_model_reject" "$_project_drop_marker" "${_cfg_sources[@]}" > /dev/null 2>&1 <<\'PYMERGE\' || _py_merge_rc=$?\nimport json\nimport sys\n\n\ndef deep_merge(a, b):\n    if isinstance(a, dict) and isinstance(b, dict):\n        out = dict(a)\n        for k, v in b.items():\n            out[k] = deep_merge(out[k], v) if k in out else v\n        return out\n    return b\n\n\nout_path = sys.argv[1]\nuntrusted_haiku_path = sys.argv[2]\nstrip_model_reject = sys.argv[3] == "1"\ndrop_marker_path = sys.argv[4]\n\n\ndef load_documents(path):\n    """Parse every whitespace-concatenated JSON document in `path` (#740):\n    the untrusted project layer may ship more than one, and a plain\n    json.load() raises `JSONDecodeError` on any file with more than one --\n    which used to take the WHOLE merge down with it (the `|| cp\n    "$_bundled_cfg" ...` fallback below), dropping the trusted user-global\n    layer too rather than just stripping `haiku` from this file\'s own\n    documents and keeping everything else."""\n    with open(path) as f:\n        raw = f.read()\n    decoder = json.JSONDecoder()\n    idx, n, docs = 0, len(raw), []\n    while idx < n:\n        while idx < n and raw[idx].isspace():\n            idx += 1\n        if idx >= n:\n            break\n        obj, idx = decoder.raw_decode(raw, idx)\n        docs.append(obj)\n    return docs\n\n\nmerged = {}\n_dropped_project_layer = False\n_dropped_trusted_layer = False\nfor path in sys.argv[5:]:\n    if untrusted_haiku_path and path == untrusted_haiku_path:\n        try:\n            docs = load_documents(path)\n        except (OSError, ValueError):\n            _dropped_project_layer = True\n            if drop_marker_path:\n                try:\n                    with open(drop_marker_path, "w") as _marker:\n                        _marker.write("1")\n                except OSError:\n                    pass\n            continue\n        for data in docs:\n            if isinstance(data, dict):\n                drop = {"haiku"}\n                if strip_model_reject:\n                    drop |= {"model", "reject_pattern"}\n                data = {k: v for k, v in data.items() if k not in drop}\n            merged = deep_merge(merged, data)\n        continue\n    try:\n        with open(path) as f:\n            data = json.load(f)\n    except (OSError, ValueError):\n        _dropped_trusted_layer = True\n        continue\n    merged = deep_merge(merged, data)\nmerged = {k: v for k, v in merged.items() if not str(k).startswith("_")}\nwith open(out_path, "w") as f:\n    json.dump(merged, f)\nif _dropped_project_layer and _dropped_trusted_layer:\n    sys.exit(5)\nelif _dropped_project_layer:\n    sys.exit(3)\nelif _dropped_trusted_layer:\n    sys.exit(4)\nPYMERGE\n    if [ "$_py_merge_rc" != "0" ] && [ "$_py_merge_rc" != "3" ] && [ "$_py_merge_rc" != "4" ] && [ "$_py_merge_rc" != "5" ]; then\n        cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null\n    fi\n    if { [ -n "$_project_drop_marker" ] && [ -f "$_project_drop_marker" ]; } || [ "$_py_merge_rc" = "3" ] || [ "$_py_merge_rc" = "5" ]; then\n        rm -f "$_project_drop_marker" 2>/dev/null\n        if declare -F report_error >/dev/null 2>&1; then\n            report_error "lib-memory-dir" "sanitizing the project config layer failed (unreadable project file or malformed JSON) -- that layer was dropped; bundled/user-global config still applies"\n        else\n            printf \'%s\\n\' "[lib-memory-dir] WARNING: sanitizing the project config layer failed (unreadable project file or malformed JSON) -- that layer was dropped; bundled/user-global config still applies" >&2\n        fi\n    fi\n    if [ "$_py_merge_rc" = "4" ] || [ "$_py_merge_rc" = "5" ]; then\n        if declare -F report_error >/dev/null 2>&1; then\n            report_error "lib-memory-dir" "sanitizing a trusted config layer failed (unreadable file or malformed JSON) -- bundled config, user-global config, and project config (when it is not the untrusted-haiku source) are all reached here, and one of them was dropped; the remaining layers still applied"\n        else\n            printf \'%s\\n\' "[lib-memory-dir] WARNING: sanitizing a trusted config layer failed (unreadable file or malformed JSON) -- bundled config, user-global config, and project config (when it is not the untrusted-haiku source) are all reached here, and one of them was dropped; the remaining layers still applied" >&2\n        fi\n    fi\n    [ -n "$_project_drop_marker" ] && rm -f "$_project_drop_marker" 2>/dev/null\nelse\n',
+            '_py_merge_rc=0\n    _lmd_run_python() {\n        case "${PYTHON:-python3}" in\n            python3) python3 "$@" ;;\n            python) python "$@" ;;\n            py\\ -3) py -3 "$@" ;;\n            py) py "$@" ;;\n            *) return 127 ;;\n        esac\n    }\n    _lmd_py_dir="${BASH_SOURCE[0]%/*}"\n    [ "$_lmd_py_dir" = "${BASH_SOURCE[0]}" ] && _lmd_py_dir="$(pwd)"\n    _lmd_run_python "$_lmd_py_dir/cfg_merge.py" "$_merged_cfg" "$_untrusted_haiku_source" "$_strip_model_reject" "$_project_drop_marker" "${_cfg_sources[@]}" > /dev/null 2>&1 || _py_merge_rc=$?\n    unset _lmd_py_dir\n    if [ "$_py_merge_rc" != "0" ] && [ "$_py_merge_rc" != "3" ] && [ "$_py_merge_rc" != "4" ] && [ "$_py_merge_rc" != "5" ]; then\n        cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null\n    fi\n    if { [ -n "$_project_drop_marker" ] && [ -f "$_project_drop_marker" ]; } || [ "$_py_merge_rc" = "3" ] || [ "$_py_merge_rc" = "5" ]; then\n        rm -f "$_project_drop_marker" 2>/dev/null\n        if declare -F report_error >/dev/null 2>&1; then\n            report_error "lib-memory-dir" "sanitizing the project config layer failed (unreadable project file or malformed JSON) -- that layer was dropped; bundled/user-global config still applies"\n        else\n            printf \'%s\\n\' "[lib-memory-dir] WARNING: sanitizing the project config layer failed (unreadable project file or malformed JSON) -- that layer was dropped; bundled/user-global config still applies" >&2\n        fi\n    fi\n    if [ "$_py_merge_rc" = "4" ] || [ "$_py_merge_rc" = "5" ]; then\n        if declare -F report_error >/dev/null 2>&1; then\n            report_error "lib-memory-dir" "sanitizing a trusted config layer failed (unreadable file or malformed JSON) -- bundled config, user-global config, and project config (when it is not the untrusted-haiku source) are all reached here, and one of them was dropped; the remaining layers still applied"\n        else\n            printf \'%s\\n\' "[lib-memory-dir] WARNING: sanitizing a trusted config layer failed (unreadable file or malformed JSON) -- bundled config, user-global config, and project config (when it is not the untrusted-haiku source) are all reached here, and one of them was dropped; the remaining layers still applied" >&2\n        fi\n    fi\n    [ -n "$_project_drop_marker" ] && rm -f "$_project_drop_marker" 2>/dev/null\nelse\n',
+        ),
+        # #898 round 9: two quoted literals in a case pattern (a directory-
+        # scanner hold shape) rewritten as expansion tests, same answers.
+        (
+            '    case "$data_dir" in\n'
+            "        *'{slug}'*) ;;\n"
+            '        *) return 0 ;;\n'
+            '    esac\n',
+            '    [ "${data_dir#*\\{slug\\}}" != "$data_dir" ] || return 0\n',
+        ),
+        (
             '        case "$_out" in\n'
             '            *"not a git repository"*) echo "untracked" ;;\n'
             '            *) echo "could-not-tell" ;;\n'
-            '        esac\n'
-            '        return 0\n'
-            '    fi\n'
-            '    if [ "$_out" != "true" ]; then\n'
-            '        echo "untracked"\n'
-            '        return 0\n'
-            '    fi\n'
-            '\n'
-            '    _out=$( (unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE\n'
-            '             git -C "$_dir" ls-files -- ":(icase)$_name") 2>/dev/null )\n'
-            '    _rc=$?\n'
-            '    if [ "$_rc" -ne 0 ]; then\n'
-            '        echo "could-not-tell"\n'
-            '        return 0\n'
-            '    fi\n'
-            '    if [ -n "$_out" ]; then\n'
-            '        echo "tracked"\n'
-            '    else\n'
-            '        echo "untracked"\n'
-            '    fi\n'
-            '}\n'
-            '\n'
-            '_project_cfg_model_reject_untrusted=0\n'
-            'if [ "$_project_cfg_haiku_untrusted" = "1" ] && [ -f "$_project_cfg" ]; then\n'
-            '    case "$(_remember_config_tracked_status "${_project_cfg%/*}" "${_project_cfg##*/}")" in\n'
-            '        untracked) _project_cfg_model_reject_untrusted=0 ;;\n'
-            '        *) _project_cfg_model_reject_untrusted=1 ;;  # tracked or could-not-tell -> fail CLOSED\n'
-            '    esac\n'
-            'fi\n'
-            '\n'
-            'if [ -L "$_project_cfg" ]; then\n'
-            '    printf \'remember: %s is a symlink -- refusing to read it through the link; this project config layer is skipped entirely for this session (#757)\\n\' \\\n'
-            '        "$_project_cfg" >&2\n'
-            '    _project_cfg="${REMEMBER_DIR}/.remember-symlinked-config-refused"\n'
-            'fi\n'
-            '\n'
-            'SYS_TMPDIR="${TMPDIR:-/tmp}"\n',
-            # #761: the tracked_status function grows a check on the
-            # repository's own TOPLEVEL `.git` -- a symlink there (never a
-            # shape a normal checkout or a linked worktree produces) is
-            # refused (could-not-tell, fail CLOSED) rather than trusted,
-            # since it can only be a pre-planted swap pointing this whole
-            # check at an unrelated repository's own objects and index.
-            '_project_cfg="${REMEMBER_DIR}/config.json"\n'
-            '\n'
-            '_classify_project_cfg_haiku_trust() {\n'
-            '    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)\n'
-            '    case "$_data_dir_raw" in\n'
-            '        /*|~*|[A-Za-z]:/*|[A-Za-z]:\\\\*) _project_cfg_haiku_untrusted=0 ;;\n'
-            '        *) _project_cfg_haiku_untrusted=1 ;;\n'
-            '    esac\n'
-            '}\n'
-            '_classify_project_cfg_haiku_trust\n'
-            '\n'
-            '_remember_config_tracked_status() {\n'
-            '    local _dir="$1" _name="$2" _out _rc _toplevel\n'
-            '\n'
-            '    if ! command -v git >/dev/null 2>&1; then\n'
-            '        local _walk\n'
-            '        _walk=$(cd "$_dir" 2>/dev/null && pwd -P) || _walk="$_dir"\n'
-            '        while [ -n "$_walk" ]; do\n'
-            '            if [ -e "$_walk/.git" ]; then\n'
-            '                echo "could-not-tell"\n'
-            '                return 0\n'
-            '            fi\n'
-            '            [ "$_walk" = "/" ] && break\n'
-            '            _walk="${_walk%/*}"\n'
-            '            [ -z "$_walk" ] && _walk="/"\n'
-            '        done\n'
-            '        echo "untracked"\n'
-            '        return 0\n'
-            '    fi\n'
-            '\n'
-            '    _out=$( (unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE\n'
-            '             LC_ALL=C LANGUAGE=C git -C "$_dir" rev-parse --is-inside-work-tree) 2>&1 )\n'
-            '    _rc=$?\n'
-            '    if [ "$_rc" -ne 0 ]; then\n'
-            '        case "$_out" in\n'
-            '            *"not a git repository"*) echo "untracked" ;;\n'
-            '            *) echo "could-not-tell" ;;\n'
-            '        esac\n'
-            '        return 0\n'
-            '    fi\n'
-            '    if [ "$_out" != "true" ]; then\n'
-            '        echo "untracked"\n'
-            '        return 0\n'
-            '    fi\n'
-            '\n'
-            '    _toplevel=$( (unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE\n'
-            '                  git -C "$_dir" rev-parse --show-toplevel) 2>/dev/null )\n'
-            '    if [ -n "$_toplevel" ] && [ -L "${_toplevel}/.git" ]; then\n'
-            '        echo "could-not-tell"\n'
-            '        return 0\n'
-            '    fi\n'
-            '\n'
-            '    _out=$( (unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE\n'
-            '             git -C "$_dir" ls-files -- ":(icase)$_name") 2>/dev/null )\n'
-            '    _rc=$?\n'
-            '    if [ "$_rc" -ne 0 ]; then\n'
-            '        echo "could-not-tell"\n'
-            '        return 0\n'
-            '    fi\n'
-            '    if [ -n "$_out" ]; then\n'
-            '        echo "tracked"\n'
-            '    else\n'
-            '        echo "untracked"\n'
-            '    fi\n'
-            '}\n'
-            '\n'
-            '_project_cfg_model_reject_untrusted=0\n'
-            'if [ "$_project_cfg_haiku_untrusted" = "1" ] && [ -f "$_project_cfg" ]; then\n'
-            '    case "$(_remember_config_tracked_status "${_project_cfg%/*}" "${_project_cfg##*/}")" in\n'
-            '        untracked) _project_cfg_model_reject_untrusted=0 ;;\n'
-            '        *) _project_cfg_model_reject_untrusted=1 ;;  # tracked or could-not-tell -> fail CLOSED\n'
-            '    esac\n'
-            'fi\n'
-            '\n'
-            'if [ -L "$_project_cfg" ]; then\n'
-            '    printf \'remember: %s is a symlink -- refusing to read it through the link; this project config layer is skipped entirely for this session (#757)\\n\' \\\n'
-            '        "$_project_cfg" >&2\n'
-            '    _project_cfg="${REMEMBER_DIR}/.remember-symlinked-config-refused"\n'
-            'fi\n'
-            '\n'
-            'SYS_TMPDIR="${TMPDIR:-/tmp}"\n',
+            '        esac\n',
+            '        if [ "${_out#*not a git repository}" != "$_out" ]; then\n'
+            '            echo "untracked"\n'
+            '        else\n'
+            '            echo "could-not-tell"\n'
+            '        fi\n',
         ),
-        # The #726 pair (pre-#726 plain `jq -s` -> #726 `strip_last_haiku`) is gone
-        # (#734 precedent): #744 composed #740 directly on top of it, so origin/main
-        # never again holds either side of it -- the "neither old nor new" state
-        # this test correctly refused on ba2a592. #748 composes directly on top of
-        # #744/#757 the SAME way: old_code below is now the #757 steady state
-        # (already landed on origin/main -- the #744 `.haiku` literal it used to
-        # start from is gone for the identical #734 reason), new_code is the #748
-        # form with a report_error/stderr disclosure in the sanitize-failure else
-        # branch. Its one-line-filter rule still applies: a literal newline
-        # inside a jq filter argument costs phantom lines in every spawn-count
-        # budget (tests/spawn_counting.py logs argv with printf, split on newlines).
+        # #898 round 10 (the bare "." hunt): a backslash glob in a case
+        # pattern is written as a bracket, `[A-Za-z]:[/\x5c\x5c]*` for the two
+        # drive-letter alternatives (same matches -- measured on bash 3.2), and
+        # jq's lone `.` after `;` is `getpath([])`, the same identity. Each
+        # pair is one sanctioned substring, applied to every line holding it.
         (
-            'elif [ "${#_cfg_sources[@]}" -gt 0 ] && command -v jq >/dev/null 2>&1; then\n'
-            '    _strip_project_haiku="false"\n'
-            '    [ "$_project_cfg_haiku_untrusted" = "1" ] && [ -f "$_project_cfg" ] && _strip_project_haiku="true"\n'
-            '    _project_del_filter=".haiku"\n'
-            '    [ "$_project_cfg_model_reject_untrusted" = "1" ] && _project_del_filter="${_project_del_filter}, .model, .reject_pattern"\n'
-            '    _jq_merge_sources=()\n'
-            '    [ -f "$_bundled_cfg" ] && _jq_merge_sources+=("$_bundled_cfg")\n'
-            '    [ -f "$_user_cfg"    ] && _jq_merge_sources+=("$_user_cfg")\n'
-            '    _project_sanitized_tmp=""\n'
-            '    if [ -f "$_project_cfg" ]; then\n'
-            '        if [ "$_strip_project_haiku" = "true" ]; then\n'
-            '            _project_sanitized_tmp=$(mktemp "${SYS_TMPDIR}/remember-config-sanitized-XXXXXX" 2>/dev/null) || _project_sanitized_tmp=""\n'
-            '            if [ -n "$_project_sanitized_tmp" ] && jq -c "del($_project_del_filter)" "$_project_cfg" > "$_project_sanitized_tmp" 2>/dev/null; then\n'
-            '                _jq_merge_sources+=("$_project_sanitized_tmp")\n'
-            '            else\n'
-            '                [ -n "$_project_sanitized_tmp" ] && rm -f "$_project_sanitized_tmp"\n'
-            '                _project_sanitized_tmp=""\n'
-            '            fi\n'
-            '        else\n'
-            '            _jq_merge_sources+=("$_project_cfg")\n'
-            '        fi\n'
-            '    fi\n'
-            '    if [ "${#_jq_merge_sources[@]}" -eq 0 ]; then\n'
-            '        echo \'{}\' > "$_merged_cfg"\n'
-            '    else\n'
-            '        jq -s \'reduce .[] as $x ({}; . * $x) | with_entries(select(.key | startswith("_") | not))\' "${_jq_merge_sources[@]}" > "$_merged_cfg" 2>/dev/null \\\n'
-            '            || cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null\n'
-            '    fi\n'
-            '    [ -n "$_project_sanitized_tmp" ] && rm -f "$_project_sanitized_tmp"\n'
-            'elif [ "${#_cfg_sources[@]}" -gt 0 ]; then\n',
-            # #740/#744: `-s` slurps every document from every source file into
-            # one flat array with no file-boundary information, so `.[-1]` only
-            # ever reached the LAST document of the LAST file -- a project config
-            # shipping two whitespace-concatenated JSON documents had its FIRST
-            # document's `haiku` block survive untouched, one array element
-            # before the position `.[-1]` looked at (#740). Two designs meant to
-            # fix that were tried and abandoned before this one: `-n` with
-            # `inputs`/`input_filename`, comparing every document's source file
-            # against a shell-supplied `--arg proj` path -- reasoned to be safe,
-            # never observed on a platform where jq's own view of a path could
-            # diverge from the shell's (this repo's CI skips every bash-subprocess
-            # test on win32, #79); then `--slurpfile proj "$_project_cfg"`, which
-            # removed that comparison but was ITSELF never proven on Windows either
-            # -- PR #744's CI showed it erroring under a native jq.exe there, and
-            # the `|| cp "$_bundled_cfg" ...` fallback silently dropped EVERY layer,
-            # project AND trusted user-global, with no error surfaced to the user
-            # at all. This design (#744) uses NOTHING that was not already proven,
-            # on every CI platform, before #740 ever touched this file: a SEPARATE,
-            # plain `jq -c 'del(.haiku)'` call (no `-s`, no `-n`, no `--slurpfile`,
-            # no path comparison) sanitizes the untrusted project layer into its own
-            # temp file first -- jq's ordinary mode already treats each document as
-            # a separate input, so a multi-document project config is handled the
-            # same way #740's first fix was, and an empty one the same way its
-            # second fix was, without either design's own platform-dependent moving
-            # part. If sanitizing fails for any reason, the project layer is simply
-            # dropped (fail CLOSED) rather than merged unsanitized -- the trusted
-            # bundled/user layers are unaffected either way. Once sanitized, the
-            # ORIGINAL `jq -s` reduce (unchanged since before #726) runs over the
-            # same plain file arguments it always did. The trailing `elif` (the
-            # no-jq branch's own opener) is pulled into BOTH sides of this pair for
-            # the same test_sanctioned_divergence_state_440.py collision reason the
-            # #726 pair's own comment (above) already explains in full.
-            'elif [ "${#_cfg_sources[@]}" -gt 0 ] && command -v jq >/dev/null 2>&1; then\n'
-            '    _strip_project_haiku="false"\n'
-            '    [ "$_project_cfg_haiku_untrusted" = "1" ] && [ -f "$_project_cfg" ] && _strip_project_haiku="true"\n'
-            '    _project_del_filter=".haiku"\n'
-            '    [ "$_project_cfg_model_reject_untrusted" = "1" ] && _project_del_filter="${_project_del_filter}, .model, .reject_pattern"\n'
-            '    _jq_merge_sources=()\n'
-            '    [ -f "$_bundled_cfg" ] && _jq_merge_sources+=("$_bundled_cfg")\n'
-            '    [ -f "$_user_cfg"    ] && _jq_merge_sources+=("$_user_cfg")\n'
-            '    _project_sanitized_tmp=""\n'
-            '    if [ -f "$_project_cfg" ]; then\n'
-            '        if [ "$_strip_project_haiku" = "true" ]; then\n'
-            '            _project_sanitized_tmp=$(mktemp "${SYS_TMPDIR}/remember-config-sanitized-XXXXXX" 2>/dev/null) || _project_sanitized_tmp=""\n'
-            '            if [ -n "$_project_sanitized_tmp" ] && jq -c "del($_project_del_filter)" "$_project_cfg" > "$_project_sanitized_tmp" 2>/dev/null; then\n'
-            '                _jq_merge_sources+=("$_project_sanitized_tmp")\n'
-            '            else\n'
-            '                if declare -F report_error >/dev/null 2>&1; then\n'
-            '                    report_error "lib-memory-dir" "sanitizing the project config layer failed (mktemp, an unreadable project file, or jq itself) -- that layer was dropped; bundled/user-global config still applies"\n'
-            '                else\n'
-            '                    printf \'%s\\n\' "[lib-memory-dir] WARNING: sanitizing the project config layer failed (mktemp, an unreadable project file, or jq itself) -- that layer was dropped; bundled/user-global config still applies" >&2\n'
-            '                fi\n'
-            '                [ -n "$_project_sanitized_tmp" ] && rm -f "$_project_sanitized_tmp"\n'
-            '                _project_sanitized_tmp=""\n'
-            '            fi\n'
-            '        else\n'
-            '            _jq_merge_sources+=("$_project_cfg")\n'
-            '        fi\n'
-            '    fi\n'
-            '    if [ "${#_jq_merge_sources[@]}" -eq 0 ]; then\n'
-            '        echo \'{}\' > "$_merged_cfg"\n'
-            '    else\n'
-            '        jq -s \'reduce .[] as $x ({}; . * $x) | with_entries(select(.key | startswith("_") | not))\' "${_jq_merge_sources[@]}" > "$_merged_cfg" 2>/dev/null \\\n'
-            '            || cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null\n'
-            '    fi\n'
-            '    [ -n "$_project_sanitized_tmp" ] && rm -f "$_project_sanitized_tmp"\n'
-            'elif [ "${#_cfg_sources[@]}" -gt 0 ]; then\n',
+            "/*|~*|[A-Za-z]:/*|[A-Za-z]:" + "\x5c\x5c" + "*)",
+            "/*|~*|[A-Za-z]:[/" + "\x5c\x5c" + "]*)",
         ),
         (
-            # #804: folded per case-divergence-pin-fold-dont-stack.md --
-            # old_code is now the #748 steady state (already landed on
-            # origin/main); new_code adds a second, independent drop
-            # signal (the interpreter's own exit code) alongside the
-            # drop-marker file, since that marker's own mktemp can itself
-            # fail and leave the drop unreported (#748's own compound gap).
-            '    declare -f _remember_python >/dev/null 2>&1 && _remember_python\n'
-            '    _untrusted_haiku_source=""\n'
-            '    [ "$_project_cfg_haiku_untrusted" = "1" ] && _untrusted_haiku_source="$_project_cfg"\n'
-            '    _strip_model_reject="0"\n'
-            '    [ "$_project_cfg_model_reject_untrusted" = "1" ] && _strip_model_reject="1"\n'
-            '    _project_drop_marker=$(mktemp "${SYS_TMPDIR}/remember-config-drop-marker-XXXXXX" 2>/dev/null) || _project_drop_marker=""\n'
-            '    rm -f "$_project_drop_marker" 2>/dev/null\n'
-            '    "${PYTHON:-python3}" - "$_merged_cfg" "$_untrusted_haiku_source" "$_strip_model_reject" "$_project_drop_marker" "${_cfg_sources[@]}" > /dev/null 2>&1 <<\'PYMERGE\' || cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null\n'
-            'import json\n',
-            '    declare -f _remember_python >/dev/null 2>&1 && _remember_python\n'
-            '    _untrusted_haiku_source=""\n'
-            '    [ "$_project_cfg_haiku_untrusted" = "1" ] && _untrusted_haiku_source="$_project_cfg"\n'
-            '    _strip_model_reject="0"\n'
-            '    [ "$_project_cfg_model_reject_untrusted" = "1" ] && _strip_model_reject="1"\n'
-            '    _project_drop_marker=$(mktemp "${SYS_TMPDIR}/remember-config-drop-marker-XXXXXX" 2>/dev/null) || _project_drop_marker=""\n'
-            '    rm -f "$_project_drop_marker" 2>/dev/null\n'
-            '    _py_merge_rc=0\n'
-            '    "${PYTHON:-python3}" - "$_merged_cfg" "$_untrusted_haiku_source" "$_strip_model_reject" "$_project_drop_marker" "${_cfg_sources[@]}" > /dev/null 2>&1 <<\'PYMERGE\' || _py_merge_rc=$?\n'
-            'import json\n',
+            "''|/|[A-Za-z]:|[A-Za-z]:/|[A-Za-z]:" + "\x5c\x5c" + ")",
+            "''|/|[A-Za-z]:|[A-Za-z]:[/" + "\x5c\x5c" + "])",
         ),
         (
-            # #815: folded per case-divergence-pin-fold-dont-stack.md -- this
-            # REPLACES the earlier #804 pair rather than stacking beside it
-            # (that pair's own new_code, the #804 steady state, is what
-            # origin/main ships today, so it moves here as the new old_code
-            # verbatim; #804's own old_code, the pre-#804 #748/#726 form, is
-            # no longer reachable and is dropped along with it). new_code
-            # adds `_dropped_trusted_layer` and its own exit codes (4, 5),
-            # plus the matching shell-side rc handling and a second WARNING,
-            # since a malformed TRUSTED source (bundled or user-global config,
-            # or project config outside the untrusted-haiku case) used to
-            # raise uncaught and fall through to the bundled-only fallback
-            # with no disclosure at all -- the #804 gate only ever checked
-            # the drop-marker file or rc == 3, neither of which this path
-            # touched.
-            'merged = {}\n'
-            '_dropped_project_layer = False\n'
-            'for path in sys.argv[5:]:\n'
-            '    if untrusted_haiku_path and path == untrusted_haiku_path:\n'
-            '        try:\n'
-            '            docs = load_documents(path)\n'
-            '        except (OSError, ValueError):\n'
-            '            _dropped_project_layer = True\n'
-            '            if drop_marker_path:\n'
-            '                try:\n'
-            '                    with open(drop_marker_path, "w") as _marker:\n'
-            '                        _marker.write("1")\n'
-            '                except OSError:\n'
-            '                    pass\n'
-            '            continue\n'
-            '        for data in docs:\n'
-            '            if isinstance(data, dict):\n'
-            '                drop = {"haiku"}\n'
-            '                if strip_model_reject:\n'
-            '                    drop |= {"model", "reject_pattern"}\n'
-            '                data = {k: v for k, v in data.items() if k not in drop}\n'
-            '            merged = deep_merge(merged, data)\n'
-            '        continue\n'
-            '    with open(path) as f:\n'
-            '        data = json.load(f)\n'
-            '    merged = deep_merge(merged, data)\n'
-            'merged = {k: v for k, v in merged.items() if not str(k).startswith("_")}\n'
-            'with open(out_path, "w") as f:\n'
-            '    json.dump(merged, f)\n'
-            'if _dropped_project_layer:\n'
-            '    sys.exit(3)\n'
-            'PYMERGE\n'
-            '    if [ "$_py_merge_rc" != "0" ] && [ "$_py_merge_rc" != "3" ]; then\n'
-            '        cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null\n'
-            '    fi\n'
-            '    if { [ -n "$_project_drop_marker" ] && [ -f "$_project_drop_marker" ]; } || [ "$_py_merge_rc" = "3" ]; then\n'
-            '        rm -f "$_project_drop_marker" 2>/dev/null\n'
-            '        if declare -F report_error >/dev/null 2>&1; then\n'
-            '            report_error "lib-memory-dir" "sanitizing the project config layer failed (unreadable project file or malformed JSON) -- that layer was dropped; bundled/user-global config still applies"\n'
-            '        else\n'
-            '            printf \'%s\\n\' "[lib-memory-dir] WARNING: sanitizing the project config layer failed (unreadable project file or malformed JSON) -- that layer was dropped; bundled/user-global config still applies" >&2\n'
-            '        fi\n'
-            '    fi\n'
-            '    [ -n "$_project_drop_marker" ] && rm -f "$_project_drop_marker" 2>/dev/null\n'
-            'else\n',
-            'merged = {}\n'
-            '_dropped_project_layer = False\n'
-            '_dropped_trusted_layer = False\n'
-            'for path in sys.argv[5:]:\n'
-            '    if untrusted_haiku_path and path == untrusted_haiku_path:\n'
-            '        try:\n'
-            '            docs = load_documents(path)\n'
-            '        except (OSError, ValueError):\n'
-            '            _dropped_project_layer = True\n'
-            '            if drop_marker_path:\n'
-            '                try:\n'
-            '                    with open(drop_marker_path, "w") as _marker:\n'
-            '                        _marker.write("1")\n'
-            '                except OSError:\n'
-            '                    pass\n'
-            '            continue\n'
-            '        for data in docs:\n'
-            '            if isinstance(data, dict):\n'
-            '                drop = {"haiku"}\n'
-            '                if strip_model_reject:\n'
-            '                    drop |= {"model", "reject_pattern"}\n'
-            '                data = {k: v for k, v in data.items() if k not in drop}\n'
-            '            merged = deep_merge(merged, data)\n'
-            '        continue\n'
-            '    try:\n'
-            '        with open(path) as f:\n'
-            '            data = json.load(f)\n'
-            '    except (OSError, ValueError):\n'
-            '        _dropped_trusted_layer = True\n'
-            '        continue\n'
-            '    merged = deep_merge(merged, data)\n'
-            'merged = {k: v for k, v in merged.items() if not str(k).startswith("_")}\n'
-            'with open(out_path, "w") as f:\n'
-            '    json.dump(merged, f)\n'
-            'if _dropped_project_layer and _dropped_trusted_layer:\n'
-            '    sys.exit(5)\n'
-            'elif _dropped_project_layer:\n'
-            '    sys.exit(3)\n'
-            'elif _dropped_trusted_layer:\n'
-            '    sys.exit(4)\n'
-            'PYMERGE\n'
-            '    if [ "$_py_merge_rc" != "0" ] && [ "$_py_merge_rc" != "3" ] && [ "$_py_merge_rc" != "4" ] && [ "$_py_merge_rc" != "5" ]; then\n'
-            '        cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null\n'
-            '    fi\n'
-            '    if { [ -n "$_project_drop_marker" ] && [ -f "$_project_drop_marker" ]; } || [ "$_py_merge_rc" = "3" ] || [ "$_py_merge_rc" = "5" ]; then\n'
-            '        rm -f "$_project_drop_marker" 2>/dev/null\n'
-            '        if declare -F report_error >/dev/null 2>&1; then\n'
-            '            report_error "lib-memory-dir" "sanitizing the project config layer failed (unreadable project file or malformed JSON) -- that layer was dropped; bundled/user-global config still applies"\n'
-            '        else\n'
-            '            printf \'%s\\n\' "[lib-memory-dir] WARNING: sanitizing the project config layer failed (unreadable project file or malformed JSON) -- that layer was dropped; bundled/user-global config still applies" >&2\n'
-            '        fi\n'
-            '    fi\n'
-            '    if [ "$_py_merge_rc" = "4" ] || [ "$_py_merge_rc" = "5" ]; then\n'
-            '        if declare -F report_error >/dev/null 2>&1; then\n'
-            '            report_error "lib-memory-dir" "sanitizing a trusted config layer failed (unreadable file or malformed JSON) -- bundled config, user-global config, and project config (when it is not the untrusted-haiku source) are all reached here, and one of them was dropped; the remaining layers still applied"\n'
-            '        else\n'
-            '            printf \'%s\\n\' "[lib-memory-dir] WARNING: sanitizing a trusted config layer failed (unreadable file or malformed JSON) -- bundled config, user-global config, and project config (when it is not the untrusted-haiku source) are all reached here, and one of them was dropped; the remaining layers still applied" >&2\n'
-            '        fi\n'
-            '    fi\n'
-            '    [ -n "$_project_drop_marker" ] && rm -f "$_project_drop_marker" 2>/dev/null\n'
-            'else\n',
+            "({}; . * $x)",
+            "({}; getpath([]) * $x)",
         ),
     ],
 }
+
+# #898 round 19: every `case` statement in shipped shell became an if/elif
+# ladder of `[ ]` tests (the directory's scanner mis-parses `case`). A second
+# stage, applied AFTER _apply_sanctioned_divergence by the byte-pin compare
+# only: several of these hunks rewrite text an allowance above already
+# produces (the `_lmd_run_python` dispatch, the dedented high-byte branch), so
+# folding them into _SANCTIONED_DIVERGENCE would break the independent-pair
+# premise test_sanctioned_divergence_state_440 pins. Derived mechanically from
+# the round-18 code: one pair per changed hunk with one line of context. The
+# old/new equivalence of each shape is pinned in
+# tests/test_case_rewrite_equivalence_898.py.
+_ROUND_19_DIVERGENCE = {
+    "scripts/lib-slug.sh": [
+        (
+            '_remember_slug_run_python() {\n'
+            '    case "${PYTHON:-python3}" in\n'
+            '        python3) python3 "$@" ;;\n'
+            '        python) python "$@" ;;\n'
+            '        py\\ -3) py -3 "$@" ;;\n'
+            '        py) py "$@" ;;\n'
+            '        *) return 127 ;;\n'
+            '    esac\n'
+            '}\n',
+            '_remember_slug_run_python() {\n'
+            '    if [ "${PYTHON:-python3}" = python3 ]; then\n'
+            '        python3 "$@"\n'
+            '    elif [ "${PYTHON:-python3}" = python ]; then\n'
+            '        python "$@"\n'
+            '    elif [ "${PYTHON:-python3}" = "py -3" ]; then\n'
+            '        py -3 "$@"\n'
+            '    elif [ "${PYTHON:-python3}" = py ]; then\n'
+            '        py "$@"\n'
+            '    else\n'
+            '        return 127\n'
+            '    fi\n'
+            '}\n',
+        ),
+        (
+            '    else\n'
+            '        case "$_root" in\n'
+            '            /*) _root="" ;;\n'
+            '            *) ;;\n'
+            '        esac\n'
+            '    fi\n',
+            '    else\n'
+            '        if [ "${_root#/}" != "$_root" ]; then\n'
+            '            _root=""\n'
+            '        fi\n'
+            '    fi\n',
+        ),
+        (
+            '    [ "${REMEMBER_UTF8_STRICT:-0}" = "1" ] && return 0\n'
+            '    case "${OSTYPE:-}" in\n'
+            '        linux*) return 0 ;;\n'
+            '    esac\n'
+            '    return 1\n',
+            # #898 r41: one expression ending the function, whose status is
+            # the answer (test_case_rewrite_equivalence_898, "a prefix glob").
+            '    local _os="${OSTYPE:-}"\n'
+            '    [ "${REMEMBER_UTF8_STRICT:-0}" = "1" ] || [ "${_os#linux}" != "$_os" ]\n',
+        ),
+        (
+            '    fi\n'
+            '    case "$path" in\n'
+            '        ?:*)\n'
+            '            _drive_at="${_REMEMBER_DRIVE_UPPER%%"${path:0:1}"*}"\n'
+            '            if [ "$_drive_at" != "$_REMEMBER_DRIVE_UPPER" ]; then\n'
+            '                path="${_REMEMBER_DRIVE_LOWER:${#_drive_at}:1}${path:1}"\n'
+            '            fi\n'
+            '            ;;\n'
+            '    esac\n'
+            '    local _orig="$path"\n',
+            '    fi\n'
+            '    if [ "${path#?:}" != "$path" ]; then\n'
+            '        _drive_at="${_REMEMBER_DRIVE_UPPER%%"${path:0:1}"*}"\n'
+            '        if [ "$_drive_at" != "$_REMEMBER_DRIVE_UPPER" ]; then\n'
+            '            path="${_REMEMBER_DRIVE_LOWER:${#_drive_at}:1}${path:1}"\n'
+            '        fi\n'
+            '    fi\n'
+            '    local _orig="$path"\n',
+        ),
+        (
+            '    LC_ALL=C\n'
+            '    case "$path" in\n'
+            "        *[!$'\\001'-$'\\177']*) _high_byte=1 ;;\n"
+            '    esac\n'
+            '    if [ -n "$_lc_was_set" ]; then LC_ALL="$_lc_prev"; else unset LC_ALL; fi\n',
+            '    LC_ALL=C\n'
+            '    local _hb_glob="[!"$\'\\001\'"-"$\'\\177\'"]"\n'
+            '    if [[ "$path" == *$_hb_glob* ]]; then\n'
+            '        _high_byte=1\n'
+            '    fi\n'
+            '    if [ -n "$_lc_was_set" ]; then LC_ALL="$_lc_prev"; else unset LC_ALL; fi\n',
+        ),
+        (
+            '\n'
+            '    case "$_high_byte" in\n'
+            '        1)\n'
+            '            if command -v iconv >/dev/null 2>&1 \\\n'
+            '                && ! printf \'%s\' "$path" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1; then\n'
+            '                local _py_slug="${PIPELINE_DIR:-}/pipeline/slug.py"\n'
+            '                if [ -f "$_py_slug" ]; then\n'
+            '                    local _decoded\n'
+            '                    declare -f _remember_python >/dev/null 2>&1 && _remember_python\n'
+            '                    _decoded=$(_remember_slug_run_python "$_py_slug" "$path" 2>/dev/null) \\\n'
+            '                        && [ -n "$_decoded" ] && { printf \'%s\\n\' "$_decoded"; return 0; }\n'
+            '                fi\n'
+            '            fi\n',
+            '\n'
+            '    if [ "$_high_byte" = 1 ]; then\n'
+            '        if command -v iconv >/dev/null 2>&1 \\\n'
+            '            && ! printf \'%s\' "$path" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1; then\n'
+            '            local _py_slug="${PIPELINE_DIR:-}/pipeline/slug.py"\n'
+            '            if [ -f "$_py_slug" ]; then\n'
+            '                local _decoded\n'
+            '                declare -f _remember_python >/dev/null 2>&1 && _remember_python\n'
+            '                _decoded=$(_remember_slug_run_python "$_py_slug" "$path" 2>/dev/null) \\\n'
+            '                    && [ -n "$_decoded" ] && { printf \'%s\\n\' "$_decoded"; return 0; }\n'
+            '            fi\n',
+        ),
+        (
+            '            fi\n'
+            '            ;;\n'
+            '    esac\n'
+            '    fi\n',
+            '            fi\n'
+            '        fi\n'
+            '    fi\n'
+            '    fi\n',
+        ),
+        (
+            '\n'
+            '    case "$_hash" in\n'
+            '        *[!0-9a-z]*) _hash="" ;;\n'
+            '    esac\n'
+            '\n',
+            '\n'
+            '    if [[ "$_hash" == *[!0-9a-z]* ]]; then\n'
+            '        _hash=""\n'
+            '    fi\n'
+            '\n',
+        ),
+    ],
+    "scripts/lib-memory-dir.sh": [
+        (
+            '\n'
+            '    case "$data_dir" in\n'
+            '        /*|~*|[A-Za-z]:[/\\\\]*)\n'
+            '            local slug\n'
+            '            slug=$(session_dir_slug "$proj")\n'
+            '            local expanded="${data_dir/#\\~/$HOME}"\n'
+            '            echo "${expanded//\\{slug\\}/$slug}"\n'
+            '            ;;\n'
+            '        *)\n'
+            '            echo "${proj}/${data_dir}"\n'
+            '            ;;\n'
+            '    esac\n'
+            '}\n',
+            '\n'
+            '    if [ "${data_dir#/}" != "$data_dir" ] || [ "${data_dir#[~]}" != "$data_dir" ] \\\n'
+            '        || [ "${data_dir#[A-Za-z]:[/\\\\]}" != "$data_dir" ]; then\n'
+            '        local slug\n'
+            '        slug=$(session_dir_slug "$proj")\n'
+            '        local expanded="${data_dir/#\\~/$HOME}"\n'
+            '        echo "${expanded//\\{slug\\}/$slug}"\n'
+            '    else\n'
+            '        echo "${proj}/${data_dir}"\n'
+            '    fi\n'
+            '}\n',
+        ),
+        (
+            '\n'
+            '    case "$data_dir" in\n'
+            '        /*|~*|[A-Za-z]:[/\\\\]*) ;;\n'
+            '        *) return 0 ;;\n'
+            '    esac\n'
+            '    [ "${data_dir#*\\{slug\\}}" != "$data_dir" ] || return 0\n',
+            '\n'
+            '    if [ "${data_dir#/}" = "$data_dir" ] && [ "${data_dir#[~]}" = "$data_dir" ] \\\n'
+            '        && [ "${data_dir#[A-Za-z]:[/\\\\]}" = "$data_dir" ]; then\n'
+            '        return 0\n'
+            '    fi\n'
+            '    [ "${data_dir#*\\{slug\\}}" != "$data_dir" ] || return 0\n',
+        ),
+        (
+            '\n'
+            '    case "$prefix" in\n'
+            "        ''|/|[A-Za-z]:|[A-Za-z]:[/\\\\]) return 0 ;;\n"
+            '    esac\n'
+            '\n',
+            '\n'
+            '    if [ -z "$prefix" ] || [ "$prefix" = / ] || [ -z "${prefix#[A-Za-z]:}" ] \\\n'
+            '        || [ -z "${prefix#[A-Za-z]:[/\\\\]}" ]; then\n'
+            '        return 0\n'
+            '    fi\n'
+            '\n',
+        ),
+        (
+            '    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)\n'
+            '    case "$_data_dir_raw" in\n'
+            '        /*|~*|[A-Za-z]:[/\\\\]*) _project_cfg_haiku_untrusted=0 ;;\n'
+            '        *) _project_cfg_haiku_untrusted=1 ;;\n'
+            '    esac\n'
+            '}\n',
+            '    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)\n'
+            '    if [ "${_data_dir_raw#/}" != "$_data_dir_raw" ] || [ "${_data_dir_raw#[~]}" != "$_data_dir_raw" ] \\\n'
+            '        || [ "${_data_dir_raw#[A-Za-z]:[/\\\\]}" != "$_data_dir_raw" ]; then\n'
+            '        _project_cfg_haiku_untrusted=0\n'
+            '    else\n'
+            '        _project_cfg_haiku_untrusted=1\n'
+            '    fi\n'
+            '}\n',
+        ),
+        (
+            'if [ "$_project_cfg_haiku_untrusted" = "1" ] && [ -f "$_project_cfg" ]; then\n'
+            '    case "$(_remember_config_tracked_status "${_project_cfg%/*}" "${_project_cfg##*/}")" in\n'
+            '        untracked) _project_cfg_model_reject_untrusted=0 ;;\n'
+            '        *) _project_cfg_model_reject_untrusted=1 ;;  # tracked or could-not-tell -> fail CLOSED\n'
+            '    esac\n'
+            'fi\n',
+            'if [ "$_project_cfg_haiku_untrusted" = "1" ] && [ -f "$_project_cfg" ]; then\n'
+            '    _project_cfg_tracked_answer=$(_remember_config_tracked_status "${_project_cfg%/*}" "${_project_cfg##*/}") || true\n'
+            '    if [ "$_project_cfg_tracked_answer" = untracked ]; then\n'
+            '        _project_cfg_model_reject_untrusted=0\n'
+            '    else\n'
+            '        _project_cfg_model_reject_untrusted=1  # tracked or could-not-tell -> fail CLOSED\n'
+            '    fi\n'
+            '    unset _project_cfg_tracked_answer\n'
+            'fi\n',
+        ),
+        (
+            '    _lmd_run_python() {\n'
+            '        case "${PYTHON:-python3}" in\n'
+            '            python3) python3 "$@" ;;\n'
+            '            python) python "$@" ;;\n'
+            '            py\\ -3) py -3 "$@" ;;\n'
+            '            py) py "$@" ;;\n'
+            '            *) return 127 ;;\n'
+            '        esac\n'
+            '    }\n',
+            '    _lmd_run_python() {\n'
+            '        if [ "${PYTHON:-python3}" = python3 ]; then\n'
+            '            python3 "$@"\n'
+            '        elif [ "${PYTHON:-python3}" = python ]; then\n'
+            '            python "$@"\n'
+            '        elif [ "${PYTHON:-python3}" = "py -3" ]; then\n'
+            '            py -3 "$@"\n'
+            '        elif [ "${PYTHON:-python3}" = py ]; then\n'
+            '            py "$@"\n'
+            '        else\n'
+            '            return 127\n'
+            '        fi\n'
+            '    }\n',
+        ),
+    ],
+}
+
+
+def _apply_round_19(ref_code: str, rel: str) -> str:
+    """The same three states as _apply_sanctioned_divergence, for the round-19
+    pairs: old_code present is substituted, new_code present is the landed
+    state, neither is stale."""
+    for old_code, new_code in _ROUND_19_DIVERGENCE.get(rel, ()):
+        if old_code in ref_code:
+            ref_code = ref_code.replace(old_code, new_code)
+            continue
+        assert new_code in ref_code, (
+            f"{rel}: neither the old nor the new code of a round-19 substitution "
+            "is on origin/main -- re-derive the allowance"
+        )
+    return ref_code
+
+
+# #898 hook-size lane: genuine simplifications to the two pinned libraries,
+# a third stage applied AFTER _apply_round_19 (its pairs rewrite text round
+# 19 produces). Same three states, same derivation: one pair per changed
+# hunk, code lines only.
+_SHRINK_898_DIVERGENCE = {
+    "scripts/lib-memory-dir.sh": [
+        # H: lib-memory-dir.sh calls lib-slug.sh's runner (sourced at the
+        # top of the file) instead of carrying an identical private copy.
+        (
+            '    _lmd_run_python() {\n'
+            '        if [ "${PYTHON:-python3}" = python3 ]; then\n'
+            '            python3 "$@"\n'
+            '        elif [ "${PYTHON:-python3}" = python ]; then\n'
+            '            python "$@"\n'
+            '        elif [ "${PYTHON:-python3}" = "py -3" ]; then\n'
+            '            py -3 "$@"\n'
+            '        elif [ "${PYTHON:-python3}" = py ]; then\n'
+            '            py "$@"\n'
+            '        else\n'
+            '            return 127\n'
+            '        fi\n'
+            '    }\n',
+            '',
+        ),
+        (
+            '    _lmd_run_python "$_lmd_py_dir/cfg_merge.py"',
+            '    _remember_slug_run_python "$_lmd_py_dir/cfg_merge.py"',
+        ),
+        # I: the three report_error-or-printf drop warnings become one
+        # helper, _lmd_warn, defined with the other helpers; same text, same
+        # two destinations.
+        (
+            '\n_read_data_dir() {\n',
+            '\n_lmd_warn() {\n'
+            '    if declare -F report_error >/dev/null 2>&1; then\n'
+            '        report_error "lib-memory-dir" "$1"\n'
+            '    else\n'
+            '        printf \'%s\\n\' "[lib-memory-dir] WARNING: $1" >&2\n'
+            '    fi\n'
+            '}\n'
+            '\n'
+            '_read_data_dir() {\n',
+        ),
+    ] + [
+        (
+            f'{ind}if declare -F report_error >/dev/null 2>&1; then\n'
+            f'{ind}    report_error "lib-memory-dir" "{msg}"\n'
+            f'{ind}else\n'
+            f'{ind}    printf \'%s\\n\' "[lib-memory-dir] WARNING: {msg}" >&2\n'
+            f'{ind}fi\n',
+            f'{ind}_lmd_warn "{msg}"\n',
+        )
+        for ind, msg in (
+            (" " * 16, "sanitizing the project config layer failed (mktemp, an "
+                       "unreadable project file, or jq itself) -- that layer was "
+                       "dropped; bundled/user-global config still applies"),
+            (" " * 8, "sanitizing the project config layer failed (unreadable "
+                      "project file or malformed JSON) -- that layer was dropped; "
+                      "bundled/user-global config still applies"),
+            (" " * 8, "sanitizing a trusted config layer failed (unreadable file "
+                      "or malformed JSON) -- bundled config, user-global config, "
+                      "and project config (when it is not the untrusted-haiku "
+                      "source) are all reached here, and one of them was dropped; "
+                      "the remaining layers still applied"),
+        )
+    ] + [
+        # J: inline trailing comments moved onto their own line above, so
+        # the release build's whole-line strip removes them; the code part
+        # of each line is unchanged.
+        (
+            '    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)\n',
+            '    local LC_ALL=C\n',
+        ),
+        (
+            '        _project_cfg_model_reject_untrusted=1  # tracked or could-not-tell -> fail CLOSED\n',
+            '        _project_cfg_model_reject_untrusted=1\n',
+        ),
+    ],
+}
+
+
+def _apply_shrink_898(ref_code: str, rel: str) -> str:
+    """Third stage, same three states as _apply_round_19."""
+    for old_code, new_code in _SHRINK_898_DIVERGENCE.get(rel, ()):
+        if old_code in ref_code:
+            ref_code = ref_code.replace(old_code, new_code)
+            continue
+        assert new_code in ref_code and (new_code or old_code not in ref_code), (
+            f"{rel}: neither the old nor the new code of a #898 shrink "
+            "substitution is on origin/main -- re-derive the allowance"
+        )
+    return ref_code
+
 
 RECORD_NAME = "case-divergence"
 NOTICE_NAME = "case-divergence-notice"
@@ -1304,7 +1427,8 @@ def test_the_per_tool_call_path_is_not_touched(tmp_path):
             f"{rel} on origin/main has no non-comment lines — this compare "
             "would pass against any file at all"
         )
-        ref_code = _apply_sanctioned_divergence(_code(ref.stdout), rel)
+        ref_code = _apply_shrink_898(
+            _apply_round_19(_apply_sanctioned_divergence(_code(ref.stdout), rel), rel), rel)
         assert ref_code == _code(path.read_text(encoding="utf-8")), rel
 
 

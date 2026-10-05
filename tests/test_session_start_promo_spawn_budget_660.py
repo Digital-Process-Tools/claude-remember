@@ -13,7 +13,7 @@ lever, per the brief): `config()` was already collapsed to one `jq` process
 per session by #232, and the recovery/consolidation forks below are already
 backgrounded by #646 -- so they were not the lever either. What remained was
 `_remember_compute_promo()`: one `jq -r '.promos | length'`, then FOUR more
-`jq` calls per candidate entry (id/text/url/installed_key), and then, for
+`jq` calls per candidate entry (id/text/url/installed_id), and then, for
 every candidate that survived those, the exact same `.plugins[$k]` query run
 TWICE -- once to capture its value, once again just to inspect its exit
 status. Measured on this file before #660 (`spawn_counting`'s PATH shim, one
@@ -388,17 +388,21 @@ def test_capture_seen_prune_is_gated_on_the_threshold(tmp_path):
 
 def test_capture_seen_prune_still_fires_over_the_threshold(tmp_path):
     """Positive control for the gate above: one entry over CAPTURE_SEEN_KEEP,
-    the prune must run -- `ls -t` observed on the spawn log -- and leave
-    exactly CAPTURE_SEEN_KEEP entries behind. A gate that skipped the
-    prune outright would pass the test above and fail here.
+    the prune must run and leave exactly CAPTURE_SEEN_KEEP entries behind.
+    A gate that skipped the prune outright would pass the test above and
+    fail here.
+
+    #898 round 20: the prune no longer forks `ls -t | tail` at all -- it
+    counts with a glob and picks the oldest with bash's own `-nt` -- so the
+    run is observed by its effect, and the spawn log must stay free of
+    `ls` here too.
     """
     lines, result = _run_with_shim(
         tmp_path, extra_setup=lambda remember: _seed_capture_seen(remember, CAPTURE_SEEN_KEEP + 1)
     )
     assert result.returncode == 0, result.stderr
-    assert _prune_spawns(lines), (
-        f"{CAPTURE_SEEN_KEEP + 1} entries is over the threshold, so the prune must "
-        "actually run -- no `ls` against capture-alive.d was observed"
+    assert _prune_spawns(lines) == [], (
+        f"the prune must not fork `ls` against capture-alive.d: {_prune_spawns(lines)}"
     )
     seen_dir = tmp_path / "project" / ".remember" / "tmp" / "capture-alive.d"
     remaining = len(list(seen_dir.iterdir()))

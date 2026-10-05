@@ -188,10 +188,58 @@ class TestEveryBytesSlotSaysWhenItDoesNotKnow:
     def test_the_shape_check_can_fail(self):
         """MUST-FIRE control: the assertion above passes trivially if the
         format string is ever spelled differently, so pin that the detector
-        sees the shape it is looking for at all."""
+        sees the shape it is looking for at all. One site since #898: the
+        deferred and rotated-slice listings share `_remember_print_sized`."""
         text = (REPO_ROOT / "scripts" / "lib-memory-context.sh").read_text(encoding="utf-8")
-        assert text.count("(%s bytes)") >= 2, (
+        assert text.count("(%s bytes)") >= 1, (
             "no byte-count format strings found in lib-memory-context.sh -- "
             "the check above is scanning for a shape that no longer exists "
             "and would pass over anything"
         )
+
+
+class TestEveryBatchedMeasurementLandsInTheRender:
+    """#898 (K): the three batched `wc -c` measurements in
+    _remember_render_memory_section (main files, compact-deferred files,
+    rotated slices) share one helper. Each one's number must still reach its
+    own listing, through a store path with a space in it (the `read bytes
+    path` split the batch relies on)."""
+
+    def _run(self, tmp_path, source):
+        import json
+        sys.path.insert(0, str(REPO_ROOT))
+        from pipeline.slug import session_dir_slug as _slug
+        home = tmp_path / "home"
+        project = tmp_path / "my project"
+        remember = project / ".remember"
+        (remember / "tmp").mkdir(parents=True)
+        (home / ".claude" / "projects" / _slug(str(project))).mkdir(parents=True)
+        (remember / "identity.md").write_text("ID\n", encoding="utf-8")
+        (remember / "archive.md").write_text("A" * 1500, encoding="utf-8")
+        (remember / "recent.md").write_text("R" * 77, encoding="utf-8")
+        (remember / "archive-2026-01-01.md").write_text("S" * 123, encoding="utf-8")
+        (remember / "config.json").write_text(json.dumps({
+            "features": {"recovery": False},
+            "thresholds": {"memory_inject_max_bytes": 1000,
+                           "session_start_max_bytes": 0},
+        }), encoding="utf-8")
+        env = {**os.environ, "HOME": str(home), "CLAUDE_PROJECT_DIR": str(project),
+               "CLAUDE_PLUGIN_ROOT": str(REPO_ROOT), "REMEMBER_CONFIG_CACHE": "0"}
+        payload = json.dumps({"session_id": "cccccccc-0000-4000-8000-000000000898",
+                              "hook_event_name": "SessionStart", "source": source})
+        r = subprocess.run(["bash", str(REPO_ROOT / "scripts" / "session-start-hook.sh")],
+                           env=env, input=payload, capture_output=True, text=True,
+                           timeout=60, check=False)
+        assert r.returncode == 0, r.stderr
+        return r.stdout, remember
+
+    def test_startup_measures_main_files_and_rotated_slices(self, tmp_path):
+        out, remember = self._run(tmp_path, "startup")
+        assert f"{remember / 'archive.md'} (1500 bytes)" in out, out[-1500:]
+        assert f"{remember / 'archive-2026-01-01.md'} (123 bytes)" in out, out[-1500:]
+        assert "R" * 77 in out, "recent.md (under the cap) should be injected"
+
+    def test_compact_measures_the_deferred_files(self, tmp_path):
+        out, remember = self._run(tmp_path, "compact")
+        assert f"{remember / 'recent.md'} (77 bytes)" in out, out[-1500:]
+        assert "R" * 77 not in out, "compact must not re-inject recent.md"

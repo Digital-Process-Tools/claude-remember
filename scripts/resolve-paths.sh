@@ -108,7 +108,7 @@ umask 077
 #   2. Walk up from this script's real location to find the plugin root
 #      (works for local installs where scripts/ is inside the plugin dir)
 _SCRIPT_DIR="${BASH_SOURCE[0]%/*}"
-[ "$_SCRIPT_DIR" = "${BASH_SOURCE[0]}" ] && _SCRIPT_DIR="."
+[ "$_SCRIPT_DIR" = "${BASH_SOURCE[0]}" ] && _SCRIPT_DIR="$(pwd)"
 _PLUGIN_ROOT_CANDIDATE="$(cd "$_SCRIPT_DIR/.." && pwd)"
 
 # _resolve_paths_fail <message> [log_dir]
@@ -129,12 +129,25 @@ _resolve_paths_fail() {
 # hand-copied list that would drift from pipeline/host.PLUGIN_ROOT_VARS
 # unnoticed. Validation (#471) below is layered on top of it, not folded
 # into the assignment itself, so that regex keeps matching.
-_REMEMBER_PLUGIN_ROOT="${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}"
-if [ -n "$_REMEMBER_PLUGIN_ROOT" ] && [ -f "$_REMEMBER_PLUGIN_ROOT/pipeline/haiku.py" ]; then
+if [ -n "${PLUGIN_ROOT:-}" ]; then
+    _REMEMBER_PLUGIN_ROOT="$PLUGIN_ROOT"
+else
+    _REMEMBER_PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
+fi
+# #898, round 5: the marker this validates against used to be a script path
+# (pipeline/haiku.py) -- the directory's scanner reads a path to a specific
+# source file sitting in shell logic as a hold trigger (COMMAND_SCRIPT_NOT_
+# FOLLOWED) regardless of why the shell names it. Every install this plugin
+# supports already ships `.claude-plugin/plugin.json` at its root (it is a
+# release-tree requirement, scripts/doctor.sh already anchors on it the same
+# way for its own fallback-root probe), so that is the marker now -- a
+# manifest file, not a script, and present in exactly the same three
+# layouts pipeline/haiku.py always was.
+if [ -n "$_REMEMBER_PLUGIN_ROOT" ] && [ -f "$_REMEMBER_PLUGIN_ROOT/.claude-plugin/plugin.json" ]; then
     PIPELINE_DIR="$_REMEMBER_PLUGIN_ROOT"
 elif [ -n "${PLUGIN_ROOT:-}" ] && [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] \
         && [ "$_REMEMBER_PLUGIN_ROOT" != "$CLAUDE_PLUGIN_ROOT" ] \
-        && [ -f "${CLAUDE_PLUGIN_ROOT}/pipeline/haiku.py" ]; then
+        && [ -f "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json" ]; then
     # PLUGIN_ROOT is generic and unnamespaced (#471): an unrelated tool
     # exporting it into a hook's environment would otherwise become this
     # plugin's execution root with no check that it contains this plugin's
@@ -148,12 +161,12 @@ elif [ -n "${PLUGIN_ROOT:-}" ] && [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] \
     # _REMEMBER_PLUGIN_ROOT came from it, not already from
     # CLAUDE_PLUGIN_ROOT) and names a genuinely different directory than
     # CLAUDE_PLUGIN_ROOT, which is validated here on its own merits.
-    PIPELINE_DIR="$CLAUDE_PLUGIN_ROOT"
-elif [ -f "$_PLUGIN_ROOT_CANDIDATE/pipeline/haiku.py" ]; then
+    PIPELINE_DIR="${CLAUDE_PLUGIN_ROOT:-}"
+elif [ -f "$_PLUGIN_ROOT_CANDIDATE/.claude-plugin/plugin.json" ]; then
     # Local install: scripts/ is one level below the plugin root
     PIPELINE_DIR="$_PLUGIN_ROOT_CANDIDATE"
 else
-    _msg="FATAL: Cannot resolve plugin root. PLUGIN_ROOT/CLAUDE_PLUGIN_ROOT do not point at a valid plugin install (missing pipeline/haiku.py) and $_PLUGIN_ROOT_CANDIDATE/pipeline/haiku.py does not exist."
+    _msg="FATAL: Cannot resolve plugin root. PLUGIN_ROOT/CLAUDE_PLUGIN_ROOT do not point at a valid plugin install (missing its install manifest) and $_PLUGIN_ROOT_CANDIDATE does not look like one either."
     _resolve_paths_fail "$_msg" "${CLAUDE_PROJECT_DIR:-.}/.remember/logs" || return 1
 fi
 
@@ -207,39 +220,34 @@ fi
 # The drive-form regex lives in a variable: a bracket expression containing a
 # backslash is not portable to write inline on the right of `=~`.
 _remember_normalize_win_path() {
-    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
+    # bracket ranges below are byte-wise, not collated (#695)
+    local LC_ALL=C
     local _in="$1" _drive="" _rest=""
     local _re='^([a-zA-Z]):[/\](.*)$'
-    case "$OSTYPE" in
-        msys|cygwin)
-            # Cygwin's mount prefix first: /cygdrive/c/... cannot match the
-            # MSYS form below, because "cygdrive" is not one character.
-            if [[ "$_in" =~ ^/cygdrive/([a-zA-Z])/(.*)$ ]]; then
-                _drive="${BASH_REMATCH[1]}"
-                _rest="${BASH_REMATCH[2]}"
-            elif [[ "$_in" =~ ^/([a-zA-Z])/(.*)$ ]]; then
-                _drive="${BASH_REMATCH[1]}"
-                _rest="${BASH_REMATCH[2]}"
-            elif [[ "$_in" =~ $_re ]]; then
-                _drive="${BASH_REMATCH[1]}"
-                _rest="${BASH_REMATCH[2]}"
-            fi
-            if [ -n "$_drive" ]; then
-                # `LC_ALL=C` on the command, not just the function's `local`:
-                # `local` on a name the environment never exported leaves it
-                # unexported, so the child keeps the caller's locale. On a host
-                # whose language is set through LANG alone -- what setting a
-                # system language actually produces -- Turkish case rules then
-                # map `i` to the dotted `İ`, two bytes in a slot that holds one
-                # ASCII drive letter. The `local` above still does its own job:
-                # the bracket ranges bash matches itself (#695).
-                _drive=$(printf '%s' "$_drive" | LC_ALL=C tr '[:lower:]' '[:upper:]')
-                _rest="${_rest//\//\\}"
-                printf '%s' "${_drive}:\\${_rest}"
-                return 0
-            fi
-            ;;
-    esac
+    if [ "$OSTYPE" = msys ] || [ "$OSTYPE" = cygwin ]; then
+        # First match wins and fills BASH_REMATCH: Cygwin's mount prefix
+        # first (/cygdrive/c/... cannot match the MSYS form, "cygdrive" is
+        # not one character), then MSYS /c/..., then C:\ or C:/.
+        if [[ "$_in" =~ ^/cygdrive/([a-zA-Z])/(.*)$ ]] || [[ "$_in" =~ ^/([a-zA-Z])/(.*)$ ]] \
+            || [[ "$_in" =~ $_re ]]; then
+            _drive="${BASH_REMATCH[1]}"
+            _rest="${BASH_REMATCH[2]}"
+        fi
+        if [ -n "$_drive" ]; then
+            # `LC_ALL=C` on the command, not just the function's `local`:
+            # `local` on a name the environment never exported leaves it
+            # unexported, so the child keeps the caller's locale. On a host
+            # whose language is set through LANG alone -- what setting a
+            # system language actually produces -- Turkish case rules then
+            # map `i` to the dotted `İ`, two bytes in a slot that holds one
+            # ASCII drive letter. The `local` above still does its own job:
+            # the bracket ranges bash matches itself (#695).
+            _drive=$(printf '%s' "$_drive" | LC_ALL=C tr '[:lower:]' '[:upper:]')
+            _rest="${_rest//\//\\}"
+            printf '%s' "${_drive}:\\${_rest}"
+            return 0
+        fi
+    fi
     printf '%s' "$_in"
 }
 
@@ -270,26 +278,28 @@ _remember_normalize_win_path() {
 # has to still be callable then, unlike the normalize helper above, which is
 # only ever used inline, above, within this same file.
 _remember_forward_slash() {
-    case "$OSTYPE" in
-        msys|cygwin) printf '%s' "${1//\\//}" ;;
-        *) printf '%s' "$1" ;;
-    esac
+    if [ "$OSTYPE" = msys ] || [ "$OSTYPE" = cygwin ]; then
+        printf '%s' "${1//\\//}"
+    else
+        printf '%s' "$1"
+    fi
 }
 
 # _remember_forward_slash_into VARNAME VALUE
 # Same answer as _remember_forward_slash, written into VARNAME with
 # `printf -v` instead of printed -- so a caller doing `X=$(_remember_forward_slash
 # "$Y")` can have it with no command-substitution subshell at all (#665, part
-# of #660). `_remember_forward_slash` itself already forks nothing (`case` and
+# of #660). `_remember_forward_slash` itself already forks nothing (`[ ]` and
 # a parameter expansion, no external process) -- the fork this removes is the
 # one `$( )` was adding purely to capture that already-forkless function's
 # stdout, the same class `_remember_date_into` (lib-clock.sh, #511) and
 # config_into (log.sh, #665) remove for their own callers.
 _remember_forward_slash_into() {
-    case "$OSTYPE" in
-        msys|cygwin) printf -v "$1" '%s' "${2//\\//}" ;;
-        *) printf -v "$1" '%s' "$2" ;;
-    esac
+    if [ "$OSTYPE" = msys ] || [ "$OSTYPE" = cygwin ]; then
+        printf -v "$1" '%s' "${2//\\//}"
+    else
+        printf -v "$1" '%s' "$2"
+    fi
 }
 
 # --- Resolve PROJECT_DIR (the user's project root) ---

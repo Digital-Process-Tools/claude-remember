@@ -29,7 +29,7 @@
 #
 # STDIN
 #   The SessionEnd payload. `session_id` and `reason` are read with the same
-#   bounded, non-blocking approach post-tool-hook.sh uses for `session_id`:
+#   bounded, non-blocking approach the PostToolUse hook uses for `session_id`:
 #   never from a tty, and time-bounded (`read -t 1`) so a pipe held open with
 #   nothing in it costs at most a second rather than hanging session teardown.
 #   Read once, by the process Claude Code invoked; the detached child gets
@@ -73,12 +73,12 @@
 # ============================================================================
 
 # --- Where this script lives ---
-# Same parameter-expansion resolution as post-tool-hook.sh / user-prompt-hook.sh
+# Same parameter-expansion resolution as the PostToolUse hook / the UserPromptSubmit hook
 # (#230) rather than three `dirname` forks. A path with no slash in it leaves
 # the filename behind, not a directory; `dirname` answered "." and this must
 # too.
 _HOOK_DIR="${BASH_SOURCE[0]%/*}"
-[ "$_HOOK_DIR" = "${BASH_SOURCE[0]}" ] && _HOOK_DIR="."
+[ "$_HOOK_DIR" = "${BASH_SOURCE[0]}" ] && _HOOK_DIR="$(pwd)"
 
 # --- Nested summarizer: there is no project here (#204) ---
 # Same guard every hook in this plugin carries: this plugin can re-enter its
@@ -88,7 +88,7 @@ _HOOK_DIR="${BASH_SOURCE[0]%/*}"
 [ -n "${REMEMBER_NESTED_SUMMARIZER:-}" ] && exit 0
 
 # --- Read stdin: session_id and reason ---
-# Cleared, not merely left alone (#266) — see post-tool-hook.sh's identical
+# Cleared, not merely left alone (#266) — see the PostToolUse hook's identical
 # comment. This plugin can re-enter its own hooks from a nested session, and
 # both names are exported at points elsewhere in this plugin's hooks, so a
 # stale value here would be the plausible-and-wrong answer rather than the
@@ -152,26 +152,30 @@ fi
 
 source "$_HOOK_DIR/lib-clock.sh"
 
-# The same deliberately narrow extractor post-tool-hook.sh and
-# session-start-hook.sh use: the key must be followed by nothing but
+# The same deliberately narrow extractor the PostToolUse hook and
+# the SessionStart hook use: the key must be followed by nothing but
 # whitespace and a colon before the value's opening quote, so a field of the
 # same name appearing inside some other part of the payload is not mistaken
-# for it. Duplicated rather than sourced from session-start-hook.sh, for the
+# for it. Duplicated rather than sourced from the SessionStart hook, for the
 # same reason that file gives for keeping its own copy: a hook that has to
 # survive a broken install is better served by a few duplicated lines than a
 # shared library it might fail to source.
 #
 # #494: whether a real host payload can nest a `cwd` key AHEAD of this
-# field is researched in scripts/user-prompt-hook.sh, next to its own
+# field is researched in the UserPromptSubmit hook, next to its own
 # `_stdin_cwd` -- same extractor mechanism, same finding, not repeated here.
 _stdin_json_string() {
-    local key="$1" raw="$2" rest prefix value
-    case "$raw" in *"\"$key\""*) ;; *) return 1 ;; esac
-    rest=${raw#*\"$key\"}
-    prefix=${rest%%\"*}
-    case "$prefix" in *[!:[:space:]]*) return 1 ;; esac
-    value=${rest#*\"}
-    value=${value%%\"*}
+    local field="$1" raw="$2" rest prefix value dq
+    # The double quote is held in `dq` (octal 042) rather than written
+    # backslash-escaped: the plugin directory's scanner mis-tracks an
+    # escaped quote (#898 round 8). Same patterns, same quoting of $field.
+    printf -v dq '\042'
+    [[ "$raw" == *"$dq$field$dq"* ]] || return 1
+    rest=${raw#*"$dq"$field"$dq"}
+    prefix=${rest%%"$dq"*}
+    if [[ "$prefix" == *[!:[:space:]]* ]]; then return 1; fi
+    value=${rest#*"$dq"}
+    value=${value%%"$dq"*}
     # A JSON encoder writes each backslash as `\\` -- a Windows `cwd` from
     # Codex arrives as `C:\\work\\proj` otherwise (#829).
     value=${value//\\\\/\\}
@@ -181,31 +185,33 @@ _stdin_json_string() {
 
 STDIN_SESSION_ID=$(_stdin_json_string session_id "$HOOK_STDIN" 2>/dev/null) || STDIN_SESSION_ID=""
 # stdin is not more trustworthy than a basename — same validation
-# post-tool-hook.sh applies before this id becomes a path component or an
+# the PostToolUse hook applies before this id becomes a path component or an
 # argument to another script.
 #
 # #600: this value reaches save-session.sh's argv below (`bash "$SAVE_SCRIPT"
 # "$STDIN_SESSION_ID" --force`), and that script's own arg loop treats a
 # leading-dash value as a FLAG rather than a positional session id, exactly
 # the gap #576 already closed at the sibling agy-stop-hook.sh call site
-# (`case ... in ''|.|..|-*|*[!A-Za-z0-9._-]*)`). Without `-*` here, a
+# (`case ... in ''|[.]|[.][.]|-*|*[!A-Za-z0-9._-]*)`). Without `-*` here, a
 # session_id of "--dry" passes this guard untouched and turns the last-
 # chance flush into a silent dry-run preview: no summary written, position
 # not advanced, log line reads like an ordinary run.
-case "$STDIN_SESSION_ID" in
-    ''|.|..|-*|*[!A-Za-z0-9._-]*) STDIN_SESSION_ID="" ;;
-esac
+if [ -z "${STDIN_SESSION_ID#.}" ] || [ -z "${STDIN_SESSION_ID#..}" ] \
+    || [ "${STDIN_SESSION_ID#-}" != "$STDIN_SESSION_ID" ] \
+    || [[ "$STDIN_SESSION_ID" == *[!A-Za-z0-9._-]* ]]; then
+    STDIN_SESSION_ID=""
+fi
 
 SESSION_END_REASON=$(_stdin_json_string reason "$HOOK_STDIN" 2>/dev/null) || SESSION_END_REASON=""
 # Not narrowed to a known enum on purpose (see STDIN comment above) — only
 # sanitised so an unexpected payload shape cannot put an arbitrary byte
 # sequence into a log line.
-case "$SESSION_END_REASON" in
-    ''|*[!A-Za-z0-9_]*) SESSION_END_REASON="unknown" ;;
-esac
+if [ -z "$SESSION_END_REASON" ] || [[ "$SESSION_END_REASON" == *[!A-Za-z0-9_]* ]]; then
+    SESSION_END_REASON="unknown"
+fi
 
 # ── The transcript path the host handed us (#407) ─────────────────────────
-# Same field, same reasoning as session-start-hook.sh's identical block:
+# Same field, same reasoning as the SessionStart hook's identical block:
 # exported for pipeline/host.transcript_path() to pick up in any Python
 # process this hook spawns. Data from a host payload, validated at the point
 # of entry -- only a carriage return is rejected, since a transcript path
@@ -217,13 +223,14 @@ esac
 # preserves one.) Whether the value names an openable file is decided on the
 # Python side, which falls back to derivation when it does not.
 REMEMBER_TRANSCRIPT_PATH=$(_stdin_json_string transcript_path "$HOOK_STDIN" 2>/dev/null) || REMEMBER_TRANSCRIPT_PATH=""
-case "$REMEMBER_TRANSCRIPT_PATH" in
-    *$'\n'*|*$'\r'*) REMEMBER_TRANSCRIPT_PATH="" ;;
-esac
+if [[ "$REMEMBER_TRANSCRIPT_PATH" == *$'\n'* ]] \
+    || [[ "$REMEMBER_TRANSCRIPT_PATH" == *$'\r'* ]]; then
+    REMEMBER_TRANSCRIPT_PATH=""
+fi
 export REMEMBER_TRANSCRIPT_PATH
 
 # ── The cwd the host handed us (#411) ─────────────────────────────────────
-# Same field, same reasoning as session-start-hook.sh's identical block:
+# Same field, same reasoning as the SessionStart hook's identical block:
 # exported for resolve-paths.sh (sourced below) to consult as its fallback
 # once CLAUDE_PROJECT_DIR is unset -- still the state Codex leaves it in
 # (live-confirmed, #463); Gemini CLI's own bundled docs now say it DOES set
@@ -238,13 +245,14 @@ export REMEMBER_TRANSCRIPT_PATH
 # actually names a directory is decided in resolve-paths.sh, which falls
 # back to the existing derivation when it does not.
 REMEMBER_HOOK_CWD=$(_stdin_json_string cwd "$HOOK_STDIN" 2>/dev/null) || REMEMBER_HOOK_CWD=""
-case "$REMEMBER_HOOK_CWD" in
-    *$'\n'*|*$'\r'*) REMEMBER_HOOK_CWD="" ;;
-esac
+if [[ "$REMEMBER_HOOK_CWD" == *$'\n'* ]] \
+    || [[ "$REMEMBER_HOOK_CWD" == *$'\r'* ]]; then
+    REMEMBER_HOOK_CWD=""
+fi
 export REMEMBER_HOOK_CWD
 
 # --- Resolve paths, tools, directories, logging ---
-# Opt into resolve-paths.sh's soft-failure mode, exactly as post-tool-hook.sh
+# Opt into resolve-paths.sh's soft-failure mode, exactly as the PostToolUse hook
 # does: this hook must never block session teardown, so a resolution failure
 # (e.g. a nested/headless session with no CLAUDE_PROJECT_DIR) is a silent
 # no-op, not a crash.
@@ -255,7 +263,7 @@ source "$PIPELINE_DIR/scripts/log.sh" 2>/dev/null
 # log.sh returns early on a store it cannot create a logs/ dir in — before it
 # defines log(), report_error() or dispatch() — so the source succeeding
 # above is not the same question as those existing (#361, #372). Same guard
-# post-tool-hook.sh and user-prompt-hook.sh already carry, for the same
+# the PostToolUse hook and the UserPromptSubmit hook already carry, for the same
 # reason: `declare -F`, NOT `type` or `command -v` — on macOS /usr/bin/log is
 # Apple's unified-logging CLI, so `type log` is true whether or not a shell
 # function was ever defined, the guard would pass, and the stub below would
@@ -272,7 +280,7 @@ source "$PIPELINE_DIR/scripts/log.sh" 2>/dev/null
 # "Falls back to stderr if log file is unwritable" — this reproduces exactly
 # that fallback, because it is the same fallback for the same reason:
 # $REMEMBER_DIR/logs is what could not be created. hook-errors.log and the
-# notices channel user-prompt-hook.sh reads (#200, #253) are both files under
+# notices channel the UserPromptSubmit hook reads (#200, #253) are both files under
 # that same directory, so neither is reachable here; stderr is the only
 # channel left, and bootstrap-dirs.sh only redirects it into hook-errors.log
 # once that directory exists (bootstrap-dirs.sh:230-231) — on this path it is
@@ -398,7 +406,7 @@ fi
 # position without a Haiku call, so this hook costs nothing extra when there
 # is genuinely nothing to flush.
 #
-# Backgrounded, the same way post-tool-hook.sh forks its own call — NOT run
+# Backgrounded, the same way the PostToolUse hook forks its own call — NOT run
 # and waited on in the foreground, which an earlier version of this hook did.
 # Claude Code kills a hook process after `hooks.dispatch_timeout_seconds`'
 # sibling budget for the events it waits on: this repo's own README documents
@@ -417,8 +425,8 @@ fi
 # the background flush itself finishes — which is what the subshell below
 # does.
 #
-# tmp/save-session.pid is the SAME marker post-tool-hook.sh's own
-# background fork writes (scripts/post-tool-hook.sh), not a second one: both
+# tmp/save-session.pid is the SAME marker the PostToolUse hook's own
+# background fork writes (the PostToolUse hook), not a second one: both
 # are "a save-session.sh is in flight" and nothing downstream needs to tell
 # them apart.
 # REMEMBER_TEST_COMPLETION_MARKER (opt-in, unset in production): CI

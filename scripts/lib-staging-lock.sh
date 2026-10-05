@@ -109,7 +109,7 @@ _REMEMBER_LIB_STAGING_LOCK_SOURCED=1
 # `date` call that would silently ignore REMEMBER_TZ -- unlike every other
 # timestamp in this pipeline.
 _REMEMBER_STAGING_LOCK_SRC_DIR="${BASH_SOURCE[0]%/*}"
-[ "$_REMEMBER_STAGING_LOCK_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_STAGING_LOCK_SRC_DIR="."
+[ "$_REMEMBER_STAGING_LOCK_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_STAGING_LOCK_SRC_DIR="$(pwd)"
 source "$_REMEMBER_STAGING_LOCK_SRC_DIR/lib-clock.sh"
 unset _REMEMBER_STAGING_LOCK_SRC_DIR
 
@@ -184,7 +184,9 @@ staging_lock_dir() {
 # Safe in $( ): it only prints. Unlike lib-lock.sh's _lock_self_set, which
 # assigns and must never be called that way.
 staging_lock_acquire() {
-    lock_acquire "$(staging_lock_dir)" "${1:-$STAGING_LOCK_TIMEOUT}"
+    local _sla_timeout="${1:-}"
+    [ -n "$_sla_timeout" ] || _sla_timeout="$STAGING_LOCK_TIMEOUT"
+    lock_acquire "$(staging_lock_dir)" "$_sla_timeout"
 }
 
 # `|| true`: release returns 1 when the lock is not ours, and every caller
@@ -224,12 +226,12 @@ staging_append() {
     local _today="$1" _text="$2"
     local _before=0
     [ -f "$_today" ] && _before=$(wc -c < "$_today" 2>/dev/null | tr -d ' ')
-    case "$_before" in (''|*[!0-9]*) _before=0 ;; esac
+    if [ -z "$_before" ] || [ "${_before#*[!0-9]}" != "$_before" ]; then _before=0; fi
     [ -s "$_today" ] && echo "" >> "$_today"
     cat "$_text" >> "$_today"
     local _warn_bytes
     _warn_bytes=$(config ".thresholds.staging_warn_bytes" 2000000)
-    case "$_warn_bytes" in (''|*[!0-9]*) _warn_bytes=2000000 ;; esac
+    if [ -z "$_warn_bytes" ] || [ "${_warn_bytes#*[!0-9]}" != "$_warn_bytes" ]; then _warn_bytes=2000000; fi
     # #399: silent on every store where the real config() (log.sh) ran,
     # configured or not -- _REMEMBER_CONFIG_IS_FALLBACK is 0 there. Only
     # fires on the #361/#372 stub, and only when REMEMBER_CONFIG itself
@@ -246,7 +248,7 @@ staging_append() {
     if [ "$_warn_bytes" -gt 0 ] && [ "$_before" -lt "$_warn_bytes" ]; then
         local _after
         _after=$(wc -c < "$_today" 2>/dev/null | tr -d ' ')
-        case "$_after" in (''|*[!0-9]*) _after=0 ;; esac
+        if [ -z "$_after" ] || [ "${_after#*[!0-9]}" != "$_after" ]; then _after=0; fi
         if [ "$_after" -ge "$_warn_bytes" ]; then
             report_error "staging" "WARNING: ${_today} has grown past ${_warn_bytes}b -- this file is append-only and only a SUCCESSFUL consolidation round retires it. Sustained lock contention, a full disk, or consolidation having stopped (check features.ndc_compression and hook-errors.log for consolidation failures) will keep appending the same kind of span here without bound. Nothing was dropped or truncated."
         fi

@@ -196,3 +196,46 @@ class TestLayeredMergeUsesJqFreeFallback:
                                 capture_output=True, text=True, timeout=30)
         assert result.returncode == 0, result.stderr
         assert result.stdout.strip() == "False"
+
+
+class TestLogShOnItsOwnWithoutDetectTools:
+    """#898: log.sh and lib-memory-dir.sh reach Python through one shared
+    literal-dispatch runner instead of a private copy each. Neither file
+    sources detect-tools.sh (it exits 1 on no Python), so the runner they
+    share must arrive with what they DO source, and must keep their old
+    contract: an unset PYTHON means python3, and an unrecognised one is a
+    silent non-zero, never a stderr line in a hook's output."""
+
+    def _run(self, tmp_path, python_value):
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(json.dumps({"model": "haiku"}))
+        remember = project / ".remember"
+        remember.mkdir()
+        (remember / "config.json").write_text(json.dumps({"model": "sonnet"}))
+        script = f"""
+        export PROJECT_DIR={project}
+        export PIPELINE_DIR={pipeline}
+        export HOME={home}
+        source {LOG_SH}
+        config '.model' 'fallback'
+        config_into _v '.model' 'fallback'
+        echo "into=$_v"
+        """
+        env = {**os.environ, "PATH": _path_without_jq(tmp_path)}
+        env.pop("PYTHON", None)
+        if python_value is not None:
+            env["PYTHON"] = python_value
+        return subprocess.run(["bash", "-c", script], env=env,
+                              capture_output=True, text=True, timeout=30, check=False)
+
+    def test_unset_python_reads_the_merged_config(self, tmp_path):
+        result = self._run(tmp_path, None)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.split() == ["sonnet", "into=sonnet"], (result.stdout, result.stderr)
+
+    def test_unrecognised_python_degrades_without_a_stderr_line(self, tmp_path):
+        """Positive control is the test above (same harness, real reads)."""
+        result = self._run(tmp_path, "no-such-python")
+        assert result.returncode == 0, result.stderr
+        assert "into=sonnet" not in result.stdout, result.stdout
+        assert "unrecognized PYTHON" not in result.stderr, result.stderr

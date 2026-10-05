@@ -22,6 +22,22 @@ def _mock_claude_response(result_text: str, input_tokens: int = 500,
     })
 
 
+def _record_env(mock_run) -> list:
+    """Record, per spawn, the environment the child actually gets (#898
+    round 15): the claude route passes no env= mapping -- the child inherits
+    this process's environment at the moment of the spawn -- so that is what
+    is captured. Call after setting ``return_value``."""
+    seen = []
+
+    def fake(*args, **kwargs):
+        env = kwargs.get("env")
+        seen.append(dict(os.environ) if env is None else dict(env))
+        return mock_run.return_value
+
+    mock_run.side_effect = fake
+    return seen
+
+
 def test_parse_response_basic():
     raw = _mock_claude_response("## 10:30 | did stuff\ndetails")
     result = _parse_response(raw)
@@ -120,6 +136,7 @@ def test_call_haiku_success(mock_run, monkeypatch):
         stdout=_mock_claude_response("hello from haiku"),
         stderr="",
     )
+    seen = _record_env(mock_run)
     result = call_haiku("test prompt")
     assert result.text == "hello from haiku"
     assert result.is_skip is False
@@ -136,9 +153,8 @@ def test_call_haiku_success(mock_run, monkeypatch):
     assert "--mcp-config" in cmd
     assert cmd[cmd.index("--mcp-config") + 1] == '{"mcpServers":{}}'
     assert "--strict-mcp-config" in cmd
-    # CLAUDECODE must be stripped from env
-    env = args[1]["env"]
-    assert "CLAUDECODE" not in env
+    # CLAUDECODE must be stripped from the environment the child inherits
+    assert "CLAUDECODE" not in seen[-1]
 
 
 @patch("pipeline.haiku.subprocess.run")
@@ -165,8 +181,9 @@ def test_call_haiku_sends_prompt_on_stdin_not_argv(mock_run):
 def test_call_haiku_strips_parent_session_env(mock_run, monkeypatch):
     """The nested claude -p must not inherit the PARENT Claude Code session
     vars — else it looks like a resumable session to anything keying off them
-    (#95). Strip CLAUDECODE, CLAUDE_JOB_DIR, and all CLAUDE_CODE_*; keep the
-    rest of the environment intact."""
+    (#95). The names are literal in `_without_session_env` (#898 round 17);
+    the rest of the environment is inherited intact."""
+    monkeypatch.delenv("REMEMBER_CONFIG", raising=False)
     monkeypatch.setenv("CLAUDECODE", "1")
     monkeypatch.setenv("CLAUDE_JOB_DIR", "/some/job/dir")
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "abc-123")
@@ -174,8 +191,9 @@ def test_call_haiku_strips_parent_session_env(mock_run, monkeypatch):
     monkeypatch.setenv("PATH", "/usr/bin")  # an unrelated var must survive
     mock_run.return_value = MagicMock(
         returncode=0, stdout=_mock_claude_response("x"), stderr="")
+    seen = _record_env(mock_run)
     call_haiku("p")
-    env = mock_run.call_args[1]["env"]
+    env = seen[-1]
     assert "CLAUDECODE" not in env
     assert "CLAUDE_JOB_DIR" not in env
     assert "CLAUDE_CODE_SESSION_ID" not in env
@@ -183,260 +201,16 @@ def test_call_haiku_strips_parent_session_env(mock_run, monkeypatch):
     assert env.get("PATH") == "/usr/bin"
 
 
-# ── ANTHROPIC_API_KEY, kept or stripped on evidence (#703) ─────────────────
+# ── a credential-looking failure says where the variable comes from ─────────
 #
-# The reported failure and the failure a naive fix creates are the SAME
-# failure -- an unauthenticated nested `claude -p`, every background save
-# dying silently -- so each test below names which population it is standing
-# in for. A strip test with no keep twin, or a keep test with no strip twin,
-# would pass just as well against a function that always did the one thing.
-
-
-@pytest.fixture
-def no_ambient_credentials(monkeypatch, tmp_path):
-    """No credential visible to `_child_env()` except what a test sets itself.
-
-    `_configured_oauth_token()` reads the merged config, `$REMEMBER_DIR`'s
-    config.json and `~/.remember/config.json`; `_host_login_present()` reads
-    `~/.claude/.credentials.json`. A developer machine has real files at two of
-    those paths, so without this fixture the strip/keep decision under test is
-    the developer's own login rather than the case the test describes -- and it
-    would flip between their machine and CI.
-    """
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setenv("USERPROFILE", str(home))  # Windows' expanduser reads this
-    monkeypatch.setenv("REMEMBER_DIR", str(tmp_path / "remember"))
-    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
-    monkeypatch.delenv("CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN", raising=False)
-    monkeypatch.delenv("REMEMBER_OAUTH_TOKEN", raising=False)
-    monkeypatch.delenv("REMEMBER_CONFIG", raising=False)
-    return home
-
-
-def _write_config(home, haiku_block):
-    cfg_dir = home / ".remember"
-    cfg_dir.mkdir(parents=True, exist_ok=True)
-    (cfg_dir / "config.json").write_text(
-        json.dumps({"haiku": haiku_block}), encoding="utf-8"
-    )
-
-
-def _write_host_login(home):
-    claude_dir = home / ".claude"
-    claude_dir.mkdir(parents=True, exist_ok=True)
-    (claude_dir / ".credentials.json").write_text(
-        json.dumps({"claudeAiOauth": {"accessToken": "x"}}), encoding="utf-8"
-    )
+# #898 round 15 removed `haiku.drop_env`; the nested call inherits the
+# environment the user started their coding agent from. A failure that looks
+# like a credential failure says so, naming no variable and no knob.
 
 
 @patch("pipeline.haiku.subprocess.run")
-def test_call_haiku_strips_anthropic_api_key_when_the_host_supplied_a_token(
-    mock_run, monkeypatch, no_ambient_credentials
-):
-    """The reported case (#703, reported in #693): the operator has a
-    credential they chose, and an ambient ANTHROPIC_API_KEY out-ranks it for
-    this subprocess because the CLI resolves credentials in that order. An
-    exhausted key then fails every background save while the operator's own
-    interactive sessions keep working off the login, so nothing points at the
-    var. With another credential present, the ambient key is the one to drop."""
-    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-example")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-example")
-    monkeypatch.setenv("PATH", "/usr/bin")  # an unrelated var must survive
-    mock_run.return_value = MagicMock(
-        returncode=0, stdout=_mock_claude_response("x"), stderr="")
-
-    call_haiku("p")
-
-    env = mock_run.call_args[1]["env"]
-    assert "ANTHROPIC_API_KEY" not in env
-    assert env.get("CLAUDE_CODE_OAUTH_TOKEN") == "sk-ant-oat-example"
-    assert env.get("PATH") == "/usr/bin"
-
-
-@patch("pipeline.haiku.subprocess.run")
-def test_call_haiku_keeps_anthropic_api_key_when_it_is_the_only_credential(
-    mock_run, monkeypatch, no_ambient_credentials
-):
-    """The twin population, and the reason the strip is conditional (#703).
-
-    Authenticating the CLI with ANTHROPIC_API_KEY alone -- no claude.ai login,
-    no setup-token -- is normal and documented. Stripping it there leaves the
-    nested call with nothing, and every background save fails silently: the
-    same outage this fix exists to remove, relocated onto different people.
-    A future refactor that strips unconditionally must fail here."""
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-example")
-    mock_run.return_value = MagicMock(
-        returncode=0, stdout=_mock_claude_response("x"), stderr="")
-
-    call_haiku("p")
-
-    env = mock_run.call_args[1]["env"]
-    assert env.get("ANTHROPIC_API_KEY") == "sk-ant-api03-example", (
-        "the only credential on the host must reach the child"
-    )
-
-
-@patch("pipeline.haiku.subprocess.run")
-def test_call_haiku_strips_anthropic_api_key_when_the_operator_configured_a_token(
-    mock_run, monkeypatch, no_ambient_credentials
-):
-    """The userConfig `oauth_token` counts as the deliberate credential too
-    (#703, updated for #860 round 2 -- it is the only recovery-token source
-    now, so it is the only one this signal can see).
-
-    It is the one the operator handed this plugin on purpose, so an ambient key
-    out-ranking it is the same defect as out-ranking a login -- and this is the
-    host shape (#129/#131) where CLAUDE_CODE_OAUTH_TOKEN never arrives at all.
-    """
-    monkeypatch.setenv("CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN", "sk-ant-oat-configured-123456")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-example")
-    mock_run.return_value = MagicMock(
-        returncode=0, stdout=_mock_claude_response("x"), stderr="")
-
-    call_haiku("p")
-
-    env = mock_run.call_args[1]["env"]
-    assert "ANTHROPIC_API_KEY" not in env
-    assert env.get("CLAUDE_CODE_OAUTH_TOKEN") == "sk-ant-oat-configured-123456"
-
-
-@patch("pipeline.haiku.subprocess.run")
-def test_legacy_oauth_config_no_longer_counts_as_another_credential(
-    mock_run, monkeypatch, no_ambient_credentials
-):
-    """Negative assertion, paired with the test above as its positive control:
-    a legacy `haiku.oauth_token` must NOT count as "another visible
-    credential" for the ANTHROPIC_API_KEY auto-strip decision any more --
-    it authenticates nothing now, so treating it as a backup would strip the
-    operator's only working credential and leave them with none (#860,
-    round 2)."""
-    _write_config(no_ambient_credentials, {"oauth_token": "sk-ant-oat-configured-123456"})
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-example")
-    mock_run.return_value = MagicMock(
-        returncode=0, stdout=_mock_claude_response("x"), stderr="")
-
-    call_haiku("p")
-
-    env = mock_run.call_args[1]["env"]
-    assert env.get("ANTHROPIC_API_KEY") == "sk-ant-api03-example", (
-        "a legacy haiku.oauth_token must not be treated as a visible "
-        "credential -- it is no longer read for authentication at all"
-    )
-
-
-@patch("pipeline.haiku.subprocess.run")
-def test_call_haiku_strips_anthropic_api_key_when_a_host_login_file_exists(
-    mock_run, monkeypatch, no_ambient_credentials
-):
-    """A `claude.ai` login on disk is a credential the child can use (#703).
-
-    This is the reporter's own shape: a login they chose, no token env var
-    anywhere, and an ambient key winning anyway. `~/.claude/.credentials.json`
-    is the only login this process can see without probing an OS keychain --
-    see the keep-by-default case in
-    test_call_haiku_keeps_anthropic_api_key_when_it_is_the_only_credential for
-    what an invisible login costs, and the `strip` policy for the way out."""
-    _write_host_login(no_ambient_credentials)
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-example")
-    mock_run.return_value = MagicMock(
-        returncode=0, stdout=_mock_claude_response("x"), stderr="")
-
-    call_haiku("p")
-
-    assert "ANTHROPIC_API_KEY" not in mock_run.call_args[1]["env"]
-
-
-@patch("pipeline.haiku.subprocess.run")
-def test_anthropic_api_key_policy_strip_overrides_an_invisible_login(
-    mock_run, monkeypatch, no_ambient_credentials
-):
-    """`haiku.anthropic_api_key: "strip"` is the escape hatch for the operator
-    whose login this process cannot see -- a macOS Keychain entry, say -- where
-    the automatic rule would otherwise keep a key that is breaking them (#703)."""
-    _write_config(no_ambient_credentials, {"anthropic_api_key": "strip"})
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-example")
-    mock_run.return_value = MagicMock(
-        returncode=0, stdout=_mock_claude_response("x"), stderr="")
-
-    call_haiku("p")
-
-    assert "ANTHROPIC_API_KEY" not in mock_run.call_args[1]["env"]
-
-
-@patch("pipeline.haiku.subprocess.run")
-def test_anthropic_api_key_policy_keep_overrides_the_strip(
-    mock_run, monkeypatch, no_ambient_credentials
-):
-    """And the other direction (#703): an operator who wants the nested call
-    billed to the key, with a token present that would otherwise win, says so
-    once in config rather than unsetting a var their other tools need."""
-    _write_config(no_ambient_credentials, {"anthropic_api_key": "keep"})
-    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-example")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-example")
-    mock_run.return_value = MagicMock(
-        returncode=0, stdout=_mock_claude_response("x"), stderr="")
-
-    call_haiku("p")
-
-    env = mock_run.call_args[1]["env"]
-    assert env.get("ANTHROPIC_API_KEY") == "sk-ant-api03-example"
-
-
-@patch("pipeline.haiku.subprocess.run")
-def test_anthropic_api_key_policy_unrecognised_value_warns_and_falls_back(
-    mock_run, monkeypatch, no_ambient_credentials
-):
-    """A value nothing recognises must not silently grade as one of the two
-    behaviours (#703). It falls back to `auto` -- here, a token is present, so
-    `auto` strips -- and says so where the operator reads warnings."""
-    _write_config(no_ambient_credentials, {"anthropic_api_key": "sk-ant-api03-pasted-here"})
-    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-example")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-example")
-    mock_run.return_value = MagicMock(
-        returncode=0, stdout=_mock_claude_response("x"), stderr="")
-
-    with patch("pipeline.haiku._warn") as mock_warn:
-        call_haiku("p")
-
-    assert "ANTHROPIC_API_KEY" not in mock_run.call_args[1]["env"]
-    warnings = " ".join(str(c.args[0]) for c in mock_warn.call_args_list)
-    assert "haiku.anthropic_api_key" in warnings
-    assert "auto, keep, strip" in warnings, "the legal values belong in the warning"
-    assert "sk-ant-api03-pasted-here" not in warnings, (
-        "the refused value must NOT be echoed -- this key's name invites pasting a "
-        "real credential into it, and the daily log is a file on disk"
-    )
-
-
-@patch("pipeline.haiku.subprocess.run")
-def test_anthropic_api_key_policy_recognised_value_warns_about_nothing(
-    mock_run, monkeypatch, no_ambient_credentials
-):
-    """The positive control for the warning above: a value the code accepts
-    must produce no warning at all, or "warns on a bad value" would be
-    indistinguishable from "warns on every value" (#703)."""
-    _write_config(no_ambient_credentials, {"anthropic_api_key": "keep"})
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-example")
-    mock_run.return_value = MagicMock(
-        returncode=0, stdout=_mock_claude_response("x"), stderr="")
-
-    with patch("pipeline.haiku._warn") as mock_warn:
-        call_haiku("p")
-
-    assert mock_warn.call_args_list == []
-
-
-@patch("pipeline.haiku.subprocess.run")
-def test_failure_names_anthropic_api_key_when_it_was_kept(
-    mock_run, monkeypatch, no_ambient_credentials
-):
-    """The discoverability half (#703). The key was kept -- correctly, it was
-    the only credential -- and the call died on that key's balance. The error
-    reaches hook-errors.log through save-session.sh, so the variable is named
-    there rather than only in the daily log (#694)."""
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-example")
+def test_credential_failure_points_at_the_inherited_environment(mock_run, monkeypatch):
+    """The discoverability half of #703, kept without naming any variable."""
     mock_run.return_value = MagicMock(
         returncode=1,
         stdout=json.dumps({"error": "Credit balance is too low"}),
@@ -448,42 +222,15 @@ def test_failure_names_anthropic_api_key_when_it_was_kept(
 
     message = str(raised.value)
     assert "Credit balance is too low" in message
-    assert "ANTHROPIC_API_KEY" in message, (
-        "the failure must name the variable that plausibly caused it"
-    )
-    assert "haiku.anthropic_api_key" in message, "and the knob that changes it"
-
-
-@patch("pipeline.haiku.subprocess.run")
-def test_failure_does_not_name_anthropic_api_key_when_it_was_not_set(
-    mock_run, monkeypatch, no_ambient_credentials
-):
-    """The positive control's twin: the same credit error, no such var in the
-    environment. A hint that fires here is a hint that fires always, which
-    would point every unrelated auth failure at an innocent variable (#703)."""
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    mock_run.return_value = MagicMock(
-        returncode=1,
-        stdout=json.dumps({"error": "Credit balance is too low"}),
-        stderr="",
-    )
-
-    with pytest.raises(RuntimeError) as raised:
-        call_haiku("p")
-
-    message = str(raised.value)
-    assert "Credit balance is too low" in message
+    assert "unset it in that environment" in message
+    assert "drop_env" not in message
     assert "ANTHROPIC_API_KEY" not in message
 
 
 @patch("pipeline.haiku.subprocess.run")
-def test_failure_unrelated_to_credentials_does_not_name_anthropic_api_key(
-    mock_run, monkeypatch, no_ambient_credentials
-):
-    """And the third case, which is the one that makes the hint worth having
-    rather than noise: the key IS set and kept, but the failure has nothing to
-    do with credentials, so the hint stays out of it (#703)."""
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-example")
+def test_failure_unrelated_to_credentials_gets_no_environment_hint(mock_run, monkeypatch):
+    """Positive control's twin: a hint that fired on every failure would
+    point unrelated outages at the environment."""
     mock_run.return_value = MagicMock(
         returncode=1,
         stdout=json.dumps({"error": "Prompt is too long"}),
@@ -495,7 +242,19 @@ def test_failure_unrelated_to_credentials_does_not_name_anthropic_api_key(
 
     message = str(raised.value)
     assert "Prompt is too long" in message
-    assert "ANTHROPIC_API_KEY" not in message
+    assert "unset it in that environment" not in message
+
+
+def test_haiku_py_no_longer_names_the_credential_or_its_old_key():
+    """#898 round 13: the shipped module must not name the credential at all
+    (the directory portal holds on the name alone), nor the removed
+    `haiku.anthropic_api_key` policy key."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "pipeline", "haiku.py")
+    with open(path, encoding="utf-8") as f:
+        source = f.read()
+    assert "def _summarizer_environment" in source, "positive control: this is the right file"
+    for needle in ("ANTHROPIC_API_KEY", "anthropic_api_key"):
+        assert needle not in source, needle
 
 
 @patch("pipeline.haiku.subprocess.run")
@@ -643,9 +402,10 @@ def test_call_haiku_keeps_oauth_token(mock_run, monkeypatch):
     mock_run.return_value = MagicMock(
         returncode=0, stdout=_mock_claude_response("x"), stderr="")
 
+    seen = _record_env(mock_run)
     call_haiku("p")
 
-    env = mock_run.call_args[1]["env"]
+    env = seen[-1]
     assert env.get("CLAUDE_CODE_OAUTH_TOKEN") == "sk-ant-oat-example", (
         "the credential must survive the parent-session strip"
     )
@@ -662,63 +422,29 @@ def _log_text(remember_dir) -> str:
     return "".join(p.read_text(encoding="utf-8") for p in sorted(log_dir.iterdir()))
 
 
-# ── userConfig oauth_token is the ONLY recovery-token source (#860, round 2) ─
+# ── This plugin reads no recovery-token credential at all (#860, round 3) ────
 #
-# plugin.json declares an optional `oauth_token` userConfig entry (sensitive:
-# true), exported to this hook's subprocess as CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN
-# per the Claude Code plugin manifest reference. REMEMBER_OAUTH_TOKEN and
-# haiku.oauth_token are no longer read anywhere -- an env var/config key this
-# plugin invented for itself is exactly what the directory's security scan
-# means by "reads a credential from the user's machine", and merely
-# deprecating-while-still-reading them (round 1) did not clear that. A still
-# -configured legacy value is detected by PRESENCE ONLY (never its content)
-# and reported once per save, by name, never by value.
+# plugin.json no longer declares a userConfig recovery-token option -- round
+# 2's own CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN env var is never read either, by
+# design, now that the option that populated it is gone. A `claude -p` call
+# now runs with whatever authentication it inherits from its own
+# environment or none.
+#
+# #898, round 4: the one remaining presence check for REMEMBER_OAUTH_TOKEN
+# and haiku.oauth_token (this plugin's own earlier, already-removed attempts
+# at the same feature) is ALSO gone now -- the directory's scanner read a
+# value-free presence check's own existence as the read half of the
+# plugin.json-aggregate credential pairing, independent of what the check
+# ever logged. Neither setting produces a NOTICE line, or any other log
+# output, any more; they are simply never read, for any purpose.
 
 
 @patch("pipeline.haiku.subprocess.run")
-def test_malformed_userconfig_token_warning_never_logs_the_value(mock_run, monkeypatch, tmp_path):
-    """CodeQL finding (PR #894, HIGH, "Clear-text logging of sensitive
-    information"): the old malformed-token warning built its message with
-    `f"{len(value.strip())} chars"` -- a value DERIVED from the secret, which
-    CodeQL's taint tracker correctly flags as the secret itself reaching a log
-    sink, even though only a length was printed. The message must be built
-    from constants and the setting's NAME only, never from the configured
-    value in any form (#860)."""
-    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
-    configured_value = "a-short-but-distinctive-secret-marker"
-    monkeypatch.setenv("CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN", "too short")
-    monkeypatch.setenv("REMEMBER_DIR", str(tmp_path))
-    mock_run.return_value = MagicMock(
-        returncode=0, stdout=_mock_claude_response("x"), stderr="")
-
-    call_haiku("p")
-
-    logged = _log_text(tmp_path)
-    assert "too short" not in logged and configured_value not in logged, (
-        "the malformed value itself must never reach the log:\n" + logged
-    )
-    assert "got " not in logged, (
-        'a length DERIVED from the value (the old "...got 9 chars)" phrase) '
-        'is itself a value-derived leak and must not appear, even as a '
-        "count rather than the value -- the fixed constant phrase "
-        '"at least 20 chars" above is fine, since it is not derived from '
-        "anything the operator configured:\n" + logged
-    )
-    assert "userConfig oauth_token option" in logged, (
-        "positive control: the warning must still name the setting (as a "
-        "hardcoded literal naming the userConfig option, not by "
-        "interpolating the env var's own name -- CodeQL's second round "
-        "flagged that too, #860 round 3), just not anything derived from "
-        "its value:\n" + logged
-    )
-
-
-@patch("pipeline.haiku.subprocess.run")
-def test_call_haiku_uses_userconfig_token_env(mock_run, monkeypatch, tmp_path):
-    """The plugin.json `userConfig` option (`oauth_token`, `sensitive: true`)
-    reaches this hook's subprocess as `CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN` (per
-    the Claude Code plugin manifest reference) and authenticates the nested
-    CLI (#860)."""
+def test_userconfig_oauth_token_env_is_never_read(mock_run, monkeypatch, tmp_path):
+    """#860, round 3: the removed userConfig option's own env var is simply
+    never consulted any more -- not malformed-rejected, not read at all. A
+    value left behind in a stale environment (e.g. a host that still
+    populates it from an old plugin.json cache) must never reach the child."""
     monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
     monkeypatch.delenv("REMEMBER_OAUTH_TOKEN", raising=False)
     monkeypatch.setenv("CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN", "sk-ant-oat-userconfig-00001")
@@ -726,30 +452,96 @@ def test_call_haiku_uses_userconfig_token_env(mock_run, monkeypatch, tmp_path):
     mock_run.return_value = MagicMock(
         returncode=0, stdout=_mock_claude_response("x"), stderr="")
 
+    seen = _record_env(mock_run)
     call_haiku("p")
 
-    env = mock_run.call_args[1]["env"]
-    assert env.get("CLAUDE_CODE_OAUTH_TOKEN") == "sk-ant-oat-userconfig-00001"
-    assert "NOTICE" not in _log_text(tmp_path), (
-        "the userConfig path is the current one -- it must not trigger the "
-        "legacy-config notice"
+    env = seen[-1]
+    assert env.get("CLAUDE_CODE_OAUTH_TOKEN") is None, (
+        "the removed userConfig option's env var must never populate "
+        "CLAUDE_CODE_OAUTH_TOKEN any more"
     )
 
 
 @patch("pipeline.haiku.subprocess.run")
-def test_host_token_wins_over_userconfig_token(mock_run, monkeypatch):
-    """A host-provided CLAUDE_CODE_OAUTH_TOKEN still wins over the configured
-    userConfig fallback -- the default, nothing-configured path is unchanged
-    (#860)."""
+def test_host_token_still_passes_through_unconditionally(mock_run, monkeypatch, tmp_path):
+    """Positive control for the test above: a host-provided
+    CLAUDE_CODE_OAUTH_TOKEN must still reach the child -- this plugin removing
+    its OWN credential read must not touch the host's (#860, round 3)."""
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-from-host-00000001")
     monkeypatch.setenv("CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN", "sk-ant-oat-userconfig-00003")
+    monkeypatch.setenv("REMEMBER_DIR", str(tmp_path))
+    mock_run.return_value = MagicMock(
+        returncode=0, stdout=_mock_claude_response("x"), stderr="")
+
+    seen = _record_env(mock_run)
+    call_haiku("p")
+
+    env = seen[-1]
+    assert env.get("CLAUDE_CODE_OAUTH_TOKEN") == "sk-ant-oat-from-host-00000001"
+
+
+@patch("pipeline.haiku.subprocess.run")
+def test_legacy_env_var_configured_logs_no_notice_at_all(mock_run, monkeypatch, tmp_path):
+    """#898, round 4: a still-set legacy REMEMBER_OAUTH_TOKEN no longer gets
+    a notice of any kind -- the presence check that used to report it is
+    removed entirely, because the directory's scanner read the check's own
+    existence as a credential read regardless of what it logged. Must-fire
+    control for the detection mechanism itself is the sibling test right
+    below (a NOTICE line written directly IS seen by _log_text), so this
+    absence is not merely a broken reader passing vacuously."""
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    configured_value = "a-short-but-distinctive-secret-marker"
+    monkeypatch.setenv("REMEMBER_OAUTH_TOKEN", configured_value)
+    monkeypatch.setenv("REMEMBER_DIR", str(tmp_path))
     mock_run.return_value = MagicMock(
         returncode=0, stdout=_mock_claude_response("x"), stderr="")
 
     call_haiku("p")
 
-    env = mock_run.call_args[1]["env"]
-    assert env.get("CLAUDE_CODE_OAUTH_TOKEN") == "sk-ant-oat-from-host-00000001"
+    logged = _log_text(tmp_path)
+    assert configured_value not in logged, (
+        "the configured value itself must never reach the log:\n" + logged
+    )
+    assert "NOTICE" not in logged, (
+        "the legacy-setting presence check is removed entirely -- a still-"
+        "configured REMEMBER_OAUTH_TOKEN must produce no notice at all:\n"
+        + logged
+    )
+
+
+@patch("pipeline.haiku.subprocess.run")
+def test_legacy_config_key_configured_logs_no_notice_at_all(mock_run, monkeypatch, tmp_path):
+    """Same absence for the config.json `haiku.oauth_token` key (#898, round
+    4) -- paired with the env-var case above so both removed sources are
+    covered, not just one."""
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.delenv("CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN", raising=False)
+    monkeypatch.delenv("REMEMBER_OAUTH_TOKEN", raising=False)
+    monkeypatch.setenv("REMEMBER_DIR", str(tmp_path))
+    monkeypatch.setattr("pipeline.haiku.os.path.expanduser", lambda p: str(tmp_path))
+    (tmp_path / "config.json").write_text(
+        json.dumps({"haiku": {"oauth_token": "sk-ant-oat-legacy-config-00009"}}),
+        encoding="utf-8")
+    mock_run.return_value = MagicMock(
+        returncode=0, stdout=_mock_claude_response("x"), stderr="")
+
+    call_haiku("p")
+
+    assert "NOTICE" not in _log_text(tmp_path)
+
+
+def test_log_text_helper_sees_a_notice_when_one_is_actually_written(tmp_path):
+    """Positive control for the two tests above's own detection mechanism:
+    _log_text() must actually surface a NOTICE line when one is written to
+    a daily log, so the preceding "no NOTICE" assertions are not passing
+    because the reader itself is broken or pointed at the wrong directory.
+    Writes directly under logs/, matching _log_text's own flat iterdir()."""
+    remember_dir = tmp_path / "remember"
+    log_dir = remember_dir / "logs"
+    log_dir.mkdir(parents=True)
+    (log_dir / "today-sentinel.log").write_text(
+        "NOTICE: sentinel line written directly by the test\n", encoding="utf-8")
+    assert "NOTICE" in _log_text(remember_dir)
 
 
 @patch("pipeline.haiku.subprocess.run")
@@ -766,9 +558,10 @@ def test_remember_oauth_token_env_no_longer_authenticates(mock_run, monkeypatch,
     mock_run.return_value = MagicMock(
         returncode=0, stdout=_mock_claude_response("x"), stderr="")
 
+    seen = _record_env(mock_run)
     call_haiku("p")
 
-    env = mock_run.call_args[1]["env"]
+    env = seen[-1]
     assert "CLAUDE_CODE_OAUTH_TOKEN" not in env, (
         "REMEMBER_OAUTH_TOKEN must not reach the child env -- it is no "
         "longer read at all (#860, round 2)"
@@ -790,101 +583,11 @@ def test_haiku_oauth_token_config_no_longer_authenticates(mock_run, monkeypatch,
     mock_run.return_value = MagicMock(
         returncode=0, stdout=_mock_claude_response("x"), stderr="")
 
+    seen = _record_env(mock_run)
     call_haiku("p")
 
-    env = mock_run.call_args[1]["env"]
+    env = seen[-1]
     assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
-
-
-@patch("pipeline.haiku.subprocess.run")
-def test_legacy_remember_oauth_token_env_triggers_value_free_notice(mock_run, monkeypatch, tmp_path):
-    """A still-configured REMEMBER_OAUTH_TOKEN gets a loud, visible notice --
-    not silence -- but the notice names the SOURCE, never the value (#860,
-    round 2)."""
-    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
-    monkeypatch.delenv("CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN", raising=False)
-    monkeypatch.setenv("REMEMBER_OAUTH_TOKEN", "sk-ant-oat-legacy-env-0000003")
-    monkeypatch.setenv("REMEMBER_DIR", str(tmp_path))
-    mock_run.return_value = MagicMock(
-        returncode=0, stdout=_mock_claude_response("x"), stderr="")
-
-    call_haiku("p")
-
-    logged = _log_text(tmp_path)
-    assert "NOTICE" in logged and "REMEMBER_OAUTH_TOKEN" in logged, (
-        "a still-configured legacy env var must be reported loudly:\n" + logged
-    )
-    assert "sk-ant-oat-legacy-env-0000003" not in logged, (
-        "the notice must never contain the configured value itself"
-    )
-
-
-@patch("pipeline.haiku.subprocess.run")
-def test_legacy_haiku_oauth_token_config_triggers_value_free_notice(mock_run, monkeypatch, tmp_path):
-    """Same value-free notice for a still-configured `haiku.oauth_token`
-    (#860, round 2)."""
-    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
-    monkeypatch.delenv("CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN", raising=False)
-    monkeypatch.delenv("REMEMBER_OAUTH_TOKEN", raising=False)
-    monkeypatch.setenv("REMEMBER_DIR", str(tmp_path))
-    monkeypatch.setattr("pipeline.haiku.os.path.expanduser", lambda p: str(tmp_path))
-    (tmp_path / "config.json").write_text(
-        json.dumps({"haiku": {"oauth_token": "sk-ant-oat-legacy-config-00004"}}),
-        encoding="utf-8")
-    mock_run.return_value = MagicMock(
-        returncode=0, stdout=_mock_claude_response("x"), stderr="")
-
-    call_haiku("p")
-
-    logged = _log_text(tmp_path)
-    assert "NOTICE" in logged and "haiku.oauth_token" in logged
-    assert "sk-ant-oat-legacy-config-00004" not in logged, (
-        "the notice must never contain the configured value itself"
-    )
-
-
-@patch("pipeline.haiku.subprocess.run")
-def test_empty_legacy_config_triggers_no_notice(mock_run, monkeypatch, tmp_path):
-    """Positive control for the notice's own presence check: `"oauth_token":
-    ""` -- how the bundled config ships the key, meaning "not configured" --
-    must not be reported as "still configured" (#860, round 2)."""
-    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
-    monkeypatch.delenv("CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN", raising=False)
-    monkeypatch.delenv("REMEMBER_OAUTH_TOKEN", raising=False)
-    monkeypatch.setenv("REMEMBER_DIR", str(tmp_path))
-    monkeypatch.setattr("pipeline.haiku.os.path.expanduser", lambda p: str(tmp_path))
-    (tmp_path / "config.json").write_text(
-        json.dumps({"haiku": {"oauth_token": ""}}), encoding="utf-8")
-    mock_run.return_value = MagicMock(
-        returncode=0, stdout=_mock_claude_response("x"), stderr="")
-
-    call_haiku("p")
-
-    assert "NOTICE" not in _log_text(tmp_path)
-
-
-@patch("pipeline.haiku.subprocess.run")
-def test_legacy_notice_logs_once_not_twice(mock_run, monkeypatch, tmp_path):
-    """_legacy_oauth_config_present() must be consulted by exactly one call
-    site -- _other_credential() (deciding whether to strip ANTHROPIC_API_KEY)
-    must not ALSO trigger this notice, or one save would log it twice (the
-    same double-count bug round 1 had for the old DEPRECATED line, #860)."""
-    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
-    monkeypatch.delenv("CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN", raising=False)
-    monkeypatch.setenv("REMEMBER_OAUTH_TOKEN", "sk-ant-oat-legacy-env-0000005")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-irrelevant-value-00")
-    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
-    monkeypatch.setattr("pipeline.haiku._host_login_present", lambda: False)
-    monkeypatch.setenv("REMEMBER_DIR", str(tmp_path))
-    mock_run.return_value = MagicMock(
-        returncode=0, stdout=_mock_claude_response("x"), stderr="")
-
-    call_haiku("p")
-
-    logged = _log_text(tmp_path)
-    assert logged.count("NOTICE") == 1, (
-        "one save must log the legacy-config notice exactly once:\n" + logged
-    )
 
 
 @patch("pipeline.haiku.subprocess.run")

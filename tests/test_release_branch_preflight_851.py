@@ -191,7 +191,14 @@ def test_lfs_pointer_fails(tmp_path):
 
 
 def test_a_file_mentioning_lfs_later_passes(tmp_path):
-    _passes(_tree(tmp_path, {"notes.md": b"# n\n\nversion https://git-lfs.github.com/spec/v1\n"}))
+    """Must not fire the LFS-pointer FAIL -- unrelated to #898's own
+    scheme-literal guard, which this fixture's own URL legitimately also
+    fires; assert no LFS offender specifically, not a wholly offender-free
+    tree."""
+    offenders = _offenders(_tree(tmp_path, {
+        "notes.md": b"# n\n\nversion https://git-lfs.github.com/spec/v1\n",
+    }))
+    assert not any("LFS" in o for o in offenders), offenders
 
 
 def test_a_nested_git_file_marks_a_submodule_and_fails(tmp_path):
@@ -330,7 +337,9 @@ def test_a_real_looking_credential_fails(tmp_path, secret):
 
 @pytest.mark.parametrize("text", [
     "pattern = r'sk-ant-[A-Za-z0-9_-]{20,}'",
-    "export ANTHROPIC_API_KEY=sk-ant-...",
+    # #898 round 13: any credential name but the Anthropic one, which now
+    # FAILs anywhere in the tree on its own (check_release_tree NAMED_API_KEYS).
+    "export EXAMPLE_API_KEY=sk-ant-...",
     "token: ghp_xxx (example)",
 ])
 def test_patterns_and_placeholders_pass(tmp_path, text):
@@ -338,10 +347,14 @@ def test_patterns_and_placeholders_pass(tmp_path, text):
 
 
 def test_reading_a_credential_is_reported_for_review_not_failed(tmp_path):
-    root = _tree(tmp_path, {"pipeline/x.py": b'import os\nkey = os.environ.get("ANTHROPIC_API_KEY")\n'})
+    # #898 round 13/16: neither provider API key name -- both now FAIL on
+    # their own (check_release_tree NAMED_API_KEYS); this row is about the
+    # generic REVIEW for a credential read, so it reads the one credential
+    # name a shipped file may still carry.
+    root = _tree(tmp_path, {"pipeline/x.py": b'import os\nkey = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")\n'})
     result = _load().check_tree(root, {})
     assert result.offenders == []
-    assert any("pipeline/x.py" in r and "ANTHROPIC_API_KEY" in r for r in result.reviews), result.reviews
+    assert any("pipeline/x.py" in r and "CLAUDE_CODE_OAUTH_TOKEN" in r for r in result.reviews), result.reviews
 
 
 # -- images ---------------------------------------------------------------------

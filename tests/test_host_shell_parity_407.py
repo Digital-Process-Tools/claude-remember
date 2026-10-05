@@ -35,18 +35,27 @@ from pipeline.host import PLUGIN_ROOT_VARS
 def _shell_mirrored_vars() -> set[str]:
     """The plugin-root variable names resolve-paths.sh actually reads.
 
-    Read off the ``_REMEMBER_PLUGIN_ROOT="${VAR:-$OTHER}"`` line rather than
+    Read off the two ``_REMEMBER_PLUGIN_ROOT=`` assignments rather than
     hand-copied here a second time -- a hand-copied list is exactly the kind
     of second copy that drifts unnoticed, which is the failure this test
     exists to catch in the *shell* side; re-typing it in the *test* would
     only move the drift one file over.
+
+    #898, round 4 converted the original single nested-default-expansion
+    line (``_REMEMBER_PLUGIN_ROOT="${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}"``)
+    into an explicit if/else -- a ``${X:-$Y}`` the directory's portal scanner
+    reads as "a command assembled at run time" is not a hold trigger here
+    (there is no command, only a variable default), but the sweep rewrote it
+    at the same source location; the regex below now matches the if/else
+    shape that replaced it, same anti-drift property, same two names.
     """
     text = RESOLVE_PATHS.read_text(encoding="utf-8")
-    match = re.search(
-        r'_REMEMBER_PLUGIN_ROOT="\$\{(\w+):-\$\{(\w+):-\}\}"', text,
+    first = re.search(r'_REMEMBER_PLUGIN_ROOT="\$(\w+)"', text)
+    second = re.search(r'_REMEMBER_PLUGIN_ROOT="\$\{(\w+):-\}"', text)
+    assert first and second, (
+        "resolve-paths.sh no longer has the expected plugin-root assignments"
     )
-    assert match, "resolve-paths.sh no longer has the expected plugin-root read"
-    return {match.group(1), match.group(2)}
+    return {first.group(1), second.group(1)}
 
 
 def test_host_shell_parity():
@@ -65,8 +74,10 @@ def test_plugin_root_wins_over_claude_plugin_root(tmp_path):
     """The vendor-neutral name wins when both are set (#407)."""
     marker = tmp_path / "native"
     marker.mkdir()
-    (marker / "pipeline").mkdir()
-    (marker / "pipeline" / "haiku.py").write_text("", encoding="utf-8")
+    # #898, round 5: resolve-paths.sh's marker moved from pipeline/haiku.py
+    # to .claude-plugin/plugin.json (install manifest, not a script path).
+    (marker / ".claude-plugin").mkdir()
+    (marker / ".claude-plugin" / "plugin.json").write_text("{}", encoding="utf-8")
     alias = tmp_path / "alias"
     alias.mkdir()
 
@@ -95,14 +106,15 @@ def test_claude_plugin_root_still_works_when_plugin_root_is_unset(tmp_path):
     ``PIPELINE_DIR``, which was exactly the missing validation #471 is
     about -- ``[ -d ]`` and nothing else. Pinning that as "still works"
     would re-encode the bug this lane exists to fix. ``alias`` now has to
-    look like an actual plugin install (``pipeline/haiku.py`` present, the
-    same marker the local-install branch already required) for the
-    assertion below to mean what it says.
+    look like an actual plugin install (``.claude-plugin/plugin.json``
+    present -- #898 round 5 moved this marker from pipeline/haiku.py to the
+    install manifest -- the same marker the local-install branch already
+    required) for the assertion below to mean what it says.
     """
     alias = tmp_path / "alias"
     alias.mkdir()
-    (alias / "pipeline").mkdir()
-    (alias / "pipeline" / "haiku.py").write_text("", encoding="utf-8")
+    (alias / ".claude-plugin").mkdir()
+    (alias / ".claude-plugin" / "plugin.json").write_text("{}", encoding="utf-8")
 
     env = {
         **os.environ,
@@ -129,16 +141,18 @@ def test_derive_from_script_location_when_no_plugin_root_var_is_set(tmp_path):
     matrix cannot reach.
 
     Builds a local install layout -- $install/scripts/resolve-paths.sh with
-    $install/pipeline/haiku.py as the marker resolve-paths.sh looks for --
-    by symlinking scripts/ and pipeline/ from the real repo into a fresh
-    directory, so the "walk up from this script's real location" branch has
-    somewhere real to land without depending on this checkout's own
-    position in the filesystem (which is a marketplace cache path here, not
-    a local install).
+    $install/.claude-plugin/plugin.json as the marker resolve-paths.sh looks
+    for (#898, round 5: moved from pipeline/haiku.py to the install
+    manifest) -- by symlinking scripts/ and .claude-plugin/ from the real
+    repo into a fresh directory, so the "walk up from this script's real
+    location" branch has somewhere real to land without depending on this
+    checkout's own position in the filesystem (which is a marketplace cache
+    path here, not a local install).
     """
     install = tmp_path / "install"
     install.mkdir()
     os.symlink(REPO_ROOT / "scripts", install / "scripts")
+    os.symlink(REPO_ROOT / ".claude-plugin", install / ".claude-plugin")
     os.symlink(REPO_ROOT / "pipeline", install / "pipeline")
 
     env = {

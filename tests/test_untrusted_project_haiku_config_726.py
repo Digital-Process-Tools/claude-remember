@@ -1,7 +1,7 @@
 """A cloned repository's own `.remember/config.json` must not choose the
-summarizer's credential or override ANTHROPIC_API_KEY-stripping policy (#726).
+summarizer's credential or which variables reach it (#726).
 
-`_configured_oauth_token()` / `_configured_anthropic_key_policy()`
+`_configured_oauth_token()` (since removed) / `_configured_drop_env()`
 (pipeline/haiku.py) read `haiku.*` from the merged config
 `lib-memory-dir.sh` builds, which deep-merges the per-project layer on top
 of user-global and bundled -- with no distinction, before this fix, between
@@ -218,23 +218,24 @@ class TestProjectLocalHaikuConfigIsUntrusted:
         merged, _ = _run_lib_and_dump_config(project, pipeline, home)
         assert "haiku" not in merged or "oauth_token" not in merged.get("haiku", {})
 
-    def test_project_haiku_anthropic_api_key_policy_does_not_reach_the_merged_config(
-        self, tmp_path
-    ):
-        """The unnamed second instance the recon for #726 flagged: the
-        project layer can ALSO set haiku.anthropic_api_key to force a strip
-        of the operator's own ANTHROPIC_API_KEY -- must not carry through
-        either."""
+    def test_project_haiku_list_does_not_replace_the_bundled_one(self, tmp_path):
+        """A list under `haiku` in an untrusted project file must not replace
+        the bundled layer's list in the merge -- the bundled value survives
+        untouched. (#898 rounds 15-16 had two such lists; round 17 moved both
+        back into code, but the merge rule is generic and stays pinned.)"""
         project, pipeline, home = _dirs(tmp_path)
-        (pipeline / "config.json").write_text(json.dumps({}))
+        bundled = ["CLAUDECODE", "CLAUDE_CODE_SESSION_ID"]
+        (pipeline / "config.json").write_text(
+            json.dumps({"haiku": {"example_list": bundled}})
+        )
         remember = project / ".remember"
         remember.mkdir()
         (remember / "config.json").write_text(
-            json.dumps({"haiku": {"anthropic_api_key": "strip"}})
+            json.dumps({"haiku": {"example_list": []}})
         )
 
         merged, _ = _run_lib_and_dump_config(project, pipeline, home)
-        assert merged.get("haiku", {}).get("anthropic_api_key") != "strip"
+        assert merged.get("haiku", {}).get("example_list") == bundled
 
     def test_project_haiku_removal_does_not_touch_other_project_keys(self, tmp_path):
         """Positive control: a non-haiku key from the SAME untrusted project
@@ -879,6 +880,52 @@ class TestMalformedTrustedConfigDisclosure:
 
         assert merged["cooldowns"]["save_seconds"] == 222
         assert "lib-memory-dir" not in stderr, stderr
+
+
+_TRUSTED_DROP_MSG = (
+    "sanitizing a trusted config layer failed (unreadable file or malformed "
+    "JSON) -- bundled config, user-global config, and project config (when it "
+    "is not the untrusted-haiku source) are all reached here, and one of them "
+    "was dropped; the remaining layers still applied"
+)
+
+
+class TestDropWarningGoesToReportErrorWhenDefined:
+    """#898 (I): the three drop warnings share one helper. Its contract, pinned
+    on the trusted-layer drop: with report_error() in scope the message goes
+    there, verbatim, tagged lib-memory-dir; without it, the same text goes to
+    stderr as one `[lib-memory-dir] WARNING: ...` line."""
+
+    def _run(self, tmp_path, define_report_error):
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(json.dumps({}))
+        (home / ".remember").mkdir(parents=True)
+        (home / ".remember" / "config.json").write_text('{"broken": ')
+        stub = ('report_error() { printf "REPORTED [%s] %s\\n" "$1" "$2" >&2; }'
+                if define_report_error else ":")
+        script = f"""
+        export PROJECT_DIR={project}
+        export PIPELINE_DIR={pipeline}
+        export HOME={home}
+        {stub}
+        source {DETECT_SCRIPT}
+        source {LIB_SCRIPT}
+        """
+        env = {**os.environ, "PATH": _path_without_jq(tmp_path)}
+        result = subprocess.run(["bash", "-c", script], env=env, check=False,
+                                capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, result.stderr
+        return result.stderr.splitlines()
+
+    def test_without_report_error_the_warning_is_one_stderr_line(self, tmp_path):
+        lines = self._run(tmp_path, define_report_error=False)
+        assert f"[lib-memory-dir] WARNING: {_TRUSTED_DROP_MSG}" in lines, lines
+        assert not any(line.startswith("REPORTED") for line in lines), lines
+
+    def test_with_report_error_the_warning_goes_through_it(self, tmp_path):
+        lines = self._run(tmp_path, define_report_error=True)
+        assert f"REPORTED [lib-memory-dir] {_TRUSTED_DROP_MSG}" in lines, lines
+        assert not any("WARNING" in line for line in lines), lines
 
 
 def test_run_lib_sanity_check_still_works():

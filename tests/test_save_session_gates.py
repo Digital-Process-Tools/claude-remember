@@ -183,12 +183,23 @@ def _make_env(tmp_path: Path, *, exchanges: int, humans: int, position: int = 50
     (plugin / "scripts").mkdir(parents=True)
     (plugin / "pipeline").mkdir(parents=True)
     (plugin / "pipeline" / "__init__.py").write_text("")
-    (plugin / "pipeline" / "haiku.py").write_text("# marker\n")
+    # #898, round 5: resolve-paths.sh's own root-detection marker moved from
+    # pipeline/haiku.py to .claude-plugin/plugin.json (an install manifest,
+    # not a script path -- the directory's COMMAND_SCRIPT_NOT_FOLLOWED hold).
+    (plugin / ".claude-plugin").mkdir(parents=True)
+    (plugin / ".claude-plugin" / "plugin.json").write_text("{}", encoding="utf-8")
     (plugin / "pipeline" / "shell.py").write_text(STUB_SHELL)
     for script in ("save-session.sh", "resolve-paths.sh", "detect-tools.sh",
                    "bootstrap-dirs.sh", "log.sh", "lib-memory-dir.sh",
                    "lib-lock.sh", "lib-staging-lock.sh", "lib-slug.sh",
-                   "lib-clock.sh"):
+                   "lib-clock.sh",
+                   # #898 rounds 7-8: the config flatten/merge programs and the
+                   # per-key fallback reader moved out of log.sh and
+                   # lib-memory-dir.sh into these files, which ship beside the
+                   # .sh scripts in every install. Without them the stub plugin
+                   # cannot read its own config.json and says so on stderr.
+                   "cfg_flatten.jq", "cfg_flatten.py", "cfg_merge.py",
+                   "jq_fallback_get.py"):
         (plugin / "scripts" / script).write_text((REPO_ROOT / "scripts" / script).read_text())
 
     cfg = {"cooldowns": {"save_seconds": 0, "ndc_seconds": 999999},

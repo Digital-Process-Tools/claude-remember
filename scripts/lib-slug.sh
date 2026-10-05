@@ -20,6 +20,25 @@
 [ -n "${_REMEMBER_LIB_SLUG_LOADED:-}" ] && return 0
 _REMEMBER_LIB_SLUG_LOADED=1
 
+# #898 round 5: "${PYTHON:-python3}" as a bare command word is a computed
+# program name (UNPINNED_NPX). This file is sourceable WITHOUT
+# detect-tools.sh (see the header above), so it has its own literal-dispatch
+# runner; lib-memory-dir.sh and log.sh, which both source this file, share
+# it (#898). Unset PYTHON means python3; an unrecognised one, a silent 127.
+_remember_slug_run_python() {
+    if [ "${PYTHON:-python3}" = python3 ]; then
+        python3 "$@"
+    elif [ "${PYTHON:-python3}" = python ]; then
+        python "$@"
+    elif [ "${PYTHON:-python3}" = "py -3" ]; then
+        py -3 "$@"
+    elif [ "${PYTHON:-python3}" = py ]; then
+        py "$@"
+    else
+        return 127
+    fi
+}
+
 # --- CRLF-safe session dir slug ---
 # Replaces all non-alphanumeric chars with dashes. Must match Claude Code's
 # own slug pattern for its ~/.claude/projects/<slug>/ session directories.
@@ -82,7 +101,12 @@ _remember_build_slug_sed
 # with enough lines would have been summarized into memory as if it were the
 # live session.
 claude_projects_dir() {
-    local _root="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+    local _root
+    if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+        _root="$CLAUDE_CONFIG_DIR"
+    else
+        _root="$HOME/.claude"
+    fi
 
     # CLAUDE_CONFIG_DIR is inherited from the environment, so on Windows it
     # arrives in whatever form the user typed — usually the native
@@ -114,15 +138,14 @@ claude_projects_dir() {
     if [ -n "$_stripped" ]; then
         _root="$_stripped"
     else
-        case "$_root" in
-            # "/" or "///" — the filesystem root, and "/projects" is what that
-            # means. Empty is the right value to append to.
-            /*) _root="" ;;
-            # "\" alone is a RELATIVE path. Stripping it to nothing would turn
-            # it into an absolute one, quietly pointing somewhere else entirely,
-            # so it stays exactly as it arrived.
-            *) ;;
-        esac
+        # "/" or "///" — the filesystem root, and "/projects" is what that
+        # means. Empty is the right value to append to.
+        # "\" alone is a RELATIVE path. Stripping it to nothing would turn
+        # it into an absolute one, quietly pointing somewhere else entirely,
+        # so it stays exactly as it arrived.
+        if [ "${_root#/}" != "$_root" ]; then
+            _root=""
+        fi
     fi
 
     printf '%s/projects' "$_root"
@@ -170,13 +193,10 @@ claude_projects_dir() {
 # be untestable everywhere except a Linux runner, and a fix nobody can exercise
 # locally is a fix nobody maintains.
 _remember_should_check_utf8() {
-    [ "${REMEMBER_UTF8_STRICT:-0}" = "1" ] && return 0
     # ${OSTYPE:-}: bash always sets it, but this file is sourced by callers
     # running under `set -u`, and one unguarded expansion there aborts the hook.
-    case "${OSTYPE:-}" in
-        linux*) return 0 ;;
-    esac
-    return 1
+    local _os="${OSTYPE:-}"
+    [ "${REMEMBER_UTF8_STRICT:-0}" = "1" ] || [ "${_os#linux}" != "$_os" ]
 }
 
 # The two alphabets, for the drive-letter fold below. Held as constants so the
@@ -229,10 +249,16 @@ session_dir_slug() {
         # Claude Code would slug it literally. Stripping unconditionally would
         # rename that store. Same reason pipeline/slug.py is untouched — it
         # never runs cygpath, so it never sees a prefix this plugin put there.
-        case "$winpath" in
-            '\\?\UNC\'*) winpath='\\'"${winpath#'\\?\UNC\'}" ;;
-            '\\?\'*)     winpath="${winpath#'\\?\'}" ;;
-        esac
+        # Expansion tests with each prefix held in a variable, not quoted
+        # literals in a case pattern (#898 round 9, a directory-scanner
+        # hold shape). The UNC form is tested first: it also starts with
+        # the plain long-path prefix.
+        local _unc_pfx='\\?\UNC\' _long_pfx='\\?\'
+        if [ "${winpath#"$_unc_pfx"}" != "$winpath" ]; then
+            winpath='\\'"${winpath#"$_unc_pfx"}"
+        elif [ "${winpath#"$_long_pfx"}" != "$winpath" ]; then
+            winpath="${winpath#"$_long_pfx"}"
+        fi
         path="$winpath"
     fi
     # Lowercase the drive letter to match Claude Code — unconditionally, not
@@ -249,7 +275,7 @@ session_dir_slug() {
     # would fix one reporter and rename every other store — trading a loud bug
     # for a quiet one. Only the drive letter is touched: every component after
     # it keeps its case, on Windows and in Claude Code's slug alike.
-    # `?:*` and not `[A-Z]:*`: a bracket range in a case pattern follows the
+    # `?:` and not `[A-Z]:`: a bracket range in a glob pattern follows the
     # locale's collation, and under en_US.UTF-8 `[A-Z]` matches lower-case
     # letters too — the same trap that made the slug sed locale-proof by hand
     # above. The membership test below is the range check, done with a literal
@@ -257,14 +283,12 @@ session_dir_slug() {
     # upper-case ASCII letter leaves the whole prefix intact and nothing is
     # folded. Without that, a locale-widened match would index past the end of
     # the lower-case alphabet and silently DELETE the drive letter.
-    case "$path" in
-        ?:*)
-            _drive_at="${_REMEMBER_DRIVE_UPPER%%"${path:0:1}"*}"
-            if [ "$_drive_at" != "$_REMEMBER_DRIVE_UPPER" ]; then
-                path="${_REMEMBER_DRIVE_LOWER:${#_drive_at}:1}${path:1}"
-            fi
-            ;;
-    esac
+    if [ "${path#?:}" != "$path" ]; then
+        _drive_at="${_REMEMBER_DRIVE_UPPER%%"${path:0:1}"*}"
+        if [ "$_drive_at" != "$_REMEMBER_DRIVE_UPPER" ]; then
+            path="${_REMEMBER_DRIVE_LOWER:${#_drive_at}:1}${path:1}"
+        fi
+    fi
     # The UTF-8 well-formedness table, one expression per row. Ranges matter:
     # a lead byte does not accept every continuation. \355 (U+D800-DFFF, the
     # surrogate block) and the overlong \340/\360 forms are not valid UTF-8,
@@ -337,35 +361,36 @@ session_dir_slug() {
     # costs nothing; the honest label is "empirically necessary, mechanism
     # unconfirmed".
     #
-    # The result is stashed in a flag rather than acted on inside the `case`,
+    # The result is stashed in a flag rather than acted on inside the test,
     # because the branch below can return early and would leave the caller's
     # locale changed.
     local _high_byte=0 _lc_was_set="${LC_ALL+set}" _lc_prev="${LC_ALL:-}"
     LC_ALL=C
-    case "$path" in
-        *[!$'\001'-$'\177']*) _high_byte=1 ;;
-    esac
+    # The bracket is built in a variable, unquoted in the pattern so it stays
+    # a pattern: the same bytes $'\001'-$'\177' the old `case` arm held.
+    local _hb_glob="[!"$'\001'"-"$'\177'"]"
+    if [[ "$path" == *$_hb_glob* ]]; then
+        _high_byte=1
+    fi
     if [ -n "$_lc_was_set" ]; then LC_ALL="$_lc_prev"; else unset LC_ALL; fi
 
-    case "$_high_byte" in
-        1)
-            if command -v iconv >/dev/null 2>&1 \
-                && ! printf '%s' "$path" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1; then
-                local _py_slug="${PIPELINE_DIR:-}/pipeline/slug.py"
-                if [ -f "$_py_slug" ]; then
-                    local _decoded
-                    # Resolves PYTHON on first use (#662); no-op outside lazy
-                    # mode, same as lib-memory-dir.sh's copy of this guard.
-                    declare -f _remember_python >/dev/null 2>&1 && _remember_python
-                    _decoded=$("${PYTHON:-python3}" "$_py_slug" "$path" 2>/dev/null) \
-                        && [ -n "$_decoded" ] && { printf '%s\n' "$_decoded"; return 0; }
-                fi
-                # No Python to ask: fall through to the byte table, which is
-                # wrong for this input in a known and documented way rather than
-                # failing.
+    if [ "$_high_byte" = 1 ]; then
+        if command -v iconv >/dev/null 2>&1 \
+            && ! printf '%s' "$path" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1; then
+            local _py_slug="${PIPELINE_DIR:-}/pipeline/slug.py"
+            if [ -f "$_py_slug" ]; then
+                local _decoded
+                # Resolves PYTHON on first use (#662); no-op outside lazy
+                # mode, same as lib-memory-dir.sh's copy of this guard.
+                declare -f _remember_python >/dev/null 2>&1 && _remember_python
+                _decoded=$(_remember_slug_run_python "$_py_slug" "$path" 2>/dev/null) \
+                    && [ -n "$_decoded" ] && { printf '%s\n' "$_decoded"; return 0; }
             fi
-            ;;
-    esac
+            # No Python to ask: fall through to the byte table, which is
+            # wrong for this input in a known and documented way rather than
+            # failing.
+        fi
+    fi
     fi
 
     path=${path//$'\n'/-}
@@ -392,7 +417,7 @@ session_dir_slug() {
     if [ -f "$_slug_py" ]; then
         # Resolves PYTHON on first use (#662); no-op outside lazy mode.
         declare -f _remember_python >/dev/null 2>&1 && _remember_python
-        _hash=$("${PYTHON:-python3}" "$_slug_py" --hash "$_orig" 2>/dev/null) || _hash=""
+        _hash=$(_remember_slug_run_python "$_slug_py" --hash "$_orig" 2>/dev/null) || _hash=""
     else
         _hash=""
     fi
@@ -402,9 +427,9 @@ session_dir_slug() {
     # appended verbatim — a NEW wrong directory rather than the old wrong one.
     # Base36 is the whole alphabet a real hash can use, so anything else is not
     # one, and falling back is safer than trusting it.
-    case "$_hash" in
-        *[!0-9a-z]*) _hash="" ;;
-    esac
+    if [[ "$_hash" == *[!0-9a-z]* ]]; then
+        _hash=""
+    fi
 
     # No usable hash (no Python, no plugin dir): emit the untruncated slug —
     # wrong, but exactly as wrong as before, and the missing-session-directory

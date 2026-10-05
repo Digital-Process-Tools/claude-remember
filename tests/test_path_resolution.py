@@ -25,6 +25,17 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def _write_plugin_manifest(plugin: str) -> None:
+    """Give a fake plugin root the marker resolve-paths.sh probes for.
+
+    Since #898 (round 5) the plugin root is recognised by its install
+    manifest, `.claude-plugin/plugin.json`, not by `pipeline/haiku.py`.
+    """
+    os.makedirs(os.path.join(plugin, ".claude-plugin"), exist_ok=True)
+    with open(os.path.join(plugin, ".claude-plugin", "plugin.json"), "w") as f:
+        f.write("{}")
+
+
 def _create_local_install(base: str) -> tuple[str, str]:
     """Create a local install layout and return (project_dir, plugin_dir).
 
@@ -43,9 +54,10 @@ def _create_local_install(base: str) -> tuple[str, str]:
     os.makedirs(os.path.join(project, ".remember", "tmp"))
     os.makedirs(os.path.join(project, ".remember", "logs"))
 
-    # Create a marker file so resolve-paths.sh can detect the plugin root
     with open(os.path.join(plugin, "pipeline", "haiku.py"), "w") as f:
         f.write("# marker\n")
+    # resolve-paths.sh detects the plugin root by its install manifest (#898)
+    _write_plugin_manifest(plugin)
 
     return project, plugin
 
@@ -72,6 +84,7 @@ def _create_marketplace_install(base: str) -> tuple[str, str, str]:
 
     with open(os.path.join(plugin, "pipeline", "haiku.py"), "w") as f:
         f.write("# marker\n")
+    _write_plugin_manifest(plugin)
 
     return project, plugin, cache_base
 
@@ -364,6 +377,7 @@ class TestResolvePathsSymlink:
         os.makedirs(os.path.join(real_plugin, "pipeline"))
         with open(os.path.join(real_plugin, "pipeline", "haiku.py"), "w") as f:
             f.write("# marker\n")
+        _write_plugin_manifest(real_plugin)
 
         # Create project with symlinked .claude/remember -> real_plugin
         project = os.path.join(str(tmp_path), "my-project")
@@ -567,7 +581,7 @@ def _make_path_probe(plugin_dir: str, script_name: str) -> str:
     log_stub = os.path.join(plugin_dir, "scripts", "log.sh")
     if not os.path.exists(log_stub):
         with open(log_stub, "w") as f:
-            f.write('#!/bin/bash\nlog() { :; }\nlog_tokens() { :; }\n'
+            f.write('#!/bin/bash\nlog() { :; }\nlog_usage() { :; }\n'
                     'assign_kv() { :; }\nconfig() { echo "$2"; }\n'
                     'dispatch() { :; }\nrotate_logs() { :; }\n'
                     'REMEMBER_TZ="UTC"\n')
@@ -769,7 +783,8 @@ def _create_full_plugin_copy(plugin_dir: str) -> None:
     """Copy the entire real plugin into a test install location."""
     import shutil
     repo = os.path.join(os.path.dirname(__file__), "..")
-    for item in ("scripts", "pipeline", "prompts", "hooks", "hooks.d", "skills"):
+    for item in ("scripts", "pipeline", "prompts", "hooks", "hooks.d", "skills",
+                 ".claude-plugin"):
         src = os.path.join(repo, item)
         if os.path.isdir(src):
             shutil.copytree(
@@ -1363,7 +1378,8 @@ class TestWindowsCompatIssue11:
         """resolve-paths.sh contains the OSTYPE=msys|cygwin normalization block."""
         with open(os.path.join(REPO_ROOT, "scripts", "resolve-paths.sh")) as f:
             content = f.read()
-        assert 'msys|cygwin' in content, (
+        # An if/elif since #898 round 19 removed every shipped `case`.
+        assert '[ "$OSTYPE" = msys ] || [ "$OSTYPE" = cygwin ]' in content, (
             "resolve-paths.sh missing the Git Bash / MSYS / Cygwin normalization case"
         )
         assert 'BASH_REMATCH' in content, (

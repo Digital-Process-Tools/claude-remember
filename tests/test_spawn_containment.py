@@ -81,7 +81,7 @@ def _recursive_fake_claude(tmp_path: Path, ledger: Path) -> Path:
 
     This is the whole point of the test: the child is launched with `env -i`,
     keeping only PATH and HOME (and the override that locates this script). The
-    marker `_child_env()` sets, and every CLAUDE* variable, are gone — so any
+    marker `_summarizer_environment()` sets, and every CLAUDE* variable, are gone — so any
     containment that depends on them is absent by construction, and only a bound
     the spawner enforces for itself can hold.
     """
@@ -305,17 +305,26 @@ def test_save_session_does_not_book_a_decline_as_a_summary_failure(tmp_path):
 
 
 def test_the_child_env_does_not_carry_the_parents_project_dir(monkeypatch):
-    """`CLAUDE_PROJECT_DIR` is not in the `CLAUDE_CODE_*` family `_child_env()`
-    strips, so it was inherited by the nested session — while both the #204
-    report and `resolve-paths.sh`'s own comments describe the child as having
-    none. Claude Code 2.1.219 overwrites it from the sandbox cwd and the leak is
-    inert there; a CLI that honoured the inherited value would instead point the
-    summarizer at the real project, which is the failure @ehutchinsonSFDC saw.
+    """`CLAUDE_PROJECT_DIR` was not in the `CLAUDE_CODE_*` family the old
+    prefix strip covered, so it was inherited by the nested session — while
+    both the #204 report and `resolve-paths.sh`'s own comments describe the
+    child as having none. Claude Code 2.1.219 overwrites it from the sandbox
+    cwd and the leak is inert there; a CLI that honoured the inherited value
+    would instead point the summarizer at the real project, which is the
+    failure @ehutchinsonSFDC saw. It is on the literal
+    `_without_session_env` list (#898 rounds 15, 17).
     """
-    from pipeline.haiku import _child_env
+    import os
 
+    from pipeline.haiku import _summarizer_environment
+
+    monkeypatch.delenv("REMEMBER_CONFIG", raising=False)
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/dev/real-project")
-    assert "CLAUDE_PROJECT_DIR" not in _child_env()
+    with _summarizer_environment():
+        assert "CLAUDE_PROJECT_DIR" not in os.environ
+    assert os.environ.get("CLAUDE_PROJECT_DIR") == "/Users/dev/real-project", (
+        "positive control: the variable was there to remove, and comes back"
+    )
 
 
 def test_a_released_slot_stops_counting_and_releasing_twice_is_harmless(monkeypatch, tmp_path):
@@ -383,7 +392,7 @@ def test_a_nonsense_cap_falls_back_to_the_default(monkeypatch, value):
 
     monkeypatch.setenv(spawn_guard.MAX_CONCURRENT_ENV, value)
     assert spawn_guard._positive_int(
-        spawn_guard.MAX_CONCURRENT_ENV, spawn_guard.DEFAULT_MAX_CONCURRENT
+        value, spawn_guard.DEFAULT_MAX_CONCURRENT
     ) == spawn_guard.DEFAULT_MAX_CONCURRENT
 
 

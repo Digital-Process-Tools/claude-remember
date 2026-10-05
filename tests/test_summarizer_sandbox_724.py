@@ -23,8 +23,12 @@ import json
 import os
 import sys
 import tempfile
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from pipeline.haiku import (
@@ -141,7 +145,7 @@ def test_codex_child_env_keeps_what_the_cli_needs(monkeypatch):
     assert env.get("HOME") == "/home/example"
 
 
-# ── #751: the allow-list must not drop Windows or credential/proxy vars ────
+# ── #751: the allow-list must not drop Windows vars (proxies: round 18) ────
 
 
 def test_codex_child_env_keeps_windows_process_vars(monkeypatch):
@@ -160,12 +164,77 @@ def test_codex_child_env_keeps_windows_process_vars(monkeypatch):
     assert env.get("PATHEXT") == ".COM;.EXE;.BAT"
 
 
-def test_codex_child_env_keeps_the_codex_api_key(monkeypatch):
-    """#751: dropping CODEX_API_KEY breaks anyone who authenticates Codex
-    via env var rather than a filesystem auth.json."""
-    monkeypatch.setenv("CODEX_API_KEY", "sk-codex-example")
+# #898 rounds 16-17: the allow-list names no credential, and it is literal
+# code (round 17), not config: no config layer -- trusted or not -- can add
+# Codex's own env-var credential to it.
+_CODEX_CREDENTIAL = "CODEX_API_KEY"
+
+
+@pytest.fixture
+def isolated_config(monkeypatch, tmp_path):
+    """No user config, no merged config: only the plugin's bundled default
+    (the repo's own config.json) answers, whatever the developer's own
+    ~/.remember/config.json says."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("REMEMBER_DIR", str(tmp_path / "remember"))
+    monkeypatch.delenv("REMEMBER_CONFIG", raising=False)
+    monkeypatch.delenv("MEMORY_PROJECT_DIR", raising=False)
+    return home
+
+
+def _with_credential_listed() -> list:
+    """What a round-16 operator config would have listed: the old shipped
+    list plus the Codex credential's name."""
+    return ["PATH", "HOME", "CODEX_HOME", "HTTPS_PROXY", _CODEX_CREDENTIAL]
+
+
+def test_codex_child_env_drops_the_codex_api_key_by_default(monkeypatch, isolated_config):
+    """#898 rounds 16-17: the allow-list names no credential, so an env-var
+    Codex credential does NOT reach the child. Positive control in the same
+    run: PATH, on the list, still does -- an env that passed nothing would
+    not pass this test."""
+    monkeypatch.setenv(_CODEX_CREDENTIAL, "sk-codex-example")
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
     env = _codex_child_env()
-    assert env.get("CODEX_API_KEY") == "sk-codex-example"
+    assert _CODEX_CREDENTIAL not in env
+    assert env.get("PATH") == "/usr/bin:/bin"
+
+
+def test_codex_child_env_ignores_the_operators_own_allow_list(monkeypatch, isolated_config):
+    """#898 round 17: round 16 let an operator add the Codex credential's
+    name in ~/.remember/config.json; the list is literal code now, so that
+    config no longer widens it. Positive control: PATH still passes."""
+    d = isolated_config / ".remember"
+    d.mkdir()
+    (d / "config.json").write_text(json.dumps({"haiku": {
+        "codex_env_allow": _with_credential_listed(),
+    }}), encoding="utf-8")
+    monkeypatch.setenv(_CODEX_CREDENTIAL, "sk-codex-example")
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    env = _codex_child_env()
+    assert _CODEX_CREDENTIAL not in env
+    assert env.get("PATH") == "/usr/bin:/bin"
+
+
+def test_codex_child_env_ignores_a_cloned_repos_own_allow_list(monkeypatch, isolated_config, tmp_path):
+    """#726: a cloned repository's own .remember/config.json cannot widen
+    the allow-list -- not even by one credential name."""
+    project = tmp_path / "project"
+    remember = project / ".remember"
+    remember.mkdir(parents=True)
+    (remember / "config.json").write_text(json.dumps({"haiku": {
+        "codex_env_allow": _with_credential_listed(),
+    }}), encoding="utf-8")
+    monkeypatch.setenv("MEMORY_PROJECT_DIR", str(project))
+    monkeypatch.setenv("REMEMBER_DIR", str(remember))
+    monkeypatch.setenv(_CODEX_CREDENTIAL, "sk-codex-example")
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    env = _codex_child_env()
+    assert _CODEX_CREDENTIAL not in env
+    assert env.get("PATH") == "/usr/bin:/bin"
 
 
 def _env_value_ci(env: dict, name: str):
@@ -194,73 +263,57 @@ def _env_value_ci(env: dict, name: str):
     return None
 
 
-def test_codex_child_env_keeps_proxy_and_ca_vars(monkeypatch):
-    """#751: dropping these breaks anyone behind a proxy or a custom CA
-    bundle, on every platform. Uses one case per variable here -- the
-    OTHER case is exercised by
-    test_codex_child_env_keeps_lowercase_proxy_vars_too below, kept in a
-    SEPARATE test so the two cases of the same variable are never set in
-    the same run (#792: they are not independently observable on
-    Windows, where os.environ folds casing)."""
+# #898 round 18 (maintainer decision): the proxy and CA-bundle variables #751
+# added are off the allow-list, in either casing. No user ever asked for proxy
+# support (#751 was a reasoned audit finding) and #798 had flagged the same
+# names as a leak risk. Behind a proxy, REMEMBER_SUMMARIZER=claude inherits the
+# full environment. Each test below pairs the "does not reach" assertion with
+# PATH reaching the child in the same run.
+
+
+def test_codex_child_env_drops_proxy_and_ca_vars(monkeypatch):
+    """Round 18: the upper-case proxy names and both CA-bundle names do not
+    reach the child. One case per variable here; the lowercase case is its
+    own test below, so the two are never set in the same run (#792: they are
+    one variable on Windows, where os.environ folds casing)."""
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
     monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:8080")
     monkeypatch.setenv("HTTP_PROXY", "http://proxy.example:8080")
     monkeypatch.setenv("NO_PROXY", "localhost")
     monkeypatch.setenv("SSL_CERT_FILE", "/etc/ssl/custom-ca.pem")
     monkeypatch.setenv("NODE_EXTRA_CA_CERTS", "/etc/ssl/custom-ca.pem")
     env = _codex_child_env()
-    assert _env_value_ci(env, "HTTPS_PROXY") == "http://proxy.example:8080"
-    assert _env_value_ci(env, "HTTP_PROXY") == "http://proxy.example:8080"
-    assert _env_value_ci(env, "NO_PROXY") == "localhost"
-    assert env.get("SSL_CERT_FILE") == "/etc/ssl/custom-ca.pem"
-    assert env.get("NODE_EXTRA_CA_CERTS") == "/etc/ssl/custom-ca.pem"
+    assert env.get("PATH") == "/usr/bin:/bin", "positive control"
+    for name in ("HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY",
+                 "SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS"):
+        assert _env_value_ci(env, name) is None, name
 
 
-def test_codex_child_env_keeps_lowercase_proxy_vars_too(monkeypatch):
-    """#751: some HTTP client libraries only ever check the lowercase
-    form. Sets ONLY the lowercase form -- never alongside the uppercase
-    one in the same test (#792, see _env_value_ci's own docstring) -- so
-    this proves the lowercase allow-list entries actually do something,
-    without depending on a coexistence Windows cannot produce."""
+def test_codex_child_env_drops_lowercase_proxy_vars_too(monkeypatch):
+    """Round 18: the lowercase spellings (#751/#792 read them on POSIX) do
+    not reach the child either."""
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
     monkeypatch.setenv("https_proxy", "http://proxy.example:9090")
     monkeypatch.setenv("http_proxy", "http://proxy.example:9090")
     monkeypatch.setenv("no_proxy", "localhost")
     env = _codex_child_env()
-    assert _env_value_ci(env, "https_proxy") == "http://proxy.example:9090"
-    assert _env_value_ci(env, "http_proxy") == "http://proxy.example:9090"
-    assert _env_value_ci(env, "no_proxy") == "localhost"
+    assert env.get("PATH") == "/usr/bin:/bin", "positive control"
+    for name in ("https_proxy", "http_proxy", "no_proxy"):
+        assert _env_value_ci(env, name) is None, name
 
 
-def test_codex_child_env_matches_a_windows_style_folded_environ(monkeypatch):
-    """#792, exercised directly rather than only inferred from CI: real
-    Windows `os.environ` folds EVERY key to uppercase at process-startup
-    time -- confirmed by reading CPython's own `os.py` (`_createenviron`'s
-    `nt` branch sets `encodekey = key.upper()` and applies it while
-    building the initial `data` dict from the inherited environment, not
-    only when Python itself calls `__setitem__`) -- so
-    `os.environ.items()` there NEVER yields a key in the exact case a
-    user originally set a variable under, only ever uppercase. Simulated
-    here by replacing `pipeline.haiku.os.environ` outright with a plain
-    dict whose only key is already uppercase, which is exactly the shape
-    a real Windows process would hand to `_codex_child_env()` regardless
-    of which case the underlying variable was actually set under.
-
-    NOTE on what this test does and does not pin: because the allow-list
-    itself already carries the canonical UPPERCASE name for every
-    variable, a Windows-folded key matches it whether the comparison is
-    case-sensitive or case-insensitive -- this test passes either way, and
-    is not what distinguishes the two (that is
-    test_codex_child_env_keeps_lowercase_proxy_vars_too above, which only
-    makes sense on a case-preserving platform and is genuinely red without
-    the #792 fix). What this test guards against is a DIFFERENT, later
-    regression: code that reads `_codex_child_env()`'s OUTPUT expecting a
-    specific-cased key (the exact mistake the original #751 test made,
-    which is how #792 was found in the first place) would break silently
-    against a real Windows environ shaped like this one."""
-    fake_windows_environ = {"HTTPS_PROXY": "http://proxy.example:7070"}
+def test_codex_child_env_on_a_windows_style_folded_environ(monkeypatch):
+    """#792's shape, exercised directly: real Windows `os.environ` folds
+    EVERY key to uppercase (CPython `os.py`, `_createenviron`'s `nt`
+    branch), simulated by replacing `pipeline.haiku.os.environ` with a plain
+    dict whose keys are already uppercase. Round 18: the folded proxy key
+    is dropped; PATH, folded the same way, still passes (positive control)."""
+    fake_windows_environ = {"PATH": "C:/bin", "HTTPS_PROXY": "http://proxy.example:7070"}
     monkeypatch.setattr("pipeline.haiku.os.environ", fake_windows_environ)
     env = _codex_child_env()
-    assert _env_value_ci(env, "https_proxy") == "http://proxy.example:7070"
-    assert _env_value_ci(env, "HTTPS_PROXY") == "http://proxy.example:7070"
+    assert _env_value_ci(env, "PATH") == "C:/bin", "positive control"
+    assert _env_value_ci(env, "https_proxy") is None
+    assert _env_value_ci(env, "HTTPS_PROXY") is None
 
 
 def test_codex_child_env_still_excludes_unrelated_secrets_after_widening(monkeypatch):
@@ -288,9 +341,9 @@ def test_call_codex_uses_the_allowlisted_env(mock_run, monkeypatch):
 # the model spawns inside the sandbox does not automatically inherit that
 # same allow-listed dict; Codex's own `shell_environment_policy` is the
 # mechanism that governs what environment SPAWNED commands receive, and it
-# must be set independently of `_codex_child_env` (#751's allow-list stays
-# necessary for Codex's own auth/proxy needs; it is not sufficient for what
-# a model-issued shell command can read).
+# must be set independently of `_codex_child_env` (the allow-list stays
+# necessary for Codex's own process; it is not sufficient for what a
+# model-issued shell command can read).
 
 
 def test_build_codex_cmd_denies_spawned_commands_the_allowlisted_env():
@@ -301,10 +354,11 @@ def test_build_codex_cmd_denies_spawned_commands_the_allowlisted_env():
     2026-09-26): `shell_environment_policy` is a real, documented dotted-path
     config key, settable via `-c` independently of whether config.toml is
     loaded (this call already passes `--ignore-user-config`). Without this,
-    #751's widened `_codex_child_env` allow-list -- CODEX_API_KEY, the proxy
-    vars, the CA bundle -- is exactly as reachable by a transcript-injected
-    shell command as it is by Codex's own process, because nothing here
-    currently distinguishes the two (#798, gate-3 audit)."""
+    whatever `_codex_child_env` passes (at the time of #798: an
+    operator-added Codex credential, the proxy vars, the CA bundle; since
+    #898 rounds 16-18, none of those) is exactly as reachable by a
+    transcript-injected shell command as it is by Codex's own process,
+    because nothing here would distinguish the two (#798, gate-3 audit)."""
     cmd = _build_codex_cmd("/tmp/out.txt", "/tmp/cwd")
     assert "-c" in cmd
     override_index = cmd.index("-c") + 1
@@ -312,23 +366,24 @@ def test_build_codex_cmd_denies_spawned_commands_the_allowlisted_env():
 
 
 @patch("pipeline.haiku.subprocess.run")
-def test_call_codex_still_authenticates_and_proxies_while_denying_spawned_commands(
-    mock_run, monkeypatch
+def test_call_codex_passes_path_but_no_proxy_while_denying_spawned_commands(
+    mock_run, monkeypatch, isolated_config
 ):
-    """Positive control for #798: the fix must not regress #751/#792 --
-    Codex's OWN process (the `env=` kwarg subprocess.run receives) still
-    gets CODEX_API_KEY and the proxy vars, in the SAME call whose argv also
-    carries the `shell_environment_policy.inherit=none` override that keeps
-    those same values from reaching a command Codex spawns internally. If
-    this test's first two assertions failed, the fix would have re-broken
-    #751 while "fixing" #798 -- the two must hold together."""
-    monkeypatch.setenv("CODEX_API_KEY", "sk-codex-example")
+    """Positive control for #798: Codex's OWN process (the `env=` kwarg
+    subprocess.run receives) still gets PATH, in the SAME call whose argv
+    also carries the `shell_environment_policy.inherit=none` override.
+    #898 rounds 16-17: the Codex credential reaches neither. Round 18
+    (maintainer decision): neither does the proxy -- behind one, use
+    REMEMBER_SUMMARIZER=claude."""
+    monkeypatch.setenv(_CODEX_CREDENTIAL, "sk-codex-example")
     monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:8080")
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
     _write_codex_output.next_text = "## codex thing"
     mock_run.side_effect = _write_codex_output
     _call_codex("prompt")
     env = mock_run.call_args[1]["env"]
     cmd = mock_run.call_args[0][0]
-    assert env.get("CODEX_API_KEY") == "sk-codex-example"
-    assert _env_value_ci(env, "HTTPS_PROXY") == "http://proxy.example:8080"
+    assert _env_value_ci(env, "PATH") == "/usr/bin:/bin", "positive control"
+    assert _env_value_ci(env, "HTTPS_PROXY") is None
+    assert _CODEX_CREDENTIAL not in env
     assert "shell_environment_policy.inherit=none" in cmd

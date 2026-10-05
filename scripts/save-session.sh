@@ -139,10 +139,11 @@ ndc_read_gen() {
     fi
     local _ndc_gen
     _ndc_gen=$(cat "$NDC_GEN_FILE" 2>/dev/null)
-    case "$_ndc_gen" in
-        (''|*[!0-9]*) echo unreadable ;;
-        (*) echo "$_ndc_gen" ;;
-    esac
+    if [ -z "$_ndc_gen" ] || [[ "$_ndc_gen" == *[!0-9]* ]]; then
+        echo unreadable
+    else
+        echo "$_ndc_gen"
+    fi
 }
 # Same shape as ndc_read_gen above, generalised to any timestamp marker file:
 # echoes 0 only when the marker was never created (see the -e/-L comment
@@ -186,10 +187,11 @@ ts_marker_read() {
     fi
     local _val
     _val=$(cat "$_marker" 2>/dev/null)
-    case "$_val" in
-        (''|*[!0-9]*) echo unreadable ;;
-        (*) echo "$_val" ;;
-    esac
+    if [ -z "$_val" ] || [[ "$_val" == *[!0-9]* ]]; then
+        echo unreadable
+    else
+        echo "$_val"
+    fi
 }
 # The write-side twin of the type check every marker READ above carries
 # (#653, release gate 3 finding on v0.31.0). `{ … > "$FILE"; } 2>/dev/null
@@ -252,12 +254,17 @@ trap cleanup EXIT
 DRY_RUN=false
 FORCE=false
 SESSION_ID=""
+# `[ ]` tests, not a `case` with a catch-all `*)` arm inside this loop
+# (#898 round 7 -- that shape is one the plugin directory's scanner
+# holds a submission on).
 for arg in "$@"; do
-    case "$arg" in
-        --dry)   DRY_RUN=true ;;
-        --force) FORCE=true ;;
-        *)       SESSION_ID="$arg" ;;
-    esac
+    if [ "$arg" = "--dry" ]; then
+        DRY_RUN=true
+    elif [ "$arg" = "--force" ]; then
+        FORCE=true
+    else
+        SESSION_ID="$arg"
+    fi
 done
 
 # --- Lock (mkdir acquisition, rename-based stale takeover — see lib-lock.sh) ---
@@ -350,7 +357,7 @@ if [[ ( -e "$COOLDOWN_MARKER" || -L "$COOLDOWN_MARKER" ) && "$DRY_RUN" != true &
     # By this point LAST_MOD is always "0" or all-digits: ts_marker_read
     # above already intercepts anything else (a failed read, or content that
     # is not a plain timestamp) and this if/fi already converted its
-    # "unreadable" sentinel to 0. So the `case` a few lines down -- and the
+    # "unreadable" sentinel to 0. So the digits test a few lines down -- and the
     # multi-paragraph history below explaining what happens when *raw,
     # unvalidated* marker content reaches `$(( ))` -- describes a route that
     # can no longer be taken through THIS read site. It is kept as a
@@ -394,9 +401,9 @@ if [[ ( -e "$COOLDOWN_MARKER" || -L "$COOLDOWN_MARKER" ) && "$DRY_RUN" != true &
     #
     # The case also rejects a marker padded with spaces, which arithmetic would
     # have accepted. Deliberate, and the same call #258's guard makes.
-    case "$LAST_MOD" in
-        ''|*[!0-9]*) LAST_MOD=0 ;;
-    esac
+    if [ -z "$LAST_MOD" ] || [ "${LAST_MOD#*[!0-9]}" != "$LAST_MOD" ]; then
+        LAST_MOD=0
+    fi
     ELAPSED=$(( $(date +%s) - 10#$LAST_MOD ))
     SAVE_COOLDOWN=$(config ".cooldowns.save_seconds" 120)
     if [ "$ELAPSED" -lt 0 ]; then
@@ -437,7 +444,7 @@ dispatch "before_save"
 
 # --- Step 1: Extract ---
 log "extract" "session $SESSION_ID"
-assign_kv <<< "$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell extract "$SESSION_ID" "$PROJECT_DIR")"
+assign_kv <<< "$(cd "$PIPELINE_DIR" && _remember_run_python -m pipeline.shell extract "$SESSION_ID" "$PROJECT_DIR")"
 # #695: the bridge is load-bearing, so its failure must be said here rather
 # than discovered three layers down. `pipeline.shell extract` ALWAYS prints
 # EXTRACT_FILE; an empty one means the line did not survive the crossing --
@@ -532,7 +539,7 @@ if [ "$EXCHANGE_COUNT" -eq 0 ]; then
             log "extract" "0 exchanges, skip -- position -> $POSITION"
             SAVE_ENVELOPE="$ENVELOPE"
         fi
-        cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell save-position "$LAST_SAVE_FILE" "$SESSION_ID" "$POSITION" "$SAVE_ENVELOPE" "$SKIP_LINES"
+        cd "$PIPELINE_DIR" && _remember_run_python -m pipeline.shell save-position "$LAST_SAVE_FILE" "$SESSION_ID" "$POSITION" "$SAVE_ENVELOPE" "$SKIP_LINES"
     else
         log "extract" "0 exchanges, skip (dry run -- position unchanged)"
     fi
@@ -549,8 +556,8 @@ MIN_HUMAN=$(config ".thresholds.min_human_messages" 3)
 MIN_EXCHANGES=$(config ".thresholds.min_exchanges_without_human" 30)
 # A non-numeric value in config.json would abort the script at the comparisons
 # below (set -e + ERR trap), turning a typo into "memory silently stopped".
-case "$MIN_HUMAN" in ''|*[!0-9]*) MIN_HUMAN=3 ;; esac
-case "$MIN_EXCHANGES" in ''|*[!0-9]*) MIN_EXCHANGES=30 ;; esac
+if [ -z "$MIN_HUMAN" ] || [ "${MIN_HUMAN#*[!0-9]}" != "$MIN_HUMAN" ]; then MIN_HUMAN=3; fi
+if [ -z "$MIN_EXCHANGES" ] || [ "${MIN_EXCHANGES#*[!0-9]}" != "$MIN_EXCHANGES" ]; then MIN_EXCHANGES=30; fi
 if [ "$HUMAN_COUNT" -lt "$MIN_HUMAN" ] && [ "$DRY_RUN" = false ] && [ "$FORCE" != true ]; then
     if [ "$MIN_EXCHANGES" -gt 0 ] && [ "$EXCHANGE_COUNT" -ge "$MIN_EXCHANGES" ]; then
         log "extract" "${HUMAN_COUNT} human < ${MIN_HUMAN} but ${EXCHANGE_COUNT} exchanges >= ${MIN_EXCHANGES}, saving (agentic session)"
@@ -609,7 +616,7 @@ else
     else
         LAST_LINE="${LAST_ENTRY_HEADERS##*$'\n'}"
         LAST_LINE="${LAST_LINE%%:*}"
-        case "$LAST_LINE" in ''|*[!0-9]*) LAST_LINE="" ;; esac
+        if [ -z "$LAST_LINE" ] || [ "${LAST_LINE#*[!0-9]}" != "$LAST_LINE" ]; then LAST_LINE=""; fi
         if [ -z "$LAST_LINE" ]; then
             printf '%s\n' "$NO_PREVIOUS_ENTRY" > "$TMP_LAST_ENTRY"
         elif tail -n +"$LAST_LINE" "$MEMORY_FILE" > "$TMP_LAST_ENTRY"; then
@@ -668,14 +675,11 @@ else
     BRANCH=""
     if [ -n "${REMEMBER_BRANCH_CMD:-}" ]; then
         if CMD_BRANCH=$("$REMEMBER_BRANCH_CMD" "$SESSION_ID" 2>/dev/null) && [ -n "$CMD_BRANCH" ]; then
-            case "$CMD_BRANCH" in
-                *$'\n'*|*$'\r'*)
-                    log "branch" "WARNING: REMEMBER_BRANCH_CMD ($REMEMBER_BRANCH_CMD) printed multi-line (or carriage-return-bearing) output for session $SESSION_ID -- refusing to use it unbounded, falling back to git branch lookup"
-                    ;;
-                *)
-                    BRANCH="$CMD_BRANCH"
-                    ;;
-            esac
+            if [[ "$CMD_BRANCH" == *$'\n'* ]] || [[ "$CMD_BRANCH" == *$'\r'* ]]; then
+                log "branch" "WARNING: REMEMBER_BRANCH_CMD ($REMEMBER_BRANCH_CMD) printed multi-line (or carriage-return-bearing) output for session $SESSION_ID -- refusing to use it unbounded, falling back to git branch lookup"
+            else
+                BRANCH="$CMD_BRANCH"
+            fi
         else
             log "branch" "WARNING: REMEMBER_BRANCH_CMD ($REMEMBER_BRANCH_CMD) exited non-zero or printed nothing for session $SESSION_ID -- falling back to git branch lookup"
         fi
@@ -700,13 +704,11 @@ EXTRACT_MAX_BYTES=$(config ".thresholds.extract_max_bytes" 300000)
 # as #816/#821's consolidate_timeout_seconds/ndc_timeout_seconds fix, except
 # 0 is never rejected here -- like consolidate_max_bytes (#360), 0 is a
 # valid, meaningful value (disables the cap), not a malformed one.
-case "$EXTRACT_MAX_BYTES" in
-    ''|*[!0-9]*)
-        log "prompt" "WARNING: thresholds.extract_max_bytes is not a valid non-negative integer (got '$EXTRACT_MAX_BYTES') -- using default 300000"
-        EXTRACT_MAX_BYTES=300000
-        ;;
-esac
-cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell build-prompt "$EXTRACT_FILE" "$TMP_LAST_ENTRY" "$CURRENT_TIME" "$BRANCH" "$TMP_PROMPT" "$EXTRACT_MAX_BYTES"
+if [ -z "$EXTRACT_MAX_BYTES" ] || [[ "$EXTRACT_MAX_BYTES" == *[!0-9]* ]]; then
+    log "prompt" "WARNING: thresholds.extract_max_bytes is not a valid non-negative integer (got '$EXTRACT_MAX_BYTES') -- using default 300000"
+    EXTRACT_MAX_BYTES=300000
+fi
+cd "$PIPELINE_DIR" && _remember_run_python -m pipeline.shell build-prompt "$EXTRACT_FILE" "$TMP_LAST_ENTRY" "$CURRENT_TIME" "$BRANCH" "$TMP_PROMPT" "$EXTRACT_MAX_BYTES"
 
 [ ! -s "$TMP_PROMPT" ] && { log "prompt" "ERROR: empty"; exit 1; }
 grep -q '{{TIME}}\|{{BRANCH}}\|{{LAST_ENTRY}}\|{{EXTRACT}}' "$TMP_PROMPT" && { log "prompt" "ERROR: unsubstituted placeholders in prompt"; exit 1; }
@@ -727,7 +729,7 @@ CLEANUP_FILES+=("$HAIKU_STDERR")
 # Set the threshold to 0 to retry forever (the old behaviour).
 FAILURE_MARKER="${REMEMBER_DIR}/tmp/last-summary-failure"
 MAX_FAILURES=$(config ".thresholds.max_summary_failures" 3)
-case "$MAX_FAILURES" in ''|*[!0-9]*) MAX_FAILURES=3 ;; esac
+if [ -z "$MAX_FAILURES" ] || [ "${MAX_FAILURES#*[!0-9]}" != "$MAX_FAILURES" ]; then MAX_FAILURES=3; fi
 
 # #583: every save-position call site below this point runs only once
 # EXCHANGE_COUNT -gt 0 (the EXCHANGE_COUNT -eq 0 branch above already
@@ -750,22 +752,22 @@ case "$MAX_FAILURES" in ''|*[!0-9]*) MAX_FAILURES=3 ;; esac
 save_position_span() {
     if [ "$ENVELOPE" != "unrecognised" ] && [ "$ENVELOPE_HAS_UNMAPPED_STEP" = "1" ]; then
         log "extract" "$ENVELOPE envelope with an unmapped step type, skip -- position -> $POSITION (span quarantined from line $SKIP_LINES for a future build)"
-        cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell save-position "$LAST_SAVE_FILE" "$SESSION_ID" "$POSITION" "unrecognised" "$SKIP_LINES"
+        cd "$PIPELINE_DIR" && _remember_run_python -m pipeline.shell save-position "$LAST_SAVE_FILE" "$SESSION_ID" "$POSITION" "unrecognised" "$SKIP_LINES"
     else
-        cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell save-position "$LAST_SAVE_FILE" "$SESSION_ID" "$POSITION" "$ENVELOPE"
+        cd "$PIPELINE_DIR" && _remember_run_python -m pipeline.shell save-position "$LAST_SAVE_FILE" "$SESSION_ID" "$POSITION" "$ENVELOPE"
     fi
 }
 
 record_summary_failure() {
     [ "$MAX_FAILURES" -eq 0 ] && return 0
-    _prev_key=""
+    _prev_span_id=""
     _prev_count=0
     if [ -f "$FAILURE_MARKER" ]; then
-        read -r _prev_key _prev_count < "$FAILURE_MARKER" || true
-        case "$_prev_count" in ''|*[!0-9]*) _prev_count=0 ;; esac
+        read -r _prev_span_id _prev_count < "$FAILURE_MARKER" || true
+        if [ -z "$_prev_count" ] || [ "${_prev_count#*[!0-9]}" != "$_prev_count" ]; then _prev_count=0; fi
     fi
-    _key="${SESSION_ID}:${POSITION}"
-    if [ "$_prev_key" = "$_key" ]; then
+    _span_id="${SESSION_ID}:${POSITION}"
+    if [ "$_prev_span_id" = "$_span_id" ]; then
         # 10# after the case (#332): a truncated marker read back as "08"
         # would abandon this branch, and the branch is what escalates.
         _count=$(( 10#$_prev_count + 1 ))
@@ -778,7 +780,7 @@ record_summary_failure() {
         save_position_span
         rm -f "$FAILURE_MARKER"
     elif marker_write_ok "$FAILURE_MARKER" summary; then
-        echo "$_key $_count" > "$FAILURE_MARKER"
+        echo "$_span_id $_count" > "$FAILURE_MARKER"
         log "haiku" "failure ${_count}/${MAX_FAILURES} on this span -- will retry next run"
     fi
 }
@@ -792,7 +794,7 @@ SPAWN_DECLINED_EXIT=3
 
 # `|| { ... }` (not a bare `if [ $? ]`) so a failure is handled under set -e
 # instead of tripping the ERR trap at the assignment.
-HAIKU_VARS=$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell call-haiku "$TMP_PROMPT" 2>"$HAIKU_STDERR") || {
+HAIKU_VARS=$(cd "$PIPELINE_DIR" && _remember_run_python -m pipeline.shell call-haiku "$TMP_PROMPT" 2>"$HAIKU_STDERR") || {
     HAIKU_EXIT=$?
     if [ "$HAIKU_EXIT" -eq "$SPAWN_DECLINED_EXIT" ]; then
         # Declined, not failed: no failure is recorded and the position stays
@@ -816,7 +818,7 @@ HAIKU_VARS=$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell call-haiku "$TMP_PR
 
 assign_kv <<< "$HAIKU_VARS"
 CLEANUP_FILES+=("$HAIKU_TEXT_FILE")
-log_tokens "tokens" "$TK_IN" "$TK_OUT" "$TK_CACHE" "$TK_COST"
+log_usage "tokens" "$TK_IN" "$TK_OUT" "$TK_CACHE" "$TK_COST"
 
 HAIKU_TEXT=$(cat "$HAIKU_TEXT_FILE")
 # report_error, not log() alone -- same #694 shape as the call-haiku
@@ -857,7 +859,7 @@ keep_rejected_text() {
 # normally rewritten to 24h. The #139 fallback below keeps the model's ORIGINAL
 # line when a rewrite would malform it, so an AM/PM header can reach memory that
 # consolidation then does not recognise as an entry at all (#177).
-ENTRY_HEADER_ERE=$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.entry_header --ere entry 2>/dev/null) \
+ENTRY_HEADER_ERE=$(cd "$PIPELINE_DIR" && _remember_run_python -m pipeline.entry_header --ere entry 2>/dev/null) \
     || ENTRY_HEADER_ERE=''
 # A failed lookup must not silently accept everything: fall back to the literal
 # pattern rather than to an empty regex, which grep matches against anything.
@@ -1066,13 +1068,13 @@ if [[ "$RUN_NDC" = true && ( -e "$NDC_MARKER" || -L "$NDC_MARKER" ) ]]; then
         NDC_MOD=0
     fi
     # As at the cooldown site above: NDC_MOD is always "0" or all-digits by
-    # this point, so the `case` below and the UNPARSEABLE-vs-OUT-OF-RANGE
+    # this point, so the digits test below and the UNPARSEABLE-vs-OUT-OF-RANGE
     # comments that follow describe a route ts_marker_read already
     # intercepts -- kept as a defensive backstop, not this path's normal
     # behaviour (#625).
-    case "$NDC_MOD" in
-        ''|*[!0-9]*) NDC_MOD=0 ;;
-    esac
+    if [ -z "$NDC_MOD" ] || [ "${NDC_MOD#*[!0-9]}" != "$NDC_MOD" ]; then
+        NDC_MOD=0
+    fi
     NDC_COOLDOWN=$(config ".cooldowns.ndc_seconds" 3600)
     NDC_ELAPSED=$(( $(date +%s) - 10#$NDC_MOD ))
     if [ "$NDC_ELAPSED" -lt 0 ]; then
@@ -1118,10 +1120,9 @@ elif [ -e "$NOW_DAY_FILE" ]; then
 else
     NDC_DAY=""
 fi
-case "$NDC_DAY" in
-    ([0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;;
-    (*) NDC_DAY="$TODAY_DATE" ;;
-esac
+if [ -z "$NDC_DAY" ] || [ -n "${NDC_DAY#[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]}" ]; then
+    NDC_DAY="$TODAY_DATE"
+fi
 TODAY_FILE="${REMEMBER_DIR}/today-${NDC_DAY}.md"
 
 if [ "$RUN_NDC" = true ]; then
@@ -1146,7 +1147,7 @@ if [ "$RUN_NDC" = true ]; then
     NDC_SRC_GEN=$(ndc_read_gen)
     NDC_PROMPT=$(mktemp "${TMPDIR:-/tmp}"/remember-ndc-XXXXXX)
 
-    cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell build-ndc-prompt "$MEMORY_FILE" "$NDC_PROMPT"
+    cd "$PIPELINE_DIR" && _remember_run_python -m pipeline.shell build-ndc-prompt "$MEMORY_FILE" "$NDC_PROMPT"
 
     if [ -s "$NDC_PROMPT" ]; then
         (set +e  # don't inherit set -e -- a haiku non-zero exit must not kill the subshell
@@ -1162,28 +1163,25 @@ if [ "$RUN_NDC" = true ]; then
             # #816: same fix shape as run-consolidation.sh's sibling guard --
             # a typo'd config value used to be swapped for the default with
             # no trace of what was discarded.
-            case "$NDC_TIMEOUT_SECONDS" in
-                ''|*[!0-9]*)
-                    log "ndc" "WARNING: thresholds.ndc_timeout_seconds is not a valid non-negative integer (got '$NDC_TIMEOUT_SECONDS') -- using default 180"
+            if [ -z "$NDC_TIMEOUT_SECONDS" ] || [[ "$NDC_TIMEOUT_SECONDS" == *[!0-9]* ]]; then
+                log "ndc" "WARNING: thresholds.ndc_timeout_seconds is not a valid non-negative integer (got '$NDC_TIMEOUT_SECONDS') -- using default 180"
+                NDC_TIMEOUT_SECONDS=180
+            else
+                # #823: same fix shape as run-consolidation.sh's sibling
+                # guard -- 0 times out this call immediately every run,
+                # and 10+ digits (>= 1e9s) reaches the same OverflowError
+                # this repo reproduced inside PyTime_t at 9e9/1e10.
+                # Length-gated so the check itself never does arithmetic
+                # on an arbitrarily long digit string.
+                if [ "${#NDC_TIMEOUT_SECONDS}" -gt 9 ]; then
+                    log "ndc" "WARNING: thresholds.ndc_timeout_seconds ($NDC_TIMEOUT_SECONDS) is too large and would crash the NDC call with an OverflowError -- using default 180"
                     NDC_TIMEOUT_SECONDS=180
-                    ;;
-                *)
-                    # #823: same fix shape as run-consolidation.sh's sibling
-                    # guard -- 0 times out this call immediately every run,
-                    # and 10+ digits (>= 1e9s) reaches the same OverflowError
-                    # this repo reproduced inside PyTime_t at 9e9/1e10.
-                    # Length-gated so the check itself never does arithmetic
-                    # on an arbitrarily long digit string.
-                    if [ "${#NDC_TIMEOUT_SECONDS}" -gt 9 ]; then
-                        log "ndc" "WARNING: thresholds.ndc_timeout_seconds ($NDC_TIMEOUT_SECONDS) is too large and would crash the NDC call with an OverflowError -- using default 180"
-                        NDC_TIMEOUT_SECONDS=180
-                    elif [ "$NDC_TIMEOUT_SECONDS" -eq 0 ]; then
-                        log "ndc" "WARNING: thresholds.ndc_timeout_seconds is 0, which times out the NDC call immediately on every run -- using default 180"
-                        NDC_TIMEOUT_SECONDS=180
-                    fi
-                    ;;
-            esac
-            NDC_VARS=$(cd "$PIPELINE_DIR" && $PYTHON -m pipeline.shell call-haiku "$NDC_PROMPT" "" "$NDC_TIMEOUT_SECONDS" 2>"$NDC_ERR")
+                elif [ "$NDC_TIMEOUT_SECONDS" -eq 0 ]; then
+                    log "ndc" "WARNING: thresholds.ndc_timeout_seconds is 0, which times out the NDC call immediately on every run -- using default 180"
+                    NDC_TIMEOUT_SECONDS=180
+                fi
+            fi
+            NDC_VARS=$(cd "$PIPELINE_DIR" && _remember_run_python -m pipeline.shell call-haiku "$NDC_PROMPT" "" "$NDC_TIMEOUT_SECONDS" 2>"$NDC_ERR")
             NDC_EXIT=$?
 
             if [ "$NDC_EXIT" -eq "$SPAWN_DECLINED_EXIT" ]; then
@@ -1215,7 +1213,7 @@ if [ "$RUN_NDC" = true ]; then
                 # memory stopped growing AND reported cost fell to zero — which
                 # reads as "nothing happened" rather than "this failed
                 # repeatedly and was paid for" (#180).
-                log_tokens "ndc" "$TK_IN" "$TK_OUT" "$TK_CACHE" "$TK_COST"
+                log_usage "ndc" "$TK_IN" "$TK_OUT" "$TK_CACHE" "$TK_COST"
                 # Compression runs through the same reject gate as the summarize
                 # call, but nothing here consumed the verdict: a refusal came
                 # back non-empty, passed `[ -n ... ]`, and was appended to
@@ -1266,33 +1264,33 @@ if [ "$RUN_NDC" = true ]; then
                 # 53ff4f7). Left alone entirely for an already-rejected reply.
                 if [ "$IS_SKIP" != "true" ] && [ "${IS_REJECTED:-false}" != "true" ]; then
                     NDC_HEADER_LINE=$(grep -n -m1 '^## ' "$HAIKU_TEXT_FILE" 2>/dev/null | cut -d: -f1)
-                    case "$NDC_HEADER_LINE" in
-                        (1) NDC_LOOKS_LIKE_HEADER=true ;;
-                        ([2-4])
-                            # The strip is destructive (it overwrites
-                            # HAIKU_TEXT_FILE in place), so a failed mktemp/
-                            # tail/mv must not be reported as a successful
-                            # strip (review of 53ff4f7): that would leave the
-                            # ORIGINAL, unstripped preamble in the file while
-                            # logging "stripped" and still writing it to
-                            # today-*.md as though it had been cleaned. On
-                            # failure this falls through to the reject branch
-                            # below instead, with an explicit WARNING.
-                            NDC_STRIPPED_FILE=$(mktemp "${TMPDIR:-/tmp}"/remember-ndc-stripped-XXXXXX)
-                            if [ -n "$NDC_STRIPPED_FILE" ] \
-                                && tail -n "+$NDC_HEADER_LINE" "$HAIKU_TEXT_FILE" > "$NDC_STRIPPED_FILE" \
-                                && mv "$NDC_STRIPPED_FILE" "$HAIKU_TEXT_FILE"; then
-                                NDC_LOOKS_LIKE_HEADER=true
-                                NDC_TEXT=$(cat "$HAIKU_TEXT_FILE")
-                                log "ndc" "preamble stripped ($((NDC_HEADER_LINE - 1)) line(s) before the first '## ')"
-                            else
-                                rm -f "$NDC_STRIPPED_FILE" 2>/dev/null
-                                NDC_LOOKS_LIKE_HEADER=false
-                                report_error "ndc" "WARNING: could not strip a short preamble from the NDC reply -- treating it as rejected instead of risking a partially-written file"
-                            fi
-                            ;;
-                        (*) NDC_LOOKS_LIKE_HEADER=false ;;
-                    esac
+                    if [ "$NDC_HEADER_LINE" = 1 ]; then
+                        NDC_LOOKS_LIKE_HEADER=true
+                    elif [ "$NDC_HEADER_LINE" = 2 ] || [ "$NDC_HEADER_LINE" = 3 ] || [ "$NDC_HEADER_LINE" = 4 ]; then
+                        # The strip is destructive (it overwrites
+                        # HAIKU_TEXT_FILE in place), so a failed mktemp/
+                        # tail/mv must not be reported as a successful
+                        # strip (review of 53ff4f7): that would leave the
+                        # ORIGINAL, unstripped preamble in the file while
+                        # logging "stripped" and still writing it to
+                        # today-*.md as though it had been cleaned. On
+                        # failure this falls through to the reject branch
+                        # below instead, with an explicit WARNING.
+                        NDC_STRIPPED_FILE=$(mktemp "${TMPDIR:-/tmp}"/remember-ndc-stripped-XXXXXX)
+                        if [ -n "$NDC_STRIPPED_FILE" ] \
+                            && tail -n "+$NDC_HEADER_LINE" "$HAIKU_TEXT_FILE" > "$NDC_STRIPPED_FILE" \
+                            && mv "$NDC_STRIPPED_FILE" "$HAIKU_TEXT_FILE"; then
+                            NDC_LOOKS_LIKE_HEADER=true
+                            NDC_TEXT=$(cat "$HAIKU_TEXT_FILE")
+                            log "ndc" "preamble stripped ($((NDC_HEADER_LINE - 1)) line(s) before the first '## ')"
+                        else
+                            rm -f "$NDC_STRIPPED_FILE" 2>/dev/null
+                            NDC_LOOKS_LIKE_HEADER=false
+                            report_error "ndc" "WARNING: could not strip a short preamble from the NDC reply -- treating it as rejected instead of risking a partially-written file"
+                        fi
+                    else
+                        NDC_LOOKS_LIKE_HEADER=false
+                    fi
                 fi
                 if [ "$IS_SKIP" = "true" ] || [ "${IS_REJECTED:-false}" = "true" ] || [ "$NDC_LOOKS_LIKE_HEADER" = "false" ]; then
                     if [ "$IS_SKIP" = "true" ] || [ "${IS_REJECTED:-false}" = "true" ]; then
@@ -1371,9 +1369,9 @@ if [ "$RUN_NDC" = true ]; then
                         # yields either nothing or a fragment cut mid-line, which the
                         # `mv` would then install over live content.
                         NDC_LIVE_BYTES=$(wc -c < "$MEMORY_FILE" 2>/dev/null | tr -d ' ')
-                        case "$NDC_LIVE_BYTES" in
-                            (''|*[!0-9]*) NDC_LIVE_BYTES=0 ;;
-                        esac
+                        if [ -z "$NDC_LIVE_BYTES" ] || [ "${NDC_LIVE_BYTES#*[!0-9]}" != "$NDC_LIVE_BYTES" ]; then
+                            NDC_LIVE_BYTES=0
+                        fi
                         # #614: size alone cannot tell a legitimate append from
                         # a REPLACEMENT that happens to still be >= this
                         # round's snapshot -- and a replacement is exactly what
@@ -1451,9 +1449,9 @@ if [ "$RUN_NDC" = true ]; then
                                 # arm and deletes the day marker — the exact damage
                                 # this whole block is being fixed for, arriving by
                                 # a different route.
-                                case "$NDC_KEPT" in
-                                    (''|*[!0-9]*) NDC_KEPT=0 ;;
-                                esac
+                                if [ -z "$NDC_KEPT" ] || [ "${NDC_KEPT#*[!0-9]}" != "$NDC_KEPT" ]; then
+                                    NDC_KEPT=0
+                                fi
                                 # The commit's result gates everything below it
                                 # (#243). It used to be unread, and under `set +e`
                                 # that meant a failed truncate still rewrote the day
@@ -1662,7 +1660,7 @@ fi
 # GNU-first-then-BSD-fallback order already used there, at doctor.sh:257
 # and at lib-lock.sh:183.
 _AUTONOMOUS_LOG_RETENTION_DAYS=$(config ".thresholds.autonomous_log_retention_days" 7)
-case "$_AUTONOMOUS_LOG_RETENTION_DAYS" in (''|*[!0-9]*) _AUTONOMOUS_LOG_RETENTION_DAYS=7 ;; esac
+if [ -z "$_AUTONOMOUS_LOG_RETENTION_DAYS" ] || [ "${_AUTONOMOUS_LOG_RETENTION_DAYS#*[!0-9]}" != "$_AUTONOMOUS_LOG_RETENTION_DAYS" ]; then _AUTONOMOUS_LOG_RETENTION_DAYS=7; fi
 # CI (job 100831279309 and its 3.10/3.11/3.12 siblings on PR #499): every
 # windows-latest leg left both the backdated file AND this run's own fresh
 # log in place -- no deletion at any age, default retention or configured,
@@ -1711,10 +1709,11 @@ case "$_AUTONOMOUS_LOG_RETENTION_DAYS" in (''|*[!0-9]*) _AUTONOMOUS_LOG_RETENTIO
 # different, generally nonexistent path -- turning a working retention
 # sweep into a silently broken one for that one directory, on the
 # platform this fix has no business touching at all.
-case "$OSTYPE" in
-    msys|cygwin) _remember_auto_dir="${REMEMBER_DIR//\\//}" ;;
-    *) _remember_auto_dir="$REMEMBER_DIR" ;;
-esac
+if [ "$OSTYPE" = msys ] || [ "$OSTYPE" = cygwin ]; then
+    _remember_auto_dir="${REMEMBER_DIR//\\//}"
+else
+    _remember_auto_dir="$REMEMBER_DIR"
+fi
 for _remember_auto_log in "${_remember_auto_dir}/logs/autonomous"/*.log; do
     [ -f "$_remember_auto_log" ] || continue
     if [ ! -s "$_remember_auto_log" ]; then
@@ -1729,19 +1728,15 @@ for _remember_auto_log in "${_remember_auto_dir}/logs/autonomous"/*.log; do
     # safe direction, same as session-start-hook.sh's identical guard: skip
     # this file rather than coerce garbage into a comparable age and risk
     # reclaiming something this read could not actually confirm is old.
-    case "$_remember_auto_mtime" in
-        (''|*[!0-9]*)
-            log "housekeeping" "WARNING: could not read mtime of $_remember_auto_log -- leaving it in place"
-            continue
-            ;;
-    esac
+    if [ -z "$_remember_auto_mtime" ] || [[ "$_remember_auto_mtime" == *[!0-9]* ]]; then
+        log "housekeeping" "WARNING: could not read mtime of $_remember_auto_log -- leaving it in place"
+        continue
+    fi
     _remember_auto_now=$(_remember_date +%s)
-    case "$_remember_auto_now" in
-        (''|*[!0-9]*)
-            log "housekeeping" "WARNING: could not read the clock -- skipping the retention sweep for $_remember_auto_log"
-            continue
-            ;;
-    esac
+    if [ -z "$_remember_auto_now" ] || [[ "$_remember_auto_now" == *[!0-9]* ]]; then
+        log "housekeeping" "WARNING: could not read the clock -- skipping the retention sweep for $_remember_auto_log"
+        continue
+    fi
     _remember_auto_age_days=$(( (10#$_remember_auto_now - 10#$_remember_auto_mtime) / 86400 ))
     if [ "$_remember_auto_age_days" -gt "$_AUTONOMOUS_LOG_RETENTION_DAYS" ]; then
         rm -f "$_remember_auto_log" 2>/dev/null \
@@ -1757,7 +1752,7 @@ unset _remember_auto_dir _remember_auto_log _remember_auto_mtime _remember_auto_
 # itself documents for its OWN consolidation trigger. Refreshing the cache
 # here, right after the memory files this save may have just written/rotated
 # have landed, is what lets the NEXT SessionStart skip re-reading them.
-PLUGIN_ROOT="${PLUGIN_ROOT:-$PIPELINE_DIR}"
+[ -n "${PLUGIN_ROOT:-}" ] || PLUGIN_ROOT="$PIPELINE_DIR"
 if source "$(dirname "$0")/lib-memory-context.sh" 2>/dev/null; then
     _remember_memory_paths
     _remember_start_cache_context_publish

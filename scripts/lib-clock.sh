@@ -84,9 +84,10 @@ fi
 # seconds-since-epoch integer and not a literal "%s" -- and why it was worth
 # checking rather than assuming, instead of just deleting the glob term.
 _remember_date_builtin_ok() {
-    case "$1" in
-        *%-*|*%_*|*%0*|*%^*|*%#*) return 1 ;;
-    esac
+    if [[ "$1" == *"%-"* ]] || [[ "$1" == *"%_"* ]] || [[ "$1" == *"%0"* ]] \
+        || [[ "$1" == *"%^"* ]] || [[ "$1" == *"%#"* ]]; then
+        return 1
+    fi
     return 0
 }
 
@@ -105,7 +106,7 @@ _remember_date() {
     fi
     if [ "$_REMEMBER_PRINTF_T" = "1" ] && [ "$#" -eq 1 ] \
         && _remember_date_builtin_ok "$1"; then
-        printf "%(${1#+})T\\n" -1 && return
+        printf "%(${1#+})T\n" -1 && return
     fi
     date "$@"
 }

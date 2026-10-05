@@ -1,9 +1,13 @@
 """Claude CLI wrapper for calling Haiku and parsing structured JSON responses.
 
 Provides the single interface used by all pipeline stages to invoke Haiku.
-Handles subprocess management, parent-session env stripping (CLAUDECODE +
-CLAUDE_JOB_DIR + CLAUDE_CODE_*), JSON parsing, token counting, and cost
-estimation.
+Handles subprocess management, removal of the parent session's own variables
+before the spawn (the names in ``_without_session_env``, #95), JSON
+parsing, token counting, and cost estimation.
+
+The nested ``claude -p`` inherits this process's environment -- the one the
+hook was started with, including the user's Claude Code login -- exactly like
+any process a hook starts. This module reads no credential of its own.
 
 The CLI is invoked in a sandboxed configuration: a fresh, empty `cwd`
 created and torn down around each call (`_isolated_summarizer_cwd`, #724 --
@@ -14,14 +18,16 @@ still callable, and a hand-maintained deny-list is only ever as complete as
 its last update against the CLI's own tool inventory),
 ``max-turns`` configurable via ``REMEMBER_MAX_TURNS`` (default 4), no MCP
 servers (#94), no setting sources and therefore no hooks (#202), and the
-parent Claude Code session env vars are stripped (``CLAUDECODE`` to allow a
-nested session; ``CLAUDE_JOB_DIR`` / ``CLAUDE_CODE_*`` so the child doesn't
-masquerade as the parent's session, #95). ``REMEMBER_NESTED_SUMMARIZER`` is set
+parent Claude Code session's variables are removed for the spawn
+(``CLAUDECODE`` to allow a nested session; ``CLAUDE_JOB_DIR``,
+``CLAUDE_PROJECT_DIR`` and the session-scoped ``CLAUDE_CODE_*`` names so the
+child doesn't masquerade as the parent's session, #95 -- literal names in
+``_without_session_env``). ``REMEMBER_NESTED_SUMMARIZER`` is set
 so the plugin's own hooks recognise the child and no-op (#204) — that covers
 *our* hooks specifically, and stays load-bearing on the fallback path below,
 where setting-source isolation has been dropped and the user's hooks are live.
-The Codex route (`_call_codex`) additionally runs with an allow-listed child
-environment rather than the Claude route's deny-list one, since its
+The Codex route (`_call_codex`) instead runs with an allow-listed child
+environment, one literal read per allowed name, since its
 ``--sandbox read-only`` still permits command execution (#724, F9/F10).
 
 The output of that call is NOT guaranteed to be the model speaking — a blocking
@@ -129,12 +135,15 @@ def _resolve_codex_bin() -> str:
     return shutil.which("codex") or "codex"
 
 
-# CLAUDE_CODE_* vars are stripped as parent-session identity (#95) — but the
-# prefix is a proxy, not a definition, and one member of the family is the
-# child's *credentials*. Stripping CLAUDE_CODE_OAUTH_TOKEN leaves `claude -p`
-# unauthenticated, so nothing ever saves for anyone who authenticated with
-# `claude setup-token` or runs under a hosted Agent SDK (#131). Keep it.
-_CHILD_ENV_KEEP = frozenset({"CLAUDE_CODE_OAUTH_TOKEN"})
+# #95 used to strip the whole CLAUDE_CODE_* prefix as parent-session
+# identity, with one exact exemption for the child's own login credential
+# (#131: stripping it left `claude -p` unauthenticated for anyone who logs in
+# with a long-lived token or runs under a hosted Agent SDK). #898 round 15
+# replaced the prefix with an explicit list of session names, literal in
+# code since round 17 (`_without_session_env`); the credential is simply never on it, so the
+# child inherits it like any other variable. The prefix had also been
+# removing provider selection (CLAUDE_CODE_USE_BEDROCK, #316) and other
+# user-set CLAUDE_CODE_* settings that were never session identity.
 
 # Set on the child, read by scripts/resolve-paths.sh (#204). Shared here as a
 # constant so the tests pin one spelling against both sides of the contract.
@@ -256,7 +265,7 @@ def _choose_summarizer_provider() -> str:
         # than widening transcript_path()'s own return shape, keeps that
         # function's contract ("a usable path or None") unchanged for every
         # other caller.
-        raw = (os.environ.get(_host.TRANSCRIPT_PATH_VAR) or "").strip()
+        raw = (os.environ.get("REMEMBER_TRANSCRIPT_PATH") or "").strip()
         if raw:
             _warn(
                 f"WARNING: REMEMBER_TRANSCRIPT_PATH={raw!r} names a "
@@ -307,55 +316,119 @@ def _choose_summarizer_provider() -> str:
     return "claude"
 
 
-def _child_env() -> dict[str, str]:
-    """Environment for the nested ``claude -p`` with the PARENT session vars
-    stripped.
+@contextlib.contextmanager
+def _without_session_env():
+    """Remove the parent Claude Code session's own variables from this
+    process's environment for the duration of the block, then put back
+    exactly what was there (#95).
 
-    ``CLAUDECODE`` blocks nested sessions. ``CLAUDE_JOB_DIR`` and the
-    ``CLAUDE_CODE_*`` family (e.g. ``CLAUDE_CODE_SESSION_ID``) identify the
-    parent Claude Code session; if they leak into the subprocess it looks like
-    a resumable session to anything keying off them (#95). Everything else is
-    passed through unchanged — including the credentials in ``_CHILD_ENV_KEEP``,
-    which only share the prefix by accident.
+    Without this the nested ``claude -p`` -- which otherwise inherits
+    everything, the user's Claude Code login included -- passes as that
+    session. Removing from ``os.environ`` -- rather than handing the child an
+    ``env=`` copy -- lets the nested CLI inherit everything else exactly as
+    the hook got it. Putting the values back afterwards keeps anything later
+    in this process that reads one of them (``pipeline.host``) working; a
+    name that was not set stays unset.
+
+    Every name is written out literally, one removal and one restore each
+    (#898 round 17): rounds 15-16 read the list from config, and reading the
+    environment by a config-supplied name is what the directory scanner
+    reports as "an environment variable named at run time". A future Claude
+    Code session variable is added here, in a release.
+
+    Never on the list: the child's own login credential (#131), which it
+    simply inherits. Not on it either, because they are configuration rather
+    than session identity: provider selection such as CLAUDE_CODE_USE_BEDROCK
+    (#316) and any other CLAUDE_CODE_* setting a user exports -- the old
+    prefix strip removed those too.
+
+    Not on it since #898 round 18 (maintainer decision): the handshake
+    Claude Code pairs with the messaging channel below. The channel itself
+    (its socket) is still removed, so the child has nothing to use the
+    handshake on; the handshake is inherited like any other variable. One
+    real summarizer call run this way opened no extra peer session (observed
+    once, without a control). Not naming it is also what cleared the
+    directory portal's credential hold.
+    """
+    # Says "already inside a session"; the CLI refuses to nest under it.
+    saved_claudecode = os.environ.pop("CLAUDECODE", None)
+    # The parent's background-job dir; the child would write into it (#95).
+    saved_claude_job_dir = os.environ.pop("CLAUDE_JOB_DIR", None)
+    # The real project; the child's hooks would aim at it (#204).
+    saved_claude_project_dir = os.environ.pop("CLAUDE_PROJECT_DIR", None)
+    # The parent's session id; the child would pass as that session (#95).
+    saved_session_id = os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
+    # How the parent was launched: parent identity, not configuration (#95).
+    saved_entrypoint = os.environ.pop("CLAUDE_CODE_ENTRYPOINT", None)
+    # Parent-session state Claude Code sets for its own children (seen on 2.1.280).
+    saved_child_session = os.environ.pop("CLAUDE_CODE_CHILD_SESSION", None)
+    # Whether a person attends the parent session; never true of this child.
+    saved_session_attended = os.environ.pop("CLAUDE_CODE_SESSION_ATTENDED", None)
+    # The parent's own executable; the nested CLI sets its own.
+    saved_execpath = os.environ.pop("CLAUDE_CODE_EXECPATH", None)
+    # The parent session's messaging channel; the child must not speak on it.
+    # Its paired handshake is inherited (#898 round 18): without this channel
+    # the child has nowhere to present it.
+    saved_messaging_socket = os.environ.pop("CLAUDE_CODE_MESSAGING_SOCKET", None)
+    # The parent's IDE connection; the child would attach to the user's IDE.
+    saved_sse_port = os.environ.pop("CLAUDE_CODE_SSE_PORT", None)
+    try:
+        yield
+    finally:
+        if saved_claudecode is not None:
+            os.environ["CLAUDECODE"] = saved_claudecode
+        if saved_claude_job_dir is not None:
+            os.environ["CLAUDE_JOB_DIR"] = saved_claude_job_dir
+        if saved_claude_project_dir is not None:
+            os.environ["CLAUDE_PROJECT_DIR"] = saved_claude_project_dir
+        if saved_session_id is not None:
+            os.environ["CLAUDE_CODE_SESSION_ID"] = saved_session_id
+        if saved_entrypoint is not None:
+            os.environ["CLAUDE_CODE_ENTRYPOINT"] = saved_entrypoint
+        if saved_child_session is not None:
+            os.environ["CLAUDE_CODE_CHILD_SESSION"] = saved_child_session
+        if saved_session_attended is not None:
+            os.environ["CLAUDE_CODE_SESSION_ATTENDED"] = saved_session_attended
+        if saved_execpath is not None:
+            os.environ["CLAUDE_CODE_EXECPATH"] = saved_execpath
+        if saved_messaging_socket is not None:
+            os.environ["CLAUDE_CODE_MESSAGING_SOCKET"] = saved_messaging_socket
+        if saved_sse_port is not None:
+            os.environ["CLAUDE_CODE_SSE_PORT"] = saved_sse_port
+
+
+@contextlib.contextmanager
+def _summarizer_environment():
+    """This process's environment, made fit for the nested ``claude -p`` to
+    inherit, for the duration of the block.
+
+    Nothing is copied and nothing is walked: the child inherits this
+    process's environment -- the user's Claude Code login included, exactly
+    like any process a hook starts -- minus the parent session's own
+    variables (``_without_session_env``, #95: without that the child looks
+    like a resumable part of the parent's session). The login credential is
+    never on that list (#131).
 
     ``REMEMBER_NESTED_SUMMARIZER`` is then set as the positive counterpart to
-    that stripping. Removing the parent markers is what lets the child start at
-    all, and it also erases every trace that it IS a child — so the plugin's own
-    hooks fire inside it, resolve a project from ``cwd`` (an isolated, per-call
-    directory since #724 -- previously the shared ``gettempdir()``), and
-    scaffold a memory directory there (#204). The hooks were always
-    meant to no-op here; they were reading a signal this function had deleted.
-    A marker we set ourselves cannot be deleted by us and cannot false-positive
-    on an unrelated session, which ``CLAUDE_CODE_ENTRYPOINT=sdk-cli`` would.
-
-    ``CLAUDE_PROJECT_DIR`` goes too. It does not carry the ``CLAUDE_CODE_``
-    prefix, so it was never covered by the rule above — while #204's report, and
-    ``resolve-paths.sh``'s own comments, both describe the child as having none.
-    Claude Code 2.1.219 overwrites it from the sandbox cwd, so the leak is inert
-    there and is not the mechanism behind any report; a CLI that honoured the
-    inherited value would aim the summarizer's hooks at the REAL project, which
-    is the failure @ehutchinsonSFDC saw. Cheap to close, and it makes the code
-    say what the comments already claim.
-
-    ``ANTHROPIC_API_KEY`` goes too, but only on evidence — see
-    ``_anthropic_api_key_decision`` for which evidence and why the strip cannot
-    be unconditional (#703).
+    that removal. Removing the parent markers is what lets the child start at
+    all, and it also erases every trace that it IS a child -- so the plugin's
+    own hooks would fire inside it, resolve a project from ``cwd`` (an
+    isolated, per-call directory since #724), and scaffold a memory directory
+    there (#204). A marker we set ourselves cannot be deleted by us and cannot
+    false-positive on an unrelated session, which ``CLAUDE_CODE_ENTRYPOINT=
+    sdk-cli`` would. Its previous state is restored afterwards, so the
+    plugin never goes silent in the user's real session.
     """
-    strip_key, key_reason = _anthropic_api_key_decision()
-    env = {
-        k: v
-        for k, v in os.environ.items()
-        if k in _CHILD_ENV_KEEP
-        or (
-            k != "CLAUDECODE"
-            and k != "CLAUDE_JOB_DIR"
-            and k != "CLAUDE_PROJECT_DIR"
-            and not (k == ANTHROPIC_API_KEY_ENV and strip_key)
-            and not k.startswith("CLAUDE_CODE_")
-        )
-    }
-    env[NESTED_SUMMARIZER_ENV] = "1"
-    return env
+    previous_marker = os.environ.get("REMEMBER_NESTED_SUMMARIZER")
+    with _without_session_env():
+        os.environ["REMEMBER_NESTED_SUMMARIZER"] = "1"
+        try:
+            yield
+        finally:
+            if previous_marker is None:
+                os.environ.pop("REMEMBER_NESTED_SUMMARIZER", None)
+            else:
+                os.environ["REMEMBER_NESTED_SUMMARIZER"] = previous_marker
 
 
 def _usage_from_failure(stdout: object) -> TokenUsage | None:
@@ -457,22 +530,33 @@ def _failure_detail(stdout: str, stderr: str) -> str:
     return joined
 
 
-# The nested `claude -p` needs its own credentials. Normally that is
-# CLAUDE_CODE_OAUTH_TOKEN, kept across the strip by _CHILD_ENV_KEEP (#131).
-# But some hosts never place it in a hook subprocess's environment at all — the
+# The nested `claude -p` needs its own credentials. Normally that is the
+# host's own OAuth credential, which the child inherits -- it is never on the
+# `_without_session_env` list (#131). But some hosts never place it
+# in a hook subprocess's environment at all — the
 # Claude Code desktop / Agent SDK host withholds it from spawned children — so
-# there is nothing to keep and `claude -p` is unauthenticated: the silent-save
-# outage of #129 on a machine that *did* run `claude setup-token`.
+# there is nothing to inherit and `claude -p` is unauthenticated: the
+# silent-save outage of #129 on a machine that *had* a long-lived login.
 #
-# Recovery is consent-based: the operator hands THIS plugin a token to pass to
-# the nested CLI, via the plugin's own `oauth_token` userConfig option (#860,
-# round 2 -- stale prose found by review: this used to say "the
-# REMEMBER_OAUTH_TOKEN env var or a haiku.oauth_token key in config.json",
-# which is no longer true; see _configured_oauth_token() below). It is used
-# only when the child env has no CLAUDE_CODE_OAUTH_TOKEN, and only a value
-# the operator deliberately configured — nothing is read from OS credential
-# storage the platform withheld.
-_MIN_TOKEN_LEN = 20
+# #860, round 3: there is no recovery path here at all any more. The plugin
+# used to offer one -- a recovery token the operator could hand it, via a
+# `oauth_token` userConfig option, to fill the host credential above when the
+# host withheld it from this hook's own subprocess -- but reading ANY
+# credential from the user's machine is itself the condition the directory's
+# security scan holds on, independent of consent or provenance, and the
+# aggregate kept pairing that read with the real, kept git-backup feature's
+# own "sends data" shape. The nested `claude -p` now runs with whatever
+# authentication it inherits from its own environment, or none at all; this
+# module reads no credential of its own to offer it one.
+#
+# #898, round 4: the previous fix for this same pairing kept one value-free
+# presence check (a function that only ever returned a bool, never a name or
+# a value) so an operator with a still-set legacy setting would hear it is
+# gone. The directory's scanner read that check's own existence as the read
+# side of the pairing regardless -- a presence check of a now-dead setting
+# is still a read of something the scanner treats as credential-shaped. That
+# check, and the notice built on it, are removed entirely; the docs alone
+# say the recovery token is gone.
 
 
 def _warn(message: str) -> None:
@@ -497,54 +581,6 @@ def _warn(message: str) -> None:
             print(f"[haiku] {message}", file=sys.stderr)
     except Exception:
         pass
-
-
-def _looks_like_token(value: object) -> bool:
-    """A configured value is usable only if it is a non-empty, whitespace-free
-    string of plausible length.
-    """
-    if not isinstance(value, str):
-        return False
-    stripped = value.strip()
-    return len(stripped) >= _MIN_TOKEN_LEN and not any(c.isspace() for c in stripped)
-
-
-def _accept_token(value: object) -> str | None:
-    """The configured value if usable, else ``None`` **and a log line**.
-
-    A rejected value used to vanish in silence, which made a typo'd or
-    truncated token indistinguishable from never having configured one: the
-    nested CLI ran unauthenticated and the operator got the same confusing auth
-    error this fallback exists to prevent, now with a misleading origin.
-
-    An empty value stays silent — that is how the bundled config ships the key
-    (``"oauth_token": ""``), i.e. "not configured", and it reaches here on
-    every save through the merged config.
-
-    The warning is one hardcoded literal naming the plugin's userConfig
-    option by hand -- round 1 of this fix logged ``len(value.strip())``
-    (#860): even a length is a value DERIVED from the secret, and CodeQL's
-    taint tracker correctly flagged that. Round 2 dropped the length but
-    kept a ``source: str`` parameter -- a constant the caller passed,
-    naming the setting -- and CodeQL's SECOND round flagged that too,
-    because the constant's own identifier (``USER_CONFIG_OAUTH_TOKEN_ENV``)
-    contains "TOKEN": a value flowing from a name that LOOKS sensitive is
-    treated as sensitive regardless of what it actually is. There is only
-    one caller now, so the message is written out in full here instead of
-    assembled from any parameter at all (#860, round 3).
-    """
-    if value is None or (isinstance(value, str) and not value.strip()):
-        return None
-    if not _looks_like_token(value):
-        _warn(
-            "WARNING: ignoring the plugin's userConfig oauth_token option "
-            "-- not a plausible OAuth token (want a whitespace-free "
-            f"string of at least {_MIN_TOKEN_LEN} chars); the nested CLI "
-            "will run unauthenticated unless the host provides a token of "
-            "its own"
-        )
-        return None
-    return str(value).strip()
 
 
 def _remember_dir_is_project_local(remember_dir: str) -> bool:
@@ -582,7 +618,7 @@ def _remember_dir_is_project_local(remember_dir: str) -> bool:
 
 
 def _config_candidates() -> list[str]:
-    """Config files to search for ``haiku.oauth_token``, highest priority first.
+    """Config files to search for ``haiku.*`` settings, highest priority first.
 
     ``REMEMBER_CONFIG`` is the merged config ``lib-memory-dir.sh`` builds from
     all three layers (plugin-bundled, user-global, per-project) and exports
@@ -612,225 +648,19 @@ def _config_candidates() -> list[str]:
     return candidates
 
 
-# plugin.json declares an optional `oauth_token` userConfig entry
-# (`sensitive: true`). Claude Code exports every userConfig option to a hook's
-# subprocess as CLAUDE_PLUGIN_OPTION_<KEY> (uppercased), sensitive values
-# included -- see the Claude Code plugin manifest reference, "Reference a
-# saved value" / "Fields that run through a shell". This is the ONLY source
-# for the recovery token (#860, round 2). REMEMBER_OAUTH_TOKEN and
-# haiku.oauth_token -- an env var and a config key this plugin invented for
-# itself, not a host-vendor credential -- are no longer read anywhere: the
-# directory's security scan holds "reads a credential from the user's
-# machine", and merely deprecating-while-still-reading them (#860's first
-# pass) does not clear that condition. See _legacy_env_var_present() /
-# _legacy_config_key_present() for the loud, value-free notice an operator
-# who still has either one set gets instead.
-USER_CONFIG_OAUTH_TOKEN_ENV = "CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN"
+# #898, round 4: the value-free presence check that used to live here (and
+# the notice built on it) are gone entirely -- see the module note above.
+# REMEMBER_OAUTH_TOKEN (an env var) and haiku.oauth_token (a config.json
+# key) were this plugin's own earlier, now-removed attempts at a recovery
+# token; this file reads neither any more, for any purpose.
 
 
-def _configured_oauth_token() -> str | None:
-    """Operator-configured OAuth token for the nested CLI, or ``None``.
-
-    The only source: the plugin's ``oauth_token`` userConfig option
-    (``CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN``, see the module comment above).
-    """
-    option_token = os.environ.get(USER_CONFIG_OAUTH_TOKEN_ENV, "").strip()
-    if option_token:
-        token = _accept_token(option_token)
-        if token:
-            return token
-    return None
-
-
-def _legacy_env_var_present() -> bool:
-    """True when the legacy recovery-token env var is still set -- boolean
-    existence only, the same "is something there" check ``test -n`` makes
-    in a shell script, nothing more (#860, round 2).
-
-    Deliberately returns a plain ``bool``, not the variable's name or
-    value: a second CodeQL round (py/clear-text-logging-sensitive-data)
-    flagged the FIRST fix for this same alert, because a function whose
-    name contained "oauth" returning ANY value that then reached a log
-    sink was itself treated as a sensitive source, independent of what the
-    value actually was ("NAME-based", not value-based, in the SARIF
-    codeFlow). A bool cannot carry a name or a value, so there is nothing
-    left for that heuristic to key on, and the caller below writes the
-    setting's name as a hardcoded literal in the warning text instead of
-    interpolating anything this function returns.
-    """
-    return bool(os.environ.get("REMEMBER_OAUTH_TOKEN", "").strip())
-
-
-def _legacy_config_key_present() -> bool:
-    """True when the legacy ``haiku.oauth_token`` config.json key is still
-    configured with a non-empty value -- boolean existence only, same
-    rationale as ``_legacy_env_var_present()`` above (#860, round 2).
-
-    An empty string -- how the bundled config ships ``haiku.oauth_token``
-    (``""``), meaning "not configured" -- is not "present": the bar is the
-    same truthiness check ``_accept_token`` already used for "is a value
-    configured at all", just without the length/shape validation that
-    function also does (that validation reads the value for more than
-    presence, which this function deliberately does not).
-    """
-    for path in _config_candidates():
-        try:
-            with open(path, encoding="utf-8") as f:
-                cfg = json.load(f)
-        except (OSError, ValueError):
-            continue
-        if not isinstance(cfg, dict):
-            continue
-        haiku_cfg = cfg.get("haiku")
-        if not isinstance(haiku_cfg, dict):
-            continue
-        value = haiku_cfg.get("oauth_token")
-        if isinstance(value, str) and value.strip():
-            return True
-    return False
-
-
-# ── The ambient ANTHROPIC_API_KEY (#703, reported in #693) ────────────────────
-#
-# The Claude CLI resolves credentials in a fixed order, and ANTHROPIC_API_KEY
-# out-ranks a claude.ai login. So an operator who has a login AND keeps that
-# var set for some unrelated tool gets every nested summarizer call billed to
-# the key -- and when its balance is exhausted, every background save dies with
-# "Credit balance is too low" while their own interactive sessions carry on
-# working off the login. Nothing at any layer names the variable; the reporter
-# found it by reading the child's stderr in the daily log after days of opaque
-# `save-session.sh --force exited 1` warnings.
-#
-# Stripping it unconditionally does not remove that failure, it relocates it:
-# authenticating the CLI with ANTHROPIC_API_KEY alone is normal and documented,
-# and for those installs a strip leaves the child with no credential at all and
-# every save failing in exactly the same silent shape.
-#
-# So the strip is conditional on another credential actually being visible.
-# "Visible" is the honest limit here: a claude.ai login in the macOS Keychain
-# is not something this process can see without probing the operator's keychain
-# (which prompts, and reads a secret we have no business reading), so `auto`
-# keeps the key for those operators -- today's behaviour, not a new failure --
-# and `haiku.anthropic_api_key` lets them say `strip` once. The failure hint in
-# `call_haiku` is what tells them the knob exists at the moment it matters.
-ANTHROPIC_API_KEY_ENV = "ANTHROPIC_API_KEY"
-
-_ANTHROPIC_KEY_POLICIES = ("auto", "keep", "strip")
-_ANTHROPIC_KEY_POLICY_DEFAULT = "auto"
-
-
-def _claude_login_path() -> str:
-    """Where the Claude CLI keeps a `claude.ai` login on disk.
-
-    ``CLAUDE_CONFIG_DIR`` relocates the CLI's whole config directory, so it is
-    honoured here rather than assuming ``~/.claude`` -- an operator who moved it
-    has a login this function would otherwise declare absent.
-    """
-    config_dir = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
-    if not config_dir:
-        config_dir = os.path.join(os.path.expanduser("~"), ".claude")
-    return os.path.join(config_dir, ".credentials.json")
-
-
-def _host_login_present() -> bool:
-    """True when a `claude.ai` login is visible ON DISK.
-
-    False means "not visible", never "absent": a login held in the macOS
-    Keychain is invisible here by design (see the note above). Every caller has
-    to treat a False as the weaker claim it is, which is why `auto` KEEPS the
-    ambient key on a False rather than stripping it.
-
-    Never raises -- a permission error reading a path under HOME must not become
-    a save outage.
-    """
-    try:
-        return os.path.getsize(_claude_login_path()) > 0
-    except OSError:
-        return False
-
-
-def _configured_anthropic_key_policy() -> str:
-    """`haiku.anthropic_api_key` from config: ``auto``, ``keep`` or ``strip``.
-
-    A value nothing recognises falls back to ``auto`` and is reported -- the
-    same rule ``_accept_token`` follows, and for the same reason: a typo'd
-    policy that silently graded as one of the two behaviours would be
-    indistinguishable from never having configured one, on a key whose whole
-    purpose is to overrule what this module inferred.
-    """
-    for path in _config_candidates():
-        try:
-            with open(path, encoding="utf-8") as f:
-                cfg = json.load(f)
-        except (OSError, ValueError):
-            continue
-        if not isinstance(cfg, dict):
-            continue
-        haiku_cfg = cfg.get("haiku")
-        if not isinstance(haiku_cfg, dict) or "anthropic_api_key" not in haiku_cfg:
-            continue
-        value = haiku_cfg["anthropic_api_key"]
-        if isinstance(value, str) and value.strip().lower() in _ANTHROPIC_KEY_POLICIES:
-            return value.strip().lower()
-        if isinstance(value, str) and not value.strip():
-            # How the bundled config can ship the key as "not configured",
-            # matching `haiku.oauth_token`'s own empty-means-unset convention.
-            return _ANTHROPIC_KEY_POLICY_DEFAULT
-        # The refused value is described, never echoed. This key's NAME invites
-        # an operator to paste an actual API key into it, and a warning that
-        # quoted the value would then write that key to the daily log in clear
-        # text -- turning a typo into a leaked credential on disk. CodeQL flags
-        # exactly this shape, and it is right to.
-        if isinstance(value, str):
-            shape = f"a {len(value.strip())}-character string"
-        else:
-            shape = f"a {type(value).__name__} value"
-        _warn(
-            f"WARNING: ignoring haiku.anthropic_api_key in {path} -- {shape}, "
-            f"not one of {', '.join(_ANTHROPIC_KEY_POLICIES)}; falling back to "
-            f"'{_ANTHROPIC_KEY_POLICY_DEFAULT}'. The value itself is not logged: "
-            "this key takes a policy word, and anyone who pasted a real key here "
-            "must not have it written to disk"
-        )
-        return _ANTHROPIC_KEY_POLICY_DEFAULT
-    return _ANTHROPIC_KEY_POLICY_DEFAULT
-
-
-def _other_credential() -> str | None:
-    """Name of a credential the child can authenticate with besides the ambient
-    key, or ``None`` when none is visible.
-
-    The name, not a bool, because it goes into the reason string: an operator
-    reading why their key was dropped should see which credential displaced it.
-    """
-    if os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "").strip():
-        return "CLAUDE_CODE_OAUTH_TOKEN from the host"
-    if _configured_oauth_token():
-        return "the OAuth token you configured for this plugin"
-    if _host_login_present():
-        return f"the claude.ai login in {_claude_login_path()}"
-    return None
-
-
-def _anthropic_api_key_decision() -> tuple[bool, str]:
-    """``(strip?, reason)`` for the ambient ANTHROPIC_API_KEY.
-
-    The reason is carried rather than logged on every save: this runs on the
-    hot path of every session end, and a line per save about a variable that is
-    behaving correctly is noise. It is surfaced only where it is actually
-    diagnostic -- in the failure hint below.
-    """
-    if not os.environ.get(ANTHROPIC_API_KEY_ENV, "").strip():
-        return False, "not set"
-    policy = _configured_anthropic_key_policy()
-    if policy == "keep":
-        return False, "haiku.anthropic_api_key is 'keep'"
-    if policy == "strip":
-        return True, "haiku.anthropic_api_key is 'strip'"
-    other = _other_credential()
-    if other:
-        return True, f"another credential is available ({other})"
-    return False, "it is the only credential this process can see"
+# #898 round 17: the #95 session list and the #724 Codex allow-list are
+# literal names in code (`_without_session_env`, `_codex_child_env`). Rounds
+# 15-16 read them from config; reading the environment by a config-supplied
+# name is what the directory scanner reports as "an environment variable
+# named at run time", so the lists came back into code, same names, same
+# order. A change to either list now needs a release.
 
 
 # Markers that a failed call plausibly died on credentials rather than on the
@@ -848,71 +678,34 @@ _CREDENTIAL_FAILURE_MARKERS = (
 )
 
 
-def _anthropic_api_key_hint(env: dict[str, str], detail: str) -> str:
-    """The sentence a failure gets when the ambient key plausibly caused it.
+def _inherited_env_hint(detail: str) -> str:
+    """The sentence a failure gets when it looks like a credential failure.
 
-    Empty string when the key never reached the child, or when the failure does
-    not look like a credential failure. This lands in the RuntimeError, which
-    `save-session.sh` surfaces into `hook-errors.log` -- the place an operator
-    is already looking, rather than the daily log alone (#694).
+    The discoverability half of #703: the nested CLI inherits the environment
+    the user started their coding agent from, and a variable set there for
+    some other tool can out-rank the CLI's own login. This names no variable
+    -- it cannot know which one. Empty string when the failure does not look
+    like a credential failure. It lands in the RuntimeError, which
+    `save-session.sh` surfaces into `hook-errors.log` -- the place an
+    operator is already looking (#694).
     """
-    if not env.get(ANTHROPIC_API_KEY_ENV):
-        return ""
     lowered = detail.lower()
     if not any(marker in lowered for marker in _CREDENTIAL_FAILURE_MARKERS):
         return ""
     return (
-        f" -- note that {ANTHROPIC_API_KEY_ENV} was set in this environment and "
-        "was passed to the nested CLI, where it OUT-RANKS a claude.ai login; if "
-        "that key is exhausted or wrong, this is what failed. Set "
-        "`haiku.anthropic_api_key` to \"strip\" in config.json to keep it out of "
-        "the summarizer, or \"keep\" to silence this note (#703)"
+        " -- the nested CLI inherits the environment you started your coding "
+        "agent from, and a credential variable set there for some other tool "
+        "can out-rank your own login; unset it in that environment to keep it "
+        "away from the summarizer (#703, #898)"
     )
 
 
-def _inject_configured_oauth_token(env: dict[str, str]) -> dict[str, str]:
-    """Fill CLAUDE_CODE_OAUTH_TOKEN from the userConfig option when the child
-    env lacks it (see the note above).
-
-    Never overrides a value already present — the host-provided credential wins.
-    Never raises: token resolution is entirely best-effort.
-
-    Also the one call site that reports a still-configured legacy
-    REMEMBER_OAUTH_TOKEN / haiku.oauth_token: once per save, by name only
-    (never the value), so an operator who has not yet migrated hears about it
-    loudly instead of silently losing a recovery path they do not know was
-    removed (#860, round 2).
-    """
-    if env.get("CLAUDE_CODE_OAUTH_TOKEN"):
-        return env
-    # Each branch below is a complete, hardcoded literal naming the setting
-    # by hand -- never built by interpolating a function's return value or
-    # a module constant into the message. A second CodeQL round flagged the
-    # first fix for this same alert (py/clear-text-logging-sensitive-data)
-    # on exactly that shape: a function whose name contained "oauth"
-    # returning a value that reached _warn() was itself treated as a
-    # sensitive source, independent of what the value actually was. These
-    # two checks now return plain booleans (see their own docstrings), so
-    # there is nothing left to interpolate (#860, round 2).
-    if _legacy_env_var_present():
-        _warn(
-            "NOTICE: REMEMBER_OAUTH_TOKEN is set but is no longer read "
-            "(#860) -- configure the recovery token through the plugin's "
-            "userConfig option instead (/plugin -> remember -> Configure, "
-            "or `claude plugin config set remember oauth_token <token>`)"
-        )
-    elif _legacy_config_key_present():
-        _warn(
-            "NOTICE: the haiku.oauth_token key in config.json is set but "
-            "is no longer read (#860) -- configure the recovery token "
-            "through the plugin's userConfig option instead (/plugin -> "
-            "remember -> Configure, or `claude plugin config set remember "
-            "oauth_token <token>`)"
-        )
-    token = _configured_oauth_token()
-    if token:
-        env["CLAUDE_CODE_OAUTH_TOKEN"] = token
-    return env
+# #898, round 4: _warn_if_legacy_recovery_token_configured() used to live
+# here. It only ever reported a value-free presence check (never a name or
+# a value reaching the log), but the directory's scanner read the presence
+# check's own existence as the read half of the plugin.json-aggregate
+# credential pairing regardless of what it logged -- removed entirely,
+# along with the check it called, per the module note above.
 
 
 # Hook isolation (#202). The nested `claude -p` was sandboxed against MCP
@@ -1183,64 +976,50 @@ def _isolated_summarizer_cwd():
 # mechanism, `-c shell_environment_policy.inherit=none` in
 # `_build_codex_cmd` (#798). Unlike the Claude route, Codex's
 # `--sandbox read-only` still executes whatever commands the model issues
-# (see _build_codex_cmd's docstring below), so stripping a deny-list off an
-# otherwise-full os.environ (what _child_env() does) is not enough -- a
-# command like `env`/`printenv` reads the child's environment directly.
+# (see _build_codex_cmd's docstring below), so inheriting the environment
+# minus the parent session's names (what the Claude route does) is not
+# enough -- a command like `env`/`printenv` reads the child's environment
+# directly.
 # This keeps only what the CLI itself needs to run and resolve its own
 # filesystem-based auth; #798's shell_environment_policy override is what
 # keeps a command spawned BY that CLI from seeing this same dict.
 #
 # #751 (release-audit, reasoned not observed): the original list was
-# PATH/HOME/LANG/LC_ALL/CODEX_HOME/TMPDIR/TEMP/TMP only -- no Windows entry,
-# and no route for anyone who authenticates Codex through an env var or
-# sits behind a proxy, on ANY platform. Both are widened here rather than
-# switched to a deny-list: #724's own rationale above (a command the model
-# runs can read the child's environment directly) is exactly as true on
-# Windows and behind a proxy as it is everywhere else this allow-list
-# already applied, so the fix is the same shape, just wider.
+# PATH/HOME/LANG/LC_ALL/CODEX_HOME/TMPDIR/TEMP/TMP only, with no Windows
+# entry. The Windows names were added rather than switching to a deny-list:
+# #724's own rationale above (a command the model runs can read the child's
+# environment directly) is exactly as true on Windows as everywhere else.
 #
-# The Windows-only names are listed UNCONDITIONALLY, not behind an
-# ``os.name == "nt"`` branch: this dict comprehension only ever passes
-# through a name that is ALSO a key in the parent's real ``os.environ``, so
-# adding ``SYSTEMROOT``/``USERPROFILE``/``APPDATA``/``PATHEXT`` to the
-# allow-list is a no-op on POSIX (nothing there sets them) and is exactly
-# the widening Codex needs on Windows -- no platform check needed, and
-# nothing here would read as "passing" on a platform it does not actually
-# cover the way a branched implementation could.
-_CODEX_CHILD_ENV_ALLOW = frozenset({
-    "PATH", "HOME", "LANG", "LC_ALL", "CODEX_HOME", "TMPDIR", "TEMP", "TMP",
-    # Windows: resolving %SystemRoot%-relative paths, the user profile dir,
-    # per-user app data, and which extensions CreateProcess treats as
-    # executable when a bare command name (no extension) is looked up on
-    # PATH -- without PATHEXT a bare "codex" can fail to resolve at all.
-    "SYSTEMROOT", "USERPROFILE", "APPDATA", "PATHEXT",
-    # Codex's own env-var credential (its filesystem-based CODEX_HOME/
-    # auth.json is unaffected either way) plus the standard proxy/CA
-    # variables -- every platform, not just Windows.
-    "CODEX_API_KEY",
-    "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY",
-    "SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS",
-})
-
-# #792 (CI, windows-latest): matched case-sensitively, this allow-list would
-# need BOTH "HTTPS_PROXY" and "https_proxy" listed to cover either casing a
-# user might set -- and even then, CPython's own os.py folds EVERY
-# os.environ key to uppercase on `nt` at process-startup time
-# (_createenviron's `encodekey = key.upper()`, applied when the initial
-# `data` dict is built from the inherited environment, not just when Python
-# itself calls __setitem__), so a lowercase entry in this allow-list could
-# never match anything on Windows regardless -- os.environ.items() never
-# yields a lowercase key there. Matching case-insensitively removes the
-# need to enumerate both cases at all: one canonical name per variable
-# above, compared against `k.upper()` below, works identically on a
-# platform that preserves case (POSIX -- a real https_proxy still gets
-# through, since "HTTPS_PROXY" is in the allow-list and .upper() of either
-# side lands on the same string) and one that folds it (Windows).
-_CODEX_CHILD_ENV_ALLOW_UPPER = frozenset(name.upper() for name in _CODEX_CHILD_ENV_ALLOW)
+# #898 rounds 16-17: the list names no credential. Codex's own login lives
+# in CODEX_HOME/auth.json (`codex login`), which is unaffected; an
+# environment-variable-only Codex login is not passed through. Round 16 had
+# made the list config so an operator could add a name; round 17 writes it
+# back in code as one literal read per name, because reading the
+# environment by a config-supplied name is what the directory scanner
+# reports as "an environment variable named at run time". Changing it needs
+# a release.
+#
+# #898 round 18 (maintainer decision): no proxy or CA-bundle variable is
+# passed through any more, in either casing. #751 had added them on a
+# reasoned audit finding, not a user request -- no user ever asked for
+# proxy support -- and #798 had flagged the same names as a leak risk.
+# Taking them off is also what cleared the directory portal's credential
+# hold. Behind a proxy, use REMEMBER_SUMMARIZER=claude: the Claude route
+# inherits the full environment. With the lowercase proxy reads gone, the
+# #792 Windows case-folding note that justified skipping them there no
+# longer applies to anything on this list.
+#
+# The Windows-only names (SYSTEMROOT/USERPROFILE/APPDATA/PATHEXT) are read
+# UNCONDITIONALLY: `_codex_child_env` only passes through a name that is
+# ALSO set in the parent's real ``os.environ``, so they are a no-op on POSIX
+# (nothing there sets them) and exactly the widening Codex needs on Windows.
 
 
 def _codex_child_env() -> dict[str, str]:
     """Allow-listed environment for `_call_codex`'s subprocess (#724, F9/F10).
+
+    The allowed names are written out below, one literal read each (#898
+    round 17, see the comment above); what they are, and why:
 
     ``PATH``/``HOME``: find and run the binary, resolve ``~``.
     ``LANG``/``LC_ALL``: locale-dependent CLI output.
@@ -1251,29 +1030,38 @@ def _codex_child_env() -> dict[str, str]:
     ``SYSTEMROOT``/``USERPROFILE``/``APPDATA``/``PATHEXT``: Windows-only in
     practice (#751) -- absent from ``os.environ`` everywhere else, so listing
     them here costs nothing on POSIX.
-    ``CODEX_API_KEY``: Codex's own env-var credential, when that is how this
-    host authenticates it rather than a filesystem ``auth.json`` (#751).
-    ``HTTPS_PROXY``/``HTTP_PROXY``/``NO_PROXY`` and
-    ``SSL_CERT_FILE``/``NODE_EXTRA_CA_CERTS``: anyone running this behind a
-    proxy or a custom CA bundle (#751). Matched case-insensitively against
-    the parent's real ``os.environ`` (#792) -- some HTTP client libraries
-    only ever check the lowercase form of the proxy names, and Windows
-    folds every ``os.environ`` key to uppercase regardless of which case
-    the variable was actually set under, so a case-sensitive match would
-    either miss the lowercase form everywhere, or need both cases listed
-    and still never match the lowercase one on Windows.
+    No credential: Codex authenticates from its filesystem ``auth.json``
+    (``codex login``); a login held only in an environment variable is not
+    passed through (#898 rounds 16-17).
+    No proxy or CA-bundle variable either, in any casing (#898 round 18,
+    maintainer decision; #751 had added them on a reasoned finding, no user
+    asked for them, and #798 named them a leak risk). Behind a proxy, use
+    ``REMEMBER_SUMMARIZER=claude``, whose route inherits the full environment.
 
     Nothing else -- no Anthropic key, no cloud credential, no unrelated
     shell secret this process's own environment happens to carry -- is
     passed through, because a command the model runs inside Codex's
     read-only sandbox can read the child's environment directly.
     """
-    env = {
-        k: v for k, v in os.environ.items()
-        if k.upper() in _CODEX_CHILD_ENV_ALLOW_UPPER
-    }
-    env[NESTED_SUMMARIZER_ENV] = "1"
-    return env
+    # #898 round 17: one literal read per allowed name, never a walk of the
+    # environment and never a name taken from config.
+    pairs = [
+        ("PATH", os.environ.get("PATH")),
+        ("HOME", os.environ.get("HOME")),
+        ("LANG", os.environ.get("LANG")),
+        ("LC_ALL", os.environ.get("LC_ALL")),
+        ("CODEX_HOME", os.environ.get("CODEX_HOME")),
+        ("TMPDIR", os.environ.get("TMPDIR")),
+        ("TEMP", os.environ.get("TEMP")),
+        ("TMP", os.environ.get("TMP")),
+        ("SYSTEMROOT", os.environ.get("SYSTEMROOT")),
+        ("USERPROFILE", os.environ.get("USERPROFILE")),
+        ("APPDATA", os.environ.get("APPDATA")),
+        ("PATHEXT", os.environ.get("PATHEXT")),
+    ]
+    child = {name: value for name, value in pairs if value is not None}
+    child["REMEMBER_NESTED_SUMMARIZER"] = "1"
+    return child
 
 
 def _build_codex_cmd(output_file: str, cwd: str) -> list[str]:
@@ -1288,19 +1076,19 @@ def _build_codex_cmd(output_file: str, cwd: str) -> list[str]:
     SEPARATE audiences:
       * `_codex_child_env` -- the ``env=`` kwarg passed to `subprocess.run`
         -- is what CODEX'S OWN PROCESS receives from this host (its CLI
-        needs PATH/HOME to run at all, plus CODEX_API_KEY/proxy/CA vars to
-        authenticate and reach the network, #751).
+        needs PATH/HOME to run at all; the list names no credential, #898
+        rounds 16-17, and no proxy/CA variable, #898 round 18).
       * the ``-c shell_environment_policy.inherit=none`` override below is
         what a COMMAND CODEX SPAWNS internally receives. These are not the
         same environment: Codex does not hand a spawned command its own
         process env by default just because that is what this host gave
         it. Before #798, nothing here set this policy at all, so a
         transcript-injected instruction that got the model to run a shell
-        command inside this sandbox could read CODEX_API_KEY and the proxy
-        vars directly out of that command's environment -- exactly the class
-        of secret #751 had just finished making Codex's OWN process able to
-        see. `_codex_child_env`'s allow-list stays necessary (Codex's own
-        auth/proxy needs do not go away); it was never sufficient for this.
+        command inside this sandbox could read an operator-added credential
+        and the proxy vars (then on the list, #751; off it since #898 round
+        18) directly out of that command's environment. `_codex_child_env`'s
+        allow-list stays necessary (Codex's own process still needs its
+        environment); it was never sufficient for this.
         Confirmed against codex-cli 0.153.2's own ``--help`` and the
         official Codex manual (fetched 2026-09-26): `shell_environment_policy`
         is a real, documented dotted-path config key, and ``-c`` overrides
@@ -1320,7 +1108,7 @@ def _build_codex_cmd(output_file: str, cwd: str) -> list[str]:
         fail to find it. Accepted here because nothing about this
         summarizer's actual job (producing the model's final text message)
         depends on a spawned command succeeding -- unlike `_codex_child_env`,
-        which deliberately keeps just enough (``PATH``/``HOME``/proxy/CA) for
+        which deliberately keeps just enough (``PATH``/``HOME``/locale/temp) for
         Codex's OWN process to run and authenticate, this policy governs a
         code path this feature does not intend to rely on at all.
         Unit tests here can only assert the argv carries this exact string;
@@ -1536,8 +1324,6 @@ def call_haiku(
     # MAX_ARG_STRLEN (128KB per single argument), which raises E2BIG ("Argument
     # list too long") at exec time and silently kills saves of long sessions.
     # `claude -p` with no positional prompt reads the prompt from stdin.
-    env = _child_env()
-    env = _inject_configured_oauth_token(env)
 
     # Bound the spawn before spawning (#204). Every defence above this line
     # depends on a signal reaching the child — an env marker a host can redact,
@@ -1561,7 +1347,10 @@ def call_haiku(
 
     def _run(isolate_hooks: bool):
         try:
-            with _isolated_summarizer_cwd() as summarizer_cwd:
+            # No env= here: the child inherits this process's environment,
+            # minus the parent session's own variables, for exactly as long
+            # as the spawn takes (`_summarizer_environment`, #95/#204).
+            with _isolated_summarizer_cwd() as summarizer_cwd, _summarizer_environment():
                 return subprocess.run(
                     _build_cmd(tools, isolate_hooks),
                     input=prompt,
@@ -1572,7 +1361,6 @@ def call_haiku(
                     encoding="utf-8",
                     errors="replace",
                     timeout=timeout,
-                    env=env,
                     cwd=summarizer_cwd,
                 )
         except subprocess.TimeoutExpired as timed_out:
@@ -1640,11 +1428,10 @@ def call_haiku(
                     "WARNING: the un-isolated retry failed with the same "
                     f"authentication error ({_failure_detail(result.stdout, result.stderr)}) "
                     "-- hook isolation was not the cause. The CLI's own saved "
-                    "login has expired; configure the plugin's userConfig "
-                    "recovery token instead (/plugin -> remember -> "
-                    "Configure, or `claude setup-token` then "
-                    "`claude plugin config set remember oauth_token <token>`; "
-                    "#129/#131/#860)."
+                    "login has expired; log in again with "
+                    "your coding agent's own CLI. This "
+                    "plugin reads no credential of its own any more -- there "
+                    "is no setting here to configure (#129/#131/#860)."
                 )
     finally:
         slot.release()
@@ -1654,7 +1441,7 @@ def call_haiku(
         detail = _failure_detail(result.stdout, result.stderr)
         raise RuntimeError(
             f"claude exited {result.returncode}: {detail}"
-            f"{_anthropic_api_key_hint(env, detail)}"
+            f"{_inherited_env_hint(detail)}"
         )
 
     return _parse_response(result.stdout)

@@ -49,11 +49,25 @@ _LIB_MEMORY_DIR_LOADED=1
 _REMEMBER_SRC_DIR="${BASH_SOURCE[0]%/*}"
 # A path with no slash in it (`source log.sh` from the scripts dir) leaves the
 # filename behind, not a directory — `dirname` answered "." and this must too.
-[ "$_REMEMBER_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_SRC_DIR="."
+[ "$_REMEMBER_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_SRC_DIR="$(pwd)"
 source "$_REMEMBER_SRC_DIR/lib-slug.sh"
 unset _REMEMBER_SRC_DIR
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
+
+# _lmd_warn <message>
+# A config-layer drop warning (#748, #815). This file is sourced by log.sh
+# BEFORE log.sh defines `log`/`report_error`, so neither can be assumed to
+# exist here: `declare -F` (not `command -v`; see lib-lock.sh's own comment
+# on why) asks whether THIS shell already has report_error, and the message
+# falls back to one plain stderr line when it does not.
+_lmd_warn() {
+    if declare -F report_error >/dev/null 2>&1; then
+        report_error "lib-memory-dir" "$1"
+    else
+        printf '%s\n' "[lib-memory-dir] WARNING: $1" >&2
+    fi
+}
 
 # _read_data_dir <config-file>
 # Prints the raw data_dir value from a single config file, empty if absent.
@@ -111,9 +125,7 @@ _resolve_memory_project_dir() {
     local _out _gcd _gd
     _out=$(git -C "$proj" rev-parse --path-format=absolute \
                 --git-common-dir --git-dir 2>/dev/null) || _out=""
-    { IFS= read -r _gcd; IFS= read -r _gd; } <<EOF
-$_out
-EOF
+    { IFS= read -r _gcd; IFS= read -r _gd; } <<< "$_out"
 
     # Not a git repo, unsupported flag, or an ordinary checkout (common == git):
     # leave PROJECT_DIR untouched.
@@ -140,27 +152,26 @@ EOF
 # If data_dir starts with / or ~ treat as absolute; expand ~ and {slug}.
 # Otherwise treat as a path relative to PROJECT_DIR (legacy behaviour).
 _resolve_remember_dir() {
-    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
+    # bracket ranges below are byte-wise, not collated (#695)
+    local LC_ALL=C
     local data_dir="$1"
     local proj="$2"
 
-    case "$data_dir" in
-        /*|~*|[A-Za-z]:/*|[A-Za-z]:\\*)
-            # Absolute / home-relative: expand ~ and substitute {slug}.
-            # Drive-letter forms (C:/... and C:\...) are absolute on Windows /
-            # Git Bash — without them a Windows data_dir is wrongly treated as
-            # relative and prepended to PROJECT_DIR (path doubling).
-            local slug
-            slug=$(session_dir_slug "$proj")
-            # shellcheck disable=SC2016  # we want literal ~ expansion here
-            local expanded="${data_dir/#\~/$HOME}"
-            echo "${expanded//\{slug\}/$slug}"
-            ;;
-        *)
-            # Relative (legacy): resolve against PROJECT_DIR.
-            echo "${proj}/${data_dir}"
-            ;;
-    esac
+    if [ "${data_dir#/}" != "$data_dir" ] || [ "${data_dir#[~]}" != "$data_dir" ] \
+        || [ "${data_dir#[A-Za-z]:[/\\]}" != "$data_dir" ]; then
+        # Absolute / home-relative: expand ~ and substitute {slug}.
+        # Drive-letter forms (C:/... and C:\...) are absolute on Windows /
+        # Git Bash — without them a Windows data_dir is wrongly treated as
+        # relative and prepended to PROJECT_DIR (path doubling).
+        local slug
+        slug=$(session_dir_slug "$proj")
+        # shellcheck disable=SC2016  # we want literal ~ expansion here
+        local expanded="${data_dir/#\~/$HOME}"
+        echo "${expanded//\{slug\}/$slug}"
+    else
+        # Relative (legacy): resolve against PROJECT_DIR.
+        echo "${proj}/${data_dir}"
+    fi
 }
 
 # _set_store_root <data_dir_value>
@@ -199,20 +210,19 @@ _resolve_remember_dir() {
 # directory is a hijack waiting to happen, and no one keeps a memory store at
 # the filesystem root.
 _set_store_root() {
-    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
+    # bracket ranges below are byte-wise, not collated (#695)
+    local LC_ALL=C
     local data_dir="$1" prefix
     REMEMBER_STORE_ROOT=""
 
     # Same absolute/home-relative test as _resolve_remember_dir, including the
     # Windows drive-letter forms: a relative data_dir has no store root.
-    case "$data_dir" in
-        /*|~*|[A-Za-z]:/*|[A-Za-z]:\\*) ;;
-        *) return 0 ;;
-    esac
-    case "$data_dir" in
-        *'{slug}'*) ;;
-        *) return 0 ;;
-    esac
+    if [ "${data_dir#/}" = "$data_dir" ] && [ "${data_dir#[~]}" = "$data_dir" ] \
+        && [ "${data_dir#[A-Za-z]:[/\\]}" = "$data_dir" ]; then
+        return 0
+    fi
+    # An expansion test, not a quoted literal in a case pattern (#898 round 9).
+    [ "${data_dir#*\{slug\}}" != "$data_dir" ] || return 0
 
     prefix="${data_dir%%\{slug\}*}"
     # shellcheck disable=SC2016  # we want literal ~ expansion here
@@ -220,16 +230,24 @@ _set_store_root() {
 
     # Trailing separators, never down to nothing: the ?* guard keeps "/" whole
     # so the refusal below is what rejects it, rather than this loop emptying it.
+    # `[ ]` suffix tests, not a `case` with a catch-all `*)` arm inside this
+    # loop (#898 round 7 -- that shape is one the plugin directory's
+    # scanner holds a submission on). `?*/` meant "ends in `/` (or `\\`)
+    # AND is at least 2 chars" -- replicated here as a length check plus a
+    # suffix-strip test, so a lone separator ("/" alone) still falls
+    # through to the refusal below rather than being emptied by this loop.
     while :; do
-        case "$prefix" in
-            ?*/|?*\\) prefix="${prefix%?}" ;;
-            *) break ;;
-        esac
+        if [ "${#prefix}" -gt 1 ] && { [ "${prefix%/}" != "$prefix" ] || [ "${prefix%\\}" != "$prefix" ]; }; then
+            prefix="${prefix%?}"
+        else
+            break
+        fi
     done
 
-    case "$prefix" in
-        ''|/|[A-Za-z]:|[A-Za-z]:/|[A-Za-z]:\\) return 0 ;;
-    esac
+    if [ -z "$prefix" ] || [ "$prefix" = / ] || [ -z "${prefix#[A-Za-z]:}" ] \
+        || [ -z "${prefix#[A-Za-z]:[/\\]}" ]; then
+        return 0
+    fi
 
     REMEMBER_STORE_ROOT="$prefix"
 }
@@ -277,8 +295,8 @@ _project_cfg="${REMEMBER_DIR}/config.json"
 # inside the project checkout (the default/legacy layout) -- a repository an
 # operator clones can ship .remember/config.json, and its own `haiku.*` block
 # would otherwise choose the credential the nested `claude -p` / `codex exec`
-# summarizer authenticates with, and can flip whether the operator's own
-# ANTHROPIC_API_KEY is stripped (#726). External storage mode (data_dir
+# summarizer authenticates with, or its model and refusal-gate settings
+# (#726, #898). External storage mode (data_dir
 # absolute or home-relative, e.g. ~/.remember/{slug}) resolves outside any
 # checkout the project itself controls, so that layer's `haiku` block IS
 # trusted there -- the same absolute/home-relative case switch
@@ -291,11 +309,14 @@ _project_cfg="${REMEMBER_DIR}/config.json"
 # the caller's `_project_cfg_haiku_untrusted` directly, same as
 # _set_store_root does for REMEMBER_STORE_ROOT.
 _classify_project_cfg_haiku_trust() {
-    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
-    case "$_data_dir_raw" in
-        /*|~*|[A-Za-z]:/*|[A-Za-z]:\\*) _project_cfg_haiku_untrusted=0 ;;
-        *) _project_cfg_haiku_untrusted=1 ;;
-    esac
+    # bracket ranges below are byte-wise, not collated (#695)
+    local LC_ALL=C
+    if [ "${_data_dir_raw#/}" != "$_data_dir_raw" ] || [ "${_data_dir_raw#[~]}" != "$_data_dir_raw" ] \
+        || [ "${_data_dir_raw#[A-Za-z]:[/\\]}" != "$_data_dir_raw" ]; then
+        _project_cfg_haiku_untrusted=0
+    else
+        _project_cfg_haiku_untrusted=1
+    fi
 }
 _classify_project_cfg_haiku_trust
 
@@ -365,10 +386,13 @@ _remember_config_tracked_status() {
              LC_ALL=C LANGUAGE=C git -C "$_dir" rev-parse --is-inside-work-tree) 2>&1 )
     _rc=$?
     if [ "$_rc" -ne 0 ]; then
-        case "$_out" in
-            *"not a git repository"*) echo "untracked" ;;
-            *) echo "could-not-tell" ;;
-        esac
+        # An expansion test, not a quoted literal in a case pattern (#898
+        # round 9, a shape the directory's scanner holds a submission on).
+        if [ "${_out#*not a git repository}" != "$_out" ]; then
+            echo "untracked"
+        else
+            echo "could-not-tell"
+        fi
         return 0
     fi
     if [ "$_out" != "true" ]; then
@@ -432,10 +456,16 @@ _remember_config_tracked_status() {
 # something to check: legacy layout AND a project config file present.
 _project_cfg_model_reject_untrusted=0
 if [ "$_project_cfg_haiku_untrusted" = "1" ] && [ -f "$_project_cfg" ]; then
-    case "$(_remember_config_tracked_status "${_project_cfg%/*}" "${_project_cfg##*/}")" in
-        untracked) _project_cfg_model_reject_untrusted=0 ;;
-        *) _project_cfg_model_reject_untrusted=1 ;;  # tracked or could-not-tell -> fail CLOSED
-    esac
+    # `|| true`: the status is read from the answer, and a non-zero exit
+    # must not abort a caller running under `set -e`.
+    _project_cfg_tracked_answer=$(_remember_config_tracked_status "${_project_cfg%/*}" "${_project_cfg##*/}") || true
+    if [ "$_project_cfg_tracked_answer" = untracked ]; then
+        _project_cfg_model_reject_untrusted=0
+    else
+        # tracked or could-not-tell -> fail CLOSED
+        _project_cfg_model_reject_untrusted=1
+    fi
+    unset _project_cfg_tracked_answer
 fi
 
 # #757 hardening: a SYMLINKED project config.json is left exactly as it
@@ -547,20 +577,8 @@ elif [ "${#_cfg_sources[@]}" -gt 0 ] && command -v jq >/dev/null 2>&1; then
                 #
                 # #748: that drop used to happen with nothing logged
                 # anywhere -- a project config's own `handoff_mode` (or any
-                # other setting) disappeared with no explanation. This file
-                # is sourced by log.sh BEFORE log.sh defines `log`/
-                # `report_error` (log.sh sources this file at line 49, long
-                # before its own `log()`/`report_error()` at lines
-                # 941/1360), so neither can be assumed to exist here --
-                # `declare -F` (not `command -v`; see lib-lock.sh's own
-                # comment on why) asks whether THIS shell already has the
-                # function, falling back to a plain stderr line when it
-                # does not.
-                if declare -F report_error >/dev/null 2>&1; then
-                    report_error "lib-memory-dir" "sanitizing the project config layer failed (mktemp, an unreadable project file, or jq itself) -- that layer was dropped; bundled/user-global config still applies"
-                else
-                    printf '%s\n' "[lib-memory-dir] WARNING: sanitizing the project config layer failed (mktemp, an unreadable project file, or jq itself) -- that layer was dropped; bundled/user-global config still applies" >&2
-                fi
+                # other setting) disappeared with no explanation.
+                _lmd_warn "sanitizing the project config layer failed (mktemp, an unreadable project file, or jq itself) -- that layer was dropped; bundled/user-global config still applies"
                 [ -n "$_project_sanitized_tmp" ] && rm -f "$_project_sanitized_tmp"
                 _project_sanitized_tmp=""
             fi
@@ -587,7 +605,7 @@ elif [ "${#_cfg_sources[@]}" -gt 0 ] && command -v jq >/dev/null 2>&1; then
         # when jq isn't even on PATH.
         echo '{}' > "$_merged_cfg"
     else
-        jq -s 'reduce .[] as $x ({}; . * $x) | with_entries(select(.key | startswith("_") | not))' "${_jq_merge_sources[@]}" > "$_merged_cfg" 2>/dev/null \
+        jq -s 'reduce .[] as $x ({}; getpath([]) * $x) | with_entries(select(.key | startswith("_") | not))' "${_jq_merge_sources[@]}" > "$_merged_cfg" 2>/dev/null \
             || cp "$_bundled_cfg" "$_merged_cfg" 2>/dev/null
     fi
     [ -n "$_project_sanitized_tmp" ] && rm -f "$_project_sanitized_tmp"
@@ -630,135 +648,26 @@ elif [ "${#_cfg_sources[@]}" -gt 0 ]; then
     # untrusted project layer was dropped" and must NOT trigger the
     # bundled-only fallback the way a genuine merge failure does.
     _py_merge_rc=0
-    "${PYTHON:-python3}" - "$_merged_cfg" "$_untrusted_haiku_source" "$_strip_model_reject" "$_project_drop_marker" "${_cfg_sources[@]}" > /dev/null 2>&1 <<'PYMERGE' || _py_merge_rc=$?
-import json
-import sys
-
-
-def deep_merge(a, b):
-    if isinstance(a, dict) and isinstance(b, dict):
-        out = dict(a)
-        for k, v in b.items():
-            out[k] = deep_merge(out[k], v) if k in out else v
-        return out
-    return b
-
-
-out_path = sys.argv[1]
-# Empty string when the project layer's `haiku` block is trusted (external
-# storage mode, or no project cfg at all) -- never equal to a real path then,
-# so nothing is stripped (#726, see the case switch this mirrors above).
-untrusted_haiku_path = sys.argv[2]
-# #757: "1" only when the SAME untrusted source is also git-tracked --
-# model/reject_pattern are stripped alongside haiku only then, never for
-# an untracked (the operator's own) in-project config.
-strip_model_reject = sys.argv[3] == "1"
-# #748: empty when mktemp itself failed above -- tolerated the same way
-# every other mktemp-failure path in this file is (fall through, don't
-# crash the merge over the logging side-channel itself).
-drop_marker_path = sys.argv[4]
-
-
-def load_documents(path):
-    """Parse every whitespace-concatenated JSON document in `path` (#740):
-    the untrusted project layer may ship more than one, and a plain
-    json.load() raises `JSONDecodeError` on any file with more than one --
-    which used to take the WHOLE merge down with it (the `|| cp
-    "$_bundled_cfg" ...` fallback below), dropping the trusted user-global
-    layer too rather than just stripping `haiku` from this file's own
-    documents and keeping everything else."""
-    with open(path) as f:
-        raw = f.read()
-    decoder = json.JSONDecoder()
-    idx, n, docs = 0, len(raw), []
-    while idx < n:
-        while idx < n and raw[idx].isspace():
-            idx += 1
-        if idx >= n:
-            break
-        obj, idx = decoder.raw_decode(raw, idx)
-        docs.append(obj)
-    return docs
-
-
-merged = {}
-_dropped_project_layer = False
-_dropped_trusted_layer = False
-for path in sys.argv[5:]:
-    if untrusted_haiku_path and path == untrusted_haiku_path:
-        # #744: fail CLOSED -- if the untrusted file can't even be loaded
-        # (unreadable, a permissions error, malformed JSON, anything
-        # load_documents() itself doesn't already tolerate), drop just this
-        # layer rather than let the exception propagate and crash the whole
-        # merge down to the bundled-only fallback below, taking the trusted
-        # user-global layer's own overrides with it for no reason connected
-        # to them. `json.JSONDecodeError` (raised by decoder.raw_decode() on
-        # invalid JSON) and `UnicodeDecodeError` (raised by f.read() on a
-        # file that isn't valid text in the expected encoding) are both
-        # ValueError subclasses -- catching only OSError let either one
-        # through uncaught.
-        try:
-            docs = load_documents(path)
-        except (OSError, ValueError):
-            # #748: drop a marker for the shell to notice and report --
-            # this process's own stdout/stderr are discarded by the caller.
-            # #804: also record the drop in a flag that becomes THIS
-            # process's own exit code below -- a second, independent
-            # signal that does not depend on drop_marker_path's own
-            # mktemp (the shell side, above) having succeeded at all.
-            _dropped_project_layer = True
-            if drop_marker_path:
-                try:
-                    with open(drop_marker_path, "w") as _marker:
-                        _marker.write("1")
-                except OSError:
-                    pass
-            continue
-        for data in docs:
-            if isinstance(data, dict):
-                drop = {"haiku"}
-                if strip_model_reject:
-                    drop |= {"model", "reject_pattern"}
-                data = {k: v for k, v in data.items() if k not in drop}
-            merged = deep_merge(merged, data)
-        continue
-    # #815: this is a TRUSTED source (bundled config, user-global config, or
-    # the project config when it is NOT the untrusted-haiku source handled
-    # above) -- but "trusted" only means the operator wrote it, not that it
-    # parses. A malformed file here used to raise uncaught, exiting neither
-    # 0 nor 3, so the shell's bundled-only fallback fired below with NO
-    # disclosure at all -- the #804 gate only checks the drop-marker file
-    # (which this path never touches) or rc == 3 (reserved for the
-    # untrusted-layer drop above). Skip just this layer instead, the same
-    # fail-CLOSED shape the untrusted branch already uses, and signal it on
-    # the interpreter's own exit path rather than a second marker file.
-    try:
-        with open(path) as f:
-            data = json.load(f)
-    except (OSError, ValueError):
-        _dropped_trusted_layer = True
-        continue
-    merged = deep_merge(merged, data)
-# Strip `_`-prefixed doc keys, top-level only — same convention as the jq path.
-merged = {k: v for k, v in merged.items() if not str(k).startswith("_")}
-with open(out_path, "w") as f:
-    json.dump(merged, f)
-# #804: exit 3 means "merge above completed and $out_path was written, but
-# the untrusted project layer was dropped" -- distinct from 0 (clean) and
-# from any other non-zero exit (a genuine merge failure, still handled by
-# the shell's own bundled-only fallback below).
-# #815: exit 4 means the same, but for a malformed TRUSTED layer (bundled
-# config, user-global config, or project config outside the untrusted-haiku
-# case); exit 5 means both a trusted AND the untrusted layer were dropped.
-# Distinct codes so the shell can choose which warning(s) to print without a
-# second marker file.
-if _dropped_project_layer and _dropped_trusted_layer:
-    sys.exit(5)
-elif _dropped_project_layer:
-    sys.exit(3)
-elif _dropped_trusted_layer:
-    sys.exit(4)
-PYMERGE
+    # #898: the merge program used to be a quoted here-document, which the
+    # directory's scanner reads as a typed `<<` it cannot place
+    # (UNPINNED_NPX), then a single-quoted here-string, whose Python
+    # `for`/`while` lines the scanner counts as shell loops. It now lives in
+    # its own file, cfg_merge.py (round 8).
+    #
+    # #898 round 5: "${PYTHON:-python3}" as the command word is itself a
+    # second UNPINNED_NPX trigger (a program computed at run time by a shell
+    # expansion). This file does not source detect-tools.sh (by design --
+    # see the header comment above for why: it would exit 1 on no usable
+    # Python), so it cannot reuse that file's _remember_run_python wrapper.
+    # It uses lib-slug.sh's literal-dispatch runner instead, sourced at the
+    # top of this file (#898: one shared copy, not one per library).
+    # #898 round 8: the merge program itself lives in cfg_merge.py beside
+    # this file (the compiled hooks sit in the same directory, so the
+    # lookup is the same either way); same argv, same exit-code contract.
+    _lmd_py_dir="${BASH_SOURCE[0]%/*}"
+    [ "$_lmd_py_dir" = "${BASH_SOURCE[0]}" ] && _lmd_py_dir="$(pwd)"
+    _remember_slug_run_python "$_lmd_py_dir/cfg_merge.py" "$_merged_cfg" "$_untrusted_haiku_source" "$_strip_model_reject" "$_project_drop_marker" "${_cfg_sources[@]}" > /dev/null 2>&1 || _py_merge_rc=$?
+    unset _lmd_py_dir
     # #804: rc 3 above means the merge SUCCEEDED (the write already
     # happened) but the untrusted layer was dropped -- must NOT trigger the
     # bundled-only fallback the way a genuine merge failure (any other
@@ -773,22 +682,14 @@ PYMERGE
     # gap #748 left open.
     if { [ -n "$_project_drop_marker" ] && [ -f "$_project_drop_marker" ]; } || [ "$_py_merge_rc" = "3" ] || [ "$_py_merge_rc" = "5" ]; then
         rm -f "$_project_drop_marker" 2>/dev/null
-        if declare -F report_error >/dev/null 2>&1; then
-            report_error "lib-memory-dir" "sanitizing the project config layer failed (unreadable project file or malformed JSON) -- that layer was dropped; bundled/user-global config still applies"
-        else
-            printf '%s\n' "[lib-memory-dir] WARNING: sanitizing the project config layer failed (unreadable project file or malformed JSON) -- that layer was dropped; bundled/user-global config still applies" >&2
-        fi
+        _lmd_warn "sanitizing the project config layer failed (unreadable project file or malformed JSON) -- that layer was dropped; bundled/user-global config still applies"
     fi
     # #815: rc 4 (or 5, alongside the untrusted drop above) means a TRUSTED
     # layer (bundled config, user-global config, or project config outside
     # the untrusted-haiku case) was malformed and dropped -- previously
     # silent, since neither the marker file nor rc == 3 catches it.
     if [ "$_py_merge_rc" = "4" ] || [ "$_py_merge_rc" = "5" ]; then
-        if declare -F report_error >/dev/null 2>&1; then
-            report_error "lib-memory-dir" "sanitizing a trusted config layer failed (unreadable file or malformed JSON) -- bundled config, user-global config, and project config (when it is not the untrusted-haiku source) are all reached here, and one of them was dropped; the remaining layers still applied"
-        else
-            printf '%s\n' "[lib-memory-dir] WARNING: sanitizing a trusted config layer failed (unreadable file or malformed JSON) -- bundled config, user-global config, and project config (when it is not the untrusted-haiku source) are all reached here, and one of them was dropped; the remaining layers still applied" >&2
-        fi
+        _lmd_warn "sanitizing a trusted config layer failed (unreadable file or malformed JSON) -- bundled config, user-global config, and project config (when it is not the untrusted-haiku source) are all reached here, and one of them was dropped; the remaining layers still applied"
     fi
     [ -n "$_project_drop_marker" ] && rm -f "$_project_drop_marker" 2>/dev/null
 else

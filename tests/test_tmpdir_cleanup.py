@@ -102,8 +102,8 @@ def test_save_session_exit_cleans_merged_config(tmp_path):
     strays = _run_and_collect_strays(
         tmp_path,
         f"""
-mkdir -p "$REMEMBER_DIR/tmp"
-echo $$ > "$REMEMBER_DIR/tmp/save.lock"
+mkdir -p "$REMEMBER_DIR/tmp/save.lock"
+echo $$ > "$REMEMBER_DIR/tmp/save.lock/pid"
 bash "{_bash_path(SAVE_SH)}"
 """,
     )

@@ -55,27 +55,25 @@ Put cross-project preferences (timezone, cooldowns) in `~/.remember/config.json`
 | `thresholds.ndc_timeout_seconds` | `180`            | Wall-clock budget (seconds) for the NDC `now.md` -> `today-*.md` compression call. Output length scales with input length, so a `now.md` large enough to need longer than this timed out on every run, was left untouched, and grew further each round — a one-way ratchet that never recovered on its own ([#788](https://github.com/Digital-Process-Tools/claude-remember/issues/788)). Raise this if the daily log shows repeated `[ndc] ERROR` lines mentioning a timeout. |
 | `thresholds.consolidate_timeout_seconds` | `180`     | Wall-clock budget (seconds) for the staging -> `recent.md`/`archive.md` consolidation call. The same fix shape as `ndc_timeout_seconds` above ([#806](https://github.com/Digital-Process-Tools/claude-remember/issues/806), reopening the intent of [#788](https://github.com/Digital-Process-Tools/claude-remember/issues/788)): output length scales with input length, so a large enough staging batch can time out on every run, be left uncompressed, and grow further every round with no recovery. Raise this if the daily log shows repeated `consolidation` ERROR lines mentioning a timeout. |
 | `debug`                          | _(unset)_        | Verbose logging for cooldowns and locks. Unset, each script keeps its own default — `save-session.sh` is verbose, the git-backup hook is quiet — which is what they did before this option was wired up (#176). `REMEMBER_DEBUG` overrides it.                                                                                                                                                                                                |
-| `haiku.oauth_token`              | _(empty)_        | **Removed on Claude Code (#860, round 2).** No longer read for authentication at all — the plugin's own `oauth_token` **userConfig** option is the only recovery-token source on Claude Code now (`/plugin` → `remember` → Configure, or `claude plugin config set remember oauth_token <token>`), set through Claude Code's own secure credential store rather than a key in this file. Codex's own native `codex exec` route never read this key either way (it authenticates via `CODEX_API_KEY` / its own host login only). It used to matter for the one Codex-side case that falls through to the shared `claude -p` code path (`REMEMBER_SUMMARIZER_FALLBACK=claude`) -- that fallback no longer reads this key any more than Claude Code does, since the recovery-token code has never branched by host. Codex has no `userConfig` mechanism to move it to, so there is no replacement for that one case; `/remember:doctor`'s notice still fires there, informationally. On Claude Code, a still-configured value here is detected by **presence only** (never its content) and logged once per save as a `NOTICE:` line, by name, naming it rather than its value, surfaced by `/remember:doctor`'s "Legacy recovery-token config" section. |
-| `haiku.anthropic_api_key`        | `auto`           | What to do with an ambient `ANTHROPIC_API_KEY` when the nested `claude -p` is spawned. The CLI resolves credentials in a fixed order and that key **out-ranks a `claude.ai` login**, so a key set for some unrelated tool silently becomes the summarizer's credential — and an exhausted one fails every background save while your interactive sessions keep working ([#703](https://github.com/Digital-Process-Tools/claude-remember/issues/703)). `auto` — strip it when another credential is visible (`CLAUDE_CODE_OAUTH_TOKEN`, a configured `haiku.oauth_token`/`REMEMBER_OAUTH_TOKEN`, or a login at `~/.claude/.credentials.json`), keep it when it is the only one, since stripping the sole credential is the same silent outage pointed at a different population. `strip` — always keep it out of the summarizer: **this is the setting for a login stored in the macOS Keychain**, which this process cannot see, so `auto` keeps the key for you. `keep` — always pass it through, e.g. to bill the summarizer to the key deliberately. An unrecognised value falls back to `auto` and is reported in the daily log. |
+| `haiku.oauth_token`              | _(empty)_        | **Removed entirely (#860, round 4).** Never read for authentication, on any host -- this plugin has no recovery-token path of its own at all, on Claude Code or Codex; a nested call that cannot authenticate simply runs unauthenticated, and refreshing your coding agent's own CLI login is the fix. A still-configured value here is not read for anything, is not detected, and is not logged anywhere -- there is nothing to migrate it to; remove it whenever convenient, but leaving it in place is harmless. |
 | `session_start_slow_threshold_s` | `5`              | The `SessionStart` hook's own wall-clock duration is always written to the daily log (`session-start took Ns`); at or above this many whole seconds it is **also** printed into the session, under `=== SESSION-START ===`, so a slow host is visible without going looking for the daily log first ([#706](https://github.com/Digital-Process-Tools/claude-remember/issues/706)). Measured with bash 5's `EPOCHSECONDS` builtin (no added fork) or, on older bash, one `date +%s` at each end — never per log line. Set `0` to surface every start; there is no key that silences the daily-log line. |
 
-**`haiku.oauth_token` and `haiku.anthropic_api_key` are never read from a per-project
-`.remember/config.json`, in the default (legacy) storage layout.** Both live under the
-`haiku` block above, and both are security-relevant: one chooses the credential the
-nested summarizer authenticates with, the other can force your own `ANTHROPIC_API_KEY`
-to be stripped. In the default layout `.remember/` sits inside the project checkout, so
-a repository you clone can ship a `.remember/config.json` of its own -- and before
+**A per-project `.remember/config.json`'s `haiku` block is never read, in the default
+(legacy) storage layout.** Keys under `haiku` have been security-relevant (`haiku.oauth_token`
+chose the credential the nested summarizer authenticated with). In the default layout
+`.remember/` sits inside the project checkout, so a repository you clone can ship a
+`.remember/config.json` of its own -- and before
 [#726](https://github.com/Digital-Process-Tools/claude-remember/issues/726), its `haiku`
 block was trusted exactly like one you wrote yourself. It no longer is, **regardless of
-whether that file is tracked by the repository's own git index** -- set these two keys
-in `~/.remember/config.json` (user-global) or via `REMEMBER_OAUTH_TOKEN`, never in a
-project's own config file, if you want them honoured.
+whether that file is tracked by the repository's own git index** -- set `haiku` keys in
+`~/.remember/config.json` (user-global), never in a project's own config file, if you
+want them honoured.
 
 **`model` and `reject_pattern` from that same per-project config are stripped too, but
 only when the file is git-TRACKED** -- committed by the repository, not merely sitting
 in the default layout
 ([#757](https://github.com/Digital-Process-Tools/claude-remember/issues/757)). Unlike
-the two `haiku.*` keys, neither can redirect where a transcript goes -- only which model
+the `haiku` block, neither can redirect where a transcript goes -- only which model
 is billed for every save, or whether the refusal gate runs at all (`reject_pattern:
 "none"` turns it off outright; any other value is a regex run over model output, an
 attacker-controlled ReDoS surface) -- severe enough to strip from a file the repository
@@ -87,15 +85,81 @@ still has `model`/`reject_pattern` take effect, exactly as before #757.
 External storage mode (`data_dir` absolute or home-relative, e.g. `~/.remember/{slug}`)
 is unaffected by any of the above -- `REMEMBER_DIR` there is the operator's own
 directory, never one a clone ships, so its config stays trusted **once it is genuinely
-the operator's own**. The one exception is the one-shot migration INTO that mode: a
-legacy `.remember/config.json` that is git-tracked (or whose tracked status could not be
-determined -- this fails CLOSED, the same as a confirmed-tracked file) is left behind
-rather than carried across trusted
+the operator's own**. Nothing is moved into that mode automatically any more (#898):
+if you move an old in-project `.remember/` there by hand, leave behind any `config.json`
+your repository tracks in git, or it becomes trusted config
 ([#757](https://github.com/Digital-Process-Tools/claude-remember/issues/757); see
-[external-storage-mode.md](external-storage-mode.md)) -- only a config nobody but you
-ever wrote, or whose git status was confirmed clean, reaches the trusted external layer.
+[external-storage-mode.md](external-storage-mode.md)).
 See [git-backup-security.md](git-backup-security.md) for the wider "a cloned project's
 config is untrusted input" note.
+
+### The summarizer's environment
+
+**The `claude` summarizer.** The summarizer runs a nested `claude -p` that inherits your
+environment, including your Claude Code login, exactly like any process a hook starts, and
+remember itself reads no credential
+([#898](https://github.com/Digital-Process-Tools/claude-remember/issues/898)). Only the
+parent Claude Code session's own variables are removed for the length of that call, so it
+does not pass as that session
+([#95](https://github.com/Digital-Process-Tools/claude-remember/issues/95),
+[#204](https://github.com/Digital-Process-Tools/claude-remember/issues/204)), and put
+back afterwards: `CLAUDECODE`, `CLAUDE_JOB_DIR`, `CLAUDE_PROJECT_DIR`,
+`CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_CHILD_SESSION`,
+`CLAUDE_CODE_SESSION_ATTENDED`, `CLAUDE_CODE_EXECPATH`, `CLAUDE_CODE_MESSAGING_SOCKET`,
+`CLAUDE_CODE_SSE_PORT` -- the reason for each is a comment beside the code in
+`pipeline/haiku.py`. `CLAUDE_CODE_MESSAGING_TOKEN`, the handshake paired with the messaging
+socket, is not on the list and reaches the nested call: with the socket removed, the nested
+call has no channel to present it on. Your login credential is never on that list
+([#131](https://github.com/Digital-Process-Tools/claude-remember/issues/131)); provider
+settings such as Bedrock selection are not either, so they reach the nested call
+([#316](https://github.com/Digital-Process-Tools/claude-remember/issues/316)). To keep any
+other variable away from the summarizer -- for example an `ANTHROPIC_API_KEY` set for some
+unrelated tool that would out-rank your `claude.ai` login there
+([#703](https://github.com/Digital-Process-Tools/claude-remember/issues/703)) -- unset it
+in the environment you start Claude Code from.
+
+**The list is code, not config.** Each name is written out literally in
+`pipeline/haiku.py` and cannot be changed from `config.json`. If a future Claude Code
+release adds a session variable, it reaches the summarizer until a plugin release adds it
+to the list. (Two earlier development rounds of #898 read this list, and the Codex one
+below, from `config.json`; a release-candidate scan reports reading the environment by a
+name taken from config as "an environment variable named at run time", so both lists went
+back into code with the same names.) **Removed:** `haiku.drop_env`
+([#898](https://github.com/Digital-Process-Tools/claude-remember/issues/898)).
+
+### The Codex summarizer's allow-list (#724)
+
+**What it protects.** Codex's `--sandbox read-only` denies writes and network, but it
+still runs whatever command the model asks for -- and a transcript can carry an
+instruction that gets the model to ask for `env`
+([#724](https://github.com/Digital-Process-Tools/claude-remember/issues/724)). So the
+nested `codex exec` process is not given your environment: it is given only these
+variables, and nothing else -- no Anthropic key, no cloud credential, no unrelated secret
+your shell happens to carry: `PATH`, `HOME`, `LANG`, `LC_ALL`, `CODEX_HOME`, `TMPDIR`,
+`TEMP`, `TMP`, `SYSTEMROOT`, `USERPROFILE`, `APPDATA`, `PATHEXT` -- what the Codex CLI
+needs to run and find its own login in `CODEX_HOME`. (Separately,
+`-c shell_environment_policy.inherit=none` gives a command Codex spawns no environment
+at all; the allow-list bounds what Codex's own process can see.) An allow-list fails
+closed: a variable nobody thought about stays out. Like the `claude` list above, it is
+code, not config: it cannot be changed from `config.json`.
+
+**No credential is on it**
+([#898](https://github.com/Digital-Process-Tools/claude-remember/issues/898)). That is
+narrower than earlier releases, which also passed Codex's own API-key variable
+(`CODEX_API_KEY`) through. If Codex finds its login in `auth.json` under `CODEX_HOME`
+(what `codex login` writes), nothing changes for you. **If you authenticate Codex only
+through an environment variable, it is not passed through and the `codex` summarizer
+starts without it** -- run `codex login` so the login lives in `auth.json`, or use the
+`claude` summarizer (`REMEMBER_SUMMARIZER=claude`).
+
+**No proxy or CA-bundle variable is on it either**
+([#898](https://github.com/Digital-Process-Tools/claude-remember/issues/898)).
+`HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY` (in either casing), `SSL_CERT_FILE` and
+`NODE_EXTRA_CA_CERTS` used to be passed through
+([#751](https://github.com/Digital-Process-Tools/claude-remember/issues/751)); they are not
+any more. **If you reach the network only through a proxy or a custom CA bundle, the `codex`
+summarizer cannot reach it -- set `REMEMBER_SUMMARIZER=claude`**: the `claude` summarizer
+inherits your whole environment, proxy variables included.
 
 ### Environment variables
 
@@ -108,7 +172,7 @@ A few runtime overrides aren't in `config.json` because they're per-shell rather
 | `REMEMBER_DEBUG`   | `1` emits verbose hook/cooldown lines to logs; `0` silences them. Highest precedence: it beats the `debug` config option. Unset **and** `debug` unset, the defaults differ per script — `save-session.sh` verbose, the git-backup hook quiet — which this table used to paper over with a single "default `1`" (#176).                                                                                                                                                                                                                                                                                                            |
 | `REMEMBER_MODEL`   | Model used for summarization/consolidation (the `claude -p` call). Default `haiku`. Point it at a more capable tier (e.g. `sonnet`) to improve salience and compression-cap compliance — the call is backgrounded, so there's no interactive-latency cost. **`config.json` → `model` is the source of truth** (per-project); this env var overrides it. Blank falls back to the default.                                                                                              |
 | `REMEMBER_REJECT_PATTERN` | Overrides the reject-gate regex that keeps model refusals/clarifications out of the memory layer. Blank → the narrow built-in default (anchored refusal/clarification stems only); `none` → gate disabled (only the literal `SKIP` contract applies); anything else → a custom case-insensitive regex. An invalid regex falls back to the default rather than failing the run. **`config.json` → `reject_pattern` is the source of truth**; this env var overrides it.   |
-| `REMEMBER_OAUTH_TOKEN` | **Removed (#860, round 2), on every host.** No longer read for authentication at all — not on Claude Code, and not on Codex's own fallthrough to the shared `claude -p` code path either (`REMEMBER_SUMMARIZER_FALLBACK=claude`), since the recovery-token code has never branched by host. On Claude Code, use the plugin's own `oauth_token` **userConfig** option instead (`/plugin` → `remember` → Configure, or `claude plugin config set remember oauth_token <token>`); Codex has no `userConfig` mechanism, so there is no replacement for it there. A still-set value is detected by **presence only** and logged once per save as a `NOTICE:` line naming this var (never its content), surfaced by `/remember:doctor`'s "Legacy recovery-token config" section, on either host. Before this removal, it was used **only when the child env has no `CLAUDE_CODE_OAUTH_TOKEN`** — some desktop / Agent-SDK hosts withhold it from hook subprocesses, so nothing ever saved ([#129](https://github.com/Digital-Process-Tools/claude-remember/issues/129)/[#131](https://github.com/Digital-Process-Tools/claude-remember/issues/131)) — create one with `claude setup-token` if you have not already. This fallback had no automated test even before removal — see [`docs/verification.md`](docs/verification.md) for the (now historical) manual procedure. **If you use git backup, this key must not live in any `config.json` that ends up committed.** A per-project `<slug>/config.json` is never staged or committed by the backup hook regardless ([#719](https://github.com/Digital-Process-Tools/claude-remember/issues/719)), but this env var is still the safer place for it, and it is the only safe place for the user-global `~/.remember/config.json`, which [external-storage-mode.md](external-storage-mode.md) does have you commit deliberately. See [`docs/git-backup-security.md`](git-backup-security.md). |
+| `REMEMBER_OAUTH_TOKEN` | **Removed entirely (#860, round 3), on every host.** No longer read for authentication at all, and there is no replacement for it any more -- this plugin has no recovery-token path of its own, on Claude Code or Codex, for either the direct call or Codex's own fallthrough to the shared `claude -p` code path (`REMEMBER_SUMMARIZER_FALLBACK=claude`). A nested call that cannot authenticate simply runs unauthenticated; refresh your coding agent's own CLI login instead (`claude setup-token` if you have not already). A still-set value is detected by **presence only** and logged once per save as a `NOTICE:` line naming this var (never its content), surfaced by `/remember:doctor`'s "Legacy recovery-token config" section, on either host -- there is nothing left to migrate it to; remove it. This fallback had no automated test even before removal — see [`docs/verification.md`](docs/verification.md) for the historical manual procedure (describes code that no longer exists; kept only as a record of what was once tested by hand). **If you use git backup, this key must not live in any `config.json` that ends up committed.** A per-project `<slug>/config.json` is never staged or committed by the backup hook regardless ([#719](https://github.com/Digital-Process-Tools/claude-remember/issues/719)), but this env var is still the safer place for it, and it is the only safe place for the user-global `~/.remember/config.json`, which [external-storage-mode.md](external-storage-mode.md) does have you commit deliberately. See [`docs/git-backup-security.md`](git-backup-security.md). |
 | `REMEMBER_MAX_CONCURRENT_SUMMARIZERS` | How many nested `claude -p` summarizers may run at once, host-wide. Default `4`. This is the depth bound too: a summarizer that re-entered the plugin runs *inside* its parent's call, so recursion appears as concurrency ([#204](https://github.com/Digital-Process-Tools/claude-remember/issues/204)). Not `1` on purpose — several projects saving at the same time is normal. When it fires, `DECLINED` appears in the daily log and the span is summarized on a later run. |
 | `REMEMBER_MAX_SUMMARIZERS_PER_MIN` | How many summarizers may be spawned in any 60-second window, host-wide. Default `12`. Covers the shape concurrency cannot see: a chain where each save spawns the next and no two ever overlap. A store saves at most once per `cooldowns.save_seconds`, so the default leaves room for roughly two dozen active projects. Same `DECLINED` log line when it fires. |
 | `REMEMBER_RUNTIME_DIR` | Where spawn records for the two caps above are kept. Default `~/.remember/run`. Derived from `HOME` alone so a child process that inherited no plugin environment still finds it — that is the point of the bound. Set it only to relocate the runtime state (a read-only home, a test harness); if it is unusable the caps stop applying and the daily log says the spawn was `UNBOUNDED`. |

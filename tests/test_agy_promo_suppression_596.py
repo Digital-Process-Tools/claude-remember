@@ -51,7 +51,7 @@ from pipeline.slug import session_dir_slug as _slug
 
 SESSION = "eeeeeeee-0000-4000-8000-000000000596"
 
-# The one promo this repo actually ships that has no installed_key
+# The one promo this repo actually ships that has no installed_id
 # collision risk -- read from the real promos.json elsewhere in the suite
 # (test_plugin_promo_574.py); reused here by key rather than duplicated.
 SUPERTOOL_KEY = "supertool@dpt-plugins"

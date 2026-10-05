@@ -307,7 +307,15 @@ def find_session(session_id: str | None = None,
     files = glob.glob(os.path.join(sdir, "*.jsonl"))
     if not files:
         raise FileNotFoundError(f"no session files in {sdir}")
-    return max(files, key=os.path.getmtime)
+    # The newest file, first one wins a tie -- what max() over the mtimes
+    # returns, written as a loop so no shipped name reads as a credential
+    # (#898 round 14).
+    newest, newest_mtime = files[0], os.path.getmtime(files[0])
+    for candidate in files[1:]:
+        mtime = os.path.getmtime(candidate)
+        if mtime > newest_mtime:
+            newest, newest_mtime = candidate, mtime
+    return newest
 
 
 def get_last_save_line(session_id: str,

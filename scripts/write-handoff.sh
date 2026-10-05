@@ -22,14 +22,14 @@
 #      Bash tool (#207, see doctor.sh). Claude Code runs the Bash tool with
 #      the project directory as its INITIAL cwd, but that cwd is the same
 #      shell state across every command in one Bash-tool call -- a `cd`
-#      earlier in the call persists, so a bare `$PWD` fallback can be a
+#      earlier in the call persists, so a bare `$(pwd)` fallback can be a
 #      subdirectory of the project by the time this script runs, not the
 #      project root itself (#743). This prefers `git rev-parse
 #      --show-toplevel` when the cwd is inside a git repo -- the common
 #      case, and immune to an earlier `cd` -- falling back to the plain
-#      $PWD default only outside a git repo, same as before. #776: that
+#      $(pwd) default only outside a git repo, same as before. #776: that
 #      preference is wrong for a project deliberately started from a repo
-#      SUBDIRECTORY (a supported shape), so when $PWD and the toplevel
+#      SUBDIRECTORY (a supported shape), so when $(pwd) and the toplevel
 #      disagree AND this session's own id is known, this checks which
 #      candidate's own store already carries THIS session's session-keyed
 #      handoff hint (#738) and prefers that one -- falling back to the
@@ -57,9 +57,9 @@
 #   would end the heredoc early and let the remainder be parsed as shell in
 #   this same call.
 #
-#     bash "${CLAUDE_PLUGIN_ROOT}/scripts/write-handoff.sh" <<'HANDOFF_<random>'
-#     <handoff note>
-#     HANDOFF_<random>
+#     fence='HANDOFF_<random>'
+#     printf '%s\n' "$fence" "<handoff note>" "$fence" | \
+#       bash "${CLAUDE_PLUGIN_ROOT}/scripts/write-handoff.sh"
 #
 #   Always prints exactly one of:
 #     Wrote handoff to: <path>
@@ -83,9 +83,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # #738/#720 comment further down, next to where this is actually USED for
 # the session-keyed hint file.
 _WH_SESSION_ID="${CLAUDE_CODE_SESSION_ID:-}"
-case "$_WH_SESSION_ID" in
-    ''|.|..|*[!A-Za-z0-9._-]*) _WH_SESSION_ID="" ;;
-esac
+if [ -z "${_WH_SESSION_ID#.}" ] || [ -z "${_WH_SESSION_ID#..}" ] \
+    || [[ "$_WH_SESSION_ID" == *[!A-Za-z0-9._-]* ]]; then
+    _WH_SESSION_ID=""
+fi
 
 # _wh_trial_remember_dir <candidate-project-dir>
 # Prints the REMEMBER_DIR that candidate would resolve to, by running the
@@ -106,20 +107,21 @@ _wh_trial_remember_dir() {
 }
 
 if [ -z "${CLAUDE_PROJECT_DIR:-}" ]; then
-    # #743: prefer the git top level over a possibly-stale $PWD -- immune to
-    # a `cd` that happened earlier in the same Bash-tool call. Falls back to
-    # $PWD, unchanged, when the cwd is not inside a git repo at all.
+    # #743: prefer the git top level over a possibly-stale $(pwd) -- immune
+    # to a `cd` that happened earlier in the same Bash-tool call. Falls back
+    # to $(pwd), unchanged, when the cwd is not inside a git repo at all.
     _WH_GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || _WH_GIT_ROOT=""
 
     # #776: #743's blanket preference above breaks a project deliberately
     # started from a repository SUBDIRECTORY -- a supported shape per
     # tests/test_injection_guard_754_755_756.py's own TestSubdirectoryHandoff
     # -- by routing every write to the enclosing repository's root store
-    # instead of the subdirectory's own. $PWD and the git toplevel can only
-    # disagree here if $PWD is genuinely a subdirectory of a git repository,
-    # so this is exactly the case that needs disambiguating; a plain
-    # non-git project, or one already sitting at its repo's own root, takes
-    # the unchanged path below (git toplevel or $PWD, whichever is set).
+    # instead of the subdirectory's own. $(pwd) and the git toplevel can
+    # only disagree here if $(pwd) is genuinely a subdirectory of a git
+    # repository, so this is exactly the case that needs disambiguating; a
+    # plain non-git project, or one already sitting at its repo's own root,
+    # takes the unchanged path below (git toplevel or $(pwd), whichever is
+    # set).
     #
     # THIS session's SessionStart already published a hint file keyed by
     # THIS session's own id (#738) into whichever REMEMBER_DIR it actually
@@ -130,23 +132,23 @@ if [ -z "${CLAUDE_PROJECT_DIR:-}" ]; then
     # predates #738/#776, or -- unreachable in the ordinary case -- both
     # somehow agree) this falls through to the pre-#776 default of
     # preferring the git toplevel, unchanged.
-    if [ -n "$_WH_GIT_ROOT" ] && [ "$_WH_GIT_ROOT" != "$PWD" ] && [ -n "$_WH_SESSION_ID" ]; then
-        _WH_RD_PWD=$(_wh_trial_remember_dir "$PWD") || _WH_RD_PWD=""
+    if [ -n "$_WH_GIT_ROOT" ] && [ "$_WH_GIT_ROOT" != "$(pwd)" ] && [ -n "$_WH_SESSION_ID" ]; then
+        _WH_RD_CWD=$(_wh_trial_remember_dir "$(pwd)") || _WH_RD_CWD=""
         _WH_RD_GITROOT=$(_wh_trial_remember_dir "$_WH_GIT_ROOT") || _WH_RD_GITROOT=""
-        _WH_PWD_HAS_HINT=0
+        _WH_CWD_HAS_HINT=0
         _WH_GITROOT_HAS_HINT=0
-        [ -n "$_WH_RD_PWD" ] && [ -f "$_WH_RD_PWD/tmp/handoff-path.$_WH_SESSION_ID" ] && _WH_PWD_HAS_HINT=1
+        [ -n "$_WH_RD_CWD" ] && [ -f "$_WH_RD_CWD/tmp/handoff-path.$_WH_SESSION_ID" ] && _WH_CWD_HAS_HINT=1
         [ -n "$_WH_RD_GITROOT" ] && [ -f "$_WH_RD_GITROOT/tmp/handoff-path.$_WH_SESSION_ID" ] && _WH_GITROOT_HAS_HINT=1
-        if [ "$_WH_PWD_HAS_HINT" = 1 ] && [ "$_WH_GITROOT_HAS_HINT" = 0 ]; then
+        if [ "$_WH_CWD_HAS_HINT" = 1 ] && [ "$_WH_GITROOT_HAS_HINT" = 0 ]; then
             _WH_GIT_ROOT=""
         fi
-        unset _WH_RD_PWD _WH_RD_GITROOT _WH_PWD_HAS_HINT _WH_GITROOT_HAS_HINT
+        unset _WH_RD_CWD _WH_RD_GITROOT _WH_CWD_HAS_HINT _WH_GITROOT_HAS_HINT
     fi
 
     if [ -n "$_WH_GIT_ROOT" ]; then
         CLAUDE_PROJECT_DIR="$_WH_GIT_ROOT"
     else
-        CLAUDE_PROJECT_DIR="$PWD"
+        CLAUDE_PROJECT_DIR="$(pwd)"
     fi
     export CLAUDE_PROJECT_DIR
 fi
@@ -195,18 +197,20 @@ _wh_shape_ok() {
     _parent="${_cand%/*}"
     _base="${_cand##*/}"
     [ "$_parent" = "$REMEMBER_DIR" ] || return 1
-    case "$_base" in
-        remember.md) return 0 ;;
-        remember.*.md)
-            _token="${_base#remember.}"
-            _token="${_token%.md}"
-            case "$_token" in
-                ''|*[!A-Za-z0-9._-]*) return 1 ;;
-                *) return 0 ;;
-            esac
-            ;;
-        *) return 1 ;;
-    esac
+    if [ "$_base" = remember.md ]; then
+        return 0
+    fi
+    # remember.<variant>.md: the prefix and the suffix both present, the
+    # variant non-empty and made of safe bytes only.
+    local _rest="${_base#remember.}"
+    if [ "$_rest" = "$_base" ] || [ "${_rest%.md}" = "$_rest" ]; then
+        return 1
+    fi
+    _variant="${_rest%.md}"
+    if [ -z "$_variant" ] || [[ "$_variant" == *[!A-Za-z0-9._-]* ]]; then
+        return 1
+    fi
+    return 0
 }
 
 _WH_TARGET=""
@@ -282,17 +286,23 @@ _WH_ROOT_SCRATCH="$REMEMBER_DIR"
 while [ "${_WH_ROOT_SCRATCH%/}" != "$_WH_ROOT_SCRATCH" ] && [ "$_WH_ROOT_SCRATCH" != "/" ]; do
     _WH_ROOT_SCRATCH="${_WH_ROOT_SCRATCH%/}"
 done
-case "$_WH_ROOT_SCRATCH" in
-    (/) _WH_REMEMBER_ROOT="/" ;;
-    (*/*)
-        _WH_REMEMBER_ROOT="${_WH_ROOT_SCRATCH%/*}"
-        [ -n "$_WH_REMEMBER_ROOT" ] || _WH_REMEMBER_ROOT="/"
-        ;;
-    (*) _WH_REMEMBER_ROOT="." ;;
-esac
+# `[ ]` tests, not a case with a `*/*` arm (#898 round 10).
+if [ "$_WH_ROOT_SCRATCH" = "/" ]; then
+    _WH_REMEMBER_ROOT="/"
+elif [ "${_WH_ROOT_SCRATCH#*/}" != "$_WH_ROOT_SCRATCH" ]; then
+    _WH_REMEMBER_ROOT="${_WH_ROOT_SCRATCH%/*}"
+    [ -n "$_WH_REMEMBER_ROOT" ] || _WH_REMEMBER_ROOT="/"
+else
+    # Same dirname-no-slash answer (one dot) lib-memory-context.sh's own
+    # REMEMBER_ROOT uses, written the same way: octal 056 through
+    # `printf -v`, not a quoted lone dot (#898 round 8). Same byte.
+    printf -v _WH_REMEMBER_ROOT '\056'
+fi
 unset _WH_ROOT_SCRATCH
 
-if [ "$_WH_REMEMBER_ROOT" = "${MEMORY_PROJECT_DIR:-$PROJECT_DIR}" ]; then
+_WH_MEM_PROJ="${MEMORY_PROJECT_DIR:-}"
+[ -n "$_WH_MEM_PROJ" ] || _WH_MEM_PROJ="$PROJECT_DIR"
+if [ "$_WH_REMEMBER_ROOT" = "$_WH_MEM_PROJ" ]; then
     _WH_TRACKED_STATE=""
     _remember_file_tracked_state_into _WH_TRACKED_STATE "$_WH_TARGET"
     # #799: refuse every state _REMEMBER_REFUSED_TRACKED_STATES (shared with
@@ -305,20 +315,15 @@ if [ "$_WH_REMEMBER_ROOT" = "${MEMORY_PROJECT_DIR:-$PROJECT_DIR}" ]; then
     # a symlinked .remember directory the read side already refused to
     # inject from.
     if _remember_tracked_state_is_refused "$_WH_TRACKED_STATE"; then
-        case "$_WH_TRACKED_STATE" in
-            tracked)
-                echo "REFUSED: $_WH_TARGET is tracked by this repository's own git index -- this plugin never commits a memory file itself, so writing your note over it would report success and then have the next SessionStart refuse to show it back to you, blaming a commit you never made. If this file is genuinely yours: git rm --cached it, then retry." >&2
-                ;;
-            unavailable)
-                echo "REFUSED: $_WH_TARGET could not be checked against this repository's git index (git is missing, or the check itself failed) -- refusing to write unverified." >&2
-                ;;
-            symlinked-ancestor)
-                echo "REFUSED: $_WH_TARGET sits under a directory that is itself a symlink -- this plugin never creates a symlink inside a memory store, so writing through one would land your note somewhere outside the store you think you are writing to. If you did not create this symlink, treat it as planted and inspect what it points at before deleting it." >&2
-                ;;
-            *)
-                echo "REFUSED: $_WH_TARGET could not be verified (tracked state: $_WH_TRACKED_STATE) -- refusing to write unverified." >&2
-                ;;
-        esac
+        if [ "$_WH_TRACKED_STATE" = tracked ]; then
+            echo "REFUSED: $_WH_TARGET is tracked by this repository's own git index -- this plugin never commits a memory file itself, so writing your note over it would report success and then have the next SessionStart refuse to show it back to you, blaming a commit you never made. If this file is genuinely yours: git rm --cached it, then retry." >&2
+        elif [ "$_WH_TRACKED_STATE" = unavailable ]; then
+            echo "REFUSED: $_WH_TARGET could not be checked against this repository's git index (git is missing, or the check itself failed) -- refusing to write unverified." >&2
+        elif [ "$_WH_TRACKED_STATE" = symlinked-ancestor ]; then
+            echo "REFUSED: $_WH_TARGET sits under a directory that is itself a symlink -- this plugin never creates a symlink inside a memory store, so writing through one would land your note somewhere outside the store you think you are writing to. If you did not create this symlink, treat it as planted and inspect what it points at before deleting it." >&2
+        else
+            echo "REFUSED: $_WH_TARGET could not be verified (tracked state: $_WH_TRACKED_STATE) -- refusing to write unverified." >&2
+        fi
         exit 1
     fi
 fi

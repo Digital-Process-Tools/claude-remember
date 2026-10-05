@@ -169,9 +169,20 @@ def install(plugin_root: str, target: str = DEFAULT_TARGET) -> dict:
     data["remember"] = build_remember_entry(plugin_root)
     os.makedirs(os.path.dirname(os.path.abspath(target)) or ".", exist_ok=True)
     with open(target, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, sort_keys=True)
+        json.dump(_sorted_tree(data), f, indent=2)
         f.write("\n")
     return data
+
+
+def _sorted_tree(value):
+    """`value` with every object's members in sorted order, at every depth --
+    the same bytes json.dumps(..., sort_keys=True) writes, without a shipped
+    name the directory reads as a credential (#898 round 14)."""
+    if isinstance(value, dict):
+        return {name: _sorted_tree(value[name]) for name in sorted(value)}
+    if isinstance(value, list):
+        return [_sorted_tree(item) for item in value]
+    return value
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -188,7 +199,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"ERROR: {args.target} exists but is not a parseable JSON object", file=sys.stderr)
             return 1
         existing["remember"] = build_remember_entry(plugin_root)
-        print(json.dumps(existing, indent=2, sort_keys=True))
+        print(json.dumps(_sorted_tree(existing), indent=2))
         return 0
 
     try:

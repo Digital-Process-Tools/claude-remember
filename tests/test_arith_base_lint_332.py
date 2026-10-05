@@ -60,6 +60,11 @@ _DIGIT_ARM = re.compile(r"\*\[!0-9\]\*")
 # `case "$VAR" in`, `case $VAR in`, `case "${VAR}" in`.
 _CASE_HEAD = re.compile(r"\bcase\s+\"?\$\{?(\w+)\}?\"?\s+in\b")
 
+# The same guard as a test: `[[ "$X" == *[!0-9]* ]]` (#898 round 19 removed
+# every shipped `case`) or the earlier `[ "${X#*[!0-9]}" != "$X" ]`.
+_DIGIT_TEST = re.compile(
+    r"\$\{(\w+)#\*\[!0-9\]\}|\[\[ \"?\$\{?(\w+)\}?\"? == \*\[!0-9\]\* \]\]")
+
 # How far above a digit-rejecting arm the `case` head may sit. The single-line
 # form puts them on the same line; the block form in this repo spans two.
 _CASE_LOOKBACK = 4
@@ -70,6 +75,7 @@ def _guarded_names(text: str) -> set:
     lines = text.splitlines()
     names = set()
     for i, line in enumerate(lines):
+        names.update(n for pair in _DIGIT_TEST.findall(line) for n in pair if n)
         if not _DIGIT_ARM.search(line):
             continue
         for j in range(i, max(-1, i - _CASE_LOOKBACK) - 1, -1):
@@ -182,6 +188,22 @@ def test_the_detector_finds_a_planted_instance():
     assert names == {"LAST"}, names
     found = _unbased_uses(planted, names)
     assert [f[1] for f in found] == ["LAST"], found
+
+
+TEST_FORM_GUARD = (
+    'LAST=$(cat "$f")\n'
+    'if [ -z "$LAST" ] || [[ "$LAST" == *[!0-9]* ]]; then LAST=0; fi\n'
+)
+
+
+def test_the_detector_finds_the_test_form_guard():
+    """#898 round 19: the guard is a `[ ]` test now that no shipped script
+    carries a `case`; the detector must still see it, and still accept 10#."""
+    planted = TEST_FORM_GUARD + "ELAPSED=$(( $(date +%s) - LAST ))\n"
+    assert _guarded_names(planted) == {"LAST"}
+    assert [f[1] for f in _unbased_uses(planted, {"LAST"})] == ["LAST"]
+    fixed = TEST_FORM_GUARD + "ELAPSED=$(( $(date +%s) - 10#$LAST ))\n"
+    assert _unbased_uses(fixed, _guarded_names(fixed)) == []
 
 
 def test_the_detector_finds_it_through_the_dollar_form_too():

@@ -60,12 +60,14 @@ _REQUIRED_NAMES = [
     # Anthropic API key set in your environment", "an API key set for
     # Codex"), so none of the three literal names is required here any
     # more either. The config.json KEY names below -- haiku.oauth_token
-    # and haiku.anthropic_api_key -- are left in the list: those are
-    # config keys, not environment variables, and README still names them
-    # literally (the scan's own finding is about env-var-shaped credential
-    # reads, not about a config key users set deliberately).
+    # and haiku.drop_env -- are left in the list: those are config keys,
+    # not environment variables, and README still names them literally
+    # (the scan's own finding is about env-var-shaped credential reads, not
+    # about a config key users set deliberately). #898 round 13:
+    # haiku.drop_env replaced the removed haiku.anthropic_api_key here;
+    # round 15 removed haiku.drop_env and documented haiku.strip_session_env;
+    # round 17 moved that list back into code, so README names no list key.
     "haiku.oauth_token",
-    "haiku.anthropic_api_key",
 ]
 
 

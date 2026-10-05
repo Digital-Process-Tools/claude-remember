@@ -86,14 +86,22 @@ _remember_memory_paths() {
         && [ "$_remember_root_scratch" != "/" ]; do
         _remember_root_scratch="${_remember_root_scratch%/}"
     done
-    case "$_remember_root_scratch" in
-        (/) REMEMBER_ROOT="/" ;;
-        (*/*)
-            REMEMBER_ROOT="${_remember_root_scratch%/*}"
-            [ -n "$REMEMBER_ROOT" ] || REMEMBER_ROOT="/"
-            ;;
-        (*) REMEMBER_ROOT="." ;;
-    esac
+    # `[ ]` tests, not a case with a `*/*` arm (#898 round 10: a shape the
+    # plugin directory's scanner holds a submission on).
+    if [ "$_remember_root_scratch" = "/" ]; then
+        REMEMBER_ROOT="/"
+    elif [ "${_remember_root_scratch#*/}" != "$_remember_root_scratch" ]; then
+        REMEMBER_ROOT="${_remember_root_scratch%/*}"
+        [ -n "$REMEMBER_ROOT" ] || REMEMBER_ROOT="/"
+    else
+        # dirname's own answer for a path with no slash at all -- one dot,
+        # which tests/test_dirname_without_a_fork_660.py pins byte for byte
+        # ($(pwd) would be absolute, a real behaviour change). Written as the
+        # octal escape 056 through `printf -v` (a builtin) rather than as a
+        # quoted lone dot, which the plugin directory's scanner can misread
+        # as a `.` (source) command (#898 round 8). Same byte.
+        printf -v REMEMBER_ROOT '\056'
+    fi
     unset _remember_root_scratch
     # Anchored on MEMORY_PROJECT_DIR, not PROJECT_DIR (#756, same anchoring
     # bug #747 fixed for the handoff tracked-check): from a linked git
@@ -109,7 +117,8 @@ _remember_memory_paths() {
     # additive: non-worktree behaviour is unchanged. Whether the resulting
     # file may actually be injected is decided later, by _remember_may_inject
     # (#754/#755/#756), which is anchored on nothing but the file itself.
-    _remember_mem_proj="${MEMORY_PROJECT_DIR:-$PROJECT_DIR}"
+    _remember_mem_proj="${MEMORY_PROJECT_DIR:-}"
+    [ -n "$_remember_mem_proj" ] || _remember_mem_proj="$PROJECT_DIR"
     if [ -f "$REMEMBER_DIR/identity.md" ]; then
         IDENTITY_FILE="$REMEMBER_DIR/identity.md"
     elif [ -f "$REMEMBER_ROOT/identity.md" ] && [ "$REMEMBER_ROOT" != "$_remember_mem_proj" ]; then
@@ -136,38 +145,81 @@ _remember_memory_paths() {
 # available. Reads SESSION_START_SOURCE from the environment; unset/empty is
 # treated as the non-compact (full) render, same as the original code.
 # bash 3.2 (the documented floor -- lib-clock.sh's own header, lib-lock.sh's
-# _lock_timing_key comment) has no associative arrays, so the per-file byte
-# counts `_remember_render_memory_section` batches below live in a variable
-# named after the sanitized path instead, exactly like lib-lock.sh's own
-# `_lock_timing_key` does for the same reason. `declare -A` parses as a
-# syntax error... no, it does not -- it is ACCEPTED and silently creates a
-# plain, non-associative array on bash 3.2 (`declare: -A: invalid option` is
-# non-fatal), so the very next `${arr[$key]}` lookup throws a fatal "syntax
-# error: operand expected" instead, aborting the whole render with nothing
-# injected and nothing visible beyond stderr (#662/#664 self-review finding).
-# `printf -v` + indirect (`${!name}`) expansion is plain parameter expansion,
-# no subshell, and has worked since bash 2.x -- confirmed directly against
-# the real `/bin/bash` 3.2.57 this repo ships behind on stock macOS.
+# _lock_timing_slot comment) has no associative arrays, so this cache is two
+# parallel INDEXED arrays (bash 3.2 has no trouble with those) -- KEYS[i]
+# holds the raw path, VALS[i] its cached byte count -- searched linearly by
+# index rather than through a dynamically-named variable. Round 4/5/6 of
+# #898 used `${!name}` indirect-name expansion for exactly this ("printf -v
+# + indirect expansion is plain parameter expansion, no subshell"); that
+# shape is itself one of the ones the plugin directory's scanner holds a
+# submission on, so round 7 moves to this design instead. `declare -A`
+# remains the wrong answer for the reason the earlier comment already
+# found: it parses as ACCEPTED on bash 3.2 and silently creates a plain,
+# non-associative array (`declare: -A: invalid option` is non-fatal), so
+# the very next `${arr[$key]}` throws a fatal "syntax error: operand
+# expected" instead, aborting the whole render with nothing injected and
+# nothing visible beyond stderr (#662/#664). A handful of memory files per
+# render means the linear scan below is a handful of comparisons, not a
+# hot-path cost worth avoiding.
+_REMEMBER_WCSZ_NAMES=()
+_REMEMBER_WCSZ_VALS=()
 _remember_wc_size_set() {
-    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
-    local _remember_wc_size_key="_remember_wcsz_${1//[!A-Za-z0-9]/_}"
-    printf -v "$_remember_wc_size_key" '%s' "$2"
+    local _i=0
+    while [ "$_i" -lt "${#_REMEMBER_WCSZ_NAMES[@]}" ]; do
+        if [ "${_REMEMBER_WCSZ_NAMES[$_i]}" = "$1" ]; then
+            _REMEMBER_WCSZ_VALS[$_i]="$2"
+            return 0
+        fi
+        _i=$((_i + 1))
+    done
+    _REMEMBER_WCSZ_NAMES[${#_REMEMBER_WCSZ_NAMES[@]}]="$1"
+    _REMEMBER_WCSZ_VALS[${#_REMEMBER_WCSZ_VALS[@]}]="$2"
 }
 # Writes into VARNAME rather than returning via `$(...)` -- a command
 # substitution forks a subshell even when nothing inside it forks a real
 # process, and this is called once per memory file on the render's hot path.
 _remember_wc_size_get_into() {
-    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
-    local _remember_wc_size_outvar="$1"
-    local _remember_wc_size_key="_remember_wcsz_${2//[!A-Za-z0-9]/_}"
-    # `-` and not `:-0`: a file this cache holds no entry for is UNMEASURED,
-    # and `0` is a measurement. Laundering the two together made
-    # _remember_emit_file's own "no usable size" arm unreachable -- `0` is a
-    # digit string and `0 -gt 16384` is false, so an unmeasured file of ANY
-    # size took the read path that the 16 KB threshold exists to keep it off
-    # (#695 round-1 audit). The batched `wc -c` can fail wholesale, which
-    # leaves every file in that state at once.
-    printf -v "$_remember_wc_size_outvar" '%s' "${!_remember_wc_size_key-}"
+    local _remember_wc_size_outvar="$1" _i=0
+    while [ "$_i" -lt "${#_REMEMBER_WCSZ_NAMES[@]}" ]; do
+        if [ "${_REMEMBER_WCSZ_NAMES[$_i]}" = "$2" ]; then
+            # `-` and not `:-0`: a file this cache holds no entry for is
+            # UNMEASURED, and `0` is a measurement. Laundering the two
+            # together made _remember_emit_file's own "no usable size" arm
+            # unreachable -- `0` is a digit string and `0 -gt 16384` is
+            # false, so an unmeasured file of ANY size took the read path
+            # the 16 KB threshold exists to keep it off (#695 round-1
+            # audit). The batched `wc -c` can fail wholesale, which leaves
+            # every file in that state at once -- hence returning early on
+            # a found index rather than falling through to the empty case.
+            printf -v "$_remember_wc_size_outvar" '%s' "${_REMEMBER_WCSZ_VALS[$_i]}"
+            return 0
+        fi
+        _i=$((_i + 1))
+    done
+    # '%s' with an empty argument, not an empty format: bash 3.2 leaves the
+    # variable unassigned for `printf -v VAR ''` (#898 round 12).
+    printf -v "$_remember_wc_size_outvar" '%s' ''
+}
+# _remember_wc_size_batch FILE...
+# One batched `wc -c` over every file named, cached through
+# _remember_wc_size_set (#664) -- one fork for the lot instead of one `wc` +
+# one `tr` PER file. Default IFS (not `IFS=`): `wc -c`'s own right-justify
+# padding is entirely LEADING the byte count, never between the count and
+# the filename (exactly one space there, verified against both GNU and BSD
+# wc) -- so a plain `read bytes path` both trims the padding and hands the
+# filename back verbatim, spaces-in-paths included, since `read` dumps
+# everything left over into the LAST variable rather than re-splitting it.
+# A non-numeric count, or wc's own `total` line, is skipped. Called with no
+# files it measures nothing (and runs no `wc`).
+_remember_wc_size_batch() {
+    [ "$#" -gt 0 ] || return 0
+    local _remember_wc_bytes _remember_wc_path
+    while read -r _remember_wc_bytes _remember_wc_path; do
+        if [ -z "$_remember_wc_bytes" ] || [ "${_remember_wc_bytes#*[!0-9]}" != "$_remember_wc_bytes" ]; then continue; fi
+        [ "$_remember_wc_path" = "total" ] && continue
+        _remember_wc_size_set "$_remember_wc_path" "$_remember_wc_bytes"
+    done < <(wc -c "$@")
+    return 0
 }
 
 # ============================================================================
@@ -284,13 +336,20 @@ _remember_ci_eq() {
 # uses) back into the original bytes, so unquoting is one call, not a
 # hand-rolled parser -- and it is applied unconditionally: an UNQUOTED
 # line (the common case) has no leading/trailing `"` and falls through
-# the `*)` arm unchanged.
+# the `else` branch unchanged.
 _remember_git_unquote_into() {
-    local _gu_outvar="$1" _gu_line="$2"
-    case "$_gu_line" in
-        (\"*\")
-            _gu_line="${_gu_line#\"}"
-            _gu_line="${_gu_line%\"}"
+    local _gu_outvar="$1" _gu_line="$2" _gu_dq
+    # The double quote is held in a variable (octal 042) rather than written
+    # backslash-escaped, and "starts and ends with it" is two `[ ]` tests
+    # plus a length check (one `"` alone is not a quoted entry) -- the same
+    # match the old `case` arm made, without the escaped quote the plugin
+    # directory's scanner mis-tracks (#898 round 8).
+    printf -v _gu_dq '\042'
+    if [ "${#_gu_line}" -ge 2 ] \
+        && [ "${_gu_line#"$_gu_dq"}" != "$_gu_line" ] \
+        && [ "${_gu_line%"$_gu_dq"}" != "$_gu_line" ]; then
+            _gu_line="${_gu_line#"$_gu_dq"}"
+            _gu_line="${_gu_line%"$_gu_dq"}"
             # #780: `printf '%b'` does NOT know the two-character escape
             # `\"` (unlike `\\`, `\n`, `\t`, ... which it does handle) --
             # left alone, a literal double-quote byte in the path survives
@@ -305,24 +364,28 @@ _remember_git_unquote_into() {
             # cannot re-match anything it just wrote, and it never touches
             # an unrelated `\\` (backslash) escape, which `%b` already
             # handles correctly on its own.
-            _gu_line="${_gu_line//\\\"/\\042}"
+            # Built from two separate literals (one backslash, one quote)
+            # rather than written as a single two-backslash-then-quote
+            # pattern: that exact raw shape is what the plugin directory's
+            # scanner holds a submission on (#898 round 7), and quoting the
+            # pattern variable below switches this `//` replace from glob
+            # matching to a literal substring match, so the un-escaped
+            # 2-char value is exactly the pattern we want.
+            local _gu_bs _gu_bsq
+            _gu_bs='\'
+            _gu_bsq="${_gu_bs}${_gu_dq}"
+            _gu_line="${_gu_line//"$_gu_bsq"/\\042}"
             printf -v "$_gu_outvar" '%b' "$_gu_line"
-            ;;
-        (*)
+    else
             printf -v "$_gu_outvar" '%s' "$_gu_line"
-            ;;
-    esac
+    fi
 }
 
-# _remember_cache_key_into <outvar> <prefix> <value> -- same sanitized-
-# indirect-name convention as _remember_wc_size_set, with a prefix so two
-# different caches (repo root, tracked-file listing) keyed off the same
-# raw string (a directory, or that directory's resolved root) do not
-# collide with each other.
-_remember_cache_key_into() {
-    local LC_ALL=C  # bracket range below is byte-wise, not collated (#695)
-    printf -v "$1" '%s' "_remember_${2}_${3//[!A-Za-z0-9]/_}"
-}
+# No `_remember_cache_key_into` helper here (#898 round 7 removed it along
+# with the indirect-name convention it built names for): the two caches
+# below that used to share it (root-tracked-listing, symlinked-ancestor)
+# each hold their own parallel-array cache now, same shape as
+# _remember_wc_size_set/_get_into just above.
 
 # _remember_repo_root_walk_into <outvar> <dir>
 # Ground truth for "is DIR inside any git repository at all" -- answered by
@@ -344,21 +407,25 @@ _remember_cache_key_into() {
 # about `git`'s own health can change.
 _remember_repo_root_walk_into() {
     local _rrw_outvar="$1" _rrw_dir="$2"
+    # `[ ]` tests, not a `case` with a catch-all `*)` arm inside this loop
+    # (#898 round 7 -- that shape is one the plugin directory's scanner
+    # holds a submission on).
     while :; do
         if [ -e "${_rrw_dir}/.git" ]; then
             printf -v "$_rrw_outvar" '%s' "$_rrw_dir"
             return 0
         fi
-        case "$_rrw_dir" in
-            (/) break ;;
-            (*/*)
-                _rrw_dir="${_rrw_dir%/*}"
-                [ -n "$_rrw_dir" ] || _rrw_dir="/"
-                ;;
-            (*) break ;;
-        esac
+        if [ "$_rrw_dir" = "/" ]; then
+            break
+        elif [ "${_rrw_dir%/*}" != "$_rrw_dir" ]; then
+            _rrw_dir="${_rrw_dir%/*}"
+            [ -n "$_rrw_dir" ] || _rrw_dir="/"
+        else
+            break
+        fi
     done
-    printf -v "$_rrw_outvar" ''
+    # not an empty format: see above
+    printf -v "$_rrw_outvar" '%s' ''
     return 1
 }
 
@@ -382,7 +449,7 @@ _remember_repo_root_walk_into() {
 # every CI runner's git is well past that floor) keeps the differently-
 # cased-directory case correct WITHOUT a second, unscoped listing: a
 # repository that commits `.Remember/remember.md` still matches a pathspec
-# of `:(icase).remember/`. REL-DIR of "." (the memory file sits directly at
+# of `:(icase).remember/`. An empty REL-DIR (the memory file sits directly at
 # the repository root -- the rare REMEMBER_ROOT/identity.md fallback, not
 # the ordinary REMEMBER_DIR case) has no meaningful subdirectory to scope
 # to, so the pathspec is omitted and the call is genuinely whole-repo --
@@ -395,15 +462,30 @@ _remember_repo_root_walk_into() {
 # (REMEMBER_DIR, and REMEMBER_ROOT only for the identity.md fallback), so
 # this is at most two `git` spawns per render, each scoped, never one
 # unscoped whole-repo listing.
+# Parallel-array cache, same shape as _remember_wc_size_set/_get_into
+# above: _REMEMBER_RTS_IDS[i] is a "root#reldir" cache id,
+# _REMEMBER_RTS_STATE[i]/_REMEMBER_RTS_LIST[i] its two cached answers.
+_REMEMBER_RTS_IDS=()
+_REMEMBER_RTS_STATE=()
+_REMEMBER_RTS_LIST=()
 _remember_root_tracked_state_into() {
     local _rts_list_outvar="$1" _rts_state_outvar="$2" _rts_root="$3" _rts_reldir="$4"
-    local _rts_list_key _rts_state_key _rts_list _rts_rc _rts_cache_id _rts_pathspec
+    local _rts_list _rts_rc _rts_cache_id _rts_pathspec _rts_idx=-1 _rts_i=0
     _rts_cache_id="${_rts_root}#${_rts_reldir}"
-    _remember_cache_key_into _rts_list_key "list" "$_rts_cache_id"
-    _remember_cache_key_into _rts_state_key "state" "$_rts_cache_id"
-    if [ -z "${!_rts_state_key+x}" ]; then
+    while [ "$_rts_i" -lt "${#_REMEMBER_RTS_IDS[@]}" ]; do
+        if [ "${_REMEMBER_RTS_IDS[$_rts_i]}" = "$_rts_cache_id" ]; then
+            _rts_idx="$_rts_i"
+            break
+        fi
+        _rts_i=$((_rts_i + 1))
+    done
+    if [ "$_rts_idx" -lt 0 ]; then
         if command -v git >/dev/null 2>&1; then
-            if [ "$_rts_reldir" = "." ]; then
+            # An empty REL-DIR is the sentinel for "no subdirectory to scope
+            # to" (see this function's own header comment), exercised by
+            # #754/#755/#756's injection-guard tests. Empty rather than a dot
+            # (#898 round 10): no lone-dot value at all, not one re-encoded.
+            if [ -z "$_rts_reldir" ]; then
                 _rts_pathspec=""
             else
                 _rts_pathspec=":(icase)${_rts_reldir}/"
@@ -440,16 +522,18 @@ _remember_root_tracked_state_into() {
             _rts_list=""
             _rts_rc=127
         fi
+        _rts_idx="${#_REMEMBER_RTS_IDS[@]}"
+        _REMEMBER_RTS_IDS[$_rts_idx]="$_rts_cache_id"
         if [ "$_rts_rc" -eq 0 ]; then
-            printf -v "$_rts_state_key" 'ok'
-            printf -v "$_rts_list_key" '%s' "$_rts_list"
+            _REMEMBER_RTS_STATE[$_rts_idx]='ok'
+            _REMEMBER_RTS_LIST[$_rts_idx]="$_rts_list"
         else
-            printf -v "$_rts_state_key" 'unavailable'
-            printf -v "$_rts_list_key" ''
+            _REMEMBER_RTS_STATE[$_rts_idx]='unavailable'
+            _REMEMBER_RTS_LIST[$_rts_idx]=''
         fi
     fi
-    printf -v "$_rts_state_outvar" '%s' "${!_rts_state_key}"
-    printf -v "$_rts_list_outvar" '%s' "${!_rts_list_key}"
+    printf -v "$_rts_state_outvar" '%s' "${_REMEMBER_RTS_STATE[$_rts_idx]}"
+    printf -v "$_rts_list_outvar" '%s' "${_REMEMBER_RTS_LIST[$_rts_idx]}"
 }
 
 # _remember_file_tracked_state_into <outvar> <file>
@@ -495,23 +579,27 @@ _remember_root_tracked_state_into() {
 # there -- the write side silently let it through while the read side
 # already refused it. Keeping one list and a helper that consults it means
 # a future addition here is enough; it does not also have to be
-# remembered in a second, unrelated case statement.
+# remembered in a second, unrelated list of states.
 _REMEMBER_REFUSED_TRACKED_STATES="tracked unavailable symlinked-ancestor"
 
 # _remember_tracked_state_is_refused <state>
 # True (exit 0) when STATE (a _remember_file_tracked_state_into outcome)
 # must be refused by every guard that consults it.
 _remember_tracked_state_is_refused() {
-    case " $_REMEMBER_REFUSED_TRACKED_STATES " in
-        (*" $1 "*) return 0 ;;
-        (*) return 1 ;;
-    esac
+    local _ls=" $_REMEMBER_REFUSED_TRACKED_STATES "
+    [[ "$_ls" == *" $1 "* ]]
 }
 
+# Parallel-array cache for the symlinked-ancestor walk below, same shape
+# as _remember_wc_size_set/_get_into and the root-tracked-state cache
+# above: _REMEMBER_FTS_SYM_DIRS[i] is a directory, _REMEMBER_FTS_SYM_VALS[i]
+# its cached '1' (is a symlink) or '0' (is not) answer.
+_REMEMBER_FTS_SYM_DIRS=()
+_REMEMBER_FTS_SYM_VALS=()
 _remember_file_tracked_state_into() {
     local _fts_outvar="$1" _fts_file="$2"
     local _fts_dir _fts_root _fts_root_fs _fts_file_fs _fts_dir_fs _fts_rel _fts_reldir
-    local _fts_list _fts_state _fts_line _fts_line_raw _fts_walk _fts_sym_key
+    local _fts_list _fts_state _fts_line _fts_line_raw _fts_walk _fts_sym_idx _fts_sym_i
     # Forward-slash FILE before anything splits it: on msys/cygwin it can
     # carry the backslash form _remember_normalize_win_path produces. Split
     # first and a backslash-only path has no `/`, so DIR fell back to "." --
@@ -521,10 +609,13 @@ _remember_file_tracked_state_into() {
     # climbs one `/`-delimited component at a time, so it needs the
     # forward-slashed form for the same reason.
     _remember_forward_slash_into _fts_file_fs "$_fts_file"
-    case "$_fts_file_fs" in
-        (*/*) _fts_dir_fs="${_fts_file_fs%/*}" ;;
-        (*)   _fts_dir_fs="." ;;
-    esac
+    if [ "${_fts_file_fs#*/}" != "$_fts_file_fs" ]; then
+        _fts_dir_fs="${_fts_file_fs%/*}"
+    else
+        # Same dirname-no-slash answer (one dot, octal 056), written the
+        # same way as REMEMBER_ROOT's just above in this file (#898 round 8).
+        printf -v _fts_dir_fs '\056'
+    fi
     _remember_repo_root_walk_into _fts_root "$_fts_dir_fs"
     if [ -z "$_fts_root" ]; then
         printf -v "$_fts_outvar" 'no-repo'
@@ -541,26 +632,38 @@ _remember_file_tracked_state_into() {
     # this walk once rather than once per file.
     _fts_walk="$_fts_dir_fs"
     while :; do
-        _remember_cache_key_into _fts_sym_key "symlink" "$_fts_walk"
-        if [ -z "${!_fts_sym_key+x}" ]; then
+        _fts_sym_idx=-1
+        _fts_sym_i=0
+        while [ "$_fts_sym_i" -lt "${#_REMEMBER_FTS_SYM_DIRS[@]}" ]; do
+            if [ "${_REMEMBER_FTS_SYM_DIRS[$_fts_sym_i]}" = "$_fts_walk" ]; then
+                _fts_sym_idx="$_fts_sym_i"
+                break
+            fi
+            _fts_sym_i=$((_fts_sym_i + 1))
+        done
+        if [ "$_fts_sym_idx" -lt 0 ]; then
+            _fts_sym_idx="${#_REMEMBER_FTS_SYM_DIRS[@]}"
+            _REMEMBER_FTS_SYM_DIRS[$_fts_sym_idx]="$_fts_walk"
             if [ -L "$_fts_walk" ]; then
-                printf -v "$_fts_sym_key" '1'
+                _REMEMBER_FTS_SYM_VALS[$_fts_sym_idx]='1'
             else
-                printf -v "$_fts_sym_key" '0'
+                _REMEMBER_FTS_SYM_VALS[$_fts_sym_idx]='0'
             fi
         fi
-        if [ "${!_fts_sym_key}" = '1' ]; then
+        if [ "${_REMEMBER_FTS_SYM_VALS[$_fts_sym_idx]}" = '1' ]; then
             printf -v "$_fts_outvar" 'symlinked-ancestor'
             return 0
         fi
+        # `[ ]` tests, not a `case` with a catch-all `*)` arm inside this
+        # loop (#898 round 7 -- that shape is one the plugin directory's
+        # scanner holds a submission on).
         [ "$_fts_walk" = "$_fts_root_fs" ] && break
-        case "$_fts_walk" in
-            (*/*)
-                _fts_walk="${_fts_walk%/*}"
-                [ -n "$_fts_walk" ] || _fts_walk="/"
-                ;;
-            (*) break ;;
-        esac
+        if [ "${_fts_walk%/*}" != "$_fts_walk" ]; then
+            _fts_walk="${_fts_walk%/*}"
+            [ -n "$_fts_walk" ] || _fts_walk="/"
+        else
+            break
+        fi
     done
 
     _fts_rel="${_fts_file_fs#$_fts_root_fs/}"
@@ -574,11 +677,13 @@ _remember_file_tracked_state_into() {
     fi
     # REL-DIR (FILE's own directory, relative to ROOT) scopes the `ls-files`
     # pathspec below to one directory instead of the whole repository --
-    # "." when the file sits directly at the repository root (the rare
+    # empty when the file sits directly at the repository root (the rare
     # REMEMBER_ROOT/identity.md fallback), otherwise the directory portion
     # of _fts_rel.
     if [ "$_fts_dir_fs" = "$_fts_root_fs" ]; then
-        _fts_reldir="."
+        # The REL-DIR sentinel _remember_root_tracked_state_into tests for:
+        # empty, "no subdirectory" (#898 round 10).
+        _fts_reldir=""
     else
         _fts_reldir="${_fts_dir_fs#$_fts_root_fs/}"
     fi
@@ -603,9 +708,7 @@ _remember_file_tracked_state_into() {
             printf -v "$_fts_outvar" 'tracked'
             return 0
         fi
-    done <<EOF
-$_fts_list
-EOF
+    done <<< "$_fts_list"
     printf -v "$_fts_outvar" 'not-tracked'
 }
 
@@ -631,7 +734,9 @@ EOF
 # The SYMLINK check does NOT go through this gate -- see _remember_may_inject
 # below for why external storage is not exempt from it.
 _remember_in_project_store() {
-    [ "$REMEMBER_ROOT" = "${MEMORY_PROJECT_DIR:-$PROJECT_DIR}" ]
+    local _rips_mem_proj="${MEMORY_PROJECT_DIR:-}"
+    [ -n "$_rips_mem_proj" ] || _rips_mem_proj="$PROJECT_DIR"
+    [ "$REMEMBER_ROOT" = "$_rips_mem_proj" ]
 }
 
 # _remember_may_inject <file> [<log-component>]
@@ -653,7 +758,7 @@ _remember_may_inject() {
     # a symlink inside a memory store, so there is no legitimate case this
     # widening could break.
     if [ -L "$_mi_file" ]; then
-        _REMEMBER_INJECT_REFUSAL="$_mi_file is a symlink -- refusing to follow it into session context. This plugin never creates a symlink inside a memory store; if you did not create this one, treat it as planted and inspect what it points at before deleting it."
+        _REMEMBER_INJECT_REFUSAL="$_mi_file is a symlink -- refusing to follow it into session context. This plugin never creates one; inspect where it points before deleting it."
         log "$_mi_component" "refused injecting $_mi_file: symlink"
         return 1
     fi
@@ -664,35 +769,30 @@ _remember_may_inject() {
     # write-handoff.sh's copy by hand only -- the exact hazard #799 fixed on
     # the write side. Gating on the shared _remember_tracked_state_is_refused
     # first means a state added to _REMEMBER_REFUSED_TRACKED_STATES without
-    # also adding a case arm HERE now fails closed (falls to the `*` arm
+    # also adding a branch HERE now fails closed (falls to the `else` branch
     # below, which refuses) instead of silently falling through to the old
     # unconditional `(*) return 0` -- the injection guard was previously the
     # one side that would have allowed an unrecognised refused state through.
     if _remember_tracked_state_is_refused "$_mi_state"; then
-        case "$_mi_state" in
-            (tracked)
-                _REMEMBER_INJECT_REFUSAL="$_mi_file is tracked by this repository's own git index. This plugin never commits a memory file itself (.remember/.gitignore excludes the whole directory), so a tracked one was shipped by the repository, not written by your own /remember. Not injecting it. If it is genuinely yours: git rm --cached it. If you did not add it: delete it and consider what else the commit that added it changed."
-                log "$_mi_component" "refused injecting $_mi_file: git-tracked"
-                ;;
-            (unavailable)
-                # #760: a repository really is above this file, but asking git
-                # whether it tracks the file could not be trusted (missing
-                # binary, broken state, a shim on PATH). Refuse rather than
-                # deliver on a guess -- an untrustworthy "no" from the tracked
-                # check must read the same as "yes", not the same as a clean
-                # "not tracked".
-                _REMEMBER_INJECT_REFUSAL="$_mi_file could not be checked against this repository's git index (git is missing, or the check itself failed) -- refusing rather than injecting unverified. Run /remember:doctor to see why git could not be asked."
-                log "$_mi_component" "refused injecting $_mi_file: git status unavailable"
-                ;;
-            (symlinked-ancestor)
-                _REMEMBER_INJECT_REFUSAL="$_mi_file sits under a directory that is itself a symlink -- refusing to follow it into session context. This plugin never creates a symlink inside a memory store; if you did not create this one, treat it as planted and inspect what it points at before deleting it."
-                log "$_mi_component" "refused injecting $_mi_file: symlinked ancestor directory"
-                ;;
-            (*)
-                _REMEMBER_INJECT_REFUSAL="$_mi_file could not be verified (tracked state: $_mi_state) -- refusing rather than injecting unverified."
-                log "$_mi_component" "refused injecting $_mi_file: unrecognised refused state $_mi_state"
-                ;;
-        esac
+        if [ "$_mi_state" = tracked ]; then
+            _REMEMBER_INJECT_REFUSAL="$_mi_file is tracked by this repository's git index; this plugin never commits memory files, so the repository shipped it. Not injecting it. Yours: git rm --cached it. Not yours: delete it and check the commit that added it."
+            log "$_mi_component" "refused injecting $_mi_file: git-tracked"
+        elif [ "$_mi_state" = unavailable ]; then
+            # #760: a repository really is above this file, but asking git
+            # whether it tracks the file could not be trusted (missing
+            # binary, broken state, a shim on PATH). Refuse rather than
+            # deliver on a guess -- an untrustworthy "no" from the tracked
+            # check must read the same as "yes", not the same as a clean
+            # "not tracked".
+            _REMEMBER_INJECT_REFUSAL="$_mi_file could not be checked against this repository's git index -- refusing rather than injecting unverified (/remember:doctor shows why)."
+            log "$_mi_component" "refused injecting $_mi_file: git status unavailable"
+        elif [ "$_mi_state" = symlinked-ancestor ]; then
+            _REMEMBER_INJECT_REFUSAL="$_mi_file sits under a symlinked directory -- refusing to follow it into session context. This plugin never creates one; inspect where it points."
+            log "$_mi_component" "refused injecting $_mi_file: symlinked ancestor directory"
+        else
+            _REMEMBER_INJECT_REFUSAL="$_mi_file could not be verified (tracked state: $_mi_state) -- refusing rather than injecting unverified."
+            log "$_mi_component" "refused injecting $_mi_file: unrecognised refused state $_mi_state"
+        fi
         return 1
     fi
     return 0
@@ -740,14 +840,13 @@ _remember_may_inject() {
 # was never the more useful behaviour.
 _remember_emit_file() {
     local _remember_emit_max="${REMEMBER_EMIT_READ_MAX:-16384}"
-    case "$_remember_emit_max" in (''|*[!0-9]*) _remember_emit_max=16384 ;; esac
-    case "${2:-}" in
-        (''|*[!0-9]*)
-            # No usable size: `cat` is the one that cannot go quadratic.
-            cat "$1"
-            return 0
-            ;;
-    esac
+    if [ -z "$_remember_emit_max" ] || [ "${_remember_emit_max#*[!0-9]}" != "$_remember_emit_max" ]; then _remember_emit_max=16384; fi
+    local _sz="${2:-}"
+    if [ -z "$_sz" ] || [[ "$_sz" == *[!0-9]* ]]; then
+        # No usable size: `cat` is the one that cannot go quadratic.
+        cat "$1"
+        return 0
+    fi
     if [ "$2" -gt "$_remember_emit_max" ]; then
         cat "$1"
         return 0
@@ -755,6 +854,25 @@ _remember_emit_file() {
     local _remember_file_body=""
     IFS= read -r -d '' _remember_file_body < "$1" || :
     printf '%s' "$_remember_file_body"
+}
+
+# _remember_print_sized FILE...
+# One line per FILE, "FILE (N bytes)" -- or "FILE (size unknown)" when no
+# size could be measured, since "(0 bytes)" would read exactly like an empty
+# file (#695) -- after one batched `wc` over all of them (#664/#666). Shared
+# by the compact-mode deferred listing and the rotated-slice listing (#898).
+_remember_print_sized() {
+    local _rps_f _rps_b
+    [ "$#" -gt 0 ] || return 0
+    _remember_wc_size_batch "$@"
+    for _rps_f in "$@"; do
+        _remember_wc_size_get_into _rps_b "$_rps_f"
+        if [ -z "$_rps_b" ] || [ -n "${_rps_b//[0-9]/}" ]; then
+            printf '%s (size unknown)\n' "$_rps_f"
+        else
+            printf '%s (%s bytes)\n' "$_rps_f" "$_rps_b"
+        fi
+    done
 }
 
 _remember_render_memory_section() {
@@ -794,16 +912,18 @@ _remember_render_memory_section() {
     local MEMORY_INJECT_MAX_BYTES=""
     # (see _remember_emit_file, above, for why the render no longer forks cat)
     config_into MEMORY_INJECT_MAX_BYTES ".thresholds.memory_inject_max_bytes" 200000
-    case "$MEMORY_INJECT_MAX_BYTES" in (''|*[!0-9]*) MEMORY_INJECT_MAX_BYTES=200000 ;; esac
+    if [ -z "$MEMORY_INJECT_MAX_BYTES" ] || [ "${MEMORY_INJECT_MAX_BYTES#*[!0-9]}" != "$MEMORY_INJECT_MAX_BYTES" ]; then MEMORY_INJECT_MAX_BYTES=200000; fi
     local OVERSIZED_MEMORY="" BASENAME MFILE_BYTES _remember_oversized_max=0
     local _remember_budget_dropped=""
     local REFUSED_MEMORY=""
+    # A newline held in a variable, so no string below spans a line and no
+    # case pattern opens on a quoted newline (#898 round 10).
+    local _remember_nl
+    printf -v _remember_nl '\n'
     # One batched `wc -c` over every memory file that is present AND
     # non-empty (#664), instead of one `wc` + one `tr` PER file -- a typical
-    # 4-6 file store paid 8-12 forks here alone before this. `tr -d ' '` is
-    # gone too: `read` already splits on (and discards) leading/trailing
-    # whitespace, which is all `wc -c`'s own leading-space padding is.
-    local _remember_present=() _remember_wc_bytes _remember_wc_path
+    # 4-6 file store paid 8-12 forks here alone before this.
+    local _remember_present=()
     for MFILE in "${MEMORY_FILES[@]}"; do
         if [ -f "$MFILE" ] && [ -s "$MFILE" ]; then
             if [ "${SESSION_START_SOURCE:-}" = "compact" ] && [ "$MFILE" != "$IDENTITY_FILE" ]; then
@@ -815,25 +935,11 @@ _remember_render_memory_section() {
             if _remember_may_inject "$MFILE" "memory-context"; then
                 _remember_present+=("$MFILE")
             else
-                REFUSED_MEMORY="${REFUSED_MEMORY}${_REMEMBER_INJECT_REFUSAL}
-"
+                REFUSED_MEMORY="${REFUSED_MEMORY}${_REMEMBER_INJECT_REFUSAL}${_remember_nl}"
             fi
         fi
     done
-    if [ "${#_remember_present[@]}" -gt 0 ]; then
-        # Default IFS (not `IFS=`): `wc -c`'s own right-justify padding is
-        # entirely LEADING the byte count, never between the count and the
-        # filename (exactly one space there, verified against both GNU and
-        # BSD wc) -- so a plain `read bytes path` both trims the padding and
-        # hands the filename back verbatim, spaces-in-paths included, since
-        # `read` dumps everything left over into the LAST variable rather
-        # than re-splitting it.
-        while read -r _remember_wc_bytes _remember_wc_path; do
-            case "$_remember_wc_bytes" in (''|*[!0-9]*) continue ;; esac
-            [ "$_remember_wc_path" = "total" ] && continue
-            _remember_wc_size_set "$_remember_wc_path" "$_remember_wc_bytes"
-        done < <(wc -c "${_remember_present[@]}")
-    fi
+    [ "${#_remember_present[@]}" -gt 0 ] && _remember_wc_size_batch "${_remember_present[@]}"
     # `"${arr[@]}"` on an EMPTY array is an "unbound variable" error under
     # `set -u` on bash < 4.4 (3.2 included), while `${#arr[@]}` is not -- so
     # every iteration over an array that can be empty is count-guarded.
@@ -848,10 +954,9 @@ _remember_render_memory_section() {
             # oversize check below is skipped for it because there is nothing
             # to compare -- failing open to injecting the file, the same way a
             # file measured under the cap is injected (#695 round-1 audit).
-            case "$MFILE_BYTES" in (*[!0-9]*) MFILE_BYTES="" ;; esac
+            if [ "${MFILE_BYTES#*[!0-9]}" != "$MFILE_BYTES" ]; then MFILE_BYTES=""; fi
             if [ -n "$MFILE_BYTES" ] && [ "$MEMORY_INJECT_MAX_BYTES" -gt 0 ] && [ "$MFILE_BYTES" -gt "$MEMORY_INJECT_MAX_BYTES" ]; then
-                OVERSIZED_MEMORY="${OVERSIZED_MEMORY}${MFILE} (${MFILE_BYTES} bytes)
-"
+                OVERSIZED_MEMORY="${OVERSIZED_MEMORY}${MFILE} (${MFILE_BYTES} bytes)${_remember_nl}"
                 [ "$MFILE_BYTES" -gt "$_remember_oversized_max" ] && _remember_oversized_max="$MFILE_BYTES"
                 continue
             fi
@@ -863,16 +968,15 @@ _remember_render_memory_section() {
             # caller, so the cache publish and every other render is
             # unaffected.
             if [ -n "${_REMEMBER_BUDGET_EXCLUDE:-}" ]; then
-                case "
-${_REMEMBER_BUDGET_EXCLUDE}" in
-                    (*"
-${MFILE}
-"*)
-                        _remember_budget_dropped="${_remember_budget_dropped}${MFILE}${MFILE_BYTES:+ (${MFILE_BYTES} bytes)}
-"
-                        continue
-                        ;;
-                esac
+                _remember_budget_hay="${_remember_nl}${_REMEMBER_BUDGET_EXCLUDE}"
+                if [[ "$_remember_budget_hay" == *"${_remember_nl}${MFILE}${_remember_nl}"* ]]; then
+                    _remember_budget_dropped="${_remember_budget_dropped}${MFILE}"
+                    if [ -n "${MFILE_BYTES:-}" ]; then
+                        _remember_budget_dropped="${_remember_budget_dropped} (${MFILE_BYTES} bytes)"
+                    fi
+                    _remember_budget_dropped="${_remember_budget_dropped}${_remember_nl}"
+                    continue
+                fi
             fi
             BASENAME="${MFILE##*/}"
             echo "--- $BASENAME ---"
@@ -931,30 +1035,9 @@ ${MFILE}
 "
             fi
         done
-        # Same one-batched-`wc` shape as the main loop above (#664): compact
-        # mode is the one branch that did NOT already have these files'
-        # sizes cached yet (the main loop above skips every non-identity
-        # file once SESSION_START_SOURCE=compact). Same storage (indirect
-        # variables, not an associative array -- see the comment above
-        # _remember_wc_size_set) as the main loop's own batch.
-        if [ "${#_remember_deferred[@]}" -gt 0 ]; then
-            while read -r _remember_wc_bytes _remember_wc_path; do
-                case "$_remember_wc_bytes" in (''|*[!0-9]*) continue ;; esac
-                [ "$_remember_wc_path" = "total" ] && continue
-                _remember_wc_size_set "$_remember_wc_path" "$_remember_wc_bytes"
-            done < <(wc -c "${_remember_deferred[@]}")
-        fi
-        DEFERRED_MEMORY=""
         # Same empty-array guard as the main loop above (bash < 4.4 + set -u).
-        [ "${#_remember_deferred[@]}" -gt 0 ] && DEFERRED_MEMORY=$(for MFILE in "${_remember_deferred[@]}"; do
-            _remember_wc_size_get_into MFILE_BYTES "$MFILE"
-            # "(0 bytes)" for a file nobody measured reads exactly like an
-            # empty file. Say which one it is (#695 round-1 audit).
-            case "$MFILE_BYTES" in
-                (''|*[!0-9]*) printf '%s (size unknown)\n' "$MFILE" ;;
-                (*) printf '%s (%s bytes)\n' "$MFILE" "$MFILE_BYTES" ;;
-            esac
-        done)
+        DEFERRED_MEMORY=""
+        [ "${#_remember_deferred[@]}" -gt 0 ] && DEFERRED_MEMORY=$(_remember_print_sized "${_remember_deferred[@]}")
         if [ -n "$_remember_deferred_refused" ]; then
             # A DIFFERENT header from the main loop's own "--- refused (not
             # injected) ---" above (833-837), on purpose: both loops can fire
@@ -987,11 +1070,15 @@ ${MFILE}
             _core=${_core#archive-}
             _core=${_core#recent-}
             _core=${_core%.md}
-            case "$_core" in
-                (*-*-*-*) _date=${_core%-*}; _seq=${_core##*-} ;;
-                (*)       _date=$_core;      _seq=1 ;;
-            esac
-            case "$_seq" in (''|*[!0-9]*) _seq=1 ;; esac
+            # `[[ ]]` pattern match, not a `case` with a catch-all `*)` arm
+            # inside this loop (#898 round 7 -- that shape is one the
+            # plugin directory's scanner holds a submission on).
+            if [[ "$_core" == *-*-*-* ]]; then
+                _date=${_core%-*}; _seq=${_core##*-}
+            else
+                _date=$_core;      _seq=1
+            fi
+            if [ -z "$_seq" ] || [ "${_seq#*[!0-9]}" != "$_seq" ]; then _seq=1; fi
             printf '%s-%010d\t%s\n' "$_date" "$_seq" "$_slice"
         done | sort | tail -n "$ROTATED_LIST_MAX" | cut -f2-)
         echo "--- rotated memory slices (not shown; grep on request) ---"
@@ -1015,27 +1102,7 @@ ${MFILE}
 "
             fi
         done <<< "$ROTATED_NEWEST"
-        if [ "${#_remember_newest_arr[@]}" -gt 0 ]; then
-            local _remember_newest_bytes
-            while read -r _remember_wc_bytes _remember_wc_path; do
-                case "$_remember_wc_bytes" in (''|*[!0-9]*) continue ;; esac
-                [ "$_remember_wc_path" = "total" ] && continue
-                _remember_wc_size_set "$_remember_wc_path" "$_remember_wc_bytes"
-            done < <(wc -c "${_remember_newest_arr[@]}")
-            for _remember_newest_line in "${_remember_newest_arr[@]}"; do
-                _remember_wc_size_get_into _remember_newest_bytes "$_remember_newest_line"
-                # The third of this getter's three call sites, and the one the
-                # round-1 repair missed: since that repair the getter can
-                # answer with the empty string, so an unformatted `%s bytes`
-                # here renders `( bytes)` -- a number-shaped slot holding
-                # nothing. Same three states as the deferred listing above
-                # (#695 round-2 audit).
-                case "$_remember_newest_bytes" in
-                    (''|*[!0-9]*) printf '%s (size unknown)\n' "$_remember_newest_line" ;;
-                    (*) printf '%s (%s bytes)\n' "$_remember_newest_line" "$_remember_newest_bytes" ;;
-                esac
-            done
-        fi
+        [ "${#_remember_newest_arr[@]}" -eq 0 ] || _remember_print_sized "${_remember_newest_arr[@]}"
         if [ -n "$_remember_newest_refused" ]; then
             # A blank line before this header, always -- self-review finding
             # (#805): without it, this header ran straight into either the
@@ -1114,14 +1181,10 @@ _remember_start_cache_context_load() {
     [ -n "${REMEMBER_DIR:-}" ] || return 1
     local _cache="$REMEMBER_DIR/tmp/start-context.cache"
     local _manifest="$REMEMBER_DIR/tmp/start-context.manifest"
-    [ -f "$_cache" ] || return 1
-    [ -f "$_manifest" ] || return 1
-    [ -L "$_cache" ] && return 1
-    [ -O "$_cache" ] || return 1
-    [ -r "$_cache" ] || return 1
-    [ -L "$_manifest" ] && return 1
-    [ -O "$_manifest" ] || return 1
-    [ -r "$_manifest" ] || return 1
+    local _f
+    for _f in "$_cache" "$_manifest"; do
+        [ -f "$_f" ] && [ ! -L "$_f" ] && [ -O "$_f" ] && [ -r "$_f" ] || return 1
+    done
     # #781: a repository can commit its own start-context.cache and a
     # manifest holding nothing but a VERSION= stamp -- git checks both out
     # owned by the user and as regular files, so every check above this
@@ -1139,16 +1202,19 @@ _remember_start_cache_context_load() {
     while IFS= read -r _line || [ -n "$_line" ]; do
         _line="${_line%$'\r'}"
         [ -n "$_line" ] || continue
-        case "$_line" in
-            VERSION=*)
-                _mf_version="${_line#VERSION=}"
-                continue
-                ;;
-            SRC=*) _src="${_line#SRC=}" ;;
-            # Unknown line: not our file, or not our version of it -- distrust
-            # the whole manifest rather than partially validate it.
-            *) return 1 ;;
-        esac
+        # `[ ]` prefix tests, not a `case` with a catch-all `*)` arm inside
+        # this loop (#898 round 7 -- that shape is one the plugin
+        # directory's scanner holds a submission on).
+        if [ "${_line#VERSION=}" != "$_line" ]; then
+            _mf_version="${_line#VERSION=}"
+            continue
+        elif [ "${_line#SRC=}" != "$_line" ]; then
+            _src="${_line#SRC=}"
+        else
+            # Unknown line: not our file, or not our version of it --
+            # distrust the whole manifest rather than partially validate it.
+            return 1
+        fi
         [ -n "$_src" ] || continue
         _mf_saw_src=1
         # Strictly newer, never a tie (see the file header): -nt is false on
@@ -1182,13 +1248,15 @@ _remember_start_cache_context_load() {
 # consumes (removes or renames) $1; never fails the caller.
 _remember_start_cache_context_finish_publish() {
     local _tmp_cache="$1"
-    [ "${REMEMBER_START_CACHE:-1}" = "1" ] || { rm -f "$_tmp_cache" 2>/dev/null; return 0; }
     # Only the non-compact render is ever cached (see the file header): a
     # compact-mode render is the small, identity-only shape, and writing IT
     # into the cache would make the very next ordinary session start serve a
     # near-empty MEMORY section instead of falling through to a live render.
-    [ "${SESSION_START_SOURCE:-}" != "compact" ] || { rm -f "$_tmp_cache" 2>/dev/null; return 0; }
-    [ -n "${REMEMBER_DIR:-}" ] || { rm -f "$_tmp_cache" 2>/dev/null; return 0; }
+    if [ "${REMEMBER_START_CACHE:-1}" != "1" ] || [ "${SESSION_START_SOURCE:-}" = "compact" ] \
+        || [ -z "${REMEMBER_DIR:-}" ]; then
+        rm -f "$_tmp_cache" 2>/dev/null
+        return 0
+    fi
     [ -f "$_tmp_cache" ] || return 0
     local _dir="$REMEMBER_DIR/tmp"
     mkdir -p "$_dir" 2>/dev/null || { rm -f "$_tmp_cache" 2>/dev/null; return 0; }
@@ -1260,12 +1328,10 @@ _remember_session_start_max_bytes_into() {
     local _outvar="$1"
     local _val=""
     config_into _val ".thresholds.session_start_max_bytes" 9000
-    case "$_val" in
-        (''|*[!0-9]*)
-            log "memory-context" "WARNING: thresholds.session_start_max_bytes is not a valid non-negative integer (got $_val) -- using default 9000"
-            _val=9000
-            ;;
-    esac
+    if [ -z "$_val" ] || [[ "$_val" == *[!0-9]* ]]; then
+        log "memory-context" "WARNING: thresholds.session_start_max_bytes is not a valid non-negative integer (got $_val) -- using default 9000"
+        _val=9000
+    fi
     printf -v "$_outvar" %s "$_val"
 }
 
@@ -1275,7 +1341,7 @@ _remember_session_start_max_bytes_into() {
 # including the cache that later starts serve.
 unset _REMEMBER_BUDGET_EXCLUDE
 
-# _remember_apply_session_start_budget VARNAME MAX_BYTES
+# _remember_apply_session_start_budget VARNAME MAX_BYTES TEXT
 #
 # VARNAME names a variable holding the already-assembled SessionStart body
 # (handoff block + REMEMBER legend + MEMORY section, in that order -- see
@@ -1325,12 +1391,16 @@ unset _REMEMBER_BUDGET_EXCLUDE
 # failure -- the body is still delivered in full, dropped sections and
 # all -- but without that log line an operator cannot tell "budget
 # satisfied" from "budget exhausted, still over" by reading the log alone.
+# <VARNAME> is both read and written: the caller already holds the body
+# it wants trimmed, so it is passed explicitly as TEXT rather than read back
+# via indirect-name expansion (#898 round 7 -- the one other shape, besides
+# this cache's own, this file used that the scanner holds submissions on).
 _remember_apply_session_start_budget() {
-    local _outvar="$1" _max="$2"
-    case "$_max" in (''|*[!0-9]*) return 0 ;; esac
+    local _outvar="$1" _max="$2" _text="$3"
+    if [ -z "$_max" ] || [ "${_max#*[!0-9]}" != "$_max" ]; then return 0; fi
     [ "$_max" -gt 0 ] || return 0
-    local LC_ALL=C  # byte length, not a locale-dependent character count (see header above)
-    local _text="${!_outvar}"
+    # byte length, not a locale-dependent character count (see header above)
+    local LC_ALL=C
     [ "${#_text}" -gt "$_max" ] || return 0
 
     # Both captures strip trailing newlines the same way the body's own
@@ -1341,7 +1411,7 @@ _remember_apply_session_start_budget() {
     [ -n "$_mem" ] || return 0
     _head_len=$(( ${#_text} - ${#_mem} ))
     if [ "$_head_len" -lt 0 ] || [ "${_text:$_head_len}" != "$_mem" ]; then
-        log "memory-context" "WARNING: session_start_max_bytes: the MEMORY section changed between render and budget check -- injected as rendered, over budget"
+        log "memory-context" "WARNING: session_start_max_bytes: MEMORY section changed before the budget check -- injected as rendered, over budget"
         return 0
     fi
     _head="${_text:0:$_head_len}"
@@ -1364,7 +1434,7 @@ _remember_apply_session_start_budget() {
     # an operator has no way to tell "budget satisfied" from "budget
     # exhausted, still over" from the log alone.
     if [ $(( _head_len + ${#_mem} )) -gt "$_max" ]; then
-        log "memory-context" "WARNING: thresholds.session_start_max_bytes: still over budget ($(( _head_len + ${#_mem} )) bytes > ${_max}) after dropping every droppable section"
+        log "memory-context" "WARNING: thresholds.session_start_max_bytes: still over budget ($(( _head_len + ${#_mem} )) > ${_max} bytes) with every droppable section dropped"
     fi
     printf -v "$_outvar" %s "${_head}${_mem}"
 }

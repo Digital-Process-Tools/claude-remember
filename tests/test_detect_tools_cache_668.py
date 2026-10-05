@@ -151,3 +151,91 @@ def test_a_symlinked_tools_cache_is_refused_not_followed(tmp_path):
         f"stdout={second.stdout!r}"
     )
     assert "PYTHON=python3" in second.stdout
+
+
+# ── Eager and lazy share one probe (#898) ────────────────────────────────────
+
+
+def _cache_fields(cache_tmpdir: Path) -> dict:
+    cache_file = cache_tmpdir / "remember-detect-tools-cache"
+    if not cache_file.is_file():
+        return {}
+    out = {}
+    for line in cache_file.read_text(encoding="utf-8").splitlines():
+        key, _, value = line.partition("=")
+        out[key] = value
+    return out
+
+
+def test_an_eager_miss_publishes_a_complete_verdict(tmp_path):
+    """Eager mode publishes once JQ is known as well as PYTHON: a cache
+    written before JQ was resolved would carry an empty JQ field, which the
+    loader refuses, so every later run would silently re-probe."""
+    bindir, _counter = _fake_python_dir(tmp_path)
+    cache_tmpdir = tmp_path / "tmp1"
+    cache_tmpdir.mkdir()
+    env = {**os.environ, "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}"}
+
+    result = _run(env, cache_tmpdir)
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    fields = _cache_fields(cache_tmpdir)
+    assert fields.get("PYTHON") == "python3", fields
+    assert fields.get("JQ") in ("jq", "_jq_fallback"), fields
+    assert f"JQ={fields['JQ']}" in result.stdout
+
+
+def _run_lazy(env, cache_tmpdir: Path, body: str):
+    return subprocess.run(
+        [BASH, "-c",
+         f'_REMEMBER_LAZY_PYTHON=1; source "{DETECT.as_posix()}"; ' + body],
+        env={**env, "REMEMBER_TOOLS_CACHE": "1", "TMPDIR": str(cache_tmpdir)},
+        capture_output=True, text=True, timeout=60, check=False,
+    )
+
+
+def test_lazy_mode_probes_only_on_first_use_and_then_publishes(tmp_path):
+    """Lazy mode (#662): sourcing probes nothing and publishes nothing; the
+    first _remember_python call probes, sets PYTHON, and publishes a
+    complete verdict; a second call probes nothing more."""
+    bindir, counter = _fake_python_dir(tmp_path)
+    cache_tmpdir = tmp_path / "tmp1"
+    cache_tmpdir.mkdir()
+    env = {**os.environ, "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}"}
+
+    result = _run_lazy(env, cache_tmpdir, (
+        'echo "before=$PYTHON"; '
+        f'echo "calls=$(wc -l < "{counter.as_posix()}" | tr -d " ")"; '
+        f'[ -f "{(cache_tmpdir / "remember-detect-tools-cache").as_posix()}" ] && echo cached-early; '
+        '_remember_python && echo "after=$PYTHON"; '
+        f'n1=$(wc -l < "{counter.as_posix()}"); _remember_python; '
+        f'n2=$(wc -l < "{counter.as_posix()}"); [ "$n1" = "$n2" ] && echo second-free'))
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    out = result.stdout.splitlines()
+    assert "before=" in out and "calls=0" in out, out
+    assert "cached-early" not in out, out
+    assert "after=python3" in out, out
+    assert "second-free" in out, out
+    fields = _cache_fields(cache_tmpdir)
+    assert fields.get("PYTHON") == "python3", fields
+    assert fields.get("JQ") in ("jq", "_jq_fallback"), fields
+
+
+def test_lazy_mode_failure_returns_instead_of_exiting(tmp_path):
+    """No usable interpreter in lazy mode: _remember_python reports the same
+    FATAL diagnostics but RETURNS 1, so the jq-less caller's own fallback
+    still runs (eager mode exits; see test_detect_tools_fatal_diagnostics_650)."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    stub = bindir / "python3"
+    stub.write_text("#!/bin/sh\nexit 49\n", encoding="utf-8")
+    stub.chmod(0o755)
+    cache_tmpdir = tmp_path / "tmp1"
+    cache_tmpdir.mkdir()
+    env = {"PATH": str(bindir), "HOME": str(tmp_path)}
+
+    result = _run_lazy(env, cache_tmpdir, '_remember_python || echo "returned=$?"; echo alive')
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert "returned=1" in result.stdout and "alive" in result.stdout, result.stdout
+    assert "FATAL: No working Python found" in result.stderr, result.stderr
+    assert "exit 49" in result.stderr, result.stderr
+    assert _cache_fields(cache_tmpdir) == {}

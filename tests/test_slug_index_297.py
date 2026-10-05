@@ -137,9 +137,10 @@ def _project(home: Path, root: Path, name: str) -> Path:
     return project
 
 
-def _run(home: Path, project: Path, session_id: str = SESSION_ID):
+def _run(home: Path, project: Path, session_id: str = SESSION_ID, extra_env=None):
     env = {k: v for k, v in os.environ.items()
-           if k not in ("REMEMBER_DIR", "REMEMBER_STORE_ROOT", "_LIB_MEMORY_DIR_LOADED")}
+           if k not in ("REMEMBER_DIR", "REMEMBER_STORE_ROOT", "_LIB_MEMORY_DIR_LOADED",
+                        "REMEMBER_LOCK_TIMING", "REMEMBER_LOCK_TIMING_FILE")}
     env.update({
         "HOME": str(home),
         "CLAUDE_PROJECT_DIR": str(project),
@@ -152,6 +153,7 @@ def _run(home: Path, project: Path, session_id: str = SESSION_ID):
         # detail. Inline keeps the race under test and drops the flake.
         "REMEMBER_DEFER": "0",
     })
+    env.update(extra_env or {})
     return subprocess.run(
         ["bash", str(SESSION_START)],
         env=env, input=_payload(session_id), capture_output=True, text=True, timeout=180,
@@ -560,3 +562,54 @@ def test_the_index_never_reaches_a_backup_remote():
     assert '"/tmp/"' in backup, (
         "the store root's tmp/ must be excluded where the per-slug ones are"
     )
+
+
+# ── The opt-in lock-timing recorder stays on the locks it measures (#898) ────
+
+LIB_LOCK = REPO_ROOT / "scripts" / "lib-lock.sh"
+
+
+def _timing_rows(timing: Path) -> list[list[str]]:
+    if not timing.exists():
+        return []
+    return [line.split("\t") for line in timing.read_text(encoding="utf-8").splitlines()
+            if line and not line.startswith("#")]
+
+
+def test_the_lock_timing_harness_records_a_sessions_lock_when_asked(tmp_path):
+    """Positive control for the test below: the same environment, handed to
+    lib-lock.sh's public wrappers directly, DOES produce a sessions.lock row.
+    Without this, a timing file left empty by a broken harness would pass the
+    negative assertion for the wrong reason."""
+    timing = tmp_path / "lock-timing.tsv"
+    lock = tmp_path / "store" / "tmp" / "sessions.lock"
+    env = dict(os.environ, REMEMBER_LOCK_TIMING="1", REMEMBER_LOCK_TIMING_FILE=str(timing))
+    result = subprocess.run(
+        ["bash", "-c", 'source "$1"; lock_acquire "$2" 2 && lock_release "$2"',
+         "bash", str(LIB_LOCK), str(lock)],
+        env=env, capture_output=True, text=True, timeout=60, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert any(row[1] == "sessions.lock" for row in _timing_rows(timing)), timing
+
+
+def test_session_start_writes_the_index_without_timing_sessions_lock(tmp_path):
+    """The slug-index writer takes sessions.lock through lib-lock.sh's primitive
+    (#898), so the opt-in hold-duration recorder (#226), which exists to size
+    save.lock and staging.lock, no longer gets sessions.lock rows from session
+    start. The index row itself is the positive control: the lock WAS taken and
+    released, the write happened, and only the measurement is absent."""
+    home = tmp_path / "home"
+    template = str(tmp_path / "store") + "/{slug}"
+    _configure(home, template)
+    project = _project(home, tmp_path, "proj")
+    timing = tmp_path / "lock-timing.tsv"
+
+    result = _run(home, project, extra_env={
+        "REMEMBER_LOCK_TIMING": "1", "REMEMBER_LOCK_TIMING_FILE": str(timing)})
+    assert result.returncode == 0, result.stderr
+
+    store_root = _store_root(template, home)
+    assert _lookup(store_root, project) is not None, "no row: the lock was never taken"
+    assert not (store_root / "tmp" / "sessions.lock").exists(), "lock left held"
+    assert [r for r in _timing_rows(timing) if r[1] == "sessions.lock"] == []

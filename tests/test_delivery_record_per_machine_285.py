@@ -247,38 +247,24 @@ class TestDeliveryRecordIsPerMachine:
             "for the right reason, not because nothing is committed at all"
         )
 
-    def test_a_store_that_already_committed_the_record_is_cleaned_up(
+    def test_a_pre_v0_13_record_at_the_store_root_is_no_longer_moved(
         self, two_machines
     ):
-        """Every store that has run the backup already has this file committed.
-
-        Leaving it tracked is not harmless: nothing writes it any more, so it
-        sits in the history describing a machine that may no longer exist, and
-        the local copy stays permanently modified against it — noise in the
-        user's own `git status`, and a name a later `merge --ff-only` can
-        refuse over.
-        """
+        """#898: the one-time move of a pre-#285 record (v0.13.0, 2026-08-01)
+        from the store root into tmp/ is retired. Session start leaves an old
+        root-level file exactly as it is, and writes its own record in tmp/
+        as usual -- the positive control that delivery ran at all."""
         (_, a_store, a_slug, a_project) = two_machines[0]
         home_a = a_store.parent
 
-        # A store as it exists today: the record committed at the store path.
-        legacy = a_slug / "remember.delivered"
-        legacy.write_text("fingerprint=2325240425-2162\nfirst_delivered=2026-07-31 23:40\ndeliveries=7\n")
+        old_text = "fingerprint=2325240425-2162\nfirst_delivered=2026-07-31 23:40\ndeliveries=7\n"
+        old_record = a_slug / "remember.delivered"
+        old_record.write_text(old_text)
         (a_slug / "remember.md").write_text(HANDOFF_TEXT)
-        _git(a_store, ["add", "-A"])
-        _git(a_store, ["commit", "-qm", "legacy state"])
-        assert "remember.delivered" in _git(a_store, ["ls-files"]).stdout
 
         _session_start(a_slug, a_project, home_a)
-        _backup(a_slug, a_project, home_a)
 
-        tracked = _git(a_store, ["ls-files"]).stdout
-        assert "remember.delivered" not in tracked, (
-            "the legacy tracked copy must be removed from the backup, not left "
-            f"behind as a stale file nothing maintains. tracked:\n{tracked}"
-        )
-        status = _git(a_store, ["status", "--porcelain"]).stdout
-        assert "remember.delivered" not in status, (
-            "and the store must come to rest clean — a permanently dirty "
-            f"working tree is the noise this fix exists to remove. status:\n{status}"
-        )
+        assert old_record.read_text() == old_text, "the root-level record was touched"
+        new_record = a_slug / "tmp" / "remember.delivered"
+        assert new_record.is_file(), "session start wrote no delivery record"
+        assert "deliveries=1" in new_record.read_text(), new_record.read_text()

@@ -19,7 +19,7 @@ SessionStart and UserPromptSubmit.
 
 The guard was always intended — session-start-hook.sh documented a no-op for
 "the remember pipeline's own Haiku call" — but it keyed on the child having no
-CLAUDE_PROJECT_DIR, and the child has one. _child_env() now sets a positive
+CLAUDE_PROJECT_DIR, and the child has one. _summarizer_environment() now sets a positive
 marker that resolve-paths.sh stops on, so the signal is one we own rather than
 one we deleted.
 
@@ -46,7 +46,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 sys.path.insert(0, str(REPO_ROOT))
 
-from pipeline.haiku import NESTED_SUMMARIZER_ENV, _child_env  # noqa: E402
+from pipeline.haiku import NESTED_SUMMARIZER_ENV, _summarizer_environment  # noqa: E402
 
 
 def _external_home(tmp_path: Path) -> tuple[Path, Path]:
@@ -114,18 +114,26 @@ def _run_hook(script: str, project_dir: Path, home: Path, nested: bool) -> subpr
     )
 
 
-def test_child_env_marks_the_nested_summarizer():
-    """The spawn side of the contract: the marker is on the child env."""
-    assert _child_env()[NESTED_SUMMARIZER_ENV] == "1"
+def test_child_env_marks_the_nested_summarizer(monkeypatch):
+    """The spawn side of the contract: the marker is in the environment the
+    child inherits, for as long as the spawn lasts (#898 round 15)."""
+    import os
+
+    monkeypatch.delenv(NESTED_SUMMARIZER_ENV, raising=False)
+    with _summarizer_environment():
+        assert os.environ.get(NESTED_SUMMARIZER_ENV) == "1"
 
 
 def test_the_marker_does_not_escape_into_the_parent_environment(monkeypatch):
-    """_child_env() builds a dict; it must not mutate os.environ, or the
-    plugin would go silent in the user's real session too."""
-    monkeypatch.delenv(NESTED_SUMMARIZER_ENV, raising=False)
-    _child_env()
+    """The marker is scoped to the spawn: once it returns, this process's
+    environment is back as it was, or the plugin would go silent in the
+    user's real session too. Paired with the test above, which proves the
+    marker was set at all."""
     import os
 
+    monkeypatch.delenv(NESTED_SUMMARIZER_ENV, raising=False)
+    with _summarizer_environment():
+        assert os.environ.get(NESTED_SUMMARIZER_ENV) == "1"
     assert NESTED_SUMMARIZER_ENV not in os.environ
 
 

@@ -106,9 +106,9 @@ def _installed_everything_else():
     the star gate is never actually exercised."""
     promos = json.loads((REPO_ROOT / "promos.json").read_text(encoding="utf-8"))["promos"]
     return {
-        p["installed_key"]: [{"name": p["id"]}]
+        p["installed_id"]: [{"name": p["id"]}]
         for p in promos
-        if p.get("installed_key") and p["id"] != STAR_ID
+        if p.get("installed_id") and p["id"] != STAR_ID
     }
 
 
@@ -159,7 +159,7 @@ class TestStarAskGate:
         entry = _shipped_star_entry()
         assert entry.get("gate") == "recent_nonempty"
         assert entry.get("url") == STAR_URL
-        assert "installed_key" not in entry
+        assert "installed_id" not in entry
 
     def test_absent_recent_md_does_not_fire(self, tmp_path):
         """Fresh install -- no recent.md at all yet. Must stay silent."""

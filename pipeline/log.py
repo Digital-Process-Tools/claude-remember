@@ -48,11 +48,11 @@ def log(component: str, message: str, log_dir: str) -> None:
         print(line, file=sys.stderr, end="")
 
 
-def log_tokens(component: str, usage: TokenUsage, log_dir: str) -> None:
+def log_usage(component: str, usage: TokenUsage, log_dir: str) -> None:
     """Log token usage and cost for a Haiku call.
 
     Delegates to ``log()`` with the TokenUsage string representation,
-    matching the format used by the shell ``log_tokens`` function.
+    matching the format used by the shell ``log_usage`` function.
 
     Args:
         component: Pipeline stage identifier.

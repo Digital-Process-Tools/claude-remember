@@ -722,6 +722,7 @@ def test_hook_dir_derivation_needs_a_forward_slash_path(tmp_path):
         result = subprocess.run(
             [BASH, probe_script.as_posix()],
             env=env, capture_output=True, timeout=10, check=False,
+            cwd=str(tmp_path),
         )
         assert result.returncode == 0, decode_bash_output(result.stderr or b"")
         return decode_bash_output(result.stdout or b"").strip()
@@ -732,18 +733,36 @@ def test_hook_dir_derivation_needs_a_forward_slash_path(tmp_path):
     )
 
     # POSITIVE CONTROL for the positive control above: a path with no
-    # separator at all is the ONE case this mechanism is DESIGNED to fall
-    # back on ("." -- see the hook's own comment at line 57-58). Without
-    # this, a probe bug that always returned "." would pass the backslash
-    # assertion below for the wrong reason.
+    # separator at all is the ONE case this mechanism falls back on. #898's
+    # own portal finding (COMMAND_SCRIPT_NOT_FOLLOWED) read the literal "."
+    # fallback as a further shipped file, so the fallback was changed from
+    # "." to "$PWD" -- same directory-resolution semantics (bare filename =>
+    # invoked from its own directory => $PWD IS that directory), no literal
+    # dot for a scanner to read as a further file. `cwd=str(tmp_path)` above
+    # pins what $PWD resolves to so this assertion is deterministic rather
+    # than depending on wherever pytest itself happens to be invoked from.
+    # Without this, a probe bug that always returned the invocation cwd
+    # would pass the backslash assertion below for the wrong reason.
+    # #898 round 4 made the fallback `$(pwd)` rather than `$PWD`. Git Bash's
+    # `pwd` spells the same directory in MSYS form (`/c/Users/...`, observed
+    # on windows-latest), where `tmp_path.as_posix()` is `C:/Users/...`; so
+    # the expected value is what this same bash's own `pwd` says in this
+    # same cwd, and on POSIX that must still be tmp_path itself.
+    here = decode_bash_output(subprocess.run(
+        [BASH, "-c", "pwd"], capture_output=True, timeout=10, check=False,
+        cwd=str(tmp_path),
+    ).stdout or b"").strip()
+    assert here, "sanity: bash's own pwd answered nothing"
+    if sys.platform != "win32":
+        assert here == tmp_path.as_posix(), here
     no_sep = _probe("session-start-hook.sh")
-    assert no_sep == "HOOK_DIR=.", (
-        f"a bare filename with no separator is the documented fallback case: {no_sep!r}"
+    assert no_sep == f"HOOK_DIR={here}", (
+        f"a bare filename with no separator must fall back to $(pwd) (#898): {no_sep!r}"
     )
 
     backslash = _probe("C:\\some\\plugin\\root\\scripts\\session-start-hook.sh")
-    assert backslash == "HOOK_DIR=.", (
-        "a backslash-only path must fall back to the SAME '.' this mechanism "
+    assert backslash == f"HOOK_DIR={here}", (
+        "a backslash-only path must fall back to the SAME $PWD this mechanism "
         "uses for 'no separator at all' -- bash's own %/* cannot tell a "
         f"Windows path from a bare filename. Got: {backslash!r}"
     )
