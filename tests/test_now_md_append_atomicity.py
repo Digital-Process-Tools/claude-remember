@@ -396,7 +396,9 @@ class TestTheReaderStillCannotLock:
         that cannot take the lock writes no row and the next one repairs it."""
         hook = (Path(__file__).resolve().parent.parent
                 / "scripts" / "session-start-hook.sh").read_text()
-        assert 'lock_acquire "$_lock" "$SLUG_INDEX_LOCK_TIMEOUT"' in hook
+        # The primitive, not the timing wrapper (#898): the hold recorder (#226)
+        # sizes save.lock/staging.lock, and the wrapper would inline it here.
+        assert '_lock_acquire_impl "$_lock" "$SLUG_INDEX_LOCK_TIMEOUT"' in hook
         timeout = re.search(r"^SLUG_INDEX_LOCK_TIMEOUT=(\d+)$", hook, re.M)
         assert timeout and int(timeout.group(1)) <= 5, (
             "the session-index lock timeout is unbounded or large; session "

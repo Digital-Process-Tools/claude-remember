@@ -1,7 +1,7 @@
 """Flatten merged config.json into `NAME\\tVALUE` lines, the jq-free fallback
 `_config_load` (log.sh) uses when jq is not on PATH (#668).
 
-Called by literal path through `_remember_log_run_python` (#898 round 7 --
+Called by literal path through `_remember_slug_run_python` (#898 round 7 --
 this body used to live inline in log.sh, as `_REMEMBER_CFG_FLATTEN_PY`, a
 single-quoted shell variable holding a multi-line program kept on one line
 for the PATH-shim spawn counters in tests/. A lone `for` statement inside a

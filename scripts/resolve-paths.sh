@@ -220,19 +220,16 @@ fi
 # The drive-form regex lives in a variable: a bracket expression containing a
 # backslash is not portable to write inline on the right of `=~`.
 _remember_normalize_win_path() {
-    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
+    # bracket ranges below are byte-wise, not collated (#695)
+    local LC_ALL=C
     local _in="$1" _drive="" _rest=""
     local _re='^([a-zA-Z]):[/\](.*)$'
     if [ "$OSTYPE" = msys ] || [ "$OSTYPE" = cygwin ]; then
-        # Cygwin's mount prefix first: /cygdrive/c/... cannot match the
-        # MSYS form below, because "cygdrive" is not one character.
-        if [[ "$_in" =~ ^/cygdrive/([a-zA-Z])/(.*)$ ]]; then
-            _drive="${BASH_REMATCH[1]}"
-            _rest="${BASH_REMATCH[2]}"
-        elif [[ "$_in" =~ ^/([a-zA-Z])/(.*)$ ]]; then
-            _drive="${BASH_REMATCH[1]}"
-            _rest="${BASH_REMATCH[2]}"
-        elif [[ "$_in" =~ $_re ]]; then
+        # First match wins and fills BASH_REMATCH: Cygwin's mount prefix
+        # first (/cygdrive/c/... cannot match the MSYS form, "cygdrive" is
+        # not one character), then MSYS /c/..., then C:\ or C:/.
+        if [[ "$_in" =~ ^/cygdrive/([a-zA-Z])/(.*)$ ]] || [[ "$_in" =~ ^/([a-zA-Z])/(.*)$ ]] \
+            || [[ "$_in" =~ $_re ]]; then
             _drive="${BASH_REMATCH[1]}"
             _rest="${BASH_REMATCH[2]}"
         fi

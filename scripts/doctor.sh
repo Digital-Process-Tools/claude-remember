@@ -44,7 +44,7 @@
 #                      comment on the same hazard.)
 #   lib-memory-dir.sh (sourced directly, not via bootstrap-dirs.sh: this is a
 #                      read-only report and must not trigger bootstrap-dirs'
-#                      legacy-to-external migration or its stderr redirect —
+#                      directory scaffold or its stderr redirect —
 #                      a diagnostic tool that hides its own errors defeats
 #                      the point.)
 #
@@ -438,6 +438,27 @@ if [ "$REMEMBER_DIR" = "${PROJECT_DIR}/.remember" ] \
 else
     echo "OK   Storage mode: external ($REMEMBER_DIR)"
 fi
+
+# The automatic legacy -> external move is gone (#898); session start prints
+# one line pointing here, and this says what to do about it. Same condition
+# as bootstrap-dirs.sh's notice, minus "the new store does not exist yet".
+# Both sides forward-slashed (#517): on msys PROJECT_DIR arrives as C:\x while
+# REMEMBER_DIR is C:/x, so the raw strings never compare equal and a legacy-mode
+# store would be reported as stranded -- with advice to remove the live store.
+_legacy_store="${MEMORY_PROJECT_DIR:-}"
+[ -n "$_legacy_store" ] || _legacy_store="$PROJECT_DIR"
+_remember_forward_slash_into _legacy_store "$_legacy_store/.remember"
+_remember_forward_slash_into _legacy_rd "$REMEMBER_DIR"
+if [ "$_legacy_rd" != "$_legacy_store" ] && [ "${_legacy_rd#"$_legacy_store"/}" = "$_legacy_rd" ]; then
+    for _legacy_f in now.md recent.md archive.md core-memories.md remember.md; do
+        if [ -f "$_legacy_store/$_legacy_f" ]; then
+            echo "WARN Legacy store: $_legacy_store still holds memory data ($_legacy_f); data_dir now points to $REMEMBER_DIR"
+            echo "     Move the memory files there by hand, then remove $_legacy_store (nothing moves them automatically since #898)."
+            break
+        fi
+    done
+fi
+unset _legacy_store _legacy_rd _legacy_f
 
 if [ -f "$REMEMBER_CONFIG" ] && [ -s "$REMEMBER_CONFIG" ]; then
     echo "OK   config.json: parsed (merged from bundled/user-global/per-project layers)"

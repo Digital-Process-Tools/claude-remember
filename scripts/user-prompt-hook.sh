@@ -257,7 +257,8 @@ fi
 # unchanged by this finding.
 _stdin_cwd() {
     local raw="$1" rest prefix value dq
-    printf -v dq '\042'  # the double quote, held in a variable (#898 round 8)
+    # the double quote, held in a variable (#898 round 8)
+    printf -v dq '\042'
     rest=${raw#*"$dq"cwd"$dq"}
     [ "$rest" != "$raw" ] || return 1
     prefix=${rest%%"$dq"*}
@@ -285,14 +286,16 @@ _stdin_cwd() {
 # to load -- see _stdin_cwd's own comment above).
 _stdin_cwd_into() {
     local _var="$1" raw="$2" rest prefix value dq
-    printf -v dq '\042'  # the double quote, held in a variable (#898 round 8)
+    # the double quote, held in a variable (#898 round 8)
+    printf -v dq '\042'
     rest=${raw#*"$dq"cwd"$dq"}
     [ "$rest" != "$raw" ] || return 1
     prefix=${rest%%"$dq"*}
     if [[ "$prefix" == *[!:[:space:]]* ]]; then return 1; fi
     value=${rest#*"$dq"}
     value=${value%%"$dq"*}
-    value=${value//\\\\/\\}  # decode `\\`, as in _stdin_cwd (#829)
+    # decode `\\`, as in _stdin_cwd (#829)
+    value=${value//\\\\/\\}
     [ -n "$value" ] || return 1
     printf -v "$_var" '%s' "$value"
 }
@@ -490,7 +493,8 @@ if [ "$_REMEMBER_HOST_JSON_STDOUT" = "1" ]; then
     # both are folded into the one JSON envelope Codex's own schema names,
     # never printed raw the way the Claude Code branch below does.
     if [ -z "$CTX" ] && [ -z "$NOTICE_MSG" ]; then
-        : # nothing to say -- printing nothing is Completed on every host
+        # nothing to say -- printing nothing is Completed on every host
+        :
     else
         _JSON=""
         if command -v "$JQ_BIN" >/dev/null 2>&1; then

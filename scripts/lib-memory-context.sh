@@ -200,6 +200,27 @@ _remember_wc_size_get_into() {
     # variable unassigned for `printf -v VAR ''` (#898 round 12).
     printf -v "$_remember_wc_size_outvar" '%s' ''
 }
+# _remember_wc_size_batch FILE...
+# One batched `wc -c` over every file named, cached through
+# _remember_wc_size_set (#664) -- one fork for the lot instead of one `wc` +
+# one `tr` PER file. Default IFS (not `IFS=`): `wc -c`'s own right-justify
+# padding is entirely LEADING the byte count, never between the count and
+# the filename (exactly one space there, verified against both GNU and BSD
+# wc) -- so a plain `read bytes path` both trims the padding and hands the
+# filename back verbatim, spaces-in-paths included, since `read` dumps
+# everything left over into the LAST variable rather than re-splitting it.
+# A non-numeric count, or wc's own `total` line, is skipped. Called with no
+# files it measures nothing (and runs no `wc`).
+_remember_wc_size_batch() {
+    [ "$#" -gt 0 ] || return 0
+    local _remember_wc_bytes _remember_wc_path
+    while read -r _remember_wc_bytes _remember_wc_path; do
+        if [ -z "$_remember_wc_bytes" ] || [ "${_remember_wc_bytes#*[!0-9]}" != "$_remember_wc_bytes" ]; then continue; fi
+        [ "$_remember_wc_path" = "total" ] && continue
+        _remember_wc_size_set "$_remember_wc_path" "$_remember_wc_bytes"
+    done < <(wc -c "$@")
+    return 0
+}
 
 # ============================================================================
 # INJECTION GUARD -- "may this memory file be injected?" (#721 follow-ups:
@@ -403,7 +424,8 @@ _remember_repo_root_walk_into() {
             break
         fi
     done
-    printf -v "$_rrw_outvar" '%s' ''  # not an empty format: see above
+    # not an empty format: see above
+    printf -v "$_rrw_outvar" '%s' ''
     return 1
 }
 
@@ -736,7 +758,7 @@ _remember_may_inject() {
     # a symlink inside a memory store, so there is no legitimate case this
     # widening could break.
     if [ -L "$_mi_file" ]; then
-        _REMEMBER_INJECT_REFUSAL="$_mi_file is a symlink -- refusing to follow it into session context. This plugin never creates a symlink inside a memory store; if you did not create this one, treat it as planted and inspect what it points at before deleting it."
+        _REMEMBER_INJECT_REFUSAL="$_mi_file is a symlink -- refusing to follow it into session context. This plugin never creates one; inspect where it points before deleting it."
         log "$_mi_component" "refused injecting $_mi_file: symlink"
         return 1
     fi
@@ -753,7 +775,7 @@ _remember_may_inject() {
     # one side that would have allowed an unrecognised refused state through.
     if _remember_tracked_state_is_refused "$_mi_state"; then
         if [ "$_mi_state" = tracked ]; then
-            _REMEMBER_INJECT_REFUSAL="$_mi_file is tracked by this repository's own git index. This plugin never commits a memory file itself (.remember/.gitignore excludes the whole directory), so a tracked one was shipped by the repository, not written by your own /remember. Not injecting it. If it is genuinely yours: git rm --cached it. If you did not add it: delete it and consider what else the commit that added it changed."
+            _REMEMBER_INJECT_REFUSAL="$_mi_file is tracked by this repository's git index; this plugin never commits memory files, so the repository shipped it. Not injecting it. Yours: git rm --cached it. Not yours: delete it and check the commit that added it."
             log "$_mi_component" "refused injecting $_mi_file: git-tracked"
         elif [ "$_mi_state" = unavailable ]; then
             # #760: a repository really is above this file, but asking git
@@ -762,10 +784,10 @@ _remember_may_inject() {
             # deliver on a guess -- an untrustworthy "no" from the tracked
             # check must read the same as "yes", not the same as a clean
             # "not tracked".
-            _REMEMBER_INJECT_REFUSAL="$_mi_file could not be checked against this repository's git index (git is missing, or the check itself failed) -- refusing rather than injecting unverified. Run /remember:doctor to see why git could not be asked."
+            _REMEMBER_INJECT_REFUSAL="$_mi_file could not be checked against this repository's git index -- refusing rather than injecting unverified (/remember:doctor shows why)."
             log "$_mi_component" "refused injecting $_mi_file: git status unavailable"
         elif [ "$_mi_state" = symlinked-ancestor ]; then
-            _REMEMBER_INJECT_REFUSAL="$_mi_file sits under a directory that is itself a symlink -- refusing to follow it into session context. This plugin never creates a symlink inside a memory store; if you did not create this one, treat it as planted and inspect what it points at before deleting it."
+            _REMEMBER_INJECT_REFUSAL="$_mi_file sits under a symlinked directory -- refusing to follow it into session context. This plugin never creates one; inspect where it points."
             log "$_mi_component" "refused injecting $_mi_file: symlinked ancestor directory"
         else
             _REMEMBER_INJECT_REFUSAL="$_mi_file could not be verified (tracked state: $_mi_state) -- refusing rather than injecting unverified."
@@ -834,6 +856,25 @@ _remember_emit_file() {
     printf '%s' "$_remember_file_body"
 }
 
+# _remember_print_sized FILE...
+# One line per FILE, "FILE (N bytes)" -- or "FILE (size unknown)" when no
+# size could be measured, since "(0 bytes)" would read exactly like an empty
+# file (#695) -- after one batched `wc` over all of them (#664/#666). Shared
+# by the compact-mode deferred listing and the rotated-slice listing (#898).
+_remember_print_sized() {
+    local _rps_f _rps_b
+    [ "$#" -gt 0 ] || return 0
+    _remember_wc_size_batch "$@"
+    for _rps_f in "$@"; do
+        _remember_wc_size_get_into _rps_b "$_rps_f"
+        if [ -z "$_rps_b" ] || [ -n "${_rps_b//[0-9]/}" ]; then
+            printf '%s (size unknown)\n' "$_rps_f"
+        else
+            printf '%s (%s bytes)\n' "$_rps_f" "$_rps_b"
+        fi
+    done
+}
+
 _remember_render_memory_section() {
     local MFILE HAS_MEMORY="" ROTATED_SLICES _remember_rotated_glob_dir
     local _remember_rotated_arr=()
@@ -881,10 +922,8 @@ _remember_render_memory_section() {
     printf -v _remember_nl '\n'
     # One batched `wc -c` over every memory file that is present AND
     # non-empty (#664), instead of one `wc` + one `tr` PER file -- a typical
-    # 4-6 file store paid 8-12 forks here alone before this. `tr -d ' '` is
-    # gone too: `read` already splits on (and discards) leading/trailing
-    # whitespace, which is all `wc -c`'s own leading-space padding is.
-    local _remember_present=() _remember_wc_bytes _remember_wc_path
+    # 4-6 file store paid 8-12 forks here alone before this.
+    local _remember_present=()
     for MFILE in "${MEMORY_FILES[@]}"; do
         if [ -f "$MFILE" ] && [ -s "$MFILE" ]; then
             if [ "${SESSION_START_SOURCE:-}" = "compact" ] && [ "$MFILE" != "$IDENTITY_FILE" ]; then
@@ -900,20 +939,7 @@ _remember_render_memory_section() {
             fi
         fi
     done
-    if [ "${#_remember_present[@]}" -gt 0 ]; then
-        # Default IFS (not `IFS=`): `wc -c`'s own right-justify padding is
-        # entirely LEADING the byte count, never between the count and the
-        # filename (exactly one space there, verified against both GNU and
-        # BSD wc) -- so a plain `read bytes path` both trims the padding and
-        # hands the filename back verbatim, spaces-in-paths included, since
-        # `read` dumps everything left over into the LAST variable rather
-        # than re-splitting it.
-        while read -r _remember_wc_bytes _remember_wc_path; do
-            if [ -z "$_remember_wc_bytes" ] || [ "${_remember_wc_bytes#*[!0-9]}" != "$_remember_wc_bytes" ]; then continue; fi
-            [ "$_remember_wc_path" = "total" ] && continue
-            _remember_wc_size_set "$_remember_wc_path" "$_remember_wc_bytes"
-        done < <(wc -c "${_remember_present[@]}")
-    fi
+    [ "${#_remember_present[@]}" -gt 0 ] && _remember_wc_size_batch "${_remember_present[@]}"
     # `"${arr[@]}"` on an EMPTY array is an "unbound variable" error under
     # `set -u` on bash < 4.4 (3.2 included), while `${#arr[@]}` is not -- so
     # every iteration over an array that can be empty is count-guarded.
@@ -1009,31 +1035,9 @@ _remember_render_memory_section() {
 "
             fi
         done
-        # Same one-batched-`wc` shape as the main loop above (#664): compact
-        # mode is the one branch that did NOT already have these files'
-        # sizes cached yet (the main loop above skips every non-identity
-        # file once SESSION_START_SOURCE=compact). Same storage (indirect
-        # variables, not an associative array -- see the comment above
-        # _remember_wc_size_set) as the main loop's own batch.
-        if [ "${#_remember_deferred[@]}" -gt 0 ]; then
-            while read -r _remember_wc_bytes _remember_wc_path; do
-                if [ -z "$_remember_wc_bytes" ] || [ "${_remember_wc_bytes#*[!0-9]}" != "$_remember_wc_bytes" ]; then continue; fi
-                [ "$_remember_wc_path" = "total" ] && continue
-                _remember_wc_size_set "$_remember_wc_path" "$_remember_wc_bytes"
-            done < <(wc -c "${_remember_deferred[@]}")
-        fi
-        DEFERRED_MEMORY=""
         # Same empty-array guard as the main loop above (bash < 4.4 + set -u).
-        [ "${#_remember_deferred[@]}" -gt 0 ] && DEFERRED_MEMORY=$(for MFILE in "${_remember_deferred[@]}"; do
-            _remember_wc_size_get_into MFILE_BYTES "$MFILE"
-            # "(0 bytes)" for a file nobody measured reads exactly like an
-            # empty file. Say which one it is (#695 round-1 audit).
-            if [ -z "$MFILE_BYTES" ] || [[ "$MFILE_BYTES" == *[!0-9]* ]]; then
-                printf '%s (size unknown)\n' "$MFILE"
-            else
-                printf '%s (%s bytes)\n' "$MFILE" "$MFILE_BYTES"
-            fi
-        done)
+        DEFERRED_MEMORY=""
+        [ "${#_remember_deferred[@]}" -gt 0 ] && DEFERRED_MEMORY=$(_remember_print_sized "${_remember_deferred[@]}")
         if [ -n "$_remember_deferred_refused" ]; then
             # A DIFFERENT header from the main loop's own "--- refused (not
             # injected) ---" above (833-837), on purpose: both loops can fire
@@ -1098,31 +1102,7 @@ _remember_render_memory_section() {
 "
             fi
         done <<< "$ROTATED_NEWEST"
-        if [ "${#_remember_newest_arr[@]}" -gt 0 ]; then
-            local _remember_newest_bytes
-            while read -r _remember_wc_bytes _remember_wc_path; do
-                if [ -z "$_remember_wc_bytes" ] || [ "${_remember_wc_bytes#*[!0-9]}" != "$_remember_wc_bytes" ]; then continue; fi
-                [ "$_remember_wc_path" = "total" ] && continue
-                _remember_wc_size_set "$_remember_wc_path" "$_remember_wc_bytes"
-            done < <(wc -c "${_remember_newest_arr[@]}")
-            for _remember_newest_line in "${_remember_newest_arr[@]}"; do
-                _remember_wc_size_get_into _remember_newest_bytes "$_remember_newest_line"
-                # The third of this getter's three call sites, and the one the
-                # round-1 repair missed: since that repair the getter can
-                # answer with the empty string, so an unformatted `%s bytes`
-                # here renders `( bytes)` -- a number-shaped slot holding
-                # nothing. Same three states as the deferred listing above
-                # (#695 round-2 audit).
-                # `[ ]` test, not a `case` with a catch-all `*)` arm inside
-                # this loop (#898 round 7 -- that shape is one the plugin
-                # directory's scanner holds a submission on).
-                if [ -z "$_remember_newest_bytes" ] || [ -n "${_remember_newest_bytes//[0-9]/}" ]; then
-                    printf '%s (size unknown)\n' "$_remember_newest_line"
-                else
-                    printf '%s (%s bytes)\n' "$_remember_newest_line" "$_remember_newest_bytes"
-                fi
-            done
-        fi
+        [ "${#_remember_newest_arr[@]}" -eq 0 ] || _remember_print_sized "${_remember_newest_arr[@]}"
         if [ -n "$_remember_newest_refused" ]; then
             # A blank line before this header, always -- self-review finding
             # (#805): without it, this header ran straight into either the
@@ -1201,14 +1181,10 @@ _remember_start_cache_context_load() {
     [ -n "${REMEMBER_DIR:-}" ] || return 1
     local _cache="$REMEMBER_DIR/tmp/start-context.cache"
     local _manifest="$REMEMBER_DIR/tmp/start-context.manifest"
-    [ -f "$_cache" ] || return 1
-    [ -f "$_manifest" ] || return 1
-    [ -L "$_cache" ] && return 1
-    [ -O "$_cache" ] || return 1
-    [ -r "$_cache" ] || return 1
-    [ -L "$_manifest" ] && return 1
-    [ -O "$_manifest" ] || return 1
-    [ -r "$_manifest" ] || return 1
+    local _f
+    for _f in "$_cache" "$_manifest"; do
+        [ -f "$_f" ] && [ ! -L "$_f" ] && [ -O "$_f" ] && [ -r "$_f" ] || return 1
+    done
     # #781: a repository can commit its own start-context.cache and a
     # manifest holding nothing but a VERSION= stamp -- git checks both out
     # owned by the user and as regular files, so every check above this
@@ -1272,13 +1248,15 @@ _remember_start_cache_context_load() {
 # consumes (removes or renames) $1; never fails the caller.
 _remember_start_cache_context_finish_publish() {
     local _tmp_cache="$1"
-    [ "${REMEMBER_START_CACHE:-1}" = "1" ] || { rm -f "$_tmp_cache" 2>/dev/null; return 0; }
     # Only the non-compact render is ever cached (see the file header): a
     # compact-mode render is the small, identity-only shape, and writing IT
     # into the cache would make the very next ordinary session start serve a
     # near-empty MEMORY section instead of falling through to a live render.
-    [ "${SESSION_START_SOURCE:-}" != "compact" ] || { rm -f "$_tmp_cache" 2>/dev/null; return 0; }
-    [ -n "${REMEMBER_DIR:-}" ] || { rm -f "$_tmp_cache" 2>/dev/null; return 0; }
+    if [ "${REMEMBER_START_CACHE:-1}" != "1" ] || [ "${SESSION_START_SOURCE:-}" = "compact" ] \
+        || [ -z "${REMEMBER_DIR:-}" ]; then
+        rm -f "$_tmp_cache" 2>/dev/null
+        return 0
+    fi
     [ -f "$_tmp_cache" ] || return 0
     local _dir="$REMEMBER_DIR/tmp"
     mkdir -p "$_dir" 2>/dev/null || { rm -f "$_tmp_cache" 2>/dev/null; return 0; }
@@ -1421,7 +1399,8 @@ _remember_apply_session_start_budget() {
     local _outvar="$1" _max="$2" _text="$3"
     if [ -z "$_max" ] || [ "${_max#*[!0-9]}" != "$_max" ]; then return 0; fi
     [ "$_max" -gt 0 ] || return 0
-    local LC_ALL=C  # byte length, not a locale-dependent character count (see header above)
+    # byte length, not a locale-dependent character count (see header above)
+    local LC_ALL=C
     [ "${#_text}" -gt "$_max" ] || return 0
 
     # Both captures strip trailing newlines the same way the body's own
@@ -1432,7 +1411,7 @@ _remember_apply_session_start_budget() {
     [ -n "$_mem" ] || return 0
     _head_len=$(( ${#_text} - ${#_mem} ))
     if [ "$_head_len" -lt 0 ] || [ "${_text:$_head_len}" != "$_mem" ]; then
-        log "memory-context" "WARNING: session_start_max_bytes: the MEMORY section changed between render and budget check -- injected as rendered, over budget"
+        log "memory-context" "WARNING: session_start_max_bytes: MEMORY section changed before the budget check -- injected as rendered, over budget"
         return 0
     fi
     _head="${_text:0:$_head_len}"
@@ -1455,7 +1434,7 @@ _remember_apply_session_start_budget() {
     # an operator has no way to tell "budget satisfied" from "budget
     # exhausted, still over" from the log alone.
     if [ $(( _head_len + ${#_mem} )) -gt "$_max" ]; then
-        log "memory-context" "WARNING: thresholds.session_start_max_bytes: still over budget ($(( _head_len + ${#_mem} )) bytes > ${_max}) after dropping every droppable section"
+        log "memory-context" "WARNING: thresholds.session_start_max_bytes: still over budget ($(( _head_len + ${#_mem} )) > ${_max} bytes) with every droppable section dropped"
     fi
     printf -v "$_outvar" %s "${_head}${_mem}"
 }

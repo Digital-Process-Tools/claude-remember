@@ -67,7 +67,7 @@ def _run_sniff(transcript_path: Path) -> str:
     decode-bearing extractor contains (#829), observed on Windows 11 / Git
     Bash 5.2."""
     body = "\n".join(
-        _function_body(name) for name in ("_stdin_json_string", "_transcript_is_pluginless_sdk")
+        _function_body(name) for name in ("_stdin_json_string_into", "_transcript_is_pluginless_sdk")
     )
     script = SNIFF_SCRIPT % body
     result = subprocess.run(

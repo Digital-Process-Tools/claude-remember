@@ -36,7 +36,12 @@ from pathlib import Path
 
 import pytest
 
-from tests._bash_runner import decode_bash_output, resolve_bash
+from tests._bash_runner import (
+    bash_octal,
+    decode_bash_output,
+    resolve_bash,
+    run_bash_file,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -143,7 +148,7 @@ done''',
     echo kept
 done''',
         "site": ("scripts/session-start-hook.sh",
-              'if [ -z "$_remember_now" ] || [[ "$_remember_now" == *[!0-9]* ]]; then'),
+              'if [ -z "$_now" ] || [[ "$_now" == *[!0-9]* ]]; then'),
     },
     "newline or carriage return": {
         "old": r'''case "$x" in
@@ -387,10 +392,10 @@ done''',
     linux*) return 0 ;;
 esac
 return 1''',
-        "new": r'''[ "${x#linux}" != "$x" ] && return 0
-return 1''',
+        "new": r'''[ "${x#linux}" != "$x" ]''',
         "extra": ["linux", "linux-gnu", "Linux", "darwin", "xlinux"],
-        "site": ("scripts/lib-slug.sh", '[ "${_os#linux}" != "$_os" ] && return 0'),
+        "site": ("scripts/lib-slug.sh",
+                 '[ "${REMEMBER_UTF8_STRICT:-0}" = "1" ] || [ "${_os#linux}" != "$_os" ]'),
     },
     "a literal list with an empty arm": {
         "old": r'''case "$x" in
@@ -421,13 +426,10 @@ echo ok''',
     */remember-config-*) return 0 ;;
     *) return 1 ;;
 esac''',
-        "new": r'''if [[ "$x" == */remember-config-* ]]; then
-    return 0
-fi
-return 1''',
+        "new": r'''[[ "$x" == */remember-config-* ]]''',
         "extra": ["/tmp/remember-config-1", "remember-config-x", "/remember-config-",
                   "a/remember-configx", "//remember-config--"],
-        "site": ("scripts/log.sh", 'if [[ "$_cfg_path" == */remember-config-* ]]; then'),
+        "site": ("scripts/log.sh", '[[ "${REMEMBER_CONFIG:-}" == */remember-config-* ]]'),
     },
     "a needle with an unquoted id in it": {
         "old": r'''S='{"a": 1, "abc-1.2": 3}'
@@ -473,10 +475,13 @@ new_() {
 local x="$1"
 %(new)s
 }
-for a in "$@"; do
-    o=$(old_ "$a" 2>/dev/null; printf ' rc=%%s' "$?")
-    n=$(new_ "$a" 2>/dev/null; printf ' rc=%%s' "$?")
-    printf '%%s\037%%s\036' "$o" "$n"
+while IFS= read -r enc; do
+    # bash 3.2's `printf -v a '%%b' ""` unsets a: skip it for the empty input
+    a=""
+    [ -z "$enc" ] || printf -v a '%%b' "$enc"
+    o=$(old_ "$a" 2>/dev/null </dev/null; printf ' rc=%%s' "$?")
+    n=$(new_ "$a" 2>/dev/null </dev/null; printf ' rc=%%s' "$?")
+    printf '%%s\037%%s\037%%s\036' "$a" "$o" "$n"
 done
 """
 
@@ -515,13 +520,18 @@ def _run(bash: str, locale: str, shape: dict) -> list[tuple[str, str, str]]:
     script = _RUNNER % {"prelude": PRELUDE, "old": shape["old"], "new": shape["new"]}
     env = {k: v for k, v in os.environ.items() if not k.startswith("LC_") and k != "LANG"}
     env["LC_ALL"] = locale
-    proc = subprocess.run([bash, "-c", script, "runner", *inputs], capture_output=True,
-                          env=env, timeout=60, check=False)
+    # Inputs on stdin, one octal-escaped line each, the script from a file:
+    # Git Bash glob-expands and splits its own argv (see run_bash_file).
+    stdin = "".join(bash_octal(i) + "\n" for i in inputs).encode("ascii")
+    proc = run_bash_file(bash, script, stdin=stdin, env=env)
     out = decode_bash_output(proc.stdout)
     assert proc.returncode == 0, decode_bash_output(proc.stderr)
-    rows = [r for r in out.split("\x1e") if r]
+    rows = [r.split("\x1f") for r in out.split("\x1e") if r]
     assert len(rows) == len(inputs), (len(rows), len(inputs), decode_bash_output(proc.stderr))
-    return [(i, *r.split("\x1f")) for i, r in zip(inputs, rows)]
+    # Each row starts with the input as bash saw it: the comparison below is
+    # over these inputs, not over whatever a transport turned them into.
+    assert [r[0] for r in rows] == inputs
+    return [(i, o, n) for i, (_, o, n) in zip(inputs, rows)]
 
 
 @pytest.mark.parametrize("bash", BASHES)

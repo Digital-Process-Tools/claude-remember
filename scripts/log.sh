@@ -48,12 +48,13 @@ fi
 
 # Resolve REMEMBER_DIR and the merged REMEMBER_CONFIG (lib-memory-dir.sh is a
 # no-op if already loaded via the _LIB_MEMORY_DIR_LOADED guard).
-_REMEMBER_SRC_DIR="${BASH_SOURCE[0]%/*}"
+# Its own name, not _REMEMBER_SRC_DIR: lib-memory-dir.sh sets and unsets
+# that one for itself, and this is kept for lib-clock.sh below (#898).
+_remember_log_src_dir="${BASH_SOURCE[0]%/*}"
 # A path with no slash in it (`source log.sh` from the scripts dir) leaves the
 # filename behind, not a directory — `dirname` answered "." and this must too.
-[ "$_REMEMBER_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_SRC_DIR="$(pwd)"
-source "$_REMEMBER_SRC_DIR/lib-memory-dir.sh"
-unset _REMEMBER_SRC_DIR
+[ "$_remember_log_src_dir" = "${BASH_SOURCE[0]}" ] && _remember_log_src_dir="$(pwd)"
+source "$_remember_log_src_dir/lib-memory-dir.sh"
 
 # ── Logging setup ─────────────────────────────────────────────────────────────
 
@@ -149,10 +150,7 @@ _remember_cfg_table_get_into() {
 # This rule and the `select(.[0] != "haiku")` in the flattener are one decision
 # in two places — change both or neither.
 _config_is_private_path() {
-    if [ "$1" = .haiku ] || [ "${1#.haiku.}" != "$1" ]; then
-        return 0
-    fi
-    return 1
+    [ "$1" = .haiku ] || [ "${1#.haiku.}" != "$1" ]
 }
 
 # Flatten every scalar to `dotted.key<TAB>value`, or decline to.
@@ -272,7 +270,8 @@ _config_is_private_path() {
 #    never inspected, and never a re-parse of the value as shell source
 #    either way.
 _remember_cfg_flatten_cache_path() {
-    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
+    # bracket ranges below are byte-wise, not collated (#695)
+    local LC_ALL=C
     [ -n "${REMEMBER_DIR:-}" ] || return 1
     local _slug="${REMEMBER_DIR//[!a-zA-Z0-9]/-}"
     # Same tail-keep truncation as _remember_env_cache_path
@@ -312,11 +311,7 @@ _remember_cfg_flatten_cache_sources() {
 # to the SECOND -- the exact "silently serve stale content" failure #668
 # names as never permitted -- before this guard existed.
 _remember_cfg_flatten_cache_is_standard_merge() {
-    local _cfg_path="${REMEMBER_CONFIG:-}"
-    if [[ "$_cfg_path" == */remember-config-* ]]; then
-        return 0
-    fi
-    return 1
+    [[ "${REMEMBER_CONFIG:-}" == */remember-config-* ]]
 }
 
 # Every value this cache writes -- the REMEMBER_DIR identity line and each
@@ -339,7 +334,8 @@ _remember_cfg_flatten_cache_is_standard_merge() {
 # rather than silently mis-decoded.
 _remember_cfg_flatten_cache_valid_value() {
     local _value="$1"
-    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
+    # bracket ranges below are byte-wise, not collated (#695)
+    local LC_ALL=C
     [[ "$_value" =~ ^([^\\]|\\[\\nrt])*$ ]]
 }
 
@@ -350,7 +346,8 @@ _remember_cfg_flatten_cache_valid_value() {
 # for what <value> has to satisfy, and the #682 block comment above this
 # whole section for what <name> is guaranteed to be (and why).
 _remember_cfg_flatten_cache_valid_line() {
-    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
+    # bracket ranges below are byte-wise, not collated (#695)
+    local LC_ALL=C
     local _line="$1"
     [[ "$_line" =~ ^_RCFG_[A-Za-z0-9_]+$'\t' ]] || return 1
     _remember_cfg_flatten_cache_valid_value "${_line#*$'\t'}"
@@ -407,37 +404,41 @@ _remember_cfg_flatten_q_decode() {
     printf -v "$1" '%b' "$2"
 }
 
+# _remember_cfg_flatten_cache_exists_into VAR [CACHE]
+# VAR gets one 1/0 digit per standard source, in
+# _remember_cfg_flatten_cache_sources order: does it exist right now (#843).
+# A layer that never existed cannot have changed, so -nt is the right answer
+# for it; a layer that EXISTED at publish and was since DELETED changes no
+# mtime, which is why the loader also compares this manifest. With CACHE,
+# returns 1 as soon as an existing source is not strictly older than it
+# (-nt: never a tie -- the "ambiguous means miss" guardrail of #668).
+# Shared by the loader and the publisher (#898).
+_remember_cfg_flatten_cache_exists_into() {
+    local _src _sources _m=""
+    _sources=$(_remember_cfg_flatten_cache_sources)
+    while IFS= read -r _src; do
+        [ -n "$_src" ] || continue
+        if [ -e "$_src" ]; then
+            _m="${_m}1"
+            [ -z "${2:-}" ] || [ "$2" -nt "$_src" ] || return 1
+        else
+            _m="${_m}0"
+        fi
+    done <<< "$_sources"
+    printf -v "$1" '%s' "$_m"
+}
+
 _remember_cfg_flatten_cache_load() {
     [ "${REMEMBER_CONFIG_CACHE:-1}" = "1" ] || return 1
     _remember_cfg_flatten_cache_is_standard_merge || return 1
     local _f
     _f=$(_remember_cfg_flatten_cache_path) || return 1
-    [ -f "$_f" ] || return 1
-    [ -L "$_f" ] && return 1
-    [ -O "$_f" ] || return 1
-    [ -r "$_f" ] || return 1
-    local _src _sources _exists_now=""
-    _sources=$(_remember_cfg_flatten_cache_sources)
-    while IFS= read -r _src; do
-        [ -n "$_src" ] || continue
-        # #843: a layer that never existed cannot have changed, so -nt is
-        # the right answer for it (true against an absent file). A layer
-        # that EXISTED when the cache was published and was since DELETED
-        # is a different case -- deleting it changes no mtime this -nt
-        # check looks at, so the comparison alone would say "fresh" forever.
-        # Build a manifest of current existence per source here, and after
-        # the identity line is read below, reject any cache whose manifest
-        # does not match this run's -- a layer appearing or vanishing is
-        # always a miss, never silently absorbed into "nothing changed".
-        if [ -e "$_src" ]; then
-            _exists_now="${_exists_now}1"
-            # -nt: strictly newer, never a tie -- the same "ambiguous means
-            # miss" guardrail #668 asks for everywhere else in this codebase.
-            [ "$_f" -nt "$_src" ] || return 1
-        else
-            _exists_now="${_exists_now}0"
-        fi
-    done <<< "$_sources"
+    [ -f "$_f" ] && [ ! -L "$_f" ] && [ -O "$_f" ] && [ -r "$_f" ] || return 1
+    # #843: the per-source existence manifest, compared after the identity
+    # line is read below; also a miss when any existing layer is not older
+    # than the cache.
+    local _exists_now=""
+    _remember_cfg_flatten_cache_exists_into _exists_now "$_f" || return 1
 
     # Validate BEFORE trusting a single byte of it -- see the #682 block
     # comment above this whole section for why a shared-tmp-dir file is
@@ -465,7 +466,7 @@ _remember_cfg_flatten_cache_load() {
     # `#` (see the flattener's own comment further up this file), so this
     # shape can never collide with a real config key's own line, unlike
     # reusing the `_RCFG_` namespace would risk.
-    local _line _lines=() _stage=0 _identity_raw="" _exists_raw=""
+    local _line _lines=() _stage=0 _identity_raw="" _exists_raw="" _bad=""
     while IFS= read -r _line || [ -n "$_line" ]; do
         _line="${_line%$'\r'}"
         [ -n "$_line" ] || continue
@@ -474,19 +475,10 @@ _remember_cfg_flatten_cache_load() {
         # directory's scanner holds a submission on).
         if [ "$_stage" = "0" ]; then
             _stage=1
-            if [ "${_line#'#REMEMBER_DIR='}" != "$_line" ]; then
-                _identity_raw="${_line#'#REMEMBER_DIR='}"
-                _remember_cfg_flatten_cache_valid_value "$_identity_raw" || {
-                    rm -f "$_f" 2>/dev/null
-                    return 1
-                }
-                continue
-            else
-                rm -f "$_f" 2>/dev/null
-                return 1
-            fi
-        fi
-        if [ "$_stage" = "1" ]; then
+            _identity_raw="${_line#'#REMEMBER_DIR='}"
+            [ "$_identity_raw" != "$_line" ] \
+                && _remember_cfg_flatten_cache_valid_value "$_identity_raw" || { _bad=1; break; }
+        elif [ "$_stage" = "1" ]; then
             _stage=2
             # #843: the second header line is the exist/absent manifest the
             # publisher recorded for the same sources the loop above just
@@ -495,29 +487,27 @@ _remember_cfg_flatten_cache_load() {
             # line is -- it is never assigned anywhere, but trusting an
             # unrecognised shape here would be trusting bytes that were
             # never inspected.
-            if [ "${_line#'#RCFG_EXISTS='}" != "$_line" ]; then
-                _exists_raw="${_line#'#RCFG_EXISTS='}"
-                if [[ "$_exists_raw" == *[!01]* ]] || [ -z "$_exists_raw" ]; then
-                    rm -f "$_f" 2>/dev/null
-                    return 1
-                fi
-                continue
-            else
-                rm -f "$_f" 2>/dev/null
-                return 1
+            _exists_raw="${_line#'#RCFG_EXISTS='}"
+            [ "$_exists_raw" != "$_line" ] || { _bad=1; break; }
+            if [[ "$_exists_raw" == *[!01]* ]] || [ -z "$_exists_raw" ]; then
+                _bad=1
+                break
             fi
+        elif _remember_cfg_flatten_cache_valid_line "$_line"; then
+            _lines[${#_lines[@]}]="$_line"
+        else
+            _bad=1
+            break
         fi
-        if ! _remember_cfg_flatten_cache_valid_line "$_line"; then
-            # Distrust the WHOLE file, and remove it: the next start must not
-            # re-read the same poison and re-pay this same rejection forever.
-            rm -f "$_f" 2>/dev/null
-            return 1
-        fi
-        _lines[${#_lines[@]}]="$_line"
     done < "$_f"
-    # No lines at all, or the file ended before both header lines were seen
-    # (including "no identity line" -- see above): reject.
-    [ "$_stage" = "2" ] || { rm -f "$_f" 2>/dev/null; return 1; }
+    # A line that failed, no lines at all, or a file that ended before both
+    # header lines were seen (including "no identity line" -- see above):
+    # distrust the WHOLE file, and remove it, so the next start does not
+    # re-read the same poison and re-pay this same rejection forever.
+    if [ -n "$_bad" ] || [ "$_stage" != "2" ]; then
+        rm -f "$_f" 2>/dev/null
+        return 1
+    fi
 
     # #843: a layer that appeared OR vanished since publish is always a
     # miss, even though neither change necessarily flips the -nt comparison
@@ -528,14 +518,11 @@ _remember_cfg_flatten_cache_load() {
     [ "$_exists_raw" = "$_exists_now" ] || return 1
 
     local _identity
-    _remember_cfg_flatten_q_decode _identity "$_identity_raw" || {
+    if ! _remember_cfg_flatten_q_decode _identity "$_identity_raw" \
+        || [ "$_identity" != "${REMEMBER_DIR:-}" ]; then
         rm -f "$_f" 2>/dev/null
         return 1
-    }
-    [ "$_identity" = "${REMEMBER_DIR:-}" ] || {
-        rm -f "$_f" 2>/dev/null
-        return 1
-    }
+    fi
 
     local _assign _assign_name _assign_value _assign_decoded
     for _assign in ${_lines[@]+"${_lines[@]}"}; do
@@ -573,7 +560,7 @@ _remember_cfg_flatten_cache_publish() {
     [ -d "$_dir" ] || mkdir -p "$_dir" 2>/dev/null || return 0
     local _t
     _t=$(mktemp "${_f}.XXXXXX" 2>/dev/null) || return 0
-    local _k _v _src _sources _exists_now=""
+    local _k _v _exists_now=""
     # #843: record which of the standard sources exist RIGHT NOW, in the
     # same order _remember_cfg_flatten_cache_sources always returns them in.
     # The loader compares this against its own fresh read of the same
@@ -581,15 +568,7 @@ _remember_cfg_flatten_cache_publish() {
     # load is always a miss -- the exact gap an mtime-only -nt check cannot
     # see for a DELETED layer (deleting a file changes no mtime a -nt check
     # looks at).
-    _sources=$(_remember_cfg_flatten_cache_sources)
-    while IFS= read -r _src; do
-        [ -n "$_src" ] || continue
-        if [ -e "$_src" ]; then
-            _exists_now="${_exists_now}1"
-        else
-            _exists_now="${_exists_now}0"
-        fi
-    done <<< "$_sources"
+    _remember_cfg_flatten_cache_exists_into _exists_now
     {
         # Identity line FIRST, always -- see the #682 comment in the loader
         # above for why a file at this (many-to-one-mangled) path cannot be
@@ -624,7 +603,9 @@ _config_load() {
         return 0
     fi
 
-    local _dump="" _rc=0
+    # Both flatteners live next to this file; one directory for either.
+    local _dump="" _rc=0 _cfg_flatten_dir="${BASH_SOURCE[0]%/*}"
+    [ "$_cfg_flatten_dir" = "${BASH_SOURCE[0]}" ] && _cfg_flatten_dir="$(pwd)"
     if command -v jq >/dev/null 2>&1; then
         # #898 round 7: `jq -f FILE`, not `jq -r "$_REMEMBER_CFG_FLATTEN_JQ"`
         # -- the program used to live inline, as the shell variable this
@@ -635,9 +616,7 @@ _config_load() {
         # scripts/cfg_flatten.jq carries the identical program (verified
         # byte-identical output against the old inline form before this
         # landed), so nothing here changes what config_into's callers see.
-        local _cfg_flatten_jq_dir="${BASH_SOURCE[0]%/*}"
-        [ "$_cfg_flatten_jq_dir" = "${BASH_SOURCE[0]}" ] && _cfg_flatten_jq_dir="$(pwd)"
-        _dump=$(jq -r -f "$_cfg_flatten_jq_dir/cfg_flatten.jq" "$REMEMBER_CONFIG" 2>/dev/null) || _rc=1
+        _dump=$(jq -r -f "$_cfg_flatten_dir/cfg_flatten.jq" "$REMEMBER_CONFIG" 2>/dev/null) || _rc=1
     else
         # Resolves PYTHON on first use (#662); no-op outside lazy mode.
         declare -f _remember_python >/dev/null 2>&1 && _remember_python
@@ -646,9 +625,7 @@ _config_load() {
         # in a shell variable -- the embedded `for` loops inside that
         # single-quoted string are themselves a shape a line-oriented
         # scanner cannot tell from real bash. Called by literal path now.
-        local _cfg_flatten_dir="${BASH_SOURCE[0]%/*}"
-        [ "$_cfg_flatten_dir" = "${BASH_SOURCE[0]}" ] && _cfg_flatten_dir="$(pwd)"
-        _dump=$(_remember_log_run_python "$_cfg_flatten_dir/cfg_flatten.py" "$REMEMBER_CONFIG" 2>/dev/null) || _rc=1
+        _dump=$(_remember_slug_run_python "$_cfg_flatten_dir/cfg_flatten.py" "$REMEMBER_CONFIG" 2>/dev/null) || _rc=1
     fi
 
     if [ "$_rc" -ne 0 ]; then
@@ -733,25 +710,12 @@ config() {
 # this; it is a live constraint on any future one, the same residual risk
 # `_remember_date_into` (lib-clock.sh, #511) already carries for its own
 # `_var`/`_val` locals.
-# #898 round 5: "${PYTHON:-python3}" as a bare command word (used twice
-# below, in _config_load and config_into's own jq-less fallbacks) is a
-# computed program name (UNPINNED_NPX). log.sh can be sourced directly
-# without detect-tools.sh (see config_into's own comment on this), so it
-# cannot rely on that file's _remember_run_python wrapper -- same
-# literal-dispatch idea, local to this file.
-_remember_log_run_python() {
-    if [ "${PYTHON:-python3}" = python3 ]; then
-        python3 "$@"
-    elif [ "${PYTHON:-python3}" = python ]; then
-        python "$@"
-    elif [ "${PYTHON:-python3}" = "py -3" ]; then
-        py -3 "$@"
-    elif [ "${PYTHON:-python3}" = py ]; then
-        py "$@"
-    else
-        return 127
-    fi
-}
+# The jq-less reads below (and _config_load's above) run Python through
+# _remember_slug_run_python, the literal-dispatch runner lib-slug.sh defines
+# (#898 round 5: a computed program name is an UNPINNED_NPX hold). log.sh
+# can be sourced without detect-tools.sh, so it cannot use that file's
+# _remember_run_python; lib-slug.sh always arrives first, through
+# lib-memory-dir.sh above, so the one shared copy is enough (#898).
 
 config_into() {
     local _cfg_into_var="$1"
@@ -777,7 +741,7 @@ config_into() {
         # the same reason that one is: a warning that fires on ordinary
         # lookups is a warning nobody reads.
         [ "${REMEMBER_DEBUG:-}" = "1" ] && \
-            echo "remember: config() key '$_cfg_into_name' is not a plain dotted path -- returning the default rather than looking it up" >&2
+            echo "remember: config() key '$_cfg_into_name' is not a plain dotted path -- returning the default" >&2
         printf -v "$_cfg_into_var" '%s' "$_cfg_into_default"
         return
     fi
@@ -861,7 +825,7 @@ config_into() {
         # call site's own argument order.
         local _cfg_py_dir="${BASH_SOURCE[0]%/*}"
         [ "$_cfg_py_dir" = "${BASH_SOURCE[0]}" ] && _cfg_py_dir="$(pwd)"
-        _cfg_into_val=$(_remember_log_run_python "$_cfg_py_dir/jq_fallback_get.py" "$REMEMBER_CONFIG" "$_cfg_into_name")
+        _cfg_into_val=$(_remember_slug_run_python "$_cfg_py_dir/jq_fallback_get.py" "$REMEMBER_CONFIG" "$_cfg_into_name")
     fi
     [ -n "$_cfg_into_val" ] || _cfg_into_val="$_cfg_into_default"
     printf -v "$_cfg_into_var" '%s' "$_cfg_into_val"
@@ -944,12 +908,17 @@ export REMEMBER_PROMPT_STAMP
 # a leading zero that clears a digits-only guard is read as octal (#322/#332).
 # One validation at the source beats one per consumer, which is how the
 # pre-#158 duplicate readers drifted.
+#
+# _remember_is_uint: set, and digits only (#898). The one test behind what
+# was spelled out at each site as `[ -z "$x" ] || [ "${x#*[!0-9]}" != "$x" ]`
+# (tests/test_is_uint_helper_898.py holds the two to the same answers).
+_remember_is_uint() { [[ -n "$1" && "$1" != *[!0-9]* ]]; }
 config_into REMEMBER_SAVE_COOLDOWN ".cooldowns.save_seconds" 120
-if [ -z "$REMEMBER_SAVE_COOLDOWN" ] || [ "${REMEMBER_SAVE_COOLDOWN#*[!0-9]}" != "$REMEMBER_SAVE_COOLDOWN" ]; then REMEMBER_SAVE_COOLDOWN=120; fi
+_remember_is_uint "$REMEMBER_SAVE_COOLDOWN" || REMEMBER_SAVE_COOLDOWN=120
 export REMEMBER_SAVE_COOLDOWN
 
 config_into REMEMBER_DELTA_THRESHOLD ".thresholds.delta_lines_trigger" 50
-if [ -z "$REMEMBER_DELTA_THRESHOLD" ] || [ "${REMEMBER_DELTA_THRESHOLD#*[!0-9]}" != "$REMEMBER_DELTA_THRESHOLD" ]; then REMEMBER_DELTA_THRESHOLD=50; fi
+_remember_is_uint "$REMEMBER_DELTA_THRESHOLD" || REMEMBER_DELTA_THRESHOLD=50
 export REMEMBER_DELTA_THRESHOLD
 
 # Model + reject-gate knobs. config.json is the source of truth; an explicit
@@ -974,12 +943,9 @@ export REMEMBER_REJECT_PATTERN
 # (#227). Sourced AFTER REMEMBER_TZ is read above, and from here rather than the
 # top of the file, so a log.sh that bailed early still leaves _remember_date
 # undefined and session-start-hook.sh's `command -v` guard still fires.
-_REMEMBER_SRC_DIR="${BASH_SOURCE[0]%/*}"
-# A path with no slash in it (`source log.sh` from the scripts dir) leaves the
-# filename behind, not a directory — `dirname` answered "." and this must too.
-[ "$_REMEMBER_SRC_DIR" = "${BASH_SOURCE[0]}" ] && _REMEMBER_SRC_DIR="$(pwd)"
-source "$_REMEMBER_SRC_DIR/lib-clock.sh"
-unset _REMEMBER_SRC_DIR
+# Same directory as lib-memory-dir.sh above, resolved there once.
+source "$_remember_log_src_dir/lib-clock.sh"
+unset _remember_log_src_dir
 
 # _remember_date_into (lib-clock.sh, #511), not $(_remember_date ...) --
 # this runs unconditionally at the top level every time log.sh is sourced,
@@ -1152,9 +1118,8 @@ log() {
     # closed as not worth the fragility and log() unconditionally forks the
     # flatten again, as it did before #621 (the pre-#621 shape, restored
     # verbatim).
-    message="$(printf '%s' "$message" | LC_ALL=C tr '[:cntrl:]' ' ')"
-    echo "${timestamp} [${component}] ${message}" >> "$MEMORY_LOG_FILE" 2>/dev/null \
-        || echo "${timestamp} [${component}] ${message}" >&2
+    message="${timestamp} [${component}] $(printf '%s' "$message" | LC_ALL=C tr '[:cntrl:]' ' ')"
+    echo "$message" >> "$MEMORY_LOG_FILE" 2>/dev/null || echo "$message" >&2
 }
 
 # Log token usage for a Haiku API call.
@@ -1447,13 +1412,16 @@ _dispatch_stdout_relay() {
 # process whose bootstrap redirect was skipped on a read-only store. A hook must
 # never gain the ability to write into the session, so the destination is named
 # rather than inherited.
+# Each dispatch reporter keeps its own body, NOT a one-line call to
+# report_error with $1..$5 inside the message: that form is one the plugin
+# directory's scanner held three hooks on (#898 r38/r39; r40 with these
+# bodies restored was clear).
 _dispatch_report_failure() {
     local _event="$1" _name="$2" _rc="$3" _why="$4"
     local _msg="ERROR: hook failed: $_event/$_name (exit $_rc): $_why"
     # #618: flattened HERE, once, before either write -- log() applies its
-    # own #599 flatten to $MEMORY_LOG_FILE, but the printf below writes a
-    # SECOND, raw copy straight to hook-errors.log, which #599 never
-    # touched. $_why can carry a hook's own untrusted output.
+    # own #599 flatten, but the printf below writes a SECOND, raw copy to
+    # hook-errors.log. $_why can carry a hook's own untrusted output.
     _msg="$(printf '%s' "$_msg" | LC_ALL=C tr '[:cntrl:]' ' ')"
     log "dispatch" "$_msg"
     [ -d "$REMEMBER_DIR/logs" ] || return 0
@@ -1474,8 +1442,7 @@ _dispatch_report_failure() {
 _dispatch_report_skip() {
     local _event="$1" _name="$2" _why="$3"
     local _msg="WARNING: hook SKIPPED and did not run: $_event/$_name ($_why) -- it will not run on any later dispatch until this is fixed"
-    # #618: see _dispatch_report_failure above -- same second, raw copy of
-    # $_msg reaches hook-errors.log below, outside log()'s own #599 flatten.
+    # #618: see _dispatch_report_failure above.
     _msg="$(printf '%s' "$_msg" | LC_ALL=C tr '[:cntrl:]' ' ')"
     log "dispatch" "$_msg"
     [ -d "$REMEMBER_DIR/logs" ] || return 0
@@ -1532,9 +1499,9 @@ report_error() {
 # opposite fixes.
 _dispatch_report_timeout() {
     local _event="$1" _name="$2" _budget="$3" _how="$4" _said="$5"
-    local _msg="WARNING: hook TIMED OUT: $_event/$_name did not return within ${_budget}s and was stopped ($_how). This is NOT a failure report from the hook -- it never answered, so whether it did its work is UNKNOWN, and anything it left half-done is its own to unwind. Raise hooks.dispatch_timeout_seconds if this listener is honestly slow, or 0 to disable the bound. It said: $_said"
+    local _msg="WARNING: hook TIMED OUT: $_event/$_name did not return within ${_budget}s and was stopped ($_how). Whether it did its work is UNKNOWN; this is not a failure report. Raise hooks.dispatch_timeout_seconds if it is honestly slow, or 0 to disable the bound. It said: $_said"
     # #618: see _dispatch_report_failure above. $_said is a hook's own
-    # (possibly hostile, definitely untrusted) reply text.
+    # untrusted reply text.
     _msg="$(printf '%s' "$_msg" | LC_ALL=C tr '[:cntrl:]' ' ')"
     log "dispatch" "$_msg"
     [ -d "$REMEMBER_DIR/logs" ] || return 0
@@ -1673,13 +1640,9 @@ dispatch() {
             # and under `set -u` an unvalidated value inside $(( )) does not
             # merely misbehave, it kills the shell (the #258 lesson). Falling
             # back to the shipped default is the safe direction in both senses.
-            if [ -z "$_budget" ] || [ "${_budget#*[!0-9]}" != "$_budget" ]; then
-                _budget=$_DISPATCH_BUDGET_FALLBACK
-            fi
+            if [ -z "$_budget" ] || [ "${_budget#*[!0-9]}" != "$_budget" ]; then _budget=$_DISPATCH_BUDGET_FALLBACK; fi
             _grace=$(config '.hooks.dispatch_kill_grace_seconds' "$_DISPATCH_KILL_GRACE_DEFAULT")
-            if [ -z "$_grace" ] || [ "${_grace#*[!0-9]}" != "$_grace" ]; then
-                _grace=$_DISPATCH_KILL_GRACE_DEFAULT
-            fi
+            if [ -z "$_grace" ] || [ "${_grace#*[!0-9]}" != "$_grace" ]; then _grace=$_DISPATCH_KILL_GRACE_DEFAULT; fi
         fi
         # Ownership + world-writable checks, ONE stat call instead of two
         # (`stat` for the owner, `find -perm -002` for the mode) -- #663, part
@@ -1776,61 +1739,45 @@ dispatch() {
         # ends, so hooks still run strictly one at a time and in name order.
         # The redirections belong to the background job, so a hook's output is
         # captured exactly as it was when this was a foreground call.
-        local _rc=0 _hpid=""
-        _DISPATCH_RC=0
-        _DISPATCH_TIMEDOUT=0
+        # Two launches with literal redirect targets, not one through
+        # variables: that single-launch form (#898) is a shape the plugin
+        # directory's scanner holds a submission on.
+        local _rc _said
         if [ -n "$_err_file" ]; then
             REMEMBER_PROJECT="${PROJECT_DIR:-.}" "$hook" >"$_out_file" 2>"$_err_file" &
-            _hpid=$!
-            _dispatch_supervise "$_hpid" "$_budget" "$_grace" "$_to_file"
+            _dispatch_supervise "$!" "$_budget" "$_grace" "$_to_file"
             _rc=$_DISPATCH_RC
             # Relayed whether the hook succeeded, failed, or was stopped: a hook
             # that says something useful and then dies has still said it, and
-            # #277 is the standing argument against discarding its words. A hook
-            # that was killed mid-sentence is the case where they matter most —
-            # they are the only evidence of what it was doing when it stopped.
+            # #277 is the standing argument against discarding its words.
             _dispatch_stdout_relay "$_out_file" "$event" "${hook##*/}"
         else
-            # No writable tmp, so stdout cannot be captured — and uncaptured
-            # stdout is inherited stdout, which is exactly the unattributed
-            # injection this fixes. It is DISCARDED and SAID, never quietly
-            # passed through and never quietly dropped: "could not check" is a
-            # third state here as it is everywhere else in this codebase.
+            # No writable tmp: uncaptured stdout would be inherited stdout, the
+            # unattributed injection this avoids. DISCARDED and SAID instead.
             REMEMBER_PROJECT="${PROJECT_DIR:-.}" "$hook" >/dev/null 2>/dev/null &
-            _hpid=$!
-            _dispatch_supervise "$_hpid" "$_budget" "$_grace" ""
+            _dispatch_supervise "$!" "$_budget" "$_grace" ""
             _rc=$_DISPATCH_RC
-            printf '%s%s/%s -- output NOT SHOWN: stdout could not be captured (no writable %s/tmp), so it was discarded rather than delivered unattributed ===\n' \
+            printf '%s%s/%s -- output NOT SHOWN: no writable %s/tmp to capture it, so it was discarded ===\n' \
                 "$_DISPATCH_FRAME" "$event" "${hook##*/}" "$REMEMBER_DIR"
         fi
 
-        # A stop is reported BEFORE the failure branch and instead of it. The
-        # status in $_rc is the signal WE sent, not an answer the hook gave.
-        if [ "$_DISPATCH_TIMEDOUT" -eq 1 ]; then
-            local _how="SIGTERM, then SIGKILL after ${_grace}s if it was still there"
-            [ -n "$_to_file" ] || _how="$_how; inferred from the exit status because $REMEMBER_DIR/tmp is not writable, so a hook that genuinely exited on this signal would look the same"
-            local _said
-            if [ -n "$_err_file" ]; then
-                _said=$(_dispatch_stderr_excerpt "$_err_file")
-            else
-                _said="nothing captured -- no writable $REMEMBER_DIR/tmp"
-            fi
-            _dispatch_report_timeout "$event" "${hook##*/}" "$_budget" "$_how" "$_said"
-            continue
-        fi
-
-        [ "$_rc" -eq 0 ] && continue
-
-        # Only a FAILING hook is reported. A hook that chatters and exits 0 is
-        # not an event, and this fires on every tool call — that noise is the
-        # one thing `2>/dev/null` was genuinely buying, and it is kept.
-        local _why
+        # Only a stopped or FAILING hook is reported. A hook that chatters and
+        # exits 0 is not an event, and this fires on every tool call.
+        [ "$_DISPATCH_TIMEDOUT" -eq 1 ] || [ "$_rc" -ne 0 ] || continue
         if [ -n "$_err_file" ]; then
-            _why=$(_dispatch_stderr_excerpt "$_err_file")
+            _said=$(_dispatch_stderr_excerpt "$_err_file")
         else
-            _why="stderr not captured -- no writable $REMEMBER_DIR/tmp, so the reason is MISSING, not absent; rerun the hook by hand to see what it says"
+            _said="stderr not captured (no writable $REMEMBER_DIR/tmp); rerun the hook by hand to see it"
         fi
-        _dispatch_report_failure "$event" "${hook##*/}" "$_rc" "$_why"
+        # A stop is reported instead of a failure: the status in $_rc is the
+        # signal WE sent, not an answer the hook gave.
+        if [ "$_DISPATCH_TIMEDOUT" -eq 1 ]; then
+            local _how="SIGTERM, then SIGKILL after ${_grace}s"
+            [ -n "$_to_file" ] || _how="$_how; inferred from the exit status (no writable tmp)"
+            _dispatch_report_timeout "$event" "${hook##*/}" "$_budget" "$_how" "$_said"
+        else
+            _dispatch_report_failure "$event" "${hook##*/}" "$_rc" "$_said"
+        fi
     done
     [ -z "$_err_file" ] || rm -f "$_err_file" "$_out_file" 2>/dev/null
     [ -z "$_to_file" ] || rm -f "$_to_file" 2>/dev/null

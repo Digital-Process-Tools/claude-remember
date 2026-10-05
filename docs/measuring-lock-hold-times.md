@@ -22,6 +22,7 @@ save.lock         us   197      4210      9840     21030     24118         0    
 staging.lock      us   210        31        44        88       201         0         0         1        12        0
 ```
 
+- **Which locks.** `save.lock` and `staging.lock`, the two this measurement exists to size. Session start's `sessions.lock` (the store-root slug index, held across one `awk` and one `mv`) is taken through the untimed primitive and never appears here (#898).
 - **`held_*`** is acquire-to-release. `save.lock`'s tail is what the 30s has to cover.
 - **`timeouts`** counts waits that ran out. For `save.lock` each one is an NDC commit that skipped and duplicated a span into `today-*.md` — the outcome the bounded wait was chosen to avoid. A non-zero count here is the direct answer to #226.
 - **Turning it on cannot change what it measures.** If the log cannot be written — read-only directory, read-only file, `REMEMBER_DIR` unset — the lock use completes normally and one line names the file that could not be written, in the pipeline log or on stderr, once per process. A hold that was not timed is **missing** from the distribution rather than present in it as a `0ms` row; those two give different `p50`s, and only one of them is honest.

@@ -542,10 +542,10 @@ _ROUND_19_DIVERGENCE = {
             '        linux*) return 0 ;;\n'
             '    esac\n'
             '    return 1\n',
-            '    [ "${REMEMBER_UTF8_STRICT:-0}" = "1" ] && return 0\n'
+            # #898 r41: one expression ending the function, whose status is
+            # the answer (test_case_rewrite_equivalence_898, "a prefix glob").
             '    local _os="${OSTYPE:-}"\n'
-            '    [ "${_os#linux}" != "$_os" ] && return 0\n'
-            '    return 1\n',
+            '    [ "${REMEMBER_UTF8_STRICT:-0}" = "1" ] || [ "${_os#linux}" != "$_os" ]\n',
         ),
         (
             '    fi\n'
@@ -755,6 +755,100 @@ def _apply_round_19(ref_code: str, rel: str) -> str:
         assert new_code in ref_code, (
             f"{rel}: neither the old nor the new code of a round-19 substitution "
             "is on origin/main -- re-derive the allowance"
+        )
+    return ref_code
+
+
+# #898 hook-size lane: genuine simplifications to the two pinned libraries,
+# a third stage applied AFTER _apply_round_19 (its pairs rewrite text round
+# 19 produces). Same three states, same derivation: one pair per changed
+# hunk, code lines only.
+_SHRINK_898_DIVERGENCE = {
+    "scripts/lib-memory-dir.sh": [
+        # H: lib-memory-dir.sh calls lib-slug.sh's runner (sourced at the
+        # top of the file) instead of carrying an identical private copy.
+        (
+            '    _lmd_run_python() {\n'
+            '        if [ "${PYTHON:-python3}" = python3 ]; then\n'
+            '            python3 "$@"\n'
+            '        elif [ "${PYTHON:-python3}" = python ]; then\n'
+            '            python "$@"\n'
+            '        elif [ "${PYTHON:-python3}" = "py -3" ]; then\n'
+            '            py -3 "$@"\n'
+            '        elif [ "${PYTHON:-python3}" = py ]; then\n'
+            '            py "$@"\n'
+            '        else\n'
+            '            return 127\n'
+            '        fi\n'
+            '    }\n',
+            '',
+        ),
+        (
+            '    _lmd_run_python "$_lmd_py_dir/cfg_merge.py"',
+            '    _remember_slug_run_python "$_lmd_py_dir/cfg_merge.py"',
+        ),
+        # I: the three report_error-or-printf drop warnings become one
+        # helper, _lmd_warn, defined with the other helpers; same text, same
+        # two destinations.
+        (
+            '\n_read_data_dir() {\n',
+            '\n_lmd_warn() {\n'
+            '    if declare -F report_error >/dev/null 2>&1; then\n'
+            '        report_error "lib-memory-dir" "$1"\n'
+            '    else\n'
+            '        printf \'%s\\n\' "[lib-memory-dir] WARNING: $1" >&2\n'
+            '    fi\n'
+            '}\n'
+            '\n'
+            '_read_data_dir() {\n',
+        ),
+    ] + [
+        (
+            f'{ind}if declare -F report_error >/dev/null 2>&1; then\n'
+            f'{ind}    report_error "lib-memory-dir" "{msg}"\n'
+            f'{ind}else\n'
+            f'{ind}    printf \'%s\\n\' "[lib-memory-dir] WARNING: {msg}" >&2\n'
+            f'{ind}fi\n',
+            f'{ind}_lmd_warn "{msg}"\n',
+        )
+        for ind, msg in (
+            (" " * 16, "sanitizing the project config layer failed (mktemp, an "
+                       "unreadable project file, or jq itself) -- that layer was "
+                       "dropped; bundled/user-global config still applies"),
+            (" " * 8, "sanitizing the project config layer failed (unreadable "
+                      "project file or malformed JSON) -- that layer was dropped; "
+                      "bundled/user-global config still applies"),
+            (" " * 8, "sanitizing a trusted config layer failed (unreadable file "
+                      "or malformed JSON) -- bundled config, user-global config, "
+                      "and project config (when it is not the untrusted-haiku "
+                      "source) are all reached here, and one of them was dropped; "
+                      "the remaining layers still applied"),
+        )
+    ] + [
+        # J: inline trailing comments moved onto their own line above, so
+        # the release build's whole-line strip removes them; the code part
+        # of each line is unchanged.
+        (
+            '    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)\n',
+            '    local LC_ALL=C\n',
+        ),
+        (
+            '        _project_cfg_model_reject_untrusted=1  # tracked or could-not-tell -> fail CLOSED\n',
+            '        _project_cfg_model_reject_untrusted=1\n',
+        ),
+    ],
+}
+
+
+def _apply_shrink_898(ref_code: str, rel: str) -> str:
+    """Third stage, same three states as _apply_round_19."""
+    for old_code, new_code in _SHRINK_898_DIVERGENCE.get(rel, ()):
+        if old_code in ref_code:
+            ref_code = ref_code.replace(old_code, new_code)
+            continue
+        assert new_code in ref_code and (new_code or old_code not in ref_code), (
+            f"{rel}: neither the old nor the new code of a #898 shrink "
+            "substitution is on origin/main -- re-derive the allowance"
         )
     return ref_code
 
@@ -1337,7 +1431,8 @@ def test_the_per_tool_call_path_is_not_touched(tmp_path):
             f"{rel} on origin/main has no non-comment lines — this compare "
             "would pass against any file at all"
         )
-        ref_code = _apply_round_19(_apply_sanctioned_divergence(_code(ref.stdout), rel), rel)
+        ref_code = _apply_shrink_898(
+            _apply_round_19(_apply_sanctioned_divergence(_code(ref.stdout), rel), rel), rel)
         assert ref_code == _code(path.read_text(encoding="utf-8")), rel
 
 

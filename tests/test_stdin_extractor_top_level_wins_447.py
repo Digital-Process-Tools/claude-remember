@@ -117,7 +117,13 @@ def _call(script: str, func_name: str, keyed: bool, key: str, raw: str):
     """
     body = _extract_function(script, func_name)
     args = [key, raw] if keyed else [raw]
-    call = func_name + " " + " ".join(shlex.quote(a) for a in args)
+    if func_name.endswith("_into"):
+        # The printf -v form (#665): same extraction, written into a named
+        # variable; its return code is the extraction's verdict.
+        call = (func_name + " OUT_447 " + " ".join(shlex.quote(a) for a in args)
+                + '; rc=$?; printf %s "$OUT_447"; exit $rc')
+    else:
+        call = func_name + " " + " ".join(shlex.quote(a) for a in args)
     result = subprocess.run(
         [BASH],
         input=body + "\n" + call,
@@ -146,9 +152,10 @@ def _nested_before(key: str, top: str, nested: str) -> str:
 # `_stdin_json_string KEY RAW` (session-start/-end, post-tool) from
 # user-prompt-hook.sh's own `_stdin_cwd RAW`, which hardcodes the key.
 CASES = [
-    pytest.param("scripts/session-start-hook.sh", "_stdin_json_string", True, "source", id="session-start/source"),
-    pytest.param("scripts/session-start-hook.sh", "_stdin_json_string", True, "cwd", id="session-start/cwd"),
-    pytest.param("scripts/session-start-hook.sh", "_stdin_json_string", True, "session_id", id="session-start/session_id"),
+    # session-start reads every field through the printf -v form (#898).
+    pytest.param("scripts/session-start-hook.sh", "_stdin_json_string_into", True, "source", id="session-start/source"),
+    pytest.param("scripts/session-start-hook.sh", "_stdin_json_string_into", True, "cwd", id="session-start/cwd"),
+    pytest.param("scripts/session-start-hook.sh", "_stdin_json_string_into", True, "session_id", id="session-start/session_id"),
     pytest.param("scripts/session-end-hook.sh", "_stdin_json_string", True, "cwd", id="session-end/cwd"),
     pytest.param("scripts/session-end-hook.sh", "_stdin_json_string", True, "session_id", id="session-end/session_id"),
     pytest.param("scripts/post-tool-hook.sh", "_stdin_json_string", True, "cwd", id="post-tool/cwd"),
@@ -189,6 +196,6 @@ def test_a_key_with_no_nested_shadow_is_unaffected():
     top-level value -- the pairing above must not be trivially satisfied by
     an extractor that always returns the wrong thing."""
     raw = '{"session_id":"PLAIN-VALUE-447","cwd":"/does/not/matter"}'
-    rc, out = _call("scripts/session-start-hook.sh", "_stdin_json_string", True, "session_id", raw)
+    rc, out = _call("scripts/session-start-hook.sh", "_stdin_json_string_into", True, "session_id", raw)
     assert rc == 0
     assert out == "PLAIN-VALUE-447"

@@ -2,7 +2,7 @@
 of lib-memory-dir.sh's config merge (#726, #740, #744, #748, #757, #804,
 #815).
 
-Called by literal path through lib-memory-dir.sh's `_lmd_run_python`
+Called by literal path through lib-slug.sh's `_remember_slug_run_python`
 (#898 round 8 -- this body used to live inline in that file, as a
 single-quoted here-string. Its `for`/`while` lines read as shell loops to
 a line-oriented scanner, and once the release build inlines the library

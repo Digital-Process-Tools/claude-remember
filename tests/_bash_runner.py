@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -91,3 +93,34 @@ def decode_bash_output(raw: bytes) -> str:
             if "\x00" not in decoded:
                 return decoded
     return raw.decode("utf-8", errors="replace")
+
+
+def bash_octal(value: str) -> str:
+    """VALUE's UTF-8 bytes as one line of ``\\0ooo`` escapes for ``printf '%b'``.
+
+    For handing a test input to bash on stdin: the line is plain ASCII, so it
+    reaches bash byte-for-byte on every platform, and ``printf -v x '%b'
+    "$line"`` rebuilds the exact bytes -- a newline, a CR or a trailing
+    newline included, which command substitution or a line read would lose.
+    """
+    return "".join(f"\\0{b:03o}" for b in value.encode("utf-8"))
+
+
+def run_bash_file(bash: str, script: str, *, stdin: bytes = b"", env=None,
+                  timeout: float = 60) -> subprocess.CompletedProcess:
+    """Run SCRIPT from a temporary file, with STDIN on its standard input.
+
+    Not ``bash -c SCRIPT arg...``: Git Bash rebuilds argv from the Windows
+    command line itself (the msys/cygwin runtime's build_argv + globify).
+    An argument Python's list2cmdline leaves unquoted -- no space in it --
+    is glob-expanded against the current directory (``*`` became every
+    entry of the repo root, observed on windows-latest in #898: 25 extra
+    rows), its backslashes are taken as glob escapes, and a newline in it
+    splits it in two. So the script travels as a file and the inputs as
+    stdin; the only argv entry is a temp path with none of those in it.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "run.sh"
+        path.write_bytes(script.encode("utf-8"))
+        return subprocess.run([bash, path.as_posix()], input=stdin, capture_output=True,
+                              env=env, timeout=timeout, check=False)

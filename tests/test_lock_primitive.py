@@ -398,7 +398,7 @@ def test_live_holder_is_never_stolen_from(tmp_path):
 def test_legacy_lock_file_does_not_block_forever(tmp_path):
     """Pre-#182 installs left a regular FILE at the lock path.
 
-    `mkdir` can never succeed against one, so without the migration every save
+    `mkdir` can never succeed against one, so without clearing it every save
     would skip forever after an upgrade — a silent, permanent outage.
     """
     lock_path = tmp_path / "legacy.lock"
@@ -414,12 +414,13 @@ def test_legacy_lock_file_does_not_block_forever(tmp_path):
     assert lock_path.is_dir()
 
 
-def test_legacy_lock_file_with_a_live_holder_is_honoured(tmp_path):
-    """The pre-upgrade holder may still be running across the upgrade.
+def test_a_lock_file_naming_a_live_pid_is_debris_too(tmp_path):
+    """#898: the pre-#182 file lock (v0.8.8, 2026-07-26) is no longer honoured.
 
-    Deleting its lock because the format changed would start a second save
-    alongside it — the exact concurrency the lock exists to prevent, handed out
-    once per upgrade.
+    A holder that old cannot still be running, so a regular file at the lock
+    path is cleared like any other non-directory debris, whatever PID it
+    names. The live PID here is this test's own, which the old code refused
+    to take over.
     """
     lock_path = tmp_path / "legacy-live.lock"
     lock_path.write_text(f"{os.getpid()}\n", encoding="utf-8")
@@ -428,10 +429,10 @@ def test_legacy_lock_file_with_a_live_holder_is_honoured(tmp_path):
     source {LIB_LOCK_SH}
     lock_acquire "{lock_path}" 0 && echo ACQUIRED || echo REFUSED
     """)
-    assert "REFUSED" in result.stdout, (
-        f"took a legacy lock from a live holder: {result.stdout} {result.stderr}"
+    assert "ACQUIRED" in result.stdout, (
+        f"a lock FILE must be cleared, not honoured: {result.stdout} {result.stderr}"
     )
-    assert lock_path.is_file(), "the live holder's lock file must survive"
+    assert lock_path.is_dir()
 
 
 def test_self_id_differs_between_sibling_subshells(tmp_path):

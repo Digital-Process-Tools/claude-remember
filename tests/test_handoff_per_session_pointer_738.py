@@ -247,3 +247,22 @@ class TestStaleSessionKeyedHintsArePruned:
             "exists was pruned -- the sweep must not delete state for a "
             "session that could still be active"
         )
+
+    def test_fresh_hint_with_no_transcript_yet_survives(self, tmp_path):
+        """MUST NOT FIRE (#393 grace window): sess-aaa's hint was just
+        written and its transcript does not exist yet -- the startup gap a
+        live session sits in. A later session start inside that window must
+        leave it alone. The must-fire twin above (same shape, aged past the
+        window) is what proves the sweep runs at all."""
+        project, home, remember_dir, _sessions_dir = _sandbox(tmp_path, handoff_mode="per_session")
+
+        _session_start(project, home, "sess-aaa")
+        hint_a = remember_dir / "tmp" / "handoff-path.sess-aaa"
+        assert hint_a.exists(), "setup did not produce a session-keyed hint"
+
+        _session_start(project, home, "sess-bbb")
+
+        assert hint_a.exists(), (
+            "a session-keyed hint younger than the #393 startup grace "
+            "window was pruned on the strength of an absent transcript alone"
+        )

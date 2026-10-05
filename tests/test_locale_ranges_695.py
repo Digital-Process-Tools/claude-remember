@@ -203,10 +203,10 @@ ALLOWLIST: dict[tuple[str, int], str] = {
     ("scripts/post-tool-hook.sh", 732): _CASE,
     ("scripts/session-end-hook.sh", 201): _CASE,
     ("scripts/session-end-hook.sh", 209): _CASE,
-    ("scripts/session-start-hook.sh", 304): _CASE,
+    ("scripts/session-start-hook.sh", 289): _CASE,
     ("scripts/write-handoff.sh", 87): _CASE,
     ("scripts/doctor.sh", 70): _CASE,
-    ("scripts/lib-slug.sh", 432): _CASE,
+    ("scripts/lib-slug.sh", 430): _CASE,
 }
 
 
