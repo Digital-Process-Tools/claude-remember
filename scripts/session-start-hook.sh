@@ -1904,36 +1904,9 @@ else
     REMEMBER_HANDOFF_STATE="$REMEMBER_DIR/tmp/remember.delivered"
 fi
 
-# Carry an existing record to its new home rather than resetting it — this
-# machine's delivery history is still true about this machine. Legacy-record
-# migration is single-mode only: the old un-namespaced record predates #363
-# entirely, so it has nothing meaningful to say about any one session's
-# per-session slot, and per_session installs are new enough that none exists.
-#
-# The MOVE is also what retires the tracked copy. An ignore rule does nothing to
-# a file git already tracks, and a `git rm --cached` whose path still exists in
-# the working tree is undone by the very next path-limited commit, which takes
-# its content from the working tree. With the old path gone, the backup's
-# ordinary add/commit stages the deletion like any other, and the remote learns
-# it once.
-#
-# A record arriving from a pull is DISCARDED, never adopted: it describes some
-# other machine's sessions, and it is the reason this issue exists.
-if [ -z "$PER_SESSION_HANDOFF" ]; then
-    _REMEMBER_HANDOFF_STATE_LEGACY="$REMEMBER_DIR/remember.delivered"
-    if [ -f "$_REMEMBER_HANDOFF_STATE_LEGACY" ]; then
-        if [ -f "$REMEMBER_HANDOFF_STATE" ]; then
-            rm -f "$_REMEMBER_HANDOFF_STATE_LEGACY" 2>/dev/null
-        else
-            # `[ -d ] ||` first (#660): `mkdir -p` on a directory that already exists is
-            # a fork that does nothing, and tmp/ exists on every start after the first.
-            # The test is a bash builtin, so the first start pays nothing for it either.
-            [ -d "$REMEMBER_DIR/tmp" ] || mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null
-            mv "$_REMEMBER_HANDOFF_STATE_LEGACY" "$REMEMBER_HANDOFF_STATE" 2>/dev/null \
-                || rm -f "$_REMEMBER_HANDOFF_STATE_LEGACY" 2>/dev/null
-        fi
-    fi
-fi
+# The one-time move of a pre-#285 record from the store root into tmp/
+# (v0.13.0, 2026-08-01) is retired (#898): an old root-level
+# remember.delivered is left where it is and no longer read.
 
 # Content fingerprint for the handoff slot. cksum is POSIX and present
 # everywhere this plugin runs, including Git Bash; the size fallback exists so

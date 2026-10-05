@@ -629,7 +629,7 @@ lock_acquire() {
 }
 
 _lock_acquire_impl() {
-    local _dir="$1" _timeout="${2:-0}" _deadline _legacy
+    local _dir="$1" _timeout="${2:-0}" _deadline
     _deadline=$(( $(date +%s) + _timeout ))
 
     mkdir -p "$(dirname "$_dir")" 2>/dev/null || true
@@ -641,26 +641,12 @@ _lock_acquire_impl() {
             return 0
         fi
 
-        if [ -f "$_dir" ]; then
-            # Pre-#182 install: the lock is a regular FILE holding a PID, and
-            # `mkdir` can never succeed against one — without this, every save
-            # would skip forever after an upgrade. But the old holder may still
-            # be running across that upgrade, and deleting its lock would let a
-            # second save start alongside it. Honour the PID: remove the file
-            # only once nobody is behind it.
-            _legacy=$(cat "$_dir" 2>/dev/null) || true
-            if [ -z "$_legacy" ] || [ "${_legacy#*[!0-9]}" != "$_legacy" ]; then
-                rm -f "$_dir" 2>/dev/null || true; continue
-            fi
-            if ! kill -0 "$_legacy" 2>/dev/null; then
-                rm -f "$_dir" 2>/dev/null || true
-                continue
-            fi
-        elif { [ -e "$_dir" ] || [ -L "$_dir" ]; } && [ ! -d "$_dir" ]; then
-            # Something at the path that is neither a lock directory nor a
-            # legacy lock file — a dangling symlink, a FIFO, debris. `mkdir`
-            # can never succeed against it and there is no holder to respect,
-            # so clear it rather than spin here until the timeout, forever.
+        if { [ -e "$_dir" ] || [ -L "$_dir" ]; } && [ ! -d "$_dir" ]; then
+            # Something at the path that is not a lock directory — a dangling
+            # symlink, a FIFO, debris, or a pre-#182 lock FILE (v0.8.8; its PID
+            # is no longer honoured since #898, no holder that old still runs).
+            # `mkdir` can never succeed against it, so clear it rather than
+            # spin here until the timeout, forever.
             rm -f "$_dir" 2>/dev/null || true
             continue
         # A won steal IS the lock: the takeover claims the existing directory in
