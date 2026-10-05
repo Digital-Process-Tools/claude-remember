@@ -244,6 +244,17 @@ class TestMustNotFireOrdinaryPaths:
         assert "REMEMBER_DIR=/c/fakestore" in result.stdout, result.stdout
 
 
+# Same opt-out, same reason, as the module these helpers come from
+# (test_post_tool_hook_spawns.py): its `_run` invokes a bare "bash", which
+# on the Windows runner is the System32 WSL launcher (#912 CI: rc 1, UTF-16
+# "... to install." on stdout), and its fixture is POSIX-only by design.
+_POSIX_HOOK_RUN = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="bash hook subprocess + POSIX semantics — not portable to Windows runners",
+)
+
+
+@_POSIX_HOOK_RUN
 class TestEndToEndSeedFailureNeverCorruptsPaths:
     """The exact reported scenario, driven through the real hook: a stale,
     non-empty save-HHMMSS.log already sitting at the name post-tool-hook.sh
@@ -309,31 +320,74 @@ class TestFastPathMkdirSiteIsGuardedToo:
     reference remained) -- together they cover what either check alone
     would miss."""
 
-    def _extract_function(self) -> str:
-        text = HOOK.read_text(encoding="utf-8")
-        start = text.index("_remember_dir_is_unsafe() {")
+    def _extract_function(self, path: Path = HOOK, name: str = "_remember_dir_is_unsafe") -> str:
+        text = path.read_text(encoding="utf-8")
+        start = text.index(name + "() {")
         end = text.index("\n}\n", start) + len("\n}\n")
         return text[start:end]
 
+    def _run_guard(self, tmp_path: Path, name: str, body: str, ostype: str = "") -> str:
+        """Run `body` with both guard functions defined, from a script FILE.
+
+        Not `bash -c SCRIPT`: on Windows the script then travels through
+        CreateProcess's single command-line string and is re-split by the
+        MSYS runtime, and #912's first Windows run came back with the
+        drive-letter case judged unsafe there while the same function,
+        sourced from log.sh on disk, accepted C:/ in the same job
+        (test_must_not_fire_windows_drive_colon_slash passed). A hook is
+        always read from a file, so that is the transport tested here."""
+        script = tmp_path / f"{name}.sh"
+        script.write_bytes((
+            "set +e\n"
+            + (f"OSTYPE={ostype}\n" if ostype else "")
+            + self._extract_function()
+            + self._extract_function(LOG_SH, "_remember_log_dir_unsafe")
+            + body
+        ).encode("utf-8"))
+        result = subprocess.run(
+            [_BASH, _bash_path(script)], capture_output=True, text=True, timeout=30, check=False,
+        )
+        return result.stdout
+
     def test_must_fire_function_logic_matches_log_sh_twin(self, tmp_path):
-        bad_newline_path = "/abs/with" + "\n" + "newline"
-        script = f"""
-        set +e
-        {self._extract_function()}
-        REMEMBER_DIR="relative/path"
-        _remember_dir_is_unsafe; echo "relative=$?"
-        REMEMBER_DIR="/abs/safe/path"
-        _remember_dir_is_unsafe; echo "absolute=$?"
-        REMEMBER_DIR='{bad_newline_path}'
-        _remember_dir_is_unsafe; echo "newline=$?"
-        REMEMBER_DIR="C:/windows/safe"
-        _remember_dir_is_unsafe; echo "windows=$?"
-        """
-        result = subprocess.run([_BASH, "-c", script], capture_output=True, text=True, timeout=30, check=False)
-        assert "relative=0" in result.stdout, result.stdout   # 0 = unsafe (bash truthy "fires")
-        assert "absolute=1" in result.stdout, result.stdout   # 1 = safe
-        assert "newline=0" in result.stdout, result.stdout
-        assert "windows=1" in result.stdout, result.stdout
+        body = (
+            'REMEMBER_DIR="relative/path"\n'
+            '_remember_dir_is_unsafe; echo "relative=$?"\n'
+            'REMEMBER_DIR="/abs/safe/path"\n'
+            '_remember_dir_is_unsafe; echo "absolute=$?"\n'
+            "REMEMBER_DIR='/abs/with\nnewline'\n"
+            '_remember_dir_is_unsafe; echo "newline=$?"\n'
+            'REMEMBER_DIR="C:/windows/safe"\n'
+            '_remember_dir_is_unsafe; echo "windows=$?"\n'
+        )
+        out = self._run_guard(tmp_path, "twin", body)
+        assert "relative=0" in out, out   # 0 = unsafe (bash truthy "fires")
+        assert "absolute=1" in out, out   # 1 = safe
+        assert "newline=0" in out, out
+        assert "windows=1" in out, out
+
+    @pytest.mark.parametrize("ostype", ["msys", "cygwin", ""])
+    def test_drive_letter_forms_accepted_by_both_guards(self, tmp_path, ostype):
+        """Both guards (log.sh's and post-tool-hook.sh's twin) must accept
+        C:/x and C:\\x -- a Windows store judged unsafe would have its daily
+        log sunk to /dev/null and its autonomous save refused -- and must
+        still refuse a relative value and an embedded newline. Run with
+        OSTYPE as Git Bash (msys) and Cygwin set it, and unset, so the
+        verdict is pinned on every platform this suite runs on, not only
+        on a Windows leg. Must-fire and must-not-fire in one table."""
+        cases = [
+            ("C:/x", 1), ("c:/x", 1), ("C:\\x", 1), ("/c/x", 1),
+            ("relative/x", 0), ("C:x", 0), ("/abs/nl\nx", 0), ("C:/nl\nx", 0),
+        ]
+        body = ""
+        for i, (value, _) in enumerate(cases):
+            body += f"REMEMBER_DIR='{value}'\n"
+            body += f'_remember_dir_is_unsafe; echo "hook{i}=$?"\n'
+            body += f'_remember_log_dir_unsafe; echo "log{i}=$?"\n'
+        out = self._run_guard(tmp_path, f"drive_{ostype or 'none'}", body, ostype)
+        for i, (value, want) in enumerate(cases):
+            assert f"hook{i}={want}" in out, (value, out)
+            assert f"log{i}={want}" in out, (value, out)
 
     def test_must_fire_mkdir_call_site_is_actually_gated(self):
         """Structural pin: the exact mkdir named in #902 must be preceded,

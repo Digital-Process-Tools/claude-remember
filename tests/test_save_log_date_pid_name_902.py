@@ -14,8 +14,18 @@ import re
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(__file__))
 from test_post_tool_hook_spawns import _env, _project, _reap, _run
+
+# Inherited with the helpers, not re-decided here: test_post_tool_hook_spawns
+# opts out of Windows because its `_run` invokes a bare "bash" -- the WSL
+# launcher on the Windows runner (#912 CI: rc 1, UTF-16 "... to install.").
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="bash hook subprocess + POSIX semantics — not portable to Windows runners",
+)
 
 # save-<8 digit date>-<6 digit time>-<pid digits>.log
 _NAME_RE = re.compile(r"^save-\d{8}-\d{6}-\d+\.log$")
