@@ -18,6 +18,9 @@ Rows that block or stop validation
   - no symlink, no `.git` file or directory (a submodule), no Git LFS pointer
   - no `.gitattributes` setting export-ignore, export-subst or filter
   - every file under 5 MiB
+  - every hook script (the HOOK_SCRIPT_NAMES and any .sh a hooks.json command
+    names) at most HOOK_SCRIPT_MAX_BYTES, 120 KiB: the scanner stops following
+    a hook script past 128 KiB (COMMAND_SCRIPT_NOT_FOLLOWED, #900)
   - hooks/hooks.json: valid JSON, a top-level `hooks` object, known events and
     hook types only, not also named by plugin.json's `hooks`; every command spells
     each path from `${CLAUDE_PLUGIN_ROOT}`, with no other variable, no `$(...)` or
@@ -371,6 +374,17 @@ CREDENTIAL_SHAPED_NAME = re.compile(
 # compiles these same four scripts for the release tree, so it is the
 # canonical list of which scripts count as "a hooks.json-registered hook".
 
+# #900: the byte budget for one hook script. Observed 2026-10-05 across 21
+# release-preview portal probes: every hook script of 130,955 bytes or less
+# cleared, every one of 131,120 bytes or more was held as
+# COMMAND_SCRIPT_NOT_FOLLOWED -- the scanner stops following a hook script
+# past 128 KiB (131,072 bytes). 120 KiB leaves a margin under that observed
+# limit, so a hook growing by one feature is caught here rather than as a
+# portal hold after a tag is spent.
+HOOK_SCRIPT_OBSERVED_LIMIT = 128 * 1024
+HOOK_SCRIPT_MAX_BYTES = 120 * 1024
+_HOOKS_JSON_SCRIPT = re.compile(r"\$\{CLAUDE_PLUGIN_ROOT\}/([^\s\"'$`;|&()]+\.sh)")
+
 # #898 round 7: the directory publishing repo's own offline sweep tool
 # (tools/sweep.sh in Digital-Process-Tools/claude-directory-publishing)
 # names five more shapes; these four are the ones with a free-standing
@@ -677,6 +691,7 @@ def check_tree(root: Path, budget: dict) -> CheckResult:
     _check_readme_and_licence(files, manifest, off)
     _check_hooks(files, manifest, off)
     _check_hook_still_sources(files, kinds, off)
+    _check_hook_script_size(files, off)
     _check_python_comments(files, kinds, off)
     _check_shell_comments(files, kinds, off)
     _check_front_matter(files, off)
@@ -1641,6 +1656,41 @@ def _check_hook_still_sources(files: dict, kinds: dict, off: list) -> None:
             off.append(f"{rel}:{n}: still sources another file after the "
                        f"compile step -- the directory holds this as "
                        f"COMMAND_SCRIPT_NOT_FOLLOWED: {line.strip()[:80]}")
+
+
+def _hook_script_paths(files: dict) -> set:
+    """Every shipped path a hook runs: each of HOOK_SCRIPT_NAMES wherever it sits,
+    plus each `${CLAUDE_PLUGIN_ROOT}/....sh` a hooks/hooks.json command names."""
+    paths = {rel for rel in files if posixpath.basename(rel) in HOOK_SCRIPT_NAMES}
+    raw = files.get("hooks/hooks.json")
+    if raw is None:
+        return paths
+    try:
+        doc = json.loads(raw.decode("utf-8"))
+        commands = [h.get("command", "") for gs in doc.get("hooks", {}).values()
+                    for g in gs for h in g.get("hooks", []) if isinstance(h, dict)]
+    except (ValueError, AttributeError, TypeError):
+        return paths
+    for command in commands:
+        if isinstance(command, str):
+            paths.update(p for p in _HOOKS_JSON_SCRIPT.findall(command) if p in files)
+    return paths
+
+
+def _check_hook_script_size(files: dict, off: list) -> None:
+    """#900: a hook script over HOOK_SCRIPT_MAX_BYTES -- FAIL. The directory's scanner
+    stops following a hook script past 128 KiB and holds it as
+    COMMAND_SCRIPT_NOT_FOLLOWED (see the constant's comment for the observation).
+    The build already strips comments, so the only real fix is less code in the
+    hook's own source chain; minifying further would only hide the growth."""
+    for rel in sorted(_hook_script_paths(files)):
+        size = len(files[rel])
+        if size > HOOK_SCRIPT_MAX_BYTES:
+            off.append(f"{rel}: {size} bytes, over the {HOOK_SCRIPT_MAX_BYTES}-byte "
+                       f"hook-script budget ({HOOK_SCRIPT_MAX_BYTES // 1024} KiB, a margin "
+                       f"under the {HOOK_SCRIPT_OBSERVED_LIMIT // 1024} KiB limit past which "
+                       f"the directory holds a hook as COMMAND_SCRIPT_NOT_FOLLOWED) -- shrink "
+                       f"the real code the hook runs, do not minify it")
 
 
 def _check_python_comments(files: dict, kinds: dict, off: list) -> None:

@@ -172,3 +172,73 @@ def test_a_stripped_sh_with_a_shebang_quoted_hash_heredoc_and_inline_comment_pas
         b'echo "$msg" "$msg2" # inline\n')})
     offenders = _check(root).offenders
     assert not any("scripts/lib-x.sh" in o for o in offenders), offenders
+
+
+# -- #900: a hook script over the directory scanner's size limit ----------------------
+# Observed 2026-10-05 across 21 portal probes: a hook script of 130,955 bytes or less
+# cleared, one of 131,120 bytes or more was held as COMMAND_SCRIPT_NOT_FOLLOWED -- the
+# scanner stops following a script past 128 KiB. The checker FAILs any hook script over a
+# 120 KiB budget, a margin under that observed limit.
+
+HOOK_BUDGET = 120 * KIB
+
+
+def _sized_script(size: int) -> bytes:
+    head = b"#!/bin/sh\necho hi\n"
+    line = b"x=1\n"
+    body = line * ((size - len(head)) // len(line))
+    data = head + body + b"\n" * (size - len(head) - len(body))
+    assert len(data) == size, len(data)
+    return data
+
+
+def _size_offenders(root):
+    return [o for o in _check(root).offenders if "hook-script budget" in o]
+
+
+def test_hook_script_byte_budget_is_a_named_120_kib_constant():
+    assert _load().HOOK_SCRIPT_MAX_BYTES == HOOK_BUDGET
+
+
+def test_a_hook_script_over_the_byte_budget_fails(tmp_path):
+    size = 148_857  # the built session-start-hook.sh the portal held
+    root = _tree(tmp_path, {"scripts/session-start-hook.sh": _sized_script(size)})
+    found = _size_offenders(root)
+    assert len(found) == 1, found
+    msg = found[0]
+    assert msg.startswith("scripts/session-start-hook.sh:"), msg
+    assert str(size) in msg and str(HOOK_BUDGET) in msg and "128 KiB" in msg, msg
+    assert "minif" in msg, msg
+
+
+def test_a_hook_script_just_under_the_byte_budget_passes(tmp_path):
+    # positive control for the one above: same tree, same script shape, under budget.
+    root = _tree(tmp_path, {"scripts/session-start-hook.sh": _sized_script(HOOK_BUDGET - 1)})
+    assert _size_offenders(root) == []
+
+
+def test_the_byte_budget_boundary_exactly_at_passes_one_over_fails(tmp_path):
+    (tmp_path / "at").mkdir()
+    (tmp_path / "over").mkdir()
+    at = _tree(tmp_path / "at", {"scripts/session-start-hook.sh": _sized_script(HOOK_BUDGET)})
+    assert _size_offenders(at) == []
+    over = _tree(tmp_path / "over",
+                 {"scripts/session-start-hook.sh": _sized_script(HOOK_BUDGET + 1)})
+    assert len(_size_offenders(over)) == 1
+
+
+def test_a_script_named_by_hooks_json_is_covered_even_off_the_compiled_list(tmp_path):
+    hooks = json.dumps({"hooks": {"Stop": [{"hooks": [
+        {"type": "command", "command": 'bash "${CLAUDE_PLUGIN_ROOT}/scripts/other-hook.sh"'},
+    ]}]}}).encode()
+    root = _tree(tmp_path, {"hooks/hooks.json": hooks,
+                            "scripts/other-hook.sh": _sized_script(HOOK_BUDGET + 1)})
+    found = _size_offenders(root)
+    assert len(found) == 1 and found[0].startswith("scripts/other-hook.sh:"), found
+
+
+def test_a_large_non_hook_script_is_not_held_by_the_hook_budget(tmp_path):
+    # scope control: a script no hook runs is outside this guard (the general 256 KiB
+    # per-file limit still applies to it).
+    root = _tree(tmp_path, {"scripts/doctor.sh": _sized_script(HOOK_BUDGET + 1)})
+    assert _size_offenders(root) == []

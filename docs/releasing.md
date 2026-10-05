@@ -164,10 +164,11 @@ validator never inspects them. Only the four hooks' own shipped bytes change.
 chain): raw transitive closure before any inlining is well over the 256 KiB budget on its own,
 but comment lines make up roughly 60-70% of these files by line count, so the compiled,
 comment-stripped result lands at about 155 KiB for session-start-hook.sh and well under 90 KiB
-for the other three -- comfortably under budget, with headroom before the next library addition
-would need re-measuring. `check_release_tree.py`'s `_check_hook_still_sources` FAILs the build if
-a compiled hook still carries a `source`/`.` statement pointing at another file -- the compile
-step not running, or not fully resolving, is a release-blocking error rather than a silent miss.
+for the other three. That is under the 256 KiB per-file budget, but **not** under the much
+tighter limit the directory's scanner applies to a hook script itself (128 KiB): see "A hook
+script over 120 KiB fails the build" further down. `check_release_tree.py`'s
+`_check_hook_still_sources` FAILs the build if a compiled hook still carries a `source`/`.`
+statement pointing at another file -- the compile step not running, or not fully resolving, is a release-blocking error rather than a silent miss.
 That statement detector is quote/heredoc-aware (the same scan `compile_hooks.py` itself uses to
 find a statement to inline in the first place): a self-review round caught both a first draft that
 missed two of this repo's own real source statements (one assignment-prefixed, one behind a
@@ -320,6 +321,32 @@ Measured on this repo's 26 shipped `.sh` files: **1,128,502 -> 595,725 bytes** (
 `scripts/lib-memory-context.sh` alone 83,042 -> 27,059. The whole release tree went from
 1,256,407 to 723,630 bytes. Built tree: `check_release_tree` 0 FAIL, `sweep.sh` "no known shape
 found", the hook smoke test passes all four hooks.
+
+### A hook script over 120 KiB fails the build (#900)
+
+The directory's scanner stops following a hook script past **128 KiB** and holds it as
+`COMMAND_SCRIPT_NOT_FOLLOWED`, the same code an unfollowed `source` gets. Observed 2026-10-05
+across 21 release-preview portal probes: every hook script of 130,955 bytes or less cleared, every
+one of 131,120 bytes or more was held -- the edge sits at 131,072 bytes. The 256 KiB per-file
+budget above does not catch it, and nothing else in the build did, so it surfaced only as a portal
+hold after a tag was spent. The built `scripts/session-start-hook.sh` was 148,857 bytes that day.
+
+`check_release_tree.py`'s `_check_hook_script_size` now FAILs any hook script larger than
+`HOOK_SCRIPT_MAX_BYTES` (122,880 bytes, 120 KiB -- a margin under the observed limit, so one more
+feature in a hook's source chain is caught here rather than at the portal). A hook script is each
+of the four `HOOK_SCRIPT_NAMES` (from `compile_hooks.py`) plus any `${CLAUDE_PLUGIN_ROOT}/....sh`
+a `hooks/hooks.json` command names. Exactly 122,880 bytes passes; one byte more fails:
+
+```
+FAIL scripts/session-start-hook.sh: 148857 bytes, over the 122880-byte hook-script budget (120 KiB, a margin under the 128 KiB limit past which the directory holds a hook as COMMAND_SCRIPT_NOT_FOLLOWED) -- shrink the real code the hook runs, do not minify it
+```
+
+**The fix is less real code, not minification.** Comments are already gone by this point (the
+strip step above); squeezing whitespace or renaming variables to win bytes back would only hide
+the growth until the next feature, and makes the shipped hook unreadable to the reviewer who reads
+it. Move work the hook does not need at that event out of its source chain, or drop dead code the
+tree-shaker cannot prove unreachable. `python3 .github/scripts/compile_hooks.py --repo .` prints
+each hook's compiled size without writing anything.
 
 ## What the Anthropic directory actually measured
 
