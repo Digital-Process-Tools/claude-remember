@@ -31,8 +31,10 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -55,6 +57,33 @@ pytestmark = pytest.mark.skipif(
     BASH is None,
     reason="no usable bash found (checked PATH, then Git-for-Windows install locations)",
 )
+
+
+def _run_bash_script(script: str, env: dict, *, timeout: int = 30):
+    """Runs `script` under BASH by writing it to a real file and invoking
+    `bash <path>`, never `bash -c "<script>"` (#914 self-review, PR #927
+    CI job 112366941574): on windows-latest, the extracted housekeeping
+    block's own generated script -- several times longer than the block
+    it replaced -- was silently TRUNCATED when passed as a single `-c`
+    argument (confirmed by the reported error itself: an `if` opened on
+    line 131 hit EOF at line 133, two lines later, nowhere near the
+    block's real closing `fi`/`done`/`unset` thirty-odd lines further
+    down) -- a known class of bug when a non-MSYS parent process (Python)
+    launches MSYS/Git-Bash's bash.exe directly via CreateProcess, which
+    is not MSYS-aware and does not go through MSYS's own argv marshaling.
+    A real script FILE sidesteps the whole command-line-argument path;
+    `bash -c` is not used again anywhere else in this file.
+    """
+    fd, path = tempfile.mkstemp(suffix=".sh")
+    try:
+        with os.fdopen(fd, "w", newline="\n") as f:
+            f.write(script)
+        return subprocess.run(
+            [BASH, path], env=env, capture_output=True, text=True,
+            timeout=timeout, check=False,
+        )
+    finally:
+        os.unlink(path)
 
 
 def _dump_dir(d: Path) -> str:
@@ -558,10 +587,7 @@ _run_housekeeping_block() {{
 }}
 _run_housekeeping_block
 """
-        result = subprocess.run(
-            [BASH, "-c", script], env=dict(os.environ), capture_output=True, text=True,
-            timeout=30, check=False,
-        )
+        result = _run_bash_script(script, dict(os.environ))
         assert result.returncode == 0, (
             f"the extracted housekeeping block itself failed to run "
             f"(REMEMBER_DIR={remember_dir!r}, OSTYPE={ostype!r})\n"
@@ -682,4 +708,238 @@ _run_housekeeping_block
             "an ordinary forward-slash REMEMBER_DIR must still be swept "
             "after the fix -- the normalization must be a no-op here, not "
             "a regression\n" + _dump_dir(autonomous)
+        )
+
+
+class TestHousekeepingSweepIsForkFree:
+    """#914: the age-keyed sweep forked a `stat` subshell AND a
+    `_remember_date` (date) subshell for EVERY surviving file, on every
+    flush that reached this point -- on Windows Git Bash, where a single
+    fork costs 50-300ms+ (#511's own measurement), a directory of ~1,200
+    files turned one sweep into ~4,000 process starts and ~140s of wall
+    time, recurring about every 15 minutes in the reporter's own session.
+
+    The fix reads the clock once, before the loop, and builds a single
+    reference file whose mtime is the retention cutoff; `[ "$f" -ot
+    "$ref" ]` is a bash builtin and forks nothing. This asserts the
+    actual claim #914 measured -- PROCESS STARTS -- not just that the
+    sweep still reclaims/retains correctly: a behavior-only test would
+    pass unchanged whether the loop forks once per sweep or twice per
+    file, and #914 is entirely about which of those two it does.
+    """
+
+    def _run_extracted_block_counting_forks(
+        self, autonomous: Path, remember_dir: str, *,
+        retention_days: int = 7, bin_dir: Path, counter: Path,
+    ):
+        block = TestHousekeepingGlobIsPortableAcrossSeparators._extract_housekeeping_block()
+        script = f"""
+set -u
+config() {{ printf '%s\n' '{retention_days}'; }}
+log() {{ :; }}
+_remember_date() {{ date "$@"; }}
+REMEMBER_DIR={shlex.quote(remember_dir)}
+{block}
+"""
+        env = dict(os.environ)
+        env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
+        env["REMEMBER_FORK_COUNTER"] = str(counter)
+        result = _run_bash_script(script, env)
+        assert result.returncode == 0, (
+            f"the extracted housekeeping block itself failed to run\n"
+            f"stdout={result.stdout}\nstderr={result.stderr}"
+        )
+
+    def test_must_fire_stat_and_date_fork_count_does_not_scale_with_file_count(self, tmp_path):
+        autonomous = tmp_path / ".remember" / "logs" / "autonomous"
+        autonomous.mkdir(parents=True)
+        eight_days_ago = time.time() - (8 * 24 * 3600)
+        stale_files = []
+        for i in range(8):
+            stale = autonomous / f"session-end-00000{i}-99999.log"
+            stale.write_text("12:00:00 [session-end] flush started\n")
+            os.utime(stale, (eight_days_ago, eight_days_ago))
+            stale_files.append(stale)
+        # Positive control in the SAME run: one fresh file must survive,
+        # exactly as test_must_fire_a_fresh_nonempty_log_survives_the_same_sweep
+        # pins for the end-to-end path -- without this, a sweep that just
+        # deleted the whole directory would also report a fork count of 0.
+        fresh = autonomous / "session-end-000009-99999.log"
+        fresh.write_text("12:00:00 [session-end] flush started\n")
+
+        bin_dir = tmp_path / "fork-counter-bin"
+        bin_dir.mkdir()
+        counter = tmp_path / "fork-count.txt"
+        counter.write_text("")
+        real_stat = shutil.which("stat")
+        real_date = shutil.which("date")
+        assert real_stat and real_date, "test environment needs real stat/date on PATH"
+        for name, real in (("stat", real_stat), ("date", real_date)):
+            wrapper = bin_dir / name
+            wrapper.write_text(
+                "#!/bin/sh\n"
+                f'echo {name} >> "$REMEMBER_FORK_COUNTER"\n'
+                f'exec {shlex.quote(real)} "$@"\n'
+            )
+            wrapper.chmod(0o755)
+
+        self._run_extracted_block_counting_forks(
+            autonomous, str(tmp_path / ".remember"), bin_dir=bin_dir, counter=counter,
+        )
+
+        for stale in stale_files:
+            assert not stale.exists(), (
+                f"{stale.name} (8 days old) survived the sweep\n" + _dump_dir(autonomous)
+            )
+        assert fresh.exists(), (
+            "the fresh (just-written) log was reclaimed by the sweep -- "
+            "positive control failed\n" + _dump_dir(autonomous)
+        )
+
+        fork_count = len([l for l in counter.read_text().splitlines() if l])
+        # Before the fix: 9 files x (1 stat + 1 date) = 18 forks, growing
+        # linearly with file count. After the fix: one `date` read before
+        # the loop, independent of file count. A ceiling well under the
+        # file count (9) still clearly distinguishes O(1) from O(n)
+        # without pinning an exact count that would break on the next
+        # portable tweak to the fast path.
+        assert fork_count < 9, (
+            f"stat/date were invoked {fork_count} times reclaiming 8 of 9 "
+            f"files -- the sweep is still forking per file instead of "
+            f"reading the clock once and comparing with a builtin "
+            f"(#914)\ncounter contents: {counter.read_text()!r}"
+        )
+
+
+class TestHousekeepingSweepFallbackAndEdgeCases:
+    """#914 self-review (Explore round 1): two things the fast-path tests
+    above cannot exercise because they only ever run on a machine where
+    the fast path succeeds.
+    """
+
+    def _run_extracted_block_with_path_override(
+        self, autonomous: Path, remember_dir: str, *,
+        retention_days, extra_path_dir: Path | None = None,
+    ):
+        """Same shape as TestHousekeepingGlobIsPortableAcrossSeparators's
+        own `_run_extracted_block`, but with the retention-days value
+        passed through as given (no implicit str()/int() coercion that
+        would hide a config value shaped like "08") and an optional
+        directory prepended to PATH, ahead of the real `mktemp`/`touch` --
+        used below to force the fast path's own reference-file build to
+        fail without touching the block itself.
+        """
+        block = TestHousekeepingGlobIsPortableAcrossSeparators._extract_housekeeping_block()
+        script = f"""
+set -u
+config() {{ printf '%s\n' {shlex.quote(str(retention_days))}; }}
+log() {{ :; }}
+_remember_date() {{ date "$@"; }}
+CLEANUP_FILES=()
+REMEMBER_DIR={shlex.quote(remember_dir)}
+{block}
+"""
+        env = dict(os.environ)
+        if extra_path_dir is not None:
+            env["PATH"] = f"{extra_path_dir}{os.pathsep}{env.get('PATH', '')}"
+        return _run_bash_script(script, env)
+
+    def test_must_fire_zero_padded_retention_days_does_not_misfire_the_fast_path(self, tmp_path):
+        """Self-review finding: the digits-only sanitizer in
+        save-session.sh accepts a config value like "08" unchanged (it
+        rejects non-digit characters, not leading zeros), and bash
+        arithmetic treats an unprefixed leading-zero literal as octal --
+        where 8/9 are not valid octal digits. Without `10#` on
+        `_AUTONOMOUS_LOG_RETENTION_DAYS` too (only the clock read had it),
+        `_remember_auto_cutoff=$(( 10#$_remember_auto_now -
+        _AUTONOMOUS_LOG_RETENTION_DAYS * 86400 ))` aborts with "value too
+        great for base" for this exact, human-plausible config value --
+        permanently defeating the fast path (and spamming stderr on every
+        flush) for anyone who writes "08" rather than "8".
+        """
+        autonomous = tmp_path / ".remember" / "logs" / "autonomous"
+        autonomous.mkdir(parents=True)
+        # Clearly past an 8-day window (10 days, not exactly 8) -- at the
+        # boundary itself the sweep's own semantics (age STRICTLY greater
+        # than the retention window, matching the pre-existing `-gt`
+        # comparison this fast path replaces) keep the file, so a file
+        # exactly as old as the window would pass vacuously here too.
+        ten_days_ago = time.time() - (10 * 24 * 3600)
+        stale = autonomous / "session-end-000000-11111.log"
+        stale.write_text("12:00:00 [session-end] flush started\n")
+        os.utime(stale, (ten_days_ago, ten_days_ago))
+        one_day_ago = time.time() - (1 * 24 * 3600)
+        fresh = autonomous / "session-end-000000-22222.log"
+        fresh.write_text("12:00:00 [session-end] flush started\n")
+        os.utime(fresh, (one_day_ago, one_day_ago))
+
+        result = self._run_extracted_block_with_path_override(
+            autonomous, str(tmp_path / ".remember"), retention_days="08",
+        )
+
+        assert result.returncode == 0, (
+            f"the extracted housekeeping block itself failed to run with "
+            f"retention_days='08'\nstdout={result.stdout}\nstderr={result.stderr}"
+        )
+        assert "value too great for base" not in result.stderr, (
+            "retention_days='08' crashed the cutoff arithmetic with a "
+            "bash 'value too great for base' error (octal "
+            "misinterpretation of a leading zero) -- #914's own fast "
+            f"path can never engage for this config value\nstderr={result.stderr!r}"
+        )
+        assert not stale.exists(), (
+            "a 10-day-old log survived with retention_days='08' -- the "
+            "sweep must still reclaim past-window files even when the "
+            "fast path's own arithmetic degrades\n" + _dump_dir(autonomous)
+        )
+        assert fresh.exists(), (
+            "a 1-day-old log was reclaimed with retention_days='08' -- "
+            "positive control failed\n" + _dump_dir(autonomous)
+        )
+
+    def test_must_fire_fallback_loop_still_reclaims_when_reference_file_cannot_be_built(self, tmp_path):
+        """Self-review finding: every test above only ever runs the FAST
+        path (the real `mktemp`/`touch -d` succeed on every CI platform
+        this suite runs on), so nothing exercises the reintroduced
+        per-file stat()+date() fallback loop -- including the rename of
+        its own loop variable (`_remember_auto_now` ->
+        `_remember_auto_file_now`) made in the same diff that added the
+        fast path. A `mktemp` that always fails forces `_remember_auto_ref`
+        to stay empty, the documented trigger for the fallback.
+        """
+        autonomous = tmp_path / ".remember" / "logs" / "autonomous"
+        autonomous.mkdir(parents=True)
+        eight_days_ago = time.time() - (8 * 24 * 3600)
+        stale = autonomous / "session-end-000000-33333.log"
+        stale.write_text("12:00:00 [session-end] flush started\n")
+        os.utime(stale, (eight_days_ago, eight_days_ago))
+        one_day_ago = time.time() - (1 * 24 * 3600)
+        fresh = autonomous / "session-end-000000-44444.log"
+        fresh.write_text("12:00:00 [session-end] flush started\n")
+        os.utime(fresh, (one_day_ago, one_day_ago))
+
+        broken_bin = tmp_path / "broken-mktemp-bin"
+        broken_bin.mkdir()
+        fake_mktemp = broken_bin / "mktemp"
+        fake_mktemp.write_text("#!/bin/sh\nexit 1\n")
+        fake_mktemp.chmod(0o755)
+
+        result = self._run_extracted_block_with_path_override(
+            autonomous, str(tmp_path / ".remember"), retention_days=7,
+            extra_path_dir=broken_bin,
+        )
+
+        assert result.returncode == 0, (
+            f"the extracted housekeeping block failed to run with mktemp "
+            f"forced to fail\nstdout={result.stdout}\nstderr={result.stderr}"
+        )
+        assert not stale.exists(), (
+            "an 8-day-old log survived the FALLBACK loop (mktemp forced "
+            "to fail, so the fast path's own reference file could never "
+            "be built) -- the per-file stat()+date() comparison this "
+            "diff kept as a fallback is broken\n" + _dump_dir(autonomous)
+        )
+        assert fresh.exists(), (
+            "a 1-day-old log was reclaimed by the fallback loop -- "
+            "positive control failed\n" + _dump_dir(autonomous)
         )
