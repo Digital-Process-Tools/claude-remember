@@ -52,7 +52,11 @@ _remember_slug_run_python() {
 # so we match the actual directory Claude Code created.
 # The sed program for the slug, assembled ONCE at source time. It used to be
 # built inside session_dir_slug, where every $(printf) forked a subshell — ~20
-# of them on a function the post-tool hook calls on every single tool call.
+# of them on a function the post-tool hook used to call on every single tool
+# call. Since #913, post-tool-hook.sh caches its own resolved SESSION_DIR and
+# calls this only on a cache miss (once per project/config/HOME triple, not
+# once per tool call) -- the per-call COST this comment describes is
+# unchanged, only how OFTEN that cost is now paid.
 # #665 (part of #660) removes those forks too: 22 x $(printf '\NNN') here
 # each forked a subshell just to capture one byte bash's own ANSI-C quoting
 # (dollar-single-quote octal escapes -- a lexer-level substitution, no
@@ -200,8 +204,11 @@ _remember_should_check_utf8() {
 }
 
 # The two alphabets, for the drive-letter fold below. Held as constants so the
-# fold is a pair of parameter expansions and not a fork: session_dir_slug runs
-# on every single tool call.
+# fold is a pair of parameter expansions and not a fork: session_dir_slug used
+# to run on every single tool call via post-tool-hook.sh; since #913 that
+# caller only reaches it on a cache miss, but the other sourcing site
+# (session-start-hook.sh, once per session) and the cost of a fork here are
+# both unchanged, so the no-fork discipline still earns its keep.
 #
 # `${x,,}` would be one expansion and is what this used to use — but it is bash
 # 4 syntax, a runtime "bad substitution" on macOS's bash 3.2. The CYGPATH_STUB

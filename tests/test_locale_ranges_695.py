@@ -186,7 +186,9 @@ ALLOWLIST: dict[tuple[str, int], str] = {
     # #898 round 7: the inline jq program and the inline Python fallback in
     # log.sh's config() flattener moved to scripts/cfg_flatten.jq and
     # scripts/cfg_flatten.py, so neither range needs an exemption here.
-    ("scripts/lib-slug.sh", 90):
+    # Shifted +4 by #913's two stale-comment fixes above this array (no new
+    # bracket range added -- same pre-existing allowlisted entry).
+    ("scripts/lib-slug.sh", 94):
         "a member of the _REMEMBER_SLUG_SED array, only ever invoked as "
         "`LC_ALL=C sed`. The locale is forced at the call "
         "site, which this scanner cannot see from the definition; "
@@ -198,15 +200,19 @@ ALLOWLIST: dict[tuple[str, int], str] = {
     # re-checked rather than quietly assumed forever.
     ("scripts/agy-stop-hook.sh", 159): _CASE,
     ("scripts/post-tool-hook.sh", 449): _CASE,
-    ("scripts/post-tool-hook.sh", 643): _CASE,
-    ("scripts/post-tool-hook.sh", 686): _CASE,
-    ("scripts/post-tool-hook.sh", 742): _CASE,
+    # Lines shifted by #913's SESSION_DIR cache sidecar, inserted above
+    # these three (session-dir-cache does not touch SESSION_ID or add a new
+    # bracket range of its own -- these are the same three pre-existing
+    # allowlisted ranges, re-pinned to where they now live).
+    ("scripts/post-tool-hook.sh", 723): _CASE,
+    ("scripts/post-tool-hook.sh", 766): _CASE,
+    ("scripts/post-tool-hook.sh", 822): _CASE,
     ("scripts/session-end-hook.sh", 201): _CASE,
     ("scripts/session-end-hook.sh", 209): _CASE,
     ("scripts/session-start-hook.sh", 289): _CASE,
     ("scripts/write-handoff.sh", 87): _CASE,
     ("scripts/doctor.sh", 70): _CASE,
-    ("scripts/lib-slug.sh", 430): _CASE,
+    ("scripts/lib-slug.sh", 437): _CASE,
 }
 
 
