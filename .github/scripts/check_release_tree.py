@@ -271,6 +271,7 @@ NETWORK_WORD_ALLOWLIST = frozenset({
     "scripts/resolve-paths.sh", "scripts/save-session.sh", "scripts/session-end-hook.sh",
     "scripts/session-start-hook.sh", "scripts/user-prompt-hook.sh",
     "hooks.d/after_save/50-git-backup.sh", "hooks.d/before_session_start/50-git-restore.sh",
+    "hooks.d/after_save/60-git-reconcile.sh",
 })
 
 # #898 round 2: `[ "$VAR" = "${BASH_SOURCE[0]}" ] && VAR="."` -- jit-context's

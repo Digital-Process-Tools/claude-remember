@@ -1,0 +1,355 @@
+#!/bin/bash
+# ============================================================================
+# 60-git-reconcile.sh — optional two-way reconcile for a memory store written
+# from two machines (#903)
+# ============================================================================
+#
+# DESCRIPTION
+#   Off by default (config key: git_reconcile.enabled). 50-git-backup.sh keeps
+#   its commit-and-push-only promise from #253, and 50-git-restore.sh stays
+#   fast-forward only -- a diverged store is still refused and reported by
+#   that hook. This file is the ONLY place a rebase happens in this plugin,
+#   and only when a human has opted in to it.
+#
+#   Runs after 50-git-backup.sh on the after_save dispatch (50- then 60-, same
+#   dispatch pass). When enabled:
+#     - fetches the configured remote/branch
+#     - behind only: fast-forwards (the backup half already pushes "ahead
+#       only"; this covers the case a store with git_restore.enabled=false
+#       would otherwise never catch up on until the next manual pull)
+#     - ahead AND behind (diverged): rebases local commits onto the remote
+#       tip and pushes, with one retry if the remote moved again between the
+#       fetch and the push
+#     - a conflict during the rebase: ABORTS the rebase, changes nothing
+#       else, and reports the conflicting file names through a
+#       git-reconcile-notice the same way 50-git-restore.sh's diverged notice
+#       works
+#
+#   Never resets, never force-pushes, never creates a merge commit -- there is
+#   no `reset --hard`, `push --force` or `merge` (non-ff-only) anywhere in
+#   this file, and a test asserts that stays true.
+#
+#   No-op when:
+#     - git_reconcile.enabled is not "true"
+#     - REMEMBER_DIR is in legacy mode, REPO_ROOT is not the toplevel of its
+#       own repo, or REPO_ROOT is the project's own repo (same guards as
+#       50-git-backup.sh, #138/#260)
+#     - HEAD is detached and no branch is configured
+#     - another instance of this hook holds its own lock
+#     - this slug's consolidation lock is held -- recent.md and archive.md are
+#       being rewritten wholesale right now, and reconcile must never touch
+#       the tree while that happens (shares consolidation's own lock dir,
+#       scripts/run-consolidation.sh's LOCK_DIR)
+#     - nothing is behind at all (50-git-backup.sh already pushes "ahead only")
+#
+# RUNTIME ENV (provided by save-session.sh via dispatch)
+#   PROJECT_DIR, PIPELINE_DIR, REMEMBER_DIR, REMEMBER_PROJECT
+#
+# ============================================================================
+
+set -u  # not -e -- we never want to fail loudly here
+
+# ── Source logging (log(), config(), report_error()) and the lock primitive
+# consolidation itself uses, so this file can share it rather than invent a
+# second one (scripts/lib-lock.sh, #182).
+source "$PIPELINE_DIR/scripts/log.sh"
+source "$PIPELINE_DIR/scripts/lib-lock.sh"
+
+# ── Off by default ───────────────────────────────────────────────────────────
+RECONCILE_ENABLED=$(config ".git_reconcile.enabled" "false")
+[ "$RECONCILE_ENABLED" = "true" ] || exit 0
+
+# ── Activation guard — identical shape to 50-git-backup.sh ──────────────────
+REPO_ROOT=$(dirname "$REMEMBER_DIR")
+SLUG=$(basename "$REMEMBER_DIR")
+
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+
+[ "$REPO_ROOT" = "$PROJECT_DIR" ] && exit 0
+
+_grc_realpath() {
+    ( cd "$1" 2>/dev/null && pwd -P ) || printf '%s' "$1"
+}
+
+TOPLEVEL=$(git -C "$REPO_ROOT" rev-parse --show-toplevel 2>/dev/null) || exit 0
+if [ "$(_grc_realpath "$TOPLEVEL")" != "$(_grc_realpath "$REPO_ROOT")" ]; then
+    log "git-reconcile" "declined: $REPO_ROOT is not the toplevel of its git repository (that is $TOPLEVEL) -- nothing here is reconciled."
+    exit 0
+fi
+
+_grc_common_dir() {
+    local LC_ALL=C
+    local _d="$1" _out
+    [ -d "$_d" ] || return 1
+    _out=$(git -C "$_d" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || _out=""
+    if [ -z "$_out" ]; then
+        _out=$(git -C "$_d" rev-parse --git-common-dir 2>/dev/null) || return 1
+        [ -n "$_out" ] || return 1
+        if [ "${_out#/}" = "$_out" ] && [ "${_out#[A-Za-z]:[/\]}" = "$_out" ]; then
+            _out="$_d/$_out"
+        fi
+    fi
+    _grc_realpath "$_out"
+}
+
+PROJECT_COMMON_DIR=$(_grc_common_dir "$PROJECT_DIR") || PROJECT_COMMON_DIR=""
+BACKUP_COMMON_DIR=$(_grc_common_dir "$REPO_ROOT") || BACKUP_COMMON_DIR=""
+if [ -n "$PROJECT_COMMON_DIR" ] && [ "$PROJECT_COMMON_DIR" = "$BACKUP_COMMON_DIR" ]; then
+    debug_enabled 0 && log "git-reconcile" "REPO_ROOT is the project repo (worktree/legacy), skip"
+    exit 0
+fi
+
+# ── Where this hook's own lock/state lives — shared location with backup/restore
+if [ -n "$BACKUP_COMMON_DIR" ] && mkdir -p "$BACKUP_COMMON_DIR/remember" 2>/dev/null; then
+    RC_STATE_DIR="$BACKUP_COMMON_DIR/remember"
+else
+    RC_STATE_DIR="$REPO_ROOT"
+fi
+
+# ── Config snapshot — read BEFORE backgrounding, same reasoning as #135 on
+# the backup half: config() quietly returns a default once REMEMBER_CONFIG's
+# EXIT trap has deleted it, which races a slow reconcile started in the parent.
+GIT_RECONCILE_REMOTE=$(config ".git_reconcile.remote" "")
+GIT_RECONCILE_BRANCH=$(config ".git_reconcile.branch" "")
+[ -n "$GIT_RECONCILE_REMOTE" ] || GIT_RECONCILE_REMOTE=$(config ".git_backup.remote" "")
+[ -n "$GIT_RECONCILE_BRANCH" ] || GIT_RECONCILE_BRANCH=$(config ".git_backup.branch" "")
+
+# #723 (sibling site, same finding class as backup/restore): config.json is
+# git-tracked and can be a poisoned copy on a shared store, so a
+# git_reconcile.remote/.branch (or the git_backup.* fallback) read from it is
+# untrusted for anything that reaches git's argv. Same two checks as the other
+# two hooks: a leading '-' is parsed as an option, and ':' or '/' make the
+# value a transport URL/refspec rather than a plain name this repo trusts.
+printf -v _dq '\042'
+if [ "${GIT_RECONCILE_REMOTE#-}" != "$GIT_RECONCILE_REMOTE" ] \
+    || [ "${GIT_RECONCILE_REMOTE#*:}" != "$GIT_RECONCILE_REMOTE" ] \
+    || [ "${GIT_RECONCILE_REMOTE#*/}" != "$GIT_RECONCILE_REMOTE" ]; then
+    report_error "git-reconcile" "WARNING: configured git_reconcile.remote (or git_backup.remote) '$GIT_RECONCILE_REMOTE' is not a plain remote name (leading '-', or contains ':' or '/') -- refusing to use it, falling back to the branch's push target. Treat this as untrusted on a shared store."
+    GIT_RECONCILE_REMOTE=""
+fi
+if [ "${GIT_RECONCILE_BRANCH#-}" != "$GIT_RECONCILE_BRANCH" ] || [[ "$GIT_RECONCILE_BRANCH" == *:* ]]; then
+    report_error "git-reconcile" "WARNING: configured git_reconcile.branch (or git_backup.branch) '$GIT_RECONCILE_BRANCH' starts with '-' or contains ':' -- refusing to use it as a git operand (a colon makes it a src:dst refspec, not a branch name)."
+    GIT_RECONCILE_BRANCH=""
+fi
+
+# Which remote a bare push/fetch would actually use -- same derivation as
+# 50-git-backup.sh's REMOTE_NAME (#257): @{push}, then branch.<name>.remote,
+# then origin as the last resort.
+REMOTE_NAME="$GIT_RECONCILE_REMOTE"
+if [ -z "$REMOTE_NAME" ]; then
+    RC_CAND=$(git -C "$REPO_ROOT" rev-parse --abbrev-ref --symbolic-full-name '@{push}' 2>/dev/null) || RC_CAND=""
+    RC_CAND="${RC_CAND%%/*}"
+    if [ -z "$RC_CAND" ]; then
+        RC_HEAD_BRANCH=$(git -C "$REPO_ROOT" symbolic-ref --short --quiet HEAD 2>/dev/null) || RC_HEAD_BRANCH=""
+        if [ -n "$RC_HEAD_BRANCH" ]; then
+            RC_CAND=$(git -C "$REPO_ROOT" config --get "branch.$RC_HEAD_BRANCH.remote" 2>/dev/null) || RC_CAND=""
+        fi
+    fi
+    if [ -n "$RC_CAND" ] && git -C "$REPO_ROOT" remote get-url "$RC_CAND" >/dev/null 2>&1; then
+        REMOTE_NAME="$RC_CAND"
+    fi
+fi
+[ -n "$REMOTE_NAME" ] || REMOTE_NAME=origin
+
+BRANCH_NAME="$GIT_RECONCILE_BRANCH"
+if [ -z "$BRANCH_NAME" ]; then
+    BRANCH_NAME=$(git -C "$REPO_ROOT" symbolic-ref --short --quiet HEAD 2>/dev/null) || BRANCH_NAME=""
+fi
+if [ -z "$BRANCH_NAME" ]; then
+    log "git-reconcile" "HEAD is detached and git_reconcile.branch/.git_backup.branch is unset -- refusing to guess which branch to reconcile"
+    exit 0
+fi
+
+# ── This hook's own lock — prevents two reconcile instances (e.g. two slugs
+# saving close together) from racing a fetch/rebase/push on the same
+# REPO_ROOT. A rebase/push sequence is not the idempotent, disjoint-subtree
+# case 50-git-backup.sh's own flock/noclobber comment relies on to call that
+# race "benign" -- a second instance can abort/rewrite history the first is
+# mid-operation on -- so this reuses lib-lock.sh's mkdir+stale-PID-takeover
+# primitive (already sourced above for the consolidation lock) rather than
+# repeat 50-git-backup.sh's flock/noclobber pattern.
+#
+# ACQUIRED HERE, in the foreground -- the directory must exist before this
+# process exits so a concurrent instance (or a test) checking right away sees
+# it immediately -- but the PID RECORDED inside it is corrected below, right
+# after the real worker is forked. Recording the FOREGROUND's own pid here
+# and leaving it would be wrong: this process forks the background subshell
+# and exits within milliseconds, so a second invocation's staleness check
+# would find that pid already dead and wrongly declare the lock stale while
+# the real work is still running in the (differently-pid'd) subshell. The
+# worker's pid is written into the SAME lock dir once `$!` is known, closing
+# that window to the few shell instructions between the two -- the same
+# microsecond-scale window lib-lock.sh's own `_lock_try_adopt` already
+# accepts elsewhere for exactly this "holder writes its pid a moment after
+# creating the directory" shape.
+RC_LOCK_DIR="$RC_STATE_DIR/git-reconcile.lock"
+if ! lock_acquire "$RC_LOCK_DIR" 0; then
+    debug_enabled 0 && log "git-reconcile" "another reconcile instance holds the lock for $REPO_ROOT, skip"
+    exit 0
+fi
+
+# Lock dir consolidation itself acquires -- scripts/run-consolidation.sh's own
+# LOCK_DIR, "${REMEMBER_DIR}/tmp/consolidation.lock". Checked (and HELD for the
+# duration below) rather than merely read, so consolidation cannot start
+# mid-reconcile either: recent.md and archive.md are rewritten wholesale by
+# consolidation, and a rebase touching the working tree while that is in
+# flight is exactly the corruption the maintainer's review asked this file to
+# rule out.
+CONSOLIDATION_LOCK_DIR="$REMEMBER_DIR/tmp/consolidation.lock"
+
+# ── Background subshell — never blocks save-session.sh ───────────────────────
+(
+    _grc_cleanup() {
+        lock_release "$CONSOLIDATION_LOCK_DIR" >/dev/null 2>&1 || true
+        lock_release "$RC_LOCK_DIR" >/dev/null 2>&1 || true
+    }
+    trap _grc_cleanup EXIT
+
+    # Second-pass review (#903): the lock dir already exists (the foreground
+    # created it via lock_acquire before forking this subshell, so a
+    # concurrent checker sees it immediately), but its recorded holder is
+    # still the FOREGROUND's own pid until corrected. Correcting it from OUT
+    # THERE, after `$!` is known, raced this subshell's own cleanup trap: a
+    # fast decline (e.g. the consolidation-lock check just below, a couple of
+    # shell builtins away) could run `lock_release` before that outside write
+    # landed, find the pid still the foreground's, fail the self-id match,
+    # and leave the lock held by a dead pid until the next instance's stale-
+    # takeover logic recovers it. Writing our OWN id, from IN HERE, as the
+    # very first thing, needs no such ordering: by the time any exit path
+    # (including this one) reaches the trap, the recorded holder is already
+    # correct, unconditionally.
+    _lock_self_set
+    echo "$_LOCK_SELF" > "$RC_LOCK_DIR/pid" 2>/dev/null || true
+
+    unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+
+    if ! lock_acquire "$CONSOLIDATION_LOCK_DIR" 0; then
+        log "git-reconcile" "declined: consolidation holds the lock for $SLUG -- recent.md/archive.md are being rewritten right now. Will try again next save."
+        exit 0
+    fi
+
+    export GIT_TERMINAL_PROMPT=0
+    export GIT_ASKPASS=
+    export SSH_ASKPASS=
+
+    REMOTE_REF="refs/remotes/$REMOTE_NAME/$BRANCH_NAME"
+    CONFLICT_STATE_FILE="$RC_STATE_DIR/git-reconcile-conflict"
+
+    git -C "$REPO_ROOT" -c core.askPass= fetch --quiet --no-tags -- "$REMOTE_NAME" "$BRANCH_NAME" >/dev/null 2>&1
+    if [ $? -ne 0 ]; then
+        log "git-reconcile" "fetch from $REMOTE_NAME/$BRANCH_NAME failed or was unreachable -- no-op, will retry next save"
+        exit 0
+    fi
+
+    REMOTE_HEAD=$(git -C "$REPO_ROOT" rev-parse --verify --quiet "$REMOTE_REF" 2>/dev/null) || REMOTE_HEAD=""
+    if [ -z "$REMOTE_HEAD" ]; then
+        log "git-reconcile" "no fetched ref $REMOTE_REF -- nothing to reconcile against. Check git_reconcile.remote / git_reconcile.branch."
+        exit 0
+    fi
+
+    COUNTS=$(git -C "$REPO_ROOT" rev-list --left-right --count "HEAD...$REMOTE_REF" 2>/dev/null) || COUNTS=""
+    AHEAD="${COUNTS%%	*}"
+    BEHIND="${COUNTS##*	}"
+    if [ -z "$AHEAD" ] || [ "${AHEAD#*[!0-9]}" != "$AHEAD" ]; then AHEAD=""; fi
+    if [ -z "$BEHIND" ] || [ "${BEHIND#*[!0-9]}" != "$BEHIND" ]; then BEHIND=""; fi
+    if [ -z "$AHEAD" ] || [ -z "$BEHIND" ]; then
+        log "git-reconcile" "WARNING: could not compare HEAD with $REMOTE_REF -- no-op"
+        exit 0
+    fi
+
+    if [ "$BEHIND" -eq 0 ]; then
+        log "git-reconcile" "nothing to reconcile -- $AHEAD commit(s) ahead, 0 behind (50-git-backup.sh already pushes those)"
+        rm -f "$CONFLICT_STATE_FILE" 2>/dev/null || true
+        exit 0
+    fi
+
+    if [ "$AHEAD" -eq 0 ]; then
+        # Cleanly behind -- fast-forward. --ff-only refuses rather than
+        # creating a merge commit or overwriting a modified working tree;
+        # same safety property as 50-git-restore.sh's own fast-forward.
+        if git -C "$REPO_ROOT" merge --ff-only "$REMOTE_REF" >/dev/null 2>&1; then
+            log "git-reconcile" "fast-forwarded $BEHIND commit(s) from $REMOTE_NAME/$BRANCH_NAME"
+            rm -f "$CONFLICT_STATE_FILE" 2>/dev/null || true
+        else
+            log "git-reconcile" "WARNING: fast-forward of $BEHIND commit(s) from $REMOTE_NAME/$BRANCH_NAME was refused by git -- uncommitted local changes most likely. No-op."
+        fi
+        exit 0
+    fi
+
+    # ── Diverged: rebase onto the remote tip, then push. One retry if the
+    # remote moves again between the fetch above and this push.
+    _grc_conflict_files() {
+        git -C "$REPO_ROOT" diff --name-only --diff-filter=U 2>/dev/null | tr '\n' ';'
+    }
+
+    _grc_rebase_in_progress() {
+        # --path-format=absolute is required here, not optional (confirmed by
+        # a real reproduction, not reasoned): --git-path alone returns a path
+        # relative to the CALLING process's cwd, which -C does not change --
+        # so from a different cwd the check silently looked in the wrong
+        # place, reported "no conflict", and left a stray rebase-merge
+        # directory behind on disk. Same mitigation _grc_common_dir already
+        # applies to --git-common-dir, extended to this call site.
+        local _rd1 _rd2
+        _rd1=$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-path rebase-merge 2>/dev/null) || _rd1=""
+        _rd2=$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-path rebase-apply 2>/dev/null) || _rd2=""
+        if [ -n "$_rd1" ] && [ -d "$_rd1" ]; then
+            return 0
+        fi
+        if [ -n "$_rd2" ] && [ -d "$_rd2" ]; then
+            return 0
+        fi
+        return 1
+    }
+
+    _grc_report_conflict() {
+        local _files="$1" _attempt="$2"
+        git -C "$REPO_ROOT" rebase --abort >/dev/null 2>&1 || true
+        log "git-reconcile" "ERROR: reconcile CONFLICT ($_attempt) rebasing onto $REMOTE_NAME/$BRANCH_NAME -- aborted, the tree is unchanged. Conflicting file(s): ${_files%;}. Resolve by hand: git -C ${_dq}$REPO_ROOT${_dq} rebase ${_dq}$REMOTE_REF${_dq}"
+        mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null || true
+        printf '%s\n' "remember: git reconcile hit a CONFLICT rebasing onto $REMOTE_NAME/$BRANCH_NAME. Nothing was changed -- the rebase was aborted. Conflicting file(s): ${_files%;}. Resolve by hand: git -C ${_dq}$REPO_ROOT${_dq} rebase ${_dq}$REMOTE_REF${_dq}" \
+            > "$REMEMBER_DIR/tmp/git-reconcile-notice" 2>/dev/null || true
+        echo 1 > "$CONFLICT_STATE_FILE" 2>/dev/null || true
+    }
+
+    git -C "$REPO_ROOT" rebase "$REMOTE_REF" >/dev/null 2>/dev/null
+    REBASE_RC=$?
+    if [ "$REBASE_RC" -eq 0 ]; then
+        if git -C "$REPO_ROOT" push --porcelain -- "$REMOTE_NAME" "$BRANCH_NAME" >/dev/null 2>/dev/null; then
+            log "git-reconcile" "rebased $AHEAD local commit(s) onto $REMOTE_NAME/$BRANCH_NAME ($BEHIND commit(s)) and pushed"
+            rm -f "$CONFLICT_STATE_FILE" 2>/dev/null || true
+            exit 0
+        fi
+        # Rebase landed cleanly, but the push was rejected: the remote moved
+        # again between the fetch above and this push. One retry.
+        git -C "$REPO_ROOT" -c core.askPass= fetch --quiet --no-tags -- "$REMOTE_NAME" "$BRANCH_NAME" >/dev/null 2>&1
+        REMOTE_HEAD2=$(git -C "$REPO_ROOT" rev-parse --verify --quiet "$REMOTE_REF" 2>/dev/null) || REMOTE_HEAD2=""
+        if [ -n "$REMOTE_HEAD2" ]; then
+            git -C "$REPO_ROOT" rebase "$REMOTE_REF" >/dev/null 2>/dev/null
+            REBASE_RC2=$?
+            if [ "$REBASE_RC2" -eq 0 ] && git -C "$REPO_ROOT" push --porcelain -- "$REMOTE_NAME" "$BRANCH_NAME" >/dev/null 2>/dev/null; then
+                log "git-reconcile" "rebased and pushed onto $REMOTE_NAME/$BRANCH_NAME on retry (remote moved between fetch and push)"
+                rm -f "$CONFLICT_STATE_FILE" 2>/dev/null || true
+                exit 0
+            fi
+            if [ "$REBASE_RC2" -ne 0 ] && _grc_rebase_in_progress; then
+                _grc_report_conflict "$(_grc_conflict_files)" retry
+                exit 0
+            fi
+        fi
+        log "git-reconcile" "push deferred after retry (will try again next save) -- $REMOTE_NAME/$BRANCH_NAME moved again or the transport was unreachable"
+        exit 0
+    fi
+
+    # Rebase itself failed. A conflict leaves .git/rebase-merge or
+    # rebase-apply in place; anything else (e.g. the rebase command failing to
+    # start at all) is a no-op rather than a tree left half-rebased.
+    if _grc_rebase_in_progress; then
+        _grc_report_conflict "$(_grc_conflict_files)" first-attempt
+    else
+        log "git-reconcile" "WARNING: git rebase on $REMOTE_REF failed to start in $REPO_ROOT -- no-op, nothing was changed. Run it by hand to see git's own reason."
+    fi
+) </dev/null >/dev/null 2>&1 &
+disown $! 2>/dev/null || true
+
+exit 0

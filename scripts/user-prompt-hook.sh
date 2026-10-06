@@ -366,8 +366,19 @@ declare -F dispatch >/dev/null 2>&1 || dispatch() { :; }
 #                       locally and going nowhere, and no retry will fix it.
 #   git-restore-notice  before_session_start/50-git-restore.sh: the store has
 #                       DIVERGED from its backup remote, so the memory loaded
-#                       this session is missing what the other machine wrote,
-#                       and nothing will merge or rebase it for you.
+#                       this session is missing what the other machine wrote.
+#                       Nothing here will merge or rebase it for you -- UNLESS
+#                       git_reconcile.enabled is also set, in which case the
+#                       next after_save (60-git-reconcile.sh) rebases and
+#                       pushes automatically, or reports its own conflict
+#                       through git-reconcile-notice below.
+#   git-reconcile-notice
+#                       after_save/60-git-reconcile.sh (#903), only reachable
+#                       when git_reconcile.enabled=true: a real CONFLICT
+#                       during the automatic rebase onto the remote tip. The
+#                       rebase was aborted and nothing was changed -- this
+#                       names the conflicting file(s) so they can be resolved
+#                       by hand.
 #   case-divergence-notice
 #                       the SessionStart hook: this store is known by a second
 #                       spelling that differs only in case (#298). Harmless on
@@ -381,7 +392,7 @@ declare -F dispatch >/dev/null 2>&1 || dispatch() { :; }
 # one is deliberately cheap and deliberately rare — this channel interrupts a
 # human mid-thought, and one that fires often is one that gets tuned out.
 NOTICE_MSG=""
-for _notice_name in capture-gap-notice git-backup-notice git-restore-notice case-divergence-notice; do
+for _notice_name in capture-gap-notice git-backup-notice git-restore-notice git-reconcile-notice case-divergence-notice; do
     NOTICE_FILE="$REMEMBER_DIR/tmp/$_notice_name"
     [ -f "$NOTICE_FILE" ] || continue
     _notice_body=$(cat "$NOTICE_FILE" 2>/dev/null)
