@@ -205,6 +205,22 @@ CONSOLIDATION_LOCK_DIR="$REMEMBER_DIR/tmp/consolidation.lock"
     }
     trap _grc_cleanup EXIT
 
+    # Second-pass review (#903): the lock dir already exists (the foreground
+    # created it via lock_acquire before forking this subshell, so a
+    # concurrent checker sees it immediately), but its recorded holder is
+    # still the FOREGROUND's own pid until corrected. Correcting it from OUT
+    # THERE, after `$!` is known, raced this subshell's own cleanup trap: a
+    # fast decline (e.g. the consolidation-lock check just below, a couple of
+    # shell builtins away) could run `lock_release` before that outside write
+    # landed, find the pid still the foreground's, fail the self-id match,
+    # and leave the lock held by a dead pid until the next instance's stale-
+    # takeover logic recovers it. Writing our OWN id, from IN HERE, as the
+    # very first thing, needs no such ordering: by the time any exit path
+    # (including this one) reaches the trap, the recorded holder is already
+    # correct, unconditionally.
+    _lock_self_set
+    echo "$_LOCK_SELF" > "$RC_LOCK_DIR/pid" 2>/dev/null || true
+
     unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
 
     if ! lock_acquire "$CONSOLIDATION_LOCK_DIR" 0; then
@@ -334,10 +350,6 @@ CONSOLIDATION_LOCK_DIR="$REMEMBER_DIR/tmp/consolidation.lock"
         log "git-reconcile" "WARNING: git rebase on $REMOTE_REF failed to start in $REPO_ROOT -- no-op, nothing was changed. Run it by hand to see git's own reason."
     fi
 ) </dev/null >/dev/null 2>&1 &
-RC_WORKER_PID=$!
-# Correct the lock's recorded holder to the actual worker, closing the
-# stale-foreground-pid window described above.
-echo "$RC_WORKER_PID" > "$RC_LOCK_DIR/pid" 2>/dev/null || true
-disown "$RC_WORKER_PID" 2>/dev/null || true
+disown $! 2>/dev/null || true
 
 exit 0

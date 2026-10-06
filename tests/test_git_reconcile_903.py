@@ -307,10 +307,19 @@ class TestNoticeIsWired:
         tmp/*-notice file does nothing on its own. scripts/user-prompt-hook.sh
         is what turns one into a systemMessage, through a hardcoded loop of
         names; a notice this hook writes and that loop does not name is
-        written to disk and never shown to anyone."""
+        written to disk and never shown to anyone.
+
+        Anchored on the `for _notice_name in ...` line itself, not merely on
+        the string appearing anywhere in the file -- a plain substring check
+        is also satisfied by the doc comment above the loop, and would stay
+        green even if someone later reverted just the loop entry while
+        leaving the comment describing it untouched."""
         text = (REPO_ROOT / "scripts" / "user-prompt-hook.sh").read_text(encoding="utf-8")
-        assert "git-reconcile-notice" in text, (
-            "git-reconcile-notice is never consumed by user-prompt-hook.sh -- "
+        loop_lines = [ln for ln in text.splitlines() if ln.startswith("for _notice_name in")]
+        assert loop_lines, "no 'for _notice_name in ...' loop found at all -- fixture assumption broken"
+        assert "git-reconcile-notice" in loop_lines[0], (
+            "git-reconcile-notice is not named in the for _notice_name in ... "
+            "loop itself (only elsewhere in the file, e.g. a doc comment) -- "
             "the conflict report this hook is designed to surface would sit "
-            "in tmp/ forever and never reach the human"
+            "in tmp/ forever and never reach the human: " + loop_lines[0]
         )
