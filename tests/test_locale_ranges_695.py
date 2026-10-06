@@ -198,9 +198,13 @@ ALLOWLIST: dict[tuple[str, int], str] = {
     # re-checked rather than quietly assumed forever.
     ("scripts/agy-stop-hook.sh", 159): _CASE,
     ("scripts/post-tool-hook.sh", 449): _CASE,
-    ("scripts/post-tool-hook.sh", 643): _CASE,
-    ("scripts/post-tool-hook.sh", 686): _CASE,
+    # Lines shifted +56 by #913's SESSION_DIR cache sidecar, inserted above
+    # these three (session-dir-cache does not touch SESSION_ID or add a new
+    # bracket range of its own -- these are the same three pre-existing
+    # allowlisted ranges, re-pinned to where they now live).
+    ("scripts/post-tool-hook.sh", 699): _CASE,
     ("scripts/post-tool-hook.sh", 742): _CASE,
+    ("scripts/post-tool-hook.sh", 798): _CASE,
     ("scripts/session-end-hook.sh", 201): _CASE,
     ("scripts/session-end-hook.sh", 209): _CASE,
     ("scripts/session-start-hook.sh", 289): _CASE,

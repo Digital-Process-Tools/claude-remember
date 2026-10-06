@@ -485,7 +485,63 @@ fi
 SAVE_SCRIPT="$PLUGIN_ROOT/scripts/save-session.sh"
 LAST_SAVE_FILE="$REMEMBER_DIR/tmp/last-save.json"
 PID_FILE="$REMEMBER_DIR/tmp/save-session.pid"
-SESSION_DIR="$(claude_projects_dir)/$(session_dir_slug "$PROJECT")"
+
+# --- SESSION_DIR: replay the slug, or compute it once per (project, config
+# dir) and remember it (#913) ---
+# claude_projects_dir()/session_dir_slug() are pure functions of PROJECT and
+# CLAUDE_CONFIG_DIR (and HOME/OSTYPE, neither of which moves mid-session), so
+# the pair this invocation would resolve to is identical to the pair any
+# other invocation for the same project resolves to. Both functions still
+# run unconditionally today, on EVERY tool call -- fast path included,
+# because this line sits below the _REMEMBER_FAST if/else, not inside it --
+# and on Windows/Git Bash each one forks `cygpath` (session_dir_slug forks a
+# `sed` too). Measured in #913: ~384 ms of a 986 ms trace on one Windows box.
+#
+# A small sidecar closes that, independent of lib-env-cache.sh: this is a
+# LOCAL cache of a LOCAL computation, not a replay of the shared chain
+# lib-env-cache.sh guards, so it carries its own two-line identity check
+# rather than reusing that file's invalidation (which does not track
+# CLAUDE_CONFIG_DIR at all, and should not be made to for the sake of one
+# caller). A mismatch on either stored line -- PROJECT changed (a different
+# project reusing the same REMEMBER_DIR tmp, which cannot happen since
+# REMEMBER_DIR is itself project-scoped, but checked anyway rather than
+# assumed) or CLAUDE_CONFIG_DIR changed -- recomputes and overwrites, so a
+# wrong cache is self-healing within one tool call, never silently stale.
+#
+# `[ -O ]` and `[ ! -L ]` before trusting the read, same as the shared cache
+# (lib-env-cache.sh): this file lives under REMEMBER_DIR/tmp, which is
+# per-project rather than shared system temp, but the same symlink/ownership
+# discipline costs nothing and a store directory is not guaranteed private
+# on every platform this runs on.
+_SESSION_DIR_CACHE="$REMEMBER_DIR/tmp/session-dir-cache"
+SESSION_DIR=""
+if [ -f "$_SESSION_DIR_CACHE" ] && [ ! -L "$_SESSION_DIR_CACHE" ] \
+    && [ -O "$_SESSION_DIR_CACHE" ] && [ -r "$_SESSION_DIR_CACHE" ]; then
+    _SDC_PROJECT="" _SDC_CONFIG_DIR="" _SDC_DIR=""
+    { IFS= read -r _SDC_PROJECT; IFS= read -r _SDC_CONFIG_DIR; IFS= read -r _SDC_DIR; } \
+        < "$_SESSION_DIR_CACHE" 2>/dev/null
+    if [ "$_SDC_PROJECT" = "$PROJECT" ] \
+        && [ "$_SDC_CONFIG_DIR" = "${CLAUDE_CONFIG_DIR:-}" ] \
+        && [ -n "$_SDC_DIR" ]; then
+        SESSION_DIR="$_SDC_DIR"
+    fi
+fi
+if [ -z "$SESSION_DIR" ]; then
+    SESSION_DIR="$(claude_projects_dir)/$(session_dir_slug "$PROJECT")"
+    # mktemp + rename (#429's lesson, same shape lib-env-cache.sh already
+    # uses): a reader must never see a half-written cache, and a predictable
+    # path pre-seeded with a symlink must never be the one this writes
+    # through.
+    _SDC_TMP=$(mktemp "${_SESSION_DIR_CACHE}.XXXXXX" 2>/dev/null) && {
+        {
+            printf '%s\n' "$PROJECT"
+            printf '%s\n' "${CLAUDE_CONFIG_DIR:-}"
+            printf '%s\n' "$SESSION_DIR"
+        } > "$_SDC_TMP" 2>/dev/null \
+            && mv -f "$_SDC_TMP" "$_SESSION_DIR_CACHE" 2>/dev/null \
+            || rm -f "$_SDC_TMP" 2>/dev/null
+    }
+fi
 
 [ -f "$SAVE_SCRIPT" ] || exit 0
 
