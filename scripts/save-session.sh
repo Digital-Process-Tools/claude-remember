@@ -1618,7 +1618,7 @@ if [ "$HAVE_LOCK" = true ]; then
     HAVE_LOCK=false
 fi
 
-# --- Housekeeping: reclaim aged autonomous logs (#487, #488, #498, #502) ---
+# --- Housekeeping: reclaim aged autonomous logs (#487, #488, #498, #502, #914) ---
 #
 # Runs unconditionally, independent of RUN_NDC/features.ndc_compression
 # (#498): this directory's only retention used to live inside the
@@ -1714,6 +1714,39 @@ if [ "$OSTYPE" = msys ] || [ "$OSTYPE" = cygwin ]; then
 else
     _remember_auto_dir="$REMEMBER_DIR"
 fi
+# #914: this loop used to fork a `stat` subshell AND a `_remember_date`
+# (date) subshell for EVERY surviving file, every time it ran -- on
+# Windows Git Bash, where a fork costs 50-300ms+ (#511's own
+# measurement), a directory of ~1,200 files turned one sweep into ~4,000
+# process starts and ~140s of wall time, recurring on every flush that
+# reached this point. Read the clock ONCE, before the loop (one fork
+# total instead of one per file), and build a single reference file
+# whose mtime is exactly the retention cutoff: `[ "$f" -ot "$ref" ]` is a
+# bash builtin and forks nothing at all. If the clock read or the
+# reference file cannot be built, fall back to the original per-file
+# stat()+date() comparison below -- correctness over speed when the fast
+# path cannot be trusted.
+_remember_auto_now=$(_remember_date +%s)
+_remember_auto_ref=""
+if [ -n "$_remember_auto_now" ] && [[ "$_remember_auto_now" != *[!0-9]* ]]; then
+    _remember_auto_cutoff=$(( 10#$_remember_auto_now - _AUTONOMOUS_LOG_RETENTION_DAYS * 86400 ))
+    _remember_auto_ref=$(mktemp "${TMPDIR:-/tmp}/remember-retention-ref.XXXXXX" 2>/dev/null) || _remember_auto_ref=""
+    if [ -n "$_remember_auto_ref" ]; then
+        if ! touch -d "@$_remember_auto_cutoff" "$_remember_auto_ref" 2>/dev/null; then
+            # BSD touch has no -d; derive the same instant through BSD
+            # date's own -r (GNU-first-then-BSD-fallback, same order used
+            # for the stat call this replaces, doctor.sh:257 and
+            # lib-lock.sh:183) and feed it to `touch -t`.
+            _remember_auto_cutoff_stamp=$(date -r "$_remember_auto_cutoff" +%Y%m%d%H%M.%S 2>/dev/null) || _remember_auto_cutoff_stamp=""
+            if [ -z "$_remember_auto_cutoff_stamp" ] || ! touch -t "$_remember_auto_cutoff_stamp" "$_remember_auto_ref" 2>/dev/null; then
+                rm -f "$_remember_auto_ref" 2>/dev/null
+                _remember_auto_ref=""
+            fi
+        fi
+    fi
+else
+    log "housekeeping" "WARNING: could not read the clock -- falling back to the per-file retention check"
+fi
 for _remember_auto_log in "${_remember_auto_dir}/logs/autonomous"/*.log; do
     [ -f "$_remember_auto_log" ] || continue
     if [ ! -s "$_remember_auto_log" ]; then
@@ -1721,6 +1754,15 @@ for _remember_auto_log in "${_remember_auto_dir}/logs/autonomous"/*.log; do
             || log "housekeeping" "WARNING: could not remove empty $_remember_auto_log"
         continue
     fi
+    if [ -n "$_remember_auto_ref" ]; then
+        if [ "$_remember_auto_log" -ot "$_remember_auto_ref" ]; then
+            rm -f "$_remember_auto_log" 2>/dev/null \
+                || log "housekeeping" "WARNING: could not remove aged $_remember_auto_log"
+        fi
+        continue
+    fi
+    # Fallback path (fast path above unavailable): the original,
+    # fork-per-file comparison -- still correct, just not fork-free.
     _remember_auto_mtime=$(stat -c %Y "$_remember_auto_log" 2>/dev/null) \
         || _remember_auto_mtime=$(stat -f %m "$_remember_auto_log" 2>/dev/null) \
         || _remember_auto_mtime=""
@@ -1732,18 +1774,19 @@ for _remember_auto_log in "${_remember_auto_dir}/logs/autonomous"/*.log; do
         log "housekeeping" "WARNING: could not read mtime of $_remember_auto_log -- leaving it in place"
         continue
     fi
-    _remember_auto_now=$(_remember_date +%s)
-    if [ -z "$_remember_auto_now" ] || [[ "$_remember_auto_now" == *[!0-9]* ]]; then
+    _remember_auto_file_now=$(_remember_date +%s)
+    if [ -z "$_remember_auto_file_now" ] || [[ "$_remember_auto_file_now" == *[!0-9]* ]]; then
         log "housekeeping" "WARNING: could not read the clock -- skipping the retention sweep for $_remember_auto_log"
         continue
     fi
-    _remember_auto_age_days=$(( (10#$_remember_auto_now - 10#$_remember_auto_mtime) / 86400 ))
+    _remember_auto_age_days=$(( (10#$_remember_auto_file_now - 10#$_remember_auto_mtime) / 86400 ))
     if [ "$_remember_auto_age_days" -gt "$_AUTONOMOUS_LOG_RETENTION_DAYS" ]; then
         rm -f "$_remember_auto_log" 2>/dev/null \
             || log "housekeeping" "WARNING: could not remove aged (${_remember_auto_age_days}d) $_remember_auto_log"
     fi
 done
-unset _remember_auto_dir _remember_auto_log _remember_auto_mtime _remember_auto_now _remember_auto_age_days
+rm -f "$_remember_auto_ref" 2>/dev/null
+unset _remember_auto_dir _remember_auto_log _remember_auto_mtime _remember_auto_now _remember_auto_age_days _remember_auto_ref _remember_auto_cutoff _remember_auto_cutoff_stamp _remember_auto_file_now
 
 # --- Pre-render the SessionStart MEMORY context cache (#668) ---
 # This script only ever runs via `nohup ... & disown` (session-end-hook.sh's

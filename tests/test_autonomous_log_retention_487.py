@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -682,4 +683,107 @@ _run_housekeeping_block
             "an ordinary forward-slash REMEMBER_DIR must still be swept "
             "after the fix -- the normalization must be a no-op here, not "
             "a regression\n" + _dump_dir(autonomous)
+        )
+
+
+class TestHousekeepingSweepIsForkFree:
+    """#914: the age-keyed sweep forked a `stat` subshell AND a
+    `_remember_date` (date) subshell for EVERY surviving file, on every
+    flush that reached this point -- on Windows Git Bash, where a single
+    fork costs 50-300ms+ (#511's own measurement), a directory of ~1,200
+    files turned one sweep into ~4,000 process starts and ~140s of wall
+    time, recurring about every 15 minutes in the reporter's own session.
+
+    The fix reads the clock once, before the loop, and builds a single
+    reference file whose mtime is the retention cutoff; `[ "$f" -ot
+    "$ref" ]` is a bash builtin and forks nothing. This asserts the
+    actual claim #914 measured -- PROCESS STARTS -- not just that the
+    sweep still reclaims/retains correctly: a behavior-only test would
+    pass unchanged whether the loop forks once per sweep or twice per
+    file, and #914 is entirely about which of those two it does.
+    """
+
+    def _run_extracted_block_counting_forks(
+        self, autonomous: Path, remember_dir: str, *,
+        retention_days: int = 7, bin_dir: Path, counter: Path,
+    ):
+        block = TestHousekeepingGlobIsPortableAcrossSeparators._extract_housekeeping_block()
+        script = f"""
+set -u
+config() {{ printf '%s\n' '{retention_days}'; }}
+log() {{ :; }}
+_remember_date() {{ date "$@"; }}
+REMEMBER_DIR={shlex.quote(remember_dir)}
+{block}
+"""
+        env = dict(os.environ)
+        env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
+        env["REMEMBER_FORK_COUNTER"] = str(counter)
+        result = subprocess.run(
+            [BASH, "-c", script], env=env, capture_output=True, text=True,
+            timeout=30, check=False,
+        )
+        assert result.returncode == 0, (
+            f"the extracted housekeeping block itself failed to run\n"
+            f"stdout={result.stdout}\nstderr={result.stderr}"
+        )
+
+    def test_must_fire_stat_and_date_fork_count_does_not_scale_with_file_count(self, tmp_path):
+        autonomous = tmp_path / ".remember" / "logs" / "autonomous"
+        autonomous.mkdir(parents=True)
+        eight_days_ago = time.time() - (8 * 24 * 3600)
+        stale_files = []
+        for i in range(8):
+            stale = autonomous / f"session-end-00000{i}-99999.log"
+            stale.write_text("12:00:00 [session-end] flush started\n")
+            os.utime(stale, (eight_days_ago, eight_days_ago))
+            stale_files.append(stale)
+        # Positive control in the SAME run: one fresh file must survive,
+        # exactly as test_must_fire_a_fresh_nonempty_log_survives_the_same_sweep
+        # pins for the end-to-end path -- without this, a sweep that just
+        # deleted the whole directory would also report a fork count of 0.
+        fresh = autonomous / "session-end-000009-99999.log"
+        fresh.write_text("12:00:00 [session-end] flush started\n")
+
+        bin_dir = tmp_path / "fork-counter-bin"
+        bin_dir.mkdir()
+        counter = tmp_path / "fork-count.txt"
+        counter.write_text("")
+        real_stat = shutil.which("stat")
+        real_date = shutil.which("date")
+        assert real_stat and real_date, "test environment needs real stat/date on PATH"
+        for name, real in (("stat", real_stat), ("date", real_date)):
+            wrapper = bin_dir / name
+            wrapper.write_text(
+                "#!/bin/sh\n"
+                f'echo {name} >> "$REMEMBER_FORK_COUNTER"\n'
+                f'exec {shlex.quote(real)} "$@"\n'
+            )
+            wrapper.chmod(0o755)
+
+        self._run_extracted_block_counting_forks(
+            autonomous, str(tmp_path / ".remember"), bin_dir=bin_dir, counter=counter,
+        )
+
+        for stale in stale_files:
+            assert not stale.exists(), (
+                f"{stale.name} (8 days old) survived the sweep\n" + _dump_dir(autonomous)
+            )
+        assert fresh.exists(), (
+            "the fresh (just-written) log was reclaimed by the sweep -- "
+            "positive control failed\n" + _dump_dir(autonomous)
+        )
+
+        fork_count = len([l for l in counter.read_text().splitlines() if l])
+        # Before the fix: 9 files x (1 stat + 1 date) = 18 forks, growing
+        # linearly with file count. After the fix: one `date` read before
+        # the loop, independent of file count. A ceiling well under the
+        # file count (9) still clearly distinguishes O(1) from O(n)
+        # without pinning an exact count that would break on the next
+        # portable tweak to the fast path.
+        assert fork_count < 9, (
+            f"stat/date were invoked {fork_count} times reclaiming 8 of 9 "
+            f"files -- the sweep is still forking per file instead of "
+            f"reading the clock once and comparing with a builtin "
+            f"(#914)\ncounter contents: {counter.read_text()!r}"
         )
