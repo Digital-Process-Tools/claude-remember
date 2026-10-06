@@ -161,27 +161,31 @@ if [ -z "$BRANCH_NAME" ]; then
 fi
 
 # ── This hook's own lock — prevents two reconcile instances (e.g. two slugs
-# saving close together) from racing a fetch/rebase/push on the same REPO_ROOT.
-# Identical acquisition shape to 50-git-backup.sh's LOCK_FILE.
-LOCK_FILE="$RC_STATE_DIR/git-reconcile.lock"
-RC_LOCK_STYLE=noclobber
-if command -v flock >/dev/null 2>&1; then
-    RC_LOCK_STYLE=flock
-    exec 9>"$LOCK_FILE"
-    if ! flock -n 9; then
-        debug_enabled 0 && log "git-reconcile" "flock held by another instance, skip"
-        exit 0
-    fi
-else
-    if ! ( set -o noclobber; echo $$ > "$LOCK_FILE" ) 2>/dev/null; then
-        RC_LOCK_PID=$(cat "$LOCK_FILE" 2>/dev/null)
-        if kill -0 "$RC_LOCK_PID" 2>/dev/null; then
-            debug_enabled 0 && log "git-reconcile" "locked by PID $RC_LOCK_PID, skip"
-            exit 0
-        fi
-        rm -f "$LOCK_FILE"
-        ( set -o noclobber; echo $$ > "$LOCK_FILE" ) 2>/dev/null || exit 0
-    fi
+# saving close together) from racing a fetch/rebase/push on the same
+# REPO_ROOT. A rebase/push sequence is not the idempotent, disjoint-subtree
+# case 50-git-backup.sh's own flock/noclobber comment relies on to call that
+# race "benign" -- a second instance can abort/rewrite history the first is
+# mid-operation on -- so this reuses lib-lock.sh's mkdir+stale-PID-takeover
+# primitive (already sourced above for the consolidation lock) rather than
+# repeat 50-git-backup.sh's flock/noclobber pattern.
+#
+# ACQUIRED HERE, in the foreground -- the directory must exist before this
+# process exits so a concurrent instance (or a test) checking right away sees
+# it immediately -- but the PID RECORDED inside it is corrected below, right
+# after the real worker is forked. Recording the FOREGROUND's own pid here
+# and leaving it would be wrong: this process forks the background subshell
+# and exits within milliseconds, so a second invocation's staleness check
+# would find that pid already dead and wrongly declare the lock stale while
+# the real work is still running in the (differently-pid'd) subshell. The
+# worker's pid is written into the SAME lock dir once `$!` is known, closing
+# that window to the few shell instructions between the two -- the same
+# microsecond-scale window lib-lock.sh's own `_lock_try_adopt` already
+# accepts elsewhere for exactly this "holder writes its pid a moment after
+# creating the directory" shape.
+RC_LOCK_DIR="$RC_STATE_DIR/git-reconcile.lock"
+if ! lock_acquire "$RC_LOCK_DIR" 0; then
+    debug_enabled 0 && log "git-reconcile" "another reconcile instance holds the lock for $REPO_ROOT, skip"
+    exit 0
 fi
 
 # Lock dir consolidation itself acquires -- scripts/run-consolidation.sh's own
@@ -197,7 +201,7 @@ CONSOLIDATION_LOCK_DIR="$REMEMBER_DIR/tmp/consolidation.lock"
 (
     _grc_cleanup() {
         lock_release "$CONSOLIDATION_LOCK_DIR" >/dev/null 2>&1 || true
-        [ "$RC_LOCK_STYLE" = "flock" ] || rm -f "$LOCK_FILE" 2>/dev/null || true
+        lock_release "$RC_LOCK_DIR" >/dev/null 2>&1 || true
     }
     trap _grc_cleanup EXIT
 
@@ -330,6 +334,10 @@ CONSOLIDATION_LOCK_DIR="$REMEMBER_DIR/tmp/consolidation.lock"
         log "git-reconcile" "WARNING: git rebase on $REMOTE_REF failed to start in $REPO_ROOT -- no-op, nothing was changed. Run it by hand to see git's own reason."
     fi
 ) </dev/null >/dev/null 2>&1 &
-disown $! 2>/dev/null || true
+RC_WORKER_PID=$!
+# Correct the lock's recorded holder to the actual worker, closing the
+# stale-foreground-pid window described above.
+echo "$RC_WORKER_PID" > "$RC_LOCK_DIR/pid" 2>/dev/null || true
+disown "$RC_WORKER_PID" 2>/dev/null || true
 
 exit 0

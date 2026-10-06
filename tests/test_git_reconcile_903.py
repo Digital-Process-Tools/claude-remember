@@ -245,8 +245,15 @@ class TestDivergedReconcile:
             "the conflicting file was modified despite the abort"
         )
 
+        # --path-format=absolute is required here, not optional: plain
+        # --git-path returns a path relative to THIS PROCESS's cwd (pytest's
+        # own), not to the -C target repo, so without it this assertion
+        # checks the wrong directory regardless of what the hook actually
+        # left behind. Same bug class the hook's own _grc_rebase_in_progress
+        # was fixed against (see its comment).
         rebase_merge = subprocess.run(
-            ["git", "-C", str(remember), "rev-parse", "--git-path", "rebase-merge"],
+            ["git", "-C", str(remember), "rev-parse", "--path-format=absolute",
+             "--git-path", "rebase-merge"],
             capture_output=True, text=True, check=False).stdout.strip()
         assert rebase_merge and not Path(rebase_merge).exists(), (
             "a rebase was left in progress after a conflict"
@@ -286,4 +293,24 @@ class TestConsolidationLock:
 
         assert _head(remember) == before, (
             "reconcile ran while consolidation's own lock was held for this slug"
+        )
+
+
+# ── The conflict notice actually reaches the human ───────────────────────────
+
+
+class TestNoticeIsWired:
+
+    def test_git_reconcile_notice_is_in_the_consumption_loop(self):
+        """git-reconcile-notice is written by the hook on a real conflict
+        (see TestDivergedReconcile.test_conflict_aborts...) -- but writing a
+        tmp/*-notice file does nothing on its own. scripts/user-prompt-hook.sh
+        is what turns one into a systemMessage, through a hardcoded loop of
+        names; a notice this hook writes and that loop does not name is
+        written to disk and never shown to anyone."""
+        text = (REPO_ROOT / "scripts" / "user-prompt-hook.sh").read_text(encoding="utf-8")
+        assert "git-reconcile-notice" in text, (
+            "git-reconcile-notice is never consumed by user-prompt-hook.sh -- "
+            "the conflict report this hook is designed to surface would sit "
+            "in tmp/ forever and never reach the human"
         )
