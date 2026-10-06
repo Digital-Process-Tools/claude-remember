@@ -40,15 +40,21 @@
 #       being rewritten wholesale right now, and reconcile must never touch
 #       the tree while that happens (shares consolidation's own lock dir,
 #       scripts/run-consolidation.sh's LOCK_DIR)
-#     - this slug's save lock is held (#932) -- save-session.sh's own NDC
-#       compression commits a rewritten now.md under that SAME lock dir
-#       (save-session.sh's LOCK_DIR, "$REMEMBER_DIR/tmp/save.lock"), and NDC's
-#       own guards (live size >= snapshot, its generation marker) are blind to
-#       a REBASE/MERGE rewriting now.md out from under them -- they only ever
-#       detect another NDC round, never this hook. Holding the same lock dir
-#       for the whole fetch/merge/rebase keeps the two writers mutually
-#       exclusive instead of silently racing.
 #     - nothing is behind at all (50-git-backup.sh already pushes "ahead only")
+#
+#   NDC compression (save-session.sh's background now.md->today-*.md summarizer)
+#   is the OTHER writer of now.md, and its own staleness guards (live size >=
+#   snapshot, a generation marker) were blind to a rebase/merge landing here
+#   while they were mid-check -- they only ever detected another NDC round
+#   (#932). This file cannot share save-session.sh's own save.lock the way it
+#   shares consolidation's: save-session.sh holds save.lock across its ENTIRE
+#   run, spanning the exact window this hook's background subshell runs in on
+#   every single save, so acquiring it here would decline almost every save
+#   rather than only the rare NDC-mid-commit one. Instead, every successful
+#   fast-forward/rebase below bumps NDC's own generation marker
+#   ("$REMEMBER_DIR/tmp/ndc-generation") -- the same counter NDC already
+#   compares before/after its own commit -- so NDC's EXISTING guard also
+#   catches this hook as a writer, at no steady-state cost.
 #
 # RUNTIME ENV (provided by save-session.sh via dispatch)
 #   PROJECT_DIR, PIPELINE_DIR, REMEMBER_DIR, REMEMBER_PROJECT
@@ -205,22 +211,43 @@ fi
 # rule out.
 CONSOLIDATION_LOCK_DIR="$REMEMBER_DIR/tmp/consolidation.lock"
 
-# Lock dir save-session.sh's own NDC commit (and its own foreground append)
-# acquire -- save-session.sh's LOCK_DIR, "$REMEMBER_DIR/tmp/save.lock" (#932).
-# Checked (and HELD for the duration below) for the same reason as
-# CONSOLIDATION_LOCK_DIR just above: NDC is the OTHER writer of now.md, its
-# commit step takes this lock (never consolidation's), and its own
-# size/generation guards cannot see a rebase/merge rewriting now.md while
-# they are mid-check -- only holding the SAME lock dir keeps the two
-# mutually exclusive. save-session.sh is not sourced here (it owns the
-# literal, this file only matches it), the same duplication already accepted
-# for CONSOLIDATION_LOCK_DIR/run-consolidation.sh's LOCK_DIR above.
-SAVE_LOCK_DIR="$REMEMBER_DIR/tmp/save.lock"
+# NDC's own staleness marker -- save-session.sh's NDC_GEN_FILE,
+# "$REMEMBER_DIR/tmp/ndc-generation" (#932). NOT a lock: save-session.sh
+# holds its own save.lock across its ENTIRE run (foreground append through
+# housekeeping, scripts/save-session.sh:83-1597), spanning the exact window
+# this hook's background subshell is forked and runs in on every single
+# save -- acquiring save.lock here the same way CONSOLIDATION_LOCK_DIR is
+# acquired above would therefore decline on nearly every save, not just the
+# rare moment NDC is actually mid-commit, and would defeat this hook's one
+# job. NDC's commit step already KNOWS how to detect "something else
+# rewrote now.md since my snapshot": it compares this same generation
+# counter before/after re-acquiring save.lock around its own tail+mv
+# (scripts/save-session.sh:1385-1406) -- it just never saw this hook as a
+# possible writer, only another NDC round. Bumping the SAME counter after a
+# successful fast-forward/rebase below makes NDC's EXISTING guard also catch
+# this hook, at zero steady-state cost: if no NDC round is concurrently
+# reading it, nobody notices the bump; if one is, it correctly skips its
+# commit the same way it already does for an overlapping NDC round (a
+# visible duplicate in today-*.md, never silent loss).
+NDC_GEN_FILE="$REMEMBER_DIR/tmp/ndc-generation"
+_grc_bump_ndc_gen() {
+    # Best-effort, not locked: a failed read or write here just means a
+    # concurrent NDC round that snapshotted the current value keeps
+    # believing it, the exact pre-#932 state -- strictly no worse than
+    # before this hook bumped anything at all. `10#` guards the same
+    # leading-zero-as-octal trap save-session.sh's own bump already guards
+    # against (see its line ~1512 comment).
+    local _grc_gen
+    _grc_gen=$(cat "$NDC_GEN_FILE" 2>/dev/null)
+    if [ -z "$_grc_gen" ] || [[ "$_grc_gen" == *[!0-9]* ]]; then
+        _grc_gen=0
+    fi
+    { echo $(( 10#$_grc_gen + 1 )) > "$NDC_GEN_FILE"; } 2>/dev/null || true
+}
 
 # ── Background subshell — never blocks save-session.sh ───────────────────────
 (
     _grc_cleanup() {
-        lock_release "$SAVE_LOCK_DIR" >/dev/null 2>&1 || true
         lock_release "$CONSOLIDATION_LOCK_DIR" >/dev/null 2>&1 || true
         lock_release "$RC_LOCK_DIR" >/dev/null 2>&1 || true
     }
@@ -246,16 +273,6 @@ SAVE_LOCK_DIR="$REMEMBER_DIR/tmp/save.lock"
 
     if ! lock_acquire "$CONSOLIDATION_LOCK_DIR" 0; then
         log "git-reconcile" "declined: consolidation holds the lock for $SLUG -- recent.md/archive.md are being rewritten right now. Will try again next save."
-        exit 0
-    fi
-
-    # #932: same reasoning as the consolidation check just above, for the
-    # OTHER writer of now.md. If save-session.sh (its own foreground append,
-    # or its backgrounded NDC commit) holds this lock, now.md is being read
-    # or rewritten right now and reconcile must not fetch/merge/rebase over
-    # it -- NDC's own guards cannot see this hook coming, only the reverse.
-    if ! lock_acquire "$SAVE_LOCK_DIR" 0; then
-        log "git-reconcile" "declined: save-session.sh holds the lock for $SLUG -- now.md is being appended to or committed by NDC right now. Will try again next save."
         exit 0
     fi
 
@@ -301,6 +318,7 @@ SAVE_LOCK_DIR="$REMEMBER_DIR/tmp/save.lock"
         if git -C "$REPO_ROOT" merge --ff-only "$REMOTE_REF" >/dev/null 2>&1; then
             log "git-reconcile" "fast-forwarded $BEHIND commit(s) from $REMOTE_NAME/$BRANCH_NAME"
             rm -f "$CONFLICT_STATE_FILE" 2>/dev/null || true
+            _grc_bump_ndc_gen
         else
             log "git-reconcile" "WARNING: fast-forward of $BEHIND commit(s) from $REMOTE_NAME/$BRANCH_NAME was refused by git -- uncommitted local changes most likely. No-op."
         fi
@@ -346,6 +364,11 @@ SAVE_LOCK_DIR="$REMEMBER_DIR/tmp/save.lock"
     git -C "$REPO_ROOT" rebase "$REMOTE_REF" >/dev/null 2>/dev/null
     REBASE_RC=$?
     if [ "$REBASE_RC" -eq 0 ]; then
+        # The working tree (now.md included) is already rewritten the moment
+        # the rebase itself lands -- regardless of whether the push below
+        # succeeds, is rejected and retried, or ends up deferred. Bump here,
+        # not after the push, so a deferred/retried push still counts.
+        _grc_bump_ndc_gen
         if git -C "$REPO_ROOT" push --porcelain -- "$REMOTE_NAME" "$BRANCH_NAME" >/dev/null 2>/dev/null; then
             log "git-reconcile" "rebased $AHEAD local commit(s) onto $REMOTE_NAME/$BRANCH_NAME ($BEHIND commit(s)) and pushed"
             rm -f "$CONFLICT_STATE_FILE" 2>/dev/null || true
@@ -358,6 +381,10 @@ SAVE_LOCK_DIR="$REMEMBER_DIR/tmp/save.lock"
         if [ -n "$REMOTE_HEAD2" ]; then
             git -C "$REPO_ROOT" rebase "$REMOTE_REF" >/dev/null 2>/dev/null
             REBASE_RC2=$?
+            # Same reasoning as the first attempt's bump above: the tree is
+            # rewritten as soon as this retry's rebase itself lands, whether
+            # or not the push just below also succeeds.
+            [ "$REBASE_RC2" -eq 0 ] && _grc_bump_ndc_gen
             if [ "$REBASE_RC2" -eq 0 ] && git -C "$REPO_ROOT" push --porcelain -- "$REMOTE_NAME" "$BRANCH_NAME" >/dev/null 2>/dev/null; then
                 log "git-reconcile" "rebased and pushed onto $REMOTE_NAME/$BRANCH_NAME on retry (remote moved between fetch and push)"
                 rm -f "$CONFLICT_STATE_FILE" 2>/dev/null || true

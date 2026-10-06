@@ -296,39 +296,76 @@ class TestConsolidationLock:
         )
 
 
-# ── Must not rewrite now.md while save-session.sh's own lock is held ───────
+# ── Must bump NDC's own generation marker on every rewrite ──────────────────
 #
 # #932: NDC (save-session.sh's background compression) and reconcile are
-# both writers of now.md, but only consolidation's lock was ever checked
-# here. NDC's commit step takes save.lock (save-session.sh's LOCK_DIR), never
-# consolidation.lock -- so a reconcile that only checks consolidation.lock
-# can fast-forward/rebase now.md out from under an in-flight NDC commit with
-# nothing here noticing.
+# both writers of now.md, but NDC's own staleness guards (live size vs.
+# snapshot, a generation marker) only ever detected another NDC round -- a
+# reconcile fast-forward/rebase landing mid-commit was invisible to them.
+# reconcile cannot simply share save-session.sh's save.lock the way it
+# shares consolidation's: save-session.sh holds save.lock across its ENTIRE
+# run, spanning the window this hook always runs in, so that would decline
+# almost every save rather than only the rare racing one (caught in review).
+# Instead reconcile bumps NDC's own generation marker on every successful
+# rewrite, so NDC's EXISTING guard also catches this hook as a writer.
 
 
-class TestSaveLock:
+class TestNdcGenerationBump:
 
-    def test_declines_while_save_lock_is_held(self, tmp_path):
-        """Paired with test_behind_only_fast_forwards above (same scenario,
-        lock free): with save-session.sh's own lock held for this slug, the
-        reconcile must do nothing at all -- not just when consolidation
-        holds its lock."""
+    def test_fast_forward_bumps_ndc_generation(self, tmp_path):
+        """Paired with test_behind_only_fast_forwards above (same scenario):
+        a fast-forward must also bump the generation marker NDC's commit
+        step reads, not just move HEAD."""
         home, remember, remote, slug_dir, project = _store(tmp_path)
-        before = _head(remember)
         _advance_remote(tmp_path, remote)
-
-        save_lock = slug_dir / "tmp" / "save.lock"
-        save_lock.mkdir(parents=True)
-        (save_lock / "pid").write_text(str(os.getpid()), encoding="utf-8")
+        gen_file = slug_dir / "tmp" / "ndc-generation"
+        assert not gen_file.exists(), "marker must start absent for this test"
 
         cfg = _enabled_config(tmp_path)
         _run(slug_dir, project, home, cfg)
         _wait_quiesce(remember)
 
-        assert _head(remember) == before, (
-            "reconcile ran while save-session.sh's own lock was held for "
-            "this slug -- it can now race an in-flight NDC commit"
+        assert gen_file.exists(), (
+            "a fast-forward landed but NDC's generation marker was never "
+            "bumped -- an in-flight NDC commit has no way to notice"
         )
+        assert gen_file.read_text(encoding="utf-8").strip() == "1"
+
+    def test_ahead_only_does_not_bump_ndc_generation(self, tmp_path):
+        """Negative control, paired with the positive case above: nothing
+        was rewritten (ahead-only is a no-op here), so the marker must stay
+        untouched -- a bump here would be a false positive that makes a
+        concurrent NDC round skip a commit for no reason."""
+        home, remember, _remote, slug_dir, project = _store(tmp_path)
+        _save_locally(remember, slug_dir, n=1)
+        gen_file = slug_dir / "tmp" / "ndc-generation"
+
+        cfg = _enabled_config(tmp_path)
+        _run(slug_dir, project, home, cfg)
+        _wait_quiesce(remember)
+
+        assert not gen_file.exists(), (
+            "the generation marker was bumped despite reconcile doing "
+            "nothing (ahead-only, 50-git-backup.sh's job)"
+        )
+
+    def test_diverged_rebase_bumps_ndc_generation(self, tmp_path):
+        """Same positive-control reasoning as the fast-forward case, for the
+        rebase-and-push path."""
+        home, remember, remote, slug_dir, project = _store(tmp_path)
+        _advance_remote(tmp_path, remote)
+        _save_locally(remember, slug_dir, n=1)
+        gen_file = slug_dir / "tmp" / "ndc-generation"
+
+        cfg = _enabled_config(tmp_path)
+        _run(slug_dir, project, home, cfg)
+        _wait_quiesce(remember)
+
+        assert gen_file.exists(), (
+            "a rebase+push landed but NDC's generation marker was never "
+            "bumped"
+        )
+        assert gen_file.read_text(encoding="utf-8").strip() == "1"
 
 
 # ── The conflict notice actually reaches the human ───────────────────────────
