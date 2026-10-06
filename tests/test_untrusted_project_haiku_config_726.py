@@ -138,6 +138,62 @@ def _path_with_broken_git(tmp_path: Path) -> str:
     return str(fake_bin)
 
 
+def _path_without_git(tmp_path: Path) -> str:
+    """A PATH where `git` has no entry AT ALL -- `command -v git` genuinely
+    fails -- distinct from `_path_with_broken_git` above (git present but
+    every invocation exits 128). #909: this is the branch that lost its only
+    test when #899 deleted the legacy-migration suite; it must walk the
+    filesystem by hand and fail CLOSED (`could-not-tell`) whenever an
+    enclosing `.git` exists, since no git spawn is possible to ask it
+    properly."""
+    fake_bin = tmp_path / "no-git-bin"
+    fake_bin.mkdir()
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for name in names:
+            if name == "git":
+                continue
+            target = fake_bin / name
+            if target.exists() or target.is_symlink():
+                continue
+            try:
+                os.symlink(os.path.join(d, name), target)
+            except OSError:
+                pass
+    return str(fake_bin)
+
+
+def _call_tracked_status_directly(check_dir: Path, pipeline_dir: Path, home_dir: Path,
+                                   env_extra=None) -> str:
+    """Source lib-memory-dir.sh (with a scratch, config-less PROJECT_DIR so
+    sourcing itself never needs to call the function or spawn git) and then
+    call `_remember_config_tracked_status` directly against `check_dir`,
+    returning its literal stdout state (`tracked` / `untracked` /
+    `could-not-tell`). Going through the full haiku-config merge instead
+    cannot tell `could-not-tell` apart from a GIT-PRESENT `untracked` --
+    both strip the same fields -- which is exactly the distinction #909
+    needs pinned directly."""
+    scratch_project = pipeline_dir / "scratch-project-for-sourcing"
+    scratch_project.mkdir(exist_ok=True)
+    script = f"""
+    set -e
+    export PROJECT_DIR={scratch_project}
+    export PIPELINE_DIR={pipeline_dir}
+    export HOME={home_dir}
+    source {DETECT_SCRIPT}
+    source {LIB_SCRIPT}
+    _remember_config_tracked_status {check_dir} config.json
+    """
+    env = {**os.environ, **(env_extra or {})}
+    result = subprocess.run(["bash", "-c", script], env=env, check=False,
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, f"lib-memory-dir.sh failed:\n{result.stderr}"
+    return result.stdout.strip()
+
+
 def _run_lib_and_dump_config(project_dir, pipeline_dir, home_dir, env_extra=None):
     """Source lib-memory-dir.sh and cat the merged config back INSIDE the
     same script -- REMEMBER_CONFIG is a mktemp file the script's own EXIT
@@ -1214,3 +1270,59 @@ class TestGitTrackedCheckFailsClosed:
         )
         assert merged.get("model") != "attacker-model"
         assert merged.get("reject_pattern") != "none"
+
+
+class TestNoGitBinaryTrackedCheckFailsClosed:
+    """#909: #899 removed the legacy-migration suite, which was the only
+    place `_remember_config_tracked_status` was ever exercised with NO git
+    binary on PATH at all (distinct from `TestGitTrackedCheckFailsClosed`
+    above, which has git present but failing). The no-git branch must walk
+    the filesystem by hand and fail CLOSED whenever an enclosing `.git` is
+    found there -- paired here with a positive control (git genuinely
+    present, file genuinely untracked) so a merge that always answers
+    could-not-tell, or one that silently ignores PATH entirely, cannot pass
+    either test by accident."""
+
+    def test_no_git_binary_with_git_dir_present_is_could_not_tell_and_fails_closed(self, tmp_path):
+        project, pipeline, home = _dirs(tmp_path)
+        # A real repo exists on disk (what the filesystem walk must find),
+        # but it is never queried: no git binary is reachable on PATH, so
+        # `command -v git` itself must fail before any spawn is attempted.
+        _git_init_commit(project, None)
+
+        no_git_path = _path_without_git(tmp_path)
+        assert _call_tracked_status_directly(
+            project, pipeline, home, env_extra={"PATH": no_git_path},
+        ) == "could-not-tell"
+
+        (pipeline / "config.json").write_text(json.dumps({}))
+        remember = project / ".remember"
+        remember.mkdir()
+        (remember / "config.json").write_text(
+            json.dumps({"model": "attacker-model", "reject_pattern": "none"})
+        )
+        merged, _ = _run_lib_and_dump_config(
+            project, pipeline, home,
+            env_extra={"PATH": no_git_path},
+        )
+        assert merged.get("model") != "attacker-model"
+        assert merged.get("reject_pattern") != "none"
+
+    def test_git_present_and_file_untracked_is_untracked_positive_control(self, tmp_path):
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(json.dumps({}))
+        remember = project / ".remember"
+        remember.mkdir()
+        (remember / "config.json").write_text(
+            json.dumps({"model": "operator-model", "reject_pattern": "operator-pattern"})
+        )
+        # A real repo, but the config file itself was never committed --
+        # the ordinary, common case this whole mechanism must still allow
+        # through untouched.
+        _git_init_commit(project, None)
+
+        assert _call_tracked_status_directly(project, pipeline, home) == "untracked"
+
+        merged, _ = _run_lib_and_dump_config(project, pipeline, home)
+        assert merged.get("model") == "operator-model"
+        assert merged.get("reject_pattern") == "operator-pattern"
