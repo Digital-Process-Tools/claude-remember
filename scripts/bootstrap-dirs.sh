@@ -52,7 +52,34 @@ SYS_TMPDIR="${TMPDIR:-/tmp}"
 _mem_proj="${MEMORY_PROJECT_DIR:-}"
 [ -n "$_mem_proj" ] || _mem_proj="$PROJECT_DIR"
 _legacy_dir="${_mem_proj}/.remember"
-if [ "$REMEMBER_DIR" != "$_legacy_dir" ] && [ "${REMEMBER_DIR#"$_legacy_dir"/}" = "$REMEMBER_DIR" ] \
+# #907: both sides forward-slashed before the comparison -- same fix as
+# doctor.sh's matching WARN check (#899/#517). Without it, msys/cygwin
+# hands REMEMBER_DIR and _legacy_dir different separator styles (one
+# backslash, one forward-slash) for the SAME directory, the "store already
+# lives inside the legacy dir" (#132) prefix check misses, and a spurious
+# notice prints for a session opened in $HOME.
+#
+# Normalized INLINE here, not via the shared `_remember_forward_slash_into`
+# (resolve-paths.sh) directly -- same reasoning as the #519 fix just below
+# this block (self-review/CI finding, job 112342749034, ubuntu/macos/
+# windows-latest, every Python version): this file's own USAGE header says
+# every caller sources resolve-paths.sh first, but that is not true of
+# every REAL caller -- several tests source only detect-tools.sh and
+# bootstrap-dirs.sh, same as the #519 block's own callers. There,
+# `_remember_forward_slash_into` is undefined and the whole script aborts
+# under `set -e` with "command not found" (exit 127) rather than silently
+# misbehaving -- CI caught this immediately, on every leg.
+# _legacy_dir is normalized IN PLACE (mirrors doctor.sh's _legacy_store),
+# so the -d/-f checks and the printed notice text that follow all read the
+# forward-slashed form too -- forward slashes resolve fine on msys/cygwin.
+# Only REMEMBER_DIR itself stays raw throughout (its own -e check and the
+# printf's other %s).
+_legacy_rd="$REMEMBER_DIR"
+if [ "$OSTYPE" = msys ] || [ "$OSTYPE" = cygwin ]; then
+    _legacy_dir="${_legacy_dir//\\//}"
+    _legacy_rd="${_legacy_rd//\\//}"
+fi
+if [ "$_legacy_rd" != "$_legacy_dir" ] && [ "${_legacy_rd#"$_legacy_dir"/}" = "$_legacy_rd" ] \
     && [ ! -e "$REMEMBER_DIR" ] && [ -d "$_legacy_dir" ]; then
     for _legacy_f in now.md recent.md archive.md core-memories.md remember.md; do
         if [ -f "$_legacy_dir/$_legacy_f" ]; then
@@ -63,7 +90,7 @@ if [ "$REMEMBER_DIR" != "$_legacy_dir" ] && [ "${REMEMBER_DIR#"$_legacy_dir"/}" 
     done
     unset _legacy_f
 fi
-unset _legacy_dir
+unset _legacy_dir _legacy_rd
 
 # --- Create directory structure ---
 # Gated on the tree already existing (#230). `mkdir -p` over three directories
