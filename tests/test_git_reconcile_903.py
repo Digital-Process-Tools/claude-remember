@@ -296,6 +296,41 @@ class TestConsolidationLock:
         )
 
 
+# ── Must not rewrite now.md while save-session.sh's own lock is held ───────
+#
+# #932: NDC (save-session.sh's background compression) and reconcile are
+# both writers of now.md, but only consolidation's lock was ever checked
+# here. NDC's commit step takes save.lock (save-session.sh's LOCK_DIR), never
+# consolidation.lock -- so a reconcile that only checks consolidation.lock
+# can fast-forward/rebase now.md out from under an in-flight NDC commit with
+# nothing here noticing.
+
+
+class TestSaveLock:
+
+    def test_declines_while_save_lock_is_held(self, tmp_path):
+        """Paired with test_behind_only_fast_forwards above (same scenario,
+        lock free): with save-session.sh's own lock held for this slug, the
+        reconcile must do nothing at all -- not just when consolidation
+        holds its lock."""
+        home, remember, remote, slug_dir, project = _store(tmp_path)
+        before = _head(remember)
+        _advance_remote(tmp_path, remote)
+
+        save_lock = slug_dir / "tmp" / "save.lock"
+        save_lock.mkdir(parents=True)
+        (save_lock / "pid").write_text(str(os.getpid()), encoding="utf-8")
+
+        cfg = _enabled_config(tmp_path)
+        _run(slug_dir, project, home, cfg)
+        _wait_quiesce(remember)
+
+        assert _head(remember) == before, (
+            "reconcile ran while save-session.sh's own lock was held for "
+            "this slug -- it can now race an in-flight NDC commit"
+        )
+
+
 # ── The conflict notice actually reaches the human ───────────────────────────
 
 

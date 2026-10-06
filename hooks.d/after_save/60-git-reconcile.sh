@@ -40,6 +40,14 @@
 #       being rewritten wholesale right now, and reconcile must never touch
 #       the tree while that happens (shares consolidation's own lock dir,
 #       scripts/run-consolidation.sh's LOCK_DIR)
+#     - this slug's save lock is held (#932) -- save-session.sh's own NDC
+#       compression commits a rewritten now.md under that SAME lock dir
+#       (save-session.sh's LOCK_DIR, "$REMEMBER_DIR/tmp/save.lock"), and NDC's
+#       own guards (live size >= snapshot, its generation marker) are blind to
+#       a REBASE/MERGE rewriting now.md out from under them -- they only ever
+#       detect another NDC round, never this hook. Holding the same lock dir
+#       for the whole fetch/merge/rebase keeps the two writers mutually
+#       exclusive instead of silently racing.
 #     - nothing is behind at all (50-git-backup.sh already pushes "ahead only")
 #
 # RUNTIME ENV (provided by save-session.sh via dispatch)
@@ -197,9 +205,22 @@ fi
 # rule out.
 CONSOLIDATION_LOCK_DIR="$REMEMBER_DIR/tmp/consolidation.lock"
 
+# Lock dir save-session.sh's own NDC commit (and its own foreground append)
+# acquire -- save-session.sh's LOCK_DIR, "$REMEMBER_DIR/tmp/save.lock" (#932).
+# Checked (and HELD for the duration below) for the same reason as
+# CONSOLIDATION_LOCK_DIR just above: NDC is the OTHER writer of now.md, its
+# commit step takes this lock (never consolidation's), and its own
+# size/generation guards cannot see a rebase/merge rewriting now.md while
+# they are mid-check -- only holding the SAME lock dir keeps the two
+# mutually exclusive. save-session.sh is not sourced here (it owns the
+# literal, this file only matches it), the same duplication already accepted
+# for CONSOLIDATION_LOCK_DIR/run-consolidation.sh's LOCK_DIR above.
+SAVE_LOCK_DIR="$REMEMBER_DIR/tmp/save.lock"
+
 # ── Background subshell — never blocks save-session.sh ───────────────────────
 (
     _grc_cleanup() {
+        lock_release "$SAVE_LOCK_DIR" >/dev/null 2>&1 || true
         lock_release "$CONSOLIDATION_LOCK_DIR" >/dev/null 2>&1 || true
         lock_release "$RC_LOCK_DIR" >/dev/null 2>&1 || true
     }
@@ -225,6 +246,16 @@ CONSOLIDATION_LOCK_DIR="$REMEMBER_DIR/tmp/consolidation.lock"
 
     if ! lock_acquire "$CONSOLIDATION_LOCK_DIR" 0; then
         log "git-reconcile" "declined: consolidation holds the lock for $SLUG -- recent.md/archive.md are being rewritten right now. Will try again next save."
+        exit 0
+    fi
+
+    # #932: same reasoning as the consolidation check just above, for the
+    # OTHER writer of now.md. If save-session.sh (its own foreground append,
+    # or its backgrounded NDC commit) holds this lock, now.md is being read
+    # or rewritten right now and reconcile must not fetch/merge/rebase over
+    # it -- NDC's own guards cannot see this hook coming, only the reverse.
+    if ! lock_acquire "$SAVE_LOCK_DIR" 0; then
+        log "git-reconcile" "declined: save-session.sh holds the lock for $SLUG -- now.md is being appended to or committed by NDC right now. Will try again next save."
         exit 0
     fi
 
