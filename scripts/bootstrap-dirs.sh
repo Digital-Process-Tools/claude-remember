@@ -57,13 +57,28 @@ _legacy_dir="${_mem_proj}/.remember"
 # hands REMEMBER_DIR and _legacy_dir different separator styles (one
 # backslash, one forward-slash) for the SAME directory, the "store already
 # lives inside the legacy dir" (#132) prefix check misses, and a spurious
-# notice prints for a session opened in $HOME. _legacy_dir is normalized
-# IN PLACE below (same as doctor.sh's _legacy_store), so the -d/-f checks
-# and the printed notice text that follow all read the forward-slashed
-# form too -- forward slashes resolve fine on msys/cygwin. Only REMEMBER_DIR
-# itself stays raw throughout (its own -e check and the printf's other %s).
-_remember_forward_slash_into _legacy_dir "$_legacy_dir"
-_remember_forward_slash_into _legacy_rd "$REMEMBER_DIR"
+# notice prints for a session opened in $HOME.
+#
+# Normalized INLINE here, not via the shared `_remember_forward_slash_into`
+# (resolve-paths.sh) directly -- same reasoning as the #519 fix just below
+# this block (self-review/CI finding, job 112342749034, ubuntu/macos/
+# windows-latest, every Python version): this file's own USAGE header says
+# every caller sources resolve-paths.sh first, but that is not true of
+# every REAL caller -- several tests source only detect-tools.sh and
+# bootstrap-dirs.sh, same as the #519 block's own callers. There,
+# `_remember_forward_slash_into` is undefined and the whole script aborts
+# under `set -e` with "command not found" (exit 127) rather than silently
+# misbehaving -- CI caught this immediately, on every leg.
+# _legacy_dir is normalized IN PLACE (mirrors doctor.sh's _legacy_store),
+# so the -d/-f checks and the printed notice text that follow all read the
+# forward-slashed form too -- forward slashes resolve fine on msys/cygwin.
+# Only REMEMBER_DIR itself stays raw throughout (its own -e check and the
+# printf's other %s).
+_legacy_rd="$REMEMBER_DIR"
+if [ "$OSTYPE" = msys ] || [ "$OSTYPE" = cygwin ]; then
+    _legacy_dir="${_legacy_dir//\\//}"
+    _legacy_rd="${_legacy_rd//\\//}"
+fi
 if [ "$_legacy_rd" != "$_legacy_dir" ] && [ "${_legacy_rd#"$_legacy_dir"/}" = "$_legacy_rd" ] \
     && [ ! -e "$REMEMBER_DIR" ] && [ -d "$_legacy_dir" ]; then
     for _legacy_f in now.md recent.md archive.md core-memories.md remember.md; do

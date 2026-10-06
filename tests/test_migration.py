@@ -71,20 +71,20 @@ def _source_bootstrap(project_dir: str, pipeline_dir: str, home_dir: str) -> sub
     Production always sources resolve-paths.sh before bootstrap-dirs.sh
     (see the latter's own USAGE comment); this harness does not, since
     resolve-paths.sh's own PROJECT_DIR autodetection would fight the
-    PROJECT_DIR/PIPELINE_DIR this fixture sets directly. #907's fix needs
-    _remember_forward_slash_into (defined in resolve-paths.sh), so just
-    that one function is lifted out via sed -- the same convention
-    tests/test_injection_guard_backslash_walk.py uses -- rather than
-    sourcing the whole file."""
-    resolve_paths = _bash_path(REPO_ROOT / "scripts" / "resolve-paths.sh")
+    PROJECT_DIR/PIPELINE_DIR this fixture sets directly. #907's fix
+    deliberately does NOT depend on anything resolve-paths.sh defines --
+    see the #907 comment in bootstrap-dirs.sh itself, which normalizes
+    inline rather than calling the shared `_remember_forward_slash_into`,
+    for exactly this reason (a real CI failure, job 112342749034, when a
+    first version of the fix did call it: this harness and several other
+    test files source bootstrap-dirs.sh the same way, without
+    resolve-paths.sh, so the shared helper is not guaranteed to exist)."""
     script = f"""
     set -e
     export PROJECT_DIR="{_bash_path(project_dir)}"
     export PIPELINE_DIR="{_bash_path(pipeline_dir)}"
     export HOME="{_bash_path(home_dir)}"
     source "{_bash_path(DETECT_SCRIPT)}"
-    _body=$(sed -n '/^_remember_forward_slash_into()/,/^}}/p' "{resolve_paths}")
-    eval "$_body"
     source "{_bash_path(BOOTSTRAP_SCRIPT)}"
     echo "REMEMBER_DIR=$REMEMBER_DIR"
     """
@@ -292,10 +292,13 @@ class TestLegacyStoreNoticeMsysBackslash:
 
     OSTYPE=msys is set directly on the child bash rather than requiring a
     real Windows host -- it is an ordinary (non-readonly) bash variable and
-    _remember_forward_slash_into's own gate reads nothing else (the same
+    bootstrap-dirs.sh's own #907 fix gates on nothing else (the same
     convention tests/test_injection_guard_backslash_walk.py uses). A
     backslash-named directory is a legal POSIX filename, so the fixture
-    below creates one for real rather than faking the comparison.
+    below creates one for real rather than faking the comparison. No
+    dependency on resolve-paths.sh is needed here -- the fix normalizes
+    inline rather than calling a shared helper, for the same reason
+    _source_bootstrap() above does not source resolve-paths.sh either.
     """
 
     @staticmethod
@@ -312,12 +315,9 @@ class TestLegacyStoreNoticeMsysBackslash:
             "_LIB_MEMORY_DIR_LOADED": "1",
             "OSTYPE": "msys",
         }
-        resolve_paths = (REPO_ROOT / "scripts" / "resolve-paths.sh").as_posix()
         script = f"""
         set -e
         source "{DETECT_SCRIPT.as_posix()}"
-        _body=$(sed -n '/^_remember_forward_slash_into()/,/^}}/p' "{resolve_paths}")
-        eval "$_body"
         source "{BOOTSTRAP_SCRIPT.as_posix()}"
         echo DONE
         """
