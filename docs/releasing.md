@@ -41,7 +41,20 @@ drop. If you really do need to publish an older line on purpose, re-run the work
    all made that way, and `.oss.json` leaves `merge_method` unset (`null`).
    *Why:* that commit is what gets tagged; CI across three OSes is the gate.
 
-3. **Tag that commit `vx.y.z` and push the tag with your own credentials**:
+3. **Run the local pre-tag check before cutting the tag** (#893): `check_release_tree.py` runs
+   against every pull request already (see "This already gates every pull request" below), so the
+   plugin folder is clean on `main` well before a release -- but a hold-class finding found by the
+   portal and not by this script is only ever caught by the real scan, and that scan can only be
+   run against a pushed branch. So before tagging, do the full "Preview before you tag" sequence
+   below -- build the tree from the commit you are about to tag, run `check_release_tree.py` and
+   `smoke_release_tree.py` on it, push it to `release-preview`, and validate it through the portal's
+   own submit form. Only once that is clean (or its findings are understood and accepted) move on
+   to step 4.
+   *Why before the tag, not after:* the portal can raise the same hold again on each new version
+   (Anthropic's own pre-submission checklist). A hold-class finding caught after the tag is pushed
+   is a version already in front of a reviewer; this step is what catches it first.
+
+4. **Tag that commit `vx.y.z` and push the tag with your own credentials**:
    `git tag vx.y.z <release-commit-sha> && git push origin vx.y.z`, then check it landed with
    `git ls-remote --tags origin vx.y.z`.
    *Why:* **pushing the tag is what publishes to the directory now.** The tag push starts the
@@ -51,7 +64,7 @@ drop. If you really do need to publish an older line on purpose, re-run the work
    workflows (GitHub suppresses them to prevent loops). The oss release flow pushes the tag with
    `git push origin <tag>` from the maintainer's checkout, which does start it.
 
-4. **Watch the `release branch` run** (Actions tab, or `gh run list --workflow release-branch.yml`).
+5. **Watch the `release branch` run** (Actions tab, or `gh run list --workflow release-branch.yml`).
    It has two jobs:
    - `verify`, read-only: installs PyYAML, builds the tree from the tag, runs
      [`check_release_tree.py`](../.github/scripts/check_release_tree.py) (the directory's
@@ -72,7 +85,7 @@ drop. If you really do need to publish an older line on purpose, re-run the work
    *Why two jobs:* the smoke test runs the plugin's own hooks, so it never holds a token that can
    push.
 
-5. **Publish the GitHub release** (`scripts/release_publish.py` from the oss plugin, not a file in
+6. **Publish the GitHub release** (`scripts/release_publish.py` from the oss plugin, not a file in
    this repository; it runs `gh release create --verify-tag`).
    *Why it is unaffected:* the release notes are read from `CHANGELOG.md` in the maintainer's
    local `main` checkout (the script's default is `<repo>/CHANGELOG.md`), never from the release
@@ -80,7 +93,7 @@ drop. If you really do need to publish an older line on purpose, re-run the work
    are required by the directory. Keep `--verify-tag`: without it `gh release create` would create
    a missing tag itself, through the API.
 
-6. **The directory picks up the new `release` commit** (at once through the push webhook,
+7. **The directory picks up the new `release` commit** (at once through the push webhook,
    otherwise within about 6 hours) and scans it. For v0.38.0 the webhook delivery got 200 OK and
    the version was in the **Versions** tab 3 to 4 minutes after the push. A version with a
    **Policy hold** waits for an Anthropic reviewer. And while the listing itself is flagged ("A
@@ -109,7 +122,7 @@ would need `export-ignore`). Then:
 - **CHANGELOG.md is not shipped at all** (on the deny-list, #898): only README and LICENSE are
   required by the directory, and a changelog line pairs an env-read token with a link far too
   easily for what it is worth. Release notes still come from `main`'s own CHANGELOG.md -- see
-  step 5 below.
+  step 6 below.
 - **It rewrites links** in every shipped `.md` file that point at a removed path (the README's
   `docs/` links and its logo) to absolute URLs on `main`: `raw.githubusercontent.com` for images,
   `github.com/.../blob/main` for everything else. Links to files that still ship are left alone.
