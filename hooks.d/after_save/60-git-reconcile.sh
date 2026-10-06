@@ -85,7 +85,7 @@ _grc_common_dir() {
     if [ -z "$_out" ]; then
         _out=$(git -C "$_d" rev-parse --git-common-dir 2>/dev/null) || return 1
         [ -n "$_out" ] || return 1
-        if [ "${_out#/}" = "$_out" ] && [ "${_out#[A-Za-z]:[/\]}" = "$_out" ]; then
+        if [ "${_out#/}" = "$_out" ] && [ "${_out#[A-Za-z]:[/\\]}" = "$_out" ]; then
             _out="$_d/$_out"
         fi
     fi
