@@ -204,9 +204,9 @@ ALLOWLIST: dict[tuple[str, int], str] = {
     # these three (session-dir-cache does not touch SESSION_ID or add a new
     # bracket range of its own -- these are the same three pre-existing
     # allowlisted ranges, re-pinned to where they now live).
-    ("scripts/post-tool-hook.sh", 715): _CASE,
-    ("scripts/post-tool-hook.sh", 758): _CASE,
-    ("scripts/post-tool-hook.sh", 814): _CASE,
+    ("scripts/post-tool-hook.sh", 723): _CASE,
+    ("scripts/post-tool-hook.sh", 766): _CASE,
+    ("scripts/post-tool-hook.sh", 822): _CASE,
     ("scripts/session-end-hook.sh", 201): _CASE,
     ("scripts/session-end-hook.sh", 209): _CASE,
     ("scripts/session-start-hook.sh", 289): _CASE,
