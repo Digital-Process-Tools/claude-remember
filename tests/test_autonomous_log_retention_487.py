@@ -939,10 +939,23 @@ REMEMBER_DIR={shlex.quote(remember_dir)}
         """
         autonomous = tmp_path / ".remember" / "logs" / "autonomous"
         autonomous.mkdir(parents=True)
-        eight_days_ago = time.time() - (8 * 24 * 3600)
+        # #933 CI (windows-latest, all four interpreters, PR #937): this
+        # fixture used to sit at exactly 8 days (N+1, N=7) and relied
+        # entirely on `broken_bin`'s `mktemp` override actually winning
+        # over the real `mktemp` on PATH to force the fallback. On a real
+        # windows-latest runner that assumption did not hold -- the real
+        # `mktemp` apparently still resolved, so this test exercised the
+        # FAST path after all, landing on the exact N+1-day boundary the
+        # two tests below this one exist to pin, and losing the same
+        # whole-second-vs-sub-second race documented there. Bumping to 9
+        # days removes the dependency on which path actually runs: either
+        # one reliably reclaims a file this far past the window, so the
+        # test now proves what its own name claims regardless of whether
+        # the mktemp override takes effect on a given platform.
+        nine_days_ago = time.time() - (9 * 24 * 3600)
         stale = autonomous / "session-end-000000-33333.log"
         stale.write_text("12:00:00 [session-end] flush started\n")
-        os.utime(stale, (eight_days_ago, eight_days_ago))
+        os.utime(stale, (nine_days_ago, nine_days_ago))
         one_day_ago = time.time() - (1 * 24 * 3600)
         fresh = autonomous / "session-end-000000-44444.log"
         fresh.write_text("12:00:00 [session-end] flush started\n")
@@ -964,10 +977,12 @@ REMEMBER_DIR={shlex.quote(remember_dir)}
             f"forced to fail\nstdout={result.stdout}\nstderr={result.stderr}"
         )
         assert not stale.exists(), (
-            "an 8-day-old log survived the FALLBACK loop (mktemp forced "
-            "to fail, so the fast path's own reference file could never "
-            "be built) -- the per-file stat()+date() comparison this "
-            "diff kept as a fallback is broken\n" + _dump_dir(autonomous)
+            "a 9-day-old log survived the sweep (intended to force the "
+            "FALLBACK loop via a `mktemp` override, though on some "
+            "platforms the fast path may run instead -- either one must "
+            "reclaim a file this far past the window) -- the per-file "
+            "stat()+date() comparison this diff kept as a fallback, or "
+            "the fast path itself, is broken\n" + _dump_dir(autonomous)
         )
         assert fresh.exists(), (
             "a 1-day-old log was reclaimed by the fallback loop -- "
