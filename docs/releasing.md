@@ -1008,9 +1008,9 @@ was "Validation ran out of time". That is the failure the `release` branch exist
    a wildcard after a shell, interpreter, package manager or runner, or `curl` is a hold. A
    specific command (`Bash(git status:*)`) or a named `${CLAUDE_PLUGIN_ROOT}` script is not.
    `check_release_tree.py` checks a space-delimited `allowed-tools` string the same as a
-   comma-delimited one (#866, trap.d/859); a `..`-escaped path past `${CLAUDE_PLUGIN_ROOT}` or a
-   wrapper command (`env bash ...`, `sudo curl ...`) in front of an otherwise-scoped entry is
-   **not yet** covered -- read it by hand until that lands.
+   comma-delimited one (#866, trap.d/859), and a `..`-escaped path past `${CLAUDE_PLUGIN_ROOT}`
+   is refused too (#879); a wrapper command (`env bash ...`, `sudo curl ...`) in front of an
+   otherwise-scoped entry is **not yet** covered -- read it by hand until that lands.
 3. Make sure fake credentials live only in denied paths (`tests/`).
 4. Put the icon in the plugin folder before the first save or submission (see `ICON_MISSING`).
 5. Disclose in README.md everything the plugin runs, sends and stores; expect that disclosure to

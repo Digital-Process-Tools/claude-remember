@@ -847,7 +847,7 @@ _UNSCOPED_COMMANDS = {
     # downloaders
     "curl", "wget",
     # wrapper commands that can run arbitrary programs (#879)
-    "xargs", "sudo", "eval", "exec", "source", "find", "awk", "nohup", "timeout",
+    "xargs", "sudo", "eval", "exec", "source", ".", "find", "awk", "nohup", "timeout",
 }
 _PLUGIN_ROOT = "${CLAUDE_PLUGIN_ROOT}/"
 

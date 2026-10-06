@@ -311,6 +311,7 @@ def test_good_front_matter_in_an_agent_passes(tmp_path):
     "Bash(eval:*)",
     "Bash(exec:*)",
     "Bash(source:*)",
+    "Bash(.:*)",
     "Bash(find:*)",
     "Bash(awk:*)",
     "Bash(nohup:*)",
