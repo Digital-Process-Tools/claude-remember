@@ -526,7 +526,15 @@ PID_FILE="$REMEMBER_DIR/tmp/save-session.pid"
 # pinned) would otherwise serve one HOME's SESSION_DIR to another's
 # invocations indefinitely, with nothing to trigger a recompute.
 _SESSION_DIR_CACHE="$REMEMBER_DIR/tmp/session-dir-cache"
-_SDC_KEY_PROJECT="${MEMORY_PROJECT_DIR:-$PROJECT}"
+# Explicit if/else, not a nested default expansion (`${MEMORY_PROJECT_DIR:-$PROJECT}`)
+# -- this repo's own release-tree checks (#900) ban that shape outright, and
+# CI caught it (a nested `${X:-$Y}` reads, to that scanner, exactly like the
+# argument-vector-assembled-at-runtime shape #898 also exists to catch).
+if [ -n "${MEMORY_PROJECT_DIR:-}" ]; then
+    _SDC_CACHE_PROJECT="$MEMORY_PROJECT_DIR"
+else
+    _SDC_CACHE_PROJECT="$PROJECT"
+fi
 SESSION_DIR=""
 if [ -f "$_SESSION_DIR_CACHE" ] && [ ! -L "$_SESSION_DIR_CACHE" ] \
     && [ -O "$_SESSION_DIR_CACHE" ] && [ -r "$_SESSION_DIR_CACHE" ]; then
@@ -534,7 +542,7 @@ if [ -f "$_SESSION_DIR_CACHE" ] && [ ! -L "$_SESSION_DIR_CACHE" ] \
     { IFS= read -r _SDC_PROJECT; IFS= read -r _SDC_CONFIG_DIR; \
       IFS= read -r _SDC_HOME; IFS= read -r _SDC_DIR; } \
         < "$_SESSION_DIR_CACHE" 2>/dev/null
-    if [ "$_SDC_PROJECT" = "$_SDC_KEY_PROJECT" ] \
+    if [ "$_SDC_PROJECT" = "$_SDC_CACHE_PROJECT" ] \
         && [ "$_SDC_CONFIG_DIR" = "${CLAUDE_CONFIG_DIR:-}" ] \
         && [ "$_SDC_HOME" = "${HOME:-}" ] \
         && [ -n "$_SDC_DIR" ]; then
@@ -549,7 +557,7 @@ if [ -z "$SESSION_DIR" ]; then
     # through.
     _SDC_TMP=$(mktemp "${_SESSION_DIR_CACHE}.XXXXXX" 2>/dev/null) && {
         {
-            printf '%s\n' "$_SDC_KEY_PROJECT"
+            printf '%s\n' "$_SDC_CACHE_PROJECT"
             printf '%s\n' "${CLAUDE_CONFIG_DIR:-}"
             printf '%s\n' "${HOME:-}"
             printf '%s\n' "$SESSION_DIR"
