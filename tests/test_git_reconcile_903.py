@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -294,6 +295,109 @@ class TestConsolidationLock:
         assert _head(remember) == before, (
             "reconcile ran while consolidation's own lock was held for this slug"
         )
+
+
+# ── Must bump NDC's own generation marker on every rewrite ──────────────────
+#
+# #932: NDC (save-session.sh's background compression) and reconcile are
+# both writers of now.md, but NDC's own staleness guards (live size vs.
+# snapshot, a generation marker) only ever detected another NDC round -- a
+# reconcile fast-forward/rebase landing mid-commit was invisible to them.
+# reconcile cannot simply share save-session.sh's save.lock the way it
+# shares consolidation's: save-session.sh holds save.lock across its ENTIRE
+# run, spanning the window this hook always runs in, so that would decline
+# almost every save rather than only the rare racing one (caught in review).
+# Instead reconcile bumps NDC's own generation marker on every successful
+# rewrite, so NDC's EXISTING guard also catches this hook as a writer.
+
+
+class TestNdcGenerationBump:
+
+    def test_fast_forward_bumps_ndc_generation(self, tmp_path):
+        """Paired with test_behind_only_fast_forwards above (same scenario):
+        a fast-forward must also bump the generation marker NDC's commit
+        step reads, not just move HEAD."""
+        home, remember, remote, slug_dir, project = _store(tmp_path)
+        _advance_remote(tmp_path, remote)
+        gen_file = slug_dir / "tmp" / "ndc-generation"
+        assert not gen_file.exists(), "marker must start absent for this test"
+
+        cfg = _enabled_config(tmp_path)
+        _run(slug_dir, project, home, cfg)
+        _wait_quiesce(remember)
+
+        assert gen_file.exists(), (
+            "a fast-forward landed but NDC's generation marker was never "
+            "bumped -- an in-flight NDC commit has no way to notice"
+        )
+        assert gen_file.read_text(encoding="utf-8").strip() == "1"
+
+    def test_ahead_only_does_not_bump_ndc_generation(self, tmp_path):
+        """Negative control, paired with the positive case above: nothing
+        was rewritten (ahead-only is a no-op here), so the marker must stay
+        untouched -- a bump here would be a false positive that makes a
+        concurrent NDC round skip a commit for no reason."""
+        home, remember, _remote, slug_dir, project = _store(tmp_path)
+        _save_locally(remember, slug_dir, n=1)
+        gen_file = slug_dir / "tmp" / "ndc-generation"
+
+        cfg = _enabled_config(tmp_path)
+        _run(slug_dir, project, home, cfg)
+        _wait_quiesce(remember)
+
+        assert not gen_file.exists(), (
+            "the generation marker was bumped despite reconcile doing "
+            "nothing (ahead-only, 50-git-backup.sh's job)"
+        )
+
+    def test_diverged_rebase_bumps_ndc_generation(self, tmp_path):
+        """Same positive-control reasoning as the fast-forward case, for the
+        rebase-and-push path."""
+        home, remember, remote, slug_dir, project = _store(tmp_path)
+        _advance_remote(tmp_path, remote)
+        _save_locally(remember, slug_dir, n=1)
+        gen_file = slug_dir / "tmp" / "ndc-generation"
+
+        cfg = _enabled_config(tmp_path)
+        _run(slug_dir, project, home, cfg)
+        _wait_quiesce(remember)
+
+        assert gen_file.exists(), (
+            "a rebase+push landed but NDC's generation marker was never "
+            "bumped"
+        )
+        assert gen_file.read_text(encoding="utf-8").strip() == "1"
+
+    def test_fifo_at_marker_path_does_not_hang_or_get_opened(self, tmp_path):
+        """#625/#634/#642/#653-shaped guard, reused here: a FIFO with no
+        reader blocks forever in open(2) -- `cat` or `>` on it hangs this
+        backgrounded subshell rather than failing fast. The bump must check
+        the file's type BEFORE opening it, the same way every other
+        accessor of this marker file in save-session.sh already does."""
+        home, remember, remote, slug_dir, project = _store(tmp_path)
+        _advance_remote(tmp_path, remote)
+        tmp_dir = slug_dir / "tmp"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        gen_fifo = tmp_dir / "ndc-generation"
+        os.mkfifo(gen_fifo)
+
+        cfg = _enabled_config(tmp_path)
+        # subprocess.run's own timeout=120 in _run() would turn an actual
+        # hang into a TimeoutExpired failure here rather than a false green.
+        result = _run(slug_dir, project, home, cfg)
+        _wait_quiesce(remember)
+
+        assert stat.S_ISFIFO(gen_fifo.stat().st_mode), (
+            "the FIFO was replaced -- the guard must refuse to open it, "
+            "not clear it out of the way"
+        )
+        assert result.returncode == 0
+
+        log_files = list((slug_dir / "logs").glob("memory-*.log"))
+        assert log_files, "hook wrote no log at all"
+        log_text = "\n".join(f.read_text(encoding="utf-8") for f in log_files)
+        assert "could not bump" in log_text
+        assert "not a regular file" in log_text
 
 
 # ── The conflict notice actually reaches the human ───────────────────────────
