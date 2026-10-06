@@ -57,9 +57,11 @@ _legacy_dir="${_mem_proj}/.remember"
 # hands REMEMBER_DIR and _legacy_dir different separator styles (one
 # backslash, one forward-slash) for the SAME directory, the "store already
 # lives inside the legacy dir" (#132) prefix check misses, and a spurious
-# notice prints for a session opened in $HOME. Filesystem checks below
-# still use the raw (unnormalized) values -- forward-slashed is just the
-# comparison form, the real paths on disk are untouched.
+# notice prints for a session opened in $HOME. _legacy_dir is normalized
+# IN PLACE below (same as doctor.sh's _legacy_store), so the -d/-f checks
+# and the printed notice text that follow all read the forward-slashed
+# form too -- forward slashes resolve fine on msys/cygwin. Only REMEMBER_DIR
+# itself stays raw throughout (its own -e check and the printf's other %s).
 _remember_forward_slash_into _legacy_dir "$_legacy_dir"
 _remember_forward_slash_into _legacy_rd "$REMEMBER_DIR"
 if [ "$_legacy_rd" != "$_legacy_dir" ] && [ "${_legacy_rd#"$_legacy_dir"/}" = "$_legacy_rd" ] \
