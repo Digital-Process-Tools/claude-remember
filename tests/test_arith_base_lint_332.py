@@ -63,9 +63,15 @@ _DIGIT_ARM = re.compile(r"\*\[!0-9\]\*")
 _CASE_HEAD = re.compile(r"\bcase\s+\"?\$\{?(\w+)\}?\"?\s+in\b")
 
 # The same guard as a test: `[[ "$X" == *[!0-9]* ]]` (#898 round 19 removed
-# every shipped `case`) or the earlier `[ "${X#*[!0-9]}" != "$X" ]`.
+# every shipped `case`) or the earlier `[ "${X#*[!0-9]}" != "$X" ]`. #899 added
+# a third shape, `[[ "$X" != *[!0-9]* ]]` (the same glob, negated polarity --
+# "stays set" rather than "gets rejected"), and a fourth, the helper call
+# `_remember_is_uint "$X"` (log.sh), which wraps the same `!=` test. #908: both
+# were invisible here -- _guarded_names only ever saw the `==` form.
 _DIGIT_TEST = re.compile(
-    r"\$\{(\w+)#\*\[!0-9\]\}|\[\[ \"?\$\{?(\w+)\}?\"? == \*\[!0-9\]\* \]\]")
+    r"\$\{(\w+)#\*\[!0-9\]\}"
+    r"|\[\[ \"?\$\{?(\w+)\}?\"? (?:==|!=) \*\[!0-9\]\* \]\]"
+    r"|(?<!\w)_remember_is_uint \"?\$\{?(\w+)\}?\"?")
 
 # How far above a digit-rejecting arm the `case` head may sit. The single-line
 # form puts them on the same line; the block form in this repo spans two.
@@ -228,6 +234,55 @@ def test_the_detector_finds_the_test_form_guard():
 def test_the_detector_finds_it_through_the_dollar_form_too():
     planted = PLANTED_GUARD + "ELAPSED=$(( $(date +%s) - $LAST ))\n"
     assert [f[1] for f in _unbased_uses(planted, _guarded_names(planted))] == ["LAST"]
+
+
+NEQ_FORM_GUARD = (
+    'LAST=$(cat "$f")\n'
+    '[ -n "$LAST" ] && [[ "$LAST" != *[!0-9]* ]] || LAST=0\n'
+)
+
+
+def test_the_detector_finds_the_neq_test_form_guard():
+    """#908/#899: `[[ "$X" != *[!0-9]* ]]` is the negated-polarity twin of the
+    `==` form -- "stays set" rather than "gets rejected" -- and lib-lock.sh
+    ships it for `_LOCK_SELF`, `_mtime` and `_pid`. Must still be found, and
+    10# still accepted."""
+    planted = NEQ_FORM_GUARD + "ELAPSED=$(( $(date +%s) - LAST ))\n"
+    assert _guarded_names(planted) == {"LAST"}
+    assert [f[1] for f in _unbased_uses(planted, {"LAST"})] == ["LAST"]
+    fixed = NEQ_FORM_GUARD + "ELAPSED=$(( $(date +%s) - 10#$LAST ))\n"
+    assert _unbased_uses(fixed, _guarded_names(fixed)) == []
+
+
+def test_the_detector_does_not_mistake_an_unrelated_bang_eq_for_the_guard():
+    """A plain string inequality is not the digits-only guard -- only the
+    exact `*[!0-9]*` glob on the right makes it one."""
+    src = 'if [[ "$MODE" != "quiet" ]]; then echo noisy; fi\n'
+    assert _guarded_names(src) == set()
+
+
+UINT_HELPER_GUARD = (
+    'LAST=$(cat "$f")\n'
+    '_remember_is_uint "$LAST" || LAST=0\n'
+)
+
+
+def test_the_detector_finds_the_is_uint_helper_call():
+    """#908/#899: `_remember_is_uint "$X"` (log.sh) wraps the same `!=` test
+    and is called ~11 times across log.sh and session-start-hook.sh. Must
+    still be found, and 10# still accepted."""
+    planted = UINT_HELPER_GUARD + "ELAPSED=$(( $(date +%s) - LAST ))\n"
+    assert _guarded_names(planted) == {"LAST"}
+    assert [f[1] for f in _unbased_uses(planted, {"LAST"})] == ["LAST"]
+    fixed = UINT_HELPER_GUARD + "ELAPSED=$(( $(date +%s) - 10#$LAST ))\n"
+    assert _unbased_uses(fixed, _guarded_names(fixed)) == []
+
+
+def test_the_detector_does_not_mistake_a_similarly_named_helper_for_is_uint():
+    """A different helper name must not be read as the is-uint guard -- the
+    match requires the exact name with a word boundary in front of it."""
+    src = '_remember_is_uint_like "$X" || X=0\n'
+    assert _guarded_names(src) == set()
 
 
 def test_the_detector_accepts_the_fixed_form():
