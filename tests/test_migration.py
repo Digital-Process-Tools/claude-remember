@@ -66,17 +66,29 @@ pytestmark = pytest.mark.skipif(_BASH is None, reason="Git Bash not found (Windo
 
 
 def _source_bootstrap(project_dir: str, pipeline_dir: str, home_dir: str) -> subprocess.CompletedProcess:
-    """Source bootstrap-dirs.sh and return the completed process."""
+    """Source bootstrap-dirs.sh and return the completed process.
+
+    Production always sources resolve-paths.sh before bootstrap-dirs.sh
+    (see the latter's own USAGE comment); this harness does not, since
+    resolve-paths.sh's own PROJECT_DIR autodetection would fight the
+    PROJECT_DIR/PIPELINE_DIR this fixture sets directly. #907's fix needs
+    _remember_forward_slash_into (defined in resolve-paths.sh), so just
+    that one function is lifted out via sed -- the same convention
+    tests/test_injection_guard_backslash_walk.py uses -- rather than
+    sourcing the whole file."""
+    resolve_paths = _bash_path(REPO_ROOT / "scripts" / "resolve-paths.sh")
     script = f"""
     set -e
     export PROJECT_DIR="{_bash_path(project_dir)}"
     export PIPELINE_DIR="{_bash_path(pipeline_dir)}"
     export HOME="{_bash_path(home_dir)}"
     source "{_bash_path(DETECT_SCRIPT)}"
+    _body=$(sed -n '/^_remember_forward_slash_into()/,/^}}/p' "{resolve_paths}")
+    eval "$_body"
     source "{_bash_path(BOOTSTRAP_SCRIPT)}"
     echo "REMEMBER_DIR=$REMEMBER_DIR"
     """
-    return subprocess.run([_BASH, "-c", script], capture_output=True, text=True)
+    return subprocess.run([_BASH, "-c", script], capture_output=True, text=True, check=False)
 
 
 def _make_legacy_dir(project_dir: Path) -> None:
@@ -269,3 +281,101 @@ class TestDoctorNamesTheLegacyStore:
         assert result.returncode == 0, result.stderr
         assert "Legacy store" not in result.stdout, result.stdout
         assert "Storage mode: external" in result.stdout, result.stdout
+
+
+class TestLegacyStoreNoticeMsysBackslash:
+    """#907: bootstrap-dirs.sh's own notice (TestLegacyStoreNotice above)
+    compared REMEMBER_DIR and the legacy dir as raw strings. doctor.sh's
+    matching WARN check was already fixed (#899/#517) to forward-slash
+    both sides first; this exercises the sibling call site bootstrap-dirs.sh
+    still left raw.
+
+    OSTYPE=msys is set directly on the child bash rather than requiring a
+    real Windows host -- it is an ordinary (non-readonly) bash variable and
+    _remember_forward_slash_into's own gate reads nothing else (the same
+    convention tests/test_injection_guard_backslash_walk.py uses). A
+    backslash-named directory is a legal POSIX filename, so the fixture
+    below creates one for real rather than faking the comparison.
+    """
+
+    @staticmethod
+    def _run(tmp_path, mem_proj_raw: str, remember_dir_raw: str) -> subprocess.CompletedProcess:
+        home = tmp_path / "home"
+        home.mkdir(parents=True, exist_ok=True)
+        env = {
+            **os.environ,
+            "HOME": str(home),
+            "PROJECT_DIR": mem_proj_raw,
+            "MEMORY_PROJECT_DIR": mem_proj_raw,
+            "PIPELINE_DIR": str(tmp_path / "plugin"),
+            "REMEMBER_DIR": remember_dir_raw,
+            "_LIB_MEMORY_DIR_LOADED": "1",
+            "OSTYPE": "msys",
+        }
+        resolve_paths = (REPO_ROOT / "scripts" / "resolve-paths.sh").as_posix()
+        script = f"""
+        set -e
+        source "{DETECT_SCRIPT.as_posix()}"
+        _body=$(sed -n '/^_remember_forward_slash_into()/,/^}}/p' "{resolve_paths}")
+        eval "$_body"
+        source "{BOOTSTRAP_SCRIPT.as_posix()}"
+        echo DONE
+        """
+        return subprocess.run([_BASH, "-c", script], env=env,
+                               capture_output=True, text=True, timeout=60, check=False)
+
+    @staticmethod
+    def _notice_lines(result: subprocess.CompletedProcess) -> list:
+        return [line for line in result.stderr.splitlines() if "holds memory data" in line]
+
+    def test_silent_when_store_lives_inside_legacy_dir_backslash_mismatch(self, tmp_path):
+        """The #132 case under OSTYPE=msys: MEMORY_PROJECT_DIR arrives
+        backslash-separated (as resolve-paths.sh's own msys normalization
+        produces -- see test_path_resolution.py), REMEMBER_DIR is a
+        forward-slash subdirectory of that same (normalized) legacy dir.
+        The store already lives where the legacy dir points; nothing is
+        stranded, so the notice must stay silent.
+
+        On a real Windows host, "C:\\x\\.remember" and "C:/x/.remember"
+        name the SAME file -- Windows accepts either separator. On this
+        POSIX test host they do not, so the fixture creates the legacy
+        dir at BOTH its raw (backslash) and normalized (forward-slash)
+        forms, each holding the same memory file: the unfixed code's `-d`
+        check reads the raw form, the fixed code's reads the normalized
+        one, and the test must discriminate the fix regardless of which
+        one the implementation under test happens to look at."""
+        mem_proj_raw = str(tmp_path / "C:\\Users\\x\\proj")
+        legacy_dir_raw = mem_proj_raw + "/.remember"
+        legacy_dir_on_disk = mem_proj_raw.replace("\\", "/") + "/.remember"
+        for _d in (legacy_dir_raw, legacy_dir_on_disk):
+            os.makedirs(_d, exist_ok=True)
+            Path(_d, "now.md").write_text("## 10:00 | m\nwork\n")
+
+        remember_dir_raw = legacy_dir_on_disk + "/some-slug"
+
+        result = self._run(tmp_path, mem_proj_raw, remember_dir_raw)
+        assert result.returncode == 0, result.stderr
+        assert self._notice_lines(result) == [], (
+            f"spurious notice fired (#907): {result.stderr}"
+        )
+
+    def test_fires_when_data_really_is_elsewhere_backslash(self, tmp_path):
+        """Positive control for the fixture above: when REMEMBER_DIR is
+        genuinely NOT inside the (normalized) legacy dir, the notice must
+        still fire -- pairing the silent case with a must-fire case so a
+        notice that never prints at all would not pass both. Same
+        both-forms fixture as the silent case above, so this discriminates
+        regardless of which form the `-d` check happens to read."""
+        mem_proj_raw = str(tmp_path / "C:\\Users\\x\\proj")
+        legacy_dir_raw = mem_proj_raw + "/.remember"
+        legacy_dir_on_disk = mem_proj_raw.replace("\\", "/") + "/.remember"
+        for _d in (legacy_dir_raw, legacy_dir_on_disk):
+            os.makedirs(_d, exist_ok=True)
+            Path(_d, "now.md").write_text("## 10:00 | m\nwork\n")
+
+        remember_dir_raw = str(tmp_path / "elsewhere" / "store")
+
+        result = self._run(tmp_path, mem_proj_raw, remember_dir_raw)
+        assert result.returncode == 0, result.stderr
+        notice = self._notice_lines(result)
+        assert len(notice) == 1, f"expected notice to fire, got: {result.stderr}"

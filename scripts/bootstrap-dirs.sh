@@ -52,7 +52,17 @@ SYS_TMPDIR="${TMPDIR:-/tmp}"
 _mem_proj="${MEMORY_PROJECT_DIR:-}"
 [ -n "$_mem_proj" ] || _mem_proj="$PROJECT_DIR"
 _legacy_dir="${_mem_proj}/.remember"
-if [ "$REMEMBER_DIR" != "$_legacy_dir" ] && [ "${REMEMBER_DIR#"$_legacy_dir"/}" = "$REMEMBER_DIR" ] \
+# #907: both sides forward-slashed before the comparison -- same fix as
+# doctor.sh's matching WARN check (#899/#517). Without it, msys/cygwin
+# hands REMEMBER_DIR and _legacy_dir different separator styles (one
+# backslash, one forward-slash) for the SAME directory, the "store already
+# lives inside the legacy dir" (#132) prefix check misses, and a spurious
+# notice prints for a session opened in $HOME. Filesystem checks below
+# still use the raw (unnormalized) values -- forward-slashed is just the
+# comparison form, the real paths on disk are untouched.
+_remember_forward_slash_into _legacy_dir "$_legacy_dir"
+_remember_forward_slash_into _legacy_rd "$REMEMBER_DIR"
+if [ "$_legacy_rd" != "$_legacy_dir" ] && [ "${_legacy_rd#"$_legacy_dir"/}" = "$_legacy_rd" ] \
     && [ ! -e "$REMEMBER_DIR" ] && [ -d "$_legacy_dir" ]; then
     for _legacy_f in now.md recent.md archive.md core-memories.md remember.md; do
         if [ -f "$_legacy_dir/$_legacy_f" ]; then
@@ -63,7 +73,7 @@ if [ "$REMEMBER_DIR" != "$_legacy_dir" ] && [ "${REMEMBER_DIR#"$_legacy_dir"/}" 
     done
     unset _legacy_f
 fi
-unset _legacy_dir
+unset _legacy_dir _legacy_rd
 
 # --- Create directory structure ---
 # Gated on the tree already existing (#230). `mkdir -p` over three directories
