@@ -1,4 +1,5 @@
 scripts/.*\.sh$	bash-locale-pin-byte-and-case-ops.md
+(scripts/.*\.sh|tests/.*\.py)$	bash-subprocess-test-pitfalls.md
 tests/test_case_divergence_298\.py$	case-divergence-pin-fold-dont-stack.md
 (changelog\.d/|(^|/)CHANGELOG\.md$)	changelog-trap-citation-goes-stale.md
 scripts/.*\.sh$	dollar-paren-lt-file-is-a-special-case.md

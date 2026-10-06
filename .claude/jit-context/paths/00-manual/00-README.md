@@ -200,3 +200,103 @@ than an oversight.
   [#816](https://github.com/Digital-Process-Tools/claude-remember/issues/816), which fixed it**
   (both guards now log the malformed value before substituting the default) -- the same stale
   "still true at HEAD" gap as the #804 entry above, corrected here by #827.
+- **`860.codex-fallback-deprecation-wording`** -- declined 2026-10-06, already fixed. The
+  fragment described `pipeline/haiku.py`'s deprecation message for the legacy
+  `REMEMBER_OAUTH_TOKEN` / `haiku.oauth_token` fallback naming a Claude-Code-only remedy
+  that did not exist for a Codex-hosted operator. Checked against HEAD: the warning this
+  code path now emits (the branch gated on `_AUTH_FAILURE_MARKERS` after an un-isolated
+  retry) reads "log in again with your coding agent's own CLI. This plugin reads no
+  credential of its own any more -- there is no setting here to configure (#129/#131/#860)"
+  -- generic across every host, naming no plugin-specific remedy at all, because the whole
+  recovery-token mechanism this fragment's complaint was about was removed entirely in
+  round 3/4 of #860. No new issue filed.
+- **`860.stale-live-credential-wording-outside-diff`** -- declined 2026-10-06, still true at
+  HEAD for a narrower set of files than the fragment originally named (several other sites
+  it cited, e.g. `docs/configuration.md`, were independently fixed since). `hooks.d/
+  after_save/50-git-backup.sh`, `hooks.d/before_session_start/50-git-restore.sh`,
+  `scripts/lib-memory-dir.sh` and `scripts/log.sh` still describe `haiku.oauth_token` as "a
+  live ... OAuth credential" even though #860 round 4 removed it as an auth source on every
+  host (`docs/configuration.md`'s own current wording: "not read for anything ... there is
+  nothing to migrate it to"). Declined as a rule because the fix is a one-time wording sweep
+  across a known, small file set, not a generalizable lesson. **Filed as
+  [#918](https://github.com/Digital-Process-Tools/claude-remember/issues/918) instead**
+  (together with `894.stale-remember-oauth-token-docs-sweep-gap` below, same root cause).
+- **`870.auth-failure-warning-misattributes-dead-credential`** -- declined 2026-10-06, already
+  fixed. The fragment described the un-isolated-retry auth-failure warning
+  (`pipeline/haiku.py`) blaming "the CLI's own saved login" even when the actually-dead
+  credential was a configured userConfig token, a host-supplied `CLAUDE_CODE_OAUTH_TOKEN` or
+  an ambient `ANTHROPIC_API_KEY`. Checked against HEAD: the warning no longer names or blames
+  any specific credential source at all -- it says the CLI's saved login has expired and that
+  "this plugin reads no credential of its own any more," because #860 round 3/4 removed the
+  userConfig recovery-token mechanism the misattribution was about. **Issue
+  [#890](https://github.com/Digital-Process-Tools/claude-remember/issues/890), filed for this
+  same finding before this curation pass, appears to already be fixed by the same change --
+  worth a maintainer look at closing it.** No new issue filed here.
+- **`875.readme-cache-disclosure-names-old-filename`** -- declined 2026-10-06, still true at
+  HEAD: `README.md`'s `$TMPDIR/remember-*` disclosure still names
+  `remember-config-cache-<key>`, while `scripts/log.sh` has written
+  `remember-config-cache-v2-<key>` since #875 changed the cache format. Everywhere else that
+  changed (`CHANGELOG.md`, `docs/releasing.md`, the test suite's own comments) already
+  reflects the `v2` name; only the README disclosure line was missed. Declined as a rule
+  because the fix is a one-line README correction, not a generalizable lesson. **Already
+  tracked as [#888](https://github.com/Digital-Process-Tools/claude-remember/issues/888)** --
+  no new issue filed.
+- **`891.lib-lock-eval-new-hits`** -- declined 2026-10-06, already fixed. The fragment
+  described `check_release_tree.py`'s widened `EVAL_OF_SUBSTITUTION` pattern newly flagging
+  `scripts/lib-lock.sh`'s own `eval "_LOCK_TIMING_T0_${KEY}=..."` shape, untriaged. Checked
+  against HEAD: `scripts/lib-lock.sh` no longer uses `eval` for this at all -- the lock-timing
+  state is now kept in bash arrays (`_LOCK_TIMING_T0S`, `_LOCK_TIMING_WAITS`, etc.), with a
+  comment reading "#898 round 10: no `eval`, no variable named at run time." `.github/
+  release-branch.json`'s deny-list never needed the file. No new issue filed.
+- **`894.doctor-notice-grep-is-history-not-presence`** -- declined 2026-10-06, already fixed.
+  The fragment described `doctor.sh`'s "legacy recovery-token config in use" section deciding
+  presence by grepping daily-log history for a `NOTICE:` substring rather than checking
+  current state, with both a stale-warning-after-migration and a false-all-clear failure
+  mode. Checked against HEAD: the whole section is gone -- `scripts/doctor.sh`'s own comment
+  reads "#898, round 4: the 'Legacy recovery-token config (#860)' section that used to live
+  here is removed entirely," consistent with the underlying mechanism (`REMEMBER_OAUTH_TOKEN`
+  / `haiku.oauth_token`) itself being fully removed by the same round. No new issue filed.
+- **`894.stale-remember-oauth-token-docs-sweep-gap`** -- declined 2026-10-06, still true at
+  HEAD for two of the five files the fragment originally named (`docs/configuration.md`,
+  `docs/verification.md` and `docs/diagnostics.md` were independently fixed since; the
+  fragment's own `docs/diagnostics.md:16` concern is now resolved by an explicit "#898 round
+  15" addendum right below it). `docs/git-backup-security.md` and
+  `docs/external-storage-mode.md` still tell users to set `REMEMBER_OAUTH_TOKEN` as a working
+  mitigation, when the var authenticates nothing on any host. Declined as a rule for the same
+  reason as `860.stale-live-credential-wording-outside-diff` above. **Filed as
+  [#918](https://github.com/Digital-Process-Tools/claude-remember/issues/918) instead**
+  (same issue as that entry -- one root cause, one sweep).
+- **`896.readme-overstates-token-isolation`** -- declined 2026-10-06, already fixed. The
+  fragment described README.md overstating the userConfig recovery token's isolation
+  ("only this plugin's own save can read it back") against `pipeline/haiku.py:_child_env`'s
+  actual strip list. Checked against HEAD: that README sentence no longer exists, and
+  `CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN` is no longer read anywhere in `pipeline/` -- the whole
+  userConfig recovery-token mechanism was removed in #860 round 4, so the isolation claim
+  the fragment questioned has nothing left underneath it to overstate. No new issue filed.
+- **`898.legacy-token-presence-check-swallows-read-errors`** -- declined 2026-10-06, already
+  fixed, per the fragment's own addendum. `_legacy_recovery_token_configured()` and its
+  caller were deleted entirely in #898 round 4 (commit `3b93c53`), not patched -- the
+  underlying read-error-swallowing behaviour this fragment described has no code left to
+  misreport from. No new issue filed.
+- **`898.url-in-comment-guard-heredoc-body-false-positive`** -- declined 2026-10-06, still
+  true at HEAD: `.github/scripts/check_release_tree.py`'s `_check_url_in_comment` still has
+  no heredoc-boundary tracking, unlike the sibling `_in_code()` helper it could reuse the
+  shape of. Re-confirmed not live today (a repo-wide grep for a `#`-prefixed line with a URL
+  host inside any heredoc body still returns zero hits). Declined as a rule because the fix
+  is a scoped addition to one checker function, not a generalizable lesson. **Filed as
+  [#919](https://github.com/Digital-Process-Tools/claude-remember/issues/919) instead.**
+- **`902.changelog-overclaims-mkdir-guard-coverage`**,
+  **`902.remember-dir-guard-fatal-swallowed`** and
+  **`902.remember-dir-guard-refuses-unc-store`** -- declined 2026-10-06, all three still true
+  at HEAD. All three describe gaps in the same #902 `REMEMBER_DIR` safety guard:
+  `scripts/bootstrap-dirs.sh` still builds the exact directory tree the guard exists to
+  refuse, with no check of its own, before the guard ever runs on the slow path;
+  `scripts/post-tool-hook.sh`/`scripts/log.sh` still route the guard's own FATAL through
+  `log()`, which has already pointed `MEMORY_LOG_FILE` at `/dev/null` by the time it fires,
+  so the refusal reaches nowhere a user can read it; and `scripts/resolve-paths.sh`'s
+  `_remember_normalize_win_path` still only recognises drive-letter and `/c/`-style Windows
+  paths, so a native UNC project directory is itself misclassified as unsafe and refused.
+  Declined as a rule because the fix for each is a scoped change to one existing guard, not a
+  generalizable lesson, and all three are different facets of the same shipped feature.
+  **Filed as [#920](https://github.com/Digital-Process-Tools/claude-remember/issues/920)
+  instead**, covering all three.
