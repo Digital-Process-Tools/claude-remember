@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -366,6 +367,37 @@ class TestNdcGenerationBump:
             "bumped"
         )
         assert gen_file.read_text(encoding="utf-8").strip() == "1"
+
+    def test_fifo_at_marker_path_does_not_hang_or_get_opened(self, tmp_path):
+        """#625/#634/#642/#653-shaped guard, reused here: a FIFO with no
+        reader blocks forever in open(2) -- `cat` or `>` on it hangs this
+        backgrounded subshell rather than failing fast. The bump must check
+        the file's type BEFORE opening it, the same way every other
+        accessor of this marker file in save-session.sh already does."""
+        home, remember, remote, slug_dir, project = _store(tmp_path)
+        _advance_remote(tmp_path, remote)
+        tmp_dir = slug_dir / "tmp"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        gen_fifo = tmp_dir / "ndc-generation"
+        os.mkfifo(gen_fifo)
+
+        cfg = _enabled_config(tmp_path)
+        # subprocess.run's own timeout=120 in _run() would turn an actual
+        # hang into a TimeoutExpired failure here rather than a false green.
+        result = _run(slug_dir, project, home, cfg)
+        _wait_quiesce(remember)
+
+        assert stat.S_ISFIFO(gen_fifo.stat().st_mode), (
+            "the FIFO was replaced -- the guard must refuse to open it, "
+            "not clear it out of the way"
+        )
+        assert result.returncode == 0
+
+        log_files = list((slug_dir / "logs").glob("memory-*.log"))
+        assert log_files, "hook wrote no log at all"
+        log_text = "\n".join(f.read_text(encoding="utf-8") for f in log_files)
+        assert "could not bump" in log_text
+        assert "not a regular file" in log_text
 
 
 # ── The conflict notice actually reaches the human ───────────────────────────

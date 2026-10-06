@@ -237,6 +237,19 @@ _grc_bump_ndc_gen() {
     # before this hook bumped anything at all. `10#` guards the same
     # leading-zero-as-octal trap save-session.sh's own bump already guards
     # against (see its line ~1512 comment).
+    #
+    # Same non-regular-file guard save-session.sh's own marker_write_ok()
+    # applies before it ever opens NDC_GEN_FILE (scripts/save-session.sh's
+    # marker_write_ok, ~line 211): a FIFO at this path has no reader here,
+    # so a bare `>` or `cat` on it blocks in open(2) before any redirection
+    # error exists, hanging this backgrounded subshell forever -- the exact
+    # hang class #625/#634/#642/#653 fixed at every OTHER accessor of this
+    # same file. This hook does not source save-session.sh (only log.sh and
+    # lib-lock.sh), so the check is reimplemented locally rather than called.
+    if [ -e "$NDC_GEN_FILE" ] && [ ! -f "$NDC_GEN_FILE" ]; then
+        log "git-reconcile" "WARNING: could not bump $NDC_GEN_FILE -- it exists but is not a regular file, and opening it is refused (a FIFO here would block this process forever). Remove or replace it."
+        return 1
+    fi
     local _grc_gen
     _grc_gen=$(cat "$NDC_GEN_FILE" 2>/dev/null)
     if [ -z "$_grc_gen" ] || [[ "$_grc_gen" == *[!0-9]* ]]; then
