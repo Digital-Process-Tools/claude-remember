@@ -1276,12 +1276,14 @@ class TestNoGitBinaryTrackedCheckFailsClosed:
     """#909: #899 removed the legacy-migration suite, which was the only
     place `_remember_config_tracked_status` was ever exercised with NO git
     binary on PATH at all (distinct from `TestGitTrackedCheckFailsClosed`
-    above, which has git present but failing). The no-git branch must walk
-    the filesystem by hand and fail CLOSED whenever an enclosing `.git` is
-    found there -- paired here with a positive control (git genuinely
-    present, file genuinely untracked) so a merge that always answers
-    could-not-tell, or one that silently ignores PATH entirely, cannot pass
-    either test by accident."""
+    above, which has git present but failing). The no-git branch has TWO
+    outcomes of its own -- `could-not-tell` when an enclosing `.git` is
+    found by the filesystem walk, `untracked` when the walk reaches `/`
+    without finding one -- and this class pins both directly, plus a
+    separate positive control for the git-PRESENT `untracked` path (a
+    different branch of the function entirely), so a degenerate no-git
+    branch that always answers `could-not-tell` regardless of what the walk
+    finds cannot pass by only ever being exercised with a `.git` present."""
 
     def test_no_git_binary_with_git_dir_present_is_could_not_tell_and_fails_closed(self, tmp_path):
         project, pipeline, home = _dirs(tmp_path)
@@ -1308,6 +1310,35 @@ class TestNoGitBinaryTrackedCheckFailsClosed:
         assert merged.get("model") != "attacker-model"
         assert merged.get("reject_pattern") != "none"
 
+    def test_no_git_binary_with_no_git_dir_anywhere_is_untracked(self, tmp_path):
+        # The no-git branch's OTHER outcome: no git binary reachable, AND
+        # the filesystem walk reaches `/` without ever finding a `.git` --
+        # nothing to check, same as the ordinary non-repo case. Without
+        # this test, a degenerate no-git branch that always answers
+        # `could-not-tell` regardless of what the walk finds would pass
+        # the whole suite, since the sibling test above never exercises a
+        # project with NO enclosing `.git` at all.
+        project, pipeline, home = _dirs(tmp_path)
+        (pipeline / "config.json").write_text(json.dumps({}))
+        remember = project / ".remember"
+        remember.mkdir()
+        (remember / "config.json").write_text(
+            json.dumps({"model": "operator-model", "reject_pattern": "operator-pattern"})
+        )
+        # Deliberately NOT a git repo at all -- no _git_init_commit call.
+
+        no_git_path = _path_without_git(tmp_path)
+        assert _call_tracked_status_directly(
+            project, pipeline, home, env_extra={"PATH": no_git_path},
+        ) == "untracked"
+
+        merged, _ = _run_lib_and_dump_config(
+            project, pipeline, home,
+            env_extra={"PATH": no_git_path},
+        )
+        assert merged.get("model") == "operator-model"
+        assert merged.get("reject_pattern") == "operator-pattern"
+
     def test_git_present_and_file_untracked_is_untracked_positive_control(self, tmp_path):
         project, pipeline, home = _dirs(tmp_path)
         (pipeline / "config.json").write_text(json.dumps({}))
@@ -1318,7 +1349,10 @@ class TestNoGitBinaryTrackedCheckFailsClosed:
         )
         # A real repo, but the config file itself was never committed --
         # the ordinary, common case this whole mechanism must still allow
-        # through untouched.
+        # through untouched. This is a DIFFERENT branch of the function
+        # entirely (git genuinely present, rev-parse/ls-files path) from
+        # the no-git tests above -- it is a control on the whole mechanism,
+        # not on the no-git branch's own second outcome.
         _git_init_commit(project, None)
 
         assert _call_tracked_status_directly(project, pipeline, home) == "untracked"
