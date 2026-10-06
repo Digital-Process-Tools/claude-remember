@@ -111,6 +111,38 @@ def test_a_large_text_file_named_png_is_not_exempt(tmp_path):
     assert any("img/fake.png" in o for o in offenders), offenders
 
 
+# -- bundled icon (#865) ---------------------------------------------------------
+
+def test_a_plugin_icon_referenced_only_from_plugin_json_is_not_flagged(tmp_path):
+    """plugin.json's own `icon` field is JSON, not a .md code span and not a
+    commands/hooks/scripts/hooks.d text file -- _check_images must not treat
+    this as a 'bundled image referenced' offense."""
+    root = _tree(tmp_path, {
+        ".claude-plugin/plugin.json": (
+            b'{"name": "x", "description": "d", "version": "1.0.0", '
+            b'"author": {"name": "a"}, "icon": "./.claude-plugin/icon.png"}\n'
+        ),
+        ".claude-plugin/icon.png": PNG + b"\x00" * 32,
+    })
+    assert _check(root).offenders == []
+
+
+def test_an_icon_path_in_markdown_backticks_is_flagged(tmp_path):
+    """Positive control for the test above: the same icon path, written in
+    backticks inside a shipped .md file, IS the shape _check_images exists to
+    catch -- proving the prior test's silence is a real pass, not a check that
+    never ran."""
+    root = _tree(tmp_path, {
+        ".claude-plugin/icon.png": PNG + b"\x00" * 32,
+        "README.md": (
+            "# x\n\n" + " ".join(["word"] * 40) +
+            "\n\nSee `.claude-plugin/icon.png`.\n"
+        ).encode(),
+    })
+    offenders = _check(root).offenders
+    assert any(".claude-plugin/icon.png" in o and "README.md" in o for o in offenders), offenders
+
+
 # -- file count and total -------------------------------------------------------
 
 def test_more_files_than_the_budget_fails(tmp_path):

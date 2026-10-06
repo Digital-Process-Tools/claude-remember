@@ -993,7 +993,10 @@ was "Validation ran out of time". That is the failure the `release` branch exist
   Anthropic reviewer" (Approved). Shipping one now would only clear the `ICON_MISSING` warning;
   it would not change the listing icon. **The lesson for a new plugin: ship the icon before the
   first portal submission** (see #865). For another repository: put the icon in the plugin
-  folder **before** the first save or submit.
+  folder **before** the first save or submit. **Shipped, 2026-10-06 (#865):** remember now ships
+  `.claude-plugin/icon.png` (a square 512x512 PNG), referenced from `plugin.json`'s `icon` field,
+  purely to clear the `ICON_MISSING` warning -- per the "set only once" rule above this does not
+  change the live listing icon.
 - **`USES_HOOKS`** is information only and stays for any plugin that ships hooks.
 
 ### For another plugin repository, in addition to the reuse steps below
