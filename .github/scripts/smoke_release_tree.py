@@ -178,9 +178,12 @@ def _env(work: Path, plugin: Path, project: Path, home: Path, fakebin: Path,
 
 def _survivors(pgids: set, marker: str) -> list:
     """(pid, pgid, args) of live processes in one of PGIDS or naming MARKER."""
+    # errors="replace" (#910): `ps -A` lists every process on the machine, and this
+    # is a diagnostic scan (reap/report), not a test of the bytes themselves -- an
+    # unrelated process's non-UTF-8 argv must not crash the scan.
     try:
         out = subprocess.run(["ps", "-A", "-o", "pid=,pgid=,args="], capture_output=True,
-                             text=True, check=False).stdout
+                             text=True, errors="replace", check=False).stdout
     except OSError:
         return []
     me = os.getpid()

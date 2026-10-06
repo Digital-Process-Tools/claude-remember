@@ -116,8 +116,11 @@ def test_a_hook_writing_into_its_plugin_root_does_not_touch_the_shipped_tree(tmp
 
 
 def _alive(marker: str) -> bool:
+    # errors="replace" (#910): `ps -eo` lists every process on the machine, and
+    # this is a diagnostic substring scan, not a test of the bytes themselves --
+    # an unrelated process's non-UTF-8 argv must not crash the scan.
     out = subprocess.run(["ps", "-eo", "args="], capture_output=True, text=True,
-                         check=False).stdout
+                         errors="replace", check=False).stdout
     return any(marker in line for line in out.splitlines())
 
 
@@ -133,6 +136,44 @@ def test_a_lingering_background_child_is_killed_and_reported(tmp_path):
     assert "killed" in result.report()
     time.sleep(0.5)
     assert not _alive(marker), "a background child outlived the smoke run"
+
+
+def _fake_ps_emitting_invalid_utf8(monkeypatch):
+    """Patch the shared `subprocess` module so a `ps` invocation is replaced with a
+    tiny emitter that writes one invalid-UTF-8 byte (#910): a `ps -A`/`ps -eo` scan
+    lists every process on the machine, and under `pytest -n` concurrent workers'
+    own child processes (or any unrelated process) can have a non-UTF-8 argv --
+    this reproduces that without depending on a real such process existing."""
+    real_run = subprocess.run
+    emitter = [sys.executable, "-c",
+               "import sys; sys.stdout.buffer.write(b'123 456 bad\\xffname\\n')"]
+
+    def fake_run(cmd, *args, **kwargs):
+        if cmd and cmd[0] == "ps":
+            cmd = emitter
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+
+@posix_only
+def test__alive_tolerates_a_non_utf8_process_name_in_ps_output(monkeypatch):
+    """(#910) `_alive`'s `ps` decode used to be strict (`text=True`, no `errors=`),
+    so a non-UTF-8 argv anywhere on the machine raised UnicodeDecodeError instead
+    of returning a plain bool -- this is diagnostic-only output, not the thing
+    under test, so it must tolerate undecodable bytes rather than crash."""
+    _fake_ps_emitting_invalid_utf8(monkeypatch)
+    assert _alive("marker-that-is-not-in-the-fake-output") is False
+
+
+@posix_only
+def test__survivors_tolerates_a_non_utf8_process_name_in_ps_output(monkeypatch):
+    """(#910) sibling of the test above for the production `_survivors` scan that
+    `_reap`/`run_smoke` actually use -- the real site both #851 and #900's smoke
+    tests share, so a flake there shows up in both files."""
+    mod = _load(SCRIPT, "smoke_release_tree_910_survivors")
+    _fake_ps_emitting_invalid_utf8(monkeypatch)
+    assert mod._survivors(set(), "marker-that-is-not-in-the-fake-output") == []
 
 
 @posix_only
