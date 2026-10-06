@@ -787,3 +787,141 @@ REMEMBER_DIR={shlex.quote(remember_dir)}
             f"reading the clock once and comparing with a builtin "
             f"(#914)\ncounter contents: {counter.read_text()!r}"
         )
+
+
+class TestHousekeepingSweepFallbackAndEdgeCases:
+    """#914 self-review (Explore round 1): two things the fast-path tests
+    above cannot exercise because they only ever run on a machine where
+    the fast path succeeds.
+    """
+
+    def _run_extracted_block_with_path_override(
+        self, autonomous: Path, remember_dir: str, *,
+        retention_days, extra_path_dir: Path | None = None,
+    ):
+        """Same shape as TestHousekeepingGlobIsPortableAcrossSeparators's
+        own `_run_extracted_block`, but with the retention-days value
+        passed through as given (no implicit str()/int() coercion that
+        would hide a config value shaped like "08") and an optional
+        directory prepended to PATH, ahead of the real `mktemp`/`touch` --
+        used below to force the fast path's own reference-file build to
+        fail without touching the block itself.
+        """
+        block = TestHousekeepingGlobIsPortableAcrossSeparators._extract_housekeeping_block()
+        script = f"""
+set -u
+config() {{ printf '%s\n' {shlex.quote(str(retention_days))}; }}
+log() {{ :; }}
+_remember_date() {{ date "$@"; }}
+CLEANUP_FILES=()
+REMEMBER_DIR={shlex.quote(remember_dir)}
+{block}
+"""
+        env = dict(os.environ)
+        if extra_path_dir is not None:
+            env["PATH"] = f"{extra_path_dir}{os.pathsep}{env.get('PATH', '')}"
+        result = subprocess.run(
+            [BASH, "-c", script], env=env, capture_output=True, text=True,
+            timeout=30, check=False,
+        )
+        return result
+
+    def test_must_fire_zero_padded_retention_days_does_not_misfire_the_fast_path(self, tmp_path):
+        """Self-review finding: the digits-only sanitizer in
+        save-session.sh accepts a config value like "08" unchanged (it
+        rejects non-digit characters, not leading zeros), and bash
+        arithmetic treats an unprefixed leading-zero literal as octal --
+        where 8/9 are not valid octal digits. Without `10#` on
+        `_AUTONOMOUS_LOG_RETENTION_DAYS` too (only the clock read had it),
+        `_remember_auto_cutoff=$(( 10#$_remember_auto_now -
+        _AUTONOMOUS_LOG_RETENTION_DAYS * 86400 ))` aborts with "value too
+        great for base" for this exact, human-plausible config value --
+        permanently defeating the fast path (and spamming stderr on every
+        flush) for anyone who writes "08" rather than "8".
+        """
+        autonomous = tmp_path / ".remember" / "logs" / "autonomous"
+        autonomous.mkdir(parents=True)
+        # Clearly past an 8-day window (10 days, not exactly 8) -- at the
+        # boundary itself the sweep's own semantics (age STRICTLY greater
+        # than the retention window, matching the pre-existing `-gt`
+        # comparison this fast path replaces) keep the file, so a file
+        # exactly as old as the window would pass vacuously here too.
+        ten_days_ago = time.time() - (10 * 24 * 3600)
+        stale = autonomous / "session-end-000000-11111.log"
+        stale.write_text("12:00:00 [session-end] flush started\n")
+        os.utime(stale, (ten_days_ago, ten_days_ago))
+        one_day_ago = time.time() - (1 * 24 * 3600)
+        fresh = autonomous / "session-end-000000-22222.log"
+        fresh.write_text("12:00:00 [session-end] flush started\n")
+        os.utime(fresh, (one_day_ago, one_day_ago))
+
+        result = self._run_extracted_block_with_path_override(
+            autonomous, str(tmp_path / ".remember"), retention_days="08",
+        )
+
+        assert result.returncode == 0, (
+            f"the extracted housekeeping block itself failed to run with "
+            f"retention_days='08'\nstdout={result.stdout}\nstderr={result.stderr}"
+        )
+        assert "value too great for base" not in result.stderr, (
+            "retention_days='08' crashed the cutoff arithmetic with a "
+            "bash 'value too great for base' error (octal "
+            "misinterpretation of a leading zero) -- #914's own fast "
+            f"path can never engage for this config value\nstderr={result.stderr!r}"
+        )
+        assert not stale.exists(), (
+            "a 10-day-old log survived with retention_days='08' -- the "
+            "sweep must still reclaim past-window files even when the "
+            "fast path's own arithmetic degrades\n" + _dump_dir(autonomous)
+        )
+        assert fresh.exists(), (
+            "a 1-day-old log was reclaimed with retention_days='08' -- "
+            "positive control failed\n" + _dump_dir(autonomous)
+        )
+
+    def test_must_fire_fallback_loop_still_reclaims_when_reference_file_cannot_be_built(self, tmp_path):
+        """Self-review finding: every test above only ever runs the FAST
+        path (the real `mktemp`/`touch -d` succeed on every CI platform
+        this suite runs on), so nothing exercises the reintroduced
+        per-file stat()+date() fallback loop -- including the rename of
+        its own loop variable (`_remember_auto_now` ->
+        `_remember_auto_file_now`) made in the same diff that added the
+        fast path. A `mktemp` that always fails forces `_remember_auto_ref`
+        to stay empty, the documented trigger for the fallback.
+        """
+        autonomous = tmp_path / ".remember" / "logs" / "autonomous"
+        autonomous.mkdir(parents=True)
+        eight_days_ago = time.time() - (8 * 24 * 3600)
+        stale = autonomous / "session-end-000000-33333.log"
+        stale.write_text("12:00:00 [session-end] flush started\n")
+        os.utime(stale, (eight_days_ago, eight_days_ago))
+        one_day_ago = time.time() - (1 * 24 * 3600)
+        fresh = autonomous / "session-end-000000-44444.log"
+        fresh.write_text("12:00:00 [session-end] flush started\n")
+        os.utime(fresh, (one_day_ago, one_day_ago))
+
+        broken_bin = tmp_path / "broken-mktemp-bin"
+        broken_bin.mkdir()
+        fake_mktemp = broken_bin / "mktemp"
+        fake_mktemp.write_text("#!/bin/sh\nexit 1\n")
+        fake_mktemp.chmod(0o755)
+
+        result = self._run_extracted_block_with_path_override(
+            autonomous, str(tmp_path / ".remember"), retention_days=7,
+            extra_path_dir=broken_bin,
+        )
+
+        assert result.returncode == 0, (
+            f"the extracted housekeeping block failed to run with mktemp "
+            f"forced to fail\nstdout={result.stdout}\nstderr={result.stderr}"
+        )
+        assert not stale.exists(), (
+            "an 8-day-old log survived the FALLBACK loop (mktemp forced "
+            "to fail, so the fast path's own reference file could never "
+            "be built) -- the per-file stat()+date() comparison this "
+            "diff kept as a fallback is broken\n" + _dump_dir(autonomous)
+        )
+        assert fresh.exists(), (
+            "a 1-day-old log was reclaimed by the fallback loop -- "
+            "positive control failed\n" + _dump_dir(autonomous)
+        )

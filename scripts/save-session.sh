@@ -1646,19 +1646,22 @@ fi
 # an mtime of now and is nowhere near the cutoff, so neither branch below
 # can delete output a caller might still want to read.
 #
-# A portable stat-based loop, not `find -mtime "+N" -delete` /
-# `find -empty -delete` (#502): `find` is the one command on this path with
-# a real PATH-shadowing risk on Windows Git Bash (System32's find.exe
-# takes none of the flags either sweep needs and would fail silently into
-# the swallowed stderr the old `2>/dev/null` carried, degrading "reclaim"
-# into a silent always-keep with nothing surfaced) -- and, independent of
-# shadowing, `find`'s own day-rounding `-mtime` arithmetic is one more
-# place for a platform-specific off-by-one to hide where nothing would
-# report it. session-start-hook.sh already documents the identical
-# PATH-shadowing risk for its own `-mmin` sweep and takes the same
-# stat-based way around it; `stat` here uses the same
-# GNU-first-then-BSD-fallback order already used there, at doctor.sh:257
-# and at lib-lock.sh:183.
+# Not `find -mtime "+N" -delete` / `find -empty -delete` (#502): `find` is
+# the one command on this path with a real PATH-shadowing risk on Windows
+# Git Bash (System32's find.exe takes none of the flags either sweep needs
+# and would fail silently into the swallowed stderr the old `2>/dev/null`
+# carried, degrading "reclaim" into a silent always-keep with nothing
+# surfaced) -- and, independent of shadowing, `find`'s own day-rounding
+# `-mtime` arithmetic is one more place for a platform-specific off-by-one
+# to hide where nothing would report it.
+#
+# #914: on the common path below, each surviving file is now compared
+# against one shared reference file with the bash builtin `-ot` -- no
+# `stat`/`date` process per file. `stat`'s own GNU-first-then-BSD-fallback
+# order (the same order session-start-hook.sh's `-mmin` sweep uses,
+# doctor.sh:257, lib-lock.sh:183) now lives only in the per-file fallback
+# loop below, used when the clock read or the reference file cannot be
+# built.
 _AUTONOMOUS_LOG_RETENTION_DAYS=$(config ".thresholds.autonomous_log_retention_days" 7)
 if [ -z "$_AUTONOMOUS_LOG_RETENTION_DAYS" ] || [ "${_AUTONOMOUS_LOG_RETENTION_DAYS#*[!0-9]}" != "$_AUTONOMOUS_LOG_RETENTION_DAYS" ]; then _AUTONOMOUS_LOG_RETENTION_DAYS=7; fi
 # CI (job 100831279309 and its 3.10/3.11/3.12 siblings on PR #499): every
@@ -1729,9 +1732,22 @@ fi
 _remember_auto_now=$(_remember_date +%s)
 _remember_auto_ref=""
 if [ -n "$_remember_auto_now" ] && [[ "$_remember_auto_now" != *[!0-9]* ]]; then
-    _remember_auto_cutoff=$(( 10#$_remember_auto_now - _AUTONOMOUS_LOG_RETENTION_DAYS * 86400 ))
+    # 10# on BOTH operands (self-review finding): a config value like "08"
+    # or "09" passes the digits-only sanitizer above unchanged, and bash
+    # arithmetic treats an unprefixed leading-zero literal as octal, where
+    # 8/9 are not valid octal digits -- "value too great for base" aborts
+    # this whole conditional (and silently falls through to the per-file
+    # fallback) for exactly that class of human-plausible config value.
+    _remember_auto_cutoff=$(( 10#$_remember_auto_now - (10#$_AUTONOMOUS_LOG_RETENTION_DAYS) * 86400 ))
     _remember_auto_ref=$(mktemp "${TMPDIR:-/tmp}/remember-retention-ref.XXXXXX" 2>/dev/null) || _remember_auto_ref=""
     if [ -n "$_remember_auto_ref" ]; then
+        # Registered with the script's own cleanup() (CLEANUP_FILES, trap
+        # EXIT above) rather than relied on solely via the bare `rm -f`
+        # after the loop (self-review finding): an abrupt exit between
+        # here and that `rm -f` would otherwise leak this file into
+        # $TMPDIR forever, since mktemp's name is unique per run and
+        # nothing later would ever clean it up.
+        CLEANUP_FILES+=("$_remember_auto_ref")
         if ! touch -d "@$_remember_auto_cutoff" "$_remember_auto_ref" 2>/dev/null; then
             # BSD touch has no -d; derive the same instant through BSD
             # date's own -r (GNU-first-then-BSD-fallback, same order used
