@@ -34,6 +34,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -56,6 +57,33 @@ pytestmark = pytest.mark.skipif(
     BASH is None,
     reason="no usable bash found (checked PATH, then Git-for-Windows install locations)",
 )
+
+
+def _run_bash_script(script: str, env: dict, *, timeout: int = 30):
+    """Runs `script` under BASH by writing it to a real file and invoking
+    `bash <path>`, never `bash -c "<script>"` (#914 self-review, PR #927
+    CI job 112366941574): on windows-latest, the extracted housekeeping
+    block's own generated script -- several times longer than the block
+    it replaced -- was silently TRUNCATED when passed as a single `-c`
+    argument (confirmed by the reported error itself: an `if` opened on
+    line 131 hit EOF at line 133, two lines later, nowhere near the
+    block's real closing `fi`/`done`/`unset` thirty-odd lines further
+    down) -- a known class of bug when a non-MSYS parent process (Python)
+    launches MSYS/Git-Bash's bash.exe directly via CreateProcess, which
+    is not MSYS-aware and does not go through MSYS's own argv marshaling.
+    A real script FILE sidesteps the whole command-line-argument path;
+    `bash -c` is not used again anywhere else in this file.
+    """
+    fd, path = tempfile.mkstemp(suffix=".sh")
+    try:
+        with os.fdopen(fd, "w", newline="\n") as f:
+            f.write(script)
+        return subprocess.run(
+            [BASH, path], env=env, capture_output=True, text=True,
+            timeout=timeout, check=False,
+        )
+    finally:
+        os.unlink(path)
 
 
 def _dump_dir(d: Path) -> str:
@@ -559,10 +587,7 @@ _run_housekeeping_block() {{
 }}
 _run_housekeeping_block
 """
-        result = subprocess.run(
-            [BASH, "-c", script], env=dict(os.environ), capture_output=True, text=True,
-            timeout=30, check=False,
-        )
+        result = _run_bash_script(script, dict(os.environ))
         assert result.returncode == 0, (
             f"the extracted housekeeping block itself failed to run "
             f"(REMEMBER_DIR={remember_dir!r}, OSTYPE={ostype!r})\n"
@@ -719,10 +744,7 @@ REMEMBER_DIR={shlex.quote(remember_dir)}
         env = dict(os.environ)
         env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
         env["REMEMBER_FORK_COUNTER"] = str(counter)
-        result = subprocess.run(
-            [BASH, "-c", script], env=env, capture_output=True, text=True,
-            timeout=30, check=False,
-        )
+        result = _run_bash_script(script, env)
         assert result.returncode == 0, (
             f"the extracted housekeeping block itself failed to run\n"
             f"stdout={result.stdout}\nstderr={result.stderr}"
@@ -820,11 +842,7 @@ REMEMBER_DIR={shlex.quote(remember_dir)}
         env = dict(os.environ)
         if extra_path_dir is not None:
             env["PATH"] = f"{extra_path_dir}{os.pathsep}{env.get('PATH', '')}"
-        result = subprocess.run(
-            [BASH, "-c", script], env=env, capture_output=True, text=True,
-            timeout=30, check=False,
-        )
-        return result
+        return _run_bash_script(script, env)
 
     def test_must_fire_zero_padded_retention_days_does_not_misfire_the_fast_path(self, tmp_path):
         """Self-review finding: the digits-only sanitizer in
