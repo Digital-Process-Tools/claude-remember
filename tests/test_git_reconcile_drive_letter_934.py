@@ -7,9 +7,15 @@ copy of the "is this already absolute" guard that `50-git-backup.sh`'s
 path against the bracket expression ``[/\\]`` -- both a forward slash and a
 backslash -- so ``C:/repo/.git`` and ``C:\repo\.git`` are both recognised as
 already absolute. Reconcile's own copy carries ``[/\]`` instead (backslash
-not doubled), which bash parses as a bracket class containing only a bare
-``/`` -- so the backslash form is never recognised and falls through to being
-treated as relative.
+not doubled), which bash's glob-pattern bracket matching parses as an
+unterminated class (the lone ``\`` escapes the following ``]`` rather than
+closing the bracket) -- so the whole expression matches neither slash form,
+and BOTH ``C:/repo/.git`` and ``C:\repo\.git`` fall through to being
+misclassified as relative, not only the backslash form. Verified by
+reverting only this guard back to ``[/\]`` and re-running this file's
+`test_reconcile_guard_matches_siblings`: both the `forward-slash` and
+`backslash` cases fail (only `relative-control` passes), confirming the
+old guard was broken for both inputs rather than just the backslash one.
 
 This drives the literal guard line straight out of the shipped hook file (so
 the test cannot drift from what actually ships) and runs it standalone in a
