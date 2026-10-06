@@ -846,6 +846,8 @@ _UNSCOPED_COMMANDS = {
     "poetry", "cargo", "go", "gem", "brew",
     # downloaders
     "curl", "wget",
+    # wrapper commands that can run arbitrary programs (#879)
+    "xargs", "sudo", "eval", "exec", "source", ".", "find", "awk", "nohup", "timeout",
 }
 _PLUGIN_ROOT = "${CLAUDE_PLUGIN_ROOT}/"
 
@@ -871,6 +873,8 @@ def bash_grant_problem(entry: str) -> str | None:
     for p in paths:
         if "*" in p or "?" in p:
             return f"`Bash({pattern})` has a wildcard in the path"
+        if ".." in p.split("/"):
+            return f"`Bash({pattern})` has a `..` path segment"
         if not p.startswith(_PLUGIN_ROOT):
             base = p.rsplit("/", 1)[-1].lower()
             if base in _UNSCOPED_COMMANDS or base.rstrip("0123456789.") in _UNSCOPED_COMMANDS:
@@ -879,7 +883,8 @@ def bash_grant_problem(entry: str) -> str | None:
                 return (f"`Bash({pattern})` names a relative path; name the plugin's script "
                         f"as {_PLUGIN_ROOT}...")
     first = words[0].rstrip("*").lower()
-    if first in _UNSCOPED_COMMANDS and not any(p.startswith(_PLUGIN_ROOT) for p in paths):
+    first_unscoped = first in _UNSCOPED_COMMANDS or first.rstrip("0123456789.") in _UNSCOPED_COMMANDS
+    if first_unscoped and not any(p.startswith(_PLUGIN_ROOT) for p in paths):
         return f"`Bash({pattern})` is a wildcard after `{words[0]}`, not one plugin script"
     return None
 
