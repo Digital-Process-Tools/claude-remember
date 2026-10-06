@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.41.0] - 2026-10-06 — the check_release_tree needle catches a one-line positional delegate, and the #902 unsafe-REMEMBER_DIR refusal lands before mkdir with date+pid save-log names
+
+### Added
+
+- Added: a `.claude/jit-context` entry fires on any edit under `scripts/*.sh`, stating the
+  Anthropic directory's 128 KiB hook-script scanner limit, the 120 KiB release budget
+  `check_release_tree.py` enforces, and the scanner's other known triggers (`case` statements,
+  typed `<<` here-documents, naming another script by path, and the one-line positional-delegate
+  shape from #905) (#904).
+- Added: `docs/releasing.md` now documents that the hook-script size budget already gates every
+  pull request through the ordinary `pytest` job
+  (`test_this_repository_built_tree_has_no_check_failures`), not only a release build -- no new
+  check was needed for this half of #904.
+
+### Fixed
+
+- Fixed #902: a failed seed write to `logs/autonomous/save-HHMMSS.log` could
+  leave `log()`'s own directory resolution unvalidated -- `log.sh` now
+  refuses to `mkdir -p` a `REMEMBER_DIR` that is not an absolute path or
+  that carries a newline/carriage return, instead of building a directory
+  tree under the current working directory from it. The refusal skips the
+  mkdir and sends the daily log line to `/dev/null`; it no longer aborts
+  `log.sh` itself, so every hook that sources it keeps `log`, `dispatch` and
+  the rest (a project directory with a newline in its name still gets its
+  SessionStart run and its `status=unavailable` record, #294).
+- Fixed #902: autonomous save-log names now carry the date and the writing
+  process's PID (`save-YYYYMMDD-HHMMSS-PID.log`), not HHMMSS alone, so a
+  seed write can never collide with and append to a same-time-of-day file
+  left over from an earlier day that is still inside the retention window.
+
+- Fixed: `check_release_tree.py` now FAILs a shipped shell function whose whole body is a single
+  call to another function with a positional parameter (`$1`..`$9`, `${1}`..) spliced into a
+  string argument, anywhere in a shipped `.sh` -- the shape that held three of `scripts/log.sh`'s
+  dispatch reporters at the Anthropic directory as `COMMAND_SCRIPT_NOT_FOLLOWED` until #899 r40
+  restored them to self-contained bodies (#905). Catches the shape whether the function is one
+  physical line or pretty-printed across several, whether the splice is quoted or a bareword
+  argument, whether the file is declared with `function name()` or plain `name()`, and whether
+  the file is checked out with LF or CRLF line endings.
+
 ## [0.40.0] - 2026-10-05 — release tree scrub finishes with self-contained hook compilation, and the legacy .remember/ auto-move is retired
 
 ### Removed
@@ -4316,7 +4355,8 @@ Fixes [#9](https://github.com/Digital-Process-Tools/claude-remember/issues/9), a
 
 ## [0.1.0] — Initial release
 
-[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.40.0...HEAD
+[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.41.0...HEAD
+[0.41.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.41.0
 [0.40.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.40.0
 [0.39.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.39.0
 [0.38.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.38.0
