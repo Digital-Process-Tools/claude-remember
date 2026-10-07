@@ -28,6 +28,15 @@ otherwise land `0.36.2` on top of it, and every install pinned to `release` woul
 drop. If you really do need to publish an older line on purpose, re-run the workflow via
 `workflow_dispatch` with the `allow_version_regression` input set.
 
+**This guard only exists in the workflow file as it is at the tag's own commit** -- an ordinary
+`push: tags:` run executes `release-branch.yml` as it exists *at the tagged commit*, not the copy
+on `main` ([#892](https://github.com/Digital-Process-Tools/claude-remember/issues/892)). #856
+first shipped in v0.39.0, so pushing a tag directly for any release line before v0.39.0 runs that
+line's own pre-#856 copy of the workflow, which has no `check_version_order.py` step at all --
+the refusal above never runs, and a version drop the next install notices is the only sign
+anything happened. Publish any pre-v0.39.0 line through `workflow_dispatch` from `main` instead
+of pushing its tag directly, until no reachable release line predates the guard.
+
 ## The sequence
 
 1. **Fold `changelog.d/` into a `## [x.y.z]` section of CHANGELOG.md and bump every version
