@@ -7,6 +7,88 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.42.1] - 2026-10-08 — the git-reconcile hook is hard-disabled pending its fifth consecutive destroys-class finding (#969)
+
+### Fixed
+
+- Fixed: `pipeline/log.py`'s `log()` now flattens control characters in the
+  message before writing, mirroring the shell-side `tr '[:cntrl:]' ' '`
+  flattening already applied by `report_error()` / `_dispatch_report_skip()`
+  (#599/#618). An embedded newline or other control byte in a logged message
+  (for example an untrusted error string) could previously corrupt the log
+  line's own structure or forge what looks like a second entry (#881).
+
+- Fixed: README's disclosure of the persistent config-flatten cache (#888) named the pre-#864 filename (`remember-config-cache-<key>`) instead of the real on-disk name (`remember-config-cache-v2-<key>`), and nothing ever removed the old-named file an install upgrading across #864 was left holding. The disclosure now names the real filename, and the cache publisher best-effort removes the leftover v1-named orphan the next time it writes the v2 cache.
+
+- Fixed: docs/releasing.md's "Reusing this in another plugin repository" section now tells an adopter to copy `check_version_order.py` too (#856 wired it into the `publish` job; omitting it fails the first release with a `release` parent), and now states that a missing or hookless `hooks/hooks.json` is a hard failure in both `check_release_tree.py` and `smoke_release_tree.py` (#858), with no config flag to opt out (#889).
+
+- Fixed: `docs/releasing.md` now states that #856's `check_version_order.py` refusal only runs for a tag cut from a commit whose own copy of `release-branch.yml` already carries that step -- an ordinary `push: tags:` trigger runs the workflow file as it exists at the tagged commit, not the one on `main`. #856 first shipped in v0.39.0, so pushing a patch tag directly for any release line before v0.39.0 ran that line's own pre-#856 workflow, which has no guard at all. The doc now says to publish any such line through `workflow_dispatch` from `main` instead (#892).
+
+- Fixed: stale `haiku.oauth_token` / `REMEMBER_OAUTH_TOKEN` wording in
+  `hooks.d/after_save/50-git-backup.sh`, `hooks.d/before_session_start/50-git-restore.sh`,
+  `scripts/lib-memory-dir.sh`, `scripts/log.sh`, `docs/git-backup-security.md` and
+  `docs/external-storage-mode.md` (#918). Six sites still called `haiku.oauth_token`
+  "a live ... OAuth credential" or told users to set `REMEMBER_OAUTH_TOKEN` as a
+  working mitigation, after #860 (rounds 3/4) made both inert everywhere -- neither
+  is read for authentication on any host any more. Reworded to match
+  `docs/configuration.md`'s own current framing ("removed entirely ... nothing to
+  migrate it to"), found by curate while disposing of two release-audit trap.d
+  fragments against the shrinking subset of sites each still named.
+
+- Fixed: the git-restore DIVERGED notice and the git-backup REJECTED notice (#935) no longer claim "nothing will merge or rebase for you" / "the backup has STOPPED and will not resume on its own" when `git_reconcile.enabled` is `true`. With reconcile on, the next `after_save` run can fetch, rebase and push the store automatically, and the old wording could send a human to resolve a divergence by hand while that automatic rebase was racing them. The wording is unchanged when reconcile is left at its default (off).
+
+- Fixed: the fast-path tests in
+  `tests/test_autonomous_log_retention_487.py` now assert that the real
+  `mktemp` binary actually succeeded, rather than only asserting the
+  sweep's outcome -- a test named after the fast path could previously
+  pass just as well if the fallback silently ran instead. The PATH built
+  for the subprocess on Windows is now injected as an MSYS-posix string
+  inside the generated bash script text rather than through the env
+  block, since a drive-lettered Windows path shreds bash's own
+  colon-based PATH splitting regardless of slash direction (#951).
+
+- Fixed: `hooks.d/after_save/60-git-reconcile.sh`'s conflict handling no
+  longer autostashes another slug's dirty tracked write (`--no-autostash` on
+  every rebase call, so a dirty tree simply refuses to start the rebase
+  instead of silently stashing it where `rebase --quit` would never
+  re-apply it), no longer scopes its abort restore to the running slug
+  alone (a shared store's ahead/behind commit set can span other slugs
+  too; the restore now covers every path either side of the rebase could
+  have touched), and no longer silently switches HEAD to the configured
+  branch when git's own record shows the rebase started from a different
+  one (it now refuses and reports instead) (#952).
+- Fixed: `_grc_rebase_in_progress` in the same hook no longer collapses a
+  failed `git rev-parse --git-path` check into "no rebase in progress" --
+  it now reports a distinct, honest "could not determine" and declines
+  rather than guessing (#953).
+
+- Fixed: `hooks.d/after_save/60-git-reconcile.sh`'s conflict path (#954) now bumps NDC's own generation marker, the same way the fast-forward and successful-rebase paths already do. A failed rebase that hits a real conflict already rewrites the slug's `now.md` to conflict-marker content before this hook's scoped restore runs, and an NDC consolidation round that snapshotted `now.md` inside that window had no way to notice -- it could trim local lines it never actually summarised. The bump now fires unconditionally as soon as the conflict path is entered, so NDC's existing staleness guard also catches this writer.
+
+- Fixed: `hooks.d/after_save/60-git-reconcile.sh`'s scoped-abort restore used
+  `mapfile`, a bash 4.0+ builtin unavailable on this repo's documented floor
+  (bash 3.2, stock macOS `/bin/bash` -- exactly what GitHub Actions'
+  `macos-latest` runner resolves plain `bash` to). There `mapfile` failed as
+  "command not found", silently leaving `_GRC_TOUCHED_PATHS`/`_grc_existing`
+  empty, so a real conflict's scoped checkout restored nothing: the
+  conflicting file was left with unresolved merge markers, another slug's
+  upstream-only change was never restored, and no notice or log was written.
+  Replaced with a `while IFS= read -r` loop into the array, which works on
+  every bash this repo supports (#962).
+
+- Fixed (#966): `_grc_report_conflict` in `hooks.d/after_save/60-git-reconcile.sh`'s
+  scoped conflict-abort now snapshots each restore-set path's content immediately
+  before `git rebase --quit` and skips the checkout/`rm -f` for any path whose
+  content changed by the time the restore runs. Previously the restore ran
+  unconditionally over every path either side's commits touched, so a different
+  slug's concurrent write landing on a shared, non-`$SLUG/` path during that call
+  was silently discarded even though only this slug's own locks were held. This
+  narrows the race to the `rebase --quit` call itself (and the few subprocess
+  calls the restore makes right after it); a write landing earlier, while this
+  run's own rebase is still replaying, is a separate, wider window the fix does
+  not close (`trap.d/966.residual-race.md`).
+
+- Hard-disabled `60-git-reconcile.sh` (the optional two-way git reconcile hook, `git_reconcile.enabled`): it now exits immediately, before even reading that config flag, on every run. This is the fifth consecutive `destroys`-class finding on this hook across two releases (#932, #939, #946, #952's regression, #966), each fix closing one race window and opening the next narrower one. The latest (#969) found that a foreign write landing in the window from the start of `git rebase --no-autostash` through the conflict firing -- before #966's own pre/post-`rebase --quit` snapshot is even taken -- could still be silently discarded by the conflict-abort restore, while the hook logged "aborted, the tree is unchanged". Rather than attempt a sixth fix, reconcile is disabled for this release: anyone who had `git_reconcile.enabled=true` set will see no more automatic fetch/fast-forward/rebase-and-push from this hook until #969's real fix lands. `50-git-backup.sh`'s commit-and-push-only behavior and `50-git-restore.sh`'s fast-forward-only behavior are unaffected.
+
 ## [0.42.0] - 2026-10-07 — the new git-reconcile hook (#903) ships behind a flag, with its conflict-abort data-loss chain (#939, #942, #943, #946) closed before release
 
 ### Added
@@ -4528,7 +4610,8 @@ Fixes [#9](https://github.com/Digital-Process-Tools/claude-remember/issues/9), a
 
 ## [0.1.0] — Initial release
 
-[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.42.0...HEAD
+[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.42.1...HEAD
+[0.42.1]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.42.1
 [0.42.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.42.0
 [0.41.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.41.0
 [0.40.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.40.0
