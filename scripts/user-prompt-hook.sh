@@ -363,7 +363,12 @@ declare -F dispatch >/dev/null 2>&1 || dispatch() { :; }
 #                       never wired in.
 #   git-backup-notice   after_save/50-git-backup.sh: the backup remote has
 #                       rejected the last N pushes, so memory is committed
-#                       locally and going nowhere, and no retry will fix it.
+#                       locally and going nowhere, and no retry of the SAME
+#                       push will fix it -- UNLESS git_reconcile.enabled is
+#                       also set (#935), in which case the next after_save
+#                       run (60-git-reconcile.sh, same dispatch pass) may
+#                       fetch, rebase and push automatically before the human
+#                       acts on this by hand.
 #   git-restore-notice  before_session_start/50-git-restore.sh: the store has
 #                       DIVERGED from its backup remote, so the memory loaded
 #                       this session is missing what the other machine wrote.
