@@ -43,7 +43,10 @@ def log(component: str, message: str, log_dir: str) -> None:
 
     Args:
         component: Pipeline stage identifier (e.g., "save", "consolidate").
-        message: Free-form log message text.
+        message: Free-form log message text. Control characters (ASCII C0
+            and DEL) are flattened to spaces before writing, mirroring the
+            shell-side ``tr '[:cntrl:]' ' '`` precedent (#599/#618, #881), so
+            an untrusted message cannot corrupt the log line's own structure.
         log_dir: Directory where daily log files are stored.
     """
     message = _CONTROL_CHARS.sub(" ", message)
