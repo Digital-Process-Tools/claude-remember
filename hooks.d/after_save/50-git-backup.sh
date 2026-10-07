@@ -454,17 +454,6 @@ fi
         '
     }
 
-    # ── #935: the REJECTED report below must not promise "nothing here will
-    # fetch, merge or rebase for you" when it is false. 60-git-reconcile.sh is
-    # the ONLY place this plugin ever rebases, and it runs right after THIS
-    # hook on the same after_save dispatch pass -- a human who reads "resolve
-    # it by hand" and starts rebasing locally can race that automatic rebase.
-    # This hook itself still never fetches/merges/rebases; it only changes
-    # what it SAYS. Read once here rather than inside _push_and_report so a
-    # transient (non-rejected) push never pays for a config lookup it has no
-    # use for.
-    RECONCILE_ENABLED=$(config '.git_reconcile.enabled' 'false')
-
     # One decision for all three push sites. The funnel #253 reports had three
     # mouths; fixing one would have left the reported case reachable through the
     # other two, and the next site added would drift again.
@@ -484,6 +473,18 @@ fi
             log "git-backup" "push deferred (will retry next backup)"
             return 0
         fi
+
+        # ── #935: the REJECTED report below must not promise "nothing here
+        # will fetch, merge or rebase for you" when it is false.
+        # 60-git-reconcile.sh is the ONLY place this plugin ever rebases, and
+        # it runs right after THIS hook on the same after_save dispatch pass.
+        # Read here, past the deferral return above, rather than
+        # unconditionally before this function is even defined: a rejection
+        # is the only case that consumes it, and a transient (deferred) push
+        # -- the common case when a push fails at all -- now pays nothing for
+        # it. This hook itself still never fetches/merges/rebases; it only
+        # changes what it SAYS.
+        RECONCILE_ENABLED=$(config '.git_reconcile.enabled' 'false')
 
         # 10# after the case (#327). Every counter in this file is read back
         # from a file the hook wrote, so "08" is only reachable through

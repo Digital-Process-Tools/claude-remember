@@ -513,6 +513,11 @@ class TestTheDivergedNoticeRespectsReconcile:
             "to know the next after_save run may resolve this automatically\n"
             "--- log ---\n" + log
         )
+        assert "Resolve it by hand" not in log, (
+            "the log says reconcile may act automatically and THEN still says "
+            "'Resolve it by hand' in the same breath -- the exact race the fix "
+            "exists to remove\n--- log ---\n" + log
+        )
 
     def test_the_notice_also_stops_promising_no_merge_or_rebase(self, tmp_path):
         home, _remember, _remote, slug_dir, project = self._diverged_with_reconcile(tmp_path)
