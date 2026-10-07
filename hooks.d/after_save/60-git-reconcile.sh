@@ -21,15 +21,18 @@
 #       tip and pushes, with one retry if the remote moved again between the
 #       fetch and the push
 #     - a conflict during the rebase: drops the rebase state and resets
-#       ONLY this run's own slug subtree back to its pre-rebase content
-#       (git rebase --quit + a scoped checkout, #943 -- NOT git rebase
-#       --abort, which resets the whole tracked tree), then reports the
-#       conflicting file names through a git-reconcile-notice the same way
-#       50-git-restore.sh's diverged notice works. A different slug
-#       sharing this REPO_ROOT that landed a tracked write of its own
+#       every path THIS RUN'S OWN rebase could have changed -- the union
+#       of this run's own ahead commits and the remote's behind commits,
+#       diffed against their merge-base, NOT merely $SLUG/ (#952: a
+#       shared REPO_ROOT's ahead/behind commit set can span other slugs
+#       too) -- back to its pre-rebase content (git rebase --quit + a
+#       scoped checkout, #943 -- NOT git rebase --abort, which resets the
+#       whole tracked tree), then reports the conflicting file names
+#       through a git-reconcile-notice the same way 50-git-restore.sh's
+#       diverged notice works. A write landing OUTSIDE that computed set
+#       -- genuinely foreign, from a process this run never started --
 #       while the rebase was in flight is never touched, at any point,
-#       because nothing outside this run's own slug subtree is ever
-#       named by the reset.
+#       because nothing outside that set is ever named by the reset.
 #
 #   Never resets, never force-pushes, never creates a merge commit -- there is
 #   no `reset --hard`, `push --force` or `merge` (non-ff-only) anywhere in
@@ -376,7 +379,16 @@ _grc_bump_ndc_gen() {
         if [ "$_rc2" -eq 0 ] && [ -n "$_rd2" ] && [ -d "$_rd2" ]; then
             return 0
         fi
-        if [ "$_rc1" -ne 0 ] && [ "$_rc2" -ne 0 ]; then
+        # Review finding: only firing this when BOTH calls failed misses the
+        # case where exactly ONE fails -- e.g. the rebase-merge check errors
+        # out but rebase-apply's own call succeeds and reports "no
+        # directory". That single failure is still a could-not-tell for
+        # rebase-merge specifically; a merge-based rebase could be sitting
+        # there, hidden behind the half of the check that never ran. Either
+        # call failing (and neither succeeding call having found a
+        # directory, already handled above) is undetermined, not "not in
+        # progress".
+        if [ "$_rc1" -ne 0 ] || [ "$_rc2" -ne 0 ]; then
             return 2
         fi
         return 1
@@ -449,8 +461,12 @@ _grc_bump_ndc_gen() {
         local _local_tip="$1" _remote_tip="$2" _mb
         _mb=$(git -C "$REPO_ROOT" merge-base "$_local_tip" "$_remote_tip" 2>/dev/null) || _mb=""
         if [ -z "$_mb" ]; then
-            # Could not compute a merge-base -- fall back to this run's own
-            # slug rather than silently restoring nothing at all.
+            # Review finding: falling back to $SLUG here, with no trace,
+            # read identically to "the rebase genuinely only ever touches
+            # this one slug" -- the exact pre-#952 scope this function
+            # exists to widen past. Logged so the degraded case leaves a
+            # distinguishable mark instead of silently narrowing back.
+            log "git-reconcile" "WARNING: could not compute a merge-base for the touched-paths restore scope -- falling back to $SLUG only (the pre-#952 scope). If a conflict happens now, another slug's own content may be left exactly as the rebase's new base put it."
             printf '%s\n' "$SLUG"
             return
         fi
