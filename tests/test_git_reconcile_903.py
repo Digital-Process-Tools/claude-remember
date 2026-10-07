@@ -440,6 +440,271 @@ class TestDivergedReconcile:
         )
 
 
+# ── #943: closing the TOCTOU gap the #939/#942 snapshot-and-restore fix
+# could not close, by never letting the abort touch anything outside
+# $SLUG/ in the first place (git rebase --quit + a scoped checkout,
+# instead of git rebase --abort). #942's own exit-status concerns (what
+# if the backup/restore copy fails?) are now moot by construction -- there
+# is no backup or restore step any more to fail -- but the SAME exit-
+# status discipline is re-applied to the new sequence's own two steps
+# (quit, scoped checkout), which is what the tests below cover.
+
+
+class TestScopedAbort:
+
+    def _diverged_with_foreign_write(self, tmp_path):
+        """Shared setup for every test below: a store with two slugs, a
+        real conflict for test-slug, and a concurrent tracked write to
+        other-slug's own file landing before the scoped-abort sequence
+        runs -- the same shape as
+        test_concurrent_write_to_another_slugs_file_survives_the_abort
+        above, reused here because the abort machinery is the part under
+        test, not the race itself."""
+        home, remember, remote, slug_dir, project = _store(tmp_path)
+
+        other_slug_dir = remember / "other-slug"
+        other_slug_dir.mkdir()
+        (other_slug_dir / "now.md").write_text("other slug base\n", encoding="utf-8")
+        _git(remember, ["add", "-A"])
+        _git(remember, ["commit", "-q", "-m", "other slug base"])
+        _git(remember, ["push", "-q", "origin", "main"])
+
+        other = tmp_path / "other-machine"
+        subprocess.run(["git", "clone", "-q", "-b", "main", str(remote), str(other)],
+                       check=True, capture_output=True)
+        _git(other, ["config", "user.email", "other@test"])
+        _git(other, ["config", "user.name", "Other"])
+        (other / "test-slug" / "now.md").write_text(
+            "## 10:00 | test\nFROM THE OTHER MACHINE\n", encoding="utf-8")
+        _git(other, ["add", "-A"])
+        _git(other, ["commit", "-q", "-m", "other machine edit"])
+        _git(other, ["push", "-q", "origin", "main"])
+
+        (slug_dir / "now.md").write_text(
+            "## 10:00 | test\nFROM THIS MACHINE\n", encoding="utf-8")
+        _git(remember, ["add", "-A"])
+        _git(remember, ["commit", "-q", "-m", "this machine edit"])
+
+        return home, remember, remote, slug_dir, project, other_slug_dir
+
+    def test_write_in_the_toctou_window_survives_the_scoped_abort(self, tmp_path):
+        """#943: the shim here injects the foreign write immediately before
+        `git rebase --quit` runs -- i.e. in the exact window the #939/#942
+        snapshot-then-abort approach could not close, since the snapshot
+        (_grc_foreign_changes, a `git status --porcelain` call) necessarily
+        runs BEFORE the abort step and cannot see a write that lands after
+        it. The scoped-abort fix never reads or relies on a snapshot taken
+        before the abort at all, so there is nothing for this write to be
+        missing FROM -- it must survive regardless of when it lands."""
+        home, remember, _remote, slug_dir, project, other_slug_dir = (
+            self._diverged_with_foreign_write(tmp_path))
+
+        real_git = shutil.which("git")
+        assert real_git, "no git on PATH -- fixture assumption broken"
+        bin_dir = tmp_path / "shim-bin"
+        bin_dir.mkdir()
+
+        git_shim = bin_dir / "git"
+        git_shim_lines = [
+            "#!/bin/sh",
+            'if [ "$1" = "-C" ] && [ "$3" = "rebase" ] && [ "$4" = "--quit" ]; then',
+            "    printf '%s\n' \"CONCURRENT WRITE FROM OTHER SLUG\" > \"$RACE_OTHER_SLUG_NOW\"",
+            "fi",
+            f'exec "{real_git}" "$@"',
+            "",
+        ]
+        git_shim.write_text("\n".join(git_shim_lines), encoding="utf-8")
+        git_shim.chmod(0o755)
+
+        cfg = _enabled_config(tmp_path)
+        _run(slug_dir, project, home, cfg,
+             PATH=f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+             RACE_OTHER_SLUG_NOW=str(other_slug_dir / "now.md"))
+        _wait_quiesce(remember)
+
+        assert (other_slug_dir / "now.md").read_text(encoding="utf-8") == (
+            "CONCURRENT WRITE FROM OTHER SLUG\n"
+        ), (
+            "a write that landed AFTER any snapshot the hook might have "
+            "taken, immediately before the abort sequence runs, was "
+            "discarded -- the exact TOCTOU gap #943 describes"
+        )
+
+        rebase_merge = subprocess.run(
+            ["git", "-C", str(remember), "rev-parse", "--path-format=absolute",
+             "--git-path", "rebase-merge"],
+            capture_output=True, text=True, check=False).stdout.strip()
+        assert rebase_merge and not Path(rebase_merge).exists(), (
+            "the rebase must still be cleanly gone afterward"
+        )
+
+        log_files = list((slug_dir / "logs").glob("memory-*.log"))
+        log_text = "\n".join(f.read_text(encoding="utf-8") for f in log_files)
+        assert "never touched" in log_text or "restored" in log_text.lower(), (
+            "the surviving foreign write should be named in the log"
+        )
+
+    def test_quit_failure_leaves_rebase_stuck_and_is_reported_honestly(self, tmp_path):
+        """`git rebase --quit` replaces `git rebase --abort` as the first
+        step. Its own exit status is now what must be checked (#942's
+        exit-status discipline, carried over to the new sequence): a
+        failure there (e.g. a concurrent index.lock) must leave the
+        rebase genuinely stuck and be reported as such, never as
+        'aborted, the tree is unchanged'."""
+        home, remember, _remote, slug_dir, project, other_slug_dir = (
+            self._diverged_with_foreign_write(tmp_path))
+
+        real_git = shutil.which("git")
+        assert real_git, "no git on PATH -- fixture assumption broken"
+        bin_dir = tmp_path / "shim-bin"
+        bin_dir.mkdir()
+
+        git_shim = bin_dir / "git"
+        git_shim_lines = [
+            "#!/bin/sh",
+            'if [ "$1" = "-C" ] && [ "$3" = "rebase" ] && [ "$4" = "--quit" ]; then',
+            "    exit 1",
+            "fi",
+            f'exec "{real_git}" "$@"',
+            "",
+        ]
+        git_shim.write_text("\n".join(git_shim_lines), encoding="utf-8")
+        git_shim.chmod(0o755)
+
+        cfg = _enabled_config(tmp_path)
+        _run(slug_dir, project, home, cfg,
+             PATH=f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+             RACE_OTHER_SLUG_NOW=str(other_slug_dir / "now.md"))
+        _wait_quiesce(remember)
+
+        rebase_merge = subprocess.run(
+            ["git", "-C", str(remember), "rev-parse", "--path-format=absolute",
+             "--git-path", "rebase-merge"],
+            capture_output=True, text=True, check=False).stdout.strip()
+        assert rebase_merge and Path(rebase_merge).exists(), (
+            "the shim made `rebase --quit` itself fail -- the rebase must "
+            "genuinely still be stuck for this test to mean anything"
+        )
+
+        log_files = list((slug_dir / "logs").glob("memory-*.log"))
+        assert log_files, "hook wrote no log at all"
+        log_text = "\n".join(f.read_text(encoding="utf-8") for f in log_files)
+        assert "unchanged" not in log_text, (
+            "a `rebase --quit` that FAILED must never be reported as "
+            "'aborted, the tree is unchanged'"
+        )
+        assert "FAILED" in log_text or "failed" in log_text, (
+            "the quit's own failure must be surfaced in the log"
+        )
+
+    def test_file_added_by_the_upstream_side_before_the_conflict_is_pruned(self, tmp_path):
+        """Review finding (Explore, self-review of #943): `git checkout
+        <tree> -- <pathspec>` only ever RESTORES a path that exists in
+        <tree> -- it never REMOVES a path present in the index/working
+        tree but absent from it. The upstream side being rebased onto can
+        have its own earlier commit that cleanly adds a new file under
+        $SLUG/ before a later commit conflicts; once the rebase sets up
+        that new base to replay onto, the new file is already checked
+        into the index as an ADDITION relative to this run's own
+        pre-rebase HEAD. `git rebase --quit` does not touch it, and the
+        scoped checkout does not remove it either, since HEAD's own
+        pre-rebase tree never had it -- unlike `git rebase --abort`
+        (effectively a `reset --hard` across the whole tree), which would
+        have pruned it. Left unpruned, that stray addition reads as
+        test-slug/'s own untouched content and gets silently committed by
+        the very next ordinary save."""
+        home, remember, remote, slug_dir, project = _store(tmp_path)
+
+        other = tmp_path / "other-machine"
+        subprocess.run(["git", "clone", "-q", "-b", "main", str(remote), str(other)],
+                       check=True, capture_output=True)
+        _git(other, ["config", "user.email", "other@test"])
+        _git(other, ["config", "user.name", "Other"])
+        # First commit on the upstream side: a clean addition under
+        # test-slug/ -- no conflict with anything local.
+        (other / "test-slug" / "added-upstream.md").write_text(
+            "added by the upstream side\n", encoding="utf-8")
+        _git(other, ["add", "-A"])
+        _git(other, ["commit", "-q", "-m", "upstream adds a new file"])
+        # Second commit on the upstream side: conflicts with the local
+        # edit to now.md made below.
+        (other / "test-slug" / "now.md").write_text(
+            "## 10:00 | test\nFROM THE OTHER MACHINE\n", encoding="utf-8")
+        _git(other, ["add", "-A"])
+        _git(other, ["commit", "-q", "-m", "other machine edit (conflicts)"])
+        _git(other, ["push", "-q", "origin", "main"])
+
+        (slug_dir / "now.md").write_text(
+            "## 10:00 | test\nFROM THIS MACHINE\n", encoding="utf-8")
+        _git(remember, ["add", "-A"])
+        _git(remember, ["commit", "-q", "-m", "this machine edit"])
+        local_head = _head(remember)
+
+        cfg = _enabled_config(tmp_path)
+        _run(slug_dir, project, home, cfg)
+        _wait_quiesce(remember)
+
+        assert _head(remember) == local_head, (
+            "a conflicting rebase changed HEAD -- it must abort and leave "
+            "the tree exactly as it was"
+        )
+        assert not (slug_dir / "added-upstream.md").exists(), (
+            "a file added by the UPSTREAM side's own earlier commit, "
+            "never part of this run's pre-rebase HEAD, was left behind "
+            "as a stray tracked addition after the scoped abort"
+        )
+        status = subprocess.run(
+            ["git", "-C", str(remember), "status", "--porcelain"],
+            capture_output=True, text=True, check=False).stdout
+        assert status == "", (
+            f"the tree must be exactly clean after the abort, got: {status!r}"
+        )
+
+    def test_scoped_checkout_failure_is_reported_honestly(self, tmp_path):
+        """The scoped `git checkout HEAD -- "$SLUG"` that restores
+        $SLUG/'s own pre-rebase content is the second step with an exit
+        status that must be checked: a failure there must never be
+        reported as a clean abort, since $SLUG/ may still carry conflict
+        markers."""
+        home, remember, _remote, slug_dir, project, other_slug_dir = (
+            self._diverged_with_foreign_write(tmp_path))
+
+        real_git = shutil.which("git")
+        assert real_git, "no git on PATH -- fixture assumption broken"
+        bin_dir = tmp_path / "shim-bin"
+        bin_dir.mkdir()
+
+        git_shim = bin_dir / "git"
+        git_shim_lines = [
+            "#!/bin/sh",
+            'if [ "$1" = "-C" ] && [ "$3" = "checkout" ] && [ "$4" = "HEAD" ]; then',
+            "    exit 1",
+            "fi",
+            f'exec "{real_git}" "$@"',
+            "",
+        ]
+        git_shim.write_text("\n".join(git_shim_lines), encoding="utf-8")
+        git_shim.chmod(0o755)
+
+        cfg = _enabled_config(tmp_path)
+        _run(slug_dir, project, home, cfg,
+             PATH=f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+             RACE_OTHER_SLUG_NOW=str(other_slug_dir / "now.md"))
+        _wait_quiesce(remember)
+
+        log_files = list((slug_dir / "logs").glob("memory-*.log"))
+        assert log_files, "hook wrote no log at all"
+        log_text = "\n".join(f.read_text(encoding="utf-8") for f in log_files)
+        assert "unchanged" not in log_text, (
+            "a scoped checkout that FAILED must never be reported as "
+            "'aborted, the tree is unchanged' -- test-slug/ may still "
+            "carry conflict markers"
+        )
+        assert "FAILED" in log_text or "failed" in log_text, (
+            "the scoped checkout's own failure must be surfaced in the log"
+        )
+
+
 # ── Must not run while consolidation holds its own lock ─────────────────────
 
 

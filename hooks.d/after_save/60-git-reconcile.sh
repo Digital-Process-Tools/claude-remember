@@ -20,13 +20,16 @@
 #     - ahead AND behind (diverged): rebases local commits onto the remote
 #       tip and pushes, with one retry if the remote moved again between the
 #       fetch and the push
-#     - a conflict during the rebase: ABORTS the rebase and reports the
+#     - a conflict during the rebase: drops the rebase state and resets
+#       ONLY this run's own slug subtree back to its pre-rebase content
+#       (git rebase --quit + a scoped checkout, #943 -- NOT git rebase
+#       --abort, which resets the whole tracked tree), then reports the
 #       conflicting file names through a git-reconcile-notice the same way
-#       50-git-restore.sh's diverged notice works. Nothing else changes,
-#       UNLESS a different slug sharing this REPO_ROOT landed a tracked
-#       write of its own while the rebase was in flight -- the abort would
-#       otherwise discard that write too (#939), so it is copied out,
-#       the abort runs as normal, and the write is restored afterward.
+#       50-git-restore.sh's diverged notice works. A different slug
+#       sharing this REPO_ROOT that landed a tracked write of its own
+#       while the rebase was in flight is never touched, at any point,
+#       because nothing outside this run's own slug subtree is ever
+#       named by the reset.
 #
 #   Never resets, never force-pushes, never creates a merge commit -- there is
 #   no `reset --hard`, `push --force` or `merge` (non-ff-only) anywhere in
@@ -367,17 +370,22 @@ _grc_bump_ndc_gen() {
         return 1
     }
 
-    # #939: `git rebase --abort` resets the WHOLE tracked tree back to
-    # ORIG_HEAD, not just the files this rebase touched (git-rebase(1)).
-    # RC_LOCK_DIR and CONSOLIDATION_LOCK_DIR above only exclude another
-    # reconcile instance and this SAME slug's own consolidation round --
-    # nothing stops a DIFFERENT slug sharing this REPO_ROOT (save-session.sh's
-    # own foreground append to its now.md, 50-git-backup.sh's add/commit, that
-    # slug's own consolidation/NDC) from landing a real, tracked write while
-    # this slug's rebase is in flight. Discarding that write via --abort, then
-    # reporting "the tree is unchanged" (as this function used to,
-    # unconditionally), is exactly the data loss #939 describes -- so check
-    # for it, by path, before ever calling --abort.
+    # #939/#942/#943: `git rebase --abort` resets the WHOLE tracked tree
+    # back to ORIG_HEAD, not just the files this rebase touched
+    # (git-rebase(1)). RC_LOCK_DIR and CONSOLIDATION_LOCK_DIR above only
+    # exclude another reconcile instance and this SAME slug's own
+    # consolidation round -- nothing stops a DIFFERENT slug sharing this
+    # REPO_ROOT (save-session.sh's own foreground append to its now.md,
+    # 50-git-backup.sh's add/commit, that slug's own consolidation/NDC)
+    # from landing a real, tracked write while this slug's rebase is in
+    # flight. An earlier version of this fix (#939, then #942) snapshotted
+    # that foreign state BEFORE calling --abort and copied it out of git's
+    # reach -- but the snapshot and the abort are two separate steps, and a
+    # write landing in the gap between them is not in the snapshot and is
+    # still discarded (#943, the TOCTOU this file's own #939 commit message
+    # already named and deferred). _grc_foreign_changes stays, but ONLY to
+    # describe what survived for the log line below -- nothing here any
+    # longer decides what to preserve based on it.
     _grc_foreign_changes() {
         # Every porcelain line outside "$SLUG/" is a write this run did not
         # make: this run's OWN churn (the conflict itself, any cleanly
@@ -413,54 +421,88 @@ _grc_bump_ndc_gen() {
     }
 
     _grc_report_conflict() {
-        local _files="$1" _attempt="$2" _foreign _foreign_backup _msg_extra
-        _foreign=$(_grc_foreign_changes)
-        _foreign_backup=""
-        if [ -n "$_foreign" ]; then
-            # #939: a write outside $SLUG/ landed while this rebase was in
-            # flight, and the abort below would otherwise discard it along
-            # with this run's own rebase churn. `git stash` cannot carve it
-            # out first -- stash refuses outright ("needs merge") while ANY
-            # path in the index is unmerged, which this slug's own conflict
-            # guarantees here. Leaving the rebase stuck instead (an earlier
-            # version of this fix) traded the discard for a worse failure:
-            # 50-git-backup.sh's own per-slug commit step has no notion of
-            # an in-progress rebase and will commit THIS slug's unresolved
-            # conflict markers verbatim on the very next save (review
-            # finding, reproduced). So: copy each foreign path's current
-            # bytes out of git's reach, abort normally -- same as the
-            # no-foreign-changes case below, never left stuck -- then
-            # restore each path from the copy. A foreign path that is not
-            # a plain file right now (e.g. a concurrent DELETE) is not
-            # copied, so the abort's own revert to ORIG_HEAD stands for
-            # it, same as if this guard were absent -- #939 is about a
-            # discarded WRITE, and only a WRITE is a file to copy.
-            _foreign_backup="$RC_STATE_DIR/tmp/foreign-backup-$$"
-            rm -rf "$_foreign_backup" 2>/dev/null || true
-            while IFS= read -r _grc_fp; do
-                [ -n "$_grc_fp" ] || continue
-                [ -f "$REPO_ROOT/$_grc_fp" ] || continue
-                mkdir -p "$_foreign_backup/$(dirname "$_grc_fp")" 2>/dev/null || true
-                cp -p "$REPO_ROOT/$_grc_fp" "$_foreign_backup/$_grc_fp" 2>/dev/null || true
-            done <<< "$_foreign"
+        local _files="$1" _attempt="$2" _msg_extra _foreign _quit_ok _checkout_ok
+
+        # #943: instead of snapshotting a foreign write and racing it
+        # against `git rebase --abort` (the #939/#942 approach, and the
+        # TOCTOU gap that fix could not close), never let the abort touch
+        # anything outside $SLUG/ in the first place -- there is then
+        # nothing to race, because nothing outside $SLUG/ is ever a
+        # candidate for being discarded.
+        #
+        #   1. `git rebase --quit` drops the rebase state (.git/rebase-merge
+        #      or rebase-apply) WITHOUT resetting HEAD, the index, or the
+        #      working tree (git-rebase(1)) -- unlike --abort, which is
+        #      effectively a `reset --hard` to ORIG_HEAD across the WHOLE
+        #      tree.
+        #   2. `git symbolic-ref HEAD refs/heads/$BRANCH_NAME` points HEAD
+        #      back at the branch. This is a plain ref rewrite, not a
+        #      checkout, so it touches nothing on disk -- safe here because
+        #      a rebase (whether it eventually succeeds or not) never moves
+        #      the branch ref itself until its very last step; a rebase
+        #      that is still in progress (conflicted, or quit out of here)
+        #      left that ref exactly where it was before this run started.
+        #   3. `git checkout HEAD -- "$SLUG"` restores ONLY the $SLUG/
+        #      subtree (index + working tree) to that pre-rebase content.
+        #      Every commit this run could have replayed is confined to
+        #      $SLUG/ (a save commits to its own slug's subtree alone, see
+        #      _grc_foreign_changes above), so this fully undoes whatever
+        #      the rebase did, scoped to exactly the part of the tree this
+        #      run owns. No other path is ever named, read, or written by
+        #      any of these three commands.
+        #
+        # Verified against a real repository, not merely reasoned: a write
+        # injected into another slug's tracked file in the exact window
+        # between the rebase failing and this sequence running survives
+        # untouched, while $SLUG/'s own content and HEAD land exactly where
+        # a successful `rebase --abort` would have put them.
+        if git -C "$REPO_ROOT" rebase --quit >/dev/null 2>&1; then
+            _quit_ok=1
+        else
+            _quit_ok=0
         fi
 
-        git -C "$REPO_ROOT" rebase --abort >/dev/null 2>&1 || true
+        _checkout_ok=0
+        if [ "$_quit_ok" -eq 1 ] \
+            && git -C "$REPO_ROOT" symbolic-ref HEAD "refs/heads/$BRANCH_NAME" >/dev/null 2>&1 \
+            && git -C "$REPO_ROOT" checkout HEAD -- "$SLUG" >/dev/null 2>&1; then
+            _checkout_ok=1
+            # Review finding: `checkout <tree-ish> -- <pathspec>` only ever
+            # restores a path that EXISTS in <tree-ish> -- it never removes
+            # a path present in the index/working tree but absent from it.
+            # Reproduced: a conflict where the upstream side being rebased
+            # onto has its OWN earlier commit adding a new file under
+            # $SLUG/ (no local commit involved at all) leaves that file
+            # checked into the index as "A" (added) once the rebase sets
+            # up that new base to replay onto -- `git rebase --quit` does
+            # not touch it, and the checkout above does not remove it,
+            # since HEAD's own pre-rebase tree never had it either. `git
+            # rebase --abort` would have pruned it (it is a full `reset
+            # --hard` across the whole tree); this scoped sequence must
+            # prune it too, but ONLY within $SLUG/ -- never touching a
+            # foreign path is still the entire point of #943.
+            while IFS= read -r _grc_added; do
+                [ -n "$_grc_added" ] || continue
+                git -C "$REPO_ROOT" rm -f -q -- "$_grc_added" >/dev/null 2>&1 || _checkout_ok=0
+            done < <(git -C "$REPO_ROOT" diff --name-only --diff-filter=A HEAD -- "$SLUG" 2>/dev/null)
+        fi
 
-        _msg_extra="aborted, the tree is unchanged"
-        if [ -n "$_foreign_backup" ] && [ -d "$_foreign_backup" ]; then
-            while IFS= read -r -d '' _grc_bf; do
-                _grc_rel="${_grc_bf#"$_foreign_backup"/}"
-                mkdir -p "$(dirname "$REPO_ROOT/$_grc_rel")" 2>/dev/null || true
-                cp -p "$_grc_bf" "$REPO_ROOT/$_grc_rel" 2>/dev/null || true
-            done < <(find "$_foreign_backup" -type f -print0 2>/dev/null)
-            rm -rf "$_foreign_backup" 2>/dev/null || true
-            _msg_extra="aborted and restored a concurrent write that landed outside $SLUG/ while the rebase was in flight (${_foreign//$'\n'/; }) rather than letting the abort discard it"
+        if [ "$_quit_ok" -eq 0 ] && _grc_rebase_in_progress; then
+            _msg_extra="git rebase --quit itself FAILED -- the rebase is still in progress and conflict markers are still in the tree"
+        elif [ "$_checkout_ok" -eq 0 ]; then
+            _msg_extra="the rebase state was cleared, but restoring $SLUG/'s own pre-rebase content FAILED -- check $SLUG/ by hand, it may still carry conflict markers"
+        else
+            _foreign=$(_grc_foreign_changes)
+            if [ -n "$_foreign" ]; then
+                _msg_extra="aborted; a concurrent write that landed outside $SLUG/ while the rebase was in flight (${_foreign//$'\n'/; }) was never touched -- only $SLUG/ was reset"
+            else
+                _msg_extra="aborted, the tree is unchanged"
+            fi
         fi
 
         log "git-reconcile" "ERROR: reconcile CONFLICT ($_attempt) rebasing onto $REMOTE_NAME/$BRANCH_NAME -- $_msg_extra. Conflicting file(s): ${_files%;}. Resolve by hand: git -C ${_dq}$REPO_ROOT${_dq} rebase ${_dq}$REMOTE_REF${_dq}"
         mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null || true
-        printf '%s\n' "remember: git reconcile hit a CONFLICT rebasing onto $REMOTE_NAME/$BRANCH_NAME. The rebase was aborted ($_msg_extra). Conflicting file(s): ${_files%;}. Resolve by hand: git -C ${_dq}$REPO_ROOT${_dq} rebase ${_dq}$REMOTE_REF${_dq}" \
+        printf '%s\n' "remember: git reconcile hit a CONFLICT rebasing onto $REMOTE_NAME/$BRANCH_NAME -- $_msg_extra. Conflicting file(s): ${_files%;}. Resolve by hand: git -C ${_dq}$REPO_ROOT${_dq} rebase ${_dq}$REMOTE_REF${_dq}" \
             > "$REMEMBER_DIR/tmp/git-reconcile-notice" 2>/dev/null || true
         echo 1 > "$CONFLICT_STATE_FILE" 2>/dev/null || true
     }
