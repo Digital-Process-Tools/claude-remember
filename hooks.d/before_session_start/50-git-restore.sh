@@ -675,7 +675,8 @@ if git -C "$REPO_ROOT" merge --ff-only "$REMOTE_REF" >/dev/null 2>&1; then
     # before -- exactly the "unmodified" case #741 names. There is no
     # distinct code path for it to hook into; it is the fast-forward doing
     # exactly what a fast-forward does, silently, to a file nothing here is
-    # allowed to lose (haiku.oauth_token and per-project settings live there).
+    # allowed to lose (config.json holds per-project settings, including
+    # the now-inert haiku.oauth_token key, #860).
     #
     # So: after the merge, ask whether config.json was tracked at the
     # PRE-merge HEAD and is not tracked at the new one. If so and the file no
@@ -695,7 +696,7 @@ if git -C "$REPO_ROOT" merge --ff-only "$REMOTE_REF" >/dev/null 2>&1; then
             log "git-restore" "restored $_gr_config_rel after this fast-forward adopted a commit that stopped tracking it (#741) -- another machine ran 'git rm --cached' on it during the #719 upgrade; the file is preserved on disk exactly as it was, but stays OUT of the index, matching the new HEAD"
         else
             rm -f "$REPO_ROOT/$_gr_config_rel.restore-tmp" 2>/dev/null || true
-            log "git-restore" "ERROR: this fast-forward adopted a commit that stopped tracking $_gr_config_rel (#741) and restoring its pre-merge content to $REPO_ROOT/$_gr_config_rel FAILED -- check it by hand; if it carried a live haiku.oauth_token, it may now be gone"
+            log "git-restore" "ERROR: this fast-forward adopted a commit that stopped tracking $_gr_config_rel (#741) and restoring its pre-merge content to $REPO_ROOT/$_gr_config_rel FAILED -- check it by hand, it may now be gone"
         fi
     fi
 else

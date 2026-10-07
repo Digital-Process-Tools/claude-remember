@@ -69,9 +69,10 @@ git push -u origin main
 ```
 
 > **Warning: this `config.json` is the store ROOT's, and this step commits and pushes it
-> deliberately.** Do not put `haiku.oauth_token` in it. That key is a live claude.ai OAuth
-> credential ([`docs/configuration.md`](configuration.md)) — put it in the `REMEMBER_OAUTH_TOKEN`
-> environment variable instead, which never touches disk inside the backup store. A
+> deliberately.** Do not put `haiku.oauth_token` in it -- or anything else you would not want in
+> git history. (That key itself, and `REMEMBER_OAUTH_TOKEN`, were
+> [removed entirely](configuration.md) by #860 and are read for nothing on any host; there is
+> nothing to migrate either to.) A
 > *per-project* `<slug>/config.json` is different: the `after_save` hook never stages or commits
 > that one regardless of what it contains ([#719](https://github.com/Digital-Process-Tools/claude-remember/issues/719)), but this manual, one-time
 > command for the root file has no such guard, because you are the one running `git add` here.
