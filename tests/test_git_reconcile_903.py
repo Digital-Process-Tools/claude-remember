@@ -154,6 +154,14 @@ class TestOffByDefault:
 # ── Fast-forward (behind only) ───────────────────────────────────────────────
 
 
+@pytest.mark.skip(reason=(
+    "hooks.d/after_save/60-git-reconcile.sh is hard-disabled pending #969 "
+    "(destroys-class TOCTOU race) -- it now exits 0 before ever reading "
+    "git_reconcile.enabled, so there is no fast-forward behavior left to "
+    "exercise. Kept as documentation of intended behavior once #969's real "
+    "fix lands and the kill switch is removed; see "
+    "TestHardDisabledPending969 for what the hook does today."
+))
 class TestFastForward:
 
     def test_behind_only_fast_forwards(self, tmp_path):
@@ -190,6 +198,14 @@ class TestFastForward:
 # ── Diverged: rebase and push, or abort cleanly ──────────────────────────────
 
 
+@pytest.mark.skip(reason=(
+    "hooks.d/after_save/60-git-reconcile.sh is hard-disabled pending #969 "
+    "(destroys-class TOCTOU race) -- it now exits 0 before ever reading "
+    "git_reconcile.enabled, so there is no rebase/push/conflict-abort "
+    "behavior left to exercise. Kept as documentation of intended behavior "
+    "once #969's real fix lands and the kill switch is removed; see "
+    "TestHardDisabledPending969 for what the hook does today."
+))
 class TestDivergedReconcile:
 
     def test_ahead_and_behind_rebases_and_pushes(self, tmp_path):
@@ -598,6 +614,14 @@ class TestDivergedReconcile:
 # over.
 
 
+@pytest.mark.skip(reason=(
+    "hooks.d/after_save/60-git-reconcile.sh is hard-disabled pending #969 "
+    "(destroys-class TOCTOU race) -- it now exits 0 before ever reading "
+    "git_reconcile.enabled, so the foreign-rebase-in-progress guard it "
+    "exercises is unreachable. Kept as documentation of intended behavior "
+    "once #969's real fix lands and the kill switch is removed; see "
+    "TestHardDisabledPending969 for what the hook does today."
+))
 class TestForeignRebaseGuard:
 
     def test_declines_when_a_foreign_rebase_is_already_in_progress(self, tmp_path):
@@ -819,6 +843,15 @@ class TestForeignRebaseGuard:
 # (quit, scoped checkout), which is what the tests below cover.
 
 
+@pytest.mark.skip(reason=(
+    "hooks.d/after_save/60-git-reconcile.sh is hard-disabled pending #969 "
+    "(destroys-class TOCTOU race) -- it now exits 0 before ever reading "
+    "git_reconcile.enabled, so the scoped-abort/restore machinery these "
+    "tests exercise (including #969's own named gap) is unreachable. Kept "
+    "as documentation of intended behavior once #969's real fix lands and "
+    "the kill switch is removed; see TestHardDisabledPending969 for what "
+    "the hook does today."
+))
 class TestScopedAbort:
 
     def _diverged_with_foreign_write(self, tmp_path):
@@ -1175,6 +1208,14 @@ class TestScopedAbort:
 # ── Must not run while consolidation holds its own lock ─────────────────────
 
 
+@pytest.mark.skip(reason=(
+    "hooks.d/after_save/60-git-reconcile.sh is hard-disabled pending #969 "
+    "(destroys-class TOCTOU race) -- it now exits 0 before ever reading "
+    "git_reconcile.enabled, so the consolidation-lock decline path it "
+    "exercises is unreachable. Kept as documentation of intended behavior "
+    "once #969's real fix lands and the kill switch is removed; see "
+    "TestHardDisabledPending969 for what the hook does today."
+))
 class TestConsolidationLock:
 
     def test_declines_while_consolidation_holds_its_lock(self, tmp_path):
@@ -1212,6 +1253,14 @@ class TestConsolidationLock:
 # rewrite, so NDC's EXISTING guard also catches this hook as a writer.
 
 
+@pytest.mark.skip(reason=(
+    "hooks.d/after_save/60-git-reconcile.sh is hard-disabled pending #969 "
+    "(destroys-class TOCTOU race) -- it now exits 0 before ever reading "
+    "git_reconcile.enabled, so it never bumps NDC's generation marker at "
+    "all. Kept as documentation of intended behavior once #969's real fix "
+    "lands and the kill switch is removed; see TestHardDisabledPending969 "
+    "for what the hook does today."
+))
 class TestNdcGenerationBump:
 
     def test_fast_forward_bumps_ndc_generation(self, tmp_path):
@@ -1299,6 +1348,98 @@ class TestNdcGenerationBump:
         log_text = "\n".join(f.read_text(encoding="utf-8") for f in log_files)
         assert "could not bump" in log_text
         assert "not a regular file" in log_text
+
+
+# ── Hard disable pending #969 ────────────────────────────────────────────────
+#
+# #969: a fifth consecutive destroys-class finding on this hook (after
+# #932/#939/#946/#952/#966), each fix closing one race window and opening the
+# next -- the latest one in the window from the start of `git rebase
+# --no-autostash` through the conflict firing, BEFORE #966's pre/post-`rebase
+# --quit` snapshot is even taken. Rather than attempt a sixth fix, the hook is
+# hard-disabled: it exits 0 unconditionally, before even the
+# git_reconcile.enabled read, until #969's real fix lands. This class proves
+# the kill switch itself, against the exact scenario #969 reports as still
+# open.
+
+
+class TestHardDisabledPending969:
+
+    def test_disabled_even_when_enabled_and_toctou_conflict_would_fire(self, tmp_path):
+        """#969: a foreign write landing at the start of `git rebase
+        --no-autostash` -- before #966's pre/post-`rebase --quit` snapshot is
+        even taken -- used to be silently discarded by the scoped restore,
+        with the hook still logging "aborted, the tree is unchanged". The
+        shim here injects the write at that exact call, inside the #966
+        restore set (same shape as
+        TestScopedAbort._diverged_with_in_set_foreign_write) -- the scenario
+        that would previously have triggered the destructive restore.
+
+        With the hook hard-disabled, none of this must run at all: no fetch,
+        no rebase, no lock file, no log file -- the write must simply never
+        be touched, because the hook exits before reading
+        git_reconcile.enabled, let alone starting a rebase."""
+        home, remember, _remote, slug_dir, project, other_slug_dir = (
+            TestScopedAbort()._diverged_with_in_set_foreign_write(tmp_path))
+        before_remember_head = _head(remember)
+
+        real_git = shutil.which("git")
+        assert real_git, "no git on PATH -- fixture assumption broken"
+        bin_dir = tmp_path / "shim-bin"
+        bin_dir.mkdir()
+
+        git_shim = bin_dir / "git"
+        git_shim_lines = [
+            "#!/bin/sh",
+            'if [ "$1" = "-C" ] && [ "$3" = "rebase" ] && [ "$4" = "--no-autostash" ]; then',
+            "    printf '%s\\n' \"CONCURRENT WRITE DURING REBASE START\" > \"$RACE_OTHER_SLUG_NOW\"",
+            "fi",
+            f'exec "{real_git}" "$@"',
+            "",
+        ]
+        git_shim.write_text("\n".join(git_shim_lines), encoding="utf-8")
+        git_shim.chmod(0o755)
+
+        cfg = _enabled_config(tmp_path)
+        result = _run(slug_dir, project, home, cfg,
+                      PATH=f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+                      RACE_OTHER_SLUG_NOW=str(other_slug_dir / "now.md"))
+        _wait_quiesce(remember)
+
+        assert result.returncode == 0
+        assert "disabled pending #969" in result.stderr, (
+            "the kill switch notice naming #969 must reach stderr: " + result.stderr
+        )
+
+        assert (other_slug_dir / "now.md").read_text(encoding="utf-8") == (
+            "other slug base\n"
+        ), (
+            "the hard-disabled hook must never reach the shimmed git call at "
+            "all -- the file must still hold its original fixture content, "
+            "not even the shim's own injected write, because nothing past "
+            "the kill switch ever runs"
+        )
+
+
+        assert _head(remember) == before_remember_head, (
+            "a hard-disabled hook moved HEAD -- it must never reach git at all"
+        )
+
+        rebase_merge = subprocess.run(
+            ["git", "-C", str(remember), "rev-parse", "--path-format=absolute",
+             "--git-path", "rebase-merge"],
+            capture_output=True, text=True, check=False).stdout.strip()
+        assert rebase_merge and not Path(rebase_merge).exists(), (
+            "a hard-disabled hook must never have started a rebase at all"
+        )
+
+        assert not hook_state(remember, ".git-reconcile.lock").exists(), (
+            "a hard-disabled hook must never take its own lock"
+        )
+        assert not list((slug_dir / "logs").glob("memory-*.log")), (
+            "a hard-disabled hook must never write a log entry -- it exits "
+            "before log.sh's config/lock machinery would ever be reached"
+        )
 
 
 # ── The conflict notice actually reaches the human ───────────────────────────

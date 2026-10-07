@@ -142,6 +142,15 @@ def test_floor_bash_really_lacks_mapfile():
     )
 
 
+@pytest.mark.skip(reason=(
+    "hooks.d/after_save/60-git-reconcile.sh is hard-disabled pending #969 "
+    "(destroys-class TOCTOU race) -- it now exits 0 before ever reading "
+    "git_reconcile.enabled, so no rebase/conflict/restore ever happens and "
+    "this test would pass trivially for the wrong reason (nothing touches "
+    "the tree because the hook never runs, not because mapfile's absence is "
+    "correctly handled). Kept as documentation of intended behavior once "
+    "#969's real fix lands and the kill switch is removed."
+))
 def test_conflict_abort_restores_the_tree_on_the_floor_bash(tmp_path):
     """The real #962 CI failure, reproduced directly: the hook run under the
     floor bash must still abort a real conflict and restore the file -- not

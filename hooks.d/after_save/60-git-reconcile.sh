@@ -78,6 +78,20 @@ set -u  # not -e -- we never want to fail loudly here
 source "$PIPELINE_DIR/scripts/log.sh"
 source "$PIPELINE_DIR/scripts/lib-lock.sh"
 
+# ── Hard disable pending #969 ────────────────────────────────────────────────
+# This hook has produced a destroys-class finding in five consecutive release
+# audits across two releases (#932, #939, #946, #952's regression, #966), each
+# fix opening the next narrower race window. #969 found a further one: a
+# foreign write landing in the window from the start of `git rebase
+# --no-autostash` through the conflict firing (before #966's pre/post-`rebase
+# --quit` snapshot is even taken) is still silently discarded by the restore.
+# Rather than open a sixth window, this hook is hard-disabled -- unconditionally,
+# before the git_reconcile.enabled read below, so the kill switch cannot itself
+# depend on the flag whose read is downstream of the disabled code path -- until
+# #969's real fix lands.
+echo "60-git-reconcile.sh: disabled pending #969 (destroys-class TOCTOU race); tracking issue has the real fix" >&2
+exit 0
+
 # ── Off by default ───────────────────────────────────────────────────────────
 RECONCILE_ENABLED=$(config ".git_reconcile.enabled" "false")
 [ "$RECONCILE_ENABLED" = "true" ] || exit 0
