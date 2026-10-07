@@ -7,6 +7,179 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.42.0] - 2026-10-07 — the new git-reconcile hook (#903) ships behind a flag, with its conflict-abort data-loss chain (#939, #942, #943, #946) closed before release
+
+### Added
+
+- Shipped `.claude-plugin/icon.png` (a square 512x512 PNG) and pointed `plugin.json`'s
+  `icon` field at it, clearing the directory scan's `ICON_MISSING` warning (#865). The
+  listing icon itself is set only on a plugin's first portal save or submission, and
+  remember's was already set by an Anthropic reviewer before this change, so this clears
+  the warning only -- it does not change the live listing icon. PR #852 and its issue
+  #848 were already closed with no action taken, so no further PR/issue decision was
+  needed here.
+
+- Added an optional reconcile step for a memory store written from two machines (#903): off by default behind `git_reconcile.enabled`, in its own hook (`hooks.d/after_save/60-git-reconcile.sh`) so `git_backup`'s commit-and-push-only promise (#253) and `git_restore`'s fast-forward-only promise are unchanged with it off. When enabled, it fetches, fast-forwards when purely behind, and rebases local commits onto the remote tip and pushes (one retry) when both ahead and behind. A real conflict aborts the rebase, changes nothing else, and reports the conflicting file names through a `git-reconcile-notice`. It never resets, force-pushes or creates a merge commit, and declines while the slug's own consolidation is rewriting `recent.md`/`archive.md`.
+
+### Changed
+
+- Clarified `docs/releasing.md`'s release sequence so the pre-tag portal-preview check
+  (build the tree, run `check_release_tree.py`/`smoke_release_tree.py`, validate against
+  `release-preview` in the submit form) is its own numbered step before the tag is pushed,
+  not a separate appendix a maintainer could skip past (#893). The release-tree rules
+  themselves already FAIL on every pull request (#904, `test_this_repository_built_tree_has_no_check_failures`),
+  including the credential-forwarding pair (`MCP_FORWARDS_CREDENTIAL_ENV`, read × sent)
+  added in #898 -- the remaining hold-class row from the pre-submission checklist, a
+  name/`displayName`/`author.name` problem, is not encoded here and needs a maintainer decision
+  on mechanism; filed as a follow-up.
+
+### Fixed
+
+- The release-tree Bash-grant preflight (`bash_grant_problem` in
+  `.github/scripts/check_release_tree.py`) no longer passes three classes of broad
+  shell grant silently: a `..` path segment after `${CLAUDE_PLUGIN_ROOT}/` (the
+  plugin-root prefix used to be trusted before any `..` check ran), an unlisted
+  digit-suffixed bash binary like `bash5` (the first-word check never stripped
+  trailing digits, unlike the path-based check beside it), and nine wrapper
+  commands that can run arbitrary programs -- `xargs`, `sudo`, a shell builtin
+  that executes a string as code, `exec`, `source` (and its `.` alias), `find`,
+  `awk`, `nohup`, `timeout` -- now added to `_UNSCOPED_COMMANDS` (#879).
+
+- `bootstrap-dirs.sh`'s legacy in-project `.remember/` notice compared
+  `REMEMBER_DIR` and the legacy directory as raw strings. On Git Bash
+  (`OSTYPE=msys`/`cygwin`), where the two can arrive with different
+  separator styles for the same directory, the "store already lives
+  inside the legacy dir" (#132) check could miss and print a spurious
+  notice telling the operator to move a store that is already in the
+  right place. Both sides are now forward-slashed before the comparison
+  via `_remember_forward_slash_into`, matching `doctor.sh`'s own WARN
+  check, already fixed the same way in #899 (#907).
+
+- `test_arith_base_lint_332.py`'s digits-only-guard detector only recognised
+  the `[[ "$X" == *[!0-9]* ]]` guard form, so the `!= ` form and the
+  `_remember_is_uint "$X"` helper call -- both introduced by #899 for
+  `_LOCK_SELF`, `_mtime` and `_pid` in `lib-lock.sh` and for ~11 call sites in
+  `log.sh`/`session-start-hook.sh` -- were invisible to the lint. Today's uses
+  all carry `10#`, so nothing was actually unsafe, but a future one written
+  behind either guard form would not have been caught. `_DIGIT_TEST` now
+  matches both forms, with must-fire and must-not-fire fixtures for each
+  (#908).
+
+- `_remember_config_tracked_status`'s no-git-binary branch -- the filesystem walk that must
+  answer `could-not-tell` (fail closed) when an enclosing `.git` is found with no `git` binary
+  on PATH, or `untracked` when the walk finds none -- lost its only test when #899 removed the
+  legacy-migration suite that exercised it. Added direct-call tests pinning both of that
+  branch's own outcomes, plus a separate positive control for the git-PRESENT `untracked` path
+  (a different branch of the function entirely), so a degenerate no-git branch that always
+  answers `could-not-tell` regardless of what the filesystem walk finds cannot pass (#909).
+
+- Release-tree smoke checks (`tests/test_release_branch_smoke_851.py`,
+  `tests/test_strip_shell_comments_900.py`) flaked with a `UnicodeDecodeError` a few
+  times per run under `pytest -n` and in compiled mode, because the `ps` scan both
+  files exercise (`.github/scripts/smoke_release_tree.py`'s `_survivors`, and that
+  test file's own `_alive`) decoded every process on the machine strictly -- an
+  unrelated process with a non-UTF-8 argv crashed the scan instead of being
+  skipped. Both `ps` reads are diagnostic only, so they now decode with
+  `errors="replace"` (#910).
+
+- `post-tool-hook.sh` recomputed `SESSION_DIR` (`claude_projects_dir()` /
+  `session_dir_slug()`) on every tool call, fast path included, forking
+  `cygpath` twice and a `sed` each time on Windows/Git Bash -- measured at
+  ~384 ms of a 986 ms per-tool-call trace on one reporter's machine (#913).
+  The resolved value now caches in `$REMEMBER_DIR/tmp/session-dir-cache`,
+  keyed on `(PROJECT_DIR, CLAUDE_CONFIG_DIR)`, so a session only pays for the
+  slug once per project/config pair rather than once per tool call.
+
+- `save-session.sh`'s autonomous-log retention sweep forked a `stat`
+  subshell AND a `_remember_date` (date) subshell for EVERY surviving
+  file in `logs/autonomous/`, on every flush that reached the write
+  step -- on Windows Git Bash one sweep over ~1,200 files started about
+  4,000 processes and ran for about 140s, recurring roughly every 15
+  minutes in the reporter's own session (#914). The sweep now reads the
+  clock once, before the loop, and compares each file's mtime against a
+  single reference file with a bash builtin (`-ot`), forking nothing per
+  file; a per-file stat()+date() comparison is still used as a fallback
+  on the rare platform where the fast reference file cannot be built.
+
+- `60-git-reconcile.sh`'s fast-forward and rebase never told NDC compression
+  (save-session.sh's background `now.md`->`today-*.md` summarizer) that they
+  had just rewritten `now.md` -- NDC's own staleness guards (live size vs.
+  snapshot, a generation marker) only ever detected another NDC round, never
+  this hook, so a reconcile that landed mid-commit could have its content
+  silently clobbered by NDC's own `tail`+`mv`. Reconcile now bumps NDC's
+  generation marker on every successful fast-forward/rebase, so NDC's
+  existing guard also catches this hook as a writer -- at no cost when
+  nothing is racing, since the earlier approach of sharing save-session.sh's
+  own save.lock directly would have declined almost every single save rather
+  than only the rare one actually racing an NDC commit (#932).
+
+- `save-session.sh`'s autonomous-log retention sweep (#933, following
+  #914's fork-free fast path) deleted a non-empty log strictly older than
+  the configured retention window, while its own per-file fallback only
+  deleted once a log was a full extra day past that window -- a log aged
+  between N and N+1 days survived or was reclaimed depending on which of
+  the two paths happened to run, which is itself platform-dependent
+  (whether `mktemp`/`touch -d` succeed). The fast path's cutoff now
+  requires the same full N+1 days as the fallback, so both paths agree at
+  the boundary instead of disagreeing by up to a day depending on
+  platform.
+
+- `hooks.d/after_save/60-git-reconcile.sh`'s `_grc_common_dir()` carried its own copy of the
+  Windows drive-letter guard with a bracket expression of `[/\]` (bare slash, unescaped)
+  instead of the sibling hooks' `[/\\]` (slash and backslash), so `50-git-backup.sh` and
+  `hooks.d/before_session_start/50-git-restore.sh` correctly classified a drive-letter path
+  as absolute, in both its forward-slash and backslash spellings, while reconcile's own copy
+  matched neither form and misclassified both `C:/repo/.git` and `C:\repo\.git` as relative
+  (#934).
+
+- `hooks.d/after_save/60-git-reconcile.sh`'s conflict handler (`_grc_report_conflict`)
+  called `git rebase --abort` unconditionally on a stopped rebase. That resets the WHOLE
+  tracked tree back to `ORIG_HEAD`, not just the files this run's rebase touched -- and
+  this hook's own locks (`git-reconcile.lock`, and this slug's `consolidation.lock`) never
+  excluded a DIFFERENT slug sharing the same store repo from landing a real write (a
+  foreground `now.md` append, a `50-git-backup.sh` commit, that slug's own
+  consolidation/NDC) while the rebase was in flight. Such a write was silently discarded by
+  the abort, while the hook went on to log and notice "the tree is unchanged" -- false for
+  that write. The hook now checks `git status --porcelain` for changes outside this run's
+  own slug before aborting; when a foreign write is present, it is copied out of git's
+  reach, the abort proceeds as normal (never left stuck, so a sibling hook's next save
+  cannot commit this slug's own unresolved conflict markers), and the write is restored
+  afterward (#939).
+
+- `hooks.d/after_save/60-git-reconcile.sh`'s #939 fix for a discarded concurrent write never
+  checked its own backup/restore/abort exit status: a failed `cp -p`/`mkdir -p` while copying a
+  foreign write out of git's reach read exactly like "nothing to restore", and the hook claimed
+  "aborted, the tree is unchanged" even though the write had just been discarded by the abort
+  regardless. A `find` failure while restoring (e.g. shadowed by Windows' System32 `find.exe` in
+  Git Bash) silently restored zero of N backed-up files while the backup directory was still
+  deleted, and the notice claimed a restore that never happened. An abort that itself failed (e.g.
+  a concurrent `index.lock`) left the rebase genuinely stuck while still reporting success. Every
+  step now checks its own exit status, and the backup directory is only deleted once every file it
+  held is confirmed restored (#942). The backup/restore mechanism this entry describes was itself
+  superseded shortly after by #943, which closes the gap structurally instead -- see that entry.
+
+- `hooks.d/after_save/60-git-reconcile.sh`'s conflict handler closed a narrower, residual race
+  the #939/#942 fix's own commit message had already named and deferred: a concurrent write
+  landing between the `git status --porcelain` snapshot and the `git rebase --abort` call was not
+  in the snapshot and was discarded by the abort exactly like the original bug. The hook no longer
+  snapshots a foreign write and races it against the abort at all -- `git rebase --abort` (which
+  resets the WHOLE tracked tree) is replaced with `git rebase --quit` (which touches nothing) plus
+  a scoped `git checkout HEAD -- "$SLUG"` that restores only this run's own slug subtree. No path
+  outside `$SLUG/` is ever read or written by the new sequence, so a foreign write landing at any
+  point -- before, during, or after it runs -- survives untouched (#943).
+
+- `hooks.d/after_save/60-git-reconcile.sh` could discard a human's in-progress, hand-written
+  conflict resolution. The hook's own conflict notice tells a human to resolve a real conflict by
+  hand (`Resolve by hand: git -C ... rebase ...`), but nothing checked, before this hook's own
+  `git rebase` call, whether a rebase/merge/cherry-pick was already in progress for that or any
+  other reason. If the hook fired again while that resolution was under way, its own rebase failed
+  with "already in progress", and `_grc_rebase_in_progress` -- a pure directory-existence check --
+  could not tell that apart from this run's own freshly-conflicted rebase, so the hook proceeded to
+  run `rebase --quit` plus the scoped checkout/rm sequence over the human's own work, discarding it.
+  The hook now checks for a pre-existing `.git/rebase-merge`/`rebase-apply` before starting (or
+  retrying) its own rebase, and declines -- loudly, through the same log convention as its other
+  guards -- rather than ever touching a rebase it did not start itself (#946).
+
 ## [0.41.0] - 2026-10-06 — the check_release_tree needle catches a one-line positional delegate, and the #902 unsafe-REMEMBER_DIR refusal lands before mkdir with date+pid save-log names
 
 ### Added
@@ -4355,7 +4528,8 @@ Fixes [#9](https://github.com/Digital-Process-Tools/claude-remember/issues/9), a
 
 ## [0.1.0] — Initial release
 
-[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.41.0...HEAD
+[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.42.0...HEAD
+[0.42.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.42.0
 [0.41.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.41.0
 [0.40.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.40.0
 [0.39.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.39.0
