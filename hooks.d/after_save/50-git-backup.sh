@@ -454,6 +454,17 @@ fi
         '
     }
 
+    # ── #935: the REJECTED report below must not promise "nothing here will
+    # fetch, merge or rebase for you" when it is false. 60-git-reconcile.sh is
+    # the ONLY place this plugin ever rebases, and it runs right after THIS
+    # hook on the same after_save dispatch pass -- a human who reads "resolve
+    # it by hand" and starts rebasing locally can race that automatic rebase.
+    # This hook itself still never fetches/merges/rebases; it only changes
+    # what it SAYS. Read once here rather than inside _push_and_report so a
+    # transient (non-rejected) push never pays for a config lookup it has no
+    # use for.
+    RECONCILE_ENABLED=$(config '.git_reconcile.enabled' 'false')
+
     # One decision for all three push sites. The funnel #253 reports had three
     # mouths; fixing one would have left the reported case reachable through the
     # other two, and the next site added would drift again.
@@ -487,7 +498,15 @@ fi
         _count=$((10#$_count + 1))
         echo "$_count" > "$REJECT_STATE_FILE" 2>/dev/null || true
 
-        log "git-backup" "ERROR: push REJECTED by the remote -- the backup has STOPPED for $SLUG and will not resume on its own (consecutive rejections: $_count). git rejected: ${_rejected%;}. The commit exists on this machine only. Nothing here will fetch, merge or rebase for you: run 'git -C ${_dq}$REPO_ROOT${_dq} push' to see git's own advice and resolve it by hand -- recent.md and archive.md are rewritten wholesale by consolidation, so a wrong automatic resolution would corrupt memory silently."
+        # Each branch below is its own complete log/printf call (rather than a
+        # shared clause assembled in a plain variable) on purpose: a structural
+        # scan over this file counts "merge"/"rebase"/"fetch" mentions and only
+        # exempts lines that themselves start a log/printf call.
+        if [ "$RECONCILE_ENABLED" = "true" ]; then
+            log "git-backup" "ERROR: push REJECTED by the remote -- the backup has STOPPED for $SLUG (consecutive rejections: $_count), but git_reconcile.enabled is on, so the next after_save run (60-git-reconcile.sh) may fetch, rebase and push this automatically before you act by hand. git rejected: ${_rejected%;}. The commit exists on this machine only. Run 'git -C ${_dq}$REPO_ROOT${_dq} push' to see git's own advice -- recent.md and archive.md are rewritten wholesale by consolidation, so a wrong automatic resolution would corrupt memory silently."
+        else
+            log "git-backup" "ERROR: push REJECTED by the remote -- the backup has STOPPED for $SLUG and will not resume on its own (consecutive rejections: $_count). git rejected: ${_rejected%;}. The commit exists on this machine only. Nothing here will fetch, merge or rebase for you: run 'git -C ${_dq}$REPO_ROOT${_dq} push' to see git's own advice and resolve it by hand -- recent.md and archive.md are rewritten wholesale by consolidation, so a wrong automatic resolution would corrupt memory silently."
+        fi
 
         # Escalation, not alarm. systemMessage is the only hook output the HUMAN
         # sees, and it is also the most intrusive surface in this codebase — one
@@ -497,8 +516,13 @@ fi
         # true report by a few backups; it can never swallow one.
         if [ "$REJECT_NOTICE_AFTER" -gt 0 ] && [ "$_count" -eq "$REJECT_NOTICE_AFTER" ]; then
             mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null || true
-            printf '%s\n' "remember: git backup has STOPPED. The remote rejected the last $_count pushes from $REPO_ROOT and will not accept them on a retry -- memory is still being committed locally, but it is not reaching your backup remote. Run: git -C ${_dq}$REPO_ROOT${_dq} push -- then resolve the divergence yourself. Nothing will be merged or rebased for you." \
-                > "$REMEMBER_DIR/tmp/git-backup-notice" 2>/dev/null || true
+            if [ "$RECONCILE_ENABLED" = "true" ]; then
+                printf '%s\n' "remember: git backup has STOPPED for now. The remote rejected the last $_count pushes from $REPO_ROOT -- memory is still being committed locally, but it is not reaching your backup remote yet. git_reconcile.enabled is on, so the next after_save run may fetch, rebase and push this automatically -- it has not happened yet. Run: git -C ${_dq}$REPO_ROOT${_dq} push -- to see git's own advice." \
+                    > "$REMEMBER_DIR/tmp/git-backup-notice" 2>/dev/null || true
+            else
+                printf '%s\n' "remember: git backup has STOPPED. The remote rejected the last $_count pushes from $REPO_ROOT and will not accept them on a retry -- memory is still being committed locally, but it is not reaching your backup remote. Run: git -C ${_dq}$REPO_ROOT${_dq} push -- then resolve the divergence yourself. Nothing will be merged or rebased for you." \
+                    > "$REMEMBER_DIR/tmp/git-backup-notice" 2>/dev/null || true
+            fi
         fi
         return 0
     }
