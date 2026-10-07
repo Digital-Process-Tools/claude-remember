@@ -89,7 +89,17 @@ source "$PIPELINE_DIR/scripts/lib-lock.sh"
 # before the git_reconcile.enabled read below, so the kill switch cannot itself
 # depend on the flag whose read is downstream of the disabled code path -- until
 # #969's real fix lands.
-echo "60-git-reconcile.sh: disabled pending #969 (destroys-class TOCTOU race); tracking issue has the real fix" >&2
+# Self-review finding (oss:auditor, #969): a bare `echo ... >&2` reaches
+# neither the daily log nor hook-errors.log, so this disablement would be
+# invisible to the one durable surface (`/remember:doctor`'s "Recent
+# errors") a human or a future agent actually checks, and indistinguishable
+# from the pre-existing, intentional "git_reconcile.enabled is false" no-op.
+# report_error() is already sourced (log.sh, above) and is what every other
+# notice in this file uses -- it writes both the daily log and
+# hook-errors.log, by path rather than by inherited stderr, for the same
+# reason every other call site in this codebase avoids raw stderr from a
+# hook (log.sh's own comment on report_error()).
+report_error "git-reconcile" "disabled pending #969 (destroys-class TOCTOU race); tracking issue has the real fix"
 exit 0
 
 # ── Off by default ───────────────────────────────────────────────────────────

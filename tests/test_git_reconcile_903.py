@@ -1376,9 +1376,13 @@ class TestHardDisabledPending969:
         that would previously have triggered the destructive restore.
 
         With the hook hard-disabled, none of this must run at all: no fetch,
-        no rebase, no lock file, no log file -- the write must simply never
-        be touched, because the hook exits before reading
-        git_reconcile.enabled, let alone starting a rebase."""
+        no rebase, no lock file -- the write must simply never be touched,
+        because the hook exits before reading git_reconcile.enabled, let
+        alone starting a rebase. It DOES still write a log entry and a
+        hook-errors.log line naming #969 (via report_error(), self-review
+        finding: a bare `echo >&2` would be invisible to the only durable
+        surface /remember:doctor reads) -- that notice is the one thing
+        this test asserts DOES happen."""
         home, remember, _remote, slug_dir, project, other_slug_dir = (
             TestScopedAbort()._diverged_with_in_set_foreign_write(tmp_path))
         before_remember_head = _head(remember)
@@ -1407,9 +1411,23 @@ class TestHardDisabledPending969:
         _wait_quiesce(remember)
 
         assert result.returncode == 0
-        assert "disabled pending #969" in result.stderr, (
-            "the kill switch notice naming #969 must reach stderr: " + result.stderr
+
+        log_files = list((slug_dir / "logs").glob("memory-*.log"))
+        assert log_files, "hook wrote no log at all"
+        log_text = "\n".join(f.read_text(encoding="utf-8") for f in log_files)
+        assert "disabled pending #969" in log_text, (
+            "the kill switch notice naming #969 must reach the daily log "
+            "(report_error(), not a bare echo -- a self-review finding: "
+            "/remember:doctor only ever reads hook-errors.log/the daily "
+            "log, never a hook's own inherited stderr): " + log_text
         )
+
+        hook_errors = slug_dir / "logs" / "hook-errors.log"
+        assert hook_errors.exists(), (
+            "report_error() must also reach hook-errors.log -- the file "
+            "/remember:doctor's own 'Recent errors' section reads"
+        )
+        assert "disabled pending #969" in hook_errors.read_text(encoding="utf-8")
 
         assert (other_slug_dir / "now.md").read_text(encoding="utf-8") == (
             "other slug base\n"
@@ -1435,10 +1453,6 @@ class TestHardDisabledPending969:
 
         assert not hook_state(remember, ".git-reconcile.lock").exists(), (
             "a hard-disabled hook must never take its own lock"
-        )
-        assert not list((slug_dir / "logs").glob("memory-*.log")), (
-            "a hard-disabled hook must never write a log entry -- it exits "
-            "before log.sh's config/lock machinery would ever be reached"
         )
 
 
