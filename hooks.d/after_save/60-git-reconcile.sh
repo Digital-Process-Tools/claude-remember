@@ -475,6 +475,20 @@ _grc_bump_ndc_gen() {
         } | sort -u
     }
 
+    # #966: a path's content right now, or the sentinel ABSENT when the
+    # path does not currently exist on disk. Used to tell "this path's
+    # content is exactly what it was at some earlier point" from "it
+    # changed since" without caring WHO changed it or WHY -- the caller
+    # decides what that means.
+    _grc_path_hash() {
+        local _grc_hp="$1"
+        if [ -f "$REPO_ROOT/$_grc_hp" ]; then
+            git hash-object -- "$REPO_ROOT/$_grc_hp" 2>/dev/null || printf '%s' "HASH-ERROR"
+        else
+            printf '%s' "ABSENT"
+        fi
+    }
+
     _grc_report_conflict() {
         local _files="$1" _attempt="$2" _msg_extra _foreign _quit_ok _checkout_ok
         local _head_name_path _actual_branch _branch_mismatch _rip_rc
@@ -536,6 +550,28 @@ _grc_bump_ndc_gen() {
         # between the rebase failing and this sequence running survives
         # untouched, while the touched paths' own content and HEAD land
         # exactly where a successful `rebase --abort` would have put them.
+        #
+        # #966: that guarantee held for a path OUTSIDE _GRC_TOUCHED_PATHS
+        # (never named by checkout/rm at all), but not for a path INSIDE
+        # it -- every touched path gets checked out / rm'd unconditionally
+        # below, which discards a concurrent write from a DIFFERENT slug
+        # landing on a shared path in the TOCTOU window `rebase --quit`
+        # opens, even though only THIS slug's own locks are held. `git
+        # rebase --quit` itself touches neither the working tree, the
+        # index, nor HEAD (git-rebase(1)) -- it only removes the
+        # rebase-merge/rebase-apply state directory -- so a snapshot taken
+        # immediately before it and compared immediately after can only
+        # ever differ because of something else writing to that path in
+        # between; nothing in this function's own path to that point can
+        # produce the difference. Paths that differ are left exactly as
+        # that write put them -- the scoped restore below only ever acts
+        # on a path whose content still matches this snapshot.
+        local _grc_prequit_hash=()
+        local _grc_pq_i
+        for ((_grc_pq_i = 0; _grc_pq_i < ${#_GRC_TOUCHED_PATHS[@]}; _grc_pq_i++)); do
+            _grc_prequit_hash[_grc_pq_i]=$(_grc_path_hash "${_GRC_TOUCHED_PATHS[_grc_pq_i]}")
+        done
+
         if git -C "$REPO_ROOT" rebase --quit >/dev/null 2>&1; then
             _quit_ok=1
         else
@@ -547,6 +583,22 @@ _grc_bump_ndc_gen() {
             && git -C "$REPO_ROOT" symbolic-ref HEAD "refs/heads/$BRANCH_NAME" >/dev/null 2>&1; then
             _checkout_ok=1
             if [ "${#_GRC_TOUCHED_PATHS[@]}" -gt 0 ]; then
+                # #966: restrict the restore to the subset of touched
+                # paths whose content right now still matches the
+                # snapshot taken immediately before `rebase --quit` above
+                # -- a path that differs was written by something other
+                # than this function (quit itself touches nothing), most
+                # likely a different slug sharing this REPO_ROOT, and is
+                # left exactly as that write put it rather than being
+                # reset or removed.
+                local _grc_safe_paths=()
+                local _grc_sp_i _grc_now_hash
+                for ((_grc_sp_i = 0; _grc_sp_i < ${#_GRC_TOUCHED_PATHS[@]}; _grc_sp_i++)); do
+                    _grc_now_hash=$(_grc_path_hash "${_GRC_TOUCHED_PATHS[_grc_sp_i]}")
+                    if [ "$_grc_now_hash" = "${_grc_prequit_hash[_grc_sp_i]}" ]; then
+                        _grc_safe_paths+=("${_GRC_TOUCHED_PATHS[_grc_sp_i]}")
+                    fi
+                done
                 # Review finding: `checkout <tree-ish> -- <pathspec>` errors
                 # out ENTIRELY (restoring nothing, not even the paths that
                 # DO exist) when even one literal pathspec matches no file
@@ -566,9 +618,11 @@ _grc_bump_ndc_gen() {
                 # array works on every bash this repo supports.
                 local _grc_existing=()
                 local _grc_exist_line
-                while IFS= read -r _grc_exist_line || [ -n "$_grc_exist_line" ]; do
-                    [ -n "$_grc_exist_line" ] && _grc_existing+=("$_grc_exist_line")
-                done < <(git -C "$REPO_ROOT" ls-tree -r --name-only HEAD -- "${_GRC_TOUCHED_PATHS[@]}" 2>/dev/null)
+                if [ "${#_grc_safe_paths[@]}" -gt 0 ]; then
+                    while IFS= read -r _grc_exist_line || [ -n "$_grc_exist_line" ]; do
+                        [ -n "$_grc_exist_line" ] && _grc_existing+=("$_grc_exist_line")
+                    done < <(git -C "$REPO_ROOT" ls-tree -r --name-only HEAD -- "${_grc_safe_paths[@]}" 2>/dev/null)
+                fi
                 if [ "${#_grc_existing[@]}" -gt 0 ]; then
                     git -C "$REPO_ROOT" checkout HEAD -- "${_grc_existing[@]}" >/dev/null 2>&1 || _checkout_ok=0
                 fi
@@ -577,11 +631,16 @@ _grc_bump_ndc_gen() {
                 # path present in the index/working tree but absent from it
                 # (e.g. the upstream side's own earlier commit cleanly
                 # adding a new file before a later commit conflicts).
-                # Pruned across every touched path now, not just $SLUG/.
-                while IFS= read -r _grc_added; do
-                    [ -n "$_grc_added" ] || continue
-                    git -C "$REPO_ROOT" rm -f -q -- "$_grc_added" >/dev/null 2>&1 || _checkout_ok=0
-                done < <(git -C "$REPO_ROOT" diff --name-only --diff-filter=A HEAD -- "${_GRC_TOUCHED_PATHS[@]}" 2>/dev/null)
+                # Pruned across every touched path now, not just $SLUG/ --
+                # but, per #966 above, only across the SAFE subset, never a
+                # path a concurrent write landed on since the pre-quit
+                # snapshot.
+                if [ "${#_grc_safe_paths[@]}" -gt 0 ]; then
+                    while IFS= read -r _grc_added; do
+                        [ -n "$_grc_added" ] || continue
+                        git -C "$REPO_ROOT" rm -f -q -- "$_grc_added" >/dev/null 2>&1 || _checkout_ok=0
+                    done < <(git -C "$REPO_ROOT" diff --name-only --diff-filter=A HEAD -- "${_grc_safe_paths[@]}" 2>/dev/null)
+                fi
             fi
         fi
 
