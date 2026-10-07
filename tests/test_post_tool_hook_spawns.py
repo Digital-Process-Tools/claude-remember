@@ -62,7 +62,7 @@ from tests.spawn_counting import make_shim_dir, spawns as _spawn_lines  # noqa: 
 # config() to a single read of the merged config, 17 after #429 added one
 # `mktemp` to close the predictable-shared-tmp-path TOCTOU in the same merge
 # (a PID-suffixed literal path let an attacker's pre-seeded symlink receive
-# the merged config, which can carry a live haiku.oauth_token) -- a real,
+# the merged config, which can carry a haiku.oauth_token value) -- a real,
 # necessary, one-time cost of the fix, not a regression to chase back out.
 # 18 after #744 added a SEPARATE `jq -c 'del(.haiku)'` sanitize spawn ahead
 # of the merge (this fixture's own project config is in the untrusted
@@ -221,7 +221,7 @@ def test_the_merged_config_is_read_once_not_once_per_key(tmp_path):
 
     The layered-config merge that PRODUCES the file is a different thing and is
     not counted here: removing it means publishing the merged config at a
-    stable path, and that file can carry a live OAuth credential. It ran as
+    stable path, and that file can carry a haiku.oauth_token value. It ran as
     plain `jq -s` before #726 first threaded an untrusted-project-layer
     strip through this SAME spawn (a `--argjson` flag, then #740's `-n`,
     then `--slurpfile`) -- #744 (CI observed the `--slurpfile` design

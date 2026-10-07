@@ -193,7 +193,7 @@ class TestTempFilePermissions:
 
 
 class TestMergedConfigPermissions:
-    """The merged REMEMBER_CONFIG can carry a live OAuth credential."""
+    """The merged REMEMBER_CONFIG can carry a haiku.oauth_token value."""
 
     def test_merged_config_is_600_without_a_caller_umask(self, tmp_path):
         """lib-memory-dir.sh must make the merged config private itself.
