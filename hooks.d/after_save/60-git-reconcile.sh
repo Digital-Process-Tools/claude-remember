@@ -423,6 +423,21 @@ _grc_bump_ndc_gen() {
     _grc_report_conflict() {
         local _files="$1" _attempt="$2" _msg_extra _foreign _quit_ok _checkout_ok
 
+        # #954: by the time this function is entered, `git rebase` has
+        # already failed with a real conflict -- which means it already
+        # rewrote $SLUG/now.md to conflict-marker content (replaying commits
+        # up to the conflicting one) before stopping. The tree is already
+        # rewritten here, the exact same "bump as soon as the tree is
+        # rewritten, regardless of downstream success" shape the
+        # fast-forward and successful-rebase call sites above are bumped
+        # for -- this path was the one now.md-rewriting path that never
+        # called it, leaving an NDC round that snapshots now.md inside this
+        # window unable to detect the overlap (#932 reasoned consequence).
+        # Bumped unconditionally, before the quit/checkout outcome is even
+        # known, so a FAILED quit or checkout (still handled below, still
+        # reported honestly) does not suppress it either.
+        _grc_bump_ndc_gen
+
         # #943: instead of snapshotting a foreign write and racing it
         # against `git rebase --abort` (the #939/#942 approach, and the
         # TOCTOU gap that fix could not close), never let the abort touch
