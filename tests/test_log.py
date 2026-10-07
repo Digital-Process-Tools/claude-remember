@@ -65,6 +65,40 @@ def test_format_duration_hours():
     assert format_duration(7200) == "2h"
 
 
+def test_log_flattens_control_characters_in_message():
+    """A control character embedded in message must not survive into the log
+    line, mirroring the shell-side `tr '[:cntrl:]' ' '` flattening already
+    applied by report_error()/_dispatch_report_skip() (#599/#618, #881)."""
+    with tempfile.TemporaryDirectory() as d:
+        log("test", "line1\x01line2", d)
+        files = os.listdir(d)
+        content = open(os.path.join(d, files[0])).read()
+        assert "\x01" not in content
+        assert "line1 line2" in content
+
+
+def test_log_does_not_flatten_printable_characters():
+    """Positive control: ordinary printable text must pass through
+    untouched, so the flattening pass above isn't masking a broken write."""
+    with tempfile.TemporaryDirectory() as d:
+        log("test", "hello world! 100% done.", d)
+        files = os.listdir(d)
+        content = open(os.path.join(d, files[0])).read()
+        assert "[test] hello world! 100% done." in content
+
+
+def test_log_flattens_embedded_newline_to_prevent_forged_entry():
+    """An embedded newline/CR in message must not let it forge a second,
+    structurally separate log line."""
+    with tempfile.TemporaryDirectory() as d:
+        log("test", "safe\nmalicious [forged] injected", d)
+        files = os.listdir(d)
+        content = open(os.path.join(d, files[0])).read()
+        lines = content.splitlines()
+        assert len(lines) == 1
+        assert "safe malicious [forged] injected" in lines[0]
+
+
 def test_log_fallback_to_stderr_on_oserror(capsys):
     """When the log file can't be written, log() prints to stderr instead of raising."""
     with tempfile.TemporaryDirectory() as d:
