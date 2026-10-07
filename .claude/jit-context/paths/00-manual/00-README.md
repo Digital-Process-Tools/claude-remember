@@ -300,3 +300,65 @@ than an oversight.
   generalizable lesson, and all three are different facets of the same shipped feature.
   **Filed as [#920](https://github.com/Digital-Process-Tools/claude-remember/issues/920)
   instead**, covering all three.
+- **`879.wrapper-grant-missing-command-builtin`** and **`879.wrapper-grant-spellings-missed`** --
+  declined 2026-10-07, both still true at HEAD. `.github/scripts/check_release_tree.py`'s
+  `_UNSCOPED_COMMANDS` set (lines 840-851) still lacks `command`, `nice` and `stdbuf`, and the
+  `..` path-escape check at line 876 still only splits on forward slash, missing a
+  backslash-separated escape -- confirmed directly against `bash_grant_problem`. Declined as a
+  rule because the fix is the same list/check-widening shape #866/#879 already established, not
+  a new lesson. **Filed as
+  [#950](https://github.com/Digital-Process-Tools/claude-remember/issues/950) instead,
+  consolidating both.**
+- **`913.windows-cygpath-test-skip`** -- declined 2026-10-07, already documented. The fragment's
+  concern (`tests/test_session_dir_cache_913.py` skips on win32, so "CI passed on windows-latest"
+  verifies nothing about the fix's actual cygpath-avoidance claim there) is already recorded
+  verbatim in `docs/windows-skip-triage.md`'s own row for that file ("the fix's cygpath-avoidance
+  claim is verified only against a POSIX stub cygpath, not a native one"). No new rule and no new
+  issue: the existing per-module verdict list already carries this exact caveat.
+- **`932.ndc-gen-not-bumped-on-conflict-path`** -- declined 2026-10-07, still true at HEAD:
+  `hooks.d/after_save/60-git-reconcile.sh`'s conflict path still never calls
+  `_grc_bump_ndc_gen`, unlike the fast-forward and successful-rebase paths. Declined as a rule
+  because the fix is a single missing call site, not a generalizable lesson. **Filed as
+  [#954](https://github.com/Digital-Process-Tools/claude-remember/issues/954) instead.**
+- **`933.fast-path-test-does-not-confirm-fast-path-ran`** -- declined 2026-10-07, still true at
+  HEAD: the fast-path test in `tests/test_autonomous_log_retention_487.py` still has no positive
+  evidence `_remember_auto_ref` was actually built by `mktemp`, unlike its sibling fallback test.
+  Declined as a rule because the fix is an assertion/marker addition across one test file's
+  existing tests, not a new lesson -- the closest generalizable lesson here (confirming which
+  code path a test exercises, not just that its output is correct) is adjacent to but distinct
+  from this repo's existing "pair a must-not-fire assertion with a must-fire one" convention, and
+  one incident is not enough to justify a second, overlapping rule. **Filed as
+  [#951](https://github.com/Digital-Process-Tools/claude-remember/issues/951) instead.**
+- **`939.reconcile-abort-exit-status-unchecked`** -- declined 2026-10-07, already fixed. The
+  fragment described the old `git rebase --abort ... || true` (unchecked exit status) at the
+  pre-#945 version of `60-git-reconcile.sh`. At current HEAD, the conflict path no longer calls
+  `--abort` at all -- commit 84a6ea5 (#945) replaced it with `if git -C "$REPO_ROOT" rebase
+  --quit >/dev/null 2>&1; then ...`, which does check the exit status via the `if` itself. No new
+  issue.
+- **`939.reconcile-foreign-commit-dropped-by-abort`** -- declined 2026-10-07, already fixed /
+  superseded. The fragment's exact mechanism (`git rebase --abort` resetting the whole tracked
+  tree and dropping a foreign commit with it) no longer applies: commit 84a6ea5 (#945) removed
+  the `--abort` call from the live conflict path entirely, replacing it with `rebase --quit` (which
+  does not reset the working tree) plus a scoped checkout. A related-but-different scoping gap in
+  that replacement is already tracked separately as part of
+  [#952](https://github.com/Digital-Process-Tools/claude-remember/issues/952) (the
+  restore-scoped-to-slug finding below). No new issue filed for this fragment specifically.
+- **`945.reconcile-autostash-not-disabled-for-rebase`**, **`945.reconcile-restore-scoped-to-slug-not-rebase-paths`**
+  and **`945.reconcile-symbolic-ref-uses-configured-not-actual-branch`** -- declined 2026-10-07,
+  all three still true at HEAD. All three are regressions introduced by commit 84a6ea5 (#945)'s
+  `rebase --quit`-based rewrite of `60-git-reconcile.sh`'s conflict path: no `--no-autostash` at
+  either rebase call site, the scoped restore assuming every replayed commit is confined to
+  `$SLUG/`, and `git symbolic-ref HEAD refs/heads/$BRANCH_NAME` restoring to the configured
+  branch rather than the rebase's own recorded head-name. Declined as a rule because each fix is
+  a scoped change to one already-identified function, not a generalizable lesson (the
+  generalizable half -- a notice claiming a tree state it never checked -- is promoted
+  separately as `hook-notice-must-not-claim-unverified-tree-state.md` in this same layer). **Filed
+  as [#952](https://github.com/Digital-Process-Tools/claude-remember/issues/952) instead,
+  consolidating all three.**
+- **`946.rebase-in-progress-collapses-could-not-tell-into-nothing-there`** -- declined 2026-10-07,
+  still true at HEAD: `_grc_rebase_in_progress` still returns a plain false both when no rebase is
+  in progress and when the underlying `git rev-parse --git-path` call itself fails, across all of
+  its call sites. Declined as a rule because the open question is a design decision (whether the
+  undetermined case should behave like "in progress" or surface its own log line), not a lesson a
+  standing rule would teach anyone away from. **Filed as
+  [#953](https://github.com/Digital-Process-Tools/claude-remember/issues/953) instead.**
