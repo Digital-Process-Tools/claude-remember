@@ -414,6 +414,7 @@ _grc_bump_ndc_gen() {
 
     _grc_report_conflict() {
         local _files="$1" _attempt="$2" _foreign _foreign_backup _msg_extra
+        local _backup_ok=0 _backup_fail=0 _restore_ok=0 _abort_ok _grc_fp _grc_bf _grc_rel
         _foreign=$(_grc_foreign_changes)
         _foreign_backup=""
         if [ -n "$_foreign" ]; then
@@ -435,32 +436,72 @@ _grc_bump_ndc_gen() {
             # copied, so the abort's own revert to ORIG_HEAD stands for
             # it, same as if this guard were absent -- #939 is about a
             # discarded WRITE, and only a WRITE is a file to copy.
+            #
+            # #942: neither the mkdir nor the cp used to check its own exit
+            # status (both "|| true") -- a failed backup copy read exactly
+            # like "nothing to restore" and the hook went on to claim
+            # success anyway. Count successes and failures explicitly
+            # instead, so a failed copy is reported as a failed copy.
             _foreign_backup="$RC_STATE_DIR/tmp/foreign-backup-$$"
-            rm -rf "$_foreign_backup" 2>/dev/null || true
+            rm -rf "$_foreign_backup" 2>/dev/null
             while IFS= read -r _grc_fp; do
                 [ -n "$_grc_fp" ] || continue
                 [ -f "$REPO_ROOT/$_grc_fp" ] || continue
-                mkdir -p "$_foreign_backup/$(dirname "$_grc_fp")" 2>/dev/null || true
-                cp -p "$REPO_ROOT/$_grc_fp" "$_foreign_backup/$_grc_fp" 2>/dev/null || true
+                if mkdir -p "$_foreign_backup/$(dirname "$_grc_fp")" 2>/dev/null \
+                    && cp -p "$REPO_ROOT/$_grc_fp" "$_foreign_backup/$_grc_fp" 2>/dev/null; then
+                    _backup_ok=$((_backup_ok + 1))
+                else
+                    _backup_fail=$((_backup_fail + 1))
+                fi
             done <<< "$_foreign"
         fi
 
-        git -C "$REPO_ROOT" rebase --abort >/dev/null 2>&1 || true
+        # #942: the abort's own exit status used to be discarded ("|| true")
+        # too, with no post-abort check -- an abort that failed (e.g. a
+        # concurrent index.lock) still produced "aborted, the tree is
+        # unchanged" while the rebase was actually still stuck.
+        if git -C "$REPO_ROOT" rebase --abort >/dev/null 2>&1; then
+            _abort_ok=1
+        else
+            _abort_ok=0
+        fi
 
-        _msg_extra="aborted, the tree is unchanged"
-        if [ -n "$_foreign_backup" ] && [ -d "$_foreign_backup" ]; then
-            while IFS= read -r -d '' _grc_bf; do
-                _grc_rel="${_grc_bf#"$_foreign_backup"/}"
-                mkdir -p "$(dirname "$REPO_ROOT/$_grc_rel")" 2>/dev/null || true
-                cp -p "$_grc_bf" "$REPO_ROOT/$_grc_rel" 2>/dev/null || true
-            done < <(find "$_foreign_backup" -type f -print0 2>/dev/null)
-            rm -rf "$_foreign_backup" 2>/dev/null || true
-            _msg_extra="aborted and restored a concurrent write that landed outside $SLUG/ while the rebase was in flight (${_foreign//$'\n'/; }) rather than letting the abort discard it"
+        if [ "$_abort_ok" -eq 0 ] && _grc_rebase_in_progress; then
+            _msg_extra="git rebase --abort itself FAILED (e.g. a concurrent index.lock) -- the rebase is still in progress and conflict markers are still in the tree"
+        elif [ "$_backup_fail" -gt 0 ]; then
+            _msg_extra="aborted, but $_backup_fail concurrent write(s) outside $SLUG/ could NOT be backed up before the abort and were likely discarded by it (${_foreign//$'\n'/; }) -- check by hand"
+        elif [ "$_backup_ok" -eq 0 ]; then
+            _msg_extra="aborted, the tree is unchanged"
+        else
+            # Every foreign path backed up successfully -- now restore from
+            # the backup, and only delete it once every restore this run
+            # actually attempted is confirmed to have succeeded. `find`
+            # itself is not checked here either (e.g. shadowed by a
+            # different `find` on PATH, Windows/Git Bash's System32 one
+            # ahead of Git's own per save-session.sh:1650/
+            # session-start-hook.sh:2151) -- if it yields nothing, or less
+            # than what was backed up, that is a restore failure, not a
+            # restore of zero files.
+            if [ -n "$_foreign_backup" ] && [ -d "$_foreign_backup" ]; then
+                while IFS= read -r -d '' _grc_bf; do
+                    _grc_rel="${_grc_bf#"$_foreign_backup"/}"
+                    if mkdir -p "$(dirname "$REPO_ROOT/$_grc_rel")" 2>/dev/null \
+                        && cp -p "$_grc_bf" "$REPO_ROOT/$_grc_rel" 2>/dev/null; then
+                        _restore_ok=$((_restore_ok + 1))
+                    fi
+                done < <(find "$_foreign_backup" -type f -print0 2>/dev/null)
+            fi
+            if [ "$_restore_ok" -eq "$_backup_ok" ]; then
+                rm -rf "$_foreign_backup" 2>/dev/null || true
+                _msg_extra="aborted and restored a concurrent write that landed outside $SLUG/ while the rebase was in flight (${_foreign//$'\n'/; }) rather than letting the abort discard it"
+            else
+                _msg_extra="aborted, but restoring $_backup_ok concurrent write(s) outside $SLUG/ only partially succeeded ($_restore_ok of $_backup_ok restored) -- the rest are kept at $_foreign_backup for manual recovery (${_foreign//$'\n'/; })"
+            fi
         fi
 
         log "git-reconcile" "ERROR: reconcile CONFLICT ($_attempt) rebasing onto $REMOTE_NAME/$BRANCH_NAME -- $_msg_extra. Conflicting file(s): ${_files%;}. Resolve by hand: git -C ${_dq}$REPO_ROOT${_dq} rebase ${_dq}$REMOTE_REF${_dq}"
         mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null || true
-        printf '%s\n' "remember: git reconcile hit a CONFLICT rebasing onto $REMOTE_NAME/$BRANCH_NAME. The rebase was aborted ($_msg_extra). Conflicting file(s): ${_files%;}. Resolve by hand: git -C ${_dq}$REPO_ROOT${_dq} rebase ${_dq}$REMOTE_REF${_dq}" \
+        printf '%s\n' "remember: git reconcile hit a CONFLICT rebasing onto $REMOTE_NAME/$BRANCH_NAME -- $_msg_extra. Conflicting file(s): ${_files%;}. Resolve by hand: git -C ${_dq}$REPO_ROOT${_dq} rebase ${_dq}$REMOTE_REF${_dq}" \
             > "$REMEMBER_DIR/tmp/git-reconcile-notice" 2>/dev/null || true
         echo 1 > "$CONFLICT_STATE_FILE" 2>/dev/null || true
     }
