@@ -1073,6 +1073,10 @@ everything repository-specific lives in `.github/release-branch.json`:
   environment, and the binaries it fakes all come from `.github/release-branch.json`'s `smoke`
   block (`bin_env_vars`, `drop_env_prefixes`, `fake_bins`) -- edit that block, not the script
   (#866). `hook-errors.log` is still read by name, not from config.
+- A missing `hooks/hooks.json`, or one that declares zero `command` hooks, is a **hard failure**
+  in both `check_release_tree.py` and `smoke_release_tree.py` (#858), with no config flag to opt
+  out. A plugin with no hooks of its own cannot reuse this tooling as it stands -- add at least
+  one `command` hook (even a no-op) before adopting it, or expect both checks to fail.
 - `release-branch.yml` reads the pinned `claude` CLI version from `.github/release-branch.json`'s
   `cli_version`, not from a workflow env entry -- edit that, and keep it at 2.1.281 or later (the
   floor is documented next to it in `_cli_version_why`) (#866).
@@ -1081,7 +1085,10 @@ everything repository-specific lives in `.github/release-branch.json`:
 
 To adopt it:
 
-1. Copy `.github/scripts/{build,check,smoke}_release_tree.py`, `.github/release-branch.json` and
+1. Copy `.github/scripts/{build,check,smoke}_release_tree.py` and
+   `.github/scripts/check_version_order.py` (`release-branch.yml`'s `publish` job calls it on
+   every release after the first one with a `release` parent (#856); skip it and that job fails
+   with "file not found" the first time that applies to you), `.github/release-branch.json` and
    `.github/workflows/release-branch.yml`, and adapt the points above.
 2. Rewrite the deny-list from that repository's own tree. Check every candidate against what the
    plugin loads at runtime (hooks, scripts they call, skills, commands, manifests) before denying
