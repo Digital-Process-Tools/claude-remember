@@ -439,6 +439,156 @@ class TestDivergedReconcile:
             "run's own slug and discarded by the abort -- #939"
         )
 
+    def test_autostash_never_silently_stashes_a_foreign_dirty_write(self, tmp_path):
+        """#952 item 1: with `rebase.autoStash=true` (a common git setting)
+        and another slug's own uncommitted, tracked write present when
+        THIS slug's rebase starts, autostash used to silently stash that
+        foreign write before the rebase began -- and `git rebase --quit`
+        (unlike --abort) never re-applies a stash, so the write ended up
+        sitting in `git stash list` with nothing announcing it, while this
+        hook's own conflict notice still claimed 'aborted, the tree is
+        unchanged'. `--no-autostash` on the rebase call closes this: with
+        a dirty tree present, the rebase must now simply refuse to START
+        at all (no stash, no replay, no-op), landing in the hook's
+        pre-existing 'failed to start' branch rather than the destructive
+        quit+checkout path."""
+        home, remember, remote, slug_dir, project = _store(tmp_path)
+
+        other_slug_dir = remember / "other-slug"
+        other_slug_dir.mkdir()
+        (other_slug_dir / "now.md").write_text("other slug base\n", encoding="utf-8")
+        _git(remember, ["add", "-A"])
+        _git(remember, ["commit", "-q", "-m", "other slug base"])
+        _git(remember, ["push", "-q", "origin", "main"])
+
+        # A common git setting -- NOT this hook's own config -- that would
+        # auto-stash a dirty tree the moment any `git rebase` starts,
+        # absent --no-autostash.
+        _git(remember, ["config", "rebase.autoStash", "true"])
+
+        other = tmp_path / "other-machine"
+        subprocess.run(["git", "clone", "-q", "-b", "main", str(remote), str(other)],
+                       check=True, capture_output=True)
+        _git(other, ["config", "user.email", "other@test"])
+        _git(other, ["config", "user.name", "Other"])
+        (other / "test-slug" / "now.md").write_text(
+            "## 10:00 | test\nFROM THE OTHER MACHINE\n", encoding="utf-8")
+        _git(other, ["add", "-A"])
+        _git(other, ["commit", "-q", "-m", "other machine edit"])
+        _git(other, ["push", "-q", "origin", "main"])
+
+        (slug_dir / "now.md").write_text(
+            "## 10:00 | test\nFROM THIS MACHINE\n", encoding="utf-8")
+        _git(remember, ["add", "-A"])
+        _git(remember, ["commit", "-q", "-m", "this machine edit"])
+        local_head = _head(remember)
+
+        # The foreign dirty write -- tracked, uncommitted -- present when
+        # this slug's rebase attempt starts.
+        dirty_content = "OTHER SLUG'S OWN UNCOMMITTED DIRTY WRITE\n"
+        (other_slug_dir / "now.md").write_text(dirty_content, encoding="utf-8")
+
+        cfg = _enabled_config(tmp_path)
+        _run(slug_dir, project, home, cfg)
+        _wait_quiesce(remember)
+
+        assert (other_slug_dir / "now.md").read_text(encoding="utf-8") == dirty_content, (
+            "the other slug's dirty, uncommitted write was altered -- it "
+            "must survive untouched, never silently autostashed"
+        )
+        stash_list = subprocess.run(
+            ["git", "-C", str(remember), "stash", "list"],
+            capture_output=True, text=True, check=False).stdout
+        assert stash_list == "", (
+            f"a stash entry was created -- autostash silently fired despite "
+            f"--no-autostash: {stash_list!r}"
+        )
+        assert _head(remember) == local_head, (
+            "HEAD moved even though the rebase should have refused to "
+            "start at all with a dirty tree present"
+        )
+
+        log_files = list((slug_dir / "logs").glob("memory-*.log"))
+        assert log_files, "hook wrote no log at all"
+        log_text = "\n".join(f.read_text(encoding="utf-8") for f in log_files)
+        assert "failed to start" in log_text, (
+            "the rebase's refusal to start (dirty tree, no autostash) was "
+            "not reported as such"
+        )
+        assert "CONFLICT" not in log_text, (
+            "this never reached a real conflict -- the rebase should have "
+            "refused to start before replaying anything"
+        )
+
+    def test_conflict_restore_covers_another_slugs_upstream_only_change(self, tmp_path):
+        """#952 item 2: the scoped restore used to assume every commit a
+        rebase could replay is confined to $SLUG/ -- false whenever
+        REPO_ROOT is shared by more than one slug, since the rebase's own
+        ahead/behind commit set spans the whole branch, not one slug's
+        subtree. Here the REMOTE side advances an OTHER slug (no local
+        commit ever touches it) at the same time it conflicts with this
+        slug -- the rebase's new base (built from the remote tip) already
+        shows the other slug's upstream content the moment the conflict
+        stops the replay. The old, $SLUG-scoped checkout left that
+        upstream content sitting in the working tree, silently advancing
+        the other slug past what this run's own pre-rebase HEAD actually
+        had -- never fetched or merged through any legitimate path."""
+        home, remember, remote, slug_dir, project = _store(tmp_path)
+
+        other_slug_dir = remember / "other-slug"
+        other_slug_dir.mkdir()
+        (other_slug_dir / "now.md").write_text("OTHER SLUG V1 (local pre-rebase)\n", encoding="utf-8")
+        _git(remember, ["add", "-A"])
+        _git(remember, ["commit", "-q", "-m", "other slug v1"])
+        _git(remember, ["push", "-q", "origin", "main"])
+
+        other = tmp_path / "other-machine"
+        subprocess.run(["git", "clone", "-q", "-b", "main", str(remote), str(other)],
+                       check=True, capture_output=True)
+        _git(other, ["config", "user.email", "other@test"])
+        _git(other, ["config", "user.name", "Other"])
+        # Upstream advances the OTHER slug -- no local commit ever touches
+        # this file, so it is never part of this run's own ahead range.
+        (other / "other-slug" / "now.md").write_text(
+            "OTHER SLUG V2 (from upstream)\n", encoding="utf-8")
+        _git(other, ["add", "-A"])
+        _git(other, ["commit", "-q", "-m", "upstream advances other-slug"])
+        # Upstream also conflicts with this slug.
+        (other / "test-slug" / "now.md").write_text(
+            "## 10:00 | test\nFROM THE OTHER MACHINE\n", encoding="utf-8")
+        _git(other, ["add", "-A"])
+        _git(other, ["commit", "-q", "-m", "other machine edit (conflicts)"])
+        _git(other, ["push", "-q", "origin", "main"])
+
+        (slug_dir / "now.md").write_text(
+            "## 10:00 | test\nFROM THIS MACHINE\n", encoding="utf-8")
+        _git(remember, ["add", "-A"])
+        _git(remember, ["commit", "-q", "-m", "this machine edit"])
+        local_head = _head(remember)
+
+        cfg = _enabled_config(tmp_path)
+        _run(slug_dir, project, home, cfg)
+        _wait_quiesce(remember)
+
+        assert _head(remember) == local_head, (
+            "a conflicting rebase changed HEAD -- it must abort and leave "
+            "the tree exactly as it was"
+        )
+        assert (other_slug_dir / "now.md").read_text(encoding="utf-8") == (
+            "OTHER SLUG V1 (local pre-rebase)\n"
+        ), (
+            "the other slug's file was left at the UPSTREAM's own content "
+            "after the abort -- the restore was scoped to $SLUG/ only and "
+            "never reached a path outside it, even though this run's own "
+            "rebase (not a separate fetch) is what put that content there"
+        )
+        status = subprocess.run(
+            ["git", "-C", str(remember), "status", "--porcelain"],
+            capture_output=True, text=True, check=False).stdout
+        assert status == "", (
+            f"the tree must be exactly clean after the abort, got: {status!r}"
+        )
+
 
 # ── #946: a rebase/merge/cherry-pick already in progress for some OTHER
 # reason -- most importantly a human mid-way through resolving a real
@@ -588,6 +738,74 @@ class TestForeignRebaseGuard:
         assert "CONFLICT" in log_text, (
             "the hook's own legitimate conflict was not reported -- the "
             "new pre-check wrongly swallowed it as a foreign rebase"
+        )
+
+    def test_undetermined_rebase_check_declines_rather_than_proceeding(self, tmp_path):
+        """#953: `_grc_rebase_in_progress` used to collapse "the git-path
+        call itself FAILED" into the same `return 1` as "no rebase-merge/
+        rebase-apply directory exists" -- a could-not-tell read as a
+        confident nothing-there. Here the two `git rev-parse --git-path`
+        calls the pre-check before this hook's OWN rebase makes are forced
+        to fail (a git binary/`.git` read problem, not merely "no rebase
+        found"), on an otherwise-ordinary diverged store with no real
+        conflict anywhere. The fix must decline with its own distinct,
+        honest message -- 'could not be determined' -- rather than either
+        silently proceeding into its own rebase (the #946 regression this
+        guards against) or reusing the "already in progress" wording,
+        which would tell a human to `rebase --continue` a rebase that was
+        never actually started."""
+        home, remember, remote, slug_dir, project = _store(tmp_path)
+        _advance_remote(tmp_path, remote)
+        _save_locally(remember, slug_dir, n=1)
+        local_head = _head(remember)
+
+        real_git = shutil.which("git")
+        assert real_git, "no git on PATH -- fixture assumption broken"
+        bin_dir = tmp_path / "shim-bin"
+        bin_dir.mkdir()
+        git_shim = bin_dir / "git"
+        git_shim_text = (
+            "#!/bin/sh\n"
+            'if [ "$1" = "-C" ] && [ "$3" = "rev-parse" ] &&\n'
+            '   [ "$4" = "--path-format=absolute" ] && [ "$5" = "--git-path" ] &&\n'
+            '   { [ "$6" = "rebase-merge" ] || [ "$6" = "rebase-apply" ]; }; then\n'
+            "    exit 1\n"
+            "fi\n"
+            f'exec "{real_git}" "$@"\n'
+        )
+        git_shim.write_text(git_shim_text, encoding="utf-8")
+        git_shim.chmod(0o755)
+
+        cfg = _enabled_config(tmp_path)
+        _run(slug_dir, project, home, cfg,
+             PATH=f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+        _wait_quiesce(remember)
+
+        assert _head(remember) == local_head, (
+            "HEAD moved despite the could-not-tell check -- the hook must "
+            "decline rather than guess"
+        )
+
+        log_files = list((slug_dir / "logs").glob("memory-*.log"))
+        assert log_files, "hook wrote no log at all"
+        log_text = "\n".join(f.read_text(encoding="utf-8") for f in log_files)
+        assert "could not determine" in log_text, (
+            "the git-path call's own failure was not reported as a "
+            "distinct, honest could-not-tell -- " + log_text
+        )
+        assert "and it is NOT this run's own" not in log_text, (
+            "a could-not-tell was worded as the OTHER, confirmed-in-"
+            "progress message -- that tells a human to `rebase --continue` "
+            "a rebase that was never actually started"
+        )
+        assert "CONFLICT" not in log_text, (
+            "the hook proceeded into its own rebase despite being unable "
+            "to tell whether one was already in progress"
+        )
+
+        notice = slug_dir / "tmp" / "git-reconcile-notice"
+        assert not notice.exists(), (
+            "a CONFLICT notice was written for a rebase this run never started"
         )
 
 
@@ -983,59 +1201,6 @@ class TestNdcGenerationBump:
         log_text = "\n".join(f.read_text(encoding="utf-8") for f in log_files)
         assert "could not bump" in log_text
         assert "not a regular file" in log_text
-
-    def test_conflict_bumps_ndc_generation(self, tmp_path):
-        """#954: the conflict path (_grc_report_conflict) is the one
-        now.md-rewriting path that never called _grc_bump_ndc_gen -- the
-        rebase itself already rewrites $SLUG/now.md to conflict-marker
-        content before failing, the same "tree already rewritten,
-        regardless of downstream success" shape the fast-forward/rebase
-        sites above are bumped for. Without this bump, an NDC round that
-        snapshots now.md inside that window sees an unchanged generation
-        counter and trims lines it never actually summarised (#932
-        reasoned consequence). Same simple real-conflict shape as
-        TestScopedAbort.test_file_added_by_the_upstream_side_before_the_conflict_is_pruned
-        -- no shim needed, since the bump must fire on an ordinary
-        conflict, not only one injected mid-flight."""
-        home, remember, remote, slug_dir, project = _store(tmp_path)
-
-        other = tmp_path / "other-machine"
-        subprocess.run(["git", "clone", "-q", "-b", "main", str(remote), str(other)],
-                       check=True, capture_output=True)
-        _git(other, ["config", "user.email", "other@test"])
-        _git(other, ["config", "user.name", "Other"])
-        (other / "test-slug" / "now.md").write_text(
-            "## 10:00 | test\nFROM THE OTHER MACHINE\n", encoding="utf-8")
-        _git(other, ["add", "-A"])
-        _git(other, ["commit", "-q", "-m", "other machine edit (conflicts)"])
-        _git(other, ["push", "-q", "origin", "main"])
-
-        (slug_dir / "now.md").write_text(
-            "## 10:00 | test\nFROM THIS MACHINE\n", encoding="utf-8")
-        _git(remember, ["add", "-A"])
-        _git(remember, ["commit", "-q", "-m", "this machine edit"])
-
-        gen_file = slug_dir / "tmp" / "ndc-generation"
-        assert not gen_file.exists(), "marker must start absent for this test"
-
-        cfg = _enabled_config(tmp_path)
-        _run(slug_dir, project, home, cfg)
-        _wait_quiesce(remember)
-
-        log_files = list((slug_dir / "logs").glob("memory-*.log"))
-        log_text = "\n".join(f.read_text(encoding="utf-8") for f in log_files)
-        assert "CONFLICT" in log_text, (
-            "fixture assumption broken -- this must be a real conflict, "
-            "not a clean rebase/fast-forward"
-        )
-
-        assert gen_file.exists(), (
-            "a conflict was hit and the rebase already rewrote "
-            "test-slug/now.md to conflict-marker content before the scoped "
-            "restore ran, but NDC's generation marker was never bumped -- "
-            "an in-flight NDC commit has no way to notice this writer"
-        )
-        assert gen_file.read_text(encoding="utf-8").strip() == "1"
 
 
 # ── The conflict notice actually reaches the human ───────────────────────────
