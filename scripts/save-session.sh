@@ -1738,7 +1738,16 @@ if [ -n "$_remember_auto_now" ] && [[ "$_remember_auto_now" != *[!0-9]* ]]; then
     # 8/9 are not valid octal digits -- "value too great for base" aborts
     # this whole conditional (and silently falls through to the per-file
     # fallback) for exactly that class of human-plausible config value.
-    _remember_auto_cutoff=$(( 10#$_remember_auto_now - (10#$_AUTONOMOUS_LOG_RETENTION_DAYS) * 86400 ))
+    #
+    # #933: cutoff is (N+1) days, not N -- the fallback loop below floors
+    # (now - mtime) / 86400 before its `-gt N` check, so it only reclaims a
+    # file once it is a FULL N+1 days old. A cutoff of exactly N days paired
+    # with a strict "older than" test would instead reclaim anything over N
+    # days by even a second, disagreeing with the fallback for any file
+    # aged between N and N+1 days -- which path a given flush happens to
+    # take (mktemp/touch -d succeeding or not) is platform-dependent, so
+    # that disagreement meant retention silently varied by platform.
+    _remember_auto_cutoff=$(( 10#$_remember_auto_now - ((10#$_AUTONOMOUS_LOG_RETENTION_DAYS) + 1) * 86400 ))
     _remember_auto_ref=$(mktemp "${TMPDIR:-/tmp}/remember-retention-ref.XXXXXX" 2>/dev/null) || _remember_auto_ref=""
     if [ -n "$_remember_auto_ref" ]; then
         # Registered with the script's own cleanup() (CLEANUP_FILES, trap
@@ -1771,7 +1780,15 @@ for _remember_auto_log in "${_remember_auto_dir}/logs/autonomous"/*.log; do
         continue
     fi
     if [ -n "$_remember_auto_ref" ]; then
-        if [ "$_remember_auto_log" -ot "$_remember_auto_ref" ]; then
+        # #933: `! -nt` (not newer than == mtime <= ref mtime), not `-ot`
+        # (strict mtime < ref mtime) -- the fallback below deletes once a
+        # file's floored age in days is "> N", which is true at EXACTLY
+        # N+1 days (floor(N+1) > N), not only strictly past it. `-ot`
+        # against the (N+1)-day-old $_remember_auto_ref would keep a file
+        # whose mtime lands exactly on that reference instant, disagreeing
+        # with the fallback for that one case; `! -nt` includes the equal
+        # instant and matches the fallback's `-gt` exactly.
+        if [ ! "$_remember_auto_log" -nt "$_remember_auto_ref" ]; then
             rm -f "$_remember_auto_log" 2>/dev/null \
                 || log "housekeeping" "WARNING: could not remove aged $_remember_auto_log"
         fi

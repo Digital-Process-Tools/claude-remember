@@ -287,14 +287,26 @@ class TestAgedAutonomousLogsAreReclaimed:
             "12:00:00 [session-end] flush started\n"
             "12:00:01 save-session.sh output from a run long finished\n"
         )
-        eight_days_ago = time.time() - (8 * 24 * 3600)
-        os.utime(stale, (eight_days_ago, eight_days_ago))
+        # #933: 9 days, not 8 -- the fast path's own cutoff now requires a
+        # FULL N+1 days (matching the fallback's floored-days comparison),
+        # so an exactly-8-day-old file (N+1 with the default N=7) sits
+        # right ON that boundary: its real mtime carries sub-second
+        # precision (a real filesystem write, or `os.utime` here), while
+        # the fast path's reference file can only represent whole seconds
+        # (`touch -d`/`touch -t`), so whether this exact instant lands on
+        # one side of that boundary or the other is a coin flip on
+        # whichever side of a wall-clock second the test happened to land.
+        # 9 days restores the comfortable margin this test always meant to
+        # have (same margin #487 originally measured with 8 days against
+        # the old cutoff).
+        nine_days_ago = time.time() - (9 * 24 * 3600)
+        os.utime(stale, (nine_days_ago, nine_days_ago))
 
         result = _run_hook(plugin, env, session_id=sid)
 
         assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")
         assert not stale.exists(), (
-            "a non-empty session-end log, 8 days old, survived an ordinary "
+            "a non-empty session-end log, 9 days old, survived an ordinary "
             "flush's own housekeeping -- #487's retention gap: emptiness "
             "was the only thing ever reclaimed here, and this file was "
             "never empty\n" + _dump_dir(autonomous)
@@ -341,17 +353,22 @@ class TestAgedAutonomousLogsAreReclaimed:
         cfg_layer.write_text(_json.dumps(cfg))
         autonomous = project / ".remember" / "logs" / "autonomous"
         autonomous.mkdir(parents=True, exist_ok=True)
-        two_days_old = autonomous / "session-end-000000-33333.log"
-        two_days_old.write_text("12:00:00 [session-end] flush started\n")
-        two_days_ago = time.time() - (2 * 24 * 3600)
-        os.utime(two_days_old, (two_days_ago, two_days_ago))
+        # #933: 3 days, not 2 -- with retention=1, the fast path's cutoff
+        # is now exactly 2 days (N+1, N=1); a 2-day-old file sits right on
+        # that boundary (the same sub-second race documented above), so
+        # bump to 3 days for the same comfortable margin this test always
+        # meant to exercise.
+        three_days_old = autonomous / "session-end-000000-33333.log"
+        three_days_old.write_text("12:00:00 [session-end] flush started\n")
+        three_days_ago = time.time() - (3 * 24 * 3600)
+        os.utime(three_days_old, (three_days_ago, three_days_ago))
 
         result = _run_hook(plugin, env, session_id=sid)
 
         assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")
-        assert not two_days_old.exists(), (
+        assert not three_days_old.exists(), (
             "thresholds.autonomous_log_retention_days=1 did not shrink the "
-            "retention window -- a 2-day-old log survived a sweep "
+            "retention window -- a 3-day-old log survived a sweep "
             "configured to reclaim anything over 1 day old\n"
             + _dump_dir(autonomous)
         )
@@ -382,14 +399,19 @@ class TestHousekeepingRunsIndependentlyOfNdcCompression:
             "12:00:00 [session-end] flush started\n"
             "12:00:01 save-session.sh output from a run long finished\n"
         )
-        eight_days_ago = time.time() - (8 * 24 * 3600)
-        os.utime(stale, (eight_days_ago, eight_days_ago))
+        # #933: 9 days, not 8 -- see the identical comment in
+        # test_must_fire_an_old_nonempty_session_end_log_is_swept above;
+        # the fast path's cutoff now sits at exactly 8 days (N+1, N=7),
+        # so this fixture needs the same margin bump to stay clear of
+        # that boundary's own sub-second race.
+        nine_days_ago = time.time() - (9 * 24 * 3600)
+        os.utime(stale, (nine_days_ago, nine_days_ago))
 
         result = _run_hook(plugin, env, session_id=sid)
 
         assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")
         assert not stale.exists(), (
-            "a non-empty session-end log, 8 days old, survived an ordinary "
+            "a non-empty session-end log, 9 days old, survived an ordinary "
             "flush's own housekeeping with features.ndc_compression=false -- "
             "#498's coupling: the sweep lived inside the RUN_NDC block and "
             "turning NDC compression off silently turned housekeeping off "
@@ -604,8 +626,11 @@ _run_housekeeping_block
         autonomous.mkdir(parents=True)
         stale = autonomous / "session-end-000000-11111.log"
         stale.write_text("12:00:00 [session-end] flush started\n")
-        eight_days_ago = time.time() - (8 * 24 * 3600)
-        os.utime(stale, (eight_days_ago, eight_days_ago))
+        # #933: 9 days, not 8 -- same margin bump as the full-hook tests
+        # above, same reason: 8 days is now exactly the fast path's own
+        # cutoff (N+1, N=7), a sub-second race rather than a safe margin.
+        nine_days_ago = time.time() - (9 * 24 * 3600)
+        os.utime(stale, (nine_days_ago, nine_days_ago))
 
         windows_style = str(tmp_path / ".remember").replace("/", "\\")
         self._run_extracted_block(autonomous, windows_style, ostype="msys")
@@ -699,8 +724,10 @@ _run_housekeeping_block
         autonomous.mkdir(parents=True)
         stale = autonomous / "session-end-000000-22222.log"
         stale.write_text("12:00:00 [session-end] flush started\n")
-        eight_days_ago = time.time() - (8 * 24 * 3600)
-        os.utime(stale, (eight_days_ago, eight_days_ago))
+        # #933: 9 days, not 8 -- same margin bump, same reason as the
+        # other fast-path fixtures in this file.
+        nine_days_ago = time.time() - (9 * 24 * 3600)
+        os.utime(stale, (nine_days_ago, nine_days_ago))
 
         self._run_extracted_block(autonomous, str(tmp_path / ".remember"))
 
@@ -753,12 +780,15 @@ REMEMBER_DIR={shlex.quote(remember_dir)}
     def test_must_fire_stat_and_date_fork_count_does_not_scale_with_file_count(self, tmp_path):
         autonomous = tmp_path / ".remember" / "logs" / "autonomous"
         autonomous.mkdir(parents=True)
-        eight_days_ago = time.time() - (8 * 24 * 3600)
+        # #933: 9 days, not 8 -- same margin bump, same reason as the
+        # other fast-path fixtures in this file (8 days is now exactly
+        # the fast path's own N+1 cutoff with the default N=7).
+        nine_days_ago = time.time() - (9 * 24 * 3600)
         stale_files = []
         for i in range(8):
             stale = autonomous / f"session-end-00000{i}-99999.log"
             stale.write_text("12:00:00 [session-end] flush started\n")
-            os.utime(stale, (eight_days_ago, eight_days_ago))
+            os.utime(stale, (nine_days_ago, nine_days_ago))
             stale_files.append(stale)
         # Positive control in the SAME run: one fresh file must survive,
         # exactly as test_must_fire_a_fresh_nonempty_log_survives_the_same_sweep
@@ -789,7 +819,7 @@ REMEMBER_DIR={shlex.quote(remember_dir)}
 
         for stale in stale_files:
             assert not stale.exists(), (
-                f"{stale.name} (8 days old) survived the sweep\n" + _dump_dir(autonomous)
+                f"{stale.name} (9 days old) survived the sweep\n" + _dump_dir(autonomous)
             )
         assert fresh.exists(), (
             "the fresh (just-written) log was reclaimed by the sweep -- "
@@ -909,10 +939,23 @@ REMEMBER_DIR={shlex.quote(remember_dir)}
         """
         autonomous = tmp_path / ".remember" / "logs" / "autonomous"
         autonomous.mkdir(parents=True)
-        eight_days_ago = time.time() - (8 * 24 * 3600)
+        # #933 CI (windows-latest, all four interpreters, PR #937): this
+        # fixture used to sit at exactly 8 days (N+1, N=7) and relied
+        # entirely on `broken_bin`'s `mktemp` override actually winning
+        # over the real `mktemp` on PATH to force the fallback. On a real
+        # windows-latest runner that assumption did not hold -- the real
+        # `mktemp` apparently still resolved, so this test exercised the
+        # FAST path after all, landing on the exact N+1-day boundary the
+        # two tests below this one exist to pin, and losing the same
+        # whole-second-vs-sub-second race documented there. Bumping to 9
+        # days removes the dependency on which path actually runs: either
+        # one reliably reclaims a file this far past the window, so the
+        # test now proves what its own name claims regardless of whether
+        # the mktemp override takes effect on a given platform.
+        nine_days_ago = time.time() - (9 * 24 * 3600)
         stale = autonomous / "session-end-000000-33333.log"
         stale.write_text("12:00:00 [session-end] flush started\n")
-        os.utime(stale, (eight_days_ago, eight_days_ago))
+        os.utime(stale, (nine_days_ago, nine_days_ago))
         one_day_ago = time.time() - (1 * 24 * 3600)
         fresh = autonomous / "session-end-000000-44444.log"
         fresh.write_text("12:00:00 [session-end] flush started\n")
@@ -934,12 +977,103 @@ REMEMBER_DIR={shlex.quote(remember_dir)}
             f"forced to fail\nstdout={result.stdout}\nstderr={result.stderr}"
         )
         assert not stale.exists(), (
-            "an 8-day-old log survived the FALLBACK loop (mktemp forced "
-            "to fail, so the fast path's own reference file could never "
-            "be built) -- the per-file stat()+date() comparison this "
-            "diff kept as a fallback is broken\n" + _dump_dir(autonomous)
+            "a 9-day-old log survived the sweep (intended to force the "
+            "FALLBACK loop via a `mktemp` override, though on some "
+            "platforms the fast path may run instead -- either one must "
+            "reclaim a file this far past the window) -- the per-file "
+            "stat()+date() comparison this diff kept as a fallback, or "
+            "the fast path itself, is broken\n" + _dump_dir(autonomous)
         )
         assert fresh.exists(), (
             "a 1-day-old log was reclaimed by the fallback loop -- "
             "positive control failed\n" + _dump_dir(autonomous)
+        )
+
+    def test_must_not_fire_fast_path_keeps_a_log_between_n_and_n_plus_one_days(self, tmp_path):
+        """#933: the fast path's own cutoff (`now - N*86400`, then `-ot`)
+        deletes anything strictly older than exactly N days -- a REAL-valued
+        boundary. The fallback loop floors `(now - mtime) / 86400` before its
+        `-gt N` check, so it only deletes once a file is a FULL N+1 days old.
+        A log aged 7.5 days with N=7 sits in the gap between those two
+        thresholds: the fast path (pre-fix) reclaims it, the fallback does
+        not -- so whether a 7.5-day-old log survives a flush depends on
+        which path happened to run, which is itself platform-dependent
+        (mktemp/touch -d success). Paired with an 8.5-day-old log (clearly
+        past BOTH thresholds) as the "must fire" positive control in the
+        same fixture, per this repo's own testing rule: an assertion that
+        checks only "the boundary file survived" would also pass if the
+        sweep reclaimed nothing at all.
+        """
+        autonomous = tmp_path / ".remember" / "logs" / "autonomous"
+        autonomous.mkdir(parents=True)
+        seven_and_a_half_days_ago = time.time() - (7 * 24 * 3600 + 12 * 3600)
+        boundary = autonomous / "session-end-000000-55555.log"
+        boundary.write_text("12:00:00 [session-end] flush started\n")
+        os.utime(boundary, (seven_and_a_half_days_ago, seven_and_a_half_days_ago))
+        eight_and_a_half_days_ago = time.time() - (8 * 24 * 3600 + 12 * 3600)
+        past_both = autonomous / "session-end-000000-66666.log"
+        past_both.write_text("12:00:00 [session-end] flush started\n")
+        os.utime(past_both, (eight_and_a_half_days_ago, eight_and_a_half_days_ago))
+
+        result = self._run_extracted_block_with_path_override(
+            autonomous, str(tmp_path / ".remember"), retention_days=7,
+        )
+
+        assert result.returncode == 0, (
+            f"the extracted housekeeping block itself failed to run\n"
+            f"stdout={result.stdout}\nstderr={result.stderr}"
+        )
+        assert boundary.exists(), (
+            "a log aged 7.5 days (N=7) was reclaimed by the FAST path -- "
+            "the fallback loop's own floored-days comparison would have "
+            "kept this same file (floor(7.5) == 7, not > 7), so which path "
+            "ran determines whether this file survives a flush\n"
+            + _dump_dir(autonomous)
+        )
+        assert not past_both.exists(), (
+            "an 8.5-day-old log (past both the fast path's and the "
+            "fallback's own thresholds) survived the fast path -- "
+            "positive control failed\n" + _dump_dir(autonomous)
+        )
+
+    def test_must_not_fire_fallback_keeps_a_log_between_n_and_n_plus_one_days(self, tmp_path):
+        """#933: same fixture as the fast-path boundary test above, run
+        through the FALLBACK loop instead (mktemp forced to fail), to
+        confirm the two paths now agree at the N/N+1 boundary instead of
+        disagreeing depending on which one happened to run.
+        """
+        autonomous = tmp_path / ".remember" / "logs" / "autonomous"
+        autonomous.mkdir(parents=True)
+        seven_and_a_half_days_ago = time.time() - (7 * 24 * 3600 + 12 * 3600)
+        boundary = autonomous / "session-end-000000-77777.log"
+        boundary.write_text("12:00:00 [session-end] flush started\n")
+        os.utime(boundary, (seven_and_a_half_days_ago, seven_and_a_half_days_ago))
+        eight_and_a_half_days_ago = time.time() - (8 * 24 * 3600 + 12 * 3600)
+        past_both = autonomous / "session-end-000000-88888.log"
+        past_both.write_text("12:00:00 [session-end] flush started\n")
+        os.utime(past_both, (eight_and_a_half_days_ago, eight_and_a_half_days_ago))
+
+        broken_bin = tmp_path / "broken-mktemp-bin-933"
+        broken_bin.mkdir()
+        fake_mktemp = broken_bin / "mktemp"
+        fake_mktemp.write_text("#!/bin/sh\nexit 1\n")
+        fake_mktemp.chmod(0o755)
+
+        result = self._run_extracted_block_with_path_override(
+            autonomous, str(tmp_path / ".remember"), retention_days=7,
+            extra_path_dir=broken_bin,
+        )
+
+        assert result.returncode == 0, (
+            f"the extracted housekeeping block failed to run with mktemp "
+            f"forced to fail\nstdout={result.stdout}\nstderr={result.stderr}"
+        )
+        assert boundary.exists(), (
+            "a log aged 7.5 days (N=7) was reclaimed by the FALLBACK "
+            "loop -- floor(7.5) == 7, not > 7, so this file must survive\n"
+            + _dump_dir(autonomous)
+        )
+        assert not past_both.exists(), (
+            "an 8.5-day-old log survived the fallback loop -- positive "
+            "control failed\n" + _dump_dir(autonomous)
         )
