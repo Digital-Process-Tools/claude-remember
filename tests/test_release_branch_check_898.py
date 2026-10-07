@@ -144,6 +144,37 @@ def test_a_url_host_in_a_python_comment_also_fails(tmp_path):
     assert any("example.py" in o and "URL host" in o for o in offenders), offenders
 
 
+def test_a_url_host_comment_line_inside_a_heredoc_body_does_not_fail(tmp_path):
+    """#919: a `#`-led line that looks like a URL-host comment is heredoc
+    content, not a real shell comment, once it sits inside the body of a
+    typed `<<EOF ... EOF` heredoc -- this guard must track heredoc
+    boundaries the same way _in_code() already tracks fenced-code state."""
+    root = _tree(tmp_path, {
+        "scripts/run.sh": (b"#!/bin/sh\n"
+                           b"cat <<EOF\n"
+                           b"# see github.com/example/example for more\n"
+                           b"EOF\n"),
+    })
+    offenders = _check(root).offenders
+    assert not any("URL host" in o for o in offenders), offenders
+
+
+def test_a_url_host_comment_line_outside_the_heredoc_still_fails(tmp_path):
+    """Positive control for the heredoc-boundary test above: the identical
+    `#`-led URL-host line, in the same file, outside any heredoc body, must
+    still fail -- the fix must skip real heredoc content without silencing
+    the guard everywhere else."""
+    root = _tree(tmp_path, {
+        "scripts/run.sh": (b"#!/bin/sh\n"
+                           b"cat <<EOF\n"
+                           b"hi\n"
+                           b"EOF\n"
+                           b"# see github.com/example/example for more\n"),
+    })
+    offenders = _check(root).offenders
+    assert any("run.sh" in o and "URL host" in o for o in offenders), offenders
+
+
 # -- network command name at command position (FAIL) -----------------------------
 
 def test_a_network_command_name_at_command_position_fails(tmp_path):

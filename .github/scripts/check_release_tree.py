@@ -186,6 +186,17 @@ URL_HOST = re.compile(
     r"(?:com|org|net|io|dev|ai|co|gov|edu|app)\b"
 )
 
+# #919: a typed `<<DELIM`/`<<-DELIM`/`<<'DELIM'`/`<<"DELIM"` heredoc opener --
+# used by _check_url_in_comment below to skip past a heredoc body the same
+# way _in_code() above already skips past a fenced code block. Not a
+# here-string (`<<<`): the lookaround on the leading `<<` mirrors
+# TYPED_HEREDOC's own, and a bare `<<<DELIM` never matches because the third
+# `<` is not whitespace, a quote or a name-start character. Masking
+# arithmetic (`_mask_arithmetic`) before testing keeps `$(( x << 4 ))` from
+# being read as a heredoc opener either, for the same reason TYPED_HEREDOC
+# masks it.
+_HEREDOC_OPEN = re.compile(r"(?<!<)<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1(?!<)")
+
 # #898: the directory's own bundled-word-list scan tripped on curl/ftp/dig/
 # drill as plain dictionary entries, one per line -- not as shell commands.
 # Catching every English use of "host" or "fetch" would FAIL this repo's own
@@ -986,14 +997,27 @@ def _check_url_in_comment(files: dict, kinds: dict, off: list) -> None:
     shipped `.sh` one, and the sibling guards below (network command names,
     the credential pair) are not directory-scoped either. A `.md` file's
     `#` heading is a false-positive risk this does not special-case; none of
-    this repo's shipped headings happens to carry a URL host today."""
+    this repo's shipped headings happens to carry a URL host today.
+
+    #919: a `#`-led line inside the body of a typed `<<DELIM ... DELIM`
+    heredoc is heredoc content, not a real shell comment, so it must not be
+    read as one -- tracked the same way _in_code() above tracks fenced-code
+    state, keyed on the heredoc's own delimiter rather than ``` ``` ```."""
     for rel, data in sorted(files.items()):
         if kinds.get(rel) != "text":
             continue
         text = data.decode("utf-8")
+        heredoc_delim = None
         for n, line in enumerate(text.splitlines(), 1):
+            if heredoc_delim is not None:
+                if line.strip() == heredoc_delim:
+                    heredoc_delim = None
+                continue
             if line.lstrip().startswith("#") and URL_HOST.search(line):
                 off.append(f"{rel}:{n}: a URL host in a comment: {line.strip()[:80]}")
+            m = _HEREDOC_OPEN.search(_mask_arithmetic(line))
+            if m:
+                heredoc_delim = m.group(2)
 
 
 def _check_network_command_names(files: dict, kinds: dict, off: list) -> None:
