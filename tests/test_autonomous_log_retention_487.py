@@ -109,8 +109,23 @@ def _bash_path_prepend(dirs) -> str:
     drive letter and this is a no-op forward-slash normalisation.
     """
 
+    _EXTENDED_LENGTH_PREFIX = ("\\" * 2) + "?" + "\\"
+
     def _to_posix(d) -> str:
         s = str(d)
+        # Self-review finding (oss:auditor): an extended-length Windows
+        # path (two backslashes, then "?", then one backslash, then the
+        # drive letter -- "\\?\\C:\\...") has a backslash, not a colon,
+        # at s[1], so the drive-letter branch below would never fire
+        # for one and it would fall straight to the bare forward-slash
+        # branch -- still carrying the drive letter's own colon two
+        # characters further in, i.e. the exact shredding failure this
+        # helper exists to avoid. Stripped before the drive-letter
+        # check so both forms convert identically; reasoned, not
+        # observed -- no Windows access to confirm whether
+        # `tempfile.mkdtemp()` ever actually returns one of these on a
+        # CI runner.
+        s = s.removeprefix(_EXTENDED_LENGTH_PREFIX)
         if len(s) >= 2 and s[1] == ":" and s[0].isalpha():
             tail = s[2:].replace("\\", "/")
             if not tail.startswith("/"):
@@ -118,7 +133,23 @@ def _bash_path_prepend(dirs) -> str:
             return f"/{s[0].lower()}{tail}"
         return s.replace("\\", "/")
 
-    return ":".join(_to_posix(d) for d in dirs)
+    joined = ":".join(_to_posix(d) for d in dirs)
+    # Self-review finding (Explore): this value is spliced into the
+    # generated script as `export PATH="<this>:$PATH"` -- a DOUBLE-
+    # QUOTED bash string, unlike every other dynamic value this file
+    # embeds (REMEMBER_DIR, retention_days), which already go through
+    # `shlex.quote`. A literal `"`, `` ` `` or `$` surviving into this
+    # string would break out of that quoting or trigger command/
+    # variable substitution in the generated script. None of this
+    # file's own call sites can produce one today (pytest `tmp_path`
+    # dirs), but escaping it here costs nothing and matches the
+    # convention every other embedded value already follows.
+    return (
+        joined.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("`", "\\`")
+        .replace("$", "\\$")
+    )
 
 
 def test_bash_path_prepend_strips_the_drive_letters_own_colon():
@@ -128,11 +159,20 @@ def test_bash_path_prepend_strips_the_drive_letters_own_colon():
     is built, which is where the reporter's CI symptom (the shim never
     invoked at all, not even its own first `echo`) actually originates.
 
-    Platform-independent and runs on every leg -- it exercises
-    `_bash_path_prepend`'s string transform directly, not bash's own
-    MSYS startup conversion, which cannot be reproduced outside a real
-    Windows runner (not something this fix claims to verify; see the
-    PR body for what remains reasoned rather than observed).
+    Platform-independent in what it exercises -- `_bash_path_prepend`'s
+    string transform itself, not bash's own MSYS startup conversion,
+    which cannot be reproduced outside a real Windows runner (not
+    something this fix claims to verify; see the PR body for what
+    remains reasoned rather than observed). Self-review finding
+    (oss:auditor): this test does NOT in fact run on every leg -- it
+    still inherits this module's own `pytestmark = skipif(BASH is
+    None, ...)` above, even though its own assertions need no bash at
+    all, because that skip is applied once for the whole module rather
+    than per-test. On every leg this repo's CI currently runs, bash is
+    present (that is the whole premise `pytestmark`'s own comment
+    gives), so the skip never actually fires here today; restructuring
+    the module-wide skip to exempt this one test is a wider change
+    than this fix's own scope and is left to a future pass.
     """
     # A bare forward-slash of a Windows-native path (the fix ALREADY
     # shipped, twice, in this same file, for the shim's own embedded
