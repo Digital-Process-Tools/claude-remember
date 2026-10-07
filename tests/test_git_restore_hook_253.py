@@ -469,13 +469,13 @@ class TestADivergedStoreIsRefused:
 # ── #935: the DIVERGED notice must not misreport when reconcile is on ───────
 
 
-class TestTheDivergedNoticeRespectsReconcile:
-    """#935: with git_reconcile.enabled=true, 60-git-reconcile.sh (the NEXT
-    after_save run) actually rebases and pushes a diverged store on its own.
-    Before this fix, neither this hook's log line nor its notice ever read
-    git_reconcile.enabled, so both kept promising "nothing will be merged or
-    rebased for you" / "resolve it by hand" even though that promise was
-    false -- risking a human racing the automatic reconcile rebase."""
+class TestTheDivergedNoticeRespectsTheKillSwitch:
+    """#976: #969 hard-disabled 60-git-reconcile.sh, so the #935 promise this
+    notice makes when git_reconcile.enabled=true -- '60-git-reconcile.sh may
+    rebase and push this automatically' -- is false while the kill switch is
+    in place: that hook now exits before it ever reads git_reconcile.enabled.
+    A diverged store waiting on a resolution that will never come is worse
+    than #935's original bug, which only forgot to mention reconcile."""
 
     def _config_reconcile(self, tmp_path: Path) -> Path:
         cfg = tmp_path / "remember-config.json"
@@ -496,30 +496,32 @@ class TestTheDivergedNoticeRespectsReconcile:
         self.env = _flock_env(tmp_path)
         return home, remember, remote, slug_dir, project
 
-    def test_the_log_stops_promising_no_merge_or_rebase_when_reconcile_is_on(self, tmp_path):
+    def test_the_log_stops_promising_automatic_resolution_while_969_holds(self, tmp_path):
         home, _remember, _remote, slug_dir, project = self._diverged_with_reconcile(tmp_path)
 
         _run(slug_dir, project, home, self._config_reconcile(tmp_path), **self.env)
 
         log = _log_text(slug_dir)
         assert "DIVERGED" in log, "--- log ---\n" + log
-        assert "merge or rebase" not in log, (
-            "the DIVERGED log still claims nothing will merge or rebase even "
-            "though git_reconcile.enabled is on -- the next after_save run "
-            "does exactly that\n--- log ---\n" + log
+        assert "may rebase and push this automatically" not in log, (
+            "the DIVERGED log still promises 60-git-reconcile.sh will act "
+            "automatically, but #969 hard-disabled that hook -- it now exits "
+            "before it ever reads git_reconcile.enabled\n--- log ---\n" + log
         )
         assert "git_reconcile" in log, (
-            "the log never mentions reconcile at all, so the human has no way "
-            "to know the next after_save run may resolve this automatically\n"
-            "--- log ---\n" + log
+            "the log drops all mention of reconcile instead of explaining "
+            "why it is currently inert\n--- log ---\n" + log
         )
-        assert "Resolve it by hand" not in log, (
-            "the log says reconcile may act automatically and THEN still says "
-            "'Resolve it by hand' in the same breath -- the exact race the fix "
-            "exists to remove\n--- log ---\n" + log
+        assert "969" in log, (
+            "the log does not point at the tracking issue for why reconcile "
+            "will not act\n--- log ---\n" + log
+        )
+        assert "Resolve it by hand" in log, (
+            "the log must say to resolve it by hand -- reconcile will not, "
+            "while #969's kill switch holds\n--- log ---\n" + log
         )
 
-    def test_the_notice_also_stops_promising_no_merge_or_rebase(self, tmp_path):
+    def test_the_notice_also_stops_promising_automatic_resolution(self, tmp_path):
         home, _remember, _remote, slug_dir, project = self._diverged_with_reconcile(tmp_path)
         cfg = self._config_reconcile(tmp_path)
 
@@ -529,13 +531,15 @@ class TestTheDivergedNoticeRespectsReconcile:
         notice = slug_dir / "tmp" / NOTICE_NAME
         assert notice.exists(), "the persistent divergence never reached the human notice"
         body = notice.read_text(encoding="utf-8")
-        assert "Nothing will be merged or rebased for you" not in body, (
+        assert "may rebase and push this automatically" not in body, (
             "the human-facing notice still makes the false promise while "
-            "reconcile is enabled\n--- notice ---\n" + body
+            "#969's kill switch is in place\n--- notice ---\n" + body
         )
         assert "git_reconcile" in body, (
-            "the notice does not say reconcile may act automatically\n"
-            "--- notice ---\n" + body
+            "the notice drops all mention of reconcile\n--- notice ---\n" + body
+        )
+        assert "969" in body, (
+            "the notice does not point at the tracking issue\n--- notice ---\n" + body
         )
 
     def test_disabled_reconcile_keeps_the_original_wording(self, tmp_path):

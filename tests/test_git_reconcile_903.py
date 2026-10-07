@@ -151,6 +151,64 @@ class TestOffByDefault:
         assert _head(remember) == before
 
 
+# ── #976: the kill-switch notice must not reach every user ──────────────────
+
+
+class TestTheKillSwitchNoticeRespectsTheFlag:
+    """#976: before this fix, the kill switch's own `report_error(...
+    "disabled pending #969"...)` ran unconditionally -- before the
+    git_reconcile.enabled read -- so EVERY save for EVERY installed user
+    appended a line to hook-errors.log, including the default-disabled
+    majority who never opted into git_reconcile at all. That permanently
+    tripped /remember:doctor's 'Recent errors' WARN. The notice is now read-
+    gated: it fires only for someone who actually turned the flag on and is
+    now finding it inert."""
+
+    def test_a_disabled_user_gets_no_kill_switch_notice_at_all(self, tmp_path):
+        home, remember, _remote, slug_dir, project = _store(tmp_path)
+        cfg = _config(tmp_path)  # enabled not set -> default false
+
+        result = _run(slug_dir, project, home, cfg)
+        _wait_quiesce(remember)
+
+        assert result.returncode == 0
+
+        hook_errors = slug_dir / "logs" / "hook-errors.log"
+        assert not hook_errors.exists(), (
+            "a user who never opted into git_reconcile still got a "
+            "hook-errors.log entry for it -- this is the #976 regression\n"
+            + (hook_errors.read_text(encoding="utf-8") if hook_errors.exists() else "")
+        )
+
+        log_files = list((slug_dir / "logs").glob("memory-*.log"))
+        if log_files:
+            log_text = "\n".join(f.read_text(encoding="utf-8") for f in log_files)
+            assert "disabled pending #969" not in log_text, (
+                "a disabled user's daily log still names the kill switch "
+                "notice\n--- log ---\n" + log_text
+            )
+
+    def test_an_enabled_user_still_gets_the_notice(self, tmp_path):
+        """Positive control: the other half of the class above would also
+        pass against a hook that never writes the notice at all -- someone
+        who DID turn the flag on, and is now wondering why nothing is
+        happening, must still be told why."""
+        home, remember, _remote, slug_dir, project = _store(tmp_path)
+        cfg = _config(tmp_path, enabled=True)
+
+        result = _run(slug_dir, project, home, cfg)
+        _wait_quiesce(remember)
+
+        assert result.returncode == 0
+
+        hook_errors = slug_dir / "logs" / "hook-errors.log"
+        assert hook_errors.exists(), (
+            "an enabled user got no hook-errors.log notice explaining why "
+            "git_reconcile is currently inert"
+        )
+        assert "disabled pending #969" in hook_errors.read_text(encoding="utf-8")
+
+
 # ── Fast-forward (behind only) ───────────────────────────────────────────────
 
 

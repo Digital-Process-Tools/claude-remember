@@ -364,26 +364,27 @@ declare -F dispatch >/dev/null 2>&1 || dispatch() { :; }
 #   git-backup-notice   after_save/50-git-backup.sh: the backup remote has
 #                       rejected the last N pushes, so memory is committed
 #                       locally and going nowhere, and no retry of the SAME
-#                       push will fix it -- UNLESS git_reconcile.enabled is
-#                       also set (#935), in which case the next after_save
-#                       run (60-git-reconcile.sh, same dispatch pass) may
-#                       fetch, rebase and push automatically before the human
-#                       acts on this by hand.
+#                       push will fix it. git_reconcile.enabled being set
+#                       (#935) no longer changes this -- #969 hard-disabled
+#                       60-git-reconcile.sh, so nothing fetches, rebases or
+#                       pushes automatically right now regardless of that
+#                       flag; resolve by hand until #969's real fix lands.
 #   git-restore-notice  before_session_start/50-git-restore.sh: the store has
 #                       DIVERGED from its backup remote, so the memory loaded
 #                       this session is missing what the other machine wrote.
-#                       Nothing here will merge or rebase it for you -- UNLESS
-#                       git_reconcile.enabled is also set, in which case the
-#                       next after_save (60-git-reconcile.sh) rebases and
-#                       pushes automatically, or reports its own conflict
-#                       through git-reconcile-notice below.
+#                       Nothing here will merge or rebase it for you, and (as
+#                       of #969/#976) that now holds even with
+#                       git_reconcile.enabled set -- 60-git-reconcile.sh is
+#                       hard-disabled, so resolve by hand until it is
+#                       re-enabled.
 #   git-reconcile-notice
-#                       after_save/60-git-reconcile.sh (#903), only reachable
-#                       when git_reconcile.enabled=true: a real CONFLICT
-#                       during the automatic rebase onto the remote tip. The
-#                       rebase was aborted and nothing was changed -- this
-#                       names the conflicting file(s) so they can be resolved
-#                       by hand.
+#                       after_save/60-git-reconcile.sh (#903): hard-disabled
+#                       pending #969, so this notice is currently unreachable
+#                       no matter what git_reconcile.enabled says. Once
+#                       re-enabled, a real CONFLICT during the automatic
+#                       rebase onto the remote tip aborts the rebase, changes
+#                       nothing, and names the conflicting file(s) here so
+#                       they can be resolved by hand.
 #   case-divergence-notice
 #                       the SessionStart hook: this store is known by a second
 #                       spelling that differs only in case (#298). Harmless on
