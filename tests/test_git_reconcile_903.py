@@ -913,6 +913,104 @@ class TestScopedAbort:
             "the surviving foreign write should be named in the log"
         )
 
+    def _diverged_with_in_set_foreign_write(self, tmp_path):
+        """#966: same shape as _diverged_with_foreign_write, except the
+        remote side's OWN diverging commit also touches other-slug/now.md
+        -- so that path lands INSIDE _GRC_TOUCHED_PATHS (the #952 restore
+        set), unlike the sibling fixture above where other-slug/now.md is
+        never touched by either side's commits and so never enters the
+        set at all. This is the exact gap #966 reports: the existing
+        TOCTOU test only exercises a foreign file the restore set never
+        names."""
+        home, remember, remote, slug_dir, project = _store(tmp_path)
+
+        other_slug_dir = remember / "other-slug"
+        other_slug_dir.mkdir()
+        (other_slug_dir / "now.md").write_text("other slug base\n", encoding="utf-8")
+        _git(remember, ["add", "-A"])
+        _git(remember, ["commit", "-q", "-m", "other slug base"])
+        _git(remember, ["push", "-q", "origin", "main"])
+
+        other = tmp_path / "other-machine"
+        subprocess.run(["git", "clone", "-q", "-b", "main", str(remote), str(other)],
+                       check=True, capture_output=True)
+        _git(other, ["config", "user.email", "other@test"])
+        _git(other, ["config", "user.name", "Other"])
+        (other / "test-slug" / "now.md").write_text(
+            "## 10:00 | test\nFROM THE OTHER MACHINE\n", encoding="utf-8")
+        # #966: the remote-side commit also touches other-slug/now.md, so
+        # merge-base diffing puts it inside the restore set.
+        (other / "other-slug" / "now.md").write_text(
+            "other slug, remote-side edit\n", encoding="utf-8")
+        _git(other, ["add", "-A"])
+        _git(other, ["commit", "-q", "-m", "other machine edit (both slugs)"])
+        _git(other, ["push", "-q", "origin", "main"])
+
+        (slug_dir / "now.md").write_text(
+            "## 10:00 | test\nFROM THIS MACHINE\n", encoding="utf-8")
+        _git(remember, ["add", "-A"])
+        _git(remember, ["commit", "-q", "-m", "this machine edit"])
+
+        return home, remember, remote, slug_dir, project, other_slug_dir
+
+    def test_write_in_the_toctou_window_inside_the_restore_set_survives_the_abort(self, tmp_path):
+        """#966: when the foreign path IS inside _GRC_TOUCHED_PATHS (because
+        the remote side's own commit also touched it), the scoped restore
+        must still not clobber a write landing in the TOCTOU window, the
+        same guarantee test_write_in_the_toctou_window_survives_the_scoped_abort
+        proves for a path OUTSIDE the set. Before the #966 fix, `git
+        checkout HEAD --` / `git rm -f` ran over the whole restore set
+        unconditionally and overwrote this path too, discarding the
+        concurrent write while still logging 'aborted, the tree is
+        unchanged'."""
+        home, remember, _remote, slug_dir, project, other_slug_dir = (
+            self._diverged_with_in_set_foreign_write(tmp_path))
+
+        real_git = shutil.which("git")
+        assert real_git, "no git on PATH -- fixture assumption broken"
+        bin_dir = tmp_path / "shim-bin"
+        bin_dir.mkdir()
+
+        git_shim = bin_dir / "git"
+        git_shim_lines = [
+            "#!/bin/sh",
+            'if [ "$1" = "-C" ] && [ "$3" = "rebase" ] && [ "$4" = "--quit" ]; then',
+            "    printf '%s\n' \"CONCURRENT WRITE FROM OTHER SLUG (IN SET)\" > \"$RACE_OTHER_SLUG_NOW\"",
+            "fi",
+            f'exec "{real_git}" "$@"',
+            "",
+        ]
+        git_shim.write_text("\n".join(git_shim_lines), encoding="utf-8")
+        git_shim.chmod(0o755)
+
+        cfg = _enabled_config(tmp_path)
+        _run(slug_dir, project, home, cfg,
+             PATH=f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+             RACE_OTHER_SLUG_NOW=str(other_slug_dir / "now.md"))
+        _wait_quiesce(remember)
+
+        assert (other_slug_dir / "now.md").read_text(encoding="utf-8") == (
+            "CONCURRENT WRITE FROM OTHER SLUG (IN SET)\n"
+        ), (
+            "a write landing in the TOCTOU window on a path that IS "
+            "inside the restore set was discarded by the unconditional "
+            "checkout/rm over the whole set -- #966"
+        )
+
+        rebase_merge = subprocess.run(
+            ["git", "-C", str(remember), "rev-parse", "--path-format=absolute",
+             "--git-path", "rebase-merge"],
+            capture_output=True, text=True, check=False).stdout.strip()
+        assert rebase_merge and not Path(rebase_merge).exists(), (
+            "the rebase must still be cleanly gone afterward"
+        )
+
+        log_files = list((slug_dir / "logs").glob("memory-*.log"))
+        log_text = "\n".join(f.read_text(encoding="utf-8") for f in log_files)
+        assert "never touched" in log_text or "restored" in log_text.lower(), (
+            "the surviving foreign write should be named in the log"
+        )
+
     def test_quit_failure_leaves_rebase_stuck_and_is_reported_honestly(self, tmp_path):
         """`git rebase --quit` replaces `git rebase --abort` as the first
         step. Its own exit status is now what must be checked (#942's
