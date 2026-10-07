@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -269,6 +270,174 @@ class TestDivergedReconcile:
         log_text = "\n".join(f.read_text(encoding="utf-8") for f in log_files)
         assert "CONFLICT" in log_text
         assert "now.md" in log_text
+
+    def test_concurrent_write_to_another_slugs_file_survives_the_abort(self, tmp_path):
+        """#939: REPO_ROOT can hold more than this run's own slug -- a store
+        shared by several slugs is exactly the arrangement _store() builds
+        when a second slug directory is added as a sibling of test-slug.
+        Nothing locked here stops a DIFFERENT slug's own writer (this
+        hook's git-reconcile.lock and consolidation.lock are both scoped to
+        the slug running THIS invocation) from touching its own tracked
+        file while this slug's rebase is in flight. `git rebase --abort`
+        resets the WHOLE tracked tree to ORIG_HEAD, not just the files this
+        rebase touched -- so a write that lands in that window must not be
+        silently discarded.
+
+        A real git binary still performs every git operation, including the
+        abort itself; only ONE invocation is intercepted (the
+        `diff --name-only --diff-filter=U` call this hook already makes,
+        unconditionally, the moment it notices the conflict and before any
+        abort decision) so the race lands deterministically instead of
+        depending on winning a sub-millisecond window on every CI runner."""
+        home, remember, remote, slug_dir, project = _store(tmp_path)
+
+        other_slug_dir = remember / "other-slug"
+        other_slug_dir.mkdir()
+        (other_slug_dir / "now.md").write_text("other slug base\n", encoding="utf-8")
+        _git(remember, ["add", "-A"])
+        _git(remember, ["commit", "-q", "-m", "other slug base"])
+        _git(remember, ["push", "-q", "origin", "main"])
+
+        other = tmp_path / "other-machine"
+        subprocess.run(["git", "clone", "-q", "-b", "main", str(remote), str(other)],
+                       check=True, capture_output=True)
+        _git(other, ["config", "user.email", "other@test"])
+        _git(other, ["config", "user.name", "Other"])
+        (other / "test-slug" / "now.md").write_text(
+            "## 10:00 | test\nFROM THE OTHER MACHINE\n", encoding="utf-8")
+        _git(other, ["add", "-A"])
+        _git(other, ["commit", "-q", "-m", "other machine edit"])
+        _git(other, ["push", "-q", "origin", "main"])
+
+        (slug_dir / "now.md").write_text(
+            "## 10:00 | test\nFROM THIS MACHINE\n", encoding="utf-8")
+        _git(remember, ["add", "-A"])
+        _git(remember, ["commit", "-q", "-m", "this machine edit"])
+
+        real_git = shutil.which("git")
+        assert real_git, "no git on PATH -- fixture assumption broken"
+        bin_dir = tmp_path / "shim-bin"
+        bin_dir.mkdir()
+        shim = bin_dir / "git"
+        shim_lines = [
+            "#!/bin/sh",
+            'if [ "$1" = "-C" ] && [ "$3" = "diff" ] && [ "$4" = "--name-only" ]; then',
+            "    printf '%s\n' \"CONCURRENT WRITE FROM OTHER SLUG\" > \"$RACE_OTHER_SLUG_NOW\"",
+            "fi",
+            f'exec "{real_git}" "$@"',
+            "",
+        ]
+        shim.write_text("\n".join(shim_lines), encoding="utf-8")
+        shim.chmod(0o755)
+
+        cfg = _enabled_config(tmp_path)
+        _run(slug_dir, project, home, cfg,
+             PATH=f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+             RACE_OTHER_SLUG_NOW=str(other_slug_dir / "now.md"))
+        _wait_quiesce(remember)
+
+        assert (other_slug_dir / "now.md").read_text(encoding="utf-8") == (
+            "CONCURRENT WRITE FROM OTHER SLUG\n"
+        ), (
+            "the concurrent write to the OTHER slug's tracked file was "
+            "discarded by this slug's `git rebase --abort` -- #939"
+        )
+
+        # Review finding (#939): an earlier version of this fix closed the
+        # discard by leaving the rebase IN PROGRESS instead of aborting --
+        # which traded it for a worse failure (50-git-backup.sh commits
+        # this slug's own unresolved conflict markers on the very next
+        # save, since it has no notion of an in-progress rebase). The
+        # shipped fix always aborts; only the foreign write is special-
+        # cased. So the rebase must be gone here, same as the plain
+        # conflict case in test_conflict_aborts_and_leaves_tree_exactly_as_it_was.
+        rebase_merge = subprocess.run(
+            ["git", "-C", str(remember), "rev-parse", "--path-format=absolute",
+             "--git-path", "rebase-merge"],
+            capture_output=True, text=True, check=False).stdout.strip()
+        assert rebase_merge and not Path(rebase_merge).exists(), (
+            "the rebase was left in progress -- 50-git-backup.sh's next "
+            "per-slug commit has no notion of an in-progress rebase and "
+            "would commit this slug's own unresolved conflict markers"
+        )
+
+    def test_foreign_path_containing_a_literal_arrow_is_not_misread_as_this_runs_own(self, tmp_path):
+        """Review finding (#939): an earlier version of _grc_foreign_changes
+        split any porcelain line containing the literal substring " -> "
+        on that substring, assuming it was always a rename -- but porcelain
+        quotes any path containing a space, rename or not, so a plain
+        (non-renamed) foreign path whose own name happens to contain
+        " -> " was wrongly truncated to whatever followed it and could
+        collide with $SLUG, waving a real foreign write through as this
+        run's own. The fix keys the split on the status CODE (does it
+        contain 'R'?), never on the path text. This constructs exactly
+        that untracked, non-renamed path and checks it survives the abort
+        the same way the plain concurrent-write case above does."""
+        home, remember, remote, slug_dir, project = _store(tmp_path)
+
+        other_slug_dir = remember / "other-slug"
+        other_slug_dir.mkdir()
+        # The TRACKED path's own name contains the literal substring
+        # " -> test-slug" (test-slug == $SLUG) -- an earlier, broken
+        # version of the parser would truncate this to "test-slug" and
+        # wave it through as this run's own slug. It must be tracked
+        # (committed here, then overwritten below) for `git rebase
+        # --abort` to be able to discard it at all: an untracked file is
+        # never touched by --abort regardless of this classification, so
+        # an untracked repro would pass even against the broken parser
+        # and prove nothing.
+        weird_dir = other_slug_dir
+        weird_name = "weird -> test-slug"
+        (weird_dir / weird_name).write_text("other slug base\n", encoding="utf-8")
+        _git(remember, ["add", "-A"])
+        _git(remember, ["commit", "-q", "-m", "other slug base"])
+        _git(remember, ["push", "-q", "origin", "main"])
+
+        other = tmp_path / "other-machine"
+        subprocess.run(["git", "clone", "-q", "-b", "main", str(remote), str(other)],
+                       check=True, capture_output=True)
+        _git(other, ["config", "user.email", "other@test"])
+        _git(other, ["config", "user.name", "Other"])
+        (other / "test-slug" / "now.md").write_text(
+            "## 10:00 | test\nFROM THE OTHER MACHINE\n", encoding="utf-8")
+        _git(other, ["add", "-A"])
+        _git(other, ["commit", "-q", "-m", "other machine edit"])
+        _git(other, ["push", "-q", "origin", "main"])
+
+        (slug_dir / "now.md").write_text(
+            "## 10:00 | test\nFROM THIS MACHINE\n", encoding="utf-8")
+        _git(remember, ["add", "-A"])
+        _git(remember, ["commit", "-q", "-m", "this machine edit"])
+
+        real_git = shutil.which("git")
+        assert real_git, "no git on PATH -- fixture assumption broken"
+        bin_dir = tmp_path / "shim-bin"
+        bin_dir.mkdir()
+        shim = bin_dir / "git"
+        shim_lines = [
+            "#!/bin/sh",
+            'if [ "$1" = "-C" ] && [ "$3" = "diff" ] && [ "$4" = "--name-only" ]; then',
+            "    printf '%s\n' \"CONCURRENT WRITE FROM OTHER SLUG\" > \"$RACE_OTHER_SLUG_NOW\"",
+            "fi",
+            f'exec "{real_git}" "$@"',
+            "",
+        ]
+        shim.write_text("\n".join(shim_lines), encoding="utf-8")
+        shim.chmod(0o755)
+
+        cfg = _enabled_config(tmp_path)
+        _run(slug_dir, project, home, cfg,
+             PATH=f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+             RACE_OTHER_SLUG_NOW=str(weird_dir / weird_name))
+        _wait_quiesce(remember)
+
+        assert (weird_dir / weird_name).read_text(encoding="utf-8") == (
+            "CONCURRENT WRITE FROM OTHER SLUG\n"
+        ), (
+            "a foreign (non-renamed) TRACKED path whose own name contains "
+            "the literal substring ' -> test-slug' was misread as this "
+            "run's own slug and discarded by the abort -- #939"
+        )
 
 
 # ── Must not run while consolidation holds its own lock ─────────────────────

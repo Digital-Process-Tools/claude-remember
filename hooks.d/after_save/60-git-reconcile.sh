@@ -20,10 +20,13 @@
 #     - ahead AND behind (diverged): rebases local commits onto the remote
 #       tip and pushes, with one retry if the remote moved again between the
 #       fetch and the push
-#     - a conflict during the rebase: ABORTS the rebase, changes nothing
-#       else, and reports the conflicting file names through a
-#       git-reconcile-notice the same way 50-git-restore.sh's diverged notice
-#       works
+#     - a conflict during the rebase: ABORTS the rebase and reports the
+#       conflicting file names through a git-reconcile-notice the same way
+#       50-git-restore.sh's diverged notice works. Nothing else changes,
+#       UNLESS a different slug sharing this REPO_ROOT landed a tracked
+#       write of its own while the rebase was in flight -- the abort would
+#       otherwise discard that write too (#939), so it is copied out,
+#       the abort runs as normal, and the write is restored afterward.
 #
 #   Never resets, never force-pushes, never creates a merge commit -- there is
 #   no `reset --hard`, `push --force` or `merge` (non-ff-only) anywhere in
@@ -364,12 +367,101 @@ _grc_bump_ndc_gen() {
         return 1
     }
 
+    # #939: `git rebase --abort` resets the WHOLE tracked tree back to
+    # ORIG_HEAD, not just the files this rebase touched (git-rebase(1)).
+    # RC_LOCK_DIR and CONSOLIDATION_LOCK_DIR above only exclude another
+    # reconcile instance and this SAME slug's own consolidation round --
+    # nothing stops a DIFFERENT slug sharing this REPO_ROOT (save-session.sh's
+    # own foreground append to its now.md, 50-git-backup.sh's add/commit, that
+    # slug's own consolidation/NDC) from landing a real, tracked write while
+    # this slug's rebase is in flight. Discarding that write via --abort, then
+    # reporting "the tree is unchanged" (as this function used to,
+    # unconditionally), is exactly the data loss #939 describes -- so check
+    # for it, by path, before ever calling --abort.
+    _grc_foreign_changes() {
+        # Every porcelain line outside "$SLUG/" is a write this run did not
+        # make: this run's OWN churn (the conflict itself, any cleanly
+        # applied commit before it) lives under "$SLUG/" only, since a save
+        # commits to its own slug's subtree alone.
+        #
+        # Rename-splitting only applies when the status CODE itself says
+        # "R" -- sniffing the path text for a literal " -> " substring
+        # instead (an earlier version of this check) misreads a plain,
+        # non-renamed path whose own name happens to contain that
+        # substring as a rename, truncating it to whatever follows the
+        # last " -> " and silently misclassifying it (review finding,
+        # reproduced: an untracked "other-slug/weird -> test-slug" was
+        # read as path "test-slug" -- an exact match for $SLUG, so a
+        # foreign file was wrongly waved through as this run's own).
+        git -C "$REPO_ROOT" status --porcelain 2>/dev/null | while IFS= read -r _grc_line; do
+            _grc_code="${_grc_line:0:2}"
+            _grc_path="${_grc_line:3}"
+            case "$_grc_code" in
+                *R*)
+                    case "$_grc_path" in
+                        *" -> "*) _grc_path="${_grc_path##* -> }" ;;
+                    esac
+                    ;;
+            esac
+            # A path with odd characters is double-quoted by porcelain.
+            _grc_path="${_grc_path#\"}"
+            _grc_path="${_grc_path%\"}"
+            case "$_grc_path" in
+                "$SLUG"/*|"$SLUG") ;;
+                *) printf '%s\n' "$_grc_path" ;;
+            esac
+        done
+    }
+
     _grc_report_conflict() {
-        local _files="$1" _attempt="$2"
+        local _files="$1" _attempt="$2" _foreign _foreign_backup _msg_extra
+        _foreign=$(_grc_foreign_changes)
+        _foreign_backup=""
+        if [ -n "$_foreign" ]; then
+            # #939: a write outside $SLUG/ landed while this rebase was in
+            # flight, and the abort below would otherwise discard it along
+            # with this run's own rebase churn. `git stash` cannot carve it
+            # out first -- stash refuses outright ("needs merge") while ANY
+            # path in the index is unmerged, which this slug's own conflict
+            # guarantees here. Leaving the rebase stuck instead (an earlier
+            # version of this fix) traded the discard for a worse failure:
+            # 50-git-backup.sh's own per-slug commit step has no notion of
+            # an in-progress rebase and will commit THIS slug's unresolved
+            # conflict markers verbatim on the very next save (review
+            # finding, reproduced). So: copy each foreign path's current
+            # bytes out of git's reach, abort normally -- same as the
+            # no-foreign-changes case below, never left stuck -- then
+            # restore each path from the copy. A foreign path that is not
+            # a plain file right now (e.g. a concurrent DELETE) is not
+            # copied, so the abort's own revert to ORIG_HEAD stands for
+            # it, same as if this guard were absent -- #939 is about a
+            # discarded WRITE, and only a WRITE is a file to copy.
+            _foreign_backup="$RC_STATE_DIR/tmp/foreign-backup-$$"
+            rm -rf "$_foreign_backup" 2>/dev/null || true
+            while IFS= read -r _grc_fp; do
+                [ -n "$_grc_fp" ] || continue
+                [ -f "$REPO_ROOT/$_grc_fp" ] || continue
+                mkdir -p "$_foreign_backup/$(dirname "$_grc_fp")" 2>/dev/null || true
+                cp -p "$REPO_ROOT/$_grc_fp" "$_foreign_backup/$_grc_fp" 2>/dev/null || true
+            done <<< "$_foreign"
+        fi
+
         git -C "$REPO_ROOT" rebase --abort >/dev/null 2>&1 || true
-        log "git-reconcile" "ERROR: reconcile CONFLICT ($_attempt) rebasing onto $REMOTE_NAME/$BRANCH_NAME -- aborted, the tree is unchanged. Conflicting file(s): ${_files%;}. Resolve by hand: git -C ${_dq}$REPO_ROOT${_dq} rebase ${_dq}$REMOTE_REF${_dq}"
+
+        _msg_extra="aborted, the tree is unchanged"
+        if [ -n "$_foreign_backup" ] && [ -d "$_foreign_backup" ]; then
+            while IFS= read -r -d '' _grc_bf; do
+                _grc_rel="${_grc_bf#"$_foreign_backup"/}"
+                mkdir -p "$(dirname "$REPO_ROOT/$_grc_rel")" 2>/dev/null || true
+                cp -p "$_grc_bf" "$REPO_ROOT/$_grc_rel" 2>/dev/null || true
+            done < <(find "$_foreign_backup" -type f -print0 2>/dev/null)
+            rm -rf "$_foreign_backup" 2>/dev/null || true
+            _msg_extra="aborted and restored a concurrent write that landed outside $SLUG/ while the rebase was in flight (${_foreign//$'\n'/; }) rather than letting the abort discard it"
+        fi
+
+        log "git-reconcile" "ERROR: reconcile CONFLICT ($_attempt) rebasing onto $REMOTE_NAME/$BRANCH_NAME -- $_msg_extra. Conflicting file(s): ${_files%;}. Resolve by hand: git -C ${_dq}$REPO_ROOT${_dq} rebase ${_dq}$REMOTE_REF${_dq}"
         mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null || true
-        printf '%s\n' "remember: git reconcile hit a CONFLICT rebasing onto $REMOTE_NAME/$BRANCH_NAME. Nothing was changed -- the rebase was aborted. Conflicting file(s): ${_files%;}. Resolve by hand: git -C ${_dq}$REPO_ROOT${_dq} rebase ${_dq}$REMOTE_REF${_dq}" \
+        printf '%s\n' "remember: git reconcile hit a CONFLICT rebasing onto $REMOTE_NAME/$BRANCH_NAME. The rebase was aborted ($_msg_extra). Conflicting file(s): ${_files%;}. Resolve by hand: git -C ${_dq}$REPO_ROOT${_dq} rebase ${_dq}$REMOTE_REF${_dq}" \
             > "$REMEMBER_DIR/tmp/git-reconcile-notice" 2>/dev/null || true
         echo 1 > "$CONFLICT_STATE_FILE" 2>/dev/null || true
     }
