@@ -407,7 +407,12 @@ SYS_TMPDIR="${TMPDIR:-/tmp}"
 _mem_proj="${MEMORY_PROJECT_DIR:-}"
 [ -n "$_mem_proj" ] || _mem_proj="$PROJECT_DIR"
 _legacy_dir="${_mem_proj}/.remember"
-if [ "$REMEMBER_DIR" != "$_legacy_dir" ] && [ "${REMEMBER_DIR#"$_legacy_dir"/}" = "$REMEMBER_DIR" ] \
+_legacy_rd="$REMEMBER_DIR"
+if [ "$OSTYPE" = msys ] || [ "$OSTYPE" = cygwin ]; then
+    _legacy_dir="${_legacy_dir//\\//}"
+    _legacy_rd="${_legacy_rd//\\//}"
+fi
+if [ "$_legacy_rd" != "$_legacy_dir" ] && [ "${_legacy_rd#"$_legacy_dir"/}" = "$_legacy_rd" ] \
     && [ ! -e "$REMEMBER_DIR" ] && [ -d "$_legacy_dir" ]; then
     for _legacy_f in now.md recent.md archive.md core-memories.md remember.md; do
         if [ -f "$_legacy_dir/$_legacy_f" ]; then
@@ -418,7 +423,7 @@ if [ "$REMEMBER_DIR" != "$_legacy_dir" ] && [ "${REMEMBER_DIR#"$_legacy_dir"/}" 
     done
     unset _legacy_f
 fi
-unset _legacy_dir
+unset _legacy_dir _legacy_rd
 
 if [ ! -d "$REMEMBER_DIR/logs/autonomous" ] || [ ! -d "$REMEMBER_DIR/tmp" ]; then
     mkdir -p \

@@ -598,11 +598,36 @@ if [ "$OSTYPE" = msys ] || [ "$OSTYPE" = cygwin ]; then
 else
     _remember_auto_dir="$REMEMBER_DIR"
 fi
+_remember_auto_now=$(_remember_date +%s)
+_remember_auto_ref=""
+if [ -n "$_remember_auto_now" ] && [[ "$_remember_auto_now" != *[!0-9]* ]]; then
+    _remember_auto_cutoff=$(( 10#$_remember_auto_now - ((10#$_AUTONOMOUS_LOG_RETENTION_DAYS) + 1) * 86400 ))
+    _remember_auto_ref=$(mktemp "${TMPDIR:-/tmp}/remember-retention-ref.XXXXXX" 2>/dev/null) || _remember_auto_ref=""
+    if [ -n "$_remember_auto_ref" ]; then
+        CLEANUP_FILES+=("$_remember_auto_ref")
+        if ! touch -d "@$_remember_auto_cutoff" "$_remember_auto_ref" 2>/dev/null; then
+            _remember_auto_cutoff_stamp=$(date -r "$_remember_auto_cutoff" +%Y%m%d%H%M.%S 2>/dev/null) || _remember_auto_cutoff_stamp=""
+            if [ -z "$_remember_auto_cutoff_stamp" ] || ! touch -t "$_remember_auto_cutoff_stamp" "$_remember_auto_ref" 2>/dev/null; then
+                rm -f "$_remember_auto_ref" 2>/dev/null
+                _remember_auto_ref=""
+            fi
+        fi
+    fi
+else
+    log "housekeeping" "WARNING: could not read the clock -- falling back to the per-file retention check"
+fi
 for _remember_auto_log in "${_remember_auto_dir}/logs/autonomous"/*.log; do
     [ -f "$_remember_auto_log" ] || continue
     if [ ! -s "$_remember_auto_log" ]; then
         rm -f "$_remember_auto_log" 2>/dev/null \
             || log "housekeeping" "WARNING: could not remove empty $_remember_auto_log"
+        continue
+    fi
+    if [ -n "$_remember_auto_ref" ]; then
+        if [ ! "$_remember_auto_log" -nt "$_remember_auto_ref" ]; then
+            rm -f "$_remember_auto_log" 2>/dev/null \
+                || log "housekeeping" "WARNING: could not remove aged $_remember_auto_log"
+        fi
         continue
     fi
     _remember_auto_mtime=$(stat -c %Y "$_remember_auto_log" 2>/dev/null) \
@@ -612,18 +637,19 @@ for _remember_auto_log in "${_remember_auto_dir}/logs/autonomous"/*.log; do
         log "housekeeping" "WARNING: could not read mtime of $_remember_auto_log -- leaving it in place"
         continue
     fi
-    _remember_auto_now=$(_remember_date +%s)
-    if [ -z "$_remember_auto_now" ] || [[ "$_remember_auto_now" == *[!0-9]* ]]; then
+    _remember_auto_file_now=$(_remember_date +%s)
+    if [ -z "$_remember_auto_file_now" ] || [[ "$_remember_auto_file_now" == *[!0-9]* ]]; then
         log "housekeeping" "WARNING: could not read the clock -- skipping the retention sweep for $_remember_auto_log"
         continue
     fi
-    _remember_auto_age_days=$(( (10#$_remember_auto_now - 10#$_remember_auto_mtime) / 86400 ))
+    _remember_auto_age_days=$(( (10#$_remember_auto_file_now - 10#$_remember_auto_mtime) / 86400 ))
     if [ "$_remember_auto_age_days" -gt "$_AUTONOMOUS_LOG_RETENTION_DAYS" ]; then
         rm -f "$_remember_auto_log" 2>/dev/null \
             || log "housekeeping" "WARNING: could not remove aged (${_remember_auto_age_days}d) $_remember_auto_log"
     fi
 done
-unset _remember_auto_dir _remember_auto_log _remember_auto_mtime _remember_auto_now _remember_auto_age_days
+rm -f "$_remember_auto_ref" 2>/dev/null
+unset _remember_auto_dir _remember_auto_log _remember_auto_mtime _remember_auto_now _remember_auto_age_days _remember_auto_ref _remember_auto_cutoff _remember_auto_cutoff_stamp _remember_auto_file_now
 
 [ -n "${PLUGIN_ROOT:-}" ] || PLUGIN_ROOT="$PIPELINE_DIR"
 if source "$(dirname "$0")/lib-memory-context.sh" 2>/dev/null; then

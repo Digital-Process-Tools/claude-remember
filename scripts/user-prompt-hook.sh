@@ -321,7 +321,12 @@ SYS_TMPDIR="${TMPDIR:-/tmp}"
 _mem_proj="${MEMORY_PROJECT_DIR:-}"
 [ -n "$_mem_proj" ] || _mem_proj="$PROJECT_DIR"
 _legacy_dir="${_mem_proj}/.remember"
-if [ "$REMEMBER_DIR" != "$_legacy_dir" ] && [ "${REMEMBER_DIR#"$_legacy_dir"/}" = "$REMEMBER_DIR" ] \
+_legacy_rd="$REMEMBER_DIR"
+if [ "$OSTYPE" = msys ] || [ "$OSTYPE" = cygwin ]; then
+    _legacy_dir="${_legacy_dir//\\//}"
+    _legacy_rd="${_legacy_rd//\\//}"
+fi
+if [ "$_legacy_rd" != "$_legacy_dir" ] && [ "${_legacy_rd#"$_legacy_dir"/}" = "$_legacy_rd" ] \
     && [ ! -e "$REMEMBER_DIR" ] && [ -d "$_legacy_dir" ]; then
     for _legacy_f in now.md recent.md archive.md core-memories.md remember.md; do
         if [ -f "$_legacy_dir/$_legacy_f" ]; then
@@ -332,7 +337,7 @@ if [ "$REMEMBER_DIR" != "$_legacy_dir" ] && [ "${REMEMBER_DIR#"$_legacy_dir"/}" 
     done
     unset _legacy_f
 fi
-unset _legacy_dir
+unset _legacy_dir _legacy_rd
 
 if [ ! -d "$REMEMBER_DIR/logs/autonomous" ] || [ ! -d "$REMEMBER_DIR/tmp" ]; then
     mkdir -p \
@@ -1540,7 +1545,7 @@ fi
 declare -F dispatch >/dev/null 2>&1 || dispatch() { :; }
 
 NOTICE_MSG=""
-for _notice_name in capture-gap-notice git-backup-notice git-restore-notice case-divergence-notice; do
+for _notice_name in capture-gap-notice git-backup-notice git-restore-notice git-reconcile-notice case-divergence-notice; do
     NOTICE_FILE="$REMEMBER_DIR/tmp/$_notice_name"
     [ -f "$NOTICE_FILE" ] || continue
     _notice_body=$(cat "$NOTICE_FILE" 2>/dev/null)

@@ -1537,7 +1537,12 @@ SYS_TMPDIR="${TMPDIR:-/tmp}"
 _mem_proj="${MEMORY_PROJECT_DIR:-}"
 [ -n "$_mem_proj" ] || _mem_proj="$PROJECT_DIR"
 _legacy_dir="${_mem_proj}/.remember"
-if [ "$REMEMBER_DIR" != "$_legacy_dir" ] && [ "${REMEMBER_DIR#"$_legacy_dir"/}" = "$REMEMBER_DIR" ] \
+_legacy_rd="$REMEMBER_DIR"
+if [ "$OSTYPE" = msys ] || [ "$OSTYPE" = cygwin ]; then
+    _legacy_dir="${_legacy_dir//\\//}"
+    _legacy_rd="${_legacy_rd//\\//}"
+fi
+if [ "$_legacy_rd" != "$_legacy_dir" ] && [ "${_legacy_rd#"$_legacy_dir"/}" = "$_legacy_rd" ] \
     && [ ! -e "$REMEMBER_DIR" ] && [ -d "$_legacy_dir" ]; then
     for _legacy_f in now.md recent.md archive.md core-memories.md remember.md; do
         if [ -f "$_legacy_dir/$_legacy_f" ]; then
@@ -1548,7 +1553,7 @@ if [ "$REMEMBER_DIR" != "$_legacy_dir" ] && [ "${REMEMBER_DIR#"$_legacy_dir"/}" 
     done
     unset _legacy_f
 fi
-unset _legacy_dir
+unset _legacy_dir _legacy_rd
 
 if [ ! -d "$REMEMBER_DIR/logs/autonomous" ] || [ ! -d "$REMEMBER_DIR/tmp" ]; then
     mkdir -p \
@@ -1744,7 +1749,40 @@ fi
 SAVE_SCRIPT="$PLUGIN_ROOT/scripts/save-session.sh"
 LAST_SAVE_FILE="$REMEMBER_DIR/tmp/last-save.json"
 PID_FILE="$REMEMBER_DIR/tmp/save-session.pid"
-SESSION_DIR="$(claude_projects_dir)/$(session_dir_slug "$PROJECT")"
+
+_SESSION_DIR_CACHE="$REMEMBER_DIR/tmp/session-dir-cache"
+if [ -n "${MEMORY_PROJECT_DIR:-}" ]; then
+    _SDC_CACHE_PROJECT="$MEMORY_PROJECT_DIR"
+else
+    _SDC_CACHE_PROJECT="$PROJECT"
+fi
+SESSION_DIR=""
+if [ -f "$_SESSION_DIR_CACHE" ] && [ ! -L "$_SESSION_DIR_CACHE" ] \
+    && [ -O "$_SESSION_DIR_CACHE" ] && [ -r "$_SESSION_DIR_CACHE" ]; then
+    _SDC_PROJECT="" _SDC_CONFIG_DIR="" _SDC_HOME="" _SDC_DIR=""
+    { IFS= read -r _SDC_PROJECT; IFS= read -r _SDC_CONFIG_DIR; \
+      IFS= read -r _SDC_HOME; IFS= read -r _SDC_DIR; } \
+        < "$_SESSION_DIR_CACHE" 2>/dev/null
+    if [ "$_SDC_PROJECT" = "$_SDC_CACHE_PROJECT" ] \
+        && [ "$_SDC_CONFIG_DIR" = "${CLAUDE_CONFIG_DIR:-}" ] \
+        && [ "$_SDC_HOME" = "${HOME:-}" ] \
+        && [ -n "$_SDC_DIR" ]; then
+        SESSION_DIR="$_SDC_DIR"
+    fi
+fi
+if [ -z "$SESSION_DIR" ]; then
+    SESSION_DIR="$(claude_projects_dir)/$(session_dir_slug "$PROJECT")"
+    _SDC_TMP=$(mktemp "${_SESSION_DIR_CACHE}.XXXXXX" 2>/dev/null) && {
+        {
+            printf '%s\n' "$_SDC_CACHE_PROJECT"
+            printf '%s\n' "${CLAUDE_CONFIG_DIR:-}"
+            printf '%s\n' "${HOME:-}"
+            printf '%s\n' "$SESSION_DIR"
+        } > "$_SDC_TMP" 2>/dev/null \
+            && mv -f "$_SDC_TMP" "$_SESSION_DIR_CACHE" 2>/dev/null \
+            || rm -f "$_SDC_TMP" 2>/dev/null
+    }
+fi
 
 [ -f "$SAVE_SCRIPT" ] || exit 0
 
