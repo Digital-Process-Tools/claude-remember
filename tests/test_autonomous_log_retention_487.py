@@ -860,6 +860,42 @@ class TestHousekeepingSweepFallbackAndEdgeCases:
         fail without touching the block itself.
         """
         block = TestHousekeepingGlobIsPortableAcrossSeparators._extract_housekeeping_block()
+        # #951: a test naming itself as exercising the fast path (or its
+        # fallback) asserted only the SWEEP'S OUTCOME, never whether
+        # `_remember_auto_ref` was actually built by `mktemp` on the
+        # runner it executes on. Two dead ends on the way to this fix,
+        # kept here so neither gets tried again:
+        #   1. A marker read AFTER the block runs cannot tell the two
+        #      paths apart -- the block's own last line (`unset
+        #      _remember_auto_ref ...`, scripts/save-session.sh, carried
+        #      verbatim into this extraction) clears the variable
+        #      unconditionally on EVERY run, before any code placed
+        #      after `{block}` can ever see it.
+        #   2. A shim that writes its marker to ITS OWN stderr is also
+        #      invisible: the block's own mktemp call is written as
+        #      `$(mktemp ... 2>/dev/null)` -- that redirect is the
+        #      PRODUCTION code's own suppression of mktemp's real error
+        #      output, and it swallows a stderr-based marker exactly as
+        #      thoroughly as a real error message (confirmed by a real
+        #      reproduction: `type mktemp` resolved to this very shim,
+        #      yet nothing it wrote to stderr ever appeared).
+        # A marker file the shim appends to, named by an env var neither
+        # the block nor its `2>/dev/null` ever touches, survives both.
+        real_mktemp = shutil.which("mktemp")
+        assert real_mktemp, "no mktemp on PATH -- fixture assumption broken"
+        marker_bin = Path(tempfile.mkdtemp(prefix="remember-mktemp-marker-"))
+        marker_log = marker_bin / "invocations.log"
+        marker_shim = marker_bin / "mktemp"
+        marker_shim.write_text(
+            "#!/bin/sh\n"
+            'echo "INVOKED" >> "$MKTEMP_SHIM_LOG"\n'
+            f'"{real_mktemp}" "$@"\n'
+            "rc=$?\n"
+            'if [ "$rc" -eq 0 ]; then echo "SUCCEEDED" >> "$MKTEMP_SHIM_LOG"; fi\n'
+            'exit "$rc"\n'
+        )
+        marker_shim.chmod(0o755)
+
         script = f"""
 set -u
 config() {{ printf '%s\n' {shlex.quote(str(retention_days))}; }}
@@ -870,9 +906,19 @@ REMEMBER_DIR={shlex.quote(remember_dir)}
 {block}
 """
         env = dict(os.environ)
+        env["MKTEMP_SHIM_LOG"] = str(marker_log)
+        path_dirs = [str(marker_bin)]
         if extra_path_dir is not None:
-            env["PATH"] = f"{extra_path_dir}{os.pathsep}{env.get('PATH', '')}"
-        return _run_bash_script(script, env)
+            # Ahead of the marker shim: a caller forcing the fallback via
+            # its own broken mktemp must still win over this shim, the
+            # same way it already wins over the real binary.
+            path_dirs.insert(0, str(extra_path_dir))
+        env["PATH"] = os.pathsep.join(path_dirs + [env.get("PATH", "")])
+        result = _run_bash_script(script, env)
+        result.mktemp_shim_log = (
+            marker_log.read_text(encoding="utf-8") if marker_log.exists() else ""
+        )
+        return result
 
     def test_must_fire_zero_padded_retention_days_does_not_misfire_the_fast_path(self, tmp_path):
         """Self-review finding: the digits-only sanitizer in
@@ -925,6 +971,12 @@ REMEMBER_DIR={shlex.quote(remember_dir)}
         assert fresh.exists(), (
             "a 1-day-old log was reclaimed with retention_days='08' -- "
             "positive control failed\n" + _dump_dir(autonomous)
+        )
+        assert "SUCCEEDED" in result.mktemp_shim_log, (
+            "#951: this test names itself as exercising the fast path, "
+            "but the real mktemp binary was never seen to succeed -- the "
+            "fallback ran instead and this test exercised nothing new"
+            f"\nmktemp_shim_log={result.mktemp_shim_log!r}"
         )
 
     def test_must_fire_fallback_loop_still_reclaims_when_reference_file_cannot_be_built(self, tmp_path):
@@ -988,6 +1040,13 @@ REMEMBER_DIR={shlex.quote(remember_dir)}
             "a 1-day-old log was reclaimed by the fallback loop -- "
             "positive control failed\n" + _dump_dir(autonomous)
         )
+        assert "SUCCEEDED" not in result.mktemp_shim_log, (
+            "#951 (sibling check): this test's own `broken_bin` mktemp "
+            "override did not actually win over the real mktemp on "
+            "PATH -- the real binary was still reached and succeeded, so "
+            "the FAST path ran instead of the fallback this test names "
+            f"itself after\nmktemp_shim_log={result.mktemp_shim_log!r}"
+        )
 
     def test_must_not_fire_fast_path_keeps_a_log_between_n_and_n_plus_one_days(self, tmp_path):
         """#933: the fast path's own cutoff (`now - N*86400`, then `-ot`)
@@ -1035,6 +1094,14 @@ REMEMBER_DIR={shlex.quote(remember_dir)}
             "fallback's own thresholds) survived the fast path -- "
             "positive control failed\n" + _dump_dir(autonomous)
         )
+        assert "SUCCEEDED" in result.mktemp_shim_log, (
+            "#951: this test's own name and docstring claim it exercises "
+            "the FAST path at the N/N+1 boundary, but the real mktemp "
+            "binary was never seen to succeed -- the fallback silently "
+            "ran instead, making this test a duplicate of its fallback "
+            "sibling rather than a check on the fast path's own boundary "
+            f"arithmetic\nmktemp_shim_log={result.mktemp_shim_log!r}"
+        )
 
     def test_must_not_fire_fallback_keeps_a_log_between_n_and_n_plus_one_days(self, tmp_path):
         """#933: same fixture as the fast-path boundary test above, run
@@ -1076,4 +1143,11 @@ REMEMBER_DIR={shlex.quote(remember_dir)}
         assert not past_both.exists(), (
             "an 8.5-day-old log survived the fallback loop -- positive "
             "control failed\n" + _dump_dir(autonomous)
+        )
+        assert "SUCCEEDED" not in result.mktemp_shim_log, (
+            "#951 (sibling check): this test's own `broken_bin` mktemp "
+            "override did not actually win over the real mktemp on "
+            "PATH -- the real binary was still reached and succeeded, so "
+            "the FAST path ran instead of the fallback this test names "
+            f"itself after\nmktemp_shim_log={result.mktemp_shim_log!r}"
         )

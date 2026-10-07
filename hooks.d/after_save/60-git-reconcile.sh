@@ -358,14 +358,26 @@ _grc_bump_ndc_gen() {
         # place, reported "no conflict", and left a stray rebase-merge
         # directory behind on disk. Same mitigation _grc_common_dir already
         # applies to --git-common-dir, extended to this call site.
-        local _rd1 _rd2
-        _rd1=$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-path rebase-merge 2>/dev/null) || _rd1=""
-        _rd2=$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-path rebase-apply 2>/dev/null) || _rd2=""
-        if [ -n "$_rd1" ] && [ -d "$_rd1" ]; then
+        #
+        # #953: the two `rev-parse --git-path` calls below can themselves
+        # FAIL (git binary trouble, a corrupt .git directory read error) --
+        # that is not the same thing as "no rebase-merge/rebase-apply
+        # directory exists", and collapsing both into a plain `return 1`
+        # turns a could-not-tell into a confident nothing-there. Return 2
+        # when BOTH underlying git calls failed, so a caller can tell the
+        # two apart instead of silently treating an undetermined check as
+        # "not in progress".
+        local _rd1 _rd2 _rc1 _rc2
+        _rd1=$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-path rebase-merge 2>/dev/null); _rc1=$?
+        _rd2=$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-path rebase-apply 2>/dev/null); _rc2=$?
+        if [ "$_rc1" -eq 0 ] && [ -n "$_rd1" ] && [ -d "$_rd1" ]; then
             return 0
         fi
-        if [ -n "$_rd2" ] && [ -d "$_rd2" ]; then
+        if [ "$_rc2" -eq 0 ] && [ -n "$_rd2" ] && [ -d "$_rd2" ]; then
             return 0
+        fi
+        if [ "$_rc1" -ne 0 ] && [ "$_rc2" -ne 0 ]; then
+            return 2
         fi
         return 1
     }
@@ -420,15 +432,65 @@ _grc_bump_ndc_gen() {
         done
     }
 
+    # #952 item 2: the scoped restore below must cover every path THIS
+    # run's own rebase could have changed, not just $SLUG/ -- a shared
+    # REPO_ROOT's ahead/behind commit set can include other slugs' commits
+    # from either machine, so "a save commits to its own slug's subtree
+    # alone" does not mean "a REBASE only ever replays one slug's commits".
+    # Computed as the union of (this run's own ahead commits) and (the
+    # remote's behind commits), each diffed against their merge-base --
+    # i.e. exactly the set of paths either side of the rebase could touch,
+    # computed BEFORE the rebase call starts (while $1/$2 are still plain,
+    # un-rewritten refs) so a write that lands in the window between a
+    # failed rebase and this restore is never mistaken for part of it --
+    # the same TOCTOU-write guarantee #943 already verified, now extended
+    # to a restore scope wider than a single slug.
+    _grc_compute_touched_paths() {
+        local _local_tip="$1" _remote_tip="$2" _mb
+        _mb=$(git -C "$REPO_ROOT" merge-base "$_local_tip" "$_remote_tip" 2>/dev/null) || _mb=""
+        if [ -z "$_mb" ]; then
+            # Could not compute a merge-base -- fall back to this run's own
+            # slug rather than silently restoring nothing at all.
+            printf '%s\n' "$SLUG"
+            return
+        fi
+        { git -C "$REPO_ROOT" diff --name-only "$_mb" "$_local_tip" -- 2>/dev/null
+          git -C "$REPO_ROOT" diff --name-only "$_mb" "$_remote_tip" -- 2>/dev/null
+        } | sort -u
+    }
+
     _grc_report_conflict() {
         local _files="$1" _attempt="$2" _msg_extra _foreign _quit_ok _checkout_ok
+        local _head_name_path _actual_branch _branch_mismatch _rip_rc
+
+        # #952 item 3: git's own record of which branch THIS rebase started
+        # from -- rebase-merge/head-name (or rebase-apply/head-name for an
+        # apply-based rebase) -- read BEFORE `git rebase --quit` below
+        # discards it. $BRANCH_NAME is whatever git_reconcile.branch names,
+        # or HEAD's branch AT HOOK START, which can differ from the branch
+        # this run's rebase actually began on. Restoring HEAD to the
+        # CONFIGURED branch in that case would silently move it to the
+        # wrong commit.
+        _head_name_path=$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-path rebase-merge 2>/dev/null) || _head_name_path=""
+        if [ -z "$_head_name_path" ] || [ ! -f "$_head_name_path/head-name" ]; then
+            _head_name_path=$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-path rebase-apply 2>/dev/null) || _head_name_path=""
+        fi
+        _actual_branch=""
+        if [ -n "$_head_name_path" ] && [ -f "$_head_name_path/head-name" ]; then
+            _actual_branch=$(cat "$_head_name_path/head-name" 2>/dev/null)
+            _actual_branch="${_actual_branch#refs/heads/}"
+        fi
+        _branch_mismatch=""
+        if [ -n "$_actual_branch" ] && [ "$_actual_branch" != "$BRANCH_NAME" ]; then
+            _branch_mismatch="$_actual_branch"
+        fi
 
         # #943: instead of snapshotting a foreign write and racing it
         # against `git rebase --abort` (the #939/#942 approach, and the
         # TOCTOU gap that fix could not close), never let the abort touch
-        # anything outside $SLUG/ in the first place -- there is then
-        # nothing to race, because nothing outside $SLUG/ is ever a
-        # candidate for being discarded.
+        # anything outside the set of paths THIS run's own rebase could
+        # have changed in the first place -- there is then nothing to race,
+        # because nothing else is ever a candidate for being discarded.
         #
         #   1. `git rebase --quit` drops the rebase state (.git/rebase-merge
         #      or rebase-apply) WITHOUT resetting HEAD, the index, or the
@@ -442,20 +504,22 @@ _grc_bump_ndc_gen() {
         #      the branch ref itself until its very last step; a rebase
         #      that is still in progress (conflicted, or quit out of here)
         #      left that ref exactly where it was before this run started.
-        #   3. `git checkout HEAD -- "$SLUG"` restores ONLY the $SLUG/
-        #      subtree (index + working tree) to that pre-rebase content.
-        #      Every commit this run could have replayed is confined to
-        #      $SLUG/ (a save commits to its own slug's subtree alone, see
-        #      _grc_foreign_changes above), so this fully undoes whatever
-        #      the rebase did, scoped to exactly the part of the tree this
-        #      run owns. No other path is ever named, read, or written by
-        #      any of these three commands.
+        #      Skipped entirely on a branch mismatch (above) -- see below.
+        #   3. `git checkout HEAD -- "${_GRC_TOUCHED_PATHS[@]}"` restores
+        #      ONLY the paths this run's own rebase could have changed --
+        #      computed BEFORE the rebase call as the union of this run's
+        #      own ahead commits and the remote's behind commits, diffed
+        #      against their merge-base (#952 item 2: not every commit a
+        #      rebase replays is confined to $SLUG/ -- a shared REPO_ROOT's
+        #      ahead/behind commit set can include other slugs' commits
+        #      from either machine). No other path is ever named, read, or
+        #      written by any of these three commands.
         #
         # Verified against a real repository, not merely reasoned: a write
         # injected into another slug's tracked file in the exact window
         # between the rebase failing and this sequence running survives
-        # untouched, while $SLUG/'s own content and HEAD land exactly where
-        # a successful `rebase --abort` would have put them.
+        # untouched, while the touched paths' own content and HEAD land
+        # exactly where a successful `rebase --abort` would have put them.
         if git -C "$REPO_ROOT" rebase --quit >/dev/null 2>&1; then
             _quit_ok=1
         else
@@ -463,38 +527,56 @@ _grc_bump_ndc_gen() {
         fi
 
         _checkout_ok=0
-        if [ "$_quit_ok" -eq 1 ] \
-            && git -C "$REPO_ROOT" symbolic-ref HEAD "refs/heads/$BRANCH_NAME" >/dev/null 2>&1 \
-            && git -C "$REPO_ROOT" checkout HEAD -- "$SLUG" >/dev/null 2>&1; then
+        if [ "$_quit_ok" -eq 1 ] && [ -z "$_branch_mismatch" ] \
+            && git -C "$REPO_ROOT" symbolic-ref HEAD "refs/heads/$BRANCH_NAME" >/dev/null 2>&1; then
             _checkout_ok=1
-            # Review finding: `checkout <tree-ish> -- <pathspec>` only ever
-            # restores a path that EXISTS in <tree-ish> -- it never removes
-            # a path present in the index/working tree but absent from it.
-            # Reproduced: a conflict where the upstream side being rebased
-            # onto has its OWN earlier commit adding a new file under
-            # $SLUG/ (no local commit involved at all) leaves that file
-            # checked into the index as "A" (added) once the rebase sets
-            # up that new base to replay onto -- `git rebase --quit` does
-            # not touch it, and the checkout above does not remove it,
-            # since HEAD's own pre-rebase tree never had it either. `git
-            # rebase --abort` would have pruned it (it is a full `reset
-            # --hard` across the whole tree); this scoped sequence must
-            # prune it too, but ONLY within $SLUG/ -- never touching a
-            # foreign path is still the entire point of #943.
-            while IFS= read -r _grc_added; do
-                [ -n "$_grc_added" ] || continue
-                git -C "$REPO_ROOT" rm -f -q -- "$_grc_added" >/dev/null 2>&1 || _checkout_ok=0
-            done < <(git -C "$REPO_ROOT" diff --name-only --diff-filter=A HEAD -- "$SLUG" 2>/dev/null)
+            if [ "${#_GRC_TOUCHED_PATHS[@]}" -gt 0 ]; then
+                # Review finding: `checkout <tree-ish> -- <pathspec>` errors
+                # out ENTIRELY (restoring nothing, not even the paths that
+                # DO exist) when even one literal pathspec matches no file
+                # in <tree-ish> -- unlike the original single-directory
+                # pathspec ($SLUG), which always matched by prefix. A path
+                # the upstream side added before HEAD's own pre-rebase
+                # commit has no HEAD entry to restore; `git ls-tree` filters
+                # the touched-paths list down to only what HEAD actually
+                # has, before checkout ever runs, so a freshly-added path
+                # no longer poisons the restore of every other one.
+                local _grc_existing
+                mapfile -t _grc_existing < <(git -C "$REPO_ROOT" ls-tree -r --name-only HEAD -- "${_GRC_TOUCHED_PATHS[@]}" 2>/dev/null)
+                if [ "${#_grc_existing[@]}" -gt 0 ]; then
+                    git -C "$REPO_ROOT" checkout HEAD -- "${_grc_existing[@]}" >/dev/null 2>&1 || _checkout_ok=0
+                fi
+                # Review finding (#943): the checkout above only ever
+                # restores a path that EXISTS in HEAD -- it never removes a
+                # path present in the index/working tree but absent from it
+                # (e.g. the upstream side's own earlier commit cleanly
+                # adding a new file before a later commit conflicts).
+                # Pruned across every touched path now, not just $SLUG/.
+                while IFS= read -r _grc_added; do
+                    [ -n "$_grc_added" ] || continue
+                    git -C "$REPO_ROOT" rm -f -q -- "$_grc_added" >/dev/null 2>&1 || _checkout_ok=0
+                done < <(git -C "$REPO_ROOT" diff --name-only --diff-filter=A HEAD -- "${_GRC_TOUCHED_PATHS[@]}" 2>/dev/null)
+            fi
         fi
 
-        if [ "$_quit_ok" -eq 0 ] && _grc_rebase_in_progress; then
-            _msg_extra="git rebase --quit itself FAILED -- the rebase is still in progress and conflict markers are still in the tree"
+        if [ -n "$_branch_mismatch" ]; then
+            _msg_extra="the rebase was started from branch '$_branch_mismatch', not the configured/detected '$BRANCH_NAME' -- refusing to guess which branch to restore HEAD to. HEAD and every touched path were left exactly as the rebase left them; resolve by hand"
+        elif [ "$_quit_ok" -eq 0 ]; then
+            _grc_rebase_in_progress
+            _rip_rc=$?
+            if [ "$_rip_rc" -eq 0 ]; then
+                _msg_extra="git rebase --quit itself FAILED -- the rebase is still in progress and conflict markers are still in the tree"
+            elif [ "$_rip_rc" -eq 2 ]; then
+                _msg_extra="git rebase --quit itself FAILED, and whether the rebase is still in progress could not be determined (the git check itself failed) -- check $REPO_ROOT by hand, conflict markers may still be in the tree"
+            else
+                _msg_extra="git rebase --quit itself FAILED"
+            fi
         elif [ "$_checkout_ok" -eq 0 ]; then
-            _msg_extra="the rebase state was cleared, but restoring $SLUG/'s own pre-rebase content FAILED -- check $SLUG/ by hand, it may still carry conflict markers"
+            _msg_extra="the rebase state was cleared, but restoring the pre-rebase content FAILED -- check $REPO_ROOT by hand, it may still carry conflict markers"
         else
             _foreign=$(_grc_foreign_changes)
             if [ -n "$_foreign" ]; then
-                _msg_extra="aborted; a concurrent write that landed outside $SLUG/ while the rebase was in flight (${_foreign//$'\n'/; }) was never touched -- only $SLUG/ was reset"
+                _msg_extra="aborted; a concurrent write that landed outside this run's own rebase while it was in flight (${_foreign//$'\n'/; }) was never touched -- only the rebase's own paths were reset"
             else
                 _msg_extra="aborted, the tree is unchanged"
             fi
@@ -525,12 +607,30 @@ _grc_bump_ndc_gen() {
     # mid-resolution left reachable only via the reflog). So this check
     # MUST run before the rebase call, not after -- checking after can only
     # ever see "a rebase-merge/rebase-apply directory exists", never WHOSE.
-    if _grc_rebase_in_progress; then
+    _grc_rebase_in_progress
+    _grc_rip_rc=$?
+    if [ "$_grc_rip_rc" -eq 0 ]; then
         log "git-reconcile" "declined: a rebase (or merge/cherry-pick) is already in progress in $REPO_ROOT and it is NOT this run's own -- .git/rebase-merge or rebase-apply already existed before this reconcile attempt started. Most likely someone is resolving a real conflict by hand right now. Nothing was touched -- finish or abort it yourself: git -C ${_dq}$REPO_ROOT${_dq} rebase --continue (or --abort)."
+        exit 0
+    elif [ "$_grc_rip_rc" -eq 2 ]; then
+        log "git-reconcile" "declined: could not determine whether a rebase (or merge/cherry-pick) is already in progress in $REPO_ROOT -- the git check itself failed (not merely 'no rebase found'). Treating it as in progress out of caution. Nothing was touched."
         exit 0
     fi
 
-    git -C "$REPO_ROOT" rebase "$REMOTE_REF" >/dev/null 2>/dev/null
+    # #952 item 2: the scoped restore _grc_report_conflict runs on a
+    # conflict needs to know, BEFORE this rebase call rewrites anything,
+    # exactly which paths this run's own ahead/behind commits could touch.
+    PRE_REBASE_HEAD=$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null) || PRE_REBASE_HEAD=""
+    mapfile -t _GRC_TOUCHED_PATHS < <(_grc_compute_touched_paths "$PRE_REBASE_HEAD" "$REMOTE_REF")
+    # #952 item 1: --no-autostash -- without it, a dirty tracked write from
+    # a DIFFERENT slug sharing this REPO_ROOT gets auto-stashed when this
+    # rebase starts, and `rebase --quit` (unlike --abort) never re-applies
+    # it: the write ends up sitting in `git stash list` with nothing
+    # announcing it, while this hook's own conflict notice still claims
+    # "aborted, the tree is unchanged". With autostash off, the rebase
+    # simply refuses to start while that write is present -- no stash, no
+    # silent loss.
+    git -C "$REPO_ROOT" rebase --no-autostash "$REMOTE_REF" >/dev/null 2>/dev/null
     REBASE_RC=$?
     if [ "$REBASE_RC" -eq 0 ]; then
         # The working tree (now.md included) is already rewritten the moment
@@ -552,11 +652,18 @@ _grc_bump_ndc_gen() {
             # a foreign rebase/merge could just as easily appear in the window
             # between the first rebase landing/push being rejected and this
             # retry's own rebase call.
-            if _grc_rebase_in_progress; then
+            _grc_rebase_in_progress
+            _grc_rip_rc=$?
+            if [ "$_grc_rip_rc" -eq 0 ]; then
                 log "git-reconcile" "declined: a rebase (or merge/cherry-pick) is already in progress in $REPO_ROOT and it is NOT this run's own -- .git/rebase-merge or rebase-apply already existed before this retry could start. Nothing was touched -- finish or abort it yourself: git -C ${_dq}$REPO_ROOT${_dq} rebase --continue (or --abort)."
                 exit 0
+            elif [ "$_grc_rip_rc" -eq 2 ]; then
+                log "git-reconcile" "declined: could not determine whether a rebase (or merge/cherry-pick) is already in progress in $REPO_ROOT before this retry -- the git check itself failed. Treating it as in progress out of caution. Nothing was touched."
+                exit 0
             fi
-            git -C "$REPO_ROOT" rebase "$REMOTE_REF" >/dev/null 2>/dev/null
+            PRE_REBASE_HEAD=$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null) || PRE_REBASE_HEAD=""
+            mapfile -t _GRC_TOUCHED_PATHS < <(_grc_compute_touched_paths "$PRE_REBASE_HEAD" "$REMOTE_REF")
+            git -C "$REPO_ROOT" rebase --no-autostash "$REMOTE_REF" >/dev/null 2>/dev/null
             REBASE_RC2=$?
             # Same reasoning as the first attempt's bump above: the tree is
             # rewritten as soon as this retry's rebase itself lands, whether
@@ -567,9 +674,16 @@ _grc_bump_ndc_gen() {
                 rm -f "$CONFLICT_STATE_FILE" 2>/dev/null || true
                 exit 0
             fi
-            if [ "$REBASE_RC2" -ne 0 ] && _grc_rebase_in_progress; then
-                _grc_report_conflict "$(_grc_conflict_files)" retry
-                exit 0
+            if [ "$REBASE_RC2" -ne 0 ]; then
+                _grc_rebase_in_progress
+                _grc_rip_rc=$?
+                if [ "$_grc_rip_rc" -eq 0 ]; then
+                    _grc_report_conflict "$(_grc_conflict_files)" retry
+                    exit 0
+                elif [ "$_grc_rip_rc" -eq 2 ]; then
+                    log "git-reconcile" "WARNING: rebase retry on $REMOTE_REF failed in $REPO_ROOT, and whether a rebase was left in progress could not be determined -- the git check itself failed. Check $REPO_ROOT by hand, it may still carry conflict markers."
+                    exit 0
+                fi
             fi
         fi
         log "git-reconcile" "push deferred after retry (will try again next save) -- $REMOTE_NAME/$BRANCH_NAME moved again or the transport was unreachable"
@@ -579,8 +693,12 @@ _grc_bump_ndc_gen() {
     # Rebase itself failed. A conflict leaves .git/rebase-merge or
     # rebase-apply in place; anything else (e.g. the rebase command failing to
     # start at all) is a no-op rather than a tree left half-rebased.
-    if _grc_rebase_in_progress; then
+    _grc_rebase_in_progress
+    _grc_rip_rc=$?
+    if [ "$_grc_rip_rc" -eq 0 ]; then
         _grc_report_conflict "$(_grc_conflict_files)" first-attempt
+    elif [ "$_grc_rip_rc" -eq 2 ]; then
+        log "git-reconcile" "WARNING: git rebase on $REMOTE_REF failed in $REPO_ROOT, and whether a rebase was left in progress could not be determined -- the git check itself failed. Check $REPO_ROOT by hand, it may still carry conflict markers."
     else
         log "git-reconcile" "WARNING: git rebase on $REMOTE_REF failed to start in $REPO_ROOT -- no-op, nothing was changed. Run it by hand to see git's own reason."
     fi
