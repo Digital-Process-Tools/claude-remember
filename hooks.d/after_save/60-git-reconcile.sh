@@ -230,11 +230,13 @@ CONSOLIDATION_LOCK_DIR="$REMEMBER_DIR/tmp/consolidation.lock"
 # counter before/after re-acquiring save.lock around its own tail+mv
 # (scripts/save-session.sh:1385-1406) -- it just never saw this hook as a
 # possible writer, only another NDC round. Bumping the SAME counter after a
-# successful fast-forward/rebase below makes NDC's EXISTING guard also catch
-# this hook, at zero steady-state cost: if no NDC round is concurrently
-# reading it, nobody notices the bump; if one is, it correctly skips its
-# commit the same way it already does for an overlapping NDC round (a
-# visible duplicate in today-*.md, never silent loss).
+# successful fast-forward/rebase, or on the conflict path once a rebase has
+# already rewritten the tree (#954 -- that path was missing this call until
+# then), makes NDC's EXISTING guard also catch this hook, at zero
+# steady-state cost: if no NDC round is concurrently reading it, nobody
+# notices the bump; if one is, it correctly skips its commit the same way
+# it already does for an overlapping NDC round (a visible duplicate in
+# today-*.md, never silent loss).
 NDC_GEN_FILE="$REMEMBER_DIR/tmp/ndc-generation"
 _grc_bump_ndc_gen() {
     # Best-effort, not locked: a failed read or write here just means a
