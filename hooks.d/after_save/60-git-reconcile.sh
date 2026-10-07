@@ -553,19 +553,33 @@ _grc_bump_ndc_gen() {
         #
         # #966: that guarantee held for a path OUTSIDE _GRC_TOUCHED_PATHS
         # (never named by checkout/rm at all), but not for a path INSIDE
-        # it -- every touched path gets checked out / rm'd unconditionally
-        # below, which discards a concurrent write from a DIFFERENT slug
-        # landing on a shared path in the TOCTOU window `rebase --quit`
-        # opens, even though only THIS slug's own locks are held. `git
-        # rebase --quit` itself touches neither the working tree, the
-        # index, nor HEAD (git-rebase(1)) -- it only removes the
-        # rebase-merge/rebase-apply state directory -- so a snapshot taken
-        # immediately before it and compared immediately after can only
-        # ever differ because of something else writing to that path in
-        # between; nothing in this function's own path to that point can
-        # produce the difference. Paths that differ are left exactly as
-        # that write put them -- the scoped restore below only ever acts
-        # on a path whose content still matches this snapshot.
+        # it -- every touched path got checked out / rm'd unconditionally
+        # below, which discarded a concurrent write from a DIFFERENT slug
+        # landing on a shared path during `rebase --quit`, even though
+        # only THIS slug's own locks are held. `git rebase --quit` itself
+        # touches neither the working tree, the index, nor HEAD
+        # (git-rebase(1)) -- it only removes the rebase-merge/rebase-apply
+        # state directory -- so a snapshot taken immediately before it and
+        # compared immediately after can only differ because of something
+        # else writing to that path in that specific window. A path that
+        # differs is left exactly as that write put it.
+        #
+        # Review finding (#966): this narrows the race to the `rebase
+        # --quit` call (and the few subprocess calls the restore itself
+        # makes just below) -- it does NOT cover the much longer window
+        # from this run's OWN `rebase --no-autostash` call starting
+        # (where _GRC_TOUCHED_PATHS is first computed, well above) through
+        # the conflict firing and this function being entered. A write
+        # landing during that earlier window is already reflected in THIS
+        # snapshot (taken after it), so the comparison cannot see it --
+        # snapshotting any earlier would also capture every path's
+        # LEGITIMATE pre-rebase content, which always differs from its
+        # post-rebase-attempt content purely from this run's OWN replay,
+        # making every touched path look "changed" and defeating the
+        # restore entirely. Closing that larger window needs a different
+        # mechanism (telling this run's own replay apart from a foreign
+        # write byte-for-byte, not merely before/after this run existed at
+        # all) and is out of scope here; see trap.d/966.residual-race.md.
         local _grc_prequit_hash=()
         local _grc_pq_i
         for ((_grc_pq_i = 0; _grc_pq_i < ${#_GRC_TOUCHED_PATHS[@]}; _grc_pq_i++)); do
@@ -595,7 +609,16 @@ _grc_bump_ndc_gen() {
                 local _grc_sp_i _grc_now_hash
                 for ((_grc_sp_i = 0; _grc_sp_i < ${#_GRC_TOUCHED_PATHS[@]}; _grc_sp_i++)); do
                     _grc_now_hash=$(_grc_path_hash "${_GRC_TOUCHED_PATHS[_grc_sp_i]}")
-                    if [ "$_grc_now_hash" = "${_grc_prequit_hash[_grc_sp_i]}" ]; then
+                    # Review finding (#966): "HASH-ERROR" is a could-not-tell
+                    # sentinel, not a content value -- two could-not-tell
+                    # reads comparing equal to each other must never be read
+                    # as "content provably unchanged". A path where EITHER
+                    # side of the comparison could not be hashed is treated
+                    # as unsafe (never restored), the same as a genuine
+                    # mismatch.
+                    if [ "$_grc_now_hash" = "${_grc_prequit_hash[_grc_sp_i]}" ] \
+                        && [ "$_grc_now_hash" != "HASH-ERROR" ] \
+                        && [ "${_grc_prequit_hash[_grc_sp_i]}" != "HASH-ERROR" ]; then
                         _grc_safe_paths+=("${_GRC_TOUCHED_PATHS[_grc_sp_i]}")
                     fi
                 done
