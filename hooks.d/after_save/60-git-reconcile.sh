@@ -396,20 +396,19 @@ _grc_bump_ndc_gen() {
         git -C "$REPO_ROOT" status --porcelain 2>/dev/null | while IFS= read -r _grc_line; do
             _grc_code="${_grc_line:0:2}"
             _grc_path="${_grc_line:3}"
-            case "$_grc_code" in
-                *R*)
-                    case "$_grc_path" in
-                        *" -> "*) _grc_path="${_grc_path##* -> }" ;;
-                    esac
-                    ;;
-            esac
+            if [[ "$_grc_code" == *R* ]] && [[ "$_grc_path" == *" -> "* ]]; then
+                _grc_path="${_grc_path##* -> }"
+            fi
             # A path with odd characters is double-quoted by porcelain.
-            _grc_path="${_grc_path#\"}"
-            _grc_path="${_grc_path%\"}"
-            case "$_grc_path" in
-                "$SLUG"/*|"$SLUG") ;;
-                *) printf '%s\n' "$_grc_path" ;;
-            esac
+            # Strip a leading/trailing double quote through a variable
+            # holding the literal character, rather than an escaped quote
+            # inside the pattern.
+            _grc_dq='"'
+            _grc_path="${_grc_path#"$_grc_dq"}"
+            _grc_path="${_grc_path%"$_grc_dq"}"
+            if [[ "$_grc_path" != "$SLUG"/* ]] && [[ "$_grc_path" != "$SLUG" ]]; then
+                printf '%s\n' "$_grc_path"
+            fi
         done
     }
 
