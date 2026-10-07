@@ -101,8 +101,9 @@ fi
 # `_RCFG_cooldowns_save_seconds=120` — and every later config() call is a
 # parameter expansion. Nothing is written to disk. That is the whole reason
 # this was preferred over caching the merged file at a stable path: that file
-# can carry `haiku.oauth_token`, a live OAuth credential, which is why
-# lib-memory-dir.sh creates it 0600, fresh every invocation, under an EXIT
+# can carry a `haiku.oauth_token` value (an inert config key since #860, but
+# still a user-editable file), which is why lib-memory-dir.sh creates it
+# 0600, fresh every invocation, under an EXIT
 # trap (#68/#429) -- an unpredictable mktemp name until bootstrap-dirs.sh's
 # #362 relocation gives it a private-directory home instead. Collapsing
 # reads must not re-introduce that trade by the back door.
@@ -227,7 +228,8 @@ _config_is_private_path() {
 # must be checked).
 #
 # Deliberately NOT a cache of the raw merged config.json: that file can carry
-# a live `haiku.oauth_token` (lib-memory-dir.sh's own security comment), and
+# a `haiku.oauth_token` value (lib-memory-dir.sh's own security comment --
+# inert since #860, but still a user-editable file), and
 # a persistent copy would extend a secret's on-disk lifetime from "until this
 # process exits" to "until the config next changes" -- real exposure growth
 # for a scratch file that today is deleted at EXIT. The FLATTENED dump is
@@ -929,7 +931,7 @@ export REMEMBER_PROMPT_STAMP
 # could not replay — which is exactly why #227 skipped it.
 #
 # What is cached is these two SCALARS, never the merged config file. That file
-# can carry `haiku.oauth_token`, which is why lib-memory-dir.sh creates it
+# can carry a `haiku.oauth_token` value, which is why lib-memory-dir.sh creates it
 # 0600, fresh every invocation, under an EXIT trap (#68/#232/#429);
 # publishing it at a stable path to save
 # processes is a trade this repo has already declined once and is not making by

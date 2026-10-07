@@ -492,7 +492,8 @@ SYS_TMPDIR="${TMPDIR:-/tmp}"
 # when opening their target and truncate on open, before a byte is written —
 # so a symlink pre-seeded at the predictable name does not just get
 # truncated, it receives the actual write that follows: the merged config,
-# which per the comment below can carry a live `haiku.oauth_token`, lands at
+# which per the comment below could carry a `haiku.oauth_token` value (an
+# inert config key since #860, but still a user-editable file), lands at
 # whatever path the attacker's symlink pointed to. mktemp both creates the
 # file atomically (closing the create/open race a separate `: >` leaves open)
 # and names it unpredictably, and is already 0600 on every mktemp this repo

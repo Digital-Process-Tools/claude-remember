@@ -562,11 +562,12 @@ RECONCILE_ENABLED=$(config '.git_reconcile.enabled' 'false')
         # the per-slug rules rather than left to be discovered.
         # /$SLUG/config.json (#719): the per-project config layer
         # (${REMEMBER_DIR}/config.json, i.e. $SLUG/config.json under the store
-        # root) is a documented home for haiku.oauth_token -- a live
-        # coding-agent OAuth credential. `git add -- "$SLUG/"` below has no exclusion for
-        # it otherwise, so it would be committed and pushed to the configured
-        # remote right alongside memory, landing a live credential in git
-        # history and in every clone of the store.
+        # root) is a documented home for haiku.oauth_token -- inert since
+        # #860 (never read for authentication, on any host), but config.json
+        # is still a user-editable file that may carry something else not
+        # meant for git history. `git add -- "$SLUG/"` below has no
+        # exclusion for it otherwise, so it would be committed and pushed to
+        # the configured remote right alongside memory.
         for _gb_rule in "/$SLUG/logs/" "/$SLUG/tmp/" "/$SLUG/config.json" "/tmp/"; do
             grep -qxF "$_gb_rule" "$GB_EXCLUDE_FILE" 2>/dev/null && continue
             printf '%s\n' "$_gb_rule" >> "$GB_EXCLUDE_FILE" 2>/dev/null || true
@@ -578,11 +579,10 @@ RECONCILE_ENABLED=$(config '.git_reconcile.enabled' 'false')
         # BACKUP_COMMON_DIR is empty or mkdir -p fails (read-only filesystem,
         # permission issue), the config.json exclusion above is silently
         # never written, and the `git add -- "$SLUG/"` below stages
-        # config.json -- which can carry a live haiku.oauth_token -- exactly
-        # as it did before #719. The caller sees the ordinary "committed
-        # $SLUG" success line either way, indistinguishable from the
-        # exclusion having worked.
-        report_error "git-backup" "WARNING: could not create $BACKUP_COMMON_DIR/info -- the logs/tmp/config.json exclusion was NOT written, so this backup's git add may stage config.json (which can carry haiku.oauth_token)"
+        # config.json -- exactly as it did before #719. The caller sees the
+        # ordinary "committed $SLUG" success line either way,
+        # indistinguishable from the exclusion having worked.
+        report_error "git-backup" "WARNING: could not create $BACKUP_COMMON_DIR/info -- the logs/tmp/config.json exclusion was NOT written, so this backup's git add may stage config.json"
     fi
 
     # ── An exclude cannot untrack, and a partial commit cannot delete (#288) ─
@@ -624,7 +624,7 @@ RECONCILE_ENABLED=$(config '.git_reconcile.enabled' 'false')
             log "git-backup" "$SLUG/logs, $SLUG/tmp or $SLUG/config.json are tracked by a version older than the exclusion, but this store has staged changes in its index -- untracking them would commit those too, so it is left for the next backup."
         elif git -C "$REPO_ROOT" rm -r -q --cached --ignore-unmatch -- "$SLUG/logs/" "$SLUG/tmp/" "$SLUG/config.json" 2>/dev/null \
             && _gb_commit_untrack >/dev/null 2>&1; then
-            log "git-backup" "untracked $SLUG/logs, $SLUG/tmp and $SLUG/config.json -- a version older than the exclusion had committed them. They stop being pushed from now on; commits that already carry them are left untouched, because removing those means rewriting history and force-pushing, which breaks every other clone of this store. If config.json carried a live haiku.oauth_token, treat that credential as compromised and rotate it."
+            log "git-backup" "untracked $SLUG/logs, $SLUG/tmp and $SLUG/config.json -- a version older than the exclusion had committed them. They stop being pushed from now on; commits that already carry them are left untouched, because removing those means rewriting history and force-pushing, which breaks every other clone of this store."
         else
             git -C "$REPO_ROOT" reset -q 2>/dev/null || true
             log "git-backup" "could not untrack $SLUG/logs, $SLUG/tmp or $SLUG/config.json; the index was restored and the next backup retries."
