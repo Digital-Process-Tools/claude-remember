@@ -232,15 +232,15 @@ than an oversight.
   [#890](https://github.com/Digital-Process-Tools/claude-remember/issues/890), filed for this
   same finding before this curation pass, appears to already be fixed by the same change --
   worth a maintainer look at closing it.** No new issue filed here.
-- **`875.readme-cache-disclosure-names-old-filename`** -- declined 2026-10-06, still true at
-  HEAD: `README.md`'s `$TMPDIR/remember-*` disclosure still names
-  `remember-config-cache-<key>`, while `scripts/log.sh` has written
-  `remember-config-cache-v2-<key>` since #875 changed the cache format. Everywhere else that
-  changed (`CHANGELOG.md`, `docs/releasing.md`, the test suite's own comments) already
-  reflects the `v2` name; only the README disclosure line was missed. Declined as a rule
-  because the fix is a one-line README correction, not a generalizable lesson. **Already
-  tracked as [#888](https://github.com/Digital-Process-Tools/claude-remember/issues/888)** --
-  no new issue filed.
+- **`875.readme-cache-disclosure-names-old-filename`** -- declined 2026-10-06, **fixed by
+  [#888](https://github.com/Digital-Process-Tools/claude-remember/issues/888), checked at the
+  commit that landed it.** Originally: `README.md`'s `$TMPDIR/remember-*` disclosure named the
+  pre-`v2` filename (`remember-config-cache-<key>`) while `scripts/log.sh` had written
+  `remember-config-cache-v2-<key>` since #864 changed the cache format (#875 was the follow-up
+  PR that landed #864's fix, not the format bump itself). README now names the real `v2`
+  filename and the cache publisher best-effort removes a leftover pre-`v2` orphan on write.
+  Declined as a rule at the time because the fix was a one-line README correction, not a
+  generalizable lesson -- that stands; this entry is kept only as a closed record, not reopened.
 - **`891.lib-lock-eval-new-hits`** -- declined 2026-10-06, already fixed. The fragment
   described `check_release_tree.py`'s widened `EVAL_OF_SUBSTITUTION` pattern newly flagging
   `scripts/lib-lock.sh`'s own `eval "_LOCK_TIMING_T0_${KEY}=..."` shape, untriaged. Checked

@@ -624,8 +624,10 @@ _remember_cfg_flatten_cache_publish() {
     # _remember_cfg_flatten_cache_path_v1 above. An install that upgraded
     # across #864 before this fix existed keeps writing the v2 cache
     # forever without ever cleaning up the old-named file it left behind;
-    # this clears it the next time this same REMEMBER_DIR publishes.
-    # Never required for correctness -- a failure here (permissions,
+    # this clears it the next time this same REMEMBER_DIR reaches this
+    # point in publish() -- including when the write above failed, since
+    # the cleanup targets only the fixed v1 path and is harmless either
+    # way. Never required for correctness -- a failure here (permissions,
     # already gone, concurrent run) is silently ignored, same as every
     # other failure path in this function.
     local _f_v1
