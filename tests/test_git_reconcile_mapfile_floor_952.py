@@ -26,10 +26,11 @@ Two layers, same shape as test_printf_v_empty_format_898.py:
   lacks `mapfile` -- a "the file was restored" assertion on an interpreter
   that has `mapfile` proves nothing about the floor.
 
-The module-level win32 skip is imported, not redefined, from
-test_git_reconcile_903 -- this is the identical hook, the identical
-"bash subprocess, not portable to Windows" reasoning, not a new blanket skip
-that would need its own docs/windows-skip-triage.md row.
+The module-level win32 skip below carries the same reason string and
+verdict as test_git_reconcile_903's own (whose fixtures this module
+imports and reuses directly) -- same shape as this doc's other
+"same reason string and same verdict" rows, see
+docs/windows-skip-triage.md.
 """
 
 from __future__ import annotations
@@ -68,7 +69,16 @@ HOOK = REPO_ROOT / "hooks.d" / "after_save" / "60-git-reconcile.sh"
 # `mapfile` (or its `readarray` alias) as a bare command word -- the bash 4.0+
 # builtin this floor does not have. Excludes a path/word that merely
 # CONTAINS the substring (e.g. a comment mentioning "mapfile" by name).
-_MAPFILE_CALL = re.compile(r"(?:^|[;&|(]|\bthen\b|\bdo\b)\s*(?:mapfile|readarray)\b")
+# Review finding (two independent reviewers, same gap): the anchor set
+# originally covered only `;`/`&`/`|`/`(`/`then`/`do` -- missing `else`,
+# `elif`, `{`, `}`, `)` (a `case` branch), and `!`/`||`/`&&` run straight
+# into the keyword with no separating whitespace captured above. Widened
+# to every shell command-start token this repo's own shell actually uses,
+# not just the ones the three real call sites in this commit happened to
+# use.
+_MAPFILE_CALL = re.compile(
+    r"(?:^|[;&|(){}!]|\b(?:then|do|else|elif)\b)\s*(?:mapfile|readarray)\b"
+)
 
 
 def _shipped_shell() -> list:
@@ -84,6 +94,12 @@ def test_the_guard_pattern_matches_the_defect_shape():
     """Positive control for the static guard below."""
     assert _MAPFILE_CALL.search('    mapfile -t _grc_existing < <(cmd)')
     assert _MAPFILE_CALL.search("if true; then readarray -t X < <(cmd); fi")
+    # Review finding (two independent reviewers): the original anchor set
+    # missed these real shell command-start shapes.
+    assert _MAPFILE_CALL.search("else mapfile -t X < <(cmd)")
+    assert _MAPFILE_CALL.search("elif mapfile -t X < <(cmd); then")
+    assert _MAPFILE_CALL.search("pat) mapfile -t X < <(cmd) ;;")
+    assert _MAPFILE_CALL.search("{ mapfile -t X < <(cmd); }")
     assert not _MAPFILE_CALL.search("# mapfile is a bash 4+ builtin, avoid it")
     assert not _MAPFILE_CALL.search('log "git-reconcile" "about mapfile semantics"')
 
