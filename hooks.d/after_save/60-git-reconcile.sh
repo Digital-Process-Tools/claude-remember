@@ -20,13 +20,16 @@
 #     - ahead AND behind (diverged): rebases local commits onto the remote
 #       tip and pushes, with one retry if the remote moved again between the
 #       fetch and the push
-#     - a conflict during the rebase: ABORTS the rebase and reports the
+#     - a conflict during the rebase: drops the rebase state and resets
+#       ONLY this run's own slug subtree back to its pre-rebase content
+#       (git rebase --quit + a scoped checkout, #943 -- NOT git rebase
+#       --abort, which resets the whole tracked tree), then reports the
 #       conflicting file names through a git-reconcile-notice the same way
-#       50-git-restore.sh's diverged notice works. Nothing else changes,
-#       UNLESS a different slug sharing this REPO_ROOT landed a tracked
-#       write of its own while the rebase was in flight -- the abort would
-#       otherwise discard that write too (#939), so it is copied out,
-#       the abort runs as normal, and the write is restored afterward.
+#       50-git-restore.sh's diverged notice works. A different slug
+#       sharing this REPO_ROOT that landed a tracked write of its own
+#       while the rebase was in flight is never touched, at any point,
+#       because nothing outside this run's own slug subtree is ever
+#       named by the reset.
 #
 #   Never resets, never force-pushes, never creates a merge commit -- there is
 #   no `reset --hard`, `push --force` or `merge` (non-ff-only) anywhere in
@@ -464,6 +467,24 @@ _grc_bump_ndc_gen() {
             && git -C "$REPO_ROOT" symbolic-ref HEAD "refs/heads/$BRANCH_NAME" >/dev/null 2>&1 \
             && git -C "$REPO_ROOT" checkout HEAD -- "$SLUG" >/dev/null 2>&1; then
             _checkout_ok=1
+            # Review finding: `checkout <tree-ish> -- <pathspec>` only ever
+            # restores a path that EXISTS in <tree-ish> -- it never removes
+            # a path present in the index/working tree but absent from it.
+            # Reproduced: a conflict where the upstream side being rebased
+            # onto has its OWN earlier commit adding a new file under
+            # $SLUG/ (no local commit involved at all) leaves that file
+            # checked into the index as "A" (added) once the rebase sets
+            # up that new base to replay onto -- `git rebase --quit` does
+            # not touch it, and the checkout above does not remove it,
+            # since HEAD's own pre-rebase tree never had it either. `git
+            # rebase --abort` would have pruned it (it is a full `reset
+            # --hard` across the whole tree); this scoped sequence must
+            # prune it too, but ONLY within $SLUG/ -- never touching a
+            # foreign path is still the entire point of #943.
+            while IFS= read -r _grc_added; do
+                [ -n "$_grc_added" ] || continue
+                git -C "$REPO_ROOT" rm -f -q -- "$_grc_added" >/dev/null 2>&1 || _checkout_ok=0
+            done < <(git -C "$REPO_ROOT" diff --name-only --diff-filter=A HEAD -- "$SLUG" 2>/dev/null)
         fi
 
         if [ "$_quit_ok" -eq 0 ] && _grc_rebase_in_progress; then

@@ -597,6 +597,69 @@ class TestScopedAbort:
             "the quit's own failure must be surfaced in the log"
         )
 
+    def test_file_added_by_the_upstream_side_before_the_conflict_is_pruned(self, tmp_path):
+        """Review finding (Explore, self-review of #943): `git checkout
+        <tree> -- <pathspec>` only ever RESTORES a path that exists in
+        <tree> -- it never REMOVES a path present in the index/working
+        tree but absent from it. The upstream side being rebased onto can
+        have its own earlier commit that cleanly adds a new file under
+        $SLUG/ before a later commit conflicts; once the rebase sets up
+        that new base to replay onto, the new file is already checked
+        into the index as an ADDITION relative to this run's own
+        pre-rebase HEAD. `git rebase --quit` does not touch it, and the
+        scoped checkout does not remove it either, since HEAD's own
+        pre-rebase tree never had it -- unlike `git rebase --abort`
+        (effectively a `reset --hard` across the whole tree), which would
+        have pruned it. Left unpruned, that stray addition reads as
+        test-slug/'s own untouched content and gets silently committed by
+        the very next ordinary save."""
+        home, remember, remote, slug_dir, project = _store(tmp_path)
+
+        other = tmp_path / "other-machine"
+        subprocess.run(["git", "clone", "-q", "-b", "main", str(remote), str(other)],
+                       check=True, capture_output=True)
+        _git(other, ["config", "user.email", "other@test"])
+        _git(other, ["config", "user.name", "Other"])
+        # First commit on the upstream side: a clean addition under
+        # test-slug/ -- no conflict with anything local.
+        (other / "test-slug" / "added-upstream.md").write_text(
+            "added by the upstream side\n", encoding="utf-8")
+        _git(other, ["add", "-A"])
+        _git(other, ["commit", "-q", "-m", "upstream adds a new file"])
+        # Second commit on the upstream side: conflicts with the local
+        # edit to now.md made below.
+        (other / "test-slug" / "now.md").write_text(
+            "## 10:00 | test\nFROM THE OTHER MACHINE\n", encoding="utf-8")
+        _git(other, ["add", "-A"])
+        _git(other, ["commit", "-q", "-m", "other machine edit (conflicts)"])
+        _git(other, ["push", "-q", "origin", "main"])
+
+        (slug_dir / "now.md").write_text(
+            "## 10:00 | test\nFROM THIS MACHINE\n", encoding="utf-8")
+        _git(remember, ["add", "-A"])
+        _git(remember, ["commit", "-q", "-m", "this machine edit"])
+        local_head = _head(remember)
+
+        cfg = _enabled_config(tmp_path)
+        _run(slug_dir, project, home, cfg)
+        _wait_quiesce(remember)
+
+        assert _head(remember) == local_head, (
+            "a conflicting rebase changed HEAD -- it must abort and leave "
+            "the tree exactly as it was"
+        )
+        assert not (slug_dir / "added-upstream.md").exists(), (
+            "a file added by the UPSTREAM side's own earlier commit, "
+            "never part of this run's pre-rebase HEAD, was left behind "
+            "as a stray tracked addition after the scoped abort"
+        )
+        status = subprocess.run(
+            ["git", "-C", str(remember), "status", "--porcelain"],
+            capture_output=True, text=True, check=False).stdout
+        assert status == "", (
+            f"the tree must be exactly clean after the abort, got: {status!r}"
+        )
+
     def test_scoped_checkout_failure_is_reported_honestly(self, tmp_path):
         """The scoped `git checkout HEAD -- "$SLUG"` that restores
         $SLUG/'s own pre-rebase content is the second step with an exit
