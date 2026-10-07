@@ -310,6 +310,21 @@ _remember_cfg_flatten_cache_path() {
     printf '%s' "${TMPDIR:-/tmp}/remember-config-cache-v2-${_slug}"
 }
 
+# #888: the OLD (pre-#864) cache name, built with the exact same slug
+# derivation as _remember_cfg_flatten_cache_path above, minus the `-v2-`
+# that function now always writes. Nothing in this codebase ever opens a
+# file at this path -- it exists only so
+# _remember_cfg_flatten_cache_publish below can best-effort remove the one
+# left behind by an install upgrading from <=0.38.0, where #864 bumped the
+# on-disk name without ever cleaning up the file the old name wrote.
+_remember_cfg_flatten_cache_path_v1() {
+    local LC_ALL=C
+    [ -n "${REMEMBER_DIR:-}" ] || return 1
+    local _slug="${REMEMBER_DIR//[!a-zA-Z0-9]/-}"
+    [ "${#_slug}" -gt 120 ] && _slug="${_slug: -120}"
+    printf '%s' "${TMPDIR:-/tmp}/remember-config-cache-${_slug}"
+}
+
 _remember_cfg_flatten_cache_sources() {
     printf '%s\n' "${PIPELINE_DIR:-}/config.json"
     printf '%s\n' "${HOME:-}/.remember/config.json"
@@ -605,6 +620,17 @@ _remember_cfg_flatten_cache_publish() {
         done <<< "$_dump"
     } > "$_t" 2>/dev/null || { rm -f "$_t" 2>/dev/null; return 0; }
     mv -f "$_t" "$_f" 2>/dev/null || rm -f "$_t" 2>/dev/null
+    # #888: best-effort, one-time removal of the pre-#864 orphan at
+    # _remember_cfg_flatten_cache_path_v1 above. An install that upgraded
+    # across #864 before this fix existed keeps writing the v2 cache
+    # forever without ever cleaning up the old-named file it left behind;
+    # this clears it the next time this same REMEMBER_DIR publishes.
+    # Never required for correctness -- a failure here (permissions,
+    # already gone, concurrent run) is silently ignored, same as every
+    # other failure path in this function.
+    local _f_v1
+    _f_v1=$(_remember_cfg_flatten_cache_path_v1 2>/dev/null) && [ -n "$_f_v1" ] \
+        && [ -f "$_f_v1" ] && rm -f "$_f_v1" 2>/dev/null
     return 0
 }
 

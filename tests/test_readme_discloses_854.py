@@ -42,7 +42,11 @@ _REQUIRED_NAMES = [
     # #857: the persistent caches, not just the per-save temp files sharing the
     # remember-* prefix.
     "remember-env-",
-    "remember-config-cache-",
+    # #888: require the real on-disk name (v2, since #864), not merely the
+    # shared prefix -- a substring match on "remember-config-cache-" alone
+    # passed just as well when README named the pre-#864 filename, which is
+    # exactly the drift this issue was filed about.
+    "remember-config-cache-v2-",
     "remember-detect-tools-cache",
     # CLAUDE_CODE_OAUTH_TOKEN deliberately NOT required here any more (#860,
     # round 2): the directory's security scan holds "reads a credential
