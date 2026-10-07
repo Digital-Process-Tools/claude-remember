@@ -1,13 +1,16 @@
 import os
+import re
 import sys
 from ._tz import time_str, today_str
 from .types import TokenUsage
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 def _log_path(log_dir: str) -> str:
     os.makedirs(log_dir, exist_ok=True)
     return os.path.join(log_dir, f"memory-{today_str()}.log")
 def _timestamp() -> str:
     return time_str()
 def log(component: str, message: str, log_dir: str) -> None:
+    message = _CONTROL_CHARS.sub(" ", message)
     line = f"{_timestamp()} [{component}] {message}\n"
     try:
         with open(_log_path(log_dir), "a", encoding="utf-8") as f:

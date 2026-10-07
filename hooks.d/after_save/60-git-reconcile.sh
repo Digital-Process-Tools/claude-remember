@@ -5,6 +5,9 @@ set -u  # not -e -- we never want to fail loudly here
 source "$PIPELINE_DIR/scripts/log.sh"
 source "$PIPELINE_DIR/scripts/lib-lock.sh"
 
+report_error "git-reconcile" "disabled pending #969 (destroys-class TOCTOU race); tracking issue has the real fix"
+exit 0
+
 RECONCILE_ENABLED=$(config ".git_reconcile.enabled" "false")
 [ "$RECONCILE_ENABLED" = "true" ] || exit 0
 
@@ -185,14 +188,17 @@ _grc_bump_ndc_gen() {
     }
 
     _grc_rebase_in_progress() {
-        local _rd1 _rd2
-        _rd1=$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-path rebase-merge 2>/dev/null) || _rd1=""
-        _rd2=$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-path rebase-apply 2>/dev/null) || _rd2=""
-        if [ -n "$_rd1" ] && [ -d "$_rd1" ]; then
+        local _rd1 _rd2 _rc1 _rc2
+        _rd1=$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-path rebase-merge 2>/dev/null); _rc1=$?
+        _rd2=$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-path rebase-apply 2>/dev/null); _rc2=$?
+        if [ "$_rc1" -eq 0 ] && [ -n "$_rd1" ] && [ -d "$_rd1" ]; then
             return 0
         fi
-        if [ -n "$_rd2" ] && [ -d "$_rd2" ]; then
+        if [ "$_rc2" -eq 0 ] && [ -n "$_rd2" ] && [ -d "$_rd2" ]; then
             return 0
+        fi
+        if [ "$_rc1" -ne 0 ] || [ "$_rc2" -ne 0 ]; then
+            return 2
         fi
         return 1
     }
@@ -213,8 +219,51 @@ _grc_bump_ndc_gen() {
         done
     }
 
+    _grc_compute_touched_paths() {
+        local _local_tip="$1" _remote_tip="$2" _mb
+        _mb=$(git -C "$REPO_ROOT" merge-base "$_local_tip" "$_remote_tip" 2>/dev/null) || _mb=""
+        if [ -z "$_mb" ]; then
+            log "git-reconcile" "WARNING: could not compute a merge-base for the touched-paths restore scope -- falling back to $SLUG only (the pre-#952 scope). If a conflict happens now, another slug's own content may be left exactly as the rebase's new base put it."
+            printf '%s\n' "$SLUG"
+            return
+        fi
+        { git -C "$REPO_ROOT" diff --name-only "$_mb" "$_local_tip" -- 2>/dev/null
+          git -C "$REPO_ROOT" diff --name-only "$_mb" "$_remote_tip" -- 2>/dev/null
+        } | sort -u
+    }
+
+    _grc_path_hash() {
+        local _grc_hp="$1"
+        if [ -f "$REPO_ROOT/$_grc_hp" ]; then
+            git hash-object -- "$REPO_ROOT/$_grc_hp" 2>/dev/null || printf '%s' "HASH-ERROR"
+        else
+            printf '%s' "ABSENT"
+        fi
+    }
+
     _grc_report_conflict() {
         local _files="$1" _attempt="$2" _msg_extra _foreign _quit_ok _checkout_ok
+        local _head_name_path _actual_branch _branch_mismatch _rip_rc
+
+        _head_name_path=$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-path rebase-merge 2>/dev/null) || _head_name_path=""
+        if [ -z "$_head_name_path" ] || [ ! -f "$_head_name_path/head-name" ]; then
+            _head_name_path=$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-path rebase-apply 2>/dev/null) || _head_name_path=""
+        fi
+        _actual_branch=""
+        if [ -n "$_head_name_path" ] && [ -f "$_head_name_path/head-name" ]; then
+            _actual_branch=$(cat "$_head_name_path/head-name" 2>/dev/null)
+            _actual_branch="${_actual_branch#refs/heads/}"
+        fi
+        _branch_mismatch=""
+        if [ -n "$_actual_branch" ] && [ "$_actual_branch" != "$BRANCH_NAME" ]; then
+            _branch_mismatch="$_actual_branch"
+        fi
+
+        local _grc_prequit_hash=()
+        local _grc_pq_i
+        for ((_grc_pq_i = 0; _grc_pq_i < ${#_GRC_TOUCHED_PATHS[@]}; _grc_pq_i++)); do
+            _grc_prequit_hash[_grc_pq_i]=$(_grc_path_hash "${_GRC_TOUCHED_PATHS[_grc_pq_i]}")
+        done
 
         if git -C "$REPO_ROOT" rebase --quit >/dev/null 2>&1; then
             _quit_ok=1
@@ -223,24 +272,57 @@ _grc_bump_ndc_gen() {
         fi
 
         _checkout_ok=0
-        if [ "$_quit_ok" -eq 1 ] \
-            && git -C "$REPO_ROOT" symbolic-ref HEAD "refs/heads/$BRANCH_NAME" >/dev/null 2>&1 \
-            && git -C "$REPO_ROOT" checkout HEAD -- "$SLUG" >/dev/null 2>&1; then
+        if [ "$_quit_ok" -eq 1 ] && [ -z "$_branch_mismatch" ] \
+            && git -C "$REPO_ROOT" symbolic-ref HEAD "refs/heads/$BRANCH_NAME" >/dev/null 2>&1; then
             _checkout_ok=1
-            while IFS= read -r _grc_added; do
-                [ -n "$_grc_added" ] || continue
-                git -C "$REPO_ROOT" rm -f -q -- "$_grc_added" >/dev/null 2>&1 || _checkout_ok=0
-            done < <(git -C "$REPO_ROOT" diff --name-only --diff-filter=A HEAD -- "$SLUG" 2>/dev/null)
+            if [ "${#_GRC_TOUCHED_PATHS[@]}" -gt 0 ]; then
+                local _grc_safe_paths=()
+                local _grc_sp_i _grc_now_hash
+                for ((_grc_sp_i = 0; _grc_sp_i < ${#_GRC_TOUCHED_PATHS[@]}; _grc_sp_i++)); do
+                    _grc_now_hash=$(_grc_path_hash "${_GRC_TOUCHED_PATHS[_grc_sp_i]}")
+                    if [ "$_grc_now_hash" = "${_grc_prequit_hash[_grc_sp_i]}" ] \
+                        && [ "$_grc_now_hash" != "HASH-ERROR" ] \
+                        && [ "${_grc_prequit_hash[_grc_sp_i]}" != "HASH-ERROR" ]; then
+                        _grc_safe_paths+=("${_GRC_TOUCHED_PATHS[_grc_sp_i]}")
+                    fi
+                done
+                local _grc_existing=()
+                local _grc_exist_line
+                if [ "${#_grc_safe_paths[@]}" -gt 0 ]; then
+                    while IFS= read -r _grc_exist_line || [ -n "$_grc_exist_line" ]; do
+                        [ -n "$_grc_exist_line" ] && _grc_existing+=("$_grc_exist_line")
+                    done < <(git -C "$REPO_ROOT" ls-tree -r --name-only HEAD -- "${_grc_safe_paths[@]}" 2>/dev/null)
+                fi
+                if [ "${#_grc_existing[@]}" -gt 0 ]; then
+                    git -C "$REPO_ROOT" checkout HEAD -- "${_grc_existing[@]}" >/dev/null 2>&1 || _checkout_ok=0
+                fi
+                if [ "${#_grc_safe_paths[@]}" -gt 0 ]; then
+                    while IFS= read -r _grc_added; do
+                        [ -n "$_grc_added" ] || continue
+                        git -C "$REPO_ROOT" rm -f -q -- "$_grc_added" >/dev/null 2>&1 || _checkout_ok=0
+                    done < <(git -C "$REPO_ROOT" diff --name-only --diff-filter=A HEAD -- "${_grc_safe_paths[@]}" 2>/dev/null)
+                fi
+            fi
         fi
 
-        if [ "$_quit_ok" -eq 0 ] && _grc_rebase_in_progress; then
-            _msg_extra="git rebase --quit itself FAILED -- the rebase is still in progress and conflict markers are still in the tree"
+        if [ -n "$_branch_mismatch" ]; then
+            _msg_extra="the rebase was started from branch '$_branch_mismatch', not the configured/detected '$BRANCH_NAME' -- refusing to guess which branch to restore HEAD to. HEAD and every touched path were left exactly as the rebase left them; resolve by hand"
+        elif [ "$_quit_ok" -eq 0 ]; then
+            _grc_rebase_in_progress
+            _rip_rc=$?
+            if [ "$_rip_rc" -eq 0 ]; then
+                _msg_extra="git rebase --quit itself FAILED -- the rebase is still in progress and conflict markers are still in the tree"
+            elif [ "$_rip_rc" -eq 2 ]; then
+                _msg_extra="git rebase --quit itself FAILED, and whether the rebase is still in progress could not be determined (the git check itself failed) -- check $REPO_ROOT by hand, conflict markers may still be in the tree"
+            else
+                _msg_extra="git rebase --quit itself FAILED"
+            fi
         elif [ "$_checkout_ok" -eq 0 ]; then
-            _msg_extra="the rebase state was cleared, but restoring $SLUG/'s own pre-rebase content FAILED -- check $SLUG/ by hand, it may still carry conflict markers"
+            _msg_extra="the rebase state was cleared, but restoring the pre-rebase content FAILED -- check $REPO_ROOT by hand, it may still carry conflict markers"
         else
             _foreign=$(_grc_foreign_changes)
             if [ -n "$_foreign" ]; then
-                _msg_extra="aborted; a concurrent write that landed outside $SLUG/ while the rebase was in flight (${_foreign//$'\n'/; }) was never touched -- only $SLUG/ was reset"
+                _msg_extra="aborted; a concurrent write that landed outside this run's own rebase while it was in flight (${_foreign//$'\n'/; }) was never touched -- only the rebase's own paths were reset"
             else
                 _msg_extra="aborted, the tree is unchanged"
             fi
@@ -253,12 +335,23 @@ _grc_bump_ndc_gen() {
         echo 1 > "$CONFLICT_STATE_FILE" 2>/dev/null || true
     }
 
-    if _grc_rebase_in_progress; then
+    _grc_rebase_in_progress
+    _grc_rip_rc=$?
+    if [ "$_grc_rip_rc" -eq 0 ]; then
         log "git-reconcile" "declined: a rebase (or merge/cherry-pick) is already in progress in $REPO_ROOT and it is NOT this run's own -- .git/rebase-merge or rebase-apply already existed before this reconcile attempt started. Most likely someone is resolving a real conflict by hand right now. Nothing was touched -- finish or abort it yourself: git -C ${_dq}$REPO_ROOT${_dq} rebase --continue (or --abort)."
+        exit 0
+    elif [ "$_grc_rip_rc" -eq 2 ]; then
+        log "git-reconcile" "declined: could not determine whether a rebase (or merge/cherry-pick) is already in progress in $REPO_ROOT -- the git check itself failed (not merely 'no rebase found'). Treating it as in progress out of caution. Nothing was touched."
         exit 0
     fi
 
-    git -C "$REPO_ROOT" rebase "$REMOTE_REF" >/dev/null 2>/dev/null
+    PRE_REBASE_HEAD=$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null) || PRE_REBASE_HEAD=""
+    _GRC_TOUCHED_PATHS=()
+    _grc_touched_line=""
+    while IFS= read -r _grc_touched_line || [ -n "$_grc_touched_line" ]; do
+        [ -n "$_grc_touched_line" ] && _GRC_TOUCHED_PATHS+=("$_grc_touched_line")
+    done < <(_grc_compute_touched_paths "$PRE_REBASE_HEAD" "$REMOTE_REF")
+    git -C "$REPO_ROOT" rebase --no-autostash "$REMOTE_REF" >/dev/null 2>/dev/null
     REBASE_RC=$?
     if [ "$REBASE_RC" -eq 0 ]; then
         _grc_bump_ndc_gen
@@ -270,11 +363,22 @@ _grc_bump_ndc_gen() {
         git -C "$REPO_ROOT" -c core.askPass= fetch --quiet --no-tags -- "$REMOTE_NAME" "$BRANCH_NAME" >/dev/null 2>&1
         REMOTE_HEAD2=$(git -C "$REPO_ROOT" rev-parse --verify --quiet "$REMOTE_REF" 2>/dev/null) || REMOTE_HEAD2=""
         if [ -n "$REMOTE_HEAD2" ]; then
-            if _grc_rebase_in_progress; then
+            _grc_rebase_in_progress
+            _grc_rip_rc=$?
+            if [ "$_grc_rip_rc" -eq 0 ]; then
                 log "git-reconcile" "declined: a rebase (or merge/cherry-pick) is already in progress in $REPO_ROOT and it is NOT this run's own -- .git/rebase-merge or rebase-apply already existed before this retry could start. Nothing was touched -- finish or abort it yourself: git -C ${_dq}$REPO_ROOT${_dq} rebase --continue (or --abort)."
                 exit 0
+            elif [ "$_grc_rip_rc" -eq 2 ]; then
+                log "git-reconcile" "declined: could not determine whether a rebase (or merge/cherry-pick) is already in progress in $REPO_ROOT before this retry -- the git check itself failed. Treating it as in progress out of caution. Nothing was touched."
+                exit 0
             fi
-            git -C "$REPO_ROOT" rebase "$REMOTE_REF" >/dev/null 2>/dev/null
+            PRE_REBASE_HEAD=$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null) || PRE_REBASE_HEAD=""
+            _GRC_TOUCHED_PATHS=()
+            _grc_touched_line=""
+            while IFS= read -r _grc_touched_line || [ -n "$_grc_touched_line" ]; do
+                [ -n "$_grc_touched_line" ] && _GRC_TOUCHED_PATHS+=("$_grc_touched_line")
+            done < <(_grc_compute_touched_paths "$PRE_REBASE_HEAD" "$REMOTE_REF")
+            git -C "$REPO_ROOT" rebase --no-autostash "$REMOTE_REF" >/dev/null 2>/dev/null
             REBASE_RC2=$?
             [ "$REBASE_RC2" -eq 0 ] && _grc_bump_ndc_gen
             if [ "$REBASE_RC2" -eq 0 ] && git -C "$REPO_ROOT" push --porcelain -- "$REMOTE_NAME" "$BRANCH_NAME" >/dev/null 2>/dev/null; then
@@ -282,17 +386,28 @@ _grc_bump_ndc_gen() {
                 rm -f "$CONFLICT_STATE_FILE" 2>/dev/null || true
                 exit 0
             fi
-            if [ "$REBASE_RC2" -ne 0 ] && _grc_rebase_in_progress; then
-                _grc_report_conflict "$(_grc_conflict_files)" retry
-                exit 0
+            if [ "$REBASE_RC2" -ne 0 ]; then
+                _grc_rebase_in_progress
+                _grc_rip_rc=$?
+                if [ "$_grc_rip_rc" -eq 0 ]; then
+                    _grc_report_conflict "$(_grc_conflict_files)" retry
+                    exit 0
+                elif [ "$_grc_rip_rc" -eq 2 ]; then
+                    log "git-reconcile" "WARNING: rebase retry on $REMOTE_REF failed in $REPO_ROOT, and whether a rebase was left in progress could not be determined -- the git check itself failed. Check $REPO_ROOT by hand, it may still carry conflict markers."
+                    exit 0
+                fi
             fi
         fi
         log "git-reconcile" "push deferred after retry (will try again next save) -- $REMOTE_NAME/$BRANCH_NAME moved again or the transport was unreachable"
         exit 0
     fi
 
-    if _grc_rebase_in_progress; then
+    _grc_rebase_in_progress
+    _grc_rip_rc=$?
+    if [ "$_grc_rip_rc" -eq 0 ]; then
         _grc_report_conflict "$(_grc_conflict_files)" first-attempt
+    elif [ "$_grc_rip_rc" -eq 2 ]; then
+        log "git-reconcile" "WARNING: git rebase on $REMOTE_REF failed in $REPO_ROOT, and whether a rebase was left in progress could not be determined -- the git check itself failed. Check $REPO_ROOT by hand, it may still carry conflict markers."
     else
         log "git-reconcile" "WARNING: git rebase on $REMOTE_REF failed to start in $REPO_ROOT -- no-op, nothing was changed. Run it by hand to see git's own reason."
     fi

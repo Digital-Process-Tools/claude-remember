@@ -292,12 +292,23 @@ if [ "$AHEAD" -gt 0 ] && [ "$BEHIND" -gt 0 ]; then
     _count=$((10#$_count + 1))
     echo "$_count" > "$DIVERGED_STATE_FILE" 2>/dev/null || true
 
-    log "git-restore" "ERROR: the memory store has DIVERGED -- $AHEAD local commit(s) the remote does not have, $BEHIND remote commit(s) this machine does not have (consecutive session starts in this state: $_count). NOT restored, and nothing here will merge or rebase for you: recent.md and archive.md are rewritten wholesale by consolidation, so a wrong automatic resolution would corrupt memory silently. Resolve it by hand: git -C ${_dq}$REPO_ROOT${_dq} log --oneline --left-right ${_dq}HEAD...$REMOTE_REF${_dq}"
+    RECONCILE_ENABLED=$(config '.git_reconcile.enabled' 'false')
+
+    if [ "$RECONCILE_ENABLED" = "true" ]; then
+        log "git-restore" "ERROR: the memory store has DIVERGED -- $AHEAD local commit(s) the remote does not have, $BEHIND remote commit(s) this machine does not have (consecutive session starts in this state: $_count). NOT restored by this session-start check, but git_reconcile.enabled is on, so the next after_save run (60-git-reconcile.sh) may rebase and push this automatically -- it has not happened yet, so do not act on this by hand until you have checked whether it already resolved itself: git -C ${_dq}$REPO_ROOT${_dq} log --oneline --left-right ${_dq}HEAD...$REMOTE_REF${_dq}"
+    else
+        log "git-restore" "ERROR: the memory store has DIVERGED -- $AHEAD local commit(s) the remote does not have, $BEHIND remote commit(s) this machine does not have (consecutive session starts in this state: $_count). NOT restored, and nothing here will merge or rebase for you: recent.md and archive.md are rewritten wholesale by consolidation, so a wrong automatic resolution would corrupt memory silently. Resolve it by hand: git -C ${_dq}$REPO_ROOT${_dq} log --oneline --left-right ${_dq}HEAD...$REMOTE_REF${_dq}"
+    fi
 
     if [ "$DIVERGED_NOTICE_AFTER" -gt 0 ] && [ "$_count" -eq "$DIVERGED_NOTICE_AFTER" ]; then
         mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null || true
-        printf '%s\n' "remember: your memory store has DIVERGED from its backup remote. $AHEAD commit(s) here are not on the remote and $BEHIND commit(s) there are not here, so the memory loaded this session is missing them -- and the backup cannot push either. Nothing will be merged or rebased for you. Resolve it by hand: git -C ${_dq}$REPO_ROOT${_dq} log --oneline --left-right HEAD...$REMOTE_NAME/$GIT_RESTORE_BRANCH" \
-            > "$REMEMBER_DIR/tmp/git-restore-notice" 2>/dev/null || true
+        if [ "$RECONCILE_ENABLED" = "true" ]; then
+            printf '%s\n' "remember: your memory store has DIVERGED from its backup remote. $AHEAD commit(s) here are not on the remote and $BEHIND commit(s) there are not here, so the memory loaded this session is missing them -- and the backup cannot push either. git_reconcile.enabled is on, so the next after_save run may rebase and push this automatically -- it has not happened yet, so check whether it already resolved itself before doing anything by hand: git -C ${_dq}$REPO_ROOT${_dq} log --oneline --left-right HEAD...$REMOTE_NAME/$GIT_RESTORE_BRANCH" \
+                > "$REMEMBER_DIR/tmp/git-restore-notice" 2>/dev/null || true
+        else
+            printf '%s\n' "remember: your memory store has DIVERGED from its backup remote. $AHEAD commit(s) here are not on the remote and $BEHIND commit(s) there are not here, so the memory loaded this session is missing them -- and the backup cannot push either. Nothing will be merged or rebased for you. Resolve it by hand: git -C ${_dq}$REPO_ROOT${_dq} log --oneline --left-right HEAD...$REMOTE_NAME/$GIT_RESTORE_BRANCH" \
+                > "$REMEMBER_DIR/tmp/git-restore-notice" 2>/dev/null || true
+        fi
     fi
     _spawn_fetch
     exit 0
@@ -329,7 +340,7 @@ if git -C "$REPO_ROOT" merge --ff-only "$REMOTE_REF" >/dev/null 2>&1; then
             log "git-restore" "restored $_gr_config_rel after this fast-forward adopted a commit that stopped tracking it (#741) -- another machine ran 'git rm --cached' on it during the #719 upgrade; the file is preserved on disk exactly as it was, but stays OUT of the index, matching the new HEAD"
         else
             rm -f "$REPO_ROOT/$_gr_config_rel.restore-tmp" 2>/dev/null || true
-            log "git-restore" "ERROR: this fast-forward adopted a commit that stopped tracking $_gr_config_rel (#741) and restoring its pre-merge content to $REPO_ROOT/$_gr_config_rel FAILED -- check it by hand; if it carried a live haiku.oauth_token, it may now be gone"
+            log "git-restore" "ERROR: this fast-forward adopted a commit that stopped tracking $_gr_config_rel (#741) and restoring its pre-merge content to $REPO_ROOT/$_gr_config_rel FAILED -- check it by hand, it may now be gone"
         fi
     fi
 else
