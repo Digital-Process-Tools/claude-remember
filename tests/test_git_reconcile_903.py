@@ -440,20 +440,26 @@ class TestDivergedReconcile:
         )
 
 
-# ── #942: the #939 fix's own backup/restore/abort must check its own exit
-# status, instead of treating a failed copy as "nothing to restore" and
-# claiming success it did not earn.
+# ── #943: closing the TOCTOU gap the #939/#942 snapshot-and-restore fix
+# could not close, by never letting the abort touch anything outside
+# $SLUG/ in the first place (git rebase --quit + a scoped checkout,
+# instead of git rebase --abort). #942's own exit-status concerns (what
+# if the backup/restore copy fails?) are now moot by construction -- there
+# is no backup or restore step any more to fail -- but the SAME exit-
+# status discipline is re-applied to the new sequence's own two steps
+# (quit, scoped checkout), which is what the tests below cover.
 
 
-class TestBackupRestoreExitStatus:
+class TestScopedAbort:
 
     def _diverged_with_foreign_write(self, tmp_path):
         """Shared setup for every test below: a store with two slugs, a
         real conflict for test-slug, and a concurrent tracked write to
-        other-slug's own file landing before the abort runs -- the same
-        shape as test_concurrent_write_to_another_slugs_file_survives_the_abort
-        above, reused here because the backup/restore/abort machinery is
-        the part under test, not the race itself."""
+        other-slug's own file landing before the scoped-abort sequence
+        runs -- the same shape as
+        test_concurrent_write_to_another_slugs_file_survives_the_abort
+        above, reused here because the abort machinery is the part under
+        test, not the race itself."""
         home, remember, remote, slug_dir, project = _store(tmp_path)
 
         other_slug_dir = remember / "other-slug"
@@ -481,27 +487,27 @@ class TestBackupRestoreExitStatus:
 
         return home, remember, remote, slug_dir, project, other_slug_dir
 
-    def test_backup_copy_failure_is_reported_not_claimed_as_nothing_to_restore(self, tmp_path):
-        """#942 mode "copyfail": the backup `cp -p` that is supposed to
-        carve the foreign write out of git's reach before the abort fails
-        (shimmed here, reproducing a real mkdir/cp failure without racing a
-        $$-dependent path). Before the fix, a failed `cp -p ... || true`
-        read exactly like "nothing to restore" and the hook claimed
-        "aborted, the tree is unchanged" even though the write WAS
-        discarded. The fix must say so honestly instead."""
+    def test_write_in_the_toctou_window_survives_the_scoped_abort(self, tmp_path):
+        """#943: the shim here injects the foreign write immediately before
+        `git rebase --quit` runs -- i.e. in the exact window the #939/#942
+        snapshot-then-abort approach could not close, since the snapshot
+        (_grc_foreign_changes, a `git status --porcelain` call) necessarily
+        runs BEFORE the abort step and cannot see a write that lands after
+        it. The scoped-abort fix never reads or relies on a snapshot taken
+        before the abort at all, so there is nothing for this write to be
+        missing FROM -- it must survive regardless of when it lands."""
         home, remember, _remote, slug_dir, project, other_slug_dir = (
             self._diverged_with_foreign_write(tmp_path))
 
         real_git = shutil.which("git")
-        real_cp = shutil.which("cp")
-        assert real_git and real_cp, "git/cp not on PATH -- fixture assumption broken"
+        assert real_git, "no git on PATH -- fixture assumption broken"
         bin_dir = tmp_path / "shim-bin"
         bin_dir.mkdir()
 
         git_shim = bin_dir / "git"
         git_shim_lines = [
             "#!/bin/sh",
-            'if [ "$1" = "-C" ] && [ "$3" = "diff" ] && [ "$4" = "--name-only" ]; then',
+            'if [ "$1" = "-C" ] && [ "$3" = "rebase" ] && [ "$4" = "--quit" ]; then',
             "    printf '%s\n' \"CONCURRENT WRITE FROM OTHER SLUG\" > \"$RACE_OTHER_SLUG_NOW\"",
             "fi",
             f'exec "{real_git}" "$@"',
@@ -510,43 +516,18 @@ class TestBackupRestoreExitStatus:
         git_shim.write_text("\n".join(git_shim_lines), encoding="utf-8")
         git_shim.chmod(0o755)
 
-        # Fail only the BACKUP copy (destination under a "foreign-backup"
-        # directory) -- the hook's own `cp -p SRC DST` puts SRC at $2, DST
-        # at $3. A restore copy's destination is under $REPO_ROOT instead,
-        # so this never touches that call.
-        cp_shim = bin_dir / "cp"
-        cp_shim_lines = [
-            "#!/bin/sh",
-            'if [ "$1" = "-p" ]; then',
-            '    case "$3" in',
-            "        *foreign-backup*) exit 1 ;;",
-            "    esac",
-            "fi",
-            f'exec "{real_cp}" "$@"',
-            "",
-        ]
-        cp_shim.write_text("\n".join(cp_shim_lines), encoding="utf-8")
-        cp_shim.chmod(0o755)
-
         cfg = _enabled_config(tmp_path)
         _run(slug_dir, project, home, cfg,
              PATH=f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
              RACE_OTHER_SLUG_NOW=str(other_slug_dir / "now.md"))
         _wait_quiesce(remember)
 
-        log_files = list((slug_dir / "logs").glob("memory-*.log"))
-        assert log_files, "hook wrote no log at all"
-        log_text = "\n".join(f.read_text(encoding="utf-8") for f in log_files)
-        assert "unchanged" not in log_text, (
-            "a backup copy that FAILED must never be reported as "
-            "'the tree is unchanged' -- the write was not protected"
-        )
-        assert "restored" not in log_text.lower(), (
-            "nothing was actually restored -- the log must not claim it was"
-        )
-        assert "discard" in log_text.lower() or "could not" in log_text.lower(), (
-            "a failed backup copy must be surfaced, not silently treated "
-            "as nothing to restore"
+        assert (other_slug_dir / "now.md").read_text(encoding="utf-8") == (
+            "CONCURRENT WRITE FROM OTHER SLUG\n"
+        ), (
+            "a write that landed AFTER any snapshot the hook might have "
+            "taken, immediately before the abort sequence runs, was "
+            "discarded -- the exact TOCTOU gap #943 describes"
         )
 
         rebase_merge = subprocess.run(
@@ -554,76 +535,22 @@ class TestBackupRestoreExitStatus:
              "--git-path", "rebase-merge"],
             capture_output=True, text=True, check=False).stdout.strip()
         assert rebase_merge and not Path(rebase_merge).exists(), (
-            "the abort must still run (and succeed) even when the backup "
-            "copy failed -- leaving the rebase stuck is the worse failure "
-            "#939's own commit message already rejected"
+            "the rebase must still be cleanly gone afterward"
         )
-
-    def test_restore_find_failure_keeps_the_backup_instead_of_deleting_it(self, tmp_path):
-        """#942 mode "nofind": `find` (used to walk the backup directory
-        during restore) is shadowed/broken and exits non-zero with no
-        output -- the real-world case cited in the issue is Windows/Git
-        Bash's System32 find.exe shadowing Git's own, per the precedent at
-        save-session.sh:1650 and session-start-hook.sh:2151. Before the
-        fix, the backup directory was `rm -rf`'d regardless of whether
-        anything was actually restored, and the notice claimed a restore
-        that never happened. The fix must keep the backup and say so."""
-        home, remember, _remote, slug_dir, project, other_slug_dir = (
-            self._diverged_with_foreign_write(tmp_path))
-
-        real_git = shutil.which("git")
-        assert real_git, "no git on PATH -- fixture assumption broken"
-        bin_dir = tmp_path / "shim-bin"
-        bin_dir.mkdir()
-
-        git_shim = bin_dir / "git"
-        git_shim_lines = [
-            "#!/bin/sh",
-            'if [ "$1" = "-C" ] && [ "$3" = "diff" ] && [ "$4" = "--name-only" ]; then',
-            "    printf '%s\n' \"CONCURRENT WRITE FROM OTHER SLUG\" > \"$RACE_OTHER_SLUG_NOW\"",
-            "fi",
-            f'exec "{real_git}" "$@"',
-            "",
-        ]
-        git_shim.write_text("\n".join(git_shim_lines), encoding="utf-8")
-        git_shim.chmod(0o755)
-
-        find_shim = bin_dir / "find"
-        find_shim.write_text("#!/bin/sh\nexit 2\n", encoding="utf-8")
-        find_shim.chmod(0o755)
-
-        cfg = _enabled_config(tmp_path)
-        _run(slug_dir, project, home, cfg,
-             PATH=f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
-             RACE_OTHER_SLUG_NOW=str(other_slug_dir / "now.md"))
-        _wait_quiesce(remember)
-
-        # The backup lives under RC_STATE_DIR ($REPO_ROOT's git-common-dir/
-        # remember), NOT under REMEMBER_DIR/tmp (slug_dir/tmp) -- the two
-        # state dirs are deliberately different (store-wide vs. per-slug),
-        # confirmed by reading where the hook actually wrote it.
-        backups = list(remember.glob(".git/remember/tmp/foreign-backup-*"))
-        assert backups, (
-            "the backup directory was deleted even though restoring from "
-            "it never actually ran (find was broken) -- the only copy of "
-            "the concurrent write is now gone"
-        )
-        backed_up = list(backups[0].rglob("now.md"))
-        assert backed_up and backed_up[0].read_text(encoding="utf-8") == (
-            "CONCURRENT WRITE FROM OTHER SLUG\n"
-        ), "the backup copy itself must still hold the foreign write's bytes"
 
         log_files = list((slug_dir / "logs").glob("memory-*.log"))
         log_text = "\n".join(f.read_text(encoding="utf-8") for f in log_files)
-        assert "aborted and restored a concurrent write" not in log_text, (
-            "restoring 0 of N files must never be reported as a successful restore"
+        assert "never touched" in log_text or "restored" in log_text.lower(), (
+            "the surviving foreign write should be named in the log"
         )
 
-    def test_abort_failure_leaves_rebase_stuck_and_is_reported_honestly(self, tmp_path):
-        """#942 related finding, same lines: `git rebase --abort ... || true`
-        ignored its own failure (e.g. a concurrent index.lock). The fix
-        must detect this (via _grc_rebase_in_progress) and report the
-        rebase as still stuck, never as 'aborted, the tree is unchanged'."""
+    def test_quit_failure_leaves_rebase_stuck_and_is_reported_honestly(self, tmp_path):
+        """`git rebase --quit` replaces `git rebase --abort` as the first
+        step. Its own exit status is now what must be checked (#942's
+        exit-status discipline, carried over to the new sequence): a
+        failure there (e.g. a concurrent index.lock) must leave the
+        rebase genuinely stuck and be reported as such, never as
+        'aborted, the tree is unchanged'."""
         home, remember, _remote, slug_dir, project, other_slug_dir = (
             self._diverged_with_foreign_write(tmp_path))
 
@@ -635,10 +562,7 @@ class TestBackupRestoreExitStatus:
         git_shim = bin_dir / "git"
         git_shim_lines = [
             "#!/bin/sh",
-            'if [ "$1" = "-C" ] && [ "$3" = "diff" ] && [ "$4" = "--name-only" ]; then',
-            "    printf '%s\n' \"CONCURRENT WRITE FROM OTHER SLUG\" > \"$RACE_OTHER_SLUG_NOW\"",
-            "fi",
-            'if [ "$1" = "-C" ] && [ "$3" = "rebase" ] && [ "$4" = "--abort" ]; then',
+            'if [ "$1" = "-C" ] && [ "$3" = "rebase" ] && [ "$4" = "--quit" ]; then',
             "    exit 1",
             "fi",
             f'exec "{real_git}" "$@"',
@@ -658,7 +582,7 @@ class TestBackupRestoreExitStatus:
              "--git-path", "rebase-merge"],
             capture_output=True, text=True, check=False).stdout.strip()
         assert rebase_merge and Path(rebase_merge).exists(), (
-            "the shim made the abort itself fail -- the rebase must "
+            "the shim made `rebase --quit` itself fail -- the rebase must "
             "genuinely still be stuck for this test to mean anything"
         )
 
@@ -666,11 +590,55 @@ class TestBackupRestoreExitStatus:
         assert log_files, "hook wrote no log at all"
         log_text = "\n".join(f.read_text(encoding="utf-8") for f in log_files)
         assert "unchanged" not in log_text, (
-            "an abort that FAILED must never be reported as "
+            "a `rebase --quit` that FAILED must never be reported as "
             "'aborted, the tree is unchanged'"
         )
         assert "FAILED" in log_text or "failed" in log_text, (
-            "the abort's own failure must be surfaced in the log"
+            "the quit's own failure must be surfaced in the log"
+        )
+
+    def test_scoped_checkout_failure_is_reported_honestly(self, tmp_path):
+        """The scoped `git checkout HEAD -- "$SLUG"` that restores
+        $SLUG/'s own pre-rebase content is the second step with an exit
+        status that must be checked: a failure there must never be
+        reported as a clean abort, since $SLUG/ may still carry conflict
+        markers."""
+        home, remember, _remote, slug_dir, project, other_slug_dir = (
+            self._diverged_with_foreign_write(tmp_path))
+
+        real_git = shutil.which("git")
+        assert real_git, "no git on PATH -- fixture assumption broken"
+        bin_dir = tmp_path / "shim-bin"
+        bin_dir.mkdir()
+
+        git_shim = bin_dir / "git"
+        git_shim_lines = [
+            "#!/bin/sh",
+            'if [ "$1" = "-C" ] && [ "$3" = "checkout" ] && [ "$4" = "HEAD" ]; then',
+            "    exit 1",
+            "fi",
+            f'exec "{real_git}" "$@"',
+            "",
+        ]
+        git_shim.write_text("\n".join(git_shim_lines), encoding="utf-8")
+        git_shim.chmod(0o755)
+
+        cfg = _enabled_config(tmp_path)
+        _run(slug_dir, project, home, cfg,
+             PATH=f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+             RACE_OTHER_SLUG_NOW=str(other_slug_dir / "now.md"))
+        _wait_quiesce(remember)
+
+        log_files = list((slug_dir / "logs").glob("memory-*.log"))
+        assert log_files, "hook wrote no log at all"
+        log_text = "\n".join(f.read_text(encoding="utf-8") for f in log_files)
+        assert "unchanged" not in log_text, (
+            "a scoped checkout that FAILED must never be reported as "
+            "'aborted, the tree is unchanged' -- test-slug/ may still "
+            "carry conflict markers"
+        )
+        assert "FAILED" in log_text or "failed" in log_text, (
+            "the scoped checkout's own failure must be surfaced in the log"
         )
 
 
