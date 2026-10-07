@@ -507,6 +507,29 @@ _grc_bump_ndc_gen() {
         echo 1 > "$CONFLICT_STATE_FILE" 2>/dev/null || true
     }
 
+    # #946: `_grc_rebase_in_progress` is a pure directory-existence check --
+    # it cannot tell THIS run's own rebase (about to be started below) from
+    # a rebase/merge/cherry-pick already sitting there for some OTHER
+    # reason, most importantly a human mid-way through resolving a real
+    # conflict by hand -- this hook's own notice above literally tells them
+    # to do exactly that ("Resolve by hand: git -C ... rebase ..."). Without
+    # this check, firing again while that resolution is in progress would
+    # have this hook's OWN `git rebase` call below fail with "already in
+    # progress", `_grc_rebase_in_progress` below (the existing post-check
+    # right before the "Rebase itself failed" branch) would then read that
+    # pre-existing state as THIS run's own freshly-conflicted rebase, and
+    # `_grc_report_conflict` would run `rebase --quit` plus the
+    # scoped checkout/rm OVER the human's in-progress, uncommitted work --
+    # discarding it, with zero copies left anywhere (reproduced for real:
+    # a half-typed, never-staged resolution destroyed, and a commit made
+    # mid-resolution left reachable only via the reflog). So this check
+    # MUST run before the rebase call, not after -- checking after can only
+    # ever see "a rebase-merge/rebase-apply directory exists", never WHOSE.
+    if _grc_rebase_in_progress; then
+        log "git-reconcile" "declined: a rebase (or merge/cherry-pick) is already in progress in $REPO_ROOT and it is NOT this run's own -- .git/rebase-merge or rebase-apply already existed before this reconcile attempt started. Most likely someone is resolving a real conflict by hand right now. Nothing was touched -- finish or abort it yourself: git -C ${_dq}$REPO_ROOT${_dq} rebase --continue (or --abort)."
+        exit 0
+    fi
+
     git -C "$REPO_ROOT" rebase "$REMOTE_REF" >/dev/null 2>/dev/null
     REBASE_RC=$?
     if [ "$REBASE_RC" -eq 0 ]; then
@@ -525,6 +548,14 @@ _grc_bump_ndc_gen() {
         git -C "$REPO_ROOT" -c core.askPass= fetch --quiet --no-tags -- "$REMOTE_NAME" "$BRANCH_NAME" >/dev/null 2>&1
         REMOTE_HEAD2=$(git -C "$REPO_ROOT" rev-parse --verify --quiet "$REMOTE_REF" 2>/dev/null) || REMOTE_HEAD2=""
         if [ -n "$REMOTE_HEAD2" ]; then
+            # #946: same guard as the first attempt above, applied here too --
+            # a foreign rebase/merge could just as easily appear in the window
+            # between the first rebase landing/push being rejected and this
+            # retry's own rebase call.
+            if _grc_rebase_in_progress; then
+                log "git-reconcile" "declined: a rebase (or merge/cherry-pick) is already in progress in $REPO_ROOT and it is NOT this run's own -- .git/rebase-merge or rebase-apply already existed before this retry could start. Nothing was touched -- finish or abort it yourself: git -C ${_dq}$REPO_ROOT${_dq} rebase --continue (or --abort)."
+                exit 0
+            fi
             git -C "$REPO_ROOT" rebase "$REMOTE_REF" >/dev/null 2>/dev/null
             REBASE_RC2=$?
             # Same reasoning as the first attempt's bump above: the tree is
