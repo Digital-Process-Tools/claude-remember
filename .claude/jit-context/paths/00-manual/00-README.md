@@ -362,3 +362,49 @@ than an oversight.
   undetermined case should behave like "in progress" or surface its own log line), not a lesson a
   standing rule would teach anyone away from. **Filed as
   [#953](https://github.com/Digital-Process-Tools/claude-remember/issues/953) instead.**
+- **`888.v1-path-substitution-can-hit-tmpdir`** -- declined 2026-10-07. Still true at HEAD:
+  `scripts/log.sh`'s `_remember_cfg_flatten_cache_path_v1()` (line 322) and the inline cleanup in
+  `_remember_cfg_flatten_cache_publish()` (line 625) both still derive the v1 orphan-cache path via
+  a bare `${var/-v2-/-}` substring substitution, unanchored to the slug segment, confirmed by
+  reading both call sites. Declined as a rule because the fix (anchor to the basename) is a
+  two-call-site, one-shape fix, not a generalizable lesson. **Filed as
+  [#972](https://github.com/Digital-Process-Tools/claude-remember/issues/972) instead.**
+- **`913.session-dir-cache-keyed-on-wrong-var`** -- declined 2026-10-07. Still true at HEAD:
+  `scripts/post-tool-hook.sh`'s SESSION_DIR cache still keys on `MEMORY_PROJECT_DIR` (shared across
+  worktrees) while caching a value computed from `$PROJECT` (worktree-specific), confirmed by
+  reading both the key assignment (~line 534) and the value computation (~line 553). Declined as a
+  rule because the fix is a one-line key change at a single cache site, not a generalizable lesson.
+  **Filed as [#973](https://github.com/Digital-Process-Tools/claude-remember/issues/973) instead.**
+- **`918.untrack-receipt-lost-rotate-credential-advice`** -- declined 2026-10-07. Still true at
+  HEAD: `hooks.d/after_save/50-git-backup.sh`'s untrack receipt (~line 627) still has no
+  rotate-the-credential sentence, confirmed by reading the line. Declined as a rule because the fix
+  is restoring one sentence to one log line, not a generalizable lesson. **Filed as
+  [#974](https://github.com/Digital-Process-Tools/claude-remember/issues/974) instead.**
+- **`951.pr960-macos-reconcile-903-not-reproducible-locally`** -- declined 2026-10-07, stale. This
+  fragment investigated a macOS-only CI flake in `tests/test_git_reconcile_903.py` on PR #960
+  (closed, superseded by #962). The file and the hook it tests have both been substantially
+  rewritten since (#966's TOCTOU fix, #969/#970's hard-disable) -- the specific failure signature
+  this fragment described is no longer reproducible against the current tree, and the investigation
+  itself names no generalizable lesson (a reasoned-not-confirmed guess between CI-ordering and a
+  platform git-config quirk). No issue filed; a fresh investigation would need to start from the
+  current tree, not this one's evidence.
+- **`952.diff-name-only-errors-swallowed-checkout-ok-stays-set`**,
+  **`952.quotepath-breaks-restore-set-matching`**, **`953.only-one-call-site-tests-rc2`** and
+  **`966.residual-race`** -- declined together 2026-10-07. All four describe defects in
+  `hooks.d/after_save/60-git-reconcile.sh`'s rebase/restore code, which is now hard-disabled
+  unconditionally (#969/#970) -- the code these four describe is unreached while the kill switch
+  stands, confirmed still present (unreached, not removed) by reading the relevant lines and
+  call sites at HEAD. Declined as individual rules because each is a scoped, single-function fix
+  rather than a generalizable lesson, and consolidated into one pre-re-enable checklist rather than
+  four separate issues since all four gate the same future event (re-enabling this hook). **Filed
+  as [#975](https://github.com/Digital-Process-Tools/claude-remember/issues/975) instead.**
+- **`969.kill-switch-notice-pollutes-hook-errors-log-for-disabled-users`** and
+  **`969.stale-reconcile-prose-not-updated`** -- declined together 2026-10-07. Both still true at
+  HEAD: the kill-switch notice in `60-git-reconcile.sh` still writes to `hook-errors.log`
+  unconditionally for every user before the `git_reconcile.enabled` read (confirmed by reading
+  line 102), and `50-git-backup.sh` / `hooks.d/before_session_start/50-git-restore.sh` still
+  promise the disabled hook will "fetch, rebase and push this automatically" (confirmed by reading
+  both notices). Declined as a rule because both are scoped fallout from one landed change (the
+  #969/#970 hard-disable), not a generalizable lesson, and consolidated into one issue since both
+  share that same root cause. **Filed as
+  [#976](https://github.com/Digital-Process-Tools/claude-remember/issues/976) instead.**
