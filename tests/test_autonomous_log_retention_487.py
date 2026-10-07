@@ -79,6 +79,98 @@ def _write_shell_script(path: Path, text: str) -> None:
         f.write(text)
 
 
+def _bash_path_prepend(dirs) -> str:
+    r"""Builds a bash `:`-joined PATH-prefix string from one or more native
+    directories, meant to be spliced into the SCRIPT TEXT a generated
+    script exports its own `$PATH` from (`export PATH="<this>:$PATH"`) --
+    never into `env["PATH"]`, the dict `_run_bash_script` hands to
+    `subprocess.run` (#951).
+
+    `env["PATH"]` stays Windows-native (`;`-joined, drive-letter paths)
+    right up until CreateProcess hands it to `bash.exe`; whether MSYS's
+    own startup conversion into bash's internal, `:`-joined $PATH
+    succeeds for an entry THIS PROCESS prepended is outside Python's
+    control and not reproducible on a non-Windows runner. The drive
+    letter's own colon is PATH's own separator once that string is
+    POSIX-split, so merely forward-slashing a prepended directory
+    (`_grc_posix`, used elsewhere in this file for the shim's OWN
+    embedded paths -- each a single `open()`/exec target, where a drive
+    letter's colon is harmless) does not help here: locally confirmed
+    (`/tmp` simulation, trap.d/951) that bash's native colon-splitting
+    shreds a `C:\...;C:\...` PATH value and a `C:/...;C:/...` one
+    IDENTICALLY, into components none of which resolve, regardless of
+    slash direction -- which is also why PR #960's two prior attempts
+    (forward-slashing shim content, then fixing shebang newlines) left
+    the symptom byte-for-byte unchanged. The one form with no embedded
+    colon at all is bash's own MSYS convention (`/c/Users/...`), built
+    here in Python and hand-written into the script as literal bash
+    source, so it needs no env-block conversion to already be correct --
+    on every other platform this repo tests on, a path already has no
+    drive letter and this is a no-op forward-slash normalisation.
+    """
+
+    def _to_posix(d) -> str:
+        s = str(d)
+        if len(s) >= 2 and s[1] == ":" and s[0].isalpha():
+            tail = s[2:].replace("\\", "/")
+            if not tail.startswith("/"):
+                tail = "/" + tail
+            return f"/{s[0].lower()}{tail}"
+        return s.replace("\\", "/")
+
+    return ":".join(_to_posix(d) for d in dirs)
+
+
+def test_bash_path_prepend_strips_the_drive_letters_own_colon():
+    """#951: a test that would have caught both prior, reasoned-but-wrong
+    fix attempts in this PR (forward-slashing the shim's own content,
+    then fixing the shim's shebang newline) -- NEITHER touches how PATH
+    is built, which is where the reporter's CI symptom (the shim never
+    invoked at all, not even its own first `echo`) actually originates.
+
+    Platform-independent and runs on every leg -- it exercises
+    `_bash_path_prepend`'s string transform directly, not bash's own
+    MSYS startup conversion, which cannot be reproduced outside a real
+    Windows runner (not something this fix claims to verify; see the
+    PR body for what remains reasoned rather than observed).
+    """
+    # A bare forward-slash of a Windows-native path (the fix ALREADY
+    # shipped, twice, in this same file, for the shim's own embedded
+    # paths and log target) still carries the drive letter's own colon
+    # -- the exact character PATH's own POSIX `:`-splitting treats as a
+    # separator, shredding the value regardless of slash direction.
+    forward_slashed_only = r"C:\Users\runneradmin\AppData\Local\Temp\x".replace("\\", "/")
+    assert ":" in forward_slashed_only, (
+        "fixture assumption broken -- a forward-slashed Windows path is "
+        "expected to still carry the drive letter's colon"
+    )
+
+    posix = _bash_path_prepend([r"C:\Users\runneradmin\AppData\Local\Temp\remember-mktemp-marker-abc"])
+    assert posix == "/c/Users/runneradmin/AppData/Local/Temp/remember-mktemp-marker-abc", (
+        f"expected the MSYS-style posix form with no embedded colon, got {posix!r}"
+    )
+    assert ":" not in posix, (
+        "#951: a colon survived the conversion -- PATH's own separator "
+        f"would still shred this value under bash's native splitting: {posix!r}"
+    )
+
+    # Must fire: a path that already has no drive letter (every path on
+    # macOS/Linux, where this repo's own CI legs run this same helper)
+    # is a no-op forward-slash normalisation, not mangled by the
+    # drive-letter branch -- a positive control pairing the negative
+    # assertions above, per this repo's own testing rule.
+    already_posix = _bash_path_prepend(["/tmp/already/posix/dir"])
+    assert already_posix == "/tmp/already/posix/dir", (
+        f"a path with no drive letter must pass through unchanged, got {already_posix!r}"
+    )
+
+    multi = _bash_path_prepend([r"C:\a", r"C:\b"])
+    assert multi == "/c/a:/c/b", (
+        f"multiple directories must join with ':' once each is already "
+        f"colon-free, got {multi!r}"
+    )
+
+
 def _run_bash_script(script: str, env: dict, *, timeout: int = 30):
     """Runs `script` under BASH by writing it to a real file and invoking
     `bash <path>`, never `bash -c "<script>"` (#914 self-review, PR #927
@@ -780,8 +872,13 @@ class TestHousekeepingSweepIsForkFree:
         retention_days: int = 7, bin_dir: Path, counter: Path,
     ):
         block = TestHousekeepingGlobIsPortableAcrossSeparators._extract_housekeeping_block()
+        # #951: PATH is prepended inside the SCRIPT ITSELF via
+        # `_bash_path_prepend`, not through `env["PATH"]` -- see that
+        # helper's own docstring for why an env-level prepend cannot be
+        # trusted to survive MSYS's win32->posix conversion on Windows.
         script = f"""
 set -u
+export PATH="{_bash_path_prepend([bin_dir])}:$PATH"
 config() {{ printf '%s\n' '{retention_days}'; }}
 log() {{ :; }}
 _remember_date() {{ date "$@"; }}
@@ -789,7 +886,6 @@ REMEMBER_DIR={shlex.quote(remember_dir)}
 {block}
 """
         env = dict(os.environ)
-        env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
         env["REMEMBER_FORK_COUNTER"] = str(counter)
         result = _run_bash_script(script, env)
         assert result.returncode == 0, (
@@ -935,8 +1031,25 @@ class TestHousekeepingSweepFallbackAndEdgeCases:
         )
         marker_shim.chmod(0o755)
 
+        path_dirs = [marker_bin]
+        if extra_path_dir is not None:
+            # Ahead of the marker shim: a caller forcing the fallback via
+            # its own broken mktemp must still win over this shim, the
+            # same way it already wins over the real binary.
+            path_dirs.insert(0, extra_path_dir)
+        # #951: PATH is prepended inside the SCRIPT ITSELF via
+        # `_bash_path_prepend`, not through `env["PATH"]` -- an
+        # env-level prepend of a native, drive-lettered directory is not
+        # trustworthy on Windows: see that helper's own docstring for why
+        # (bash's native colon-splitting of the resulting PATH value
+        # shreds it on the drive letter's own colon, independent of
+        # slash direction, which the two PREVIOUS fix attempts on this
+        # PR -- forward-slashing the shim content, then fixing the
+        # shebang's newline -- could never have touched, since neither
+        # changed how PATH itself was built).
         script = f"""
 set -u
+export PATH="{_bash_path_prepend(path_dirs)}:$PATH"
 config() {{ printf '%s\n' {shlex.quote(str(retention_days))}; }}
 log() {{ :; }}
 _remember_date() {{ date "$@"; }}
@@ -946,13 +1059,6 @@ REMEMBER_DIR={shlex.quote(remember_dir)}
 """
         env = dict(os.environ)
         env["MKTEMP_SHIM_LOG"] = _grc_posix(marker_log)
-        path_dirs = [str(marker_bin)]
-        if extra_path_dir is not None:
-            # Ahead of the marker shim: a caller forcing the fallback via
-            # its own broken mktemp must still win over this shim, the
-            # same way it already wins over the real binary.
-            path_dirs.insert(0, str(extra_path_dir))
-        env["PATH"] = os.pathsep.join(path_dirs + [env.get("PATH", "")])
         result = _run_bash_script(script, env)
         result.mktemp_shim_log = (
             marker_log.read_text(encoding="utf-8") if marker_log.exists() else ""
