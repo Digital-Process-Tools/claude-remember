@@ -557,8 +557,18 @@ _grc_bump_ndc_gen() {
                 # the touched-paths list down to only what HEAD actually
                 # has, before checkout ever runs, so a freshly-added path
                 # no longer poisons the restore of every other one.
-                local _grc_existing
-                mapfile -t _grc_existing < <(git -C "$REPO_ROOT" ls-tree -r --name-only HEAD -- "${_GRC_TOUCHED_PATHS[@]}" 2>/dev/null)
+                # #961: `mapfile` is a bash 4.0+ builtin -- absent on this
+                # repo's documented floor (bash 3.2, stock macOS /bin/bash,
+                # which is exactly what GitHub Actions' macos-latest runner
+                # resolves plain `bash` to). There it fails as "command not
+                # found", silently leaving the array empty, so the checkout
+                # below would restore nothing. A while-read loop into the
+                # array works on every bash this repo supports.
+                local _grc_existing=()
+                local _grc_exist_line
+                while IFS= read -r _grc_exist_line || [ -n "$_grc_exist_line" ]; do
+                    [ -n "$_grc_exist_line" ] && _grc_existing+=("$_grc_exist_line")
+                done < <(git -C "$REPO_ROOT" ls-tree -r --name-only HEAD -- "${_GRC_TOUCHED_PATHS[@]}" 2>/dev/null)
                 if [ "${#_grc_existing[@]}" -gt 0 ]; then
                     git -C "$REPO_ROOT" checkout HEAD -- "${_grc_existing[@]}" >/dev/null 2>&1 || _checkout_ok=0
                 fi
@@ -637,7 +647,18 @@ _grc_bump_ndc_gen() {
     # conflict needs to know, BEFORE this rebase call rewrites anything,
     # exactly which paths this run's own ahead/behind commits could touch.
     PRE_REBASE_HEAD=$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null) || PRE_REBASE_HEAD=""
-    mapfile -t _GRC_TOUCHED_PATHS < <(_grc_compute_touched_paths "$PRE_REBASE_HEAD" "$REMOTE_REF")
+    # #961: `mapfile` is a bash 4.0+ builtin, absent on this repo's
+    # documented floor (bash 3.2, stock macOS /bin/bash -- exactly what
+    # GitHub Actions' macos-latest runner resolves plain `bash` to). There
+    # it fails as "command not found", silently leaving
+    # _GRC_TOUCHED_PATHS empty, so the scoped restore below touches
+    # nothing. A while-read loop into the array works on every bash this
+    # repo supports.
+    _GRC_TOUCHED_PATHS=()
+    _grc_touched_line=""
+    while IFS= read -r _grc_touched_line || [ -n "$_grc_touched_line" ]; do
+        [ -n "$_grc_touched_line" ] && _GRC_TOUCHED_PATHS+=("$_grc_touched_line")
+    done < <(_grc_compute_touched_paths "$PRE_REBASE_HEAD" "$REMOTE_REF")
     # #952 item 1: --no-autostash -- without it, a dirty tracked write from
     # a DIFFERENT slug sharing this REPO_ROOT gets auto-stashed when this
     # rebase starts, and `rebase --quit` (unlike --abort) never re-applies
@@ -678,7 +699,13 @@ _grc_bump_ndc_gen() {
                 exit 0
             fi
             PRE_REBASE_HEAD=$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null) || PRE_REBASE_HEAD=""
-            mapfile -t _GRC_TOUCHED_PATHS < <(_grc_compute_touched_paths "$PRE_REBASE_HEAD" "$REMOTE_REF")
+            # #961: same bash-3.2-floor fix as the first attempt's own
+            # _GRC_TOUCHED_PATHS build above -- `mapfile` is unavailable there.
+            _GRC_TOUCHED_PATHS=()
+            _grc_touched_line=""
+            while IFS= read -r _grc_touched_line || [ -n "$_grc_touched_line" ]; do
+                [ -n "$_grc_touched_line" ] && _GRC_TOUCHED_PATHS+=("$_grc_touched_line")
+            done < <(_grc_compute_touched_paths "$PRE_REBASE_HEAD" "$REMOTE_REF")
             git -C "$REPO_ROOT" rebase --no-autostash "$REMOTE_REF" >/dev/null 2>/dev/null
             REBASE_RC2=$?
             # Same reasoning as the first attempt's bump above: the tree is
