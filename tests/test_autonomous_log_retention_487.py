@@ -59,6 +59,158 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def _write_shell_script(path: Path, text: str) -> None:
+    r"""Writes a `#!/bin/sh` (or bash) script via `open(..., newline="\n")`,
+    never `Path.write_text()` (CI, PR #960, windows-latest jobs
+    112746585138/.../152 then 112755717371: `Path.write_text()`'s default
+    `newline=None` applies universal-newline translation on write, turning
+    every `\n` in the content into `os.linesep` -- `\r\n` on Windows. A
+    CRLF-corrupted shebang line is a classic "bad interpreter" exec
+    failure: the loader reads `#!/bin/sh\r`, fails to resolve that as a
+    path, and the script never starts at all -- indistinguishable from
+    the shim simply not existing, which is exactly `mktemp_shim_log`
+    reading back empty on every statement, not just a later one, that
+    was observed). `Path.write_text()` DOES take a `newline=` keyword,
+    but only since Python 3.10 -- this repo's own CI matrix still runs
+    3.9, so that keyword is not available here; `open(..., newline="\n")`
+    is, on every version this suite runs on, and is the same mechanism
+    `_run_bash_script` below already uses for the identical reason."""
+    with open(path, "w", newline="\n", encoding="utf-8") as f:
+        f.write(text)
+
+
+def _bash_path_prepend(dirs) -> str:
+    r"""Builds a bash `:`-joined PATH-prefix string from one or more native
+    directories, meant to be spliced into the SCRIPT TEXT a generated
+    script exports its own `$PATH` from (`export PATH="<this>:$PATH"`) --
+    never into `env["PATH"]`, the dict `_run_bash_script` hands to
+    `subprocess.run` (#951).
+
+    `env["PATH"]` stays Windows-native (`;`-joined, drive-letter paths)
+    right up until CreateProcess hands it to `bash.exe`; whether MSYS's
+    own startup conversion into bash's internal, `:`-joined $PATH
+    succeeds for an entry THIS PROCESS prepended is outside Python's
+    control and not reproducible on a non-Windows runner. The drive
+    letter's own colon is PATH's own separator once that string is
+    POSIX-split, so merely forward-slashing a prepended directory
+    (`_grc_posix`, used elsewhere in this file for the shim's OWN
+    embedded paths -- each a single `open()`/exec target, where a drive
+    letter's colon is harmless) does not help here: locally confirmed
+    (`/tmp` simulation, trap.d/951) that bash's native colon-splitting
+    shreds a `C:\...;C:\...` PATH value and a `C:/...;C:/...` one
+    IDENTICALLY, into components none of which resolve, regardless of
+    slash direction -- which is also why PR #960's two prior attempts
+    (forward-slashing shim content, then fixing shebang newlines) left
+    the symptom byte-for-byte unchanged. The one form with no embedded
+    colon at all is bash's own MSYS convention (`/c/Users/...`), built
+    here in Python and hand-written into the script as literal bash
+    source, so it needs no env-block conversion to already be correct --
+    on every other platform this repo tests on, a path already has no
+    drive letter and this is a no-op forward-slash normalisation.
+    """
+
+    _EXTENDED_LENGTH_PREFIX = ("\\" * 2) + "?" + "\\"
+
+    def _to_posix(d) -> str:
+        s = str(d)
+        # Self-review finding (oss:auditor): an extended-length Windows
+        # path (two backslashes, then "?", then one backslash, then the
+        # drive letter -- "\\?\\C:\\...") has a backslash, not a colon,
+        # at s[1], so the drive-letter branch below would never fire
+        # for one and it would fall straight to the bare forward-slash
+        # branch -- still carrying the drive letter's own colon two
+        # characters further in, i.e. the exact shredding failure this
+        # helper exists to avoid. Stripped before the drive-letter
+        # check so both forms convert identically; reasoned, not
+        # observed -- no Windows access to confirm whether
+        # `tempfile.mkdtemp()` ever actually returns one of these on a
+        # CI runner.
+        s = s.removeprefix(_EXTENDED_LENGTH_PREFIX)
+        if len(s) >= 2 and s[1] == ":" and s[0].isalpha():
+            tail = s[2:].replace("\\", "/")
+            if not tail.startswith("/"):
+                tail = "/" + tail
+            return f"/{s[0].lower()}{tail}"
+        return s.replace("\\", "/")
+
+    joined = ":".join(_to_posix(d) for d in dirs)
+    # Self-review finding (Explore): this value is spliced into the
+    # generated script as `export PATH="<this>:$PATH"` -- a DOUBLE-
+    # QUOTED bash string, unlike every other dynamic value this file
+    # embeds (REMEMBER_DIR, retention_days), which already go through
+    # `shlex.quote`. A literal `"`, `` ` `` or `$` surviving into this
+    # string would break out of that quoting or trigger command/
+    # variable substitution in the generated script. None of this
+    # file's own call sites can produce one today (pytest `tmp_path`
+    # dirs), but escaping it here costs nothing and matches the
+    # convention every other embedded value already follows.
+    return (
+        joined.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("`", "\\`")
+        .replace("$", "\\$")
+    )
+
+
+def test_bash_path_prepend_strips_the_drive_letters_own_colon():
+    """#951: a test that would have caught both prior, reasoned-but-wrong
+    fix attempts in this PR (forward-slashing the shim's own content,
+    then fixing the shim's shebang newline) -- NEITHER touches how PATH
+    is built, which is where the reporter's CI symptom (the shim never
+    invoked at all, not even its own first `echo`) actually originates.
+
+    Platform-independent in what it exercises -- `_bash_path_prepend`'s
+    string transform itself, not bash's own MSYS startup conversion,
+    which cannot be reproduced outside a real Windows runner (not
+    something this fix claims to verify; see the PR body for what
+    remains reasoned rather than observed). Self-review finding
+    (oss:auditor): this test does NOT in fact run on every leg -- it
+    still inherits this module's own `pytestmark = skipif(BASH is
+    None, ...)` above, even though its own assertions need no bash at
+    all, because that skip is applied once for the whole module rather
+    than per-test. On every leg this repo's CI currently runs, bash is
+    present (that is the whole premise `pytestmark`'s own comment
+    gives), so the skip never actually fires here today; restructuring
+    the module-wide skip to exempt this one test is a wider change
+    than this fix's own scope and is left to a future pass.
+    """
+    # A bare forward-slash of a Windows-native path (the fix ALREADY
+    # shipped, twice, in this same file, for the shim's own embedded
+    # paths and log target) still carries the drive letter's own colon
+    # -- the exact character PATH's own POSIX `:`-splitting treats as a
+    # separator, shredding the value regardless of slash direction.
+    forward_slashed_only = r"C:\Users\runneradmin\AppData\Local\Temp\x".replace("\\", "/")
+    assert ":" in forward_slashed_only, (
+        "fixture assumption broken -- a forward-slashed Windows path is "
+        "expected to still carry the drive letter's colon"
+    )
+
+    posix = _bash_path_prepend([r"C:\Users\runneradmin\AppData\Local\Temp\remember-mktemp-marker-abc"])
+    assert posix == "/c/Users/runneradmin/AppData/Local/Temp/remember-mktemp-marker-abc", (
+        f"expected the MSYS-style posix form with no embedded colon, got {posix!r}"
+    )
+    assert ":" not in posix, (
+        "#951: a colon survived the conversion -- PATH's own separator "
+        f"would still shred this value under bash's native splitting: {posix!r}"
+    )
+
+    # Must fire: a path that already has no drive letter (every path on
+    # macOS/Linux, where this repo's own CI legs run this same helper)
+    # is a no-op forward-slash normalisation, not mangled by the
+    # drive-letter branch -- a positive control pairing the negative
+    # assertions above, per this repo's own testing rule.
+    already_posix = _bash_path_prepend(["/tmp/already/posix/dir"])
+    assert already_posix == "/tmp/already/posix/dir", (
+        f"a path with no drive letter must pass through unchanged, got {already_posix!r}"
+    )
+
+    multi = _bash_path_prepend([r"C:\a", r"C:\b"])
+    assert multi == "/c/a:/c/b", (
+        f"multiple directories must join with ':' once each is already "
+        f"colon-free, got {multi!r}"
+    )
+
+
 def _run_bash_script(script: str, env: dict, *, timeout: int = 30):
     """Runs `script` under BASH by writing it to a real file and invoking
     `bash <path>`, never `bash -c "<script>"` (#914 self-review, PR #927
@@ -760,8 +912,13 @@ class TestHousekeepingSweepIsForkFree:
         retention_days: int = 7, bin_dir: Path, counter: Path,
     ):
         block = TestHousekeepingGlobIsPortableAcrossSeparators._extract_housekeeping_block()
+        # #951: PATH is prepended inside the SCRIPT ITSELF via
+        # `_bash_path_prepend`, not through `env["PATH"]` -- see that
+        # helper's own docstring for why an env-level prepend cannot be
+        # trusted to survive MSYS's win32->posix conversion on Windows.
         script = f"""
 set -u
+export PATH="{_bash_path_prepend([bin_dir])}:$PATH"
 config() {{ printf '%s\n' '{retention_days}'; }}
 log() {{ :; }}
 _remember_date() {{ date "$@"; }}
@@ -769,7 +926,6 @@ REMEMBER_DIR={shlex.quote(remember_dir)}
 {block}
 """
         env = dict(os.environ)
-        env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
         env["REMEMBER_FORK_COUNTER"] = str(counter)
         result = _run_bash_script(script, env)
         assert result.returncode == 0, (
@@ -806,10 +962,11 @@ REMEMBER_DIR={shlex.quote(remember_dir)}
         assert real_stat and real_date, "test environment needs real stat/date on PATH"
         for name, real in (("stat", real_stat), ("date", real_date)):
             wrapper = bin_dir / name
-            wrapper.write_text(
+            _write_shell_script(
+                wrapper,
                 "#!/bin/sh\n"
                 f'echo {name} >> "$REMEMBER_FORK_COUNTER"\n'
-                f'exec {shlex.quote(real)} "$@"\n'
+                f'exec {shlex.quote(real)} "$@"\n',
             )
             wrapper.chmod(0o755)
 
@@ -860,8 +1017,79 @@ class TestHousekeepingSweepFallbackAndEdgeCases:
         fail without touching the block itself.
         """
         block = TestHousekeepingGlobIsPortableAcrossSeparators._extract_housekeeping_block()
+        # #951: a test naming itself as exercising the fast path (or its
+        # fallback) asserted only the SWEEP'S OUTCOME, never whether
+        # `_remember_auto_ref` was actually built by `mktemp` on the
+        # runner it executes on. Two dead ends on the way to this fix,
+        # kept here so neither gets tried again:
+        #   1. A marker read AFTER the block runs cannot tell the two
+        #      paths apart -- the block's own last line (`unset
+        #      _remember_auto_ref ...`, scripts/save-session.sh, carried
+        #      verbatim into this extraction) clears the variable
+        #      unconditionally on EVERY run, before any code placed
+        #      after `{block}` can ever see it.
+        #   2. A shim that writes its marker to ITS OWN stderr is also
+        #      invisible: the block's own mktemp call is written as
+        #      `$(mktemp ... 2>/dev/null)` -- that redirect is the
+        #      PRODUCTION code's own suppression of mktemp's real error
+        #      output, and it swallows a stderr-based marker exactly as
+        #      thoroughly as a real error message (confirmed by a real
+        #      reproduction: `type mktemp` resolved to this very shim,
+        #      yet nothing it wrote to stderr ever appeared).
+        # A marker file the shim appends to, named by an env var neither
+        # the block nor its `2>/dev/null` ever touches, survives both.
+        real_mktemp = shutil.which("mktemp")
+        assert real_mktemp, "no mktemp on PATH -- fixture assumption broken"
+        marker_bin = Path(tempfile.mkdtemp(prefix="remember-mktemp-marker-"))
+        marker_log = marker_bin / "invocations.log"
+        marker_shim = marker_bin / "mktemp"
+        # CI (windows-latest, job 112746585138/...152, PR #960): both paths
+        # embedded into the shim's own bash content below arrive from
+        # Python as Windows-native, backslash-separated strings on that
+        # platform. `>> "$MKTEMP_SHIM_LOG"` (an append REDIRECT, not a
+        # glob) silently failed to open that target under git-bash there
+        # -- the shim's very first statement -- so EVERY run on that leg
+        # read back an empty log regardless of which path the extracted
+        # block actually took, exactly as #448/#263's own backslash-vs-
+        # forward-slash split already caught for REMEMBER_DIR in this
+        # same file (that fix forward-slashes only when gated on $OSTYPE;
+        # this one is unconditional, since a forward-slash absolute path
+        # is accepted by git-bash on every platform this runs on, POSIX
+        # included, where it is simply a no-op). `.exists()`/`.read_text()`
+        # below still use the ORIGINAL, OS-native `marker_log` Path --
+        # Windows' own file APIs accept '/' as a separator too, so Python
+        # and the shim agree on the same file either way.
+        _grc_posix = lambda p: str(p).replace("\\", "/")
+        _write_shell_script(
+            marker_shim,
+            "#!/bin/sh\n"
+            'echo "INVOKED" >> "$MKTEMP_SHIM_LOG"\n'
+            f'"{_grc_posix(real_mktemp)}" "$@"\n'
+            "rc=$?\n"
+            'if [ "$rc" -eq 0 ]; then echo "SUCCEEDED" >> "$MKTEMP_SHIM_LOG"; fi\n'
+            'exit "$rc"\n',
+        )
+        marker_shim.chmod(0o755)
+
+        path_dirs = [marker_bin]
+        if extra_path_dir is not None:
+            # Ahead of the marker shim: a caller forcing the fallback via
+            # its own broken mktemp must still win over this shim, the
+            # same way it already wins over the real binary.
+            path_dirs.insert(0, extra_path_dir)
+        # #951: PATH is prepended inside the SCRIPT ITSELF via
+        # `_bash_path_prepend`, not through `env["PATH"]` -- an
+        # env-level prepend of a native, drive-lettered directory is not
+        # trustworthy on Windows: see that helper's own docstring for why
+        # (bash's native colon-splitting of the resulting PATH value
+        # shreds it on the drive letter's own colon, independent of
+        # slash direction, which the two PREVIOUS fix attempts on this
+        # PR -- forward-slashing the shim content, then fixing the
+        # shebang's newline -- could never have touched, since neither
+        # changed how PATH itself was built).
         script = f"""
 set -u
+export PATH="{_bash_path_prepend(path_dirs)}:$PATH"
 config() {{ printf '%s\n' {shlex.quote(str(retention_days))}; }}
 log() {{ :; }}
 _remember_date() {{ date "$@"; }}
@@ -870,9 +1098,12 @@ REMEMBER_DIR={shlex.quote(remember_dir)}
 {block}
 """
         env = dict(os.environ)
-        if extra_path_dir is not None:
-            env["PATH"] = f"{extra_path_dir}{os.pathsep}{env.get('PATH', '')}"
-        return _run_bash_script(script, env)
+        env["MKTEMP_SHIM_LOG"] = _grc_posix(marker_log)
+        result = _run_bash_script(script, env)
+        result.mktemp_shim_log = (
+            marker_log.read_text(encoding="utf-8") if marker_log.exists() else ""
+        )
+        return result
 
     def test_must_fire_zero_padded_retention_days_does_not_misfire_the_fast_path(self, tmp_path):
         """Self-review finding: the digits-only sanitizer in
@@ -926,6 +1157,12 @@ REMEMBER_DIR={shlex.quote(remember_dir)}
             "a 1-day-old log was reclaimed with retention_days='08' -- "
             "positive control failed\n" + _dump_dir(autonomous)
         )
+        assert "SUCCEEDED" in result.mktemp_shim_log, (
+            "#951: this test names itself as exercising the fast path, "
+            "but the real mktemp binary was never seen to succeed -- the "
+            "fallback ran instead and this test exercised nothing new"
+            f"\nmktemp_shim_log={result.mktemp_shim_log!r}"
+        )
 
     def test_must_fire_fallback_loop_still_reclaims_when_reference_file_cannot_be_built(self, tmp_path):
         """Self-review finding: every test above only ever runs the FAST
@@ -964,7 +1201,7 @@ REMEMBER_DIR={shlex.quote(remember_dir)}
         broken_bin = tmp_path / "broken-mktemp-bin"
         broken_bin.mkdir()
         fake_mktemp = broken_bin / "mktemp"
-        fake_mktemp.write_text("#!/bin/sh\nexit 1\n")
+        _write_shell_script(fake_mktemp, "#!/bin/sh\nexit 1\n")
         fake_mktemp.chmod(0o755)
 
         result = self._run_extracted_block_with_path_override(
@@ -987,6 +1224,13 @@ REMEMBER_DIR={shlex.quote(remember_dir)}
         assert fresh.exists(), (
             "a 1-day-old log was reclaimed by the fallback loop -- "
             "positive control failed\n" + _dump_dir(autonomous)
+        )
+        assert "SUCCEEDED" not in result.mktemp_shim_log, (
+            "#951 (sibling check): this test's own `broken_bin` mktemp "
+            "override did not actually win over the real mktemp on "
+            "PATH -- the real binary was still reached and succeeded, so "
+            "the FAST path ran instead of the fallback this test names "
+            f"itself after\nmktemp_shim_log={result.mktemp_shim_log!r}"
         )
 
     def test_must_not_fire_fast_path_keeps_a_log_between_n_and_n_plus_one_days(self, tmp_path):
@@ -1035,6 +1279,14 @@ REMEMBER_DIR={shlex.quote(remember_dir)}
             "fallback's own thresholds) survived the fast path -- "
             "positive control failed\n" + _dump_dir(autonomous)
         )
+        assert "SUCCEEDED" in result.mktemp_shim_log, (
+            "#951: this test's own name and docstring claim it exercises "
+            "the FAST path at the N/N+1 boundary, but the real mktemp "
+            "binary was never seen to succeed -- the fallback silently "
+            "ran instead, making this test a duplicate of its fallback "
+            "sibling rather than a check on the fast path's own boundary "
+            f"arithmetic\nmktemp_shim_log={result.mktemp_shim_log!r}"
+        )
 
     def test_must_not_fire_fallback_keeps_a_log_between_n_and_n_plus_one_days(self, tmp_path):
         """#933: same fixture as the fast-path boundary test above, run
@@ -1056,7 +1308,7 @@ REMEMBER_DIR={shlex.quote(remember_dir)}
         broken_bin = tmp_path / "broken-mktemp-bin-933"
         broken_bin.mkdir()
         fake_mktemp = broken_bin / "mktemp"
-        fake_mktemp.write_text("#!/bin/sh\nexit 1\n")
+        _write_shell_script(fake_mktemp, "#!/bin/sh\nexit 1\n")
         fake_mktemp.chmod(0o755)
 
         result = self._run_extracted_block_with_path_override(
@@ -1076,4 +1328,11 @@ REMEMBER_DIR={shlex.quote(remember_dir)}
         assert not past_both.exists(), (
             "an 8.5-day-old log survived the fallback loop -- positive "
             "control failed\n" + _dump_dir(autonomous)
+        )
+        assert "SUCCEEDED" not in result.mktemp_shim_log, (
+            "#951 (sibling check): this test's own `broken_bin` mktemp "
+            "override did not actually win over the real mktemp on "
+            "PATH -- the real binary was still reached and succeeded, so "
+            "the FAST path ran instead of the fallback this test names "
+            f"itself after\nmktemp_shim_log={result.mktemp_shim_log!r}"
         )
