@@ -310,6 +310,16 @@ _remember_cfg_flatten_cache_path() {
     printf '%s' "${TMPDIR:-/tmp}/remember-config-cache-v2-${_slug}"
 }
 
+# #888: the OLD (pre-#864) cache name -- the real path above, minus the
+# literal `-v2-` segment. Nothing ever opens this path; it exists only so
+# _remember_cfg_flatten_cache_publish below can best-effort remove the
+# orphan an install upgrading from <=0.38.0 left behind.
+_remember_cfg_flatten_cache_path_v1() {
+    local _v2
+    _v2=$(_remember_cfg_flatten_cache_path) || return 1
+    printf '%s' "${_v2/-v2-/-}"
+}
+
 _remember_cfg_flatten_cache_sources() {
     printf '%s\n' "${PIPELINE_DIR:-}/config.json"
     printf '%s\n' "${HOME:-}/.remember/config.json"
@@ -605,6 +615,13 @@ _remember_cfg_flatten_cache_publish() {
         done <<< "$_dump"
     } > "$_t" 2>/dev/null || { rm -f "$_t" 2>/dev/null; return 0; }
     mv -f "$_t" "$_f" 2>/dev/null || rm -f "$_t" 2>/dev/null
+    # #888: best-effort removal of the pre-#864 orphan (same path as
+    # _remember_cfg_flatten_cache_path_v1 above, derived from $_f directly
+    # to skip a second subshell) left behind by an install that upgraded
+    # across #864 before this fix existed. Harmless either way -- never
+    # required for correctness, same as every other failure path above.
+    local _f_v1="${_f/-v2-/-}"
+    [ -f "$_f_v1" ] && rm -f "$_f_v1" 2>/dev/null
     return 0
 }
 

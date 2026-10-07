@@ -220,6 +220,85 @@ class TestARejectionIsNotADeferral:
             )
 
 
+# ── #935: the REJECTED notice must not misreport when reconcile is on ───────
+
+
+class TestTheRejectionNoticeRespectsReconcile:
+    """#935: with git_reconcile.enabled=true, 60-git-reconcile.sh runs right
+    after this hook on the SAME after_save dispatch pass and actually rebases
+    and pushes a rejected/diverged store on its own. Before this fix, neither
+    this hook's log line nor its notice ever read git_reconcile.enabled, so
+    both kept saying 'the backup has STOPPED ... will not resume on its own'
+    and 'nothing here will fetch, merge or rebase for you' even though that
+    was false."""
+
+    def _config_reconcile(self, tmp_path: Path) -> Path:
+        cfg = tmp_path / "remember-config.json"
+        cfg.write_text(
+            json.dumps({
+                "cooldowns": {"git_backup_seconds": 0},
+                "git_reconcile": {"enabled": True},
+            }),
+            encoding="utf-8",
+        )
+        return cfg
+
+    def test_the_log_stops_promising_no_fetch_merge_or_rebase_when_reconcile_is_on(self, tmp_path):
+        home, remember, remote, slug_dir, project = _store(tmp_path)
+        cfg = self._config_reconcile(tmp_path)
+
+        _run(slug_dir, project, home, remember, cfg)
+
+        log = _log_text(slug_dir)
+        assert "REJECTED" in log, "--- log ---\n" + log
+        assert "fetch, merge or rebase" not in log, (
+            "the REJECTED log still claims nothing will fetch, merge or "
+            "rebase even though git_reconcile.enabled is on -- the next "
+            "after_save run (60-git-reconcile.sh) does exactly that\n"
+            "--- log ---\n" + log
+        )
+        assert "git_reconcile" in log, (
+            "the log never mentions reconcile at all, so the human has no "
+            "way to know the next after_save run may resolve this "
+            "automatically\n--- log ---\n" + log
+        )
+
+    def test_the_notice_also_stops_promising_no_merge_or_rebase(self, tmp_path):
+        home, remember, remote, slug_dir, project = _store(tmp_path)
+        cfg = self._config_reconcile(tmp_path)
+
+        for n in range(3):
+            _save_again(remember, slug_dir, n)
+            _run(slug_dir, project, home, remember, cfg)
+
+        notice = slug_dir / "tmp" / NOTICE_NAME
+        assert notice.exists(), "the persistent rejection never reached the human notice"
+        body = notice.read_text(encoding="utf-8")
+        assert "Nothing will be merged or rebased for you" not in body, (
+            "the human-facing notice still makes the false promise while "
+            "reconcile is enabled\n--- notice ---\n" + body
+        )
+        assert "git_reconcile" in body, (
+            "the notice does not say reconcile may act automatically\n"
+            "--- notice ---\n" + body
+        )
+
+    def test_disabled_reconcile_keeps_the_original_wording(self, tmp_path):
+        """Positive control: with git_reconcile left at its default (off), the
+        original promise must still be made -- otherwise this whole class
+        would also pass against a hook that does nothing at all."""
+        home, remember, remote, slug_dir, project = _store(tmp_path)
+        cfg = _config(tmp_path)
+
+        _run(slug_dir, project, home, remember, cfg)
+
+        log = _log_text(slug_dir)
+        assert "fetch, merge or rebase" in log, "--- log ---\n" + log
+        assert "git_reconcile" not in log, (
+            "a disabled reconcile still mentioned it in the log\n--- log ---\n" + log
+        )
+
+
 # ── The opposite failure: a blip must stay quiet ─────────────────────────────
 
 

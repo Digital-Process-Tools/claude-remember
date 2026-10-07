@@ -13,10 +13,16 @@ configured log directory (typically ``.remember/logs/``).
 """
 
 import os
+import re
 import sys
 
 from ._tz import time_str, today_str
 from .types import TokenUsage
+
+# Same character class as the shell-side `tr '[:cntrl:]' ' '` flattening in
+# scripts/log.sh's log()/report_error()/_dispatch_report_skip() (#599/#618):
+# POSIX [:cntrl:] under LC_ALL=C is ASCII C0 (0x00-0x1f) plus DEL (0x7f).
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 
 
 def _log_path(log_dir: str) -> str:
@@ -37,9 +43,13 @@ def log(component: str, message: str, log_dir: str) -> None:
 
     Args:
         component: Pipeline stage identifier (e.g., "save", "consolidate").
-        message: Free-form log message text.
+        message: Free-form log message text. Control characters (ASCII C0
+            and DEL) are flattened to spaces before writing, mirroring the
+            shell-side ``tr '[:cntrl:]' ' '`` precedent (#599/#618, #881), so
+            an untrusted message cannot corrupt the log line's own structure.
         log_dir: Directory where daily log files are stored.
     """
+    message = _CONTROL_CHARS.sub(" ", message)
     line = f"{_timestamp()} [{component}] {message}\n"
     try:
         with open(_log_path(log_dir), "a", encoding="utf-8") as f:
