@@ -230,11 +230,13 @@ CONSOLIDATION_LOCK_DIR="$REMEMBER_DIR/tmp/consolidation.lock"
 # counter before/after re-acquiring save.lock around its own tail+mv
 # (scripts/save-session.sh:1385-1406) -- it just never saw this hook as a
 # possible writer, only another NDC round. Bumping the SAME counter after a
-# successful fast-forward/rebase below makes NDC's EXISTING guard also catch
-# this hook, at zero steady-state cost: if no NDC round is concurrently
-# reading it, nobody notices the bump; if one is, it correctly skips its
-# commit the same way it already does for an overlapping NDC round (a
-# visible duplicate in today-*.md, never silent loss).
+# successful fast-forward/rebase, or on the conflict path once a rebase has
+# already rewritten the tree (#954 -- that path was missing this call until
+# then), makes NDC's EXISTING guard also catch this hook, at zero
+# steady-state cost: if no NDC round is concurrently reading it, nobody
+# notices the bump; if one is, it correctly skips its commit the same way
+# it already does for an overlapping NDC round (a visible duplicate in
+# today-*.md, never silent loss).
 NDC_GEN_FILE="$REMEMBER_DIR/tmp/ndc-generation"
 _grc_bump_ndc_gen() {
     # Best-effort, not locked: a failed read or write here just means a
@@ -422,6 +424,21 @@ _grc_bump_ndc_gen() {
 
     _grc_report_conflict() {
         local _files="$1" _attempt="$2" _msg_extra _foreign _quit_ok _checkout_ok
+
+        # #954: by the time this function is entered, `git rebase` has
+        # already failed with a real conflict -- which means it already
+        # rewrote $SLUG/now.md to conflict-marker content (replaying commits
+        # up to the conflicting one) before stopping. The tree is already
+        # rewritten here, the exact same "bump as soon as the tree is
+        # rewritten, regardless of downstream success" shape the
+        # fast-forward and successful-rebase call sites above are bumped
+        # for -- this path was the one now.md-rewriting path that never
+        # called it, leaving an NDC round that snapshots now.md inside this
+        # window unable to detect the overlap (#932 reasoned consequence).
+        # Bumped unconditionally, before the quit/checkout outcome is even
+        # known, so a FAILED quit or checkout (still handled below, still
+        # reported honestly) does not suppress it either.
+        _grc_bump_ndc_gen
 
         # #943: instead of snapshotting a foreign write and racing it
         # against `git rebase --abort` (the #939/#942 approach, and the

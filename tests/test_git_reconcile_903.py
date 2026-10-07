@@ -984,6 +984,59 @@ class TestNdcGenerationBump:
         assert "could not bump" in log_text
         assert "not a regular file" in log_text
 
+    def test_conflict_bumps_ndc_generation(self, tmp_path):
+        """#954: the conflict path (_grc_report_conflict) is the one
+        now.md-rewriting path that never called _grc_bump_ndc_gen -- the
+        rebase itself already rewrites $SLUG/now.md to conflict-marker
+        content before failing, the same "tree already rewritten,
+        regardless of downstream success" shape the fast-forward/rebase
+        sites above are bumped for. Without this bump, an NDC round that
+        snapshots now.md inside that window sees an unchanged generation
+        counter and trims lines it never actually summarised (#932
+        reasoned consequence). Same simple real-conflict shape as
+        TestScopedAbort.test_file_added_by_the_upstream_side_before_the_conflict_is_pruned
+        -- no shim needed, since the bump must fire on an ordinary
+        conflict, not only one injected mid-flight."""
+        home, remember, remote, slug_dir, project = _store(tmp_path)
+
+        other = tmp_path / "other-machine"
+        subprocess.run(["git", "clone", "-q", "-b", "main", str(remote), str(other)],
+                       check=True, capture_output=True)
+        _git(other, ["config", "user.email", "other@test"])
+        _git(other, ["config", "user.name", "Other"])
+        (other / "test-slug" / "now.md").write_text(
+            "## 10:00 | test\nFROM THE OTHER MACHINE\n", encoding="utf-8")
+        _git(other, ["add", "-A"])
+        _git(other, ["commit", "-q", "-m", "other machine edit (conflicts)"])
+        _git(other, ["push", "-q", "origin", "main"])
+
+        (slug_dir / "now.md").write_text(
+            "## 10:00 | test\nFROM THIS MACHINE\n", encoding="utf-8")
+        _git(remember, ["add", "-A"])
+        _git(remember, ["commit", "-q", "-m", "this machine edit"])
+
+        gen_file = slug_dir / "tmp" / "ndc-generation"
+        assert not gen_file.exists(), "marker must start absent for this test"
+
+        cfg = _enabled_config(tmp_path)
+        _run(slug_dir, project, home, cfg)
+        _wait_quiesce(remember)
+
+        log_files = list((slug_dir / "logs").glob("memory-*.log"))
+        log_text = "\n".join(f.read_text(encoding="utf-8") for f in log_files)
+        assert "CONFLICT" in log_text, (
+            "fixture assumption broken -- this must be a real conflict, "
+            "not a clean rebase/fast-forward"
+        )
+
+        assert gen_file.exists(), (
+            "a conflict was hit and the rebase already rewrote "
+            "test-slug/now.md to conflict-marker content before the scoped "
+            "restore ran, but NDC's generation marker was never bumped -- "
+            "an in-flight NDC commit has no way to notice this writer"
+        )
+        assert gen_file.read_text(encoding="utf-8").strip() == "1"
+
 
 # ── The conflict notice actually reaches the human ───────────────────────────
 
