@@ -886,10 +886,27 @@ class TestHousekeepingSweepFallbackAndEdgeCases:
         marker_bin = Path(tempfile.mkdtemp(prefix="remember-mktemp-marker-"))
         marker_log = marker_bin / "invocations.log"
         marker_shim = marker_bin / "mktemp"
+        # CI (windows-latest, job 112746585138/...152, PR #960): both paths
+        # embedded into the shim's own bash content below arrive from
+        # Python as Windows-native, backslash-separated strings on that
+        # platform. `>> "$MKTEMP_SHIM_LOG"` (an append REDIRECT, not a
+        # glob) silently failed to open that target under git-bash there
+        # -- the shim's very first statement -- so EVERY run on that leg
+        # read back an empty log regardless of which path the extracted
+        # block actually took, exactly as #448/#263's own backslash-vs-
+        # forward-slash split already caught for REMEMBER_DIR in this
+        # same file (that fix forward-slashes only when gated on $OSTYPE;
+        # this one is unconditional, since a forward-slash absolute path
+        # is accepted by git-bash on every platform this runs on, POSIX
+        # included, where it is simply a no-op). `.exists()`/`.read_text()`
+        # below still use the ORIGINAL, OS-native `marker_log` Path --
+        # Windows' own file APIs accept '/' as a separator too, so Python
+        # and the shim agree on the same file either way.
+        _grc_posix = lambda p: str(p).replace("\\", "/")
         marker_shim.write_text(
             "#!/bin/sh\n"
             'echo "INVOKED" >> "$MKTEMP_SHIM_LOG"\n'
-            f'"{real_mktemp}" "$@"\n'
+            f'"{_grc_posix(real_mktemp)}" "$@"\n'
             "rc=$?\n"
             'if [ "$rc" -eq 0 ]; then echo "SUCCEEDED" >> "$MKTEMP_SHIM_LOG"; fi\n'
             'exit "$rc"\n'
@@ -906,7 +923,7 @@ REMEMBER_DIR={shlex.quote(remember_dir)}
 {block}
 """
         env = dict(os.environ)
-        env["MKTEMP_SHIM_LOG"] = str(marker_log)
+        env["MKTEMP_SHIM_LOG"] = _grc_posix(marker_log)
         path_dirs = [str(marker_bin)]
         if extra_path_dir is not None:
             # Ahead of the marker shim: a caller forcing the fallback via
