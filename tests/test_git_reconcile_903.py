@@ -440,6 +440,157 @@ class TestDivergedReconcile:
         )
 
 
+# ── #946: a rebase/merge/cherry-pick already in progress for some OTHER
+# reason -- most importantly a human mid-way through resolving a real
+# conflict by hand, which this hook's own notice literally tells them to
+# do ("Resolve by hand: git -C ... rebase ...") -- must be declined, not
+# mistaken for this run's own freshly-conflicted rebase and quit/reset
+# over.
+
+
+class TestForeignRebaseGuard:
+
+    def test_declines_when_a_foreign_rebase_is_already_in_progress(self, tmp_path):
+        """#946: before this hook's OWN `git rebase` call, something else
+        (a human resolving a real conflict by hand, most importantly) may
+        already have .git/rebase-merge in place. `_grc_rebase_in_progress`
+        is a pure directory-existence check -- it cannot tell that case
+        from this run's own rebase having just hit a conflict -- so the
+        hook must check BEFORE it starts its own rebase, and decline
+        untouched, rather than running `rebase --quit` plus the scoped
+        checkout/rm over work that was never this run's own."""
+        home, remember, remote, slug_dir, project = _store(tmp_path)
+
+        other = tmp_path / "other-machine"
+        subprocess.run(["git", "clone", "-q", "-b", "main", str(remote), str(other)],
+                       check=True, capture_output=True)
+        _git(other, ["config", "user.email", "other@test"])
+        _git(other, ["config", "user.name", "Other"])
+        (other / "test-slug" / "now.md").write_text(
+            "## 10:00 | test\nFROM THE OTHER MACHINE\n", encoding="utf-8")
+        _git(other, ["add", "-A"])
+        _git(other, ["commit", "-q", "-m", "other machine edit"])
+        _git(other, ["push", "-q", "origin", "main"])
+
+        (slug_dir / "now.md").write_text(
+            "## 10:00 | test\nFROM THIS MACHINE\n", encoding="utf-8")
+        _git(remember, ["add", "-A"])
+        _git(remember, ["commit", "-q", "-m", "this machine edit"])
+        local_head = _head(remember)
+
+        # Simulate "a human is already mid-resolution of a real conflict"
+        # WITHOUT actually running the hook's own rebase: a real
+        # `git rebase` here would leave HEAD detached mid-replay, which
+        # would make AHEAD/BEHIND against REMOTE_REF unpredictable and
+        # could short-circuit the hook before it ever reaches its own
+        # rebase call -- not what this test is about. The mechanism this
+        # hook's own `_grc_rebase_in_progress` checks is nothing more than
+        # directory existence (confirmed by reading the function), so
+        # creating that directory directly reproduces exactly the state
+        # the hook must recognise as "not mine" -- while keeping HEAD on
+        # the real branch so the hook reaches its own rebase call instead
+        # of declining earlier for an unrelated reason.
+        git_dir = subprocess.run(
+            ["git", "-C", str(remember), "rev-parse", "--git-dir"],
+            capture_output=True, text=True, check=True).stdout.strip()
+        rebase_merge_path = (remember / git_dir / "rebase-merge")
+        rebase_merge_path.mkdir()
+        sentinel = rebase_merge_path / "human-in-progress-marker"
+        sentinel.write_text("do not touch -- a human owns this\n", encoding="utf-8")
+        human_resolution = "## 10:00 | test\nHAND-RESOLVED BY HUMAN, NOT YET STAGED\n"
+        (slug_dir / "now.md").write_text(human_resolution, encoding="utf-8")
+
+        cfg = _enabled_config(tmp_path)
+        _run(slug_dir, project, home, cfg)
+        _wait_quiesce(remember)
+
+        assert rebase_merge_path.exists(), (
+            "the hook discarded a pre-existing rebase that was NOT its "
+            "own -- a human's in-progress conflict resolution was removed"
+        )
+        assert sentinel.read_text(encoding="utf-8") == "do not touch -- a human owns this\n", (
+            "the pre-existing rebase-merge directory's own content was touched"
+        )
+        assert (slug_dir / "now.md").read_text(encoding="utf-8") == human_resolution, (
+            "the human's hand-resolved, not-yet-staged content was overwritten "
+            "by the hook's own scoped checkout"
+        )
+        assert _head(remember) == local_head, (
+            "HEAD moved even though the hook should have declined untouched"
+        )
+
+        log_files = list((slug_dir / "logs").glob("memory-*.log"))
+        assert log_files, "hook wrote no log at all"
+        log_text = "\n".join(f.read_text(encoding="utf-8") for f in log_files)
+        assert "CONFLICT" not in log_text, (
+            "the hook treated the pre-existing, foreign rebase as its own "
+            "freshly-conflicted rebase instead of declining"
+        )
+        assert "already in progress" in log_text and "declined" in log_text.lower(), (
+            "no clear decline was logged -- whoever owns the in-progress "
+            "rebase has no way to know the hook backed off"
+        )
+
+        notice = slug_dir / "tmp" / "git-reconcile-notice"
+        assert not notice.exists(), (
+            "a CONFLICT notice was written for a rebase this run never started"
+        )
+
+    def test_still_handles_its_own_conflict_when_nothing_preceded_it(self, tmp_path):
+        """Positive control for the test above: with no foreign rebase in
+        place beforehand, a real conflict in THIS run's own rebase must
+        still be caught, reported and cleaned up exactly as
+        test_conflict_aborts_and_leaves_tree_exactly_as_it_was already
+        covers -- the new pre-check must not make the hook decline its
+        own legitimate conflict-handling path."""
+        home, remember, remote, slug_dir, project = _store(tmp_path)
+
+        other = tmp_path / "other-machine"
+        subprocess.run(["git", "clone", "-q", "-b", "main", str(remote), str(other)],
+                       check=True, capture_output=True)
+        _git(other, ["config", "user.email", "other@test"])
+        _git(other, ["config", "user.name", "Other"])
+        (other / "test-slug" / "now.md").write_text(
+            "## 10:00 | test\nFROM THE OTHER MACHINE\n", encoding="utf-8")
+        _git(other, ["add", "-A"])
+        _git(other, ["commit", "-q", "-m", "other machine edit"])
+        _git(other, ["push", "-q", "origin", "main"])
+
+        (slug_dir / "now.md").write_text(
+            "## 10:00 | test\nFROM THIS MACHINE\n", encoding="utf-8")
+        _git(remember, ["add", "-A"])
+        _git(remember, ["commit", "-q", "-m", "this machine edit"])
+        local_head = _head(remember)
+        local_content = (slug_dir / "now.md").read_text(encoding="utf-8")
+
+        cfg = _enabled_config(tmp_path)
+        _run(slug_dir, project, home, cfg)
+        _wait_quiesce(remember)
+
+        assert _head(remember) == local_head, (
+            "a conflicting rebase changed HEAD -- the new pre-check must "
+            "not interfere with the hook's own legitimate conflict path"
+        )
+        assert (slug_dir / "now.md").read_text(encoding="utf-8") == local_content
+
+        rebase_merge = subprocess.run(
+            ["git", "-C", str(remember), "rev-parse", "--path-format=absolute",
+             "--git-path", "rebase-merge"],
+            capture_output=True, text=True, check=False).stdout.strip()
+        assert rebase_merge and not Path(rebase_merge).exists(), (
+            "the hook's own conflict handling left a rebase in progress -- "
+            "the new pre-check must have wrongly declined its own rebase"
+        )
+
+        log_files = list((slug_dir / "logs").glob("memory-*.log"))
+        assert log_files, "hook wrote no log at all"
+        log_text = "\n".join(f.read_text(encoding="utf-8") for f in log_files)
+        assert "CONFLICT" in log_text, (
+            "the hook's own legitimate conflict was not reported -- the "
+            "new pre-check wrongly swallowed it as a foreign rebase"
+        )
+
+
 # ── #943: closing the TOCTOU gap the #939/#942 snapshot-and-restore fix
 # could not close, by never letting the abort touch anything outside
 # $SLUG/ in the first place (git rebase --quit + a scoped checkout,
