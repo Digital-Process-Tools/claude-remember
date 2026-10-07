@@ -59,6 +59,26 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def _write_shell_script(path: Path, text: str) -> None:
+    r"""Writes a `#!/bin/sh` (or bash) script via `open(..., newline="\n")`,
+    never `Path.write_text()` (CI, PR #960, windows-latest jobs
+    112746585138/.../152 then 112755717371: `Path.write_text()`'s default
+    `newline=None` applies universal-newline translation on write, turning
+    every `\n` in the content into `os.linesep` -- `\r\n` on Windows. A
+    CRLF-corrupted shebang line is a classic "bad interpreter" exec
+    failure: the loader reads `#!/bin/sh\r`, fails to resolve that as a
+    path, and the script never starts at all -- indistinguishable from
+    the shim simply not existing, which is exactly `mktemp_shim_log`
+    reading back empty on every statement, not just a later one, that
+    was observed). `Path.write_text()` DOES take a `newline=` keyword,
+    but only since Python 3.10 -- this repo's own CI matrix still runs
+    3.9, so that keyword is not available here; `open(..., newline="\n")`
+    is, on every version this suite runs on, and is the same mechanism
+    `_run_bash_script` below already uses for the identical reason."""
+    with open(path, "w", newline="\n", encoding="utf-8") as f:
+        f.write(text)
+
+
 def _run_bash_script(script: str, env: dict, *, timeout: int = 30):
     """Runs `script` under BASH by writing it to a real file and invoking
     `bash <path>`, never `bash -c "<script>"` (#914 self-review, PR #927
@@ -806,10 +826,11 @@ REMEMBER_DIR={shlex.quote(remember_dir)}
         assert real_stat and real_date, "test environment needs real stat/date on PATH"
         for name, real in (("stat", real_stat), ("date", real_date)):
             wrapper = bin_dir / name
-            wrapper.write_text(
+            _write_shell_script(
+                wrapper,
                 "#!/bin/sh\n"
                 f'echo {name} >> "$REMEMBER_FORK_COUNTER"\n'
-                f'exec {shlex.quote(real)} "$@"\n'
+                f'exec {shlex.quote(real)} "$@"\n',
             )
             wrapper.chmod(0o755)
 
@@ -903,13 +924,14 @@ class TestHousekeepingSweepFallbackAndEdgeCases:
         # Windows' own file APIs accept '/' as a separator too, so Python
         # and the shim agree on the same file either way.
         _grc_posix = lambda p: str(p).replace("\\", "/")
-        marker_shim.write_text(
+        _write_shell_script(
+            marker_shim,
             "#!/bin/sh\n"
             'echo "INVOKED" >> "$MKTEMP_SHIM_LOG"\n'
             f'"{_grc_posix(real_mktemp)}" "$@"\n'
             "rc=$?\n"
             'if [ "$rc" -eq 0 ]; then echo "SUCCEEDED" >> "$MKTEMP_SHIM_LOG"; fi\n'
-            'exit "$rc"\n'
+            'exit "$rc"\n',
         )
         marker_shim.chmod(0o755)
 
@@ -1033,7 +1055,7 @@ REMEMBER_DIR={shlex.quote(remember_dir)}
         broken_bin = tmp_path / "broken-mktemp-bin"
         broken_bin.mkdir()
         fake_mktemp = broken_bin / "mktemp"
-        fake_mktemp.write_text("#!/bin/sh\nexit 1\n")
+        _write_shell_script(fake_mktemp, "#!/bin/sh\nexit 1\n")
         fake_mktemp.chmod(0o755)
 
         result = self._run_extracted_block_with_path_override(
@@ -1140,7 +1162,7 @@ REMEMBER_DIR={shlex.quote(remember_dir)}
         broken_bin = tmp_path / "broken-mktemp-bin-933"
         broken_bin.mkdir()
         fake_mktemp = broken_bin / "mktemp"
-        fake_mktemp.write_text("#!/bin/sh\nexit 1\n")
+        _write_shell_script(fake_mktemp, "#!/bin/sh\nexit 1\n")
         fake_mktemp.chmod(0o755)
 
         result = self._run_extracted_block_with_path_override(
