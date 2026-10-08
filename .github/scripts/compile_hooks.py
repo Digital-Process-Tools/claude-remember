@@ -514,7 +514,7 @@ _DYNAMIC_CALL_RE = re.compile(
 )
 
 
-def _mask_bracket_tests(masked_line):
+def _mask_bracket_tests(masked_line, carry_depth=0, carry_double=False):
     """Blank out every `[[ ... ]]` and `[ ... ]` test-expression span in an
     already-masked line (quotes/comments/heredocs/$(...) already stripped
     by _scan_line_braces) before the dynamic-dispatch scan ever sees it
@@ -525,10 +525,39 @@ def _mask_bracket_tests(masked_line):
     arbitrary command through a variable -- there is no call here to miss.
     Brackets are counted (not matched with the first `]`) so a glob
     char-class inside the test (`*[!0-9]*`) does not prematurely close the
-    span before the real closing bracket is reached."""
+    span before the real closing bracket is reached.
+
+    CARRY_DEPTH/CARRY_DOUBLE thread a still-open span across physical
+    lines, the same way _scan_line_braces threads brace/quote/heredoc
+    state -- bash continues a `[[ ... ]]`/`[ ... ]` test onto the next
+    physical line not only after an explicit trailing backslash, but
+    whenever a line simply ends on '&&'/'||'/'|' with no backslash at all
+    (review finding on this function's own first cut: a per-line scan with
+    no carried state reproduced the exact false positive #906 was filed to
+    fix, the moment the test itself wrapped across two lines). Returns
+    (masked_line, new_depth, new_double): new_depth is 0 once every span
+    opened on or carried into this line has closed, otherwise the depth
+    still outstanding at end of line, to pass back in as CARRY_DEPTH/
+    CARRY_DOUBLE on the next physical line."""
     chars = list(masked_line)
     n = len(chars)
     i = 0
+    depth = carry_depth
+    double = carry_double
+    if depth > 0:
+        start = 0
+        while i < n and depth > 0:
+            if chars[i] == "[":
+                depth += 1
+            elif chars[i] == "]":
+                depth -= 1
+            i += 1
+        if double and depth == 0 and i < n and chars[i] == "]":
+            i += 1
+        for k in range(start, i):
+            chars[k] = " "
+        if depth > 0:
+            return "".join(chars), depth, double
     while i < n:
         at_boundary = i == 0 or chars[i - 1] in " \t;&|("
         if chars[i] == "[" and at_boundary:
@@ -546,10 +575,12 @@ def _mask_bracket_tests(masked_line):
                 j += 1
             for k in range(start, j):
                 chars[k] = " "
+            if depth > 0:
+                return "".join(chars), depth, double
             i = j
             continue
         i += 1
-    return "".join(chars)
+    return "".join(chars), 0, False
 
 
 def _cmdsub_continue(line, start, depth, sq, dq):
@@ -920,8 +951,14 @@ def tree_shake(text):
         in_func_line.update(range(s, e + 1))
 
     dynamic_dispatch_line = None
+    bracket_depth = 0
+    bracket_double = False
     for lineno, ml in enumerate(masked_lines, start=1):
-        if ml and _DYNAMIC_CALL_RE.search(_mask_bracket_tests(ml)):
+        if not ml:
+            continue
+        ml, bracket_depth, bracket_double = _mask_bracket_tests(
+            ml, bracket_depth, bracket_double)
+        if _DYNAMIC_CALL_RE.search(ml):
             dynamic_dispatch_line = lineno
             break
     dynamic_dispatch = dynamic_dispatch_line is not None

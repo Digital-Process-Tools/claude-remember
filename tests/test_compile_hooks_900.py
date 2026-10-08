@@ -606,6 +606,29 @@ def test_tree_shake_a_real_call_through_a_variable_still_bails_even_after_a_test
     assert "real_fn" in out
 
 
+def test_tree_shake_a_test_operand_split_across_lines_by_implicit_continuation_is_not_dynamic_dispatch():
+    # Review finding on #906's own fix: bash continues a statement onto the
+    # next physical line not only after an explicit trailing backslash, but
+    # also whenever a line simply ends on '&&'/'||'/'|' -- no backslash at
+    # all (this repo's own scripts/run-consolidation.sh:301 line-wraps
+    # exactly this way). A `[[ ... ]]` test split across such a boundary
+    # must still be recognized as a test span, not scanned per-line raw.
+    text = (
+        "#!/bin/sh\n"
+        "unused() {\n"
+        "    echo unused\n"
+        "}\n"
+        'x="abc"\n'
+        '[[ -n "$x" &&\n'
+        '   "$x" != "" ]] && echo nonempty\n'
+    )
+    out, report = compile_hooks.tree_shake(text)
+    assert report["dynamic_dispatch"] is False
+    assert report["shaken"] is True
+    assert report["dropped"] == ["unused"]
+    assert "echo unused" not in out
+
+
 def test_tree_shake_reason_names_the_triggering_line_when_dispatch_is_dynamic():
     # The report's "reason" string must name the physical line that
     # triggered the bail -- a silent fallback is the failure mode #906
