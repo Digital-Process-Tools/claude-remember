@@ -895,8 +895,9 @@ _UNSCOPED_COMMANDS = {
     "poetry", "cargo", "go", "gem", "brew",
     # downloaders
     "curl", "wget",
-    # wrapper commands that can run arbitrary programs (#879)
+    # wrapper commands that can run arbitrary programs (#879, #950)
     "xargs", "sudo", "eval", "exec", "source", ".", "find", "awk", "nohup", "timeout",
+    "command", "nice", "stdbuf",
 }
 _PLUGIN_ROOT = "${CLAUDE_PLUGIN_ROOT}/"
 
@@ -918,11 +919,11 @@ def bash_grant_problem(entry: str) -> str | None:
     words = cmd.split()
     if not words:
         return f"`Bash({pattern})` grants every shell command"
-    paths = [w for w in words if "/" in w]
+    paths = [w for w in words if "/" in w or "\\" in w]
     for p in paths:
         if "*" in p or "?" in p:
             return f"`Bash({pattern})` has a wildcard in the path"
-        if ".." in p.split("/"):
+        if ".." in re.split(r"[/\\]", p):
             return f"`Bash({pattern})` has a `..` path segment"
         if not p.startswith(_PLUGIN_ROOT):
             base = p.rsplit("/", 1)[-1].lower()
