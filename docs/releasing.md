@@ -580,8 +580,10 @@ commit built from tag v0.38.0 (`4cda472` on `main`), the first release carrying 
 
 The rest of the v0.38.0 run, as the portal showed it: Received "Arrived by a push to the tracked
 branch"; Fetch "Fetched and unpacked: 73 files, 1.3 MB"; Validation "Passed with warnings"; Review
-"No reviewer action recorded for this version". It did not go live: the plugin-level hold
-described under "Reading a scan" above still applies.
+"No reviewer action recorded for this version". It did not go live at the time: the plugin-level
+hold described under "Reading a scan" above still applied. **It later cleared on its own, with no
+reply ever received** -- see "Contacting Anthropic about a plugin" below for the 2026-10-06
+update, before assuming a wait described here is still open.
 
 On the earlier v0.36.0 (`a92a072`, full tree, 474 files / 9.2 MB) the validator never finished:
 `VALIDATION_INCOMPLETE` and `VALIDATION_NOT_EVALUATED`, both policy holds; the portal's wording
@@ -1029,11 +1031,15 @@ was "Validation ran out of time". That is the failure the `release` branch exist
 6. If the plugin itself was ever flagged, a clean, **Approved** version still needs the directory
    team: it waits for them however clean it is (observed on v0.38.0, see "Reading a scan").
    Contact them as soon as the first clean version is Approved, with the before and after
-   numbers (ours: policy holds 1 to 0, security scan passed, status Approved).
+   numbers (ours: policy holds 1 to 0, security scan passed, status Approved). **That flag can
+   also clear on its own, with no reply ever received** -- read "Contacting Anthropic about a
+   plugin" below before assuming a wait is still open; check the portal's own **version list**
+   for your latest Approved versions' publish state rather than relying only on the flag's
+   last-known reading.
 
 ## Listing details: what comes from where
 
-Sourced on 2026-10-02.
+Sourced on 2026-10-02, except "Contacting Anthropic about a plugin" below, updated 2026-10-06.
 
 - **The listing fields in `plugin.json`.** Per the code.claude.com plugin manifest reference, the
   directory reads `icon`, `documentationUrl`, `supportUrl`, `privacyPolicyUrl` and
@@ -1068,22 +1074,31 @@ portal's **Contact Anthropic** opens a mail to `directory@anthropic.com` with th
 submission".
 
 For remember, the maintainer sent that mail on 2026-10-02, after the v0.38.0 scan, asking the
-directory team to clear the plugin-level hold. The portal's own help desk replied within a minute
-with an automatic acknowledgement (ticket #140917199, "Submitted — We'll pick up your ticket
-soon"); that is the route, not an answer.
+directory team to clear the plugin-level hold described under "Reading a scan" above. The portal's
+own help desk replied within a minute with an automatic acknowledgement (ticket #140917199,
+"Submitted — We'll pick up your ticket soon"); that is the route, not an answer, and no further
+reply to that ticket arrived.
 
-**Resolved (2026-10-06, #863): there was no plugin-level hold on an already-listed plugin.** The
-"Needs the directory team" / `COMMAND_SCRIPT_NOT_FOLLOWED` flag seen after v0.38.0 came from the
-validator behind the *new-submission* form, not from the review that decides publishing a new
-version of a plugin already listed. Checking the portal's version list directly showed v0.38.0
-through v0.41.0 all **Approved**, each with "Publish update" available. Nothing is held; the
-remaining step for any approved version is a manual **Publish** click in the portal, not a code
-change or a reply to wait on.
+**Update (2026-10-06, #863): the plugin-level "Needs the directory team" hold cleared on its own,
+and a second, unrelated confusion followed it.** By 2026-10-05 v0.40.0 validated with zero holds
+(#899, #901 fixed the code-side `COMMAND_SCRIPT_NOT_FOLLOWED` cause), but the plugin-level flag
+itself was still reported as open, separate from anything a code change could clear -- consistent
+with "Reading a scan" above. On 2026-10-06 a re-validation of the *same, unchanged* commit showed a
+new `COMMAND_SCRIPT_NOT_FOLLOWED` hold on all four hooks, which read at first as the flag
+resurfacing. **It was not:** that reading came from the validator behind the *new-submission*
+form, not from the review that gates publishing a new version of a plugin already listed. Checking
+the portal's **version list** directly instead showed v0.38.0 through v0.41.0 all **Approved**,
+each with "Publish update" available and nothing held. So, as of 2026-10-06, nothing blocks
+publishing an approved version; the remaining step is a manual **Publish** click in the portal, not
+a code change -- **this is a change since the mail above, not a correction of it: the hold it
+asked about was real when it was sent.**
 
 **Still open, on ticket #140917199: Keywords and Short description show "No value"** (see
-"Listing details: what comes from where" above) -- that question is still with the directory team.
-`#841` (the official-marketplace pin lagging this repo's releases) is tracked and answered on its
-own issue; it isn't something this repository's tooling or this ticket can move.
+"Listing details: what comes from where" above) -- that question is still with the directory team
+and no reply has been recorded. `#841` (the official-marketplace pin lagging this repo's releases)
+is tracked on its own issue, with a cause identified and a bump request filed upstream, but it
+remains open there, waiting on that external pin to move; it isn't something this repository's
+tooling or this ticket can move.
 
 ## Reusing this in another plugin repository
 
