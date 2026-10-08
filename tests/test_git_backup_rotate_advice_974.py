@@ -118,6 +118,57 @@ class TestUntrackReceiptCarriesRotateAdvice:
             f"credential config.json may have carried: {log_text}"
         )
 
+    def test_could_not_untrack_also_logs_rotate_advice(self, tmp_path):
+        """#989 follow-up to #974: the COULD-NOT-UNTRACK branch -- `git rm
+        --cached` or `_gb_commit_untrack` fails, so the index is restored and
+        the next backup retries -- is reached under the exact same
+        git-history fact as the succeeded and deferred branches above (the
+        credential is already committed either way) and must give the same
+        rotate advice, not stay silent just because this attempt failed.
+
+        Forces the failure with a `pre-commit` hook in the remember repo
+        that always exits non-zero, so `_gb_commit_untrack`'s `git commit`
+        fails and the untrack block's `else` branch (line 630) fires --
+        without requiring root or any filesystem permission trick.
+        """
+        home, remember, _ = make_external_remember_repo(tmp_path)
+        slug = "legacy-slug-989-could-not"
+        slug_dir = remember / slug
+        slug_dir.mkdir()
+        (slug_dir / "now.md").write_text("## 10:00 | test\nMemory.\n")
+        (slug_dir / "config.json").write_text(
+            '{"haiku": {"oauth_token": "sk-ant-oat-OLD-SECRET"}}'
+        )
+        # Simulate a pre-#719 backup: commit config.json alongside memory directly.
+        _git(remember, ["add", "--", f"{slug}/"])
+        _git(remember, ["commit", "-q", "-m", "auto: legacy commit with config.json"])
+
+        # Write new memory so the next backup has something to commit.
+        (slug_dir / "now.md").write_text("## 11:00 | test\nMore memory.\n")
+
+        # Block every commit in this repo so `_gb_commit_untrack` fails and
+        # the untrack block takes its "could not untrack" else branch.
+        hooks_dir = remember / ".git" / "hooks"
+        hooks_dir.mkdir(parents=True, exist_ok=True)
+        pre_commit = hooks_dir / "pre-commit"
+        pre_commit.write_text("#!/bin/sh\nexit 1\n")
+        pre_commit.chmod(0o755)
+
+        project = tmp_path / "project"
+        project.mkdir()
+        cfg = _make_config(tmp_path, cooldown=0)
+
+        result = _run_hook(slug_dir, project, home, config_path=cfg)
+        assert result.returncode == 0
+        wait_for_lock_release(remember / ".git-backup.lock")
+
+        log_text = _memory_log_text(slug_dir)
+        assert "could not untrack" in log_text, log_text
+        assert "rotate" in log_text.lower(), (
+            "the could-not-untrack receipt must also advise rotating a "
+            f"credential config.json may have carried: {log_text}"
+        )
+
     def test_ordinary_backup_does_not_log_rotate_advice(self, tmp_path):
         """Positive control: an ordinary backup with no legacy config.json
         must NOT trip the rotate-advice sentence -- pairing the "must fire"
