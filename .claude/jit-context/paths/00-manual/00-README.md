@@ -433,3 +433,13 @@ than an oversight.
   parsing is a materially bigger change than this file's other deliberately-cheap heuristics, held
   for a second independent report rather than built pre-emptively against one observed edge case.
   **Filed as [#991](https://github.com/Digital-Process-Tools/claude-remember/issues/991) instead.**
+- **`989.pre-commit-hook-script-crlf-write-text`** -- declined 2026-10-08, still true at HEAD:
+  `tests/test_git_backup_rotate_advice_974.py:154`'s `pre_commit.write_text("#!/bin/sh\nexit 1\n")`
+  still carries no `newline=""` guard, so Python's default text-mode newline translation would
+  rewrite the shebang to CRLF on Windows and could make some shebang parsers misread the interpreter
+  path. Inert today: the whole test file's `pytestmark` still skips `sys.platform == "win32"` for an
+  unrelated reason (#79), and CI's matrix confirms `windows-latest` is exactly the leg that skip
+  exempts, so nothing exercises the CRLF path either way. Declined as a rule because the fix (add
+  `newline="\n"`, or write via `open(path, "wb")`) is a one-line-shaped fix scoped to this test, not
+  a generalizable lesson. **Filed as
+  [#994](https://github.com/Digital-Process-Tools/claude-remember/issues/994) instead.**
