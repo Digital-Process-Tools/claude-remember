@@ -316,6 +316,13 @@ def test_good_front_matter_in_an_agent_passes(tmp_path):
     "Bash(awk:*)",
     "Bash(nohup:*)",
     "Bash(timeout:*)",
+    # #950: command/nice/stdbuf missing from _UNSCOPED_COMMANDS, and the `..`
+    # check only split on forward slash, missing a backslash-separated escape.
+    "Bash(command:*)",
+    "Bash(command curl:*)",
+    "Bash(nice:*)",
+    "Bash(stdbuf:*)",
+    "Bash(${CLAUDE_PLUGIN_ROOT}/..\\..\\bin\\bash:*)",
 ])
 def test_unrestricted_bash_grant_as_a_string_fails(tmp_path, rel, value):
     body = f"---\ndescription: d\nallowed-tools: {value}\n---\n\nx\n".encode()
