@@ -450,9 +450,29 @@ _grc_bump_ndc_gen() {
     # reached ls-tree/checkout/rm still quoted, matched nothing there, and
     # silently dropped out of the restore while _checkout_ok stayed 1.
     _grc_unquote_porcelain_path() {
-        local _grc_up_path="$1" _grc_up_dq='"'
+        local _grc_up_path="$1" _grc_up_dq='"' _grc_up_sentinel=$'\x1c'
         _grc_up_path="${_grc_up_path#"$_grc_up_dq"}"
         _grc_up_path="${_grc_up_path%"$_grc_up_dq"}"
+        if [[ "$_grc_up_path" == *'\'* ]]; then
+            # Review finding (#975 item 2, self-review): stripping only
+            # the outer quote characters is not enough -- under
+            # core.quotePath git C-style-escapes a path's INTERIOR too
+            # (\" \\ \t \n ... and \NNN octal for a non-ASCII/control
+            # byte), the exact case this fix exists to handle, and a
+            # bare outer-quote strip left the literal escape text (e.g.
+            # "caf\303\251.txt" -> caf\303\251.txt, not the real UTF-8
+            # bytes) in place -- the restore would still never match the
+            # real file. A literal escaped backslash (\\) is protected
+            # behind a sentinel BEFORE `printf '%b'` decodes everything
+            # else (\" and the \NNN/\t/\n/... sequences bash's own %b
+            # already understands), so a backslash that was genuinely
+            # part of the filename is never re-interpreted as the start
+            # of a second escape once restored.
+            _grc_up_path="${_grc_up_path//\\\\/$_grc_up_sentinel}"
+            _grc_up_path="${_grc_up_path//\\\"/\"}"
+            _grc_up_path=$(printf '%b' "$_grc_up_path")
+            _grc_up_path="${_grc_up_path//$_grc_up_sentinel/\\}"
+        fi
         printf '%s\n' "$_grc_up_path"
     }
 
