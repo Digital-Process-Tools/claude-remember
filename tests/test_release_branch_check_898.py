@@ -275,6 +275,27 @@ def test_a_real_quoted_heredoc_opener_still_opens_one(tmp_path):
     assert not any("URL host" in o for o in offenders), offenders
 
 
+def test_an_unmatched_apostrophe_before_a_real_opener_does_not_suppress_it(tmp_path):
+    """Review finding on #981: an ordinary English contraction ("it's") with
+    no closing quote on the line must not be read as an open quote that
+    swallows a REAL heredoc opener later on the same line -- a naive
+    quote-toggle scan (flip on any quote char, flip back on the next
+    matching one) gets this wrong, because the single apostrophe never
+    finds a partner and the toggle stays "on" for the rest of the line. The
+    opener must still be detected, so the heredoc body below it (including
+    its `#`-led URL-host-shaped line, which is heredoc content, not a real
+    comment) must not be misread as ordinary file content."""
+    root = _tree(tmp_path, {
+        "scripts/run.sh": (b"#!/bin/sh\n"
+                           b"cat it's_fine <<EOF\n"
+                           b"hi\n"
+                           b"# see github.com/example/example for more\n"
+                           b"EOF\n"),
+    })
+    offenders = _check(root).offenders
+    assert not any("URL host" in o for o in offenders), offenders
+
+
 def test_an_unclosed_heredoc_opener_is_reported(tmp_path):
     """#981 addendum: an opener that is never closed must be reported rather
     than silently swallowing the rest of the file -- a FAIL the maintainer
