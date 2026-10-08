@@ -408,3 +408,28 @@ than an oversight.
   #969/#970 hard-disable), not a generalizable lesson, and consolidated into one issue since both
   share that same root cause. **Filed as
   [#976](https://github.com/Digital-Process-Tools/claude-remember/issues/976) instead.**
+- **`974.untrack-rotate-advice-third-sibling`** -- declined 2026-10-08, still true at HEAD:
+  `hooks.d/after_save/50-git-backup.sh:630`'s "could not untrack" branch of the config.json/logs/tmp
+  untrack block still has no rotate-credential advice, unlike its two sibling branches (lines 624
+  and 627) which #974/PR #987 already fixed. Declined as a rule because the fix is copying the same
+  one-sentence rotate-advice addition already applied to the other two branches, not a generalizable
+  lesson. **Filed as [#989](https://github.com/Digital-Process-Tools/claude-remember/issues/989)
+  instead.**
+- **`980.deferred-checkers-no-followup-issue`** -- declined 2026-10-08, still true at HEAD:
+  `_check_catch_all_in_loop` and `_check_single_line_delegate_positional`
+  (`.github/scripts/check_release_tree.py`) still carry docstrings claiming the heredoc-body
+  comment-test gap was "filed for a follow-up rather than fixed silently alongside the other 16," and
+  no such issue existed (checked by issue search for both function names, and again during this
+  curate pass). Declined as a rule because the fix is either routing both functions through
+  heredoc-aware tracking (the same shape #919/#980 already applied to 16 siblings) or softening the
+  docstring wording -- not a new lesson. **Filed as
+  [#990](https://github.com/Digital-Process-Tools/claude-remember/issues/990) instead.**
+- **`981.heredoc-quote-scan-is-escape-blind`** -- declined 2026-10-08, still true at HEAD:
+  `_in_quotes_before`'s `_QUOTED_SPAN` regex (`.github/scripts/check_release_tree.py:217`) still has
+  no backslash-escape awareness, so a backslash-escaped quote inside a quoted string closes the
+  matched span one character early and a real heredoc-opener-shaped substring right after it can be
+  misreported as not-in-quotes. Confirmed pre-existing (the same wrong answer predates the
+  quote-awareness rewrite #981 itself made). Declined as a rule because real escape-aware shell quote
+  parsing is a materially bigger change than this file's other deliberately-cheap heuristics, held
+  for a second independent report rather than built pre-emptively against one observed edge case.
+  **Filed as [#991](https://github.com/Digital-Process-Tools/claude-remember/issues/991) instead.**
