@@ -205,6 +205,26 @@ def test_a_function_keyword_declared_delegate_fails(tmp_path):
     assert any("lib-function-kw.sh" in o and NEEDLE_MARKER in o for o in offenders), offenders
 
 
+HEREDOC_DELEGATE_SCRIPT = (
+    b"#!/bin/sh\n"
+    b"_wrap() {\n"
+    b'    report_error "dispatch" "ERROR: hook failed: $1" <<EOF\n'
+    b"some data\n"
+    b"EOF\n"
+    b"}\n"
+    b"echo hi\n"
+)
+
+
+def test_a_single_delegate_with_a_heredoc_attached_still_fails(tmp_path):
+    # #990: the heredoc body's own lines must not inflate the apparent
+    # statement count and blind the needle to the one real delegating
+    # statement attached to it.
+    root = _tree(tmp_path, {"scripts/lib-heredoc.sh": HEREDOC_DELEGATE_SCRIPT})
+    offenders = _check(root).offenders
+    assert any("lib-heredoc.sh" in o and NEEDLE_MARKER in o for o in offenders), offenders
+
+
 def test_todays_log_sh_dispatch_reporters_do_not_trip_this_needle():
     # confirms today's tree (post-#899 r40) does not trip the new needle.
     assert LOG_SH.exists(), f"{LOG_SH} does not exist"

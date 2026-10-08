@@ -69,6 +69,58 @@ def test_probe_is_not_flagged_after_a_closed_loop():
     assert not _probe_flagged("for a in 1 2; do\n    :\ndone\n")
 
 
+def test_a_heredoc_body_containing_loop_keywords_does_not_corrupt_depth():
+    """#990: a heredoc body's literal text is not real shell code -- an
+    unclosed 'while ... do' inside a heredoc must not leave the depth
+    counter open for the real code that follows."""
+    text = (
+        "cat <<'EOF'\n"
+        "while true; do\n"
+        "EOF\n"
+        'case "$x" in\n'
+        "    *) : ;;\n"
+        "esac\n"
+    )
+    assert not _catch_all_hits(text)
+
+
+def test_a_genuine_catch_all_in_loop_still_fires_alongside_a_heredoc():
+    """Positive control for the test above: a heredoc elsewhere in the file
+    must not blind the checker to a genuine catch-all-in-loop."""
+    text = (
+        "cat <<'EOF'\n"
+        "just data\n"
+        "EOF\n"
+        "while true; do\n"
+        '    case "$x" in\n'
+        "        *) : ;;\n"
+        "    esac\n"
+        "done\n"
+    )
+    assert _catch_all_hits(text)
+
+
+def test_heredoc_open_syntax_inside_the_checkers_own_tracked_string_does_not_blind_it():
+    """#990 regression: the shared generator's heredoc-open detection has no
+    visibility into this checker's own multi-line in_string tracking (a
+    `VAR='...` single-quoted string spanning several lines). A `<<WORD`-
+    shaped substring appearing inside the BODY of one of those tracked
+    strings must not be misread as a real heredoc opener -- doing so makes
+    the generator silently swallow every following line (including the
+    genuine catch-all-in-loop below) as fake heredoc body, until it
+    happens to find a bare line matching that accidental "delimiter"."""
+    text = (
+        "x='abc\n"
+        "def <<EOF ghi'\n"
+        "while true; do\n"
+        '    case "$y" in\n'
+        "        *) : ;;\n"
+        "    esac\n"
+        "done\n"
+    )
+    assert _catch_all_hits(text)
+
+
 @pytest.mark.parametrize("path", SHIPPED_SH, ids=lambda p: p.name)
 def test_shipped_script_leaves_the_loop_counter_closed(path):
     assert SHIPPED_SH, "no shipped scripts found -- the glob is broken"
