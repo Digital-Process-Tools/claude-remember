@@ -85,10 +85,12 @@ source "$PIPELINE_DIR/scripts/lib-lock.sh"
 # foreign write landing in the window from the start of `git rebase
 # --no-autostash` through the conflict firing (before #966's pre/post-`rebase
 # --quit` snapshot is even taken) is still silently discarded by the restore.
-# Rather than open a sixth window, this hook is hard-disabled -- unconditionally,
-# before the git_reconcile.enabled read below, so the kill switch cannot itself
-# depend on the flag whose read is downstream of the disabled code path -- until
-# #969's real fix lands.
+# Rather than open a sixth window, this hook is hard-disabled -- unconditionally
+# -- until #969's real fix lands. The `exit 0` below does NOT depend on the
+# config read above it: that read exists ONLY to decide whether to print the
+# notice, never to decide whether to disable -- the disable itself holds no
+# matter what `config` returns, so a config-read failure can never re-enable
+# the hook the way a read gating the exit itself could.
 # Self-review finding (oss:auditor, #969): a bare `echo ... >&2` reaches
 # neither the daily log nor hook-errors.log, so this disablement would be
 # invisible to the one durable surface (`/remember:doctor`'s "Recent
@@ -99,12 +101,18 @@ source "$PIPELINE_DIR/scripts/lib-lock.sh"
 # hook-errors.log, by path rather than by inherited stderr, for the same
 # reason every other call site in this codebase avoids raw stderr from a
 # hook (log.sh's own comment on report_error()).
-report_error "git-reconcile" "disabled pending #969 (destroys-class TOCTOU race); tracking issue has the real fix"
-exit 0
-
-# ── Off by default ───────────────────────────────────────────────────────────
+# #976: that report_error call used to fire unconditionally, before this
+# flag read even existed -- so it reached hook-errors.log on EVERY save for
+# EVERY installed user, including the default-disabled majority who never
+# opted into git_reconcile at all, permanently tripping /remember:doctor's
+# "Recent errors" WARN. The notice is only useful to someone who turned the
+# flag on and is now finding it inert, so read the flag here ONLY to gate
+# the notice -- the `exit 0` stays unconditional either way.
 RECONCILE_ENABLED=$(config ".git_reconcile.enabled" "false")
-[ "$RECONCILE_ENABLED" = "true" ] || exit 0
+if [ "$RECONCILE_ENABLED" = "true" ]; then
+    report_error "git-reconcile" "disabled pending #969 (destroys-class TOCTOU race); tracking issue has the real fix"
+fi
+exit 0
 
 # ── Activation guard — identical shape to 50-git-backup.sh ──────────────────
 REPO_ROOT=$(dirname "$REMEMBER_DIR")
