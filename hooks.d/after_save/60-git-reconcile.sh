@@ -5,11 +5,11 @@ set -u  # not -e -- we never want to fail loudly here
 source "$PIPELINE_DIR/scripts/log.sh"
 source "$PIPELINE_DIR/scripts/lib-lock.sh"
 
-report_error "git-reconcile" "disabled pending #969 (destroys-class TOCTOU race); tracking issue has the real fix"
-exit 0
-
 RECONCILE_ENABLED=$(config ".git_reconcile.enabled" "false")
-[ "$RECONCILE_ENABLED" = "true" ] || exit 0
+if [ "$RECONCILE_ENABLED" = "true" ]; then
+    report_error "git-reconcile" "disabled pending #969 (destroys-class TOCTOU race); tracking issue has the real fix"
+fi
+exit 0
 
 REPO_ROOT=$(dirname "$REMEMBER_DIR")
 SLUG=$(basename "$REMEMBER_DIR")
