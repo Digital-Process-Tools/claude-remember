@@ -1068,7 +1068,22 @@ portal's **Contact Anthropic** opens a mail to `directory@anthropic.com` with th
 submission".
 
 For remember, the maintainer sent that mail on 2026-10-02, after the v0.38.0 scan, asking the
-directory team to clear the plugin-level hold. No reply had arrived as of writing.
+directory team to clear the plugin-level hold. The portal's own help desk replied within a minute
+with an automatic acknowledgement (ticket #140917199, "Submitted — We'll pick up your ticket
+soon"); that is the route, not an answer.
+
+**Resolved (2026-10-06, #863): there was no plugin-level hold on an already-listed plugin.** The
+"Needs the directory team" / `COMMAND_SCRIPT_NOT_FOLLOWED` flag seen after v0.38.0 came from the
+validator behind the *new-submission* form, not from the review that decides publishing a new
+version of a plugin already listed. Checking the portal's version list directly showed v0.38.0
+through v0.41.0 all **Approved**, each with "Publish update" available. Nothing is held; the
+remaining step for any approved version is a manual **Publish** click in the portal, not a code
+change or a reply to wait on.
+
+**Still open, on ticket #140917199: Keywords and Short description show "No value"** (see
+"Listing details: what comes from where" above) -- that question is still with the directory team.
+`#841` (the official-marketplace pin lagging this repo's releases) is tracked and answered on its
+own issue; it isn't something this repository's tooling or this ticket can move.
 
 ## Reusing this in another plugin repository
 
