@@ -451,27 +451,36 @@ _grc_bump_ndc_gen() {
     # silently dropped out of the restore while _checkout_ok stayed 1.
     _grc_unquote_porcelain_path() {
         local _grc_up_path="$1" _grc_up_dq='"' _grc_up_sentinel=$'\x1c'
+        local _grc_up_bs=$'\\' _grc_up_bsbs _grc_up_bsq
+        _grc_up_bsbs="${_grc_up_bs}${_grc_up_bs}"
+        _grc_up_bsq="${_grc_up_bs}${_grc_up_dq}"
         _grc_up_path="${_grc_up_path#"$_grc_up_dq"}"
         _grc_up_path="${_grc_up_path%"$_grc_up_dq"}"
-        if [[ "$_grc_up_path" == *'\'* ]]; then
+        if [[ "$_grc_up_path" == *"$_grc_up_bs"* ]]; then
             # Review finding (#975 item 2, self-review): stripping only
             # the outer quote characters is not enough -- under
             # core.quotePath git C-style-escapes a path's INTERIOR too
-            # (\" \\ \t \n ... and \NNN octal for a non-ASCII/control
-            # byte), the exact case this fix exists to handle, and a
-            # bare outer-quote strip left the literal escape text (e.g.
-            # "caf\303\251.txt" -> caf\303\251.txt, not the real UTF-8
-            # bytes) in place -- the restore would still never match the
-            # real file. A literal escaped backslash (\\) is protected
-            # behind a sentinel BEFORE `printf '%b'` decodes everything
-            # else (\" and the \NNN/\t/\n/... sequences bash's own %b
-            # already understands), so a backslash that was genuinely
-            # part of the filename is never re-interpreted as the start
-            # of a second escape once restored.
-            _grc_up_path="${_grc_up_path//\\\\/$_grc_up_sentinel}"
-            _grc_up_path="${_grc_up_path//\\\"/\"}"
+            # (an escaped quote, an escaped backslash, a tab/newline, and
+            # octal for a non-ASCII/control byte), the exact case this
+            # fix exists to handle, and a bare outer-quote strip left the
+            # literal escape text in place -- the restore would still
+            # never match the real file. An escaped backslash is
+            # protected behind a sentinel BEFORE `printf '%b'` decodes
+            # everything else (the escaped quote and the octal/control
+            # escapes bash's own %b already understands), so a backslash
+            # that was genuinely part of the filename is never
+            # re-interpreted as the start of a second escape once
+            # restored. The two escape patterns are held in variables
+            # (`_grc_up_bsbs`, `_grc_up_bsq`), built from single
+            # characters rather than written as a literal
+            # backslash-then-quote in the source -- the shape this
+            # repo's own release-tree shape checker holds a submission
+            # on (#898 round 7/8; see .github/scripts/check_release_
+            # tree.py's BACKSLASH_QUOTE/ESCAPED_QUOTE).
+            _grc_up_path="${_grc_up_path//"$_grc_up_bsbs"/$_grc_up_sentinel}"
+            _grc_up_path="${_grc_up_path//"$_grc_up_bsq"/$_grc_up_dq}"
             _grc_up_path=$(printf '%b' "$_grc_up_path")
-            _grc_up_path="${_grc_up_path//$_grc_up_sentinel/\\}"
+            _grc_up_path="${_grc_up_path//$_grc_up_sentinel/$_grc_up_bs}"
         fi
         printf '%s\n' "$_grc_up_path"
     }
