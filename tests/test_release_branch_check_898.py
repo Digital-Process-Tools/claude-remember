@@ -144,6 +144,87 @@ def test_a_url_host_in_a_python_comment_also_fails(tmp_path):
     assert any("example.py" in o and "URL host" in o for o in offenders), offenders
 
 
+def test_a_url_host_comment_line_inside_a_heredoc_body_does_not_fail(tmp_path):
+    """#919: a `#`-led line that looks like a URL-host comment is heredoc
+    content, not a real shell comment, once it sits inside the body of a
+    typed `<<EOF ... EOF` heredoc -- this guard must track heredoc
+    boundaries the same way _in_code() already tracks fenced-code state."""
+    root = _tree(tmp_path, {
+        "scripts/run.sh": (b"#!/bin/sh\n"
+                           b"cat <<EOF\n"
+                           b"# see github.com/example/example for more\n"
+                           b"EOF\n"),
+    })
+    offenders = _check(root).offenders
+    assert not any("URL host" in o for o in offenders), offenders
+
+
+def test_a_url_host_comment_line_outside_the_heredoc_still_fails(tmp_path):
+    """Positive control for the heredoc-boundary test above: the identical
+    `#`-led URL-host line, in the same file, outside any heredoc body, must
+    still fail -- the fix must skip real heredoc content without silencing
+    the guard everywhere else."""
+    root = _tree(tmp_path, {
+        "scripts/run.sh": (b"#!/bin/sh\n"
+                           b"cat <<EOF\n"
+                           b"hi\n"
+                           b"EOF\n"
+                           b"# see github.com/example/example for more\n"),
+    })
+    offenders = _check(root).offenders
+    assert any("run.sh" in o and "URL host" in o for o in offenders), offenders
+
+
+def test_a_bitshift_like_line_in_a_python_file_does_not_suppress_a_later_url_host_comment(
+    tmp_path,
+):
+    """Review finding on #919: the heredoc-opener regex (`<< NAME`) is also the
+    shape of a bitwise left-shift against a named operand (Python, JS) and a
+    C++-style stream-insertion operator -- neither is a heredoc, and Python has
+    no heredoc syntax at all. Heredoc-delimiter tracking must therefore be
+    scoped to hooks/hooks.d/scripts (the only directories that can hold a real
+    one), or this bare bit-shift line would silently disable the URL-host
+    guard for the rest of the file."""
+    root = _tree(tmp_path, {
+        "pipeline/example.py": (b"mask = flag << SOME_CONST\n"
+                                 b"# see github.com/example/example for more\n"),
+    })
+    offenders = _check(root).offenders
+    assert any("example.py" in o and "URL host" in o for o in offenders), offenders
+
+
+def test_a_plain_heredoc_closer_with_leading_whitespace_does_not_close_it(tmp_path):
+    """Review finding on #919: an unquoted `<<EOF` heredoc's closing line must be
+    the bare delimiter with no leading/trailing whitespace -- real bash does not
+    treat an indented look-alike as the terminator. `.strip() == delim` would
+    close the heredoc one line early here and then read the real body line that
+    follows (still inside the heredoc, per bash) as an ordinary file line."""
+    root = _tree(tmp_path, {
+        "scripts/run.sh": (b"#!/bin/sh\n"
+                           b"cat <<EOF\n"
+                           b"  EOF\n"
+                           b"# see github.com/example/example for more\n"
+                           b"EOF\n"),
+    })
+    offenders = _check(root).offenders
+    assert not any("URL host" in o for o in offenders), offenders
+
+
+def test_a_dash_heredoc_closer_with_leading_tabs_still_closes_it(tmp_path):
+    """Positive control for the test above: `<<-EOF` heredocs DO strip leading
+    tabs from the closing line -- the tab-tolerant and whitespace-strict
+    closing paths must not collapse into each other."""
+    root = _tree(tmp_path, {
+        "scripts/run.sh": (b"#!/bin/sh\n"
+                           b"cat <<-EOF\n"
+                           b"hi\n"
+                           b"\tEOF\n"
+                           b"# see github.com/example/example for more\n"),
+    })
+    offenders = _check(root).offenders
+    assert any("run.sh" in o and "URL host" in o for o in offenders), offenders
+
+
 # -- network command name at command position (FAIL) -----------------------------
 
 def test_a_network_command_name_at_command_position_fails(tmp_path):

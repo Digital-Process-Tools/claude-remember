@@ -144,8 +144,9 @@ def test_floor_bash_really_lacks_mapfile():
 
 @pytest.mark.skip(reason=(
     "hooks.d/after_save/60-git-reconcile.sh is hard-disabled pending #969 "
-    "(destroys-class TOCTOU race) -- it now exits 0 before ever reading "
-    "git_reconcile.enabled, so no rebase/conflict/restore ever happens and "
+    "(destroys-class TOCTOU race) -- the kill switch's own exit 0 fires "
+    "unconditionally regardless of git_reconcile.enabled's value, so no "
+    "rebase/conflict/restore ever happens and "
     "this test would pass trivially for the wrong reason (nothing touches "
     "the tree because the hook never runs, not because mapfile's absence is "
     "correctly handled). Kept as documentation of intended behavior once "

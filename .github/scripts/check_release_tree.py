@@ -186,6 +186,25 @@ URL_HOST = re.compile(
     r"(?:com|org|net|io|dev|ai|co|gov|edu|app)\b"
 )
 
+# #919: a typed `<<DELIM`/`<<-DELIM`/`<<'DELIM'`/`<<"DELIM"` heredoc opener --
+# used by _check_url_in_comment below to skip past a heredoc body the same
+# way _in_code() above already skips past a fenced code block. Not a
+# here-string (`<<<`): the lookaround on the leading `<<` mirrors
+# TYPED_HEREDOC's own, and a bare `<<<DELIM` never matches because the third
+# `<` is not whitespace, a quote or a name-start character. Masking
+# arithmetic (`_mask_arithmetic`) before testing keeps `$(( x << 4 ))` from
+# being read as a heredoc opener either, for the same reason TYPED_HEREDOC
+# masks it.
+#
+# Review finding on #919: this same bare-identifier shape (`<< NAME`) is also
+# a bitwise left-shift against a named operand in Python/JS, and a C++-style
+# stream-insertion operator (`cout << endl`) -- neither is a heredoc. Heredocs
+# only exist in shell, so `_check_url_in_comment` below only engages this
+# tracking inside hooks/hooks.d/scripts (the same directories
+# `_check_typed_heredoc` above is scoped to); elsewhere this regex is never
+# even tested against a line, so the ambiguity cannot fire.
+_HEREDOC_OPEN = re.compile(r"(?<!<)<<(-?)\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2(?!<)")
+
 # #898: the directory's own bundled-word-list scan tripped on curl/ftp/dig/
 # drill as plain dictionary entries, one per line -- not as shell commands.
 # Catching every English use of "host" or "fetch" would FAIL this repo's own
@@ -986,14 +1005,43 @@ def _check_url_in_comment(files: dict, kinds: dict, off: list) -> None:
     shipped `.sh` one, and the sibling guards below (network command names,
     the credential pair) are not directory-scoped either. A `.md` file's
     `#` heading is a false-positive risk this does not special-case; none of
-    this repo's shipped headings happens to carry a URL host today."""
+    this repo's shipped headings happens to carry a URL host today.
+
+    #919: a `#`-led line inside the body of a typed `<<DELIM ... DELIM`
+    heredoc is heredoc content, not a real shell comment, so it must not be
+    read as one -- tracked the same way _in_code() above tracks fenced-code
+    state, keyed on the heredoc's own delimiter rather than ``` ``` ```.
+    Unlike the URL-host check itself, this heredoc tracking IS scoped to
+    hooks/hooks.d/scripts (review finding on #919: a bare `<< NAME` is only
+    ever a heredoc opener in shell -- in any other shipped text file it is
+    just as likely to be a bitwise left-shift or a C++-style stream-
+    insertion operator, and tracking it there would silently swallow every
+    `#`-led line for the rest of that file). An unquoted `<<DELIM` heredoc's
+    closing line must be the bare delimiter with no leading/trailing
+    whitespace at all; only `<<-DELIM` strips leading tabs -- using
+    `.strip()` unconditionally would close a plain heredoc one line early on
+    an indented look-alike and read real heredoc body as ordinary file
+    content (review finding on #919)."""
     for rel, data in sorted(files.items()):
         if kinds.get(rel) != "text":
             continue
         text = data.decode("utf-8")
+        track_heredocs = rel.split("/")[0] in ("hooks", "hooks.d", "scripts")
+        heredoc_delim = None
+        heredoc_dash = False
         for n, line in enumerate(text.splitlines(), 1):
+            if heredoc_delim is not None:
+                closer = line.lstrip("\t") if heredoc_dash else line
+                if closer == heredoc_delim:
+                    heredoc_delim = None
+                continue
             if line.lstrip().startswith("#") and URL_HOST.search(line):
                 off.append(f"{rel}:{n}: a URL host in a comment: {line.strip()[:80]}")
+            if track_heredocs:
+                m = _HEREDOC_OPEN.search(_mask_arithmetic(line))
+                if m:
+                    heredoc_dash = bool(m.group(1))
+                    heredoc_delim = m.group(3)
 
 
 def _check_network_command_names(files: dict, kinds: dict, off: list) -> None:
