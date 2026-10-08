@@ -514,6 +514,44 @@ _DYNAMIC_CALL_RE = re.compile(
 )
 
 
+def _mask_bracket_tests(masked_line):
+    """Blank out every `[[ ... ]]` and `[ ... ]` test-expression span in an
+    already-masked line (quotes/comments/heredocs/$(...) already stripped
+    by _scan_line_braces) before the dynamic-dispatch scan ever sees it
+    (#906). `&& "$x"` inside a test expression --
+    `[[ -n "$x" && "$x" != *[!0-9]* ]]` -- is a real code-position match
+    for _DYNAMIC_CALL_RE (the leading alternation treats '&&' as a command
+    separator unconditionally), but `[[ ]]`/`[ ]` cannot invoke an
+    arbitrary command through a variable -- there is no call here to miss.
+    Brackets are counted (not matched with the first `]`) so a glob
+    char-class inside the test (`*[!0-9]*`) does not prematurely close the
+    span before the real closing bracket is reached."""
+    chars = list(masked_line)
+    n = len(chars)
+    i = 0
+    while i < n:
+        at_boundary = i == 0 or chars[i - 1] in " \t;&|("
+        if chars[i] == "[" and at_boundary:
+            start = i
+            double = i + 1 < n and chars[i + 1] == "["
+            j = i + 2 if double else i + 1
+            depth = 1
+            while j < n and depth > 0:
+                if chars[j] == "[":
+                    depth += 1
+                elif chars[j] == "]":
+                    depth -= 1
+                j += 1
+            if double and j < n and chars[j] == "]":
+                j += 1
+            for k in range(start, j):
+                chars[k] = " "
+            i = j
+            continue
+        i += 1
+    return "".join(chars)
+
+
 def _cmdsub_continue(line, start, depth, sq, dq):
     """The character-by-character scan _command_substitution_end uses for
     a fresh '$(', also re-entered at the start of a physical line that
@@ -881,15 +919,21 @@ def tree_shake(text):
     for s, e in funcs.values():
         in_func_line.update(range(s, e + 1))
 
-    dynamic_dispatch = any(_DYNAMIC_CALL_RE.search(ml) for ml in masked_lines if ml)
+    dynamic_dispatch_line = None
+    for lineno, ml in enumerate(masked_lines, start=1):
+        if ml and _DYNAMIC_CALL_RE.search(_mask_bracket_tests(ml)):
+            dynamic_dispatch_line = lineno
+            break
+    dynamic_dispatch = dynamic_dispatch_line is not None
 
     if dynamic_dispatch:
         return text, {"shaken": False, "kept": sorted(funcs), "dropped": [],
                        "dynamic_dispatch": True,
-                       "reason": ("a command position occupied by a bare/quoted "
-                                  "lowercase variable was found -- its call target is "
-                                  "not provably resolvable from the source text, so "
-                                  "no function in this file can be proven unreachable")}
+                       "reason": (f"line {dynamic_dispatch_line}: a command position "
+                                  "occupied by a bare/quoted lowercase variable was "
+                                  "found -- its call target is not provably resolvable "
+                                  "from the source text, so no function in this file "
+                                  "can be proven unreachable")}
 
     root_words = set()
     for i, line in enumerate(lines):
@@ -1136,7 +1180,7 @@ def main(argv: list[str] | None = None) -> int:
             status = 1
             continue
         try:
-            compiled = compile_hook(key, contents, args.script_dir)
+            compiled, shake_report = compile_hook_report(key, contents, args.script_dir)
         except InlineError as exc:
             print(f"compile_hooks: {key}: {exc}", file=sys.stderr)
             status = 1
@@ -1148,6 +1192,12 @@ def main(argv: list[str] | None = None) -> int:
                   f"compiling, line {n}: {line.strip()}", file=sys.stderr)
             status = 1
             continue
+        if not shake_report["shaken"]:
+            # #906: a silent fallback is the failure mode here -- the only
+            # prior symptom of tree-shaking being disabled was the
+            # compiled file's own byte size. Say why, every build.
+            print(f"compile_hooks: {key}: tree-shaking disabled -- "
+                  f"{shake_report['reason']}", file=sys.stderr)
         size = len(compiled.encode("utf-8"))
         print(f"{key}: {size} bytes compiled ({len(contents[key].encode('utf-8'))} "
               f"before inlining+stripping)")
