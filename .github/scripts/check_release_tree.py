@@ -1428,18 +1428,17 @@ def _check_catch_all_in_loop(files: dict, kinds: dict, off: list) -> None:
     every instance this repo had as `[ ]` tests, so this guards against a
     REintroduction, not a known holdout.
 
-    #980 (deferred, not fixed here): shares the exact same unguarded
+    #980 left this out because it shared the exact same unguarded
     `line.lstrip().startswith("#")` comment test as the 16 functions #980
     did route through _iter_non_heredoc_lines, and a heredoc-body line
     could be misread the same two ways -- a `#`-led body line read as a
     real comment (hiding a genuine catch-all-in-loop shape), or a body
     line containing literal `while`/`for`/`until`/`done`/`*)` text read as
-    real loop/case syntax. Left out of that lane because this function
-    carries its own multi-line open/close-depth and in-string state
-    machine, which heredoc-tracking would need to interleave with rather
-    than simply wrap -- a bigger, separate change, not folded into #980's
-    scope. Filed for a follow-up rather than fixed silently alongside the
-    other 16."""
+    real loop/case syntax. #990: fixed here by swapping the raw
+    `enumerate(text.splitlines(), 1)` for `_iter_non_heredoc_lines` itself
+    -- it tracks heredoc delimiters independently of this function's own
+    multi-line open/close-depth and in-string state, so the two interleave
+    without either needing to know about the other."""
     _loop_open = re.compile(r'(?:^|[;&|\s])(?:while|for|until)\s')
     _loop_close = re.compile(r'(?:^|[;&|\s])done(?=\s|;|$|\))')
     _catch_all = re.compile(r'(?:^|[\s;(])\*\)')
@@ -1455,12 +1454,12 @@ def _check_catch_all_in_loop(files: dict, kinds: dict, off: list) -> None:
         text = data.decode("utf-8")
         depth = 0
         in_string = False
-        for n, raw_line in enumerate(text.splitlines(), 1):
+        for n, raw_line, is_comment in _iter_non_heredoc_lines(text, track_heredocs=True):
             if in_string:
                 if raw_line.startswith("'") or re.search(r"^[^']*'\s*(\)|\"|$)", raw_line):
                     in_string = False
                 continue
-            if raw_line.lstrip().startswith("#"):
+            if is_comment:
                 continue
             if _string_open.match(raw_line) or _awk_open.search(raw_line):
                 in_string = True
@@ -1727,16 +1726,16 @@ def _check_single_line_delegate_positional(files: dict, kinds: dict, off: list) 
     through another call. A bare "$1" (a named-local-style passthrough) is
     fine; "$1" spliced into a longer message string is the held shape.
 
-    #980 (deferred, not fixed here): this is the same bare
+    #980 left this out because it filters an already-extracted
+    function-body *string* (see _iter_function_bodies below), not the raw
+    file by line number, and shared the same bare
     `ln.lstrip().startswith("#")` comment test as the 16 functions #980
-    routed through _iter_non_heredoc_lines, but it filters an already-
-    extracted function-body *string* (see _iter_function_bodies below),
-    not the raw file by line number -- heredoc tracking here would need a
-    different approach (tracked across the body slice, with line numbers
-    re-derived the way `n = text[:body_start].count("\n") + 1` already
-    does below), not a drop-in swap for the shared generator. Left out of
-    that lane's scope; filed for a follow-up rather than fixed silently
-    alongside the other 16."""
+    routed through _iter_non_heredoc_lines. #990: fixed here by running
+    the extracted body string itself through _iter_non_heredoc_lines --
+    the line numbers reported still come from `n = text[:body_start].
+    count("\n") + 1` below, derived from the function's own start offset
+    in the raw file, which is unaffected by which lines inside the body
+    are heredoc content."""
     for rel, data in sorted(files.items()):
         top = rel.split("/")[0]
         if top not in _SCRIPT_DIRS or kinds.get(rel) != "text" or not rel.endswith(".sh"):
@@ -1751,8 +1750,9 @@ def _check_single_line_delegate_positional(files: dict, kinds: dict, off: list) 
             off.append(f"{rel}: not UTF-8, so its function bodies cannot be checked")
             continue
         for name, body, body_start in _iter_function_bodies(text):
-            code = [ln for ln in body.splitlines()
-                    if ln.strip() and not ln.lstrip().startswith("#")]
+            code = [ln for _, ln, is_comment in
+                    _iter_non_heredoc_lines(body, track_heredocs=True)
+                    if ln.strip() and not is_comment]
             if len(code) != 1:
                 continue
             line = code[0].strip()

@@ -69,6 +69,37 @@ def test_probe_is_not_flagged_after_a_closed_loop():
     assert not _probe_flagged("for a in 1 2; do\n    :\ndone\n")
 
 
+def test_a_heredoc_body_containing_loop_keywords_does_not_corrupt_depth():
+    """#990: a heredoc body's literal text is not real shell code -- an
+    unclosed 'while ... do' inside a heredoc must not leave the depth
+    counter open for the real code that follows."""
+    text = (
+        "cat <<'EOF'\n"
+        "while true; do\n"
+        "EOF\n"
+        'case "$x" in\n'
+        "    *) : ;;\n"
+        "esac\n"
+    )
+    assert not _catch_all_hits(text)
+
+
+def test_a_genuine_catch_all_in_loop_still_fires_alongside_a_heredoc():
+    """Positive control for the test above: a heredoc elsewhere in the file
+    must not blind the checker to a genuine catch-all-in-loop."""
+    text = (
+        "cat <<'EOF'\n"
+        "just data\n"
+        "EOF\n"
+        "while true; do\n"
+        '    case "$x" in\n'
+        "        *) : ;;\n"
+        "    esac\n"
+        "done\n"
+    )
+    assert _catch_all_hits(text)
+
+
 @pytest.mark.parametrize("path", SHIPPED_SH, ids=lambda p: p.name)
 def test_shipped_script_leaves_the_loop_counter_closed(path):
     assert SHIPPED_SH, "no shipped scripts found -- the glob is broken"
