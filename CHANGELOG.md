@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.42.2] - 2026-10-08 — stop the #969 hard-disable notice from polluting hook-errors.log for every user, every save
+
+### Fixed
+
+- Fixed: the release-tree URL-host-in-comment guard now tracks typed heredoc
+  boundaries, so a `#`-led line inside a `<<DELIM ... DELIM` heredoc body is no
+  longer misread as a real shell comment (#919).
+
+- Fixed (#976): the #969 hard-disable of `60-git-reconcile.sh` left two side
+  effects unaddressed. The kill-switch notice no longer reaches
+  `hook-errors.log` for every user on every save -- it now fires only for
+  someone who actually set `git_reconcile.enabled`, and is now finding it
+  inert, instead of unconditionally for the default-disabled majority who
+  never opted in. `/remember:doctor`'s "Recent errors" check was permanently
+  tripped by this. Also fixed: the rejection/divergence notices in
+  `50-git-backup.sh` and `50-git-restore.sh` no longer promise that
+  `60-git-reconcile.sh` "may fetch, rebase and push this automatically" when
+  `git_reconcile.enabled=true` -- that hook is hard-disabled pending #969, so
+  nothing resolves automatically right now, and the notices (and
+  `scripts/user-prompt-hook.sh`'s internal documentation of them) say so.
+
 ## [0.42.1] - 2026-10-08 — the git-reconcile hook is hard-disabled pending its fifth consecutive destroys-class finding (#969)
 
 ### Fixed
@@ -4610,7 +4631,8 @@ Fixes [#9](https://github.com/Digital-Process-Tools/claude-remember/issues/9), a
 
 ## [0.1.0] — Initial release
 
-[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.42.1...HEAD
+[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.42.2...HEAD
+[0.42.2]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.42.2
 [0.42.1]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.42.1
 [0.42.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.42.0
 [0.41.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.41.0
