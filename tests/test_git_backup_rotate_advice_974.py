@@ -77,6 +77,47 @@ class TestUntrackReceiptCarriesRotateAdvice:
             f"may have carried: {log_text}"
         )
 
+    def test_deferred_untrack_with_staged_changes_also_logs_rotate_advice(self, tmp_path):
+        """Self-review finding (#974 follow-up): the DEFERRED branch -- a
+        legacy config.json is tracked but this store also has staged
+        changes, so the untrack commit is left for the next backup -- is
+        reached under the exact same git-history fact as the succeeded
+        branch above (the credential is already committed either way) and
+        must give the same rotate advice, not stay silent until a later
+        save happens to untrack it cleanly."""
+        home, remember, _ = make_external_remember_repo(tmp_path)
+        slug = "legacy-slug-974-deferred"
+        slug_dir = remember / slug
+        slug_dir.mkdir()
+        (slug_dir / "now.md").write_text("## 10:00 | test\nMemory.\n")
+        (slug_dir / "config.json").write_text(
+            '{"haiku": {"oauth_token": "sk-ant-oat-OLD-SECRET"}}'
+        )
+        # Simulate a pre-#719 backup: commit config.json alongside memory directly.
+        _git(remember, ["add", "--", f"{slug}/"])
+        _git(remember, ["commit", "-q", "-m", "auto: legacy commit with config.json"])
+
+        # Stage a change directly in the index (not via the hook) so the
+        # hook finds the index dirty and takes the DEFERRED branch instead
+        # of the succeeded one.
+        (slug_dir / "now.md").write_text("## 11:00 | test\nMore memory.\n")
+        _git(remember, ["add", "--", f"{slug}/now.md"])
+
+        project = tmp_path / "project"
+        project.mkdir()
+        cfg = _make_config(tmp_path, cooldown=0)
+
+        result = _run_hook(slug_dir, project, home, config_path=cfg)
+        assert result.returncode == 0
+        wait_for_lock_release(remember / ".git-backup.lock")
+
+        log_text = _memory_log_text(slug_dir)
+        assert "left for the next backup" in log_text, log_text
+        assert "rotate" in log_text.lower(), (
+            "the deferred-untrack receipt must also advise rotating a "
+            f"credential config.json may have carried: {log_text}"
+        )
+
     def test_ordinary_backup_does_not_log_rotate_advice(self, tmp_path):
         """Positive control: an ordinary backup with no legacy config.json
         must NOT trip the rotate-advice sentence -- pairing the "must fire"
