@@ -503,38 +503,41 @@ PID_FILE="$REMEMBER_DIR/tmp/save-session.pid"
 # reusing that file's invalidation (which does not track CLAUDE_CONFIG_DIR
 # at all, and should not be made to for the sake of one caller).
 #
-# Keyed on MEMORY_PROJECT_DIR, NOT raw PROJECT/PROJECT_DIR (self-review
-# finding, #913): REMEMBER_DIR -- and therefore this very tmp/ directory --
-# is resolved from MEMORY_PROJECT_DIR, which lib-memory-dir.sh deliberately
-# makes the SAME value across every worktree of one repo (#56), precisely so
-# memory is shared rather than split per worktree. Keying on raw PROJECT
-# would make this cache thrash -- recompute every call, the exact cost #913
-# reports -- the moment two worktrees of the same repo are both in use and
-# their hook invocations interleave, since each one's $PROJECT differs but
-# both write to this same file. lib-env-cache.sh already gets this right
-# ("the same identity the file is keyed and validated on") and this cache
-# now matches it. Falls back to PROJECT only in the one case
-# MEMORY_PROJECT_DIR can be unset here: a config-cache load whose own loader
-# already defaults it to PROJECT_DIR when the cache carried no value
-# (lib-env-cache.sh's own `[ -n "$MEMORY_PROJECT_DIR" ] || MEMORY_PROJECT_DIR="$_proj"`),
-# so this mirrors that default rather than inventing a second one.
+# Keyed on PROJECT, NOT MEMORY_PROJECT_DIR (#973 fix; #913 self-review had
+# keyed this on MEMORY_PROJECT_DIR instead, reasoning below). SESSION_DIR
+# below is computed from $PROJECT -- "$(claude_projects_dir)/$(session_dir_slug
+# "$PROJECT")" -- so the cache key must track PROJECT's granularity, or the
+# key can validate a cache entry that was never actually keyed on the thing
+# whose value it is.
 #
-# HOME is also part of the key (second self-review finding): claude_projects_dir()
+# MEMORY_PROJECT_DIR deliberately collapses every linked worktree of one repo
+# to the SAME value (lib-memory-dir.sh, #56), which is also why REMEMBER_DIR
+# -- and therefore this cache FILE's location -- stays shared across
+# worktrees on purpose: that sharing is correct for MEMORY, which is meant to
+# survive `git worktree remove` and be pooled across worktrees. But a cache
+# KEY built from that same collapsed value can never distinguish worktree A's
+# PROJECT from worktree B's: both share one cache file AND, under the old
+# key, one cache key, so whichever worktree wrote last silently wins for
+# every reader regardless of which worktree is asking (#973) -- the file's
+# sharing leaking into the key's sharing, when only the former was intended.
+# PROJECT stays worktree-specific, so it is the only key that actually
+# matches what gets cached, even though the file it is written into keeps
+# living at the shared, MEMORY_PROJECT_DIR-derived location.
+#
+# The #913 cost this cache exists to avoid is unaffected for the common case
+# (repeat calls within ONE worktree, where PROJECT does not change); it is
+# only reintroduced -- correctly -- the moment two worktrees of the same repo
+# interleave calls against this shared file, which #913 itself counted as an
+# edge case rather than the steady state it was optimizing.
+#
+# HOME is also part of the key (second #913 self-review finding): claude_projects_dir()
 # falls back to "$HOME/.claude" whenever CLAUDE_CONFIG_DIR is unset, and this
 # cache outlives one invocation -- a shared-filesystem/CI setup where
 # REMEMBER_DIR is reached under more than one HOME (no CLAUDE_CONFIG_DIR
 # pinned) would otherwise serve one HOME's SESSION_DIR to another's
 # invocations indefinitely, with nothing to trigger a recompute.
 _SESSION_DIR_CACHE="$REMEMBER_DIR/tmp/session-dir-cache"
-# Explicit if/else, not a nested default expansion (`${MEMORY_PROJECT_DIR:-$PROJECT}`)
-# -- this repo's own release-tree checks (#900) ban that shape outright, and
-# CI caught it (a nested `${X:-$Y}` reads, to that scanner, exactly like the
-# argument-vector-assembled-at-runtime shape #898 also exists to catch).
-if [ -n "${MEMORY_PROJECT_DIR:-}" ]; then
-    _SDC_CACHE_PROJECT="$MEMORY_PROJECT_DIR"
-else
-    _SDC_CACHE_PROJECT="$PROJECT"
-fi
+_SDC_CACHE_PROJECT="$PROJECT"
 SESSION_DIR=""
 if [ -f "$_SESSION_DIR_CACHE" ] && [ ! -L "$_SESSION_DIR_CACHE" ] \
     && [ -O "$_SESSION_DIR_CACHE" ] && [ -r "$_SESSION_DIR_CACHE" ]; then
