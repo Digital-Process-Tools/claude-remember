@@ -14,6 +14,7 @@ positive control).
 """
 
 import sys
+import unittest.mock
 from pathlib import Path
 
 import pytest
@@ -32,6 +33,52 @@ pytestmark = pytest.mark.skipif(
     sys.platform == "win32",
     reason="bash hook subprocess + POSIX flock/git semantics - not portable to Windows runners (#79)",
 )
+
+
+def _write_fail_hook(hooks_dir: Path) -> Path:
+    """Write a `pre-commit` hook that always exits 1, forcing
+    `_gb_commit_untrack`'s `git commit` to fail so the "could not untrack"
+    branch fires.
+
+    Written via `open(..., newline="\\n")`, never `Path.write_text()`:
+    `write_text()`'s default `newline=None` applies universal-newline
+    translation on write, turning every `\\n` into `os.linesep` -- `\\r\\n`
+    on Windows -- which corrupts the shebang line into a "bad interpreter"
+    exec failure (same mechanism, same fix, as
+    `tests/test_autonomous_log_retention_487.py`'s `_write_shell_script`,
+    CI PR #960, windows-latest). This file's own win32 skip above means
+    that specific breakage is inert here, but the write is still fixed to
+    the safe pattern (#994) rather than left as a trap for whoever narrows
+    or removes that skip.
+    """
+    pre_commit = hooks_dir / "pre-commit"
+    with open(pre_commit, "w", newline="\n", encoding="utf-8") as f:
+        f.write("#!/bin/sh\nexit 1\n")
+    pre_commit.chmod(0o755)
+    return pre_commit
+
+
+def test_fail_hook_writer_never_uses_path_write_text(tmp_path):
+    """Regression pin for #994: `_write_fail_hook` must go through
+    `open(..., newline="\\n")`, never `Path.write_text()`, whose default
+    `newline=None` applies universal-newline translation and can corrupt
+    the shebang line on Windows. Pins the *call*, not the output bytes --
+    `os.linesep` is "\\n" on every platform this suite can exercise
+    locally, so the corrupted bytes this bug produces on Windows would
+    not appear here even without the fix, which is exactly why the call
+    itself has to be pinned instead."""
+    hooks_dir = tmp_path / "hooks"
+    hooks_dir.mkdir()
+    with unittest.mock.patch.object(
+        Path,
+        "write_text",
+        side_effect=AssertionError(
+            "pre-commit hook written via Path.write_text(), not open(newline='\\n')"
+        ),
+    ):
+        pre_commit = _write_fail_hook(hooks_dir)
+    assert pre_commit.read_bytes() == b"#!/bin/sh\nexit 1\n"
+    assert pre_commit.stat().st_mode & 0o777 == 0o755
 
 
 def _memory_log_text(remember_slug_dir: Path) -> str:
