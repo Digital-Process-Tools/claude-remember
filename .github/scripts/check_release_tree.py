@@ -1020,7 +1020,23 @@ def _iter_non_heredoc_lines(text: str, track_heredocs: bool):
     behaviour for a caller whose files are not guaranteed to be shell
     scripts, where a bare `<< NAME` is just as likely to be a left-shift or
     a C++-style stream-insertion operator as a heredoc opener (the same
-    reasoning as _check_url_in_comment's own `track_heredocs` gate)."""
+    reasoning as _check_url_in_comment's own `track_heredocs` gate).
+
+    Unlike _check_url_in_comment's own hand-rolled copy of this same loop,
+    this generator has no "the heredoc opened here was never closed" signal
+    back to its 16 callers (review finding on #980) -- an unclosed/malformed
+    `<<DELIM` silently blinds every one of them to the rest of the file,
+    with no diagnostic of its own. This is a real gap, left unfixed here
+    rather than threading an extra `rel`/off-list parameter through 24 call
+    sites in this one lane: it is mitigated, not masked, because
+    `check_tree` always runs the unchanged `_check_url_in_comment` on every
+    file too, with the exact same `track_heredocs` scope condition (hooks/
+    hooks.d/scripts) -- so any file reachable by one of these 16 callers
+    that has a genuinely unclosed heredoc is guaranteed to also trip that
+    function's own "heredoc opener ... is never closed" FAIL in the same
+    run (tests/test_heredoc_comment_guard_980.py pins this). A future
+    change that moves or narrows _check_url_in_comment's own scope would
+    need to re-examine this coupling."""
     heredoc_delim = None
     heredoc_dash = False
     for n, line in enumerate(text.splitlines(), 1):
@@ -1410,7 +1426,20 @@ def _check_catch_all_in_loop(files: dict, kinds: dict, off: list) -> None:
     scanner itself is (not a bash parser), rather than a tighter check that
     would stop matching what the scanner matches. FAIL: round 7 rewrote
     every instance this repo had as `[ ]` tests, so this guards against a
-    REintroduction, not a known holdout."""
+    REintroduction, not a known holdout.
+
+    #980 (deferred, not fixed here): shares the exact same unguarded
+    `line.lstrip().startswith("#")` comment test as the 16 functions #980
+    did route through _iter_non_heredoc_lines, and a heredoc-body line
+    could be misread the same two ways -- a `#`-led body line read as a
+    real comment (hiding a genuine catch-all-in-loop shape), or a body
+    line containing literal `while`/`for`/`until`/`done`/`*)` text read as
+    real loop/case syntax. Left out of that lane because this function
+    carries its own multi-line open/close-depth and in-string state
+    machine, which heredoc-tracking would need to interleave with rather
+    than simply wrap -- a bigger, separate change, not folded into #980's
+    scope. Filed for a follow-up rather than fixed silently alongside the
+    other 16."""
     _loop_open = re.compile(r'(?:^|[;&|\s])(?:while|for|until)\s')
     _loop_close = re.compile(r'(?:^|[;&|\s])done(?=\s|;|$|\))')
     _catch_all = re.compile(r'(?:^|[\s;(])\*\)')
@@ -1696,7 +1725,18 @@ def _check_single_line_delegate_positional(files: dict, kinds: dict, off: list) 
     went back to a self-contained body: its own locals, its own #618
     flatten, its own writes (#899 r40) -- never delegate a positional splice
     through another call. A bare "$1" (a named-local-style passthrough) is
-    fine; "$1" spliced into a longer message string is the held shape."""
+    fine; "$1" spliced into a longer message string is the held shape.
+
+    #980 (deferred, not fixed here): this is the same bare
+    `ln.lstrip().startswith("#")` comment test as the 16 functions #980
+    routed through _iter_non_heredoc_lines, but it filters an already-
+    extracted function-body *string* (see _iter_function_bodies below),
+    not the raw file by line number -- heredoc tracking here would need a
+    different approach (tracked across the body slice, with line numbers
+    re-derived the way `n = text[:body_start].count("\n") + 1` already
+    does below), not a drop-in swap for the shared generator. Left out of
+    that lane's scope; filed for a follow-up rather than fixed silently
+    alongside the other 16."""
     for rel, data in sorted(files.items()):
         top = rel.split("/")[0]
         if top not in _SCRIPT_DIRS or kinds.get(rel) != "text" or not rel.endswith(".sh"):

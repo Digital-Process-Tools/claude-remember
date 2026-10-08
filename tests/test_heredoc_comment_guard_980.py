@@ -123,3 +123,22 @@ def test_pwd_literal_outside_heredoc_is_still_flagged(tmp_path):
     root = _tree(tmp_path, {"scripts/run.sh": b"#!/bin/sh\necho $PWD\n"})
     offenders = _check(root).offenders
     assert any("PWD" in o for o in offenders), offenders
+
+
+# -- review finding on #980: _iter_non_heredoc_lines has no "the heredoc
+# opened here was never closed" signal back to its 16 callers, unlike
+# _check_url_in_comment's own hand-rolled copy of this tracking loop, which
+# reports exactly that as a FAIL. The 16 callers going quiet for the rest of
+# the file is mitigated, not masked: check_tree always runs the unchanged
+# _check_url_in_comment on every file too, with the same track_heredocs
+# scope, so a genuinely unclosed heredoc in a reachable file is guaranteed
+# to still trip that FAIL in the same run. This pins that guarantee. --
+
+def test_an_unclosed_heredoc_still_fails_even_though_the_16_routed_checkers_go_quiet_after_it(tmp_path):
+    root = _tree(tmp_path, {
+        "scripts/run.sh": b"#!/bin/sh\ncat <<NEVERCLOSES\nbody\necho $PWD\nenv\n",
+    })
+    result = _check(root)
+    assert not any("PWD" in o for o in result.offenders), result.offenders
+    assert not any("bare 'env'" in o for o in result.offenders), result.offenders
+    assert any("never closed" in o for o in result.offenders), result.offenders
