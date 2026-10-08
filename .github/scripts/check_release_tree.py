@@ -205,6 +205,36 @@ URL_HOST = re.compile(
 # even tested against a line, so the ambiguity cannot fire.
 _HEREDOC_OPEN = re.compile(r"(?<!<)<<(-?)\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2(?!<)")
 
+
+# #981 review finding: a naive quote-TOGGLE scan (flip on any `'`/`"`, flip
+# back on the next matching one) breaks on an ordinary English contraction
+# with no closing quote on the line ("it's", "don't") -- one stray
+# apostrophe before a REAL heredoc opener would flip the toggle on and
+# never off, making a genuine `<<EOF` read as "inside quotes" and silently
+# skipping it. Matching only COMPLETE quoted spans (both quote characters
+# present) avoids that: a lone apostrophe forms no span at all, so it
+# cannot swallow a real opener later on the same line.
+_QUOTED_SPAN = re.compile(r"'[^'\n]*'|\"[^\"\n]*\"")
+
+
+def _in_quotes_before(line: str, idx: int) -> bool:
+    """#981: true if `idx` falls inside a COMPLETE single/double-quoted span
+    anywhere on `line` -- enough to tell "this << sits inside an ordinary
+    quoted string" (e.g. `echo "see <<EOF in the docs"`) from "this << is
+    real heredoc syntax", without attempting real shell quote/escape
+    parsing. Under-detecting a real heredoc opener here is the safe
+    direction: this tracking exists to SKIP content as heredoc body, so a
+    false positive here (treating an ordinary quoted string as an opener)
+    is what silently disables the URL-host-in-comment guard for the rest of
+    the file -- the opposite failure from _check_typed_heredoc's own FAIL
+    guard, where over-flagging is the safe side."""
+    for m in _QUOTED_SPAN.finditer(line):
+        if m.start() > idx:
+            break
+        if m.start() <= idx < m.end():
+            return True
+    return False
+
 # #898: the directory's own bundled-word-list scan tripped on curl/ftp/dig/
 # drill as plain dictionary entries, one per line -- not as shell commands.
 # Catching every English use of "host" or "fetch" would FAIL this repo's own
@@ -1029,19 +1059,32 @@ def _check_url_in_comment(files: dict, kinds: dict, off: list) -> None:
         track_heredocs = rel.split("/")[0] in ("hooks", "hooks.d", "scripts")
         heredoc_delim = None
         heredoc_dash = False
+        heredoc_open_line = None
         for n, line in enumerate(text.splitlines(), 1):
             if heredoc_delim is not None:
                 closer = line.lstrip("\t") if heredoc_dash else line
                 if closer == heredoc_delim:
                     heredoc_delim = None
                 continue
-            if line.lstrip().startswith("#") and URL_HOST.search(line):
+            is_comment = line.lstrip().startswith("#")
+            if is_comment and URL_HOST.search(line):
                 off.append(f"{rel}:{n}: a URL host in a comment: {line.strip()[:80]}")
-            if track_heredocs:
-                m = _HEREDOC_OPEN.search(_mask_arithmetic(line))
-                if m:
+            # #981: bash never opens a heredoc from inside a `#` comment or
+            # from a `<<WORD`-shaped substring sitting inside an ordinary
+            # quoted string -- either one can otherwise leave this tracker
+            # "open" for the rest of the file, silently swallowing every
+            # later URL-host comment line.
+            if track_heredocs and not is_comment:
+                masked = _mask_arithmetic(line)
+                m = _HEREDOC_OPEN.search(masked)
+                if m and not _in_quotes_before(masked, m.start()):
                     heredoc_dash = bool(m.group(1))
                     heredoc_delim = m.group(3)
+                    heredoc_open_line = n
+        if heredoc_delim is not None:
+            off.append(f"{rel}:{heredoc_open_line}: a heredoc opener (<<{heredoc_delim}) is "
+                       f"never closed -- everything after it in this file was skipped as "
+                       f"heredoc body")
 
 
 def _check_network_command_names(files: dict, kinds: dict, off: list) -> None:
