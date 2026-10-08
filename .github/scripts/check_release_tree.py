@@ -1434,11 +1434,17 @@ def _check_catch_all_in_loop(files: dict, kinds: dict, off: list) -> None:
     could be misread the same two ways -- a `#`-led body line read as a
     real comment (hiding a genuine catch-all-in-loop shape), or a body
     line containing literal `while`/`for`/`until`/`done`/`*)` text read as
-    real loop/case syntax. #990: fixed here by swapping the raw
-    `enumerate(text.splitlines(), 1)` for `_iter_non_heredoc_lines` itself
-    -- it tracks heredoc delimiters independently of this function's own
-    multi-line open/close-depth and in-string state, so the two interleave
-    without either needing to know about the other."""
+    real loop/case syntax. #990: fixed by tracking heredoc delimiters
+    inline, the same way _iter_non_heredoc_lines does, rather than
+    delegating to that shared generator directly -- a first attempt doing
+    exactly that regressed in review: the generator's own heredoc-open
+    detection runs on every line it yields with no visibility into this
+    function's own in_string state, so a `<<WORD`-shaped substring inside
+    a tracked quoted string was misread as a real opener, silently
+    swallowing every later line (including a genuine catch-all-in-loop)
+    as fake heredoc body. The inline version below only looks for a
+    heredoc opener on a line that already passed the in_string/comment
+    checks, so the two states can never step on each other."""
     _loop_open = re.compile(r'(?:^|[;&|\s])(?:while|for|until)\s')
     _loop_close = re.compile(r'(?:^|[;&|\s])done(?=\s|;|$|\))')
     _catch_all = re.compile(r'(?:^|[\s;(])\*\)')
@@ -1454,12 +1460,19 @@ def _check_catch_all_in_loop(files: dict, kinds: dict, off: list) -> None:
         text = data.decode("utf-8")
         depth = 0
         in_string = False
-        for n, raw_line, is_comment in _iter_non_heredoc_lines(text, track_heredocs=True):
+        heredoc_delim = None
+        heredoc_dash = False
+        for n, raw_line in enumerate(text.splitlines(), 1):
+            if heredoc_delim is not None:
+                closer = raw_line.lstrip("\t") if heredoc_dash else raw_line
+                if closer == heredoc_delim:
+                    heredoc_delim = None
+                continue
             if in_string:
                 if raw_line.startswith("'") or re.search(r"^[^']*'\s*(\)|\"|$)", raw_line):
                     in_string = False
                 continue
-            if is_comment:
+            if raw_line.lstrip().startswith("#"):
                 continue
             if _string_open.match(raw_line) or _awk_open.search(raw_line):
                 in_string = True
@@ -1477,6 +1490,22 @@ def _check_catch_all_in_loop(files: dict, kinds: dict, off: list) -> None:
                            f"same line a loop opens: {raw_line.strip()[:80]}")
             depth += opens - closes
             depth = max(depth, 0)
+            # #990: heredoc-open detection runs AFTER (never instead of) the
+            # in_string/comment checks above, deliberately -- the shared
+            # _iter_non_heredoc_lines generator has no visibility into this
+            # function's own in_string state, so delegating heredoc
+            # detection to it blindly let a `<<WORD`-shaped substring
+            # *inside* a tracked quoted string get misread as a real
+            # heredoc opener, silently swallowing every line after it as
+            # fake heredoc body (regression caught in review, #990).
+            # Detecting it locally, gated on reaching this point (i.e.
+            # already past the in_string/comment continues), keeps the two
+            # states from stepping on each other.
+            masked = _mask_arithmetic(raw_line)
+            m = _HEREDOC_OPEN.search(masked)
+            if m and not _in_quotes_before(masked, m.start()):
+                heredoc_dash = bool(m.group(1))
+                heredoc_delim = m.group(3)
 
 
 def _check_dot_string(files: dict, kinds: dict, reviews: list) -> None:
