@@ -627,7 +627,7 @@ RECONCILE_ENABLED=$(config '.git_reconcile.enabled' 'false')
             log "git-backup" "untracked $SLUG/logs, $SLUG/tmp and $SLUG/config.json -- a version older than the exclusion had committed them. They stop being pushed from now on; commits that already carry them are left untouched, because removing those means rewriting history and force-pushing, which breaks every other clone of this store. If that config.json ever carried a haiku.oauth_token, treat it as compromised and rotate it (claude setup-token) -- claude.ai itself may still accept the old token even though this plugin no longer reads it (#860), and anyone with access to this store's git history can still see it."
         else
             git -C "$REPO_ROOT" reset -q 2>/dev/null || true
-            log "git-backup" "could not untrack $SLUG/logs, $SLUG/tmp or $SLUG/config.json; the index was restored and the next backup retries."
+            log "git-backup" "could not untrack $SLUG/logs, $SLUG/tmp or $SLUG/config.json; the index was restored and the next backup retries. If that config.json ever carried a haiku.oauth_token, it is already in this store's git history regardless of whether this untrack attempt ever succeeds -- treat it as compromised and rotate it (claude setup-token) -- claude.ai itself may still accept the old token even though this plugin no longer reads it (#860), and anyone with access to this store's git history can still see it."
         fi
     fi
 
