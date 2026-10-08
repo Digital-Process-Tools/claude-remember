@@ -214,8 +214,9 @@ class TestTheKillSwitchNoticeRespectsTheFlag:
 
 @pytest.mark.skip(reason=(
     "hooks.d/after_save/60-git-reconcile.sh is hard-disabled pending #969 "
-    "(destroys-class TOCTOU race) -- it now exits 0 before ever reading "
-    "git_reconcile.enabled, so there is no fast-forward behavior left to "
+    "(destroys-class TOCTOU race) -- the kill switch's own exit 0 fires "
+    "unconditionally regardless of git_reconcile.enabled's value, so there "
+    "is no fast-forward behavior left to "
     "exercise. Kept as documentation of intended behavior once #969's real "
     "fix lands and the kill switch is removed; see "
     "TestHardDisabledPending969 for what the hook does today."
@@ -258,8 +259,9 @@ class TestFastForward:
 
 @pytest.mark.skip(reason=(
     "hooks.d/after_save/60-git-reconcile.sh is hard-disabled pending #969 "
-    "(destroys-class TOCTOU race) -- it now exits 0 before ever reading "
-    "git_reconcile.enabled, so there is no rebase/push/conflict-abort "
+    "(destroys-class TOCTOU race) -- the kill switch's own exit 0 fires "
+    "unconditionally regardless of git_reconcile.enabled's value, so there "
+    "is no rebase/push/conflict-abort "
     "behavior left to exercise. Kept as documentation of intended behavior "
     "once #969's real fix lands and the kill switch is removed; see "
     "TestHardDisabledPending969 for what the hook does today."
@@ -674,8 +676,9 @@ class TestDivergedReconcile:
 
 @pytest.mark.skip(reason=(
     "hooks.d/after_save/60-git-reconcile.sh is hard-disabled pending #969 "
-    "(destroys-class TOCTOU race) -- it now exits 0 before ever reading "
-    "git_reconcile.enabled, so the foreign-rebase-in-progress guard it "
+    "(destroys-class TOCTOU race) -- the kill switch's own exit 0 fires "
+    "unconditionally regardless of git_reconcile.enabled's value, so the "
+    "foreign-rebase-in-progress guard it "
     "exercises is unreachable. Kept as documentation of intended behavior "
     "once #969's real fix lands and the kill switch is removed; see "
     "TestHardDisabledPending969 for what the hook does today."
@@ -903,8 +906,9 @@ class TestForeignRebaseGuard:
 
 @pytest.mark.skip(reason=(
     "hooks.d/after_save/60-git-reconcile.sh is hard-disabled pending #969 "
-    "(destroys-class TOCTOU race) -- it now exits 0 before ever reading "
-    "git_reconcile.enabled, so the scoped-abort/restore machinery these "
+    "(destroys-class TOCTOU race) -- the kill switch's own exit 0 fires "
+    "unconditionally regardless of git_reconcile.enabled's value, so the "
+    "scoped-abort/restore machinery these "
     "tests exercise (including #969's own named gap) is unreachable. Kept "
     "as documentation of intended behavior once #969's real fix lands and "
     "the kill switch is removed; see TestHardDisabledPending969 for what "
@@ -1268,8 +1272,9 @@ class TestScopedAbort:
 
 @pytest.mark.skip(reason=(
     "hooks.d/after_save/60-git-reconcile.sh is hard-disabled pending #969 "
-    "(destroys-class TOCTOU race) -- it now exits 0 before ever reading "
-    "git_reconcile.enabled, so the consolidation-lock decline path it "
+    "(destroys-class TOCTOU race) -- the kill switch's own exit 0 fires "
+    "unconditionally regardless of git_reconcile.enabled's value, so the "
+    "consolidation-lock decline path it "
     "exercises is unreachable. Kept as documentation of intended behavior "
     "once #969's real fix lands and the kill switch is removed; see "
     "TestHardDisabledPending969 for what the hook does today."
@@ -1313,8 +1318,9 @@ class TestConsolidationLock:
 
 @pytest.mark.skip(reason=(
     "hooks.d/after_save/60-git-reconcile.sh is hard-disabled pending #969 "
-    "(destroys-class TOCTOU race) -- it now exits 0 before ever reading "
-    "git_reconcile.enabled, so it never bumps NDC's generation marker at "
+    "(destroys-class TOCTOU race) -- the kill switch's own exit 0 fires "
+    "unconditionally regardless of git_reconcile.enabled's value, so it "
+    "never bumps NDC's generation marker at "
     "all. Kept as documentation of intended behavior once #969's real fix "
     "lands and the kill switch is removed; see TestHardDisabledPending969 "
     "for what the hook does today."
@@ -1415,9 +1421,11 @@ class TestNdcGenerationBump:
 # next -- the latest one in the window from the start of `git rebase
 # --no-autostash` through the conflict firing, BEFORE #966's pre/post-`rebase
 # --quit` snapshot is even taken. Rather than attempt a sixth fix, the hook is
-# hard-disabled: it exits 0 unconditionally, before even the
-# git_reconcile.enabled read, until #969's real fix lands. This class proves
-# the kill switch itself, against the exact scenario #969 reports as still
+# hard-disabled: the `exit 0` fires unconditionally, regardless of what
+# git_reconcile.enabled reads as (#976 made the read itself happen earlier,
+# to decide whether to print the kill-switch notice -- it is the EXIT that
+# never depends on it), until #969's real fix lands. This class proves the
+# kill switch itself, against the exact scenario #969 reports as still
 # open.
 
 
@@ -1435,8 +1443,11 @@ class TestHardDisabledPending969:
 
         With the hook hard-disabled, none of this must run at all: no fetch,
         no rebase, no lock file -- the write must simply never be touched,
-        because the hook exits before reading git_reconcile.enabled, let
-        alone starting a rebase. It DOES still write a log entry and a
+        because the `exit 0` fires unconditionally regardless of what
+        git_reconcile.enabled reads as (#976: that read now happens, but
+        only to decide whether to print the kill-switch notice below, never
+        to decide whether to exit), let alone starting a rebase. It DOES
+        still write a log entry and a
         hook-errors.log line naming #969 (via report_error(), self-review
         finding: a bare `echo >&2` would be invisible to the only durable
         surface /remember:doctor reads) -- that notice is the one thing
