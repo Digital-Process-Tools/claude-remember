@@ -9,6 +9,7 @@ scripts/.*\.sh$	generalizing-a-narrow-security-check-needs-a-whole-suite-grep.md
 hooks\.d/.*\.sh$	hook-notice-must-not-claim-unverified-tree-state.md
 (scripts|hooks|hooks\.d)/.*\.sh$	hook-script-size-budget.md
 scripts/.*\.sh$	kill-a-subshell-not-its-forked-child.md
+(pipeline/log\.py|scripts/log\.sh)$	log-sanitizer-regex-must-cover-unicode-line-separators.md
 scripts/.*\.sh$	per-session-value-shared-channel.md
 scripts/.*\.sh$	security-check-three-states-not-two.md
 tests/.*\.py$	simulating-tool-absence-on-macos.md
