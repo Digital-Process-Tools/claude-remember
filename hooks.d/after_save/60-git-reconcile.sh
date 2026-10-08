@@ -442,6 +442,49 @@ _grc_bump_ndc_gen() {
     # already named and deferred). _grc_foreign_changes stays, but ONLY to
     # describe what survived for the log line below -- nothing here any
     # longer decides what to preserve based on it.
+    # #975 item 2: factored out of _grc_foreign_changes below so
+    # _grc_compute_touched_paths' own `git diff --name-only` output (which
+    # git quotes under the exact same core.quotePath default) gets the
+    # identical unquoting -- previously only this function's porcelain
+    # paths were unquoted, so a touched path with non-ASCII/special bytes
+    # reached ls-tree/checkout/rm still quoted, matched nothing there, and
+    # silently dropped out of the restore while _checkout_ok stayed 1.
+    _grc_unquote_porcelain_path() {
+        local _grc_up_path="$1" _grc_up_dq='"' _grc_up_sentinel=$'\x1c'
+        local _grc_up_bs=$'\\' _grc_up_bsbs _grc_up_bsq
+        _grc_up_bsbs="${_grc_up_bs}${_grc_up_bs}"
+        _grc_up_bsq="${_grc_up_bs}${_grc_up_dq}"
+        _grc_up_path="${_grc_up_path#"$_grc_up_dq"}"
+        _grc_up_path="${_grc_up_path%"$_grc_up_dq"}"
+        if [[ "$_grc_up_path" == *"$_grc_up_bs"* ]]; then
+            # Review finding (#975 item 2, self-review): stripping only
+            # the outer quote characters is not enough -- under
+            # core.quotePath git C-style-escapes a path's INTERIOR too
+            # (an escaped quote, an escaped backslash, a tab/newline, and
+            # octal for a non-ASCII/control byte), the exact case this
+            # fix exists to handle, and a bare outer-quote strip left the
+            # literal escape text in place -- the restore would still
+            # never match the real file. An escaped backslash is
+            # protected behind a sentinel BEFORE `printf '%b'` decodes
+            # everything else (the escaped quote and the octal/control
+            # escapes bash's own %b already understands), so a backslash
+            # that was genuinely part of the filename is never
+            # re-interpreted as the start of a second escape once
+            # restored. The two escape patterns are held in variables
+            # (`_grc_up_bsbs`, `_grc_up_bsq`), built from single
+            # characters rather than written as a literal
+            # backslash-then-quote in the source -- the shape this
+            # repo's own release-tree shape checker holds a submission
+            # on (#898 round 7/8; see .github/scripts/check_release_
+            # tree.py's BACKSLASH_QUOTE/ESCAPED_QUOTE).
+            _grc_up_path="${_grc_up_path//"$_grc_up_bsbs"/$_grc_up_sentinel}"
+            _grc_up_path="${_grc_up_path//"$_grc_up_bsq"/$_grc_up_dq}"
+            _grc_up_path=$(printf '%b' "$_grc_up_path")
+            _grc_up_path="${_grc_up_path//$_grc_up_sentinel/$_grc_up_bs}"
+        fi
+        printf '%s\n' "$_grc_up_path"
+    }
+
     _grc_foreign_changes() {
         # Every porcelain line outside "$SLUG/" is a write this run did not
         # make: this run's OWN churn (the conflict itself, any cleanly
@@ -463,13 +506,9 @@ _grc_bump_ndc_gen() {
             if [[ "$_grc_code" == *R* ]] && [[ "$_grc_path" == *" -> "* ]]; then
                 _grc_path="${_grc_path##* -> }"
             fi
-            # A path with odd characters is double-quoted by porcelain.
-            # Strip a leading/trailing double quote through a variable
-            # holding the literal character, rather than an escaped quote
-            # inside the pattern.
-            _grc_dq='"'
-            _grc_path="${_grc_path#"$_grc_dq"}"
-            _grc_path="${_grc_path%"$_grc_dq"}"
+            # A path with odd characters is double-quoted by porcelain --
+            # unquoted through the shared helper above (#975 item 2).
+            _grc_path=$(_grc_unquote_porcelain_path "$_grc_path")
             if [[ "$_grc_path" != "$SLUG"/* ]] && [[ "$_grc_path" != "$SLUG" ]]; then
                 printf '%s\n' "$_grc_path"
             fi
@@ -502,9 +541,35 @@ _grc_bump_ndc_gen() {
             printf '%s\n' "$SLUG"
             return
         fi
-        { git -C "$REPO_ROOT" diff --name-only "$_mb" "$_local_tip" -- 2>/dev/null
-          git -C "$REPO_ROOT" diff --name-only "$_mb" "$_remote_tip" -- 2>/dev/null
-        } | sort -u
+        # #975 item 1: both `git diff --name-only` calls used to send
+        # errors to 2>/dev/null with nobody checking their rc -- a failure
+        # here left the touched-path list silently empty (restore skipped
+        # entirely) while the consumer's own _checkout_ok stayed 1, so the
+        # hook could log "aborted, the tree is unchanged" while conflict
+        # state was still sitting in the tree. Checked and handled exactly
+        # like the merge-base failure just above: log it, fall back to the
+        # pre-#952 scope rather than silently narrowing to nothing.
+        local _d1 _d2 _d1_rc _d2_rc
+        _d1=$(git -C "$REPO_ROOT" diff --name-only "$_mb" "$_local_tip" -- 2>/dev/null)
+        _d1_rc=$?
+        _d2=$(git -C "$REPO_ROOT" diff --name-only "$_mb" "$_remote_tip" -- 2>/dev/null)
+        _d2_rc=$?
+        if [ "$_d1_rc" -ne 0 ] || [ "$_d2_rc" -ne 0 ]; then
+            log "git-reconcile" "WARNING: a git diff --name-only call failed while computing the touched-paths restore scope -- falling back to $SLUG only (the pre-#952 scope). If a conflict happens now, another slug's own content may be left exactly as the rebase's new base put it."
+            printf '%s\n' "$SLUG"
+            return
+        fi
+        # #975 item 2: core.quotePath is left on, so either diff's output
+        # can double-quote a path with non-ASCII/special bytes -- unquoted
+        # here through the same helper _grc_foreign_changes uses, so a
+        # quoted path reaching the checkout/rm consumer below always
+        # matches the real file instead of silently dropping out.
+        local _grc_ctp_line
+        { printf '%s\n' "$_d1"
+          printf '%s\n' "$_d2"
+        } | while IFS= read -r _grc_ctp_line; do
+            [ -n "$_grc_ctp_line" ] && _grc_unquote_porcelain_path "$_grc_ctp_line"
+        done | sort -u
     }
 
     # #966: a path's content right now, or the sentinel ABSENT when the

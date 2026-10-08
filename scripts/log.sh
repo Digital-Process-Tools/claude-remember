@@ -317,9 +317,17 @@ _remember_cfg_flatten_cache_path() {
 # _remember_cfg_flatten_cache_publish below can best-effort remove the
 # orphan an install upgrading from <=0.38.0 left behind.
 _remember_cfg_flatten_cache_path_v1() {
-    local _v2
+    local _v2 _dir _base
     _v2=$(_remember_cfg_flatten_cache_path) || return 1
-    printf '%s' "${_v2/-v2-/-}"
+    # #972: anchor the substitution to the filename's own -v2- segment, not
+    # the first occurrence anywhere in the full path -- a bare `${_v2/-v2-/-}`
+    # over the WHOLE path matches inside ${TMPDIR:-/tmp} itself when that
+    # path happens to contain the literal substring -v2- (e.g.
+    # TMPDIR=/mnt/build-v2-staging/tmp), producing a v1 path that does not
+    # name the real pre-#864 orphan at all.
+    _dir="${_v2%/*}"
+    _base="${_v2##*/}"
+    printf '%s' "${_dir}/${_base/-v2-/-}"
 }
 
 _remember_cfg_flatten_cache_sources() {
@@ -622,7 +630,14 @@ _remember_cfg_flatten_cache_publish() {
     # to skip a second subshell) left behind by an install that upgraded
     # across #864 before this fix existed. Harmless either way -- never
     # required for correctness, same as every other failure path above.
-    local _f_v1="${_f/-v2-/-}"
+    # #972: anchor to the basename's own -v2- segment, not the first
+    # occurrence anywhere in the full path -- see the matching comment in
+    # _remember_cfg_flatten_cache_path_v1 above for why a bare substring
+    # substitution over $_f is wrong when ${TMPDIR:-/tmp} itself contains
+    # the literal substring -v2-.
+    local _f_dir="${_f%/*}"
+    local _f_base="${_f##*/}"
+    local _f_v1="${_f_dir}/${_f_base/-v2-/-}"
     [ -f "$_f_v1" ] && rm -f "$_f_v1" 2>/dev/null
     return 0
 }
