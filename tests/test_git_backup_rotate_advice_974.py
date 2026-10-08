@@ -197,9 +197,7 @@ class TestUntrackReceiptCarriesRotateAdvice:
         # the untrack block takes its "could not untrack" else branch.
         hooks_dir = remember / ".git" / "hooks"
         hooks_dir.mkdir(parents=True, exist_ok=True)
-        pre_commit = hooks_dir / "pre-commit"
-        pre_commit.write_text("#!/bin/sh\nexit 1\n")
-        pre_commit.chmod(0o755)
+        _write_fail_hook(hooks_dir)
 
         project = tmp_path / "project"
         project.mkdir()
