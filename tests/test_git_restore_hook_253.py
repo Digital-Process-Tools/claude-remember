@@ -473,9 +473,10 @@ class TestTheDivergedNoticeRespectsTheKillSwitch:
     """#976: #969 hard-disabled 60-git-reconcile.sh, so the #935 promise this
     notice makes when git_reconcile.enabled=true -- '60-git-reconcile.sh may
     rebase and push this automatically' -- is false while the kill switch is
-    in place: that hook now exits before it ever reads git_reconcile.enabled.
-    A diverged store waiting on a resolution that will never come is worse
-    than #935's original bug, which only forgot to mention reconcile."""
+    in place: that hook now reads the flag first (#979), then still
+    unconditionally exits without acting on it. A diverged store waiting on
+    a resolution that will never come is worse than #935's original bug,
+    which only forgot to mention reconcile."""
 
     def _config_reconcile(self, tmp_path: Path) -> Path:
         cfg = tmp_path / "remember-config.json"
@@ -505,8 +506,9 @@ class TestTheDivergedNoticeRespectsTheKillSwitch:
         assert "DIVERGED" in log, "--- log ---\n" + log
         assert "may rebase and push this automatically" not in log, (
             "the DIVERGED log still promises 60-git-reconcile.sh will act "
-            "automatically, but #969 hard-disabled that hook -- it now exits "
-            "before it ever reads git_reconcile.enabled\n--- log ---\n" + log
+            "automatically, but #969 hard-disabled that hook -- it reads the "
+            "flag (#979) but still unconditionally exits without acting on "
+            "it\n--- log ---\n" + log
         )
         assert "git_reconcile" in log, (
             "the log drops all mention of reconcile instead of explaining "
