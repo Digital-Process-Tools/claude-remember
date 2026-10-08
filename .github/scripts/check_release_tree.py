@@ -919,7 +919,7 @@ def bash_grant_problem(entry: str) -> str | None:
     words = cmd.split()
     if not words:
         return f"`Bash({pattern})` grants every shell command"
-    paths = [w for w in words if "/" in w]
+    paths = [w for w in words if "/" in w or "\\" in w]
     for p in paths:
         if "*" in p or "?" in p:
             return f"`Bash({pattern})` has a wildcard in the path"

@@ -323,6 +323,10 @@ def test_good_front_matter_in_an_agent_passes(tmp_path):
     "Bash(nice:*)",
     "Bash(stdbuf:*)",
     "Bash(${CLAUDE_PLUGIN_ROOT}/..\\..\\bin\\bash:*)",
+    # a path with no forward slash at all was still collected by `paths` only
+    # via its "/" membership check, so a fully backslash-separated grant slid
+    # through the whole per-path loop untouched (auditor finding, #950).
+    "Bash(${CLAUDE_PLUGIN_ROOT}\\..\\..\\bin\\bash:*)",
 ])
 def test_unrestricted_bash_grant_as_a_string_fails(tmp_path, rel, value):
     body = f"---\ndescription: d\nallowed-tools: {value}\n---\n\nx\n".encode()
