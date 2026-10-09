@@ -15,6 +15,7 @@ it. docs/windows.md says so; the reporter is asked to confirm in the PR.
 from __future__ import annotations
 
 import os
+import shlex
 import stat
 import subprocess
 import sys
@@ -28,7 +29,20 @@ from pipeline.slug import session_dir_slug as _slug
 from tests._bash_runner import resolve_bash
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-LIB = REPO_ROOT / "scripts" / "lib-detach.sh"
+# #1002 CI round 7: .as_posix(), not a bare Path -- every use below
+# interpolates this into a bash script string via an f-string, which
+# calls str() implicitly. On Windows that is backslash-separated, and
+# `_remember_detach_windows`'s own `lib_dir="${BASH_SOURCE[0]%/*}"` is a
+# pure string pattern-match on "/" with no filesystem call behind it: a
+# backslash-only BASH_SOURCE[0] has no "/" to strip at, so it silently
+# falls through to lib-detach.sh's own `pwd` fallback (this pytest
+# process's cwd -- the real repo root, not any tmp dir) and every
+# subsequent `$lib_dir/windows-hidden-run.vbs` lookup inside the function
+# resolves to the wrong directory, failing the `[ -f "$vbs" ]` guard and
+# returning 1 -- confirmed via CI diagnostics, not reasoned (#1002 CI
+# round 7). The same bug class rounds 5-6 already fixed for the real
+# post-tool-hook.sh invocations below.
+LIB = (REPO_ROOT / "scripts" / "lib-detach.sh").as_posix()
 ONE_MESSAGE_LINE = "{\"type\":\"assistant\",\"message\":{\"content\":\"x\"}}\n"
 
 # #1002 CI: a bare "bash" resolves to the WSL launcher stub
@@ -62,7 +76,32 @@ def _stub(path: Path, body: str) -> None:
 
 
 def _run(script: str, env: dict) -> subprocess.CompletedProcess:
-    return subprocess.run([BASH, "-c", script], env=env, capture_output=True, text=True, timeout=10, check=False)
+    # #1002 CI round 7: Git Bash/MSYS unconditionally prepends its own
+    # standard directories (observed: /mingw64/bin, /usr/bin, a user bin
+    # dir) to PATH at process startup, regardless of what PATH value was
+    # supplied via the subprocess env -- confirmed on real Windows CI by
+    # printing the actual $PATH a sourced script saw: the real /usr/bin
+    # (with the real uname/cygpath) came ahead of a test's own stub
+    # directory even though the env dict's PATH value put the stub
+    # first. Re-asserting PATH via an explicit `export` INSIDE the
+    # script, which runs AFTER that startup injection has already
+    # happened, is the only way a test's own directory can actually win.
+    path = env.get("PATH", "")
+    prefix = f"export PATH={shlex.quote(path)}; " if path else ""
+    return subprocess.run([BASH, "-c", prefix + script], env=env, capture_output=True, text=True, timeout=10, check=False)
+
+
+def _run_real_script(path: Path, env: dict, *args: str, input_text: str = "") -> subprocess.CompletedProcess:
+    """Run a REAL script FILE (not an inline -c string) with the same
+    post-startup PATH re-assertion _run() does for inline scripts, and
+    with the path itself passed as .as_posix() for the same
+    BASH_SOURCE[0]/backslash reason LIB above is (#1002 CI round 7)."""
+    env_path = env.get("PATH", "")
+    prefix = f"export PATH={shlex.quote(env_path)}; " if env_path else ""
+    quoted_args = " ".join(shlex.quote(a) for a in args)
+    script = f'{prefix}exec "{path.as_posix()}" {quoted_args}'.rstrip()
+    return subprocess.run([BASH, "-c", script], env=env, input=input_text,
+                           capture_output=True, text=True, timeout=15, check=False)
 
 
 def _controlled_env(path: str, **overrides) -> dict:
@@ -141,22 +180,8 @@ def test_is_windows_false_on_plain_linux_env(tmp_path):
     fake_uname = tmp_path / "uname"
     _stub(fake_uname, 'echo Linux')
     env = _is_windows_env({"OS": ""}, path_prepend=str(tmp_path))
-    # TEMPORARY diagnostic (#1002 CI round 7): neither the CRLF-safe
-    # _stub() write nor _controlled_env()'s full os.environ inheritance
-    # changed this test's outcome on Windows CI at all (rounds 5 and 6),
-    # so the actual mechanism is still unknown. Surface exactly what this
-    # shell saw: whether `command -v uname` resolved to the stub at all,
-    # and what running it actually produced.
-    script = (
-        f'. "{LIB}"; '
-        f'echo "DEBUG_PATH=$PATH"; '
-        f'echo "DEBUG_COMMAND_V_UNAME=$(command -v uname 2>&1)"; '
-        f'echo "DEBUG_UNAME_RAW=$(uname -s 2>&1)"; '
-        f'_remember_is_windows && echo YES || echo NO'
-    )
-    r = _run(script, env)
-    result_line = r.stdout.strip().splitlines()[-1] if r.stdout.strip() else "<empty>"
-    assert result_line == "NO", f"full stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+    r = _run(f'. "{LIB}"; _remember_is_windows && echo YES || echo NO', env)
+    assert r.stdout.strip() == "NO", r.stderr
 
 
 @_NO_BASH
@@ -188,23 +213,11 @@ def test_detach_windows_invokes_hidden_launcher_with_expected_args(tmp_path):
     env = _controlled_env(_win_safe_path(bindir, "/usr/bin", "/bin"))
     out = tmp_path / "out.log"
     pid = tmp_path / "pid"
-    # TEMPORARY diagnostic (#1002 CI round 7): this test's RC=1 on Windows
-    # CI survived both the CRLF-safe _stub() fix and _controlled_env()'s
-    # full os.environ inheritance (rounds 5 and 6). Surface which guard
-    # clause inside _remember_detach_windows is actually failing: PATH as
-    # bash sees it, and whether wscript.exe/cygpath/bash resolve via
-    # `command -v`.
-    diag = (
-        'echo "DEBUG_PATH=$PATH"; '
-        'echo "DEBUG_CV_WSCRIPT=$(command -v wscript.exe 2>&1)"; '
-        'echo "DEBUG_CV_CYGPATH=$(command -v cygpath 2>&1)"; '
-        'echo "DEBUG_CV_BASH=$(command -v bash 2>&1)"; '
-    )
     r = _run(
-        f'. "{LIB}"; {diag}_remember_detach_windows "{out}" "{pid}" echo hi; echo "RC=$?"; sleep 0.2',
+        f'. "{LIB}"; _remember_detach_windows "{out}" "{pid}" echo hi; echo "RC=$?"; sleep 0.2',
         env,
     )
-    assert "RC=0" in r.stdout, f"full stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+    assert "RC=0" in r.stdout, r.stdout + r.stderr
     lines = captured.read_text(encoding="utf-8").splitlines()
     assert lines[0] == "//B", lines
     assert lines[1].endswith("windows-hidden-run.vbs"), lines
@@ -322,16 +335,11 @@ def test_post_tool_save_uses_hidden_launcher_on_windows(tmp_path):
     root = _post_tool_plugin_root(tmp_path, "#!/usr/bin/env bash\nexit 0\n")
     env, _remember = _post_tool_env(tmp_path, root, extra_path=str(bindir))
     env["OS"] = "Windows_NT"
-    # #1002 CI round 5: pass the script's own path as POSIX-forward-slash
-    # form, not whatever str(Path) gives on this host. On Windows, str()
-    # yields backslashes, and the script's own `${BASH_SOURCE[0]%/*}` is a
-    # pure string pattern-match with no filesystem call behind it -- a
-    # backslash-only path has no "/" for that pattern to find, so it
-    # silently falls through to its own `pwd` fallback (the pytest
-    # process's cwd, i.e. the real repo root, NOT this tmp plugin root),
-    # breaking every `source "$_HOOK_DIR/..."` after it.
-    r = subprocess.run([BASH, (root / "scripts" / "post-tool-hook.sh").as_posix()],
-                        env=env, input="", capture_output=True, text=True, timeout=15, check=False)
+    # #1002 CI round 5/7: _run_real_script passes the script's own path as
+    # POSIX-forward-slash (see LIB's own comment above for why -- the
+    # same BASH_SOURCE[0]/backslash mechanism) and re-asserts PATH after
+    # MSYS's own startup injection (see _run's own comment).
+    r = _run_real_script(root / "scripts" / "post-tool-hook.sh", env)
     time.sleep(0.3)  # the hidden route's own "wscript.exe &" is detached -- give it a beat
     assert captured.exists(), "wscript.exe stub was never invoked -- hidden route not taken\n" + r.stderr
 
@@ -347,11 +355,22 @@ def test_post_tool_save_uses_nohup_without_windows(tmp_path):
     captured = tmp_path / "captured.txt"
     _stub(bindir / "wscript.exe", 'printf "%s\n" "$@" > "' + str(captured) + '"')
     _stub(bindir / "cygpath", 'shift; printf "%s" "$1"')
+    # #1002 CI round 7: OS="" alone does not prove "not Windows" to
+    # _remember_is_windows on a REAL Windows runner -- it falls through to
+    # `uname -s`, and the real uname genuinely answers MINGW*/MSYS*/
+    # CYGWIN* there regardless of OS. Without this stub, the hidden route
+    # was actually being attempted (and from _remember_detach_windows's
+    # own perspective, successfully dispatched -- it does not wait for or
+    # verify the backgrounded wscript.exe launch), so post-tool-hook.sh
+    # skipped its nohup fallback entirely: neither PID_FILE nor
+    # captured.txt was ever written, both failing silently (#1002 CI
+    # round 7, confirmed by CI diagnostics on the sibling
+    # _remember_is_windows unit test).
+    _stub(bindir / "uname", 'echo Linux')
     root = _post_tool_plugin_root(tmp_path, "#!/usr/bin/env bash\nexit 0\n")
     env, remember = _post_tool_env(tmp_path, root, extra_path=str(bindir))
     env["OS"] = ""
-    r = subprocess.run([BASH, (root / "scripts" / "post-tool-hook.sh").as_posix()],
-                        env=env, input="", capture_output=True, text=True, timeout=15, check=False)
+    r = _run_real_script(root / "scripts" / "post-tool-hook.sh", env)
     assert not captured.exists(), "wscript.exe stub was invoked even though Windows was not detected\n" + r.stderr
     pid_file = remember / "tmp" / "save-session.pid"
     assert pid_file.exists(), "PID_FILE must still be created on the nohup fallback branch"
