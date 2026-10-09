@@ -44,7 +44,20 @@ _NO_BASH = pytest.mark.skipif(BASH is None, reason="no real POSIX bash resolvabl
 
 
 def _stub(path: Path, body: str) -> None:
-    path.write_text("#!/bin/sh\n" + body + "\n", encoding="utf-8")
+    # #1002 CI round 5: Path.write_text() does universal-newline
+    # translation on write -- on a real Windows runner it turns every
+    # "\n" into "\r\n", corrupting the shebang line to "#!/bin/sh\r".
+    # MSYS/Git Bash's own exec-by-shebang lookup then either fails to
+    # resolve "/bin/sh\r" as an interpreter or does not recognise the
+    # file as a valid script at all, so `command -v` silently skips this
+    # stub and PATH resolution falls through to whatever real binary of
+    # the same name sits later on PATH -- exactly the "stub never found,
+    # real one collides" symptom this suite's own stubs hit on Windows
+    # CI. This repo hit the identical CRLF-via-write_text() class once
+    # already in scripts/ code (#994); `newline=""` here is the same fix,
+    # applied to this test file's own stub writer.
+    with path.open("w", encoding="utf-8", newline="") as f:
+        f.write("#!/bin/sh\n" + body + "\n")
     path.chmod(path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 
 
@@ -52,8 +65,29 @@ def _run(script: str, env: dict) -> subprocess.CompletedProcess:
     return subprocess.run([BASH, "-c", script], env=env, capture_output=True, text=True, timeout=10, check=False)
 
 
-def _is_windows_env(extra: dict) -> dict:
-    env = {"PATH": "/usr/bin:/bin", **extra}
+def _controlled_env(path: str, **overrides) -> dict:
+    """Inherit the REAL environment (SystemRoot, TEMP, ComSpec, USERPROFILE,
+    etc.) rather than replacing it wholesale, but fully control PATH.
+
+    #1002 CI round 5: every env dict in this file used to start from `{}`
+    and set only a couple of keys. On a real Windows runner that drops
+    SystemRoot and friends, which MSYS/Git Bash's own fork+exec emulation
+    can need just to function at all -- a plausible reason a background
+    `&` job silently failed to launch in one of this file's own dispatch
+    tests. PATH is still fully replaced, never merged with the host's
+    real PATH: a test asserting a stub is used (or deliberately absent)
+    would otherwise be defeated by whatever real Windows system
+    directories (System32, with its own real wscript.exe) happen to sit
+    on the inherited PATH."""
+    env = dict(os.environ)
+    env["PATH"] = path
+    env.update(overrides)
+    return env
+
+
+def _is_windows_env(extra: dict, path_prepend: str = "") -> dict:
+    env = _controlled_env(_win_safe_path(path_prepend, "/usr/bin", "/bin"))
+    env.update(extra)
     return env
 
 
@@ -88,7 +122,7 @@ def test_is_windows_true_via_os_env_var():
 def test_is_windows_true_via_uname_mingw(monkeypatch, tmp_path):
     fake_uname = tmp_path / "uname"
     _stub(fake_uname, 'echo MINGW64_NT-10.0')
-    env = _is_windows_env({"OS": "", "PATH": _win_safe_path(tmp_path, "/usr/bin", "/bin")})
+    env = _is_windows_env({"OS": ""}, path_prepend=str(tmp_path))
     r = _run(f'. "{LIB}"; _remember_is_windows && echo YES || echo NO', env)
     assert r.stdout.strip() == "YES", r.stderr
 
@@ -106,7 +140,7 @@ def test_is_windows_false_on_plain_linux_env(tmp_path):
     product)."""
     fake_uname = tmp_path / "uname"
     _stub(fake_uname, 'echo Linux')
-    env = _is_windows_env({"OS": "", "PATH": _win_safe_path(tmp_path, "/usr/bin", "/bin")})
+    env = _is_windows_env({"OS": ""}, path_prepend=str(tmp_path))
     r = _run(f'. "{LIB}"; _remember_is_windows && echo YES || echo NO', env)
     assert r.stdout.strip() == "NO", r.stderr
 
@@ -118,7 +152,7 @@ def test_detach_windows_returns_1_when_wscript_missing(tmp_path):
     its own nohup line, never to silently skipping the launch."""
     out = tmp_path / "out.log"
     pid = tmp_path / "pid"
-    env = {"PATH": "/usr/bin:/bin"}
+    env = _controlled_env(_win_safe_path("/usr/bin", "/bin"))
     r = _run(
         f'. "{LIB}"; _remember_detach_windows "{out}" "{pid}" echo hi; echo "RC=$?"',
         env,
@@ -137,7 +171,7 @@ def test_detach_windows_invokes_hidden_launcher_with_expected_args(tmp_path):
     captured = tmp_path / "captured.txt"
     _stub(bindir / "wscript.exe", f'printf "%s\\n" "$@" > "{captured}"')
     _stub(bindir / "cygpath", 'shift; printf "%s" "$1"')
-    env = {"PATH": _win_safe_path(bindir, "/usr/bin", "/bin")}
+    env = _controlled_env(_win_safe_path(bindir, "/usr/bin", "/bin"))
     out = tmp_path / "out.log"
     pid = tmp_path / "pid"
     r = _run(
@@ -174,7 +208,7 @@ def test_detach_windows_resolves_bare_bash_argv_to_absolute_path(tmp_path):
     captured = tmp_path / "captured.txt"
     _stub(bindir / "wscript.exe", f'printf "%s\\n" "$@" > "{captured}"')
     _stub(bindir / "cygpath", 'shift; printf "%s" "$1"')
-    env = {"PATH": _win_safe_path(bindir, "/usr/bin", "/bin")}
+    env = _controlled_env(_win_safe_path(bindir, "/usr/bin", "/bin"))
     out = tmp_path / "out.log"
     pid = tmp_path / "pid"
     r = _run(
@@ -201,7 +235,7 @@ def test_detach_windows_leaves_a_non_bash_command_untouched(tmp_path):
     captured = tmp_path / "captured.txt"
     _stub(bindir / "wscript.exe", f'printf "%s\\n" "$@" > "{captured}"')
     _stub(bindir / "cygpath", 'shift; printf "%s" "$1"')
-    env = {"PATH": _win_safe_path(bindir, "/usr/bin", "/bin")}
+    env = _controlled_env(_win_safe_path(bindir, "/usr/bin", "/bin"))
     out = tmp_path / "out.log"
     pid = tmp_path / "pid"
     r = _run(
@@ -240,13 +274,12 @@ def _post_tool_env(tmp_path, root, extra_path=""):
     (remember / "tmp").mkdir(parents=True)
     (session_dir / "sess-1.jsonl").write_text(ONE_MESSAGE_LINE * 60)
     (remember / "config.json").write_text(_json.dumps({"thresholds": {"delta_lines_trigger": 50}}))
-    base_path = os.environ.get("PATH", "")
-    path = _win_safe_path(extra_path, base_path)
-    env = {
-        "HOME": str(home), "CLAUDE_PROJECT_DIR": str(project),
-        "CLAUDE_PLUGIN_ROOT": str(root), "REMEMBER_DIR": str(remember),
-        "_LIB_MEMORY_DIR_LOADED": "1", "PATH": path,
-    }
+    env = _controlled_env(
+        _win_safe_path(extra_path, os.environ.get("PATH", "")),
+        HOME=str(home), CLAUDE_PROJECT_DIR=str(project),
+        CLAUDE_PLUGIN_ROOT=str(root), REMEMBER_DIR=str(remember),
+        _LIB_MEMORY_DIR_LOADED="1",
+    )
     return env, remember
 
 
