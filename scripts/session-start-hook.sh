@@ -2315,7 +2315,14 @@ if [ "$STAGING_COUNT" -gt 0 ] && [ "$SESSION_START_SOURCE" != "compact" ]; then
     # Not a lock, and not a Git Bash detach failure: their own probe of this
     # exact construct returned in 0.11s. Ordinary POSIX fd inheritance, so it
     # reproduced on macOS too (tests/test_session_start_fd_leak_646.py).
-    nohup "$PLUGIN_ROOT/scripts/run-consolidation.sh" </dev/null >/dev/null 2>&1 3>&- & disown 2>/dev/null || true
+    # #1002: hidden launcher first (no fd-3 closing needed there -- the
+    # Windows route never inherits it, since it is a brand-new process tree
+    # started by wscript.exe rather than a direct fork of this shell), the
+    # unchanged nohup-and-close-fd-3 line as fallback -- see lib-detach.sh.
+    source "$_HOOK_DIR/lib-detach.sh"
+    if ! { _remember_is_windows && _remember_detach_windows /dev/null /dev/null "$PLUGIN_ROOT/scripts/run-consolidation.sh"; }; then
+        nohup "$PLUGIN_ROOT/scripts/run-consolidation.sh" </dev/null >/dev/null 2>&1 3>&- & disown 2>/dev/null || true
+    fi
     echo ""
 fi
 

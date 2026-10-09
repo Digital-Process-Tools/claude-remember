@@ -143,9 +143,35 @@ else
         done
     fi
     if [ -z "${REMEMBER_SESSION_END_FOREGROUND:-}" ]; then
-        REMEMBER_SESSION_END_DETACHED=1 REMEMBER_SESSION_END_PAYLOAD="$HOOK_STDIN" \
-            nohup bash "${BASH_SOURCE[0]}" </dev/null >/dev/null 2>&1 &
-        disown 2>/dev/null || true
+        # #1002: Windows detection duplicated inline rather than sourced --
+        # this whole block exists to detach BEFORE any sourcing happens
+        # (#560, #647), so the hot non-Windows path here pays zero extra
+        # cost. lib-detach.sh is only sourced below, on the rare branch
+        # that already determined it needs it.
+        _rd_is_win=false
+        case "${OS:-}" in
+            Windows_NT) _rd_is_win=true ;;
+        esac
+        if [ "$_rd_is_win" = false ]; then
+            case "$(uname -s 2>/dev/null)" in
+                MINGW*|MSYS*|CYGWIN*) _rd_is_win=true ;;
+            esac
+        fi
+        _rd_used_hidden=false
+        if [ "$_rd_is_win" = true ] && [ -f "$_HOOK_DIR/lib-detach.sh" ]; then
+            # shellcheck disable=SC1090
+            . "$_HOOK_DIR/lib-detach.sh"
+            export REMEMBER_SESSION_END_DETACHED=1 REMEMBER_SESSION_END_PAYLOAD="$HOOK_STDIN"
+            if _remember_detach_windows /dev/null /dev/null bash "${BASH_SOURCE[0]}"; then
+                _rd_used_hidden=true
+            fi
+            unset REMEMBER_SESSION_END_DETACHED REMEMBER_SESSION_END_PAYLOAD
+        fi
+        if [ "$_rd_used_hidden" = false ]; then
+            REMEMBER_SESSION_END_DETACHED=1 REMEMBER_SESSION_END_PAYLOAD="$HOOK_STDIN" \
+                nohup bash "${BASH_SOURCE[0]}" </dev/null >/dev/null 2>&1 &
+            disown 2>/dev/null || true
+        fi
         exit 0
     fi
 fi
