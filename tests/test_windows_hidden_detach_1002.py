@@ -227,7 +227,13 @@ def test_detach_windows_invokes_hidden_launcher_with_expected_args(tmp_path):
     assert lines[1].endswith("windows-hidden-run.vbs"), lines
     assert lines[2].endswith("bash"), lines
     assert lines[3] == "-c", lines
-    assert "exec bash" in lines[4] and str(out) in lines[4], lines
+    # #1002 CI round 9: lines[4] is the function's own `printf '%q'`
+    # escaping of $outfile for safe reuse inside the -c script -- on a
+    # native Windows path, %q doubles every backslash, so comparing
+    # against the bare str(out) (single backslashes) was comparing
+    # against the UNescaped form on a path %q had correctly escaped.
+    # The basename is enough to confirm the right file was named.
+    assert "exec bash" in lines[4] and out.name in lines[4], lines
     assert lines[5].endswith("lib-detach-pidwrap.sh"), lines
     assert lines[6] == str(pid), lines
     assert lines[7:] == ["echo", "hi"], lines
