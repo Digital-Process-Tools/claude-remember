@@ -1056,8 +1056,15 @@ if [ "$DELTA" -gt "$DELTA_THRESHOLD" ] && [ "$IN_COOLDOWN" = false ]; then
         if ! printf '%s [post-tool] save triggered\n' "$(_remember_date +%H:%M:%S)" >> "$_SAVE_LOG" 2>/dev/null; then
             log "hook" "WARNING: could not seed $_SAVE_LOG -- if this file stays absent or empty, an ordinary housekeeping sweep will reclaim it while this flush is still writing to it"
         fi
-        nohup "$SAVE_SCRIPT" "$SESSION_ID" >> "$_SAVE_LOG" 2>&1 &
-        echo $! > "$PID_FILE"
+        # #1002: on Windows, a plain nohup-and-background launch still
+        # allocates a console that Windows Terminal flashes for ~1s. Route
+        # through the hidden launcher first; the nohup line below is the
+        # unchanged fallback (and the ONLY path on every other platform).
+        source "$_HOOK_DIR/lib-detach.sh"
+        if ! { _remember_is_windows && _remember_detach_windows "$_SAVE_LOG" "$PID_FILE" "$SAVE_SCRIPT" "$SESSION_ID"; }; then
+            nohup "$SAVE_SCRIPT" "$SESSION_ID" >> "$_SAVE_LOG" 2>&1 &
+            echo $! > "$PID_FILE"
+        fi
         SAVE_TRIGGERED="true"
     fi
   fi
