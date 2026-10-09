@@ -92,7 +92,24 @@ _remember_detach_windows() {
     local c_script
     c_script='exec bash "$0" "$@" >>'"${outfile_q}"' 2>&1'
 
-    wscript.exe //B "$vbs_win" "$bash_win" -c "$c_script" "$pidwrap" "$pidfile" "$@" >/dev/null 2>&1 &
+    # #1002 review: a call site may hand us a bare "bash" as the real
+    # command's own argv[0] (session-end-hook.sh and agy-stop-hook.sh both
+    # re-invoke themselves as `bash SCRIPT`, rather than exec'ing SCRIPT
+    # directly the way post-tool-hook.sh does). That bareword then travels
+    # through two more layers (this function's own bash -c driver, then
+    # lib-detach-pidwrap.sh's `exec "$@"`) before it is ever resolved --
+    # each an extra place a bare "bash" could resolve to the wrong
+    # interpreter on a Windows host with WSL installed (its own bash.exe
+    # launcher stub lives in System32, ahead of Git's own bin directories
+    # on some PATH orderings). Resolve it ONCE, here, to the same absolute
+    # path $bash_path already is, rather than trust three more PATH
+    # lookups deep in a process chain this function cannot observe.
+    local real_cmd=("$@")
+    if [ "${real_cmd[0]}" = "bash" ]; then
+        real_cmd[0]="$bash_path"
+    fi
+
+    wscript.exe //B "$vbs_win" "$bash_win" -c "$c_script" "$pidwrap" "$pidfile" "${real_cmd[@]}" >/dev/null 2>&1 &
     disown 2>/dev/null || true
     return 0
 }

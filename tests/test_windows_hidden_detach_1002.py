@@ -25,10 +25,22 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from pipeline.slug import session_dir_slug as _slug
+from tests._bash_runner import resolve_bash
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LIB = REPO_ROOT / "scripts" / "lib-detach.sh"
 ONE_MESSAGE_LINE = "{\"type\":\"assistant\",\"message\":{\"content\":\"x\"}}\n"
+
+# #1002 CI: a bare "bash" resolves to the WSL launcher stub
+# (C:/Windows/System32/bash.exe) on windows-latest, not Git Bash, because
+# CreateProcess searches System32 before PATH for an unqualified name --
+# tests/_bash_runner.py's resolve_bash() (#432) exists for exactly this.
+# Every subprocess.run call in this file must go through BASH, never the
+# literal string "bash" -- a harness bug, not a product bug: this file's
+# own docstring already says the hidden-launch route is tested through
+# stubs because CI cannot observe a real Windows console either way.
+BASH = resolve_bash()
+_NO_BASH = pytest.mark.skipif(BASH is None, reason="no real POSIX bash resolvable on this platform")
 
 
 def _stub(path: Path, body: str) -> None:
@@ -37,7 +49,7 @@ def _stub(path: Path, body: str) -> None:
 
 
 def _run(script: str, env: dict) -> subprocess.CompletedProcess:
-    return subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True, timeout=10, check=False)
+    return subprocess.run([BASH, "-c", script], env=env, capture_output=True, text=True, timeout=10, check=False)
 
 
 def _is_windows_env(extra: dict) -> dict:
@@ -45,11 +57,13 @@ def _is_windows_env(extra: dict) -> dict:
     return env
 
 
+@_NO_BASH
 def test_is_windows_true_via_os_env_var():
     r = _run(f'. "{LIB}"; _remember_is_windows && echo YES || echo NO', _is_windows_env({"OS": "Windows_NT"}))
     assert r.stdout.strip() == "YES", r.stderr
 
 
+@_NO_BASH
 def test_is_windows_true_via_uname_mingw(monkeypatch, tmp_path):
     fake_uname = tmp_path / "uname"
     _stub(fake_uname, 'echo MINGW64_NT-10.0')
@@ -58,6 +72,7 @@ def test_is_windows_true_via_uname_mingw(monkeypatch, tmp_path):
     assert r.stdout.strip() == "YES", r.stderr
 
 
+@_NO_BASH
 def test_is_windows_false_on_plain_linux_env():
     """Positive control for the two tests above: a real Linux/macOS
     environment (the one this suite actually runs on) must NOT be detected
@@ -67,6 +82,7 @@ def test_is_windows_false_on_plain_linux_env():
     assert r.stdout.strip() == "NO", r.stderr
 
 
+@_NO_BASH
 def test_detach_windows_returns_1_when_wscript_missing(tmp_path):
     """Hidden launcher unavailable (the common case on this CI, which has no
     wscript.exe at all) -- must return non-zero so the caller falls back to
@@ -81,6 +97,7 @@ def test_detach_windows_returns_1_when_wscript_missing(tmp_path):
     assert "RC=1" in r.stdout, r.stdout + r.stderr
 
 
+@_NO_BASH
 def test_detach_windows_invokes_hidden_launcher_with_expected_args(tmp_path):
     """Positive control for the test above: when wscript.exe AND cygpath
     AND bash are all resolvable, the hidden route is taken and wscript.exe
@@ -108,6 +125,63 @@ def test_detach_windows_invokes_hidden_launcher_with_expected_args(tmp_path):
     assert lines[5].endswith("lib-detach-pidwrap.sh"), lines
     assert lines[6] == str(pid), lines
     assert lines[7:] == ["echo", "hi"], lines
+
+
+@_NO_BASH
+def test_detach_windows_resolves_bare_bash_argv_to_absolute_path(tmp_path):
+    """#1002 review: session-end-hook.sh and agy-stop-hook.sh both hand
+    _remember_detach_windows a bare "bash" as the real command's own
+    argv[0] (re-invoking themselves as `bash SCRIPT`, rather than exec'ing
+    SCRIPT directly the way post-tool-hook.sh does). That bareword must
+    come out resolved to an absolute path -- the same one $bash_path
+    already resolved for the function's own -c wrapper above -- rather
+    than pass through as the literal string "bash" for three more nested
+    PATH lookups to get right on their own. Whether an unresolved "bash"
+    would actually mis-resolve on real Windows is REASONED, not OBSERVED
+    (no Windows box here), but resolving it once, locally, removes the
+    question rather than betting on it."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    captured = tmp_path / "captured.txt"
+    _stub(bindir / "wscript.exe", f'printf "%s\\n" "$@" > "{captured}"')
+    _stub(bindir / "cygpath", 'shift; printf "%s" "$1"')
+    env = {"PATH": f"{bindir}:/usr/bin:/bin"}
+    out = tmp_path / "out.log"
+    pid = tmp_path / "pid"
+    r = _run(
+        f'. "{LIB}"; _remember_detach_windows "{out}" "{pid}" bash /some/script.sh arg1; echo "RC=$?"; sleep 0.2',
+        env,
+    )
+    assert "RC=0" in r.stdout, r.stdout + r.stderr
+    real_cmd = captured.read_text(encoding="utf-8").splitlines()[7:]
+    assert real_cmd[0] != "bash", real_cmd
+    assert real_cmd[0].endswith("bash"), real_cmd
+    assert real_cmd[1:] == ["/some/script.sh", "arg1"], real_cmd
+
+
+@_NO_BASH
+def test_detach_windows_leaves_a_non_bash_command_untouched(tmp_path):
+    """Positive control for the test above: a real command whose argv[0]
+    is NOT the literal string "bash" (the post-tool-hook.sh shape, and
+    the existing test_detach_windows_invokes_hidden_launcher_with_expected_args
+    above, both pass a script path or "echo" directly) must reach
+    wscript.exe completely unchanged -- the new resolution step must be
+    conditional on the exact bareword, not a blanket rewrite of argv[0]."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    captured = tmp_path / "captured.txt"
+    _stub(bindir / "wscript.exe", f'printf "%s\\n" "$@" > "{captured}"')
+    _stub(bindir / "cygpath", 'shift; printf "%s" "$1"')
+    env = {"PATH": f"{bindir}:/usr/bin:/bin"}
+    out = tmp_path / "out.log"
+    pid = tmp_path / "pid"
+    r = _run(
+        f'. "{LIB}"; _remember_detach_windows "{out}" "{pid}" /some/script.sh arg1; echo "RC=$?"; sleep 0.2',
+        env,
+    )
+    assert "RC=0" in r.stdout, r.stdout + r.stderr
+    real_cmd = captured.read_text(encoding="utf-8").splitlines()[7:]
+    assert real_cmd == ["/some/script.sh", "arg1"], real_cmd
 
 
 def _post_tool_plugin_root(tmp_path: Path, save_body: str) -> Path:
@@ -147,6 +221,7 @@ def _post_tool_env(tmp_path, root, extra_path=""):
     return env, remember
 
 
+@_NO_BASH
 def test_post_tool_save_uses_hidden_launcher_on_windows(tmp_path):
     """Dispatch decision at the REAL call site (post-tool-hook.sh), not a
     reimplementation of it: with Windows detected and a hidden launcher
@@ -159,12 +234,13 @@ def test_post_tool_save_uses_hidden_launcher_on_windows(tmp_path):
     root = _post_tool_plugin_root(tmp_path, "#!/usr/bin/env bash\nexit 0\n")
     env, _remember = _post_tool_env(tmp_path, root, extra_path=str(bindir))
     env["OS"] = "Windows_NT"
-    r = subprocess.run(["bash", str(root / "scripts" / "post-tool-hook.sh")],
+    r = subprocess.run([BASH, str(root / "scripts" / "post-tool-hook.sh")],
                         env=env, input="", capture_output=True, text=True, timeout=15, check=False)
     time.sleep(0.3)  # the hidden route's own "wscript.exe &" is detached -- give it a beat
     assert captured.exists(), "wscript.exe stub was never invoked -- hidden route not taken\n" + r.stderr
 
 
+@_NO_BASH
 def test_post_tool_save_uses_nohup_without_windows(tmp_path):
     """Positive control for the test above: with no Windows signal at all
     (the environment this suite actually runs under), the save must go
@@ -178,7 +254,7 @@ def test_post_tool_save_uses_nohup_without_windows(tmp_path):
     root = _post_tool_plugin_root(tmp_path, "#!/usr/bin/env bash\nexit 0\n")
     env, remember = _post_tool_env(tmp_path, root, extra_path=str(bindir))
     env["OS"] = ""
-    r = subprocess.run(["bash", str(root / "scripts" / "post-tool-hook.sh")],
+    r = subprocess.run([BASH, str(root / "scripts" / "post-tool-hook.sh")],
                         env=env, input="", capture_output=True, text=True, timeout=15, check=False)
     assert not captured.exists(), "wscript.exe stub was invoked even though Windows was not detected\n" + r.stderr
     pid_file = remember / "tmp" / "save-session.pid"
