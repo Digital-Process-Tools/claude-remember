@@ -21,6 +21,8 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from pipeline.slug import session_dir_slug as _slug
 
@@ -203,3 +205,72 @@ def test_every_nohup_detach_site_guards_with_the_shared_helper():
             "a nohup detach here would flash a console on Windows (#1002) "
             "with nothing guarding it."
         )
+        active_lines = [
+            line for line in text.splitlines()
+            if "_remember_detach_windows" in line and not line.strip().startswith("#")
+        ]
+        assert active_lines, (
+            f"{site.name}: _remember_detach_windows is only mentioned inside a "
+            "comment, never on an active line -- the string-presence check "
+            "above has no positive control distinguishing a real call from a "
+            "stray comment (#1002 review)."
+        )
+
+
+BACKSLASH = chr(92)
+DQUOTE = chr(34)
+
+
+def _vbs_quotearg_port(arg):
+    """Line-for-line port of scripts/windows-hidden-run.vbs's QuoteArg,
+    kept in sync by hand so a future edit to either side that breaks the
+    pairing fails this test rather than shipping silently (#1002 review:
+    the original doubled-quote escape silently dropped every embedded
+    quote under the MS-CRT/CreateProcess convention subprocess.list2cmdline
+    already implements correctly in the stdlib, on every platform, since
+    it is pure string manipulation -- no Windows box needed to run it)."""
+    need_quote = (" " in arg) or ("\t" in arg) or (arg == "")
+    result = []
+    bs_count = 0
+    for c in arg:
+        if c == BACKSLASH:
+            bs_count += 1
+        elif c == DQUOTE:
+            result.append(BACKSLASH * (bs_count * 2 + 1))
+            result.append(DQUOTE)
+            bs_count = 0
+        else:
+            if bs_count:
+                result.append(BACKSLASH * bs_count)
+                bs_count = 0
+            result.append(c)
+    if need_quote:
+        result.append(BACKSLASH * (bs_count * 2))
+        return DQUOTE + "".join(result) + DQUOTE
+    result.append(BACKSLASH * bs_count)
+    return "".join(result)
+
+
+_QUOTEARG_CASES = [
+    "plain",
+    "with space",
+    "with\ttab",
+    "",
+    "has\"quote",
+    "ends with backslash\\",
+    "backslash before quote\\\"end",
+    "exec bash \"$0\" \"$@\" >>/tmp/out space.log 2>&1",
+    "C:\\Users\\John Doe\\save-session.sh",
+]
+
+
+@pytest.mark.parametrize("arg", _QUOTEARG_CASES)
+def test_vbs_quotearg_matches_the_stdlib_createprocess_convention(arg):
+    """Pins the VBS escaping algorithm against Python's own
+    subprocess.list2cmdline -- the same MS-CRT/CreateProcess convention,
+    correct on every platform since it is pure string manipulation. The
+    original escape (doubling embedded quotes) failed this for any
+    argument containing a literal quote; #1002 review caught it."""
+    import subprocess
+
+    assert _vbs_quotearg_port(arg) == subprocess.list2cmdline([arg])
