@@ -194,18 +194,6 @@ fi
 # aggressively than Claude Code's did, which this failed silently against
 # until caught by checking the target workspace's own memory log rather
 # than trusting the hook's exit code alone.
-# #1002: same hidden-launcher-first, unchanged-nohup-fallback shape as
-# post-tool-hook.sh's own save trigger -- see lib-detach.sh.
-_rd_lib="$_SCRIPT_DIR/lib-detach.sh"
-_rd_used_hidden=false
-if [ -f "$_rd_lib" ]; then
-    source "$_rd_lib"
-    if _remember_is_windows && _remember_detach_windows /dev/null /dev/null bash "$_SCRIPT_DIR/save-session.sh" "$_CONVERSATION_ID"; then
-        _rd_used_hidden=true
-    fi
-fi
-if [ "$_rd_used_hidden" = false ]; then
-    nohup bash "$_SCRIPT_DIR/save-session.sh" "$_CONVERSATION_ID" >/dev/null 2>&1 &
-    disown 2>/dev/null || true
-fi
+nohup bash "$_SCRIPT_DIR/save-session.sh" "$_CONVERSATION_ID" >/dev/null 2>&1 &
+disown 2>/dev/null || true
 exit 0
