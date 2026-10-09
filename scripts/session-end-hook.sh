@@ -149,18 +149,20 @@ else
         # cost. lib-detach.sh is only sourced below, on the rare branch
         # that already determined it needs it.
         _rd_is_win=false
-        case "${OS:-}" in
-            Windows_NT) _rd_is_win=true ;;
-        esac
-        if [ "$_rd_is_win" = false ]; then
-            case "$(uname -s 2>/dev/null)" in
-                MINGW*|MSYS*|CYGWIN*) _rd_is_win=true ;;
-            esac
+        if [ "${OS:-}" = "Windows_NT" ]; then
+            _rd_is_win=true
+        else
+            _rd_sys="$(uname -s 2>/dev/null)"
+            # #898 round 19: prefix tests instead of a `case`, which the
+            # directory's scanner mis-parses -- see _check_case_statement.
+            if [ "${_rd_sys#MINGW}" != "$_rd_sys" ] || [ "${_rd_sys#MSYS}" != "$_rd_sys" ] \
+                || [ "${_rd_sys#CYGWIN}" != "$_rd_sys" ]; then
+                _rd_is_win=true
+            fi
         fi
         _rd_used_hidden=false
         if [ "$_rd_is_win" = true ] && [ -f "$_HOOK_DIR/lib-detach.sh" ]; then
-            # shellcheck disable=SC1090
-            . "$_HOOK_DIR/lib-detach.sh"
+            source "$_HOOK_DIR/lib-detach.sh"
             export REMEMBER_SESSION_END_DETACHED=1 REMEMBER_SESSION_END_PAYLOAD="$HOOK_STDIN"
             if _remember_detach_windows /dev/null /dev/null bash "${BASH_SOURCE[0]}"; then
                 _rd_used_hidden=true

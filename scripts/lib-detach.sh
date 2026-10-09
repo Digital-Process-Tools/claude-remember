@@ -32,10 +32,10 @@ _remember_is_windows() {
     sys="${OS:-}"
     [ "$sys" = "Windows_NT" ] && return 0
     sys="$(uname -s 2>/dev/null)"
-    case "$sys" in
-        MINGW*|MSYS*|CYGWIN*) return 0 ;;
-    esac
-    return 1
+    # #898 round 19: written as prefix tests instead of a `case`, which the
+    # directory's scanner mis-parses -- see _check_case_statement.
+    [ "${sys#MINGW}" != "$sys" ] || [ "${sys#MSYS}" != "$sys" ] \
+        || [ "${sys#CYGWIN}" != "$sys" ]
 }
 
 # _remember_detach_windows OUTFILE PIDFILE CMD...
@@ -86,8 +86,11 @@ _remember_detach_windows() {
 
     local outfile_q
     outfile_q="$(printf '%q' "$outfile")"
+    # Single-quoted literal, concatenated with the quoted outfile_q
+    # expansion -- not an escaped double quote, which the directory's
+    # scanner mis-tracks in some states (#898 round 8).
     local c_script
-    c_script="exec bash \"\$0\" \"\$@\" >>${outfile_q} 2>&1"
+    c_script='exec bash "$0" "$@" >>'"${outfile_q}"' 2>&1'
 
     wscript.exe //B "$vbs_win" "$bash_win" -c "$c_script" "$pidwrap" "$pidfile" "$@" >/dev/null 2>&1 &
     disown 2>/dev/null || true

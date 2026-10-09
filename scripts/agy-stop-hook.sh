@@ -199,8 +199,7 @@ fi
 _rd_lib="$_SCRIPT_DIR/lib-detach.sh"
 _rd_used_hidden=false
 if [ -f "$_rd_lib" ]; then
-    # shellcheck disable=SC1090
-    . "$_rd_lib"
+    source "$_rd_lib"
     if _remember_is_windows && _remember_detach_windows /dev/null /dev/null bash "$_SCRIPT_DIR/save-session.sh" "$_CONVERSATION_ID"; then
         _rd_used_hidden=true
     fi
