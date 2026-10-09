@@ -293,8 +293,7 @@ _remember_python() {
     # has shipped down to this file's own floor (_REMEMBER_PY_FLOOR_MINOR,
     # 3.9) -- covering the reporter's 3.10 and leaving room for a future
     # release without another #900-budget negotiation.
-    for _c in "python3" "python" "py -3" "py" \
-        "python3.13" "python3.12" "python3.11" "python3.10" "python3.9"; do
+    for _c in "python3" "python" "py -3" "py" python3.{13..9}; do
         if ! command -v "${_c%% *}" >/dev/null 2>&1; then
             _pr="$_pr
 $_c: -"
