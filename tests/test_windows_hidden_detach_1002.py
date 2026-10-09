@@ -141,8 +141,22 @@ def test_is_windows_false_on_plain_linux_env(tmp_path):
     fake_uname = tmp_path / "uname"
     _stub(fake_uname, 'echo Linux')
     env = _is_windows_env({"OS": ""}, path_prepend=str(tmp_path))
-    r = _run(f'. "{LIB}"; _remember_is_windows && echo YES || echo NO', env)
-    assert r.stdout.strip() == "NO", r.stderr
+    # TEMPORARY diagnostic (#1002 CI round 7): neither the CRLF-safe
+    # _stub() write nor _controlled_env()'s full os.environ inheritance
+    # changed this test's outcome on Windows CI at all (rounds 5 and 6),
+    # so the actual mechanism is still unknown. Surface exactly what this
+    # shell saw: whether `command -v uname` resolved to the stub at all,
+    # and what running it actually produced.
+    script = (
+        f'. "{LIB}"; '
+        f'echo "DEBUG_PATH=$PATH"; '
+        f'echo "DEBUG_COMMAND_V_UNAME=$(command -v uname 2>&1)"; '
+        f'echo "DEBUG_UNAME_RAW=$(uname -s 2>&1)"; '
+        f'_remember_is_windows && echo YES || echo NO'
+    )
+    r = _run(script, env)
+    result_line = r.stdout.strip().splitlines()[-1] if r.stdout.strip() else "<empty>"
+    assert result_line == "NO", f"full stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
 
 
 @_NO_BASH
@@ -174,11 +188,23 @@ def test_detach_windows_invokes_hidden_launcher_with_expected_args(tmp_path):
     env = _controlled_env(_win_safe_path(bindir, "/usr/bin", "/bin"))
     out = tmp_path / "out.log"
     pid = tmp_path / "pid"
+    # TEMPORARY diagnostic (#1002 CI round 7): this test's RC=1 on Windows
+    # CI survived both the CRLF-safe _stub() fix and _controlled_env()'s
+    # full os.environ inheritance (rounds 5 and 6). Surface which guard
+    # clause inside _remember_detach_windows is actually failing: PATH as
+    # bash sees it, and whether wscript.exe/cygpath/bash resolve via
+    # `command -v`.
+    diag = (
+        'echo "DEBUG_PATH=$PATH"; '
+        'echo "DEBUG_CV_WSCRIPT=$(command -v wscript.exe 2>&1)"; '
+        'echo "DEBUG_CV_CYGPATH=$(command -v cygpath 2>&1)"; '
+        'echo "DEBUG_CV_BASH=$(command -v bash 2>&1)"; '
+    )
     r = _run(
-        f'. "{LIB}"; _remember_detach_windows "{out}" "{pid}" echo hi; echo "RC=$?"; sleep 0.2',
+        f'. "{LIB}"; {diag}_remember_detach_windows "{out}" "{pid}" echo hi; echo "RC=$?"; sleep 0.2',
         env,
     )
-    assert "RC=0" in r.stdout, r.stdout + r.stderr
+    assert "RC=0" in r.stdout, f"full stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
     lines = captured.read_text(encoding="utf-8").splitlines()
     assert lines[0] == "//B", lines
     assert lines[1].endswith("windows-hidden-run.vbs"), lines
