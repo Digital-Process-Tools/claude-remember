@@ -204,6 +204,28 @@ def test_a_versioned_fallback_candidate_is_actually_runnable(tmp_path):
     assert "3.11.4" in result.stdout, (result.stdout, result.stderr)
 
 
+def test_the_reporters_ubuntu_2004_shape_falls_through_to_python310(tmp_path):
+    """Maintainer finding, round 3 (#1003 follow-up): the reporter's own
+    machine is Ubuntu 20.04 with `python3` = 3.8.10 and `python3.10`
+    installed -- not 3.11. Round 2's versioned fallback named only
+    python3.11, so on this exact machine detect-tools would reject 3.8,
+    find no python3.11, and FATAL -- breaking every hook for the very
+    person who reported the original bug. The fallback must cover at
+    least python3.9 through python3.13, not one pinned version."""
+    bindir = tmp_path / "bin"
+    _stub(bindir, "python3", "Python 3.8.10")
+    _stub(bindir, "python3.10", "Python 3.10.12")
+
+    env = _isolated_env(tmp_path, str(bindir), base_path="")
+    result = _source(env)
+
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert "PYTHON=python3.10" in result.stdout, (
+        "the reporter's exact shape (3.8 + 3.10, no 3.11) must resolve to "
+        f"python3.10, not FATAL:\n{result.stdout}\n{result.stderr}"
+    )
+
+
 def test_a_stale_pre_1003_cache_is_not_trusted(tmp_path):
     """A cache written by a version of this file from before #1003 has no
     PYFLOOR line at all. Trusting it anyway would let a stale, floor-

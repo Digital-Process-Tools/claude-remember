@@ -130,16 +130,26 @@ _remember_run_python() {
         py -3 "$@"
     elif [ "$PYTHON" = py ]; then
         py "$@"
-    # #1003's versioned fallback is a candidate `_remember_python` can now
-    # pick, and needs its own literal arm here for the same reason the
-    # original four do -- the scanner only reads a literal command word,
-    # never a variable-driven dispatch, and a candidate accepted above
-    # with no arm here would FATAL on every actual use after being
-    # accepted as PYTHON. Scoped to one version (the hook-script byte
-    # budget, #900, has no room for a full 3.9-3.13 ladder here -- #1003
-    # follow-up files the wider range as a separate issue).
-    elif [ "$PYTHON" = python3.11 ]; then
-        python3.11 "$@"
+    # #1003 round 3 (maintainer finding): round 2's versioned fallback had
+    # its own literal arm per name, scoped to one version (python3.11) for
+    # the hook-script byte budget (#900). That broke on the reporter's own
+    # machine (Ubuntu 20.04: python3=3.8, python3.10 installed, no 3.11) --
+    # detect-tools would reject 3.8, find no python3.11, and FATAL. One
+    # per-name arm cannot cover a whole version ladder within the budget, so
+    # this is ONE generic arm instead: any PYTHON value shaped like
+    # "python3.N" dispatches through the `command` builtin, a literal word
+    # in command position (what the scanner can read) that then runs the
+    # STRING in "$PYTHON" as a program name -- no new per-version arm ever
+    # needed again. `env "$PYTHON" "$@"` was the other candidate for this;
+    # rejected because check_release_tree.py's BARE_ENV_WORD check (#898
+    # round 4/5) FAILs a bare `env` word at command position (the
+    # directory's checklist names it for the credential-pair finding), and
+    # `env` is also a separate process spawn on Windows where `command` is
+    # a shell builtin -- doubly worse there. The glob match keeps this
+    # scoped to the one shape `_remember_python`'s candidate loop can ever
+    # produce; it is not a general "run anything in $PYTHON" escape hatch.
+    elif [[ "$PYTHON" == python3.[0-9]* ]]; then
+        command "$PYTHON" "$@"
     else
         echo "FATAL: _remember_run_python: unrecognized PYTHON value '$PYTHON'" >&2
         return 127
@@ -272,7 +282,19 @@ _remember_python() {
     # the floor. The common case (a floor-or-above python3 first on PATH)
     # still breaks out on the very first iteration, exactly as before #1003;
     # the versioned candidates cost a subprocess each only when it does not.
-    for _c in "python3" "python" "py -3" "py" "python3.11"; do
+    #
+    # #1003 round 3 (maintainer finding): round 2 named one version here
+    # (python3.11) only, matching its one-arm _remember_run_python limit.
+    # That broke the reporter's own machine (Ubuntu 20.04: python3=3.8,
+    # python3.10 installed, no 3.11) -- capture, which was WORKING on 3.8
+    # before #1003, would now FATAL too. _remember_run_python's generic
+    # `command "$PYTHON"` arm (above) removed the one-arm-per-version
+    # limit, so the ladder now runs every version from the newest Python
+    # has shipped down to this file's own floor (_REMEMBER_PY_FLOOR_MINOR,
+    # 3.9) -- covering the reporter's 3.10 and leaving room for a future
+    # release without another #900-budget negotiation.
+    for _c in "python3" "python" "py -3" "py" \
+        "python3.13" "python3.12" "python3.11" "python3.10" "python3.9"; do
         if ! command -v "${_c%% *}" >/dev/null 2>&1; then
             _pr="$_pr
 $_c: -"
