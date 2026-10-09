@@ -1,4 +1,5 @@
-"""#1002: a plain nohup-and-background launch still allocates a console that
+"""#1002: Windows Terminal flashes a visible console for ~1s because a plain
+nohup-and-background launch still allocates a console on Windows regardless --
 Windows Terminal flashes for ~1s on Windows, every time one of this plugin's
 four detached saves/consolidations fires (reporter fmatamala). CI cannot see
 a Windows console, so what is tested here is the DISPATCH DECISION added by
@@ -40,8 +41,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # subsequent `$lib_dir/windows-hidden-run.vbs` lookup inside the function
 # resolves to the wrong directory, failing the `[ -f "$vbs" ]` guard and
 # returning 1 -- confirmed via CI diagnostics, not reasoned (#1002 CI
-# round 7). The same bug class rounds 5-6 already fixed for the real
-# post-tool-hook.sh invocations below.
+# round 7).
 LIB = (REPO_ROOT / "scripts" / "lib-detach.sh").as_posix()
 ONE_MESSAGE_LINE = "{\"type\":\"assistant\",\"message\":{\"content\":\"x\"}}\n"
 
@@ -75,85 +75,85 @@ def _stub(path: Path, body: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 
 
-def _run(script: str, env: dict) -> subprocess.CompletedProcess:
+def _to_msys_path(value) -> str:
+    """Convert a native Windows path (``C:\\Users\\X``) to its Git Bash/MSYS
+    mount form (``/c/Users/X``) -- no embedded colon, so it can be safely
+    ':'-joined with other PATH entries and re-asserted at bash runtime
+    without the drive-letter-vs-separator ambiguity a raw Windows path
+    creates (#1002 CI rounds 5-8: a naive ':'-join split "C:\\Users\\X"
+    into "C" and "\\Users\\X" at the drive letter's own colon, silently
+    dropping the entry from PATH). A value with no drive letter (already
+    POSIX, or empty) passes through with backslashes normalised and
+    nothing else changed."""
+    s = str(value)
+    if len(s) >= 2 and s[1] == ":" and s[0].isalpha():
+        return f"/{s[0].lower()}{s[2:].replace(chr(92), '/')}"
+    return s.replace(chr(92), "/")
+
+
+def _run(script: str, env: dict, prepend: str = "") -> subprocess.CompletedProcess:
     # #1002 CI round 7: Git Bash/MSYS unconditionally prepends its own
-    # standard directories (observed: /mingw64/bin, /usr/bin, a user bin
-    # dir) to PATH at process startup, regardless of what PATH value was
-    # supplied via the subprocess env -- confirmed on real Windows CI by
-    # printing the actual $PATH a sourced script saw: the real /usr/bin
-    # (with the real uname/cygpath) came ahead of a test's own stub
-    # directory even though the env dict's PATH value put the stub
+    # standard directories (observed on CI: /mingw64/bin, /usr/bin, a
+    # user bin dir) to PATH at process STARTUP, regardless of what PATH
+    # value is supplied via the subprocess env -- confirmed by printing
+    # the actual $PATH a sourced script saw on real Windows CI: the real
+    # /usr/bin (with the real uname/cygpath) came ahead of a test's own
+    # stub directory even though the env dict's PATH value put the stub
     # first. Re-asserting PATH via an explicit `export` INSIDE the
-    # script, which runs AFTER that startup injection has already
-    # happened, is the only way a test's own directory can actually win.
-    path = env.get("PATH", "")
-    prefix = f"export PATH={shlex.quote(path)}; " if path else ""
+    # script, which runs AFTER that startup injection, is the only way a
+    # test's own directory can actually win.
+    #
+    # #1002 CI round 8: that `export` must PREPEND onto the already-
+    # correct `$PATH` bash has at that point, never REPLACE it -- a
+    # wholesale replacement (round 7's own first attempt) discarded
+    # /mingw64/bin, where this image's `sleep`/`tr`/etc. actually live
+    # (not /usr/bin), breaking plain utility calls the function and its
+    # stubs both still need. And the prepended entry must go through
+    # _to_msys_path() first: a manual runtime `export PATH=...` is parsed
+    # by bash using pure POSIX ':' semantics, with none of MSYS's own
+    # semicolon-based startup conversion applied to it -- unlike the
+    # subprocess env's own PATH value, which IS converted once at
+    # startup. Confirmed on CI: round 7's os.pathsep(';')-joined value,
+    # re-exported this way, was parsed as one single useless PATH
+    # component by the drive letter's own colon.
+    prefix = f'export PATH={shlex.quote(_to_msys_path(prepend))}:"$PATH"; ' if prepend else ""
     return subprocess.run([BASH, "-c", prefix + script], env=env, capture_output=True, text=True, timeout=10, check=False)
 
 
-def _run_real_script(path: Path, env: dict, *args: str, input_text: str = "") -> subprocess.CompletedProcess:
+def _run_real_script(path: Path, env: dict, *args: str, prepend: str = "", input_text: str = "") -> subprocess.CompletedProcess:
     """Run a REAL script FILE (not an inline -c string) with the same
-    post-startup PATH re-assertion _run() does for inline scripts, and
-    with the path itself passed as .as_posix() for the same
+    post-startup PATH prepend _run() does for inline scripts, and with
+    the path itself passed as .as_posix() for the same
     BASH_SOURCE[0]/backslash reason LIB above is (#1002 CI round 7)."""
-    env_path = env.get("PATH", "")
-    prefix = f"export PATH={shlex.quote(env_path)}; " if env_path else ""
+    prefix = f'export PATH={shlex.quote(_to_msys_path(prepend))}:"$PATH"; ' if prepend else ""
     quoted_args = " ".join(shlex.quote(a) for a in args)
     script = f'{prefix}exec "{path.as_posix()}" {quoted_args}'.rstrip()
     return subprocess.run([BASH, "-c", script], env=env, input=input_text,
                            capture_output=True, text=True, timeout=15, check=False)
 
 
-def _controlled_env(path: str, **overrides) -> dict:
-    """Inherit the REAL environment (SystemRoot, TEMP, ComSpec, USERPROFILE,
-    etc.) rather than replacing it wholesale, but fully control PATH.
-
-    #1002 CI round 5: every env dict in this file used to start from `{}`
-    and set only a couple of keys. On a real Windows runner that drops
-    SystemRoot and friends, which MSYS/Git Bash's own fork+exec emulation
-    can need just to function at all -- a plausible reason a background
-    `&` job silently failed to launch in one of this file's own dispatch
-    tests. PATH is still fully replaced, never merged with the host's
-    real PATH: a test asserting a stub is used (or deliberately absent)
-    would otherwise be defeated by whatever real Windows system
-    directories (System32, with its own real wscript.exe) happen to sit
-    on the inherited PATH."""
+def _controlled_env(path=None, **overrides) -> dict:
+    """Inherit the REAL environment (SystemRoot, TEMP, ComSpec,
+    USERPROFILE, PATH, etc.) rather than replacing it wholesale --
+    #1002 CI round 6 found that starting from `{}` dropped vars
+    MSYS/Git Bash's own fork+exec emulation can need just to function at
+    all. `path`, when given, still fully REPLACES PATH for the rare test
+    that needs a real system directory (like System32, with its own real
+    wscript.exe) to be genuinely absent rather than merely outranked --
+    every other test controls precedence instead, via _run()'s/
+    _run_real_script()'s own `prepend` argument, which preserves the
+    rest of the real PATH (see their own comments for why that is a
+    separate mechanism from this dict's PATH value)."""
     env = dict(os.environ)
-    env["PATH"] = path
+    if path is not None:
+        env["PATH"] = path
     env.update(overrides)
     return env
 
 
-def _is_windows_env(extra: dict, path_prepend: str = "") -> dict:
-    env = _controlled_env(_win_safe_path(path_prepend, "/usr/bin", "/bin"))
-    env.update(extra)
-    return env
-
-
-def _win_safe_path(*entries) -> str:
-    """Join PATH entries with this host's native list separator.
-
-    A bash invoked on Windows (MSYS/Git Bash) auto-converts a
-    semicolon-joined PATH at shell startup: a drive-letter entry
-    (a drive-letter directory such as ``C:/Users/.../bin``) is translated
-    to its POSIX mount form, and an
-    entry that already looks POSIX-style (``/usr/bin``) is passed through
-    unchanged. Joining the same list with a bare POSIX ':' instead
-    corrupts it on Windows -- a stub directory's own drive-letter colon is
-    then indistinguishable from the separator, splitting that one entry
-    into two useless fragments and silently dropping the stub dir from
-    PATH. That is exactly how the REAL wscript.exe/cygpath got found
-    instead of the stubs: the stub entry vanished, while the ``/usr/bin``
-    and ``/bin`` fallbacks (no drive-letter colon to confuse the split)
-    stayed valid and still pointed at Git's own usr/bin, which does ship a
-    real cygpath (#1002 CI round 5). ``os.pathsep`` is ';' on Windows and
-    ':' on POSIX, matching what this host's own bash actually needs."""
-    return os.pathsep.join(str(e) for e in entries if e)
-
-
 @_NO_BASH
 def test_is_windows_true_via_os_env_var():
-    r = _run(f'. "{LIB}"; _remember_is_windows && echo YES || echo NO', _is_windows_env({"OS": "Windows_NT"}))
+    r = _run(f'. "{LIB}"; _remember_is_windows && echo YES || echo NO', _controlled_env(OS="Windows_NT"))
     assert r.stdout.strip() == "YES", r.stderr
 
 
@@ -161,8 +161,8 @@ def test_is_windows_true_via_os_env_var():
 def test_is_windows_true_via_uname_mingw(monkeypatch, tmp_path):
     fake_uname = tmp_path / "uname"
     _stub(fake_uname, 'echo MINGW64_NT-10.0')
-    env = _is_windows_env({"OS": ""}, path_prepend=str(tmp_path))
-    r = _run(f'. "{LIB}"; _remember_is_windows && echo YES || echo NO', env)
+    env = _controlled_env(OS="")
+    r = _run(f'. "{LIB}"; _remember_is_windows && echo YES || echo NO', env, prepend=str(tmp_path))
     assert r.stdout.strip() == "YES", r.stderr
 
 
@@ -179,8 +179,8 @@ def test_is_windows_false_on_plain_linux_env(tmp_path):
     product)."""
     fake_uname = tmp_path / "uname"
     _stub(fake_uname, 'echo Linux')
-    env = _is_windows_env({"OS": ""}, path_prepend=str(tmp_path))
-    r = _run(f'. "{LIB}"; _remember_is_windows && echo YES || echo NO', env)
+    env = _controlled_env(OS="")
+    r = _run(f'. "{LIB}"; _remember_is_windows && echo YES || echo NO', env, prepend=str(tmp_path))
     assert r.stdout.strip() == "NO", r.stderr
 
 
@@ -188,10 +188,13 @@ def test_is_windows_false_on_plain_linux_env(tmp_path):
 def test_detach_windows_returns_1_when_wscript_missing(tmp_path):
     """Hidden launcher unavailable (the common case on this CI, which has no
     wscript.exe at all) -- must return non-zero so the caller falls back to
-    its own nohup line, never to silently skipping the launch."""
+    its own nohup line, never to silently skipping the launch. PATH is
+    fully replaced here (via _controlled_env's `path=`), not merely
+    outranked, so a real wscript.exe elsewhere on PATH cannot accidentally
+    make this test's own premise false."""
     out = tmp_path / "out.log"
     pid = tmp_path / "pid"
-    env = _controlled_env(_win_safe_path("/usr/bin", "/bin"))
+    env = _controlled_env(path="/usr/bin:/bin")
     r = _run(
         f'. "{LIB}"; _remember_detach_windows "{out}" "{pid}" echo hi; echo "RC=$?"',
         env,
@@ -210,12 +213,13 @@ def test_detach_windows_invokes_hidden_launcher_with_expected_args(tmp_path):
     captured = tmp_path / "captured.txt"
     _stub(bindir / "wscript.exe", f'printf "%s\\n" "$@" > "{captured}"')
     _stub(bindir / "cygpath", 'shift; printf "%s" "$1"')
-    env = _controlled_env(_win_safe_path(bindir, "/usr/bin", "/bin"))
+    env = _controlled_env()
     out = tmp_path / "out.log"
     pid = tmp_path / "pid"
     r = _run(
         f'. "{LIB}"; _remember_detach_windows "{out}" "{pid}" echo hi; echo "RC=$?"; sleep 0.2',
         env,
+        prepend=str(bindir),
     )
     assert "RC=0" in r.stdout, r.stdout + r.stderr
     lines = captured.read_text(encoding="utf-8").splitlines()
@@ -247,12 +251,13 @@ def test_detach_windows_resolves_bare_bash_argv_to_absolute_path(tmp_path):
     captured = tmp_path / "captured.txt"
     _stub(bindir / "wscript.exe", f'printf "%s\\n" "$@" > "{captured}"')
     _stub(bindir / "cygpath", 'shift; printf "%s" "$1"')
-    env = _controlled_env(_win_safe_path(bindir, "/usr/bin", "/bin"))
+    env = _controlled_env()
     out = tmp_path / "out.log"
     pid = tmp_path / "pid"
     r = _run(
         f'. "{LIB}"; _remember_detach_windows "{out}" "{pid}" bash /some/script.sh arg1; echo "RC=$?"; sleep 0.2',
         env,
+        prepend=str(bindir),
     )
     assert "RC=0" in r.stdout, r.stdout + r.stderr
     real_cmd = captured.read_text(encoding="utf-8").splitlines()[7:]
@@ -274,12 +279,13 @@ def test_detach_windows_leaves_a_non_bash_command_untouched(tmp_path):
     captured = tmp_path / "captured.txt"
     _stub(bindir / "wscript.exe", f'printf "%s\\n" "$@" > "{captured}"')
     _stub(bindir / "cygpath", 'shift; printf "%s" "$1"')
-    env = _controlled_env(_win_safe_path(bindir, "/usr/bin", "/bin"))
+    env = _controlled_env()
     out = tmp_path / "out.log"
     pid = tmp_path / "pid"
     r = _run(
         f'. "{LIB}"; _remember_detach_windows "{out}" "{pid}" /some/script.sh arg1; echo "RC=$?"; sleep 0.2',
         env,
+        prepend=str(bindir),
     )
     assert "RC=0" in r.stdout, r.stdout + r.stderr
     real_cmd = captured.read_text(encoding="utf-8").splitlines()[7:]
@@ -302,7 +308,7 @@ def _post_tool_plugin_root(tmp_path: Path, save_body: str) -> Path:
     return root
 
 
-def _post_tool_env(tmp_path, root, extra_path=""):
+def _post_tool_env(tmp_path, root):
     import json as _json
 
     home = tmp_path / "home"
@@ -314,7 +320,6 @@ def _post_tool_env(tmp_path, root, extra_path=""):
     (session_dir / "sess-1.jsonl").write_text(ONE_MESSAGE_LINE * 60)
     (remember / "config.json").write_text(_json.dumps({"thresholds": {"delta_lines_trigger": 50}}))
     env = _controlled_env(
-        _win_safe_path(extra_path, os.environ.get("PATH", "")),
         HOME=str(home), CLAUDE_PROJECT_DIR=str(project),
         CLAUDE_PLUGIN_ROOT=str(root), REMEMBER_DIR=str(remember),
         _LIB_MEMORY_DIR_LOADED="1",
@@ -333,13 +338,13 @@ def test_post_tool_save_uses_hidden_launcher_on_windows(tmp_path):
     _stub(bindir / "wscript.exe", 'printf "%s\n" "$@" > "' + str(captured) + '"')
     _stub(bindir / "cygpath", 'shift; printf "%s" "$1"')
     root = _post_tool_plugin_root(tmp_path, "#!/usr/bin/env bash\nexit 0\n")
-    env, _remember = _post_tool_env(tmp_path, root, extra_path=str(bindir))
+    env, _remember = _post_tool_env(tmp_path, root)
     env["OS"] = "Windows_NT"
     # #1002 CI round 5/7: _run_real_script passes the script's own path as
     # POSIX-forward-slash (see LIB's own comment above for why -- the
-    # same BASH_SOURCE[0]/backslash mechanism) and re-asserts PATH after
+    # same BASH_SOURCE[0]/backslash mechanism) and prepends PATH after
     # MSYS's own startup injection (see _run's own comment).
-    r = _run_real_script(root / "scripts" / "post-tool-hook.sh", env)
+    r = _run_real_script(root / "scripts" / "post-tool-hook.sh", env, prepend=str(bindir))
     time.sleep(0.3)  # the hidden route's own "wscript.exe &" is detached -- give it a beat
     assert captured.exists(), "wscript.exe stub was never invoked -- hidden route not taken\n" + r.stderr
 
@@ -368,9 +373,9 @@ def test_post_tool_save_uses_nohup_without_windows(tmp_path):
     # _remember_is_windows unit test).
     _stub(bindir / "uname", 'echo Linux')
     root = _post_tool_plugin_root(tmp_path, "#!/usr/bin/env bash\nexit 0\n")
-    env, remember = _post_tool_env(tmp_path, root, extra_path=str(bindir))
+    env, remember = _post_tool_env(tmp_path, root)
     env["OS"] = ""
-    r = _run_real_script(root / "scripts" / "post-tool-hook.sh", env)
+    r = _run_real_script(root / "scripts" / "post-tool-hook.sh", env, prepend=str(bindir))
     assert not captured.exists(), "wscript.exe stub was invoked even though Windows was not detected\n" + r.stderr
     pid_file = remember / "tmp" / "save-session.pid"
     assert pid_file.exists(), "PID_FILE must still be created on the nohup fallback branch"
