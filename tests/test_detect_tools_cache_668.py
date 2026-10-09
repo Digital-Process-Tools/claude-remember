@@ -37,6 +37,13 @@ def _fake_python_dir(tmp_path: Path) -> Path:
     stub.write_text(
         "#!/bin/sh\n"
         f'echo x >> "{counter}"\n'
+        # #1003: detect-tools.sh now checks the version text `-V` reports
+        # against the supported floor, so a stub that exits 0 with no
+        # version output at all would be (correctly) rejected as
+        # unparsable -- report a real, floor-meeting version so this
+        # fixture keeps exercising the CACHE behaviour these tests are
+        # actually about, not the floor check.
+        'echo "Python 3.12.0"\n'
         'exit 0\n',
         encoding="utf-8",
     )
