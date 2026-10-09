@@ -42,6 +42,18 @@
 # is the whole PATH value itself, byte for byte (the issue's own guidance:
 # "bash ${PATH} compared as a string is enough").
 #
+# --- Supported floor (#1003) ---
+# Mirrors tests/pep604_floor.py's declared_floor(): the CI matrix in
+# .github/workflows/tests.yml is the only declaration of the floor this
+# repo has, currently 3.9 -- pipeline/_tz.py's `from zoneinfo import ...`
+# (stdlib only since 3.9) is what actually breaks below it. Bash cannot
+# import that test module without a python subprocess on this hot path
+# (#668's whole point is avoiding exactly that fork), so the floor is
+# duplicated here as a plain integer pair, pinned against the real
+# derivation by tests/test_detect_tools_floor_1003.py -- change one
+# without the other and that test fails rather than the two silently
+# drifting apart.
+
 # Lives under the system temp dir (like lib-env-cache.sh's own cache file),
 # NOT under REMEMBER_DIR: this file runs before bootstrap-dirs.sh, so
 # REMEMBER_DIR is not known yet. It is machine/PATH-global rather than
@@ -91,11 +103,30 @@ _jq_fallback() {
     _remember_run_python "$_jq_fb_dir/jq_fallback_get.py" "$_jq_file" "$_jq_query" 2>/dev/null
 }
 
+_REMEMBER_PY_FLOOR_MAJOR=3
+_REMEMBER_PY_FLOOR_MINOR=9
+
+_remember_py_meets_floor() {
+    local _v="$1" _maj _min
+    if [[ "$_v" =~ ([0-9]+)\.([0-9]+) ]]; then
+        _maj="${BASH_REMATCH[1]}"
+        _min="${BASH_REMATCH[2]}"
+    else
+        return 1
+    fi
+    if [ "$((10#$_maj))" -gt "$_REMEMBER_PY_FLOOR_MAJOR" ]; then
+        return 0
+    elif [ "$((10#$_maj))" -lt "$_REMEMBER_PY_FLOOR_MAJOR" ]; then
+        return 1
+    fi
+    [ "$((10#$_min))" -ge "$_REMEMBER_PY_FLOOR_MINOR" ]
+}
+
 _remember_tools_cache_load() {
     [ "${REMEMBER_TOOLS_CACHE:-1}" = "1" ] || return 1
     local _f="$_REMEMBER_TOOLS_CACHE"
     [ -f "$_f" ] && [ ! -L "$_f" ] && [ -O "$_f" ] && [ -r "$_f" ] || return 1
-    local _line _path="" _py="" _jq=""
+    local _line _path="" _py="" _jq="" _pyfloor=""
     # `[ ]` prefix tests, not a `case` with a catch-all `*)` arm inside this
     # loop (#898 round 7 -- that shape is one the plugin directory's
     # scanner holds a submission on).
@@ -108,6 +139,8 @@ _remember_tools_cache_load() {
             _py="${_line#*=}"
         elif [ "${_line#JQ=}" != "$_line" ]; then
             _jq="${_line#*=}"
+        elif [ "${_line#PYFLOOR=}" != "$_line" ]; then
+            _pyfloor="${_line#*=}"
         else
             # Unknown line: not our file, or not our version of it --
             # distrust the whole thing rather than partially validate it.
@@ -116,6 +149,15 @@ _remember_tools_cache_load() {
     done < "$_f"
     [ -n "$_py" ] || return 1
     [ -n "$_jq" ] || return 1
+    # A cache written before #1003 carries no PYFLOOR line, and one written
+    # against a floor this install no longer declares carries the wrong
+    # one -- either way its cached PYTHON was never checked against the
+    # floor this version enforces. Distrust it outright rather than adopt
+    # it: re-trusting it would let a stale, floor-violating interpreter
+    # from before this fix outlive the fix for as long as PATH happens not
+    # to change, reopening the exact silent-for-months failure #1003
+    # reports.
+    [ "$_pyfloor" = "${_REMEMBER_PY_FLOOR_MAJOR}.${_REMEMBER_PY_FLOOR_MINOR}" ] || return 1
     # An EMPTY PATH compares equal to itself just as readily as a real one --
     # never let a process that genuinely has no PATH short-circuit real
     # detection on that coincidence.
@@ -133,6 +175,7 @@ _remember_tools_cache_publish() {
     local _f="$_REMEMBER_TOOLS_CACHE" _t
     _t=$(mktemp "${_f}.XXXXXX" 2>/dev/null) || return 0
     printf '%s=%s\n' CACHE_PATH "$PATH" PYTHON "$PYTHON" JQ "$JQ" \
+        PYFLOOR "${_REMEMBER_PY_FLOOR_MAJOR}.${_REMEMBER_PY_FLOOR_MINOR}" \
         > "$_t" 2>/dev/null || { rm -f "$_t" 2>/dev/null; return 0; }
     mv -f "$_t" "$_f" 2>/dev/null || rm -f "$_t" 2>/dev/null
     return 0
@@ -189,25 +232,34 @@ else
 PYTHON=""
 _remember_python() {
     [ -n "${PYTHON:-}" ] && return 0
-    local _candidate _first _probe_status _probe_report=""
-    for _candidate in "python3" "python" "py -3" "py"; do
+    local _candidate _first _probe_status _probe_report="" _below_report="" _v
+    # Generic candidates first (python3, python, the Windows launcher), then
+    # versioned fallbacks newest-to-oldest down to the floor (#1003), tried
+    # only once the generic four have each failed outright or come in below
+    # the floor. The common case (a floor-or-above python3 first on PATH)
+    # still breaks out on the very first iteration, exactly as before #1003;
+    # the versioned candidates cost a subprocess each only when it does not.
+    for _candidate in "python3" "python" "py -3" "py" \
+        "python3.13" "python3.12" "python3.11" "python3.10" "python3.9"; do
         _first="${_candidate%% *}"
         if ! command -v "$_first" >/dev/null 2>&1; then
             _probe_report="$_probe_report
   $_candidate: not on PATH"
             continue
         fi
-        if $_candidate -V >/dev/null 2>&1; then
+        _v=$($_candidate -V 2>&1)
+        _probe_status=$?
+        if [ "$_probe_status" -ne 0 ]; then
+            _probe_report="$_probe_report
+  $_candidate: on PATH ($(command -v "$_first" 2>/dev/null)), '-V' exit $_probe_status"
+            continue
+        fi
+        if _remember_py_meets_floor "$_v"; then
             PYTHON="$_candidate"
             break
-        else
-            # Captured in the else arm, where `$?` is still the probe's own
-            # status: after `fi` it is the compound's, which is 0 here, and
-            # after the `command -v` substitution below it would be that one's.
-            _probe_status=$?
         fi
-        _probe_report="$_probe_report
-  $_candidate: on PATH ($(command -v "$_first" 2>/dev/null)), '-V' exit $_probe_status"
+        _below_report="$_below_report
+  $_candidate: on PATH ($(command -v "$_first" 2>/dev/null)), $_v -- below the supported floor (${_REMEMBER_PY_FLOOR_MAJOR}.${_REMEMBER_PY_FLOOR_MINOR})"
     done
     if [ -z "$PYTHON" ]; then
         # Returned, not exited: in lazy mode this runs on demand, deep inside
@@ -216,9 +268,23 @@ _remember_python() {
         # available" (lib-memory-dir.sh copies the bundled config; log.sh's
         # config() returns its default). Eager mode turns it into the exit
         # below, before any real work starts.
-        echo "FATAL: No working Python found. Tried: python3, python, py -3, py. Windows users: install the official Python release (not the Microsoft Store one) and ensure 'python' or 'py' works from the shell Claude Code launches hooks in." >&2
-        echo "  PATH searched: $PATH" >&2
-        echo "  per-candidate (exit 49 = Microsoft Store placeholder, not a real interpreter):$_probe_report" >&2
+        if [ -n "$_below_report" ]; then
+            # Distinct from "nothing found at all" below (#1003, #650): an
+            # interpreter IS on PATH and DOES run, it is simply too old to
+            # support -- consolidation needs zoneinfo (3.9+) and crashes on
+            # anything older (#1003's own silent-for-months reporter). The
+            # generic FATAL in the else arm would send this reporter off to
+            # reinstall Python when one is already installed and working,
+            # just unsupported.
+            echo "FATAL: Python found, but every interpreter on PATH is below the floor this plugin supports (${_REMEMBER_PY_FLOOR_MAJOR}.${_REMEMBER_PY_FLOOR_MINOR}); consolidation requires zoneinfo (3.9+) and crashes on anything older. Install a newer Python and put it first on PATH, or as python3.9+ / py -3." >&2
+            echo "  PATH searched: $PATH" >&2
+            echo "  below floor:$_below_report" >&2
+            [ -n "$_probe_report" ] && echo "  also unusable:$_probe_report" >&2
+        else
+            echo "FATAL: No working Python found. Tried: python3, python, py -3, py (then python3.9 through python3.13). Windows users: install the official Python release (not the Microsoft Store one) and ensure 'python' or 'py' works from the shell Claude Code launches hooks in." >&2
+            echo "  PATH searched: $PATH" >&2
+            echo "  per-candidate (exit 49 = Microsoft Store placeholder, not a real interpreter):$_probe_report" >&2
+        fi
         return 1
     fi
     export PYTHON
@@ -264,6 +330,22 @@ _remember_run_python() {
         py -3 "$@"
     elif [ "$PYTHON" = py ]; then
         py "$@"
+    # #1003's versioned fallbacks (python3.9 through python3.13) are
+    # candidates `_remember_python` can now pick, and each needs its own
+    # literal arm here for the same reason the original four do -- the
+    # scanner only reads a literal command word, never a variable-driven
+    # dispatch, and a candidate accepted above with no arm here would
+    # FATAL on every actual use after being accepted as PYTHON.
+    elif [ "$PYTHON" = python3.9 ]; then
+        python3.9 "$@"
+    elif [ "$PYTHON" = python3.10 ]; then
+        python3.10 "$@"
+    elif [ "$PYTHON" = python3.11 ]; then
+        python3.11 "$@"
+    elif [ "$PYTHON" = python3.12 ]; then
+        python3.12 "$@"
+    elif [ "$PYTHON" = python3.13 ]; then
+        python3.13 "$@"
     else
         echo "FATAL: _remember_run_python: unrecognized PYTHON value '$PYTHON'" >&2
         return 127
