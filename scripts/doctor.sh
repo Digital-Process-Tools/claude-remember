@@ -423,8 +423,8 @@ else
     # warns independently of how it was chosen. WARN, not FAIL, and the
     # VERDICT below is deliberately left alone -- capture (PostToolUse)
     # does not touch zoneinfo and is unaffected; only consolidation is.
-    if command -v _remember_py_meets_floor >/dev/null 2>&1 \
-        && ! _remember_py_meets_floor "$_PY_VERSION"; then
+    if command -v _py_ok >/dev/null 2>&1 \
+        && ! _py_ok "$_PY_VERSION"; then
         echo "WARN python: $_PY_VERSION is below this plugin's supported floor"
         echo "     (${_REMEMBER_PY_FLOOR_MAJOR}.${_REMEMBER_PY_FLOOR_MINOR}) -- consolidation needs zoneinfo (stdlib only"
         echo "     since 3.9) and will crash even though capture above reports OK"
@@ -1179,20 +1179,16 @@ if [ "${#_CH_FILES[@]}" -gt 0 ]; then
     unset _CH_SORTED
 fi
 unset _CH_FILES _remember_ch_glob_dir _ch_f
-case "$_CH_LAST_LINE" in
-    *'[consolidation] ERROR'*)
-        echo "WARN Consolidation's last recorded attempt failed, and no later attempt has"
-        echo "     succeeded since -- memory may still be captured (see Capture health"
-        echo "     above) while consolidation stays silently broken. Last entry:"
-        echo "     $_CH_LAST_LINE"
-        ;;
-    *'[consolidation] done'*)
-        echo "OK   Consolidation: last recorded attempt succeeded ($_CH_LAST_LINE)"
-        ;;
-    *)
-        echo "--   No consolidation attempt recorded yet in $REMEMBER_DIR/logs"
-        ;;
-esac
+if [[ "$_CH_LAST_LINE" == *"[consolidation] ERROR"* ]]; then
+    echo "WARN Consolidation's last recorded attempt failed, and no later attempt has"
+    echo "     succeeded since -- memory may still be captured (see Capture health"
+    echo "     above) while consolidation stays silently broken. Last entry:"
+    echo "     $_CH_LAST_LINE"
+elif [[ "$_CH_LAST_LINE" == *"[consolidation] done"* ]]; then
+    echo "OK   Consolidation: last recorded attempt succeeded ($_CH_LAST_LINE)"
+else
+    echo "--   No consolidation attempt recorded yet in $REMEMBER_DIR/logs"
+fi
 unset _CH_LAST_LINE
 echo ""
 

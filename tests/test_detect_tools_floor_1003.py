@@ -8,9 +8,11 @@ picking it: any interpreter that answered `-V` with exit 0 was accepted,
 "capture is working" -- capture (PostToolUse) never touches zoneinfo, so it
 genuinely was fine, while consolidation failed silently for months.
 
-The fix: `_remember_py_meets_floor` rejects anything below the floor, and
-the candidate loop tries versioned fallbacks (python3.9 through python3.13)
-before giving up -- never a guarded `zoneinfo` import, since the floor this
+The fix: `_py_ok` (detect-tools.sh) rejects anything below the floor, and
+the candidate loop tries a versioned fallback (python3.11; the hook-script
+byte budget, #900, leaves no room for the full 3.9-3.13 range inlined into
+every hook -- see detect-tools.sh's own comment) before giving up -- never
+a guarded `zoneinfo` import, since the floor this
 repo actually supports is 3.9 (tests/pep604_floor.py's declared_floor(),
 read from .github/workflows/tests.yml's own CI matrix).
 """
@@ -54,52 +56,40 @@ def _source(env):
     )
 
 
-def _real_path_without_other_pythons() -> str:
-    """The real PATH, minus any directory that itself holds a `python3*`
-    binary -- needed so a test asserting "every candidate is below the
-    floor" is not accidentally falsified by a genuinely floor-meeting
-    interpreter the host happens to have installed elsewhere on PATH
-    (CI images commonly ship several python3.X siblings in the same
-    directory).
-
-    Self-review correction: this does NOT reliably preserve coreutils
-    (mktemp, sort, grep). On a Linux image where /usr/bin holds both
-    python3 and those binaries in the SAME directory (the common case on
-    ubuntu-latest), the whole directory is dropped together with it. The
-    two tests that pass this filtered PATH do not assert anything about
-    the tool-verdict cache, so a silently-failing `mktemp` there (that
-    function already degrades to `return 0` with nothing written when
-    `mktemp` is missing) costs nothing today -- but a FUTURE test built
-    on this same filtered PATH that does need the cache to actually
-    publish would fail for an environment reason that looks like a
-    detect-tools.sh bug. Not fixed here (the two current call sites do
-    not need it); flagged so nobody trusts the coreutils half of this
-    docstring if cache-publish ever needs asserting through it."""
-    import glob
-
-    kept = []
-    for entry in os.environ.get("PATH", "").split(os.pathsep):
-        if entry and glob.glob(os.path.join(entry, "python3*")):
-            continue
-        kept.append(entry)
-    return os.pathsep.join(kept)
-
-
 def _isolated_env(tmp_path: Path, bindir_value: str, base_path: str | None = None) -> dict:
     """PREPEND bindir to a real PATH, never replace it (#1003 self-review):
     a replaced PATH loses `mktemp`, used by `_remember_tools_cache_publish`,
     which then fails silently and leaves the cache file unwritten -- a false
     negative that looks exactly like "the cache was never refreshed" without
     ever exercising that code path for real. `base_path` defaults to the
-    real PATH; pass `_real_path_without_other_pythons()` when the test's
-    own premise requires no OTHER python on PATH."""
+    real PATH; pass `base_path=""` (bindir alone, no fallback at all --
+    never a trailing empty PATH entry, which POSIX reads as "current
+    directory") when the test's own premise requires no OTHER python on
+    PATH and does not need coreutils either.
+
+    A previous version of this helper offered a THIRD option,
+    `_real_path_without_other_pythons()`, filtering the real PATH for any
+    directory holding a `python3*` binary rather than excluding the real
+    PATH outright. That filter missed a shape CI actually has: a directory
+    carrying a bare `python` with no `python3*` sibling at all (a #1003
+    follow-up reporter traced a `PYTHON=python` resolving to a real,
+    floor-meeting system interpreter straight through the filter on
+    ubuntu-latest, defeating three tests built on "every candidate is
+    below the floor"). None of this file's three call sites that need no
+    OTHER python on PATH also need coreutils (`command -v`, `[`, `echo`
+    are all builtins; `_remember_tools_cache_publish`'s `mktemp` is the
+    one real external dependency, and it already degrades to a silent
+    no-op when missing), so excluding the real PATH entirely, rather than
+    guessing at every shape a leftover python might take, is both simpler
+    and the only version a CI image cannot quietly defeat."""
     cache_tmpdir = tmp_path / "tmp1"
     cache_tmpdir.mkdir(exist_ok=True)
     if base_path is None:
         base_path = os.environ["PATH"]
+    path = bindir_value if not base_path else f"{bindir_value}{os.pathsep}{base_path}"
     return {
         **os.environ,
-        "PATH": f"{bindir_value}{os.pathsep}{base_path}",
+        "PATH": path,
         "HOME": str(tmp_path),
         "TMPDIR": str(cache_tmpdir),
     }
@@ -150,7 +140,7 @@ def test_a_below_floor_interpreter_is_rejected_in_favor_of_a_versioned_fallback(
     _stub(bindir, "python3", "Python 3.8.10")
     _stub(bindir, "python3.11", "Python 3.11.4")
 
-    env = _isolated_env(tmp_path, str(bindir), base_path=_real_path_without_other_pythons())
+    env = _isolated_env(tmp_path, str(bindir), base_path="")
     result = _source(env)
 
     assert result.returncode == 0, (result.stdout, result.stderr)
@@ -169,7 +159,7 @@ def test_every_candidate_below_floor_is_fatal_and_distinct_from_not_found(tmp_pa
     bindir = tmp_path / "bin"
     _stub(bindir, "python3", "Python 3.8.10")
 
-    env = _isolated_env(tmp_path, str(bindir), base_path=_real_path_without_other_pythons())
+    env = _isolated_env(tmp_path, str(bindir), base_path="")
     result = _source(env)
 
     assert result.returncode != 0, "a floor-violating-only PATH must still be fatal"
@@ -195,7 +185,7 @@ def test_a_versioned_fallback_candidate_is_actually_runnable(tmp_path):
     bindir = tmp_path / "bin"
     _stub(bindir, "python3", "Python 3.8.10")
     _stub(bindir, "python3.11", "Python 3.11.4")
-    env = _isolated_env(tmp_path, str(bindir), base_path=_real_path_without_other_pythons())
+    env = _isolated_env(tmp_path, str(bindir), base_path="")
 
     script = (
         f'source "{DETECT.as_posix()}" >/dev/null 2>&1; '
