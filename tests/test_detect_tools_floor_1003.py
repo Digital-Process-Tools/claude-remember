@@ -60,8 +60,21 @@ def _real_path_without_other_pythons() -> str:
     floor" is not accidentally falsified by a genuinely floor-meeting
     interpreter the host happens to have installed elsewhere on PATH
     (CI images commonly ship several python3.X siblings in the same
-    directory). Keeps coreutils (mktemp, sort, grep) that
-    `_remember_tools_cache_publish` and this file's own helpers need."""
+    directory).
+
+    Self-review correction: this does NOT reliably preserve coreutils
+    (mktemp, sort, grep). On a Linux image where /usr/bin holds both
+    python3 and those binaries in the SAME directory (the common case on
+    ubuntu-latest), the whole directory is dropped together with it. The
+    two tests that pass this filtered PATH do not assert anything about
+    the tool-verdict cache, so a silently-failing `mktemp` there (that
+    function already degrades to `return 0` with nothing written when
+    `mktemp` is missing) costs nothing today -- but a FUTURE test built
+    on this same filtered PATH that does need the cache to actually
+    publish would fail for an environment reason that looks like a
+    detect-tools.sh bug. Not fixed here (the two current call sites do
+    not need it); flagged so nobody trusts the coreutils half of this
+    docstring if cache-publish ever needs asserting through it."""
     import glob
 
     kept = []
