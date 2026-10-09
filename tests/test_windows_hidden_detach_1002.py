@@ -57,6 +57,27 @@ def _is_windows_env(extra: dict) -> dict:
     return env
 
 
+def _win_safe_path(*entries) -> str:
+    """Join PATH entries with this host's native list separator.
+
+    A bash invoked on Windows (MSYS/Git Bash) auto-converts a
+    semicolon-joined PATH at shell startup: a drive-letter entry
+    (a drive-letter directory such as ``C:/Users/.../bin``) is translated
+    to its POSIX mount form, and an
+    entry that already looks POSIX-style (``/usr/bin``) is passed through
+    unchanged. Joining the same list with a bare POSIX ':' instead
+    corrupts it on Windows -- a stub directory's own drive-letter colon is
+    then indistinguishable from the separator, splitting that one entry
+    into two useless fragments and silently dropping the stub dir from
+    PATH. That is exactly how the REAL wscript.exe/cygpath got found
+    instead of the stubs: the stub entry vanished, while the ``/usr/bin``
+    and ``/bin`` fallbacks (no drive-letter colon to confuse the split)
+    stayed valid and still pointed at Git's own usr/bin, which does ship a
+    real cygpath (#1002 CI round 5). ``os.pathsep`` is ';' on Windows and
+    ':' on POSIX, matching what this host's own bash actually needs."""
+    return os.pathsep.join(str(e) for e in entries if e)
+
+
 @_NO_BASH
 def test_is_windows_true_via_os_env_var():
     r = _run(f'. "{LIB}"; _remember_is_windows && echo YES || echo NO', _is_windows_env({"OS": "Windows_NT"}))
@@ -67,18 +88,26 @@ def test_is_windows_true_via_os_env_var():
 def test_is_windows_true_via_uname_mingw(monkeypatch, tmp_path):
     fake_uname = tmp_path / "uname"
     _stub(fake_uname, 'echo MINGW64_NT-10.0')
-    env = _is_windows_env({"OS": "", "PATH": f"{tmp_path}:/usr/bin:/bin"})
+    env = _is_windows_env({"OS": "", "PATH": _win_safe_path(tmp_path, "/usr/bin", "/bin")})
     r = _run(f'. "{LIB}"; _remember_is_windows && echo YES || echo NO', env)
     assert r.stdout.strip() == "YES", r.stderr
 
 
 @_NO_BASH
-def test_is_windows_false_on_plain_linux_env():
-    """Positive control for the two tests above: a real Linux/macOS
-    environment (the one this suite actually runs on) must NOT be detected
-    as Windows, or every one of this plugin's four nohup fallbacks would be
-    dead code nothing ever exercises."""
-    r = _run(f'. "{LIB}"; _remember_is_windows && echo YES || echo NO', _is_windows_env({"OS": ""}))
+def test_is_windows_false_on_plain_linux_env(tmp_path):
+    """Positive control for the two tests above: a NON-Windows environment
+    must NOT be detected as Windows, or every one of this plugin's four
+    nohup fallbacks would be dead code nothing ever exercises. This stubs
+    `uname` to a deterministic non-Windows answer rather than trusting the
+    host's own real `uname` -- on an actual Windows CI runner, the real
+    `uname` genuinely reports MINGW*/MSYS*/CYGWIN* regardless of the OS
+    env var, which made this exact assertion fail on the one platform it
+    exists to guard (#1002 CI round 5: the premise was wrong, not the
+    product)."""
+    fake_uname = tmp_path / "uname"
+    _stub(fake_uname, 'echo Linux')
+    env = _is_windows_env({"OS": "", "PATH": _win_safe_path(tmp_path, "/usr/bin", "/bin")})
+    r = _run(f'. "{LIB}"; _remember_is_windows && echo YES || echo NO', env)
     assert r.stdout.strip() == "NO", r.stderr
 
 
@@ -108,7 +137,7 @@ def test_detach_windows_invokes_hidden_launcher_with_expected_args(tmp_path):
     captured = tmp_path / "captured.txt"
     _stub(bindir / "wscript.exe", f'printf "%s\\n" "$@" > "{captured}"')
     _stub(bindir / "cygpath", 'shift; printf "%s" "$1"')
-    env = {"PATH": f"{bindir}:/usr/bin:/bin"}
+    env = {"PATH": _win_safe_path(bindir, "/usr/bin", "/bin")}
     out = tmp_path / "out.log"
     pid = tmp_path / "pid"
     r = _run(
@@ -145,7 +174,7 @@ def test_detach_windows_resolves_bare_bash_argv_to_absolute_path(tmp_path):
     captured = tmp_path / "captured.txt"
     _stub(bindir / "wscript.exe", f'printf "%s\\n" "$@" > "{captured}"')
     _stub(bindir / "cygpath", 'shift; printf "%s" "$1"')
-    env = {"PATH": f"{bindir}:/usr/bin:/bin"}
+    env = {"PATH": _win_safe_path(bindir, "/usr/bin", "/bin")}
     out = tmp_path / "out.log"
     pid = tmp_path / "pid"
     r = _run(
@@ -172,7 +201,7 @@ def test_detach_windows_leaves_a_non_bash_command_untouched(tmp_path):
     captured = tmp_path / "captured.txt"
     _stub(bindir / "wscript.exe", f'printf "%s\\n" "$@" > "{captured}"')
     _stub(bindir / "cygpath", 'shift; printf "%s" "$1"')
-    env = {"PATH": f"{bindir}:/usr/bin:/bin"}
+    env = {"PATH": _win_safe_path(bindir, "/usr/bin", "/bin")}
     out = tmp_path / "out.log"
     pid = tmp_path / "pid"
     r = _run(
@@ -212,7 +241,7 @@ def _post_tool_env(tmp_path, root, extra_path=""):
     (session_dir / "sess-1.jsonl").write_text(ONE_MESSAGE_LINE * 60)
     (remember / "config.json").write_text(_json.dumps({"thresholds": {"delta_lines_trigger": 50}}))
     base_path = os.environ.get("PATH", "")
-    path = f"{extra_path}:{base_path}" if extra_path else base_path
+    path = _win_safe_path(extra_path, base_path)
     env = {
         "HOME": str(home), "CLAUDE_PROJECT_DIR": str(project),
         "CLAUDE_PLUGIN_ROOT": str(root), "REMEMBER_DIR": str(remember),
@@ -234,7 +263,15 @@ def test_post_tool_save_uses_hidden_launcher_on_windows(tmp_path):
     root = _post_tool_plugin_root(tmp_path, "#!/usr/bin/env bash\nexit 0\n")
     env, _remember = _post_tool_env(tmp_path, root, extra_path=str(bindir))
     env["OS"] = "Windows_NT"
-    r = subprocess.run([BASH, str(root / "scripts" / "post-tool-hook.sh")],
+    # #1002 CI round 5: pass the script's own path as POSIX-forward-slash
+    # form, not whatever str(Path) gives on this host. On Windows, str()
+    # yields backslashes, and the script's own `${BASH_SOURCE[0]%/*}` is a
+    # pure string pattern-match with no filesystem call behind it -- a
+    # backslash-only path has no "/" for that pattern to find, so it
+    # silently falls through to its own `pwd` fallback (the pytest
+    # process's cwd, i.e. the real repo root, NOT this tmp plugin root),
+    # breaking every `source "$_HOOK_DIR/..."` after it.
+    r = subprocess.run([BASH, (root / "scripts" / "post-tool-hook.sh").as_posix()],
                         env=env, input="", capture_output=True, text=True, timeout=15, check=False)
     time.sleep(0.3)  # the hidden route's own "wscript.exe &" is detached -- give it a beat
     assert captured.exists(), "wscript.exe stub was never invoked -- hidden route not taken\n" + r.stderr
@@ -254,7 +291,7 @@ def test_post_tool_save_uses_nohup_without_windows(tmp_path):
     root = _post_tool_plugin_root(tmp_path, "#!/usr/bin/env bash\nexit 0\n")
     env, remember = _post_tool_env(tmp_path, root, extra_path=str(bindir))
     env["OS"] = ""
-    r = subprocess.run([BASH, str(root / "scripts" / "post-tool-hook.sh")],
+    r = subprocess.run([BASH, (root / "scripts" / "post-tool-hook.sh").as_posix()],
                         env=env, input="", capture_output=True, text=True, timeout=15, check=False)
     assert not captured.exists(), "wscript.exe stub was invoked even though Windows was not detected\n" + r.stderr
     pid_file = remember / "tmp" / "save-session.pid"
@@ -274,10 +311,19 @@ def test_every_nohup_detach_site_guards_with_the_shared_helper():
     # to absorb it -- see the DEFERRED comment at its own (unchanged)
     # nohup detach site. Reinstate it here once a follow-up frees enough
     # of that hook's own byte budget to add the wiring back.
+    #
+    # session-end-hook.sh and agy-stop-hook.sh are ALSO deliberately not in
+    # this list, as of #1002 CI round 5's own scope narrowing: those two
+    # sites are reverted byte-for-byte to main and tracked in #1006
+    # instead, because wscript-launching session-end-hook.sh's own
+    # self-redetach loses the hook's stdin JSON payload (a wscript-launched
+    # child does not inherit it the way `nohup ... &` does), a real product
+    # regression caught by the pre-existing test_windows_native_hook_cwd_448.py
+    # test going red on this PR's own Windows CI legs. This PR keeps the
+    # hidden launcher to post-tool-hook.sh's save only -- the one site the
+    # reporter actually measured flashing a console every few minutes.
     sites = [
         REPO_ROOT / "scripts" / "post-tool-hook.sh",
-        REPO_ROOT / "scripts" / "session-end-hook.sh",
-        REPO_ROOT / "scripts" / "agy-stop-hook.sh",
     ]
     for site in sites:
         text = site.read_text(encoding="utf-8")
