@@ -27,6 +27,13 @@ concurrency:
 jobs:
   pytest:
     runs-on: ${{ matrix.os }}
+    # #1002 round 2: a real wscript.exe call on windows-latest can hang this
+    # whole job indefinitely (a blocking UI prompt on a headless runner,
+    # never resolving on its own) rather than failing the one test that
+    # triggered it -- a bounded job timeout turns that into a fast, loud
+    # failure instead of a silent multi-hour hold. 30 minutes is well above
+    # the slowest leg's own observed full-suite runtime.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -95,6 +102,11 @@ jobs:
   hook-tests-compiled:
     name: hook tests (compiled) / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    # #1002 round 2: same reasoning as the plain pytest job's own
+    # timeout-minutes above -- this job runs the identical real-wscript
+    # tests against the compiled hooks, so it is exposed to the same
+    # hang risk.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:

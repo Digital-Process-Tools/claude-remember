@@ -143,5 +143,12 @@ _remember_detach_windows() {
     # become this function's own return value: non-zero when WSH itself
     # could not run the script at all, reaching the caller and
     # triggering the nohup fallback instead of a silent skip.
-    wscript.exe //B "$vbs_win" "$bash_win" "$pidwrap" "$outfile" "$pidfile" "${real_cmd[@]}" >/dev/null 2>&1
+    #
+    # #1002 round 2, live CI finding: a bare foreground call hung this
+    # exact CI job on windows-latest -- WSH disabled is not guaranteed to
+    # fail wscript.exe silently; it can surface as a blocking UI prompt
+    # that never resolves on a headless runner, and would hang the real
+    # PostToolUse hook the same way. A hard bound closes that hole.
+    command -v timeout >/dev/null 2>&1 || return 1
+    timeout 10 wscript.exe //B "$vbs_win" "$bash_win" "$pidwrap" "$outfile" "$pidfile" "${real_cmd[@]}" >/dev/null 2>&1
 }

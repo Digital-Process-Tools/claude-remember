@@ -175,7 +175,13 @@ def test_real_wscript_wsh_disabled_still_saves_via_fallback(tmp_path, wsh_disabl
         f'if ! _remember_detach_windows "{out}" "{pid}" "{save.as_posix()}"; then '
         f'nohup "{save.as_posix()}" >> "{out}" 2>&1 & echo $! > "{pid}"; fi'
     )
-    r = _run(script)
+    # #1002 round 2 live finding: this is exactly the case that hung CI
+    # once already (a modal WSH prompt on a headless runner never
+    # resolving on its own) before lib-detach.sh's own call grew a hard
+    # `timeout 10` bound. 30s here gives that bound, plus bash/registry
+    # overhead, comfortable room without letting a still-hanging call
+    # silently re-stall this one test for the job's full timeout-minutes.
+    r = _run(script, timeout=30)
     outfile_text = out.read_text(encoding="utf-8", errors="replace") if out.exists() else "<missing>"
     assert _poll_for_marker(marker), (
         "WSH disabled and the save never happened -- the fallback the real "
