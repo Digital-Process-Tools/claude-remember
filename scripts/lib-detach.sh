@@ -149,6 +149,30 @@ _remember_detach_windows() {
     # fail wscript.exe silently; it can surface as a blocking UI prompt
     # that never resolves on a headless runner, and would hang the real
     # PostToolUse hook the same way. A hard bound closes that hole.
-    command -v timeout >/dev/null 2>&1 || return 1
-    timeout 10 wscript.exe //B "$vbs_win" "$bash_win" "$pidwrap" "$outfile" "$pidfile" "${real_cmd[@]}" >/dev/null 2>&1
+    #
+    # Implemented as a plain bash background-job-plus-watchdog pair,
+    # never the external `timeout` binary: that coreutils tool is on the
+    # real Windows target's own PATH (it ships with every supported
+    # Windows shell this doc names), but is NOT guaranteed on the hosts
+    # this function's own stub-based test suite simulates Windows on --
+    # observed absent on a bare macos-latest CI image, which turned
+    # "WSH is fine" into "always return 1" for every stub test on that
+    # platform. `wait` and `kill` are bash builtins with no such gap.
+    wscript.exe //B "$vbs_win" "$bash_win" "$pidwrap" "$outfile" "$pidfile" "${real_cmd[@]}" >/dev/null 2>&1 &
+    local wscript_pid=$!
+    # The watchdog's own stdout/stderr must be redirected away from
+    # whatever this function's own caller inherited (a pipe, in the test
+    # suite's own subprocess.run) -- otherwise a caller reading that pipe
+    # for EOF keeps blocking on it for as long as the watchdog's `sleep`
+    # is still alive, even after wscript.exe itself has already exited
+    # and this function has already returned the right value (observed:
+    # a positive-control test timed out at exactly the watchdog's own
+    # bound despite RC=0 already being in the buffered output).
+    ( sleep 10; kill -9 "$wscript_pid" 2>/dev/null ) >/dev/null 2>&1 &
+    local watchdog_pid=$!
+    wait "$wscript_pid" 2>/dev/null
+    local wscript_rc=$?
+    kill "$watchdog_pid" 2>/dev/null
+    wait "$watchdog_pid" 2>/dev/null
+    return "$wscript_rc"
 }
