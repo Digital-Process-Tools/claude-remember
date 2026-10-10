@@ -206,9 +206,9 @@ def test_real_wscript_healthy_path_latency(tmp_path, capsys):
     """#1002 round 3 (maintainer instruction): measure the healthy-path cost
     on a real Windows host -- hook entry to return -- on the hidden route
     versus the plain nohup route, over several runs, so the watchdog bound
-    in scripts/lib-detach.sh (currently a fixed `sleep 10`) can be sized
-    against a real number instead of a guess. #913 (PostToolUse latency) is
-    the open issue this feeds.
+    in scripts/lib-detach.sh (a fixed `sleep` call, 5s as of round 3) can
+    be sized against a real number instead of a guess. #913 (PostToolUse
+    latency) is the open issue this feeds.
 
     This is a MEASUREMENT, not a correctness assertion -- it has its own
     loose sanity bound (well under the watchdog's own bound) so a genuine

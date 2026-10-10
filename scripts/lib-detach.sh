@@ -96,8 +96,8 @@ _REMEMBER_DETACH_WIN_CACHE="${TMPDIR:-/tmp}/remember-detach-windows-cache"
 # see the watchdog-bound comment below), and caching it would mean a host
 # that becomes unusable mid-session (WSH disabled while a long session is
 # open) keeps being told it is fine. Caching only the expensive failure is
-# the asymmetry that actually matters: it is the repeated 10s-class stall
-# this cache exists to remove, never the fast path.
+# the asymmetry that actually matters: it is the repeated watchdog-bound
+# stall this cache exists to remove, never the fast path.
 #
 # TTL, not a permanent verdict (self-review finding, both spawns independently):
 # unlike detect-tools.sh's own #668 cache, where the thing being cached
