@@ -71,10 +71,21 @@ def test_real_build_probe_returns_an_integer(tmp_path):
 
 
 def test_real_timeout_probe_returns_an_integer(tmp_path):
+    # TEMPORARY diagnostic for #1011 round 4: this probe was observed to
+    # return empty output on real windows-latest CI (jobs 114303128794,
+    # 114303128471) while the build probe above, which runs no Add-Type
+    # compile, passed reliably. Elapsed time and exit code let us tell a
+    # watchdog kill (elapsed ~5s, output empty) apart from a fast failure
+    # (quoting/policy -- elapsed well under 5s). Remove once the real cause
+    # is confirmed and fixed.
+    import time
+    start = time.monotonic()
     result = _run_probe(tmp_path, "_remember_doctor_fglock_timeout")
+    elapsed = time.monotonic() - start
     assert result.stdout.strip().isdigit(), (
         f"timeout probe did not return a bare integer: {result.stdout!r} "
-        f"(stderr: {result.stderr!r})"
+        f"(stderr: {result.stderr!r}, elapsed={elapsed:.2f}s, "
+        f"returncode={result.returncode})"
     )
 
 
