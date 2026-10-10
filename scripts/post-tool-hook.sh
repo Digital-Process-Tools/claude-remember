@@ -869,10 +869,20 @@ if [ -n "$_SCAN_NAME" ]; then
         _SCAN_RAW_OFFSET=""
         _SCAN_RAW_LINES=""
         read -r _SCAN_RAW_OFFSET _SCAN_RAW_LINES < "$SCAN_SIDECAR" 2>/dev/null
-        if [ -z "$_SCAN_RAW_OFFSET" ] || [[ "$_SCAN_RAW_OFFSET" == *[!0-9]* ]]; then
+        # Validated as a PAIR, not field-by-field (self-review finding): a
+        # write interrupted between the two fields (OOM, disk full, a kill
+        # mid-`printf`) can leave a syntactically VALID OFFSET -- a real
+        # prior scan position, so `_pt_scan_lines`'s own newline check at
+        # that offset passes -- next to an EMPTY/missing LINES field. Each
+        # field alone looked fine, so a per-field default silently paired
+        # a genuine OFFSET with a LINES of 0, undercounting every line
+        # that existed before it -- not "no sidecar at all", but a sidecar
+        # that is wrong and passes every check this function runs on it.
+        # Any failure on either field now discards BOTH, forcing the same
+        # full recount an absent sidecar already gets.
+        if [ -z "$_SCAN_RAW_OFFSET" ] || [[ "$_SCAN_RAW_OFFSET" == *[!0-9]* ]] \
+            || [ -z "$_SCAN_RAW_LINES" ] || [[ "$_SCAN_RAW_LINES" == *[!0-9]* ]]; then
             _SCAN_RAW_OFFSET=0
-        fi
-        if [ -z "$_SCAN_RAW_LINES" ] || [[ "$_SCAN_RAW_LINES" == *[!0-9]* ]]; then
             _SCAN_RAW_LINES=0
         fi
         _SCAN_OFFSET=$((10#$_SCAN_RAW_OFFSET))

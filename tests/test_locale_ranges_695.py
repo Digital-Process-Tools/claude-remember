@@ -215,7 +215,7 @@ ALLOWLIST: dict[tuple[str, int], str] = {
     # [A-Za-z0-9._-]+ charset as SESSION_ID right above, never locale text --
     # measured the same way, same reason.
     ("scripts/post-tool-hook.sh", 860): _CASE,
-    ("scripts/post-tool-hook.sh", 945): _CASE,
+    ("scripts/post-tool-hook.sh", 955): _CASE,
     ("scripts/session-end-hook.sh", 201): _CASE,
     ("scripts/session-end-hook.sh", 209): _CASE,
     ("scripts/session-start-hook.sh", 289): _CASE,

@@ -268,6 +268,33 @@ def test_a_rewritten_transcript_falls_back_rather_than_trusting_a_stale_offset(t
     assert int(offset_after) == len(transcript.read_bytes())
 
 
+def test_a_partial_sidecar_write_is_rejected_as_a_pair_not_per_field(tmp_path):
+    """A write interrupted between the two fields can leave a syntactically
+    valid OFFSET (a real prior scan position) next to a missing LINES field.
+    Each field alone passes the digits-only check -- the pair must be
+    rejected together, or OFFSET's own newline-validation in _pt_scan_lines
+    passes too, silently pairing a real position with LINES=0."""
+    home, project, remember, transcript = _project(tmp_path, jsonl_lines=20)
+    env = _env(tmp_path, home, project)
+
+    first = _run(env)
+    assert first.returncode == 0, first.stderr[:400]
+    sidecar = _sidecar(remember)
+    real_offset, real_lines = sidecar.read_text(encoding="utf-8").split()
+    assert real_lines == "20"
+
+    sidecar.write_text(real_offset + " ", encoding="utf-8")
+
+    second = _run(env)
+    assert second.returncode == 0, second.stderr[:400]
+    offset_after, lines_after = sidecar.read_text(encoding="utf-8").split()
+    assert lines_after == "20", (
+        f"a partial sidecar write (valid OFFSET, missing LINES) undercounted "
+        f"to {lines_after} lines instead of recounting the real 20"
+    )
+    assert int(offset_after) == len(transcript.read_bytes())
+
+
 # -- The other named cost: no scan at all when a save cannot fire -----------
 
 def test_cooldown_active_skips_the_scan_entirely(tmp_path):
