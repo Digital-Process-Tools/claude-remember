@@ -273,6 +273,18 @@ _remember_detach_windows_impl() {
     # observed absent on a bare macos-latest CI image, which turned
     # "WSH is fine" into "always return 1" for every stub test on that
     # platform. `wait` and `kill` are bash builtins with no such gap.
+    #
+    # Bound is 5s, not the original 10s (#1002 round 3, maintainer
+    # instruction: "take the smallest value the healthy path reliably
+    # beats"). tests/test_windows_real_wscript_1002.py's own
+    # test_real_wscript_healthy_path_latency measured the real cost on
+    # real windows-latest CI legs (PR #1010, run #38054376838, job
+    # #114219715609 and siblings): hidden-route max 0.422s, nohup max
+    # 0.250s, over 5 runs each -- roughly 10x margin under 5s. A disabled
+    # WSH still stalls for the full bound regardless of its value (the
+    # watchdog's job is to cap the worst case, not to represent any real
+    # completion time), so halving the bound halves that worst case
+    # without touching the margin a genuinely healthy call needs.
     wscript.exe //B "$vbs_win" "$bash_win" "$pidwrap" "$outfile" "$pidfile" "${real_cmd[@]}" >/dev/null 2>&1 &
     local wscript_pid=$!
     # The watchdog's own stdout/stderr must be redirected away from
@@ -283,7 +295,7 @@ _remember_detach_windows_impl() {
     # and this function has already returned the right value (observed:
     # a positive-control test timed out at exactly the watchdog's own
     # bound despite RC=0 already being in the buffered output).
-    ( sleep 10; kill -9 "$wscript_pid" 2>/dev/null ) >/dev/null 2>&1 &
+    ( sleep 5; kill -9 "$wscript_pid" 2>/dev/null ) >/dev/null 2>&1 &
     local watchdog_pid=$!
     wait "$wscript_pid" 2>/dev/null
     local wscript_rc=$?

@@ -259,15 +259,17 @@ def test_real_wscript_healthy_path_latency(tmp_path, capsys):
         print(f"  hidden route : {hidden_times} max={max(hidden_times):.3f}s")
         print(f"  nohup route  : {nohup_times} max={max(nohup_times):.3f}s")
 
-    # Loose sanity bound only -- the watchdog itself (10s as of round 2) is
-    # the real ceiling; a healthy hidden-route call taking anywhere close to
-    # that would mean the "smallest bound the healthy path reliably beats"
-    # reasoning in scripts/lib-detach.sh and docs/windows.md is wrong and
-    # needs revisiting against these actual numbers, not that this test
-    # should simply raise its own bound to match.
-    assert max(hidden_times) < 5.0, (
-        f"healthy hidden-route call took {max(hidden_times):.3f}s -- close to or "
-        f"over the watchdog bound; re-measure before trusting that bound (#1002 round 3)"
+    # Loose sanity bound only, well under the watchdog itself (5s as of
+    # round 3 -- reduced from 10s against this very test's own measurement
+    # on real windows-latest CI, see scripts/lib-detach.sh's own comment
+    # at the watchdog call site). A healthy hidden-route call taking
+    # anywhere close to the watchdog bound would mean the "smallest bound
+    # the healthy path reliably beats" reasoning is wrong and needs
+    # revisiting against these actual numbers, not that this test or the
+    # bound should simply be raised to match.
+    assert max(hidden_times) < 2.5, (
+        f"healthy hidden-route call took {max(hidden_times):.3f}s -- more than half "
+        f"the watchdog bound; re-measure before trusting that bound (#1002 round 3)"
     )
 
 
