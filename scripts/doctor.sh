@@ -1192,6 +1192,145 @@ fi
 unset _CH_LAST_LINE
 echo ""
 
+# ── Windows kernel Token leak (#1011) ───────────────────────────────────────
+#
+# On Windows 11 25H2, a win32kfull.sys bug leaks one kernel Token object per
+# console-attached process start, never freed until a real Restart (Fast
+# Startup's Shut down keeps the leaked state). This plugin's hooks are a
+# heavy process creator, so an affected host accumulates leaked objects every
+# session. Reporter-confirmed on build 26200.9457; microsoft/terminal#20781
+# has since confirmed it on 26300.9550 too (both OPEN, no fix/KB yet -- see
+# docs/windows.md). The confirmed workaround -- setting the LIVE foreground
+# lock timeout to 0 -- has a real trade-off (apps can steal foreground focus
+# without asking) and resets at every logon, so it is an opt-in system
+# change a human decides on. This plugin must never apply it itself: WARN
+# only, a pointer to the docs, and the VERDICT is deliberately left alone,
+# same as log rotation and case divergence above -- capture itself is
+# entirely unaffected either way.
+#
+# _REMEMBER_DOCTOR_FORCE_WINDOWS / _REMEMBER_DOCTOR_WIN_BUILD_OVERRIDE /
+# _REMEMBER_DOCTOR_FGLOCK_TIMEOUT_OVERRIDE are test-only hooks, unset in
+# normal use -- tests/test_doctor_windows_fglock_1011.py drives this
+# decision with stubbed values on every platform, not only a real Windows
+# host, by way of these three.
+_remember_doctor_is_windows() {
+    local sys
+    sys="${OS:-}"
+    [ "$sys" = "Windows_NT" ] && return 0
+    sys="$(uname -s 2>/dev/null)"
+    [ "${sys#MINGW}" != "$sys" ] || [ "${sys#MSYS}" != "$sys" ] \
+        || [ "${sys#CYGWIN}" != "$sys" ]
+}
+
+# bounded by a plain bash watchdog (sleep + kill -9); missing powershell,
+# a non-zero exit, or a timeout all print nothing on purpose (#1002).
+_remember_doctor_run_powershell_file() {
+    local _ps_bin="" _ps_file="$1" _ps_out_file _ps_pid _ps_watchdog _ps_rc _ps_out
+
+if command -v powershell.exe >/dev/null 2>&1; then
+        _ps_bin="powershell.exe"
+    elif command -v powershell >/dev/null 2>&1; then
+        _ps_bin="powershell"
+    else
+        return 1
+    fi
+    _ps_out_file=$(mktemp "${TMPDIR:-/tmp}/remember-doctor-fglock-out.XXXXXX") || return 1
+
+"$_ps_bin" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$_ps_file" >"$_ps_out_file" 2>/dev/null &
+    _ps_pid=$!
+
+( sleep 5; kill -9 "$_ps_pid" 2>/dev/null ) &
+    _ps_watchdog=$!
+    wait "$_ps_pid" 2>/dev/null
+    _ps_rc=$?
+    kill "$_ps_watchdog" 2>/dev/null
+    wait "$_ps_watchdog" 2>/dev/null
+
+_ps_out=$(tr -d '\r' <"$_ps_out_file" 2>/dev/null | tr -d '[:space:]')
+    rm -f "$_ps_out_file"
+    if [ "$_ps_rc" -ne 0 ] || [ -z "$_ps_out" ]; then
+        return 1
+    fi
+    printf '%s' "$_ps_out"
+}
+
+# live Windows build number via [Environment]::OSVersion.Version.Build.
+_remember_doctor_fglock_build() {
+    local _ps_script
+    _ps_script=$(mktemp "${TMPDIR:-/tmp}/remember-doctor-fglock-build.XXXXXX") || return 1
+    mv "$_ps_script" "${_ps_script}.ps1" 2>/dev/null && _ps_script="${_ps_script}.ps1"
+    printf '%s\n' '[Environment]::OSVersion.Version.Build' >"$_ps_script"
+    _remember_doctor_run_powershell_file "$_ps_script"
+    rm -f "$_ps_script"
+}
+
+# live SPI_GETFOREGROUNDLOCKTIMEOUT read.
+_remember_doctor_fglock_timeout() {
+    local _ps_script _dq
+    _dq='"'
+    _ps_script=$(mktemp "${TMPDIR:-/tmp}/remember-doctor-fglock-timeout.XXXXXX") || return 1
+    mv "$_ps_script" "${_ps_script}.ps1" 2>/dev/null && _ps_script="${_ps_script}.ps1"
+
+printf '%s\n' "Add-Type -Name RememberFg -Namespace RememberWin -MemberDefinition '[DllImport(${_dq}user32.dll${_dq})] public static extern bool SystemParametersInfo(uint a, uint b, out uint c, uint d);'" >"$_ps_script"
+    printf '%s\n' '$fg = 0' >>"$_ps_script"
+
+printf '%s\n' '[RememberWin.RememberFg]::SystemParametersInfo(0x2000, 0, [ref]$fg, 0) | Out-Null' >>"$_ps_script"
+    printf '%s\n' 'Write-Output $fg' >>"$_ps_script"
+    _remember_doctor_run_powershell_file "$_ps_script"
+    rm -f "$_ps_script"
+}
+
+_FGLOCK_IS_WIN=0
+if [ -n "${_REMEMBER_DOCTOR_FORCE_WINDOWS:-}" ]; then
+    [ "$_REMEMBER_DOCTOR_FORCE_WINDOWS" = "1" ] && _FGLOCK_IS_WIN=1
+elif _remember_doctor_is_windows; then
+    _FGLOCK_IS_WIN=1
+fi
+
+if [ "$_FGLOCK_IS_WIN" -eq 1 ]; then
+    echo "-- Windows foreground-lock check (#1011) --"
+    _FGLOCK_BUILD="${_REMEMBER_DOCTOR_WIN_BUILD_OVERRIDE:-}"
+    if [ -z "$_FGLOCK_BUILD" ]; then
+        _FGLOCK_BUILD=$(_remember_doctor_fglock_build)
+    fi
+
+    if [ -z "$_FGLOCK_BUILD" ] || [[ "$_FGLOCK_BUILD" == *[!0-9]* ]]; then
+        echo "WARN Could not determine the Windows build number (PowerShell unavailable,"
+        echo "     slow, or returned something unexpected) -- the #1011 kernel Token-leak"
+        echo "     check could not run. See docs/windows.md."
+    elif [ "$_FGLOCK_BUILD" -lt 26200 ]; then
+        echo "OK   Windows build $_FGLOCK_BUILD is not known-affected by #1011's kernel"
+        echo "     Token leak (confirmed from build 26200)"
+    else
+
+_FGLOCK_TIMEOUT="${_REMEMBER_DOCTOR_FGLOCK_TIMEOUT_OVERRIDE:-}"
+        if [ -z "$_FGLOCK_TIMEOUT" ]; then
+            _FGLOCK_TIMEOUT=$(_remember_doctor_fglock_timeout)
+        fi
+
+        if [ -z "$_FGLOCK_TIMEOUT" ] || [[ "$_FGLOCK_TIMEOUT" == *[!0-9]* ]]; then
+            echo "WARN Windows build $_FGLOCK_BUILD is known-affected by #1011's kernel Token"
+            echo "     leak, but the live foreground lock timeout could not be read"
+            echo "     (PowerShell unavailable, slow, or returned something unexpected) --"
+            echo "     cannot tell whether the opt-in workaround is applied. See docs/windows.md."
+        elif [ "$_FGLOCK_TIMEOUT" = "0" ]; then
+            echo "OK   Windows build $_FGLOCK_BUILD is known-affected by #1011's kernel Token"
+            echo "     leak, but the foreground lock timeout is already 0 (opt-in workaround applied)"
+        else
+            echo "WARN Windows build $_FGLOCK_BUILD is known-affected by #1011's kernel Token leak"
+            echo "     (one win32kfull.sys Token object per console-attached process start,"
+            echo "     freed only by a Restart) -- foreground lock timeout is $_FGLOCK_TIMEOUT, not"
+            echo "     0. This plugin's hooks spawn many such processes. An opt-in workaround,"
+            echo "     with a real trade-off, is in docs/windows.md; this plugin never applies"
+            echo "     it on its own."
+        fi
+        unset _FGLOCK_TIMEOUT
+    fi
+    unset _FGLOCK_BUILD
+fi
+unset _FGLOCK_IS_WIN
+echo ""
+
 # ── Verdict ──────────────────────────────────────────────────────────────────
 # Order matters more than it looks. Every one of these ends with "capture is
 # not running", but they need different actions, and the generic
