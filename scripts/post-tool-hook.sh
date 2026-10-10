@@ -1061,21 +1061,42 @@ if [ "$DELTA" -gt "$DELTA_THRESHOLD" ] && [ "$IN_COOLDOWN" = false ]; then
         # through the hidden launcher first; the nohup line below is the
         # unchanged fallback (and the ONLY path on every other platform).
         source "$_HOOK_DIR/lib-detach.sh"
-        if ! { _remember_is_windows && _remember_detach_windows "$_SAVE_LOG" "$PID_FILE" "$SAVE_SCRIPT" "$SESSION_ID"; }; then
-            # #1002 round 4: a non-zero return above does not guarantee
-            # nothing started -- the hidden route own watchdog can kill
-            # wscript.exe AFTER lib-detach-pidwrap.sh has already claimed
-            # PID_FILE and exec'd into the real save (WshShell.Run detaches
-            # the real command from wscript.exe own process; killing
-            # wscript.exe does not stop it). Falling back unconditionally
-            # here would then start a SECOND, independent save racing the
-            # first. Re-check PID_FILE for a live pid the hidden route
-            # itself may have already written before assuming nothing is
-            # running.
-            _hidden_pid=""
-            [ -f "$PID_FILE" ] && _hidden_pid=$(cat "$PID_FILE" 2>/dev/null)
-            if [ -n "$_hidden_pid" ] && kill -0 "$_hidden_pid" 2>/dev/null; then
-                log "hook" "post-tool: hidden launcher reported failure but PID_FILE already names a live pid ($_hidden_pid) -- trusting it, not double-launching"
+        if _remember_is_windows; then
+            _remember_detach_windows "$_SAVE_LOG" "$PID_FILE" "$SAVE_SCRIPT" "$SESSION_ID"
+            _detach_rc=$?
+        else
+            _detach_rc=1
+        fi
+        if [ "$_detach_rc" -ne 0 ]; then
+            # #1002 round 4, self-review finding: a non-zero return does
+            # NOT always mean nothing started. When $_detach_rc is
+            # specifically 137 (the watchdog's own kill), the hidden
+            # route's own child (lib-detach-pidwrap.sh) may have already
+            # claimed PID_FILE and exec'd into the real save before the
+            # watchdog fired -- WshShell.Run detaches the real command
+            # from wscript.exe's own process, so killing wscript.exe via
+            # the watchdog does not stop a save that already started.
+            # Falling back unconditionally there would start a SECOND,
+            # independent save racing the first. This narrows (does not
+            # eliminate: a pidwrap chain that is ITSELF what is slow may
+            # not have written PID_FILE yet when the bound expires) that
+            # race rather than closing it outright, and is scoped to
+            # exactly the rc the watchdog produces -- a genuine
+            # structural failure (rc=1: wscript.exe/cygpath missing) never
+            # changes PID_FILE, so re-trusting it there would risk a rare
+            # pid-reuse false positive (a stale, already-dead pid in
+            # PID_FILE happening to collide with an unrelated live
+            # process) silently DROPPING a save instead of merely racing
+            # one -- a worse failure than the one being fixed.
+            if [ "$_detach_rc" -eq 137 ]; then
+                _hidden_pid=""
+                [ -f "$PID_FILE" ] && _hidden_pid=$(cat "$PID_FILE" 2>/dev/null)
+                if [ -n "$_hidden_pid" ] && kill -0 "$_hidden_pid" 2>/dev/null; then
+                    log "hook" "post-tool: watchdog killed the hidden launcher but PID_FILE already names a live pid ($_hidden_pid) -- trusting it, not double-launching"
+                else
+                    nohup "$SAVE_SCRIPT" "$SESSION_ID" >> "$_SAVE_LOG" 2>&1 &
+                    echo $! > "$PID_FILE"
+                fi
             else
                 nohup "$SAVE_SCRIPT" "$SESSION_ID" >> "$_SAVE_LOG" 2>&1 &
                 echo $! > "$PID_FILE"

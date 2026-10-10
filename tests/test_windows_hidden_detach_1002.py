@@ -599,14 +599,22 @@ def test_vbs_quotearg_matches_the_stdlib_createprocess_convention(arg):
 
 
 @_NO_BASH
-def test_detach_windows_watchdog_kill_returns_137_and_does_not_cache_as_unusable(tmp_path):
+def test_detach_windows_watchdog_kill_caches_as_slow_not_unusable(tmp_path):
     """#1002 round 4 (PR #1010's own CI, run #38062128176, job
     #114242348418): RC=137 -- this function's OWN watchdog firing, never a
-    structural "WSH is unusable" verdict -- must NOT poison the hour-long
-    cache the way a genuine early-return failure does. wscript.exe here
-    never responds at all, forcing the watchdog; the override env var lets
-    this resolve in well under a second rather than the real production
-    bound."""
+    structural "WSH is unusable" verdict -- earns a SHORT-lived "slow"
+    cache verdict rather than the hour-long "unusable" one a genuine
+    early-return failure gets. wscript.exe here never responds at all,
+    forcing the watchdog; the override env var lets this resolve in well
+    under a second rather than the real production bound.
+
+    Self-review finding (both Explore and oss:auditor): this fix's own
+    FIRST shape never cached rc=137 at all, which reopens the "stalls
+    every single save, forever" pathology the cache exists to remove, for
+    a host that is persistently -- not just transiently -- slower than the
+    watchdog bound. This test exercises the throttle that replaced it:
+    a second call in quick succession must be short-circuited exactly
+    like a structural failure would be, not re-attempted."""
     bindir = tmp_path / "bin"
     bindir.mkdir()
     _stub(bindir / "wscript.exe", "sleep 999")
@@ -623,31 +631,49 @@ def test_detach_windows_watchdog_kill_returns_137_and_does_not_cache_as_unusable
     )
     assert "RC=137" in r1.stdout, r1.stdout + r1.stderr
     cache_file = tmp_path / "remember-detach-windows-cache"
-    assert not cache_file.exists(), (
-        "a watchdog-kill (RC=137) published an 'unusable' cache entry -- "
-        "this would flash a console on every save for up to an hour off a "
-        "single slow sample, rather than just this one call"
+    assert cache_file.exists(), "a watchdog-kill must still publish a cache entry, just a short-lived one"
+    cache_text = cache_file.read_text(encoding="utf-8")
+    assert "VERDICT=slow" in cache_text, (
+        f"a watchdog-kill must publish VERDICT=slow, not VERDICT=unusable -- got: {cache_text!r}"
     )
 
-    # Positive control for the assertion above: swap in a FAST wscript.exe
-    # stub on the SAME PATH (same cache key) and confirm the real route is
-    # actually attempted again, not short-circuited by a cached verdict
-    # that should never have been written.
+    # Throttle check: swap in a FAST wscript.exe stub on the SAME PATH
+    # (same cache key) and confirm the SECOND call, made immediately, is
+    # short-circuited by the fresh "slow" verdict rather than reaching the
+    # real route -- proving a persistently slow host no longer pays the
+    # full watchdog bound on every single call.
     captured = tmp_path / "captured.txt"
     _stub(bindir / "wscript.exe", f'printf "%s\\n" "$@" > "{captured}"')
     r2 = _run(
+        f'. "{LIB}"; _remember_detach_windows "{out}" "{pid}" echo hi; echo "RC=$?"',
+        env,
+    )
+    assert "RC=1" in r2.stdout, (
+        "a second call shortly after a watchdog-kill reached the real route "
+        f"instead of being throttled by the fresh 'slow' verdict\\n{r2.stdout}{r2.stderr}"
+    )
+    assert not captured.exists(), (
+        "wscript.exe was invoked despite a fresh 'slow' verdict for this exact PATH"
+    )
+
+    # Positive control for the throttle above: once the "slow" verdict's
+    # own (much shorter) TTL has elapsed, the real route must be reachable
+    # again -- same technique as
+    # test_detach_windows_cache_ignores_a_stale_entry, a backdated CACHE_TS
+    # written directly rather than waiting out the real TTL.
+    cache_file.write_text(
+        f"CACHE_PATH={bindir}\\nVERDICT=slow\\nCACHE_TS=1\\n",
+        encoding="utf-8",
+    )
+    r3 = _run(
         f'. "{LIB}"; _remember_detach_windows "{out}" "{pid}" echo hi; echo "RC=$?"; sleep 0.2',
         env,
     )
-    assert "RC=0" in r2.stdout, (
-        "a later, genuinely healthy call on the same PATH still failed -- "
-        f"the earlier watchdog kill left something behind\\n{r2.stdout}{r2.stderr}"
+    assert "RC=0" in r3.stdout, (
+        "a stale 'slow' cache entry was trusted instead of re-attempted\\n"
+        f"{r3.stdout}{r3.stderr}"
     )
-    assert captured.exists(), (
-        "wscript.exe was never invoked on the second call -- a stale "
-        "'unusable' verdict from the earlier watchdog kill is still being "
-        "consulted"
-    )
+    assert captured.exists(), "the real route never ran despite the stale 'slow' cache entry"
 
 
 @_NO_BASH
@@ -707,11 +733,29 @@ def test_post_tool_fallback_skips_when_hidden_route_already_claimed_pid_file(tmp
 
 
 def _pid_alive(pid: int) -> bool:
+    """Portable liveness probe (#1002 round 4, oss:auditor self-review
+    finding) -- NOT os.kill(pid, 0) on its own. On Windows, CPython maps
+    signal 0 to CTRL_C_EVENT and calls GenerateConsoleCtrlEvent(0, pid), a
+    console-control-event broadcast to a PROCESS GROUP rather than a clean
+    existence probe of one PID -- the same idiom this repo already retired
+    once in tests/test_session_end_log_names_488.py::_pid_alive, whose
+    tasklist-based probe this mirrors, because this test's own windows-latest
+    CI leg (gated only by resolve_bash(), which resolves there) is not
+    skipped on that platform."""
+    if os.name == "posix":
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return False
+        return True
     try:
-        os.kill(pid, 0)
+        out = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+            capture_output=True, text=True, timeout=5, check=False,
+        ).stdout
     except OSError:
         return False
-    return True
+    return str(pid) in out
 
 
 @_NO_BASH
