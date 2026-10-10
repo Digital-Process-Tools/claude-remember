@@ -596,3 +596,145 @@ def test_vbs_quotearg_matches_the_stdlib_createprocess_convention(arg):
     import subprocess
 
     assert _vbs_quotearg_port(arg) == subprocess.list2cmdline([arg])
+
+
+@_NO_BASH
+def test_detach_windows_watchdog_kill_returns_137_and_does_not_cache_as_unusable(tmp_path):
+    """#1002 round 4 (PR #1010's own CI, run #38062128176, job
+    #114242348418): RC=137 -- this function's OWN watchdog firing, never a
+    structural "WSH is unusable" verdict -- must NOT poison the hour-long
+    cache the way a genuine early-return failure does. wscript.exe here
+    never responds at all, forcing the watchdog; the override env var lets
+    this resolve in well under a second rather than the real production
+    bound."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    _stub(bindir / "wscript.exe", "sleep 999")
+    _stub(bindir / "cygpath", 'shift; printf "%s" "$1"')
+    env = _controlled_env(
+        path=f"{bindir}:/usr/bin:/bin", TMPDIR=str(tmp_path),
+        _REMEMBER_DETACH_WIN_WATCHDOG_SECS="0.3",
+    )
+    out = tmp_path / "out.log"
+    pid = tmp_path / "pid"
+    r1 = _run(
+        f'. "{LIB}"; _remember_detach_windows "{out}" "{pid}" echo hi; echo "RC=$?"',
+        env,
+    )
+    assert "RC=137" in r1.stdout, r1.stdout + r1.stderr
+    cache_file = tmp_path / "remember-detach-windows-cache"
+    assert not cache_file.exists(), (
+        "a watchdog-kill (RC=137) published an 'unusable' cache entry -- "
+        "this would flash a console on every save for up to an hour off a "
+        "single slow sample, rather than just this one call"
+    )
+
+    # Positive control for the assertion above: swap in a FAST wscript.exe
+    # stub on the SAME PATH (same cache key) and confirm the real route is
+    # actually attempted again, not short-circuited by a cached verdict
+    # that should never have been written.
+    captured = tmp_path / "captured.txt"
+    _stub(bindir / "wscript.exe", f'printf "%s\\n" "$@" > "{captured}"')
+    r2 = _run(
+        f'. "{LIB}"; _remember_detach_windows "{out}" "{pid}" echo hi; echo "RC=$?"; sleep 0.2',
+        env,
+    )
+    assert "RC=0" in r2.stdout, (
+        "a later, genuinely healthy call on the same PATH still failed -- "
+        f"the earlier watchdog kill left something behind\\n{r2.stdout}{r2.stderr}"
+    )
+    assert captured.exists(), (
+        "wscript.exe was never invoked on the second call -- a stale "
+        "'unusable' verdict from the earlier watchdog kill is still being "
+        "consulted"
+    )
+
+
+@_NO_BASH
+def test_post_tool_fallback_skips_when_hidden_route_already_claimed_pid_file(tmp_path):
+    """#1002 round 4: the race this branch is named for. wscript.exe hangs
+    (forcing the watchdog, RC=137) but -- exactly like the real
+    WshShell.Run, which detaches the real command from wscript.exe's own
+    process -- a separate process has ALREADY written its own live pid to
+    PID_FILE and is still running by the time the watchdog fires. Before
+    the fix, post-tool-hook.sh's nohup fallback fired unconditionally on
+    any non-zero return, racing a second, independent save against the
+    first (two saves of the same session). After the fix it must see the
+    live PID_FILE and skip the fallback."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    # #1002 round 4 self-test finding: bash's own "$$" inside a backgrounded
+    # subshell reports the PARENT shell's pid, not the subshell's own forked
+    # one -- using "$$" here would write the exact pid the watchdog is about
+    # to kill, defeating the premise. "$!" of a freshly backgrounded job is
+    # the real forked pid, and -- like the real WshShell.Run child -- a
+    # plain "CMD &" backgrounded process is not killed when this script's
+    # own top-level pid is (SIGKILL targets one pid, not its children).
+    _stub(
+        bindir / "wscript.exe",
+        'pidfile="$6"\nsleep 999 &\nprintf "%s" "$!" > "$pidfile"\nsleep 999',
+    )
+    _stub(bindir / "cygpath", 'shift; printf "%s" "$1"')
+    marker = tmp_path / "nohup_save_ran.marker"
+    save_body = f'#!/usr/bin/env bash\ntouch "{marker}"\n'
+    root = _post_tool_plugin_root(tmp_path, save_body)
+    env, remember = _post_tool_env(tmp_path, root)
+    env["OS"] = "Windows_NT"
+    env["TMPDIR"] = str(tmp_path)
+    env["_REMEMBER_DETACH_WIN_WATCHDOG_SECS"] = "0.3"
+    pid_file = remember / "tmp" / "save-session.pid"
+    leftover_pid = None
+    try:
+        _run_real_script(root / "scripts" / "post-tool-hook.sh", env, prepend=str(bindir))
+        time.sleep(0.8)  # watchdog (0.3s) + a beat for the detached child to settle
+        assert not marker.exists(), (
+            "nohup fallback ran even though PID_FILE already named a live "
+            "pid the hidden route itself wrote -- this is a double save of "
+            "the same session"
+        )
+        assert pid_file.exists(), "PID_FILE must still name the hidden route's own live pid"
+        leftover_pid = int(pid_file.read_text(encoding="utf-8").strip())
+        assert _pid_alive(leftover_pid), (
+            "PID_FILE's pid is not actually alive -- the test's own premise "
+            "(a live hidden-route pid) does not hold"
+        )
+    finally:
+        if leftover_pid:
+            try:
+                os.kill(leftover_pid, 9)
+            except OSError:
+                pass
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+@_NO_BASH
+def test_post_tool_fallback_still_fires_when_hidden_route_claimed_nothing(tmp_path):
+    """Positive control for the test above: when the hidden route's
+    watchdog fires and NOTHING was ever spawned (PID_FILE never claimed by
+    anything), the nohup fallback must still run -- the fix above must not
+    be so eager to call a watchdog-kill harmless that it ends up losing
+    the save entirely."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    _stub(bindir / "wscript.exe", "sleep 999")
+    _stub(bindir / "cygpath", 'shift; printf "%s" "$1"')
+    marker = tmp_path / "nohup_save_ran.marker"
+    save_body = f'#!/usr/bin/env bash\ntouch "{marker}"\n'
+    root = _post_tool_plugin_root(tmp_path, save_body)
+    env, _remember = _post_tool_env(tmp_path, root)
+    env["OS"] = "Windows_NT"
+    env["TMPDIR"] = str(tmp_path)
+    env["_REMEMBER_DETACH_WIN_WATCHDOG_SECS"] = "0.3"
+    _run_real_script(root / "scripts" / "post-tool-hook.sh", env, prepend=str(bindir))
+    time.sleep(0.8)
+    assert marker.exists(), (
+        "nohup fallback did not run even though the hidden route claimed "
+        "nothing -- the save was lost entirely"
+    )
