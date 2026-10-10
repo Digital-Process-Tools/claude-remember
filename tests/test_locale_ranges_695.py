@@ -204,10 +204,20 @@ ALLOWLIST: dict[tuple[str, int], str] = {
     # these three (session-dir-cache does not touch SESSION_ID or add a new
     # bracket range of its own -- these are the same three pre-existing
     # allowlisted ranges, re-pinned to where they now live). Shifted +3 again
-    # by #973's rewrite of that same cache's keying comment block.
-    ("scripts/post-tool-hook.sh", 726): _CASE,
-    ("scripts/post-tool-hook.sh", 769): _CASE,
-    ("scripts/post-tool-hook.sh", 825): _CASE,
+    # by #973's rewrite of that same cache's keying comment block, and again
+    # by #913's own incremental-scan rewrite (the cooldown block moved ahead
+    # of these three, and a fourth, equally ASCII-only range -- the new
+    # transcript-scan sidecar's own basename sanitiser -- was added between
+    # the first two). Re-pinned again after the #1013 rebase's own self-review
+    # fix (the IN_COOLDOWN scoping comments inserted above this region,
+    # scripts/post-tool-hook.sh:825-923).
+    ("scripts/post-tool-hook.sh", 719): _CASE,
+    ("scripts/post-tool-hook.sh", 762): _CASE,
+    # The #913 transcript-scan sidecar's own key: a filename component, same
+    # [A-Za-z0-9._-]+ charset as SESSION_ID right above, never locale text --
+    # measured the same way, same reason.
+    ("scripts/post-tool-hook.sh", 868): _CASE,
+    ("scripts/post-tool-hook.sh", 970): _CASE,
     ("scripts/session-end-hook.sh", 201): _CASE,
     ("scripts/session-end-hook.sh", 209): _CASE,
     ("scripts/session-start-hook.sh", 289): _CASE,

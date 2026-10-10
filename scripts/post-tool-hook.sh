@@ -690,13 +690,6 @@ else
     [ -n "$STDIN_SESSION_ID" ] && log "hook" "post-tool: stdin session $STDIN_SESSION_ID has no transcript in $SESSION_DIR -- falling back to newest"
 fi
 
-# `wc -l` on BSD pads its output with leading spaces, which is why `tr -d ' '`
-# was here. Arithmetic expansion strips whitespace on its own, so the pipe's
-# second process goes (#230) — and a `wc` that printed nothing usable now yields
-# 0 rather than the empty string, which every comparison below already treated
-# as 0 anyway.
-CURRENT_LINES=$(wc -l < "$TRANSCRIPT" 2>/dev/null)
-CURRENT_LINES=$(( CURRENT_LINES + 0 ))
 # STDIN_SESSION_ID wins when it is TRUSTED -- i.e. it is actually the id that
 # resolved TRANSCRIPT above, not merely a value that showed up on stdin
 # (#468, same precedence #407 gave STDIN_TRANSCRIPT_PATH). Deriving from the
@@ -777,6 +770,158 @@ if printf '%s' "$SESSION_ID" > "$REMEMBER_DIR/tmp/capture-alive.$$" 2>/dev/null;
         || rm -f "$REMEMBER_DIR/tmp/capture-alive.$$" 2>/dev/null || true
 fi
 
+# --- Don't fork a save that save-session.sh will only discard on cooldown ---
+# Moved ahead of the #913 scan below (#1011's own suggestion): until the
+# first save lands, LAST_LINE is 0, so DELTA is the whole transcript and
+# always clears the threshold -- and in an agentic session (many tool calls,
+# few human turns) the min-human gate keeps that first save from ever
+# landing, so the hook would fork a save-session.sh on every tool call for
+# the whole session (issue #125). save-session.sh already rate-limits on the
+# last-save-ts cooldown marker; consulting it here, BEFORE the scan rather
+# than after it, means the scan itself is skipped too whenever a save could
+# not fire regardless of what it found -- #913's second named cost paid for
+# nothing, on every call this throttle alone was already going to block.
+# #1011: on an affected Windows build, a fork avoided here is a kernel Token
+# object that never leaks at all, not merely a fork whose latency was saved.
+IN_COOLDOWN=false
+COOLDOWN_MARKER="$REMEMBER_DIR/tmp/last-save-ts"
+if [ -f "$COOLDOWN_MARKER" ]; then
+    LAST_TS=0
+    read -r LAST_TS < "$COOLDOWN_MARKER" 2>/dev/null
+    if [ -z "$LAST_TS" ] || [ "${LAST_TS#*[!0-9]}" != "$LAST_TS" ]; then LAST_TS=0; fi
+    SAVE_COOLDOWN="${REMEMBER_SAVE_COOLDOWN:-120}"
+    _ELAPSED=$(( $(_remember_date +%s) - 10#$LAST_TS ))
+    [ "$_ELAPSED" -ge 0 ] && [ "$_ELAPSED" -lt "$SAVE_COOLDOWN" ] && IN_COOLDOWN=true
+fi
+
+# --- #913: make the transcript line count incremental, not O(session length) ---
+# `wc -l < "$TRANSCRIPT"` used to read the WHOLE transcript on every tool
+# call, so the hook got slower every turn of a long session (#913's own
+# trace: 229ms of a 986ms run, on a 260 MB transcript, in `wc -l` alone).
+# This stores (OFFSET, LINES) next to the existing #353 sidecar, keyed by
+# the transcript's own basename rather than SESSION_ID -- this cache is
+# about the FILE's own scan progress, not which session speaks for it, so
+# it needs none of the stdin-trust nuance SESSION_ID carries above.
+#
+# `tail -c +OFFSET` (one byte before the first genuinely unread one) IS the
+# validator as well as the reader: its own first character, read back, has
+# to be the newline this OFFSET claims to follow. A shorter read than that
+# single byte means the file no longer HAS that many bytes (shrank, or
+# rotated to something smaller); a first byte that is anything else means
+# what used to be there at OFFSET is not there any more (rewritten from the
+# top). Either one is exactly #913's "file shrank or its head changed", and
+# both fall back to a full recount -- the SAME recount a brand new session's
+# first call gets, with OFFSET starting at 0 rather than a dedicated cold
+# branch.
+#
+# A chunk with no trailing newline is a record still being written (#913's
+# "half-written last line"): never counted, and OFFSET never advances past
+# it, so the next call re-reads it whole -- complete this time, or still
+# partial and still excluded.
+#
+# `local LC_ALL=C` scopes every length/substring op below to BYTES, not
+# characters (#695, same reason `_remember_dir_is_unsafe` above takes it):
+# `tail -c` counts bytes, and a UTF-8 locale's `${#}` does not, which would
+# desync OFFSET from the file it is supposed to point into.
+#
+# This `if` wraps ONLY the scan below, through the SCAN_SIDECAR write right
+# after it -- not the #353 sidecar lookup or the DELTA it feeds, both of
+# which run unconditionally further down, exactly as they did before #913
+# touched this file. A first version of this change nested the #353 block
+# inside this same `if` too (kept at its ORIGINAL indentation, visually
+# flush with the new wrapper, on the reasoning that none of it affects a
+# call's save decision when IN_COOLDOWN is true anyway), but
+# tests/test_hot_path_cost_pin_330.py's own #353/#395 sidecar-trust pins
+# exercise that block independent of cooldown state, and their fixture
+# always leaves a save-session.sh cooldown marker set -- so nesting it here
+# silently disabled the branch those tests exist to pin, on every run of
+# that fixture. Scoping the `if` to just the scan restores that invariant;
+# #913's own win (no longer reading the whole transcript on every call) is
+# untouched, and the scan itself still skips entirely under cooldown.
+if [ "$IN_COOLDOWN" = false ]; then
+_pt_scan_lines() {
+    local LC_ALL=C
+    local _off="$1" _lines="$2" _file="$3"
+    local _start=1 _nl=$'\n'
+    [ "$_off" -gt 0 ] && _start="$_off"
+    local _chunk
+    _chunk=$(tail -c +"$_start" "$_file" 2>/dev/null; printf 'X')
+    _chunk=${_chunk%X}
+    if [ "$_off" -gt 0 ]; then
+        local _first=${_chunk:0:1}
+        if [ -z "$_chunk" ] || [ "$_first" != "$_nl" ]; then
+            _pt_scan_lines 0 0 "$_file"
+            return
+        fi
+        _chunk=${_chunk:1}
+    fi
+    local _partial=${_chunk##*$'\n'}
+    local _complete=${_chunk%"$_partial"}
+    local _nl_only=${_complete//[^$'\n']}
+    printf '%s %s\n' "$(( _off + ${#_complete} ))" "$(( _lines + ${#_nl_only} ))"
+}
+
+_SCAN_NAME="${TRANSCRIPT##*/}"
+_SCAN_NAME="${_SCAN_NAME%.jsonl}"
+if [ -z "${_SCAN_NAME#.}" ] || [ -z "${_SCAN_NAME#..}" ] \
+    || [ "${_SCAN_NAME#-}" != "$_SCAN_NAME" ] \
+    || [[ "$_SCAN_NAME" == *[!A-Za-z0-9._-]* ]]; then
+    _SCAN_NAME=""
+fi
+
+_SCAN_OFFSET=0
+_SCAN_LINES=0
+if [ -n "$_SCAN_NAME" ]; then
+    SCAN_SIDECAR="$REMEMBER_DIR/tmp/transcript-scan.$_SCAN_NAME"
+    if [ -f "$SCAN_SIDECAR" ]; then
+        _SCAN_RAW_OFFSET=""
+        _SCAN_RAW_LINES=""
+        read -r _SCAN_RAW_OFFSET _SCAN_RAW_LINES < "$SCAN_SIDECAR" 2>/dev/null
+        # Validated as a PAIR, not field-by-field (self-review finding): a
+        # write interrupted between the two fields (OOM, disk full, a kill
+        # mid-`printf`) can leave a syntactically VALID OFFSET -- a real
+        # prior scan position, so `_pt_scan_lines`'s own newline check at
+        # that offset passes -- next to an EMPTY/missing LINES field. Each
+        # field alone looked fine, so a per-field default silently paired
+        # a genuine OFFSET with a LINES of 0, undercounting every line
+        # that existed before it -- not "no sidecar at all", but a sidecar
+        # that is wrong and passes every check this function runs on it.
+        # Any failure on either field now discards BOTH, forcing the same
+        # full recount an absent sidecar already gets.
+        if [ -z "$_SCAN_RAW_OFFSET" ] || [[ "$_SCAN_RAW_OFFSET" == *[!0-9]* ]] \
+            || [ -z "$_SCAN_RAW_LINES" ] || [[ "$_SCAN_RAW_LINES" == *[!0-9]* ]]; then
+            _SCAN_RAW_OFFSET=0
+            _SCAN_RAW_LINES=0
+        fi
+        _SCAN_OFFSET=$((10#$_SCAN_RAW_OFFSET))
+        _SCAN_LINES=$((10#$_SCAN_RAW_LINES))
+    fi
+else
+    SCAN_SIDECAR=""
+fi
+
+_SCAN_RESULT=$(_pt_scan_lines "$_SCAN_OFFSET" "$_SCAN_LINES" "$TRANSCRIPT")
+_SCAN_NEW_OFFSET=${_SCAN_RESULT%% *}
+CURRENT_LINES=${_SCAN_RESULT##* }
+CURRENT_LINES=$(( CURRENT_LINES + 0 ))
+
+# Plain redirect, not the mktemp+rename the #353 sidecar uses: a partial
+# write here is self-healing. The read above already treats anything that
+# is not two plain digit fields as "no sidecar at all" (OFFSET=0, LINES=0),
+# so a crash mid-write costs one extra full recount next call, never a
+# wrong DELTA -- unlike last-save.json's own sidecar, where a wrong value
+# could skip or duplicate a summary.
+if [ -n "$SCAN_SIDECAR" ]; then
+    printf '%s %s\n' "$_SCAN_NEW_OFFSET" "$CURRENT_LINES" > "$SCAN_SIDECAR" 2>/dev/null
+fi
+fi
+# CURRENT_LINES is 0 here when the scan above was skipped (IN_COOLDOWN=true)
+# -- bash's own default for an unset arithmetic operand, never assigned in
+# that case. The one place that matters, the sidecar's own upper-bound
+# check a little further down, is told so explicitly rather than reading a
+# false "sidecar is past the transcript" rejection off a count that was
+# simply never taken this round.
+
 # --- Get last saved position (from the #353 sidecar, or last-save.json) ---
 # Positions are keyed by session (issue #140), so ask for THIS session rather
 # than whether it happens to own the one slot — two live sessions used to
@@ -839,7 +984,13 @@ if [ -n "$SIDECAR" ] && [ -f "$SIDECAR" ]; then
         # 10# (#332): a leading zero in the sidecar would otherwise be
         # read as octal and take this comparison — and the delta
         # arithmetic below it — down with it.
-        if [ "$((10#$_SIDECAR_LINE))" -gt "$CURRENT_LINES" ]; then
+        #
+        # `[ "$IN_COOLDOWN" = false ] &&` short-circuits the bound check
+        # itself (never just its message) when the scan above was skipped:
+        # CURRENT_LINES is 0 in that case, never this run's real line
+        # count, and comparing against it would reject every legitimate
+        # sidecar as "past the transcript" on every cooldown-active call.
+        if [ "$IN_COOLDOWN" = false ] && [ "$((10#$_SIDECAR_LINE))" -gt "$CURRENT_LINES" ]; then
             log "hook" "WARNING: sidecar $SIDECAR reports position $_SIDECAR_LINE, past this run's own $CURRENT_LINES transcript lines -- disagrees with last-save.json, falling back to read-position"
         else
             # #403: the bound above only rules out a value the sidecar
@@ -949,56 +1100,14 @@ fi
 # 10# after the case, never instead of it (#332) — the position is a decimal
 # string from pipeline.shell, and a "08" in it would be read as octal and take
 # the whole delta throttle down with the arithmetic.
+#
+# Runs unconditionally, cooldown or not: CURRENT_LINES is 0 under cooldown
+# (the scan above was skipped), so DELTA comes out <= 0 and the threshold
+# check below -- which ANDs on "$IN_COOLDOWN" = false in its own right --
+# can never fire from it either way. Nothing here needs a cooldown branch
+# of its own.
 DELTA=$((CURRENT_LINES - 10#$LAST_LINE))
 SAVE_TRIGGERED=""
-
-# --- Don't fork a save that save-session.sh will only discard on cooldown ---
-# The delta throttle above keys on save *position* (last-save.json), which is
-# only written after a successful save. Until the first save lands LAST_LINE is
-# 0, so DELTA is the whole transcript and always clears the threshold — and in
-# an agentic session (many tool calls, few human turns) the min-human gate keeps
-# that first save from ever landing, so the hook would fork a save-session.sh on
-# every tool call for the whole session (issue #125). save-session.sh already
-# rate-limits on the last-save-ts cooldown marker; consult it here so the fork
-# is skipped entirely instead of spawned only to be discarded milliseconds later.
-IN_COOLDOWN=false
-COOLDOWN_MARKER="$REMEMBER_DIR/tmp/last-save-ts"
-if [ -f "$COOLDOWN_MARKER" ]; then
-    # `read`, not `cat` (#230) — see the note on NOTICE_LAST above. This one is
-    # on the hot path proper: the cooldown marker exists for the whole of any
-    # session that has saved once, so this ran on every tool call.
-    LAST_TS=0
-    read -r LAST_TS < "$COOLDOWN_MARKER" 2>/dev/null
-    if [ -z "$LAST_TS" ] || [ "${LAST_TS#*[!0-9]}" != "$LAST_TS" ]; then LAST_TS=0; fi
-    # Resolved by log.sh and validated there, so it arrives the same way on
-    # both paths — from the chain when the chain ran, replayed from the env
-    # cache when it did not (#350). config() is the one thing the fast path
-    # cannot call, and a second reader of the same key here is how the
-    # pre-#158 duplicates drifted.
-    SAVE_COOLDOWN="${REMEMBER_SAVE_COOLDOWN:-120}"
-    # 10# for the same reason as the notice marker above (#322). Only LAST_TS
-    # needs it: SAVE_COOLDOWN is the right-hand operand of `[ ... -lt ... ]`,
-    # and `test` parses base 10 without evaluating -- measured, `[ 9 -lt 010 ]`
-    # is true. Marking it too would advertise a gap that is not there.
-    # `-ge 0` is the range half of #326, and this site is deliberately NOT
-    # symmetrical with the three gates that heal the marker:
-    #
-    #   * it does not rewrite it. tmp/last-save-ts belongs to save-session.sh,
-    #     which stamps it on the very path this hook unblocks. A second writer
-    #     on a per-tool-call path is a race for no gain.
-    #   * it emits no diagnostic. save-session.sh emits exactly one when it
-    #     heals; one here too would append to hook-errors.log on EVERY tool call
-    #     for as long as the clock is behind.
-    #   * it costs nothing (#299/#330): the value is already computed, so this
-    #     adds no subprocess spawn and no file read to the hot path.
-    #
-    # What it must do is refuse to claim a cooldown it cannot substantiate. A
-    # negative ELAPSED used to read as "deep inside the window", so no save was
-    # forked, so save-session.sh never ran, so the marker it would have healed
-    # stayed ahead — the two throttles held each other shut.
-    _ELAPSED=$(( $(_remember_date +%s) - 10#$LAST_TS ))
-    [ "$_ELAPSED" -ge 0 ] && [ "$_ELAPSED" -lt "$SAVE_COOLDOWN" ] && IN_COOLDOWN=true
-fi
 
 # --- Fire save if delta exceeds threshold and no save already running ---
 # Same as SAVE_COOLDOWN above: log.sh resolves and validates it, both paths
