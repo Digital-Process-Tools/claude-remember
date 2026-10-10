@@ -548,6 +548,104 @@ def test_tree_shake_an_all_caps_variable_call_is_not_dynamic_dispatch():
     assert report["dropped"] == ["unused"]
 
 
+def test_tree_shake_a_lowercase_test_operand_inside_double_brackets_is_not_dynamic_dispatch():
+    # #906: `&& "$x"` is a real code-position match for _DYNAMIC_CALL_RE
+    # when it sits inside `[[ ... ]]`, but there it is a TEST OPERAND, not
+    # a call through a variable -- `[[ ]]` cannot invoke an arbitrary
+    # command. Shaking must still proceed and still drop the unused
+    # function; this is the exact shape from scripts/lib-lock.sh that grew
+    # the compiled hook by 10+ KB with no visible symptom besides size.
+    text = (
+        "#!/bin/sh\n"
+        "unused() {\n"
+        "    echo unused\n"
+        "}\n"
+        'x="abc"\n'
+        '[[ -n "$x" && "$x" != *[!0-9]* ]] && echo digits\n'
+    )
+    out, report = compile_hooks.tree_shake(text)
+    assert report["dynamic_dispatch"] is False
+    assert report["shaken"] is True
+    assert report["dropped"] == ["unused"]
+    assert "echo unused" not in out
+
+
+def test_tree_shake_a_lowercase_test_operand_inside_single_brackets_is_not_dynamic_dispatch():
+    # Same false-positive shape, classic `[ ... ]` test form.
+    text = (
+        "#!/bin/sh\n"
+        "unused() {\n"
+        "    echo unused\n"
+        "}\n"
+        'x="abc"\n'
+        '[ -n "$x" ] && [ "$x" != "" ] && echo nonempty\n'
+    )
+    out, report = compile_hooks.tree_shake(text)
+    assert report["dynamic_dispatch"] is False
+    assert report["shaken"] is True
+    assert report["dropped"] == ["unused"]
+    assert "echo unused" not in out
+
+
+def test_tree_shake_a_real_call_through_a_variable_still_bails_even_after_a_test():
+    # The fix for the false positive above must not also blind the real
+    # positive: a genuine dynamic dispatch (`"$fn"` in command position)
+    # appearing on a line AFTER a `[[ ]]` test must still disable shaking.
+    text = (
+        "#!/bin/sh\n"
+        "real_fn() {\n"
+        "    echo real\n"
+        "}\n"
+        'fn="real_fn"\n'
+        '[[ -n "$fn" ]] && "$fn"\n'
+    )
+    out, report = compile_hooks.tree_shake(text)
+    assert report["shaken"] is False
+    assert report["dynamic_dispatch"] is True
+    assert report["dropped"] == []
+    assert "real_fn" in out
+
+
+def test_tree_shake_a_test_operand_split_across_lines_by_implicit_continuation_is_not_dynamic_dispatch():
+    # Review finding on #906's own fix: bash continues a statement onto the
+    # next physical line not only after an explicit trailing backslash, but
+    # also whenever a line simply ends on '&&'/'||'/'|' -- no backslash at
+    # all (this repo's own scripts/run-consolidation.sh:301 line-wraps
+    # exactly this way). A `[[ ... ]]` test split across such a boundary
+    # must still be recognized as a test span, not scanned per-line raw.
+    text = (
+        "#!/bin/sh\n"
+        "unused() {\n"
+        "    echo unused\n"
+        "}\n"
+        'x="abc"\n'
+        '[[ -n "$x" &&\n'
+        '   "$x" != "" ]] && echo nonempty\n'
+    )
+    out, report = compile_hooks.tree_shake(text)
+    assert report["dynamic_dispatch"] is False
+    assert report["shaken"] is True
+    assert report["dropped"] == ["unused"]
+    assert "echo unused" not in out
+
+
+def test_tree_shake_reason_names_the_triggering_line_when_dispatch_is_dynamic():
+    # The report's "reason" string must name the physical line that
+    # triggered the bail -- a silent fallback is the failure mode #906
+    # calls out; the only prior symptom was the compiled file's byte size.
+    text = (
+        '#!/bin/sh\n'
+        'real_fn() {\n'
+        "    echo real\n"
+        "}\n"
+        'fn="real_fn"\n'
+        '"$fn"\n'
+    )
+    _out, report = compile_hooks.tree_shake(text)
+    assert report["dynamic_dispatch"] is True
+    assert "line 6" in report["reason"]
+
+
 def test_tree_shake_correctly_finds_a_functions_end_despite_a_nested_brace_group():
     # The exact risk this module's own inliner introduces: a gated source
     # statement's `{ ...; }` wrapper can land INSIDE a function body (this
