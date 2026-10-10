@@ -206,8 +206,10 @@ def test_detach_windows_returns_1_when_wscript_missing(tmp_path):
 def test_detach_windows_invokes_hidden_launcher_with_expected_args(tmp_path):
     """Positive control for the test above: when wscript.exe AND cygpath
     AND bash are all resolvable, the hidden route is taken and wscript.exe
-    is invoked with the vbs path, the bash path, -c, the pidwrap script,
-    the pidfile, and the real command -- in that order."""
+    is invoked with the vbs path, the bash path, the pidwrap script, the
+    outfile, the pidfile, and the real command -- in that order (#1002
+    round 2: no more "-c SCRIPT" hop -- see lib-detach.sh's own comment at
+    the wscript.exe call site)."""
     bindir = tmp_path / "bin"
     bindir.mkdir()
     captured = tmp_path / "captured.txt"
@@ -226,17 +228,13 @@ def test_detach_windows_invokes_hidden_launcher_with_expected_args(tmp_path):
     assert lines[0] == "//B", lines
     assert lines[1].endswith("windows-hidden-run.vbs"), lines
     assert lines[2].endswith("bash"), lines
-    assert lines[3] == "-c", lines
-    # #1002 CI round 9: lines[4] is the function's own `printf '%q'`
-    # escaping of $outfile for safe reuse inside the -c script -- on a
-    # native Windows path, %q doubles every backslash, so comparing
-    # against the bare str(out) (single backslashes) was comparing
-    # against the UNescaped form on a path %q had correctly escaped.
-    # The basename is enough to confirm the right file was named.
-    assert "exec bash" in lines[4] and out.name in lines[4], lines
-    assert lines[5].endswith("lib-detach-pidwrap.sh"), lines
-    assert lines[6] == str(pid), lines
-    assert lines[7:] == ["echo", "hi"], lines
+    assert lines[3].endswith("lib-detach-pidwrap.sh"), lines
+    # #1002 round 2: OUTFILE and PIDFILE are now each their own argv
+    # entry -- no more embedded "-c" bash script string, no more %q
+    # escaping, so these compare against the bare paths directly.
+    assert lines[4] == str(out), lines
+    assert lines[5] == str(pid), lines
+    assert lines[6:] == ["echo", "hi"], lines
 
 
 @_NO_BASH
@@ -266,7 +264,10 @@ def test_detach_windows_resolves_bare_bash_argv_to_absolute_path(tmp_path):
         prepend=str(bindir),
     )
     assert "RC=0" in r.stdout, r.stdout + r.stderr
-    real_cmd = captured.read_text(encoding="utf-8").splitlines()[7:]
+    # #1002 round 2: argv shifted by one -- outfile and pidfile are each
+    # now their own entry, with no "-c" marker preceding them -- so the
+    # real command starts at index 6, not 7.
+    real_cmd = captured.read_text(encoding="utf-8").splitlines()[6:]
     assert real_cmd[0] != "bash", real_cmd
     assert real_cmd[0].endswith("bash"), real_cmd
     assert real_cmd[1:] == ["/some/script.sh", "arg1"], real_cmd
@@ -294,7 +295,7 @@ def test_detach_windows_leaves_a_non_bash_command_untouched(tmp_path):
         prepend=str(bindir),
     )
     assert "RC=0" in r.stdout, r.stdout + r.stderr
-    real_cmd = captured.read_text(encoding="utf-8").splitlines()[7:]
+    real_cmd = captured.read_text(encoding="utf-8").splitlines()[6:]
     assert real_cmd == ["/some/script.sh", "arg1"], real_cmd
 
 

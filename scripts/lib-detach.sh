@@ -95,21 +95,14 @@ _remember_detach_windows() {
     bash_win="$(cygpath -w "$bash_path" 2>/dev/null)" || return 1
     [ -n "$bash_win" ] || return 1
 
-    local outfile_q
-    outfile_q="$(printf '%q' "$outfile")"
-    # Single-quoted literal, concatenated with the quoted outfile_q
-    # expansion -- not an escaped double quote, which the directory's
-    # scanner mis-tracks in some states (#898 round 8).
-    local c_script
-    c_script='exec bash "$0" "$@" >>'"${outfile_q}"' 2>&1'
-
     # #1002 review: a call site may hand us a bare "bash" as the real
     # command's own argv[0] (session-end-hook.sh and agy-stop-hook.sh both
     # re-invoke themselves as `bash SCRIPT`, rather than exec'ing SCRIPT
     # directly the way post-tool-hook.sh does). That bareword then travels
-    # through two more layers (this function's own bash -c driver, then
-    # lib-detach-pidwrap.sh's `exec "$@"`) before it is ever resolved --
-    # each an extra place a bare "bash" could resolve to the wrong
+    # through one more layer (lib-detach-pidwrap.sh's `exec "$@"`) before
+    # it is ever resolved (#1002 round 2: the bash -c driver this comment
+    # once described no longer exists, see the wscript.exe call below) --
+    # an extra place a bare "bash" could resolve to the wrong
     # interpreter on a Windows host with WSL installed (its own bash.exe
     # launcher stub lives in System32, ahead of Git's own bin directories
     # on some PATH orderings). Resolve it ONCE, here, to the same absolute
@@ -120,7 +113,35 @@ _remember_detach_windows() {
         real_cmd[0]="$bash_path"
     fi
 
-    wscript.exe //B "$vbs_win" "$bash_win" -c "$c_script" "$pidwrap" "$pidfile" "${real_cmd[@]}" >/dev/null 2>&1 &
-    disown 2>/dev/null || true
-    return 0
+    # #1002 round 2 (release-audit v0.42.3 gate 3, trap A): the previous
+    # shape built a bash -c SCRIPT whose script string embedded literal
+    # double quotes (exec bash "$0" "$@" >>OUTFILE 2>&1) and handed that
+    # whole string to wscript.exe as ONE argv entry. Whether a quote
+    # embedded that way survives the exec->CreateProcess argv-to-command-
+    # line conversion and WSH's own command-line parse was never settled
+    # on a real Windows host -- CI only ever exercised a bash stub
+    # standing in for wscript.exe (tests/test_windows_hidden_detach_1002.py),
+    # which cannot see either side of that parse. Removing the embedded
+    # quotes removes the question: OUTFILE and PIDFILE are now each their
+    # own separate WScript.Arguments entry, quoted (if at all) by
+    # windows-hidden-run.vbs's own QuoteArg -- the same tested,
+    # CreateProcess-convention quoting every other argv entry already
+    # gets -- and lib-detach-pidwrap.sh does its own redirection from
+    # OUTFILE directly, rather than via a second nested bash -c. No
+    # argument on this call ever carries a literal quote any more.
+    #
+    # #1002 round 2 (trap B): the previous shape backgrounded wscript.exe
+    # itself with a trailing "&" and then unconditionally returned 0, so
+    # a wscript.exe launch failure (e.g. Windows Script Host disabled)
+    # was invisible to the caller -- post-tool-hook.sh's own nohup
+    # fallback only fires on a non-zero return. WshShell.Run's own wait
+    # flag is already False (async: it returns as soon as the real
+    # command is spawned, not when it finishes), so wscript.exe's own
+    # process exits almost immediately either way -- backgrounding it
+    # here was never needed for responsiveness, only hid its exit
+    # status. Run it in the FOREGROUND instead and let its exit status
+    # become this function's own return value: non-zero when WSH itself
+    # could not run the script at all, reaching the caller and
+    # triggering the nohup fallback instead of a silent skip.
+    wscript.exe //B "$vbs_win" "$bash_win" "$pidwrap" "$outfile" "$pidfile" "${real_cmd[@]}" >/dev/null 2>&1
 }
