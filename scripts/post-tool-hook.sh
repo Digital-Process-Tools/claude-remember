@@ -824,12 +824,20 @@ fi
 # `tail -c` counts bytes, and a UTF-8 locale's `${#}` does not, which would
 # desync OFFSET from the file it is supposed to point into.
 #
-# Everything from here through the DELTA assignment below keeps its
-# ORIGINAL indentation rather than being re-flowed one level deeper for the
-# `if` this adds -- it is still inside it, just visually flush with it. A
-# mechanical re-indent of a ~170-line block already covered by #140/#403/
-# #426's own comments is a larger, harder-to-review diff than the one line
-# of asymmetry it would remove.
+# This `if` wraps ONLY the scan below, through the SCAN_SIDECAR write right
+# after it -- not the #353 sidecar lookup or the DELTA it feeds, both of
+# which run unconditionally further down, exactly as they did before #913
+# touched this file. A first version of this change nested the #353 block
+# inside this same `if` too (kept at its ORIGINAL indentation, visually
+# flush with the new wrapper, on the reasoning that none of it affects a
+# call's save decision when IN_COOLDOWN is true anyway), but
+# tests/test_hot_path_cost_pin_330.py's own #353/#395 sidecar-trust pins
+# exercise that block independent of cooldown state, and their fixture
+# always leaves a save-session.sh cooldown marker set -- so nesting it here
+# silently disabled the branch those tests exist to pin, on every run of
+# that fixture. Scoping the `if` to just the scan restores that invariant;
+# #913's own win (no longer reading the whole transcript on every call) is
+# untouched, and the scan itself still skips entirely under cooldown.
 if [ "$IN_COOLDOWN" = false ]; then
 _pt_scan_lines() {
     local LC_ALL=C
@@ -906,6 +914,13 @@ CURRENT_LINES=$(( CURRENT_LINES + 0 ))
 if [ -n "$SCAN_SIDECAR" ]; then
     printf '%s %s\n' "$_SCAN_NEW_OFFSET" "$CURRENT_LINES" > "$SCAN_SIDECAR" 2>/dev/null
 fi
+fi
+# CURRENT_LINES is 0 here when the scan above was skipped (IN_COOLDOWN=true)
+# -- bash's own default for an unset arithmetic operand, never assigned in
+# that case. The one place that matters, the sidecar's own upper-bound
+# check a little further down, is told so explicitly rather than reading a
+# false "sidecar is past the transcript" rejection off a count that was
+# simply never taken this round.
 
 # --- Get last saved position (from the #353 sidecar, or last-save.json) ---
 # Positions are keyed by session (issue #140), so ask for THIS session rather
@@ -969,7 +984,13 @@ if [ -n "$SIDECAR" ] && [ -f "$SIDECAR" ]; then
         # 10# (#332): a leading zero in the sidecar would otherwise be
         # read as octal and take this comparison — and the delta
         # arithmetic below it — down with it.
-        if [ "$((10#$_SIDECAR_LINE))" -gt "$CURRENT_LINES" ]; then
+        #
+        # `[ "$IN_COOLDOWN" = false ] &&` short-circuits the bound check
+        # itself (never just its message) when the scan above was skipped:
+        # CURRENT_LINES is 0 in that case, never this run's real line
+        # count, and comparing against it would reject every legitimate
+        # sidecar as "past the transcript" on every cooldown-active call.
+        if [ "$IN_COOLDOWN" = false ] && [ "$((10#$_SIDECAR_LINE))" -gt "$CURRENT_LINES" ]; then
             log "hook" "WARNING: sidecar $SIDECAR reports position $_SIDECAR_LINE, past this run's own $CURRENT_LINES transcript lines -- disagrees with last-save.json, falling back to read-position"
         else
             # #403: the bound above only rules out a value the sidecar
@@ -1079,15 +1100,13 @@ fi
 # 10# after the case, never instead of it (#332) — the position is a decimal
 # string from pipeline.shell, and a "08" in it would be read as octal and take
 # the whole delta throttle down with the arithmetic.
+#
+# Runs unconditionally, cooldown or not: CURRENT_LINES is 0 under cooldown
+# (the scan above was skipped), so DELTA comes out <= 0 and the threshold
+# check below -- which ANDs on "$IN_COOLDOWN" = false in its own right --
+# can never fire from it either way. Nothing here needs a cooldown branch
+# of its own.
 DELTA=$((CURRENT_LINES - 10#$LAST_LINE))
-else
-    # IN_COOLDOWN is already known (computed above, before the #913 scan
-    # this branch skips) -- the threshold check below ANDs it with
-    # "$IN_COOLDOWN" = false anyway, so DELTA's exact value can never flip
-    # that outcome. 0 keeps the `-gt` comparison a valid integer test
-    # without paying for a scan this run's save decision does not need.
-    DELTA=0
-fi
 SAVE_TRIGGERED=""
 
 # --- Fire save if delta exceeds threshold and no save already running ---

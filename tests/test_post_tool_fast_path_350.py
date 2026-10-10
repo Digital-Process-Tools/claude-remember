@@ -49,13 +49,14 @@ from tests.spawn_counting import make_shim_dir, spawns as _spawn_lines  # noqa: 
 TRANSCRIPT_LINE = "{\"type\":\"assistant\",\"message\":{\"content\":\"x\"}}\n"
 
 # The warm run measured on macOS bash 3.2.57 with the shared counted-command
-# list: `sed` (the slug), `ls -t`, `head -1`, `wc -l`, `mv -f` (capture-alive)
-# and `date +%s` (the cooldown clock; a builtin on bash >= 4.2). Against 14 for
-# the same fixture before this change.
-#
-# The slack is for the platforms that are not this one — Git Bash spends a
-# `cygpath` more, bash >= 4.2 a `date` less — not for a regression.
-FAST_PATH_SPAWN_MEASURED = 6
+# list: `ls -t`, `head -1`, `wc -l`, `mv -f` (capture-alive) and `date +%s`
+# (the cooldown clock; a builtin on bash >= 4.2). Against 14 for the same
+# fixture before this change. `sed` (the slug) is already gone from this
+# count -- an earlier, separate #913 session-dir-cache sidecar PR closed
+# that half without this constant ever being re-measured, so 6 had already
+# been stale (actual 5) before the #913 incremental-scan change below
+# touched this file at all; re-measured and corrected here.
+FAST_PATH_SPAWN_MEASURED = 5
 FAST_PATH_SPAWN_BUDGET = FAST_PATH_SPAWN_MEASURED + 2
 
 
