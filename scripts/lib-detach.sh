@@ -68,7 +68,91 @@ _remember_is_windows() {
 # "echo $! > PID_FILE" line gives today, just sourced from inside the
 # child instead of from the parent. Pass PIDFILE as /dev/null at call
 # sites with no PID-based liveness guard to read.
+# --- Hidden-route verdict cache (#1002 round 3) ---
+# With Windows Script Host disabled by policy, every _remember_detach_windows
+# call used to pay the full watchdog bound (foreground wscript.exe, killed
+# after the bound elapses) before falling back to nohup -- and PostToolUse
+# calls this on every tool call, so an affected host stalled every single
+# save by that amount, forever, never just once. The verdict (can this host
+# reach the hidden route at all, right now) cannot change unless PATH
+# changes -- same reasoning as detect-tools.sh's own #668 tool-verdict
+# cache, which this mirrors: identity is the whole PATH string, byte for
+# byte, since there is no single "source file" whose mtime could track a
+# PATH change the way the other #668 caches key on file mtimes.
+#
+# Lives under the system temp dir (like detect-tools.sh's own cache file),
+# machine/PATH-global rather than per-project -- whether this host's WSH is
+# usable does not depend on which project a hook is running for.
+#
+# SECURITY: same convention as detect-tools.sh/lib-env-cache.sh -- read only
+# when it is a regular file (never a symlink) owned by the current user; a
+# pre-planted file from another user on a shared tmp dir simply fails that
+# check and falls through to a real (re-)attempt, exactly as if no cache
+# existed.
+_REMEMBER_DETACH_WIN_CACHE="${TMPDIR:-/tmp}/remember-detach-windows-cache"
+
+# Only the "unusable" verdict is ever cached. A "usable" verdict is cheap to
+# re-earn (the wscript.exe call itself succeeds quickly on a healthy host --
+# see the watchdog-bound comment below), and caching it would mean a host
+# that becomes unusable mid-session (WSH disabled while a long session is
+# open) keeps being told it is fine. Caching only the expensive failure is
+# the asymmetry that actually matters: it is the repeated 10s-class stall
+# this cache exists to remove, never the fast path.
+_remember_detach_windows_cache_load() {
+    [ "${REMEMBER_DETACH_WIN_CACHE:-1}" = "1" ] || return 1
+    local _f="$_REMEMBER_DETACH_WIN_CACHE"
+    [ -f "$_f" ] && [ ! -L "$_f" ] && [ -O "$_f" ] && [ -r "$_f" ] || return 1
+    local _line _path="" _verdict=""
+    # `[ ]` prefix tests, not a `case` with a catch-all `*)` arm inside this
+    # loop (#898 round 7 -- that shape is one the plugin directory's
+    # scanner holds a submission on; detect-tools.sh's own cache loader
+    # uses the identical shape for the identical reason).
+    while IFS= read -r _line || [ -n "$_line" ]; do
+        _line="${_line%$'\r'}"
+        [ -n "$_line" ] || continue
+        if [ "${_line#CACHE_PATH=}" != "$_line" ]; then
+            _path="${_line#*=}"
+        elif [ "${_line#VERDICT=}" != "$_line" ]; then
+            _verdict="${_line#*=}"
+        else
+            # Unknown line: not our file, or not our version of it --
+            # distrust the whole thing rather than partially validate it.
+            return 1
+        fi
+    done < "$_f"
+    # An EMPTY PATH compares equal to itself just as readily as a real one --
+    # never let a process that genuinely has no PATH short-circuit real
+    # detection on that coincidence.
+    [ -n "$_path" ] && [ "$_path" = "$PATH" ] || return 1
+    [ "$_verdict" = "unusable" ] || return 1
+    return 0
+}
+
+_remember_detach_windows_cache_publish_unusable() {
+    [ "${REMEMBER_DETACH_WIN_CACHE:-1}" = "1" ] || return 0
+    local _f="$_REMEMBER_DETACH_WIN_CACHE" _t
+    _t=$(mktemp "${_f}.XXXXXX" 2>/dev/null) || return 0
+    printf '%s=%s\n' CACHE_PATH "$PATH" VERDICT unusable \
+        > "$_t" 2>/dev/null || { rm -f "$_t" 2>/dev/null; return 0; }
+    mv -f "$_t" "$_f" 2>/dev/null || rm -f "$_t" 2>/dev/null
+    return 0
+}
+
+# Public entry point: a cached "unusable" verdict short-circuits straight to
+# the caller's own nohup fallback, paying none of the checks below and none
+# of the watchdog bound. Everything that used to be the whole function body
+# is now _remember_detach_windows_impl; any failure it returns gets cached
+# here, in the one place every failing return path already funnels through,
+# rather than touching each of its own early "return 1"s individually.
 _remember_detach_windows() {
+    _remember_detach_windows_cache_load && return 1
+    _remember_detach_windows_impl "$@"
+    local _rc=$?
+    [ "$_rc" -ne 0 ] && _remember_detach_windows_cache_publish_unusable
+    return "$_rc"
+}
+
+_remember_detach_windows_impl() {
     local outfile pidfile
     outfile="$1"
     pidfile="$2"

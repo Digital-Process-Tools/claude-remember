@@ -191,6 +191,65 @@ def test_real_wscript_wsh_disabled_still_saves_via_fallback(tmp_path, wsh_disabl
     )
 
 
+def test_real_wscript_healthy_path_latency(tmp_path, capsys):
+    """#1002 round 3 (maintainer instruction): measure the healthy-path cost
+    on a real Windows host -- hook entry to return -- on the hidden route
+    versus the plain nohup route, over several runs, so the watchdog bound
+    in scripts/lib-detach.sh (currently a fixed `sleep 10`) can be sized
+    against a real number instead of a guess. #913 (PostToolUse latency) is
+    the open issue this feeds.
+
+    This is a MEASUREMENT, not a correctness assertion -- it has its own
+    loose sanity bound (well under the watchdog's own bound) so a genuine
+    regression still fails it, but its real output is the printed numbers,
+    read from the CI log for this job (see docs/windows.md and
+    trap.d/1002.*.md for where the chosen bound and its job-id evidence are
+    recorded)."""
+    runs = 5
+
+    def _timed_hidden(i: int) -> float:
+        marker = tmp_path / f"hidden-marker-{i}.txt"
+        out = tmp_path / f"hidden-out-{i}.log"
+        pid = tmp_path / f"hidden-pid-{i}"
+        save = _save_script(tmp_path, marker)
+        script = f'. "{LIB}"; _remember_detach_windows "{out}" "{pid}" "{save.as_posix()}"; echo "RC=$?"'
+        t0 = time.monotonic()
+        r = _run(script)
+        assert "RC=0" in r.stdout, f"stdout={r.stdout!r} stderr={r.stderr!r}"
+        assert _poll_for_marker(marker), f"hidden route run {i}: marker never appeared"
+        return time.monotonic() - t0
+
+    def _timed_nohup(i: int) -> float:
+        marker = tmp_path / f"nohup-marker-{i}.txt"
+        out = tmp_path / f"nohup-out-{i}.log"
+        pid = tmp_path / f"nohup-pid-{i}"
+        save = _save_script(tmp_path, marker)
+        script = f'nohup "{save.as_posix()}" >> "{out}" 2>&1 & echo $! > "{pid}"'
+        t0 = time.monotonic()
+        _run(script)
+        assert _poll_for_marker(marker), f"nohup route run {i}: marker never appeared"
+        return time.monotonic() - t0
+
+    hidden_times = [_timed_hidden(i) for i in range(runs)]
+    nohup_times = [_timed_nohup(i) for i in range(runs)]
+
+    with capsys.disabled():
+        print(f"\n#1002 round 3 healthy-path latency (N={runs}, real wscript.exe):")
+        print(f"  hidden route : {hidden_times} max={max(hidden_times):.3f}s")
+        print(f"  nohup route  : {nohup_times} max={max(nohup_times):.3f}s")
+
+    # Loose sanity bound only -- the watchdog itself (10s as of round 2) is
+    # the real ceiling; a healthy hidden-route call taking anywhere close to
+    # that would mean the "smallest bound the healthy path reliably beats"
+    # reasoning in scripts/lib-detach.sh and docs/windows.md is wrong and
+    # needs revisiting against these actual numbers, not that this test
+    # should simply raise its own bound to match.
+    assert max(hidden_times) < 5.0, (
+        f"healthy hidden-route call took {max(hidden_times):.3f}s -- close to or "
+        f"over the watchdog bound; re-measure before trusting that bound (#1002 round 3)"
+    )
+
+
 def test_real_nohup_path_writes_marker_positive_control(tmp_path):
     """Case (d): positive control for the three assertions above. A 'the
     save must still happen' assertion passes just as readily when the
