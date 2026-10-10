@@ -70,9 +70,19 @@ def _pid_alive(pid: int) -> bool:
     PROCESS GROUP, not a liveness probe of one PID -- which is a different
     operation from the POSIX no-op `kill(pid, 0)` performs, and can raise or
     signal the wrong thing when `pid` does not itself name a process group.
-    `tasklist` is queried instead: it ships with every supported Windows
-    version and answers the same question (does a process with this PID
-    exist) without touching signal delivery at all.
+
+    A prior fix queried `tasklist` instead, but the pid this file's own
+    `save-session.pid` names is written by `echo $! > ...` inside
+    session-end-hook.sh's own MSYS bash (session-end-hook.sh line ~475) --
+    an MSYS/Cygwin pid, not a Windows WINPID -- and `tasklist` only ever
+    resolves WINPIDs. Looking an MSYS pid up there always reads as dead
+    (#1012 CI round, same instance confirmed on
+    tests/test_windows_hidden_detach_1002.py's sibling `_pid_alive`), which
+    silently turns the wait loop below into a no-op on Windows rather than
+    an actual wait. The product itself checks PID_FILE liveness with a
+    plain `kill -0 "$pid"` run inside the same MSYS bash that wrote it
+    (post-tool-hook.sh), so this probe now mirrors that instead of asking
+    a native Windows tool to resolve an MSYS pid.
     """
     if os.name == "posix":
         try:
@@ -80,14 +90,16 @@ def _pid_alive(pid: int) -> bool:
         except OSError:
             return False
         return True
+    if BASH is None:
+        return False
     try:
-        out = subprocess.run(
-            ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
-            capture_output=True, text=True, timeout=5, check=False,
-        ).stdout
+        result = subprocess.run(
+            [BASH, "-c", f"kill -0 {pid} 2>/dev/null"],
+            capture_output=True, timeout=5, check=False,
+        )
     except OSError:
         return False
-    return str(pid) in out
+    return result.returncode == 0
 
 
 def _posix_path(p) -> str:

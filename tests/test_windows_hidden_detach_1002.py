@@ -734,28 +734,38 @@ def test_post_tool_fallback_skips_when_hidden_route_already_claimed_pid_file(tmp
 
 def _pid_alive(pid: int) -> bool:
     """Portable liveness probe (#1002 round 4, oss:auditor self-review
-    finding) -- NOT os.kill(pid, 0) on its own. On Windows, CPython maps
-    signal 0 to CTRL_C_EVENT and calls GenerateConsoleCtrlEvent(0, pid), a
-    console-control-event broadcast to a PROCESS GROUP rather than a clean
-    existence probe of one PID -- the same idiom this repo already retired
-    once in tests/test_session_end_log_names_488.py::_pid_alive, whose
-    tasklist-based probe this mirrors, because this test's own windows-latest
-    CI leg (gated only by resolve_bash(), which resolves there) is not
-    skipped on that platform."""
+    finding) -- NOT os.kill(pid, 0) on its own, and (#1012 CI round) NOT
+    tasklist either. On Windows, CPython maps signal 0 to CTRL_C_EVENT and
+    calls GenerateConsoleCtrlEvent(0, pid), a console-control-event
+    broadcast to a PROCESS GROUP rather than a clean existence probe of one
+    PID, which is why the prior fix moved to tasklist. But the pid this
+    test's own `_stub` captures is bash's own "$!" -- an MSYS/Cygwin pid,
+    not a Windows WINPID -- and `tasklist` only ever resolves WINPIDs: an
+    MSYS pid looked up there always reads as dead, which is exactly what
+    CI round 1012 showed on all four Windows legs ("PID_FILE's pid is not
+    actually alive", jobs 114255174670/114255174596/etc). The product
+    itself never makes this mistake: post-tool-hook.sh checks PID_FILE's
+    liveness with a plain `kill -0 "$pid"` run inside the same MSYS bash
+    that wrote it (post-tool-hook.sh's ALREADY_RUNNING and
+    #1002-round-4 checks both do this), so the write and the read stay in
+    the same pid namespace. This probe now mirrors that instead of
+    reaching for a native Windows tool."""
     if os.name == "posix":
         try:
             os.kill(pid, 0)
         except OSError:
             return False
         return True
+    if BASH is None:
+        return False
     try:
-        out = subprocess.run(
-            ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
-            capture_output=True, text=True, timeout=5, check=False,
-        ).stdout
+        result = subprocess.run(
+            [BASH, "-c", f"kill -0 {pid} 2>/dev/null"],
+            capture_output=True, timeout=5, check=False,
+        )
     except OSError:
         return False
-    return str(pid) in out
+    return result.returncode == 0
 
 
 @_NO_BASH
