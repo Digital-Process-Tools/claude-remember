@@ -203,6 +203,22 @@ _grc_bump_ndc_gen() {
         return 1
     }
 
+    _grc_unquote_porcelain_path() {
+        local _grc_up_path="$1" _grc_up_dq='"' _grc_up_sentinel=$'\x1c'
+        local _grc_up_bs=$'\\' _grc_up_bsbs _grc_up_bsq
+        _grc_up_bsbs="${_grc_up_bs}${_grc_up_bs}"
+        _grc_up_bsq="${_grc_up_bs}${_grc_up_dq}"
+        _grc_up_path="${_grc_up_path#"$_grc_up_dq"}"
+        _grc_up_path="${_grc_up_path%"$_grc_up_dq"}"
+        if [[ "$_grc_up_path" == *"$_grc_up_bs"* ]]; then
+            _grc_up_path="${_grc_up_path//"$_grc_up_bsbs"/$_grc_up_sentinel}"
+            _grc_up_path="${_grc_up_path//"$_grc_up_bsq"/$_grc_up_dq}"
+            _grc_up_path=$(printf '%b' "$_grc_up_path")
+            _grc_up_path="${_grc_up_path//$_grc_up_sentinel/$_grc_up_bs}"
+        fi
+        printf '%s\n' "$_grc_up_path"
+    }
+
     _grc_foreign_changes() {
         git -C "$REPO_ROOT" status --porcelain 2>/dev/null | while IFS= read -r _grc_line; do
             _grc_code="${_grc_line:0:2}"
@@ -210,9 +226,7 @@ _grc_bump_ndc_gen() {
             if [[ "$_grc_code" == *R* ]] && [[ "$_grc_path" == *" -> "* ]]; then
                 _grc_path="${_grc_path##* -> }"
             fi
-            _grc_dq='"'
-            _grc_path="${_grc_path#"$_grc_dq"}"
-            _grc_path="${_grc_path%"$_grc_dq"}"
+            _grc_path=$(_grc_unquote_porcelain_path "$_grc_path")
             if [[ "$_grc_path" != "$SLUG"/* ]] && [[ "$_grc_path" != "$SLUG" ]]; then
                 printf '%s\n' "$_grc_path"
             fi
@@ -227,9 +241,22 @@ _grc_bump_ndc_gen() {
             printf '%s\n' "$SLUG"
             return
         fi
-        { git -C "$REPO_ROOT" diff --name-only "$_mb" "$_local_tip" -- 2>/dev/null
-          git -C "$REPO_ROOT" diff --name-only "$_mb" "$_remote_tip" -- 2>/dev/null
-        } | sort -u
+        local _d1 _d2 _d1_rc _d2_rc
+        _d1=$(git -C "$REPO_ROOT" diff --name-only "$_mb" "$_local_tip" -- 2>/dev/null)
+        _d1_rc=$?
+        _d2=$(git -C "$REPO_ROOT" diff --name-only "$_mb" "$_remote_tip" -- 2>/dev/null)
+        _d2_rc=$?
+        if [ "$_d1_rc" -ne 0 ] || [ "$_d2_rc" -ne 0 ]; then
+            log "git-reconcile" "WARNING: a git diff --name-only call failed while computing the touched-paths restore scope -- falling back to $SLUG only (the pre-#952 scope). If a conflict happens now, another slug's own content may be left exactly as the rebase's new base put it."
+            printf '%s\n' "$SLUG"
+            return
+        fi
+        local _grc_ctp_line
+        { printf '%s\n' "$_d1"
+          printf '%s\n' "$_d2"
+        } | while IFS= read -r _grc_ctp_line; do
+            [ -n "$_grc_ctp_line" ] && _grc_unquote_porcelain_path "$_grc_ctp_line"
+        done | sort -u
     }
 
     _grc_path_hash() {

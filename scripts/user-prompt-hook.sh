@@ -1059,7 +1059,9 @@ _remember_cfg_flatten_cache_publish() {
         done <<< "$_dump"
     } > "$_t" 2>/dev/null || { rm -f "$_t" 2>/dev/null; return 0; }
     mv -f "$_t" "$_f" 2>/dev/null || rm -f "$_t" 2>/dev/null
-    local _f_v1="${_f/-v2-/-}"
+    local _f_dir="${_f%/*}"
+    local _f_base="${_f##*/}"
+    local _f_v1="${_f_dir}/${_f_base/-v2-/-}"
     [ -f "$_f_v1" ] && rm -f "$_f_v1" 2>/dev/null
     return 0
 }

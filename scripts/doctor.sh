@@ -207,6 +207,13 @@ else
     _PY_DISPLAY="$_PY_PATH"
     [ -n "$_PY_DISPLAY" ] || _PY_DISPLAY="$_PY_FIRST"
     echo "OK   python: $PYTHON -> $_PY_DISPLAY ($_PY_VERSION)"
+    if command -v _py_ok >/dev/null 2>&1 \
+        && ! _py_ok "$_PY_VERSION"; then
+        echo "WARN python: $_PY_VERSION is below this plugin's supported floor"
+        echo "     (${_REMEMBER_PY_FLOOR_MAJOR}.${_REMEMBER_PY_FLOOR_MINOR}) -- consolidation needs zoneinfo (stdlib only"
+        echo "     since 3.9) and will crash even though capture above reports OK"
+        echo "     (#1003). Install a newer Python."
+    fi
 
     if command -v jq >/dev/null 2>&1; then
         _JQ_PATH=$(command -v jq)
@@ -608,6 +615,39 @@ if [ -f "$_ROTATE_STATE" ]; then
 else
     echo "OK   Log rotation: no failure recorded"
 fi
+echo ""
+
+echo "-- Consolidation health (#1003) --"
+_remember_ch_glob_dir=$(_remember_forward_slash "$REMEMBER_DIR")
+_CH_FILES=()
+for _ch_f in "$_remember_ch_glob_dir"/logs/memory-*.log; do
+    [ -f "$_ch_f" ] && _CH_FILES+=("$_ch_f")
+done
+_CH_LAST_LINE=""
+if [ "${#_CH_FILES[@]}" -gt 0 ]; then
+    _CH_OLD_IFS="$IFS"
+    IFS=$'\n'
+    _CH_SORTED=($(printf '%s\n' "${_CH_FILES[@]}" | LC_ALL=C sort))
+    IFS="$_CH_OLD_IFS"
+    unset _CH_OLD_IFS
+    for _ch_f in "${_CH_SORTED[@]}"; do
+        _ch_match=$(grep -E '\[consolidation\] (done|ERROR)' "$_ch_f" 2>/dev/null | tail -n 1)
+        [ -n "$_ch_match" ] && _CH_LAST_LINE="$_ch_match"
+    done
+    unset _CH_SORTED
+fi
+unset _CH_FILES _remember_ch_glob_dir _ch_f
+if [[ "$_CH_LAST_LINE" == *"[consolidation] ERROR"* ]]; then
+    echo "WARN Consolidation's last recorded attempt failed, and no later attempt has"
+    echo "     succeeded since -- memory may still be captured (see Capture health"
+    echo "     above) while consolidation stays silently broken. Last entry:"
+    echo "     $_CH_LAST_LINE"
+elif [[ "$_CH_LAST_LINE" == *"[consolidation] done"* ]]; then
+    echo "OK   Consolidation: last recorded attempt succeeded ($_CH_LAST_LINE)"
+else
+    echo "--   No consolidation attempt recorded yet in $REMEMBER_DIR/logs"
+fi
+unset _CH_LAST_LINE
 echo ""
 
 _ASSUMED_NOTE=""
