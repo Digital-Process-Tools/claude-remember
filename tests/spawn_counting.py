@@ -29,7 +29,7 @@ from pathlib import Path
 COUNTED = (
     "date whoami jq git dirname basename sed tr id stat find mkdir cat rm cp mv "
     "python3 python iconv cygpath tar wc touch uname expr awk grep ls sleep nohup "
-    "head sort cut"
+    "head sort cut tail"
 ).split()
 
 
