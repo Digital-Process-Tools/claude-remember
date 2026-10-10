@@ -9,9 +9,24 @@
 # the same guarantee a plain "nohup CMD &" already gives "$!" for free on
 # every other platform.
 #
-# Usage: lib-detach-pidwrap.sh PIDFILE CMD...
-# PIDFILE may be /dev/null to skip writing (no liveness guard at that call
-# site).
+# #1002 round 2 (release-audit v0.42.3 gate 3, trap A): this script now
+# also owns the OUTFILE redirect that used to be a separate bash -c
+# "exec bash \"$0\" \"$@\" >>OUTFILE 2>&1" wrapper lib-detach.sh built as
+# one argv entry with embedded literal quotes -- whether those quotes
+# survived the exec->CreateProcess->WSH argv hop unmangled was never
+# settled on a real Windows host. OUTFILE is now its own separate argv
+# entry (no embedded quotes anywhere on this call), and the redirect
+# happens here, inside a real shell, instead of being spelled out as a
+# string for another shell to re-parse.
+#
+# Usage: lib-detach-pidwrap.sh OUTFILE PIDFILE CMD...
+# OUTFILE and PIDFILE may each independently be /dev/null to skip that
+# step (no redirect, or no liveness guard, at that call site).
+_of="$1"
+shift
+if [ "$_of" != "/dev/null" ]; then
+    exec >>"$_of" 2>&1
+fi
 _pf="$1"
 shift
 if [ "$_pf" != "/dev/null" ]; then
