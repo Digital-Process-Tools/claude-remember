@@ -71,13 +71,18 @@ def test_real_build_probe_returns_an_integer(tmp_path):
 
 
 def test_real_timeout_probe_returns_an_integer(tmp_path):
-    # TEMPORARY diagnostic for #1011 round 4: this probe was observed to
-    # return empty output on real windows-latest CI (jobs 114303128794,
-    # 114303128471) while the build probe above, which runs no Add-Type
-    # compile, passed reliably. Elapsed time and exit code let us tell a
-    # watchdog kill (elapsed ~5s, output empty) apart from a fast failure
-    # (quoting/policy -- elapsed well under 5s). Remove once the real cause
-    # is confirmed and fixed.
+    # #1011 round 4: this probe used to return empty output on real
+    # windows-latest CI (jobs 114303128794, 114303128471), while the build
+    # probe above, which runs no Add-Type compile, passed reliably. A
+    # diagnostic run (elapsed=10.81s, returncode=0, empty stdout/stderr)
+    # proved the Add-Type C# compile in
+    # _remember_doctor_fglock_timeout exceeded doctor.sh's old 5s watchdog
+    # bound -- fixed by widening that one probe's bound to 20s (see
+    # scripts/doctor.sh's own comment on _remember_doctor_run_powershell_file).
+    # Elapsed time and exit code stay in the assertion message below,
+    # permanently -- cheap, and the next regression here won't need a
+    # separate diagnostic round-trip to tell a watchdog-bound issue apart
+    # from a fast failure (quoting/policy, elapsed well under the bound).
     import time
     start = time.monotonic()
     result = _run_probe(tmp_path, "_remember_doctor_fglock_timeout")
@@ -92,10 +97,11 @@ def test_real_timeout_probe_returns_an_integer(tmp_path):
 def test_this_ci_hosts_own_build_does_not_warn(tmp_path):
     """OBSERVED negative control: the real build this CI leg runs on is not
     26200+ (confirmed-affected), so the real end-to-end check must not WARN
-    here -- it is exercised positively by the override-based unit tests in
-    test_doctor_windows_fglock_1011.py instead."""
+    here -- it is exercised positively by the stub-driven unit tests in
+    test_doctor_windows_fglock_1011.py instead. #1015 review: no
+    _REMEMBER_DOCTOR_FORCE_WINDOWS override needed -- this module only runs
+    on a real win32 host, where OS=Windows_NT is already the real value."""
     env = _project_env(tmp_path)
-    env["_REMEMBER_DOCTOR_FORCE_WINDOWS"] = "1"
     result = subprocess.run([BASH, str(DOCTOR)], env=env, check=False,
                             capture_output=True, text=True, timeout=120)
     lines = result.stdout.splitlines()

@@ -1208,11 +1208,14 @@ echo ""
 # same as log rotation and case divergence above -- capture itself is
 # entirely unaffected either way.
 #
-# _REMEMBER_DOCTOR_FORCE_WINDOWS / _REMEMBER_DOCTOR_WIN_BUILD_OVERRIDE /
-# _REMEMBER_DOCTOR_FGLOCK_TIMEOUT_OVERRIDE are test-only hooks, unset in
-# normal use -- tests/test_doctor_windows_fglock_1011.py drives this
-# decision with stubbed values on every platform, not only a real Windows
-# host, by way of these three.
+# #1015 review: this check used to read three env-var knobs
+# (_REMEMBER_DOCTOR_FORCE_WINDOWS / _REMEMBER_DOCTOR_WIN_BUILD_OVERRIDE /
+# _REMEMBER_DOCTOR_FGLOCK_TIMEOUT_OVERRIDE) unconditionally, which let a
+# real user SUPPRESS a genuine WARN by setting any one of them. There is no
+# such knob now -- tests/test_doctor_windows_fglock_1011.py instead sets
+# OS=Windows_NT (the same real signal _remember_doctor_is_windows() already
+# reads below) and puts a stub powershell.exe on PATH, matching how
+# tests/test_windows_hidden_detach_1002.py stubs wscript.exe.
 _remember_doctor_is_windows() {
     local sys
     sys="${OS:-}"
@@ -1223,9 +1226,19 @@ _remember_doctor_is_windows() {
 }
 
 # bounded by a plain bash watchdog (sleep + kill -9); missing powershell,
-# a non-zero exit, or a timeout all print nothing on purpose (#1002).
+# a non-zero exit, or a timeout all print nothing on purpose (#1002). The
+# bound defaults to 5s but is overridable per call ($2) -- #1015 review
+# round 4: on real windows-latest CI, a diagnostic run of ONLY the timeout
+# probe below (which runs an Add-Type C# compile; see
+# tests/test_windows_real_fglock_1011.py) measured elapsed=10.81s,
+# returncode=0, empty stdout/stderr -- more than double the 5s this
+# function used to hard-code, with no error of any kind reported. The
+# build probe above never needs Add-Type and stays fast on the same host,
+# so it keeps the 5s default; only the Add-Type-using timeout probe asks
+# for a wider one. doctor.sh is not a hot path, so a wider bound here is a
+# fair trade against a false "could not determine" WARN.
 _remember_doctor_run_powershell_file() {
-    local _ps_bin="" _ps_file="$1" _ps_out_file _ps_pid _ps_watchdog _ps_rc _ps_out
+    local _ps_bin="" _ps_file="$1" _ps_timeout="${2:-5}" _ps_out_file _ps_pid _ps_watchdog _ps_rc _ps_out
 
 if command -v powershell.exe >/dev/null 2>&1; then
         _ps_bin="powershell.exe"
@@ -1251,7 +1264,7 @@ if command -v powershell.exe >/dev/null 2>&1; then
 "$_ps_bin" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$_ps_file" >"$_ps_out_file" 2>/dev/null &
     _ps_pid=$!
 
-( sleep 5; kill -9 "$_ps_pid" 2>/dev/null ) &
+( sleep "$_ps_timeout"; kill -9 "$_ps_pid" 2>/dev/null ) &
     _ps_watchdog=$!
     wait "$_ps_pid" 2>/dev/null
     _ps_rc=$?
@@ -1294,23 +1307,21 @@ printf '%s\n' "Add-Type -Name RememberFg -Namespace RememberWin -MemberDefinitio
 
 printf '%s\n' '[RememberWin.RememberFg]::SystemParametersInfo(0x2000, 0, [ref]$fg, 0) | Out-Null' >>"$_ps_script"
     printf '%s\n' 'Write-Output $fg' >>"$_ps_script"
-    _remember_doctor_run_powershell_file "$_ps_script"
+    # 20s, not the 5s default -- this probe's Add-Type C# compile was PROVEN
+    # (see the comment on _remember_doctor_run_powershell_file above) to
+    # exceed 5s on real windows-latest CI.
+    _remember_doctor_run_powershell_file "$_ps_script" 20
     rm -f "$_ps_script"
 }
 
 _FGLOCK_IS_WIN=0
-if [ -n "${_REMEMBER_DOCTOR_FORCE_WINDOWS:-}" ]; then
-    [ "$_REMEMBER_DOCTOR_FORCE_WINDOWS" = "1" ] && _FGLOCK_IS_WIN=1
-elif _remember_doctor_is_windows; then
+if _remember_doctor_is_windows; then
     _FGLOCK_IS_WIN=1
 fi
 
 if [ "$_FGLOCK_IS_WIN" -eq 1 ]; then
     echo "-- Windows foreground-lock check (#1011) --"
-    _FGLOCK_BUILD="${_REMEMBER_DOCTOR_WIN_BUILD_OVERRIDE:-}"
-    if [ -z "$_FGLOCK_BUILD" ]; then
-        _FGLOCK_BUILD=$(_remember_doctor_fglock_build)
-    fi
+    _FGLOCK_BUILD=$(_remember_doctor_fglock_build)
 
     if [ -z "$_FGLOCK_BUILD" ] || [[ "$_FGLOCK_BUILD" == *[!0-9]* ]]; then
         echo "WARN Could not determine the Windows build number (PowerShell unavailable,"
@@ -1321,10 +1332,7 @@ if [ "$_FGLOCK_IS_WIN" -eq 1 ]; then
         echo "     Token leak (confirmed from build 26200)"
     else
 
-_FGLOCK_TIMEOUT="${_REMEMBER_DOCTOR_FGLOCK_TIMEOUT_OVERRIDE:-}"
-        if [ -z "$_FGLOCK_TIMEOUT" ]; then
-            _FGLOCK_TIMEOUT=$(_remember_doctor_fglock_timeout)
-        fi
+_FGLOCK_TIMEOUT=$(_remember_doctor_fglock_timeout)
 
         if [ -z "$_FGLOCK_TIMEOUT" ] || [[ "$_FGLOCK_TIMEOUT" == *[!0-9]* ]]; then
             echo "WARN Windows build $_FGLOCK_BUILD is known-affected by #1011's kernel Token"

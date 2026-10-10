@@ -53,4 +53,4 @@ Add-Type -Name Fg -Namespace W -MemberDefinition '[DllImport("user32.dll")] publ
 
 Windows resets the live value to 2147483647 at every logon, regardless of the registry, so this has to be re-applied from a logon task to stay in effect across reboots. Tokens that have already leaked are freed only by a real **Restart** -- with Fast Startup on, **Shut down** keeps the leaked state, because it is a hybrid shutdown/hibernate rather than a cold boot.
 
-`scripts/doctor.sh` points at this section with a WARN-only check (never FAIL, and it never touches the setting) when it detects a known-affected build whose live timeout has not been changed from the default; see that script's own `#1011` comments for exactly what it reads and how.
+`scripts/doctor.sh` points at this section with a WARN-only check (never FAIL, and it never touches the setting) when it detects a known-affected build whose live timeout is not 0; see that script's own `#1011` comments for exactly what it reads and how.
