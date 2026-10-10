@@ -602,8 +602,9 @@ fi
 NOTICE_TTL=3600
 # STDIN_TRANSCRIPT_PATH (#459) wins outright when present: it is the exact
 # file the host says this invocation belongs to, so there is nothing for the
-# `ls -t`/slug-match dance below to improve on, and running it anyway would
-# cost a process on every tool call for an answer already in hand. It is
+# glob-walk/slug-match dance below to improve on (#1011 made that walk
+# forkless on the common path; paying for it anyway on an answer already in
+# hand would still be wasted work, fork or not). It is
 # only consulted (and SESSION_DIR only matters at all) when this host's
 # stdin did not offer one -- an older CLI, a test harness, a host this
 # module has not been taught yet -- which is exactly the population the
@@ -627,7 +628,14 @@ else
         if [ -z "$LATEST_JSONL" ]; then
             LATEST_JSONL="$_ptl_jsonl"
         elif [ "$_ptl_jsonl" -nt "$LATEST_JSONL" ]; then
+            # A clear winner resolves any tie a PRIOR comparison left
+            # flagged (self-review finding): once this file is strictly
+            # newer than the running LATEST, nothing earlier in the walk
+            # can out-rank it, so whatever ambiguity existed before this
+            # comparison is moot -- the walk is not forced into the `ls -t`
+            # fallback over a tie that no longer touches the final answer.
             LATEST_JSONL="$_ptl_jsonl"
+            _ptl_jsonl_tie=false
         elif ! [ "$LATEST_JSONL" -nt "$_ptl_jsonl" ]; then
             # `-nt` rounds the mtime to a whole time_t second (self-review
             # caught this on real bash 3.2.57: two files written ~1ms apart
@@ -822,11 +830,20 @@ fi
 # firing" (its own comment: "a marker refreshed on every one of its many
 # calls inside a live session"). Skipping the write outright would freeze
 # that mtime at the session's first tool call and report a long-idle-looking
-# marker for an actively firing hook. A direct in-place overwrite is not
-# atomic the way tmp+rename is, but the bytes it writes are identical to
-# the bytes already there, so a reader mid-write sees either the old,
-# correct content or a prefix of the identical new content -- never a
-# wrong session id -- and it costs no fork either way.
+# marker for an actively firing hook.
+#
+# `1<>`, not a plain `>` (self-review finding): a bare `>` redirect opens
+# with O_TRUNC, which truncates the file to zero bytes BEFORE the `printf`
+# writes anything -- a window in which a concurrent PostToolUse invocation's
+# own `read` just below could see an empty marker and wrongly conclude the
+# session id changed. `1<>` opens the existing file for read+write with NO
+# truncation, so this write only ever lands bytes identical to what is
+# already there, at the same offset, never shortening the file first -- a
+# concurrent reader sees the old content, the new (byte-identical) content,
+# or some consistent prefix of a write that never changes length, but never
+# a truncated marker. Not atomic the way tmp+rename is, but the byte
+# identity this branch is gated on (CURRENT == SESSION_ID) means there is no
+# length change for a lack of atomicity to expose, and it costs no fork.
 _ptl_capture_marker="$REMEMBER_DIR/tmp/capture-alive"
 _ptl_capture_current=""
 if [ -f "$_ptl_capture_marker" ]; then
@@ -838,7 +855,7 @@ if [ "$_ptl_capture_current" != "$SESSION_ID" ]; then
             || rm -f "$_ptl_capture_marker.$$" 2>/dev/null || true
     fi
 else
-    printf '%s' "$SESSION_ID" > "$_ptl_capture_marker" 2>/dev/null || true
+    printf '%s' "$SESSION_ID" 1<> "$_ptl_capture_marker" 2>/dev/null || true
 fi
 unset _ptl_capture_marker _ptl_capture_current
 

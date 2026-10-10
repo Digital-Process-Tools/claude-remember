@@ -212,14 +212,16 @@ ALLOWLIST: dict[tuple[str, int], str] = {
     # fix. Shifted again by #1011's fork-reduction fix (the forkless
     # transcript-lookup glob-walk, plus its same-second mtime-tie comment
     # block, landed above the first two; the capture-alive skip-when-
-    # unchanged rewrite landed between the first and the other two).
-    ("scripts/post-tool-hook.sh", 759): _CASE,
-    ("scripts/post-tool-hook.sh", 802): _CASE,
+    # unchanged rewrite landed between the first and the other two), and once
+    # more by #1011's own self-review round (a stale-comment fix above the
+    # glob-walk, plus a longer comment on the capture-alive in-place write).
+    ("scripts/post-tool-hook.sh", 767): _CASE,
+    ("scripts/post-tool-hook.sh", 810): _CASE,
     # The #913 transcript-scan sidecar's own key: a filename component, same
     # [A-Za-z0-9._-]+ charset as SESSION_ID right above, never locale text --
     # measured the same way, same reason.
-    ("scripts/post-tool-hook.sh", 940): _CASE,
-    ("scripts/post-tool-hook.sh", 1042): _CASE,
+    ("scripts/post-tool-hook.sh", 957): _CASE,
+    ("scripts/post-tool-hook.sh", 1059): _CASE,
     ("scripts/session-end-hook.sh", 201): _CASE,
     ("scripts/session-end-hook.sh", 209): _CASE,
     ("scripts/session-start-hook.sh", 289): _CASE,
