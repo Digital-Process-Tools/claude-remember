@@ -98,11 +98,29 @@ _REMEMBER_DETACH_WIN_CACHE="${TMPDIR:-/tmp}/remember-detach-windows-cache"
 # open) keeps being told it is fine. Caching only the expensive failure is
 # the asymmetry that actually matters: it is the repeated 10s-class stall
 # this cache exists to remove, never the fast path.
+#
+# TTL, not a permanent verdict (self-review finding, both spawns independently):
+# unlike detect-tools.sh's own #668 cache, where the thing being cached
+# (which python/jq resolves on PATH) genuinely CANNOT change unless PATH
+# itself changes, "is the hidden route usable" can change with NO PATH
+# change at all -- the dominant real trigger is Windows Script Host being
+# toggled on/off via registry policy (the same HKCU key
+# test_windows_real_wscript_1002.py's _WSH_KEY names), which has nothing
+# to do with PATH. Caching that verdict forever, keyed only on PATH, would
+# mean a host whose WSH gets re-enabled stays stuck on the nohup fallback
+# indefinitely -- silently defeating the console-flash fix #1002 exists to
+# deliver, with nothing to notice or self-correct it. A TTL bounds the
+# damage to "at most one watchdog-bound stall per TTL window" instead of
+# "once per host, forever": the repeated-every-save stall this cache was
+# built to remove is still removed, and a host whose condition changes
+# recovers on its own within one TTL window rather than never.
+_REMEMBER_DETACH_WIN_CACHE_TTL=3600
+
 _remember_detach_windows_cache_load() {
     [ "${REMEMBER_DETACH_WIN_CACHE:-1}" = "1" ] || return 1
     local _f="$_REMEMBER_DETACH_WIN_CACHE"
     [ -f "$_f" ] && [ ! -L "$_f" ] && [ -O "$_f" ] && [ -r "$_f" ] || return 1
-    local _line _path="" _verdict=""
+    local _line _path="" _verdict="" _ts=""
     # `[ ]` prefix tests, not a `case` with a catch-all `*)` arm inside this
     # loop (#898 round 7 -- that shape is one the plugin directory's
     # scanner holds a submission on; detect-tools.sh's own cache loader
@@ -114,6 +132,8 @@ _remember_detach_windows_cache_load() {
             _path="${_line#*=}"
         elif [ "${_line#VERDICT=}" != "$_line" ]; then
             _verdict="${_line#*=}"
+        elif [ "${_line#CACHE_TS=}" != "$_line" ]; then
+            _ts="${_line#*=}"
         else
             # Unknown line: not our file, or not our version of it --
             # distrust the whole thing rather than partially validate it.
@@ -125,14 +145,25 @@ _remember_detach_windows_cache_load() {
     # detection on that coincidence.
     [ -n "$_path" ] && [ "$_path" = "$PATH" ] || return 1
     [ "$_verdict" = "unusable" ] || return 1
+    # A cache written before this TTL field existed carries no CACHE_TS at
+    # all -- distrust it outright (same convention as detect-tools.sh's
+    # PYFLOOR check) rather than treat a missing timestamp as "always
+    # fresh", which would silently resurrect the no-TTL behaviour for
+    # exactly the hosts most likely to still have an old cache file lying
+    # around.
+    [[ "$_ts" =~ ^[0-9]+$ ]] || return 1
+    local _now
+    _now=$(date +%s 2>/dev/null) || return 1
+    (( _now - _ts < _REMEMBER_DETACH_WIN_CACHE_TTL )) || return 1
     return 0
 }
 
 _remember_detach_windows_cache_publish_unusable() {
     [ "${REMEMBER_DETACH_WIN_CACHE:-1}" = "1" ] || return 0
-    local _f="$_REMEMBER_DETACH_WIN_CACHE" _t
+    local _f="$_REMEMBER_DETACH_WIN_CACHE" _t _now
+    _now=$(date +%s 2>/dev/null) || return 0
     _t=$(mktemp "${_f}.XXXXXX" 2>/dev/null) || return 0
-    printf '%s=%s\n' CACHE_PATH "$PATH" VERDICT unusable \
+    printf '%s=%s\n' CACHE_PATH "$PATH" VERDICT unusable CACHE_TS "$_now" \
         > "$_t" 2>/dev/null || { rm -f "$_t" 2>/dev/null; return 0; }
     mv -f "$_t" "$_f" 2>/dev/null || rm -f "$_t" 2>/dev/null
     return 0

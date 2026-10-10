@@ -194,12 +194,111 @@ def test_detach_windows_returns_1_when_wscript_missing(tmp_path):
     make this test's own premise false."""
     out = tmp_path / "out.log"
     pid = tmp_path / "pid"
-    env = _controlled_env(path="/usr/bin:/bin")
+    # #1002 round 3 self-review finding: _remember_detach_windows now
+    # publishes a cache file on ANY non-zero return (scripts/lib-detach.sh's
+    # own _remember_detach_windows_cache_publish_unusable), and this is the
+    # one call in this suite guaranteed to fail that way. Without an
+    # isolated TMPDIR this writes a real file into the actual host's real
+    # temp directory on every test run, on every platform -- outside
+    # pytest's own tmp_path sandbox and outside this file's existing
+    # repo-mutation guard (which only watches the repo tree, not $TMPDIR).
+    env = _controlled_env(path="/usr/bin:/bin", TMPDIR=str(tmp_path))
     r = _run(
         f'. "{LIB}"; _remember_detach_windows "{out}" "{pid}" echo hi; echo "RC=$?"',
         env,
     )
     assert "RC=1" in r.stdout, r.stdout + r.stderr
+
+
+@_NO_BASH
+def test_detach_windows_cache_short_circuits_a_now_healthy_route(tmp_path):
+    """#1002 round 3 self-review finding: the "hidden route unusable" cache
+    (scripts/lib-detach.sh's _remember_detach_windows_cache_load/_publish_
+    unusable) must actually be exercised by a test, not merely trusted by
+    reading the diff -- no test anywhere referenced those two functions
+    before this one. First call fails (missing wscript.exe/cygpath stubs)
+    and must publish the cache; a SECOND call on the identical PATH --
+    with the missing stubs now added to the same already-on-PATH
+    directory, so this call would succeed if the cache were not consulted
+    -- must still return 1, proving the cache genuinely short-circuits
+    rather than merely existing as an unread file."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    # path= here is bindir PLUS a real system PATH, not bindir alone: the
+    # cache publish path (mktemp/mv/date) needs real coreutils resolvable,
+    # same reasoning as test_detach_windows_returns_1_when_wscript_missing's
+    # own "/usr/bin:/bin" above -- an empty custom PATH silently breaks the
+    # publish via its own `|| return 0` fallbacks, which would make this
+    # test's assertions pass for the wrong reason (#1002 round 3 self-review:
+    # caught locally when the cache file never appeared with a bare bindir).
+    env = _controlled_env(path=f"{bindir}:/usr/bin:/bin", TMPDIR=str(tmp_path))
+    out = tmp_path / "out.log"
+    pid = tmp_path / "pid"
+    r1 = _run(
+        f'. "{LIB}"; _remember_detach_windows "{out}" "{pid}" echo hi; echo "RC=$?"',
+        env,
+    )
+    assert "RC=1" in r1.stdout, r1.stdout + r1.stderr
+    cache_file = tmp_path / "remember-detach-windows-cache"
+    assert cache_file.exists(), "first failure must publish the cache file"
+    assert "VERDICT=unusable" in cache_file.read_text(encoding="utf-8")
+
+    # Add the previously-missing stubs to the SAME directory already on
+    # PATH -- PATH itself (the cache key) is unchanged, so without the
+    # cache this second call would now succeed.
+    captured = tmp_path / "captured.txt"
+    _stub(bindir / "wscript.exe", f'printf "%s\\n" "$@" > "{captured}"')
+    _stub(bindir / "cygpath", 'shift; printf "%s" "$1"')
+    r2 = _run(
+        f'. "{LIB}"; _remember_detach_windows "{out}" "{pid}" echo hi; echo "RC=$?"',
+        env,
+    )
+    assert "RC=1" in r2.stdout, (
+        "second call on the identical PATH did not short-circuit -- the "
+        f"cache is not being consulted\n{r2.stdout}{r2.stderr}"
+    )
+    assert not captured.exists(), (
+        "wscript.exe was invoked despite a cached 'unusable' verdict for "
+        "this exact PATH"
+    )
+
+
+@_NO_BASH
+def test_detach_windows_cache_ignores_a_stale_entry(tmp_path):
+    """The cache carries a TTL (#1002 round 3 self-review finding -- WSH's
+    own enablement is a registry policy setting, independent of PATH, so a
+    verdict cached forever would leave a host that recovers stuck on the
+    slow/nohup path indefinitely). A cache entry older than the TTL must be
+    ignored, not trusted, even though its PATH matches exactly."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    captured = tmp_path / "captured.txt"
+    _stub(bindir / "wscript.exe", f'printf "%s\\n" "$@" > "{captured}"')
+    _stub(bindir / "cygpath", 'shift; printf "%s" "$1"')
+    # path= here is bindir PLUS a real system PATH -- same reasoning as
+    # the short-circuit test above: `sleep` (the watchdog) and the cache
+    # publish path's own coreutils need real binaries on PATH, and an
+    # empty custom PATH silently breaks them instead of proving anything
+    # about the cache.
+    env = _controlled_env(path=f"{bindir}:/usr/bin:/bin", TMPDIR=str(tmp_path))
+    out = tmp_path / "out.log"
+    pid = tmp_path / "pid"
+    # Pre-seed a stale "unusable" cache for this exact PATH -- older than
+    # _REMEMBER_DETACH_WIN_CACHE_TTL (3600s).
+    cache_file = tmp_path / "remember-detach-windows-cache"
+    cache_file.write_text(
+        f"CACHE_PATH={bindir}\nVERDICT=unusable\nCACHE_TS=1\n",
+        encoding="utf-8",
+    )
+    r = _run(
+        f'. "{LIB}"; _remember_detach_windows "{out}" "{pid}" echo hi; echo "RC=$?"; sleep 0.2',
+        env,
+    )
+    assert "RC=0" in r.stdout, (
+        "a stale cache entry was trusted instead of re-attempted\n"
+        f"{r.stdout}{r.stderr}"
+    )
+    assert captured.exists(), "the real route never ran despite the stale cache"
 
 
 @_NO_BASH
@@ -215,7 +314,11 @@ def test_detach_windows_invokes_hidden_launcher_with_expected_args(tmp_path):
     captured = tmp_path / "captured.txt"
     _stub(bindir / "wscript.exe", f'printf "%s\\n" "$@" > "{captured}"')
     _stub(bindir / "cygpath", 'shift; printf "%s" "$1"')
-    env = _controlled_env()
+    # TMPDIR isolation (#1002 round 3 self-review): this call succeeds
+    # (RC=0), so it never publishes a cache entry today, but isolating it
+    # defensively costs nothing and removes the question for any future
+    # change to what gets cached.
+    env = _controlled_env(TMPDIR=str(tmp_path))
     out = tmp_path / "out.log"
     pid = tmp_path / "pid"
     r = _run(
@@ -255,7 +358,7 @@ def test_detach_windows_resolves_bare_bash_argv_to_absolute_path(tmp_path):
     captured = tmp_path / "captured.txt"
     _stub(bindir / "wscript.exe", f'printf "%s\\n" "$@" > "{captured}"')
     _stub(bindir / "cygpath", 'shift; printf "%s" "$1"')
-    env = _controlled_env()
+    env = _controlled_env(TMPDIR=str(tmp_path))
     out = tmp_path / "out.log"
     pid = tmp_path / "pid"
     r = _run(
@@ -286,7 +389,7 @@ def test_detach_windows_leaves_a_non_bash_command_untouched(tmp_path):
     captured = tmp_path / "captured.txt"
     _stub(bindir / "wscript.exe", f'printf "%s\\n" "$@" > "{captured}"')
     _stub(bindir / "cygpath", 'shift; printf "%s" "$1"')
-    env = _controlled_env()
+    env = _controlled_env(TMPDIR=str(tmp_path))
     out = tmp_path / "out.log"
     pid = tmp_path / "pid"
     r = _run(
@@ -347,6 +450,7 @@ def test_post_tool_save_uses_hidden_launcher_on_windows(tmp_path):
     root = _post_tool_plugin_root(tmp_path, "#!/usr/bin/env bash\nexit 0\n")
     env, _remember = _post_tool_env(tmp_path, root)
     env["OS"] = "Windows_NT"
+    env["TMPDIR"] = str(tmp_path)
     # #1002 CI round 5/7: _run_real_script passes the script's own path as
     # POSIX-forward-slash (see LIB's own comment above for why -- the
     # same BASH_SOURCE[0]/backslash mechanism) and prepends PATH after
@@ -382,6 +486,7 @@ def test_post_tool_save_uses_nohup_without_windows(tmp_path):
     root = _post_tool_plugin_root(tmp_path, "#!/usr/bin/env bash\nexit 0\n")
     env, remember = _post_tool_env(tmp_path, root)
     env["OS"] = ""
+    env["TMPDIR"] = str(tmp_path)
     r = _run_real_script(root / "scripts" / "post-tool-hook.sh", env, prepend=str(bindir))
     assert not captured.exists(), "wscript.exe stub was invoked even though Windows was not detected\n" + r.stderr
     pid_file = remember / "tmp" / "save-session.pid"
