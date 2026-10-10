@@ -1236,6 +1236,18 @@ if command -v powershell.exe >/dev/null 2>&1; then
     fi
     _ps_out_file=$(mktemp "${TMPDIR:-/tmp}/remember-doctor-fglock-out.XXXXXX") || return 1
 
+    # review finding: powershell.exe is a native Windows binary and does not
+    # reliably accept an MSYS/Cygwin POSIX path for -File, the same hazard
+    # lib-detach.sh's own wscript.exe launcher already guards with cygpath
+    # -w. Convert when cygpath is on PATH; fall back to the POSIX path
+    # otherwise rather than refusing outright -- a conversion that cannot
+    # run is not reason enough to give up on a check that might work anyway,
+    # and either way an unresolvable path still degrades to the "could not
+    # determine" WARN above, never a false OK.
+    if command -v cygpath >/dev/null 2>&1; then
+        _ps_file="$(cygpath -w "$_ps_file" 2>/dev/null)" || _ps_file="$1"
+    fi
+
 "$_ps_bin" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$_ps_file" >"$_ps_out_file" 2>/dev/null &
     _ps_pid=$!
 
@@ -1258,6 +1270,11 @@ _ps_out=$(tr -d '\r' <"$_ps_out_file" 2>/dev/null | tr -d '[:space:]')
 _remember_doctor_fglock_build() {
     local _ps_script
     _ps_script=$(mktemp "${TMPDIR:-/tmp}/remember-doctor-fglock-build.XXXXXX") || return 1
+    # review finding: if this mv fails, _ps_script keeps its extension-less
+    # name, powershell -File (which requires .ps1) then errors, and the
+    # caller reports its own "could not determine" WARN -- a safe but
+    # otherwise-undocumented degrade, named here so a future "always WARNs
+    # could-not-check on this host" report has somewhere to start looking.
     mv "$_ps_script" "${_ps_script}.ps1" 2>/dev/null && _ps_script="${_ps_script}.ps1"
     printf '%s\n' '[Environment]::OSVersion.Version.Build' >"$_ps_script"
     _remember_doctor_run_powershell_file "$_ps_script"
@@ -1269,6 +1286,7 @@ _remember_doctor_fglock_timeout() {
     local _ps_script _dq
     _dq='"'
     _ps_script=$(mktemp "${TMPDIR:-/tmp}/remember-doctor-fglock-timeout.XXXXXX") || return 1
+    # same mv-may-fail degrade as _remember_doctor_fglock_build above.
     mv "$_ps_script" "${_ps_script}.ps1" 2>/dev/null && _ps_script="${_ps_script}.ps1"
 
 printf '%s\n' "Add-Type -Name RememberFg -Namespace RememberWin -MemberDefinition '[DllImport(${_dq}user32.dll${_dq})] public static extern bool SystemParametersInfo(uint a, uint b, out uint c, uint d);'" >"$_ps_script"
