@@ -116,6 +116,16 @@ _REMEMBER_DETACH_WIN_CACHE="${TMPDIR:-/tmp}/remember-detach-windows-cache"
 # recovers on its own within one TTL window rather than never.
 _REMEMBER_DETACH_WIN_CACHE_TTL=3600
 
+# #1002 round 4 self-review finding: a watchdog kill (rc=137) earns this
+# much shorter TTL instead of either extreme a prior shape tried. Caching it
+# for the full hour over-penalizes one transient slow sample. Caching it
+# not at all reopens the "stalls every single save, forever" pathology the
+# cache exists to remove, for a host that is persistently slower than the
+# bound rather than only transiently so. This throttles that host to paying
+# the bound at most once per SLOW_TTL, while a one-off slow sample is
+# forgotten within minutes rather than remembered for an hour.
+_REMEMBER_DETACH_WIN_SLOW_TTL=300
+
 _remember_detach_windows_cache_load() {
     [ "${REMEMBER_DETACH_WIN_CACHE:-1}" = "1" ] || return 1
     local _f="$_REMEMBER_DETACH_WIN_CACHE"
@@ -144,7 +154,14 @@ _remember_detach_windows_cache_load() {
     # never let a process that genuinely has no PATH short-circuit real
     # detection on that coincidence.
     [ -n "$_path" ] && [ "$_path" = "$PATH" ] || return 1
-    [ "$_verdict" = "unusable" ] || return 1
+    local _ttl
+    if [ "$_verdict" = "unusable" ]; then
+        _ttl="$_REMEMBER_DETACH_WIN_CACHE_TTL"
+    elif [ "$_verdict" = "slow" ]; then
+        _ttl="$_REMEMBER_DETACH_WIN_SLOW_TTL"
+    else
+        return 1
+    fi
     # A cache written before this TTL field existed carries no CACHE_TS at
     # all -- distrust it outright (same convention as detect-tools.sh's
     # PYFLOOR check) rather than treat a missing timestamp as "always
@@ -154,7 +171,7 @@ _remember_detach_windows_cache_load() {
     [[ "$_ts" =~ ^[0-9]+$ ]] || return 1
     local _now
     _now=$(date +%s 2>/dev/null) || return 1
-    (( _now - _ts < _REMEMBER_DETACH_WIN_CACHE_TTL )) || return 1
+    (( _now - _ts < _ttl )) || return 1
     return 0
 }
 
@@ -169,17 +186,45 @@ _remember_detach_windows_cache_publish_unusable() {
     return 0
 }
 
+# #1002 round 4: SLOW_TTL instead of CACHE_TTL. Published only for rc=137,
+# the watchdog's own kill -- see this file's own SLOW_TTL comment for why
+# that case earns a separate, much shorter-lived verdict rather than
+# either caching it like a structural failure or never caching it at all.
+_remember_detach_windows_cache_publish_slow() {
+    [ "${REMEMBER_DETACH_WIN_CACHE:-1}" = "1" ] || return 0
+    local _f="$_REMEMBER_DETACH_WIN_CACHE" _t _now
+    _now=$(date +%s 2>/dev/null) || return 0
+    _t=$(mktemp "${_f}.XXXXXX" 2>/dev/null) || return 0
+    printf '%s=%s\n' CACHE_PATH "$PATH" VERDICT slow CACHE_TS "$_now" \
+        > "$_t" 2>/dev/null || { rm -f "$_t" 2>/dev/null; return 0; }
+    mv -f "$_t" "$_f" 2>/dev/null || rm -f "$_t" 2>/dev/null
+    return 0
+}
+
 # Public entry point: a cached "unusable" verdict short-circuits straight to
 # the caller's own nohup fallback, paying none of the checks below and none
 # of the watchdog bound. Everything that used to be the whole function body
 # is now _remember_detach_windows_impl; any failure it returns gets cached
 # here, in the one place every failing return path already funnels through,
-# rather than touching each of its own early "return 1"s individually.
+# rather than touching each of its own early "return 1"s individually --
+# EXCEPT rc=137 (#1002 round 4): that is this function own watchdog firing
+# (128+SIGKILL, from the kill -9 below), never a structural "this host can
+# never do this" verdict the early "return 1"s are. One attempt happened
+# to be slow -- a loaded host, not necessarily a disabled/missing WSH --
+# so it earns the much shorter SLOW_TTL verdict instead (self-review
+# finding: caching it the same as a structural failure over-penalizes one
+# transient sample, but never caching it at all reopens the
+# stall-every-save pathology for a host that is slow on every attempt,
+# not just once).
 _remember_detach_windows() {
     _remember_detach_windows_cache_load && return 1
     _remember_detach_windows_impl "$@"
     local _rc=$?
-    [ "$_rc" -ne 0 ] && _remember_detach_windows_cache_publish_unusable
+    if [ "$_rc" -eq 137 ]; then
+        _remember_detach_windows_cache_publish_slow
+    elif [ "$_rc" -ne 0 ]; then
+        _remember_detach_windows_cache_publish_unusable
+    fi
     return "$_rc"
 }
 
@@ -274,17 +319,26 @@ _remember_detach_windows_impl() {
     # "WSH is fine" into "always return 1" for every stub test on that
     # platform. `wait` and `kill` are bash builtins with no such gap.
     #
-    # Bound is 5s, not the original 10s (#1002 round 3, maintainer
-    # instruction: "take the smallest value the healthy path reliably
-    # beats"). tests/test_windows_real_wscript_1002.py's own
-    # test_real_wscript_healthy_path_latency measured the real cost on
-    # real windows-latest CI legs (PR #1010, run #38054376838, job
-    # #114219715609 and siblings): hidden-route max 0.422s, nohup max
-    # 0.250s, over 5 runs each -- roughly 10x margin under 5s. A disabled
-    # WSH still stalls for the full bound regardless of its value (the
-    # watchdog's job is to cap the worst case, not to represent any real
-    # completion time), so halving the bound halves that worst case
-    # without touching the margin a genuinely healthy call needs.
+    # Bound was cut to 5s in round 3 off a 5-run sample (max 0.422s); CI
+    # on this very PR showed that was not representative of a loaded
+    # runner -- run #38062128176, job #114242348418 observed a HEALTHY
+    # hidden-route call take 5.13s (passed) next to a sibling call that
+    # took 6.03s and got killed by this watchdog (RC=137, OBSERVED, not
+    # reasoned). Raised to 15s: a REASONED margin over those two data
+    # points, not re-measured at this width. A disabled WSH still stalls
+    # for the full bound regardless of its value -- the watchdog caps the
+    # worst case, it does not represent real completion time -- and round
+    # 3's own TTL cache (above) already keeps a genuinely unusable host
+    # from paying this more than once per hour. #1002 round 4: a watchdog
+    # kill no longer risks a double save (post-tool-hook.sh's own
+    # fallback now checks PID_FILE first) or an hour of console-flashing
+    # (the rc=137 cache exception above), which is what widens the room
+    # to prefer a bound a loaded host can beat over a tight one.
+    #
+    # Overridable via _REMEMBER_DETACH_WIN_WATCHDOG_SECS so a test can
+    # force a real watchdog kill deterministically, in well under a
+    # second, rather than waiting out the production bound.
+    local _watchdog_secs="${_REMEMBER_DETACH_WIN_WATCHDOG_SECS:-15}"
     wscript.exe //B "$vbs_win" "$bash_win" "$pidwrap" "$outfile" "$pidfile" "${real_cmd[@]}" >/dev/null 2>&1 &
     local wscript_pid=$!
     # The watchdog's own stdout/stderr must be redirected away from
@@ -295,7 +349,7 @@ _remember_detach_windows_impl() {
     # and this function has already returned the right value (observed:
     # a positive-control test timed out at exactly the watchdog's own
     # bound despite RC=0 already being in the buffered output).
-    ( sleep 5; kill -9 "$wscript_pid" 2>/dev/null ) >/dev/null 2>&1 &
+    ( sleep "$_watchdog_secs"; kill -9 "$wscript_pid" 2>/dev/null ) >/dev/null 2>&1 &
     local watchdog_pid=$!
     wait "$wscript_pid" 2>/dev/null
     local wscript_rc=$?
