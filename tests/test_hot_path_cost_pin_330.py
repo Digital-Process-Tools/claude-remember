@@ -288,8 +288,10 @@ def _read_builtin_lines(stderr: bytes) -> list[str]:
 # loop (`read -t 1`, one attempt against empty stdin), the fast path's own
 # cooldown-timestamp read (`read -r LAST_TS < last-save-ts`), and
 # lib-env-cache.sh's replay of its own 14-line cache file (14 successful
-# reads, one that hits EOF) = 17. Mostly fixed by construction --
-# lib-env-cache.sh always writes exactly those 14 lines
+# reads, one that hits EOF) = 17, PLUS #1011's own `read -r
+# _ptl_capture_current < "$_ptl_capture_marker"` (post-tool-hook.sh, the
+# capture-alive skip-when-unchanged check) = 18. Mostly fixed by construction
+# -- lib-env-cache.sh always writes exactly those 14 lines
 # (scripts/lib-env-cache.sh, the _remember_env_cache_publish printf block)
 # regardless of config content -- so most of this is not a measurement that
 # drifts with fixture data the way spawn counts can drift across platforms.
@@ -303,7 +305,7 @@ def _read_builtin_lines(stderr: bytes) -> list[str]:
 # See the docstring on test_an_extra_builtin_file_read_is_invisible_to_the_
 # spawn_pin_but_caught_by_the_read_pin for the reproduction that surfaced
 # this and why its fixture deliberately does not redirect stderr.
-READ_BUILTIN_MEASURED = 17
+READ_BUILTIN_MEASURED = 18
 READ_BUILTIN_BUDGET = READ_BUILTIN_MEASURED + 2
 
 
@@ -393,20 +395,21 @@ def test_the_warm_path_stays_inside_both_budgets(tmp_path):
 # Measured on macOS bash 3.2.57, stable across three trials, with a fixture
 # carrying both last-save.json and its #353 sidecar (position inside this
 # run's own transcript, so SIDECAR_TRUSTED is set and `pipeline.shell
-# read-position` is never spawned): the same 17 reads
-# test_the_warm_path_stays_inside_both_budgets measures on the "no save
-# yet" path, PLUS the sidecar's own `read -r _SIDECAR_LINE < "$SIDECAR"`
-# (post-tool-hook.sh:530) = 18. Confirmed against the harness itself, not
-# guessed: identical to the round-one release audit's own count for #395.
+# read-position` is never spawned): the same 18 reads (17 pre-#1011, see
+# READ_BUILTIN_MEASURED above) test_the_warm_path_stays_inside_both_budgets
+# measures on the "no save yet" path, PLUS the sidecar's own `read -r
+# _SIDECAR_LINE < "$SIDECAR"` (post-tool-hook.sh:530) = 19. Confirmed
+# against the harness itself, not guessed: identical to the round-one
+# release audit's own count for #395, plus #1011's one new read.
 #
 # No slack, unlike READ_BUILTIN_BUDGET above. #395 exists because the "no
 # save yet" pin above passed while ONE slack unit stood between this
-# branch's own 18 measured reads and a budget of 19 that never actually
+# branch's own measured reads and a budget that never actually
 # walked it -- slack absorbed a gap nothing was pinning. Setting this one
 # at the measured value means a future read added to the sidecar branch
 # has to argue for itself in its own PR, rather than fitting inside a
 # margin nobody is watching.
-SIDECAR_READ_BUILTIN_MEASURED = 18
+SIDECAR_READ_BUILTIN_MEASURED = 19
 SIDECAR_READ_BUILTIN_BUDGET = SIDECAR_READ_BUILTIN_MEASURED
 
 

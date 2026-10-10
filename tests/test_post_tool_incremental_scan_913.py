@@ -309,7 +309,15 @@ def test_cooldown_active_skips_the_scan_entirely(tmp_path):
     assert result.returncode == 0, result.stderr[:400]
     cmds = _cmds(_spawn_lines(log))
 
-    assert "ls" in cmds, "the hook never looked for a transcript"
+    # #1011 made the transcript lookup itself forkless (no `ls` on the
+    # common, untied path), so its absence is the fix working, not evidence
+    # the hook never looked. The capture-alive marker is written
+    # unconditionally for any run that found a transcript at all -- a
+    # filesystem effect, not a spawn, so it stays reachable regardless of
+    # whether the lookup or the (here, cooldown-skipped) scan forked.
+    assert (remember / "tmp" / "capture-alive").exists(), (
+        "the hook never looked for a transcript (no capture-alive marker)"
+    )
     assert "tail" not in cmds, "the cooldown-active run still scanned the transcript"
     assert "wc" not in cmds, "the cooldown-active run still forked wc"
     assert not (remember / "tmp" / "transcript-scan.sess-1").exists()

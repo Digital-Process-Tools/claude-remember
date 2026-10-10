@@ -48,15 +48,21 @@ from tests.spawn_counting import make_shim_dir, spawns as _spawn_lines  # noqa: 
 
 TRANSCRIPT_LINE = "{\"type\":\"assistant\",\"message\":{\"content\":\"x\"}}\n"
 
-# The warm run measured on macOS bash 3.2.57 with the shared counted-command
-# list: `ls -t`, `head -1`, `wc -l`, `mv -f` (capture-alive) and `date +%s`
-# (the cooldown clock; a builtin on bash >= 4.2). Against 14 for the same
-# fixture before this change. `sed` (the slug) is already gone from this
-# count -- an earlier, separate #913 session-dir-cache sidecar PR closed
-# that half without this constant ever being re-measured, so 6 had already
-# been stale (actual 5) before the #913 incremental-scan change below
-# touched this file at all; re-measured and corrected here.
-FAST_PATH_SPAWN_MEASURED = 5
+# The warm run measured on real macOS bash 3.2.57 (not the Homebrew bash 5
+# on PATH by default -- /bin put first). Before #1011's fork-reduction fix
+# below: `ls -t`, `head -1` (the transcript lookup pipe), `mv -f`
+# (capture-alive, unconditional) and `date +%s` (the cooldown clock, a
+# builtin on bash >= 4.2) = 4 -- this fixture's own cooldown-active case had
+# drifted stale at 5 (against main's real 4) before #1011 ever touched this
+# file, from #913's own `wc`-removal landing without a re-measurement here.
+#
+# #1011 collapsed two of those four to forkless builtins: the transcript
+# lookup is now a glob-plus-mtime walk (paying `ls -t` again only on a real
+# same-second mtime tie), and the capture-alive write is a plain in-place
+# overwrite, no `mv`, whenever the marker already holds this session's id --
+# which is every tool call after the first in a session, this fixture's own
+# steady state. Measured after: just `date` = 1.
+FAST_PATH_SPAWN_MEASURED = 1
 FAST_PATH_SPAWN_BUDGET = FAST_PATH_SPAWN_MEASURED + 2
 
 
@@ -158,17 +164,28 @@ def _fast_path_run(env: dict, tmp_path: Path, label: str):
     one-pass flatten, and neither can be absent from a run that sourced log.sh.
 
     Paired with a positive control, because "no jq" is also what a hook that
-    exited on line 1 spawns: `ls -t` is how the transcript is found, so a run
-    that spawned it got as far as looking.
+    exited on line 1 spawns -- but #1011 made the transcript lookup itself a
+    forkless glob-plus-mtime walk (only paying `ls -t` on an actual same-second
+    mtime tie, which a single-file fixture never produces), so neither `ls` nor
+    a scan spawn (`tail`) is reachable evidence any more: under an active
+    save-cooldown the whole incremental scan is skipped too (#913), so a run
+    that did everything right can show NO extra spawn at all between the
+    bootstrap chain and the fast path's exit. The capture-alive marker is
+    written unconditionally for any run that found a transcript at all (it
+    sits well after the hook's only early `exit 0`, the no-transcript-notice
+    branch) and is a filesystem effect, not a spawn -- so it stays reachable
+    whether the lookup or the scan forked or not.
     """
     log = tmp_path / ("spawns-" + label + ".log")
     shims = make_shim_dir(tmp_path)
     result = _run(env, count_into=log, shims=shims)
     lines = _spawn_lines(log)
     assert result.returncode == 0, repr(result.stderr[:400])
-    assert "ls" in _cmds(lines), (
-        "the " + label + " run never looked for a transcript, so nothing below "
-        "is attributable to the fast path. Spawned:" + _listing(lines)
+    capture_marker = Path(env["CLAUDE_PROJECT_DIR"]) / ".remember" / "tmp" / "capture-alive"
+    assert capture_marker.exists(), (
+        "the " + label + " run never looked for a transcript (no capture-alive "
+        "marker), so nothing below is attributable to the fast path. Spawned:"
+        + _listing(lines)
     )
     assert "jq" not in _cmds(lines), (
         "the " + label + " run forked jq, so it took the bootstrap chain — this "
@@ -216,11 +233,17 @@ def test_a_warm_post_tool_call_replays_instead_of_re_resolving(tmp_path):
     probe.assert_warm("the post-tool fast path")
     _reap(remember)
 
-    # POSITIVE CONTROL: the warm run did work. `ls -t` is how the hook finds
-    # the transcript, so a run that spawned it got as far as looking.
-    assert "ls" in _cmds(warm_lines), (
-        "the warm run spawned no `ls` — it exited before it looked for a "
-        "transcript, so no-git-no-jq says nothing. Spawned:"
+    # POSITIVE CONTROL: the warm run did work. #1011 made the transcript
+    # lookup forkless (no `ls` on the common, untied path) and the incremental
+    # scan is skipped outright under an active save-cooldown (#913, this
+    # fixture's own setup) -- so no spawn distinguishes "looked and found one"
+    # from "exited before looking" any more. The capture-alive marker does:
+    # it is written unconditionally for any run that found a transcript, well
+    # after the hook's only early `exit 0` (the no-transcript-notice branch).
+    capture_marker = Path(env["CLAUDE_PROJECT_DIR"]) / ".remember" / "tmp" / "capture-alive"
+    assert capture_marker.exists(), (
+        "the warm run has no capture-alive marker — it exited before it "
+        "looked for a transcript, so no-git-no-jq says nothing. Spawned:"
         + _listing(warm_lines)
     )
 
@@ -235,6 +258,58 @@ def test_a_warm_post_tool_call_replays_instead_of_re_resolving(tmp_path):
     assert len(warm_lines) <= FAST_PATH_SPAWN_BUDGET, (
         str(len(warm_lines)) + " external spawns on a warm tool call (cold run: "
         + str(len(cold_lines)) + "). Spawned:" + _listing(warm_lines)
+    )
+
+
+def test_a_same_second_mtime_tie_falls_back_to_ls_t_not_lexical_order(tmp_path):
+    """#1011 self-review finding (auditor). `-nt` rounds a file's mtime down
+    to a whole time_t second on real bash 3.2.57, so two *.jsonl transcripts
+    written inside the same wall-clock second compare as tied in EITHER
+    direction even though the filesystem holds a finer-grained timestamp that
+    orders them correctly. The forkless glob-walk must not silently keep
+    whichever same-second file lexical glob order visited first on such a
+    tie -- that is the exact misattribution #204/#129 already named as worse
+    than capturing nothing. It must flag the tie and fall back to `ls -t`,
+    which reads the full mtime and does not tie.
+
+    `sess-aaa` sorts first in the glob (lexical "a" < "z"), so a buggy
+    walk that keeps the first-seen file on a tie would report it as newest.
+    `sess-zzz` is given the later sub-second mtime, and both floor to the
+    SAME whole second -- `-nt` alone cannot tell them apart.
+    """
+    home, project, remember = _project(tmp_path, session_id="sess-aaa")
+    env = _env(tmp_path, home, project)
+    session_dir = home / ".claude" / "projects" / _slug(str(project))
+    older_file = session_dir / "sess-aaa.jsonl"
+    newer_file = session_dir / "sess-zzz.jsonl"
+    newer_file.write_text(TRANSCRIPT_LINE * 5, encoding="utf-8")
+
+    base = int(time.time())
+    os.utime(older_file, (base + 0.1, base + 0.1))
+    os.utime(newer_file, (base + 0.9, base + 0.9))
+    assert int(older_file.stat().st_mtime) == int(newer_file.stat().st_mtime), (
+        "fixture setup failed to produce a same-second tie -- "
+        f"{older_file.stat().st_mtime!r} vs {newer_file.stat().st_mtime!r}"
+    )
+    assert newer_file.stat().st_mtime > older_file.stat().st_mtime, (
+        "fixture setup failed to give sess-zzz the truly later sub-second mtime"
+    )
+
+    _prime(env)
+    result = _run(env)
+    assert result.returncode == 0, repr(result.stderr[:400])
+    _reap(remember)
+
+    present = sorted(p.name for p in (remember / "tmp" / "capture-alive.d").iterdir())
+    assert "sess-zzz" in present, (
+        "the truly-newest same-second transcript (sess-zzz) was not picked -- "
+        "a same-second mtime tie resolved to the lexically-first file instead "
+        "of the real one. capture-alive.d present: " + repr(present)
+    )
+    assert "sess-aaa" not in present, (
+        "the STALE same-second transcript (sess-aaa) was picked as current -- "
+        "exactly the misattribution #204/#129 named as worse than capturing "
+        "nothing. capture-alive.d present: " + repr(present)
     )
 
 
@@ -299,6 +374,46 @@ def test_the_fast_path_still_records_which_session_it_captured(tmp_path):
         + repr(present)
     )
     assert (remember / "tmp" / "capture-alive").read_text(encoding="utf-8") == "sess-abc"
+
+
+def test_the_capture_alive_marker_mtime_still_advances_when_unchanged(tmp_path):
+    """#1011 self-review finding. doctor.sh reads this marker's MTIME, not just
+    its content, as evidence PostToolUse is still firing -- its own comment
+    calls it "a marker refreshed on every one of its many calls inside a live
+    session". The skip-the-mv-fork optimisation must not silently freeze that
+    mtime at the session's first tool call: a run with an UNCHANGED session id
+    still has to touch the file, just without the atomic tmp+rename dance.
+
+    POSITIVE CONTROL: the second run's own write actually ran (not a no-op
+    that happens to leave the old mtime behind) is proven by content staying
+    correct across the touch, which only holds if the write path executed.
+    """
+    home, project, remember = _project(tmp_path, cooldown_ts=int(time.time()),
+                                       session_id="sess-abc")
+    env = _env(tmp_path, home, project)
+    _prime(env)
+    _fast_path_run(env, tmp_path, "capture-alive-first")
+    _reap(remember)
+
+    marker = remember / "tmp" / "capture-alive"
+    first_mtime = marker.stat().st_mtime_ns
+    # Force the clock backward past whatever resolution this filesystem's
+    # mtime actually carries, so a real touch is distinguishable from a
+    # no-op even on a coarse (whole-second) filesystem.
+    os.utime(marker, (first_mtime / 1e9 - 5, first_mtime / 1e9 - 5))
+    backdated_mtime = marker.stat().st_mtime_ns
+
+    _fast_path_run(env, tmp_path, "capture-alive-second")
+    _reap(remember)
+
+    assert marker.read_text(encoding="utf-8") == "sess-abc", (
+        "the second run's touch corrupted the marker's content"
+    )
+    assert marker.stat().st_mtime_ns > backdated_mtime, (
+        "the marker's mtime did not advance on a second run with an "
+        "UNCHANGED session id -- doctor.sh's freshness read would report "
+        "this session as idle while PostToolUse keeps firing"
+    )
 
 
 @pytest.mark.parametrize(

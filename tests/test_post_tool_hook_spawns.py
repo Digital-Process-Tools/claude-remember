@@ -100,7 +100,15 @@ from tests.spawn_counting import make_shim_dir, spawns as _spawn_lines  # noqa: 
 # pre-#726 form) and the sanitize spawn ahead of it, plus their own `rm` on
 # exit -- neither can go without caching the merged config, and that is a
 # credential lifetime decision (#232) rather than a spawn one.
-POST_TOOL_SPAWN_MEASURED = 19
+#
+# #1011 removed two more from the warm run measured here: the transcript
+# lookup's `ls -t | head -1` pipe is now a forkless glob-plus-mtime walk, and
+# the capture-alive marker's `mv -f` is skipped (written in place instead)
+# whenever it already holds the current session id -- this fixture's own
+# second (warm) run, same as every tool call after a session's first.
+# Re-measured on real macOS bash 3.2.57 (/bin, not the Homebrew bash 5
+# normally ahead of it on PATH): 17 before, 14 after.
+POST_TOOL_SPAWN_MEASURED = 14
 POST_TOOL_SPAWN_BUDGET = POST_TOOL_SPAWN_MEASURED + 2
 
 

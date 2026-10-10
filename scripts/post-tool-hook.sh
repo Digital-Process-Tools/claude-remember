@@ -585,13 +585,15 @@ fi
 # silent again — the very failure being fixed. An hourly repeat keeps a
 # persistent cause visible without flooding.
 #
-# `ls -t … | head -1` is two processes and it STAYS two processes (#230). The
-# obvious replacement — glob the directory and keep the newest with `[ "$f" -nt
-# "$newest" ]` — is spawn-free and WRONG here: under bash 3.2 (stock macOS)
-# `-nt` compares mtimes at ONE-SECOND granularity, the same trap recorded below
-# the capture-alive marker. Two transcripts written in the same second tie, and
-# a tie makes the loop keep whichever the glob listed first — alphabetical order,
-# not newest. `ls -t` reads the full mtime and does not tie.
+# `ls -t … | head -1` WAS two processes on every tool call this host did not
+# carry a transcript_path for (#230) -- collapsed by #1011 to a glob-plus-`-nt`
+# walk, spawn-free on the common path. The naive version of that walk is WRONG
+# under bash 3.2 (stock macOS): `-nt` compares mtimes at ONE-SECOND granularity,
+# the same trap recorded below the capture-alive marker, so two transcripts
+# written inside the same second tie, and an unresolved tie would make the loop
+# keep whichever the glob listed first -- alphabetical order, not newest. The
+# walk below flags exactly that tie and falls back to `ls -t` (paid only then,
+# only once) to break it, rather than ever guessing.
 #
 # The value picked here decides which session this invocation is recorded FOR
 # whenever stdin does not answer (#212). Trading a correct answer for two
@@ -609,7 +611,45 @@ NOTICE_TTL=3600
 if [ -n "$STDIN_TRANSCRIPT_PATH" ]; then
     LATEST_JSONL="$STDIN_TRANSCRIPT_PATH"
 else
-    LATEST_JSONL=$(ls -t "$SESSION_DIR"/*.jsonl 2>/dev/null | head -1)
+    # A glob loop + bash's own `-nt` builtin, not `ls -t ... | head -1` (#1011):
+    # the pipe forks two processes on every tool call this host did not carry
+    # a transcript_path for, and on Windows 11 25H2 each console-attached fork
+    # leaks a kernel Token object until reboot (not just latency -- the whole
+    # reason this one was worth collapsing). Same idiom, same retention (the
+    # newest *.jsonl by mtime) as the #898 round-20 fix elsewhere in this repo
+    # (session-start-hook.sh _remember_prune_keep_newest). `[ -e ]` drops the
+    # unmatched literal glob an empty/absent SESSION_DIR leaves behind, so no
+    # nullglob save/restore is needed either.
+    LATEST_JSONL=""
+    _ptl_jsonl_tie=false
+    for _ptl_jsonl in "$SESSION_DIR"/*.jsonl; do
+        [ -e "$_ptl_jsonl" ] || continue
+        if [ -z "$LATEST_JSONL" ]; then
+            LATEST_JSONL="$_ptl_jsonl"
+        elif [ "$_ptl_jsonl" -nt "$LATEST_JSONL" ]; then
+            LATEST_JSONL="$_ptl_jsonl"
+        elif ! [ "$LATEST_JSONL" -nt "$_ptl_jsonl" ]; then
+            # `-nt` rounds the mtime to a whole time_t second (self-review
+            # caught this on real bash 3.2.57: two files written ~1ms apart
+            # inside the same wall-clock second compare as tied in EITHER
+            # direction, even though the filesystem holds a finer-grained
+            # timestamp and `ls -t` sorts on that finer one). Walking a
+            # glob in lexical order would then silently keep whichever
+            # same-second file came first, which is exactly the
+            # misattribution the comment a few lines above this block
+            # warns about (#204, #129) -- "two sessions live in one
+            # project" is precisely when two *.jsonl files can be touched
+            # inside the same second. So a tie is not resolved by this
+            # loop at all: it is flagged, and `ls -t` -- paid only once,
+            # only here, only on an actual tie -- breaks it correctly.
+            _ptl_jsonl_tie=true
+        fi
+    done
+    unset _ptl_jsonl
+    if [ "$_ptl_jsonl_tie" = true ]; then
+        LATEST_JSONL=$(ls -t "$SESSION_DIR"/*.jsonl 2>/dev/null | head -1)
+    fi
+    unset _ptl_jsonl_tie
 fi
 if [ -z "$LATEST_JSONL" ]; then
     NOTICE_MARKER="$REMEMBER_DIR/tmp/no-transcript-notice"
@@ -765,10 +805,42 @@ if [ -d "$REMEMBER_DIR/tmp/capture-alive.d" ] \
         : > "$REMEMBER_DIR/tmp/capture-alive.d/$SESSION_ID" 2>/dev/null || true
     fi
 fi
-if printf '%s' "$SESSION_ID" > "$REMEMBER_DIR/tmp/capture-alive.$$" 2>/dev/null; then
-    mv -f "$REMEMBER_DIR/tmp/capture-alive.$$" "$REMEMBER_DIR/tmp/capture-alive" 2>/dev/null \
-        || rm -f "$REMEMBER_DIR/tmp/capture-alive.$$" 2>/dev/null || true
+# `read`, not `cat` (#230), to decide whether the atomic tmp+mv rewrite
+# below is even needed. The overwhelming majority of tool calls happen
+# inside the same session as the one before them (#1011): capture-alive
+# already holds this exact SESSION_ID, so a fresh write-then-mv reproduces
+# byte-identical content and buys nothing but a fork on every single tool
+# call. Only a session CHANGE (or a first-ever write, file absent) still
+# pays for the atomic rewrite -- which keeps the rename-not-truncate crash
+# safety above intact: this never skips the write that CREATES the file,
+# only the atomic DANCE around a write that would have left it holding
+# what it already holds.
+#
+# The "already holds it" case still writes, though -- directly, no tmp
+# file, no `mv` -- rather than doing nothing (self-review, #1011): doctor.sh
+# reads this marker's MTIME, not just its content, as "is PostToolUse still
+# firing" (its own comment: "a marker refreshed on every one of its many
+# calls inside a live session"). Skipping the write outright would freeze
+# that mtime at the session's first tool call and report a long-idle-looking
+# marker for an actively firing hook. A direct in-place overwrite is not
+# atomic the way tmp+rename is, but the bytes it writes are identical to
+# the bytes already there, so a reader mid-write sees either the old,
+# correct content or a prefix of the identical new content -- never a
+# wrong session id -- and it costs no fork either way.
+_ptl_capture_marker="$REMEMBER_DIR/tmp/capture-alive"
+_ptl_capture_current=""
+if [ -f "$_ptl_capture_marker" ]; then
+    read -r _ptl_capture_current < "$_ptl_capture_marker" 2>/dev/null
 fi
+if [ "$_ptl_capture_current" != "$SESSION_ID" ]; then
+    if printf '%s' "$SESSION_ID" > "$_ptl_capture_marker.$$" 2>/dev/null; then
+        mv -f "$_ptl_capture_marker.$$" "$_ptl_capture_marker" 2>/dev/null \
+            || rm -f "$_ptl_capture_marker.$$" 2>/dev/null || true
+    fi
+else
+    printf '%s' "$SESSION_ID" > "$_ptl_capture_marker" 2>/dev/null || true
+fi
+unset _ptl_capture_marker _ptl_capture_current
 
 # --- Don't fork a save that save-session.sh will only discard on cooldown ---
 # Moved ahead of the #913 scan below (#1011's own suggestion): until the
