@@ -53,13 +53,23 @@ BASH = resolve_bash()
 _WSH_KEY = r"HKCU\Software\Microsoft\Windows Script Host\Settings"
 
 
-def _run(script: str, env: dict | None = None, timeout: float = 20) -> subprocess.CompletedProcess:
+def _run(script: str, env: dict | None = None, timeout: float = 20,
+         cwd: Path | None = None) -> subprocess.CompletedProcess:
+    """CI finding (#1002 round 3, job 114204833202 and siblings): without
+    `cwd`, this inherits pytest's own cwd (the repo checkout root on
+    windows-latest). The v0.42.3 shape's own quote-corruption (trap A) can
+    turn an absolute OUTFILE path into a garbled RELATIVE filename once WSH
+    strips the embedded quote around it -- observed as stray `...out.log`
+    files appearing directly in the repo checkout, tripping
+    conftest.py's own repo-mutation guard at session teardown. `cwd=tmp_path`
+    sends any such leak somewhere pytest cleans up on its own."""
     assert BASH, "no real bash resolvable on this Windows host -- cannot drive the hidden-launch route"
     full_env = dict(os.environ)
     if env:
         full_env.update(env)
     return subprocess.run([BASH, "-c", script], env=full_env, capture_output=True,
-                           text=True, timeout=timeout, check=False)
+                           text=True, timeout=timeout, check=False,
+                           cwd=str(cwd) if cwd else None)
 
 
 def _poll_for_marker(marker: Path, timeout: float = 10.0) -> bool:
@@ -83,6 +93,17 @@ def _save_script(directory: Path, marker: Path) -> Path:
     return path
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="OBSERVED on PR #1010, run #38049234152, jobs 114204833302 "
+           "(windows-latest, 3.9), 114204833300 (3.10), 114204833325 "
+           "(3.11), 114204833251 (3.12), 114204833202 (hook tests "
+           "compiled): the SHIPPED v0.42.3 shape returns RC=0 but the "
+           "marker never appears -- the save script never actually ran. "
+           "Confirms trap A (WSH's own argv parser corrupts the embedded "
+           "literal quote in v0.42.3's own c_script) on a real Windows "
+           "host for the first time; previously only reasoned.",
+)
 def test_v0_42_3_plain_path_detaches_and_saves(tmp_path):
     """Case (a): plain path, no quoting hazards. v0.42.3's own
     _remember_detach_windows signature is identical to today's
@@ -93,7 +114,7 @@ def test_v0_42_3_plain_path_detaches_and_saves(tmp_path):
     pid = tmp_path / "pid"
     save = _save_script(tmp_path, marker)
     script = f'. "{LIB}"; _remember_detach_windows "{out}" "{pid}" "{save.as_posix()}"; echo "RC=$?"'
-    r = _run(script)
+    r = _run(script, cwd=tmp_path)
     outfile_text = out.read_text(encoding="utf-8", errors="replace") if out.exists() else "<missing>"
     assert "RC=0" in r.stdout, f"v0.42.3 shape: stdout={r.stdout!r} stderr={r.stderr!r}"
     assert _poll_for_marker(marker), (
@@ -104,6 +125,17 @@ def test_v0_42_3_plain_path_detaches_and_saves(tmp_path):
     )
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="OBSERVED on PR #1010, run #38049234152, jobs 114204833302 "
+           "(windows-latest, 3.9), 114204833300 (3.10), 114204833325 "
+           "(3.11), 114204833251 (3.12), 114204833202 (hook tests "
+           "compiled): same failure as the plain-path case -- RC=0 but no "
+           "marker. The outfile path itself was also observed corrupted: "
+           "WSH's own argv parsing turned the absolute OUTFILE path into "
+           "a garbled relative filename that landed in the CI job's own "
+           "working directory instead of under this test's tmp_path.",
+)
 def test_v0_42_3_path_with_space_detaches_and_saves(tmp_path):
     """Case (b): a space in the path -- the shape most likely to expose
     trap A (WSH's argv parser stripping the embedded literal quote in
@@ -115,7 +147,7 @@ def test_v0_42_3_path_with_space_detaches_and_saves(tmp_path):
     pid = spacedir / "pid"
     save = _save_script(spacedir, marker)
     script = f'. "{LIB}"; _remember_detach_windows "{out}" "{pid}" "{save.as_posix()}"; echo "RC=$?"'
-    r = _run(script)
+    r = _run(script, cwd=spacedir)
     outfile_text = out.read_text(encoding="utf-8", errors="replace") if out.exists() else "<missing>"
     assert "RC=0" in r.stdout, f"v0.42.3 shape: stdout={r.stdout!r} stderr={r.stderr!r}"
     assert _poll_for_marker(marker), (
@@ -161,6 +193,17 @@ def wsh_disabled():
             )
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="OBSERVED on PR #1010, run #38049234152, jobs 114204833302 "
+           "(windows-latest, 3.9), 114204833300 (3.10), 114204833325 "
+           "(3.11), 114204833251 (3.12), 114204833202 (hook tests "
+           "compiled): with WSH disabled, the save never happened within "
+           "the poll window -- confirms trap B (the SHIPPED v0.42.3 "
+           "backgrounded-and-unconditional-return-0 shape genuinely "
+           "silently skips the save) on a real Windows host for the "
+           "first time; previously only reasoned.",
+)
 def test_v0_42_3_wsh_disabled_silent_skip(tmp_path, wsh_disabled):
     """Case (c), trap B: with WSH disabled, v0.42.3's own
     _remember_detach_windows backgrounds wscript.exe with a trailing "&" and
@@ -182,7 +225,7 @@ def test_v0_42_3_wsh_disabled_silent_skip(tmp_path, wsh_disabled):
         f'if ! _remember_detach_windows "{out}" "{pid}" "{save.as_posix()}"; then '
         f'nohup "{save.as_posix()}" >> "{out}" 2>&1 & echo $! > "{pid}"; fi'
     )
-    r = _run(script, timeout=30)
+    r = _run(script, timeout=30, cwd=tmp_path)
     outfile_text = out.read_text(encoding="utf-8", errors="replace") if out.exists() else "<missing>"
     assert _poll_for_marker(marker), (
         "v0.42.3 OBSERVED: WSH disabled and the save never happened within the "
@@ -201,5 +244,5 @@ def test_v0_42_3_positive_control(tmp_path):
     pid = tmp_path / "pid"
     save = _save_script(tmp_path, marker)
     script = f'nohup "{save.as_posix()}" >> "{out}" 2>&1 & echo $! > "{pid}"'
-    _run(script)
+    _run(script, cwd=tmp_path)
     assert _poll_for_marker(marker), "the nohup path itself never wrote the marker -- harness is broken"

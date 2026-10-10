@@ -49,13 +49,24 @@ BASH = resolve_bash()
 _WSH_KEY = r"HKCU\Software\Microsoft\Windows Script Host\Settings"
 
 
-def _run(script: str, env: dict | None = None, timeout: float = 20) -> subprocess.CompletedProcess:
+def _run(script: str, env: dict | None = None, timeout: float = 20,
+         cwd: Path | None = None) -> subprocess.CompletedProcess:
+    """CI finding (#1002 round 3, job 114204833202 and siblings): a call
+    with no `cwd` inherits pytest's own cwd (the repo checkout root on
+    windows-latest). Any relative-path side effect the hidden route or its
+    quoting produces then lands IN THE REPO rather than under tmp_path,
+    tripping conftest.py's own repo-mutation guard at session teardown --
+    observed as two stray `out.log`-shaped files in the checkout after the
+    v0.42.3 module's quote-corruption cases ran. Callers pass `cwd=tmp_path`
+    (or a subdirectory of it) so any such leak lands somewhere pytest
+    cleans up on its own, never in the tree the suite was launched from."""
     assert BASH, "no real bash resolvable on this Windows host -- cannot drive the hidden-launch route"
     full_env = dict(os.environ)
     if env:
         full_env.update(env)
     return subprocess.run([BASH, "-c", script], env=full_env, capture_output=True,
-                           text=True, timeout=timeout, check=False)
+                           text=True, timeout=timeout, check=False,
+                           cwd=str(cwd) if cwd else None)
 
 
 def _poll_for_marker(marker: Path, timeout: float = 10.0) -> bool:
@@ -91,7 +102,7 @@ def test_real_wscript_plain_path_detaches_and_saves(tmp_path):
     pid = tmp_path / "pid"
     save = _save_script(tmp_path, marker)
     script = f'. "{LIB}"; _remember_detach_windows "{out}" "{pid}" "{save.as_posix()}"; echo "RC=$?"'
-    r = _run(script)
+    r = _run(script, env={"TMPDIR": str(tmp_path)}, cwd=tmp_path)
     assert "RC=0" in r.stdout, f"stdout={r.stdout!r} stderr={r.stderr!r}"
     outfile_text = out.read_text(encoding="utf-8", errors="replace") if out.exists() else "<missing>"
     assert _poll_for_marker(marker), (
@@ -112,7 +123,7 @@ def test_real_wscript_path_with_space_detaches_and_saves(tmp_path):
     pid = spacedir / "pid"
     save = _save_script(spacedir, marker)
     script = f'. "{LIB}"; _remember_detach_windows "{out}" "{pid}" "{save.as_posix()}"; echo "RC=$?"'
-    r = _run(script)
+    r = _run(script, env={"TMPDIR": str(tmp_path)}, cwd=spacedir)
     assert "RC=0" in r.stdout, f"stdout={r.stdout!r} stderr={r.stderr!r}"
     outfile_text = out.read_text(encoding="utf-8", errors="replace") if out.exists() else "<missing>"
     assert _poll_for_marker(marker), (
@@ -181,7 +192,7 @@ def test_real_wscript_wsh_disabled_still_saves_via_fallback(tmp_path, wsh_disabl
     # `timeout 10` bound. 30s here gives that bound, plus bash/registry
     # overhead, comfortable room without letting a still-hanging call
     # silently re-stall this one test for the job's full timeout-minutes.
-    r = _run(script, timeout=30)
+    r = _run(script, timeout=30, env={"TMPDIR": str(tmp_path)}, cwd=tmp_path)
     outfile_text = out.read_text(encoding="utf-8", errors="replace") if out.exists() else "<missing>"
     assert _poll_for_marker(marker), (
         "WSH disabled and the save never happened -- the fallback the real "
@@ -214,7 +225,17 @@ def test_real_wscript_healthy_path_latency(tmp_path, capsys):
         save = _save_script(tmp_path, marker)
         script = f'. "{LIB}"; _remember_detach_windows "{out}" "{pid}" "{save.as_posix()}"; echo "RC=$?"'
         t0 = time.monotonic()
-        r = _run(script)
+        # #1002 round 3 CI finding (job 114204833202 and siblings): without a
+        # per-call TMPDIR override, this call shares a real-host-wide
+        # $TMPDIR/$PATH with every earlier test in the same pytest process --
+        # including test_real_wscript_wsh_disabled_still_saves_via_fallback,
+        # which deliberately makes the hidden route fail and so publishes
+        # scripts/lib-detach.sh's own "unusable" verdict cache. Without this
+        # override that verdict leaks into every later call on the same
+        # host, including this one, which would otherwise observe a healthy
+        # route as permanently cached-unusable from an unrelated earlier
+        # test rather than from its own real outcome.
+        r = _run(script, env={"TMPDIR": str(tmp_path)}, cwd=tmp_path)
         assert "RC=0" in r.stdout, f"stdout={r.stdout!r} stderr={r.stderr!r}"
         assert _poll_for_marker(marker), f"hidden route run {i}: marker never appeared"
         return time.monotonic() - t0
@@ -226,7 +247,7 @@ def test_real_wscript_healthy_path_latency(tmp_path, capsys):
         save = _save_script(tmp_path, marker)
         script = f'nohup "{save.as_posix()}" >> "{out}" 2>&1 & echo $! > "{pid}"'
         t0 = time.monotonic()
-        _run(script)
+        _run(script, cwd=tmp_path)
         assert _poll_for_marker(marker), f"nohup route run {i}: marker never appeared"
         return time.monotonic() - t0
 
@@ -261,5 +282,5 @@ def test_real_nohup_path_writes_marker_positive_control(tmp_path):
     pid = tmp_path / "pid"
     save = _save_script(tmp_path, marker)
     script = f'nohup "{save.as_posix()}" >> "{out}" 2>&1 & echo $! > "{pid}"'
-    _run(script)
+    _run(script, cwd=tmp_path)
     assert _poll_for_marker(marker), "the nohup path itself never wrote the marker -- harness is broken"
