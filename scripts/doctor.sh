@@ -1311,6 +1311,19 @@ if command -v powershell.exe >/dev/null 2>&1; then
     _ps_watchdog=$!
     wait "$_ps_pid" 2>/dev/null
     _ps_rc=$?
+    # review finding: the watchdog subshell above forks `sleep` and only
+    # AFTERWARDS writes that child's real PID out to $_ps_sleep_pid_file --
+    # a real gap, not merely a theoretical one: a 0.3s delay manufactured
+    # between those two lines reliably reproduced a reap landing here
+    # before the write did, finding the file still empty and falling
+    # through to "kill $_ps_watchdog" below, which cannot touch a child
+    # the subshell already forked -- leaving that `sleep` to run out its
+    # own full bound, orphaned. One bounded 1s retry closes the window a
+    # fast PowerShell exit can realistically race into, without turning
+    # this into a busy-poll whose real margin would vary with host speed.
+    if [ -n "$_ps_sleep_pid_file" ] && [ ! -s "$_ps_sleep_pid_file" ]; then
+        sleep 1
+    fi
     if [ -n "$_ps_sleep_pid_file" ] && [ -s "$_ps_sleep_pid_file" ]; then
         kill "$(cat "$_ps_sleep_pid_file" 2>/dev/null)" 2>/dev/null
     fi

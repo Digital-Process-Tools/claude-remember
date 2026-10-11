@@ -158,3 +158,62 @@ def test_hung_powershell_is_still_killed_at_the_bound(tmp_path):
         f"took {elapsed:.2f}s against a {bound}s kill-on-timeout bound -- "
         f"expected close to the bound itself, not a multiple of it"
     )
+
+
+def _extract_function_with_injected_delay(name: str, after_line: str, delay_seconds: float) -> str:
+    """Insert a `sleep DELAY` line right after the first line containing
+    *after_line*, inside the extracted function body -- used to
+    manufacture, deterministically, the fork-to-pidfile-write scheduler
+    window a real host otherwise only hits by chance."""
+    lines = DOCTOR.read_text(encoding="utf-8").splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith(f"{name}() {{"))
+    end = next(i for i in range(start + 1, len(lines)) if lines[i] == "}")
+    body = lines[start : end + 1]
+    insert_at = next(i for i, line in enumerate(body) if after_line in line) + 1
+    body.insert(insert_at, f"        sleep {delay_seconds}")
+    return "\n".join(body)
+
+
+def _run_with_injected_race(tmp_path: Path, bound: int, delay_seconds: float):
+    bin_dir = _stub_dir(tmp_path, _FAST_STUB)
+    script = tmp_path / "probe.ps1"
+    script.write_text("ignored\n", encoding="utf-8")
+    function_src = _extract_function_with_injected_delay(
+        "_remember_doctor_run_powershell_file", "_ps_sleep_real_pid=$!", delay_seconds
+    )
+    env = dict(os.environ)
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
+    wrapper = "set -u\n" + function_src + "\n"
+    wrapper += f'out=$(_remember_doctor_run_powershell_file "{script}" {bound})\n'
+    wrapper += 'rc=$?\n'
+    wrapper += 'printf OUT=%sX "$out"\n'
+    wrapper += 'printf RC=%sX "$rc"\n'
+    check_cmd = "pgrep -f " + repr(f"sleep {bound}$")
+    wrapper += "if " + check_cmd + " >/dev/null 2>&1; then\n"
+    wrapper += "    printf STRAY=1X\n"
+    wrapper += "else\n"
+    wrapper += "    printf STRAY=0X\n"
+    wrapper += "fi\n"
+    start = time.monotonic()
+    result = subprocess.run(
+        ["bash", "-c", wrapper], env=env, check=False, capture_output=True, text=True, timeout=60
+    )
+    elapsed = time.monotonic() - start
+    return result, elapsed
+
+
+def test_a_manufactured_fork_to_pidfile_write_race_still_leaves_no_stray_sleep(tmp_path):
+    """Review finding: the watchdog own sleep child is forked before its
+    real PID is written out to the handoff file. A deliberately injected
+    0.3s delay between those two lines manufactures the race a real host
+    would otherwise only hit by chance -- this must still end with no
+    stray sleep process, same bar as the unmanufactured case above."""
+    bound = 23
+    result, _elapsed = _run_with_injected_race(tmp_path, bound, 0.3)
+    assert "RC=0X" in result.stdout, result.stdout + result.stderr
+    assert "OUT=42X" in result.stdout, result.stdout + result.stderr
+    assert "STRAY=0X" in result.stdout, (
+        "the manufactured fork-to-pidfile-write race left a stray sleep "
+        "child running after the function returned: "
+        + result.stdout + result.stderr
+    )
