@@ -158,8 +158,8 @@ CASES = [
     pytest.param("scripts/session-start-hook.sh", "_stdin_json_string_into", True, "session_id", id="session-start/session_id"),
     pytest.param("scripts/session-end-hook.sh", "_stdin_json_string", True, "cwd", id="session-end/cwd"),
     pytest.param("scripts/session-end-hook.sh", "_stdin_json_string", True, "session_id", id="session-end/session_id"),
-    pytest.param("scripts/post-tool-hook.sh", "_stdin_json_string", True, "cwd", id="post-tool/cwd"),
-    pytest.param("scripts/post-tool-hook.sh", "_stdin_json_string", True, "session_id", id="post-tool/session_id"),
+    pytest.param("scripts/post-tool-hook.sh", "_stdin_json_string_into", True, "cwd", id="post-tool/cwd"),
+    pytest.param("scripts/post-tool-hook.sh", "_stdin_json_string_into", True, "session_id", id="post-tool/session_id"),
     pytest.param("scripts/user-prompt-hook.sh", "_stdin_cwd", False, "cwd", id="user-prompt/cwd"),
 ]
 
