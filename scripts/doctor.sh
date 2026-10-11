@@ -1294,23 +1294,36 @@ _remember_doctor_fglock_build() {
     rm -f "$_ps_script"
 }
 
-# live SPI_GETFOREGROUNDLOCKTIMEOUT read.
+# live SPI_GETFOREGROUNDLOCKTIMEOUT read. Compile-free P/Invoke via
+# System.Reflection.Emit (DefineDynamicAssembly -> DefineDynamicModule ->
+# DefineType -> DefinePInvokeMethod -> CreateType) -- #1011 round 5: the
+# previous Add-Type approach shells out to csc.exe to compile inline C#,
+# and that compile step was measured to take anywhere from ~10.8s to over
+# 20s on real windows-latest CI, making this probe flaky by host load
+# rather than by anything this plugin's own logic does. Reflection.Emit
+# builds the same P/Invoke signature at runtime with no compiler process,
+# and works on both Windows PowerShell 5.1 and pwsh 7.
 _remember_doctor_fglock_timeout() {
-    local _ps_script _dq
-    _dq='"'
+    local _ps_script
     _ps_script=$(mktemp "${TMPDIR:-/tmp}/remember-doctor-fglock-timeout.XXXXXX") || return 1
     # same mv-may-fail degrade as _remember_doctor_fglock_build above.
     mv "$_ps_script" "${_ps_script}.ps1" 2>/dev/null && _ps_script="${_ps_script}.ps1"
 
-printf '%s\n' "Add-Type -Name RememberFg -Namespace RememberWin -MemberDefinition '[DllImport(${_dq}user32.dll${_dq})] public static extern bool SystemParametersInfo(uint a, uint b, out uint c, uint d);'" >"$_ps_script"
+printf '%s\n' '$asmName = New-Object System.Reflection.AssemblyName("RememberFgAsm")' >"$_ps_script"
+    printf '%s\n' '$asmBuilder = [System.AppDomain]::CurrentDomain.DefineDynamicAssembly($asmName, [System.Reflection.Emit.AssemblyBuilderAccess]::Run)' >>"$_ps_script"
+    printf '%s\n' '$moduleBuilder = $asmBuilder.DefineDynamicModule("RememberFgMod")' >>"$_ps_script"
+    printf '%s\n' '$typeBuilder = $moduleBuilder.DefineType("RememberFg", [System.Reflection.TypeAttributes]::Public)' >>"$_ps_script"
+    printf '%s\n' '$paramTypes = [Type[]]@([uint32], [uint32], [uint32].MakeByRefType(), [uint32])' >>"$_ps_script"
+    printf '%s\n' '$methodAttrs = [System.Reflection.MethodAttributes]"Public,Static,PinvokeImpl"' >>"$_ps_script"
+    printf '%s\n' '$methodBuilder = $typeBuilder.DefinePInvokeMethod("SystemParametersInfo", "user32.dll", $methodAttrs, [System.Reflection.CallingConventions]::Standard, [bool], $paramTypes, [System.Runtime.InteropServices.CallingConvention]::Winapi, [System.Runtime.InteropServices.CharSet]::Auto)' >>"$_ps_script"
+    printf '%s\n' '$fgType = $typeBuilder.CreateType()' >>"$_ps_script"
     printf '%s\n' '$fg = 0' >>"$_ps_script"
-
-printf '%s\n' '[RememberWin.RememberFg]::SystemParametersInfo(0x2000, 0, [ref]$fg, 0) | Out-Null' >>"$_ps_script"
+    printf '%s\n' '$fgType::SystemParametersInfo(0x2000, 0, [ref]$fg, 0) | Out-Null' >>"$_ps_script"
     printf '%s\n' 'Write-Output $fg' >>"$_ps_script"
-    # 20s, not the 5s default -- this probe's Add-Type C# compile was PROVEN
-    # (see the comment on _remember_doctor_run_powershell_file above) to
-    # exceed 5s on real windows-latest CI.
-    _remember_doctor_run_powershell_file "$_ps_script" 20
+    # Compile-free, so this probe no longer needs the wider 20s bound the
+    # Add-Type version required -- it stays on the same default as the
+    # build probe above (plain PowerShell startup, no compiler process).
+    _remember_doctor_run_powershell_file "$_ps_script"
     rm -f "$_ps_script"
 }
 
