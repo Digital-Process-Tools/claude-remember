@@ -210,23 +210,23 @@ fi
 # of printed, so a call site forks no subshell -- same shape as
 # session-start-hook.sh own _stdin_json_string_into, 665/660.
 _stdin_json_string_into() {
-    local _sjsi_var="$1" field="$2" raw="$3" rest prefix value dq
+    local _sjsi_var="$1" _sjsi_field="$2" _sjsi_raw="$3" _sjsi_rest _sjsi_prefix _sjsi_value _sjsi_dq
     printf -v "$_sjsi_var" '%s' ""
-    # The double quote is held in `dq` (octal 042) rather than written
-    # backslash-escaped: the plugin directory's scanner mis-tracks an
-    # escaped quote (#898 round 8). Same patterns, same quoting of $field.
-    printf -v dq '\042'
-    [[ "$raw" == *"$dq$field$dq"* ]] || return 1
-    rest=${raw#*"$dq"$field"$dq"}
-    prefix=${rest%%"$dq"*}
-    if [[ "$prefix" == *[!:[:space:]]* ]]; then return 1; fi
-    value=${rest#*"$dq"}
-    value=${value%%"$dq"*}
+    # Every local is _sjsi_-prefixed, as in session-start-hook.sh: printf -v
+    # resolves against the innermost local, so an unprefixed `value` here
+    # would swallow a caller's VARNAME of the same name.
+    printf -v _sjsi_dq '\042'
+    [[ "$_sjsi_raw" == *"$_sjsi_dq$_sjsi_field$_sjsi_dq"* ]] || return 1
+    _sjsi_rest=${_sjsi_raw#*"$_sjsi_dq"$_sjsi_field"$_sjsi_dq"}
+    _sjsi_prefix=${_sjsi_rest%%"$_sjsi_dq"*}
+    if [[ "$_sjsi_prefix" == *[!:[:space:]]* ]]; then return 1; fi
+    _sjsi_value=${_sjsi_rest#*"$_sjsi_dq"}
+    _sjsi_value=${_sjsi_value%%"$_sjsi_dq"*}
     # A JSON encoder writes each backslash as `\\` -- a Windows `cwd` from
     # Codex arrives as `C:\\work\\proj` otherwise (#829).
-    value=${value//\\\\/\\}
-    [ -n "$value" ] || return 1
-    printf -v "$_sjsi_var" '%s' "$value"
+    _sjsi_value=${_sjsi_value//\\\\/\\}
+    [ -n "$_sjsi_value" ] || return 1
+    printf -v "$_sjsi_var" '%s' "$_sjsi_value"
 }
 
 # The double quote, for the last-save.json scope check and the sanitiser
