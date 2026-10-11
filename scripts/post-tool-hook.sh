@@ -940,6 +940,8 @@ fi
 # #913's own win (no longer reading the whole transcript on every call) is
 # untouched, and the scan itself still skips entirely under cooldown.
 if [ "$IN_COOLDOWN" = false ]; then
+PT_SCAN_OFFSET=0
+PT_SCAN_LINES=0
 _pt_scan_lines() {
     local LC_ALL=C
     local _off="$1" _lines="$2" _file="$3"
@@ -970,11 +972,14 @@ _pt_scan_lines() {
     # costs one extra fork per call (`printf` is a builtin, so only `wc`
     # is a new process `tests/spawn_counting.py`'s shim can see), not a
     # cost that grows with chunk size beyond the linear read itself.
-    local _nl_count
-    _nl_count=$(printf '%s' "$_complete" | wc -l)
-    _nl_count=${_nl_count//[^0-9]}
-    [ -z "$_nl_count" ] && _nl_count=0
-    printf '%s %s\n' "$(( _off + ${#_complete} ))" "$(( _lines + _nl_count ))"
+    local _nl_count=0
+    if [ -n "$_complete" ]; then
+        _nl_count=$(wc -l <<< "${_complete%$'\n'}")
+        _nl_count=${_nl_count//[^0-9]}
+        [ -z "$_nl_count" ] && _nl_count=0
+    fi
+    PT_SCAN_OFFSET=$(( _off + ${#_complete} ))
+    PT_SCAN_LINES=$(( _lines + _nl_count ))
 }
 
 _SCAN_NAME="${TRANSCRIPT##*/}"
@@ -1016,9 +1021,9 @@ else
     SCAN_SIDECAR=""
 fi
 
-_SCAN_RESULT=$(_pt_scan_lines "$_SCAN_OFFSET" "$_SCAN_LINES" "$TRANSCRIPT")
-_SCAN_NEW_OFFSET=${_SCAN_RESULT%% *}
-CURRENT_LINES=${_SCAN_RESULT##* }
+_pt_scan_lines "$_SCAN_OFFSET" "$_SCAN_LINES" "$TRANSCRIPT"
+_SCAN_NEW_OFFSET=$PT_SCAN_OFFSET
+CURRENT_LINES=$PT_SCAN_LINES
 CURRENT_LINES=$(( CURRENT_LINES + 0 ))
 
 # Plain redirect, not the mktemp+rename the #353 sidecar uses: a partial
