@@ -58,6 +58,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import warnings
 from pathlib import Path
 
 import pytest
@@ -235,8 +236,16 @@ def test_below_threshold_path_total_forks_vs_tagged_baselines(tmp_path):
         f"{label}=min:{vals[0]} all:{sorted(vals[1])}"
         for label, vals in results.items()
     )
-    print(f"#1011 below-threshold path, whole-hook strace totals -- {summary}"
-          + (f" (skipped, could not materialize: {skipped})" if skipped else ""))
+    full_summary = (f"#1011 below-threshold path, whole-hook strace totals -- {summary}"
+                     + (f" (skipped, could not materialize: {skipped})" if skipped else ""))
+    print(full_summary)
+    # A print() is captured and discarded by pytest on a PASSING test -- the
+    # CI log would carry the three totals only when this test fails, which
+    # defeats the point of comparing against real measured numbers instead
+    # of a hand-picked threshold. warnings.warn() lands in pytest's own
+    # "warnings summary" section, printed unconditionally regardless of
+    # outcome, so the totals reach the CI log either way.
+    warnings.warn(full_summary, stacklevel=1)
 
     if "v0.42.4" not in results and "v0.43.0" not in results:
         pytest.skip(
