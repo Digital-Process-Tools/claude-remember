@@ -87,8 +87,35 @@ jobs:
           Add-MpPreference -ExclusionPath "${{ github.workspace }}"
           Add-MpPreference -ExclusionPath "$env:RUNNER_TEMP"
       - name: Run tests
+        # #1014 round 2: this PR's own CI already hit a Windows leg that
+        # ran past this timeout and still ended `cancelled` with no log at
+        # all (job 114418645594) -- the step-level kill is not trusted to
+        # fire on its own, so pyproject.toml's faulthandler_exit_on_timeout
+        # makes a hung test kill the pytest PROCESS itself well inside
+        # this bound. `tee` is belt-and-braces on top of that: even if a
+        # hang somehow outlives the process-level exit, whatever reached
+        # the log file before that point is uploaded as an artifact below
+        # under `if: always()`, rather than depending only on the step's
+        # own captured output surviving.
         timeout-minutes: 25
-        run: pytest
+        shell: bash
+        run: |
+          set -o pipefail
+          pytest 2>&1 | tee pytest-output.log
+      - name: Upload pytest output log
+        # `if: always()` so a failed or timed-out step still uploads
+        # whatever reached the file -- the one case this cannot cover is
+        # a job-level `cancelled` (#1014's original failure mode), where
+        # GitHub Actions stops running steps entirely rather than
+        # executing the ones still pending; faulthandler_exit_on_timeout
+        # above is what keeps a hang from reaching that case at all.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-output-${{ matrix.os }}-${{ matrix.python-version }}
+          path: pytest-output.log
+          if-no-files-found: ignore
+          retention-days: 7
       - name: List surviving wscript/bash/conhost/powershell processes (Windows)
         if: always() && runner.os == 'Windows'
         shell: pwsh
@@ -148,8 +175,21 @@ jobs:
         # above already uses on this same matrix.
         run: python .github/scripts/compile_hooks.py --repo . --apply
       - name: Run the full suite against the compiled hooks
+        # Same #1014-round-2 reasoning as the plain pytest job's own "Run
+        # tests" step above.
         timeout-minutes: 25
-        run: pytest
+        shell: bash
+        run: |
+          set -o pipefail
+          pytest 2>&1 | tee pytest-output.log
+      - name: Upload pytest output log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-output-hooks-${{ matrix.os }}
+          path: pytest-output.log
+          if-no-files-found: ignore
+          retention-days: 7
       - name: List surviving wscript/bash/conhost/powershell processes (Windows)
         if: always() && runner.os == 'Windows'
         shell: pwsh

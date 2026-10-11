@@ -53,6 +53,52 @@ BASH = resolve_bash()
 _WSH_KEY = r"HKCU\Software\Microsoft\Windows Script Host\Settings"
 
 
+def _kill_processes_matching(substr: str) -> list[str]:
+    """Windows only: force-terminate any wscript.exe/bash.exe/conhost.exe
+    whose command line mentions SUBSTR (this test's own tmp_path).
+
+    #1014 CI finding (run 38122057767, job 114418645663 -- a GREEN leg of
+    this same PR's own CI): the hidden-launch route this module drives
+    left an orphan bash.exe and wscript.exe alive all the way to the job's
+    own teardown step, which had to force-terminate them itself (log lines
+    2256-2258, "Cleaning up orphan processes"). The OLD v0.42.3 shape under
+    test here backgrounds wscript.exe with a trailing `&` and disowns it --
+    by design, since trap B (the silent skip this module exists to
+    observe) depends on the caller never waiting on it -- so nothing in
+    the shape itself, or in this test module before this fixture, ever
+    killed what it launched.
+
+    Returns what it killed, for diagnostics; killing nothing is not an
+    error -- traps A and B can both mean the hidden route never actually
+    reached a running wscript.exe at all.
+    """
+    if sys.platform != "win32":
+        return []
+    ps = (
+        "Get-CimInstance Win32_Process | "
+        "Where-Object { $_.Name -in @('wscript.exe','bash.exe','conhost.exe') -and "
+        f"$_.CommandLine -like '*{substr}*' }} | "
+        "Select-Object ProcessId, Name | ForEach-Object { "
+        "Write-Output \"$($_.ProcessId) $($_.Name)\"; "
+        "Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+    )
+    r = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                        capture_output=True, text=True, timeout=15, check=False)
+    return [line for line in r.stdout.splitlines() if line.strip()]
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_hidden_launch_orphans(tmp_path):
+    """Kill, after every test in this module, any wscript.exe/bash.exe this
+    test's own hidden-launch call spawned and never waited on (see
+    `_kill_processes_matching`'s docstring for the CI evidence). Matched on
+    this test's own tmp_path so cleanup never reaches a process some other,
+    unrelated test launched.
+    """
+    yield
+    _kill_processes_matching(str(tmp_path))
+
+
 def _run(script: str, env: dict | None = None, timeout: float = 20,
          cwd: Path | None = None) -> subprocess.CompletedProcess:
     """CI finding (#1002 round 3, job 114204833202 and siblings): without
