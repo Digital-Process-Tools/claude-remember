@@ -14,27 +14,26 @@ addopts = "-rs --durations=25 --cov=pipeline --cov-report=term-missing --cov-fai
 # hung test -- once any single test runs longer than this. Sized from a green
 # windows-latest run's own --durations=25 output (run 38091996750, job
 # 114330142530): the slowest single test there was 30.14s, so 900s leaves
-# ~30x margin over normal variance.
+# ~30x margin over normal variance, and fires well inside the step's own
+# 25min (1500s) timeout below.
 #
-# #1014 round 2: this PR's OWN CI hit the exact failure it set out to fix
-# (run 38122057767, job 114418645594, pytest windows-latest/3.9): "Run
-# tests" ran ~33.6 min -- past the step's own 25min timeout below -- yet
-# the job ended `cancelled`, not a failed step, and wrote NO log at all.
-# Neither the step's nor the job's own timeout-minutes visibly stopped the
-# hang; the leading theory is a Windows runner cannot always kill a
-# process tree held by a hung grandchild (a green sibling leg of the same
-# run, job 114418645663, had to force-terminate an orphaned bash.exe/
-# wscript.exe at teardown -- see
-# tests/test_windows_real_wscript_v0_42_3_1002.py's own cleanup fixture).
-# faulthandler_exit_on_timeout makes the dump kill the pytest PROCESS
-# itself (_exit, bypassing whatever held it) well inside this same 900s
-# bound, so a hang becomes a failed step with its traceback in a log that
-# survives, rather than depending on a runner-level kill that was already
-# observed not to fire.
+# #1014 round 2 PROOF (run 38122057767, job 114445674357, pytest
+# linux/3.x -- a deliberately hanging test, with faulthandler_timeout
+# temporarily lowered and the step timeout left in place): the
+# faulthandler traceback naming the stuck test IS present in the kept
+# log, followed by "##[error]The action 'Run tests' has timed out after
+# 25 minutes." -- i.e. the STEP timeout is what kept the log, not
+# faulthandler_exit_on_timeout: pytest was not observed to exit on its
+# own before the step timeout fired. faulthandler_exit_on_timeout is
+# therefore not enabled here; it was not shown to do anything in this
+# proof, and this repo does not rely on it. Only Linux was proven this
+# way -- the earlier round-2 Windows failure (run 38122057767, job
+# 114418645594: cancelled, no log, after ~33.6 min past the step's own
+# 25min timeout) is NOT shown fixed by this setting; see issue filed
+# separately for that gap.
 #
 # Compatible with --cov (faulthandler is independent of coverage collection)
 # and with pytest-xdist if it is ever added (this repo currently has none,
 # confirmed by a repo-wide grep); both ini options are per-worker/per-process
 # settings either way.
-faulthandler_timeout = 20
-faulthandler_exit_on_timeout = true
+faulthandler_timeout = 900

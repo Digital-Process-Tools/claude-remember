@@ -90,13 +90,15 @@ jobs:
         # #1014 round 2: this PR's own CI already hit a Windows leg that
         # ran past this timeout and still ended `cancelled` with no log at
         # all (job 114418645594) -- the step-level kill is not trusted to
-        # fire on its own, so pyproject.toml's faulthandler_exit_on_timeout
-        # makes a hung test kill the pytest PROCESS itself well inside
-        # this bound. `tee` is belt-and-braces on top of that: even if a
-        # hang somehow outlives the process-level exit, whatever reached
-        # the log file before that point is uploaded as an artifact below
-        # under `if: always()`, rather than depending only on the step's
-        # own captured output surviving.
+        # fire on its own on every OS. pyproject.toml's faulthandler_timeout
+        # dumps the stuck test's traceback well inside this bound, and the
+        # step's own timeout-minutes is what actually ends the step and
+        # keeps the log (proven on Linux: run 38122057767, job
+        # 114445674357 -- the faulthandler traceback IS in the kept log,
+        # followed by the step-timeout error). `tee` is belt-and-braces on
+        # top of that: whatever reached the log file before the step ends
+        # is uploaded as an artifact below under `if: always()`, rather
+        # than depending only on the step's own captured output surviving.
         timeout-minutes: 25
         shell: bash
         run: |
@@ -105,10 +107,11 @@ jobs:
       - name: Upload pytest output log
         # `if: always()` so a failed or timed-out step still uploads
         # whatever reached the file -- the one case this cannot cover is
-        # a job-level `cancelled` (#1014's original failure mode), where
-        # GitHub Actions stops running steps entirely rather than
-        # executing the ones still pending; faulthandler_exit_on_timeout
-        # above is what keeps a hang from reaching that case at all.
+        # a job-level `cancelled` (#1014's original failure mode, observed
+        # on Windows: job 114418645594), where GitHub Actions stops
+        # running steps entirely rather than executing the ones still
+        # pending. That path is not proven fixed here -- see the issue
+        # filed for the unproven Windows cancellation case.
         if: always()
         uses: actions/upload-artifact@v4
         with:
