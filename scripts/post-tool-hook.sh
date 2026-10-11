@@ -1198,32 +1198,38 @@ if [ -n "$SIDECAR" ] && [ -f "$SIDECAR" ]; then
             # expansion pair took 2.05s and 9.69s. No new fork: BASH_REMATCH
             # is a builtin, same as the expansion it replaces.
             #
-            # `[^}]*` can only stop at the first literal `}`, so this is the
-            # same "up to the first closing brace" scope the old `%%\}*`
-            # produced -- byte-identical on every case measured (normal,
-            # empty, absent "sessions", sessions-at-end, empty sessions
-            # object). The `elif` fallback below is the one case a single
-            # regex cannot express without losing fidelity: "sessions" is
-            # present but nothing ever closes it (a truncated/corrupted
-            # write -- already-pathological input the atomic
-            # temp-file-then-rename writer below should never produce).
-            # That fallback keeps the OLD quadratic-shaped prefix-strip, on
-            # purpose: it only runs on input that is already broken, never
-            # on a legitimate file, so it buys exact parity with history
-            # without paying for it on any real save.
+            # `([^}]*)` with NO trailing `\}` requirement: a greedy `[^}]*`
+            # stops at the first literal `}` when one exists -- the same
+            # "up to the first closing brace" scope the old `%%\}*` produced
+            # -- and matches to the end of the string when none does,
+            # because nothing after the capture group forces backtracking.
+            # Self-review's first draft required a trailing `\}` and kept
+            # an `elif` fallback (the old quadratic prefix-strip) for a
+            # truncated/corrupted file with no closing brace anywhere after
+            # "sessions" -- a case the atomic temp-file-then-rename writer
+            # below should never produce, but still a live exposure on an
+            # already-broken file for as long as the sidecar-trust check
+            # keeps running on every tool call. Dropping the trailing `\}`
+            # removes the fallback (and the exposure) entirely: re-measured
+            # on a 20,000-filler-session file with NO closing brace anywhere
+            # after "sessions" -- 0.022s, same as the well-formed
+            # 20,000-session case, not the quadratic cost the fallback
+            # existed to re-admit. Byte-identical to the old two-expansion
+            # form on every case measured (normal, empty, absent "sessions",
+            # sessions-at-end, empty sessions object, truncated-no-brace, a
+            # double "sessions" occurrence).
             #
-            # Built from `$_pt_dq` rather than a literal `\"` in the pattern
-            # -- #898 round 8's scanner (tests/test_scanner_shapes_source_898.py,
+            # Built from `$_pt_dq` -- not a literal `\"` in the pattern --
+            # the same technique the two expansions this replaces already
+            # used (not new work this fix introduces): #898 round 8's
+            # scanner (tests/test_scanner_shapes_source_898.py,
             # `_check_escaped_quote`) flags an escaped double quote shipped
             # in a hook script, because the build's inlining step can hold
-            # on it. A variable holding the quote is the rewrite its own
-            # docstring names.
+            # on it.
             _SESSIONS_SCOPE=""
-            _PT_SESSIONS_RE="$_pt_dq"'sessions'"$_pt_dq"'([^}]*)}'
+            _PT_SESSIONS_RE="$_pt_dq"'sessions'"$_pt_dq"'([^}]*)'
             if [[ "$_LAST_SAVE_CONTENT" =~ $_PT_SESSIONS_RE ]]; then
                 _SESSIONS_SCOPE="${BASH_REMATCH[1]}"
-            elif [[ "$_LAST_SAVE_CONTENT" == *"$_pt_dq"sessions"$_pt_dq"* ]]; then
-                _SESSIONS_SCOPE="${_LAST_SAVE_CONTENT#*"$_pt_dq"sessions"$_pt_dq"}"
             fi
             if [[ "$_SESSIONS_SCOPE" == *"$_pt_dq"$SESSION_ID"$_pt_dq":* ]]; then
                 LAST_LINE=$((10#$_SIDECAR_LINE))
