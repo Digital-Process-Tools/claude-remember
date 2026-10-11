@@ -96,6 +96,16 @@ def test_real_timeout_probe_returns_an_integer(tmp_path):
         f"(stderr: {result.stderr!r}, elapsed={elapsed:.2f}s, "
         f"returncode={result.returncode})"
     )
+    # isdigit() alone accepts "0", and 0 is the one value doctor.sh reads as
+    # "workaround applied" (OK, no WARN). A mis-marshalled P/Invoke that
+    # silently returned 0 would pass the line above while suppressing the
+    # warning -- the dangerous direction. A stock CI host has never had the
+    # workaround applied, so its live value is the non-zero default.
+    assert int(result.stdout.strip()) > 0, (
+        f"timeout probe returned 0 on a CI host that never applied the "
+        f"#1011 workaround -- likely a mis-marshalled read, not the live value "
+        f"(elapsed={elapsed:.2f}s)"
+    )
 
 
 def test_this_ci_hosts_own_build_does_not_warn(tmp_path):

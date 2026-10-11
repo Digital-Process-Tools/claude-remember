@@ -1234,10 +1234,14 @@ _remember_doctor_is_windows() {
 # load). #1011 round 5 removed that Add-Type compile entirely (see
 # _remember_doctor_fglock_timeout's own comment below) in favor of a
 # compile-free System.Reflection.Emit P/Invoke, so neither probe below
-# spawns a compiler process anymore and both now share this 5s default --
-# the $2 override point is kept for any future probe that needs it.
+# spawns a compiler process anymore. The shared default is 15s, not 5s: no
+# run has isolated a probe's own wall time (CI only measures whole tests,
+# each of which also sources this file), and a cold Windows PowerShell 5.1
+# start on a loaded host can take several seconds. Doctor is on-demand, so a
+# wide bound costs nothing on a healthy host and removes an unmeasured
+# margin -- the exact shape that turned main red twice. $2 still overrides.
 _remember_doctor_run_powershell_file() {
-    local _ps_bin="" _ps_file="$1" _ps_timeout="${2:-5}" _ps_out_file _ps_pid _ps_watchdog _ps_rc _ps_out
+    local _ps_bin="" _ps_file="$1" _ps_timeout="${2:-15}" _ps_out_file _ps_pid _ps_watchdog _ps_rc _ps_out
 
 if command -v powershell.exe >/dev/null 2>&1; then
         _ps_bin="powershell.exe"
