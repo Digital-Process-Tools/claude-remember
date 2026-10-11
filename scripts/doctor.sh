@@ -1241,7 +1241,7 @@ _remember_doctor_is_windows() {
 # wide bound costs nothing on a healthy host and removes an unmeasured
 # margin -- the exact shape that turned main red twice. $2 still overrides.
 _remember_doctor_run_powershell_file() {
-    local _ps_bin="" _ps_file="$1" _ps_timeout="${2:-15}" _ps_out_file _ps_pid _ps_watchdog _ps_rc _ps_out
+    local _ps_bin="" _ps_file="$1" _ps_timeout="${2:-15}" _ps_out_file _ps_pid _ps_watchdog _ps_sleep_pid_file _ps_sleep_real_pid _ps_rc _ps_out
 
 if command -v powershell.exe >/dev/null 2>&1; then
         _ps_bin="powershell.exe"
@@ -1267,10 +1267,54 @@ if command -v powershell.exe >/dev/null 2>&1; then
 "$_ps_bin" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$_ps_file" >"$_ps_out_file" 2>/dev/null &
     _ps_pid=$!
 
-( sleep "$_ps_timeout"; kill -9 "$_ps_pid" 2>/dev/null ) &
+    # #1011 round 6 review finding: this watchdog subshell used to inherit
+    # this function's own stdout/stderr unredirected. Every real caller
+    # captures this function's output via command substitution ($(...)),
+    # e.g. _FGLOCK_TIMEOUT=$(_remember_doctor_fglock_timeout) -- and that
+    # read blocks until EVERY process holding the pipe's write end closes
+    # it, not just until the data it is waiting for arrives. `sleep` is
+    # forked as a child of the subshell below (the subshell runs two
+    # sequential commands, so bash cannot exec-replace it), and that child
+    # kept the write end open for the FULL $_ps_timeout bound even after
+    # PowerShell had already answered and this function had already
+    # printed its real result (observed on real windows-latest CI, PR
+    # #1024 merge-check logs: each probe cost ~2x its own bound). Closing
+    # the subshell's own fds (below) removes the wait.
+    #
+    # Reaping the watchdog early (once PowerShell answers) must also reap
+    # its `sleep` child, not just the subshell -- `kill` on the subshell's
+    # own PID does not touch a child it already forked, so sleep would
+    # otherwise be orphaned and keep running for the rest of its own bound
+    # (a stray process, even once it no longer blocks anything). A first
+    # attempt moved `sleep` out to be a direct child of THIS function so it
+    # could be killed directly -- but that makes the subshell's own `wait`
+    # target a SIBLING process, not its own child, which bash refuses
+    # ("wait: pid N is not a child of this shell") and returns from
+    # immediately, firing the kill -9 right away regardless of the real
+    # bound (caught in self-review before this reached CI). `wait` can
+    # only ever target a process's own direct child, so the subshell must
+    # keep `sleep` as ITS OWN child -- the fix instead has the subshell
+    # hand its sleep child's real PID back out through a small temp file,
+    # so the reap path below can `kill` that PID directly (killing does
+    # NOT require a parent-child relationship) without needing to `wait`
+    # on it from outside.
+    _ps_sleep_pid_file=$(mktemp "${TMPDIR:-/tmp}/remember-doctor-fglock-sleep.XXXXXX") || _ps_sleep_pid_file=""
+    (
+        sleep "$_ps_timeout" &
+        _ps_sleep_real_pid=$!
+        if [ -n "$_ps_sleep_pid_file" ]; then
+            printf '%s' "$_ps_sleep_real_pid" >"$_ps_sleep_pid_file" 2>/dev/null
+        fi
+        wait "$_ps_sleep_real_pid" 2>/dev/null
+        kill -9 "$_ps_pid" 2>/dev/null
+    ) >/dev/null 2>&1 &
     _ps_watchdog=$!
     wait "$_ps_pid" 2>/dev/null
     _ps_rc=$?
+    if [ -n "$_ps_sleep_pid_file" ] && [ -s "$_ps_sleep_pid_file" ]; then
+        kill "$(cat "$_ps_sleep_pid_file" 2>/dev/null)" 2>/dev/null
+    fi
+    rm -f "$_ps_sleep_pid_file" 2>/dev/null
     kill "$_ps_watchdog" 2>/dev/null
     wait "$_ps_watchdog" 2>/dev/null
 
