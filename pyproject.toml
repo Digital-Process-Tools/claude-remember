@@ -8,6 +8,17 @@ testpaths = ["tests"]
 # identical to a green run that checked everything (#306).
 addopts = "-rs --durations=25 --cov=pipeline --cov-report=term-missing --cov-fail-under=80"
 
-# TEMPORARY PROOF VALUE for #1014 -- lowered to make the dump fire fast on CI.
-# Will be raised to the real margin (900s) before the PR is finalized.
-faulthandler_timeout = 5
+# #1014: a job cancelled by its own job-level timeout-minutes writes NO log at
+# all, so a hung test used to be unidentifiable. faulthandler_timeout (builtin
+# to pytest, no new dependency) dumps every thread's traceback -- naming the
+# hung test -- once any single test runs longer than this. Sized from a green
+# windows-latest run's own --durations=25 output (run 38091996750, job
+# 114330142530): the slowest single test there was 30.14s, so 900s leaves
+# ~30x margin over normal variance while still firing well inside the step's
+# own 1500s (25min) timeout below, which is itself below the job's 30min
+# timeout -- the dump lands in the kept log before the step is killed.
+# Compatible with --cov (faulthandler is independent of coverage collection)
+# and with pytest-xdist if it is ever added (this repo currently has none,
+# confirmed by a repo-wide grep); faulthandler_timeout is a per-worker/
+# per-process setting either way.
+faulthandler_timeout = 900

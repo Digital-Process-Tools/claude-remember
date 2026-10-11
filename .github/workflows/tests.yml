@@ -87,7 +87,16 @@ jobs:
           Add-MpPreference -ExclusionPath "${{ github.workspace }}"
           Add-MpPreference -ExclusionPath "$env:RUNNER_TEMP"
       - name: Run tests
+        timeout-minutes: 25
         run: pytest
+      - name: List surviving wscript/bash/conhost/powershell processes (Windows)
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Get-CimInstance Win32_Process |
+            Where-Object { $_.Name -in @('wscript.exe', 'bash.exe', 'conhost.exe', 'powershell.exe') } |
+            Select-Object ProcessId, ParentProcessId, Name, CommandLine |
+            Format-List
 
   # #900: each hooks.json-registered hook script is inlined and
   # comment-stripped for the release tree (compile_hooks.py) so the
@@ -139,4 +148,13 @@ jobs:
         # above already uses on this same matrix.
         run: python .github/scripts/compile_hooks.py --repo . --apply
       - name: Run the full suite against the compiled hooks
+        timeout-minutes: 25
         run: pytest
+      - name: List surviving wscript/bash/conhost/powershell processes (Windows)
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Get-CimInstance Win32_Process |
+            Where-Object { $_.Name -in @('wscript.exe', 'bash.exe', 'conhost.exe', 'powershell.exe') } |
+            Select-Object ProcessId, ParentProcessId, Name, CommandLine |
+            Format-List
