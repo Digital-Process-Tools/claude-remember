@@ -48,6 +48,31 @@ already-regressed baseline), and HEAD (this fix) -- instead of against a
 number nobody re-derived. `_pt_scan_lines` and its call site are a few
 processes out of a much larger total; this file no longer pretends it is
 measuring their contribution alone.
+
+#1029 (follow-up investigation): this file's own fixture -- a brand-new
+tmp_path (HOME, PROJECT, REMEMBER_DIR, TMPDIR all freshly created) for every
+single one of the `n` repeated runs -- measures ONLY the cold-start cost: no
+prior invocation has ever published lib-env-cache.sh's session cache, the
+SESSION_DIR cache, or log.sh's cfg-flatten cache for that tree, so every run
+takes the full slow path (resolve-paths.sh -> detect-tools.sh ->
+bootstrap-dirs.sh -> log.sh, lib-memory-dir.sh's worktree-detection forks,
+`_config_load`'s jq read, the mktemp+mv cache publishes). On the WARM path --
+any call after the first in a real session, which is the common case once a
+project has run once -- `_remember_env_cache_load` (post-tool-hook.sh:317)
+succeeds and skips sourcing all four of those files entirely; the only two
+forks left on that path are `_pt_scan_lines`'s own `tail`+`wc` (lines
+~959/989), and the comment immediately above that `wc` call already
+documents why collapsing it further reintroduces #1017's quadratic
+bash-expansion regression. No further cut landed in this round: every
+candidate the issue named (bootstrap-dirs.sh's mkdir, the mktemp+mv
+atomic-write pattern, the jq config read, the two `_pt_scan_lines` forks)
+was traced to either (a) cold-path-only work already gated behind existence
+checks (#230/#666), (b) work inside the byte-pinned lib-memory-dir.sh
+(tests/test_case_divergence_298.py), or (c) a fork already proven, in-repo,
+unavoidable without reintroducing a worse regression. The absolute-budget
+assertions below exist so a REAL future reduction (or regression) on this
+cold path is still caught, without this test depending on a cut this round
+did not find a safe way to make.
 """
 
 from __future__ import annotations
@@ -220,6 +245,21 @@ def test_below_threshold_path_total_forks_vs_tagged_baselines(tmp_path):
     head_min, head_all = _min_forks_for_tree(
         tmp_path, "head", HOOK, REPO_ROOT, n=n)
 
+    # #1029: an ABSOLUTE budget, independent of whether either tagged tree can
+    # be materialized here (no network reaching origin skips BOTH relative
+    # assertions below, leaving nothing that can fail -- see the skip branch
+    # a few lines down). HEAD measured 67 on every one of 9 runs across every
+    # ubuntu/Python CI leg as of #1028; +2 is slack for ordinary noise
+    # (scheduler jitter, background reaping), not room for a new fork class
+    # to creep back in unnoticed the way #1011 round 1 did.
+    assert head_min <= 69, (
+        f"below-threshold path, whole-hook strace total -- HEAD min={head_min} "
+        f"all={sorted(head_all)} -- exceeds the absolute budget of 69 (67 "
+        f"measured as of #1028, +2 slack); this must hold even when neither "
+        f"tagged baseline tree below can be materialized, so a regression is "
+        f"never silently unchecked just because this CI leg has no network"
+    )
+
     results = {"HEAD": (head_min, head_all)}
     skipped = []
     for tag in ("v0.42.4", "v0.43.0"):
@@ -298,4 +338,12 @@ def test_cooldown_path_forks_fewer_than_below_threshold_path(tmp_path):
         f"the below-threshold path ({sorted(below_all)}) -- either the scan is "
         f"no longer being skipped under cooldown, or this counting method "
         f"cannot see the decrease it exists to detect"
+    )
+    # #1029: absolute budget for the cooldown path too, same reasoning as the
+    # below-threshold path's own budget above -- a relative check alone
+    # ("fewer than below-threshold") would still pass if BOTH paths silently
+    # grew by the same amount.
+    assert cool_min <= 69, (
+        f"cooldown path, whole-hook strace total -- min={cool_min} "
+        f"all={sorted(cool_all)} -- exceeds the absolute budget of 69"
     )
