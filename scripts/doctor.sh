@@ -1228,15 +1228,14 @@ _remember_doctor_is_windows() {
 # bounded by a plain bash watchdog (sleep + kill -9); missing powershell,
 # a non-zero exit, or a timeout all print nothing on purpose (#1002). The
 # bound defaults to 5s but is overridable per call ($2) -- #1015 review
-# round 4: on real windows-latest CI, a diagnostic run of ONLY the timeout
-# probe below (which runs an Add-Type C# compile; see
-# tests/test_windows_real_fglock_1011.py) measured elapsed=10.81s,
-# returncode=0, empty stdout/stderr -- more than double the 5s this
-# function used to hard-code, with no error of any kind reported. The
-# build probe above never needs Add-Type and stays fast on the same host,
-# so it keeps the 5s default; only the Add-Type-using timeout probe asks
-# for a wider one. doctor.sh is not a hot path, so a wider bound here is a
-# fair trade against a false "could not determine" WARN.
+# round 4 OBSERVED this default too narrow for a timeout probe that used
+# Add-Type to compile inline C# via csc.exe (elapsed=10.81s on real
+# windows-latest CI, later exceeding even a widened 20s bound under more
+# load). #1011 round 5 removed that Add-Type compile entirely (see
+# _remember_doctor_fglock_timeout's own comment below) in favor of a
+# compile-free System.Reflection.Emit P/Invoke, so neither probe below
+# spawns a compiler process anymore and both now share this 5s default --
+# the $2 override point is kept for any future probe that needs it.
 _remember_doctor_run_powershell_file() {
     local _ps_bin="" _ps_file="$1" _ps_timeout="${2:-5}" _ps_out_file _ps_pid _ps_watchdog _ps_rc _ps_out
 
@@ -1316,6 +1315,12 @@ printf '%s\n' '$asmName = New-Object System.Reflection.AssemblyName("RememberFgA
     printf '%s\n' '$paramTypes = [Type[]]@([uint32], [uint32], [uint32].MakeByRefType(), [uint32])' >>"$_ps_script"
     printf '%s\n' '$methodAttrs = [System.Reflection.MethodAttributes]"Public,Static,PinvokeImpl"' >>"$_ps_script"
     printf '%s\n' '$methodBuilder = $typeBuilder.DefinePInvokeMethod("SystemParametersInfo", "user32.dll", $methodAttrs, [System.Reflection.CallingConventions]::Standard, [bool], $paramTypes, [System.Runtime.InteropServices.CallingConvention]::Winapi, [System.Runtime.InteropServices.CharSet]::Auto)' >>"$_ps_script"
+    # review finding: DefinePInvokeMethod, unlike Add-Type, does NOT infer
+    # PreserveSig for a non-void P/Invoke return type -- without it the CLR
+    # applies COM/HRESULT-style return marshaling and the call fails on
+    # every real host, not just intermittently. The MSDN DefinePInvokeMethod
+    # sample sets this explicitly for exactly this reason.
+    printf '%s\n' '$methodBuilder.SetImplementationFlags($methodBuilder.GetMethodImplementationFlags() -bor [System.Reflection.MethodImplAttributes]::PreserveSig)' >>"$_ps_script"
     printf '%s\n' '$fgType = $typeBuilder.CreateType()' >>"$_ps_script"
     printf '%s\n' '$fg = 0' >>"$_ps_script"
     printf '%s\n' '$fgType::SystemParametersInfo(0x2000, 0, [ref]$fg, 0) | Out-Null' >>"$_ps_script"

@@ -75,10 +75,14 @@ def test_real_timeout_probe_returns_an_integer(tmp_path):
     # windows-latest CI (jobs 114303128794, 114303128471), while the build
     # probe above, which runs no Add-Type compile, passed reliably. A
     # diagnostic run (elapsed=10.81s, returncode=0, empty stdout/stderr)
-    # proved the Add-Type C# compile in
-    # _remember_doctor_fglock_timeout exceeded doctor.sh's old 5s watchdog
-    # bound -- fixed by widening that one probe's bound to 20s (see
-    # scripts/doctor.sh's own comment on _remember_doctor_run_powershell_file).
+    # proved the Add-Type C# compile in _remember_doctor_fglock_timeout
+    # exceeded doctor.sh's old 5s watchdog bound -- round 4 widened that
+    # one probe's bound to 20s, but a later CI run (38110311076,
+    # 114384312765) measured 25.81s, exceeding even that. Round 5 removed
+    # the Add-Type compile entirely in favor of a compile-free
+    # System.Reflection.Emit P/Invoke (see scripts/doctor.sh's own comment
+    # on _remember_doctor_fglock_timeout), so this probe shares the
+    # standard 5s bound again -- no compiler process left to wait out.
     # Elapsed time and exit code stay in the assertion message below,
     # permanently -- cheap, and the next regression here won't need a
     # separate diagnostic round-trip to tell a watchdog-bound issue apart
