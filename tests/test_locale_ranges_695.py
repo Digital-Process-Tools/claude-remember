@@ -219,9 +219,13 @@ ALLOWLIST: dict[tuple[str, int], str] = {
     ("scripts/post-tool-hook.sh", 810): _CASE,
     # The #913 transcript-scan sidecar's own key: a filename component, same
     # [A-Za-z0-9._-]+ charset as SESSION_ID right above, never locale text --
-    # measured the same way, same reason.
-    ("scripts/post-tool-hook.sh", 957): _CASE,
-    ("scripts/post-tool-hook.sh", 1059): _CASE,
+    # measured the same way, same reason. Shifted +26 by #1017's comment
+    # block replacing the quadratic newline count in _pt_scan_lines with a
+    # linear `wc -l`, and by #1019's comment block forcing the empty-
+    # SESSION_ID capture-alive write onto the atomic branch -- neither
+    # touches this range or adds a new one of its own.
+    ("scripts/post-tool-hook.sh", 984): _CASE,
+    ("scripts/post-tool-hook.sh", 1086): _CASE,
     ("scripts/session-end-hook.sh", 201): _CASE,
     ("scripts/session-end-hook.sh", 209): _CASE,
     ("scripts/session-start-hook.sh", 289): _CASE,

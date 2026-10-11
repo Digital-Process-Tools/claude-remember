@@ -110,9 +110,20 @@ def _reap(remember):
 def test_a_warm_call_reads_only_the_appended_bytes(tmp_path):
     """POSITIVE CONTROL first: the cold run must still spawn something that
     reads the transcript (`tail`, from offset 0, same as a fresh file), or
-    the absence of `wc` below proves nothing. Then the real assertion: a
-    warm call, after more lines were appended, must fork `tail` and must
-    NOT fork `wc` at all -- the whole-file scan #913 complains about."""
+    the assertion below (that `tail` runs again on the warm call) proves
+    nothing. Then the real assertion: a warm call, after more lines were
+    appended, must fork `tail` again rather than re-reading the whole file
+    from the start -- the whole-file SCAN #913 complains about, not the
+    byte count of what gets read.
+
+    `wc` forking here is no longer the thing under test (#1017): counting
+    newlines in the appended chunk with bash's own per-byte parameter
+    substitution was quadratic in chunk size (measured 110.81s for a 2MB
+    chunk on bash 5.3, 415.67s for 50KB on /bin/bash 3.2.57), so #1017
+    moved that count to `wc -l` over the chunk -- one extra fork per call,
+    paid once, not once per byte. `wc` now appears on every warm call; see
+    test_pt_scan_lines_wall_clock_1017.py for the bound that actually
+    matters (wall-clock time, not which binaries ran)."""
     home, project, remember, transcript = _project(tmp_path, jsonl_lines=10)
     env = _env(tmp_path, home, project)
     log = tmp_path / "spawns.log"
@@ -135,10 +146,6 @@ def test_a_warm_call_reads_only_the_appended_bytes(tmp_path):
 
     assert "tail" in _cmds(warm_lines), (
         "the warm run did not re-scan the transcript at all: " + repr(warm_lines)
-    )
-    assert "wc" not in _cmds(warm_lines), (
-        "the warm run still forked `wc` -- the whole-file scan #913 exists "
-        "to remove: " + repr(warm_lines)
     )
 
     sidecar = _sidecar(remember)

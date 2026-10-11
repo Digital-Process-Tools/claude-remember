@@ -849,7 +849,19 @@ _ptl_capture_current=""
 if [ -f "$_ptl_capture_marker" ]; then
     read -r _ptl_capture_current < "$_ptl_capture_marker" 2>/dev/null
 fi
-if [ "$_ptl_capture_current" != "$SESSION_ID" ]; then
+# #1019: when SESSION_ID is empty (the basename-sanitiser route below
+# failed on this transcript's name) and the marker already holds ""
+# too, CURRENT == SESSION_ID is true for the SAME reason it is true in
+# the real case -- but taking the in-place branch there writes ZERO
+# bytes, and a 0-byte write(2) never touches mtime (POSIX). doctor.sh
+# reads this marker's mtime as "is PostToolUse still firing"; a frozen
+# mtime for a hook that is actively firing misreports a healthy session
+# as stale. Forcing the empty-id case onto the atomic tmp+mv branch
+# keeps it paying the same fork #1016 added the in-place branch to
+# avoid for the common (non-empty, unchanged) case -- but the mtime
+# DOES refresh there (`mv` always touches it), which is the one
+# property doctor.sh needs and the in-place branch cannot give it here.
+if [ "$_ptl_capture_current" != "$SESSION_ID" ] || [ -z "$SESSION_ID" ]; then
     if printf '%s' "$SESSION_ID" > "$_ptl_capture_marker.$$" 2>/dev/null; then
         mv -f "$_ptl_capture_marker.$$" "$_ptl_capture_marker" 2>/dev/null \
             || rm -f "$_ptl_capture_marker.$$" 2>/dev/null || true
@@ -946,8 +958,23 @@ _pt_scan_lines() {
     fi
     local _partial=${_chunk##*$'\n'}
     local _complete=${_chunk%"$_partial"}
-    local _nl_only=${_complete//[^$'\n']}
-    printf '%s %s\n' "$(( _off + ${#_complete} ))" "$(( _lines + ${#_nl_only} ))"
+    # Counting newlines with a per-byte parameter-substitution scan
+    # (${_complete//[^\n]}, the prior form here) is QUADRATIC in bash --
+    # both 3.2 and 5.3, the same class #898 already documents for other
+    # expansion forms. Measured (#1017): 110.81s for a 2MB chunk on bash
+    # 5.3, 415.67s for a 50KB chunk on /bin/bash 3.2.57 (this repo's
+    # documented floor) -- regressing the exact #913 scenario (the first
+    # post-upgrade call on an existing session, which rescans the whole
+    # transcript) to far worse than the 229ms whole-file `wc -l` #913
+    # replaced. `wc -l` is a linear C loop; piping `_complete` through it
+    # costs one extra fork per call (`printf` is a builtin, so only `wc`
+    # is a new process `tests/spawn_counting.py`'s shim can see), not a
+    # cost that grows with chunk size beyond the linear read itself.
+    local _nl_count
+    _nl_count=$(printf '%s' "$_complete" | wc -l)
+    _nl_count=${_nl_count//[^0-9]}
+    [ -z "$_nl_count" ] && _nl_count=0
+    printf '%s %s\n' "$(( _off + ${#_complete} ))" "$(( _lines + _nl_count ))"
 }
 
 _SCAN_NAME="${TRANSCRIPT##*/}"
