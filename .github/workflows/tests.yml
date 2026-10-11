@@ -88,6 +88,98 @@ jobs:
           Add-MpPreference -ExclusionPath "$env:RUNNER_TEMP"
       - name: Run tests
         run: pytest
+      - name: "#1011 scratch diagnostic: attribute post-tool-hook process count (removed before merge)"
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.11'
+        continue-on-error: true
+        run: |
+          set -u
+          mkdir -p /tmp/attrib-1011/home/.claude/projects/proj /tmp/attrib-1011/project/.remember/tmp
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          proj = Path("/tmp/attrib-1011/project")
+          (proj / ".remember" / "config.json").write_text(
+              json.dumps({"thresholds": {"delta_lines_trigger": 50}}), encoding="utf-8")
+          line = json.dumps({"type": "assistant", "message": {"content": "x"}}) + "\n"
+          (Path("/tmp/attrib-1011/home/.claude/projects/proj") / "sess-1.jsonl").write_text(
+              line * 10, encoding="utf-8")
+          PY
+          export CLAUDE_PLUGIN_ROOT="$PWD"
+          export HOME=/tmp/attrib-1011/home
+          export CLAUDE_PROJECT_DIR=/tmp/attrib-1011/project
+          export BASH_XTRACEFD=9
+          export PS4='+++XTRACE ${EPOCHREALTIME} ${BASH_SOURCE##*/}:${LINENO}:${BASHPID} '
+          strace -f -tt -qq -e trace=clone,clone3,fork,vfork,execve \
+            -o /tmp/attrib-1011/strace.log \
+            bash -x scripts/post-tool-hook.sh \
+            9>/tmp/attrib-1011/xtrace.log <<< '' || true
+          python3 - <<'PY'
+          import math
+          import re
+          import time
+          from collections import Counter, defaultdict
+
+          def epoch_to_sod(t):
+              frac = t - math.floor(t)
+              lt = time.localtime(t)
+              return lt.tm_hour * 3600 + lt.tm_min * 60 + lt.tm_sec + frac
+
+          def hms_to_sod(ts):
+              h, m, s = ts.split(":")
+              return int(h) * 3600 + int(m) * 60 + float(s)
+
+          by_pid = defaultdict(list)
+          xre = re.compile(r"^\+\+\+XTRACE (\d+\.\d+) (\S+):(\d+):(\d+)")
+          with open("/tmp/attrib-1011/xtrace.log", encoding="utf-8", errors="replace") as fh:
+              for line in fh:
+                  m = xre.match(line)
+                  if not m:
+                      continue
+                  t, src, lineno, pid = m.groups()
+                  by_pid[int(pid)].append((epoch_to_sod(float(t)), f"{src}:{lineno}"))
+          for pid in by_pid:
+              by_pid[pid].sort()
+
+          def loc_for(pid, sod):
+              entries = by_pid.get(pid)
+              if not entries:
+                  return None
+              best = None
+              for et, loc in entries:
+                  if et <= sod + 0.05:
+                      best = loc
+                  else:
+                      break
+              return best
+
+          clone_counter = Counter()
+          exec_counter = Counter()
+          total = 0
+          cre = re.compile(r"^(\d+)\s+(\d{2}:\d{2}:\d{2}\.\d+)\s+(clone3?|fork|vfork)\(")
+          ere = re.compile(r'^(\d+)\s+(\d{2}:\d{2}:\d{2}\.\d+)\s+execve\("([^"]+)"')
+          with open("/tmp/attrib-1011/strace.log", encoding="utf-8", errors="replace") as fh:
+              for line in fh:
+                  m = cre.match(line)
+                  if m:
+                      pid, ts, call = m.groups()
+                      total += 1
+                      loc = loc_for(int(pid), hms_to_sod(ts)) or f"pid:{pid} (no xtrace match -- non-bash descendant)"
+                      clone_counter[loc] += 1
+                      continue
+                  m2 = ere.match(line)
+                  if m2:
+                      pid, ts, path = m2.groups()
+                      loc = loc_for(int(pid), hms_to_sod(ts)) or f"pid:{pid} (no xtrace match -- non-bash descendant)"
+                      exec_counter[(loc, path.rsplit("/", 1)[-1])] += 1
+
+          print(f"#1011 attribution -- total clone/clone3/fork/vfork syscalls this run: {total}")
+          print("## by attributed script:line (sorted by count)")
+          for loc, n in clone_counter.most_common():
+              print(f"{n:4d}  {loc}")
+          print("## execve destinations by attributed script:line")
+          for (loc, binname), n in exec_counter.most_common():
+              print(f"{n:4d}  {loc}  -> {binname}")
+          PY
 
   # #900: each hooks.json-registered hook script is inlined and
   # comment-stripped for the release tree (compile_hooks.py) so the

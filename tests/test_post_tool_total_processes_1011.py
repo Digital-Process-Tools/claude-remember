@@ -31,18 +31,44 @@ POSITIVE CONTROL: the cooldown path's process count must come out LOWER
 than the below-threshold path's (it skips the whole scan), proving this
 method can detect a decrease and is not just reporting the same number for
 every scenario because the harness itself is broken.
+
+ROUND 2 OF ROUND 2 (this file's own self-review finding, #1011 follow-up):
+a CI run of the below-threshold test asserted the whole hook invocation's
+TOTAL fork count (`strace -f bash "$HOOK"`, every clone/fork/vfork anywhere
+in the process tree -- libs sourced, `detect-tools.sh` probes, the
+background `save-session.sh` detach, all of it) against 6, a number that
+only ever described `_pt_scan_lines`'s own local contribution. It measured
+67 on every one of 9 runs across every ubuntu/Python leg -- a real,
+reproducible number, just checked against the wrong claim. The whole-hook
+total was never pinned against anything meaningful before this round: this
+file now compares the SAME whole-hook strace measurement across three real
+trees -- the tagged v0.42.4 release (before #913's incremental scan existed
+at all), the tagged v0.43.0 release (this issue's own immediately preceding,
+already-regressed baseline), and HEAD (this fix) -- instead of against a
+number nobody re-derived. `_pt_scan_lines` and its call site are a few
+processes out of a much larger total; this file no longer pretends it is
+measuring their contribution alone.
 """
 
 from __future__ import annotations
 
+import atexit
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
+from pathlib import Path
 
 import pytest
 
-from tests.test_post_tool_incremental_scan_913 import HOOK, _env, _project, _reap
+from tests.test_post_tool_incremental_scan_913 import (
+    HOOK,
+    REPO_ROOT,
+    _env,
+    _project,
+    _reap,
+)
 
 pytestmark = pytest.mark.skipif(
     sys.platform == "win32",
@@ -55,12 +81,71 @@ pytestmark = pytest.mark.skipif(
 # most likely to run this test (current ubuntu-latest images).
 _CLONE_RE = re.compile(r"^\d+\s+(clone3?|fork|vfork)\(")
 
+# Tag -> materialized tree root, or None once materializing it has been
+# tried and failed (no network, tag genuinely absent, archive/extract
+# failure) -- cached once per test session rather than re-attempted per
+# call, since a failure mode here (no network reaching origin) is a
+# property of the whole run, not of one test.
+_TREE_CACHE: dict[str, Path | None] = {}
+
 
 def _strace_path():
     return shutil.which("strace")
 
 
-def _count_forks(env):
+def _materialize_tree(tag):
+    """Extract the tagged release's full tree (whatever `git archive` has
+    recorded for it -- the whole `scripts/` directory, since the hook
+    sources half a dozen sibling libs by relative path, not just the one
+    file) into a throwaway directory, fetching the tag shallowly first if
+    this checkout does not already have it (a CI checkout is commonly
+    shallow and tag-less). Returns None -- never raises -- on anything that
+    keeps the comparison from being possible here: no git, no network, the
+    tag genuinely does not exist. A caller that gets None for a tag must
+    skip (not fail) the comparison against that baseline; None is "could
+    not measure," never "measured zero."
+    """
+    if tag in _TREE_CACHE:
+        return _TREE_CACHE[tag]
+    git = shutil.which("git")
+    if git is None:
+        _TREE_CACHE[tag] = None
+        return None
+    verify = subprocess.run(
+        [git, "-C", str(REPO_ROOT), "rev-parse", "--verify", "--quiet", tag + "^{commit}"],
+        capture_output=True, timeout=30, check=False,
+    )
+    if verify.returncode != 0:
+        fetch = subprocess.run(
+            [git, "-C", str(REPO_ROOT), "fetch", "--depth=1", "origin", "tag", tag],
+            capture_output=True, timeout=60, check=False,
+        )
+        if fetch.returncode != 0:
+            _TREE_CACHE[tag] = None
+            return None
+    dest = Path(tempfile.mkdtemp(prefix="remember-tree-" + tag.replace("/", "_") + "-"))
+    archive = subprocess.run(
+        [git, "-C", str(REPO_ROOT), "archive", "--format=tar", tag],
+        capture_output=True, timeout=60, check=False,
+    )
+    if archive.returncode != 0 or not archive.stdout:
+        shutil.rmtree(dest, ignore_errors=True)
+        _TREE_CACHE[tag] = None
+        return None
+    extract = subprocess.run(
+        ["tar", "-x", "-C", str(dest)],
+        input=archive.stdout, capture_output=True, timeout=60, check=False,
+    )
+    if extract.returncode != 0 or not (dest / "scripts" / "post-tool-hook.sh").exists():
+        shutil.rmtree(dest, ignore_errors=True)
+        _TREE_CACHE[tag] = None
+        return None
+    atexit.register(shutil.rmtree, dest, True)
+    _TREE_CACHE[tag] = dest
+    return dest
+
+
+def _count_forks(env, hook=HOOK):
     """Total clone/clone3/fork/vfork syscalls the hook's own process tree
     makes, via a raw (non -c) strace trace -- counting matching lines
     avoids depending on a specific strace version's `-c` summary-table
@@ -73,7 +158,7 @@ def _count_forks(env):
     strace = _strace_path()
     log = env["_STRACE_LOG"]
     cmd = [strace, "-f", "-qq", "-e", "trace=clone,clone3,fork,vfork",
-           "-o", log, "bash", str(HOOK)]
+           "-o", log, "bash", str(hook)]
     result = subprocess.run(cmd, capture_output=True, env=env, timeout=120,
                              input=b"", check=False)
     if result.returncode != 0:
@@ -93,48 +178,91 @@ def _count_forks(env):
     return count
 
 
+def _min_forks_for_tree(tmp_path, label, hook, plugin_root, *, n, cooldown_ts=None):
+    """Run the below-threshold (or, with cooldown_ts set, cooldown) path
+    `n` times against one tree's own hook + sibling libs, and return the
+    minimum total fork count seen -- the same min-of-n convention the
+    release auditor and this file's own positive control already use,
+    since a single run's count is noisy (background reaping, scheduler
+    jitter) but the floor is stable."""
+    deltas = []
+    for i in range(n):
+        home, project, remember, _transcript = _project(
+            tmp_path / f"{label}-{i}", jsonl_lines=10, cooldown_ts=cooldown_ts)
+        env = _env(tmp_path / f"{label}-{i}", home, project)
+        env["CLAUDE_PLUGIN_ROOT"] = str(plugin_root)
+        env["_STRACE_LOG"] = str(tmp_path / f"{label}-{i}.strace.log")
+        count = _count_forks(env, hook=hook)
+        assert count is not None, (
+            f"strace produced no readable trace log for tree={label!r}"
+        )
+        deltas.append(count)
+        _reap(remember)
+    return min(deltas), deltas
+
+
 @pytest.mark.skipif(_strace_path() is None,
                      reason="strace not on PATH -- exact fork counting needs it; "
                             "this leg cannot see the class #1011 regressed")
-def test_below_threshold_path_total_forks_at_or_under_v0424_baseline(tmp_path):
-    """v0.42.4 (before #913's incremental scan existed at all) forked a
-    single `wc -l < "$TRANSCRIPT"` for this decision: 1 subshell + 1 `wc`
-    exec. #1011 round 1 (#913's offset-based rewrite) and #1017 (the
-    quadratic-newline-count fix after it) grew this to 3 fork-groups -- the
-    outer `$(_pt_scan_lines ...)` subshell, the `tail` chunk read, and a
-    `printf | wc` pipe -- 6 processes for this one decision, a real
-    regression #1011 round 2 exists to undo. This pins the fix: globals
-    instead of an outer command substitution, and a herestring instead of a
-    pipe, both landing the function+call-site's own contribution at 4
-    processes (2 for the unavoidable `tail` chunk read, 2 for `wc -l`
-    counting the chunk's complete lines) -- below the 6 the whole
-    below-threshold path forked before #1011 round 1 ever touched it,
-    whenever there is at least one complete line to count."""
+def test_below_threshold_path_total_forks_vs_tagged_baselines(tmp_path):
+    """Compares the SAME whole-hook strace measurement across three real
+    trees instead of against a hand-picked number: v0.42.4 (before #913's
+    incremental scan existed at all), v0.43.0 (this issue's own immediately
+    preceding, already-regressed release), and HEAD (this fix). A tagged
+    tree that cannot be materialized here (no network reaching origin, or
+    the tag genuinely absent from this checkout) is skipped for its own
+    comparison rather than silently treated as a pass or a fail -- the
+    assertion against it is what gets skipped, not the whole test, so HEAD
+    is still checked against whichever baseline(s) are actually available.
+    """
     n = 9
-    deltas = []
-    for i in range(n):
-        home, project, remember, _transcript = _project(tmp_path / f"t{i}",
-                                                          jsonl_lines=10)
-        env = _env(tmp_path / f"t{i}", home, project)
-        env["_STRACE_LOG"] = str(tmp_path / f"strace-{i}.log")
-        count = _count_forks(env)
-        assert count is not None, "strace produced no readable trace log"
-        deltas.append(count)
-        _reap(remember)
-    # Pinned BELOW v0.42.4's own pre-#913 baseline (6), not merely below
-    # the round-1 regression (9) -- a bound of "<= 9" would still pass if
-    # this fix were reverted outright, since 9 <= 9 is true. 6 is the
-    # ceiling: this fix's own design removes 2 of the 6 fork-groups
-    # _pt_scan_lines and its call site forked at the 9-total state (the
-    # outer `$(...)` wrapper, and the pipe's extra subshell), landing at
-    # 4 for that specific contribution -- below what v0.42.4 forked here
-    # before #913/#1017 ever added anything.
-    assert min(deltas) < 6, (
-        f"below-threshold path forked {min(deltas)} processes (min of {n}) -- "
-        f"at or above v0.42.4's own baseline (6) for this decision, not just "
-        f"the round-1 regression (9); the fork reduction in _pt_scan_lines "
-        f"has regressed: {sorted(deltas)}"
+    head_min, head_all = _min_forks_for_tree(
+        tmp_path, "head", HOOK, REPO_ROOT, n=n)
+
+    results = {"HEAD": (head_min, head_all)}
+    skipped = []
+    for tag in ("v0.42.4", "v0.43.0"):
+        tree = _materialize_tree(tag)
+        if tree is None:
+            skipped.append(tag)
+            continue
+        tag_min, tag_all = _min_forks_for_tree(
+            tmp_path, tag.replace(".", "_"),
+            tree / "scripts" / "post-tool-hook.sh", tree, n=n)
+        results[tag] = (tag_min, tag_all)
+
+    summary = ", ".join(
+        f"{label}=min:{vals[0]} all:{sorted(vals[1])}"
+        for label, vals in results.items()
     )
+    print(f"#1011 below-threshold path, whole-hook strace totals -- {summary}"
+          + (f" (skipped, could not materialize: {skipped})" if skipped else ""))
+
+    if "v0.42.4" not in results and "v0.43.0" not in results:
+        pytest.skip(
+            "could not materialize either tagged comparison tree (no "
+            f"network reaching origin, or tags absent from this checkout) "
+            f"-- HEAD alone measured min={head_min} all={sorted(head_all)}, "
+            "not checked against a baseline"
+        )
+
+    if "v0.42.4" in results:
+        baseline_min = results["v0.42.4"][0]
+        assert head_min <= baseline_min, (
+            f"below-threshold path, whole-hook strace total -- {summary} -- "
+            f"HEAD ({head_min}) regressed past v0.42.4's own baseline "
+            f"({baseline_min}); this fix must not fork more than the "
+            f"release that existed before #913's incremental scan did"
+        )
+
+    if "v0.43.0" in results:
+        regressed_min = results["v0.43.0"][0]
+        assert head_min < regressed_min, (
+            f"below-threshold path, whole-hook strace total -- {summary} -- "
+            f"HEAD ({head_min}) did not improve on v0.43.0's own "
+            f"already-regressed total ({regressed_min}); this fix's whole "
+            f"point was to fork fewer processes than the release it follows"
+        )
 
 
 @pytest.mark.skipif(_strace_path() is None,
@@ -146,34 +274,19 @@ def test_cooldown_path_forks_fewer_than_below_threshold_path(tmp_path):
     definition and call site included, never executes), so it must measure
     strictly fewer total forks than the below-threshold path in the SAME
     run -- proving this counting method can see a real decrease, not just
-    report a flat number regardless of which path actually executed."""
+    report a flat number regardless of which path actually executed. Runs
+    against HEAD only: this is a check on the measurement method itself,
+    not a cross-tree comparison, so a tagged tree's own availability (or
+    lack of it) is irrelevant here."""
     n = 9
-    below_d, cool_d = [], []
+    below_min, below_all = _min_forks_for_tree(tmp_path, "below", HOOK, REPO_ROOT, n=n)
     import time
     cooldown_ts = int(time.time()) - 5
-    for i in range(n):
-        home, project, remember, _transcript = _project(tmp_path / f"b{i}",
-                                                          jsonl_lines=10)
-        env = _env(tmp_path / f"b{i}", home, project)
-        env["_STRACE_LOG"] = str(tmp_path / f"below-{i}.log")
-        below_d.append(_count_forks(env))
-        _reap(remember)
-
-        home2, project2, remember2, _transcript2 = _project(
-            tmp_path / f"c{i}", jsonl_lines=10, cooldown_ts=cooldown_ts)
-        env2 = _env(tmp_path / f"c{i}", home2, project2)
-        env2["_STRACE_LOG"] = str(tmp_path / f"cool-{i}.log")
-        cool_d.append(_count_forks(env2))
-        _reap(remember2)
-    assert None not in below_d, (
-        f"strace produced no usable trace on the below-threshold path: {below_d}"
-    )
-    assert None not in cool_d, (
-        f"strace produced no usable trace on the cooldown path: {cool_d}"
-    )
-    assert min(cool_d) < min(below_d), (
-        f"cooldown path ({sorted(cool_d)}) did not fork fewer processes than "
-        f"the below-threshold path ({sorted(below_d)}) -- either the scan is "
+    cool_min, cool_all = _min_forks_for_tree(
+        tmp_path, "cool", HOOK, REPO_ROOT, n=n, cooldown_ts=cooldown_ts)
+    assert cool_min < below_min, (
+        f"cooldown path ({sorted(cool_all)}) did not fork fewer processes than "
+        f"the below-threshold path ({sorted(below_all)}) -- either the scan is "
         f"no longer being skipped under cooldown, or this counting method "
         f"cannot see the decrease it exists to detect"
     )
