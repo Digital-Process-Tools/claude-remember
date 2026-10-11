@@ -206,8 +206,12 @@ fi
 # -- same extractor mechanism, same finding (on every
 # host checked, `tool_input` is positioned AFTER the top-level `cwd` field,
 # so this stays the safe nested-after case), not repeated here.
-_stdin_json_string() {
-    local field="$1" raw="$2" rest prefix value dq
+# 1029: VARNAME is the new first argument, written via printf -v instead
+# of printed, so a call site forks no subshell -- same shape as
+# session-start-hook.sh own _stdin_json_string_into, 665/660.
+_stdin_json_string_into() {
+    local _sjsi_var="$1" field="$2" raw="$3" rest prefix value dq
+    printf -v "$_sjsi_var" '%s' ""
     # The double quote is held in `dq` (octal 042) rather than written
     # backslash-escaped: the plugin directory's scanner mis-tracks an
     # escaped quote (#898 round 8). Same patterns, same quoting of $field.
@@ -222,12 +226,12 @@ _stdin_json_string() {
     # Codex arrives as `C:\\work\\proj` otherwise (#829).
     value=${value//\\\\/\\}
     [ -n "$value" ] || return 1
-    printf '%s' "$value"
+    printf -v "$_sjsi_var" '%s' "$value"
 }
 
 # The double quote, for the last-save.json scope check and the sanitiser
 # log line below -- held in a variable rather than backslash-escaped, the
-# same reason as dq in _stdin_json_string (#898 round 8).
+# same reason as _sjsi_dq in _stdin_json_string_into (#898 round 8).
 printf -v _pt_dq '\042'
 
 # ── The cwd the host handed us (#411, #444) ─────────────────────────────
@@ -247,7 +251,7 @@ printf -v _pt_dq '\042'
 # not. Precedence is CLAUDE_PROJECT_DIR, then this, then the existing
 # .claude/remember layout derivation, then the existing failure -- resolved
 # entirely inside resolve-paths.sh, unchanged by this hook.
-REMEMBER_HOOK_CWD=$(_stdin_json_string cwd "$HOOK_STDIN" 2>/dev/null) || REMEMBER_HOOK_CWD=""
+_stdin_json_string_into REMEMBER_HOOK_CWD cwd "$HOOK_STDIN" 2>/dev/null
 if [[ "$REMEMBER_HOOK_CWD" == *$'\n'* ]] \
     || [[ "$REMEMBER_HOOK_CWD" == *$'\r'* ]]; then
     REMEMBER_HOOK_CWD=""
@@ -418,10 +422,10 @@ fi
 # --- Which session is this invocation FOR? (#212) ---
 # HOOK_STDIN was already captured above, ahead of path resolution (#444, so
 # the same payload's `cwd` can feed resolve-paths.sh's REMEMBER_HOOK_CWD
-# fallback), and _stdin_json_string already defined there. session_id is
+# fallback), and _stdin_json_string_into already defined there. session_id is
 # extracted from that same capture rather than reading stdin a second time —
 # it is a single stream and a second read here would see EOF.
-STDIN_SESSION_ID=$(_stdin_json_string session_id "$HOOK_STDIN" 2>/dev/null) || STDIN_SESSION_ID=""
+_stdin_json_string_into STDIN_SESSION_ID session_id "$HOOK_STDIN" 2>/dev/null
 # stdin is not more trustworthy than a basename. The id becomes both a path
 # component under capture-alive.d/ and a transcript filename, so it faces the
 # same guard the basename-derived id now faces too (#620) -- both are
@@ -466,7 +470,7 @@ fi
 # return is rejected outright; whether the value actually names a file is
 # the `[ -f ]` check below, not a character allowlist -- a transcript path
 # legitimately contains slashes and dots.
-STDIN_TRANSCRIPT_PATH=$(_stdin_json_string transcript_path "$HOOK_STDIN" 2>/dev/null) || STDIN_TRANSCRIPT_PATH=""
+_stdin_json_string_into STDIN_TRANSCRIPT_PATH transcript_path "$HOOK_STDIN" 2>/dev/null
 if [[ "$STDIN_TRANSCRIPT_PATH" == *$'\r'* ]]; then
     STDIN_TRANSCRIPT_PATH=""
 fi

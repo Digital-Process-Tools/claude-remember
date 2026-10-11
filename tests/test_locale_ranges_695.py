@@ -199,7 +199,7 @@ ALLOWLIST: dict[tuple[str, int], str] = {
     # from the scan, so that one libc's behaviour stays visible and can be
     # re-checked rather than quietly assumed forever.
     ("scripts/agy-stop-hook.sh", 159): _CASE,
-    ("scripts/post-tool-hook.sh", 449): _CASE,
+    ("scripts/post-tool-hook.sh", 453): _CASE,
     # Lines shifted by #913's SESSION_DIR cache sidecar, inserted above
     # these three (session-dir-cache does not touch SESSION_ID or add a new
     # bracket range of its own -- these are the same three pre-existing
@@ -215,8 +215,8 @@ ALLOWLIST: dict[tuple[str, int], str] = {
     # unchanged rewrite landed between the first and the other two), and once
     # more by #1011's own self-review round (a stale-comment fix above the
     # glob-walk, plus a longer comment on the capture-alive in-place write).
-    ("scripts/post-tool-hook.sh", 767): _CASE,
-    ("scripts/post-tool-hook.sh", 810): _CASE,
+    ("scripts/post-tool-hook.sh", 771): _CASE,
+    ("scripts/post-tool-hook.sh", 814): _CASE,
     # The #913 transcript-scan sidecar's own key: a filename component, same
     # [A-Za-z0-9._-]+ charset as SESSION_ID right above, never locale text --
     # measured the same way, same reason. Shifted +27 (957->984, 1059->1086)
@@ -235,8 +235,8 @@ ALLOWLIST: dict[tuple[str, int], str] = {
     # class this whole round exists to remove), and +4 for the comment
     # above `_nl_count` that now describes the herestring instead of the
     # pipe it replaced.
-    ("scripts/post-tool-hook.sh", 1001): _CASE,
-    ("scripts/post-tool-hook.sh", 1103): _CASE,
+    ("scripts/post-tool-hook.sh", 1005): _CASE,
+    ("scripts/post-tool-hook.sh", 1107): _CASE,
     ("scripts/session-end-hook.sh", 201): _CASE,
     ("scripts/session-end-hook.sh", 209): _CASE,
     ("scripts/session-start-hook.sh", 289): _CASE,
