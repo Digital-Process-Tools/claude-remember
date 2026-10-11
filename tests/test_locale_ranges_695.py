@@ -224,13 +224,19 @@ ALLOWLIST: dict[tuple[str, int], str] = {
     # _pt_scan_lines with a linear `wc -l`, and by #1019's comment block
     # forcing the empty-SESSION_ID capture-alive write onto the atomic
     # branch -- neither touches this range or adds a new one of its own.
-    # Shifted +5 again (984->989, 1086->1091) by #1011 round 2's fork
-    # reduction: two added lines (globals set before _pt_scan_lines) plus a
-    # net +3 inside the function (the pipe-based wc -l replaced by a
-    # herestring, wrapped in an `if` that skips the fork entirely when
-    # there is no complete line to count).
-    ("scripts/post-tool-hook.sh", 989): _CASE,
-    ("scripts/post-tool-hook.sh", 1091): _CASE,
+    # Shifted +5, then +7, then +4 more (984->989->996->1001,
+    # 1086->1091->1099->1103) by #1011 round 2's fork reduction and its own
+    # self-review follow-ups: two added lines (globals set before
+    # _pt_scan_lines), a net +3 inside the function (the pipe-based wc -l
+    # replaced by a herestring, wrapped in an `if` that skips the fork
+    # entirely when there is no complete line to count), +7 for
+    # `_remember_date_into` replacing `$(_remember_date +%s)` in the
+    # cooldown-elapsed check above this range (the same avoidable-subshell
+    # class this whole round exists to remove), and +4 for the comment
+    # above `_nl_count` that now describes the herestring instead of the
+    # pipe it replaced.
+    ("scripts/post-tool-hook.sh", 1001): _CASE,
+    ("scripts/post-tool-hook.sh", 1103): _CASE,
     ("scripts/session-end-hook.sh", 201): _CASE,
     ("scripts/session-end-hook.sh", 209): _CASE,
     ("scripts/session-start-hook.sh", 289): _CASE,

@@ -49,7 +49,11 @@ pytestmark = pytest.mark.skipif(
     reason="bash hook subprocess + POSIX semantics -- not portable to Windows runners",
 )
 
-_CLONE_RE = re.compile(r"^\d+\s+(clone|fork|vfork)\(")
+# clone3 is included alongside the legacy clone/fork/vfork trio: modern
+# glibc can route process creation through clone3 on a recent kernel, and
+# a trace set missing it would silently undercount on exactly the hosts
+# most likely to run this test (current ubuntu-latest images).
+_CLONE_RE = re.compile(r"^\d+\s+(clone3?|fork|vfork)\(")
 
 
 def _strace_path():
@@ -57,21 +61,36 @@ def _strace_path():
 
 
 def _count_forks(env):
-    """Total clone/fork/vfork syscalls the hook's own process tree makes,
-    via a raw (non -c) strace trace -- counting matching lines avoids
-    depending on a specific strace version's `-c` summary-table layout."""
+    """Total clone/clone3/fork/vfork syscalls the hook's own process tree
+    makes, via a raw (non -c) strace trace -- counting matching lines
+    avoids depending on a specific strace version's `-c` summary-table
+    layout. Returns None (never 0) on anything that is not a genuine,
+    complete trace: strace itself exiting non-zero (an unsupported flag
+    combination, a ptrace restriction on a hardened runner) is NOT the
+    same thing as "the hook forked nothing," which never happens on this
+    code path -- a bare 0 there would read as a pass on `0 <= N` and hide
+    the very failure this test exists to catch."""
     strace = _strace_path()
     log = env["_STRACE_LOG"]
-    cmd = [strace, "-f", "-qq", "-e", "trace=clone,fork,vfork",
+    cmd = [strace, "-f", "-qq", "-e", "trace=clone,clone3,fork,vfork",
            "-o", log, "bash", str(HOOK)]
-    subprocess.run(cmd, capture_output=True, env=env, timeout=120, input=b"",
-                    check=False)
+    result = subprocess.run(cmd, capture_output=True, env=env, timeout=120,
+                             input=b"", check=False)
+    if result.returncode != 0:
+        return None
     try:
         with open(log, encoding="utf-8", errors="replace") as fh:
             lines = fh.readlines()
     except OSError:
         return None
-    return sum(1 for line in lines if _CLONE_RE.match(line))
+    count = sum(1 for line in lines if _CLONE_RE.match(line))
+    if count == 0:
+        # A hook call that reaches this code path always forks at least
+        # the chunk read; zero real matches alongside a clean exit status
+        # means the trace itself produced nothing usable (wrong flags
+        # silently accepted, an empty/truncated log), not a forkless run.
+        return None
+    return count
 
 
 @pytest.mark.skipif(_strace_path() is None,
@@ -102,10 +121,19 @@ def test_below_threshold_path_total_forks_at_or_under_v0424_baseline(tmp_path):
         assert count is not None, "strace produced no readable trace log"
         deltas.append(count)
         _reap(remember)
-    assert min(deltas) <= 9, (
+    # Pinned BELOW v0.42.4's own pre-#913 baseline (6), not merely below
+    # the round-1 regression (9) -- a bound of "<= 9" would still pass if
+    # this fix were reverted outright, since 9 <= 9 is true. 6 is the
+    # ceiling: this fix's own design removes 2 of the 6 fork-groups
+    # _pt_scan_lines and its call site forked at the 9-total state (the
+    # outer `$(...)` wrapper, and the pipe's extra subshell), landing at
+    # 4 for that specific contribution -- below what v0.42.4 forked here
+    # before #913/#1017 ever added anything.
+    assert min(deltas) < 6, (
         f"below-threshold path forked {min(deltas)} processes (min of {n}) -- "
-        f"at or above the pre-fix #1011 round-1 regression (9); the fork "
-        f"reduction in _pt_scan_lines has regressed again: {sorted(deltas)}"
+        f"at or above v0.42.4's own baseline (6) for this decision, not just "
+        f"the round-1 regression (9); the fork reduction in _pt_scan_lines "
+        f"has regressed: {sorted(deltas)}"
     )
 
 
@@ -137,6 +165,12 @@ def test_cooldown_path_forks_fewer_than_below_threshold_path(tmp_path):
         env2["_STRACE_LOG"] = str(tmp_path / f"cool-{i}.log")
         cool_d.append(_count_forks(env2))
         _reap(remember2)
+    assert None not in below_d, (
+        f"strace produced no usable trace on the below-threshold path: {below_d}"
+    )
+    assert None not in cool_d, (
+        f"strace produced no usable trace on the cooldown path: {cool_d}"
+    )
     assert min(cool_d) < min(below_d), (
         f"cooldown path ({sorted(cool_d)}) did not fork fewer processes than "
         f"the below-threshold path ({sorted(below_d)}) -- either the scan is "
