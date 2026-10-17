@@ -757,7 +757,12 @@ fi
 if [ "$STDIN_SESSION_ID_TRUSTED" = true ]; then
     SESSION_ID="$STDIN_SESSION_ID"
 else
-    SESSION_ID="${TRANSCRIPT##*/}"
+    # #1034: split on a backslash as well as `/`. Claude Code on Windows
+    # sends a native `C:\Users\...\<id>.jsonl` transcript_path, which #829 decodes to
+    # single backslashes and no `/` at all, so a `/`-only split kept the
+    # WHOLE path and the sanitiser below emptied it. Same pattern at every
+    # basename site in this file.
+    SESSION_ID="${TRANSCRIPT##*[/\\]}"
     SESSION_ID="${SESSION_ID%.jsonl}"
     # #620: the basename route faced no guard at all before this line was
     # added -- this value reaches save-session.sh's argv unchanged, on the
@@ -998,12 +1003,29 @@ _pt_scan_lines() {
     PT_SCAN_LINES=$(( _lines + _nl_count ))
 }
 
-_SCAN_NAME="${TRANSCRIPT##*/}"
+# Both separators (#1034): see the SESSION_ID fallback above.
+_SCAN_NAME="${TRANSCRIPT##*[/\\]}"
 _SCAN_NAME="${_SCAN_NAME%.jsonl}"
 if [ -z "${_SCAN_NAME#.}" ] || [ -z "${_SCAN_NAME#..}" ] \
     || [ "${_SCAN_NAME#-}" != "$_SCAN_NAME" ] \
     || [[ "$_SCAN_NAME" == *[!A-Za-z0-9._-]* ]]; then
     _SCAN_NAME=""
+fi
+# #1034: an empty name used to disable the cache SILENTLY -- every tool call
+# then cold-rescans the whole transcript, and nothing in hook-errors.log or
+# /remember:doctor said why. Say so once per transcript, not once per call:
+# the marker holds the TRANSCRIPT it last warned about, read back with the
+# `read` builtin and rewritten with a builtin redirect, so this costs no
+# fork either way (#1011/#1029 count them), and nothing at all on the
+# common path where the name is usable.
+if [ -z "$_SCAN_NAME" ] && [ -n "$TRANSCRIPT" ]; then
+    _SCAN_NOTICE="$REMEMBER_DIR/tmp/transcript-scan-unnamed"
+    _SCAN_NOTICE_LAST=""
+    [ -f "$_SCAN_NOTICE" ] && read -r _SCAN_NOTICE_LAST < "$_SCAN_NOTICE" 2>/dev/null
+    if [ "$_SCAN_NOTICE_LAST" != "$TRANSCRIPT" ]; then
+        log "hook" "WARNING: transcript-scan cache disabled for $_pt_dq$TRANSCRIPT$_pt_dq -- its basename is not a usable cache name, so every tool call rescans the whole transcript (#1034)"
+        printf '%s\n' "$TRANSCRIPT" > "$_SCAN_NOTICE" 2>/dev/null
+    fi
 fi
 
 _SCAN_OFFSET=0
@@ -1312,7 +1334,7 @@ if [ "$DELTA" -gt "$DELTA_THRESHOLD" ] && [ "$IN_COOLDOWN" = false ]; then
     # as "no id given" and silently substitutes the newest .jsonl by mtime
     # (save-session.sh:273-275) rather than refusing, so the fork must be
     # skipped here rather than let that happen.
-    log "hook" "post-tool: transcript basename $_pt_dq${TRANSCRIPT##*/}$_pt_dq failed the session id sanitiser -- refusing to save rather than handing save-session.sh an empty id"
+    log "hook" "post-tool: transcript basename $_pt_dq${TRANSCRIPT##*[/\\]}$_pt_dq failed the session id sanitiser -- refusing to save rather than handing save-session.sh an empty id"
   else
     ALREADY_RUNNING=false
     if [ -f "$PID_FILE" ]; then

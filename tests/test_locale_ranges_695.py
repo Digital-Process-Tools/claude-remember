@@ -215,8 +215,10 @@ ALLOWLIST: dict[tuple[str, int], str] = {
     # unchanged rewrite landed between the first and the other two), and once
     # more by #1011's own self-review round (a stale-comment fix above the
     # glob-walk, plus a longer comment on the capture-alive in-place write).
-    ("scripts/post-tool-hook.sh", 771): _CASE,
-    ("scripts/post-tool-hook.sh", 814): _CASE,
+    # Shifted +5 (771->776, 814->819) by #1034's comment on the
+    # both-separators basename split just above the first one.
+    ("scripts/post-tool-hook.sh", 776): _CASE,
+    ("scripts/post-tool-hook.sh", 819): _CASE,
     # The #913 transcript-scan sidecar's own key: a filename component, same
     # [A-Za-z0-9._-]+ charset as SESSION_ID right above, never locale text --
     # measured the same way, same reason. Shifted +27 (957->984, 1059->1086)
@@ -234,9 +236,12 @@ ALLOWLIST: dict[tuple[str, int], str] = {
     # cooldown-elapsed check above this range (the same avoidable-subshell
     # class this whole round exists to remove), and +4 for the comment
     # above `_nl_count` that now describes the herestring instead of the
-    # pipe it replaced.
-    ("scripts/post-tool-hook.sh", 1005): _CASE,
-    ("scripts/post-tool-hook.sh", 1107): _CASE,
+    # pipe it replaced. Shifted +6 and +22 (1005->1011, 1107->1129) by
+    # #1034: the +5 SESSION_ID comment above, one comment line on the
+    # sidecar's own split, and the once-per-transcript warning block between
+    # the two -- which adds no range of its own.
+    ("scripts/post-tool-hook.sh", 1011): _CASE,
+    ("scripts/post-tool-hook.sh", 1129): _CASE,
     ("scripts/session-end-hook.sh", 201): _CASE,
     ("scripts/session-end-hook.sh", 209): _CASE,
     ("scripts/session-start-hook.sh", 289): _CASE,
