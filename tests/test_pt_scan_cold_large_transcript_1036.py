@@ -67,6 +67,15 @@ def _scan(remember: Path):
     return int(offset), int(lines)
 
 
+def _inflate(remember: Path, offset: int, lines: int) -> None:
+    """Rewrite the sidecar with a valid OFFSET and LINES 1000 too high. Bytes, not
+    text: write_text would turn the newline into CRLF on Windows, the LINES
+    field would read back as '1006' plus a carriage return, fail the hook's
+    digit check, and the sidecar would be discarded -- the must-take-the-warm-
+    path case then fails for a reason that has nothing to do with the scan."""
+    _sidecar(remember).write_bytes(f"{offset} {lines + 1000}".encode("ascii") + NL)
+
+
 def _truth(data: bytes):
     """Python's own answer: OFFSET just past the last newline, LINES = the
     number of newlines. A trailing partial line counts toward neither."""
@@ -134,7 +143,7 @@ def test_warm_resume_really_resumes_from_the_sidecar(tmp_path):
     data = ROW * 6
     home, project, remember, transcript = _cold(tmp_path, data)
     offset, lines = _scan(remember)
-    _sidecar(remember).write_text(f"{offset} {lines + 1000}\n", encoding="utf-8")
+    _inflate(remember, offset, lines)
     more = data + ROW * 2 + _long_line(MB) + b'{"par'
     transcript.write_bytes(more)
     _call(tmp_path, home, project, transcript)
@@ -149,7 +158,7 @@ def test_a_sidecar_that_no_longer_points_at_a_newline_forces_a_recount(tmp_path)
     data = ROW * 6
     home, project, remember, transcript = _cold(tmp_path, data)
     offset, lines = _scan(remember)
-    _sidecar(remember).write_text(f"{offset} {lines + 1000}\n", encoding="utf-8")
+    _inflate(remember, offset, lines)
     rewritten = b"z" * offset + ROW * 3
     transcript.write_bytes(rewritten)
     _call(tmp_path, home, project, transcript)
@@ -160,7 +169,7 @@ def test_a_sidecar_past_the_end_of_a_shrunk_file_forces_a_recount(tmp_path):
     data = ROW * 6
     home, project, remember, transcript = _cold(tmp_path, data)
     offset, lines = _scan(remember)
-    _sidecar(remember).write_text(f"{offset} {lines + 1000}\n", encoding="utf-8")
+    _inflate(remember, offset, lines)
     shrunk = ROW * 2
     transcript.write_bytes(shrunk)
     _call(tmp_path, home, project, transcript)
