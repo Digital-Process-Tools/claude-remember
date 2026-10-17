@@ -239,9 +239,12 @@ ALLOWLIST: dict[tuple[str, int], str] = {
     # pipe it replaced. Shifted +6 and +22 (1005->1011, 1107->1129) by
     # #1034: the +5 SESSION_ID comment above, one comment line on the
     # sidecar's own split, and the once-per-transcript warning block between
-    # the two -- which adds no range of its own.
-    ("scripts/post-tool-hook.sh", 1011): _CASE,
-    ("scripts/post-tool-hook.sh", 1129): _CASE,
+    # the two -- which adds no range of its own. Shifted +68 (1011->1079,
+    # 1129->1197) by #1036: `_pt_scan_lines` rewritten to keep the
+    # transcript out of shell variables, with its own comment block --
+    # its only bracket patterns are digit classes, which this scanner skips.
+    ("scripts/post-tool-hook.sh", 1079): _CASE,
+    ("scripts/post-tool-hook.sh", 1197): _CASE,
     ("scripts/session-end-hook.sh", 201): _CASE,
     ("scripts/session-end-hook.sh", 209): _CASE,
     ("scripts/session-start-hook.sh", 289): _CASE,

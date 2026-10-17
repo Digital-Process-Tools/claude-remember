@@ -937,10 +937,12 @@ fi
 # it, so the next call re-reads it whole -- complete this time, or still
 # partial and still excluded.
 #
-# `local LC_ALL=C` scopes every length/substring op below to BYTES, not
+# `local LC_ALL=C` scopes the one-byte `read -n 1` probes below to BYTES, not
 # characters (#695, same reason `_remember_dir_is_unsafe` above takes it):
-# `tail -c` counts bytes, and a UTF-8 locale's `${#}` does not, which would
-# desync OFFSET from the file it is supposed to point into.
+# `tail -c` and `wc -c` count bytes, and a UTF-8 locale's `read -n 1` would
+# swallow a whole multi-byte character, desyncing OFFSET from the file it is
+# supposed to point into. Since #1036 the transcript itself never enters a
+# shell variable on either path; see the comment inside `_pt_scan_lines`.
 #
 # This `if` wraps ONLY the scan below, through the SCAN_SIDECAR write right
 # after it -- not the #353 sidecar lookup or the DELTA it feeds, both of
@@ -962,45 +964,111 @@ PT_SCAN_LINES=0
 _pt_scan_lines() {
     local LC_ALL=C
     local _off="$1" _lines="$2" _file="$3"
-    local _start=1 _nl=$'\n'
-    [ "$_off" -gt 0 ] && _start="$_off"
-    local _chunk
-    _chunk=$(tail -c +"$_start" "$_file" 2>/dev/null; printf 'X')
-    _chunk=${_chunk%X}
+    local _nl=$'\n' _first="" _last="" _wc="" _n=0 _b=0 _c=0 _end
+    # #1036: nothing below holds more than ONE byte of the transcript in a
+    # shell variable, on either path. This function used to read everything
+    # after OFFSET into a variable (`_chunk=$(tail -c +OFFSET file; printf X)`)
+    # and cut the trailing partial line off it with `##`/`%` expansions --
+    # at OFFSET 0 (no sidecar: every new session's first call, and every
+    # existing session's first call after an upgrade) that was the whole
+    # transcript. @KRR-66 measured it on Git Bash 5.2.37 with real, long-line
+    # transcripts: 5 MB 1.5 s, 20 MB 13.5 s, 50 MB 92 s, close to quadratic;
+    # a 247 MB and a 1.33 GB one ran into the host's 600 s PostToolUse
+    # timeout, the hook died before writing the sidecar, and so every later
+    # call started from 0 again and stalled 600 s, forever. A multi-MB
+    # trailing partial line was worse still: the `%` strip of a 3 MB partial
+    # line did not finish in 120 s on macOS bash 5.3.
+    #
+    # Now the bytes go only to C tools that stream them, and bash keeps
+    # counts:
+    #   1. warm only: `tail -c +OFFSET` on fd 9, and ONE byte read off it with
+    #      the `read` builtin, which reads a pipe one byte at a time so the
+    #      rest stays in the pipe. It must be the newline OFFSET claims to
+    #      follow, or the file shrank or was rewritten (#913) and the whole
+    #      thing is recounted from 0 -- the same check the old code made on
+    #      the first byte of its chunk, with the same fallback.
+    #   2. `wc -lc` over everything after that (warm: the rest of fd 9;
+    #      cold: the file itself): N newlines and B bytes, one linear pass.
+    #   3. the LAST of those B bytes, read the same way as in step 1 (a
+    #      one-byte `read` off `tail -c +END`). Appends never change a byte
+    #      already written, so this is the byte `wc` saw last even if the
+    #      file grew in between. A newline there means OFFSET moves to the
+    #      end of what `wc` counted: the common case, a hook firing right
+    #      after a whole record was written.
+    #   4. only when it is not a newline (a record still being written,
+    #      #913's half-written last line, of any length): `head -n N` over the
+    #      same region, piped to `wc -c`, gives the byte length up to and
+    #      including the Nth newline. The partial line is never counted and
+    #      OFFSET stops before it, so the next call re-reads it -- unchanged
+    #      contract, and still no bytes in bash.
+    #
+    # Forks, measured on macOS /bin/bash 3.2.57 and Homebrew bash 5.3.15 by
+    # PID delta: each `$(exec CMD)` and `<(exec CMD)` below is one fork, the
+    # explicit `exec` saving the second one a redirect otherwise costs. Warm
+    # with new bytes 3, warm with nothing new 2, cold 2. Step 4, only when a
+    # partial line is pending, adds one for the substitution and one per
+    # pipeline stage: 3 cold (measured), 4 warm (same rule, not measured).
+    # The code this replaces cost 4 whenever there was a complete line to
+    # count (2 for its `tail` read, 2 for its `wc -l` herestring).
+    #
+    # `local LC_ALL=C` keeps `read -n 1` at one BYTE, not one character
+    # (#695): OFFSET is a byte offset, and a UTF-8 locale would desync it.
+    # A NUL byte reads back empty (it is the delimiter of `read -d ""`),
+    # which is never taken for a newline -- the safe direction in both
+    # steps.
     if [ "$_off" -gt 0 ]; then
-        local _first=${_chunk:0:1}
-        if [ -z "$_chunk" ] || [ "$_first" != "$_nl" ]; then
+        exec 9< <(exec tail -c +"$_off" "$_file" 2>/dev/null)
+        IFS= read -r -d '' -n 1 _first <&9
+        if [ "$_first" != "$_nl" ]; then
+            exec 9<&-
             _pt_scan_lines 0 0 "$_file"
             return
         fi
-        _chunk=${_chunk:1}
+        _wc=$(exec wc -lc <&9 2>/dev/null)
+        exec 9<&-
+    else
+        _wc=$(exec wc -lc 2>/dev/null < "$_file")
     fi
-    local _partial=${_chunk##*$'\n'}
-    local _complete=${_chunk%"$_partial"}
-    # Counting newlines with a per-byte parameter-substitution scan
-    # (${_complete//[^\n]}, the prior form here) is QUADRATIC in bash --
-    # both 3.2 and 5.3, the same class #898 already documents for other
-    # expansion forms. Measured (#1017): 110.81s for a 2MB chunk on bash
-    # 5.3, 415.67s for a 50KB chunk on /bin/bash 3.2.57 (this repo's
-    # documented floor) -- regressing the exact #913 scenario (the first
-    # post-upgrade call on an existing session, which rescans the whole
-    # transcript) to far worse than the 229ms whole-file `wc -l` #913
-    # replaced. `wc -l` itself stays a single linear C loop, unavoidably
-    # a fork of its own -- what moved (#1011 round 2) is only which
-    # processes carry the bytes to it: this used to pipe `_complete`
-    # through `printf | wc -l`, a SECOND subshell fork for the pipe on
-    # top of the `wc` exec, invisible to `tests/spawn_counting.py`'s
-    # exec-only shim either way. It now goes through a herestring
-    # instead, one fork fewer, and is skipped entirely (no fork at all)
-    # when there is no complete line to count.
-    local _nl_count=0
-    if [ -n "$_complete" ]; then
-        _nl_count=$(wc -l <<< "${_complete%$'\n'}")
-        _nl_count=${_nl_count//[^0-9]}
-        [ -z "$_nl_count" ] && _nl_count=0
+    # `wc` pads its two fields with spaces on BSD/macOS and not on GNU; the
+    # expansions below split either, with no fork (#1011/#1029 count them)
+    # and no herestring temp file.
+    _wc=${_wc#"${_wc%%[0-9]*}"}
+    _n=${_wc%%[!0-9]*}
+    _wc=${_wc#"$_n"}
+    _wc=${_wc#"${_wc%%[0-9]*}"}
+    _b=${_wc%%[!0-9]*}
+    # Digits only by construction, but never trusted blind: an empty or odd
+    # field (a `wc` that failed, a file that vanished) counts as 0, and 10#
+    # keeps a leading zero from being read as octal (#332).
+    if [ -z "$_n" ] || [[ "$_n" == *[!0-9]* ]]; then _n=0; fi
+    if [ -z "$_b" ] || [[ "$_b" == *[!0-9]* ]]; then _b=0; fi
+    _n=$(( 10#$_n ))
+    _b=$(( 10#$_b ))
+    PT_SCAN_OFFSET=$_off
+    PT_SCAN_LINES=$_lines
+    [ "$_b" -gt 0 ] || return 0
+    _end=$(( _off + 10#$_b ))
+    exec 9< <(exec tail -c +"$_end" "$_file" 2>/dev/null)
+    IFS= read -r -d '' -n 1 _last <&9
+    exec 9<&-
+    if [ "$_last" = "$_nl" ]; then
+        PT_SCAN_OFFSET=$_end
+        PT_SCAN_LINES=$(( _lines + 10#$_n ))
+        return 0
     fi
-    PT_SCAN_OFFSET=$(( _off + ${#_complete} ))
-    PT_SCAN_LINES=$(( _lines + _nl_count ))
+    [ "$_n" -gt 0 ] || return 0
+    # Cold, `head` reads the file itself: macOS `tail -c +N` streams at ~30
+    # MB/s (measured: 27 MB in 0.9 s, even to /dev/null) where `head -n` on
+    # the file took 0.014 s. Warm, only the bytes after OFFSET go through it.
+    if [ "$_off" -gt 0 ]; then
+        _c=$(tail -c +"$(( _off + 1 ))" "$_file" 2>/dev/null | head -n "$_n" | wc -c)
+    else
+        _c=$(head -n "$_n" "$_file" 2>/dev/null | wc -c)
+    fi
+    _c=${_c//[^0-9]/}
+    [ -n "$_c" ] || return 0
+    PT_SCAN_OFFSET=$(( _off + 10#$_c ))
+    PT_SCAN_LINES=$(( _lines + 10#$_n ))
 }
 
 # Both separators (#1034): see the SESSION_ID fallback above.
