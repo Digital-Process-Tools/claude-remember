@@ -134,14 +134,9 @@ if [ -n "${REMEMBER_SESSION_END_DETACHED:-}" ]; then
     HOOK_STDIN="${REMEMBER_SESSION_END_PAYLOAD:-}"
     unset REMEMBER_SESSION_END_DETACHED REMEMBER_SESSION_END_PAYLOAD
 else
-    HOOK_STDIN=""
-    if [ ! -t 0 ]; then
-        _line=""
-        while IFS= read -r -t 1 _line || [ -n "$_line" ]; do
-            HOOK_STDIN="$HOOK_STDIN$_line"
-            _line=""
-        done
-    fi
+    # Chunked, never byte at a time (#1040): see lib-stdin.sh.
+    source "$_HOOK_DIR/lib-stdin.sh"
+    _remember_read_stdin_into HOOK_STDIN
     if [ -z "${REMEMBER_SESSION_END_FOREGROUND:-}" ]; then
         REMEMBER_SESSION_END_DETACHED=1 REMEMBER_SESSION_END_PAYLOAD="$HOOK_STDIN" \
             nohup bash "${BASH_SOURCE[0]}" </dev/null >/dev/null 2>&1 &

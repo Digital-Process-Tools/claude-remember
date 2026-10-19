@@ -97,9 +97,14 @@ def _bash32():
 
 BASH32 = _bash32()
 
+# The line loop is the bash 3.2 path. On Windows it is the bug itself (25 s
+# per MB), and its `-t 1` then fires every ~40 KB in the middle of a line, so
+# it is neither run there nor meaningful there.
 READERS = [
     pytest.param("chunked", id="chunked"),
-    pytest.param("fallback", id="line-loop-fallback"),
+    pytest.param("fallback", id="line-loop-fallback", marks=pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="the line loop is the bash 3.2 fallback; on MSYS bash it is the #1040 bug")),
     pytest.param("bash32", id="bin-bash-3.2", marks=pytest.mark.skipif(
         BASH32 is None, reason="no /bin/bash 3.x on this host (stock macOS has one)")),
 ]
@@ -239,11 +244,17 @@ def _reader_only(out: Path, pre: str = "") -> str:
             + "printf %s " + _q("[$GOT]") + " > " + _q(_fwd(out / "seen")) + NL)
 
 
-@pytest.mark.parametrize("reader", READERS)
 @pytest.mark.parametrize("locale", ["C", "utf8"])
-def test_a_multibyte_payload_over_one_chunk_survives_byte_for_byte(tmp_path, reader, locale):
+def test_a_multibyte_payload_over_one_chunk_survives_byte_for_byte(tmp_path, locale):
     """Over 1 MiB of multibyte text: under LC_ALL=C `-N` counts bytes, so a
-    chunk boundary falls inside a character; the bytes must still join up."""
+    chunk boundary falls inside a character; the bytes must still join up.
+
+    Chunked reader only. The line loop takes about a second per MB even on
+    macOS, so its `-t 1` can fire inside this one long line, and a timeout
+    that lands inside a multibyte character was seen to change a byte there
+    (bash 5.3, UTF-8 locale, a loaded machine): a flaw of the old loop that
+    this test would only report as noise."""
+    reader = "chunked"
     payload = json.dumps(_obj("é漢" * 250000), ensure_ascii=False)
     raw = payload.encode("utf-8")
     assert len(raw) > 1048576
@@ -253,6 +264,33 @@ def test_a_multibyte_payload_over_one_chunk_survives_byte_for_byte(tmp_path, rea
     r = _pipe_through(bash, env, _reader_only(out), raw, tmp_path)
     assert r.returncode == 0, _err(r)
     assert (out / "seen").read_bytes() == b"[" + raw + b"]"
+
+
+# Shapes that each once cost the chunked reader a quadratic tail on bash 5.3,
+# found while writing the fix: a suffix strip of the trailing newline on a
+# payload WITHOUT one (165 s for 1 MB), and a pattern substitution of the
+# newlines of a pretty-printed payload (8 s for 840 KB, UTF-8 locale).
+READ_SHAPES = {
+    "1mb-no-trailing-newline": "x" * (1024 * 1024),
+    "1mb-trailing-newline": "x" * (1024 * 1024) + NL,
+    "pretty-printed-many-lines": json.dumps(
+        {"c": ["ab" * 10] * 20000, "d": "L" * 300000}, indent=2),
+}
+READ_BOUND_SECONDS = 10.0
+
+
+@pytest.mark.parametrize("shape", sorted(READ_SHAPES))
+def test_the_chunked_reader_has_no_quadratic_tail(tmp_path, shape):
+    payload = READ_SHAPES[shape]
+    out = tmp_path / "out"
+    out.mkdir()
+    bash, env = _reader_env("chunked", _utf8_locale())
+    t0 = time.monotonic()
+    r = _pipe_through(bash, env, _reader_only(out), payload.encode("utf-8"), tmp_path)
+    elapsed = time.monotonic() - t0
+    assert r.returncode == 0, _err(r)
+    assert (out / "seen").read_text(encoding="utf-8") == "[" + _expected_seen(payload) + "]"
+    assert elapsed < READ_BOUND_SECONDS, f"{shape}: {elapsed:.2f} s on {sys.platform}"
 
 
 @pytest.mark.parametrize("reader", READERS)

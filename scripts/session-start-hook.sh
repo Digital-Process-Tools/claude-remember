@@ -117,14 +117,10 @@ _remember_hook_clock_into _REMEMBER_HOOK_T0
 # a tty — for the reason the PostToolUse hook records: a hook that blocks on
 # stdin is not a slow session start, it is one that never starts. bash 3.2
 # has no sub-second -t, hence 1.
-HOOK_STDIN=""
-if [ ! -t 0 ]; then
-    _line=""
-    while IFS= read -r -t 1 _line || [ -n "$_line" ]; do
-        HOOK_STDIN="$HOOK_STDIN$_line"
-        _line=""
-    done
-fi
+# The read itself lives in lib-stdin.sh (#1040): chunked with read -N where
+# bash has it, because a byte-at-a-time read cost 25 s per MB on Windows.
+source "$_HOOK_DIR/lib-stdin.sh"
+_remember_read_stdin_into HOOK_STDIN
 
 # The same deliberately narrow extractor the PostToolUse hook and
 # the SessionEnd hook use, and for the same reason: the key must be followed

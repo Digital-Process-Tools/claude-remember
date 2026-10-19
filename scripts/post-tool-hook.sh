@@ -183,14 +183,10 @@ unset REMEMBER_TRANSCRIPT_PATH
 # invocation has no payload; a stale one is the plausible-and-wrong answer.
 unset REMEMBER_HOOK_STDIN REMEMBER_HOOK_STDIN_FILE
 
-HOOK_STDIN=""
-if [ ! -t 0 ]; then
-    _line=""
-    while IFS= read -r -t 1 _line || [ -n "$_line" ]; do
-        HOOK_STDIN="$HOOK_STDIN$_line"
-        _line=""
-    done
-fi
+# The read itself lives in lib-stdin.sh (#1040): chunked with read -N where
+# bash has it, because a byte-at-a-time read cost 25 s per MB on Windows.
+source "$_HOOK_DIR/lib-stdin.sh"
+_remember_read_stdin_into HOOK_STDIN
 
 # Extract a top-level string field without forking a JSON parser on every
 # tool call. Deliberately narrow: the key must be followed by nothing but

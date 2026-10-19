@@ -193,6 +193,10 @@ def _make_env(tmp_path: Path, *, exchanges: int, humans: int, position: int = 50
                    "bootstrap-dirs.sh", "log.sh", "lib-memory-dir.sh",
                    "lib-lock.sh", "lib-staging-lock.sh", "lib-slug.sh",
                    "lib-clock.sh",
+                   # #1040: the four hooks read their stdin payload through
+                   # this library. Tests that wire a hook into this stub
+                   # plugin (session-end-hook.sh, post-tool-hook.sh) need it.
+                   "lib-stdin.sh",
                    # #898 rounds 7-8: the config flatten/merge programs and the
                    # per-key fallback reader moved out of log.sh and
                    # lib-memory-dir.sh into these files, which ship beside the

@@ -199,7 +199,7 @@ ALLOWLIST: dict[tuple[str, int], str] = {
     # from the scan, so that one libc's behaviour stays visible and can be
     # re-checked rather than quietly assumed forever.
     ("scripts/agy-stop-hook.sh", 159): _CASE,
-    ("scripts/post-tool-hook.sh", 453): _CASE,
+    ("scripts/post-tool-hook.sh", 449): _CASE,
     # Lines shifted by #913's SESSION_DIR cache sidecar, inserted above
     # these three (session-dir-cache does not touch SESSION_ID or add a new
     # bracket range of its own -- these are the same three pre-existing
@@ -217,8 +217,8 @@ ALLOWLIST: dict[tuple[str, int], str] = {
     # glob-walk, plus a longer comment on the capture-alive in-place write).
     # Shifted +5 (771->776, 814->819) by #1034's comment on the
     # both-separators basename split just above the first one.
-    ("scripts/post-tool-hook.sh", 776): _CASE,
-    ("scripts/post-tool-hook.sh", 819): _CASE,
+    ("scripts/post-tool-hook.sh", 772): _CASE,
+    ("scripts/post-tool-hook.sh", 815): _CASE,
     # The #913 transcript-scan sidecar's own key: a filename component, same
     # [A-Za-z0-9._-]+ charset as SESSION_ID right above, never locale text --
     # measured the same way, same reason. Shifted +27 (957->984, 1059->1086)
@@ -243,11 +243,11 @@ ALLOWLIST: dict[tuple[str, int], str] = {
     # 1129->1197) by #1036: `_pt_scan_lines` rewritten to keep the
     # transcript out of shell variables, with its own comment block --
     # its only bracket patterns are digit classes, which this scanner skips.
-    ("scripts/post-tool-hook.sh", 1079): _CASE,
-    ("scripts/post-tool-hook.sh", 1197): _CASE,
-    ("scripts/session-end-hook.sh", 201): _CASE,
-    ("scripts/session-end-hook.sh", 209): _CASE,
-    ("scripts/session-start-hook.sh", 289): _CASE,
+    ("scripts/post-tool-hook.sh", 1075): _CASE,
+    ("scripts/post-tool-hook.sh", 1193): _CASE,
+    ("scripts/session-end-hook.sh", 196): _CASE,
+    ("scripts/session-end-hook.sh", 204): _CASE,
+    ("scripts/session-start-hook.sh", 285): _CASE,
     ("scripts/write-handoff.sh", 87): _CASE,
     ("scripts/doctor.sh", 70): _CASE,
     ("scripts/lib-slug.sh", 437): _CASE,

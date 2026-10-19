@@ -196,14 +196,10 @@ source "$_HOOK_DIR/lib-env-cache.sh"
 # other stdin-reading hook in this repo already carries: a blocking read
 # here is not a slow prompt, it is a lost one (see the COST section above).
 # bash 3.2 has no sub-second -t, hence 1.
-_HOOK_STDIN=""
-if [ ! -t 0 ]; then
-    _line=""
-    while IFS= read -r -t 1 _line || [ -n "$_line" ]; do
-        _HOOK_STDIN="$_HOOK_STDIN$_line"
-        _line=""
-    done
-fi
+# The read itself lives in lib-stdin.sh (#1040): chunked with read -N where
+# bash has it, because a byte-at-a-time read cost 25 s per MB on Windows.
+source "$_HOOK_DIR/lib-stdin.sh"
+_remember_read_stdin_into _HOOK_STDIN
 # The same deliberately narrow extractor the SessionStart hook uses: the
 # key must be followed by nothing but whitespace and a colon before the
 # value's opening quote, so a `cwd` appearing inside some other field is
