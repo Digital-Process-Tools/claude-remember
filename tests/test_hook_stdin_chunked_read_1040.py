@@ -24,7 +24,9 @@ Two kinds of test, and what each is evidence of:
   it) must hand the extractors exactly what the old loop did: the payload with
   its newlines removed. post-tool-hook.sh is also run end to end through a
   pipe, its session_id / transcript_path / cwd observed through the files it
-  writes.
+  writes. session-start-hook.sh keeps the line loop (no room under the release
+  size budget, and its payload is a few hundred bytes); its own loop, cut out
+  of the hook, gets the same small-payload checks.
 * TIMING, meaningful on windows-latest only. A ~1 MB payload piped into
   post-tool-hook.sh must finish under a bound the old loop cannot meet there
   (the reporter's whole-hook figure was 34-43 s). On macOS and Linux the old
@@ -157,6 +159,8 @@ PAYLOADS = {
     "trailing-newline": json.dumps(_obj("ok")) + NL,
     "multibyte": json.dumps(_obj(MB_TEXT * 20000, cwd="/work/proj-é漢"),
                             ensure_ascii=False),
+    "multibyte-small": json.dumps(_obj(MB_TEXT * 20, cwd="/work/proj-é漢"),
+                                  ensure_ascii=False),
 }
 PAYLOAD_IDS = sorted(PAYLOADS)
 
@@ -175,14 +179,35 @@ def _expected_seen(payload: str) -> str:
 CMDSUB_OPEN = "$" + "("
 
 
+# session-start-hook.sh keeps the line loop (the comment at its read says
+# why: a tiny payload, and no room under the 120 KiB release budget). The
+# other three read through lib-stdin.sh.
+LINE_LOOP_HOOKS = {"scripts/session-start-hook.sh"}
+# A SessionStart payload is ids, paths and a source word: a few hundred bytes.
+LINE_LOOP_MAX_PAYLOAD = 16 * 1024
+
+
+def _read_site(script: str, var: str) -> str:
+    """The hook's own stdin read, as the harness should run it.
+
+    A hook on the shared reader gets the real library. A line-loop hook gets
+    its own block, cut verbatim out of its text, so the test runs what
+    ships rather than a copy that could drift from it."""
+    text = (REPO_ROOT / script).read_text(encoding="utf-8")
+    if "_remember_read_stdin_into " + var in text:
+        return "source " + _q(_fwd(LIB)) + NL + "_remember_read_stdin_into " + var
+    start = text.index(var + '=""' + NL + "if [ ! -t 0 ]; then")
+    end = text.index(NL + "fi" + NL, start) + len(NL + "fi")
+    return text[start:end]
+
+
 def _harness(script: str, var: str, func: str, style: str, out: Path) -> str:
     body = _extract_function(script, func)
     o = _fwd(out)
     v = _q("$" + var)
     lines = [
         body,
-        "source " + _q(_fwd(LIB)),
-        "_remember_read_stdin_into " + var,
+        _read_site(script, var),
         "printf %s " + v + " > " + _q(o + "/seen"),
     ]
     fields = ["cwd"] if style == "cwd-only" else ["session_id", "transcript_path", "cwd"]
@@ -221,6 +246,8 @@ def test_each_hook_extracts_the_same_fields_from_a_piped_payload(
         tmp_path, script, var, func, style, name, reader):
     skip_if_dropped(REPO_ROOT / script, func)
     payload = PAYLOADS[name]
+    if script in LINE_LOOP_HOOKS and len(payload.encode("utf-8")) > LINE_LOOP_MAX_PAYLOAD:
+        pytest.skip(script + " keeps the line loop and never gets a payload this large")
     obj = json.loads(payload)
     out = tmp_path / "out"
     out.mkdir()
@@ -337,8 +364,14 @@ def test_a_pipe_held_open_with_nothing_in_it_still_costs_about_a_second(tmp_path
 
 @pytest.mark.parametrize("script, var, func, style", HOOKS)
 def test_every_hook_reads_stdin_through_the_shared_reader(script, var, func, style):
-    """No hook keeps a private copy of the byte-per-syscall loop."""
+    """No hook keeps a private copy of the byte-per-syscall loop -- except
+    session-start-hook.sh, deliberately, and that exception is pinned too:
+    moving it onto the library has to go past the release size budget."""
     text = (REPO_ROOT / script).read_text(encoding="utf-8")
+    if script in LINE_LOOP_HOOKS:
+        assert "_remember_read_stdin_into" not in text, script
+        assert "read -r -t 1 _line" in text, script
+        return
     assert "_remember_read_stdin_into " + var in text, script
     assert "read -r -t 1 _line" not in text, script
 

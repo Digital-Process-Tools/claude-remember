@@ -13,6 +13,9 @@
 #   writes nothing costs a second, not a hung agent. bash 3.2 has no
 #   sub-second -t, hence 1.
 #
+#   Used by post-tool-hook.sh, user-prompt-hook.sh and session-end-hook.sh.
+#   session-start-hook.sh keeps the line loop below, and says why at its read.
+#
 # WHY CHUNKS (#1040)
 #   All four hooks used to read with
 #

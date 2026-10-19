@@ -117,10 +117,22 @@ _remember_hook_clock_into _REMEMBER_HOOK_T0
 # a tty — for the reason the PostToolUse hook records: a hook that blocks on
 # stdin is not a slow session start, it is one that never starts. bash 3.2
 # has no sub-second -t, hence 1.
-# The read itself lives in lib-stdin.sh (#1040): chunked with read -N where
-# bash has it, because a byte-at-a-time read cost 25 s per MB on Windows.
-source "$_HOOK_DIR/lib-stdin.sh"
-_remember_read_stdin_into HOOK_STDIN
+#
+# #1040: the other three hooks read through lib-stdin.sh in -N chunks, because
+# a byte-at-a-time read costs 25-40 us per byte on Windows. This one keeps
+# the line loop on purpose. A SessionStart payload carries no tool output and
+# no prompt text, only ids, paths and the source, so it is a few hundred
+# bytes: milliseconds even at that rate. And the compiled hook sits 37 bytes
+# under the 120 KiB release budget (check_release_tree.py), which the inlined
+# library (about 1.2 KB) would break.
+HOOK_STDIN=""
+if [ ! -t 0 ]; then
+    _line=""
+    while IFS= read -r -t 1 _line || [ -n "$_line" ]; do
+        HOOK_STDIN="$HOOK_STDIN$_line"
+        _line=""
+    done
+fi
 
 # The same deliberately narrow extractor the PostToolUse hook and
 # the SessionEnd hook use, and for the same reason: the key must be followed
