@@ -1013,13 +1013,13 @@ was "Validation ran out of time". That is the failure the `release` branch exist
   `.claude-plugin/plugin.json`, and its text says the plugin "stays held for review". *Reasoned,
   not confirmed by the portal:* the hooks' `dispatch()` loop runs executables out of a `hooks.d`
   directory only known at runtime, so the scanner cannot rule out that the icon is one of them.
-  The icon was therefore removed again, and `tests/test_release_tree_ships_no_image.py` now fails
-  any built release tree that carries an image or font file, or a `plugin.json` with an `icon`
-  key. **The `ICON_MISSING` ("No icon") warning is expected from here on, and harmless:** it is
-  a warning, not a hold, and by the "set only once" rule above the file could never have become
-  remember's listing icon (first submitted on May 7, long before the icon existed; the listing
-  icon is the one an Anthropic reviewer set). Shipping it bought nothing but the cleared warning,
-  and cost a hold on every version. Do not add it back.
+  The icon was therefore removed again (#1041), and `tests/test_release_tree_ships_no_image.py`
+  now fails any built release tree that carries an image or font file, or a `plugin.json` with an
+  `icon` key. **The `ICON_MISSING` ("No icon") warning is expected from here on, and harmless:**
+  it is a warning, not a hold, and by the "set only once" rule above the file could never have
+  become remember's listing icon (first submitted on May 7, long before the icon existed; the
+  listing icon is the one an Anthropic reviewer set). Shipping it bought nothing but the cleared
+  warning, and cost a hold on every version. Do not add it back.
 - **`USES_HOOKS`** is information only and stays for any plugin that ships hooks.
 
 ### For another plugin repository, in addition to the reuse steps below
