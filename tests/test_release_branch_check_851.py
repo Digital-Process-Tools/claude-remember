@@ -112,6 +112,11 @@ def test_a_large_text_file_named_png_is_not_exempt(tmp_path):
 
 
 # -- bundled icon (#865) ---------------------------------------------------------
+# remember itself no longer ships an icon: every version that did was held by the
+# directory's "image the plugin's code could run" finding, and
+# tests/test_release_tree_ships_no_image.py pins its absence. These two stay because
+# another repository built with the same scripts may still ship one, and they are the
+# check's own pass/fail pair for an image referenced from plugin.json vs. from a .md file.
 
 def test_a_plugin_icon_referenced_only_from_plugin_json_is_not_flagged(tmp_path):
     """plugin.json's own `icon` field is JSON, not a .md code span and not a

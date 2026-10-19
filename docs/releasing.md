@@ -1004,10 +1004,22 @@ was "Validation ran out of time". That is the failure the `release` branch exist
   Anthropic reviewer" (Approved). Shipping one now would only clear the `ICON_MISSING` warning;
   it would not change the listing icon. **The lesson for a new plugin: ship the icon before the
   first portal submission** (see #865). For another repository: put the icon in the plugin
-  folder **before** the first save or submit. **Shipped, 2026-10-06 (#865):** remember now ships
-  `.claude-plugin/icon.png` (a square 512x512 PNG), referenced from `plugin.json`'s `icon` field,
-  purely to clear the `ICON_MISSING` warning -- per the "set only once" rule above this does not
-  change the live listing icon.
+  folder **before** the first save or submit. **Shipped, 2026-10-06 (#865, PR #922), then
+  removed:** v0.42.0 shipped `.claude-plugin/icon.png` (a square 512x512 PNG), referenced from
+  `plugin.json`'s `icon` field, purely to clear the `ICON_MISSING` warning. **Observed in the
+  portal's version list:** v0.41.0, with no icon, was not flagged; every version from v0.42.0 on
+  carries the policy finding "Image or font file that the plugin's code could run", cited on
+  `scripts/post-tool-hook.sh`, `scripts/session-start-hook.sh`, `scripts/user-prompt-hook.sh` and
+  `.claude-plugin/plugin.json`, and its text says the plugin "stays held for review". *Reasoned,
+  not confirmed by the portal:* the hooks' `dispatch()` loop runs executables out of a `hooks.d`
+  directory only known at runtime, so the scanner cannot rule out that the icon is one of them.
+  The icon was therefore removed again, and `tests/test_release_tree_ships_no_image.py` now fails
+  any built release tree that carries an image or font file, or a `plugin.json` with an `icon`
+  key. **The `ICON_MISSING` ("No icon") warning is expected from here on, and harmless:** it is
+  a warning, not a hold, and by the "set only once" rule above the file could never have become
+  remember's listing icon (first submitted on May 7, long before the icon existed; the listing
+  icon is the one an Anthropic reviewer set). Shipping it bought nothing but the cleared warning,
+  and cost a hold on every version. Do not add it back.
 - **`USES_HOOKS`** is information only and stays for any plugin that ships hooks.
 
 ### For another plugin repository, in addition to the reuse steps below
@@ -1026,6 +1038,9 @@ was "Validation ran out of time". That is the failure the `release` branch exist
    `_UNSCOPED_COMMANDS`.
 3. Make sure fake credentials live only in denied paths (`tests/`).
 4. Put the icon in the plugin folder before the first save or submission (see `ICON_MISSING`).
+   If your hooks run files the scanner cannot list ahead of time (a directory read at runtime,
+   as remember's `hooks.d` dispatch does), expect any shipped image to draw the "Image or font
+   file that the plugin's code could run" hold; remember dropped its icon for exactly that.
 5. Disclose in README.md everything the plugin runs, sends and stores; expect that disclosure to
    raise warnings, and leave it in.
 6. If the plugin itself was ever flagged, a clean, **Approved** version still needs the directory
