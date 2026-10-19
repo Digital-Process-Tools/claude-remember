@@ -460,6 +460,28 @@ flag: on `e6cf58f` the portal's credential warning named `README.md`,
 `scripts/session-start-hook.sh` and `.claude-plugin/plugin.json`, and none of those is a `REVIEW`
 line (the check skips `.md` files for this).
 
+**A credential named in a shipped shell script is a read on its own (v0.42.3).** The listed
+plugin's own version list shows v0.42.2 (`release` 55e1520) without the "Uses a credential from
+the user's machine" finding and v0.42.3 (`release` 8803994) with it, nothing else in the finding
+list changed (observed). That finding pairs a read with a send. v0.42.2 already shipped senders
+(the backup hook's push to its remote had been cited as the send side before), so the new
+version had to add a read, not only a send (reasoned). The only credential-shaped text the
+55e1520..8803994 release diff adds is the #974/#989 rotate advice in
+`hooks.d/after_save/50-git-backup.sh`: three log messages naming `haiku.oauth_token` and the
+command `claude setup-token`, in the same file as that push. `claude setup-token` in a
+user-facing string was cited verbatim as the read once before (#898, probe hE). The messages now
+give the same advice without either name ("the old haiku sign-in setting ... rotate it, make a
+new one the way the old one was made"), and
+`tests/test_release_tree_credential_text_in_shell.py` builds the release tree from `HEAD` and
+fails on any shipped `hooks/`, `hooks.d/` or `scripts/` `.sh` line matching the checker's
+`CREDENTIAL_USE` pattern or `setup-token`. `config.example.json` is left out on purpose: it named
+`oauth_token` on v0.42.2 too, which was clean. The new Windows hidden-window launcher
+(`scripts/windows-hidden-run.vbs`, #1002) arrived in the same version and is a send-shaped
+"run an assembled command line"; it is left as it is, because a send alone did not raise the
+finding on any earlier version. If the release-preview validation still shows the finding with
+this change, the launcher is the next suspect. The full-detail docs (`docs/git-backup-security.md`)
+are not shipped and still name the command.
+
 ## How the directory decides what to read
 
 The directory never looks at tags. It follows **one branch or tag**, set in the developer portal
