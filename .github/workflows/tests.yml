@@ -113,7 +113,7 @@ jobs:
         # pending. That path is not proven fixed here -- see the issue
         # filed for the unproven Windows cancellation case.
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: pytest-output-${{ matrix.os }}-${{ matrix.python-version }}
           path: pytest-output.log
@@ -187,7 +187,7 @@ jobs:
           pytest 2>&1 | tee pytest-output.log
       - name: Upload pytest output log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: pytest-output-hooks-${{ matrix.os }}
           path: pytest-output.log
