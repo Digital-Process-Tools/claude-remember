@@ -306,8 +306,22 @@ READ_SHAPES = {
 READ_BOUND_SECONDS = 10.0
 
 
+def _has_read_n(bash) -> bool:
+    out = subprocess.run([bash, "-c", "echo $BASH_VERSION"], capture_output=True,
+                         text=True, check=False).stdout.strip().split(".")
+    try:
+        return (int(out[0]), int(out[1])) >= (4, 1)
+    except (ValueError, IndexError):
+        return False
+
+
 @pytest.mark.parametrize("shape", sorted(READ_SHAPES))
 def test_the_chunked_reader_has_no_quadratic_tail(tmp_path, shape):
+    """Not a claim about the bash 3.2 line loop: its concatenation is itself
+    quadratic in the number of lines (108 s for this pretty-printed shape on
+    /bin/bash 3.2, measured), as it always was. Claude Code sends one line."""
+    if not _has_read_n(BASH):
+        pytest.skip(str(BASH) + " has no read -N, so the chunked reader never runs there")
     payload = READ_SHAPES[shape]
     out = tmp_path / "out"
     out.mkdir()
