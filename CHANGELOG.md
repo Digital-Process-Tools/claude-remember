@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.44.1] - 2026-10-19 — Large tool results no longer stall Windows
+
+### Fixed
+
+- Fixed #1040: on Windows, Remember could make Claude Code pause for half a minute after a tool returned a lot of text, such as reading a big file. Remember took in that text one letter at a time, and on Windows each letter is slow to fetch, so 1 MB took about 25 seconds. It now takes the text in large blocks: well under a second for the same 1 MB. What Remember reads from the text is exactly the same as before. Thanks to @gwangyong-kim, who measured it and pointed at the fix.
+
 ## [0.44.0] - 2026-10-19 — The directory listing can move again: icon removed, backup advice reworded
 
 ### Removed
@@ -4870,7 +4876,8 @@ Fixes [#9](https://github.com/Digital-Process-Tools/claude-remember/issues/9), a
 
 ## [0.1.0] — Initial release
 
-[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.44.0...HEAD
+[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.44.1...HEAD
+[0.44.1]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.44.1
 [0.44.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.44.0
 [0.43.2]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.43.2
 [0.43.1]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.43.1
