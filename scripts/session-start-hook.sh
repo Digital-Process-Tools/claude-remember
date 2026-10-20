@@ -125,11 +125,34 @@ _remember_hook_clock_into _REMEMBER_HOOK_T0
 # bytes: milliseconds even at that rate. And the compiled hook sits 37 bytes
 # under the 120 KiB release budget (check_release_tree.py), which the inlined
 # library (about 1.2 KB) would break.
+#
+# #1047: the paragraph above assumes a payload size the HOST chooses, and
+# nothing here enforced it. Handed its own transcript instead -- 6.8 MB, on a
+# child `claude` whose fd 0 was the session jsonl -- this hook hangs two ways,
+# both quadratic: `_stdin_json_string_into` opens with `${raw#*"$key"}`, and
+# the join below is `acc=$acc$line`. Measured: the strip is 0.28 s at 12.5 KB
+# and 15.2 s at 100 KB, 4x per doubling, against 2-6 ms for the `case` one line
+# into that function; the join is 63-91 s for 6 MB across 5,000 lines. Neither
+# can be linearised by dropping the leading `*` (docs/releasing.md: both
+# `${x#*P}` and `${x%%P*}` are quadratic on a miss), so the bound goes on the
+# INPUT, where it fixes both at once: one crop per side of the join, so the
+# accumulator never exceeds 8192 and every scan over it is capped. Payloads
+# under 4096 bytes are byte-identical to before, and the four fields this hook
+# reads are all in the first few hundred. A single `${var#...}` builtin also
+# runs without a signal check, which is why the 27 instances of this hang that
+# were found could not be stopped with SIGTERM.
+#
+# 8192 is under REMEMBER_HOOK_STDIN_MAX below, so the "too large for the
+# environment" branch under it cannot fire here any more, and a hooks.d/
+# listener always gets the payload in the environment as well as in the file.
+# Both carry the CROPPED payload, not the whole stream -- a listener that
+# needed bytes past 8192 would be the reason to revisit this, so keep it clear
+# of what a real payload needs.
 HOOK_STDIN=""
 if [ ! -t 0 ]; then
     _line=""
     while IFS= read -r -t 1 _line || [ -n "$_line" ]; do
-        HOOK_STDIN="$HOOK_STDIN$_line"
+        HOOK_STDIN="${HOOK_STDIN:0:4096}${_line:0:4096}"
         _line=""
     done
 fi
