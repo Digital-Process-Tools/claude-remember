@@ -281,6 +281,32 @@ export MEMORY_PROJECT_DIR
 REMEMBER_DIR=$(_resolve_remember_dir "$_data_dir_raw" "$MEMORY_PROJECT_DIR")
 export REMEMBER_DIR
 
+# #920 gap 1: every mkdir -p "$REMEMBER_DIR/..." site downstream of this file
+# (bootstrap-dirs.sh, session-start-hook.sh, session-end-hook.sh,
+# write-handoff.sh) built its tree with no check that REMEMBER_DIR is itself
+# a safe value -- only log.sh's own mkdir and post-tool-hook.sh's twin
+# (#902) ever refused. This is the single place every one of those scripts
+# resolves REMEMBER_DIR (each sources this file, directly or via
+# bootstrap-dirs.sh, before its own mkdir), so the check lives here once and
+# every downstream mkdir gates on the exported flag rather than repeating
+# the predicate. Byte-wise (#695), same reason log.sh's own
+# _remember_log_dir_unsafe takes it. A UNC-rooted value (two leading
+# backslashes, then anything but a third) is accepted as absolute (#920
+# gap 3) -- lib-slug.sh already treats that shape as a known one.
+_remember_dir_is_unsafe() {
+    local LC_ALL=C
+    { [[ "$REMEMBER_DIR" != /* ]] && [[ "$REMEMBER_DIR" != [A-Za-z]:[/\\]* ]] \
+        && [[ "$REMEMBER_DIR" != [\\][\\][^\\]* ]]; } \
+        || [[ "$REMEMBER_DIR" == *$'\n'* || "$REMEMBER_DIR" == *$'\r'* ]]
+}
+if _remember_dir_is_unsafe; then
+    echo "FATAL: unsafe REMEMBER_DIR ($REMEMBER_DIR) -- refusing to mkdir (#920)" >&2
+    REMEMBER_DIR_UNSAFE=1
+else
+    REMEMBER_DIR_UNSAFE=0
+fi
+export REMEMBER_DIR_UNSAFE
+
 # Empty in every layout where REMEMBER_DIR is nameable without the slug (#297).
 # Assigned, never `$(...)`: this runs on the per-tool-call path.
 _set_store_root "$_data_dir_raw"
