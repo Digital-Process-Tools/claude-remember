@@ -5,3 +5,5 @@ Bash	~supertool.*edit:@	supertool-literal-backslashes.md	remind
 Bash	~(^|[;&|])[[:space:]]*(python3?[[:space:]]+-m[[:space:]]+)?pytest[[:space:]]+.*(tests/|\.py|::)	targeted-pytest-misses-py39-and-scanners.md	remind			
 Bash	~tree_snapshot	tree-snapshot-compare.md	remind			
 Bash	~pytestmark[^)]*skipif\([^)]*win32	win32-skip-triage-entry.md	remind			
+Bash	~supertool	worktree-isolation-guard-surface-text-false-positive.md	remind			supertool
+Bash	~worktree (remove|add)	worktree-remove-ownership.md	remind			supertool
