@@ -2,8 +2,8 @@
 title: "The worktree-isolation guard on Bash refuses by surface-text match and payload size/complexity, not by actual risk"
 description: "Five separate #1002/#1003/#1011 incidents: a supertool edit:@- payload was refused for containing a VCS-tool brand name, repo slug or exe path in plain prose (never an invocation), or simply for being large/complex (a big heredoc, several keyword arguments together) -- bisecting and splitting into smaller calls cleared every one."
 tool: Bash
-match: ~supertool
-mode: remind
+match: ~supertool.*(edit|paste):@
+mode: once
 requires: supertool
 ---
 

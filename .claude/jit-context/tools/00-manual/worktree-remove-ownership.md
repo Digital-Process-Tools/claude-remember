@@ -2,7 +2,7 @@
 title: "Never git worktree remove a path you did not yourself git worktree add -- a concurrent spawn may still be using it"
 description: "oss:recon, pointed at a worktree path the calling lane had already named and was actively using, ran git worktree add then git worktree remove against that same path on its own initiative -- deleting the lane's own checked-out branch out from under it mid-session, with no error at the time."
 tool: Bash
-match: ~worktree (remove|add)
+match: ~worktree[[:space:]]+remove
 mode: remind
 requires: supertool
 ---
