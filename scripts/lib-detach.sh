@@ -22,16 +22,20 @@
 # with this route. docs/windows.md says so; #1002's own reporter is asked
 # to confirm.
 #
-# CALLERS: only post-tool-hook.sh's save wires into this file today -- the
-# one site the reporter actually measured flashing a console every few
-# minutes. The other three sites (SessionStart's consolidation,
-# SessionEnd's self-redetach, the Antigravity Stop hook's save) are
-# tracked in #1006 rather than wired here: SessionStart has no compiled
-# release-tree budget left to absorb it, and wiring SessionEnd surfaced a
-# real regression under review -- a wscript-launched child does not
-# inherit the parent's stdin the way `nohup ... &` does, so SessionEnd
-# would lose the hook's own JSON payload on the hidden route. Those three
-# keep their unchanged nohup lines, so they still flash a console.
+# CALLERS: post-tool-hook.sh's save sources this file directly (the one
+# site the reporter actually measured flashing a console every few
+# minutes). SessionStart's consolidation (#1006) reaches it indirectly,
+# through scripts/consolidation-launch.sh -- a separate, non-hook file
+# that sources this one in ITS OWN process, so lib-detach.sh's compiled
+# body is never inlined into session-start-hook.sh's own output (which
+# has no release-tree byte budget left to absorb it; see that file's own
+# call-site comment). SessionEnd's self-redetach and the Antigravity Stop
+# hook's save remain unwired and tracked in #1006: wiring SessionEnd
+# surfaced a real regression under review -- a wscript-launched child
+# does not inherit the parent's stdin the way `nohup ... &` does, so
+# SessionEnd would lose the hook's own JSON payload on the hidden route.
+# Those two keep their unchanged nohup lines, so they still flash a
+# console.
 
 # _remember_is_windows: true under MSYS2 or Cygwin on Windows, matching how
 # the rest of this plugin already detects Windows (docs/windows.md's
