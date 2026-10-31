@@ -7,8 +7,8 @@ wscript.exe, and pins the expected failures with
 failure to keep the suite green -- not the *documented* one -- so a
 checkout-time corruption of these bytes (a Windows checkout converting
 LF -> CRLF, say) could silently satisfy the same xfail markers with a
-different failure, and nothing would notice. See trap.d/1002.round-3-self-
-review-gitattributes-and-citation.md / #1070.
+different failure, and nothing would notice. See issue #1070 (originally a
+trap.d fragment, since curated and closed into that issue).
 
 Two independent guards, so either one catches a regression the other
 misses:
