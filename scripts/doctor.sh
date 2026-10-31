@@ -403,6 +403,21 @@ _PYTHON_OK=1
 if [ "$_DT_STATUS" -ne 0 ]; then
     _PYTHON_OK=0
     echo "FAIL Python: ${_DT_LOG:-no usable python found (tried python3, python, py -3, py)}"
+    # #1007: the FATAL text above (relayed verbatim from detect-tools.sh,
+    # which cannot grow it -- it is inlined into every compiled hook and
+    # #1005 left only 37 bytes of budget, #1006) never names the floor
+    # itself. doctor.sh is not inlined, so it can afford to: re-source
+    # detect-tools.sh in lazy mode (skips the candidate probe and its
+    # `exit 1` entirely -- this only needs the floor constants it sets
+    # as plain variables near the top of the file) to recover
+    # _REMEMBER_PY_FLOOR_MAJOR/_MINOR, which the subshell probe above
+    # could not leak out to this shell.
+    _PY_FLOOR=$(export _REMEMBER_LAZY_PYTHON=1
+        source "$SCRIPT_DIR/detect-tools.sh" >/dev/null 2>&1
+        echo "${_REMEMBER_PY_FLOOR_MAJOR}.${_REMEMBER_PY_FLOOR_MINOR}")
+    if [[ "$_PY_FLOOR" =~ ^[0-9]+\.[0-9]+$ ]]; then
+        echo "     need Python ${_PY_FLOOR}+ -- install a newer Python."
+    fi
     echo "WARN jq: skipped (python detection failed first)"
 else
     # Safe to source for real now — the subshell probe already proved this
