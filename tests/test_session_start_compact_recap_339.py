@@ -52,6 +52,7 @@ import json
 import os
 import subprocess
 import sys
+import unittest.mock
 from pathlib import Path
 
 import pytest
@@ -76,6 +77,19 @@ FROZEN_TODAY = "2099-04-08"
 TODAY_FILE = "today-" + FROZEN_TODAY + ".md"
 
 
+def _write_shell_script(path: Path, text: str) -> None:
+    """Writes a `#!/bin/sh` script via `open(..., newline="\n")`, never
+    `Path.write_text()` (#994/#999): `write_text()`'s default
+    `newline=None` applies universal-newline translation on write, turning
+    every `\n` into `os.linesep` -- `\r\n` on Windows -- which corrupts
+    the shebang line into a "bad interpreter" exec failure. This file
+    carries a win32 skip (above), so that breakage is inert here, but the
+    write is still fixed to the safe pattern rather than left as a trap
+    for whoever narrows or removes that skip."""
+    with open(path, "w", newline="\n", encoding="utf-8") as f:
+        f.write(text)
+
+
 def _shim_date(bindir, today):
     """PATH shim for `date`, freezing `+%Y-%m-%d` to a fixed value.
 
@@ -90,7 +104,8 @@ def _shim_date(bindir, today):
     """
     bindir.mkdir(exist_ok=True)
     shim = bindir / "date"
-    shim.write_text(
+    _write_shell_script(
+        shim,
         "#!/bin/sh\n"
         'if [ "$1" = "+%Y-%m-%d" ]; then\n'
         f'  echo {today}\n'
@@ -100,6 +115,27 @@ def _shim_date(bindir, today):
     )
     shim.chmod(0o755)
     return shim
+
+
+def test_write_shell_script_never_uses_path_write_text(tmp_path):
+    """Regression pin for #994/#999: `_write_shell_script` must go through
+    `open(..., newline="\n")`, never `Path.write_text()`, whose default
+    `newline=None` applies universal-newline translation and can corrupt
+    the shebang line on Windows. Pins the *call*, not the output bytes --
+    `os.linesep` is "\n" on every platform this suite can exercise
+    locally, so the corrupted bytes this bug produces on Windows would
+    not appear here even without the fix, which is exactly why the call
+    itself has to be pinned instead."""
+    target = tmp_path / "stub"
+    with unittest.mock.patch.object(
+        Path,
+        "write_text",
+        side_effect=AssertionError(
+            "shell script written via Path.write_text(), not open(newline='\n')"
+        ),
+    ):
+        _write_shell_script(target, "#!/bin/sh\nexit 0\n")
+    assert target.read_bytes() == b"#!/bin/sh\nexit 0\n"
 
 
 # One sentinel per memory file. Asserting on the BODY, not on the section

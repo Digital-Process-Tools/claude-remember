@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import unittest.mock
 from pathlib import Path
 
 import pytest
@@ -26,6 +27,37 @@ BASH = resolve_bash()
 pytestmark = pytest.mark.skipif(BASH is None, reason="no usable bash found")
 
 
+def _write_shell_script(path: Path, text: str) -> None:
+    r"""Writes a `#!/bin/sh` script via `open(..., newline="\n")`, never
+    `Path.write_text()` (#994/#999): `write_text()`'s default
+    `newline=None` applies universal-newline translation on write, turning
+    every `\n` into `os.linesep` -- `\r\n` on Windows -- which corrupts
+    the shebang line into a "bad interpreter" exec failure."""
+    with open(path, "w", newline="\n", encoding="utf-8") as f:
+        f.write(text)
+
+
+def test_write_shell_script_never_uses_path_write_text(tmp_path):
+    """Regression pin for #994/#999: `_write_shell_script` must go through
+    `open(..., newline="\n")`, never `Path.write_text()`, whose default
+    `newline=None` applies universal-newline translation and can corrupt
+    the shebang line on Windows. Pins the *call*, not the output bytes --
+    `os.linesep` is "\n" on every platform this suite can exercise
+    locally, so the corrupted bytes this bug produces on Windows would
+    not appear here even without the fix, which is exactly why the call
+    itself has to be pinned instead."""
+    target = tmp_path / "stub"
+    with unittest.mock.patch.object(
+        Path,
+        "write_text",
+        side_effect=AssertionError(
+            "shell script written via Path.write_text(), not open(newline='\n')"
+        ),
+    ):
+        _write_shell_script(target, "#!/bin/sh\nexit 0\n")
+    assert target.read_bytes() == b"#!/bin/sh\nexit 0\n"
+
+
 def _fake_python_dir(tmp_path: Path) -> Path:
     """A PATH entry with a `python3` that actually runs `-V` (exit 0) and a
     counter file so the test can assert whether it was invoked."""
@@ -34,7 +66,8 @@ def _fake_python_dir(tmp_path: Path) -> Path:
     counter = tmp_path / "python3-calls"
     counter.write_text("", encoding="utf-8")
     stub = bindir / "python3"
-    stub.write_text(
+    _write_shell_script(
+        stub,
         "#!/bin/sh\n"
         f'echo x >> "{counter}"\n'
         # #1003: detect-tools.sh now checks the version text `-V` reports
@@ -45,7 +78,6 @@ def _fake_python_dir(tmp_path: Path) -> Path:
         # actually about, not the floor check.
         'echo "Python 3.12.0"\n'
         'exit 0\n',
-        encoding="utf-8",
     )
     stub.chmod(0o755)
     return bindir, counter
@@ -234,7 +266,7 @@ def test_lazy_mode_failure_returns_instead_of_exiting(tmp_path):
     bindir = tmp_path / "bin"
     bindir.mkdir()
     stub = bindir / "python3"
-    stub.write_text("#!/bin/sh\nexit 49\n", encoding="utf-8")
+    _write_shell_script(stub, "#!/bin/sh\nexit 49\n")
     stub.chmod(0o755)
     cache_tmpdir = tmp_path / "tmp1"
     cache_tmpdir.mkdir()
