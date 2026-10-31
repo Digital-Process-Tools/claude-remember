@@ -136,20 +136,32 @@ if [ -z "${CLAUDE_PROJECT_DIR:-}" ]; then
     # THIS session's SessionStart already published a hint file keyed by
     # THIS session's own id (#738) into whichever REMEMBER_DIR it actually
     # resolved -- nothing else can have written that file, and nothing else
-    # is asked to disambiguate. Whichever candidate's derived store carries
-    # it is the one SessionStart itself used for this very session; if
-    # neither or both do (no session id reached this script, a session that
-    # predates #738/#776, or -- unreachable in the ordinary case -- both
-    # somehow agree) this falls through to the pre-#776 default of
-    # preferring the git toplevel, unchanged.
+    # is asked to disambiguate. #1058 replaced the original #776 two-candidate
+    # comparison below with a full ancestor walk (closest-to-$(pwd) wins), so
+    # the old "neither or both agree -> toplevel, unchanged" rule now only
+    # describes the "neither" half: when $(pwd) ITSELF already carries the
+    # hint, the walk stops there immediately, even if the toplevel also
+    # carries one. That "both" shape is still the one the #776 comment above
+    # called unreachable in the ordinary case (SessionStart only ever
+    # publishes the hint to the one store it actually resolved to), so this
+    # is a comment correction, not a behaviour change anyone should observe.
     if [ -n "$_WH_GIT_ROOT" ] && [ "$_WH_GIT_ROOT" != "$(pwd)" ] && [ -n "$_WH_SESSION_ID" ]; then
-        # #1058: walk every ancestor from $(pwd) up to (and including) the
-        # git toplevel, taking the first (closest to $(pwd)) whose own
-        # resolved store already carries this session's hint. This reaches
-        # $(pwd) itself first, so it reproduces the #776 two-candidate
-        # check exactly when $(pwd) is one of the two original candidates,
-        # and also reaches any directory strictly BETWEEN $(pwd) and the
-        # toplevel -- the #1058 shape #776 could not see at all.
+        # #1058: walk every ancestor from $(pwd) up to the git toplevel,
+        # taking the first (closest to $(pwd)) whose own resolved store
+        # already carries this session's hint. This reaches $(pwd) itself
+        # first, so it reproduces the #776 two-candidate check exactly when
+        # $(pwd) is one of the two original candidates, and also reaches any
+        # directory strictly BETWEEN $(pwd) and the toplevel -- the #1058
+        # shape #776 could not see at all.
+        #
+        # The toplevel-reached test below uses `-ef` (same device+inode),
+        # not a string compare: `git rev-parse --show-toplevel` resolves
+        # symlinks, but bash's own $(pwd) is LOGICAL and keeps whatever
+        # symlink name got `cd`'d through (e.g. macOS's /tmp ->
+        # /private/tmp). A string compare would never match in that case and
+        # the walk would silently fall through to its "/" backstop instead
+        # of stopping at the toplevel as intended -- still correct (each
+        # ancestor's hint check is independent), just needlessly expensive.
         _WH_WALK_DIR="$(pwd)"
         _WH_HINT_DIR=""
         while :; do
@@ -158,7 +170,7 @@ if [ -z "${CLAUDE_PROJECT_DIR:-}" ]; then
                 _WH_HINT_DIR="$_WH_WALK_DIR"
                 break
             fi
-            [ "$_WH_WALK_DIR" = "$_WH_GIT_ROOT" ] && break
+            [ "$_WH_WALK_DIR" -ef "$_WH_GIT_ROOT" ] && break
             [ "$_WH_WALK_DIR" = "/" ] && break
             _WH_WALK_DIR=$(dirname "$_WH_WALK_DIR")
         done
