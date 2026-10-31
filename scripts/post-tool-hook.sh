@@ -413,8 +413,8 @@ _remember_dir_is_unsafe() {
 # wired hook has never fired: the exact regression #200 fixed.
 # #920 gap 1: this mkdir (and the two more below, at the notice marker and
 # the capture-alive.d check) ran on both paths with no check that
-# REMEMBER_DIR is itself a safe value -- only the #902 call site above
-# (logs/autonomous, further down this file) was ever gated.
+# REMEMBER_DIR is itself a safe value -- only the #902 call site further
+# down this file (logs/autonomous) was ever gated.
 if ! _remember_dir_is_unsafe && ! : > "$REMEMBER_DIR/tmp/post-tool-ran" 2>/dev/null; then
     mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null \
         && : > "$REMEMBER_DIR/tmp/post-tool-ran" 2>/dev/null || true

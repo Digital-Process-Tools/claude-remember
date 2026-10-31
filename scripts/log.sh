@@ -77,8 +77,15 @@ _remember_log_dir_unsafe() {
 # mkdir is skipped, log()'s file write goes to /dev/null, and dispatch() skips
 # its own tmp/ mkdir -- the rest of the library is defined as usual.
 _REMEMBER_LOG_SINK=""
-if _remember_log_dir_unsafe; then
-    echo "FATAL: unsafe REMEMBER_DIR ($REMEMBER_DIR) -- refusing to mkdir" >&2
+# #920 self-review: this used to re-run _remember_log_dir_unsafe and echo its
+# own, separate FATAL line here -- byte-identical in substance to the one
+# lib-memory-dir.sh now echoes ONCE, at the point REMEMBER_DIR is actually
+# resolved (sourced just above, unconditionally, so REMEMBER_DIR_UNSAFE is
+# always set before this runs). Every hook that sources bootstrap-dirs.sh
+# (-> lib-memory-dir.sh) and then log.sh was printing BOTH lines back to
+# back, on every tool call, for as long as REMEMBER_DIR stayed unsafe. Read
+# the flag instead of recomputing the predicate and re-announcing it.
+if [ "${REMEMBER_DIR_UNSAFE:-0}" = 1 ]; then
     _REMEMBER_LOG_SINK=/dev/null
 # `[ -d ]` first (#230): bootstrap-dirs.sh has almost always just created this,
 # and re-asking `mkdir` costs a process per hook invocation to learn nothing. The

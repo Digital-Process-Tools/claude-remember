@@ -218,9 +218,9 @@ ALLOWLIST: dict[tuple[str, int], str] = {
     # more by #1011's own self-review round (a stale-comment fix above the
     # glob-walk, plus a longer comment on the capture-alive in-place write).
     # Shifted +5 (771->776, 814->819) by #1034's comment on the
-    # both-separators basename split just above the first one. Shifted
-    # +6/+7 again (776->782, 819->826) by #920's unsafe-dir guards at the
-    # notice-marker mkdir and the capture-alive.d mkdir, both just above.
+    # both-separators basename split just above the first one. Shifted again
+    # by #920's unsafe-dir guards at the notice-marker mkdir and the
+    # capture-alive.d mkdir, both just above (772->778, 815->822).
     ("scripts/post-tool-hook.sh", 778): _CASE,
     ("scripts/post-tool-hook.sh", 822): _CASE,
     # The #913 transcript-scan sidecar's own key: a filename component, same
