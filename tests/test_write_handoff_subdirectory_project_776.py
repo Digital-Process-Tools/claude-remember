@@ -30,6 +30,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -166,6 +167,72 @@ class TestSubdirectoryProjectIsRoutedToItsOwnStore:
             f"exists anywhere.\nstdout: {result.stdout!r}\nstderr: {result.stderr!r}"
         )
         assert not sub_target.exists()
+
+
+class TestFreshestHintWinsOnResume1058Review:
+    """Review finding on #1058 / PR #1081: the ancestor walk must pick the
+    FRESHEST session hint among every ancestor that carries one, not just
+    the nearest to $(pwd). session-start-hook.sh republishes
+    tmp/handoff-path.<id> on every SessionStart for a given session id --
+    including a `--resume` that keeps the same id but runs from a
+    DIFFERENT directory than the one the session originally started in --
+    and the earlier directory's hint is not pruned just because a later
+    SessionStart happened somewhere else. "Closest ancestor with a hint"
+    can therefore pick a directory the session has since moved on from,
+    over the one it most recently resolved to."""
+
+    def test_a_fresher_hint_at_the_toplevel_beats_a_stale_one_at_a_nearer_ancestor(self, tmp_path):
+        project, sub_project, deep, home = _sandbox_git_repo_with_deep_subproject(tmp_path)
+
+        # The subdirectory project's hint (planted by the shared fixture)
+        # is the STALE one -- back-date its mtime well outside any
+        # ordinary clock-skew tolerance.
+        sub_hint = sub_project / ".remember" / "tmp" / f"handoff-path.{SESSION_ID}"
+        old_time = time.time() - 3600
+        os.utime(sub_hint, (old_time, old_time))
+
+        # The enclosing repository's own store ALSO carries this session's
+        # hint, written more recently -- the #776/#1058 "resume" shape: the
+        # same session id resumed from the repo root after originally
+        # starting in `pkg`.
+        root_remember = project / ".remember"
+        (root_remember / "tmp").mkdir(parents=True)
+        (root_remember / "config.json").write_text(json.dumps({"data_dir": ".remember"}))
+        root_target = root_remember / "remember.md"
+        (root_remember / "tmp" / f"handoff-path.{SESSION_ID}").write_text(str(root_target))
+
+        result = _write_handoff(deep, home, "note after a resume at the repo root\n")
+
+        assert result.returncode == 0, (
+            f"stdout: {result.stdout!r}\nstderr: {result.stderr!r}"
+        )
+        sub_target = sub_project / ".remember" / "remember.md"
+        assert root_target.exists() and "note after a resume at the repo root" in root_target.read_text(), (
+            f"expected the FRESHER hint (the repo root, re-published by the "
+            f"resume) to win over the STALE one at the nearer ancestor.\n"
+            f"stdout: {result.stdout!r}\nstderr: {result.stderr!r}"
+        )
+        assert not sub_target.exists(), (
+            "note was misrouted to the stale nearer ancestor instead of the "
+            "freshest hint -- the #1058/PR #1081 review regression"
+        )
+
+    def test_positive_control_the_only_hint_present_still_wins_regardless_of_mtime(self, tmp_path):
+        """Only one ancestor has a hint at all (the plain #1058 shape, no
+        resume involved) -- freshest-wins must still find and use it,
+        exactly as closest-wins did. Guards against a "freshest" rewrite
+        that accidentally requires two or more candidates to work at all."""
+        project, sub_project, deep, home = _sandbox_git_repo_with_deep_subproject(tmp_path)
+
+        result = _write_handoff(deep, home, "note with only one hint anywhere\n")
+
+        assert result.returncode == 0, (
+            f"stdout: {result.stdout!r}\nstderr: {result.stderr!r}"
+        )
+        sub_target = sub_project / ".remember" / "remember.md"
+        root_target = project / ".remember" / "remember.md"
+        assert sub_target.exists() and "note with only one hint anywhere" in sub_target.read_text()
+        assert not root_target.exists()
 
 
 class TestDeeperCwdThanSessionStartDir1058:

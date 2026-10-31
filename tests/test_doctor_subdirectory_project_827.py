@@ -55,6 +55,32 @@ def _sandbox_git_repo_with_subproject(tmp_path: Path):
     return project, sub_project, home
 
 
+def _sandbox_git_repo_with_deep_subproject(tmp_path: Path):
+    """Like _sandbox_git_repo_with_subproject, but with an extra directory
+    (`pkg/deep`) below the subdirectory project the session actually
+    started in -- the #1058 shape, ported to doctor.sh (#1082)."""
+    project = tmp_path / "proj"
+    project.mkdir()
+    _git("init", "-q", cwd=project)
+    _git("config", "user.email", "test@example.com", cwd=project)
+    _git("config", "user.name", "Test", cwd=project)
+
+    home = tmp_path / "home"
+    (home / ".claude" / "projects").mkdir(parents=True)
+
+    sub_project = project / "pkg"
+    sub_remember = sub_project / ".remember"
+    (sub_remember / "tmp").mkdir(parents=True)
+    (sub_remember / "config.json").write_text(json.dumps({"data_dir": ".remember"}))
+    sub_target = sub_remember / "remember.md"
+    (sub_remember / "tmp" / f"handoff-path.{SESSION_ID}").write_text(str(sub_target))
+
+    deep = sub_project / "deep"
+    deep.mkdir()
+
+    return project, sub_project, deep, home
+
+
 def _run_doctor_json(cwd: Path, home: Path, session_id: str = SESSION_ID) -> dict:
     env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
     env["CLAUDE_PLUGIN_ROOT"] = str(REPO_ROOT)
@@ -102,4 +128,35 @@ class TestDoctorSubdirectoryProjectIsRoutedToItsOwnStore:
         assert report["project_dir"] == str(project), (
             "expected the #802 behaviour (git root) when no session hint "
             f"exists anywhere.\nreport: {report}"
+        )
+
+
+class TestDoctorDeeperCwdThanSessionStartDir1058:
+    """#1058/#1082: doctor.sh's resolver must report the same store
+    write-handoff.sh would actually write into when $(pwd) has moved past
+    the subdirectory project the session started in -- not just the
+    original #827 two-candidate shape."""
+
+    def test_a_cwd_deeper_than_the_session_start_dir_is_still_reported_correctly(self, tmp_path):
+        _project, sub_project, deep, home = _sandbox_git_repo_with_deep_subproject(tmp_path)
+
+        report = _run_doctor_json(deep, home)
+
+        assert report["project_dir"] == str(sub_project), (
+            "doctor.sh --json reported the enclosing repository's own "
+            "store instead of the subdirectory project's own, from a cwd "
+            "deeper than the session's start dir -- the #1058 defect, "
+            "uncarried into doctor.sh.\n"
+            f"report: {report}"
+        )
+
+    def test_positive_control_no_hint_anywhere_still_falls_back_to_git_root(self, tmp_path):
+        project, sub_project, deep, home = _sandbox_git_repo_with_deep_subproject(tmp_path)
+        (sub_project / ".remember" / "tmp" / f"handoff-path.{SESSION_ID}").unlink()
+
+        report = _run_doctor_json(deep, home)
+
+        assert report["project_dir"] == str(project), (
+            "expected the fallback (git root) when no session hint exists "
+            f"anywhere.\nreport: {report}"
         )

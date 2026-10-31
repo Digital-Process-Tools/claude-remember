@@ -147,37 +147,59 @@ if [ -z "${CLAUDE_PROJECT_DIR:-}" ]; then
     # is a comment correction, not a behaviour change anyone should observe.
     if [ -n "$_WH_GIT_ROOT" ] && [ "$_WH_GIT_ROOT" != "$(pwd)" ] && [ -n "$_WH_SESSION_ID" ]; then
         # #1058: walk every ancestor from $(pwd) up to the git toplevel,
-        # taking the first (closest to $(pwd)) whose own resolved store
-        # already carries this session's hint. This reaches $(pwd) itself
-        # first, so it reproduces the #776 two-candidate check exactly when
-        # $(pwd) is one of the two original candidates, and also reaches any
-        # directory strictly BETWEEN $(pwd) and the toplevel -- the #1058
-        # shape #776 could not see at all.
+        # and -- review finding on #1058/PR #1081 -- pick the FRESHEST
+        # hint among every ancestor that has one, not just the nearest.
+        # session-start-hook.sh republishes tmp/handoff-path.<id> on every
+        # SessionStart for a given session id, including a `--resume` that
+        # keeps the same id but runs from a DIFFERENT directory than the
+        # one the session originally started in; the earlier directory's
+        # hint survives (session-start-hook.sh's own stale-hint reap only
+        # ever sweeps the CURRENT REMEMBER_DIR's own tmp/, never another
+        # directory's) for as long as its grace window, so "closest
+        # ancestor with a hint" can genuinely pick a directory the session
+        # has since moved on from over the one it most recently resolved
+        # to. Comparing mtimes picks whichever hint was written most
+        # recently, which is the resume's own, not an accident of which
+        # ancestor happens to be nearer $(pwd).
         #
-        # The toplevel-reached test below uses `-ef` (same device+inode),
-        # not a string compare: `git rev-parse --show-toplevel` resolves
+        # The toplevel-reached test uses `-ef` (same device+inode), not a
+        # string compare: `git rev-parse --show-toplevel` resolves
         # symlinks, but bash's own $(pwd) is LOGICAL and keeps whatever
         # symlink name got `cd`'d through (e.g. macOS's /tmp ->
-        # /private/tmp). A string compare would never match in that case and
-        # the walk would silently fall through to its "/" backstop instead
-        # of stopping at the toplevel as intended -- still correct (each
-        # ancestor's hint check is independent), just needlessly expensive.
+        # /private/tmp). Termination itself does not depend on reaching
+        # the toplevel at all, though: it stops as soon as `dirname` makes
+        # no further progress (covers both POSIX "/" and an MSYS/Windows
+        # UNC root like "//server", where some `dirname` implementations
+        # return the same string forever -- review finding on #1058/PR
+        # #1081, reasoned rather than observed: no MSYS environment was
+        # available to exercise the UNC shape directly).
         _WH_WALK_DIR="$(pwd)"
         _WH_HINT_DIR=""
+        _WH_HINT_MTIME=-1
         while :; do
             _WH_RD_WALK=$(_wh_trial_remember_dir "$_WH_WALK_DIR") || _WH_RD_WALK=""
-            if [ -n "$_WH_RD_WALK" ] && [ -f "$_WH_RD_WALK/tmp/handoff-path.$_WH_SESSION_ID" ]; then
-                _WH_HINT_DIR="$_WH_WALK_DIR"
-                break
+            if [ -n "$_WH_RD_WALK" ]; then
+                _WH_HINT_FILE_WALK="$_WH_RD_WALK/tmp/handoff-path.$_WH_SESSION_ID"
+                if [ -f "$_WH_HINT_FILE_WALK" ]; then
+                    _WH_MTIME_WALK=$(stat -c %Y "$_WH_HINT_FILE_WALK" 2>/dev/null) \
+                        || _WH_MTIME_WALK=$(stat -f %m "$_WH_HINT_FILE_WALK" 2>/dev/null) \
+                        || _WH_MTIME_WALK=""
+                    if [ -n "$_WH_MTIME_WALK" ] && [[ "$_WH_MTIME_WALK" != *[!0-9]* ]] \
+                        && [ "$_WH_MTIME_WALK" -gt "$_WH_HINT_MTIME" ]; then
+                        _WH_HINT_MTIME="$_WH_MTIME_WALK"
+                        _WH_HINT_DIR="$_WH_WALK_DIR"
+                    fi
+                fi
             fi
             [ "$_WH_WALK_DIR" -ef "$_WH_GIT_ROOT" ] && break
-            [ "$_WH_WALK_DIR" = "/" ] && break
-            _WH_WALK_DIR=$(dirname "$_WH_WALK_DIR")
+            _WH_WALK_NEXT=$(dirname "$_WH_WALK_DIR")
+            [ "$_WH_WALK_NEXT" = "$_WH_WALK_DIR" ] && break
+            _WH_WALK_DIR="$_WH_WALK_NEXT"
         done
         if [ -n "$_WH_HINT_DIR" ]; then
             _WH_GIT_ROOT="$_WH_HINT_DIR"
         fi
-        unset _WH_RD_WALK _WH_WALK_DIR _WH_HINT_DIR
+        unset _WH_RD_WALK _WH_WALK_DIR _WH_WALK_NEXT _WH_HINT_DIR _WH_HINT_MTIME _WH_HINT_FILE_WALK _WH_MTIME_WALK
     fi
 
     if [ -n "$_WH_GIT_ROOT" ]; then
