@@ -1409,7 +1409,10 @@ fi
 # the transcript. One line, overwritten every session start; a stale value
 # left over from a session that never got this far is never worse than the
 # hardcoded fallback write-handoff.sh already falls back to.
-[ -d "$REMEMBER_DIR/tmp" ] || mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null
+# #920 gap 1: REMEMBER_DIR_UNSAFE is exported by lib-memory-dir.sh (sourced
+# via bootstrap-dirs.sh above), the single chokepoint this script resolves
+# REMEMBER_DIR through.
+[ "${REMEMBER_DIR_UNSAFE:-0}" = 1 ] || [ -d "$REMEMBER_DIR/tmp" ] || mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null
 printf '%s\n' "$REMEMBER_HANDOFF" > "$REMEMBER_DIR/tmp/handoff-path" 2>/dev/null
 
 # ── Session-keyed copy of the same pointer (#738) ──────────────────────────
@@ -1802,7 +1805,8 @@ _REMEMBER_CTX_OK=""
 # `[ -d ] ||` first (#660): `mkdir -p` on a directory that already exists is
 # a fork that does nothing, and tmp/ exists on every start after the first.
 # The test is a bash builtin, so the first start pays nothing for it either.
-[ -d "$REMEMBER_DIR/tmp" ] || mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null
+# #920 gap 1
+[ "${REMEMBER_DIR_UNSAFE:-0}" = 1 ] || [ -d "$REMEMBER_DIR/tmp" ] || mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null
 # Verify the target is writable BEFORE handing it to `exec`: a redirection
 # failure on the `exec` builtin itself (a special builtin) can terminate a
 # non-interactive shell outright, and this hook is documented EXIT CODES: 0
@@ -2231,7 +2235,9 @@ echo ""
 
 if ! _remember_start_cache_context_load; then
     _REMEMBER_START_CTX_TMP=""
-    if [ -n "${REMEMBER_DIR:-}" ] && [ "${REMEMBER_START_CACHE:-1}" = "1" ] \
+    # #920 gap 1
+    if [ -n "${REMEMBER_DIR:-}" ] && [ "${REMEMBER_DIR_UNSAFE:-0}" != 1 ] \
+       && [ "${REMEMBER_START_CACHE:-1}" = "1" ] \
        && [ "$SESSION_START_SOURCE" != "compact" ] \
        && { [ -d "$REMEMBER_DIR/tmp" ] || mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null; }; then
         _REMEMBER_START_CTX_TMP=$(mktemp "$REMEMBER_DIR/tmp/start-context.cache.XXXXXX" 2>/dev/null) || _REMEMBER_START_CTX_TMP=""

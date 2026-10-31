@@ -67,7 +67,8 @@ REMEMBER_LOG_DIR="${REMEMBER_DIR}/logs"
 # scope the bracket range byte-wise (#695) without exporting it past here.
 _remember_log_dir_unsafe() {
     local LC_ALL=C
-    { [[ "$REMEMBER_DIR" != /* ]] && [[ "$REMEMBER_DIR" != [A-Za-z]:[/\\]* ]]; } \
+    { [[ "$REMEMBER_DIR" != /* ]] && [[ "$REMEMBER_DIR" != [A-Za-z]:[/\\]* ]] \
+        && [[ "$REMEMBER_DIR" != [\\][\\][^\\]* ]]; } \
         || [[ "$REMEMBER_DIR" == *$'\n'* || "$REMEMBER_DIR" == *$'\r'* ]]
 }
 # Refused, NOT returned from: every hook calls log/dispatch/report_error right
@@ -76,8 +77,15 @@ _remember_log_dir_unsafe() {
 # mkdir is skipped, log()'s file write goes to /dev/null, and dispatch() skips
 # its own tmp/ mkdir -- the rest of the library is defined as usual.
 _REMEMBER_LOG_SINK=""
-if _remember_log_dir_unsafe; then
-    echo "FATAL: unsafe REMEMBER_DIR ($REMEMBER_DIR) -- refusing to mkdir" >&2
+# #920 self-review: this used to re-run _remember_log_dir_unsafe and echo its
+# own, separate FATAL line here -- byte-identical in substance to the one
+# lib-memory-dir.sh now echoes ONCE, at the point REMEMBER_DIR is actually
+# resolved (sourced just above, unconditionally, so REMEMBER_DIR_UNSAFE is
+# always set before this runs). Every hook that sources bootstrap-dirs.sh
+# (-> lib-memory-dir.sh) and then log.sh was printing BOTH lines back to
+# back, on every tool call, for as long as REMEMBER_DIR stayed unsafe. Read
+# the flag instead of recomputing the predicate and re-announcing it.
+if [ "${REMEMBER_DIR_UNSAFE:-0}" = 1 ]; then
     _REMEMBER_LOG_SINK=/dev/null
 # `[ -d ]` first (#230): bootstrap-dirs.sh has almost always just created this,
 # and re-asking `mkdir` costs a process per hook invocation to learn nothing. The
@@ -1181,7 +1189,18 @@ log() {
     # flatten again, as it did before #621 (the pre-#621 shape, restored
     # verbatim).
     message="${timestamp} [${component}] $(printf '%s' "$message" | LC_ALL=C tr '[:cntrl:]' ' ')"
-    echo "$message" >> "$MEMORY_LOG_FILE" 2>/dev/null || echo "$message" >&2
+    # #920 gap 2: once the sink is active (MEMORY_LOG_FILE == _REMEMBER_LOG_SINK,
+    # i.e. /dev/null, because REMEMBER_DIR itself was judged unsafe), an append
+    # to /dev/null always SUCCEEDS -- so the `|| echo ... >&2` fallback below
+    # never ran and a message logged while refusing simply vanished. Checked
+    # explicitly rather than relied on the append failing: go straight to
+    # stderr whenever the sink is the active target, instead of attempting
+    # (and "succeeding" at) a write nobody can ever read back.
+    if [ -n "$_REMEMBER_LOG_SINK" ] && [ "$MEMORY_LOG_FILE" = "$_REMEMBER_LOG_SINK" ]; then
+        echo "$message" >&2
+    else
+        echo "$message" >> "$MEMORY_LOG_FILE" 2>/dev/null || echo "$message" >&2
+    fi
 }
 
 # Log token usage for a Haiku API call.

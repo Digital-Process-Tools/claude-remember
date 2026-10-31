@@ -325,7 +325,8 @@ log "hook" "session-end: reason=$SESSION_END_REASON session=${STDIN_SESSION_ID:-
 # problem that does not exist. Reported the same way save-session.sh:428
 # reports its own fall-through, so a read-only store or a full disk shows
 # up as a fault rather than as silence.
-if ! mkdir -p "$REMEMBER_DIR/logs/autonomous" 2>/dev/null; then
+# #920 gap 1
+if [ "${REMEMBER_DIR_UNSAFE:-0}" = 1 ] || ! mkdir -p "$REMEMBER_DIR/logs/autonomous" 2>/dev/null; then
     report_error "session-end" "WARNING: could not create $REMEMBER_DIR/logs/autonomous -- this session's flush will not be recorded, and /remember:doctor may misreport SessionEnd as never having fired."
 fi
 # `$$` (this hook process's own PID) suffixes the second-granularity

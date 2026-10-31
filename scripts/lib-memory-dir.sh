@@ -281,6 +281,35 @@ export MEMORY_PROJECT_DIR
 REMEMBER_DIR=$(_resolve_remember_dir "$_data_dir_raw" "$MEMORY_PROJECT_DIR")
 export REMEMBER_DIR
 
+# #920 gap 1: every mkdir -p "$REMEMBER_DIR/..." site downstream of this file
+# (bootstrap-dirs.sh, session-start-hook.sh, session-end-hook.sh,
+# write-handoff.sh) built its tree with no check that REMEMBER_DIR is itself
+# a safe value -- only log.sh's own mkdir and post-tool-hook.sh's twin
+# (#902) ever refused. This is the single place every one of those scripts
+# resolves REMEMBER_DIR (each sources this file, directly or via
+# bootstrap-dirs.sh, before its own mkdir), so the check lives here once and
+# every downstream mkdir gates on the exported flag rather than repeating
+# the predicate. Byte-wise (#695), same reason log.sh's own
+# _remember_log_dir_unsafe takes it. A UNC-rooted value (two leading
+# backslashes, then anything but a third) is accepted as absolute (#920
+# gap 3) -- lib-slug.sh already treats that shape as a known one.
+#
+# Named DISTINCTLY from post-tool-hook.sh's own, pre-existing (#902)
+# `_remember_dir_is_unsafe` -- not merely out of caution: the #900 compiled-
+# hook build inlines every sourced file's top level into one script, and
+# post-tool-hook.sh sources this file (via bootstrap-dirs.sh), so the two
+# functions would collide under the SAME name in that one compiled text.
+# CI's `tests/test_compile_hooks_900.py` caught exactly this (self-review
+# follow-up, after a first version of this fix picked the same name here).
+_remember_lmd_set_dir_unsafe() {
+    local LC_ALL=C
+    REMEMBER_DIR_UNSAFE=1
+    [[ "$REMEMBER_DIR" == *[$'\n\r']* ]] && return
+    [[ "$REMEMBER_DIR" == /* || "$REMEMBER_DIR" == [A-Za-z]:[/\\]* || "$REMEMBER_DIR" == [\\][\\]?* ]] && REMEMBER_DIR_UNSAFE=0
+}
+_remember_lmd_set_dir_unsafe
+[ "$REMEMBER_DIR_UNSAFE" = 1 ] && echo "FATAL: unsafe REMEMBER_DIR ($REMEMBER_DIR) -- refusing to mkdir" >&2
+
 # Empty in every layout where REMEMBER_DIR is nameable without the slug (#297).
 # Assigned, never `$(...)`: this runs on the per-tool-call path.
 _set_store_root "$_data_dir_raw"

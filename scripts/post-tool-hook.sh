@@ -391,7 +391,8 @@ PROJECT="$PROJECT_DIR"
 # (#695), hence the function + `local LC_ALL=C` rather than an inline `[[ ]]`.
 _remember_dir_is_unsafe() {
     local LC_ALL=C
-    { [[ "$REMEMBER_DIR" != /* ]] && [[ "$REMEMBER_DIR" != [A-Za-z]:[/\\]* ]]; } \
+    { [[ "$REMEMBER_DIR" != /* ]] && [[ "$REMEMBER_DIR" != [A-Za-z]:[/\\]* ]] \
+        && [[ "$REMEMBER_DIR" != [\\][\\][^\\]* ]]; } \
         || [[ "$REMEMBER_DIR" == *$'\n'* || "$REMEMBER_DIR" == *$'\r'* ]]
 }
 
@@ -410,7 +411,11 @@ _remember_dir_is_unsafe() {
 # same shape #230 gave every other mkdir in this file. Silently skipping the
 # marker when the directory is missing would tell every doctor user that a
 # wired hook has never fired: the exact regression #200 fixed.
-if ! : > "$REMEMBER_DIR/tmp/post-tool-ran" 2>/dev/null; then
+# #920 gap 1: this mkdir (and the two more below, at the notice marker and
+# the capture-alive.d check) ran on both paths with no check that
+# REMEMBER_DIR is itself a safe value -- only the #902 call site further
+# down this file (logs/autonomous) was ever gated.
+if ! _remember_dir_is_unsafe && ! : > "$REMEMBER_DIR/tmp/post-tool-ran" 2>/dev/null; then
     mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null \
         && : > "$REMEMBER_DIR/tmp/post-tool-ran" 2>/dev/null || true
 fi
@@ -677,7 +682,8 @@ if [ -z "$LATEST_JSONL" ]; then
     # 10# on an empty string is itself an error on bash 5, which is why the case
     # stays in front.
     if [ $(( $(_remember_date +%s) - 10#$NOTICE_LAST )) -ge "$NOTICE_TTL" ]; then
-        mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null
+        # #920 gap 1
+        _remember_dir_is_unsafe || mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null
         _remember_date +%s > "$NOTICE_MARKER" 2>/dev/null
         if [ -d "$SESSION_DIR" ]; then
             log "hook" "no .jsonl transcript in $SESSION_DIR -- nothing to save yet"
@@ -806,8 +812,9 @@ fi
 # session finds this directory already there, and asking `mkdir -p` to confirm
 # that costs a process each time. The mkdir still runs — and still gates the
 # write on its success — the first time, and on any run where it is missing.
+# #920 gap 1
 if [ -d "$REMEMBER_DIR/tmp/capture-alive.d" ] \
-    || mkdir -p "$REMEMBER_DIR/tmp/capture-alive.d" 2>/dev/null; then
+    || { ! _remember_dir_is_unsafe && mkdir -p "$REMEMBER_DIR/tmp/capture-alive.d" 2>/dev/null; }; then
     # The id becomes a path component, so it is checked rather than trusted:
     # it comes from a filename in the transcript dir, and `..` or a slash
     # would escape the store. Real session ids are UUIDs.

@@ -199,7 +199,9 @@ ALLOWLIST: dict[tuple[str, int], str] = {
     # from the scan, so that one libc's behaviour stays visible and can be
     # re-checked rather than quietly assumed forever.
     ("scripts/agy-stop-hook.sh", 159): _CASE,
-    ("scripts/post-tool-hook.sh", 449): _CASE,
+    # Shifted +5 (449->454) by #920's _remember_dir_is_unsafe guard added at
+    # the fast-path tmp mkdir just above this one.
+    ("scripts/post-tool-hook.sh", 454): _CASE,
     # Lines shifted by #913's SESSION_DIR cache sidecar, inserted above
     # these three (session-dir-cache does not touch SESSION_ID or add a new
     # bracket range of its own -- these are the same three pre-existing
@@ -216,9 +218,11 @@ ALLOWLIST: dict[tuple[str, int], str] = {
     # more by #1011's own self-review round (a stale-comment fix above the
     # glob-walk, plus a longer comment on the capture-alive in-place write).
     # Shifted +5 (771->776, 814->819) by #1034's comment on the
-    # both-separators basename split just above the first one.
-    ("scripts/post-tool-hook.sh", 772): _CASE,
-    ("scripts/post-tool-hook.sh", 815): _CASE,
+    # both-separators basename split just above the first one. Shifted again
+    # by #920's unsafe-dir guards at the notice-marker mkdir and the
+    # capture-alive.d mkdir, both just above (772->778, 815->822).
+    ("scripts/post-tool-hook.sh", 778): _CASE,
+    ("scripts/post-tool-hook.sh", 822): _CASE,
     # The #913 transcript-scan sidecar's own key: a filename component, same
     # [A-Za-z0-9._-]+ charset as SESSION_ID right above, never locale text --
     # measured the same way, same reason. Shifted +27 (957->984, 1059->1086)
@@ -243,8 +247,10 @@ ALLOWLIST: dict[tuple[str, int], str] = {
     # 1129->1197) by #1036: `_pt_scan_lines` rewritten to keep the
     # transcript out of shell variables, with its own comment block --
     # its only bracket patterns are digit classes, which this scanner skips.
-    ("scripts/post-tool-hook.sh", 1075): _CASE,
-    ("scripts/post-tool-hook.sh", 1193): _CASE,
+    # Shifted +7 again (1075->1082, 1193->1200) by #920's unsafe-dir guard
+    # comments added earlier in this file.
+    ("scripts/post-tool-hook.sh", 1082): _CASE,
+    ("scripts/post-tool-hook.sh", 1200): _CASE,
     ("scripts/session-end-hook.sh", 196): _CASE,
     ("scripts/session-end-hook.sh", 204): _CASE,
     ("scripts/session-start-hook.sh", 297): _CASE,
