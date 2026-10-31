@@ -500,12 +500,15 @@ def test_every_nohup_detach_site_guards_with_the_shared_helper():
     _remember_detach_windows (or the inline is-windows check that gates it)
     within a few lines above it, so a future spawn copying the OLD
     unguarded shape gets caught here rather than shipping unnoticed."""
-    # session-start-hook.sh is deliberately NOT in this list: wiring it in
-    # pushed that hook's own compiled size over its 120 KiB release budget
-    # (check_release_tree.py's HOOK_SCRIPT_MAX_BYTES), with no margin left
-    # to absorb it -- see the DEFERRED comment at its own (unchanged)
-    # nohup detach site. Reinstate it here once a follow-up frees enough
-    # of that hook's own byte budget to add the wiring back.
+    # session-start-hook.sh itself is deliberately NOT in this list (#1006):
+    # it never sources lib-detach.sh or calls _remember_detach_windows
+    # directly -- that would inline lib-detach.sh's whole compiled body
+    # into session-start-hook.sh's own output, over its 120 KiB release
+    # budget (check_release_tree.py's HOOK_SCRIPT_MAX_BYTES). Instead it
+    # calls scripts/consolidation-launch.sh, a separate, non-hook file
+    # that sources lib-detach.sh and calls _remember_detach_windows in ITS
+    # OWN process -- that file is the real guarded site, so it is what
+    # this list names.
     #
     # session-end-hook.sh and agy-stop-hook.sh are ALSO deliberately not in
     # this list, as of #1002 CI round 5's own scope narrowing: those two
@@ -514,11 +517,10 @@ def test_every_nohup_detach_site_guards_with_the_shared_helper():
     # self-redetach loses the hook's stdin JSON payload (a wscript-launched
     # child does not inherit it the way `nohup ... &` does), a real product
     # regression caught by the pre-existing test_windows_native_hook_cwd_448.py
-    # test going red on this PR's own Windows CI legs. This PR keeps the
-    # hidden launcher to post-tool-hook.sh's save only -- the one site the
-    # reporter actually measured flashing a console every few minutes.
+    # test going red on this PR's own Windows CI legs.
     sites = [
         REPO_ROOT / "scripts" / "post-tool-hook.sh",
+        REPO_ROOT / "scripts" / "consolidation-launch.sh",
     ]
     for site in sites:
         text = site.read_text(encoding="utf-8")

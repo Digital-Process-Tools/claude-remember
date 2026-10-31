@@ -2323,18 +2323,20 @@ if [ "$STAGING_COUNT" -gt 0 ] && [ "$SESSION_START_SOURCE" != "compact" ]; then
     # Not a lock, and not a Git Bash detach failure: their own probe of this
     # exact construct returned in 0.11s. Ordinary POSIX fd inheritance, so it
     # reproduced on macOS too (tests/test_session_start_fd_leak_646.py).
-    # #1002: this site's own hidden-launcher wiring is DEFERRED, not
-    # forgotten -- inlining lib-detach.sh here (#900's per-hook build)
-    # pushed this hook's own compiled size over its 120 KiB budget
-    # (check_release_tree.py's HOOK_SCRIPT_MAX_BYTES), with no margin left
-    # in this already-near-the-edge hook to absorb it without unrelated
-    # cuts elsewhere. The other three detach sites (post-tool-hook.sh's
-    # save -- #1002's own reported bug -- session-end-hook.sh,
-    # agy-stop-hook.sh) all carry the fix; this is the lowest-frequency of
-    # the four (only fires when a staging backlog exists at session
-    # start), so it keeps the unchanged nohup line pending a follow-up
-    # that frees enough of this hook's own byte budget to add it back.
-    nohup "$PLUGIN_ROOT/scripts/run-consolidation.sh" </dev/null >/dev/null 2>&1 3>&- & disown 2>/dev/null || true
+    # #1006: scripts/consolidation-launch.sh -- a SEPARATE file, not a
+    # direct `source "$_HOOK_DIR/lib-detach.sh"` here, because lib-detach.sh
+    # is not one of compile_hooks.py's four HOOK_SCRIPT_NAMES, and sourcing
+    # it here would inline its whole compiled body into THIS hook's own
+    # output, well past the 120 KiB budget (HOOK_SCRIPT_MAX_BYTES) with no
+    # margin to absorb it. The trailing `&` is load-bearing, not tidiness --
+    # consolidation-launch.sh's own _remember_detach_windows call WAITS on
+    # wscript.exe, up to lib-detach.sh's 15s watchdog cap, so a synchronous
+    # call here would reintroduce the #646 SessionStart-stall class this PR
+    # exists to avoid (review finding on #1006). SessionStart must not wait
+    # on this launch; its exit status is unused. consolidation-launch.sh's
+    # own header has the rest of the design, including why it alone decides
+    # Windows vs. the unchanged nohup fallback.
+    "$PLUGIN_ROOT/scripts/consolidation-launch.sh" "$PLUGIN_ROOT/scripts/run-consolidation.sh" 3>&- &
     echo ""
 fi
 
