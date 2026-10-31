@@ -148,7 +148,10 @@ def _save_script(directory: Path, marker: Path) -> Path:
            "marker never appears -- the save script never actually ran. "
            "Confirms trap A (WSH's own argv parser corrupts the embedded "
            "literal quote in v0.42.3's own c_script) on a real Windows "
-           "host for the first time; previously only reasoned.",
+           "host for the first time; previously only reasoned. That run "
+           "also carried two unrelated test-isolation bugs fixed on a "
+           "later PR #1010 commit; a clean confirming run with neither "
+           "bug present is #38051416393 (#1070).",
 )
 def test_v0_42_3_plain_path_detaches_and_saves(tmp_path):
     """Case (a): plain path, no quoting hazards. v0.42.3's own
@@ -180,7 +183,10 @@ def test_v0_42_3_plain_path_detaches_and_saves(tmp_path):
            "marker. The outfile path itself was also observed corrupted: "
            "WSH's own argv parsing turned the absolute OUTFILE path into "
            "a garbled relative filename that landed in the CI job's own "
-           "working directory instead of under this test's tmp_path.",
+           "working directory instead of under this test's tmp_path. That "
+           "run also carried two unrelated test-isolation bugs fixed on a "
+           "later PR #1010 commit; a clean confirming run with neither "
+           "bug present is #38051416393 (#1070).",
 )
 def test_v0_42_3_path_with_space_detaches_and_saves(tmp_path):
     """Case (b): a space in the path -- the shape most likely to expose
@@ -248,7 +254,10 @@ def wsh_disabled():
            "the poll window -- confirms trap B (the SHIPPED v0.42.3 "
            "backgrounded-and-unconditional-return-0 shape genuinely "
            "silently skips the save) on a real Windows host for the "
-           "first time; previously only reasoned.",
+           "first time; previously only reasoned. That run also carried "
+           "two unrelated test-isolation bugs fixed on a later PR #1010 "
+           "commit; a clean confirming run with neither bug present is "
+           "#38051416393 (#1070).",
 )
 def test_v0_42_3_wsh_disabled_silent_skip(tmp_path, wsh_disabled):
     """Case (c), trap B: with WSH disabled, v0.42.3's own
