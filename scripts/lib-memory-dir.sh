@@ -301,16 +301,14 @@ export REMEMBER_DIR
 # functions would collide under the SAME name in that one compiled text.
 # CI's `tests/test_compile_hooks_900.py` caught exactly this (self-review
 # follow-up, after a first version of this fix picked the same name here).
-_remember_lmd_dir_is_unsafe() {
+_remember_lmd_set_dir_unsafe() {
     local LC_ALL=C
-    [[ "$REMEMBER_DIR" == *[$'\n\r']* ]] && return 0
-    [[ "$REMEMBER_DIR" == /* || "$REMEMBER_DIR" == [A-Za-z]:[/\\]* || "$REMEMBER_DIR" == [\\][\\]?* ]] && return 1
-    return 0
+    REMEMBER_DIR_UNSAFE=1
+    [[ "$REMEMBER_DIR" == *[$'\n\r']* ]] && return
+    [[ "$REMEMBER_DIR" == /* || "$REMEMBER_DIR" == [A-Za-z]:[/\\]* || "$REMEMBER_DIR" == [\\][\\]?* ]] && REMEMBER_DIR_UNSAFE=0
 }
-REMEMBER_DIR_UNSAFE=0
-_remember_lmd_dir_is_unsafe && { REMEMBER_DIR_UNSAFE=1
-    echo "FATAL: unsafe REMEMBER_DIR ($REMEMBER_DIR) -- refusing to mkdir" >&2; }
-export REMEMBER_DIR_UNSAFE
+_remember_lmd_set_dir_unsafe
+[ "$REMEMBER_DIR_UNSAFE" = 1 ] && echo "FATAL: unsafe REMEMBER_DIR ($REMEMBER_DIR) -- refusing to mkdir" >&2
 
 # Empty in every layout where REMEMBER_DIR is nameable without the slug (#297).
 # Assigned, never `$(...)`: this runs on the per-tool-call path.

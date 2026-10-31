@@ -62,11 +62,17 @@ CASES = {
 
 def _run_all_three(value: str) -> dict[str, int]:
     body = (
-        _extract_function(LIB_MEMORY_DIR, "_remember_lmd_dir_is_unsafe")
+        _extract_function(LIB_MEMORY_DIR, "_remember_lmd_set_dir_unsafe")
         + _extract_function(HOOK, "_remember_dir_is_unsafe")
         + _extract_function(LOG_SH, "_remember_log_dir_unsafe")
         + 'REMEMBER_DIR="$1"\n'
-        + '_remember_lmd_dir_is_unsafe; echo "lib=$?"\n'
+        # lib-memory-dir.sh's own copy sets a FLAG rather than returning a
+        # status (it is called unconditionally, never in an `if`, so its own
+        # exit status is never checked in the real file either) -- read the
+        # flag it set, inverted to the same 0=unsafe/1=safe convention
+        # _remember_dir_is_unsafe's own exit status already uses, so all
+        # three lines below are directly comparable.
+        + '_remember_lmd_set_dir_unsafe; echo "lib=$(( 1 - REMEMBER_DIR_UNSAFE ))"\n'
         + '_remember_dir_is_unsafe; echo "hook=$?"\n'
         + '_remember_log_dir_unsafe; echo "log=$?"\n'
     )
