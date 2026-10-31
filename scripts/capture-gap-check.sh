@@ -804,6 +804,34 @@ _recovery_attempted=""
 if [ "$_recovery_enabled" = "true" ]; then
 if [ -d "$SESSIONS_DIR" ] && [ -f "$LAST_SAVE_FILE" ] && [ -n "$PREV_ID" ]; then
     if [ "$PREV_WAS_SAVED" = "no" ]; then
+        # #1046: several terminals can pin DIFFERENT REMEMBER_DIRs at the same
+        # project directory, sharing one SESSIONS_DIR -- _find_previous_transcript
+        # has no notion of "store" and picks the newest OTHER transcript
+        # regardless of which store wrote it. post-tool-hook.sh already writes a
+        # per-session marker under THIS store's capture-alive.d for every
+        # session that ran a tool under it (read by the #200 capture-gap check
+        # below via capture_was_seen()); a candidate with no marker here was
+        # not provably captured under THIS store, so recovery -- which WRITES,
+        # unlike the gap check, which only reports -- skips it rather than risk
+        # force-saving a different store's live session into this one.
+        #
+        # Deliberately NOT folded into _find_previous_transcript itself: that
+        # function's result (PREV_ID/PREV_JSONL) is also read by the capture-gap
+        # check below, whose entire purpose is to warn about a session that
+        # ran tools but was never captured in THIS store -- the exact "no
+        # marker present" signal this guard uses. Gating resolution itself
+        # would make a genuine capture gap indistinguishable from a foreign
+        # store's session and silence the #200 warning for it. Gating only the
+        # WRITE leaves that check, and its own three-source
+        # capture_was_seen(), untouched.
+        #
+        # Gated on REMEMBER_DIR being set at all so a caller that never
+        # sources lib-memory-dir.sh (none shipped today, but nothing enforces
+        # it) keeps the pre-#1046 behaviour rather than silently skipping
+        # every recovery.
+        if [ -n "$REMEMBER_DIR" ] && [ ! -e "$REMEMBER_DIR/tmp/capture-alive.d/$PREV_ID" ]; then
+            log "hook" "recovery: skipping force-save of $PREV_ID -- no capture-alive.d marker under this REMEMBER_DIR (#1046: may belong to a different store sharing this project's transcript directory)"
+        else
         # REMEMBER_TRANSCRIPT_PATH (exported above, #407) names THIS session's
         # own transcript -- it must not reach a save being forced for a
         # DIFFERENT one. pipeline.extract.find_session() trusts that variable
@@ -820,6 +848,7 @@ if [ -d "$SESSIONS_DIR" ] && [ -f "$LAST_SAVE_FILE" ] && [ -n "$PREV_ID" ]; then
         # claim honestly available here. The notice below says "is being
         # recovered", never "has been recovered", for the same reason.
         _recovery_attempted="true"
+        fi
     fi
 fi
 fi

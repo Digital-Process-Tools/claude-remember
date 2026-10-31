@@ -160,6 +160,22 @@ fi
 _stdin_json_string_into() {
     local _sjsi_var="$1" _sjsi_field="$2" _sjsi_raw="$3" _sjsi_rest _sjsi_prefix _sjsi_value _sjsi_dq
     printf -v "$_sjsi_var" '%s' ""
+    # #1047: `${var#*pattern}` below is quadratic in bash -- O(n^2) on
+    # _sjsi_raw's length, 15.2s measured at 100 KB and hours at the 3.3 MB a
+    # host handed this hook by piping a whole transcript in as stdin
+    # (observed: 27 processes alive 21h, SIGTERM-immune). The four fields
+    # this hook ever extracts (cwd, session_id, transcript_path, source) all
+    # sit in the first few hundred bytes of a legitimate SessionStart
+    # payload, so bounding the INPUT to the match, not HOOK_STDIN's own
+    # accumulation, makes every call here O(1) regardless of payload size
+    # -- a field that genuinely starts past this bound is missed (same
+    # degradation #745's pluginless-SDK sniff already accepts for its own
+    # scan cap), never hung. Deliberately local to the match rather than
+    # truncating HOOK_STDIN itself: HOOK_STDIN's own full value is still
+    # read elsewhere in this hook (the before_session_start/after_session_start
+    # listener publish below, #266) and must stay byte-identical up to its
+    # own 32 KiB cap, not get silently cropped to this much smaller bound.
+    [ "${#_sjsi_raw}" -gt 4096 ] && _sjsi_raw=${_sjsi_raw:0:4096}
     # The double quote is held in a variable (octal 042) rather than written
     # backslash-escaped: the plugin directory's scanner mis-tracks an
     # escaped quote (#898 round 8). Same patterns, same quoting of the field.

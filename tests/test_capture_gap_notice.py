@@ -398,17 +398,39 @@ def test_a_session_captured_only_by_recovery_is_not_flagged(tmp_path):
 # recovery block itself checks, rather than by toggling the inert config key.
 
 
-def test_an_unsaved_previous_session_gets_the_recovered_wording(tmp_path):
-    """Recovery has what it needs to attempt PREV_ID's rescue this run: the
-    notice must say so instead of flatly claiming nothing happened."""
+def test_an_unsaved_previous_session_with_no_roster_marker_keeps_the_flat_wording(tmp_path):
+    """#1046 changed this test's own premise. Before #1046, recovery attempted
+    PREV_ID's rescue whenever it was merely unsaved, and the notice used the
+    "is being recovered" wording to say so. Recovery now ALSO requires a
+    capture-alive.d marker under THIS store before it will force-save a
+    candidate -- the same marker capture_was_seen() already reads as its own
+    first evidence source. The two cannot both engage on one session: a
+    marker that lets recovery act also makes capture_was_seen() true, which
+    means there is no capture gap left to report at all (see
+    test_recovery_and_the_gap_check_agree_on_which_session_is_previous for
+    that case). Conversely, a session with NO marker -- this fixture -- is
+    exactly the case #1046 asks recovery to leave alone (it might belong to a
+    different store sharing this project directory), so recovery declines,
+    and the notice correctly falls back to the flat wording instead of
+    claiming a rescue that did not happen.
+
+    Net effect: the "is being recovered" wording this test used to pin is
+    now unreachable code (flagged in this lane's PR for the maintainer --
+    see #1046's own comments). This test now pins the flat-wording fallback
+    instead, as a regression guard against claiming a rescue that did not
+    happen."""
     home, project, remember, session_dir = _project(tmp_path)
     _transcripts(session_dir, previous=TOOL_USE_LINE * 5)
     # last-save.json exists (so the recovery block's own [-f] guard passes)
     # but records a DIFFERENT session -- PREV_ID ("sess-prev") is still
-    # unsaved, which is exactly what triggers save-session.sh --force below.
+    # unsaved. Pre-#1046 this alone triggered save-session.sh --force; now it
+    # is necessary but not sufficient without a roster marker (absent here).
     (remember / "tmp" / "last-save.json").write_text(
         json.dumps({"sessions": {"sess-older": 10}, "session": "sess-older", "line": 10}),
         encoding="utf-8",
+    )
+    assert not (remember / "tmp" / "capture-alive.d" / "sess-prev").exists(), (
+        "precondition: no roster marker for sess-prev under this store"
     )
 
     result = _run(SESSION_START, _env(home, project, remember))
@@ -416,14 +438,14 @@ def test_an_unsaved_previous_session_gets_the_recovered_wording(tmp_path):
 
     notice = remember / "tmp" / "capture-gap-notice"
     assert _wait_for_notice(notice), (
-        "a genuinely unsaved previous session with a recovery attempt in "
-        "flight still has to be reported -- silence here is the same #200 "
-        "regression the flat wording already guards against"
+        "a genuine capture gap with no roster marker still has to be "
+        "reported -- silence here is the #200 regression this guards against"
     )
     text = notice.read_text()
-    assert "is being recovered" in text, (
-        f"recovery had what it needed to attempt PREV_ID's rescue this run, "
-        f"but the notice does not say so -- got: {text!r}"
+    assert "is being recovered" not in text, (
+        f"recovery declined to force-save sess-prev (#1046: no roster "
+        f"marker under this store), but the notice claims a rescue that "
+        f"did not happen -- got: {text!r}"
     )
     assert "has been recovered" not in text, (
         "the fork is asynchronous (& disown) -- this hook cannot know it "
