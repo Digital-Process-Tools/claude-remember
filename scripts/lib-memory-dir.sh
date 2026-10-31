@@ -293,18 +293,23 @@ export REMEMBER_DIR
 # _remember_log_dir_unsafe takes it. A UNC-rooted value (two leading
 # backslashes, then anything but a third) is accepted as absolute (#920
 # gap 3) -- lib-slug.sh already treats that shape as a known one.
-_remember_dir_is_unsafe() {
+#
+# Named DISTINCTLY from post-tool-hook.sh's own, pre-existing (#902)
+# `_remember_dir_is_unsafe` -- not merely out of caution: the #900 compiled-
+# hook build inlines every sourced file's top level into one script, and
+# post-tool-hook.sh sources this file (via bootstrap-dirs.sh), so the two
+# functions would collide under the SAME name in that one compiled text.
+# CI's `tests/test_compile_hooks_900.py` caught exactly this (self-review
+# follow-up, after a first version of this fix picked the same name here).
+_remember_lmd_dir_is_unsafe() {
     local LC_ALL=C
     { [[ "$REMEMBER_DIR" != /* ]] && [[ "$REMEMBER_DIR" != [A-Za-z]:[/\\]* ]] \
         && [[ "$REMEMBER_DIR" != [\\][\\][^\\]* ]]; } \
         || [[ "$REMEMBER_DIR" == *$'\n'* || "$REMEMBER_DIR" == *$'\r'* ]]
 }
-if _remember_dir_is_unsafe; then
-    echo "FATAL: unsafe REMEMBER_DIR ($REMEMBER_DIR) -- refusing to mkdir (#920)" >&2
-    REMEMBER_DIR_UNSAFE=1
-else
-    REMEMBER_DIR_UNSAFE=0
-fi
+REMEMBER_DIR_UNSAFE=0
+_remember_lmd_dir_is_unsafe && { REMEMBER_DIR_UNSAFE=1
+    echo "FATAL: unsafe REMEMBER_DIR ($REMEMBER_DIR) -- refusing to mkdir" >&2; }
 export REMEMBER_DIR_UNSAFE
 
 # Empty in every layout where REMEMBER_DIR is nameable without the slug (#297).
