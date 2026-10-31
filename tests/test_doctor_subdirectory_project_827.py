@@ -17,6 +17,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -129,6 +130,43 @@ class TestDoctorSubdirectoryProjectIsRoutedToItsOwnStore:
             "expected the #802 behaviour (git root) when no session hint "
             f"exists anywhere.\nreport: {report}"
         )
+
+
+class TestDoctorFreshestHintWinsOnResume1058Review:
+    """Review finding on the doctor.sh port of #1058/#1082: the write-handoff.sh
+    sibling got a resume-shaped regression test (TestFreshestHintWinsOnResume1058Review
+    in test_write_handoff_subdirectory_project_776.py) exercising the freshest-mtime
+    vs. nearest-ancestor distinction; this file's own deeper-cwd test never put a
+    hint at more than one ancestor at once, so it could not tell freshest-wins from
+    nearest-wins. This class closes that gap directly."""
+
+    def test_a_fresher_hint_at_the_toplevel_beats_a_stale_one_at_a_nearer_ancestor(self, tmp_path):
+        project, sub_project, deep, home = _sandbox_git_repo_with_deep_subproject(tmp_path)
+
+        sub_hint = sub_project / ".remember" / "tmp" / f"handoff-path.{SESSION_ID}"
+        old_time = time.time() - 3600
+        os.utime(sub_hint, (old_time, old_time))
+
+        root_remember = project / ".remember"
+        (root_remember / "tmp").mkdir(parents=True)
+        (root_remember / "config.json").write_text(json.dumps({"data_dir": ".remember"}))
+        (root_remember / "tmp" / f"handoff-path.{SESSION_ID}").write_text(
+            str(root_remember / "remember.md")
+        )
+
+        report = _run_doctor_json(deep, home)
+
+        assert report["project_dir"] == str(project), (
+            "expected the FRESHER hint (the repo root) to win over the STALE "
+            f"one at the nearer ancestor (pkg).\nreport: {report}"
+        )
+
+    def test_positive_control_the_only_hint_present_still_wins_regardless_of_mtime(self, tmp_path):
+        _project, sub_project, deep, home = _sandbox_git_repo_with_deep_subproject(tmp_path)
+
+        report = _run_doctor_json(deep, home)
+
+        assert report["project_dir"] == str(sub_project)
 
 
 class TestDoctorDeeperCwdThanSessionStartDir1058:

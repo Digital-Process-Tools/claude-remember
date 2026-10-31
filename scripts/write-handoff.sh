@@ -39,11 +39,11 @@
 #      just sideways out of it. The session-keyed hint then lives in neither
 #      candidate; it lives in an ancestor strictly between them. So this
 #      walks every directory from $(pwd) up to (and including) the git
-#      toplevel, taking the FIRST one (closest to $(pwd)) whose own store
-#      carries this session's hint -- which subsumes the #776 two-candidate
-#      check (walking from $(pwd) reaches it first when $(pwd) itself has
-#      the hint) and still falls back to the toplevel, unchanged, when no
-#      ancestor in the walk has it at all.
+#      toplevel, taking the FRESHEST one (by mtime, review finding on
+#      #1058/PR #1081 -- NOT simply the first/closest to $(pwd); see the
+#      comment right above the walk itself for why) whose own store carries
+#      this session's hint, and still falls back to the toplevel, unchanged,
+#      when no ancestor in the walk has one at all.
 #   2. If the SessionStart hook this session left a resolved path at
 #      $REMEMBER_DIR/tmp/handoff-path (written every session start, #720),
 #      and that path's shape passes the check below, use it -- this is what
@@ -137,14 +137,16 @@ if [ -z "${CLAUDE_PROJECT_DIR:-}" ]; then
     # THIS session's own id (#738) into whichever REMEMBER_DIR it actually
     # resolved -- nothing else can have written that file, and nothing else
     # is asked to disambiguate. #1058 replaced the original #776 two-candidate
-    # comparison below with a full ancestor walk (closest-to-$(pwd) wins), so
-    # the old "neither or both agree -> toplevel, unchanged" rule now only
-    # describes the "neither" half: when $(pwd) ITSELF already carries the
-    # hint, the walk stops there immediately, even if the toplevel also
-    # carries one. That "both" shape is still the one the #776 comment above
-    # called unreachable in the ordinary case (SessionStart only ever
-    # publishes the hint to the one store it actually resolved to), so this
-    # is a comment correction, not a behaviour change anyone should observe.
+    # comparison below with a full ancestor walk; a review finding on #1058/
+    # PR #1081 then replaced that walk's own first version again, from
+    # "closest ancestor with a hint wins" to "FRESHEST hint (by mtime) among
+    # every ancestor wins" -- see the comment right above the walk itself for
+    # the mechanism. So the old #776 "neither or both agree -> toplevel,
+    # unchanged" rule describes neither half accurately any more: "neither"
+    # still falls through to the toplevel as before, but "both" (or any
+    # ancestor with a hint at all) is decided by mtime, never by which
+    # ancestor happens to be nearer $(pwd) -- not even $(pwd) itself is
+    # special-cased any more.
     if [ -n "$_WH_GIT_ROOT" ] && [ "$_WH_GIT_ROOT" != "$(pwd)" ] && [ -n "$_WH_SESSION_ID" ]; then
         # #1058: walk every ancestor from $(pwd) up to the git toplevel,
         # and -- review finding on #1058/PR #1081 -- pick the FRESHEST
