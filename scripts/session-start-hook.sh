@@ -2328,13 +2328,15 @@ if [ "$STAGING_COUNT" -gt 0 ] && [ "$SESSION_START_SOURCE" != "compact" ]; then
     # is not one of compile_hooks.py's four HOOK_SCRIPT_NAMES, and sourcing
     # it here would inline its whole compiled body into THIS hook's own
     # output, well past the 120 KiB budget (HOOK_SCRIPT_MAX_BYTES) with no
-    # margin to absorb it. The one extra synchronous fork this costs on
-    # every platform is paid only on the staging-backlog branch, which
-    # already pays several (two `echo`s, the launch itself) and does not
-    # fire on an ordinary session start. consolidation-launch.sh's own
-    # header has the rest of the design, including why it alone decides
+    # margin to absorb it. The trailing `&` is load-bearing, not tidiness --
+    # consolidation-launch.sh's own _remember_detach_windows call WAITS on
+    # wscript.exe, up to lib-detach.sh's 15s watchdog cap, so a synchronous
+    # call here would reintroduce the #646 SessionStart-stall class this PR
+    # exists to avoid (review finding on #1006). SessionStart must not wait
+    # on this launch; its exit status is unused. consolidation-launch.sh's
+    # own header has the rest of the design, including why it alone decides
     # Windows vs. the unchanged nohup fallback.
-    "$PLUGIN_ROOT/scripts/consolidation-launch.sh" "$PLUGIN_ROOT/scripts/run-consolidation.sh" 3>&-
+    "$PLUGIN_ROOT/scripts/consolidation-launch.sh" "$PLUGIN_ROOT/scripts/run-consolidation.sh" 3>&- &
     echo ""
 fi
 

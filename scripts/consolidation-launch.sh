@@ -13,17 +13,20 @@
 # source chain is never inlined into any hook's compiled output, because it
 # is not itself one of the four names compile_hooks.py inlines INTO.
 #
-# session-start-hook.sh invokes this SYNCHRONOUSLY (no nohup/& at that call
-# site), unconditionally -- this file, not the caller, decides Windows vs.
-# not. The actual detachment happens IN HERE, either via
-# _remember_detach_windows's own async WshShell.Run or, on the nohup
-# fallback below, via the same `& disown` shape every other detach site
-# already uses. Either route returns to the caller almost immediately
-# (WshShell.Run's own wait flag is already False; nohup backgrounding
-# returns at once), so this one extra fork+exec costs session-start-hook.sh
-# a few milliseconds on the staging-backlog branch only -- a branch that
-# already pays several forks (two `echo`s, the launch itself) and does not
-# fire on an ordinary session start with no backlog.
+# session-start-hook.sh invokes this BACKGROUNDED (a trailing `&` at that
+# call site), unconditionally -- this file, not the caller, decides Windows
+# vs. not. The actual detachment happens IN HERE, either via
+# _remember_detach_windows's own SYNCHRONOUS wait on wscript.exe (up to
+# lib-detach.sh's 15s watchdog cap) or, on the nohup fallback below, via the
+# same `& disown` shape every other detach site already uses. Earlier drafts
+# had the caller invoke this file synchronously and claimed the cost was "a
+# few milliseconds" -- false: _remember_detach_windows's own wait is bounded
+# by the 15s watchdog, not by how fast wscript.exe actually launches, so a
+# synchronous call site reintroduced the #646 SessionStart-stall class
+# (review finding on #1006). Because the CALLER backgrounds this whole
+# file, that wait (whatever it actually costs) never blocks SessionStart --
+# it only delays how soon the hidden route itself finishes, never how soon
+# session-start-hook.sh returns.
 #
 # No PID_FILE double-launch guard is needed here (unlike post-tool-hook.sh's
 # save): run-consolidation.sh takes its own atomic lock (lib-lock.sh,

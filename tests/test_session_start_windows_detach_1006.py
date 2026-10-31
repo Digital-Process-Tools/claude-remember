@@ -112,21 +112,87 @@ def test_session_start_consolidation_uses_hidden_launcher_on_windows(tmp_path):
         ["bash", str(SESSION_START)], input=_payload(), env=env,
         capture_output=True, text=True, timeout=30, check=False,
     )
-    # No sleep needed here (self-review finding, Explore): unlike
-    # post-tool-hook.sh's own backgrounded nohup call, this whole chain
-    # (session-start-hook.sh -> consolidation-launch.sh ->
-    # _remember_detach_windows_impl) runs SYNCHRONOUSLY -- the function
-    # itself `wait`s on the backgrounded wscript.exe before returning, so
-    # by the time subprocess.run() above has returned, the stub has
-    # already run and written captured.txt.
+    # #1006 review finding (MEDIUM): session-start-hook.sh now backgrounds
+    # this whole chain (trailing `&` at the call site) so SessionStart
+    # itself never waits on consolidation-launch.sh's own wait on
+    # wscript.exe. The stub here is fast, but the launch is still
+    # asynchronous relative to subprocess.run() returning, so both
+    # assertions below poll with a bounded wait instead of checking
+    # immediately.
     assert MARKER in proc.stdout, proc.stdout + proc.stderr
-    assert captured.exists(), (
+    assert _wait_until(captured.exists, timeout=5.0), (
         "wscript.exe stub was never invoked -- consolidation-launch.sh did "
         "not take the hidden route\n" + proc.stderr
     )
+    # #1006 review finding (LOW): checking `not marker.exists()` right after
+    # subprocess.run() returns raced the backgrounded nohup fallback -- a
+    # double launch would have passed undetected. Give it the same bounded
+    # window as the positive control above before trusting the absence.
+    _wait_until(marker.exists, timeout=5.0)
     assert not marker.exists(), (
         "the nohup fallback ran even though the hidden route was available "
         "and Windows was detected"
+    )
+
+
+def _wait_until(predicate, timeout=5.0, interval=0.05):
+    """Bounded poll instead of an immediate assert -- the consolidation
+    launch is backgrounded (#1006 review finding, MEDIUM), so a file it
+    creates may not exist yet the instant subprocess.run() returns."""
+    deadline = time.monotonic() + timeout
+    while not predicate() and time.monotonic() < deadline:
+        time.sleep(interval)
+    return predicate()
+
+
+def test_session_start_returns_promptly_even_when_windows_route_is_slow(tmp_path):
+    """#1006 review finding (MEDIUM): session-start-hook.sh must not wait on
+    consolidation-launch.sh, which itself waits on wscript.exe up to
+    lib-detach.sh's 15s watchdog cap. Before this fix the call site had no
+    trailing `&`, so a slow (or hung) wscript.exe stalled the whole
+    SessionStart the same way #646 did. The positive control is the second
+    assertion below: the hidden route must still actually run in the
+    background, so a fast return is not merely a sign that the launch was
+    skipped entirely."""
+    home, project, remember = _store(tmp_path)
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    captured = tmp_path / "captured.txt"
+    _stub(
+        bindir / "wscript.exe",
+        'sleep 5; printf "%s\n" "$@" > "' + str(captured) + '"',
+    )
+    _stub(bindir / "cygpath", 'shift; printf "%s" "$1"')
+    marker = tmp_path / "ran.marker"
+    plugin_root = _fake_plugin_root(
+        tmp_path, f'#!/usr/bin/env bash\ntouch "{marker}"\n'
+    )
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "CLAUDE_PROJECT_DIR": str(project),
+        "CLAUDE_PLUGIN_ROOT": str(plugin_root),
+        "REMEMBER_DIR": str(remember),
+        "_LIB_MEMORY_DIR_LOADED": "1",
+        "TMPDIR": str(tmp_path),
+        "PATH": f"{bindir}:{os.environ.get('PATH', '')}",
+        "OS": "Windows_NT",
+    }
+    started = time.monotonic()
+    proc = subprocess.run(
+        ["bash", str(SESSION_START)], input=_payload(), env=env,
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    elapsed = time.monotonic() - started
+    assert MARKER in proc.stdout, proc.stdout + proc.stderr
+    assert elapsed < 2.0, (
+        f"SessionStart took {elapsed:.2f}s -- it must not wait on "
+        "consolidation-launch.sh's own wait on a slow wscript.exe "
+        "(#1006 review finding)\\n" + proc.stderr
+    )
+    assert _wait_until(captured.exists, timeout=8.0), (
+        "the hidden route never actually ran in the background -- a fast "
+        "return must not mean the launch was silently skipped\\n" + proc.stderr
     )
 
 
