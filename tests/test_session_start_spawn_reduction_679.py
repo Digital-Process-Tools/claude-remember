@@ -185,3 +185,117 @@ def test_hook_stdin_and_ctx_files_removed_in_one_rm_call_679(tmp_path):
     assert "session-start-stdin" in combined and "session-start-ctx" in combined, (
         f"only one of the two temp files is named in the single rm call: {combined}"
     )
+
+
+# ── #1069 review on #1067: the deferred phase's new process boundary ───────
+#
+# #1067 moved the deferred phase (previous-session recovery, slug/case-
+# divergence bookkeeping, capture-gap detection) out of session-start-hook.sh
+# into a new scripts/capture-gap-check.sh, invoked as a fresh process rather
+# than a backgrounded brace group in the SAME process. The first version of
+# that extraction re-ran resolve-paths.sh -> detect-tools.sh ->
+# bootstrap-dirs.sh in full inside that new process -- redoing
+# lib-memory-dir.sh's own cfg_merge.py fork (and resolve-paths.sh's own git
+# rev-parse) purely to re-derive PROJECT_DIR/PIPELINE_DIR/REMEMBER_DIR/
+# REMEMBER_STORE_ROOT that its own PARENT process had already resolved and
+# exported moments earlier. Fixed by trusting those four when already
+# present+exported (every direct/standalone test invocation still falls
+# through to the full chain, unaffected).
+#
+# This is a bounded, measured reduction -- NOT the complete fork-count fix
+# #1056 ("fewer forks under concurrent Windows session starts") tracks.
+# log.sh's own smaller config_into/log merge still runs inside
+# capture-gap-check.sh regardless (needed for log()/config_into(), which
+# this file's own fast path cannot skip without its own further work); only
+# the redundant RE-bootstrap this file's own fast path removes is pinned
+# here.
+#
+# REMEMBER_DEFER=0 (synchronous), not the default background path: the
+# child's own spawns must land in the log before the parent process
+# returns, or the warm run below could read the log before the backgrounded
+# child finishes writing to it -- the same race this issue's OWN review
+# flagged for two timing-sensitive tests elsewhere in this suite.
+CAPTURE_GAP_CHECK = REPO_ROOT / "scripts" / "capture-gap-check.sh"
+
+
+def _capture_gap_check_resolve_paths_sourced(tmp_path: Path, *, inherited: bool) -> bool:
+    """True iff capture-gap-check.sh's own slow-path branch ran (its `source
+    ".../resolve-paths.sh"` line is the one and only place that exact
+    string can appear in a `bash -x` trace of this file, since the fast
+    path's own branch never names that file at all).
+
+    `bash -x` on capture-gap-check.sh DIRECTLY, not threaded through a
+    session-start-hook.sh parent: xtrace does not propagate across exec()
+    into a child that never sets `set -x` itself, so tracing the real
+    end-to-end pipeline cannot see inside this file's own process at all --
+    confirmed empirically while building this test (every `+` trace line
+    after the parent's own `capture-gap-check.sh ...` call belonged to the
+    PARENT resuming its own execution, not the child). Running this file
+    AS the traced process is what makes its branch choice directly
+    observable, with no fork-counting ambiguity (log.sh's own merge forks
+    git/cp regardless of which branch runs, which is exactly what made an
+    earlier version of this test assert something false).
+
+    `inherited=True` sets PROJECT_DIR/PIPELINE_DIR/REMEMBER_DIR -- the
+    exact three environment variables session-start-hook.sh has already
+    exported by the time it reaches this file's own call site -- so the
+    fast-path guard (scripts/capture-gap-check.sh's own `if [ -n
+    "${PROJECT_DIR:-}" ] ...`) should take it. `inherited=False` leaves
+    them unset, the shape every direct/standalone invocation (every OTHER
+    test in this suite) is in, which must still fall through to the full
+    chain.
+    """
+    project = tmp_path / "project"
+    remember = project / ".remember"
+    (remember / "tmp").mkdir(parents=True)
+    env = {
+        **os.environ,
+        "CLAUDE_PROJECT_DIR": str(project),
+        "CLAUDE_PLUGIN_ROOT": str(REPO_ROOT),
+    }
+    if inherited:
+        env["PROJECT_DIR"] = str(project)
+        env["PIPELINE_DIR"] = str(REPO_ROOT)
+        env["REMEMBER_DIR"] = str(remember)
+    # Decoded leniently, same convention as tests/spawn_counting.py's own
+    # spawns(): the slug-computation `sed` script's dash-squashing bracket
+    # ranges operate on this test's own tmp_path string, which is not
+    # guaranteed UTF-8-clean, and a budget/trace assertion here must not
+    # become a UnicodeDecodeError over bytes nobody asked it to read.
+    result = subprocess.run(
+        [BASH, "-x", CAPTURE_GAP_CHECK.as_posix(), ""],
+        env=env, capture_output=True, timeout=60, check=False,
+    )
+    stderr = result.stderr.decode("utf-8", "replace")
+    assert result.returncode == 0, stderr[-2000:]
+    return "resolve-paths.sh" in stderr
+
+
+def test_capture_gap_check_fast_path_skips_resolve_paths_sh_1069(tmp_path):
+    """#1069 review on #1067: capture-gap-check.sh's first version re-ran
+    resolve-paths.sh -> detect-tools.sh -> bootstrap-dirs.sh in full inside
+    its own freshly forked process -- redoing work its own PARENT process
+    (session-start-hook.sh) had already done and exported moments earlier.
+    Given the three environment variables that export already carries, the
+    fast path must not source resolve-paths.sh again.
+    """
+    assert not _capture_gap_check_resolve_paths_sourced(tmp_path, inherited=True), (
+        "capture-gap-check.sh sourced resolve-paths.sh despite inheriting "
+        "PROJECT_DIR/PIPELINE_DIR/REMEMBER_DIR from its own parent process"
+    )
+
+
+def test_capture_gap_check_without_inherited_vars_still_resolves_1069(tmp_path):
+    """Positive control, paired with the test above: a direct/standalone
+    invocation with NONE of PROJECT_DIR/PIPELINE_DIR/REMEMBER_DIR set (the
+    shape every other test in this suite already runs capture-gap-check.sh
+    in) must still fall through to the full resolve-paths.sh chain --
+    proving the harness can see that branch at all, so the "skips it"
+    assertion above is not passing because the trace could never show it
+    either way.
+    """
+    assert _capture_gap_check_resolve_paths_sourced(tmp_path, inherited=False), (
+        "positive control: a standalone invocation with no inherited "
+        "PROJECT_DIR/PIPELINE_DIR/REMEMBER_DIR never sourced resolve-paths.sh "
+        "at all -- the harness cannot see this branch"
+    )

@@ -624,15 +624,27 @@ def test_the_same_gap_is_reported_once_not_on_every_restart(tmp_path):
     a true positive gets trained into background noise.
     """
     home, project, remember, session_dir = _project(tmp_path)
-    env = _env(home, project, remember)
     _transcripts(session_dir, previous=TOOL_USE_LINE * 5)
-
-    _run(SESSION_START, env)
     notice = remember / "tmp" / "capture-gap-notice"
-    assert notice.exists(), "precondition: the first run must report it"
+
+    # #1069 review on #1067: the deferred phase now runs as a genuinely
+    # separate process (scripts/capture-gap-check.sh), not an in-process
+    # function call -- slower to start than the pre-#1067 shape, which is
+    # exactly the class of timing this file's own module docstring already
+    # warns about for the "must appear" half of an assertion. Poll for it
+    # instead of reading `notice.exists()` the instant the PARENT hook
+    # returns -- the parent returning says nothing about whether its
+    # disowned background child has finished writing yet.
+    _run(SESSION_START, _env(home, project, remember))
+    assert _wait_for_notice(notice), "precondition: the first run must report it"
     notice.unlink()  # user-prompt-hook.sh consumes it on delivery
 
-    _run(SESSION_START, env)
+    # The "must NOT reappear" half, in contrast, cannot be polled the same
+    # way (this file's own module docstring: a negative assertion racing an
+    # unstarted background phase is indistinguishable from a correctly
+    # absent one) -- run it inline instead (REMEMBER_DEFER=0), where "did
+    # not fire" is a verdict rather than a race.
+    _run(SESSION_START, _env(home, project, remember, defer=False))
 
     assert not notice.exists(), (
         "re-reported an already-delivered gap about the same session"

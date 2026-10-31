@@ -63,6 +63,45 @@ def _function_body(name: str) -> str:
     )
 
 
+def _function_body_from(path: Path, name: str) -> str:
+    """Like _function_body, but pinned to exactly one file -- used by the
+    parity test below, which needs each copy named separately rather than
+    whichever one _function_body's own SESSION_START-first search happens to
+    find."""
+    start_marker = f"\n{name}() {{\n"
+    source = path.read_text(encoding="utf-8")
+    start = source.index(start_marker)
+    end = source.index("\n}\n", start) + len("\n}")
+    return source[start + 1 : end]
+
+
+def test_stdin_json_string_into_copies_stay_identical():
+    """#1067 duplicated _stdin_json_string_into into capture-gap-check.sh
+    rather than sharing it via a sourced lib (the comment on that copy says
+    why -- it is the hook's own stdin-payload parser, needed here only
+    because _transcript_is_pluginless_sdk calls it on a transcript line, not
+    on stdin). _function_body's own SESSION_START-first search means every
+    OTHER test in this module exercises SESSION_START's copy, never
+    capture-gap-check.sh's -- the one that actually runs at SessionStart time
+    for a REAL transcript, since _transcript_is_pluginless_sdk itself only
+    exists in capture-gap-check.sh now. This closes that gap directly: if
+    the two copies ever diverge, this fails immediately, rather than leaving
+    the untested copy to disagree silently in production.
+
+    Would this test still pass if the code did nothing? No -- flip one
+    character in either copy and this fails; nothing else in this file
+    would notice, since nothing else in this file ever reads
+    capture-gap-check.sh's copy.
+    """
+    session_start_copy = _function_body_from(SESSION_START, "_stdin_json_string_into")
+    capture_gap_copy = _function_body_from(CAPTURE_GAP_CHECK, "_stdin_json_string_into")
+    assert session_start_copy == capture_gap_copy, (
+        "_stdin_json_string_into has diverged between scripts/session-start-hook.sh "
+        "and scripts/capture-gap-check.sh -- keep both copies identical (see the "
+        "comment on capture-gap-check.sh's own copy)"
+    )
+
+
 SNIFF_SCRIPT = r"""
 _ENTRYPOINT_SNIFF_CAP=50
 %s

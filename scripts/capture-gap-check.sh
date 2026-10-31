@@ -29,28 +29,101 @@
 _HOOK_DIR="${BASH_SOURCE[0]%/*}"
 [ "$_HOOK_DIR" = "${BASH_SOURCE[0]}" ] && _HOOK_DIR="$(pwd)"
 
-# resolve-paths.sh sets PROJECT_DIR/PIPELINE_DIR, which bootstrap-dirs.sh (via
-# lib-memory-dir.sh) requires to resolve REMEMBER_DIR/REMEMBER_STORE_ROOT
-# correctly -- session-start-hook.sh sources this exact file, the exact same
-# way, before its own detect-tools.sh/bootstrap-dirs.sh (see its own comment
-# on this call site). REMEMBER_HOOK_CWD is already exported by the parent
-# hook process, so the SAME fallback it resolved from is what this process
-# inherits too.
-REMEMBER_PATHS_SOFT_FAIL=1 source "$_HOOK_DIR/resolve-paths.sh" || exit 0
+# #1069 review (fork-cost finding on #1067): our own parent,
+# session-start-hook.sh, already ran the full resolve-paths.sh ->
+# detect-tools.sh -> bootstrap-dirs.sh chain moments ago, in the SAME
+# process this one was forked/exec'd from -- and exported every answer that
+# chain produces (PROJECT_DIR/PIPELINE_DIR: resolve-paths.sh; REMEMBER_DIR/
+# REMEMBER_STORE_ROOT: lib-memory-dir.sh, sourced by bootstrap-dirs.sh).
+# Re-running that chain here would redo work this process already has for
+# free via ordinary environment inheritance. Trust those values when
+# present rather than re-deriving them: a direct/standalone invocation
+# (every test fixture that execs this file without first execing
+# session-start-hook.sh) will not have them set, and falls through to the
+# full chain below exactly as before.
+#
+# Measured (tests/test_session_start_spawn_reduction_679.py's own
+# #1069-tagged tests): this fast path's own trace never sources
+# resolve-paths.sh at all, confirmed directly rather than by fork-counting
+# -- lib-memory-dir.sh's own config merge for data_dir turned out to be
+# sourced from log.sh too (needed regardless, for log()/config_into()),
+# so counting its forks could not tell "the fast path skipped it" apart
+# from "log.sh needed it anyway" and an earlier version of this comment
+# overstated what the skip alone removes. This is NOT the full fix #1056
+# ("fewer forks under concurrent Windows session starts") tracks -- #1056's
+# own scope covers the fork count log.sh's own merge still costs here,
+# which this skip does not touch; this removes only the REDUNDANT second
+# run of resolve-paths.sh/bootstrap-dirs.sh's OWN resolution, not log.sh's.
+if [ -n "${PROJECT_DIR:-}" ] && [ -d "${PROJECT_DIR:-}" ] \
+    && [ -n "${PIPELINE_DIR:-}" ] && [ -d "${PIPELINE_DIR:-}" ] \
+    && [ -n "${REMEMBER_DIR:-}" ]; then
+    PLUGIN_ROOT="$PIPELINE_DIR"
+    PROJECT="$PROJECT_DIR"
+    # resolve-paths.sh's own umask (#68) and bootstrap-dirs.sh's own
+    # SYS_TMPDIR (#1040) -- neither is exported by either file (a plain
+    # assignment, not `export`), so inheritance cannot carry them; both are
+    # cheap builtins to redo by hand, the same way post-tool-hook.sh's own
+    # fast path already does for the identical reason.
+    umask 077
+    SYS_TMPDIR="${TMPDIR:-/tmp}"
+    # _remember_forward_slash[_into]: resolve-paths.sh's own exported
+    # FUNCTIONS, not just its variables -- function definitions are never
+    # inherited across exec() the way exported variables are, so skipping
+    # resolve-paths.sh here drops them unless redefined. Both are small,
+    # pure (no forks: "[ ]" and a parameter expansion only, per the
+    # original's own comment) and identical to resolve-paths.sh's copy;
+    # lib-case-divergence.sh and several other files this chain still
+    # sources call one or the other. #1069 review round: the FIRST version
+    # of this fast path omitted these and _remember_write_case_divergence
+    # silently returned "not-applicable" for every external store --
+    # command-not-found on stderr, empty stdout from the failed command
+    # substitution, caught only by tests/test_case_divergence_298.py.
+    _remember_forward_slash() {
+        if [ "$OSTYPE" = msys ] || [ "$OSTYPE" = cygwin ]; then
+            printf '%s' "${1//\\//}"
+        else
+            printf '%s' "$1"
+        fi
+    }
+    _remember_forward_slash_into() {
+        if [ "$OSTYPE" = msys ] || [ "$OSTYPE" = cygwin ]; then
+            printf -v "$1" '%s' "${2//\\//}"
+        else
+            printf -v "$1" '%s' "$2"
+        fi
+    }
+    source "$_HOOK_DIR/log.sh" 2>/dev/null
+    if ! command -v _remember_date >/dev/null 2>&1; then
+        echo "capture-gap-check: ERROR -- failed to source $_HOOK_DIR/log.sh" >&2
+        exit 127
+    fi
+    _REMEMBER_LAZY_PYTHON=1
+    source "$_HOOK_DIR/detect-tools.sh"
+else
+    # resolve-paths.sh sets PROJECT_DIR/PIPELINE_DIR, which bootstrap-dirs.sh
+    # (via lib-memory-dir.sh) requires to resolve REMEMBER_DIR/
+    # REMEMBER_STORE_ROOT correctly -- session-start-hook.sh sources this
+    # exact file, the exact same way, before its own detect-tools.sh/
+    # bootstrap-dirs.sh (see its own comment on this call site).
+    # REMEMBER_HOOK_CWD is already exported by the parent hook process, so
+    # the SAME fallback it resolved from is what this process inherits too.
+    REMEMBER_PATHS_SOFT_FAIL=1 source "$_HOOK_DIR/resolve-paths.sh" || exit 0
 
-_REMEMBER_LAZY_PYTHON=1
-source "$_HOOK_DIR/detect-tools.sh"
-source "$_HOOK_DIR/bootstrap-dirs.sh"
-PLUGIN_ROOT="$PIPELINE_DIR"
-PROJECT="$PROJECT_DIR"
-source "$PLUGIN_ROOT/scripts/log.sh" 2>/dev/null
-# log.sh is sourced with stderr suppressed; a silent failure (e.g. read-only
-# mount where log.sh `return 1`s) would leave _remember_date / log / dispatch
-# undefined, crashing later with a cryptic `command not found`. Same guard
-# session-start-hook.sh itself carries right after its own identical source.
-if ! command -v _remember_date >/dev/null 2>&1; then
-    echo "capture-gap-check: ERROR -- failed to source $PLUGIN_ROOT/scripts/log.sh" >&2
-    exit 127
+    _REMEMBER_LAZY_PYTHON=1
+    source "$_HOOK_DIR/detect-tools.sh"
+    source "$_HOOK_DIR/bootstrap-dirs.sh"
+    PLUGIN_ROOT="$PIPELINE_DIR"
+    PROJECT="$PROJECT_DIR"
+    source "$PLUGIN_ROOT/scripts/log.sh" 2>/dev/null
+    # log.sh is sourced with stderr suppressed; a silent failure (e.g.
+    # read-only mount where log.sh `return 1`s) would leave _remember_date /
+    # log / dispatch undefined, crashing later with a cryptic "command not
+    # found". Same guard session-start-hook.sh itself carries right after
+    # its own identical source.
+    if ! command -v _remember_date >/dev/null 2>&1; then
+        echo "capture-gap-check: ERROR -- failed to source $PLUGIN_ROOT/scripts/log.sh" >&2
+        exit 127
+    fi
 fi
 
 CURRENT_SESSION_ID="${1:-}"
@@ -481,6 +554,9 @@ _remember_write_case_divergence() {
 _stdin_json_string_into() {
     local _sjsi_var="$1" _sjsi_field="$2" _sjsi_raw="$3" _sjsi_rest _sjsi_prefix _sjsi_value _sjsi_dq
     printf -v "$_sjsi_var" '%s' ""
+    # The double quote is held in a variable (octal 042) rather than written
+    # backslash-escaped: the plugin directory's scanner mis-tracks an
+    # escaped quote (#898 round 8). Same patterns, same quoting of the field.
     printf -v _sjsi_dq '\042'
     [[ "$_sjsi_raw" == *"$_sjsi_dq$_sjsi_field$_sjsi_dq"* ]] || return 1
     _sjsi_rest=${_sjsi_raw#*"$_sjsi_dq"$_sjsi_field"$_sjsi_dq"}
@@ -488,6 +564,8 @@ _stdin_json_string_into() {
     if [[ "$_sjsi_prefix" == *[!:[:space:]]* ]]; then return 1; fi
     _sjsi_value=${_sjsi_rest#*"$_sjsi_dq"}
     _sjsi_value=${_sjsi_value%%"$_sjsi_dq"*}
+    # A JSON encoder writes each backslash as `\\` -- a Windows `cwd` from
+    # Codex arrives as `C:\\work\\proj` otherwise (#829).
     _sjsi_value=${_sjsi_value//\\\\/\\}
     [ -n "$_sjsi_value" ] || return 1
     printf -v "$_sjsi_var" '%s' "$_sjsi_value"
