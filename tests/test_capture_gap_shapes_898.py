@@ -41,7 +41,10 @@ from ._bash_runner import resolve_bash
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = REPO_ROOT / "scripts"
-HOOK = SCRIPTS / "session-start-hook.sh"
+# #1067: every function/constant this file pins (session_was_saved,
+# capture_was_seen, _remember_prune_keep_newest, SAVED_QUERY) moved into this
+# separate, non-inlined file.
+HOOK = SCRIPTS / "capture-gap-check.sh"
 DETECT = SCRIPTS / "detect-tools.sh"
 NOT_SHIPPED = {"bench-slug.sh", "run-tests.sh"}
 SHIPPED_SH = sorted(p for p in SCRIPTS.glob("*.sh") if p.name not in NOT_SHIPPED) + sorted(

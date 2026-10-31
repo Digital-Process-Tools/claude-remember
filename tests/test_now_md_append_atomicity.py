@@ -393,9 +393,14 @@ class TestTheReaderStillCannotLock:
         """And bounded by a constant small enough to read, because the failure
         this cannot have is a session start that waits. The index is a way to
         find the per-project record, not a second source of truth, so a session
-        that cannot take the lock writes no row and the next one repairs it."""
+        that cannot take the lock writes no row and the next one repairs it.
+
+        #1067: _remember_write_slug_index (the only caller of this lock) moved
+        into scripts/capture-gap-check.sh, invoked (not sourced) from
+        session-start-hook.sh, same `& disown`/synchronous call session start
+        always took here."""
         hook = (Path(__file__).resolve().parent.parent
-                / "scripts" / "session-start-hook.sh").read_text()
+                / "scripts" / "capture-gap-check.sh").read_text()
         # The primitive, not the timing wrapper (#898): the hold recorder (#226)
         # sizes save.lock/staging.lock, and the wrapper would inline it here.
         assert '_lock_acquire_impl "$_lock" "$SLUG_INDEX_LOCK_TIMEOUT"' in hook

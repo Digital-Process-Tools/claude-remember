@@ -186,8 +186,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _jq_saved_state(payload: str, session_id: str) -> str:
-    """Run session-start-hook.sh's own jq expression against a store."""
-    source = (REPO_ROOT / "scripts" / "session-start-hook.sh").read_text()
+    """Run session-start-hook.sh's own jq expression against a store.
+
+    #1067: SAVED_QUERY (and session_was_saved, its only reader) moved into
+    scripts/capture-gap-check.sh, a separate, non-inlined file."""
+    source = (REPO_ROOT / "scripts" / "capture-gap-check.sh").read_text()
     query = next(
         line.split("=", 1)[1].strip().strip("'")
         for line in source.splitlines()

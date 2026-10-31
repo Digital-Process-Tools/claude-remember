@@ -39,6 +39,9 @@ from ._compiled_hooks import skip_if_compiled
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SESSION_START = REPO_ROOT / "scripts" / "session-start-hook.sh"
+# #1067: _find_previous_transcript's own region (and everything it calls)
+# moved into this separate, non-inlined file.
+CAPTURE_GAP_CHECK = REPO_ROOT / "scripts" / "capture-gap-check.sh"
 
 BASH = resolve_bash()
 pytestmark = pytest.mark.skipif(
@@ -66,12 +69,16 @@ def _function_body(source: str, name: str) -> str:
 def _lookup_script() -> str:
     # The region is cut out between COMMENT markers of the hook's source; the
     # compiled build (#900 compiled CI leg) strips comments, so it has none.
+    # #1067: everything this function slices now lives in CAPTURE_GAP_CHECK,
+    # which is not one of compile_hooks.py's four HOOK_SCRIPT_NAMES and is
+    # therefore never itself a build product -- skip_if_compiled on it is a
+    # defensive no-op, kept so a future re-inlining would still be caught.
     skip_if_compiled(
-        SESSION_START,
-        "this test slices the hook between source comment markers the "
+        CAPTURE_GAP_CHECK,
+        "this test slices the file between source comment markers the "
         "compiler strips",
     )
-    source = SESSION_START.read_text(encoding="utf-8")
+    source = CAPTURE_GAP_CHECK.read_text(encoding="utf-8")
     deps = "\n".join(
         _function_body(source, n)
         for n in ("_stdin_json_string_into", "_transcript_is_pluginless_sdk")
