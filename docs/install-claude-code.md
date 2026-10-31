@@ -38,6 +38,19 @@ The first command decodes the whole catalogue and filters it down to this plugin
 
 **Separately, `plugin update` can report "already at latest version" from a stale local cache** without pulling first ([#37252](https://github.com/anthropics/claude-code/issues/37252), [#38271](https://github.com/anthropics/claude-code/issues/38271)). That one is a client-side cache and is a different failure from the pin lag above, though both surface the same sentence.
 
+## Switching from the official marketplace
+
+If you installed from the official Anthropic Marketplace and want the newest fixes right away instead of waiting for the catalogue to catch up, move to our marketplace instead. Four steps:
+
+1. **Uninstall the official-marketplace copy first:** `/plugin uninstall remember@claude-plugins-official`. Do this before adding ours — with both installed at once, every hook runs twice (two saves, two forks, double the work for no benefit).
+2. `/plugin marketplace add Digital-Process-Tools/claude-marketplace`
+3. `/plugin install remember@dpt-plugins`
+4. **Restart Claude Code.** Hooks are only read at session start, same as any other install or update.
+
+**Your memory is safe either way.** Your saved sessions and settings live in `.remember/` (inside each project) and `~/.remember/` (in your home folder), never inside the plugin's own folder. Switching marketplaces only replaces the plugin code, so nothing you have saved is touched or lost.
+
+**The one thing to expect:** your very first prompt in each project after switching will be a little slower than usual. Claude Remember caches some setup work per project, and that cache is tied to where the plugin files live on disk (`CLAUDE_PLUGIN_ROOT`, among other things — see `scripts/lib-env-cache.sh`). A new install from a different marketplace lives at a new path, so the old cache no longer matches and gets rebuilt once. Every prompt after that first one is back to normal speed.
+
 ## Manual install
 
 1. Copy `.claude/remember/` into your project's `.claude/` directory
