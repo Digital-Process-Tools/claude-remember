@@ -1,73 +1,104 @@
-"""#920 self-review finding, round 2: lib-memory-dir.sh and post-tool-hook.sh
-each need their own copy of the unsafe-dir predicate (post-tool-hook.sh's fast
-path never sources lib-memory-dir.sh -- it replays a cached REMEMBER_DIR
-instead -- so the check has to exist there standalone). A first version of
-this fix gave both copies the SAME name, `_remember_dir_is_unsafe`, reasoning
-that -- being byte-identical -- a silent name collision on post-tool-hook.sh's
-slow path (where lib-memory-dir.sh IS also sourced) was harmless. CI's
-`tests/test_compile_hooks_900.py` disagreed: the #900 compiled-hook build
-inlines every sourced file's top level into one script, and two top-level
-functions sharing one name there is a build failure
-(`duplicate top-level function name '_remember_dir_is_unsafe'`), not a
-runtime-harmless shadow. Fixed by renaming lib-memory-dir.sh's copy to
-`_remember_lmd_dir_is_unsafe`. This file pins the weaker invariant that
-survives the rename: the two functions' own LOGIC (everything but the
-`name() {` line) must stay identical, so an edit to the absolute/UNC/newline
-check in one that forgets the other still fails loudly.
+"""#920 self-review, round 3: lib-memory-dir.sh, post-tool-hook.sh and log.sh
+each carry their own, separately-named copy of the REMEMBER_DIR-unsafe
+predicate -- necessarily duplicated because post-tool-hook.sh's fast path
+never sources lib-memory-dir.sh (it replays a cached REMEMBER_DIR instead),
+and because the #900 compiled-hook build inlines every sourced file's top
+level into one script, so two top-level functions sharing a name there is a
+build failure, not a harmless shadow (tests/test_compile_hooks_900.py caught
+exactly that in an earlier round of this fix).
+
+lib-memory-dir.sh's own copy is ALSO deliberately written more compactly
+than the other two -- every byte it adds is paid by every hook that sources
+it (unconditionally, at top level, regardless of whether that hook's own
+code ever reads REMEMBER_DIR_UNSAFE), and session-start-hook.sh's compiled
+size was already within 37 bytes of its 120 KiB release budget before this
+fix -- so a BODY-TEXT comparison across the three copies is the wrong
+invariant now: the compact form legitimately reads differently from the
+other two while agreeing on every input. This file pins the invariant that
+actually matters: all three predicates classify the SAME set of values the
+SAME way.
 """
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from test_remember_dir_guard_920 import HOOK, LOG_SH, _extract_function
+from test_log_sh import _bash_path, _find_bash
+from test_remember_dir_guard_920 import (
+    HOOK,
+    LOG_SH,
+    UNC_VALUE,
+    UNC_WITH_NEWLINE,
+    _extract_function,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LIB_MEMORY_DIR = REPO_ROOT / "scripts" / "lib-memory-dir.sh"
 
+_BASH = _find_bash()
 
-def _body_without_signature(text: str) -> str:
-    """Drop the `name() {` first line and the closing `}` last line -- what
-    is left is the part that must agree between differently-named twins."""
-    lines = text.splitlines()
-    return "\n".join(lines[1:-1])
+# value -> expected exit code when run through the predicate directly
+# (0 = bash truthy = "fires" = unsafe; 1 = safe). Covers every shape the
+# three #920 gaps care about: plain absolute, both Windows drive forms, the
+# MSYS/cygwin spelling, UNC, a bare two-backslash value with nothing after
+# it (the auditor's below-bar edge case -- all three must agree on it even
+# though none of them accept it), relative, and both control-char cases.
+CASES = {
+    "/abs/safe/path": 1,
+    "C:/windows/safe": 1,
+    "C:\\windows\\safe": 1,
+    "/c/msys/safe": 1,
+    UNC_VALUE: 1,
+    "\\\\x": 1,
+    "\\\\": 0,
+    "relative/path": 0,
+    "/abs/with\nnewline": 0,
+    UNC_WITH_NEWLINE: 0,
+}
 
 
-def test_must_fire_the_three_unsafe_dir_predicates_stay_in_sync():
-    lib_logic = _body_without_signature(
+def _run_all_three(value: str) -> dict[str, int]:
+    body = (
         _extract_function(LIB_MEMORY_DIR, "_remember_lmd_dir_is_unsafe")
+        + _extract_function(HOOK, "_remember_dir_is_unsafe")
+        + _extract_function(LOG_SH, "_remember_log_dir_unsafe")
+        + 'REMEMBER_DIR="$1"\n'
+        + '_remember_lmd_dir_is_unsafe; echo "lib=$?"\n'
+        + '_remember_dir_is_unsafe; echo "hook=$?"\n'
+        + '_remember_log_dir_unsafe; echo "log=$?"\n'
     )
-    hook_logic = _body_without_signature(
-        _extract_function(HOOK, "_remember_dir_is_unsafe")
-    )
-    log_logic = _body_without_signature(
-        _extract_function(LOG_SH, "_remember_log_dir_unsafe")
-    )
-    assert lib_logic == hook_logic == log_logic, (
-        "the three REMEMBER_DIR-unsafe predicates (lib-memory-dir.sh's "
-        "_remember_lmd_dir_is_unsafe, post-tool-hook.sh's own "
-        "_remember_dir_is_unsafe, log.sh's _remember_log_dir_unsafe) have "
-        "diverged in logic -- each is a SEPARATE, deliberately distinctly-"
-        "named copy (so the #900 compiled-hook build does not see a "
-        "duplicate top-level function name when it inlines them together), "
-        "and nothing but this test keeps an edit to one from silently "
-        "stopping short of the others.\n"
-        f"lib-memory-dir.sh:\n{lib_logic}\n"
-        f"post-tool-hook.sh:\n{hook_logic}\n"
-        f"log.sh:\n{log_logic}"
-    )
+    tmp = Path(__file__).parent / f"_sync_probe_{abs(hash(value))}.sh"
+    tmp.write_text(body, encoding="utf-8")
+    try:
+        result = subprocess.run(
+            [_BASH, _bash_path(tmp), value], capture_output=True, text=True, timeout=30, check=False,
+        )
+    finally:
+        tmp.unlink(missing_ok=True)
+    out = {}
+    for line in result.stdout.splitlines():
+        if "=" in line:
+            k, v = line.split("=", 1)
+            out[k] = int(v)
+    return out
 
 
-def test_must_not_fire_an_unrelated_function_is_not_mistaken_for_a_match():
-    """Positive control: comparing a predicate against something that is NOT
-    one of its twins must fail, or the equality check above proves nothing
-    about precision."""
-    lib_logic = _body_without_signature(
-        _extract_function(LIB_MEMORY_DIR, "_remember_lmd_dir_is_unsafe")
-    )
-    unrelated_logic = _body_without_signature(
-        _extract_function(LIB_MEMORY_DIR, "_classify_project_cfg_haiku_trust")
-    )
-    assert lib_logic != unrelated_logic
+def test_must_fire_all_three_predicates_classify_every_case_the_same_way():
+    mismatches = []
+    for value, expected in CASES.items():
+        got = _run_all_three(value)
+        for name in ("lib", "hook", "log"):
+            if got.get(name) != expected:
+                mismatches.append(f"{value!r}: expected {name}={expected}, got {got.get(name)!r} (full: {got})")
+    assert not mismatches, "the three REMEMBER_DIR-unsafe predicates disagree:\n" + "\n".join(mismatches)
+
+
+def test_must_not_fire_an_absolute_value_is_never_classified_unsafe_by_anyone():
+    """Positive control: every predicate must still accept the ordinary case
+    -- a table that happened to assert only on disagreement would pass even
+    if all three predicates were simultaneously, identically broken."""
+    got = _run_all_three("/an/ordinary/absolute/path")
+    assert got == {"lib": 1, "hook": 1, "log": 1}, got

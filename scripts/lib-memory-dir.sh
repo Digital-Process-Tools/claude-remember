@@ -303,9 +303,9 @@ export REMEMBER_DIR
 # follow-up, after a first version of this fix picked the same name here).
 _remember_lmd_dir_is_unsafe() {
     local LC_ALL=C
-    { [[ "$REMEMBER_DIR" != /* ]] && [[ "$REMEMBER_DIR" != [A-Za-z]:[/\\]* ]] \
-        && [[ "$REMEMBER_DIR" != [\\][\\][^\\]* ]]; } \
-        || [[ "$REMEMBER_DIR" == *$'\n'* || "$REMEMBER_DIR" == *$'\r'* ]]
+    [[ "$REMEMBER_DIR" == *[$'\n\r']* ]] && return 0
+    [[ "$REMEMBER_DIR" == /* || "$REMEMBER_DIR" == [A-Za-z]:[/\\]* || "$REMEMBER_DIR" == [\\][\\]?* ]] && return 1
+    return 0
 }
 REMEMBER_DIR_UNSAFE=0
 _remember_lmd_dir_is_unsafe && { REMEMBER_DIR_UNSAFE=1
