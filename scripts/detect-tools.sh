@@ -18,8 +18,11 @@
 #   _REMEMBER_LAZY_PYTHON=1 source "$(dirname "$0")/detect-tools.sh"
 #   # Lazy mode (#662): JQ is set, PYTHON stays EMPTY until the first
 #   # `_remember_python` call resolves it -- see "Lazy mode" below. Only
-#   # session-start-hook.sh opts in; every other sourcer needs $PYTHON
-#   # right away and keeps the eager default.
+#   # session-start-hook.sh opts in for its own main execution; every
+#   # other sourcer needs $PYTHON right away and keeps the eager default.
+#   # (doctor.sh's FAIL-path floor lookup also sets this, #1007, but only
+#   # inside a throwaway `$(...)` subshell to recover the floor constants
+#   # -- it never affects doctor.sh's own main-shell PYTHON resolution.)
 #
 # ENVIRONMENT (outputs)
 #   PYTHON       Path/command for python (python3 or python, validated).
@@ -258,12 +261,16 @@ else
 # log.sh's jq-less per-key read, lib-slug.sh's two Python-hash fallbacks, and
 # _jq_fallback itself below) -- none of which fire on the common jq-present
 # foreground path. A caller that sets _REMEMBER_LAZY_PYTHON=1 BEFORE sourcing
-# this file (session-start-hook.sh does; nothing else does, because every
-# other sourcer -- post-tool-hook.sh, save-session.sh, run-consolidation.sh,
-# doctor.sh -- genuinely invokes $PYTHON -m pipeline.shell unconditionally
-# right after sourcing, so eager detection there is real work, not waste)
+# this file for its OWN main execution (session-start-hook.sh does;
+# nothing else does, because every other sourcer -- post-tool-hook.sh,
+# save-session.sh, run-consolidation.sh, doctor.sh's own real probe --
+# genuinely invokes $PYTHON -m pipeline.shell unconditionally right
+# after sourcing, so eager detection there is real work, not waste)
 # gets the probe deferred into `_remember_python`, called at first actual
-# need instead of here. Every other sourcer keeps today's exact behavior:
+# need instead of here. (doctor.sh's FAIL-path floor lookup, #1007, also
+# sets this var, but only inside its own throwaway `$(...)` subshell --
+# a second, unrelated use that never touches doctor.sh's main shell.)
+# Every other sourcer keeps today's exact behavior:
 # PYTHON is resolved at source time, so a call site that unconditionally
 # calls `_remember_python` (to cover BOTH modes) returns at its first test
 # and costs nothing extra when lazy mode is off.
