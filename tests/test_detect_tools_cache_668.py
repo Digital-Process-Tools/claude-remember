@@ -38,7 +38,7 @@ def _write_shell_script(path: Path, text: str) -> None:
 
 
 def test_write_shell_script_never_uses_path_write_text(tmp_path):
-    """Regression pin for #994/#999: `_write_shell_script` must go through
+    r"""Regression pin for #994/#999: `_write_shell_script` must go through
     `open(..., newline="\n")`, never `Path.write_text()`, whose default
     `newline=None` applies universal-newline translation and can corrupt
     the shebang line on Windows. Pins the *call*, not the output bytes --
@@ -51,7 +51,7 @@ def test_write_shell_script_never_uses_path_write_text(tmp_path):
         Path,
         "write_text",
         side_effect=AssertionError(
-            "shell script written via Path.write_text(), not open(newline='\n')"
+            r"shell script written via Path.write_text(), not open(newline='\n')"
         ),
     ):
         _write_shell_script(target, "#!/bin/sh\nexit 0\n")
