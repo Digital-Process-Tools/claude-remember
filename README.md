@@ -70,7 +70,7 @@ Once in a while, `SessionStart` names whichever of `claude-supertool` / `claude-
 /plugin install remember@dpt-plugins
 ```
 
-Restart Claude Code afterwards; hooks are read at session start ([#200](https://github.com/Digital-Process-Tools/claude-remember/issues/200)). Updating, the official Anthropic marketplace and its lag, manual install, checking your version: [docs/install-claude-code.md](docs/install-claude-code.md).
+Restart Claude Code afterwards; hooks are read at session start ([#200](https://github.com/Digital-Process-Tools/claude-remember/issues/200)). Updating, the official Anthropic marketplace and its lag, manual install, checking your version, and how to switch here from the official marketplace: [docs/install-claude-code.md](docs/install-claude-code.md).
 
 **Codex**
 
