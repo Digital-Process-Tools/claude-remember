@@ -68,7 +68,20 @@ SESSION = "eeeeeeee-0000-4000-8000-000000000660"
 PROMO_JQ_SPAWN_BUDGET = 4
 
 
-def _run_with_shim(tmp_path: Path, extra_setup=None) -> tuple[list[str], subprocess.CompletedProcess]:
+def _run_with_shim(
+    tmp_path: Path, extra_setup=None, *, defer0: bool = False,
+) -> tuple[list[str], subprocess.CompletedProcess]:
+    """`defer0=True` sets REMEMBER_DEFER=0, running the deferred phase
+    inline rather than backgrounded (`&disown`) -- needed by any caller
+    that asserts an on-disk effect of that phase (the prune, the capture-
+    gap notice, ...) immediately after this function returns, since the
+    PARENT hook returning says nothing about whether its disowned
+    background child (scripts/capture-gap-check.sh, #1067) has finished
+    yet. #1069 review: that child is now a genuinely separate process --
+    slower to start than the pre-#1067 in-process function call was -- so
+    a caller relying on a race window that happened to be wide enough
+    before #1067 is exactly the class of test this parameter exists to
+    fix."""
     home = tmp_path / "home"
     project = tmp_path / "project"
     remember = project / ".remember"
@@ -93,6 +106,7 @@ def _run_with_shim(tmp_path: Path, extra_setup=None) -> tuple[list[str], subproc
         "REMEMBER_DIR": str(remember),
         "SPAWN_LOG": str(log),
         "PATH": f"{shims}{os.pathsep}{os.environ['PATH']}",
+        **({"REMEMBER_DEFER": "0"} if defer0 else {}),
     }
     payload = json.dumps(
         {
@@ -396,9 +410,16 @@ def test_capture_seen_prune_still_fires_over_the_threshold(tmp_path):
     counts with a glob and picks the oldest with bash's own `-nt` -- so the
     run is observed by its effect, and the spawn log must stay free of
     `ls` here too.
+
+    #1069 review on #1067: `defer0=True`, since this asserts the deferred
+    phase's own on-disk effect (the prune) immediately after the run --
+    unlike the sibling "must not fire" test above, which passes whether or
+    not the (now genuinely separate, #1067) background child has started
+    yet.
     """
     lines, result = _run_with_shim(
-        tmp_path, extra_setup=lambda remember: _seed_capture_seen(remember, CAPTURE_SEEN_KEEP + 1)
+        tmp_path, extra_setup=lambda remember: _seed_capture_seen(remember, CAPTURE_SEEN_KEEP + 1),
+        defer0=True,
     )
     assert result.returncode == 0, result.stderr
     assert _prune_spawns(lines) == [], (

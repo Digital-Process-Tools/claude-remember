@@ -33,6 +33,11 @@ from .spawn_counting import make_shim_dir, spawns
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SESSION_START = REPO_ROOT / "scripts" / "session-start-hook.sh"
+# #1067: _find_previous_transcript and _transcript_is_pluginless_sdk moved
+# into this separate, non-inlined file (a release-budget extraction);
+# _stdin_json_string_into exists, byte-identical, in both -- session-start-
+# hook.sh still needs its own copy on its hot synchronous path.
+CAPTURE_GAP_CHECK = REPO_ROOT / "scripts" / "capture-gap-check.sh"
 
 BASH = resolve_bash()
 pytestmark = pytest.mark.skipif(
@@ -50,14 +55,21 @@ def _function_body(name: str) -> str:
     test runs the actual code, not a hand-copied stand-in that can drift
     from it. Neither function this issue touches uses a nested `{ }` brace
     group, so the first `\n}\n` after the opening line is genuinely the
-    function's own close."""
-    source = SESSION_START.read_text(encoding="utf-8")
+    function's own close.
+
+    Tried against SESSION_START first, then CAPTURE_GAP_CHECK (#1067:
+    _find_previous_transcript and _transcript_is_pluginless_sdk moved into
+    the latter; _stdin_json_string_into is defined, identically, in both)."""
     start_marker = f"\n{name}() {{\n"
-    start = source.index(start_marker)
-    if start == -1:
-        raise AssertionError(f"{name}() not found in {SESSION_START}")
-    end = source.index("\n}\n", start) + len("\n}")
-    return source[start + 1 : end]
+    for candidate in (SESSION_START, CAPTURE_GAP_CHECK):
+        source = candidate.read_text(encoding="utf-8")
+        start = source.find(start_marker)
+        if start != -1:
+            end = source.index("\n}\n", start) + len("\n}")
+            return source[start + 1 : end]
+    raise AssertionError(
+        f"{name}() not found in {SESSION_START} or {CAPTURE_GAP_CHECK}"
+    )
 
 
 def _function_bodies(*names: str) -> str:
@@ -153,9 +165,11 @@ log() {
 # positional no-id fallback the second template exercises. It reads the
 # transcript suffix from a variable assigned once at top level in the hook,
 # so that assignment is pulled from the real file too.
+# #1067: this assignment moved along with _find_previous_transcript into
+# CAPTURE_GAP_CHECK.
 _SUFFIX_LINE = next(
     line
-    for line in SESSION_START.read_text(encoding="utf-8").splitlines()
+    for line in CAPTURE_GAP_CHECK.read_text(encoding="utf-8").splitlines()
     if line.startswith("_TRANSCRIPT_SUFFIX=")
 )
 

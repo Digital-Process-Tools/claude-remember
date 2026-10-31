@@ -21,13 +21,19 @@ inlines each sourced file as one function in the built hook. Editing a library (
 hook that sources it, not just the library file's own size on disk.
 
 **Check before you add, not after:** `python3 .github/scripts/compile_hooks.py --repo .` prints
-each hook's compiled size with nothing written. As of #899, `session-start-hook.sh` built to
-121,820 bytes -- about 1 KiB of headroom under the 120 KiB budget.
+each hook's compiled size with nothing written. By #1065, `session-start-hook.sh` had shrunk to
+50 bytes of headroom under the 120 KiB budget, blocking #1064 and #1056 outright. #1067 extracted
+its previous-session recovery, slug/case-divergence bookkeeping and capture-gap detection into a
+new, non-`HOOK_SCRIPT_NAMES` file (`scripts/capture-gap-check.sh`, invoked the way
+`scripts/consolidation-launch.sh` already was for #1006) -- over 21 KiB of headroom as of that
+fix.
 
-**The fix is less real code.** Comments are already stripped by this point; squeezing whitespace
-or renaming variables only hides the growth until the next feature and was refused by the agent's
-own safety classifier as scanner evasion when tried. Move work out of the hook's source chain
-instead.
+**The fix is less real code, or less of it IN THE HOOK'S OWN SOURCE CHAIN.** Comments are already
+stripped by this point; squeezing whitespace or renaming variables only hides the growth until the
+next feature and was refused by the agent's own safety classifier as scanner evasion when tried.
+Moving a rarely-taken branch into its own invoked-not-sourced file (#1006, #1067) is the move that
+actually works: that file's own `source`/`.` chain is never inlined into any of the four compiled
+hooks, because it is not itself one of `HOOK_SCRIPT_NAMES`.
 
 This entry also fires on `hooks/` and `hooks.d/*.sh` -- `check_release_tree.py`'s other
 scanner-shape needles (below) scan every `.sh` under `_SCRIPT_DIRS` (`hooks`, `hooks.d`,
