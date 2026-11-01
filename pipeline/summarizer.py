@@ -179,7 +179,7 @@ AUTO_MEMORY_DISABLE_ENV = "CLAUDE_CODE_DISABLE_AUTO_MEMORY"
 # "auto" used to ask pipeline.host.detect_host() -- env-var signatures
 # (#460, keyed correctly only after #463). #465 found that mechanism cannot
 # work for THIS call site: detect_host() runs inside the summarizer, which
-# is spawned from scripts/haiku's caller (pipeline/haiku.py -> _call_codex /
+# is spawned from scripts/haiku's caller (pipeline/summarizer.py -> _call_codex /
 # _call_claude), itself reached through scripts/save-session.sh ->
 # scripts/session-end-hook.sh, a process Codex spawns as a HOOK, not the
 # tool shell #464's own CODEX_SESSION_ID/CODEX_THREAD_ID fixture was

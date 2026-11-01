@@ -125,7 +125,7 @@ echo ""
 # ── 4. Module imports ────────────────────────────────────────────────────
 echo "4. Module imports"
 
-for mod in types extract haiku log prompts consolidate shell; do
+for mod in types extract summarizer log prompts consolidate shell; do
     if python3 -c "import sys; sys.path.insert(0,'$PIPELINE_DIR'); import pipeline.$mod" 2>/dev/null; then
         pass "pipeline.$mod"
     else
