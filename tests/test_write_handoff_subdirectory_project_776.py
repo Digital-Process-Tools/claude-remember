@@ -234,6 +234,48 @@ class TestFreshestHintWinsOnResume1058Review:
         assert sub_target.exists() and "note with only one hint anywhere" in sub_target.read_text()
         assert not root_target.exists()
 
+    def test_a_fresh_near_hint_beats_a_stale_far_one_for_the_right_reason(self, tmp_path):
+        """The mirror image of the resume test above: this time the NEAR
+        ancestor's hint is the fresh, correct one, and the FAR ancestor (the
+        git toplevel) carries a stale one left over from some earlier
+        session or an accidental stray write. Maintainer-requested
+        regression test: a hypothetical "farthest ancestor with any hint
+        wins" implementation, or one that tie-breaks on walk ORDER rather
+        than on mtime, would pick the toplevel here and fail this test --
+        the only way to pass both this test and the resume test above is to
+        genuinely compare mtimes."""
+        project, sub_project, deep, home = _sandbox_git_repo_with_deep_subproject(tmp_path)
+
+        # The subdirectory project's hint (planted by the shared fixture) is
+        # the FRESH, correct one -- leave its mtime untouched (just written
+        # by the fixture, so it is newer than anything backdated below).
+
+        # The enclosing repository's own store carries a STALE hint --
+        # back-dated well outside any ordinary clock-skew tolerance.
+        root_remember = project / ".remember"
+        (root_remember / "tmp").mkdir(parents=True)
+        (root_remember / "config.json").write_text(json.dumps({"data_dir": ".remember"}))
+        root_target = root_remember / "remember.md"
+        root_hint = root_remember / "tmp" / f"handoff-path.{SESSION_ID}"
+        root_hint.write_text(str(root_target))
+        old_time = time.time() - 3600
+        os.utime(root_hint, (old_time, old_time))
+
+        result = _write_handoff(deep, home, "note from the fresh near ancestor\n")
+
+        assert result.returncode == 0, (
+            f"stdout: {result.stdout!r}\nstderr: {result.stderr!r}"
+        )
+        sub_target = sub_project / ".remember" / "remember.md"
+        assert sub_target.exists() and "note from the fresh near ancestor" in sub_target.read_text(), (
+            f"expected the FRESH near ancestor to win over the STALE far "
+            f"(toplevel) one.\nstdout: {result.stdout!r}\nstderr: {result.stderr!r}"
+        )
+        assert not root_target.exists(), (
+            "note was misrouted to the stale toplevel store instead of the "
+            "fresh nearer one -- walk-order or farthest-wins regression"
+        )
+
 
 class TestDeeperCwdThanSessionStartDir1058:
     """#1058: #776's own disambiguation only ever compares $(pwd) against the
