@@ -6,39 +6,65 @@ whose module-level `pytestmark = pytest.mark.skipif(sys.platform ==
 "win32", ...)` pytest applies to EVERY item in that module -- including a
 class defined inside it, regardless of the class's own docstring claiming
 otherwise. A class's own `pytestmark` attribute only ADDS markers; it
-cannot remove or override one the module already declared. The only way to
-make this case actually run on windows-latest is a module with no such
-skip at all, which is this file.
+cannot remove or override one the module already declared. This file has
+no such skip, so it runs on every platform including windows-latest.
+
+First CI round on windows-latest found a SECOND bug this move exposed:
+the literal string "bash" on PATH there commonly resolves to the WSL
+launcher (which then prints "Windows Subsystem for Linux has no installed
+distributions" to stdout and exits nonzero), not Git Bash -- exactly the
+hazard tests/_bash_runner.py's own module docstring documents and that
+test_hooks_json.py, test_hook_cwd_leak_417.py and others already route
+around via resolve_bash()/find_git_bash(). This file now uses that same
+helper instead of a raw ["bash", "-c", ...] call, and passes the value
+under test on stdin (octal-escaped, via bash_octal/printf '%b') rather
+than as an argv entry -- argv is NOT trusted on Windows either: Git Bash
+rebuilds it from the raw Windows command line itself, so an unquoted
+backslash or an embedded newline in an argv string does not survive
+intact (see run_bash_file's own docstring).
 
 The pointer-path logic lib-session-store.sh's own shape predicate implements
 is pure path handling, not filesystem access -- a drive letter and a UNC
 path are bash STRING matching, identical on every platform the shell itself
-runs on. Observed on macOS/Linux; REASONED (not observed) for the actual
-Windows runner, consistent with this repo's own convention for the sibling
-ancestor-walk termination logic (see write-handoff.sh's own #1058/PR #1081
-comment on the UNC root case).
+runs on, once that shell is genuinely bash and the input reaches it intact.
 """
 
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
+
+import pytest
+
+from tests._bash_runner import (
+    bash_octal,
+    decode_bash_output,
+    resolve_bash,
+    run_bash_file,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LIB_SESSION_STORE = REPO_ROOT / "scripts" / "lib-session-store.sh"
+
+BASH = resolve_bash()
+
+pytestmark = pytest.mark.skipif(
+    BASH is None,
+    reason="no usable bash found (not Git Bash on Windows, no bash on PATH elsewhere)",
+)
 
 
 def _check(value: str) -> str:
     script = (
         "set -u\n"
-        f'source "{LIB_SESSION_STORE}"\n'
-        '_remember_session_store_shape_ok "$1" && echo ACCEPTED || echo REJECTED\n'
+        "IFS= read -r enc\n"
+        'val=""\n'
+        '[ -z "$enc" ] || printf -v val "%b" "$enc"\n'
+        f'source "{LIB_SESSION_STORE.as_posix()}"\n'
+        '_remember_session_store_shape_ok "$val" && echo ACCEPTED || echo REJECTED\n'
     )
-    result = subprocess.run(
-        ["bash", "-c", script, "shape-check", value],
-        capture_output=True, text=True, check=False,
-    )
-    return result.stdout.strip()
+    stdin = (bash_octal(value) + "\n").encode("ascii")
+    result = run_bash_file(BASH, script, stdin=stdin)
+    return decode_bash_output(result.stdout).strip()
 
 
 def test_a_drive_letter_path_is_accepted():
