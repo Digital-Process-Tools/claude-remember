@@ -104,6 +104,12 @@ from pathlib import Path
 
 import pytest
 
+# #660: test_benchmark_summary_line_survives_capture_660 drives the real
+# `pytester` fixture through a nested pytest subprocess -- see that test's
+# own docstring. `tests/test_conftest_import_failure_510.py` already uses
+# the same plugin the same way.
+pytest_plugins = ["pytester"]
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SESSION_START = REPO_ROOT / "scripts" / "session-start-hook.sh"
 
@@ -514,7 +520,7 @@ def _diagnose(env: dict, shims: Path, log: Path, label: str,
     return "\n".join(lines)
 
 
-def _benchmark(tmp_path: Path, record_property, *, jq_present: bool,
+def _benchmark(tmp_path: Path, record_property, capfd, *, jq_present: bool,
                 cold_budget: int, warm_budget: int, label: str):
     home, project, remember = _store(tmp_path)
     base_path = os.environ["PATH"] if jq_present else _path_without_jq(os.environ["PATH"], tmp_path)
@@ -610,15 +616,30 @@ def _benchmark(tmp_path: Path, record_property, *, jq_present: bool,
     # still shows up the way it always has (captured, surfaced by pytest on
     # a failure), stderr so it reaches a log that shows even when the run as
     # a whole is green, which is the whole gap #673 exists to close.
-    print(summary_line)
-    print(summary_line, file=sys.stderr)
+    #
+    # #660: that stderr half did not actually do that. pytest's default
+    # capture mode ("fd") redirects the real OS file descriptors 1/2 for the
+    # DURATION OF EVERY TEST, pass or fail, and only replays what it caught
+    # if the test fails (or -rA/-s is passed) -- a direct write() to fd 2,
+    # which is exactly what print(file=sys.stderr) does, is captured right
+    # along with stdout. Confirmed empirically: this PR's own first
+    # windows-latest CI run had zero matches for this line in the job log
+    # despite the benchmark passing. `capfd.disabled()` is the actual,
+    # pytest-documented way to make a write bypass that capture regardless
+    # of outcome -- see test_benchmark_summary_line_survives_capture_660
+    # below for a standalone proof of the mechanism, independent of this
+    # test's own heavy hook-driving fixtures.
+    with capfd.disabled():
+        print(summary_line)
+        print(summary_line, file=sys.stderr)
     table = _format_benchmark_table(
         label, cold_time=cold_time, cold_spawns=cold_spawns,
         warm_time=warm_median_time, warm_spawns=warm_spawns,
         warm_runs=WARM_RUN_COUNT,
     )
-    print(table)
-    print(table, file=sys.stderr)
+    with capfd.disabled():
+        print(table)
+        print(table, file=sys.stderr)
     _append_step_summary(table)
     record_property(f"remember_benchmark_{label}_cold_seconds", round(cold_time, 3))
     record_property(f"remember_benchmark_{label}_cold_spawns", len(cold_spawns))
@@ -651,24 +672,24 @@ def _benchmark(tmp_path: Path, record_property, *, jq_present: bool,
     )
 
 
-def test_session_start_hook_benchmark_with_jq_present(tmp_path, record_property):
+def test_session_start_hook_benchmark_with_jq_present(tmp_path, record_property, capfd):
     """The common case: jq resolvable on PATH, as on macOS/Linux and on a
     Windows box where the user installed it (this repo's own docs/windows.md
     tells Git-Bash users to)."""
     _benchmark(
-        tmp_path, record_property, jq_present=True,
+        tmp_path, record_property, capfd, jq_present=True,
         cold_budget=JQ_PRESENT_COLD_SPAWN_BUDGET,
         warm_budget=JQ_PRESENT_WARM_SPAWN_BUDGET,
         label="jq_present",
     )
 
 
-def test_session_start_hook_benchmark_with_jq_absent(tmp_path, record_property):
+def test_session_start_hook_benchmark_with_jq_absent(tmp_path, record_property, capfd):
     """Git for Windows does not ship jq -- the issue's own stated reason this
     scenario needs its own measurement, not an assumption that the fallback
     costs the same."""
     _benchmark(
-        tmp_path, record_property, jq_present=False,
+        tmp_path, record_property, capfd, jq_present=False,
         cold_budget=JQ_ABSENT_COLD_SPAWN_BUDGET,
         warm_budget=JQ_ABSENT_WARM_SPAWN_BUDGET,
         label="jq_absent",
@@ -898,3 +919,67 @@ def test_step_summary_raises_loudly_when_path_unwritable(tmp_path, monkeypatch):
     )
     with pytest.raises(OSError):
         _append_step_summary(table)
+
+
+def test_benchmark_summary_line_survives_capture_660(pytester):
+    """#660: #673's own stated reason for printing the benchmark summary to
+    BOTH streams was so it "reaches a log that shows even when the run is
+    green" -- stdout is captured and only surfaced by pytest on a FAILURE,
+    so stderr was meant to be the half that always gets through. It did
+    not: pytest's default capture mode ("fd") redirects the real OS file
+    descriptors 1 and 2 for the duration of every test, pass or fail, and a
+    direct write() to fd 2 -- exactly what `print(file=sys.stderr)` does --
+    is captured right along with stdout. This PR's own first
+    `windows-latest` CI run confirmed it empirically: zero matches for the
+    summary line in that job's log, despite both benchmark tests passing.
+
+    `capfd.disabled()` is pytest's own documented way to make a write
+    bypass that capture regardless of outcome, and `_benchmark` above now
+    wraps its two summary prints in it. This test drives that REAL pytest
+    fixture through a nested subprocess rather than asserting against a
+    description of what it is documented to do -- the same reasoning this
+    file's own module docstring gives for driving the real hook under real
+    bash instead of reasoning about it.
+
+    Positive/negative control, paired (CLAUDE.md: a "must fire" assertion
+    needs a "must not fire" twin, or a harness that captures nothing passes
+    the positive half for free). `test_with_disable` MUST reach the
+    subprocess's own output even though it passes; `test_without_disable`,
+    identical but for the wrapper, MUST NOT -- proving the wrapper is what
+    did it, not an accident of this sub-run's own configuration."""
+    pytester.makepyfile(
+        test_with_disable="""
+            import sys
+
+            def test_x(capfd):
+                with capfd.disabled():
+                    print("MARKER-660-DISABLED", file=sys.stderr)
+        """,
+        test_without_disable="""
+            import sys
+
+            def test_x(capfd):
+                print("MARKER-660-NOT-DISABLED", file=sys.stderr)
+        """,
+    )
+    result = pytester.runpytest_subprocess(
+        "test_with_disable.py", "test_without_disable.py"
+    )
+    result.assert_outcomes(passed=2)
+    # Both markers are printed to the SUBPROCESS's stderr -- pytester's
+    # RunResult keeps stdout and stderr as separate LineMatcher objects
+    # (`.outlines` is `.stdout.lines` only), so the real evidence is in
+    # `.stderr`, not `.outlines`. Caught while writing this test: the first
+    # version asserted against `.outlines` and failed even for the
+    # DISABLED case, which would have made the positive assertion below
+    # meaningless had it been left unnoticed.
+    combined = "\n".join(result.stdout.lines + result.stderr.lines)
+    assert "MARKER-660-DISABLED" in combined, (
+        "capfd.disabled() did not let a stderr print reach the subprocess's "
+        f"own output on a PASSING test. Full output:\n{combined}"
+    )
+    assert "MARKER-660-NOT-DISABLED" not in combined, (
+        "a stderr print with no capfd.disabled() wrap reached the output "
+        "anyway -- the negative control failed, so the positive assertion "
+        f"above proves nothing. Full output:\n{combined}"
+    )
