@@ -218,6 +218,31 @@ class TestBudgetSurvivesADayRollover:
         _assert_no_stray_tmp_files(remember)
 
 
+def _resolve_main_ref() -> str | None:
+    """A PR's own CI checkout is commonly shallow and single-ref -- just
+    the merge commit fetched at depth 1, with main's own history and tree
+    never fetched at all, so a bare "main" or even "origin/main" can be
+    genuinely unresolvable (or resolvable yet treeless) there. A fresh,
+    shallow fetch of main's own tip is the most robust first move: it
+    works whether or not the checkout already happened to populate a
+    local ref, and every GitHub Actions runner has the network access to
+    do it against the same "origin" the checkout action itself set up."""
+    fetch = subprocess.run(
+        ["git", "fetch", "--quiet", "--depth", "1", "origin", "main"],
+        cwd=REPO_ROOT, capture_output=True, text=True, check=False,
+    )
+    if fetch.returncode == 0:
+        return "FETCH_HEAD"
+    for candidate in ("origin/main", "main", "origin/HEAD"):
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", candidate],
+            cwd=REPO_ROOT, capture_output=True, text=True, check=False,
+        )
+        if result.returncode == 0:
+            return candidate
+    return None
+
+
 def _archive_ref_tree(ref: str, dest: Path) -> None:
     """Export `ref`'s whole tree into `dest` -- used to run the SAME
     scenario against main's actual code, rather than against a hardcoded
@@ -284,8 +309,26 @@ def test_cache_served_spawn_count_does_not_exceed_main(tmp_path):
     directly with a bash builtin, only on the mismatch path. Pinned by
     running the actual scenario against BOTH this branch's code and
     main's, rather than a hardcoded number either one could drift past."""
+    main_ref = _resolve_main_ref()
+    if main_ref is None:
+        pytest.skip(
+            "no local ref for main resolvable in this checkout (a shallow, "
+            "single-branch CI checkout of just the PR ref has neither "
+            "origin/main nor a local main) -- cannot pin against main's own "
+            "code here"
+        )
     main_tree = tmp_path / "main-tree"
-    _archive_ref_tree("main", main_tree)
+    try:
+        _archive_ref_tree(main_ref, main_tree)
+    except subprocess.CalledProcessError as exc:
+        # A shallow, single-ref CI checkout can resolve "origin/main" (the
+        # ref/tracking-branch pointer exists) without the commit's TREE
+        # actually being present locally -- `git archive` needs the latter,
+        # and fails exactly here rather than at the rev-parse above.
+        pytest.skip(
+            f"main_ref {main_ref!r} resolved but `git archive` could not "
+            f"read its tree in this checkout (likely shallow): {exc.stderr!r}"
+        )
 
     branch_spawns = _same_day_cache_served_spawns(tmp_path / "branch", REPO_ROOT)
     main_spawns = _same_day_cache_served_spawns(tmp_path / "main", main_tree)
