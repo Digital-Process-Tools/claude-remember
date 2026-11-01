@@ -191,12 +191,20 @@ def test_the_cap_is_a_byte_cap_not_a_character_cap_under_utf8():
     payload = four_byte_char * 20000  # >> 32768 bytes, well under as chars
     script = _LOOP_DRIVER % _extract_read_loop()
     env = {**os.environ, "LC_ALL": "en_US.UTF-8", "LANG": "en_US.UTF-8"}
+    # text=True with no explicit encoding uses the PLATFORM's preferred
+    # encoding to decode/encode -- cp1252 on Windows, which cannot
+    # represent this payload's own 4-byte UTF-8 character at all and
+    # raises UnicodeEncodeError on `input=` before the subprocess even
+    # starts. The payload is genuinely UTF-8 (that is the whole point of
+    # this test), so the encoding must be pinned explicitly rather than
+    # left to whatever codepage the host happens to default to.
     result = subprocess.run(
         [BASH, "-c", script],
         input=payload,
         env=env,
         capture_output=True,
         text=True,
+        encoding="utf-8",
         timeout=15,
         check=False,
     )
