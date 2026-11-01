@@ -207,7 +207,25 @@ if [ -n "$CURRENT_SESSION_ID" ]; then
     # below produced an unbalanced quote the shell could not parse at
     # exit (caught by this fix's own TDD red run: an "unexpected EOF
     # while looking for matching quote" exit-trap error).
-    _remember_gap_existing_trap="${_remember_gap_existing_trap//\'\\\'\'/\'}"
+    #
+    # NOT `${var//'\''/\'}` (#1086 review follow-up): identical input,
+    # identical pattern/replacement, and bash 3.2 (Apple's shipped
+    # /bin/bash, also what macos-latest CI resolves) silently leaves a
+    # stray backslash in the result where bash 4+ collapses correctly --
+    # confirmed side by side, same pattern, two bash versions, two
+    # different outputs. On the cache-miss path that silently corrupted
+    # the reinstalled trap's quoting enough that log.sh's OWN merged-
+    # config cleanup (`rm -f '...'`) never actually ran, leaking a
+    # `remember-config-XXXXXX` tmpfile into shared tmp on every exit --
+    # exactly the #362-style leak this trap exists to prevent, on the one
+    # platform `${var//pat/rep}` disagrees with itself. The loop below
+    # uses only `%%`/`#` prefix/suffix removal, which both bash versions
+    # agree on; this trap-install path only runs once per cache miss
+    # (already far more expensive than one more bash builtin loop), so
+    # portability costs nothing on the hot path this exists to protect.
+    while [[ "$_remember_gap_existing_trap" == *"'\''"* ]]; do
+        _remember_gap_existing_trap="${_remember_gap_existing_trap%%"'\''"*}'${_remember_gap_existing_trap#*"'\''"}"
+    done
     unset _remember_gap_trap_raw
     if [ -n "$_remember_gap_existing_trap" ]; then
         # shellcheck disable=SC2064
