@@ -516,24 +516,27 @@ SESSIONS_DIR="$(claude_projects_dir)/${PROJECT_PATH_SLUG}"
 #     session id indefinitely -- only until the bound passes.
 #   * `kill -0` was SUSPECTED (reasoned, not confirmed) to false-negative
 #     on a PID that is genuinely alive but was never spawned under THIS
-#     bash's own MSYS/Git-Bash process tree, which would explain
-#     windows-latest CI's own symptom: a resume whose PID marker named a
-#     still-running process (started directly by the Python test harness,
-#     not forked from any MSYS shell) vanishing entirely within one
-#     second. `/proc/$pid` existence was added below as an extra "still
-#     alive" signal, on the theory that it is populated by walking the
-#     real OS process table rather than an MSYS-internal signal-delivery
-#     registration. CI DISPROVED this: the next run, with this check in
-#     place, showed the IDENTICAL failure, byte for byte (same symptom,
-#     same `bash -x` trace shape) -- so either MSYS's `/proc` does not
-#     expose this PID either, or the true mechanism is something else
-#     entirely. Left in place as a harmless, zero-cost (`[ -e ]` is a
-#     builtin) extra check for a platform where it DOES fire, but it is
-#     NOT a fix for the #1060 Windows CI failure and must not be read as
-#     one -- that failure's real cause is still unknown, and needs a real
-#     Windows host (or the next CI round's own fresh diagnostic) to find.
+#     bash's own MSYS/Git-Bash process tree -- windows-latest CI's own
+#     symptom was a resume whose PID marker named a still-running process
+#     vanishing entirely within one second. An earlier round added a
+#     `/proc/$pid` existence probe here as an extra "still alive" signal;
+#     CI DISPROVED it (the identical failure recurred, byte for byte, with
+#     the probe in place), so it was removed rather than left as dead
+#     speculative code. ROOT CAUSE FOUND: the symptom was never in `kill
+#     -0` at all -- it was in the TEST, not the guard. The test's own
+#     stand-in "live deferred phase" was started with a plain
+#     `subprocess.Popen(["sleep", "60"])`, which hands this guard a NATIVE
+#     Windows PID; every REAL deferred phase is always backgrounded with
+#     `... &` from INSIDE an MSYS/Git-Bash process (this file's own `&`
+#     below, or capture-gap-check.sh's synchronous REMEMBER_DEFER=0 path),
+#     so its `$!` -- what actually ends up in the PID marker in
+#     production -- is an MSYS-space PID, which is what `kill -0` in an
+#     MSYS shell actually resolves. Fixed in
+#     tests/test_resume_deferred_stacking_1060.py: the stand-in process is
+#     now started the same way production does, through `bash -c 'sleep
+#     60 & echo $!'`. Plain `kill -0` is therefore correct as written and
+#     needs no OS-specific extra signal.
 _remember_pid_is_alive() {
-    [ -e "/proc/$1" ] 2>/dev/null && return 0
     kill -0 "$1" 2>/dev/null
 }
 

@@ -67,14 +67,14 @@ def _run_session_start(env: dict, session_id: str, source: str):
     )
 
 
-def _resume_diag(remember, session_id: str, env: dict, sleeper_pid: int) -> str:
+def _resume_diag(remember, session_id: str, env: dict, sleeper_pid: str) -> str:
     """Diagnostics only (never shipped): the PID marker directory listing, and
     a bash -x re-run of the same resume trimmed to the deferred-phase guard
     (kill -0 / _remember_deferred_already_running), so a Windows PID the
     MSYS/Git-Bash `kill -0` check cannot resolve shows up directly rather
     than as an unexplained relaunch.
     """
-    parts = [f"REMEMBER_DIR={env.get('REMEMBER_DIR')!r}", f"sleeper (Popen) pid={sleeper_pid}"]
+    parts = [f"REMEMBER_DIR={env.get('REMEMBER_DIR')!r}", f"sleeper (bash $!) pid={sleeper_pid}"]
     tmp_dir = remember / "tmp"
     try:
         parts.append(f"{tmp_dir} listing: {sorted(p.name for p in tmp_dir.glob('*'))}")
@@ -109,6 +109,47 @@ def _resume_diag(remember, session_id: str, env: dict, sleeper_pid: int) -> str:
     return "\n".join(parts)
 
 
+def _bash_background_sleeper(env: dict, seconds: int = 60) -> str:
+    """Start a long-lived sleeper THE SAME WAY production does -- `&` inside
+    an MSYS/Git-Bash process, not a native Popen -- and return the PID
+    string `$!` printed for it.
+
+    #1060 CI (windows-latest): the original version of this helper used
+    `subprocess.Popen(["sleep", "60"])` directly, handing the guard a native
+    Windows PID. In production the deferred phase's own PID marker is always
+    `$!` of a job started with `... &` INSIDE session-start-hook.sh's own
+    MSYS bash (this file's own module docstring, point 2), and MSYS/Git-
+    Bash's `kill -0` -- what `_remember_pid_is_alive` actually calls -- works
+    in that same MSYS pid space, which is not guaranteed to be the native
+    Windows PID a directly-Popen'd process gets. Starting the sleeper from
+    bash itself, through `&`/`$!`, hands the guard the identical kind of PID
+    string production writes, on every platform -- a no-op change on macOS/
+    Linux, where the two pid spaces always agree, and the fix on Windows,
+    where they do not.
+    """
+    result = subprocess.run(
+        [BASH, "-c", f"sleep {seconds} >/dev/null 2>&1 & echo $!; disown"],
+        env=env, capture_output=True, text=True, timeout=10, check=False,
+    )
+    pid = result.stdout.strip()
+    assert result.returncode == 0 and pid, (
+        f"precondition: could not start a bash-backgrounded sleeper "
+        f"(rc={result.returncode}): stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    return pid
+
+
+def _bash_pid_is_alive(env: dict, pid: str) -> bool:
+    """`kill -0` in the SAME bash/pid space `_bash_background_sleeper`
+    started the process in -- the guard's own liveness check, used here only
+    to verify the harness's own stand-in process, never the guard itself."""
+    result = subprocess.run(
+        [BASH, "-c", f"kill -0 {pid} 2>/dev/null"],
+        env=env, capture_output=True, text=True, timeout=10, check=False,
+    )
+    return result.returncode == 0
+
+
 def test_a_resume_for_a_session_whose_deferred_phase_is_still_alive_does_not_relaunch_it(tmp_path):
     home, project, remember = _store(tmp_path)
     env = _env(home, project, remember, os.environ["PATH"])
@@ -127,9 +168,9 @@ def test_a_resume_for_a_session_whose_deferred_phase_is_still_alive_does_not_rel
     slug_record = remember / "tmp" / "session-slug"
     assert not slug_record.exists(), "precondition: no deferred phase has run for this project yet"
 
-    sleeper = subprocess.Popen(["sleep", "60"])
+    sleeper_pid = _bash_background_sleeper(env, 60)
     try:
-        pid_file.write_text(str(sleeper.pid), encoding="utf-8")
+        pid_file.write_text(sleeper_pid, encoding="utf-8")
 
         result = _run_session_start(env, session_id, "resume")
         assert result.returncode == 0, result.stderr[-2000:]
@@ -147,14 +188,14 @@ def test_a_resume_for_a_session_whose_deferred_phase_is_still_alive_does_not_rel
         assert pid_file_now is not None, (
             "a resume for a session whose deferred phase is still alive "
             f"relaunched it instead of being skipped -- the PID file {pid_file} "
-            f"is gone entirely (sleeper pid={sleeper.pid})\n"
-            f"{_resume_diag(remember, session_id, env, sleeper.pid)}"
+            f"is gone entirely (sleeper pid={sleeper_pid})\n"
+            f"{_resume_diag(remember, session_id, env, sleeper_pid)}"
         )
-        assert pid_file_now.strip() == str(sleeper.pid), (
+        assert pid_file_now.strip() == sleeper_pid, (
             "a resume for a session whose deferred phase is still alive "
             "relaunched it instead of being skipped -- the PID file no "
             f"longer names the still-running sleeper (now: {pid_file_now!r})\n"
-            f"{_resume_diag(remember, session_id, env, sleeper.pid)}"
+            f"{_resume_diag(remember, session_id, env, sleeper_pid)}"
         )
         assert not slug_record.exists(), (
             "a resume for a session whose deferred phase is still alive "
@@ -163,13 +204,15 @@ def test_a_resume_for_a_session_whose_deferred_phase_is_still_alive_does_not_rel
             "launch path ran (mechanism-independent of the pid-file check "
             "above, which a tree with no guard at all would pass vacuously)"
         )
-        assert sleeper.poll() is None, (
+        assert _bash_pid_is_alive(env, sleeper_pid), (
             "precondition broke mid-test: the sleeper this test uses as a "
             "stand-in live process exited on its own"
         )
     finally:
-        sleeper.terminate()
-        sleeper.wait(timeout=10)
+        subprocess.run(
+            [BASH, "-c", f"kill {sleeper_pid} 2>/dev/null"],
+            env=env, capture_output=True, text=True, timeout=10, check=False,
+        )
 
 
 def test_the_deferred_phases_own_pid_file_is_removed_when_it_finishes(tmp_path):

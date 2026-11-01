@@ -107,20 +107,45 @@ if [ -n "${PROJECT_DIR:-}" ] && [ -d "${PROJECT_DIR:-}" ] \
     # unconditionally redid lib-memory-dir.sh's whole three-layer jq/mktemp
     # merge on EVERY SessionStart (2-6 extra spawns, measured on macOS) and
     # left that merge's own mktemp'd file in shared OS tmp, since this fast
-    # path never sources bootstrap-dirs.sh (the #362 fix) either. Load the
-    # env cache session-start-hook.sh already published moments ago instead
-    # -- it carries the ONE config value this common path actually needs
-    # (REMEMBER_RECOVERY_ENABLED, used by the recovery check below), the
-    # same way post-tool-hook.sh's own fast path replays REMEMBER_SAVE_COOLDOWN/
-    # REMEMBER_DELTA_THRESHOLD instead of calling config_into. Falls through
-    # to the full chain whenever the cache is missing, stale, or predates
-    # this key -- the "needed regardless" case this comment used to claim
-    # could not be removed without "further work": this is that work.
+    # path never sources bootstrap-dirs.sh (the #362 fix) either.
+    #
+    # #1079 CI follow-up: this used to replay the one scalar this common
+    # path needs (REMEMBER_RECOVERY_ENABLED) by loading the env-cache FILE
+    # session-start-hook.sh publishes a few lines before it backgrounds (or
+    # inline-runs) this very script -- but that publish is itself a write to
+    # shared OS tmp, and windows-latest CI showed it sometimes never lands
+    # (or is not yet visible) by the time this process starts: the cache
+    # read failed outright (`-f`/`-O` on the just-written file came back
+    # false), so the `&&` chain below short-circuited straight to the full
+    # merge on EVERY run, file or no file. The file was never actually the
+    # cheap path's dependency, though: this script is reached ONLY as a
+    # child of session-start-hook.sh's OWN bash process (either backgrounded
+    # with `&` at the end of its deferred block, or run inline for
+    # REMEMBER_DEFER=0) -- never as an unrelated, independently-launched
+    # process -- and session-start-hook.sh already `export`s
+    # REMEMBER_RECOVERY_ENABLED before either call site. An exported
+    # variable is inherited by a forked/exec'd child for free, no file
+    # needed, so check for that inheritance FIRST and skip the cache file
+    # (and its own publish-vs-load race) entirely on the path that always
+    # has it. The env-cache file stays as the fallback for the one caller
+    # that does NOT get this for free: a direct/standalone invocation (every
+    # test fixture here that execs this file without first execing
+    # session-start-hook.sh in the SAME process), which is also what
+    # post-tool-hook.sh's and user-prompt-hook.sh's own fast paths still
+    # need the file for -- they are launched by the host directly, not
+    # forked from session-start-hook.sh, so they have no exported value to
+    # inherit and the file is their only route to it.
     _REMEMBER_FAST=0
-    source "$_HOOK_DIR/lib-env-cache.sh" 2>/dev/null
-    if command -v _remember_env_cache_load >/dev/null 2>&1 \
-        && _remember_env_cache_load && [ -n "${REMEMBER_RECOVERY_ENABLED:-}" ]; then
+    if [ -n "${REMEMBER_RECOVERY_ENABLED:-}" ]; then
         _REMEMBER_FAST=1
+    else
+        source "$_HOOK_DIR/lib-env-cache.sh" 2>/dev/null
+        if command -v _remember_env_cache_load >/dev/null 2>&1 \
+            && _remember_env_cache_load && [ -n "${REMEMBER_RECOVERY_ENABLED:-}" ]; then
+            _REMEMBER_FAST=1
+        fi
+    fi
+    if [ "$_REMEMBER_FAST" = "1" ]; then
         # Lazy log(): a handful of rare call sites further down (a
         # case-divergence mismatch, a pluginless-SDK exclusion cap, the
         # no-session_id skip message) still need log.sh's real definitions.

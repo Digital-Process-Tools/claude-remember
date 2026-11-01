@@ -117,11 +117,27 @@ def _warm_the_cache(project: Path, home: Path, systmp: Path) -> dict:
 _SESSION_ID = "f1079000-0000-4000-8000-000000001079"
 
 
-def _run_capture_gap_check_shimmed(project: Path, remember: Path, env: dict, tmp_path: Path) -> list[str]:
+def _run_capture_gap_check_shimmed(
+    project: Path, remember: Path, env: dict, tmp_path: Path,
+    *, recovery_enabled: str | None = None,
+) -> list[str]:
     """Run capture-gap-check.sh's fast path with every COUNTED external
     command shimmed, and return the recorded invocations. Unlike `bash -x`,
     this sees through `source log.sh 2>/dev/null`'s own stderr redirect --
     the shim records a real exec(), not a trace line.
+
+    `recovery_enabled`, when given, is set directly into the child's own
+    environment as REMEMBER_RECOVERY_ENABLED -- modelling the real #1079
+    contract: session-start-hook.sh `export`s this scalar BEFORE it forks
+    capture-gap-check.sh (inline or backgrounded), in the SAME bash process,
+    so the child inherits it for free. This harness runs capture-gap-check.sh
+    as its own, separate `subprocess.run` -- a SECOND OS process, unrelated
+    to whatever `_warm_the_cache` started and already exited -- so plain
+    inheritance cannot be exercised here; setting the var explicitly is the
+    one way this harness can stand in for the fork it is not actually doing.
+    `None` (the default) leaves it unset, modelling a direct/standalone
+    invocation that has nothing to inherit -- the shape every caller of this
+    helper uses for the "both caches missing" positive control.
     """
     shim_log = tmp_path / f"spawn-log-{os.getpid()}-{id(env)}"
     shims = make_shim_dir(tmp_path, shim_log)
@@ -133,6 +149,10 @@ def _run_capture_gap_check_shimmed(project: Path, remember: Path, env: dict, tmp
         "PATH": f"{shims}{os.pathsep}{env.get('PATH', os.environ.get('PATH', ''))}",
         "SPAWN_LOG": str(shim_log),
     }
+    if recovery_enabled is not None:
+        env2["REMEMBER_RECOVERY_ENABLED"] = recovery_enabled
+    else:
+        env2.pop("REMEMBER_RECOVERY_ENABLED", None)
     result = subprocess.run(
         [BASH, CAPTURE_GAP_CHECK.as_posix(), _SESSION_ID],
         env=env2, capture_output=True, text=True, timeout=60, check=False,
@@ -262,7 +282,17 @@ def test_fast_path_with_warm_cache_never_reruns_the_merge(tmp_path, with_user_co
     systmp = tmp_path / "systmp"
     env = _warm_the_cache(project, home, systmp)
 
-    recorded = _run_capture_gap_check_shimmed(project, remember, env, tmp_path)
+    # The real #1079 contract (post-CI-fix): session-start-hook.sh exports
+    # REMEMBER_RECOVERY_ENABLED before it forks this script, so the fast
+    # path never touches the cache FILE at all on the ordinary path -- see
+    # _run_capture_gap_check_shimmed's own docstring for why this harness
+    # sets it directly rather than exercising real process inheritance.
+    # config_into's default is the bare word `true`; with_user_config writes
+    # features.recovery=false into config.json, so the resolved value flips.
+    recovery_enabled = "false" if with_user_config else "true"
+    recorded = _run_capture_gap_check_shimmed(
+        project, remember, env, tmp_path, recovery_enabled=recovery_enabled,
+    )
     merge_spawns = _merge_spawns(recorded)
 
     assert not merge_spawns, (
@@ -325,8 +355,13 @@ def test_warm_cache_run_leaves_no_new_merged_config_tmpfile_in_shared_tmp(tmp_pa
     systmp = tmp_path / "systmp"
     env = _warm_the_cache(project, home, systmp)
 
+    # See test_fast_path_with_warm_cache_never_reruns_the_merge: the real
+    # #1079 contract hands this scalar off via the environment, not the
+    # cache file -- with_user_config=True resolves features.recovery=false.
     before = {p.name for p in systmp.glob("remember-config-*")}
-    _run_capture_gap_check_shimmed(project, remember, env, tmp_path)
+    _run_capture_gap_check_shimmed(
+        project, remember, env, tmp_path, recovery_enabled="false",
+    )
     after = {p.name for p in systmp.glob("remember-config-*")}
 
     new_files = after - before
