@@ -387,13 +387,27 @@ def test_capture_seen_prune_is_gated_on_the_threshold(tmp_path):
     two -- an absent directory never forked under either (the first draft
     of this test only ran that shape, and would have passed against the
     old code: Explore self-review finding on #675).
+
+    #1046 round 2: session-start-hook.sh now writes its own cheap roster
+    marker for THIS run's own SESSION id into capture-alive.d on every
+    single SessionStart (so a chat-only session still earns one piece of
+    recovery roster evidence) -- unconditionally, not gated on the prune
+    threshold, so an under-threshold store legitimately gains exactly one
+    entry per run. The count below is 3 (the 2 seeded + SESSION's own
+    marker), not 2 -- "must not touch" here means the prune leaves the 2
+    SEEDED entries alone, not that the directory's entry count never
+    changes at all.
     """
     lines, result = _run_with_shim(
         tmp_path, extra_setup=lambda remember: _seed_capture_seen(remember, 2)
     )
     assert result.returncode == 0, result.stderr
     seen_dir = tmp_path / "project" / ".remember" / "tmp" / "capture-alive.d"
-    assert len(list(seen_dir.iterdir())) == 2, "the run must not touch an under-threshold store"
+    entries = {p.name for p in seen_dir.iterdir()}
+    assert entries == {"session-0000", "session-0001", SESSION}, (
+        f"the run must not prune the 2 under-threshold seeded entries, and "
+        f"must add exactly its own SESSION roster marker: {entries}"
+    )
     assert _prune_spawns(lines) == [], (
         "capture-alive.d exists with 2 entries, far under the keep threshold, "
         f"so the prune must not fork `ls` against it: {_prune_spawns(lines)}"
