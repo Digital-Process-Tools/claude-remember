@@ -789,6 +789,48 @@ if [ -n "$PREV_ID" ] && session_was_saved "$PREV_ID"; then
     PREV_WAS_SAVED="yes"
 fi
 
+# Args: $1 -- a session id to check against THIS store's own roster, used
+# only by the #1046 recovery guard below (capture_was_seen(), defined
+# further down, is the richer three-source version the #200 capture-gap
+# check uses; this is deliberately narrower -- see the guard's own comment
+# for why checking all three there would be wrong). Two of
+# capture_was_seen()'s three sources apply here: the per-session
+# capture-alive.d marker, and the legacy single slot (self-review finding:
+# the roster alone reintroduces capture_was_seen()'s own documented
+# upgrade-transition false positive -- "the first run after an upgrade, old
+# file present, new store empty" -- for the WRITE path, wrongly declining
+# to rescue a session that legitimately belongs to this store). The third
+# source (session_was_saved) is already excluded by construction: this is
+# only ever called from inside the recovery block's own `PREV_WAS_SAVED =
+# no` guard, so a session source 3 would vouch for is never reached here.
+#
+# Sanitizes $1 the same way capture_was_seen() does, and for the same
+# reason (self-review finding): $1 is a basename taken off a glob in
+# SESSIONS_DIR with no character-class check of its own
+# (_find_previous_transcript's `id=${f#"$dir"/}; id=${id%"$_TRANSCRIPT_
+# SUFFIX"}`), so an adversarial or merely malformed filename like `..jsonl`
+# must not be allowed to make `-e ".../capture-alive.d/.."` true whenever
+# capture-alive.d itself exists (which it will, in exactly the cross-store
+# scenario #1046 is about) and bypass the guard this function exists for.
+_remember_recovery_prev_id_vouched() {
+    # bracket ranges below are byte-wise, not collated (#695), same as
+    # capture_was_seen()'s own copy
+    local LC_ALL=C
+    local _d _ok
+    [ -n "$1" ] || return 1
+    printf -v _d '\056'
+    _ok="^[A-Za-z0-9${_d}_-]*\$"
+    if [ "$1" = "$_d" ] || [ "$1" = "$_d$_d" ]; then
+        return 1
+    elif ! [[ "$1" =~ $_ok ]]; then
+        return 1
+    fi
+    [ -e "$REMEMBER_DIR/tmp/capture-alive.d/$1" ] && return 0
+    [ -f "$REMEMBER_DIR/tmp/capture-alive" ] \
+        && [ "$(<"$REMEMBER_DIR/tmp/capture-alive")" = "$1" ] && return 0
+    return 1
+}
+
 # ── Recovery: save the most recent missed session ──────────────────────────
 # config_into (#665, part of #660) writes into a scratch var directly --
 # no command-substitution subshell on top of the flattened-cache-hit table.
@@ -829,8 +871,8 @@ if [ -d "$SESSIONS_DIR" ] && [ -f "$LAST_SAVE_FILE" ] && [ -n "$PREV_ID" ]; then
         # sources lib-memory-dir.sh (none shipped today, but nothing enforces
         # it) keeps the pre-#1046 behaviour rather than silently skipping
         # every recovery.
-        if [ -n "$REMEMBER_DIR" ] && [ ! -e "$REMEMBER_DIR/tmp/capture-alive.d/$PREV_ID" ]; then
-            log "hook" "recovery: skipping force-save of $PREV_ID -- no capture-alive.d marker under this REMEMBER_DIR (#1046: may belong to a different store sharing this project's transcript directory)"
+        if [ -n "$REMEMBER_DIR" ] && ! _remember_recovery_prev_id_vouched "$PREV_ID"; then
+            log "hook" "recovery: skipping force-save of $PREV_ID -- no capture-alive.d marker or legacy capture-alive slot under this REMEMBER_DIR (#1046: may belong to a different store sharing this project's transcript directory)"
         else
         # REMEMBER_TRANSCRIPT_PATH (exported above, #407) names THIS session's
         # own transcript -- it must not reach a save being forced for a

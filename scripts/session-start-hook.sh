@@ -158,6 +158,14 @@ fi
 # function in this file that takes a destination VARNAME shares; see
 # config_into's comment (log.sh) for the full argument.
 _stdin_json_string_into() {
+    # #1047 self-review: byte-counted, not character-counted -- without this,
+    # `${#_sjsi_raw}` and `${_sjsi_raw:0:4096}` below count and slice by
+    # CHARACTER under any UTF-8 locale (the common default, unset anywhere in
+    # this script), so a payload with multi-byte content before the matched
+    # field (a non-ASCII project path, say) is bounded to 4096 characters --
+    # up to 4x that many bytes -- silently widening the margin #1047 exists
+    # to close. Bytes are what the quadratic match actually costs against.
+    local LC_ALL=C
     local _sjsi_var="$1" _sjsi_field="$2" _sjsi_raw="$3" _sjsi_rest _sjsi_prefix _sjsi_value _sjsi_dq
     printf -v "$_sjsi_var" '%s' ""
     # #1047: `${var#*pattern}` below is quadratic in bash -- O(n^2) on
@@ -185,6 +193,18 @@ _stdin_json_string_into() {
     _sjsi_prefix=${_sjsi_rest%%"$_sjsi_dq"*}
     if [[ "$_sjsi_prefix" == *[!:[:space:]]* ]]; then return 1; fi
     _sjsi_value=${_sjsi_rest#*"$_sjsi_dq"}
+    # #1047 self-review: a value whose OPENING quote survived the bound but
+    # whose CLOSING quote fell past it (the field name/open-quote sit inside
+    # the first 4096 bytes, the value's own close does not) left this
+    # function returning SUCCESS with the entire unterminated truncated tail
+    # as the "value" -- a corrupted-but-non-empty string, not the documented
+    # "missed" degradation. Three of the four call sites happen to validate
+    # their result afterwards (a character allowlist, a fixed enum, an
+    # openability check on the Python side) and would have caught it anyway,
+    # but REMEMBER_HOOK_CWD is checked only for embedded CR/LF and is
+    # otherwise trusted as a directory candidate -- fail closed here instead
+    # of relying on every future caller to validate defensively.
+    [[ "$_sjsi_value" == *"$_sjsi_dq"* ]] || return 1
     _sjsi_value=${_sjsi_value%%"$_sjsi_dq"*}
     # A JSON encoder writes each backslash as `\\` -- a Windows `cwd` from
     # Codex arrives as `C:\\work\\proj` otherwise (#829).

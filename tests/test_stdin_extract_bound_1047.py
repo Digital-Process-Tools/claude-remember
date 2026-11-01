@@ -136,3 +136,26 @@ def test_a_field_entirely_past_the_bound_is_missed_not_hung(tmp_path):
         f"{out!r} -- the 4096-byte cap may not be engaging at all"
     )
     assert elapsed < 3.0
+
+
+def test_a_value_straddling_the_bound_fails_closed_not_corrupted(tmp_path):
+    """Self-review finding: the field's opening quote can survive the
+    4096-byte bound while its closing quote does not -- the field name and
+    value-opening quote sit inside the bound, but the value itself is long
+    enough that its closing quote falls past the cut. Before this fix, the
+    function returned SUCCESS with the entire unterminated truncated tail
+    as the "value" instead of failing closed: a corrupted-but-non-empty
+    result, not the documented "missed" degradation every other case in
+    this file pins. `cwd` is the one call site most exposed to this (no
+    character allowlist, no enum, no openability check at the point of
+    extraction -- see session-start-hook.sh's own comment on
+    REMEMBER_HOOK_CWD), so that is the field name used here."""
+    straddling_value = "y" * 8192  # long enough that its closing quote cannot survive the bound
+    straddling = '{"cwd":"' + straddling_value + '"}'
+    out, elapsed = _run(straddling, "cwd", timeout=10, tmp_path=tmp_path)
+    assert out == "", (
+        f"expected extraction to fail closed (empty) when the value's own "
+        f"closing quote falls past the bound, got a "
+        f"{len(out)}-byte corrupted value instead: {out[:80]!r}..."
+    )
+    assert elapsed < 3.0

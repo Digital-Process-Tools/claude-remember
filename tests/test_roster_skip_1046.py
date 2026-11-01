@@ -39,7 +39,9 @@ test_git_reconcile_mapfile_floor_952.py uses for test_git_reconcile_903.py."""
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -55,6 +57,8 @@ from .test_session_start_prev_session_270 import (
     _startup_project,
     _vouch,
 )
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 pytestmark = pytest.mark.skipif(
     sys.platform == "win32",
@@ -120,4 +124,126 @@ def test_positive_control_a_marked_candidate_is_still_rescued(tmp_path):
     assert PREV in argv, (
         f"expected recovery to rescue the roster-marked session {PREV!r}, "
         f"got {argv!r}"
+    )
+
+
+def test_a_candidate_vouched_only_by_the_legacy_slot_is_still_rescued(tmp_path):
+    """Self-review finding: the guard checked only the capture-alive.d
+    marker, one of capture_was_seen()'s three evidence sources -- not the
+    legacy single-slot file, kept (per that function's own comment) "so the
+    first run after an upgrade -- old file present, new store empty -- is
+    not itself a false positive." The roster-only guard reintroduced that
+    exact false positive for the WRITE path: a session captured under an
+    older plugin version, with only the legacy slot as evidence, would now
+    be wrongly treated as possibly belonging to a different store and
+    declined. Must still be rescued when ONLY the legacy slot vouches."""
+    home, project, remember, _ = _startup_project(tmp_path)
+    (remember / "tmp" / "capture-alive").write_text(PREV)
+    assert not (remember / "tmp" / "capture-alive.d" / PREV).exists(), (
+        "precondition: no .d marker -- only the legacy slot vouches"
+    )
+    (remember / "tmp" / "last-save.json").write_text(json.dumps({"sessions": {}}))
+    record = tmp_path / "save-argv.txt"
+    root = _plugin_root_with_stub_save(tmp_path, record)
+
+    result = _run(
+        _env(home, project, remember, plugin_root=root),
+        _payload(CURRENT),
+        script=root / "scripts" / "session-start-hook.sh",
+    )
+    assert result.returncode == 0, subprocess_failure_detail(result, remember)
+
+    argv = _await_record(record)
+    assert PREV in argv, (
+        f"expected recovery to rescue the legacy-slot-vouched session "
+        f"{PREV!r}, got {argv!r}"
+    )
+
+
+# Unit-tested directly against the shipped function, not through the real
+# hook: a transcript literally named `..jsonl` (or `.jsonl`) is what WOULD
+# strip to the dangerous id "." or ".." -- but bash's glob in
+# `_find_previous_transcript` (`"$dir"/*"$_TRANSCRIPT_SUFFIX"`) never
+# matches a leading-dot filename without `dotglob` set (confirmed: adding
+# such a file to a real SESSIONS_DIR fixture and running the hook end to
+# end, it is simply invisible, never reaching the recovery block at all --
+# the originally-written version of this test passed with or without the
+# sanitization fix below, for that reason, and was rewritten after that
+# was discovered). The glob's own default behaviour is therefore a second,
+# independent line of defense against this specific route today -- but
+# `_remember_recovery_prev_id_vouched` is still worth testing directly,
+# the same way this file already pulls functions verbatim out of a real
+# hook (test_previous_transcript_no_sort_691.py's own convention): a future
+# caller is not guaranteed to reach it only through this one glob (a
+# `dotglob`-enabled environment, a future call site that hands it an id
+# from somewhere else), and capture_was_seen() -- the function this one
+# deliberately mirrors -- already treats the sanitization as load-bearing
+# on its own, not merely incidental to how its one caller happens to glob.
+_VOUCH_DRIVER = """
+%s
+REMEMBER_DIR=$1
+_remember_recovery_prev_id_vouched "$2"
+printf '%%s' "$?"
+"""
+
+
+def _extract_vouched_function() -> str:
+    source = (REPO_ROOT / "scripts" / "capture-gap-check.sh").read_text(encoding="utf-8")
+    marker = "\n_remember_recovery_prev_id_vouched() {\n"
+    start = source.find(marker)
+    assert start != -1, "_remember_recovery_prev_id_vouched not found in capture-gap-check.sh"
+    end = source.index("\n}\n", start) + len("\n}")
+    return source[start + 1 : end]
+
+
+def test_a_malformed_id_is_never_vouched_for_even_with_a_marker_present(tmp_path):
+    """Self-review finding: PREV_ID is a basename off a glob in SESSIONS_DIR
+    with no character-class check of its own
+    (_find_previous_transcript's `id=${f#"$dir"/}; id=${id%.jsonl}`). An
+    unsanitized `-e ".../capture-alive.d/.."` or `.` would be true whenever
+    capture-alive.d itself exists as a directory -- which it will in
+    exactly the cross-store scenario #1046 is about. `.` and `..` must both
+    be refused outright, the same way capture_was_seen() already refuses
+    them for its own roster check."""
+    remember = tmp_path / "remember"
+    (remember / "tmp" / "capture-alive.d").mkdir(parents=True)
+    # The condition that would make an unsanitized `-e .../.` or `-e
+    # .../..` true: capture-alive.d exists, non-empty.
+    (remember / "tmp" / "capture-alive.d" / "some-other-session").write_text("")
+
+    body = _extract_vouched_function()
+    script = _VOUCH_DRIVER % body
+
+    for malformed_id in (".", ".."):
+        result = subprocess.run(
+            ["bash", "-c", script, "bash", str(remember), malformed_id],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+        assert result.stdout.strip() == "1", (
+            f"_remember_recovery_prev_id_vouched({malformed_id!r}) returned "
+            f"exit {result.stdout.strip()!r} (0 = vouched) -- a malformed id "
+            f"must never vouch for itself: {result.stderr}"
+        )
+
+
+def test_a_well_formed_id_with_a_real_marker_is_vouched_for(tmp_path):
+    """Positive control, paired with the must-fire case above: an ordinary
+    well-formed session id with a real marker present must still return
+    vouched (exit 0) -- proving the sanitization only ever rejects the
+    pathological inputs, never a legitimate one."""
+    remember = tmp_path / "remember"
+    (remember / "tmp" / "capture-alive.d").mkdir(parents=True)
+    (remember / "tmp" / "capture-alive.d" / PREV).write_text("")
+
+    body = _extract_vouched_function()
+    script = _VOUCH_DRIVER % body
+
+    result = subprocess.run(
+        ["bash", "-c", script, "bash", str(remember), PREV],
+        capture_output=True, text=True, timeout=10, check=False,
+    )
+    assert result.stdout.strip() == "0", (
+        f"_remember_recovery_prev_id_vouched({PREV!r}) returned exit "
+        f"{result.stdout.strip()!r} (0 = vouched) with a real marker "
+        f"present: {result.stderr}"
     )
