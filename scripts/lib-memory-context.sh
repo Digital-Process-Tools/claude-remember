@@ -501,6 +501,7 @@ _remember_start_cache_manifest_lines() {
 }
 
 _remember_start_cache_context_load() {
+    local LC_ALL=C
     [ "${REMEMBER_START_CACHE:-1}" = "1" ] || return 1
     [ "${SESSION_START_SOURCE:-}" != "compact" ] || return 1
     [ -n "${REMEMBER_DIR:-}" ] || return 1
@@ -583,9 +584,10 @@ unset _REMEMBER_BUDGET_EXCLUDE
 
 _remember_apply_session_start_budget() {
     local _outvar="$1" _max="$2" _text="$3"
+    local LC_ALL=C
+
     if [ -z "$_max" ] || [ "${_max#*[!0-9]}" != "$_max" ]; then return 0; fi
     [ "$_max" -gt 0 ] || return 0
-    local LC_ALL=C
     [ "${#_text}" -gt "$_max" ] || return 0
 
     local _mem _head_len _head _exclude="" _path _next
@@ -593,8 +595,19 @@ _remember_apply_session_start_budget() {
     [ -n "$_mem" ] || return 0
     _head_len=$(( ${#_text} - ${#_mem} ))
     if [ "$_head_len" -lt 0 ] || [ "${_text:$_head_len}" != "$_mem" ]; then
-        log "memory-context" "WARNING: session_start_max_bytes: MEMORY section changed before the budget check -- injected as rendered, over budget"
-        return 0
+        local _cache="${REMEMBER_DIR:-}/tmp/start-context.cache"
+        local _cache_now="" _cache_head_len=-1
+        if [ -n "${REMEMBER_DIR:-}" ] && [ -f "$_cache" ] && [ ! -L "$_cache" ] \
+            && [ -O "$_cache" ] && [ -r "$_cache" ]; then
+            _cache_now="$(<"$_cache")"
+            _cache_head_len=$(( ${#_text} - ${#_cache_now} ))
+        fi
+        if [ "$_cache_head_len" -ge 0 ] && [ "${_text:$_cache_head_len}" = "$_cache_now" ]; then
+            _head_len="$_cache_head_len"
+        else
+            log "memory-context" "WARNING: session_start_max_bytes: MEMORY section changed before the budget check -- injected as rendered, over budget"
+            return 0
+        fi
     fi
     _head="${_text:0:$_head_len}"
 

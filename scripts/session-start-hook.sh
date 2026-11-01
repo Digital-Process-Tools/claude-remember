@@ -62,13 +62,6 @@ _remember_normalize_win_path() {
     printf '%s' "$_in"
 }
 
-_remember_forward_slash() {
-    if [ "$OSTYPE" = msys ] || [ "$OSTYPE" = cygwin ]; then
-        printf '%s' "${1//\\//}"
-    else
-        printf '%s' "$1"
-    fi
-}
 
 _remember_forward_slash_into() {
     if [ "$OSTYPE" = msys ] || [ "$OSTYPE" = cygwin ]; then
@@ -442,7 +435,8 @@ if [ "$_legacy_rd" != "$_legacy_dir" ] && [ "${_legacy_rd#"$_legacy_dir"/}" = "$
 fi
 unset _legacy_dir _legacy_rd
 
-if [ ! -d "$REMEMBER_DIR/logs/autonomous" ] || [ ! -d "$REMEMBER_DIR/tmp" ]; then
+if [ "${REMEMBER_DIR_UNSAFE:-0}" != 1 ] \
+    && { [ ! -d "$REMEMBER_DIR/logs/autonomous" ] || [ ! -d "$REMEMBER_DIR/tmp" ]; }; then
     mkdir -p \
         "$REMEMBER_DIR/tmp" \
         "$REMEMBER_DIR/logs" \
@@ -648,6 +642,16 @@ export MEMORY_PROJECT_DIR
 REMEMBER_DIR=$(_resolve_remember_dir "$_data_dir_raw" "$MEMORY_PROJECT_DIR")
 export REMEMBER_DIR
 
+_remember_lmd_set_dir_unsafe() {
+    local LC_ALL=C
+    REMEMBER_DIR_UNSAFE=1
+    [[ "$REMEMBER_DIR" == *[$'\n\r']* ]] && return
+    [[ "$REMEMBER_DIR" == /* || "$REMEMBER_DIR" == [A-Za-z]:[/\\]* || "$REMEMBER_DIR" == [\\][\\][^\\]* ]] && REMEMBER_DIR_UNSAFE=0
+}
+_remember_lmd_set_dir_unsafe
+export REMEMBER_DIR_UNSAFE
+[ "$REMEMBER_DIR_UNSAFE" = 1 ] && echo "FATAL: unsafe REMEMBER_DIR ($REMEMBER_DIR) -- refusing to mkdir" >&2
+
 _set_store_root "$_data_dir_raw"
 export REMEMBER_STORE_ROOT
 
@@ -839,14 +843,8 @@ __remember_src_lib_memory_dir ${1+"$@"}
 
 
 REMEMBER_LOG_DIR="${REMEMBER_DIR}/logs"
-_remember_log_dir_unsafe() {
-    local LC_ALL=C
-    { [[ "$REMEMBER_DIR" != /* ]] && [[ "$REMEMBER_DIR" != [A-Za-z]:[/\\]* ]]; } \
-        || [[ "$REMEMBER_DIR" == *$'\n'* || "$REMEMBER_DIR" == *$'\r'* ]]
-}
 _REMEMBER_LOG_SINK=""
-if _remember_log_dir_unsafe; then
-    echo "FATAL: unsafe REMEMBER_DIR ($REMEMBER_DIR) -- refusing to mkdir" >&2
+if [ "${REMEMBER_DIR_UNSAFE:-0}" = 1 ]; then
     _REMEMBER_LOG_SINK=/dev/null
 elif [ ! -d "$REMEMBER_LOG_DIR" ] && ! mkdir -p "$REMEMBER_LOG_DIR" 2>/dev/null; then
     echo "FATAL: cannot create $REMEMBER_LOG_DIR" >&2
@@ -1209,7 +1207,11 @@ log() {
     _REMEMBER_LOG_LAST_TIME="$timestamp"
     [ -n "$_REMEMBER_LOG_LAST_EPOCH" ] && _REMEMBER_LOG_LAST_EPOCH="$EPOCHSECONDS"
     message="${timestamp} [${component}] $(printf '%s' "$message" | LC_ALL=C tr '[:cntrl:]' ' ')"
-    echo "$message" >> "$MEMORY_LOG_FILE" 2>/dev/null || echo "$message" >&2
+    if [ -n "$_REMEMBER_LOG_SINK" ] && [ "$MEMORY_LOG_FILE" = "$_REMEMBER_LOG_SINK" ]; then
+        echo "$message" >&2
+    else
+        echo "$message" >> "$MEMORY_LOG_FILE" 2>/dev/null || echo "$message" >&2
+    fi
 }
 
 
@@ -1563,9 +1565,15 @@ _remember_env_cache_publish() {
     _remember_env_cache_path || return 0
 
     local _f="$_REMEMBER_ENV_CACHE_FILE" _t
-    _t=$(mktemp "${_f}.XXXXXX" 2>/dev/null) || return 0
+    _t=""
+    for _ecp_try in 1 2 3; do
+        _t=$(mktemp "${_f}.XXXXXX" 2>/dev/null) && break
+        _t=""
+    done
+    [ -n "$_t" ] || return 0
     local _ecp_mem_proj="${MEMORY_PROJECT_DIR:-}" _c _e
     [ -n "$_ecp_mem_proj" ] || _ecp_mem_proj="$PROJECT_DIR"
+    local _ecp_store_root="${REMEMBER_STORE_ROOT:-}"
     {
         printf '%s=%s\n' \
             CACHE_ENV_PROJECT_DIR "$_REMEMBER_ENV_CACHE_PROJECT_DIR" \
@@ -1573,9 +1581,9 @@ _remember_env_cache_publish() {
             CACHE_ENV_HOME "${HOME:-}" \
             PROJECT_DIR "$PROJECT_DIR" \
             PIPELINE_DIR "$PIPELINE_DIR" \
-            REMEMBER_DIR "$REMEMBER_DIR" \
+            REMEMBER_DIR "${#_ecp_store_root}:${REMEMBER_DIR}" \
             REMEMBER_TZ "${REMEMBER_TZ:-}" \
-            REMEMBER_PROMPT_STAMP "${REMEMBER_PROMPT_STAMP:-full}" \
+            REMEMBER_PROMPT_STAMP "${REMEMBER_PROMPT_STAMP:-full}:${REMEMBER_RECOVERY_ENABLED:-}" \
             REMEMBER_SAVE_COOLDOWN "$REMEMBER_SAVE_COOLDOWN" \
             REMEMBER_DELTA_THRESHOLD "$REMEMBER_DELTA_THRESHOLD" \
             MEMORY_PROJECT_DIR "$_ecp_mem_proj"
@@ -2095,6 +2103,7 @@ _remember_start_cache_manifest_lines() {
 }
 
 _remember_start_cache_context_load() {
+    local LC_ALL=C
     [ "${REMEMBER_START_CACHE:-1}" = "1" ] || return 1
     [ "${SESSION_START_SOURCE:-}" != "compact" ] || return 1
     [ -n "${REMEMBER_DIR:-}" ] || return 1
@@ -2166,9 +2175,10 @@ unset _REMEMBER_BUDGET_EXCLUDE
 
 _remember_apply_session_start_budget() {
     local _outvar="$1" _max="$2" _text="$3"
+    local LC_ALL=C
+
     if [ -z "$_max" ] || [ "${_max#*[!0-9]}" != "$_max" ]; then return 0; fi
     [ "$_max" -gt 0 ] || return 0
-    local LC_ALL=C
     [ "${#_text}" -gt "$_max" ] || return 0
 
     local _mem _head_len _head _exclude="" _path _next
@@ -2176,8 +2186,19 @@ _remember_apply_session_start_budget() {
     [ -n "$_mem" ] || return 0
     _head_len=$(( ${#_text} - ${#_mem} ))
     if [ "$_head_len" -lt 0 ] || [ "${_text:$_head_len}" != "$_mem" ]; then
-        log "memory-context" "WARNING: session_start_max_bytes: MEMORY section changed before the budget check -- injected as rendered, over budget"
-        return 0
+        local _cache="${REMEMBER_DIR:-}/tmp/start-context.cache"
+        local _cache_now="" _cache_head_len=-1
+        if [ -n "${REMEMBER_DIR:-}" ] && [ -f "$_cache" ] && [ ! -L "$_cache" ] \
+            && [ -O "$_cache" ] && [ -r "$_cache" ]; then
+            _cache_now="$(<"$_cache")"
+            _cache_head_len=$(( ${#_text} - ${#_cache_now} ))
+        fi
+        if [ "$_cache_head_len" -ge 0 ] && [ "${_text:$_cache_head_len}" = "$_cache_now" ]; then
+            _head_len="$_cache_head_len"
+        else
+            log "memory-context" "WARNING: session_start_max_bytes: MEMORY section changed before the budget check -- injected as rendered, over budget"
+            return 0
+        fi
     fi
     _head="${_text:0:$_head_len}"
 
@@ -2197,325 +2218,6 @@ _remember_apply_session_start_budget() {
 }
 
 }
-__remember_src_lib_lock() {
-:
-
-[ -n "${_REMEMBER_LIB_LOCK_SOURCED:-}" ] && return 0
-_REMEMBER_LIB_LOCK_SOURCED=1
-
-if sleep 0.001 2>/dev/null; then
-    _LOCK_SLEEP=0.05
-else
-    _LOCK_SLEEP=1
-fi
-
-_lock_self_set() {
-    if [ -n "${BASHPID:-}" ]; then
-        _LOCK_SELF="$BASHPID"
-        return 0
-    fi
-    local _probe
-    _probe=$(mktemp "${TMPDIR:-/tmp}/remember-lockself-XXXXXX" 2>/dev/null) || {
-        _LOCK_SELF="$$"
-        return 0
-    }
-    sh -c 'echo $PPID' > "$_probe" 2>/dev/null
-    _LOCK_SELF=$(cat "$_probe" 2>/dev/null) || true
-    rm -f "$_probe" 2>/dev/null || true
-    [ -n "$_LOCK_SELF" ] && [[ "$_LOCK_SELF" != *[!0-9]* ]] || _LOCK_SELF="$$"
-    return 0
-}
-
-_lock_try_steal() {
-    local _dir="$1" _pid _seen _abandoned _owner _claim
-    _lock_self_set
-    _claim="${_dir}/pid.stealing.${_LOCK_SELF}"
-
-    if [ ! -e "${_dir}/pid" ]; then
-        for _abandoned in "${_dir}"/pid.stealing.*; do
-            [ -e "$_abandoned" ] || continue
-            _owner="${_abandoned##*.}"
-            [[ "$_owner" == *[!0-9]* ]] && continue
-            kill -0 "$_owner" 2>/dev/null && continue
-            if [ ! -e "${_dir}/pid" ]; then
-                mv "$_abandoned" "${_dir}/pid" 2>/dev/null || true
-            else
-                rm -f "$_abandoned" 2>/dev/null || true
-            fi
-        done
-    fi
-
-    _pid=$(cat "${_dir}/pid" 2>/dev/null) || true
-
-    [ -n "$_pid" ] && [[ "$_pid" != *[!0-9]* ]] || return 1
-    kill -0 "$_pid" 2>/dev/null && return 1
-
-    mv "${_dir}/pid" "$_claim" 2>/dev/null || return 1
-
-    _seen=$(cat "$_claim" 2>/dev/null) || true
-    if [ "$_seen" != "$_pid" ]; then
-        mv "$_claim" "${_dir}/pid" 2>/dev/null || true
-        return 1
-    fi
-
-    echo "$_LOCK_SELF" > "${_dir}/pid" 2>/dev/null || true
-    rm -f "$_claim" 2>/dev/null || true
-    return 0
-}
-
-_LOCK_ADOPT_AFTER="${_LOCK_ADOPT_AFTER:-30}"
-
-_lock_dir_age() {
-    local _mtime _now
-    _mtime=$(stat -c %Y "$1" 2>/dev/null) || _mtime=""
-    [ -n "$_mtime" ] && [[ "$_mtime" != *[!0-9]* ]] || _mtime=$(stat -f %m "$1" 2>/dev/null) || _mtime=""
-    [ -n "$_mtime" ] && [[ "$_mtime" != *[!0-9]* ]] || { echo 0; return 0; }
-    _now=$(date +%s)
-    echo $(( _now - 10#$_mtime ))
-}
-
-_lock_try_adopt() {
-    local _dir="$1" _claim _owns_marker=0 _adopted=0
-    [ -e "${_dir}/pid" ] && return 1
-    for _claim in "${_dir}"/pid.stealing.*; do
-        [ -e "$_claim" ] && return 1
-    done
-    [ "$(_lock_dir_age "$_dir")" -lt "$_LOCK_ADOPT_AFTER" ] && return 1
-
-    if ! mkdir "${_dir}/adopt" 2>/dev/null; then
-        [ "$(_lock_dir_age "${_dir}/adopt")" -lt "$_LOCK_ADOPT_AFTER" ] && return 1
-        mv "${_dir}/adopt" "${_dir}/adopt.dead.$$" 2>/dev/null || return 1
-        rm -rf "${_dir}/adopt.dead.$$" 2>/dev/null || true
-    else
-        _owns_marker=1
-    fi
-
-    _lock_self_set
-
-    ( set -o noclobber; echo "$_LOCK_SELF" > "${_dir}/pid" ) 2>/dev/null && _adopted=1
-
-    [ "$_owns_marker" = 1 ] && rmdir "${_dir}/adopt" 2>/dev/null
-    [ "$_adopted" = 1 ] || return 1
-    return 0
-}
-
-_LOCK_TIMING="${REMEMBER_LOCK_TIMING:-0}"
-_LOCK_TIMING_MAX="${REMEMBER_LOCK_TIMING_MAX:-5000}"
-_LOCK_TIMING_PRECISION=""
-_LOCK_TIMING_FILE=""
-_LOCK_TIMING_NOW=0
-_LOCK_TIMING_DISCLOSED=0
-_LOCK_TIMING_SLOTS=()
-_LOCK_TIMING_T0S=()
-_LOCK_TIMING_WAITS=()
-_LOCK_TIMING_IDX=-1
-
-_lock_timing_has_ns_date() {
-    local _n
-    _n=$(date +%s%N 2>/dev/null) || return 1
-    [ -n "$_n" ] && [ "${_n#*[!0-9]}" = "$_n" ] && [ "${#_n}" -ge 16 ]
-}
-
-if [ "$_LOCK_TIMING" = 1 ]; then
-    if [ "${BASH_VERSINFO[0]:-0}" -ge 5 ] && [ -n "${EPOCHREALTIME:-}" ]; then
-        _LOCK_TIMING_PRECISION="us"
-    elif _lock_timing_has_ns_date; then
-        _LOCK_TIMING_PRECISION="ms"
-    else
-        _LOCK_TIMING_PRECISION="s"
-    fi
-fi
-
-
-
-
-
-
-
-
-
-
-
-
-_lock_acquire_impl() {
-    local _dir="$1" _timeout="${2:-0}" _deadline
-    _deadline=$(( $(date +%s) + _timeout ))
-
-    mkdir -p "$(dirname "$_dir")" 2>/dev/null || true
-
-    while :; do
-        if mkdir "$_dir" 2>/dev/null; then
-            _lock_self_set
-            echo "$_LOCK_SELF" > "${_dir}/pid" 2>/dev/null || true
-            return 0
-        fi
-
-        if { [ -e "$_dir" ] || [ -L "$_dir" ]; } && [ ! -d "$_dir" ]; then
-            rm -f "$_dir" 2>/dev/null || true
-            continue
-        elif _lock_try_steal "$_dir"; then
-            return 0
-        elif _lock_try_adopt "$_dir"; then
-            return 0
-        fi
-
-        [ "$(date +%s)" -ge "$_deadline" ] && return 1
-        sleep "$_LOCK_SLEEP"
-    done
-}
-
-
-_lock_release_impl() {
-    local _dir="$1" _pid
-    _pid=$(cat "${_dir}/pid" 2>/dev/null) || true
-
-    _lock_self_set
-    if [ -n "$_pid" ] && [ "$_pid" != "$_LOCK_SELF" ]; then
-        return 1
-    fi
-    rm -rf "$_dir" 2>/dev/null || true
-    return 0
-}
-
-}
-__remember_src_lib_case_divergence() {
-:
-
-[ -n "${_REMEMBER_LIB_CASE_DIVERGENCE_LOADED:-}" ] && return 0
-_REMEMBER_LIB_CASE_DIVERGENCE_LOADED=1
-
-_remember_case_fold_eq() {
-    local _was=0 _rc
-    shopt -q nocasematch && _was=1
-    shopt -s nocasematch
-    [[ "$1" == "$2" ]]
-    _rc=$?
-    [ "$_was" -eq 1 ] || shopt -u nocasematch
-    return $_rc
-}
-
-remember_case_divergence() {
-    REMEMBER_CASE_STATUS="not-applicable"
-    REMEMBER_CASE_RESOLVED=""
-    REMEMBER_CASE_ROOT=""
-    REMEMBER_CASE_DISK_STATE=""
-    REMEMBER_CASE_DISK_REASON=""
-    REMEMBER_CASE_DISK_NAMES=""
-    REMEMBER_CASE_GIT_STATE=""
-    REMEMBER_CASE_GIT_REASON=""
-    REMEMBER_CASE_GIT_NAMES=""
-    REMEMBER_CASE_MESSAGE=""
-
-    [ -n "${REMEMBER_STORE_ROOT:-}" ] || return 0
-    [ -n "${REMEMBER_DIR:-}" ] || return 0
-
-    local _remember_case_div_dir _root _name
-    _remember_case_div_dir=$(_remember_forward_slash "$REMEMBER_DIR")
-    _root="${_remember_case_div_dir%/*}" _name="${_remember_case_div_dir##*/}"
-    [ -n "$_root" ] && [ "$_root" != "$_remember_case_div_dir" ] || return 0
-    [ -n "$_name" ] || return 0
-
-    [ "$_root" != "$(_remember_forward_slash "${PROJECT_DIR:-}")" ] || return 0
-
-    REMEMBER_CASE_RESOLVED="$_name"
-    REMEMBER_CASE_ROOT="$_root"
-
-    _remember_case_probe_disk "$_root" "$_name"
-    _remember_case_probe_git "$_root" "$_name"
-
-    if [ "$REMEMBER_CASE_DISK_STATE" = "diverged" ] || [ "$REMEMBER_CASE_GIT_STATE" = "diverged" ]; then
-        REMEMBER_CASE_STATUS="diverged"
-        _remember_case_compose_message
-    elif [ "$REMEMBER_CASE_DISK_STATE" = "ok" ] && [ "$REMEMBER_CASE_GIT_STATE" = "ok" ]; then
-        REMEMBER_CASE_STATUS="ok"
-    else
-        REMEMBER_CASE_STATUS="unavailable"
-    fi
-    return 0
-}
-
-_remember_case_probe_disk() {
-    local _root="$1" _name="$2" _entry _base
-
-    if [ ! -d "$_root" ] || [ ! -r "$_root" ] || [ ! -x "$_root" ]; then
-        REMEMBER_CASE_DISK_STATE="unavailable"
-        REMEMBER_CASE_DISK_REASON="store-root-unreadable"
-        return 0
-    fi
-
-    for _entry in "$_root"/*; do
-        [ -d "$_entry" ] || continue
-        _base="${_entry##*/}"
-        [ "$_base" = "$_name" ] && continue
-        _remember_case_fold_eq "$_base" "$_name" || continue
-        REMEMBER_CASE_DISK_NAMES="${REMEMBER_CASE_DISK_NAMES:+$REMEMBER_CASE_DISK_NAMES,}$_base"
-    done
-
-    if [ -n "$REMEMBER_CASE_DISK_NAMES" ]; then
-        REMEMBER_CASE_DISK_STATE="diverged"
-    else
-        REMEMBER_CASE_DISK_STATE="ok"
-    fi
-    return 0
-}
-
-_remember_case_probe_git() {
-    local _root="$1" _name="$2" _out _line _matched=0
-
-    if [ ! -e "$_root/.git" ]; then
-        REMEMBER_CASE_GIT_REASON="not-a-repository"
-    elif ! command -v git >/dev/null 2>&1; then
-        REMEMBER_CASE_GIT_REASON="git-not-installed"
-    else
-        _out=$(unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
-               git -C "$_root" ls-tree --name-only HEAD 2>/dev/null) || _out=""
-        [ -n "$_out" ] || REMEMBER_CASE_GIT_REASON="nothing-committed"
-    fi
-    if [ -n "$REMEMBER_CASE_GIT_REASON" ]; then
-        REMEMBER_CASE_GIT_STATE="unavailable"
-        return 0
-    fi
-
-    while IFS= read -r _line; do
-        [ -n "$_line" ] || continue
-        if [ "$_line" = "$_name" ]; then
-            _matched=1
-        elif _remember_case_fold_eq "$_line" "$_name"; then
-            _matched=1
-            REMEMBER_CASE_GIT_NAMES="${REMEMBER_CASE_GIT_NAMES:+$REMEMBER_CASE_GIT_NAMES,}$_line"
-        fi
-    done <<< "$_out"
-
-    if [ -n "$REMEMBER_CASE_GIT_NAMES" ]; then
-        REMEMBER_CASE_GIT_STATE="diverged"
-    elif [ "$_matched" -eq 1 ]; then
-        REMEMBER_CASE_GIT_STATE="ok"
-    else
-        REMEMBER_CASE_GIT_STATE="unavailable"
-        REMEMBER_CASE_GIT_REASON="store-not-tracked"
-    fi
-    return 0
-}
-
-_remember_case_compose_message() {
-    local _lead=""
-
-    if [ "$REMEMBER_CASE_DISK_STATE" = "diverged" ]; then
-        _lead="this store's directory is spelled ${REMEMBER_CASE_DISK_NAMES} where this plugin resolves it as ${REMEMBER_CASE_RESOLVED}"
-    fi
-    if [ "$REMEMBER_CASE_GIT_STATE" = "diverged" ]; then
-        if [ -n "$_lead" ]; then
-            _lead="$_lead, and its backup repository tracks it as ${REMEMBER_CASE_GIT_NAMES}"
-        else
-            _lead="this store's backup repository tracks it as ${REMEMBER_CASE_GIT_NAMES} where this plugin resolves it as ${REMEMBER_CASE_RESOLVED}"
-        fi
-    fi
-
-    REMEMBER_CASE_MESSAGE="remember: ${_lead} -- spellings that differ only in case. Harmless on this case-insensitive filesystem, so nothing to fix today; restored onto a case-sensitive one they become separate directories and this plugin would use only ${REMEMBER_CASE_RESOLVED}. Nothing will be renamed or merged for you -- check which spellings your backup's HEAD holds before such a restore. /remember:doctor shows this again."
-    return 0
-}
-
-}
 
 _HOOK_DIR="${BASH_SOURCE[0]%/*}"
 [ "$_HOOK_DIR" = "${BASH_SOURCE[0]}" ] && _HOOK_DIR="$(pwd)"
@@ -2532,24 +2234,51 @@ _remember_hook_clock_into() {
 _REMEMBER_HOOK_T0=""
 _remember_hook_clock_into _REMEMBER_HOOK_T0
 
+_REMEMBER_HOOK_STDIN_CAP=32768
 HOOK_STDIN=""
+_hook_stdin_truncated=0
+_hook_stdin_lc_all_was_set=0
+if [ "${LC_ALL+set}" = set ]; then
+    _hook_stdin_lc_all_was_set=1
+    _hook_stdin_prior_lc_all="$LC_ALL"
+fi
+LC_ALL=C
 if [ ! -t 0 ]; then
     _line=""
     while IFS= read -r -t 1 _line || [ -n "$_line" ]; do
-        HOOK_STDIN="$HOOK_STDIN$_line"
+        if [ "$_hook_stdin_truncated" -eq 0 ]; then
+            HOOK_STDIN="$HOOK_STDIN$_line"
+            if [ "${#HOOK_STDIN}" -gt "$_REMEMBER_HOOK_STDIN_CAP" ]; then
+                HOOK_STDIN=${HOOK_STDIN:0:$_REMEMBER_HOOK_STDIN_CAP}
+                _hook_stdin_truncated=1
+                break
+            fi
+        fi
         _line=""
     done
+    if [ "$_hook_stdin_truncated" -eq 1 ]; then
+        cat <&0 >/dev/null 2>&1 3>&- & disown 2>/dev/null || true
+    fi
 fi
+if [ "$_hook_stdin_lc_all_was_set" -eq 1 ]; then
+    LC_ALL="$_hook_stdin_prior_lc_all"
+else
+    unset LC_ALL
+fi
+unset _hook_stdin_lc_all_was_set _hook_stdin_prior_lc_all
 
 _stdin_json_string_into() {
+    local LC_ALL=C
     local _sjsi_var="$1" _sjsi_field="$2" _sjsi_raw="$3" _sjsi_rest _sjsi_prefix _sjsi_value _sjsi_dq
     printf -v "$_sjsi_var" '%s' ""
+    [ "${#_sjsi_raw}" -gt 4096 ] && _sjsi_raw=${_sjsi_raw:0:4096}
     printf -v _sjsi_dq '\042'
     [[ "$_sjsi_raw" == *"$_sjsi_dq$_sjsi_field$_sjsi_dq"* ]] || return 1
     _sjsi_rest=${_sjsi_raw#*"$_sjsi_dq"$_sjsi_field"$_sjsi_dq"}
     _sjsi_prefix=${_sjsi_rest%%"$_sjsi_dq"*}
     if [[ "$_sjsi_prefix" == *[!:[:space:]]* ]]; then return 1; fi
     _sjsi_value=${_sjsi_rest#*"$_sjsi_dq"}
+    [[ "$_sjsi_value" == *"$_sjsi_dq"* ]] || return 1
     _sjsi_value=${_sjsi_value%%"$_sjsi_dq"*}
     _sjsi_value=${_sjsi_value//\\\\/\\}
     [ -n "$_sjsi_value" ] || return 1
@@ -2582,6 +2311,10 @@ REMEMBER_SESSION_START_SLOW_S=""
 config_into REMEMBER_SESSION_START_SLOW_S ".session_start_slow_threshold_s" "5"
 _remember_is_uint "$REMEMBER_SESSION_START_SLOW_S" || REMEMBER_SESSION_START_SLOW_S=5
 
+REMEMBER_RECOVERY_ENABLED=""
+config_into REMEMBER_RECOVERY_ENABLED ".features.recovery" true
+export REMEMBER_RECOVERY_ENABLED
+
 __remember_src_lib_env_cache ${1+"$@"}
 _remember_env_cache_publish
 
@@ -2591,6 +2324,13 @@ _stdin_json_string_into CURRENT_SESSION_ID session_id "$HOOK_STDIN" 2>/dev/null
 if [ -z "${CURRENT_SESSION_ID#.}" ] || [ -z "${CURRENT_SESSION_ID#..}" ] \
     || [[ "$CURRENT_SESSION_ID" == *[!A-Za-z0-9._-]* ]]; then
     CURRENT_SESSION_ID=""
+fi
+
+if [ "${REMEMBER_DIR_UNSAFE:-0}" != 1 ] && [ -n "$REMEMBER_DIR" ] && [ -n "$CURRENT_SESSION_ID" ]; then
+    if [ -d "$REMEMBER_DIR/tmp/session-started.d" ] \
+        || mkdir -p "$REMEMBER_DIR/tmp/session-started.d" 2>/dev/null; then
+        : > "$REMEMBER_DIR/tmp/session-started.d/$CURRENT_SESSION_ID" 2>/dev/null
+    fi
 fi
 
 _stdin_json_string_into REMEMBER_TRANSCRIPT_PATH transcript_path "$HOOK_STDIN" 2>/dev/null
@@ -2607,7 +2347,6 @@ if [ "$SESSION_START_SOURCE" != startup ] && [ "$SESSION_START_SOURCE" != resume
     SESSION_START_SOURCE=""
 fi
 
-REMEMBER_HOOK_STDIN_MAX=32768
 _hook_stdin_file=""
 
 _session_start_listener() {
@@ -2627,7 +2366,7 @@ if [ -n "$HOOK_STDIN" ] && _session_start_listener; then
         rm -f "$_hook_stdin_file" 2>/dev/null
         _hook_stdin_file=""
     fi
-    if [ "${#HOOK_STDIN}" -le "$REMEMBER_HOOK_STDIN_MAX" ]; then
+    if [ "$_hook_stdin_truncated" -eq 0 ]; then
         export REMEMBER_HOOK_STDIN="$HOOK_STDIN"
     else
         export REMEMBER_HOOK_STDIN=""
@@ -2665,334 +2404,44 @@ unset _remember_defer_dispatch
 
 rm -f "$REMEMBER_DIR/tmp/save-session.pid"
 
-LAST_SAVE_FILE="$REMEMBER_DIR/tmp/last-save.json"
-SAVED_QUERY='def isline: type == "number" and ((isnan or isinfinite) | not) and . == floor; if (((.sessions // {})[$id]) | isline) or (.session == $id and (.line | isline)) then "saved" else "unsaved" end'
-
-session_was_saved() {
-    [ -n "$1" ] && [ -f "$LAST_SAVE_FILE" ] || return 1
-    if [ "$JQ" = "_jq_fallback" ]; then
-        _remember_python || return 1
-        [ "$(_remember_run_python "$_HOOK_DIR/session_saved.py" "$LAST_SAVE_FILE" "$1" 2>/dev/null)" = "saved" ]
-    else
-        [ "$(_remember_run_jq -r --arg id "$1" "$SAVED_QUERY" "$LAST_SAVE_FILE" 2>/dev/null)" = "saved" ]
-    fi
-}
 
 PROJECT_PATH_SLUG="$(session_dir_slug "$PROJECT")"
 SESSIONS_DIR="$(claude_projects_dir)/${PROJECT_PATH_SLUG}"
 
-_remember_write_slug_record() {
-    local _dir="$REMEMBER_DIR/tmp" _tmp
-    [ -d "$_dir" ] || mkdir -p "$_dir" 2>/dev/null || return 0
-    _tmp="$_dir/session-slug.$$"
 
-    local _reason=""
-    if [ -z "$PROJECT_PATH_SLUG" ]; then
-        _reason="empty-slug"
-    else
-        local _paths_joined="${PROJECT}${SESSIONS_DIR}${REMEMBER_DIR}"
-        if [[ "$_paths_joined" == *$'\n'* ]]; then
-            _reason="unrepresentable-path"
-        fi
-    fi
-
-    if [ -n "$_reason" ]; then
-        printf 'format=1\nstatus=unavailable\nreason=%s\n' "$_reason" \
-            > "$_tmp" 2>/dev/null || { rm -f "$_tmp" 2>/dev/null; return 0; }
-    else
-        {
-            printf '%s=%s\n' format 1 status ok project_dir "$PROJECT" slug "$PROJECT_PATH_SLUG" \
-                sessions_dir "$SESSIONS_DIR" memory_dir "$REMEMBER_DIR"
-            [ -z "$CURRENT_SESSION_ID" ] || printf 'session_id=%s\n' "$CURRENT_SESSION_ID"
-        } > "$_tmp" 2>/dev/null || { rm -f "$_tmp" 2>/dev/null; return 0; }
-    fi
-
-    mv -f "$_tmp" "$_dir/session-slug" 2>/dev/null || rm -f "$_tmp" 2>/dev/null
-    return 0
+_remember_pid_is_alive() {
+    kill -0 "$1" 2>/dev/null
 }
 
-SLUG_INDEX_LOCK_TIMEOUT=2
-SLUG_INDEX_MAX_ROWS=1000
-_remember_write_slug_index() {
-    [ -n "${REMEMBER_STORE_ROOT:-}" ] || return 0
-    [ "$REMEMBER_STORE_ROOT" != "$REMEMBER_DIR" ] || return 0
-    [ -n "$PROJECT_PATH_SLUG" ] || return 0
-
-    local _paths_joined="${PROJECT}${REMEMBER_DIR}"
-    if [[ "$_paths_joined" == *$'\n'* ]] || [[ "$_paths_joined" == *$'\t'* ]]; then
-        return 0
-    fi
-
-    local _dir="$REMEMBER_STORE_ROOT/tmp"
-    [ -d "$_dir" ] || mkdir -p "$_dir" 2>/dev/null || return 0
-
-    local _index="$_dir/sessions" _lock="$_dir/sessions.lock" _tmp
-
-    __remember_src_lib_lock ${1+"$@"} 2>/dev/null || return 0
-    command -v _lock_acquire_impl >/dev/null 2>&1 || return 0
-    _lock_acquire_impl "$_lock" "$SLUG_INDEX_LOCK_TIMEOUT" || return 0
-
-    _tmp="$_index.$$"
-    {
-        printf 'format=1\n'
-        if [ -f "$_index" ]; then
-            awk -v self="$PROJECT" -v max="$((SLUG_INDEX_MAX_ROWS - 1))" '
-                NR == 1 { if ($0 != "format=1") exit 0; next }
-                $0 == "" { next }
-                {
-                    n = index($0, "\tproject_dir=")
-                    if (n == 0) next
-                    if (substr($0, n + 13) == self) next
-                    rows[++c] = $0
-                }
-                END {
-                    start = (c > max) ? c - max + 1 : 1
-                    for (i = start; i <= c; i++) print rows[i]
-                }
-            ' "$_index" 2>/dev/null
+_remember_deferred_already_running() {
+    local _f="$REMEMBER_DIR/tmp/deferred-${CURRENT_SESSION_ID:-_}.pid" _pid _mtime _now
+    [ -f "$_f" ] || return 1
+    read -r _pid < "$_f" 2>/dev/null
+    [ -n "$_pid" ] && [[ "$_pid" != *[!0-9]* ]] || { rm -f "$_f" 2>/dev/null; return 1; }
+    _mtime=$(stat -c %Y "$_f" 2>/dev/null) || _mtime=""
+    [ -n "$_mtime" ] && [[ "$_mtime" != *[!0-9]* ]] || _mtime=$(stat -f %m "$_f" 2>/dev/null) || _mtime=""
+    if [ -n "$_mtime" ] && [[ "$_mtime" != *[!0-9]* ]]; then
+        _now=$(date +%s)
+        if [ $(( 10#$_now - 10#$_mtime )) -ge "${REMEMBER_DEFERRED_PID_MAX_AGE:-900}" ]; then
+            rm -f "$_f" 2>/dev/null
+            return 1
         fi
-        printf 'status=ok\tslug=%s\tmemory_dir=%s\tproject_dir=%s\n' \
-            "$PROJECT_PATH_SLUG" "$REMEMBER_DIR" "$PROJECT"
-    } > "$_tmp" 2>/dev/null || {
-        rm -f "$_tmp" 2>/dev/null
-        _lock_release_impl "$_lock" 2>/dev/null
-        return 0
-    }
-
-    mv -f "$_tmp" "$_index" 2>/dev/null || rm -f "$_tmp" 2>/dev/null
-    _lock_release_impl "$_lock" 2>/dev/null
-    return 0
-}
-
-_remember_write_case_divergence() {
-    __remember_src_lib_case_divergence ${1+"$@"} 2>/dev/null || return 0
-    command -v remember_case_divergence >/dev/null 2>&1 || return 0
-    remember_case_divergence
-
-    local _dir="$REMEMBER_DIR/tmp" _tmp _old="" _body="" NL=$'\n'
-
-    _body="format=1${NL}status=$REMEMBER_CASE_STATUS"
-    if [ "$REMEMBER_CASE_STATUS" != "not-applicable" ]; then
-        _body="$_body${NL}resolved=$REMEMBER_CASE_RESOLVED${NL}store_root=$REMEMBER_CASE_ROOT"
-        _body="$_body${NL}disk_state=$REMEMBER_CASE_DISK_STATE"
-        _body="$_body${REMEMBER_CASE_DISK_REASON:+${NL}disk_reason=$REMEMBER_CASE_DISK_REASON}"
-        _body="$_body${REMEMBER_CASE_DISK_NAMES:+${NL}disk_names=$REMEMBER_CASE_DISK_NAMES}"
-        _body="$_body${NL}git_state=$REMEMBER_CASE_GIT_STATE"
-        _body="$_body${REMEMBER_CASE_GIT_REASON:+${NL}git_reason=$REMEMBER_CASE_GIT_REASON}"
-        _body="$_body${REMEMBER_CASE_GIT_NAMES:+${NL}git_names=$REMEMBER_CASE_GIT_NAMES}"
     fi
-
-    if [ -f "$_dir/case-divergence" ]; then
-        local _pline
-        while IFS= read -r _pline; do
-            _old="${_old:+$_old$NL}$_pline"
-        done < "$_dir/case-divergence"
-    fi
-
-    if [ "$_old" != "$_body" ]; then
-        [ -d "$_dir" ] || mkdir -p "$_dir" 2>/dev/null || return 0
-        _tmp="$_dir/case-divergence.$$"
-        printf '%s\n' "$_body" > "$_tmp" 2>/dev/null \
-            || { rm -f "$_tmp" 2>/dev/null; return 0; }
-        mv -f "$_tmp" "$_dir/case-divergence" 2>/dev/null || rm -f "$_tmp" 2>/dev/null
-    fi
-
-    if [ "$REMEMBER_CASE_STATUS" = diverged ]; then
-        log "case-divergence" "$REMEMBER_CASE_MESSAGE"
-        [ "$_old" = "$_body" ] && return 0
-        printf '%s\n' "$REMEMBER_CASE_MESSAGE" \
-            > "$_dir/case-divergence-notice" 2>/dev/null || true
-    elif [ "$REMEMBER_CASE_STATUS" = unavailable ]; then
-        [ "$_old" = "$_body" ] && return 0
-        log "case-divergence" "could not check for a second spelling of this store (disk=$REMEMBER_CASE_DISK_STATE${REMEMBER_CASE_DISK_REASON:+/$REMEMBER_CASE_DISK_REASON} git=$REMEMBER_CASE_GIT_STATE${REMEMBER_CASE_GIT_REASON:+/$REMEMBER_CASE_GIT_REASON}) -- not a report that they agree"
-    fi
-    return 0
-}
-
-_ENTRYPOINT_SNIFF_CAP=50
-_transcript_is_pluginless_sdk() {
-    local f=$1 n=0 line ep rest prefix is_dialogue dq
-    printf -v dq '\042'
-    while IFS= read -r line; do
-        n=$((n + 1))
-        is_dialogue=0
-        rest=${line#*"$dq"message"$dq"}
-        if [ "$rest" != "$line" ]; then
-            prefix=${rest%%"$dq"*}
-            if [[ "$prefix" == *[!:[:space:]]* ]]; then
-                is_dialogue=1
-            fi
-        fi
-        if [ "$is_dialogue" -eq 0 ]; then
-            if [ "${line#*"$dq"entrypoint"$dq"}" != "$line" ]; then
-                _stdin_json_string_into ep entrypoint "$line" 2>/dev/null || return 1
-                if [ "${ep#sdk-}" != "$ep" ]; then
-                    return 0
-                else
-                    return 1
-                fi
-            fi
-        fi
-        [ "$n" -ge "$_ENTRYPOINT_SNIFF_CAP" ] && return 1
-    done < "$f" 2>/dev/null
+    _remember_pid_is_alive "$_pid" && return 0
+    rm -f "$_f" 2>/dev/null
     return 1
-}
-
-_PREV_TRANSCRIPT_EXCLUDE_CAP="${_PREV_TRANSCRIPT_EXCLUDE_CAP:-20}"
-
-_TRANSCRIPT_SUFFIX=.jsonl
-
-_find_previous_transcript() {
-    local dir=$1 own_id=$2 floor="" before_floor tries=0 f id
-    local assume_newest_is_ours=""
-    local -a files
-    [ -z "$own_id" ] && assume_newest_is_ours=1
-    files=("$dir"/*"$_TRANSCRIPT_SUFFIX")
-    while :; do
-        PREV_JSONL="" PREV_ID="" before_floor=1
-        for f in "${files[@]}"; do
-            [ -e "$f" ] || continue
-            if [ -n "$floor" ]; then
-                if [ "$f" = "$floor" ]; then
-                    before_floor=""
-                    continue
-                fi
-                [ "$f" -nt "$floor" ] && continue
-                [ -n "$before_floor" ] && ! [ "$floor" -nt "$f" ] && continue
-            fi
-            id=${f#"$dir"/}
-            id=${id%"$_TRANSCRIPT_SUFFIX"}
-            [ -n "$own_id" ] && [ "$id" = "$own_id" ] && continue
-            if [ -z "$PREV_JSONL" ] || [ "$f" -nt "$PREV_JSONL" ]; then
-                PREV_JSONL=$f
-                PREV_ID=$id
-            fi
-        done
-        [ -z "$PREV_JSONL" ] && return 0
-        if [ -n "$assume_newest_is_ours" ]; then
-            assume_newest_is_ours=""
-        elif _transcript_is_pluginless_sdk "$PREV_JSONL"; then
-            tries=$((tries + 1))
-            if [ "$tries" -ge "${_PREV_TRANSCRIPT_EXCLUDE_CAP:-20}" ]; then
-                log "hook" "WARNING: _find_previous_transcript gave up after ${_PREV_TRANSCRIPT_EXCLUDE_CAP:-20} pluginless-SDK exclusions in $dir -- recovery and the #200 capture-gap check treat this as no previous session"
-                PREV_JSONL="" PREV_ID=""
-                return 0
-            fi
-        else
-            return 0
-        fi
-        floor=$PREV_JSONL
-    done
-}
-
-_remember_deferred_phase() {
-local -x _REMEMBER_PHASE=deferred
-
-_remember_write_slug_record
-_remember_write_slug_index
-_remember_write_case_divergence
-
-_find_previous_transcript "$SESSIONS_DIR" "$CURRENT_SESSION_ID"
-
-PREV_WAS_SAVED="no"
-if [ -n "$PREV_ID" ] && session_was_saved "$PREV_ID"; then
-    PREV_WAS_SAVED="yes"
-fi
-
-_recovery_enabled=""
-config_into _recovery_enabled '.features.recovery' true
-_recovery_attempted=""
-if [ "$_recovery_enabled" = "true" ]; then
-if [ -d "$SESSIONS_DIR" ] && [ -f "$LAST_SAVE_FILE" ] && [ -n "$PREV_ID" ]; then
-    if [ "$PREV_WAS_SAVED" = "no" ]; then
-        ( unset REMEMBER_TRANSCRIPT_PATH; "$PLUGIN_ROOT/scripts/save-session.sh" "$PREV_ID" --force ) </dev/null >/dev/null 2>&1 & disown 2>/dev/null || true
-        _recovery_attempted="true"
-    fi
-fi
-fi
-
-CAPTURE_ALIVE="$REMEMBER_DIR/tmp/capture-alive"
-CAPTURE_SEEN_DIR="$REMEMBER_DIR/tmp/capture-alive.d"
-CAPTURE_REPORTED="$REMEMBER_DIR/tmp/capture-gap-reported"
-CAPTURE_SEEN_KEEP=200
-
-SEEN_ID=""
-[ -f "$CAPTURE_ALIVE" ] && SEEN_ID=$(<"$CAPTURE_ALIVE")
-
-capture_was_seen() {
-    local LC_ALL=C
-    local _d _ok
-    [ -n "$1" ] || return 1
-    printf -v _d '\056'
-    _ok="^[A-Za-z0-9${_d}_-]*\$"
-    if [ "$1" = "$_d" ] || [ "$1" = "$_d$_d" ]; then
-        :
-    elif ! [[ "$1" =~ $_ok ]]; then
-        :
-    else
-        [ -e "$CAPTURE_SEEN_DIR/$1" ] && return 0
-    fi
-    [ "$SEEN_ID" = "$1" ] && return 0
-    [ "$1" = "$PREV_ID" ] && [ "$PREV_WAS_SAVED" = "yes" ] && return 0
-    [ "$1" != "$PREV_ID" ] && session_was_saved "$1" && return 0
-    return 1
-}
-
-_remember_prune_keep_newest() {
-    local dir=$1 keep=$2 f n=0 oldest nl skip
-    printf -v nl '\n'
-    skip=$nl
-    for f in "$dir"/*; do
-        [ -e "$f" ] && n=$((n + 1))
-    done
-    while [ "$n" -gt "$keep" ]; do
-        oldest=""
-        for f in "$dir"/*; do
-            [ -e "$f" ] || continue
-            [[ "$skip" == *"$nl$f$nl"* ]] && continue
-            if [ -z "$oldest" ] || ! [ "$f" -nt "$oldest" ]; then
-                oldest=$f
-            fi
-        done
-        [ -n "$oldest" ] || break
-        rm -f "$oldest" 2>/dev/null
-        [ -e "$oldest" ] && skip="$skip$oldest$nl"
-        n=$((n - 1))
-    done
-    return 0
-}
-_remember_prune_keep_newest "$CAPTURE_SEEN_DIR" "$CAPTURE_SEEN_KEEP"
-
-CAPTURE_SKIPPED="$REMEMBER_DIR/tmp/capture-gap-skipped"
-
-if [ -z "$CURRENT_SESSION_ID" ]; then
-    printf '%s\n' "the SessionStart payload carried no usable session_id" \
-        > "$CAPTURE_SKIPPED" 2>/dev/null || true
-    log "hook" "session-start: capture-gap check skipped -- no session_id on stdin"
-else
-    rm -f "$CAPTURE_SKIPPED" 2>/dev/null || true
-
-    REPORTED_ID=""
-    [ -f "$CAPTURE_REPORTED" ] && REPORTED_ID=$(<"$CAPTURE_REPORTED")
-
-    if [ -n "$PREV_ID" ] && [ "$REPORTED_ID" != "$PREV_ID" ] \
-       && ! capture_was_seen "$PREV_ID" \
-       && grep -q '"tool_use"' "$PREV_JSONL" 2>/dev/null; then
-        _capture_gap_notice="remember: your previous session was not captured. If you just installed or enabled the plugin, that is expected -- capture starts now. Otherwise its hooks were not registered for that session; run /remember:doctor."
-        if [ "$_recovery_attempted" = "true" ]; then
-            _capture_gap_notice="remember: your previous session was not captured live -- its hooks did not run. It is being recovered from its transcript now, so nothing should be lost; if this keeps happening for interactive sessions, run /remember:doctor."
-        fi
-        echo "$_capture_gap_notice" \
-            > "$REMEMBER_DIR/tmp/capture-gap-notice" 2>/dev/null || true
-        printf '%s' "$PREV_ID" > "$CAPTURE_REPORTED" 2>/dev/null || true
-    fi
-fi
 }
 
 if [ "${REMEMBER_DEFER:-1}" = "0" ]; then
-    _remember_deferred_phase
+    "$PLUGIN_ROOT/scripts/capture-gap-check.sh" "$CURRENT_SESSION_ID"
+elif [ -n "$CURRENT_SESSION_ID" ] && _remember_deferred_already_running; then
+    : # #1060: another deferred phase for THIS session is still alive -- skip
 else
-    _remember_deferred_phase </dev/null >/dev/null 2>&1 3>&- & disown 2>/dev/null || true
+    "$PLUGIN_ROOT/scripts/capture-gap-check.sh" "$CURRENT_SESSION_ID" </dev/null >/dev/null 2>&1 3>&- &
+    if [ -n "$CURRENT_SESSION_ID" ]; then
+        printf '%s' "$!" > "$REMEMBER_DIR/tmp/deferred-${CURRENT_SESSION_ID}.pid" 2>/dev/null || true
+    fi
+    disown 2>/dev/null || true
 fi
 
 _remember_memory_paths
@@ -3008,11 +2457,33 @@ else
     [ "$HANDOFF_MODE" = "per_session" ] && HANDOFF_MODE_DEGRADED="true"
 fi
 
-[ -d "$REMEMBER_DIR/tmp" ] || mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null
+[ "${REMEMBER_DIR_UNSAFE:-0}" = 1 ] || [ -d "$REMEMBER_DIR/tmp" ] || mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null
 printf '%s\n' "$REMEMBER_HANDOFF" > "$REMEMBER_DIR/tmp/handoff-path" 2>/dev/null
 
 if [ -n "$CURRENT_SESSION_ID" ]; then
     printf '%s\n' "$REMEMBER_HANDOFF" > "$REMEMBER_DIR/tmp/handoff-path.$CURRENT_SESSION_ID" 2>/dev/null
+fi
+
+if [ -n "$CURRENT_SESSION_ID" ]; then
+    _REMEMBER_SESSION_STORE_DIR="$HOME/.remember/tmp/session-store"
+    _REMEMBER_SESSION_STORE_WRITTEN=0
+    [ "${REMEMBER_DIR_UNSAFE:-0}" = 1 ] || [ -d "$_REMEMBER_SESSION_STORE_DIR" ] || mkdir -p "$_REMEMBER_SESSION_STORE_DIR" 2>/dev/null
+    if [ "${REMEMBER_DIR_UNSAFE:-0}" != 1 ] && [ -d "$_REMEMBER_SESSION_STORE_DIR" ]; then
+        _REMEMBER_SESSION_STORE_TMP=$(mktemp "$_REMEMBER_SESSION_STORE_DIR/.tmp-XXXXXX" 2>/dev/null) || _REMEMBER_SESSION_STORE_TMP=""
+        if [ -n "$_REMEMBER_SESSION_STORE_TMP" ]; then
+            if printf '%s\n' "$REMEMBER_DIR" > "$_REMEMBER_SESSION_STORE_TMP" 2>/dev/null \
+                && mv -f "$_REMEMBER_SESSION_STORE_TMP" "$_REMEMBER_SESSION_STORE_DIR/$CURRENT_SESSION_ID" 2>/dev/null; then
+                _REMEMBER_SESSION_STORE_WRITTEN=1
+            else
+                rm -f "$_REMEMBER_SESSION_STORE_TMP" 2>/dev/null
+            fi
+        fi
+        unset _REMEMBER_SESSION_STORE_TMP
+    fi
+    if [ "$_REMEMBER_SESSION_STORE_WRITTEN" != 1 ]; then
+        rm -f "$_REMEMBER_SESSION_STORE_DIR/$CURRENT_SESSION_ID" 2>/dev/null
+    fi
+    unset _REMEMBER_SESSION_STORE_DIR _REMEMBER_SESSION_STORE_WRITTEN
 fi
 
 PROMO_MSG=""
@@ -3149,7 +2620,7 @@ fi
 
 _REMEMBER_CTX_FILE="$REMEMBER_DIR/tmp/session-start-ctx.$$"
 _REMEMBER_CTX_OK=""
-[ -d "$REMEMBER_DIR/tmp" ] || mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null
+[ "${REMEMBER_DIR_UNSAFE:-0}" = 1 ] || [ -d "$REMEMBER_DIR/tmp" ] || mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null
 if ! [[ "$-" == *x* ]] && [ "${REMEMBER_TRACE:-}" != "1" ] && : > "$_REMEMBER_CTX_FILE" 2>/dev/null; then
     exec 3>&1
     exec > "$_REMEMBER_CTX_FILE"
@@ -3278,6 +2749,42 @@ if [ -d "$SESSIONS_DIR" ] && [ -d "$REMEMBER_DIR/tmp" ]; then
     _remember_prune_stale_session_files remember.delivered
     _remember_prune_stale_session_files handoff-path
 fi
+
+_remember_prune_stale_session_store_pointers() {
+    local _ss_dir="${HOME}/.remember/tmp/session-store" _file _id _mtime _now
+    local _max_age="${REMEMBER_SESSION_STORE_POINTER_MAX_AGE_S:-604800}"
+    [[ "$_max_age" == *[!0-9]* ]] && _max_age=604800
+    [ -d "$_ss_dir" ] || return 0
+    for _file in "$_ss_dir"/*; do
+        [ -f "$_file" ] || continue
+        _id="${_file##*/}"
+        [ -n "$_id" ] || continue
+        [ "${_id#.tmp-}" != "$_id" ] && continue
+        [ "$_id" = "$CURRENT_SESSION_ID" ] && continue
+        _mtime=$(stat -c %Y "$_file" 2>/dev/null) \
+            || _mtime=$(stat -f %m "$_file" 2>/dev/null) \
+            || _mtime=""
+        if [ -z "$_mtime" ] || [[ "$_mtime" == *[!0-9]* ]]; then
+            continue
+        fi
+        _now=""
+        _remember_date_into _now +%s
+        if [ -z "$_now" ] || [[ "$_now" == *[!0-9]* ]]; then
+            continue
+        fi
+        if [ "$_now" -gt 0 ] && [ "$_mtime" -gt 0 ] \
+            && [ $((10#$_now - 10#$_mtime)) -lt "$_max_age" ]; then
+            continue
+        fi
+        rm -f "$_file" 2>/dev/null
+    done
+    return 0
+}
+
+{
+    export _REMEMBER_PHASE=deferred
+    _remember_prune_stale_session_store_pointers
+} </dev/null >/dev/null 2>&1 3>&- & disown 2>/dev/null || true
 unset GRACE_MIN
 
 if [ -f "$PLUGIN_ROOT/prompts/session-history-hint.txt" ]; then
@@ -3288,7 +2795,8 @@ echo ""
 
 if ! _remember_start_cache_context_load; then
     _REMEMBER_START_CTX_TMP=""
-    if [ -n "${REMEMBER_DIR:-}" ] && [ "${REMEMBER_START_CACHE:-1}" = "1" ] \
+    if [ -n "${REMEMBER_DIR:-}" ] && [ "${REMEMBER_DIR_UNSAFE:-0}" != 1 ] \
+       && [ "${REMEMBER_START_CACHE:-1}" = "1" ] \
        && [ "$SESSION_START_SOURCE" != "compact" ] \
        && { [ -d "$REMEMBER_DIR/tmp" ] || mkdir -p "$REMEMBER_DIR/tmp" 2>/dev/null; }; then
         _REMEMBER_START_CTX_TMP=$(mktemp "$REMEMBER_DIR/tmp/start-context.cache.XXXXXX" 2>/dev/null) || _REMEMBER_START_CTX_TMP=""
@@ -3328,7 +2836,7 @@ unset _remember_staging_file
 if [ "$STAGING_COUNT" -gt 0 ] && [ "$SESSION_START_SOURCE" != "compact" ]; then
     echo "=== MEMORY CONSOLIDATION ==="
     echo "$STAGING_COUNT day(s) of memory to compress. Running consolidation in background..."
-    nohup "$PLUGIN_ROOT/scripts/run-consolidation.sh" </dev/null >/dev/null 2>&1 3>&- & disown 2>/dev/null || true
+    "$PLUGIN_ROOT/scripts/consolidation-launch.sh" "$PLUGIN_ROOT/scripts/run-consolidation.sh" 3>&- &
     echo ""
 fi
 

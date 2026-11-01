@@ -484,7 +484,8 @@ if [ "$_legacy_rd" != "$_legacy_dir" ] && [ "${_legacy_rd#"$_legacy_dir"/}" = "$
 fi
 unset _legacy_dir _legacy_rd
 
-if [ ! -d "$REMEMBER_DIR/logs/autonomous" ] || [ ! -d "$REMEMBER_DIR/tmp" ]; then
+if [ "${REMEMBER_DIR_UNSAFE:-0}" != 1 ] \
+    && { [ ! -d "$REMEMBER_DIR/logs/autonomous" ] || [ ! -d "$REMEMBER_DIR/tmp" ]; }; then
     mkdir -p \
         "$REMEMBER_DIR/tmp" \
         "$REMEMBER_DIR/logs" \
@@ -690,6 +691,16 @@ export MEMORY_PROJECT_DIR
 REMEMBER_DIR=$(_resolve_remember_dir "$_data_dir_raw" "$MEMORY_PROJECT_DIR")
 export REMEMBER_DIR
 
+_remember_lmd_set_dir_unsafe() {
+    local LC_ALL=C
+    REMEMBER_DIR_UNSAFE=1
+    [[ "$REMEMBER_DIR" == *[$'\n\r']* ]] && return
+    [[ "$REMEMBER_DIR" == /* || "$REMEMBER_DIR" == [A-Za-z]:[/\\]* || "$REMEMBER_DIR" == [\\][\\][^\\]* ]] && REMEMBER_DIR_UNSAFE=0
+}
+_remember_lmd_set_dir_unsafe
+export REMEMBER_DIR_UNSAFE
+[ "$REMEMBER_DIR_UNSAFE" = 1 ] && echo "FATAL: unsafe REMEMBER_DIR ($REMEMBER_DIR) -- refusing to mkdir" >&2
+
 _set_store_root "$_data_dir_raw"
 export REMEMBER_STORE_ROOT
 
@@ -881,14 +892,8 @@ __remember_src_lib_memory_dir ${1+"$@"}
 
 
 REMEMBER_LOG_DIR="${REMEMBER_DIR}/logs"
-_remember_log_dir_unsafe() {
-    local LC_ALL=C
-    { [[ "$REMEMBER_DIR" != /* ]] && [[ "$REMEMBER_DIR" != [A-Za-z]:[/\\]* ]]; } \
-        || [[ "$REMEMBER_DIR" == *$'\n'* || "$REMEMBER_DIR" == *$'\r'* ]]
-}
 _REMEMBER_LOG_SINK=""
-if _remember_log_dir_unsafe; then
-    echo "FATAL: unsafe REMEMBER_DIR ($REMEMBER_DIR) -- refusing to mkdir" >&2
+if [ "${REMEMBER_DIR_UNSAFE:-0}" = 1 ]; then
     _REMEMBER_LOG_SINK=/dev/null
 elif [ ! -d "$REMEMBER_LOG_DIR" ] && ! mkdir -p "$REMEMBER_LOG_DIR" 2>/dev/null; then
     echo "FATAL: cannot create $REMEMBER_LOG_DIR" >&2
@@ -1251,7 +1256,11 @@ log() {
     _REMEMBER_LOG_LAST_TIME="$timestamp"
     [ -n "$_REMEMBER_LOG_LAST_EPOCH" ] && _REMEMBER_LOG_LAST_EPOCH="$EPOCHSECONDS"
     message="${timestamp} [${component}] $(printf '%s' "$message" | LC_ALL=C tr '[:cntrl:]' ' ')"
-    echo "$message" >> "$MEMORY_LOG_FILE" 2>/dev/null || echo "$message" >&2
+    if [ -n "$_REMEMBER_LOG_SINK" ] && [ "$MEMORY_LOG_FILE" = "$_REMEMBER_LOG_SINK" ]; then
+        echo "$message" >&2
+    else
+        echo "$message" >> "$MEMORY_LOG_FILE" 2>/dev/null || echo "$message" >&2
+    fi
 }
 
 
@@ -1369,16 +1378,22 @@ __remember_src_detect_tools ${1+"$@"}
 __remember_src_bootstrap_dirs ${1+"$@"}
 __remember_src_log ${1+"$@"} 2>/dev/null
 declare -F log >/dev/null 2>&1 || log() {
-    printf '%s [%s] %s\n' "$(_remember_date +%H:%M:%S)" "$1" "$2" >&2
+    local _ts
+    _remember_date_into _ts +%H:%M:%S
+    printf '%s [%s] %s\n' "$_ts" "$1" "$2" >&2
 }
 declare -F report_error >/dev/null 2>&1 || report_error() { log "$1" "$2"; }
 log "hook" "session-end: reason=$SESSION_END_REASON session=${STDIN_SESSION_ID:-unresolved}"
 
-if ! mkdir -p "$REMEMBER_DIR/logs/autonomous" 2>/dev/null; then
+if [ "${REMEMBER_DIR_UNSAFE:-0}" = 1 ]; then
+    report_error "session-end" "WARNING: REMEMBER_DIR ($REMEMBER_DIR) was refused as unsafe -- this session's flush will not be recorded, and /remember:doctor may misreport SessionEnd as never having fired."
+elif ! mkdir -p "$REMEMBER_DIR/logs/autonomous" 2>/dev/null; then
     report_error "session-end" "WARNING: could not create $REMEMBER_DIR/logs/autonomous -- this session's flush will not be recorded, and /remember:doctor may misreport SessionEnd as never having fired."
 fi
-_END_LOG="$REMEMBER_DIR/logs/autonomous/session-end-$(_remember_date +%H%M%S)-$$.log"
-if ! printf '%s [session-end] flush started\n' "$(_remember_date +%H:%M:%S)" >> "$_END_LOG" 2>/dev/null; then
+_remember_date_into _END_LOG_TS +%H%M%S
+_END_LOG="$REMEMBER_DIR/logs/autonomous/session-end-${_END_LOG_TS}-$$.log"
+_remember_date_into _FLUSH_START_TS +%H:%M:%S
+if ! printf '%s [session-end] flush started\n' "$_FLUSH_START_TS" >> "$_END_LOG" 2>/dev/null; then
     report_error "session-end" "WARNING: could not seed $_END_LOG -- if this file stays absent or empty, an ordinary housekeeping sweep will reclaim it, and /remember:doctor may misreport this session as one where SessionEnd never fired."
 fi
 
@@ -1394,22 +1409,39 @@ if [ ! -f "$SAVE_SCRIPT" ]; then
 fi
 
 if [ -n "${REMEMBER_TEST_COMPLETION_MARKER:-}" ]; then
-    printf '%s session-end: about to launch subshell\n' "$(_remember_date +%H:%M:%S)" \
+    _remember_date_into _subshell_ts +%H:%M:%S
+    printf '%s session-end: about to launch subshell\n' "$_subshell_ts" \
         >> "$REMEMBER_TEST_COMPLETION_MARKER" 2>&1
 fi
 (
-    if [ -n "$STDIN_SESSION_ID" ]; then
-        bash "$SAVE_SCRIPT" "$STDIN_SESSION_ID" --force
-    else
-        bash "$SAVE_SCRIPT" --force
-    fi
+    _remember_session_end_flush() {
+        if [ -n "$STDIN_SESSION_ID" ]; then
+            bash "$SAVE_SCRIPT" "$STDIN_SESSION_ID" --force
+        else
+            bash "$SAVE_SCRIPT" --force
+        fi
+    }
+    _remember_session_end_flush
     _flush_status=$?
+    _REMEMBER_SAVE_RETRYABLE_EXIT=75
+    _retried=0
+    if [ "$_flush_status" -eq "$_REMEMBER_SAVE_RETRYABLE_EXIT" ]; then
+        sleep 1
+        _remember_session_end_flush
+        _flush_status=$?
+        _retried=1
+    fi
     if [ -n "${REMEMBER_TEST_COMPLETION_MARKER:-}" ]; then
+        _remember_date_into _subshell_done_ts +%H:%M:%S
         printf '%s session-end: save-session.sh exited status=%s\n' \
-            "$(_remember_date +%H:%M:%S)" "$_flush_status" >> "$REMEMBER_TEST_COMPLETION_MARKER" 2>&1
+            "$_subshell_done_ts" "$_flush_status" >> "$REMEMBER_TEST_COMPLETION_MARKER" 2>&1
     fi
     if [ "$_flush_status" -ne 0 ]; then
-        report_error "session-end" "WARNING: save-session.sh --force exited $_flush_status at session end -- this session's unsaved tail may be lost. See $_END_LOG for what save-session.sh itself logged."
+        if [ "$_retried" -eq 1 ]; then
+            report_error "session-end" "WARNING: save-session.sh --force exited $_flush_status at session end (after one retry) -- this session's unsaved tail may be lost. See $_END_LOG for what save-session.sh itself logged."
+        else
+            report_error "session-end" "WARNING: save-session.sh --force exited $_flush_status at session end (not retried -- not the transient pre-write failure class this hook's bounded retry covers) -- this session's unsaved tail may be lost. See $_END_LOG for what save-session.sh itself logged."
+        fi
     fi
 ) < /dev/null >> "$_END_LOG" 2>&1 &
 echo $! > "$REMEMBER_DIR/tmp/save-session.pid" 2>/dev/null

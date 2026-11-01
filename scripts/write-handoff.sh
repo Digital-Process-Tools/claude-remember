@@ -4,6 +4,8 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+source "$SCRIPT_DIR/lib-session-store.sh"
+
 _WH_SESSION_ID="${CLAUDE_CODE_SESSION_ID:-}"
 if [ -z "${_WH_SESSION_ID#.}" ] || [ -z "${_WH_SESSION_ID#..}" ] \
     || [[ "$_WH_SESSION_ID" == *[!A-Za-z0-9._-]* ]]; then
@@ -11,30 +13,23 @@ if [ -z "${_WH_SESSION_ID#.}" ] || [ -z "${_WH_SESSION_ID#..}" ] \
 fi
 
 _wh_trial_remember_dir() {
-    (
-        CLAUDE_PROJECT_DIR="$1"
-        export CLAUDE_PROJECT_DIR
-        REMEMBER_PATHS_SOFT_FAIL=1 source "$SCRIPT_DIR/resolve-paths.sh" >/dev/null 2>&1 || exit 1
-        source "$SCRIPT_DIR/lib-memory-dir.sh" >/dev/null 2>&1 || exit 1
-        [ -n "${REMEMBER_DIR:-}" ] || exit 1
-        printf '%s\n' "$REMEMBER_DIR"
-    )
+    _remember_session_store_trial_dir "$1"
 }
 
+_WH_POINTER_DIR=""
+if [ -n "$_WH_SESSION_ID" ]; then
+    _WH_POINTER_VAL=$(_remember_session_store_read "$_WH_SESSION_ID") && _WH_POINTER_DIR="$_WH_POINTER_VAL"
+    unset _WH_POINTER_VAL
+fi
+
+_WH_AMBIGUOUS=0
 if [ -z "${CLAUDE_PROJECT_DIR:-}" ]; then
     _WH_GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || _WH_GIT_ROOT=""
 
-    if [ -n "$_WH_GIT_ROOT" ] && [ "$_WH_GIT_ROOT" != "$(pwd)" ] && [ -n "$_WH_SESSION_ID" ]; then
-        _WH_RD_CWD=$(_wh_trial_remember_dir "$(pwd)") || _WH_RD_CWD=""
-        _WH_RD_GITROOT=$(_wh_trial_remember_dir "$_WH_GIT_ROOT") || _WH_RD_GITROOT=""
-        _WH_CWD_HAS_HINT=0
-        _WH_GITROOT_HAS_HINT=0
-        [ -n "$_WH_RD_CWD" ] && [ -f "$_WH_RD_CWD/tmp/handoff-path.$_WH_SESSION_ID" ] && _WH_CWD_HAS_HINT=1
-        [ -n "$_WH_RD_GITROOT" ] && [ -f "$_WH_RD_GITROOT/tmp/handoff-path.$_WH_SESSION_ID" ] && _WH_GITROOT_HAS_HINT=1
-        if [ "$_WH_CWD_HAS_HINT" = 1 ] && [ "$_WH_GITROOT_HAS_HINT" = 0 ]; then
-            _WH_GIT_ROOT=""
-        fi
-        unset _WH_RD_CWD _WH_RD_GITROOT _WH_CWD_HAS_HINT _WH_GITROOT_HAS_HINT
+    if [ -z "$_WH_POINTER_DIR" ] && [ -n "$_WH_GIT_ROOT" ] && [ "$_WH_GIT_ROOT" != "$(pwd)" ] && [ -n "$_WH_SESSION_ID" ]; then
+        _remember_session_store_ancestor_candidate "$_WH_GIT_ROOT" "$_WH_SESSION_ID"
+        _WH_GIT_ROOT="$_REMEMBER_SESSION_STORE_RESULT"
+        _WH_AMBIGUOUS="$_REMEMBER_SESSION_STORE_AMBIGUOUS"
     fi
 
     if [ -n "$_WH_GIT_ROOT" ]; then
@@ -43,6 +38,11 @@ if [ -z "${CLAUDE_PROJECT_DIR:-}" ]; then
         CLAUDE_PROJECT_DIR="$(pwd)"
     fi
     export CLAUDE_PROJECT_DIR
+fi
+
+if [ -z "$_WH_POINTER_DIR" ] && [ "$_WH_AMBIGUOUS" = 1 ]; then
+    echo "REFUSED: more than one candidate store matched this session, and no session-start pointer exists to disambiguate -- restart this session (or let its next SessionStart run) rather than risk writing the handoff note to the wrong one." >&2
+    exit 1
 fi
 
 _WH_RESOLVE_ERR_FILE=$(mktemp "${TMPDIR:-/tmp}/remember-write-handoff-resolve-XXXXXX" 2>/dev/null) || _WH_RESOLVE_ERR_FILE=""
@@ -63,6 +63,11 @@ if [ "$_WH_RESOLVE_STATUS" -ne 0 ]; then
 fi
 
 source "$SCRIPT_DIR/lib-memory-dir.sh"
+
+if [ -n "$_WH_POINTER_DIR" ]; then
+    REMEMBER_DIR="$_WH_POINTER_DIR"
+    REMEMBER_DIR_UNSAFE=0
+fi
 
 if [ -z "${REMEMBER_DIR:-}" ]; then
     echo "REFUSED: REMEMBER_DIR did not resolve" >&2
@@ -156,7 +161,7 @@ if [ "$_WH_REMEMBER_ROOT" = "$_WH_MEM_PROJ" ]; then
     fi
 fi
 
-[ -d "$REMEMBER_DIR" ] || mkdir -p "$REMEMBER_DIR" 2>/dev/null
+[ "${REMEMBER_DIR_UNSAFE:-0}" = 1 ] || [ -d "$REMEMBER_DIR" ] || mkdir -p "$REMEMBER_DIR" 2>/dev/null
 
 _WH_TMP=$(mktemp "${_WH_TARGET%/*}/.write-handoff-XXXXXX" 2>/dev/null) || _WH_TMP=""
 if [ -z "$_WH_TMP" ]; then

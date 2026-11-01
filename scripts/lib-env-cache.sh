@@ -47,17 +47,33 @@ _remember_env_cache_load() {
 
     local _line _dir="" _tz="" _mem="" _proj="" _pipe="" _stamp=""
     local _cooldown="" _delta="" _cfg_exists_raw="" _cfg_raw=""
-    local _env_proj="" _env_pipe="" _env_home=""
+    local _env_proj="" _env_pipe="" _env_home="" _recovery=""
+    local _store_root_len="" _dir_raw="" _dir_lenpart=""
     local _cfgs=()
     while IFS= read -r _line || [ -n "$_line" ]; do
         _line="${_line%$'\r'}"
         [ -n "$_line" ] || continue
         if [ "${_line#REMEMBER_DIR=}" != "$_line" ]; then
-            _dir="${_line#*=}"
+            _dir_raw="${_line#*=}"
+            _dir_lenpart="${_dir_raw%%:*}"
+            if [ -n "$_dir_lenpart" ] && [ "$_dir_lenpart" != "$_dir_raw" ] \
+                && [[ "$_dir_lenpart" != *[!0-9]* ]]; then
+                _store_root_len="$_dir_lenpart"
+                _dir="${_dir_raw#*:}"
+            else
+                _store_root_len=""
+                _dir="$_dir_raw"
+            fi
         elif [ "${_line#REMEMBER_TZ=}" != "$_line" ]; then
             _tz="${_line#*=}"
         elif [ "${_line#REMEMBER_PROMPT_STAMP=}" != "$_line" ]; then
             _stamp="${_line#*=}"
+            if [ "${_stamp#*:}" != "$_stamp" ]; then
+                _recovery="${_stamp#*:}"
+                _stamp="${_stamp%%:*}"
+            else
+                _recovery=""
+            fi
         elif [ "${_line#REMEMBER_SAVE_COOLDOWN=}" != "$_line" ]; then
             _cooldown="${_line#*=}"
         elif [ "${_line#REMEMBER_DELTA_THRESHOLD=}" != "$_line" ]; then
@@ -118,10 +134,16 @@ _remember_env_cache_load() {
     REMEMBER_PROMPT_STAMP="$_stamp"
     REMEMBER_SAVE_COOLDOWN="$_cooldown"
     REMEMBER_DELTA_THRESHOLD="$_delta"
+    REMEMBER_RECOVERY_ENABLED="$_recovery"
     MEMORY_PROJECT_DIR="$_mem"
     [ -n "$MEMORY_PROJECT_DIR" ] || MEMORY_PROJECT_DIR="$_proj"
+    REMEMBER_STORE_ROOT=""
+    if [ -n "$_store_root_len" ] && [ "$_store_root_len" -gt 0 ]; then
+        REMEMBER_STORE_ROOT="${_dir:0:_store_root_len}"
+    fi
     export PROJECT_DIR PIPELINE_DIR REMEMBER_DIR REMEMBER_TZ MEMORY_PROJECT_DIR
     export REMEMBER_PROMPT_STAMP REMEMBER_SAVE_COOLDOWN REMEMBER_DELTA_THRESHOLD
+    export REMEMBER_RECOVERY_ENABLED REMEMBER_STORE_ROOT
     return 0
 }
 
@@ -136,9 +158,15 @@ _remember_env_cache_publish() {
     _remember_env_cache_path || return 0
 
     local _f="$_REMEMBER_ENV_CACHE_FILE" _t
-    _t=$(mktemp "${_f}.XXXXXX" 2>/dev/null) || return 0
+    _t=""
+    for _ecp_try in 1 2 3; do
+        _t=$(mktemp "${_f}.XXXXXX" 2>/dev/null) && break
+        _t=""
+    done
+    [ -n "$_t" ] || return 0
     local _ecp_mem_proj="${MEMORY_PROJECT_DIR:-}" _c _e
     [ -n "$_ecp_mem_proj" ] || _ecp_mem_proj="$PROJECT_DIR"
+    local _ecp_store_root="${REMEMBER_STORE_ROOT:-}"
     {
         printf '%s=%s\n' \
             CACHE_ENV_PROJECT_DIR "$_REMEMBER_ENV_CACHE_PROJECT_DIR" \
@@ -146,9 +174,9 @@ _remember_env_cache_publish() {
             CACHE_ENV_HOME "${HOME:-}" \
             PROJECT_DIR "$PROJECT_DIR" \
             PIPELINE_DIR "$PIPELINE_DIR" \
-            REMEMBER_DIR "$REMEMBER_DIR" \
+            REMEMBER_DIR "${#_ecp_store_root}:${REMEMBER_DIR}" \
             REMEMBER_TZ "${REMEMBER_TZ:-}" \
-            REMEMBER_PROMPT_STAMP "${REMEMBER_PROMPT_STAMP:-full}" \
+            REMEMBER_PROMPT_STAMP "${REMEMBER_PROMPT_STAMP:-full}:${REMEMBER_RECOVERY_ENABLED:-}" \
             REMEMBER_SAVE_COOLDOWN "$REMEMBER_SAVE_COOLDOWN" \
             REMEMBER_DELTA_THRESHOLD "$REMEMBER_DELTA_THRESHOLD" \
             MEMORY_PROJECT_DIR "$_ecp_mem_proj"

@@ -16,12 +16,12 @@ source "$_remember_log_src_dir/lib-memory-dir.sh"
 REMEMBER_LOG_DIR="${REMEMBER_DIR}/logs"
 _remember_log_dir_unsafe() {
     local LC_ALL=C
-    { [[ "$REMEMBER_DIR" != /* ]] && [[ "$REMEMBER_DIR" != [A-Za-z]:[/\\]* ]]; } \
+    { [[ "$REMEMBER_DIR" != /* ]] && [[ "$REMEMBER_DIR" != [A-Za-z]:[/\\]* ]] \
+        && [[ "$REMEMBER_DIR" != [\\][\\][^\\]* ]]; } \
         || [[ "$REMEMBER_DIR" == *$'\n'* || "$REMEMBER_DIR" == *$'\r'* ]]
 }
 _REMEMBER_LOG_SINK=""
-if _remember_log_dir_unsafe; then
-    echo "FATAL: unsafe REMEMBER_DIR ($REMEMBER_DIR) -- refusing to mkdir" >&2
+if [ "${REMEMBER_DIR_UNSAFE:-0}" = 1 ]; then
     _REMEMBER_LOG_SINK=/dev/null
 elif [ ! -d "$REMEMBER_LOG_DIR" ] && ! mkdir -p "$REMEMBER_LOG_DIR" 2>/dev/null; then
     echo "FATAL: cannot create $REMEMBER_LOG_DIR" >&2
@@ -406,7 +406,11 @@ log() {
     _REMEMBER_LOG_LAST_TIME="$timestamp"
     [ -n "$_REMEMBER_LOG_LAST_EPOCH" ] && _REMEMBER_LOG_LAST_EPOCH="$EPOCHSECONDS"
     message="${timestamp} [${component}] $(printf '%s' "$message" | LC_ALL=C tr '[:cntrl:]' ' ')"
-    echo "$message" >> "$MEMORY_LOG_FILE" 2>/dev/null || echo "$message" >&2
+    if [ -n "$_REMEMBER_LOG_SINK" ] && [ "$MEMORY_LOG_FILE" = "$_REMEMBER_LOG_SINK" ]; then
+        echo "$message" >&2
+    else
+        echo "$message" >> "$MEMORY_LOG_FILE" 2>/dev/null || echo "$message" >&2
+    fi
 }
 
 log_usage() {

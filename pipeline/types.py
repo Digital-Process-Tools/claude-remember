@@ -15,6 +15,7 @@ class HaikuResult:
     is_skip: bool = False
     is_rejected: bool = False
     provider: str = "claude"
+    model: str = ""
 @dataclass
 class ExtractResult:
     exchanges: str = ""

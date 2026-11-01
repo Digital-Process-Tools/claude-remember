@@ -2,38 +2,33 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+source "$SCRIPT_DIR/lib-session-store.sh"
+
 _DOCTOR_SESSION_ID="${CLAUDE_CODE_SESSION_ID:-}"
 if [ -z "${_DOCTOR_SESSION_ID#.}" ] || [ -z "${_DOCTOR_SESSION_ID#..}" ] \
     || [[ "$_DOCTOR_SESSION_ID" == *[!A-Za-z0-9._-]* ]]; then
     _DOCTOR_SESSION_ID=""
 fi
 
+_DOCTOR_POINTER_DIR=""
+if [ -n "$_DOCTOR_SESSION_ID" ]; then
+    _doctor_pointer_val=$(_remember_session_store_read "$_DOCTOR_SESSION_ID") && _DOCTOR_POINTER_DIR="$_doctor_pointer_val"
+    unset _doctor_pointer_val
+fi
+
 _doctor_trial_remember_dir() {
-    (
-        CLAUDE_PROJECT_DIR="$1"
-        export CLAUDE_PROJECT_DIR
-        REMEMBER_PATHS_SOFT_FAIL=1 source "$SCRIPT_DIR/resolve-paths.sh" >/dev/null 2>&1 || exit 1
-        source "$SCRIPT_DIR/lib-memory-dir.sh" >/dev/null 2>&1 || exit 1
-        [ -n "${REMEMBER_DIR:-}" ] || exit 1
-        printf '%s\n' "$REMEMBER_DIR"
-    )
+    _remember_session_store_trial_dir "$1"
 }
 
 _doctor_resolve_project_dir_candidate() {
     _doctor_git_root="$1"
-    if [ -n "$_doctor_git_root" ] && [ "$_doctor_git_root" != "$(pwd)" ] && [ -n "$_DOCTOR_SESSION_ID" ]; then
-        _doctor_rd_cwd=$(_doctor_trial_remember_dir "$(pwd)") || _doctor_rd_cwd=""
-        _doctor_rd_gitroot=$(_doctor_trial_remember_dir "$_doctor_git_root") || _doctor_rd_gitroot=""
-        _doctor_cwd_has_hint=0
-        _doctor_gitroot_has_hint=0
-        [ -n "$_doctor_rd_cwd" ] && [ -f "$_doctor_rd_cwd/tmp/handoff-path.$_DOCTOR_SESSION_ID" ] && _doctor_cwd_has_hint=1
-        [ -n "$_doctor_rd_gitroot" ] && [ -f "$_doctor_rd_gitroot/tmp/handoff-path.$_DOCTOR_SESSION_ID" ] && _doctor_gitroot_has_hint=1
-        if [ "$_doctor_cwd_has_hint" = 1 ] && [ "$_doctor_gitroot_has_hint" = 0 ]; then
-            _doctor_git_root=""
-        fi
-        unset _doctor_rd_cwd _doctor_rd_gitroot _doctor_cwd_has_hint _doctor_gitroot_has_hint
+    _DOCTOR_RESOLVE_RESULT="$_doctor_git_root"
+    _DOCTOR_AMBIGUOUS=0
+    if [ -z "$_DOCTOR_POINTER_DIR" ] && [ -n "$_doctor_git_root" ] && [ "$_doctor_git_root" != "$(pwd)" ] && [ -n "$_DOCTOR_SESSION_ID" ]; then
+        _remember_session_store_ancestor_candidate "$_doctor_git_root" "$_DOCTOR_SESSION_ID"
+        _DOCTOR_RESOLVE_RESULT="$_REMEMBER_SESSION_STORE_RESULT"
+        _DOCTOR_AMBIGUOUS="$_REMEMBER_SESSION_STORE_AMBIGUOUS"
     fi
-    printf '%s' "$_doctor_git_root"
     unset _doctor_git_root
 }
 
@@ -41,7 +36,8 @@ if [ "${1:-}" = "--json" ]; then
     _JSON_PROJECT_DIR_ASSUMED=0
     if [ -z "${CLAUDE_PROJECT_DIR:-}" ]; then
         _DOCTOR_JSON_GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || _DOCTOR_JSON_GIT_ROOT=""
-        _DOCTOR_JSON_GIT_ROOT=$(_doctor_resolve_project_dir_candidate "$_DOCTOR_JSON_GIT_ROOT")
+        _doctor_resolve_project_dir_candidate "$_DOCTOR_JSON_GIT_ROOT"
+        _DOCTOR_JSON_GIT_ROOT="$_DOCTOR_RESOLVE_RESULT"
         if [ -n "$_DOCTOR_JSON_GIT_ROOT" ]; then
             CLAUDE_PROJECT_DIR="$_DOCTOR_JSON_GIT_ROOT"
         else
@@ -76,6 +72,11 @@ if [ "${1:-}" = "--json" ]; then
 
     source "$SCRIPT_DIR/lib-memory-dir.sh"
 
+    if [ -n "$_DOCTOR_POINTER_DIR" ]; then
+        REMEMBER_DIR="$_DOCTOR_POINTER_DIR"
+        REMEMBER_DIR_UNSAFE=0
+    fi
+
     if [ "$REMEMBER_DIR" = "${PROJECT_DIR}/.remember" ] \
         || [[ "$(_remember_forward_slash "$REMEMBER_DIR")" == "$(_remember_forward_slash "$PROJECT_DIR")"/* ]]; then
         _JSON_STORAGE_MODE="legacy"
@@ -89,8 +90,14 @@ if [ "${1:-}" = "--json" ]; then
         _JSON_STATE="resolved"
     fi
 
-    printf '{"schema_version":1,"state":"%s","remember_dir":"%s","storage_mode":"%s","project_dir":"%s"}\n' \
-        "$_JSON_STATE" "$(_json_escape "$REMEMBER_DIR")" "$_JSON_STORAGE_MODE" "$(_json_escape "$PROJECT_DIR")"
+    if [ "${REMEMBER_DIR_UNSAFE:-0}" = 1 ]; then
+        _JSON_REMEMBER_DIR_UNSAFE="true"
+    else
+        _JSON_REMEMBER_DIR_UNSAFE="false"
+    fi
+
+    printf '{"schema_version":1,"state":"%s","remember_dir":"%s","remember_dir_unsafe":%s,"storage_mode":"%s","project_dir":"%s"}\n' \
+        "$_JSON_STATE" "$(_json_escape "$REMEMBER_DIR")" "$_JSON_REMEMBER_DIR_UNSAFE" "$_JSON_STORAGE_MODE" "$(_json_escape "$PROJECT_DIR")"
     exit 0
 fi
 
@@ -129,7 +136,8 @@ echo "-- Paths --"
 _PROJECT_DIR_ASSUMED=0
 if [ -z "${CLAUDE_PROJECT_DIR:-}" ]; then
     _DOCTOR_GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || _DOCTOR_GIT_ROOT=""
-    _DOCTOR_GIT_ROOT=$(_doctor_resolve_project_dir_candidate "$_DOCTOR_GIT_ROOT")
+    _doctor_resolve_project_dir_candidate "$_DOCTOR_GIT_ROOT"
+    _DOCTOR_GIT_ROOT="$_DOCTOR_RESOLVE_RESULT"
     if [ -n "$_DOCTOR_GIT_ROOT" ]; then
         CLAUDE_PROJECT_DIR="$_DOCTOR_GIT_ROOT"
     else
@@ -164,7 +172,28 @@ fi
 echo "OK   PIPELINE_DIR       = $PIPELINE_DIR"
 
 source "$SCRIPT_DIR/lib-memory-dir.sh"
-echo "OK   REMEMBER_DIR       = $REMEMBER_DIR"
+
+if [ -n "$_DOCTOR_POINTER_DIR" ]; then
+    REMEMBER_DIR="$_DOCTOR_POINTER_DIR"
+    REMEMBER_DIR_UNSAFE=0
+elif [ "${_DOCTOR_AMBIGUOUS:-0}" = 1 ]; then
+    echo "WARN Session-store resolution: more than one candidate store matched"
+    echo "     this session, with no session-start pointer to disambiguate --"
+    echo "     write-handoff.sh would REFUSE to write rather than guess. The"
+    echo "     REMEMBER_DIR reported below is this diagnostic's best-effort"
+    echo "     fallback (the enclosing repository's own store), which may not"
+    echo "     be where a note would actually land."
+fi
+
+if [ "${REMEMBER_DIR_UNSAFE:-0}" = 1 ]; then
+    echo "FAIL REMEMBER_DIR       = $REMEMBER_DIR (refused as unsafe)"
+    echo "     Not absolute (or not a recognised drive-letter/UNC form), or it"
+    echo "     carries an embedded newline/CR -- every mkdir/save site this"
+    echo "     plugin has is refusing to touch this value. Fix the data_dir"
+    echo "     template in config.json (or whatever produced this value)."
+else
+    echo "OK   REMEMBER_DIR       = $REMEMBER_DIR"
+fi
 
 if ! command -v session_dir_slug >/dev/null 2>&1; then
     source "$SCRIPT_DIR/lib-slug.sh" 2>/dev/null || true
@@ -198,6 +227,12 @@ _PYTHON_OK=1
 if [ "$_DT_STATUS" -ne 0 ]; then
     _PYTHON_OK=0
     echo "FAIL Python: ${_DT_LOG:-no usable python found (tried python3, python, py -3, py)}"
+    _PY_FLOOR=$(export _REMEMBER_LAZY_PYTHON=1
+        source "$SCRIPT_DIR/detect-tools.sh" >/dev/null 2>&1
+        echo "${_REMEMBER_PY_FLOOR_MAJOR}.${_REMEMBER_PY_FLOOR_MINOR}")
+    if [[ "$_PY_FLOOR" =~ ^[0-9]+\.[0-9]+$ ]]; then
+        echo "     need Python ${_PY_FLOOR}+ -- install a newer Python."
+    fi
     echo "WARN jq: skipped (python detection failed first)"
 else
     source "$SCRIPT_DIR/detect-tools.sh" >/dev/null 2>&1
@@ -572,6 +607,61 @@ if [ -s "$_SUMMARY_FAILURE_MARKER" ]; then
 else
     echo "OK   No summarizer failure recorded ($_SUMMARY_FAILURE_MARKER empty or absent)"
 fi
+echo ""
+
+echo "-- Dropped summarizer spans (#1052) --"
+_remember_rs_glob_dir=$(_remember_forward_slash "$REMEMBER_DIR")
+_RS_FILES=()
+for _rs_f in "$_remember_rs_glob_dir"/logs/memory-*.log; do
+    [ -f "$_rs_f" ] && _RS_FILES+=("$_rs_f")
+done
+_RS_COUNT=0
+_RS_LAST_LINE=""
+if [ "${#_RS_FILES[@]}" -gt 0 ]; then
+    _RS_OLD_IFS="$IFS"
+    IFS=$'\n'
+    _RS_SORTED=($(printf '%s\n' "${_RS_FILES[@]}" | LC_ALL=C sort))
+    IFS="$_RS_OLD_IFS"
+    unset _RS_OLD_IFS
+    for _rs_f in "${_RS_SORTED[@]}"; do
+        _rs_count_file=$(grep -cE '\[(validate|haiku|summarizer)\] REJECTED' "$_rs_f" 2>/dev/null)
+        [ -z "$_rs_count_file" ] && _rs_count_file=0
+        [ "$_rs_count_file" -eq 0 ] && continue
+        _RS_COUNT=$((_RS_COUNT + _rs_count_file))
+        _RS_LAST_LINE=$(grep -E '\[(validate|haiku|summarizer)\] REJECTED' "$_rs_f" 2>/dev/null | tail -n 1)
+    done
+    unset _RS_SORTED
+fi
+unset _RS_FILES _remember_rs_glob_dir _rs_f _rs_count_file
+if [ "$_RS_COUNT" -gt 0 ]; then
+    printf -v _rs_dq '\042'
+    echo "WARN $_RS_COUNT rejection(s) hit a reject gate (summarizer refusal or"
+    echo "     ${_rs_dq}not an entry header${_rs_dq}) across the logs present -- the call"
+    echo "     succeeded each time, so this is invisible to the Summarizer"
+    echo "     failures check above. A rejected span is retried (see"
+    echo "     thresholds.max_rejected_retries) before the position advances"
+    echo "     past it. The refusal text is always kept at"
+    echo "     $REMEMBER_DIR/tmp/rejected-*.md; a span that exhausts its"
+    echo "     retries also has its raw span text parked at"
+    echo "     $REMEMBER_DIR/tmp/dropped-span-*.md. Most recent reject:"
+    echo "     $_RS_LAST_LINE"
+    unset _rs_dq
+else
+    echo "OK   No rejections recorded (no [validate]/[haiku]/[summarizer] REJECTED line in the logs present)"
+fi
+_remember_rs_parked_glob_dir=$(_remember_forward_slash "$REMEMBER_DIR")
+_RS_PARKED=0
+for _rs_p in "$_remember_rs_parked_glob_dir"/tmp/dropped-span-*.md; do
+    [ -f "$_rs_p" ] && _RS_PARKED=$((_RS_PARKED + 1))
+done
+unset _remember_rs_parked_glob_dir _rs_p
+if [ "$_RS_PARKED" -gt 0 ]; then
+    echo "     $_RS_PARKED span(s) are currently parked, unsummarized, in"
+    echo "     $REMEMBER_DIR/tmp/ (dropped-span-*.md) -- each exhausted its"
+    echo "     retries (or was dropped on the session's final flush) and will"
+    echo "     never be retried. The newest 20 are kept."
+fi
+unset _RS_COUNT _RS_LAST_LINE _RS_PARKED
 echo ""
 
 echo "-- SessionStart duration (#706) --"

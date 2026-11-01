@@ -280,10 +280,13 @@ lock_acquire() {
 }
 
 _lock_acquire_impl() {
-    local _dir="$1" _timeout="${2:-0}" _deadline
-    _deadline=$(( $(date +%s) + _timeout ))
+    local _dir="$1" _timeout="${2:-0}" _deadline=""
 
-    mkdir -p "$(dirname "$_dir")" 2>/dev/null || true
+    local _lock_parent="${_dir%/*}"
+    if [ "$_lock_parent" = "$_dir" ]; then
+        printf -v _lock_parent '\056'
+    fi
+    mkdir -p "$_lock_parent" 2>/dev/null || true
 
     while :; do
         if mkdir "$_dir" 2>/dev/null; then
@@ -301,6 +304,7 @@ _lock_acquire_impl() {
             return 0
         fi
 
+        [ -n "$_deadline" ] || _deadline=$(( $(date +%s) + _timeout ))
         [ "$(date +%s)" -ge "$_deadline" ] && return 1
         sleep "$_LOCK_SLEEP"
     done

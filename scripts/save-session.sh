@@ -2,14 +2,27 @@
 
 set -e
 
-trap 'log "error" "FAILED at line $LINENO (exit $?)"' ERR
+EXIT_RETRYABLE_BEFORE_WRITE=75
+_WROTE_ENTRY=0
 
-source "$(dirname "$0")/resolve-paths.sh"
-source "$(dirname "$0")/detect-tools.sh"
-source "$(dirname "$0")/bootstrap-dirs.sh"
-source "$(dirname "$0")/log.sh"
-source "$(dirname "$0")/lib-lock.sh"
-source "$(dirname "$0")/lib-staging-lock.sh"
+trap '
+    _err_status=$?
+    log "error" "FAILED at line $LINENO (exit $_err_status)"
+    if [ "$_WROTE_ENTRY" -eq 0 ]; then
+        exit "$EXIT_RETRYABLE_BEFORE_WRITE"
+    fi
+    exit "$_err_status"
+' ERR
+
+_SAVE_SCRIPT_DIR="${BASH_SOURCE[0]%/*}"
+[ "$_SAVE_SCRIPT_DIR" = "${BASH_SOURCE[0]}" ] && _SAVE_SCRIPT_DIR="$(pwd)"
+
+source "$_SAVE_SCRIPT_DIR/resolve-paths.sh"
+source "$_SAVE_SCRIPT_DIR/detect-tools.sh"
+source "$_SAVE_SCRIPT_DIR/bootstrap-dirs.sh"
+source "$_SAVE_SCRIPT_DIR/log.sh"
+source "$_SAVE_SCRIPT_DIR/lib-lock.sh"
+source "$_SAVE_SCRIPT_DIR/lib-staging-lock.sh"
 log "hook" "save-session: PROJECT_DIR=$PROJECT_DIR PIPELINE_DIR=$PIPELINE_DIR PYTHON=$PYTHON REMEMBER_DIR=$REMEMBER_DIR"
 
 LOCK_DIR="${REMEMBER_DIR}/tmp/save.lock"
@@ -62,6 +75,7 @@ marker_write_ok() {
 NOW_DAY_FILE="${REMEMBER_DIR}/tmp/now-day"
 LAST_SAVE_FILE="${REMEMBER_DIR}/tmp/last-save.json"
 COOLDOWN_MARKER="${REMEMBER_DIR}/tmp/last-save-ts"
+PENDING_POSITION_MARKER="${REMEMBER_DIR}/tmp/pending-position"
 TODAY_DATE=$(_remember_date +%Y-%m-%d)
 CLEANUP_FILES=()
 CLEANUP_FILES+=("$REMEMBER_CONFIG")
@@ -101,6 +115,21 @@ else
     else
         debug_enabled 1 && log "lock" "another save holds the lock, skipping"
         exit 0
+    fi
+fi
+
+if [ -f "$PENDING_POSITION_MARKER" ]; then
+    _pend_session="" ; _pend_position="" ; _pend_envelope=""
+    IFS=$'\t' read -r _pend_session _pend_position _pend_envelope < "$PENDING_POSITION_MARKER" 2>/dev/null || true
+    if [ -n "$_pend_session" ] && [ -n "$_pend_position" ] && [ -n "$_pend_envelope" ]; then
+        log "write" "recovering an interrupted position write from a previous run (session ${_pend_session}, position ${_pend_position}) -- now.md already holds that entry; only its position record was missing"
+        if (cd "$PIPELINE_DIR" && _remember_run_python -m pipeline.shell save-position "$LAST_SAVE_FILE" "$_pend_session" "$_pend_position" "$_pend_envelope"); then
+            rm -f "$PENDING_POSITION_MARKER" 2>/dev/null
+        else
+            log "write" "WARNING: could not recover the pending position marker at $PENDING_POSITION_MARKER -- will retry on the next invocation"
+        fi
+    else
+        rm -f "$PENDING_POSITION_MARKER" 2>/dev/null
     fi
 fi
 
@@ -260,13 +289,21 @@ cd "$PIPELINE_DIR" && _remember_run_python -m pipeline.shell build-prompt "$EXTR
 [ ! -s "$TMP_PROMPT" ] && { log "prompt" "ERROR: empty"; exit 1; }
 grep -q '{{TIME}}\|{{BRANCH}}\|{{LAST_ENTRY}}\|{{EXTRACT}}' "$TMP_PROMPT" && { log "prompt" "ERROR: unsubstituted placeholders in prompt"; exit 1; }
 
-log "haiku" "calling (branch: $BRANCH)"
+log "summarizer" "calling (branch: $BRANCH)"
 HAIKU_STDERR=$(mktemp "${TMPDIR:-/tmp}"/remember-haiku-err-XXXXXX)
 CLEANUP_FILES+=("$HAIKU_STDERR")
 
 FAILURE_MARKER="${REMEMBER_DIR}/tmp/last-summary-failure"
 MAX_FAILURES=$(config ".thresholds.max_summary_failures" 3)
 if [ -z "$MAX_FAILURES" ] || [ "${MAX_FAILURES#*[!0-9]}" != "$MAX_FAILURES" ]; then MAX_FAILURES=3; fi
+
+REJECTED_MARKER="${REMEMBER_DIR}/tmp/last-rejected-span"
+MAX_REJECTIONS=$(config ".thresholds.max_rejected_retries" 3)
+if [ -z "$MAX_REJECTIONS" ] || [ "${MAX_REJECTIONS#*[!0-9]}" != "$MAX_REJECTIONS" ]; then MAX_REJECTIONS=3; fi
+if [ "$MAX_REJECTIONS" -eq 0 ]; then
+    log "config" "thresholds.max_rejected_retries is 0 ('retry forever') -- that would stall this session's saving entirely on a span the model always refuses, so using the default (3) instead"
+    MAX_REJECTIONS=3
+fi
 
 save_position_span() {
     if [ "$ENVELOPE" != "unrecognised" ] && [ "$ENVELOPE_HAS_UNMAPPED_STEP" = "1" ]; then
@@ -285,7 +322,7 @@ record_summary_failure() {
         read -r _prev_span_id _prev_count < "$FAILURE_MARKER" || true
         if [ -z "$_prev_count" ] || [ "${_prev_count#*[!0-9]}" != "$_prev_count" ]; then _prev_count=0; fi
     fi
-    _span_id="${SESSION_ID}:${POSITION}"
+    _span_id="${SESSION_ID}:${SKIP_LINES}"
     if [ "$_prev_span_id" = "$_span_id" ]; then
         _count=$(( 10#$_prev_count + 1 ))
     else
@@ -293,12 +330,52 @@ record_summary_failure() {
     fi
 
     if [ "$_count" -ge "$MAX_FAILURES" ]; then
-        log "haiku" "WARNING: ${_count} consecutive failures on this span -- dropping it unsummarized and advancing position -> $POSITION (see thresholds.max_summary_failures)"
+        log "summarizer" "WARNING: ${_count} consecutive failures on this span -- dropping it unsummarized and advancing position -> $POSITION (see thresholds.max_summary_failures)"
         save_position_span
         rm -f "$FAILURE_MARKER"
     elif marker_write_ok "$FAILURE_MARKER" summary; then
         echo "$_span_id $_count" > "$FAILURE_MARKER"
-        log "haiku" "failure ${_count}/${MAX_FAILURES} on this span -- will retry next run"
+        log "summarizer" "failure ${_count}/${MAX_FAILURES} on this span -- will retry next run"
+    fi
+}
+
+record_rejected_span() {
+    local _tag="$1"
+    _prev_span_id=""
+    _prev_count=0
+    if [ -f "$REJECTED_MARKER" ]; then
+        read -r _prev_span_id _prev_count < "$REJECTED_MARKER" || true
+        if [ -z "$_prev_count" ] || [ "${_prev_count#*[!0-9]}" != "$_prev_count" ]; then _prev_count=0; fi
+    fi
+    _span_id="${SESSION_ID}:${SKIP_LINES}"
+    if [ "$_prev_span_id" = "$_span_id" ]; then
+        _count=$(( 10#$_prev_count + 1 ))
+    else
+        _count=1
+    fi
+
+    if [ "$_count" -ge "$MAX_REJECTIONS" ] || [ "$FORCE" = true ]; then
+        _dropped_dir="${REMEMBER_DIR}/tmp"
+        mkdir -p "$_dropped_dir" 2>/dev/null
+        _dropped_file="${_dropped_dir}/dropped-span-$(_remember_date +%Y%m%d-%H%M%S)-$$.md"
+        if [ "$FORCE" = true ] && [ "$_count" -lt "$MAX_REJECTIONS" ]; then
+            _give_up_why="rejected on the session's final flush (--force) -- no later save exists to retry it, so giving up now at ${_count}/${MAX_REJECTIONS} rejections rather than waiting for retries that will never come"
+        else
+            _give_up_why="${_count} consecutive rejections on this span"
+        fi
+        if [ -n "${EXTRACT_FILE:-}" ] && cp "$EXTRACT_FILE" "$_dropped_file" 2>/dev/null; then
+            report_error "$_tag" "WARNING: ${_give_up_why} -- giving up, raw span text kept at $_dropped_file -- advancing position -> $POSITION (see thresholds.max_rejected_retries)"
+        else
+            report_error "$_tag" "WARNING: ${_give_up_why} -- giving up, advancing position -> $POSITION (could not park raw span text; see thresholds.max_rejected_retries)"
+        fi
+        save_position_span
+        rm -f "$REJECTED_MARKER"
+        ls -t "${_dropped_dir}"/dropped-span-*.md 2>/dev/null | tail -n +21 | while read -r _old; do
+            rm -f "$_old"
+        done
+    elif marker_write_ok "$REJECTED_MARKER" rejected; then
+        echo "$_span_id $_count" > "$REJECTED_MARKER"
+        log "$_tag" "rejected ${_count}/${MAX_REJECTIONS} on this span -- will retry next run"
     fi
 }
 
@@ -307,18 +384,19 @@ SPAWN_DECLINED_EXIT=3
 HAIKU_VARS=$(cd "$PIPELINE_DIR" && _remember_run_python -m pipeline.shell call-haiku "$TMP_PROMPT" 2>"$HAIKU_STDERR") || {
     HAIKU_EXIT=$?
     if [ "$HAIKU_EXIT" -eq "$SPAWN_DECLINED_EXIT" ]; then
-        log "haiku" "DECLINED: $(head -1 "$HAIKU_STDERR")"
+        log "summarizer" "DECLINED: $(head -1 "$HAIKU_STDERR")"
         exit 0
     fi
-    report_error "haiku" "ERROR: $(head -1 "$HAIKU_STDERR")"; record_summary_failure; exit 1
+    report_error "summarizer" "ERROR: $(head -1 "$HAIKU_STDERR")"; record_summary_failure; exit 1
 }
 
 assign_kv <<< "$HAIKU_VARS"
 CLEANUP_FILES+=("$HAIKU_TEXT_FILE")
+log "summarizer" "model: ${MODEL:-unknown}"
 log_usage "tokens" "$TK_IN" "$TK_OUT" "$TK_CACHE" "$TK_COST"
 
 HAIKU_TEXT=$(cat "$HAIKU_TEXT_FILE")
-[ -z "$HAIKU_TEXT" ] && { report_error "haiku" "ERROR: empty response"; record_summary_failure; exit 1; }
+[ -z "$HAIKU_TEXT" ] && { report_error "summarizer" "ERROR: empty response"; record_summary_failure; exit 1; }
 
 keep_rejected_text() {
     local _src="$1" _tag="$2"
@@ -344,8 +422,7 @@ if [ "$IS_SKIP" != "true" ]; then
     if ! echo "$FIRST_LINE" | grep -qE "$ENTRY_HEADER_ERE"; then
         log "validate" "REJECTED (not an entry header): $(echo "$FIRST_LINE" | head -c 80)"
         keep_rejected_text "$HAIKU_TEXT_FILE" "validate"
-        save_position_span
-        log "validate" "position -> $POSITION"
+        record_rejected_span "validate"
         rm -f "$FAILURE_MARKER"
         exit 0
     else
@@ -367,12 +444,15 @@ fi
 
 if [ "$IS_SKIP" = "true" ]; then
     if [ "${IS_REJECTED:-false}" = "true" ]; then
-        log "haiku" "REJECTED (provider: ${PROVIDER:-claude}; not a summary -- refusal or clarification): $(head -c 80 "$HAIKU_TEXT_FILE" 2>/dev/null)"
-        keep_rejected_text "$HAIKU_TEXT_FILE" "haiku"
+        log "summarizer" "REJECTED (provider: ${PROVIDER:-claude}; not a summary -- refusal or clarification): $(head -c 80 "$HAIKU_TEXT_FILE" 2>/dev/null)"
+        keep_rejected_text "$HAIKU_TEXT_FILE" "summarizer"
+        record_rejected_span "summarizer"
+        rm -f "$FAILURE_MARKER"
+        exit 0
     fi
-    log "haiku" "SKIP (provider: ${PROVIDER:-claude}) -- position -> $POSITION"
+    log "summarizer" "SKIP (provider: ${PROVIDER:-claude}) -- position -> $POSITION"
     save_position_span
-    rm -f "$FAILURE_MARKER"
+    rm -f "$FAILURE_MARKER" "$REJECTED_MARKER"
     exit 0
 fi
 
@@ -400,9 +480,12 @@ APPEND_ERR=$({ printf '\n' && cat "$HAIKU_TEXT_FILE"; } 2>&1 >> "$APPEND_TMP") \
 APPEND_ERR=$(mv "$APPEND_TMP" "$MEMORY_FILE" 2>&1) \
     || append_failed "commit failed: ${APPEND_ERR:-unknown error}"
 log "write" "appended (provider: ${PROVIDER:-claude}): $(head -1 "$HAIKU_TEXT_FILE" | cut -c1-80)"
+_WROTE_ENTRY=1
+printf '%s\t%s\t%s\n' "$SESSION_ID" "$POSITION" "$ENVELOPE" > "$PENDING_POSITION_MARKER" 2>/dev/null || true
 save_position_span
+rm -f "$PENDING_POSITION_MARKER" 2>/dev/null
 log "write" "position -> $POSITION"
-rm -f "$FAILURE_MARKER"
+rm -f "$FAILURE_MARKER" "$REJECTED_MARKER"
 
 dispatch "after_save"
 

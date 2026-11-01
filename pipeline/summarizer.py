@@ -36,6 +36,7 @@ def _resolve_codex_bin() -> str:
         return override
     return shutil.which("codex") or "codex"
 NESTED_SUMMARIZER_ENV = "REMEMBER_NESTED_SUMMARIZER"
+AUTO_MEMORY_DISABLE_ENV = "CLAUDE_CODE_DISABLE_AUTO_MEMORY"
 _SUMMARIZER_PROVIDERS = frozenset({"claude", "codex", "auto"})
 def _resolve_summarizer_provider() -> str:
     raw = os.environ.get("REMEMBER_SUMMARIZER", "").strip().lower()
@@ -135,8 +136,10 @@ def _without_session_env():
 @contextlib.contextmanager
 def _summarizer_environment():
     previous_marker = os.environ.get("REMEMBER_NESTED_SUMMARIZER")
+    previous_auto_memory_marker = os.environ.get("CLAUDE_CODE_DISABLE_AUTO_MEMORY")
     with _without_session_env():
         os.environ["REMEMBER_NESTED_SUMMARIZER"] = "1"
+        os.environ["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
         try:
             yield
         finally:
@@ -144,6 +147,10 @@ def _summarizer_environment():
                 os.environ.pop("REMEMBER_NESTED_SUMMARIZER", None)
             else:
                 os.environ["REMEMBER_NESTED_SUMMARIZER"] = previous_marker
+            if previous_auto_memory_marker is None:
+                os.environ.pop("CLAUDE_CODE_DISABLE_AUTO_MEMORY", None)
+            else:
+                os.environ["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = previous_auto_memory_marker
 def _usage_from_failure(stdout: object) -> TokenUsage | None:
     if isinstance(stdout, bytes):
         try:
@@ -206,9 +213,9 @@ def _warn(message: str) -> None:
         remember_dir = os.environ.get("REMEMBER_DIR", "").strip()
         if remember_dir:
             from .log import log
-            log("haiku", message, os.path.join(remember_dir, "logs"))
+            log("summarizer", message, os.path.join(remember_dir, "logs"))
         else:
-            print(f"[haiku] {message}", file=sys.stderr)
+            print(f"[summarizer] {message}", file=sys.stderr)
     except Exception:
         pass
 def _remember_dir_is_project_local(remember_dir: str) -> bool:
@@ -451,6 +458,7 @@ def _call_codex(prompt: str, timeout: int = 120) -> HaikuResult:
         is_skip=model_skipped or rejected,
         is_rejected=rejected,
         provider="codex",
+        model="codex default",
     )
 def call_haiku(
     prompt: str,
@@ -558,7 +566,9 @@ def call_haiku(
             f"claude exited {result.returncode}: {detail}"
             f"{_inherited_env_hint(detail)}"
         )
-    return _parse_response(result.stdout)
+    parsed = _parse_response(result.stdout)
+    parsed.model = _resolve_model()
+    return parsed
 DEFAULT_REJECT_PATTERN = (
     r"^\s*("
     r"i (cannot|can't|can not|won't|will not|am unable|'m unable|am not able)|"
