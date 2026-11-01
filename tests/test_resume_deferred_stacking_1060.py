@@ -66,6 +66,41 @@ def _run_session_start(env: dict, session_id: str, source: str):
     )
 
 
+def _resume_diag(remember, session_id: str, env: dict, sleeper_pid: int) -> str:
+    """Diagnostics only (never shipped): the PID marker directory listing, and
+    a bash -x re-run of the same resume trimmed to the deferred-phase guard
+    (kill -0 / _remember_deferred_already_running), so a Windows PID the
+    MSYS/Git-Bash `kill -0` check cannot resolve shows up directly rather
+    than as an unexplained relaunch.
+    """
+    parts = [f"REMEMBER_DIR={env.get('REMEMBER_DIR')!r}", f"sleeper (Popen) pid={sleeper_pid}"]
+    tmp_dir = remember / "tmp"
+    try:
+        parts.append(f"{tmp_dir} listing: {sorted(p.name for p in tmp_dir.glob('*'))}")
+    except OSError as exc:
+        parts.append(f"{tmp_dir} listing: could not list ({exc})")
+    try:
+        trace = subprocess.run(
+            [BASH, "-x", SESSION_START.as_posix()],
+            input=_payload(session_id, "resume"), env=env,
+            capture_output=True, text=True, timeout=HOOK_TIMEOUT, check=False,
+        )
+        all_lines = trace.stderr.splitlines()
+        trace_lines = [
+            l for l in all_lines
+            if "deferred" in l or "kill" in l or "_remember_deferred_already_running" in l
+        ]
+        parts.append(
+            f"bash -x re-run of the SAME resume (deferred/kill lines, "
+            f"{len(trace_lines)} of {len(all_lines)} total; rc={trace.returncode}; "
+            "this SECOND run mutates state again -- diagnostic only, not a "
+            "repeat of the assertion above):\n" + "\n".join(trace_lines[:120])
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        parts.append(f"bash -x re-run: could not run ({exc})")
+    return "\n".join(parts)
+
+
 def test_a_resume_for_a_session_whose_deferred_phase_is_still_alive_does_not_relaunch_it(tmp_path):
     home, project, remember = _store(tmp_path)
     env = _env(home, project, remember, os.environ["PATH"])
@@ -97,11 +132,21 @@ def test_a_resume_for_a_session_whose_deferred_phase_is_still_alive_does_not_rel
         # touches it at all. Still naming the sleeper's PID is therefore
         # direct proof the guard took the skip branch, not an inference from
         # timing.
-        assert pid_file.read_text(encoding="utf-8").strip() == str(sleeper.pid), (
+        try:
+            pid_file_now = pid_file.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            pid_file_now = None
+        assert pid_file_now is not None, (
+            "a resume for a session whose deferred phase is still alive "
+            f"relaunched it instead of being skipped -- the PID file {pid_file} "
+            f"is gone entirely (sleeper pid={sleeper.pid})\n"
+            f"{_resume_diag(remember, session_id, env, sleeper.pid)}"
+        )
+        assert pid_file_now.strip() == str(sleeper.pid), (
             "a resume for a session whose deferred phase is still alive "
             "relaunched it instead of being skipped -- the PID file no "
-            f"longer names the still-running sleeper (now: "
-            f"{pid_file.read_text(encoding='utf-8')!r})"
+            f"longer names the still-running sleeper (now: {pid_file_now!r})\n"
+            f"{_resume_diag(remember, session_id, env, sleeper.pid)}"
         )
         assert not slug_record.exists(), (
             "a resume for a session whose deferred phase is still alive "

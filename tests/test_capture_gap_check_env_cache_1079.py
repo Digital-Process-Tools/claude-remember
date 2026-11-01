@@ -152,6 +152,93 @@ def _merge_spawns(recorded: list[str]) -> list[str]:
     return [s for s in recorded if s.split(" ", 1)[0] in ("mktemp", "jq")]
 
 
+def _env_cache_diag(project: Path, home: Path, systmp: Path, env: dict) -> str:
+    """Diagnostics only (never shipped): TMPDIR/TMP/TEMP/SYS_TMPDIR as the hook
+    would see them, directory listings of systmp and .remember/tmp, and the
+    cache key/path each side of lib-env-cache.sh computes for this exact
+    project -- sourced directly (no hook side effects) so a mismatch between
+    the publish-side key (post-resolve-paths.sh CLAUDE_PROJECT_DIR) and the
+    load-side key (pre-resolve-paths.sh / REMEMBER_HOOK_CWD fallback) is
+    visible without re-running the whole chain under `bash -x`.
+    """
+    parts = []
+    for var in ("TMPDIR", "TMP", "TEMP"):
+        parts.append(f"{var}={env.get(var)!r}")
+    parts.append(f"computed SYS_TMPDIR (TMPDIR-or-/tmp)={(env.get('TMPDIR') or '/tmp')!r}")
+    try:
+        parts.append(f"systmp listing: {sorted(p.name for p in systmp.glob('*'))}")
+    except OSError as exc:
+        parts.append(f"systmp listing: could not list ({exc})")
+    remember_tmp = project / ".remember" / "tmp"
+    try:
+        parts.append(
+            f".remember/tmp listing: "
+            f"{sorted(p.name for p in remember_tmp.glob('*')) if remember_tmp.exists() else 'DIR MISSING'}"
+        )
+    except OSError as exc:
+        parts.append(f".remember/tmp listing: could not list ({exc})")
+
+    lib = (REPO_ROOT / "scripts" / "lib-env-cache.sh").as_posix()
+    probe = (
+        f'source "{lib}"\n'
+        '_remember_env_cache_path\n'
+        'printf "KEY_PROJECT_DIR=%s\\nKEY_FILE=%s\\n" '
+        '"$_REMEMBER_ENV_CACHE_PROJECT_DIR" "$_REMEMBER_ENV_CACHE_FILE"\n'
+    )
+    for label, overrides in (
+        ("publish-side (CLAUDE_PROJECT_DIR set, post-resolve-paths.sh shape)",
+         {"CLAUDE_PROJECT_DIR": str(project), "REMEMBER_HOOK_CWD": ""}),
+        ("load-side (CLAUDE_PROJECT_DIR unset, REMEMBER_HOOK_CWD fallback, #469 shape)",
+         {"CLAUDE_PROJECT_DIR": "", "REMEMBER_HOOK_CWD": str(project)}),
+    ):
+        probe_env = {**env, **overrides}
+        try:
+            result = subprocess.run(
+                [BASH, "-c", probe], env=probe_env,
+                capture_output=True, text=True, timeout=30, check=False,
+            )
+            parts.append(
+                f"{label} key probe: rc={result.returncode} "
+                f"stdout={result.stdout.strip()!r} stderr={result.stderr[-300:]!r}"
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            parts.append(f"{label} key probe: could not run ({exc})")
+
+    # bash -x re-run of the warm path, trimmed to the env-cache publish/load
+    # section -- the log is large, so only lines naming env_cache are kept.
+    try:
+        xtrace = subprocess.run(
+            [BASH, "-x", str(SESSION_START)],
+            env={
+                **env,
+                "CLAUDE_PROJECT_DIR": str(project),
+                "CLAUDE_PLUGIN_ROOT": str(REPO_ROOT),
+                "HOME": str(home),
+                "TMPDIR": str(systmp),
+                "REMEMBER_DEFER": "0",
+            },
+            input=json.dumps({
+                "session_id": _SESSION_ID,
+                "transcript_path": "/does/not/matter/1079.jsonl",
+                "hook_event_name": "SessionStart",
+                "cwd": str(project),
+                "source": "startup",
+            }),
+            capture_output=True, text=True, timeout=60, check=False,
+        )
+        all_lines = xtrace.stderr.splitlines()
+        trace_lines = [l for l in all_lines if "env_cache" in l]
+        parts.append(
+            f"bash -x re-run of the warm path (env_cache lines, "
+            f"{len(trace_lines)} of {len(all_lines)} total; rc={xtrace.returncode}):\n"
+            + "\n".join(trace_lines[:120])
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        parts.append(f"bash -x re-run: could not run ({exc})")
+
+    return "\n".join(parts)
+
+
 @pytest.mark.parametrize("with_user_config", [False, True], ids=["no-config", "with-config"])
 def test_fast_path_with_warm_cache_never_reruns_the_merge(tmp_path, with_user_config):
     """The actual #1079 claim: with the env cache warm (the ordinary case,
@@ -172,7 +259,8 @@ def test_fast_path_with_warm_cache_never_reruns_the_merge(tmp_path, with_user_co
     assert not merge_spawns, (
         f"capture-gap-check.sh's fast path re-ran the config merge with a "
         f"warm env cache (with_user_config={with_user_config}): {merge_spawns}\n"
-        f"full spawn log: {recorded}"
+        f"full spawn log: {recorded}\n"
+        f"{_env_cache_diag(project, home, systmp, env)}"
     )
 
 
@@ -195,7 +283,10 @@ def test_fast_path_falls_back_to_the_full_merge_when_both_caches_are_missing(tmp
         list(systmp.glob("remember-env-*"))
         + list(systmp.glob("remember-config-cache-v2-*"))
     )
-    assert cache_files, "precondition: the warm run did not publish any cache file at all"
+    assert cache_files, (
+        "precondition: the warm run did not publish any cache file at all\n"
+        f"{_env_cache_diag(project, home, systmp, env)}"
+    )
     for f in cache_files:
         f.unlink()
 
@@ -232,7 +323,8 @@ def test_warm_cache_run_leaves_no_new_merged_config_tmpfile_in_shared_tmp(tmp_pa
     new_files = after - before
     assert not new_files, (
         f"capture-gap-check.sh's fast path left a NEW merged-config tmpfile "
-        f"behind in shared tmp: {new_files}"
+        f"behind in shared tmp: {new_files}\n"
+        f"{_env_cache_diag(project, home, systmp, env)}"
     )
 
 
@@ -257,7 +349,10 @@ def test_cache_miss_path_leaves_no_new_merged_config_tmpfile_in_shared_tmp(tmp_p
         list(systmp.glob("remember-env-*"))
         + list(systmp.glob("remember-config-cache-v2-*"))
     )
-    assert cache_files, "precondition: the warm run did not publish any cache file at all"
+    assert cache_files, (
+        "precondition: the warm run did not publish any cache file at all\n"
+        f"{_env_cache_diag(project, home, systmp, env)}"
+    )
     for f in cache_files:
         f.unlink()
 
@@ -276,5 +371,6 @@ def test_cache_miss_path_leaves_no_new_merged_config_tmpfile_in_shared_tmp(tmp_p
         f"capture-gap-check.sh's SLOW/cache-miss path left a NEW merged-"
         f"config tmpfile behind in shared tmp -- its own "
         f"_remember_cleanup_deferred_pid_file EXIT trap replaced log.sh's "
-        f"merge-cleanup trap instead of appending to it: {new_files}"
+        f"merge-cleanup trap instead of appending to it: {new_files}\n"
+        f"{_env_cache_diag(project, home, systmp, env)}"
     )
