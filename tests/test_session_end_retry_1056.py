@@ -43,18 +43,32 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, os.path.dirname(__file__))
-from _bash_runner import resolve_bash
 from test_save_session_gates import _make_env  # shared harness
 from test_session_end_hook_345 import _run_hook, _wire_hook
 
-# #1056: _run_hook() resolves a real Git-Bash binary rather than a hardcoded
-# "bash" literal (see test_session_end_hook_345.py), so this module narrows
-# to "no usable bash found" instead of a blanket win32 skip -- the #432
-# route, which needs no docs/windows-skip-triage.md row because it is not a
-# blanket skip at all.
+# #1056 round 2 self-review: this module WAS converted to _bash_runner's
+# resolve_bash() route (the #432 pattern, no blanket skip) and pushed to
+# CI to test the claim rather than assume it. windows-latest promptly
+# failed all three of the original tests for a real reason, not a missing
+# interpreter: session-end-hook.sh's OWN detached-relaunch fork
+# (nohup bash "${BASH_SOURCE[0]}" ... -- see that file's own comment above
+# REMEMBER_SESSION_END_DETACHED) hardcodes the literal bash binary name,
+# which this test's own _run_hook() cannot influence from the outside. On
+# windows-latest that inner fork either resolves to a non-functional bash
+# or fails silently, so the hook's own backgrounded flush never actually
+# runs the stub at all ("the stub save-session.sh was never invoked at
+# all" -- not a skip, a genuine assertion failure). Fixing that is a
+# session-end-hook.sh production-code change (what the bash binary name
+# should resolve to there on a real Windows host), out of #1056's own
+# scope, so the fallback this repo's own convention names applies: scope
+# the skip back to this test and record the finding in
+# docs/windows-skip-triage.md rather than claim Windows coverage this
+# module does not actually have.
 pytestmark = pytest.mark.skipif(
-    resolve_bash() is None,
-    reason="no usable bash found (checked PATH, then Git-for-Windows install locations)",
+    sys.platform == "win32",
+    reason="session-end-hook.sh's own detached-relaunch fork hardcodes the "
+    "bash binary name -- observed non-functional on windows-latest CI "
+    "(#1056 round 2), not merely unresolved; see docs/windows-skip-triage.md",
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
