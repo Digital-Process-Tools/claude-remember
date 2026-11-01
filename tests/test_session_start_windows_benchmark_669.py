@@ -96,6 +96,7 @@ from __future__ import annotations
 
 import json
 import os
+import statistics
 import subprocess
 import sys
 import time
@@ -160,23 +161,41 @@ JQ_ABSENT_WARM_SPAWN_BUDGET = 50
 # why. Measured locally: ~2.6s cold, ~0.2s warm.
 WALL_TIME_CEILING_SECONDS = 45.0
 
+# #660's own ask, on top of #669's existing cold/warm split: a single warm
+# sample is one shared-runner noise sample, not a number. The cold run stays
+# a single sample -- it can only be genuinely cold once per scenario, since
+# that single run is what populates the #668 caches whose absence it is
+# measuring -- but the "warm cache-hit start" half is repeatable with no
+# change of meaning (every call after the first is equally warm), so it is
+# run WARM_RUN_COUNT times and reported as a median, which is what #660's
+# re-measurement thread (kheirou, erdogan-deniz) actually did by hand
+# ("median of 5-7 runs") to get a number a single noisy sample cannot give.
+WARM_RUN_COUNT = 3
+
 
 def _format_benchmark_table(label: str, *, cold_time: float, cold_spawns: list,
-                             warm_time: float, warm_spawns: list) -> str:
+                             warm_time: float, warm_spawns: list,
+                             warm_runs: int = 1) -> str:
     """#673: the table the issue asks for -- one row per scenario x
     cold/warm, wall time in whole milliseconds (CI's own summary renderer is
     Markdown, not a spreadsheet; sub-ms precision is not what a human
     comparing run over run needs) and the real spawn count beside it. Pure
     and platform-independent by construction -- it takes numbers in and
     returns text, so it is tested directly with no subprocess, no tmp_path,
-    and no skip condition of its own."""
+    and no skip condition of its own.
+
+    #660: `warm_time` is a median when `warm_runs` > 1 -- the row label says
+    so rather than leaving a reader to guess whether a single sample or a
+    median produced the number, since the two mean different things about
+    how much to trust it."""
+    warm_row_label = f"warm (median of {warm_runs})" if warm_runs > 1 else "warm"
     return (
         f"### #669 benchmark: `{label}` ({sys.platform})\n"
         "\n"
         "| scenario | wall (ms) | spawns |\n"
         "| --- | --- | --- |\n"
         f"| cold | {cold_time * 1000:.0f} | {len(cold_spawns)} |\n"
-        f"| warm | {warm_time * 1000:.0f} | {len(warm_spawns)} |\n"
+        f"| {warm_row_label} | {warm_time * 1000:.0f} | {len(warm_spawns)} |\n"
     )
 
 
@@ -525,10 +544,26 @@ def _benchmark(tmp_path: Path, record_property, *, jq_present: bool,
     assert cold.returncode == 0, (
         f"[{label}] cold run failed: {cold.stderr[-2000:]!r}"
     )
-    warm, warm_time, warm_spawns = _run_once(env, shims, log)
-    assert warm.returncode == 0, (
-        f"[{label}] warm run failed: {warm.stderr[-2000:]!r}"
-    )
+
+    # #660: the cold run above is the only sample that can ever be cold --
+    # it is what populates the #668 caches -- but every call after it is
+    # equally warm, so WARM_RUN_COUNT of them are taken and reported as a
+    # median rather than a single noisy sample (see WARM_RUN_COUNT's own
+    # comment). Spawn count is still read off the LAST warm run only: it is
+    # asserted elsewhere as a real failing budget, and asserting it against
+    # every run would just repeat the same deterministic count (or fail
+    # loudly on the first run that doesn't match, which is itself a useful
+    # signal -- the loop below prints every run's own spawn count in the
+    # diagnostics so that divergence is visible either way).
+    warm_runs = []
+    warm = warm_time = warm_spawns = None
+    for _ in range(WARM_RUN_COUNT):
+        warm, warm_time, warm_spawns = _run_once(env, shims, log)
+        assert warm.returncode == 0, (
+            f"[{label}] warm run failed: {warm.stderr[-2000:]!r}"
+        )
+        warm_runs.append((warm_time, len(warm_spawns)))
+    warm_median_time = statistics.median(t for t, _ in warm_runs)
 
     # Printed unconditionally, not only on failure: pytest shows captured
     # stdout for a FAILED test by default (no -s needed, confirmed against
@@ -561,10 +596,14 @@ def _benchmark(tmp_path: Path, record_property, *, jq_present: bool,
             f"{jq_calls}\n\n{diag}"
         )
 
+    per_run = ", ".join(
+        f"{t:.3f}s/{n}sp" for t, n in warm_runs
+    )
     summary_line = (
         f"#669 benchmark [{label}]: "
         f"cold {cold_time:.3f}s / {len(cold_spawns)} spawns, "
-        f"warm {warm_time:.3f}s / {len(warm_spawns)} spawns "
+        f"warm median {warm_median_time:.3f}s / {len(warm_spawns)} spawns "
+        f"over {WARM_RUN_COUNT} runs ({per_run}) "
         f"(platform={sys.platform}, bash={BASH})"
     )
     # #673: printed to BOTH streams (the issue's own ask) -- stdout so it
@@ -575,24 +614,33 @@ def _benchmark(tmp_path: Path, record_property, *, jq_present: bool,
     print(summary_line, file=sys.stderr)
     table = _format_benchmark_table(
         label, cold_time=cold_time, cold_spawns=cold_spawns,
-        warm_time=warm_time, warm_spawns=warm_spawns,
+        warm_time=warm_median_time, warm_spawns=warm_spawns,
+        warm_runs=WARM_RUN_COUNT,
     )
     print(table)
     print(table, file=sys.stderr)
     _append_step_summary(table)
     record_property(f"remember_benchmark_{label}_cold_seconds", round(cold_time, 3))
     record_property(f"remember_benchmark_{label}_cold_spawns", len(cold_spawns))
-    record_property(f"remember_benchmark_{label}_warm_seconds", round(warm_time, 3))
+    record_property(
+        f"remember_benchmark_{label}_warm_median_seconds", round(warm_median_time, 3)
+    )
     record_property(f"remember_benchmark_{label}_warm_spawns", len(warm_spawns))
+    record_property(
+        f"remember_benchmark_{label}_warm_seconds_all",
+        [round(t, 3) for t, _ in warm_runs],
+    )
 
     assert cold_time < WALL_TIME_CEILING_SECONDS, (
         f"[{label}] cold run took {cold_time:.1f}s -- past the hang-detection "
         f"ceiling of {WALL_TIME_CEILING_SECONDS}s, not merely slow"
     )
-    assert warm_time < WALL_TIME_CEILING_SECONDS, (
-        f"[{label}] warm run took {warm_time:.1f}s -- past the hang-detection "
-        f"ceiling of {WALL_TIME_CEILING_SECONDS}s, not merely slow"
-    )
+    for t, _ in warm_runs:
+        assert t < WALL_TIME_CEILING_SECONDS, (
+            f"[{label}] a warm run took {t:.1f}s -- past the hang-detection "
+            f"ceiling of {WALL_TIME_CEILING_SECONDS}s, not merely slow "
+            f"(all warm runs: {warm_runs})"
+        )
     assert len(cold_spawns) <= cold_budget, (
         f"[{label}] cold run spawned {len(cold_spawns)} processes "
         f"(budget {cold_budget}):\n  " + "\n  ".join(cold_spawns)
