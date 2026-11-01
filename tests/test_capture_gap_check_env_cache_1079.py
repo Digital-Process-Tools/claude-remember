@@ -99,8 +99,24 @@ def _warm_the_cache(project: Path, home: Path, systmp: Path) -> dict:
         "cwd": str(project),
         "source": "startup",
     })
+    # .as_posix(), not str(): the real hook invocation (hooks/hooks.json's
+    # own command string, `bash "${CLAUDE_PLUGIN_ROOT}/scripts/session-start-
+    # hook.sh"`) guarantees at least one literal forward slash around
+    # `/scripts/` even when CLAUDE_PLUGIN_ROOT itself is a native Windows
+    # path, which is what lets session-start-hook.sh's own `_HOOK_DIR=
+    # "${BASH_SOURCE[0]%/*}"` strip correctly. str(Path) on Windows instead
+    # builds a PURE-backslash argv[0] with zero forward slashes anywhere --
+    # a shape the real hook invocation can never produce -- which trips that
+    # same expansion's "no slash in it" fallback (`_HOOK_DIR="$(pwd)"`,
+    # landing one directory too shallow) and makes the hook silently exit 0
+    # at `source "$_HOOK_DIR/resolve-paths.sh" || exit 0` long before
+    # publish, well before this function ever gets a chance to warm the
+    # cache. Confirmed directly (bash string test, independent of pytest):
+    # a BASH_SOURCE[0] with a literal '/' anywhere resolves _HOOK_DIR
+    # correctly even with backslashes elsewhere; one with NO '/' at all
+    # falls back to pwd and resolves one level too shallow.
     result = subprocess.run(
-        [BASH, str(SESSION_START)], env=env, input=payload,
+        [BASH, SESSION_START.as_posix()], env=env, input=payload,
         capture_output=True, text=True, timeout=60, check=False,
     )
     assert result.returncode == 0, f"warm run exited {result.returncode}: {result.stderr[-2000:]}"
@@ -228,7 +244,7 @@ def _env_cache_diag(project: Path, home: Path, systmp: Path, env: dict) -> str:
     # section -- the log is large, so only lines naming env_cache are kept.
     try:
         xtrace = subprocess.run(
-            [BASH, "-x", str(SESSION_START)],
+            [BASH, "-x", SESSION_START.as_posix()],  # same .as_posix() fix as _warm_the_cache above
             env={
                 **env,
                 "CLAUDE_PROJECT_DIR": str(project),
