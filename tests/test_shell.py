@@ -292,7 +292,7 @@ def test_cmd_call_haiku_emits_vars_and_passes_prompt(capsys, tmp_path):
         tokens=TokenUsage(input=5, output=2, cache=1, cost_usd=0.0001),
         is_skip=False,
     )
-    with patch("pipeline.haiku.call_haiku", return_value=fake) as mock_ch:
+    with patch("pipeline.summarizer.call_haiku", return_value=fake) as mock_ch:
         cmd_call_haiku(str(prompt))
 
     out = capsys.readouterr().out
@@ -313,7 +313,7 @@ def test_cmd_call_haiku_error_exits_1(tmp_path):
     from pipeline.shell import cmd_call_haiku
     prompt = tmp_path / "p.txt"
     prompt.write_text("x")
-    with patch("pipeline.haiku.call_haiku", side_effect=RuntimeError("boom")):
+    with patch("pipeline.summarizer.call_haiku", side_effect=RuntimeError("boom")):
         with pytest.raises(SystemExit) as ei:
             cmd_call_haiku(str(prompt))
     assert ei.value.code == 1
@@ -337,7 +337,7 @@ def test_cmd_call_haiku_passes_timeout(tmp_path):
     prompt = tmp_path / "p.txt"
     prompt.write_text("x")
     fake = HaikuResult(text="t", tokens=TokenUsage(input=1, output=1, cache=0, cost_usd=0.0), is_skip=False)
-    with patch("pipeline.haiku.call_haiku", return_value=fake) as mock_ch:
+    with patch("pipeline.summarizer.call_haiku", return_value=fake) as mock_ch:
         cmd_call_haiku(str(prompt), timeout=180)
     assert mock_ch.call_args.kwargs.get("timeout") == 180
 

@@ -117,7 +117,7 @@ unset REMEMBER_TRANSCRIPT_PATH
 # live, that neither CODEX_SESSION_ID nor CODEX_THREAD_ID reaches a process
 # Codex spawns as a HOOK (this script is one, registered in
 # hooks/hooks.codex.json) -- only a Codex TOOL-SHELL command sees them
-# (see pipeline/haiku.py's own note, and tests/test_codex_signature_463.py's
+# (see pipeline/summarizer.py's own note, and tests/test_codex_signature_463.py's
 # docstring). tests/fixtures/codex-env-463.txt, the fixture that pair is
 # pinned against, was itself captured from a tool-shell `codex exec … "run:
 # env | …"`, not from inside a hook -- so gating THIS script on those two

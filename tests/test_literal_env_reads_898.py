@@ -2,7 +2,7 @@
 variable literally.
 
 The directory portal's MCP_FORWARDS_CREDENTIAL_ENV hold cited
-"reads the installer's ANTHROPIC_API_KEY_ENV (file pipeline/haiku.py)" --
+"reads the installer's ANTHROPIC_API_KEY_ENV (file pipeline/summarizer.py)" --
 `os.environ.get(SOME_CONSTANT)`, "an environment variable named at run
 time". claude-directory-publishing triggers.md (the Python table) lists
 the shapes the portal cites and the rewrite for each, and notes the read
@@ -176,7 +176,7 @@ def test_literal_reads_are_not_flagged():
 
 def test_shipped_python_set_is_not_empty():
     names = {p.name for p in SHIPPED_PY}
-    assert {"haiku.py", "host.py", "spawn_guard.py"} <= names
+    assert {"summarizer.py", "host.py", "spawn_guard.py"} <= names
 
 
 def test_host_reads_every_name_its_registry_declares(monkeypatch):
@@ -213,7 +213,7 @@ def test_the_former_exempt_sites_now_read_literally():
     """The two functions rounds 15-16 exempted still touch the environment
     (positive control: the scan reaches real accesses there) and every one
     of those accesses names its variable literally."""
-    haiku_py = REPO_ROOT / "pipeline" / "haiku.py"
+    haiku_py = REPO_ROOT / "pipeline" / "summarizer.py"
     source = haiku_py.read_text(encoding="utf-8")
     spans = _function_spans(source)
     tree = ast.parse(source)

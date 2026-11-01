@@ -44,10 +44,10 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from pipeline import haiku
-from pipeline.haiku import call_haiku
+from pipeline import summarizer as haiku
+from pipeline.summarizer import call_haiku
 
-HAIKU_PY = REPO_ROOT / "pipeline" / "haiku.py"
+HAIKU_PY = REPO_ROOT / "pipeline" / "summarizer.py"
 
 # The session variables Claude Code sets for the processes it starts, as
 # observed in a live Claude Code 2.1.280 session (2026-10-04, names dumped
@@ -112,7 +112,7 @@ def _function(name: str) -> ast.FunctionDef:
     for node in ast.walk(ast.parse(HAIKU_PY.read_text(encoding="utf-8"))):
         if isinstance(node, ast.FunctionDef) and node.name == name:
             return node
-    raise AssertionError(f"positive control: {name} exists in pipeline/haiku.py")
+    raise AssertionError(f"positive control: {name} exists in pipeline/summarizer.py")
 
 
 def _is_os_environ(node) -> bool:
@@ -249,7 +249,7 @@ def test_the_config_keys_are_gone():
 # ── inheritance on the claude route ─────────────────────────────────────────
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_claude_child_gets_no_env_mapping(mock_run, isolated_config):
     seen = _capture(mock_run)
     call_haiku("p")
@@ -257,7 +257,7 @@ def test_claude_child_gets_no_env_mapping(mock_run, isolated_config):
     assert seen[-1]["env_kwarg"] is False, "the child must inherit, not get a built dict"
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_child_inherits_an_arbitrary_variable(mock_run, monkeypatch, isolated_config):
     monkeypatch.setenv("REMEMBER_TEST_ARBITRARY_898", "kept")
     seen = _capture(mock_run)
@@ -266,7 +266,7 @@ def test_child_inherits_an_arbitrary_variable(mock_run, monkeypatch, isolated_co
 
 
 @pytest.mark.parametrize("name", EXPECTED_SESSION_NAMES)
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_each_listed_session_variable_is_removed(mock_run, name, monkeypatch, isolated_config):
     monkeypatch.setenv(name, "parent-session-value")
     monkeypatch.setenv("REMEMBER_TEST_ARBITRARY_898", "kept")
@@ -277,7 +277,7 @@ def test_each_listed_session_variable_is_removed(mock_run, name, monkeypatch, is
     assert name not in env
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_all_listed_session_variables_are_removed_together(mock_run, monkeypatch, isolated_config):
     for name in EXPECTED_SESSION_NAMES:
         monkeypatch.setenv(name, f"parent-{name}")
@@ -291,7 +291,7 @@ def test_all_listed_session_variables_are_removed_together(mock_run, monkeypatch
         assert os.environ.get(name) == f"parent-{name}", f"{name} restored"
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_nested_summarizer_marker_is_set(mock_run, monkeypatch, isolated_config):
     monkeypatch.delenv("REMEMBER_NESTED_SUMMARIZER", raising=False)
     seen = _capture(mock_run)
@@ -299,7 +299,7 @@ def test_nested_summarizer_marker_is_set(mock_run, monkeypatch, isolated_config)
     assert seen[-1]["env"].get("REMEMBER_NESTED_SUMMARIZER") == "1"
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_oauth_credential_reaches_the_child_by_inheritance(mock_run, monkeypatch, isolated_config):
     """#131: never removed, never copied -- simply inherited."""
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-example-898")
@@ -311,7 +311,7 @@ def test_oauth_credential_reaches_the_child_by_inheritance(mock_run, monkeypatch
     assert "CLAUDE_CODE_SESSION_ID" not in env, "positive control: the strip ran"
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_messaging_handshake_is_inherited_while_its_socket_is_removed(
         mock_run, monkeypatch, isolated_config):
     """Round 18 (maintainer decision): the handshake reaches the child by
@@ -329,14 +329,14 @@ def test_messaging_handshake_is_inherited_while_its_socket_is_removed(
 
 def test_shipped_code_no_longer_names_the_messaging_handshake():
     """Round 18: nothing in `_without_session_env` -- nor anywhere in
-    pipeline/haiku.py -- names the handshake any more, so the release-tree
+    pipeline/summarizer.py -- names the handshake any more, so the release-tree
     checker no longer needs it allowlisted."""
     source = HAIKU_PY.read_text(encoding="utf-8")
     assert "CLAUDE_CODE_MESSAGING_SOCKET" in source, "positive control"
     assert MESSAGING_HANDSHAKE not in source
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_provider_selection_variables_are_now_inherited(mock_run, monkeypatch, isolated_config):
     """#316: the old prefix strip also removed provider selection (Bedrock),
     sending a proxy token to the wrong API. Not a session variable, so not
@@ -350,7 +350,7 @@ def test_provider_selection_variables_are_now_inherited(mock_run, monkeypatch, i
     assert "CLAUDE_CODE_SESSION_ID" not in env
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_this_process_gets_its_environment_back(mock_run, monkeypatch, isolated_config):
     """The removal is scoped to the spawn: anything later in this process
     that reads a session variable (pipeline.host) still sees it."""
@@ -367,7 +367,7 @@ def test_this_process_gets_its_environment_back(mock_run, monkeypatch, isolated_
     assert "REMEMBER_NESTED_SUMMARIZER" not in os.environ
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_environment_is_restored_when_the_call_fails(mock_run, monkeypatch, isolated_config):
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "abc-123")
     monkeypatch.setenv("CLAUDE_CODE_MESSAGING_SOCKET", "/tmp/parent.sock")
@@ -397,7 +397,7 @@ def test_environment_is_restored_when_the_block_raises(monkeypatch):
 # ── config no longer changes the session list ───────────────────────────────
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_user_config_can_no_longer_empty_the_list(mock_run, monkeypatch, isolated_config):
     _user_config(isolated_config, {"strip_session_env": []})
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "abc-123")
@@ -409,7 +409,7 @@ def test_user_config_can_no_longer_empty_the_list(mock_run, monkeypatch, isolate
     assert "CLAUDE_CODE_SESSION_ID" not in env
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_user_config_can_no_longer_add_to_the_list(mock_run, monkeypatch, isolated_config):
     _user_config(isolated_config, {"strip_session_env": ["REMEMBER_TEST_ARBITRARY_898"]})
     monkeypatch.setenv("REMEMBER_TEST_ARBITRARY_898", "kept")
@@ -421,7 +421,7 @@ def test_user_config_can_no_longer_add_to_the_list(mock_run, monkeypatch, isolat
     assert env.get("REMEMBER_TEST_ARBITRARY_898") == "kept"
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_drop_env_is_no_longer_read(mock_run, monkeypatch, isolated_config):
     _user_config(isolated_config, {"drop_env": ["REMEMBER_TEST_ARBITRARY_898"]})
     monkeypatch.setenv("REMEMBER_TEST_ARBITRARY_898", "kept")
@@ -432,7 +432,7 @@ def test_drop_env_is_no_longer_read(mock_run, monkeypatch, isolated_config):
 
 def test_shipped_tree_no_longer_names_drop_env():
     # Shipped files only: README.md (main branch) records the removal by name.
-    for rel in ("pipeline/haiku.py", "config.example.json", "config.json",
+    for rel in ("pipeline/summarizer.py", "config.example.json", "config.json",
                 "README.release.md", "scripts/lib-memory-dir.sh"):
         path = REPO_ROOT / rel
         if path.exists():
@@ -475,7 +475,7 @@ def test_codex_list_names_no_credential():
 def test_no_shipped_file_names_the_codex_credential():
     """The name lives only where an operator reads what is not passed."""
     name = "CODEX_" + "API_KEY"
-    for rel in ("pipeline/haiku.py", "config.json", "config.example.json", "README.release.md"):
+    for rel in ("pipeline/summarizer.py", "config.json", "config.example.json", "README.release.md"):
         path = REPO_ROOT / rel
         if path.exists():
             assert name not in path.read_text(encoding="utf-8"), rel
@@ -582,7 +582,7 @@ def test_codex_spawned_commands_still_get_no_environment():
 
 
 def test_no_shipped_message_names_a_credential_command():
-    for rel in ("pipeline/haiku.py", "scripts/doctor.sh", "README.md", "README.release.md"):
+    for rel in ("pipeline/summarizer.py", "scripts/doctor.sh", "README.md", "README.release.md"):
         text = (REPO_ROOT / rel).read_text(encoding="utf-8")
         assert "setup-token" not in text, rel
     assert "coding agent's own CLI" in HAIKU_PY.read_text(encoding="utf-8")

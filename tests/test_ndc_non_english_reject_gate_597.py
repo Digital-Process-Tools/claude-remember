@@ -1,6 +1,6 @@
 """A non-English refusal must not pass the NDC reject gate either (#597).
 
-`DEFAULT_REJECT_PATTERN` (pipeline/haiku.py) is anchored to English refusal
+`DEFAULT_REJECT_PATTERN` (pipeline/summarizer.py) is anchored to English refusal
 stems ("i cannot", "could you", "i'm sorry", ...). #593 put the model's reply
 in the *conversation's own language* into `now.md` in ordinary use for the
 first time, so a refusal in Chinese, French, Spanish, German or Japanese comes
@@ -60,7 +60,7 @@ class TestNdcNonEnglishRefusalIsRejectedNotAppended:
         env, project, plugin, calls, sid = _ndc_env(tmp_path)
         env["STUB_NDC_TEXT"] = NON_ENGLISH_REFUSAL_ZH
         # Left unset/false on purpose: this is what the REAL gate does for
-        # non-English text today, per pipeline.haiku._parse_response.
+        # non-English text today, per pipeline.summarizer._parse_response.
 
         result = _run(plugin, env, sid)
         assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")

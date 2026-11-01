@@ -1,6 +1,6 @@
 # Trusting the nested model call
 
-`pipeline/haiku.py` spawns a nested `claude -p` and reads its stdout as the
+`pipeline/summarizer.py` spawns a nested `claude -p` and reads its stdout as the
 model's reply. Everything downstream — the session entry written to staging,
 the consolidated `recent.md`, the compressed `now.md` — is that string.
 
@@ -82,8 +82,8 @@ it. Those are not comparable, so the guard is tuned to over-reject.
 
 | Layer | Where | Covers | Can it be degraded away? |
 | ----- | ----- | ------ | ------------------------ |
-| Hook isolation (`--setting-sources ''`) | `haiku.py`, argv | the hook vector, for every pipeline stage | **yes** — see below |
-| CLI-notice rejection | `haiku.py`, `_parse_response` | the CLI's own voice, every stage | no |
+| Hook isolation (`--setting-sources ''`) | `summarizer.py`, argv | the hook vector, for every pipeline stage | **yes** — see below |
+| CLI-notice rejection | `summarizer.py`, `_parse_response` | the CLI's own voice, every stage | no |
 | Echo rejection | `consolidate.py` | any quotation of the consolidation prompt | no |
 
 Isolation is the only one that can be lost, and it can be lost for reasons

@@ -243,9 +243,9 @@ Memory is keyed to the repository's main checkout, not the worktree, so every wo
 ```
 pipeline/           Python core — extraction, prompts, parsing, types
   extract.py        Session JSONL → filtered exchanges
-  haiku.py          Claude CLI wrapper + response parsing
+  summarizer.py     Claude/Codex CLI wrapper + response parsing
   prompts.py        Template loading and substitution
-  consolidate.py    Multi-day compression via Haiku
+  consolidate.py    Multi-day compression via the configured summarizer
   log.py            Structured logging
   shell.py          Shell integration — prints eval-able variables
   types.py          Dataclasses for all pipeline data

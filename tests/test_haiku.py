@@ -9,7 +9,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from pipeline.haiku import call_haiku, _parse_response, _extract_tokens
+from pipeline.summarizer import call_haiku, _parse_response, _extract_tokens
 
 
 def _mock_claude_response(result_text: str, input_tokens: int = 500,
@@ -128,7 +128,7 @@ def test_parse_response_headerless_summary():
     assert result.is_skip is False
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_call_haiku_success(mock_run, monkeypatch):
     monkeypatch.delenv("REMEMBER_MODEL", raising=False)  # assert the default model
     mock_run.return_value = MagicMock(
@@ -157,7 +157,7 @@ def test_call_haiku_success(mock_run, monkeypatch):
     assert "CLAUDECODE" not in seen[-1]
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_call_haiku_sends_prompt_on_stdin_not_argv(mock_run):
     """The prompt is delivered on STDIN, never as an argv string.
 
@@ -177,7 +177,7 @@ def test_call_haiku_sends_prompt_on_stdin_not_argv(mock_run):
     assert cmd[cmd.index("-p") + 1] == "--output-format"
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_call_haiku_strips_parent_session_env(mock_run, monkeypatch):
     """The nested claude -p must not inherit the PARENT Claude Code session
     vars — else it looks like a resumable session to anything keying off them
@@ -208,7 +208,7 @@ def test_call_haiku_strips_parent_session_env(mock_run, monkeypatch):
 # like a credential failure says so, naming no variable and no knob.
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_credential_failure_points_at_the_inherited_environment(mock_run, monkeypatch):
     """The discoverability half of #703, kept without naming any variable."""
     mock_run.return_value = MagicMock(
@@ -227,7 +227,7 @@ def test_credential_failure_points_at_the_inherited_environment(mock_run, monkey
     assert "ANTHROPIC_API_KEY" not in message
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_failure_unrelated_to_credentials_gets_no_environment_hint(mock_run, monkeypatch):
     """Positive control's twin: a hint that fired on every failure would
     point unrelated outages at the environment."""
@@ -249,7 +249,7 @@ def test_haiku_py_no_longer_names_the_credential_or_its_old_key():
     """#898 round 13: the shipped module must not name the credential at all
     (the directory portal holds on the name alone), nor the removed
     `haiku.anthropic_api_key` policy key."""
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "pipeline", "haiku.py")
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "pipeline", "summarizer.py")
     with open(path, encoding="utf-8") as f:
         source = f.read()
     assert "def _summarizer_environment" in source, "positive control: this is the right file"
@@ -257,7 +257,7 @@ def test_haiku_py_no_longer_names_the_credential_or_its_old_key():
         assert needle not in source, needle
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_call_haiku_with_tools(mock_run):
     mock_run.return_value = MagicMock(
         returncode=0,
@@ -275,7 +275,7 @@ def _max_turns_in(cmd: list[str]) -> str:
     return cmd[cmd.index("--max-turns") + 1]
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_call_haiku_default_max_turns_clears_cc2x(mock_run, monkeypatch):
     """Default must be >=2 — CC 2.x counts prompt-delivery as turn 1, so a cap
     of 1 exits error_max_turns before the model replies (#98/#100). This is the
@@ -287,7 +287,7 @@ def test_call_haiku_default_max_turns_clears_cc2x(mock_run, monkeypatch):
     assert _max_turns_in(mock_run.call_args[0][0]) == "4"
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_call_haiku_max_turns_env_override(mock_run, monkeypatch):
     monkeypatch.setenv("REMEMBER_MAX_TURNS", "6")
     mock_run.return_value = MagicMock(
@@ -297,7 +297,7 @@ def test_call_haiku_max_turns_env_override(mock_run, monkeypatch):
 
 
 @pytest.mark.parametrize("bad", ["0", "-1", "banana", "", "3.5", "21", "999999"])
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_call_haiku_invalid_max_turns_falls_back(mock_run, bad, monkeypatch):
     """A bad/out-of-range REMEMBER_MAX_TURNS must not flow through as a garbage
     --max-turns value (which would break claude -p the same way the original
@@ -310,7 +310,7 @@ def test_call_haiku_invalid_max_turns_falls_back(mock_run, bad, monkeypatch):
 
 
 @pytest.mark.parametrize("raw,expected", [("2", "2"), ("20", "20"), ("007", "7")])
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_call_haiku_valid_max_turns_normalized(mock_run, raw, expected, monkeypatch):
     """In-range values pass through, normalized (leading zeros stripped)."""
     monkeypatch.setenv("REMEMBER_MAX_TURNS", raw)
@@ -320,7 +320,7 @@ def test_call_haiku_valid_max_turns_normalized(mock_run, raw, expected, monkeypa
     assert _max_turns_in(mock_run.call_args[0][0]) == expected
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_call_haiku_nonzero_exit(mock_run):
     mock_run.return_value = MagicMock(
         returncode=1,
@@ -335,7 +335,7 @@ def test_call_haiku_nonzero_exit(mock_run):
         assert "something broke" in str(e)
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_call_haiku_failure_reports_json_error_from_stdout(mock_run):
     """--output-format json puts the failure on STDOUT and leaves stderr empty.
 
@@ -357,7 +357,7 @@ def test_call_haiku_failure_reports_json_error_from_stdout(mock_run):
         )
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_call_haiku_failure_with_no_output_says_so(mock_run):
     """Empty on both streams must read as a statement, not a truncated sentence."""
     mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="")
@@ -368,7 +368,7 @@ def test_call_haiku_failure_with_no_output_says_so(mock_run):
         assert "no output" in str(e)
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_call_haiku_failure_falls_back_to_raw_stdout(mock_run):
     """Non-JSON stdout is still better than nothing."""
     mock_run.return_value = MagicMock(
@@ -380,7 +380,7 @@ def test_call_haiku_failure_falls_back_to_raw_stdout(mock_run):
         assert "plain text explosion" in str(e)
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_call_haiku_failure_detail_is_capped(mock_run):
     """A huge payload must not be dumped into the log on every failure."""
     mock_run.return_value = MagicMock(
@@ -392,7 +392,7 @@ def test_call_haiku_failure_detail_is_capped(mock_run):
         assert len(str(e)) < 700, "failure detail should be truncated"
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_call_haiku_keeps_oauth_token(mock_run, monkeypatch):
     """CLAUDE_CODE_OAUTH_TOKEN shares the parent-session prefix but is the
     child's credentials — stripping it leaves `claude -p` unauthenticated, so
@@ -439,7 +439,7 @@ def _log_text(remember_dir) -> str:
 # output, any more; they are simply never read, for any purpose.
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_userconfig_oauth_token_env_is_never_read(mock_run, monkeypatch, tmp_path):
     """#860, round 3: the removed userConfig option's own env var is simply
     never consulted any more -- not malformed-rejected, not read at all. A
@@ -462,7 +462,7 @@ def test_userconfig_oauth_token_env_is_never_read(mock_run, monkeypatch, tmp_pat
     )
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_host_token_still_passes_through_unconditionally(mock_run, monkeypatch, tmp_path):
     """Positive control for the test above: a host-provided
     CLAUDE_CODE_OAUTH_TOKEN must still reach the child -- this plugin removing
@@ -480,7 +480,7 @@ def test_host_token_still_passes_through_unconditionally(mock_run, monkeypatch, 
     assert env.get("CLAUDE_CODE_OAUTH_TOKEN") == "sk-ant-oat-from-host-00000001"
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_legacy_env_var_configured_logs_no_notice_at_all(mock_run, monkeypatch, tmp_path):
     """#898, round 4: a still-set legacy REMEMBER_OAUTH_TOKEN no longer gets
     a notice of any kind -- the presence check that used to report it is
@@ -509,7 +509,7 @@ def test_legacy_env_var_configured_logs_no_notice_at_all(mock_run, monkeypatch, 
     )
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_legacy_config_key_configured_logs_no_notice_at_all(mock_run, monkeypatch, tmp_path):
     """Same absence for the config.json `haiku.oauth_token` key (#898, round
     4) -- paired with the env-var case above so both removed sources are
@@ -518,7 +518,7 @@ def test_legacy_config_key_configured_logs_no_notice_at_all(mock_run, monkeypatc
     monkeypatch.delenv("CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN", raising=False)
     monkeypatch.delenv("REMEMBER_OAUTH_TOKEN", raising=False)
     monkeypatch.setenv("REMEMBER_DIR", str(tmp_path))
-    monkeypatch.setattr("pipeline.haiku.os.path.expanduser", lambda p: str(tmp_path))
+    monkeypatch.setattr("pipeline.summarizer.os.path.expanduser", lambda p: str(tmp_path))
     (tmp_path / "config.json").write_text(
         json.dumps({"haiku": {"oauth_token": "sk-ant-oat-legacy-config-00009"}}),
         encoding="utf-8")
@@ -544,7 +544,7 @@ def test_log_text_helper_sees_a_notice_when_one_is_actually_written(tmp_path):
     assert "NOTICE" in _log_text(remember_dir)
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_remember_oauth_token_env_no_longer_authenticates(mock_run, monkeypatch, tmp_path):
     """Negative assertion, with a positive control: REMEMBER_OAUTH_TOKEN no
     longer authenticates the nested CLI at all -- it is not even read for
@@ -568,7 +568,7 @@ def test_remember_oauth_token_env_no_longer_authenticates(mock_run, monkeypatch,
     )
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_haiku_oauth_token_config_no_longer_authenticates(mock_run, monkeypatch, tmp_path):
     """Same negative assertion for the `haiku.oauth_token` config.json key
     (#860, round 2)."""
@@ -576,7 +576,7 @@ def test_haiku_oauth_token_config_no_longer_authenticates(mock_run, monkeypatch,
     monkeypatch.delenv("CLAUDE_PLUGIN_OPTION_OAUTH_TOKEN", raising=False)
     monkeypatch.delenv("REMEMBER_OAUTH_TOKEN", raising=False)
     monkeypatch.setenv("REMEMBER_DIR", str(tmp_path))
-    monkeypatch.setattr("pipeline.haiku.os.path.expanduser", lambda p: str(tmp_path))
+    monkeypatch.setattr("pipeline.summarizer.os.path.expanduser", lambda p: str(tmp_path))
     (tmp_path / "config.json").write_text(
         json.dumps({"haiku": {"oauth_token": "sk-ant-oat-legacy-config-00004"}}),
         encoding="utf-8")
@@ -590,7 +590,7 @@ def test_haiku_oauth_token_config_no_longer_authenticates(mock_run, monkeypatch,
     assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_a_failed_call_reports_what_it_spent(mock_run, monkeypatch, tmp_path):
     """#190: a non-zero exit still cost money if the payload says so."""
     monkeypatch.setenv("REMEMBER_DIR", str(tmp_path))
@@ -613,7 +613,7 @@ def test_a_failed_call_reports_what_it_spent(mock_run, monkeypatch, tmp_path):
     )
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_a_failure_with_no_usage_says_unknown_not_zero(mock_run, monkeypatch, tmp_path):
     """Zero would read as "it failed for free", which is the invisibility this
     closes. Unknown is the honest answer."""
@@ -628,7 +628,7 @@ def test_a_failure_with_no_usage_says_unknown_not_zero(mock_run, monkeypatch, tm
     assert "unknown" in logged, f"no honest account of the failed call:\n{logged}"
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_a_timeout_is_accounted_for_too(mock_run, monkeypatch, tmp_path):
     """A client-side timeout aborts a call the API has already been billing."""
     from subprocess import TimeoutExpired
@@ -645,7 +645,7 @@ def test_a_timeout_is_accounted_for_too(mock_run, monkeypatch, tmp_path):
     )
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_call_haiku_timeout(mock_run):
     from subprocess import TimeoutExpired
     mock_run.side_effect = TimeoutExpired("claude", 120)
@@ -700,7 +700,7 @@ def test_extract_tokens_nested_wins_over_flat():
 
 
 # --- REMEMBER_MODEL env knob (mirrors REMEMBER_MAX_TURNS) --------------------
-from pipeline.haiku import _resolve_model
+from pipeline.summarizer import _resolve_model
 
 
 def test_resolve_model_default(monkeypatch):
@@ -718,7 +718,7 @@ def test_resolve_model_blank_falls_back(monkeypatch):
     assert _resolve_model() == "haiku"
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_call_haiku_uses_resolved_model(mock_run, monkeypatch):
     monkeypatch.setenv("REMEMBER_MODEL", "sonnet")
     mock_run.return_value = MagicMock(returncode=0, stdout=_mock_claude_response("x"), stderr="")
@@ -775,7 +775,7 @@ def test_parse_response_keeps_hedged_summaries(good):
 
 
 # --- REMEMBER_REJECT_PATTERN env knob (mirrors REMEMBER_MODEL) ----------------
-from pipeline.haiku import _resolve_reject_pattern, DEFAULT_REJECT_PATTERN
+from pipeline.summarizer import _resolve_reject_pattern, DEFAULT_REJECT_PATTERN
 
 
 def test_resolve_reject_pattern_default(monkeypatch):
@@ -818,13 +818,13 @@ def test_reject_gate_custom_pattern_applies(monkeypatch):
 
 
 # --- REMEMBER_CLAUDE_BIN: resolve the claude.cmd shim on Windows (#120) -------
-from pipeline.haiku import _resolve_claude_bin
+from pipeline.summarizer import _resolve_claude_bin
 
 
 def test_resolve_claude_bin_uses_which(monkeypatch):
     """Default resolves the full path via shutil.which (queried for "claude")."""
     monkeypatch.delenv("REMEMBER_CLAUDE_BIN", raising=False)
-    with patch("pipeline.haiku.shutil.which", return_value="/usr/local/bin/claude") as w:
+    with patch("pipeline.summarizer.shutil.which", return_value="/usr/local/bin/claude") as w:
         assert _resolve_claude_bin() == "/usr/local/bin/claude"
         w.assert_called_once_with("claude")
 
@@ -835,20 +835,20 @@ def test_resolve_claude_bin_windows_cmd_shim(monkeypatch):
     .exe from a bare name), which is what kills every auto-save on Windows (#120)."""
     monkeypatch.delenv("REMEMBER_CLAUDE_BIN", raising=False)
     shim = r"C:\Users\x\AppData\Roaming\npm\claude.cmd"
-    with patch("pipeline.haiku.shutil.which", return_value=shim):
+    with patch("pipeline.summarizer.shutil.which", return_value=shim):
         assert _resolve_claude_bin() == shim
 
 
 def test_resolve_claude_bin_env_override(monkeypatch):
     """REMEMBER_CLAUDE_BIN wins over which (mirrors REMEMBER_MODEL / _MAX_TURNS)."""
     monkeypatch.setenv("REMEMBER_CLAUDE_BIN", "/opt/claude/bin/claude")
-    with patch("pipeline.haiku.shutil.which", return_value="/usr/local/bin/claude"):
+    with patch("pipeline.summarizer.shutil.which", return_value="/usr/local/bin/claude"):
         assert _resolve_claude_bin() == "/opt/claude/bin/claude"
 
 
 def test_resolve_claude_bin_blank_override_falls_back(monkeypatch):
     monkeypatch.setenv("REMEMBER_CLAUDE_BIN", "   ")
-    with patch("pipeline.haiku.shutil.which", return_value="/usr/local/bin/claude"):
+    with patch("pipeline.summarizer.shutil.which", return_value="/usr/local/bin/claude"):
         assert _resolve_claude_bin() == "/usr/local/bin/claude"
 
 
@@ -856,17 +856,17 @@ def test_resolve_claude_bin_not_on_path_falls_back(monkeypatch):
     """which finds nothing → fall back to the bare name, preserving the prior
     behaviour on a misconfigured PATH instead of returning None / crashing."""
     monkeypatch.delenv("REMEMBER_CLAUDE_BIN", raising=False)
-    with patch("pipeline.haiku.shutil.which", return_value=None):
+    with patch("pipeline.summarizer.shutil.which", return_value=None):
         assert _resolve_claude_bin() == "claude"
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_call_haiku_uses_resolved_bin(mock_run, monkeypatch):
     """cmd[0] must be the RESOLVED binary path, not the bare "claude" — else
     Windows' CreateProcess raises WinError 2 on the claude.cmd shim (#120)."""
     monkeypatch.delenv("REMEMBER_CLAUDE_BIN", raising=False)
     mock_run.return_value = MagicMock(
         returncode=0, stdout=_mock_claude_response("x"), stderr="")
-    with patch("pipeline.haiku.shutil.which", return_value="/usr/local/bin/claude"):
+    with patch("pipeline.summarizer.shutil.which", return_value="/usr/local/bin/claude"):
         call_haiku("p")
     assert mock_run.call_args[0][0][0] == "/usr/local/bin/claude"
