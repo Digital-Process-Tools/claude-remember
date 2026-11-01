@@ -1,0 +1,13 @@
+# v0.42.3 vendored fixtures (#1002 round 3, #1070) must stay byte-for-byte
+# identical to the tagged release forever -- see tests/fixtures/v0_42_3/
+# NOTE.md. -text disables git's line-ending normalization on checkout, so a
+# Windows checkout cannot silently rewrite LF -> CRLF here. Without this, a
+# future rewrite would still satisfy the xfail(strict=True) markers in
+# tests/test_windows_real_wscript_v0_42_3_1002.py (any failure does, not
+# only the documented one) and CI would stay green with no signal that the
+# fixture's byte-identity invariant had broken. See also
+# tests/test_v0_42_3_fixture_integrity_1070.py, which pins both the
+# mechanism (this file) and the actual bytes (a committed sha256) directly.
+tests/fixtures/v0_42_3/lib-detach.sh -text
+tests/fixtures/v0_42_3/lib-detach-pidwrap.sh -text
+tests/fixtures/v0_42_3/windows-hidden-run.vbs -text
