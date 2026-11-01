@@ -1175,7 +1175,21 @@ _remember_start_cache_manifest_lines() {
 # On a hit: prints the cached MEMORY section bytes and returns 0. On a miss
 # (disabled, absent, unreadable, untrusted, or any manifest entry not older
 # than the cache): prints nothing and returns 1 -- the caller renders live.
+#
+# No marker file (#1051 self-review): an earlier version of this fix wrote
+# the exact byte length of what it just printed into a PID-scoped marker
+# file, purely so _remember_apply_session_start_budget's own subshell could
+# learn what THIS subshell served. That cost real forks (mktemp + mv to
+# write it, a second cat to measure it, rm to consume it) on every single
+# cache-served SessionStart -- the COMMON path, not the rare over-budget
+# one -- measured 26 -> 30 process launches with the #679 counting harness.
+# The budget function now recovers the same information for free, by
+# re-reading THIS SAME cache file directly with $(<...) (a bash builtin,
+# no fork) on the one path that actually needs it: see that function for
+# why re-reading it is safe against the #845 race a marker also had to
+# guard against.
 _remember_start_cache_context_load() {
+    local LC_ALL=C
     [ "${REMEMBER_START_CACHE:-1}" = "1" ] || return 1
     [ "${SESSION_START_SOURCE:-}" != "compact" ] || return 1
     [ -n "${REMEMBER_DIR:-}" ] || return 1
@@ -1235,6 +1249,17 @@ _remember_start_cache_context_load() {
     # why mtimes alone cannot catch this.
     [ "$_mf_version" = "$_REMEMBER_CACHE_FORMAT_VERSION" ] || return 1
 
+    # Direct `cat`, not a command substitution: this stdout IS the function's
+    # contract (test_start_context_cache_668.py asserts it byte-identical to
+    # a live render, trailing newlines included), and a `$(...)` capture
+    # strips trailing newlines bash's own stripping rules would only apply
+    # again, redundantly, once this output lands inside the SessionStart
+    # body's own outer command substitution in session-start-hook.sh -- NOT
+    # when this function is called directly, as the cache test above does.
+    # No marker, no second capture here (#1051 self-review): the budget
+    # function re-reads this exact cache file for itself, only on the rare
+    # path that needs it. See that function's own comment for the full
+    # reasoning.
     cat "$_cache"
     return 0
 }
@@ -1374,7 +1399,14 @@ unset _REMEMBER_BUDGET_EXCLUDE
 # is confirmed byte-identical to a fresh render. ${var:off:len} and string
 # equality are both linear. A mismatch (a memory file changed between the
 # two renders) leaves the body untouched and logs it -- the pre-#842 shape,
-# never a cut at a guessed offset.
+# never a cut at a guessed offset -- UNLESS a cache HIT (#1051) is why it
+# mismatched: a cache can legitimately serve a PRIOR calendar day's bytes,
+# which can never match a TODAY-dated re-render, and in that one case this
+# function re-reads the SAME cache file directly ($(<...), no fork) to
+# recover the real split, trusting it only when what is on disk right now
+# still matches the served tail (the #845 guard against a concurrent
+# republish racing that same read). See this function's own body for that
+# fallback.
 #
 # Cost: none on the common path. An under-budget body returns at the length
 # check below, before any render, fork or copy; only an over-budget body
@@ -1397,22 +1429,64 @@ unset _REMEMBER_BUDGET_EXCLUDE
 # this cache's own, this file used that the scanner holds submissions on).
 _remember_apply_session_start_budget() {
     local _outvar="$1" _max="$2" _text="$3"
-    if [ -z "$_max" ] || [ "${_max#*[!0-9]}" != "$_max" ]; then return 0; fi
-    [ "$_max" -gt 0 ] || return 0
     # byte length, not a locale-dependent character count (see header above)
     local LC_ALL=C
+
+    if [ -z "$_max" ] || [ "${_max#*[!0-9]}" != "$_max" ]; then return 0; fi
+    [ "$_max" -gt 0 ] || return 0
     [ "${#_text}" -gt "$_max" ] || return 0
 
     # Both captures strip trailing newlines the same way the body's own
     # capture in session-start-hook.sh did, and the memory section is the
-    # body's tail -- so the two tails compare equal byte for byte.
+    # body's tail -- so the two tails compare equal byte for byte, UNLESS
+    # the tail came from a cache HIT serving a PRIOR calendar day's bytes
+    # (see below).
     local _mem _head_len _head _exclude="" _path _next
     _mem=$(_remember_render_memory_section 2>/dev/null)
     [ -n "$_mem" ] || return 0
     _head_len=$(( ${#_text} - ${#_mem} ))
     if [ "$_head_len" -lt 0 ] || [ "${_text:$_head_len}" != "$_mem" ]; then
-        log "memory-context" "WARNING: session_start_max_bytes: MEMORY section changed before the budget check -- injected as rendered, over budget"
-        return 0
+        # #1051: the fresh render above can never match a cache HIT served
+        # from a PRIOR calendar day -- every check the loader applies
+        # (mtimes, VERSION=) passes on a cache that is a day old, by design
+        # (#668), and nothing re-rendered live TODAY can be byte-identical
+        # to it. That is not the #845 race this equality check exists to
+        # catch (nothing changed mid-render); it is two different days
+        # producing two different renders by construction. When the loader
+        # told us exactly how many bytes IT served, trust that split instead
+        # of giving up: the head (handoff + legend, always rendered live in
+        # THIS process, never cached) is unaffected by which day's MEMORY
+        # section the served tail holds.
+        #
+        # No marker: recover the split by re-reading the SAME cache file
+        # the loader just served, with $(<...) -- a bash builtin, no fork,
+        # so this costs nothing beyond the mismatch path it already lives
+        # on. If what is on disk RIGHT NOW is still byte-identical to the
+        # text's tail, the cache is exactly what was served and its length
+        # is the real split point; the head (handoff + legend, always
+        # rendered live in THIS process, never cached) is unaffected by
+        # which day's MEMORY section the served tail holds.
+        #
+        # #845: a concurrent republish between the original serve and this
+        # read can overwrite the cache with DIFFERENT bytes before this
+        # line runs. That race is exactly what this same comparison also
+        # catches: a raced cache no longer matches the served tail either,
+        # so trust neither and fall through to the existing conservative
+        # "give up, warn, inject untrimmed" path below -- the same
+        # fallback this whole recovery sits on top of.
+        local _cache="${REMEMBER_DIR:-}/tmp/start-context.cache"
+        local _cache_now="" _cache_head_len=-1
+        if [ -n "${REMEMBER_DIR:-}" ] && [ -f "$_cache" ] && [ ! -L "$_cache" ] \
+            && [ -O "$_cache" ] && [ -r "$_cache" ]; then
+            _cache_now="$(<"$_cache")"
+            _cache_head_len=$(( ${#_text} - ${#_cache_now} ))
+        fi
+        if [ "$_cache_head_len" -ge 0 ] && [ "${_text:$_cache_head_len}" = "$_cache_now" ]; then
+            _head_len="$_cache_head_len"
+        else
+            log "memory-context" "WARNING: session_start_max_bytes: MEMORY section changed before the budget check -- injected as rendered, over budget"
+            return 0
+        fi
     fi
     _head="${_text:0:$_head_len}"
 
