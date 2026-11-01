@@ -44,7 +44,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from pipeline.haiku import call_haiku  # noqa: E402
+from pipeline.summarizer import call_haiku  # noqa: E402
 
 # Spelled out rather than imported from the module under test: these two numbers
 # are the contract a user reads in the CHANGELOG, and a test that imports them
@@ -88,7 +88,7 @@ def _recursive_fake_claude(tmp_path: Path, ledger: Path) -> Path:
     snippet = (
         "import sys;"
         f"sys.path.insert(0, {str(REPO_ROOT)!r});"
-        "from pipeline.haiku import call_haiku\n"
+        "from pipeline.summarizer import call_haiku\n"
         "try:\n"
         "    call_haiku('summarize this', timeout=20)\n"
         "except Exception as exc:\n"
@@ -316,7 +316,7 @@ def test_the_child_env_does_not_carry_the_parents_project_dir(monkeypatch):
     """
     import os
 
-    from pipeline.haiku import _summarizer_environment
+    from pipeline.summarizer import _summarizer_environment
 
     monkeypatch.delenv("REMEMBER_CONFIG", raising=False)
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/dev/real-project")

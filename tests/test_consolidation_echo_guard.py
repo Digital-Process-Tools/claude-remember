@@ -2,7 +2,7 @@
 
 Two independent defects produced one corruption:
 
-1. ``pipeline/haiku.py`` isolated the nested ``claude -p`` from MCP servers
+1. ``pipeline/summarizer.py`` isolated the nested ``claude -p`` from MCP servers
    (#94) but from nothing else, so the *user's* hooks fired inside it. A
    ``UserPromptSubmit`` hook that blocks makes the CLI write its block message
    to stdout and exit **0**, reporting ``subtype: success`` — so the plugin
@@ -41,7 +41,7 @@ from pipeline.consolidate import (
 )
 from pipeline.entry_header import contains_header
 from pipeline.prompts import build_consolidation_prompt
-from pipeline.haiku import call_haiku
+from pipeline.summarizer import call_haiku
 
 
 # --- fixtures reproducing the real failure ---------------------------------
@@ -210,7 +210,7 @@ def _mock_claude_response(result_text: str) -> str:
     })
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_nested_call_isolates_hooks(mock_run):
     """The nested `claude -p` must load no setting sources, the way #94 made it
     load no MCP servers. Hooks live in user/project/local settings files; with
@@ -226,7 +226,7 @@ def test_nested_call_isolates_hooks(mock_run):
     assert cmd[cmd.index("--setting-sources") + 1] == ""
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_older_cli_without_the_flag_degrades_instead_of_going_silent(mock_run):
     """The #204 trap: an unknown option makes the CLI exit non-zero, which
     becomes a RuntimeError, which means **no saves ever again**.
@@ -258,7 +258,7 @@ def test_older_cli_without_the_flag_degrades_instead_of_going_silent(mock_run):
     assert "--no-session-persistence" in second
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_unknown_option_for_some_other_flag_is_not_retried(mock_run):
     """An unknown option that is not ours says the CLI disagrees about
     something we did not just add — retrying without `--setting-sources`
@@ -285,7 +285,7 @@ def test_unknown_option_for_some_other_flag_is_not_retried(mock_run):
 def test_parse_response_rejects_a_cli_block_message():
     """`claude -p` reports a blocked prompt as `subtype: success` with exit 0,
     so nothing downstream can tell it apart from a reply by status alone."""
-    from pipeline.haiku import _parse_response
+    from pipeline.summarizer import _parse_response
 
     blocked = _hook_block_message("## 09:14 | main\nsome earlier entry\n")
     result = _parse_response(_mock_claude_response(blocked))
@@ -295,7 +295,7 @@ def test_parse_response_rejects_a_cli_block_message():
 
 def test_parse_response_still_accepts_an_ordinary_entry():
     """The seam check must not reject real summaries."""
-    from pipeline.haiku import _parse_response
+    from pipeline.summarizer import _parse_response
 
     result = _parse_response(
         _mock_claude_response("## 14:32 | main\nFixed the lock adoption path.")
@@ -307,7 +307,7 @@ def test_parse_response_still_accepts_an_ordinary_entry():
 # --- layer 1: isolation must fail OPEN into layer 2, never into an outage ---
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_settings_file_auth_falls_back_instead_of_dying(mock_run):
     """Excluding every setting source also excludes `apiKeyHelper` and the
     `env` block, which is how enterprise / Bedrock / proxy installs are
@@ -332,7 +332,7 @@ def test_settings_file_auth_falls_back_instead_of_dying(mock_run):
     assert "--setting-sources" not in mock_run.call_args_list[1][0][0]
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_a_billable_api_failure_is_never_retried(mock_run):
     """A rate limit or an overloaded upstream already cost money. Retrying it
     doubles the spend and hides the cause — the #129/#190 shape."""

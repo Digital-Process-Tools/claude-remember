@@ -149,6 +149,16 @@ def _resolve_codex_bin() -> str:
 # constant so the tests pin one spelling against both sides of the contract.
 NESTED_SUMMARIZER_ENV = "REMEMBER_NESTED_SUMMARIZER"
 
+# The CLI's own auto-memory, unrelated to this plugin's hooks (#1054). It
+# scaffolds `<project>/memory/` at startup for ANY cwd Claude Code resolves a
+# project from -- including the fresh, isolated per-call cwd this spawn gets
+# (_isolated_summarizer_cwd, #724) -- and does so before any hook runs, so
+# `--setting-sources ""` and REMEMBER_NESTED_SUMMARIZER above have no effect
+# on it: neither is a hook. The summarizer never reads or writes auto-memory,
+# so disabling it for the spawn loses nothing and costs nothing; left alone,
+# every call leaves a permanent, empty project folder behind.
+AUTO_MEMORY_DISABLE_ENV = "CLAUDE_CODE_DISABLE_AUTO_MEMORY"
+
 
 # ─── Host-native summarizer routing (#460) ─────────────────────────────────
 #
@@ -418,10 +428,18 @@ def _summarizer_environment():
     false-positive on an unrelated session, which ``CLAUDE_CODE_ENTRYPOINT=
     sdk-cli`` would. Its previous state is restored afterwards, so the
     plugin never goes silent in the user's real session.
+
+    ``CLAUDE_CODE_DISABLE_AUTO_MEMORY`` is set alongside it, same lifetime,
+    same restore (#1054). This one is not about our hooks at all -- it is the
+    CLI's own auto-memory, which scaffolds ``<project>/memory/`` at startup
+    for the isolated per-call cwd regardless of hook isolation, and leaves a
+    permanent, empty project folder behind for every single call.
     """
     previous_marker = os.environ.get("REMEMBER_NESTED_SUMMARIZER")
+    previous_auto_memory_marker = os.environ.get("CLAUDE_CODE_DISABLE_AUTO_MEMORY")
     with _without_session_env():
         os.environ["REMEMBER_NESTED_SUMMARIZER"] = "1"
+        os.environ["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
         try:
             yield
         finally:
@@ -429,6 +447,10 @@ def _summarizer_environment():
                 os.environ.pop("REMEMBER_NESTED_SUMMARIZER", None)
             else:
                 os.environ["REMEMBER_NESTED_SUMMARIZER"] = previous_marker
+            if previous_auto_memory_marker is None:
+                os.environ.pop("CLAUDE_CODE_DISABLE_AUTO_MEMORY", None)
+            else:
+                os.environ["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = previous_auto_memory_marker
 
 
 def _usage_from_failure(stdout: object) -> TokenUsage | None:
@@ -576,9 +598,12 @@ def _warn(message: str) -> None:
         if remember_dir:
             from .log import log
 
-            log("haiku", message, os.path.join(remember_dir, "logs"))
+            # Tag renamed from "haiku" to "summarizer" (#1055): the configured
+            # model is not always Haiku, and a Sonnet or Codex user's log
+            # said "haiku" on every save regardless of what actually ran.
+            log("summarizer", message, os.path.join(remember_dir, "logs"))
         else:
-            print(f"[haiku] {message}", file=sys.stderr)
+            print(f"[summarizer] {message}", file=sys.stderr)
     except Exception:
         pass
 
@@ -1256,6 +1281,10 @@ def _call_codex(prompt: str, timeout: int = 120) -> HaikuResult:
         is_skip=model_skipped or rejected,
         is_rejected=rejected,
         provider="codex",
+        # _build_codex_cmd passes no --model flag at all (#1055): there is no
+        # resolved model to report, only the fact that this ran through
+        # codex's own default rather than a chosen one.
+        model="codex default",
     )
 
 
@@ -1444,7 +1473,13 @@ def call_haiku(
             f"{_inherited_env_hint(detail)}"
         )
 
-    return _parse_response(result.stdout)
+    parsed = _parse_response(result.stdout)
+    # Which model actually ran this call (#1055): the resolved REMEMBER_MODEL
+    # value (or the "haiku" default) -- the same value `_build_cmd` passed as
+    # `--model`, so this names what was actually billed, not merely what the
+    # module is called.
+    parsed.model = _resolve_model()
+    return parsed
 
 
 # Reject-gate: conversational refusals / clarifications must NEVER reach the

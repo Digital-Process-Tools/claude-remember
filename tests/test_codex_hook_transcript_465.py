@@ -4,7 +4,7 @@ environment (#465).
 #464 keyed Codex detection on CODEX_SESSION_ID/CODEX_THREAD_ID, captured
 from a live `codex exec` run -- but that capture came from a Codex *tool
 shell*, not from the SessionEnd *hook* process that actually spawns
-Remember's summarizer (pipeline/haiku.py, reached via
+Remember's summarizer (pipeline/summarizer.py, reached via
 scripts/save-session.sh <- scripts/session-end-hook.sh). A live capture from
 inside a real SessionEnd hook (env dumped with CLAUDE_CODE_* stripped, one
 live `codex exec` session, macOS, codex-cli 0.150.1) confirms neither
@@ -41,7 +41,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from pipeline.haiku import _choose_summarizer_provider
+from pipeline.summarizer import _choose_summarizer_provider
 
 FIXTURES = Path(__file__).parent / "fixtures"
 CODEX_TRANSCRIPT = FIXTURES / "codex-rollout.jsonl"
@@ -115,7 +115,7 @@ def test_unusable_transcript_logs_why_it_fell_to_claude(monkeypatch):
     unrecognised.write_text('{"not": "a host shape"}\n', encoding="utf-8")
     try:
         monkeypatch.setenv("REMEMBER_TRANSCRIPT_PATH", str(unrecognised))
-        with patch("pipeline.haiku._warn") as mock_warn:
+        with patch("pipeline.summarizer._warn") as mock_warn:
             assert _choose_summarizer_provider() == "claude"
         mock_warn.assert_called_once()
         assert "could not identify the host" in mock_warn.call_args[0][0]
@@ -129,7 +129,7 @@ def test_no_transcript_at_all_does_not_warn(monkeypatch):
     pipeline invocation with no hook preamble) is not a failure and must
     not log a warning every time."""
     _clear_host_signals(monkeypatch)
-    with patch("pipeline.haiku._warn") as mock_warn:
+    with patch("pipeline.summarizer._warn") as mock_warn:
         assert _choose_summarizer_provider() == "claude"
     mock_warn.assert_not_called()
 

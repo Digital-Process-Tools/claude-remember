@@ -28,7 +28,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from pipeline.haiku import call_haiku
+from pipeline.summarizer import call_haiku
 from pipeline.spawn_guard import SummarizerSpawnDeclined
 
 # #465: "auto" no longer asks the environment for a Codex signature -- it
@@ -86,7 +86,7 @@ def _write_codex_output(cmd, **kwargs):
     return MagicMock(returncode=0, stdout="", stderr="")
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_claude_code_host_still_uses_claude(mock_run, monkeypatch):
     """Regression control: a Claude Code (non-Codex) session is untouched."""
     monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "cli")
@@ -99,7 +99,7 @@ def test_claude_code_host_still_uses_claude(mock_run, monkeypatch):
     assert "-p" in cmd
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_unknown_host_still_uses_claude(mock_run):
     """No signature at all (e.g. a bare `python3 -m pipeline.shell` run,
     or a host this module has never heard of) is not Codex -- it gets the
@@ -112,7 +112,7 @@ def test_unknown_host_still_uses_claude(mock_run):
     assert os.path.basename(cmd[0]).startswith("claude")
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_codex_host_routes_to_codex_exec(mock_run, monkeypatch):
     """A detected Codex host uses `codex exec`, not `claude -p` -- the
     positive control paired with every "claude was NOT called" assertion
@@ -136,7 +136,7 @@ def test_codex_host_routes_to_codex_exec(mock_run, monkeypatch):
     assert not any("claude" in os.path.basename(str(c)) for c in cmd)
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_explicit_claude_override_wins_under_codex_host(mock_run, monkeypatch):
     """A Codex user who explicitly wants Claude gets it -- possible, just
     not unconditional (the issue's own framing)."""
@@ -150,7 +150,7 @@ def test_explicit_claude_override_wins_under_codex_host(mock_run, monkeypatch):
     assert os.path.basename(cmd[0]).startswith("claude")
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_explicit_codex_override_wins_under_claude_code_host(mock_run, monkeypatch):
     monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "cli")
     monkeypatch.setenv("REMEMBER_SUMMARIZER", "codex")
@@ -162,7 +162,7 @@ def test_explicit_codex_override_wins_under_claude_code_host(mock_run, monkeypat
     assert os.path.basename(cmd[0]) == "codex"
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_codex_unavailable_fails_loudly_with_no_fallback_configured(mock_run, monkeypatch):
     """The route being unavailable must never silently reproduce #460 one
     layer down by falling back to claude -p on its own. No fallback opted
@@ -179,7 +179,7 @@ def test_codex_unavailable_fails_loudly_with_no_fallback_configured(mock_run, mo
         assert not os.path.basename(cmd[0]).startswith("claude")
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_codex_unavailable_falls_back_when_opted_in(mock_run, monkeypatch):
     """REMEMBER_SUMMARIZER_FALLBACK=claude is the operator's explicit
     opt-in -- the one case where this route is allowed to reach claude -p."""
@@ -202,7 +202,7 @@ def test_codex_unavailable_falls_back_when_opted_in(mock_run, monkeypatch):
     assert os.path.basename(calls[1][0]).startswith("claude")
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_codex_empty_output_is_a_loud_failure_not_a_silent_skip(mock_run, monkeypatch):
     """An empty -o file (codex exited 0 but wrote nothing) must not be
     read as a legitimate SKIP -- it is a failure of the route, distinct
@@ -215,8 +215,8 @@ def test_codex_empty_output_is_a_loud_failure_not_a_silent_skip(mock_run, monkey
         call_haiku("test prompt")
 
 
-@patch("pipeline.haiku.spawn_guard.claim")
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.spawn_guard.claim")
+@patch("pipeline.summarizer.subprocess.run")
 def test_codex_spawn_declined_is_never_treated_as_unavailable(mock_run, mock_claim, monkeypatch):
     """A spawn-guard decline (#204) is "skip this span, retry later", not
     "route unavailable" -- it must propagate as-is, never triggering a
@@ -231,7 +231,7 @@ def test_codex_spawn_declined_is_never_treated_as_unavailable(mock_run, mock_cla
     mock_run.assert_not_called()
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_legacy_oauth_token_does_not_authenticate_the_codex_fallback(mock_run, monkeypatch):
     """Review finding (#860, round 2): the recovery-token code has never
     branched by host, so a Codex host falling through to the shared
@@ -270,7 +270,7 @@ def test_legacy_oauth_token_does_not_authenticate_the_codex_fallback(mock_run, m
     )
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_host_token_does_authenticate_the_codex_fallback(mock_run, monkeypatch):
     """Positive control for the test above: a real host-vendor credential
     (CLAUDE_CODE_OAUTH_TOKEN, passed straight through unconditionally) DOES
@@ -304,7 +304,7 @@ def test_host_token_does_authenticate_the_codex_fallback(mock_run, monkeypatch):
     assert claude_env.get("CLAUDE_CODE_OAUTH_TOKEN") == "sk-ant-oat-host-codex02"
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_userconfig_env_var_no_longer_reaches_the_codex_fallback(mock_run, monkeypatch):
     """#860, round 3: the plugin's own userConfig recovery-token setting is
     gone entirely -- its env var must no longer authenticate the Codex
@@ -340,7 +340,7 @@ def test_userconfig_env_var_no_longer_reaches_the_codex_fallback(mock_run, monke
     )
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_invalid_summarizer_env_falls_back_to_auto(mock_run):
     """A typo'd REMEMBER_SUMMARIZER value must not silently do something
     unexpected -- it is reported and treated as unset (\"auto\"), same

@@ -24,7 +24,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from pipeline.haiku import _isolation_may_be_the_cause
+from pipeline.summarizer import _isolation_may_be_the_cause
 
 
 def test_the_316_auth_failure_is_still_recognised():

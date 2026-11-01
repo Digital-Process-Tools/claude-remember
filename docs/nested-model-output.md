@@ -82,8 +82,8 @@ it. Those are not comparable, so the guard is tuned to over-reject.
 
 | Layer | Where | Covers | Can it be degraded away? |
 | ----- | ----- | ------ | ------------------------ |
-| Hook isolation (`--setting-sources ''`) | `haiku.py`, argv | the hook vector, for every pipeline stage | **yes** — see below |
-| CLI-notice rejection | `haiku.py`, `_parse_response` | the CLI's own voice, every stage | no |
+| Hook isolation (`--setting-sources ''`) | `summarizer.py`, argv | the hook vector, for every pipeline stage | **yes** — see below |
+| CLI-notice rejection | `summarizer.py`, `_parse_response` | the CLI's own voice, every stage | no |
 | Echo rejection | `consolidate.py` | any quotation of the consolidation prompt | no |
 
 Isolation is the only one that can be lost, and it can be lost for reasons

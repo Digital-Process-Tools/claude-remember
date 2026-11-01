@@ -295,7 +295,7 @@ echo "8. Live Haiku test"
 if [ "$LIVE" = true ]; then
     LIVE_OUT=$(cd "$PIPELINE_DIR" && python3 -c "
 import sys; sys.path.insert(0, '.')
-from pipeline.haiku import call_haiku
+from pipeline.summarizer import call_haiku
 r = call_haiku('Reply with exactly one word: WORKING', timeout=30)
 print(f'text={r.text.strip()}')
 print(f'tokens_in={r.tokens.input}')

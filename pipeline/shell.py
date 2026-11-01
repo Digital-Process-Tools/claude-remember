@@ -40,8 +40,8 @@ from .extract import (
     mark_unread_envelope,
     read_positions,
 )
-from .haiku import _parse_response
 from .prompts import build_save_prompt, build_ndc_prompt
+from .summarizer import _parse_response
 
 
 def _shell_escape(value: str) -> str:
@@ -264,6 +264,9 @@ def _emit_haiku_result(r, output_file: str = "") -> None:
     # a call-haiku declines (spawn guard) before it even reaches whichever
     # provider it would have used.
     print(f"PROVIDER={_shell_escape(r.provider)}")
+    # Which model actually ran this call (#1055) -- so a Sonnet or Codex
+    # user's log says which model ran, not just a tag naming neither.
+    print(f"MODEL={_shell_escape(r.model)}")
     print(f"TK_IN={r.tokens.input}")
     print(f"TK_OUT={r.tokens.output}")
     print(f"TK_CACHE={r.tokens.cache}")
@@ -292,7 +295,7 @@ def cmd_call_haiku(prompt_file: str, output_file: str = "", timeout: int = 120) 
     ``thresholds.max_summary_failures``, advances the read cursor past it — so
     reporting a working cap as a failure would lose the span it protected.
     """
-    from .haiku import call_haiku
+    from .summarizer import call_haiku
     from .spawn_guard import EXIT_SPAWN_DECLINED, SummarizerSpawnDeclined
 
     try:

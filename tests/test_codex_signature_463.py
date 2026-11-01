@@ -19,9 +19,9 @@ those are different children, and a live capture from inside the hook shows
 CODEX_SESSION_ID/CODEX_THREAD_ID do not survive into it. ``detect_host()``
 itself is unchanged and these assertions still hold (it is a correct
 description of what a tool-shell environment looks like); what changed is
-that ``pipeline.haiku._choose_summarizer_provider()`` no longer calls it for
+that ``pipeline.summarizer._choose_summarizer_provider()`` no longer calls it for
 "auto" -- see tests/test_codex_hook_transcript_465.py and
-pipeline/haiku.py's own note.
+pipeline/summarizer.py's own note.
 """
 
 from __future__ import annotations

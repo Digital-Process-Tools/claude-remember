@@ -50,8 +50,8 @@ inventing a seam rather than recording one:
 
 - **Event names.** Bindings live in each host's own manifest, which is the file
   that has to name them anyway. A mapping table here would be read by nobody.
-- **The summarizer.** ``pipeline/haiku.py`` shells ``claude -p`` or
-  ``codex exec``, chosen by ``pipeline.haiku._choose_summarizer_provider()``
+- **The summarizer.** ``pipeline/summarizer.py`` shells ``claude -p`` or
+  ``codex exec``, chosen by ``pipeline.summarizer._choose_summarizer_provider()``
   -- "auto" reads the TRANSCRIPT the host wrote (``transcript_path()`` below
   plus ``pipeline.extract.sniff_file_envelope()``), not ``detect_host()``
   (#465; ``detect_host()`` was the original #460 mechanism, but the env-var
@@ -61,7 +61,7 @@ inventing a seam rather than recording one:
   still not here: each provider's auth model and output shape (Anthropic's
   ``--output-format json`` vs. Codex's ``-o <file>``) stay different enough
   that one would either leak one CLI's shape into the other or hide a
-  distinction ``pipeline/haiku.py`` actually needs, so the provider dispatch
+  distinction ``pipeline/summarizer.py`` actually needs, so the provider dispatch
   lives beside the CLI calls it dispatches to, and only WHICH host is running
   lives here.
 - **Path resolution in shell.** ``scripts/resolve-paths.sh`` runs before Python
@@ -200,7 +200,7 @@ UNKNOWN = Host(name="unknown", plugin_root_vars=(), project_dir_vars=())
 #
 # A third, explicit AMBIGUOUS state was considered instead of silently
 # picking one. It was rejected here because, at the time, detect_host() had
-# exactly one consumer (pipeline.haiku._choose_summarizer_provider) and that
+# exactly one consumer (pipeline.summarizer._choose_summarizer_provider) and that
 # consumer's own contract was already binary -- "codex under a detected
 # Codex host, claude everywhere else" -- so AMBIGUOUS would have collapsed
 # into the same "claude" branch as UNKNOWN with no behavioural difference
@@ -209,7 +209,7 @@ UNKNOWN = Host(name="unknown", plugin_root_vars=(), project_dir_vars=())
 #
 # #465: that consumer no longer calls detect_host() at all -- the env-var
 # signature this function reads does not survive into the process that
-# actually runs the summarizer (see pipeline/haiku.py's own note on
+# actually runs the summarizer (see pipeline/summarizer.py's own note on
 # _choose_summarizer_provider), so summarizer routing now reads the
 # transcript the host wrote instead. detect_host() stays here as a correct,
 # directly-tested fact about a process's environment

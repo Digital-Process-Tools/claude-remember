@@ -70,6 +70,13 @@ class HaikuResult:
             this result; the default is "claude" because that was the only
             provider before #460 and every construction site that predates
             it (tests included) is correct leaving it unset.
+        model: Which model actually ran this call (#1055) -- the resolved
+            REMEMBER_MODEL value (or the "haiku" default) on the claude
+            route, since ``--model`` is what was actually passed; "codex
+            default" on the codex route, since ``_build_codex_cmd`` passes
+            no model flag at all. Empty string only for a construction site
+            that predates #1055 (none in this codebase, but a future test
+            fixture is not obligated to set it).
     """
 
     text: str = ""
@@ -77,6 +84,7 @@ class HaikuResult:
     is_skip: bool = False
     is_rejected: bool = False
     provider: str = "claude"
+    model: str = ""
 
 
 @dataclass

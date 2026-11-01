@@ -2,7 +2,7 @@
 summarizer's credential or which variables reach it (#726).
 
 `_configured_oauth_token()` (since removed) / `_configured_drop_env()`
-(pipeline/haiku.py) read `haiku.*` from the merged config
+(pipeline/summarizer.py) read `haiku.*` from the merged config
 `lib-memory-dir.sh` builds, which deep-merges the per-project layer on top
 of user-global and bundled -- with no distinction, before this fix, between
 "a project I trust wrote this" and "a repository I cloned shipped this
@@ -29,7 +29,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from pipeline.haiku import _config_candidates, _remember_dir_is_project_local
+from pipeline.summarizer import _config_candidates, _remember_dir_is_project_local
 from tests.test_jq_free_config import _path_without_jq
 from tests.test_layered_config import DETECT_SCRIPT, LIB_SCRIPT, _run_lib
 
@@ -1025,7 +1025,7 @@ class TestConfigCandidatesSkipsProjectLocalRememberDir:
         direct-python case above) but realpath() raises -- must default to
         True (exclude the raw candidate) rather than False, since the wrong
         default here silently reopens #726 on whatever rare host hits this."""
-        import pipeline.haiku as haiku_module
+        import pipeline.summarizer as haiku_module
 
         project = tmp_path / "proj"
         project.mkdir()

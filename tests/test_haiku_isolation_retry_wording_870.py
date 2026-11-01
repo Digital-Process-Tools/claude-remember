@@ -21,7 +21,7 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from pipeline.haiku import _HOOK_ISOLATION_FLAG, call_haiku
+from pipeline.summarizer import _HOOK_ISOLATION_FLAG, call_haiku
 
 
 AUTH_ERROR = json.dumps({
@@ -35,7 +35,7 @@ RATE_LIMIT_ERROR = json.dumps({
 })
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_an_auth_only_failure_is_not_blamed_on_the_rejected_flag(mock_run):
     """Self-review regression: _isolation_may_be_the_cause() also returns True
     on a pure auth-marker match with no "unknown option" text anywhere -- the
@@ -48,7 +48,7 @@ def test_an_auth_only_failure_is_not_blamed_on_the_rejected_flag(mock_run):
         MagicMock(returncode=1, stdout=RATE_LIMIT_ERROR, stderr=""),
     ]
 
-    with patch("pipeline.haiku._warn") as mock_warn:
+    with patch("pipeline.summarizer._warn") as mock_warn:
         try:
             call_haiku("p")
             assert False, "should raise -- both attempts failed"
@@ -65,7 +65,7 @@ def test_an_auth_only_failure_is_not_blamed_on_the_rejected_flag(mock_run):
     )
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_an_unknown_option_failure_still_blames_the_flag(mock_run):
     """Positive control for the test above: when the CLI's own failure text
     DOES say "unknown option" naming this flag, the original wording is
@@ -80,7 +80,7 @@ def test_an_unknown_option_failure_still_blames_the_flag(mock_run):
         MagicMock(returncode=0, stdout=ok_response, stderr=""),
     ]
 
-    with patch("pipeline.haiku._warn") as mock_warn:
+    with patch("pipeline.summarizer._warn") as mock_warn:
         call_haiku("p")
 
     warnings = " ".join(str(c.args[0]) for c in mock_warn.call_args_list)
@@ -90,14 +90,14 @@ def test_an_unknown_option_failure_still_blames_the_flag(mock_run):
     )
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_retry_failing_with_the_same_auth_error_names_isolation_as_innocent(mock_run):
     mock_run.side_effect = [
         MagicMock(returncode=1, stdout=AUTH_ERROR, stderr=""),
         MagicMock(returncode=1, stdout=AUTH_ERROR, stderr=""),
     ]
 
-    with patch("pipeline.haiku._warn") as mock_warn:
+    with patch("pipeline.summarizer._warn") as mock_warn:
         try:
             call_haiku("p")
             assert False, "should raise -- both attempts failed"
@@ -118,7 +118,7 @@ def test_retry_failing_with_the_same_auth_error_names_isolation_as_innocent(mock
     assert mock_run.call_count == 2, "the retry must actually have run"
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_retry_succeeding_prints_no_correction(mock_run):
     """Positive control: when the un-isolated retry SUCCEEDS, there is
     nothing to correct -- the first warning was right that dropping
@@ -130,7 +130,7 @@ def test_retry_succeeding_prints_no_correction(mock_run):
         MagicMock(returncode=0, stdout=ok_response, stderr=""),
     ]
 
-    with patch("pipeline.haiku._warn") as mock_warn:
+    with patch("pipeline.summarizer._warn") as mock_warn:
         call_haiku("p")
 
     warnings = " ".join(str(c.args[0]) for c in mock_warn.call_args_list)
@@ -139,7 +139,7 @@ def test_retry_succeeding_prints_no_correction(mock_run):
     )
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_retry_failing_for_an_unrelated_reason_prints_no_correction(mock_run):
     """Negative control: the retry fails, but NOT with an auth marker -- the
     correction ("isolation was not the cause, it's your login") would be
@@ -149,7 +149,7 @@ def test_retry_failing_for_an_unrelated_reason_prints_no_correction(mock_run):
         MagicMock(returncode=1, stdout=RATE_LIMIT_ERROR, stderr=""),
     ]
 
-    with patch("pipeline.haiku._warn") as mock_warn:
+    with patch("pipeline.summarizer._warn") as mock_warn:
         try:
             call_haiku("p")
             assert False, "should raise -- both attempts failed"

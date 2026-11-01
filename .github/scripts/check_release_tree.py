@@ -311,7 +311,7 @@ _NETWORK_WORD_STANDALONE = re.compile(
     r"\b(" + "|".join(NETWORK_WORDS_EXTENDED) + r")\b", re.IGNORECASE
 )
 NETWORK_WORD_ALLOWLIST = frozenset({
-    "pipeline/extract.py", "pipeline/haiku.py", "pipeline/host.py",
+    "pipeline/extract.py", "pipeline/summarizer.py", "pipeline/host.py",
     "pipeline/shell.py", "pipeline/slug.py", "pipeline/spawn_guard.py", "pipeline/types.py",
     "scripts/agy-session-start-hook.sh", "scripts/agy-stop-hook.sh",
     "scripts/doctor.sh", "scripts/install_agy_hooks.py",
