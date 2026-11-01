@@ -141,6 +141,26 @@ _remember_hook_clock_into _REMEMBER_HOOK_T0
 _REMEMBER_HOOK_STDIN_CAP=32768
 HOOK_STDIN=""
 _hook_stdin_truncated=0
+# #1047 self-review (round 3): this block is top-level script code, not a
+# function, so the `local LC_ALL=C` fix `_stdin_json_string_into` uses for
+# the exact same problem is not available here -- bash has no `local`
+# outside a function. Without SOME form of this, `${#HOOK_STDIN}` and
+# `${HOOK_STDIN:0:N}` below count and slice by CHARACTER under any UTF-8
+# locale (the common default on CI's own Ubuntu/macOS runners), so a
+# multi-byte-heavy payload (a non-ASCII project path or transcript content)
+# could grow HOOK_STDIN up to 4x past the stated 32 KiB byte ceiling before
+# this loop's own character-count check trips -- the quadratic growth stays
+# bounded (it cannot reopen the hang), but the ceiling itself silently
+# stops being the number this file's own comments and changelog claim.
+# Saved and restored explicitly, not just `local`-shadowed, because this is
+# top-level: a bare `LC_ALL=C` here would otherwise leak into the rest of
+# this hook's own user-facing output for the remainder of the script.
+_hook_stdin_lc_all_was_set=0
+if [ "${LC_ALL+set}" = set ]; then
+    _hook_stdin_lc_all_was_set=1
+    _hook_stdin_prior_lc_all="$LC_ALL"
+fi
+LC_ALL=C
 if [ ! -t 0 ]; then
     _line=""
     while IFS= read -r -t 1 _line || [ -n "$_line" ]; do
@@ -154,6 +174,12 @@ if [ ! -t 0 ]; then
         _line=""
     done
 fi
+if [ "$_hook_stdin_lc_all_was_set" -eq 1 ]; then
+    LC_ALL="$_hook_stdin_prior_lc_all"
+else
+    unset LC_ALL
+fi
+unset _hook_stdin_lc_all_was_set _hook_stdin_prior_lc_all
 
 # The same deliberately narrow extractor the PostToolUse hook and
 # the SessionEnd hook use, and for the same reason: the key must be followed

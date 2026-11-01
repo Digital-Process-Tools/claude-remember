@@ -157,8 +157,14 @@ def _extract_read_loop() -> str:
     check available for the byte-for-byte half of the claim)."""
     source = SESSION_START.read_text(encoding="utf-8")
     start_marker = "_REMEMBER_HOOK_STDIN_CAP=32768"
+    # The block now contains THREE `fi` lines (the LC_ALL save-check, the
+    # main read loop, and the LC_ALL restore if/else) -- ending at the
+    # first one would truncate the extraction before the read loop even
+    # runs. The restore's final `unset` line is the real, stable end of
+    # the whole block.
+    end_marker = "unset _hook_stdin_lc_all_was_set _hook_stdin_prior_lc_all"
     start = source.index(start_marker)
-    end = source.index("\nfi\n", start) + len("\nfi")
+    end = source.index(end_marker, start) + len(end_marker)
     return source[start:end]
 
 
@@ -166,6 +172,41 @@ _LOOP_DRIVER = """
 %s
 printf '%%s' "$HOOK_STDIN"
 """
+
+
+def test_the_cap_is_a_byte_cap_not_a_character_cap_under_utf8():
+    """Self-review finding (Explore + oss:auditor pass on this diff): the
+    read loop's own `${#HOOK_STDIN}`/`${HOOK_STDIN:0:N}` count and slice by
+    CHARACTER under any UTF-8 locale unless LC_ALL=C is forced for that
+    scope -- the exact defect class `_stdin_json_string_into`'s own
+    comment already names, reintroduced here because this block is
+    top-level code and cannot use that function's `local LC_ALL=C` fix.
+    A payload built entirely from a 4-byte UTF-8 character (so "character
+    count" and "byte count" diverge by 4x) must still be capped at
+    _REMEMBER_HOOK_STDIN_CAP BYTES, not characters -- confirmed by running
+    under a UTF-8 locale explicitly (not relying on whatever the test
+    runner's own ambient locale happens to be, which is exactly how this
+    class of bug hides)."""
+    four_byte_char = "\U0001F600"  # U+1F600, encodes to 4 bytes in UTF-8
+    payload = four_byte_char * 20000  # >> 32768 bytes, well under as chars
+    script = _LOOP_DRIVER % _extract_read_loop()
+    env = {**os.environ, "LC_ALL": "en_US.UTF-8", "LANG": "en_US.UTF-8"}
+    result = subprocess.run(
+        [BASH, "-c", script],
+        input=payload,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    out_bytes = len(result.stdout.encode("utf-8"))
+    assert out_bytes <= 32768, (
+        f"expected the loop's own output capped to <= 32768 BYTES, got "
+        f"{out_bytes} bytes ({len(result.stdout)} characters) -- the cap "
+        f"is counting characters, not bytes, under a UTF-8 locale"
+    )
 
 
 def test_a_small_payload_survives_the_cap_byte_for_byte():
