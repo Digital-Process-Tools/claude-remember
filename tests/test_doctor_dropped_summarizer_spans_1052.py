@@ -182,3 +182,40 @@ def test_counts_sum_across_multiple_logs_not_only_the_newest(tmp_path):
         "expected the count to sum across both daily logs (1 + 2 = 3):\n"
         + result.stdout
     )
+
+
+def test_parked_dropped_span_files_are_counted_and_located(tmp_path):
+    """Final-review finding: the WARN above counts REJECTION EVENTS out of
+    the log text, which is a different number from how many spans are
+    actually PARKED (dropped, unsummarized) on disk right now -- a span
+    rejected once and later retried successfully adds to the event count
+    without ever being parked, and the event count alone never tells an
+    operator in plain words how many files are sitting there or where.
+    This must be reported directly off tmp/dropped-span-*.md, not derived
+    from the log."""
+    home, project, remember, _session_dir = _healthy_baseline(tmp_path)
+    tmp_dir = remember / "tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    (tmp_dir / "dropped-span-20261101-000000-1.md").write_text("raw span 1")
+    (tmp_dir / "dropped-span-20261101-000001-2.md").write_text("raw span 2")
+
+    result = _run(home, project, remember)
+
+    assert result.returncode == 0, result.stderr
+    assert "2 span(s) are currently parked" in result.stdout, result.stdout
+    assert str(tmp_dir) in result.stdout, (
+        "the folder path must be named in plain words, not just the glob "
+        "pattern:\n" + result.stdout
+    )
+
+
+def test_no_parked_files_reports_nothing_extra(tmp_path):
+    """Positive control for the test above: with no dropped-span-*.md file
+    present, the new line must not appear at all -- otherwise the must-fire
+    case above could be passing because the line always fires."""
+    home, project, remember, _session_dir = _healthy_baseline(tmp_path)
+
+    result = _run(home, project, remember)
+
+    assert result.returncode == 0, result.stderr
+    assert "span(s) are currently parked" not in result.stdout, result.stdout

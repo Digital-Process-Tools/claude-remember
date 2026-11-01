@@ -749,18 +749,115 @@ class TestRejectedSpanLoop:
             "the parked file must hold the RAW span, not the model's refusal text"
         )
 
-    def test_max_rejected_retries_zero_retries_forever(self, tmp_path):
-        """0 restores the old behaviour: never give up on a rejected span."""
+    def test_max_rejected_retries_zero_is_clamped_to_the_default(self, tmp_path):
+        """Final-review finding: 0 ('retry forever') would stall saving for
+        the REST of the session the first time the model refuses something
+        for good -- worse than the bug this whole mechanism exists to fix.
+        Clamp to the default instead, with a log line saying so."""
         env, project, plugin, calls, sid = _make_env(
-            tmp_path, exchanges=6, humans=5,
+            tmp_path, exchanges=6, humans=5, position=904,
             config={"max_rejected_retries": 0},
         )
         env["STUB_HAIKU_TEXT"] = self.MALFORMED
 
-        for _ in range(4):
+        result = None
+        for _ in range(3):
+            result = _run(plugin, env, sid)
+
+        assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")
+        assert _saved_position(project) == 904, (
+            "0 must be clamped to the default (3), not retried forever"
+        )
+        log_files = list((project / ".remember" / "logs").glob("memory-*.log"))
+        assert log_files, "no daily log written"
+        log_text = "\n".join(f.read_text() for f in log_files)
+        assert "max_rejected_retries is 0" in log_text, (
+            "the clamp must be logged, not silent:\n" + log_text
+        )
+
+    def test_growing_transcript_still_parks_after_max_retries(self, tmp_path):
+        """#1052 final-review finding: in a LIVE session the transcript
+        keeps growing between saves, so POSITION (the transcript's current
+        end) is different on every attempt. Keying the span-id on POSITION
+        meant the counter never saw the same span twice -- it reset to 1
+        every time, the span was never parked, and the position never
+        advanced while the model kept refusing. $SKIP_LINES (the span's
+        START) does not move across retries of the same span and must be
+        used instead."""
+        env, project, plugin, calls, sid = _make_env(tmp_path, exchanges=6, humans=5,
+                                                     position=904)
+        env["STUB_HAIKU_TEXT"] = self.MALFORMED
+
+        for i, pos in enumerate((904, 950, 1001)):
+            env["STUB_POSITION"] = str(pos)
+            _run(plugin, env, sid)
+            if i < 2:
+                assert _saved_position(project) is None, (
+                    f"still retrying at rejection {i + 1} of 3 (position grew to {pos})"
+                )
+
+        assert _saved_position(project) == 1001, (
+            "a growing transcript must still be recognised as the SAME span "
+            "(keyed on SKIP_LINES, not the ever-changing POSITION) and "
+            "parked after max_rejected_retries"
+        )
+        dropped = list((project / ".remember" / "tmp").glob("dropped-span-*.md"))
+        assert len(dropped) == 1, f"raw span text not parked: {dropped}"
+
+    def test_force_flush_parks_immediately_without_waiting_for_retries(self, tmp_path):
+        """Final-review finding: session-end's --force call may be the
+        session's LAST chance to flush -- no later save exists to retry a
+        rejected span, so waiting for max_rejected_retries would simply lose
+        it rather than park it. A single rejection under --force must give
+        up immediately."""
+        env, project, plugin, calls, sid = _make_env(tmp_path, exchanges=6, humans=5,
+                                                     position=904)
+        env["STUB_HAIKU_TEXT"] = self.MALFORMED
+
+        result = _run(plugin, env, sid, "--force")
+
+        assert result.returncode == 0, subprocess_failure_detail(result, project / ".remember")
+        assert _saved_position(project) == 904, (
+            "a rejection on the final --force flush must give up immediately, "
+            "not wait for retries that will never come"
+        )
+        dropped = list((project / ".remember" / "tmp").glob("dropped-span-*.md"))
+        assert len(dropped) == 1, f"raw span text not parked on forced give-up: {dropped}"
+
+    def test_dropped_span_files_do_not_accumulate(self, tmp_path):
+        """They are diagnostic, not memory -- keep the last 20, same
+        retention keep_rejected_text already applies to tmp/rejected-*.md."""
+        env, project, plugin, calls, sid = _make_env(tmp_path, exchanges=6, humans=5,
+                                                     position=904)
+        env["STUB_HAIKU_TEXT"] = self.MALFORMED
+        tmp_dir = project / ".remember" / "tmp"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        for i in range(25):
+            (tmp_dir / f"dropped-span-2026010100{i:04d}-1.md").write_text("old")
+
+        for _ in range(3):
             _run(plugin, env, sid)
 
-        assert _saved_position(project) is None
+        dropped = list(tmp_dir.glob("dropped-span-*.md"))
+        assert len(dropped) <= 20, f"{len(dropped)} dropped-span files kept"
+
+    def test_giving_up_writes_to_hook_errors_log(self, tmp_path):
+        """doctor.sh's 'Dropped summarizer spans' section reads
+        hook-errors.log, not only the daily narrative log -- the give-up
+        message must reach both (same #694 shape as the call-haiku failure
+        path above it)."""
+        env, project, plugin, calls, sid = _make_env(tmp_path, exchanges=6, humans=5,
+                                                     position=904)
+        env["STUB_HAIKU_TEXT"] = self.MALFORMED
+
+        for _ in range(3):
+            _run(plugin, env, sid)
+
+        hook_errors = project / ".remember" / "logs" / "hook-errors.log"
+        assert hook_errors.exists(), "hook-errors.log was never written"
+        assert "consecutive rejections on this span" in hook_errors.read_text(), (
+            hook_errors.read_text()
+        )
 
     def test_success_clears_the_rejected_count(self, tmp_path):
         """Two rejections then an accepted summary must not leave a primed

@@ -1204,7 +1204,28 @@ if [ "$_RS_COUNT" -gt 0 ]; then
 else
     echo "OK   No rejections recorded (no [validate]/[haiku]/[summarizer] REJECTED line in the logs present)"
 fi
-unset _RS_COUNT _RS_LAST_LINE
+# Final-review finding: the WARN above counts REJECTION EVENTS from the log
+# text, not how many spans actually got PARKED (dropped, unsummarized) --
+# the two numbers can differ (a span rejected once and later retried
+# successfully adds to the event count without ever being parked), and
+# neither tells an operator in plain words how many files are actually
+# sitting there or where. Count the parked files directly and say so,
+# independent of whether any REJECTED line is still in the logs present
+# (log rotation can age those lines out while the parked file itself is
+# still sitting in tmp/, since the two have different retention).
+_remember_rs_parked_glob_dir=$(_remember_forward_slash "$REMEMBER_DIR")
+_RS_PARKED=0
+for _rs_p in "$_remember_rs_parked_glob_dir"/tmp/dropped-span-*.md; do
+    [ -f "$_rs_p" ] && _RS_PARKED=$((_RS_PARKED + 1))
+done
+unset _remember_rs_parked_glob_dir _rs_p
+if [ "$_RS_PARKED" -gt 0 ]; then
+    echo "     $_RS_PARKED span(s) are currently parked, unsummarized, in"
+    echo "     $REMEMBER_DIR/tmp/ (dropped-span-*.md) -- each exhausted its"
+    echo "     retries (or was dropped on the session's final flush) and will"
+    echo "     never be retried. The newest 20 are kept."
+fi
+unset _RS_COUNT _RS_LAST_LINE _RS_PARKED
 echo ""
 
 # ── 6b. SessionStart duration (#706) ────────────────────────────────────────
