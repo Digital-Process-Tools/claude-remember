@@ -249,6 +249,19 @@ def test_the_deferred_phases_own_pid_file_is_removed_when_it_finishes(tmp_path):
         "cleanup from a run that simply never happened"
     )
 
+    # The PID file is removed by an EXIT trap, which fires AFTER the
+    # script's main body (including the session-slug write just polled
+    # for above) -- there is a real, if normally short, window between
+    # "session-slug exists" and "the trap has actually run and removed
+    # the PID file". A hard assertion right after the slug poll raced
+    # that window and was observed flaking on windows-latest CI (slower
+    # process teardown than the slug write itself), failing with the PID
+    # file still present even though cleanup does run moments later.
+    # Poll the same way the slug_record wait above does, rather than
+    # asserting once.
+    deadline = time.time() + 15
+    while time.time() < deadline and pid_file.exists():
+        time.sleep(0.1)
     assert not pid_file.exists(), (
         "a deferred phase that ran to completion left its own PID marker "
         "behind instead of cleaning it up on exit"
