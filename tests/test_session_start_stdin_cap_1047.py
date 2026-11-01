@@ -199,10 +199,14 @@ def test_hook_returns_quickly_when_a_writer_holds_stdin_open_past_the_cap(tmp_pa
     assert result.returncode == 0, (
         f"hook exited {result.returncode}, stderr={result.stderr!r}"
     )
-    # 3s: well under the feeder's 6s hold, and well over what the fixed,
+    # 5s: well under the feeder's 6s hold, and well over what the fixed,
     # backgrounded drain actually costs (bounded by the read loop's own
-    # `read -t 1` cadence, not by the writer at all).
-    assert elapsed < 3.0, (
+    # `read -t 1` cadence, not by the writer at all). Matches the other
+    # must-fire test in this file (test_a_1mb_transcript_sized_stdin_...):
+    # a tight ceiling nearer the writer's own hold measurably flaked on
+    # windows-latest CI (3.16s observed against a 3.0s bound) from process
+    # spawn overhead alone, with the fix correctly in place.
+    assert elapsed < 5.0, (
         f"hook took {elapsed:.2f}s to return while a writer held stdin open "
         f"for 6s past the cap -- the post-cap drain is blocking on the "
         f"writer again instead of running detached"
