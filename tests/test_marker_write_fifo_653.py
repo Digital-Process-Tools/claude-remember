@@ -146,7 +146,8 @@ class TestFailureMarkerWrite:
         assert p.read_text().strip() == "s1:5 1"
 
 
-_MARKERS = ("COOLDOWN_MARKER", "NDC_MARKER", "NOW_DAY_FILE", "NDC_GEN_FILE", "FAILURE_MARKER")
+_MARKERS = ("COOLDOWN_MARKER", "NDC_MARKER", "NOW_DAY_FILE", "NDC_GEN_FILE", "FAILURE_MARKER",
+            "REJECTED_MARKER")
 
 
 def test_every_marker_write_site_is_guarded():

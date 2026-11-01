@@ -949,8 +949,9 @@ if [ "$IS_SKIP" != "true" ]; then
         #
         # Dropped rather than kept, but never destroyed: the text goes to
         # tmp/rejected-*.md, so nothing is lost, it simply does not enter the
-        # compression chain. The position still advances, exactly as a SKIP
-        # does, or this span would be re-summarized on every run forever.
+        # compression chain. #1052: the position does NOT advance on the
+        # spot any more -- see record_rejected_span below, which retries the
+        # span up to thresholds.max_rejected_retries times before giving up.
         log "validate" "REJECTED (not an entry header): $(echo "$FIRST_LINE" | head -c 80)"
         keep_rejected_text "$HAIKU_TEXT_FILE" "validate"
         # #1052: bounded retry, not an unconditional advance -- see
@@ -1021,8 +1022,14 @@ if [ "$IS_SKIP" = "true" ]; then
     # A SKIP is a successful summarization (the model judged the span not worth
     # recording) and it advances the position, so it must clear the failure
     # count too — otherwise a stale count survives and a later single failure
-    # trips the give-up threshold early.
-    rm -f "$FAILURE_MARKER"
+    # trips the give-up threshold early. #1052: same reasoning for the
+    # rejection counter -- a SKIP on a DIFFERENT span than the one that was
+    # previously rejected would leave REJECTED_MARKER stale otherwise (in
+    # practice the span-id comparison in record_rejected_span already
+    # protects against a stale marker misattributing itself to a later span,
+    # but clearing it explicitly here matches FAILURE_MARKER's own hygiene
+    # rather than relying on that alone).
+    rm -f "$FAILURE_MARKER" "$REJECTED_MARKER"
     exit 0
 fi
 
@@ -1112,7 +1119,10 @@ APPEND_ERR=$(mv "$APPEND_TMP" "$MEMORY_FILE" 2>&1) \
 log "write" "appended (provider: ${PROVIDER:-claude}): $(head -1 "$HAIKU_TEXT_FILE" | cut -c1-80)"
 save_position_span
 log "write" "position -> $POSITION"
-rm -f "$FAILURE_MARKER"
+# #1052: same hygiene as FAILURE_MARKER just above -- an accepted summary
+# must not leave a primed rejection counter behind for whatever span comes
+# next.
+rm -f "$FAILURE_MARKER" "$REJECTED_MARKER"
 
 # --- Dispatch: after_save ---
 dispatch "after_save"

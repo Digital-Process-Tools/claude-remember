@@ -1177,7 +1177,13 @@ if [ "$_RS_COUNT" -gt 0 ]; then
     # mis-tracks an escaped quote. Sibling warnings in this file already use
     # this (e.g. the git-backup/git-reconcile hooks' own copies).
     printf -v _rs_dq '\042'
-    echo "WARN $_RS_COUNT span(s) dropped by a reject gate (summarizer refusal or"
+    # #1052: this counts REJECTED log lines, i.e. rejection EVENTS -- a span
+    # that was rejected once and then retried successfully (or is still
+    # mid-retry) contributes to this count without ever being dropped. Say
+    # "rejection(s)", not "span(s) dropped": only a span that exhausts
+    # thresholds.max_rejected_retries is actually dropped, and the detail
+    # text below says so.
+    echo "WARN $_RS_COUNT rejection(s) hit a reject gate (summarizer refusal or"
     echo "     ${_rs_dq}not an entry header${_rs_dq}) across the logs present -- the call"
     echo "     succeeded each time, so this is invisible to the Summarizer"
     # #1052 (second half): the position no longer advances past a rejected
@@ -1196,7 +1202,7 @@ if [ "$_RS_COUNT" -gt 0 ]; then
     echo "     $_RS_LAST_LINE"
     unset _rs_dq
 else
-    echo "OK   No dropped summarizer spans recorded (no [validate]/[haiku] REJECTED line in the logs present)"
+    echo "OK   No rejections recorded (no [validate]/[haiku]/[summarizer] REJECTED line in the logs present)"
 fi
 unset _RS_COUNT _RS_LAST_LINE
 echo ""

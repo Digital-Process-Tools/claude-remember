@@ -772,6 +772,9 @@ class TestRejectedSpanLoop:
         _run(plugin, env, sid)
         _run(plugin, env, sid)
         assert _saved_position(project) is None
+        assert (project / ".remember" / "tmp" / "last-rejected-span").exists(), (
+            "precondition: two rejections must have primed the marker"
+        )
 
         env["STUB_HAIKU_TEXT"] = "## 10:00 | main\n\n- did some work\n"
         result = _run(plugin, env, sid)
@@ -779,6 +782,10 @@ class TestRejectedSpanLoop:
         assert _saved_position(project) == 42, (
             "an accepted summary must still advance the position, rejection "
             "history or not"
+        )
+        assert not (project / ".remember" / "tmp" / "last-rejected-span").exists(), (
+            "an accepted summary must clear the rejection marker, or a later "
+            "unrelated span could inherit a stale count"
         )
 
     def test_a_rejected_summarizer_reply_also_retries_before_giving_up(self, tmp_path):
