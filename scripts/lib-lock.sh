@@ -622,8 +622,18 @@ _lock_acquire_impl() {
     # not a directory; `dirname` answered "." and this must too -- "."
     # rather than "$(pwd)" because `mkdir -p "."` already resolves against
     # the caller's cwd with no fork needed to say so explicitly.
+    #
+    # Written via `printf -v` with octal escape 056 (a builtin), not as a
+    # quoted lone dot: the plugin directory's own scanner can misread a
+    # literal "." string value as a `.` (source) command (#898 round 8;
+    # same byte, same fix as lib-memory-context.sh's REMEMBER_ROOT and
+    # write-handoff.sh's _WH_REMEMBER_ROOT). Introduced by this branch's
+    # own self-review round (#1056) without the round-8 convention,
+    # caught by this same scanner's own CI leg.
     local _lock_parent="${_dir%/*}"
-    [ "$_lock_parent" = "$_dir" ] && _lock_parent="."
+    if [ "$_lock_parent" = "$_dir" ]; then
+        printf -v _lock_parent '\056'
+    fi
     mkdir -p "$_lock_parent" 2>/dev/null || true
 
     while :; do
