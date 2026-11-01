@@ -262,6 +262,17 @@ def _env_cache_diag(project: Path, home: Path, systmp: Path, env: dict) -> str:
             f"{len(trace_lines)} of {len(all_lines)} total; rc={xtrace.returncode}):\n"
             + "\n".join(trace_lines[:120])
         )
+        # Temporary, diagnostics-only widening (#1086 step 2): when the
+        # env_cache-filtered view is empty but the full trace is short (the
+        # observed windows-latest shape -- 31 total lines, 0 naming
+        # env_cache), the hook took an early silent exit well before
+        # publish; print the whole trace so that exit is visible instead of
+        # an empty env_cache-filtered list.
+        if not trace_lines and len(all_lines) < 200:
+            parts.append(
+                "FULL bash -x trace (env_cache-filtered view was empty):\n"
+                + "\n".join(all_lines)
+            )
     except (OSError, subprocess.SubprocessError) as exc:
         parts.append(f"bash -x re-run: could not run ({exc})")
 
