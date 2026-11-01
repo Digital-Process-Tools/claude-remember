@@ -40,7 +40,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from pipeline.slug import session_dir_slug as _slug
 
-from ._bash_runner import resolve_bash
+from ._bash_runner import decode_bash_output, resolve_bash
 from .spawn_counting import make_shim_dir, spawns
 
 BASH = resolve_bash()
@@ -223,10 +223,19 @@ def _env_cache_diag(project: Path, home: Path, systmp: Path, env: dict) -> str:
                 "hook_event_name": "SessionStart",
                 "cwd": str(project),
                 "source": "startup",
-            }),
-            capture_output=True, text=True, timeout=60, check=False,
+            }).encode("utf-8"),
+            capture_output=True, timeout=60, check=False,
         )
-        all_lines = xtrace.stderr.splitlines()
+        # This is diagnostics-only and must never itself crash the test it is
+        # explaining: `text=True` decodes with the strict error handler, and a
+        # `bash -x` trace of a WHOLE session-start-hook.sh run can carry a
+        # byte sequence from this host's own locale/filesystem that is not
+        # valid UTF-8 (observed on macos-latest CI, consistently, at the same
+        # byte offset across four Python versions -- a real non-UTF-8 byte in
+        # the trace, not a flake). `decode_bash_output` is the same tolerant
+        # decode this repo's own bash-subprocess tests already use for
+        # exactly this reason.
+        all_lines = decode_bash_output(xtrace.stderr).splitlines()
         trace_lines = [l for l in all_lines if "env_cache" in l]
         parts.append(
             f"bash -x re-run of the warm path (env_cache lines, "

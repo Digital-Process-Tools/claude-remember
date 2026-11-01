@@ -36,6 +36,7 @@ import time
 
 import pytest
 
+from ._bash_runner import decode_bash_output
 from .test_session_start_windows_benchmark_669 import BASH, SESSION_START, _env, _store
 
 pytestmark = pytest.mark.skipif(BASH is None, reason="no usable bash on this host (#432)")
@@ -82,10 +83,17 @@ def _resume_diag(remember, session_id: str, env: dict, sleeper_pid: int) -> str:
     try:
         trace = subprocess.run(
             [BASH, "-x", SESSION_START.as_posix()],
-            input=_payload(session_id, "resume"), env=env,
-            capture_output=True, text=True, timeout=HOOK_TIMEOUT, check=False,
+            input=_payload(session_id, "resume").encode("utf-8"), env=env,
+            capture_output=True, timeout=HOOK_TIMEOUT, check=False,
         )
-        all_lines = trace.stderr.splitlines()
+        # Diagnostics-only, so this must never itself crash the test it is
+        # explaining: `text=True` decodes with the strict error handler, and
+        # a `bash -x` trace of a whole session-start-hook.sh run can carry a
+        # byte sequence from this host's locale/filesystem that is not valid
+        # UTF-8 (the sibling env-cache diagnostic hit exactly this on
+        # macos-latest CI). `decode_bash_output` is the same tolerant decode
+        # this repo's own bash-subprocess tests already use.
+        all_lines = decode_bash_output(trace.stderr).splitlines()
         trace_lines = [
             l for l in all_lines
             if "deferred" in l or "kill" in l or "_remember_deferred_already_running" in l
