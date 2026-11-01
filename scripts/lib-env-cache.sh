@@ -227,13 +227,29 @@ _remember_env_cache_load() {
         elif [ "${_line#REMEMBER_TZ=}" != "$_line" ]; then
             _tz="${_line#*=}"
         elif [ "${_line#REMEMBER_PROMPT_STAMP=}" != "$_line" ]; then
+            # #1086 review: REMEMBER_RECOVERY_ENABLED used to be its OWN
+            # line here -- a line every reader of this cache pays for with
+            # one more `read` builtin on EVERY load, including post-tool-
+            # hook.sh and user-prompt-hook.sh, neither of which ever needed
+            # it (CI: ubuntu-latest 3.9, test_hot_path_cost_pin_330.py's
+            # SIDECAR_READ_BUILTIN_BUDGET tripped by exactly one). Piggy-
+            # backed onto this line instead, as `stamp:recovery` -- a
+            # colon-delimited suffix a plain reader does not pay an extra
+            # `read` for. REMEMBER_PROMPT_STAMP's own values (full/stable/
+            # off, see log.sh) never contain a colon, so the split below is
+            # unambiguous; a cache from a release before this suffix
+            # existed has no colon at all, and the `case` below reads that
+            # as "no answer" (empty _recovery) rather than misreading the
+            # whole stamp value as the recovery flag.
             _stamp="${_line#*=}"
+            case "$_stamp" in
+                *:*) _recovery="${_stamp#*:}"; _stamp="${_stamp%%:*}" ;;
+                *) _recovery="" ;;
+            esac
         elif [ "${_line#REMEMBER_SAVE_COOLDOWN=}" != "$_line" ]; then
             _cooldown="${_line#*=}"
         elif [ "${_line#REMEMBER_DELTA_THRESHOLD=}" != "$_line" ]; then
             _delta="${_line#*=}"
-        elif [ "${_line#REMEMBER_RECOVERY_ENABLED=}" != "$_line" ]; then
-            _recovery="${_line#*=}"
         elif [ "${_line#MEMORY_PROJECT_DIR=}" != "$_line" ]; then
             _mem="${_line#*=}"
         elif [ "${_line#PROJECT_DIR=}" != "$_line" ]; then
@@ -387,9 +403,10 @@ _remember_env_cache_publish() {
     # session-start-hook.sh resolves .features.recovery before publishing;
     # post-tool-hook.sh and user-prompt-hook.sh publish this same cache file
     # without ever touching it, and requiring it here would silently refuse
-    # every publish from those two callers. Written below as whatever it is
-    # -- empty included -- and the load side already treats empty as "this
-    # cache cannot answer that question" rather than as a value.
+    # every publish from those two callers. Written below piggy-backed onto
+    # the REMEMBER_PROMPT_STAMP line -- empty included -- and the load side
+    # already treats an empty suffix as "this cache cannot answer that
+    # question" rather than as a value.
     _remember_env_cache_path || return 0
 
     local _f="$_REMEMBER_ENV_CACHE_FILE" _t
@@ -426,10 +443,9 @@ _remember_env_cache_publish() {
             PIPELINE_DIR "$PIPELINE_DIR" \
             REMEMBER_DIR "$REMEMBER_DIR" \
             REMEMBER_TZ "${REMEMBER_TZ:-}" \
-            REMEMBER_PROMPT_STAMP "${REMEMBER_PROMPT_STAMP:-full}" \
+            REMEMBER_PROMPT_STAMP "${REMEMBER_PROMPT_STAMP:-full}:${REMEMBER_RECOVERY_ENABLED:-}" \
             REMEMBER_SAVE_COOLDOWN "$REMEMBER_SAVE_COOLDOWN" \
             REMEMBER_DELTA_THRESHOLD "$REMEMBER_DELTA_THRESHOLD" \
-            REMEMBER_RECOVERY_ENABLED "${REMEMBER_RECOVERY_ENABLED:-}" \
             MEMORY_PROJECT_DIR "$_ecp_mem_proj"
         # #843: each CACHE_CONFIG value carries a "1:" or "0:" prefix
         # recording whether that layer existed RIGHT NOW (at publish time),

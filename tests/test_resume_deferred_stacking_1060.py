@@ -233,3 +233,44 @@ def test_a_resume_for_a_session_whose_pid_file_is_stale_relaunches_it(tmp_path):
         "a resume for a session whose PID file named a DEAD process never "
         "relaunched the deferred phase -- the guard is not stale-safe"
     )
+
+
+def test_a_resume_for_a_session_whose_marker_is_old_and_names_a_live_but_unrelated_pid_relaunches_it(tmp_path):
+    """#1086 review (item 4): `kill -0` alone cannot tell a dead holder's
+    PID from an unrelated LIVE process the OS has since reassigned the
+    same PID to ("PID recycling", aggressive on Windows) -- without an age
+    bound, a marker like that would make `kill -0` succeed FOREVER, and
+    every future resume of that session would silently skip recovery
+    indefinitely. Paired with the "still alive" test above (recent marker,
+    live PID -> must NOT relaunch): this is the same "live PID" condition
+    with an OLD marker, which must relaunch once the marker is older than
+    REMEMBER_DEFERRED_PID_MAX_AGE.
+
+    The "unrelated LIVE process" is simulated with this TEST's own pid --
+    guaranteed alive for the whole test, and guaranteed to be nothing the
+    deferred phase ever started.
+    """
+    home, project, remember = _store(tmp_path)
+    env = _env(home, project, remember, os.environ["PATH"])
+    env["REMEMBER_DEFERRED_PID_MAX_AGE"] = "1"
+
+    session_id = "55555555-0000-4000-8000-000000001060"
+    pid_file = remember / "tmp" / f"deferred-{session_id}.pid"
+    pid_file.parent.mkdir(parents=True, exist_ok=True)
+    pid_file.write_text(str(os.getpid()), encoding="utf-8")
+    old = time.time() - 60
+    os.utime(pid_file, (old, old))
+
+    slug_record = remember / "tmp" / "session-slug"
+
+    result = _run_session_start(env, session_id, "resume")
+    assert result.returncode == 0, result.stderr[-2000:]
+
+    deadline = time.time() + 15
+    while time.time() < deadline and not slug_record.is_file():
+        time.sleep(0.1)
+    assert slug_record.is_file(), (
+        "a resume for a session whose marker is OLD and names a LIVE "
+        "(but unrelated) pid never relaunched the deferred phase -- "
+        "there is no age bound on the PID-recycling guard"
+    )

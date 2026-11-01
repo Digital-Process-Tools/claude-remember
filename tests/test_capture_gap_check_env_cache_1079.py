@@ -234,3 +234,47 @@ def test_warm_cache_run_leaves_no_new_merged_config_tmpfile_in_shared_tmp(tmp_pa
         f"capture-gap-check.sh's fast path left a NEW merged-config tmpfile "
         f"behind in shared tmp: {new_files}"
     )
+
+
+def test_cache_miss_path_leaves_no_new_merged_config_tmpfile_in_shared_tmp(tmp_path):
+    """#1086 review (item 1): the SLOW/cache-miss path -- where
+    capture-gap-check.sh's own `trap _remember_cleanup_deferred_pid_file
+    EXIT` (added for #1060's PID-marker cleanup) sits in the SAME process
+    log.sh's config merge already installed its OWN EXIT trap in, to remove
+    the merged-config tmpfile (lib-memory-dir.sh:704-725) -- is exactly
+    where a bare (non-appending) `trap ... EXIT` silently replaces that
+    prior trap and leaks the merge's own tmpfile. The warm-path sibling
+    above never walks this branch at all (no caches ever get deleted
+    there), so it cannot catch this specific leak -- this test deletes both
+    caches first, forcing the full merge AND the deferred-PID trap install
+    into the same process.
+    """
+    project, remember, home = _project_and_home(tmp_path, with_user_config=True)
+    systmp = tmp_path / "systmp"
+    env = _warm_the_cache(project, home, systmp)
+
+    cache_files = (
+        list(systmp.glob("remember-env-*"))
+        + list(systmp.glob("remember-config-cache-v2-*"))
+    )
+    assert cache_files, "precondition: the warm run did not publish any cache file at all"
+    for f in cache_files:
+        f.unlink()
+
+    # Exclude remember-config-cache-v2-* -- unlike the warm-path sibling
+    # above, THIS test deletes it first, so a legitimate republish of it by
+    # the fresh merge this test forces is expected and is not the leak
+    # under test. The bare `remember-config-XXXXXX` mktemp name (no
+    # `-cache-v2-` segment) is the one lib-memory-dir.sh's own EXIT trap
+    # must remove.
+    before = {p.name for p in systmp.glob("remember-config-*") if "-cache-v2-" not in p.name}
+    _run_capture_gap_check_shimmed(project, remember, env, tmp_path)
+    after = {p.name for p in systmp.glob("remember-config-*") if "-cache-v2-" not in p.name}
+
+    new_files = after - before
+    assert not new_files, (
+        f"capture-gap-check.sh's SLOW/cache-miss path left a NEW merged-"
+        f"config tmpfile behind in shared tmp -- its own "
+        f"_remember_cleanup_deferred_pid_file EXIT trap replaced log.sh's "
+        f"merge-cleanup trap instead of appending to it: {new_files}"
+    )

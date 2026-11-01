@@ -483,9 +483,13 @@ SESSIONS_DIR="$(claude_projects_dir)/${PROJECT_PATH_SLUG}"
 # replaced. A stale-safe PID file, keyed by session id so a DIFFERENT
 # session's own deferred phase is never blocked by this one, catches the
 # live case; a dead PID (crash, kill) is simply overwritten below. No new
-# fork on this path: `[ -f ]`/`$(<file)`/`kill -0` are builtins, and `kill`
-# does not count as "running a process" the way an external binary would.
-# Two limitations survive, and neither is new to this codebase:
+# fork on this path: `[ -f ]`/`read -r ... <file`/`kill -0` are builtins,
+# and `kill` does not count as "running a process" the way an external
+# binary would. #1086 review: this used to read the PID with `$(<file)` --
+# a bash builtin on its own, but wrapped in `$(...)`, which forks a subshell
+# to run the substitution regardless of what is inside it (measured: 2000
+# calls 0.63s vs 0.045s with a plain `read -r ... < file` on bash 3.2).
+# Three limitations survive, and only the third is new:
 #
 #   * Check-then-act, not a lock: two SessionStarts for the SAME session id
 #     landing close enough together can both read "no live deferred phase"
@@ -503,11 +507,31 @@ SESSIONS_DIR="$(claude_projects_dir)/${PROJECT_PATH_SLUG}"
 #     as "an accepted, general limitation rather than a fix" (see that
 #     file's header comment and tests/test_cross_host_lock_contract_491.py).
 #     This guard is simpler than a real lock and inherits the same tradeoff.
+#   * Bounded by the marker's own AGE (#1086 review), the same way
+#     lib-lock.sh's own `_lock_dir_age` bounds a lock directory's age
+#     rather than trusting `kill -0` (or a marker's mere presence) forever:
+#     a marker older than REMEMBER_DEFERRED_PID_MAX_AGE seconds (default
+#     900 = 15min) is treated as stale regardless of what `kill -0` says,
+#     so a PID-recycling false-positive cannot block recovery for that
+#     session id indefinitely -- only until the bound passes.
 _remember_deferred_already_running() {
-    local _f="$REMEMBER_DIR/tmp/deferred-${CURRENT_SESSION_ID:-_}.pid" _pid
+    local _f="$REMEMBER_DIR/tmp/deferred-${CURRENT_SESSION_ID:-_}.pid" _pid _mtime _now
     [ -f "$_f" ] || return 1
-    _pid="$(<"$_f")" 2>/dev/null
+    read -r _pid < "$_f" 2>/dev/null
     [ -n "$_pid" ] && [[ "$_pid" != *[!0-9]* ]] || { rm -f "$_f" 2>/dev/null; return 1; }
+    # `stat` is BSD on macOS and GNU on Linux with incompatible flags; try
+    # both, same two-probe shape as lib-lock.sh's own `_lock_dir_age`. An
+    # unreadable mtime is simply not bounded -- never read as "stale" from
+    # a failed probe, only from a genuinely old one.
+    _mtime=$(stat -c %Y "$_f" 2>/dev/null) || _mtime=""
+    [ -n "$_mtime" ] && [[ "$_mtime" != *[!0-9]* ]] || _mtime=$(stat -f %m "$_f" 2>/dev/null) || _mtime=""
+    if [ -n "$_mtime" ] && [[ "$_mtime" != *[!0-9]* ]]; then
+        _now=$(date +%s)
+        if [ $(( _now - 10#$_mtime )) -ge "${REMEMBER_DEFERRED_PID_MAX_AGE:-900}" ]; then
+            rm -f "$_f" 2>/dev/null
+            return 1
+        fi
+    fi
     kill -0 "$_pid" 2>/dev/null && return 0
     rm -f "$_f" 2>/dev/null
     return 1

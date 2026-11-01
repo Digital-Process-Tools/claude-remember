@@ -183,11 +183,39 @@ if [ -n "$CURRENT_SESSION_ID" ]; then
     _remember_deferred_pid_file="$REMEMBER_DIR/tmp/deferred-${CURRENT_SESSION_ID}.pid"
     _remember_cleanup_deferred_pid_file() {
         [ -f "$_remember_deferred_pid_file" ] || return 0
-        [ "$(<"$_remember_deferred_pid_file")" = "$$" ] 2>/dev/null \
+        local _remember_dpf_owner
+        read -r _remember_dpf_owner < "$_remember_deferred_pid_file" 2>/dev/null
+        [ "$_remember_dpf_owner" = "$$" ] \
             && rm -f "$_remember_deferred_pid_file" 2>/dev/null
         return 0
     }
-    trap _remember_cleanup_deferred_pid_file EXIT
+    # #1086 review: a bare `trap ... EXIT` here REPLACES whatever EXIT trap
+    # the config chain above (log.sh -> lib-memory-dir.sh's three-layer
+    # merge) already installed, on the slow/cache-miss path, to remove ITS
+    # OWN merged-config tmpfile (lib-memory-dir.sh:704-725) -- leaking that
+    # tmpfile into shared tmp on every exit after a cache miss. Append
+    # instead, the same idiom bootstrap-dirs.sh:220-232 and
+    # lib-memory-dir.sh:715-724 already use for the identical reason.
+    _remember_gap_trap_raw=$(trap -p EXIT 2>/dev/null)
+    _remember_gap_existing_trap="${_remember_gap_trap_raw#trap -- \'}"
+    _remember_gap_existing_trap="${_remember_gap_existing_trap%\' EXIT}"
+    # Collapse trap -p's own escaping of an embedded single quote back to
+    # a literal one -- bootstrap-dirs.sh:220-232's own comment on this
+    # exact line explains why: lib-memory-dir.sh's installed trap body
+    # quotes its path, so a strip with no collapse leaves those escapes
+    # LITERAL, and re-embedding that into a new double-quoted trap string
+    # below produced an unbalanced quote the shell could not parse at
+    # exit (caught by this fix's own TDD red run: an "unexpected EOF
+    # while looking for matching quote" exit-trap error).
+    _remember_gap_existing_trap="${_remember_gap_existing_trap//\'\\\'\'/\'}"
+    unset _remember_gap_trap_raw
+    if [ -n "$_remember_gap_existing_trap" ]; then
+        # shellcheck disable=SC2064
+        trap "${_remember_gap_existing_trap}; _remember_cleanup_deferred_pid_file" EXIT
+    else
+        trap _remember_cleanup_deferred_pid_file EXIT
+    fi
+    unset _remember_gap_existing_trap
 fi
 
 # PROJECT_PATH_SLUG/SESSIONS_DIR: a pure function of PROJECT_DIR
