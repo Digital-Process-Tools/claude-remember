@@ -211,6 +211,31 @@ def test_capture_was_seen_id_table(tmp_path, bash):
 
 
 @pytest.mark.parametrize("bash", BASHES)
+def test_capture_was_seen_ignores_the_session_started_marker(tmp_path, bash):
+    """#1046 final review: session-start-hook.sh now writes a cheaper,
+    separate-folder marker (tmp/session-started.d) for every session,
+    including a chat-only one that never runs a tool call. That marker
+    must NOT satisfy capture_was_seen() -- the #200 capture-gap check's own
+    evidence function -- or a session whose hooks genuinely never ran would
+    read as "captured" the moment session-start-hook.sh itself ran, which
+    is exactly the false-quiet regression this fix exists to prevent. Only
+    capture-alive.d (PostToolUse's own marker, gated on at least one tool
+    call actually firing) may satisfy this function."""
+    seen_dir = tmp_path / "capture-alive.d"
+    seen_dir.mkdir()
+    started_dir = tmp_path / "session-started.d"
+    started_dir.mkdir()
+    (started_dir / "only-started").write_text("x", encoding="utf-8")
+    r = _run(bash, _seen_harness(), {
+        "CAPTURE_SEEN_DIR": seen_dir.as_posix(), "ID": "only-started",
+    })
+    assert r.stdout.strip() == "unseen", (
+        "a marker present ONLY in session-started.d must not satisfy "
+        f"capture_was_seen(): {r.stdout!r} / {r.stderr!r}"
+    )
+
+
+@pytest.mark.parametrize("bash", BASHES)
 def test_capture_was_seen_needs_a_marker(tmp_path, bash):
     """Positive control for the table: a well-formed id with no marker, no
     legacy slot and no save record is not vouched for -- nor is an empty id."""
