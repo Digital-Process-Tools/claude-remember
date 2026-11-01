@@ -72,12 +72,23 @@ set -e
 
 trap 'log "error" "FAILED at line $LINENO (exit $?)"' ERR
 
-source "$(dirname "$0")/resolve-paths.sh"
-source "$(dirname "$0")/detect-tools.sh"
-source "$(dirname "$0")/bootstrap-dirs.sh"
-source "$(dirname "$0")/log.sh"
-source "$(dirname "$0")/lib-lock.sh"
-source "$(dirname "$0")/lib-staging-lock.sh"
+# Parameter expansion, not six `dirname` forks (#230/#1056) -- the same
+# pattern session-start-hook.sh, session-end-hook.sh, post-tool-hook.sh and
+# user-prompt-hook.sh already use. A path with no slash in it leaves the
+# filename behind, not a directory; `dirname` answered "." and this must
+# too. This script is always executed, never sourced (confirmed: no other
+# file in this repo sources it), so BASH_SOURCE[0] and $0 agree here --
+# BASH_SOURCE[0] is used for consistency with the hooks' own copy of this
+# pattern.
+_SAVE_SCRIPT_DIR="${BASH_SOURCE[0]%/*}"
+[ "$_SAVE_SCRIPT_DIR" = "${BASH_SOURCE[0]}" ] && _SAVE_SCRIPT_DIR="$(pwd)"
+
+source "$_SAVE_SCRIPT_DIR/resolve-paths.sh"
+source "$_SAVE_SCRIPT_DIR/detect-tools.sh"
+source "$_SAVE_SCRIPT_DIR/bootstrap-dirs.sh"
+source "$_SAVE_SCRIPT_DIR/log.sh"
+source "$_SAVE_SCRIPT_DIR/lib-lock.sh"
+source "$_SAVE_SCRIPT_DIR/lib-staging-lock.sh"
 log "hook" "save-session: PROJECT_DIR=$PROJECT_DIR PIPELINE_DIR=$PIPELINE_DIR PYTHON=$PYTHON REMEMBER_DIR=$REMEMBER_DIR"
 
 LOCK_DIR="${REMEMBER_DIR}/tmp/save.lock"
