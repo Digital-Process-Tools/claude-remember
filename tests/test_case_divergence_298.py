@@ -154,7 +154,36 @@ def _apply_sanctioned_divergence(ref_code: str, rel: str) -> str:
 # stage or round rewrote again -- matched neither side and failed the test as
 # stale. None of them is still needed. The mechanism stays, pinned in
 # isolation by tests/test_sanctioned_divergence_state_440.py.
-_SANCTIONED_DIVERGENCE: dict = {}
+# #920: lib-memory-dir.sh gained a new, single-use unsafe-REMEMBER_DIR
+# predicate (the same shape log.sh's own _remember_log_dir_unsafe and
+# post-tool-hook.sh's pre-existing _remember_dir_is_unsafe already carry,
+# named distinctly per #920's own self-review so the #900 compiled-hook
+# build does not collide the two under one name). A pure addition right
+# after REMEMBER_DIR is resolved, not a replacement of existing code --
+# the anchor is the surrounding unchanged lines, substituted to include
+# the new block between them.
+_SANCTIONED_DIVERGENCE: dict = {
+    "scripts/lib-memory-dir.sh": [
+        (
+            r"""export REMEMBER_DIR
+
+_set_store_root""",
+            r"""export REMEMBER_DIR
+
+_remember_lmd_set_dir_unsafe() {
+    local LC_ALL=C
+    REMEMBER_DIR_UNSAFE=1
+    [[ "$REMEMBER_DIR" == *[$'\n\r']* ]] && return
+    [[ "$REMEMBER_DIR" == /* || "$REMEMBER_DIR" == [A-Za-z]:[/\\]* || "$REMEMBER_DIR" == [\\][\\][^\\]* ]] && REMEMBER_DIR_UNSAFE=0
+}
+_remember_lmd_set_dir_unsafe
+export REMEMBER_DIR_UNSAFE
+[ "$REMEMBER_DIR_UNSAFE" = 1 ] && echo "FATAL: unsafe REMEMBER_DIR ($REMEMBER_DIR) -- refusing to mkdir" >&2
+
+_set_store_root""",
+        ),
+    ],
+}
 
 # #898 round 19: every `case` statement in shipped shell became an if/elif
 # ladder of `[ ]` tests (the directory's scanner mis-parses `case`). A second

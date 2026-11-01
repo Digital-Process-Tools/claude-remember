@@ -270,8 +270,23 @@ if [ "${1:-}" = "--json" ]; then
         _JSON_STATE="resolved"
     fi
 
-    printf '{"schema_version":1,"state":"%s","remember_dir":"%s","storage_mode":"%s","project_dir":"%s"}\n' \
-        "$_JSON_STATE" "$(_json_escape "$REMEMBER_DIR")" "$_JSON_STORAGE_MODE" "$(_json_escape "$PROJECT_DIR")"
+    # #920 scheduler review round 2, item 4: lib-memory-dir.sh (sourced just
+    # above) always exports REMEMBER_DIR_UNSAFE now, but nothing in this
+    # --json surface ever read it -- a caller parsing this had no way to
+    # learn that REMEMBER_DIR was refused as unsafe and every save site is
+    # silently no-op'ing, short of re-deriving the same predicate itself.
+    # Always present, true or false, rather than an absent key a caller
+    # could mistake for "not applicable" -- the same reasoning this file's
+    # own three-state `state` ladder gives for not folding distinct
+    # conditions into one key's absence.
+    if [ "${REMEMBER_DIR_UNSAFE:-0}" = 1 ]; then
+        _JSON_REMEMBER_DIR_UNSAFE="true"
+    else
+        _JSON_REMEMBER_DIR_UNSAFE="false"
+    fi
+
+    printf '{"schema_version":1,"state":"%s","remember_dir":"%s","remember_dir_unsafe":%s,"storage_mode":"%s","project_dir":"%s"}\n' \
+        "$_JSON_STATE" "$(_json_escape "$REMEMBER_DIR")" "$_JSON_REMEMBER_DIR_UNSAFE" "$_JSON_STORAGE_MODE" "$(_json_escape "$PROJECT_DIR")"
     exit 0
 fi
 
@@ -387,7 +402,22 @@ echo "OK   PIPELINE_DIR       = $PIPELINE_DIR"
 # lib-slug.sh itself, so session_dir_slug/claude_projects_dir are available
 # without going through detect-tools.sh's exit-prone python check.
 source "$SCRIPT_DIR/lib-memory-dir.sh"
-echo "OK   REMEMBER_DIR       = $REMEMBER_DIR"
+# #920 scheduler review round 2, item 4: this line used to print "OK" for
+# REMEMBER_DIR unconditionally, even when lib-memory-dir.sh's own
+# REMEMBER_DIR_UNSAFE=1 meant every downstream save site had already
+# refused to touch it -- the refusal itself is logged only to stderr
+# (which Claude Code hides for an exit-0 hook, and user-prompt-hook.sh/
+# capture-gap-check.sh both discard it outright), so this report was the
+# one place left that could have said so and did not.
+if [ "${REMEMBER_DIR_UNSAFE:-0}" = 1 ]; then
+    echo "FAIL REMEMBER_DIR       = $REMEMBER_DIR (refused as unsafe)"
+    echo "     Not absolute (or not a recognised drive-letter/UNC form), or it"
+    echo "     carries an embedded newline/CR -- every mkdir/save site this"
+    echo "     plugin has is refusing to touch this value. Fix the data_dir"
+    echo "     template in config.json (or whatever produced this value)."
+else
+    echo "OK   REMEMBER_DIR       = $REMEMBER_DIR"
+fi
 
 # lib-memory-dir.sh returns early when already loaded, and the slug helpers
 # live in lib-slug.sh, so they are not guaranteed to be defined by the source

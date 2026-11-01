@@ -325,7 +325,15 @@ log "hook" "session-end: reason=$SESSION_END_REASON session=${STDIN_SESSION_ID:-
 # problem that does not exist. Reported the same way save-session.sh:428
 # reports its own fall-through, so a read-only store or a full disk shows
 # up as a fault rather than as silence.
-if ! mkdir -p "$REMEMBER_DIR/logs/autonomous" 2>/dev/null; then
+# #920 gap 1 (scheduler review round 2): say WHY the directory was never
+# attempted -- "could not create" previously covered both this refusal and
+# an ordinary mkdir failure (read-only root, missing parent) under the same
+# wording, and the two call for different responses from whoever reads
+# hook-errors.log (an unsafe REMEMBER_DIR needs the value fixed; a mkdir
+# failure needs the filesystem fixed).
+if [ "${REMEMBER_DIR_UNSAFE:-0}" = 1 ]; then
+    report_error "session-end" "WARNING: REMEMBER_DIR ($REMEMBER_DIR) was refused as unsafe -- this session's flush will not be recorded, and /remember:doctor may misreport SessionEnd as never having fired."
+elif ! mkdir -p "$REMEMBER_DIR/logs/autonomous" 2>/dev/null; then
     report_error "session-end" "WARNING: could not create $REMEMBER_DIR/logs/autonomous -- this session's flush will not be recorded, and /remember:doctor may misreport SessionEnd as never having fired."
 fi
 # `$$` (this hook process's own PID) suffixes the second-granularity

@@ -98,7 +98,12 @@ unset _legacy_dir _legacy_rd
 # pays it — PostToolUse on every single tool call. The deepest path implies its
 # parents, so two tests settle all three, and a partially-removed tree still
 # falls through to the unchanged mkdir.
-if [ ! -d "$REMEMBER_DIR/logs/autonomous" ] || [ ! -d "$REMEMBER_DIR/tmp" ]; then
+# #920 gap 1: REMEMBER_DIR_UNSAFE is exported by lib-memory-dir.sh (sourced
+# above), the single chokepoint every one of this script's callers resolves
+# REMEMBER_DIR through -- refuse the whole tree rather than mkdir -p'ing a
+# value #902's own guard would have refused one line later.
+if [ "${REMEMBER_DIR_UNSAFE:-0}" != 1 ] \
+    && { [ ! -d "$REMEMBER_DIR/logs/autonomous" ] || [ ! -d "$REMEMBER_DIR/tmp" ]; }; then
     mkdir -p \
         "$REMEMBER_DIR/tmp" \
         "$REMEMBER_DIR/logs" \

@@ -387,7 +387,9 @@ if [ "$_WH_REMEMBER_ROOT" = "$_WH_MEM_PROJ" ]; then
     fi
 fi
 
-[ -d "$REMEMBER_DIR" ] || mkdir -p "$REMEMBER_DIR" 2>/dev/null
+# #920 gap 1: REMEMBER_DIR_UNSAFE is exported by lib-memory-dir.sh, sourced
+# directly above.
+[ "${REMEMBER_DIR_UNSAFE:-0}" = 1 ] || [ -d "$REMEMBER_DIR" ] || mkdir -p "$REMEMBER_DIR" 2>/dev/null
 
 # mktemp, not a $$-suffixed literal path -- the exact hazard
 # lib-memory-dir.sh's own merged-config write already documents at length
