@@ -172,8 +172,10 @@ def test_hook_returns_quickly_when_a_writer_holds_stdin_open_past_the_cap(tmp_pa
             os.write(write_fd, payload)
             # Longer than this test's own elapsed-time assertion below, so a
             # hook that (bug) waits for EOF cannot pass by accident -- it
-            # would have to wait out this whole sleep first.
-            time.sleep(6)
+            # would have to wait out this whole sleep first. Held 3x longer
+            # than the bound so widening the bound for a slow runner cannot
+            # quietly reach the hold and stop catching the bug.
+            time.sleep(15)
         finally:
             os.close(write_fd)
             _feeder_done.set()
@@ -188,18 +190,18 @@ def test_hook_returns_quickly_when_a_writer_holds_stdin_open_past_the_cap(tmp_pa
             env=_env(home, project, remember),
             capture_output=True,
             text=True,
-            timeout=20,
+            timeout=30,
             check=False,
         )
         elapsed = time.monotonic() - start
     finally:
         os.close(read_fd)
-        feeder.join(timeout=10)
+        feeder.join(timeout=20)
 
     assert result.returncode == 0, (
         f"hook exited {result.returncode}, stderr={result.stderr!r}"
     )
-    # 5s: well under the feeder's 6s hold, and well over what the fixed,
+    # 5s: a third of the feeder's 15s hold, and well over what the fixed,
     # backgrounded drain actually costs (bounded by the read loop's own
     # `read -t 1` cadence, not by the writer at all). Matches the other
     # must-fire test in this file (test_a_1mb_transcript_sized_stdin_...):
@@ -208,7 +210,7 @@ def test_hook_returns_quickly_when_a_writer_holds_stdin_open_past_the_cap(tmp_pa
     # spawn overhead alone, with the fix correctly in place.
     assert elapsed < 5.0, (
         f"hook took {elapsed:.2f}s to return while a writer held stdin open "
-        f"for 6s past the cap -- the post-cap drain is blocking on the "
+        f"for 15s past the cap -- the post-cap drain is blocking on the "
         f"writer again instead of running detached"
     )
     assert _feeder_done.wait(timeout=10), "feeder thread never finished"
