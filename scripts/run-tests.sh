@@ -19,7 +19,7 @@
 #   python3, pytest, bash, jq
 #   Fixtures: tests/fixtures/sample-session.jsonl, tests/fixtures/team/
 #   Scripts: save-session.sh (for dry-run test)
-#   Python: pipeline.shell, pipeline.haiku (for live test)
+#   Python: pipeline.shell, pipeline.summarizer (for live test)
 #
 # EXIT CODES
 #   0   All tests passed

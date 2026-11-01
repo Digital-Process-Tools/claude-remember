@@ -59,7 +59,7 @@
 # ENVIRONMENT (opt-in)
 #   REMEMBER_PATHS_SOFT_FAIL=1   Signal failure with `return 1` instead of
 #                                exiting the caller. Set by the hook scripts.
-#   REMEMBER_NESTED_SUMMARIZER   Set by pipeline/haiku.py on the nested
+#   REMEMBER_NESTED_SUMMARIZER   Set by pipeline/summarizer.py on the nested
 #                                `claude -p` it spawns. There is no project
 #                                here — resolve nothing and stop.
 #
@@ -70,7 +70,7 @@
 # ============================================================================
 
 # --- Nested summarizer: there is no project here (#204) ---
-# The Haiku call in pipeline/haiku.py runs `claude -p` with cwd set to a
+# The Haiku call in pipeline/summarizer.py runs `claude -p` with cwd set to a
 # fresh, isolated per-call directory (_isolated_summarizer_cwd, #724 --
 # previously the shared gettempdir()). Claude Code loads plugins in that
 # child and derives its CLAUDE_PROJECT_DIR from that cwd, so every hook this
@@ -135,14 +135,14 @@ else
     _REMEMBER_PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
 fi
 # #898, round 5: the marker this validates against used to be a script path
-# (pipeline/haiku.py) -- the directory's scanner reads a path to a specific
+# (pipeline/summarizer.py) -- the directory's scanner reads a path to a specific
 # source file sitting in shell logic as a hold trigger (COMMAND_SCRIPT_NOT_
 # FOLLOWED) regardless of why the shell names it. Every install this plugin
 # supports already ships `.claude-plugin/plugin.json` at its root (it is a
 # release-tree requirement, scripts/doctor.sh already anchors on it the same
 # way for its own fallback-root probe), so that is the marker now -- a
 # manifest file, not a script, and present in exactly the same three
-# layouts pipeline/haiku.py always was.
+# layouts pipeline/summarizer.py always was.
 if [ -n "$_REMEMBER_PLUGIN_ROOT" ] && [ -f "$_REMEMBER_PLUGIN_ROOT/.claude-plugin/plugin.json" ]; then
     PIPELINE_DIR="$_REMEMBER_PLUGIN_ROOT"
 elif [ -n "${PLUGIN_ROOT:-}" ] && [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] \

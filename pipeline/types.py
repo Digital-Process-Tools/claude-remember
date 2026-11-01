@@ -141,7 +141,7 @@ class ExtractResult:
             naming a known host shape (#556). Never true together with
             ``envelope_unreadable`` -- a file that could not be opened
             never reaches the scan -- and never true for a resolved
-            envelope. Lets a caller (``pipeline.haiku``'s fallback warning)
+            envelope. Lets a caller (``pipeline.summarizer``'s fallback warning)
             name the cap specifically instead of lumping it in with
             "unrecognised shape".
         envelope_has_unmapped_step: True when ``envelope`` resolved to a

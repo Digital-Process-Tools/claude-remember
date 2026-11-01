@@ -713,7 +713,7 @@ cd "$PIPELINE_DIR" && _remember_run_python -m pipeline.shell build-prompt "$EXTR
 [ ! -s "$TMP_PROMPT" ] && { log "prompt" "ERROR: empty"; exit 1; }
 grep -q '{{TIME}}\|{{BRANCH}}\|{{LAST_ENTRY}}\|{{EXTRACT}}' "$TMP_PROMPT" && { log "prompt" "ERROR: unsubstituted placeholders in prompt"; exit 1; }
 
-# --- Step 4+5: Call Haiku (the claude -p invocation lives only in pipeline/haiku.py) ---
+# --- Step 4+5: Call the summarizer (the claude -p invocation lives only in pipeline/summarizer.py) ---
 log "summarizer" "calling (branch: $BRANCH)"
 HAIKU_STDERR=$(mktemp "${TMPDIR:-/tmp}"/remember-haiku-err-XXXXXX)
 CLEANUP_FILES+=("$HAIKU_STDERR")
@@ -805,7 +805,7 @@ HAIKU_VARS=$(cd "$PIPELINE_DIR" && _remember_run_python -m pipeline.shell call-h
     fi
     # report_error, not log() alone (#694): log() only reaches the daily
     # narrative log, and the CLI's own failure detail -- already dug out of
-    # its stdout JSON by pipeline/haiku.py's _failure_detail() and printed
+    # its stdout JSON by pipeline/summarizer.py's _failure_detail() and printed
     # here by `pipeline.shell call-haiku`'s own stderr handler -- is exactly
     # the diagnosis an operator needs when saves silently stop working.
     # Without this, hook-errors.log (what /remember:doctor tails, and what a
@@ -1229,7 +1229,7 @@ if [ "$RUN_NDC" = true ]; then
                 # log line. now.md is left intact so the next round retries.
                 #
                 # #597: IS_REJECTED alone is not enough. DEFAULT_REJECT_PATTERN
-                # (pipeline/haiku.py) is anchored to English refusal stems, and
+                # (pipeline/summarizer.py) is anchored to English refusal stems, and
                 # #593 put the reply in the conversation's OWN language into
                 # now.md in ordinary use for the first time -- a Chinese,
                 # French, Spanish, German or Japanese refusal comes back with
