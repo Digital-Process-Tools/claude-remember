@@ -32,7 +32,10 @@ pytestmark = pytest.mark.skipif(
     sys.platform == "win32",
     reason="Git/bin/bash.exe prepends /usr/bin ahead of the shim dir, so "
     "coreutils spawns (dirname included) are not observable on Windows "
-    "(#679) -- the byte-identity-free static check below still runs there.",
+    "(#679) -- every test in this file is skipped there, unlike "
+    "test_session_start_spawn_reduction_679.py's byte-identity test, which "
+    "has no such dependency; this fix's own dirname-fork-count guard has no "
+    "coverage on the one platform #1056/#660 are actually about.",
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
