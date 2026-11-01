@@ -68,7 +68,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from pipeline import extract as _extract
-from pipeline.haiku import call_haiku
+from pipeline.summarizer import call_haiku
 from pipeline.prompts import build_save_prompt
 
 RUN_LIVE = os.environ.get("RUN_LIVE_SUMMARY_JUDGE") == "1"
@@ -139,7 +139,7 @@ def test_live_summary_preserves_session_facts(case, monkeypatch):
     # This is the one thing the issue is actually about: without forcing
     # the route, _choose_summarizer_provider()'s "auto" default only ever
     # resolves to "codex" when REMEMBER_TRANSCRIPT_PATH already points at a
-    # live Codex-shaped transcript (pipeline/haiku.py's own
+    # live Codex-shaped transcript (pipeline/summarizer.py's own
     # _choose_summarizer_provider docstring) -- never true in an ordinary
     # dev shell or CI runner, so an unforced run here would silently judge
     # the pre-existing claude route instead of the codex route #492 is

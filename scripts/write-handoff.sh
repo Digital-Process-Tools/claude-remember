@@ -34,6 +34,16 @@
 #      candidate's own store already carries THIS session's session-keyed
 #      handoff hint (#738) and prefers that one -- falling back to the
 #      toplevel, unchanged, when neither or both do.
+#      #1058: that two-candidate check missed a THIRD shape -- a Bash `cd`
+#      that moved $(pwd) past the subdirectory project's own start dir, not
+#      just sideways out of it. The session-keyed hint then lives in neither
+#      candidate; it lives in an ancestor strictly between them. So this
+#      walks every directory from $(pwd) up to (and including) the git
+#      toplevel, taking the FRESHEST one (by mtime, review finding on
+#      #1058/PR #1081 -- NOT simply the first/closest to $(pwd); see the
+#      comment right above the walk itself for why) whose own store carries
+#      this session's hint, and still falls back to the toplevel, unchanged,
+#      when no ancestor in the walk has one at all.
 #   2. If the SessionStart hook this session left a resolved path at
 #      $REMEMBER_DIR/tmp/handoff-path (written every session start, #720),
 #      and that path's shape passes the check below, use it -- this is what
@@ -126,23 +136,72 @@ if [ -z "${CLAUDE_PROJECT_DIR:-}" ]; then
     # THIS session's SessionStart already published a hint file keyed by
     # THIS session's own id (#738) into whichever REMEMBER_DIR it actually
     # resolved -- nothing else can have written that file, and nothing else
-    # is asked to disambiguate. Whichever candidate's derived store carries
-    # it is the one SessionStart itself used for this very session; if
-    # neither or both do (no session id reached this script, a session that
-    # predates #738/#776, or -- unreachable in the ordinary case -- both
-    # somehow agree) this falls through to the pre-#776 default of
-    # preferring the git toplevel, unchanged.
+    # is asked to disambiguate. #1058 replaced the original #776 two-candidate
+    # comparison below with a full ancestor walk; a review finding on #1058/
+    # PR #1081 then replaced that walk's own first version again, from
+    # "closest ancestor with a hint wins" to "FRESHEST hint (by mtime) among
+    # every ancestor wins" -- see the comment right above the walk itself for
+    # the mechanism. So the old #776 "neither or both agree -> toplevel,
+    # unchanged" rule describes neither half accurately any more: "neither"
+    # still falls through to the toplevel as before, but "both" (or any
+    # ancestor with a hint at all) is decided by mtime, never by which
+    # ancestor happens to be nearer $(pwd) -- not even $(pwd) itself is
+    # special-cased any more.
     if [ -n "$_WH_GIT_ROOT" ] && [ "$_WH_GIT_ROOT" != "$(pwd)" ] && [ -n "$_WH_SESSION_ID" ]; then
-        _WH_RD_CWD=$(_wh_trial_remember_dir "$(pwd)") || _WH_RD_CWD=""
-        _WH_RD_GITROOT=$(_wh_trial_remember_dir "$_WH_GIT_ROOT") || _WH_RD_GITROOT=""
-        _WH_CWD_HAS_HINT=0
-        _WH_GITROOT_HAS_HINT=0
-        [ -n "$_WH_RD_CWD" ] && [ -f "$_WH_RD_CWD/tmp/handoff-path.$_WH_SESSION_ID" ] && _WH_CWD_HAS_HINT=1
-        [ -n "$_WH_RD_GITROOT" ] && [ -f "$_WH_RD_GITROOT/tmp/handoff-path.$_WH_SESSION_ID" ] && _WH_GITROOT_HAS_HINT=1
-        if [ "$_WH_CWD_HAS_HINT" = 1 ] && [ "$_WH_GITROOT_HAS_HINT" = 0 ]; then
-            _WH_GIT_ROOT=""
+        # #1058: walk every ancestor from $(pwd) up to the git toplevel,
+        # and -- review finding on #1058/PR #1081 -- pick the FRESHEST
+        # hint among every ancestor that has one, not just the nearest.
+        # session-start-hook.sh republishes tmp/handoff-path.<id> on every
+        # SessionStart for a given session id, including a `--resume` that
+        # keeps the same id but runs from a DIFFERENT directory than the
+        # one the session originally started in; the earlier directory's
+        # hint survives (session-start-hook.sh's own stale-hint reap only
+        # ever sweeps the CURRENT REMEMBER_DIR's own tmp/, never another
+        # directory's) for as long as its grace window, so "closest
+        # ancestor with a hint" can genuinely pick a directory the session
+        # has since moved on from over the one it most recently resolved
+        # to. Comparing mtimes picks whichever hint was written most
+        # recently, which is the resume's own, not an accident of which
+        # ancestor happens to be nearer $(pwd).
+        #
+        # The toplevel-reached test uses `-ef` (same device+inode), not a
+        # string compare: `git rev-parse --show-toplevel` resolves
+        # symlinks, but bash's own $(pwd) is LOGICAL and keeps whatever
+        # symlink name got `cd`'d through (e.g. macOS's /tmp ->
+        # /private/tmp). Termination itself does not depend on reaching
+        # the toplevel at all, though: it stops as soon as `dirname` makes
+        # no further progress (covers both POSIX "/" and an MSYS/Windows
+        # UNC root like "//server", where some `dirname` implementations
+        # return the same string forever -- review finding on #1058/PR
+        # #1081, reasoned rather than observed: no MSYS environment was
+        # available to exercise the UNC shape directly).
+        _WH_WALK_DIR="$(pwd)"
+        _WH_HINT_DIR=""
+        _WH_HINT_MTIME=-1
+        while :; do
+            _WH_RD_WALK=$(_wh_trial_remember_dir "$_WH_WALK_DIR") || _WH_RD_WALK=""
+            if [ -n "$_WH_RD_WALK" ]; then
+                _WH_HINT_FILE_WALK="$_WH_RD_WALK/tmp/handoff-path.$_WH_SESSION_ID"
+                if [ -f "$_WH_HINT_FILE_WALK" ]; then
+                    _WH_MTIME_WALK=$(stat -c %Y "$_WH_HINT_FILE_WALK" 2>/dev/null) \
+                        || _WH_MTIME_WALK=$(stat -f %m "$_WH_HINT_FILE_WALK" 2>/dev/null) \
+                        || _WH_MTIME_WALK=""
+                    if [ -n "$_WH_MTIME_WALK" ] && [[ "$_WH_MTIME_WALK" != *[!0-9]* ]] \
+                        && [ "$_WH_MTIME_WALK" -gt "$_WH_HINT_MTIME" ]; then
+                        _WH_HINT_MTIME="$_WH_MTIME_WALK"
+                        _WH_HINT_DIR="$_WH_WALK_DIR"
+                    fi
+                fi
+            fi
+            [ "$_WH_WALK_DIR" -ef "$_WH_GIT_ROOT" ] && break
+            _WH_WALK_NEXT=$(dirname "$_WH_WALK_DIR")
+            [ "$_WH_WALK_NEXT" = "$_WH_WALK_DIR" ] && break
+            _WH_WALK_DIR="$_WH_WALK_NEXT"
+        done
+        if [ -n "$_WH_HINT_DIR" ]; then
+            _WH_GIT_ROOT="$_WH_HINT_DIR"
         fi
-        unset _WH_RD_CWD _WH_RD_GITROOT _WH_CWD_HAS_HINT _WH_GITROOT_HAS_HINT
+        unset _WH_RD_WALK _WH_WALK_DIR _WH_WALK_NEXT _WH_HINT_DIR _WH_HINT_MTIME _WH_HINT_FILE_WALK _WH_MTIME_WALK
     fi
 
     if [ -n "$_WH_GIT_ROOT" ]; then

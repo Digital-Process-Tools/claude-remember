@@ -30,7 +30,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "tests"))
 
-from pipeline.haiku import _parse_response  # noqa: E402
+from pipeline.summarizer import _parse_response  # noqa: E402
 
 pytestmark = pytest.mark.skipif(
     sys.platform == "win32",

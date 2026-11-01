@@ -132,7 +132,7 @@ def test_call_haiku_decodes_utf8_stdout_under_non_utf8_locale(tmp_path):
 
     env = {**FORCED_NON_UTF8_ENV, "PATH": f"{bindir}:{os.environ.get('PATH', '')}"}
     driver = (
-        "from pipeline.haiku import call_haiku\n"
+        "from pipeline.summarizer import call_haiku\n"
         "r = call_haiku('go')\n"
         "import sys; sys.stdout.buffer.write(r.text.encode('utf-8'))\n"
     )
@@ -149,9 +149,9 @@ def test_call_haiku_passes_utf8_encoding_to_subprocess():
     an explicit UTF-8 decode, never relying on the locale codec (#91)."""
     sys.path.insert(0, str(REPO_ROOT))
     from unittest.mock import MagicMock, patch
-    import pipeline.haiku as haiku
+    import pipeline.summarizer as haiku
 
-    with patch("pipeline.haiku.subprocess.run") as run:
+    with patch("pipeline.summarizer.subprocess.run") as run:
         run.return_value = MagicMock(
             returncode=0,
             stdout='{"result":"x","input_tokens":1,"output_tokens":1,'

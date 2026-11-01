@@ -31,7 +31,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from pipeline.haiku import (
+from pipeline.summarizer import (
     _build_cmd,
     _build_codex_cmd,
     _call_codex,
@@ -81,7 +81,7 @@ def test_build_cmd_still_allows_explicitly_requested_tools():
 # ── F8: isolated cwd, not the shared tempdir ────────────────────────────────
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_call_haiku_does_not_spawn_in_the_shared_tempdir(mock_run, monkeypatch):
     """The cwd handed to subprocess.run must both differ from the shared
     tempdir AND exist AT THE MOMENT the call runs -- checked from inside a
@@ -104,7 +104,7 @@ def test_call_haiku_does_not_spawn_in_the_shared_tempdir(mock_run, monkeypatch):
     assert not os.path.isdir(seen["cwd"])
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_call_haiku_still_produces_a_result_from_the_isolated_cwd(mock_run):
     """Positive control: the call still works end to end."""
     mock_run.return_value = MagicMock(
@@ -113,7 +113,7 @@ def test_call_haiku_still_produces_a_result_from_the_isolated_cwd(mock_run):
     assert result.text == "did a thing"
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_call_codex_does_not_spawn_in_the_shared_tempdir(mock_run, monkeypatch):
     _write_codex_output.next_text = "## codex thing"
     mock_run.side_effect = _write_codex_output
@@ -305,11 +305,11 @@ def test_codex_child_env_drops_lowercase_proxy_vars_too(monkeypatch):
 def test_codex_child_env_on_a_windows_style_folded_environ(monkeypatch):
     """#792's shape, exercised directly: real Windows `os.environ` folds
     EVERY key to uppercase (CPython `os.py`, `_createenviron`'s `nt`
-    branch), simulated by replacing `pipeline.haiku.os.environ` with a plain
+    branch), simulated by replacing `pipeline.summarizer.os.environ` with a plain
     dict whose keys are already uppercase. Round 18: the folded proxy key
     is dropped; PATH, folded the same way, still passes (positive control)."""
     fake_windows_environ = {"PATH": "C:/bin", "HTTPS_PROXY": "http://proxy.example:7070"}
-    monkeypatch.setattr("pipeline.haiku.os.environ", fake_windows_environ)
+    monkeypatch.setattr("pipeline.summarizer.os.environ", fake_windows_environ)
     env = _codex_child_env()
     assert _env_value_ci(env, "PATH") == "C:/bin", "positive control"
     assert _env_value_ci(env, "https_proxy") is None
@@ -327,7 +327,7 @@ def test_codex_child_env_still_excludes_unrelated_secrets_after_widening(monkeyp
     assert "ANTHROPIC_API_KEY" not in env
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_call_codex_uses_the_allowlisted_env(mock_run, monkeypatch):
     monkeypatch.setenv("SOME_UNRELATED_TOKEN", "sk-super-secret")
     _write_codex_output.next_text = "## codex thing"
@@ -365,7 +365,7 @@ def test_build_codex_cmd_denies_spawned_commands_the_allowlisted_env():
     assert cmd[override_index] == "shell_environment_policy.inherit=none"
 
 
-@patch("pipeline.haiku.subprocess.run")
+@patch("pipeline.summarizer.subprocess.run")
 def test_call_codex_passes_path_but_no_proxy_while_denying_spawned_commands(
     mock_run, monkeypatch, isolated_config
 ):

@@ -31,7 +31,7 @@ def _write_plugin_manifest(plugin: str) -> None:
     """Give a fake plugin root the marker resolve-paths.sh probes for.
 
     Since #898 (round 5) the plugin root is recognised by its install
-    manifest, `.claude-plugin/plugin.json`, not by `pipeline/haiku.py`.
+    manifest, `.claude-plugin/plugin.json`, not by `pipeline/summarizer.py`.
     """
     os.makedirs(os.path.join(plugin, ".claude-plugin"), exist_ok=True)
     with open(os.path.join(plugin, ".claude-plugin", "plugin.json"), "w") as f:
@@ -44,7 +44,7 @@ def _create_local_install(base: str) -> tuple[str, str]:
     Layout:
         base/my-project/
         base/my-project/.claude/remember/scripts/save-session.sh
-        base/my-project/.claude/remember/pipeline/haiku.py
+        base/my-project/.claude/remember/pipeline/summarizer.py
         base/my-project/.remember/tmp/
         base/my-project/.remember/logs/
     """
@@ -73,7 +73,7 @@ def _create_marketplace_install(base: str) -> tuple[str, str, str]:
         base/my-project/.remember/logs/
         base/home/.claude/plugins/cache/org/remember/0.1.0/       (plugin)
         base/home/.claude/plugins/cache/org/remember/0.1.0/scripts/
-        base/home/.claude/plugins/cache/org/remember/0.1.0/pipeline/haiku.py
+        base/home/.claude/plugins/cache/org/remember/0.1.0/pipeline/summarizer.py
     """
     project = os.path.join(base, "my-project")
     cache_base = os.path.join(base, "home", ".claude", "plugins", "cache")
@@ -417,7 +417,7 @@ import json
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from pipeline.haiku import _parse_response, _extract_tokens
+from pipeline.summarizer import _parse_response, _extract_tokens
 
 
 class TestParseResponseCLIv2:

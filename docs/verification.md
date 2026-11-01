@@ -8,7 +8,7 @@ the CLI's own login, with no recovery path of this plugin's own on any host. Eve
 past this notice describes code and configuration that is gone; it is kept only as a
 record of what was once tested by hand, not as a live procedure.
 
-`pipeline/haiku.py` normally lets the nested `claude -p` inherit its
+`pipeline/summarizer.py` normally lets the nested `claude -p` inherit its
 credential from the parent's `CLAUDE_CODE_OAUTH_TOKEN`, kept across the
 parent-session-var strip by `_CHILD_ENV_KEEP`. That path is covered by the
 suite.
@@ -93,7 +93,7 @@ With the negative precondition confirmed and the userConfig `oauth_token`
 option set to a real token (step 1 above):
 
 ```python
-from pipeline.haiku import call_haiku
+from pipeline.summarizer import call_haiku
 
 result = call_haiku("Reply with exactly the word PONG and nothing else.")
 print(result.is_skip, repr(result.text))
@@ -138,7 +138,7 @@ Check specifically:
   survives. The message now carries no value-derived content at all, and
   no identifier-derived content either -- only fixed, hand-written text,
 - the configured value itself never appears anywhere in the log line
-  (`_accept_token` in `pipeline/haiku.py` — see
+  (`_accept_token` in `pipeline/summarizer.py` — see
   [#184](https://github.com/Digital-Process-Tools/claude-remember/issues/184),
   which closed the silent-refusal gap this check exists to prevent).
 

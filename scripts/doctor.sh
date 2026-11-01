@@ -92,25 +92,52 @@ _doctor_trial_remember_dir() {
 # human report) breaks a project deliberately started from a repository
 # SUBDIRECTORY -- the same shape write-handoff.sh's own #776 fix
 # disambiguates -- by routing the report onto the enclosing repository's
-# store instead of the subdirectory project's own. When $(pwd) and the git
-# toplevel disagree AND this session's id is known, prefer whichever
-# candidate's own store already carries THIS session's session-keyed
-# handoff hint (#738); fall back to the toplevel, unchanged, when neither or
-# both do (the #743/#802 shape: an accidental `cd`, no session hint
-# published anywhere for this session).
+# store instead of the subdirectory project's own.
+#
+# #1058/#1082: ported write-handoff.sh's own ancestor-walk fix (not the
+# original #827 two-candidate check) so this diagnostic reports the SAME
+# store write-handoff.sh would actually write into, including when $(pwd)
+# has moved deeper than the subdirectory project the session started in.
+# Walks every ancestor from $(pwd) up to the git toplevel, picking whichever
+# one's own store carries the FRESHEST copy of this session's hint (not
+# just the nearest -- a `--resume` from a different directory republishes
+# the hint there without pruning an earlier directory's copy, so "nearest"
+# alone can pick a directory the session has since moved on from). Falls
+# back to the toplevel, unchanged, when no ancestor has a hint at all.
+# Termination does not depend on reaching the toplevel: it stops as soon as
+# `dirname` makes no further progress, covering both POSIX "/" and an
+# MSYS/Windows UNC root like "//server" (reasoned, not observed -- no MSYS
+# environment was available here).
 _doctor_resolve_project_dir_candidate() {
     _doctor_git_root="$1"
     if [ -n "$_doctor_git_root" ] && [ "$_doctor_git_root" != "$(pwd)" ] && [ -n "$_DOCTOR_SESSION_ID" ]; then
-        _doctor_rd_cwd=$(_doctor_trial_remember_dir "$(pwd)") || _doctor_rd_cwd=""
-        _doctor_rd_gitroot=$(_doctor_trial_remember_dir "$_doctor_git_root") || _doctor_rd_gitroot=""
-        _doctor_cwd_has_hint=0
-        _doctor_gitroot_has_hint=0
-        [ -n "$_doctor_rd_cwd" ] && [ -f "$_doctor_rd_cwd/tmp/handoff-path.$_DOCTOR_SESSION_ID" ] && _doctor_cwd_has_hint=1
-        [ -n "$_doctor_rd_gitroot" ] && [ -f "$_doctor_rd_gitroot/tmp/handoff-path.$_DOCTOR_SESSION_ID" ] && _doctor_gitroot_has_hint=1
-        if [ "$_doctor_cwd_has_hint" = 1 ] && [ "$_doctor_gitroot_has_hint" = 0 ]; then
-            _doctor_git_root=""
+        _doctor_walk_dir="$(pwd)"
+        _doctor_hint_dir=""
+        _doctor_hint_mtime=-1
+        while :; do
+            _doctor_rd_walk=$(_doctor_trial_remember_dir "$_doctor_walk_dir") || _doctor_rd_walk=""
+            if [ -n "$_doctor_rd_walk" ]; then
+                _doctor_hint_file_walk="$_doctor_rd_walk/tmp/handoff-path.$_DOCTOR_SESSION_ID"
+                if [ -f "$_doctor_hint_file_walk" ]; then
+                    _doctor_mtime_walk=$(stat -c %Y "$_doctor_hint_file_walk" 2>/dev/null) \
+                        || _doctor_mtime_walk=$(stat -f %m "$_doctor_hint_file_walk" 2>/dev/null) \
+                        || _doctor_mtime_walk=""
+                    if [ -n "$_doctor_mtime_walk" ] && [[ "$_doctor_mtime_walk" != *[!0-9]* ]] \
+                        && [ "$_doctor_mtime_walk" -gt "$_doctor_hint_mtime" ]; then
+                        _doctor_hint_mtime="$_doctor_mtime_walk"
+                        _doctor_hint_dir="$_doctor_walk_dir"
+                    fi
+                fi
+            fi
+            [ "$_doctor_walk_dir" -ef "$_doctor_git_root" ] && break
+            _doctor_walk_next=$(dirname "$_doctor_walk_dir")
+            [ "$_doctor_walk_next" = "$_doctor_walk_dir" ] && break
+            _doctor_walk_dir="$_doctor_walk_next"
+        done
+        if [ -n "$_doctor_hint_dir" ]; then
+            _doctor_git_root="$_doctor_hint_dir"
         fi
-        unset _doctor_rd_cwd _doctor_rd_gitroot _doctor_cwd_has_hint _doctor_gitroot_has_hint
+        unset _doctor_rd_walk _doctor_walk_dir _doctor_walk_next _doctor_hint_dir _doctor_hint_mtime _doctor_hint_file_walk _doctor_mtime_walk
     fi
     printf '%s' "$_doctor_git_root"
     unset _doctor_git_root
@@ -1049,7 +1076,7 @@ if [ -s "$_SUMMARY_FAILURE_MARKER" ]; then
     fi
     unset _SF_FILES
     echo "FAIL summarizer: last attempt failed${_SF_DETAIL:+: $_SF_DETAIL}"
-    # Same marker family _isolation_may_be_the_cause (pipeline/haiku.py) scans
+    # Same marker family _isolation_may_be_the_cause (pipeline/summarizer.py) scans
     # for -- an expired login reads as a generic failure here, so this is the
     # one lowercased substring match worth doing in bash rather than naming
     # a specific remedy for every kind of failure, which would be as wrong
@@ -1172,7 +1199,7 @@ unset _remember_ss_glob_dir _SS_LATEST_LOG _SS_LAST_LINE _ss_f
 
 # #898, round 4: the "Legacy recovery-token config (#860)" section that used
 # to live here is removed entirely. It scanned the daily log for a "NOTICE:"
-# line pipeline/haiku.py no longer writes (#898 round 4 removed the presence
+# line pipeline/summarizer.py no longer writes (#898 round 4 removed the presence
 # check that produced it) -- this diagnostic would only ever report "OK"
 # from here on, which is not a check worth keeping.
 

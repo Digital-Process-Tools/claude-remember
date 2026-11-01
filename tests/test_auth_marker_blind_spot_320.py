@@ -33,8 +33,8 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from pipeline import haiku
-from pipeline.haiku import _isolation_may_be_the_cause
+from pipeline import summarizer as haiku
+from pipeline.summarizer import _isolation_may_be_the_cause
 
 
 @pytest.fixture

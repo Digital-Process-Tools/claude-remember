@@ -1,6 +1,6 @@
 """#477: transcript_path() collapses two different facts into one None --
 the var was never set, and the var was set but the file it names is gone --
-and pipeline.haiku._choose_summarizer_provider() read that single None as
+and pipeline.summarizer._choose_summarizer_provider() read that single None as
 "nothing to say", so a Codex session whose exported transcript vanished
 between export and read was silently billed to Anthropic with no receipt.
 
@@ -31,7 +31,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from pipeline.haiku import _choose_summarizer_provider
+from pipeline.summarizer import _choose_summarizer_provider
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -54,7 +54,7 @@ def test_set_but_missing_transcript_warns_distinctly_from_unset(monkeypatch):
     render identically to an operator debugging a wrongly-billed session."""
     _clear_host_signals(monkeypatch)
     monkeypatch.setenv("REMEMBER_TRANSCRIPT_PATH", str(FIXTURES / "does-not-exist-477.jsonl"))
-    with patch("pipeline.haiku._warn") as mock_warn:
+    with patch("pipeline.summarizer._warn") as mock_warn:
         assert _choose_summarizer_provider() == "claude"
     mock_warn.assert_called_once()
     message = mock_warn.call_args[0][0]
@@ -68,6 +68,6 @@ def test_unset_transcript_still_does_not_warn(monkeypatch):
     must stay silent -- this is what tells B's warning apart from a warning
     that fires on every ordinary run."""
     _clear_host_signals(monkeypatch)
-    with patch("pipeline.haiku._warn") as mock_warn:
+    with patch("pipeline.summarizer._warn") as mock_warn:
         assert _choose_summarizer_provider() == "claude"
     mock_warn.assert_not_called()

@@ -110,7 +110,7 @@ back afterwards: `CLAUDECODE`, `CLAUDE_JOB_DIR`, `CLAUDE_PROJECT_DIR`,
 `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_CHILD_SESSION`,
 `CLAUDE_CODE_SESSION_ATTENDED`, `CLAUDE_CODE_EXECPATH`, `CLAUDE_CODE_MESSAGING_SOCKET`,
 `CLAUDE_CODE_SSE_PORT` -- the reason for each is a comment beside the code in
-`pipeline/haiku.py`. `CLAUDE_CODE_MESSAGING_TOKEN`, the handshake paired with the messaging
+`pipeline/summarizer.py`. `CLAUDE_CODE_MESSAGING_TOKEN`, the handshake paired with the messaging
 socket, is not on the list and reaches the nested call: with the socket removed, the nested
 call has no channel to present it on. Your login credential is never on that list
 ([#131](https://github.com/Digital-Process-Tools/claude-remember/issues/131)); provider
@@ -122,7 +122,7 @@ unrelated tool that would out-rank your `claude.ai` login there
 in the environment you start Claude Code from.
 
 **The list is code, not config.** Each name is written out literally in
-`pipeline/haiku.py` and cannot be changed from `config.json`. If a future Claude Code
+`pipeline/summarizer.py` and cannot be changed from `config.json`. If a future Claude Code
 release adds a session variable, it reaches the summarizer until a plugin release adds it
 to the list. (Two earlier development rounds of #898 read this list, and the Codex one
 below, from `config.json`; a release-candidate scan reports reading the environment by a

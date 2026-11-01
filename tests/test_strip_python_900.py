@@ -2,7 +2,7 @@
 
 The directory's release-preview scanner reads Python comments and docstrings as code:
 release-preview probe hD (claude-directory-publishing triggers.md) changed the
-credential hold's citation on pipeline/haiku.py from "an environment variable named at
+credential hold's citation on pipeline/summarizer.py from "an environment variable named at
 run time" to "the whole environment object" by doing nothing but removing them. So
 `.github/scripts/strip_python.py` strips both from every shipped .py, and proves --
 per file, failing the build otherwise -- that the result parses as Python 3.9 and has
@@ -234,7 +234,7 @@ def test_every_shipped_py_has_no_comment_and_no_docstring(built_tree):
     mod = _strip_mod()
     files = _shipped_py(out)
     assert files, "no .py shipped -- the check below would pass vacuously"
-    assert out / "pipeline" / "haiku.py" in files
+    assert out / "pipeline" / "summarizer.py" in files
     for p in files:
         assert mod.leftovers(p.read_text(encoding="utf-8")) == [], p
 
@@ -277,5 +277,5 @@ def test_the_stripped_pipeline_imports_and_runs(built_tree):
 def test_the_source_tree_keeps_its_docstrings():
     # the build reads git blobs; source pipeline modules (what every other test imports)
     # still carry their docstrings and comments
-    text = (REPO_ROOT / "pipeline" / "haiku.py").read_text(encoding="utf-8")
+    text = (REPO_ROOT / "pipeline" / "summarizer.py").read_text(encoding="utf-8")
     assert _strip_mod().leftovers(text), "source haiku.py lost its comments/docstrings"
