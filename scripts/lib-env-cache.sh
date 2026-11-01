@@ -212,7 +212,7 @@ _remember_env_cache_load() {
 
     local _line _dir="" _tz="" _mem="" _proj="" _pipe="" _stamp=""
     local _cooldown="" _delta="" _cfg_exists_raw="" _cfg_raw=""
-    local _env_proj="" _env_pipe="" _env_home=""
+    local _env_proj="" _env_pipe="" _env_home="" _recovery=""
     local _cfgs=()
     while IFS= read -r _line || [ -n "$_line" ]; do
         # Python on Windows writes \r\n and a stray CR would end up inside a
@@ -232,6 +232,8 @@ _remember_env_cache_load() {
             _cooldown="${_line#*=}"
         elif [ "${_line#REMEMBER_DELTA_THRESHOLD=}" != "$_line" ]; then
             _delta="${_line#*=}"
+        elif [ "${_line#REMEMBER_RECOVERY_ENABLED=}" != "$_line" ]; then
+            _recovery="${_line#*=}"
         elif [ "${_line#MEMORY_PROJECT_DIR=}" != "$_line" ]; then
             _mem="${_line#*=}"
         elif [ "${_line#PROJECT_DIR=}" != "$_line" ]; then
@@ -291,6 +293,14 @@ _remember_env_cache_load() {
     # once, at upgrade.
     if [ -z "$_cooldown" ] || [[ "$_cooldown" == *[!0-9]* ]]; then return 1; fi
     if [ -z "$_delta" ] || [[ "$_delta" == *[!0-9]* ]]; then return 1; fi
+    # NOT required, unlike the two scalars above (#1079): post-tool-hook.sh
+    # and user-prompt-hook.sh also publish this cache file but never resolve
+    # .features.recovery themselves, so a cache they wrote legitimately
+    # carries no answer for it. capture-gap-check.sh's own fast path already
+    # treats an empty REMEMBER_RECOVERY_ENABLED as "this cache cannot answer
+    # that" and falls back to the full chain -- refusing the WHOLE cache
+    # here over one field only session-start-hook.sh ever resolves would
+    # break the two callers that do not.
     # Compared against the SAME identity _remember_env_cache_path just keyed
     # on (CLAUDE_PROJECT_DIR, falling back to REMEMBER_HOOK_CWD, #469) rather
     # than raw CLAUDE_PROJECT_DIR directly -- on Codex (live-confirmed,
@@ -333,10 +343,12 @@ _remember_env_cache_load() {
     REMEMBER_PROMPT_STAMP="$_stamp"
     REMEMBER_SAVE_COOLDOWN="$_cooldown"
     REMEMBER_DELTA_THRESHOLD="$_delta"
+    REMEMBER_RECOVERY_ENABLED="$_recovery"
     MEMORY_PROJECT_DIR="$_mem"
     [ -n "$MEMORY_PROJECT_DIR" ] || MEMORY_PROJECT_DIR="$_proj"
     export PROJECT_DIR PIPELINE_DIR REMEMBER_DIR REMEMBER_TZ MEMORY_PROJECT_DIR
     export REMEMBER_PROMPT_STAMP REMEMBER_SAVE_COOLDOWN REMEMBER_DELTA_THRESHOLD
+    export REMEMBER_RECOVERY_ENABLED
     return 0
 }
 
@@ -371,6 +383,13 @@ _remember_env_cache_publish() {
     # that lies about config is the thing #358 exists to refuse.
     [ -n "${REMEMBER_SAVE_COOLDOWN:-}" ] || return 0
     [ -n "${REMEMBER_DELTA_THRESHOLD:-}" ] || return 0
+    # REMEMBER_RECOVERY_ENABLED is NOT required here (#1079): only
+    # session-start-hook.sh resolves .features.recovery before publishing;
+    # post-tool-hook.sh and user-prompt-hook.sh publish this same cache file
+    # without ever touching it, and requiring it here would silently refuse
+    # every publish from those two callers. Written below as whatever it is
+    # -- empty included -- and the load side already treats empty as "this
+    # cache cannot answer that question" rather than as a value.
     _remember_env_cache_path || return 0
 
     local _f="$_REMEMBER_ENV_CACHE_FILE" _t
@@ -410,6 +429,7 @@ _remember_env_cache_publish() {
             REMEMBER_PROMPT_STAMP "${REMEMBER_PROMPT_STAMP:-full}" \
             REMEMBER_SAVE_COOLDOWN "$REMEMBER_SAVE_COOLDOWN" \
             REMEMBER_DELTA_THRESHOLD "$REMEMBER_DELTA_THRESHOLD" \
+            REMEMBER_RECOVERY_ENABLED "${REMEMBER_RECOVERY_ENABLED:-}" \
             MEMORY_PROJECT_DIR "$_ecp_mem_proj"
         # #843: each CACHE_CONFIG value carries a "1:" or "0:" prefix
         # recording whether that layer existed RIGHT NOW (at publish time),

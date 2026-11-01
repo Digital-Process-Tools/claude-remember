@@ -44,16 +44,22 @@ _HOOK_DIR="${BASH_SOURCE[0]%/*}"
 #
 # Measured (tests/test_session_start_spawn_reduction_679.py's own
 # #1069-tagged tests): this fast path's own trace never sources
-# resolve-paths.sh at all, confirmed directly rather than by fork-counting
-# -- lib-memory-dir.sh's own config merge for data_dir turned out to be
-# sourced from log.sh too (needed regardless, for log()/config_into()),
-# so counting its forks could not tell "the fast path skipped it" apart
-# from "log.sh needed it anyway" and an earlier version of this comment
-# overstated what the skip alone removes. This is NOT the full fix #1056
-# ("fewer forks under concurrent Windows session starts") tracks -- #1056's
-# own scope covers the fork count log.sh's own merge still costs here,
-# which this skip does not touch; this removes only the REDUNDANT second
-# run of resolve-paths.sh/bootstrap-dirs.sh's OWN resolution, not log.sh's.
+# resolve-paths.sh at all, confirmed directly rather than by fork-counting.
+#
+# #1079 CORRECTION: an earlier version of this comment claimed log.sh's own
+# config merge was "needed regardless" here and could not be removed
+# "without further work" -- false; it was never removed, only unconditionally
+# re-run on every SessionStart (2-6 extra spawns, measured on macOS) plus a
+# #362-style mktemp leak into shared OS tmp, because this process is
+# forked/exec'd fresh and none of session-start-hook.sh's own in-process
+# config table survives into it. The "further work" is the env-cache load a
+# few lines below: it replays the one scalar (REMEMBER_RECOVERY_ENABLED)
+# this file's own common path actually needs, so the merge itself now runs
+# only on a cache miss -- not on every single session start. This is still
+# NOT the full fix #1056 ("fewer forks under concurrent Windows session
+# starts") tracks; it removes the redundant resolve-paths.sh/bootstrap-dirs.sh
+# re-run (as before) AND the redundant log.sh config merge (#1079), not every
+# fork #1056's own scope covers.
 if [ -n "${PROJECT_DIR:-}" ] && [ -d "${PROJECT_DIR:-}" ] \
     && [ -n "${PIPELINE_DIR:-}" ] && [ -d "${PIPELINE_DIR:-}" ] \
     && [ -n "${REMEMBER_DIR:-}" ]; then
@@ -92,13 +98,46 @@ if [ -n "${PROJECT_DIR:-}" ] && [ -d "${PROJECT_DIR:-}" ] \
             printf -v "$1" '%s' "$2"
         fi
     }
-    source "$_HOOK_DIR/log.sh" 2>/dev/null
-    if ! command -v _remember_date >/dev/null 2>&1; then
-        echo "capture-gap-check: ERROR -- failed to source $_HOOK_DIR/log.sh" >&2
-        exit 127
-    fi
     _REMEMBER_LAZY_PYTHON=1
     source "$_HOOK_DIR/detect-tools.sh"
+
+    # #1079 review on #1069's own review comment above (now corrected): this
+    # process is forked/exec'd fresh, so none of session-start-hook.sh's own
+    # in-process _RCFG_* table survives into it -- sourcing log.sh here
+    # unconditionally redid lib-memory-dir.sh's whole three-layer jq/mktemp
+    # merge on EVERY SessionStart (2-6 extra spawns, measured on macOS) and
+    # left that merge's own mktemp'd file in shared OS tmp, since this fast
+    # path never sources bootstrap-dirs.sh (the #362 fix) either. Load the
+    # env cache session-start-hook.sh already published moments ago instead
+    # -- it carries the ONE config value this common path actually needs
+    # (REMEMBER_RECOVERY_ENABLED, used by the recovery check below), the
+    # same way post-tool-hook.sh's own fast path replays REMEMBER_SAVE_COOLDOWN/
+    # REMEMBER_DELTA_THRESHOLD instead of calling config_into. Falls through
+    # to the full chain whenever the cache is missing, stale, or predates
+    # this key -- the "needed regardless" case this comment used to claim
+    # could not be removed without "further work": this is that work.
+    _REMEMBER_FAST=0
+    source "$_HOOK_DIR/lib-env-cache.sh" 2>/dev/null
+    if command -v _remember_env_cache_load >/dev/null 2>&1 \
+        && _remember_env_cache_load && [ -n "${REMEMBER_RECOVERY_ENABLED:-}" ]; then
+        _REMEMBER_FAST=1
+        # Lazy log(): the ONE remaining call site that needs log.sh's real
+        # definitions is the rare case-divergence branch further down --
+        # same shape, same rationale, as post-tool-hook.sh:343-359.
+        log() {
+            unset -f log
+            source "$PLUGIN_ROOT/scripts/log.sh" 2>/dev/null
+            declare -F log >/dev/null 2>&1 || log() { :; }
+            log "$@"
+        }
+    fi
+    if [ "$_REMEMBER_FAST" != "1" ]; then
+        source "$_HOOK_DIR/log.sh" 2>/dev/null
+        if ! command -v _remember_date >/dev/null 2>&1; then
+            echo "capture-gap-check: ERROR -- failed to source $_HOOK_DIR/log.sh" >&2
+            exit 127
+        fi
+    fi
 else
     # resolve-paths.sh sets PROJECT_DIR/PIPELINE_DIR, which bootstrap-dirs.sh
     # (via lib-memory-dir.sh) requires to resolve REMEMBER_DIR/
@@ -793,7 +832,14 @@ fi
 # config_into (#665, part of #660) writes into a scratch var directly --
 # no command-substitution subshell on top of the flattened-cache-hit table.
 _recovery_enabled=""
-config_into _recovery_enabled '.features.recovery' true
+if [ -n "${REMEMBER_RECOVERY_ENABLED:-}" ]; then
+    # #1079: the fast/cache-hit path above never sourced log.sh, so
+    # config_into is not even defined here -- the cached scalar IS the
+    # answer, already resolved by session-start-hook.sh moments ago.
+    _recovery_enabled="$REMEMBER_RECOVERY_ENABLED"
+else
+    config_into _recovery_enabled '.features.recovery' true
+fi
 # Tracks whether THIS run actually kicked off a recovery fork for PREV_ID --
 # distinct from _recovery_enabled, which reads "true" even when the extra
 # preconditions below (SESSIONS_DIR, LAST_SAVE_FILE, an unsaved PREV_ID) are
