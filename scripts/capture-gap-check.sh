@@ -1059,7 +1059,13 @@ _remember_recovery_prev_id_vouched() {
 # claims. Consulted ONLY when the grace would otherwise apply (roster-epoch
 # absent, or not older than the candidate) -- returns 0 ("blocked", the
 # grace must NOT apply) or 1 ("not blocked", the grace may still apply if
-# its own other condition holds).
+# its own other condition holds). Sets _REMEMBER_ROSTER_GRACE_BLOCK_REASON
+# to "recency" or "other-store" on a 0 return, empty otherwise -- the epoch-
+# write site further down reads it: a recency-only block is transient (the
+# same candidate stops looking live once it ages past the window, so the
+# epoch must NOT be written yet, or the grace is spent on nothing) while an
+# other-store block is read by a marker that does not expire on its own, so
+# writing the epoch there costs nothing extra (scheduler review of #1091).
 #
 # Signal 1 -- recency. A live sibling window keeps appending to its own
 # transcript, so an mtime from inside the last few minutes is exactly what
@@ -1076,43 +1082,85 @@ _remember_recovery_prev_id_vouched() {
 # "cannot tell" counts as recent (blocks the grace), never silently
 # coerced into "confirmed old enough" by a failed comparison.
 #
-# Signal 2 -- another store's own marker. Checked at most two directory
-# levels under $HOME/.remember: the shipped default layout
-# (~/.remember/{slug}) is one level, and the #1046 reporter's own pinned
-# layout (~/.remember/roles/a, ~/.remember/roles/b) is two -- deep enough
-# to catch both without turning a background phase that already runs
-# every session start into an unbounded filesystem walk.
-# REMEMBER_STORE_ROOT is not reachable here: the #1046 issue's own second
-# finding is that a pinned REMEMBER_DIR (_LIB_MEMORY_DIR_LOADED=1, the
-# exact setup #1087 is about) makes lib-memory-dir.sh return before
-# REMEMBER_STORE_ROOT is ever set, so that variable is empty in precisely
-# the case this signal exists for.
+# Signal 2 -- another store's own marker. The DEFAULT layout
+# (lib-memory-dir.sh's own fallback, scripts/lib-memory-dir.sh:~273) is
+# <project>/.remember, checked directly -- it is a single fixed path, not a
+# directory of several stores, so no glob is needed for it. The home-
+# relative external layout config.user.example.json documents
+# (~/.remember/{slug}) is checked at most two directory levels under
+# $HOME/.remember: one level is the template itself, and two is the #1046
+# reporter's own pinned variant of it (~/.remember/roles/a,
+# ~/.remember/roles/b) -- deep enough to catch both without turning a
+# background phase that already runs every session start into an unbounded
+# filesystem walk. REMEMBER_STORE_ROOT, when this run's own lib-memory-dir.
+# sh pass actually set it (the #1046 issue's own second finding is that a
+# pinned REMEMBER_DIR, _LIB_MEMORY_DIR_LOADED=1, the exact setup #1087 is
+# about, makes lib-memory-dir.sh return before it is ever set, so it is
+# routinely empty here), is checked the same two-level way whenever it
+# differs from $HOME/.remember, so a custom external store root is not
+# missed either.
 _ROSTER_LIVE_GRACE_MIN=5
+_REMEMBER_ROSTER_GRACE_BLOCK_REASON=""
+_remember_roster_grace_other_store_marker() {
+    # One candidate store directory (not a root to glob): $1/tmp/<marker
+    # dir>/$2. Returns 0 (found, and not THIS store) the first time a
+    # marker exists under a directory that is not $REMEMBER_DIR.
+    local _store="$1" _pid="$2" _marker
+    [ -d "$_store" ] || return 1
+    [ "${_store%/}" != "${REMEMBER_DIR%/}" ] || return 1
+    for _marker in "$_store/tmp/capture-alive.d/$_pid" "$_store/tmp/session-started.d/$_pid"; do
+        [ -e "$_marker" ] && return 0
+    done
+    return 1
+}
+_remember_roster_grace_scan_root() {
+    # $1: a directory several per-project stores sit under (NOT a store
+    # itself) -- checked at most two levels deep below it.
+    local _root="$1" _pid="$2" _d1 _d2
+    [ -n "$_root" ] && [ -d "$_root" ] || return 1
+    for _d1 in "$_root"/*/; do
+        [ -d "$_d1" ] || continue
+        _remember_roster_grace_other_store_marker "${_d1%/}" "$_pid" && return 0
+        for _d2 in "$_d1"*/; do
+            [ -d "$_d2" ] || continue
+            _remember_roster_grace_other_store_marker "${_d2%/}" "$_pid" && return 0
+        done
+    done
+    return 1
+}
 _remember_roster_grace_blocked() {
-    local _pid="$1" _jsonl="$2" _now="" _mtime="" _d1 _d2 _marker _LC_ALL_SAVE
+    local _pid="$1" _jsonl="$2" _now="" _mtime="" _LC_ALL_SAVE
 
-    [ -n "$_jsonl" ] && [ -f "$_jsonl" ] || return 0
+    _REMEMBER_ROSTER_GRACE_BLOCK_REASON=""
 
-    _mtime=$(stat -c %Y "$_jsonl" 2>/dev/null) \
-        || _mtime=$(stat -f %m "$_jsonl" 2>/dev/null) \
-        || _mtime=""
-    if [ -z "$_mtime" ] || [[ "$_mtime" == *[!0-9]* ]]; then
-        return 0
-    fi
-    if ! command -v _remember_date_into >/dev/null 2>&1; then
-        # Forkless function definitions only -- cheap enough for this
-        # background phase even on the #1079 fast path, where log.sh
-        # itself is deliberately not sourced eagerly. Idempotent: a no-op
-        # if some other call site already sourced it first.
-        source "$_HOOK_DIR/lib-clock.sh" 2>/dev/null
-    fi
-    if command -v _remember_date_into >/dev/null 2>&1; then
-        _remember_date_into _now +%s
-    fi
-    if [ -z "$_now" ] || [[ "$_now" == *[!0-9]* ]]; then
-        return 0
-    fi
-    if [ $((10#$_now - 10#$_mtime)) -lt $((_ROSTER_LIVE_GRACE_MIN * 60)) ]; then
+    if [ -n "$_jsonl" ] && [ -f "$_jsonl" ]; then
+        _mtime=$(stat -c %Y "$_jsonl" 2>/dev/null) \
+            || _mtime=$(stat -f %m "$_jsonl" 2>/dev/null) \
+            || _mtime=""
+        if [ -z "$_mtime" ] || [[ "$_mtime" == *[!0-9]* ]]; then
+            _REMEMBER_ROSTER_GRACE_BLOCK_REASON="recency"
+            return 0
+        fi
+        if ! command -v _remember_date_into >/dev/null 2>&1; then
+            # Forkless function definitions only -- cheap enough for this
+            # background phase even on the #1079 fast path, where log.sh
+            # itself is deliberately not sourced eagerly. Idempotent: a
+            # no-op if some other call site already sourced it first.
+            source "$_HOOK_DIR/lib-clock.sh" 2>/dev/null
+        fi
+        if command -v _remember_date_into >/dev/null 2>&1; then
+            _remember_date_into _now +%s
+        fi
+        if [ -z "$_now" ] || [[ "$_now" == *[!0-9]* ]]; then
+            _REMEMBER_ROSTER_GRACE_BLOCK_REASON="recency"
+            return 0
+        fi
+        if [ $((10#$_now - 10#$_mtime)) -lt $((_ROSTER_LIVE_GRACE_MIN * 60)) ]; then
+            _REMEMBER_ROSTER_GRACE_BLOCK_REASON="recency"
+            return 0
+        fi
+    else
+        _REMEMBER_ROSTER_GRACE_BLOCK_REASON="recency"
         return 0
     fi
 
@@ -1136,23 +1184,23 @@ _remember_roster_grace_blocked() {
     fi
     LC_ALL="$_LC_ALL_SAVE"
 
-    if [ -n "${HOME:-}" ] && [ -d "$HOME/.remember" ]; then
-        for _d1 in "$HOME/.remember"/*/; do
-            [ -d "$_d1" ] || continue
-            for _marker in "$_d1"tmp/capture-alive.d/"$_pid" "$_d1"tmp/session-started.d/"$_pid"; do
-                if [ -e "$_marker" ] && [ "${_d1%/}" != "$REMEMBER_DIR" ]; then
-                    return 0
-                fi
-            done
-            for _d2 in "$_d1"*/; do
-                [ -d "$_d2" ] || continue
-                for _marker in "$_d2"tmp/capture-alive.d/"$_pid" "$_d2"tmp/session-started.d/"$_pid"; do
-                    if [ -e "$_marker" ] && [ "${_d2%/}" != "$REMEMBER_DIR" ]; then
-                        return 0
-                    fi
-                done
-            done
-        done
+    # The default in-project layout: a single fixed store, not a root of
+    # several -- checked directly.
+    if [ -n "${PROJECT:-}" ] \
+        && _remember_roster_grace_other_store_marker "$PROJECT/.remember" "$_pid"; then
+        _REMEMBER_ROSTER_GRACE_BLOCK_REASON="other-store"
+        return 0
+    fi
+    if [ -n "${HOME:-}" ] \
+        && _remember_roster_grace_scan_root "$HOME/.remember" "$_pid"; then
+        _REMEMBER_ROSTER_GRACE_BLOCK_REASON="other-store"
+        return 0
+    fi
+    if [ -n "${REMEMBER_STORE_ROOT:-}" ] \
+        && [ "${REMEMBER_STORE_ROOT%/}" != "${HOME:-}/.remember" ] \
+        && _remember_roster_grace_scan_root "$REMEMBER_STORE_ROOT" "$_pid"; then
+        _REMEMBER_ROSTER_GRACE_BLOCK_REASON="other-store"
+        return 0
     fi
     return 1
 }
@@ -1205,12 +1253,23 @@ _prev_id_possibly_foreign_store=""
 # in this same run -- creating the epoch file any earlier would make this
 # very session's own grace decision see the epoch as already started.
 _remember_roster_epoch_grace=""
+# #1087 scheduler review: whether this run reached the grace-eligible
+# branch at all (epoch absent, or not older than the candidate) --
+# distinct from _remember_roster_epoch_grace itself, which is also "" when
+# blocked. Consulted at the epoch-write site further down: a recency block
+# on an otherwise-eligible run must leave the epoch unwritten, so THIS
+# candidate (or whichever one is newest when it is no longer recent) gets
+# a real chance at the grace on a later start, rather than the grace being
+# spent on a decision that only ever said no.
+_remember_roster_epoch_eligible=""
 ROSTER_EPOCH="$REMEMBER_DIR/tmp/roster-epoch"
 if [ -n "$REMEMBER_DIR" ]; then
-    if { [ ! -f "$ROSTER_EPOCH" ] || { [ -n "$PREV_JSONL" ] && [ -f "$PREV_JSONL" ] \
-        && ! [ "$PREV_JSONL" -nt "$ROSTER_EPOCH" ]; }; } \
-        && ! _remember_roster_grace_blocked "$PREV_ID" "$PREV_JSONL"; then
-        _remember_roster_epoch_grace="true"
+    if [ ! -f "$ROSTER_EPOCH" ] || { [ -n "$PREV_JSONL" ] && [ -f "$PREV_JSONL" ] \
+        && ! [ "$PREV_JSONL" -nt "$ROSTER_EPOCH" ]; }; then
+        _remember_roster_epoch_eligible="true"
+        if ! _remember_roster_grace_blocked "$PREV_ID" "$PREV_JSONL"; then
+            _remember_roster_epoch_grace="true"
+        fi
     fi
 fi
 if [ "$_recovery_enabled" = "true" ]; then
@@ -1299,7 +1358,22 @@ fi
 # comment): every run after the first one under this store sees the epoch
 # already started, so the grace applies at most once per previously-
 # ungraced previous session.
-if [ -n "$REMEMBER_DIR" ] && [ ! -f "$ROSTER_EPOCH" ]; then
+#
+# #1087 scheduler review: NOT written when this run reached the grace-
+# eligible branch and _remember_roster_grace_blocked declined for recency
+# alone. Writing it anyway would spend the one-time grace on a decision
+# that only ever said no -- the candidate stops looking live once it ages
+# past the window, and a later start should still get a real shot at
+# rescuing it, which it can only do while the epoch stays absent (or
+# older than that candidate's own transcript, the other half of the
+# eligibility test above). An "other-store" block is read by a marker
+# that does not expire the same way, so the epoch still writes there --
+# consulting _REMEMBER_ROSTER_GRACE_BLOCK_REASON, not merely whether the
+# grace applied, is what tells the two apart.
+if [ -n "$REMEMBER_DIR" ] && [ ! -f "$ROSTER_EPOCH" ] \
+    && { [ "$_remember_roster_epoch_eligible" != "true" ] \
+        || [ "$_remember_roster_epoch_grace" = "true" ] \
+        || [ "$_REMEMBER_ROSTER_GRACE_BLOCK_REASON" != "recency" ]; }; then
     : > "$ROSTER_EPOCH" 2>/dev/null || true
 fi
 
