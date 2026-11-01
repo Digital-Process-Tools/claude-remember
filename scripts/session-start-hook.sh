@@ -450,7 +450,11 @@ fi
 # costs a process on every single SessionStart. The mkdir still runs -- and
 # still gates the write on its success -- the first time, and on any run
 # where the directory is missing.
-if [ -n "$REMEMBER_DIR" ] && [ -n "$CURRENT_SESSION_ID" ]; then
+# #920 gap 1 (scheduler review round 2): this mkdir was added by #1084/#1086
+# after the #920 gating pass above (806/1200/1630) and was never covered by
+# it -- same REMEMBER_DIR_UNSAFE flag, exported by lib-memory-dir.sh via
+# bootstrap-dirs.sh earlier in this script.
+if [ "${REMEMBER_DIR_UNSAFE:-0}" != 1 ] && [ -n "$REMEMBER_DIR" ] && [ -n "$CURRENT_SESSION_ID" ]; then
     if [ -d "$REMEMBER_DIR/tmp/session-started.d" ] \
         || mkdir -p "$REMEMBER_DIR/tmp/session-started.d" 2>/dev/null; then
         : > "$REMEMBER_DIR/tmp/session-started.d/$CURRENT_SESSION_ID" 2>/dev/null

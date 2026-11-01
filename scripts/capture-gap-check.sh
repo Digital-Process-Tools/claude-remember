@@ -405,6 +405,12 @@ session_was_saved() {
 # question.
 _remember_write_slug_record() {
     local _dir="$REMEMBER_DIR/tmp" _tmp
+    # #920 gap 1 (scheduler review round 2): REMEMBER_DIR_UNSAFE is exported
+    # by lib-memory-dir.sh's _remember_lmd_set_dir_unsafe, but this script's
+    # own fast path (above) inherits REMEMBER_DIR from the environment
+    # without re-sourcing that file -- gate here on the inherited flag
+    # instead of assuming re-derivation happened.
+    [ "${REMEMBER_DIR_UNSAFE:-0}" = 1 ] && return 0
     [ -d "$_dir" ] || mkdir -p "$_dir" 2>/dev/null || return 0
     _tmp="$_dir/session-slug.$$"
 
@@ -509,6 +515,11 @@ _remember_write_slug_index() {
         return 0
     fi
 
+    # #920 gap 1 (scheduler review round 2): same inherited-flag gate as the
+    # other two mkdir sites in this file -- REMEMBER_STORE_ROOT is built from
+    # the same raw data_dir value REMEMBER_DIR is, so an unsafe value can
+    # carry the same newline/CR into it.
+    [ "${REMEMBER_DIR_UNSAFE:-0}" = 1 ] && return 0
     local _dir="$REMEMBER_STORE_ROOT/tmp"
     [ -d "$_dir" ] || mkdir -p "$_dir" 2>/dev/null || return 0
 
@@ -634,6 +645,11 @@ _remember_write_case_divergence() {
     fi
 
     if [ "$_old" != "$_body" ]; then
+        # #920 gap 1 (scheduler review round 2): same inherited-flag gate as
+        # _remember_write_slug_record above -- this fast path never re-sources
+        # lib-memory-dir.sh, so REMEMBER_DIR_UNSAFE must be read from the
+        # environment it exports into, not re-derived.
+        [ "${REMEMBER_DIR_UNSAFE:-0}" = 1 ] && return 0
         [ -d "$_dir" ] || mkdir -p "$_dir" 2>/dev/null || return 0
         _tmp="$_dir/case-divergence.$$"
         printf '%s\n' "$_body" > "$_tmp" 2>/dev/null \

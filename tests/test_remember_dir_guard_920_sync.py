@@ -55,6 +55,13 @@ CASES = {
     UNC_VALUE: 1,
     "\\\\x": 1,
     "\\\\": 0,
+    # #920 scheduler review round 2, item 6: a THIRD leading backslash (no
+    # real share-name character after the UNC prefix) used to read as safe
+    # here (lib-memory-dir.sh's own `[\\][\\]?*` let any third character,
+    # backslash included, satisfy the UNC arm) and unsafe in the other two
+    # copies (`[\\][\\][^\\]*`, which needs a NON-backslash third
+    # character) -- the exact disagreement this file exists to catch.
+    "\\\\\\x": 0,
     "relative/path": 0,
     "/abs/with\nnewline": 0,
     UNC_WITH_NEWLINE: 0,

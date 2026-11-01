@@ -305,9 +305,27 @@ _remember_lmd_set_dir_unsafe() {
     local LC_ALL=C
     REMEMBER_DIR_UNSAFE=1
     [[ "$REMEMBER_DIR" == *[$'\n\r']* ]] && return
-    [[ "$REMEMBER_DIR" == /* || "$REMEMBER_DIR" == [A-Za-z]:[/\\]* || "$REMEMBER_DIR" == [\\][\\]?* ]] && REMEMBER_DIR_UNSAFE=0
+    # #920 scheduler review round 2, item 6: the UNC arm was `[\\][\\]?*`
+    # (any third character, backslash included), which disagreed with
+    # post-tool-hook.sh's and log.sh's own `[\\][\\][^\\]*` (a third
+    # character that is NOT itself a backslash) on a three-backslash-
+    # prefixed value -- e.g. "\\\\\x" read as safe here and unsafe there.
+    # Brought in line with the stricter, pre-existing copies: a bare
+    # backslash-backslash run with no real share-name character after it
+    # is not a shape any of the three predicates should call safe.
+    [[ "$REMEMBER_DIR" == /* || "$REMEMBER_DIR" == [A-Za-z]:[/\\]* || "$REMEMBER_DIR" == [\\][\\][^\\]* ]] && REMEMBER_DIR_UNSAFE=0
 }
 _remember_lmd_set_dir_unsafe
+# EXPORTED (scheduler review round 2, #920): capture-gap-check.sh's own fast
+# path is a forked/exec'd CHILD of session-start-hook.sh (backgrounded with
+# `&disown`, or exec'd inline for REMEMBER_DEFER=0) that deliberately skips
+# re-sourcing this file to avoid redoing the jq/mktemp merge on every
+# SessionStart (#1069/#1079) -- it inherits PROJECT_DIR/PIPELINE_DIR/
+# REMEMBER_DIR from the environment instead. A plain (non-exported) variable
+# assignment is never inherited across that fork/exec boundary, so without
+# `export` here the child always read REMEMBER_DIR_UNSAFE as unset/0 and ran
+# its own unguarded mkdir sites regardless of what this predicate decided.
+export REMEMBER_DIR_UNSAFE
 [ "$REMEMBER_DIR_UNSAFE" = 1 ] && echo "FATAL: unsafe REMEMBER_DIR ($REMEMBER_DIR) -- refusing to mkdir" >&2
 
 # Empty in every layout where REMEMBER_DIR is nameable without the slug (#297).

@@ -174,9 +174,10 @@ _remember_lmd_set_dir_unsafe() {
     local LC_ALL=C
     REMEMBER_DIR_UNSAFE=1
     [[ "$REMEMBER_DIR" == *[$'\n\r']* ]] && return
-    [[ "$REMEMBER_DIR" == /* || "$REMEMBER_DIR" == [A-Za-z]:[/\\]* || "$REMEMBER_DIR" == [\\][\\]?* ]] && REMEMBER_DIR_UNSAFE=0
+    [[ "$REMEMBER_DIR" == /* || "$REMEMBER_DIR" == [A-Za-z]:[/\\]* || "$REMEMBER_DIR" == [\\][\\][^\\]* ]] && REMEMBER_DIR_UNSAFE=0
 }
 _remember_lmd_set_dir_unsafe
+export REMEMBER_DIR_UNSAFE
 [ "$REMEMBER_DIR_UNSAFE" = 1 ] && echo "FATAL: unsafe REMEMBER_DIR ($REMEMBER_DIR) -- refusing to mkdir" >&2
 
 _set_store_root""",

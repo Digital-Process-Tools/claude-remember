@@ -65,6 +65,18 @@ REMEMBER_LOG_DIR="${REMEMBER_DIR}/logs"
 # drive-letter test as lib-memory-dir.sh's own absolute check. A function,
 # not an inline `[[ ]]` at this top-level scope, so `local LC_ALL=C` can
 # scope the bracket range byte-wise (#695) without exporting it past here.
+#
+# #920 scheduler review round 2, item 5: this function is never CALLED
+# anywhere in this file any more -- the `if` just below reads the exported
+# REMEMBER_DIR_UNSAFE flag directly instead of recomputing it (the #920
+# self-review comment above that `if` explains why). It is NOT dead code to
+# delete on sight: tests/test_remember_dir_guard_920_sync.py extracts and
+# RUNS this exact function as the "log" arm of its three-way consistency
+# check across lib-memory-dir.sh/post-tool-hook.sh/log.sh's own copies of
+# this predicate -- deleting it would silently drop that check's ability to
+# catch THIS copy drifting from the other two, rather than make the drift
+# unreachable. Keep this predicate's logic in sync with the other two
+# copies; if it is ever genuinely retired, retire it there first.
 _remember_log_dir_unsafe() {
     local LC_ALL=C
     { [[ "$REMEMBER_DIR" != /* ]] && [[ "$REMEMBER_DIR" != [A-Za-z]:[/\\]* ]] \
