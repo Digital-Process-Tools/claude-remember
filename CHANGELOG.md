@@ -7,6 +7,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.45.0] - 2026-11-01 — Several windows in one project no longer step on each other's memory
+
+### Added
+
+- Added #1063: The install guide now explains how to switch from the official plugin marketplace to ours: remove the official copy first (having both makes everything run twice), install from our marketplace, and restart Claude Code. Your first message in each project may be a little slower once, and your saved memory is untouched either way. The README's install section links to it.
+
+### Fixed
+
+- Fixed #660: On Windows, the first "SessionStart" of a day used to take noticeably longer than later ones in the same session, and in 2026 that initial delay averaged about 12.5 seconds on one person's machine. A long series of fixes already shipped in earlier releases (fewer programs started per start, less duplicated setup work) brought that down a lot, but nobody had measured it the same careful way since. We added that measurement to our automated testing (it now runs on every change, on a real Windows machine, several times in a row so one slow moment does not skew the number) and read the real numbers back: a warm start now takes about 1.0 to 1.6 seconds, down from the original ~12.5 seconds, with no single step left that stands out as slow. Not fixed yet: on a Windows machine without the "jq" tool installed, a start is still a bit slower (closer to 1.0-1.3 seconds than the ~1.4-1.6 seconds with jq installed); installing jq on Windows (our setup guide explains how) remains the fastest path there.
+
+- Fixed (#920): a safety check added earlier to protect where memory gets saved had
+  three gaps. Several of the places that create memory folders were not covered
+  by the check at all, so a corrupted save location could still have created
+  folders in the wrong place. When the check did correctly refuse to save, it
+  wrote an error message that was silently thrown away instead of being
+  visible anywhere. And if your project lived on a Windows network share
+  (a path starting with two backslashes, like a shared drive), the check
+  wrongly treated that as unsafe and refused to save there at all. All three
+  are fixed: every memory-folder save site this issue found is now covered, a
+  refusal always produces a visible error message, and network-share project
+  paths are recognized as safe.
+
+- Fixed #999: Behind the scenes: some of our automated tests failed on Windows because of how they wrote small script files; they now work there, and nothing changes for you.
+
+- Fixed #1006: On Windows, a black console window could flash on screen when a session started and Remember had notes waiting to be tidied up. That tidy-up now starts hidden, like the rest of Remember's background work, without slowing down the start of your session.
+
+- Fixed #1007: When the Python on your computer was too old, /remember:doctor said so but never said which version you actually need. It now names the minimum (for example "need Python 3.9+") and tells you to install a newer Python.
+
+- Fixed #1041: The copy of Remember in Anthropic's plugin directory no longer includes one feature that is switched off for now (#969), because the directory's safety scanner flagged it. Nothing changes for you: that feature was already off for everyone. Installs straight from our GitHub still include it, and it returns to the directory copy once #969 switches it back on.
+
+- Fixed #1046: If you had several Claude Code windows open in the same project, each saving to a different memory, one window could grab another window's unsaved conversation and save it into the wrong memory. Remember now checks that a conversation really belongs to a memory before rescuing it there, and leaves it alone when it cannot tell. Fixed further by #1087: right after an update, each memory's first start used to get one more chance to grab a window's conversation it shouldn't have -- now it skips a conversation that still looks like it is being written, or that another memory already has evidence for, so only a genuinely old, unclaimed conversation from before the update gets rescued. One narrow case is still possible: a window that was only chatting (no file edits or tool use) before the update, and that has sat idle for more than a few minutes without closing, leaves no trace anywhere -- it can still be grabbed by mistake, once, during that first start after the update.
+
+- Fixed #1047: Starting a session could leave Remember stuck in the background for hours, using up your computer, when Claude Code handed it a very large amount of start-up information (one person found 27 copies still running after 21 hours). Remember now reads only the small part it needs, so start-up stays quick. Thanks to CNSeniorious000 (Muspi Merol), whose pull request #1049 this fix builds on. Not fixed yet: three other places in Remember read information the same slow way and still need to be checked one by one.
+
+- Fixed (#1051): on the first session of a new day, your saved memory could
+  come back too big -- past the size Claude Code can actually show, so you
+  would never see it at all. This happened because yesterday's saved copy was
+  being compared against a freshly built one from today, and the two never
+  matched, so the size check gave up instead of trimming anything. Now the
+  size check keeps working correctly on the first session of a new day too,
+  and does it without any extra overhead on an ordinary session start.
+
+- Fixed #1052: /remember:doctor could report that everything was working even when a piece of your work had been left out of memory because its summary was rejected as unusable. It now shows a warning with how many times that happened, the latest example, and how many pieces of work are currently set aside unsummarized (and where to find them). A rejected piece of work is also no longer dropped the first time it is refused -- it is now tried again on the next save, up to 3 times (configurable; setting this to 0 no longer means "retry forever", which could stall saving for the rest of a session -- it falls back to the default instead, with a note in the log), before being set aside with the original (unsummarized) text kept in a clearly named file so nothing is permanently lost. If the refusal happens on your session's very last save, it is set aside immediately instead of waiting for retries that would never come. The set-aside files no longer pile up without limit -- only the most recent 20 are kept.
+
+- Fixed #1054: Every time Remember saved a summary, an empty folder was left behind in Claude Code's projects folder, about 50 a day on one computer. Claude Code's own memory feature was creating them during the summary step; Remember now turns that off just for that step, so no new folders appear and nothing is lost.
+
+- Fixed #1055: Remember's daily log said "haiku" for every summary, even if you had picked a different AI model. The log now says "summarizer" and records which model actually wrote each summary. Your settings keep working as they are; there is nothing to change.
+
+- Fixed #1056: When many Claude Code windows in the same project start or end together (for example, right after you reopen the app), saving your session's memory could fail on Windows because the system briefly ran out of room to start new background processes. A failed save at the end of a session now gets one automatic second try after a short pause, so a brief, momentary shortage no longer costs you that session's memory. The saving process itself also does a bit less behind-the-scenes work on every run, which leaves more room for everyone else's windows to succeed too.
+
+- Fixed #1058: If you started a session in a subfolder of a project and then moved deeper into it, /remember could save your note into the parent project's memory instead of yours. It now finds the folder your session belongs to, and /remember:doctor shows the same folder /remember saves to. Not fixed yet (tracked in #1083): a few less common setups can still send the note to the wrong place: resuming a session from a neighbouring folder, a project stored inside another git project, and folders not tracked with git at all.
+
+- Fixed #1060: In some tools, resuming a session could make Remember start the same background work again and again, piling up dozens of copies and slowing the computer to a crawl (one person counted 42 at once). Now, if that session's work is still running, a new resume skips it instead of starting another copy. Sessions you really run side by side, like several agents working at once, still each get their own background work.
+
+- Fixed #1067: Behind the scenes: reorganized the code that runs when a session starts, to make room for future fixes; nothing changes for you.
+
+- Fixed #1070: Behind the scenes: a few saved copies of old Remember files that our Windows tests compare against are now protected from being silently changed, so those tests keep meaning what they say; nothing changes for you.
+
+- Fixed #1079: Each time a session started, Remember redid some set-up work it had already done and left a small leftover file in your computer's temporary folder. It now reuses the setting it was already given, so starting a session does less work and no longer leaves that file behind.
+
+- Fixed #1083: in a few setups -- a project folder nested inside another project, a folder with no version control at all, or picking a session back up in a different folder than where it started -- `/remember` could save your note into the wrong project, or lose track of where to put it. Claude now writes down, right when a session starts, exactly which project it belongs to, and keeps using that instead of guessing from wherever you happen to be. If it genuinely cannot tell (an old session from before this fix, with more than one plausible project), it now says so plainly instead of guessing and getting it wrong.
+
 ## [0.44.1] - 2026-10-19 — Large tool results no longer stall Windows
 
 ### Fixed
@@ -4876,7 +4938,8 @@ Fixes [#9](https://github.com/Digital-Process-Tools/claude-remember/issues/9), a
 
 ## [0.1.0] — Initial release
 
-[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.44.1...HEAD
+[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.45.0...HEAD
+[0.45.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.45.0
 [0.44.1]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.44.1
 [0.44.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.44.0
 [0.43.2]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.43.2
