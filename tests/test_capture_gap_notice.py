@@ -89,6 +89,23 @@ def _wait_for_notice(notice: Path) -> bool:
     return False
 
 
+def _wait_for_reported(reported: Path) -> bool:
+    """#1079 point 4: the deferred phase writes the notice (capture-gap-notice,
+    script line ~1039) and the dedupe marker (capture-gap-reported, ~1040) as
+    two separate writes, moments apart. A test that polls only for the notice
+    and then immediately acts (unlinking it, re-running the hook) can win a
+    race against the SECOND write on a slow runner, re-reporting the same gap
+    on the very next restart -- the failure test_the_same_gap_is_reported_once
+    exists to catch. Poll for both before treating the deferred phase as done.
+    """
+    deadline = time.time() + DEFERRED_TIMEOUT
+    while time.time() < deadline:
+        if reported.is_file() and reported.read_text(encoding="utf-8").strip():
+            return True
+        time.sleep(0.1)
+    return False
+
+
 def _project(tmp_path: Path):
     home = tmp_path / "home"
     project = tmp_path / "project"
@@ -657,6 +674,7 @@ def test_the_same_gap_is_reported_once_not_on_every_restart(tmp_path):
     home, project, remember, session_dir = _project(tmp_path)
     _transcripts(session_dir, previous=TOOL_USE_LINE * 5)
     notice = remember / "tmp" / "capture-gap-notice"
+    reported = remember / "tmp" / "capture-gap-reported"
 
     # #1069 review on #1067: the deferred phase now runs as a genuinely
     # separate process (scripts/capture-gap-check.sh), not an in-process
@@ -668,6 +686,16 @@ def test_the_same_gap_is_reported_once_not_on_every_restart(tmp_path):
     # disowned background child has finished writing yet.
     _run(SESSION_START, _env(home, project, remember))
     assert _wait_for_notice(notice), "precondition: the first run must report it"
+    # #1079 point 4: the notice and the dedupe marker (capture-gap-reported)
+    # are two separate writes a few lines apart in the SAME deferred phase --
+    # waiting only for the first and then immediately unlinking/re-running
+    # races the second on a slow runner, which is indistinguishable from the
+    # dedupe itself being broken (the exact failure this test exists to
+    # catch) rather than from the test's own timing.
+    assert _wait_for_reported(reported), (
+        "precondition: the first run must also finish writing the dedupe "
+        "marker before this test acts on its result"
+    )
     notice.unlink()  # user-prompt-hook.sh consumes it on delivery
 
     # The "must NOT reappear" half, in contrast, cannot be polled the same

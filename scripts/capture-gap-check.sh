@@ -44,16 +44,22 @@ _HOOK_DIR="${BASH_SOURCE[0]%/*}"
 #
 # Measured (tests/test_session_start_spawn_reduction_679.py's own
 # #1069-tagged tests): this fast path's own trace never sources
-# resolve-paths.sh at all, confirmed directly rather than by fork-counting
-# -- lib-memory-dir.sh's own config merge for data_dir turned out to be
-# sourced from log.sh too (needed regardless, for log()/config_into()),
-# so counting its forks could not tell "the fast path skipped it" apart
-# from "log.sh needed it anyway" and an earlier version of this comment
-# overstated what the skip alone removes. This is NOT the full fix #1056
-# ("fewer forks under concurrent Windows session starts") tracks -- #1056's
-# own scope covers the fork count log.sh's own merge still costs here,
-# which this skip does not touch; this removes only the REDUNDANT second
-# run of resolve-paths.sh/bootstrap-dirs.sh's OWN resolution, not log.sh's.
+# resolve-paths.sh at all, confirmed directly rather than by fork-counting.
+#
+# #1079 CORRECTION: an earlier version of this comment claimed log.sh's own
+# config merge was "needed regardless" here and could not be removed
+# "without further work" -- false; it was never removed, only unconditionally
+# re-run on every SessionStart (2-6 extra spawns, measured on macOS) plus a
+# #362-style mktemp leak into shared OS tmp, because this process is
+# forked/exec'd fresh and none of session-start-hook.sh's own in-process
+# config table survives into it. The "further work" is the env-cache load a
+# few lines below: it replays the one scalar (REMEMBER_RECOVERY_ENABLED)
+# this file's own common path actually needs, so the merge itself now runs
+# only on a cache miss -- not on every single session start. This is still
+# NOT the full fix #1056 ("fewer forks under concurrent Windows session
+# starts") tracks; it removes the redundant resolve-paths.sh/bootstrap-dirs.sh
+# re-run (as before) AND the redundant log.sh config merge (#1079), not every
+# fork #1056's own scope covers.
 if [ -n "${PROJECT_DIR:-}" ] && [ -d "${PROJECT_DIR:-}" ] \
     && [ -n "${PIPELINE_DIR:-}" ] && [ -d "${PIPELINE_DIR:-}" ] \
     && [ -n "${REMEMBER_DIR:-}" ]; then
@@ -92,13 +98,83 @@ if [ -n "${PROJECT_DIR:-}" ] && [ -d "${PROJECT_DIR:-}" ] \
             printf -v "$1" '%s' "$2"
         fi
     }
-    source "$_HOOK_DIR/log.sh" 2>/dev/null
-    if ! command -v _remember_date >/dev/null 2>&1; then
-        echo "capture-gap-check: ERROR -- failed to source $_HOOK_DIR/log.sh" >&2
-        exit 127
-    fi
     _REMEMBER_LAZY_PYTHON=1
     source "$_HOOK_DIR/detect-tools.sh"
+
+    # #1079 review on #1069's own review comment above (now corrected): this
+    # process is forked/exec'd fresh, so none of session-start-hook.sh's own
+    # in-process _RCFG_* table survives into it -- sourcing log.sh here
+    # unconditionally redid lib-memory-dir.sh's whole three-layer jq/mktemp
+    # merge on EVERY SessionStart (2-6 extra spawns, measured on macOS) and
+    # left that merge's own mktemp'd file in shared OS tmp, since this fast
+    # path never sources bootstrap-dirs.sh (the #362 fix) either.
+    #
+    # #1079 CI follow-up: this used to replay the one scalar this common
+    # path needs (REMEMBER_RECOVERY_ENABLED) by loading the env-cache FILE
+    # session-start-hook.sh publishes a few lines before it backgrounds (or
+    # inline-runs) this very script -- but that publish is itself a write to
+    # shared OS tmp, and windows-latest CI showed it sometimes never lands
+    # (or is not yet visible) by the time this process starts: the cache
+    # read failed outright (`-f`/`-O` on the just-written file came back
+    # false), so the `&&` chain below short-circuited straight to the full
+    # merge on EVERY run, file or no file. The file was never actually the
+    # cheap path's dependency, though: this script is reached ONLY as a
+    # child of session-start-hook.sh's OWN bash process (either backgrounded
+    # with `&` at the end of its deferred block, or run inline for
+    # REMEMBER_DEFER=0) -- never as an unrelated, independently-launched
+    # process -- and session-start-hook.sh already `export`s
+    # REMEMBER_RECOVERY_ENABLED before either call site. An exported
+    # variable is inherited by a forked/exec'd child for free, no file
+    # needed, so check for that inheritance FIRST and skip the cache file
+    # (and its own publish-vs-load race) entirely on the path that always
+    # has it. The env-cache file stays as the fallback for the one caller
+    # that does NOT get this for free: a direct/standalone invocation (every
+    # test fixture here that execs this file without first execing
+    # session-start-hook.sh in the SAME process), which is also what
+    # post-tool-hook.sh's and user-prompt-hook.sh's own fast paths still
+    # need the file for -- they are launched by the host directly, not
+    # forked from session-start-hook.sh, so they have no exported value to
+    # inherit and the file is their only route to it.
+    _REMEMBER_FAST=0
+    if [ -n "${REMEMBER_RECOVERY_ENABLED:-}" ]; then
+        _REMEMBER_FAST=1
+    else
+        source "$_HOOK_DIR/lib-env-cache.sh" 2>/dev/null
+        if command -v _remember_env_cache_load >/dev/null 2>&1 \
+            && _remember_env_cache_load && [ -n "${REMEMBER_RECOVERY_ENABLED:-}" ]; then
+            _REMEMBER_FAST=1
+        fi
+    fi
+    if [ "$_REMEMBER_FAST" = "1" ]; then
+        # Lazy log(): a handful of rare call sites further down (a
+        # case-divergence mismatch, a pluginless-SDK exclusion cap, the
+        # no-session_id skip message) still need log.sh's real definitions.
+        # The lazy stub works the same regardless of which one fires first
+        # -- same shape, same rationale, as post-tool-hook.sh:343-359.
+        log() {
+            unset -f log
+            source "$PLUGIN_ROOT/scripts/log.sh" 2>/dev/null
+            declare -F log >/dev/null 2>&1 || log() { :; }
+            log "$@"
+        }
+    fi
+    if [ "$_REMEMBER_FAST" != "1" ]; then
+        source "$_HOOK_DIR/log.sh" 2>/dev/null
+        # #1086 review (item 3): the ONLY two places in this file where
+        # log.sh is sourced EAGERLY (this one, and the standalone/else
+        # branch's own copy below) -- never the lazy stub above, which only
+        # sources it if and when a rare call site actually invokes log()
+        # AFTER the trap-install block below has already run, at which point
+        # there is nothing yet installed for that block to preserve either
+        # way. Read by the trap-install block to decide whether log.sh's
+        # merge (lib-memory-dir.sh) could have installed an EXIT trap in
+        # THIS process that needs preserving.
+        _remember_gap_log_sourced=1
+        if ! command -v _remember_date >/dev/null 2>&1; then
+            echo "capture-gap-check: ERROR -- failed to source $_HOOK_DIR/log.sh" >&2
+            exit 127
+        fi
+    fi
 else
     # resolve-paths.sh sets PROJECT_DIR/PIPELINE_DIR, which bootstrap-dirs.sh
     # (via lib-memory-dir.sh) requires to resolve REMEMBER_DIR/
@@ -115,6 +191,10 @@ else
     PLUGIN_ROOT="$PIPELINE_DIR"
     PROJECT="$PROJECT_DIR"
     source "$PLUGIN_ROOT/scripts/log.sh" 2>/dev/null
+    # #1086 review (item 3): the other eager `source log.sh` call site in
+    # this file, read by the trap-install block below -- see its own
+    # comment for why.
+    _remember_gap_log_sourced=1
     # log.sh is sourced with stderr suppressed; a silent failure (e.g.
     # read-only mount where log.sh `return 1`s) would leave _remember_date /
     # log / dispatch undefined, crashing later with a cryptic "command not
@@ -127,6 +207,104 @@ else
 fi
 
 CURRENT_SESSION_ID="${1:-}"
+
+# #1060 review: session-start-hook.sh's own per-session PID marker
+# (REMEMBER_DIR/tmp/deferred-<id>.pid) names this process once it is
+# backgrounded, and nothing ever removed it on a normal finish -- an
+# unbounded, never-cleaned file per session id, the same class of leak
+# this issue's own #362-style tmp fix elsewhere in this diff is about.
+# Removed here, under an EXIT trap so every return/exit path is covered,
+# and only when the file STILL names OUR OWN pid: a session that resumed
+# again and relaunched (this file's own stale-PID recovery) owns a NEWER
+# file by the time this trap fires for the OLDER, now-finishing process,
+# and that newer file must survive this cleanup untouched.
+if [ -n "$CURRENT_SESSION_ID" ]; then
+    _remember_deferred_pid_file="$REMEMBER_DIR/tmp/deferred-${CURRENT_SESSION_ID}.pid"
+    _remember_cleanup_deferred_pid_file() {
+        [ -f "$_remember_deferred_pid_file" ] || return 0
+        local _remember_dpf_owner
+        read -r _remember_dpf_owner < "$_remember_deferred_pid_file" 2>/dev/null
+        [ "$_remember_dpf_owner" = "$$" ] \
+            && rm -f "$_remember_deferred_pid_file" 2>/dev/null
+        return 0
+    }
+    # #1086 review: a bare `trap ... EXIT` here REPLACES whatever EXIT trap
+    # the config chain above (log.sh -> lib-memory-dir.sh's three-layer
+    # merge) already installed, on the slow/cache-miss path, to remove ITS
+    # OWN merged-config tmpfile (lib-memory-dir.sh:704-725) -- leaking that
+    # tmpfile into shared tmp on every exit after a cache miss. Append
+    # instead, the same idiom bootstrap-dirs.sh:220-232 and
+    # lib-memory-dir.sh:715-724 already use for the identical reason.
+    #
+    # #1086 review (item 3): an earlier version of this comment claimed this
+    # whole block "only runs once per cache miss" -- false; the `if` above is
+    # unconditional on cache state and runs on EVERY invocation that has a
+    # session id. What IS gated on the branches above is whether log.sh's
+    # merge (the only thing that installs an EXIT trap this needs to
+    # preserve) ran IN THIS PROCESS at all: `_remember_gap_log_sourced` is
+    # set at this file's own two EAGER `source log.sh` call sites (the
+    # cache-miss branch just above, and the standalone/else branch below) and
+    # nowhere else, so its absence here means no prior trap can exist to
+    # clobber -- the `$(trap -p EXIT)` subshell (one fork) is skipped
+    # entirely on exactly that path, which is the ordinary, cache-warm,
+    # forked-from-session-start-hook.sh case this file's own header
+    # describes as the common one.
+    if [ -n "${_remember_gap_log_sourced:-}" ]; then
+        _remember_gap_trap_raw=$(trap -p EXIT 2>/dev/null)
+        _remember_gap_existing_trap="${_remember_gap_trap_raw#trap -- \'}"
+        _remember_gap_existing_trap="${_remember_gap_existing_trap%\' EXIT}"
+        # Collapse trap -p's own escaping of an embedded single quote back to
+        # a literal one -- bootstrap-dirs.sh:220-232's own comment on this
+        # exact line explains why: lib-memory-dir.sh's installed trap body
+        # quotes its path, so a strip with no collapse leaves those escapes
+        # LITERAL, and re-embedding that into a new double-quoted trap string
+        # below produced an unbalanced quote the shell could not parse at
+        # exit (caught by this fix's own TDD red run: an "unexpected EOF
+        # while looking for matching quote" exit-trap error).
+        #
+        # NOT `${var//'\''/\'}` (#1086 review follow-up): identical input,
+        # identical pattern/replacement, and bash 3.2 (Apple's shipped
+        # /bin/bash, also what macos-latest CI resolves) silently leaves a
+        # stray backslash in the result where bash 4+ collapses correctly --
+        # confirmed side by side, same pattern, two bash versions, two
+        # different outputs. On the cache-miss path that silently corrupted
+        # the reinstalled trap's quoting enough that log.sh's OWN merged-
+        # config cleanup (`rm -f '...'`) never actually ran, leaking a
+        # `remember-config-XXXXXX` tmpfile into shared tmp on every exit --
+        # exactly the #362-style leak this trap exists to prevent, on the one
+        # platform `${var//pat/rep}` disagrees with itself. The loop below
+        # uses only `%%`/`#` prefix/suffix removal, which both bash versions
+        # agree on; this branch is reached only on a cache miss or a
+        # standalone invocation (already far more expensive than one more
+        # bash builtin loop), so portability costs nothing on the hot path
+        # the `else` arm below protects.
+        while [[ "$_remember_gap_existing_trap" == *"'\''"* ]]; do
+            _remember_gap_existing_trap="${_remember_gap_existing_trap%%"'\''"*}'${_remember_gap_existing_trap#*"'\''"}"
+        done
+        unset _remember_gap_trap_raw
+        if [ -n "$_remember_gap_existing_trap" ]; then
+            # shellcheck disable=SC2064
+            trap "${_remember_gap_existing_trap}; _remember_cleanup_deferred_pid_file" EXIT
+        else
+            trap _remember_cleanup_deferred_pid_file EXIT
+        fi
+        unset _remember_gap_existing_trap
+    else
+        trap _remember_cleanup_deferred_pid_file EXIT
+    fi
+fi
+
+# TEST-ONLY, no-op in production (empty/unset by default, same convention
+# as REMEMBER_DEFER=0 and REMEMBER_ENV_CACHE=0 elsewhere in this plugin): a
+# deterministic way for a test to make this deferred phase slow, so a test
+# can observe session-start-hook.sh's own per-session PID marker
+# (deferred-<id>.pid) while a REAL deferred phase it forked is still alive,
+# rather than racing a real one that may finish before a concurrent resume
+# can even be issued (#1086 review, item 1 -- the end-to-end stacking test
+# below this knob exists for).
+if [ -n "${REMEMBER_TEST_DEFER_DELAY:-}" ]; then
+    sleep "$REMEMBER_TEST_DEFER_DELAY" 2>/dev/null || true
+fi
 
 # PROJECT_PATH_SLUG/SESSIONS_DIR: a pure function of PROJECT_DIR
 # (session-start-hook.sh's own comment on this, above its matching
@@ -864,7 +1042,14 @@ _remember_recovery_prev_id_vouched() {
 # config_into (#665, part of #660) writes into a scratch var directly --
 # no command-substitution subshell on top of the flattened-cache-hit table.
 _recovery_enabled=""
-config_into _recovery_enabled '.features.recovery' true
+if [ -n "${REMEMBER_RECOVERY_ENABLED:-}" ]; then
+    # #1079: the fast/cache-hit path above never sourced log.sh, so
+    # config_into is not even defined here -- the cached scalar IS the
+    # answer, already resolved by session-start-hook.sh moments ago.
+    _recovery_enabled="$REMEMBER_RECOVERY_ENABLED"
+else
+    config_into _recovery_enabled '.features.recovery' true
+fi
 # Tracks whether THIS run actually kicked off a recovery fork for PREV_ID --
 # distinct from _recovery_enabled, which reads "true" even when the extra
 # preconditions below (SESSIONS_DIR, LAST_SAVE_FILE, an unsaved PREV_ID) are
@@ -957,12 +1142,34 @@ if [ -d "$SESSIONS_DIR" ] && [ -f "$LAST_SAVE_FILE" ] && [ -n "$PREV_ID" ]; then
         # saved record PREV_ID. Cleared in a subshell so it stays exported for
         # this hook's own later use. Pinned by
         # tests/test_recovery_transcript_leak_407.py.
-        ( unset REMEMBER_TRANSCRIPT_PATH; "$PLUGIN_ROOT/scripts/save-session.sh" "$PREV_ID" --force ) </dev/null >/dev/null 2>&1 & disown 2>/dev/null || true
-        # Set BEFORE we know whether the forked save-session.sh above actually
-        # succeeds (#745) -- it runs detached (`& disown`, just above) and this
-        # hook can exit long before it finishes, so "attempted" is the only
-        # claim honestly available here. The notice below says "is being
-        # recovered", never "has been recovered", for the same reason.
+        # #1086 review (item 2): NOT backgrounded+disowned (an earlier
+        # version of this line ended `& disown`). This whole file is
+        # already the backgrounded deferred phase (session-start-hook.sh's
+        # own `&`, far above) -- running the force-save in its OWN
+        # foreground, rather than detaching a second background job from
+        # it, keeps session-start-hook.sh's per-session PID marker
+        # (deferred-<id>.pid, read by `_remember_deferred_already_running`)
+        # alive for the save's ENTIRE duration, not just until this process
+        # happens to reach its own exit. Detached, the marker could vanish
+        # (removed by this file's own EXIT trap) seconds into a save that
+        # takes much longer -- `save-session.sh --force` waiting 30s+ for
+        # save.lock under load, per the reporter -- and a resume racing in
+        # during that window would see no live marker and relaunch a SECOND
+        # deferred phase, which forces ANOTHER save for the same still-
+        # unsaved PREV_ID before the first one has even written last-
+        # save.json: the reporter's ~700 stacked forced saves. Waiting here
+        # does not block anything upstream: session-start-hook.sh has
+        # already returned to the user long before this background child
+        # even starts.
+        ( unset REMEMBER_TRANSCRIPT_PATH; "$PLUGIN_ROOT/scripts/save-session.sh" "$PREV_ID" --force ) </dev/null >/dev/null 2>&1
+        # Set only once the save above has actually finished (changed from
+        # "attempted" to "done" by this same review item): with the save no
+        # longer detached, this hook does not exit until it completes, so
+        # there is no longer a window where "attempted" could mean anything
+        # other than "finished". The notice below still says "is being
+        # recovered" rather than "has been recovered" for a DIFFERENT
+        # reason -- see that write site's own comment -- not because of any
+        # remaining uncertainty about whether the save itself ran.
         _recovery_attempted="true"
         fi
     fi

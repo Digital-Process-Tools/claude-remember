@@ -369,6 +369,16 @@ REMEMBER_SESSION_START_SLOW_S=""
 config_into REMEMBER_SESSION_START_SLOW_S ".session_start_slow_threshold_s" "5"
 _remember_is_uint "$REMEMBER_SESSION_START_SLOW_S" || REMEMBER_SESSION_START_SLOW_S=5
 
+# capture-gap-check.sh's own fast path (#1079) needs this ONE scalar, the
+# same way post-tool-hook.sh's fast path already needs REMEMBER_SAVE_COOLDOWN/
+# REMEMBER_DELTA_THRESHOLD above -- config_into is the same forkless cached
+# lookup, so resolving it here costs nothing on the common (already-cached)
+# path, and the deferred phase below gets it from the cache this publish call
+# writes instead of re-running the whole three-layer config merge itself.
+REMEMBER_RECOVERY_ENABLED=""
+config_into REMEMBER_RECOVERY_ENABLED ".features.recovery" true
+export REMEMBER_RECOVERY_ENABLED
+
 # Publish what the chain above just resolved, so the UserPromptSubmit hook does not
 # repeat it on every prompt (#227). Republishing unconditionally here is what
 # bounds the staleness of anything the cache cannot detect — a project that
@@ -624,10 +634,106 @@ SESSIONS_DIR="$(claude_projects_dir)/${PROJECT_PATH_SLUG}"
 # speed. Default is 1 -- deferred -- and
 # tests/test_session_start_deferred_capture_gap_660.py covers the DEFAULT
 # path, so the switch cannot become the only thing that is ever tested.
+# #1060: an SDK host can fire SessionStart with source=resume on every
+# resumed TURN, not once per session -- each one backgrounds a deferred
+# phase (above), and a prior one that is still running (or was orphaned,
+# ppid 1, when its own parent hook already exited) stacks rather than being
+# replaced. A stale-safe PID file, keyed by session id so a DIFFERENT
+# session's own deferred phase is never blocked by this one, catches the
+# live case; a dead PID (crash, kill) is simply overwritten below. No new
+# fork on this path: `[ -f ]`/`read -r ... <file`/`kill -0` are builtins,
+# and `kill` does not count as "running a process" the way an external
+# binary would. #1086 review: this used to read the PID with `$(<file)` --
+# a bash builtin on its own, but wrapped in `$(...)`, which forks a subshell
+# to run the substitution regardless of what is inside it (measured: 2000
+# calls 0.63s vs 0.045s with a plain `read -r ... < file` on bash 3.2).
+# Three limitations survive, and only the third is new:
+#
+#   * Check-then-act, not a lock: two SessionStarts for the SAME session id
+#     landing close enough together can both read "no live deferred phase"
+#     before either writes its own PID, so both launch and the second
+#     write clobbers the first PID -- the stacking #1060 reports, narrowed
+#     from "every resumed turn" to "two starts that land within this
+#     window." An atomic claim (a lock directory, the primitive
+#     lib-lock.sh already carries) would close it, at the cost of sourcing
+#     a file this hot path does not otherwise need; left as a known gap
+#     rather than added here.
+#   * `kill -0`-based staleness detection cannot tell a dead holder's PID
+#     from an unrelated LIVE process the OS has since reassigned the same
+#     PID to ("PID recycling") -- scripts/lib-lock.sh's own
+#     `_lock_try_steal` carries the identical limitation and documents it
+#     as "an accepted, general limitation rather than a fix" (see that
+#     file's header comment and tests/test_cross_host_lock_contract_491.py).
+#     This guard is simpler than a real lock and inherits the same tradeoff.
+#   * Bounded by the marker's own AGE (#1086 review), the same way
+#     lib-lock.sh's own `_lock_dir_age` bounds a lock directory's age
+#     rather than trusting `kill -0` (or a marker's mere presence) forever:
+#     a marker older than REMEMBER_DEFERRED_PID_MAX_AGE seconds (default
+#     900 = 15min) is treated as stale regardless of what `kill -0` says,
+#     so a PID-recycling false-positive cannot block recovery for that
+#     session id indefinitely -- only until the bound passes.
+#   * `kill -0` was SUSPECTED (reasoned, not confirmed) to false-negative
+#     on a PID that is genuinely alive but was never spawned under THIS
+#     bash's own MSYS/Git-Bash process tree -- windows-latest CI's own
+#     symptom was a resume whose PID marker named a still-running process
+#     vanishing entirely within one second. An earlier round added a
+#     `/proc/$pid` existence probe here as an extra "still alive" signal;
+#     CI DISPROVED it (the identical failure recurred, byte for byte, with
+#     the probe in place), so it was removed rather than left as dead
+#     speculative code. ROOT CAUSE FOUND: the symptom was never in `kill
+#     -0` at all -- it was in the TEST, not the guard. The test's own
+#     stand-in "live deferred phase" was started with a plain
+#     `subprocess.Popen(["sleep", "60"])`, which hands this guard a NATIVE
+#     Windows PID; every REAL deferred phase is always backgrounded with
+#     `... &` from INSIDE an MSYS/Git-Bash process (this file's own `&`
+#     below, or capture-gap-check.sh's synchronous REMEMBER_DEFER=0 path),
+#     so its `$!` -- what actually ends up in the PID marker in
+#     production -- is an MSYS-space PID, which is what `kill -0` in an
+#     MSYS shell actually resolves. Fixed in
+#     tests/test_resume_deferred_stacking_1060.py: the stand-in process is
+#     now started the same way production does, through `bash -c 'sleep
+#     60 & echo $!'`. Plain `kill -0` is therefore correct as written and
+#     needs no OS-specific extra signal.
+_remember_pid_is_alive() {
+    kill -0 "$1" 2>/dev/null
+}
+
+_remember_deferred_already_running() {
+    local _f="$REMEMBER_DIR/tmp/deferred-${CURRENT_SESSION_ID:-_}.pid" _pid _mtime _now
+    [ -f "$_f" ] || return 1
+    read -r _pid < "$_f" 2>/dev/null
+    [ -n "$_pid" ] && [[ "$_pid" != *[!0-9]* ]] || { rm -f "$_f" 2>/dev/null; return 1; }
+    # `stat` is BSD on macOS and GNU on Linux with incompatible flags; try
+    # both, same two-probe shape as lib-lock.sh's own `_lock_dir_age`. An
+    # unreadable mtime is simply not bounded -- never read as "stale" from
+    # a failed probe, only from a genuinely old one.
+    _mtime=$(stat -c %Y "$_f" 2>/dev/null) || _mtime=""
+    [ -n "$_mtime" ] && [[ "$_mtime" != *[!0-9]* ]] || _mtime=$(stat -f %m "$_f" 2>/dev/null) || _mtime=""
+    if [ -n "$_mtime" ] && [[ "$_mtime" != *[!0-9]* ]]; then
+        _now=$(date +%s)
+        if [ $(( 10#$_now - 10#$_mtime )) -ge "${REMEMBER_DEFERRED_PID_MAX_AGE:-900}" ]; then
+            rm -f "$_f" 2>/dev/null
+            return 1
+        fi
+    fi
+    _remember_pid_is_alive "$_pid" && return 0
+    rm -f "$_f" 2>/dev/null
+    return 1
+}
+
 if [ "${REMEMBER_DEFER:-1}" = "0" ]; then
     "$PLUGIN_ROOT/scripts/capture-gap-check.sh" "$CURRENT_SESSION_ID"
+elif [ -n "$CURRENT_SESSION_ID" ] && _remember_deferred_already_running; then
+    : # #1060: another deferred phase for THIS session is still alive -- skip
+      # rather than stack. A different session id is never affected: the
+      # guard above is keyed on CURRENT_SESSION_ID, not on "any deferred
+      # phase at all".
 else
-    "$PLUGIN_ROOT/scripts/capture-gap-check.sh" "$CURRENT_SESSION_ID" </dev/null >/dev/null 2>&1 3>&- & disown 2>/dev/null || true
+    "$PLUGIN_ROOT/scripts/capture-gap-check.sh" "$CURRENT_SESSION_ID" </dev/null >/dev/null 2>&1 3>&- &
+    if [ -n "$CURRENT_SESSION_ID" ]; then
+        printf '%s' "$!" > "$REMEMBER_DIR/tmp/deferred-${CURRENT_SESSION_ID}.pid" 2>/dev/null || true
+    fi
+    disown 2>/dev/null || true
 fi
 # ── end deferred block (#660) ─────────────────────────────────────────────
 

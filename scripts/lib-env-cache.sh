@@ -201,8 +201,8 @@ _remember_env_cache_path() {
 # _remember_env_cache_load
 # On success: REMEMBER_DIR, REMEMBER_TZ, REMEMBER_PROMPT_STAMP,
 # REMEMBER_SAVE_COOLDOWN, REMEMBER_DELTA_THRESHOLD, MEMORY_PROJECT_DIR,
-# PROJECT_DIR and PIPELINE_DIR are set and exported, and the caller can skip
-# the chain.
+# PROJECT_DIR, PIPELINE_DIR and REMEMBER_STORE_ROOT are set and exported,
+# and the caller can skip the chain.
 # On failure: nothing is set and the caller must resolve normally.
 _remember_env_cache_load() {
     [ "${REMEMBER_ENV_CACHE:-1}" = "1" ] || return 1
@@ -212,7 +212,8 @@ _remember_env_cache_load() {
 
     local _line _dir="" _tz="" _mem="" _proj="" _pipe="" _stamp=""
     local _cooldown="" _delta="" _cfg_exists_raw="" _cfg_raw=""
-    local _env_proj="" _env_pipe="" _env_home=""
+    local _env_proj="" _env_pipe="" _env_home="" _recovery=""
+    local _store_root_len="" _dir_raw="" _dir_lenpart=""
     local _cfgs=()
     while IFS= read -r _line || [ -n "$_line" ]; do
         # Python on Windows writes \r\n and a stray CR would end up inside a
@@ -223,11 +224,48 @@ _remember_env_cache_load() {
         # this loop (#898 round 7 -- that shape, nested one included, is one
         # the plugin directory's scanner holds a submission on).
         if [ "${_line#REMEMBER_DIR=}" != "$_line" ]; then
-            _dir="${_line#*=}"
+            # #1086 review (item 4): piggy-backed `<len>:` prefix recording
+            # REMEMBER_STORE_ROOT's length -- see the publish side's own
+            # comment for why a length, not a separate value or line.
+            # Backward compatible with a cache published before this
+            # existed: that shape has NO colon at all (the all-digits test
+            # below also protects a Windows REMEMBER_DIR that itself starts
+            # with a drive-letter colon, e.g. "C:/Users/...", where the
+            # segment before the first colon is "C", not digits).
+            _dir_raw="${_line#*=}"
+            _dir_lenpart="${_dir_raw%%:*}"
+            if [ -n "$_dir_lenpart" ] && [ "$_dir_lenpart" != "$_dir_raw" ] \
+                && [[ "$_dir_lenpart" != *[!0-9]* ]]; then
+                _store_root_len="$_dir_lenpart"
+                _dir="${_dir_raw#*:}"
+            else
+                _store_root_len=""
+                _dir="$_dir_raw"
+            fi
         elif [ "${_line#REMEMBER_TZ=}" != "$_line" ]; then
             _tz="${_line#*=}"
         elif [ "${_line#REMEMBER_PROMPT_STAMP=}" != "$_line" ]; then
+            # #1086 review: REMEMBER_RECOVERY_ENABLED used to be its OWN
+            # line here -- a line every reader of this cache pays for with
+            # one more `read` builtin on EVERY load, including post-tool-
+            # hook.sh and user-prompt-hook.sh, neither of which ever needed
+            # it (CI: ubuntu-latest 3.9, test_hot_path_cost_pin_330.py's
+            # SIDECAR_READ_BUILTIN_BUDGET tripped by exactly one). Piggy-
+            # backed onto this line instead, as `stamp:recovery` -- a
+            # colon-delimited suffix a plain reader does not pay an extra
+            # `read` for. REMEMBER_PROMPT_STAMP's own values (full/stable/
+            # off, see log.sh) never contain a colon, so the split below is
+            # unambiguous; a cache from a release before this suffix
+            # existed has no colon at all, and the `case` below reads that
+            # as "no answer" (empty _recovery) rather than misreading the
+            # whole stamp value as the recovery flag.
             _stamp="${_line#*=}"
+            if [ "${_stamp#*:}" != "$_stamp" ]; then
+                _recovery="${_stamp#*:}"
+                _stamp="${_stamp%%:*}"
+            else
+                _recovery=""
+            fi
         elif [ "${_line#REMEMBER_SAVE_COOLDOWN=}" != "$_line" ]; then
             _cooldown="${_line#*=}"
         elif [ "${_line#REMEMBER_DELTA_THRESHOLD=}" != "$_line" ]; then
@@ -291,6 +329,14 @@ _remember_env_cache_load() {
     # once, at upgrade.
     if [ -z "$_cooldown" ] || [[ "$_cooldown" == *[!0-9]* ]]; then return 1; fi
     if [ -z "$_delta" ] || [[ "$_delta" == *[!0-9]* ]]; then return 1; fi
+    # NOT required, unlike the two scalars above (#1079): post-tool-hook.sh
+    # and user-prompt-hook.sh also publish this cache file but never resolve
+    # .features.recovery themselves, so a cache they wrote legitimately
+    # carries no answer for it. capture-gap-check.sh's own fast path already
+    # treats an empty REMEMBER_RECOVERY_ENABLED as "this cache cannot answer
+    # that" and falls back to the full chain -- refusing the WHOLE cache
+    # here over one field only session-start-hook.sh ever resolves would
+    # break the two callers that do not.
     # Compared against the SAME identity _remember_env_cache_path just keyed
     # on (CLAUDE_PROJECT_DIR, falling back to REMEMBER_HOOK_CWD, #469) rather
     # than raw CLAUDE_PROJECT_DIR directly -- on Codex (live-confirmed,
@@ -333,10 +379,20 @@ _remember_env_cache_load() {
     REMEMBER_PROMPT_STAMP="$_stamp"
     REMEMBER_SAVE_COOLDOWN="$_cooldown"
     REMEMBER_DELTA_THRESHOLD="$_delta"
+    REMEMBER_RECOVERY_ENABLED="$_recovery"
     MEMORY_PROJECT_DIR="$_mem"
     [ -n "$MEMORY_PROJECT_DIR" ] || MEMORY_PROJECT_DIR="$_proj"
+    # #1086 review (item 4): empty unless the parsed prefix named a positive
+    # length -- the common case (no {slug}) publishes length 0 and this
+    # stays empty, matching _set_store_root's own "emptiness is the
+    # interface" contract (#297).
+    REMEMBER_STORE_ROOT=""
+    if [ -n "$_store_root_len" ] && [ "$_store_root_len" -gt 0 ]; then
+        REMEMBER_STORE_ROOT="${_dir:0:_store_root_len}"
+    fi
     export PROJECT_DIR PIPELINE_DIR REMEMBER_DIR REMEMBER_TZ MEMORY_PROJECT_DIR
     export REMEMBER_PROMPT_STAMP REMEMBER_SAVE_COOLDOWN REMEMBER_DELTA_THRESHOLD
+    export REMEMBER_RECOVERY_ENABLED REMEMBER_STORE_ROOT
     return 0
 }
 
@@ -371,6 +427,14 @@ _remember_env_cache_publish() {
     # that lies about config is the thing #358 exists to refuse.
     [ -n "${REMEMBER_SAVE_COOLDOWN:-}" ] || return 0
     [ -n "${REMEMBER_DELTA_THRESHOLD:-}" ] || return 0
+    # REMEMBER_RECOVERY_ENABLED is NOT required here (#1079): only
+    # session-start-hook.sh resolves .features.recovery before publishing;
+    # post-tool-hook.sh and user-prompt-hook.sh publish this same cache file
+    # without ever touching it, and requiring it here would silently refuse
+    # every publish from those two callers. Written below piggy-backed onto
+    # the REMEMBER_PROMPT_STAMP line -- empty included -- and the load side
+    # already treats an empty suffix as "this cache cannot answer that
+    # question" rather than as a value.
     _remember_env_cache_path || return 0
 
     local _f="$_REMEMBER_ENV_CACHE_FILE" _t
@@ -385,9 +449,46 @@ _remember_env_cache_publish() {
     # this repo relies on (GNU and BSD/macOS alike) -- no umask needed, and no
     # trailing suffix after the X's (BSD mktemp only substitutes a run of X's
     # at the very end of the template; anything after is left literal).
-    _t=$(mktemp "${_f}.XXXXXX" 2>/dev/null) || return 0
+    # #1079 CI evidence (windows-latest): this publish intermittently wrote
+    # nothing at all even though every precondition above was satisfied and
+    # a SIBLING mktemp in the same process (log.sh's own #668 flatten cache,
+    # same shared tmp dir) succeeded moments earlier. A transient filesystem
+    # hiccup was the REASONED (not confirmed) guess, so a short, bounded
+    # retry was added here -- CI DISPROVED that guess: the next round, with
+    # this retry in place, showed the IDENTICAL failure (same assertion,
+    # same `systmp listing: []`). This is therefore NOT the fix for that
+    # failure and must not be read as one; the real mechanism is still
+    # unknown and needs a real Windows host to find. Left in place because
+    # it is harmless and free on the overwhelmingly common first-try-
+    # succeeds path (and a no-op on any platform that never fails here).
+    _t=""
+    for _ecp_try in 1 2 3; do
+        _t=$(mktemp "${_f}.XXXXXX" 2>/dev/null) && break
+        _t=""
+    done
+    [ -n "$_t" ] || return 0
     local _ecp_mem_proj="${MEMORY_PROJECT_DIR:-}" _c _e
     [ -n "$_ecp_mem_proj" ] || _ecp_mem_proj="$PROJECT_DIR"
+    # #1086 review (item 4): REMEMBER_STORE_ROOT (lib-memory-dir.sh's
+    # _set_store_root) was never carried by this cache at all, so
+    # capture-gap-check.sh's own fast path -- the one that reads THIS cache,
+    # not the one that inherits PROJECT_DIR/REMEMBER_DIR by export -- left it
+    # unset, and _remember_write_slug_index's own `[ -n
+    # "$REMEMBER_STORE_ROOT" ]` guard then silently no-ops for every external
+    # {slug} store on a direct/standalone invocation. NOT a new line (the
+    # #330/#395 hot-path read-budget reason the REMEMBER_PROMPT_STAMP
+    # piggyback below already documents): by construction (_set_store_root's
+    # own comment, "the data_dir template truncated at {slug}"),
+    # REMEMBER_STORE_ROOT is either empty (no {slug} -- the common case this
+    # cache is on the hot path for) or an exact STRING PREFIX of REMEMBER_DIR,
+    # so recording its LENGTH is enough to recover it with a substring slice
+    # on load, with no separate value and no delimiter that could collide
+    # with the path itself -- a length is pure digits, so splitting on the
+    # FIRST colon is unambiguous even for a Windows REMEMBER_DIR that itself
+    # starts with a drive-letter colon ("C:/Users/..."). See
+    # _remember_env_cache_load's own matching comment for the backward-
+    # compatibility read of a cache published before this existed.
+    local _ecp_store_root="${REMEMBER_STORE_ROOT:-}"
     {
         # One printf, which reuses its format for each KEY value pair (#898).
         # CACHE_ENV_PROJECT_DIR is the same identity the file is keyed and
@@ -405,9 +506,9 @@ _remember_env_cache_publish() {
             CACHE_ENV_HOME "${HOME:-}" \
             PROJECT_DIR "$PROJECT_DIR" \
             PIPELINE_DIR "$PIPELINE_DIR" \
-            REMEMBER_DIR "$REMEMBER_DIR" \
+            REMEMBER_DIR "${#_ecp_store_root}:${REMEMBER_DIR}" \
             REMEMBER_TZ "${REMEMBER_TZ:-}" \
-            REMEMBER_PROMPT_STAMP "${REMEMBER_PROMPT_STAMP:-full}" \
+            REMEMBER_PROMPT_STAMP "${REMEMBER_PROMPT_STAMP:-full}:${REMEMBER_RECOVERY_ENABLED:-}" \
             REMEMBER_SAVE_COOLDOWN "$REMEMBER_SAVE_COOLDOWN" \
             REMEMBER_DELTA_THRESHOLD "$REMEMBER_DELTA_THRESHOLD" \
             MEMORY_PROJECT_DIR "$_ecp_mem_proj"
