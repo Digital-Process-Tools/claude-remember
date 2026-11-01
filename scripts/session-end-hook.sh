@@ -282,7 +282,9 @@ source "$PIPELINE_DIR/scripts/log.sh" 2>/dev/null
 # still going wherever Claude Code sends an unredirected hook's stderr,
 # which is not nowhere.
 declare -F log >/dev/null 2>&1 || log() {
-    printf '%s [%s] %s\n' "$(_remember_date +%H:%M:%S)" "$1" "$2" >&2
+    local _ts
+    _remember_date_into _ts +%H:%M:%S
+    printf '%s [%s] %s\n' "$_ts" "$1" "$2" >&2
 }
 declare -F report_error >/dev/null 2>&1 || report_error() { log "$1" "$2"; }
 log "hook" "session-end: reason=$SESSION_END_REASON session=${STDIN_SESSION_ID:-unresolved}"
@@ -351,7 +353,8 @@ fi
 # `session-end-*.log` glob (#370's SessionEnd-liveness check) needs no
 # change for this: the `*` already matches whatever follows the timestamp,
 # suffix included.
-_END_LOG="$REMEMBER_DIR/logs/autonomous/session-end-$(_remember_date +%H%M%S)-$$.log"
+_remember_date_into _END_LOG_TS +%H%M%S
+_END_LOG="$REMEMBER_DIR/logs/autonomous/session-end-${_END_LOG_TS}-$$.log"
 # Seeded with a header line BEFORE the subshell below ever opens it, and the
 # subshell appends (`>>`) rather than truncates (`>`) -- not cosmetic (#483).
 # save-session.sh's own housekeeping sweep (unconditional on every flush
@@ -379,7 +382,8 @@ _END_LOG="$REMEMBER_DIR/logs/autonomous/session-end-$(_remember_date +%H%M%S)-$$
 # scripts/doctor.sh's own liveness check then misreporting it as a hook
 # that never fired at all. Reported the same way save-session.sh:428
 # reports its own fall-through.
-if ! printf '%s [session-end] flush started\n' "$(_remember_date +%H:%M:%S)" >> "$_END_LOG" 2>/dev/null; then
+_remember_date_into _FLUSH_START_TS +%H:%M:%S
+if ! printf '%s [session-end] flush started\n' "$_FLUSH_START_TS" >> "$_END_LOG" 2>/dev/null; then
     report_error "session-end" "WARNING: could not seed $_END_LOG -- if this file stays absent or empty, an ordinary housekeeping sweep will reclaim it, and /remember:doctor may misreport this session as one where SessionEnd never fired."
 fi
 
@@ -457,22 +461,67 @@ fi
 # `result.stderr`) and for the second, inside the subshell, is $_END_LOG
 # (which _dump_dir already surfaces in full on assertion failure).
 if [ -n "${REMEMBER_TEST_COMPLETION_MARKER:-}" ]; then
-    printf '%s session-end: about to launch subshell\n' "$(_remember_date +%H:%M:%S)" \
+    _remember_date_into _subshell_ts +%H:%M:%S
+    printf '%s session-end: about to launch subshell\n' "$_subshell_ts" \
         >> "$REMEMBER_TEST_COMPLETION_MARKER" 2>&1
 fi
 (
-    if [ -n "$STDIN_SESSION_ID" ]; then
-        bash "$SAVE_SCRIPT" "$STDIN_SESSION_ID" --force
-    else
-        bash "$SAVE_SCRIPT" --force
-    fi
+    _remember_session_end_flush() {
+        if [ -n "$STDIN_SESSION_ID" ]; then
+            bash "$SAVE_SCRIPT" "$STDIN_SESSION_ID" --force
+        else
+            bash "$SAVE_SCRIPT" --force
+        fi
+    }
+    _remember_session_end_flush
     _flush_status=$?
+    # One bounded retry (#1056): the scenario this hook exists to rescue --
+    # an app restart reconnecting many sessions in one project, each one's
+    # flush competing for the same process table -- is exactly the scenario
+    # that produces MSYS's own "fork: retry: Resource temporarily
+    # unavailable". There is no next cooldown tick to catch this tail later
+    # (see #345 above): this is the last chance. A short sleep gives
+    # transient fork pressure a chance to clear before the one retry.
+    #
+    # Gated on save-session.sh's own EXIT_RETRYABLE_BEFORE_WRITE (75), NOT on
+    # "any nonzero exit" (#1056 round 2 self-review finding -- the comment
+    # this replaces claimed retrying ANY failure was safe because position
+    # bookkeeping only advances on success, which is true but not the whole
+    # story). save-session.sh reserves 75 for an unexpected failure that
+    # struck BEFORE now.md was touched; every deliberate outcome there (a
+    # lock timeout, an invalid session id, a refused REMEMBER_DIR, a cooldown
+    # skip, nothing to save, a summarizer failure, a write error) keeps its
+    # ordinary 0/1 and this comparison therefore never retries it. Two
+    # concrete reasons that mattered: a summarizer failure already counts
+    # itself against save-session.sh's thresholds.max_summary_failures, so
+    # retrying it here doubled that count and could drop a span for good in
+    # one SessionEnd; and a failure that strikes AFTER now.md's append but
+    # during the position write is NOT the harmless re-invocation the old
+    # comment described -- it IS a duplicate save, because the retried run
+    # re-extracts and re-summarizes the same unadvanced span into a SECOND
+    # entry (save-session.sh's own PENDING_POSITION_MARKER is the backstop
+    # for every OTHER caller that can reach that same half-success; this
+    # retry is simply excluded from it by never firing there in the first
+    # place).
+    _REMEMBER_SAVE_RETRYABLE_EXIT=75
+    _retried=0
+    if [ "$_flush_status" -eq "$_REMEMBER_SAVE_RETRYABLE_EXIT" ]; then
+        sleep 1
+        _remember_session_end_flush
+        _flush_status=$?
+        _retried=1
+    fi
     if [ -n "${REMEMBER_TEST_COMPLETION_MARKER:-}" ]; then
+        _remember_date_into _subshell_done_ts +%H:%M:%S
         printf '%s session-end: save-session.sh exited status=%s\n' \
-            "$(_remember_date +%H:%M:%S)" "$_flush_status" >> "$REMEMBER_TEST_COMPLETION_MARKER" 2>&1
+            "$_subshell_done_ts" "$_flush_status" >> "$REMEMBER_TEST_COMPLETION_MARKER" 2>&1
     fi
     if [ "$_flush_status" -ne 0 ]; then
-        report_error "session-end" "WARNING: save-session.sh --force exited $_flush_status at session end -- this session's unsaved tail may be lost. See $_END_LOG for what save-session.sh itself logged."
+        if [ "$_retried" -eq 1 ]; then
+            report_error "session-end" "WARNING: save-session.sh --force exited $_flush_status at session end (after one retry) -- this session's unsaved tail may be lost. See $_END_LOG for what save-session.sh itself logged."
+        else
+            report_error "session-end" "WARNING: save-session.sh --force exited $_flush_status at session end (not retried -- not the transient pre-write failure class this hook's bounded retry covers) -- this session's unsaved tail may be lost. See $_END_LOG for what save-session.sh itself logged."
+        fi
     fi
 ) < /dev/null >> "$_END_LOG" 2>&1 &
 echo $! > "$REMEMBER_DIR/tmp/save-session.pid" 2>/dev/null

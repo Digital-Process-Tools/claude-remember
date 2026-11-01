@@ -614,10 +614,27 @@ lock_acquire() {
 }
 
 _lock_acquire_impl() {
-    local _dir="$1" _timeout="${2:-0}" _deadline
-    _deadline=$(( $(date +%s) + _timeout ))
+    local _dir="$1" _timeout="${2:-0}" _deadline=""
 
-    mkdir -p "$(dirname "$_dir")" 2>/dev/null || true
+    # Parameter expansion, not a `dirname` fork (#230/#1056) -- the same
+    # pattern the four hooks and save-session.sh's own sourcing preamble
+    # already use. A path with no slash in it leaves the filename behind,
+    # not a directory; `dirname` answered "." and this must too -- "."
+    # rather than "$(pwd)" because `mkdir -p "."` already resolves against
+    # the caller's cwd with no fork needed to say so explicitly.
+    #
+    # Written via `printf -v` with octal escape 056 (a builtin), not as a
+    # quoted lone dot: the plugin directory's own scanner can misread a
+    # literal "." string value as a `.` (source) command (#898 round 8;
+    # same byte, same fix as lib-memory-context.sh's REMEMBER_ROOT and
+    # write-handoff.sh's _WH_REMEMBER_ROOT). Introduced by this branch's
+    # own self-review round (#1056) without the round-8 convention,
+    # caught by this same scanner's own CI leg.
+    local _lock_parent="${_dir%/*}"
+    if [ "$_lock_parent" = "$_dir" ]; then
+        printf -v _lock_parent '\056'
+    fi
+    mkdir -p "$_lock_parent" 2>/dev/null || true
 
     while :; do
         if mkdir "$_dir" 2>/dev/null; then
@@ -643,6 +660,15 @@ _lock_acquire_impl() {
             return 0
         fi
 
+        # Computed lazily, on first actual need (#1056 self-review finding):
+        # the common case is an uncontended lock that succeeds on the very
+        # first `mkdir` above, where `_deadline` is never read at all --
+        # paying a `date` fork for a value nothing uses is the identical
+        # "fork whether or not it's needed" pattern #1056 removes elsewhere
+        # on this same hot path. Deferring it shifts the effective deadline
+        # later by the time one steal/adopt attempt takes, never earlier --
+        # the direction a lock timeout can safely drift.
+        [ -n "$_deadline" ] || _deadline=$(( $(date +%s) + _timeout ))
         [ "$(date +%s)" -ge "$_deadline" ] && return 1
         sleep "$_LOCK_SLEEP"
     done
