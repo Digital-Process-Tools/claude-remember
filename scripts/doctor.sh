@@ -1180,13 +1180,19 @@ if [ "$_RS_COUNT" -gt 0 ]; then
     echo "WARN $_RS_COUNT span(s) dropped by a reject gate (summarizer refusal or"
     echo "     ${_rs_dq}not an entry header${_rs_dq}) across the logs present -- the call"
     echo "     succeeded each time, so this is invisible to the Summarizer"
-    # #1052: keep_rejected_text (save-session.sh) saves the REFUSAL TEXT --
-    # the model's own reply explaining why it would not summarize -- never
-    # the dropped SPAN itself, and by the time it runs the read position has
-    # already moved past that span. The refusal text is kept; the span is
-    # not. Do not claim otherwise here.
-    echo "     failures check above. The refusal text (not the dropped span"
-    echo "     itself) is kept -- see $REMEMBER_DIR/tmp/rejected-*.md. Most recent:"
+    # #1052 (second half): the position no longer advances past a rejected
+    # span on the first refusal. save-session.sh now retries it, up to
+    # thresholds.max_rejected_retries consecutive rejections of the SAME
+    # span, before giving up. The model's refusal text is kept at
+    # tmp/rejected-*.md on every rejection either way; a span that exhausts
+    # its retries ALSO gets its raw, unsummarized text parked at
+    # tmp/dropped-span-*.md before the position finally advances past it.
+    echo "     failures check above. A rejected span is retried (see"
+    echo "     thresholds.max_rejected_retries) before the position advances"
+    echo "     past it. The refusal text is always kept at"
+    echo "     $REMEMBER_DIR/tmp/rejected-*.md; a span that exhausts its"
+    echo "     retries also has its raw span text parked at"
+    echo "     $REMEMBER_DIR/tmp/dropped-span-*.md. Most recent reject:"
     echo "     $_RS_LAST_LINE"
     unset _rs_dq
 else

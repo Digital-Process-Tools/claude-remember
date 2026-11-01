@@ -15,8 +15,10 @@ call-haiku. The reject gate returns successfully, so it never increments that
 counter and never trips the give-up warning — this failure mode is invisible
 because it resembles success.
 
-The span still has to be dropped rather than retried forever, so the position
-keeps advancing; what changes is that it is now visible and the text is kept.
+#1052: the span is no longer dropped on the first rejection -- it is
+retried, up to thresholds.max_rejected_retries consecutive rejections of the
+SAME span, before the position finally advances past it (and the raw span
+text, not just the model's refusal, is parked where it can be found).
 """
 
 from __future__ import annotations
@@ -102,12 +104,28 @@ def test_a_rejected_span_is_kept_for_inspection(tmp_path):
     assert "I'm sorry" in rejects[0].read_text(encoding="utf-8")
 
 
-def test_a_rejected_span_still_advances_the_position(tmp_path):
-    """Otherwise the same span is retried forever — the #147 wedge."""
+def test_a_rejected_span_does_not_advance_on_first_rejection(tmp_path):
+    """#1052: a single rejection must be retried, not dropped on the spot."""
     env, project, plugin, calls, sid = _make_env(tmp_path, exchanges=6, humans=5,
                                                  position=777)
     env["STUB_HAIKU_REJECTED"] = "1"
     _run(plugin, env, sid)
+
+    assert not (project / ".remember" / "tmp" / "last-save.json").exists(), (
+        "a single rejection must not drop the span — it is retried next run"
+    )
+
+
+def test_a_rejected_span_eventually_advances_the_position(tmp_path):
+    """Otherwise the same span is retried forever — the #147 wedge, this
+    time for a successful call that discarded its own output. Per
+    thresholds.max_rejected_retries (default 3), the Nth consecutive
+    rejection of the SAME span gives up and advances."""
+    env, project, plugin, calls, sid = _make_env(tmp_path, exchanges=6, humans=5,
+                                                 position=777)
+    env["STUB_HAIKU_REJECTED"] = "1"
+    for _ in range(3):
+        _run(plugin, env, sid)
 
     import json
     saved = json.loads((project / ".remember" / "tmp" / "last-save.json").read_text())
