@@ -1175,7 +1175,24 @@ _remember_start_cache_manifest_lines() {
 # On a hit: prints the cached MEMORY section bytes and returns 0. On a miss
 # (disabled, absent, unreadable, untrusted, or any manifest entry not older
 # than the cache): prints nothing and returns 1 -- the caller renders live.
+#
+# #1051: also drops the exact byte length of what it just printed into
+# REMEMBER_DIR/tmp/start-context.served-bytes.$$ (PID-scoped: this runs
+# inside the subshell that builds the SessionStart body, so a plain shell
+# variable set here never reaches the parent shell's budget check below --
+# a file does). A cache HIT can legitimately serve bytes rendered on a
+# PRIOR calendar day -- every check above (mtimes, VERSION=) passes on a
+# cache that is a day old, by design -- so nothing re-rendered live TODAY
+# can ever be byte-identical to it, and _remember_apply_session_start_budget
+# needs this to tell that apart from the #845 race its own equality check
+# exists to catch. Cleared at the top of every call (hit or miss) so a
+# stale marker from an earlier call under the same PID never survives into
+# one that does not hit the cache.
 _remember_start_cache_context_load() {
+    local LC_ALL=C
+    local _served_marker=""
+    [ -n "${REMEMBER_DIR:-}" ] && _served_marker="$REMEMBER_DIR/tmp/start-context.served-bytes.$$"
+    [ -n "$_served_marker" ] && [ -f "$_served_marker" ] && rm -f "$_served_marker" 2>/dev/null
     [ "${REMEMBER_START_CACHE:-1}" = "1" ] || return 1
     [ "${SESSION_START_SOURCE:-}" != "compact" ] || return 1
     [ -n "${REMEMBER_DIR:-}" ] || return 1
@@ -1235,7 +1252,10 @@ _remember_start_cache_context_load() {
     # why mtimes alone cannot catch this.
     [ "$_mf_version" = "$_REMEMBER_CACHE_FORMAT_VERSION" ] || return 1
 
-    cat "$_cache"
+    local _served
+    _served="$(cat "$_cache")"
+    [ -n "$_served_marker" ] && printf '%s' "${#_served}" > "$_served_marker" 2>/dev/null
+    printf '%s' "$_served"
     return 0
 }
 
@@ -1403,16 +1423,44 @@ _remember_apply_session_start_budget() {
     local LC_ALL=C
     [ "${#_text}" -gt "$_max" ] || return 0
 
+    # #1051: a marker _remember_start_cache_context_load (see its own
+    # header) drops only on a cache HIT, under this same PID. Read once and
+    # removed immediately -- single-use, never trusted by a later call.
+    local _served_marker="" _served_bytes=""
+    [ -n "${REMEMBER_DIR:-}" ] && _served_marker="$REMEMBER_DIR/tmp/start-context.served-bytes.$$"
+    if [ -n "$_served_marker" ] && [ -f "$_served_marker" ]; then
+        _served_bytes="$(<"$_served_marker")"
+        rm -f "$_served_marker" 2>/dev/null
+    fi
+
     # Both captures strip trailing newlines the same way the body's own
     # capture in session-start-hook.sh did, and the memory section is the
-    # body's tail -- so the two tails compare equal byte for byte.
+    # body's tail -- so the two tails compare equal byte for byte, UNLESS
+    # the tail came from a cache HIT serving a PRIOR calendar day's bytes
+    # (see below).
     local _mem _head_len _head _exclude="" _path _next
     _mem=$(_remember_render_memory_section 2>/dev/null)
     [ -n "$_mem" ] || return 0
     _head_len=$(( ${#_text} - ${#_mem} ))
     if [ "$_head_len" -lt 0 ] || [ "${_text:$_head_len}" != "$_mem" ]; then
-        log "memory-context" "WARNING: session_start_max_bytes: MEMORY section changed before the budget check -- injected as rendered, over budget"
-        return 0
+        # #1051: the fresh render above can never match a cache HIT served
+        # from a PRIOR calendar day -- every check the loader applies
+        # (mtimes, VERSION=) passes on a cache that is a day old, by design
+        # (#668), and nothing re-rendered live TODAY can be byte-identical
+        # to it. That is not the #845 race this equality check exists to
+        # catch (nothing changed mid-render); it is two different days
+        # producing two different renders by construction. When the loader
+        # told us exactly how many bytes IT served, trust that split instead
+        # of giving up: the head (handoff + legend, always rendered live in
+        # THIS process, never cached) is unaffected by which day's MEMORY
+        # section the served tail holds.
+        if [ -n "$_served_bytes" ] && [ "${_served_bytes#*[!0-9]}" = "$_served_bytes" ] \
+            && [ $(( ${#_text} - 10#$_served_bytes )) -ge 0 ]; then
+            _head_len=$(( ${#_text} - 10#$_served_bytes ))
+        else
+            log "memory-context" "WARNING: session_start_max_bytes: MEMORY section changed before the budget check -- injected as rendered, over budget"
+            return 0
+        fi
     fi
     _head="${_text:0:$_head_len}"
 
