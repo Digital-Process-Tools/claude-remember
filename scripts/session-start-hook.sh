@@ -125,14 +125,92 @@ _remember_hook_clock_into _REMEMBER_HOOK_T0
 # bytes: milliseconds even at that rate. And the compiled hook sits 37 bytes
 # under the 120 KiB release budget (check_release_tree.py), which the inlined
 # library (about 1.2 KB) would break.
+# #1047 round 2: the join below, `HOOK_STDIN="$HOOK_STDIN$_line"`, is a
+# SECOND quadratic independent of the one `_stdin_json_string_into` already
+# bounds -- this one tracks the number of LINES, not the length of any one
+# line. Measured: 3.3 MB over 2,500 lines, 68.8s on bash 3.2 and 23.6s on
+# bash 5.3 just to finish the read loop, before extraction ever runs.
+# _REMEMBER_HOOK_STDIN_CAP is hoisted here from its old home next to the
+# hooks.d/ publish block below (#266) because the cap must now be enforced
+# DURING accumulation, not after: stopping at this ceiling, rather than
+# building the full string and slicing it afterwards, is what keeps this
+# loop itself from ever re-growing a multi-megabyte string one line at a
+# time. The publish block's own byte-for-byte promise (#266) is preserved
+# for every payload AT OR UNDER this cap -- nothing here shortens anything
+# that would otherwise fit.
+_REMEMBER_HOOK_STDIN_CAP=32768
 HOOK_STDIN=""
+_hook_stdin_truncated=0
+# #1047 self-review (round 3): this block is top-level script code, not a
+# function, so the `local LC_ALL=C` fix `_stdin_json_string_into` uses for
+# the exact same problem is not available here -- bash has no `local`
+# outside a function. Without SOME form of this, `${#HOOK_STDIN}` and
+# `${HOOK_STDIN:0:N}` below count and slice by CHARACTER under any UTF-8
+# locale (the common default on CI's own Ubuntu/macOS runners), so a
+# multi-byte-heavy payload (a non-ASCII project path or transcript content)
+# could grow HOOK_STDIN up to 4x past the stated 32 KiB byte ceiling before
+# this loop's own character-count check trips -- the quadratic growth stays
+# bounded (it cannot reopen the hang), but the ceiling itself silently
+# stops being the number this file's own comments and changelog claim.
+# Saved and restored explicitly, not just `local`-shadowed, because this is
+# top-level: a bare `LC_ALL=C` here would otherwise leak into the rest of
+# this hook's own user-facing output for the remainder of the script.
+_hook_stdin_lc_all_was_set=0
+if [ "${LC_ALL+set}" = set ]; then
+    _hook_stdin_lc_all_was_set=1
+    _hook_stdin_prior_lc_all="$LC_ALL"
+fi
+LC_ALL=C
 if [ ! -t 0 ]; then
     _line=""
     while IFS= read -r -t 1 _line || [ -n "$_line" ]; do
-        HOOK_STDIN="$HOOK_STDIN$_line"
+        if [ "$_hook_stdin_truncated" -eq 0 ]; then
+            HOOK_STDIN="$HOOK_STDIN$_line"
+            if [ "${#HOOK_STDIN}" -gt "$_REMEMBER_HOOK_STDIN_CAP" ]; then
+                HOOK_STDIN=${HOOK_STDIN:0:$_REMEMBER_HOOK_STDIN_CAP}
+                _hook_stdin_truncated=1
+                # #1047 round 4 (CI self-review): the string growth above was
+                # the quadratic cost this cap exists to close, but looping
+                # `read -r -t 1` once per LINE for every remaining line of an
+                # oversized payload is still O(lines) of pure per-iteration
+                # overhead with nothing left to do once HOOK_STDIN is already
+                # capped -- cheap on Linux/macOS bash, measured expensive
+                # enough on Windows runners (git-bash/MSYS syscall overhead
+                # per `read` call) that a 2,500-line/1MB payload alone pushed
+                # tests/test_session_start_stdin_cap_1047.py past its 30s
+                # budget on every windows-latest leg while every other OS
+                # stayed well under it. Nothing below this point needs the
+                # per-line value once the cap is hit, so stop asking for one
+                # line at a time and swallow whatever is left of stdin in a
+                # single bulk read instead -- still O(input size) in bytes
+                # copied, never O(lines) in `read` calls.
+                break
+            fi
+        fi
         _line=""
     done
+    if [ "$_hook_stdin_truncated" -eq 1 ]; then
+        # #1047 round 5 (final review): this used to drain the REST of stdin
+        # synchronously, in the foreground, with no time bound at all -- the
+        # per-line `read -t 1` loop above is bounded, but this bulk drain was
+        # not, so a writer that holds stdin open (never closes its write end)
+        # made the hook hang forever rather than returning once the cap was
+        # hit. Observed: an 8s-holding writer cost the hook 8s once truncation
+        # fired, where the under-cap path (no writer held open) returns within
+        # read -t 1's own 1s. Backgrounded and disowned, the same shape every
+        # other detach site in this file already uses (before_session_start's
+        # deferred dispatch, just below) -- fd 3 is explicitly closed (`3>&-`)
+        # rather than left to leak into the background job, matching that
+        # convention's own fd hygiene.
+        cat <&0 >/dev/null 2>&1 3>&- & disown 2>/dev/null || true
+    fi
 fi
+if [ "$_hook_stdin_lc_all_was_set" -eq 1 ]; then
+    LC_ALL="$_hook_stdin_prior_lc_all"
+else
+    unset LC_ALL
+fi
+unset _hook_stdin_lc_all_was_set _hook_stdin_prior_lc_all
 
 # The same deliberately narrow extractor the PostToolUse hook and
 # the SessionEnd hook use, and for the same reason: the key must be followed
@@ -158,8 +236,32 @@ fi
 # function in this file that takes a destination VARNAME shares; see
 # config_into's comment (log.sh) for the full argument.
 _stdin_json_string_into() {
+    # #1047 self-review: byte-counted, not character-counted -- without this,
+    # `${#_sjsi_raw}` and `${_sjsi_raw:0:4096}` below count and slice by
+    # CHARACTER under any UTF-8 locale (the common default, unset anywhere in
+    # this script), so a payload with multi-byte content before the matched
+    # field (a non-ASCII project path, say) is bounded to 4096 characters --
+    # up to 4x that many bytes -- silently widening the margin #1047 exists
+    # to close. Bytes are what the quadratic match actually costs against.
+    local LC_ALL=C
     local _sjsi_var="$1" _sjsi_field="$2" _sjsi_raw="$3" _sjsi_rest _sjsi_prefix _sjsi_value _sjsi_dq
     printf -v "$_sjsi_var" '%s' ""
+    # #1047: `${var#*pattern}` below is quadratic in bash -- O(n^2) on
+    # _sjsi_raw's length, 15.2s measured at 100 KB and hours at the 3.3 MB a
+    # host handed this hook by piping a whole transcript in as stdin
+    # (observed: 27 processes alive 21h, SIGTERM-immune). The four fields
+    # this hook ever extracts (cwd, session_id, transcript_path, source) all
+    # sit in the first few hundred bytes of a legitimate SessionStart
+    # payload, so bounding the INPUT to the match, not HOOK_STDIN's own
+    # accumulation, makes every call here O(1) regardless of payload size
+    # -- a field that genuinely starts past this bound is missed (same
+    # degradation #745's pluginless-SDK sniff already accepts for its own
+    # scan cap), never hung. Deliberately local to the match rather than
+    # truncating HOOK_STDIN itself: HOOK_STDIN's own full value is still
+    # read elsewhere in this hook (the before_session_start/after_session_start
+    # listener publish below, #266) and must stay byte-identical up to its
+    # own 32 KiB cap, not get silently cropped to this much smaller bound.
+    [ "${#_sjsi_raw}" -gt 4096 ] && _sjsi_raw=${_sjsi_raw:0:4096}
     # The double quote is held in a variable (octal 042) rather than written
     # backslash-escaped: the plugin directory's scanner mis-tracks an
     # escaped quote (#898 round 8). Same patterns, same quoting of the field.
@@ -169,6 +271,18 @@ _stdin_json_string_into() {
     _sjsi_prefix=${_sjsi_rest%%"$_sjsi_dq"*}
     if [[ "$_sjsi_prefix" == *[!:[:space:]]* ]]; then return 1; fi
     _sjsi_value=${_sjsi_rest#*"$_sjsi_dq"}
+    # #1047 self-review: a value whose OPENING quote survived the bound but
+    # whose CLOSING quote fell past it (the field name/open-quote sit inside
+    # the first 4096 bytes, the value's own close does not) left this
+    # function returning SUCCESS with the entire unterminated truncated tail
+    # as the "value" -- a corrupted-but-non-empty string, not the documented
+    # "missed" degradation. Three of the four call sites happen to validate
+    # their result afterwards (a character allowlist, a fixed enum, an
+    # openability check on the Python side) and would have caught it anyway,
+    # but REMEMBER_HOOK_CWD is checked only for embedded CR/LF and is
+    # otherwise trusted as a directory candidate -- fail closed here instead
+    # of relying on every future caller to validate defensively.
+    [[ "$_sjsi_value" == *"$_sjsi_dq"* ]] || return 1
     _sjsi_value=${_sjsi_value%%"$_sjsi_dq"*}
     # A JSON encoder writes each backslash as `\\` -- a Windows `cwd` from
     # Codex arrives as `C:\\work\\proj` otherwise (#829).
@@ -255,6 +369,16 @@ REMEMBER_SESSION_START_SLOW_S=""
 config_into REMEMBER_SESSION_START_SLOW_S ".session_start_slow_threshold_s" "5"
 _remember_is_uint "$REMEMBER_SESSION_START_SLOW_S" || REMEMBER_SESSION_START_SLOW_S=5
 
+# capture-gap-check.sh's own fast path (#1079) needs this ONE scalar, the
+# same way post-tool-hook.sh's fast path already needs REMEMBER_SAVE_COOLDOWN/
+# REMEMBER_DELTA_THRESHOLD above -- config_into is the same forkless cached
+# lookup, so resolving it here costs nothing on the common (already-cached)
+# path, and the deferred phase below gets it from the cache this publish call
+# writes instead of re-running the whole three-layer config merge itself.
+REMEMBER_RECOVERY_ENABLED=""
+config_into REMEMBER_RECOVERY_ENABLED ".features.recovery" true
+export REMEMBER_RECOVERY_ENABLED
+
 # Publish what the chain above just resolved, so the UserPromptSubmit hook does not
 # repeat it on every prompt (#227). Republishing unconditionally here is what
 # bounds the staleness of anything the cache cannot detect — a project that
@@ -296,6 +420,41 @@ _stdin_json_string_into CURRENT_SESSION_ID session_id "$HOOK_STDIN" 2>/dev/null
 if [ -z "${CURRENT_SESSION_ID#.}" ] || [ -z "${CURRENT_SESSION_ID#..}" ] \
     || [[ "$CURRENT_SESSION_ID" == *[!A-Za-z0-9._-]* ]]; then
     CURRENT_SESSION_ID=""
+fi
+
+# #1046 round 2: a chat-only session (no tool call at all, so
+# post-tool-hook.sh's own capture-alive.d marker is never written) that then
+# dies without a clean SessionEnd was no longer rescuable by recovery once
+# #1046's roster guard landed above -- real data loss introduced BY that
+# fix, not present before it: the guard correctly declines to force-save a
+# candidate with no roster evidence under this store, but a chat-only
+# session could never have earned any. Writing a second, cheaper marker
+# here -- at the START of every session, under this same store, for THIS
+# session's own id -- gives even a tool-less session one piece of roster
+# evidence by the time it could ever become a later session's PREV_ID.
+#
+# #1046 final review: this used to land in the SAME folder
+# (capture-alive.d) post-tool-hook.sh writes into for "a tool actually ran
+# under this store" -- the #200 capture-gap check's own capture_was_seen()
+# reads that folder as ITS evidence too, so a session that only ever hit
+# THIS marker (no tool call at all) made a real capture gap (hooks never
+# registered, so neither marker was ever written... except this one now
+# was) read as "captured" and go silently unwarned. Written into its own
+# folder instead -- only the #1046 recovery guard
+# (_remember_recovery_prev_id_vouched, capture-gap-check.sh) accepts it as
+# evidence; capture_was_seen() deliberately does not.
+#
+# `[ -d ]` before the `mkdir` (#230, same convention as post-tool-hook.sh's
+# own capture-alive.d write): every session after the first in a store
+# finds this directory already there, and asking `mkdir -p` to confirm that
+# costs a process on every single SessionStart. The mkdir still runs -- and
+# still gates the write on its success -- the first time, and on any run
+# where the directory is missing.
+if [ -n "$REMEMBER_DIR" ] && [ -n "$CURRENT_SESSION_ID" ]; then
+    if [ -d "$REMEMBER_DIR/tmp/session-started.d" ] \
+        || mkdir -p "$REMEMBER_DIR/tmp/session-started.d" 2>/dev/null; then
+        : > "$REMEMBER_DIR/tmp/session-started.d/$CURRENT_SESSION_ID" 2>/dev/null
+    fi
 fi
 
 # ── The transcript path the host handed us (#407) ─────────────────────────
@@ -347,14 +506,18 @@ fi
 # cannot tell it from a genuinely short one. Three states, the third disclosed:
 #
 #   FILE unset                     no payload arrived, or no listener
-#   STDIN non-empty                the whole payload
-#   STDIN empty and FILE set       too large for the environment; the file
-#                                  holds it, complete
+#   STDIN non-empty                the whole payload, complete
+#   STDIN empty and FILE set       the payload was truncated at the
+#                                  accumulation cap (#1047 round 2) --
+#                                  neither the env var nor the file holds
+#                                  more than _REMEMBER_HOOK_STDIN_CAP bytes
+#                                  of it, because HOOK_STDIN itself was
+#                                  never allowed to grow past that during
+#                                  the read loop above
 #
 # Nothing is written at all unless a listener is installed — the shipped
 # distribution's before_session_start/ and after_session_start/ hold a
 # .gitkeep and, for the git hooks, scripts that never read stdin.
-REMEMBER_HOOK_STDIN_MAX=32768
 _hook_stdin_file=""
 
 _session_start_listener() {
@@ -376,7 +539,12 @@ if [ -n "$HOOK_STDIN" ] && _session_start_listener; then
         rm -f "$_hook_stdin_file" 2>/dev/null
         _hook_stdin_file=""
     fi
-    if [ "${#HOOK_STDIN}" -le "$REMEMBER_HOOK_STDIN_MAX" ]; then
+    # Length can no longer tell the two states apart -- HOOK_STDIN is
+    # already capped at _REMEMBER_HOOK_STDIN_CAP by the read loop above, so
+    # its length is always <= the cap whether or not the real payload was
+    # longer. _hook_stdin_truncated (set only by that loop) is the actual
+    # signal now.
+    if [ "$_hook_stdin_truncated" -eq 0 ]; then
         export REMEMBER_HOOK_STDIN="$HOOK_STDIN"
     else
         export REMEMBER_HOOK_STDIN=""
@@ -424,8 +592,9 @@ if [ "$_remember_defer_dispatch" = 1 ]; then
     {
         # #700: exported, not a plain assignment -- a bare `_REMEMBER_PHASE=deferred`
         # never left this subshell, so no traced child (a hooks.d/ listener,
-        # here) could see it. The whole point of the label, per the comment on
-        # _remember_deferred_phase below, is telling a deferred child from a
+        # here) could see it. The whole point of the label, per the same
+        # export in scripts/capture-gap-check.sh (#1067, formerly
+        # _remember_deferred_phase here), is telling a deferred child from a
         # command substitution by pid alone; that needs the child's own env.
         export _REMEMBER_PHASE=deferred
         dispatch "before_session_start"
@@ -438,60 +607,6 @@ unset _remember_defer_dispatch
 # ── Cleanup + health check ─────────────────────────────────────────────────
 rm -f "$REMEMBER_DIR/tmp/save-session.pid"
 
-# ── "Was session X saved?" ────────────────────────────────────────────────
-# Hoisted out of the recovery block below because the capture-gap check
-# further down asks the same question of the same file, and the two answers
-# must not be allowed to drift: a detector that tells you a session "was not
-# captured" while the save record says it was captured 72/72 is reporting on
-# its own bookkeeping, not on anything you lost (#206).
-#
-# Ask whether this session was EVER saved, not whether it owns the one
-# slot: positions are keyed by session now, and the old equality test
-# force-saved an already-saved session whenever another had saved since
-# (issue #140). Legacy single-slot files still answer correctly.
-# Type-check the value, not just the key: the python readers require an
-# int, so `has($id)` alone would call a corrupt {"id": null} entry saved
-# while they resume it from 0 — re-summarizing the whole span, which is
-# what #140 exists to prevent.
-# isinfinite guard: JSON has no infinity literal, but 1e400 overflows to
-# one, and floor(infinite) == infinite — so it would read as a line
-# number here while python's is_integer() rejects it. jq would then call
-# the session saved and the recovery force-save below would never fire,
-# losing that session's tail entirely.
-LAST_SAVE_FILE="$REMEMBER_DIR/tmp/last-save.json"
-SAVED_QUERY='def isline: type == "number" and ((isnan or isinfinite) | not) and . == floor; if (((.sessions // {})[$id]) | isline) or (.session == $id and (.line | isline)) then "saved" else "unsaved" end'
-
-# Args: $1 — session id. Exit 0 if last-save.json records it as saved.
-#
-# _jq_fallback's own shim (scripts/detect-tools.sh) only ever evaluates
-# dotted-path lookups and drops every `--arg`/`--argjson` pair entirely
-# (#667): it eats each leading `-*` token into a flags variable it never
-# reads, then treats the first non-flag token as the query and the one
-# after it as the file -- fed `--arg id "$1" "$SAVED_QUERY"
-# "$LAST_SAVE_FILE"`, that lands on query="id", file="$1" (the session id,
-# not a real file), so the shim always prints nothing and this always read
-# as "unsaved", spawning `save-session.sh --force` on every jq-less
-# startup regardless of whether the previous session was actually saved.
-#
-# Every OTHER $JQ/$JQ_BIN call site under scripts/ that passes --arg already
-# guards itself with `command -v jq` first (session-start-hook.sh's own
-# promo-JSON call below, the UserPromptSubmit hook's two notice-JSON calls), so
-# this is the ONLY call site that ever reaches the fallback with --arg --
-# it gets its own jq-free branch instead of teaching the generic shim a
-# --arg parser it would be the sole caller of.
-session_was_saved() {
-    [ -n "$1" ] && [ -f "$LAST_SAVE_FILE" ] || return 1
-    if [ "$JQ" = "_jq_fallback" ]; then
-        _remember_python || return 1
-        # #898 round 20: the program lives in session_saved.py beside this
-        # hook (as jq_fallback_get.py and cfg_merge.py do), called by path.
-        # It used to be a multi-line here-string fed to `python -`, and the
-        # directory's scanner could not follow the script past it.
-        [ "$(_remember_run_python "$_HOOK_DIR/session_saved.py" "$LAST_SAVE_FILE" "$1" 2>/dev/null)" = "saved" ]
-    else
-        [ "$(_remember_run_jq -r --arg id "$1" "$SAVED_QUERY" "$LAST_SAVE_FILE" 2>/dev/null)" = "saved" ]
-    fi
-}
 
 # ── Which session was the PREVIOUS one? (#270) ────────────────────────────
 # Resolved once, here, for the recovery block and the capture-gap check both.
@@ -508,826 +623,6 @@ session_was_saved() {
 PROJECT_PATH_SLUG="$(session_dir_slug "$PROJECT")"
 SESSIONS_DIR="$(claude_projects_dir)/${PROJECT_PATH_SLUG}"
 
-# ── The slug, written down once, for callers that are not bash (#294) ─────
-# The slug is a pure function of PROJECT_DIR and PROJECT_DIR does not change
-# mid-session, so a caller in another language had no reason to recompute it —
-# and no way to ask for it except by sourcing lib-slug.sh in a subshell, once
-# per tool call. The reporter of #294 drives this plugin from PowerShell and
-# answered that by maintaining a port of session_dir_slug, which is how the
-# long-path divergence was found: a second implementation of the one function
-# whose disagreements are silent.
-#
-# So it is written here, where PROJECT_PATH_SLUG already exists two lines
-# above. This costs one `mv`; the per-tool-call path is not touched at all,
-# which is deliberate and is asserted by
-# tests/test_session_slug_record_294.py::test_the_per_tool_call_path_is_not_touched.
-#
-# In tmp/, with the locks, the cooldown markers and the delivery record: it
-# names one machine's session and one machine's absolute paths, and #285 is
-# what happens when that kind of state is committed like memory. The git
-# backup already excludes the whole directory.
-#
-# THREE STATES, NOT TWO. An empty slug is not an absence — it resolves to
-# ~/.claude/projects/ ITSELF, a directory that exists and holds every
-# project's transcripts, so a reader that cannot tell "nothing was written"
-# from "the slug is empty" reads someone else's session and never knows. The
-# record therefore always carries a status, and never carries a `slug=` key it
-# cannot fill: absent means this never ran, status=unavailable means it ran
-# and could not answer, status=ok means the value is usable.
-#
-# NO TIMESTAMP, deliberately. The slug is a pure function of the path, so a
-# record written by a long-dead session is still correct; only a record
-# written by a DIFFERENT project is wrong, and worktrees make that reachable —
-# they share a REMEMBER_DIR with the main checkout (#56) while keeping their
-# own PROJECT_DIR, so the last session to start owns this file. `project_dir`
-# is the one field that decides whether the record applies to a reader. A
-# timestamp beside it would only offer a staleness test that answers the wrong
-# question.
-_remember_write_slug_record() {
-    local _dir="$REMEMBER_DIR/tmp" _tmp
-    [ -d "$_dir" ] || mkdir -p "$_dir" 2>/dev/null || return 0
-    _tmp="$_dir/session-slug.$$"
-
-    # A newline is a legal byte in a POSIX filename and this record is
-    # line-based, so a project path containing one would put `slug=…` inside
-    # the value of `project_dir=` — a file that parses cleanly and says
-    # something false. Refusing is the only honest answer, and saying which
-    # state we are in is the point of the status field.
-    local _reason=""
-    if [ -z "$PROJECT_PATH_SLUG" ]; then
-        _reason="empty-slug"
-    else
-        local _paths_joined="${PROJECT}${SESSIONS_DIR}${REMEMBER_DIR}"
-        if [[ "$_paths_joined" == *$'\n'* ]]; then
-            _reason="unrepresentable-path"
-        fi
-    fi
-
-    # Written whole to a private temp name and moved into place, because two
-    # worktrees of one repo start sessions against the same tmp/ and a reader
-    # must never see half a record. CURRENT_SESSION_ID is already constrained
-    # to [A-Za-z0-9._-] where it is read, so it cannot break a line here.
-    if [ -n "$_reason" ]; then
-        printf 'format=1\nstatus=unavailable\nreason=%s\n' "$_reason" \
-            > "$_tmp" 2>/dev/null || { rm -f "$_tmp" 2>/dev/null; return 0; }
-    else
-        {
-            printf '%s=%s\n' format 1 status ok project_dir "$PROJECT" slug "$PROJECT_PATH_SLUG" \
-                sessions_dir "$SESSIONS_DIR" memory_dir "$REMEMBER_DIR"
-            [ -z "$CURRENT_SESSION_ID" ] || printf 'session_id=%s\n' "$CURRENT_SESSION_ID"
-        } > "$_tmp" 2>/dev/null || { rm -f "$_tmp" 2>/dev/null; return 0; }
-    fi
-
-    mv -f "$_tmp" "$_dir/session-slug" 2>/dev/null || rm -f "$_tmp" 2>/dev/null
-    return 0
-}
-# Called in the deferred block below (#660), not here: this writes a record
-# nothing in this hook reads back, and the foreground path's only obligation
-# is the injected context.
-
-# ── And somewhere a caller can NAME, in the layout we ship (#297) ─────────
-# The record above answers "what is the slug", and in the layout
-# config.user.example.json ships — "data_dir": "~/.remember/{slug}", under a
-# _purpose that says to copy it — it answers from inside a directory the slug
-# names. A caller holding project_dir and the template could not open it
-# without already knowing what it says. That was written down as one documented
-# hole when #296 shipped; it is the recommended configuration, and those are
-# the installs most likely to have a non-bash caller in the first place.
-#
-# NOTHING IS DERIVED FROM project_dir. The alternative shape — a second copy at
-# <store_root>/tmp/session-slug-<key from project_dir> — needs a key both sides
-# compute the same way, which is a second algorithm over the project path, and
-# deleting exactly that is what #294 and #296 were for. A language-neutral
-# encoding does not escape it either: base64 of an N-byte path is 4*ceil(N/3),
-# so the 260-character paths #294 was about come out at 348 bytes and the
-# 300-character vector in tests/slug_vectors.py at 400, past the 255-byte
-# filename limit everywhere — and truncating to fit means appending a hash, a
-# slug algorithm under a different name. An index matched on project_dir
-# verbatim asks the caller to compute nothing at all, and keeps the property
-# the reporter's own directory scan has: it cannot answer wrongly, only fail
-# to answer.
-#
-# WRITTEN ONLY WHEN THE SLUG NAMES THE STORE. REMEMBER_STORE_ROOT is empty in
-# the legacy layout and in a single-directory external store, where it would
-# equal REMEMBER_DIR and duplicate a record that is already reachable — two
-# files saying one thing, with a second chance to disagree. The common layout
-# pays nothing for the external one, which is also why this is not in
-# bootstrap-dirs.sh.
-#
-# ONE FILE, MANY WRITERS — the difference from the record, which each project
-# owns outright. Several projects, and several worktrees of one project, start
-# sessions against one store root, and a read-modify-write across them loses
-# rows silently. So the rewrite is taken under the plugin's one lock primitive
-# and published with mv; a session that cannot take the lock writes no row and
-# says nothing, because the per-project record remains authoritative and this
-# is a way to find it, not a second source of truth.
-#
-# NO TIMESTAMPS, for the reason _remember_write_slug_record gives above. A row
-# for a directory since deleted can never be MATCHED by a caller holding a live
-# project_dir, and if that path is ever recreated the row is still correct — so
-# rows are never expired by age, and never pruned by testing whether the
-# directory still exists, which would drop correct rows for anything on an
-# unmounted share. The only bound is the row cap, and the ordering it drops by
-# is position, maintained by this rewrite. That is not a staleness test and no
-# reader may use it as one.
-#
-# AND NO ROW AT ALL for a project_dir this file cannot hold. A newline is legal
-# on POSIX and a tab is legal too, and both are structure here. The record can
-# take status=unavailable for that case; a row cannot, because it would have to
-# be keyed by the very value it is refusing. A caller with such a path finds no
-# row and falls back — the same outcome as this never having run, which is the
-# honest one.
-SLUG_INDEX_LOCK_TIMEOUT=2
-SLUG_INDEX_MAX_ROWS=1000
-_remember_write_slug_index() {
-    [ -n "${REMEMBER_STORE_ROOT:-}" ] || return 0
-    [ "$REMEMBER_STORE_ROOT" != "$REMEMBER_DIR" ] || return 0
-    [ -n "$PROJECT_PATH_SLUG" ] || return 0
-
-    local _paths_joined="${PROJECT}${REMEMBER_DIR}"
-    if [[ "$_paths_joined" == *$'\n'* ]] || [[ "$_paths_joined" == *$'\t'* ]]; then
-        return 0
-    fi
-
-    local _dir="$REMEMBER_STORE_ROOT/tmp"
-    [ -d "$_dir" ] || mkdir -p "$_dir" 2>/dev/null || return 0
-
-    local _index="$_dir/sessions" _lock="$_dir/sessions.lock" _tmp
-
-    # Sourced here rather than at the top of the file: this is the only caller,
-    # and lib-lock.sh probes for fractional sleep at source time — a fork the
-    # legacy layout has no reason to pay at every session start.
-    #
-    # The primitive, not the lock_acquire/lock_release wrappers (#898): the
-    # wrappers only add the opt-in hold-duration recorder (#226), which sizes
-    # the save and staging locks, and calling them here would compile that
-    # whole recorder into this hook for a lock it was never about.
-    source "$_HOOK_DIR/lib-lock.sh" 2>/dev/null || return 0
-    command -v _lock_acquire_impl >/dev/null 2>&1 || return 0
-    _lock_acquire_impl "$_lock" "$SLUG_INDEX_LOCK_TIMEOUT" || return 0
-
-    _tmp="$_index.$$"
-    {
-        printf 'format=1\n'
-        if [ -f "$_index" ]; then
-            # Our own row dropped — it is re-appended below, so a project that
-            # starts twice moves rather than doubles — and the oldest dropped at
-            # the cap. A first line that is not ours means a format this version
-            # cannot read: exit, print nothing, start the file over, rather than
-            # carry rows forward under rules we do not know.
-            awk -v self="$PROJECT" -v max="$((SLUG_INDEX_MAX_ROWS - 1))" '
-                NR == 1 { if ($0 != "format=1") exit 0; next }
-                $0 == "" { next }
-                {
-                    n = index($0, "\tproject_dir=")
-                    if (n == 0) next
-                    if (substr($0, n + 13) == self) next
-                    rows[++c] = $0
-                }
-                END {
-                    start = (c > max) ? c - max + 1 : 1
-                    for (i = start; i <= c; i++) print rows[i]
-                }
-            ' "$_index" 2>/dev/null
-        fi
-        # project_dir LAST, and the only field whose value may contain a tab —
-        # so a reader splits on the first three and keeps the remainder whole.
-        # slug is ASCII by construction, and memory_dir was refused above if it
-        # carried one.
-        printf 'status=ok\tslug=%s\tmemory_dir=%s\tproject_dir=%s\n' \
-            "$PROJECT_PATH_SLUG" "$REMEMBER_DIR" "$PROJECT"
-    } > "$_tmp" 2>/dev/null || {
-        rm -f "$_tmp" 2>/dev/null
-        _lock_release_impl "$_lock" 2>/dev/null
-        return 0
-    }
-
-    mv -f "$_tmp" "$_index" 2>/dev/null || rm -f "$_tmp" 2>/dev/null
-    _lock_release_impl "$_lock" 2>/dev/null
-    return 0
-}
-# Called in the deferred block below (#660), not here: this writes a record
-# nothing in this hook reads back, and the foreground path's only obligation
-# is the injected context.
-
-# ── Is this store known by a second spelling? (#298) ──────────────────────
-# Git's index is case-sensitive where NTFS is not, so a store can be spelled
-# one way on disk and another in the repository that backs it up. That costs
-# nothing while it stays on a case-insensitive filesystem — measured on the
-# reporter's own Windows box, where both spellings resolve to the same
-# directory object — and it splits the store in two on a case-sensitive
-# restore, which is the machine least likely to be looking.
-#
-# Session start, not the per-tool-call path: `session_dir_slug` runs on every
-# tool call and #299 pinned that path byte-identical. The whole check costs one
-# `git ls-tree` and only for a store that has its own repository; the disk half
-# costs no fork at all, and a store in the legacy layout pays nothing because
-# the library returns not-applicable before either probe runs.
-#
-# Disclosure only, and everything downstream keys off ONE fact: whether the
-# finding has changed since last session. The record at tmp/case-divergence
-# always holds the current answer in all four states, and is rewritten only
-# when that answer is different — which is also what makes the steady state
-# fork-free. The human-facing notice and the "could not check" log line fire
-# on that same change. The condition never clears itself and is harmless
-# today, so repeating it every session start would spend the one channel a
-# human actually reads (#200) on wallpaper — the argument `_push_and_report`
-# makes for its threshold, with the threshold replaced by "say it again only
-# when it says something different". `/remember:doctor` re-runs the check live
-# and reports every time, which is where someone who suspects a problem looks.
-_remember_write_case_divergence() {
-    source "$_HOOK_DIR/lib-case-divergence.sh" 2>/dev/null || return 0
-    command -v remember_case_divergence >/dev/null 2>&1 || return 0
-    remember_case_divergence
-
-    local _dir="$REMEMBER_DIR/tmp" _tmp _old="" _body="" NL=$'\n'
-
-    # The record built as a string first, so it can be compared with what is
-    # already on disk. Every field is appended unconditionally or inside an
-    # `if` — never `[ -n … ] && …`, which as a group's last command makes a
-    # correct write look like a failed one, and cost this file a record it had
-    # already produced until the trace said so.
-    _body="format=1${NL}status=$REMEMBER_CASE_STATUS"
-    # Optional fields only when set, through `${VAR:+...}` (#898).
-    if [ "$REMEMBER_CASE_STATUS" != "not-applicable" ]; then
-        _body="$_body${NL}resolved=$REMEMBER_CASE_RESOLVED${NL}store_root=$REMEMBER_CASE_ROOT"
-        _body="$_body${NL}disk_state=$REMEMBER_CASE_DISK_STATE"
-        _body="$_body${REMEMBER_CASE_DISK_REASON:+${NL}disk_reason=$REMEMBER_CASE_DISK_REASON}"
-        _body="$_body${REMEMBER_CASE_DISK_NAMES:+${NL}disk_names=$REMEMBER_CASE_DISK_NAMES}"
-        _body="$_body${NL}git_state=$REMEMBER_CASE_GIT_STATE"
-        _body="$_body${REMEMBER_CASE_GIT_REASON:+${NL}git_reason=$REMEMBER_CASE_GIT_REASON}"
-        _body="$_body${REMEMBER_CASE_GIT_NAMES:+${NL}git_names=$REMEMBER_CASE_GIT_NAMES}"
-    fi
-
-    # Read what is already there BEFORE deciding anything: it answers both
-    # "has the finding changed" (which is what the human-facing notice fires
-    # on) and "is there anything to write at all". Read with the shell — a
-    # `grep | tr` here was two forks on a path whose whole budget is one
-    # `git ls-tree`, and in the legacy layout, where this check is
-    # not-applicable and its record never changes, it was two forks for a file
-    # that already said the right thing.
-    if [ -f "$_dir/case-divergence" ]; then
-        local _pline
-        while IFS= read -r _pline; do
-            _old="${_old:+$_old$NL}$_pline"
-        done < "$_dir/case-divergence"
-    fi
-
-    if [ "$_old" != "$_body" ]; then
-        [ -d "$_dir" ] || mkdir -p "$_dir" 2>/dev/null || return 0
-        _tmp="$_dir/case-divergence.$$"
-        printf '%s\n' "$_body" > "$_tmp" 2>/dev/null \
-            || { rm -f "$_tmp" 2>/dev/null; return 0; }
-        mv -f "$_tmp" "$_dir/case-divergence" 2>/dev/null || rm -f "$_tmp" 2>/dev/null
-    fi
-
-    if [ "$REMEMBER_CASE_STATUS" = diverged ]; then
-        log "case-divergence" "$REMEMBER_CASE_MESSAGE"
-        # An unchanged record is an unchanged finding, and the human has
-        # already been told. Saying it again every session start would
-        # spend the one channel they actually read on a condition that is
-        # harmless today and never clears itself.
-        [ "$_old" = "$_body" ] && return 0
-        printf '%s\n' "$REMEMBER_CASE_MESSAGE" \
-            > "$_dir/case-divergence-notice" 2>/dev/null || true
-    elif [ "$REMEMBER_CASE_STATUS" = unavailable ]; then
-        # Logged on change only. The commonest reason by far is
-        # `not-a-repository` — an external store nobody has pointed a git
-        # backup at — and that is a standing condition, not an event: one
-        # identical line per session for the life of the install is the
-        # wallpaper #252's five weeks of identical daily lines proved
-        # nobody reads. It is still never rendered as agreement anywhere
-        # that reports it; `/remember:doctor` says it every time.
-        [ "$_old" = "$_body" ] && return 0
-        log "case-divergence" "could not check for a second spelling of this store (disk=$REMEMBER_CASE_DISK_STATE${REMEMBER_CASE_DISK_REASON:+/$REMEMBER_CASE_DISK_REASON} git=$REMEMBER_CASE_GIT_STATE${REMEMBER_CASE_GIT_REASON:+/$REMEMBER_CASE_GIT_REASON}) -- not a report that they agree"
-    fi
-    return 0
-}
-# Called in the deferred block below (#660), not here: this writes a record
-# nothing in this hook reads back, and the foreground path's only obligation
-# is the injected context.
-
-# Args: $1 -- path to a transcript file. Reports (via exit status) whether
-# its own first bookkeeping records name it as an Agent SDK session that
-# never loaded this plugin at all (#745).
-#
-# A reporter's transcripts opened with `"type":"queue-operation"` and had no
-# `capture-alive.d/<id>` marker -- the capture-gap notice fired even though
-# `/remember:doctor` reported the session as saved, and separately, recovery
-# force-saved another plugin's own review into the user's memory. A second
-# report on the same issue (kenspc, 16 real transcripts) found the real
-# discriminator: every marker-less transcript in that sample was
-# `entrypoint: sdk-py`, written by another plugin's own `agentic_review()`
-# call (security-guidance's commit/push review) starting a Claude Agent SDK
-# session with `setting_sources=[]` -- no settings, no plugins, so
-# remember's hooks were never REGISTERED for it, not merely unwired. There
-# is no marker to find because PostToolUse was never there to write one, and
-# there never will be.
-#
-# Claude Code writes `entrypoint` on a transcript's own bookkeeping records
-# (`cli`, `claude-vscode`, `sdk-py`, ...); an SDK client's own transcript
-# carries it before the plugin can be blamed. This is deliberately narrow:
-# only a value opening with `sdk-` is treated as pluginless.
-#
-# NOT SOUND, on two counts logged to trap.d/745 (curator to decide) rather
-# than fixed here:
-#   1. An SDK integration that DOES pass `setting_sources` and loads this
-#      plugin would write its own marker exactly like any other host, but
-#      this check has no way to tell that apart from a pluginless one -- it
-#      looks only at the entrypoint prefix, never at whether evidence of
-#      capture already exists for this same transcript. No real-world
-#      instance of a plugin-loaded SDK entrypoint has been observed; #745's
-#      own dataset (16 transcripts) had none.
-#   2. The match below is a substring scan over up to 50 RAW transcript
-#      lines, not a check that the matching line is a bookkeeping record --
-#      ordinary conversation content (a pasted JSON snippet, a tool result
-#      quoting this very file) could in principle carry the literal text
-#      `"entrypoint":"sdk-...` and be misread as a bookkeeping line. A line
-#      whose "message" field is the nested {role, content} OBJECT real
-#      dialogue always uses is skipped outright below (#803: a bookkeeping
-#      record's own "message" field, when present, is instead a plain
-#      string, discriminated from the object shape rather than assumed
-#      absent) -- which closes the concrete case self-review raised (a
-#      session whose own transcript discusses this issue's test fixtures)
-#      without a real JSON parse -- a residual false match confined to
-#      bookkeeping-shaped, non-dialogue content is not eliminated.
-# The field also carries no documented stability contract; absence, or a
-# shape this cannot parse, falls through to "not sdk" -- the safe direction,
-# since keeping a transcript in contention risks at most the false notice
-# this exists to fix, never a real gap going unreported.
-#
-# Bounded to the same scan depth pipeline/extract.py's own envelope sniff
-# uses for the same shape of problem (#543/#556's _ENVELOPE_SNIFF_SCAN_CAP) --
-# a transcript that never says who wrote it in its first 50 lines is read as
-# not-sdk rather than scanned to the end.
-_ENTRYPOINT_SNIFF_CAP=50
-_transcript_is_pluginless_sdk() {
-    local f=$1 n=0 line ep rest prefix is_dialogue dq
-    # the double quote, as in _stdin_json_string_into
-    printf -v dq '\042'
-    while IFS= read -r line; do
-        n=$((n + 1))
-        is_dialogue=0
-        # Expansion tests, not quoted literals in a case pattern (#898
-        # round 9, a directory-scanner hold shape).
-        rest=${line#*"$dq"message"$dq"}
-        if [ "$rest" != "$line" ]; then
-            # #803: real dialogue's own "message" field is always the
-            # nested {role, content} OBJECT; a bookkeeping record's
-            # "message" field (an error/status STRING, possibly empty,
-            # on say a queue-operation record) is not. Checked directly
-            # by shape rather than by reusing _stdin_json_string_into (its
-            # own `[ -n "$value" ]` non-empty guard cannot tell an empty
-            # STRING apart from an OBJECT by return code alone --
-            # auditor finding, self-review round): everything between
-            # the "message" key and the first `"` after it must be only
-            # colon and whitespace for the value to be quote-opened
-            # (string-shaped, any length, any whitespace width); any
-            # other character there (a `{`, most plainly) means the
-            # value is an object, and only that shape is real dialogue.
-            # A string-shaped "message" falls through to the entrypoint
-            # check below like any other bookkeeping line, so it can no
-            # longer mask an "entrypoint" field on the same line the way
-            # a bare substring skip did. Skipping via `is_dialogue` (an
-            # `if`, not a `continue`) -- self-review caught that a
-            # `continue` here would jump past the CAP check below on
-            # every dialogue line, silently defeating
-            # _ENTRYPOINT_SNIFF_CAP for the overwhelmingly common case
-            # (ordinary transcripts are mostly dialogue).
-            prefix=${rest%%"$dq"*}
-            if [[ "$prefix" == *[!:[:space:]]* ]]; then
-                is_dialogue=1
-            fi
-        fi
-        if [ "$is_dialogue" -eq 0 ]; then
-            if [ "${line#*"$dq"entrypoint"$dq"}" != "$line" ]; then
-                _stdin_json_string_into ep entrypoint "$line" 2>/dev/null || return 1
-                # `[ ]` prefix test, not a `case` with a catch-all `*)`
-                # arm inside this loop (#898 round 7 -- that shape is
-                # one the plugin directory's scanner holds a
-                # submission on).
-                if [ "${ep#sdk-}" != "$ep" ]; then
-                    return 0
-                else
-                    return 1
-                fi
-            fi
-        fi
-        [ "$n" -ge "$_ENTRYPOINT_SNIFF_CAP" ] && return 1
-    done < "$f" 2>/dev/null
-    return 1
-}
-
-# How many pluginless-SDK transcripts (#745) the previous-transcript lookup
-# below passes over before it gives up (#819).
-# `:-`, not a plain `=`, so a value already set in the calling environment
-# survives (self-review finding, Explore round: a bare `=20` here
-# unconditionally clobbers any caller-supplied override before the
-# lookup ever reads it via its own `${_PREV_TRANSCRIPT_EXCLUDE_CAP:-20}`
-# fallback below, making the "configurable" cap dead code in production --
-# always exactly 20 regardless of what the environment set).
-_PREV_TRANSCRIPT_EXCLUDE_CAP="${_PREV_TRANSCRIPT_EXCLUDE_CAP:-20}"
-
-# The file suffix every transcript in SESSIONS_DIR carries; a transcript's
-# session id is its file name without it.
-_TRANSCRIPT_SUFFIX=.jsonl
-
-# Args: $1 — sessions dir, $2 — this session's id ("" when the payload had
-# none). Sets PREV_JSONL and PREV_ID to the previous session's transcript
-# path and session id, or both to "" when there is no previous session.
-#
-# Transcripts are ranked newest first by mtime, compared with bash's own
-# `-nt` test builtin -- no `ls -t`, no sort, no fork, however many
-# transcripts exist (#691). Equal mtimes keep glob order. The lookup takes
-# the best-ranked transcript and passes over it while it is one of:
-#   * this session's own: with an id, the transcript named after it is
-#     never considered at all; without one, the best-ranked transcript is
-#     ASSUMED to be ours and passed over positionally (see the call site);
-#   * a pluginless-SDK transcript (#745): no plugin was ever loaded into
-#     it, so neither the capture-gap notice nor recovery's force-save may aim
-#     at it. At most _PREV_TRANSCRIPT_EXCLUDE_CAP of these are passed over
-#     (#819) -- a previous session hidden behind more headless runs than
-#     that is not worth finding -- and giving up is logged (#823), because
-#     otherwise it reads exactly like "no previous session exists" and the
-#     recovery save and the #200 capture-gap check both skip in silence.
-#
-# Passing over is a floor, not a list: each round takes the best-ranked
-# transcript ranked strictly BELOW the last one passed over, so nothing has
-# to remember which files were already excluded. The glob runs once; each
-# round walks its result, so the worst case is (cap + 2) * n `-nt` tests,
-# never n * (however many headless runs sit in the directory) (#819).
-_find_previous_transcript() {
-    local dir=$1 own_id=$2 floor="" before_floor tries=0 f id
-    local assume_newest_is_ours=""
-    local -a files
-    [ -z "$own_id" ] && assume_newest_is_ours=1
-    files=("$dir"/*"$_TRANSCRIPT_SUFFIX")
-    while :; do
-        PREV_JSONL="" PREV_ID="" before_floor=1
-        for f in "${files[@]}"; do
-            [ -e "$f" ] || continue
-            if [ -n "$floor" ]; then
-                # Skip everything ranked at or above the floor: the floor
-                # itself, anything newer, and an equal-mtime file that comes
-                # before it in glob order.
-                if [ "$f" = "$floor" ]; then
-                    before_floor=""
-                    continue
-                fi
-                [ "$f" -nt "$floor" ] && continue
-                [ -n "$before_floor" ] && ! [ "$floor" -nt "$f" ] && continue
-            fi
-            id=${f#"$dir"/}
-            id=${id%"$_TRANSCRIPT_SUFFIX"}
-            [ -n "$own_id" ] && [ "$id" = "$own_id" ] && continue
-            if [ -z "$PREV_JSONL" ] || [ "$f" -nt "$PREV_JSONL" ]; then
-                PREV_JSONL=$f
-                PREV_ID=$id
-            fi
-        done
-        [ -z "$PREV_JSONL" ] && return 0
-        if [ -n "$assume_newest_is_ours" ]; then
-            assume_newest_is_ours=""
-        elif _transcript_is_pluginless_sdk "$PREV_JSONL"; then
-            tries=$((tries + 1))
-            if [ "$tries" -ge "${_PREV_TRANSCRIPT_EXCLUDE_CAP:-20}" ]; then
-                log "hook" "WARNING: _find_previous_transcript gave up after ${_PREV_TRANSCRIPT_EXCLUDE_CAP:-20} pluginless-SDK exclusions in $dir -- recovery and the #200 capture-gap check treat this as no previous session"
-                PREV_JSONL="" PREV_ID=""
-                return 0
-            fi
-        else
-            return 0
-        fi
-        floor=$PREV_JSONL
-    done
-}
-
-# ── Deferred: previous-session recovery and capture-gap detection (#660) ──
-# Everything from here to the end of the capture-gap block runs in a detached
-# subshell, because nothing in it feeds this hook's stdout and nothing after
-# it reads what it sets. Its outputs are: a backgrounded save-session.sh
-# (already detached before this change), files under tmp/ whose only reader is
-# the UserPromptSubmit hook on the NEXT prompt, and log lines. The foreground path's
-# one obligation is the injected context, and this is not part of it.
-#
-# Why it is worth moving: `_find_previous_transcript` sorts every past transcript
-# (0.41s at 2000 of them) and the capture-gap check greps the previous
-# transcript to EOF whenever "tool_use" is absent (0.197s on a 100MB one,
-# windows-latest) -- both inside a start whose whole budget is a couple of
-# seconds on Git Bash.
-#
-# A brace group, not an extracted script: a subshell inherits the functions
-# and variables already defined above (_find_previous_transcript, session_was_saved,
-# config_into, log, REMEMBER_DIR, SESSIONS_DIR...), so nothing has to be
-# duplicated and there is no second copy to drift. Verified before the move:
-# no variable assigned inside this span is referenced after it.
-#
-# The redirections are load-bearing, not tidiness -- the same #646 fd
-# inheritance that cost that reporter 98s. At this point in the script stdout
-# is still the REAL pipe Claude Code reads (the buffer redirect happens later,
-# at `exec 3>&1`), so a child that inherits it holds the write end open and
-# the client does not see EOF until this subshell finishes -- which would make
-# a start that no longer WAITS for this work still BLOCK on it, and look like
-# the change did nothing. `3>&-` guards the same way against the fd 3 dup that
-# the consolidation spawn below documents in full.
-#
-# Behaviour change, stated: the capture-gap notice is written slightly later
-# than before. A start whose first user prompt arrives before the grep
-# finishes now sees the notice on the prompt after it. The notice is about a
-# PREVIOUS session and is not time-critical; nothing else observes the file.
-_remember_deferred_phase() {
-# `local`, so an inline run (REMEMBER_DEFER=0, below) does not leave the label
-# set for the rest of the hook. Marks everything below as off the foreground
-# path, for the profiler and for the reader: a trace cannot tell a deferred
-# child from a command substitution by pid alone -- $(...) gets its own pid
-# too and the parent WAITS for it -- so "how much is still synchronous" is
-# unanswerable without a phase label.
-# #700: exported (local -x), so a real child forked from anywhere below
-# (the recovery save-session.sh fork, further down) carries the label into
-# its own env -- a plain `local` never left this function at all, so no
-# tracer outside this process could ever have observed it.
-local -x _REMEMBER_PHASE=deferred
-
-# Records, moved here from their original call sites above (#660). All three
-# are pure side effects -- verified mechanically that none of them assigns
-# anything read later in this hook -- and their outputs are read by
-# the UserPromptSubmit hook and /remember:doctor, never by the start itself.
-_remember_write_slug_record
-_remember_write_slug_index
-_remember_write_case_divergence
-
-# With no CURRENT_SESSION_ID, "not ours" has no meaning and there is no right
-# answer to substitute — the lookup's positional guess (newest is ours) is
-# correct at resume and wrong at startup, and nothing here can tell which.
-# Recovery keeps it unchanged rather than trading one guess for another: its
-# failure mode is a save aimed at the wrong session, which the next startup
-# can still correct. The capture-gap check gets no such fallback, because its
-# failure mode is an accusation — see below.
-_find_previous_transcript "$SESSIONS_DIR" "$CURRENT_SESSION_ID"
-
-# Asked ONCE, and before recovery forks (#270). Recovery force-saves in the
-# background and the capture-gap check below re-read this same file through
-# session_was_saved — so a session being rescued could read as unsaved in the
-# very invocation that was rescuing it, or as saved, depending on which process
-# won. The question is "was this captured", not "has that fork finished yet",
-# and the answer to it does not change while this hook runs.
-PREV_WAS_SAVED="no"
-if [ -n "$PREV_ID" ] && session_was_saved "$PREV_ID"; then
-    PREV_WAS_SAVED="yes"
-fi
-
-# ── Recovery: save the most recent missed session ──────────────────────────
-# config_into (#665, part of #660) writes into a scratch var directly --
-# no command-substitution subshell on top of the flattened-cache-hit table.
-_recovery_enabled=""
-config_into _recovery_enabled '.features.recovery' true
-# Tracks whether THIS run actually kicked off a recovery fork for PREV_ID --
-# distinct from _recovery_enabled, which reads "true" even when the extra
-# preconditions below (SESSIONS_DIR, LAST_SAVE_FILE, an unsaved PREV_ID) are
-# not met. The capture-gap notice further down reads THIS flag, not the
-# feature flag alone: "enabled" with nothing to attempt is the same
-# user-facing case as "disabled", so both get the original wording (#745).
-_recovery_attempted=""
-if [ "$_recovery_enabled" = "true" ]; then
-if [ -d "$SESSIONS_DIR" ] && [ -f "$LAST_SAVE_FILE" ] && [ -n "$PREV_ID" ]; then
-    if [ "$PREV_WAS_SAVED" = "no" ]; then
-        # REMEMBER_TRANSCRIPT_PATH (exported above, #407) names THIS session's
-        # own transcript -- it must not reach a save being forced for a
-        # DIFFERENT one. pipeline.extract.find_session() trusts that variable
-        # unconditionally once it names a real file, so an inherited value
-        # here would make PREV_ID's rescue silently read and summarize the
-        # current session's transcript instead, while still labelling the
-        # saved record PREV_ID. Cleared in a subshell so it stays exported for
-        # this hook's own later use. Pinned by
-        # tests/test_recovery_transcript_leak_407.py.
-        ( unset REMEMBER_TRANSCRIPT_PATH; "$PLUGIN_ROOT/scripts/save-session.sh" "$PREV_ID" --force ) </dev/null >/dev/null 2>&1 & disown 2>/dev/null || true
-        # Set BEFORE we know whether the forked save-session.sh above actually
-        # succeeds (#745) -- it runs detached (`& disown`, just above) and this
-        # hook can exit long before it finishes, so "attempted" is the only
-        # claim honestly available here. The notice below says "is being
-        # recovered", never "has been recovered", for the same reason.
-        _recovery_attempted="true"
-    fi
-fi
-fi
-
-# ── Capture-gap detection (#200) ──────────────────────────────────────────
-# Claude Code reads hook registrations at session start, so a plugin enabled
-# MID-session has none of its hooks wired for that session: PostToolUse never
-# fires and capture silently does nothing, for hours, with nothing in the logs
-# to say so. The reporter lost a day to it and found only a lone session-start
-# line.
-#
-# It cannot be caught while it is happening. Nothing inside a hook can see
-# which hooks are registered — no env var, no file, and `/hooks` is a UI a
-# script cannot invoke — and SessionStart's `source` field is only
-# startup/resume/clear/compact/fork, so a plugin-enable is indistinguishable
-# from a fresh start. Afterwards, though, the signature is exact: a session
-# where SessionStart ran and PostToolUse never did.
-#
-# Judged by IDENTITY: the PostToolUse hook writes the session id it saw, and if
-# there is no record for the previous session's id then PostToolUse never ran
-# for it. Comparing mtimes instead failed — bash 3.2's `-nt` works to the
-# second, so a healthy session whose first tool call landed inside the same
-# second as a stamp was reported as broken.
-#
-# By MEMBERSHIP, not equality (#206). The first cut stored one id, last-write-
-# wins, which answers "which session most recently made a tool call" — a
-# different question, and the two come apart the instant anything writes after
-# X did. Two real installs found the seam:
-#
-#   * `/clear` does not mint a new session id. SessionStart fires while the
-#     transcript, the id and the .jsonl all stay the same, and by then the
-#     CURRENT session has made tool calls, so the slot holds the current id
-#     while PREV_ID resolves to a genuinely older session. The mismatch was
-#     structurally guaranteed, regardless of capture health — a warning on
-#     every /clear, forever. Same for `compact` and `fork`.
-#   * A session captured by the NEXT session's recovery block rather than its
-#     own live saves. save-session.sh's recovery path never touches
-#     capture-alive, so the slot names something else entirely, while
-#     last-save.json records the session as fully saved. With the default
-#     delta/cooldown thresholds this is the ordinary case for a short session,
-#     not an edge case. (Reported independently by ca-sringert on #206.)
-#
-# Filtering on SessionStart's `source` — the fix the issue proposed — would
-# silence the first and not the second, and would leave the store still unable
-# to answer the question it is asked. So the store changed shape instead: a
-# per-session marker directory, membership-tested. Three sources are accepted
-# as evidence of capture, because a false positive here costs more than a
-# false negative: this warning has no second chance to be believed, whereas a
-# missed gap is still caught by /remember:doctor and, for the content itself,
-# by the recovery block directly above.
-#
-# Deliberately NOT gated on "have we run before". A first cut required a prior
-# session-start stamp, to keep a fresh install from being greeted with a
-# warning — which sounds right and defeats the entire purpose: during a
-# mid-session enable NO hook runs, so no stamp is written, so the one incident
-# this exists to report was the exact case it stayed silent for. It could only
-# ever have caught a recurrence.
-#
-# So the question is just "was the previous session captured", and the answer
-# is reported whether or not this plugin has run before. A fresh install does
-# see it once per project, which is honest: memory really does start here, and
-# the wording says so.
-CAPTURE_ALIVE="$REMEMBER_DIR/tmp/capture-alive"
-CAPTURE_SEEN_DIR="$REMEMBER_DIR/tmp/capture-alive.d"
-CAPTURE_REPORTED="$REMEMBER_DIR/tmp/capture-gap-reported"
-CAPTURE_SEEN_KEEP=200
-
-# $(<"$f") -- bash's own special-cased "no fork" command substitution,
-# not $(cat "$f" 2>/dev/null) (#679, part of #660): `$(<file)` is ONLY that
-# fast path when the substitution's body is EXACTLY `<file` and nothing
-# else -- `$(2>/dev/null <file)` looks similar but is an ordinary subshell
-# running NO command with two redirections, so it always prints nothing at
-# all, file-present or not (a real, reproduced bug in an earlier version
-# of this fix: it read as correct on the missing-file path and silently
-# broke the present-file one, caught by the full suite rather than by this
-# file's own targeted test, which never exercised a file that actually has
-# content). So: guard the missing/unreadable case with `[ -f ]` first,
-# exactly as this codebase already does everywhere else on this pattern,
-# and use the untouched `$(<file)` form only once existence is known.
-SEEN_ID=""
-[ -f "$CAPTURE_ALIVE" ] && SEEN_ID=$(<"$CAPTURE_ALIVE")
-
-# Args: $1 — session id. Exit 0 if anything can vouch for it having been
-# captured. Any one source suffices; they fail independently.
-capture_was_seen() {
-    # bracket ranges below are byte-wise, not collated (#695)
-    local LC_ALL=C
-    local _d _ok
-    [ -n "$1" ] || return 1
-    # 1. Per-session marker from the PostToolUse hook — "PostToolUse ran for this
-    #    session", written pre-throttle, so it means WIRED, not saved.
-    #    Same id check the writer applies: this is a basename off the
-    #    transcript dir, and `..` would make `-e` true for every id.
-    #    #898 round 20: the dot comes from printf and the allowed set is a
-    #    positive ERE -- the same test as before (`.`/`..` refused, anything
-    #    outside A-Za-z0-9 dot underscore hyphen refused), in a shape the
-    #    directory's scanner can follow.
-    printf -v _d '\056'
-    _ok="^[A-Za-z0-9${_d}_-]*\$"
-    if [ "$1" = "$_d" ] || [ "$1" = "$_d$_d" ]; then
-        :
-    elif ! [[ "$1" =~ $_ok ]]; then
-        :
-    else
-        [ -e "$CAPTURE_SEEN_DIR/$1" ] && return 0
-    fi
-    # 2. The legacy single slot. Kept as evidence rather than dropped so the
-    #    first run after an upgrade — old file present, new store empty — is
-    #    not itself a false positive. It can still speak for exactly one
-    #    session, which is all it ever could.
-    [ "$SEEN_ID" = "$1" ] && return 0
-    # 3. The save record. Covers the session captured by recovery rather than
-    #    by its own live saves, which touches nothing above. Read as it stood
-    #    when this hook started, BEFORE the recovery fork above (#270) — asking
-    #    again here would be asking a file that a background save is rewriting,
-    #    and answering "has the rescue finished" instead of "was it captured".
-    [ "$1" = "$PREV_ID" ] && [ "$PREV_WAS_SAVED" = "yes" ] && return 0
-    [ "$1" != "$PREV_ID" ] && session_was_saved "$1" && return 0
-    return 1
-}
-
-# Bounded: one marker per session accumulates in a tmp dir nothing else
-# prunes. Newest are kept — those are the only ones the check ever reads.
-#
-# Args: $1 — directory, $2 — how many entries to keep. Removes the oldest
-# entries by mtime until at most $2 remain; an entry rm cannot remove (a
-# directory, a permission) is skipped and still counted, so the newest $2
-# are never touched and the loop always ends.
-#
-# Gated on actually being over the threshold (#666): counting is one glob
-# walk with no fork, so a store at or under the threshold costs nothing
-# beyond it. Over the threshold -- normally by one, the marker the session
-# that just ended wrote -- each removal is one more walk comparing mtimes
-# with bash's own `-nt` builtin, again with no fork.
-# #898 round 20: this replaced a glob ARRAY plus an `ls -t | tail | while
-# read` pipeline. Same retention (the newest $2 by mtime); the directory's
-# scanner could not follow the script past the old shape. `[ -e ]` drops
-# the unmatched literal `*` an empty or absent directory leaves behind, so
-# nullglob is not needed either.
-_remember_prune_keep_newest() {
-    local dir=$1 keep=$2 f n=0 oldest nl skip
-    printf -v nl '\n'
-    skip=$nl
-    for f in "$dir"/*; do
-        [ -e "$f" ] && n=$((n + 1))
-    done
-    while [ "$n" -gt "$keep" ]; do
-        oldest=""
-        for f in "$dir"/*; do
-            [ -e "$f" ] || continue
-            [[ "$skip" == *"$nl$f$nl"* ]] && continue
-            if [ -z "$oldest" ] || ! [ "$f" -nt "$oldest" ]; then
-                oldest=$f
-            fi
-        done
-        [ -n "$oldest" ] || break
-        rm -f "$oldest" 2>/dev/null
-        [ -e "$oldest" ] && skip="$skip$oldest$nl"
-        n=$((n - 1))
-    done
-    return 0
-}
-_remember_prune_keep_newest "$CAPTURE_SEEN_DIR" "$CAPTURE_SEEN_KEEP"
-
-# PREV_ID and PREV_JSONL were resolved once, above, for this check and for
-# recovery both. Guard against the honest zero-tool session too: a conversation
-# with no tool calls produces no PostToolUse either, and warning about that
-# would be crying wolf.
-CAPTURE_SKIPPED="$REMEMBER_DIR/tmp/capture-gap-skipped"
-
-if [ -z "$CURRENT_SESSION_ID" ]; then
-    # Without a session id this check cannot tell our own transcript from the
-    # previous session's, and its output is an accusation. A missed gap is
-    # still caught by /remember:doctor and, for the content itself, by the
-    # recovery block above; a false one accuses a healthy install and spends
-    # the credibility this warning needs the one time it is true. It has no
-    # second chance to be believed — the same asymmetry that made three
-    # independent sources count as evidence of capture rather than one.
-    #
-    # Silence is a positive claim too, so it is disclosed rather than assumed.
-    # "No warning" must not mean both "the previous session was captured" and
-    # "the question was never asked": an absence the checker produced, read as
-    # an absence in the world, is the defect class this repo keeps filing on
-    # (#144, #263, #266). doctor reports the marker.
-    printf '%s\n' "the SessionStart payload carried no usable session_id" \
-        > "$CAPTURE_SKIPPED" 2>/dev/null || true
-    log "hook" "session-start: capture-gap check skipped -- no session_id on stdin"
-else
-    rm -f "$CAPTURE_SKIPPED" 2>/dev/null || true
-
-    # A gap is a fact about one past session, not a live condition, so it is
-    # said once. Restarts are frequent and each re-examines the same previous
-    # session; repeating the same true positive on every one is how it gets
-    # tuned out. (This dedupe was structurally unable to help while the id was
-    # wrong: a wrong id changes on every startup, so every restart minted a
-    # fresh unreported id and warned again.)
-    # $(<"$f") -- see SEEN_ID's own comment above (#679) for why this is
-    # NOT `$(2>/dev/null <"$f")`.
-    REPORTED_ID=""
-    [ -f "$CAPTURE_REPORTED" ] && REPORTED_ID=$(<"$CAPTURE_REPORTED")
-
-    if [ -n "$PREV_ID" ] && [ "$REPORTED_ID" != "$PREV_ID" ] \
-       && ! capture_was_seen "$PREV_ID" \
-       && grep -q '"tool_use"' "$PREV_JSONL" 2>/dev/null; then
-        # Two wordings (#745): the flat "not captured, run doctor" notice
-        # contradicts /remember:doctor's own "capture is working" verdict once
-        # the recovery fork above finishes and last-save.json records the
-        # rescue -- a reporter's save landed 9h after the session ended, long
-        # after this notice had already been written and read. When THIS run
-        # kicked off that fork for PREV_ID, say so instead of leaving the two
-        # disagree.
-        _capture_gap_notice="remember: your previous session was not captured. If you just installed or enabled the plugin, that is expected -- capture starts now. Otherwise its hooks were not registered for that session; run /remember:doctor."
-        if [ "$_recovery_attempted" = "true" ]; then
-            _capture_gap_notice="remember: your previous session was not captured live -- its hooks did not run. It is being recovered from its transcript now, so nothing should be lost; if this keeps happening for interactive sessions, run /remember:doctor."
-        fi
-        echo "$_capture_gap_notice" \
-            > "$REMEMBER_DIR/tmp/capture-gap-notice" 2>/dev/null || true
-        printf '%s' "$PREV_ID" > "$CAPTURE_REPORTED" 2>/dev/null || true
-    fi
-fi
-}
 
 # REMEMBER_DEFER=0 runs the whole block inline, on the foreground path, exactly
 # as it ran before #660. It exists because determinism is worth more than
@@ -1339,10 +634,106 @@ fi
 # speed. Default is 1 -- deferred -- and
 # tests/test_session_start_deferred_capture_gap_660.py covers the DEFAULT
 # path, so the switch cannot become the only thing that is ever tested.
+# #1060: an SDK host can fire SessionStart with source=resume on every
+# resumed TURN, not once per session -- each one backgrounds a deferred
+# phase (above), and a prior one that is still running (or was orphaned,
+# ppid 1, when its own parent hook already exited) stacks rather than being
+# replaced. A stale-safe PID file, keyed by session id so a DIFFERENT
+# session's own deferred phase is never blocked by this one, catches the
+# live case; a dead PID (crash, kill) is simply overwritten below. No new
+# fork on this path: `[ -f ]`/`read -r ... <file`/`kill -0` are builtins,
+# and `kill` does not count as "running a process" the way an external
+# binary would. #1086 review: this used to read the PID with `$(<file)` --
+# a bash builtin on its own, but wrapped in `$(...)`, which forks a subshell
+# to run the substitution regardless of what is inside it (measured: 2000
+# calls 0.63s vs 0.045s with a plain `read -r ... < file` on bash 3.2).
+# Three limitations survive, and only the third is new:
+#
+#   * Check-then-act, not a lock: two SessionStarts for the SAME session id
+#     landing close enough together can both read "no live deferred phase"
+#     before either writes its own PID, so both launch and the second
+#     write clobbers the first PID -- the stacking #1060 reports, narrowed
+#     from "every resumed turn" to "two starts that land within this
+#     window." An atomic claim (a lock directory, the primitive
+#     lib-lock.sh already carries) would close it, at the cost of sourcing
+#     a file this hot path does not otherwise need; left as a known gap
+#     rather than added here.
+#   * `kill -0`-based staleness detection cannot tell a dead holder's PID
+#     from an unrelated LIVE process the OS has since reassigned the same
+#     PID to ("PID recycling") -- scripts/lib-lock.sh's own
+#     `_lock_try_steal` carries the identical limitation and documents it
+#     as "an accepted, general limitation rather than a fix" (see that
+#     file's header comment and tests/test_cross_host_lock_contract_491.py).
+#     This guard is simpler than a real lock and inherits the same tradeoff.
+#   * Bounded by the marker's own AGE (#1086 review), the same way
+#     lib-lock.sh's own `_lock_dir_age` bounds a lock directory's age
+#     rather than trusting `kill -0` (or a marker's mere presence) forever:
+#     a marker older than REMEMBER_DEFERRED_PID_MAX_AGE seconds (default
+#     900 = 15min) is treated as stale regardless of what `kill -0` says,
+#     so a PID-recycling false-positive cannot block recovery for that
+#     session id indefinitely -- only until the bound passes.
+#   * `kill -0` was SUSPECTED (reasoned, not confirmed) to false-negative
+#     on a PID that is genuinely alive but was never spawned under THIS
+#     bash's own MSYS/Git-Bash process tree -- windows-latest CI's own
+#     symptom was a resume whose PID marker named a still-running process
+#     vanishing entirely within one second. An earlier round added a
+#     `/proc/$pid` existence probe here as an extra "still alive" signal;
+#     CI DISPROVED it (the identical failure recurred, byte for byte, with
+#     the probe in place), so it was removed rather than left as dead
+#     speculative code. ROOT CAUSE FOUND: the symptom was never in `kill
+#     -0` at all -- it was in the TEST, not the guard. The test's own
+#     stand-in "live deferred phase" was started with a plain
+#     `subprocess.Popen(["sleep", "60"])`, which hands this guard a NATIVE
+#     Windows PID; every REAL deferred phase is always backgrounded with
+#     `... &` from INSIDE an MSYS/Git-Bash process (this file's own `&`
+#     below, or capture-gap-check.sh's synchronous REMEMBER_DEFER=0 path),
+#     so its `$!` -- what actually ends up in the PID marker in
+#     production -- is an MSYS-space PID, which is what `kill -0` in an
+#     MSYS shell actually resolves. Fixed in
+#     tests/test_resume_deferred_stacking_1060.py: the stand-in process is
+#     now started the same way production does, through `bash -c 'sleep
+#     60 & echo $!'`. Plain `kill -0` is therefore correct as written and
+#     needs no OS-specific extra signal.
+_remember_pid_is_alive() {
+    kill -0 "$1" 2>/dev/null
+}
+
+_remember_deferred_already_running() {
+    local _f="$REMEMBER_DIR/tmp/deferred-${CURRENT_SESSION_ID:-_}.pid" _pid _mtime _now
+    [ -f "$_f" ] || return 1
+    read -r _pid < "$_f" 2>/dev/null
+    [ -n "$_pid" ] && [[ "$_pid" != *[!0-9]* ]] || { rm -f "$_f" 2>/dev/null; return 1; }
+    # `stat` is BSD on macOS and GNU on Linux with incompatible flags; try
+    # both, same two-probe shape as lib-lock.sh's own `_lock_dir_age`. An
+    # unreadable mtime is simply not bounded -- never read as "stale" from
+    # a failed probe, only from a genuinely old one.
+    _mtime=$(stat -c %Y "$_f" 2>/dev/null) || _mtime=""
+    [ -n "$_mtime" ] && [[ "$_mtime" != *[!0-9]* ]] || _mtime=$(stat -f %m "$_f" 2>/dev/null) || _mtime=""
+    if [ -n "$_mtime" ] && [[ "$_mtime" != *[!0-9]* ]]; then
+        _now=$(date +%s)
+        if [ $(( 10#$_now - 10#$_mtime )) -ge "${REMEMBER_DEFERRED_PID_MAX_AGE:-900}" ]; then
+            rm -f "$_f" 2>/dev/null
+            return 1
+        fi
+    fi
+    _remember_pid_is_alive "$_pid" && return 0
+    rm -f "$_f" 2>/dev/null
+    return 1
+}
+
 if [ "${REMEMBER_DEFER:-1}" = "0" ]; then
-    _remember_deferred_phase
+    "$PLUGIN_ROOT/scripts/capture-gap-check.sh" "$CURRENT_SESSION_ID"
+elif [ -n "$CURRENT_SESSION_ID" ] && _remember_deferred_already_running; then
+    : # #1060: another deferred phase for THIS session is still alive -- skip
+      # rather than stack. A different session id is never affected: the
+      # guard above is keyed on CURRENT_SESSION_ID, not on "any deferred
+      # phase at all".
 else
-    _remember_deferred_phase </dev/null >/dev/null 2>&1 3>&- & disown 2>/dev/null || true
+    "$PLUGIN_ROOT/scripts/capture-gap-check.sh" "$CURRENT_SESSION_ID" </dev/null >/dev/null 2>&1 3>&- &
+    if [ -n "$CURRENT_SESSION_ID" ]; then
+        printf '%s' "$!" > "$REMEMBER_DIR/tmp/deferred-${CURRENT_SESSION_ID}.pid" 2>/dev/null || true
+    fi
+    disown 2>/dev/null || true
 fi
 # ── end deferred block (#660) ─────────────────────────────────────────────
 
@@ -2329,18 +1720,20 @@ if [ "$STAGING_COUNT" -gt 0 ] && [ "$SESSION_START_SOURCE" != "compact" ]; then
     # Not a lock, and not a Git Bash detach failure: their own probe of this
     # exact construct returned in 0.11s. Ordinary POSIX fd inheritance, so it
     # reproduced on macOS too (tests/test_session_start_fd_leak_646.py).
-    # #1002: this site's own hidden-launcher wiring is DEFERRED, not
-    # forgotten -- inlining lib-detach.sh here (#900's per-hook build)
-    # pushed this hook's own compiled size over its 120 KiB budget
-    # (check_release_tree.py's HOOK_SCRIPT_MAX_BYTES), with no margin left
-    # in this already-near-the-edge hook to absorb it without unrelated
-    # cuts elsewhere. The other three detach sites (post-tool-hook.sh's
-    # save -- #1002's own reported bug -- session-end-hook.sh,
-    # agy-stop-hook.sh) all carry the fix; this is the lowest-frequency of
-    # the four (only fires when a staging backlog exists at session
-    # start), so it keeps the unchanged nohup line pending a follow-up
-    # that frees enough of this hook's own byte budget to add it back.
-    nohup "$PLUGIN_ROOT/scripts/run-consolidation.sh" </dev/null >/dev/null 2>&1 3>&- & disown 2>/dev/null || true
+    # #1006: scripts/consolidation-launch.sh -- a SEPARATE file, not a
+    # direct `source "$_HOOK_DIR/lib-detach.sh"` here, because lib-detach.sh
+    # is not one of compile_hooks.py's four HOOK_SCRIPT_NAMES, and sourcing
+    # it here would inline its whole compiled body into THIS hook's own
+    # output, well past the 120 KiB budget (HOOK_SCRIPT_MAX_BYTES) with no
+    # margin to absorb it. The trailing `&` is load-bearing, not tidiness --
+    # consolidation-launch.sh's own _remember_detach_windows call WAITS on
+    # wscript.exe, up to lib-detach.sh's 15s watchdog cap, so a synchronous
+    # call here would reintroduce the #646 SessionStart-stall class this PR
+    # exists to avoid (review finding on #1006). SessionStart must not wait
+    # on this launch; its exit status is unused. consolidation-launch.sh's
+    # own header has the rest of the design, including why it alone decides
+    # Windows vs. the unchanged nohup fallback.
+    "$PLUGIN_ROOT/scripts/consolidation-launch.sh" "$PLUGIN_ROOT/scripts/run-consolidation.sh" 3>&- &
     echo ""
 fi
 

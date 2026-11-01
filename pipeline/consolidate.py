@@ -24,7 +24,7 @@ from __future__ import annotations
 import re
 
 from .prompts import build_consolidation_prompt, consolidation_template
-from .haiku import call_haiku
+from .summarizer import call_haiku
 from .entry_header import ANY_HEADER_ERE
 from .types import ConsolidationResult, TokenUsage
 

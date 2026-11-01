@@ -219,10 +219,11 @@ NOT_SHIPPED_PY = {"report_test_durations.py", "report_windows_skip_floor.py",
 SHIPPED_PY = (sorted((REPO_ROOT / "pipeline").glob("*.py"))
               + sorted(p for p in (REPO_ROOT / "scripts").glob("*.py")
                        if p.name not in NOT_SHIPPED_PY))
-# pipeline/haiku.py is bisected against the portal in a lane of its own
-# (#898 round 14 brief); its names are renamed there, not here.
-FRAGMENT_DEFERRED = {"pipeline/haiku.py"}
-# Names other files share with pipeline/haiku.py, deferred with it: haiku.py
+# pipeline/haiku.py (renamed to pipeline/summarizer.py in #1055 -- same file,
+# same deferral, new path) is bisected against the portal in a lane of its
+# own (#898 round 14 brief); its names are renamed there, not here.
+FRAGMENT_DEFERRED = {"pipeline/summarizer.py"}
+# Names other files share with pipeline/summarizer.py, deferred with it: it
 # builds `HaikuResult(tokens=...)` (LLM token counts), so the field and every
 # `.tokens` read rename in that lane, in one change.
 FRAGMENT_DEFERRED_NAMES = {"tokens"}

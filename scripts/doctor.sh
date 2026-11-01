@@ -92,25 +92,52 @@ _doctor_trial_remember_dir() {
 # human report) breaks a project deliberately started from a repository
 # SUBDIRECTORY -- the same shape write-handoff.sh's own #776 fix
 # disambiguates -- by routing the report onto the enclosing repository's
-# store instead of the subdirectory project's own. When $(pwd) and the git
-# toplevel disagree AND this session's id is known, prefer whichever
-# candidate's own store already carries THIS session's session-keyed
-# handoff hint (#738); fall back to the toplevel, unchanged, when neither or
-# both do (the #743/#802 shape: an accidental `cd`, no session hint
-# published anywhere for this session).
+# store instead of the subdirectory project's own.
+#
+# #1058/#1082: ported write-handoff.sh's own ancestor-walk fix (not the
+# original #827 two-candidate check) so this diagnostic reports the SAME
+# store write-handoff.sh would actually write into, including when $(pwd)
+# has moved deeper than the subdirectory project the session started in.
+# Walks every ancestor from $(pwd) up to the git toplevel, picking whichever
+# one's own store carries the FRESHEST copy of this session's hint (not
+# just the nearest -- a `--resume` from a different directory republishes
+# the hint there without pruning an earlier directory's copy, so "nearest"
+# alone can pick a directory the session has since moved on from). Falls
+# back to the toplevel, unchanged, when no ancestor has a hint at all.
+# Termination does not depend on reaching the toplevel: it stops as soon as
+# `dirname` makes no further progress, covering both POSIX "/" and an
+# MSYS/Windows UNC root like "//server" (reasoned, not observed -- no MSYS
+# environment was available here).
 _doctor_resolve_project_dir_candidate() {
     _doctor_git_root="$1"
     if [ -n "$_doctor_git_root" ] && [ "$_doctor_git_root" != "$(pwd)" ] && [ -n "$_DOCTOR_SESSION_ID" ]; then
-        _doctor_rd_cwd=$(_doctor_trial_remember_dir "$(pwd)") || _doctor_rd_cwd=""
-        _doctor_rd_gitroot=$(_doctor_trial_remember_dir "$_doctor_git_root") || _doctor_rd_gitroot=""
-        _doctor_cwd_has_hint=0
-        _doctor_gitroot_has_hint=0
-        [ -n "$_doctor_rd_cwd" ] && [ -f "$_doctor_rd_cwd/tmp/handoff-path.$_DOCTOR_SESSION_ID" ] && _doctor_cwd_has_hint=1
-        [ -n "$_doctor_rd_gitroot" ] && [ -f "$_doctor_rd_gitroot/tmp/handoff-path.$_DOCTOR_SESSION_ID" ] && _doctor_gitroot_has_hint=1
-        if [ "$_doctor_cwd_has_hint" = 1 ] && [ "$_doctor_gitroot_has_hint" = 0 ]; then
-            _doctor_git_root=""
+        _doctor_walk_dir="$(pwd)"
+        _doctor_hint_dir=""
+        _doctor_hint_mtime=-1
+        while :; do
+            _doctor_rd_walk=$(_doctor_trial_remember_dir "$_doctor_walk_dir") || _doctor_rd_walk=""
+            if [ -n "$_doctor_rd_walk" ]; then
+                _doctor_hint_file_walk="$_doctor_rd_walk/tmp/handoff-path.$_DOCTOR_SESSION_ID"
+                if [ -f "$_doctor_hint_file_walk" ]; then
+                    _doctor_mtime_walk=$(stat -c %Y "$_doctor_hint_file_walk" 2>/dev/null) \
+                        || _doctor_mtime_walk=$(stat -f %m "$_doctor_hint_file_walk" 2>/dev/null) \
+                        || _doctor_mtime_walk=""
+                    if [ -n "$_doctor_mtime_walk" ] && [[ "$_doctor_mtime_walk" != *[!0-9]* ]] \
+                        && [ "$_doctor_mtime_walk" -gt "$_doctor_hint_mtime" ]; then
+                        _doctor_hint_mtime="$_doctor_mtime_walk"
+                        _doctor_hint_dir="$_doctor_walk_dir"
+                    fi
+                fi
+            fi
+            [ "$_doctor_walk_dir" -ef "$_doctor_git_root" ] && break
+            _doctor_walk_next=$(dirname "$_doctor_walk_dir")
+            [ "$_doctor_walk_next" = "$_doctor_walk_dir" ] && break
+            _doctor_walk_dir="$_doctor_walk_next"
+        done
+        if [ -n "$_doctor_hint_dir" ]; then
+            _doctor_git_root="$_doctor_hint_dir"
         fi
-        unset _doctor_rd_cwd _doctor_rd_gitroot _doctor_cwd_has_hint _doctor_gitroot_has_hint
+        unset _doctor_rd_walk _doctor_walk_dir _doctor_walk_next _doctor_hint_dir _doctor_hint_mtime _doctor_hint_file_walk _doctor_mtime_walk
     fi
     printf '%s' "$_doctor_git_root"
     unset _doctor_git_root
@@ -403,6 +430,21 @@ _PYTHON_OK=1
 if [ "$_DT_STATUS" -ne 0 ]; then
     _PYTHON_OK=0
     echo "FAIL Python: ${_DT_LOG:-no usable python found (tried python3, python, py -3, py)}"
+    # #1007: the FATAL text above (relayed verbatim from detect-tools.sh,
+    # which cannot grow it -- it is inlined into every compiled hook and
+    # #1005 left only 37 bytes of budget, #1006) never names the floor
+    # itself. doctor.sh is not inlined, so it can afford to: re-source
+    # detect-tools.sh in lazy mode (skips the candidate probe and its
+    # `exit 1` entirely -- this only needs the floor constants it sets
+    # as plain variables near the top of the file) to recover
+    # _REMEMBER_PY_FLOOR_MAJOR/_MINOR, which the subshell probe above
+    # could not leak out to this shell.
+    _PY_FLOOR=$(export _REMEMBER_LAZY_PYTHON=1
+        source "$SCRIPT_DIR/detect-tools.sh" >/dev/null 2>&1
+        echo "${_REMEMBER_PY_FLOOR_MAJOR}.${_REMEMBER_PY_FLOOR_MINOR}")
+    if [[ "$_PY_FLOOR" =~ ^[0-9]+\.[0-9]+$ ]]; then
+        echo "     need Python ${_PY_FLOOR}+ -- install a newer Python."
+    fi
     echo "WARN jq: skipped (python detection failed first)"
 else
     # Safe to source for real now — the subshell probe already proved this
@@ -1034,7 +1076,7 @@ if [ -s "$_SUMMARY_FAILURE_MARKER" ]; then
     fi
     unset _SF_FILES
     echo "FAIL summarizer: last attempt failed${_SF_DETAIL:+: $_SF_DETAIL}"
-    # Same marker family _isolation_may_be_the_cause (pipeline/haiku.py) scans
+    # Same marker family _isolation_may_be_the_cause (pipeline/summarizer.py) scans
     # for -- an expired login reads as a generic failure here, so this is the
     # one lowercased substring match worth doing in bash rather than naming
     # a specific remedy for every kind of failure, which would be as wrong
@@ -1057,6 +1099,70 @@ if [ -s "$_SUMMARY_FAILURE_MARKER" ]; then
 else
     echo "OK   No summarizer failure recorded ($_SUMMARY_FAILURE_MARKER empty or absent)"
 fi
+echo ""
+
+# ── 6a-2. Dropped summarizer spans (#1052) ──────────────────────────────────
+# The summarizer call SUCCEEDING and the span actually being KEPT are two
+# different claims, and #870's own counter above only ever tracked the
+# first: a reject gate firing (the model's reply refused, or the validator
+# judged it "not an entry header") is a successful call that drops real
+# work, so max_summary_failures never counts it and tmp/last-summary-failure
+# is never written for it either. The reporter's own observation: three
+# [validate] REJECTED spans over four days, plus ten more ([haiku] REJECTED
+# and plain missing-header cases) while 0.33.0 and 0.43.1 both ran, and
+# doctor said "Summarizer failures: OK" and "capture is working" throughout
+# -- the call succeeded every time.
+#
+# Counted across every daily log present, same walk as #870/#1003 above
+# (log rotation already bounds how many exist) -- not windowed to "today"
+# specifically, since a dropped span from yesterday that nobody has looked
+# at since is exactly as real as one from this morning.
+echo "-- Dropped summarizer spans (#1052) --"
+_remember_rs_glob_dir=$(_remember_forward_slash "$REMEMBER_DIR")
+_RS_FILES=()
+for _rs_f in "$_remember_rs_glob_dir"/logs/memory-*.log; do
+    [ -f "$_rs_f" ] && _RS_FILES+=("$_rs_f")
+done
+_RS_COUNT=0
+_RS_LAST_LINE=""
+if [ "${#_RS_FILES[@]}" -gt 0 ]; then
+    _RS_OLD_IFS="$IFS"
+    IFS=$'\n'
+    _RS_SORTED=($(printf '%s\n' "${_RS_FILES[@]}" | LC_ALL=C sort))
+    IFS="$_RS_OLD_IFS"
+    unset _RS_OLD_IFS
+    for _rs_f in "${_RS_SORTED[@]}"; do
+        _rs_count_file=$(grep -cE '\[(validate|haiku|summarizer)\] REJECTED' "$_rs_f" 2>/dev/null)
+        [ -z "$_rs_count_file" ] && _rs_count_file=0
+        [ "$_rs_count_file" -eq 0 ] && continue
+        _RS_COUNT=$((_RS_COUNT + _rs_count_file))
+        _RS_LAST_LINE=$(grep -E '\[(validate|haiku|summarizer)\] REJECTED' "$_rs_f" 2>/dev/null | tail -n 1)
+    done
+    unset _RS_SORTED
+fi
+unset _RS_FILES _remember_rs_glob_dir _rs_f _rs_count_file
+if [ "$_RS_COUNT" -gt 0 ]; then
+    # #898 round 8 convention: hold the double quote in a variable rather
+    # than writing it backslash-escaped -- the plugin directory's scanner
+    # mis-tracks an escaped quote. Sibling warnings in this file already use
+    # this (e.g. the git-backup/git-reconcile hooks' own copies).
+    printf -v _rs_dq '\042'
+    echo "WARN $_RS_COUNT span(s) dropped by a reject gate (summarizer refusal or"
+    echo "     ${_rs_dq}not an entry header${_rs_dq}) across the logs present -- the call"
+    echo "     succeeded each time, so this is invisible to the Summarizer"
+    # #1052: keep_rejected_text (save-session.sh) saves the REFUSAL TEXT --
+    # the model's own reply explaining why it would not summarize -- never
+    # the dropped SPAN itself, and by the time it runs the read position has
+    # already moved past that span. The refusal text is kept; the span is
+    # not. Do not claim otherwise here.
+    echo "     failures check above. The refusal text (not the dropped span"
+    echo "     itself) is kept -- see $REMEMBER_DIR/tmp/rejected-*.md. Most recent:"
+    echo "     $_RS_LAST_LINE"
+    unset _rs_dq
+else
+    echo "OK   No dropped summarizer spans recorded (no [validate]/[haiku] REJECTED line in the logs present)"
+fi
+unset _RS_COUNT _RS_LAST_LINE
 echo ""
 
 # ── 6b. SessionStart duration (#706) ────────────────────────────────────────
@@ -1093,7 +1199,7 @@ unset _remember_ss_glob_dir _SS_LATEST_LOG _SS_LAST_LINE _ss_f
 
 # #898, round 4: the "Legacy recovery-token config (#860)" section that used
 # to live here is removed entirely. It scanned the daily log for a "NOTICE:"
-# line pipeline/haiku.py no longer writes (#898 round 4 removed the presence
+# line pipeline/summarizer.py no longer writes (#898 round 4 removed the presence
 # check that produced it) -- this diagnostic would only ever report "OK"
 # from here on, which is not a check worth keeping.
 

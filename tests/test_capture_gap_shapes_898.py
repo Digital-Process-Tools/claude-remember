@@ -41,7 +41,10 @@ from ._bash_runner import resolve_bash
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = REPO_ROOT / "scripts"
-HOOK = SCRIPTS / "session-start-hook.sh"
+# #1067: every function/constant this file pins (session_was_saved,
+# capture_was_seen, _remember_prune_keep_newest, SAVED_QUERY) moved into this
+# separate, non-inlined file.
+HOOK = SCRIPTS / "capture-gap-check.sh"
 DETECT = SCRIPTS / "detect-tools.sh"
 NOT_SHIPPED = {"bench-slug.sh", "run-tests.sh"}
 SHIPPED_SH = sorted(p for p in SCRIPTS.glob("*.sh") if p.name not in NOT_SHIPPED) + sorted(
@@ -205,6 +208,31 @@ def test_capture_was_seen_id_table(tmp_path, bash):
                                 "LANG": "en_US.UTF-8"})
         got[name] = r.stdout.strip() == "seen"
     assert got == ID_TABLE
+
+
+@pytest.mark.parametrize("bash", BASHES)
+def test_capture_was_seen_ignores_the_session_started_marker(tmp_path, bash):
+    """#1046 final review: session-start-hook.sh now writes a cheaper,
+    separate-folder marker (tmp/session-started.d) for every session,
+    including a chat-only one that never runs a tool call. That marker
+    must NOT satisfy capture_was_seen() -- the #200 capture-gap check's own
+    evidence function -- or a session whose hooks genuinely never ran would
+    read as "captured" the moment session-start-hook.sh itself ran, which
+    is exactly the false-quiet regression this fix exists to prevent. Only
+    capture-alive.d (PostToolUse's own marker, gated on at least one tool
+    call actually firing) may satisfy this function."""
+    seen_dir = tmp_path / "capture-alive.d"
+    seen_dir.mkdir()
+    started_dir = tmp_path / "session-started.d"
+    started_dir.mkdir()
+    (started_dir / "only-started").write_text("x", encoding="utf-8")
+    r = _run(bash, _seen_harness(), {
+        "CAPTURE_SEEN_DIR": seen_dir.as_posix(), "ID": "only-started",
+    })
+    assert r.stdout.strip() == "unseen", (
+        "a marker present ONLY in session-started.d must not satisfy "
+        f"capture_was_seen(): {r.stdout!r} / {r.stderr!r}"
+    )
 
 
 @pytest.mark.parametrize("bash", BASHES)

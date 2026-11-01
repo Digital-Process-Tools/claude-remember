@@ -124,6 +124,17 @@ would need `export-ignore`). Then:
   catches it loudly if it is too big. With an allow-list, a forgotten runtime file would vanish
   from every user's install with no error anywhere. A new dev-only top-level file or directory
   therefore needs adding here.
+- **It drops a hook that cannot run.** `hooks.d/after_save/60-git-reconcile.sh` is hard-disabled
+  pending [#969](https://github.com/Digital-Process-Tools/claude-remember/issues/969): it exits at
+  line 12, whatever `git_reconcile.enabled` says. Its ~430 unreachable lines still shipped from
+  v0.42.0 to v0.43.2, and the directory's scanner reads code that never runs. There, the
+  password-prompt variables (`GIT_ASKPASS`, `SSH_ASKPASS`, `core.askPass`) sit next to a fetch and
+  a push: the read-plus-send shape of "Uses a credential from the user's machine" (a reasoned
+  candidate, not yet observed to clear it). The entry is on the deny-list until #969 re-enables
+  the hook.
+  `tests/test_release_tree_no_dead_hook_body_1041.py` fails once the hook can run again, so the entry
+  cannot outlive the reason for it. The same test fails on any shipped `.sh` with code after an
+  unconditional top-level `exit`.
 - **It swaps `README.release.md` in for `README.md`** (`release_readme` in
   `.github/release-branch.json`, #898): a short release-only README with no `$VAR`/`${...}` and
   no network command names, written to keep #855's disclosure in substance (what runs, sends and

@@ -268,6 +268,29 @@ def test_this_repository_built_tree_has_no_check_failures(built_tree):
     assert result.offenders == [], result.offenders
 
 
+# #1067: the budget test above only asserts the hook stays UNDER
+# HOOK_SCRIPT_MAX_BYTES -- a build sitting 50 bytes under it (as
+# session-start-hook.sh was, after #1065, with #1064 and #1056 both blocked
+# on the gap) still passes that assertion. The issue's own "done when" is a
+# real MARGIN, not just a pass/fail: at least 4 KiB of headroom, so the next
+# SessionStart fix has somewhere to land without immediately re-triggering
+# this same issue. Would this test still pass if the code did nothing? No:
+# before #1067's extraction, session-start-hook.sh compiled to 122,830 bytes
+# against a 122,880-byte cap -- 50 bytes of headroom, 82x under the 4 KiB
+# floor this asserts.
+@needs_bash
+def test_this_repository_session_start_hook_has_4kib_headroom(built_tree):
+    check = _load(CHECK, "check_release_tree_sh900")
+    compiled = (built_tree / "scripts" / "session-start-hook.sh").read_bytes()
+    headroom = check.HOOK_SCRIPT_MAX_BYTES - len(compiled)
+    assert headroom >= 4 * 1024, (
+        f"session-start-hook.sh compiles to {len(compiled)} bytes, only "
+        f"{headroom} bytes under HOOK_SCRIPT_MAX_BYTES "
+        f"({check.HOOK_SCRIPT_MAX_BYTES}) -- below the 4 KiB headroom floor "
+        "#1067 exists to restore"
+    )
+
+
 @posix_only
 def test_this_repository_built_tree_passes_the_hook_smoke(built_tree):
     smoke = _load(SMOKE, "smoke_release_tree_sh900")

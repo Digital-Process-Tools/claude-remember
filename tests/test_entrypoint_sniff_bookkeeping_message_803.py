@@ -25,8 +25,10 @@ must still be skipped -- proving the fix does not simply stop skipping altogethe
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -35,6 +37,32 @@ from ._bash_runner import resolve_bash
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SESSION_START = REPO_ROOT / "scripts" / "session-start-hook.sh"
+# #1067: _transcript_is_pluginless_sdk moved into this separate, non-inlined
+# file; _stdin_json_string_into is defined, identically, in both.
+CAPTURE_GAP_CHECK = REPO_ROOT / "scripts" / "capture-gap-check.sh"
+
+
+def _strip_whole_line_comments(text: str) -> str:
+    """CI's own "hook tests (compiled)" leg runs session-start-hook.sh
+    through compile_hooks.py's compile step before the suite ever sees it --
+    it is one of the four HOOK_SCRIPT_NAMES scripts that step inlines and
+    strips whole-line comments from. capture-gap-check.sh is not one of
+    those four, so it keeps its comments verbatim on every leg, compiled or
+    not. The plain `pytest` legs read both files as plain source, so a
+    comment-only line never made the two copies differ there -- only the
+    compiled legs, which read session-start-hook.sh post-strip, did (#1067
+    round 2, CI red on exactly those two legs). Delegate to the exact
+    stripper the build uses rather than a second hand-written comment
+    filter here that could drift from what compile_hooks.py actually
+    does."""
+    spec = importlib.util.spec_from_file_location(
+        "compile_hooks_1067",
+        REPO_ROOT / ".github" / "scripts" / "compile_hooks.py",
+    )
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return mod.strip_whole_line_comments(text)
 
 BASH = resolve_bash()
 pytestmark = pytest.mark.skipif(
@@ -45,12 +73,113 @@ pytestmark = pytest.mark.skipif(
 def _function_body(name: str) -> str:
     """Same extraction technique as test_previous_transcript_no_sort_691.py's
     _function_bodies -- pulls the real shipped function verbatim rather than a
-    hand-copied stand-in that can drift from it."""
-    source = SESSION_START.read_text(encoding="utf-8")
+    hand-copied stand-in that can drift from it.
+
+    Tried against SESSION_START first, then CAPTURE_GAP_CHECK (#1067)."""
     start_marker = f"\n{name}() {{\n"
+    for candidate in (SESSION_START, CAPTURE_GAP_CHECK):
+        source = candidate.read_text(encoding="utf-8")
+        start = source.find(start_marker)
+        if start != -1:
+            end = source.index("\n}\n", start) + len("\n}")
+            return source[start + 1 : end]
+    raise AssertionError(
+        f"{name}() not found in {SESSION_START} or {CAPTURE_GAP_CHECK}"
+    )
+
+
+def _function_body_from(path: Path, name: str) -> str:
+    """Like _function_body, but pinned to exactly one file -- used by the
+    parity test below, which needs each copy named separately rather than
+    whichever one _function_body's own SESSION_START-first search happens to
+    find."""
+    start_marker = f"\n{name}() {{\n"
+    source = path.read_text(encoding="utf-8")
     start = source.index(start_marker)
     end = source.index("\n}\n", start) + len("\n}")
     return source[start + 1 : end]
+
+
+def test_stdin_json_string_into_copies_stay_identical():
+    """#1067 duplicated _stdin_json_string_into into capture-gap-check.sh
+    rather than sharing it via a sourced lib (the comment on that copy says
+    why -- it is the hook's own stdin-payload parser, needed here only
+    because _transcript_is_pluginless_sdk calls it on a transcript line, not
+    on stdin). _function_body's own SESSION_START-first search means every
+    OTHER test in this module exercises SESSION_START's copy, never
+    capture-gap-check.sh's -- the one that actually runs at SessionStart time
+    for a REAL transcript, since _transcript_is_pluginless_sdk itself only
+    exists in capture-gap-check.sh now. This closes that gap directly: if
+    the two copies ever diverge, this fails immediately, rather than leaving
+    the untested copy to disagree silently in production.
+
+    Compared with whole-line comments stripped from both sides first (#1067
+    round 2): CI's "hook tests (compiled)" leg runs session-start-hook.sh
+    through compile_hooks.py first, which strips its comments, while
+    capture-gap-check.sh is never compiled and keeps its comments on every
+    leg -- so a straight string comparison was red on exactly those two
+    legs (ubuntu + windows) while every plain `pytest` leg, which reads both
+    files as uncompiled source, stayed green. Stripping comments from both
+    sides before comparing is what the compiled leg itself effectively does
+    to session-start-hook.sh's copy; capture-gap-check.sh's copy loses
+    nothing it did not already lose on that leg.
+
+    Would this test still pass if the code did nothing? No -- flip one
+    non-comment character in either copy and this fails; nothing else in
+    this file would notice, since nothing else in this file ever reads
+    capture-gap-check.sh's copy. (The companion test right below is the
+    positive control proving the comment-stripping above does not swallow
+    a real functional divergence.)
+    """
+    session_start_copy = _function_body_from(SESSION_START, "_stdin_json_string_into")
+    capture_gap_copy = _function_body_from(CAPTURE_GAP_CHECK, "_stdin_json_string_into")
+    assert _strip_whole_line_comments(session_start_copy) == _strip_whole_line_comments(
+        capture_gap_copy
+    ), (
+        "_stdin_json_string_into has diverged between scripts/session-start-hook.sh "
+        "and scripts/capture-gap-check.sh -- keep both copies identical (see the "
+        "comment on capture-gap-check.sh's own copy)"
+    )
+
+
+def test_stdin_json_string_into_copies_stripping_still_catches_real_divergence():
+    """Positive control for the test above (this repo's own CLAUDE.md rule:
+    a negative assertion -- the copies do not differ -- needs a positive
+    one proving the check can still fire). Stripping whole-line comments
+    before comparing must not quietly widen the check into "ignore
+    everything" -- a real functional change to either copy, on a
+    non-comment line, must still be caught after stripping.
+
+    Would this test still pass if the comment-stripping above were replaced
+    by something that discarded the whole body (e.g. always comparing two
+    empty strings)? No -- the body_still_has_content assertion below would
+    then fail, since a function body genuinely contains more than a single
+    stray newline.
+    """
+    session_start_copy = _function_body_from(SESSION_START, "_stdin_json_string_into")
+    capture_gap_copy = _function_body_from(CAPTURE_GAP_CHECK, "_stdin_json_string_into")
+    stripped_session_start = _strip_whole_line_comments(session_start_copy)
+    stripped_capture_gap = _strip_whole_line_comments(capture_gap_copy)
+    assert stripped_session_start == stripped_capture_gap
+    body_still_has_content = len(stripped_session_start.strip()) > 40
+    assert body_still_has_content, (
+        "the comment stripper left almost nothing behind -- it may be "
+        "swallowing non-comment lines, which would make the parity check "
+        "above pass vacuously"
+    )
+    target = "_sjsi_value=${_sjsi_value//\\\\\\\\/\\\\}"
+    mutated = capture_gap_copy.replace(target, "_sjsi_value=${_sjsi_value}")
+    assert mutated != capture_gap_copy, (
+        "the replace() above did not match anything in the real function "
+        "body -- update the target line if _stdin_json_string_into's "
+        "source changed"
+    )
+    assert _strip_whole_line_comments(session_start_copy) != _strip_whole_line_comments(
+        mutated
+    ), (
+        "stripping whole-line comments must not mask a real functional "
+        "divergence between the two copies"
+    )
 
 
 SNIFF_SCRIPT = r"""

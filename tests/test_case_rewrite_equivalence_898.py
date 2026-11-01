@@ -106,7 +106,9 @@ else
     [ -e "$SEEN/$x" ] && return 0
 fi
 echo after''',
-        "site": ("scripts/session-start-hook.sh",
+        # #1067: capture_was_seen (the only caller of this rewrite) moved into
+        # scripts/capture-gap-check.sh.
+        "site": ("scripts/capture-gap-check.sh",
               r'    _ok="^[A-Za-z0-9${_d}_-]*\$"'),
     },
     "empty or a non-digit, with a catch-all": {

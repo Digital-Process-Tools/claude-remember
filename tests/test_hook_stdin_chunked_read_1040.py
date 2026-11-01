@@ -196,6 +196,22 @@ def _read_site(script: str, var: str) -> str:
     text = (REPO_ROOT / script).read_text(encoding="utf-8")
     if "_remember_read_stdin_into " + var in text:
         return "source " + _q(_fwd(LIB)) + NL + "_remember_read_stdin_into " + var
+    if script in LINE_LOOP_HOOKS:
+        # #1047 round 2: session-start-hook.sh's own read site grew a
+        # 32 KiB accumulation cap (plus, round 3, an LC_ALL save/restore
+        # wrapped around the loop for byte-safety under a UTF-8 locale).
+        # The cap constant is now set BEFORE `var=""` and is referenced
+        # inside the loop, so the extraction must start there, not at
+        # `var=""` itself -- starting later would leave
+        # _REMEMBER_HOOK_STDIN_CAP unset when the extracted block runs.
+        # The block also now contains THREE `fi` lines of its own (an
+        # LC_ALL-save check, the read loop itself, and an LC_ALL restore
+        # if/else), so the end must be the stable marker that closes the
+        # WHOLE block, not the first `fi` reached.
+        start = text.index("_REMEMBER_HOOK_STDIN_CAP=32768")
+        end_marker = "unset _hook_stdin_lc_all_was_set _hook_stdin_prior_lc_all"
+        end = text.index(end_marker, start) + len(end_marker)
+        return text[start:end]
     start = text.index(var + '=""' + NL + "if [ ! -t 0 ]; then")
     end = text.index(NL + "fi" + NL, start) + len(NL + "fi")
     return text[start:end]

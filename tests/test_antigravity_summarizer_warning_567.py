@@ -3,7 +3,7 @@ warn before falling back to the ``claude`` summarizer (#567).
 
 Teaching ``sniff_envelope()`` the Antigravity shape (#563, ``pipeline/host.py``)
 moved an Antigravity transcript out of the ``"unrecognised"`` arm of
-``pipeline.haiku._choose_summarizer_provider()`` -- the only arm that used to
+``pipeline.summarizer._choose_summarizer_provider()`` -- the only arm that used to
 warn -- into a silent fall-through to ``return "claude"``. Every other
 "we identified a specific non-default host situation but still answer
 'claude'" arm in this function warns: the vanished-Codex-transcript case
@@ -34,7 +34,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from pipeline.haiku import _choose_summarizer_provider
+from pipeline.summarizer import _choose_summarizer_provider
 
 FIXTURES = Path(__file__).parent / "fixtures"
 ANTIGRAVITY_TRANSCRIPT = FIXTURES / "antigravity-transcript-563.jsonl"

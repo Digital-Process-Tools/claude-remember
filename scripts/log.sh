@@ -174,7 +174,7 @@ _remember_cfg_table_get_into() {
 # `.haiku.*` is deliberately NOT flattened. Reading every key up front means
 # reading the OAuth token up front, and it would then sit in a shell variable
 # in every process that sources log.sh — including one that runs other people's
-# scripts via dispatch(). Nothing needs it there: pipeline/haiku.py reads the
+# scripts via dispatch(). Nothing needs it there: pipeline/summarizer.py reads the
 # token from the merged file in Python, and no config() caller asks for it.
 # This rule and the `select(.[0] != "haiku")` in the flattener are one decision
 # in two places — change both or neither.
@@ -986,7 +986,7 @@ export REMEMBER_DELTA_THRESHOLD
 # Model + reject-gate knobs. config.json is the source of truth; an explicit
 # shell env var still wins (override) via ${VAR:=...}, then config, then the
 # built-in default. Exported here (log.sh is sourced by every script) so both
-# the summarize and consolidate model calls in pipeline/haiku.py see them.
+# the summarize and consolidate model calls in pipeline/summarizer.py see them.
 # `${VAR:=...}` triggers on unset OR empty -- preserved here by checking
 # the same condition directly, rather than `${VAR:=$(config_into ...)}`
 # (config_into has no stdout to substitute; it writes to a NAMED variable,

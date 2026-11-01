@@ -89,6 +89,23 @@ def _wait_for_notice(notice: Path) -> bool:
     return False
 
 
+def _wait_for_reported(reported: Path) -> bool:
+    """#1079 point 4: the deferred phase writes the notice (capture-gap-notice,
+    script line ~1039) and the dedupe marker (capture-gap-reported, ~1040) as
+    two separate writes, moments apart. A test that polls only for the notice
+    and then immediately acts (unlinking it, re-running the hook) can win a
+    race against the SECOND write on a slow runner, re-reporting the same gap
+    on the very next restart -- the failure test_the_same_gap_is_reported_once
+    exists to catch. Poll for both before treating the deferred phase as done.
+    """
+    deadline = time.time() + DEFERRED_TIMEOUT
+    while time.time() < deadline:
+        if reported.is_file() and reported.read_text(encoding="utf-8").strip():
+            return True
+        time.sleep(0.1)
+    return False
+
+
 def _project(tmp_path: Path):
     home = tmp_path / "home"
     project = tmp_path / "project"
@@ -398,32 +415,63 @@ def test_a_session_captured_only_by_recovery_is_not_flagged(tmp_path):
 # recovery block itself checks, rather than by toggling the inert config key.
 
 
-def test_an_unsaved_previous_session_gets_the_recovered_wording(tmp_path):
-    """Recovery has what it needs to attempt PREV_ID's rescue this run: the
-    notice must say so instead of flatly claiming nothing happened."""
+def test_an_unsaved_previous_session_with_no_roster_marker_keeps_the_flat_wording(tmp_path):
+    """#1046 changed this test's own premise. Before #1046, recovery attempted
+    PREV_ID's rescue whenever it was merely unsaved, and the notice used the
+    "is being recovered" wording to say so. Recovery now ALSO requires a
+    capture-alive.d marker under THIS store before it will force-save a
+    candidate -- the same marker capture_was_seen() already reads as its own
+    first evidence source. The two cannot both engage on one session: a
+    marker that lets recovery act also makes capture_was_seen() true, which
+    means there is no capture gap left to report at all (see
+    test_recovery_and_the_gap_check_agree_on_which_session_is_previous for
+    that case). Conversely, a session with NO marker -- this fixture -- is
+    exactly the case #1046 asks recovery to leave alone (it might belong to a
+    different store sharing this project directory), so recovery declines,
+    and the notice correctly falls back to the flat wording instead of
+    claiming a rescue that did not happen.
+
+    Net effect: the "is being recovered" wording this test used to pin is
+    now unreachable code (flagged in this lane's PR for the maintainer --
+    see #1046's own comments). This test now pins the flat-wording fallback
+    instead, as a regression guard against claiming a rescue that did not
+    happen."""
     home, project, remember, session_dir = _project(tmp_path)
     _transcripts(session_dir, previous=TOOL_USE_LINE * 5)
     # last-save.json exists (so the recovery block's own [-f] guard passes)
     # but records a DIFFERENT session -- PREV_ID ("sess-prev") is still
-    # unsaved, which is exactly what triggers save-session.sh --force below.
+    # unsaved. Pre-#1046 this alone triggered save-session.sh --force; now it
+    # is necessary but not sufficient without a roster marker (absent here).
     (remember / "tmp" / "last-save.json").write_text(
         json.dumps({"sessions": {"sess-older": 10}, "session": "sess-older", "line": 10}),
         encoding="utf-8",
     )
+    assert not (remember / "tmp" / "capture-alive.d" / "sess-prev").exists(), (
+        "precondition: no roster marker for sess-prev under this store"
+    )
+    # #1046 final review: past the one-time upgrade grace window (an epoch
+    # older than sess-prev's own transcript) -- this test is about the
+    # STEADY-STATE guard, not the upgrade transition pinned in
+    # tests/test_roster_skip_1046.py's own grace tests.
+    epoch = remember / "tmp" / "roster-epoch"
+    epoch.write_text("")
+    prev_jsonl = session_dir / "sess-prev.jsonl"
+    old_mtime = int(prev_jsonl.stat().st_mtime) - 3600
+    os.utime(epoch, (old_mtime, old_mtime))
 
     result = _run(SESSION_START, _env(home, project, remember))
     assert result.returncode == 0, subprocess_failure_detail(result, remember)
 
     notice = remember / "tmp" / "capture-gap-notice"
     assert _wait_for_notice(notice), (
-        "a genuinely unsaved previous session with a recovery attempt in "
-        "flight still has to be reported -- silence here is the same #200 "
-        "regression the flat wording already guards against"
+        "a genuine capture gap with no roster marker still has to be "
+        "reported -- silence here is the #200 regression this guards against"
     )
     text = notice.read_text()
-    assert "is being recovered" in text, (
-        f"recovery had what it needed to attempt PREV_ID's rescue this run, "
-        f"but the notice does not say so -- got: {text!r}"
+    assert "is being recovered" not in text, (
+        f"recovery declined to force-save sess-prev (#1046: no roster "
+        f"marker under this store), but the notice claims a rescue that "
+        f"did not happen -- got: {text!r}"
     )
     assert "has been recovered" not in text, (
         "the fork is asynchronous (& disown) -- this hook cannot know it "
@@ -624,15 +672,38 @@ def test_the_same_gap_is_reported_once_not_on_every_restart(tmp_path):
     a true positive gets trained into background noise.
     """
     home, project, remember, session_dir = _project(tmp_path)
-    env = _env(home, project, remember)
     _transcripts(session_dir, previous=TOOL_USE_LINE * 5)
-
-    _run(SESSION_START, env)
     notice = remember / "tmp" / "capture-gap-notice"
-    assert notice.exists(), "precondition: the first run must report it"
+    reported = remember / "tmp" / "capture-gap-reported"
+
+    # #1069 review on #1067: the deferred phase now runs as a genuinely
+    # separate process (scripts/capture-gap-check.sh), not an in-process
+    # function call -- slower to start than the pre-#1067 shape, which is
+    # exactly the class of timing this file's own module docstring already
+    # warns about for the "must appear" half of an assertion. Poll for it
+    # instead of reading `notice.exists()` the instant the PARENT hook
+    # returns -- the parent returning says nothing about whether its
+    # disowned background child has finished writing yet.
+    _run(SESSION_START, _env(home, project, remember))
+    assert _wait_for_notice(notice), "precondition: the first run must report it"
+    # #1079 point 4: the notice and the dedupe marker (capture-gap-reported)
+    # are two separate writes a few lines apart in the SAME deferred phase --
+    # waiting only for the first and then immediately unlinking/re-running
+    # races the second on a slow runner, which is indistinguishable from the
+    # dedupe itself being broken (the exact failure this test exists to
+    # catch) rather than from the test's own timing.
+    assert _wait_for_reported(reported), (
+        "precondition: the first run must also finish writing the dedupe "
+        "marker before this test acts on its result"
+    )
     notice.unlink()  # user-prompt-hook.sh consumes it on delivery
 
-    _run(SESSION_START, env)
+    # The "must NOT reappear" half, in contrast, cannot be polled the same
+    # way (this file's own module docstring: a negative assertion racing an
+    # unstarted background phase is indistinguishable from a correctly
+    # absent one) -- run it inline instead (REMEMBER_DEFER=0), where "did
+    # not fire" is a verdict rather than a race.
+    _run(SESSION_START, _env(home, project, remember, defer=False))
 
     assert not notice.exists(), (
         "re-reported an already-delivered gap about the same session"

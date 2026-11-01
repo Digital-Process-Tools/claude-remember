@@ -713,8 +713,8 @@ cd "$PIPELINE_DIR" && _remember_run_python -m pipeline.shell build-prompt "$EXTR
 [ ! -s "$TMP_PROMPT" ] && { log "prompt" "ERROR: empty"; exit 1; }
 grep -q '{{TIME}}\|{{BRANCH}}\|{{LAST_ENTRY}}\|{{EXTRACT}}' "$TMP_PROMPT" && { log "prompt" "ERROR: unsubstituted placeholders in prompt"; exit 1; }
 
-# --- Step 4+5: Call Haiku (the claude -p invocation lives only in pipeline/haiku.py) ---
-log "haiku" "calling (branch: $BRANCH)"
+# --- Step 4+5: Call the summarizer (the claude -p invocation lives only in pipeline/summarizer.py) ---
+log "summarizer" "calling (branch: $BRANCH)"
 HAIKU_STDERR=$(mktemp "${TMPDIR:-/tmp}"/remember-haiku-err-XXXXXX)
 CLEANUP_FILES+=("$HAIKU_STDERR")
 
@@ -776,12 +776,12 @@ record_summary_failure() {
     fi
 
     if [ "$_count" -ge "$MAX_FAILURES" ]; then
-        log "haiku" "WARNING: ${_count} consecutive failures on this span -- dropping it unsummarized and advancing position -> $POSITION (see thresholds.max_summary_failures)"
+        log "summarizer" "WARNING: ${_count} consecutive failures on this span -- dropping it unsummarized and advancing position -> $POSITION (see thresholds.max_summary_failures)"
         save_position_span
         rm -f "$FAILURE_MARKER"
     elif marker_write_ok "$FAILURE_MARKER" summary; then
         echo "$_span_id $_count" > "$FAILURE_MARKER"
-        log "haiku" "failure ${_count}/${MAX_FAILURES} on this span -- will retry next run"
+        log "summarizer" "failure ${_count}/${MAX_FAILURES} on this span -- will retry next run"
     fi
 }
 
@@ -800,12 +800,12 @@ HAIKU_VARS=$(cd "$PIPELINE_DIR" && _remember_run_python -m pipeline.shell call-h
         # Declined, not failed: no failure is recorded and the position stays
         # put, so this span is summarized by a later run. Logged as its own word
         # so `grep DECLINED` finds it — a cap that fires has to be visible.
-        log "haiku" "DECLINED: $(head -1 "$HAIKU_STDERR")"
+        log "summarizer" "DECLINED: $(head -1 "$HAIKU_STDERR")"
         exit 0
     fi
     # report_error, not log() alone (#694): log() only reaches the daily
     # narrative log, and the CLI's own failure detail -- already dug out of
-    # its stdout JSON by pipeline/haiku.py's _failure_detail() and printed
+    # its stdout JSON by pipeline/summarizer.py's _failure_detail() and printed
     # here by `pipeline.shell call-haiku`'s own stderr handler -- is exactly
     # the diagnosis an operator needs when saves silently stop working.
     # Without this, hook-errors.log (what /remember:doctor tails, and what a
@@ -813,18 +813,25 @@ HAIKU_VARS=$(cd "$PIPELINE_DIR" && _remember_run_python -m pipeline.shell call-h
     # -- an expired token, an exhausted balance, a rate limit -- sat in a
     # second log file nobody was looking at (#693: 12 occurrences over
     # several days before anyone found it).
-    report_error "haiku" "ERROR: $(head -1 "$HAIKU_STDERR")"; record_summary_failure; exit 1
+    report_error "summarizer" "ERROR: $(head -1 "$HAIKU_STDERR")"; record_summary_failure; exit 1
 }
 
 assign_kv <<< "$HAIKU_VARS"
 CLEANUP_FILES+=("$HAIKU_TEXT_FILE")
+# Which model actually ran this call (#1055): MODEL is printed by
+# pipeline.shell's call-haiku subcommand (pipeline/summarizer.py resolves
+# it -- REMEMBER_MODEL, or the "haiku" default -- for the claude route, and
+# reports "codex default" for the codex route, which passes no model flag
+# at all). Logged once per call so a Sonnet or Codex user's log says which
+# model ran, not just a tag that used to name neither.
+log "summarizer" "model: ${MODEL:-unknown}"
 log_usage "tokens" "$TK_IN" "$TK_OUT" "$TK_CACHE" "$TK_COST"
 
 HAIKU_TEXT=$(cat "$HAIKU_TEXT_FILE")
 # report_error, not log() alone -- same #694 shape as the call-haiku
 # failure above: an empty summary is a real, reportable failure and must
 # reach hook-errors.log rather than only the daily narrative log.
-[ -z "$HAIKU_TEXT" ] && { report_error "haiku" "ERROR: empty response"; record_summary_failure; exit 1; }
+[ -z "$HAIKU_TEXT" ] && { report_error "summarizer" "ERROR: empty response"; record_summary_failure; exit 1; }
 
 # Park a discarded reply where it can be read later. Three callers now (format
 # validator, reject gate, NDC compression) — one copy each drifts, so it lives
@@ -926,15 +933,15 @@ if [ "$IS_SKIP" = "true" ]; then
     # stops growing, and max_summary_failures never notices because that counts
     # hard errors and this call succeeded.
     if [ "${IS_REJECTED:-false}" = "true" ]; then
-        log "haiku" "REJECTED (provider: ${PROVIDER:-claude}; not a summary -- refusal or clarification): $(head -c 80 "$HAIKU_TEXT_FILE" 2>/dev/null)"
-        keep_rejected_text "$HAIKU_TEXT_FILE" "haiku"
+        log "summarizer" "REJECTED (provider: ${PROVIDER:-claude}; not a summary -- refusal or clarification): $(head -c 80 "$HAIKU_TEXT_FILE" 2>/dev/null)"
+        keep_rejected_text "$HAIKU_TEXT_FILE" "summarizer"
     fi
     # provider is logged here (#461): a plain "SKIP" is ambiguous about which
     # route declined once more than one summarizer exists (#460) -- a bare
     # host guess from the branch name or the log's surrounding lines would be
     # reconstruction, the exact failure mode #443's envelope field exists to
     # avoid. This is the value the call itself reported using.
-    log "haiku" "SKIP (provider: ${PROVIDER:-claude}) -- position -> $POSITION"
+    log "summarizer" "SKIP (provider: ${PROVIDER:-claude}) -- position -> $POSITION"
     save_position_span
     # A SKIP is a successful summarization (the model judged the span not worth
     # recording) and it advances the position, so it must clear the failure
@@ -1222,7 +1229,7 @@ if [ "$RUN_NDC" = true ]; then
                 # log line. now.md is left intact so the next round retries.
                 #
                 # #597: IS_REJECTED alone is not enough. DEFAULT_REJECT_PATTERN
-                # (pipeline/haiku.py) is anchored to English refusal stems, and
+                # (pipeline/summarizer.py) is anchored to English refusal stems, and
                 # #593 put the reply in the conversation's OWN language into
                 # now.md in ordinary use for the first time -- a Chinese,
                 # French, Spanish, German or Japanese refusal comes back with

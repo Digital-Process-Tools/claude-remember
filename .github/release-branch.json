@@ -25,8 +25,10 @@
     "scripts/report_test_durations.py",
     "scripts/report_windows_skip_floor.py",
     "scripts/run-tests.sh",
-    "scripts/windows_skip_triage_497.py"
+    "scripts/windows_skip_triage_497.py",
+    "hooks.d/after_save/60-git-reconcile.sh"
   ],
+  "_deny_reconcile_why": "60-git-reconcile.sh is hard-disabled pending #969 (an unconditional exit 0 at line 12), so it does nothing at run time -- but the directory's scanner reads its unreachable body, where credential-prompt names (GIT_ASKPASS, SSH_ASKPASS, core.askPass) sit beside a fetch and a push: the read-plus-send shape of the 'Uses a credential from the user's machine' finding. Drop this entry when #969 re-enables the hook; tests/test_release_tree_no_dead_hook_body_1041.py fails until you do.",
   "_budget_why": "max_file_bytes and max_files are the directory's own rules (pre-submission checklist, 'Files in the plugin folder'); images and fonts are exempt from the per-file limit. max_total_bytes (3 MiB) is this repo's own ceiling: the directory timed out validating 9.2 MB.",
   "budget": {
     "max_file_bytes": 262144,

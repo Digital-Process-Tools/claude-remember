@@ -70,7 +70,7 @@ Once in a while, `SessionStart` names whichever of `claude-supertool` / `claude-
 /plugin install remember@dpt-plugins
 ```
 
-Restart Claude Code afterwards; hooks are read at session start ([#200](https://github.com/Digital-Process-Tools/claude-remember/issues/200)). Updating, the official Anthropic marketplace and its lag, manual install, checking your version: [docs/install-claude-code.md](docs/install-claude-code.md).
+Restart Claude Code afterwards; hooks are read at session start ([#200](https://github.com/Digital-Process-Tools/claude-remember/issues/200)). Updating, the official Anthropic marketplace and its lag, manual install, checking your version, and how to switch here from the official marketplace: [docs/install-claude-code.md](docs/install-claude-code.md).
 
 **Codex**
 
@@ -175,6 +175,7 @@ This plugin runs with your full shell privileges, like any other hook your codin
 - Before the nested call starts, only the parent session's own variables are removed, so it does not pass as that session ([#95](https://github.com/Digital-Process-Tools/claude-remember/issues/95)): the names are listed in [`docs/configuration.md`](docs/configuration.md#the-summarizers-environment). Your login is never on that list.
 - Some hosts do not hand hooks that login (an older desktop build, a hosted Agent SDK). When that happens the nested call simply runs unauthenticated: this plugin has no recovery path of its own, by design (#860, round 3) — reading any credential from your machine is exactly the condition a directory security scan holds on, independent of consent or provenance. Log in again with your coding agent's own CLI and the next save picks it up.
   - Two older ways of configuring a recovery token for this plugin — an environment variable, and a `haiku.oauth_token` key in `config.json`, both this plugin's own earlier and now fully removed attempts at the same feature — are no longer read at all, on any host, for anything, and a still-configured value is not detected or logged anywhere any more (#898, round 6): there is nothing left to migrate it to, and leaving it in place is harmless.
+- Some Agent SDK hosts fire `SessionStart` with `source=resume` on every resumed turn, not once per session (#1060). Each start's deferred bookkeeping (recovery, capture-gap detection) is keyed by a stale-safe per-session marker under `REMEMBER_DIR/tmp/deferred-<session id>.pid`, so a second start for the same still-running session is skipped rather than stacked; a dead marker (a crashed or already-finished run) is treated as stale and replaced. A different session id is never affected by another session's marker.
 - If you also happen to have an unrelated Anthropic API key set in your environment for something else, the nested call inherits it exactly like every other variable, and it can out-rank your login there ([#703](https://github.com/Digital-Process-Tools/claude-remember/issues/703)). To keep a variable like that away from the summarizer, unset it in the environment you start Claude Code from. (The `haiku.drop_env` list that used to do this inside the plugin was removed in [#898](https://github.com/Digital-Process-Tools/claude-remember/issues/898): applying names chosen at run time meant walking your whole environment.)
 - The `codex` summarizer is the other way round: the nested `codex exec` gets **only** an allow-list of your variables ([#724](https://github.com/Digital-Process-Tools/claude-remember/issues/724)), because a command the model runs inside Codex's sandbox could read anything else. The list carries what the Codex CLI needs to run (`PATH`, `HOME`, `CODEX_HOME`, locale, temp and Windows process variables), **no credential** and **no proxy or CA-bundle variable** ([#898](https://github.com/Digital-Process-Tools/claude-remember/issues/898)): if you reach the network only through a proxy, set `REMEMBER_SUMMARIZER=claude`, whose nested call inherits your whole environment. Codex's own login in `CODEX_HOME` (what `codex login` writes) is unaffected; a Codex login held only in an environment variable is not passed through, so run `codex login` instead -- see [`docs/configuration.md`](docs/configuration.md#the-codex-summarizers-allow-list-724). Both lists are written in the plugin's code, not read from config: changing either needs a plugin release, and no config file -- yours or a cloned repository's -- can change them.
 
@@ -242,9 +243,9 @@ Memory is keyed to the repository's main checkout, not the worktree, so every wo
 ```
 pipeline/           Python core — extraction, prompts, parsing, types
   extract.py        Session JSONL → filtered exchanges
-  haiku.py          Claude CLI wrapper + response parsing
+  summarizer.py     Claude/Codex CLI wrapper + response parsing
   prompts.py        Template loading and substitution
-  consolidate.py    Multi-day compression via Haiku
+  consolidate.py    Multi-day compression via the configured summarizer
   log.py            Structured logging
   shell.py          Shell integration — prints eval-able variables
   types.py          Dataclasses for all pipeline data

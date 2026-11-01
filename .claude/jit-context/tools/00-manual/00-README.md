@@ -22,6 +22,75 @@ hits them. They are filed upstream and should be deleted here once they ship in 
 The rule builder skips this file by name, so an absence recorded here reads as a decision rather
 than an oversight.
 
+- **`1002.detach-windows-silent-skip-after-launch`** -- declined 2026-10-31 as a new rule: already
+  fixed. scripts/lib-detach.sh:223-233 now propagates wscript.exe's real exit status (`wscript_rc`)
+  through `_remember_detach_windows` instead of unconditionally returning 0, confirmed by reading
+  the current file. Round 3 of PR #1010 observed this fixed on real `windows-latest` CI legs (run
+  #38049234152).
+- **`1002.wsh-strips-quotes-in-hidden-launch-c-script`** -- declined 2026-10-31 as a new rule:
+  already fixed. scripts/lib-detach.sh:345-363 no longer embeds a literal quote in any
+  `wscript.exe` argv entry (OUTFILE is its own separate argument now), confirmed by reading the
+  current file. PR #1010 round 3 observed this fixed on real `windows-latest` CI legs.
+- **`1002.session-start-hook-comment-overstates-coverage`** -- declined 2026-10-31 as a new rule:
+  already fixed. scripts/session-start-hook.sh:2326-2338's comment now correctly cites #1006 for
+  the two deferred call sites rather than claiming they already carry the fix, confirmed by reading
+  the current file.
+- **`1002.supertool-edit-complexity-and-classifier-backreference`** -- partially promoted, partially
+  declined, 2026-10-31. The Bash-tool complexity-refusal finding is folded into the new
+  `worktree-isolation-guard-surface-text-false-positive.md` rule in this same layer. The separate
+  `review_return.py` `--framed` back-reference classifier finding is declined as a rule in *this*
+  repository -- it is not this repository's code to fix, filed instead as
+  [claude-oss#1814](https://github.com/Digital-Process-Tools/claude-oss/issues/1814).
+- **`1002.round-3-self-review-gitattributes-and-citation`** -- declined 2026-10-31 as a new rule:
+  both self-review findings (missing `.gitattributes` pin for `tests/fixtures/v0_42_3/`; a stale CI
+  citation mixing a contaminated run with a clean one) checked against HEAD and confirmed STILL
+  TRUE. Filed as
+  [claude-remember#1070](https://github.com/Digital-Process-Tools/claude-remember/issues/1070)
+  rather than left as a one-off code defect with no tracking issue.
+- **`1003.doctor-consolidation-health-unreadable-log-reads-as-absent`** -- declined 2026-10-31 as a
+  new rule: a one-off code defect (scripts/doctor.sh's Consolidation health section still folds
+  "unreadable" into "absent"), checked against HEAD and confirmed STILL TRUE. Filed as
+  [claude-remember#1071](https://github.com/Digital-Process-Tools/claude-remember/issues/1071).
+- **`1003.python-floor-ladder-stops-at-3.13`** -- declined 2026-10-31 as a new rule: a one-off code
+  defect (scripts/detect-tools.sh's versioned fallback ladder still stops at python3.13), checked
+  against HEAD and confirmed STILL TRUE. Filed as
+  [claude-remember#1072](https://github.com/Digital-Process-Tools/claude-remember/issues/1072).
+- **`1011.below-threshold-path-regressed-and-process-count-misreported`** -- declined 2026-10-31 as
+  a new rule: a one-off code defect in a specific audit measurement (process-count regression on
+  the below-threshold save path). Checked -- could not tell: re-running the auditor's own PID-delta
+  strace measurement across tagged trees was outside this pass's budget, and the specific
+  command-substitution shape the fragment names (`_pt_scan_lines` inside `$(...)`) already does not
+  match what scripts/post-tool-hook.sh:960/1126 does today (a plain call setting globals), so the
+  fragment's own suggested fix may already be partly applied -- not confirmed either way.
+- **`1011.lib-detach-same-stray-sleep-shape-unfixed`** -- declined 2026-10-31 as a new rule: already
+  promoted in this same layer as `kill-a-subshell-not-its-forked-child.md` under `paths/00-manual/`
+  (matches `scripts/.*\.sh$`, so lib-detach.sh is already covered). The underlying code defect this
+  fragment names (scripts/lib-detach.sh:356's watchdog still kills the subshell, not the `sleep`
+  child it forked) was checked against HEAD and confirmed STILL TRUE. Filed as
+  [claude-remember#1073](https://github.com/Digital-Process-Tools/claude-remember/issues/1073).
+- **`1028.test-fetch-tag-shallows-dev-clone`** -- declined 2026-10-31 as a new rule: a one-off code
+  defect in a test helper (`_materialize_tree` in
+  tests/test_post_tool_total_processes_1011.py still fetches a missing baseline tag into the
+  developer's own `REPO_ROOT`), checked against HEAD and confirmed STILL TRUE. Filed as
+  [claude-remember#1074](https://github.com/Digital-Process-Tools/claude-remember/issues/1074).
+- **`350.fast-path-warm-positive-control-satisfied-by-cold-run`** -- declined 2026-10-31 as a new
+  rule: a one-off code defect in a test's own positive control (the warm run's `capture-alive`
+  marker check in tests/test_post_tool_fast_path_350.py cannot fail because the cold run already
+  wrote that marker), checked against HEAD and confirmed STILL TRUE. Filed as
+  [claude-remember#1075](https://github.com/Digital-Process-Tools/claude-remember/issues/1075).
+- **`906.mask-bracket-tests-depth-carries-across-lines`** -- declined 2026-10-31 as a new rule: a
+  one-off code defect (.github/scripts/compile_hooks.py's `_mask_bracket_tests` still carries an
+  unbalanced bracket's depth across physical lines unconditionally, with no check for a trailing
+  `&&`/`||`/`|`), checked against HEAD and confirmed STILL TRUE. Filed as
+  [claude-remember#1076](https://github.com/Digital-Process-Tools/claude-remember/issues/1076).
+- **`913.tail-exit-status-not-checked-in-scan-fallback`** -- declined 2026-10-31 as a new rule: a
+  one-off code defect. The specific code shape the fragment cites (`tail`/`printf 'X'` sentinel in a
+  command substitution) was replaced by #1036 with a process-substitution + one-byte `read`
+  (scripts/post-tool-hook.sh lines 1015-1024, 1047-1049), but the same gap persists in the new
+  shape -- `tail`'s own exit status is still never observed -- checked against HEAD and confirmed
+  STILL TRUE under the new mechanism. Filed as
+  [claude-remember#1077](https://github.com/Digital-Process-Tools/claude-remember/issues/1077).
+
 - **`705.edit-toml-literal-double-escape`** -- declined 2026-09-28 as a new rule: already
   promoted. `supertool-literal-backslashes.md` in this same layer already documents exactly this
   incident by number (#705) -- an embedded literal double quote needing \" written through

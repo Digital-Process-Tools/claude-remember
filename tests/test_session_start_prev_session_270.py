@@ -217,6 +217,40 @@ def test_a_healthy_previous_session_is_not_accused_at_startup(tmp_path):
     )
 
 
+def test_the_session_started_marker_lands_in_its_own_folder_not_capture_alive_d(tmp_path):
+    """#1046 final review: the hook writes a cheap per-session roster marker
+    for its OWN (CURRENT) session id at every SessionStart (round 2 above),
+    so even a chat-only session earns one piece of recovery evidence. That
+    marker used to land in tmp/capture-alive.d -- the SAME folder
+    post-tool-hook.sh writes into, and the SAME folder capture_was_seen()
+    (the #200 capture-gap check's own evidence function) reads. A session
+    whose hooks never actually registered for PostToolUse would then still
+    get this marker from SessionStart alone, and capture_was_seen() could
+    not tell the two apart -- a real capture gap would read as "captured"
+    and the #200 warning would go quiet for it. Red before the fix: CURRENT
+    shows up in capture-alive.d. Green after it: CURRENT shows up only in
+    its own tmp/session-started.d, and capture-alive.d is untouched by this
+    run (nothing in this hook's own synchronous/deferred phases, run with
+    REMEMBER_DEFER=0, ever writes there -- only post-tool-hook.sh does)."""
+    home, project, remember, _ = _startup_project(tmp_path)
+
+    result = _run(_env(home, project, remember), _payload(CURRENT))
+    assert result.returncode == 0, subprocess_failure_detail(result, remember)
+
+    started = remember / "tmp" / "session-started.d" / CURRENT
+    assert started.exists(), (
+        "the session's own SessionStart marker was not written to "
+        f"tmp/session-started.d/{CURRENT}"
+    )
+    alive_marker = remember / "tmp" / "capture-alive.d" / CURRENT
+    assert not alive_marker.exists(), (
+        "the SessionStart marker landed in tmp/capture-alive.d -- the same "
+        "folder PostToolUse writes into and capture_was_seen() reads, "
+        "which silences the #200 check for a session whose hooks never "
+        "actually ran"
+    )
+
+
 def test_the_check_says_nothing_when_it_cannot_know_which_session_is_ours(tmp_path):
     """No stdin, so no session id, so "which of these is the previous one" has
     no answer — the positional guess is right at resume and wrong at startup
@@ -338,6 +372,11 @@ def test_recovery_rescues_the_previous_session_not_the_one_before_it(tmp_path):
     capture *is* healthy — the tail is simply never picked up.
     """
     home, project, remember, _ = _startup_project(tmp_path)
+    # #1046: recovery now requires a capture-alive.d marker under THIS store
+    # before it force-saves a candidate -- this fixture models a session that
+    # ran tools under THIS store, so it is vouched for the same way
+    # post-tool-hook.sh would have marked it.
+    _vouch(remember, PREV)
     (remember / "tmp" / "last-save.json").write_text(json.dumps({"sessions": {}}))
     record = tmp_path / "save-argv.txt"
     root = _plugin_root_with_stub_save(tmp_path, record)
@@ -362,8 +401,17 @@ def test_recovery_rescues_the_previous_session_not_the_one_before_it(tmp_path):
 def test_recovery_and_the_gap_check_agree_on_which_session_is_previous(tmp_path):
     """Two independent resolutions are how these drifted apart in the first
     place. Pinned by outcome: whichever session recovery rescues is the one the
-    gap check reports on."""
+    gap check reports on.
+
+    #1046: recovery now requires a capture-alive.d marker under THIS store
+    before it force-saves a candidate, vouched for below exactly as
+    post-tool-hook.sh would have. That same marker is also
+    capture_was_seen()'s own first evidence source, so a marked PREV is -- by
+    definition -- not a capture gap, and the gap check correctly has nothing
+    to report. "Agreement" now means recovery names PREV and the gap check
+    stays silent about it, rather than both independently landing on PREV."""
     home, project, remember, _ = _startup_project(tmp_path)
+    _vouch(remember, PREV)
     (remember / "tmp" / "last-save.json").write_text(json.dumps({"sessions": {}}))
     record = tmp_path / "save-argv.txt"
     root = _plugin_root_with_stub_save(tmp_path, record)
@@ -375,9 +423,14 @@ def test_recovery_and_the_gap_check_agree_on_which_session_is_previous(tmp_path)
     )
 
     argv = _await_record(record)
-    assert _reported(remember) and _reported(remember) in argv, (
-        f"recovery rescued {argv!r} while the gap check reported on "
-        f"{_reported(remember)!r} — the same two answers, drifting again"
+    assert PREV in argv, (
+        f"expected recovery to rescue the marked previous session {PREV!r}, "
+        f"got {argv!r}"
+    )
+    assert not _reported(remember), (
+        f"gap check reported {_reported(remember)!r} on a session this "
+        "store's own roster already vouches for -- a marked session is not "
+        "a capture gap, so there is nothing to report"
     )
 
 
@@ -419,6 +472,11 @@ def test_recovery_skips_a_pluginless_sdk_transcript_with_no_session_id_on_stdin(
     own = session_dir / "sess-own-placeholder.jsonl"  # positionally "this session's own"
     own.write_text(TOOL_USE_LINE)
     os.utime(own, (now, now))
+
+    # #1046: recovery now requires a capture-alive.d marker under THIS store
+    # before it force-saves a candidate -- PREV ran tools under this store,
+    # so vouch for it the way post-tool-hook.sh would have.
+    _vouch(remember, PREV)
 
     (remember / "tmp" / "last-save.json").write_text(json.dumps({"sessions": {}}))
     record = tmp_path / "save-argv.txt"
