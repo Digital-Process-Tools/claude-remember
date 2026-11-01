@@ -829,6 +829,37 @@ if [ -n "$CURRENT_SESSION_ID" ]; then
     printf '%s\n' "$REMEMBER_HANDOFF" > "$REMEMBER_DIR/tmp/handoff-path.$CURRENT_SESSION_ID" 2>/dev/null
 fi
 
+# ── Session-store pointer (#1083) ───────────────────────────────────────────
+# Pinned OUTSIDE every project store, keyed by session id, so write-handoff.sh
+# and doctor.sh never have to guess the store from cwd via an ancestor walk
+# at all -- an ancestor walk can only ever see directories on the chain from
+# $(pwd) up to the git toplevel, categorically missing a nested repo one
+# level in, a non-git sibling, or a resumed session's own sibling directory.
+# Plain redirect into a temp file in the SAME directory (no fork beyond the
+# mktemp/mv this file already relies on everywhere else), then `mv -f` --
+# atomic, so a concurrent read of the pointer (write-handoff.sh racing the
+# next SessionStart) never observes a partially written file. Overwritten on
+# every start, including `--resume`, same as the two pointers just above.
+if [ -n "$CURRENT_SESSION_ID" ]; then
+    _REMEMBER_SESSION_STORE_DIR="$HOME/.remember/tmp/session-store"
+    # #920 gap 1, same guard this file already applies to every other
+    # mkdir -- never create or write into this directory off an unsafe
+    # REMEMBER_DIR, and never publish an unsafe REMEMBER_DIR into it either.
+    [ "${REMEMBER_DIR_UNSAFE:-0}" = 1 ] || [ -d "$_REMEMBER_SESSION_STORE_DIR" ] || mkdir -p "$_REMEMBER_SESSION_STORE_DIR" 2>/dev/null
+    if [ "${REMEMBER_DIR_UNSAFE:-0}" != 1 ] && [ -d "$_REMEMBER_SESSION_STORE_DIR" ]; then
+        _REMEMBER_SESSION_STORE_TMP=$(mktemp "$_REMEMBER_SESSION_STORE_DIR/.tmp-XXXXXX" 2>/dev/null) || _REMEMBER_SESSION_STORE_TMP=""
+        if [ -n "$_REMEMBER_SESSION_STORE_TMP" ]; then
+            if printf '%s\n' "$REMEMBER_DIR" > "$_REMEMBER_SESSION_STORE_TMP" 2>/dev/null; then
+                mv -f "$_REMEMBER_SESSION_STORE_TMP" "$_REMEMBER_SESSION_STORE_DIR/$CURRENT_SESSION_ID" 2>/dev/null
+            else
+                rm -f "$_REMEMBER_SESSION_STORE_TMP" 2>/dev/null
+            fi
+        fi
+        unset _REMEMBER_SESSION_STORE_TMP
+    fi
+    unset _REMEMBER_SESSION_STORE_DIR
+fi
+
 # ── Handoff path hint (human-facing only since #720) ───────────────────────
 # Emitted in external mode (unchanged, #56/#296) OR whenever this session
 # resolved a per-session path — in LEGACY per_session mode REMEMBER_HANDOFF
@@ -1601,6 +1632,59 @@ _remember_prune_stale_session_files() {
 if [ -d "$SESSIONS_DIR" ] && [ -d "$REMEMBER_DIR/tmp" ]; then
     _remember_prune_stale_session_files remember.delivered
     _remember_prune_stale_session_files handoff-path
+fi
+
+# _remember_prune_stale_session_store_pointers (#1083)
+# Sweeps $HOME/.remember/tmp/session-store/<session-id> -- the pointer
+# written above, in a directory OUTSIDE every REMEMBER_DIR -- the same way
+# _remember_prune_stale_session_files above sweeps $REMEMBER_DIR/tmp/
+# <prefix>.<session-id>: a pointer is removed only when its session id is
+# not CURRENT_SESSION_ID, has no live transcript in $SESSIONS_DIR, and is
+# older than GRACE_MIN minutes. Not a parameterized call into the existing
+# helper: that helper's own filename shape is "<prefix>.<id>" under
+# $REMEMBER_DIR/tmp (one dot-separated name per project store); this
+# pointer's shape is "<id>" alone, flat, under a directory shared by every
+# project on the machine -- a different enough glob and strip that forcing
+# one function to cover both would obscure which shape each line is about.
+# Every could-not-tell (unreadable mtime, unreadable clock) keeps the file,
+# same safe direction as the sibling helper.
+_remember_prune_stale_session_store_pointers() {
+    local _ss_dir="${HOME}/.remember/tmp/session-store" _file _id _mtime _now
+    [ -d "$_ss_dir" ] || return 0
+    for _file in "$_ss_dir"/*; do
+        [ -f "$_file" ] || continue
+        _id="${_file##*/}"
+        [ -n "$_id" ] || continue
+        # Never sweep this very invocation's own temp file (the dot-prefixed
+        # mktemp name above, still present for the instant between its
+        # create and its `mv -f` into place) -- an expansion test, not a
+        # `case` with a catch-all arm (#898 round 7). Or the pointer it
+        # just wrote.
+        [ "${_id#.tmp-}" != "$_id" ] && continue
+        [ "$_id" = "$CURRENT_SESSION_ID" ] && continue
+        [ ! -e "$SESSIONS_DIR/$_id.jsonl" ] || continue
+        _mtime=$(stat -c %Y "$_file" 2>/dev/null) \
+            || _mtime=$(stat -f %m "$_file" 2>/dev/null) \
+            || _mtime=""
+        if [ -z "$_mtime" ] || [[ "$_mtime" == *[!0-9]* ]]; then
+            continue
+        fi
+        _now=""
+        _remember_date_into _now +%s
+        if [ -z "$_now" ] || [[ "$_now" == *[!0-9]* ]]; then
+            continue
+        fi
+        if [ "$_now" -gt 0 ] && [ "$_mtime" -gt 0 ] \
+            && [ $((10#$_now - 10#$_mtime)) -lt $((GRACE_MIN * 60)) ]; then
+            continue
+        fi
+        rm -f "$_file" 2>/dev/null
+    done
+    return 0
+}
+
+if [ -d "$SESSIONS_DIR" ]; then
+    _remember_prune_stale_session_store_pointers
 fi
 unset GRACE_MIN
 

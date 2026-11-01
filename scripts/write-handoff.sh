@@ -87,6 +87,12 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# #1083: the shared resolver lib write-handoff.sh and doctor.sh both source
+# -- see its own header for the full mechanism (session-keyed pointer
+# written at SessionStart, read here first; ancestor walk kept only as a
+# fallback for a session that predates it).
+source "$SCRIPT_DIR/lib-session-store.sh"
+
 # Session id, sanitized at the point of entry -- moved ahead of the
 # CLAUDE_PROJECT_DIR resolution below (#776) because that resolution now
 # needs it too. Unchanged from its pre-#776 position otherwise: see the
@@ -99,109 +105,54 @@ if [ -z "${_WH_SESSION_ID#.}" ] || [ -z "${_WH_SESSION_ID#..}" ] \
 fi
 
 # _wh_trial_remember_dir <candidate-project-dir>
-# Prints the REMEMBER_DIR that candidate would resolve to, by running the
-# SAME resolve-paths.sh + lib-memory-dir.sh chain the real resolution below
-# uses, in a subshell -- so it can be tried twice (#776) with neither trial
-# able to leak an export, a cd, or a set -e/-u state change into this
-# script's own environment. Prints nothing and exits nonzero if the chain
-# itself fails for that candidate.
+# Thin wrapper over the shared lib's own trial function (#1083) -- kept
+# under this name so nothing else referencing it by name needs to change.
 _wh_trial_remember_dir() {
-    (
-        CLAUDE_PROJECT_DIR="$1"
-        export CLAUDE_PROJECT_DIR
-        REMEMBER_PATHS_SOFT_FAIL=1 source "$SCRIPT_DIR/resolve-paths.sh" >/dev/null 2>&1 || exit 1
-        source "$SCRIPT_DIR/lib-memory-dir.sh" >/dev/null 2>&1 || exit 1
-        [ -n "${REMEMBER_DIR:-}" ] || exit 1
-        printf '%s\n' "$REMEMBER_DIR"
-    )
+    _remember_session_store_trial_dir "$1"
 }
 
+# #1083: read the session-keyed pointer SessionStart published OUTSIDE
+# every project store, BEFORE any guessing from cwd at all. When this
+# hits, _WH_POINTER_DIR holds the final REMEMBER_DIR already -- the
+# ancestor walk below never needs to run, and never needs to disambiguate
+# anything, for any session that reaches this point after the pointer was
+# written. See lib-session-store.sh's own header for why an ancestor walk,
+# however tuned, cannot see a hint that lives outside the $(pwd)-to-git-
+# toplevel chain at all.
+_WH_POINTER_DIR=""
+if [ -n "$_WH_SESSION_ID" ]; then
+    _WH_POINTER_VAL=$(_remember_session_store_read "$_WH_SESSION_ID") && _WH_POINTER_DIR="$_WH_POINTER_VAL"
+    unset _WH_POINTER_VAL
+fi
+
+_WH_AMBIGUOUS=0
 if [ -z "${CLAUDE_PROJECT_DIR:-}" ]; then
     # #743: prefer the git top level over a possibly-stale $(pwd) -- immune
     # to a `cd` that happened earlier in the same Bash-tool call. Falls back
     # to $(pwd), unchanged, when the cwd is not inside a git repo at all.
     _WH_GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || _WH_GIT_ROOT=""
 
-    # #776: #743's blanket preference above breaks a project deliberately
-    # started from a repository SUBDIRECTORY -- a supported shape per
-    # tests/test_injection_guard_754_755_756.py's own TestSubdirectoryHandoff
-    # -- by routing every write to the enclosing repository's root store
-    # instead of the subdirectory's own. $(pwd) and the git toplevel can
-    # only disagree here if $(pwd) is genuinely a subdirectory of a git
-    # repository, so this is exactly the case that needs disambiguating; a
-    # plain non-git project, or one already sitting at its repo's own root,
-    # takes the unchanged path below (git toplevel or $(pwd), whichever is
-    # set).
-    #
-    # THIS session's SessionStart already published a hint file keyed by
-    # THIS session's own id (#738) into whichever REMEMBER_DIR it actually
-    # resolved -- nothing else can have written that file, and nothing else
-    # is asked to disambiguate. #1058 replaced the original #776 two-candidate
-    # comparison below with a full ancestor walk; a review finding on #1058/
-    # PR #1081 then replaced that walk's own first version again, from
-    # "closest ancestor with a hint wins" to "FRESHEST hint (by mtime) among
-    # every ancestor wins" -- see the comment right above the walk itself for
-    # the mechanism. So the old #776 "neither or both agree -> toplevel,
-    # unchanged" rule describes neither half accurately any more: "neither"
-    # still falls through to the toplevel as before, but "both" (or any
-    # ancestor with a hint at all) is decided by mtime, never by which
-    # ancestor happens to be nearer $(pwd) -- not even $(pwd) itself is
-    # special-cased any more.
-    if [ -n "$_WH_GIT_ROOT" ] && [ "$_WH_GIT_ROOT" != "$(pwd)" ] && [ -n "$_WH_SESSION_ID" ]; then
-        # #1058: walk every ancestor from $(pwd) up to the git toplevel,
-        # and -- review finding on #1058/PR #1081 -- pick the FRESHEST
-        # hint among every ancestor that has one, not just the nearest.
-        # session-start-hook.sh republishes tmp/handoff-path.<id> on every
-        # SessionStart for a given session id, including a `--resume` that
-        # keeps the same id but runs from a DIFFERENT directory than the
-        # one the session originally started in; the earlier directory's
-        # hint survives (session-start-hook.sh's own stale-hint reap only
-        # ever sweeps the CURRENT REMEMBER_DIR's own tmp/, never another
-        # directory's) for as long as its grace window, so "closest
-        # ancestor with a hint" can genuinely pick a directory the session
-        # has since moved on from over the one it most recently resolved
-        # to. Comparing mtimes picks whichever hint was written most
-        # recently, which is the resume's own, not an accident of which
-        # ancestor happens to be nearer $(pwd).
-        #
-        # The toplevel-reached test uses `-ef` (same device+inode), not a
-        # string compare: `git rev-parse --show-toplevel` resolves
-        # symlinks, but bash's own $(pwd) is LOGICAL and keeps whatever
-        # symlink name got `cd`'d through (e.g. macOS's /tmp ->
-        # /private/tmp). Termination itself does not depend on reaching
-        # the toplevel at all, though: it stops as soon as `dirname` makes
-        # no further progress (covers both POSIX "/" and an MSYS/Windows
-        # UNC root like "//server", where some `dirname` implementations
-        # return the same string forever -- review finding on #1058/PR
-        # #1081, reasoned rather than observed: no MSYS environment was
-        # available to exercise the UNC shape directly).
-        _WH_WALK_DIR="$(pwd)"
-        _WH_HINT_DIR=""
-        _WH_HINT_MTIME=-1
-        while :; do
-            _WH_RD_WALK=$(_wh_trial_remember_dir "$_WH_WALK_DIR") || _WH_RD_WALK=""
-            if [ -n "$_WH_RD_WALK" ]; then
-                _WH_HINT_FILE_WALK="$_WH_RD_WALK/tmp/handoff-path.$_WH_SESSION_ID"
-                if [ -f "$_WH_HINT_FILE_WALK" ]; then
-                    _WH_MTIME_WALK=$(stat -c %Y "$_WH_HINT_FILE_WALK" 2>/dev/null) \
-                        || _WH_MTIME_WALK=$(stat -f %m "$_WH_HINT_FILE_WALK" 2>/dev/null) \
-                        || _WH_MTIME_WALK=""
-                    if [ -n "$_WH_MTIME_WALK" ] && [[ "$_WH_MTIME_WALK" != *[!0-9]* ]] \
-                        && [ "$_WH_MTIME_WALK" -gt "$_WH_HINT_MTIME" ]; then
-                        _WH_HINT_MTIME="$_WH_MTIME_WALK"
-                        _WH_HINT_DIR="$_WH_WALK_DIR"
-                    fi
-                fi
-            fi
-            [ "$_WH_WALK_DIR" -ef "$_WH_GIT_ROOT" ] && break
-            _WH_WALK_NEXT=$(dirname "$_WH_WALK_DIR")
-            [ "$_WH_WALK_NEXT" = "$_WH_WALK_DIR" ] && break
-            _WH_WALK_DIR="$_WH_WALK_NEXT"
-        done
-        if [ -n "$_WH_HINT_DIR" ]; then
-            _WH_GIT_ROOT="$_WH_HINT_DIR"
-        fi
-        unset _WH_RD_WALK _WH_WALK_DIR _WH_WALK_NEXT _WH_HINT_DIR _WH_HINT_MTIME _WH_HINT_FILE_WALK _WH_MTIME_WALK
+    # #776/#1058/#1083: #743's blanket preference above breaks a project
+    # deliberately started from a repository SUBDIRECTORY -- a supported
+    # shape per tests/test_injection_guard_754_755_756.py's own
+    # TestSubdirectoryHandoff. This whole block only runs AT ALL when
+    # _WH_POINTER_DIR above came up empty -- a session that predates the
+    # #1083 pointer, or lost it some other way -- so it is a fallback, not
+    # the primary mechanism: see lib-session-store.sh's own header for why.
+    # #1083 review: the walk's own tie-break used to pick the FRESHEST hint
+    # (by mtime) among every ancestor that had one; that is gone now -- a
+    # same-second write defeated it outright, and #1083's own ruling is to
+    # REFUSE on an ambiguous result rather than keep guessing. See
+    # _remember_session_store_ancestor_candidate's own header for the walk
+    # itself.
+    if [ -z "$_WH_POINTER_DIR" ] && [ -n "$_WH_GIT_ROOT" ] && [ "$_WH_GIT_ROOT" != "$(pwd)" ] && [ -n "$_WH_SESSION_ID" ]; then
+        # Called directly, not via $(...): the ambiguous flag is a second
+        # return value the function sets as a global, which a command
+        # substitution's own subshell would swallow (see the function's own
+        # header).
+        _remember_session_store_ancestor_candidate "$_WH_GIT_ROOT" "$_WH_SESSION_ID"
+        _WH_GIT_ROOT="$_REMEMBER_SESSION_STORE_RESULT"
+        _WH_AMBIGUOUS="$_REMEMBER_SESSION_STORE_AMBIGUOUS"
     fi
 
     if [ -n "$_WH_GIT_ROOT" ]; then
@@ -210,6 +161,16 @@ if [ -z "${CLAUDE_PROJECT_DIR:-}" ]; then
         CLAUDE_PROJECT_DIR="$(pwd)"
     fi
     export CLAUDE_PROJECT_DIR
+fi
+
+# #1083: no pointer, and the fallback walk just above found more than one
+# ancestor claiming this session -- refuse rather than guess. A session
+# with a pointer (the ordinary case for anything started after this fix)
+# never reaches here: _WH_POINTER_DIR was already non-empty, and the
+# fallback block above never ran at all.
+if [ -z "$_WH_POINTER_DIR" ] && [ "$_WH_AMBIGUOUS" = 1 ]; then
+    echo "REFUSED: more than one candidate store matched this session, and no session-start pointer exists to disambiguate -- restart this session (or let its next SessionStart run) rather than risk writing the handoff note to the wrong one." >&2
+    exit 1
 fi
 
 _WH_RESOLVE_ERR_FILE=$(mktemp "${TMPDIR:-/tmp}/remember-write-handoff-resolve-XXXXXX" 2>/dev/null) || _WH_RESOLVE_ERR_FILE=""
@@ -230,6 +191,20 @@ if [ "$_WH_RESOLVE_STATUS" -ne 0 ]; then
 fi
 
 source "$SCRIPT_DIR/lib-memory-dir.sh"
+
+# #1083: the pointer -- read above, before any cwd-based guessing -- names
+# the actual REMEMBER_DIR directly, overriding whatever CLAUDE_PROJECT_DIR
+# this script guessed (or was given) just to get resolve-paths.sh/
+# lib-memory-dir.sh to run at all. Its shape was already validated in
+# _remember_session_store_read, with the exact predicate
+# lib-memory-dir.sh's own REMEMBER_DIR_UNSAFE check applies -- re-asserted
+# here (not re-derived) so the rest of this script, including the #920
+# REMEMBER_DIR_UNSAFE gate further down, sees a consistent, already-safe
+# value rather than whatever the pre-override guess computed.
+if [ -n "$_WH_POINTER_DIR" ]; then
+    REMEMBER_DIR="$_WH_POINTER_DIR"
+    REMEMBER_DIR_UNSAFE=0
+fi
 
 if [ -z "${REMEMBER_DIR:-}" ]; then
     echo "REFUSED: REMEMBER_DIR did not resolve" >&2

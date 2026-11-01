@@ -61,6 +61,10 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# #1083: the shared resolver lib write-handoff.sh and doctor.sh both
+# source -- see its own header for the full mechanism.
+source "$SCRIPT_DIR/lib-session-store.sh"
+
 # Session id, sanitized at the point of entry -- same restriction
 # session-start-hook.sh applies before ever using it in a filename. Ported
 # from write-handoff.sh's own #776 fix so both --json and the human report
@@ -71,75 +75,50 @@ if [ -z "${_DOCTOR_SESSION_ID#.}" ] || [ -z "${_DOCTOR_SESSION_ID#..}" ] \
     _DOCTOR_SESSION_ID=""
 fi
 
+# #1083: read the session-keyed pointer SessionStart published OUTSIDE
+# every project store, the same way write-handoff.sh does, BEFORE any
+# guessing from cwd. _DOCTOR_POINTER_DIR holds the REMEMBER_DIR
+# write-handoff.sh would actually use, when one is available.
+_DOCTOR_POINTER_DIR=""
+if [ -n "$_DOCTOR_SESSION_ID" ]; then
+    _doctor_pointer_val=$(_remember_session_store_read "$_DOCTOR_SESSION_ID") && _DOCTOR_POINTER_DIR="$_doctor_pointer_val"
+    unset _doctor_pointer_val
+fi
+
 # _doctor_trial_remember_dir <candidate-project-dir>
-# Prints the REMEMBER_DIR that candidate would resolve to, by running the
-# same resolve-paths.sh + lib-memory-dir.sh chain the real resolution below
-# uses, in a subshell -- mirrors write-handoff.sh's own _wh_trial_remember_dir
-# (#776/#827). Prints nothing and exits nonzero if the chain itself fails.
+# Thin wrapper over the shared lib's own trial function (#1083) -- kept
+# under this name so nothing else referencing it by name needs to change.
 _doctor_trial_remember_dir() {
-    (
-        CLAUDE_PROJECT_DIR="$1"
-        export CLAUDE_PROJECT_DIR
-        REMEMBER_PATHS_SOFT_FAIL=1 source "$SCRIPT_DIR/resolve-paths.sh" >/dev/null 2>&1 || exit 1
-        source "$SCRIPT_DIR/lib-memory-dir.sh" >/dev/null 2>&1 || exit 1
-        [ -n "${REMEMBER_DIR:-}" ] || exit 1
-        printf '%s\n' "$REMEMBER_DIR"
-    )
+    _remember_session_store_trial_dir "$1"
 }
 
 # _doctor_resolve_project_dir_candidate <git-root>
-# #827: the #802 blanket git-root preference below (both --json and the
-# human report) breaks a project deliberately started from a repository
-# SUBDIRECTORY -- the same shape write-handoff.sh's own #776 fix
-# disambiguates -- by routing the report onto the enclosing repository's
-# store instead of the subdirectory project's own.
-#
-# #1058/#1082: ported write-handoff.sh's own ancestor-walk fix (not the
-# original #827 two-candidate check) so this diagnostic reports the SAME
-# store write-handoff.sh would actually write into, including when $(pwd)
-# has moved deeper than the subdirectory project the session started in.
-# Walks every ancestor from $(pwd) up to the git toplevel, picking whichever
-# one's own store carries the FRESHEST copy of this session's hint (not
-# just the nearest -- a `--resume` from a different directory republishes
-# the hint there without pruning an earlier directory's copy, so "nearest"
-# alone can pick a directory the session has since moved on from). Falls
-# back to the toplevel, unchanged, when no ancestor has a hint at all.
-# Termination does not depend on reaching the toplevel: it stops as soon as
-# `dirname` makes no further progress, covering both POSIX "/" and an
-# MSYS/Windows UNC root like "//server" (reasoned, not observed -- no MSYS
-# environment was available here).
+# FALLBACK ONLY, reached only when _DOCTOR_POINTER_DIR above is empty
+# (#1083) -- a session that predates the pointer. #827: the #802 blanket
+# git-root preference below (both --json and the human report) breaks a
+# project deliberately started from a repository SUBDIRECTORY -- the same
+# shape write-handoff.sh's own #776 fix disambiguates -- by routing the
+# report onto the enclosing repository's store instead of the subdirectory
+# project's own. Delegates the walk itself to the shared lib
+# (_remember_session_store_ancestor_candidate) and, on an ambiguous result
+# (more than one ancestor claims this session, #1083 review), WARNs rather
+# than refusing outright -- doctor.sh's whole purpose is to always report
+# something, not to withhold a report the way write-handoff.sh's REFUSED
+# exit code does.
+# NOT called via command substitution at its own call sites below -- same
+# reason the shared lib's own ancestor-candidate function documents: the
+# ambiguous flag is a second return value set as a global, and a `$(...)`
+# subshell would swallow it. Sets _DOCTOR_RESOLVE_RESULT and
+# _DOCTOR_AMBIGUOUS; callers read both after calling this directly.
 _doctor_resolve_project_dir_candidate() {
     _doctor_git_root="$1"
-    if [ -n "$_doctor_git_root" ] && [ "$_doctor_git_root" != "$(pwd)" ] && [ -n "$_DOCTOR_SESSION_ID" ]; then
-        _doctor_walk_dir="$(pwd)"
-        _doctor_hint_dir=""
-        _doctor_hint_mtime=-1
-        while :; do
-            _doctor_rd_walk=$(_doctor_trial_remember_dir "$_doctor_walk_dir") || _doctor_rd_walk=""
-            if [ -n "$_doctor_rd_walk" ]; then
-                _doctor_hint_file_walk="$_doctor_rd_walk/tmp/handoff-path.$_DOCTOR_SESSION_ID"
-                if [ -f "$_doctor_hint_file_walk" ]; then
-                    _doctor_mtime_walk=$(stat -c %Y "$_doctor_hint_file_walk" 2>/dev/null) \
-                        || _doctor_mtime_walk=$(stat -f %m "$_doctor_hint_file_walk" 2>/dev/null) \
-                        || _doctor_mtime_walk=""
-                    if [ -n "$_doctor_mtime_walk" ] && [[ "$_doctor_mtime_walk" != *[!0-9]* ]] \
-                        && [ "$_doctor_mtime_walk" -gt "$_doctor_hint_mtime" ]; then
-                        _doctor_hint_mtime="$_doctor_mtime_walk"
-                        _doctor_hint_dir="$_doctor_walk_dir"
-                    fi
-                fi
-            fi
-            [ "$_doctor_walk_dir" -ef "$_doctor_git_root" ] && break
-            _doctor_walk_next=$(dirname "$_doctor_walk_dir")
-            [ "$_doctor_walk_next" = "$_doctor_walk_dir" ] && break
-            _doctor_walk_dir="$_doctor_walk_next"
-        done
-        if [ -n "$_doctor_hint_dir" ]; then
-            _doctor_git_root="$_doctor_hint_dir"
-        fi
-        unset _doctor_rd_walk _doctor_walk_dir _doctor_walk_next _doctor_hint_dir _doctor_hint_mtime _doctor_hint_file_walk _doctor_mtime_walk
+    _DOCTOR_RESOLVE_RESULT="$_doctor_git_root"
+    _DOCTOR_AMBIGUOUS=0
+    if [ -z "$_DOCTOR_POINTER_DIR" ] && [ -n "$_doctor_git_root" ] && [ "$_doctor_git_root" != "$(pwd)" ] && [ -n "$_DOCTOR_SESSION_ID" ]; then
+        _remember_session_store_ancestor_candidate "$_doctor_git_root" "$_DOCTOR_SESSION_ID"
+        _DOCTOR_RESOLVE_RESULT="$_REMEMBER_SESSION_STORE_RESULT"
+        _DOCTOR_AMBIGUOUS="$_REMEMBER_SESSION_STORE_AMBIGUOUS"
     fi
-    printf '%s' "$_doctor_git_root"
     unset _doctor_git_root
 }
 
@@ -182,7 +161,8 @@ if [ "${1:-}" = "--json" ]; then
         # repo at all. Same pattern write-handoff.sh's own #743 fix
         # established.
         _DOCTOR_JSON_GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || _DOCTOR_JSON_GIT_ROOT=""
-        _DOCTOR_JSON_GIT_ROOT=$(_doctor_resolve_project_dir_candidate "$_DOCTOR_JSON_GIT_ROOT")
+        _doctor_resolve_project_dir_candidate "$_DOCTOR_JSON_GIT_ROOT"
+        _DOCTOR_JSON_GIT_ROOT="$_DOCTOR_RESOLVE_RESULT"
         if [ -n "$_DOCTOR_JSON_GIT_ROOT" ]; then
             CLAUDE_PROJECT_DIR="$_DOCTOR_JSON_GIT_ROOT"
         else
@@ -251,6 +231,14 @@ if [ "${1:-}" = "--json" ]; then
     fi
 
     source "$SCRIPT_DIR/lib-memory-dir.sh"
+
+    # #1083: the pointer -- read above, before any cwd-based guessing --
+    # names the actual REMEMBER_DIR directly. Overrides whatever the
+    # CLAUDE_PROJECT_DIR guess above computed, same as write-handoff.sh.
+    if [ -n "$_DOCTOR_POINTER_DIR" ]; then
+        REMEMBER_DIR="$_DOCTOR_POINTER_DIR"
+        REMEMBER_DIR_UNSAFE=0
+    fi
 
     # #517: both sides forward-slashed before the `==`-glob comparison --
     # REMEMBER_DIR and PROJECT_DIR both arrive backslash-separated on
@@ -364,7 +352,8 @@ if [ -z "${CLAUDE_PROJECT_DIR:-}" ]; then
     # to $(pwd), unchanged, when the cwd is not inside a git repo at all.
     # Same pattern write-handoff.sh's own #743 fix established.
     _DOCTOR_GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || _DOCTOR_GIT_ROOT=""
-    _DOCTOR_GIT_ROOT=$(_doctor_resolve_project_dir_candidate "$_DOCTOR_GIT_ROOT")
+    _doctor_resolve_project_dir_candidate "$_DOCTOR_GIT_ROOT"
+    _DOCTOR_GIT_ROOT="$_DOCTOR_RESOLVE_RESULT"
     if [ -n "$_DOCTOR_GIT_ROOT" ]; then
         CLAUDE_PROJECT_DIR="$_DOCTOR_GIT_ROOT"
     else
@@ -402,6 +391,25 @@ echo "OK   PIPELINE_DIR       = $PIPELINE_DIR"
 # lib-slug.sh itself, so session_dir_slug/claude_projects_dir are available
 # without going through detect-tools.sh's exit-prone python check.
 source "$SCRIPT_DIR/lib-memory-dir.sh"
+
+# #1083: the pointer -- read above, before any cwd-based guessing -- names
+# the actual REMEMBER_DIR directly. Overrides whatever the
+# CLAUDE_PROJECT_DIR guess above computed, same as write-handoff.sh. When
+# the ancestor-walk fallback found this ambiguous (and no pointer exists),
+# say so here -- doctor.sh always reports something; it never silently
+# withholds the way write-handoff.sh's REFUSED exit does.
+if [ -n "$_DOCTOR_POINTER_DIR" ]; then
+    REMEMBER_DIR="$_DOCTOR_POINTER_DIR"
+    REMEMBER_DIR_UNSAFE=0
+elif [ "${_DOCTOR_AMBIGUOUS:-0}" = 1 ]; then
+    echo "WARN Session-store resolution: more than one candidate store matched"
+    echo "     this session, with no session-start pointer to disambiguate --"
+    echo "     write-handoff.sh would REFUSE to write rather than guess. The"
+    echo "     REMEMBER_DIR reported below is this diagnostic's best-effort"
+    echo "     fallback (the enclosing repository's own store), which may not"
+    echo "     be where a note would actually land."
+fi
+
 # #920 scheduler review round 2, item 4: this line used to print "OK" for
 # REMEMBER_DIR unconditionally, even when lib-memory-dir.sh's own
 # REMEMBER_DIR_UNSAFE=1 meant every downstream save site had already
