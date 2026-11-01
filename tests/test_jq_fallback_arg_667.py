@@ -175,6 +175,19 @@ def _store(tmp_path: Path, *, prev_saved: bool, last_save_body: dict | None = No
     prev = session_dir / f"{PREV_SESSION}.jsonl"
     prev.write_text('{"type":"assistant","message":{"content":"x"}}\n')
 
+    # #1046 round 2: recovery now also requires roster evidence that PREV_SESSION
+    # ran under THIS store before it will force-save it. A genuine previous
+    # session always has this by construction -- its own SessionStart hook
+    # writes it at startup (session-start-hook.sh, the #1046-round-2 marker,
+    # same file PREV's post-tool-hook.sh marker would also land in). This
+    # fixture writes PREV's transcript directly rather than running the hook
+    # for it, so the marker has to be planted by hand -- otherwise every case
+    # here would be indistinguishable from PREV belonging to a DIFFERENT
+    # store, which is a different bug (#1046's own repro) than the one this
+    # file is about (#667's jq-fallback argv parsing).
+    (remember / "tmp" / "capture-alive.d").mkdir(parents=True, exist_ok=True)
+    (remember / "tmp" / "capture-alive.d" / PREV_SESSION).write_text("")
+
     if last_save_body is not None:
         body = last_save_body
     elif prev_saved:

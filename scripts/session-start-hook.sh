@@ -125,11 +125,32 @@ _remember_hook_clock_into _REMEMBER_HOOK_T0
 # bytes: milliseconds even at that rate. And the compiled hook sits 37 bytes
 # under the 120 KiB release budget (check_release_tree.py), which the inlined
 # library (about 1.2 KB) would break.
+# #1047 round 2: the join below, `HOOK_STDIN="$HOOK_STDIN$_line"`, is a
+# SECOND quadratic independent of the one `_stdin_json_string_into` already
+# bounds -- this one tracks the number of LINES, not the length of any one
+# line. Measured: 3.3 MB over 2,500 lines, 68.8s on bash 3.2 and 23.6s on
+# bash 5.3 just to finish the read loop, before extraction ever runs.
+# _REMEMBER_HOOK_STDIN_CAP is hoisted here from its old home next to the
+# hooks.d/ publish block below (#266) because the cap must now be enforced
+# DURING accumulation, not after: stopping at this ceiling, rather than
+# building the full string and slicing it afterwards, is what keeps this
+# loop itself from ever re-growing a multi-megabyte string one line at a
+# time. The publish block's own byte-for-byte promise (#266) is preserved
+# for every payload AT OR UNDER this cap -- nothing here shortens anything
+# that would otherwise fit.
+_REMEMBER_HOOK_STDIN_CAP=32768
 HOOK_STDIN=""
+_hook_stdin_truncated=0
 if [ ! -t 0 ]; then
     _line=""
     while IFS= read -r -t 1 _line || [ -n "$_line" ]; do
-        HOOK_STDIN="$HOOK_STDIN$_line"
+        if [ "$_hook_stdin_truncated" -eq 0 ]; then
+            HOOK_STDIN="$HOOK_STDIN$_line"
+            if [ "${#HOOK_STDIN}" -gt "$_REMEMBER_HOOK_STDIN_CAP" ]; then
+                HOOK_STDIN=${HOOK_STDIN:0:$_REMEMBER_HOOK_STDIN_CAP}
+                _hook_stdin_truncated=1
+            fi
+        fi
         _line=""
     done
 fi
@@ -334,6 +355,23 @@ if [ -z "${CURRENT_SESSION_ID#.}" ] || [ -z "${CURRENT_SESSION_ID#..}" ] \
     CURRENT_SESSION_ID=""
 fi
 
+# #1046 round 2: a chat-only session (no tool call at all, so
+# post-tool-hook.sh's own capture-alive.d marker is never written) that then
+# dies without a clean SessionEnd was no longer rescuable by recovery once
+# #1046's roster guard landed above -- real data loss introduced BY that
+# fix, not present before it: the guard correctly declines to force-save a
+# candidate with no roster evidence under this store, but a chat-only
+# session could never have earned any. Writing a second, cheaper marker
+# here -- at the START of every session, under this same store, for THIS
+# session's own id -- gives even a tool-less session one piece of roster
+# evidence by the time it could ever become a later session's PREV_ID. A
+# plain redirect, no subprocess fork, to stay on the hot synchronous path
+# the way #1040's own comment on this file requires.
+if [ -n "$REMEMBER_DIR" ] && [ -n "$CURRENT_SESSION_ID" ]; then
+    mkdir -p "$REMEMBER_DIR/tmp/capture-alive.d" 2>/dev/null
+    : > "$REMEMBER_DIR/tmp/capture-alive.d/$CURRENT_SESSION_ID" 2>/dev/null
+fi
+
 # ── The transcript path the host handed us (#407) ─────────────────────────
 # Read from the same payload, exported for pipeline/host.transcript_path() to
 # pick up in any Python process this hook (or something it dispatches)
@@ -383,14 +421,18 @@ fi
 # cannot tell it from a genuinely short one. Three states, the third disclosed:
 #
 #   FILE unset                     no payload arrived, or no listener
-#   STDIN non-empty                the whole payload
-#   STDIN empty and FILE set       too large for the environment; the file
-#                                  holds it, complete
+#   STDIN non-empty                the whole payload, complete
+#   STDIN empty and FILE set       the payload was truncated at the
+#                                  accumulation cap (#1047 round 2) --
+#                                  neither the env var nor the file holds
+#                                  more than _REMEMBER_HOOK_STDIN_CAP bytes
+#                                  of it, because HOOK_STDIN itself was
+#                                  never allowed to grow past that during
+#                                  the read loop above
 #
 # Nothing is written at all unless a listener is installed — the shipped
 # distribution's before_session_start/ and after_session_start/ hold a
 # .gitkeep and, for the git hooks, scripts that never read stdin.
-REMEMBER_HOOK_STDIN_MAX=32768
 _hook_stdin_file=""
 
 _session_start_listener() {
@@ -412,7 +454,12 @@ if [ -n "$HOOK_STDIN" ] && _session_start_listener; then
         rm -f "$_hook_stdin_file" 2>/dev/null
         _hook_stdin_file=""
     fi
-    if [ "${#HOOK_STDIN}" -le "$REMEMBER_HOOK_STDIN_MAX" ]; then
+    # Length can no longer tell the two states apart -- HOOK_STDIN is
+    # already capped at _REMEMBER_HOOK_STDIN_CAP by the read loop above, so
+    # its length is always <= the cap whether or not the real payload was
+    # longer. _hook_stdin_truncated (set only by that loop) is the actual
+    # signal now.
+    if [ "$_hook_stdin_truncated" -eq 0 ]; then
         export REMEMBER_HOOK_STDIN="$HOOK_STDIN"
     else
         export REMEMBER_HOOK_STDIN=""

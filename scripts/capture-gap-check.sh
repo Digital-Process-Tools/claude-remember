@@ -552,8 +552,20 @@ _remember_write_case_divergence() {
 # ever changes -- session-start-hook.sh's own copy is the one with the full
 # rationale comment.
 _stdin_json_string_into() {
+    # #1047 self-review (kept identical to session-start-hook.sh's own copy,
+    # per the comment above -- tests/test_entrypoint_sniff_bookkeeping_message_803.py
+    # pins the two bodies as byte-identical, comments stripped): byte-counted,
+    # not character-counted, so a multi-byte line read from a transcript does
+    # not widen the bound this function enforces below.
+    local LC_ALL=C
     local _sjsi_var="$1" _sjsi_field="$2" _sjsi_raw="$3" _sjsi_rest _sjsi_prefix _sjsi_value _sjsi_dq
     printf -v "$_sjsi_var" '%s' ""
+    # #1047: bounding the INPUT to the match keeps this O(1) per call
+    # regardless of how long the transcript line handed to it is -- the
+    # same quadratic `${var#*pattern}` cost session-start-hook.sh's own
+    # copy exists to bound, here against one JSONL line read from disk
+    # rather than against stdin.
+    [ "${#_sjsi_raw}" -gt 4096 ] && _sjsi_raw=${_sjsi_raw:0:4096}
     # The double quote is held in a variable (octal 042) rather than written
     # backslash-escaped: the plugin directory's scanner mis-tracks an
     # escaped quote (#898 round 8). Same patterns, same quoting of the field.
@@ -563,6 +575,11 @@ _stdin_json_string_into() {
     _sjsi_prefix=${_sjsi_rest%%"$_sjsi_dq"*}
     if [[ "$_sjsi_prefix" == *[!:[:space:]]* ]]; then return 1; fi
     _sjsi_value=${_sjsi_rest#*"$_sjsi_dq"}
+    # #1047 self-review: fail closed, rather than returning the unterminated
+    # truncated tail as a corrupted-but-non-empty value, when the value's own
+    # closing quote fell past the bound above -- same fix as
+    # session-start-hook.sh's own copy.
+    [[ "$_sjsi_value" == *"$_sjsi_dq"* ]] || return 1
     _sjsi_value=${_sjsi_value%%"$_sjsi_dq"*}
     # A JSON encoder writes each backslash as `\\` -- a Windows `cwd` from
     # Codex arrives as `C:\\work\\proj` otherwise (#829).
@@ -843,6 +860,11 @@ config_into _recovery_enabled '.features.recovery' true
 # feature flag alone: "enabled" with nothing to attempt is the same
 # user-facing case as "disabled", so both get the original wording (#745).
 _recovery_attempted=""
+# #1046 round 2: set when recovery itself judged PREV_ID unvouched under
+# this store -- consulted by the #200 notice below, which reads the same
+# absence and must not report it as "never captured" when it may instead
+# belong to a different store.
+_prev_id_possibly_foreign_store=""
 if [ "$_recovery_enabled" = "true" ]; then
 if [ -d "$SESSIONS_DIR" ] && [ -f "$LAST_SAVE_FILE" ] && [ -n "$PREV_ID" ]; then
     if [ "$PREV_WAS_SAVED" = "no" ]; then
@@ -873,6 +895,12 @@ if [ -d "$SESSIONS_DIR" ] && [ -f "$LAST_SAVE_FILE" ] && [ -n "$PREV_ID" ]; then
         # every recovery.
         if [ -n "$REMEMBER_DIR" ] && ! _remember_recovery_prev_id_vouched "$PREV_ID"; then
             log "hook" "recovery: skipping force-save of $PREV_ID -- no capture-alive.d marker or legacy capture-alive slot under this REMEMBER_DIR (#1046: may belong to a different store sharing this project's transcript directory)"
+            # #1046 round 2: the #200 capture-gap notice below reads the SAME
+            # absence (no marker under this store) as "never captured" -- a
+            # false positive for exactly this case, since the session may
+            # simply belong to a different store. Recorded here, consulted
+            # there, so the notice can tell the two apart.
+            _prev_id_possibly_foreign_store="true"
         else
         # REMEMBER_TRANSCRIPT_PATH (exported above, #407) names THIS session's
         # own transcript -- it must not reach a save being forced for a
@@ -1105,6 +1133,13 @@ else
         _capture_gap_notice="remember: your previous session was not captured. If you just installed or enabled the plugin, that is expected -- capture starts now. Otherwise its hooks were not registered for that session; run /remember:doctor."
         if [ "$_recovery_attempted" = "true" ]; then
             _capture_gap_notice="remember: your previous session was not captured live -- its hooks did not run. It is being recovered from its transcript now, so nothing should be lost; if this keeps happening for interactive sessions, run /remember:doctor."
+        elif [ "$_prev_id_possibly_foreign_store" = "true" ]; then
+            # #1046 round 2: recovery's own log already says "may belong to
+            # a different store" for this exact case -- the flat "not
+            # captured" wording above would contradict that and read as a
+            # real gap when it may just be a different pinned store sharing
+            # this project's transcript directory.
+            _capture_gap_notice="remember: no record of your previous session under this store. If several Claude Code windows share this project with different pinned stores, that is expected. Otherwise its hooks were not registered for that session; run /remember:doctor."
         fi
         echo "$_capture_gap_notice" \
             > "$REMEMBER_DIR/tmp/capture-gap-notice" 2>/dev/null || true

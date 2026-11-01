@@ -1115,12 +1115,23 @@ if [ "${#_RS_FILES[@]}" -gt 0 ]; then
 fi
 unset _RS_FILES _remember_rs_glob_dir _rs_f _rs_count_file
 if [ "$_RS_COUNT" -gt 0 ]; then
+    # #898 round 8 convention: hold the double quote in a variable rather
+    # than writing it backslash-escaped -- the plugin directory's scanner
+    # mis-tracks an escaped quote. Sibling warnings in this file already use
+    # this (e.g. the git-backup/git-reconcile hooks' own copies).
+    printf -v _rs_dq '\042'
     echo "WARN $_RS_COUNT span(s) dropped by a reject gate (summarizer refusal or"
-    echo "     \"not an entry header\") across the logs present -- the call"
+    echo "     ${_rs_dq}not an entry header${_rs_dq}) across the logs present -- the call"
     echo "     succeeded each time, so this is invisible to the Summarizer"
-    echo "     failures check above. The text is kept, not lost -- see"
-    echo "     $REMEMBER_DIR/tmp/rejected-*.md. Most recent:"
+    # #1052: keep_rejected_text (save-session.sh) saves the REFUSAL TEXT --
+    # the model's own reply explaining why it would not summarize -- never
+    # the dropped SPAN itself, and by the time it runs the read position has
+    # already moved past that span. The refusal text is kept; the span is
+    # not. Do not claim otherwise here.
+    echo "     failures check above. The refusal text (not the dropped span"
+    echo "     itself) is kept -- see $REMEMBER_DIR/tmp/rejected-*.md. Most recent:"
     echo "     $_RS_LAST_LINE"
+    unset _rs_dq
 else
     echo "OK   No dropped summarizer spans recorded (no [validate]/[haiku] REJECTED line in the logs present)"
 fi

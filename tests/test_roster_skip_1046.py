@@ -41,10 +41,12 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
 
+from ._bash_runner import resolve_bash
 from .subprocess_helpers import subprocess_failure_detail
 from .test_session_start_prev_session_270 import (
     CURRENT,
@@ -60,10 +62,24 @@ from .test_session_start_prev_session_270 import (
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-pytestmark = pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="bash hook subprocess + POSIX semantics -- not portable to Windows runners",
-)
+pytestmark = [
+    pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="bash hook subprocess + POSIX semantics -- not portable to Windows runners",
+    ),
+]
+
+# #1046 round 2: the two direct subprocess calls below drove the extracted
+# _remember_recovery_prev_id_vouched function with a literal "bash" argv
+# rather than this repo's own resolve_bash() convention -- on Windows that
+# literal resolves to the WSL launcher (UTF-16LE stdout, exit 127), the
+# exact defect class documented in CHANGELOG.md that moved every other test
+# file in this suite onto resolve_bash(). The module itself still
+# unconditionally skips on win32 (see pytestmark above): BASH is only used
+# by the two direct-function calls, which would otherwise hardcode the same
+# bad resolution this convention exists to avoid, independent of whether
+# the module-level skip itself is ever lifted.
+BASH = resolve_bash()
 
 
 def test_recovery_declines_a_candidate_with_no_roster_marker_in_this_store(tmp_path):
@@ -102,6 +118,47 @@ def test_recovery_declines_a_candidate_with_no_roster_marker_in_this_store(tmp_p
     )
 
 
+def test_declined_candidate_gets_the_reworded_capture_gap_notice(tmp_path):
+    """#1046 round 2: the pre-existing #200 "never captured" notice reads the
+    SAME absence (no marker for PREV under this store) the roster guard
+    above just declined to rescue on -- a false positive, since recovery's
+    own log already says "may belong to a different store" for this exact
+    case. The notice must say that too, not the flat "was not captured"
+    wording, which would contradict it."""
+    home, project, remember, _ = _startup_project(tmp_path)
+    assert not (remember / "tmp" / "capture-alive.d" / PREV).exists(), (
+        "precondition: no roster marker for PREV under this store"
+    )
+    (remember / "tmp" / "last-save.json").write_text(json.dumps({"sessions": {}}))
+    record = tmp_path / "save-argv.txt"
+    root = _plugin_root_with_stub_save(tmp_path, record)
+
+    result = _run(
+        _env(home, project, remember, plugin_root=root),
+        _payload(CURRENT),
+        script=root / "scripts" / "session-start-hook.sh",
+    )
+    assert result.returncode == 0, subprocess_failure_detail(result, remember)
+
+    notice_path = remember / "tmp" / "capture-gap-notice"
+    deadline = time.monotonic() + 10.0
+    notice = ""
+    while time.monotonic() < deadline:
+        if notice_path.exists():
+            notice = notice_path.read_text(encoding="utf-8").strip()
+            if notice:
+                break
+        time.sleep(0.05)
+    assert notice, "expected a capture-gap notice to be written"
+    assert "different pinned stores" in notice, (
+        f"expected the reworded, cross-store-aware notice, got: {notice!r}"
+    )
+    assert "was not captured. If you just installed" not in notice, (
+        f"got the flat never-captured wording despite recovery's own log "
+        f"saying this may belong to a different store: {notice!r}"
+    )
+
+
 def test_positive_control_a_marked_candidate_is_still_rescued(tmp_path):
     """Positive control, paired with the must-fire case above: when PREV IS
     marked under this store's roster, recovery must still force-save it --
@@ -124,6 +181,54 @@ def test_positive_control_a_marked_candidate_is_still_rescued(tmp_path):
     assert PREV in argv, (
         f"expected recovery to rescue the roster-marked session {PREV!r}, "
         f"got {argv!r}"
+    )
+
+
+def test_a_chat_only_previous_session_is_still_rescued(tmp_path):
+    """#1046 round 2: a chat-only session (no tool call at all) never earns
+    post-tool-hook.sh's own capture-alive.d marker -- the roster guard above
+    would then decline to rescue it on its NEXT startup, which is new data
+    loss introduced by the roster guard itself, not present before it. Fixed
+    by having SessionStart write its OWN cheap marker for the session
+    starting now, so even a chat-only session earns one. Simulated here by
+    actually running session-start-hook.sh once for PREV (its own, earlier
+    startup -- no tool call follows, so post-tool-hook.sh never runs for it
+    either) before running it again for CURRENT, rather than hand-planting
+    the marker the way the other tests in this file do -- this is the one
+    exercising the NEW marker-write itself, not merely consuming it."""
+    home, project, remember, _ = _startup_project(tmp_path)
+    assert not (remember / "tmp" / "capture-alive.d" / PREV).exists(), (
+        "precondition: no roster marker for PREV before its own startup runs"
+    )
+    (remember / "tmp" / "last-save.json").write_text(json.dumps({"sessions": {}}))
+    record = tmp_path / "save-argv.txt"
+    root = _plugin_root_with_stub_save(tmp_path, record)
+
+    # PREV's own earlier startup -- chat-only, no tool call ever follows.
+    prev_result = _run(
+        _env(home, project, remember, plugin_root=root),
+        _payload(PREV),
+        script=root / "scripts" / "session-start-hook.sh",
+    )
+    assert prev_result.returncode == 0, subprocess_failure_detail(prev_result, remember)
+    assert (remember / "tmp" / "capture-alive.d" / PREV).exists(), (
+        "PREV's own SessionStart should have written its cheap roster "
+        "marker even though no tool call ever ran for it"
+    )
+
+    # CURRENT's startup, which is where recovery considers rescuing PREV.
+    result = _run(
+        _env(home, project, remember, plugin_root=root),
+        _payload(CURRENT),
+        script=root / "scripts" / "session-start-hook.sh",
+    )
+    assert result.returncode == 0, subprocess_failure_detail(result, remember)
+
+    argv = _await_record(record)
+    assert PREV in argv, (
+        f"expected recovery to rescue the chat-only previous session "
+        f"{PREV!r} on the strength of its OWN SessionStart marker, got "
+        f"{argv!r}"
     )
 
 
@@ -216,7 +321,7 @@ def test_a_malformed_id_is_never_vouched_for_even_with_a_marker_present(tmp_path
 
     for malformed_id in (".", ".."):
         result = subprocess.run(
-            ["bash", "-c", script, "bash", str(remember), malformed_id],
+            [BASH, "-c", script, "bash", str(remember), malformed_id],
             capture_output=True, text=True, timeout=10, check=False,
         )
         assert result.stdout.strip() == "1", (
@@ -239,7 +344,7 @@ def test_a_well_formed_id_with_a_real_marker_is_vouched_for(tmp_path):
     script = _VOUCH_DRIVER % body
 
     result = subprocess.run(
-        ["bash", "-c", script, "bash", str(remember), PREV],
+        [BASH, "-c", script, "bash", str(remember), PREV],
         capture_output=True, text=True, timeout=10, check=False,
     )
     assert result.stdout.strip() == "0", (
