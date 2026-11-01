@@ -29,6 +29,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, os.path.dirname(__file__))
+from _bash_runner import resolve_bash
 from subprocess_helpers import subprocess_failure_detail
 from test_save_session_gates import _make_env  # shared harness
 
@@ -36,6 +37,14 @@ pytestmark = pytest.mark.skipif(
     sys.platform == "win32",
     reason="bash hook subprocess + POSIX semantics — not portable to Windows runners",
 )
+
+# #1056: _run_hook() below resolves a real Git-Bash binary (not "bash" on
+# PATH, which on Windows commonly resolves to the WSL launcher) rather than
+# a hardcoded literal, so a module importing it is free to narrow its OWN
+# skip to "no usable bash found" instead of a blanket win32 skip -- see
+# tests/test_session_end_retry_1056.py, which does exactly that. This
+# module's own pytestmark above is unchanged: it still drives other, more
+# POSIX-specific fixtures this one change does not make portable.
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HOOK_NAME = "session-end-hook.sh"
@@ -109,9 +118,16 @@ def _run_hook(plugin: Path, env: dict, *, session_id, reason: str = "other",
         if session_id is not None:
             body["session_id"] = session_id
         stdin_kw["input"] = json.dumps(body)
+    # resolve_bash() (#1056), not a hardcoded "bash" literal: on Windows,
+    # "bash" on PATH commonly resolves to the WSL launcher rather than the
+    # real Git Bash a Windows caller of this hook actually has. Falls back
+    # to the literal if resolution comes back empty, matching this
+    # function's own pre-existing behaviour on every platform where it
+    # already worked.
+    bash_bin = resolve_bash() or "bash"
     result = subprocess.run(
-        ["bash", str(hook)], env=env, capture_output=True, text=True, timeout=60,
-        check=False, **stdin_kw,
+        [bash_bin, hook.as_posix()], env=env, capture_output=True, text=True,
+        timeout=60, check=False, **stdin_kw,
     )
     if reap:
         _reap(Path(env["CLAUDE_PROJECT_DIR"]) / ".remember")

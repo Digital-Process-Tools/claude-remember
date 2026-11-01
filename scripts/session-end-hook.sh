@@ -483,17 +483,33 @@ fi
     # (see #345 above): this is the last chance. A short sleep gives
     # transient fork pressure a chance to clear before the one retry.
     #
-    # Deliberately NOT conditioned on recognizing that exact error text --
-    # it is not a stable contract across bash/MSYS versions -- and retrying
-    # ANY nonzero exit once is safe regardless of cause: save-session.sh's
-    # own cooldown/position bookkeeping only advances on an actual
-    # successful save (see its own USAGE block), so a retry after a
-    # non-transient failure costs one harmless extra invocation, not a
-    # duplicate save.
-    if [ "$_flush_status" -ne 0 ]; then
+    # Gated on save-session.sh's own EXIT_RETRYABLE_BEFORE_WRITE (75), NOT on
+    # "any nonzero exit" (#1056 round 2 self-review finding -- the comment
+    # this replaces claimed retrying ANY failure was safe because position
+    # bookkeeping only advances on success, which is true but not the whole
+    # story). save-session.sh reserves 75 for an unexpected failure that
+    # struck BEFORE now.md was touched; every deliberate outcome there (a
+    # lock timeout, an invalid session id, a refused REMEMBER_DIR, a cooldown
+    # skip, nothing to save, a summarizer failure, a write error) keeps its
+    # ordinary 0/1 and this comparison therefore never retries it. Two
+    # concrete reasons that mattered: a summarizer failure already counts
+    # itself against save-session.sh's thresholds.max_summary_failures, so
+    # retrying it here doubled that count and could drop a span for good in
+    # one SessionEnd; and a failure that strikes AFTER now.md's append but
+    # during the position write is NOT the harmless re-invocation the old
+    # comment described -- it IS a duplicate save, because the retried run
+    # re-extracts and re-summarizes the same unadvanced span into a SECOND
+    # entry (save-session.sh's own PENDING_POSITION_MARKER is the backstop
+    # for every OTHER caller that can reach that same half-success; this
+    # retry is simply excluded from it by never firing there in the first
+    # place).
+    _REMEMBER_SAVE_RETRYABLE_EXIT=75
+    _retried=0
+    if [ "$_flush_status" -eq "$_REMEMBER_SAVE_RETRYABLE_EXIT" ]; then
         sleep 1
         _remember_session_end_flush
         _flush_status=$?
+        _retried=1
     fi
     if [ -n "${REMEMBER_TEST_COMPLETION_MARKER:-}" ]; then
         _remember_date_into _subshell_done_ts +%H:%M:%S
@@ -501,7 +517,11 @@ fi
             "$_subshell_done_ts" "$_flush_status" >> "$REMEMBER_TEST_COMPLETION_MARKER" 2>&1
     fi
     if [ "$_flush_status" -ne 0 ]; then
-        report_error "session-end" "WARNING: save-session.sh --force exited $_flush_status at session end (after one retry) -- this session's unsaved tail may be lost. See $_END_LOG for what save-session.sh itself logged."
+        if [ "$_retried" -eq 1 ]; then
+            report_error "session-end" "WARNING: save-session.sh --force exited $_flush_status at session end (after one retry) -- this session's unsaved tail may be lost. See $_END_LOG for what save-session.sh itself logged."
+        else
+            report_error "session-end" "WARNING: save-session.sh --force exited $_flush_status at session end (not retried -- not the transient pre-write failure class this hook's bounded retry covers) -- this session's unsaved tail may be lost. See $_END_LOG for what save-session.sh itself logged."
+        fi
     fi
 ) < /dev/null >> "$_END_LOG" 2>&1 &
 echo $! > "$REMEMBER_DIR/tmp/save-session.pid" 2>/dev/null

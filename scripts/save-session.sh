@@ -70,7 +70,35 @@
 
 set -e
 
-trap 'log "error" "FAILED at line $LINENO (exit $?)"' ERR
+# Exit code reserved for an UNEXPECTED failure (one the ERR trap below
+# catches, not one of this script's own explicit `exit` lines) that struck
+# before now.md was touched -- the one class of failure session-end-hook.sh's
+# bounded retry is safe to repeat (#1056). Every deliberate exit in this file
+# (a lock timeout, an invalid session id, a summarizer failure, a write
+# error, a cooldown skip, nothing to save) keeps its ordinary 0/1 and is
+# therefore excluded from that retry BY CONSTRUCTION, not by this value
+# inspecting what failed -- the old "retry any nonzero exit" reasoning
+# conflated "safe to repeat" with "failed", which is what let a summarizer
+# failure get retried into a second count against thresholds.max_summary_failures,
+# and let a position-write failure AFTER a successful append get retried into
+# a duplicate entry (session-end-hook.sh's own self-review findings on
+# #1056). 75 is sysexits.h's EX_TEMPFAIL -- picked for a stable, documented
+# meaning, not because the rest of this file follows that convention -- and
+# is never returned by any of this script's own explicit exit sites, so a
+# future one accidentally colliding with it would need to literally write the
+# number down.
+EXIT_RETRYABLE_BEFORE_WRITE=75
+# Set to 1 the instant now.md's rename succeeds (Step 7) -- see there for why.
+_WROTE_ENTRY=0
+
+trap '
+    _err_status=$?
+    log "error" "FAILED at line $LINENO (exit $_err_status)"
+    if [ "$_WROTE_ENTRY" -eq 0 ]; then
+        exit "$EXIT_RETRYABLE_BEFORE_WRITE"
+    fi
+    exit "$_err_status"
+' ERR
 
 # Parameter expansion, not six `dirname` forks (#230/#1056) -- the same
 # pattern session-start-hook.sh, session-end-hook.sh, post-tool-hook.sh and
@@ -232,6 +260,14 @@ marker_write_ok() {
 NOW_DAY_FILE="${REMEMBER_DIR}/tmp/now-day"
 LAST_SAVE_FILE="${REMEMBER_DIR}/tmp/last-save.json"
 COOLDOWN_MARKER="${REMEMBER_DIR}/tmp/last-save-ts"
+# #1056 gap 1's second defence: written right before Step 7's save-position
+# call, the one write that can fail AFTER now.md's append already succeeded.
+# A caller this file's own EXIT_RETRYABLE_BEFORE_WRITE cannot gate -- a human
+# re-running `save-session.sh --force` by hand, or a later cooldown tick --
+# would otherwise re-extract and re-summarize the same unadvanced span into a
+# SECOND now.md entry. Resolved at the top of every invocation, before this
+# run touches anything of its own; see there.
+PENDING_POSITION_MARKER="${REMEMBER_DIR}/tmp/pending-position"
 TODAY_DATE=$(_remember_date +%Y-%m-%d)
 CLEANUP_FILES=()
 # The trap below REPLACES the cleanup trap lib-memory-dir.sh installed for
@@ -324,6 +360,33 @@ else
     else
         debug_enabled 1 && log "lock" "another save holds the lock, skipping"
         exit 0
+    fi
+fi
+
+# Resolve any pending-position marker left by a PREVIOUS run's half-success
+# (#1056 gap 1's second defence -- see PENDING_POSITION_MARKER's own comment
+# above) before this run touches anything of its own. Under the save.lock
+# already held above, and independent of which session THIS invocation is
+# about to process: the marker names its own session/position/envelope, and
+# resolving it here means a stuck one from session A does not wait for
+# session B to invoke this script.
+if [ -f "$PENDING_POSITION_MARKER" ]; then
+    _pend_session="" ; _pend_position="" ; _pend_envelope=""
+    IFS=$'\t' read -r _pend_session _pend_position _pend_envelope < "$PENDING_POSITION_MARKER" 2>/dev/null || true
+    if [ -n "$_pend_session" ] && [ -n "$_pend_position" ] && [ -n "$_pend_envelope" ]; then
+        log "write" "recovering an interrupted position write from a previous run (session ${_pend_session}, position ${_pend_position}) -- now.md already holds that entry; only its position record was missing"
+        if (cd "$PIPELINE_DIR" && _remember_run_python -m pipeline.shell save-position "$LAST_SAVE_FILE" "$_pend_session" "$_pend_position" "$_pend_envelope"); then
+            rm -f "$PENDING_POSITION_MARKER" 2>/dev/null
+        else
+            log "write" "WARNING: could not recover the pending position marker at $PENDING_POSITION_MARKER -- will retry on the next invocation"
+        fi
+    else
+        # Unreadable or only partially written -- cannot safely replay a
+        # garbled session id or position (it could advance the WRONG
+        # session's cursor). Drop it rather than loop on it forever; the
+        # worst case is one already-saved entry whose position lags, which
+        # is exactly the state this run started in before this block existed.
+        rm -f "$PENDING_POSITION_MARKER" 2>/dev/null
     fi
 fi
 
@@ -1046,7 +1109,24 @@ APPEND_ERR=$({ printf '\n' && cat "$HAIKU_TEXT_FILE"; } 2>&1 >> "$APPEND_TMP") \
 APPEND_ERR=$(mv "$APPEND_TMP" "$MEMORY_FILE" 2>&1) \
     || append_failed "commit failed: ${APPEND_ERR:-unknown error}"
 log "write" "appended (provider: ${PROVIDER:-claude}): $(head -1 "$HAIKU_TEXT_FILE" | cut -c1-80)"
+# Set the INSTANT the rename above succeeds, before save_position_span runs
+# (#1056 gap 1): if save_position_span itself is what hits an unexpected
+# failure -- the ERR trap's own exact scenario, fork/resource exhaustion
+# during the app-restart pile-up #1056 exists to rescue -- this flag is
+# already 1, so the trap at the top of this file exits with the ORDINARY
+# code rather than EXIT_RETRYABLE_BEFORE_WRITE. A caller retrying blindly on
+# that code would re-extract and re-summarize this SAME span, now already
+# sitting in now.md, into a second entry.
+_WROTE_ENTRY=1
+# Second, independent defence for a retry this process's own exit code
+# cannot gate (a human re-running --force by hand, a later cooldown tick):
+# record what is about to be committed BEFORE attempting it, so a crash
+# between here and the rm below leaves a trail the NEXT invocation's own
+# resolve-pending-marker block (see PENDING_POSITION_MARKER above) can
+# finish without touching now.md again.
+printf '%s\t%s\t%s\n' "$SESSION_ID" "$POSITION" "$ENVELOPE" > "$PENDING_POSITION_MARKER" 2>/dev/null || true
 save_position_span
+rm -f "$PENDING_POSITION_MARKER" 2>/dev/null
 log "write" "position -> $POSITION"
 rm -f "$FAILURE_MARKER"
 
