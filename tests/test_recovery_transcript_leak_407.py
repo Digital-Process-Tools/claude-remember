@@ -82,7 +82,19 @@ def _startup_project(tmp_path: Path):
     the resume/clear/compact/fork shape, where recovery and this leak are
     both live (unlike a cold `source=startup`, where Claude Code has not yet
     created the current transcript and there is nothing for
-    REMEMBER_TRANSCRIPT_PATH to point at)."""
+    REMEMBER_TRANSCRIPT_PATH to point at).
+
+    PREV's transcript carries 5 real tool_use lines -- under this exact
+    REMEMBER_DIR, post-tool-hook.sh (#206, pre-existing, unrelated to #1046)
+    would already have written capture-alive.d/PREV the moment the first of
+    those tool calls happened. #1046's recovery guard reads that same
+    marker to tell "ran under this store" from "may belong to a different
+    store sharing this project's transcript directory" -- so a fixture that
+    gives PREV tool calls but never plants the marker those calls would
+    themselves have produced is not a realistic "never captured" case, it
+    is a hole in the fixture. Planted here rather than left for each test to
+    discover independently (round 2 self-review, after #1046 landed in this
+    same PR and made the omission visible)."""
     home = tmp_path / "home"
     project = tmp_path / "project"
     remember = project / ".remember"
@@ -102,6 +114,8 @@ def _startup_project(tmp_path: Path):
     os.utime(current, (now, now))
 
     (remember / "tmp" / "last-save.json").write_text(json.dumps({"sessions": {}}))
+    (remember / "tmp" / "capture-alive.d").mkdir(parents=True, exist_ok=True)
+    (remember / "tmp" / "capture-alive.d" / PREV).write_text("", encoding="utf-8")
     return home, project, remember, session_dir, current
 
 

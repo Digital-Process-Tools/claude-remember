@@ -387,13 +387,29 @@ def test_capture_seen_prune_is_gated_on_the_threshold(tmp_path):
     two -- an absent directory never forked under either (the first draft
     of this test only ran that shape, and would have passed against the
     old code: Explore self-review finding on #675).
+
+    #1046 round 2: session-start-hook.sh writes its own cheap roster
+    marker for THIS run's own SESSION id on every single SessionStart (so a
+    chat-only session still earns one piece of recovery roster evidence).
+    #1046 final review: that marker moved OUT of capture-alive.d into its
+    own folder (tmp/session-started.d) -- landing in capture-alive.d made
+    the #200 capture-gap check's own capture_was_seen() treat a session
+    that never ran a single tool call as "captured" (see that write site's
+    own comment in session-start-hook.sh). So capture-alive.d itself is
+    untouched by this run: the count stays 2, the 2 seeded entries alone,
+    not 3.
     """
     lines, result = _run_with_shim(
         tmp_path, extra_setup=lambda remember: _seed_capture_seen(remember, 2)
     )
     assert result.returncode == 0, result.stderr
     seen_dir = tmp_path / "project" / ".remember" / "tmp" / "capture-alive.d"
-    assert len(list(seen_dir.iterdir())) == 2, "the run must not touch an under-threshold store"
+    entries = {p.name for p in seen_dir.iterdir()}
+    assert entries == {"session-0000", "session-0001"}, (
+        f"the run must not prune the 2 under-threshold seeded entries, and "
+        f"must not add its own SESSION marker here any more (it now goes "
+        f"to tmp/session-started.d instead): {entries}"
+    )
     assert _prune_spawns(lines) == [], (
         "capture-alive.d exists with 2 entries, far under the keep threshold, "
         f"so the prune must not fork `ls` against it: {_prune_spawns(lines)}"

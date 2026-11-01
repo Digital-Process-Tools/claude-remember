@@ -1101,6 +1101,70 @@ else
 fi
 echo ""
 
+# ── 6a-2. Dropped summarizer spans (#1052) ──────────────────────────────────
+# The summarizer call SUCCEEDING and the span actually being KEPT are two
+# different claims, and #870's own counter above only ever tracked the
+# first: a reject gate firing (the model's reply refused, or the validator
+# judged it "not an entry header") is a successful call that drops real
+# work, so max_summary_failures never counts it and tmp/last-summary-failure
+# is never written for it either. The reporter's own observation: three
+# [validate] REJECTED spans over four days, plus ten more ([haiku] REJECTED
+# and plain missing-header cases) while 0.33.0 and 0.43.1 both ran, and
+# doctor said "Summarizer failures: OK" and "capture is working" throughout
+# -- the call succeeded every time.
+#
+# Counted across every daily log present, same walk as #870/#1003 above
+# (log rotation already bounds how many exist) -- not windowed to "today"
+# specifically, since a dropped span from yesterday that nobody has looked
+# at since is exactly as real as one from this morning.
+echo "-- Dropped summarizer spans (#1052) --"
+_remember_rs_glob_dir=$(_remember_forward_slash "$REMEMBER_DIR")
+_RS_FILES=()
+for _rs_f in "$_remember_rs_glob_dir"/logs/memory-*.log; do
+    [ -f "$_rs_f" ] && _RS_FILES+=("$_rs_f")
+done
+_RS_COUNT=0
+_RS_LAST_LINE=""
+if [ "${#_RS_FILES[@]}" -gt 0 ]; then
+    _RS_OLD_IFS="$IFS"
+    IFS=$'\n'
+    _RS_SORTED=($(printf '%s\n' "${_RS_FILES[@]}" | LC_ALL=C sort))
+    IFS="$_RS_OLD_IFS"
+    unset _RS_OLD_IFS
+    for _rs_f in "${_RS_SORTED[@]}"; do
+        _rs_count_file=$(grep -cE '\[(validate|haiku|summarizer)\] REJECTED' "$_rs_f" 2>/dev/null)
+        [ -z "$_rs_count_file" ] && _rs_count_file=0
+        [ "$_rs_count_file" -eq 0 ] && continue
+        _RS_COUNT=$((_RS_COUNT + _rs_count_file))
+        _RS_LAST_LINE=$(grep -E '\[(validate|haiku|summarizer)\] REJECTED' "$_rs_f" 2>/dev/null | tail -n 1)
+    done
+    unset _RS_SORTED
+fi
+unset _RS_FILES _remember_rs_glob_dir _rs_f _rs_count_file
+if [ "$_RS_COUNT" -gt 0 ]; then
+    # #898 round 8 convention: hold the double quote in a variable rather
+    # than writing it backslash-escaped -- the plugin directory's scanner
+    # mis-tracks an escaped quote. Sibling warnings in this file already use
+    # this (e.g. the git-backup/git-reconcile hooks' own copies).
+    printf -v _rs_dq '\042'
+    echo "WARN $_RS_COUNT span(s) dropped by a reject gate (summarizer refusal or"
+    echo "     ${_rs_dq}not an entry header${_rs_dq}) across the logs present -- the call"
+    echo "     succeeded each time, so this is invisible to the Summarizer"
+    # #1052: keep_rejected_text (save-session.sh) saves the REFUSAL TEXT --
+    # the model's own reply explaining why it would not summarize -- never
+    # the dropped SPAN itself, and by the time it runs the read position has
+    # already moved past that span. The refusal text is kept; the span is
+    # not. Do not claim otherwise here.
+    echo "     failures check above. The refusal text (not the dropped span"
+    echo "     itself) is kept -- see $REMEMBER_DIR/tmp/rejected-*.md. Most recent:"
+    echo "     $_RS_LAST_LINE"
+    unset _rs_dq
+else
+    echo "OK   No dropped summarizer spans recorded (no [validate]/[haiku] REJECTED line in the logs present)"
+fi
+unset _RS_COUNT _RS_LAST_LINE
+echo ""
+
 # ── 6b. SessionStart duration (#706) ────────────────────────────────────────
 # "The daily log is right for the record, and /remember:doctor is right for
 # the read-out" -- the issue's own words. session-start-hook.sh writes

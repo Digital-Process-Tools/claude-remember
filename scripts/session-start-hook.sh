@@ -125,14 +125,92 @@ _remember_hook_clock_into _REMEMBER_HOOK_T0
 # bytes: milliseconds even at that rate. And the compiled hook sits 37 bytes
 # under the 120 KiB release budget (check_release_tree.py), which the inlined
 # library (about 1.2 KB) would break.
+# #1047 round 2: the join below, `HOOK_STDIN="$HOOK_STDIN$_line"`, is a
+# SECOND quadratic independent of the one `_stdin_json_string_into` already
+# bounds -- this one tracks the number of LINES, not the length of any one
+# line. Measured: 3.3 MB over 2,500 lines, 68.8s on bash 3.2 and 23.6s on
+# bash 5.3 just to finish the read loop, before extraction ever runs.
+# _REMEMBER_HOOK_STDIN_CAP is hoisted here from its old home next to the
+# hooks.d/ publish block below (#266) because the cap must now be enforced
+# DURING accumulation, not after: stopping at this ceiling, rather than
+# building the full string and slicing it afterwards, is what keeps this
+# loop itself from ever re-growing a multi-megabyte string one line at a
+# time. The publish block's own byte-for-byte promise (#266) is preserved
+# for every payload AT OR UNDER this cap -- nothing here shortens anything
+# that would otherwise fit.
+_REMEMBER_HOOK_STDIN_CAP=32768
 HOOK_STDIN=""
+_hook_stdin_truncated=0
+# #1047 self-review (round 3): this block is top-level script code, not a
+# function, so the `local LC_ALL=C` fix `_stdin_json_string_into` uses for
+# the exact same problem is not available here -- bash has no `local`
+# outside a function. Without SOME form of this, `${#HOOK_STDIN}` and
+# `${HOOK_STDIN:0:N}` below count and slice by CHARACTER under any UTF-8
+# locale (the common default on CI's own Ubuntu/macOS runners), so a
+# multi-byte-heavy payload (a non-ASCII project path or transcript content)
+# could grow HOOK_STDIN up to 4x past the stated 32 KiB byte ceiling before
+# this loop's own character-count check trips -- the quadratic growth stays
+# bounded (it cannot reopen the hang), but the ceiling itself silently
+# stops being the number this file's own comments and changelog claim.
+# Saved and restored explicitly, not just `local`-shadowed, because this is
+# top-level: a bare `LC_ALL=C` here would otherwise leak into the rest of
+# this hook's own user-facing output for the remainder of the script.
+_hook_stdin_lc_all_was_set=0
+if [ "${LC_ALL+set}" = set ]; then
+    _hook_stdin_lc_all_was_set=1
+    _hook_stdin_prior_lc_all="$LC_ALL"
+fi
+LC_ALL=C
 if [ ! -t 0 ]; then
     _line=""
     while IFS= read -r -t 1 _line || [ -n "$_line" ]; do
-        HOOK_STDIN="$HOOK_STDIN$_line"
+        if [ "$_hook_stdin_truncated" -eq 0 ]; then
+            HOOK_STDIN="$HOOK_STDIN$_line"
+            if [ "${#HOOK_STDIN}" -gt "$_REMEMBER_HOOK_STDIN_CAP" ]; then
+                HOOK_STDIN=${HOOK_STDIN:0:$_REMEMBER_HOOK_STDIN_CAP}
+                _hook_stdin_truncated=1
+                # #1047 round 4 (CI self-review): the string growth above was
+                # the quadratic cost this cap exists to close, but looping
+                # `read -r -t 1` once per LINE for every remaining line of an
+                # oversized payload is still O(lines) of pure per-iteration
+                # overhead with nothing left to do once HOOK_STDIN is already
+                # capped -- cheap on Linux/macOS bash, measured expensive
+                # enough on Windows runners (git-bash/MSYS syscall overhead
+                # per `read` call) that a 2,500-line/1MB payload alone pushed
+                # tests/test_session_start_stdin_cap_1047.py past its 30s
+                # budget on every windows-latest leg while every other OS
+                # stayed well under it. Nothing below this point needs the
+                # per-line value once the cap is hit, so stop asking for one
+                # line at a time and swallow whatever is left of stdin in a
+                # single bulk read instead -- still O(input size) in bytes
+                # copied, never O(lines) in `read` calls.
+                break
+            fi
+        fi
         _line=""
     done
+    if [ "$_hook_stdin_truncated" -eq 1 ]; then
+        # #1047 round 5 (final review): this used to drain the REST of stdin
+        # synchronously, in the foreground, with no time bound at all -- the
+        # per-line `read -t 1` loop above is bounded, but this bulk drain was
+        # not, so a writer that holds stdin open (never closes its write end)
+        # made the hook hang forever rather than returning once the cap was
+        # hit. Observed: an 8s-holding writer cost the hook 8s once truncation
+        # fired, where the under-cap path (no writer held open) returns within
+        # read -t 1's own 1s. Backgrounded and disowned, the same shape every
+        # other detach site in this file already uses (before_session_start's
+        # deferred dispatch, just below) -- fd 3 is explicitly closed (`3>&-`)
+        # rather than left to leak into the background job, matching that
+        # convention's own fd hygiene.
+        cat <&0 >/dev/null 2>&1 3>&- & disown 2>/dev/null || true
+    fi
 fi
+if [ "$_hook_stdin_lc_all_was_set" -eq 1 ]; then
+    LC_ALL="$_hook_stdin_prior_lc_all"
+else
+    unset LC_ALL
+fi
+unset _hook_stdin_lc_all_was_set _hook_stdin_prior_lc_all
 
 # The same deliberately narrow extractor the PostToolUse hook and
 # the SessionEnd hook use, and for the same reason: the key must be followed
@@ -158,8 +236,32 @@ fi
 # function in this file that takes a destination VARNAME shares; see
 # config_into's comment (log.sh) for the full argument.
 _stdin_json_string_into() {
+    # #1047 self-review: byte-counted, not character-counted -- without this,
+    # `${#_sjsi_raw}` and `${_sjsi_raw:0:4096}` below count and slice by
+    # CHARACTER under any UTF-8 locale (the common default, unset anywhere in
+    # this script), so a payload with multi-byte content before the matched
+    # field (a non-ASCII project path, say) is bounded to 4096 characters --
+    # up to 4x that many bytes -- silently widening the margin #1047 exists
+    # to close. Bytes are what the quadratic match actually costs against.
+    local LC_ALL=C
     local _sjsi_var="$1" _sjsi_field="$2" _sjsi_raw="$3" _sjsi_rest _sjsi_prefix _sjsi_value _sjsi_dq
     printf -v "$_sjsi_var" '%s' ""
+    # #1047: `${var#*pattern}` below is quadratic in bash -- O(n^2) on
+    # _sjsi_raw's length, 15.2s measured at 100 KB and hours at the 3.3 MB a
+    # host handed this hook by piping a whole transcript in as stdin
+    # (observed: 27 processes alive 21h, SIGTERM-immune). The four fields
+    # this hook ever extracts (cwd, session_id, transcript_path, source) all
+    # sit in the first few hundred bytes of a legitimate SessionStart
+    # payload, so bounding the INPUT to the match, not HOOK_STDIN's own
+    # accumulation, makes every call here O(1) regardless of payload size
+    # -- a field that genuinely starts past this bound is missed (same
+    # degradation #745's pluginless-SDK sniff already accepts for its own
+    # scan cap), never hung. Deliberately local to the match rather than
+    # truncating HOOK_STDIN itself: HOOK_STDIN's own full value is still
+    # read elsewhere in this hook (the before_session_start/after_session_start
+    # listener publish below, #266) and must stay byte-identical up to its
+    # own 32 KiB cap, not get silently cropped to this much smaller bound.
+    [ "${#_sjsi_raw}" -gt 4096 ] && _sjsi_raw=${_sjsi_raw:0:4096}
     # The double quote is held in a variable (octal 042) rather than written
     # backslash-escaped: the plugin directory's scanner mis-tracks an
     # escaped quote (#898 round 8). Same patterns, same quoting of the field.
@@ -169,6 +271,18 @@ _stdin_json_string_into() {
     _sjsi_prefix=${_sjsi_rest%%"$_sjsi_dq"*}
     if [[ "$_sjsi_prefix" == *[!:[:space:]]* ]]; then return 1; fi
     _sjsi_value=${_sjsi_rest#*"$_sjsi_dq"}
+    # #1047 self-review: a value whose OPENING quote survived the bound but
+    # whose CLOSING quote fell past it (the field name/open-quote sit inside
+    # the first 4096 bytes, the value's own close does not) left this
+    # function returning SUCCESS with the entire unterminated truncated tail
+    # as the "value" -- a corrupted-but-non-empty string, not the documented
+    # "missed" degradation. Three of the four call sites happen to validate
+    # their result afterwards (a character allowlist, a fixed enum, an
+    # openability check on the Python side) and would have caught it anyway,
+    # but REMEMBER_HOOK_CWD is checked only for embedded CR/LF and is
+    # otherwise trusted as a directory candidate -- fail closed here instead
+    # of relying on every future caller to validate defensively.
+    [[ "$_sjsi_value" == *"$_sjsi_dq"* ]] || return 1
     _sjsi_value=${_sjsi_value%%"$_sjsi_dq"*}
     # A JSON encoder writes each backslash as `\\` -- a Windows `cwd` from
     # Codex arrives as `C:\\work\\proj` otherwise (#829).
@@ -308,6 +422,41 @@ if [ -z "${CURRENT_SESSION_ID#.}" ] || [ -z "${CURRENT_SESSION_ID#..}" ] \
     CURRENT_SESSION_ID=""
 fi
 
+# #1046 round 2: a chat-only session (no tool call at all, so
+# post-tool-hook.sh's own capture-alive.d marker is never written) that then
+# dies without a clean SessionEnd was no longer rescuable by recovery once
+# #1046's roster guard landed above -- real data loss introduced BY that
+# fix, not present before it: the guard correctly declines to force-save a
+# candidate with no roster evidence under this store, but a chat-only
+# session could never have earned any. Writing a second, cheaper marker
+# here -- at the START of every session, under this same store, for THIS
+# session's own id -- gives even a tool-less session one piece of roster
+# evidence by the time it could ever become a later session's PREV_ID.
+#
+# #1046 final review: this used to land in the SAME folder
+# (capture-alive.d) post-tool-hook.sh writes into for "a tool actually ran
+# under this store" -- the #200 capture-gap check's own capture_was_seen()
+# reads that folder as ITS evidence too, so a session that only ever hit
+# THIS marker (no tool call at all) made a real capture gap (hooks never
+# registered, so neither marker was ever written... except this one now
+# was) read as "captured" and go silently unwarned. Written into its own
+# folder instead -- only the #1046 recovery guard
+# (_remember_recovery_prev_id_vouched, capture-gap-check.sh) accepts it as
+# evidence; capture_was_seen() deliberately does not.
+#
+# `[ -d ]` before the `mkdir` (#230, same convention as post-tool-hook.sh's
+# own capture-alive.d write): every session after the first in a store
+# finds this directory already there, and asking `mkdir -p` to confirm that
+# costs a process on every single SessionStart. The mkdir still runs -- and
+# still gates the write on its success -- the first time, and on any run
+# where the directory is missing.
+if [ -n "$REMEMBER_DIR" ] && [ -n "$CURRENT_SESSION_ID" ]; then
+    if [ -d "$REMEMBER_DIR/tmp/session-started.d" ] \
+        || mkdir -p "$REMEMBER_DIR/tmp/session-started.d" 2>/dev/null; then
+        : > "$REMEMBER_DIR/tmp/session-started.d/$CURRENT_SESSION_ID" 2>/dev/null
+    fi
+fi
+
 # ── The transcript path the host handed us (#407) ─────────────────────────
 # Read from the same payload, exported for pipeline/host.transcript_path() to
 # pick up in any Python process this hook (or something it dispatches)
@@ -357,14 +506,18 @@ fi
 # cannot tell it from a genuinely short one. Three states, the third disclosed:
 #
 #   FILE unset                     no payload arrived, or no listener
-#   STDIN non-empty                the whole payload
-#   STDIN empty and FILE set       too large for the environment; the file
-#                                  holds it, complete
+#   STDIN non-empty                the whole payload, complete
+#   STDIN empty and FILE set       the payload was truncated at the
+#                                  accumulation cap (#1047 round 2) --
+#                                  neither the env var nor the file holds
+#                                  more than _REMEMBER_HOOK_STDIN_CAP bytes
+#                                  of it, because HOOK_STDIN itself was
+#                                  never allowed to grow past that during
+#                                  the read loop above
 #
 # Nothing is written at all unless a listener is installed — the shipped
 # distribution's before_session_start/ and after_session_start/ hold a
 # .gitkeep and, for the git hooks, scripts that never read stdin.
-REMEMBER_HOOK_STDIN_MAX=32768
 _hook_stdin_file=""
 
 _session_start_listener() {
@@ -386,7 +539,12 @@ if [ -n "$HOOK_STDIN" ] && _session_start_listener; then
         rm -f "$_hook_stdin_file" 2>/dev/null
         _hook_stdin_file=""
     fi
-    if [ "${#HOOK_STDIN}" -le "$REMEMBER_HOOK_STDIN_MAX" ]; then
+    # Length can no longer tell the two states apart -- HOOK_STDIN is
+    # already capped at _REMEMBER_HOOK_STDIN_CAP by the read loop above, so
+    # its length is always <= the cap whether or not the real payload was
+    # longer. _hook_stdin_truncated (set only by that loop) is the actual
+    # signal now.
+    if [ "$_hook_stdin_truncated" -eq 0 ]; then
         export REMEMBER_HOOK_STDIN="$HOOK_STDIN"
     else
         export REMEMBER_HOOK_STDIN=""
