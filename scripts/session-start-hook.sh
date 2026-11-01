@@ -169,10 +169,29 @@ if [ ! -t 0 ]; then
             if [ "${#HOOK_STDIN}" -gt "$_REMEMBER_HOOK_STDIN_CAP" ]; then
                 HOOK_STDIN=${HOOK_STDIN:0:$_REMEMBER_HOOK_STDIN_CAP}
                 _hook_stdin_truncated=1
+                # #1047 round 4 (CI self-review): the string growth above was
+                # the quadratic cost this cap exists to close, but looping
+                # `read -r -t 1` once per LINE for every remaining line of an
+                # oversized payload is still O(lines) of pure per-iteration
+                # overhead with nothing left to do once HOOK_STDIN is already
+                # capped -- cheap on Linux/macOS bash, measured expensive
+                # enough on Windows runners (git-bash/MSYS syscall overhead
+                # per `read` call) that a 2,500-line/1MB payload alone pushed
+                # tests/test_session_start_stdin_cap_1047.py past its 30s
+                # budget on every windows-latest leg while every other OS
+                # stayed well under it. Nothing below this point needs the
+                # per-line value once the cap is hit, so stop asking for one
+                # line at a time and swallow whatever is left of stdin in a
+                # single bulk read instead -- still O(input size) in bytes
+                # copied, never O(lines) in `read` calls.
+                break
             fi
         fi
         _line=""
     done
+    if [ "$_hook_stdin_truncated" -eq 1 ]; then
+        cat <&0 >/dev/null 2>&1 || true
+    fi
 fi
 if [ "$_hook_stdin_lc_all_was_set" -eq 1 ]; then
     LC_ALL="$_hook_stdin_prior_lc_all"
