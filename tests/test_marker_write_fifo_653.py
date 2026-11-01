@@ -110,7 +110,13 @@ def _run_record_summary_failure(failure_marker: Path, timeout: float = 5) -> sub
         'save_position_span() { :; }\n'
         + _extract_helper()
         + _extract_record_summary_failure()
-        + f'\nFAILURE_MARKER="{failure_marker}"\nMAX_FAILURES=3\nSESSION_ID="s1"\nPOSITION="5"\n'
+        # Final-review finding: record_summary_failure's own span-id is now
+        # keyed on $SKIP_LINES (the span's START), not $POSITION (the
+        # transcript's current END) -- see the #1052-adjacent comment above
+        # the real function. SKIP_LINES must be set here too, or this
+        # isolated harness silently exercises a span-id of "s1:" instead of
+        # the real "s1:5" the comment below still describes.
+        + f'\nFAILURE_MARKER="{failure_marker}"\nMAX_FAILURES=3\nSESSION_ID="s1"\nPOSITION="5"\nSKIP_LINES="5"\n'
         + 'record_summary_failure\necho DONE\n'
     )
     with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False, encoding="utf-8") as f:
@@ -146,7 +152,8 @@ class TestFailureMarkerWrite:
         assert p.read_text().strip() == "s1:5 1"
 
 
-_MARKERS = ("COOLDOWN_MARKER", "NDC_MARKER", "NOW_DAY_FILE", "NDC_GEN_FILE", "FAILURE_MARKER")
+_MARKERS = ("COOLDOWN_MARKER", "NDC_MARKER", "NOW_DAY_FILE", "NDC_GEN_FILE", "FAILURE_MARKER",
+            "REJECTED_MARKER")
 
 
 def test_every_marker_write_site_is_guarded():

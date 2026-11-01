@@ -44,7 +44,7 @@ def test_positive_control_healthy_baseline_reports_no_dropped_spans(tmp_path):
 
     assert result.returncode == 0, result.stderr
     assert (
-        "OK   No dropped summarizer spans recorded" in result.stdout
+        "OK   No rejections recorded" in result.stdout
     ), result.stdout
 
 
@@ -75,7 +75,7 @@ def test_a_validate_rejected_line_is_counted_and_warned(tmp_path):
         "precondition broke: #870's counter should still read OK here -- "
         "this test is about the NEW section catching what that one cannot"
     )
-    assert "WARN 1 span(s) dropped by a reject gate" in result.stdout, (
+    assert "WARN 1 rejection(s) hit a reject gate" in result.stdout, (
         "a [validate] REJECTED line in the daily log went uncounted:\n"
         + result.stdout
     )
@@ -98,7 +98,7 @@ def test_a_haiku_rejected_line_is_also_counted(tmp_path):
     result = _run(home, project, remember)
 
     assert result.returncode == 0, result.stderr
-    assert "WARN 1 span(s) dropped by a reject gate" in result.stdout, result.stdout
+    assert "WARN 1 rejection(s) hit a reject gate" in result.stdout, result.stdout
 
 
 def test_a_summarizer_rejected_line_is_also_counted(tmp_path):
@@ -122,7 +122,7 @@ def test_a_summarizer_rejected_line_is_also_counted(tmp_path):
     result = _run(home, project, remember)
 
     assert result.returncode == 0, result.stderr
-    assert "WARN 1 span(s) dropped by a reject gate" in result.stdout, (
+    assert "WARN 1 rejection(s) hit a reject gate" in result.stdout, (
         "a [summarizer] REJECTED line (#1085's renamed tag) went uncounted:\n"
         + result.stdout
     )
@@ -151,8 +151,8 @@ def test_an_ndc_rejected_line_is_not_counted_as_dropped(tmp_path):
     result = _run(home, project, remember)
 
     assert result.returncode == 0, result.stderr
-    assert "OK   No dropped summarizer spans recorded" in result.stdout, (
-        "an [ndc] REJECTED line was counted as a dropped span, but ndc "
+    assert "OK   No rejections recorded" in result.stdout, (
+        "an [ndc] REJECTED line was counted as a rejection here, but ndc "
         "rejections are retried (now.md left intact), not dropped:\n"
         + result.stdout
     )
@@ -178,7 +178,44 @@ def test_counts_sum_across_multiple_logs_not_only_the_newest(tmp_path):
     result = _run(home, project, remember)
 
     assert result.returncode == 0, result.stderr
-    assert "WARN 3 span(s) dropped by a reject gate" in result.stdout, (
+    assert "WARN 3 rejection(s) hit a reject gate" in result.stdout, (
         "expected the count to sum across both daily logs (1 + 2 = 3):\n"
         + result.stdout
     )
+
+
+def test_parked_dropped_span_files_are_counted_and_located(tmp_path):
+    """Final-review finding: the WARN above counts REJECTION EVENTS out of
+    the log text, which is a different number from how many spans are
+    actually PARKED (dropped, unsummarized) on disk right now -- a span
+    rejected once and later retried successfully adds to the event count
+    without ever being parked, and the event count alone never tells an
+    operator in plain words how many files are sitting there or where.
+    This must be reported directly off tmp/dropped-span-*.md, not derived
+    from the log."""
+    home, project, remember, _session_dir = _healthy_baseline(tmp_path)
+    tmp_dir = remember / "tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    (tmp_dir / "dropped-span-20261101-000000-1.md").write_text("raw span 1")
+    (tmp_dir / "dropped-span-20261101-000001-2.md").write_text("raw span 2")
+
+    result = _run(home, project, remember)
+
+    assert result.returncode == 0, result.stderr
+    assert "2 span(s) are currently parked" in result.stdout, result.stdout
+    assert str(tmp_dir) in result.stdout, (
+        "the folder path must be named in plain words, not just the glob "
+        "pattern:\n" + result.stdout
+    )
+
+
+def test_no_parked_files_reports_nothing_extra(tmp_path):
+    """Positive control for the test above: with no dropped-span-*.md file
+    present, the new line must not appear at all -- otherwise the must-fire
+    case above could be passing because the line always fires."""
+    home, project, remember, _session_dir = _healthy_baseline(tmp_path)
+
+    result = _run(home, project, remember)
+
+    assert result.returncode == 0, result.stderr
+    assert "span(s) are currently parked" not in result.stdout, result.stdout

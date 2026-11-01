@@ -731,6 +731,34 @@ FAILURE_MARKER="${REMEMBER_DIR}/tmp/last-summary-failure"
 MAX_FAILURES=$(config ".thresholds.max_summary_failures" 3)
 if [ -z "$MAX_FAILURES" ] || [ "${MAX_FAILURES#*[!0-9]}" != "$MAX_FAILURES" ]; then MAX_FAILURES=3; fi
 
+# #1052: a reject gate (validate's "not an entry header", or the summarizer's
+# own refusal/clarification) is a SUCCESSFUL call that discards real work --
+# the counter above only ever caught a FAILED one. Until now the position
+# advanced past a rejected span immediately, so a span the model refused
+# once was gone for good, never retried. Same shape as record_summary_failure
+# above, deliberately a SEPARATE marker/threshold -- doctor.sh's own #1084
+# comment already treats "a failed call" and "a successful call that
+# discarded its own output" as different failure classes, and sharing one
+# counter would let a rejection trip the other one's threshold early, or
+# vice versa. Count consecutive rejections of the SAME (session,
+# start-of-span) pair and, past thresholds.max_rejected_retries, give up --
+# park the raw, unsummarized span text (not just the model's refusal) where
+# it can be found, and advance.
+#
+# Final-review finding: 0 used to mean "retry forever" here too (the same
+# convention as MAX_FAILURES) -- but a span the model always refuses then
+# blocks every LATER span in the session as well, forever, which is worse
+# than the #1052 bug this whole mechanism exists to fix. Disallowed below:
+# 0 is clamped to the default instead, with a log line, the same way an
+# unparsable value already is just above.
+REJECTED_MARKER="${REMEMBER_DIR}/tmp/last-rejected-span"
+MAX_REJECTIONS=$(config ".thresholds.max_rejected_retries" 3)
+if [ -z "$MAX_REJECTIONS" ] || [ "${MAX_REJECTIONS#*[!0-9]}" != "$MAX_REJECTIONS" ]; then MAX_REJECTIONS=3; fi
+if [ "$MAX_REJECTIONS" -eq 0 ]; then
+    log "config" "thresholds.max_rejected_retries is 0 ('retry forever') -- that would stall this session's saving entirely on a span the model always refuses, so using the default (3) instead"
+    MAX_REJECTIONS=3
+fi
+
 # #583: every save-position call site below this point runs only once
 # EXCHANGE_COUNT -gt 0 (the EXCHANGE_COUNT -eq 0 branch above already
 # quarantines a wholly-unmapped span per #575) -- a give-up, a reject, a
@@ -766,7 +794,15 @@ record_summary_failure() {
         read -r _prev_span_id _prev_count < "$FAILURE_MARKER" || true
         if [ -z "$_prev_count" ] || [ "${_prev_count#*[!0-9]}" != "$_prev_count" ]; then _prev_count=0; fi
     fi
-    _span_id="${SESSION_ID}:${POSITION}"
+    # Final-review finding (adjacent to the #1052 rejection-counter fix
+    # below): keyed on $SKIP_LINES, the span's START, not $POSITION (the
+    # transcript's current END) -- in a live session $POSITION grows on
+    # every later save, so a key built from it never matches twice and this
+    # counter would never actually escalate. $SKIP_LINES is set once by the
+    # extract step and never reassigned afterwards (see the #583 comment
+    # above save_position_span), so it stays stable across every retry of
+    # the SAME span.
+    _span_id="${SESSION_ID}:${SKIP_LINES}"
     if [ "$_prev_span_id" = "$_span_id" ]; then
         # 10# after the case (#332): a truncated marker read back as "08"
         # would abandon this branch, and the branch is what escalates.
@@ -782,6 +818,84 @@ record_summary_failure() {
     elif marker_write_ok "$FAILURE_MARKER" summary; then
         echo "$_span_id $_count" > "$FAILURE_MARKER"
         log "summarizer" "failure ${_count}/${MAX_FAILURES} on this span -- will retry next run"
+    fi
+}
+
+# Sibling of record_summary_failure, same shape, deliberately a separate
+# marker/threshold (see the #1052 comment above REJECTED_MARKER): that
+# function counts a FAILED call; this one counts a SUCCESSFUL call whose
+# reply was rejected (not an entry header, or the model refusing outright).
+#
+# Unlike the refusal text, which keep_rejected_text parks unconditionally on
+# every rejection, the RAW unsummarized span -- $EXTRACT_FILE -- is only
+# worth parking once retrying has given up on it: parking it on every single
+# rejection would mean re-parking the same span's extract while it is still
+# being retried.
+#
+# Final-review finding: the span-id used to be keyed on $POSITION, which is
+# the transcript's CURRENT END (extract.py's total_lines), not the span's
+# START -- in a live session every LATER save sees a longer transcript, so
+# $POSITION differs on every attempt and this counter never sees the same
+# span-id twice. The count reset to 1 every time, the span was never parked,
+# and nothing LATER from that session was ever saved while the model kept
+# refusing: worse than the original #1052 bug this mechanism exists to fix.
+# $SKIP_LINES is the span's START (extract.py's used_skip_lines, == the last
+# SAVED position for this session) and is set once by the extract step and
+# never reassigned afterwards (see the #583 comment above save_position_span)
+# -- stable across every retry of the SAME span, which is what a "same span"
+# counter actually needs.
+record_rejected_span() {
+    local _tag="$1"
+    _prev_span_id=""
+    _prev_count=0
+    if [ -f "$REJECTED_MARKER" ]; then
+        read -r _prev_span_id _prev_count < "$REJECTED_MARKER" || true
+        if [ -z "$_prev_count" ] || [ "${_prev_count#*[!0-9]}" != "$_prev_count" ]; then _prev_count=0; fi
+    fi
+    _span_id="${SESSION_ID}:${SKIP_LINES}"
+    if [ "$_prev_span_id" = "$_span_id" ]; then
+        # 10# for the same reason record_summary_failure reads its own
+        # counter this way (#332): a truncated marker read back as "08"
+        # would abandon this branch, and the branch is what escalates.
+        _count=$(( 10#$_prev_count + 1 ))
+    else
+        _count=1
+    fi
+
+    # Final-review finding: if a rejection happens on the session's LAST
+    # flush (session-end's --force recovery), no LATER save exists to retry
+    # it -- waiting for $MAX_REJECTIONS consecutive rejections before parking
+    # would simply lose the span, never park it at all. $FORCE is this
+    # invocation's own flag, set once from argv and never reassigned, so it
+    # is already known here whether a later retry can even happen.
+    if [ "$_count" -ge "$MAX_REJECTIONS" ] || [ "$FORCE" = true ]; then
+        _dropped_dir="${REMEMBER_DIR}/tmp"
+        mkdir -p "$_dropped_dir" 2>/dev/null
+        _dropped_file="${_dropped_dir}/dropped-span-$(_remember_date +%Y%m%d-%H%M%S)-$$.md"
+        if [ "$FORCE" = true ] && [ "$_count" -lt "$MAX_REJECTIONS" ]; then
+            _give_up_why="rejected on the session's final flush (--force) -- no later save exists to retry it, so giving up now at ${_count}/${MAX_REJECTIONS} rejections rather than waiting for retries that will never come"
+        else
+            _give_up_why="${_count} consecutive rejections on this span"
+        fi
+        # report_error, not log() alone (same #694 shape as the call-haiku
+        # failure above): giving up on a span is exactly the silent failure
+        # hook-errors.log exists for, and doctor.sh's own "Dropped summarizer
+        # spans" section reports against it.
+        if [ -n "${EXTRACT_FILE:-}" ] && cp "$EXTRACT_FILE" "$_dropped_file" 2>/dev/null; then
+            report_error "$_tag" "WARNING: ${_give_up_why} -- giving up, raw span text kept at $_dropped_file -- advancing position -> $POSITION (see thresholds.max_rejected_retries)"
+        else
+            report_error "$_tag" "WARNING: ${_give_up_why} -- giving up, advancing position -> $POSITION (could not park raw span text; see thresholds.max_rejected_retries)"
+        fi
+        save_position_span
+        rm -f "$REJECTED_MARKER"
+        # Keep the last 20; these are diagnostic, not memory -- same
+        # retention keep_rejected_text already applies to tmp/rejected-*.md.
+        ls -t "${_dropped_dir}"/dropped-span-*.md 2>/dev/null | tail -n +21 | while read -r _old; do
+            rm -f "$_old"
+        done
+    elif marker_write_ok "$REJECTED_MARKER" rejected; then
+        echo "$_span_id $_count" > "$REJECTED_MARKER"
+        log "$_tag" "rejected ${_count}/${MAX_REJECTIONS} on this span -- will retry next run"
     fi
 }
 
@@ -883,12 +997,16 @@ if [ "$IS_SKIP" != "true" ]; then
         #
         # Dropped rather than kept, but never destroyed: the text goes to
         # tmp/rejected-*.md, so nothing is lost, it simply does not enter the
-        # compression chain. The position still advances, exactly as a SKIP
-        # does, or this span would be re-summarized on every run forever.
+        # compression chain. #1052: the position does NOT advance on the
+        # spot any more -- see record_rejected_span below, which retries the
+        # span up to thresholds.max_rejected_retries times before giving up.
         log "validate" "REJECTED (not an entry header): $(echo "$FIRST_LINE" | head -c 80)"
         keep_rejected_text "$HAIKU_TEXT_FILE" "validate"
-        save_position_span
-        log "validate" "position -> $POSITION"
+        # #1052: bounded retry, not an unconditional advance -- see
+        # record_rejected_span above. Its own logging covers what used to be
+        # the "position -> $POSITION" line here, since the position may not
+        # have moved at all.
+        record_rejected_span "validate"
         rm -f "$FAILURE_MARKER"
         exit 0
     else
@@ -935,6 +1053,12 @@ if [ "$IS_SKIP" = "true" ]; then
     if [ "${IS_REJECTED:-false}" = "true" ]; then
         log "summarizer" "REJECTED (provider: ${PROVIDER:-claude}; not a summary -- refusal or clarification): $(head -c 80 "$HAIKU_TEXT_FILE" 2>/dev/null)"
         keep_rejected_text "$HAIKU_TEXT_FILE" "summarizer"
+        # #1052: distinct from the plain-SKIP path below -- a rejection
+        # discards real work, so it gets the bounded retry (see
+        # record_rejected_span above), not an unconditional save_position_span.
+        record_rejected_span "summarizer"
+        rm -f "$FAILURE_MARKER"
+        exit 0
     fi
     # provider is logged here (#461): a plain "SKIP" is ambiguous about which
     # route declined once more than one summarizer exists (#460) -- a bare
@@ -946,8 +1070,14 @@ if [ "$IS_SKIP" = "true" ]; then
     # A SKIP is a successful summarization (the model judged the span not worth
     # recording) and it advances the position, so it must clear the failure
     # count too — otherwise a stale count survives and a later single failure
-    # trips the give-up threshold early.
-    rm -f "$FAILURE_MARKER"
+    # trips the give-up threshold early. #1052: same reasoning for the
+    # rejection counter -- a SKIP on a DIFFERENT span than the one that was
+    # previously rejected would leave REJECTED_MARKER stale otherwise (in
+    # practice the span-id comparison in record_rejected_span already
+    # protects against a stale marker misattributing itself to a later span,
+    # but clearing it explicitly here matches FAILURE_MARKER's own hygiene
+    # rather than relying on that alone).
+    rm -f "$FAILURE_MARKER" "$REJECTED_MARKER"
     exit 0
 fi
 
@@ -1037,7 +1167,10 @@ APPEND_ERR=$(mv "$APPEND_TMP" "$MEMORY_FILE" 2>&1) \
 log "write" "appended (provider: ${PROVIDER:-claude}): $(head -1 "$HAIKU_TEXT_FILE" | cut -c1-80)"
 save_position_span
 log "write" "position -> $POSITION"
-rm -f "$FAILURE_MARKER"
+# #1052: same hygiene as FAILURE_MARKER just above -- an accepted summary
+# must not leave a primed rejection counter behind for whatever span comes
+# next.
+rm -f "$FAILURE_MARKER" "$REJECTED_MARKER"
 
 # --- Dispatch: after_save ---
 dispatch "after_save"

@@ -10,6 +10,7 @@
     "min_human_messages": 3,
     "min_exchanges_without_human": 30,
     "max_summary_failures": 3,
+    "max_rejected_retries": 3,
     "delta_lines_trigger": 50,
     "extract_max_bytes": 300000,
     "consolidate_max_bytes": 600000,
