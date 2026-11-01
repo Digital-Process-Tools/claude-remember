@@ -135,14 +135,15 @@ else
     _REMEMBER_PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
 fi
 # #898, round 5: the marker this validates against used to be a script path
-# (pipeline/summarizer.py) -- the directory's scanner reads a path to a specific
-# source file sitting in shell logic as a hold trigger (COMMAND_SCRIPT_NOT_
-# FOLLOWED) regardless of why the shell names it. Every install this plugin
-# supports already ships `.claude-plugin/plugin.json` at its root (it is a
-# release-tree requirement, scripts/doctor.sh already anchors on it the same
-# way for its own fallback-root probe), so that is the marker now -- a
-# manifest file, not a script, and present in exactly the same three
-# layouts pipeline/summarizer.py always was.
+# (pipeline/haiku.py, before #1055 renamed that file to pipeline/summarizer.py)
+# -- the directory's scanner reads a path to a specific source file sitting in
+# shell logic as a hold trigger (COMMAND_SCRIPT_NOT_FOLLOWED) regardless of why
+# the shell names it. Every install this plugin supports already ships
+# `.claude-plugin/plugin.json` at its root (it is a release-tree requirement,
+# scripts/doctor.sh already anchors on it the same way for its own
+# fallback-root probe), so that is the marker now -- a manifest file, not a
+# script, and present in exactly the same three layouts pipeline/haiku.py
+# always was.
 if [ -n "$_REMEMBER_PLUGIN_ROOT" ] && [ -f "$_REMEMBER_PLUGIN_ROOT/.claude-plugin/plugin.json" ]; then
     PIPELINE_DIR="$_REMEMBER_PLUGIN_ROOT"
 elif [ -n "${PLUGIN_ROOT:-}" ] && [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] \
