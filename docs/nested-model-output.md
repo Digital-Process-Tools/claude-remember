@@ -1,6 +1,6 @@
 # Trusting the nested model call
 
-`pipeline/haiku.py` spawns a nested `claude -p` and reads its stdout as the
+`pipeline/summarizer.py` spawns a nested `claude -p` and reads its stdout as the
 model's reply. Everything downstream — the session entry written to staging,
 the consolidated `recent.md`, the compressed `now.md` — is that string.
 
