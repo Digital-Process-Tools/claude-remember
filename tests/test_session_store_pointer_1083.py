@@ -372,63 +372,14 @@ def test_external_slug_store_resolves_via_pointer(tmp_path):
     assert "note into the external slug store" in (external / "remember.md").read_text()
 
 
-# ---------------------------------------------------------------------------
-# Case 6: a Windows path case -- NOT skipif(win32); pure string handling
-# ---------------------------------------------------------------------------
-
-
-class TestWindowsPathShapeRunsOnEveryPlatform:
-    """The pointer-path logic is pure path handling once the pointer file
-    itself exists (#1083's own requirement 6: a Windows case that is NOT
-    skipped). This drives lib-session-store.sh's own shape predicate
-    directly with Windows-style values -- a drive letter and a UNC path --
-    which is bash string matching, identical on every platform the shell
-    itself runs on. Observed on macOS/Linux; REASONED (not observed) for
-    the actual Windows runner, consistent with this repo's own convention
-    for the sibling ancestor-walk termination logic."""
-
-    def _check(self, value: str) -> str:
-        script = (
-            "set -u\n"
-            f'source "{LIB_SESSION_STORE}"\n'
-            '_remember_session_store_shape_ok "$1" && echo ACCEPTED || echo REJECTED\n'
-        )
-        result = subprocess.run(
-            ["bash", "-c", script, "shape-check", value],
-            capture_output=True, text=True, check=False,
-        )
-        return result.stdout.strip()
-
-    def test_a_drive_letter_path_is_accepted(self):
-        assert self._check("C:/Users/dev/project/.remember") == "ACCEPTED"
-
-    def test_a_drive_letter_path_with_backslashes_is_accepted(self):
-        assert self._check("C:\\Users\\dev\\project\\.remember") == "ACCEPTED"
-
-    def test_a_unc_path_is_accepted(self):
-        assert self._check("\\\\server\\share\\.remember") == "ACCEPTED"
-
-    def test_a_bare_backslash_pair_with_nothing_after_is_rejected(self):
-        """Exactly two backslashes and no third character at all -- not a
-        genuine UNC share, and must not be accepted as one."""
-        assert self._check("\\\\\\\\") == "REJECTED"
-
-    def test_a_three_backslash_prefixed_value_is_rejected(self):
-        """#920 scheduler review round 2, item 6's own counterexample: a
-        third character that is ITSELF a backslash, with nothing real
-        after it. The old, looser UNC arm accepted any third character
-        including another backslash; the stricter one this file relies
-        on requires the third character to NOT be a backslash."""
-        assert self._check("\\\\\\\\\\\\x") == "REJECTED"
-
-    def test_a_relative_path_is_rejected(self):
-        assert self._check("relative/path/.remember") == "REJECTED"
-
-    def test_a_value_with_an_embedded_newline_is_rejected(self):
-        assert self._check("/tmp/proj/.remember\nmalicious") == "REJECTED"
-
-    def test_an_empty_value_is_rejected(self):
-        assert self._check("") == "REJECTED"
+# Case 6 (a Windows path case, NOT skipif(win32)) lives in its own file,
+# tests/test_session_store_shape_windows_1083.py -- scheduler review,
+# finding 3: this module is skipif(win32) at the TOP, which pytest applies
+# to every item in the module INCLUDING a class inside it, regardless of
+# what the class's own docstring claims; a class-level `pytestmark` only
+# ADDS to the module's, it cannot override it. The only way to make this
+# case actually run on windows-latest is to put it somewhere the module
+# skip never reaches.
 
 
 # ---------------------------------------------------------------------------
@@ -527,6 +478,55 @@ def test_session_start_overwrites_the_pointer_on_resume(tmp_path):
     _session_start(other, home, session_id, other_remember, source="resume")
     assert pointer.read_text().strip() == str(other_remember), (
         "the pointer was not overwritten on --resume"
+    )
+
+
+def test_session_start_deletes_a_stale_pointer_when_resume_lands_on_an_unsafe_store(tmp_path):
+    """Scheduler review, finding 2: start in A (writes a good pointer),
+    resume in C whose own REMEMBER_DIR fails the #1064/#920 safety check --
+    the resume must not leave A's pointer behind for write-handoff.sh to
+    still read. Red before the fix: the resume's write was skipped but the
+    EARLIER pointer for this same session id survived untouched, so
+    write-handoff.sh (run from C, no cwd relation to A at all) still wrote
+    into A's store -- the #1058 defect again, bypassing #1064's own
+    unsafe-store refusal entirely."""
+    project_a = tmp_path / "a"
+    project_a.mkdir()
+    remember_a = project_a / ".remember"
+    (remember_a / "tmp").mkdir(parents=True)
+    home = tmp_path / "home"
+    (home / ".claude" / "projects").mkdir(parents=True)
+    session_id = "resume-onto-unsafe-session"
+
+    _session_start(project_a, home, session_id, remember_a, source="startup")
+    pointer = home / ".remember" / "tmp" / "session-store" / session_id
+    assert pointer.read_text().strip() == str(remember_a)
+
+    project_c = tmp_path / "c"
+    project_c.mkdir()
+    env = {**os.environ, "HOME": str(home), "CLAUDE_PROJECT_DIR": str(project_c),
+           "CLAUDE_PLUGIN_ROOT": str(REPO_ROOT), "REMEMBER_DIR": "relative/not-absolute",
+           "REMEMBER_DIR_UNSAFE": "1", "_LIB_MEMORY_DIR_LOADED": "1", "REMEMBER_DEFER": "0"}
+    payload = json.dumps({
+        "session_id": session_id,
+        "transcript_path": f"/does/not/matter/{session_id}.jsonl",
+        "hook_event_name": "SessionStart",
+        "source": "resume",
+        "cwd": str(project_c),
+    })
+    subprocess.run(["bash", str(SESSION_START)], input=payload, env=env,
+                    capture_output=True, text=True, timeout=60, cwd=str(project_c),
+                    check=False)
+
+    assert not pointer.exists(), (
+        "the resume onto an unsafe store left the earlier, good pointer in "
+        "place -- write-handoff.sh would still read it and write into A"
+    )
+
+    result = _write_handoff(project_c, home, "must not reach A\n", session_id)
+    assert not (remember_a / "remember.md").exists(), (
+        f"write-handoff.sh still wrote into A's store via the stale "
+        f"pointer.\nstdout: {result.stdout!r}\nstderr: {result.stderr!r}"
     )
 
 
